@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::autologin::CommandOutput;
-use crate::helper::{Account, Host, LiveProcess, NewUser, PrintAnswer, Process};
+use crate::helper::{Account, Host, LiveProcess, NewUser, PrintAnswer, Process, SHELL, UserRecord};
 
 /// The fake clock's time.
 pub(crate) const NOW: u64 = 1_800_000_000;
@@ -31,8 +31,18 @@ pub(crate) struct State {
     pub(crate) log: Vec<String>,
     /// Users by name.
     pub(crate) users: BTreeMap<String, NewUser>,
+    /// The names the directory says are in `admin`: put there by something other than the
+    /// helper, which never makes an administrator.
+    pub(crate) admins: BTreeSet<String>,
+    /// The pool-owned attributes of a record, where they are not what a new user has
+    /// (hidden, the shell, the group and home of its [`NewUser`]): a record someone
+    /// changed, or one that is not the pool's.
+    pub(crate) records: BTreeMap<String, UserRecord>,
     /// Uids some user record outside the helper's has.
     pub(crate) foreign: BTreeSet<u32>,
+    /// Names whose record the directory does not answer for, though the account is there
+    /// (a record that went between two looks).
+    pub(crate) recordless: BTreeSet<String>,
     /// Live processes per uid.
     pub(crate) procs: BTreeMap<u32, usize>,
     /// Answers `live_processes` gives, in order, before it reads `procs` again: a
@@ -46,7 +56,7 @@ pub(crate) struct State {
     /// Every `pause` so far.
     pub(crate) pauses: usize,
     /// Calls that fail, by name ("uid_taken", "make_home", "create_user",
-    /// "delete_user", "launchctl print", "bootout gui", "bootout user", "user_dir",
+    /// "delete_user", "user_record", "restore_user", "launchctl print", "bootout gui", "bootout user", "user_dir",
     /// "kill_all", "live_processes",
     /// "command", "reset_password", "boot_session", "account", "processes", "kill_group",
     /// "term_group").
@@ -123,6 +133,9 @@ pub(crate) struct State {
     /// The uids with one more live process whose name cannot be read (`?`, pid 901),
     /// which a kill ends.
     pub(crate) unreadable: BTreeSet<u32>,
+    /// What `list_privacy_dir` answers when it fails: the kind of its error. `None`
+    /// lists the directory (a helper that holds Full Disk Access).
+    pub(crate) privacy_dir: Option<io::ErrorKind>,
     /// The System V IPC objects, by id: their kind's letter (`q`, `m` or `s`) and their
     /// owner as `ipcs` prints it (a user's name, or a uid). `ipcs -a` lists them and
     /// `ipcrm -<kind> <id>` removes one, unless a command answer is set for either.
@@ -144,16 +157,14 @@ impl State {
         text
     }
 
-    /// `dseditgroup -o checkmember -m <name> admin`: `yes` (exit 0) for a user made an
-    /// administrator, else `no` and a failure, as `dseditgroup` answers.
+    /// `dseditgroup -o checkmember -m <name> admin`: `yes` (exit 0) for a name in
+    /// `admins`, else `no` and a failure, as `dseditgroup` answers.
     fn checkmember(&self, name: &str) -> CommandOutput {
-        let admin = self.users.get(name).is_some_and(|user| user.admin);
+        let admin = self.admins.contains(name);
+        let (word, not) = [("no", "NOT "), ("yes", "")][usize::from(admin)];
         CommandOutput {
             success: admin,
-            stdout: match admin {
-                true => format!("yes {name} is a member of admin\n"),
-                false => format!("no {name} is NOT a member of admin\n"),
-            },
+            stdout: format!("{word} {name} is {not}a member of admin\n"),
             stderr: String::new(),
         }
     }
@@ -209,13 +220,66 @@ pub(crate) fn pool_of(range: crate::lease::UidRange) -> crate::lease::PoolSize {
     crate::lease::PoolSize::new(u32::try_from(range.uids().count()).unwrap()).unwrap()
 }
 
-/// `launchctl print`'s answer for a domain launchd has.
+/// `launchctl print`'s answer for a domain launchd has and that holds something: exit 0
+/// and a domain with a service in it.
 pub(crate) fn found() -> PrintAnswer {
     PrintAnswer {
         code: Some(0),
+        stdout: "user/1 = {\n\ttype = user\n\n\tservices = {\n\t\t     0   \
+                 0 \tcom.apple.job\n\t}\n\n\tunmanaged processes = {\n\t}\n}\n"
+            .to_owned(),
         stderr: String::new(),
     }
 }
+
+/// `launchctl print user/<uid>`'s answer for a uid whose user domain holds nothing, as
+/// macOS 27 prints it for an idle pool user, for a uid after its lease, and for a uid
+/// with no account (the print makes the domain): exit 0 and a domain with no service
+/// and no unmanaged process.
+pub(crate) fn empty_domain(uid: u32) -> PrintAnswer {
+    PrintAnswer {
+        code: Some(0),
+        stdout: EMPTY_DOMAIN.replace("799", &uid.to_string()),
+        stderr: String::new(),
+    }
+}
+
+/// What `launchctl print user/799` prints on macOS 27 for a user domain that holds
+/// nothing (tabs as launchctl writes them).
+pub(crate) const EMPTY_DOMAIN: &str = "user/799 = {
+\ttype = user
+\thandle = 799
+\tactive count = 3
+\tcreator = launchctl[21036]
+\tcreator euid = 0
+\tsession = Background
+\texternal activation count = 1
+\tsecurity context = {
+\t\tuid = 799
+\t\tasid = 101432
+\t}
+
+\tdeath port = 0x0
+\tin-progress bootstraps = 1
+
+\tservices = {
+\t}
+
+\tunmanaged processes = {
+\t}
+
+\tendpoints = {
+\t}
+
+\ttask-special ports = {
+\t\t\t 0x9dd93 4       bootstrap  com.apple.xpc.launchd.domain.user.799
+\t\t\t  0x3a03 9          access  (unknown)
+\t}
+
+
+\tproperties = 
+}
+";
 
 /// `launchctl print`'s answer for a domain launchd does not have, as macOS 26 gives it
 /// for `gui/<uid>`: exit 112, "Bad request." and "Could not find domain for user gui:
@@ -224,6 +288,7 @@ pub(crate) fn no_domain(domain: &str) -> PrintAnswer {
     let (kind, uid) = domain.split_once('/').unwrap();
     PrintAnswer {
         code: Some(112),
+        stdout: String::new(),
         stderr: format!("Bad request.\nCould not find domain for user {kind}: {uid}\n"),
     }
 }
@@ -273,13 +338,47 @@ impl Host for FakeHost {
 
     fn create_user(&self, user: &NewUser) -> io::Result<()> {
         self.call("create_user", format!("create_user {}", user.name))?;
-        self.state().users.insert(user.name.clone(), user.clone());
+        let mut state = self.state();
+        state.records.remove(&user.name);
+        state.users.insert(user.name.clone(), user.clone());
         Ok(())
     }
 
     fn delete_user(&self, name: &str) -> io::Result<bool> {
         self.call("delete_user", format!("delete_user {name}"))?;
-        Ok(self.state().users.remove(name).is_some())
+        let mut state = self.state();
+        state.records.remove(name);
+        state.admins.remove(name);
+        Ok(state.users.remove(name).is_some())
+    }
+
+    /// The record `records` holds for `name`, else what a pool user made for its
+    /// [`NewUser`] has.
+    fn user_record(&self, name: &str) -> io::Result<Option<UserRecord>> {
+        self.call("user_record", format!("user_record {name}"))?;
+        let state = self.state();
+        if state.recordless.contains(name) {
+            return Ok(None);
+        }
+        Ok(state.records.get(name).cloned().or_else(|| {
+            state.users.get(name).map(|user| UserRecord {
+                uid: user.uid,
+                gid: user.gid,
+                home: user.home.clone(),
+                hidden: true,
+                shell: SHELL.to_owned(),
+            })
+        }))
+    }
+
+    /// Gives the record `user.name` the attributes of a new user, whatever `records`
+    /// held; its membership of `admin` stays.
+    fn restore_user(&self, user: &NewUser) -> io::Result<()> {
+        self.call("restore_user", format!("restore_user {}", user.name))?;
+        let mut state = self.state();
+        state.records.remove(&user.name);
+        state.users.insert(user.name.clone(), user.clone());
+        Ok(())
     }
 
     /// The next answer of `print_script`, or launchd's: exit 0 for a domain in
@@ -539,6 +638,14 @@ impl Host for FakeHost {
 
     fn term_group(&self, pgid: i32) -> io::Result<()> {
         self.call("term_group", format!("term_group {pgid}"))
+    }
+
+    fn list_privacy_dir(&self) -> io::Result<()> {
+        let mut state = self.state();
+        state.log.push("list_privacy_dir".to_owned());
+        state
+            .privacy_dir
+            .map_or(Ok(()), |kind| Err(io::Error::new(kind, "privacy dir")))
     }
 
     fn pause(&self) {

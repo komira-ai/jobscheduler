@@ -32,6 +32,7 @@ use crate::network;
 use crate::refusal;
 use crate::rootfs::{self, HostPort, JobMount, Layer};
 use crate::run::RunSpec;
+use crate::sizing::StartSizing;
 
 /// The hello capability of an agent that takes [`crate::Command::JobStart`] and
 /// [`crate::Command::JobStop`] and reports `jobs` and `retired_jobs` in its heartbeat. Its
@@ -68,6 +69,16 @@ pub const HOST_JOBS_CAPABILITY: &str = "host-jobs";
 /// waiting for its next heartbeat. An agent without it waits the interval after every reply,
 /// so a server never holds its heartbeat: a held reply would stretch its interval.
 pub const HELD_BEAT_CAPABILITY: &str = "held-beat";
+
+/// The hello capability of an agent that admits a job start from the job service by the job
+/// service's own placement. Its value is `true`. Such an agent does not refuse a
+/// [`JobStartSpec`] (keyed by job id) for the summed CPU or memory bookings of the jobs it
+/// holds; it still refuses a job larger than the machine, and still sums disk, GPUs and slots.
+/// So a server may pack its host by measured load for CPU and memory. A host that does not
+/// report it exactly `true` (an agent from before it) refuses a start whose CPU, memory or
+/// disk bookings do not fit what the bookings it holds leave free, and a server packs it by
+/// those sums.
+pub const LOAD_ADMISSION_CAPABILITY: &str = "load-admission";
 
 /// What the job's allocation booked on the host, which the agent enforces as the job's
 /// limits. The ranges are those of [`crate::Limits`].
@@ -155,11 +166,13 @@ pub struct JobStartSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<RunSpec>,
     /// The operating system of the image manifest the digest pins, as
-    /// [`crate::JobSpec::os`]. Absent when not given.
+    /// [`crate::JobSpec::os`]: the job's, which the server sends on every start, native or
+    /// container, of a job that names one, so that an agent that runs more than one platform
+    /// can choose its runtime from it. Absent when not given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub os: Option<Os>,
     /// The CPU architecture of the image manifest the digest pins, as
-    /// [`crate::JobSpec::arch`]. Absent when not given.
+    /// [`crate::JobSpec::arch`], sent as `os` is. Absent when not given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arch: Option<Arch>,
     /// The environment, literal and not secret, held to the rules of a run's
@@ -264,6 +277,18 @@ pub struct JobStartSpec {
     /// a host whose `xcode` capability ([`crate::limits::XCODE_CAPABILITY`]) lists the build.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub xcode: Option<String>,
+    /// What the job's booking came from ([`StartSizing`]): its size class and which history
+    /// gave its CPU and its memory. The agent writes it in its journal beside the booking and
+    /// decides nothing by it. It is never part of the start's acceptance: a value that does
+    /// not decode reads as absent, and [`JobStartSpec::validate`] does not look at it
+    /// ([`StartSizing::checked`] does). Absent when the server sends none; an agent that
+    /// predates the field ignores it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "log_sink::lenient"
+    )]
+    pub sizing: Option<StartSizing>,
 }
 
 impl JobStartSpec {
@@ -431,11 +456,25 @@ pub struct JobResult {
         deserialize_with = "log_sink::lenient"
     )]
     pub usage: Option<JobUsage>,
+    /// The job's CPU second by second over its run, as its host recorded it ([`CpuSeries`]):
+    /// sent by an agent started with `--cpu-series` whose runtime samples the job's CPU, and
+    /// absent otherwise, and left out of the text. Never part of the result's acceptance: a
+    /// value that does not decode, or is not a well-formed series, reads as absent and leaves
+    /// the rest of the result intact. A server from before the field ignores it, and a result
+    /// from an agent from before it reads as absent here.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "log_sink::lenient"
+    )]
+    pub cpu_series: Option<CpuSeries>,
 }
 
 /// What one job used while it ran, as its host read it from the job's control group once it
-/// ended. Both numbers are measured; an agent that cannot read one of them sends no
-/// [`JobUsage`] at all, so a zero is a measured zero and never an unknown.
+/// ended. The first two numbers are measured; an agent that cannot read one of them sends no
+/// [`JobUsage`] at all, so a zero is a measured zero and never an unknown. The two that
+/// follow, the CPU peak and the swap peak are optional: each is absent for an agent from
+/// before it and when the agent could not read that counter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobUsage {
     /// The most memory the job's group held at once, in bytes (`memory.peak`).
@@ -443,6 +482,141 @@ pub struct JobUsage {
     /// The CPU time the job's group used, in microseconds (`usage_usec` of `cpu.stat`), the
     /// unit of `cpu_usage_usec` in [`crate::LoadReport`].
     pub cpu_usage_usec: u64,
+    /// The job group's CPU throttle counters when it ended ([`CpuThrottle`]). Absent for an
+    /// agent from before the field and when the counters could not be read; a value that does
+    /// not decode reads as absent and leaves the rest of the usage intact.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "log_sink::lenient"
+    )]
+    pub cpu_throttle: Option<CpuThrottle>,
+    /// The time, in microseconds, some task of the job's group waited for a CPU (the `some`
+    /// total of the group's `cpu.pressure`). Absent for an agent from before the field and
+    /// when the counter could not be read. A value that does not decode reads as absent and
+    /// leaves the rest of the usage intact.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "log_sink::lenient"
+    )]
+    pub cpu_pressure_some_usec: Option<u64>,
+    /// The most CPU the job's group used over any window of its run ([`CpuPeak`]). Absent for
+    /// an agent from before the field and when the agent could not measure it; a value that
+    /// does not decode reads as absent and leaves the rest of the usage intact.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "log_sink::lenient"
+    )]
+    pub cpu_peak: Option<CpuPeak>,
+    /// The most swap the job's group held at once, in bytes (`memory.swap.peak`): what
+    /// `peak_memory_bytes`, which counts memory alone, leaves out of a job that the host's swap
+    /// absorbed. Absent for an agent from before the field and when the counter could not be
+    /// read (a kernel before 6.5, or one without swap accounting); a value that does not decode
+    /// reads as absent and leaves the rest of the usage intact.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "log_sink::lenient"
+    )]
+    pub peak_swap_bytes: Option<u64>,
+}
+
+/// The most CPU a job's group used over any window of `window_usec` of its run, in
+/// millicores: the largest `(usage_usec[i+k] - usage_usec[i]) * 1000 / elapsed` over the
+/// agent's one-second samples of `cpu.stat`, with a five-second window. A run shorter than
+/// the window reports its whole-run mean, with the window its wall time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CpuPeak {
+    /// The peak, in millicores (1000 is one CPU busy for the whole window).
+    pub millicores: u64,
+    /// The window it was measured over, in microseconds.
+    pub window_usec: u64,
+}
+
+/// The most points a [`CpuSeries`] holds.
+pub const CPU_SERIES_MAX_POINTS: usize = 128;
+
+/// The points of a [`CpuSeries`] in one core: a point is in sixteenths of a core.
+pub const CPU_SERIES_POINTS_PER_CORE: u64 = 16;
+
+/// A job's CPU over its run (the design of komira-ai/jobscheduler#1033, section 3): at most
+/// [`CPU_SERIES_MAX_POINTS`] points, each the mean CPU of the job's group over
+/// `granularity_secs` seconds of its run, in order from its start.
+///
+/// The series starts at one second a point. Each time a run outlasts its points, neighbouring
+/// points are combined in pairs by their mean and the granularity doubles, so a run of up to
+/// 128 s is kept at 1 s a point, up to 256 s at 2 s, up to 512 s at 4 s, and so on. The last
+/// point covers what is left of the run after the others (`run_usec` less
+/// `granularity_secs` for each point before it) and is its mean over that time. CPU between
+/// two of the agent's samples of `cpu.stat` is spread evenly over the time between them.
+///
+/// It decodes only when well formed: `granularity_secs` a power of two and at most
+/// [`CPU_SERIES_MAX_POINTS`] points; anything else fails to decode (and so, inside a
+/// [`JobResult`], reads as absent).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "CpuSeriesText")]
+pub struct CpuSeries {
+    /// The seconds each point covers: 1, 2, 4, 8 and so on.
+    pub granularity_secs: u32,
+    /// The mean CPU of each span of the run, in sixteenths of a core
+    /// ([`CPU_SERIES_POINTS_PER_CORE`]); 16 is one core busy for the whole span.
+    pub points: Vec<u16>,
+    /// The job's run as the agent measured it, in microseconds of its monotonic clock: from
+    /// the moment its container was made (or, for a `partial` series, from the agent's first
+    /// sample of it) to its last sample, when it had ended.
+    pub run_usec: u64,
+    /// Whether the series misses the start of the run: a run the agent adopted after a
+    /// restart of its own, whose series starts at its first sample after the restart. Left
+    /// out when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub partial: bool,
+}
+
+/// A [`CpuSeries`] as text, before it is checked.
+#[derive(Deserialize)]
+struct CpuSeriesText {
+    granularity_secs: u32,
+    points: Vec<u16>,
+    run_usec: u64,
+    #[serde(default)]
+    partial: bool,
+}
+
+impl TryFrom<CpuSeriesText> for CpuSeries {
+    type Error = String;
+
+    fn try_from(text: CpuSeriesText) -> Result<Self, Self::Error> {
+        if !text.granularity_secs.is_power_of_two() {
+            return Err(format!(
+                "granularity_secs {} is not a power of two",
+                text.granularity_secs
+            ));
+        }
+        if text.points.len() > CPU_SERIES_MAX_POINTS {
+            return Err(format!(
+                "{} points, more than {CPU_SERIES_MAX_POINTS}",
+                text.points.len()
+            ));
+        }
+        Ok(Self {
+            granularity_secs: text.granularity_secs,
+            points: text.points,
+            run_usec: text.run_usec,
+            partial: text.partial,
+        })
+    }
+}
+
+/// The CPU throttle counters of a job's group: `nr_periods` and `nr_throttled` of its
+/// `cpu.stat` when it ended. `periods` 0 means the group had no `cpu.max`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CpuThrottle {
+    /// The scheduling periods the group lived through (`nr_periods`).
+    pub periods: u64,
+    /// The periods among them in which the group was throttled (`nr_throttled`).
+    pub throttled_periods: u64,
 }
 
 impl JobResult {

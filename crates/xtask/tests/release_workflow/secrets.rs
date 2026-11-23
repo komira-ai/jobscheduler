@@ -131,19 +131,30 @@ fn errors(release: &str) -> Vec<String> {
 #[test]
 fn the_release_passes_secrets_to_the_package_call_alone() {
     assert_eq!(errors(&workflow()), Vec::<String>::new());
-    // The package workflow names the two installer secrets and no other; the other local calls
+    // The package workflow names the two application secrets (which sign the programs) and the
+    // two installer secrets (which sign the package) and no other; the other local calls
     // name none, so `beta-macos-pkg` is the one call that must pass them. This is also what
     // bounds `secrets: inherit`: of all the caller's secrets (the apt signing key among them),
-    // the package workflow can read only these two, in any job or step.
-    let want: BTreeSet<String> = ["MACOS_INSTALLER_P12", "MACOS_INSTALLER_P12_PASSWORD"]
-        .into_iter()
-        .map(str::to_owned)
-        .collect();
+    // the package workflow can read only these four, in any job or step.
+    let want: BTreeSet<String> = [
+        "MACOS_APPLICATION_P12",
+        "MACOS_APPLICATION_P12_PASSWORD",
+        "MACOS_INSTALLER_P12",
+        "MACOS_INSTALLER_P12_PASSWORD",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
     assert_eq!(
         named_secrets(&read_workflow("js-agent-macos-pkg.yml")),
         want
     );
-    for file in ["artifacts.yml", "beta.yml", "macos-probe.yml"] {
+    for file in [
+        "artifacts.yml",
+        "beta.yml",
+        "js-agent-macos-first-install.yml",
+        "macos-probe.yml",
+    ] {
         assert_eq!(
             named_secrets(&read_workflow(file)),
             BTreeSet::new(),
@@ -166,7 +177,7 @@ fn the_package_call_without_inherit_is_refused() {
     assert_eq!(
         errors(&text),
         [
-            "beta-macos-pkg: calls js-agent-macos-pkg.yml, which names MACOS_INSTALLER_P12, MACOS_INSTALLER_P12_PASSWORD, without `secrets: inherit`; it would read them as empty"
+            "beta-macos-pkg: calls js-agent-macos-pkg.yml, which names MACOS_APPLICATION_P12, MACOS_APPLICATION_P12_PASSWORD, MACOS_INSTALLER_P12, MACOS_INSTALLER_P12_PASSWORD, without `secrets: inherit`; it would read them as empty"
         ]
     );
 }
@@ -181,7 +192,7 @@ fn the_package_call_passing_a_mapping_instead_of_inherit_is_refused() {
     assert_eq!(
         errors(&text),
         [
-            "beta-macos-pkg: calls js-agent-macos-pkg.yml, which names MACOS_INSTALLER_P12, MACOS_INSTALLER_P12_PASSWORD, without `secrets: inherit`; it would read them as empty"
+            "beta-macos-pkg: calls js-agent-macos-pkg.yml, which names MACOS_APPLICATION_P12, MACOS_APPLICATION_P12_PASSWORD, MACOS_INSTALLER_P12, MACOS_INSTALLER_P12_PASSWORD, without `secrets: inherit`; it would read them as empty"
         ]
     );
 }
@@ -196,6 +207,23 @@ fn a_call_passing_secrets_to_a_workflow_that_names_none_is_refused() {
     assert_eq!(
         errors(&text),
         ["beta-macos: passes secrets to beta.yml, which names none"]
+    );
+}
+
+/// The first-install call passing the caller's secrets is refused: the workflow it calls names
+/// none, and it installs a package built from the branch's code.
+#[test]
+fn the_first_install_call_passing_secrets_is_refused() {
+    let text = edit(
+        &workflow(),
+        "    uses: ./.github/workflows/js-agent-macos-first-install.yml\n",
+        "    uses: ./.github/workflows/js-agent-macos-first-install.yml\n    secrets: inherit\n",
+    );
+    assert_eq!(
+        errors(&text),
+        [
+            "beta-macos-first-install: passes secrets to js-agent-macos-first-install.yml, which names none"
+        ]
     );
 }
 

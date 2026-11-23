@@ -42,13 +42,11 @@ pub fn main(args: &Args) -> ExitCode {
         tracing::error!("kbf-mac-session must run as root");
         return ExitCode::from(2);
     }
-    let started = read_serial().and_then(|serial| {
-        let check: Arc<dyn CallerCheck> =
-            Arc::new(CodeSignatureCheck::new(&args.daemon_requirement)?);
+    let started = CodeSignatureCheck::new(&args.daemon_requirement).and_then(|check| {
+        let check: Arc<dyn CallerCheck> = Arc::new(check);
         let ready = start::prepare(
             args,
             Box::new(MacHost),
-            serial,
             SweepPlan::macos_schedules(),
             SweepPlan::macos(),
             ScanFolder::macos(),
@@ -66,17 +64,6 @@ pub fn main(args: &Args) -> ExitCode {
             ExitCode::from(2)
         }
     }
-}
-
-/// This Mac's serial number, from the I/O Registry.
-fn read_serial() -> Result<String, String> {
-    let output =
-        crate::disclaim::Program::new("/usr/sbin/ioreg", ["-rd1", "-c", "IOPlatformExpertDevice"])
-            .env_clear()
-            .output()
-            .map_err(|why| format!("ioreg: {why}"))?;
-    start::parse_serial(&String::from_utf8_lossy(&output.stdout))
-        .ok_or_else(|| "ioreg named no IOPlatformSerialNumber".to_owned())
 }
 
 /// The user flags that block removing an entry or a directory's entries.
@@ -144,6 +131,34 @@ pub(crate) fn clear_dir_flags(dir: &OwnedFd, mask: u32) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+/// Removes every entry of the access control list of the open directory `dir`, which
+/// `chmod -N` does.
+pub(crate) fn clear_dir_acl(dir: &OwnedFd) -> io::Result<()> {
+    // SAFETY: `acl_init` allocates an empty list that `acl_set_fd` only reads and that is
+    // freed below; the descriptor is one this function borrows.
+    // FFI-BOUNDARY: the list `acl_init` returns is owned here and freed here with
+    // `acl_free`; `acl_set_fd` does not keep it.
+    unsafe {
+        let acl = acl_init(0);
+        if acl.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let set = acl_set_fd(dir.as_raw_fd(), acl);
+        let why = io::Error::last_os_error();
+        acl_free(acl);
+        if set != 0 {
+            return Err(why);
+        }
+    }
+    Ok(())
+}
+
+unsafe extern "C" {
+    fn acl_init(count: libc::c_int) -> *mut libc::c_void;
+    fn acl_set_fd(fd: libc::c_int, acl: *mut libc::c_void) -> libc::c_int;
+    fn acl_free(obj: *mut libc::c_void) -> libc::c_int;
 }
 
 /// Whether the directory `name` of `dir` (not followed if it is a link) has the extended

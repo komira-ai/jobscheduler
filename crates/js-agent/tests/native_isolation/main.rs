@@ -1,14 +1,17 @@
-//! The two-run isolation test of the Mac pool users, for real, as root, on a Mac.
+//! The two-run isolation test of the Mac slot accounts, for real, as root, on a Mac.
 //!
 //! Question: does what a run leaves behind survive into the next run that gets the same
-//! uid? Every run is lent a user from the helper's pool of reused users, and the user is
-//! reset when the run ends. A reset may not remove what the user left.
+//! uid? Every run is lent a fresh account (`kbf-acct-<n>`) of the agent's account pool, made
+//! for it and deleted when the run ends; the uid is the slot's, so the next account made in
+//! the same slot has the same uid. A deletion may not leave what the account owned.
 //!
-//! The test serves the real `js-mac-session` helper from this process with a pool of ONE
-//! user (a range of one uid), so the second run gets the user of the first. Then:
+//! The test builds the agent's real pool over the real `MacHost` in this process, with a
+//! range of ONE uid and no account kept ready, and the agent's real supervisor
+//! (`SystemLauncher` over the `js-agent` binary, which answers `__supervise-native`), so
+//! the second run gets the uid of the first. Then:
 //!
 //! 1. Run A (a native run through the agent's own `NativeRuntime`, under the product's
-//!    Seatbelt profile, as the pool user) leaves one item of every kind behind, each with a
+//!    Seatbelt profile, as the run's account) leaves one item of every kind behind, each with a
 //!    random token: a file in its home and in its scratch, a file in the system temp
 //!    directory, a process left running (detached), a keychain item, a defaults key, a
 //!    launchd agent in its user domain, System V shared memory, semaphore and message
@@ -31,8 +34,11 @@
 //!    it covers nothing, and the run cannot pass. Root's every attempt is a `PROBE
 //!    agent-attempt` line.
 //! 2. Between the runs the test does what the agent does when a run ends and the next
-//!    begins: `NativeRuntime::remove` (the helper's `kill-uid`, then `user-delete`, which
-//!    resets the pool user), and the next start is lent that user again (`user-create`).
+//!    begins: `NativeRuntime::remove` (every process of the uid is killed, the account's
+//!    record and home are deleted), and the next start is lent a new account on that uid. The
+//!    test then checks what the removal itself left: no process of the uid, the account's
+//!    home gone and its name no longer known to the system; anything left is a row of the
+//!    table of survivors.
 //! 3. Run B (the same program, another role, the same uid) looks for every token. The test
 //!    also reads the system-wide views: `ipcs` for objects owned by the uid, `ps` for
 //!    processes of the uid, `launchctl print` of `user/<uid>` and `gui/<uid>`, and `find -uid`
@@ -56,19 +62,22 @@
 //!    anything about time.
 //!
 //! It lives in js-agent because the question is about what the agent's runtime leaves: the
-//! test drives the runtime's own start and remove (the calls the agent makes), and js-agent
-//! already holds the fixture that serves the helper from a test process.
+//! test drives the runtime's own start and remove (the calls the agent makes) over the same
+//! pool and supervisor code the agent runs.
 //!
 //! Every test that touches the machine is `#[ignore]`: it needs root, a Mac and a free uid,
-//! and it makes a user. Run the binary as root with `JS_NATIVE_ISO_ROOT` naming a new
+//! and it makes an account. Run the binary as root with `JS_NATIVE_ISO_ROOT` naming a new
 //! directory, owned by root and mode 0755, that every user can search down to, and
-//! `JS_NATIVE_ISO_UID` naming a uid in 500 to 60000 that nothing uses, with `--ignored
-//! --test-threads=1 --nocapture`. See the `js-agent-native-isolation-test` workflow. Never
-//! run it on a production host.
+//! `JS_NATIVE_ISO_UID` naming a uid in 501 to 60000, outside 600 to 799 (the range the agent's
+//! own accounts use), that nothing uses, with `--ignored --test-threads=1 --nocapture`. The
+//! supervisor is the `js-agent` binary next to the test binary when there is one, else the
+//! one cargo built for it (`CARGO_BIN_EXE_js-agent`). See the `js-agent-native-isolation-test`
+//! workflow. Never run it on a production host.
 //!
 //! One difference from production: the runtime here has the directory of this test binary as
 //! an extra tool root (the runs execute the binary), a read/exec allowance the agent
-//! does not have. Not tested here: cron/at jobs and extended attributes.
+//! does not have; and the account pool's state and homes are below the test's root
+//! directory, not the agent's own. Not tested here: cron/at jobs and extended attributes.
 //!
 //! The file builds on every platform, so clippy reads it on Linux; the parsers and the
 //! report are tested there. Run anywhere but macOS, the ignored test stops at its first
@@ -85,17 +94,21 @@ mod report;
 mod token;
 mod views;
 
+use std::collections::BTreeSet;
 use std::fs;
-use std::os::unix::fs::MetadataExt as _;
+use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use js_agent::lifecycle::{Body, Exit, RunHandle, RunSpec, Runtime, Status};
-use js_agent::native::{Ceiling, NativeConfig, NativeRuntime};
+use js_agent::mac_accounts::{MacHost, Pool, Settings, Slots};
+use js_agent::mac_supervisor::SystemLauncher;
+use js_agent::native::{Accounts, Ceiling, NativeConfig, NativeRuntime};
 use js_agent_wire::{Isolation, NativeSpec, NetworkLevel};
 use js_mac_pool::seatbelt::{AbsPath, ReadModel};
-use js_mac_session::client::Client;
+use js_mac_session::full_disk_access::FullDiskAccess;
 
 use lines::{Kind, Line, Verdict, parse_lines};
 use look::Outcome;
@@ -103,8 +116,10 @@ use token::Token;
 
 /// The variable naming the directory the test works in.
 const ROOT: &str = "JS_NATIVE_ISO_ROOT";
-/// The variable naming the one uid of the helper's range.
+/// The variable naming the one uid of the pool's range.
 const UID: &str = "JS_NATIVE_ISO_UID";
+/// The uids the agent's own accounts use; the test's uid is outside them.
+const AGENT_UIDS: std::ops::RangeInclusive<u32> = 600..=799;
 const NEEDS_ROOT: &str =
     "needs root: run the test binary as root (see the header of tests/native_isolation/main.rs)";
 /// The most polls the test makes for a run to end.
@@ -131,7 +146,7 @@ fn child_of_the_runs() {
         "seed" => {
             let tmp = PathBuf::from(std::env::var("TMPDIR").expect("the agent sets TMPDIR"));
             let spot = child::Spot {
-                home: tmp.parent().expect("TMPDIR is below the home").to_owned(),
+                home: PathBuf::from(std::env::var("HOME").expect("the agent sets HOME")),
                 tmp,
                 uid: rustix::process::getuid().as_raw(),
             };
@@ -143,9 +158,8 @@ fn child_of_the_runs() {
             let path = std::env::var(HANDOFF).expect("the test names the seeded list");
             let text = fs::read_to_string(&path).expect("the seeded list is readable");
             let seeded = parse_lines(&text).expect("the seeded list is ours");
-            let tmp = PathBuf::from(std::env::var("TMPDIR").expect("the agent sets TMPDIR"));
-            let home = tmp.parent().expect("TMPDIR is below the home");
-            for line in child::look_all(&seeded, home) {
+            let home = PathBuf::from(std::env::var("HOME").expect("the agent sets HOME"));
+            for line in child::look_all(&seeded, &home) {
                 println!("{}", line.encode());
             }
         }
@@ -153,10 +167,9 @@ fn child_of_the_runs() {
     }
 }
 
-/// The helper this process serves, and where it keeps things.
+/// Where the test keeps things: the pool's state and homes are below its root.
 struct Fixture {
     root: PathBuf,
-    socket: PathBuf,
     homes: PathBuf,
     state: PathBuf,
     uid: u32,
@@ -170,101 +183,58 @@ fn fixture() -> Fixture {
         .unwrap_or_else(|_| panic!("{UID} is not set"))
         .parse()
         .unwrap_or_else(|_| panic!("{UID} is not a uid"));
+    assert!(
+        !AGENT_UIDS.contains(&uid),
+        "{UID} is {uid}, in {AGENT_UIDS:?}, which the agent's own accounts use"
+    );
     let fixture = Fixture {
-        socket: root.join("sock").join("socket"),
         homes: root.join("homes"),
         state: root.join("state"),
         root,
         uid,
     };
     fs::create_dir(&fixture.homes).unwrap();
+    fs::create_dir(&fixture.state).unwrap();
+    // The pool refuses a state directory that is not root's and writable by others.
+    fs::set_permissions(&fixture.state, fs::Permissions::from_mode(0o755)).unwrap();
     fs::create_dir(fixture.root.join("scratch")).unwrap();
-    serve(&fixture);
     fixture
 }
 
-/// Serves the real helper on the fixture's socket, with a range of the one uid, for as
-/// long as the process lives.
-#[cfg(target_os = "macos")]
-fn serve(fixture: &Fixture) {
-    use std::os::unix::net::UnixStream;
-    use std::sync::Arc;
-
-    use clap::Parser as _;
-    use js_mac_session::macos::MacHost;
-    use js_mac_session::scan::ScanFolder;
-    use js_mac_session::server::{self, Caller, CallerCheck};
-    use js_mac_session::start::{self, Args};
-    use js_mac_session::sweep::SweepPlan;
-
-    /// The caller check of a helper this very process serves: everyone who reaches the
-    /// socket is the test.
-    struct Anyone;
-
-    impl CallerCheck for Anyone {
-        fn identify(&self, _: &UnixStream) -> Result<Caller, String> {
-            Ok(Caller {
-                token: Vec::new(),
-                pid: 0,
-                version: 0,
-            })
-        }
-
-        fn check(&self, _: &Caller) -> Result<(), String> {
-            Ok(())
-        }
+/// The supervisor binary: the `js-agent` next to the test binary when there is one (the
+/// operator copies both), else the one cargo built for this test.
+fn supervisor_binary(exe: &Path) -> PathBuf {
+    let beside = exe.parent().unwrap().join("js-agent");
+    if beside.is_file() {
+        beside
+    } else {
+        PathBuf::from(env!("CARGO_BIN_EXE_js-agent"))
     }
-
-    let path = |path: &Path| path.display().to_string();
-    let args = Args::parse_from([
-        "js-mac-session".to_owned(),
-        "--socket".to_owned(),
-        path(&fixture.socket),
-        "--socket-group".to_owned(),
-        "wheel".to_owned(),
-        "--state-dir".to_owned(),
-        path(&fixture.state),
-        "--uid-range".to_owned(),
-        format!("{0}-{0}", fixture.uid),
-        // The pool is the one user of the one uid: a pool larger than the range is
-        // refused at the helper's start.
-        "--pool-size".to_owned(),
-        "1".to_owned(),
-        "--homes".to_owned(),
-        path(&fixture.homes),
-        // The boot reset clears the auto-login of the Mac the helper serves; the files it
-        // clears are the test's own, so a real login setting is not touched.
-        "--kcpassword".to_owned(),
-        path(&fixture.root.join("kcpassword")),
-        "--loginwindow".to_owned(),
-        path(&fixture.root.join("loginwindow")),
-        "--daemon-requirement".to_owned(),
-        "unused: the check is replaced".to_owned(),
-    ]);
-    let ready = start::prepare(
-        &args,
-        Box::new(MacHost),
-        "js-native-isolation".to_owned(),
-        SweepPlan::macos_schedules(),
-        SweepPlan::macos(),
-        ScanFolder::macos(),
-    )
-    .unwrap();
-    let check: Arc<dyn CallerCheck> = Arc::new(Anyone);
-    std::thread::spawn(move || server::serve(&ready.listener, &ready.helper, &check));
-}
-
-#[cfg(not(target_os = "macos"))]
-fn serve(_: &Fixture) {
-    panic!("these tests run on macOS only");
 }
 
 /// The production layout of the runtime, plus the directory this binary is in as a tool
 /// root (the runs execute it).
 fn runtime(fixture: &Fixture, exe: &Path) -> NativeRuntime {
     let denied = |path: &Path| AbsPath::new(path).unwrap();
+    let slots = Slots::new(fixture.uid, 1).unwrap();
+    // No account is kept ready, so every run is lent an account made for it.
+    let mut settings = Settings::macos(slots, 0);
+    settings.homes = fs::canonicalize(&fixture.homes).unwrap();
+    let pool = Pool::with_settings(
+        &fixture.state,
+        settings.clone(),
+        &BTreeSet::new(),
+        Arc::new(MacHost),
+    )
+    .unwrap_or_else(|why| panic!("the account pool: {why}"));
+    let launcher = Arc::new(SystemLauncher::at(supervisor_binary(exe)));
     let config = NativeConfig {
-        homes: fs::canonicalize(&fixture.homes).unwrap(),
+        accounts: Accounts {
+            state: fixture.state.clone(),
+            slots,
+            ready: 0,
+        },
+        homes: settings.homes,
         network: Ceiling::Off,
         tool_roots: vec![
             PathBuf::from("/usr/bin"),
@@ -281,9 +251,10 @@ fn runtime(fixture: &Fixture, exe: &Path) -> NativeRuntime {
         max_file_bytes: 1 << 30,
         max_processes: 512,
         egress: None,
+        full_disk_access: FullDiskAccess::Granted,
     };
     let term = TERMS.fetch_add(1, Ordering::SeqCst);
-    NativeRuntime::open(Client::new(&fixture.socket), config, term).unwrap()
+    NativeRuntime::over(Some(Arc::new(pool)), launcher, config, term).unwrap()
 }
 
 /// A run of this binary's `child_of_the_runs` in `role`; its scratch directory (the log
@@ -341,10 +312,30 @@ fn settle(rt: &mut NativeRuntime, id: &RunHandle) -> Result<Status, String> {
     Err("the run did not end".to_owned())
 }
 
-/// The user of `id`: the pool holds one user, in slot 0, so every run is lent
-/// `kbf-lease-pool-0`, and its home is that name below the homes directory.
-fn user_of(_: &RunHandle) -> String {
-    js_mac_session::lease::pool_user_name(js_mac_session::lease::Slot::new(0))
+/// The account of the run that is lent the uid, found by the home it owns below the homes
+/// directory: its name and its home. Exactly one account has the uid while a run holds it.
+fn account_of(homes: &Path, uid: u32) -> Result<(String, PathBuf), String> {
+    let entries = fs::read_dir(homes).map_err(|why| format!("the homes directory: {why}"))?;
+    let mut found = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|why| format!("the homes directory: {why}"))?;
+        let meta = entry
+            .metadata()
+            .map_err(|why| format!("{}: {why}", entry.path().display()))?;
+        if meta.uid() == uid {
+            found.push((
+                entry.file_name().to_string_lossy().into_owned(),
+                entry.path(),
+            ));
+        }
+    }
+    match found.len() {
+        1 => Ok(found.remove(0)),
+        n => Err(format!(
+            "{n} homes below {} are owned by uid {uid}, not one",
+            homes.display()
+        )),
+    }
 }
 
 fn tool_output(program: &str, args: &[&str]) -> Result<(bool, String), String> {
@@ -429,7 +420,7 @@ fn row(kind: Kind, place: impl Into<String>, detail: impl Into<String>) -> Row {
 }
 
 impl Trial {
-    /// The two runs and the views; the table of survivors, empty when the pool user is clean.
+    /// The two runs and the views; the table of survivors, empty when the uid is clean.
     fn body(&mut self) -> Result<Vec<Row>, String> {
         let uid = self.fixture.uid;
         let exe = self.exe.clone();
@@ -449,20 +440,14 @@ impl Trial {
             &mut self.seeded,
         )?;
         let a = ran_a.id.clone();
-        let home_a = self.fixture.homes.join(user_of(&a));
-        let owner = fs::metadata(&home_a)
-            .map_err(|why| format!("the home of run A: {why}"))?
-            .uid();
-        if owner != uid {
-            return Err(format!(
-                "run A ran as uid {owner}, not the uid {uid} asked for"
-            ));
-        }
+        let (user_a, home_a) = account_of(&self.fixture.homes, uid)
+            .map_err(|why| format!("the account of run A: {why}"))?;
         let job = look::JobProcs {
             pids: ran_a.pids.clone(),
         };
         self.confirm_denials_by_log(&started, &job);
-        self.bootstrap_agents_as_root(uid, &home_a);
+        // The job's own home, where it left its files, is below the run directory.
+        self.bootstrap_agents_as_root(uid, &home_a.join("exec").join(".home"));
         println!("{}", self.seeded_table());
         let missing = look::missing_minimum(&self.seeded);
         if !missing.is_empty() {
@@ -480,6 +465,7 @@ impl Trial {
             .remove(&a)
             .map_err(|why| format!("remove run A: {}", why.0))?;
         self.runs.clear();
+        let mut survivors = self.after_removal(uid, &user_a, &home_a)?;
 
         // Run B, on the same uid.
         let handoff = self.fixture.root.join("seeded.txt");
@@ -496,36 +482,66 @@ impl Trial {
             &mut self.runs,
             &mut not_cleaned,
         )?;
-        let b = ran_b.id.clone();
-        let owner = fs::metadata(self.fixture.homes.join(user_of(&b)))
-            .map_err(|why| format!("the home of run B: {why}"))?
-            .uid();
-        if owner != uid {
-            return Err(format!(
-                "run B got uid {owner}, not run A's uid {uid}: the helper did not reuse it, so this run proves nothing"
-            ));
-        }
+        let (user_b, _) = account_of(&self.fixture.homes, uid).map_err(|why| {
+            format!(
+                "run B did not run as an account of uid {uid}, so this run proves nothing: {why}"
+            )
+        })?;
         look::uids_agree(ran_a.uid, ran_b.uid, uid)?;
 
-        let mut survivors: Vec<Row> = ran_b
-            .lines
-            .iter()
-            .filter_map(|line| match line.verdict {
-                Verdict::Found => Some(row(
-                    line.kind,
-                    line.text.clone(),
-                    format!("run B found it (token {})", line.token),
-                )),
-                Verdict::Unlooked => Some(row(
-                    line.kind,
-                    "COULD NOT LOOK",
-                    format!("{} (token {})", line.text, line.token),
-                )),
-                _ => None,
-            })
-            .collect();
-        survivors.extend(self.system_views(uid, &user_of(&b))?);
+        survivors.extend(ran_b.lines.iter().filter_map(|line| match line.verdict {
+            Verdict::Found => Some(row(
+                line.kind,
+                line.text.clone(),
+                format!("run B found it (token {})", line.token),
+            )),
+            Verdict::Unlooked => Some(row(
+                line.kind,
+                "COULD NOT LOOK",
+                format!("{} (token {})", line.text, line.token),
+            )),
+            _ => None,
+        }));
+        survivors.extend(self.system_views(uid, &[&user_a, &user_b])?);
         Ok(survivors)
+    }
+
+    /// What the removal of run A's account left: a process of the uid, the account's home, or
+    /// the account's name still known to the system. A look that fails is an error.
+    fn after_removal(&self, uid: u32, user: &str, home: &Path) -> Result<Vec<Row>, String> {
+        let mut rows = Vec::new();
+        let ps = view("/bin/ps", &["-A", "-o", "uid=,pid=,command="])?;
+        for proc in views::procs_of_uid(&views::parse_ps(&ps), uid) {
+            rows.push(row(
+                Kind::Process,
+                format!("pid={}", proc.pid),
+                format!(
+                    "ps lists it for uid {uid} after the removal: {}",
+                    proc.command
+                ),
+            ));
+        }
+        match fs::symlink_metadata(home) {
+            Ok(_) => rows.push(row(
+                Kind::HomeFile,
+                home.display().to_string(),
+                "the home of the removed account is still there",
+            )),
+            Err(why) if why.kind() == std::io::ErrorKind::NotFound => {}
+            Err(why) => return Err(format!("{}: {why}", home.display())),
+        }
+        let (known, text) = tool_output("/usr/bin/id", &["-u", user])?;
+        if known {
+            rows.push(row(
+                Kind::HomeFile,
+                user.to_owned(),
+                format!(
+                    "the removed account is still known to the system: {}",
+                    text.trim()
+                ),
+            ));
+        }
+        Ok(rows)
     }
 
     fn tokens(&self) -> Vec<Token> {
@@ -620,13 +636,13 @@ impl Trial {
     /// The system-wide views, read as root after run B ended: SysV objects by owner,
     /// processes by uid, the user's launchd domains, and the files of the uid outside its
     /// home. A view that fails is an error, not an empty view.
-    fn system_views(&self, uid: u32, user: &str) -> Result<Vec<Row>, String> {
+    fn system_views(&self, uid: u32, users: &[&str]) -> Result<Vec<Row>, String> {
         let tokens = self.tokens();
         let mut rows = Vec::new();
 
         let ipcs = view("/usr/bin/ipcs", &["-a"])?;
         let objects = views::parse_ipcs(&ipcs);
-        for object in views::ipc_owned_by(&objects, uid, &[user]) {
+        for object in views::ipc_owned_by(&objects, uid, users) {
             let kind = match object.kind {
                 views::IpcKind::Message => Kind::SysvMsg,
                 views::IpcKind::Shared => Kind::SysvShm,
@@ -722,11 +738,11 @@ impl Trial {
     }
 
     /// Takes down what the trial made, whatever happened (it runs from `Drop`, so also on a
-    /// panic): the launchd domains, the users, the objects the runs left. Best effort, and
+    /// panic): the launchd domains, the accounts, the objects the runs left. Best effort, and
     /// no wider than that.
     fn cleanup(&mut self) {
-        // The domains go out before the user is deleted: deleting a user does not end
-        // its launchd domain, and one left makes the next run on the uid refuse.
+        // The domains go out before the account is deleted: the pool's kill rounds end
+        // them too, but one left would make the next run on the uid refuse.
         for domain in ["user", "gui"] {
             let target = format!("{domain}/{}", self.fixture.uid);
             let _ = tool_output("/bin/launchctl", &["bootout", &target]);
@@ -901,13 +917,14 @@ fn run_bounded(program: &str, args: &[&str]) -> Result<(Option<i32>, Vec<u8>, St
 
 /// Asserts that run B, on the uid run A had, finds nothing A left behind, and that the
 /// system's views (`ipcs`, `ps`, `launchctl print`, `find -uid`) show nothing of A's either,
-/// after the agent's own end-of-run calls and no other cleanup. It catches a user delete
-/// that leaves the home's content, a keychain or defaults item, a process, a launchd agent,
+/// after the agent's own end-of-run calls and no other cleanup; and that the removal of A's
+/// account left no process of the uid, no home and no record of the account. It catches an
+/// account removal that leaves the home's content, a keychain or defaults item, a process, a launchd agent,
 /// the uid-keyed temp and cache directories, or a System V or POSIX object behind for the
 /// next run that gets the uid. It fails with the table of what survived, and also when a
 /// look could not be made or run A seeded too little to mean anything.
 #[test]
-#[ignore = "needs root and a Mac; creates a user"]
+#[ignore = "needs root and a Mac; creates an account"]
 fn a_second_run_on_the_same_uid_finds_nothing_the_first_left() {
     let fixture = fixture();
     let exe = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();

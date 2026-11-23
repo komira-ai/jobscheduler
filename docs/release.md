@@ -48,7 +48,7 @@ opens a `RELEASE-RED` issue (step 11) and is fixed forward.
    it, and publishes it in one call. Publishing creates the tag `vX.Y.Z` on the commit. It refuses a
    Debian package or an image without its bundle. It leaves the macOS archives (`*-aarch64-apple-darwin.tar.gz`) out: step 6a adds them.
 
-6a. The beta stage, the platforms other than Linux x86_64, runs after `artifacts` and beside `publish` and everything after it (nothing of the Linux files, the Debian packages, the apt repository, `gamma`, the control-plane deploy or hostkeeper waits for its tests). On the hosted `macos-15` runners it runs three jobs, each calling a workflow that holds `contents: read`: `beta-macos` (`beta.yml`: the workspace's tests on Apple silicon, all but the Linux-only crates js-contain, js-host-step and js-mdm), `beta-macos-pkg` (`js-agent-macos-pkg.yml`, called with `secrets: inherit`, the one beta call given secrets, since a called workflow reads every secret it is not passed as empty: the installer package of the agent, built unsigned and read back by a job that names no secret, then signed by its `sign` job in the environment `pkg-signing`, the only job that holds the installer certificate's secrets and that skips with a notice when they are not set; `pkg-upload` uploads the signed package once this job has ended and `publish` passed, so that the deploy (step 10) gives it to the Macs, and uploads nothing when the package failed, see "macOS" below) and `beta-macos-probe` (`macos-probe.yml`: what the native runtime relies on, probed on the runner). When the three and `publish` succeeded, `promote-macos` (`contents: write` alone, no repository code) adds the macOS archives to the published release; an archive the release already has must equal this run's byte for byte and is kept. `SHA256SUMS` lists them from the start, so until they are added `sha256sum -c --ignore-missing SHA256SUMS` is the check. A beta job that fails leaves the release without the macOS archives and the run red, and `release-red` opens or comments on the RELEASE-RED issue; the release has been deployed already. Fix forward, or re-run the failed jobs and `promote-macos` adds them. Following the owner's rule, a pull request runs none of this (`cargo test -p xtask --test pr_linux_only`): a pull request that changes `release.yml` runs `plan` as a dry run on Linux x86_64 and builds nothing, since `artifacts.yml`'s build matrix names the arm64 and macOS runners.
+6a. The beta stage, the platforms other than Linux x86_64, runs after `artifacts` and beside `publish` and everything after it (nothing of the Linux files, the Debian packages, the apt repository, `gamma`, the control-plane deploy or hostkeeper waits for its tests). On the hosted `macos-15` runners it runs four jobs, each calling a workflow that holds `contents: read`: `beta-macos` (`beta.yml`: the workspace's tests on Apple silicon, all but the Linux-only crates js-contain, js-host-step and js-mdm, and js-mac-first-install, which the first-install job builds), `beta-macos-pkg` (`js-agent-macos-pkg.yml`, called with `secrets: inherit`, the one beta call given secrets, since a called workflow reads every secret it is not passed as empty: the installer package of the agent: `build` builds the three programs and an unsigned package in a job that names no secret; `sign-code`, in the environment `pkg-signing`, signs the three programs with the Developer ID Application identity (a hardened runtime, a secure timestamp, one identifier each) and fails, naming the secret, when a secret is not set; `package` makes the package of the signed programs after `cargo xtask release check-code-signature` read each back, in a job that names no secret; and `sign` signs the package with the installer certificate, in the same environment, and skips with a notice when the installer certificate's secrets are not set; `pkg-upload` uploads the signed package once this job has ended and `publish` passed, so that the deploy (step 10) gives it to the Macs, and uploads nothing when the package failed, see "macOS" below), `beta-macos-first-install` (`js-agent-macos-first-install.yml`, after `beta-macos-pkg`, called with no secret: the first install of that unsigned package on the runner, the way hostkeeper does it, through hostkeeper's own installer and step runner, then the update hook's prepare, cutover, verify and cleanup as root with launchd loading the jobs, then a config package rolled over the installed agent (the config hook) and an update of the agent to a second package, the next patch version, which `js-agent-macos-pkg.yml`'s `build-update` job builds beside the first with the same local action and uploads as its own artifact for a day (no job signs it and no release takes it), by the ignored test `mac_first_install` of js-mac-first-install (a test-only crate); the lease server runs in the test process, the host certificate is minted by a test CA and the signature answer is the test's; no deploy job waits for it, and a manual run of `js-agent-macos-pkg.yml` on a branch runs it too) and `beta-macos-probe` (`macos-probe.yml`: what the native runtime relies on, probed on the runner). When the four and `publish` succeeded, `promote-macos` (`contents: write` alone, no repository code) adds the macOS archives to the published release; an archive the release already has must equal this run's byte for byte and is kept. `SHA256SUMS` lists them from the start, so until they are added `sha256sum -c --ignore-missing SHA256SUMS` is the check. A beta job that fails leaves the release without the macOS archives and the run red, and `release-red` opens or comments on the RELEASE-RED issue; the release has been deployed already. Fix forward, or re-run the failed jobs and `promote-macos` adds them. Following the owner's rule, a pull request runs none of this (`cargo test -p xtask --test pr_linux_only`): a pull request that changes `release.yml` runs `plan` as a dry run on Linux x86_64 and builds nothing, since `artifacts.yml`'s build matrix names the arm64 and macOS runners.
 
 The tag is made last, by that one call, so a run that fails earlier leaves no tag and no public
 release: at worst a draft, which only people who can write to the repository see. Re-run the failed
@@ -111,7 +111,7 @@ next push that ships code. Nothing runs on a timer.
    `stable` lists the release and `pkg-upload` has ended; that workflow sets the release as
    hostkeeper's desired version of `js-agent` ([Deploying through
    hostkeeper](#deploying-through-hostkeeper)). Then `deployed` ends the run's turn.
-11. When any job of the run failed (the deploy path, the beta stage), `release-red`
+11. When any job of the run failed (the deploy path, the beta stage, the smoke bundle), `release-red`
    opens an issue titled `RELEASE-RED: jobscheduler <first failing job> failed on main at <commit>`
    with the label `main-red`, its body a `Run:`, a `Head:` and up to five `Failing:` lines, or
    comments those lines on the RELEASE-RED issue that is open. When a run that released had no job
@@ -119,19 +119,19 @@ next push that ships code. Nothing runs on a timer.
    run. Both hold `issues: write` and `actions: read` and run `gh` alone.
 
 Each job holds only the permission it needs: `contents: read` for plan, build, deploy-tool, sums,
-verify, the apt index jobs and `check-apt` (plus `attestations: read` for verify), `id-token` and
+verify, the apt index jobs, `check-apt`, `smoke-bundle-pack` and `smoke-bundle-check` (plus `attestations: read` for verify), `id-token` and
 `attestations` write for `attest`, `actions: read` and
 `contents: read` for `turn`, `actions: write` alone for `desired`, `issues: write` and
 `actions: read` for `release-red` and `release-green`, `contents` write for
 `publish` (the tag and the release), `contents: read` and `id-token` write for the apt read and
 write jobs (the token is exchanged for the apt publish role), `id-token` write alone for `gamma`
-and for `cp-deploy` (the call of docker-swarm-updater's deploy workflow), nothing for
-`cp-deploy-digest`.
+and for `cp-deploy` (the call of docker-swarm-updater's deploy workflow), `packages: write` alone
+for `smoke-bundle-push` (the push of the smoke bundle), nothing for `cp-deploy-digest`.
 The `artifacts` job of release.yml grants `contents: read` and the two writes of `attest`, since a
 called workflow's jobs can hold no more than the calling job grants; each job of artifacts.yml then
 asks for its own. No job
 that holds a write permission or the signing key compiles this repository's code: `gamma`,
-`cp-deploy-digest` and the apt read, index and write jobs run the `xtask` binary that `deploy-tool` built in a job with no token and no secret, so
+`cp-deploy-digest`, `smoke-bundle-push` and the apt read, index and write jobs run the `xtask` binary that `deploy-tool` built in a job with no token and no secret, so
 the build, whose scripts run code from the locked dependency set, never shares a job with the token
 service's address, the cloud role or the key. The rules (SHA-pinned
 actions, no permission at the top, `id-token` write in `attest`, the apt read and write jobs,
@@ -151,7 +151,9 @@ so do the root `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` and everything 
 Linux `js-lease-server` archives carry as they are, and the files the Debian package of `js-agent`
 is made of, which `release deb` compiles in: those under `packaging/js-agent/deb/` (markdown aside)
 and `packaging/js-agent/js-agent.service`, `packaging/js-agent/tmpfiles.conf` and
-`packaging/js-agent/crun_host_setup.sh` (`DEB_DIRS` and `DEB_FILES` in `crates/xtask/src/release.rs`).
+`packaging/js-agent/crun_host_setup.sh` (`DEB_DIRS` and `DEB_FILES` in `crates/xtask/src/release.rs`),
+and the smoke bundle's tree and recipe under `packaging/js-smoke-bundle/` (its README aside), which
+the release publishes ([The smoke bundle](#the-smoke-bundle)).
 
 A file in one of the excluded places still ships when a shipped source compiles it in. `plan` reads
 the `include_str!`, `include_bytes!` and `include!` calls of every shipped `.rs` file (not those
@@ -206,7 +208,7 @@ For version `X.Y.Z`:
 | `js-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js` binary for Apple silicon Macs and `LICENSE` |
 | `js-agent-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js-agent` binary for Apple silicon Macs and `LICENSE` |
 | `js-mdm-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js-mdm` binary and `LICENSE` |
-| `js-bundle-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js-bundle` binary (packs, prints and verifies darwin bundles) and `LICENSE` |
+| `js-bundle-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js-bundle` binary (packs, prints, verifies and pushes darwin bundles) and `LICENSE` |
 | `js-bundle-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js-bundle` binary for Apple silicon Macs and `LICENSE` |
 | `js-lease-server-X.Y.Z-aarch64-unknown-linux-musl.tar.gz` | the `js-lease-server` binary for arm64 Linux hosts, `LICENSE` and `updater.d/js-lease-server.toml`, as in the x86_64 archive |
 | `js-X.Y.Z-aarch64-unknown-linux-musl.tar.gz` | the `js` binary for arm64 Linux hosts and `LICENSE` |
@@ -482,13 +484,23 @@ SHA-256 as the pin, and the manifest:
 The update steps do not drain a host whose agent can hand its jobs over (a crun host whose
 running agent prints `stops: drain handover` in `js-agent --version`, with the unit unchanged
 and, where the flags file sets an `--egress` ceiling, `egress-handover` on the `stops:` line of
-both the running and the staged agent): `prepare` neither cordons nor waits, and `cutover` and
-`rollback` write the handover file in the agent's state root before they stop the unit, so the
-stopping agent exits within seconds leaving its jobs to the agent started next, which adopts them
-(under an egress ceiling each job's wiring stays in the kernel and its record in the state root's
-`egress` directory, from which the new agent takes the wiring over)
-(docs/runbooks/crun-host-setup.md, "Agent updates while jobs run"). The timeouts above cover the
-drain of any other host.
+both the running and the staged agent): `prepare` neither cordons nor waits. When both agents
+also list `in-place` on that line, `cutover` and `rollback` hand the jobs over in place: they
+write the handover file in the agent's state root and send SIGHUP to the unit's main process
+(`systemctl kill --kill-whom=main --signal=SIGHUP`), and the agent hands over and runs its
+program again as the same process, so the unit is not stopped and not started and the hook waits
+until the agent has removed the file. Otherwise they write the file before they stop the unit, so
+the stopping agent exits within seconds leaving its jobs to the agent started next, which adopts
+them; that is allowed only on a systemd older than 258, and a host with a newer systemd (or whose
+`systemctl --version` cannot be read) whose agents do not both list `in-place` drains instead
+(systemd 258 starts a service's first process in the unit's own cgroup, which the jobs a stop
+leaves keep from taking one). Under an egress ceiling each job's wiring stays in the kernel and
+its record in the state root's `egress` directory, from which the new agent takes the wiring over
+(docs/runbooks/crun-host-setup.md, "Agent updates while jobs run"). A start that fails after the
+cutover says in its report that the staged release is installed and its agent is not running; a
+rollback whose start fails says that the previous release is installed again but its agent is
+not running. The timeouts above cover the drain of any other host, and the in-place wait is
+bounded by the cutover's and the rollback's stop bounds.
 
 The two maintenance steps. `drain` writes the hold file in the agent's state root, cordons the
 host on the lease server and returns once the host is idle (no lease, no running job, not
@@ -552,6 +564,8 @@ together) moves the entry. The call names the host group `all-in-one` (the `host
 `js-agent`; each host needs the `komira-stable` repository entry. The Macs' call names the host group `mac-build`, which must list `js-agent` too.
 
 ### macOS
+
+**Signing.** The package's three programs are signed with the Developer ID Application identity of the team (`Developer ID Application: Komira AI, Inc. (U7RTX4XD3X)`, the table in `crates/xtask/src/release/mac_programs.rs`) before the package is made: by the job `sign-code` of `js-agent-macos-pkg.yml`, in the environment `pkg-signing`, which holds the secrets `MACOS_APPLICATION_P12` and `MACOS_APPLICATION_P12_PASSWORD` and runs nothing built from the repository. Each program gets `--options runtime --timestamp` and a fixed identifier (`com.komira.js-agent`, `com.komira.js-agent.session`, `com.komira.js-agent.provision`), so its designated requirement names the identifier, Apple's Developer ID chain and the team, and no hash: every release of the program meets it. The job imports Apple's Developer ID intermediate certificate, fetched over HTTPS and held to its SHA-256 (a hosted runner that holds it already makes the import answer that the item already exists, and that answer alone, exactly, passes), requires `security find-identity -v` to list the identity as a valid code-signing identity, and fails 30 days before the identity expires. A signing run (`gh workflow run js-agent-macos-pkg.yml --ref <branch> -f version=X -f sign=true`, on a branch of this repository) runs `sign-code`, `package` and `sign` as the release does and publishes nothing, so a change to the signing is proved before it merges; on a tag or in a fork it fails by name. The job `package` then checks each staged program with `cargo xtask release check-code-signature <binary> --program <name>`, which refuses an ad hoc signature, another identifier or team, another authority chain, no timestamp, no hardened runtime and another requirement, and the cdhash the helper's plist pins for the agent is read from the signed `js-agent`. The profile `packaging/js-agent-macos/mdm/js-agent-full-disk-access.mobileconfig` grants Full Disk Access to `js-mac-session` alone, by its installed path and that requirement; `cargo test -p xtask` holds the file to the table. The owner installs it through device management (packaging/js-agent-macos/mdm/README.md).
 
 The Mac agent is installed on a Mac by its hostkeeper as a `macos-pkg` entry: the signed installer
 package `js-agent-X.Y.Z-macos-arm64.pkg` (identifier `com.komira.js-agent`, built and signed by
@@ -626,13 +640,13 @@ The Mac manifest is the Linux one (`minHostkeeper`, `installerBounds`, the hook'
 | `params.state_dir` | `/Library/Application Support/js-agent/update` |
 | `params.state_root` | `/var/db/js-agent/state` |
 | `params.socket_group` | `_jsagent`, the helper's socket group, which the hook's `prepare` makes when the Mac has none |
-| `params.scratch_root` | `/var/db/js-agent/scratch`, which `prepare` makes and gives an APFS volume of its own |
+| `params.scratch_root` | `/var/db/js-agent/scratch/runs`, the agent's scratch root, which `prepare` makes on an APFS volume of its own mounted on its parent `/var/db/js-agent/scratch` (root's, 0711) |
 | `params.runtime` | `native` |
 
 The `release_link` (`/var/lib/hostkeeper/packages/js-agent/current`), `flags_file` and `token_file`
 are the Linux values. The Mac archives (`*-aarch64-apple-darwin.tar.gz`) are released as before.
 
-The Linux binaries are statically linked against musl, for both architectures (`x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`), so each runs on any Linux host of its architecture, including `gcr.io/distroless/cc-debian12`. Each Linux target is built natively on a GitHub-hosted runner of its architecture (`ubuntu-24.04` for x86_64, `ubuntu-24.04-arm` for arm64), with no cross linker and no emulation, so the `--version` check runs every binary on a host of the kind it is for, and the static check (no `NEEDED` entry in `readelf -d`) is the same for both. The TLS stack (rustls with ring) needs a C compiler for ring, which the workflow gets from `musl-tools` on both Linux runners, its packages pinned by version and SHA-256 in `.github/debs/musl-tools.toml` and installed with `dpkg` after `cargo xtask debs` took them from the actions cache or, when the cache missed, from the pinned mirrors (on the arm64 runner a link gives its `musl-gcc` the name `aarch64-linux-musl-gcc`, the one the `cc` crate looks for there); musl itself needed no crate code change (the Mac build needed one: `js` draws its run label and `js-agent` its retry jitter through the `getrandom` crate, which both targets share). The macOS assets (`aarch64-apple-darwin`) are built on a `macos-15` runner with `MACOSX_DEPLOYMENT_TARGET=11.0` pinned (the build fails if a binary's minimum macOS is above it) and are dynamically linked against the system libraries, as every Mac binary is; there is no macOS `js-lease-server`. `js-mac-session` and `js-mac-provision` are the host tools a Mac node installs; `js-mac-pool` is a library and `js-mac-probe` runs only on hosted CI runners, so neither is shipped. The darwin binaries, including the root helper `js-mac-session`, are not codesigned or notarized. The Mac agent refuses `--container-bin`, whose post-job checks read `/proc`.
+The Linux binaries are statically linked against musl, for both architectures (`x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`), so each runs on any Linux host of its architecture, including `gcr.io/distroless/cc-debian12`. Each Linux target is built natively on a GitHub-hosted runner of its architecture (`ubuntu-24.04` for x86_64, `ubuntu-24.04-arm` for arm64), with no cross linker and no emulation, so the `--version` check runs every binary on a host of the kind it is for, and the static check (no `NEEDED` entry in `readelf -d`) is the same for both. The TLS stack (rustls with ring) needs a C compiler for ring, which the workflow gets from `musl-tools` on both Linux runners, its packages pinned by version and SHA-256 in `.github/debs/musl-tools.toml` and installed with `dpkg` after `cargo xtask debs` took them from the actions cache or, when the cache missed, from the pinned mirrors (on the arm64 runner a link gives its `musl-gcc` the name `aarch64-linux-musl-gcc`, the one the `cc` crate looks for there); musl itself needed no crate code change (the Mac build needed one: `js` draws its run label and `js-agent` its retry jitter through the `getrandom` crate, which both targets share). The macOS assets (`aarch64-apple-darwin`) are built on a `macos-15` runner with `MACOSX_DEPLOYMENT_TARGET=11.0` pinned (the build fails if a binary's minimum macOS is above it) and are dynamically linked against the system libraries, as every Mac binary is; there is no macOS `js-lease-server`. `js-mac-session` and `js-mac-provision` are the host tools a Mac node installs; `js-mac-pool` is a library and `js-mac-probe` runs only on hosted CI runners, so neither is shipped. The darwin binaries of the release archives are not codesigned or notarized. The three programs inside the Mac installer package (`js-agent`, `js-mac-session`, `js-mac-provision`) are signed, see "macOS" below. The Mac agent refuses `--container-bin`, whose post-job checks read `/proc`.
 
 Not yet proven: that the Mac archives come out byte-identical when a partly published release is re-run, nor that the Linux arm64 ones do when they are built again on a hosted arm64 runner. The Linux archives of both architectures are held to this by the comparison in `publish`, as every archive is; for the Mac ones and the Linux arm64 ones it is watched on the first real release. `crates/xtask/tests/release_archive_compat.rs` checks the archiving half for the arm64 agent archive: the workflow's `tar` options and `gzip -n` make the same bytes from the same files, whatever the working directory and the files' own times.
 
@@ -710,6 +724,13 @@ until it is set.
   release, step 6a), so remove them from the required checks, or every pull request waits for a
   check that never reports. A change that breaks the Mac build or package is found by the beta
   stage after the merge and fixed forward.
+- **The smoke bundle's package public, once**: the first release that publishes the smoke bundle
+  creates the package `js/smoke` of the organisation on GitHub's container registry, and GitHub
+  makes a new package private, with no API to change that. In the package's settings, set its
+  visibility to public (once; later pushes keep it). Until then `smoke-bundle-check` fails with the
+  registry's refusal (`https://ghcr.io/token: the registry answered 401`) followed by this step,
+  and the release run is red ([The smoke bundle](#the-smoke-bundle)). The next release run after
+  the change passes it.
 - **The environments `apt-publish` and `apt-signing`**, restricted to `main`, with the variables and
   secrets [The apt repository](#the-apt-repository) lists. Until they exist every apt job passes
   doing nothing, and the release ends with the GitHub release published and no package in the
@@ -724,6 +745,41 @@ Not proven until the first real run on `main`, and fixed there if it differs:
   before anything is published if they differ);
 - the draft and asset calls of `publish` (listing drafts, uploading to a draft, reading an asset
   back to compare it).
+
+## The smoke bundle
+
+A darwin bundle of one program that prints the host name, the user and uid it runs as, the macOS
+version and its arguments, so that a Mac host is proven with one job
+([docs/runbooks/mac-smoke-bundle.md](runbooks/mac-smoke-bundle.md)). Its tree and its recipe are
+committed under `packaging/js-smoke-bundle/`; the recipe (`bundle.toml`) names the repository and tag
+it is published under and the manifest digest the tree packs to, which
+`cargo test -p xtask --test smoke_bundle` holds it to. Each release publishes it, in three jobs after
+`deploy-tool`, none of which the deploy path waits for:
+
+1. `smoke-bundle-pack` (`contents: read`) checks out the commit and runs `xtask release smoke-bundle
+   pack`, which packs the tree with `js-bundle pack` and the recipe's fields, and fails unless the
+   manifest digest is the recipe's. The layout goes to the next job as the artifact `smoke-bundle`.
+2. `smoke-bundle-push` (`packages: write` alone; no checkout, no build) runs `xtask release
+   smoke-bundle push`, which is `js-bundle push` of that digest to `ghcr.io/komira-ai/js/smoke`
+   under the recipe's tag, with the job's own token given on standard input. The push first asks
+   the registry what the tag names: the same digest ends it with nothing sent (`unchanged`);
+   another digest is refused and the tag left as it is (a new bundle comes with a new tag); no
+   tag yet uploads the config and the layer and puts the manifest under the tag (`pushed`). The
+   package is linked to this repository by the manifest's `org.opencontainers.image.source`
+   annotation.
+3. `smoke-bundle-check` (`contents: read`) runs `xtask release smoke-bundle check`: it pulls the
+   bundle by digest from the registry with the agent's registry client and no credentials, checks
+   it as an agent does (the manifest against the digest, the bundle kind, every blob's length and
+   digest, the config's rules), extracts its layer with the agent's extractor, and compares every
+   entry with the committed tree: paths, kinds, execute bits, link targets and bytes. It fails while
+   the package is not public: when the registry answers the manifest's fetch 401 or 403 (ghcr.io answers 401
+   for a private package and 403 for one that is not there), the error says so after the
+   registry's answer and names the owner's step ([Configuration the project owner must
+   set](#configuration-the-project-owner-must-set)).
+
+A failure of any of them makes the run red (`release-red` counts `smoke-bundle-check`, and so the
+two before it); the release itself is published and deployed as without them. The bundle is not a
+release asset and not in `SHA256SUMS`: its pin is its manifest digest.
 
 ## The gamma step
 

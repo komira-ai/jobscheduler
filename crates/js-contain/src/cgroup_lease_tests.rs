@@ -356,6 +356,8 @@ fn made(
         "memory.oom.group",
         "cpu.max",
         "cpu.weight",
+        "cpuset.cpus",
+        "cpuset.mems",
         "cgroup.subtree_control",
     ]
     .iter()
@@ -370,42 +372,79 @@ fn made(
     }
 }
 
-/// Catches a Hard lease whose memory cap is not the booking (the booking times 1.5 plus
-/// 512 MiB lets a job use what it did not book, which podman's `--memory` never did), or
-/// whose swap is not 0 (a job pressed at its cap would be moved to swap, which podman's
-/// `--memory-swap` equal to `--memory` forbids), or that lost the OOM group.
+/// Catches a lease of the agent's policy held at its memory booking: a `memory.max` of the
+/// booking stalls a job that needs more in reclaim at it, and a `memory.swap.max` of 0 keeps
+/// the host's swap from absorbing what it uses over. A lease that booked 3 GiB has neither, nor
+/// a `memory.high`, and keeps the OOM group, so a job the kernel kills dies whole.
 #[test]
-fn a_hard_lease_caps_memory_at_the_booking_and_forbids_swap() {
-    let read = made("hard-memory", &booking(2000, 3 << 30), LeasePolicy::Hard);
-    assert_eq!(read("memory.max"), Some((3u64 << 30).to_string()));
-    assert_eq!(read("memory.swap.max").as_deref(), Some("0"));
-    assert_eq!(read("memory.oom.group").as_deref(), Some("1"));
-    assert_eq!(read("memory.high"), None);
-}
-
-/// Catches a Hard lease without a hard CPU cap (a `cpu.weight` alone lets a job use idle
-/// cores, which `--cpus` never did) and a cap that is not `cpu_millis` thousandths of a
-/// core per 100 ms period: 2500 booked is `250000 100000`, as `--cpus 2.500` makes.
-#[test]
-fn a_hard_lease_caps_cpu_at_the_booked_cores() {
-    let read = made("hard-cpu", &booking(2500, 1 << 30), LeasePolicy::Hard);
-    assert_eq!(read("cpu.max").as_deref(), Some("250000 100000"));
-    assert_eq!(cpu_max(1500).as_deref(), Some("150000 100000"));
-    assert_eq!(
-        cpu_max(1).as_deref(),
-        Some("1000 100000"),
-        "the kernel's least quota"
+fn a_tracked_memory_lease_has_no_memory_or_swap_limit_and_keeps_the_oom_group() {
+    let read = made(
+        "tracked-memory",
+        &booking(2000, 3 << 30),
+        LeasePolicy::TrackedMemory,
     );
-    assert_eq!(cpu_max(0), None);
-    assert_eq!(hard_memory_max(1 << 30), Some(1 << 30));
-    assert_eq!(hard_memory_max(0), None);
+    assert_eq!(read("memory.max"), None);
+    assert_eq!(read("memory.swap.max"), None);
+    assert_eq!(read("memory.high"), None);
+    assert_eq!(read("memory.oom.group").as_deref(), Some("1"));
 }
 
-/// Catches a Hard lease that booked nothing getting a limit of 0 (a `memory.max` of 0
-/// kills every process at once) and a swap limit with no memory limit beside it.
+/// Catches a lease held to its CPU booking: a `cpu.max` makes the kernel throttle a job that
+/// booked half a core to half a core in every period while the node's other cores are idle.
+/// With no `cpu.max` the kernel's `max` stands (no quota, so no period is ever throttled)
+/// and the booking is the lease's `cpu.weight`, 100 a core: half a core is 50. Nor is it held
+/// to a set of cores: a lease with no NUMA pin writes no `cpuset.cpus` or `cpuset.mems`, so a
+/// job bursts onto any core the host has free.
 #[test]
-fn a_hard_lease_that_booked_nothing_has_no_limits() {
-    let read = made("hard-none", &Resources::default(), LeasePolicy::Hard);
+fn a_lease_that_booked_half_a_core_has_no_cpu_ceiling_and_a_weight_of_half_a_core() {
+    let read = made(
+        "half-core",
+        &booking(500, 1 << 30),
+        LeasePolicy::TrackedMemory,
+    );
+    assert_eq!(read("cpu.max"), None);
+    assert_eq!(read("cpu.weight").as_deref(), Some("50"));
+    assert_eq!(read("cpuset.cpus"), None);
+    assert_eq!(read("cpuset.mems"), None);
+}
+
+/// Catches two leases that want every core not sharing the cores as they booked them: the
+/// kernel gives siblings that all want CPU each its weight's part of the cores, so leases
+/// that booked 1 and 3 cores get a quarter and three quarters. A `cpu.max` on either would
+/// hold it to its booking whatever the other leaves idle; neither has one.
+#[test]
+fn two_leases_that_booked_one_and_three_cores_share_the_cores_one_to_three() {
+    let one = made(
+        "share-one",
+        &booking(1000, 1 << 30),
+        LeasePolicy::TrackedMemory,
+    );
+    let three = made(
+        "share-three",
+        &booking(3000, 1 << 30),
+        LeasePolicy::TrackedMemory,
+    );
+    let weight = |read: &dyn Fn(&str) -> Option<String>| -> u64 {
+        read("cpu.weight")
+            .expect("cpu.weight")
+            .parse()
+            .expect("a number")
+    };
+    let (one_weight, three_weight) = (weight(&one), weight(&three));
+    assert_eq!((one_weight, three_weight), (100, 300));
+    assert_eq!(three_weight, 3 * one_weight, "shares one to three");
+    assert_eq!((one("cpu.max"), three("cpu.max")), (None, None));
+}
+
+/// Catches a lease that booked nothing getting a limit of 0 (a `memory.max` of 0 kills
+/// every process at once, a `cpu.weight` of 0 is refused by the kernel) or a swap limit.
+#[test]
+fn a_tracked_memory_lease_that_booked_nothing_has_no_limits() {
+    let read = made(
+        "tracked-none",
+        &Resources::default(),
+        LeasePolicy::TrackedMemory,
+    );
     for file in ["memory.max", "memory.swap.max", "cpu.max", "cpu.weight"] {
         assert_eq!(read(file), None, "{file}");
     }
@@ -429,4 +468,26 @@ fn the_build_host_policy_is_unchanged_and_the_default() {
     assert_eq!(read("cpu.weight").as_deref(), Some("200"));
     assert_eq!(read("memory.swap.max"), None);
     assert_eq!(read("cpu.max"), None);
+}
+
+/// Catches an operator's CPU ceiling not written, or written as something else than the cores
+/// as a quota per 100 ms period beside the weight that shares the cores: a lease that booked
+/// half a core under a ceiling of 2 is held to one core (`100000 100000`) and keeps its weight
+/// of 50; a ceiling of 0 cores writes nothing.
+#[test]
+fn an_operators_ceiling_holds_a_lease_beside_its_weight() {
+    let root = mount("ceiling");
+    std::fs::create_dir(root.join("actions")).expect("mkdir");
+    let lease = LeaseCgroup::at(&root, "/actions", "lease-1-1");
+    lease
+        .create_with(&booking(500, 1 << 30), None, LeasePolicy::TrackedMemory)
+        .expect("created");
+    let read = |file: &str| std::fs::read_to_string(lease.dir().join(file)).ok();
+    lease.hold_cpu(0).expect("nothing to hold");
+    assert_eq!(read("cpu.max"), None);
+    let ceiling: crate::CpuCeiling = "2".parse().expect("a ceiling");
+    let most = ceiling.millis_of(500).expect("a booking");
+    lease.hold_cpu(most).expect("held");
+    assert_eq!(read("cpu.max").as_deref(), Some("100000 100000"));
+    assert_eq!(read("cpu.weight").as_deref(), Some("50"));
 }

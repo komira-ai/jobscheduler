@@ -8,14 +8,13 @@ use std::path::Path;
 use js_agent_wire::{HOST_JOBS_CAPABILITY, Hello, LOG_UPLOAD_CAPABILITY, NetworkCeiling};
 use js_caps::{
     EXEC, FLAG_SET, FUSE_JOBS, FUSE_URING, GPU_PASSTHROUGH, GPU_TOOLKIT, RUNTIME,
-    SCRATCH_DEFAULT_GIB, SCRATCH_QUOTA, SCRATCH_QUOTA_PROJECT, mount_provider_key,
+    SCRATCH_DEFAULT_GIB, SCRATCH_QUOTA, SCRATCH_QUOTA_PROJECT,
 };
 use js_types::ExecMode;
 
 use super::{report_per_job, report_run_files};
 use crate::facts::CommandRunner;
 use crate::fuse_env::FuseEnv;
-use crate::lifecycle::MountProviders;
 
 /// The `PATH` the toolkit hook runs with; it inherits nothing else.
 const HOOK_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
@@ -41,20 +40,6 @@ impl ToolkitHook {
             ));
         }
         Ok(Some(Self(path.to_owned())))
-    }
-}
-
-/// Puts `mount-provider.<name>` into `hello` for each provider the agent was given
-/// (`--mount-provider`), where it reports `layered-rootfs` (`layered`): a provider's tree is
-/// a layer or a mount of the job, which a host that gives neither cannot give, so a server
-/// never places a job that names the provider there.
-pub(crate) fn report_mount_providers(hello: &mut Hello, providers: &MountProviders, layered: bool) {
-    if layered {
-        for (name, _, _) in providers.sockets() {
-            hello
-                .capabilities
-                .insert(mount_provider_key(name), FLAG_SET.to_owned());
-        }
     }
 }
 
@@ -159,7 +144,9 @@ mod tests {
     };
 
     use super::*;
+    use crate::contract::report_mount_providers;
     use crate::egress::Config;
+    use crate::lifecycle::{MountProviders, UserNames};
 
     /// A runner whose every program fails: the toolkit hook does not pass.
     struct Failing;
@@ -229,7 +216,7 @@ mod tests {
         hello
     }
 
-    /// Asserts that `start-fence`, `held-beat` and `dispatch-poll` are reported as `true`, beside `per-job`, by
+    /// Asserts that `start-fence`, `held-beat`, `dispatch-poll` and `load-admission` are reported as `true`, beside `per-job`, by
     /// the hello of an agent that runs containers (its lifecycle judges a job start by its fence
     /// and stops its jobs after a silence; its session beats again at once after a held reply),
     /// and that the hello still validates. It catches a server never told that a container
@@ -254,12 +241,17 @@ mod tests {
             flag(&contained, DISPATCH_CAPABILITY).as_deref(),
             Some(FLAG_SET)
         );
+        assert_eq!(
+            flag(&contained, js_agent_wire::LOAD_ADMISSION_CAPABILITY).as_deref(),
+            Some(FLAG_SET)
+        );
         assert_eq!(contained.validate(), Ok(()));
         assert_eq!(START_FENCE_CAPABILITY, "start-fence");
+        assert_eq!(js_agent_wire::LOAD_ADMISSION_CAPABILITY, "load-admission");
     }
 
     /// Asserts that the job half of a native agent's hello (`report_native_jobs`, which the
-    /// macOS build calls) is `per-job`, `start-fence`, `held-beat` and `layered-rootfs`, each `true`, and
+    /// macOS build calls) is `per-job`, `start-fence`, `held-beat`, `load-admission` and `layered-rootfs`, each `true`, and
     /// that the hello still validates. It catches a native agent that hides that it takes
     /// job starts and gives mounts, so no server sends it the kbf action jobs.
     #[test]
@@ -271,6 +263,7 @@ mod tests {
             START_FENCE_CAPABILITY,
             HELD_BEAT_CAPABILITY,
             DISPATCH_CAPABILITY,
+            js_agent_wire::LOAD_ADMISSION_CAPABILITY,
             js_caps::LAYERED_ROOTFS,
         ] {
             assert_eq!(
@@ -477,7 +470,7 @@ mod tests {
         let socket = |name: &str| (name.to_owned(), dir.path().join(format!("{name}.sock")));
         let given = [socket("tierstore"), socket("scratch-cache")];
         let providers =
-            MountProviders::from_flags(&given, &[], None, std::path::Path::new("/nonexistent"))
+            MountProviders::from_flags(&given, &[], None, UserNames::Passwd(Path::new("/nx")))
                 .expect("sound flags");
         let mut layered = reported(&Config::none());
         report_mount_providers(&mut layered, &providers, true);

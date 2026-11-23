@@ -51,6 +51,11 @@ async fn a_start_is_resent_until_listed() {
         placed_at_ms: Some(millis(rig.job(&id).placed_at.unwrap())),
         fuse: false,
         xcode: None,
+        sizing: Some(js_agent_wire::StartSizing {
+            class: Some(js_sched_placer::sizes::class_name(&rig.job(&id))),
+            cpu: js_agent_wire::BookedFrom::Named,
+            memory: js_agent_wire::BookedFrom::Named,
+        }),
     };
     let mut last = None;
     for _ in 0..3 {
@@ -264,12 +269,13 @@ async fn a_late_start_after_a_cancel_does_not_run() {
     assert_eq!(agent.launched, ["job-b"]);
 }
 
-/// Under `--placement js-sched`, a heartbeat through the route places a job only queued (no
-/// test places it): after the beat the job is placed on the beating host with its allocation
-/// booked, in the one commit the pass makes; the reply to that beat, built before the pass,
-/// carries no start, and the next beat's reply carries the job's start. Under the registry's
-/// placement the same beat places nothing. It catches a heartbeat that does not run the pass,
-/// a pass that does not commit, and a start sent before the placement is committed.
+/// Under `--placement js-sched`, a heartbeat through the route, with the poller's turn the
+/// server runs right after it, places a job only queued (no test places it): after the beat the
+/// job is placed on the beating host with its allocation booked, in the one commit the pass
+/// makes; the reply to that beat, built before the pass, carries no start, and the next beat's
+/// reply carries the job's start. Under the registry's placement the same beat places nothing.
+/// It catches a heartbeat that does not poke the poller, a pass that does not commit, and a
+/// start sent before the placement is committed.
 #[tokio::test]
 async fn a_heartbeat_places_a_queued_job_and_the_next_one_starts_it() {
     let queue = |rig: &super::job_rig::Rig| {
@@ -591,10 +597,10 @@ async fn a_job_naming_an_xcode_is_started_only_on_a_host_that_lists_the_build() 
 
 /// Through the heartbeats alone, results that carry the usage their agent counted teach the
 /// job's class, and the next job of it that books nothing is placed booked from that history:
-/// after five clean runs of a class that reported 2 GiB peaks, its next job books less memory
-/// than the cold size (the first jobs booked), while a class whose five clean runs reported
-/// no usage books the cold size again. It catches a result whose usage is lost between the
-/// wire and the stored job (every class then stays cold however often it ran).
+/// after clean runs of a class that reported 2 GiB peaks, its next job books less memory
+/// than the cold size (the first jobs booked), while a class of another client whose five clean
+/// runs reported no usage books the cold size again. It catches a result whose usage is lost
+/// between the wire and the stored job (every class then stays cold however often it ran).
 #[tokio::test]
 async fn results_that_report_usage_size_the_next_job_of_the_class_from_history() {
     let mut rig = placing_rig("usage_sizes");
@@ -603,6 +609,13 @@ async fn results_that_report_usage_size_the_next_job_of_the_class_from_history()
     let counted = js_agent_wire::JobUsage {
         peak_memory_bytes: 2 << 30,
         cpu_usage_usec: 30_000_000,
+        cpu_throttle: Some(js_agent_wire::CpuThrottle {
+            periods: 0,
+            throttled_periods: 0,
+        }),
+        cpu_pressure_some_usec: Some(0),
+        cpu_peak: None,
+        peak_swap_bytes: None,
     };
     let mut memory_of = Vec::new();
     for (class, usage) in [("measured", Some(counted)), ("bare", None)] {
@@ -617,7 +630,7 @@ async fn results_that_report_usage_size_the_next_job_of_the_class_from_history()
                     ..spec()
                 },
                 priority: 0,
-                client: None,
+                client: Some(js_jobs::ClientName::parse(class).unwrap()),
             };
             let queued = rig.jobs.insert_queued(new).unwrap().record.id;
             rig.beat(&agent).await.unwrap();
@@ -626,7 +639,10 @@ async fn results_that_report_usage_size_the_next_job_of_the_class_from_history()
             rig.beat(&agent).await.unwrap();
             rig.advance(std::time::Duration::from_secs(10));
             match usage {
-                Some(usage) => agent.end_with_usage(&id, usage),
+                Some(usage) => {
+                    agent.end(&id, Outcome::Succeeded, Some(0));
+                    agent.report(&id, usage);
+                }
                 None => agent.end(&id, Outcome::Succeeded, Some(0)),
             }
             agent.take(&rig.beat(&agent).await.unwrap());
@@ -650,4 +666,122 @@ async fn results_that_report_usage_size_the_next_job_of_the_class_from_history()
         learned < cold,
         "five runs with usage size the sixth from history below the cold size: {learned} < {cold}"
     );
+}
+
+/// One job service and two agents during a roll of the agents: one of the release now deployed,
+/// which holds a job at its memory booking (1 GiB, [`BOOKED`]) and reports it killed there, out
+/// of memory with its peak at the booking; and one of this release, which holds a job of the same
+/// booking to nothing, so that it uses 1.5 GiB and part of the host's swap, and reports it
+/// succeeded with that peak and a swap peak. The server takes both results from the same
+/// heartbeats, as each agent sent it: the deployed agent's job fails for memory with its 1 GiB
+/// peak, this release's succeeds with its whole 1.5 GiB peak, above its booking. It catches a
+/// result of either release that the server refuses or leaves unanswered, a swap peak the server
+/// cannot take, and a peak above the booking the server does not record as sent.
+#[tokio::test]
+async fn a_deployed_agent_and_this_one_report_their_jobs_to_one_server_as_each_measured() {
+    let mut rig = rig("deployed_and_new_agents", true);
+    rig.register("host-deployed", true);
+    rig.register("host-new", true);
+    let mut deployed = FakeAgent::new("host-deployed");
+    let mut new = FakeAgent::new("host-new");
+    let held = rig.place("held", "host-deployed");
+    let over = rig.place("over", "host-new");
+    let usage = |peak_memory_bytes, peak_swap_bytes| js_agent_wire::JobUsage {
+        peak_memory_bytes,
+        cpu_usage_usec: 30_000_000,
+        cpu_throttle: None,
+        cpu_pressure_some_usec: None,
+        cpu_peak: None,
+        peak_swap_bytes,
+    };
+    for (agent, name, id) in [(&mut deployed, "held", &held), (&mut new, "over", &over)] {
+        let allocation = rig.allocation(id).allocation_id.to_string();
+        agent.hold(name, &allocation, HeldState::Running);
+        rig.beat(agent).await.unwrap();
+        assert_eq!(rig.job(id).state, JobState::Running, "{name}");
+    }
+    deployed.end("held", Outcome::OutOfMemory, None);
+    deployed.report("held", usage(1 << 30, None));
+    new.end("over", Outcome::Succeeded, Some(0));
+    new.report("over", usage(3 << 29, Some(256 << 20)));
+    for (agent, name) in [(&deployed, "held"), (&new, "over")] {
+        let reply = rig.beat(agent).await.unwrap();
+        let acks: Vec<Ack> = reply.job_acks.iter().map(|ack| ack.ack).collect();
+        assert_eq!(acks, [Ack::Accepted], "{name}");
+    }
+    let ended = |id: &JobId| {
+        let job = rig.job(id);
+        let result = job.result.expect("a result");
+        let peak = result.usage.map(|usage| usage.peak_memory_bytes);
+        (job.state, result.reason, peak)
+    };
+    assert_eq!(
+        ended(&held),
+        (
+            JobState::Failed,
+            js_jobs::ResultReason::Memory,
+            Some(1 << 30)
+        )
+    );
+    assert_eq!(
+        ended(&over),
+        (
+            JobState::Succeeded,
+            js_jobs::ResultReason::Exit,
+            Some(3 << 29)
+        )
+    );
+}
+
+/// Through the heartbeats alone, a result that carries a CPU series (and no usage) is accepted,
+/// the series is stored in the job's result exactly as the agent sent it, and when the job's
+/// allocation is freed the usage history row of the job holds the same series; a second job
+/// whose result carries none is recorded with none. It catches a series lost between the wire
+/// result and the stored job, one lost between the stored job and the history row that
+/// `GetUsage` lists, one altered on the way (a point, the granularity, the run length or the
+/// partial flag), and one tied to the result's usage.
+#[tokio::test]
+async fn a_results_cpu_series_reaches_the_job_row_and_the_usage_history() {
+    let mut rig = rig("series_reaches_history", true);
+    rig.register("host-a", true);
+    let mut agent = FakeAgent::new("host-a");
+    let sent = js_agent_wire::CpuSeries {
+        granularity_secs: 2,
+        points: vec![0, 16, 40, 65535],
+        run_usec: 7_500_000,
+        partial: true,
+    };
+    let stored = js_types::CpuSeries::new(2, vec![0, 16, 40, 65535], 7_500_000, true);
+    let with = rig.place("with-series", "host-a");
+    let without = rig.place("no-series", "host-a");
+    for (name, id) in [("with-series", &with), ("no-series", &without)] {
+        let allocation = rig.allocation(id).allocation_id.to_string();
+        agent.hold(name, &allocation, HeldState::Running);
+    }
+    rig.beat(&agent).await.unwrap();
+    agent.end("with-series", Outcome::Succeeded, Some(0));
+    agent.report_series("with-series", sent);
+    agent.end("no-series", Outcome::Succeeded, Some(0));
+    let reply = rig.beat(&agent).await.unwrap();
+    let acks: Vec<Ack> = reply.job_acks.iter().map(|ack| ack.ack).collect();
+    assert_eq!(acks, [Ack::Accepted, Ack::Accepted]);
+    agent.take(&reply);
+    rig.beat(&agent).await.unwrap();
+    for id in [&with, &without] {
+        assert_eq!(rig.allocation(id).step, AllocationStep::Freed, "{id}");
+    }
+
+    let series_of = |id: &JobId| rig.job(id).result.expect("a result").cpu_series;
+    assert_eq!(series_of(&with), stored);
+    assert_eq!(rig.job(&with).result.expect("a result").usage, None);
+    assert_eq!(series_of(&without), None);
+
+    let limit = std::num::NonZeroUsize::new(100).unwrap();
+    let rows = js_usage::EndedHistory::new(&*rig.store)
+        .range(0, u64::MAX, limit)
+        .unwrap()
+        .rows;
+    let row_of = |id: &JobId| rows.iter().find(|row| row.id.as_str() == id.as_str());
+    assert_eq!(row_of(&with).expect("a row").cpu_series, stored);
+    assert_eq!(row_of(&without).expect("a row").cpu_series, None);
 }

@@ -16,6 +16,10 @@ use crate::http::Gateway;
 use crate::node::{Node, image};
 use crate::server::{Files, Server, Store};
 
+/// The most reads of a job [`Rig::left_the_queue`] makes before it fails: a guard against a
+/// poller that never places, far above the few reads a placement takes.
+const QUEUE_READS: usize = 10_000;
+
 /// The most heartbeats a case lets pass while it waits for one change. A change the path
 /// makes takes a handful (the start rides on one reply, the result on a later heartbeat); the
 /// bound keeps a regression from looping and fails it naming what never happened.
@@ -312,6 +316,21 @@ impl Rig {
     /// The state of the job `id`, as the gateway says.
     pub fn state(&self, id: &str) -> String {
         self.http.state(id)
+    }
+
+    /// Reads the job `id` until the server's placement poller, which places a submitted job on a
+    /// task of its own, has taken it out of the queue; returns the job. No heartbeat is sent, so
+    /// the placement is the poller's. Nothing is timed; the reads are counted, and a job still
+    /// queued after [`QUEUE_READS`] of them fails the case rather than holding it up.
+    pub fn left_the_queue(&self, id: &str) -> Value {
+        for _ in 0..QUEUE_READS {
+            let job = self.client(Via::Http).job(id);
+            if job["state"] != "JOB_STATE_QUEUED" {
+                return job;
+            }
+            std::thread::yield_now();
+        }
+        panic!("the job {id} is still queued after {QUEUE_READS} reads");
     }
 
     /// Lets the agent beat until `done` holds, at most [`BEATS`] times; fails naming `what`.

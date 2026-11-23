@@ -88,14 +88,14 @@ mod whole;
 pub use capacity::StaticCapacity;
 pub use config::{
     ConfigError, DEFAULT_LOST_RETENTION_MS, MAX_LOST_RETENTION_MS, MIN_LOST_RETENTION_MS,
-    PoolConfig,
+    PoolConfig, quota_default,
 };
 pub use credential::{Binding, Credential};
 pub use js_whole::{
     DEFAULT_PREPARE_TIMEOUT_MS, DEFAULT_REGAIN_GRACE_MS, DEFAULT_RESERVE_BACKOFF_MS,
     WholeNodeConfig,
 };
-pub use load::{BadLease, node_load};
+pub use load::{BadLease, LoadSeconds, node_load};
 pub use placer::Placer;
 pub use refusal::{Refusal, ShapeFault};
 pub use registry::{

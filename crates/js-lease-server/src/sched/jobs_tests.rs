@@ -73,6 +73,8 @@ pub(super) fn open_hosts(names: &[&str], host_jobs: bool) -> BTreeMap<HostId, Op
         host_jobs,
         rank: None,
         capacity: None,
+        load_admission: false,
+        quota_disk_bytes: None,
     };
     names
         .iter()
@@ -429,6 +431,7 @@ fn a_crash_between_placement_and_the_host_call_resolves_by_observation() {
         layered_rootfs: false,
         mount_providers: &[],
         xcodes: &[],
+        limits: crate::job_expiry::JobLimits::DEFAULT,
     };
     let holds = [HeldJob {
         job_id: "job-a".to_owned(),
@@ -514,6 +517,7 @@ fn only_absent_frees_an_allocation() {
                     layered_rootfs: false,
                     mount_providers: &[],
                     xcodes: &[],
+                    limits: crate::job_expiry::JobLimits::DEFAULT,
                 };
                 let holds = [HeldJob {
                     job_id: "job-a".to_owned(),

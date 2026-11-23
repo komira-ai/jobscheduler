@@ -22,6 +22,24 @@ fn prepare_changes_nothing_but_makes_the_state_directory() {
     assert_eq!(rig.lease.looks.get(), 0);
 }
 
+/// Asserts that `prepare` succeeds when the state directory is reached through a link at the top
+/// of the tree, as a Mac's `/var` is a link to `private/var`, and makes the state directory at
+/// the link's real location.
+///
+/// Catches a prepare that halts a Mac's host with `state_invalid: above the state directory,
+/// /var: is a symbolic link` for every update of the config package.
+#[test]
+fn prepare_makes_a_state_directory_under_a_symlinked_top_directory() {
+    let rig = Rig::behind_a_system_link("config-prepare-link");
+    let done = rig.run(prepare);
+    assert_eq!(done.outcome, Outcome::Success);
+    assert_eq!(done.report, Default::default());
+    assert!(rig.params.state_dir.is_dir());
+    let real = std::fs::canonicalize(&rig.params.state_dir).unwrap();
+    assert!(real.ends_with("tree/private/var/lib/state"), "{real:?}");
+    assert!(rig.record().is_none());
+}
+
 /// Asserts that a step that finds the state directory locked by another holder is refused with
 /// `locked`, whichever step it is, and does nothing.
 ///

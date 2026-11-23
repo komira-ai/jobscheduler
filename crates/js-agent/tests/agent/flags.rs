@@ -258,7 +258,7 @@ fn usage_errors_and_help() {
     let after: &[&str] = match cfg!(target_os = "linux") {
         true => &[
             "runtimes: docker crun",
-            "stops: drain handover egress-handover",
+            "stops: drain handover egress-handover in-place",
         ],
         false => &["runtimes: native"],
     };
@@ -703,7 +703,7 @@ const NO_EGRESS_ALLOW: &str = "--container-egress-allow: removed. Use --egress a
 /// What the agent prints for `--runtime`, which was removed.
 const NO_RUNTIME: &str = "--runtime: removed. The runtime is the build's: a Linux build runs \
     crun (or, with --allow-container-engine and --container-bin, the container engine), a macOS \
-    build the native runtime of --native-helper-socket; --no-jobs starts an agent that runs no job";
+    build the native runtime of --native-accounts; --no-jobs starts an agent that runs no job";
 
 /// What the agent prints for `--container-nft`, which was removed.
 const NO_NFT: &str = "--container-nft: removed together with --container-network. The crun \

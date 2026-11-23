@@ -61,8 +61,8 @@ pub(crate) use test_support::{LATER_FORMAT, field_of, rearranged, set_field};
 /// The format byte of the rows this build writes.
 pub(crate) const FORMAT: u8 = 1;
 
-/// The tags of a job row (whole-host tags 45, 46 and 59 are in `whole_fields`, isolation tag 47
-/// in `host_fields`, queue tags 48 to 53 in `queue_fields`, 54 to 58 in `rootfs_fields`).
+/// The tags of a job row (whole-host tags 45, 46, 59 and 63 are in `whole_fields`, isolation tag
+/// 47 in `host_fields`, queue tags 48 to 53 in `queue_fields`, 54 to 58 in `rootfs_fields`).
 pub(crate) mod job_tag {
     /// The job's id (text).
     pub const ID: u16 = 1;
@@ -126,7 +126,7 @@ pub(crate) mod job_tag {
     /// When the record may be deleted (time).
     pub const RETENTION_ENDS: u16 = 30;
     /// Why the job ended, when it has a result (u8). A row without it has no result, and
-    /// the tags up to [`RESULT_USAGE`] and [`RESULT_LOGS`] are read only beside it.
+    /// the tags up to [`RESULT_USAGE`], [`RESULT_LOGS`] and 60 and 61 are read only beside it.
     pub const RESULT_REASON: u16 = 31;
     /// The exit code (i32).
     pub const RESULT_EXIT_CODE: u16 = 32;
@@ -159,7 +159,7 @@ pub(crate) mod job_tag {
     pub const FILE_DIGESTS: u16 = 44;
 }
 
-/// The tags of an allocation row (the whole-host tags 14 and 15 are in `whole_fields`).
+/// The tags of an allocation row (tags 14 to 16 are in `whole_fields`).
 pub(crate) mod alloc_tag {
     /// The job (text).
     pub const JOB: u16 = 1;
@@ -918,9 +918,8 @@ pub(crate) fn decode_job(row: &[u8]) -> Result<JobRecord, DecodeError> {
     let retention_ends = fields.opt(t::RETENTION_ENDS, time_of)?;
     let result = result_fields::take_result(&mut fields)?;
     let start_failure_detail = rootfs_fields::take_detail(&mut fields)?;
-    let deadline_floor = fields.opt(t::DEADLINE_FLOOR, time_of)?;
     let client = fields.opt(t::CLIENT, client_of)?;
-    let (failed_prepares, prepare_bars, held_refusals) = whole_fields::take_job(&mut fields)?;
+    let whole = whole_fields::take_job(&mut fields)?;
     Ok(JobRecord {
         id,
         spec,
@@ -936,11 +935,12 @@ pub(crate) fn decode_job(row: &[u8]) -> Result<JobRecord, DecodeError> {
         result,
         start_failure_detail,
         retention_ends,
-        deadline_floor,
+        deadline_floor: fields.opt(t::DEADLINE_FLOOR, time_of)?,
         client,
-        failed_prepares,
-        prepare_bars,
-        held_refusals,
+        failed_prepares: whole.failed_prepares,
+        prepare_bars: whole.prepare_bars,
+        held_refusals: whole.held_refusals,
+        capacity_refusals: whole.capacity_refusals,
         queue: queue_fields::take_job(&mut fields)?,
         carried: fields.carried(),
     })
@@ -973,7 +973,7 @@ pub(crate) fn decode_allocation(row: &[u8]) -> Result<AllocationRecord, DecodeEr
     let created_at = fields.need(t::CREATED_AT, time_of)?;
     let freed_at = fields.opt(t::FREED_AT, time_of)?;
     let end_reason = fields.opt(t::END_REASON, reason_of)?;
-    let (prepare_deadline, wall_limit_secs) = whole_fields::take_allocation(&mut fields)?;
+    let (prepare_deadline, wall_limit_secs, sized_from) = whole_fields::take_alloc(&mut fields)?;
     Ok(AllocationRecord {
         job,
         allocation_id,
@@ -986,6 +986,7 @@ pub(crate) fn decode_allocation(row: &[u8]) -> Result<AllocationRecord, DecodeEr
         end_reason,
         prepare_deadline,
         wall_limit_secs,
+        sized_from,
         carried: fields.carried(),
     })
 }

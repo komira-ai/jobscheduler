@@ -4,9 +4,11 @@
 //! The record is the hook's own memory, kept where only root writes; the rules are for the
 //! day that stops being true (a corrupt file, a record of another version, a directory that
 //! was not what it should be). A record that fails one is not acted on: the step exits 1 with
-//! the reason `state_invalid` and changes nothing. The one exception is `prepare`'s, for a record
-//! of another target that never took the host: it is moved aside, not used (see
-//! `step::supersede`). Where the record and the system disagree
+//! the reason `state_invalid` and changes nothing. The exceptions are for a record of another
+//! target that keeps these rules under the params it was written under: `prepare` moves it
+//! aside, not used, when it never took the host or its rollback is complete in effect, and
+//! `rollback` rolls it back with those params when it returns the host to the previous release
+//! the params name (see `step::supersede`). Where the record and the system disagree
 //! about what was done, the system is believed; that is a step's decision and not a rule here.
 
 use std::ffi::OsStr;
@@ -348,6 +350,8 @@ fn cordon(record: &Record, params: &Params) -> Result<(), Invalid> {
 fn marks(record: &Record) -> Result<(), Invalid> {
     let rb = &record.rb;
     let rules = [
+        // Only an update that hands the runs over can hand them over in place.
+        ("in_place", record.in_place, "handover", record.handover),
         (
             "link_moved",
             record.link_moved,

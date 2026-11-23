@@ -28,8 +28,7 @@ use js_types::sched::LeaseId;
 use js_types::sched::usage::LeaseCost;
 
 use crate::admission::{
-    Admission, Blocked, Left, Profile, Ratio, Refusal, binding, clamped, new_charge, pick,
-    start_time,
+    Admission, Blocked, Left, Profile, Ratio, binding, clamped, new_charge, pick, start_time,
 };
 use crate::backfill;
 use crate::cordon::Cordons;
@@ -37,6 +36,7 @@ use crate::input::Request;
 use crate::load::{Charge, HostFacts, LeaseFacts, Load, SLOTS, SlotHost, SlotLoad, least_loaded};
 use crate::probe::{ProbeHost, ProbeRefusal, admit_probe};
 use crate::provider_rank::of_first_provider;
+use crate::refusal::RefusalKind;
 use crate::scheduler::Worker;
 use crate::unservable::Unservable;
 
@@ -446,7 +446,7 @@ impl Servable {
     /// was, if none: `Load` if any was refused on CPU or memory, `ColdCap` if the cold
     /// cap alone refused. `None` when there was no candidate to refuse.
     fn admitted<'a>(
-        adm: &Admission,
+        adm: &mut Admission,
         workers: &BTreeMap<WorkerId, Worker>,
         candidates: &[&'a WorkerId],
         attempt: &Attempt<'_>,
@@ -472,8 +472,11 @@ impl Servable {
                     left,
                     cost,
                 }),
-                Err(Refusal::ColdCap) => cold = true,
-                Err(_) => load = true,
+                Err(refusal) => {
+                    cold |= refusal.kind == RefusalKind::ColdCap;
+                    load |= refusal.kind != RefusalKind::ColdCap;
+                    adm.note_refusal(name, refusal);
+                }
             }
         }
         let why = if !admitted.is_empty() {

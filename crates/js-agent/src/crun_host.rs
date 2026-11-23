@@ -748,6 +748,19 @@ pub fn layered_rootfs(answers: &[(&'static str, std::io::Result<()>)]) -> (bool,
     }
 }
 
+/// Makes the state root (mode 0700) and the scratch root (mode 0711) when they are missing,
+/// owned by the user the agent runs as. Only the leaf is made: a missing parent, a root that
+/// exists (whatever its mode or kind) and a directory that cannot be made are left as they are,
+/// and the check of the host then reports what is wrong with its fix.
+pub fn make_roots(request: &Request<'_>) {
+    for (path, mode) in [(request.state_root, 0o700), (request.scratch_root, 0o711)] {
+        if std::fs::create_dir(path).is_ok() {
+            // The mode is set after the make so that the umask does not narrow it.
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+        }
+    }
+}
+
 /// What the crun runtime (the Linux build's, unless the agent runs the container engine or
 /// no job) asks of the other flags, and then of the host; the host ports a job may reach
 /// (`--host-port`) come with what it found.
@@ -760,6 +773,7 @@ pub fn start(cli: &Cli, host: &CrunHost, commands: &dyn CommandRunner) -> Result
     let host_ports = crate::host_ports::allowed(&cli.os.host_port).map_err(|why| why.to_string());
     host_ports.and_then(|host_ports| {
         let request = flags(cli)?;
+        make_roots(&request);
         let report = check(&request, host, commands);
         let mut ready = ready(&request, report)?;
         let (layered, warning) = layered_rootfs(&(host.kernel_calls)());

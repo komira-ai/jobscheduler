@@ -3,11 +3,7 @@ use std::os::fd::OwnedFd;
 
 use super::*;
 use crate::autologin::SessionPaths;
-use crate::grant::testing::{key_line, sign, text};
-use crate::testing::{FakeHost, NOW, act_argv, pool_of, scratch, trace};
-
-/// The fake clock's time, as a grant's times count it.
-const NOW_SECS: i64 = NOW.cast_signed();
+use crate::testing::{FakeHost, act_argv, pool_of, scratch, trace};
 
 pub(super) fn me() -> u32 {
     rustix::process::getuid().as_raw()
@@ -69,8 +65,6 @@ pub(super) fn rig_vm_with(
             owned: vec![dir.join("Shared")],
         },
         user_folders: dir.join("folders"),
-        grant_keys: Some(GrantKeys::parse(&key_line(7)).unwrap()),
-        serial: "SERIAL1".to_owned(),
         session: SessionPaths::under(&dir),
         scan: crate::scan::ScanSettings::under(&dir),
         image: crate::helper::ImageSettings::under(&dir),
@@ -109,7 +103,6 @@ pub(super) fn add_legacy(rig: &Rig, lease: &str) -> u32 {
         uid,
         gid: my_gid(),
         home: rig.helper.settings.homes.join(crate::lease::user_name(id)),
-        admin: false,
     };
     rig.host.state().users.insert(user.name.clone(), user);
     uid
@@ -127,7 +120,7 @@ pub(super) fn uid_held(rig: &Rig) {
         let held = format!("slot 0: uid {uid} is held by a live lease");
         assert!(created.errors.contains(&held), "{created:?}");
     }
-    exhausted(rig.helper.user_create("99.1", None));
+    exhausted(rig.helper.user_create("99.1"));
 }
 
 /// Asserts that `created` is the pool's exhaustion: no slot was free for the lease.
@@ -148,7 +141,7 @@ pub(super) fn log(rig: &Rig) -> Vec<String> {
 #[test]
 fn kill_uid_kills_then_boots_out_until_none_is_left() {
     let rig = rig("kill", 2);
-    rig.helper.user_create("5.1", None).unwrap();
+    rig.helper.user_create("5.1").unwrap();
     let uid = me();
     log(&rig);
     rig.host.state().procs.insert(uid, 3);
@@ -217,7 +210,7 @@ fn only_live_leases_in_range_are_acted_on() {
             .unwrap_err()
             .contains("has no user")
     );
-    rig.helper.user_create("6.1", None).unwrap();
+    rig.helper.user_create("6.1").unwrap();
     rig.helper.user_delete("6.1").unwrap();
     assert!(
         rig.helper
@@ -244,7 +237,7 @@ fn only_live_leases_in_range_are_acted_on() {
     assert!(error.contains("was deleted"), "{error}");
 
     // The same ledger under a range that no longer holds the lease's uid.
-    rig.helper.user_create("6.2", None).unwrap();
+    rig.helper.user_create("6.2").unwrap();
     let narrow = UidRange::new(me() + 5, me() + 6).unwrap();
     let moved = rig_with("live", narrow, Some(rig.dir.clone()));
     let error = moved.helper.kill_uid("6.2").unwrap_err();
@@ -283,7 +276,7 @@ pub(super) fn fds(dir: &Path) -> Vec<OwnedFd> {
 #[test]
 fn run_starts_the_process_as_the_lease_user_in_the_lease_directory() {
     let rig = rig("run", 2);
-    rig.helper.user_create("7.1", None).unwrap();
+    rig.helper.user_create("7.1").unwrap();
     let (mut out, write) = std::io::pipe().unwrap();
     let mut fds = fds(rig.dir.path());
     fds[1] = write.into();
@@ -304,7 +297,7 @@ fn run_starts_the_process_as_the_lease_user_in_the_lease_directory() {
 #[test]
 fn run_refuses_a_bad_request() {
     let rig = rig("run-bad", 2);
-    rig.helper.user_create("8.1", None).unwrap();
+    rig.helper.user_create("8.1").unwrap();
     let true_ = || vec!["/usr/bin/true".to_owned()];
     let three = fds(rig.dir.path()).into_iter().take(3).collect();
     let error = rig
@@ -336,7 +329,7 @@ fn run_refuses_a_bad_request() {
 #[test]
 fn run_refuses_bad_limits_and_starts_a_limited_run() {
     let rig = rig("run-limits", 2);
-    rig.helper.user_create("8.2", None).unwrap();
+    rig.helper.user_create("8.2").unwrap();
     let true_ = || vec!["/usr/bin/true".to_owned()];
     let run = |limits: Limits, session: Session| {
         rig.helper.run_limited(
@@ -599,7 +592,7 @@ fn requests_are_routed_and_stray_descriptors_refused() {
 
 /// The portable home-folder maker, on the test's own uid.
 #[test]
-fn a_home_folder_is_new_private_and_the_users() {
+fn a_home_folder_is_made_private_and_the_users() {
     let dir = scratch("make-home");
     make_home(&dir, "kbf-lease-1-1", me(), my_gid()).unwrap();
     let meta = std::fs::metadata(dir.join("kbf-lease-1-1")).unwrap();
@@ -608,10 +601,60 @@ fn a_home_folder_is_new_private_and_the_users() {
         0o700
     );
     assert_eq!(std::os::unix::fs::MetadataExt::uid(&meta), me());
-    let again = make_home(&dir, "kbf-lease-1-1", me(), my_gid()).unwrap_err();
-    assert_eq!(again.kind(), io::ErrorKind::AlreadyExists);
     std::os::unix::fs::symlink(&dir, dir.join("linked")).unwrap();
     assert!(make_home(&dir.join("linked"), "x", me(), my_gid()).is_err());
+    std::fs::write(dir.join("file"), "x").unwrap();
+    assert!(make_home(&dir, "file", me(), my_gid()).is_err());
+    assert!(make_home(&dir, "no/such", me(), my_gid()).is_err());
+}
+
+/// Catches a home that is refused when it is there already, or that comes back with the
+/// mode a lease left: a home that exists is kept (the same folder, never removed and
+/// made again, which macOS refuses in `/Users`), given back mode 0700 and the user's, and
+/// what is in it stays for the caller to have emptied.
+#[test]
+fn a_home_folder_that_is_there_is_kept_and_given_back() {
+    let dir = scratch("keep-home");
+    make_home(&dir, "kbf-lease-1-1", me(), my_gid()).unwrap();
+    let home = dir.join("kbf-lease-1-1");
+    std::fs::write(home.join("left"), "x").unwrap();
+    std::fs::set_permissions(&home, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let before = std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&home).unwrap());
+    make_home(&dir, "kbf-lease-1-1", me(), my_gid()).unwrap();
+    let meta = std::fs::metadata(&home).unwrap();
+    assert_eq!(std::os::unix::fs::MetadataExt::ino(&meta), before);
+    assert_eq!(
+        std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o777,
+        0o700
+    );
+    assert!(home.join("left").exists());
+}
+
+/// Catches an ACL a lease put on a home that stays: after the home is made again it has no
+/// access control entry (the real `ls -le` and `chmod +a` of the Mac).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_home_folder_that_is_there_loses_its_acl() {
+    let dir = scratch("home-acl");
+    make_home(&dir, "kbf-lease-1-1", me(), my_gid()).unwrap();
+    let home = dir.join("kbf-lease-1-1");
+    let chmod = std::process::Command::new("/bin/chmod")
+        .args(["+a", "everyone allow list"])
+        .arg(&home)
+        .status()
+        .unwrap();
+    assert!(chmod.success());
+    let listing = |path: &std::path::Path| {
+        let out = std::process::Command::new("/bin/ls")
+            .arg("-lde")
+            .arg(path)
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().lines().count()
+    };
+    assert_eq!(listing(&home), 2, "the ACL is set");
+    make_home(&dir, "kbf-lease-1-1", me(), my_gid()).unwrap();
+    assert_eq!(listing(&home), 1, "the ACL is gone");
 }
 
 /// Catches the race of issue #195: a process of the uid (a cron job) that starts after
@@ -705,7 +748,7 @@ fn user_delete_gives_up_naming_what_is_left() {
 #[test]
 fn kill_uid_removes_the_schedules_between_two_kills() {
     let rig = rig("kill-schedules", 2);
-    rig.helper.user_create("14.1", None).unwrap();
+    rig.helper.user_create("14.1").unwrap();
     let tabs = rig.dir.join("tabs");
     let tab = tabs.join("kbf-lease-pool-0");
     std::fs::create_dir_all(&tabs).unwrap();
@@ -758,8 +801,8 @@ fn kill_uid_removes_the_schedules_between_two_kills() {
 #[test]
 fn a_gui_run_waits_for_the_lease_user_s_gui_domain() {
     let rig = rig("gui", 3);
-    let uid = rig.helper.user_create("9.1", None).unwrap();
-    rig.helper.user_create("9.2", None).unwrap();
+    let uid = rig.helper.user_create("9.1").unwrap();
+    rig.helper.user_create("9.2").unwrap();
     let true_ = || vec!["/usr/bin/true".to_owned()];
     let gui = |lease: &str| {
         rig.helper
@@ -826,6 +869,7 @@ fn a_gui_run_waits_for_the_lease_user_s_gui_domain() {
 fn readiness_answer(code: Option<i32>, stderr: &str) -> io::Result<bool> {
     launchctl_print_answer(&PrintAnswer {
         code,
+        stdout: String::new(),
         stderr: stderr.to_owned(),
     })
 }
@@ -895,6 +939,7 @@ fn only_launchds_not_found_answer_is_absence() {
 }
 
 mod bounds;
+mod full_disk_access;
 mod lease;
 mod obligation;
 mod outcome;

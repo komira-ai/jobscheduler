@@ -2,23 +2,37 @@
 //! step is one command (the alias is in `.cargo/config.toml`).
 //!
 //! - `fetch --url <url> --sha256 <hex> --out <path> [--extract tar.gz|tar.xz --member <path>
-//!   [--tree]] [--cache <path>]` ([`fetch`]): a pinned tool, downloaded over HTTPS (or taken from the
-//!   file the actions cache restored at `--cache`) and refused unless its SHA-256 matches,
-//!   before anything is unpacked or written.
+//!   [--tree] | --extract zst] [--cache <path>]` ([`fetch`]): a pinned tool, downloaded over
+//!   HTTPS (or taken from the file the actions cache restored at `--cache`) and refused unless
+//!   its SHA-256 matches, before anything is unpacked or written; `--extract zst` is one
+//!   zstd-compressed file (buck2's release form), decompressed whole.
+//! - `farm-build --buck2 <path> --target <label> --patch <path> --summary <path> --repo
+//!   <owner/name> --run-id <id>` ([`farm`]): the build of the farm lane
+//!   (`.github/workflows/farm.yml`): refused unless buck2 has a worker property set; refused when
+//!   the generated build table is stale, with what `buildrules sync` changed written as a patch to
+//!   `--patch` and the command that applies it to the job summary `--summary`; then
+//!   `buck2 build <label>` with its progress in the log, failed unless its summary says `local: 0`
+//!   (every action ran on the build farm or came from its cache), and buck2's daemon stopped after.
 //! - `debs --pins <file> --dir <dir>` ([`debs`]): the Debian packages a CI job installs with
 //!   `dpkg`, pinned by version and SHA-256 in a file of `.github/debs/`: the files the actions
 //!   cache restored into `--dir` when they match, and otherwise each downloaded from the pinned
 //!   mirrors in turn, in bounded rounds, and refused unless its SHA-256 matches.
 //!
-//! - `release plan --head <sha>`, `release stamp --to <version>` and `release stage --bin <name>
+//! - `release plan --head <sha>`, `release stamp --to <version>`,
+//!   `release next-version --version <version>` and `release stage --bin <name>
 //!   --target <triple> --version <version> --out <dir>` ([`release`]): whether a commit of main
 //!   is released and as which version, setting that version in the CI checkout before the build,
-//!   and laying down the files of each release archive (docs/release.md).
+//!   the patch version after a version (the macOS update package's), and laying down the files
+//!   of each release archive (docs/release.md).
 //!
 //! - `release macos-leg --target <triple> --builds "<package>:<bin> ..." --min-macos <x.y> --out
 //!   <dir>` ([`release::macos_leg`]): on a Mac, the release's macOS leg from a checkout:
 //!   the release build of each binary, its archive directory, its minimum macOS and its
 //!   `--version`; nothing is uploaded.
+//! - `release check-code-signature <binary> --program <name> [--codesign <program>]`
+//!   ([`release::code_signature`]): on a Mac, refuses a js-agent program unless it is signed as the
+//!   release signs it (Developer ID Application, the team, its identifier, hardened runtime,
+//!   timestamp, its designated requirement), against the table of [`release::mac_programs`].
 //! - `release deb --binary <path> --version <X.Y.Z> --platform linux-x86_64|linux-arm64 --out <dir>`
 //!   ([`release::deb`]): the js-agent Debian package of one Linux platform, byte for byte the same
 //!   for the same inputs.
@@ -36,12 +50,21 @@
 //!   ([`release::image_digest`]): the manifest digest of the release's linux-x86_64 image of
 //!   js-lease-server, held to `SHA256SUMS`, and the release's addresses of the image and its bundle:
 //!   what the control plane's deploy of `js-server` is given.
+//! - `release smoke-bundle pack --tree <dir> --out <dir>`, `release smoke-bundle push --layout
+//!   <dir> --user <name> --password-file <file>` and `release smoke-bundle check --tree <dir>
+//!   --scratch <dir>` ([`release::smoke_bundle`]): the smoke bundle packed from its committed
+//!   tree and refused unless it gives the digest its recipe names, pushed to the recipe's
+//!   repository and tag (a held tag is never moved), and pulled back by digest anonymously and
+//!   compared with the tree, every byte.
 //! - `merge-profiles --dir <dir> --out <file> [--rustc <program>]` ([`merge_profiles`]): one
 //!   indexed coverage profile from the raw ones a coverage shard wrote at the top of `--dir`,
 //!   merged by the toolchain's llvm-profdata from a list file.
 //! - `postgres-for-tests --bin-dir <dir> --data-dir <dir> --socket-dir <dir> --github-env <file>`
 //!   ([`postgres_for_tests`]): a Postgres server for the tests that need one, on a runner with
 //!   no service container (the macOS job), and its URL for the later steps.
+//! - `mac-test-artifact --test <name> --target <triple> --build-json <file> --out <dir> --commit
+//!   <sha> --summary <file> --github-env <file>` ([`mac_test_artifact`]): a Mac root test binary
+//!   and the `js-agent` it starts, staged for an operator with their SHA-256 sums.
 //!
 //! - `deploy --service NAME... --version X.Y.Z --url <coordinator>` ([`deploy`]): the gamma
 //!   step of a release, setting the version of each service on the update coordinator in
@@ -107,8 +130,9 @@
 //!   test rather than a verb: `cargo test -p xtask --test layering`.
 //! - [`spawn_sites`]: every program the crates `js-agent` and `js-mac-session` are built
 //!   from (themselves and their path dependencies built for macOS) start goes through
-//!   `js_mac_session::disclaim`, used by a test rather than a verb: `cargo test -p xtask
-//!   --test spawn_sites`.
+//!   `js_mac_session::disclaim`, and only the files of `KEEPERS` keep a program's privacy
+//!   responsibility, used by tests rather than a verb: `cargo test -p xtask --test
+//!   spawn_sites` and `--test spawn_sites_keepers`.
 //!
 //! Exit status: 0 when the verb passed, 1 when it failed (one reason on stderr), 2 on a
 //! usage error.
@@ -126,11 +150,13 @@ pub mod debs;
 pub mod deploy;
 pub mod determinism;
 pub mod doc_refs;
+pub mod farm;
 pub mod fetch;
 pub mod image;
 pub mod job_surface;
 pub mod layering;
 pub mod mac_root;
+pub mod mac_test_artifact;
 pub mod macpkg;
 pub mod merge_profiles;
 pub mod postgres_for_tests;
@@ -147,6 +173,9 @@ pub enum Error {
     /// A release verb failed.
     #[error(transparent)]
     Release(#[from] release::Error),
+    /// `release check-code-signature` refused a program.
+    #[error(transparent)]
+    CodeSignature(#[from] release::code_signature::Error),
     /// `release desired` set nothing, or could not tell.
     #[error(transparent)]
     Desired(release::desired::Error),
@@ -156,12 +185,18 @@ pub enum Error {
     /// `release image-digest` gave no digest.
     #[error(transparent)]
     ImageDigest(#[from] release::image_digest::Error),
+    /// `release smoke-bundle` failed.
+    #[error(transparent)]
+    SmokeBundle(#[from] release::smoke_bundle::Error),
     /// The deploy verb failed.
     #[error(transparent)]
     Deploy(#[from] deploy::Error),
     /// The determinism lint failed, or could not read the tree.
     #[error(transparent)]
     Determinism(#[from] determinism::Error),
+    /// The farm lane's build failed.
+    #[error(transparent)]
+    Farm(#[from] farm::Error),
     /// The fetch verb failed.
     #[error(transparent)]
     Fetch(#[from] fetch::Error),
@@ -187,6 +222,9 @@ pub enum Error {
     /// The Postgres server for the tests could not be started.
     #[error(transparent)]
     PostgresForTests(#[from] postgres_for_tests::Error),
+    /// A Mac root test binary could not be staged.
+    #[error("mac-test-artifact: {0}")]
+    MacTestArtifact(#[from] mac_test_artifact::Error),
     /// A coverage shard's raw profiles could not be merged.
     #[error("merge-profiles: {0}")]
     MergeProfiles(#[from] merge_profiles::Error),
@@ -236,7 +274,7 @@ enum Verb {
         #[arg(long, value_enum)]
         extract: Option<fetch::Format>,
         /// The file to take out of a tar (`--extract`): its path inside the archive; with
-        /// `--tree`, the directory to take.
+        /// `--tree`, the directory to take. Not given with `--extract zst`.
         #[arg(long)]
         member: Option<PathBuf>,
         /// Install the directory `--member` and everything under it as the directory `--out`.
@@ -246,6 +284,28 @@ enum Verb {
         /// used in place of the download; when it does not, the checked download is kept there.
         #[arg(long)]
         cache: Option<PathBuf>,
+    },
+    /// Build a target with buck2 on the build farm, failing unless the generated build table is
+    /// fresh and every action ran there or came from its cache (the `farm` workflow's build step).
+    FarmBuild {
+        /// The buck2 program.
+        #[arg(long)]
+        buck2: PathBuf,
+        /// The label to build, `//:ci` for the lane.
+        #[arg(long)]
+        target: String,
+        /// Where a stale table's patch (what `buildrules sync` changed) is written.
+        #[arg(long)]
+        patch: PathBuf,
+        /// The job summary a stale table's fix is appended to.
+        #[arg(long)]
+        summary: PathBuf,
+        /// The repository of the run, `owner/name`, for the command that downloads the patch.
+        #[arg(long)]
+        repo: String,
+        /// The run's id, for the command that downloads the patch.
+        #[arg(long)]
+        run_id: u64,
     },
     /// Make a directory hold exactly the pinned Debian packages of this host's architecture,
     /// each checked against its SHA-256: those already there, the rest downloaded.
@@ -353,6 +413,9 @@ enum Verb {
     /// Start a Postgres server for the tests that need one, from an installed Postgres's
     /// programs, and append its URL (`KBF_TEST_POSTGRES_URL`) to the workflow's environment file.
     PostgresForTests(postgres_for_tests::Args),
+    /// Stage a Mac root test binary and the `js-agent` it starts, checked to be arm64 Mach-O
+    /// executables, with their SHA-256 sums, for the manual Mac root-test workflows.
+    MacTestArtifact(mac_test_artifact::Args),
     /// Merge the raw coverage profiles at the top of a directory into one indexed profile,
     /// with the toolchain's llvm-profdata.
     MergeProfiles(merge_profiles::Args),
@@ -401,10 +464,14 @@ enum ReleaseVerb {
     Plan(release::plan::PlanArgs),
     /// Set the release version in this checkout (not committed).
     Stamp(release::stamp::StampArgs),
+    /// The version after a package's: its patch plus one.
+    NextVersion(release::next_version::NextVersionArgs),
     /// Lay down the files of one release archive.
     Stage(release::stage::StageArgs),
     /// Build, stage, check and package the darwin leg of a release.
     MacosLeg(release::macos_leg::LegArgs),
+    /// Refuse a macOS program that is not signed as the release signs it (a Mac only).
+    CheckCodeSignature(release::code_signature::CheckArgs),
     /// Build the Debian package of js-agent for one Linux platform.
     Deb(release::deb::DebArgs),
     /// Build the OCI image tar of js-lease-server for one Linux target.
@@ -416,6 +483,12 @@ enum ReleaseVerb {
     ImageDigest(release::image_digest::DigestArgs),
     /// Wait for this run's turn to publish and deploy, or skip it when a newer one has it.
     Turn(release::turn::TurnArgs),
+    /// Pack, push or check the smoke bundle (`packaging/js-smoke-bundle/`).
+    SmokeBundle {
+        /// Which step.
+        #[command(subcommand)]
+        verb: release::smoke_bundle::Verb,
+    },
 }
 
 /// Runs the verb `cli` names: the line to print when it passed.
@@ -439,6 +512,27 @@ fn run(cli: Cli) -> Result<String, Error> {
                 &out,
                 cache.as_deref(),
                 &roots,
+            )?)
+        }
+        Verb::FarmBuild {
+            buck2,
+            target,
+            patch,
+            summary,
+            repo,
+            run_id,
+        } => {
+            let handoff = farm::Handoff {
+                patch,
+                summary,
+                repo,
+                run_id,
+            };
+            Ok(farm::build(
+                &buck2,
+                &target,
+                &handoff,
+                &mut std::io::stderr(),
             )?)
         }
         Verb::Debs { pins, dir } => {
@@ -521,6 +615,7 @@ fn run(cli: Cli) -> Result<String, Error> {
         }
         Verb::SiteChanged(args) => Ok(site_changed::run(&args)?),
         Verb::PostgresForTests(args) => Ok(postgres_for_tests::run(&args)?),
+        Verb::MacTestArtifact(args) => Ok(mac_test_artifact::run(&args)?),
         Verb::MergeProfiles(args) => Ok(merge_profiles::run(&args)?),
         Verb::GenJobSurface(args) => Ok(job_surface::run(&args)?),
         Verb::GenReport(args) => Ok(report::run(&args)?),
@@ -533,8 +628,10 @@ fn run(cli: Cli) -> Result<String, Error> {
         Verb::Release { verb } => Ok(match verb {
             ReleaseVerb::Plan(args) => release::plan::run(&args)?,
             ReleaseVerb::Stamp(args) => release::stamp::run(&args)?,
+            ReleaseVerb::NextVersion(args) => release::next_version::run(&args)?,
             ReleaseVerb::Stage(args) => release::stage::run(&args)?,
             ReleaseVerb::MacosLeg(args) => release::macos_leg::run(&args)?,
+            ReleaseVerb::CheckCodeSignature(args) => release::code_signature::run(&args)?,
             ReleaseVerb::Deb(args) => release::deb::run(&args)?,
             ReleaseVerb::Image(args) => release::server_image::run(&args)?,
             ReleaseVerb::Desired(args) => release::desired::run(&args).map_err(|e| match e {
@@ -546,6 +643,7 @@ fn run(cli: Cli) -> Result<String, Error> {
                 release::turn::Error::Usage(why) => Error::Usage(why),
                 other => Error::Turn(other),
             })?,
+            ReleaseVerb::SmokeBundle { verb } => release::smoke_bundle::run(&verb)?,
         }),
     }
 }

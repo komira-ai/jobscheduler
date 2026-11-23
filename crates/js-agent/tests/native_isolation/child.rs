@@ -1,4 +1,4 @@
-//! What run A leaves behind and what run B looks for. Both run as the pool user, inside
+//! What run A leaves behind and what run B looks for. Both run as the run's account, inside
 //! the Seatbelt profile of the product, through the `child_of_the_runs` test of this
 //! binary. An item the profile (or the machine) refuses is reported as refused with the
 //! reason, never silently skipped: a table of only refusals proves nothing.
@@ -35,7 +35,7 @@ const SEM_FAILED: *mut c_void = usize::MAX as *mut c_void;
 const POSIX_PREFIX: &str = "jsi";
 const DEFAULTS_KEY: &str = "isolation";
 
-/// Where the pool user is.
+/// Where the run's account is.
 pub struct Spot {
     pub home: PathBuf,
     pub tmp: PathBuf,
@@ -432,7 +432,7 @@ pub fn look_all(seeded: &[Line], home: &Path) -> Vec<Line> {
 
 /// Removes what a seeded item left, as root, after the test has looked: so a failed run
 /// does not leave objects on the Mac that the next run would meet. Best effort; a
-/// process is ended by the helper's kill of the user, a launch agent by the bootout.
+/// process is ended by the kill of the uid, a launch agent by the bootout.
 pub fn remove(seeded: &Line) {
     let locator = seeded.text.as_str();
     match seeded.kind {

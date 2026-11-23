@@ -10,14 +10,15 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use js_agent_wire::{HostPort, JobMount, Layer, MountMode, MountSource, PortProtocol, Propagation};
-use js_types::ExecMode;
+use js_types::{CpuSeries, ExecMode};
 use proptest::collection::{btree_map, vec};
 use proptest::prelude::*;
 use proptest::test_runner::RngSeed;
 
 use super::tests::{allocation, at, bare_job, full_job, full_result, shape};
 use super::*;
-use crate::record::{Exclusion, FileDigest, Isolation, JobFiles};
+use crate::record::{Exclusion, FileDigest, Isolation, JobFiles, SizedFrom};
+use crate::result::{CpuPeak, CpuThrottle};
 use crate::result::{JobResult, JobTiming, LogLengths, ResourceUsage, ResultReason};
 use crate::rows;
 use crate::suite::{digest, full_spec};
@@ -280,14 +281,25 @@ fn job_result() -> impl Strategy<Value = JobResult> {
             proptest::option::of(store_time()),
             proptest::option::of(store_time()),
             store_time(),
-            proptest::option::of((0..u64::MAX, 0..NANOS_PER_SEC, any::<u64>())),
+            proptest::option::of((
+                (0..u64::MAX, 0..NANOS_PER_SEC, any::<u64>()),
+                proptest::option::of((any::<u64>(), any::<u64>())),
+                proptest::option::of((0..u64::MAX, 0..NANOS_PER_SEC)),
+                proptest::option::of((any::<u64>(), any::<u64>())),
+            )),
             proptest::option::of(any::<[u64; 4]>()),
+            proptest::option::of((
+                0u32..16,
+                vec(any::<u16>(), 0..=128),
+                any::<u64>(),
+                any::<bool>(),
+            )),
         ),
     )
         .prop_map(
             |(
                 (exit_code, reason, stdout_tail, stderr_tail, truncated, input_failure),
-                (q, p, s, e, usage, logs),
+                (q, p, s, e, usage, logs, series),
             )| {
                 JobResult {
                     exit_code,
@@ -301,9 +313,23 @@ fn job_result() -> impl Strategy<Value = JobResult> {
                         started_at: s,
                         ended_at: e,
                     },
-                    usage: usage.map(|(secs, nanos, peak)| ResourceUsage {
-                        cpu_time: Duration::new(secs, nanos),
-                        peak_memory_bytes: peak,
+                    usage: usage.map(|((secs, nanos, peak), throttle, pressure, cpu_peak)| {
+                        ResourceUsage {
+                            cpu_time: Duration::new(secs, nanos),
+                            peak_memory_bytes: peak,
+                            cpu_throttle: throttle.map(|(periods, throttled_periods)| {
+                                CpuThrottle {
+                                    periods,
+                                    throttled_periods,
+                                }
+                            }),
+                            cpu_pressure_some: pressure
+                                .map(|(secs, nanos)| Duration::new(secs, nanos)),
+                            cpu_peak: cpu_peak.map(|(millicores, window_usec)| CpuPeak {
+                                millicores,
+                                window_usec,
+                            }),
+                        }
                     }),
                     logs: logs.map(
                         |[stdout_bytes, stderr_bytes, stdout_dropped, stderr_dropped]| LogLengths {
@@ -313,6 +339,9 @@ fn job_result() -> impl Strategy<Value = JobResult> {
                             stderr_dropped,
                         },
                     ),
+                    cpu_series: series.and_then(|(shift, points, run_usec, partial)| {
+                        CpuSeries::new(1 << shift, points, run_usec, partial)
+                    }),
                     input_failure,
                 }
             },
@@ -353,6 +382,7 @@ fn job() -> impl Strategy<Value = JobRecord> {
             any::<u32>(),
             btree_map(host_id(), exclusion(), 0..4),
             proptest::collection::vec(host_id(), 0..4),
+            proptest::collection::vec(host_id(), 0..4),
         ),
         queue_trail(),
     )
@@ -361,7 +391,7 @@ fn job() -> impl Strategy<Value = JobRecord> {
                 (id, spec, priority, state, submitted_at),
                 (placed_at, started_at, ended_at, host, cancel_requested, cancel_requested_at),
                 (result, retention_ends, deadline_floor, client, start_failure_detail),
-                (failed_prepares, prepare_bars, held_refusals),
+                (failed_prepares, prepare_bars, held_refusals, capacity_refusals),
                 queue,
             )| JobRecord {
                 id: JobId::parse(&id).expect("an id"),
@@ -382,6 +412,7 @@ fn job() -> impl Strategy<Value = JobRecord> {
                 failed_prepares,
                 prepare_bars,
                 held_refusals,
+                capacity_refusals,
                 queue,
                 carried: Carried::default(),
                 start_failure_detail,
@@ -486,6 +517,12 @@ fn allocation_record() -> impl Strategy<Value = AllocationRecord> {
         (
             proptest::option::of(store_time()),
             proptest::option::of(any::<u64>()),
+            proptest::option::of(prop::sample::select(vec![
+                SizedFrom::Class,
+                SizedFrom::Fallback,
+                SizedFrom::Cold,
+                SizedFrom::OverCap,
+            ])),
         ),
     )
         .prop_map(
@@ -493,7 +530,7 @@ fn allocation_record() -> impl Strategy<Value = AllocationRecord> {
                 (job, bits, host, booked),
                 ports,
                 (step, created_at, freed_at, end_reason),
-                (prepare_deadline, wall_limit_secs),
+                (prepare_deadline, wall_limit_secs, sized_from),
             )| {
                 AllocationRecord {
                     job: JobId::parse(&job).expect("an id"),
@@ -507,6 +544,7 @@ fn allocation_record() -> impl Strategy<Value = AllocationRecord> {
                     end_reason,
                     prepare_deadline,
                     wall_limit_secs,
+                    sized_from,
                     carried: Carried::default(),
                 }
             },

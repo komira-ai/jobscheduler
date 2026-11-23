@@ -5,8 +5,9 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use js_state::StoreTime;
-use js_types::{ExecMode, HostId, Labels};
+use js_types::{CpuSeries, ExecMode, HostId, Labels};
 
+use super::result_fields::job_result_tag;
 use super::whole_fields::job_whole_tag;
 use super::*;
 use crate::record::Exclusion;
@@ -34,6 +35,9 @@ pub(super) fn full_result() -> JobResult {
         usage: Some(ResourceUsage {
             cpu_time: Duration::from_secs(7),
             peak_memory_bytes: 4096,
+            cpu_throttle: None,
+            cpu_pressure_some: None,
+            cpu_peak: None,
         }),
         logs: Some(LogLengths {
             stdout_bytes: 2_621_440,
@@ -41,6 +45,7 @@ pub(super) fn full_result() -> JobResult {
             stdout_dropped: 1,
             stderr_dropped: 2,
         }),
+        cpu_series: CpuSeries::new(2, vec![0, 16, 40], 5_500_000, true),
         input_failure: Some("input-unreadable".to_owned()),
     }
 }
@@ -76,6 +81,10 @@ pub(super) fn full_job() -> JobRecord {
             HostId::new("host-d").expect("a host"),
             HostId::new("host-a").expect("a host"),
             HostId::new("host-d").expect("a host"),
+        ],
+        capacity_refusals: vec![
+            HostId::new("host-e").expect("a host"),
+            HostId::new("host-a").expect("a host"),
         ],
         queue: crate::QueueTrail::default(),
         carried: Carried::default(),
@@ -116,6 +125,7 @@ pub(super) fn bare_job() -> JobRecord {
         failed_prepares: 0,
         prepare_bars: BTreeMap::new(),
         held_refusals: Vec::new(),
+        capacity_refusals: Vec::new(),
         queue: crate::QueueTrail::default(),
         carried: Carried::default(),
     }
@@ -134,6 +144,7 @@ pub(super) fn allocation(booked: Booked) -> AllocationRecord {
         end_reason: Some(EndReason::Exited),
         prepare_deadline: None,
         wall_limit_secs: None,
+        sized_from: None,
         carried: Carried::default(),
     }
 }
@@ -193,6 +204,7 @@ fn a_record_reads_back_as_written() {
             },
             usage: None,
             logs: None,
+            cpu_series: None,
             input_failure: None,
         }),
         ..bare_job()
@@ -469,12 +481,17 @@ fn a_field_the_row_lacks_reads_as_its_default() {
         job_tag::RESULT_PLACED_AT,
         job_tag::RESULT_STARTED_AT,
         job_tag::RESULT_USAGE,
+        job_result_tag::RESULT_CPU_THROTTLE,
+        job_result_tag::RESULT_CPU_PRESSURE_SOME,
+        job_result_tag::RESULT_CPU_PEAK,
+        job_result_tag::RESULT_CPU_SERIES,
         job_tag::DEADLINE_FLOOR,
         job_tag::CLIENT,
         job_tag::RESULT_LOGS,
         job_whole_tag::FAILED_PREPARES,
         job_whole_tag::PREPARE_BARS,
         job_whole_tag::HELD_REFUSALS,
+        job_whole_tag::CAPACITY_REFUSALS,
     ] {
         row = without(&row, tag);
     }
@@ -487,6 +504,11 @@ fn a_field_the_row_lacks_reads_as_its_default() {
         job.held_refusals,
         Vec::new(),
         "and before held refusals were kept"
+    );
+    assert_eq!(
+        job.capacity_refusals,
+        Vec::new(),
+        "and before capacity refusals were kept"
     );
     assert_eq!(
         job.result,
@@ -502,12 +524,13 @@ fn a_field_the_row_lacks_reads_as_its_default() {
             },
             usage: None,
             logs: None,
+            cpu_series: None,
             ..full_result()
         })
     );
     // A row without a reason, as every row before results were stored, has no result.
     let mut before_results = job_row(&full_job());
-    for tag in (31..=40).chain([job_tag::RESULT_LOGS, 58]) {
+    for tag in (31..=40).chain([job_tag::RESULT_LOGS, 58, 60, 61, 62, 64]) {
         before_results = without(&before_results, tag);
     }
     assert_eq!(
@@ -775,6 +798,59 @@ fn a_value_that_is_not_valid_for_its_field_is_refused_by_tag() {
             .concat(),
             BadValue {
                 tag: t::RESULT_USAGE,
+            },
+        ),
+        (
+            job_result_tag::RESULT_CPU_THROTTLE,
+            vec![0; 15],
+            BadLength {
+                tag: job_result_tag::RESULT_CPU_THROTTLE,
+            },
+        ),
+        (
+            job_result_tag::RESULT_CPU_THROTTLE,
+            vec![0; 17],
+            BadLength {
+                tag: job_result_tag::RESULT_CPU_THROTTLE,
+            },
+        ),
+        (
+            job_result_tag::RESULT_CPU_PRESSURE_SOME,
+            vec![0; 11],
+            BadLength {
+                tag: job_result_tag::RESULT_CPU_PRESSURE_SOME,
+            },
+        ),
+        (
+            job_result_tag::RESULT_CPU_PRESSURE_SOME,
+            vec![0; 13],
+            BadLength {
+                tag: job_result_tag::RESULT_CPU_PRESSURE_SOME,
+            },
+        ),
+        (
+            job_result_tag::RESULT_CPU_PRESSURE_SOME,
+            [
+                0u64.to_be_bytes().to_vec(),
+                1_000_000_000u32.to_be_bytes().to_vec(),
+            ]
+            .concat(),
+            BadValue {
+                tag: job_result_tag::RESULT_CPU_PRESSURE_SOME,
+            },
+        ),
+        (
+            job_result_tag::RESULT_CPU_PEAK,
+            vec![0; 15],
+            BadLength {
+                tag: job_result_tag::RESULT_CPU_PEAK,
+            },
+        ),
+        (
+            job_result_tag::RESULT_CPU_PEAK,
+            vec![0; 17],
+            BadLength {
+                tag: job_result_tag::RESULT_CPU_PEAK,
             },
         ),
         (

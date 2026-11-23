@@ -119,8 +119,8 @@ process, on a stop and after a crash, so the supervisors and the containers outl
 - **A plain stop** (`systemctl stop`) drains: the agent lets its jobs run for up to
   `--drain-wait` seconds, stops them within `--stop-grace`, reports, and exits.
 - **An update** hands the jobs over instead (see "Agent updates while jobs run" below): the agent
-  exits within seconds, leaving every job running, and the new agent takes them over as after a
-  crash.
+  hands over in place, or exits within seconds, leaving every job running, and the new agent takes
+  them over as after a crash.
 - **A crash** leaves the jobs running. When `Restart=always` starts the agent again, it reads its
   ledger and takes over (adopts) each container its record holds, then lists those jobs in its
   first heartbeat. A job that ended while no agent ran is reported with the code and output tail
@@ -159,12 +159,22 @@ update hook's steps; on a crun node they go like this:
 1. `prepare` checks the new release and records that this update hands the jobs over. It places
    no cordon and waits for nothing: the node keeps taking work.
 2. `cutover` writes the file `handover` in the agent's state root (`/var/lib/js-agent/state`) and
-   stops the unit. The agent reads the file when the stop reaches it. It takes no new job and
-   says `draining` to the server, so no new job is placed on the node for those seconds. It
-   waits until no job is being started (an image still being pulled counts), no job is being
-   stopped and no finished job's cleanup and post-job checks are under way. Then it exits,
-   leaving every running job as it is; that takes seconds. The hook removes the file and starts
-   the unit on the new release.
+   then either signals the agent (in place) or stops the unit.
+   - In place (the running and the new agent both list `in-place` on the `stops:` line of
+     `js-agent --version`): the hook sends SIGHUP to the unit's main process
+     (`systemctl kill --kill-whom=main --signal=SIGHUP -- js-agent-crun.service`). The agent
+     reads the file, takes no new job and says `draining` to the server, waits until no job is
+     being started (an image still being pulled counts), no job is being stopped and no finished
+     job's cleanup and post-job checks are under way, hands the jobs over, and runs the program at
+     its path (`/usr/bin/js-agent`, which the package replaced) again with its own arguments, as
+     the same process. The unit is not stopped and not started, so systemd places no process in
+     it. The new program takes the jobs over and removes the file at its start; the hook waits
+     for that. A unit that is no longer active meanwhile (the agent ended instead of running
+     again) is started as below. A request not taken in the cutover's stop bound fails the step
+     (`stop_failed`, class environment, the file left for the agent).
+   - By stop and start: the agent reads the file when the stop reaches it, does the same, and
+     exits, leaving every running job as it is; that takes seconds. The hook removes the file
+     and starts the unit on the new release.
 3. The new agent takes over (adopts) every job, as after a crash, and lists them in its first
    heartbeat. A job that ended in the gap is reported from its `exit.json`, once. A job's result
    that the old agent had not had acknowledged is kept in the state root and sent by the new
@@ -172,8 +182,11 @@ update hook's steps; on a crun node they go like this:
    (the pool's grace, 15 s by default), so the node takes no new job for that long; the jobs
    that run are not touched by it.
 4. `verify` waits for the new agent's hello, and `cleanup` ends the update. A `rollback` hands
-   the jobs back to the previous agent the same way: no drain, the request file, a stop and a
-   start.
+   the jobs back to the previous agent the same way: no drain, the request file, and a signal
+   (or a stop and a start). If the previous agent's unit then does not start, the report says
+   that the previous release is installed again but its agent is not running, and the host runs
+   no agent until the unit starts. A cutover whose start fails says the same of the staged
+   release.
 
 The update hands over only when all of these hold; otherwise it drains as before (cordon, wait
 for no lease, stop):
@@ -188,7 +201,13 @@ for no lease, stop):
   seen by the hook, and such an agent does not read the file: it drains, and its jobs are
   stopped once `--drain-wait` has passed;
 - the running agent can hand over: `js-agent --version` prints `stops: drain handover` (and
-  `egress-handover`, as above). The first update from a release without that line still drains.
+  `egress-handover`, as above). The first update from a release without that line still drains;
+- the hand-over is made in place, or the host's systemd is older than 258: both the running and
+  the new agent list `in-place` on the `stops:` line, or `systemctl --version` prints a version
+  below 258. A systemd of 258 or newer (or one whose version cannot be read) starts a service's
+  first process in the unit's own cgroup, which the jobs a stop leaves keep from taking one (see
+  below), so an update that would stop and start the unit drains instead, and its detail says
+  why.
 
 What does not survive the restart's few seconds: a job's `--host-port` listeners, and the
 connections open through them, are the agent's and end with it; they are down until the new
@@ -197,6 +216,73 @@ agent offers the ports again (a job that took the port itself meanwhile is stopp
 
 The maintenance `drain` step (an OS update or a reboot) is not an agent update: it still cordons
 the node and waits until no job runs.
+
+### A start refused while jobs are left (systemd 258 or newer)
+
+Since systemd 258 a service's `ExecStart=` process is cloned straight into the unit's own cgroup
+and moved into its `DelegateSubgroup=` only after; 255 to 257 cloned it into the subgroup. The
+kernel refuses a process in a cgroup that has controllers enabled for its children, and systemd
+cannot switch the controllers off while the unit's `actions` cgroup, which holds the lease
+cgroups of the jobs, uses them. So when the agent has ended and left jobs running (after a
+hand-over by stop and start, or after a crash under `KillMode=process`), every start of
+`js-agent-crun.service` on systemd 258 or newer fails until those jobs end: the journal says
+`Failed to spawn executor: Device or resource busy` and the unit's result is `resources`. With no
+job left the start works. An update avoids this by handing over in place or by draining (above).
+
+The unit's `ExecStopPost=` step, `js-agent crun-start-refused --result ${SERVICE_RESULT}`, runs
+after such a refused start. When the result is `resources`, systemd is 258 or newer and the
+unit's cgroup has controllers enabled, it ends the jobs left (the supervisors first, then the
+lease cgroups), so that systemd can trim the cgroup and the next restart (`Restart=always`)
+starts the agent. Those jobs are lost; the server finds them lost because the new agent does not
+list them.
+
+By hand, on a node in that state: do nothing, and the unit comes back by itself within
+`RestartSec` after the last job left ends. To bring it back at once, at the cost of those jobs:
+
+```
+systemctl kill --kill-whom=all --signal=SIGKILL js-agent-crun.service
+```
+
+after which the next restart starts it.
+
+### An update record a rollback did not finish
+
+The update hook keeps its record of an update in `/var/lib/js-agent-update/record.json` (root's;
+on a Mac `/Library/Application Support/js-agent/update/record.json`) and deletes it when the
+update ends, by `cleanup` or by a `rollback` that saw the previous agent's hello. A rollback whose
+start was refused (above) ends before that hello and leaves the record, although the previous
+agent comes back by itself once the last job ends. The next update names another target, and
+its steps treat the record so:
+
+- `prepare` finishes the record itself when the rollback is complete in effect: the record
+  returns the host to the previous release this update names, the release link is on that
+  release, the unit is active, the record does not say the agent that runs is the one the
+  failed update started, and the lease server shows the previous agent's live session (a
+  session it shows with no version, as a server that did not take the hello does, counts by the
+  session; one that names a version must name the previous one). It moves
+  the record aside as `record.rolled-back-<target>-<ms>.json` in the same directory, says so in
+  its detail, and goes on. Otherwise it fails `state_invalid` with the record kept, and the
+  detail names the first thing left (`... its rollback is not complete: <what>; the rollback step
+  finishes it`).
+- the updater's `rollback` that follows rolls back the update on record, with the record's own
+  target, previous version, digest and releases, and its detail begins `the record is of the
+  update to <target>, not <ordered>`. It is refused, record kept, when the record returns the
+  host to another previous version or release than the order's, and for a first install's
+  record.
+
+A hook from before this behaviour refuses such a record at both steps. To finish it by hand with
+jobs running, run that hook's `rollback` with a params file that is the package's `[params]`
+table plus the record's own `updater.target_version`, `updater.previous_version`,
+`updater.staged_release`, `updater.previous_release` and `updater.artifact_digest` (the values
+of its `update` object, byte for byte). With the unit active on the previous release it makes no
+act on the unit: it waits for the previous agent's session, deletes the record and prints
+`{"class":"release","promotion_pending":false,"reversible":false}`.
+Such a hook refuses a session the lease server shows with no version (`version_mismatch: the
+session is of no version on container, ...`), having changed nothing. When that happens and the
+unit is active with the release link on the previous release, move the record aside under the
+hook's lock, keeping its bytes, as the newer hook does:
+`flock -n /var/lib/js-agent-update mv -n /var/lib/js-agent-update/record.json
+/var/lib/js-agent-update/record.rolled-back-<target>-manual.json`.
 
 The ledger is one file per lease, `<image store>/oci-labels/<lease>.json` (the image store is
 `oci` beside the scratch root), mode 0600, root's. Version 2 of the file holds:

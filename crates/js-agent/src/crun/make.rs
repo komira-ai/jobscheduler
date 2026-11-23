@@ -96,6 +96,10 @@ impl Maker {
         }
         job_env(&mut container, &spec.env);
         gpu.apply(&mut container);
+        // The operator's ceiling, if any, which the job reads as its own `cpu.max`.
+        container.limits.cpu_ceiling_millis = self
+            .cpu_ceiling
+            .and_then(|ceiling| ceiling.millis_of(spec.cpu_millis));
         self.make_resources(spec, &container, (&lease, &cgroup), marks)?;
         Ok((container, lease, cgroup))
     }
@@ -206,7 +210,8 @@ impl Maker {
         self.mark(marks, "dirs");
         let booking = Resources::new(spec.cpu_millis, spec.memory_bytes, 0, None)?;
         cgroup
-            .create_with(&booking, None, LeasePolicy::Hard)
+            .create_with(&booking, None, LeasePolicy::TrackedMemory)
+            .and_then(|()| cgroup.hold_cpu(container.limits.cpu_ceiling_millis.unwrap_or(0)))
             .map_err(|why| Fault::step("make the lease's cgroup", &why))?;
         for file in JOB_OWNED_FILES {
             chown(&owned(cgroup.dir(), file), job.0, job.1)

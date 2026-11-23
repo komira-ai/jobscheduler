@@ -96,8 +96,12 @@ after a fix.
 The checks of a pull request that are not in `ci.yml` (`js-agent-deb.yml`,
 `js-agent-crun-runtime.yml`, `js-agent-quota-tests.yml`, `egress-spike.yml` and `release.yml`'s
 dry run) run when a pull request changes the paths they name. They run on the pull request
-before it is queued, not on a merge group, and are not required.
+before it is queued, not on a merge group, and are not required. `farm.yml`, the build farm lane
+(`docs/farm.md`), runs on every pull request from a branch of this repository and on the push to
+`main`, likewise not on a merge group, and is not required.
 
 The macOS checks keep their place: the beta stage of `release.yml` on the push to `main`
 (`beta.yml`, `js-agent-macos-pkg.yml` and `macos-probe.yml`), which holds back only the macOS
-archives of a release. A merge group, like a pull request, runs nothing on macOS.
+archives of a release. A merge group, like a pull request, runs nothing on macOS. A change
+whose macOS tests should be seen before it merges is tried by a manual run of `beta.yml` on its
+branch (`gh workflow run beta.yml --ref <branch>`), the same job on the same hosted runner.

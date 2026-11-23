@@ -485,6 +485,55 @@ fn a_release_link_is_on_the_staged_release_by_where_it_points_however_it_is_spel
     }
 }
 
+/// On macOS `/var` is a link to `/private/var`: hostkeeper names the staged release by its real
+/// path and the release link sits under the other spelling. A link whose target is the staged
+/// release through a symbolic link on the way is on it: the cutover stops and starts and
+/// succeeds.
+///
+/// Catches a comparison of the two paths by name, which refuses every cutover on a Mac with
+/// `link_failed`.
+#[test]
+fn a_release_link_reached_through_a_symlinked_directory_is_on_the_staged_release_by_its_real_path()
+{
+    let rig = running(Rig::new("hook-cutover-link-aliased"));
+    rig.link_through_an_alias("1.4.0");
+    let spy = Spy::new(&rig);
+    let done = spy.cutover_as_is(&rig);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert_eq!(spy.act_names(), [stop(), start()]);
+    assert_eq!(unit_state(&rig), "active running");
+    assert_eq!(marks(&rig), [true, true, true]);
+}
+
+/// The same on a first install, where the failure was seen: no unit to stop, the link the
+/// updater made is reached through the symbolic link, and the unit is started on it.
+///
+/// Catches the lexical comparison that made every first install on a Mac end `link_failed`.
+#[test]
+fn a_first_install_whose_link_is_reached_through_a_symlinked_directory_starts_the_unit() {
+    let rig = first("hook-cutover-first-aliased");
+    rig.link_through_an_alias("1.4.0");
+    let spy = Spy::new(&rig);
+    let done = spy.cutover_as_is(&rig);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert_eq!(spy.act_names(), [start()]);
+    assert_eq!(unit_state(&rig), "active running");
+    assert_eq!(marks(&rig), [false, true, true]);
+}
+
+/// A link reached through the symbolic link but on another release is still off the staged one.
+///
+/// Catches a comparison so loose that any link under the aliased directory passes.
+#[test]
+fn a_release_link_reached_through_a_symlinked_directory_on_another_release_is_still_refused() {
+    let rig = running(Rig::new("hook-cutover-link-aliased-other"));
+    rig.link_through_an_alias("1.3.0");
+    let spy = Spy::new(&rig);
+    let done = spy.cutover_as_is(&rig);
+    assert_eq!(done.report.reason, Some(Reason::LinkFailed), "{done:?}");
+    assert_eq!(spy.act_names(), Vec::<String>::new());
+}
+
 /// Puts the host back as `prepare` left it: the unit running, the stop and start marks off.
 fn return_to_start(rig: &Rig) {
     let mut record = rig.record().unwrap();

@@ -1,7 +1,7 @@
 //! The runtime of this build, chosen when it is compiled: a Linux build runs its jobs with
 //! `crun` (`js-contain`), or, opted in with `--allow-container-engine`, through the container
-//! engine at `--container-bin`; a macOS build runs native jobs through the root helper
-//! `js-mac-session` ([`crate::native`]), with the VM backend beside them ([`crate::vm`]). Only
+//! engine at `--container-bin`; a macOS build runs native jobs as accounts of its own pool,
+//! started by its supervisor ([`crate::native`]), with the VM backend beside them ([`crate::vm`]). Only
 //! this module is compiled per platform: `linux.rs` or `macos.rs` defines the flags of the
 //! build's runtime ([`Flags`], flattened into [`crate::Cli`]), the checks the agent makes of
 //! them at start, the [`Backend`] the worker runs jobs with, and what the hello says of it.
@@ -34,6 +34,8 @@ pub const LINUX_ONLY: [&str; 34] = [
     "allow-container-engine",
     "crun-bin",
     "image-budget-gib",
+    "cpu-ceiling",
+    "cpu-series",
     "job-user",
     "gpu-device",
     "gpu-mount",
@@ -58,16 +60,16 @@ pub const LINUX_ONLY: [&str; 34] = [
     "image-allow-loopback",
     "settle-ms",
     "taint-recheck-ms",
-    "mount-provider",
-    "mount-provider-user",
-    "mount-provider-wait",
+    "host-second-samples",
 ];
 
 /// The flags only a macOS build has (its [`Flags`] there), without the leading `--`. A Linux
 /// build refuses each by name; a test of the macOS build holds the list to the flags clap
 /// knows there.
-pub const MACOS_ONLY: [&str; 15] = [
-    "native-helper-socket",
+pub const MACOS_ONLY: [&str; 18] = [
+    "native-accounts",
+    "native-account-range",
+    "native-account-ready",
     "native-homes",
     "native-network",
     "native-deny-read",
@@ -80,6 +82,7 @@ pub const MACOS_ONLY: [&str; 15] = [
     "native-pf-anchor",
     "native-pf-state-dir",
     "native-pfctl",
+    "native-trees-root",
     "vm-driver",
     "vm-store",
 ];

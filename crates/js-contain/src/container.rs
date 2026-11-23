@@ -45,18 +45,14 @@ pub struct ContainerLimits {
     /// The size of the container's `/run` tmpfs, in MiB. Its `/tmp` and `/var/tmp` are the
     /// caller's host mounts ([`ContainerSpec::mounts`]), on disk.
     pub run_mib: u64,
-    /// The CPU the lease booked, in thousandths of a core, written on the container's own
-    /// cgroup as `cpu.max` ([`cpu_max`](crate::cgroup::cpu_max), the text
-    /// [`LeasePolicy::Hard`](crate::cgroup::LeasePolicy::Hard) writes on the lease). The
-    /// job's cgroup namespace makes that cgroup its `/sys/fs/cgroup`, so a tool that sizes
-    /// itself from `cpu.max` reads the booking there rather than `max`; the lease's own
-    /// `cpu.max` stays the bound. `None`, or `Some(0)`, writes none.
-    pub cpu_millis: Option<u64>,
-    /// The memory the lease booked, in bytes, written on the container's own cgroup as
-    /// `memory.max` ([`hard_memory_max`](crate::cgroup::hard_memory_max), the lease's own
-    /// under [`LeasePolicy::Hard`](crate::cgroup::LeasePolicy::Hard)), for the same reason.
-    /// `None`, or `Some(0)`, writes none.
-    pub memory_bytes: Option<u64>,
+    /// The operator's CPU ceiling of the lease ([`CpuCeiling`](crate::CpuCeiling)), in
+    /// thousandths of a core, written on the container's own cgroup as `cpu.max`
+    /// ([`cpu_max`](crate::cpu_ceiling::cpu_max)) so that a tool that sizes itself from it
+    /// reads the ceiling; the lease's own `cpu.max` is the bound. `None` (the default, no
+    /// ceiling), or `Some(0)`, writes none: the CPU booking is then the lease's
+    /// [`cpu_weight`](crate::cgroup::cpu_weight) alone, and the job reads `max` and sizes
+    /// itself to the CPUs it may run on.
+    pub cpu_ceiling_millis: Option<u64>,
 }
 
 /// The `RLIMIT_NPROC` a job is given unless the caller says otherwise: the kernel's
@@ -69,15 +65,14 @@ pub const NPROC_HIGH: u64 = 4_194_304;
 
 impl ContainerLimits {
     /// 8192 pids, a 64 MiB `/dev/shm`, 65,536 open files, [`NPROC_HIGH`] processes, a
-    /// 64 MiB `/run`, and no CPU or memory limit on the container's own cgroup.
+    /// 64 MiB `/run`, and no memory limit or CPU ceiling on the container's own cgroup.
     pub const DEFAULT: Self = Self {
         pids: 8192,
         shm_mib: 64,
         nofile: 65_536,
         nproc: NPROC_HIGH,
         run_mib: 64,
-        cpu_millis: None,
-        memory_bytes: None,
+        cpu_ceiling_millis: None,
     };
 
     /// `self` with `nproc` no higher than `ceiling`.
@@ -296,8 +291,7 @@ pub(crate) mod tests {
                 nofile: 103,
                 nproc: 104,
                 run_mib: 106,
-                cpu_millis: None,
-                memory_bytes: None,
+                cpu_ceiling_millis: None,
             },
             shared: Vec::new(),
             mounts: vec![

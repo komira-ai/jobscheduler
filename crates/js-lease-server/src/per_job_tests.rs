@@ -6,14 +6,15 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use js_agent_wire::{
-    HeartbeatReply, HeldJob, HeldState, JobResult, JobUsage, NetworkCeiling, Outcome,
+    CpuPeak as WirePeak, CpuSeries as WireSeries, CpuThrottle as WireThrottle, HeartbeatReply,
+    HeldJob, HeldState, JobResult, JobUsage, NetworkCeiling, Outcome,
 };
 use js_jobs::{
-    Booked, JobEnd, JobSpec, JobState, JobStoreError, Needs, Output, ResourceUsage, ResultReason,
-    StartFailure,
+    Booked, CpuPeak, CpuThrottle, JobEnd, JobSpec, JobState, JobStoreError, Needs, Output,
+    ResourceUsage, ResultReason, StartFailure,
 };
 use js_state::StoreError;
-use js_types::{HostId, Resources};
+use js_types::{CpuSeries, HostId, Resources};
 
 use js_state::Store;
 
@@ -54,6 +55,7 @@ fn a_retired_id_that_is_no_job_id_is_acknowledged() {
             layered_rootfs: false,
             mount_providers: &[],
             xcodes: &[],
+            limits: crate::job_expiry::JobLimits::DEFAULT,
         },
         &[],
         std::slice::from_ref(&long),
@@ -92,6 +94,7 @@ fn a_listed_state_that_names_no_step_moves_nothing() {
             layered_rootfs: false,
             mount_providers: &[],
             xcodes: &[],
+            limits: crate::job_expiry::JobLimits::DEFAULT,
         },
         &listing,
         &[],
@@ -138,6 +141,7 @@ fn a_failed_end_commit_is_an_error() {
             layered_rootfs: false,
             mount_providers: &[],
             xcodes: &[],
+            limits: crate::job_expiry::JobLimits::DEFAULT,
         },
         &listing,
         &[],
@@ -185,6 +189,7 @@ fn an_unsendable_start_is_not_sent_and_starts_stop_at_the_room() {
             layered_rootfs: false,
             mount_providers: &[],
             xcodes: &[],
+            limits: crate::job_expiry::JobLimits::DEFAULT,
         },
         &[],
         &[],
@@ -214,6 +219,7 @@ fn an_unsendable_start_is_not_sent_and_starts_stop_at_the_room() {
             layered_rootfs: false,
             mount_providers: &[],
             xcodes: &[],
+            limits: crate::job_expiry::JobLimits::DEFAULT,
         },
         &[],
         &[],
@@ -261,6 +267,7 @@ fn a_whole_host_job_is_started_only_once_ready_and_never_stopped_while_preparing
         layered_rootfs: false,
         mount_providers: &[],
         xcodes: &[],
+        limits: crate::job_expiry::JobLimits::DEFAULT,
     };
     let beat = |listed: &[HeldJob]| serve(&jobs, &context, listed, &[], 8, None).unwrap();
 
@@ -315,6 +322,7 @@ fn done() -> Output {
         truncated: false,
         usage: None,
         logs: None,
+        cpu_series: None,
     }
 }
 
@@ -464,6 +472,7 @@ fn listed_end(
         layered_rootfs: false,
         mount_providers: &[],
         xcodes: &[],
+        limits: crate::job_expiry::JobLimits::DEFAULT,
     };
     let listing = [listed("job-a", HeldState::ExitedUnacked, Some(result))];
     let reply = serve(jobs, &context, &listing, &[], 8, None).unwrap();
@@ -559,10 +568,17 @@ fn the_usage_of_a_result_is_stored_with_the_jobs_output() {
     let counted = JobUsage {
         peak_memory_bytes: 3 << 30,
         cpu_usage_usec: 4_500_001,
+        cpu_throttle: None,
+        cpu_pressure_some_usec: None,
+        cpu_peak: None,
+        peak_swap_bytes: None,
     };
     let stored = ResourceUsage {
         cpu_time: Duration::new(4, 500_001_000),
         peak_memory_bytes: 3 << 30,
+        cpu_throttle: None,
+        cpu_pressure_some: None,
+        cpu_peak: None,
     };
     let mut measured = ended(Outcome::Succeeded, Some(0));
     measured.usage = Some(counted);
@@ -588,4 +604,164 @@ fn the_usage_of_a_result_is_stored_with_the_jobs_output() {
         panic!("a clean exit ends exited");
     };
     assert_eq!(output.usage, None);
+}
+
+/// A usage that reports the CPU periods, the throttled periods and the CPU pressure stores each
+/// with the output (the pressure in microseconds as a duration), and a usage that does not
+/// stores `None` for each, not a zero. It catches a counter dropped on the way to the stored
+/// result, a unit slip on the pressure, and a counter that is absent made into a zero.
+#[test]
+fn the_cpu_counters_of_a_usage_are_stored_when_reported_and_none_when_not() {
+    let (_store, jobs) = tables();
+    let (job, _) = placed(&jobs, "job-a", "host-a", spec(), BOOKED);
+    let mut reported = ended(Outcome::Succeeded, Some(0));
+    reported.usage = Some(JobUsage {
+        peak_memory_bytes: 1 << 30,
+        cpu_usage_usec: 2_000_000,
+        cpu_throttle: Some(WireThrottle {
+            periods: 600,
+            throttled_periods: 45,
+        }),
+        cpu_pressure_some_usec: Some(1_250_001),
+        cpu_peak: None,
+        peak_swap_bytes: None,
+    });
+    let Some(JobEnd::Exited { output, .. }) = end_of(&job, &reported) else {
+        panic!("a clean exit ends exited");
+    };
+    assert_eq!(
+        output.usage,
+        Some(ResourceUsage {
+            cpu_time: Duration::from_secs(2),
+            peak_memory_bytes: 1 << 30,
+            cpu_throttle: Some(CpuThrottle {
+                periods: 600,
+                throttled_periods: 45,
+            }),
+            cpu_pressure_some: Some(Duration::new(1, 250_001_000)),
+            cpu_peak: None,
+        })
+    );
+    let mut older = ended(Outcome::Succeeded, Some(0));
+    older.usage = Some(JobUsage {
+        peak_memory_bytes: 1 << 30,
+        cpu_usage_usec: 2_000_000,
+        cpu_throttle: None,
+        cpu_pressure_some_usec: None,
+        cpu_peak: None,
+        peak_swap_bytes: None,
+    });
+    let Some(JobEnd::Exited { output, .. }) = end_of(&job, &older) else {
+        panic!("a clean exit ends exited");
+    };
+    assert_eq!(
+        output.usage,
+        Some(ResourceUsage {
+            cpu_time: Duration::from_secs(2),
+            peak_memory_bytes: 1 << 30,
+            cpu_throttle: None,
+            cpu_pressure_some: None,
+            cpu_peak: None,
+        })
+    );
+}
+
+/// A usage that reports a CPU peak stores its millicores and its window with the output, and
+/// a usage that does not stores `None`, not a zero. It catches a peak dropped on the way to the
+/// stored result, its two numbers swapped, and an absent peak made into a zero.
+#[test]
+fn the_cpu_peak_of_a_usage_is_stored_when_reported_and_none_when_not() {
+    let (_store, jobs) = tables();
+    let (job, _) = placed(&jobs, "job-a", "host-a", spec(), BOOKED);
+    let usage = |cpu_peak| JobUsage {
+        peak_memory_bytes: 1 << 30,
+        cpu_usage_usec: 2_000_000,
+        cpu_throttle: None,
+        cpu_pressure_some_usec: None,
+        cpu_peak,
+        peak_swap_bytes: None,
+    };
+    let stored = |reported: JobUsage| {
+        let mut result = ended(Outcome::Succeeded, Some(0));
+        result.usage = Some(reported);
+        let Some(JobEnd::Exited { output, .. }) = end_of(&job, &result) else {
+            panic!("a clean exit ends exited");
+        };
+        output.usage.expect("a usage").cpu_peak
+    };
+    assert_eq!(
+        stored(usage(Some(WirePeak {
+            millicores: 3_500,
+            window_usec: 5_000_000,
+        }))),
+        Some(CpuPeak {
+            millicores: 3_500,
+            window_usec: 5_000_000,
+        })
+    );
+    assert_eq!(stored(usage(None)), None);
+}
+
+/// A result that carries a CPU series ends the job with the series stored in its output as
+/// reported (its granularity, points, run length and partial flag), whatever the way it ended and
+/// whether or not the result reports a usage; a result without one stores none; and a series
+/// whose granularity does not fit 16 bits (which the job rows cannot hold) is dropped and the
+/// rest of the result still stored. The total CPU of the series is not compared with the usage.
+/// It catches a series dropped on the way to the stored result, one tied to the usage, one
+/// changed or checked against the usage, and a series the store cannot keep stored.
+#[test]
+fn the_cpu_series_of_a_result_is_stored_as_reported_and_none_when_not() {
+    let (_store, jobs) = tables();
+    let (job, _) = placed(&jobs, "job-a", "host-a", spec(), BOOKED);
+    let wire = WireSeries {
+        granularity_secs: 4,
+        points: vec![0, 16, 40],
+        run_usec: 9_000_000,
+        partial: true,
+    };
+    let stored = CpuSeries::new(4, vec![0, 16, 40], 9_000_000, true);
+    let output_of = |result: &JobResult| match end_of(&job, result) {
+        Some(JobEnd::Exited { output, .. } | JobEnd::InputFailed { output, .. }) => output,
+        other => panic!("an exit or an input failure, not {other:?}"),
+    };
+    let mut reported = ended(Outcome::Succeeded, Some(0));
+    reported.cpu_series = Some(wire.clone());
+    assert_eq!(output_of(&reported).cpu_series, stored);
+    assert_eq!(output_of(&reported).usage, None);
+
+    // A usage whose CPU total is far from the series' is stored with the series untouched.
+    reported.usage = Some(JobUsage {
+        peak_memory_bytes: 1 << 20,
+        cpu_usage_usec: 1,
+        cpu_throttle: None,
+        cpu_pressure_some_usec: None,
+        cpu_peak: None,
+        peak_swap_bytes: None,
+    });
+    assert_eq!(output_of(&reported).cpu_series, stored);
+    assert!(output_of(&reported).usage.is_some());
+
+    let mut failed = ended(Outcome::Failed, Some(2));
+    failed.cpu_series = Some(wire.clone());
+    assert_eq!(output_of(&failed).cpu_series, stored);
+    let mut refused_input = ended(Outcome::Succeeded, Some(0));
+    refused_input.cpu_series = Some(wire.clone());
+    refused_input.input_failure = Some("input-unreadable".to_owned());
+    assert_eq!(output_of(&refused_input).cpu_series, stored);
+
+    assert_eq!(
+        output_of(&ended(Outcome::Succeeded, Some(0))).cpu_series,
+        None
+    );
+
+    let mut wide = ended(Outcome::Succeeded, Some(0));
+    wide.cpu_series = Some(WireSeries {
+        granularity_secs: 1 << 20,
+        ..wire
+    });
+    let output = output_of(&wide);
+    assert_eq!(
+        (output.cpu_series, output.stdout),
+        (None, "done\n".to_owned())
+    );
 }

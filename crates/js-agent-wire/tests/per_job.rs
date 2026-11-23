@@ -48,6 +48,7 @@ fn start() -> JobStartSpec {
         placed_at_ms: None,
         fuse: false,
         xcode: None,
+        sizing: None,
     }
 }
 
@@ -66,6 +67,7 @@ fn job_result() -> JobResult {
         logs: None,
         input_failure: None,
         usage: None,
+        cpu_series: None,
     }
 }
 

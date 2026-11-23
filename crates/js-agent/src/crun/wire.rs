@@ -16,6 +16,7 @@ use js_contain::subids::IdFiles;
 use js_oci::{Client, Policy};
 
 use super::adopt::report_lines;
+use super::dirs::cgroup_dir;
 use super::fs::{FsSettings, MOUNTS_DIR, PathCalls};
 use super::{
     CgroupSettings, CrunError, CrunRuntime, CrunSettings, EgressPort, GpuSettings, Hooks,
@@ -234,7 +235,10 @@ pub fn open(
     seams: &Seams,
 ) -> Result<(CrunRuntime, Mapping, Vec<String>), WireError> {
     let cgroups = seams.cgroups.settings()?;
-    plan.delegated(&cgroups.actions);
+    // The usage is read from the actions cgroup's directory, the form `--actions-cgroup`
+    // takes, not from its name below the mount.
+    let actions_dir = cgroup_dir(&cgroups.mount, &cgroups.actions);
+    plan.delegated(&actions_dir.to_string_lossy());
     let policy = Policy::new(plan.image_allow.clone());
     let images = RegistryImages::new(Client::new(policy), std::env::consts::ARCH)?
         .keeping_configs(config_dir(&plan.store));
@@ -267,6 +271,8 @@ pub fn open(
             read: read_node,
         }),
         image_budget: plan.image_budget,
+        cpu_ceiling: plan.cpu_ceiling,
+        cpu_series: plan.cpu_series,
         host_jobs: plan.host_jobs,
         host_ports: HostPorts {
             allowed: plan.host_ports.clone(),

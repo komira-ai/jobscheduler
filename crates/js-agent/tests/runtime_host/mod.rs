@@ -249,6 +249,8 @@ impl RuntimeHost {
             host_jobs: false,
             host_ports: HostPorts::default(),
             fs: None,
+            cpu_ceiling: None,
+            cpu_series: false,
         };
         let runtime = CrunRuntime::open(settings, Arc::new(NoImages))
             .map_err(|why| format!("open the crun runtime: {why}"))?;

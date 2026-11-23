@@ -57,7 +57,7 @@ Carry the file to the node by a channel you trust.
 ## 3. Place the files on the node
 
 Do this as root, before you assign the service. Create `/etc/js-agent` first if it does not exist
-(the package's tmpfiles file makes it mode 0700 when the agent's unit starts).
+(the package's tmpfiles file makes it mode 0700 at boot; the agent's unit does not make it).
 
 The token, root:root with mode 0600:
 

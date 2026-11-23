@@ -14,9 +14,7 @@ name = "js-mac-session"
 path = "src/main.rs"
 
 [dependencies]
-base64.workspace = true
 clap.workspace = true
-ed25519-dalek.workspace = true
 hex.workspace = true
 js-types = { path = "../js-types" }
 libc.workspace = true
@@ -33,7 +31,7 @@ tracing-subscriber.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation.workspace = true
 objc2.workspace = true
-objc2-foundation = { workspace = true, features = ["NSError", "NSString"] }
+objc2-foundation = { workspace = true, features = ["NSArray", "NSError", "NSString"] }
 objc2-open-directory = { workspace = true, features = [
     "CFOpenDirectory",
     "CFOpenDirectoryConstants",
@@ -50,3 +48,12 @@ js-testkit = { path = "../js-testkit" }
 
 [lints]
 workspace = true
+
+[package.metadata.buildrules]
+# The farm lane's `//:ci` (docs/farm.md) checks the format of, builds and lints this package but
+# does not run its tests: its tests read /etc/passwd and remove directories other mounts sit on;
+# tests/as_root.rs holds `#[ignore]`d tests, and buildrules' test gate refuses a test target with
+# an ignored test (they need root). They run in ci.yml alone.
+
+[package.metadata.buildrules.actions]
+ci = ["fmt", "lint"]

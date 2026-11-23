@@ -13,15 +13,18 @@
 //! memory: max(sum m(all), working_set + sum m(uncovered)) + V_mem + m_new       <=  C_mem * (1 + s_mem)
 //! ```
 //!
-//! - `measured` is the cores busy over the last two windows of the worker's readings, the
-//!   larger, so a rise counts at once and a fall after two windows.
+//! - `measured` is the cores the whole host was busy over the last two windows of the
+//!   worker's readings, the larger, so a rise counts at once and a fall after two windows.
+//!   Every process of the host counts, not only the leases: work besides them takes the
+//!   same cores. Covered leases' use is inside it; uncovered leases are charged beside it.
 //! - A lease is *covered* once a reading lists it as running for the whole window since
 //!   the previous reading; until then it is *uncovered* and carries its full cost.
 //! - Predicted memory is held to the lease's end and never decays.
 //! - `f` ([`LoadConfig::cpu_floor_permille`]) keeps a covered lease in an idle phase
 //!   from handing its room back to the next batch.
-//! - `V` is the booked cost of the worker's VM leases, which run outside the measured
-//!   cgroup.
+//! - `V` is the booked cost of the worker's VM leases, which run outside the actions
+//!   cgroup whose working set is measured. A running VM's CPU is in the host's measured CPU
+//!   too, so `V_cpu` counts it again: an over-count that can only refuse work.
 //! - A worker with no usable measurement is admitted by the same predicate on the sum of
 //!   its leases' predicted costs ([`Left::fallback`]); never by the booked rule. Each lease
 //!   on a worker that never sent an accepted reading (a Mac, a native or VM node) is
@@ -74,12 +77,13 @@ pub use config::{FlagError, LoadConfig, MAX_CPU_SLACK_PERMILLE, PlacementLoad};
 pub(crate) use config::{scale, scale_up};
 pub(crate) use head::{Ratio, binding, pick, start_time};
 pub(crate) use horizon::new_charge;
-pub(crate) use ledger::{Ended, Left, Refusal, WorkerLoad, clamped};
+pub(crate) use ledger::{Ended, Left, WorkerLoad, clamped};
 pub use profile::HORIZON_MINUTES;
 pub(crate) use profile::{H_PLUS as H_PLUS_SLOT, Profile};
 
 use crate::input::Request;
 use crate::load::{Charge, ScoreConfig, Scorer};
+use crate::refusal::{Refusal, RefusalKind, RefusalLog, Refusals};
 
 use guard::{Resource, ShapeGuard};
 use profile::{Choice, MIN_RUNS};
@@ -114,6 +118,17 @@ pub struct LoadCounters {
     pub blocked: u64,
     /// Of those, requests whose only obstacle was the cold cap.
     pub cold_deferred: u64,
+    /// Refusals of a host to a request by the CPU side of the load predicate
+    /// ([`crate::RefusalKind::Cpu`]). Unlike `blocked`, a request is counted once for
+    /// every host that refused it, and once for the kind of each refusal.
+    pub refused_cpu: u64,
+    /// Refusals by the memory side of the load predicate
+    /// ([`crate::RefusalKind::PredictedMemory`]).
+    pub refused_predicted_memory: u64,
+    /// Refusals by the flat memory guard ([`crate::RefusalKind::BookedMemory`]).
+    pub refused_booked_memory: u64,
+    /// Refusals by the cold cap ([`crate::RefusalKind::ColdCap`]).
+    pub refused_cold_cap: u64,
     /// Head reservations taken or moved.
     pub reservations: u64,
     /// Readings accepted.
@@ -240,6 +255,7 @@ pub(crate) struct Admission {
     hints: BTreeMap<OperationId, Prediction>,
     curves: Curves,
     guard: ShapeGuard,
+    refusals: RefusalLog,
 }
 
 impl Default for Admission {
@@ -251,6 +267,7 @@ impl Default for Admission {
             hints: BTreeMap::new(),
             curves: Curves(Arc::new(NoCurves)),
             guard: ShapeGuard::default(),
+            refusals: RefusalLog::default(),
         }
     }
 }
@@ -497,6 +514,23 @@ impl Admission {
             c.chose_concentrated += u64::from(choice.concentrated);
             c.chose_by_tie_break += u64::from(choice.tie_break);
         }
+    }
+
+    /// Counts a refusal by kind and keeps it for [`Admission::take_refusals`].
+    pub(crate) fn note_refusal(&mut self, worker: &js_types::sched::WorkerId, refusal: Refusal) {
+        let c = &mut self.counters;
+        match refusal.kind {
+            RefusalKind::Cpu => c.refused_cpu += 1,
+            RefusalKind::PredictedMemory => c.refused_predicted_memory += 1,
+            RefusalKind::BookedMemory => c.refused_booked_memory += 1,
+            RefusalKind::ColdCap => c.refused_cold_cap += 1,
+        }
+        self.refusals.push(worker, refusal);
+    }
+
+    /// The refusals kept since the last take.
+    pub(crate) fn take_refusals(&mut self) -> Refusals {
+        self.refusals.take()
     }
 
     pub(crate) fn count_blocked(&mut self, why: Blocked) {

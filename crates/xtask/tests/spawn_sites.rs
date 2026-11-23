@@ -7,95 +7,24 @@
 //! real sources with one start added. Nothing in the repository is edited.
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
 
-use js_testkit::dir::TestDir;
 use xtask::spawn_sites::{Error, SPAWNER, check, crates};
 
-/// The repository root.
-fn repo() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
+mod spawn_tree;
+use spawn_tree::{Tree, at, repo};
 
-/// A scratch tree with the two starting crates: an empty `js-agent` library, and a
-/// `js-mac-session` library whose spawner holds a `Command::new` (the one place one may
-/// be); each has a manifest that names no dependency.
-struct Tree {
-    dir: TestDir,
-}
-
-impl Tree {
-    fn new(name: &str) -> Tree {
-        let tree = Tree {
-            dir: TestDir::under(env!("CARGO_TARGET_TMPDIR"), &format!("spawn-sites-{name}")),
-        };
-        tree.manifest("js-agent", "");
-        tree.put("crates/js-agent/src/lib.rs", "");
-        tree.manifest("js-mac-session", "");
-        tree.put("crates/js-mac-session/src/lib.rs", "pub mod disclaim;\n");
-        tree.put(
-            SPAWNER,
-            "pub fn start() { std::process::Command::new(\"/bin/true\"); }\n",
-        );
-        tree
-    }
-
-    fn root(&self) -> &Path {
-        self.dir.path()
-    }
-
-    /// Writes `text` to `rel`, making its directories.
-    fn put(&self, rel: &str, text: &str) {
-        let path = self.root().join(rel);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, text).unwrap();
-    }
-
-    /// Writes the manifest of `krate`: its package, then `extra`.
-    fn manifest(&self, krate: &str, extra: &str) {
-        self.put(
-            &format!("crates/{krate}/Cargo.toml"),
-            &format!("[package]\nname = \"{krate}\"\n{extra}"),
-        );
-    }
-
-    /// Writes a library for `krate` that holds one `Command::new`, on line 1.
-    fn starter(&self, krate: &str) {
-        self.manifest(krate, "");
-        self.put(
-            &format!("crates/{krate}/src/lib.rs"),
-            "fn f() { Command::new(\"x\"); }\n",
-        );
-    }
-
-    /// What the check found, each as `file:line: what`.
-    fn sites(&self) -> Vec<String> {
-        check(self.root())
-            .unwrap()
-            .iter()
-            .map(ToString::to_string)
-            .collect()
-    }
-
-    /// The error the check stopped at, as it is printed.
-    fn error(&self) -> String {
-        match check(self.root()) {
-            Ok(sites) => panic!("no error; found {sites:?}"),
-            Err(error) => error.to_string(),
-        }
-    }
-}
-
-/// `file:line: what`, for a list of `(line, what)`.
-fn at(file: &str, found: &[(u32, &str)]) -> Vec<String> {
-    found
-        .iter()
-        .map(|(line, what)| format!("{file}:{line}: {what}"))
-        .collect()
+/// Writes a library for `krate` in `tree` that holds one `Command::new`, on line 1.
+fn starter(tree: &Tree, krate: &str) {
+    tree.manifest(krate, "");
+    tree.put(
+        &format!("crates/{krate}/src/lib.rs"),
+        "fn f() { Command::new(\"x\"); }\n",
+    );
 }
 
 /// The repository as it is: nothing in the crates the agent and the helper are built from
-/// starts a program but the spawner.
+/// starts a program but the spawner, and nothing keeps a program's responsibility outside the
+/// supervisor's two starts (the files of `KEEPERS`).
 /// It catches a job, a helper or a probe started with `Command::new` (or `pre_exec`,
 /// `exec`, a C library `exec*` or `posix_spawn*`) instead of the spawner: on macOS that
 /// process would answer for the helper or the agent, and hold their privacy grants.
@@ -105,7 +34,7 @@ fn every_job_spawn_path_uses_the_disclaiming_spawner() {
     let listed: Vec<String> = sites.iter().map(ToString::to_string).collect();
     assert!(
         listed.is_empty(),
-        "programs started outside {SPAWNER}:\n{}",
+        "programs started outside {SPAWNER}, or kept outside KEEPERS:\n{}",
         listed.join("\n")
     );
 }
@@ -130,42 +59,12 @@ fn the_real_crates_read_include_the_agents_path_dependencies() {
 /// check that walks a toy tree only, or that stops short of the modules the agent has.
 #[test]
 fn a_start_added_to_the_real_agent_is_found() {
-    let tree = Tree::new("real");
-    for krate in crates(&repo()).unwrap() {
-        let rel = Path::new("crates").join(krate);
-        copy(
-            &repo().join(&rel).join("src"),
-            &tree.root().join(&rel).join("src"),
-        );
-        copy(
-            &repo().join(&rel).join("tests/bin"),
-            &tree.root().join(&rel).join("tests/bin"),
-        );
-        // The modules the agent's test-only binaries reach through `#[path]`: the fakes of
-        // `js-update-hook-fake`, and the measurement and the runtime host of
-        // `js-launch-measure`.
-        for dir in [
-            "tests/update_hook_fakes",
-            "tests/launch_measure",
-            "tests/runtime_host",
-        ] {
-            copy(
-                &repo().join(&rel).join(dir),
-                &tree.root().join(&rel).join(dir),
-            );
-        }
-        std::fs::copy(
-            repo().join(&rel).join("Cargo.toml"),
-            tree.root().join(&rel).join("Cargo.toml"),
-        )
-        .unwrap();
-    }
-    let native = tree.root().join("crates/js-agent/src/native/mod.rs");
-    let mut text = std::fs::read_to_string(&native).unwrap();
+    let tree = Tree::real("real");
     // The added `Command::new` is on the third line after the file's last one.
-    let line = u32::try_from(text.lines().count() + 3).unwrap();
-    text.push_str("\nfn stray() {\n    let _ = std::process::Command::new(\"/bin/true\");\n}\n");
-    std::fs::write(&native, text).unwrap();
+    let line = 3 + tree.append(
+        "crates/js-agent/src/native/mod.rs",
+        "\nfn stray() {\n    let _ = std::process::Command::new(\"/bin/true\");\n}\n",
+    );
     assert_eq!(
         tree.sites(),
         at(
@@ -173,23 +72,6 @@ fn a_start_added_to_the_real_agent_is_found() {
             &[(line, "Command::new"), (line, "process::Command")]
         )
     );
-}
-
-/// Copies every file under `from` to `to`; a `from` that is not a directory is not copied.
-fn copy(from: &Path, to: &Path) {
-    let Ok(entries) = std::fs::read_dir(from) else {
-        return;
-    };
-    for entry in entries {
-        let path = entry.unwrap().path();
-        let target = to.join(path.file_name().unwrap());
-        if path.is_dir() {
-            copy(&path, &target);
-        } else {
-            std::fs::create_dir_all(to).unwrap();
-            std::fs::copy(&path, &target).unwrap();
-        }
-    }
 }
 
 /// The tree of [`Tree::new`] passes: the spawner's own `Command::new` is not a site. It
@@ -673,7 +555,7 @@ build-only = { path = "../build-only" }
     );
     tree.manifest("dep-a", "[dependencies]\ndep-b = { path = \"../dep-b\" }\n");
     for krate in ["dep-b", "mac-only", "linux-only", "dev-only", "build-only"] {
-        tree.starter(krate);
+        starter(&tree, krate);
     }
     tree.put("crates/js-mac-session/src/lib.rs", "pub mod disclaim;\n");
     tree.put("crates/dep-a/src/lib.rs", "");

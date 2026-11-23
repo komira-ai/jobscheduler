@@ -5,7 +5,7 @@
 //! `0` (`DARWIN_USER_DIR`), `C` (`DARWIN_USER_CACHE_DIR`) and `T`
 //! (`DARWIN_USER_TEMP_DIR`). Daemons make folders there for the user (a
 //! `com.apple.ScreenTimeAgent` folder under `C`, say) that outlive the account, so
-//! `user-delete` removes the entry whole. The entry is the one the uid's own
+//! `user-delete` removes the entry whole (emptied and kept where the system placed it). The entry is the one the uid's own
 //! `DARWIN_USER_DIR` names, never one guessed from the uid: only an answer of exactly
 //! that shape is taken, and its entry is spelled under the configured folders, so no
 //! answer can name a path outside them.
@@ -35,20 +35,24 @@ pub(crate) struct NotAnEntry {
 pub(crate) const GETCONF: (&str, &str) = ("/usr/bin/getconf", "DARWIN_USER_DIR");
 
 /// Runs `program` with `args` as `uid` and `gid`, out of any session: an empty
-/// environment, `/` as its working directory, standard input empty (std drops the
-/// caller's supplementary groups before the `setuid` when the caller is root), and waits
-/// for it. Its answer is [`answer`] of what it printed.
+/// environment, `/` as its working directory, standard input empty, and waits for it. Its
+/// only group is `gid` (`crate::spawn::primary_group_only`: `setgroups([gid])`, `setgid`,
+/// `setuid`), never the group 0 that std's `setgroups(0)` leaves on macOS. The program is
+/// `getconf`, which only prints a path. Its answer is [`answer`] of what it printed.
 ///
 /// # Errors
 /// The program could not be started or waited for, or [`answer`] refused its output.
 // Only `MacHost` runs the resolver; off macOS the tests do.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn ask(program: &str, args: &[&str], uid: u32, gid: u32) -> io::Result<PathBuf> {
-    let output = Program::new(program, args)
+    // SAFETY: the step runs in the child between fork and exec; it is
+    // `spawn::primary_group_only`, which calls only async-signal-safe functions and
+    // allocates nothing.
+    let mut program =
+        unsafe { Program::with_steps(program, args, crate::spawn::primary_group_only(uid, gid)) };
+    let output = program
         .env_clear()
         .current_dir("/")
-        .uid(uid)
-        .gid(gid)
         .stdin(Stdio::null())
         .output()?;
     answer(output.status.code(), &output.stdout, &output.stderr)

@@ -5,7 +5,7 @@
 //! written with a single `write` and then `fsync`ed before the helper acts on it.
 //!
 //! `ledger`, the lease ids. An id is used once: a second `user-create` for it is
-//! refused, so a gate grant (which names one lease) is single-use. It holds the uid each
+//! refused. It holds the uid each
 //! lease got, so `run`, `kill-uid` and `user-delete` act on the uid the ledger names
 //! rather than on whatever a directory lookup says:
 //!
@@ -14,8 +14,8 @@
 //! deleted <term>.<seq>
 //! ```
 //!
-//! `deleted` records that the lease is over: its pool user went back to the pool (or was
-//! replaced), or, for a lease a release before the pool created, its own user was
+//! `deleted` records that the lease is over: its pool user went back to the pool (reset
+//! in place), or, for a lease a release before the pool created, its own user was
 //! deleted. This file's format is the one releases before the pool wrote and read, so
 //! they can still read it.
 //!
@@ -33,7 +33,8 @@
 //! to a lease that is not live, which the boot reset resets.
 //!
 //! `ledger` grows by about 30 bytes per lease and `pool` by about 40, and neither is
-//! compacted (a later change can drop records of ended leases older than any grant).
+//! compacted (a later change can drop records of ended leases once lease ids are known to
+//! grow).
 
 pub mod pool;
 
@@ -56,7 +57,7 @@ pub const POOL_FILE: &str = "pool";
 pub struct Entry {
     /// The uid the lease's user had.
     pub uid: u32,
-    /// Whether the lease is over (its user returned to the pool, replaced, or deleted);
+    /// Whether the lease is over (its user returned to the pool, or deleted);
     /// a lease id that is over is never used again.
     pub deleted: bool,
 }
@@ -261,15 +262,14 @@ impl Ledger {
         self.pool.append(pool::Record::Made(slot, uid))
     }
 
-    /// Records, durably, that `lease` takes the free `slot` (as an administrator when
-    /// `admin`): first the slot's `leased`, then the lease's `created` with the slot's
-    /// uid.
+    /// Records, durably, that `lease` takes the free `slot`: first the slot's `leased`,
+    /// then the lease's `created` with the slot's uid.
     ///
     /// # Errors
     /// The lease was created before, the slot is not free, or a write failed (a failed
     /// `created` leaves the slot leased to a lease that is not live, which the boot reset
     /// resets).
-    pub fn record_leased(&mut self, slot: Slot, lease: LeaseId, admin: bool) -> io::Result<()> {
+    pub fn record_leased(&mut self, slot: Slot, lease: LeaseId) -> io::Result<()> {
         let Some(SlotEntry {
             uid,
             state: SlotState::Free,
@@ -278,13 +278,14 @@ impl Ledger {
             return Err(refused(format!("slot {slot} is not free")));
         };
         self.admit(Record::Created(lease, uid)).map_err(refused)?;
-        self.pool.append(pool::Record::Leased(slot, lease, admin))?;
+        self.pool.append(pool::Record::Leased(slot, lease, false))?;
         self.append(Record::Created(lease, uid))
     }
 
     /// Records, durably, that `lease`, which holds `slot`, is over: first the lease's
-    /// `deleted`, then the slot's `resetting` (`resetting <slot> replace` for an
-    /// administrator's lease).
+    /// `deleted`, then the slot's `resetting` (`resetting <slot> replace` for a slot a
+    /// release that made administrators recorded as an administrator's: the word is kept
+    /// for the format's sake, and the helper resets that slot in place like any other).
     ///
     /// # Errors
     /// The lease is not live, `slot` is not leased to it, or a write failed (a failed
@@ -319,8 +320,9 @@ impl Ledger {
         self.pool.append(pool::Record::Resetting(slot, replace))
     }
 
-    /// Whether `slot` is leased to an administrator's lease: its user is then replaced,
-    /// never reset, and its `resetting` says so.
+    /// Whether `slot` is leased to an administrator's lease, which only a ledger written by
+    /// a release that made administrators holds: its `resetting` says so (the helper resets
+    /// it in place all the same).
     fn leased_admin(&self, slot: Slot) -> bool {
         matches!(
             self.slot(slot),
@@ -339,7 +341,7 @@ impl Ledger {
         self.pool.append(pool::Record::Free(slot))
     }
 
-    /// Records, durably, that `slot`'s user could be neither reset nor replaced: the slot
+    /// Records, durably, that `slot`'s user could not be reset in place: the slot
     /// is broken, and leased to no one.
     ///
     /// # Errors
@@ -424,7 +426,7 @@ mod tests {
     }
 
     /// Catches: a ledger kept only in memory, under which a restart (or reboot)
-    /// forgets used lease ids and a grant or a name can be used again.
+    /// forgets used lease ids and a name can be used again.
     #[test]
     fn records_survive_reopening() {
         let _path_own = dir("reopen");
@@ -455,7 +457,7 @@ mod tests {
         assert_eq!(text, "created 1.1 600\ncreated 1.2 601\ndeleted 1.1\n");
     }
 
-    /// Catches: a second `created` for one lease accepted (a reused name or grant),
+    /// Catches: a second `created` for one lease accepted (a reused name),
     /// or a deletion of a lease that is not live.
     #[test]
     fn a_lease_is_created_once_and_deleted_once() {

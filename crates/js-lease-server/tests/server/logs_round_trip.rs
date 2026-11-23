@@ -266,6 +266,9 @@ impl Cell {
         let body = serde_json::to_value(&beat).expect("a heartbeat");
         let router = self.server.agent_router();
         let answer = routed(&router, "POST", "/v1/agent/heartbeat", JOIN, Some(&body)).await;
+        // The placement poller's turn, which the server runs on a task of its own right after a
+        // heartbeat or a submit pokes it, and which the server in process leaves to its caller.
+        self.server.poll().await;
         assert_eq!(
             answer.status,
             200,
@@ -395,6 +398,7 @@ impl Cell {
             logs: Some(report),
             input_failure: None,
             usage: None,
+            cpu_series: None,
         };
         let ended = vec![HeldJob {
             job_id: job.start.job_id.clone(),

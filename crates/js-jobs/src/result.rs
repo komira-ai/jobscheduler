@@ -2,7 +2,8 @@
 //! sections 3.2, 6.7 and 8, rows 3, 30 and 36).
 //!
 //! An ended job's record keeps its [`JobResult`] (exit code, reason, log tails, timing,
-//! resource usage, and the lengths of its live-log streams when the agent reported them) and
+//! resource usage, the lengths of its live-log streams and its CPU series when the agent
+//! reported them) and
 //! its retention end, both written by [`crate::JobStore::end_job`] in
 //! the transaction that ends the job. The retention end is a stored instant: the store's
 //! clock at the end plus the [`Retention`] window the store was opened with, so a window
@@ -21,6 +22,7 @@ use std::time::Duration;
 
 use js_agent_wire::limits::MAX_LOG_STREAM_LEN;
 use js_state::StoreTime;
+use js_types::CpuSeries;
 
 use crate::ids::JobId;
 use crate::record::{JobRecord, JobState, StartFailure};
@@ -62,6 +64,27 @@ pub struct JobTiming {
     pub ended_at: StoreTime,
 }
 
+/// The CPU throttle counters of a job's control group: `nr_periods` and `nr_throttled` of its
+/// `cpu.stat` when it ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CpuThrottle {
+    /// The scheduling periods the group lived through; 0 means the group had no `cpu.max`.
+    pub periods: u64,
+    /// The periods among them in which the group was throttled.
+    pub throttled_periods: u64,
+}
+
+/// The most CPU a job's control group used over any window of its run, as the agent measured
+/// it from its one-second samples of `cpu.stat`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CpuPeak {
+    /// The peak, in millicores (1000 is one CPU busy for the whole window).
+    pub millicores: u64,
+    /// The window it was measured over, in microseconds; a run shorter than the agent's
+    /// window reports its whole-run mean with its wall time as the window.
+    pub window_usec: u64,
+}
+
 /// What a job used, as the agent reported it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResourceUsage {
@@ -69,6 +92,15 @@ pub struct ResourceUsage {
     pub cpu_time: Duration,
     /// The most memory it held at once, in bytes.
     pub peak_memory_bytes: u64,
+    /// The CPU throttle counters of its control group when it ended. `None` when the agent
+    /// did not report them (an agent from before the field, or an unreadable counter).
+    pub cpu_throttle: Option<CpuThrottle>,
+    /// The time some task of its group waited for a CPU (the `some` total of `cpu.pressure`).
+    /// `None` when the agent did not report it.
+    pub cpu_pressure_some: Option<Duration>,
+    /// The most CPU its group used over a window of its run. `None` when the agent did not
+    /// report it.
+    pub cpu_peak: Option<CpuPeak>,
 }
 
 /// The length of each output stream of a job and the bytes of each that the host's capture
@@ -109,6 +141,9 @@ pub struct JobResult {
     /// The lengths of its output streams; `None` when the agent reported none (a runtime that
     /// does not upload live logs, or a build from before them).
     pub logs: Option<LogLengths>,
+    /// Its CPU second by second over its run, when the agent reported it; kept as reported
+    /// beside `usage` and never part of it.
+    pub cpu_series: Option<CpuSeries>,
     /// With [`ResultReason::InputFailed`], the agent's code of the input that failed
     /// (`input-unreadable`, `host-port-lost`); `None` otherwise.
     pub input_failure: Option<String>,
@@ -129,6 +164,8 @@ pub struct Output {
     pub usage: Option<ResourceUsage>,
     /// The lengths of its output streams, when the agent reported them.
     pub logs: Option<LogLengths>,
+    /// Its CPU over its run, when the agent reported a well-formed series.
+    pub cpu_series: Option<CpuSeries>,
 }
 
 /// How a job ended: what [`crate::JobStore::end_job`] records.
@@ -344,6 +381,7 @@ pub(crate) fn ended(
                 timing,
                 usage: output.usage,
                 logs: output.logs,
+                cpu_series: output.cpu_series,
                 input_failure,
             }
         });
@@ -455,6 +493,7 @@ mod tests {
             failed_prepares: 0,
             prepare_bars: std::collections::BTreeMap::new(),
             held_refusals: Vec::new(),
+            capacity_refusals: Vec::new(),
             queue: crate::QueueTrail::default(),
             carried: crate::codec::Carried::default(),
             start_failure_detail: None,
@@ -469,15 +508,23 @@ mod tests {
             usage: Some(ResourceUsage {
                 cpu_time: Duration::from_millis(1500),
                 peak_memory_bytes: 4096,
+                cpu_throttle: None,
+                cpu_pressure_some: None,
+                cpu_peak: None,
             }),
             logs: Some(LENGTHS),
+            cpu_series: Some(series()),
         }
+    }
+
+    fn series() -> CpuSeries {
+        CpuSeries::new(4, vec![8, 16], 6_000_000, false).expect("a series")
     }
 
     // Catches an end mapped to the wrong state or reason (a clean exit read as failed, a wall
     // limit read as an exit, a cancel without its reason), an exit code dropped or invented,
-    // the stream lengths the host reported dropped from the result, and a result made for a
-    // job that was lost or failed to start.
+    // the stream lengths or the CPU series the host reported dropped from the result, and a
+    // result made for a job that was lost or failed to start.
     #[test]
     fn every_end_has_its_state_and_its_result() {
         let cases = [
@@ -563,8 +610,12 @@ mod tests {
                         usage: Some(ResourceUsage {
                             cpu_time: Duration::from_millis(1500),
                             peak_memory_bytes: 4096,
+                            cpu_throttle: None,
+                            cpu_pressure_some: None,
+                            cpu_peak: None,
                         }),
                         logs: Some(LENGTHS),
+                        cpu_series: Some(series()),
                         input_failure: None,
                     },
                     "{end:?}"

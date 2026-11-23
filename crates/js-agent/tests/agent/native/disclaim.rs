@@ -1,14 +1,20 @@
-//! Every process started for a job answers to the privacy controls (TCC) for itself, never
-//! for the helper or the agent that started it, so no grant of theirs reaches it
-//! (`js_mac_session::disclaim`). Each test reads the responsible process back through the
-//! system's own interface while the process runs: the job says on a pipe that its final
-//! program is running, and waits for a line on its input, which the test sends only after
-//! it has looked, so nothing races a clock.
+//! Which process each program the agent and the helper start answers to for the privacy
+//! controls (TCC), and so whose grants it holds (`js_mac_session::disclaim`). A start is
+//! disclaimed unless it keeps the responsibility: then the program answers for the process its
+//! starter answers for. Two starts keep it, a native job's supervisor and the job's program,
+//! so that a job answers for the agent and holds its Full Disk Access; every other program
+//! the agent starts (a probe, `pfctl`), and every job the helper starts, answers for itself.
 //!
-//! The hosted runner has no grant to give, so these tests check the disclaim, not a read
-//! that a grant would have allowed. They also check that the disclaimed execution finds
-//! and runs the program as `execvp` would (the macOS start no longer goes through it), in
-//! the job's own environment and working directory.
+//! Each test reads the responsible process back through the system's own interface while the
+//! process runs: the program says on a pipe that it is running, and waits for a line on its
+//! input, which the test sends only after it has looked, so nothing races a clock. The test
+//! process stands in for the agent: what answers for the agent answers for the test's own
+//! responsible process (the agent, a launchd daemon, is its own).
+//!
+//! The hosted runner has no grant to give, so these tests check which process answers, not a
+//! read that a grant would have allowed. They also check that the disclaimed execution finds
+//! and runs the program as `execvp` would (the macOS start no longer goes through it), in the
+//! job's own environment and working directory.
 
 use std::ffi::OsString;
 use std::io::{BufRead as _, BufReader, PipeReader, PipeWriter, Read as _, Write as _};
@@ -19,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
 use js_mac_provision::pfctl::{Pfctl as _, SystemPfctl};
-use js_mac_session::disclaim::{Program, responsible_pid};
+use js_mac_session::disclaim::{Kept, Program, responsible_pid};
 use js_mac_session::proto::Session;
 use js_mac_session::spawn::{self, Spawn};
 
@@ -43,10 +49,12 @@ struct Job {
 }
 
 impl Job {
-    /// The next line the job printed, without its newline.
+    /// The next line the job printed, without its newline; the job ending first fails the
+    /// test.
     fn line(&mut self) -> String {
         let mut line = String::new();
-        self.out.read_line(&mut line).unwrap();
+        let read = self.out.read_line(&mut line).unwrap();
+        assert_ne!(read, 0, "the job ended before it printed a line");
         line.trim_end().to_owned()
     }
 
@@ -112,11 +120,11 @@ fn printed(mut job: Job) -> String {
 }
 
 /// A job's process, started as the helper starts every job, is its own responsible
-/// process, read once its program has printed. It catches a start that does not disclaim
-/// the responsibility: the job would answer for the helper, and use any grant the helper
-/// was given.
+/// process, read once its program has printed: the helper's start is not one of the two that
+/// keep the responsibility. It catches a helper start that keeps it: the job would answer for
+/// the helper, not for the agent whose grant a job is to hold.
 #[test]
-fn spawned_job_has_responsibility_disclaimed() {
+fn a_job_the_helper_starts_answers_for_itself() {
     let dir = Scratch::new("disclaim-job");
     let mut job = start(&dir.path(""), &READY, &[]).unwrap();
     let pid = job.child.id();
@@ -129,11 +137,11 @@ fn spawned_job_has_responsibility_disclaimed() {
     job.finish();
 }
 
-/// A native job runs as `sandbox-exec ... <program>`: once the program itself has printed
-/// (so `sandbox-exec` has executed it), it is still its own responsible process. It
-/// catches a disclaim lost on the way from `sandbox-exec` to the job's program.
+/// A native job the helper starts runs as `sandbox-exec ... <program>`: once the program
+/// itself has printed (so `sandbox-exec` has executed it), it is still its own responsible
+/// process. It catches a disclaim lost on the way from `sandbox-exec` to the job's program.
 #[test]
-fn a_job_under_sandbox_exec_answers_for_itself() {
+fn a_helper_job_under_sandbox_exec_answers_for_itself() {
     let dir = Scratch::new("disclaim-sandbox");
     let argv = [
         "/usr/bin/sandbox-exec",
@@ -154,11 +162,11 @@ fn a_job_under_sandbox_exec_answers_for_itself() {
     job.finish();
 }
 
-/// What a job starts the usual way, a child and a grandchild, answers for the job, not
-/// for the helper. It catches a disclaim that the job's own processes escape (they would
-/// answer for the helper again), the one guarantee the documentation gives for them.
+/// What a job the helper starts starts the usual way, a child and a grandchild, answers for
+/// the job, not for the helper: a process's children follow it. It catches a disclaim that
+/// the job's own processes escape (they would answer for the helper again).
 #[test]
-fn a_jobs_children_answer_for_the_job() {
+fn a_helper_jobs_children_answer_for_the_job() {
     let dir = Scratch::new("disclaim-descendants");
     // Each shell ends with `:` so that none executes its last command in its own place.
     let script =
@@ -181,8 +189,9 @@ fn a_jobs_children_answer_for_the_job() {
 }
 
 /// A program the agent starts itself (a probe, the `sandbox-exec` self-test) is its own
-/// responsible process too. It catches a [`Program`] that disclaims only when it is given
-/// steps, as the helper's runs are.
+/// responsible process too: it does not keep the responsibility. It catches a [`Program`]
+/// that disclaims only when it is given steps, as the helper's runs are, or one that keeps
+/// the responsibility by default.
 #[test]
 fn a_program_the_agent_starts_answers_for_itself() {
     let (stdin, mut feed) = std::io::pipe().unwrap();
@@ -201,7 +210,8 @@ fn a_program_the_agent_starts_answers_for_itself() {
     assert!(child.wait().unwrap().success());
 }
 
-/// The agent's `pfctl`, which js-mac-provision starts for the agent, is started disclaimed:
+/// The agent's `pfctl`, which js-mac-provision starts for the agent, is started disclaimed (a
+/// firewall tool given fixed arguments needs no grant):
 /// a stand-in started through `SystemPfctl` sends its pid through a named pipe and waits on
 /// another while the test looks. It catches a program the agent starts through a dependency
 /// that bypasses the spawner.
@@ -250,6 +260,236 @@ fn the_agents_pfctl_answers_for_itself() {
     assert_eq!(ran.unwrap().code, Some(0));
     let (pid, responsible) = said.unwrap();
     assert_eq!(responsible.unwrap(), pid);
+}
+
+/// The responsible process of this test process: what a program that keeps its starter's
+/// responsibility answers for, as a job answers for the agent.
+fn starters() -> u32 {
+    responsible_pid(std::process::id()).unwrap()
+}
+
+/// Starts [`READY`] through a [`Program`], keeping the responsibility for `kept`, and waits
+/// until it has said it is ready; returns it and its pid.
+fn ready(kept: Option<Kept>) -> (Job, u32) {
+    let (stdin, feed) = std::io::pipe().unwrap();
+    let (out, out_end) = std::io::pipe().unwrap();
+    let mut program = Program::new(READY[0], &READY[1..]);
+    program.stdin(stdin).stdout(out_end);
+    if let Some(why) = kept {
+        program.keep_responsibility(why);
+    }
+    let child = program.spawn().unwrap();
+    // The program holds the pipes' other ends until it is dropped: dropped here, a job that
+    // ends early is read as the end of its output, not waited for.
+    drop(program);
+    let mut job = Job {
+        child,
+        out: BufReader::new(out),
+        feed,
+    };
+    let pid = job.child.id();
+    assert_eq!(job.line(), format!("ready {pid}"));
+    (job, pid)
+}
+
+/// A job's program started keeping the responsibility (as a supervisor starts it) answers
+/// for its starter's responsible process, not for itself: it holds what the agent holds. It
+/// catches a keep that still disclaims, under which a job is judged by its own signature and
+/// refused the network file system mount its build trees are served from.
+#[test]
+fn a_job_that_keeps_its_responsibility_answers_for_its_starter() {
+    let (job, pid) = ready(Some(Kept::Job));
+    let mine = starters();
+    assert_ne!(mine, pid);
+    assert_eq!(
+        responsible_pid(pid).unwrap(),
+        mine,
+        "the job answers for itself"
+    );
+    job.finish();
+}
+
+/// What a job started keeping the responsibility starts the usual way, a child and a
+/// grandchild, answers for the job's starter too: a compiler or a shell the job runs holds the
+/// same grants as the job. It catches a keep that only the job's first process gets.
+#[test]
+fn a_kept_jobs_children_and_grandchildren_answer_for_its_starter() {
+    // Each shell ends with `:` so that none executes its last command in its own place.
+    let script =
+        r#"echo job $$; /bin/sh -c 'echo child $$; /bin/sh -c "echo grand \$\$; read line"; :'; :"#;
+    let (stdin, feed) = std::io::pipe().unwrap();
+    let (out, out_end) = std::io::pipe().unwrap();
+    let mut job = Job {
+        child: Program::new("/bin/sh", ["-c", script])
+            .keep_responsibility(Kept::Job)
+            .stdin(stdin)
+            .stdout(out_end)
+            .spawn()
+            .unwrap(),
+        out: BufReader::new(out),
+        feed,
+    };
+    let pid = job.child.id();
+    assert_eq!(job.line(), format!("job {pid}"));
+    let mine = starters();
+    for name in ["child", "grand"] {
+        let line = job.line();
+        let theirs: u32 = line
+            .strip_prefix(&format!("{name} "))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_ne!(theirs, pid, "{name} is the job itself");
+        assert_eq!(responsible_pid(theirs).unwrap(), mine, "{name}");
+    }
+    assert_eq!(responsible_pid(pid).unwrap(), mine, "the job");
+    job.finish();
+}
+
+/// How the stand-in supervisor starts its job: `kept` or `disclaimed`, from the test that
+/// starts the stand-in.
+const STAND_IN_JOB: &str = "JS_DISCLAIM_TEST_STAND_IN_JOB";
+
+/// The stand-in supervisor the chain tests start in a process of its own, as the agent starts
+/// a native job's supervisor: it says its pid, then starts [`READY`] as its job through a
+/// [`Program`], keeping the responsibility when the parent asks for `kept`, with its own
+/// input and output, and waits for it. Ignored in a plain run: it needs its parent.
+#[test]
+#[ignore = "run by the chain tests as a stand-in supervisor, in a process of its own"]
+fn stand_in_supervisor_starts_its_job() {
+    let how = std::env::var(STAND_IN_JOB).expect("the parent test says how to start the job");
+    let mut job = Program::new(READY[0], &READY[1..]);
+    if how == "kept" {
+        job.keep_responsibility(Kept::Job);
+    } else {
+        assert_eq!(how, "disclaimed", "no way to start a job called so");
+    }
+    println!("supervisor {}", std::process::id());
+    let status = job.spawn().unwrap().wait().unwrap();
+    assert!(status.success(), "{status}");
+}
+
+/// What a chain of starts reads: the pid of the supervisor and of its job, and the responsible
+/// process of each.
+struct Chain {
+    supervisor: u32,
+    job: u32,
+    supervisor_answers_for: u32,
+    job_answers_for: u32,
+}
+
+/// Starts the stand-in supervisor, keeping the responsibility for `supervisor`, with its job
+/// started `job` (`kept` or `disclaimed`), reads both answers while the job waits, then ends
+/// the job and checks that the supervisor ran to the end.
+fn chain(supervisor: Option<Kept>, job: &str) -> Chain {
+    let (stdin, mut feed) = std::io::pipe().unwrap();
+    let (out, out_end) = std::io::pipe().unwrap();
+    let test = std::env::current_exe().unwrap();
+    let mut program = Program::new(
+        test,
+        [
+            "--exact",
+            "native::disclaim::stand_in_supervisor_starts_its_job",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ],
+    );
+    program.env(STAND_IN_JOB, job).stdin(stdin).stdout(out_end);
+    if let Some(why) = supervisor {
+        program.keep_responsibility(why);
+    }
+    let mut started = program.spawn().unwrap();
+    // The program holds the pipes' other ends until it is dropped: dropped here, a stand-in
+    // that ends early is read as the end of its output, not waited for.
+    drop(program);
+    let mut out = BufReader::new(out);
+    // libtest's own `test <name> ... ` may come first on the line a pid is on.
+    let (mut said_supervisor, mut said_job) = (None, None);
+    while said_supervisor.is_none() || said_job.is_none() {
+        let mut line = String::new();
+        assert_ne!(out.read_line(&mut line).unwrap(), 0, "the stand-in ended");
+        let pid = |word: &str| {
+            line.split_once(word)
+                .map(|(_, pid)| pid.trim().parse::<u32>().unwrap())
+        };
+        said_supervisor = said_supervisor.or(pid("supervisor "));
+        said_job = said_job.or(pid("ready "));
+    }
+    let (supervisor, job) = (said_supervisor.unwrap(), said_job.unwrap());
+    let read = Chain {
+        supervisor,
+        job,
+        supervisor_answers_for: responsible_pid(supervisor).unwrap(),
+        job_answers_for: responsible_pid(job).unwrap(),
+    };
+    feed.write_all(b"done\n").unwrap();
+    drop(feed);
+    let status = started.wait().unwrap();
+    assert!(status.success(), "{status}");
+    assert_eq!(supervisor, started.id());
+    read
+}
+
+/// The chain the agent runs a native job by: the agent starts the supervisor keeping the
+/// responsibility, and the supervisor starts the job keeping it, so the job answers for the
+/// agent (here, for the test's own responsible process), and so does the supervisor. It
+/// catches a supervisor or a job start that disclaims: the job would answer for the
+/// supervisor or for itself, and lose the agent's grant.
+#[test]
+fn a_job_started_by_a_kept_supervisor_answers_for_the_agent() {
+    let read = chain(Some(Kept::Supervisor), "kept");
+    let mine = starters();
+    assert_ne!(read.job, read.supervisor);
+    assert_ne!(mine, read.supervisor);
+    assert_eq!(read.supervisor_answers_for, mine, "the supervisor");
+    assert_eq!(read.job_answers_for, mine, "the job");
+}
+
+/// Any start in the chain that disclaims breaks it: a supervisor started disclaimed answers
+/// for itself, and its job, kept, answers for the supervisor, not the agent; a supervisor
+/// started kept whose job is disclaimed leaves the job answering for itself. Without this, a
+/// read-back that named the test's responsible process for every process of the chain would
+/// pass the test above.
+#[test]
+fn a_disclaimed_start_in_the_chain_breaks_it() {
+    let read = chain(None, "kept");
+    assert_eq!(
+        read.supervisor_answers_for, read.supervisor,
+        "the supervisor"
+    );
+    assert_eq!(read.job_answers_for, read.supervisor, "the job");
+    let read = chain(Some(Kept::Supervisor), "disclaimed");
+    assert_eq!(read.supervisor_answers_for, starters(), "the supervisor");
+    assert_eq!(read.job_answers_for, read.job, "the job");
+}
+
+/// Programs started at the same moment from several threads, some keeping the responsibility
+/// and some not, each answer as their own start asked. It catches a keep that reaches another
+/// start, or a disclaim that does, through what the starts make before the fork.
+#[test]
+fn kept_and_disclaimed_starts_at_the_same_moment_keep_their_own_answer() {
+    let barrier = std::sync::Barrier::new(4);
+    let kinds = [Some(Kept::Job), None, Some(Kept::Supervisor), None];
+    let started: Vec<(Option<Kept>, (Job, u32))> = std::thread::scope(|scope| {
+        let threads: Vec<_> = kinds
+            .iter()
+            .map(|&kept| {
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    (kept, ready(kept))
+                })
+            })
+            .collect();
+        threads.into_iter().map(|t| t.join().unwrap()).collect()
+    });
+    let mine = starters();
+    for (kept, (job, pid)) in started {
+        let want = if kept.is_some() { mine } else { pid };
+        assert_eq!(responsible_pid(pid).unwrap(), want, "{kept:?}");
+        job.finish();
+    }
 }
 
 /// The read-back tells the two apart: a process started the usual way answers for the

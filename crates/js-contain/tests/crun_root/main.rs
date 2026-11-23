@@ -5,10 +5,14 @@
 //! says it should see.
 //!
 //! - `inside`: the ids the job runs as, its capabilities, the seccomp filter, the root's
-//!   read-only mount, `/tmp`, the network namespace, the cgroup's OOM group, the booking in
-//!   its own cgroup's `cpu.max` and `memory.max`, and the
-//!   exec-root overlay's options.
-//! - `limits`: an out-of-memory kill is the lease's own, a kill leaves no process or
+//!   read-only mount, `/tmp`, the network namespace, the cgroup's OOM group, no memory limit
+//!   and no `cpu.max` in its own cgroup, and the exec-root overlay's options.
+//! - `cpu`: the CPU booking is a share, never a ceiling: a lease that booked half a core
+//!   runs many busy processes and the kernel throttles none of its periods, the job counts
+//!   the node's CPUs, and leases that booked 1 and 3 cores hold weights 1 to 3; the memory
+//!   booking is no limit either: the lease's `memory.max` and `memory.swap.max` read `max`.
+//! - `limits`: an out-of-memory kill at a lease's own cap (the build-host policy's) is the
+//!   lease's own, a kill leaves no process or
 //!   cgroup, and one job that has used up its process limit does not stop another from
 //!   forking (the limit is the lease cgroup's `pids.max` or the job's `RLIMIT_NPROC`, and
 //!   both jobs run as the same ids).
@@ -41,6 +45,7 @@
 mod support;
 
 mod cell;
+mod cpu;
 mod gc;
 mod inside;
 mod isolation;

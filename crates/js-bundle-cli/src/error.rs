@@ -64,6 +64,15 @@ pub enum Error {
         /// The name.
         key: String,
     },
+    /// `push --to` is not `REGISTRY/REPOSITORY:TAG`.
+    #[error("--to {0:?} is not REGISTRY/REPOSITORY:TAG")]
+    Target(String),
+    /// `push --password-file` does not hold text.
+    #[error("{path}: the password file is not UTF-8 text")]
+    Password {
+        /// The file.
+        path: String,
+    },
     /// Something that must be a regular file is another kind of file.
     #[error("{path} is not a regular file")]
     NotRegular {

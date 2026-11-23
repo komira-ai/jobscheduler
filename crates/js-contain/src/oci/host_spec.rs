@@ -17,11 +17,11 @@
 //! | `process.args`          | the init at its bind in `/dev`, then the argv   | the init at its host path with `--end-descendants`, then the argv |
 //! | `cgroupsPath`           | `<lease cgroup>/ctr`                            | the same                                              |
 //! | pids limit, OOM group   | `resources.pids`, `memory.oom.group=1`          | the same                                              |
-//! | `cpu.max`, `memory.max` | the lease's, when the limits name a booking     | the same                                              |
+//! | `memory.max`            | none: the booking is no limit                   | the same                                              |
 //! | rlimits, OOM score      | `nofile`, `nproc`, no core dump; the default     | the same                                              |
 //!
-//! The memory and CPU limits that bound the job are the lease cgroup's, as for a contained
-//! job; the container's own cgroup repeats them ([`unified`]). A host spec
+//! The lease cgroup's settings are a host job's as a contained job's; the container's own
+//! cgroup gets the same files ([`unified`]). A host spec
 //! with a mount, a shared tree or a device is refused: the job sees the host's own paths
 //! and devices, and none of them could be given without changing the host. So is one given
 //! the FUSE device ([`ContainerSpec::fuse`]): it sees the host's own.

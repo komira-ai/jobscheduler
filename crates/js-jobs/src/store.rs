@@ -38,7 +38,7 @@ mod whole;
 mod written;
 
 pub use cordons::{CordonWrite, UncordonWrite};
-pub use held::HeldRequeue;
+pub use held::{HeldRequeue, RequeuedFor};
 
 pub use index::Backfill;
 pub use queue::queue_order;
@@ -381,6 +381,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             failed_prepares: 0,
             prepare_bars: BTreeMap::new(),
             held_refusals: Vec::new(),
+            capacity_refusals: Vec::new(),
             queue: QueueTrail::default(),
             carried: Carried::default(),
             start_failure_detail: None,

@@ -135,6 +135,19 @@ async fn fixture(name: &str) -> Fixture {
     for (from, times) in sources.into_iter().zip(1..) {
         (0..times).for_each(|_| recorder.job_tables(from));
     }
+    let (host_a, host_b) = (
+        HostId::new("host-a").unwrap(),
+        HostId::new("host-b").unwrap(),
+    );
+    for (host, reason, times) in [
+        (&host_a, "cpu", 3),
+        (&host_a, "predicted-memory", 1),
+        (&host_b, "booked-memory", 2),
+    ] {
+        (0..times).for_each(|_| recorder.placement_refused(host, reason));
+    }
+    (0..2).for_each(|_| recorder.start_refused(&host_a, "no-capacity"));
+    recorder.start_refused(&host_b, "input-not-allowed");
     let capacity = Acquired::Refused(Refusal {
         code: RefusalCode::Capacity,
         reason: Reason::Api("no capacity in the zone".to_owned()),
@@ -282,6 +295,83 @@ fn only_a_capacity_or_quota_refusal_fails_over() {
     };
     let expected = BTreeMap::from([("cpu".to_owned(), cpu), ("gpu".to_owned(), gpu)]);
     assert_eq!(recorder.acquires(), expected);
+}
+
+/// Asserts that the placer's pass tells the recorder each refusal through the pass sink, and
+/// that the recorder keeps them by host and reason: two for `cpu` on one host, one for
+/// `cold-cap` on it and one for `cpu` on another. It catches a pass sink that does not
+/// forward, and counts kept under the wrong host or reason.
+#[test]
+fn the_pass_sink_counts_each_refusal_by_host_and_reason() {
+    use js_sched_placer::engine::jobs::PassMetrics;
+    let recorder = Recorder::default();
+    let sink = PassSink(&recorder);
+    let (a, b) = (HostId::new("a").unwrap(), HostId::new("b").unwrap());
+    sink.refused(&a, "cpu");
+    sink.refused(&a, "cpu");
+    sink.refused(&a, "cold-cap");
+    sink.refused(&b, "cpu");
+    let expected = BTreeMap::from([
+        (("a".to_owned(), "cold-cap"), 1),
+        (("a".to_owned(), "cpu"), 2),
+        (("b".to_owned(), "cpu"), 1),
+    ]);
+    assert_eq!(recorder.refusals(), expected);
+}
+
+/// Asserts that a refusal is one line of the counter, labelled with its host and reason.
+#[test]
+fn a_refusal_is_written_with_its_host_and_reason_labels() {
+    let recorder = Recorder::default();
+    recorder.placement_refused(&HostId::new("h").unwrap(), "cpu");
+    let seen = super::render::Snapshot {
+        jobs: None,
+        hosts: Vec::new(),
+    };
+    let text = render(&seen, &recorder);
+    let line = "\njs_placement_refusals_total{host=\"h\",reason=\"cpu\"} 1\n";
+    assert!(text.contains(line), "{line} is not in:\n{text}");
+}
+
+/// Asserts that an agent's refusal code is a label of its own only when it is 1 to 64 characters
+/// of `a-z`, `0-9` and `-` (a code with a digit among them), and is counted as `other` otherwise (a capital, a space, a quote,
+/// no characters, 65 characters), and that with no refusal counted the family is only its HELP
+/// and TYPE lines. Catches a label value the agent's text chooses without bound.
+#[test]
+fn a_refusal_code_outside_the_label_rule_is_counted_as_other() {
+    let seen = super::render::Snapshot {
+        jobs: None,
+        hosts: Vec::new(),
+    };
+    let recorder = Recorder::default();
+    let empty = render(&seen, &recorder);
+    assert!(empty.contains("# TYPE js_agent_start_refusals_total counter\n"));
+    assert!(!empty.contains("js_agent_start_refusals_total{"), "{empty}");
+    let host = HostId::new("h").unwrap();
+    let longest = "a".repeat(64);
+    let too_long = "a".repeat(65);
+    for code in [
+        "no-capacity",
+        "tree-v2",
+        "No-capacity",
+        "no capacity",
+        "x\"y",
+        "",
+        &longest,
+        &too_long,
+    ] {
+        recorder.start_refused(&host, code);
+    }
+    let expected = BTreeMap::from([
+        (("h".to_owned(), "no-capacity".to_owned()), 1),
+        (("h".to_owned(), "tree-v2".to_owned()), 1),
+        (("h".to_owned(), "other".to_owned()), 5),
+        (("h".to_owned(), longest), 1),
+    ]);
+    assert_eq!(recorder.start_refusals(), expected);
+    let text = render(&seen, &recorder);
+    let line = "\njs_agent_start_refusals_total{host=\"h\",code=\"other\"} 5\n";
+    assert!(text.contains(line), "{line} is not in:\n{text}");
 }
 
 /// Asserts that a pool's name is written escaped in the text, so a name with a quote or a line

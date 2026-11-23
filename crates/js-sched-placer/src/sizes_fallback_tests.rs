@@ -1,8 +1,8 @@
 //! The fallback class ([`SIZE_FALLBACK_LABEL`]): a job whose own class has too few runs is
 //! booked from the history of the class it names there (a build step's kind, where its
-//! `size-class` is its target) before the cold size, and every run teaches both classes. The
-//! host is the module's: eight cores and 16 GiB, where the module's cold size is two cores and
-//! 4 GiB.
+//! `size-class` is its target), else from its client's, before the cold size, and every run
+//! teaches both classes and the client's. The host is the module's: 32 cores and 16 GiB,
+//! where the module's cold size is two cores and 4 GiB.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -16,7 +16,7 @@ use js_types::{Labels, ManualClock, Resources, Shape, Timestamp};
 use super::super::{SIZE_FALLBACK_LABEL, SizedFrom};
 use super::{
     GIB, JobSizes, MIB, MODULE_COLD, SIZE_CLASS_LABEL, Tables, allocation, booked, bounds, exited,
-    host, needs, of_class, output, pass, queued, ran, size, spec_of, taught,
+    host, needs, of_class, output, pass, queued, queued_by, ran, size, spec_of, taught,
 };
 use crate::engine::Settings;
 use crate::place::SchedPlacer;
@@ -77,11 +77,12 @@ fn five_targets(tables: &Tables, peak: u64, cpu: Duration) -> Vec<JobRecord> {
 /// it was booked the cold size before: five targets of the kind, one run each with a 1 GiB peak
 /// and one core, give a new target of the kind one core and 1.5 GiB (`1.2 x 1 GiB + 128 MiB`
 /// rounded up to 256 MiB), and give each of those five targets (one run of their own) the same.
-/// The same job without the fallback label, or naming a kind with no runs, is still booked the
-/// cold size. Catches a fallback label that is not read, a run not taught to its kind, and a
-/// kind's history that sizes jobs naming another kind.
+/// The same job without the fallback label, or naming a kind with no runs, is booked from its
+/// client's history (every run of the client taught it: the same figures, `sized_from`
+/// fallback) and, for a client with no run, the cold size. Catches a fallback label that is not
+/// read, a run not taught to its kind, and a client's history that is not the last fallback.
 #[test]
-fn a_target_with_no_runs_is_booked_from_its_kinds_runs_before_the_cold_size() {
+fn a_target_with_no_runs_is_booked_from_its_kinds_runs_else_its_clients_before_the_cold_size() {
     let tables = Tables::new();
     let jobs = five_targets(&tables, GIB, Duration::from_secs(10));
     let sizes = taught(&jobs, booked(2000, 4 * GIB));
@@ -91,23 +92,39 @@ fn a_target_with_no_runs_is_booked_from_its_kinds_runs_before_the_cold_size() {
     assert_eq!(sizes.sized_from(&fresh, Day(0)), Some(SizedFrom::Fallback));
     assert_eq!(size(&sizes, &step("t0-again", "t0")), kind_size);
     let unlabelled = queued("unlabelled", of_class("fresh", needs(0, 0)));
-    assert_eq!(size(&sizes, &unlabelled), (2000, 4 * GIB), "no fallback");
-    assert_eq!(sizes.sized_from(&unlabelled, Day(0)), Some(SizedFrom::Cold));
+    assert_eq!(
+        size(&sizes, &unlabelled),
+        kind_size,
+        "no fallback: the client's"
+    );
+    assert_eq!(
+        sizes.sized_from(&unlabelled, Day(0)),
+        Some(SizedFrom::Fallback)
+    );
     let other = queued("other", of_kind("fresh", "cargo-test", needs(0, 0)));
-    assert_eq!(size(&sizes, &other), (2000, 4 * GIB), "another kind");
+    assert_eq!(
+        size(&sizes, &other),
+        kind_size,
+        "another kind: the client's"
+    );
+    let stranger = queued_by(
+        Some("stranger"),
+        "stranger",
+        of_kind("fresh", KIND, needs(0, 0)),
+    );
+    assert_eq!(size(&sizes, &stranger), (2000, 4 * GIB), "another client");
+    assert_eq!(sizes.sized_from(&stranger, Day(0)), Some(SizedFrom::Cold));
 }
 
 /// Asserts how a target's own runs take over from its kind: with a kind whose runs peak at
 /// 3 GiB and use three cores (3.75 GiB), a target whose runs peak at 512 MiB and use half a
-/// core books the kind's size after one run of its own (too few to estimate), the kind's
-/// memory and its own CPU after two to four (its memory may only rise from the kind's, as it
-/// may only rise from the cold size without one), and its own size (half a core and 1 GiB, the
-/// least) from its fifth run on, as without a fallback. A target whose runs carry no CPU
-/// sample books the kind's CPU, where without a fallback it books the estimator's two cores.
-/// Catches a target held at its kind after five runs, a target lowered below its kind on too
-/// few runs, and a learned CPU replaced by the kind's.
+/// core books its own size (half a core and 1 GiB, the least) from its first run on, not the
+/// kind's memory. A target whose runs carry no CPU sample books its own memory and the kind's
+/// CPU; with no fallback and no CPU sample anywhere (another client's class of five such runs)
+/// it books the cold CPU, not the estimator's two cores. Catches a target held at its kind's
+/// largest peak after runs of its own, and a learned CPU replaced by the kind's.
 #[test]
-fn a_targets_own_runs_raise_it_from_its_kind_and_take_over_at_five() {
+fn a_targets_own_runs_size_it_from_its_first_run_and_not_its_kinds_largest_peak() {
     let tables = Tables::new();
     let kind_jobs = five_targets(&tables, 3 * GIB, Duration::from_secs(30));
     let small = target_runs(&tables, "small", 5, (MIB * 512, Duration::from_secs(5)));
@@ -118,20 +135,18 @@ fn a_targets_own_runs_raise_it_from_its_kind_and_take_over_at_five() {
         (size(&sizes, &next), sizes.sized_from(&next, Day(0)))
     };
     let kind = 15 * 256 * MIB;
-    let fallback = Some(SizedFrom::Fallback);
-    assert_eq!(after(1), ((3000, kind), fallback), "one run: the kind's");
-    for runs in 2..5 {
+    assert_eq!(
+        after(0),
+        ((3000, kind), Some(SizedFrom::Fallback)),
+        "no run of its own: the kind's"
+    );
+    for runs in 1..=5 {
         assert_eq!(
             after(runs),
-            ((500, kind), fallback),
-            "{runs} runs: raised from the kind"
+            ((500, GIB), Some(SizedFrom::Class)),
+            "{runs} runs: its own"
         );
     }
-    assert_eq!(
-        after(5),
-        ((500, GIB), Some(SizedFrom::Class)),
-        "five: its own"
-    );
 
     let mut jobs = kind_jobs;
     jobs.extend(target_runs(
@@ -141,12 +156,32 @@ fn a_targets_own_runs_raise_it_from_its_kind_and_take_over_at_five() {
         (MIB * 512, Duration::ZERO),
     ));
     let sizes = taught(&jobs, booked(2000, 4 * GIB));
-    assert_eq!(size(&sizes, &step("silent-next", "silent")), (3000, kind));
+    assert_eq!(size(&sizes, &step("silent-next", "silent")), (3000, GIB));
     let alone = queued("alone", of_class("silent", needs(0, 0)));
     assert_eq!(
         size(&sizes, &alone),
-        (2000, 4 * GIB),
-        "no fallback: two cores"
+        (3000, GIB),
+        "no fallback: the client's CPU, its own memory"
+    );
+
+    let tables = Tables::new();
+    let mute: Vec<JobRecord> = (0..5)
+        .map(|at| {
+            ran(
+                &tables,
+                (&format!("mute-{at}"), Some("mute")),
+                of_class("mute", needs(0, 0)),
+                booked(2000, 4 * GIB),
+                exited(0, MIB * 512, Duration::ZERO),
+            )
+        })
+        .collect();
+    let sizes = taught(&mute, booked(2000, 4 * GIB));
+    let next = queued_by(Some("mute"), "mute-next", of_class("mute", needs(0, 0)));
+    assert_eq!(
+        size(&sizes, &next),
+        (2000, GIB),
+        "settled, no CPU sample: the cold CPU"
     );
 }
 
@@ -203,27 +238,24 @@ fn a_kill_of_a_target_booked_from_its_kind_raises_the_target_and_the_kind() {
     assert_eq!(size(&sizes, &step("sibling", "sibling")), (1000, raised));
 }
 
-/// Asserts that a kind with no estimate is no fallback: one run of the kind leaves a new
-/// target at the cold size; two runs (an estimate that may only rise from the cold memory)
-/// give the kind's CPU and the cold memory; a kind whose runs reach the host's memory leaves
-/// a new target at the cold size, not the whole host. Catches a kind of one run trusted, and
-/// a whole-host booking handed from a kind to a target that may be small.
+/// Asserts that a kind teaches a new target from even one run, and that one whose runs reach
+/// the host's memory does not: one run, or two, of the kind give a new target the kind's CPU
+/// (a core) and memory (1.5 GiB); a kind whose runs reach the host's memory gives its CPU and
+/// leaves the memory at the cold size, not the whole host. Catches a kind of one run ignored,
+/// and a whole-host booking handed from a kind to a target that may be small.
 #[test]
-fn a_kind_with_no_estimate_leaves_a_new_target_at_the_cold_size() {
+fn a_kind_of_one_run_sizes_a_new_target_and_one_over_the_host_leaves_its_memory_cold() {
     let tables = Tables::new();
     let one = GIB;
     let cpu = Duration::from_secs(10);
     let jobs = kind_runs(&tables, &["a0", "a1"], KIND, (one, cpu));
     let fresh = step("fresh", "fresh");
     let sizes = taught(&jobs[..1], booked(2000, 4 * GIB));
-    assert_eq!(size(&sizes, &fresh), (2000, 4 * GIB), "one run: cold");
-    assert_eq!(sizes.sized_from(&fresh, Day(0)), Some(SizedFrom::Cold));
+    let kind = (1000, 6 * 256 * MIB);
+    assert_eq!(size(&sizes, &fresh), kind, "one run");
+    assert_eq!(sizes.sized_from(&fresh, Day(0)), Some(SizedFrom::Fallback));
     let sizes = taught(&jobs, booked(2000, 4 * GIB));
-    assert_eq!(
-        size(&sizes, &fresh),
-        (1000, 4 * GIB),
-        "two runs: raise-only"
-    );
+    assert_eq!(size(&sizes, &fresh), kind, "two runs");
     assert_eq!(sizes.sized_from(&fresh, Day(0)), Some(SizedFrom::Fallback));
     let huge = (14 * GIB, cpu);
     let jobs = kind_runs(&tables, &["h0", "h1"], "huge-kind", huge);
@@ -231,8 +263,8 @@ fn a_kind_with_no_estimate_leaves_a_new_target_at_the_cold_size() {
     let fresh = queued("fresh-huge", of_kind("fresh", "huge-kind", needs(0, 0)));
     assert_eq!(
         size(&sizes, &fresh),
-        (2000, 4 * GIB),
-        "a kind over the host"
+        (1000, 4 * GIB),
+        "a kind over the host: its CPU, the cold memory"
     );
     assert_eq!(sizes.sized_from(&fresh, Day(0)), Some(SizedFrom::Cold));
 }
@@ -286,7 +318,7 @@ fn a_target_whose_own_runs_are_stale_is_booked_from_its_kind() {
 }
 
 /// Asserts that a job whose fallback label names its own class teaches that class once (one
-/// sample, not two), and has no fallback class; and that a fallback class is keyed as the
+/// sample, not two; and its client's history once), and has no fallback class; and that a fallback class is keyed as the
 /// `size-class` of that name is, under the job's own client and platform: the runs of a
 /// target named `zig-cc` are the history of the kind `zig-cc`, and another client's or
 /// platform's `zig-cc` is another class. Catches a run counted twice (five runs would settle
@@ -303,9 +335,16 @@ fn a_fallback_class_is_the_class_of_that_name_for_the_jobs_client_and_platform()
     );
     assert_eq!(JobSizes::fallback_key_of(&same), None);
     let sizes = taught(&[same], booked(2000, 4 * GIB));
-    assert_eq!(sizes.summaries.len(), 1);
-    let key = JobSizes::key_of(&queued("k", of_class("k", needs(0, 0))));
+    assert_eq!(
+        sizes.summaries.len(),
+        2,
+        "the class and the client's history"
+    );
+    let job = queued("k", of_class("k", needs(0, 0)));
+    let key = JobSizes::key_of(&job);
     assert_eq!(sizes.summaries.get(&key).map(|s| s.samples()), Some(1));
+    let client = JobSizes::client_key_of(&job);
+    assert_eq!(sizes.summaries.get(&client).map(|s| s.samples()), Some(1));
 
     let fresh = step("fresh", "fresh");
     let named = queued("named", of_class(KIND, needs(0, 0)));
@@ -407,13 +446,13 @@ fn process_sink() {
 }
 
 /// Asserts the pass end to end: five targets of a kind run once each through the passes
-/// (the first two placed cold, the next three at the kind's one core and, the kind having
-/// fewer than five runs, the cold memory; each freed run taught to its kind), and the pass
+/// (the first placed cold, the next four at the kind's one core and 1.5 GiB, from even the
+/// one run the kind has; each freed run taught to its kind), and the pass
 /// then places a new
 /// target of the kind booked one core and 1.5 GiB from the kind's runs, beside a job that
 /// names its size and is placed as it names it. Each placement of a job the history sized
 /// logs one line naming the job, its host, its class and what sized it (`cold` for the
-/// first two, `fallback` after), and the job that names its size logs none. Catches a pass
+/// first, `fallback` after), and the job that names its size logs none. Catches a pass
 /// that teaches only the target class, so every new target of a build stays cold, and a
 /// placement log that is lost, names the wrong source or logs a job the history did not size.
 #[test]
@@ -435,7 +474,7 @@ fn a_pass_books_a_new_target_from_the_runs_its_kind_had_in_earlier_passes() {
     };
     let placer = SchedPlacer::new(settings, clock);
     let caps = BTreeMap::from([("arch".to_owned(), "x86_64".to_owned())]);
-    let shape = Shape::new(Resources::new(8000, 16 * GIB, 0, None).unwrap(), caps);
+    let shape = Shape::new(Resources::new(32_000, 16 * GIB, 0, None).unwrap(), caps);
     placer.engine().host_up(&host("a"), &shape, super::at(0));
     let submit = |id: &str, spec: JobSpec| {
         let new = NewJob {
@@ -449,8 +488,11 @@ fn a_pass_books_a_new_target_from_the_runs_its_kind_had_in_earlier_passes() {
     for (run, target) in ["t0", "t1", "t2", "t3", "t4"].into_iter().enumerate() {
         submit(target, of_kind(target, KIND, needs(0, 0)));
         assert_eq!(pass(&placer, &tables).len(), 1);
-        let cpu = if run < 2 { 2000 } else { 1000 };
-        let expected = booked(cpu, 4 * GIB);
+        let expected = if run == 0 {
+            booked(2000, 4 * GIB)
+        } else {
+            booked(1000, 6 * 256 * MIB)
+        };
         assert_eq!(allocation(&tables, target), expected, "run {run}");
         finish(&tables, target, GIB, Duration::from_secs(10));
     }
@@ -473,7 +515,7 @@ fn a_pass_books_a_new_target_from_the_runs_its_kind_had_in_earlier_passes() {
     };
     let expected = [
         line("t0", "cold"),
-        line("t1", "cold"),
+        line("t1", "fallback"),
         line("t2", "fallback"),
         line("t3", "fallback"),
         line("t4", "fallback"),
@@ -594,7 +636,7 @@ fn a_start_teaches_each_kind_from_the_ended_jobs_of_its_targets() {
     let placer = SchedPlacer::new(settings, clock);
     assert_eq!(placer.learn_ended(&tables.jobs).unwrap(), 5);
     let caps = BTreeMap::from([("arch".to_owned(), "x86_64".to_owned())]);
-    let shape = Shape::new(Resources::new(8000, 16 * GIB, 0, None).unwrap(), caps);
+    let shape = Shape::new(Resources::new(32_000, 16 * GIB, 0, None).unwrap(), caps);
     placer.engine().host_up(&host("a"), &shape, super::at(0));
     let new = NewJob {
         id: Some(JobId::parse("fresh").unwrap()),

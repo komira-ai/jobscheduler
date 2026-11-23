@@ -16,7 +16,7 @@ use std::time::Duration;
 use js_agent_wire::{HostPort, JobMount, Layer, MountMode, MountSource, PortProtocol, Propagation};
 use js_state::conformance::Backend;
 use js_state::{CommitStats, Cond, ManualClock, Store, Txn, Versioned};
-use js_types::{ExecMode, HostId, ImageDigestRef, Labels, ReservedKey, Resources};
+use js_types::{CpuSeries, ExecMode, HostId, ImageDigestRef, Labels, ReservedKey, Resources};
 
 use crate::interfere::Interfere;
 use crate::{
@@ -244,6 +244,7 @@ where
     a_cancel_of_a_queued_job_drops_its_mark_in_the_same_commit(backend);
     a_failed_prepare_requeues_the_job_with_its_count_and_bars(backend);
     a_held_refusal_requeues_the_job_without_counting_a_failure(backend);
+    a_capacity_refusal_requeues_the_job_and_names_the_host_in_its_own_list(backend);
     a_held_refusal_refuses_what_it_cannot_requeue(backend);
     a_held_refusal_loses_to_a_change_of_either_row(backend);
     the_last_failed_prepare_ends_the_job_failed_to_start(backend);
@@ -442,6 +443,7 @@ macro_rules! job_store_tests {
             a_cancel_of_a_queued_job_drops_its_mark_in_the_same_commit,
             a_failed_prepare_requeues_the_job_with_its_count_and_bars,
             a_held_refusal_requeues_the_job_without_counting_a_failure,
+            a_capacity_refusal_requeues_the_job_and_names_the_host_in_its_own_list,
             a_held_refusal_refuses_what_it_cannot_requeue,
             a_held_refusal_loses_to_a_change_of_either_row,
             the_last_failed_prepare_ends_the_job_failed_to_start,
@@ -735,7 +737,8 @@ pub(crate) fn whole_host_spec() -> JobSpec {
     }
 }
 
-/// What a host reports of a job that stopped: short tails and the resources it used.
+/// What a host reports of a job that stopped: short tails, the resources it used and its CPU
+/// series.
 pub(crate) fn output() -> Output {
     Output {
         stdout: "done\n".to_owned(),
@@ -744,9 +747,18 @@ pub(crate) fn output() -> Output {
         usage: Some(ResourceUsage {
             cpu_time: Duration::from_millis(2500),
             peak_memory_bytes: 64 << 20,
+            cpu_throttle: None,
+            cpu_pressure_some: None,
+            cpu_peak: None,
         }),
         logs: None,
+        cpu_series: Some(series()),
     }
+}
+
+/// The CPU series [`output`] carries: two points at 2 s a point.
+pub(crate) fn series() -> CpuSeries {
+    CpuSeries::new(2, vec![16, 40], 3_000_000, false).expect("a well-formed series")
 }
 
 /// An exit with `exit_code` and [`output`].

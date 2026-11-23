@@ -26,6 +26,7 @@ mod fuse;
 mod gpu;
 mod host;
 mod host_ports;
+mod memory;
 mod quota;
 #[path = "../runtime_suite/mod.rs"]
 mod runtime_suite;

@@ -1,6 +1,6 @@
 //! `user-create` against the pool: a lease takes the lowest free pool user and makes no
-//! user, a lease id is used once, an administrator needs a valid grant (and its user is
-//! replaced, before and after), and a ledger that cannot record stops the verb.
+//! user, a lease id is used once, no lease user is ever an administrator (a request with a
+//! grant is refused), and a ledger that cannot record stops the verb.
 
 use super::*;
 
@@ -20,16 +20,15 @@ fn each_lease_takes_the_lowest_free_slot_and_makes_no_user() {
             uid: base + 1,
             gid: my_gid(),
             home: rig.dir.join("Users/kbf-lease-pool-1"),
-            admin: false,
         }
     );
-    assert_eq!(rig.helper.user_create("1.1", None), Ok(base));
-    assert_eq!(rig.helper.user_create("1.2", None), Ok(base + 1));
+    assert_eq!(rig.helper.user_create("1.1"), Ok(base));
+    assert_eq!(rig.helper.user_create("1.2"), Ok(base + 1));
     // 1.1 ends: its slot is the lowest free one again.
     rig.helper.user_delete("1.1").unwrap();
-    assert_eq!(rig.helper.user_create("1.3", None), Ok(base));
-    assert_eq!(rig.helper.user_create("1.4", None), Ok(base + 2));
-    exhausted(rig.helper.user_create("1.5", None));
+    assert_eq!(rig.helper.user_create("1.3"), Ok(base));
+    assert_eq!(rig.helper.user_create("1.4"), Ok(base + 2));
+    exhausted(rig.helper.user_create("1.5"));
     let calls = log(&rig);
     assert!(
         !calls
@@ -46,8 +45,8 @@ fn each_lease_takes_the_lowest_free_slot_and_makes_no_user() {
     );
     shrunk.helper.boot_reset(&[]).unwrap();
     shrunk.helper.settings.pool = crate::lease::PoolSize::new(1).unwrap();
-    assert_eq!(shrunk.helper.user_create("1.6", None), Ok(base));
-    exhausted(shrunk.helper.user_create("1.7", None));
+    assert_eq!(shrunk.helper.user_create("1.6"), Ok(base));
+    exhausted(shrunk.helper.user_create("1.7"));
     shrunk.helper.user_delete("1.6").unwrap();
     // Nor one whose uid the range no longer holds.
     let narrowed = rig_with(
@@ -56,21 +55,21 @@ fn each_lease_takes_the_lowest_free_slot_and_makes_no_user() {
         Some(rig.dir.clone()),
     );
     narrowed.helper.boot_reset(&[]).unwrap();
-    exhausted(narrowed.helper.user_create("1.8", None));
+    exhausted(narrowed.helper.user_create("1.8"));
 }
 
-/// Catches: a lease id used twice (a gate grant names one lease: single use),
+/// Catches: a lease id used twice,
 /// including after its lease ended, and including across a restart of the helper.
 #[test]
 fn a_lease_id_is_never_used_twice() {
     let rig = rig("reuse", 4);
-    rig.helper.user_create("2.1", None).unwrap();
-    let again = rig.helper.user_create("2.1", None).unwrap_err().to_string();
+    rig.helper.user_create("2.1").unwrap();
+    let again = rig.helper.user_create("2.1").unwrap_err().to_string();
     assert_eq!(again, "lease 2.1 was used before; a lease id is used once");
     rig.helper.user_delete("2.1").unwrap();
     assert!(
         rig.helper
-            .user_create("2.1", None)
+            .user_create("2.1")
             .unwrap_err()
             .to_string()
             .contains("was used before")
@@ -78,120 +77,56 @@ fn a_lease_id_is_never_used_twice() {
     // A new helper over the same ledger (a reboot) remembers.
     let range = UidRange::new(me(), me() + 3).unwrap();
     let rebooted = rig_with("reuse", range, Some(rig.dir.clone()));
-    let after = rebooted
-        .helper
-        .user_create("2.1", None)
-        .unwrap_err()
-        .to_string();
+    let after = rebooted.helper.user_create("2.1").unwrap_err().to_string();
     assert!(after.contains("was used before"), "{after}");
     assert!(
         rig.helper
-            .user_create("2.01", None)
+            .user_create("2.01")
             .unwrap_err()
             .to_string()
             .contains("not <term>.<seq>")
     );
 }
 
-/// Catches: an administrator made on the daemon's word (S10: "trust an admin flag
-/// from the daemon"), a grant used twice, or a grant for another lease or Mac; and a pool
-/// user left an administrator, or reset rather than replaced, after its lease.
+/// Catches: a lease user made an administrator, or a lease taken, for a `user-create` that
+/// carries a grant (the field a release with signed admin grants sent), whatever it holds;
+/// and a refused grant that spends the lease id or a slot.
 #[test]
-fn an_administrator_needs_a_valid_unused_grant() {
-    let rig = rig("admin", 4);
-    let grant = sign(7, &text("SERIAL1", "3.1", NOW_SECS));
-    assert_eq!(rig.helper.user_create("3.1", Some(&grant)), Ok(me()));
-    assert!(rig.host.state().users["kbf-lease-pool-0"].admin);
-    let calls = log(&rig);
-    let made: Vec<&String> = calls
-        .iter()
-        .filter(|c| c.starts_with("delete_user") || c.starts_with("create_user"))
-        .collect();
-    assert_eq!(
-        made,
-        [
-            "delete_user kbf-lease-pool-0",
-            "create_user kbf-lease-pool-0"
-        ],
-        "the slot's user is replaced by an administrator"
-    );
-    // Single use: the lease id is spent.
-    assert!(
-        rig.helper
-            .user_create("3.1", Some(&grant))
-            .unwrap_err()
-            .to_string()
-            .contains("was used before")
-    );
-    // A grant names one lease and one Mac, and the gate's key.
-    let error = rig
-        .helper
-        .user_create("3.2", Some(&grant))
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("names lease 3.1"), "{error}");
-    let other_mac = sign(7, &text("SERIAL2", "3.2", NOW_SECS));
-    assert!(
-        rig.helper
-            .user_create("3.2", Some(&other_mac))
-            .unwrap_err()
-            .to_string()
-            .contains("serial")
-    );
-    let forged = sign(8, &text("SERIAL1", "3.2", NOW_SECS));
-    assert!(
-        rig.helper
-            .user_create("3.2", Some(&forged))
-            .unwrap_err()
-            .to_string()
-            .contains("does not verify")
-    );
-    // A refused grant took no slot and spent nothing: the plain lease still works.
-    assert_eq!(rig.helper.user_create("3.2", None), Ok(me() + 1));
-    assert!(!rig.host.state().users["kbf-lease-pool-1"].admin);
-
-    // The administrator's lease ends: its user is replaced, never reset, by one that is
-    // not an administrator.
-    log(&rig);
-    assert_eq!(rig.helper.user_delete("3.1"), Ok(true));
+fn a_user_create_with_a_grant_is_refused_and_takes_no_user() {
+    let rig = rig("admin", 2);
+    let with_grant = |lease: &str, grant: &str| Request::UserCreate {
+        lease: lease.to_owned(),
+        grant: Some(grant.to_owned()),
+    };
+    for grant in ["a.b", "", "kbf-grant-v1"] {
+        let Outcome::Reply(reply) = rig.helper.handle(with_grant("3.1", grant), Vec::new()) else {
+            panic!("not a reply");
+        };
+        assert_eq!(
+            reply,
+            Reply::Refused {
+                reason: NO_ADMINISTRATOR.to_owned()
+            },
+            "grant {grant:?}"
+        );
+    }
     let calls = log(&rig);
     assert!(
-        calls.contains(&"delete_user kbf-lease-pool-0".to_owned()),
+        !calls
+            .iter()
+            .any(|c| c.starts_with("create_user") || c.starts_with("delete_user")),
         "{calls:#?}"
     );
-    assert!(!rig.host.state().users["kbf-lease-pool-0"].admin);
     assert_eq!(
-        rig.helper.pool_status().free,
-        [Slot::new(0), Slot::new(2), Slot::new(3)]
+        rig.helper.lock().get(LeaseId::new(3, 1)),
+        None,
+        "the id is not spent"
     );
-
-    // An administrator that cannot be made leaves the lease live, to be ended.
-    rig.host.state().fail.insert("create_user");
-    let grant = sign(7, &text("SERIAL1", "3.4", NOW_SECS));
-    let error = rig
-        .helper
-        .user_create("3.4", Some(&grant))
-        .unwrap_err()
-        .to_string();
-    assert_eq!(
-        error,
-        "making kbf-lease-pool-0 an administrator for lease 3.4: creating user \
-         kbf-lease-pool-0: create_user failed"
-    );
-    rig.host.state().fail.clear();
-    assert_eq!(rig.helper.user_delete("3.4"), Ok(true));
-    assert!(!rig.host.state().users["kbf-lease-pool-0"].admin);
-
-    let mut keyless = rig_with("admin-nokeys", UidRange::new(me(), me()).unwrap(), None);
-    keyless.helper.settings.grant_keys = None;
-    let grant = sign(7, &text("SERIAL1", "3.3", NOW_SECS));
-    let error = keyless
-        .helper
-        .user_create("3.3", Some(&grant))
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("no gate key"), "{error}");
-    assert!(keyless.host.state().users.is_empty());
+    assert_eq!(rig.helper.pool_status().free, [Slot::new(0), Slot::new(1)]);
+    // The same lease without a grant takes the lowest slot, and its user is no member of
+    // `admin`.
+    assert_eq!(rig.helper.user_create("3.1"), Ok(me()));
+    assert!(rig.host.state().admins.is_empty());
 }
 
 /// Catches: a lease recorded when the ledger could not record it (after a reboot the
@@ -200,9 +135,9 @@ fn an_administrator_needs_a_valid_unused_grant() {
 #[test]
 fn a_ledger_that_cannot_record_stops_the_verb() {
     let rig = rig("ledger-fail", 2);
-    rig.helper.user_create("4.2", None).unwrap();
+    rig.helper.user_create("4.2").unwrap();
     rig.helper.lock().fail_writes(&rig.dir.join("ledger"), true);
-    let error = rig.helper.user_create("4.3", None).unwrap_err().to_string();
+    let error = rig.helper.user_create("4.3").unwrap_err().to_string();
     assert!(error.starts_with("recording lease 4.3"), "{error}");
     let error = rig.helper.user_delete("4.2").unwrap_err();
     assert!(
@@ -225,5 +160,5 @@ fn a_ledger_that_cannot_record_stops_the_verb() {
         "{error}"
     );
     assert!(!rig.host.state().users.contains_key("kbf-lease-4-4"));
-    exhausted(rig.helper.user_create("4.5", None));
+    exhausted(rig.helper.user_create("4.5"));
 }

@@ -347,6 +347,7 @@ fn job_start(id: &str) -> Command {
         placed_at_ms: None,
         fuse: false,
         xcode: None,
+        sizing: None,
     }))
 }
 
@@ -425,6 +426,7 @@ fn previous_agent_wire_reads_the_new_wire_types_without_error() {
                 logs: None,
                 input_failure: None,
                 usage: None,
+                cpu_series: None,
             }),
         }],
         retired_jobs: vec!["job-2".into()],
@@ -538,6 +540,7 @@ fn an_old_agent_ignores_log_sink() {
                 }),
                 input_failure: None,
                 usage: None,
+                cpu_series: None,
             }),
         }],
         log_grant_state: Some(LogGrantState {
@@ -589,6 +592,7 @@ fn an_old_server_ignores_input_failure() {
                 logs: None,
                 input_failure: Some(js_agent_wire::refusal::TREE_STALLED.into()),
                 usage: None,
+                cpu_series: None,
             }),
         }],
         ..heartbeat()
@@ -755,5 +759,125 @@ fn an_old_agent_skips_the_xcode_of_an_xcode_start() {
     );
     assert!(
         matches!(&old.commands[1], previous::JobCommand::JobStop { job_id } if job_id == "xcode-41")
+    );
+}
+
+/// Asserts that an agent from before `sizing` reads a reply whose job start carries one as it
+/// reads one without (its ids, image, command and wall limit intact), and that this version
+/// reads that release's reply with no sizing on its starts. Catches a field an older agent
+/// cannot skip, which would cost it the job start.
+#[test]
+fn an_old_agent_ignores_sizing() {
+    let Command::JobStart(mut spec) = job_start("build-42") else {
+        unreachable!("job_start makes a job start");
+    };
+    spec.sizing = Some(js_agent_wire::StartSizing {
+        class: Some("root.crates.js-sched.js-sched".into()),
+        cpu: js_agent_wire::BookedFrom::Class,
+        memory: js_agent_wire::BookedFrom::OverCap,
+    });
+    assert_eq!(spec.validate(), Ok(()));
+    let reply = HeartbeatReply {
+        commands: vec![Command::JobStart(spec)],
+        ..HeartbeatReply::default()
+    };
+    let wire = serde_json::to_value(&reply).unwrap();
+    assert_eq!(
+        wire["commands"][0]["sizing"],
+        json!({"class": "root.crates.js-sched.js-sched", "cpu": "class", "memory": "over-cap"})
+    );
+    let old: previous::JobReply = serde_json::from_value(wire).unwrap();
+    let previous::JobCommand::JobStart(start) = &old.commands[0] else {
+        panic!("the job start is lost: {:?}", old.commands);
+    };
+    assert_eq!(
+        (start.job_id.as_str(), start.wall_ms, start.command.clone()),
+        ("build-42", 60_000, vec!["make".to_owned()])
+    );
+    let decoded: HeartbeatReply = serde_json::from_value(fixture(REPLY)).unwrap();
+    for command in &decoded.commands {
+        if let Command::JobStart(spec) = command {
+            assert_eq!(spec.sizing, None);
+        }
+    }
+}
+
+/// Asserts that a `sizing` that does not decode (a source of the wrong type, a class that is
+/// not text, the whole value not an object) reads as absent and leaves the start as sent and
+/// valid, and that a source name this version does not know reads as `unknown`. Catches a
+/// sizing that refuses a start, which only ever feeds a journal line.
+#[test]
+fn a_malformed_sizing_reads_as_absent_and_the_start_runs() {
+    let Command::JobStart(spec) = job_start("build-42") else {
+        unreachable!("job_start makes a job start");
+    };
+    let plain = serde_json::to_value(&*spec).unwrap();
+    for bad in [
+        json!({"cpu": 5, "memory": "cold"}),
+        json!({"class": 7, "cpu": "class", "memory": "cold"}),
+        json!({"cpu": "class"}),
+        json!("cold"),
+    ] {
+        let mut wire = plain.clone();
+        wire["sizing"] = bad.clone();
+        let read: JobStartSpec = serde_json::from_value(wire).unwrap();
+        assert_eq!(read.sizing, None, "{bad}");
+        assert_eq!(read, *spec, "{bad}");
+        assert_eq!(read.validate(), Ok(()), "{bad}");
+    }
+    let mut wire = plain;
+    wire["sizing"] = json!({"cpu": "learned-twice", "memory": "named"});
+    let read: JobStartSpec = serde_json::from_value(wire).unwrap();
+    assert_eq!(
+        read.sizing,
+        Some(js_agent_wire::StartSizing {
+            class: None,
+            cpu: js_agent_wire::BookedFrom::Unknown,
+            memory: js_agent_wire::BookedFrom::Named,
+        })
+    );
+}
+
+/// Asserts that a container start carrying `os` and `arch` (as the job service now sends every
+/// start of a job that names its system and architecture) decodes with the previous release's
+/// reply type as one without them does: its ids, command and wall limit intact and the stop
+/// beside it kept, never a decode error; and that the start with them passes this version's
+/// checks and a start without them serializes neither. Catches a container start that costs
+/// an older Linux agent the reply, or one this version refuses.
+#[test]
+fn an_old_agent_ignores_the_os_and_arch_of_a_container_start() {
+    let Command::JobStart(mut spec) = job_start("build-43") else {
+        unreachable!("job_start makes a job start");
+    };
+    let plain = serde_json::to_value(&*spec).unwrap();
+    assert_eq!((plain.get("os"), plain.get("arch")), (None, None));
+    spec.os = Some(js_types::Os::Linux);
+    spec.arch = Some(js_types::Arch::X86_64);
+    assert_eq!(spec.validate().and_then(|()| spec.require_pinned()), Ok(()));
+    let reply = HeartbeatReply {
+        commands: vec![
+            Command::JobStart(spec),
+            Command::JobStop {
+                job_id: "build-41".into(),
+            },
+        ],
+        ..HeartbeatReply::default()
+    };
+    let wire = serde_json::to_value(&reply).unwrap();
+    assert_eq!(
+        (&wire["commands"][0]["os"], &wire["commands"][0]["arch"]),
+        (&json!("linux"), &json!("x86_64"))
+    );
+    assert_eq!(wire["commands"][0].get("run"), None);
+    let old: previous::JobReply = serde_json::from_value(wire).unwrap();
+    let previous::JobCommand::JobStart(start) = &old.commands[0] else {
+        panic!("the job start is lost: {:?}", old.commands);
+    };
+    assert_eq!(
+        (start.job_id.as_str(), start.command.clone(), start.wall_ms),
+        ("build-43", vec!["make".to_owned()], 60_000)
+    );
+    assert!(
+        matches!(&old.commands[1], previous::JobCommand::JobStop { job_id } if job_id == "build-41")
     );
 }

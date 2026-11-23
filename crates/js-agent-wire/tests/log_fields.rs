@@ -52,6 +52,7 @@ fn start_of(job_id: &str) -> JobStartSpec {
         placed_at_ms: None,
         fuse: false,
         xcode: None,
+        sizing: None,
     }
 }
 
@@ -122,6 +123,7 @@ fn result_with(logs: Option<LogReport>) -> JobResult {
         logs,
         input_failure: None,
         usage: None,
+        cpu_series: None,
     }
 }
 

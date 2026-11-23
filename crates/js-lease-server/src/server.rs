@@ -55,6 +55,8 @@ pub struct Running {
     slots: Arc<Slots>,
     serving: JoinHandle<()>,
     ticking: Ticking,
+    /// The placement poller ([`crate::poller`]), which each submit and heartbeat pokes.
+    polling: Polling,
     _checking: Checking,
     scaler: Option<Scaler>,
     tls: Option<tls::Tls>,
@@ -341,6 +343,11 @@ pub async fn start_waiting<T: Ticker, C: Ticker, R: Ticker>(
         scaler.clone().map(|scaler| (scaler, cached)),
     ));
     let ticking = Ticking(tokio::spawn(ticking));
+    let (stop_polling, polling_stopped) = oneshot::channel();
+    let polling = Polling {
+        stop: stop_polling,
+        task: Ticking(tokio::spawn(poll_loop(shared.clone(), polling_stopped))),
+    };
     let checking = Checking(checker.map(|checker| tokio::spawn(checker.run(checks))));
     gate.set(Phase::Ready);
     Ok(Running {
@@ -355,6 +362,7 @@ pub async fn start_waiting<T: Ticker, C: Ticker, R: Ticker>(
         slots,
         serving: tokio::spawn(serving),
         ticking,
+        polling,
         _checking: checking,
         scaler,
         tls,
@@ -612,9 +620,18 @@ pub(crate) fn open(prepared: Prepared, clock: &SharedClock) -> Result<Opened, St
     })
 }
 
-/// The tick task, ended when it is dropped: a server that is dropped must not go on
-/// ticking.
+/// The tick task or the placement poller, ended when it is dropped: a server that is dropped
+/// must not go on ticking or placing.
 struct Ticking(JoinHandle<()>);
+
+/// The placement poller's task, with the signal that stops it between two passes: an orderly
+/// stop ([`Running::shutdown`]) waits for a pass under way to end, so nothing the pass holds
+/// outlives the stop. Dropped, it is aborted.
+struct Polling {
+    /// Sent to stop the poller once its pass under way, if any, has ended.
+    stop: oneshot::Sender<()>,
+    task: Ticking,
+}
 
 impl Drop for Ticking {
     fn drop(&mut self) {
@@ -663,6 +680,24 @@ async fn tick_loop<T: Ticker>(
     loop {
         let tick = ticker.next().await;
         tick_once(&shared, side.as_ref(), tick).await;
+    }
+}
+
+/// The placement poller of `shared`'s agent side: one pass over the queued jobs after each
+/// poke ([`crate::poller::poked`], [`crate::poller::run`]), until `stopped` fires (or its
+/// sender is dropped), which it heeds only between passes. A panic in a pass ends it as one in
+/// the tick ends the tick loop: `/healthz` then answers that the server is not ticking, and the
+/// supervisor of the process must restart it.
+async fn poll_loop(shared: Arc<Shared>, mut stopped: oneshot::Receiver<()>) {
+    let _alive = Alive(shared.clone());
+    let agents = Arc::clone(shared.agents());
+    loop {
+        tokio::select! {
+            biased;
+            _ = &mut stopped => return,
+            () = crate::poller::poked(&agents) => {}
+        }
+        crate::poller::run(&agents).await;
     }
 }
 
@@ -883,6 +918,11 @@ impl Running {
         }
         self.ticking.0.abort();
         let _ = (&mut self.ticking.0).await;
+        // The poller ends after the pass it may be running, so that pass lets go of the state
+        // before the last tick and before the stop returns.
+        let Polling { stop, mut task } = self.polling;
+        let _ = stop.send(());
+        let _ = (&mut task.0).await;
         final_tick(&self.shared).await;
         served
     }

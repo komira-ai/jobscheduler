@@ -15,9 +15,10 @@
 //!   bound covers `/scratch`, `/work` and `/root`; a runtime opened without
 //!   `OciConfig::leases_in` keeps it as `<store>/<name>`;
 //! - the job's `.tmp-<name>` beside it ([`Runtime::tmp_dir`]): its `/tmp` and `/var/tmp`;
-//! - the cgroup `<actions>/<name>`, made by the agent with the booking as the limit
-//!   (memory the booking with no swap, CPU the booked cores: the arithmetic the lease
-//!   server's booking assumes) and given to the job user, who makes the container's cgroup
+//! - the cgroup `<actions>/<name>`, made by the agent from the booking (no memory or swap
+//!   limit: the memory booking is what placement counted, and the job's use is measured and
+//!   reported, not held at it; the booked cores as the lease's `cpu.weight`) and given to the
+//!   job user, who makes the container's cgroup
 //!   `<name>/ctr` under it ([`Runtime::cgroup`]). The job user is given nothing of the
 //!   directory the leases' cgroups are in (it could make or remove the cgroups of other
 //!   leases there) except the cgroup `helpers` below it, where the helper containers are
@@ -212,9 +213,11 @@ mod make;
 mod net;
 #[cfg(test)]
 mod net_tests;
+mod peak;
 mod pull;
 mod remove;
 mod rootfs;
+mod series;
 mod settings;
 mod spec;
 #[cfg(test)]
@@ -248,7 +251,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_agent_wire::{JobUsage, LogReport, LogTail, NetworkCeiling, PortRange};
+use js_agent_wire::{CpuSeries, JobUsage, LogReport, LogTail, NetworkCeiling, PortRange};
 use js_contain::cgroup::{LeaseCgroup, ROOT_OWNED_FILES};
 use js_contain::container::ContainerSpec;
 use js_contain::oci::image::ImageSource;
@@ -306,8 +309,6 @@ struct Run {
     labels: BTreeMap<String, String>,
     lease: LeaseDirs,
     cgroup: LeaseCgroup,
-    /// The lease's `memory.max`.
-    cap: Option<u64>,
     /// The OOM count of the cgroup above, when the lease started.
     backstop: Option<u64>,
     state: State,
@@ -321,6 +322,12 @@ struct Run {
     fs: Option<rootfs::RunFs>,
     /// The steps of its start, until [`Runtime::start_steps`] takes them.
     marks: make::Marks,
+    /// Its CPU over time, for its peak: sampled from its start (or, for an adopted run, from
+    /// its first poll) each time it is polled ([`peak::PeakWindow`]).
+    peak: peak::PeakWindow,
+    /// Its CPU second by second, from the same samples as the peak
+    /// ([`series::SeriesRecorder`]); none without `--cpu-series`.
+    series: Option<series::SeriesRecorder>,
 }
 
 /// A container runtime over `crun`. Dropping it leaves its runs as they are, their network
@@ -337,6 +344,10 @@ pub struct CrunRuntime {
     configs: PathBuf,
     files: Option<FilesRoot>,
     gpus: Option<GpuSettings>,
+    /// The operator's CPU ceiling ([`CrunSettings::cpu_ceiling`]).
+    cpu_ceiling: Option<js_contain::CpuCeiling>,
+    /// Whether each run's CPU is recorded second by second ([`CrunSettings::cpu_series`]).
+    cpu_series: bool,
     /// Whether host jobs are launched ([`CrunSettings::host_jobs`]).
     host_jobs: bool,
     /// Whether the leases' directories are made beside the runs' own
@@ -466,6 +477,8 @@ impl CrunRuntime {
             files: settings.files,
             gpus: settings.gpus,
             host_jobs: settings.host_jobs,
+            cpu_ceiling: settings.cpu_ceiling,
+            cpu_series: settings.cpu_series,
             leases_beside,
             store: settings.scratch.clone(),
             egress: settings.egress,
@@ -583,18 +596,42 @@ impl CrunRuntime {
             State::Created => return Status::Running,
             State::Ended(exit, _) => return Status::Exited(*exit),
             State::Running { run: running, .. } => match running.try_end() {
-                None => return Status::Running,
+                None => {
+                    if let Some(used) = cpu_usec_of(&run.cgroup) {
+                        // One reading of the clock for both: they take the same sample.
+                        let now = (self.hooks.mono_us)();
+                        run.peak.observe(now, used);
+                        run.series
+                            .iter_mut()
+                            .for_each(|series| series.observe(now, used));
+                    }
+                    return Status::Running;
+                }
                 // The drain of the streams is over once the supervisor wrote its record:
-                // what it kept is all the run wrote.
-                Some(end) => (rt.block_on(oci.ended_as(&run.spec, end)), running.tail()),
+                // what it kept is all the run wrote. Its series ends at this poll, which saw
+                // the end, not at the later moment its usage is read.
+                Some(end) => {
+                    run.series
+                        .iter_mut()
+                        .for_each(|series| series.end_at((self.hooks.mono_us)()));
+                    (rt.block_on(oci.ended_as(&run.spec, end)), running.tail())
+                }
             },
         };
-        let (exit, tail) = concluded(ended, &captured, (&run.cgroup, run.cap, run.backstop));
+        let (exit, tail) = concluded(ended, &captured, (&run.cgroup, run.backstop));
         run.logs.end((captured.stdout.total, captured.stderr.total));
         run.state = State::Ended(exit, tail);
         run.net.release(name);
         Status::Exited(exit)
     }
+}
+
+/// The `usage_usec` of the `cpu.stat` of the lease's group, as read now.
+fn cpu_usec_of(cgroup: &LeaseCgroup) -> Option<u64> {
+    let text = std::fs::read_to_string(cgroup.dir().join("cpu.stat"));
+    text.ok()
+        .as_deref()
+        .and_then(crate::usage::parse_usage_usec)
 }
 
 impl Runtime for CrunRuntime {
@@ -800,8 +837,24 @@ impl Runtime for CrunRuntime {
 
     fn usage(&mut self, id: &RunHandle) -> Option<JobUsage> {
         // The lease's group, so that everything the job ran in it is counted; it is removed
-        // with the container, after this is read.
-        self.runs.get(&id.0).and_then(|run| usage_of(&run.cgroup))
+        // with the container, after this is read. Its peak ends with this reading.
+        let now = (self.hooks.mono_us)();
+        let run = self.runs.get(&id.0)?;
+        let usage = usage_of(&run.cgroup)?;
+        let peak = run.peak.clone().finish(now, usage.cpu_usage_usec);
+        Some(JobUsage {
+            cpu_peak: peak,
+            ..usage
+        })
+    }
+
+    fn cpu_series(&mut self, id: &RunHandle) -> Option<CpuSeries> {
+        // Ended where the poll saw the end; the group's last count is spread over the time
+        // since the sample before it. It is read from the lease's group, as `usage` reads it.
+        let run = self.runs.get(&id.0)?;
+        let series = run.series.clone()?;
+        let usage = cpu_usec_of(&run.cgroup)?;
+        series.finish((self.hooks.mono_us)(), usage)
     }
 
     fn cgroup(&mut self, id: &RunHandle) -> Option<PathBuf> {

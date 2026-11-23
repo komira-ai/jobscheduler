@@ -1,13 +1,23 @@
 //! `kill-uid` and `user-delete`: the end of a lease user, and the errors their steps
 //! fail with ([`TeardownError`], worded for the refusal at the protocol boundary). The
-//! kill and the deletion here are also the steps of a pool user's reset and replacement
-//! (`super::pool`); `user-delete` of a pool user's lease goes there.
+//! kill, the looks and the sweeps here are also the steps of a pool user's reset in place
+//! (`super::pool`); `user-delete` of a pool user's lease goes there, and deletes nothing.
+//! The deletion of a user record here is only for a lease user from before the pool; a
+//! pool user is never deleted, and on macOS 27 root is refused the deletion of a record
+//! and of a home, so that path fails there (the lease stays live, its uid held) unless the
+//! helper holds Full Disk Access (`full-disk-access` reports whether it holds it). The
+//! privacy profile grants that access to `js-agent`, not to the helper; this module is the
+//! same with and without the grant, and deleting an account per job is the next step, in the
+//! agent (`docs/design/mac-account-per-job.md`).
 //!
 //! Both are judged by their outcome, never by what a `launchctl` call answered: no
-//! process of the uid is left, and the uid's launchd domains no longer print. A
+//! process of the uid is left, and the uid's launchd domains are gone. A
 //! `launchctl bootout` is asked for and its failure only logged; `launchctl print` is
-//! read as printed (exit 0) or not (any other exit status), so no exit status of it is
-//! matched.
+//! read as a domain that is there or not, so no exit status of it is matched. A domain
+//! is gone when the print exits non-zero, or exits 0 and prints a domain that holds
+//! nothing: `launchctl print user/<uid>` exits 0 for any uid (the print makes the user
+//! domain), so for a user domain "gone" is an empty one, with no service and no
+//! unmanaged process ([`holds_nothing`]).
 //!
 //! The order the helper's header describes: `kill-uid` decides whether the uid may have
 //! a GUI login session (the intent record names it, it owns a `loginwindow` process or
@@ -108,9 +118,6 @@ pub(crate) enum TeardownError {
     /// The ledger could not record the deletion.
     #[error("recording the deletion of lease {lease}: {source}")]
     Record { lease: String, source: io::Error },
-    /// The pool user to reset has no record: there is no user left to reset.
-    #[error("user {name} has no record, so it cannot be reset")]
-    Missing { name: String },
     /// The uid's System V IPC objects could not be listed.
     #[error("listing the IPC objects of uid {uid}: {why}")]
     Ipc { uid: u32, why: String },
@@ -123,6 +130,9 @@ pub(crate) enum TeardownError {
     /// A user record could not be made.
     #[error("creating user {name}: {source}")]
     Create { name: String, source: io::Error },
+    /// The attributes of a pool user's record could not be set back.
+    #[error("setting back the record of user {name}: {source}")]
+    Restore { name: String, source: io::Error },
     /// The user may be in the `admin` group: the directory says so, or could not say.
     #[error("user {name} may be an administrator: {why}")]
     Admin { name: String, why: String },
@@ -192,17 +202,35 @@ fn session_seen(processes: &[LiveProcess]) -> bool {
         .any(|p| p.command == LOGINWINDOW || p.command == UNREADABLE)
 }
 
-/// Whether `launchctl print` printed the domain (`answer`): exit 0 is a domain launchd
-/// has. Any other exit status is a domain it does not print; no exit status is matched
-/// as "not found", because launchd's answer for a domain it does not have varies
-/// (112, 113 and 125 have each been seen for the `gui/<uid>` of a user that never
-/// logged in).
+/// Whether the text of a successful `launchctl print <domain>` is that of a domain that
+/// holds nothing: its own `services = {` block and its own `unmanaged processes = {`
+/// block, the domain's top-level properties (one tab deep, not an endpoint's or a
+/// nested block's), are both empty. A block with anything in it, or one that cannot be
+/// found, is a domain that stays.
+fn holds_nothing(stdout: &str) -> bool {
+    let lines: Vec<&str> = stdout.lines().map(str::trim_end).collect();
+    ["\tservices = {", "\tunmanaged processes = {"]
+        .iter()
+        .all(|header| {
+            lines
+                .iter()
+                .position(|line| line == header)
+                .is_some_and(|at| lines.get(at + 1) == Some(&"\t}"))
+        })
+}
+
+/// Whether `launchctl print` printed a domain that stays (`answer`): a non-zero exit
+/// status is a domain launchd does not print; no exit status is matched as "not found",
+/// because launchd's answer for a domain it does not have varies (112, 113 and 125 have
+/// each been seen for the `gui/<uid>` of a user that never logged in). Exit 0 is a
+/// domain launchd has, unless what it printed holds nothing ([`holds_nothing`]):
+/// `user/<uid>` prints so, exit 0, for a uid with no domain, because the print makes it.
 ///
 /// # Errors
 /// A signal ended `launchctl`, so it gave no answer.
 fn printed(answer: &PrintAnswer) -> io::Result<bool> {
     match answer.code {
-        Some(code) => Ok(code == 0),
+        Some(code) => Ok(code == 0 && !holds_nothing(&answer.stdout)),
         None => Err(io::Error::other(format!(
             "launchctl print was ended by a signal: {}",
             answer.stderr.trim()
@@ -406,7 +434,7 @@ impl Helper {
 
     /// Whether launchd prints `domain` ([`printed`]), as the teardown judges it: a
     /// domain wrongly read as gone is caught by the look at the processes, so any exit
-    /// status but 0 is gone. The readiness checks read `launchctl print` more strictly
+    /// status but 0 is gone, and so is an empty domain. The readiness checks read `launchctl print` more strictly
     /// ([`Self::domain_exists`]).
     ///
     /// # Errors
@@ -449,15 +477,16 @@ impl Helper {
     }
 
     /// `user-delete <lease>`: ends the lease. A pool user's lease is recorded over and
-    /// its user reset or replaced (`super::pool`), returning `true`, or refused naming
-    /// why when the slot broke. For a lease from before the pool: sweeps what the user
+    /// its user reset in place (`super::pool`), returning `true`, or refused naming
+    /// what blocked the reset when the slot broke. For a lease from before the pool: sweeps what the user
     /// leaves, deletes its record and records the deletion, returning whether a record
     /// was there to delete. A lease already over returns `false` and touches nothing.
     ///
     /// The uid's entry under the per-user folders is taken from its `DARWIN_USER_DIR`,
     /// asked first, while the record is there ([`super::Host::user_dir`]); an answer that
     /// is not an entry of [`super::Settings::user_folders`] is refused, never guessed at,
-    /// and the entry is removed whole with the rest of the sweep. When the record is gone
+    /// and the entry is removed whole with the rest of the sweep (emptied and kept where
+    /// the system placed it). When the record is gone
     /// already (a delete repeated after it went, or a record removed by someone else),
     /// there is no `DARWIN_USER_DIR` of the uid's own to ask for: every entry of the
     /// per-user folders that the uid owns is removed instead.
@@ -546,6 +575,12 @@ impl Helper {
 
     /// Deletes the user `name`, with `uid`, and sweeps what it leaves, in the order of
     /// [`Self::user_delete`]. Returns whether a record was there to delete.
+    /// The home is removed whole. This is the one path that deletes a user record, and
+    /// only for a lease user from before the pool, which `user-create` no longer makes: a
+    /// pool user is never passed here. On macOS 27 and later, root is refused the removal
+    /// of a local user record, of an account's home and of the per-user folders the
+    /// system placed, so this delete fails there (the lease stays live, its uid held)
+    /// unless the helper holds Full Disk Access.
     pub(super) fn remove_account(&self, name: &str, uid: u32) -> Result<bool, TeardownError> {
         let entries = self.user_entries(name, uid)?;
         self.settled(uid)?;

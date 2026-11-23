@@ -41,6 +41,7 @@ fn the_beat_carries_the_load_and_the_welcome_sets_the_window() {
             "seq": 4,
             "mono_usec": 9_000,
             "cpu_usage_usec": 7_000,
+            "host_cpu_usec": 6_000,
             "working_set_bytes": 8_000,
             "active_file_bytes": 9_000,
             "actions_cpu_limited": true,

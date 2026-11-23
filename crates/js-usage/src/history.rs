@@ -38,7 +38,7 @@ use std::num::NonZeroUsize;
 use std::ops::Bound;
 
 use js_state::{Cond, ResumeToken, ScanRange, Store, Txn, Versioned};
-use js_types::{HostId, LeaseId};
+use js_types::{CpuSeries, HostId, LeaseId};
 
 use crate::error::UsageError;
 use crate::key::ProfileKey;
@@ -268,6 +268,11 @@ pub struct EndedRow {
     pub error_ms: Option<i64>,
     /// What it was measured to use; `None` when nothing was measured.
     pub used: Option<Used>,
+    /// What it used second by second over its run, as its host reported it, when it did and
+    /// the series is well formed ([`CpuSeries::is_well_formed`]); `None` otherwise. Stored
+    /// after `used` and written only when present, so a row without one is the bytes it was
+    /// before the field.
+    pub cpu_series: Option<CpuSeries>,
 }
 
 /// The key of the row of allocation `id`, which ended at `ended_at_ms`.
@@ -442,5 +447,7 @@ impl<'a> EndedHistory<'a> {
     }
 }
 
+#[cfg(test)]
+mod series_tests;
 #[cfg(test)]
 pub(crate) mod tests;

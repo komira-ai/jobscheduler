@@ -27,3 +27,6 @@ nix = { workspace = true, features = ["fs"] }
 
 [lints]
 workspace = true
+
+[package.metadata.buildrules]
+# Every step of the farm lane's `//:ci` (docs/farm.md): the workspace's policy.

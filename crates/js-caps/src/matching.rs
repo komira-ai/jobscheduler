@@ -8,6 +8,7 @@
 //! | `isa_level` | at least, within the family (`x86-64-v3` is served by v3 and v4) |
 //! | `cpu.feature` (repeatable) | subset: every requested feature is present |
 //! | `cpus`, `mem_gib`, `nvme_gib`, `disk-gib`, `gpu` | countable: the node has at least the amount |
+//! | `os_version` | at least, by major version: the request names a version (`26`, or `26.1` read as 26) and the node reports one of that major or later; a node that reports none has none |
 //! | `os`, `os_image`, `cpu.model`, `page_size`, `gpu.kind` | exact |
 //! | `exec` | exact, and a mode name: `container` or `sandbox-exec` |
 //! | `layered-rootfs` | exact: a job with layers, mounts or host ports asks for `true` |
@@ -32,7 +33,9 @@
 //!
 //! The reserved keys ([`RESERVED_KEYS`]: `kbf-lease`, `kbf-cpu`, `kbf-mac-admin`,
 //! `kbf-book-cpus`, `kbf-book-mem-gib`) ask for a kind or a size of capacity, not a
-//! capability; [`Request::parse`] skips them for the scheduler.
+//! capability; [`Request::parse`] skips them for the scheduler. `kbf-mac-admin` is
+//! reserved and has no meaning: no Mac lease user is ever an administrator (a job that
+//! needs administrator rights runs in a VM), so nothing books it.
 //!
 //! `ios.device=1` asks for one iOS device (`docs/design/ios-devices.md`, section 5.3).
 //! Its attributes are [`DEVICE_ATTRIBUTES`] (`ios.device.class=iPhone`,
@@ -66,15 +69,20 @@ pub enum Consumable {
     DiskGib,
     /// Whole GPUs.
     Gpus,
+    /// The major version of the node's operating system (`os_version`, macOS 26 is 26). A
+    /// least version, never booked: a request asks for a major and a node of that major or a
+    /// later one meets it.
+    OsVersion,
 }
 
 impl Consumable {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Cpus,
         Self::MemGib,
         Self::NvmeGib,
         Self::DiskGib,
         Self::Gpus,
+        Self::OsVersion,
     ];
 
     /// The consumable whose key is `key`, if any.
@@ -91,6 +99,7 @@ impl Consumable {
             Self::NvmeGib => "nvme_gib",
             Self::DiskGib => crate::host::DISK_GIB,
             Self::Gpus => "gpu",
+            Self::OsVersion => crate::host::OS_VERSION,
         }
     }
 }
@@ -455,7 +464,11 @@ impl Request {
                 }
                 req.features.insert(value.to_owned());
             } else if let Some(what) = Consumable::from_name(key) {
-                let amount = value.parse().map_err(|_| bad())?;
+                let amount = match what {
+                    Consumable::OsVersion => js_types::os_major(value).map(u64::from),
+                    _ => value.parse().ok(),
+                };
+                let amount = amount.ok_or_else(bad)?;
                 if req.minimums.insert(what, amount).is_some() {
                     return Err(repeated());
                 }

@@ -23,6 +23,7 @@ use rustix::net::{
 };
 use serde::{Deserialize, Serialize};
 
+pub use crate::full_disk_access::FullDiskAccess;
 pub use crate::limits::Limits;
 
 /// The largest frame either side accepts.
@@ -64,11 +65,13 @@ pub struct Call {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "verb", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum Request {
-    /// Lend the lease a free user of the pool; an administrator only with a gate grant.
+    /// Lend the lease a free user of the pool, never an administrator.
     UserCreate {
         /// The lease, as `<term>.<seq>`.
         lease: String,
-        /// The gate's signed grant, which makes the user an administrator.
+        /// A gate's signed grant, which once made the user an administrator. Still read, so
+        /// a request from a release that could send one parses, and always refused
+        /// ([`crate::helper::NO_ADMINISTRATOR`]); never sent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         grant: Option<String>,
     },
@@ -206,6 +209,10 @@ pub enum Request {
     PoolCreate,
     /// The state of the pool.
     PoolStatus,
+    /// Whether the helper holds Full Disk Access ([`crate::full_disk_access`]). Answered
+    /// before the boot reset, as it reads nothing of the pool; a helper from before the
+    /// verb refuses it as unknown.
+    FullDiskAccess,
 }
 
 /// Where `run` starts a process.
@@ -304,6 +311,11 @@ pub enum Reply {
     },
     /// The state of the pool, after `pool-create` or for `pool-status`.
     Pool(Box<PoolState>),
+    /// Whether the helper holds Full Disk Access.
+    FullDiskAccess {
+        /// What a listing of the privacy database's directory showed.
+        state: FullDiskAccess,
+    },
     /// The request was refused or failed, and why.
     Refused {
         /// Why.

@@ -1,5 +1,5 @@
 //! `fetch --url <https url> --sha256 <hex> --out <path> [--extract tar.gz|tar.xz --member <path>
-//! [--tree]] [--cache <path>]`: installs a pinned tool for a CI job.
+//! [--tree] | --extract zst] [--cache <path>]`: installs a pinned tool for a CI job.
 //!
 //! The order is the point:
 //!
@@ -12,7 +12,9 @@
 //!    refused here, before any byte is unpacked or written: nothing is created on disk.
 //!    A cached file that does not match is refused too, not replaced by a download.
 //! 3. They are unpacked in memory: as is, or one regular file (`--member`, its path
-//!    inside the archive) out of a gzip or xz tar (`--extract tar.gz` or `tar.xz`), or with
+//!    inside the archive) out of a gzip or xz tar (`--extract tar.gz` or `tar.xz`), or one
+//!    zstd-compressed file decompressed whole (`--extract zst`, the form buck2's releases
+//!    take), or with
 //!    `--tree` every directory and regular file under the directory `--member` (a tool that
 //!    needs the files beside it, such as a compiler and its headers). A tree holding a link
 //!    or another special file, or an entry whose path climbs out of `--member`, is refused.
@@ -95,10 +97,14 @@ pub enum Format {
     /// An xz-compressed tar: the file is its `--member`.
     #[value(name = "tar.xz")]
     TarXz,
+    /// One zstd-compressed file: the file is the download decompressed (no `--member`).
+    #[value(name = "zst")]
+    Zst,
 }
 
 impl Format {
-    /// The tar archive `bytes` holds in this compression.
+    /// What `bytes` holds in this compression: a tar archive for the tar formats, the file
+    /// itself for zst.
     fn decode(self, bytes: &[u8]) -> Result<Vec<u8>, Error> {
         let mut tar = Vec::new();
         match self {
@@ -109,6 +115,11 @@ impl Format {
             Format::TarXz => {
                 lzma_rs::xz_decompress(&mut &bytes[..], &mut tar).map_err(unpack_error)?
             }
+            Format::Zst => ruzstd::decoding::StreamingDecoder::new(bytes)
+                .map_err(|e| Error::Unpack(format!("not a zstd frame: {e}")))?
+                .read_to_end(&mut tar)
+                .map(drop)
+                .map_err(unpack_error)?,
         }
         Ok(tar)
     }
@@ -131,6 +142,8 @@ pub enum Unpack {
         /// The path of the file inside the archive.
         member: PathBuf,
     },
+    /// The download is one zstd-compressed file; the file is the download decompressed.
+    Zst,
     /// The download is a tar archive packed as `format`; what is installed is the directory
     /// `top` in it, with every directory and regular file under it.
     Tree {
@@ -170,6 +183,10 @@ impl Unpack {
     ) -> Result<Unpack, String> {
         match (extract, member, tree) {
             (None, None, false) => Ok(Unpack::Raw),
+            (Some(Format::Zst), None, false) => Ok(Unpack::Zst),
+            (Some(Format::Zst), _, _) => Err(
+                "--extract zst is one compressed file: it takes no --member or --tree".to_owned(),
+            ),
             (Some(Format::TarGz), Some(member), false) => Ok(Unpack::TarGz { member }),
             (Some(Format::TarXz), Some(member), false) => Ok(Unpack::TarXz { member }),
             (Some(format), Some(top), true) => Ok(Unpack::Tree { format, top }),
@@ -190,6 +207,7 @@ impl Unpack {
             Unpack::Raw => Ok(Unpacked::File(bytes.to_vec())),
             Unpack::TarGz { member } => tar_member(&Format::TarGz.decode(bytes)?, member),
             Unpack::TarXz { member } => tar_member(&Format::TarXz.decode(bytes)?, member),
+            Unpack::Zst => Ok(Unpacked::File(Format::Zst.decode(bytes)?)),
             Unpack::Tree { format, top } => tar_tree(&format.decode(bytes)?, top),
         }
     }

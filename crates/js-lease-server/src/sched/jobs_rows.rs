@@ -23,14 +23,14 @@ use js_agent_wire::{Phase, Taint};
 use std::sync::{Arc, PoisonError};
 
 use js_jobs::{Capacity, HOST_JOB_TAINT, HostTaint, JobId, NodeRow};
-use js_registry::{Binding, HostState, HostView};
+use js_registry::{Binding, HostState, HostView, quota_default};
 use js_sched::ceiling::ceiling_of;
 use js_sched_placer::place::SchedPlacer;
 use js_types::{HostId, Shape, Timestamp};
 
 use super::engine::jobs::{OpenHost, open_to_jobs};
 use super::rank::rank;
-use crate::admit::reports_host_jobs;
+use crate::admit::{reports_host_jobs, reports_load_admission};
 use crate::agents::Agents;
 use crate::config::CpuSlack;
 use crate::job_store::ServerJobs;
@@ -67,10 +67,12 @@ pub(crate) struct RowsRead {
     stored: BTreeMap<HostId, Binding>,
 }
 
-/// What a host of `shape` can book: the shape the pool books for it, with the CPU slack the
-/// placement engine allows on its cores, which is the most the engine places on it. The
-/// capacity is the bound a placement is held to in its own transaction against the
-/// allocations the store holds, so it must not be tighter than what the engine allows.
+/// What a host of `shape` can book under load admission: the shape the pool books for it, with
+/// the CPU slack the placement engine allows on its cores, which is the most the engine places
+/// on it. The capacity is the bound a placement is held to in its own transaction against the
+/// allocations the store holds, so it must not be tighter than what the engine allows. It is
+/// the bound of a host whose agent reports load admission ([`OpenHost::load_admission`]); every
+/// other host is held to [`booked_capacity`].
 pub(super) fn capacity_of(shape: &Shape, slack: CpuSlack) -> Capacity {
     let resources = shape.resources();
     let cpu = u128::from(resources.cpu_millis()) * (1000 + u128::from(slack.permille())) / 1000;
@@ -79,6 +81,21 @@ pub(super) fn capacity_of(shape: &Shape, slack: CpuSlack) -> Capacity {
         memory_bytes: resources.memory_bytes(),
         disk_bytes: resources.disk_bytes(),
         accelerators: resources.gpus(),
+    }
+}
+
+/// What a host whose agent does not report load admission can book: on each of CPU, memory,
+/// disk and accelerators, the smaller of what the pool's `shape` and the `claim` (its hello)
+/// offer, with no CPU slack: what its agent itself offers and sums the bookings of its jobs
+/// against. With no claim, what `shape` offers.
+pub(super) fn booked_capacity(shape: &Shape, claim: Option<&Shape>) -> Capacity {
+    let (booked, offered) = (shape.resources(), claim.map(Shape::resources));
+    let least = |booked: u64, offered: Option<u64>| offered.map_or(booked, |o| booked.min(o));
+    Capacity {
+        cpu_millis: least(booked.cpu_millis(), offered.map(|r| r.cpu_millis())),
+        memory_bytes: least(booked.memory_bytes(), offered.map(|r| r.memory_bytes())),
+        disk_bytes: least(booked.disk_bytes(), offered.map(|r| r.disk_bytes())),
+        accelerators: least(booked.gpus(), offered.map(|r| r.gpus())),
     }
 }
 
@@ -262,11 +279,18 @@ impl Agents {
                 placer.host_seen(host, engine);
             }
             let capabilities = seen.claim.map(Shape::capabilities);
+            let load_admission = capabilities.is_some_and(reports_load_admission);
+            let capacity = match load_admission {
+                true => capacity_of(seen.shape, self.cpu_slack),
+                false => booked_capacity(seen.shape, seen.claim),
+            };
             let offer = OpenHost {
                 ceiling: capabilities.map(ceiling_of).unwrap_or_default(),
                 host_jobs: capabilities.is_some_and(reports_host_jobs),
+                load_admission,
                 rank: Some(ranked),
-                capacity: Some(capacity_of(seen.shape, self.cpu_slack)),
+                capacity: Some(capacity),
+                quota_disk_bytes: capabilities.and_then(quota_default),
             };
             offered.open.insert(host.clone(), offer);
         }

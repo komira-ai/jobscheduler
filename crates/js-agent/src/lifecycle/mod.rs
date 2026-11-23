@@ -329,12 +329,14 @@ use crate::platform::Backend;
 use crate::quota::ScratchQuota;
 
 pub use codes::{code, detail};
-pub use event::{CleanupTimeline, Event, Finding, Skip, StartTimeline};
+pub use event::{CleanupTimeline, Event, Finding, JobBooking, Skip, StartTimeline};
 pub use finding::{CHECK_DETAIL_MAX, CheckFinding, CheckNote};
 pub use machine::{
     Lifecycle, Quiet, RETIRED_CAP, RETIRED_LISTED, Restored, RunningLease, SLOTS, Slots,
 };
-pub use mount_providers::{DEFAULT_PROVIDER_WAIT_SECS, MAX_PROVIDER_WAIT_SECS, MountProviders};
+pub use mount_providers::{
+    DEFAULT_PROVIDER_WAIT_SECS, MAX_PROVIDER_WAIT_SECS, MountProviders, ProviderFlags, UserNames,
+};
 pub use mounts::{Beneath, MountError, MountRoots};
 pub use prefetch::{Forgetter, Prefetcher, PullFuture};
 pub use provider::{ProviderAnswer, ProviderCall, Providers};
@@ -519,8 +521,8 @@ impl Config {
 pub struct Local {
     /// The `--mount-root` and `--mount-root-ro` flags, canonicalised.
     pub mounts: MountRoots,
-    /// The `--mount-provider` and `--mount-provider-wait` flags, checked: none for an agent
-    /// given none (and for a macOS build, which has no such flag).
+    /// The `--mount-provider`, `--mount-provider-user` and `--mount-provider-wait` flags,
+    /// checked: none for an agent given none.
     pub providers: MountProviders,
     /// `--scratch-quota` was given.
     pub scratch_quota: bool,
@@ -545,7 +547,7 @@ pub struct Local {
     /// `--scratch-root`, when given.
     pub scratch: Option<ScratchRoot>,
     /// `--run-files-root`, or for containers the default under `/run` when that can be
-    /// made; always none without `--container-bin` or `--native-helper-socket`.
+    /// made; always none without `--container-bin` or `--native-accounts`.
     pub files: Option<FilesRoot>,
     /// Why the default run files root could not be used, for a warning; none when it was
     /// used, was not needed, or `--run-files-root` was given (then a fault is an error).
@@ -561,6 +563,8 @@ pub struct Local {
     pub settle: Duration,
     /// `--taint-recheck-ms`, or [`DEFAULT_TAINT_RECHECK`].
     pub taint_recheck: Duration,
+    /// `--host-second-samples`: the worker also takes the node's CPU per second.
+    pub host_second_samples: bool,
     /// `--stop-grace`, or [`DEFAULT_STOP_GRACE`].
     pub stop_grace: Duration,
     /// `--drain-wait`, or the stop grace.
@@ -735,6 +739,7 @@ impl Local {
         let tmp_gib = job_tmp_gib(cli)?;
         let settle = jobs.settle;
         let taint_recheck = jobs.taint_recheck;
+        let host_second_samples = jobs.host_second_samples;
         let egress = std::mem::take(&mut jobs.egress);
         let allow_host_jobs = jobs.allow_host_jobs;
         let allow_fuse_jobs = jobs.allow_fuse_jobs;
@@ -757,6 +762,7 @@ impl Local {
             state,
             settle,
             taint_recheck,
+            host_second_samples,
             stop_grace,
             drain_wait,
             image_allow: image_allow(&cli.image_allow)?,

@@ -13,10 +13,12 @@
 //! else the job's.
 
 use js_agent_wire::{
-    BUNDLE_PROGRAM_PREFIX, BookedResources, Isolation, JobStartSpec, NetworkLevel, RunFile, RunSpec,
+    BUNDLE_PROGRAM_PREFIX, BookedFrom, BookedResources, Isolation, JobStartSpec, NetworkLevel,
+    RunFile, RunSpec, StartSizing,
 };
 use js_caps::{XCODE, is_mount_provider_key};
-use js_jobs::{AllocationRecord, Booked, JobRecord, JobSpec, NetworkPolicy};
+use js_jobs::{AllocationRecord, Booked, JobRecord, JobSpec, Needs, NetworkPolicy, SizedFrom};
+use js_sched_placer::sizes::class_name;
 use js_types::{Arch, ExecMode, Os, PortMap, Resources};
 
 use crate::job_api::read::view::millis;
@@ -113,18 +115,28 @@ pub(crate) use js_sched_placer::engine::jobs::job_network;
 /// capability `xcode`) is sent only to a host whose agent listed that build
 /// ([`BeatContext::xcodes`]), and its start carries it as `xcode`.
 ///
+/// A start for a job that books a share carries its sizing ([`StartSizing`]): its size class and
+/// which history gave its CPU and its memory, for the agent's journal.
+///
 /// # Errors
 /// [`Unsendable`] says why it cannot be sent.
 ///
 /// # Native jobs
-/// A job whose `exec` constraint is `sandbox-exec` and that has an image runs a bundle, not a
-/// container: its start has `command` empty (the wire requires it beside a `run`) and a
-/// `run` with no files, no environment of its own (the job's environment stays in `env`, which
-/// the agent lays over the bundle's), no inputs and no outputs, the network level mapped from
-/// the job's ([`run_network`]) and the program of [`bundle_program`]. The start's `os` and
-/// `arch` are the job's constraints when they name a known system and architecture. Every
-/// other job (`exec` unspecified or `container`, or no image) is built as a container job, with
-/// the command then its arguments in `command` and `run`, `os` and `arch` left out.
+/// A job that names an image runs it as a bundle, not a container, when [`runs_natively`]
+/// says so: its operating system is macOS and it names no execution mode, or it names
+/// `sandbox-exec` (as an older client does). Its start has `command` empty (the wire requires
+/// it beside a `run`) and a `run` with no files, no environment of its own (the job's
+/// environment stays in `env`, which the agent lays over the bundle's), no inputs and no
+/// outputs, the network level mapped from the job's ([`run_network`]) and the program of
+/// [`bundle_program`]. Every other job (one that names `container`, one of another or no
+/// operating system that names no mode, or one with no image) is built as a container job,
+/// with the command then its arguments in `command` and no `run`.
+///
+/// Every start, native or container, carries the job's operating system and architecture
+/// (`os`, `arch`) when its constraints name a known system and architecture, so that an agent
+/// that runs more than one platform can choose its runtime from them; a constraint that names
+/// neither, or one this version does not know, leaves the field out. An agent from before the
+/// fields skips them.
 pub(crate) fn start_of(
     job: &JobRecord,
     allocation: &AllocationRecord,
@@ -206,27 +218,24 @@ pub(crate) fn start_of(
     let log_sink = context
         .logs
         .and_then(|logs| logs.sink_for(context.host.as_str(), job.id.as_str()));
-    let native = spec.constraints.exec == Some(ExecMode::SandboxExec) && spec.image.is_some();
-    let (command, run, os, arch) = if native {
-        (
-            Vec::new(),
-            spec.image.as_ref().map(|image| run_of(spec, image.name())),
-            spec.constraints
-                .os
-                .as_deref()
-                .and_then(|os| os.parse::<Os>().ok()),
-            spec.constraints
-                .arch
-                .as_deref()
-                .and_then(|arch| arch.parse::<Arch>().ok()),
-        )
-    } else {
-        (
+    let os = spec
+        .constraints
+        .os
+        .as_deref()
+        .and_then(|os| os.parse::<Os>().ok());
+    let arch = spec
+        .constraints
+        .arch
+        .as_deref()
+        .and_then(|arch| arch.parse::<Arch>().ok());
+    let (command, run) = match &spec.image {
+        Some(image) if runs_natively(spec.constraints.exec, os) => {
+            (Vec::new(), Some(run_of(spec, image.name())))
+        }
+        _ => (
             spec.command.iter().chain(&spec.args).cloned().collect(),
             None,
-            None,
-            None,
-        )
+        ),
     };
     let mut start = JobStartSpec {
         job_id: job.id.to_string(),
@@ -255,6 +264,7 @@ pub(crate) fn start_of(
         placed_at_ms: job.placed_at.map(millis),
         fuse: false,
         xcode,
+        sizing: sizing_of(job, allocation),
     };
     let sink_ok = start.log_sink_checked().is_ok();
     start.log_sink = start.log_sink.filter(|_| sink_ok);
@@ -266,6 +276,46 @@ pub(crate) fn start_of(
             field: error.field(),
         })?;
     Ok(start)
+}
+
+/// What the start says of where the booking came from, for the agent's journal: `None` for a
+/// job that books the whole host. Otherwise the job's size class ([`class_name`]) and, for each
+/// of CPU and memory, [`BookedFrom::Named`] when the job's own needs name it (non-zero), else
+/// the history that sized the allocation ([`AllocationRecord::sized_from`]), or
+/// [`BookedFrom::Unknown`] when the allocation records none.
+fn sizing_of(job: &JobRecord, allocation: &AllocationRecord) -> Option<StartSizing> {
+    let Needs::Shape(asked) = &job.spec.needs else {
+        return None;
+    };
+    if allocation.booked == Booked::WholeHost {
+        return None;
+    }
+    let sized = match allocation.sized_from {
+        Some(SizedFrom::Class) => BookedFrom::Class,
+        Some(SizedFrom::Fallback) => BookedFrom::Fallback,
+        Some(SizedFrom::Cold) => BookedFrom::Cold,
+        Some(SizedFrom::OverCap) => BookedFrom::OverCap,
+        None => BookedFrom::Unknown,
+    };
+    let from = |named: u64| if named > 0 { BookedFrom::Named } else { sized };
+    Some(StartSizing {
+        class: Some(class_name(job)),
+        cpu: from(asked.cpu_millis()),
+        memory: from(asked.memory_bytes()),
+    })
+}
+
+/// Whether a job of the execution mode `exec` and the operating system `os` that names an image
+/// runs that image as a bundle, natively: `sandbox-exec` always (as an older client asks for
+/// it), `container` never, and a job that names no mode when its system is macOS. The mode a
+/// job names is honoured over its system, so a macOS job that names `container` (or that the
+/// submit gave `container` for its layers or a remapped host port) stays a container job.
+fn runs_natively(exec: Option<ExecMode>, os: Option<Os>) -> bool {
+    match exec {
+        Some(ExecMode::SandboxExec) => true,
+        Some(ExecMode::Container) => false,
+        None => os == Some(Os::Macos),
+    }
 }
 
 /// The network level of a native job's [`RunSpec`]: none is off, an allow-list is on (limited

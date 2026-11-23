@@ -418,13 +418,17 @@ pub struct JobRecord {
     pub failed_prepares: u32,
     /// The hosts the job is kept off, each with until when: those its failed prepares bar,
     /// written with the count by [`crate::JobStore::fail_prepare_with`], and those that refused
-    /// its start as held, written by [`crate::JobStore::requeue_held`]. Kept while the job is
+    /// its start as held or for capacity, written by [`crate::JobStore::requeue_held`]. Kept while the job is
     /// queued, so the bars survive the deletion of its mark. Empty on a row that never had any.
     pub prepare_bars: BTreeMap<HostId, Exclusion>,
     /// The host of each start of the job that a held host refused (the agent's code
     /// `host-held`) and that sent the job back to the queue, in order: appended by
     /// [`crate::JobStore::requeue_held`]. Empty on a row that never had one.
     pub held_refusals: Vec<HostId>,
+    /// The host of each start of the job that a host refused for capacity (the agent's code
+    /// `no-capacity`) and that sent the job back to the queue, in order: appended by
+    /// [`crate::JobStore::requeue_held`]. Empty on a row that never had one.
+    pub capacity_refusals: Vec<HostId>,
     /// Why the job waits, its placement attempts and its newest events
     /// (`docs/design/queue-status.md`).
     pub queue: QueueTrail,
@@ -448,6 +452,33 @@ pub enum Booked {
     },
     /// The whole host.
     WholeHost,
+}
+
+/// Which history sized a job that books nothing of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SizedFrom {
+    /// Its own class's runs: the class has a fresh run of its own.
+    Class,
+    /// Its fallback class's runs, else its client's, in place of the cold size: its own class
+    /// has no run; raised only by its own class's floor.
+    Fallback,
+    /// The cold size: neither its class, nor its fallback class, nor its client has a run.
+    Cold,
+    /// The whole of the most bookable memory a host has: its class's runs reach it.
+    OverCap,
+}
+
+impl SizedFrom {
+    /// The name a placement's log gives it: `class`, `fallback`, `cold` or `over-cap`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Class => "class",
+            Self::Fallback => "fallback",
+            Self::Cold => "cold",
+            Self::OverCap => "over-cap",
+        }
+    }
 }
 
 /// Where an allocation is (design section 6.2).
@@ -514,6 +545,10 @@ pub struct AllocationRecord {
     /// ([`JobSpec::wall_limit_secs`]), as [`crate::Placement::wall_limit_secs`] gives it. `None`:
     /// the job's own.
     pub wall_limit_secs: Option<u64>,
+    /// Which history sized the job's booking, as [`crate::Placement::sized_from`] gives it, when
+    /// the history sized it. `None`: the job named both its CPU and its memory, or the row was
+    /// written before the field.
+    pub sized_from: Option<SizedFrom>,
     /// Fields a later build wrote, kept for the next write of the row.
     pub(crate) carried: Carried,
 }

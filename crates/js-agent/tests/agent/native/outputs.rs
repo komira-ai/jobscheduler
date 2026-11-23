@@ -1,5 +1,5 @@
 //! The declared outputs of a native run, copied out of its working directory when the run
-//! is removed: after the kill and before the user (and its home) is deleted, without
+//! is removed: after the kill and before the account (and its home) is retired, without
 //! following a link, within the run's caps, and without stopping the teardown when one
 //! cannot be copied.
 
@@ -30,8 +30,17 @@ fn started(rig_name: &str, max_file_bytes: u64, outputs: Vec<OutputSpec>) -> (Ri
     body.outputs = outputs;
     let spec = rig.spec("r1", body);
     rig.rt.create_and_start(&spec).unwrap();
-    let exec = rig.fake.home_of("7.0").join("exec");
+    let exec = rig.home_of(&account_of(&rig)).join("exec");
     (rig, exec)
+}
+
+/// The name of the account the run `r1` of `rig` runs as.
+fn account_of(rig: &Rig) -> String {
+    rig.launcher
+        .last()
+        .var("USER")
+        .expect("the account")
+        .to_owned()
 }
 
 /// Where the outputs of the run `r1` of `rig` are copied to.
@@ -55,36 +64,30 @@ fn journal(rig: &Rig) -> Vec<String> {
     leases.map(str::to_owned).collect()
 }
 
-/// Asserts that a declared output is copied after the kill and before the user is deleted:
-/// when the helper's `user-delete` arrives, the copy is already in the run's scratch
-/// directory with the bytes the job wrote, the helper saw `kill-uid` and then
-/// `user-delete`, the copy stays (`0600`, the agent's) after the home is gone, and the
-/// journal says the lease is done. A file output in a directory of the working directory
-/// is copied to the same place below `outputs`. It catches a collection after the deletion
-/// (the home and the file would be gone) and a collection that never runs.
+/// Asserts that a declared output is copied before the account is retired: once the removal
+/// is done and the account's home is gone (the pool's retirement deletes it, with the record),
+/// the copy is in the run's scratch directory with the bytes the job wrote, it stays (`0600`,
+/// the agent's), the account is retired, and the journal says the lease is done. A file
+/// output in a directory of the working directory is copied to the same place below
+/// `outputs`. It catches a collection after the retirement (the home and the file would be
+/// gone) and a collection that never runs.
 #[test]
-fn outputs_are_collected_before_the_user_is_deleted() {
+fn outputs_are_collected_before_the_account_is_retired() {
     let declared = vec![
         output("out.txt", OutputKind::File),
         output("logs/run.log", OutputKind::File),
     ];
     let (mut rig, exec) = started("outputs-order", 1 << 20, declared);
+    let account = account_of(&rig);
     let into = collected(&rig);
-    rig.fake.read_at_delete(&into.join("out.txt"));
     fs::write(exec.join("out.txt"), b"the job's result\n").unwrap();
     fs::create_dir(exec.join("logs")).unwrap();
     fs::write(exec.join("logs/run.log"), b"log").unwrap();
-    rig.fake.exit("7.0", 0);
     rig.settle(&handle());
+    assert!(!into.exists(), "nothing is copied before the removal");
     rig.rt.remove(&handle()).unwrap();
-    let read = rig.fake.read_when_deleted();
-    assert_eq!(read, Some(Some(b"the job's result\n".to_vec())));
-    let verbs = rig.fake.verbs();
-    assert_eq!(
-        verbs[verbs.len() - 2..],
-        ["kill-uid 7.0", "user-delete 7.0"]
-    );
-    assert!(!rig.fake.home_of("7.0").exists());
+    assert!(!rig.home_of(&account).exists());
+    assert!(!rig.accounts.records().contains(&account));
     assert_eq!(
         fs::read(into.join("out.txt")).unwrap(),
         b"the job's result\n"
@@ -99,7 +102,7 @@ fn outputs_are_collected_before_the_user_is_deleted() {
 /// included, and that no link is followed: a link in the tree to a file outside the home
 /// is not copied and is a failure; a link declared as the output itself is a failure; a
 /// link on the way to an output is a failure; and a socket in the tree is not copied and
-/// is a failure. The removal still deletes the user and fails with every failure by path,
+/// is a failure. The removal still retires the account and fails with every failure by path,
 /// and none of what the links point at is copied. It catches a root agent steered by a
 /// job's link to read outside the job's home.
 #[test]
@@ -125,7 +128,6 @@ fn a_directory_output_copies_regular_files_and_skips_links() {
     let short = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("o{}", std::process::id()));
     drop(UnixListener::bind(&short).unwrap());
     fs::rename(&short, tree.join("sock")).unwrap();
-    rig.fake.exit("7.0", 0);
     rig.settle(&handle());
     let why = rig.rt.remove(&handle()).unwrap_err();
     assert_eq!(
@@ -140,45 +142,49 @@ fn a_directory_output_copies_regular_files_and_skips_links() {
     for absent in ["tree/link", "tree/sock", "single", "via"] {
         assert!(fs::symlink_metadata(into.join(absent)).is_err(), "{absent}");
     }
-    assert_eq!(rig.fake.verbs().last().unwrap(), "user-delete 7.0");
+    assert!(
+        !rig.home_of(&account_of(&rig)).exists(),
+        "the account is retired"
+    );
     assert_eq!(journal(&rig), ["+ 7.0", "- 7.0"]);
 }
 
 /// Asserts that an output over the run's largest file is not copied past the cap (no part
-/// of it is kept), that the removal still kills and deletes the user and marks the journal
-/// done, and that it then fails naming the path and the cap, not the bytes. A removal the
-/// helper refused first (`user-delete`) and that is tried again copies nothing twice and
-/// reports the failure once, and a removal after that is fine. It catches a failure that
-/// returns early and leaves the user, and a copy that is cut short and kept.
+/// of it is kept), that the removal still retires the account and marks the journal done,
+/// and that it then fails naming the path and the cap, not the bytes. A removal whose
+/// account the pool could not retire first (its record cannot be deleted) and that is tried
+/// again copies nothing twice and reports the failure once, and a removal after that is
+/// fine. It catches a failure that returns early and leaves the account, and a copy that is
+/// cut short and kept.
 #[test]
 fn an_output_over_the_cap_is_a_collection_failure_and_teardown_still_happens() {
     let declared = vec![output("big", OutputKind::File)];
     let (mut rig, exec) = started("outputs-cap", 10, declared);
+    let account = account_of(&rig);
     fs::write(exec.join("big"), b"0123456789A").unwrap();
-    rig.fake.exit("7.0", 0);
     rig.settle(&handle());
-    rig.fake.refuse("user-delete", "busy");
+    rig.accounts.keep_record(&account);
     let first = rig.rt.remove(&handle()).unwrap_err();
-    assert!(first.0.starts_with("user-delete: "), "{}", first.0);
-    assert!(first.0.contains("busy"), "{}", first.0);
+    assert!(
+        first.0.starts_with(&format!("account {account} (uid ")),
+        "{}",
+        first.0
+    );
     assert!(!first.0.contains("outputs"), "{}", first.0);
-    rig.fake.allow("user-delete");
+    assert_eq!(
+        journal(&rig),
+        ["+ 7.0"],
+        "the lease stays while the account is held"
+    );
+    rig.accounts.free_record(&account);
     let why = rig.rt.remove(&handle()).unwrap_err();
     assert_eq!(
         why.0,
         "outputs not copied: big: over the 10 bytes it may hold: not copied"
     );
     assert!(!collected(&rig).join("big").exists());
-    let verbs = rig.fake.verbs();
-    assert_eq!(
-        verbs[verbs.len() - 4..],
-        [
-            "kill-uid 7.0",
-            "user-delete 7.0",
-            "kill-uid 7.0",
-            "user-delete 7.0"
-        ]
-    );
+    assert!(!rig.accounts.records().contains(&account));
+    assert!(rig.pool.held().is_empty());
     assert_eq!(journal(&rig), ["+ 7.0", "- 7.0"]);
     rig.rt.remove(&handle()).unwrap();
 }
@@ -195,13 +201,12 @@ fn a_missing_declared_output_is_not_an_error() {
         output("deep/er/file", OutputKind::File),
     ];
     let (mut rig, _) = started("outputs-missing", 1 << 20, declared.clone());
-    rig.fake.exit("7.0", 0);
     rig.settle(&handle());
     rig.rt.remove(&handle()).unwrap();
     assert!(!collected(&rig).exists());
 
     let (mut rig, _) = started("outputs-homeless", 1 << 20, declared);
-    fs::remove_dir_all(rig.fake.home_of("7.0")).unwrap();
+    fs::remove_dir_all(rig.home_of(&account_of(&rig))).unwrap();
     rig.rt.remove(&handle()).unwrap();
     assert!(!collected(&rig).exists());
 }
@@ -235,7 +240,6 @@ fn an_output_that_is_not_what_was_declared_is_a_failure() {
     }
     fs::create_dir_all(&deep).unwrap();
     fs::write(deep.parent().unwrap().join("kept"), b"k").unwrap();
-    rig.fake.exit("7.0", 0);
     rig.settle(&handle());
     let why = rig.rt.remove(&handle()).unwrap_err();
     let deepest = format!("deep{}", "/d".repeat(64));
@@ -262,7 +266,7 @@ fn an_output_that_is_not_what_was_declared_is_a_failure() {
 /// Asserts that a native run whose output cannot be copied is cleaned up like any other
 /// through the lifecycle: the result is the job's exit, the failure is the finding
 /// `outputs-failed` naming the path, the cleanup runs in its order, the host is not tainted
-/// (nothing of the run is left: its user is deleted), and the next start runs. It catches a
+/// (nothing of the run is left: its account is retired), and the next start runs. It catches a
 /// job that taints the host for good by declaring an output and writing a link there.
 #[test]
 fn a_collection_failure_is_a_finding_and_leaves_the_host_untainted() {
@@ -270,9 +274,8 @@ fn a_collection_failure_is_a_finding_and_leaves_the_host_untainted() {
     let mut spec = job("r1", "/bin/sh");
     spec.native.as_mut().unwrap().outputs = vec![output("out", OutputKind::File)];
     assert_eq!(h.start(spec), ["started r1"]);
-    let exec = h.fake.home_of("7.0").join("exec");
+    let exec = h.home_of(0).join("exec");
     symlink("elsewhere", exec.join("out")).unwrap();
-    h.fake.exit("7.0", 0);
     let events = h.until(|life| life.busy_slots().is_empty());
     let mut want = vec![
         "result r1".to_owned(),
@@ -288,7 +291,7 @@ fn a_collection_failure_is_a_finding_and_leaves_the_host_untainted() {
     assert_eq!(found.as_deref(), Some(said));
     assert_eq!(h.life.results()[0].outcome, Outcome::Succeeded);
     assert!(!h.life.is_tainted());
-    assert!(!h.fake.home_of("7.0").exists());
+    assert!(!h.home_of(0).exists());
     assert_eq!(h.start(job("r2", "/bin/sh")), ["started r2"]);
 }
 
@@ -303,7 +306,6 @@ fn a_file_with_a_second_name_is_not_copied() {
     let outside = rig.dir.path("outside");
     fs::write(&outside, b"not the job's").unwrap();
     fs::hard_link(&outside, exec.join("hard")).unwrap();
-    rig.fake.exit("7.0", 0);
     rig.settle(&handle());
     let why = rig.rt.remove(&handle()).unwrap_err();
     assert_eq!(

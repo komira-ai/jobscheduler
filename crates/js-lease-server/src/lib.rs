@@ -48,8 +48,8 @@
 //! | `--agent-hello-burst`, `--agent-hello-interval` | the hellos one join token may say in a burst (`60`) and how often one more is allowed after (`1s`) |
 //! | `--require-host-credential` | off by default: turn it on once every agent is new. The first hello of a one-time join token must then say the agent keeps a host credential, or it is refused `join-token-credential-required` (403) and the token stays unused; so the token of every launched host is dead after its first hello. Pool join tokens are not affected. Needs `--agent-pool-config` |
 //! | `--placement js-sched` | deprecated, and does nothing: `js-sched` is the only placement. The flag is accepted with the warning `--placement is deprecated and does nothing: js-sched is the only placement (drop the flag)`; `--placement registry`, the removed first-free placement, is refused at start, `the registry placement mode was removed; js-sched is the only placement (drop the flag)`. The server keeps one `js-sched` scheduler for the life of the server, built once and told of every hello, accepted heartbeat (with its load reading) and stop as the registry takes them, and of every host the registry forgets; it places the jobs on the hosts that registered themselves, and the scheduler is built again only when its picture of those hosts and the registry's books disagree, keeping each host's last three readings, and the start is counted. The pool's `memory_schedulable_percent` is the scheduler's rule: the registry books each host's whole `[shape]` and the scheduler books no more than the percent of its memory; `GET /v1/hosts` shows the cut memory as `shape.memory_bytes`, beside the percent. A host a whole-node request has set aside takes work of the pool's `share_class` only as backfill, by the end of the host's tail as the mark took it; a wall time above `server.max_lease_wall` never does. An agent pool (`--agent-pool-config`, or a joined pool of the file) whose capabilities name no `arch` is refused at start, naming the pool; an elastic pool is not: each of its machines is placed by the floor's numbers and the capabilities its agent reported at hello, `arch` among them. Needs `--agent-pool-config` |
-//! | `--cpu-slack <multiplier>` | how far above a host's cores the scheduler may charge it, from `1.0` to `2.0` with at most three decimals, such as `1.1`; the scheduler's own default (1.1) unless given. Needs `--agent-pool-config` |
-//! | `--cold-cpu-millis <n>`, `--cold-memory-bytes <n>` | what a queued job that names no CPU or no memory books, for that dimension, while the history of its class gives no estimate (`docs/design/sizing.md`, section 7.7): millicores from `250`, bytes from `1073741824` (1 GiB); the memory is also the least its class books before five runs. Each left out is its default, `4000` (4 cores) and `17179869184` (16 GiB); a value above the most a registered host has books that most. Needs `--agent-pool-config` |
+//! | `--cpu-slack <multiplier>` | how far above a host's cores the scheduler may charge it, from `1.0` to `2.0` with at most three decimals, such as `1.1`; the scheduler's own default (1.1) unless given. A job is placed on a host whose agent does not report `load-admission` only where the summed bookings of its jobs stay within what its hello offers, with no slack. Needs `--agent-pool-config` |
+//! | `--cold-cpu-millis <n>`, `--cold-memory-bytes <n>` | what a queued job that names no CPU or no memory books, for that dimension, while neither its class, its fallback class nor its client has a run (`docs/design/sizing.md`, section 7.7): millicores from `250`, bytes from `1073741824` (1 GiB). Each left out is its default, `22000` (22 cores) and `4294967296` (4 GiB); a CPU above a quarter of the most cores a registered host has books that quarter, and a memory above the most a registered host has books that most. Needs `--agent-pool-config` |
 //! | `--estimate-feed` | deprecated, and does nothing: no lease is costed by an estimate any more. The flag is accepted with the warning `--estimate-feed is deprecated and does nothing: no lease is costed by an estimate any more (drop the flag)`, and is still refused beside `--usage-off` and without `--agent-pool-config` |
 //! | `--token-file <path>`, `--client-token <NAME>=<PATH>` | `--token-file`: required: a regular file owned by the server's user, mode 0600 or 0400, holding one token of printable ASCII of at least 32 bytes ([`MIN_TOKEN_BYTES`]; trailing whitespace is dropped). A shorter token is refused at start. The token of `GET /v1/hosts` and the join, brake and usage routes, and on the job service the token of the client named `default`. `--client-token`: repeatable, none by default: one more client of the job service (see `docs/design/configuration.md`), `NAME=PATH` or `NAME:ROLE=PATH`: its name (1 to 40 bytes of letters, digits, `.`, `_` and `-`, each name once, not `default`), its role (`client`, the default, or `operator`; the client `default` is an operator) and the file of its own token, checked as `--token-file`'s is and read again at every tick. A bad entry is refused by its position without repeating it; a short token, a file others can read, a name or a token another client has, and a token the join token file holds are refused naming the entry, never the token. Needs `--job-listen` |
 //! | `--tick` | how often the job pass runs and, with agent registration on, the agent registry is advanced (reservation drain and prepare deadlines), `5s` unless given |
@@ -120,9 +120,9 @@
 //! # cpu_slack (1.1, a number): the flag's name, default and range; refused unless a pool
 //! # registers agents
 //! # cold_cpu_millis (250 or more), cold_memory_bytes (1073741824 or more): what a queued job
-//! # that names no CPU or memory books while its class has no estimate, and the least memory
-//! # its class books before five runs; each left out is its default (4000, 17179869184: 4 cores
-//! # and 16 GiB); held at the largest host; the flags' names (--cold-cpu-millis, --cold-memory-bytes) and rules
+//! # that names no CPU or memory books while neither its class, its fallback class nor its
+//! # client has a run; each left out is its default (22000, 4294967296: 22 cores and 4 GiB);
+//! # the CPU held at a quarter of the largest host's cores, the memory at the largest host; the flags' names (--cold-cpu-millis, --cold-memory-bytes) and rules
 //! # estimate_feed (false): deprecated, as the flag; true warns and does nothing; refused unless a
 //! # pool registers agents, and refused as true beside usage_off = true
 //! # usage_db (usage.db beside state_file), usage_off (false), profile_store_bytes (268435456),
@@ -288,6 +288,8 @@
 //! max_machines   = 4          # max_instances is the same cap; give one
 //! max_queue_wait = "30m"      # default 1h
 //! start_timeout  = "15m"      # default 15m
+//! capacity_requeues    = 8     # default 8; 0 ends a job at its first refusal for capacity
+//! capacity_refusal_bar = "60s" # default 60s; how long a host that refused for capacity is kept off the job
 //! path_grace     = "15s"      # default 15s
 //! # max_spend_per_hour, max_spend_per_day and the other keys of an elastic pool as above
 //!
@@ -314,7 +316,9 @@
 //! step 5). Two machine providers of one kind (one provider id) in one pool are refused.
 //! A pool's health is its first launching provider's checks, and the scaler reads that
 //! provider's notices; a later provider's offers are its cached catalog. `max_queue_wait`, `start_timeout`
-//! and `path_grace` (each a positive duration) and the `provider_limits` tables (for a launching machine provider
+//! and `path_grace` (each a positive duration), `capacity_refusal_bar` (a positive duration, 60s by default),
+//! `capacity_requeues` (0 to 1000, 8 by default: how many times a start a host refused for capacity sends a
+//! job back to the queue before the next such refusal ends it) and the `provider_limits` tables (for a launching machine provider
 //! of the pool's platforms; unknown keys are refused) are read and checked. Admission reads
 //! `allowed_instance_types`, `max_price_cents_per_hour` and `max_machines` (see "Admission"
 //! below); `quota_backoff` and `acquire_retry` (1h and 60s by default) time pass 2's failover;
@@ -365,8 +369,8 @@
 //! without one a gRPC call is answered `UNAUTHENTICATED` with an empty message and an HTTP
 //! request 401 with an empty body. A request carries at most 64 KiB over either transport.
 //! [`SERVED_CALLS`] are served: `SubmitJob` (validated, idempotent on the job id, admitted
-//! over the registered hosts and the pool's catalog, committed before it answers, and placed in
-//! the call when no queued job of its priority or above is ahead; its wall
+//! over the registered hosts and the pool's catalog, committed before it answers, answered queued, and placed by the server's placement
+//! poller, which the call pokes; its wall
 //! limit held to `--max-job-wall`), `CancelJob` and the reads, and the fleet calls (`ListHosts`,
 //! `CordonHost`, `UncordonHost`, `ClearHostTaint`, `ListPools`, `ListProviders`, `GetUsage`) over the server's
 //! hosts, the status of its pools, and its usage and job stores. `docs/http-gateway.md` has the answers
@@ -799,6 +803,7 @@ pub mod network;
 mod node_rows;
 mod per_job;
 mod platform;
+mod poller;
 mod pool;
 mod program;
 mod rate;

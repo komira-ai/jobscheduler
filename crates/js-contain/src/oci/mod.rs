@@ -57,10 +57,9 @@
 //! tail to whoever reads its exit record.
 //!
 //! **cgroups:** the container's cgroup is `<lease cgroup>/ctr`, made by `crun` in the
-//! daemon's delegated subtree with the pids limit and `memory.oom.group=1`; the memory and
-//! CPU limits that bound the job are the lease cgroup's, and the container's cgroup repeats
-//! them (`cpu.max`, `memory.max`) when its limits name the booking, so the job reads them in
-//! its own `/sys/fs/cgroup`.
+//! daemon's delegated subtree with the pids limit and `memory.oom.group=1`; the lease's
+//! limits are the lease cgroup's (`crate::cgroup`). The container's cgroup has no
+//! `memory.max`, and a `cpu.max` only to repeat an operator's CPU ceiling.
 
 pub(crate) mod crun;
 mod devices;

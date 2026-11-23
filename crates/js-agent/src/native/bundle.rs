@@ -10,14 +10,14 @@
 //!    the program names (`@bundle/<name>`) must be one the bundle has. A start that fails
 //!    here has made nothing.
 //! 2. [`prepare`], after the user exists and before anything of the user's runs: the
-//!    config's writable trees are cloned into the run's own `trees` directory (owned by the
+//!    config's writable trees are cloned into the run's own `.trees` directory (below its run directory) (owned by the
 //!    user, private to them), the config is resolved for the run (`js_bundle::materialise`:
 //!    where each tree is, the environment, the arguments), and the entrypoint is resolved
 //!    to the file it names, which must lie inside its tree and be a program.
 //!
 //! The pins end with the run: [`Pinned`] unpins when it is dropped, whichever way the start
-//! or the run ends. The clones are inside the user's home, which the helper sweeps when it
-//! deletes the user.
+//! or the run ends. The clones are inside the account's home, which the account's retirement
+//! deletes.
 //!
 //! The profile of a run that pins a bundle is the same as any native run's: reads are open
 //! (`ReadModel::Open`, the only model with a profile builder), so the store's trees need no
@@ -99,8 +99,9 @@ pub(super) fn pin(
     }
 }
 
-/// Makes the pinned bundle ready for the run of `native` as `uid`, whose home is `home`:
-/// clones what the bundle says is written to into `<home>/trees` and resolves the config.
+/// Makes the pinned bundle ready for the run of `native` as `uid`, whose run directory is
+/// `home`: clones what the bundle says is written to into `<home>/.trees` (the profile
+/// grants writes below the run directory only) and resolves the config.
 /// `tmp` is the run's `TMPDIR`, and `developer_dir` the `Contents/Developer` of the Xcode the
 /// start names, which becomes `DEVELOPER_DIR` and what `${developer_dir}` expands to.
 pub(super) fn prepare(
@@ -108,9 +109,10 @@ pub(super) fn prepare(
     native: &NativeSpec,
     home: &Path,
     (uid, tmp, developer_dir): (u32, &Path, Option<&Path>),
+    hand_over: &super::HandOver,
 ) -> Result<Prepared, Prepare> {
-    let under = home.join("trees");
-    super::make_dir(&under, uid)?;
+    let under = home.join(super::profile::JOB_TREES_DIR);
+    super::make_dir(&under, uid, hand_over)?;
     let gid = fs::metadata(home)?.gid();
     let owner = Owner::new(uid, gid).ok_or(Prepare::Owner)?;
     let writable = pinned.clone_writable(&under, owner)?;

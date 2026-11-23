@@ -314,6 +314,7 @@ fn job_start(node: &Node, job_id: &str) -> JobStartSpec {
         host_ports: Vec::new(),
         placed_at_ms: None,
         xcode: None,
+        sizing: None,
     }
 }
 

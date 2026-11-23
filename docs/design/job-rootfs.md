@@ -75,7 +75,7 @@ Read in code; every later section builds on these facts.
   `PortMap { host, container }`) are the other direction: a forward from a host port into the job.
 - **macOS has no root to replace.** A native job runs as a pool user under `sandbox-exec`, in `exec/` of the user's
   home, with reads open except listed denies (`ReadModel::Open`, `crates/js-agent/src/native/settings.rs`) and writes
-  only in the home. A `Mount` input is copied into `exec/<dest>` (`crates/js-agent/src/native/files.rs`). The Seatbelt
+  only in the run directory `exec/` (`HOME` is `exec/.home`, `TMPDIR` `exec/.tmp`; the account's home is never written). A `Mount` input is copied into `exec/<dest>` (`crates/js-agent/src/native/files.rs`). The Seatbelt
   builder can already allow single loopback ports (`Net::Ports`, `crates/js-mac-pool/src/seatbelt/profile.rs:191-195`),
   which no job reaches yet.
 - **The preparing stage is image-only.** A contained start whose image is not on the host waits in `Stage::Preparing`
@@ -804,6 +804,7 @@ not change whichever wins, because all three realise the same thing: a `COPY_ON_
 | `mounts`, `READ_ONLY` or `READ_WRITE`, target below `/work` | a link in `exec/` (5.2); built. A target below another mount's target is refused `mount-target-unsupported-here` (its link would be made inside the host directory the first points at) |
 | `mounts`, `READ_ONLY` or `READ_WRITE`, target exactly `/work` | refused `mount-target-unsupported-here`: the run's working directory is a directory of the run's home, which a link cannot replace |
 | `mounts`, any target outside `/work` | refused `mount-target-unsupported-here` |
+| `mounts[i].source`, a provider (`--mount-provider`) | `READ_ONLY`: the lifecycle asks the provider to prepare and mount the tree and the link of 5.2 points at the directory it answered (tierstore: a directory of its one NFS mount of the Mac, below `--native-trees-root`); below the trees root the mount is one of the run's trees (5.4); built. `READ_WRITE` refused `input-not-allowed` at admission; `COPY_ON_WRITE` as above. The hello reports `mount-provider.<name>` for each provider, as on Linux |
 | `mounts[i].sub_path` | resolved beneath the host path as on Linux; the link of 5.2 points at the result |
 | `mounts[i].no_exec` | a Seatbelt deny of `process-exec*` and `file-map-executable` for the mount's path (5.4) |
 | `mounts[i].propagation` | private is what a link gives: nothing mounted on the host later appears through it unless it is mounted below the linked path itself, which the provider controls |
@@ -833,7 +834,7 @@ Independent of 5.3:
   the run's home, where the profile's head denies them. A working directory at or below the link is refused
   `cwd-in-tree` (an existing code), since the working-directory check (`crates/js-agent/src/native/cwd.rs`) refuses a
   link out of `exec/`.
-- **Built** in `native/mounts.rs`. The lookup (`resolve_fs`) canonicalises each host path with its `sub_path`, requires a directory (`input-unavailable` when it is missing or is not one) beneath a canonical root of the agent that its mode allows (`input-not-allowed`; the lifecycle's own check reads the path's text only, so a link inside a root that leads out is caught here), and keeps the plan by run id; the start makes the links, with the missing directories above them as the run's user's, and a name that is there already fails the start. `discard_fs` drops an unused plan.
+- **Built** in `native/mounts.rs`. The lookup (`resolve_fs`) canonicalises each host path with its `sub_path`, requires a directory (`input-unavailable` when it is missing or is not one) beneath a canonical root of the agent that its mode allows (`input-not-allowed`; the lifecycle's own check reads the path's text only, so a link inside a root that leads out is caught here), then holds the whole set to the trees root's rules (5.4; `input-not-allowed`), and keeps the plan by run id; the start makes the links, with the missing directories above them as the run's user's, and a name that is there already fails the start. The agent makes no directory a mount points at and never unmounts anything. `discard_fs` drops an unused plan.
 - **`READ_WRITE`**: the same link, with the host path in a write grant of the profile (5.4); the Unix permissions of the
   host path must also let the run's user write it, which the profile cannot grant.
 
@@ -871,9 +872,22 @@ and because it is the cheapest if the measurements show that the jobs only repla
 
 The profile of a run with mounts (reads stay open, `ReadModel::Open`), whichever candidate is chosen:
 
-- Built. Each `--mount-root`/`--mount-root-ro` is a **read deny** of every run (`NativeConfig.read_denies`), so a run cannot
-  read what another run was given below the same root. An operator who keeps a tool under a mount root, which jobs read
-  without mounting, moves it out; the agent already refuses a files root that overlaps a mount root at start.
+- Built. Each `--mount-root`/`--mount-root-ro` but the trees root is a **read deny** of every run
+  (`NativeConfig.read_denies`), so a run cannot read what another run was given below the same root. An operator who
+  keeps a tool under a mount root, which jobs read without mounting, moves it out; the agent already refuses a files root
+  that overlaps a mount root at start.
+- Built. **Trees.** `--native-trees-root` names the one mount point below which the provider serves every run's trees
+  (tierstore's NFS mount of the Mac). The agent does not start unless it is absolute, resolves to a `--mount-root-ro`
+  that no `--mount-root` names, no other mount root lies above or below it, and a `--mount-provider` is given (`crates/js-agent/src/native_fs.rs`, `trees_root`). A
+  mount whose directory is below it, as named or once resolved, is a tree of the run; the set is refused at the lookup
+  (`input-not-allowed`, naming the path) when a tree is the root itself, resolves outside it (`..`, a link), is
+  `READ_WRITE` or lacks `no_exec`, is not a tree the provider answered for this run (`<root>/mount-provider/<provider>/<run>/<index>`, the run the hex of `js.<run id>`: a job cannot name another run's tree as a host path), or a mount's directory holds the root (`tree_rules`). With a trees root every run's profile carries the root's rules, with no tree when the run mounts none. A tree gets no `GR_i`: the
+  profile denies reads below the root (`MOUNT`), then grants each tree's reads (`MT_i`) and the metadata of its
+  ancestors (js-mac-pool `MountTrees`), so a run reads its own trees and cannot read or list another run's or the root.
+  The builder renders these rules before the read denies, so the trees root is the one mount root left out of
+  `read_denies` (a later deny of it would hide every tree). The trees' rules begin with a deny of `process-exec*`
+  and `file-map-executable` below the root, which no later rule allows, so no tree is ever run or mapped executable;
+  `no_exec` is required of a tree at admission so that a start asking otherwise is refused before it runs.
 - Each read-only or read-write mount of the run, and each host path a candidate reads through, is **granted** by a new
   policy item emitted after the read denies and before the floor: `(allow file-read* (subpath (param "GR_i")))`, and
   `(allow file-read-metadata (path-ancestors (param "GR_i")))`, so that `realpath` and
@@ -962,8 +976,8 @@ moment the program runs. `times.started_at_ms - times.placed_at_ms` is how long 
    (the server's `may_move`, `crates/js-jobs/src/record.rs`), then one end, which never changes. The two ways back
    are operations of the store's own outside `may_move`: a whole-host job whose host's prepare failed returns from
    `PLACED` to `QUEUED` (`requeue_failed_prepare` and `fail_prepare_with`, `crates/js-jobs/src/store.rs` and
-   `store/whole.rs`), and a job whose start a host held for maintenance refused returns from `PLACED` or `STARTING` to
-   `QUEUED` (`requeue_held`, `crates/js-jobs/src/store/held.rs`). Either way its `host_id` is cleared and an event
+   `store/whole.rs`), and a job whose start a host held for maintenance, or with no room for it, refused returns from `PLACED` or
+   `STARTING` to `QUEUED` (`requeue_held`, `crates/js-jobs/src/store/held.rs`). Either way its `host_id` is cleared and an event
    `REQUEUED` names the host it left; it may then be placed on another host.
 2. **A read may miss a state.** Every state the job passes is recorded, one commit each, but a read sees only the
    state of its moment: a job may go from `PLACED` to `RUNNING`, or to an end, between two reads, and from `QUEUED` to
@@ -1098,7 +1112,7 @@ every other refusal to `AgentRefused`, with the code. A result with `input_failu
   agent that reports `layered-rootfs`.
 - **The agent's files.** The ledger sidecar does not change (4.6). The list of a run's mounts is a new file in a new
   directory, `<mounts>`, that no earlier release reads or sweeps; 4.6 says what a rollback leaves.
-- **macOS.** A mount root becomes a read deny of every run (5.4). A job that read a tool under a mount root without
+- **macOS.** A mount root but the trees root becomes a read deny of every run (5.4). A job that read a tool under a mount root without
   mounting it no longer can; the operator keeps such tools outside the roots.
 - **The tree wire** is retired additively (section 6); only the never-reported capability key is removed.
 - **Kernel.** Linux 5.12 for `mount_setattr` (`openat2` needs 5.6, `open_tree` and `move_mount` 5.2); `layered-rootfs`

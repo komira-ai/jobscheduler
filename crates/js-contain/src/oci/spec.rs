@@ -19,8 +19,8 @@ use super::devices;
 use super::hardening::{
     FUSE_CAPABILITY, MASKED_PATHS, READONLY_PATHS, SeccompError, capability, fuse_seccomp, seccomp,
 };
-use crate::cgroup::{cpu_max, hard_memory_max};
 use crate::container::{ACTION_ID, ContainerLimits, ContainerSpec, HostMount, Isolation};
+use crate::cpu_ceiling::cpu_max;
 use crate::subids::DaemonIds;
 
 /// The OCI version the file declares (what `crun spec` writes).
@@ -312,24 +312,23 @@ pub(crate) fn rlimit(typ: PosixRlimitType, value: u64) -> PosixRlimit {
 }
 
 /// The `unified` cgroup files of the container's own cgroup (`<lease cgroup>/ctr`):
-/// `memory.oom.group` 1, so an out-of-memory kill takes the whole container, and, when
-/// `limits` name a booking, the lease's `cpu.max` ([`cpu_max`]) and `memory.max`
-/// ([`hard_memory_max`]).
+/// `memory.oom.group` 1, so an out-of-memory kill takes the whole container.
 ///
-/// Those two bound nothing the lease's own files do not already bound (a child cannot use
-/// more than its parent allows, and the job, which owns its cgroup's files, may raise them
-/// to no effect). They are there because the job's cgroup namespace makes this cgroup its
-/// `/sys/fs/cgroup`: a tool that sizes itself from `cpu.max` or `memory.max` there (Rust's
-/// `available_parallelism`, Go's `GOMAXPROCS` from Go 1.25, the JVM) reads the booking
-/// rather than `max`. A tool that counts the CPUs it may run on (`sched_getaffinity`:
-/// busybox `nproc`, Zig's `getCpuCount`) still sees the node's.
+/// There is no `memory.max`: the memory booking is no limit (the lease has none either,
+/// [`LeasePolicy::TrackedMemory`](crate::cgroup::LeasePolicy::TrackedMemory)), so the job,
+/// whose cgroup namespace makes this cgroup its `/sys/fs/cgroup`, reads `max` there, and a tool
+/// that sizes itself from `memory.max` (the JVM's default heap, a quarter of it) falls back to
+/// the host's memory. The CPU booking is the lease's `cpu.weight`, not a ceiling: with
+/// no operator's ceiling there is no `cpu.max`, here or on the lease, so a tool that sizes
+/// itself from `cpu.max` (Rust's `available_parallelism`, Go's `GOMAXPROCS` from Go 1.25, the
+/// JVM) reads `max` and, like one that counts the CPUs it may run on (`sched_getaffinity`:
+/// busybox `nproc`, Zig's `getCpuCount`), sizes itself to the node's CPUs. With a ceiling
+/// (`limits.cpu_ceiling_millis`) the lease's `cpu.max` is repeated here, so such a tool reads
+/// the ceiling.
 pub(crate) fn unified(limits: ContainerLimits) -> HashMap<String, String> {
     let mut files = HashMap::from([("memory.oom.group".to_owned(), "1".to_owned())]);
-    if let Some(cpu) = limits.cpu_millis.and_then(cpu_max) {
+    if let Some(cpu) = limits.cpu_ceiling_millis.and_then(cpu_max) {
         files.insert("cpu.max".to_owned(), cpu);
-    }
-    if let Some(memory) = limits.memory_bytes.and_then(hard_memory_max) {
-        files.insert("memory.max".to_owned(), memory.to_string());
     }
     files
 }
@@ -365,7 +364,7 @@ pub(crate) fn environment(env: &[(String, String)]) -> Vec<String> {
 /// | only the Command's environment           | `process.env` is the Command's variables only      |
 /// | the Command's argv and directory         | `process.args`, `process.cwd`                      |
 /// | the lease cgroup, `memory.oom.group=1`   | `cgroupsPath` a child of the lease cgroup, `unified` `memory.oom.group`       |
-/// | the booking seen from inside             | `unified` `cpu.max`, `memory.max` the lease's (only when the limits name them) |
+/// | no limit seen from inside but a ceiling  | no `memory.max`; `unified` `cpu.max` only for an operator's CPU ceiling |
 /// | a pids limit                             | `resources.pids.limit`                             |
 /// | `nofile`, `nproc` ulimits, no core dump  | `process.rlimits` (`RLIMIT_CORE` 0)                |
 /// | no capability                            | the five `process.capabilities` sets, empty; the seccomp filter resolved for none |
@@ -379,9 +378,9 @@ pub(crate) fn environment(env: &[(String, String)]) -> Vec<String> {
 /// | the input root, writes in `upper`        | an `overlay` mount at `exec_root`, or the host mount there; none for a mounted root |
 /// | a root of layers the caller mounted      | `root.path` that root, not read-only               |
 ///
-/// The lease cgroup carries the memory and CPU limits that bound the job
-/// ([`LeasePolicy::Hard`](crate::cgroup::LeasePolicy::Hard)); the container's own cgroup gets
-/// the same `cpu.max` and `memory.max` only so the job can read them ([`unified`]).
+/// The lease cgroup carries the CPU weight that shares the node's cores and no memory limit
+/// ([`LeasePolicy::TrackedMemory`](crate::cgroup::LeasePolicy::TrackedMemory)); nor does the
+/// container's own cgroup ([`unified`]).
 ///
 /// A host container ([`Isolation::Host`]) is built by
 /// [`host_config`](super::host_spec::host_config), whose table says what differs.
@@ -850,67 +849,55 @@ mod tests {
         assert_eq!(resources["unified"], json!({"memory.oom.group": "1"}));
     }
 
-    /// `spec()` with the limits naming a booking of `cpu_millis` and `memory_bytes`.
-    fn booked(cpu_millis: Option<u64>, memory_bytes: Option<u64>) -> ContainerSpec {
-        let mut booked = spec();
-        booked.limits.cpu_millis = cpu_millis;
-        booked.limits.memory_bytes = memory_bytes;
-        booked
-    }
-
-    /// The `cpu.max` and `memory.max` a lease cgroup made under the Hard policy for
-    /// `cpu_millis` and `memory_bytes` holds: what the agent's lease gets.
-    fn lease_files(cpu_millis: u64, memory_bytes: u64) -> (String, String) {
+    /// What a lease cgroup made under the agent's policy for `cpu_millis` and `memory_bytes`
+    /// holds: its `memory.max`, `memory.swap.max` and `cpu.max` (each `None`: none written, the
+    /// kernel's `max`).
+    fn lease_files(cpu_millis: u64, memory_bytes: u64) -> [Option<String>; 3] {
         let root = crate::unit_dir("oci-spec-lease-files");
         std::fs::create_dir(root.join("actions")).expect("mkdir");
         let lease = crate::cgroup::LeaseCgroup::at(&root, "/actions", "lease-1-2");
         let booking =
             js_types::Resources::new(cpu_millis, memory_bytes, 0, None).expect("a booking");
         lease
-            .create_with(&booking, None, crate::cgroup::LeasePolicy::Hard)
+            .create_with(&booking, None, crate::cgroup::LeasePolicy::TrackedMemory)
             .expect("created");
-        let read = |file: &str| std::fs::read_to_string(lease.dir().join(file)).expect(file);
-        (read("cpu.max"), read("memory.max"))
+        let read = |file: &str| std::fs::read_to_string(lease.dir().join(file)).ok();
+        [read("memory.max"), read("memory.swap.max"), read("cpu.max")]
     }
 
-    /// Catches a job whose `/sys/fs/cgroup/cpu.max` reads `max` while its lease is held to
-    /// the booking (`make -j$(nproc)` and the like then size themselves to the node), and a
-    /// container cgroup whose files differ from the lease's: 1.5 booked cores and 1 GiB are
-    /// `150000 100000` and `1073741824` in both, byte for byte, beside `memory.oom.group`.
+    /// Catches a job whose `/sys/fs/cgroup/memory.max` reads its booking (a limit it would be
+    /// stalled at, and a tool would size itself to), a swap limit on either cgroup, and a
+    /// `cpu.max` on either: a lease that booked 1.5 cores and 1 GiB has no `memory.max`,
+    /// `memory.swap.max` or `cpu.max`, and the container's own cgroup gets `memory.oom.group`
+    /// alone, so the job reads `max` for each.
     #[test]
-    fn the_containers_cgroup_repeats_the_leases_cpu_max_and_memory_max() {
-        let config = config_of(&booked(Some(1500), Some(1 << 30)));
+    fn neither_the_lease_nor_the_containers_cgroup_has_a_memory_swap_or_cpu_max() {
+        let config = config_of(&spec());
         let resources = &config["linux"]["resources"];
-        assert_eq!(
-            resources["unified"],
-            json!({
-                "memory.oom.group": "1",
-                "cpu.max": "150000 100000",
-                "memory.max": "1073741824",
-            })
-        );
-        let (cpu, memory) = lease_files(1500, 1 << 30);
-        assert_eq!(resources["unified"]["cpu.max"], cpu.as_str());
-        assert_eq!(resources["unified"]["memory.max"], memory.as_str());
+        assert_eq!(resources["unified"], json!({"memory.oom.group": "1"}));
+        assert_eq!(lease_files(1500, 1 << 30), [None, None, None]);
         assert!(resources.get("memory").is_none());
         assert!(resources.get("cpu").is_none());
     }
 
-    /// Catches a booking of 0 written as a limit (a `memory.max` of 0 kills the job at
-    /// once, a `cpu.max` quota of 0 is refused by the kernel), a booking below the kernel's
-    /// least quota written as it is, and one limit written without the other.
+    /// Catches an operator's CPU ceiling the job cannot read: with one, the container's own
+    /// cgroup repeats it as `cpu.max` (one and a half cores is `150000 100000`), with no memory
+    /// limit beside it, so a tool that sizes itself from `cpu.max` sizes itself to the ceiling.
     #[test]
-    fn a_zero_or_tiny_booking_follows_the_leases_rules() {
-        let unified =
-            |cpu, memory| config_of(&booked(cpu, memory))["linux"]["resources"]["unified"].clone();
-        assert_eq!(unified(Some(0), Some(0)), json!({"memory.oom.group": "1"}));
+    fn an_operators_ceiling_is_repeated_on_the_containers_cgroup() {
+        let mut capped = spec();
+        capped.limits.cpu_ceiling_millis = Some(1500);
         assert_eq!(
-            unified(Some(1), None),
-            json!({"memory.oom.group": "1", "cpu.max": "1000 100000"})
+            config_of(&capped)["linux"]["resources"]["unified"],
+            json!({
+                "memory.oom.group": "1",
+                "cpu.max": "150000 100000",
+            })
         );
+        capped.limits.cpu_ceiling_millis = Some(0);
         assert_eq!(
-            unified(None, Some(4096)),
-            json!({"memory.oom.group": "1", "memory.max": "4096"})
+            config_of(&capped)["linux"]["resources"]["unified"],
+            json!({"memory.oom.group": "1"})
         );
     }
 }

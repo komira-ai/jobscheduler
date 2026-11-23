@@ -48,14 +48,16 @@ fn a_start_gives_its_steps_once_in_the_order_they_were_done() {
 /// directories, given to the job user or to the job's id (first id of the subordinate range
 /// plus 1000) in the order the layout says, then the job's temporary directory to the job
 /// user with its `tmp` and `var-tmp` to the job's id, then the run's scratch directory to the
-/// job's id, then the lease's cgroup and its four files to the job user; a cgroup limited by
-/// the booking (`memory.max` the booking, no swap, `cpu.max` the booked cores,
-/// `memory.oom.group`); a bundle that runs the image's entrypoint with the run's arguments
+/// job's id, then the lease's cgroup and its four files to the job user; a cgroup made from
+/// the booking (no `memory.max` and no `memory.swap.max`: the memory booking is no limit;
+/// `cpu.weight` from the booked cores and no `cpu.max`: the CPU booking is a share, never a
+/// ceiling; `memory.oom.group`); a bundle that runs the image's entrypoint with the run's arguments
 /// in the image's environment with the scratch directory bound, and the temporary
 /// directory's `tmp` and `var-tmp` bound at `/tmp` and `/var/tmp` (`noexec`). It lists with
 /// the run's label, the agent's and the time it was made. The program's exit 3 polls as 3,
 /// again as the same, and removing it leaves no directory (the temporary one included), no
-/// cgroup and no listing, repeated without error. Catches a limit that is not the booking,
+/// cgroup and no listing, repeated without error. Catches a memory or swap limit written from
+/// the booking (a job that needs more than it booked would stall at it), a CPU ceiling (a job held to 1.5 cores while the node's others are idle),
 /// files the job cannot write or `crun` cannot use, a `/tmp` in memory or not bound, and a
 /// removal that leaves a lease or a job's `/tmp` behind.
 #[test]
@@ -92,9 +94,10 @@ fn a_run_is_made_started_read_and_removed() {
     assert_eq!(found[0].labels, labels);
 
     let (lease, cgroup) = (node.lease_of(&name), node.cgroup_of(&name));
-    assert_eq!(read(&cgroup.join("memory.max")), (1_u64 << 30).to_string());
-    assert_eq!(read(&cgroup.join("memory.swap.max")), "0");
-    assert_eq!(read(&cgroup.join("cpu.max")), "150000 100000");
+    assert!(!cgroup.join("memory.max").exists(), "no memory limit");
+    assert!(!cgroup.join("memory.swap.max").exists(), "no swap limit");
+    assert_eq!(read(&cgroup.join("cpu.weight")), "150");
+    assert!(!cgroup.join("cpu.max").exists(), "no CPU ceiling");
     assert_eq!(read(&cgroup.join("memory.oom.group")), "1");
 
     let bundle: Value =
@@ -547,11 +550,12 @@ fn an_image_in_the_store_with_no_config_is_fetched_again_to_get_one() {
 }
 
 /// Proves the runtime answers the usage of an ended container from its lease's cgroup files,
-/// read before the container is removed: with `memory.peak` and `cpu.stat` written the way the
-/// kernel does, it gives their exact values; a lease whose group has no `memory.peak` gives
-/// none; and once the container is removed there is nothing to read. Catches a usage read from
-/// the wrong group, a zero given for an unread counter, and a read that waits until the
-/// group is gone.
+/// read before the container is removed: with `memory.peak`, `memory.swap.peak` and `cpu.stat`
+/// written the way the kernel does, it gives their exact values, a peak of 2 GiB for a run that
+/// booked 1 GiB among them (nothing is held at the booking); a lease whose group has no
+/// `memory.peak` gives none; and once the container is removed there is nothing to read.
+/// Catches a usage read from the wrong group, a peak clipped at the booking, a swap peak left
+/// out, a zero given for an unread counter, and a read that waits until the group is gone.
 #[test]
 fn an_ended_containers_usage_is_read_from_its_lease_cgroup() {
     let node = Node::new("run-usage");
@@ -564,6 +568,7 @@ fn an_ended_containers_usage_is_read_from_its_lease_cgroup() {
     let cgroup = node.cgroup_of(&id.0);
     assert_eq!(runtime.usage(&id), None);
     std::fs::write(cgroup.join("memory.peak"), "2147483648\n").expect("memory.peak");
+    std::fs::write(cgroup.join("memory.swap.peak"), "268435456\n").expect("memory.swap.peak");
     std::fs::write(
         cgroup.join("cpu.stat"),
         "usage_usec 1234567\nuser_usec 1000000\nsystem_usec 234567\n",
@@ -572,8 +577,92 @@ fn an_ended_containers_usage_is_read_from_its_lease_cgroup() {
     let want = JobUsage {
         peak_memory_bytes: 2_147_483_648,
         cpu_usage_usec: 1_234_567,
+        cpu_throttle: None,
+        cpu_pressure_some_usec: None,
+        cpu_peak: None,
+        peak_swap_bytes: Some(268_435_456),
     };
     assert_eq!(runtime.usage(&id), Some(want));
     runtime.remove(&id).expect("removed");
     assert_eq!(runtime.usage(&id), None);
+}
+
+/// Proves the operator's CPU ceiling (`--cpu-ceiling`) on a run: with a ceiling of 2, the lease
+/// of a run that booked 1.5 cores is held to 3 (`cpu.max` `300000 100000`) beside its weight of
+/// 150 (and no memory limit beside it), and the container's own cgroup repeats it in the
+/// bundle, so the job reads 3 cores as its count. Without one (every other test here) there is no `cpu.max` at all. Catches a
+/// ceiling the runtime was given and did not write, one written on the lease only (the job
+/// would size itself to the node's CPUs and be throttled), and one that drops the weight.
+#[test]
+fn an_operators_ceiling_holds_the_lease_and_the_job_reads_it() {
+    let node = Node::new("run-ceiling");
+    let settings = js_agent::crun::CrunSettings {
+        cpu_ceiling: Some("2".parse().expect("a ceiling")),
+        ..node.settings("/root")
+    };
+    let mut runtime = js_agent::crun::CrunRuntime::open_with(
+        settings,
+        std::sync::Arc::new(crate::node::NoImages),
+        Node::hooks(LONG, LONG),
+    )
+    .expect("opens");
+    let spec = node.spec("r1-exit");
+    let id = runtime.create_and_start(&spec).expect("started");
+    runtime.wait_ended(&id);
+    let (lease, cgroup) = (node.lease_of(&id.0), node.cgroup_of(&id.0));
+    assert_eq!(read(&cgroup.join("cpu.max")), "300000 100000");
+    assert_eq!(read(&cgroup.join("cpu.weight")), "150");
+    assert!(
+        !cgroup.join("memory.max").exists(),
+        "no memory limit beside the ceiling"
+    );
+    let bundle: Value =
+        serde_json::from_str(&read(&lease.join("bundle/config.json"))).expect("a config");
+    assert_eq!(
+        bundle["linux"]["resources"]["unified"]["cpu.max"],
+        json!("300000 100000")
+    );
+}
+
+/// The monotonic clock of [`a_running_jobs_cpu_peak_is_its_busiest_five_seconds`] alone: each
+/// read is one second after the last.
+fn ticking_mono_us() -> u64 {
+    static TICKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    (TICKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1) * 1_000_000
+}
+
+/// Proves a job's CPU peak comes from its lease's `cpu.stat` read while it runs: the runtime
+/// takes the CPU it has used at each poll of the running job, at most once a second, and its
+/// usage reports the largest rise over five seconds as millicores. A job that has used 20 CPU
+/// seconds more at each of six polls a second apart reports 20 000 m over 5 s, though its mean
+/// over its life is lower. Catches a peak read from the end alone (the mean), and one that is
+/// not carried in the usage.
+#[test]
+fn a_running_jobs_cpu_peak_is_its_busiest_five_seconds() {
+    let node = Node::new("run-peak");
+    let hooks = js_agent::crun::Hooks {
+        mono_us: ticking_mono_us,
+        ..Node::hooks(LONG, LONG)
+    };
+    let mut runtime = node.open_with(hooks, std::sync::Arc::new(crate::node::NoImages));
+    let id = crate::adopt::started(&node, &mut runtime, &node.spec("r9-hold"));
+    let cgroup = node.cgroup_of(&id.0);
+    for used in 1..=6_u64 {
+        let stat = format!("usage_usec {}\n", used * 20_000_000);
+        std::fs::write(cgroup.join("cpu.stat"), stat).expect("cpu.stat");
+        assert_eq!(runtime.poll(&id), Ok(Status::Running));
+    }
+    runtime.stop(&id, LONG).expect("stopped");
+    runtime.wait_ended(&id);
+    std::fs::write(cgroup.join("memory.peak"), "1024\n").expect("memory.peak");
+    let usage = runtime.usage(&id).expect("a usage");
+    assert_eq!(usage.cpu_usage_usec, 120_000_000);
+    assert_eq!(
+        usage.cpu_peak,
+        Some(js_agent_wire::CpuPeak {
+            millicores: 20_000,
+            window_usec: 5_000_000,
+        })
+    );
+    runtime.remove(&id).expect("removed");
 }

@@ -175,6 +175,7 @@ fn full_load() -> NodeLoad {
         seq: u64::MAX,
         mono_usec: u64::MAX,
         cpu_usage_usec: u64::MAX,
+        host_cpu_usec: None,
         working_set_bytes: MAX_MEMORY_BYTES,
         active_file_bytes: MAX_MEMORY_BYTES,
         actions_cpu_limited: true,
@@ -194,6 +195,8 @@ fn full_load() -> NodeLoad {
                 ws_max_bytes: MAX_MEMORY_BYTES,
             })
             .collect(),
+        second_cpu_millis: Vec::new(),
+        second_cpu_pressure_some_permille: Vec::new(),
         dropped: LoadDrops::default(),
     }
 }

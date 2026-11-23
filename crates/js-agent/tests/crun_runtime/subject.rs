@@ -171,6 +171,8 @@ fn subject_in(name: &str, parent: &Path, beside: bool) -> CrunSubject {
         host_jobs: false,
         host_ports: HostPorts::default(),
         fs: None,
+        cpu_ceiling: None,
+        cpu_series: false,
     };
     let crun = CrunRuntime::open(settings.clone(), registry(&scratch))
         .unwrap_or_else(|e| panic!("open: {e}"));
@@ -193,6 +195,16 @@ impl CrunSubject {
         settings.host_id = host_id.to_owned();
         CrunRuntime::open(settings, registry(&self.settings.scratch))
             .unwrap_or_else(|e| panic!("open as {host_id}: {e}"))
+    }
+
+    /// Holds this subject's jobs together to `memory` bytes of memory and `swap` bytes of swap:
+    /// the `memory.max` and `memory.swap.max` of the cgroup its leases are made in, which stand
+    /// for the host's memory (or for one limit on the group of all jobs), so that a job that
+    /// grows without bound stops there and not at the runner's own memory.
+    pub fn hold_jobs_to(&self, memory: u64, swap: u64) {
+        let dir = cgroup_dir(&self.cgroup);
+        fs::write(dir.join("memory.max"), memory.to_string()).expect("memory.max");
+        fs::write(dir.join("memory.swap.max"), swap.to_string()).expect("memory.swap.max");
     }
 
     /// [`CrunSubject::open_as`] with the hooks given: a clock a test sets, for the start the

@@ -405,6 +405,9 @@ fn used() -> ResourceUsage {
     ResourceUsage {
         cpu_time: Duration::from_micros(BIG),
         peak_memory_bytes: BIG,
+        cpu_throttle: None,
+        cpu_pressure_some: None,
+        cpu_peak: None,
     }
 }
 
@@ -418,6 +421,7 @@ fn exit_3() -> JobEnd {
             truncated: false,
             usage: Some(used()),
             logs: None,
+            cpu_series: None,
         },
     }
 }

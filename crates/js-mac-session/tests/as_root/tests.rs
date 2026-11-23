@@ -6,52 +6,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::*;
 
-/// Catches: a grant key file someone other than root can write accepted at start, which
-/// would let that user make administrators. The helper must stop before it serves.
-#[test]
-#[ignore = "needs root: run the test binary through `sudo` (see the header of tests/as_root.rs)"]
-fn a_grant_key_file_the_runner_owns_stops_the_helper() {
-    let (_serial, mac) = mac();
-    let keys = format!("{SCRATCH}/user-keys");
-    let pubkey = mac.client(&["pubkey", "07"]);
-    assert!(pubkey.ok(), "pubkey: {}", pubkey.all());
-    write_root(&keys, &pubkey.stdout);
-    std::os::unix::fs::chown(&keys, Some(mac.runner.uid), Some(mac.runner.gid))
-        .expect("give the key file to the runner");
-    let mut args = mac.helper_args();
-    let at = |flag: &str| args.iter().position(|a| a == flag).expect(flag) + 1;
-    let (socket, state, grant) = (at("--socket"), at("--state-dir"), at("--grant-keys"));
-    args[socket] = format!("{SCRATCH}/refused-run/socket");
-    args[state] = format!("{SCRATCH}/refused-state");
-    args[grant] = keys;
-    let mut child = Command::new(&mac.helper)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start the helper");
-    // A helper that accepted the file would serve until killed.
-    let give_up = Instant::now() + Duration::from_secs(10);
-    while child.try_wait().expect("wait").is_none() && Instant::now() < give_up {
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let _ = child.kill();
-    let o = child.wait_with_output().expect("the helper's output");
-    let out = Out {
-        code: o.status.code(),
-        stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
-    };
-    println!("{}", out.all());
-    let want = format!("owned by uid {}", mac.runner.uid);
-    refused(&out, &want, "a start with the runner's key file");
-    assert!(
-        !exists(&format!("{SCRATCH}/refused-run/socket")),
-        "the refused helper bound its socket"
-    );
-}
-
 /// Catches: a verb served before the boot reset (a lease user of an earlier boot could
 /// be used), a reset that leaves a stale session's auto-login, kcpassword or intent
 /// record (the Mac would log a lease user in at the next boot), or a second reset.
@@ -160,7 +114,7 @@ fn the_socket_admits_only_its_group() {
 #[ignore = "needs root: run the test binary through `sudo` (see the header of tests/as_root.rs)"]
 fn user_create_makes_a_hidden_non_admin_user_with_a_private_home() {
     let (_serial, mac) = mac();
-    let lease = mac.create("5.1", None);
+    let lease = mac.create("5.1");
     let name = lease.name();
     says(&root("/usr/bin/id", &["-u", &name]), &lease.uid(), "id -u");
     says(&root("/usr/bin/id", &["-gn", &name]), "staff", "id -gn");
@@ -199,7 +153,7 @@ fn a_lease_user_makes_the_scan_dirty_and_closes_the_baseline_window() {
     });
     // As an apply in an earlier boot leaves it: user-create must close it.
     write_root(&window(), "ci-earlier-boot\n");
-    let lease = mac.create("6.1", None);
+    let lease = mac.create("6.1");
     assert!(
         !exists(&window()),
         "user-create left the baseline window open"
@@ -231,7 +185,7 @@ fn run_runs_as_the_lease_user_in_the_lease_directory() {
     // The daemon opens the lease directory and the lease user works in it (on a node an
     // inherited ACL entry gives the daemon access; here it is open to all).
     let dir = scratch_dir("lease-7", 0o777);
-    let lease = mac.create("7.1", None);
+    let lease = mac.create("7.1");
     let steps = ["run", "/usr/bin/id", "-u", ";", "pwd", ";", "env", "HOME"];
     let out = lease.run(&dir, &mac.act(&steps));
     let want = format!("{}\n{dir}\n{}\nexit 0", lease.uid, home(&lease.name()));
@@ -251,7 +205,7 @@ fn run_runs_as_the_lease_user_in_the_lease_directory() {
 fn an_action_cannot_reach_the_helper() {
     let (_serial, mac) = mac();
     let dir = scratch_dir("lease-8", 0o777);
-    let lease = mac.create("8.1", None);
+    let lease = mac.create("8.1");
     let client = path_str(&mac.client);
     let out = lease.run(&dir, &[client, "kill", SOCKET, "8.1"]);
     let all = out.all();
@@ -274,7 +228,7 @@ fn an_action_cannot_reach_the_helper() {
 #[ignore = "needs root: run the test binary through `sudo` (see the header of tests/as_root.rs)"]
 fn only_the_daemon_s_code_is_served() {
     let (_serial, mac) = mac();
-    let lease = mac.create("20.1", None);
+    let lease = mac.create("20.1");
     let client = path_str(&mac.client);
     refused(
         &mac.impostor(&["kill", SOCKET, "20.1"]),
@@ -321,7 +275,7 @@ fn user_delete_waits_for_the_uid_s_processes_and_sweeps_without_following_links(
     let sentinel = "/private/var/kbf-ci-sentinel";
     fs::create_dir_all(sentinel).expect("the sentinel directory");
     write_root(&format!("{sentinel}/keep"), "");
-    let lease = mac.create("10.1", None);
+    let lease = mac.create("10.1");
     let (uid, name) = (lease.uid(), lease.name());
     let override_plist = format!("/private/var/db/com.apple.xpc.launchd/disabled.{uid}.plist");
     let target = format!("user/{uid}/kbf.ci.planted");
@@ -419,9 +373,13 @@ fn user_delete_waits_for_the_uid_s_processes_and_sweeps_without_following_links(
     );
 
     says(&lease.call("delete"), "existed", "user-delete");
-    assert!(!user_exists(&name), "the user record survived");
+    // A pool user is permanent: macOS refuses root the deletion of its record and home.
+    assert!(user_exists(&name), "the pool user's record was deleted");
+    assert!(
+        root("/bin/ls", &["-A", &home(&name)]).said().is_empty(),
+        "the pool user's home was not emptied"
+    );
     let mut gone = vec![
-        home(&name),
         tabs,
         format!("{shared}/kbf-ci-owned"),
         format!("{shared}/kbf-ci-dir"),
@@ -431,7 +389,11 @@ fn user_delete_waits_for_the_uid_s_processes_and_sweeps_without_following_links(
     gone.extend(override_plist);
     let survived: Vec<&String> = gone.iter().filter(|path| exists(path)).collect();
     assert!(survived.is_empty(), "survived the sweep: {survived:?}");
-    let files = root("/usr/bin/find", &["/private/var/folders", "-user", &uid]);
+    // The folders the system placed stay (emptied); no file is left in them.
+    let files = root(
+        "/usr/bin/find",
+        &["/private/var/folders", "-user", &uid, "-type", "f"],
+    );
     assert_eq!(
         files.said(),
         "",
@@ -450,7 +412,7 @@ fn user_delete_waits_for_the_uid_s_processes_and_sweeps_without_following_links(
 #[ignore = "needs root: run the test binary through `sudo` (see the header of tests/as_root.rs)"]
 fn a_lease_id_is_never_used_twice() {
     let (_serial, mac) = mac();
-    let lease = mac.create("10.2", None);
+    let lease = mac.create("10.2");
     lease.end();
     refused(
         &mac.client(&["create", SOCKET, "10.2"]),
@@ -460,75 +422,13 @@ fn a_lease_id_is_never_used_twice() {
     refused(&lease.call("kill"), "was deleted", "kill-uid after delete");
 }
 
-/// Catches: an administrator made without a grant, or with a grant for another lease,
-/// a forged one, one for another Mac, or one used twice; and a lease user left in the
-/// admin group after its delete.
-#[test]
-#[ignore = "needs root: run the test binary through `sudo` (see the header of tests/as_root.rs)"]
-fn an_administrator_only_with_a_valid_gate_grant_used_once() {
-    let (_serial, mac) = mac();
-    let plain = mac.create("11.1", None);
-    assert!(
-        !is_admin(&plain.name()),
-        "{} is an administrator",
-        plain.name()
-    );
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("after 1970")
-        .as_secs()
-        .to_string();
-    let grant = |seed: &str, serial: &str, lease: &str| {
-        let out = mac.client(&["grant", seed, serial, lease, &now]);
-        assert!(out.ok(), "grant: {}", out.all());
-        out.said().to_owned()
-    };
-    let token = grant("07", &mac.serial, "11.2");
-    let admin = mac.create("11.2", Some(&token));
-    assert!(
-        is_admin(&admin.name()),
-        "{} is not an administrator",
-        admin.name()
-    );
-    let create = |lease: &str, token: &str| mac.client(&["create", SOCKET, lease, token]);
-    refused(
-        &create("11.3", &token),
-        "names lease 11.2",
-        "another lease's grant",
-    );
-    refused(
-        &create("11.2", &token),
-        "never reused",
-        "the grant used twice",
-    );
-    let forged = grant("08", &mac.serial, "11.3");
-    refused(
-        &create("11.3", &forged),
-        "does not verify",
-        "a forged grant",
-    );
-    let elsewhere = grant("07", "OTHERSERIAL", "11.3");
-    refused(&create("11.3", &elsewhere), "serial", "another Mac's grant");
-    plain.end();
-    admin.end();
-    let members = root(
-        "/usr/bin/dscl",
-        &[".", "-read", "/Groups/admin", "GroupMembership"],
-    );
-    assert!(
-        !members.all().contains("kbf-lease"),
-        "a lease user is still in the admin group: {}",
-        members.all()
-    );
-}
-
 /// Catches: a ledger that does not survive a restart of the helper (a used lease id or a
 /// uid handed out again; [`Mac::create`] checks the uid after the restart).
 #[test]
 #[ignore = "needs root: run the test binary through `sudo` (see the header of tests/as_root.rs)"]
 fn the_ledger_survives_a_restart_of_the_helper() {
     let (_serial, mac) = mac();
-    let used = mac.create("12.1", None);
+    let used = mac.create("12.1");
     used.end();
     assert_eq!(
         mac.restart(&[]),
@@ -545,7 +445,7 @@ fn the_ledger_survives_a_restart_of_the_helper() {
         "never reused",
         "create again",
     );
-    mac.create("12.2", None).end();
+    mac.create("12.2").end();
 }
 
 /// Catches: user-delete that refuses at once instead of waiting for a process of the
@@ -566,7 +466,7 @@ fn user_delete_waits_for_a_process_that_exits_by_itself() {
     let (_serial, mac) = mac();
     let dir = scratch_dir("lease-13", 0o777);
     let pid_file = format!("{dir}/child.pid");
-    let lease = mac.create("13.1", None);
+    let lease = mac.create("13.1");
     lease.kill();
     let sleep: [&str; 5] = ["spawn-child", "--pid", &pid_file, "sleep", "2"];
     says(
@@ -610,7 +510,7 @@ fn no_cron_job_of_the_lease_user_starts_after_kill_uid() {
     let crontab = format!("{SCRATCH}/crontab-14");
     write_root(&crontab, "* * * * * /bin/sleep 3\n");
     for round in 1..=2 {
-        let lease = mac.create(&format!("14.{round}"), None);
+        let lease = mac.create(&format!("14.{round}"));
         let uid = lease.uid();
         lease.run(&dir, &["/usr/bin/crontab", &crontab]);
         let tabs = format!("/private/var/at/tabs/{}", lease.name());
@@ -651,8 +551,8 @@ fn no_cron_job_of_the_lease_user_starts_after_kill_uid() {
 #[ignore = "needs root: run the test binary through `sudo` (see the header of tests/as_root.rs)"]
 fn the_boot_reset_keeps_the_held_session_and_deletes_every_other_leftover() {
     let (_serial, mac) = mac();
-    let held = mac.create("15.1", None);
-    let leftover = mac.create("15.2", None);
+    let held = mac.create("15.1");
+    let leftover = mac.create("15.2");
     // Dropped before the leases: their delete is refused while the session is held.
     let _clear = OnPanic(clear_session);
     // What session-login leaves (it is not run here: it restarts userspace).
@@ -667,7 +567,7 @@ fn the_boot_reset_keeps_the_held_session_and_deletes_every_other_leftover() {
             &held.name(),
         ],
     );
-    write_root(&kcpassword(), "x\n");
+    write_root(&autologin_cipher_path(), "x\n");
     assert_eq!(
         mac.restart(&["15.1"]),
         "kept 15.1 deleted 15.2",
@@ -677,9 +577,10 @@ fn the_boot_reset_keeps_the_held_session_and_deletes_every_other_leftover() {
         user_exists(&held.name()),
         "the held session's user was deleted"
     );
+    // The pool's users are permanent: the leftover lease is over, its user stays, reset.
     assert!(
-        !user_exists(&leftover.name()),
-        "the leftover user survived the reset"
+        user_exists(&leftover.name()),
+        "the leftover pool user was deleted"
     );
     says(
         &root(
@@ -689,7 +590,7 @@ fn the_boot_reset_keeps_the_held_session_and_deletes_every_other_leftover() {
         &held.name(),
         "auto-login",
     );
-    assert!(exists(&kcpassword()), "kcpassword was not kept");
+    assert!(exists(&autologin_cipher_path()), "kcpassword was not kept");
     refused(
         &held.call("delete"),
         "holds the GUI session",
@@ -702,9 +603,8 @@ fn the_boot_reset_keeps_the_held_session_and_deletes_every_other_leftover() {
         "reset, nothing held"
     );
     assert!(
-        !user_exists(&held.name()),
-        "{} survived the reset",
-        held.name()
+        user_exists(&held.name()),
+        "the held session's pool user was deleted by the reset"
     );
     let auto_login = root(
         "/usr/bin/defaults",
@@ -715,7 +615,7 @@ fn the_boot_reset_keeps_the_held_session_and_deletes_every_other_leftover() {
         "auto-login survived the reset: {}",
         auto_login.all()
     );
-    for gone in [kcpassword(), intent()] {
+    for gone in [autologin_cipher_path(), intent()] {
         assert!(!exists(&gone), "{gone} survived the reset");
     }
 }
@@ -727,7 +627,7 @@ fn the_boot_reset_keeps_the_held_session_and_deletes_every_other_leftover() {
 #[ignore = "needs root: run the test binary through `sudo` (see the header of tests/as_root.rs)"]
 fn the_scan_is_clean_again_once_every_lease_user_is_gone() {
     let (_serial, mac) = mac();
-    mac.create("16.1", None).end();
+    mac.create("16.1").end();
     assert_eq!(mac.restart(&[]), "kept none deleted ", "the boot reset");
     // The order matters: reboot-dirty only after a scan that said clean.
     says(
@@ -754,7 +654,7 @@ fn the_scan_is_clean_again_once_every_lease_user_is_gone() {
 fn run_gui_is_refused_until_the_lease_user_s_gui_domain_exists() {
     let (_serial, mac) = mac();
     let dir = scratch_dir("lease-17", 0o777);
-    let lease = mac.create("17.1", None);
+    let lease = mac.create("17.1");
     // Dropped before the lease: its delete is refused while the session is held.
     let _clear = OnPanic(clear_session);
     refused(
@@ -893,13 +793,14 @@ fn a_gui_spawn_lands_in_aqua_and_a_background_one_in_the_system_session() {
     assert_eq!(gui, want, "the GUI spawn");
 }
 
-/// Catches: a GUI run that keeps root's supplementary groups. Under sudo, root holds
-/// its whole group list (initgroups), which this process passes on; the GUI run's
-/// process must hold the user's primary group alone (the kernel's list, `getgroups`,
-/// not `id -G`, which asks the directory).
+/// Catches: a GUI run that keeps root's supplementary groups, or loses the user's own.
+/// Under sudo, root holds its whole group list (initgroups), which this process passes
+/// on; the GUI run's process must hold the user's groups as the directory lists them, and
+/// none of root's that the user is not in (the kernel's list, `getgroups`, not `id -G`,
+/// which asks the directory).
 #[test]
 #[ignore = "needs root: run the test binary through `sudo` (see the header of tests/as_root.rs)"]
-fn a_gui_run_holds_no_group_but_its_own() {
+fn a_gui_run_holds_the_user_s_groups_and_no_other() {
     let (_serial, mac) = mac();
     let client = path_str(&mac.client);
     let root_groups = succeeds(client, &["groups"]);
@@ -916,12 +817,22 @@ fn a_gui_run_holds_no_group_but_its_own() {
         &["spawn", "gui", &me, &gid, name, &dir, client, "groups"],
     );
     let lines: Vec<&str> = held.lines().collect();
-    // Its own primary group, or none at all, as the kernel keeps an empty list.
-    assert!(
-        matches!(lines.first(), Some(&first) if first == gid || first.is_empty()),
-        "the GUI run kept groups: {held:?}"
-    );
     assert_eq!(lines.last(), Some(&"exit 0"), "{held:?}");
+    let sorted = |text: &str| {
+        let mut ids: Vec<u32> = text
+            .split_whitespace()
+            .map(|g| g.parse().expect("a group id"))
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    };
+    let want = sorted(&succeeds("/usr/bin/id", &["-G", name]));
+    assert_eq!(
+        sorted(lines.first().copied().unwrap_or_default()),
+        want,
+        "the GUI run's groups are not the user's: {held:?}"
+    );
 }
 
 /// Catches: the macOS host's account lookup (the VM user's uid and gid come from it, and

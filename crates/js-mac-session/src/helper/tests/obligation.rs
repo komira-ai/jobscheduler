@@ -80,7 +80,7 @@ fn a_failed_gui_teardown_stays_owed_across_a_retry_and_a_direct_delete() {
     assert!(!owed(&rig, uid));
     assert!(rig.host.state().domains.is_empty());
     assert!(rig.helper.pool_create().errors.is_empty());
-    assert_eq!(rig.helper.user_create("61.2", None), Ok(uid));
+    assert_eq!(rig.helper.user_create("61.2"), Ok(uid));
 }
 
 /// Catches a GUI teardown obligation kept only in memory: after the failed `kill-uid`
@@ -180,6 +180,7 @@ fn an_unreadable_name_or_a_job_named_loginwindow_is_judged_safely() {
         state.gui.insert(uid);
         state.absent_print = Some(PrintAnswer {
             code: Some(125),
+            stdout: String::new(),
             stderr: "Could not print domain: 125: Domain does not support specified action\n"
                 .to_owned(),
         });
@@ -204,6 +205,7 @@ fn processes_and_domains_that_both_remain_are_named_together() {
         state.stubborn.insert(uid, usize::MAX);
         state.absent_print = Some(PrintAnswer {
             code: None,
+            stdout: String::new(),
             stderr: "killed\n".to_owned(),
         });
     }
@@ -247,6 +249,7 @@ fn a_domain_outcome_that_holds_at_the_last_attempt_is_a_success() {
                 "no answer" => state.print_script.extend(vec![
                     PrintAnswer {
                         code: None,
+                        stdout: String::new(),
                         stderr: String::new(),
                     };
                     KILL_ROUNDS - 1

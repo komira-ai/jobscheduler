@@ -880,7 +880,8 @@ step_reload() {
   if act "systemctl daemon-reload" systemctl daemon-reload; then
     record reload 1
     # The unit runs its program through the release link (/opt/js-agent/link/current), which the tmpfiles file
-    # makes; the verify below needs the program to be there.
+    # makes, and the unit runs no tmpfiles step at start (the agent makes its state and scratch roots itself);
+    # the verify below needs the program to be there.
     if [ -f "$TMPF_DST" ]; then act "systemd-tmpfiles --create $TMPF_DST" systemd-tmpfiles --create "$TMPF_DST" || return 0; fi
     local units=("$UNIT_DST")
     if [ -f "$GPU_DST" ]; then units+=("$GPU_DST"); fi

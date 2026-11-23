@@ -38,6 +38,7 @@ fn two_passes(uid: u32, domains: &[&str]) -> Vec<String> {
 fn answer(code: i32, stderr: &str) -> PrintAnswer {
     PrintAnswer {
         code: Some(code),
+        stdout: String::new(),
         stderr: stderr.to_owned(),
     }
 }
@@ -219,7 +220,7 @@ fn a_process_that_never_goes_away_fails_after_the_last_attempt_and_quarantines_t
     assert_eq!(rig.helper.kill_uid("55.1"), Ok(()));
     assert_eq!(rig.helper.user_delete("55.1"), Ok(true));
     assert!(rig.helper.pool_create().errors.is_empty());
-    assert_eq!(rig.helper.user_create("55.2", None), Ok(uid));
+    assert_eq!(rig.helper.user_create("55.2"), Ok(uid));
 }
 
 /// Catches a domain read as gone when `launchctl print` printed it: `user/<uid>` prints

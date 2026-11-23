@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use js_agent_wire::{HostPort, JobUsage, LogTail};
+use js_agent_wire::{CpuThrottle, HostPort, JobUsage, LogTail};
 use js_contain::Isolation;
 use js_contain::cgroup::{LeaseCgroup, OomOutcome};
 use js_contain::cgroup_usage::NumaSample;
@@ -115,12 +115,13 @@ pub(super) fn container_spec(
         working_directory: String::new(),
         env: Vec::new(),
         argv: Vec::new(),
-        // The booking again on the container's own cgroup, which the job reads as its
-        // `/sys/fs/cgroup`: the lease's (`LeasePolicy::Hard`) is what bounds it.
+        // The memory booking is no limit: neither the lease (`LeasePolicy::TrackedMemory`) nor
+        // the container's own cgroup, which the job reads as its `/sys/fs/cgroup`, has a
+        // `memory.max`. The CPU booking is a guarantee the lease's `cpu.weight` keeps, not a
+        // ceiling: no cgroup of the job has a `cpu.max` unless the operator set a ceiling
+        // (`Maker::make_recorded`).
         limits: ContainerLimits {
             pids: run.pids.unwrap_or(DEFAULT_PIDS),
-            cpu_millis: Some(run.cpu_millis),
-            memory_bytes: Some(run.memory_bytes),
             ..ContainerLimits::DEFAULT
         },
         shared: Vec::new(),
@@ -224,8 +225,10 @@ pub(super) fn adopted_spec(
 }
 
 /// What a container's end is to the lifecycle: the exit status of the job, or [`NOT_RUN`]
-/// for one that did not run; flagged out of memory only when the kernel's killer ran for
-/// the lease's own limit (a node short of memory is not the booking's fault).
+/// for one that did not run; flagged out of memory only when the kernel's killer ran for a
+/// limit inside the lease (a node short of memory is not the booking's fault). The agent writes
+/// no limit on a lease, so that is a lease an agent of an earlier release made with its booking
+/// as `memory.max` and this one adopted, or one whose job put a limit on a cgroup of its own.
 pub(super) fn exit_of(ended: Result<Ended, String>, oom: Option<&OomOutcome>) -> Exit {
     let code = match ended {
         Ok(Ended::Exited(code)) => code,
@@ -251,14 +254,14 @@ pub(super) fn ctr_of(lease: &Path) -> std::path::PathBuf {
 /// What a container's end is, with the kernel's account of it read from the lease's cgroup
 /// (`memory.events`, and the actions cgroup's `memory.events.local`): [`exit_of`] with the
 /// OOM outcome js-contain classifies. A cgroup that cannot be read says nothing of an OOM
-/// kill, so the end is the exit as crun gave it.
+/// kill, so the end is the exit as crun gave it. The lease has no `memory.max` the agent
+/// knows of, so js-contain is given none.
 pub(super) fn end_of(
     ended: Result<Ended, String>,
     cgroup: &LeaseCgroup,
-    cap: Option<u64>,
     backstop: Option<u64>,
 ) -> Exit {
-    let oom = match cgroup.oom_outcome(cap, backstop) {
+    let oom = match cgroup.oom_outcome(None, backstop) {
         Ok(oom) => oom,
         Err(why) => {
             tracing::warn!(
@@ -274,25 +277,38 @@ pub(super) fn end_of(
 /// What the lease's `cgroup` counted, read once its processes have exited and before the group
 /// is removed: `memory.peak` and `usage_usec` of `cpu.stat`, read by js-contain. `None` when
 /// either is not readable (cgroup version 1, a kernel without `memory.peak`, a group that is
-/// gone): an unknown is never a zero.
+/// gone): an unknown is never a zero. With them, the throttle counts of `cpu.stat`
+/// (`nr_periods`, `nr_throttled`) when both are there, the `some` total of `cpu.pressure`
+/// and `memory.swap.peak` when each is; `None` for each otherwise. A lease of this agent has no
+/// `cpu.max`, so its counts are 0 periods, 0 throttled, and no `memory.max`, so its peak is what
+/// the job used, never one held at its booking.
 pub(super) fn usage_of(cgroup: &LeaseCgroup) -> Option<JobUsage> {
     let counted = NumaSample::default().finish(cgroup.dir());
+    let cpu_throttle = counted.cpu_periods.zip(counted.cpu_throttled_periods).map(
+        |(periods, throttled_periods)| CpuThrottle {
+            periods,
+            throttled_periods,
+        },
+    );
     Some(JobUsage {
         peak_memory_bytes: counted.memory_peak_bytes?,
         cpu_usage_usec: counted.cpu_usage_micros?,
+        cpu_throttle,
+        cpu_pressure_some_usec: counted.cpu_pressure_some_micros,
+        cpu_peak: None,
+        peak_swap_bytes: counted.memory_swap_peak_bytes,
     })
 }
 
 /// The exit and the tail a run's end becomes: `ended` as js-contain read it, `captured` what
-/// the run wrote, and the lease's `cgroup`, `cap` and `backstop` for the OOM account
-/// ([`end_of`]).
+/// the run wrote, and the lease's `cgroup` and `backstop` for the OOM account ([`end_of`]).
 pub(super) fn concluded(
     ended: Result<Ended, String>,
     captured: &Captured,
-    (cgroup, cap, backstop): (&LeaseCgroup, Option<u64>, Option<u64>),
+    (cgroup, backstop): (&LeaseCgroup, Option<u64>),
 ) -> (Exit, LogTail) {
     let tail = log_tail_of(captured, not_run_words(&ended));
-    (end_of(ended, cgroup, cap, backstop), tail)
+    (end_of(ended, cgroup, backstop), tail)
 }
 
 /// The words `crun` or the init gave for a container that did not run to an exit.

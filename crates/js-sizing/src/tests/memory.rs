@@ -423,7 +423,11 @@ fn a_mixed_key_is_never_lowered_and_raised_only_by_kills() {
         "mixed: the default, not the sized 3.25 GiB"
     );
     feed(&mut s, &k, &success(5 * GIB), 1);
-    assert_eq!(memory(&s, &k), 4 * GIB, "samples do not raise a mixed key");
+    assert_eq!(
+        memory(&s, &k),
+        6 * GIB + GIB / 4,
+        "its own largest peak (5 GiB x 1.2 + 128 MiB) raises a mixed key above the default"
+    );
     s.observe(&k, &heavy_kill(), DAY, &Bounds::default());
     assert!(memory(&s, &k) >= 16 * GIB, "a kill does");
 }
@@ -439,7 +443,7 @@ fn the_mixed_boundary_is_exact() {
     assert_eq!(memory(&s, &k), 5 * GIB);
     feed(&mut s, &k, &success(4 * GIB + 1), 1);
     assert!(s.get(&k).unwrap().mixed());
-    assert_eq!(memory(&s, &k), 4 * GIB);
+    assert_eq!(memory(&s, &k), 5 * GIB, "mixed: sized from its own peak");
     assert!(
         !Summary::new(Basis::Cgroup, DAY).mixed(),
         "no samples is not mixed"
@@ -814,12 +818,31 @@ fn cpu_counters_count_each_case() {
     assert_eq!(s.cpu_counts().kept, 2);
 }
 
-/// Rule 3.3: the estimate is the nearest-rank P90 of the last 32 samples.
+/// Rule 3.3: the estimate is the nearest-rank median (P50) of the last 32 samples, each
+/// the mean CPU of one run: the ceil(n / 2)-th smallest.
 #[test]
-fn cpu_is_the_p90_of_the_recent_samples() {
+fn cpu_is_the_p50_of_the_recent_samples() {
     let b = Bounds::default();
-    assert_eq!(cpu_of(&[(1500, Some(0), 28), (4000, Some(0), 4)], &b), 4000);
+    // 32 samples: the median is the 16th smallest.
+    assert_eq!(
+        cpu_of(&[(1500, Some(0), 16), (4000, Some(0), 16)], &b),
+        1500
+    );
+    assert_eq!(
+        cpu_of(&[(1500, Some(0), 15), (4000, Some(0), 17)], &b),
+        4000
+    );
+    // A burst of heavy runs in a light key does not move the booking.
     assert_eq!(cpu_of(&[(1500, Some(0), 29), (4000, Some(0), 3)], &b), 1500);
+    // Few samples: 2 are ranked 1st (the lower), 3 are ranked 2nd (the middle).
+    assert_eq!(cpu_of(&[(1000, Some(0), 1), (4000, Some(0), 1)], &b), 1000);
+    assert_eq!(
+        cpu_of(
+            &[(1000, Some(0), 1), (4000, Some(0), 1), (2000, Some(0), 1)],
+            &b
+        ),
+        2000
+    );
     // Only the last 32 count: 32 heavy samples are replaced by 32 light ones.
     assert_eq!(
         cpu_of(&[(4000, Some(0), 32), (1000, Some(0), 32)], &b),

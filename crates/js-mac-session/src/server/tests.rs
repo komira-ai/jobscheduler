@@ -8,8 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::*;
 use crate::autologin::SessionPaths;
 use crate::client::{Client, ClientError, Exit};
-use crate::helper::POOL_EXHAUSTED;
-use crate::helper::Settings;
+use crate::helper::{POOL_EXHAUSTED, Settings};
 use crate::lease::UidRange;
 use crate::ledger::Ledger;
 use crate::proto::{PoolState, Request};
@@ -133,8 +132,6 @@ fn served_in(
             owned: Vec::new(),
         },
         user_folders: dir.join("folders"),
-        grant_keys: None,
-        serial: "S".to_owned(),
         session: SessionPaths::under(&dir),
         scan: crate::scan::ScanSettings::under(&dir),
         image: crate::helper::ImageSettings::under(&dir),
@@ -210,7 +207,7 @@ fn the_switch_and_the_reset_work_over_the_socket() {
         Err(ClientError::Refused(why)) => assert!(why.contains("has no user"), "{why}"),
         other => panic!("a login without a user: {other:?}"),
     }
-    client.user_create("1.1", None).unwrap();
+    client.user_create("1.1").unwrap();
     client.session_login("1.1").unwrap();
     client.session_idle().unwrap();
     let log = served.host.state().log.clone();
@@ -247,7 +244,6 @@ fn the_role_verbs_work_over_the_socket() {
             uid: me() + 10,
             gid: my_gid(),
             home: served.dir.join("Users/kbf-vm"),
-            admin: false,
         },
     );
     assert!(!client.role_session_ready().unwrap());
@@ -321,7 +317,6 @@ fn the_image_verbs_work_over_the_socket() {
             uid: me(),
             gid: my_gid(),
             home: served.dir.join("Users/kbf-vm"),
-            admin: false,
         },
     );
     let setup = format!(
@@ -410,7 +405,7 @@ fn the_scan_verbs_work_over_the_socket() {
 fn the_verbs_work_over_the_socket() {
     let served = served("verbs", Ok(()));
     let client = &served.client;
-    assert_eq!(client.user_create("1.1", None).unwrap(), me());
+    assert_eq!(client.user_create("1.1").unwrap(), me());
     let (mut out, write) = std::io::pipe().unwrap();
     let null = std::fs::File::open("/dev/null").unwrap();
     let lease_dir = std::fs::File::open(&served.dir).unwrap();
@@ -472,7 +467,7 @@ fn the_verbs_work_over_the_socket() {
 #[test]
 fn a_refused_caller_gets_nothing_done() {
     let served = served("refused", Err("not the daemon".to_owned()));
-    match served.client.user_create("2.1", None) {
+    match served.client.user_create("2.1") {
         Err(ClientError::Refused(why)) => {
             assert_eq!(why, "caller refused: not the daemon");
         }
@@ -520,7 +515,7 @@ fn a_request_from_another_process_than_the_checked_one_is_refused() {
         Ok(()),
     );
     let served = served_with("changed", check);
-    match served.client.user_create("2.2", None) {
+    match served.client.user_create("2.2") {
         Err(ClientError::Refused(why)) => assert_eq!(
             why,
             "caller refused: the process at the other end changed since the check \
@@ -528,7 +523,7 @@ fn a_request_from_another_process_than_the_checked_one_is_refused() {
         ),
         other => panic!("{other:?}"),
     }
-    match served.client.user_create("2.2", None) {
+    match served.client.user_create("2.2") {
         Err(ClientError::Refused(why)) => assert_eq!(why, "caller refused: gone"),
         other => panic!("{other:?}"),
     }
@@ -548,7 +543,7 @@ fn a_request_from_another_process_than_the_checked_one_is_refused() {
         Ok(()),
     );
     let served = served_with("changed-version", check);
-    match served.client.user_create("2.3", None) {
+    match served.client.user_create("2.3") {
         Err(ClientError::Refused(why)) => assert!(why.contains("now pid 7 version 2"), "{why}"),
         other => panic!("{other:?}"),
     }
@@ -721,7 +716,7 @@ fn a_malformed_request_is_refused_and_an_empty_one_ignored() {
     );
     drop(UnixStream::connect(socket_path(&served)).unwrap());
     // The server is still up.
-    assert_eq!(socket.user_create("3.1", None).unwrap(), me());
+    assert_eq!(socket.user_create("3.1").unwrap(), me());
 }
 
 fn socket_path(served: &Served) -> PathBuf {
@@ -797,7 +792,7 @@ fn the_client_reports_unexpected_replies_and_hangups() {
         other => panic!("{other:?}"),
     };
     assert!(unexpected(client.kill_uid("1.1")).contains("Killed"));
-    assert!(unexpected(client.user_create("1.1", None).map(drop)).contains("Killed"));
+    assert!(unexpected(client.user_create("1.1").map(drop)).contains("Killed"));
     assert!(unexpected(client.kill_uid("1.1")).contains("Created"));
     assert!(unexpected(client.user_delete("1.1").map(drop)).contains("Killed"));
     let null = std::fs::File::open("/dev/null").unwrap();
@@ -820,7 +815,7 @@ fn the_client_reports_unexpected_replies_and_hangups() {
     let running = client.role_run(&[], &[], fds).unwrap();
     assert_eq!(running.pid, 9);
     assert_eq!(running.wait().unwrap().code, Some(3));
-    match client.user_create("1.1", None) {
+    match client.user_create("1.1") {
         Err(error @ ClientError::Exhausted(_)) => assert_eq!(
             error.to_string(),
             format!("kbf-mac-session refused: {POOL_EXHAUSTED}: of 1 slots")
@@ -829,7 +824,7 @@ fn the_client_reports_unexpected_replies_and_hangups() {
     }
     // Exactly the words, with nothing after them, are the exhausted pool too.
     assert!(matches!(
-        client.user_create("1.1", None),
+        client.user_create("1.1"),
         Err(ClientError::Exhausted(_))
     ));
     assert_eq!(client.pool_status().unwrap().size, 1);
@@ -930,8 +925,6 @@ fn serve_returns_when_accept_fails() {
                 owned: Vec::new(),
             },
             user_folders: dir.join("folders"),
-            grant_keys: None,
-            serial: "S".to_owned(),
             session: SessionPaths::under(&dir),
             scan: crate::scan::ScanSettings::under(&dir),
             image: crate::helper::ImageSettings::under(&dir),
@@ -988,8 +981,6 @@ fn quiet_helper(dir: &Path) -> Helper {
             owned: Vec::new(),
         },
         user_folders: dir.join("folders"),
-        grant_keys: None,
-        serial: "S".to_owned(),
         session: SessionPaths::under(dir),
         scan: crate::scan::ScanSettings::under(dir),
         image: crate::helper::ImageSettings::under(dir),
@@ -1031,7 +1022,7 @@ fn a_refused_caller_is_told_it_is_not_the_installed_kbf_daemon() {
 fn a_run_is_watched_again_and_stopped_over_the_socket() {
     let served = served("watch", Ok(()));
     let client = &served.client;
-    client.user_create("1.1", None).unwrap();
+    client.user_create("1.1").unwrap();
     match client.watch("1.1") {
         Err(ClientError::Refused(why)) => assert!(why.ends_with(crate::helper::NO_RUN), "{why}"),
         other => panic!("{other:?}"),
@@ -1078,3 +1069,4 @@ fn a_watched_run_that_was_forgotten_is_refused() {
         }
     );
 }
+mod full_disk_access;

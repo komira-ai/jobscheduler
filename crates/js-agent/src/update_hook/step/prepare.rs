@@ -8,8 +8,9 @@
 //! In this order, each before anything is written unless it says so:
 //! 1. the lock, the record (if there is one) and the params agree; a record that breaks a rule
 //!    is `state_invalid` (1), except a record of another target that never took the host, which
-//!    is superseded (see [`supersede`](super::supersede)): moved aside just before the new record
-//!    is first written (6), and named in the detail of the step's last line. The state
+//!    is superseded, and one of an update whose rollback is complete in effect, which is
+//!    finished (see [`supersede`](super::supersede)): either is moved aside just before the new
+//!    record is first written (6), and named in the detail of the step's last line. The state
 //!    directory is made, mode 0700, when it is not there, and so is every directory above it
 //!    that is not there, mode 0755: hostkeeper makes none, so a first install finds none (on a
 //!    Mac, not even `/Library/Application Support/js-agent`);
@@ -63,9 +64,20 @@
 //! saying so in its detail; the owed checks of the running agent are not looked at (it finishes
 //! them before it hands over, see `cutover`).
 //!
+//! The hand-over is made in place (decided at the same time, kept in the record as `in_place`,
+//! and only with `handover`) when both the previous release's agent and the staged release's
+//! agent list `in-place` on their `stops:` line: `cutover` and `rollback` then signal the
+//! running agent, which hands over and runs its program again as the same process, and never
+//! stop the unit. Otherwise the unit is stopped and started, which a systemd that starts a
+//! service's first process in the unit's own cgroup (258 or newer; see [`crate::systemd`])
+//! refuses while the runs a stop leaves hold controllers in it: that way is taken only when
+//! `systemctl --version` is read and is older than 258, and every other host drains. The detail
+//! of the success says which hand-over it is.
+//!
 //! An update that does not hand over drains, and a success of `prepare` says why in its detail
-//! (one fixed text per [`Drain`] cause, in the order `hands_over` checks them), as does the
-//! deferral of a drain that passes its bound with a lease still running.
+//! (one fixed text per [`Drain`] cause, in the order `hands_over` checks them, the systemd
+//! cause last), as does the deferral of a drain that passes its bound with a lease still
+//! running.
 //!
 //! A first install has no agent to drain and no host the lease server knows: it ends after 6.
 //!
@@ -78,13 +90,14 @@ use std::time::Duration;
 
 use js_client::{HostIdentity, host_key_problem};
 
+use crate::systemd;
 use crate::update_hook::{
     Class, Cordon, Done, Held, HostReading, Manager, Outcome, POLL_SECS, Params, PlanError, Reason,
-    Record, Report, UnitRestart, UpdateInfo, agent_in, plan,
+    Record, Report, SYSTEMCTL, UnitRestart, UpdateInfo, agent_in, plan,
 };
 
 use super::host_setup::set_up;
-use super::supersede::{judge, set_aside};
+use super::supersede::{judge, noted, set_aside};
 use super::{Env, TokenFacts, check, failure, lease_failure, open_unchecked, save, success};
 
 /// The agent's name, the first word of its `--version`.
@@ -94,37 +107,44 @@ const AGENT_NAME: &str = "js-agent";
 /// handover in it (see [`crate::lifecycle::handover`]).
 const STOPS: &str = "stops:";
 const HANDOVER_WORD: &str = "handover";
+/// The word of an agent that hands its runs over without ending: on the signal of the request
+/// it hands over and runs its own program again, as the same process (see
+/// [`crate::lifecycle::handover`]), so the unit is not stopped and not started.
+const IN_PLACE_WORD: &str = "in-place";
 /// The word of an agent that keeps the network wiring of the runs it leaves to the next
 /// process, and adopts the wiring of the runs it finds (see [`crate::lifecycle::handover`]).
 const EGRESS_WORD: &str = "egress-handover";
 
-/// The detail of a `prepare` that hands the runs over.
+/// The detail of a `prepare` that hands the runs over by stopping the unit and starting it.
 pub(super) const HANDOVER_NOTE: &str =
     "the cutover hands the running jobs over to the new agent: no cordon and no drain";
+
+/// The detail of a `prepare` that hands the runs over in place.
+pub(super) const IN_PLACE_NOTE: &str = "the cutover hands the running jobs over in place (the unit is not stopped): no cordon and no drain";
 
 /// Runs `prepare` of the release in `params.staged_release`.
 pub fn prepare(env: &Env<'_>, params: &Params) -> Done {
     let mut superseded = None;
     let done = run(env, params, &mut superseded).unwrap_or_else(|done| done);
-    note_superseded(done, superseded)
+    noted(done, superseded, None)
 }
 
 fn run(env: &Env<'_>, params: &Params, superseded: &mut Option<String>) -> Result<Done, Done> {
     let (held, loaded) = open_unchecked(env, params)?;
     let stale = match &loaded {
         Some(record) => judge(env, params, record)?,
-        None => false,
+        None => None,
     };
     // Before anything else is looked at or written: no version can repair a taint the agent
     // cannot clear itself. The owed checks are looked at once the update knows whether it
     // drains (below).
     refuse_taint(env)?;
-    let (fresh, aside, mut record) = match loaded {
-        Some(record) if !stale => (false, None, record),
-        aside => {
+    let (fresh, aside, mut record) = match (loaded, stale) {
+        (Some(record), None) => (false, None, record),
+        (loaded, how) => {
             let record = new_record(params);
             check(params, &record)?;
-            (true, aside, record)
+            (true, loaded.zip(how), record)
         }
     };
     check_agent(env, params)?;
@@ -134,11 +154,15 @@ fn run(env: &Env<'_>, params: &Params, superseded: &mut Option<String>) -> Resul
         true => verdict.is_ok(),
         false => record.handover,
     };
+    let in_place = match fresh {
+        true => matches!(verdict, Ok(Way::InPlace)),
+        false => record.in_place,
+    };
     // Why the update drains, for the detail: the cause found now; a rerun whose conditions now
     // allow a hand-over keeps the drain it began with.
     let cause = match verdict {
         Err(cause) => cause,
-        Ok(()) => Drain::Decided,
+        Ok(_) => Drain::Decided,
     };
     // The owed checks: a first install has no agent to settle them, and halts on them. An update
     // that drains waits for them (see `wait`) and lists them now only so that a state root that
@@ -155,8 +179,8 @@ fn run(env: &Env<'_>, params: &Params, superseded: &mut Option<String>) -> Resul
     set_up(env, params)?;
     // The record of another target goes aside only now, when the new one is about to be
     // written: a refusal before this point leaves the host as it found it.
-    if let Some(aside) = &aside {
-        *superseded = Some(set_aside(env, &held, aside)?);
+    if let Some((aside, how)) = &aside {
+        *superseded = Some(set_aside(env, &held, aside, *how)?);
     }
     if params.previous_version.is_none() {
         if fresh {
@@ -167,14 +191,19 @@ fn run(env: &Env<'_>, params: &Params, superseded: &mut Option<String>) -> Resul
     if fresh {
         record.unit_restart = restart;
         record.handover = handover;
+        record.in_place = in_place;
     }
     if record.handover {
         if fresh {
             save(env, &held, &record)?;
         }
+        let note = match record.in_place {
+            true => IN_PLACE_NOTE,
+            false => HANDOVER_NOTE,
+        };
         return Ok(Done {
             report: Report {
-                detail: Some(HANDOVER_NOTE.to_owned()),
+                detail: Some(note.to_owned()),
                 ..Report::default()
             },
             ..success()
@@ -200,6 +229,9 @@ enum Drain {
     PreviousKeepsNoEgress,
     /// The host has an egress ceiling and the staged agent does not list `egress-handover`.
     StagedAdoptsNoEgress,
+    /// The host's systemd starts a service's first process in the unit's own cgroup (258 or
+    /// newer, or its version cannot be read), and the agents do not both hand over in place.
+    OwnCgroupStart,
     /// A rerun of a prepare that began as a drain, whose conditions now allow a hand-over.
     Decided,
 }
@@ -225,6 +257,12 @@ impl Drain {
                  staged release's agent does not adopt the jobs' egress wiring \
                  (no `egress-handover` on its `stops:` line)"
             }
+            Self::OwnCgroupStart => {
+                "the host's systemd starts a service's first process in the unit's own cgroup \
+                 (258 or newer, or its version cannot be read), which the jobs a stop leaves keep \
+                 from taking one, and the previous and staged agents do not both hand over in \
+                 place (no `in-place` on their `stops:` line)"
+            }
             Self::Decided => "decided when the update began",
         }
     }
@@ -246,7 +284,14 @@ impl Drain {
 /// stopped must leave it and the agent that starts must adopt it: both list `egress-handover`
 /// (the staged agent is the one that starts, and the one a rollback stops). An agent without
 /// the word would cut the runs' network or remove the runs.
-fn hands_over(env: &Env<'_>, params: &Params, restart: Option<&UnitRestart>) -> Result<(), Drain> {
+///
+/// The way it hands over is then in place when both the previous and the staged agent list
+/// `in-place`: the unit is signalled and never stopped, so systemd places no process in its
+/// cgroup. Otherwise the unit is stopped and started, which a systemd that starts a service's
+/// first process in the unit's own cgroup (258 or newer) refuses while the runs the stop left
+/// hold controllers there: that is allowed only on a systemd whose version is read and is
+/// older, and every other host drains.
+fn hands_over(env: &Env<'_>, params: &Params, restart: Option<&UnitRestart>) -> Result<Way, Drain> {
     if env.manager != Manager::Systemd {
         return Err(Drain::NotSystemd);
     }
@@ -264,17 +309,33 @@ fn hands_over(env: &Env<'_>, params: &Params, restart: Option<&UnitRestart>) -> 
     if !previous.iter().any(|word| word == HANDOVER_WORD) {
         return Err(Drain::PreviousKeepsNoHandover);
     }
-    if !env.egress {
-        return Ok(());
-    }
-    if !previous.iter().any(|word| word == EGRESS_WORD) {
-        return Err(Drain::PreviousKeepsNoEgress);
-    }
     let staged = stops_of(env, &params.staged_release);
-    match staged.iter().any(|word| word == EGRESS_WORD) {
-        true => Ok(()),
-        false => Err(Drain::StagedAdoptsNoEgress),
+    if env.egress {
+        if !previous.iter().any(|word| word == EGRESS_WORD) {
+            return Err(Drain::PreviousKeepsNoEgress);
+        }
+        if !staged.iter().any(|word| word == EGRESS_WORD) {
+            return Err(Drain::StagedAdoptsNoEgress);
+        }
     }
+    let lists = |words: &[String]| words.iter().any(|word| word == IN_PLACE_WORD);
+    if lists(&previous) && lists(&staged) {
+        return Ok(Way::InPlace);
+    }
+    let printed = env.runner.run(SYSTEMCTL, &["--version"]);
+    match printed.ok().and_then(|printed| systemd::version(&printed)) {
+        Some(version) if version < systemd::OWN_CGROUP_START => Ok(Way::StopStart),
+        _ => Err(Drain::OwnCgroupStart),
+    }
+}
+
+/// How an update that hands the runs over does it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Way {
+    /// The unit is signalled, and the agent hands over and runs again as the same process.
+    InPlace,
+    /// The unit is stopped and started.
+    StopStart,
 }
 
 /// The words on the `stops:` lines of the `--version` of the agent of the release `release`;
@@ -303,17 +364,6 @@ fn staged_unit(env: &Env<'_>, params: &Params) -> Result<Option<UnitRestart>, Do
         PlanError::Staged { .. } => bad_artifact(why),
         PlanError::Installed { .. } => failure(Reason::StateInvalid, why.to_string()),
     })
-}
-
-/// Any ending of a step that set a record of another target aside says so first.
-fn note_superseded(mut done: Done, superseded: Option<String>) -> Done {
-    if let Some(note) = superseded {
-        done.report.detail = Some(match done.report.detail.take() {
-            Some(detail) => format!("{note}; {detail}"),
-            None => note,
-        });
-    }
-    done
 }
 
 /// A success of a prepare that drains says why, and the unit that changes, and which keys; a

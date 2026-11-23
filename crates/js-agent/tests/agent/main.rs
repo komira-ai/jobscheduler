@@ -20,6 +20,10 @@ mod clear_taint;
 mod cli_runtime;
 mod container;
 mod cordon;
+#[cfg(target_os = "linux")]
+mod cpu_ceiling;
+#[cfg(target_os = "linux")]
+mod cpu_series;
 mod credential;
 mod credential_e2e;
 #[cfg(target_os = "linux")]
@@ -28,6 +32,8 @@ mod crun_default;
 mod crun_gpu;
 #[cfg(target_os = "linux")]
 mod crun_host;
+#[cfg(target_os = "linux")]
+mod crun_roots;
 mod disk;
 mod drive;
 mod e2e;
@@ -47,6 +53,7 @@ mod integrity;
 mod jobs;
 mod join_round_trip;
 mod lifecycle;
+mod mac_supervisor;
 #[cfg(target_os = "macos")]
 mod native;
 mod provider_client;
@@ -54,6 +61,7 @@ mod provider_wire;
 mod quota;
 mod readiness;
 mod retired;
+mod run_again;
 mod runtime_conformance;
 #[path = "../runtime_suite/mod.rs"]
 mod runtime_suite;

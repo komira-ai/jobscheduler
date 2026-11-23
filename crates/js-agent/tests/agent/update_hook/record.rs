@@ -432,13 +432,11 @@ fn a_parent_owned_by_someone_else_and_the_root_itself_are_checked() {
 }
 
 #[test]
-fn a_link_or_a_file_among_the_ancestors_is_refused() {
+fn a_dangling_link_or_a_file_among_the_ancestors_is_refused() {
     let dir = cell("hook-record-link-ancestor");
     fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
-    let real = dir.path().join("real");
-    fs::create_dir(&real).unwrap();
     let link = dir.path().join("link");
-    symlink(&real, &link).unwrap();
+    symlink(dir.path().join("nowhere"), &link).unwrap();
     let file = dir.path().join("file");
     fs::write(&file, "x").unwrap();
     for (ancestor, want) in [
@@ -518,11 +516,25 @@ fn an_ancestor_swapped_for_a_link_between_two_steps_redirects_nothing_and_the_ne
     assert!(!moved.join("state").join(RECORD_FILE).exists());
     drop(held);
 
-    // The next step, coming by the path, is refused at the link and makes nothing anywhere.
-    match Held::open(&state, &rooted(dir.path())) {
+    // The next step, coming by the path, goes through the link to where it leads and holds that
+    // to the rules: the directory is another user's, so it is refused there (named by its real
+    // path) and makes nothing anywhere.
+    let real = rooted(dir.path());
+    let theirs = |path: &Path, fd: BorrowedFd<'_>| {
+        if path == other {
+            Ok(DirStat {
+                uid: 1000,
+                gid: 1000,
+                ..fd_stat(fd)?
+            })
+        } else {
+            real(path, fd)
+        }
+    };
+    match Held::open(&state, &theirs) {
         Err(StateError::Ancestor { path, problem }) => {
-            assert_eq!(path, parent);
-            assert_eq!(problem, DirProblem::Symlink);
+            assert_eq!(path, other);
+            assert_eq!(problem, DirProblem::NotRootOwned { uid: 1000 });
         }
         other => panic!("{other:?}"),
     }

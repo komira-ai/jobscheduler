@@ -27,7 +27,7 @@ use js_agent::update_hook::{
     MAX_CORDON_SECS, Params, PortError, Uncordoned, UnitState, Units, read_link,
 };
 use js_agent_wire::Taint;
-use js_update_hook::swap_link;
+use js_update_hook::{real_path, swap_link};
 use serde::{Deserialize, Serialize};
 
 pub mod harness;
@@ -277,6 +277,20 @@ impl World {
             .map_err(|why| PortError::Io(why.to_string()))?;
         fs::remove_file(&file).map_err(|why| io_err(&why))?;
         Ok(true)
+    }
+
+    /// The agent of a unit that stays active runs its program again in place: it says hello as
+    /// a new session, with the version of the release the link names.
+    ///
+    /// # Errors
+    /// The link names a release the params never did, or the server's file cannot be written.
+    pub fn hello_again(&self) -> Result<(), PortError> {
+        match self.linked_version()? {
+            Some(version) => self
+                .hello(&version)
+                .map_err(|why| PortError::Io(why.to_string())),
+            None => Ok(()),
+        }
     }
 
     /// The server restarts: it forgets the host's session, and the next hello makes it live
@@ -628,6 +642,12 @@ impl Link for World {
         }
         self.gate();
         swap_link(&file, target).map_err(|why| io_err(&why))
+    }
+
+    /// The real path on the world's own scratch directory, as on the machine: the releases the
+    /// params name are directories there.
+    fn real(&self, path: &Path) -> Result<Option<PathBuf>, PortError> {
+        real_path(path).map_err(|why| io_err(&why))
     }
 }
 

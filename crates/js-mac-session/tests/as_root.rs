@@ -58,7 +58,7 @@ const CLIENT: &str = "kbf-ci-client";
 /// The file name of the copy signed under another identifier.
 const IMPOSTOR: &str = "kbf-ci-impostor";
 /// The tests' own directory, where every user may search (the runner's home is not):
-/// the copies, the grant keys, the login window's files, lease directories. Root's.
+/// the copies, the login window's files, lease directories. Root's.
 const SCRATCH: &str = "/private/tmp/kbf-mac-session-as-root";
 const RUN_DIR: &str = "/private/var/run/kbf-ci-mac-session";
 const SOCKET: &str = "/private/var/run/kbf-ci-mac-session/socket";
@@ -357,7 +357,6 @@ struct Mac {
     /// The client copy's cdhash: the daemon requirement.
     genuine: String,
     runner: Runner,
-    serial: String,
     process: Mutex<Option<Child>>,
     first: FirstContact,
 }
@@ -409,9 +408,6 @@ impl Mac {
             groups.split_whitespace().any(|g| g == "admin"),
             "the runner is not in the admin group: {groups}"
         );
-        let ioreg = quiet("/usr/sbin/ioreg", &["-rd1", "-c", "IOPlatformExpertDevice"]);
-        let serial = js_mac_session::start::parse_serial(&ioreg.stdout).expect("a serial number");
-        println!("serial: {serial}");
 
         let _ = fs::remove_dir_all(RUN_DIR);
         let _ = fs::remove_dir_all(STATE);
@@ -422,13 +418,9 @@ impl Mac {
             act,
             genuine,
             runner,
-            serial,
             process: Mutex::new(None),
             first: FirstContact::empty(),
         };
-        let pubkey = mac.client(&["pubkey", "07"]);
-        assert!(pubkey.ok(), "pubkey: {}", pubkey.all());
-        write_root(&format!("{SCRATCH}/grant-keys"), &pubkey.stdout);
 
         println!("== a power cut mid-session, as the boot finds it");
         // Auto-login names a lease user, and an intent record names a lease the server
@@ -446,7 +438,7 @@ impl Mac {
                 "kbf-lease-9-9",
             ],
         );
-        write_root(&kcpassword(), "x\n");
+        write_root(&autologin_cipher_path(), "x\n");
         mac.start_helper();
         mac.first = mac.first_contact();
         mac
@@ -472,11 +464,9 @@ impl Mac {
             "--daemon-requirement".to_owned(),
             format!("cdhash H\"{}\"", self.genuine),
             "--kcpassword".to_owned(),
-            kcpassword(),
+            autologin_cipher_path(),
             "--loginwindow".to_owned(),
             loginwindow(),
-            "--grant-keys".to_owned(),
-            format!("{SCRATCH}/grant-keys"),
         ]);
         args
     }
@@ -560,12 +550,10 @@ impl Mac {
         argv
     }
 
-    /// `user-create` for `lease` (with a gate grant), which must give the next uid.
+    /// `user-create` for `lease`, which must give the next uid.
     #[track_caller]
-    fn create(&self, lease: &str, grant: Option<&str>) -> Lease<'_> {
-        let mut args = vec!["create", SOCKET, lease];
-        args.extend(grant);
-        let out = self.client(&args);
+    fn create(&self, lease: &str) -> Lease<'_> {
+        let out = self.client(&["create", SOCKET, lease]);
         assert!(out.ok(), "user-create {lease}: {}", out.all());
         let uid: u32 = out.said().parse().expect("user-create prints the uid");
         let made = Lease {
@@ -588,7 +576,7 @@ impl Mac {
             "/usr/bin/defaults",
             &["read", &loginwindow(), "autoLoginUser"],
         );
-        let survived = [kcpassword(), intent()]
+        let survived = [autologin_cipher_path(), intent()]
             .into_iter()
             .filter(|path| exists(path))
             .collect();
@@ -679,8 +667,9 @@ fn window() -> String {
     format!("{STATE}/baseline-window")
 }
 
-fn kcpassword() -> String {
-    format!("{SCRATCH}/kcpassword")
+/// Where the tests have the helper keep the auto-login cipher (its `--kcpassword`).
+fn autologin_cipher_path() -> String {
+    format!("{SCRATCH}/autologin-cipher")
 }
 
 /// The session switch's files are the tests' own, never the runner's login window: the
@@ -764,7 +753,7 @@ impl<F: FnMut()> Drop for OnPanic<F> {
 /// Removes the session switch's files: a failing test must not leave a lease held.
 fn clear_session() {
     let _ = fs::remove_file(intent());
-    let _ = fs::remove_file(kcpassword());
+    let _ = fs::remove_file(autologin_cipher_path());
     root(
         "/usr/bin/defaults",
         &["delete", &loginwindow(), "autoLoginUser"],
@@ -781,5 +770,7 @@ fn mac() -> (MutexGuard<'static, ()>, &'static Mac) {
     (serial, MAC.get_or_init(Mac::prepare))
 }
 
+#[path = "as_root/groups.rs"]
+mod groups;
 #[path = "as_root/tests.rs"]
 mod tests;

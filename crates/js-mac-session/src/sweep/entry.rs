@@ -1,5 +1,6 @@
 //! The uid's entries under the per-user folders (`/private/var/folders/<xx>/<hash>`):
-//! [`remove_owned`] removes one whole, its owner checked first, and [`owned_entries`]
+//! [`remove_owned`] removes one whole (or empties it and keeps it, and the folders in it,
+//! where the system placed them), its owner checked first, and [`owned_entries`]
 //! finds those the uid owns when there is no `DARWIN_USER_DIR` left to name one.
 
 use std::io;
@@ -8,8 +9,8 @@ use std::path::{Path, PathBuf};
 use rustix::fs::AtFlags;
 
 use super::{
-    Park, Swept, examine, is_dir, listed, note, open_base, open_child, present, remove_entry,
-    rmdir_at, unlock,
+    Park, Swept, examine, is_dir, is_placed, listed, note, open_base, open_child, present,
+    remove_entry, rmdir_at, scrub_kept, unlock,
 };
 
 /// Removes the directory at `path` and everything in it, whoever owns what is inside, as
@@ -72,6 +73,15 @@ fn remove_dir_of(path: &Path, uid: u32, swept: &mut Swept) -> io::Result<()> {
     note(swept, path, park.drain(uid, dev));
     if swept.errors.len() > before {
         // Kept, with all that is left of it inside, for the next removal.
+        return Ok(());
+    }
+    swept.kept.extend(park.kept.take());
+    if is_placed(&dir, name, &stat) {
+        // The system placed the entry (`sunlnk`; so are its `0`, `C`, `T` and `X`, kept as
+        // the walk met them): emptied, it is kept, given back as the system made it, and no
+        // removal of it is tried, which macOS refuses root too.
+        scrub_kept(&entry)?;
+        swept.kept.push(path.to_owned());
         return Ok(());
     }
     rmdir_at(&dir, name)?;

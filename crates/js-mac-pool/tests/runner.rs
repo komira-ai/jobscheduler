@@ -58,6 +58,7 @@ impl Scene {
     /// The policy of `net` that also denies reads of `denies`.
     fn policy_denying(&self, net: Net, denies: &[&Path]) -> Policy {
         let layout = SlotLayout {
+            trees: None,
             run: AbsPath::new(&self.run).expect("run path"),
             uid_entry: Some(AbsPath::new(&self.uid_entry).expect("entry path")),
             inputs: vec![AbsPath::new(&self.input).expect("input path")],
@@ -538,6 +539,7 @@ fn a_floor_deny_beats_an_earlier_grant() {
         .join("sfanalytics")
         .join(format!("js-mac-pool-{}", std::process::id()));
     let layout = SlotLayout {
+        trees: None,
         run: AbsPath::new(protected).expect("run path"),
         uid_entry: Some(AbsPath::new(&scene.uid_entry).expect("entry path")),
         inputs: vec![],
@@ -697,6 +699,70 @@ fn the_dev_fd_grant_lets_a_shell_write_through_a_descriptor_path() {
         describe(&granted)
     );
     assert_eq!(String::from_utf8_lossy(&granted.stdout), "x\n");
+}
+
+/// `/dev/null` is written under the profile; `/dev/zero` is not, though the control
+/// writes it. (`/dev/tty` is not granted either, `job_profile.rs` pins the text; a test
+/// has no terminal, where the write fails without a profile too, so it is not run here.)
+#[test]
+fn a_run_writes_dev_null_and_not_dev_zero() {
+    let scene = Scene::new("devices", "run");
+    let script = args(&["-c", "echo x > /dev/null && echo x > /dev/zero"]);
+    let free = control("/bin/sh", &script);
+    assert!(free.status.success(), "control: {}", describe(&free));
+    let refused = scene.sandboxed(Net::Off, "/bin/sh", &script);
+    assert!(
+        !refused.status.success(),
+        "sandboxed: {}",
+        describe(&refused)
+    );
+    let stderr = String::from_utf8_lossy(&refused.stderr).into_owned();
+    assert!(
+        stderr.contains("/dev/zero") && stderr.contains("Operation not permitted"),
+        "the /dev/zero write was refused by the sandbox: {stderr}"
+    );
+}
+
+/// `pidpath <pid>...`: for a child it starts, then each pid, prints `ok` or `errno N` of
+/// `proc_pidpath`, one per line.
+const PIDPATH_C: &str = r#"#include <errno.h>
+#include <libproc.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+static void ask(pid_t pid) {
+    char path[PROC_PIDPATHINFO_MAXSIZE];
+    if (proc_pidpath(pid, path, sizeof path) > 0) puts("ok"); else printf("errno %d\n", errno);
+}
+int main(int argc, char **argv) {
+    pid_t child = fork();
+    if (child == 0) { pause(); _exit(0); }
+    ask(child);
+    for (int i = 1; i < argc; i++) ask(atoi(argv[i]));
+    kill(child, SIGKILL);
+    return 0;
+}
+"#;
+
+/// Under the profile a run reads the executable path of its own child and not of
+/// another user's process (launchd, pid 1): `(deny process-info* (target others))`, with
+/// its own processes allowed back. The control reads both. (The kernel's process list,
+/// `sysctl` `KERN_PROC`, is not narrowed by it; the user boundary is what keeps others'
+/// processes from a run.)
+#[test]
+fn a_run_reads_its_own_childs_path_and_not_another_users_process() {
+    let scene = Scene::new("procs", "run");
+    let source = scene.run.join("pidpath.c");
+    let exe = scene.run.join("pidpath");
+    std::fs::write(&source, PIDPATH_C).expect("source");
+    let built = control("/usr/bin/clang", &[os(&source), "-o".into(), os(&exe)]);
+    assert!(built.status.success(), "clang: {}", describe(&built));
+    let exe = exe.to_str().expect("utf8");
+    let free = control(exe, &args(&["1"]));
+    assert_eq!(said(&free), "ok\nok", "control: {}", describe(&free));
+    let held = scene.sandboxed(Net::Off, exe, &args(&["1"]));
+    assert_eq!(said(&held), "ok\nerrno 1", "sandboxed: {}", describe(&held));
 }
 
 /// `posix <verb> <name>`: `make` creates a POSIX shared memory object and keeps it,

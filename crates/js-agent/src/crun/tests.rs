@@ -154,8 +154,9 @@ fn a_job_env_goes_over_the_image_env_once_applied() {
 /// binds, read-write, `noexec`: no tmpfs in memory), then its mounts with the access they
 /// asked, then its files read-only; the job starting at the
 /// exec root; no shared trees; the process limit the run named, or the default for one that
-/// named none; the run's booked CPU and memory as its container cgroup's own limits (without
-/// them the job reads `max` in `/sys/fs/cgroup/cpu.max`); no program or environment (the
+/// named none; the run's booked memory as its container cgroup's own limit (without it the job
+/// reads `max` in `/sys/fs/cgroup/memory.max`) and no CPU limit on it (the CPU booking is the
+/// lease's `cpu.weight`, a share: the job reads `max` in its `cpu.max`); no program or environment (the
 /// image config gives them); and the job ports of its host ports, in order, as the ports its
 /// init waits to be listening (none without).
 #[test]
@@ -186,8 +187,6 @@ fn a_run_becomes_the_container_it_asked_for() {
         spec.limits,
         ContainerLimits {
             pids: 77,
-            cpu_millis: Some(1500),
-            memory_bytes: Some(1 << 30),
             ..ContainerLimits::DEFAULT
         }
     );
@@ -223,10 +222,12 @@ fn a_run_becomes_the_container_it_asked_for() {
         (&lease(), Some(Path::new(TMP))),
         "/c",
     );
-    assert_eq!(plain.limits.pids, DEFAULT_PIDS);
     assert_eq!(
-        (plain.limits.cpu_millis, plain.limits.memory_bytes),
-        (Some(1500), Some(1 << 30))
+        plain.limits,
+        ContainerLimits {
+            pids: DEFAULT_PIDS,
+            ..ContainerLimits::DEFAULT
+        }
     );
     // `/scratch`, `/tmp`, `/var/tmp` and the run's two mounts.
     assert_eq!(plain.mounts.len(), 5);
@@ -339,8 +340,10 @@ impl Drop for Fixture {
 }
 
 /// Proves, from the files the kernel writes and not from timing, that a kill is flagged
-/// `oom_killed` only when the job's own memory limit made the OOM killer run: its
-/// `memory.events` counts `oom` and `max` as well as `oom_kill`. Catches a runtime that
+/// `oom_killed` only when a memory limit inside the lease made the OOM killer run: its
+/// `memory.events` counts `oom` and `max` as well as `oom_kill` (the agent writes no limit, so
+/// that is a lease an earlier release made with its booking as `memory.max`, adopted after an
+/// update, or one whose job set a limit of its own). Catches a runtime that
 /// blames the job for a kill by the node: a parent cgroup's limit (the lease's `oom` is 0,
 /// the actions cgroup's `memory.events.local` counts one) or the host (nothing counted
 /// above), which would make the server retry with more memory for a job that did not
@@ -354,37 +357,28 @@ fn only_the_jobs_own_memory_limit_flags_a_kill_from_the_cgroups_files() {
 
     let own = Fixture::new("own");
     own.events(4, 1, 2, Some(0));
-    assert_eq!(
-        end_of(ok(1), &own.lease(), Some(1 << 30), Some(0)),
-        flagged(137, true)
-    );
+    assert_eq!(end_of(ok(1), &own.lease(), Some(0)), flagged(137, true));
 
     let parent = Fixture::new("parent");
     parent.events(0, 0, 3, Some(1));
     assert_eq!(
-        end_of(ok(137), &parent.lease(), Some(1 << 30), Some(0)),
+        end_of(ok(137), &parent.lease(), Some(0)),
         flagged(137, false)
     );
 
     let host = Fixture::new("host");
     host.events(0, 0, 3, Some(0));
-    assert_eq!(
-        end_of(ok(137), &host.lease(), Some(1 << 30), Some(0)),
-        flagged(137, false)
-    );
+    assert_eq!(end_of(ok(137), &host.lease(), Some(0)), flagged(137, false));
 
     let reclaimed = Fixture::new("reclaimed");
     reclaimed.events(9, 0, 0, Some(0));
     assert_eq!(
-        end_of(ok(0), &reclaimed.lease(), Some(1 << 30), Some(0)),
+        end_of(ok(0), &reclaimed.lease(), Some(0)),
         flagged(0, false)
     );
 
     let unread = Fixture::new("unread");
-    assert_eq!(
-        end_of(ok(5), &unread.lease(), Some(1 << 30), None),
-        flagged(5, false)
-    );
+    assert_eq!(end_of(ok(5), &unread.lease(), None), flagged(5, false));
 }
 
 /// Log lines written by the test's subscriber on this thread.
@@ -415,12 +409,7 @@ fn a_lease_whose_memory_events_cannot_be_read_ends_unflagged_and_is_logged() {
     let broken = Fixture::new("unreadable");
     fs::create_dir(broken.mount.join("actions/js-x-r1/memory.events")).expect("unreadable file");
     assert_eq!(
-        end_of(
-            Ok(Ended::Exited(137)),
-            &broken.lease(),
-            Some(1 << 30),
-            Some(0)
-        ),
+        end_of(Ok(Ended::Exited(137)), &broken.lease(), Some(0)),
         Exit {
             code: 137,
             oom_killed: false
@@ -829,10 +818,88 @@ fn a_leases_usage_is_both_counters_or_none() {
         Some(JobUsage {
             peak_memory_bytes: 3_221_225_472,
             cpu_usage_usec: 4_500_000,
+            cpu_throttle: None,
+            cpu_pressure_some_usec: None,
+            cpu_peak: None,
+            peak_swap_bytes: None,
         })
     );
     fs::write(dir.join("memory.peak"), "max\n").expect("peak");
     assert_eq!(usage_of(&fixture.lease()), None);
     fs::remove_dir_all(&dir).expect("remove the group");
     assert_eq!(usage_of(&fixture.lease()), None);
+}
+
+/// Proves a lease's usage carries its `memory.swap.peak` and its `memory.peak` as the kernel
+/// counted them, with nothing held at the booking: a job booked 1 GiB (the fixture's run) that
+/// peaked at 3 GiB of memory and put 512 MiB in swap reports both numbers whole; a group with no
+/// `memory.swap.peak` (a kernel before 6.5, or one without swap accounting) reports the rest with
+/// no swap peak, and one that does not parse is no swap peak either, never a zero. Catches a peak
+/// clipped at the booking, a swap peak left out (a job the host's swap absorbed would read as
+/// smaller than it is), and an unknown swap peak sent as 0.
+#[test]
+fn a_leases_usage_carries_its_whole_peak_and_its_swap_peak() {
+    let fixture = Fixture::new("usage-swap");
+    let dir = fixture.mount.join("actions/js-x-r1");
+    fs::write(dir.join("memory.peak"), "3221225472\n").expect("peak");
+    fs::write(dir.join("cpu.stat"), "usage_usec 9\n").expect("stat");
+    let usage = || usage_of(&fixture.lease()).expect("a usage");
+    assert_eq!(
+        (usage().peak_memory_bytes, usage().peak_swap_bytes),
+        (3 << 30, None)
+    );
+    fs::write(dir.join("memory.swap.peak"), "536870912\n").expect("swap peak");
+    assert_eq!(
+        (usage().peak_memory_bytes, usage().peak_swap_bytes),
+        (3 << 30, Some(512 << 20))
+    );
+    fs::write(dir.join("memory.swap.peak"), "max\n").expect("swap peak");
+    assert_eq!(usage().peak_swap_bytes, None);
+}
+
+/// Proves a lease's usage carries the throttle counts of its `cpu.stat` when it holds both, and
+/// the `some` total of its `cpu.pressure` when it holds one:
+/// `nr_periods` and `nr_throttled` as they are (a group with no `cpu.max` counts 0 of each,
+/// a capped one counts its periods), and none when either is missing. Catches the counts
+/// left out, read from each other's line, or a missing count sent as a zero (which would
+/// read as a run its host never throttled).
+#[test]
+fn a_leases_usage_carries_its_throttle_counts_when_both_are_there() {
+    let fixture = Fixture::new("usage-throttle");
+    let dir = fixture.mount.join("actions/js-x-r1");
+    fs::write(dir.join("memory.peak"), "1024\n").expect("peak");
+    let throttle = |stat: &str| {
+        fs::write(dir.join("cpu.stat"), stat).expect("stat");
+        usage_of(&fixture.lease()).expect("a usage").cpu_throttle
+    };
+    let counted = |periods, throttled_periods| {
+        Some(js_agent_wire::CpuThrottle {
+            periods,
+            throttled_periods,
+        })
+    };
+    assert_eq!(
+        throttle("usage_usec 9\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\n"),
+        counted(0, 0)
+    );
+    assert_eq!(
+        throttle("usage_usec 9\nnr_periods 5597\nnr_throttled 5585\nthrottled_usec 5730985614\n"),
+        counted(5597, 5585)
+    );
+    assert_eq!(throttle("usage_usec 9\nnr_periods 5597\n"), None);
+    assert_eq!(throttle("usage_usec 9\nnr_throttled 5585\n"), None);
+    let pressure = || {
+        usage_of(&fixture.lease())
+            .expect("a usage")
+            .cpu_pressure_some_usec
+    };
+    assert_eq!(pressure(), None, "no cpu.pressure: unknown, not 0");
+    let psi = "some avg10=0.00 avg60=0.00 avg300=0.00 total=1250000\n\
+               full avg10=0.00 avg60=0.00 avg300=0.00 total=7\n";
+    fs::write(dir.join("cpu.pressure"), psi).expect("pressure");
+    assert_eq!(
+        pressure(),
+        Some(1_250_000),
+        "the some total, not the full one"
+    );
 }

@@ -1,7 +1,7 @@
 //! What the lifecycle reports of what it did ([`Event`]), why it did not act on a start
 //! ([`Skip`]) and what it keeps for a person ([`Finding`]).
 
-use js_agent_wire::Taint;
+use js_agent_wire::{JobUsage, StartSizing, Taint};
 
 /// Something the agent keeps because it needs a person or a later step: a cleanup that
 /// failed, a check that found something, a container it could not account for. The text
@@ -36,6 +36,24 @@ pub enum Skip {
     /// job id is the run id of this run start: the two would share one scratch directory
     /// and one set of labels, so the start is not taken.
     Clash,
+}
+
+/// What a job booked and where the booking came from, carried by [`Event::Started`] and
+/// [`Event::ResultReady`] and so written in the journal at a job's start and at its result,
+/// with the job's usage at its result: the record that tells how a job's booking compared with
+/// what it used.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct JobBooking {
+    /// The CPU booked, in thousandths of a core: the lease's `cpu.weight`, a share of the
+    /// node's cores and never a ceiling.
+    pub cpu_millis: u64,
+    /// The memory booked, in bytes: what placement counted for the job, not a limit (the lease
+    /// has no `memory.max`, and the job may use swap).
+    pub memory_bytes: u64,
+    /// The size class and which history gave the CPU and the memory, as the job's start said
+    /// ([`JobStartSpec::sizing`](js_agent_wire::JobStartSpec::sizing)); `None` for a run start,
+    /// for a server that sends none, and for a job taken over from an earlier agent.
+    pub sizing: Option<StartSizing>,
 }
 
 /// When each step of a container's start was done, carried by [`Event::Started`] and so
@@ -107,6 +125,8 @@ pub enum Event {
         run_id: String,
         /// When each step of the start was done.
         timeline: StartTimeline,
+        /// What the job booked and where the booking came from.
+        booked: JobBooking,
     },
     /// The start was refused and nothing was created; a `failed_to_start` result is held.
     Refused {
@@ -135,6 +155,12 @@ pub enum Event {
     ResultReady {
         /// The run.
         run_id: String,
+        /// What the job booked and where the booking came from.
+        booked: JobBooking,
+        /// What the job's control group used, with how often its CPU was throttled
+        /// ([`JobUsage::cpu_throttle`]), when it was read; `None` for a job that never ran or
+        /// whose group could not be read.
+        usage: Option<JobUsage>,
     },
     /// The container is gone.
     ContainerRemoved {

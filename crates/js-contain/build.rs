@@ -8,6 +8,14 @@
 //! (`libc.a`: Debian's `libc6-dev`, Fedora's `glibc-static`). Only Linux runs
 //! containers: on any other target the embedded file is empty and the OCI backend
 //! refuses to start with it.
+//!
+//! What `rustc` wrote is read back and refused unless it names no program interpreter
+//! (`init/static_elf.rs`): a linker that cannot link statically may link dynamically and
+//! still succeed, and that binary would fail to start in an image without the host's C
+//! library.
+
+#[path = "init/static_elf.rs"]
+mod static_elf;
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -16,6 +24,7 @@ fn main() {
     let source = PathBuf::from("init/init.rs");
     println!("cargo:rerun-if-changed={}", source.display());
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=init/static_elf.rs");
     let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
     let dest = out.join("js-init");
     println!("cargo:rustc-env=JS_INIT_BINARY={}", dest.display());
@@ -55,4 +64,12 @@ fn main() {
          archive, libc.a, must be installed):\n{}",
         String::from_utf8_lossy(&built.stderr)
     );
+    let bytes = std::fs::read(&dest).expect("read the built js-init");
+    if let Some(why) = static_elf::not_static(&bytes) {
+        panic!(
+            "js-init built, but not as a static executable: {why}. Its linker did not honour \
+             `-C target-feature=+crt-static`; build with one that links the C library's \
+             static archive (cargo with the host's cc and libc.a)"
+        );
+    }
 }

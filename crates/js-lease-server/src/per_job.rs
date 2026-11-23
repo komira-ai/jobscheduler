@@ -9,9 +9,9 @@
 //!    store, one transaction per step, each step carrying the allocation change that goes with
 //!    it: `starting` moves placed to starting; `running` moves to running and stamps the start
 //!    (the wall clock runs from there); a result moves the job to its end and its allocation
-//!    to releasing, and is acknowledged; a start the host refused as held (`host-held`) sends
-//!    the job back to the queue and frees its allocation instead ([`crate::job_held`]), and is
-//!    acknowledged too. A job the agent ran and ended between two heartbeats is walked
+//!    to releasing, and is acknowledged; a start the host refused as held (`host-held`) or for
+//!    capacity (`no-capacity`) sends the job back to the queue and frees its allocation instead
+//!    ([`crate::job_held`]), and is acknowledged too. A job the agent ran and ended between two heartbeats is walked
 //!    through the steps it skipped first. The same listing twice commits nothing, and a
 //!    report that would move a job backwards or out of an end is ignored.
 //! 2. **Retired ids are answered** ([`job_alloc::answer_retired`]): a job the agent never held
@@ -47,13 +47,15 @@ use js_agent_wire::{
     Outcome, refusal,
 };
 use js_jobs::{
-    AllocationId, AllocationRecord, AllocationStep, Booked, DispatchKind, JobEnd, JobId, JobRecord,
-    JobState, JobStoreError, LogLengths, Output, ResourceUsage, StartFailure,
+    AllocationId, AllocationRecord, AllocationStep, Booked, CpuPeak, CpuThrottle, DispatchKind,
+    JobEnd, JobId, JobRecord, JobState, JobStoreError, LogLengths, Output, ResourceUsage,
+    StartFailure,
 };
-use js_types::{HostId, Resources};
+use js_types::{CpuSeries, HostId, Resources};
 use tracing::warn;
 
 use crate::job_alloc::{self, Freed};
+use crate::job_expiry::JobLimits;
 use crate::job_held;
 use crate::job_start::start_of;
 use crate::job_store::ServerJobs;
@@ -128,6 +130,9 @@ pub(crate) struct BeatContext<'a> {
     pub(crate) polls_dispatch: bool,
     /// Where a start failure the host reports is counted.
     pub(crate) metrics: &'a dyn MetricsSink,
+    /// The pool's limits, of which a start refused for capacity reads its requeue count and bar
+    /// ([`job_held::held_or_end`]).
+    pub(crate) limits: JobLimits,
 }
 
 /// The per-job half of a heartbeat of the host `context` names, listing `listed` and
@@ -333,14 +338,17 @@ fn report(
 
 /// Commits the result the host of `context` lists for `job`, which it holds, and returns the
 /// verdict on it: the one place a listed result is recorded. A start the host refused as held
-/// sends the job back to the queue instead, freeing its allocation, and is answered
-/// [`Ack::Accepted`] ([`job_held::held_or_end`]). Otherwise the job ends as [`end_of`] reads
-/// the result (or, for the refusal of a job held hosts sent back too often, with a detail
-/// naming them), in one transaction with its allocation's move to releasing, after the steps
+/// (`host-held`) or for capacity (`no-capacity`) sends the job back to the queue instead,
+/// freeing its allocation, and is answered [`Ack::Accepted`] ([`job_held::held_or_end`]).
+/// Otherwise the job ends as [`end_of`] reads the result (or, for the refusal of a job such
+/// refusals sent back too often, with a detail naming the hosts), in one transaction with its allocation's move to releasing, after the steps
 /// it skipped when it ran and ended between two heartbeats ([`Ack::Accepted`]); a job that has
 /// already ended is left as it is ([`Ack::Duplicate`]); an end its state cannot take is logged
 /// and changes nothing ([`Ack::Stale`]); an outcome this version does not know is left
-/// unanswered.
+/// unanswered. A start the host refused is told to the metrics with its code (`none` when it
+/// lists none) once, when the requeue or the end it brings is committed, whether it is sent
+/// back to the queue or ends the job; a duplicate, a stale listing and a commit that fails are
+/// not told.
 fn commit_result(
     jobs: &ServerJobs,
     context: &BeatContext<'_>,
@@ -353,7 +361,15 @@ fn commit_result(
     if job.state.is_ended() {
         return Ok(Some(Ack::Duplicate));
     }
-    let Some(end) = job_held::held_or_end(jobs, context.host, &job, end)? else {
+    // A refused start is told once its outcome is committed: a requeue or an end that fails
+    // is the beat's error, and the agent lists the result again.
+    let refused = matches!(result.outcome, Outcome::FailedToStart);
+    let tell_refused = || {
+        let code = result.detail.as_deref().unwrap_or("none");
+        context.metrics.start_refused(context.host, code);
+    };
+    let Some(end) = job_held::held_or_end(jobs, context.host, &job, end, &context.limits)? else {
+        tell_refused();
         return Ok(Some(Ack::Accepted));
     };
     let ran = matches!(
@@ -374,6 +390,9 @@ fn commit_result(
     };
     match jobs.end_job(&job.id, end) {
         Ok(_) => {
+            if refused {
+                tell_refused();
+            }
             failure
                 .into_iter()
                 .for_each(|failure| context.metrics.start_failed(failure));
@@ -414,7 +433,10 @@ fn advance(
 /// ([`JobResult::logs_report`]); an inconsistent one is dropped and the result recorded
 /// without it, so that a reader of the job's live logs knows where each stream ends. The
 /// result's `usage`, what the job's control group counted, is kept as the output's resource
-/// usage; a result with none records none, never a zero.
+/// usage, with the CPU periods, the throttled periods, the CPU pressure and the CPU peak it reports; a
+/// result with none records none, never a zero, and a counter it does not report is `None`. The
+/// result's `cpu_series` is kept as reported, beside the usage and whether or not the result has
+/// one, when it is well formed ([`CpuSeries::new`]); a series that is not is dropped.
 ///
 /// A start the agent refused keeps the agent's code (`detail`) as the job's start failure
 /// detail: [`StartFailure::InputUnavailable`] for `input-unavailable`, and
@@ -433,6 +455,25 @@ pub(crate) fn end_of(job: &JobRecord, result: &JobResult) -> Option<JobEnd> {
     let usage = result.usage.map(|used| ResourceUsage {
         cpu_time: Duration::from_micros(used.cpu_usage_usec),
         peak_memory_bytes: used.peak_memory_bytes,
+        cpu_throttle: used.cpu_throttle.map(|throttle| CpuThrottle {
+            periods: throttle.periods,
+            throttled_periods: throttle.throttled_periods,
+        }),
+        cpu_pressure_some: used.cpu_pressure_some_usec.map(Duration::from_micros),
+        cpu_peak: used.cpu_peak.map(|peak| CpuPeak {
+            millicores: peak.millicores,
+            window_usec: peak.window_usec,
+        }),
+    });
+    // The wire type reads only a series with a power-of-two granularity and at most 128
+    // points; the store also keeps no granularity past 16 bits, and drops such a series.
+    let cpu_series = result.cpu_series.as_ref().and_then(|series| {
+        CpuSeries::new(
+            series.granularity_secs,
+            series.points.clone(),
+            series.run_usec,
+            series.partial,
+        )
     });
     let output = Output {
         stdout: tail.stdout,
@@ -440,6 +481,7 @@ pub(crate) fn end_of(job: &JobRecord, result: &JobResult) -> Option<JobEnd> {
         truncated: tail.truncated,
         usage,
         logs,
+        cpu_series,
     };
     let code = result.exit_code;
     let failed = code.filter(|code| *code != 0).unwrap_or(NO_EXIT_CODE);

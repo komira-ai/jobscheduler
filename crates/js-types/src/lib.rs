@@ -34,6 +34,8 @@ mod booking;
 mod class;
 mod clock;
 pub mod cordon;
+mod cpu_ceiling;
+mod cpu_series;
 mod digest;
 pub mod env;
 mod ids;
@@ -62,6 +64,8 @@ pub use accel::{
 pub use booking::{Candidate, Held, HostCapacity};
 pub use class::{Admission, ClassError, ResourceClass};
 pub use clock::{Clock, ManualClock, Monotonic, Timestamp};
+pub use cpu_ceiling::{CpuCeiling, CpuCeilingError};
+pub use cpu_series::{CPU_SERIES_MAX_POINTS, CpuSeries};
 pub use digest::{BundleRef, BundleRefError, DigestRef, DigestRefError};
 pub use ids::{
     ClassId, CordonHolder, HostId, IdError, LeaseId, ProviderId, RequestId, RequestIdError,
@@ -77,6 +81,6 @@ pub use network::{JobNetwork, PortMap, UnknownJobNetwork};
 pub use queue::{JobEventKind, QueueCode, QueueNote};
 pub use request::{Request, RequestError};
 pub use resources::{Dim, Dims, Resources, TypeError};
-pub use shape::{Capabilities, Shape};
+pub use shape::{Capabilities, Shape, os_major};
 pub use size_class::{SIZE_CLASS_LABEL, SIZE_FALLBACK_LABEL, SizeClass};
 pub use start::{RefusalCode, StartSpec};
