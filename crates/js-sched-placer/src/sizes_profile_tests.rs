@@ -507,7 +507,12 @@ fn a_class_remembers_the_end_of_its_latest_run() {
     let mut sizes = sizes_with(Curves::Shadow);
     assert!(sizes.observe(&late, bk()));
     assert!(sizes.observe(&early, bk()));
-    assert_eq!(class(&sizes, &early).last_ended_ms, 20_000);
+    let ended_ms = |job: &JobRecord| {
+        let ended = job.result.as_ref().unwrap().timing.ended_at.as_duration();
+        u64::try_from(ended.as_millis()).unwrap()
+    };
+    assert!(ended_ms(&early) < ended_ms(&late));
+    assert_eq!(class(&sizes, &early).last_ended_ms, ended_ms(&late));
 }
 
 /// The key of the class of hash `n`.
