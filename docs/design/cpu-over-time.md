@@ -23,7 +23,8 @@ with no CPU limit). **MEASURED**, counted from the export or the farm's metrics,
    (the kernel's pressure "some" over 60 s). The overshoot is mostly at bursts of arrivals, not a steady 3x.
    - **Until komira-ai/jobscheduler#1036 no host was read at all.** The crun agent opened its node's `cpu.stat` at the
      wrong path, so every host was charged by bookings alone (each job at least a core). With every host tied on
-     trust, the fit packed the fullest hosts: two at load 113 and 306 while four idled (MEASURED).
+     trust, the fit packed the fullest hosts: two at load 113 and 306 while four idled (MEASURED). Every farm
+     figure above is of booking-only placement; load-based placement runs once #1036's agent is on the six hosts.
 2. A booking is one number. A class can average a few cores and burst to 20 for a few seconds. The sum of bookings
    can then sit at 1.1x of a host's cores while the real demand in some seconds is several times that.
 3. Even read, a host cannot measure above its cores (READ: `NodeLoad::busy_millicores_since`), so it reads 88 and
@@ -237,19 +238,19 @@ teaches the class: a run slowed by contention may only raise it, as today.
 8 runs, it is flat.
 
 **Memory.** It starts from komira-ai/jobscheduler#1035:
-- **Today's rule.** A class books its own largest recent peak with a margin (1.2 x + 128 MiB, at least 1 GiB) from
-  its first run. Its kind's largest peak books only a class with no run, and 16 GiB only a class never seen. A run
-  above its booking raises the next booking at once.
+- **Today's rule.** From its first run, a class books its own largest peak over its last 256 to 288 runs: 1.2 x
+  + 128 MiB, rounded up to 256 MiB, at least 1 GiB, never below its kill floor. Only a class with no run books its
+  kind's figure, else its client's, else the cold 4 GiB. There is no `memory.max` (#1027): a run above its booking
+  raises the next at once. The only bound on a host is `memory_schedulable_percent`.
 - **Autopilot** (EuroSys 2020, section 3.2) uses the peak, not a mean, for memory: "we typically want to provision
   for (close to) the peak memory usage". It records only each window's peak, with a 48 h half-life. It takes the
   maximum for minimal tolerance of out-of-memory kills, the 98th percentile for low tolerance, and between them the
   larger of the 60th percentile and half the peak; then a 10 to 15% margin and the maximum over the last hour.
-- **What is taken here:** the per-class peak of the series' runs, decayed like CPU, with #1035's margin. That is
-  Autopilot's choice for minimal tolerance, because a job here may not be killed.
+- **What is taken here:** #1035's rule as it is. The maximum over recent runs is Autopilot's choice for minimal
+  tolerance, which is ours because a job here may not be killed.
 - **The host's measured memory.** The working set in the heartbeat (READ: `NodeLoad.working_set_bytes`) enters as
   for CPU: the larger of it and the bookings it covers, plus what it does not cover yet.
-- **Nothing is ever killed for memory by this design.** A host whose jobs outgrow their bookings is refused new jobs,
-  and the next booking rises.
+- **Nothing is ever killed for memory.** A host whose bookings leave no room is refused as `booked-memory`.
 
 ## 5. The placement rule
 
