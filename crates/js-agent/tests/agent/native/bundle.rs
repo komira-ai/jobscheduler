@@ -15,6 +15,7 @@ use js_agent::lifecycle::{Body, RunHandle, RunSpec, Runtime, Status};
 use js_agent::native::{Ceiling, Journal, NativeConfig};
 use js_agent_wire::{NetworkLevel, Outcome, refusal};
 use js_bundle::DottedVersion;
+use serde_json::json;
 
 use super::grant::{Over, job};
 use super::{Failing, Launched, Rig, TERM, native};
@@ -520,4 +521,41 @@ fn a_bundle_run_naming_a_held_xcode_gets_its_developer_dir() {
     let plain = s.spec("r2", "@bundle/tool", &[]);
     s.rig.rt.create_and_start(&plain).unwrap();
     assert!(vars(&s.rig.launcher.last(), "DEVELOPER_DIR").is_empty());
+}
+
+/// Asserts that a bundle rule that sets a name of the run's account (`USER`, `LOGNAME`,
+/// `xcrun_db`) loses to the account's value: each name is given once to the supervisor, `USER`
+/// and `LOGNAME` are the lent account, `xcrun_db` is the file in the run's temporary
+/// directory, and the bundle's own values are given nowhere.
+///
+/// Catches: a start that leaves the bundle's value beside the account's, so the job could be
+/// handed the bundle's name for itself, or a name given twice.
+#[test]
+fn a_bundle_rule_for_an_account_name_loses_to_the_accounts_value() {
+    let mut spec = Spec::standard();
+    for name in ["USER", "LOGNAME", "xcrun_db"] {
+        spec.env
+            .push(json!({"name": name, "op": "set", "values": ["bundle-value"], "locked": false}));
+    }
+    let mut s = Stored::of("acct-env", spec);
+    let run = s.spec("r1", "@bundle/tool", &[]);
+    let id = s.rig.rt.create_and_start(&run).unwrap();
+    let launched = s.rig.launcher.last();
+    let lent = launched.var("USER").unwrap().to_owned();
+    let home = s.rig.home_of(&lent);
+    assert!(home.exists());
+    assert_eq!(vars(&launched, "USER"), [lent.as_str()]);
+    assert_eq!(vars(&launched, "LOGNAME"), [lent.as_str()]);
+    let db = text(&home.join("exec/.tmp/xcrun_db"));
+    assert_eq!(vars(&launched, "xcrun_db"), [db.as_str()]);
+    assert!(
+        !launched
+            .env
+            .iter()
+            .any(|(_, value)| value == "bundle-value"),
+        "{:?}",
+        launched.env
+    );
+    s.rig.settle(&id);
+    s.rig.rt.remove(&id).unwrap();
 }

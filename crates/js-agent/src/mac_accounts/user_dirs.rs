@@ -12,6 +12,11 @@ use std::io;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 
+#[cfg(any(target_os = "macos", test))]
+use super::Account;
+#[cfg(any(target_os = "macos", test))]
+use super::cycle::Ran;
+
 /// The two names asked: the per-user temporary folder, then the per-user cache folder.
 pub const NAMES: [&str; 2] = ["DARWIN_USER_TEMP_DIR", "DARWIN_USER_CACHE_DIR"];
 
@@ -44,6 +49,36 @@ pub fn checked(printed: &str, folders: &Path, uid: u32) -> io::Result<PathBuf> {
         return Err(named(format!("owned by uid {}, not uid {uid}", meta.uid())));
     }
     Ok(real)
+}
+
+/// The folders of `account` below `root`: each of [`NAMES`] asked through `run` (which runs
+/// the given `getconf` command as the account) and checked ([`checked`]).
+///
+/// # Errors
+/// `run` failed, `getconf` ended with a status other than 0 (the text names the variable,
+/// the account and what `getconf` printed to its error stream), or an answer is not the
+/// account's own folder.
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn folders_via(
+    account: &Account,
+    root: &Path,
+    run: &mut dyn FnMut(&[String]) -> io::Result<Ran>,
+) -> io::Result<Vec<PathBuf>> {
+    NAMES
+        .iter()
+        .map(|name| {
+            let command = ["/usr/bin/getconf".to_owned(), (*name).to_owned()];
+            let ran = run(&command)?;
+            if ran.code != Some(0) {
+                return Err(io::Error::other(format!(
+                    "getconf {name} as {}: {}",
+                    account.name,
+                    ran.stderr.trim()
+                )));
+            }
+            checked(&ran.stdout, root, account.uid)
+        })
+        .collect()
 }
 
 #[cfg(test)]
