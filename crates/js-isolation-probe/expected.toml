@@ -49,9 +49,7 @@
 "read:tcc-dir" = "denied"
 "read:tcc-db" = "denied"
 "read:timemachine-prefs" = "denied"
-# Another user's home must not be readable. A home the system made 0755 with an ACL (a console
-# user's) lets every user list it, and the profile has no read deny for the other homes yet:
-# a job listed one on macOS 27, so this pin fails by name until the profile denies it.
+# Another user's home must not be readable, whatever its modes.
 "read:other-home" = "denied"
 "read:root-home" = "denied"
 # The flags file is 0644 and holds no secret (no token: a Mac joins by its host certificate).
