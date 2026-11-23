@@ -1,7 +1,9 @@
-//! A run's CPU second by second ([`SeriesRecorder`]), from the same `usage_usec` samples of its
-//! lease's `cpu.stat` that [`super::peak::PeakWindow`] takes, on the agent's monotonic clock.
-//! What the job's result reports as [`JobResult::cpu_series`](js_agent_wire::JobResult::cpu_series)
-//! (the design of komira-ai/jobscheduler#1033, section 3).
+//! A run's CPU second by second ([`SeriesRecorder`]), from samples of the CPU its processes
+//! have used (on Linux the `usage_usec` of its lease's `cpu.stat`, the samples the crun
+//! runtime's CPU peak also takes; on a Mac the CPU time of the run's processes,
+//! [`crate::mac_usage`]), on the agent's monotonic clock. What the job's result reports as
+//! [`JobResult::cpu_series`](js_agent_wire::JobResult::cpu_series) (the design of
+//! komira-ai/jobscheduler#1033, section 3).
 //!
 //! The series holds at most [`MAX_POINTS`] points and one granularity, the seconds each point
 //! covers. It starts at one second a point. When a run outlasts its points, neighbouring
@@ -12,14 +14,14 @@
 use js_agent_wire::{CPU_SERIES_MAX_POINTS, CPU_SERIES_POINTS_PER_CORE, CpuSeries};
 
 /// The most points a series holds.
-pub(super) const MAX_POINTS: usize = CPU_SERIES_MAX_POINTS;
+pub(crate) const MAX_POINTS: usize = CPU_SERIES_MAX_POINTS;
 /// One second, in microseconds.
 const SECOND_USEC: u64 = 1_000_000;
 
 /// The CPU of one run per point of its series. Pure: the caller reads the clock and the
 /// counter.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct SeriesRecorder {
+pub(crate) struct SeriesRecorder {
     /// The time the series starts at, in microseconds; meaningful once there is a sample.
     start: u64,
     /// The last sample: `(time, usage)`, both in microseconds; none for an adopted run until
@@ -39,7 +41,7 @@ pub(super) struct SeriesRecorder {
 impl SeriesRecorder {
     /// A series that starts at `at` microseconds with `usage` CPU microseconds already used:
     /// a run made at `at` starts from zero.
-    pub(super) fn starting(at: u64, usage: u64) -> Self {
+    pub(crate) fn starting(at: u64, usage: u64) -> Self {
         Self {
             start: at,
             last: Some((at, usage)),
@@ -53,7 +55,7 @@ impl SeriesRecorder {
     /// A series of a run this process did not start (adopted after a restart of the agent),
     /// marked partial: what the run did before it is not in the series. It starts at its
     /// first sample and counts what the run used from there.
-    pub(super) fn adopted() -> Self {
+    pub(crate) fn adopted() -> Self {
         Self {
             start: 0,
             last: None,
@@ -66,7 +68,7 @@ impl SeriesRecorder {
 
     /// Records that the run was seen to end at `at` microseconds: [`SeriesRecorder::finish`]
     /// then ends the series there, not at the later time it is given.
-    pub(super) fn end_at(&mut self, at: u64) {
+    pub(crate) fn end_at(&mut self, at: u64) {
         self.ended = Some(at);
     }
 
@@ -74,7 +76,7 @@ impl SeriesRecorder {
     /// used since the last sample evenly over the time since it. A sample no later than the
     /// last one adds nothing; a counter that fell counts as no use. The first sample of a
     /// series with none (an adopted run's) sets its start and adds nothing.
-    pub(super) fn observe(&mut self, at: u64, usage: u64) {
+    pub(crate) fn observe(&mut self, at: u64, usage: u64) {
         let Some((from, used)) = self.last else {
             self.start = at;
             self.last = Some((at, usage));
@@ -114,7 +116,7 @@ impl SeriesRecorder {
     /// time it covers, the last point over the part of it the run lived. The CPU since the
     /// sample before is spread over the time since it. `None` for a run with no time between
     /// its start and its end.
-    pub(super) fn finish(mut self, at: u64, usage: u64) -> Option<CpuSeries> {
+    pub(crate) fn finish(mut self, at: u64, usage: u64) -> Option<CpuSeries> {
         self.observe(self.ended.unwrap_or(at), usage);
         let run_usec = self.last.map_or(0, |(last, _)| last - self.start);
         if run_usec == 0 {
@@ -171,5 +173,5 @@ fn mul_div(value: u64, part: u64, whole: u64) -> u64 {
 }
 
 #[cfg(test)]
-#[path = "series_tests.rs"]
+#[path = "cpu_tests.rs"]
 mod tests;

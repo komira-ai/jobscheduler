@@ -51,7 +51,9 @@ getrandom.workspace = true
 hex.workspace = true
 # `TokioIo`, the stream a provider channel's connector hands tonic (src/provider).
 hyper-util = { workspace = true, features = ["tokio"] }
-# The project-quota calls (`ioctl`, `quotactl`) of src/quota: rustix has no form of them.
+# The project-quota calls (`ioctl`, `quotactl`) of src/quota, the supervisor's `wait4`
+# (src/mac_supervisor/run.rs) and a Mac's process and host statistics (src/mac_usage/macos.rs,
+# src/usage/macos.rs): rustix has no form of them.
 libc.workspace = true
 # Property lists read as XML: the `version.plist` of an installed Xcode (src/xcode), and what
 # `diskutil -plist` prints, which the update hook's host setup of a Mac reads

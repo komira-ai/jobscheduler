@@ -20,7 +20,8 @@
 //!   which the server reads as a new series.
 //! - **The seconds** (with `--host-second-samples`): [`Collector::step`], which the worker calls
 //!   after every step in place of `due`, reads the whole host's `/proc/stat` and `/proc/pressure/cpu`
-//!   (through [`super::host_cpu`], not the actions group's files)
+//!   (through [`super::host_cpu`], not the actions group's files; on a Mac the host's CPU load,
+//!   [`super::HostSampler`])
 //!   when at least a second has passed since the last such read, and keeps the busy CPU and the
 //!   CPU pressure of each interval (`js_agent_usage::Seconds`), the newest 16 of each. A run
 //!   publishes them in its reading and starts again; they are sent once, so a beat that fails
@@ -37,13 +38,13 @@ use js_agent_wire::limits::{MAX_LOAD_MINUTES, MAX_LOAD_SECONDS};
 use super::binner::Binner;
 use super::clock::UsageClock;
 use super::outbox::{Outbox, Reading};
-use super::sampler::{LeaseCgroup, SampleError, Sampler};
+use super::sampler::{LeaseCgroup, NodeSampler, SampleError, Sampler};
 use crate::facts::FileReader;
 use crate::lifecycle::RunningLease;
 
 /// Samples the node on the worker's thread. See the [module](self).
 pub struct Collector {
-    sampler: Sampler<Box<dyn FileReader>>,
+    sampler: Box<dyn NodeSampler>,
     clock: Box<dyn UsageClock>,
     outbox: Arc<Outbox>,
     binner: Option<Binner>,
@@ -68,11 +69,22 @@ impl Collector {
         clock: Box<dyn UsageClock>,
         outbox: Arc<Outbox>,
     ) -> Self {
+        Self::with_sampler(Box::new(Sampler::new(files, actions_dir)), clock, outbox)
+    }
+
+    /// A collector of what `sampler` reads (the cgroup tree on Linux, the host's own counters
+    /// on a Mac), timed by `clock` and publishing in `outbox`, which also says whether it
+    /// takes the per-second series.
+    pub fn with_sampler(
+        sampler: Box<dyn NodeSampler>,
+        clock: Box<dyn UsageClock>,
+        outbox: Arc<Outbox>,
+    ) -> Self {
         Self {
             seconds: outbox
                 .host_seconds()
                 .then(|| Seconds::new(MAX_LOAD_SECONDS)),
-            sampler: Sampler::new(files, actions_dir),
+            sampler,
             clock,
             outbox,
             binner: None,

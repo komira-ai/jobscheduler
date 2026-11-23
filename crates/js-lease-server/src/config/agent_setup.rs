@@ -1,13 +1,13 @@
 //! What the configuration decided for the agents that register hosts: [`AgentSetup`], the
 //! clock and id source its job store is opened on ([`Config::with_job_sources`]).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use js_registry::PoolConfig;
-use js_sched_placer::sizes::ColdSize;
+use js_sched_placer::sizes::{ColdMemoryOn, ColdSize};
 use js_types::ProviderId;
 
 use super::{Cli, Config, CpuSlack, DispatchTimes, LiveClients, check_pool, listen};
@@ -41,6 +41,9 @@ pub(crate) struct AgentSetup {
     /// its fallback class nor its client has a run (each absent one its default,
     /// 22 cores and 4 GiB).
     pub(crate) cold: ColdSize,
+    /// `--cold-memory-bytes-on` or `server.cold_memory_bytes_on`: the cold memory of the jobs
+    /// of each operating system it names, in place of `cold`'s.
+    pub(crate) cold_memory_on: ColdMemoryOn,
     /// `server.max_lease_wall`: the one up to which the placement engine trusts a wall time
     /// for backfill.
     pub(crate) max_lease_wall: Option<Duration>,
@@ -177,6 +180,8 @@ pub(super) fn agents(cli: &Cli, clients: &LiveClients) -> Result<Box<AgentSetup>
             cpu_millis: cli.cold_cpu_millis,
             memory_bytes: cli.cold_memory_bytes,
         },
+        cold_memory_on: cold_memory_on(&cli.cold_memory_bytes_on)
+            .map_err(|why| StartupError::new("--cold-memory-bytes-on", why))?,
         max_lease_wall: None,
         job_limits: JobLimits::default(),
         jobs: listen::job_store(cli),
@@ -184,6 +189,60 @@ pub(super) fn agents(cli: &Cli, clients: &LiveClients) -> Result<Box<AgentSetup>
         providers: None,
         dispatch: DispatchTimes::default(),
     }))
+}
+
+/// The least cold memory of an operating system: 1 GiB, the least memory the estimator books,
+/// as for `--cold-memory-bytes`.
+pub(crate) const COLD_MEMORY_LEAST: u64 = 1 << 30;
+
+/// One value of `--cold-memory-bytes-on`, `OS=BYTES`: the name of an operating system as a
+/// job's `os` constraint gives it, and its cold memory in bytes ([`cold_entry`]).
+///
+/// # Errors
+///
+/// The text says what is wrong: no `=`, bytes that are not a whole number, or what
+/// [`cold_entry`] refuses.
+pub fn parse_cold_on(text: &str) -> Result<(String, u64), String> {
+    let (os, bytes) = text
+        .split_once('=')
+        .ok_or_else(|| "must be OS=BYTES, such as macos=4294967296".to_owned())?;
+    let bytes = bytes
+        .parse::<u64>()
+        .map_err(|_| format!("{bytes:?} is not a whole number of bytes"))?;
+    cold_entry(os, bytes)
+}
+
+/// The cold memory `bytes` of the operating system `os`, checked: a name that is not empty and
+/// bytes from 1073741824 (1 GiB).
+///
+/// # Errors
+///
+/// The text says what is wrong.
+pub(crate) fn cold_entry(os: &str, bytes: u64) -> Result<(String, u64), String> {
+    if os.is_empty() {
+        return Err("the operating system is empty".to_owned());
+    }
+    if bytes < COLD_MEMORY_LEAST {
+        return Err(format!(
+            "{os}: {bytes} is below the least, 1073741824 (1 GiB)"
+        ));
+    }
+    Ok((os.to_owned(), bytes))
+}
+
+/// The cold memory of each operating system `entries` names.
+///
+/// # Errors
+///
+/// An operating system named twice.
+pub(crate) fn cold_memory_on(entries: &[(String, u64)]) -> Result<ColdMemoryOn, String> {
+    let mut on = BTreeMap::new();
+    for (os, bytes) in entries {
+        if on.insert(os.clone(), *bytes).is_some() {
+            return Err(format!("{os} is given twice"));
+        }
+    }
+    Ok(ColdMemoryOn::new(on))
 }
 
 /// The shared join tokens of the file at `path`, which `place` names: a refusal names it,

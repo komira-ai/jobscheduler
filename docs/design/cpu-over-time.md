@@ -385,7 +385,8 @@ negative and fades; each release reads the other's results.
 - **Delay on purpose** (a job not yet started), decided by the perfect-curve arm; **a spread term**, by step 3.
 
 ## 12. Mac hosts, settings
-- **Mac hosts:** the Mac runtime has no `usage` method (READ), so Mac classes stay flat until Linux shows a gain.
+- **Mac hosts:** the Mac runtime reports each run's usage and, with `--cpu-series`, its CPU series, from the samples of the
+  run's processes (`docs/design/mac-runtime.md`, section 4), so Mac classes learn as Linux's do.
 - **Settings** (flags, each off or at today's value by default): agent `--cpu-series`, `--host-second-samples`;
   server `--placement-curves off|shadow|on`, `--curve-hosts`, `--curve-horizon-seconds 128`, `--curve-slot-seconds
   2`, `--curve-min-runs 8`, `--curve-fit-ratio 0.8`, `--curve-bias-fade-seconds 10`, `--curve-max-hold-seconds 30`

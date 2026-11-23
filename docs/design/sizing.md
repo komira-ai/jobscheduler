@@ -86,7 +86,9 @@ estimator's own rules for mixed runs (the largest of 32 samples over 4x their me
 no run of its own books its fallback class's figure (the same formula over the kind's runs, 7.8), else the whole history of its client
 on its platform (a third key every run of the client but a memory kill teaches), else the cold size, and at least its own kill floor.
 A fallback whose figure reaches the host is no fallback. Only a client with no fresh run at all books the cold size: `server.cold_cpu_millis` and
-`server.cold_memory_bytes` (or their flags), each one left out its default: 22 cores and 4 GiB. The cold CPU is never more than a quarter of
+`server.cold_memory_bytes` (or their flags), each one left out its default: 22 cores and 4 GiB; a job whose `os` constraint the server names
+in `server.cold_memory_bytes_on` (`--cold-memory-bytes-on OS=BYTES`) books that operating system's memory in place of `cold_memory_bytes`
+(the name as the job gives it; a job of another `os`, or of none, books `cold_memory_bytes`). The cold CPU is never more than a quarter of
 the most cores of the hosts the engine knows (the most any class books, so that the first run of an unknown class has room for
 the cores it uses), and the cold memory never more than the most bookable memory (the pool's `memory_schedulable_percent` applied) of the hosts the engine knows, and at
 least the class's kill floor. The CPU is the class's own learned CPU, else its fallback class's, else its client's (the first
@@ -104,6 +106,12 @@ The cold default is a fixed size, not a share of the hosts. It was 16 GiB, which
 filled at 15 jobs a host while its build jobs peaked at 0.6 to 3.2 GB; it is 4 GiB, above the largest of those peaks, and it books
 only the first jobs of a client with no history. A job that needs more is raised by its runs: a memory kill books twice the
 booking it died at next (the floor), and each run's peak with its margin raises its class's next booking.
+
+The cold memory of an operating system is set for the hosts of one platform without changing the others'. A farm whose build hosts
+run with `cold_memory_bytes` at 16 GiB has Macs with 88 GiB of bookable memory, which that size fills at five jobs a Mac
+whatever their CPU; `cold_memory_bytes_on = { macos = 4294967296 }` books a new Mac class 4 GiB and leaves the build hosts' 16 GiB as
+it is. It is a setting, not a share of the hosts: a share (the cold CPU's quarter of the cores, say) would change what every
+platform books at once. A Mac's classes learn from their runs as Linux's do once its agent reports their usage.
 
 The size is decided by the placement pass, not at submit, and is not written on the job: its needs stay as submitted, so a retried
 submit with the same id is still the same job. What it was booked is its allocation's `booked`, and which history sized it its
@@ -129,7 +137,9 @@ the group's non-file memory about once a second while the job runs, `memory.curr
 anywhere else, which the kernel can drop), and sends the most of each span as the result's `memory_series`. The peak a run teaches
 its class is that series' largest point when the result has a whole one (not a `partial` series of a run adopted after an agent
 restart); otherwise it is `memory.peak`, which counts page cache as well. On the farm, page cache was about a tenth of running jobs'
-`memory.peak` (a read of every running job's group on six hosts: 31.7 of 325.8 GiB of peaks, 8% for the median build job). A job whose
+`memory.peak` (a read of every running job's group on six hosts: 31.7 of 325.8 GiB of peaks, 8% for the median build job). A Mac's native runtime sends the same fields from samples of the run's processes and its supervisor's wait of
+the job (`docs/design/mac-runtime.md`, section 4): the peak is the processes' physical footprint together (which counts no file page)
+or the largest resident set, the series their footprint. A job whose
 result carries none (an agent from before the field, cgroup version 1, a result read back after an agent restart) has no usage, and
 a success with no peak is not a memory sample, so a class whose jobs all lack it books from its fallback or its client (7.8),
 else the cold size. The count a server logs at

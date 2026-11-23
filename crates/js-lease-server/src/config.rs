@@ -42,7 +42,8 @@ mod retention;
 mod store;
 mod tokens;
 pub(crate) use agent_setup::AgentSetup;
-use agent_setup::{MorePool, agents, check_more};
+pub(crate) use agent_setup::cold_entry;
+use agent_setup::{MorePool, agents, check_more, parse_cold_on};
 pub use cpu_slack::{CpuSlack, CpuSlackError};
 pub(crate) use dispatch::{
     DEFAULT_LEASE_SECS, DEFAULT_RECHECK_MS, DispatchTimes, MOST_LEASE_SECS, MOST_RECHECK_MS,
@@ -203,6 +204,14 @@ pub struct Cli {
         value_parser = clap::value_parser!(u64).range(1_073_741_824..)
     )]
     pub cold_memory_bytes: u64,
+    /// The memory a queued job whose `os` constraint is `OS` books in place of
+    /// `--cold-memory-bytes`, while neither its class, its fallback class nor its client has a
+    /// fresh run: `OS=BYTES`, such as `macos=4294967296`, the name as jobs give it and the
+    /// bytes from 1073741824 (1 GiB); above the most bookable memory a registered host has,
+    /// that most. A job of any other `os`, or of none, books `--cold-memory-bytes`.
+    /// Repeatable, each `OS` once. Needs `--agent-pool-config`.
+    #[arg(long = "cold-memory-bytes-on", value_name = "OS=BYTES", value_parser = parse_cold_on)]
+    pub cold_memory_bytes_on: Vec<(String, u64)>,
     /// Deprecated, and does nothing: no lease is costed by an estimate any more. The flag
     /// is accepted with a warning. Needs `--agent-pool-config`; not allowed with
     /// `--usage-off`.
@@ -681,6 +690,7 @@ impl Config {
             require_host_credential: server.agents.require_host_credential(),
             cpu_slack,
             cold: server.agents.cold(),
+            cold_memory_on: server.agents.cold_memory_on(),
             max_lease_wall: server.max_lease_wall,
             job_limits,
             jobs: server.agents.job_store(server.job_store_windows()),

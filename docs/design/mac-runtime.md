@@ -4,7 +4,7 @@ Status: proposed. The macOS sandbox stays `js-agent`'s macOS backend, in this wo
 
 ## What changes
 
-Nothing in this document changes code by itself. Jobs, the wire, placement and the Mac package stay as they are. Section 5 sets one value of the Macs' pool file, its least `os_version`. Section 4 proposes the one behaviour change: today a Mac job is held to no memory or CPU limit, and the agent reports no usage for it. After section 4's steps, a run that goes over its memory cap is killed and reported as a memory kill, as on Linux, and the agent reports what each run uses.
+Nothing in this document changes code by itself. Jobs, the wire, placement and the Mac package stay as they are. Section 5 sets one value of the Macs' pool file, its least `os_version`. Section 4 proposes the one behaviour change: today a Mac job is held to no memory or CPU limit. After section 4's steps, a run that goes over its memory cap is killed and reported as a memory kill, as on Linux. The agent already reports what each run uses (section 4, step 2).
 
 ## 1. One runtime interface
 
@@ -53,7 +53,11 @@ These facts were not re-checked on current macOS releases beyond those checks.
 
 ## 4. Memory and CPU limits
 
-**Today.** The scheduler books each Mac job's memory and CPU against the host, so bookings bound how many jobs share a Mac. Nothing holds a job to its booking. The native runtime ignores `memory_bytes` and `cpu_millis`, and the agent reports no usage for a native run (`NO_NATIVE_USAGE`, `crates/js-agent/src/worker.rs`).
+**Today.** The scheduler books each Mac job's memory and CPU against the host, so bookings bound how many jobs share a Mac. Nothing holds a job to its booking. The native runtime ignores `memory_bytes` and `cpu_millis`. It reports what each run used, as a Linux run's usage is reported (step 2 below, `crates/js-agent/src/mac_usage`):
+- At each poll of a running job (once a second), the agent reads `proc_pid_rusage` of every process of the run's account: the sum of their `ri_phys_footprint` is the run's memory at that moment, and the sum of their user and system time, with that of the children they waited for (`mach_timebase_info` converts the ticks), is its CPU. The run's CPU is the most that sum has been, and its peak the most footprint one sample saw.
+- The supervisor reaps the job with `wait4`, and its exit record carries that usage (`usage` of `exit.json`, an optional field a record from an earlier supervisor lacks): the CPU of the job and of every descendant it waited for, and the largest resident set one of them reached. So a run too short for any sample still has both.
+- The job's result carries the more of each as its `usage` and, with `--cpu-series` and `--memory-series`, the two series; a run with neither a sample nor a wait's usage carries none, never a zero.
+- The heartbeat carries the Mac's load: its busy time from `host_statistics` (`HOST_CPU_LOAD_INFO`, widened across the 32-bit counters' wrap) and its non-file memory from `host_statistics64` (anonymous pages less purgeable ones, wired and compressed pages), as a Linux host's `/proc/stat` and `/proc/meminfo` are read; with `--host-second-samples`, the busy CPU of each second, and no pressure (a Mac has none).
 
 **Memory: a cap enforced by sampling.**
 - The helper samples each live run every 2 seconds. It already lists a uid's processes for `kill-uid`, and here it sums their `ri_phys_footprint`.
@@ -68,7 +72,7 @@ These facts were not re-checked on current macOS releases beyond those checks.
 
 **Steps, each shippable:**
 1. The new asserted probes of section 3, in `js-mac-probe`.
-2. Usage: the helper's sample and a `usage` verb, the agent's heartbeat from it, and `NO_NATIVE_USAGE` removed.
+2. Usage (done, as **Today** above says): the agent's sample of the run's processes at each poll and the supervisor's `wait4`, the job's usage and series from them, and the heartbeat's load from the host's counters.
 3. The memory cap: `memory_cap_bytes`, the kill, and the `oom_killed` report.
 
 Each step is tested on Linux against the helper's fake host (`Host` in `js-mac-session`), and on the beta stage's macOS runner.

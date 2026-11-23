@@ -17,6 +17,7 @@ use crate::lifecycle::CheckHook;
 use crate::lifecycle::{Local, MountProviders, Runtime, UserNames};
 use crate::registry_credentials::RegistryCredentials;
 use crate::system::{Machine, RuntimeBuild, System};
+use crate::usage::{NodeSampler, Sampler};
 use crate::{Failure, Services, crun, crun_host, disk};
 
 mod claims;
@@ -150,20 +151,6 @@ pub struct Flags {
     /// job is held to its booking.
     #[arg(long, value_name = "MULTIPLE")]
     pub cpu_ceiling: Option<js_contain::CpuCeiling>,
-    /// Record each job's CPU second by second and send it with the job's result
-    /// (`cpu_series`): at most 128 points of a sixteenth of a core, a granularity that
-    /// doubles when a run outlasts them, and the agent's own run length. Read from the same
-    /// samples of each job's cgroup as the job's CPU peak. Off by default. Taken by the crun
-    /// runtime only: a job of the container engine records none.
-    #[arg(long)]
-    pub cpu_series: bool,
-    /// Record each job's non-file memory (`memory.current - (file - shmem)` of its cgroup:
-    /// no page cache, shared memory and tmpfs kept) about once a second and send it with the
-    /// job's result (`memory_series`): at most 128 points in MiB, each the most of its span,
-    /// combined in pairs by their maximum when a run outlasts them. The job service books a
-    /// class's memory from the peak of it. Off by default; taken by the crun runtime only.
-    #[arg(long)]
-    pub memory_series: bool,
     /// The dedicated non-root user every `crun` command of the crun runtime runs as, such as
     /// `jsjob`: the account whose ranges in `/etc/subuid` and `/etc/subgid` (at least 65536
     /// ids each) every job's user namespace is mapped onto. It must exist, with a uid and a
@@ -315,16 +302,6 @@ pub struct Flags {
     /// `--container-bin`.
     #[arg(long, value_name = "PATH")]
     pub actions_cgroup: Option<PathBuf>,
-    /// Sends, in each heartbeat, the busy CPU and the CPU pressure of the whole host for each
-    /// second of the beat's window (at most 16 values of each, newest last): the agent reads
-    /// `/proc/stat` and `/proc/pressure/cpu` every second and the heartbeat carries the rates
-    /// between those readings. Telemetry only; the lease server lists it on `GET /v1/hosts`
-    /// and nothing places or sizes by it. The readings ride with the load, so without an
-    /// actions control group (no `--actions-cgroup` for the container engine, none delegated
-    /// for crun) there is no load and the flag does nothing; a host with no
-    /// `/proc/pressure/cpu` sends the busy values alone. Off by default.
-    #[arg(long)]
-    pub host_second_samples: bool,
     /// The absolute path of a program that checks the host's GPU container toolkit, run
     /// once at start when the host offers a GPU. Exit 0 makes the hello report
     /// `gpu-toolkit`; any other outcome (another exit status, no output within the probe
@@ -421,12 +398,9 @@ impl Flags {
             ("--allow-host-jobs", self.allow_host_jobs),
             ("--allow-fuse-jobs", self.allow_fuse_jobs),
             ("--cpu-ceiling", self.cpu_ceiling.is_some()),
-            ("--cpu-series", self.cpu_series),
-            ("--memory-series", self.memory_series),
             ("--watch-dir", !self.watch_dirs.is_empty()),
             ("--settle-ms", self.settle_ms.is_some()),
             ("--taint-recheck-ms", self.taint_recheck_ms.is_some()),
-            ("--host-second-samples", self.host_second_samples),
             ("--egress", self.egress.is_some()),
             ("--egress-allow", !self.egress_allow.is_empty()),
             ("--egress-dns", !self.egress_dns.is_empty()),
@@ -577,7 +551,8 @@ pub(crate) fn check(
     let usage = |text: String| Failure::Usage(text);
     if cli.no_jobs {
         // An agent that runs no job takes no flag of a runtime that would run them.
-        return match first(os.given().into_iter().chain(cli.providers.given())) {
+        let given = os.given().into_iter().chain(cli.providers.given());
+        return match first(given.chain(cli.samples.given())) {
             Some(flag) => Err(usage(format!(
                 "{flag}: not with --no-jobs (an agent that runs no job)"
             ))),
@@ -756,14 +731,14 @@ pub(crate) fn jobs(
         container: crun.or(from_flags).map(|settings| {
             settings
                 .with_cpu_ceiling(os.cpu_ceiling)
-                .with_cpu_series(os.cpu_series)
-                .with_memory_series(os.memory_series)
+                .with_cpu_series(cli.samples.cpu_series)
+                .with_memory_series(cli.samples.memory_series)
         }),
         layout,
         egress,
         settle: crate::lifecycle::settle(os.settle_ms)?,
         taint_recheck: taint::recheck_every(os.taint_recheck_ms)?,
-        host_second_samples: os.host_second_samples,
+        host_second_samples: cli.samples.host_second_samples,
         allow_host_jobs: os.allow_host_jobs,
         allow_fuse_jobs: os.allow_fuse_jobs,
         providers: MountProviders::from_flags(
@@ -882,12 +857,15 @@ pub(crate) fn runtime(
 }
 
 /// The post-job checks of a backend's jobs, and the cgroup directory the usage of the leases
-/// is read from (or why there is none).
-pub(crate) type Checks = (Box<dyn CheckHook>, Result<String, &'static str>);
+/// is read from, as the sampler of its files (or why there is none).
+pub(crate) type Checks = (
+    Box<dyn CheckHook>,
+    Result<Box<dyn NodeSampler>, &'static str>,
+);
 
 /// The post-job checks of `backend`'s jobs, which watch `watch` and wait `settle` for the host
-/// to settle; and the cgroup directory the usage of the leases is read from (or why there is
-/// none).
+/// to settle; and the sampler of the cgroup directory the usage of the leases is read from, over
+/// the machine's cgroup files (or why there is none).
 ///
 /// # Errors
 ///
@@ -906,7 +884,9 @@ pub(crate) fn checks(
         Some(_) => integrity,
         None => integrity.with_slots(settings.slot_ids(0).0),
     };
-    let actions = settings.actions_cgroup().map(str::to_owned);
+    let actions = settings
+        .actions_cgroup()
+        .map(|dir| Box::new(Sampler::new(machine.cgroup_files(), dir)) as Box<dyn NodeSampler>);
     Ok((Box::new(integrity), actions.ok_or(NO_ACTIONS_CGROUP)))
 }
 

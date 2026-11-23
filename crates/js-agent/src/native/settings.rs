@@ -17,6 +17,7 @@ use super::put::PutConfig;
 use crate::bundle::Placer;
 use crate::logs::{DEFAULT_FILE_CAP, LogPlan};
 use crate::mac_accounts::Slots;
+use crate::mac_usage::Series;
 use crate::xcode::Xcode;
 
 /// Where the account pool makes its accounts' homes: the one value `--native-homes` takes.
@@ -77,6 +78,8 @@ pub struct NativeSettings {
     logs: LogPlan,
     /// The put ingest runs' outputs are committed to (`native/put.rs`).
     put: Option<PutConfig>,
+    /// The series each run records (`--cpu-series`, `--memory-series`).
+    series: Series,
 }
 
 impl NativeSettings {
@@ -217,6 +220,7 @@ impl NativeSettings {
             xcodes: Vec::new(),
             logs: LogPlan::new(DEFAULT_FILE_CAP),
             put: None,
+            series: Series::default(),
         }))
     }
 
@@ -284,6 +288,18 @@ impl NativeSettings {
     #[must_use]
     pub fn put(&self) -> Option<&PutConfig> {
         self.put.as_ref()
+    }
+
+    /// The same settings with each run recording the series `series` names.
+    #[must_use]
+    pub fn with_series(self, series: Series) -> Self {
+        Self { series, ..self }
+    }
+
+    /// The series each run of the runtime these settings make records.
+    #[must_use]
+    pub fn series(&self) -> Series {
+        self.series
     }
 
     /// The same settings with `file_cap` (`--log-file-cap`) as the most bytes of each log file

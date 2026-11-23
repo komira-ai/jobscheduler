@@ -12,9 +12,9 @@ use std::rc::Rc;
 use js_mac_pool::seatbelt::SandboxInit;
 use js_testkit::dir::TestDir;
 
-use super::{JobChild, SuperviseHost, SystemHost, supervise};
+use super::{JobChild, Reaped, SuperviseHost, SystemHost, supervise};
 use crate::mac_supervisor::record::{
-    EXIT, Ended, ExitRecord, READY, Ready, Records, Step, parse_exit, parse_ready,
+    EXIT, Ended, ExitRecord, JobRusage, READY, Ready, Records, Step, parse_exit, parse_ready,
 };
 use crate::mac_supervisor::spec::tests::spec;
 use crate::mac_supervisor::{SuperviseSpec, status};
@@ -121,6 +121,12 @@ impl SuperviseHost for Fake {
     }
 }
 
+/// What the fake host's job reports it used when it is waited for.
+const USED: JobRusage = JobRusage {
+    cpu_usec: 1_500_000,
+    max_rss_bytes: 3 << 20,
+};
+
 /// The fake host's job.
 struct FakeJob {
     log: Log,
@@ -133,12 +139,15 @@ impl JobChild for FakeJob {
         4321
     }
 
-    fn wait(&mut self) -> io::Result<ExitStatus> {
+    fn wait(&mut self) -> io::Result<Reaped> {
         self.log.borrow_mut().push("wait".to_owned());
         if self.fail == Some("wait") {
             return Err(io::Error::other("wait refused"));
         }
-        Ok(ExitStatus::from_raw(self.status))
+        Ok(Reaped {
+            status: ExitStatus::from_raw(self.status),
+            usage: USED,
+        })
     }
 
     fn kill_group(&mut self) -> io::Result<()> {
@@ -208,6 +217,7 @@ fn supervise_runs_the_steps_in_order() {
         ended: Ended::Exited(0),
         job_pid: Some(4321),
         asid: Some(77),
+        usage: Some(USED),
     };
     assert_eq!(exit, Some(ended));
     assert_eq!(
@@ -271,6 +281,7 @@ fn a_failing_step_ends_the_start() {
             },
             job_pid: None,
             asid: None,
+            usage: None,
         };
         assert_eq!(exit, Some(want), "{fail}");
         let calls = host.calls();
@@ -330,6 +341,7 @@ fn failures_after_the_job_started_are_reported() {
         },
         job_pid: Some(4321),
         asid: Some(77),
+        usage: None,
     };
     assert_eq!(exit, Some(want));
     assert_eq!(
@@ -404,8 +416,9 @@ fn the_job_status_and_setup_failure_are_told_apart() {
 
 /// The real host starts the program in a process group of its own and waits for it; a job
 /// that stops itself is killed with its group and reads as killed by signal 9; a program that
-/// does not exist is not started. Catches a wait that misreads the status, and a kill that
-/// misses the job.
+/// does not exist is not started; a job reaped once cannot be waited for again. Catches a wait
+/// that misreads the status, a kill that misses the job, and a second wait that would read
+/// another process's end.
 #[test]
 fn the_system_host_starts_waits_for_and_kills_the_job() {
     let (_dir, records) = scratch("system-job");
@@ -416,11 +429,13 @@ fn the_system_host_starts_waits_for_and_kills_the_job() {
     let mut job = SystemHost.spawn(&shell("exit 7")).unwrap();
     let pid = job.pid();
     assert!(pid > 0);
-    assert_eq!(job.wait().unwrap().code(), Some(7));
+    assert_eq!(job.wait().unwrap().status.code(), Some(7));
+    let again = job.wait().unwrap_err();
+    assert_eq!(again.raw_os_error(), Some(libc::ECHILD));
 
     let mut job = SystemHost.spawn(&shell("kill -STOP $$")).unwrap();
     job.kill_group().unwrap();
-    assert_eq!(job.wait().unwrap().signal(), Some(9));
+    assert_eq!(job.wait().unwrap().status.signal(), Some(9));
 
     let absent = SuperviseSpec {
         program: records.join("absent").display().to_string(),
@@ -428,6 +443,32 @@ fn the_system_host_starts_waits_for_and_kills_the_job() {
     };
     assert!(SystemHost.spawn(&absent).is_err());
     assert!(!SystemHost.is_root(), "the tests run as an ordinary user");
+}
+
+/// The real host's wait says what the job used, its descendants it waited for included: a job
+/// that waits for a child which burns CPU and fills memory reports at least the memory the
+/// child held and some CPU. The child's work is a fixed amount, not a time, and nothing is
+/// asserted of how long it took. Catches a wait that reports none of the CPU or the memory,
+/// the descendants' left out, and a resident set read in the wrong unit (KiB taken for bytes
+/// reads 1024 times too small).
+#[test]
+fn the_system_host_s_wait_reports_what_the_job_and_its_children_used() {
+    let (_dir, records) = scratch("system-usage");
+    // The child holds 64 MiB of text in a variable (a resident set of at least that) and
+    // counts to 200000: work the kernel times as CPU, whatever the speed of the host. The job
+    // waits for it.
+    let child = "v=$(head -c 67108864 /dev/zero | tr '\\0' a); i=0; \
+                 while [ $i -lt 200000 ]; do i=$((i+1)); done; [ ${#v} -gt 0 ]";
+    let job = SuperviseSpec {
+        args: ["-c", "sh -c \"$1\"; exit 0", "job", child]
+            .map(str::to_owned)
+            .to_vec(),
+        ..spec(&records)
+    };
+    let reaped = SystemHost.spawn(&job).unwrap().wait().unwrap();
+    assert_eq!(reaped.status.code(), Some(0));
+    assert!(reaped.usage.cpu_usec > 0, "{:?}", reaped.usage);
+    assert!(reaped.usage.max_rss_bytes >= 64 << 20, "{:?}", reaped.usage);
 }
 
 /// The real host's records are the files of [`Records`], written through it. Catches a host
@@ -445,6 +486,7 @@ fn the_system_host_writes_the_records_it_opened() {
         ended: Ended::Exited(3),
         job_pid: Some(12),
         asid: None,
+        usage: Some(USED),
     };
     SystemHost.write_exit(&mut held, &exit).unwrap();
     let text = |name: &str| fs::read_to_string(records.join(name)).unwrap();

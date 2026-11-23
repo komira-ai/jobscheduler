@@ -6,15 +6,15 @@ use std::time::Duration;
 
 use js_elastic::SchedulerId;
 use js_jobs::Retention;
-use js_sched_placer::sizes::ColdSize;
+use js_sched_placer::sizes::{ColdMemoryOn, ColdSize};
 
 use super::{Load, Section};
 use crate::config::{
     BootMode, CpuSlack, DEFAULT_LEASE_SECS, DEFAULT_RECHECK_MS, DispatchTimes, FeedRetention,
     JOB_FEED_RETENTION_MUST, JOB_RETENTION_MUST, JobListen, Limits, MAX_JOB_WALL_MUST,
     MOST_LEASE_SECS, MOST_RECHECK_MS, MetricsListen, Placement, ReadyListen, TlsFiles, Token,
-    not_loopback, not_private, parse_job_feed_retention, parse_job_retention, parse_max_job_wall,
-    parse_token,
+    cold_entry, not_loopback, not_private, parse_job_feed_retention, parse_job_retention,
+    parse_max_job_wall, parse_token,
 };
 use crate::error::StartupError;
 use crate::job_store::JobStoreSetup;
@@ -51,6 +51,7 @@ const SERVER_KEYS: &[&str] = &[
     "cpu_slack",
     "cold_cpu_millis",
     "cold_memory_bytes",
+    "cold_memory_bytes_on",
     "usage_db",
     "usage_off",
     "profile_store_bytes",
@@ -152,6 +153,7 @@ pub(crate) struct AgentKeys {
     estimate_feed: Option<bool>,
     cpu_slack: Option<CpuSlack>,
     cold: ColdSize,
+    cold_on: ColdMemoryOn,
     job_listen: Option<SocketAddr>,
 }
 
@@ -192,6 +194,12 @@ impl AgentKeys {
     /// default (22 cores and 4 GiB, [`ColdSize::default`]).
     pub(crate) fn cold(&self) -> ColdSize {
         self.cold
+    }
+
+    /// The cold memory of the jobs of each operating system `cold_memory_bytes_on` names, in
+    /// place of `cold_memory_bytes`; none when the file gives no such table.
+    pub(crate) fn cold_memory_on(&self) -> ColdMemoryOn {
+        self.cold_on.clone()
     }
 
     /// Where the job service is served, when the file turns it on.
@@ -272,6 +280,7 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
         estimate_feed: s.boolean("estimate_feed")?,
         cpu_slack: read_cpu_slack(&mut s)?,
         cold: read_cold(&mut s)?,
+        cold_on: read_cold_on(&mut s)?,
         job_listen: s.address("job_listen")?,
     };
     let usage = read_usage(&mut s)?;
@@ -529,6 +538,25 @@ fn read_cold(s: &mut Section) -> Result<ColdSize, StartupError> {
     })
 }
 
+/// `cold_memory_bytes_on`: a table of each operating system's cold memory, its keys the names
+/// as jobs give them (`macos = 4294967296`), its values whole numbers of bytes from 1 GiB (the
+/// rules of `--cold-memory-bytes-on`). Left out, none.
+fn read_cold_on(s: &mut Section) -> Result<ColdMemoryOn, StartupError> {
+    let key = "cold_memory_bytes_on";
+    let Some(table) = s.table(key)? else {
+        return Ok(ColdMemoryOn::default());
+    };
+    let mut entries = Vec::new();
+    for (os, value) in table {
+        let bytes = value
+            .as_integer()
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or_else(|| s.fail(key, &format!("{os}: must be a whole number of bytes")))?;
+        entries.push(cold_entry(&os, bytes).map_err(|why| s.fail(key, &why))?);
+    }
+    Ok(ColdMemoryOn::new(entries.into_iter().collect()))
+}
+
 /// The usage keys. The rules are the flags': a budget and a retention of at least 1, and no
 /// `usage_db` beside `usage_off = true`.
 fn read_usage(s: &mut Section) -> Result<UsageKeys, StartupError> {
@@ -659,6 +687,56 @@ mod tests {
             ),
         ] {
             assert_eq!(cold_of(extra), Err(said.to_owned()), "{extra}");
+        }
+    }
+
+    /// The cold memory of each operating system the `[server]` table with its required keys
+    /// and `extra` gives.
+    fn cold_on_of(extra: &str) -> Result<ColdMemoryOn, String> {
+        let required = "state_file = \"js\"\nboot = \"initialise\"\nclient_token_file = \"t\"";
+        let table: toml::Table = format!("{required}\n{extra}").parse().unwrap();
+        let server = read_server(table).map_err(|err| err.to_string())?;
+        Ok(server.agents.cold_memory_on())
+    }
+
+    /// Asserts that `cold_memory_bytes_on` is read as a table of each operating system's
+    /// bytes, from the least (1 GiB), and that left out it names none; and that a value that is
+    /// not a whole number of bytes, one under the least, an empty name or a key that is not a
+    /// table is refused at start naming the key and what is wrong. Catches a table that is not
+    /// read, an entry under the estimator's least memory, and a name no job could give.
+    #[test]
+    fn the_cold_memory_of_each_os_is_read_and_refused_out_of_range() {
+        assert_eq!(cold_on_of(""), Ok(ColdMemoryOn::default()));
+        let both = "cold_memory_bytes_on = { macos = 4294967296, linux = 1073741824 }";
+        let entries = [("macos".to_owned(), 4 << 30), ("linux".to_owned(), 1 << 30)];
+        assert_eq!(
+            cold_on_of(both),
+            Ok(ColdMemoryOn::new(entries.into_iter().collect()))
+        );
+        let key = "server.cold_memory_bytes_on";
+        for (extra, said) in [
+            (
+                "cold_memory_bytes_on = { macos = \"4GiB\" }",
+                format!("{key}: macos: must be a whole number of bytes"),
+            ),
+            (
+                "cold_memory_bytes_on = { macos = -1 }",
+                format!("{key}: macos: must be a whole number of bytes"),
+            ),
+            (
+                "cold_memory_bytes_on = { macos = 1073741823 }",
+                format!("{key}: macos: 1073741823 is below the least, 1073741824 (1 GiB)"),
+            ),
+            (
+                "cold_memory_bytes_on = { \"\" = 4294967296 }",
+                format!("{key}: the operating system is empty"),
+            ),
+            (
+                "cold_memory_bytes_on = 4294967296",
+                format!("{key}: must be a table"),
+            ),
+        ] {
+            assert_eq!(cold_on_of(extra), Err(said), "{extra}");
         }
     }
 

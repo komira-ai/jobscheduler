@@ -33,11 +33,13 @@
 //!   (`docs/design/sizing.md`, 7.8).
 //! - **Cold.** A class with no history of its own, whose client has no fresh run either, books
 //!   the cold size ([`ColdSize`]): the server's `cold_cpu_millis` and `cold_memory_bytes`, which
-//!   default to [`DEFAULT_COLD_CPU_MILLIS`] (22 cores) and [`DEFAULT_COLD_MEMORY_BYTES`] (4 GiB);
-//!   its CPU never more than a quarter of the most cores a known host has (the most any class
-//!   books, so that the first run of an unknown class has room for the cores it uses), its memory
-//!   never more than the most a known host has ([`Bounds`] of [`bounds_of`]) and at least the
-//!   class's memory floor.
+//!   default to [`DEFAULT_COLD_CPU_MILLIS`] (22 cores) and [`DEFAULT_COLD_MEMORY_BYTES`] (4 GiB),
+//!   and for a job whose `os` the server names in `cold_memory_bytes_on` ([`ColdMemoryOn`]) that
+//!   operating system's memory in place of `cold_memory_bytes` (a Mac's jobs need not book what a
+//!   build host's do); its CPU never more than a quarter of the most cores a known host has (the
+//!   most any class books, so that the first run of an unknown class has room for the cores it
+//!   uses), its memory never more than the most a known host has ([`Bounds`] of [`bounds_of`])
+//!   and at least the class's memory floor.
 //! - **Too large.** A class whose own runs ask for the most bookable memory a host has or more
 //!   books all of that memory: it waits for a host with nothing else on it.
 //! - **CPU.** The learned CPU of the class, else of its fallback class, else of the client's
@@ -201,6 +203,28 @@ impl ColdSize {
     }
 }
 
+/// The cold memory the server sets for the jobs of each operating system it names
+/// (`--cold-memory-bytes-on`, `server.cold_memory_bytes_on`), in bytes, in place of
+/// [`ColdSize::memory_bytes`]: keyed by the `os` a job's constraints name, as it names it (such
+/// as `macos`). A job that names no `os`, or one with no entry, books the server's cold memory.
+/// Each is held at the most bookable memory a known host has, as the server's is.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ColdMemoryOn(BTreeMap<String, u64>);
+
+impl ColdMemoryOn {
+    /// The cold memory of each operating system `entries` names, in bytes.
+    #[must_use]
+    pub fn new(entries: BTreeMap<String, u64>) -> Self {
+        Self(entries)
+    }
+
+    /// The cold memory set for the jobs of `os`, if any.
+    #[must_use]
+    pub fn of(&self, os: &str) -> Option<u64> {
+        self.0.get(os).copied()
+    }
+}
+
 pub use js_jobs::SizedFrom;
 
 /// The history of every class the server has seen, and the job allocations live at the last
@@ -209,6 +233,8 @@ pub use js_jobs::SizedFrom;
 pub struct JobSizes {
     /// What a class with no estimate books.
     cold: ColdSize,
+    /// The cold memory of the jobs of an operating system the server names.
+    cold_on: ColdMemoryOn,
     summaries: Summaries,
     /// Each job whose allocation was live at the last pass, with what it booked.
     live: BTreeMap<JobId, Booked>,
@@ -247,6 +273,16 @@ impl JobSizes {
         Self {
             cold,
             ..Self::default()
+        }
+    }
+
+    /// The same sizes, a class with no estimate of a job whose `os` is one `on` names booking
+    /// that operating system's cold memory in place of the server's.
+    #[must_use]
+    pub fn with_cold_memory_on(self, on: ColdMemoryOn) -> Self {
+        Self {
+            cold_on: on,
+            ..self
         }
     }
 
@@ -356,8 +392,21 @@ impl JobSizes {
         // The base and the floor stay within the host.
         match fallback {
             Some(memory) => (cpu, memory.max(floor), SizedFrom::Fallback),
-            None => (cpu, bounds.default_memory.max(floor), SizedFrom::Cold),
+            None => (
+                cpu,
+                self.cold_memory(job, bounds).max(floor),
+                SizedFrom::Cold,
+            ),
         }
+    }
+
+    /// The cold memory `job` books under `bounds`: the one set for its `os` ([`ColdMemoryOn`])
+    /// held at the most bookable memory a host has, else the server's (held there already).
+    fn cold_memory(&self, job: &JobRecord, bounds: &Bounds) -> u64 {
+        let os = job.spec.constraints.os.as_deref().unwrap_or("");
+        self.cold_on.of(os).map_or(bounds.default_memory, |memory| {
+            memory.min(bounds.host_memory)
+        })
     }
 
     /// The CPU `job` books on `day` under `bounds`: the learned CPU of its own class, else of

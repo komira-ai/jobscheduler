@@ -36,7 +36,7 @@ use js_types::{HostId, Shape};
 
 use crate::map;
 use crate::room::Room;
-use crate::sizes::{ColdSize, JobSizes};
+use crate::sizes::{ColdMemoryOn, ColdSize, JobSizes};
 
 #[path = "jobs.rs"]
 pub mod jobs;
@@ -71,7 +71,7 @@ pub struct Settings {
     /// The share of each host's memory the engine may book (`memory_schedulable_percent`).
     pub memory: MemoryPercent,
     /// What a job that books nothing books while its class has no estimate
-    /// (`server.cold_cpu_millis`, `server.cold_memory_bytes`); by default 4 cores and 16 GiB.
+    /// (`server.cold_cpu_millis`, `server.cold_memory_bytes`); by default 22 cores and 4 GiB.
     pub cold: ColdSize,
 }
 
@@ -150,6 +150,14 @@ impl Engine {
             #[cfg(any(test, feature = "test-support"))]
             job_rounds: 0,
         }
+    }
+
+    /// The same engine, a job of an operating system `on` names booking that cold memory while
+    /// its class has no estimate, in place of [`Settings::cold`]'s ([`ColdMemoryOn`]).
+    #[must_use]
+    pub fn with_cold_memory_on(mut self, on: ColdMemoryOn) -> Self {
+        self.sizes = std::mem::take(&mut self.sizes).with_cold_memory_on(on);
+        self
     }
 
     /// Holds the walks that follow to `room`, the ledger a pass builds ([`Room::of`]).
