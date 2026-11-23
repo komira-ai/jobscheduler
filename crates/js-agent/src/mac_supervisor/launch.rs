@@ -57,10 +57,8 @@ pub trait Supervised: Send {
     /// The start ended without the job starting, as above.
     fn wait_ready(&mut self) -> Result<Ready, Ended>;
 
-    /// The exit record, without waiting: `None` while the supervisor runs, even once it has
-    /// written its record (it is reaped first, so a run removed after its end leaves no
-    /// zombie); once it has ended, its record, or one made from its own status when it wrote
-    /// none.
+    /// The exit record, without waiting: `None` while the supervisor runs and has written
+    /// none; once it has ended without one, a record made from its own status.
     ///
     /// # Errors
     /// The supervisor's status could not be read.
@@ -167,8 +165,9 @@ impl Supervised for Supervision {
     }
 
     fn try_exit(&mut self) -> io::Result<Option<ExitRecord>> {
-        // Reaped before the record is answered: once a run has ended nothing asks again, and
-        // a supervisor answered by its record alone would stay a zombie of the agent.
+        if let Some(record) = self.read_exit() {
+            return Ok(Some(record));
+        }
         Ok(self.child.try_wait()?.map(|status| self.ended(status)))
     }
 

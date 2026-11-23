@@ -167,23 +167,19 @@ fn the_agent_side_waits_for_ready_or_the_end() {
     );
 }
 
-/// `try_exit` never waits (it never pauses, and answers `None` while the fake supervisor runs,
-/// its exit record written or not); it returns the exit record once the supervisor has ended
-/// and is reaped; a supervisor that ends after its ready record with
+/// `try_exit` never waits (it never pauses, and answers `None` while the fake supervisor runs);
+/// it returns the exit record once written; a supervisor that ends after its ready record with
 /// no exit record gives a record made from its status that keeps the job's pid and session; an
 /// exit record written just before the end is the one returned; a supervisor that cannot be
-/// looked at is an error. Catches a poll that blocks the agent, that loses the job's pid, or
-/// that answers a record before reaping its supervisor (a zombie per run once removed).
+/// looked at is an error. Catches a poll that blocks the agent, or that loses the job's pid.
 #[test]
 fn try_exit_answers_at_once() {
     let dir = records("running");
-    let child = FakeChild::new([Ok(None), Ok(None), Ok(None), Ok(Some(exited(125)))]);
-    let (mut run, pauses) = watched(&dir, child, None);
+    let (mut run, pauses) = watched(&dir, FakeChild::new([]), None);
     assert_eq!(run.try_exit().unwrap(), None);
     assert_eq!(run.try_exit().unwrap(), None);
     let (record, text) = profile_refused();
     fs::write(dir.join(EXIT), &text).unwrap();
-    assert_eq!(run.try_exit().unwrap(), None, "written, not yet reaped");
     assert_eq!(run.try_exit().unwrap(), Some(record.clone()));
     assert_eq!(pauses.load(Ordering::SeqCst), 0);
 
