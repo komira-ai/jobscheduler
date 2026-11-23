@@ -456,8 +456,10 @@ fn the_put_flags_go_through_the_mac_agents_start() {
     fs::create_dir_all(dir.path("put")).unwrap();
     fs::write(dir.path("not-a-dir"), "").unwrap();
     let put = dir.path("put").display().to_string();
+    // The native flags make their directories once; each run of the agent reuses them.
+    let base = native_flags(&dir);
     let with = |extra: &[&str]| {
-        let mut given = native_flags(&dir);
+        let mut given = base.clone();
         given.extend(extra.iter().map(|flag| (*flag).to_owned()));
         hello_on(&mac_host(), &given, welcome(1))
     };
