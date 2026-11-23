@@ -81,9 +81,12 @@
 //!
 //! # Stops
 //!
-//! [`Runtime::stop`] sends `SIGTERM` to the job's process group, so a job may flush, and the
-//! first poll after the grace ends the run's processes. The lifecycle holds the wall limit and
-//! the silence bound (`--silence-stop`) and calls the stop.
+//! [`Runtime::stop`] sends `SIGTERM` to the job's process group, so a job may flush; a second
+//! stop moves nothing. The first poll after the grace that finds the job running sweeps the
+//! run's processes by the job's audit session and the account's uid (`native/end.rs`), and
+//! every later poll sweeps again until a sweep leaves none; only then is the job's end read
+//! (`native/remove.rs`). The lifecycle holds the wall limit and the silence bound
+//! (`--silence-stop`) and calls the stop.
 //!
 //! The environment of a run is the agent's (the body's own `env`, or the bundle's rules
 //! applied to it, then `TMPDIR` and `JS_FILES_DIR`) with a job start's environment
@@ -149,6 +152,7 @@ use crate::lifecycle::{
 use crate::logs::LiveLogs;
 use crate::mac_accounts::{Pool, Retired};
 use crate::mac_supervisor::Launcher;
+use crate::mac_sweep::{MacTable, ProcessTable};
 
 pub use accounts::Accounts;
 pub use files::HandOver;
@@ -230,6 +234,8 @@ pub struct NativeRuntime {
     now_ms: Clock,
     /// Whether each run's supervisor opens an audit session of its own (which needs root).
     new_session: bool,
+    /// The process table a run's processes are swept from (`native/end.rs`).
+    table: Arc<dyn ProcessTable + Send + Sync>,
     /// The account the last removal retired, and what its retirement showed.
     last_retired: Option<(String, Retired)>,
     /// What finds the lent account's own per-user temporary and cache folders, which its
@@ -323,6 +329,7 @@ impl NativeRuntime {
             logs: None,
             now_ms: system_clock(),
             new_session: true,
+            table: Arc::new(MacTable),
             last_retired: None,
             own_folders: None,
         })
@@ -371,6 +378,14 @@ impl NativeRuntime {
             new_session: false,
             ..self
         }
+    }
+
+    /// The same runtime, sweeping a run's processes from `table` in place of the Mac's own.
+    /// For tests, whose runs are the test user's own processes; an agent never calls it.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_process_table(self, table: Arc<dyn ProcessTable + Send + Sync>) -> Self {
+        Self { table, ..self }
     }
 
     /// The same runtime, giving a run's files to its account through `hand_over` in place of
