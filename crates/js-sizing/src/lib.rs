@@ -113,12 +113,37 @@
 //! * **Storage.** [`Summary::encode`] writes a versioned, checksummed, fixed-size
 //!   record (counters and days beyond sane bounds are corrupt); [`Summary::decode`] returns `None` for anything else, and a key whose row
 //!   does not decode starts cold.
+//!
+//! # Profiles
+//!
+//! A [`Profile`] learns what the runs of one class used over their first two minutes and
+//! after. It keeps the class's last [`MAX_RUNS`] runs, each as 2 s slots for ages 0 to
+//! 128 s (a CPU slot is the mean of its seconds, a memory slot the largest) and the sum
+//! and seconds of the run past 128 s. Nothing else is stored: every statistic (the
+//! level, a slot's mean and 90th percentile, the tail, the histogram of all samples in
+//! [`BUCKETS`] log-spaced buckets) is computed on demand, with each run weighted by the
+//! age of its end, halving every six hours ([`HALF_LIFE_MS`]). All arithmetic is integer.
+//!
+//! [`Profile::check_and_learn`] first checks a run against the profile as it stands. With
+//! at least [`MIN_RUNS`] kept runs it scores the run twice, in unit-seconds: against the
+//! curve (a slot's mean when [`MIN_SLOT_RUNS`] runs reached it, else the level) and
+//! against the flat level. The last [`CHECK_RUNS`] scores are the profile's window, and
+//! the profile is [`Profile::shaped`] when the window is full and the curve's error is at
+//! most [`FIT_PERMILLE`] per mille of the flat level's. Then it learns the run: a clean
+//! run always, an unclean one (slowed by contention or held at a ceiling) only when its
+//! mean is above the level, so it can only raise its class. [`series_agrees`] says
+//! whether a recorded CPU series matches the run's exact CPU time within 5%.
+//!
+//! A kept run is its slots (4 bytes each, at most 64), a few counters and its end time:
+//! about 330 bytes. A profile of 64 runs is about 21 KiB, and the self-check
+//! window adds 16 pairs of counters.
 
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
 #![forbid(unsafe_code)]
 
 mod codec;
 mod key;
+mod profile;
 mod run;
 mod store;
 mod summary;
@@ -126,6 +151,11 @@ mod summary;
 mod tests;
 
 pub use key::{Basis, Cfg, Day, Instance, Key, Level, PlatformClass, Shape};
+pub use profile::{
+    BUCKETS, CHECK_RUNS, CPU_UNIT, Checked, Combine, FIT_PERMILLE, HALF_LIFE_MS, MAX_RUNS,
+    MEMORY_UNIT, MIN_RUNS, MIN_SLOT_RUNS, Profile, RunSeries, SLOT_SECS, START_SLOTS, Unit, Window,
+    series_agrees,
+};
 pub use run::{Bounds, CpuSample, Discard, Hint, Observed, Outcome, Run, memory_max};
 pub use store::{
     CpuCounts, Estimate, Fallback, MAX_KEYS, MAX_KEYS_PER_INSTANCE, MAX_PINNED, STALE_DAYS,

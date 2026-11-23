@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_registry::PoolConfig;
-use js_sched_placer::sizes::ColdSize;
+use js_sched_placer::sizes::{ColdSize, Curves};
 use js_types::ProviderId;
 
 use super::{Cli, Config, CpuSlack, DispatchTimes, LiveClients, check_pool, listen};
@@ -41,6 +41,9 @@ pub(crate) struct AgentSetup {
     /// its fallback class nor its client has a run (each absent one its default,
     /// 22 cores and 4 GiB).
     pub(crate) cold: ColdSize,
+    /// `--placement-curves`, or `server.placement_curves`: whether the engine learns profiles
+    /// in shadow.
+    pub(crate) curves: Curves,
     /// `server.max_lease_wall`: the one up to which the placement engine trusts a wall time
     /// for backfill.
     pub(crate) max_lease_wall: Option<Duration>,
@@ -177,6 +180,7 @@ pub(super) fn agents(cli: &Cli, clients: &LiveClients) -> Result<Box<AgentSetup>
             cpu_millis: cli.cold_cpu_millis,
             memory_bytes: cli.cold_memory_bytes,
         },
+        curves: cli.placement_curves,
         max_lease_wall: None,
         job_limits: JobLimits::default(),
         jobs: listen::job_store(cli),
