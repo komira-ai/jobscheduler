@@ -29,12 +29,13 @@ const SETUID_DIRS: [&str; 5] = ["/bin", "/sbin", "/usr/bin", "/usr/sbin", "/usr/
 
 pub(crate) fn run(phase: &Phase) -> ExitCode {
     match prepare().and_then(|(who, tools, pins)| {
+        let reads = host::reads(&who);
         let host = Host {
             tools: &tools,
             who,
             ids: ids()?,
             writes: &host::writes,
-            reads: host::reads(),
+            reads,
             connect_limit: CONNECT_LIMIT,
             many: MANY,
             setuid_dirs: SETUID_DIRS.iter().map(PathBuf::from).collect(),

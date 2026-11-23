@@ -26,11 +26,24 @@ struct Made {
 fn make(prefix: &str, target: &Target, tag: &str) -> Made {
     let name = format!("{prefix}:{}", target.name);
     let shown = target.dir.display().to_string();
-    if !target.dir.is_dir() {
-        return Made {
-            line: Line::new(name, Outcome::NotApplicable).detail(format!("{shown} is absent")),
-            file: None,
-        };
+    // A place the job may not even look at answers as a refused write would: the profile's
+    // read denies (EPERM) or the modes of a folder above it (EACCES) keep the job out of it.
+    let absent = match fs::metadata(&target.dir) {
+        Ok(meta) if meta.is_dir() => None,
+        Ok(_) => Some(
+            Line::new(&name, Outcome::NotApplicable).detail(format!("{shown} is not a folder")),
+        ),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            Some(Line::new(&name, Outcome::NotApplicable).detail(format!("{shown} is absent")))
+        }
+        Err(err) => Some(Line::refused(
+            &name,
+            &err,
+            format!("cannot look at {shown}"),
+        )),
+    };
+    if let Some(line) = absent {
+        return Made { line, file: None };
     }
     let file = target.dir.join(marker_name(tag));
     // The file is empty: its name carries the tag, so nothing is written that could fail
@@ -266,6 +279,53 @@ mod tests {
         let left = leave(&target("home-launchagents", &absent), "t1");
         assert_eq!(left.outcome, Outcome::NotApplicable);
         assert!(!dir.join("Library").exists(), "nothing is made");
+    }
+
+    #[test]
+    fn a_place_that_cannot_be_looked_at_is_denied_not_absent() {
+        let dir = TestDir::under(std::env::temp_dir(), "files-unseen");
+        let closed = dir.join("closed");
+        let place = closed.join("home");
+        fs::create_dir_all(&place).unwrap();
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o000)).unwrap();
+        let root = rustix::process::geteuid().is_root();
+        let wrote = write(&target("other-home", &place), "t7");
+        let left = leave(&target("other-home", &place), "t7");
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o700)).unwrap();
+        // Root passes any mode, so it looks and writes; every other user is refused the look.
+        let want = [
+            format!(
+                "write:other-home: denied (EACCES); cannot look at {}",
+                place.display()
+            ),
+            format!("write:other-home: allowed; {}", place.display()),
+        ];
+        assert_eq!(wrote.to_string(), want[usize::from(root)]);
+        let want = [Outcome::Denied, Outcome::Allowed];
+        assert_eq!(left.outcome, want[usize::from(root)], "{left}");
+        assert_eq!(left.name, "leave:file:other-home");
+        let made = usize::from(place.join(marker_name("t7")).exists());
+        assert_eq!(
+            made,
+            usize::from(root),
+            "only a write that was allowed leaves a file"
+        );
+    }
+
+    #[test]
+    fn a_place_that_is_a_file_is_not_applicable_and_is_left_alone() {
+        let dir = TestDir::under(std::env::temp_dir(), "files-not-a-folder");
+        let plain = dir.join("plain");
+        fs::write(&plain, b"").unwrap();
+        let line = write(&target("users-shared", &plain), "t8");
+        assert_eq!(
+            line.to_string(),
+            format!(
+                "write:users-shared: n/a; {} is not a folder",
+                plain.display()
+            )
+        );
+        assert_eq!(fs::read_dir(&*dir).unwrap().count(), 1, "nothing is made");
     }
 
     #[test]
