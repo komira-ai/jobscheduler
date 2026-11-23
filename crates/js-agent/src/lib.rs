@@ -334,6 +334,7 @@ pub mod lifecycle;
 mod login;
 pub mod logs;
 pub mod mac_accounts;
+pub mod mac_put;
 pub mod mac_supervisor;
 pub mod mac_sweep;
 #[cfg(target_os = "macos")]

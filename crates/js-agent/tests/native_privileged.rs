@@ -53,6 +53,10 @@ use serde_json::json;
 /// The variable naming the directory the tests work in.
 const ROOT: &str = "JS_NATIVE_PRIV_ROOT";
 
+/// A run's output committed to the put ingest for real.
+#[cfg(target_os = "macos")]
+#[path = "native_privileged/put.rs"]
+mod put;
 /// The VM runtime for real; macOS only, as it boots a VM.
 #[cfg(target_os = "macos")]
 #[path = "native_privileged/vm.rs"]
