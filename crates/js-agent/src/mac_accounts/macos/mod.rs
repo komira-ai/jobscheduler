@@ -37,21 +37,9 @@ use super::host::{
 /// folder.
 pub fn own_folders(account: &Account, home: &Path) -> io::Result<Vec<PathBuf>> {
     let root = Path::new("/private/var/folders");
-    super::user_dirs::NAMES
-        .iter()
-        .map(|name| {
-            let command = ["/usr/bin/getconf".to_owned(), (*name).to_owned()];
-            let ran = AsAccount.run(account, home, &command)?;
-            if ran.code != Some(0) {
-                return Err(io::Error::other(format!(
-                    "getconf {name} as {}: {}",
-                    account.name,
-                    ran.stderr.trim()
-                )));
-            }
-            super::user_dirs::checked(&ran.stdout, root, account.uid)
-        })
-        .collect()
+    super::user_dirs::folders_via(account, root, |command| {
+        AsAccount.run(account, home, command)
+    })
 }
 
 /// The macOS host.

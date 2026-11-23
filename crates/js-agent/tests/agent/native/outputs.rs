@@ -189,6 +189,36 @@ fn an_output_over_the_cap_is_a_collection_failure_and_teardown_still_happens() {
     rig.rt.remove(&handle()).unwrap();
 }
 
+/// Asserts that a removal tried again after the account could not be retired does not copy
+/// the outputs a second time: the first removal copies `small`, the copy is then overwritten
+/// with a marker and the home's file is changed, and the second removal succeeds and leaves
+/// the marker as it was.
+///
+/// Catches: a collection that runs again on each removal, which would copy over the first
+/// copy (the marker would be replaced) or fail because the copy exists.
+#[test]
+fn a_removal_tried_again_does_not_copy_outputs_again() {
+    let declared = vec![output("small", OutputKind::File)];
+    let (mut rig, exec) = started("outputs-once", 1 << 20, declared);
+    let account = account_of(&rig);
+    fs::write(exec.join("small"), b"ok").unwrap();
+    rig.settle(&handle());
+    rig.accounts.keep_record(&account);
+    let first = rig.rt.remove(&handle()).unwrap_err();
+    assert!(
+        first.0.starts_with(&format!("account {account} (uid ")),
+        "{}",
+        first.0
+    );
+    assert_eq!(fs::read(collected(&rig).join("small")).unwrap(), b"ok");
+    fs::write(collected(&rig).join("small"), b"MARK").unwrap();
+    fs::write(exec.join("small"), b"changed").unwrap();
+    rig.accounts.free_record(&account);
+    rig.rt.remove(&handle()).unwrap();
+    assert_eq!(fs::read(collected(&rig).join("small")).unwrap(), b"MARK");
+    assert_eq!(journal(&rig), ["+ 7.0", "- 7.0"]);
+}
+
 /// Asserts that outputs the job did not make are not an error: a missing file, a missing
 /// directory and a file below a missing directory are each skipped, the removal succeeds
 /// and nothing is made below the scratch directory; and a run whose home is already gone
