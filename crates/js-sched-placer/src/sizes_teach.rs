@@ -129,7 +129,7 @@ impl SchedPlacer {
             .filter(|(job, booked)| sizes.observe(job, *booked))
             .count();
         for (job, booked) in &held.runs {
-            let _ = sizes.observe(job, *booked);
+            let _ = sizes.observe_logged(job, *booked, true);
         }
         taught
     }

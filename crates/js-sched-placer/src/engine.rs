@@ -39,7 +39,7 @@ use js_types::{HostId, Shape};
 
 use crate::map;
 use crate::room::Room;
-use crate::sizes::{ColdSize, JobSizes};
+use crate::sizes::{ColdSize, Curves, JobSizes};
 
 #[path = "jobs.rs"]
 pub mod jobs;
@@ -76,6 +76,9 @@ pub struct Settings {
     /// What a job that books nothing books while its class has no estimate
     /// (`server.cold_cpu_millis`, `server.cold_memory_bytes`); by default 4 cores and 16 GiB.
     pub cold: ColdSize,
+    /// Whether the history learns a CPU and a memory profile for each class
+    /// (`--placement-curves`); off by default. Placement is the same in both.
+    pub curves: Curves,
 }
 
 /// The scheduler form of a host: its capacity and the capabilities its node report gives.
@@ -146,7 +149,7 @@ impl Engine {
             whole_jobs: BTreeMap::new(),
             whole_settings: None,
             at_reading: BTreeMap::new(),
-            sizes: JobSizes::with_cold(settings.cold),
+            sizes: JobSizes::with_cold(settings.cold).with_curves(settings.curves),
             refused: refusals::Book::default(),
             whole_seq: 0,
             room: Room::default(),
