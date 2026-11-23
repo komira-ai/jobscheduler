@@ -36,9 +36,9 @@ use js_agent_wire::{
     Isolation, JobMount, MountMode, MountSource, NativeSpec, NetworkLevel, Propagation,
 };
 
-use super::{NativeFlags, NativeRuntime, NativeSettings, PfFlags, grant};
+use super::{NativeConfig, NativeFlags, NativeRuntime, NativeSettings, PfFlags, grant, proof};
 use crate::lifecycle::{
-    Body, JobFs, ProviderAnswer, ProviderCall, Providers as _, RunSpec, Runtime, Status,
+    Body, JobFs, ProviderAnswer, ProviderCall, Providers, RunSpec, Runtime, Status,
 };
 use crate::mac_supervisor::SystemLauncher;
 use crate::native_fs::MountRoot;
@@ -50,8 +50,8 @@ pub const VERB: &str = "__native-trees-proof";
 /// The pause between two polls.
 const PAUSE: Duration = Duration::from_millis(100);
 
-/// The longest wait for one provider call's answer.
-const CALL_GUARD: Duration = Duration::from_secs(120);
+/// The most asks of one provider call, a [`PAUSE`] apart (two minutes in production).
+const ASKS: u32 = 1200;
 
 /// The two runs, by id.
 const RUNS: [&str; 2] = ["trees-proof-a", "trees-proof-b"];
@@ -60,7 +60,7 @@ const RUNS: [&str; 2] = ["trees-proof-a", "trees-proof-b"];
 const TARGET: &str = "/work/.kbf-tree";
 
 /// The exit statuses.
-mod status {
+pub mod status {
     /// Both jobs exited 0, both removals retired their accounts, both sources were released.
     pub const OK: u8 = 0;
     /// A job, a removal or a release failed.
@@ -132,20 +132,63 @@ fn parse(words: &[OsString]) -> Result<Args, String> {
     Ok(args)
 }
 
-/// Runs the verb on `args` (the program name first, the verb second).
+/// What opens the mount providers of the verb, for the agent id and the provider (its name,
+/// socket and uid) its flags gave.
+pub type ProvidersOpener<'a> =
+    &'a dyn Fn(&str, &[(String, PathBuf, u32)]) -> std::io::Result<Box<dyn Providers>>;
+
+/// What the verb runs over: the runtime and the providers it opens, and the pause between
+/// two asks of a provider call not answered yet and between two polls of a job.
+pub struct Over<'a> {
+    /// Makes the runtime from the configuration the flags gave.
+    pub runtime: proof::Opener<'a>,
+    /// Makes the providers' client.
+    pub providers: ProvidersOpener<'a>,
+    /// Waits a moment.
+    pub pause: &'a dyn Fn(),
+}
+
+/// Runs the verb on `args` (the program name first, the verb second), over the production
+/// runtime and the real providers' client.
 pub fn run(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> ExitCode {
-    let parsed = match parse(args.get(2..).unwrap_or_default()) {
-        Ok(parsed) => parsed,
-        Err(why) => {
-            let _ = writeln!(err, "js-agent: {VERB}: {why}");
-            return ExitCode::from(status::USAGE);
-        }
-    };
     let _ = tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_ansi(false)
         .try_init();
-    ExitCode::from(prove(&parsed, out, err))
+    let providers = |agent: &str, sockets: &[(String, PathBuf, u32)]| {
+        ProviderClient::new(agent, sockets).map(|client| Box::new(client) as Box<dyn Providers>)
+    };
+    let over = Over {
+        runtime: &open_production,
+        providers: &providers,
+        pause: &|| std::thread::sleep(PAUSE),
+    };
+    run_with(args, out, err, &over)
+}
+
+/// [`run`] over `over`: how a test runs the verb over a pool, a launcher and providers of its
+/// own. The flags, the calls, the report and the exit status are the verb's.
+#[doc(hidden)]
+pub fn run_with(
+    args: &[OsString],
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    over: &Over<'_>,
+) -> ExitCode {
+    match parse(args.get(2..).unwrap_or_default()) {
+        Ok(parsed) => ExitCode::from(prove(&parsed, over, out, err)),
+        Err(why) => {
+            let _ = writeln!(err, "js-agent: {VERB}: {why}");
+            ExitCode::from(status::USAGE)
+        }
+    }
+}
+
+/// The production runtime over `config`: the real supervisor (this program) and the pool of
+/// `--accounts` on this Mac.
+fn open_production(config: NativeConfig) -> Result<NativeRuntime, String> {
+    let launcher = SystemLauncher::current().map_err(|why| format!("own path: {why}"))?;
+    NativeRuntime::open(Arc::new(launcher), config, 1).map_err(|why| why.0)
 }
 
 /// What [`prove`] needs that the command line must give.
@@ -175,9 +218,9 @@ fn given(args: &Args) -> Result<Given<'_>, String> {
     })
 }
 
-/// Opens the runtime, has both trees made, runs both jobs and releases the trees; the exit
-/// status.
-fn prove(args: &Args, out: &mut dyn Write, err: &mut dyn Write) -> u8 {
+/// Opens the runtime and the providers, has both trees made, runs both jobs and releases the
+/// trees; the exit status.
+fn prove(args: &Args, over: &Over<'_>, out: &mut dyn Write, err: &mut dyn Write) -> u8 {
     let given = match given(args) {
         Ok(given) => given,
         Err(why) => {
@@ -185,7 +228,7 @@ fn prove(args: &Args, out: &mut dyn Write, err: &mut dyn Write) -> u8 {
             return status::USAGE;
         }
     };
-    let mut runtime = match open(args, &given, out) {
+    let mut runtime = match open(args, &given, over.runtime, out) {
         Ok(runtime) => runtime,
         Err(why) => {
             let _ = writeln!(out, "open: {why}");
@@ -194,23 +237,28 @@ fn prove(args: &Args, out: &mut dyn Write, err: &mut dyn Write) -> u8 {
     };
     let (name, socket) = given.provider;
     let sockets = [(name.clone(), socket.clone(), args.provider_uid)];
-    let mut client = match ProviderClient::new(&args.agent_id, &sockets) {
-        Ok(client) => client,
+    let mut providers = match (over.providers)(&args.agent_id, &sockets) {
+        Ok(providers) => providers,
         Err(why) => {
             let _ = writeln!(out, "provider client: {why}");
             return status::REFUSED;
         }
     };
+    let mut calls = Calls {
+        providers: providers.as_mut(),
+        name,
+        pause: over.pause,
+    };
     let mut trees = Vec::new();
     for run_id in RUNS {
-        match tree_of(&mut client, name, run_id, given.reference) {
+        match tree_of(&mut calls, run_id, given.reference) {
             Ok(dir) => {
                 let _ = writeln!(out, "tree {run_id}: {dir}");
                 trees.push(PathBuf::from(dir));
             }
             Err(why) => {
                 let _ = writeln!(out, "tree {run_id}: {why}");
-                release_all(&mut client, name, out);
+                release_all(&mut calls, out);
                 return status::REFUSED;
             }
         }
@@ -218,7 +266,8 @@ fn prove(args: &Args, out: &mut dyn Write, err: &mut dyn Write) -> u8 {
     let mut ok = true;
     for (at, run_id) in RUNS.iter().enumerate() {
         let other = &trees[1 - at];
-        match run_one(&mut runtime, args, &given, (run_id, &trees[at], other), out) {
+        let job = (args.command.as_slice(), over.pause);
+        match run_one(&mut runtime, &given, job, (run_id, &trees[at], other), out) {
             Ok(passed) => ok &= passed,
             Err(why) => {
                 let _ = writeln!(out, "run {run_id}: {why}");
@@ -226,16 +275,18 @@ fn prove(args: &Args, out: &mut dyn Write, err: &mut dyn Write) -> u8 {
             }
         }
     }
-    ok &= release_all(&mut client, name, out);
-    match ok {
-        true => status::OK,
-        false => status::FAILED,
-    }
+    ok &= release_all(&mut calls, out);
+    if ok { status::OK } else { status::FAILED }
 }
 
-/// The runtime of the flags, with the trees root as its one mount root (or, with
-/// `--without-tree-rules`, a root that is neither denied nor the trees root).
-fn open(args: &Args, given: &Given<'_>, out: &mut dyn Write) -> Result<NativeRuntime, String> {
+/// The runtime of the flags made by `opener`, with the trees root as its one mount root (or,
+/// with `--without-tree-rules`, a root that is neither denied nor the trees root).
+fn open(
+    args: &Args,
+    given: &Given<'_>,
+    opener: proof::Opener<'_>,
+    out: &mut dyn Write,
+) -> Result<NativeRuntime, String> {
     let flags = NativeFlags {
         accounts: args.accounts.as_deref(),
         account_range: args.range.as_deref(),
@@ -269,34 +320,42 @@ fn open(args: &Args, given: &Given<'_>, out: &mut dyn Write) -> Result<NativeRun
             .read_denies
             .retain(|denied| Path::new(denied.as_str()) != given.root);
     }
-    let launcher = SystemLauncher::current().map_err(|why| format!("own path: {why}"))?;
-    NativeRuntime::open(Arc::new(launcher), config, 1).map_err(|why| why.0)
+    opener(config)
 }
 
-/// Asks `call` of the provider `name` and waits for its answer.
-fn ask(client: &mut ProviderClient, name: &str, call: &ProviderCall) -> ProviderAnswer {
-    let first = client.ask(name, call);
-    if first != ProviderAnswer::Pending {
-        return first;
+/// The provider `name` of the verb and the pause between two asks of a call.
+struct Calls<'a> {
+    providers: &'a mut dyn Providers,
+    name: &'a str,
+    pause: &'a dyn Fn(),
+}
+
+impl Calls<'_> {
+    /// Asks `call` until it is answered, at most [`ASKS`] times with a pause between two.
+    fn ask(&mut self, call: &ProviderCall) -> ProviderAnswer {
+        for _ in 1..ASKS {
+            let answer = self.providers.ask(self.name, call);
+            if answer != ProviderAnswer::Pending {
+                return answer;
+            }
+            (self.pause)();
+        }
+        match self.providers.ask(self.name, call) {
+            ProviderAnswer::Pending => ProviderAnswer::Unavailable("no answer".to_owned()),
+            answer => answer,
+        }
     }
-    let _ = client.wait_answered(name, call, CALL_GUARD);
-    client.ask(name, call)
 }
 
-/// The directory the provider `name` answered for the tree `reference` of `run_id`.
-fn tree_of(
-    client: &mut ProviderClient,
-    name: &str,
-    run_id: &str,
-    reference: &str,
-) -> Result<String, String> {
+/// The directory the provider answered for the tree `reference` of `run_id`.
+fn tree_of(calls: &mut Calls<'_>, run_id: &str, reference: &str) -> Result<String, String> {
     let prepare = ProviderCall::Prepare {
         run_id: run_id.to_owned(),
         index: 0,
         reference: reference.to_owned(),
         mode: MountMode::ReadOnly,
     };
-    match ask(client, name, &prepare) {
+    match calls.ask(&prepare) {
         ProviderAnswer::Done(_) => {}
         other => return Err(format!("prepare: {other:?}")),
     }
@@ -304,7 +363,7 @@ fn tree_of(
         run_id: run_id.to_owned(),
         index: 0,
     };
-    match ask(client, name, &mount) {
+    match calls.ask(&mount) {
         ProviderAnswer::Done(Some(dir)) => Ok(dir),
         other => Err(format!("mount: {other:?}")),
     }
@@ -313,17 +372,17 @@ fn tree_of(
 /// Releases both runs' sources and sweeps this agent's placements, then asks the provider to
 /// mount each again; whether every release and the sweep were answered done and no source is
 /// mounted any more.
-fn release_all(client: &mut ProviderClient, name: &str, out: &mut dyn Write) -> bool {
+fn release_all(calls: &mut Calls<'_>, out: &mut dyn Write) -> bool {
     let mut done = true;
-    let calls = RUNS
+    let releases = RUNS
         .iter()
         .map(|run_id| ProviderCall::Release {
             run_id: (*run_id).to_owned(),
             index: 0,
         })
         .chain([ProviderCall::Sweep { keep: Vec::new() }]);
-    for call in calls {
-        let answer = ask(client, name, &call);
+    for call in releases {
+        let answer = calls.ask(&call);
         let _ = writeln!(out, "{call:?}: {answer:?}");
         done &= matches!(answer, ProviderAnswer::Done(_));
     }
@@ -334,7 +393,7 @@ fn release_all(client: &mut ProviderClient, name: &str, out: &mut dyn Write) -> 
             run_id: run_id.to_owned(),
             index: 0,
         };
-        let answer = ask(client, name, &mount);
+        let answer = calls.ask(&mount);
         let held = matches!(answer, ProviderAnswer::Done(Some(_)));
         let _ = writeln!(out, "after release, mount {run_id}: {answer:?}");
         let _ = writeln!(
@@ -347,13 +406,13 @@ fn release_all(client: &mut ProviderClient, name: &str, out: &mut dyn Write) -> 
     done
 }
 
-/// Runs the job of `args` as `run_id` with its tree `own` at [`TARGET`], given the other run's
-/// tree and the trees root as its last two arguments; whether it exited 0 and its removal
-/// retired its account.
+/// Runs `command` as `run_id` with its tree `own` at [`TARGET`], given the other run's tree
+/// and the trees root as its last two arguments, pausing with `pause` between two polls;
+/// whether it exited 0 and its removal retired its account.
 fn run_one(
     runtime: &mut NativeRuntime,
-    args: &Args,
     given: &Given<'_>,
+    (command, pause): (&[String], &dyn Fn()),
     (run_id, own, other): (&str, &Path, &Path),
     out: &mut dyn Write,
 ) -> Result<bool, String> {
@@ -377,7 +436,7 @@ fn run_one(
     let _ = writeln!(out, "run {run_id}: lookup {resolved:?}");
     let scratch = given.state.join(run_id);
     fresh(&scratch).map_err(|why| format!("scratch {}: {why}", scratch.display()))?;
-    let (program, rest) = args.command.split_first().ok_or("no program")?;
+    let (program, rest) = command.split_first().ok_or("no program")?;
     let mut job_args = rest.to_vec();
     job_args.extend([
         other.display().to_string(),
@@ -389,7 +448,7 @@ fn run_one(
         .map_err(|why| format!("start: {}", why.0))?;
     let ended = loop {
         match runtime.poll(&id) {
-            Ok(Status::Running) => std::thread::sleep(PAUSE),
+            Ok(Status::Running) => pause(),
             Ok(ended) => break ended,
             Err(why) => {
                 let _ = writeln!(out, "run {run_id}: poll: {}", why.0);
