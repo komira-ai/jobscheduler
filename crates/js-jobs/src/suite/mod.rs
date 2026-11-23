@@ -245,6 +245,7 @@ where
     a_failed_prepare_requeues_the_job_with_its_count_and_bars(backend);
     a_held_refusal_requeues_the_job_without_counting_a_failure(backend);
     a_capacity_refusal_requeues_the_job_and_names_the_host_in_its_own_list(backend);
+    a_bundle_pending_refusal_requeues_the_job_and_names_the_host_in_no_list(backend);
     a_held_refusal_refuses_what_it_cannot_requeue(backend);
     a_held_refusal_loses_to_a_change_of_either_row(backend);
     the_last_failed_prepare_ends_the_job_failed_to_start(backend);
@@ -444,6 +445,7 @@ macro_rules! job_store_tests {
             a_failed_prepare_requeues_the_job_with_its_count_and_bars,
             a_held_refusal_requeues_the_job_without_counting_a_failure,
             a_capacity_refusal_requeues_the_job_and_names_the_host_in_its_own_list,
+            a_bundle_pending_refusal_requeues_the_job_and_names_the_host_in_no_list,
             a_held_refusal_refuses_what_it_cannot_requeue,
             a_held_refusal_loses_to_a_change_of_either_row,
             the_last_failed_prepare_ends_the_job_failed_to_start,

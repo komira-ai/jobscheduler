@@ -53,7 +53,7 @@ value it does not know reads it as `UNSPECIFIED`, and so does the store (section
 | `QUOTA_BACKOFF` | 3 | A machine for the job was refused for quota (every refusal). |
 | `FAILING_OVER` | 4 | A machine for the job was refused for capacity (every refusal). |
 | `PLACED` | 5 | The job was placed; `host_id` names the host. |
-| `REQUEUED` | 6 | A failed whole-host prepare, or a start refused by a host held for maintenance or with no room for it, sent the job back; `host_id` names the host. |
+| `REQUEUED` | 6 | A failed whole-host prepare, or a start refused by a host held for maintenance, with no room for it or still fetching its bundle, sent the job back; `host_id` names the host. |
 | `WAITING_FOR_MACHINE` | 7 | The job began to wait for a machine launched for it. |
 
 The same rule holds: values are appended, never renumbered, and an unknown one reads as `UNSPECIFIED`.
@@ -71,9 +71,10 @@ The fields are written by one writer: the placement pass of the engine (`SchedPl
 (`js-jobs`). There are two exceptions, the requeues. After a failed whole-host prepare the job goes back to queued in
 `job_whole.rs`, when its prepare runs out of time (the time pass of the tick, `job_pass.rs`) or its host refuses the prepare (a
 heartbeat). The transaction that requeues it writes the status the engine decided for it in `failed_prepare`
-(`FailedPrepare::queue`). After a start that a host held for maintenance refused (the agent's code `host-held`), or that a
-host refused for capacity (`no-capacity`), the job goes back to queued in `job_held.rs`, from the heartbeat that lists the
-refusal; the transaction writes the note of `Outcome::HeldRequeued` or `Outcome::CapacityRequeued` (`HeldRequeue::queue`).
+(`FailedPrepare::queue`). After a start that a host held for maintenance refused (the agent's code `host-held`), that a
+host refused for capacity (`no-capacity`), or that a host refused while it fetches the job's bundle (`bundle-pending`), the job
+goes back to queued in `job_held.rs`, from the heartbeat that lists the refusal; the transaction writes the note of
+`Outcome::HeldRequeued`, `Outcome::CapacityRequeued` or `Outcome::BundlePendingRequeued` (`HeldRequeue::queue`).
 
 What to write is decided by a pure function, `js_sched::queue_status::note`. It takes the outcome a pass reached for a job and
 the job's current code, and returns a `QueueNote`: the code, the detail, the event to append (if any), the host, and whether this
@@ -93,6 +94,7 @@ The outcomes (`js_sched::queue_status::Outcome`):
 | `Requeued { host }` | a failed whole-host prepare sent the job back | `WAITING_FOR_WHOLE_HOST` | `REQUEUED`, with the host | no |
 | `HeldRequeued { host, whole_host }` | a host held for maintenance refused the job's start and sent it back | `WAITING_FOR_WHOLE_HOST` for a whole-host job, else `WAITING_FOR_CAPACITY` | `REQUEUED`, with the host | no |
 | `CapacityRequeued { host }` | a host refused the job's start for capacity (`no-capacity`) and sent it back | `WAITING_FOR_CAPACITY` | `REQUEUED`, with the host | no |
+| `BundlePendingRequeued { host, whole_host }` | a host still fetching the job's bundle refused the job's start (`bundle-pending`) and sent it back | `WAITING_FOR_WHOLE_HOST` for a whole-host job, else `WAITING_FOR_CAPACITY` | `REQUEUED`, with the host | no |
 
 Two rules join pass 1 and pass 2:
 
