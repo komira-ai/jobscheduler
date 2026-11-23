@@ -12,6 +12,8 @@ use js_update_hook::{
     Clock, CommandRunner, LAUNCHCTL, LaunchUnits, PortError, SETTLE_READS, UnitState, Units,
 };
 
+// A crate root's modules sit beside it; this test's own sit in `launchd/`.
+#[path = "launchd/start_refused.rs"]
 mod start_refused;
 
 const LABEL: &str = "js-agent";
