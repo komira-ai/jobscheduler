@@ -47,7 +47,8 @@ pub struct JobBooking {
     /// The CPU booked, in thousandths of a core: the lease's `cpu.weight`, a share of the
     /// node's cores and never a ceiling.
     pub cpu_millis: u64,
-    /// The memory booked, in bytes: the lease's `memory.max`, with no swap.
+    /// The memory booked, in bytes: what placement counted for the job, not a limit (the lease
+    /// has no `memory.max`, and the job may use swap).
     pub memory_bytes: u64,
     /// The size class and which history gave the CPU and the memory, as the job's start said
     /// ([`JobStartSpec::sizing`](js_agent_wire::JobStartSpec::sizing)); `None` for a run start,

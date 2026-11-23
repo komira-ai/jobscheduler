@@ -199,7 +199,7 @@ async fn submit_calls_the_store_off_the_worker() {
     let rig = clocked_rig("submit_off_worker", true, NEVER);
     let (probe, jobs) = probed();
     let clock = SharedClock::new(ManualClock::new(Timestamp::from_millis(0)));
-    let placing = Ctx::served(CEILING, Fixed::new(true)).placing(Arc::clone(&rig.agents));
+    let placing = Ctx::served(CEILING, Fixed::new(true)).poking(Arc::clone(&rig.agents));
     let api = JobApi::new(Arc::clone(&jobs), clock.clone()).with_submit(placing);
     let request = Request::new(SubmitJobRequest {
         spec: Some(wire("job-a")),

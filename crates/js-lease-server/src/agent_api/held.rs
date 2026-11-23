@@ -36,6 +36,7 @@ use crate::admit::{
 };
 use crate::agents::Agents;
 use crate::held_beat::Watch;
+use crate::job_expiry::JobLimits;
 use crate::job_store::ServerJobs;
 use crate::logs::LogGrants;
 use crate::metrics::MetricsSink;
@@ -52,6 +53,8 @@ pub(super) struct HostFacts {
     pub(super) booked: Resources,
     /// Whether the registry holds the host tainted.
     pub(super) tainted: bool,
+    /// The pool's limits, of which a refusal for capacity reads its requeue count and bar.
+    pub(super) limits: JobLimits,
 }
 
 impl HostFacts {
@@ -70,6 +73,7 @@ impl HostFacts {
                     claim,
                     booked,
                     tainted,
+                    limits: agents.job_limits,
                 })
             })
     }
@@ -95,6 +99,8 @@ pub(super) struct Inputs {
     pub(super) retired: Vec<String>,
     /// How many commands the reply has room for.
     pub(super) room: usize,
+    /// The pool's limits ([`HostFacts::limits`]).
+    pub(super) limits: JobLimits,
 }
 
 impl Inputs {
@@ -122,6 +128,7 @@ impl Inputs {
             listed,
             retired,
             room,
+            limits: facts.limits,
         }
     }
 
@@ -138,6 +145,7 @@ impl Inputs {
             logs: self.logs.as_deref(),
             polls_dispatch: self.polls_dispatch,
             metrics,
+            limits: self.limits,
         }
     }
 }

@@ -15,9 +15,10 @@
 //!   bound covers `/scratch`, `/work` and `/root`; a runtime opened without
 //!   `OciConfig::leases_in` keeps it as `<store>/<name>`;
 //! - the job's `.tmp-<name>` beside it ([`Runtime::tmp_dir`]): its `/tmp` and `/var/tmp`;
-//! - the cgroup `<actions>/<name>`, made by the agent with the booking as the limit
-//!   (memory the booking with no swap, CPU the booked cores: the arithmetic the lease
-//!   server's booking assumes) and given to the job user, who makes the container's cgroup
+//! - the cgroup `<actions>/<name>`, made by the agent from the booking (no memory or swap
+//!   limit: the memory booking is what placement counted, and the job's use is measured and
+//!   reported, not held at it; the booked cores as the lease's `cpu.weight`) and given to the
+//!   job user, who makes the container's cgroup
 //!   `<name>/ctr` under it ([`Runtime::cgroup`]). The job user is given nothing of the
 //!   directory the leases' cgroups are in (it could make or remove the cgroups of other
 //!   leases there) except the cgroup `helpers` below it, where the helper containers are
@@ -307,8 +308,6 @@ struct Run {
     labels: BTreeMap<String, String>,
     lease: LeaseDirs,
     cgroup: LeaseCgroup,
-    /// The lease's `memory.max`.
-    cap: Option<u64>,
     /// The OOM count of the cgroup above, when the lease started.
     backstop: Option<u64>,
     state: State,
@@ -606,7 +605,7 @@ impl CrunRuntime {
                 Some(end) => (rt.block_on(oci.ended_as(&run.spec, end)), running.tail()),
             },
         };
-        let (exit, tail) = concluded(ended, &captured, (&run.cgroup, run.cap, run.backstop));
+        let (exit, tail) = concluded(ended, &captured, (&run.cgroup, run.backstop));
         run.logs.end((captured.stdout.total, captured.stderr.total));
         run.state = State::Ended(exit, tail);
         run.net.release(name);

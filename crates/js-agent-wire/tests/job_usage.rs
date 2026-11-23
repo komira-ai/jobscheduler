@@ -45,6 +45,36 @@ struct PreviousResultWithUsage {
 /// `,"cpu_peak":{"millicores":N,"window_usec":N}` 82.
 const WIDEST_CPU_COUNTERS: usize = 89 + 46 + 82;
 
+/// The bytes the swap peak adds to a usage at its widest: `,"peak_swap_bytes":N`, 20 digits.
+const WIDEST_SWAP_PEAK: usize = 39;
+
+/// The `JobUsage` of the release before the swap peak, kept as it was: it stands for the
+/// servers and agents of the release now deployed, and must not follow later changes to
+/// [`JobUsage`]. Fields it does not know are skipped.
+#[derive(Debug, Deserialize, PartialEq, serde::Serialize)]
+struct ReleasedJobUsage {
+    peak_memory_bytes: u64,
+    cpu_usage_usec: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cpu_throttle: Option<CpuThrottle>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cpu_pressure_some_usec: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cpu_peak: Option<CpuPeak>,
+}
+
+/// A usage with a swap peak and every CPU counter: a job its host's swap absorbed part of.
+fn swapped() -> JobUsage {
+    JobUsage {
+        cpu_peak: Some(CpuPeak {
+            millicores: 3_500,
+            window_usec: 5_000_000,
+        }),
+        peak_swap_bytes: Some(512 << 20),
+        ..counted_with_cpu()
+    }
+}
+
 /// A usage as an agent from before the counters sent it: the two measured numbers.
 fn counted() -> JobUsage {
     JobUsage {
@@ -53,6 +83,7 @@ fn counted() -> JobUsage {
         cpu_throttle: None,
         cpu_pressure_some_usec: None,
         cpu_peak: None,
+        peak_swap_bytes: None,
     }
 }
 
@@ -145,7 +176,8 @@ fn a_result_with_usage_has_the_exact_wire_form() {
 }
 
 /// Asserts the bytes `usage` adds to a result at its widest: 89 with the two measured counters
-/// at 20 digits, and 306 with the three optional ones at 20 digits as well, the figures of
+/// at 20 digits, 306 with the three optional CPU ones at 20 digits as well, and 345 with the
+/// swap peak too, the figures of
 /// `docs/design/agent-wire.md`. Catches a field whose size the heartbeat budget no longer
 /// allows for.
 #[test]
@@ -174,6 +206,15 @@ fn usage_at_its_widest_adds_its_documented_bytes_to_a_result() {
         89 + WIDEST_CPU_COUNTERS
     );
     assert_eq!(89 + WIDEST_CPU_COUNTERS, 306);
+    let swapped = JobUsage {
+        peak_swap_bytes: Some(u64::MAX),
+        ..all
+    };
+    assert_eq!(
+        len(&result(Some(swapped))) - len(&result(None)),
+        89 + WIDEST_CPU_COUNTERS + WIDEST_SWAP_PEAK
+    );
+    assert_eq!(89 + WIDEST_CPU_COUNTERS + WIDEST_SWAP_PEAK, 345);
 }
 
 /// Asserts a usage with the CPU counters has the exact wire form, round-trips, and that a
@@ -419,5 +460,91 @@ fn a_malformed_cpu_peak_reads_as_none_and_keeps_the_usage() {
             ..counted()
         };
         assert_eq!(read, result(Some(expected)), "{bad}");
+    }
+}
+
+/// Asserts a usage with a swap peak has the exact wire form beside the CPU counters,
+/// round-trips, and that a usage without one has no `peak_swap_bytes` key, and that a measured
+/// zero stays a zero. Catches a renamed field, a swap peak written as `null` when absent, and a
+/// zero (a job that swapped nothing) that reads as unknown.
+#[test]
+fn a_usage_with_a_swap_peak_has_the_exact_wire_form() {
+    let wire = json!({
+        "peak_memory_bytes": 3_221_225_472_u64,
+        "cpu_usage_usec": 4_500_000,
+        "cpu_throttle": { "periods": 600, "throttled_periods": 45 },
+        "cpu_pressure_some_usec": 1_250_000,
+        "cpu_peak": { "millicores": 3_500, "window_usec": 5_000_000 },
+        "peak_swap_bytes": 536_870_912
+    });
+    assert_eq!(serde_json::to_value(swapped()).unwrap(), wire);
+    assert_eq!(serde_json::from_value::<JobUsage>(wire).unwrap(), swapped());
+    let none = JobUsage {
+        peak_swap_bytes: None,
+        ..swapped()
+    };
+    let text = serde_json::to_value(none).unwrap();
+    assert!(text.get("peak_swap_bytes").is_none(), "{text}");
+    let zero = JobUsage {
+        peak_swap_bytes: Some(0),
+        ..counted()
+    };
+    let text = serde_json::to_value(zero).unwrap();
+    assert_eq!(text["peak_swap_bytes"], 0);
+    assert_eq!(serde_json::from_value::<JobUsage>(text).unwrap(), zero);
+}
+
+/// Asserts the release now deployed and this one read each other's usage: a server of the
+/// deployed release, with its own copy of `JobUsage`, reads a usage of this release's agent
+/// (with a swap peak) as every number it knows, unchanged; and this release reads a usage of the
+/// deployed release's agent (no swap peak) with every number it sent and `None` for the swap
+/// peak, inside a heartbeat that this release validates. Catches a swap peak an older server
+/// cannot skip, and one this release demands of an older agent.
+#[test]
+fn the_deployed_release_and_this_one_read_each_others_usage() {
+    let new = serde_json::to_value(result(Some(swapped()))).unwrap();
+    let read_by_deployed: ReleasedJobUsage = serde_json::from_value(new["usage"].clone()).unwrap();
+    assert_eq!(
+        read_by_deployed,
+        ReleasedJobUsage {
+            peak_memory_bytes: 3 << 30,
+            cpu_usage_usec: 4_500_000,
+            cpu_throttle: Some(CpuThrottle {
+                periods: 600,
+                throttled_periods: 45,
+            }),
+            cpu_pressure_some_usec: Some(1_250_000),
+            cpu_peak: Some(CpuPeak {
+                millicores: 3_500,
+                window_usec: 5_000_000,
+            }),
+        }
+    );
+    let mut deployed = previous_text();
+    deployed["usage"] = serde_json::to_value(&read_by_deployed).unwrap();
+    let read: JobResult = serde_json::from_value(deployed).unwrap();
+    let want = JobUsage {
+        peak_swap_bytes: None,
+        ..swapped()
+    };
+    assert_eq!(read, result(Some(want)));
+    let beat = beat_with(read);
+    assert_eq!(beat.validate(), Ok(()));
+}
+
+/// Asserts a swap peak that does not decode (negative, text, a fraction, an object) reads as
+/// `None` while the usage around it keeps its other numbers. Catches a malformed swap peak that
+/// drops the whole usage, and so the job's memory peak with it.
+#[test]
+fn a_malformed_swap_peak_reads_as_none_and_keeps_the_usage() {
+    for bad in [json!(-1), json!("512M"), json!(1.5), json!({ "bytes": 1 })] {
+        let mut text = previous_text();
+        text["usage"] = json!({
+            "peak_memory_bytes": 3_221_225_472_u64,
+            "cpu_usage_usec": 4_500_000,
+            "peak_swap_bytes": bad.clone()
+        });
+        let read: JobResult = serde_json::from_value(text).unwrap();
+        assert_eq!(read, result(Some(counted())), "{bad}");
     }
 }

@@ -47,22 +47,19 @@
 //!    nothing to roll back. A second writer that recorded a different job under the id
 //!    between the lookup and the commit is `job-id-conflict`.
 //!
-//! 5. **Place now, when nothing is ahead** (design komira-ai/jobscheduler#903). When the
-//!    service places jobs ([`Ctx::placing`]) and, before the commit, no queued job had a
-//!    priority equal to or above the new job's, the call runs the server's pass over the queued
-//!    jobs itself, after the commit and before the answer
-//!    ([`Agents::place_jobs`](crate::agents::Agents::place_jobs)): the pass claims the host's
-//!    room in the store's own transaction, as every pass does, so it stays right with several
-//!    servers. A placement wakes the host's heartbeat this server holds open
-//!    ([`crate::held_beat`]), whose reply carries the start at once. The answer is the job as
-//!    the store holds it after the pass: `placed` with its host when a host had room, `queued`
-//!    otherwise, and the queued record of the commit when that read fails. When the commit is
-//!    the only write of the job store since the placer last read the job tables, the job is
-//!    added to those tables rather than the pass reading all four again
-//!    ([`Agents::note_inserted`]). A job that has a
-//!    queued job of its priority or above ahead of it, a retry of a job already held, and every
-//!    job of a service that does not place, are only committed: the tick's pass, or a
-//!    heartbeat's, finds the queued row. A failed read of the queue counts as a job ahead.
+//! 5. **Poke the poller, answer queued.** When the service places jobs ([`Ctx::poking`]), the
+//!    call tells the placer of the job the commit recorded ([`Agents::note_inserted`]: when the
+//!    commit is the only write of the job store since the placer last read the job tables, the
+//!    next pass takes the job added to those tables rather than reading all four again), pokes
+//!    the placement poller ([`crate::poller::Poller::poke`]) and answers. It never places the
+//!    job itself: the answer for a new job is the job as the commit recorded it, `queued` with
+//!    no host, always. The poller's pass, the tick's or a heartbeat's places it
+//!    (the pass claims the host's room in the store's own transaction, so it stays right with
+//!    several servers); a placement wakes the host's heartbeat this server holds open
+//!    ([`crate::held_beat`]), whose reply carries the start at once. A client that wants to know
+//!    where and when its job starts reads or watches the job. A retry of a job already held is
+//!    answered with that job as it is now, in whatever state (step 2); it pokes the poller too,
+//!    whose pass then finds nothing new to place.
 //!
 //! Every read and write of the job tables runs on the pool for blocking calls
 //! ([`JobApi::on_tables`]), so a slow store holds up this call and not the server's workers.
@@ -122,9 +119,9 @@ struct Served {
     ceiling: Duration,
     /// Where admission is asked.
     admission: Handle<dyn Admission>,
-    /// The agent side whose pass places a job with nothing ahead of it in the call (step 5);
-    /// `None`: the call only commits.
-    placing: Option<Handle<Agents>>,
+    /// The agent side whose placement poller each recorded job pokes (step 5); `None`: the call
+    /// only commits, and the tick's pass finds the queued row.
+    poking: Option<Handle<Agents>>,
 }
 
 impl Ctx {
@@ -137,17 +134,17 @@ impl Ctx {
             served: Some(Served {
                 ceiling,
                 admission: Handle(admission),
-                placing: None,
+                poking: None,
             }),
         }
     }
 
-    /// This context, placing a job that has nothing ahead of it in the call, with the pass of
-    /// `agents` (step 5 of the module docs). Nothing for a context that is not served.
+    /// This context, poking the placement poller of `agents` for each job it records (step 5 of
+    /// the module docs). Nothing for a context that is not served.
     #[must_use]
-    pub(crate) fn placing(mut self, agents: Arc<Agents>) -> Ctx {
+    pub(crate) fn poking(mut self, agents: Arc<Agents>) -> Ctx {
         self.served = self.served.map(|served| Served {
-            placing: Some(Handle(agents)),
+            poking: Some(Handle(agents)),
             ..served
         });
         self
@@ -253,12 +250,6 @@ pub(super) async fn submit_job(
             .is_some(),
         None => false,
     };
-    // Read before the commit, so two jobs submitted together into an empty queue are both
-    // placed in their calls (the passes take turns), not both left to the tick.
-    let placing = match &served.placing {
-        Some(agents) if !held && nothing_ahead(api, valid.priority).await => Some(agents),
-        _ => None,
-    };
     let isolation = valid.spec.constraints.isolation;
     if !held
         && !served
@@ -282,8 +273,8 @@ pub(super) async fn submit_job(
     if !caller.owns(&inserted.record) {
         return Err(id_conflict());
     }
-    let record = match placing {
-        Some(Handle(agents)) => place_now(api, agents, inserted).await,
+    let record = match &served.poking {
+        Some(Handle(agents)) => poke(agents, inserted).await,
         None => inserted.record,
     };
     Ok(Response::new(SubmitJobResponse {
@@ -291,30 +282,19 @@ pub(super) async fn submit_job(
     }))
 }
 
-/// Whether no queued job has a priority equal to or above `priority`; `false` when the queue
-/// cannot be read.
-async fn nothing_ahead(api: &JobApi, priority: i32) -> bool {
-    let queued = api.on_tables(|jobs| jobs.queued()).await;
-    queued.is_ok_and(|queued| queued.iter().all(|job| job.priority < priority))
-}
-
-/// Runs the server's pass over the queued jobs for the job just committed, `inserted`, keeps
-/// the taints of the hosts it gave to host jobs, and answers the job as the store holds it then
-/// (the inserted record when that read fails). The job is first added to the job tables the
-/// placer last read, when its commit is the only write since ([`Agents::note_inserted`]), so
-/// the pass does not read them again for it.
-async fn place_now(api: &JobApi, agents: &Arc<Agents>, inserted: Inserted) -> JobRecord {
-    let placing = Arc::clone(agents);
-    let (tainted, record) = blocking(move || {
-        placing.note_inserted(&inserted);
-        (placing.place_jobs(), inserted.record)
+/// Tells the placer of `agents` of the job just recorded, `inserted`, so that the next pass
+/// does not read the job tables again for it ([`Agents::note_inserted`]), and pokes the
+/// placement poller ([`crate::poller::Poller::poke`]); the job's record as the commit recorded
+/// it. The poke comes after the commit, so the pass it brings reads the job.
+async fn poke(agents: &Arc<Agents>, inserted: Inserted) -> JobRecord {
+    let noting = Arc::clone(agents);
+    let record = blocking(move || {
+        noting.note_inserted(&inserted);
+        inserted.record
     })
     .await;
-    agents.keep_taints(tainted).await;
-    let id = record.id.clone();
-    let now = api.on_tables(move |jobs| jobs.get_job(&id)).await;
-    let now = now.ok().flatten();
-    now.unwrap_or(record)
+    agents.poller.poke();
+    record
 }
 
 #[cfg(test)]
@@ -322,8 +302,8 @@ async fn place_now(api: &JobApi, agents: &Arc<Agents>, inserted: Inserted) -> Jo
 mod tests;
 
 #[cfg(test)]
-#[path = "submit_place_tests.rs"]
-mod place_tests;
+#[path = "submit_poke_tests.rs"]
+mod poke_tests;
 
 #[cfg(test)]
 #[path = "submit_rows_tests.rs"]
