@@ -237,7 +237,7 @@ fn a_tree_is_linked_and_read_through_the_runs_trees_not_a_grant() {
     ]);
     assert_eq!(rig.rt.resolve_fs("r1", "", &answered, 0), FsPrepared::Ready);
     rig.rt
-        .create_and_start(&rig.spec("r1", native("/bin/true", &[])))
+        .create_and_start(&rig.spec("r1", native("/usr/bin/true", &[])))
         .unwrap();
 
     let exec = exec_of(&rig, 0);
@@ -318,7 +318,7 @@ fn the_lookup_refuses_a_set_that_breaks_the_trees_roots_rules() {
     }
     let err = rig
         .rt
-        .create_and_start(&rig.spec("r1", native("/bin/true", &[])));
+        .create_and_start(&rig.spec("r1", native("/usr/bin/true", &[])));
     assert!(err.is_ok(), "{err:?}");
     let exec = exec_of(&rig, 0);
     assert!(!exec.join("t").exists(), "a refused plan was kept");

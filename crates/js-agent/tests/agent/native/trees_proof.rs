@@ -379,25 +379,32 @@ fn a_wrong_command_line_exits_64_naming_what_is_wrong() {
     let cases: Vec<(Vec<String>, &str)> = vec![
         (words(&["--state", &state]), "no program after --"),
         (
-            words(&["--bogus", "--", "/bin/true"]),
+            words(&["--bogus", "--", "/usr/bin/true"]),
             "--bogus: not a flag of __native-trees-proof",
         ),
         (words(&["--state"]), "--state needs a value"),
         (
-            words(&["--provider", "tierstore", "--", "/bin/true"]),
+            words(&["--provider", "tierstore", "--", "/usr/bin/true"]),
             "--provider tierstore: not <name>=<socket>",
         ),
         (
-            words(&["--provider-uid", "x", "--", "/bin/true"]),
+            words(&["--provider-uid", "x", "--", "/usr/bin/true"]),
             "--provider-uid x: not a uid",
         ),
-        (words(&["--", "/bin/true"]), "--state is required"),
+        (words(&["--", "/usr/bin/true"]), "--state is required"),
         (
-            words(&["--state", &state, "--", "/bin/true"]),
+            words(&["--state", &state, "--", "/usr/bin/true"]),
             "--provider is required",
         ),
         (
-            words(&["--state", &state, "--provider", "t=/s", "--", "/bin/true"]),
+            words(&[
+                "--state",
+                &state,
+                "--provider",
+                "t=/s",
+                "--",
+                "/usr/bin/true",
+            ]),
             "--trees-root is required",
         ),
         (
@@ -409,7 +416,7 @@ fn a_wrong_command_line_exits_64_naming_what_is_wrong() {
                 "--trees-root",
                 &root,
                 "--",
-                "/bin/true",
+                "/usr/bin/true",
             ]),
             "--ref is required",
         ),
