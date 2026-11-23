@@ -59,9 +59,11 @@ pub struct Refusal {
     pub new: u64,
     /// The most the inequality allows.
     pub limit: u64,
-    /// The cores the host's newest windows measured, in millicores; 0 for a host charged
-    /// by prediction and for the kinds other than CPU.
-    pub measured_cpu_millis: u64,
+    /// The cores the host's newest windows measured, in millicores, for the CPU kind on a
+    /// host charged by measurement; `None` for a host charged by prediction alone (it has no
+    /// fresh reading: none yet, a dropped one, a stale one or a CPU-limited actions cgroup)
+    /// and for the kinds other than CPU.
+    pub measured_cpu_millis: Option<u64>,
 }
 
 impl Refusal {
@@ -71,11 +73,11 @@ impl Refusal {
             counted,
             new,
             limit,
-            measured_cpu_millis: 0,
+            measured_cpu_millis: None,
         }
     }
 
-    pub(crate) const fn measured(self, measured_cpu_millis: u64) -> Self {
+    pub(crate) const fn measured(self, measured_cpu_millis: Option<u64>) -> Self {
         Self {
             measured_cpu_millis,
             ..self

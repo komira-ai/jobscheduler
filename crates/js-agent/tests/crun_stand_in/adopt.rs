@@ -93,7 +93,9 @@ fn command(life: &mut Lifecycle, command: Command) -> Vec<Event> {
 }
 
 /// Stages `spec`, starts it and waits for its script to say it is up (the pipe it opens).
-fn started(node: &Node, runtime: &mut CrunRuntime, spec: &RunSpec) -> RunHandle {
+/// A test that stops a `*-hold` job starts it here: the script handles SIGTERM only once it
+/// is up, and a stop sent before that never reaches it.
+pub(crate) fn started(node: &Node, runtime: &mut CrunRuntime, spec: &RunSpec) -> RunHandle {
     let id = runtime.stage(spec).expect("staged");
     node.pipe(&id.0);
     runtime.start_staged(&id).expect("started");

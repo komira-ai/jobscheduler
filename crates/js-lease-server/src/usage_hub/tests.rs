@@ -186,6 +186,7 @@ fn load(seq: u64, minutes: &[(&str, u16, u32, u64)]) -> NodeLoad {
         seq,
         mono_usec: 10,
         cpu_usage_usec: 10,
+        host_cpu_usec: None,
         working_set_bytes: 1,
         active_file_bytes: 0,
         actions_cpu_limited: false,

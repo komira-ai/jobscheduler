@@ -137,7 +137,7 @@ impl Room {
             counted,
             new: memory_bytes,
             limit,
-            measured_cpu_millis: 0,
+            measured_cpu_millis: None,
         })
     }
 
