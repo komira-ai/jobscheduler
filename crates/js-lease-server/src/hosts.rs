@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use js_agent_wire::Taint;
+use js_caps::FULL_DISK_ACCESS;
 use js_jobs::{HOST_JOB_TAINT, ScaleMark};
 use js_registry::{HostMark, HostState, HostView, LoadSeconds};
 use js_types::sched::usage::NodeLoad;
@@ -258,8 +259,28 @@ pub(crate) fn mark_text(mark: HostMark) -> &'static str {
     }
 }
 
+/// The capabilities a registered host is listed with: those of the shape the pool books it on,
+/// and the agent's own answer of whether it holds Full Disk Access ([`FULL_DISK_ACCESS`], as its
+/// last hello reported it) where that shape does not name it, so that an operator reads in the
+/// listing which Macs lack the grant in a pool that places by its own shape too. The answer
+/// places nothing (a request cannot name it), so only the listing carries it.
+fn listed_capabilities(host: &HostView) -> BTreeMap<String, String> {
+    let mut listed = host.shape.capabilities().clone();
+    let reported = host
+        .claim
+        .as_ref()
+        .and_then(|claim| claim.capabilities().get(FULL_DISK_ACCESS));
+    if let Some(state) = reported {
+        listed
+            .entry(FULL_DISK_ACCESS.to_owned())
+            .or_insert_with(|| state.clone());
+    }
+    listed
+}
+
 impl HostEntry {
     fn registered(host: HostView) -> Self {
+        let capabilities = listed_capabilities(&host);
         Self {
             id: host.id,
             source: Source::Registered,
@@ -268,7 +289,7 @@ impl HostEntry {
             phase: Some(String::from(host.phase)),
             shape: shape_view(&host.shape),
             memory: MemoryView::of(host.memory),
-            capabilities: host.shape.capabilities().clone(),
+            capabilities,
             labels: host.labels,
             agent_version: host.agent_version,
             releasing: Some(host.releasing),
@@ -502,6 +523,54 @@ mod tests {
         assert_eq!(sized.count(), 1);
         let disk = shapes.iter().find_map(|shape| shape.get("disk_bytes"));
         assert_eq!(disk.and_then(|disk| disk.as_u64()), Some(5 << 30));
+    }
+
+    /// Asserts the capabilities a registered host is listed with, each map in full: the pool's
+    /// booked shape's alone for a host with no claim and for one whose claim reports no Full
+    /// Disk Access, and those with the claim's `full-disk-access` added for a host whose agent
+    /// reported it (`not-granted`), while the claim's other capabilities (`runtime`) stay out
+    /// and the pool's own value of a key the claim also names stays (`os`, and `full-disk-access`
+    /// in a shape that names it). It catches a listing that
+    /// shows the pool's capabilities alone, so an operator never sees which Macs lack the
+    /// grant, and one that lists the whole claim.
+    #[test]
+    fn a_registered_host_lists_the_full_disk_access_its_agent_reported() {
+        let resources = Resources::new(1000, 1 << 20, 0, None).unwrap();
+        let caps = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+            pairs
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                .collect()
+        };
+        let pool = caps(&[("arch", "arm64"), ("os", "macos")]);
+        let host = |claim: Option<&[(&str, &str)]>| {
+            let mut host = view(None);
+            host.shape = Shape::new(resources.clone(), pool.clone());
+            host.claim = claim.map(|pairs| Shape::new(resources.clone(), caps(pairs)));
+            host
+        };
+        let listed = |host: HostView| HostList::of(vec![host]).hosts.remove(0).capabilities;
+        assert_eq!(listed(host(None)), pool);
+        assert_eq!(
+            listed(host(Some(&[("os", "macos"), ("runtime", "sandbox-exec")]))),
+            pool
+        );
+        assert_eq!(
+            listed(host(Some(&[
+                ("os", "linux"),
+                ("runtime", "sandbox-exec"),
+                ("full-disk-access", "not-granted"),
+            ]))),
+            caps(&[
+                ("arch", "arm64"),
+                ("full-disk-access", "not-granted"),
+                ("os", "macos"),
+            ])
+        );
+        let mut naming = host(Some(&[("full-disk-access", "not-granted")]));
+        let granted = caps(&[("full-disk-access", "granted")]);
+        naming.shape = Shape::new(resources.clone(), granted.clone());
+        assert_eq!(listed(naming), granted);
     }
 
     /// Asserts that the listing is the registry's hosts alone, in id order: hosts viewed `b`

@@ -21,6 +21,12 @@
 //!   after them, so that a grant below a denied path opens it) is refused at or above a
 //!   denied path ([`PolicyError::MountOverReadDeny`]). The runtime passes the system places
 //!   that only the privacy grant opens as read denies.
+//! - The roots of users' homes a [`Narrowing`] names are read-denied before every read
+//!   grant, and the run's own home (the directory just below the deepest root that holds
+//!   the run directory) is granted back right after them: under the open model a run reads
+//!   below those roots only its own home and what a later grant (a tree, a mount) names. A
+//!   homes root in the own home ([`PolicyError::HomesInOwnHome`]) and a mount grant at or
+//!   above a homes root are refused.
 //! - A run's trees on the store's shared mount ([`MountTrees`]) are its only readable
 //!   places below the mount's root: the root is read-denied, each tree is read-granted
 //!   after the deny, and a mount grant that would reopen the root is refused.

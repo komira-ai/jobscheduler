@@ -20,8 +20,9 @@ fn text(path: &Path) -> String {
 }
 
 /// Asserts that the profile of a run grants writes to the run directory `<home>/exec` by
-/// the exact rule text and to no other place: `RUN` is `<home>/exec`, no parameter of the
-/// profile is the account's home, and no other rule allows a write.
+/// the exact rule text and to no other place: `RUN` is `<home>/exec`, the only parameter of
+/// the profile that is the account's home is `OWN`, which only its read grants name, and no
+/// other rule allows a write.
 ///
 /// Catches: a profile that grants the whole home (`RUN` = the home), with which a job makes
 /// `~/Library/Preferences`, which root cannot remove.
@@ -47,8 +48,23 @@ fn the_profile_grants_writes_below_the_run_directory_and_not_to_the_home() {
         .collect();
     assert_eq!(writes, [WRITE_GRANT]);
     for (name, value) in &launched.params {
-        assert_ne!(Path::new(value), home, "{name} is the account's home");
+        if name != "OWN" {
+            assert_ne!(Path::new(value), home, "{name} is the account's home");
+        }
     }
+    assert_eq!(param(&launched, "OWN"), Some(text(&home).as_str()));
+    let own: Vec<&str> = launched
+        .profile
+        .lines()
+        .filter(|line| line.contains("(param \"OWN\")"))
+        .collect();
+    assert_eq!(
+        own,
+        [
+            "(allow file-read* (subpath (param \"OWN\")))",
+            "(allow file-read-metadata (path-ancestors (param \"OWN\")))",
+        ]
+    );
     rig.settle(&id);
     rig.rt.remove(&id).unwrap();
 }

@@ -113,6 +113,7 @@ the binary is static and the check passes.
 | `js-bundle` | `tests/pack.rs` binds a Unix socket below `TMPDIR` (#170) |
 | `js-guest` | its serve tests bind a Unix socket below `TMPDIR` (#170); `tests/as_root.rs` holds `#[ignore]`d root tests |
 | `js-vmm` | the lease-system tests bind a Unix socket below `TMPDIR` (#170) |
+| `js-isolation-probe` | its network tests bind a Unix socket below `TMPDIR` (#170) |
 | `js-caps` | `tests/accel.rs` scans the sources of every member |
 | `js-watch` | `tests/read_only.rs` reads other members' sources and walks `crates/` |
 | `js-elastic-fake` | `tests/no_cloud_reach.rs` reads every manifest and source file of the repository |
