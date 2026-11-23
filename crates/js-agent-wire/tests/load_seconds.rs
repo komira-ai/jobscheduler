@@ -322,7 +322,12 @@ fn the_released_server_and_this_one_read_each_others_loads() {
     let mut body = serde_json::to_value(heartbeat()).unwrap();
     body["load"] = serde_json::to_value(&written).unwrap();
     let read = decoded(body);
-    assert_eq!(read, load());
+    // The released agent sends no host counter: the load reads without one.
+    let released = NodeLoad {
+        host_cpu_usec: None,
+        ..load()
+    };
+    assert_eq!(read, released);
     assert_eq!(
         read.minutes[0],
         LeaseMinute {

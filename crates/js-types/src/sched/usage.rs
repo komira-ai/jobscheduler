@@ -67,7 +67,8 @@ pub fn key_hash(key: &WorkKey) -> u64 {
         })
 }
 
-/// One reading of the node's action cgroup, taken by the agent.
+/// One reading of the node, taken by the agent: the whole host's CPU, the actions cgroup's
+/// memory, and the leases.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NodeLoad {
     /// Counts readings within one agent process, one more for each. A reading whose `seq`
@@ -76,8 +77,10 @@ pub struct NodeLoad {
     /// The agent's monotonic clock, in microseconds, when the reading was taken. The only
     /// time base used for windows.
     pub mono_usec: u64,
-    /// Cumulative CPU time of the actions cgroup, in microseconds. Descendants removed
-    /// since an earlier reading are still included.
+    /// Cumulative CPU busy time of the whole host, in microseconds: every process counts,
+    /// the leases and everything else (the agent, the storage service, the kernel). From an
+    /// agent of an earlier release, which sends no host counter, the actions cgroup's
+    /// cumulative CPU time instead.
     pub cpu_usage_usec: u64,
     /// Memory in use by the actions cgroup that cannot simply be dropped: `memory.current`
     /// minus the inactive file pages. Clamped at 0 when the inactive file is the

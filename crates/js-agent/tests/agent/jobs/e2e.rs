@@ -398,6 +398,7 @@ fn the_agent_sends_its_load_to_a_real_server() {
     let run = rig.queued(1000);
     let files = &rig.machine.files;
     files.set(&format!("{slice}/cpu.stat"), "usage_usec 10\n");
+    files.set("/proc/stat", "cpu  1 0 0 0 0 0 0 0\n");
     files.set(&format!("{slice}/memory.current"), "4096\n");
     files.set(&format!("{slice}/cpu.max"), "max 100000\n");
     files.set(

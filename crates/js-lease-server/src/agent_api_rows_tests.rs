@@ -651,6 +651,42 @@ async fn each_judgement_of_a_beat_is_answered_as_the_row_says() {
     assert_eq!(said(&refused), (409, "stale-epoch"));
 }
 
+/// Asserts that the row keeps the whole host's CPU counter of a beat's load, not the actions
+/// group's: a load whose `host_cpu_usec` is 600 and whose `cpu_usage_usec` is 6 leaves 600 in
+/// the row, and a later load without the host counter (an agent of an earlier release) leaves
+/// its actions counter, 9. Catches a row that keeps the jobs' CPU alone, which a placement
+/// reading the row would take for the host's.
+#[tokio::test]
+async fn the_row_keeps_the_hosts_cpu_counter_of_a_beats_load() {
+    let world = World::new();
+    let server = world.server("rows_host_cpu", Kind::JOBS);
+    let session = server.join("host-a").await;
+    let load = |seq: u64, cpu: u64, host: Option<u64>| {
+        let mut load = json!({
+            "seq": seq, "mono_usec": seq * 5_000_000, "cpu_usage_usec": cpu,
+            "working_set_bytes": 7,
+        });
+        if let Some(host) = host {
+            load["host_cpu_usec"] = json!(host);
+        }
+        json!({ "load": load })
+    };
+    let stored = || {
+        let reading = world.row("host-a").record.state.load.unwrap();
+        (reading.seq, reading.cpu_usage_usec)
+    };
+    server
+        .beat_with(&session, Some(1), Vec::new(), load(1, 6, Some(600)))
+        .await
+        .unwrap();
+    assert_eq!(stored(), (1, 600));
+    server
+        .beat_with(&session, Some(2), Vec::new(), load(2, 9, None))
+        .await
+        .unwrap();
+    assert_eq!(stored(), (2, 9));
+}
+
 /// Asserts that a beat of a session whose row is gone is 409 `unknown-host`, which makes the
 /// agent say hello: the row is deleted at its version, and the beat, whose epoch the registry
 /// holds, is refused. Catches a beat served for a host whose row is not there, which would run
