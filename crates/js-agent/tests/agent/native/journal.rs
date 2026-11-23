@@ -120,7 +120,7 @@ fn concurrent_adds_are_never_lost_to_a_retirement() {
 #[test]
 fn a_started_run_is_recorded_with_its_account_and_uid_until_it_is_removed() {
     let mut rig = Rig::new("journal-record");
-    let mut body = native("/bin/true", &[]);
+    let mut body = native("/usr/bin/true", &[]);
     body.outputs.push(OutputSpec {
         path: "out".to_owned(),
         kind: OutputKind::File,
@@ -245,7 +245,7 @@ fn a_journal_that_cannot_be_written_stops_the_start_before_an_account_is_lent() 
         config.journal = dir.path("no-such-dir").join("native-leases");
     });
     let ready = rig.accounts.records();
-    let spec = rig.spec("r1", native("/bin/true", &[]));
+    let spec = rig.spec("r1", native("/usr/bin/true", &[]));
     let error = rig.rt.create_and_start(&spec).unwrap_err();
     assert!(error.0.starts_with("the lease journal: "), "{}", error.0);
     assert_eq!(
@@ -269,7 +269,7 @@ fn a_lease_that_could_not_be_undone_is_dropped_by_a_later_runtime() {
     let lent = rig.accounts.records().remove(0);
     rig.accounts.keep_record(&lent);
     rig.launcher.fail(Failing::Launch);
-    let spec = rig.spec("r1", native("/bin/true", &[]));
+    let spec = rig.spec("r1", native("/usr/bin/true", &[]));
     rig.rt.create_and_start(&spec).unwrap_err();
     assert_eq!(live(&rig), ["7.0"]);
     rig.accounts.free_record(&lent);

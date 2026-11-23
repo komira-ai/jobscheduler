@@ -115,7 +115,7 @@ fn a_kbf_shaped_start_links_both_mounts_and_grants_them_in_its_profile() {
     assert_eq!(rig.rt.check_job_fs(&mounts, &[]), Ok(()));
     assert_eq!(rig.rt.resolve_fs("r1", "", &mounts, 0), FsPrepared::Ready);
     rig.rt
-        .create_and_start(&rig.spec("r1", native("/bin/true", &[])))
+        .create_and_start(&rig.spec("r1", native("/usr/bin/true", &[])))
         .unwrap();
 
     let exec = exec_of(&rig, 0);
@@ -383,7 +383,7 @@ fn a_host_path_that_cannot_be_had_beneath_a_root_is_refused_by_code() {
     }
     // A refusal keeps no plan: a start of the run links nothing.
     rig.rt
-        .create_and_start(&rig.spec("r1", native("/bin/true", &[])))
+        .create_and_start(&rig.spec("r1", native("/usr/bin/true", &[])))
         .unwrap();
     let exec = exec_of(&rig, 0);
     assert_eq!(visible(&exec), 0);
@@ -408,7 +408,7 @@ fn a_sub_path_is_linked_and_a_nested_target_gets_its_parent_directory() {
     ]);
     assert_eq!(rig.rt.resolve_fs("r1", "", &mounts, 0), FsPrepared::Ready);
     rig.rt
-        .create_and_start(&rig.spec("r1", native("/bin/true", &[])))
+        .create_and_start(&rig.spec("r1", native("/usr/bin/true", &[])))
         .unwrap();
     let exec = exec_of(&rig, 0);
     assert_eq!(fs::read_link(exec.join("a/b")).unwrap(), rw);
@@ -434,7 +434,7 @@ fn discarding_the_file_system_of_a_run_drops_its_plan_and_is_idempotent() {
     assert!(rig.rt.discard_fs("r1").is_ok());
     assert!(rig.rt.discard_fs("never-seen").is_ok());
     rig.rt
-        .create_and_start(&rig.spec("r1", native("/bin/true", &[])))
+        .create_and_start(&rig.spec("r1", native("/usr/bin/true", &[])))
         .unwrap();
     let exec = exec_of(&rig, 0);
     assert_eq!(visible(&exec), 0);
@@ -458,7 +458,7 @@ fn a_link_whose_name_is_taken_fails_the_start_and_removes_its_user() {
     let taken = dir_in(&rig, "rw", "taken");
     let mounts = fs_of(vec![mount(&out, "/work/out", MountMode::ReadWrite, false)]);
     assert_eq!(rig.rt.resolve_fs("r1", "", &mounts, 0), FsPrepared::Ready);
-    let mut spec = rig.spec("r1", native("/bin/true", &[]));
+    let mut spec = rig.spec("r1", native("/usr/bin/true", &[]));
     spec.mounts = vec![ResolvedMount {
         host: taken,
         target: "out".to_owned(),

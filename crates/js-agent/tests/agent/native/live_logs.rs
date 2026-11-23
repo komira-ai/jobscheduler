@@ -169,8 +169,10 @@ fn gate_of(rig: &Rig, run_id: &str) -> PathBuf {
 
 /// A job that prints nothing and ends with exit code 0 once the file `gate` is there.
 fn waiting(gate: &Path) -> js_agent_wire::NativeSpec {
+    // From `/`: the run directory goes with the account when a later runtime's pool retires
+    // it, and a shell whose working directory is gone writes errors into the log under test.
     let script = format!(
-        "until [ -e '{}' ]; do /bin/sleep 0.01; done",
+        "cd / && until [ -e '{}' ]; do /bin/sleep 0.01; done",
         gate.display()
     );
     native("/bin/sh", &["-c", &script])

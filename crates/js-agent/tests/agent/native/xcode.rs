@@ -38,7 +38,7 @@ fn a_start_naming_a_held_xcode_runs_with_that_apps_developer_dir_and_selects_not
     let mut rig = Rig::new("xcode-held").holding(two());
     assert_eq!(rig.rt.check_xcode("16F6"), Ok(()));
     assert_eq!(rig.rt.check_xcode("16C5032a"), Ok(()));
-    let mut spec = rig.spec("r1", native("/bin/true", &[]));
+    let mut spec = rig.spec("r1", native("/usr/bin/true", &[]));
     spec.xcode = Some("16F6".to_owned());
     let id = rig.rt.create_and_start(&spec).unwrap();
     let launched = rig.launcher.last();
@@ -75,7 +75,7 @@ fn a_start_naming_a_held_xcode_runs_with_that_apps_developer_dir_and_selects_not
         .collect();
     assert!(named.is_empty(), "{named:?}");
     assert_eq!(rig.launcher.launched().len(), 1);
-    assert_eq!(launched.program, "/bin/true");
+    assert_eq!(launched.program, "/usr/bin/true");
     assert!(launched.args.is_empty());
     assert!(!launched.profile.contains("xcode-select"));
     rig.settle(&id);
@@ -87,7 +87,7 @@ fn a_start_naming_a_held_xcode_runs_with_that_apps_developer_dir_and_selects_not
 #[test]
 fn a_start_naming_no_xcode_runs_without_a_developer_dir() {
     let mut rig = Rig::new("xcode-none").holding(two());
-    let spec = rig.spec("r1", native("/bin/true", &[]));
+    let spec = rig.spec("r1", native("/usr/bin/true", &[]));
     rig.rt.create_and_start(&spec).unwrap();
     let launched = rig.launcher.last();
     assert!(launched.env.iter().all(|(name, _)| name != "DEVELOPER_DIR"));
@@ -127,7 +127,7 @@ fn a_start_naming_an_xcode_the_runtime_lacks_is_refused_before_an_account_is_len
 fn a_run_naming_an_unheld_xcode_fails_before_an_account_is_lent() {
     let mut rig = Rig::new("xcode-unheld-run").holding(two());
     let ready = rig.accounts.records();
-    let mut spec = rig.spec("r1", native("/bin/true", &[]));
+    let mut spec = rig.spec("r1", native("/usr/bin/true", &[]));
     spec.xcode = Some("99Z9".to_owned());
     let error = rig.rt.create_and_start(&spec).unwrap_err();
     assert!(error.0.contains("99Z9"), "{}", error.0);
