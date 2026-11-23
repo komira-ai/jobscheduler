@@ -116,7 +116,7 @@ fn a_getconf_that_fails_fails_the_lookup_with_its_error_text() {
     let valid = format!("{}\n", root.join("ab/slot/T").display());
     for (code, stdout) in [(Some(1), ""), (None, valid.as_str())] {
         let mut asked = 0;
-        let why = folders_via(&slot(), &root, |_| {
+        let why = folders_via(&slot(), &root, &mut |_| {
             asked += 1;
             Ok(ran(code, stdout, " no slot\n"))
         })
@@ -138,10 +138,10 @@ fn a_getconf_that_fails_fails_the_lookup_with_its_error_text() {
 #[test]
 fn the_folders_are_asked_of_getconf_in_order_and_returned() {
     let (_dir, root) = folders("asked");
-    let why = folders_via(&slot(), &root, |_| Err(io::Error::other("no spawn"))).unwrap_err();
+    let why = folders_via(&slot(), &root, &mut |_| Err(io::Error::other("no spawn"))).unwrap_err();
     assert_eq!(why.to_string(), "no spawn");
     let mut commands = Vec::new();
-    let got = folders_via(&slot(), &root, |command| {
+    let got = folders_via(&slot(), &root, &mut |command| {
         commands.push(command.to_vec());
         let folder = if command[1] == "DARWIN_USER_TEMP_DIR" {
             "T"
