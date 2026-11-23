@@ -36,6 +36,7 @@ pub(crate) fn row(end: u64) -> EndedRow {
             memory_bytes: 1 << 30,
             cpu_mean_milli: 1100,
         }),
+        cpu_series: None,
     }
 }
 
@@ -55,6 +56,7 @@ fn bare(end: u64, id: &str) -> EndedRow {
         actual_end: end,
         error_ms: None,
         used: None,
+        cpu_series: None,
     }
 }
 
@@ -211,12 +213,24 @@ fn the_bytes_of_a_row_are_pinned() {
 }
 
 /// Catches: a reader that refuses a row a later build wrote with a field added at the end,
-/// which would make every added field cost the older build its history.
+/// which would make every added field cost the older build its history. The bytes come after
+/// the last field this build knows, the CPU series, on a row without one and on a row with one.
 #[test]
 fn bytes_after_the_known_fields_are_a_later_builds_fields_and_are_ignored() {
-    let mut later = encode(&row(9));
-    later.extend_from_slice(&[1, 0x81, 0x01, 7]);
-    assert_eq!(decode(&later), Ok(row(9)));
+    let series = CpuSeries::new(4, vec![8, 16, 24], 9_000_000, false);
+    for cpu_series in [None, series] {
+        let known = EndedRow {
+            cpu_series,
+            ..row(9)
+        };
+        let mut later = encode(&known);
+        if known.cpu_series.is_none() {
+            // A byte 0 stands for the absent series, so what follows it is the later build's.
+            later.push(0);
+        }
+        later.extend_from_slice(&[1, 0x81, 0x01, 7]);
+        assert_eq!(decode(&later), Ok(known));
+    }
 }
 
 /// Catches: a row of another version read as this one.

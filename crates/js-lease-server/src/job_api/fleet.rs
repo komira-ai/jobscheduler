@@ -751,6 +751,12 @@ fn record(row: EndedRow) -> wire::UsageRecord {
         whole_host: i32::from(whole_host(&row)),
         mark_give_ups: row.give_up_outcome.unwrap_or(0),
         estimated_run_ms: estimated_run(&row),
+        cpu_series: row.cpu_series.map(|series| wire::CpuSeries {
+            granularity_secs: series.granularity_secs,
+            points: series.points.into_iter().map(u32::from).collect(),
+            run_usec: series.run_usec,
+            partial: series.partial,
+        }),
     }
 }
 
