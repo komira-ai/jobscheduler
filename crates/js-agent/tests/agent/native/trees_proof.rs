@@ -35,7 +35,12 @@ struct State {
     refuse_prepare: bool,
     /// Keep every source after a release or a sweep, as a provider that does not release.
     keeps: bool,
+    /// What the verb opened its providers' client with: the agent id and the providers.
+    opened: Vec<(String, Vec<Provider>)>,
 }
+
+/// A provider as the verb names it to its client: name, socket and uid.
+type Provider = (String, PathBuf, u32);
 
 /// A mount provider that answers each call the second time it is asked (the first answer is
 /// `Pending`, as a socket call's is), and makes a run's directory as tierstore names it:
@@ -175,7 +180,11 @@ impl Proof {
                 .map_err(|why| why.0)
         };
         let provider = self.provider.clone();
-        let providers = move |_: &str, _: &[(String, PathBuf, u32)]| {
+        let providers = move |agent: &str, sockets: &[(String, PathBuf, u32)]| {
+            provider
+                .state()
+                .opened
+                .push((agent.to_owned(), sockets.to_vec()));
             Ok(Box::new(provider.clone()) as Box<dyn Providers>)
         };
         let over = Over {
@@ -427,4 +436,37 @@ fn a_wrong_command_line_exits_64_naming_what_is_wrong() {
         assert_eq!(err, format!("js-agent: {VERB}: {why}\n"), "{given:?}");
     }
     assert!(proof.answered().is_empty());
+}
+
+/// Asserts that the providers' client is opened once with the agent id the placements are
+/// made for, `trees-proof` unless `--agent-id` names another, and with the provider of
+/// `--provider` and the uid of `--provider-uid` (0 unless given). Catches a verb whose
+/// placements are made under an agent id other than the one it releases and sweeps, or
+/// that checks the provider's socket against the wrong user.
+#[test]
+fn the_providers_client_gets_the_agent_id_and_the_provider_given() {
+    let socket = PathBuf::from("/nonexistent/provider.sock");
+    let by_default = Proof::new("agent-default");
+    let (code, out, err) = by_default.run(&JOB);
+    assert_eq!(code, ExitCode::from(status::OK), "{out}{err}");
+    assert_eq!(
+        by_default.provider.state().opened,
+        [(
+            "trees-proof".to_owned(),
+            vec![("tierstore".to_owned(), socket.clone(), 0)]
+        )]
+    );
+
+    let named = Proof::new("agent-named");
+    let mut words = vec!["--agent-id", "mac-proof-7", "--provider-uid", "263"];
+    words.extend(JOB);
+    let (code, out, err) = named.run(&words);
+    assert_eq!(code, ExitCode::from(status::OK), "{out}{err}");
+    assert_eq!(
+        named.provider.state().opened,
+        [(
+            "mac-proof-7".to_owned(),
+            vec![("tierstore".to_owned(), socket, 263)]
+        )]
+    );
 }
