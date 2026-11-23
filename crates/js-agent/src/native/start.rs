@@ -321,6 +321,7 @@ impl NativeRuntime {
                 supervised,
                 ready,
                 kill_after: None,
+                sweeping: false,
             }),
         })
     }
