@@ -171,10 +171,17 @@ pub struct Flags {
     /// start is refused (`input-not-allowed`).
     #[arg(long, value_name = "PATH")]
     pub native_trees_root: Option<PathBuf>,
-    /// `--native-put-root` and `--native-put-user`: where a run's output is committed after
-    /// it (`native/put.rs`).
-    #[command(flatten)]
-    pub native_put: PutFlags,
+    /// The put ingest's directory (tierstore's `local_cache.put_ingest` put root): a run's
+    /// read-write mount of `<this>/cas/b/<build>/<nonce>` is where its output is committed
+    /// after it (`native/put.rs`), and is never given to the job; no run may read below it.
+    /// Needs `--native-put-user` and `--native-accounts`.
+    #[arg(long, value_name = "PATH")]
+    pub native_put_root: Option<PathBuf>,
+    /// The user the tierstore node runs as, by name or by number (a number is its uid and
+    /// its group): the folders of each key become its, and each job's put directory its
+    /// group's. Needs `--native-put-root`.
+    #[arg(long, value_name = "USER")]
+    pub native_put_user: Option<String>,
     /// Turns the VM backend on (macOS build only, beside `--native-accounts`): the
     /// absolute path of the signed `js-vmm` binary, started as `js-vmm lease` for each VM. A
     /// VM start then runs in a fresh VM cloned from the base image and destroyed when it
@@ -220,14 +227,8 @@ impl Flags {
             ("--native-pf-state-dir", self.native_pf_state_dir.is_some()),
             ("--native-pfctl", self.native_pfctl.is_some()),
             ("--native-trees-root", self.native_trees_root.is_some()),
-            (
-                "--native-put-root",
-                self.native_put.native_put_root.is_some(),
-            ),
-            (
-                "--native-put-user",
-                self.native_put.native_put_user.is_some(),
-            ),
+            ("--native-put-root", self.native_put_root.is_some()),
+            ("--native-put-user", self.native_put_user.is_some()),
             ("--vm-driver", self.vm_driver.is_some()),
             ("--vm-store", self.vm_store.is_some()),
         ]
@@ -522,7 +523,10 @@ impl Jobs {
         let native = NativeSettings::from_flags(&cli.os.native(), denied, &journal)?
             .map(|native| native.with_mount_roots(self.mounts.clone()))
             .transpose()?;
-        let put = &cli.os.native_put;
+        let put = &PutFlags {
+            native_put_root: cli.os.native_put_root.clone(),
+            native_put_user: cli.os.native_put_user.clone(),
+        };
         let native = match native {
             Some(native) => {
                 let put = native::put_of(put, &node_of_name)?;

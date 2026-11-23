@@ -30,7 +30,6 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use clap::Args;
 use js_agent_wire::{OutputKind, OutputSpec};
 use js_mac_pool::seatbelt::AbsPath;
 
@@ -43,19 +42,13 @@ use crate::mac_put::{self, Committed, Node, PutTarget};
 /// The name of the one output a put mount gives a run, below the mount's target.
 const PACK: &str = "pack";
 
-/// The put flags as the command line gave them.
-#[derive(Debug, Clone, Default, Args)]
+/// The put flags as the command line gave them (`--native-put-root`, `--native-put-user`;
+/// the macOS build's `Flags` holds them).
+#[derive(Debug, Clone, Default)]
 pub struct PutFlags {
-    /// The put ingest's directory (tierstore's `local_cache.put_ingest` put root): a run's
-    /// read-write mount of `<this>/cas/b/<build>/<nonce>` is where its output is committed
-    /// after it, and is never given to the job; no run may read below it. Needs
-    /// `--native-put-user` and `--native-accounts`.
-    #[arg(long, value_name = "PATH")]
+    /// `--native-put-root`.
     pub native_put_root: Option<PathBuf>,
-    /// The user the tierstore node runs as, by name or by number (a number is its uid and
-    /// its group): the folders of each key become its, and each job's put directory its
-    /// group's. Needs `--native-put-root`.
-    #[arg(long, value_name = "USER")]
+    /// `--native-put-user`.
     pub native_put_user: Option<String>,
 }
 
