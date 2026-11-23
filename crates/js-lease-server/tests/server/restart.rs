@@ -16,7 +16,8 @@ use serde_json::json;
 
 use crate::agents_support::{JOB_POOL, JOIN, Session, agent_args, entry, hosts, join, listed};
 use crate::jobs_support::{
-    beat_with, commands, job_agent as shared_agent, job_of, one_start, running, submit_body,
+    beat_with, commands, job_agent as shared_agent, job_of, left_the_queue, one_start, running,
+    submit_body,
 };
 use crate::support::{
     Harness, Scratch, T0, TOKEN, base_args, config, lease_file, replace, request,
@@ -233,6 +234,8 @@ async fn a_restored_older_job_store_stops_unknown_jobs_and_reissues_no_id() {
     let host_1 = job_agent(&first, "host-1").await;
     let a = submit(&first).await;
     first.ticks.step().await;
+    // The start rides on the beat after the placement, which the poller may still be making.
+    left_the_queue(&first, &a).await;
     let (started, a_allocation) = one_start(&beat_with(&first, &host_1, &[]).await);
     assert_eq!(started, a);
     let quiet = beat_with(&first, &host_1, &[running(&a)]).await;
@@ -245,6 +248,7 @@ async fn a_restored_older_job_store_stops_unknown_jobs_and_reissues_no_id() {
     let host_2 = job_agent(&first, "host-2").await;
     let b = submit(&first).await;
     first.ticks.step().await;
+    left_the_queue(&first, &b).await;
     let (started, b_allocation) = one_start(&beat_with(&first, &host_2, &[]).await);
     assert_eq!(started, b);
     beat_with(&first, &host_2, &[running(&b)]).await;
@@ -307,6 +311,8 @@ async fn a_restored_older_job_store_stops_unknown_jobs_and_reissues_no_id() {
     h.ticks.step().await;
     let clean = beat_with(&h, &host_2, &[]).await;
     assert_eq!(commands(&clean), (vec![], vec![]), "{clean}");
+    // The clean listing poked the placement poller, whose pass places C on host-2.
+    left_the_queue(&h, &c).await;
     let (started, c_allocation) = one_start(&beat_with(&h, &host_2, &[]).await);
     assert_eq!(started, c);
     assert_eq!(c_allocation, "06".repeat(16));

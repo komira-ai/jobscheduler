@@ -327,6 +327,7 @@ pub mod fuse_env;
 #[cfg(target_os = "linux")]
 mod gpu_dropin;
 pub mod health;
+mod hidden_verbs;
 pub mod hold_cordon;
 mod host;
 pub mod host_ports;
@@ -340,6 +341,7 @@ pub mod leak_scan;
 pub mod lifecycle;
 mod login;
 pub mod logs;
+pub mod mac_accounts;
 #[cfg(target_os = "macos")]
 pub mod native;
 mod os_version;
@@ -523,12 +525,8 @@ pub fn main_with(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> ExitCode {
-    #[cfg(target_os = "linux")]
-    if args
-        .get(1)
-        .is_some_and(|verb| verb.to_str() == Some(image::pull::VERB))
-    {
-        return image::pull::run(&args, out, err, &image::pull::Host::system());
+    if let Some(code) = hidden_verbs::dispatch(&args, out, err) {
+        return code;
     }
     // An operator's clear of the taint stops and starts the agent's unit itself: it runs no
     // agent and installs no signal handler.

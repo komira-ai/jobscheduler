@@ -55,6 +55,7 @@ use js_types::{HostId, Resources};
 use tracing::warn;
 
 use crate::job_alloc::{self, Freed};
+use crate::job_expiry::JobLimits;
 use crate::job_held;
 use crate::job_start::start_of;
 use crate::job_store::ServerJobs;
@@ -129,6 +130,9 @@ pub(crate) struct BeatContext<'a> {
     pub(crate) polls_dispatch: bool,
     /// Where a start failure the host reports is counted.
     pub(crate) metrics: &'a dyn MetricsSink,
+    /// The pool's limits, of which a start refused for capacity reads its requeue count and bar
+    /// ([`job_held::held_or_end`]).
+    pub(crate) limits: JobLimits,
 }
 
 /// The per-job half of a heartbeat of the host `context` names, listing `listed` and
@@ -364,7 +368,7 @@ fn commit_result(
         let code = result.detail.as_deref().unwrap_or("none");
         context.metrics.start_refused(context.host, code);
     };
-    let Some(end) = job_held::held_or_end(jobs, context.host, &job, end)? else {
+    let Some(end) = job_held::held_or_end(jobs, context.host, &job, end, &context.limits)? else {
         tell_refused();
         return Ok(Some(Ack::Accepted));
     };

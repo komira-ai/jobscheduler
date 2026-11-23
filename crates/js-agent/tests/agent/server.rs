@@ -20,6 +20,11 @@ use tokio::runtime::Runtime;
 use crate::jobs::fake::FakeMachine;
 use crate::support::{Host, Lowest, Ran, Scratch, run_on, run_on_defaulted, run_on_polling};
 
+/// The most reads of a job [`Server::left_the_queue`] makes before it fails: a guard against
+/// a placement poller that never places, far above the few reads a placement takes.
+#[cfg(target_os = "linux")]
+const QUEUE_READS: usize = 10_000;
+
 /// The wall time the server's clock starts at.
 pub const T0: u64 = 1_000_000;
 
@@ -299,6 +304,22 @@ impl Server {
     #[cfg(target_os = "linux")]
     pub fn job_state(&self, id: &str) -> String {
         self.job(id)["state"].as_str().unwrap().to_owned()
+    }
+
+    /// The state of the job `id` once it has left `JOB_STATE_QUEUED`: a submit answers the job
+    /// queued and pokes the server's placement poller, whose pass places it on a task of its
+    /// own, so the job is read until that pass has run. Nothing is timed; a job still queued
+    /// after [`QUEUE_READS`] reads fails the test rather than holding it up.
+    #[cfg(target_os = "linux")]
+    pub fn left_the_queue(&self, id: &str) -> String {
+        for _ in 0..QUEUE_READS {
+            let state = self.job_state(id);
+            if state != "JOB_STATE_QUEUED" {
+                return state;
+            }
+            std::thread::yield_now();
+        }
+        panic!("the job {id} is still queued after {QUEUE_READS} reads");
     }
 
     /// The result of the job `id` as `GET /v1/jobs/{id}/result` answers it.

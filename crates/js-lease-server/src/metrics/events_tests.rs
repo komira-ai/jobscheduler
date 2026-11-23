@@ -72,6 +72,7 @@ fn a_job_pass_counts_its_start_failures_its_duration_and_its_failure() {
     let limits = JobLimits {
         max_queue_wait: Duration::from_secs(600),
         start_timeout: Duration::from_secs(300),
+        ..JobLimits::DEFAULT
     };
     let rig = clocked_rig("metrics_pass", false, limits);
     let recorder = metered(&rig);

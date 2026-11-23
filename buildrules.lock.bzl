@@ -4,12 +4,12 @@
 SCHEMA = 2
 RUSTC = "1.95.0"
 TARGET = "x86_64-unknown-linux-gnu"
-CARGO_LOCK_SHA256 = "e4639ed9469686e97cc76d75871e13652ff00c5c872dfd76a03f9e5170c80103"
+CARGO_LOCK_SHA256 = "b91868811c231a1b689410a0cb4a769752321648500002d0f1421775cf7d16cb"
 MANIFEST_SHA256 = {
     "Cargo.toml": "6068f407ba23f7d41e379b77fc8d6b0f66b8cc717a35d2322243f2b9690e67fa",
     "crates/js-agent-usage/Cargo.toml": "eb4f33ee86f779ec8745bcaf2419317e1dd8d97b148bad2fa2d8019b6726f147",
     "crates/js-agent-wire/Cargo.toml": "22099db6711d6c4a5c4a37c98fab41552ea087c9db1e610511d5ed2ec722f82b",
-    "crates/js-agent/Cargo.toml": "11af25318914e6f7985bb9b59d50f0d26183e98188c012b5f2538caae37e0c15",
+    "crates/js-agent/Cargo.toml": "7da25923ec5fbf2f4a30b9b0ffba36155bf28f5061e0da57005cbb513113fd42",
     "crates/js-alert/Cargo.toml": "643847634b5bd4e252707143bd488c0e8ebfa8dba974de43fe1f4452ee231eb1",
     "crates/js-analysis/Cargo.toml": "64f41142f7ff29b2af9064469d5ae8c4e7b4c79d8340e183618e90eed527b2f5",
     "crates/js-api-gateway/Cargo.toml": "6e3f1fd3cf53ebc8ee65294e36823d3033c6ac242ff5655d10d7625e8f1a6e42",

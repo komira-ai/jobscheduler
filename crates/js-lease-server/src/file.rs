@@ -109,6 +109,8 @@ const POOL_KEYS: &[&str] = &[
     "provider_limits",
     "max_queue_wait",
     "start_timeout",
+    "capacity_requeues",
+    "capacity_refusal_bar",
     "path_grace",
     "network",
 ];
