@@ -91,7 +91,7 @@ fn two_inputs_are_staged_into_exec_read_only() {
     let tool = tree.join("tool");
     fs::write(&tool, "#!/bin/sh\n").unwrap();
     fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
-    let mut spec = rig.spec("r1", native("/bin/true", &[]));
+    let mut spec = rig.spec("r1", native("/usr/bin/true", &[]));
     let third = source(&rig, "src-c", "y", "three");
     spec.mounts = vec![
         input(&tree, "in/a"),
@@ -134,7 +134,7 @@ fn an_input_link_is_copied_as_a_link_and_a_cwd_may_follow_one_inside() {
     let tree = source(&rig, "src", "x", "one");
     fs::create_dir(tree.join("real")).unwrap();
     std::os::unix::fs::symlink("real", tree.join("here")).unwrap();
-    let mut body = native("/bin/true", &[]);
+    let mut body = native("/usr/bin/true", &[]);
     body.cwd = "in/here".to_owned();
     let mut spec = rig.spec("r1", body);
     spec.mounts = vec![input(&tree, "in")];
@@ -155,7 +155,7 @@ fn an_input_link_is_copied_as_a_link_and_a_cwd_may_follow_one_inside() {
 #[test]
 fn a_cwd_runs_in_its_directory_below_exec() {
     let mut rig = Rig::in_dir("cwd", 2, |_, _| {});
-    let mut body = native("/bin/true", &[]);
+    let mut body = native("/usr/bin/true", &[]);
     body.cwd = "sub".to_owned();
     rig.rt
         .create_and_start(&rig.spec("r1", body.clone()))
@@ -180,7 +180,7 @@ fn a_cwd_runs_in_its_directory_below_exec() {
 fn a_cwd_that_escapes_exec_is_refused_and_nothing_starts() {
     let mut rig = Rig::new("cwd-escape");
     for cwd in ["../x", "/etc"] {
-        let mut body = native("/bin/true", &[]);
+        let mut body = native("/usr/bin/true", &[]);
         body.cwd = cwd.to_owned();
         let refused = rig.rt.check_native(&body).unwrap_err();
         assert_eq!(refused.code, refusal::INVALID_JOB);
@@ -193,7 +193,7 @@ fn a_cwd_that_escapes_exec_is_refused_and_nothing_starts() {
     let tree = rig.dir.path("src");
     fs::create_dir(&tree).unwrap();
     std::os::unix::fs::symlink("/", tree.join("out")).unwrap();
-    let mut body = native("/bin/true", &[]);
+    let mut body = native("/usr/bin/true", &[]);
     body.cwd = "in/out/etc".to_owned();
     let mut spec = rig.spec("r1", body);
     spec.mounts = vec![input(&tree, "in")];
@@ -219,7 +219,7 @@ fn a_cwd_that_is_not_a_directory_fails_the_start() {
         ("in/file", "native.cwd \"in/file\": not a directory"),
         ("in/dangling", "native.cwd \"in/dangling\": "),
     ] {
-        let mut body = native("/bin/true", &[]);
+        let mut body = native("/usr/bin/true", &[]);
         body.cwd = cwd.to_owned();
         let mut spec = rig.spec("r1", body);
         spec.mounts = vec![input(&tree, "in")];
@@ -252,7 +252,7 @@ fn an_input_that_cannot_be_staged_fails_the_start() {
         (vec![input(device, "s")], "an input: s: "),
     ];
     for (n, (inputs, said)) in cases.into_iter().enumerate() {
-        let mut spec = rig.spec(&format!("r{n}"), native("/bin/true", &[]));
+        let mut spec = rig.spec(&format!("r{n}"), native("/usr/bin/true", &[]));
         spec.mounts = inputs;
         let error = rig.rt.create_and_start(&spec).unwrap_err();
         assert!(error.0.starts_with(said), "{n}: {}", error.0);
@@ -334,7 +334,7 @@ fn the_lifecycle_resolves_a_mount_input_below_its_root() {
     let mut h = Native::with("inputs-life", None);
     fs::create_dir(h.dir.path("data").join("x")).unwrap();
     fs::write(h.dir.path("data").join("x/file"), "hi").unwrap();
-    let mut spec = super::lifecycle::job("r1", "/bin/true");
+    let mut spec = super::lifecycle::job("r1", "/usr/bin/true");
     let mount = |root: &str| InputRef::Mount {
         root_name: root.to_owned(),
         rel: "x".to_owned(),
@@ -362,7 +362,7 @@ fn the_lifecycle_resolves_a_mount_input_below_its_root() {
 #[test]
 fn a_cwd_that_cannot_be_looked_up_fails_the_start() {
     let mut rig = Rig::new("cwd-long");
-    let mut body = native("/bin/true", &[]);
+    let mut body = native("/usr/bin/true", &[]);
     body.cwd = "a".repeat(300);
     let error = rig.rt.create_and_start(&rig.spec("r1", body)).unwrap_err();
     let said = format!("native.cwd {:?}: ", "a".repeat(300));

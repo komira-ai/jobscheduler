@@ -600,7 +600,12 @@ impl Jobs {
 /// # Errors
 ///
 /// The text names the flag at fault.
-pub(crate) fn complete(local: &mut Local, cli: &Cli, start: &Start) -> Result<(), String> {
+pub(crate) fn complete(
+    local: &mut Local,
+    cli: &Cli,
+    start: &Start,
+    files: &dyn crate::FileReader,
+) -> Result<(), String> {
     let backend = local.backend.take();
     local.backend = match backend {
         Some(Backend::Native(native)) => {
@@ -611,9 +616,8 @@ pub(crate) fn complete(local: &mut Local, cli: &Cli, start: &Start) -> Result<()
             // The agent asks itself once, here: the state its listing of the privacy
             // database's directory shows is the one the hello reports and the runtime
             // refuses jobs by.
-            let held = native::grant::ask(native::grant::list(std::path::Path::new(
-                native::grant::PRIVACY_DIR,
-            )));
+            let privacy = std::path::Path::new(native::grant::PRIVACY_DIR);
+            let held = native::grant::ask(files.entries(privacy).map(drop));
             let native = native
                 .with_full_disk_access(held)
                 .with_xcodes(start.xcodes.clone());

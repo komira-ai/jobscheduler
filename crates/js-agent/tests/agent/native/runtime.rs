@@ -152,8 +152,8 @@ fn a_jobs_standard_input_is_empty() {
 #[test]
 fn each_start_gets_an_account_of_its_own() {
     let mut rig = Rig::in_dir("leases", 3, |_, _| {});
-    let first = rig.start("r1", "/bin/true", &[]);
-    let second = rig.start("r2", "/bin/true", &[]);
+    let first = rig.start("r1", "/usr/bin/true", &[]);
+    let second = rig.start("r2", "/usr/bin/true", &[]);
     assert_eq!((first, second), (handle("7.0"), handle("7.1")));
     let launches = rig.launcher.launched();
     let names: Vec<&str> = launches
@@ -177,8 +177,8 @@ fn each_start_gets_an_account_of_its_own() {
 #[test]
 fn a_run_lives_in_the_home_of_the_account_the_pool_lent_it() {
     let mut rig = Rig::in_dir("poolhome", 3, |_, _| {});
-    rig.start("r1", "/bin/true", &[]);
-    rig.start("r2", "/bin/true", &[]);
+    rig.start("r1", "/usr/bin/true", &[]);
+    rig.start("r2", "/usr/bin/true", &[]);
     for launched in rig.launcher.launched() {
         let name = launched.var("USER").unwrap();
         assert!(name.starts_with("kbf-acct-"), "{name}");
@@ -217,7 +217,7 @@ fn a_runs_network_is_the_lower_of_its_request_and_the_agents_cap() {
             config.network = cap;
             config.egress = Some(Fake::new(Verdict::Enforced));
         });
-        let mut body = native("/bin/true", &[]);
+        let mut body = native("/usr/bin/true", &[]);
         body.network = asked;
         let spec = rig.spec("r1", body);
         rig.rt.create_and_start(&spec).unwrap();
@@ -235,7 +235,7 @@ fn a_runs_network_is_the_lower_of_its_request_and_the_agents_cap() {
 #[test]
 fn the_agents_own_paths_are_denied_to_the_run() {
     let mut rig = Rig::new("denies");
-    rig.start("r1", "/bin/true", &[]);
+    rig.start("r1", "/usr/bin/true", &[]);
     let launched = rig.launcher.last();
     assert!(
         launched
@@ -379,7 +379,7 @@ fn a_long_stream_is_cut_to_its_end_and_marked() {
 #[test]
 fn a_log_that_cannot_be_read_is_an_error() {
     let mut rig = Rig::new("nolog");
-    let spec = rig.spec("r1", native("/bin/true", &[]));
+    let spec = rig.spec("r1", native("/usr/bin/true", &[]));
     let id = rig.rt.create_and_start(&spec).unwrap();
     rig.settle(&id);
     fs::remove_file(spec.scratch.join("stdout")).unwrap();
@@ -429,7 +429,7 @@ fn a_start_that_fails_after_the_account_is_lent_leaves_nothing() {
     for (n, (why, text)) in cases.into_iter().enumerate() {
         let mut rig = Rig::new(&format!("fail{n}"));
         let lent = ready_account(&rig);
-        let mut spec = rig.spec("r1", native("/bin/true", &[]));
+        let mut spec = rig.spec("r1", native("/usr/bin/true", &[]));
         match n {
             0 => fs::remove_dir(&spec.scratch).unwrap(),
             1 => fs::create_dir(spec.scratch.join("supervisor")).unwrap(),
@@ -457,14 +457,14 @@ fn a_home_or_a_read_model_the_profile_cannot_serve_fails_the_start() {
         config.homes = config.homes.join("..").join("Users");
     });
     let lent = ready_account(&rig);
-    let spec = rig.spec("r1", native("/bin/true", &[]));
+    let spec = rig.spec("r1", native("/usr/bin/true", &[]));
     let error = rig.rt.create_and_start(&spec).unwrap_err();
     assert!(error.0.contains("not in normal form"), "{}", error.0);
     nothing_left(&rig, &lent, 0);
 
     let mut rig = Rig::with("allow", |config| config.read_model = ReadModel::Allow);
     let lent = ready_account(&rig);
-    let spec = rig.spec("r1", native("/bin/true", &[]));
+    let spec = rig.spec("r1", native("/usr/bin/true", &[]));
     let error = rig.rt.create_and_start(&spec).unwrap_err();
     assert!(error.0.starts_with("the profile: "), "{}", error.0);
     nothing_left(&rig, &lent, 0);
@@ -482,7 +482,7 @@ fn a_policy_over_the_bounds_fails_the_start_and_retires_the_account() {
             .collect();
     });
     let lent = ready_account(&rig);
-    let spec = rig.spec("r1", native("/bin/true", &[]));
+    let spec = rig.spec("r1", native("/usr/bin/true", &[]));
     let error = rig.rt.create_and_start(&spec).unwrap_err();
     assert!(error.0.starts_with("the policy: "), "{}", error.0);
     nothing_left(&rig, &lent, 0);
@@ -495,7 +495,7 @@ fn a_policy_over_the_bounds_fails_the_start_and_retires_the_account() {
 fn a_container_body_is_refused_before_any_account_is_lent() {
     let mut rig = Rig::new("container");
     let ready = ready_account(&rig);
-    let mut spec = rig.spec("r1", native("/bin/true", &[]));
+    let mut spec = rig.spec("r1", native("/usr/bin/true", &[]));
     spec.body = Body::Container {
         image: "registry.example/job:1".to_owned(),
         args: Vec::new(),
@@ -592,12 +592,12 @@ fn the_configured_limits_travel_to_the_supervisor_as_fields() {
         config.max_file_bytes = 10;
         config.max_processes = 7;
     });
-    rig.start("r1", "/bin/true", &[]);
+    rig.start("r1", "/usr/bin/true", &[]);
     let launched = rig.launcher.last();
     assert_eq!(launched.max_file_bytes, 10);
     assert_eq!(launched.max_processes, 8);
     let mut big = Rig::with("limits-big", |config| config.max_file_bytes = 3 << 20);
-    big.start("r1", "/bin/true", &[]);
+    big.start("r1", "/usr/bin/true", &[]);
     assert_eq!(big.launcher.last().max_file_bytes, 3 << 20);
 }
 
