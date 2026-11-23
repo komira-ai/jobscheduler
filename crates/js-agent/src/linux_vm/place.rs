@@ -41,14 +41,17 @@ fn settle(client: &mut ProviderClient, call: &ProviderCall, guard: Duration) -> 
     loop {
         let answer = client.ask(NAME, call);
         let waited = u128::from(super::clock::micros_since(began)) > guard.as_micros();
-        match answer {
-            ProviderAnswer::Pending if !waited => {
-                let _ = client.wait_answered(NAME, call, guard);
-            }
-            ProviderAnswer::Unavailable(_) if !waited => {
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            answer => return answer,
+        let final_answer = !matches!(
+            answer,
+            ProviderAnswer::Pending | ProviderAnswer::Unavailable(_)
+        );
+        if waited || final_answer {
+            return answer;
+        }
+        if answer == ProviderAnswer::Pending {
+            let _ = client.wait_answered(NAME, call, guard);
+        } else {
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
 }
@@ -160,10 +163,8 @@ mod tests {
         // A guard of zero gives up at the first answer that is not final.
         let (result, _) = placed(&place2, Duration::ZERO);
         let why = result.unwrap_err();
-        assert!(
-            why.starts_with("Unavailable(") || why.starts_with("Pending"),
-            "{why}"
-        );
+        // The first answer to the first call is that it is in flight.
+        assert_eq!(why, "Pending");
     }
 
     /// Asserts that `run` (the default guard) places a tree, as the verb calls it.

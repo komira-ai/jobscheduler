@@ -187,7 +187,7 @@ fn run_flags(args: &[String]) -> Result<RunFlags, String> {
     if flags.dir.as_os_str().is_empty() {
         return Err("--dir is required".to_owned());
     }
-    if flags.cpus == 0 || flags.memory_mib == 0 {
+    if u64::from(flags.cpus).min(flags.memory_mib) == 0 {
         return Err("--cpus and --memory-mib must be more than 0".to_owned());
     }
     Ok(flags)
@@ -383,6 +383,10 @@ mod tests {
             ("run --dir", "--dir takes a value"),
             (
                 "run --dir /v --cpus 0",
+                "--cpus and --memory-mib must be more than 0",
+            ),
+            (
+                "run --dir /v --memory-mib 0",
                 "--cpus and --memory-mib must be more than 0",
             ),
             ("run --dir /v --cpus x", "--cpus: \"x\" is not a number"),

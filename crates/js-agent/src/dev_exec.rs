@@ -91,11 +91,11 @@ fn parse(rest: &[OsString]) -> Option<(&OsString, &[OsString])> {
 /// The status to exit with for the child's: its code, or 128 + the signal that ended it.
 fn exit_code(status: std::process::ExitStatus) -> u8 {
     use std::os::unix::process::ExitStatusExt as _;
-    match (status.code(), status.signal()) {
-        (Some(code), _) => u8::try_from(code).unwrap_or(1),
-        (None, Some(signal)) => u8::try_from(128 + signal).unwrap_or(1),
-        (None, None) => 1,
-    }
+    // A status with neither a code nor a signal does not occur on Unix; it maps to 1.
+    let code = status
+        .code()
+        .unwrap_or_else(|| 128 + status.signal().unwrap_or(-127));
+    u8::try_from(code).unwrap_or(1)
 }
 
 #[cfg(test)]
@@ -202,8 +202,7 @@ mod tests {
     /// before anything else runs: each answers its own usage with status 2.
     #[test]
     fn the_agent_dispatches_the_development_verbs() {
-        let install =
-            || -> std::io::Result<crate::SystemSleeper> { Err(std::io::Error::other("unused")) };
+        let install = crate::SystemSleeper::install;
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let code = crate::main_with(&install, os(&["js-agent", VERB]), &mut out, &mut err);
         assert_eq!(code, ExitCode::from(USAGE));

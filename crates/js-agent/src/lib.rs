@@ -527,18 +527,13 @@ pub fn main_with(
 ) -> ExitCode {
     // The prototype's development verb for the Full Disk Access proof: answered first, as it
     // only starts one program and waits for it.
-    if args
-        .get(1)
-        .is_some_and(|verb| verb.to_str() == Some(dev_exec::VERB))
-    {
+    let verb = args.get(1).and_then(|verb| verb.to_str());
+    if verb == Some(dev_exec::VERB) {
         return dev_exec::run(&args, err);
     }
     // The Linux VM prototype's development verb: answered before anything else starts a
     // thread or a runtime, as it runs its own.
-    if args
-        .get(1)
-        .is_some_and(|verb| verb.to_str() == Some(linux_vm::VERB))
-    {
+    if verb == Some(linux_vm::VERB) {
         return linux_vm::run(&args, out, err);
     }
     #[cfg(target_os = "linux")]
