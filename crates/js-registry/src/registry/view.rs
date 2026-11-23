@@ -59,6 +59,10 @@ impl Registry {
                     .latest
                     .clone()
                     .filter(|_| state != HostState::Lost),
+                load_seconds: match state {
+                    HostState::Lost => Default::default(),
+                    _ => record.load.seconds.clone(),
+                },
                 phase: record.phase,
                 lease: None,
                 leases: Vec::new(),

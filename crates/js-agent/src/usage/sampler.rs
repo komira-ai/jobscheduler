@@ -12,7 +12,7 @@ use super::cgroup::{
     parse_usage_usec, working_set,
 };
 use super::clock::UsageClock;
-use super::proc_stat::{PROC_STAT, parse_host_busy_usec};
+use super::host::{HostCpu, host_cpu};
 
 /// A lease whose cgroup is to be read.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,11 +75,8 @@ impl<F: FileReader> Sampler<F> {
         let cpu = self
             .value(dir, "cpu.stat", parse_usage_usec)
             .ok_or(SampleError::NodeCpuStat)?;
-        let host = self
-            .files
-            .read(PROC_STAT)
-            .ok()
-            .and_then(|text| parse_host_busy_usec(&text))
+        let host = host_cpu(&self.files)
+            .map(|host| host.busy_usec)
             .ok_or(SampleError::HostCpuStat)?;
         let mono_usec = clock.now_usec();
         let current = self
@@ -109,6 +106,14 @@ impl<F: FileReader> Sampler<F> {
             leases: read.into_iter().flatten().collect(),
             unreadable_leases: u32::try_from(unreadable).unwrap_or(u32::MAX),
         })
+    }
+
+    /// The whole host's CPU counters, for the per-second series ([`host_cpu`]): the busy time
+    /// of every CPU and the `some` total of the host's CPU pressure. `None` when `/proc/stat`
+    /// cannot be read (no zero is invented); the pressure alone is `None` when
+    /// `/proc/pressure/cpu` cannot be read.
+    pub fn host_counters(&self) -> Option<HostCpu> {
+        host_cpu(&self.files)
     }
 
     /// The number `parse` finds in the file `name` of `dir`.

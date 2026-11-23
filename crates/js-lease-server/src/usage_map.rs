@@ -148,6 +148,8 @@ mod tests {
                 cpu_peak_window_millis: 2500,
                 ws_max_bytes: 1 << 29,
             }],
+            second_cpu_millis: Vec::new(),
+            second_cpu_pressure_some_permille: Vec::new(),
             dropped: LoadDrops::default(),
         }
     }

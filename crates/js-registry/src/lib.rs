@@ -95,7 +95,7 @@ pub use js_whole::{
     DEFAULT_PREPARE_TIMEOUT_MS, DEFAULT_REGAIN_GRACE_MS, DEFAULT_RESERVE_BACKOFF_MS,
     WholeNodeConfig,
 };
-pub use load::{BadLease, node_load};
+pub use load::{BadLease, LoadSeconds, node_load};
 pub use placer::Placer;
 pub use refusal::{Refusal, ShapeFault};
 pub use registry::{

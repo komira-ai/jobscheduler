@@ -10,6 +10,10 @@
 //! Every number is an integer, so the types are `Eq`. The lease ids on the wire are the
 //! root form `term-seq` (see [`lease_parts`]), the one grammar this crate owns.
 //!
+//! The two per-second lists are plain numbers, not records: an element that is not a number
+//! of its type is dropped as malformed, and [`NodeLoad::vet`] empties a pressure list that
+//! has a value above 1000, since a list with holes pairs with nothing.
+//!
 //! Minute indexes run from 0 to [`limits::TAIL_MINUTE`]; the last one means "that minute
 //! or later", so a receiver merges repeats of it by taking the larger value of each field.
 
@@ -61,6 +65,19 @@ pub struct NodeLoad {
     /// Closed lease-minutes. At most [`limits::MAX_LOAD_MINUTES`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub minutes: Vec<LeaseMinute>,
+    /// Busy CPU of the whole host (every CPU's busy time in `/proc/stat`, not the actions
+    /// cgroup's) over each interval between two of the agent's one-second samples, in
+    /// thousandths of a core (`busy_usec * 1000 / time`), oldest first. At most [`limits::MAX_LOAD_SECONDS`]. Telemetry only: nothing in
+    /// placement or sizing reads it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub second_cpu_millis: Vec<u32>,
+    /// The share of each of those intervals in which some task of the host waited for a CPU
+    /// (the `some` line of `/proc/pressure/cpu`), in thousandths, at most 1000,
+    /// oldest first. At most [`limits::MAX_LOAD_SECONDS`]. Empty when the host has no
+    /// pressure files, while `second_cpu_millis` is not. The two lists pair by position
+    /// only when they have the same length.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub second_cpu_pressure_some_permille: Vec<u16>,
     /// What decoding and [`NodeLoad::vet`] dropped. Never on the wire; part of `Eq`.
     #[serde(skip)]
     pub dropped: LoadDrops,
@@ -198,6 +215,28 @@ impl NodeLoad {
             max,
         )?;
         let mono = self.mono_usec;
+        sweep(
+            &mut self.second_cpu_millis,
+            limits::MAX_LOAD_SECONDS,
+            &mut self.dropped,
+            |_| Verdict::Keep,
+        );
+        // A pressure value is a share of the interval, so one above 1000 is a broken
+        // sender, and the list goes whole: a list with a hole in it pairs with nothing.
+        let hole = self
+            .second_cpu_pressure_some_permille
+            .iter()
+            .any(|p| *p > 1000);
+        if hole {
+            self.second_cpu_pressure_some_permille.clear();
+            self.dropped.invalid = self.dropped.invalid.saturating_add(1);
+        }
+        sweep(
+            &mut self.second_cpu_pressure_some_permille,
+            limits::MAX_LOAD_SECONDS,
+            &mut self.dropped,
+            |_| Verdict::Keep,
+        );
         let mut seen = BTreeSet::new();
         sweep(
             &mut self.minutes,
@@ -284,6 +323,20 @@ impl NodeLoad {
             &mut dropped,
             read_minute,
         );
+        let second_cpu_millis = list(
+            object,
+            "second_cpu_millis",
+            limits::MAX_LOAD_SECONDS,
+            &mut dropped,
+            |item| item.as_u64().and_then(|n| u32::try_from(n).ok()),
+        );
+        let second_cpu_pressure_some_permille = list(
+            object,
+            "second_cpu_pressure_some_permille",
+            limits::MAX_LOAD_SECONDS,
+            &mut dropped,
+            |item| item.as_u64().and_then(|n| u16::try_from(n).ok()),
+        );
         Some(Self {
             seq,
             mono_usec,
@@ -298,6 +351,8 @@ impl NodeLoad {
             covered,
             clocks,
             minutes,
+            second_cpu_millis,
+            second_cpu_pressure_some_permille,
             dropped,
         })
     }

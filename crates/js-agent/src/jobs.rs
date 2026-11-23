@@ -103,6 +103,7 @@ pub fn start(
         watch,
         settle,
         taint_recheck,
+        host_second_samples,
         stop_grace,
         drain_wait,
         image_allow: _,
@@ -131,7 +132,7 @@ pub fn start(
         bundle: seams.bundle.clone(),
         quota,
     };
-    let outbox = Arc::new(Outbox::new());
+    let outbox = Arc::new(Outbox::new().with_host_seconds(host_second_samples));
     let worker = Worker::start(Plan {
         config,
         backend,

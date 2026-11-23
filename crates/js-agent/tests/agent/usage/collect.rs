@@ -16,14 +16,14 @@ use js_agent_wire::{LeaseMinute, NodeLoad};
 
 use crate::support::FakeFiles;
 
-const ACTIONS: &str = "/sys/fs/cgroup/jobs.slice";
+pub(super) const ACTIONS: &str = "/sys/fs/cgroup/jobs.slice";
 const SECOND: u64 = 1_000_000;
 /// A `/proc/stat` of a host that has not been busy since boot.
 const HOST_IDLE: &str = "cpu  0 0 0 500 0 0 0 0 0 0\n";
 
 /// The files the collector reads, which the test goes on writing.
 #[derive(Clone, Default)]
-struct Shared(Rc<RefCell<FakeFiles>>);
+pub(super) struct Shared(pub(super) Rc<RefCell<FakeFiles>>);
 
 impl FileReader for Shared {
     fn read(&self, path: &str) -> Result<String, String> {
@@ -53,7 +53,7 @@ impl FileReader for Shared {
 
 /// A clock the test sets.
 #[derive(Clone, Default)]
-struct SetClock(Rc<Cell<u64>>);
+pub(super) struct SetClock(pub(super) Rc<Cell<u64>>);
 
 impl UsageClock for SetClock {
     fn now_usec(&self) -> u64 {

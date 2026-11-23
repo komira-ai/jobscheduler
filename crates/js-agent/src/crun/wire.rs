@@ -272,6 +272,7 @@ pub fn open(
         }),
         image_budget: plan.image_budget,
         cpu_ceiling: plan.cpu_ceiling,
+        cpu_series: plan.cpu_series,
         host_jobs: plan.host_jobs,
         host_ports: HostPorts {
             allowed: plan.host_ports.clone(),

@@ -244,6 +244,11 @@ pub struct CrunPlan {
     /// The operator's CPU ceiling (`--cpu-ceiling`), set by [`Settings::with_cpu_ceiling`]:
     /// none by default.
     pub cpu_ceiling: Option<js_types::CpuCeiling>,
+    /// Whether each run's CPU is recorded second by second ([`CrunSettings::cpu_series`]),
+    /// set by [`Settings::with_cpu_series`]: off by default.
+    ///
+    /// [`CrunSettings::cpu_series`]: crate::crun::CrunSettings::cpu_series
+    pub cpu_series: bool,
     actions: Arc<OnceLock<String>>,
 }
 
@@ -376,6 +381,7 @@ impl Settings {
                 mount_roots: crate::lifecycle::MountRoots::default(),
                 layered: false,
                 cpu_ceiling: None,
+                cpu_series: false,
                 actions: Arc::new(OnceLock::new()),
             })),
         }
@@ -433,6 +439,16 @@ impl Settings {
         self.crun_mut()
             .into_iter()
             .for_each(|plan| plan.cpu_ceiling = ceiling);
+        self
+    }
+
+    /// These settings with `on` as whether the crun runtime records each run's CPU second by
+    /// second (`--cpu-series`); the settings of another runtime are as they were.
+    #[must_use]
+    pub fn with_cpu_series(mut self, on: bool) -> Self {
+        self.crun_mut()
+            .into_iter()
+            .for_each(|plan| plan.cpu_series = on);
         self
     }
 

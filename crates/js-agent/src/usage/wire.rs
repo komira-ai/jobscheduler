@@ -5,8 +5,8 @@ use js_agent_wire::{LeaseClock, LeaseMinute, LoadDrops, NodeLoad};
 use super::outbox::Reading;
 
 /// The wire form of a reading: the node's counters, the leases that ran the whole window,
-/// the start of each running lease and the closed minutes, each field as it is, in the
-/// order the reading holds them.
+/// the start of each running lease, the closed minutes and the per-second lists, each field
+/// as it is, in the order the reading holds them.
 pub fn to_wire(reading: &Reading) -> NodeLoad {
     let sample = &reading.sample;
     NodeLoad {
@@ -37,6 +37,8 @@ pub fn to_wire(reading: &Reading) -> NodeLoad {
                 ws_max_bytes: minute.ws_max_bytes,
             })
             .collect(),
+        second_cpu_millis: reading.seconds.cpu_millis.clone(),
+        second_cpu_pressure_some_permille: reading.seconds.pressure_some_permille.clone(),
         dropped: LoadDrops::default(),
     }
 }

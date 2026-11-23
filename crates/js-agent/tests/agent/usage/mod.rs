@@ -4,9 +4,10 @@
 
 mod cgroup;
 mod collect;
+mod host;
 mod outbox;
-mod proc_stat;
 mod sampler;
+mod seconds;
 mod tail;
 mod wiring;
 

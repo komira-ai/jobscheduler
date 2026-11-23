@@ -1,4 +1,5 @@
-//! Cuts a node's readings into each lease's per-minute CPU and memory.
+//! Cuts a node's readings into each lease's per-minute CPU and memory, and into the node's CPU per
+//! second ([`Seconds`]).
 //!
 //! The crate is pure and has no dependency: [`Binner`] takes [`Sample`]s as values and
 //! reads no file, no clock and no socket. Any program that can read a node's counters can
@@ -31,12 +32,14 @@
 
 mod binner;
 mod sample;
+mod seconds;
 
 pub use binner::{
     Binner, ClosedMinute, Counters, MAX_UNSENT_AGE_USEC, MIN_SPAN_USEC, Observation, TAIL_MINUTE,
     WindowPart, window_parts,
 };
 pub use sample::{LeaseSample, Sample};
+pub use seconds::{SECOND_USEC, SecondRates, SecondSample, Seconds};
 
 /// One minute in microseconds.
 pub const MINUTE_USEC: u64 = 60_000_000;

@@ -46,6 +46,8 @@ fn full() -> Wire {
                 ws_max_bytes: 0,
             },
         ],
+        second_cpu_millis: Vec::new(),
+        second_cpu_pressure_some_permille: Vec::new(),
         dropped: LoadDrops::default(),
     }
 }
@@ -82,6 +84,8 @@ fn back(load: &NodeLoad) -> Wire {
                 ws_max_bytes: m.ws_max_bytes,
             })
             .collect(),
+        second_cpu_millis: Vec::new(),
+        second_cpu_pressure_some_permille: Vec::new(),
         dropped: LoadDrops::default(),
     }
 }
@@ -144,6 +148,8 @@ fn the_round_trip_holds_at_the_extremes_and_when_empty() {
             cpu_peak_window_millis: u32::MAX,
             ws_max_bytes: MAX_MEMORY_BYTES,
         }],
+        second_cpu_millis: Vec::new(),
+        second_cpu_pressure_some_permille: Vec::new(),
         dropped: LoadDrops::default(),
     };
     assert_eq!(back(&node_load(&wire).unwrap()), wire);

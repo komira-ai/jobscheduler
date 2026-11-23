@@ -853,12 +853,21 @@ async fn fleet_usage_and_log_answers_survive_the_mapping() {
         "ListProvidersResponse",
         "/v1/providers"
     );
-    same!(
+    let usage = same!(
         get_usage,
         GetUsageRequest::default(),
         js_proto::v1::GetUsageResponse,
         "GetUsageResponse",
         "/v1/usage"
+    );
+    assert_eq!(
+        usage.json()["records"][0]["cpuSeries"],
+        json!({
+            "granularitySecs": 2,
+            "points": [0, 16, 40],
+            "runUsec": "5500000",
+            "partial": true
+        })
     );
     let empty = same!(
         get_usage,

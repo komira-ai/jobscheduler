@@ -372,6 +372,8 @@ fn load(seq: u64) -> NodeLoad {
         covered: Vec::new(),
         clocks: Vec::new(),
         minutes: Vec::new(),
+        second_cpu_millis: Vec::new(),
+        second_cpu_pressure_some_permille: Vec::new(),
         dropped: Default::default(),
     }
 }

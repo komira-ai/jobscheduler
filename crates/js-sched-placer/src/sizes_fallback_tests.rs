@@ -118,15 +118,13 @@ fn a_target_with_no_runs_is_booked_from_its_kinds_runs_else_its_clients_before_t
 
 /// Asserts how a target's own runs take over from its kind: with a kind whose runs peak at
 /// 3 GiB and use three cores (3.75 GiB), a target whose runs peak at 512 MiB and use half a
-/// core books its own CPU (half a core) from its first run and the kind's memory after one to
-/// four (its memory may only rise from the kind's), and its own size (half a core and 1 GiB,
-/// the least) from its fifth run on, as without a fallback. A target whose runs carry no CPU
-/// sample books the kind's CPU; with no fallback and no CPU sample anywhere (another client's
-/// class of five such runs) it books the cold CPU, not the estimator's two cores. Catches a
-/// target held at its kind after five runs, a target lowered below its kind on too few runs,
-/// and a learned CPU replaced by the kind's.
+/// core books its own size (half a core and 1 GiB, the least) from its first run on, not the
+/// kind's memory. A target whose runs carry no CPU sample books its own memory and the kind's
+/// CPU; with no fallback and no CPU sample anywhere (another client's class of five such runs)
+/// it books the cold CPU, not the estimator's two cores. Catches a target held at its kind's
+/// largest peak after runs of its own, and a learned CPU replaced by the kind's.
 #[test]
-fn a_targets_own_runs_raise_it_from_its_kind_and_take_over_at_five() {
+fn a_targets_own_runs_size_it_from_its_first_run_and_not_its_kinds_largest_peak() {
     let tables = Tables::new();
     let kind_jobs = five_targets(&tables, 3 * GIB, Duration::from_secs(30));
     let small = target_runs(&tables, "small", 5, (MIB * 512, Duration::from_secs(5)));
@@ -137,19 +135,18 @@ fn a_targets_own_runs_raise_it_from_its_kind_and_take_over_at_five() {
         (size(&sizes, &next), sizes.sized_from(&next, Day(0)))
     };
     let kind = 15 * 256 * MIB;
-    let fallback = Some(SizedFrom::Fallback);
-    for runs in 1..5 {
+    assert_eq!(
+        after(0),
+        ((3000, kind), Some(SizedFrom::Fallback)),
+        "no run of its own: the kind's"
+    );
+    for runs in 1..=5 {
         assert_eq!(
             after(runs),
-            ((500, kind), fallback),
-            "{runs} runs: its own CPU, the memory raised from the kind"
+            ((500, GIB), Some(SizedFrom::Class)),
+            "{runs} runs: its own"
         );
     }
-    assert_eq!(
-        after(5),
-        ((500, GIB), Some(SizedFrom::Class)),
-        "five: its own"
-    );
 
     let mut jobs = kind_jobs;
     jobs.extend(target_runs(
@@ -159,12 +156,12 @@ fn a_targets_own_runs_raise_it_from_its_kind_and_take_over_at_five() {
         (MIB * 512, Duration::ZERO),
     ));
     let sizes = taught(&jobs, booked(2000, 4 * GIB));
-    assert_eq!(size(&sizes, &step("silent-next", "silent")), (3000, kind));
+    assert_eq!(size(&sizes, &step("silent-next", "silent")), (3000, GIB));
     let alone = queued("alone", of_class("silent", needs(0, 0)));
     assert_eq!(
         size(&sizes, &alone),
-        (3000, kind),
-        "no fallback: the client's"
+        (3000, GIB),
+        "no fallback: the client's CPU, its own memory"
     );
 
     let tables = Tables::new();

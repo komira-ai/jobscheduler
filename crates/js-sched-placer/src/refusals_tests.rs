@@ -236,6 +236,76 @@ fn a_pass_logs_one_line_per_host_and_counts_each_refusal() {
     assert_eq!(told.0.lock().unwrap()[0], (host("a"), "cpu"));
 }
 
+/// Behaviour: a host whose live bookings fill the memory it offers (3 of 4 GiB booked by a job
+/// that fit and was placed, a job of 2 GiB queued, its CPU free) is refused the job by the
+/// walk's ledger before the scheduler sees it, and the pass says so as it says the scheduler's
+/// refusals: one info line for the host, whose refusals read in full
+/// `booked-memory x1 (latest job j2: counted 3072MiB + new 2048MiB > limit 4096MiB)`, and the
+/// metrics told the refusal by host and reason. Catches a host full by memory dropped with
+/// nothing said, so that every refusal the log shows is a CPU one although memory is what
+/// filled the host.
+#[test]
+fn a_host_full_by_memory_bookings_is_refused_for_memory_and_says_so() {
+    process_sink();
+    let lines = Lines::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(lines.clone())
+        .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .without_time()
+        .with_target(false)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let clock = ManualClock::new(Timestamp::from_millis(0));
+    let placer = SchedPlacer::new(Settings::default(), clock);
+    let caps = BTreeMap::from([("arch".to_owned(), "x86_64".to_owned())]);
+    let shape = Shape::new(Resources::new(8_000, 4 * GIB, 0, None).unwrap(), caps);
+    placer.engine().host_up(&host("a"), &shape, at(0));
+    placer.heard(&host("a"), None);
+    let tables = Tables::new();
+    let offer = OpenHost {
+        capacity: Some(js_jobs::Capacity {
+            cpu_millis: 8_000,
+            memory_bytes: 4 * GIB,
+            disk_bytes: 0,
+            accelerators: 0,
+        }),
+        ..OpenHost::default()
+    };
+    let (open, hello) = (
+        BTreeMap::from([(host("a"), offer)]),
+        BTreeSet::from([host("a")]),
+    );
+    let on = JobHosts {
+        open: &open,
+        hello: &hello,
+        whole: None,
+    };
+    let told = Told::default();
+    let pass = || {
+        placer
+            .place_jobs_with(&tables.jobs, &on, (&NoStarts, &told))
+            .unwrap()
+    };
+    tables.submit_with("j1", need(1_000, 3 * GIB), 600);
+    assert_eq!(pass(), vec![JobId::parse("j1").unwrap()]);
+    let _ = lines.take();
+    tables.submit_with("j2", need(1_000, 2 * GIB), 600);
+    assert!(pass().is_empty());
+    let logged = lines.take();
+    let summary: Vec<&str> = logged
+        .lines()
+        .filter(|line| line.contains("a host refused queued jobs in this pass"))
+        .collect();
+    assert_eq!(summary.len(), 1, "{logged}");
+    let refusals = summary[0].split("refusals=").nth(1).unwrap();
+    assert_eq!(
+        refusals,
+        "booked-memory x1 (latest job j2: counted 3072MiB + new 2048MiB > limit 4096MiB)"
+    );
+    assert_eq!(*told.0.lock().unwrap(), vec![(host("a"), "booked-memory")]);
+}
+
 /// Behaviour: refusals the scheduler's buffer could not keep are said once in a warning that
 /// gives their number, and a pass that saw none says nothing.
 #[test]
