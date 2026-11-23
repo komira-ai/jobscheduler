@@ -21,6 +21,7 @@ fn sample(mono: u64, leases: Vec<LeaseSample>) -> Sample {
     Sample {
         mono_usec: mono,
         cpu_usage_usec: 0,
+        host_cpu_usec: 0,
         working_set_bytes: 0,
         active_file_bytes: 0,
         cpu_limited: false,

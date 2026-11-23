@@ -97,7 +97,8 @@ pub(crate) fn refusal(
         let new = new_cpu(slot);
         if at.saturating_add(new) > cpu_limit {
             let refusal = Refusal::new(RefusalKind::Cpu, at, new, cpu_limit);
-            return Some(refusal.measured(left.measured));
+            // Only a host charged by measurement is judged over the horizon.
+            return Some(refusal.measured(Some(left.measured)));
         }
     }
     // Memory is checked at minute 0 alone: a charge by curve is the remaining maximum

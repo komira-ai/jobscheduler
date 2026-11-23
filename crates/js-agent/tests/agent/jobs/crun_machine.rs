@@ -188,3 +188,18 @@ impl Machine for CrunMachine {
 pub(super) fn euid() -> u32 {
     rustix::process::geteuid().as_raw()
 }
+
+/// Asserts that `settings` recorded, as the actions cgroup the usage is read from, the
+/// directory `name` below the cgroup mount `mount`.
+pub(super) fn records_actions(
+    settings: &js_agent::cli_runtime::Settings,
+    mount: &Path,
+    name: &str,
+) {
+    let dir = mount.join(name);
+    assert_eq!(
+        settings.actions_cgroup(),
+        dir.to_str(),
+        "the actions cgroup's directory"
+    );
+}

@@ -147,7 +147,8 @@ struct LoadView {
     seq: u64,
     /// The agent's monotonic clock at the reading, in microseconds.
     mono_usec: u64,
-    /// Cumulative CPU time of the cgroup that holds every action, in microseconds.
+    /// Cumulative CPU busy time of the whole host, in microseconds (the actions cgroup's
+    /// CPU time from an agent of an earlier release, which sends no host counter).
     cpu_usage_usec: u64,
     /// Memory in use by the actions, in bytes.
     memory_working_set_bytes: u64,

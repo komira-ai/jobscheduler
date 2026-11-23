@@ -55,7 +55,7 @@ fn a_host_refused_for_cpu_slack_reports_the_cpu_figures() {
             counted: 8_000,
             new: 2_000,
             limit: 8_800,
-            measured_cpu_millis: 0,
+            measured_cpu_millis: None,
         }
     );
     let c = r.s.load_counters();
@@ -89,7 +89,7 @@ fn a_measured_host_refused_for_cpu_reports_the_measurement() {
             counted: 9_000,
             new: 1_000,
             limit: 8_800,
-            measured_cpu_millis: 9_000,
+            measured_cpu_millis: Some(9_000),
         }
     );
 }
@@ -113,7 +113,7 @@ fn a_host_refused_by_predicted_memory_reports_the_memory_figures() {
             counted: 32 * GIB,
             new: 4 * GIB,
             limit: 32 * GIB,
-            measured_cpu_millis: 0,
+            measured_cpu_millis: None,
         }
     );
     let c = r.s.load_counters();
@@ -141,7 +141,7 @@ fn a_host_refused_by_the_flat_guard_reports_booked_memory() {
             counted: 20 * GIB,
             new: 16 * GIB,
             limit: 32 * GIB,
-            measured_cpu_millis: 0,
+            measured_cpu_millis: None,
         }
     );
     let c = r.s.load_counters();
@@ -168,7 +168,7 @@ fn a_host_refused_by_the_cold_cap_reports_the_cap() {
             counted: 1,
             new: 1,
             limit: 1,
-            measured_cpu_millis: 0,
+            measured_cpu_millis: None,
         }
     );
     let c = r.s.load_counters();
