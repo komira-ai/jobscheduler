@@ -1,7 +1,7 @@
 //! The flags that configure native jobs, checked.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use js_mac_pool::seatbelt::{AbsPath, ReadModel};
@@ -92,7 +92,8 @@ impl NativeSettings {
     ///
     /// The text names the flag at fault: a native flag without `--native-accounts`, no
     /// `--native-account-range` or one the pool refuses, more ready accounts than slots, a
-    /// path that is not absolute (`--native-deny-read` included), a home directory other
+    /// path that is not absolute (`--native-deny-read` included), a `--native-deny-read`
+    /// whose part that is not there yet has a `..`, a home directory other
     /// than the pool's, a network level that is none of `off`, `loopback`, `on` and `open`,
     /// a `--native-pf-*` flag beside
     /// `open` (or beside any value but `on`), a limit of 0 or one too large, or a root a
@@ -172,9 +173,18 @@ impl NativeSettings {
         // the agent starts) is denied by the name it will have, as the agent's own are: a
         // missing one never stops a start. Absolute, as the other path flags are, so the name
         // is the one the operator wrote and not one read against the agent's working directory.
+        // The part not there yet is kept as written, so a `..` in it would name a path the
+        // kernel never resolves to: refused by name rather than denied in name only.
         for path in flags.deny_read {
             absolute("--native-deny-read", path)?;
-            denies.push(real_or_planned(path));
+            let planned = real_or_planned(path);
+            if planned.components().any(|c| c == Component::ParentDir) {
+                return Err(format!(
+                    "--native-deny-read: {}: a part that is not there yet has a `..`",
+                    path.display()
+                ));
+            }
+            denies.push(planned);
         }
         denies.push(PathBuf::from(KCPASSWORD));
         denies.extend(PRIVACY_ONLY_PLACES.iter().map(PathBuf::from));

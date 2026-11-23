@@ -470,7 +470,8 @@ fn bad_flags_are_refused_by_name() {
 /// as the kernel resolves it, after the pool's directory and before the auto-login password and
 /// the places only the privacy controls guard. A path that is not there yet (a directory made
 /// after the agent starts, one level or two below a link) is denied by the real path it will
-/// have, never refused; a relative path is refused naming the flag. It catches a pool ledger or
+/// have, never refused; a relative path, or one whose part that is not there yet has a `..`
+/// (which the profile would deny in name only), is refused naming the flag. It catches a pool ledger or
 /// a privacy database that a run can read, a denied directory named through a link (which a
 /// profile cannot name), and a fresh host's agent that never starts because a denied directory
 /// is made only after the start.
@@ -512,6 +513,17 @@ fn explicit_read_denies_are_resolved_and_need_not_exist() {
     assert_eq!(
         why,
         "--native-deny-read: relative/ledger is not an absolute path"
+    );
+
+    let climbing = [alias.join("missing/../ledger")];
+    with.deny_read = &climbing;
+    let why = NativeSettings::from_flags(&with, &[], Path::new("/srv/journal")).unwrap_err();
+    assert_eq!(
+        why,
+        format!(
+            "--native-deny-read: {}: a part that is not there yet has a `..`",
+            climbing[0].display()
+        )
     );
 }
 
