@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use js_agent_wire::Taint;
 use js_jobs::{HOST_JOB_TAINT, ScaleMark};
-use js_registry::{HostMark, HostState, HostView};
+use js_registry::{HostMark, HostState, HostView, LoadSeconds};
 use js_types::sched::usage::NodeLoad;
 use js_types::{HostId, MemoryHeadroom, Shape};
 
@@ -161,6 +161,17 @@ struct LoadView {
     lease_clocks: Vec<LeaseClockView>,
     /// Closed lease-minutes.
     minutes: Vec<LeaseMinuteView>,
+    /// Busy CPU of the actions group for each second the agent sampled, in thousandths of a
+    /// core, oldest first; left out when the agent sent none (`--host-second-samples` is not
+    /// given). Telemetry: nothing places or sizes by it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    second_cpu_millis: Vec<u32>,
+    /// The share of each of those seconds in which some task of the group waited for a CPU,
+    /// in thousandths, oldest first; left out when the host has no pressure files or the
+    /// agent sent none. It pairs with `second_cpu_millis` by position only when the two lists
+    /// have the same length.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    second_cpu_pressure_some_permille: Vec<u16>,
 }
 
 #[derive(Debug, Serialize)]
@@ -182,8 +193,10 @@ struct LeaseMinuteView {
 }
 
 impl LoadView {
-    fn of(load: NodeLoad) -> Self {
+    fn of(load: NodeLoad, seconds: LoadSeconds) -> Self {
         Self {
+            second_cpu_millis: seconds.cpu_millis,
+            second_cpu_pressure_some_permille: seconds.cpu_pressure_some_permille,
             seq: load.seq,
             mono_usec: load.mono_usec,
             cpu_usage_usec: load.cpu_usage_usec,
@@ -266,7 +279,7 @@ impl HostEntry {
                 expires_at_ms: at.millis(),
                 holder: host.cordon_holder.map(|holder| holder.to_string()),
             }),
-            load: host.load.map(LoadView::of),
+            load: host.load.map(|load| LoadView::of(load, host.load_seconds)),
         }
     }
 }
@@ -411,6 +424,7 @@ mod tests {
             cordon_until: None,
             cordon_holder: None,
             load: None,
+            load_seconds: Default::default(),
         }
     }
 

@@ -9,7 +9,8 @@
 //! # To the heartbeat
 //!
 //! The job worker owns a [`Collector`], which samples on the worker's thread once per
-//! heartbeat interval and publishes a [`Reading`] in an [`Outbox`]. The session takes the
+//! heartbeat interval (and, with `--host-second-samples`, reads the node's CPU and CPU
+//! pressure every second, which the reading carries as two lists of rates) and publishes a [`Reading`] in an [`Outbox`]. The session takes the
 //! reading into its next heartbeat ([`to_wire`]) and tells the outbox whether the beat went
 //! through ([`Outbox::delivered`], [`Outbox::failed`], [`Outbox::refused`]), so a minute is
 //! not sent again after a 2xx and a failed send is not lost.
@@ -60,11 +61,12 @@ pub use binner::{
     WindowPart, window_parts,
 };
 pub use cgroup::{
-    Layout, cpu_limited, layout_of, parse_active_file, parse_inactive_file, parse_single_u64,
-    parse_stat_key, parse_usage_usec, working_set,
+    Layout, cpu_limited, layout_of, parse_active_file, parse_inactive_file,
+    parse_pressure_some_total, parse_single_u64, parse_stat_key, parse_usage_usec, working_set,
 };
 pub use clock::{MINUTE_USEC, MonotonicClock, UsageClock};
 pub use collect::Collector;
+pub use js_agent_usage::SecondRates;
 pub use outbox::{Outbox, Reading};
 pub use sampler::{LeaseCgroup, LeaseSample, Sample, SampleError, Sampler};
 pub use wire::to_wire;

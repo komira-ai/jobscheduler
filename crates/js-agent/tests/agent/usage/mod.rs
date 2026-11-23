@@ -6,6 +6,7 @@ mod cgroup;
 mod collect;
 mod outbox;
 mod sampler;
+mod seconds;
 mod tail;
 mod wiring;
 

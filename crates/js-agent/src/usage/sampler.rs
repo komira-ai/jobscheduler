@@ -7,8 +7,8 @@ pub use js_agent_usage::{LeaseSample, Sample};
 use std::path::Path;
 
 use super::cgroup::{
-    cpu_limited, layout_of, parse_active_file, parse_inactive_file, parse_single_u64,
-    parse_usage_usec, working_set,
+    cpu_limited, layout_of, parse_active_file, parse_inactive_file, parse_pressure_some_total,
+    parse_single_u64, parse_usage_usec, working_set,
 };
 use super::clock::UsageClock;
 
@@ -96,6 +96,18 @@ impl<F: FileReader> Sampler<F> {
             leases: read.into_iter().flatten().collect(),
             unreadable_leases: u32::try_from(unreadable).unwrap_or(u32::MAX),
         })
+    }
+
+    /// The actions group's `usage_usec` and the `some` total of its `cpu.pressure`, for the
+    /// per-second series. `None` when `cpu.stat` cannot be read (no zero is invented); the
+    /// pressure alone is `None` when the group has no pressure file or it cannot be read.
+    pub fn host_counters(&self) -> Option<(u64, Option<u64>)> {
+        let dir = self.actions_dir.as_str();
+        let usage = self.value(dir, "cpu.stat", parse_usage_usec)?;
+        Some((
+            usage,
+            self.value(dir, "cpu.pressure", parse_pressure_some_total),
+        ))
     }
 
     /// The number `parse` finds in the file `name` of `dir`.

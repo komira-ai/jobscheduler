@@ -194,6 +194,8 @@ fn full_load() -> NodeLoad {
                 ws_max_bytes: MAX_MEMORY_BYTES,
             })
             .collect(),
+        second_cpu_millis: Vec::new(),
+        second_cpu_pressure_some_permille: Vec::new(),
         dropped: LoadDrops::default(),
     }
 }

@@ -72,6 +72,8 @@ fn reading(seq: u64, bad: bool) -> Wire {
         covered: Vec::new(),
         clocks: Vec::new(),
         minutes: Vec::new(),
+        second_cpu_millis: Vec::new(),
+        second_cpu_pressure_some_permille: Vec::new(),
         dropped: LoadDrops::default(),
     }
 }

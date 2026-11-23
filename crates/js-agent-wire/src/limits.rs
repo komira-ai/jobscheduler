@@ -32,7 +32,7 @@
 //! | signed identity of a hello (`identity`) | `document` 1 to [`MAX_IDENTITY_DOCUMENT_LEN`] bytes, `signature` at most [`MAX_IDENTITY_SIGNATURE_LEN`] bytes, any text |
 //! | GPUs | [`MAX_GPUS`] devices or indices; uuid and model [`MAX_GPU_TEXT_LEN`] bytes |
 //! | lists in a heartbeat or reply | [`MAX_HELD`] held runs, jobs, retired job ids or retired acks, [`MAX_RESULTS`] results, run acks or job acks, [`MAX_COMMANDS`] commands |
-//! | node load in a heartbeat | [`MAX_LOAD_LEASES`] ids in each of `covered` and `clocks`, [`MAX_LOAD_MINUTES`] minute records, minute index 0 to [`TAIL_MINUTE`], lease ids [`MAX_LEASE_REF_LEN`] bytes |
+//! | node load in a heartbeat | [`MAX_LOAD_LEASES`] ids in each of `covered` and `clocks`, [`MAX_LOAD_MINUTES`] minute records, minute index 0 to [`TAIL_MINUTE`], lease ids [`MAX_LEASE_REF_LEN`] bytes, [`MAX_LOAD_SECONDS`] values in each of `second_cpu_millis` and `second_cpu_pressure_some_permille` (a pressure value at most 1000) |
 //! | shape and limits | [`MAX_CPU_MILLIS`], [`MAX_MEMORY_BYTES`], [`MAX_DISK_BYTES`], [`MAX_DISK_GIB`], [`MAX_PIDS`], [`MAX_WALL_MS`], [`MAX_LEASE_CAP`] |
 //! | session timing | [`MIN_HEARTBEAT_INTERVAL_MS`], [`MAX_HEARTBEAT_INTERVAL_MS`], [`MAX_GRACE_MS`] |
 //! | log sink of a job start | `endpoint` [`MAX_LOG_ENDPOINT_LEN`] bytes; `region` [`MAX_LOG_REGION_LEN`] and `bucket` [`MAX_LOG_BUCKET_LEN`] bytes of `[A-Za-z0-9._-]`, leading alphanumeric; `prefix` [`MAX_LOG_PREFIX_LEN`] bytes, for a job id of at most [`MAX_LOG_JOB_ID_LEN`] bytes |
@@ -227,6 +227,11 @@ pub const TAIL_MINUTE: u16 = 63;
 /// Longest lease id in a load, in bytes: `u64::MAX-u64::MAX`. A load's lease id is held to
 /// this and to the `term-seq` form, not to [`MAX_ID_LEN`].
 pub const MAX_LEASE_REF_LEN: usize = 41;
+/// Most values in each of a load's per-second lists (`second_cpu_millis` and
+/// `second_cpu_pressure_some_permille`): three beats' worth at the 5 s default beat, so a
+/// beat or two lost in a row still leaves the seconds before them in the next one that
+/// arrives.
+pub const MAX_LOAD_SECONDS: usize = 16;
 /// The most a [`crate::NodeLoad`] at every cap serialises to, in bytes (a test builds one
 /// and holds it to this). A host that reports a load must leave this much of the heartbeat
 /// body for it.

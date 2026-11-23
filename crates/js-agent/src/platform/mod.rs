@@ -60,6 +60,7 @@ pub const LINUX_ONLY: [&str; 36] = [
     "image-allow-loopback",
     "settle-ms",
     "taint-recheck-ms",
+    "host-second-samples",
     "mount-provider",
     "mount-provider-user",
     "mount-provider-wait",

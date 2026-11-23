@@ -308,6 +308,16 @@ pub struct Flags {
     /// `--container-bin`.
     #[arg(long, value_name = "PATH")]
     pub actions_cgroup: Option<PathBuf>,
+    /// Sends, in each heartbeat, the busy CPU and the CPU pressure of the actions control
+    /// group for each second of the beat's window (at most 16 values of each, newest last):
+    /// the agent reads the group's `cpu.stat` and `cpu.pressure` every second and the
+    /// heartbeat carries the rates between those readings. Telemetry only; the lease
+    /// server lists it on `GET /v1/hosts` and nothing places or sizes by it. Without an
+    /// actions control group (no `--actions-cgroup` for the container engine, none
+    /// delegated for crun) nothing is read and the flag does nothing; a group with no
+    /// `cpu.pressure` sends the busy values alone. Off by default.
+    #[arg(long)]
+    pub host_second_samples: bool,
     /// The absolute path of a program that checks the host's GPU container toolkit, run
     /// once at start when the host offers a GPU. Exit 0 makes the hello report
     /// `gpu-toolkit`; any other outcome (another exit status, no output within the probe
@@ -438,6 +448,7 @@ impl Flags {
             ("--watch-dir", !self.watch_dirs.is_empty()),
             ("--settle-ms", self.settle_ms.is_some()),
             ("--taint-recheck-ms", self.taint_recheck_ms.is_some()),
+            ("--host-second-samples", self.host_second_samples),
             ("--egress", self.egress.is_some()),
             ("--egress-allow", !self.egress_allow.is_empty()),
             ("--egress-dns", !self.egress_dns.is_empty()),
@@ -651,6 +662,8 @@ pub(crate) struct Jobs {
     pub(crate) settle: Duration,
     /// `--taint-recheck-ms`, or its default.
     pub(crate) taint_recheck: Duration,
+    /// `--host-second-samples`.
+    pub(crate) host_second_samples: bool,
     /// `--allow-host-jobs`.
     pub(crate) allow_host_jobs: bool,
     /// `--allow-fuse-jobs`.
@@ -771,6 +784,7 @@ pub(crate) fn jobs(
         egress,
         settle: crate::lifecycle::settle(os.settle_ms)?,
         taint_recheck: taint::recheck_every(os.taint_recheck_ms)?,
+        host_second_samples: os.host_second_samples,
         allow_host_jobs: os.allow_host_jobs,
         allow_fuse_jobs: os.allow_fuse_jobs,
         providers: MountProviders::from_flags(

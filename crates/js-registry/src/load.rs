@@ -12,6 +12,10 @@
 //! conversion invents a value. The working set is the agent's `memory.current` less
 //! `inactive_file`, clamped at 0 when the inactive file is larger.
 //!
+//! The wire's two per-second lists (`second_cpu_millis`, `second_cpu_pressure_some_permille`)
+//! are not part of that conversion: they are kept beside the converted load as
+//! [`LoadSeconds`], for the hosts listing, and nothing in placement or sizing reads them.
+//!
 //! # What is kept
 //!
 //! Only the latest accepted beat's load is kept for a host. Closed minutes the beat
@@ -87,12 +91,27 @@ pub fn node_load(wire: &WireLoad) -> Result<NodeLoad, BadLease> {
     })
 }
 
+/// The per-second lists of a host's latest load, as the wire sent them: busy CPU of the
+/// actions group in thousandths of a core and the share of each interval with a task waiting
+/// for a CPU in thousandths, oldest first. They sit beside [`NodeLoad`], not in it: they are
+/// for the hosts listing and nothing in placement or sizing reads them. Empty when the
+/// agent sent none (it was not asked to, or the host has no pressure files).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LoadSeconds {
+    /// `second_cpu_millis` of the load.
+    pub cpu_millis: Vec<u32>,
+    /// `second_cpu_pressure_some_permille` of the load, at most 1000 each.
+    pub cpu_pressure_some_permille: Vec<u16>,
+}
+
 /// What the registry keeps of a host's load: the latest reading, and the highest `seq` it
 /// has seen in this session (kept apart from the reading, so a clear does not let an older
 /// beat back in). A hello makes a new, empty one.
 #[derive(Debug, Default)]
 pub(crate) struct Kept {
     pub(crate) latest: Option<NodeLoad>,
+    /// The per-second lists of the same reading; empty whenever `latest` is `None`.
+    pub(crate) seconds: LoadSeconds,
     seen: Option<u64>,
 }
 
@@ -111,6 +130,7 @@ impl Kept {
     pub(crate) fn take(&mut self, wire: Option<&WireLoad>) -> Option<&NodeLoad> {
         let Some(wire) = wire else {
             self.latest = None;
+            self.seconds = LoadSeconds::default();
             return None;
         };
         if self.seen.is_some_and(|seen| wire.seq <= seen) {
@@ -118,7 +138,17 @@ impl Kept {
         }
         self.seen = Some(wire.seq);
         let mut vetted = wire.clone();
-        self.latest = vetted.vet().ok().and_then(|()| node_load(&vetted).ok());
+        let kept = vetted.vet().ok().and_then(|()| {
+            let load = node_load(&vetted).ok()?;
+            let seconds = LoadSeconds {
+                cpu_millis: vetted.second_cpu_millis,
+                cpu_pressure_some_permille: vetted.second_cpu_pressure_some_permille,
+            };
+            Some((load, seconds))
+        });
+        let (latest, seconds) = kept.unzip();
+        self.latest = latest;
+        self.seconds = seconds.unwrap_or_default();
         self.latest.as_ref()
     }
 }
