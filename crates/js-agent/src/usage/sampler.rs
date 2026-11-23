@@ -12,7 +12,7 @@ use super::cgroup::{
     parse_usage_usec, working_set,
 };
 use super::clock::UsageClock;
-use super::host::{HostCpu, host_cpu};
+use super::host::{HostCpu, host_cpu, host_memory_used};
 
 /// A lease whose cgroup is to be read.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,8 +64,10 @@ impl<F: FileReader> Sampler<F> {
     /// Reads the node and then each of `leases`, with exactly one read of `clock`, taken
     /// right after the two CPU counters (the actions cgroup's, then the host's).
     ///
-    /// A node file that cannot be read is an error, so that no zero is invented. A lease
-    /// that cannot be read is left out and counted in `unreadable_leases`.
+    /// A node file that cannot be read is an error, so that no zero is invented. The host's
+    /// `/proc/meminfo` is the exception: when it cannot be read the sample carries no host
+    /// memory, and the CPU it measured still counts. A lease that cannot be read is left out
+    /// and counted in `unreadable_leases`.
     pub fn sample(
         &self,
         clock: &dyn UsageClock,
@@ -101,6 +103,7 @@ impl<F: FileReader> Sampler<F> {
             cpu_usage_usec: cpu,
             host_cpu_usec: host,
             working_set_bytes: working_set(current, inactive),
+            host_memory_used_bytes: host_memory_used(&self.files),
             active_file_bytes: active,
             cpu_limited: limited,
             leases: read.into_iter().flatten().collect(),

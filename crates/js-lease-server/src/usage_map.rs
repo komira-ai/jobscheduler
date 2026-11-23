@@ -97,15 +97,16 @@ mod tests {
     use super::*;
 
     /// Asserts the two converters of a wire load agree: for a vetted load,
-    /// `js_registry::node_load` with the active file pages zeroed equals
-    /// `NodeLoad::from(load_in(..).load)`, and the active file pages are the only
-    /// difference. It catches one converter gaining or changing a field the other does not.
+    /// `js_registry::node_load` with the active file pages zeroed and the host's memory in use
+    /// taken out equals `NodeLoad::from(load_in(..).load)`, and those two are the only
+    /// differences. It catches one converter gaining or changing a field the other does not.
     #[test]
     fn the_registry_converter_and_the_usage_converter_agree() {
         let mut load = wire();
         load.seq = u64::MAX;
         load.host_cpu_usec = Some(88_000_000);
         load.active_file_bytes = 12_345;
+        load.host_memory_used_bytes = Some(3 << 30);
         load.actions_cpu_limited = false;
         load.covered.push("5-6".into());
         load.clocks.push(LeaseClock {
@@ -123,6 +124,8 @@ mod tests {
         let mut ours = js_registry::node_load(&load).unwrap();
         assert_eq!(ours.memory_active_file_bytes, 12_345);
         ours.memory_active_file_bytes = 0;
+        assert_eq!(ours.host_memory_used_bytes, Some(3 << 30));
+        ours.host_memory_used_bytes = None;
         let theirs = js_types::sched::usage::NodeLoad::from(load_in(&load).load);
         assert_eq!(ours, theirs);
     }
@@ -135,6 +138,7 @@ mod tests {
             host_cpu_usec: None,
             working_set_bytes: 1 << 30,
             active_file_bytes: 0,
+            host_memory_used_bytes: None,
             actions_cpu_limited: true,
             covered: vec!["3-4".into()],
             clocks: vec![LeaseClock {

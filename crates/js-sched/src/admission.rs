@@ -11,6 +11,7 @@
 //! ```text
 //! CPU:    max(measured, f * sum p(covered)) + sum p(uncovered) + V_cpu + p_new  <=  C_cpu * (1 + s_cpu)
 //! memory: max(sum m(all), working_set + sum m(uncovered)) + V_mem + m_new       <=  C_mem * (1 + s_mem)
+//! memory: host_used + sum m(uncovered) + V_mem + m_new     (the reading carries host_used)
 //! ```
 //!
 //! - `measured` is the cores the whole host was busy over the last two windows of the
@@ -19,7 +20,12 @@
 //!   same cores. Covered leases' use is inside it; uncovered leases are charged beside it.
 //! - A lease is *covered* once a reading lists it as running for the whole window since
 //!   the previous reading; until then it is *uncovered* and carries its full cost.
-//! - Predicted memory is held to the lease's end and never decays.
+//! - `host_used` is the whole host's memory in use (`MemTotal - MemAvailable`) when the fresh
+//!   reading carries it: covered leases' memory is inside it, uncovered leases are charged
+//!   their peaks beside it, and the second memory form replaces the first, so the peaks of
+//!   leases that do not peak together are not summed. The flat-memory guard counts the same
+//!   way there. A memory refusal carries `host_used` when it was counted.
+//! - Without `host_used`, predicted memory is held to the lease's end and never decays.
 //! - `f` ([`LoadConfig::cpu_floor_permille`]) keeps a covered lease in an idle phase
 //!   from handing its room back to the next batch.
 //! - `V` is the booked cost of the worker's VM leases, which run outside the actions

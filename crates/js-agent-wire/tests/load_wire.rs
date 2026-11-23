@@ -32,6 +32,7 @@ fn minimal() -> NodeLoad {
         host_cpu_usec: None,
         working_set_bytes: 4,
         active_file_bytes: 0,
+        host_memory_used_bytes: None,
         actions_cpu_limited: false,
         covered: Vec::new(),
         clocks: Vec::new(),
@@ -60,7 +61,7 @@ fn load_wire_form() {
         concat!(
             r#"{"seq":7,"mono_usec":9000000,"cpu_usage_usec":4500000,"host_cpu_usec":40500000,"#,
             r#""working_set_bytes":3221225472,"active_file_bytes":1048576,"#,
-            r#""actions_cpu_limited":true,"covered":["3-4"],"#,
+            r#""host_memory_used_bytes":5368709120,"actions_cpu_limited":true,"covered":["3-4"],"#,
             r#""clocks":[{"lease_id":"3-4","started_mono_usec":1000000}],"#,
             r#""minutes":[{"lease_id":"3-4","minute":2,"cpu_mean_millis":1500,"#,
             r#""cpu_peak_window_millis":2500,"ws_max_bytes":2147483648}]}"#
@@ -109,6 +110,37 @@ fn the_host_cpu_counter_is_optional_and_read_before_the_actions_one() {
     })));
     let new = new.load.expect("a load");
     assert_eq!((new.host_cpu_usec, new.node_cpu_usec()), (Some(30), 30));
+}
+
+/// Asserts the host's memory in use across releases: a load from an agent of an earlier
+/// release, without `host_memory_used_bytes`, decodes with none (the receiver then counts the
+/// host's memory by its bookings) and encodes again without the key; a load with it decodes
+/// it; a value that is not a number reads as none and costs nothing else of the load. It
+/// catches a new agent's figure lost on the way, an old agent's load read as having no memory
+/// in use, and a `null` written for an agent that sends none.
+#[test]
+fn the_host_memory_in_use_is_optional() {
+    let old = decode(body_with(json!({
+        "seq": 1, "mono_usec": 2, "cpu_usage_usec": 3, "working_set_bytes": 4,
+    })));
+    let old = old.load.expect("a load");
+    assert_eq!(old.host_memory_used_bytes, None);
+    let written = serde_json::to_value(&old).unwrap();
+    assert!(written.get("host_memory_used_bytes").is_none(), "{written}");
+    let new = decode(body_with(json!({
+        "seq": 1, "mono_usec": 2, "cpu_usage_usec": 3, "working_set_bytes": 4,
+        "host_memory_used_bytes": 40,
+    })));
+    assert_eq!(new.load.expect("a load").host_memory_used_bytes, Some(40));
+    let bad = decode(body_with(json!({
+        "seq": 1, "mono_usec": 2, "cpu_usage_usec": 3, "working_set_bytes": 4,
+        "host_memory_used_bytes": "40",
+    })));
+    let bad = bad.load.expect("a load");
+    assert_eq!(
+        (bad.host_memory_used_bytes, bad.working_set_bytes),
+        (None, 4)
+    );
 }
 
 /// Asserts that a body from before the load existed decodes with `load` `None` and

@@ -212,6 +212,7 @@ mod tests {
             floor_cpu: 0,
             measured,
             working_set,
+            host_memory: None,
         }
     }
 

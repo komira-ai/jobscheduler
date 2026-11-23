@@ -189,6 +189,7 @@ fn load(seq: u64, minutes: &[(&str, u16, u32, u64)]) -> NodeLoad {
         host_cpu_usec: None,
         working_set_bytes: 1,
         active_file_bytes: 0,
+        host_memory_used_bytes: None,
         actions_cpu_limited: false,
         covered: Vec::new(),
         clocks: Vec::new(),

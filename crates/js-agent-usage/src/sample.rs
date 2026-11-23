@@ -26,6 +26,10 @@ pub struct Sample {
     pub host_cpu_usec: u64,
     /// The actions cgroup's `memory.current` less its `inactive_file`.
     pub working_set_bytes: u64,
+    /// Memory in use on the whole host, in bytes: `MemTotal` less `MemAvailable` of
+    /// `/proc/meminfo`. `None` when that file cannot be read or lacks either line; the rest of
+    /// the sample stands, and the job service then counts the host's memory by its bookings.
+    pub host_memory_used_bytes: Option<u64>,
     /// The actions cgroup's `active_file`.
     pub active_file_bytes: u64,
     /// Whether the actions cgroup has a CPU limit, from its `cpu.max`. A reader that cannot

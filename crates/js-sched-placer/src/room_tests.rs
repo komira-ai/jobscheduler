@@ -328,6 +328,7 @@ fn a_host_out_of_memory_by_its_bookings_has_a_booked_memory_refusal_and_no_other
         new,
         limit,
         measured_cpu_millis: None,
+        measured_memory_bytes: None,
     };
     assert_eq!(
         room.memory_refusal(&host("a"), shape(1, 3 * GIB, 0)),

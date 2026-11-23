@@ -69,6 +69,7 @@ fn reading(seq: u64, bad: bool) -> Wire {
         host_cpu_usec: None,
         working_set_bytes: if bad { MAX_MEMORY_BYTES + 1 } else { 1 << 30 },
         active_file_bytes: 0,
+        host_memory_used_bytes: None,
         actions_cpu_limited: false,
         covered: Vec::new(),
         clocks: Vec::new(),

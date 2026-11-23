@@ -86,6 +86,7 @@ fn a_sample_reads_every_field() {
             cpu_usage_usec: 1000,
             host_cpu_usec: 1_500_000,
             working_set_bytes: 4300,
+            host_memory_used_bytes: None,
             active_file_bytes: 300,
             cpu_limited: false,
             leases: vec![lease("a", 111, 40, 850), lease("b", 222, 41, 990)],

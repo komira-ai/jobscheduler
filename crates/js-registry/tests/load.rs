@@ -18,6 +18,7 @@ fn full() -> Wire {
         host_cpu_usec: None,
         working_set_bytes: 7_000_000_789,
         active_file_bytes: 250_001,
+        host_memory_used_bytes: Some(9_000_000_321),
         actions_cpu_limited: true,
         covered: vec!["3-7".into(), "0-0".into()],
         clocks: vec![
@@ -63,6 +64,7 @@ fn back(load: &NodeLoad) -> Wire {
         host_cpu_usec: None,
         working_set_bytes: load.memory_working_set_bytes,
         active_file_bytes: load.memory_active_file_bytes,
+        host_memory_used_bytes: load.host_memory_used_bytes,
         actions_cpu_limited: load.actions_cpu_limited,
         covered: load.covered.iter().map(text).collect(),
         clocks: load
@@ -91,8 +93,8 @@ fn back(load: &NodeLoad) -> Wire {
 }
 
 /// Asserts the conversion of a load with a distinct value in every field, field by field
-/// (the working set stays bytes, the active file lands in the active file, the clocks and
-/// minutes keep their order and lease), and that converting back gives the wire load again.
+/// (the working set stays bytes, the active file lands in the active file, the host's memory
+/// in use in the host's memory in use, the clocks and minutes keep their order and lease), and that converting back gives the wire load again.
 /// The two fields only the scheduler's type has read 0. It catches two fields swapped, a
 /// unit scaled on the way, and a record dropped or reordered.
 #[test]
@@ -105,6 +107,7 @@ fn a_wire_load_converts_field_for_field_and_back() {
     );
     assert_eq!(load.memory_working_set_bytes, 7_000_000_789);
     assert_eq!(load.memory_active_file_bytes, 250_001);
+    assert_eq!(load.host_memory_used_bytes, Some(9_000_000_321));
     assert!(load.actions_cpu_limited);
     assert_eq!(
         (load.cpu_throttled_usec, load.cpu_pressure_some_total_usec),
@@ -135,6 +138,7 @@ fn the_round_trip_holds_at_the_extremes_and_when_empty() {
         host_cpu_usec: None,
         working_set_bytes: MAX_MEMORY_BYTES,
         active_file_bytes: MAX_MEMORY_BYTES,
+        host_memory_used_bytes: Some(MAX_MEMORY_BYTES),
         actions_cpu_limited: false,
         covered: vec![big.clone()],
         clocks: vec![LeaseClock {

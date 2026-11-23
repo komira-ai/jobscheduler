@@ -1,6 +1,7 @@
 //! What each lease costs the machine: CPU and memory sampled from the cgroup tree and cut
 //! into per-lease minutes, ready to be sent to the server, beside the whole host's CPU busy
-//! time from `/proc/stat` ([`host_cpu`]), which is what the server places by.
+//! time from `/proc/stat` ([`host_cpu`]) and the whole host's memory in use from
+//! `/proc/meminfo` ([`host_memory_used`]), which are what the server places by.
 //!
 //! [`Sampler`] reads cgroup files through a [`FileReader`](crate::FileReader) and takes the
 //! time from a [`UsageClock`]; [`Binner`] (defined in the `js-agent-usage` crate, with
@@ -68,7 +69,10 @@ pub use cgroup::{
 };
 pub use clock::{MINUTE_USEC, MonotonicClock, UsageClock};
 pub use collect::Collector;
-pub use host::{HostCpu, PROC_CPU_PRESSURE, PROC_STAT, host_cpu, parse_proc_stat_busy_usec};
+pub use host::{
+    HostCpu, PROC_CPU_PRESSURE, PROC_MEMINFO, PROC_STAT, host_cpu, host_memory_used,
+    parse_meminfo_used_bytes, parse_proc_stat_busy_usec,
+};
 pub use js_agent_usage::SecondRates;
 pub use outbox::{Outbox, Reading};
 pub use sampler::{LeaseCgroup, LeaseSample, Sample, SampleError, Sampler};

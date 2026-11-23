@@ -237,6 +237,10 @@ pub(crate) struct Left {
     pub(crate) measured: u64,
     /// The working set that counts against memory (0 when charged by prediction alone).
     pub(crate) working_set: u64,
+    /// The whole host's memory in use the fresh reading measured, in bytes, which then stands
+    /// for the covered leases' memory ([`horizon::mem_left`]); `None` when charged by
+    /// prediction alone or when the reading does not carry it.
+    pub(crate) host_memory: Option<u64>,
 }
 
 impl Left {
@@ -292,14 +296,19 @@ impl WorkerLoad {
     }
 
     /// What taking each lease off the ledger takes off the left side `left`: the lease, its
-    /// cores (at least the floor `left` holds for an action lease) and its memory.
+    /// cores (at least the floor `left` holds for an action lease) and its memory. When
+    /// `left` counts the whole host's memory in use, a lease a reading covers takes off no
+    /// memory: it is in that figure at what it uses, not at its booking, so ending it frees
+    /// no booking below the measurement.
     pub(crate) fn charges(&self, left: &Left) -> Vec<(LeaseId, u64, u64)> {
+        let measured = left.host_memory.is_some();
         self.ledger
             .iter()
             .map(|(lease, entry)| {
                 let c = charge(&entry.cost);
                 let floor = left.floor_cpu * u64::from(!entry.vm);
-                (*lease, c.cpu_millis.max(floor), c.memory_bytes)
+                let mem = c.memory_bytes * u64::from(!(measured && entry.covered));
+                (*lease, c.cpu_millis.max(floor), mem)
             })
             .collect()
     }
@@ -488,6 +497,14 @@ impl WorkerLoad {
             .is_some_and(|r| r.last.actions_cpu_limited)
     }
 
+    /// The whole host's memory in use, in bytes, when the worker is charged by measurement
+    /// and its fresh reading carries it: the one figure the predicate and the flat-memory
+    /// guard count the covered leases' memory by.
+    fn host_memory(&self, now: FarmTime, cfg: &LoadConfig) -> Option<u64> {
+        self.fresh_reading(now, cfg)
+            .and_then(|reading| reading.host_memory_used_bytes)
+    }
+
     /// The newest reading's working set, if there is one.
     pub(crate) fn working_set(&self) -> Option<u64> {
         self.readings
@@ -524,6 +541,7 @@ impl WorkerLoad {
     /// ```text
     /// cpu = max(measured, f * sum p(covered)) + sum p(uncovered) + V_cpu
     /// mem = max(sum m(all), working_set + sum m(uncovered)) + V_mem
+    /// mem = host_used + sum m(uncovered) + V_mem       (the reading carries host_used)
     /// ```
     ///
     /// Without one, the fallback charges every lease its full predicted cost once, and
@@ -535,13 +553,15 @@ impl WorkerLoad {
         if let Some(reading) = self.fresh_reading(now, cfg) {
             let measured = u64::from(self.measured().unwrap_or(0));
             let ws = self.working_set_counted(reading, capacity, cfg);
+            let host_memory = reading.host_memory_used_bytes;
             Left {
                 cpu: horizon::cpu_left(t, 0, measured, cfg),
-                mem: horizon::mem_left(t, 0, ws),
+                mem: horizon::mem_left(t, 0, ws, host_memory),
                 fallback: false,
                 floor_cpu: 0,
                 measured,
                 working_set: ws,
+                host_memory,
             }
         } else if self.measured_once {
             Left {
@@ -551,6 +571,7 @@ impl WorkerLoad {
                 floor_cpu: 0,
                 measured: 0,
                 working_set: 0,
+                host_memory: None,
             }
         } else {
             let floor = UNMEASURED_CPU_FLOOR_MILLIS.min(capacity.cpu_millis);
@@ -567,6 +588,7 @@ impl WorkerLoad {
                 floor_cpu: floor,
                 measured: 0,
                 working_set: 0,
+                host_memory: None,
             }
         }
     }
@@ -588,20 +610,23 @@ impl WorkerLoad {
         let t = &self.totals;
         (
             horizon::cpu_left(t, slot, left.measured, cfg),
-            horizon::mem_left(t, slot, left.working_set),
+            horizon::mem_left(t, slot, left.working_set, left.host_memory),
         )
     }
 
-    /// The flat-memory guard for a lease of `cost` on this worker
-    /// ([`horizon::flat_memory_refusal`]); a VM, which has no predicate, is held to it
-    /// alone, with its booked memory as its cost.
+    /// The flat-memory guard for a lease of `cost` on this worker at `now`
+    /// ([`horizon::flat_memory_refusal`], with the host's measured memory in use when the
+    /// fresh reading carries it); a VM, which has no predicate, is held to it alone, with its
+    /// booked memory as its cost.
     pub(crate) fn flat_memory_refusal(
         &self,
         cost: &LeaseCost,
         capacity: &Resources,
+        now: FarmTime,
         cfg: &LoadConfig,
     ) -> Option<Refusal> {
-        horizon::flat_memory_refusal(&self.totals, cost, capacity, cfg)
+        let host_used = self.host_memory(now, cfg);
+        horizon::flat_memory_refusal(&self.totals, cost, capacity, host_used, cfg)
     }
 
     /// Whether a lease of `cost` (already clamped to the capacity) fits beside `left`.
@@ -637,15 +662,16 @@ impl WorkerLoad {
             }
             let limit = cfg.mem_limit(capacity);
             if left.mem.saturating_add(cost.memory_bytes) > limit {
-                return Err(Refusal::new(
+                let refusal = Refusal::new(
                     RefusalKind::PredictedMemory,
                     left.mem,
                     cost.memory_bytes,
                     limit,
-                ));
+                );
+                return Err(refusal.measured_memory(left.host_memory));
             }
         }
-        if let Some(refusal) = self.flat_memory_refusal(cost, capacity, cfg) {
+        if let Some(refusal) = self.flat_memory_refusal(cost, capacity, now, cfg) {
             return Err(refusal);
         }
         let admitted = self.cold_admitted(now, cfg);
@@ -708,6 +734,44 @@ mod tests {
         assert_eq!(load.totals().cpu_uncovered, 700);
         load.remove(lease(1));
         assert_eq!(*load.totals(), Totals::default());
+    }
+
+    /// Catches: a booked peak credited against a measured host figure when a head's start is
+    /// projected. The worker measured 20 GiB in use on the whole host; a covered lease booked
+    /// 16 GiB and an uncovered one 8 GiB (charged 20 + 8 of 32). Ending the covered lease
+    /// takes no memory off (it is in the 20 GiB at what it uses), ending the uncovered one
+    /// takes its 8 GiB off: a lease that needs 12 GiB starts when the uncovered one ends, at
+    /// 200, not when the covered one does, at 100. Without the measurement both bookings
+    /// come off, as before.
+    #[test]
+    fn a_covered_lease_frees_no_booking_below_the_hosts_measured_memory() {
+        let mut load = WorkerLoad::default();
+        load.insert(lease(1), cost(0, 16 * GIB), false, None);
+        load.insert(lease(2), cost(0, 8 * GIB), false, None);
+        load.cover(&BTreeSet::from([lease(1)]));
+        let left = Left {
+            cpu: 0,
+            mem: 28 * GIB,
+            fallback: false,
+            floor_cpu: 0,
+            measured: 0,
+            working_set: 0,
+            host_memory: Some(20 * GIB),
+        };
+        let charges = load.charges(&left);
+        assert_eq!(charges, [(lease(1), 0, 0), (lease(2), 0, 8 * GIB)].to_vec());
+        let ends = BTreeMap::from([(lease(1), Some(100)), (lease(2), Some(200))]);
+        let caps = (8_000, 32 * GIB);
+        let start = super::super::start_time(&left, &charges, &ends, caps, (0, 12 * GIB), 0);
+        assert_eq!(start, Some(200));
+        let booked = Left {
+            host_memory: None,
+            ..left
+        };
+        assert_eq!(
+            load.charges(&booked),
+            [(lease(1), 0, 16 * GIB), (lease(2), 0, 8 * GIB)].to_vec()
+        );
     }
 
     fn curve(points: &[(u32, u64)]) -> js_types::sched::usage::Curve {

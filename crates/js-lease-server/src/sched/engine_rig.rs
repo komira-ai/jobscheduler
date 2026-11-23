@@ -192,6 +192,7 @@ pub(super) fn reading(seq: u64, cores: u64, working_set: u64) -> Wire {
         host_cpu_usec: None,
         working_set_bytes: working_set,
         active_file_bytes: 0,
+        host_memory_used_bytes: None,
         actions_cpu_limited: false,
         covered: Vec::new(),
         clocks: Vec::new(),

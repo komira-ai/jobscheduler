@@ -16,6 +16,7 @@ pub fn to_wire(reading: &Reading) -> NodeLoad {
         host_cpu_usec: Some(sample.host_cpu_usec),
         working_set_bytes: sample.working_set_bytes,
         active_file_bytes: sample.active_file_bytes,
+        host_memory_used_bytes: sample.host_memory_used_bytes,
         actions_cpu_limited: sample.cpu_limited,
         covered: reading.covered.clone(),
         clocks: reading

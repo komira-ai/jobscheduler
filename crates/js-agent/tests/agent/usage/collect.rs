@@ -579,3 +579,23 @@ fn an_unreadable_proc_stat_gives_no_load_and_one_line() {
     assert!(rig.run_at(30, &[]).is_empty());
     assert_eq!(rig.load().unwrap().host_cpu_usec, Some(0));
 }
+
+/// Asserts that the load carries the whole host's memory in use (`MemTotal` less
+/// `MemAvailable` of `/proc/meminfo`) when the file can be read, and that a host whose
+/// `/proc/meminfo` cannot be read still sends its load, without the figure, which the job
+/// service then counts by bookings. Catches the host's memory lost between the sample and the
+/// heartbeat, and a missing file that costs the CPU reading with it.
+#[test]
+fn the_load_carries_the_hosts_memory_in_use_when_meminfo_reads() {
+    let mut rig = Rig::windowed();
+    rig.node(0, 100);
+    assert!(rig.run_at(0, &[]).is_empty());
+    assert_eq!(rig.load().unwrap().host_memory_used_bytes, None);
+    rig.put(
+        "/proc/meminfo",
+        "MemTotal: 16777216 kB\nMemFree: 1024 kB\nMemAvailable: 12582912 kB\n",
+    );
+    rig.node(30 * SECOND, 100);
+    assert!(rig.run_at(30, &[]).is_empty());
+    assert_eq!(rig.load().unwrap().host_memory_used_bytes, Some(4 << 30));
+}

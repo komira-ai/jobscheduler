@@ -248,9 +248,11 @@ teaches the class: a run slowed by contention may only raise it, as today.
   larger of the 60th percentile and half the peak; then a 10 to 15% margin and the maximum over the last hour.
 - **What is taken here:** #1035's rule as it is. The maximum over recent runs is Autopilot's choice for minimal
   tolerance, which is ours because a job here may not be killed.
-- **The host's measured memory:** the whole host's memory in use (today the jobs' group's working set, READ:
-  `NodeLoad.working_set_bytes`), used as for CPU.
-- **Nothing is ever killed for memory.** A host whose bookings leave no room is refused as `booked-memory`.
+- **The host's measured memory:** the whole host's memory in use (`MemTotal` minus `MemAvailable` of `/proc/meminfo`,
+  the heartbeat's `host_memory_used_bytes`), used as for CPU: placement counts it plus the bookings of the jobs placed
+  since the reading, against `memory_schedulable_percent` of the host (`placement-by-load.md`, Memory by measurement).
+- **Nothing is ever killed for memory.** A host whose measured memory and new bookings leave no room is refused for
+  memory, the refusal saying what was measured; with no fresh reading of its memory, its bookings count.
 
 ## 5. The placement rule
 

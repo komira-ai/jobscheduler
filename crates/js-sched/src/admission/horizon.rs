@@ -9,7 +9,13 @@
 //!         F(0) = max(measured, f * sum p(covered flat) + sum c(covered by curve))
 //! memory: max(sum R(tau, all), working_set + sum R(tau, uncovered)) + V_mem + R_new(tau)
 //!                                                                         <= C_mem * (1 + s_mem)
+//!         host_used + sum R(tau, uncovered) + V_mem + R_new(tau)          (reading has host_used)
 //! ```
+//!
+//! With the whole host's memory in use in the fresh reading (`host_used`), the leases a reading
+//! covers are inside it and only the others are charged beside it: no lease is charged its
+//! peak once a reading has seen it run, so the peaks of leases that do not peak together are
+//! not summed. Without it the first form holds.
 //!
 //! Memory is checked at `tau = 0` alone: every term of its left side falls (or stays) as
 //! `tau` grows, since a lease is charged the remaining maximum of its curve, which never
@@ -25,7 +31,9 @@
 //! with the new lease's, must stay within `(1 + d) * C_mem`, whatever way the new lease
 //! is charged. It bounds what a memory misfit shared by many keys can do, which the
 //! curves cannot see, and what a lease charged flat (a retry up the memory ladder, a cold
-//! key) adds beside leases charged by curve.
+//! key) adds beside leases charged by curve. With `host_used` in the fresh reading the sum
+//! is `host_used` plus the flat costs of the leases no reading covers yet: the measurement
+//! sees every misfit.
 
 use js_types::sched::Resources;
 use js_types::sched::usage::LeaseCost;
@@ -49,11 +57,19 @@ pub(crate) fn cpu_left(t: &Totals, slot: usize, measured: u64, cfg: &LoadConfig)
         .saturating_add(t.vm_cpu)
 }
 
-/// The memory a worker is charged `slot` minutes ahead, before a new lease.
-pub(crate) fn mem_left(t: &Totals, slot: usize, working_set: u64) -> u64 {
-    t.mem_all_at(slot)
-        .max(working_set.saturating_add(t.mem_uncovered_at(slot)))
-        .saturating_add(t.vm_mem)
+/// The memory a worker is charged `slot` minutes ahead, before a new lease: the whole host's
+/// memory in use when the fresh reading measured it (`host_used`), plus the leases no reading
+/// covers yet; else the larger of every lease's charge and the counted working set plus the
+/// uncovered leases'. The VMs' booked memory is added either way; a running VM's memory is in
+/// `host_used` too, an over-count that can only refuse work.
+pub(crate) fn mem_left(t: &Totals, slot: usize, working_set: u64, host_used: Option<u64>) -> u64 {
+    let leases = match host_used {
+        Some(used) => used.saturating_add(t.mem_uncovered_at(slot)),
+        None => t
+            .mem_all_at(slot)
+            .max(working_set.saturating_add(t.mem_uncovered_at(slot))),
+    };
+    leases.saturating_add(t.vm_mem)
 }
 
 /// What a new lease of `cost` (already clamped to `capacity`), charged over time as
@@ -105,21 +121,19 @@ pub(crate) fn refusal(
     // from the minute on, which never rises with the minute, a flat charge is the same at
     // every minute, and a charge that ends with the lease's life only falls, so the sum at
     // any later minute is no more than at minute 0 (the measurement enters at 0 too).
-    let at = mem_left(t, 0, left.working_set);
+    let at = mem_left(t, 0, left.working_set, left.host_memory);
     if at.saturating_add(new_mem) > mem_limit {
-        return Some(Refusal::new(
-            RefusalKind::PredictedMemory,
-            at,
-            new_mem,
-            mem_limit,
-        ));
+        let refusal = Refusal::new(RefusalKind::PredictedMemory, at, new_mem, mem_limit);
+        return Some(refusal.measured_memory(left.host_memory));
     }
     None
 }
 
 /// Why the flat-memory guard refuses a lease of `cost` (already clamped to `capacity`):
 /// the flat memory costs of every lease on the worker, cold and demoted ones included,
-/// and the VMs' booked memory, with the new lease's, are above `(1 + d) * C_mem`. It
+/// and the VMs' booked memory, with the new lease's, are above `(1 + d) * C_mem`; on a
+/// worker whose fresh reading measured the host's memory in use (`host_used`), that figure
+/// stands for the leases the reading covers, and the refusal carries it. It
 /// holds for every action lease, charged by curve or flat, on a worker charged by
 /// measurement or by prediction alone; `None` when the guard is off. A VM is judged by
 /// the same sum, with its booked memory as its cost, besides the booked-capacity rule
@@ -129,11 +143,15 @@ pub(crate) fn flat_memory_refusal(
     t: &Totals,
     cost: &LeaseCost,
     capacity: &Resources,
+    host_used: Option<u64>,
     cfg: &LoadConfig,
 ) -> Option<Refusal> {
     let d = cfg.flat_memory_slack_permille?;
-    let held = t.mem_all().saturating_add(t.vm_mem);
+    let leases = host_used.map_or(t.mem_all(), |used| used.saturating_add(t.mem_uncovered));
+    let held = leases.saturating_add(t.vm_mem);
     let limit = super::scale(capacity.memory_bytes, 1000 + u64::from(d), 1000);
-    (held.saturating_add(cost.memory_bytes) > limit)
-        .then(|| Refusal::new(RefusalKind::BookedMemory, held, cost.memory_bytes, limit))
+    (held.saturating_add(cost.memory_bytes) > limit).then(|| {
+        Refusal::new(RefusalKind::BookedMemory, held, cost.memory_bytes, limit)
+            .measured_memory(host_used)
+    })
 }

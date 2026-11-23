@@ -319,7 +319,8 @@ impl Servable {
                     && workers[*name].has_room(request, by_load)
                     && workers[*name].fits_before_end(now, wall)
                     && (!attempt.not_whole || !workers[*name].exclusive(request))
-                    && (!vm_by_load || Self::vm_within_flat_memory(adm, &workers[*name], attempt))
+                    && (!vm_by_load
+                        || Self::vm_within_flat_memory(adm, &workers[*name], attempt, now))
             })
             .collect();
         let mut blocked = None;
@@ -432,13 +433,12 @@ impl Servable {
         admit_probe(pin, known, request)
     }
 
-    /// Whether a VM of `attempt` passes the flat-memory guard on `worker`: its booked
-    /// memory is its flat cost, summed with the flat costs of the leases there and the
-    /// other VMs' bookings.
-    fn vm_within_flat_memory(adm: &Admission, worker: &Worker, attempt: &Attempt<'_>) -> bool {
-        worker
-            .load_state
-            .flat_memory_refusal(&attempt.cost, &worker.capacity, &adm.cfg)
+    /// Whether a VM of `at` passes the flat-memory guard on `w` at `now`: its booked memory
+    /// is its flat cost, summed with the flat costs of the leases there (or the host's
+    /// measured memory in use for those a fresh reading covers) and the other VMs' bookings.
+    fn vm_within_flat_memory(adm: &Admission, w: &Worker, at: &Attempt<'_>, now: FarmTime) -> bool {
+        w.load_state
+            .flat_memory_refusal(&at.cost, &w.capacity, now, &adm.cfg)
             .is_none()
     }
 
