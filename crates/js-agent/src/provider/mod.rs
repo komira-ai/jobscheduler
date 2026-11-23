@@ -27,6 +27,7 @@
 //! in `SweepRequest.agent`, and `js.` before every run id.
 
 mod call;
+pub(crate) use call::run_name;
 mod flight;
 mod socket;
 pub mod wire;

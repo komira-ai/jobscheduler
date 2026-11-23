@@ -240,7 +240,10 @@ impl NativeRuntime {
                 });
             }
         }
-        let trees = None; // TRE
+        let trees = mounts::trees_of(&self.config.mount_roots, &plans)
+            .map(|rules| rules.mount_trees())
+            .transpose()
+            .map_err(|why| fail(&"the trees", &why))?;
         let built = profile::build(&self.config, &native, &home, (&read_only, &grants), trees)?;
         self.mark(marks, STEPS[5]);
         // The job start's environment over the agent's (its values win), then the account's
