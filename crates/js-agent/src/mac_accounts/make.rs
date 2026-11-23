@@ -1,0 +1,269 @@
+//! Making an account: choosing its slot (a uid and the `GeneratedUID` that goes with it),
+//! recording it, emptying the slot's per-user folder, making its home and its record.
+
+use super::error::Failure;
+use super::host::NewUser;
+use super::ledger::{Record, name};
+use super::pool::Pool;
+use super::teardown::Launchd;
+use super::{Account, AccountError, Step, folder, generated_uid, tree, uid};
+use std::os::unix::fs::MetadataExt as _;
+
+/// How many uids a refusal for want of a free one names; it counts the rest.
+const REASONS: usize = 8;
+
+impl Pool {
+    /// The first free uid of the range after the one the ledger's last `made` record names.
+    ///
+    /// # Errors
+    /// No uid is free: the refusal names up to [`REASONS`] uids and why each is not.
+    fn choose_uid(&self) -> Result<u32, AccountError> {
+        let last = self.ledger().last_uid();
+        let mut busy = Vec::new();
+        for uid in uid::after(&self.settings.range, last) {
+            match self.why_busy(uid) {
+                None => return Ok(uid),
+                Some(why) => busy.push(format!("{uid}: {why}")),
+            }
+        }
+        let more = busy.len().saturating_sub(REASONS);
+        busy.truncate(REASONS);
+        if more > 0 {
+            busy.push(format!("and {more} more"));
+        }
+        Err(AccountError::NoFreeUid {
+            range: format!(
+                "{}-{}",
+                self.settings.range.start(),
+                self.settings.range.end()
+            ),
+            reasons: busy,
+        })
+    }
+
+    /// Why the slot of `uid` is not free; `None` when it is. The first reason found: an
+    /// account of the ledger that is not gone, a record with the uid, a record with the
+    /// slot's `GeneratedUID`, a live process that the kill rounds do not end, something in
+    /// the slot's per-user folders below their top-level directories, an entry in the shared
+    /// places. An error in looking is a reason.
+    ///
+    /// A process of a slot that no account of the ledger holds and that no record has is
+    /// nobody's work: macOS starts per-user daemons (`distnoted`) by itself for a uid whose
+    /// domain was touched. Such a process is ended with the rounds a retirement uses
+    /// ([`Pool::kill_rounds`]), without asking launchd anything (no account has the uid, and
+    /// a question about its user domain would make one), and the slot is busy only when one
+    /// survives them or they cannot look. A slot an account of the ledger holds is never
+    /// killed here: that is [`Pool::retire`]'s.
+    fn why_busy(&self, uid: u32) -> Option<String> {
+        if let Some(n) = self.ledger().holding(uid) {
+            return Some(format!("held by {}", name(n)));
+        }
+        match self.host.uid_taken(uid) {
+            Err(why) => return Some(format!("looking up its record: {why}")),
+            Ok(true) => return Some("a user record has it".to_owned()),
+            Ok(false) => {}
+        }
+        match self.host.guid_taken(&generated_uid(uid)) {
+            Err(why) => return Some(format!("looking up its GeneratedUID: {why}")),
+            Ok(true) => return Some("a user record has its GeneratedUID".to_owned()),
+            Ok(false) => {}
+        }
+        match self.host.processes(uid) {
+            Err(why) => return Some(format!("listing its processes: {why}")),
+            Ok(stray) if !stray.is_empty() => {
+                let mut killed = Vec::new();
+                if let Err(failed) = self.kill_rounds(uid, &mut killed, Launchd::Never) {
+                    return Some(failed.why);
+                }
+                killed.sort_unstable();
+                killed.dedup();
+                tracing::info!(uid, ?killed, "ended the processes of a free slot");
+            }
+            Ok(_) => {}
+        }
+        match folder::left(&self.settings.user_folders, uid, &*self.os) {
+            Err(why) => return Some(format!("searching the per-user folders: {why}")),
+            Ok(found) if !found.is_empty() => {
+                return Some(format!(
+                    "{} is left in its per-user folder",
+                    found[0].display()
+                ));
+            }
+            Ok(_) => {}
+        }
+        match tree::left_in(&self.settings.swept_places(), None, uid) {
+            Err(why) => Some(format!("looking in the shared places: {why}")),
+            Ok(found) if !found.is_empty() => {
+                Some(format!("{} is owned by it", found[0].display()))
+            }
+            Ok(_) => None,
+        }
+    }
+
+    /// Makes an account, with the maker held: chooses its slot, records `made` (durably,
+    /// before anything exists), empties the slot's per-user folder again (a crash may have
+    /// left something in it), makes its home and its record with the slot's `GeneratedUID`
+    /// and reads that back, then records `ready`, or, when it is made for the lend of `job`,
+    /// `lent` to it directly (never `ready`, which a lend beside this one could take). A
+    /// failure after `made` deletes what was made and records how that ended
+    /// ([`Pool::unmake`]).
+    ///
+    /// # Errors
+    /// No free uid, or a step failed (named, with how the deletion of what was made ended).
+    pub(super) fn make(&self, job: Option<&str>) -> Result<Account, AccountError> {
+        let uid = self.choose_uid()?;
+        let n = self.ledger().next();
+        let name = name(n);
+        self.record(&Record::Made(n, uid))
+            .map_err(|why| make_error(&name, Step::Ledger, format!("recording made: {why}")))?;
+        let gid = self.settings.gid;
+        let home = self.settings.homes.join(&name);
+        let user = NewUser {
+            name: name.clone(),
+            uid,
+            gid,
+            home: home.clone(),
+            generated_uid: generated_uid(uid),
+        };
+        let made = folder::empty(&self.settings.user_folders, uid, &*self.os)
+            .map_err(|why| {
+                Failure::new(
+                    Step::Folder,
+                    format!("emptying its per-user folders: {why}"),
+                )
+            })
+            .and_then(|()| {
+                self.host
+                    .make_home(&self.settings.homes, &name, uid, gid)
+                    .map_err(|why| {
+                        Failure::new(Step::Home, format!("making {}: {why}", home.display()))
+                    })
+            })
+            .and_then(|()| {
+                self.host.create_account(&user).map_err(|why| {
+                    Failure::new(Step::Record, format!("creating the record: {why}"))
+                })
+            })
+            .and_then(|()| self.check_generated_uid(&user))
+            .and_then(|()| match job {
+                // Made for a lend: `made` goes straight to `lent`, so the account is never
+                // visible as ready to a lend that runs beside this one.
+                Some(job) => self
+                    .record(&Record::Lent(n, job.to_owned()))
+                    .map_err(|why| Failure::new(Step::Ledger, format!("recording lent: {why}"))),
+                None => self
+                    .record(&Record::Ready(n))
+                    .map_err(|why| Failure::new(Step::Ledger, format!("recording ready: {why}"))),
+            });
+        match made {
+            Ok(()) => {
+                tracing::info!(account = %name, uid, "made an account");
+                Ok(Account {
+                    name,
+                    uid,
+                    gid,
+                    generated_uid: user.generated_uid,
+                })
+            }
+            Err(failed) => Err(self.unmake(n, uid, &failed)),
+        }
+    }
+
+    /// Reads the record just made back: it must carry the slot's `GeneratedUID`, which is
+    /// what makes the slot's per-user folder the same one again.
+    fn check_generated_uid(&self, user: &NewUser) -> Result<(), Failure> {
+        let found = self.host.record_guid(&user.name).map_err(|why| {
+            Failure::new(
+                Step::Record,
+                format!("reading the GeneratedUID of the record: {why}"),
+            )
+        })?;
+        match found {
+            Some(guid) if guid == user.generated_uid => Ok(()),
+            Some(guid) => Err(Failure::new(
+                Step::Record,
+                format!(
+                    "the record's GeneratedUID is {guid}, not the slot's {}",
+                    user.generated_uid
+                ),
+            )),
+            None => Err(Failure::new(
+                Step::Record,
+                "the record is not there after it was made",
+            )),
+        }
+    }
+
+    /// Deletes what a failed making left of account `n`: ends the processes of its uid with
+    /// the kill rounds (no job ran as it, but macOS may have started a per-user daemon for a
+    /// record that existed), then steps 3 to 6 of a deletion; records `gone` when it is shown
+    /// gone and `held` when it is not, and returns the error that says what failed and how
+    /// that ended.
+    fn unmake(&self, n: u64, uid: u32, failed: &Failure) -> AccountError {
+        let name = name(n);
+        let done = self
+            .not_anothers(&name, uid, failed.step)
+            .and_then(|()| self.launchd_for(&name, uid))
+            .and_then(|ask| self.kill_rounds(uid, &mut Vec::new(), ask))
+            .and_then(|()| self.cleanup(&name, uid));
+        let ended = match self.settle(n, done) {
+            Ok(_) => "what was made was deleted and shown gone".to_owned(),
+            Err(held) => format!(
+                "deleting what was made did not complete, at {}: {}",
+                held.step, held.why
+            ),
+        };
+        make_error(&name, failed.step, format!("{}; {ended}", failed.why))
+    }
+}
+
+impl Pool {
+    /// Before a failed making deletes by name: when it failed at the home or the record (one
+    /// of the name may have been there already, made by another ledger on the host), a record
+    /// of `name` with another uid, or (failed at the home) a home of `name` another uid owns,
+    /// is another's and is not deleted: the account is held at that step instead. Seen on the proof Mac: two
+    /// ledgers both named an account `kbf-acct-2`, and a refill that found the other's home
+    /// deleted the other's record and home.
+    fn not_anothers(&self, name: &str, uid: u32, step: Step) -> Result<(), Failure> {
+        if !matches!(step, Step::Home | Step::Record) {
+            return Ok(());
+        }
+        let record = self.host.account(name).map_err(|why| {
+            Failure::new(Step::Record, format!("looking up the record {name}: {why}"))
+        })?;
+        if let Some(theirs) = record.filter(|record| record.uid != uid) {
+            return Err(Failure::new(
+                Step::Record,
+                format!(
+                    "the record {name} has uid {}, not {uid}: another's, not deleted",
+                    theirs.uid
+                ),
+            ));
+        }
+        // A making that failed at the record made the home itself: only one that failed at
+        // the home found one there.
+        let home = self.settings.homes.join(name);
+        match std::fs::symlink_metadata(&home).map(|found| found.uid()) {
+            Ok(owner) if step == Step::Home && owner != uid => Err(Failure::new(
+                Step::Home,
+                format!(
+                    "{} is owned by uid {owner}, not {uid}: another's, not removed",
+                    home.display()
+                ),
+            )),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// [`AccountError::Make`] for the account `account` and the step that failed.
+fn make_error(account: &str, step: Step, why: String) -> AccountError {
+    AccountError::Make {
+        account: account.to_owned(),
+        step,
+        why,
+    }
+}
+
+#[cfg(test)]
+mod tests;
