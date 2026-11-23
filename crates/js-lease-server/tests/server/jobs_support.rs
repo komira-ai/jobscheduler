@@ -157,6 +157,29 @@ pub async fn job_state(h: &Harness, id: &str) -> String {
     read.json()["job"]["state"].as_str().unwrap().to_owned()
 }
 
+/// The job service's answer about the job `id` once it has left `JOB_STATE_QUEUED`, as a
+/// client that submitted it watches it: a submit answers the job queued and pokes the
+/// server's placement poller, whose pass runs on a task of its own, so the job is read until
+/// that pass has placed it. Nothing is timed: each read is one request, and how many come
+/// before the pass lands is not fixed; a job still queued after [`QUEUE_READS`] reads fails
+/// the test rather than holding it up.
+pub async fn left_the_queue(h: &Harness, id: &str) -> Value {
+    for _ in 0..QUEUE_READS {
+        let read = job_of(h, id).await;
+        assert_eq!(read.status, 200, "{}", read.body);
+        let job = read.json()["job"].clone();
+        if job["state"] != "JOB_STATE_QUEUED" {
+            return job;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("the job {id} is still queued after {QUEUE_READS} reads");
+}
+
+/// The most reads of a job [`left_the_queue`] makes before it fails: a guard against a poller
+/// that never places, far above the few reads a placement takes.
+const QUEUE_READS: usize = 10_000;
+
 /// `CancelJob` of the job `id` through the job service's gateway.
 pub async fn cancel(h: &Harness, id: &str) -> Reply {
     let addr = h.running.job_addr().expect("the job service is on");

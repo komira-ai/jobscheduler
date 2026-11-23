@@ -98,7 +98,9 @@ booking it died at next (the floor), and each run's peak with its margin raises 
 The size is decided by the placement pass, not at submit, and is not written on the job: its needs stay as submitted, so a retried
 submit with the same id is still the same job. What it was booked is its allocation's `booked`, and which history sized it its
 allocation's `sized_from` (`class`, `fallback`, `cold` or `over-cap`; none for a job that named both). A contained job's memory
-booking is its `memory.max`, with no swap. Its CPU booking is what it is guaranteed (7.9), and placement packs a host by the bookings;
+booking is no limit: its cgroup has no `memory.max` and no `memory.swap.max`, so a job that needs more than it booked runs on
+what the host has (its swap absorbs a little) and reports its whole peak, and the bound on the jobs of a host together is the
+share of it placement books (`memory_schedulable_percent`). Its CPU booking is what it is guaranteed (7.9), and placement packs a host by the bookings;
 nothing holds a job below what it needs: a compile that needs 20 cores for 30 seconds gets them whenever the host has them. The
 lease's `cpu.weight`, from the booking, is how the kernel keeps the guarantee when a host is busier than planned (leases that all
 want CPU get the cores in proportion to their bookings); there is no `cpu.max` unless the agent's operator sets a ceiling
@@ -182,7 +184,8 @@ opaque to it), so a client may send it to any server.
 **Why.** On the farm of 7.7 (six hosts of 88 cores and 251 GiB), the hosts were 11% to 33% busy. Each job ran under a `cpu.max`
 of its booked CPU (0.25 to 1.25 cores) and was throttled almost all the time, and each host was full by memory bookings at about
 15 jobs: most jobs booked the cold 16 GiB and used 0.6 to 3.2 GB. No job now has a CPU limit, known or unknown: the agent writes
-a job's booked CPU as its `cpu.weight`, a share of the host's CPU. Memory stays a hard limit on every job.
+a job's booked CPU as its `cpu.weight`, a share of the host's CPU. Nor is a job's memory booking a limit: it is what placement
+counts, and the bound is the pool's `memory_schedulable_percent` per host.
 
 **What the CPU booking is: the median of the runs' mean CPU.** A class books the median (the nearest-rank 50th percentile) of its
 recent runs' mean CPU: the CPU time of a run over its wall time, the cores it used on average. The mean is what placement needs.
@@ -217,7 +220,7 @@ takes up to its slack in bookings, which are means.
 **Unknown jobs.** A class with no CPU history books its kind's learned CPU, else its client's, and only a client with no history
 at all books the cold CPU: by default 22 cores, held at a quarter of the largest host, the most any class books. Its first run is
 therefore placed with room for the most cores a class may use, and one run is enough to learn its mean. An unknown job's memory is
-its kind's or its client's peak with the margin, else the cold 4 GiB, a hard limit raised by a kill's floor.
+its kind's or its client's peak with the margin, else the cold 4 GiB, raised by a kill's floor (a booking, not a limit on the job).
 
 **The history from before.** Every run a server rebuilds at its first start after the change has a mean: its CPU time over its wall
 time, from its job record. A server re-derives each run's sample from its job record as the run's mean at the server's start; there
@@ -231,8 +234,8 @@ or not, no longer depends on the peak.
 **Run time.** The estimator keeps the minutes each run lasted as it did. The job walk charges each job flat for its life, and the
 whole-host path waits on a job's wall limit, as before.
 
-**Memory.** A young class books its fallback's memory peaks with a margin, not the cold size (7.7, 7.8); memory stays a hard limit per
-job and the pool's `memory_schedulable_percent` per host, and the kill floor stays the safety net.
+**Memory.** A young class books its fallback's memory peaks with a margin, not the cold size (7.7, 7.8); memory is bounded by the
+pool's `memory_schedulable_percent` per host (a job's booking is no limit of its own), and the kill floor stays the safety net.
 
 **Proof on runs shaped like the farm's** (`crates/js-sched-placer/src/sizes_farm_tests.rs`, measured by the tests):
 
