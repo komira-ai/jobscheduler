@@ -726,7 +726,7 @@ fn execute(
     // The state root the hold file is read from (see `hold_cordon`), kept before the jobs
     // take `local`: an agent with no state root is never held.
     let held_root = local.state.clone();
-    platform::complete(&mut local, &cli, &start).map_err(Failure::Usage)?;
+    platform::complete(&mut local, &cli, &start, services.files).map_err(Failure::Usage)?;
     if let Some(why) = &local.files_warning {
         let _ = writeln!(err, "js-agent: warning: {why}");
     }

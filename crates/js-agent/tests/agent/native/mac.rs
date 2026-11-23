@@ -305,35 +305,35 @@ fn a_run_cannot_raise_the_limits_it_was_given() {
     rig.rt.remove(&id).unwrap();
 }
 
-/// Asserts that the supervisor starts no shell in front of the program: the program is run with
-/// an environment that would make a shell trace with a `PS4` that creates a file in the run
-/// directory (which the profile lets the job write), and run an imported `ulimit` function that
-/// does the same. The file must not exist afterwards, and the run still ends well. Catches a
-/// shell put in front of the program, which would run with the job's environment.
+/// Asserts that no shell stands in front of the program: an argument that a shell would
+/// expand (`$(touch escaped)`) reaches `echo` as it was, and no file is made; and that the
+/// names a job could steer a shell with (`SHELLOPTS`, `PS4`, an imported function) are refused
+/// before anything starts. Catches a shell put in front of the program, which would run the
+/// job's words and environment.
 #[test]
 fn the_job_environment_steers_no_shell_because_there_is_none() {
     let mut rig = MacRig::new("shell-env");
-    let touch = "/usr/bin/touch escaped";
-    let mut body = native("/bin/echo", &["done"]);
-    body.env = std::collections::BTreeMap::from([
-        ("SHELLOPTS".to_owned(), "xtrace".to_owned()),
-        ("PS4".to_owned(), format!("$({touch}) ")),
-        (
-            "BASH_FUNC_ulimit%%".to_owned(),
-            format!("() {{ {touch}; return 0; }}"),
-        ),
-    ]);
-    let spec = rig.spec("r1", body);
-    let id = rig.rt.create_and_start(&spec).unwrap();
+    let touch = "$(/usr/bin/touch escaped)";
+    let id = rig.start("r1", "/bin/echo", &[touch]);
     let status = rig.settle(&id);
     let escaped = rig.exec().join("escaped").exists();
     let tail = rig.rt.log_tail(&id).unwrap().unwrap();
-    // The job must have run first: a start that never ran it would leave no file either, and
-    // that is not the absence of a shell.
     assert_eq!(status, exited(0), "{tail:?}");
-    assert_eq!(tail.stdout, "done\n");
-    assert!(!escaped, "a shell ran with the job's environment");
+    assert_eq!(tail.stdout, format!("{touch}\n"));
+    assert!(!escaped, "a shell ran the job's words");
     rig.rt.remove(&id).unwrap();
+
+    let mut body = native("/bin/echo", &["done"]);
+    body.env = std::collections::BTreeMap::from([
+        ("SHELLOPTS".to_owned(), "xtrace".to_owned()),
+        ("PS4".to_owned(), format!("{touch} ")),
+        (
+            "BASH_FUNC_ulimit%%".to_owned(),
+            "() { /usr/bin/touch escaped; }".to_owned(),
+        ),
+    ]);
+    let why = rig.rt.create_and_start(&rig.spec("r2", body)).unwrap_err();
+    assert_eq!(why.0, "native.env: BASH_FUNC_ulimit%% is a reserved name");
 }
 
 /// Asserts that the start-up self-test passes with the real supervisor: `/usr/bin/true` runs
@@ -343,12 +343,20 @@ fn the_job_environment_steers_no_shell_because_there_is_none() {
 #[test]
 fn the_self_test_passes_with_the_real_supervisor() {
     let mut rig = MacRig::new("selftest");
+    let homes = |rig: &MacRig| -> Vec<std::ffi::OsString> {
+        fs::read_dir(&rig.settings.homes)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect()
+    };
+    // The pool keeps one account ready: the self-test is lent it, retires it, and the refill
+    // makes the next one.
+    let before = homes(&rig);
+    assert_eq!(before.len(), 1);
     assert_eq!(rig.rt.self_test(), Ok(()));
-    assert_eq!(
-        fs::read_dir(&rig.settings.homes).unwrap().count(),
-        0,
-        "the self-test left an account"
-    );
+    let after = homes(&rig);
+    assert_eq!(after.len(), 1, "{after:?}");
+    assert_ne!(after, before, "the self-test's account was not retired");
 }
 
 /// The kbf shape of a tree: a read-only, `no_exec` mount of the host directory `dir` at
