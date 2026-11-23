@@ -41,46 +41,9 @@ jobs:
       - run: rustup toolchain install
       - run: rustup target add "$TARGET"
       - name: Build the test binary without running it
-        run: |
-          set -euo pipefail
-          cargo test -p js-agent --test native_isolation --no-run --locked --target "$TARGET" --message-format=json > build.json
-      - name: Pick the binary and check what it is
-        run: |
-          set -euo pipefail
-          commit="$(git rev-parse HEAD)"
-          short="${commit:0:12}"
-          # The test executable of the `native_isolation` integration test: a compiler-artifact
-          # message with profile.test and that target's name and kind, never a guess by file name.
-          exe="$(jq -r 'select(.reason == "compiler-artifact" and .profile.test == true and .target.name == "native_isolation" and (.target.kind | index("test")) != null and .executable != null) | .executable' build.json)"
-          if [ "$(printf '%s\n' "$exe" | grep -c .)" != 1 ]; then
-            echo "::error::expected exactly one native_isolation test executable, got: $exe"
-            exit 1
-          fi
-          mkdir dist
-          cp "$exe" dist/native_isolation
-          description="$(file dist/native_isolation)"
-          echo "$description"
-          case "$description" in
-            *"Mach-O 64-bit executable arm64"*) ;;
-            *)
-              echo "::error::dist/native_isolation is not an arm64 Mach-O executable"
-              exit 1
-              ;;
-          esac
-          # The supervisor the test starts: the js-agent binary cargo built for the test, shipped
-          # beside it (the test takes the js-agent next to itself).
-          cp "target/$TARGET/debug/js-agent" dist/js-agent
-          (cd dist && shasum -a 256 native_isolation js-agent > SHA256SUMS)
-          sha="$(head -n 1 dist/SHA256SUMS | cut -d ' ' -f 1)"
-          {
-            echo "### js-agent native isolation test binary"
-            echo
-            echo "- commit: \`$commit\`"
-            echo "- target: \`$TARGET\`"
-            echo "- sha256: \`$sha\`"
-            echo "- file: $description"
-          } >> "$GITHUB_STEP_SUMMARY"
-          echo "SHORT=$short" >> "$GITHUB_ENV"
+        run: cargo test -p js-agent --test native_isolation --no-run --locked --target "$TARGET" --message-format=json > build.json
+      - name: Stage the test binary and the js-agent it starts, with their sums
+        run: cargo xtask mac-test-artifact --test native_isolation --target "$TARGET" --build-json build.json --out dist --commit "$GITHUB_SHA" --summary "$GITHUB_STEP_SUMMARY" --github-env "$GITHUB_ENV"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: js-agent-native-isolation-test-${{ env.SHORT }}
