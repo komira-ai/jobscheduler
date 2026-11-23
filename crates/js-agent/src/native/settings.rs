@@ -85,14 +85,16 @@ impl NativeSettings {
     /// may read; so are `--native-accounts`, `--native-deny-read`, the auto-login password
     /// and the places only the privacy controls guard ([`PRIVACY_ONLY_PLACES`]). Each is
     /// read-denied by the name the kernel resolves, a path that is not there yet by the real
-    /// path of its deepest ancestor that is (see [`real_or_planned`]).
+    /// path of its deepest ancestor that is (see [`real_or_planned`]): none of them need
+    /// exist when the agent starts.
     ///
     /// # Errors
     ///
     /// The text names the flag at fault: a native flag without `--native-accounts`, no
     /// `--native-account-range` or one the pool refuses, more ready accounts than slots, a
-    /// path that is not absolute, a home directory other than the pool's, a network level
-    /// that is none of `off`, `loopback`, `on` and `open`, a `--native-pf-*` flag beside
+    /// path that is not absolute (`--native-deny-read` included), a home directory other
+    /// than the pool's, a network level that is none of `off`, `loopback`, `on` and `open`,
+    /// a `--native-pf-*` flag beside
     /// `open` (or beside any value but `on`), a limit of 0 or one too large, or a root a
     /// profile cannot name.
     pub fn from_flags(
@@ -166,11 +168,13 @@ impl NativeSettings {
         }
         let mut denies: Vec<PathBuf> = denied.iter().map(|path| real_or_planned(path)).collect();
         denies.push(real_or_planned(state));
+        // A path that is not there yet (a directory the agent or another service makes after
+        // the agent starts) is denied by the name it will have, as the agent's own are: a
+        // missing one never stops a start. Absolute, as the other path flags are, so the name
+        // is the one the operator wrote and not one read against the agent's working directory.
         for path in flags.deny_read {
-            let found = fs::canonicalize(path);
-            denies.push(
-                found.map_err(|why| format!("--native-deny-read: {}: {why}", path.display()))?,
-            );
+            absolute("--native-deny-read", path)?;
+            denies.push(real_or_planned(path));
         }
         denies.push(PathBuf::from(KCPASSWORD));
         denies.extend(PRIVACY_ONLY_PLACES.iter().map(PathBuf::from));
@@ -381,7 +385,8 @@ fn absolute(flag: &str, path: &Path) -> Result<(), String> {
 }
 
 /// The name the kernel resolves `path` to: its real path, or, for a path that is not there (the
-/// token file of a host that joins by its certificate), the real path of its deepest ancestor
+/// token file of a host that joins by its certificate, a `--native-deny-read` directory made
+/// after the agent starts), the real path of its deepest ancestor
 /// that is, with the rest of `path` after it. So `/etc/js-agent/token` is denied as
 /// `/private/etc/js-agent/token` whether the file exists or not: a profile cannot name `/etc`,
 /// which is a link, and a run that makes the file later is still denied it. `path` as it is when

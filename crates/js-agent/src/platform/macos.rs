@@ -25,7 +25,7 @@
 //! | `--vm-driver <path>` | turns the VM backend on (see [`vm`]): the absolute path of the signed `js-vmm` binary, started as `js-vmm lease` (one process for each VM, through the disclaiming spawner) to make and drive the VMs; a VM start (`kind: vm`) then runs in a fresh VM cloned from the base image and destroyed when it ends, at most two at once (a third is refused `no-capacity`), and the hello reports `vm.slots`, `vm.max_cpus` and `vm.max_mem_gib`; without it a VM start is refused `vm-unavailable`; macOS build only; needs `--vm-store` and `--native-accounts` |
 //! | `--vm-store <dir>` | (macOS build only) the directory of the VM backend: the base image in `base` and each run's clone under `runs/`, on one APFS volume; needs `--vm-driver` |
 //! | `--native-tool-root <path>` | (macOS build only) a directory a native start's program must lie under; repeatable; by default `/usr/bin`, `/bin`, `/usr/sbin` and `/sbin`; needs `--native-accounts` |
-//! | `--native-deny-read <path>` | (macOS build only) a path no native run may read, beside the agent's roots, token, instance and CA files, `--native-accounts`, `/etc/kcpassword` and the places only the privacy controls guard (`native/fence.rs`); repeatable; must exist; needs `--native-accounts` |
+//! | `--native-deny-read <path>` | (macOS build only) a path no native run may read, beside the agent's roots, token, instance and CA files, `--native-accounts`, `/etc/kcpassword` and the places only the privacy controls guard (`native/fence.rs`); repeatable; absolute; need not exist yet; needs `--native-accounts` |
 //! | `--native-max-file-mib <n>` | (macOS build only) the most MiB any one file a native run writes may reach, its output included (the run's `RLIMIT_FSIZE`); by default 4096; a run that writes more is ended by `SIGXFSZ`; needs `--native-accounts` |
 //! | `--native-max-processes <n>` | (macOS build only) the most processes a native run may start (the run's `RLIMIT_NPROC` is this and one, for the supervisor that waits on the job as the run's account); by default 512; needs `--native-accounts` |
 
@@ -117,7 +117,8 @@ pub struct Flags {
     pub native_network: Option<String>,
     /// A path no native run may read, in addition to the agent's own roots, its token,
     /// instance and CA files, `--native-accounts`, `/etc/kcpassword` and the places only the
-    /// privacy controls guard; repeatable. It must exist. Needs `--native-accounts`.
+    /// privacy controls guard; repeatable. An absolute path; it need not exist yet (one that is
+    /// not there is denied by the name it will have). Needs `--native-accounts`.
     #[arg(long = "native-deny-read", value_name = "PATH")]
     pub native_deny_read: Vec<PathBuf>,
     /// The most MiB any one file a native run writes may reach, its output included (the

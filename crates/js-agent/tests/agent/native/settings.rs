@@ -466,17 +466,23 @@ fn bad_flags_are_refused_by_name() {
     assert!(why.starts_with("relative/state: "), "{why}");
 }
 
-/// Asserts the read denies a start adds beyond the agent's own: `--native-deny-read` (spelled
-/// as the kernel resolves it, and refused when it does not exist), after the pool's directory
-/// and before the auto-login password and the places only the privacy controls guard. It
-/// catches a pool ledger or a privacy database that a run can read.
+/// Asserts the read denies a start adds beyond the agent's own: `--native-deny-read`, spelled
+/// as the kernel resolves it, after the pool's directory and before the auto-login password and
+/// the places only the privacy controls guard. A path that is not there yet (a directory made
+/// after the agent starts, one level or two below a link) is denied by the real path it will
+/// have, never refused; a relative path is refused naming the flag. It catches a pool ledger or
+/// a privacy database that a run can read, a denied directory named through a link (which a
+/// profile cannot name), and a fresh host's agent that never starts because a denied directory
+/// is made only after the start.
 #[test]
-fn explicit_read_denies_are_resolved_and_must_exist() {
+fn explicit_read_denies_are_resolved_and_need_not_exist() {
     let dir = Scratch::new("native-set-deny");
     let state = dir.path("extra-state");
     fs::create_dir(&state).unwrap();
+    let alias = dir.path("alias");
+    std::os::unix::fs::symlink(&state, &alias).unwrap();
     let odd = state.join("..").join("extra-state");
-    let given = [odd];
+    let given = [odd, alias.join("ledger"), alias.join("made/later")];
     let mut with = flags(None, &[]);
     with.deny_read = &given;
     let settings = NativeSettings::from_flags(&with, &[], Path::new("/srv/journal"))
@@ -489,13 +495,24 @@ fn explicit_read_denies_are_resolved_and_must_exist() {
         .map(|d| d.as_str())
         .collect();
     let resolved = fs::canonicalize(&state).unwrap();
-    let mut want = vec![ACCOUNTS.to_owned(), resolved.to_str().unwrap().to_owned()];
+    let spelt = |path: PathBuf| path.to_str().unwrap().to_owned();
+    let mut want = vec![
+        ACCOUNTS.to_owned(),
+        spelt(resolved.clone()),
+        spelt(resolved.join("ledger")),
+        spelt(resolved.join("made/later")),
+    ];
     want.extend(always_denied());
     assert_eq!(denied, want);
-    let missing = [dir.path("missing")];
-    with.deny_read = &missing;
+    assert!(!resolved.join("ledger").exists(), "the check made the path");
+
+    let relative = [PathBuf::from("relative/ledger")];
+    with.deny_read = &relative;
     let why = NativeSettings::from_flags(&with, &[], Path::new("/srv/journal")).unwrap_err();
-    assert!(why.starts_with("--native-deny-read: "), "{why}");
+    assert_eq!(
+        why,
+        "--native-deny-read: relative/ledger is not an absolute path"
+    );
 }
 
 /// Asserts that every start read-denies the pool's directory, the auto-login password and each
