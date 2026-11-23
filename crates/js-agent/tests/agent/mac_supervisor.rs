@@ -182,23 +182,21 @@ mod macos {
         (output, ready, exit)
     }
 
-    /// A job that exits 7: the status is 7, the ready record has the job's pid, which is not
-    /// the supervisor's and leads the job's own process group, no audit session (none was
+    /// A job that exits 7: the status is 7, the ready record has the pid the job prints (its
+    /// group is checked from outside the sandbox, where `ps` may look, by
+    /// `the_job_runs_in_the_chosen_directory_and_its_own_group`), no audit session (none was
     /// asked for), and the exit record has the code. Catches a supervisor that execs the job in
     /// its own place, or reports a code it did not see.
     #[test]
     fn a_job_s_pid_and_code_are_recorded() {
         let folders = Folders::new("supervisor-code");
-        let script = "echo \"$$ $(/bin/ps -o pgid= -p $$ | tr -d ' ')\"; exit 7";
+        let script = "echo $$; exit 7";
         let job = spec(&folders, OPEN, &[], "/bin/sh", &["-c", script]);
         let (output, ready, exit) = supervised(&folders, &job);
         assert_eq!(output.status.code(), Some(7), "{output:?}");
         let ready = ready.unwrap();
         let pid = ready.job_pid;
-        assert_eq!(
-            String::from_utf8_lossy(&output.stdout),
-            format!("{pid} {pid}\n")
-        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout), format!("{pid}\n"));
         assert_eq!(ready.asid, None);
         assert_eq!(
             exit,
@@ -287,14 +285,16 @@ mod macos {
         assert!(!marker.exists());
     }
 
-    /// The job gets no descriptor beyond 0, 1 and 2 (the records are not passed on), and
+    /// The job gets no descriptor beyond 0, 1 and 2 (the records are not passed on; each is
+    /// probed by an external command, because bash saves a builtin's redirected output on a
+    /// descriptor of its own from 10 up, which a builtin's probe would then find), and
     /// `SIGPIPE` has its default action in it (`trap -p PIPE` prints nothing, and a writer to
     /// a closed pipe is killed by the signal: status 141). Catches records, or the Rust
     /// runtime's ignored `SIGPIPE`, leaking into the job.
     #[test]
     fn the_job_gets_no_descriptor_of_the_supervisor_and_a_default_sigpipe() {
         let folders = Folders::new("supervisor-leaks");
-        let script = r#"fd=3; while [ "$fd" -lt 256 ]; do (: >&"$fd") 2>/dev/null && echo "open $fd"; fd=$((fd + 1)); done
+        let script = r#"fd=3; while [ "$fd" -lt 256 ]; do /usr/bin/true 2>/dev/null >&"$fd" && echo "open $fd"; fd=$((fd + 1)); done
 trap -p PIPE
 { /usr/bin/yes; echo "yes:$?" >&2; } | /usr/bin/head -n 1 > /dev/null"#;
         let job = spec(&folders, OPEN, &[], "/bin/sh", &["-c", script]);
