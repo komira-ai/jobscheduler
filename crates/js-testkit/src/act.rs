@@ -44,6 +44,9 @@
 //! - `mtime PATH SECS`: sets the modification time of `PATH` (a file or a directory)
 //!   to `SECS` whole seconds after the Unix epoch;
 //! - `pgid`: prints the id of its process group;
+//! - `groups`: prints the process's group list as the kernel holds it (`getgroups(2)`), the
+//!   ids in its order, separated by spaces (on macOS, `id -G` prints the user's groups in
+//!   the directory instead, which a process need not hold);
 //! - `leads`: prints `group G session S`, each `1` when this process leads its process
 //!   group or its session and `0` when it does not;
 //! - `write-lines FILE [LINE]...`: creates or truncates `FILE` and writes each `LINE`
@@ -212,6 +215,7 @@ pub(crate) enum Step<'a> {
         secs: u64,
     },
     Pgid,
+    Groups,
     Leads,
     WriteLines {
         path: &'a str,
@@ -343,6 +347,7 @@ fn step(words: &[String]) -> Result<Step<'_>, Error> {
             secs: number(secs)?,
         },
         ["pgid"] => Step::Pgid,
+        ["groups"] => Step::Groups,
         ["leads"] => Step::Leads,
         ["write-lines", path, lines @ ..] => Step::WriteLines {
             path,
@@ -541,6 +546,11 @@ pub(crate) fn perform(steps: &[Step<'_>]) -> Result<Option<u8>, Error> {
                 std::io::stdout(),
                 &rustix::process::getpgrp().as_raw_nonzero().to_string(),
             )?,
+            Step::Groups => {
+                let groups = rustix::process::getgroups().map_err(failed("getgroups"))?;
+                let ids: Vec<String> = groups.iter().map(|g| g.as_raw().to_string()).collect();
+                write_line(std::io::stdout(), &ids.join(" "))?;
+            }
             Step::Leads => {
                 let pid = rustix::process::getpid();
                 let group = rustix::process::getpgrp() == pid;
