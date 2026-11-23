@@ -59,7 +59,9 @@ impl MemoryRecorder {
     }
 
     /// A series of a run this process did not start (adopted after a restart of the agent),
-    /// marked partial: it starts at its first sample.
+    /// marked partial: it starts at its first sample. Only the crun runtime adopts a run (a
+    /// Mac's native runs end with the agent), so only Linux has it.
+    #[cfg(target_os = "linux")]
     pub(crate) fn adopted() -> Self {
         Self {
             start: 0,

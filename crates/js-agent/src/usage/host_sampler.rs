@@ -5,7 +5,9 @@
 //! A Mac has no actions group, so the node's own figures are the host's: its CPU counter is
 //! the host's busy time and its working set the host's non-file memory, with no active file
 //! pages and no CPU limit. No lease has a group to read either: a lease asked for is counted
-//! unreadable, and the load carries no lease minutes.
+//! unreadable, and the load carries no lease minutes. The reading holds what every lease used,
+//! so the collector names each lease that ran the whole window covered
+//! ([`NodeSampler::covers_every_lease`]).
 //!
 //! The host's CPU counters are 32-bit tick counts summed over its CPUs, which wrap (at 100
 //! ticks a second on 24 CPUs, in about three weeks). The sampler widens them: each reading
@@ -141,6 +143,11 @@ impl<S: HostStatistics> NodeSampler for HostSampler<S> {
             busy_usec,
             pressure_some_usec: None,
         })
+    }
+
+    /// A reading is the whole host's, which holds what every lease used.
+    fn covers_every_lease(&self) -> bool {
+        true
     }
 }
 

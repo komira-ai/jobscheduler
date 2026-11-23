@@ -17,6 +17,7 @@ use crate::mac_accounts::macos::procs::pids_of;
 
 // The `libc` crate declares `mach_timebase_info` deprecated (for the `mach2` crate), which this
 // crate does not depend on: the one call is declared here, as libSystem has it.
+// FFI-BOUNDARY: the caller owns the two words the call fills; nothing is allocated or freed.
 unsafe extern "C" {
     /// Fills the timebase: its numerator, then its denominator.
     fn mach_timebase_info(info: *mut [u32; 2]) -> c_int;

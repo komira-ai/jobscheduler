@@ -74,6 +74,13 @@ pub trait NodeSampler {
     /// The whole host's CPU counters, for the per-second series; `None` when they cannot be
     /// read (no zero is invented).
     fn host_counters(&mut self) -> Option<HostCpu>;
+
+    /// Whether a reading is of the whole host and so holds every lease's use, though it reads
+    /// none on its own (a host with no control groups). By default not: a lease is covered
+    /// only when its own group was read.
+    fn covers_every_lease(&self) -> bool {
+        false
+    }
 }
 
 impl<F: FileReader> NodeSampler for Sampler<F> {

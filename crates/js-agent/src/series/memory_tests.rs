@@ -121,6 +121,7 @@ fn the_series_ends_where_the_run_was_seen_to_end() {
 
 /// Asserts that an adopted run's series is partial and starts at its first sample. Catches the
 /// time before the agent's restart counted as a run with nothing held.
+#[cfg(target_os = "linux")]
 #[test]
 fn an_adopted_run_starts_at_its_first_sample_and_is_partial() {
     let mut recorder = MemoryRecorder::adopted();

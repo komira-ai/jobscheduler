@@ -16,6 +16,7 @@ use super::host_sampler::{CpuTicks, HostStatistics, VmPages};
 
 // The `libc` crate declares `mach_host_self` deprecated (for the `mach2` crate), which this
 // crate does not depend on: the one call is declared here, as libSystem has it.
+// FFI-BOUNDARY: the call returns a port name, no pointer; the port is kept, never freed.
 unsafe extern "C" {
     /// The name port of this host.
     fn mach_host_self() -> libc::mach_port_t;

@@ -54,7 +54,9 @@ impl SeriesRecorder {
 
     /// A series of a run this process did not start (adopted after a restart of the agent),
     /// marked partial: what the run did before it is not in the series. It starts at its
-    /// first sample and counts what the run used from there.
+    /// first sample and counts what the run used from there. Only the crun runtime adopts a
+    /// run (a Mac's native runs end with the agent), so only Linux has it.
+    #[cfg(target_os = "linux")]
     pub(crate) fn adopted() -> Self {
         Self {
             start: 0,

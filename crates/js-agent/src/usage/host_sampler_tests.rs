@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::{CpuTicks, HostSampler, HostStatistics, VmPages};
+use crate::lifecycle::RunningLease;
 use crate::usage::{
     Collector, HostCpu, LeaseCgroup, NodeSampler, Outbox, Sample, SampleError, UsageClock,
 };
@@ -219,4 +220,53 @@ fn a_collector_over_the_host_publishes_its_load() {
         ["usage: no load while the host CPU load cannot be read"]
     );
     assert!(outbox.take().is_none());
+}
+
+/// A lease that started at 0, taken over from no earlier process.
+fn running(id: &str) -> RunningLease {
+    RunningLease {
+        lease_id: id.to_owned(),
+        cgroup: None,
+        started_usec: Some(0),
+        adopted: false,
+    }
+}
+
+/// Asserts that a whole-host reading covers each lease that was running at the last reading
+/// published and still is: none at the first reading (no lease has a baseline), the lease that
+/// ran through the second, not the one that started since, and not one taken over from an
+/// earlier process. Catches a Mac load that covers no lease, which the server would charge
+/// at each lease's booking on top of the host's measured use, so that a Mac's running jobs
+/// would count twice.
+#[test]
+fn a_whole_host_reading_covers_the_leases_that_ran_through_it() {
+    let clock = Shared::default();
+    let outbox = Arc::new(Outbox::new());
+    outbox.set_window(Duration::from_secs(5));
+    let fake = Fake::new(
+        &[ticks(100, 0, 0), ticks(200, 0, 0), ticks(300, 0, 0)],
+        100,
+        Some(1 << 30),
+    );
+    let sampler: Box<dyn NodeSampler> = Box::new(HostSampler::new(fake));
+    let mut collector = Collector::with_sampler(sampler, Box::new(clock.clone()), outbox.clone());
+    let adopted = RunningLease {
+        adopted: true,
+        ..running("1-9")
+    };
+    clock.0.set(5_000_000);
+    assert_eq!(
+        collector.run(&[running("1-1"), adopted.clone()]),
+        Vec::<String>::new()
+    );
+    assert_eq!(outbox.take().expect("a load").covered, Vec::<String>::new());
+    outbox.delivered();
+    clock.0.set(10_000_000);
+    let now = [running("1-1"), running("1-2"), adopted.clone()];
+    assert_eq!(collector.run(&now), Vec::<String>::new());
+    assert_eq!(outbox.take().expect("a load").covered, ["1-1"]);
+    outbox.delivered();
+    clock.0.set(15_000_000);
+    assert_eq!(collector.run(&now), Vec::<String>::new());
+    assert_eq!(outbox.take().expect("a load").covered, ["1-1", "1-2"]);
 }

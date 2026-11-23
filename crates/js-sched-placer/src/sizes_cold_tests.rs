@@ -376,8 +376,8 @@ fn a_job_of_an_os_the_server_names_books_that_os_s_cold_memory() {
     assert_eq!(macs_at_4_gib().of("macos"), Some(4 * GIB));
 }
 
-/// A placer whose engine takes `cold` and, when given, `on`, over one Mac (28 cores and
-/// 88 GiB of bookable memory, `os` `macos`), on a clock at zero.
+/// A placer whose engine takes `cold` and, when given, `on`, over one Mac `a` (28 cores and
+/// 88 GiB of bookable memory, `os` `macos`; the host [`pass`] opens), on a clock at zero.
 fn mac_placer(cold: ColdSize, on: Option<ColdMemoryOn>) -> SchedPlacer {
     let clock = ManualClock::new(Timestamp::from_millis(0));
     let settings = Settings {
@@ -396,7 +396,7 @@ fn mac_placer(cold: ColdSize, on: Option<ColdMemoryOn>) -> SchedPlacer {
     let resources = Resources::new(28_000, 88 * GIB, 0, None).unwrap();
     placer
         .engine()
-        .host_up(&host("mac"), &Shape::new(resources, caps), at(0));
+        .host_up(&host("a"), &Shape::new(resources, caps), at(0));
     placer
 }
 
