@@ -26,25 +26,26 @@ struct Made {
 fn make(prefix: &str, target: &Target, tag: &str) -> Made {
     let name = format!("{prefix}:{}", target.name);
     let shown = target.dir.display().to_string();
-    // A place the job may not even look at answers as a refused write would: the profile's
-    // read denies (EPERM) or the modes of a folder above it (EACCES) keep the job out of it.
-    let absent = match fs::metadata(&target.dir) {
+    // A place the job may not even look at (the profile's read denies, EPERM, or the modes of
+    // a folder above it, EACCES) is still written to: only the write says whether a job can
+    // leave a file there, and a refused look must not hide a write that would succeed.
+    let unseen = match fs::metadata(&target.dir) {
         Ok(meta) if meta.is_dir() => None,
-        Ok(_) => Some(
-            Line::new(&name, Outcome::NotApplicable).detail(format!("{shown} is not a folder")),
-        ),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            Some(Line::new(&name, Outcome::NotApplicable).detail(format!("{shown} is absent")))
+        Ok(_) => {
+            return Made {
+                line: Line::new(name, Outcome::NotApplicable)
+                    .detail(format!("{shown} is not a folder")),
+                file: None,
+            };
         }
-        Err(err) => Some(Line::refused(
-            &name,
-            &err,
-            format!("cannot look at {shown}"),
-        )),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Made {
+                line: Line::new(name, Outcome::NotApplicable).detail(format!("{shown} is absent")),
+                file: None,
+            };
+        }
+        Err(err) => Some(err),
     };
-    if let Some(line) = absent {
-        return Made { line, file: None };
-    }
     let file = target.dir.join(marker_name(tag));
     // The file is empty: its name carries the tag, so nothing is written that could fail
     // after it exists.
@@ -53,6 +54,13 @@ fn make(prefix: &str, target: &Target, tag: &str) -> Made {
         .create_new(true)
         .mode(0o600)
         .open(&file);
+    let shown = match &unseen {
+        None => shown,
+        Some(look) => format!(
+            "{shown}, which it cannot look at ({})",
+            crate::outcome::errno_name(look.raw_os_error().unwrap_or_default())
+        ),
+    };
     match opened {
         Ok(_) => Made {
             line: Line::new(name, Outcome::Allowed).detail(shown),
@@ -295,7 +303,7 @@ mod tests {
         // Root passes any mode, so it looks and writes; every other user is refused the look.
         let want = [
             format!(
-                "write:other-home: denied (EACCES); cannot look at {}",
+                "write:other-home: denied (EACCES); {}, which it cannot look at (EACCES)",
                 place.display()
             ),
             format!("write:other-home: allowed; {}", place.display()),

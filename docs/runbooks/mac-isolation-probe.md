@@ -12,8 +12,8 @@ succeed where a job's must not):
 - it writes only files it names (`.js-isolation-probe-<tag>`, empty) and removes them; `probe` removes at once
   whatever else it managed to make (a launchd job, a crontab, an `at` job, an attribute on its own record);
 - it makes no folder: a place that is absent is `n/a` (a folder a job makes under `~/Library` is one neither the
-  job nor the slot's reset can remove), and a place the job may not even look at is `denied`, with the error number
-  of that look;
+  job nor the slot's reset can remove); a place the job may not even look at is not absent: the probe still tries
+  the write, and its line names the refused look beside the write's answer;
 - it touches the job account's own state only: its pasteboard (overwritten, then emptied by `find`), its preferences
   domain `com.komira.js-isolation-probe` and its keychain (each only when the home already has the folder it is kept
   in), and its crontab, which it uses only when the account has none;

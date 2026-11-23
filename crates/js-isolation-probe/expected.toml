@@ -34,8 +34,8 @@
 "write:account-home-preferences" = "n/a"
 # Every place outside the run directory: the profile denies the write (or the modes do).
 # The shared folder of the homes, another user's home and root's home are below the roots
-# whose reads the profile denies, so a job may not even look at them: the write is denied
-# at that look (EPERM), before any file is tried.
+# whose reads the profile denies, so a job may not even look at them (EPERM); the probe
+# still tries the write, which the profile denies too.
 "write:private-tmp" = "denied"
 "write:private-var-tmp" = "denied"
 "write:users-shared" = "denied"
@@ -142,8 +142,8 @@
 # By the time leave writes files, the system (Launch Services, acting for the account) has made
 # Library/Preferences in the account's home; the profile denies the job a write there.
 "leave:file:account-home-preferences" = "denied"
-# The homes' shared folder, another user's home and root's home: denied at the look, as in
-# [probe].
+# The homes' shared folder, another user's home and root's home: the look and the write are
+# denied, as in [probe].
 "leave:file:private-tmp" = "denied"
 "leave:file:private-var-tmp" = "denied"
 "leave:file:users-shared" = "denied"
@@ -191,6 +191,8 @@
 "find:file:usr-local" = "gone"
 "find:file:etc" = "gone"
 "find:file:library-launchdaemons" = "gone"
+# The profile denies a look below the homes, but a marker that was never made answers that it
+# does not exist (ENOENT) before the deny is reached, so these say gone.
 "find:file:other-home" = "gone"
 # Root's home is 0750: a job can neither write there (leave: denied) nor look.
 "find:file:root-home" = "n/a"
@@ -229,6 +231,8 @@
 "find:file:usr-local" = "gone"
 "find:file:etc" = "gone"
 "find:file:library-launchdaemons" = "gone"
+# The profile denies a look below the homes, but a marker that was never made answers that it
+# does not exist (ENOENT) before the deny is reached, so these say gone.
 "find:file:other-home" = "gone"
 # Root's home is 0750: a job can neither write there (leave: denied) nor look.
 "find:file:root-home" = "n/a"
