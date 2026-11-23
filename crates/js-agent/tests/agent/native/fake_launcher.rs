@@ -83,8 +83,9 @@ struct State {
     failing: Failing,
     /// The pid the next jobs report as theirs, when it is not their real pid.
     job_pid: Option<i32>,
-    /// The pid of each program started, which is also its process group's id.
-    groups: Vec<i32>,
+    /// Each program started: its pid, which is also its process group's id, and the uid its
+    /// launch was asked to run it as (it runs as the test's own user all the same).
+    groups: Vec<(i32, u32)>,
 }
 
 /// The fake launcher. Shared by the runtime and the test.
@@ -140,6 +141,15 @@ impl FakeLauncher {
 
     /// The process group of every program a launch started, in order: the job's pid.
     pub fn groups(&self) -> Vec<i32> {
+        self.owned_groups()
+            .into_iter()
+            .map(|(group, _)| group)
+            .collect()
+    }
+
+    /// The process group of every program a launch started, in order, with the uid its launch
+    /// was asked to run it as: the account's, as the Mac's process table would show it.
+    pub fn owned_groups(&self) -> Vec<(i32, u32)> {
         self.state().groups.clone()
     }
 
@@ -197,7 +207,7 @@ impl Launcher for FakeLauncher {
                     .process_group(0)
                     .spawn()?;
                 if let Ok(group) = i32::try_from(child.id()) {
-                    self.state().groups.push(group);
+                    self.state().groups.push((group, launched.uid));
                 }
                 Ok(Box::new(FakeSupervised {
                     child: Some(child),
