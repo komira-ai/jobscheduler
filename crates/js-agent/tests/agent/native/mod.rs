@@ -37,6 +37,7 @@ mod runtime;
 mod settings;
 mod silence;
 mod steps;
+mod trees_proof;
 mod worker;
 mod xcode;
 
