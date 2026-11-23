@@ -58,6 +58,16 @@ server's TLS offers only `http/1.1` in ALPN (`crates/js-lease-server/src/tls.rs`
   and is never part of a result's acceptance. A server from before the field ignores it, and a result from an agent from before it
   reads with no usage; the lease server stores it as the job's resource usage, which is what the placement history is taught from
   (`docs/design/sizing.md`, section 7.7).
+- `JobResult.cpu_series` (`CpuSeries`: `granularity_secs`, `points`, `run_usec` and `partial`; the design of
+  komira-ai/jobscheduler#1033, section 3), the job's CPU over its run: at most 128 points (`CPU_SERIES_MAX_POINTS`), each the mean CPU of the job's group over
+  `granularity_secs` seconds of the run in sixteenths of a core, in order from its start. The series starts at one second a point;
+  each time a run outlasts its points, neighbouring points are combined in pairs by their mean and the granularity doubles. The last
+  point is the mean over what is left of the run after the others. `run_usec` is the run as the agent measured it on its monotonic
+  clock, from the moment the container was started to the poll that saw it end (at most one worker step, a second, after the end);
+  `partial` (left out when false) marks a run the agent adopted after a restart of its own, whose series starts at its first sample
+  after the restart. The `crun` runtime of an agent started with `--cpu-series` sends it; other runtimes and agents send none. It
+  decodes only when well formed (a power-of-two granularity, at most 128 points of 16 bits) and is decoded as `logs` is: anything
+  else reads as absent and is never part of a result's acceptance. A server from before the field ignores it.
 - `JobStartSpec.sizing` (`StartSizing`: the optional `class`, and `cpu` and `memory`, each `named`, `class`, `fallback`, `cold` or
   `over-cap`), what the job's booking came from: its size class, and for each of its CPU and memory whether the job named it or
   which history sized it. The lease server fills it from the job and its allocation's `sized_from`; the agent writes it in its
@@ -292,6 +302,9 @@ digits), with the comma that joins it to the message. Derived, and measured by t
   `,"cpu_pressure_some_usec":N` and `,"cpu_peak":{"millicores":N,"window_usec":N}`, add 89 + 46 + 82 = 217 more at 20 digits each, so **306** bytes;
   the swap peak, `,"peak_swap_bytes":N`, adds 39 more, so **345** bytes in all (the three figures measured by
   `usage_at_its_widest_adds_its_documented_bytes_to_a_result`). The agent's `results_budget` counts it with the rest of the result.
+- `cpu_series` in a job's result, `,"cpu_series":{"granularity_secs":N,"points":[...],"run_usec":N,"partial":true}` with 128 points
+  of 5 digits: 14 + (1 + 19 + 10) + 11 + (128 × 5 + 127) + 1 + (1 + 11 + 20) + 15 + 1 = **871** bytes per result (measured by
+  `a_series_at_its_widest_adds_its_documented_bytes_to_a_result`). The agent's `results_budget` counts it with the rest of the result.
 
 The heartbeat's 65,536-byte body is what these press on: 8 results with `logs` add 8 × 157 = 1,256 bytes, and a beat carries one
 `log_grant_state`; the agent's `results_budget` is to count both before it fits log tails (Planned, with the fields).

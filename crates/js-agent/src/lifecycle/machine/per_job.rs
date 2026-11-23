@@ -88,6 +88,7 @@ pub(super) fn job_result(
         logs,
         input_failure,
         usage,
+        cpu_series: None,
     }
 }
 
