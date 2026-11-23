@@ -11,12 +11,10 @@
 //! - `__account-cycle`: a development verb that runs the life cycle of one account of the
 //!   Mac account pool once, to prove it on a Mac ([`crate::mac_accounts::cycle`]). It runs no
 //!   job, and is removed once the native runtime proves an account's life cycle itself.
-//! - `__native-proof` (macOS): a development verb that runs one native job through the
-//!   production runtime and the real supervisor ([`crate::native::proof`]); it is removed once
-//!   the end-to-end proof through the job service runs a native job.
 //! - `__native-trees-proof` (macOS): a development verb that runs two native jobs, each with
 //!   its own tree from the mount provider, through the production runtime
-//!   ([`crate::native::trees_proof`]); removed with `__native-proof`.
+//!   ([`crate::native::trees_proof`]); removed once the end-to-end proof through the job service
+//!   runs a job with a tree.
 
 use std::ffi::OsString;
 use std::io::Write;
@@ -40,10 +38,6 @@ pub(crate) fn dispatch(
     }
     if verb == crate::mac_accounts::cycle::VERB {
         return Some(crate::mac_accounts::cycle::run(args, out, err));
-    }
-    #[cfg(target_os = "macos")]
-    if verb == crate::native::proof::VERB {
-        return Some(crate::native::proof::run(args, out, err));
     }
     #[cfg(target_os = "macos")]
     if verb == crate::native::trees_proof::VERB {

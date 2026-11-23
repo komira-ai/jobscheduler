@@ -120,7 +120,6 @@ mod network;
 mod outputs;
 mod pf;
 mod profile;
-pub mod proof;
 mod put;
 mod remove;
 mod run;
