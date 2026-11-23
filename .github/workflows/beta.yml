@@ -130,3 +130,8 @@ jobs:
         run: sudo install -d -o root -g wheel -m 0755 /private/var/js-native-priv
       - name: Run the native runtime's root tests as root
         run: sudo -E env "PATH=$PATH" "HOME=$HOME" JS_NATIVE_PRIV_ROOT=/private/var/js-native-priv cargo test -p js-agent --test native_privileged --locked -- --ignored --nocapture --test-threads=1 --skip a_command_runs_in_a_fresh_vm
+      # The sweep's privileged calls (crates/js-agent/src/mac_sweep/macos/root_tests.rs, each
+      # `#[ignore]` by name in the run above): every user's processes listed with their real and
+      # effective uid and their audit session, and SIGKILL to other users' processes, as root.
+      - name: Run the sweep's root tests as root
+        run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-agent --lib --locked -- --ignored --nocapture --test-threads=1 mac_sweep::macos::root_tests

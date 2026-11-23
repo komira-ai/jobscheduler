@@ -7,6 +7,8 @@
 
 mod procs;
 #[cfg(test)]
+mod root_tests;
+#[cfg(test)]
 mod tests;
 
 use std::io;
