@@ -12,9 +12,6 @@
 //! A host the walk's own ledger ([`crate::room::Room`]) finds full by the memory its
 //! allocations book is refused before the scheduler sees it, and is booked the same way as a
 //! `booked-memory` refusal with the ledger's figures ([`crate::room::Room::memory_refusal`]).
-//! Only a host whose capacity bounds its memory by bookings meets that ledger's memory check:
-//! one whose agent reports load admission is offered with no such bound, and its memory is
-//! the scheduler's to judge, by measurement when its fresh reading carries the host's memory.
 //!
 //! A host that fails the scheduler's other checks (a lease cap, a request larger than the
 //! host, a host that must be empty) is refused with no kind: the scheduler does not say which
@@ -159,9 +156,7 @@ impl Refused {
 }
 
 /// The figures of a refusal: `counted + new > limit`, with the unit of its kind; for CPU, the
-/// load the host's fresh reading measured, or that it had none and was charged by bookings;
-/// for memory, the memory in use the host's fresh reading measured, or that it had none (or
-/// one without the host's memory) and was counted by bookings.
+/// load the host's fresh reading measured, or that it had none and was charged by bookings.
 fn figures(refusal: &Refusal) -> String {
     let (unit, scale) = match refusal.kind {
         RefusalKind::Cpu => ("m", 1),
@@ -174,22 +169,12 @@ fn figures(refusal: &Refusal) -> String {
         refusal.limit / scale,
     );
     let mut text = format!("counted {counted}{unit} + new {new}{unit} > limit {limit}{unit}");
-    match refusal.kind {
-        RefusalKind::Cpu => match refusal.measured_cpu_millis {
-            Some(measured) => {
-                let _ = write!(text, " (measured {measured}m)");
-            }
-            None => text.push_str(" (no fresh load reading: charged by bookings)"),
-        },
-        RefusalKind::PredictedMemory | RefusalKind::BookedMemory => {
-            match refusal.measured_memory_bytes {
-                Some(measured) => {
-                    let _ = write!(text, " (measured {}MiB)", measured / scale);
-                }
-                None => text.push_str(" (no fresh memory reading: charged by bookings)"),
-            }
+    match (refusal.kind, refusal.measured_cpu_millis) {
+        (RefusalKind::Cpu, Some(measured)) => {
+            let _ = write!(text, " (measured {measured}m)");
         }
-        RefusalKind::ColdCap => {}
+        (RefusalKind::Cpu, None) => text.push_str(" (no fresh load reading: charged by bookings)"),
+        _ => {}
     }
     text
 }

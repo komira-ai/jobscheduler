@@ -46,8 +46,8 @@ fn lease(text: &str) -> Result<LeaseId, BadLease> {
 
 /// The wire's load as the scheduler's, field for field. The lease server's usage path
 /// converts the same load with `NodeLoad::from(LoadIn)`, which sets the active file pages to
-/// 0 and the host's memory in use to `None` on purpose; this one keeps them. A test in the
-/// lease server pins that these are the only differences.
+/// 0 on purpose; this one keeps them. A test in the lease server pins that this is the only
+/// difference.
 ///
 /// # Errors
 ///
@@ -59,7 +59,6 @@ pub fn node_load(wire: &WireLoad) -> Result<NodeLoad, BadLease> {
         cpu_usage_usec: wire.node_cpu_usec(),
         memory_working_set_bytes: wire.working_set_bytes,
         memory_active_file_bytes: wire.active_file_bytes,
-        host_memory_used_bytes: wire.host_memory_used_bytes,
         covered: wire
             .covered
             .iter()

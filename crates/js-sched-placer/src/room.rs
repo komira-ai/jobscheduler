@@ -5,8 +5,7 @@
 //!
 //! A host's capacity is the bound its agent enforces (the summed bookings of its jobs against
 //! what its hello offers) or, for a host that reports load admission, the slacked capacity the
-//! store holds it to, whose memory bounds nothing: the scheduler holds such a host's memory to
-//! its measured use. A job that names no disk books the disk its host's agent books for it,
+//! store holds it to. A job that names no disk books the disk its host's agent books for it,
 //! the scratch quota's default ([`OpenHost::quota_disk_bytes`]), so the allocation the store
 //! records books what the agent books.
 
@@ -139,7 +138,6 @@ impl Room {
             new: memory_bytes,
             limit,
             measured_cpu_millis: None,
-            measured_memory_bytes: None,
         })
     }
 

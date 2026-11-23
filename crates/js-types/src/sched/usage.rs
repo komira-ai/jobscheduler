@@ -67,8 +67,8 @@ pub fn key_hash(key: &WorkKey) -> u64 {
         })
 }
 
-/// One reading of the node, taken by the agent: the whole host's CPU, the whole host's memory in
-/// use, the actions cgroup's memory, and the leases.
+/// One reading of the node, taken by the agent: the whole host's CPU, the actions cgroup's
+/// memory, and the leases.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NodeLoad {
     /// Counts readings within one agent process, one more for each. A reading whose `seq`
@@ -86,12 +86,6 @@ pub struct NodeLoad {
     /// minus the inactive file pages. Clamped at 0 when the inactive file is the
     /// larger.
     pub memory_working_set_bytes: u64,
-    /// Memory in use on the whole host, in bytes: `MemTotal` minus `MemAvailable` of
-    /// `/proc/meminfo`, so every process counts, the leases and everything else, and page
-    /// cache the kernel can drop does not. `None` from an agent that does not send it (one of
-    /// an earlier release, or one that could not read the file): placement then counts the
-    /// host's memory by its bookings.
-    pub host_memory_used_bytes: Option<u64>,
     /// The actions cgroup's active file pages (`active_file` of `memory.stat`), in bytes.
     /// Hot page cache that `memory_working_set_bytes` still counts; admission caps this part.
     pub memory_active_file_bytes: u64,

@@ -73,29 +73,16 @@ fn an_honest_load_passes_vet_untouched() {
     assert_eq!(got.dropped.total(), 0);
 }
 
-/// Asserts that the three memory scalars pass at `MAX_MEMORY_BYTES` and fail one above with
-/// the right field, rule and code, and that a load without the host's memory in use passes.
-/// It catches `<` for `<=`, a wrong field name and a rule put on the wrong scalar.
+/// Asserts that the two memory scalars pass at `MAX_MEMORY_BYTES` and fail one above with
+/// the right field, rule and code. It catches `<` for `<=`, a wrong field name and a rule
+/// put on the wrong scalar.
 #[test]
 fn scalar_bounds() {
     let code = refusal::INVALID_HEARTBEAT;
     let mut at_cap = load();
     at_cap.working_set_bytes = MAX_MEMORY_BYTES;
     at_cap.active_file_bytes = MAX_MEMORY_BYTES;
-    at_cap.host_memory_used_bytes = Some(MAX_MEMORY_BYTES);
     assert_eq!(at_cap.vet(), Ok(()));
-    at_cap.host_memory_used_bytes = None;
-    assert_eq!(at_cap.vet(), Ok(()));
-
-    let mut host = load();
-    host.host_memory_used_bytes = Some(MAX_MEMORY_BYTES + 1);
-    let err = host.vet().unwrap_err();
-    expect(
-        err,
-        "heartbeat.load.host_memory_used_bytes",
-        Rule::OutOfRange,
-        code,
-    );
 
     let mut ws = load();
     ws.working_set_bytes = MAX_MEMORY_BYTES + 1;
@@ -417,7 +404,6 @@ fn beat_at_every_cap() -> (NodeLoad, Heartbeat) {
         host_cpu_usec: Some(u64::MAX),
         working_set_bytes: MAX_MEMORY_BYTES,
         active_file_bytes: MAX_MEMORY_BYTES,
-        host_memory_used_bytes: Some(MAX_MEMORY_BYTES),
         actions_cpu_limited: true,
         covered: (0..MAX_LOAD_LEASES as u64).map(worst_id).collect(),
         clocks: (0..MAX_LOAD_LEASES as u64)

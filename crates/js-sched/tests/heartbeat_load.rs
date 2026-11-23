@@ -41,7 +41,6 @@ fn a_load_changes_nothing_the_scheduler_does() {
         cpu_usage_usec: u64::MAX,
         mono_usec: 1,
         memory_working_set_bytes: u64::MAX,
-        host_memory_used_bytes: None,
         memory_active_file_bytes: 2,
         covered: vec![LeaseId::new(1, 1)],
         lease_clocks: vec![],

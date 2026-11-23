@@ -63,7 +63,6 @@ fn a_host_full_of_cpu_books_a_cpu_refusal_with_its_figures() {
             new: 2_000,
             limit: 8_800,
             measured_cpu_millis: None,
-            measured_memory_bytes: None,
         }
     );
     assert_eq!(refused.count(&host("a"), RefusalKind::PredictedMemory), 0);
@@ -241,8 +240,8 @@ fn a_pass_logs_one_line_per_host_and_counts_each_refusal() {
 /// that fit and was placed, a job of 2 GiB queued, its CPU free) is refused the job by the
 /// walk's ledger before the scheduler sees it, and the pass says so as it says the scheduler's
 /// refusals: one info line for the host, whose refusals read in full
-/// `booked-memory x1 (latest job j2: counted 3072MiB + new 2048MiB > limit 4096MiB (no fresh
-/// memory reading: charged by bookings))`, and the metrics told the refusal by host and reason. Catches a host full by memory dropped with
+/// `booked-memory x1 (latest job j2: counted 3072MiB + new 2048MiB > limit 4096MiB)`, and the
+/// metrics told the refusal by host and reason. Catches a host full by memory dropped with
 /// nothing said, so that every refusal the log shows is a CPU one although memory is what
 /// filled the host.
 #[test]
@@ -302,8 +301,7 @@ fn a_host_full_by_memory_bookings_is_refused_for_memory_and_says_so() {
     let refusals = summary[0].split("refusals=").nth(1).unwrap();
     assert_eq!(
         refusals,
-        "booked-memory x1 (latest job j2: counted 3072MiB + new 2048MiB > limit 4096MiB \
-         (no fresh memory reading: charged by bookings))"
+        "booked-memory x1 (latest job j2: counted 3072MiB + new 2048MiB > limit 4096MiB)"
     );
     assert_eq!(*told.0.lock().unwrap(), vec![(host("a"), "booked-memory")]);
 }
@@ -356,7 +354,6 @@ fn a_host_refused_for_two_kinds_says_both_on_one_line() {
         new,
         limit,
         measured_cpu_millis: None,
-        measured_memory_bytes: None,
     };
     let job = JobId::parse("j9").unwrap();
     let kinds = BTreeMap::from([
@@ -392,8 +389,7 @@ fn a_host_refused_for_two_kinds_says_both_on_one_line() {
     let logged = lines.take();
     assert!(
         logged.contains(
-            "booked-memory x2 (latest job j9: counted 20480MiB + new 16384MiB > limit 32768MiB \
-             (no fresh memory reading: charged by bookings)); \
+            "booked-memory x2 (latest job j9: counted 20480MiB + new 16384MiB > limit 32768MiB); \
              cold-cap x1 (latest job j9: counted 3cold + new 1cold > limit 3cold)"
         ),
         "{logged}"
@@ -436,48 +432,6 @@ fn a_measured_hosts_refusal_line_carries_the_measurement_it_used() {
         logged.contains(
             "refusals=cpu x1 (latest job j2: counted 9000m + new 200m > limit 8800m \
              (measured 9000m))"
-        ),
-        "{logged}"
-    );
-}
-
-/// Behaviour: on a host whose fresh readings measure 13 GiB in use on the whole host while its
-/// one job books 4 GiB, a job of 4 GiB is refused for memory, and the info line of the pass
-/// carries the figures the predicate used: the measurement counted (13312 MiB) and the
-/// measurement itself, where a host with no fresh reading of its memory says it was charged by
-/// its bookings (see [`a_host_full_by_memory_bookings_is_refused_for_memory_and_says_so`]).
-/// Catches a memory refusal line that does not say a host's memory was measured, which leaves
-/// a refusal by the bookings and one by the measurement looking alike.
-#[test]
-fn a_measured_hosts_memory_refusal_line_carries_the_measurement_it_used() {
-    process_sink();
-    let lines = Lines::default();
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(lines.clone())
-        .with_ansi(false)
-        .without_time()
-        .with_target(false)
-        .finish();
-    let _guard = tracing::subscriber::set_default(subscriber);
-    let (mut e, tables) = (engine(LoadConfig::default()), Tables::new());
-    assert!(walk(&mut e, &tables, "j1", need(1_000, 4 * GIB)));
-    let reading = |seq: u64| js_types::sched::usage::NodeLoad {
-        seq,
-        mono_usec: seq * 5_000_000,
-        cpu_usage_usec: seq * 5_000_000,
-        memory_working_set_bytes: 4 * GIB,
-        host_memory_used_bytes: Some(13 * GIB),
-        ..Default::default()
-    };
-    e.heard(&host("a"), Some(&reading(1)), at(0));
-    e.heard(&host("a"), Some(&reading(2)), at(0));
-    assert!(!walk(&mut e, &tables, "j2", need(200, 4 * GIB)));
-    e.take_refused().announce(&Told::default());
-    let logged = lines.take();
-    assert!(
-        logged.contains(
-            "refusals=predicted-memory x1 (latest job j2: counted 13312MiB + new 4096MiB > \
-             limit 16384MiB (measured 13312MiB))"
         ),
         "{logged}"
     );

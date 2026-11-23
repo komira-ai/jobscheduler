@@ -64,12 +64,6 @@ pub struct Refusal {
     /// fresh reading: none yet, a dropped one, a stale one or a CPU-limited actions cgroup)
     /// and for the kinds other than CPU.
     pub measured_cpu_millis: Option<u64>,
-    /// The memory in use on the whole host its fresh reading measured, in bytes, for the two
-    /// memory kinds on a host whose memory is counted by measurement (`counted` is then that
-    /// figure plus the bookings of the leases no reading covers yet); `None` for a host whose
-    /// memory is counted by its bookings (no fresh reading, or one without the host's memory)
-    /// and for the other kinds.
-    pub measured_memory_bytes: Option<u64>,
 }
 
 impl Refusal {
@@ -80,20 +74,12 @@ impl Refusal {
             new,
             limit,
             measured_cpu_millis: None,
-            measured_memory_bytes: None,
         }
     }
 
     pub(crate) const fn measured(self, measured_cpu_millis: Option<u64>) -> Self {
         Self {
             measured_cpu_millis,
-            ..self
-        }
-    }
-
-    pub(crate) const fn measured_memory(self, measured_memory_bytes: Option<u64>) -> Self {
-        Self {
-            measured_memory_bytes,
             ..self
         }
     }

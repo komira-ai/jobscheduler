@@ -277,13 +277,9 @@ engine now covers the job leases it held at the previous accepted reading of the
 
 **Why a host is not full.** Each refusal of a host to a queued job is reported with the predicate that refused and its figures:
 `cpu` (the CPU side of the load predicate, with the measured CPU), `predicted-memory` (the memory side), `booked-memory` (the flat
-memory guard) and `cold-cap`. A memory refusal says `(measured NMiB)` when the host's fresh reading carried the whole host's
-memory in use, which then counted for the jobs it covers (`placement-by-load.md`, Memory by measurement), and `(no fresh memory
-reading: charged by bookings)` when it did not. A host that the walk's own ledger (`Room`: the summed bookings of the host's live
-allocations against the memory its capacity offers) finds full by memory is dropped before the scheduler sees it. Only a host whose
-agent does not report load admission has a capacity that bounds its memory by bookings: a host that reports it is offered with no
-such bound, and its memory is the scheduler's to judge. A host the ledger refuses is
-booked as a `booked-memory` refusal with the ledger's figures (counted is the memory the host's allocations book, new the job's
+memory guard) and `cold-cap`. A host that the walk's own ledger (`Room`: the summed bookings of the host's live allocations against
+the memory its agent offers, `memory_schedulable_percent` applied) finds full by memory is dropped before the scheduler sees it. It
+is booked as a `booked-memory` refusal with the ledger's figures (counted is the memory the host's allocations book, new the job's
 memory, limit the memory it offers), logged at debug and in the per-host info line and counted like the scheduler's refusals. Before,
 such a host was dropped silently, so the log showed only cpu refusals even when memory filled the host. Hosts the ledger refuses for
 CPU, disk or a whole host still say nothing. The placer logs each at debug level and one line per host per pass at info level, and `/metrics`

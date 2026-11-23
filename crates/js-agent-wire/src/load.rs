@@ -51,13 +51,6 @@ pub struct NodeLoad {
     /// Active file cache, in bytes. At most [`limits::MAX_MEMORY_BYTES`].
     #[serde(default)]
     pub active_file_bytes: u64,
-    /// Memory in use on the whole host, in bytes: `MemTotal` minus `MemAvailable` of
-    /// `/proc/meminfo` (every process of the host, the actions and everything else; page cache
-    /// the kernel can drop is not in use). At most [`limits::MAX_MEMORY_BYTES`]. Optional: an
-    /// agent of an earlier release does not send it, nor one that could not read the file,
-    /// and a receiver then counts the host's memory by its bookings.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub host_memory_used_bytes: Option<u64>,
     /// Whether the actions cgroup has a CPU limit.
     #[serde(default)]
     pub actions_cpu_limited: bool,
@@ -201,8 +194,7 @@ impl NodeLoad {
 
     /// Drops the records that break a rule and counts them in [`NodeLoad::dropped`].
     ///
-    /// Fails only for a scalar out of range (`working_set_bytes`, `active_file_bytes`,
-    /// `host_memory_used_bytes`);
+    /// Fails only for a scalar out of range (`working_set_bytes`, `active_file_bytes`);
     /// the receiver then discards the load and keeps the heartbeat. Counters (`seq`,
     /// `mono_usec`, `cpu_usage_usec`, `host_cpu_usec`) are unbounded here: whether one goes
     /// backwards is
@@ -222,14 +214,6 @@ impl NodeLoad {
             0,
             max,
         )?;
-        if let Some(used) = self.host_memory_used_bytes {
-            check::range(
-                at.field("heartbeat.load.host_memory_used_bytes"),
-                used,
-                0,
-                max,
-            )?;
-        }
         let mono = self.mono_usec;
         sweep(
             &mut self.second_cpu_millis,
@@ -360,7 +344,6 @@ impl NodeLoad {
             host_cpu_usec: number(object, "host_cpu_usec"),
             working_set_bytes,
             active_file_bytes: number(object, "active_file_bytes").unwrap_or_default(),
-            host_memory_used_bytes: number(object, "host_memory_used_bytes"),
             actions_cpu_limited: object
                 .get("actions_cpu_limited")
                 .and_then(Value::as_bool)

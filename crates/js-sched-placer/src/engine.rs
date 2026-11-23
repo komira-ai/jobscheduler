@@ -388,10 +388,6 @@ fn recovered_as(
 mod measured_tests;
 
 #[cfg(test)]
-#[path = "engine_memory_tests.rs"]
-mod memory_tests;
-
-#[cfg(test)]
 mod tests {
     use js_types::Resources;
     use js_types::sched::WorkerId;

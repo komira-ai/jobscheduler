@@ -27,7 +27,6 @@ pub fn reading(seq: u64, at: u64, minutes: Vec<ClosedMinute>) -> Reading {
             cpu_usage_usec: 7_000,
             host_cpu_usec: 6_000,
             working_set_bytes: 8_000,
-            host_memory_used_bytes: None,
             active_file_bytes: 9_000,
             cpu_limited: true,
             leases: Vec::new(),

@@ -287,10 +287,10 @@ fn vet_holds_pressure_to_a_thousand_and_each_list_to_its_cap() {
 }
 
 /// Asserts the release now deployed, with its own copy of `NodeLoad`, reads a load that
-/// carries both lists and the host's memory in use as the same load without them and sends
-/// back text that this release reads with empty lists; and that this release reads a load
-/// written by that release (no lists, no host memory). Catches a field an older server cannot
-/// skip, and one this release demands of an older agent.
+/// carries both lists as the same load without them and sends back text that this release
+/// reads with empty lists; and that this release reads a load written by that release (no
+/// lists). Catches a field an older server cannot skip, and one this release demands of an
+/// older agent.
 #[test]
 fn the_released_server_and_this_one_read_each_others_loads() {
     let new = with_seconds(vec![1500, 20], vec![3, 4]);
@@ -322,11 +322,9 @@ fn the_released_server_and_this_one_read_each_others_loads() {
     let mut body = serde_json::to_value(heartbeat()).unwrap();
     body["load"] = serde_json::to_value(&written).unwrap();
     let read = decoded(body);
-    // The released agent sends no host counter and no host memory: the load reads without
-    // either.
+    // The released agent sends no host counter: the load reads without one.
     let released = NodeLoad {
         host_cpu_usec: None,
-        host_memory_used_bytes: None,
         ..load()
     };
     assert_eq!(read, released);

@@ -69,19 +69,16 @@ pub(crate) struct RowsRead {
 
 /// What a host of `shape` can book under load admission: the shape the pool books for it, with
 /// the CPU slack the placement engine allows on its cores, which is the most the engine places
-/// on it, and no bound on memory. The capacity is the bound a placement is held to in its own
-/// transaction against the allocations the store holds, so it must not be tighter than what the
-/// engine allows; the engine holds a host's memory to what its fresh reading measured in use
-/// plus the bookings of the jobs placed since, which may sum to more bookings than the host
-/// has memory, so a sum of bookings here would refuse what the engine placed. It is the bound
-/// of a host whose agent reports load admission ([`OpenHost::load_admission`]); every other
-/// host is held to [`booked_capacity`].
+/// on it. The capacity is the bound a placement is held to in its own transaction against the
+/// allocations the store holds, so it must not be tighter than what the engine allows. It is
+/// the bound of a host whose agent reports load admission ([`OpenHost::load_admission`]); every
+/// other host is held to [`booked_capacity`].
 pub(super) fn capacity_of(shape: &Shape, slack: CpuSlack) -> Capacity {
     let resources = shape.resources();
     let cpu = u128::from(resources.cpu_millis()) * (1000 + u128::from(slack.permille())) / 1000;
     Capacity {
         cpu_millis: u64::try_from(cpu).unwrap_or(u64::MAX),
-        memory_bytes: u64::MAX,
+        memory_bytes: resources.memory_bytes(),
         disk_bytes: resources.disk_bytes(),
         accelerators: resources.gpus(),
     }

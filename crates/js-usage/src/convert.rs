@@ -37,8 +37,7 @@ impl From<ClockIn> for LeaseClock {
 impl From<LoadIn> for NodeLoad {
     /// The reading admission reads. What a [`LoadIn`] does not carry is 0: the active
     /// file pages of the working set (so none is taken off it), and the throttled time
-    /// and CPU pressure, which are telemetry only. The host's memory in use is not carried
-    /// either and is `None`, so admission counts that host's memory by its bookings.
+    /// and CPU pressure, which are telemetry only.
     fn from(l: LoadIn) -> Self {
         Self {
             seq: l.seq,
@@ -46,7 +45,6 @@ impl From<LoadIn> for NodeLoad {
             cpu_usage_usec: l.cpu_usage_usec,
             memory_working_set_bytes: l.working_set_bytes,
             memory_active_file_bytes: 0,
-            host_memory_used_bytes: None,
             covered: l.covered.into_iter().map(sched_lease).collect(),
             actions_cpu_limited: l.actions_cpu_limited,
             cpu_throttled_usec: 0,
@@ -96,10 +94,9 @@ impl TryFrom<&NodeLoad> for LoadIn {
     /// reverse of `From<LoadIn> for NodeLoad`, so a caller holding a `NodeLoad` need not
     /// map the fields itself.
     ///
-    /// A [`LoadIn`] does not carry the active file pages, the throttled time, the CPU
-    /// pressure or the host's memory in use, so those four are dropped: `NodeLoad -> LoadIn
-    /// -> NodeLoad` returns the same value only when the first three are 0 and the last is
-    /// `None`, and `LoadIn -> NodeLoad -> LoadIn` always does.
+    /// A [`LoadIn`] does not carry the active file pages, the throttled time or the CPU
+    /// pressure, so those three are dropped: `NodeLoad -> LoadIn -> NodeLoad` returns the
+    /// same value only when they are 0, and `LoadIn -> NodeLoad -> LoadIn` always does.
     /// Order of the covered leases, clocks and minutes is kept.
     ///
     /// This is a `TryFrom` because a lease minute is a `u32` here and a `u16` in a
@@ -298,7 +295,6 @@ mod tests {
             memory_active_file_bytes: 77,
             cpu_throttled_usec: 88,
             cpu_pressure_some_total_usec: 99,
-            host_memory_used_bytes: Some(100),
             ..NodeLoad::from(full_load())
         };
         let back = LoadIn::try_from(&node).unwrap();
@@ -358,7 +354,6 @@ mod tests {
             memory_active_file_bytes: 7,
             cpu_throttled_usec: 8,
             cpu_pressure_some_total_usec: 9,
-            host_memory_used_bytes: Some(10),
             ..NodeLoad::from(full_load())
         };
         let again = NodeLoad::from(LoadIn::try_from(&node).unwrap());
@@ -366,10 +361,9 @@ mod tests {
             (
                 again.memory_active_file_bytes,
                 again.cpu_throttled_usec,
-                again.cpu_pressure_some_total_usec,
-                again.host_memory_used_bytes
+                again.cpu_pressure_some_total_usec
             ),
-            (0, 0, 0, None)
+            (0, 0, 0)
         );
     }
 

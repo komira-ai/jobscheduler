@@ -141,7 +141,6 @@ pub fn load() -> NodeLoad {
         host_cpu_usec: Some(40_500_000),
         working_set_bytes: 3 << 30,
         active_file_bytes: 1 << 20,
-        host_memory_used_bytes: Some(5 << 30),
         actions_cpu_limited: true,
         covered: vec!["3-4".into()],
         clocks: vec![LeaseClock {

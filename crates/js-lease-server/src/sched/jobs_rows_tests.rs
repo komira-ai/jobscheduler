@@ -376,11 +376,9 @@ fn the_scan_of_stored_bindings_returns_the_readable_ones() {
 /// claimed: a host whose claim lacks `load-admission` is offered with `load_admission` false,
 /// the smaller of the pool's shape and its claim on each axis without the CPU slack, and the
 /// quota default its claim reports; a host whose claim reports it is offered with
-/// `load_admission` true, the slacked capacity of the pool's shape with no bound on memory,
-/// and no quota default when its claim reports none. It catches a host packed by load that its
-/// agent refuses by the summed bookings, a booking that leaves out the disk its agent books,
-/// and a load-admission host whose store capacity sums memory bookings, which refuses in the
-/// placing transaction a job the engine placed by the host's measured memory in use.
+/// `load_admission` true, the slacked capacity of the pool's shape and no quota default when
+/// its claim reports none. It catches a host packed by load that its agent refuses by the
+/// summed bookings, and a booking that leaves out the disk its agent books.
 #[test]
 fn a_read_offers_a_host_by_the_rule_its_agent_enforces() {
     let w = world("rows_admission", false);
@@ -427,7 +425,7 @@ fn a_read_offers_a_host_by_the_rule_its_agent_enforces() {
     assert_eq!(new.quota_disk_bytes, None);
     let slacked = Capacity {
         cpu_millis: 8800,
-        memory_bytes: u64::MAX,
+        memory_bytes: 16 * GIB,
         ..booked
     };
     assert_eq!(new.capacity, Some(slacked));

@@ -1,11 +1,7 @@
 //! The whole host's CPU counters: the busy time of `/proc/stat` and the `some` total of
-//! `/proc/pressure/cpu`, which the per-second series reads; and the whole host's memory in use,
-//! from `/proc/meminfo`.
+//! `/proc/pressure/cpu`, which the per-second series reads.
 
-use js_agent::usage::{
-    HostCpu, PROC_CPU_PRESSURE, PROC_MEMINFO, PROC_STAT, host_cpu, host_memory_used,
-    parse_meminfo_used_bytes, parse_proc_stat_busy_usec,
-};
+use js_agent::usage::{HostCpu, PROC_CPU_PRESSURE, PROC_STAT, host_cpu, parse_proc_stat_busy_usec};
 
 use crate::support::FakeFiles;
 
@@ -80,49 +76,4 @@ fn the_hosts_counters_are_its_busy_time_and_its_pressure() {
         (PROC_STAT, PROC_CPU_PRESSURE),
         ("/proc/stat", "/proc/pressure/cpu")
     );
-}
-
-/// Asserts the memory in use read from `/proc/meminfo`: `MemTotal` less `MemAvailable`, in
-/// kibibytes, as bytes, wherever the two lines are; 0 when `MemAvailable` is the larger; and
-/// none when either line is missing or not a number. Catches `MemFree` read for `MemAvailable`
-/// (which counts the page cache the kernel can drop as in use), kibibytes taken for bytes, a
-/// raw subtraction that wraps, and a missing line read as zero.
-#[test]
-fn meminfo_used_table() {
-    let cases: [(&str, Option<u64>); 8] = [
-        (
-            "MemTotal:       263303168 kB\nMemFree:         1048576 kB\n\
-             MemAvailable:   174063616 kB\nBuffers:          2048 kB\n",
-            Some((263_303_168 - 174_063_616) * 1024),
-        ),
-        (
-            "MemAvailable: 1000 kB\nMemTotal: 3000 kB\n",
-            Some(2000 * 1024),
-        ),
-        ("MemTotal: 1000 kB\nMemAvailable: 3000 kB\n", Some(0)),
-        ("MemTotal: 1000 kB\nMemFree: 10 kB\n", None),
-        ("MemFree: 10 kB\nMemAvailable: 10 kB\n", None),
-        ("MemTotal: x kB\nMemAvailable: 10 kB\n", None),
-        ("", None),
-        (
-            "MemTotal: 18446744073709551615 kB\nMemAvailable: 0 kB\n",
-            Some(u64::MAX),
-        ),
-    ];
-    for (text, want) in cases {
-        assert_eq!(parse_meminfo_used_bytes(text), want, "{text:?}");
-    }
-}
-
-/// Asserts the host's memory in use from its files: read from `/proc/meminfo` when it can be
-/// read, and none when it cannot. Catches a zero invented for an unreadable file.
-#[test]
-fn the_hosts_memory_in_use_is_read_from_meminfo() {
-    let files = FakeFiles::default().with(
-        PROC_MEMINFO,
-        "MemTotal: 16777216 kB\nMemAvailable: 8388608 kB\n",
-    );
-    assert_eq!(host_memory_used(&files), Some(8 << 30));
-    assert_eq!(host_memory_used(&FakeFiles::default()), None);
-    assert_eq!(PROC_MEMINFO, "/proc/meminfo");
 }
