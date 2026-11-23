@@ -50,7 +50,7 @@ fn started(rig: &mut Rig, run_id: &str, program: &str, args: &[&str]) -> RunHand
 fn a_restart_lists_every_run_of_the_earlier_process_ended_and_removes_them() {
     let mut rig = Rig::in_dir("adopt-many", 3, |_, _| {});
     let first = started(&mut rig, "r1", "/bin/echo", &["from the earlier process"]);
-    let second = started(&mut rig, "r2", "/bin/true", &[]);
+    let second = started(&mut rig, "r2", "/usr/bin/true", &[]);
     assert_eq!((&first, &second), (&handle("7.0"), &handle("7.1")));
     let earlier: Vec<String> = rig
         .launcher
@@ -109,7 +109,7 @@ fn a_restart_lists_every_run_of_the_earlier_process_ended_and_removes_them() {
 #[test]
 fn a_reclaim_drops_the_leases_of_starts_that_never_ran_and_keeps_the_runs() {
     let mut rig = Rig::new("adopt-reclaim");
-    let id = started(&mut rig, "r1", "/bin/true", &[]);
+    let id = started(&mut rig, "r1", "/usr/bin/true", &[]);
     let path = rig.dir.path("native-leases");
     fs::OpenOptions::new()
         .append(true)
@@ -141,7 +141,7 @@ fn a_reclaim_drops_the_leases_of_starts_that_never_ran_and_keeps_the_runs() {
 #[test]
 fn a_listing_that_cannot_read_the_journal_fails() {
     let mut rig = Rig::new("adopt-lost");
-    let id = started(&mut rig, "r1", "/bin/true", &[]);
+    let id = started(&mut rig, "r1", "/usr/bin/true", &[]);
     let mut next = rig.reopened();
     let path = rig.dir.path("native-leases");
     let kept = fs::read(&path).unwrap();

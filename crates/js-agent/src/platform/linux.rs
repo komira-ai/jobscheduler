@@ -782,7 +782,12 @@ fn egress_of(os: &Flags, crun: bool) -> Result<crate::egress::Config, String> {
 /// # Errors
 ///
 /// None; the signature is the macOS build's.
-pub(crate) fn complete(_local: &mut Local, _cli: &Cli, _start: &Start) -> Result<(), String> {
+pub(crate) fn complete(
+    _local: &mut Local,
+    _cli: &Cli,
+    _start: &Start,
+    _files: &dyn crate::FileReader,
+) -> Result<(), String> {
     Ok(())
 }
 
