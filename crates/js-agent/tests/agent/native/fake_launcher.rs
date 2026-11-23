@@ -81,10 +81,10 @@ struct Controls {
 struct State {
     launched: Vec<Launched>,
     failing: Failing,
-    /// The pid of each program started, which is also its process group's id.
-    groups: Vec<i32>,
     /// The pid the next jobs report as theirs, when it is not their real pid.
     job_pid: Option<i32>,
+    /// The pid of each program started, which is also its process group's id.
+    groups: Vec<i32>,
 }
 
 /// The fake launcher. Shared by the runtime and the test.
@@ -101,8 +101,8 @@ impl FakeLauncher {
             state: Mutex::new(State {
                 launched: Vec::new(),
                 failing: Failing::No,
-                groups: Vec::new(),
                 job_pid: None,
+                groups: Vec::new(),
             }),
             controls: Arc::new(Controls::default()),
         })

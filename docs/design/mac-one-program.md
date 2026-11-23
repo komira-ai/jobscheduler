@@ -376,6 +376,7 @@ The owner answered yes to all five questions of section 8:
 
 - **Trees.** A provider's tree reaches the job as a read-only link `exec/<rest>` to the directory the provider answered below `--native-trees-root` (tierstore's one NFS mount of the Mac). The profile denies reads, execution and executable mapping below that root and grants back the reads of the run's own trees only (js-mac-pool `MountTrees`), so the trees root is the one mount root that is not a read deny. A mount below the root must be the run's own tree, read-only and `no_exec`, or the start is refused (`native_fs::tree_rules`). The agent never unmounts the root; the lifecycle releases the trees after the run.
 
+
 Not built yet: adoption across an agent update, the retirement of `js-mac-session`'s pool and the helper program.
 
 ## 14. Built: a run's output committed to the put ingest
