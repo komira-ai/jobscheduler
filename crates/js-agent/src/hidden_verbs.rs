@@ -14,9 +14,6 @@
 //! - `__native-proof` (macOS): a development verb that runs one native job through the
 //!   production runtime and the real supervisor ([`crate::native::proof`]); it is removed once
 //!   the end-to-end proof through the job service runs a native job.
-//! - `__native-trees-proof` (macOS): a development verb that runs two native jobs, each with
-//!   its own tree from the mount provider, through the production runtime
-//!   ([`crate::native::trees_proof`]); removed with `__native-proof`.
 
 use std::ffi::OsString;
 use std::io::Write;
@@ -44,10 +41,6 @@ pub(crate) fn dispatch(
     #[cfg(target_os = "macos")]
     if verb == crate::native::proof::VERB {
         return Some(crate::native::proof::run(args, out, err));
-    }
-    #[cfg(target_os = "macos")]
-    if verb == crate::native::trees_proof::VERB {
-        return Some(crate::native::trees_proof::run(args, out, err));
     }
     None
 }
