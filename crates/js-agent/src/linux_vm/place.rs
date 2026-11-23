@@ -4,7 +4,7 @@
 //! container. `--release` gives the tree up again.
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use js_agent_wire::MountMode;
@@ -61,17 +61,25 @@ fn settle(client: &mut ProviderClient, call: &ProviderCall, guard: Duration) -> 
 /// # Errors
 /// The client could not be made, or the provider refused or failed.
 pub fn run(place: &Place, out: &mut dyn Write) -> Result<(), String> {
-    run_within(place, GUARD, out)
+    run_within(place, GUARD, out, ProviderClient::new)
 }
 
-/// [`run`], with `guard` the longest wait for one answer.
-fn run_within(place: &Place, guard: Duration, out: &mut dyn Write) -> Result<(), String> {
+/// How the provider client is made: [`ProviderClient::new`], or a test's stand-in.
+type MakeClient = fn(&str, &[(String, PathBuf, u32)]) -> std::io::Result<ProviderClient>;
+
+/// [`run`], with `guard` the longest wait for one answer and `make` the client's maker.
+fn run_within(
+    place: &Place,
+    guard: Duration,
+    out: &mut dyn Write,
+    make: MakeClient,
+) -> Result<(), String> {
     let socket = (
         NAME.to_owned(),
         Path::new(&place.socket).to_owned(),
         place.uid,
     );
-    let made = ProviderClient::new("linux-vm-poc", &[socket]);
+    let made = make("linux-vm-poc", &[socket]);
     let mut client = made.map_err(|why| format!("the provider client: {why}"))?;
     let (run_id, index) = (place.run.clone(), 0);
     let calls = if place.release {
@@ -127,7 +135,7 @@ mod tests {
 
     fn placed(place: &Place, guard: Duration) -> (Result<(), String>, String) {
         let mut out = Vec::new();
-        let result = run_within(place, guard, &mut out);
+        let result = run_within(place, guard, &mut out, ProviderClient::new);
         (result, String::from_utf8(out).unwrap())
     }
 
@@ -174,5 +182,17 @@ mod tests {
         let mut out = Vec::new();
         assert_eq!(run(&place, &mut out), Ok(()));
         assert!(!out.is_empty());
+    }
+
+    /// Asserts that a client that cannot be made (no threads or descriptors left) is an
+    /// error naming it, and nothing is printed.
+    #[test]
+    fn a_client_that_cannot_be_made_is_an_error() {
+        let (_dir, _fake, place) = rig("linux-vm-place-noclient");
+        let mut out = Vec::new();
+        let refuse: MakeClient = |_, _| Err(std::io::Error::other("no threads"));
+        let result = run_within(&place, Duration::ZERO, &mut out, refuse);
+        assert_eq!(result, Err("the provider client: no threads".to_owned()));
+        assert!(out.is_empty());
     }
 }
