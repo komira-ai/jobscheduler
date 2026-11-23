@@ -125,5 +125,7 @@ jobs:
       # The sweep's privileged calls (crates/js-agent/src/mac_sweep/macos/root_tests.rs, each
       # `#[ignore]` by name in the run above): every user's processes listed with their real and
       # effective uid and their audit session, and SIGKILL to other users' processes, as root.
+      # It runs whenever the job was not cancelled, so a red test step above does not hide it.
       - name: Run the sweep's root tests as root
+        if: ${{ !cancelled() }}
         run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-agent --lib --locked -- --ignored --nocapture --test-threads=1 mac_sweep::macos::root_tests
