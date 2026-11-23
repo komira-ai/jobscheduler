@@ -86,7 +86,7 @@ fn a_job_env_the_wire_refuses_lends_no_account() {
         ),
     ];
     for (env, said) in cases {
-        let mut spec = rig.spec("r1", native("/bin/true", &[]));
+        let mut spec = rig.spec("r1", native("/usr/bin/true", &[]));
         spec.env = env.clone();
         let error = rig.rt.create_and_start(&spec).unwrap_err();
         assert!(error.0.starts_with(said), "{env:?}: {}", error.0);

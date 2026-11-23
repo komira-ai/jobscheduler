@@ -478,7 +478,10 @@ fn remove_present(
     if depth > PARK_DEPTH {
         return park.take(dir, name, stat);
     }
-    if park.lift {
+    // A directory the uid owns is made its owner's to search and to empty, as a lifting park
+    // makes every directory: a job may leave one it cannot write, such as an input staged
+    // read-only.
+    if park.lift || stat.st_uid == uid {
         searchable(dir, name, stat)?;
     }
     let child = open_child(dir, name, stat)?;
