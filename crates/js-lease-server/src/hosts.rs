@@ -529,7 +529,8 @@ mod tests {
     /// booked shape's alone for a host with no claim and for one whose claim reports no Full
     /// Disk Access, and those with the claim's `full-disk-access` added for a host whose agent
     /// reported it (`not-granted`), while the claim's other capabilities (`runtime`) stay out
-    /// and the pool's own value of a key the claim also names stays. It catches a listing that
+    /// and the pool's own value of a key the claim also names stays (`os`, and `full-disk-access`
+    /// in a shape that names it). It catches a listing that
     /// shows the pool's capabilities alone, so an operator never sees which Macs lack the
     /// grant, and one that lists the whole claim.
     #[test]
@@ -566,6 +567,10 @@ mod tests {
                 ("os", "macos"),
             ])
         );
+        let mut naming = host(Some(&[("full-disk-access", "not-granted")]));
+        let granted = caps(&[("full-disk-access", "granted")]);
+        naming.shape = Shape::new(resources.clone(), granted.clone());
+        assert_eq!(listed(naming), granted);
     }
 
     /// Asserts that the listing is the registry's hosts alone, in id order: hosts viewed `b`
