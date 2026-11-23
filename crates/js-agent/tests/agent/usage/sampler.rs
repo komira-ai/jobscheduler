@@ -13,6 +13,12 @@ fn cpu_stat(usage: u64) -> String {
     format!("usage_usec {usage}\nuser_usec 1\nsystem_usec 2\n")
 }
 
+/// A `/proc/stat` of two CPUs whose `cpu` line sums `user nice system idle iowait irq softirq
+/// steal guest guest_nice` to 150 busy ticks (1.5 s): 100 + 2 + 30 + 4 + 6 + 8, with idle,
+/// iowait and the guest times (already in user and nice) left out.
+const PROC_STAT: &str = "cpu  100 2 30 9999 50 4 6 8 70 1\ncpu0 50 1 15 5000 25 2 3 4 35 0\n\
+cpu1 50 1 15 4999 25 2 3 4 35 1\nintr 12345 0 0\nctxt 999\n";
+
 fn memory_stat(inactive: u64, active: u64) -> String {
     format!(
         "anon 1\nactive_anon 11\ninactive_anon 12\ninactive_file {inactive}\nactive_file {active}\n"
@@ -32,6 +38,7 @@ fn node(usage: u64, current: u64, inactive: u64, active: u64, cpu_max: &str) -> 
             &memory_stat(inactive, active),
         )
         .with(&format!("{ACTIONS}/cpu.max"), cpu_max)
+        .with("/proc/stat", PROC_STAT)
 }
 
 fn with_lease(files: FakeFiles, dir: &str, usage: u64, current: u64, inactive: u64) -> FakeFiles {
@@ -77,6 +84,7 @@ fn a_sample_reads_every_field() {
         Sample {
             mono_usec: 777,
             cpu_usage_usec: 1000,
+            host_cpu_usec: 1_500_000,
             working_set_bytes: 4300,
             active_file_bytes: 300,
             cpu_limited: false,
@@ -309,4 +317,24 @@ fn only_groups_below_the_actions_group_are_sampled() {
     let ids: Vec<&str> = got.leases.iter().map(|l| l.lease_id.as_str()).collect();
     assert_eq!(ids, ["l0", "l1"]);
     assert_eq!(got.unreadable_leases, 4);
+}
+
+/// Asserts that a host whose `/proc/stat` cannot be read, or has no `cpu` line, gives no
+/// sample, with the host's reason, even when every cgroup file of the node can be read. It
+/// catches a host counter invented as 0 beside a real actions counter.
+#[test]
+fn a_host_without_a_readable_proc_stat_gives_no_sample() {
+    let unreadable = FakeFiles::default()
+        .with(&format!("{ACTIONS}/cpu.stat"), &cpu_stat(1))
+        .with(&format!("{ACTIONS}/memory.current"), "1\n")
+        .with(&format!("{ACTIONS}/memory.stat"), &memory_stat(0, 0))
+        .with(&format!("{ACTIONS}/cpu.max"), "max 100000\n");
+    let no_cpu_line = unreadable.clone().with("/proc/stat", "intr 1\n");
+    for files in [unreadable, no_cpu_line] {
+        assert_eq!(sample(files, &[]), Err(SampleError::HostCpuStat));
+    }
+    assert_eq!(
+        SampleError::HostCpuStat.to_string(),
+        "the host /proc/stat cannot be read"
+    );
 }

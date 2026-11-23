@@ -432,8 +432,9 @@ impl WorkerLoad {
         r.windows.iter().flatten().copied().max()
     }
 
-    /// Whether the measured CPU is above the predicted sum of the covered leases
-    /// (`M > P_c`): the predictions are known to be too low here. Plain, before the floor.
+    /// Whether the measured CPU, the whole host's, is above the predicted sum of the covered
+    /// leases (`M > P_c`): the predictions are too low here, or work besides the leases
+    /// keeps the host busy. Plain, before the floor.
     pub(crate) fn measured_above_covered(&self) -> bool {
         self.measured()
             .is_some_and(|m| u64::from(m) > self.totals.cpu_covered)

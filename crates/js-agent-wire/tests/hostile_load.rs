@@ -400,6 +400,7 @@ fn beat_at_every_cap() -> (NodeLoad, Heartbeat) {
         seq: u64::MAX,
         mono_usec: u64::MAX,
         cpu_usage_usec: u64::MAX,
+        host_cpu_usec: Some(u64::MAX),
         working_set_bytes: MAX_MEMORY_BYTES,
         active_file_bytes: MAX_MEMORY_BYTES,
         actions_cpu_limited: true,

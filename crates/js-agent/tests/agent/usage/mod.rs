@@ -5,6 +5,7 @@
 mod cgroup;
 mod collect;
 mod outbox;
+mod proc_stat;
 mod sampler;
 mod tail;
 mod wiring;

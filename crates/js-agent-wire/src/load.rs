@@ -34,6 +34,13 @@ pub struct NodeLoad {
     /// Cumulative CPU time of the cgroup that holds every action, in microseconds,
     /// required.
     pub cpu_usage_usec: u64,
+    /// The whole host's cumulative CPU busy time, in microseconds (`/proc/stat`: every
+    /// process of the host, the actions and everything else). Optional: an agent of an
+    /// earlier release does not send it, and a receiver then reads the host's CPU from
+    /// `cpu_usage_usec` ([`NodeLoad::node_cpu_usec`]). An agent that sends it sends it in
+    /// every reading of its process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_cpu_usec: Option<u64>,
     /// Memory in use by the actions, in bytes (`memory.current - inactive_file`),
     /// required. At most [`limits::MAX_MEMORY_BYTES`].
     pub working_set_bytes: u64,
@@ -160,11 +167,20 @@ fn lease_ok(id: &str) -> bool {
 }
 
 impl NodeLoad {
+    /// The counter a receiver reads the host's CPU busy time from: `host_cpu_usec` when the
+    /// agent sends it, else `cpu_usage_usec` (an agent of an earlier release, whose only
+    /// counter is its actions cgroup's).
+    #[must_use]
+    pub fn node_cpu_usec(&self) -> u64 {
+        self.host_cpu_usec.unwrap_or(self.cpu_usage_usec)
+    }
+
     /// Drops the records that break a rule and counts them in [`NodeLoad::dropped`].
     ///
     /// Fails only for a scalar out of range (`working_set_bytes`, `active_file_bytes`);
     /// the receiver then discards the load and keeps the heartbeat. Counters (`seq`,
-    /// `mono_usec`, `cpu_usage_usec`) are unbounded here: whether one goes backwards is
+    /// `mono_usec`, `cpu_usage_usec`, `host_cpu_usec`) are unbounded here: whether one goes
+    /// backwards is
     /// the receiver's state to judge. Calling it twice changes nothing the second time.
     pub fn vet(&mut self) -> Result<(), ValidationError> {
         let at = At::new("heartbeat.load", refusal::INVALID_HEARTBEAT);
@@ -272,6 +288,7 @@ impl NodeLoad {
             seq,
             mono_usec,
             cpu_usage_usec,
+            host_cpu_usec: number(object, "host_cpu_usec"),
             working_set_bytes,
             active_file_bytes: number(object, "active_file_bytes").unwrap_or_default(),
             actions_cpu_limited: object

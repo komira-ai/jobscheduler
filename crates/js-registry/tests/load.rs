@@ -15,6 +15,7 @@ fn full() -> Wire {
         seq: 17,
         mono_usec: 61_000_123,
         cpu_usage_usec: 125_000_456,
+        host_cpu_usec: None,
         working_set_bytes: 7_000_000_789,
         active_file_bytes: 250_001,
         actions_cpu_limited: true,
@@ -57,6 +58,7 @@ fn back(load: &NodeLoad) -> Wire {
         seq: load.seq,
         mono_usec: load.mono_usec,
         cpu_usage_usec: load.cpu_usage_usec,
+        host_cpu_usec: None,
         working_set_bytes: load.memory_working_set_bytes,
         active_file_bytes: load.memory_active_file_bytes,
         actions_cpu_limited: load.actions_cpu_limited,
@@ -126,6 +128,7 @@ fn the_round_trip_holds_at_the_extremes_and_when_empty() {
         seq: u64::MAX,
         mono_usec: u64::MAX,
         cpu_usage_usec: u64::MAX,
+        host_cpu_usec: None,
         working_set_bytes: MAX_MEMORY_BYTES,
         active_file_bytes: MAX_MEMORY_BYTES,
         actions_cpu_limited: false,
@@ -331,4 +334,31 @@ fn a_repeat_after_a_gap_and_a_beat_of_an_old_session_leave_the_load() {
     let refused = fx.registry.heartbeat(&old, &cred("t"));
     assert!(matches!(refused, Err(js_registry::Refusal::StaleEpoch)));
     assert_eq!(stored(&fx, "a").unwrap().seq, 3);
+}
+
+/// Asserts that the scheduler's CPU counter is the whole host's when the agent sends it, and
+/// the actions cgroup's from an agent that does not (an earlier release): over two readings
+/// 5 s apart in which the jobs' cgroup used one core and the host ten, the scheduler reads
+/// 10000 m busy, not 1000 m; and the same two readings without the host counter read 1000 m.
+/// It catches a placement that sees only the jobs' CPU on a host that other work keeps busy,
+/// and an older agent's load read as having no CPU at all.
+#[test]
+fn the_schedulers_cpu_is_the_whole_hosts_when_the_agent_sends_it() {
+    let at = |seq: u64, host: Option<u64>| Wire {
+        seq,
+        mono_usec: seq * 5_000_000,
+        cpu_usage_usec: seq * 5_000_000,
+        host_cpu_usec: host.map(|cores| seq * 5_000_000 * cores),
+        ..full()
+    };
+    let busy = |host: Option<u64>| {
+        let (first, second) = (node_load(&at(1, host)), node_load(&at(2, host)));
+        second.unwrap().busy_millicores_since(&first.unwrap())
+    };
+    assert_eq!(
+        node_load(&at(1, Some(10))).unwrap().cpu_usage_usec,
+        50_000_000
+    );
+    assert_eq!(busy(Some(10)), Some(10_000));
+    assert_eq!(busy(None), Some(1_000));
 }

@@ -64,7 +64,7 @@ pub(crate) fn load_in(load: &NodeLoad) -> Mapped {
         load: LoadIn {
             seq: load.seq,
             mono_usec: load.mono_usec,
-            cpu_usage_usec: load.cpu_usage_usec,
+            cpu_usage_usec: load.node_cpu_usec(),
             working_set_bytes: load.working_set_bytes,
             actions_cpu_limited: load.actions_cpu_limited,
             covered,
@@ -104,6 +104,7 @@ mod tests {
     fn the_registry_converter_and_the_usage_converter_agree() {
         let mut load = wire();
         load.seq = u64::MAX;
+        load.host_cpu_usec = Some(88_000_000);
         load.active_file_bytes = 12_345;
         load.actions_cpu_limited = false;
         load.covered.push("5-6".into());
@@ -131,6 +132,7 @@ mod tests {
             seq: 7,
             mono_usec: 6_000_000,
             cpu_usage_usec: 5_000_000,
+            host_cpu_usec: None,
             working_set_bytes: 1 << 30,
             active_file_bytes: 0,
             actions_cpu_limited: true,
@@ -183,6 +185,17 @@ mod tests {
                 working_set_max_bytes: 1 << 29,
             }]
         );
+    }
+
+    /// Asserts that the node minutes are built from the whole host's CPU when the agent sends
+    /// it (`host_cpu_usec`), and from the actions cgroup's when it does not (an agent of an
+    /// earlier release). It catches node rows that keep counting only the jobs' CPU.
+    #[test]
+    fn the_node_cpu_is_the_hosts_when_the_agent_sends_it() {
+        let mut load = wire();
+        assert_eq!(load_in(&load).load.cpu_usage_usec, 5_000_000);
+        load.host_cpu_usec = Some(42_000_000);
+        assert_eq!(load_in(&load).load.cpu_usage_usec, 42_000_000);
     }
 
     /// Asserts that a record whose lease id is not `<term>-<seq>` in canonical decimal is

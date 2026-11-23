@@ -2,16 +2,51 @@
 //! the machine's own file reader, from the actions cgroup the runtime delegated when it opened.
 
 use std::fs;
+use std::io;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent::crun::{CgroupSettings, CgroupSource, Seams};
+use js_agent::flags_file::FileFacts;
 use js_agent::usage::{Collector, Outbox, UsageClock};
-use js_agent::{Backend, Machine as _, Platform, RuntimeBuild, System, SystemFiles};
+use js_agent::{Backend, FileReader, Machine as _, Platform, RuntimeBuild, System, SystemFiles};
 use js_testkit::dir::TestDir;
 
 use super::crun_e2e::{NODE_IN_USE, crun_settings, seams};
+
+/// The machine's own file reader, except that the host's `/proc/stat` is a fixed text (300
+/// busy ticks), so the test reads the real cgroup files and not the host's CPU.
+struct FixedProcStat;
+
+impl FileReader for FixedProcStat {
+    fn read(&self, path: &str) -> Result<String, String> {
+        match path {
+            "/proc/stat" => Ok("cpu  100 0 200 900 0 0 0 0 0 0\n".to_owned()),
+            _ => SystemFiles.read(path),
+        }
+    }
+
+    fn link(&self, path: &str) -> Result<String, String> {
+        SystemFiles.link(path)
+    }
+
+    fn device(&self, path: &Path) -> Result<u64, String> {
+        SystemFiles.device(path)
+    }
+
+    fn is_tmpfs(&self, path: &Path) -> Result<bool, String> {
+        SystemFiles.is_tmpfs(path)
+    }
+
+    fn facts(&self, path: &Path) -> io::Result<FileFacts> {
+        SystemFiles.facts(path)
+    }
+
+    fn entries(&self, dir: &Path) -> Result<Vec<String>, io::Error> {
+        SystemFiles.entries(dir)
+    }
+}
 
 /// A clock that always reads `0`: one run is all the test takes.
 struct Zero;
@@ -49,7 +84,8 @@ fn mount_with_actions(mount: &Path, usage_usec: u64) {
 
 /// Asserts that once the crun runtime has opened, the usage read through the machine's file
 /// reader from the actions cgroup it recorded is the node's: one run of the collector
-/// publishes a load with the `usage_usec` and the working set of the actions cgroup's files.
+/// publishes a load with the `usage_usec` and the working set of the actions cgroup's files,
+/// beside the host's CPU busy time (a fixed `/proc/stat`, 300 ticks of 10 ms).
 /// The runtime names its cgroups relative to the mount (`/actions`); the usage reads files, so
 /// it must be given the directory below the mount. It catches the delegated cgroup's name
 /// read as a path from `/`, where no `cpu.stat` is: every heartbeat of a crun host then
@@ -84,7 +120,7 @@ fn a_crun_host_samples_its_load_from_the_delegated_actions_cgroup() {
     let outbox = Arc::new(Outbox::new());
     outbox.set_window(Duration::from_secs(5));
     let mut collector = Collector::new(
-        Box::new(SystemFiles),
+        Box::new(FixedProcStat),
         actions,
         Box::new(Zero),
         outbox.clone(),
@@ -96,8 +132,9 @@ fn a_crun_host_samples_its_load_from_the_delegated_actions_cgroup() {
             load.seq,
             load.cpu_usage_usec,
             load.working_set_bytes,
-            load.actions_cpu_limited
+            load.actions_cpu_limited,
+            load.host_cpu_usec
         ),
-        (1, 123_456, 3072, false)
+        (1, 123_456, 3072, false, Some(3_000_000))
     );
 }

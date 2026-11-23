@@ -3,8 +3,10 @@
 //! [`node_load`] turns the wire's [`WireLoad`] into `js_types::sched::usage::NodeLoad`,
 //! the type `js-sched` consumes. Every number is copied unchanged, in the units both
 //! types state: CPU time in microseconds, memory in bytes, per-lease CPU in thousandths of
-//! a core, times in microseconds on the agent's monotonic clock. The only change is the
-//! form of a lease: the wire's `term-seq` text becomes a `sched::LeaseId`.
+//! a core, times in microseconds on the agent's monotonic clock. The node's CPU counter is
+//! the whole host's busy time when the agent sends it (`host_cpu_usec`), else its actions
+//! cgroup's ([`WireLoad::node_cpu_usec`]). The only other change is the form of a lease:
+//! the wire's `term-seq` text becomes a `sched::LeaseId`.
 //!
 //! Two fields exist only on the scheduler's side, `cpu_throttled_usec` and
 //! `cpu_pressure_some_total_usec` (telemetry the wire does not carry yet); they read 0
@@ -50,7 +52,7 @@ pub fn node_load(wire: &WireLoad) -> Result<NodeLoad, BadLease> {
     Ok(NodeLoad {
         seq: wire.seq,
         mono_usec: wire.mono_usec,
-        cpu_usage_usec: wire.cpu_usage_usec,
+        cpu_usage_usec: wire.node_cpu_usec(),
         memory_working_set_bytes: wire.working_set_bytes,
         memory_active_file_bytes: wire.active_file_bytes,
         covered: wire

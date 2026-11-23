@@ -184,8 +184,8 @@ pub struct HostFacts {
     /// The worker is in fallback: no measurement, or a stale signal, or a kind of node
     /// that reports none.
     pub fallback: bool,
-    /// The measured covered CPU exceeds the predicted sum of the worker's covered leases
-    /// (`M > P_c`).
+    /// The measured CPU (the whole host's) exceeds the predicted sum of the worker's covered
+    /// leases (`M > P_c`).
     pub measured_above_predicted: bool,
     /// The worker's leases (covered and uncovered) of the new lease's action key, summed
     /// as the key's flat cost `p_bar`, in millicores.
@@ -342,7 +342,8 @@ impl ScoreKey {
         self.memory_unsafe
     }
 
-    /// Key 3: the worker is in fallback or measured above its predictions.
+    /// Key 3: the worker is in fallback or measured (the whole host) above the predictions
+    /// of its covered leases.
     #[must_use]
     pub const fn distrusted(&self) -> bool {
         self.distrusted

@@ -1,4 +1,5 @@
-//! One reading of the machine's actions cgroup and of each lease's cgroup.
+//! One reading of the host's CPU busy time, of the machine's actions cgroup and of each
+//! lease's cgroup.
 
 use crate::facts::FileReader;
 
@@ -11,6 +12,7 @@ use super::cgroup::{
     parse_usage_usec, working_set,
 };
 use super::clock::UsageClock;
+use super::proc_stat::{PROC_STAT, parse_host_busy_usec};
 
 /// A lease whose cgroup is to be read.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +31,9 @@ pub enum SampleError {
     /// The actions cgroup's `cpu.stat` is unreadable or has no `usage_usec`.
     #[error("the node cpu.stat cannot be read")]
     NodeCpuStat,
+    /// The host's `/proc/stat` is unreadable or has no `cpu` line of eight numbers.
+    #[error("the host /proc/stat cannot be read")]
+    HostCpuStat,
     /// The actions cgroup's `memory.current` is unreadable or not a number.
     #[error("the node memory.current cannot be read")]
     NodeMemoryCurrent,
@@ -56,7 +61,8 @@ impl<F: FileReader> Sampler<F> {
         }
     }
 
-    /// Reads the node and then each of `leases`, with exactly one read of `clock`.
+    /// Reads the node and then each of `leases`, with exactly one read of `clock`, taken
+    /// right after the two CPU counters (the actions cgroup's, then the host's).
     ///
     /// A node file that cannot be read is an error, so that no zero is invented. A lease
     /// that cannot be read is left out and counted in `unreadable_leases`.
@@ -69,6 +75,12 @@ impl<F: FileReader> Sampler<F> {
         let cpu = self
             .value(dir, "cpu.stat", parse_usage_usec)
             .ok_or(SampleError::NodeCpuStat)?;
+        let host = self
+            .files
+            .read(PROC_STAT)
+            .ok()
+            .and_then(|text| parse_host_busy_usec(&text))
+            .ok_or(SampleError::HostCpuStat)?;
         let mono_usec = clock.now_usec();
         let current = self
             .value(dir, "memory.current", parse_single_u64)
@@ -90,6 +102,7 @@ impl<F: FileReader> Sampler<F> {
         Ok(Sample {
             mono_usec,
             cpu_usage_usec: cpu,
+            host_cpu_usec: host,
             working_set_bytes: working_set(current, inactive),
             active_file_bytes: active,
             cpu_limited: limited,
