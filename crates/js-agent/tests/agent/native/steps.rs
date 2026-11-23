@@ -489,3 +489,77 @@ fn a_stop_terms_the_job_and_ends_it_after_the_grace() {
     );
     rt.remove(&id).unwrap();
 }
+
+/// The write grants of a launch's profile: the value of each parameter a
+/// `(allow file-write* (subpath (param "NAME")))` line names.
+fn write_grants(launched: &super::Launched) -> Vec<String> {
+    launched
+        .profile
+        .lines()
+        .filter(|line| line.starts_with("(allow file-write*"))
+        .flat_map(|line| line.split("(param \"").skip(1))
+        .filter_map(|rest| rest.split('"').next())
+        .filter_map(|name| super::param(launched, name))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Asserts that the lent account's own per-user temporary and cache folders are granted
+/// writes by their own paths, beside the run directory, and that nothing else below the
+/// per-user folders' root is: not the root, not the account's whole entry, not another
+/// account's folder; and that a lookup that fails fails the start with nothing left.
+///
+/// Catches a profile that grants `/var/folders` as a whole or another account's folder, and a
+/// start that runs without the folders `xcrun` writes its cache in.
+#[test]
+fn the_accounts_own_folders_are_granted_and_nothing_else_below_them() {
+    let rig = Rig::new("own-folders");
+    let root = rig.dir.path("folders");
+    for part in ["ab/mine/T", "ab/mine/C", "ab/mine/0", "cd/theirs/T"] {
+        fs::create_dir_all(root.join(part)).unwrap();
+    }
+    let root = fs::canonicalize(root).unwrap();
+    let mine = (root.join("ab/mine/T"), root.join("ab/mine/C"));
+    let given = mine.clone();
+    let find: js_agent::native::OwnFolders =
+        std::sync::Arc::new(move |_, _| Ok(vec![given.0.clone(), given.1.clone()]));
+    let mut rig = Rig {
+        rt: rig.rt.with_own_folders(find),
+        ..rig
+    };
+    let lent = ready_account(&rig);
+    let id = rig.start("own", "/usr/bin/true", &[]);
+    let launched = rig.launcher.last();
+    let grants = write_grants(&launched);
+    let exec = rig.home_of(&lent).join("exec").display().to_string();
+    let (temp, cache) = (mine.0.display().to_string(), mine.1.display().to_string());
+    // The grants follow the run directory in path order: the cache folder (`C`), then the
+    // temporary one (`T`).
+    assert_eq!(grants, [exec, cache, temp], "{}", launched.profile);
+    for refused in [
+        root.clone(),
+        root.join("ab/mine"),
+        root.join("ab/mine/0"),
+        root.join("cd/theirs/T"),
+    ] {
+        let covered = grants.iter().any(|grant| refused.starts_with(grant));
+        assert!(!covered, "{} is writable", refused.display());
+    }
+    rig.settle(&id);
+    rig.rt.remove(&id).unwrap();
+
+    let rig = Rig::new("own-folders-fail");
+    let lent = ready_account(&rig);
+    let fails: js_agent::native::OwnFolders =
+        std::sync::Arc::new(|_, _| Err(std::io::Error::other("getconf failed")));
+    let mut rig = Rig {
+        rt: rig.rt.with_own_folders(fails),
+        ..rig
+    };
+    let why = rig
+        .rt
+        .create_and_start(&rig.spec("fail", native("/usr/bin/true", &[])))
+        .unwrap_err();
+    assert_eq!(why.0, "the account's own folders: getconf failed");
+    nothing_left(&rig, &lent, 0);
+}

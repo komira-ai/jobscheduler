@@ -14,7 +14,9 @@
 //! 5. `inputs-linked`: the run's files are given to the account, its mount inputs staged
 //!    and its job mounts linked into `exec/` (`native/files.rs`, `native/mounts.rs`), its
 //!    working directory made, and its bundle's writable trees cloned into `exec/.trees`.
-//! 6. `profile-built`: the Seatbelt profile of the run (`native/profile.rs`).
+//! 6. `profile-built`: the account's own per-user temporary and cache folders are found (asked
+//!    of the system as the account), and the Seatbelt profile of the run is built
+//!    (`native/profile.rs`), granting writes to the run directory and to those two folders.
 //! 7. `supervisor-started`: `js-agent __supervise-native` is started through the
 //!    [`Launcher`], with the run's environment (and nothing else), its working directory,
 //!    and its three log files in the scratch directory as standard input, output and error.
@@ -33,7 +35,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use js_agent_wire::{BUNDLE_PROGRAM_PREFIX, Isolation, NativeSpec, NetworkLevel};
-use js_mac_pool::seatbelt::AbsPath;
+use js_mac_pool::seatbelt::{AbsPath, MountGrant};
 
 use super::journal::RunRecord;
 use super::run::{Job, Run};
@@ -223,7 +225,21 @@ impl NativeRuntime {
             )
             .chain(mounts::read_only_links(&plans, &exec))
             .collect();
-        let grants = mounts::grants(&plans);
+        let mut grants = mounts::grants(&plans);
+        // The account's own per-user temporary and cache folders: its run may write there
+        // (`xcrun` keeps its cache there), and nowhere else below `/private/var/folders`.
+        if let Some(find) = &self.own_folders {
+            let found =
+                find(account, &home).map_err(|why| fail(&"the account's own folders", &why))?;
+            for folder in found {
+                let path = AbsPath::new(&folder).map_err(|why| fail(&folder.display(), &why))?;
+                grants.push(MountGrant {
+                    path,
+                    write: true,
+                    no_exec: false,
+                });
+            }
+        }
         let trees = None; // TRE
         let built = profile::build(&self.config, &native, &home, (&read_only, &grants), trees)?;
         self.mark(marks, STEPS[5]);
