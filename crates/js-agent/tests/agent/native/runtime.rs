@@ -1,25 +1,20 @@
-//! The native runtime against the fake helper: what a start asks of the helper and puts on
-//! disk, the command line it builds, how an end is told, the logs, the kill and the removal,
-//! and every way a start fails.
+//! The native runtime over the real account pool (on a fake host) and the fake supervisor:
+//! what a start asks of the supervisor and puts on disk (the account, the run directory, the
+//! profile, the environment, the limits), how an end is told, the logs, the removal, and
+//! every way a start fails before or after an account is lent.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
-use std::path::PathBuf;
 
 use js_agent::lifecycle::{Body, Exit, RunHandle, Runtime, Status};
-use js_agent::native::{Ceiling, NativeRuntime};
+use js_agent::native::{Ceiling, Journal};
 use js_agent_wire::limits::MAX_LOG_STREAM_LEN;
 use js_agent_wire::{NetworkLevel, refusal};
 use js_mac_pool::seatbelt::{AbsPath, ReadModel};
-use js_mac_session::client::Client;
-use js_mac_session::helper::RESET_ALREADY;
-use js_mac_session::proto::Limits;
 
-use super::fake_helper::{End, FakeHelper};
 use super::pf_gate::{Fake, Verdict};
-use super::{Rig, TERM, config, native, parse};
-use crate::support::Scratch;
+use super::{Rig, native, param};
 
 fn handle(lease: &str) -> RunHandle {
     RunHandle(lease.to_owned())
@@ -32,176 +27,180 @@ fn exited(code: i32) -> Status {
     })
 }
 
-/// Asserts that a start asks the helper for a user named for the run's lease, makes the run
+/// The one account the rig's pool keeps ready, by name: the account the next start is lent.
+fn ready_account(rig: &Rig) -> String {
+    let records = rig.accounts.records();
+    assert_eq!(records.len(), 1, "{records:?}");
+    records[0].clone()
+}
+
+/// The leases the rig's journal holds live.
+fn live(rig: &Rig) -> Vec<String> {
+    Journal::new(&rig.dir.path("native-leases")).live().unwrap()
+}
+
+/// Asserts that a start that was refused or failed lent nothing and left nothing: the pool
+/// holds no account and keeps one ready that is not `lent`, no lease is live, and the
+/// supervisor was started `launches` times.
+fn nothing_left(rig: &Rig, lent: &str, launches: usize) {
+    assert!(rig.pool.held().is_empty(), "{:?}", rig.pool.held());
+    let records = rig.accounts.records();
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_ne!(records[0], lent, "the failed start's account is retired");
+    assert_eq!(live(rig), Vec::<String>::new());
+    assert_eq!(rig.launcher.launched().len(), launches);
+}
+
+/// Asserts that a start refused before an account is lent changed nothing: the pool's ready
+/// account is still the one it was, no supervisor was started, no lease was written.
+fn untouched(rig: &Rig, ready: &str) {
+    assert_eq!(rig.accounts.records(), [ready.to_owned()]);
+    assert!(rig.pool.held().is_empty());
+    assert!(rig.launcher.launched().is_empty());
+    assert!(
+        !rig.dir.path("native-leases").exists(),
+        "the journal was touched"
+    );
+}
+
+/// Asserts that a start lends the run an account named for the pool's slots, makes the run
 /// directory (`exec`, the working directory, with `.home` and `.tmp` inside it) private to
-/// that user before the program starts, hands the helper a working directory and an empty
-/// standard input, and runs the program under `sandbox-exec` with a profile that grants
-/// writes to the run directory (not to the home, nor to the user's folder entry), with
-/// `TMPDIR` and `CFFIXED_USER_HOME` inside the run directory. It catches a program
-/// started without its profile, a working directory that is not a directory, a run
-/// directory the user cannot use, and a start that skips the helper's reset.
+/// the account before the program starts, and asks the supervisor to run the program under a
+/// profile that grants writes to the run directory (not to the home, nor to the account's
+/// folder entry), in an environment of the agent's value, `TMPDIR` and the account's names
+/// (the job's home and `TMPDIR` inside the run directory), as the account's uid and group,
+/// with the configured largest file.
+///
+/// Catches: a program started without its profile, a working directory that is not the run
+/// directory, a run directory the account cannot use, and an environment that lacks the
+/// account's names.
 #[test]
-fn a_start_makes_a_user_and_a_run_directory_and_runs_the_program_under_the_profile() {
+fn a_start_lends_an_account_and_makes_a_run_directory_and_runs_the_program_under_the_profile() {
     let mut rig = Rig::new("start");
-    let mut native = native("/usr/bin/id", &["-u"]);
-    native.env.insert("A".to_owned(), "b".to_owned());
-    let spec = rig.spec("r1", native);
+    let lent = ready_account(&rig);
+    let mut body = native("/usr/bin/id", &["-u"]);
+    body.env.insert("A".to_owned(), "b".to_owned());
+    let spec = rig.spec("r1", body);
     let id = rig.rt.create_and_start(&spec).unwrap();
     assert_eq!(id, handle("7.0"));
-    assert_eq!(
-        rig.fake.verbs(),
-        ["boot-reset", "user-create 7.0", "pool-status", "run 7.0"]
-    );
-    let home = rig.fake.home_of("7.0");
+    let home = rig.home_of(&lent);
     for dir in ["exec", "exec/.tmp", "exec/.home"] {
         let mode = fs::metadata(home.join(dir)).unwrap().permissions().mode();
         assert_eq!(mode & 0o7777, 0o700, "{dir}");
     }
-    let run = rig.fake.run_of("7.0");
-    assert!(run.cwd_is_dir, "the working directory is a directory");
-    assert_eq!(run.stdin_bytes, 0, "standard input is empty");
-    let tmp = home.join("exec/.tmp").display().to_string();
+    let launched = rig.launcher.last();
+    assert_eq!(launched.cwd, fs::canonicalize(home.join("exec")).unwrap());
+    let tmp = home.join("exec/.tmp");
     let job_home = home.join("exec/.home").display().to_string();
+    let pair = |name: &str, value: &str| (name.to_owned(), value.to_owned());
     assert_eq!(
-        run.env,
+        launched.env,
         [
-            ("A".to_owned(), "b".to_owned()),
-            ("TMPDIR".to_owned(), tmp),
-            ("CFFIXED_USER_HOME".to_owned(), job_home),
+            pair("A", "b"),
+            pair("TMPDIR", &tmp.display().to_string()),
+            pair("HOME", &job_home),
+            pair("CFFIXED_USER_HOME", &job_home),
+            pair("USER", &lent),
+            pair("LOGNAME", &lent),
+            pair("xcrun_db", &tmp.join("xcrun_db").display().to_string()),
         ]
     );
-    let parsed = parse(&run.argv);
-    assert_eq!(parsed.tail, ["/usr/bin/id", "-u"]);
+    assert_eq!(launched.program, "/usr/bin/id");
+    assert_eq!(launched.args, ["-u"]);
+    assert_eq!(launched.max_file_bytes, 1 << 30, "1 GiB in bytes");
     assert_eq!(
-        run.limits,
-        Some(Limits {
-            file_bytes: 1 << 30,
-            processes: 512
-        }),
-        "1 GiB in bytes, and 512 processes"
-    );
-    assert_eq!(
-        parsed.params[0],
-        ("RUN".to_owned(), home.join("exec").display().to_string())
+        param(&launched, "RUN"),
+        Some(home.join("exec").display().to_string().as_str())
     );
     assert!(
-        parsed
+        launched
             .profile
             .contains("(allow file-write* (subpath (param \"RUN\"))")
     );
-    assert!(!parsed.profile.contains("UENTRY"));
+    assert!(!launched.profile.contains("UENTRY"));
     assert!(
-        parsed
+        launched
             .profile
             .ends_with("(deny network-outbound (literal \"/private/var/run/usbmuxd\"))\n"),
         "the floor is the profile's last rule"
     );
+    rig.settle(&id);
+    rig.rt.remove(&id).unwrap();
 }
 
-/// Asserts that every start gets a lease of its own (`7.0`, then `7.1`), so a user's name is
-/// never used twice, and a home of its own. It catches a lease reused for a second run,
-/// which the helper refuses and which would share one user's files.
+/// Asserts that a job's standard input is empty: a program that reads it to its end ends at
+/// once with nothing read, and its output is its own.
+///
+/// Catches: a job started with the agent's terminal or a pipe as its input, which a reader
+/// would wait on for ever.
 #[test]
-fn each_start_gets_a_user_of_its_own() {
-    let mut rig = Rig::new("leases");
-    let first = rig.start("r1", "/bin/true", &[]);
-    let second = rig.start("r2", "/bin/true", &[]);
+fn a_jobs_standard_input_is_empty() {
+    let mut rig = Rig::new("stdin");
+    let id = rig.start("r1", "/bin/cat", &[]);
+    assert_eq!(rig.settle(&id), exited(0));
+    let tail = rig.rt.log_tail(&id).unwrap().unwrap();
+    assert_eq!((tail.stdout.as_str(), tail.stderr.as_str()), ("", ""));
+    rig.rt.remove(&id).unwrap();
+}
+
+/// Asserts that every start gets a lease of its own (`7.0`, then `7.1`) and an account of its
+/// own: a name, a uid and a home that no other run held at the same time, each with its run
+/// directory. Two runs at once need two slots.
+///
+/// Catches: a lease or an account reused for a second run, which would share one account's
+/// files.
+#[test]
+fn each_start_gets_an_account_of_its_own() {
+    let mut rig = Rig::in_dir("leases", 3, |_, _| {});
+    let first = rig.start("r1", "/usr/bin/true", &[]);
+    let second = rig.start("r2", "/usr/bin/true", &[]);
     assert_eq!((first, second), (handle("7.0"), handle("7.1")));
-    assert_ne!(rig.fake.home_of("7.0"), rig.fake.home_of("7.1"));
-    assert!(rig.fake.home_of("7.1").join("exec").is_dir());
+    let launches = rig.launcher.launched();
+    let names: Vec<&str> = launches
+        .iter()
+        .map(|launched| launched.var("USER").unwrap())
+        .collect();
+    assert_ne!(names[0], names[1]);
+    assert_ne!(launches[0].uid, launches[1].uid);
+    assert_ne!(rig.home_of(names[0]), rig.home_of(names[1]));
+    for name in names {
+        assert!(rig.home_of(name).join("exec").is_dir(), "{name}");
+    }
 }
 
-/// Asserts that a run's home is the home of the pool user the helper lent its lease,
-/// named by the slot `pool-status` gives (`kbf-lease-pool-<slot>`), and not a name made
-/// from the lease id: the helper lends slots 4 and 5 to the leases `7.0` and `7.1`, and
-/// each run's directory and its profile's write grant are in that slot's home. It catches
-/// a run directory made below a home the helper never made (`kbf-lease-<term>-<seq>`, or
-/// a slot guessed from the lease's sequence), which fails every start on a Mac whose
-/// helper lends pool users.
+/// Asserts that a run's home is the home of the account the pool lent it (named for the
+/// pool, `kbf-acct-<n>`, not for the lease), at one of the uids of the pool's slots: each
+/// run's directory and its profile's write grant are in that account's home.
+///
+/// Catches: a run directory made below a home the pool never made, which fails every start on
+/// a Mac.
 #[test]
-fn a_run_lives_in_the_home_of_the_pool_user_its_lease_was_lent() {
-    let mut rig = Rig::new("poolhome");
-    rig.fake.lend_from(4);
-    rig.start("r1", "/bin/true", &[]);
-    rig.start("r2", "/bin/true", &[]);
-    let homes = rig.fake.homes().to_path_buf();
-    for (lease, slot) in [("7.0", 4), ("7.1", 5)] {
-        let home = homes.join(format!("kbf-lease-pool-{slot}"));
-        assert_eq!(rig.fake.home_of(lease), home);
+fn a_run_lives_in_the_home_of_the_account_the_pool_lent_it() {
+    let mut rig = Rig::in_dir("poolhome", 3, |_, _| {});
+    rig.start("r1", "/usr/bin/true", &[]);
+    rig.start("r2", "/usr/bin/true", &[]);
+    for launched in rig.launcher.launched() {
+        let name = launched.var("USER").unwrap();
+        assert!(name.starts_with("kbf-acct-"), "{name}");
+        assert!(!name.contains("7-0") && !name.contains("7.0"), "{name}");
+        assert!((super::me()..super::me() + 3).contains(&launched.uid));
+        let home = rig.settings.homes.join(name);
+        assert_eq!(rig.home_of(name), home);
         assert!(home.join("exec").is_dir(), "{}", home.display());
-        let ran = parse(&rig.fake.run_of(lease).argv);
         assert_eq!(
-            ran.params[0],
-            ("RUN".to_owned(), home.join("exec").display().to_string())
+            param(&launched, "RUN"),
+            Some(home.join("exec").display().to_string().as_str())
         );
     }
-    for name in ["kbf-lease-7-0", "kbf-lease-pool-0", "kbf-lease-pool-1"] {
-        assert!(!homes.join(name).exists(), "{name}");
-    }
-    assert_eq!(
-        rig.fake.verbs()[..4],
-        ["boot-reset", "user-create 7.0", "pool-status", "run 7.0"]
-    );
-}
-
-/// Asserts that on a helper from before the pool, which refuses `pool-status` as a verb it
-/// cannot read, a run's home is the user that helper made for the lease alone
-/// (`kbf-lease-<term>-<seq>`). It catches an agent that cannot run a job while its helper
-/// is still the release before the pool, as during an update.
-#[test]
-fn on_a_helper_from_before_the_pool_a_run_lives_in_its_leases_own_home() {
-    let mut rig = Rig::new("prepool");
-    rig.fake.be_old();
-    rig.start("r1", "/bin/true", &[]);
-    let home = rig.fake.homes().join("kbf-lease-7-0");
-    assert_eq!(rig.fake.home_of("7.0"), home);
-    assert!(home.join("exec").is_dir());
-    assert_eq!(
-        rig.fake.verbs(),
-        ["boot-reset", "user-create 7.0", "unreadable", "run 7.0"]
-    );
-}
-
-/// Asserts that a start whose lease `pool-status` cannot place fails by name and ends the
-/// user it was lent: when the helper refuses `pool-status`, and when the status names no
-/// slot for the lease. Nothing is made below the homes directory and no `run` is sent.
-/// It catches a run directory guessed when the helper did not say which user the lease
-/// holds, and a lent user left behind by such a start.
-#[test]
-fn a_lease_the_pool_status_does_not_place_fails_the_start_and_is_ended() {
-    let ended = [
-        "boot-reset",
-        "user-create 7.0",
-        "pool-status",
-        "kill-uid 7.0",
-        "user-delete 7.0",
-    ];
-    let mut rig = Rig::new("nostatus");
-    rig.fake.refuse("pool-status", "busy");
-    let spec = rig.spec("r1", native("/bin/true", &[]));
-    let error = rig.rt.create_and_start(&spec).unwrap_err();
-    assert!(error.0.starts_with("pool-status: "), "{}", error.0);
-    assert!(error.0.contains("busy"), "{}", error.0);
-    assert_eq!(rig.fake.verbs(), ended);
-    assert!(!rig.fake.home_of("7.0").exists());
-
-    let mut rig = Rig::new("unnamed");
-    rig.fake.status_names_no_lease();
-    let spec = rig.spec("r1", native("/bin/true", &[]));
-    let error = rig.rt.create_and_start(&spec).unwrap_err();
-    assert_eq!(
-        error.0,
-        "pool-status: the helper names no pool user for lease 7.0"
-    );
-    assert_eq!(rig.fake.verbs(), ended);
-    assert!(!rig.fake.home_of("7.0").exists());
 }
 
 /// Asserts the network rules of the profile: `off` has no loopback rule, `loopback` has it,
 /// and an open network has no network rule at all; a request above the ceiling, given to the
 /// runtime directly, is still held at the ceiling. An agent refuses such a start before it
-/// reaches the runtime (`check_native`); the profile's own bound is a defence in depth. It
-/// catches a profile that grants more than the ceiling and a level mapped to the wrong rules.
+/// reaches the runtime (`check_native`); the profile's own bound is a defence in depth.
+///
+/// Catches: a profile that grants more than the ceiling and a level mapped to the wrong
+/// rules.
 #[test]
 fn a_runs_network_is_the_lower_of_its_request_and_the_agents_cap() {
     let loopback = "(allow network* (remote ip \"localhost:*\"))";
@@ -218,11 +217,11 @@ fn a_runs_network_is_the_lower_of_its_request_and_the_agents_cap() {
             config.network = cap;
             config.egress = Some(Fake::new(Verdict::Enforced));
         });
-        let mut body = native("/bin/true", &[]);
+        let mut body = native("/usr/bin/true", &[]);
         body.network = asked;
         let spec = rig.spec("r1", body);
         rig.rt.create_and_start(&spec).unwrap();
-        let profile = parse(&rig.fake.run_of("7.0").argv).profile;
+        let profile = rig.launcher.last().profile;
         let said = format!("{cap:?} cap, {asked:?} asked");
         assert_eq!(profile.contains(loopback), has_loopback, "{said}");
         assert_eq!(profile.contains("(deny network*)"), denies, "{said}");
@@ -230,222 +229,198 @@ fn a_runs_network_is_the_lower_of_its_request_and_the_agents_cap() {
 }
 
 /// Asserts that the paths the agent keeps from jobs are read-denied in the profile, as
-/// parameters. It catches a profile that lets a run read the agent's state.
+/// parameters.
+///
+/// Catches: a profile that lets a run read the agent's state.
 #[test]
 fn the_agents_own_paths_are_denied_to_the_run() {
     let mut rig = Rig::new("denies");
-    rig.start("r1", "/bin/true", &[]);
-    let parsed = parse(&rig.fake.run_of("7.0").argv);
+    rig.start("r1", "/usr/bin/true", &[]);
+    let launched = rig.launcher.last();
     assert!(
-        parsed
+        launched
             .params
             .contains(&("RD_0".to_owned(), "/srv/js-state".to_owned()))
     );
     assert!(
-        parsed
+        launched
             .profile
             .contains("(deny file-read* (subpath (param \"RD_0\")))")
     );
 }
 
-/// Asserts how a run's end is told: running until the helper reports it; then the exit
-/// code; a process a signal ended has the status a shell gives it (128 and the signal); an
-/// end with neither is 255; and the answer is the same on every later poll. It catches an
-/// exit status lost between the helper and the lifecycle and a poll that blocks.
+/// Asserts that the profile is built from the policy and the paths of the run only: two
+/// runs that differ only in their environment, one of them with a value that would break
+/// out of a quoted string, are given the same profile text and the same parameters (but the
+/// run directory's own).
+///
+/// Catches: a value of the job's environment that reaches the profile.
 #[test]
-fn a_run_is_running_until_the_helper_reports_its_end() {
-    let mut rig = Rig::new("ends");
+fn the_profile_does_not_depend_on_the_jobs_environment() {
+    let mut rig = Rig::in_dir("profile-env", 3, |_, _| {});
+    let plain = native("/usr/bin/id", &["-u"]);
+    let mut hostile = native("/usr/bin/id", &["-u"]);
+    hostile.env.insert(
+        "A".to_owned(),
+        "\") (allow file-write* (subpath \"/\")".to_owned(),
+    );
+    for (n, body) in [plain, hostile].into_iter().enumerate() {
+        let spec = rig.spec(&format!("r{n}"), body);
+        rig.rt.create_and_start(&spec).unwrap();
+    }
+    let launches = rig.launcher.launched();
+    assert_eq!(launches[0].profile, launches[1].profile);
+    let params = |at: usize| -> Vec<(String, String)> {
+        launches[at]
+            .params
+            .iter()
+            .filter(|(name, _)| name != "RUN")
+            .cloned()
+            .collect()
+    };
+    assert_eq!(params(0), params(1));
+}
+
+/// Asserts how a run's end is told: a job that is running is polled as running; an exit code
+/// is the run's; a job a signal ended has the status a shell gives it (128 and the signal);
+/// and the answer is the same on every later poll.
+///
+/// Catches: an exit status lost between the supervisor and the lifecycle and a poll that
+/// blocks.
+#[test]
+fn a_run_is_running_until_its_job_ends_and_its_end_is_told_the_same_every_time() {
+    let mut rig = Rig::in_dir("ends", 4, |_, _| {});
+    let running = rig.start("r0", "/bin/sleep", &["600"]);
+    assert_eq!(rig.rt.poll(&running).unwrap(), Status::Running);
+    rig.rt
+        .stop(&running, std::time::Duration::from_secs(600))
+        .unwrap();
+    assert_eq!(rig.settle(&running), exited(143));
+    rig.rt.remove(&running).unwrap();
+
     let ends = [
-        End::Exit(Some(3), None),
-        End::Exit(None, Some(11)),
-        End::Exit(None, None),
+        ("exit 3", exited(3)),
+        ("kill -HUP $$", exited(128 + 1)),
+        ("exit 0", exited(0)),
     ];
-    let want = [exited(3), exited(139), exited(255)];
-    for (n, (end, want)) in ends.into_iter().zip(want).enumerate() {
-        let id = rig.start(&format!("r{n}"), "/bin/true", &[]);
-        assert_eq!(rig.rt.poll(&id).unwrap(), Status::Running);
-        rig.fake.end(&id.0, end);
-        assert_eq!(rig.settle(&id), want);
+    for (n, (script, want)) in ends.into_iter().enumerate() {
+        let id = rig.start(&format!("r{}", n + 1), "/bin/sh", &["-c", script]);
+        assert_eq!(rig.settle(&id), want, "{script}");
         assert_eq!(rig.rt.poll(&id).unwrap(), want, "asked again");
+        rig.rt.remove(&id).unwrap();
     }
 }
 
-/// Asserts that a helper connection that ends with no exit makes the run `Gone`, which the
-/// lifecycle ends as failed and removes (killing whatever the user still runs). It catches
-/// a run polled as running for ever after the helper went away.
-#[test]
-fn a_helper_that_hangs_up_leaves_a_run_gone() {
-    let mut rig = Rig::new("hangup");
-    let id = rig.start("r1", "/bin/true", &[]);
-    rig.fake.end(&id.0, End::HangUp);
-    assert_eq!(rig.settle(&id), Status::Gone);
-}
-
-/// Asserts that a handle the runtime never made is `Gone`, has no log and no gpu, and that
-/// the runtime lists nothing to adopt. It catches a poll of a stranger that errs and a
-/// runtime that claims runs it cannot find again.
+/// Asserts that a handle the runtime never made is `Gone`, has no log and no gpu, that
+/// stopping or removing it is no error, and that the runtime lists nothing to adopt.
+///
+/// Catches: a poll of a stranger that errs and a runtime that claims runs it cannot find
+/// again.
 #[test]
 fn an_unknown_handle_is_gone_and_nothing_is_listed() {
     let mut rig = Rig::new("unknown");
     let stranger = handle("9.9");
     assert_eq!(rig.rt.poll(&stranger).unwrap(), Status::Gone);
     assert_eq!(rig.rt.log_tail(&stranger).unwrap(), None);
+    rig.rt.stop(&stranger, std::time::Duration::ZERO).unwrap();
+    rig.rt.remove(&stranger).unwrap();
     assert!(rig.rt.list_labelled().unwrap().is_empty());
     assert!(rig.rt.list_ids().unwrap().is_empty());
     assert!(!rig.rt.supports_gpus());
 }
 
-/// Asserts that the two streams of the job are the two log files: what the helper's process
-/// wrote to its standard output and standard error comes back, apart, as the tail. It
-/// catches streams swapped or merged.
+/// Asserts that the two streams of the job are the two log files: what the program wrote to
+/// its standard output and standard error comes back, apart, as the tail.
+///
+/// Catches: streams swapped or merged.
 #[test]
 fn the_tail_is_what_the_job_wrote_to_each_stream() {
     let mut rig = Rig::new("tail");
-    rig.fake.print(b"to out\n", b"to err\n");
-    let id = rig.start("r1", "/bin/true", &[]);
+    let script = "printf 'to out\\n'; printf 'to err\\n' >&2";
+    let id = rig.start("r1", "/bin/sh", &["-c", script]);
+    assert_eq!(rig.settle(&id), exited(0));
     let tail = rig.rt.log_tail(&id).unwrap().unwrap();
     assert_eq!(tail.stdout, "to out\n");
     assert_eq!(tail.stderr, "to err\n");
     assert!(!tail.truncated);
+    rig.rt.remove(&id).unwrap();
 }
 
 /// Asserts that a job that wrote more than the tail holds on either stream keeps the end of
-/// that stream and is marked truncated, and that one that wrote less is not. It catches a
-/// tail that grows with the log and a truncation nobody is told of.
+/// that stream and is marked truncated, and that one that wrote less is not.
+///
+/// Catches: a tail that grows with the log and a truncation nobody is told of.
 #[test]
 fn a_long_stream_is_cut_to_its_end_and_marked() {
     let mut rig = Rig::new("long");
-    let long = vec![b'a'; MAX_LOG_STREAM_LEN + 100];
-    let (one, two) = (b"o".as_slice(), b"e".as_slice());
-    let cases = [
-        (long.as_slice(), two, true),
-        (one, long.as_slice(), true),
-        (one, two, false),
-    ];
+    let long = MAX_LOG_STREAM_LEN + 100;
+    let cases = [(long, 1, true), (1, long, true), (1, 1, false)];
     for (n, (out, err, truncated)) in cases.into_iter().enumerate() {
-        rig.fake.print(out, err);
-        let id = rig.start(&format!("r{n}"), "/bin/true", &[]);
+        let script = format!(
+            "/usr/bin/head -c {out} /dev/zero | /usr/bin/tr '\\0' o; \
+             /usr/bin/head -c {err} /dev/zero | /usr/bin/tr '\\0' e >&2"
+        );
+        let id = rig.start(&format!("r{n}"), "/bin/sh", &["-c", &script]);
+        assert_eq!(rig.settle(&id), exited(0), "case {n}");
         let tail = rig.rt.log_tail(&id).unwrap().unwrap();
         assert_eq!(tail.truncated, truncated, "case {n}");
         assert!(tail.stdout.len() <= MAX_LOG_STREAM_LEN);
         assert!(tail.stderr.len() <= MAX_LOG_STREAM_LEN);
+        assert!(tail.stdout.chars().all(|c| c == 'o'), "case {n}");
+        assert!(tail.stderr.chars().all(|c| c == 'e'), "case {n}");
+        rig.rt.remove(&id).unwrap();
     }
 }
 
 /// Asserts that a log file that cannot be read is an error of the log call, not a panic or
-/// an empty tail. It catches a result that claims the job printed nothing.
+/// an empty tail.
+///
+/// Catches: a result that claims the job printed nothing.
 #[test]
 fn a_log_that_cannot_be_read_is_an_error() {
     let mut rig = Rig::new("nolog");
-    let spec = rig.spec("r1", native("/bin/true", &[]));
+    let spec = rig.spec("r1", native("/usr/bin/true", &[]));
     let id = rig.rt.create_and_start(&spec).unwrap();
+    rig.settle(&id);
     fs::remove_file(spec.scratch.join("stdout")).unwrap();
     let error = rig.rt.log_tail(&id).unwrap_err();
     assert!(error.0.starts_with("the log: "), "{}", error.0);
 }
 
-/// Asserts that a stop asks the helper's `stop` with the grace it was given, that a run that
-/// ends on the `SIGTERM` ends by that signal, and that a refused stop is an error. It
-/// catches a stop that ignores its grace (the job never gets to flush) and a refusal taken
-/// for a stop.
+/// Asserts that a removal ends the job's processes (a job still running is ended), retires
+/// the account (its record and its home are gone), ends the lease, and forgets the run: it
+/// polls `Gone` and has no log.
+///
+/// Catches: an account left on the Mac after its job, or a run remembered after its removal.
 #[test]
-fn a_stop_asks_the_helper_to_stop_with_its_grace() {
-    let mut rig = Rig::new("stop");
-    let id = rig.start("r1", "/bin/true", &[]);
-    rig.rt
-        .stop(&id, std::time::Duration::from_secs(10))
-        .unwrap();
-    let stop = rig.fake.seen().pop().unwrap();
-    assert_eq!((stop.verb.as_str(), stop.lease.as_str()), ("stop", "7.0"));
-    assert_eq!(stop.millis, Some(10_000));
-    assert_eq!(rig.settle(&id), exited(143));
-    rig.fake.refuse("stop", "no");
-    let error = rig.rt.stop(&id, std::time::Duration::ZERO).unwrap_err();
-    assert!(error.0.starts_with("stop: "), "{}", error.0);
-}
-
-/// Asserts that a removal kills the user, deletes it (the helper sweeps its home), forgets
-/// the run, and that a removal the helper refuses is an error that keeps the run and can be
-/// tried again. It catches a lease user left on the Mac after its job.
-#[test]
-fn a_removal_kills_and_deletes_the_user_and_forgets_the_run() {
+fn a_removal_ends_the_job_retires_the_account_and_forgets_the_run() {
     let mut rig = Rig::new("remove");
-    let id = rig.start("r1", "/bin/true", &[]);
-    let home = rig.fake.home_of("7.0");
+    let lent = ready_account(&rig);
+    let id = rig.start("r1", "/bin/sleep", &["600"]);
+    let home = rig.home_of(&lent);
     assert!(home.is_dir());
-    rig.fake.refuse("user-delete", "busy");
-    let error = rig.rt.remove(&id).unwrap_err();
-    assert!(error.0.starts_with("user-delete: "), "{}", error.0);
-    assert!(home.is_dir(), "a refused delete removes nothing");
-    assert_ne!(rig.rt.poll(&id).unwrap(), Status::Gone, "the run is kept");
-    rig.fake.refuse("kill-uid", "stuck");
-    let error = rig.rt.remove(&id).unwrap_err();
-    assert!(error.0.starts_with("kill-uid: "), "{}", error.0);
-    rig.fake.allow("kill-uid");
-    rig.fake.allow("user-delete");
+    assert_eq!(rig.rt.poll(&id).unwrap(), Status::Running);
     rig.rt.remove(&id).unwrap();
     assert!(!home.exists());
+    assert!(!rig.accounts.records().contains(&lent));
+    assert!(rig.pool.held().is_empty());
+    assert_eq!(live(&rig), Vec::<String>::new());
     assert_eq!(rig.rt.poll(&id).unwrap(), Status::Gone);
     assert_eq!(rig.rt.log_tail(&id).unwrap(), None);
 }
 
-/// Asserts that a start the helper refuses at `user-create` removes what the helper may
-/// have recorded before it refused: the helper records the lease in its ledger, holding a
-/// uid, before it makes the home and the account, so a refusal after that point leaves a
-/// live lease. The start asks for a kill and a delete of the lease, and when that fails too
-/// the error says so. A refusal that the lease was used before is the one exception: that
-/// lease is not ours to remove. It catches a helper whose uid range is used up by failed
-/// starts.
+/// Asserts that every failure after the account is lent leaves nothing behind: the account
+/// is retired, the lease is done, no job runs, and the start's error names the first
+/// failure. The failures: no scratch directory (the supervisor's records cannot be made), a
+/// records directory already there, a directory in the place of each of the three
+/// standard-stream files, and a program the profile cannot name.
+///
+/// Catches: an account, a lease or a home left on the Mac by a start that failed.
 #[test]
-fn a_user_the_helper_refuses_to_make_is_removed_again() {
-    let mut rig = Rig::new("nouser");
-    rig.fake.refuse("user-create", "range full");
-    let spec = rig.spec("r1", native("/bin/true", &[]));
-    let error = rig.rt.create_and_start(&spec).unwrap_err();
-    assert!(error.0.starts_with("user-create: "), "{}", error.0);
-    assert!(error.0.contains("range full"));
-    assert_eq!(
-        rig.fake.verbs(),
-        [
-            "boot-reset",
-            "user-create 7.0",
-            "kill-uid 7.0",
-            "user-delete 7.0"
-        ]
-    );
-
-    rig.fake.refuse("kill-uid", "stuck");
-    rig.fake.refuse("user-delete", "busy");
-    let spec = rig.spec("r2", native("/bin/true", &[]));
-    let error = rig.rt.create_and_start(&spec).unwrap_err();
-    assert!(error.0.contains("range full"), "{}", error.0);
-    for told in ["kill-uid: ", "stuck", "user-delete: ", "busy"] {
-        assert!(error.0.contains(told), "{told}: {}", error.0);
-    }
-
-    let mut rig = Rig::new("used");
-    rig.fake.refuse(
-        "user-create",
-        "lease 7.0 was used before; a lease user's name is never reused",
-    );
-    let spec = rig.spec("r1", native("/bin/true", &[]));
-    rig.rt.create_and_start(&spec).unwrap_err();
-    assert_eq!(rig.fake.verbs(), ["boot-reset", "user-create 7.0"]);
-}
-
-/// Asserts that every failure after the user exists leaves nothing behind: the helper is
-/// asked to kill and delete the user, and the start's error names the first failure. The
-/// failures: the helper refusing `run`, no home to make the run directory in, none of the
-/// three standard-stream files made (no scratch directory, or a directory in the file's
-/// place) and a program the profile cannot name. It catches a lease user, and a home, left
-/// on the Mac by a start that failed.
-#[test]
-fn a_start_that_fails_after_the_user_exists_removes_the_user() {
-    let rollback = ["kill-uid 7.0", "user-delete 7.0"];
+fn a_start_that_fails_after_the_account_is_lent_leaves_nothing() {
     let cases = [
-        ("run refused", "run: "),
-        ("no home", "/exec: "),
-        ("no scratch directory", "/stdin: "),
+        ("no scratch directory", "/supervisor: "),
+        ("a records directory already there", "/supervisor: "),
         ("a directory for stdin", "/stdin: "),
         ("a directory for stdout", "/stdout: "),
         ("a directory for stderr", "/stderr: "),
@@ -453,101 +428,89 @@ fn a_start_that_fails_after_the_user_exists_removes_the_user() {
     ];
     for (n, (why, text)) in cases.into_iter().enumerate() {
         let mut rig = Rig::new(&format!("fail{n}"));
-        let mut spec = rig.spec("r1", native("/bin/true", &[]));
+        let lent = ready_account(&rig);
+        let mut spec = rig.spec("r1", native("/usr/bin/true", &[]));
         match n {
-            0 => rig.fake.refuse("run", "no"),
-            1 => rig.fake.make_homes(false),
-            2 => fs::remove_dir(&spec.scratch).unwrap(),
-            3 => fs::create_dir(spec.scratch.join("stdin")).unwrap(),
-            4 => fs::create_dir(spec.scratch.join("stdout")).unwrap(),
-            5 => fs::create_dir(spec.scratch.join("stderr")).unwrap(),
+            0 => fs::remove_dir(&spec.scratch).unwrap(),
+            1 => fs::create_dir(spec.scratch.join("supervisor")).unwrap(),
+            2 => fs::create_dir(spec.scratch.join("stdin")).unwrap(),
+            3 => fs::create_dir(spec.scratch.join("stdout")).unwrap(),
+            4 => fs::create_dir(spec.scratch.join("stderr")).unwrap(),
             _ => spec.body = Body::Native(native("/tmp/tool", &[])),
         }
         let error = rig.rt.create_and_start(&spec).unwrap_err();
         assert!(error.0.contains(text), "{why}: {}", error.0);
-        let verbs = rig.fake.verbs();
-        assert_eq!(verbs[verbs.len() - 2..], rollback, "{why}");
+        nothing_left(&rig, &lent, 0);
     }
 }
 
 /// Asserts that a home the profile cannot name (here one spelled with `..`, which the
 /// kernel resolves and a profile parameter may not hold) and a read model with no profile
-/// builder each fail the start by name and remove the user. It catches a run started under
-/// a profile built from a path that was never checked, and a pool configured for a model
-/// that is not built that runs under the open one.
+/// builder each fail the start by name and retire the account.
+///
+/// Catches: a run started under a profile built from a path that was never checked, and a
+/// pool configured for a model that is not built that runs under the open one.
 #[test]
 fn a_home_or_a_read_model_the_profile_cannot_serve_fails_the_start() {
+    // The same directory as the pool's homes, spelled through its parent.
     let mut rig = Rig::with("oddhome", |config| {
-        config.homes = config.homes.join("..").join("homes");
+        config.homes = config.homes.join("..").join("Users");
     });
-    let spec = rig.spec("r1", native("/bin/true", &[]));
+    let lent = ready_account(&rig);
+    let spec = rig.spec("r1", native("/usr/bin/true", &[]));
     let error = rig.rt.create_and_start(&spec).unwrap_err();
     assert!(error.0.contains("not in normal form"), "{}", error.0);
-    assert_eq!(rig.fake.verbs().last().unwrap(), "user-delete 7.0");
+    nothing_left(&rig, &lent, 0);
 
     let mut rig = Rig::with("allow", |config| config.read_model = ReadModel::Allow);
-    let spec = rig.spec("r1", native("/bin/true", &[]));
+    let lent = ready_account(&rig);
+    let spec = rig.spec("r1", native("/usr/bin/true", &[]));
     let error = rig.rt.create_and_start(&spec).unwrap_err();
     assert!(error.0.starts_with("the profile: "), "{}", error.0);
-    assert_eq!(rig.fake.verbs().last().unwrap(), "user-delete 7.0");
+    nothing_left(&rig, &lent, 0);
 }
 
 /// Asserts that a policy over the profile's bounds (too many read-denied paths) fails the
-/// start with the policy's name and removes the user. It catches a profile built from a
-/// policy the builder refused.
+/// start with the policy's name and retires the account.
+///
+/// Catches: a profile built from a policy the builder refused.
 #[test]
-fn a_policy_over_the_bounds_fails_the_start_and_removes_the_user() {
+fn a_policy_over_the_bounds_fails_the_start_and_retires_the_account() {
     let mut rig = Rig::with("bounds", |config| {
         config.read_denies = (0..65)
             .map(|n| AbsPath::parse(&format!("/srv/deny{n}")).unwrap())
             .collect();
     });
-    let spec = rig.spec("r1", native("/bin/true", &[]));
+    let lent = ready_account(&rig);
+    let spec = rig.spec("r1", native("/usr/bin/true", &[]));
     let error = rig.rt.create_and_start(&spec).unwrap_err();
     assert!(error.0.starts_with("the policy: "), "{}", error.0);
-    assert_eq!(rig.fake.verbs().last().unwrap(), "user-delete 7.0");
+    nothing_left(&rig, &lent, 0);
 }
 
-/// Asserts that a body that is not native never reaches the helper. It catches a container
-/// start handed to the Mac runtime that makes a user for nothing.
+/// Asserts that a body that is not native lends no account.
+///
+/// Catches: a container start handed to the Mac runtime that lends an account for nothing.
 #[test]
-fn a_container_body_is_refused_before_any_user_is_made() {
+fn a_container_body_is_refused_before_any_account_is_lent() {
     let mut rig = Rig::new("container");
-    let mut spec = rig.spec("r1", native("/bin/true", &[]));
+    let ready = ready_account(&rig);
+    let mut spec = rig.spec("r1", native("/usr/bin/true", &[]));
     spec.body = Body::Container {
         image: "registry.example/job:1".to_owned(),
         args: Vec::new(),
     };
     let error = rig.rt.create_and_start(&spec).unwrap_err();
     assert_eq!(error.0, "this runtime runs native bodies only");
-    assert_eq!(rig.fake.verbs(), ["boot-reset"]);
-}
-
-/// Asserts the boot reset at open: asked for once; a helper that has reset already is fine;
-/// any other refusal, and a helper that cannot be reached, are errors that name the reset.
-/// It catches a runtime that works against a helper that refuses every verb, and one that
-/// fails because the helper outlived an earlier agent.
-#[test]
-fn opening_asks_for_the_reset_and_takes_one_that_ran_already() {
-    let rig = Rig::new("open");
-    assert_eq!(rig.fake.verbs(), ["boot-reset"]);
-    rig.fake.refuse("boot-reset", RESET_ALREADY);
-    let again = NativeRuntime::open(rig.fake.client(), config(&rig.fake), TERM + 1);
-    assert!(again.is_ok(), "a reset that ran already is fine");
-    rig.fake.refuse("boot-reset", "no");
-    let refused = NativeRuntime::open(rig.fake.client(), config(&rig.fake), TERM + 2);
-    let error = refused.err().unwrap();
-    assert!(error.0.starts_with("the boot reset: "), "{}", error.0);
-    assert!(error.0.contains("no"));
-    let nowhere = Client::new(PathBuf::from("/nonexistent/js-helper"));
-    let lost = NativeRuntime::open(nowhere, config(&rig.fake), TERM + 3);
-    assert!(lost.err().unwrap().0.starts_with("the boot reset: "));
+    untouched(&rig, &ready);
 }
 
 /// Asserts what the runtime answers a native start before anything is made: a program under
 /// a tool root passes; one outside every root is `invalid-program`; a mount input and a
 /// working directory below `exec/`, which this runtime stages, and declared outputs, which
-/// it collects, pass. It catches a program run from anywhere on the Mac.
+/// it collects, pass.
+///
+/// Catches: a program run from anywhere on the Mac.
 #[test]
 fn a_native_start_is_checked_against_the_tool_roots_and_what_is_staged() {
     let rig = Rig::new("check");
@@ -583,70 +546,19 @@ fn a_native_start_is_checked_against_the_tool_roots_and_what_is_staged() {
     }
 }
 
-/// Asserts that the first program of the command is `sandbox-exec`, that the program of the
-/// run follows the profile directly and that no shell is anywhere in the command line: the
-/// helper sets the limits, so nothing the job's environment steers runs before the profile
-/// applies. The command line does not depend on the environment. It catches a command that
-/// starts any other program first, or puts a shell back between the profile and the program.
+/// Asserts that a start refuses, by name, each environment name that steers a shell
+/// (`SHELLOPTS`, `BASHOPTS`, `BASH_ENV`, `ENV`, `PS4`, `PROMPT_COMMAND`, `IFS`, `CDPATH`),
+/// any name starting `BASH_FUNC_`, and each name the agent owns, before an account is lent:
+/// no supervisor is started and the lease journal is not made.
+///
+/// Catches: a body that skipped the wire's validation and reaches a program that is a shell,
+/// which reads the environment the job has.
 #[test]
-fn nothing_but_sandbox_exec_runs_before_the_profile_applies() {
-    let mut rig = Rig::new("first-program");
-    let mut body = native("/usr/bin/id", &["-u"]);
-    body.env = BTreeMap::from([("A".to_owned(), "b".to_owned())]);
-    let spec = rig.spec("r1", body);
-    rig.rt.create_and_start(&spec).unwrap();
-    let argv = rig.fake.run_of("7.0").argv;
-    assert_eq!(argv[0], "/usr/bin/sandbox-exec");
-    for shell in ["/bin/sh", "/bin/bash", "/bin/zsh", "sh", "-c"] {
-        assert!(
-            !argv.iter().any(|word| word == shell),
-            "{shell} is in the command line: {argv:?}"
-        );
-    }
-    let profile_at = argv.iter().position(|word| word == "-p").unwrap();
-    assert_eq!(
-        argv[profile_at + 2],
-        "/usr/bin/env",
-        "env, which sets the job's HOME, follows the profile"
-    );
-    assert_eq!(
-        &argv[profile_at + 4..],
-        ["/usr/bin/id", "-u"],
-        "the program follows"
-    );
-    assert_eq!(parse(&argv).tail, ["/usr/bin/id", "-u"]);
-
-    let hostile = BTreeMap::from([
-        ("SHELLOPTS".to_owned(), "xtrace".to_owned()),
-        (
-            "PS4".to_owned(),
-            "$(touch /private/tmp/js-escape)".to_owned(),
-        ),
-    ]);
-    let mut other = native("/usr/bin/id", &["-u"]);
-    other.env = hostile;
-    let home = rig.fake.home_of("7.0");
-    let plain = native("/usr/bin/id", &["-u"]);
-    let config = config(&rig.fake);
-    assert_eq!(
-        js_agent::native::profile_argv(&config, &other, &home).unwrap(),
-        js_agent::native::profile_argv(&config, &plain, &home).unwrap(),
-        "the command line does not read the environment"
-    );
-}
-
-/// Asserts that a start refuses, by name, each environment name that steers the limiting
-/// shell (`SHELLOPTS`, `BASHOPTS`, `BASH_ENV`, `ENV`, `PS4`, `PROMPT_COMMAND`, `IFS`,
-/// `CDPATH`), any name starting `BASH_FUNC_`, and each name the agent owns, before the
-/// helper hears of the run: no verb is sent after the reset that opening asked for, and the
-/// lease journal is not made. It catches a body that skipped the wire's validation and
-/// reaches the shell, which runs inside the profile with the job's environment before
-/// `ulimit`.
-#[test]
-fn a_start_refuses_names_that_steer_the_shell_before_a_user_is_made() {
+fn a_start_refuses_reserved_env_names_before_an_account_is_lent() {
     use js_types::env::{OWNED_ENV_NAMES, SHELL_ENV_NAMES};
 
     let mut rig = Rig::new("shell-names");
+    let ready = ready_account(&rig);
     let names = SHELL_ENV_NAMES
         .iter()
         .chain(OWNED_ENV_NAMES.iter())
@@ -666,61 +578,43 @@ fn a_start_refuses_names_that_steer_the_shell_before_a_user_is_made() {
             "{name} was not refused by name: {text:?}"
         );
     }
-    assert_eq!(rig.fake.verbs(), ["boot-reset"], "only the reset of open");
-    assert!(
-        !rig.dir.path("native-leases").exists(),
-        "the journal was touched"
-    );
+    untouched(&rig, &ready);
 }
 
-/// Asserts that the limits of the configuration reach the helper as fields of the `run`
-/// request, in bytes and as a count, exactly as configured (a file limit of 10 bytes is 10
-/// bytes), and that a configuration the helper would refuse is refused when the runtime opens,
-/// before the helper is asked anything. It catches a run that starts without the limits an operator set, limits sent in
-/// blocks, and a runtime that opens on limits the helper would refuse for every run.
+/// Asserts that the configured limits reach the supervisor as fields of its spec, in bytes
+/// and as a count, exactly as configured (a file limit of 10 bytes is 10 bytes; the
+/// processes are the configured count and one more, for the supervisor itself).
+///
+/// Catches: a run that starts without the limits an operator set, and limits sent in blocks.
 #[test]
-fn the_configured_limits_travel_to_the_helper_as_fields() {
+fn the_configured_limits_travel_to_the_supervisor_as_fields() {
     let mut rig = Rig::with("limits", |config| {
         config.max_file_bytes = 10;
         config.max_processes = 7;
     });
-    rig.start("r1", "/bin/true", &[]);
-    assert_eq!(
-        rig.fake.run_of("7.0").limits,
-        Some(Limits {
-            file_bytes: 10,
-            processes: 7
-        })
-    );
+    rig.start("r1", "/usr/bin/true", &[]);
+    let launched = rig.launcher.last();
+    assert_eq!(launched.max_file_bytes, 10);
+    assert_eq!(launched.max_processes, 8);
     let mut big = Rig::with("limits-big", |config| config.max_file_bytes = 3 << 20);
-    big.start("r1", "/bin/true", &[]);
-    assert_eq!(big.fake.run_of("7.0").limits.unwrap().file_bytes, 3 << 20);
-
-    for (bytes, procs) in [(0, 7), (u64::MAX, 7), (10, 0), (10, u32::MAX)] {
-        let dir = Scratch::new("native-limits-bad");
-        let fake = FakeHelper::start(&dir);
-        let mut bad = config(&fake);
-        bad.max_file_bytes = bytes;
-        bad.max_processes = procs;
-        let why = NativeRuntime::open(fake.client(), bad, TERM)
-            .err()
-            .expect("a limit the helper would refuse was taken");
-        assert!(why.0.contains("limit"), "{bytes} {procs}: {}", why.0);
-        assert_eq!(fake.verbs(), Vec::<String>::new(), "the helper was asked");
-    }
+    big.start("r1", "/usr/bin/true", &[]);
+    assert_eq!(big.launcher.last().max_file_bytes, 3 << 20);
 }
 
 /// Asserts that a job environment that names `TMPDIR`, which the agent sets, is refused before
-/// anything is made, as it is for a run that pins a bundle. It catches a plain run that takes
-/// the job's `TMPDIR` beside the agent's and leaves the choice to the program.
+/// an account is lent, as it is for a run that pins a bundle.
+///
+/// Catches: a plain run that takes the job's `TMPDIR` beside the agent's and leaves the
+/// choice to the program.
 #[test]
-fn a_job_that_sets_tmpdir_is_refused_before_a_user_is_made() {
+fn a_job_that_sets_tmpdir_is_refused_before_an_account_is_lent() {
     let mut rig = Rig::new("tmpdir");
+    let ready = ready_account(&rig);
     let mut body = native("/usr/bin/id", &[]);
     body.env
         .insert("TMPDIR".to_owned(), "/private/tmp".to_owned());
     let spec = rig.spec("r1", body);
     let why = rig.rt.create_and_start(&spec).unwrap_err();
     assert!(why.0.contains("TMPDIR"), "{}", why.0);
-    assert_eq!(rig.fake.verbs(), ["boot-reset"]);
+    untouched(&rig, &ready);
 }

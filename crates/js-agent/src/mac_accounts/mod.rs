@@ -152,12 +152,13 @@ mod teardown;
 mod tests;
 mod tree;
 mod uid;
+pub mod user_dirs;
 
 pub use error::{AccountError, Gone, Held, Step};
 pub use home::{SHELL, account_attributes, creation_attributes, generated_uid, make_home};
 pub use host::{AccountHost, CommandOutput, LiveProcess, NewUser, PrintAnswer, UserRecord};
 #[cfg(target_os = "macos")]
-pub use macos::MacHost;
+pub use macos::{MacHost, own_folders};
 pub use pool::Pool;
 pub use settings::{Places, STAFF, Settings, Slots};
 

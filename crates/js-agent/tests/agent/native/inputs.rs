@@ -1,15 +1,18 @@
 //! The inputs and the working directory of a native run: mount inputs copied into `exec/`
-//! and given to the run's user before its program starts, write-denied by the profile; a
-//! `cwd` resolved below `exec/`, and one that leaves it refused before anything starts.
+//! and given to the run's account before its program starts, write-denied by the profile; a
+//! `cwd` resolved below `exec/` (the working directory the supervisor is asked to start the
+//! program in), and one that leaves it refused before anything starts.
 
 use std::fs;
-use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
 use js_agent::lifecycle::{ResolvedMount, Runtime};
+use js_agent::native::Journal;
 use js_agent_wire::{InputRef, Placement, TreeUnavailable, refusal};
 
-use super::{Rig, native, parse};
+use super::lifecycle::Native;
+use super::{Rig, native};
 
 /// An input copied from `host` to `dest` below `exec/`, as the lifecycle resolves a mount
 /// input.
@@ -34,7 +37,7 @@ fn mode(path: &Path) -> u32 {
 }
 
 /// Makes every directory below `dir` writable again, so the test's directory can be removed:
-/// a staged input directory is `0500`, which only root (the real helper) can empty.
+/// a staged input directory is `0500`, which only root (the agent) can empty.
 fn unlock(dir: &Path) {
     for entry in fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
@@ -45,19 +48,55 @@ fn unlock(dir: &Path) {
     }
 }
 
-/// The device and inode of `path`, as the fake helper reports the descriptor a `run` starts
-/// in.
-fn id_of(path: &Path) -> Option<(u64, u64)> {
-    let meta = fs::metadata(path).unwrap();
-    Some((meta.dev(), meta.ino()))
+/// The agent's hand-over (`lchown`), leaving a staged directory writable by its owner: the
+/// test's user retires the account after a start that failed once its inputs were staged,
+/// and only root (the agent) can empty a `0500` directory. For the tests that assert no
+/// staged mode.
+fn owner_writable() -> js_agent::native::HandOver {
+    std::sync::Arc::new(|path: &Path, uid: u32, gid: u32| {
+        std::os::unix::fs::lchown(path, Some(uid), Some(gid))?;
+        match fs::symlink_metadata(path)?.is_dir() {
+            true => fs::set_permissions(path, fs::Permissions::from_mode(0o700)),
+            false => Ok(()),
+        }
+    })
+}
+
+/// The run directory `exec` of the account the `n`th launch (from 0) of `rig` ran as.
+fn exec_of(rig: &Rig, n: usize) -> PathBuf {
+    let launched = &rig.launcher.launched()[n];
+    rig.home_of(launched.var("USER").expect("the account"))
+        .join("exec")
+}
+
+/// The working directory the `n`th launch of `rig` was asked to start its program in.
+fn cwd_of(rig: &Rig, n: usize) -> PathBuf {
+    rig.launcher.launched()[n].cwd.clone()
+}
+
+/// The lines of the lease journal of `rig` (a lease is added `+` and done `-`), empty when it
+/// was never written.
+fn leases(rig: &Rig) -> Vec<String> {
+    let text = fs::read_to_string(rig.dir.path("native-leases")).unwrap_or_default();
+    text.lines()
+        .filter(|line| !line.starts_with("= "))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Asserts that no supervisor was asked for and the pool lends nothing: what a start that
+/// fails after its account is lent leaves, the account being retired.
+fn nothing_started(rig: &Rig) {
+    assert!(rig.launcher.launched().is_empty(), "no supervisor");
+    assert!(rig.pool.held().is_empty(), "{:?}", rig.pool.held());
 }
 
 /// Asserts that a start with two inputs (a directory and a single file, one below a `dest`
-/// with a part that is not there) finds both below `exec/` with their contents before the
-/// helper's `run`, each directory `0500` and each file `0400` (`0500` for an executable one),
-/// and that the profile denies writes below each `dest`. It catches inputs that are not
-/// staged, staged after the program starts, left writable to the job, or a tool among them
-/// that can no longer be run.
+/// with a part that is not there) finds both below `exec/` with their contents once the
+/// start is done, each directory `0500` and each file `0400` (`0500` for an executable one),
+/// that the profile the supervisor is given denies writes below each `dest`, and that the
+/// program is started in `exec/`. It catches inputs that are not staged, left writable to the
+/// job, or a tool among them that can no longer be run.
 #[test]
 fn two_inputs_are_staged_into_exec_read_only() {
     let mut rig = Rig::new("inputs");
@@ -66,7 +105,7 @@ fn two_inputs_are_staged_into_exec_read_only() {
     let tool = tree.join("tool");
     fs::write(&tool, "#!/bin/sh\n").unwrap();
     fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
-    let mut spec = rig.spec("r1", native("/bin/true", &[]));
+    let mut spec = rig.spec("r1", native("/usr/bin/true", &[]));
     let third = source(&rig, "src-c", "y", "three");
     spec.mounts = vec![
         input(&tree, "in/a"),
@@ -74,7 +113,7 @@ fn two_inputs_are_staged_into_exec_read_only() {
         input(&third, "in/c"),
     ];
     rig.rt.create_and_start(&spec).unwrap();
-    let exec = rig.fake.home_of("7.0").join("exec");
+    let exec = exec_of(&rig, 0);
     assert_eq!(fs::read_to_string(exec.join("in/a/x")).unwrap(), "one");
     assert_eq!(fs::read_to_string(exec.join("two.txt")).unwrap(), "two");
     assert_eq!(fs::read_to_string(exec.join("in/c/y")).unwrap(), "three");
@@ -87,21 +126,16 @@ fn two_inputs_are_staged_into_exec_read_only() {
         "an executable stays executable"
     );
     assert_eq!(mode(&exec.join("two.txt")), 0o400);
-    let run = rig.fake.run_of("7.0");
-    let parsed = parse(&run.argv);
+    let run = rig.launcher.last();
     for dest in ["in/a", "two.txt"] {
         let path = exec.join(dest).display().to_string();
-        let param = parsed.params.iter().find(|(_, value)| *value == path);
-        let (name, _) = param.unwrap_or_else(|| panic!("{path} in {:?}", parsed.params));
+        let param = run.params.iter().find(|(_, value)| *value == path);
+        let (name, _) = param.unwrap_or_else(|| panic!("{path} in {:?}", run.params));
         let denied = format!("(deny file-write* (subpath (param \"{name}\")))");
-        assert!(
-            parsed.profile.contains(&denied),
-            "{denied} in {}",
-            parsed.profile
-        );
+        assert!(run.profile.contains(&denied), "{denied} in {}", run.profile);
     }
-    assert_eq!(run.cwd_id, id_of(&exec));
-    unlock(rig.fake.homes());
+    assert_eq!(run.cwd, fs::canonicalize(&exec).unwrap());
+    unlock(&rig.settings.homes);
 }
 
 /// Asserts that a link in an input is copied as the link it is (never followed), and that a
@@ -114,18 +148,19 @@ fn an_input_link_is_copied_as_a_link_and_a_cwd_may_follow_one_inside() {
     let tree = source(&rig, "src", "x", "one");
     fs::create_dir(tree.join("real")).unwrap();
     std::os::unix::fs::symlink("real", tree.join("here")).unwrap();
-    let mut body = native("/bin/true", &[]);
+    let mut body = native("/usr/bin/true", &[]);
     body.cwd = "in/here".to_owned();
     let mut spec = rig.spec("r1", body);
     spec.mounts = vec![input(&tree, "in")];
     rig.rt.create_and_start(&spec).unwrap();
-    let exec = rig.fake.home_of("7.0").join("exec");
+    let exec = exec_of(&rig, 0);
     assert_eq!(
         fs::read_link(exec.join("in/here")).unwrap(),
         Path::new("real")
     );
-    assert_eq!(rig.fake.run_of("7.0").cwd_id, id_of(&exec.join("in/real")));
-    unlock(rig.fake.homes());
+    let real = fs::canonicalize(exec.join("in/real")).unwrap();
+    assert_eq!(cwd_of(&rig, 0), real);
+    unlock(&rig.settings.homes);
 }
 
 /// Asserts that `cwd = "sub"` runs in `exec/sub`, made `0700` for the user because it was
@@ -133,32 +168,33 @@ fn an_input_link_is_copied_as_a_link_and_a_cwd_may_follow_one_inside() {
 /// `cwd` ignored (the run starts in `exec/`) and one that must exist beforehand.
 #[test]
 fn a_cwd_runs_in_its_directory_below_exec() {
-    let mut rig = Rig::new("cwd");
-    let mut body = native("/bin/true", &[]);
+    let mut rig = Rig::in_dir("cwd", 2, |_, _| {});
+    let mut body = native("/usr/bin/true", &[]);
     body.cwd = "sub".to_owned();
     rig.rt
         .create_and_start(&rig.spec("r1", body.clone()))
         .unwrap();
-    let exec = rig.fake.home_of("7.0").join("exec");
-    assert_eq!(rig.fake.run_of("7.0").cwd_id, id_of(&exec.join("sub")));
+    let exec = exec_of(&rig, 0);
+    assert_eq!(cwd_of(&rig, 0), fs::canonicalize(exec.join("sub")).unwrap());
     assert_eq!(mode(&exec.join("sub")), 0o700);
     body.cwd = "./sub/deeper".to_owned();
     rig.rt.create_and_start(&rig.spec("r2", body)).unwrap();
-    let exec = rig.fake.home_of("7.1").join("exec");
-    let want = id_of(&exec.join("sub/deeper"));
-    assert_eq!(rig.fake.run_of("7.1").cwd_id, want);
+    let exec = exec_of(&rig, 1);
+    let want = fs::canonicalize(exec.join("sub/deeper")).unwrap();
+    assert_eq!(cwd_of(&rig, 1), want);
 }
 
 /// Asserts that a `cwd` that leaves `exec/` is refused with the escape error and nothing is
-/// started: `../x` and an absolute path before the helper is asked for a user, and a link
-/// (from an input) that resolves outside after the user is made, which is then removed with
-/// no `run`. Admission answers the first two `invalid-job`. It catches a job that starts in
-/// the user's home, in `/`, or anywhere a link points.
+/// started: `../x` and an absolute path before any account is lent (no lease is written),
+/// and a link (from an input) that resolves outside after the account is lent, which is then
+/// retired with its lease done and the supervisor never asked. Admission answers the first
+/// two `invalid-job`. It catches a job that starts in the account's home, in `/`, or
+/// anywhere a link points.
 #[test]
 fn a_cwd_that_escapes_exec_is_refused_and_nothing_starts() {
-    let mut rig = Rig::new("cwd-escape");
+    let mut rig = Rig::new("cwd-escape").handing_over(owner_writable());
     for cwd in ["../x", "/etc"] {
-        let mut body = native("/bin/true", &[]);
+        let mut body = native("/usr/bin/true", &[]);
         body.cwd = cwd.to_owned();
         let refused = rig.rt.check_native(&body).unwrap_err();
         assert_eq!(refused.code, refusal::INVALID_JOB);
@@ -166,11 +202,12 @@ fn a_cwd_that_escapes_exec_is_refused_and_nothing_starts() {
         let want = format!("native.cwd {cwd:?} escapes the run directory");
         assert_eq!((error.0, refused.why), (want.clone(), want));
     }
-    assert_eq!(rig.fake.verbs(), ["boot-reset"]);
+    nothing_started(&rig);
+    assert_eq!(leases(&rig), Vec::<String>::new());
     let tree = rig.dir.path("src");
     fs::create_dir(&tree).unwrap();
     std::os::unix::fs::symlink("/", tree.join("out")).unwrap();
-    let mut body = native("/bin/true", &[]);
+    let mut body = native("/usr/bin/true", &[]);
     body.cwd = "in/out/etc".to_owned();
     let mut spec = rig.spec("r1", body);
     spec.mounts = vec![input(&tree, "in")];
@@ -179,54 +216,41 @@ fn a_cwd_that_escapes_exec_is_refused_and_nothing_starts() {
         error.0,
         "native.cwd \"in/out/etc\" escapes the run directory"
     );
-    assert_eq!(
-        rig.fake.verbs(),
-        [
-            "boot-reset",
-            "user-create 7.0",
-            "pool-status",
-            "kill-uid 7.0",
-            "user-delete 7.0"
-        ]
-    );
-    unlock(rig.fake.homes());
+    nothing_started(&rig);
+    assert_eq!(leases(&rig), ["+ 7.0", "- 7.0"]);
+    unlock(&rig.settings.homes);
 }
 
-/// Asserts the working directories that cannot be used and fail the start before `run`: a
-/// part that is a file, and a link that leads nowhere. It catches a start that runs in
-/// `exec/` when its `cwd` cannot be had.
+/// Asserts the working directories that cannot be used and fail the start before the
+/// supervisor is asked: a part that is a file, and a link that leads nowhere. It catches a
+/// start that runs in `exec/` when its `cwd` cannot be had.
 #[test]
 fn a_cwd_that_is_not_a_directory_fails_the_start() {
-    let mut rig = Rig::new("cwd-file");
+    let mut rig = Rig::new("cwd-file").handing_over(owner_writable());
     let tree = source(&rig, "src", "file", "text");
     std::os::unix::fs::symlink("missing", tree.join("dangling")).unwrap();
     for (cwd, said) in [
         ("in/file", "native.cwd \"in/file\": not a directory"),
         ("in/dangling", "native.cwd \"in/dangling\": "),
     ] {
-        let mut body = native("/bin/true", &[]);
+        let mut body = native("/usr/bin/true", &[]);
         body.cwd = cwd.to_owned();
         let mut spec = rig.spec("r1", body);
         spec.mounts = vec![input(&tree, "in")];
         let error = rig.rt.create_and_start(&spec).unwrap_err();
         assert!(error.0.starts_with(said), "{cwd}: {}", error.0);
     }
-    let runs = rig
-        .fake
-        .verbs()
-        .into_iter()
-        .filter(|verb| verb.starts_with("run"));
-    assert_eq!(runs.count(), 0);
-    unlock(rig.fake.homes());
+    nothing_started(&rig);
+    unlock(&rig.settings.homes);
 }
 
-/// Asserts that an input that cannot be staged fails the start before `run`, naming the
-/// input, and the user is removed: a source that is not there, two inputs at one `dest`, and
+/// Asserts that an input that cannot be staged fails the start before the supervisor is
+/// asked, naming the input, and the account is retired: a source that is not there, two inputs at one `dest`, and
 /// a source that is neither a file, a directory nor a link (a device). It catches a run that
 /// starts without an input it named.
 #[test]
 fn an_input_that_cannot_be_staged_fails_the_start() {
-    let mut rig = Rig::new("inputs-bad");
+    let mut rig = Rig::new("inputs-bad").handing_over(owner_writable());
     let tree = source(&rig, "src", "x", "one");
     // A character device: neither a file, a directory nor a link, on Linux and macOS.
     let device = std::path::Path::new("/dev/null");
@@ -242,24 +266,15 @@ fn an_input_that_cannot_be_staged_fails_the_start() {
         (vec![input(device, "s")], "an input: s: "),
     ];
     for (n, (inputs, said)) in cases.into_iter().enumerate() {
-        let mut spec = rig.spec(&format!("r{n}"), native("/bin/true", &[]));
+        let mut spec = rig.spec(&format!("r{n}"), native("/usr/bin/true", &[]));
         spec.mounts = inputs;
         let error = rig.rt.create_and_start(&spec).unwrap_err();
         assert!(error.0.starts_with(said), "{n}: {}", error.0);
     }
-    let error = rig.fake.verbs();
-    assert!(
-        !error.iter().any(|verb| verb.starts_with("run")),
-        "{error:?}"
-    );
-    assert_eq!(
-        error
-            .iter()
-            .filter(|verb| verb.starts_with("user-delete"))
-            .count(),
-        3
-    );
-    unlock(rig.fake.homes());
+    nothing_started(&rig);
+    let done = ["+ 7.0", "- 7.0", "+ 7.1", "- 7.1", "+ 7.2", "- 7.2"];
+    assert_eq!(leases(&rig), done);
+    unlock(&rig.settings.homes);
 }
 
 /// Asserts what admission answers inputs: a mount input passes, a `stage` input is refused
@@ -326,14 +341,14 @@ fn a_tree_input_is_refused_native_unsupported() {
 
 /// Asserts the lifecycle's part: a native start's mount input is resolved below the agent's
 /// mount root and staged at its `dest`, and one whose root the agent does not have is refused
-/// `invalid-mount` before the helper is asked for a user. It catches a mount input handed to
+/// `invalid-mount` before an account is lent. It catches a mount input handed to
 /// the runtime unresolved, or resolved outside the agent's roots.
 #[test]
 fn the_lifecycle_resolves_a_mount_input_below_its_root() {
-    let mut h = super::lifecycle::Native::with("inputs-life", None);
+    let mut h = Native::with("inputs-life", None);
     fs::create_dir(h.dir.path("data").join("x")).unwrap();
     fs::write(h.dir.path("data").join("x/file"), "hi").unwrap();
-    let mut spec = super::lifecycle::job("r1", "/bin/true");
+    let mut spec = super::lifecycle::job("r1", "/usr/bin/true");
     let mount = |root: &str| InputRef::Mount {
         root_name: root.to_owned(),
         rel: "x".to_owned(),
@@ -341,7 +356,7 @@ fn the_lifecycle_resolves_a_mount_input_below_its_root() {
     };
     spec.native.as_mut().unwrap().inputs.push(mount("data"));
     assert_eq!(h.start(spec.clone()), ["started r1"]);
-    let staged = h.fake.home_of("7.0").join("exec/in/file");
+    let staged = h.home_of(0).join("exec/in/file");
     assert_eq!(fs::read_to_string(staged).unwrap(), "hi");
     spec.run_id = "r2".to_owned();
     spec.native.as_mut().unwrap().inputs = vec![mount("other")];
@@ -349,26 +364,22 @@ fn the_lifecycle_resolves_a_mount_input_below_its_root() {
         h.start(spec),
         [format!("refused r2 {}", refusal::INVALID_MOUNT)]
     );
-    let verbs = h.fake.verbs();
-    assert!(!verbs.contains(&"user-create 7.1".to_owned()), "{verbs:?}");
-    unlock(h.fake.homes());
+    assert_eq!(h.launcher.launched().len(), 1, "no second launch");
+    let lent = Journal::new(&h.dir.path("native-leases")).live().unwrap();
+    assert_eq!(lent, ["7.0"], "no second lease");
+    unlock(&h.settings.homes);
 }
 
 /// Asserts that a `cwd` whose part cannot even be looked up (a name longer than the file
-/// system allows) fails the start before `run`, naming the `cwd`. It catches a lookup error
+/// system allows) fails the start before the supervisor is asked, naming the `cwd`. It catches a lookup error
 /// taken for a part that is not there, which would be made.
 #[test]
 fn a_cwd_that_cannot_be_looked_up_fails_the_start() {
     let mut rig = Rig::new("cwd-long");
-    let mut body = native("/bin/true", &[]);
+    let mut body = native("/usr/bin/true", &[]);
     body.cwd = "a".repeat(300);
     let error = rig.rt.create_and_start(&rig.spec("r1", body)).unwrap_err();
     let said = format!("native.cwd {:?}: ", "a".repeat(300));
     assert!(error.0.starts_with(&said), "{}", error.0);
-    let runs = rig
-        .fake
-        .verbs()
-        .into_iter()
-        .filter(|verb| verb.starts_with("run"));
-    assert_eq!(runs.count(), 0);
+    nothing_started(&rig);
 }

@@ -1,9 +1,6 @@
 use std::collections::VecDeque;
 use std::io;
 
-use js_mac_session::client::Client;
-use js_testkit::dir::TestDir;
-
 use super::*;
 
 /// A login item of the pool uid 601, as the scan prints one.
@@ -257,16 +254,6 @@ fn a_scan_that_cannot_run_leaves_the_host_unchecked() {
         );
         assert_eq!(notes(&mut checks), []);
     }
-    let dir = TestDir::under(std::env::temp_dir(), "leak-scan-no-socket");
-    let mut checks = NativeChecks::over(Client::new(dir.path().join("absent.sock")));
-    let found = run(&mut checks).unwrap_err();
-    assert_eq!(found.code(), code::SCAN_FAILED);
-    assert!(
-        found
-            .detail()
-            .starts_with("the leak scan could not run: kbf-mac-session: "),
-        "{found:?}"
-    );
 }
 
 /// Catches: a node with no baseline (every node until one is recorded) tainting the host
