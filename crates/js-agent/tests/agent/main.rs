@@ -34,6 +34,7 @@ mod crun_gpu;
 mod crun_host;
 #[cfg(target_os = "linux")]
 mod crun_roots;
+mod dev_verbs;
 mod disk;
 mod drive;
 mod e2e;
