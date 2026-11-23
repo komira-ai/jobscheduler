@@ -1,5 +1,6 @@
-//! A restart of the agent at the runtime level. No run outlives the process that started it:
-//! the next process's pool retires every account an earlier run held, so the runtime lists
+//! A restart of the agent at the runtime level. A run is not adopted by the next process: its
+//! processes are ended and its account retired when the next process opens its account pool
+//! (the open retires every account an earlier process lent), so the runtime lists
 //! each run the journal has a record of as ended (`Gone`, with its labels, its age and the
 //! output it wrote), the lifecycle reports the job failed and removes it, which ends its
 //! lease; a lease with no run record (a start that died before its job started) is dropped by
