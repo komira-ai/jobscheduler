@@ -498,6 +498,41 @@ fn explicit_read_denies_are_resolved_and_must_exist() {
     assert!(why.starts_with("--native-deny-read: "), "{why}");
 }
 
+/// Asserts that `--native-deny-read` naming the pool's directory, or a path below it, starts
+/// on a fresh host where that directory is not made yet (the pool makes it at open): the deny
+/// is the path the directory will have, and a deny of a missing path elsewhere is still
+/// refused. Catches an agent that never starts on a fresh Mac whose flags deny reads of its
+/// own accounts directory.
+#[test]
+fn a_read_deny_of_the_pool_directory_not_made_yet_starts() {
+    let given = [PathBuf::from(ACCOUNTS), Path::new(ACCOUNTS).join("ledger")];
+    let mut with = flags(None, &[]);
+    with.deny_read = &given;
+    let settings = NativeSettings::from_flags(&with, &[], Path::new("/srv/journal"))
+        .unwrap()
+        .unwrap();
+    let denied: Vec<&str> = settings
+        .config()
+        .read_denies
+        .iter()
+        .map(|d| d.as_str())
+        .collect();
+    let mut want = vec![
+        ACCOUNTS.to_owned(),
+        ACCOUNTS.to_owned(),
+        format!("{ACCOUNTS}/ledger"),
+    ];
+    want.extend(always_denied());
+    assert_eq!(denied, want);
+    let elsewhere = [PathBuf::from("/srv/not-the-pool")];
+    with.deny_read = &elsewhere;
+    let why = NativeSettings::from_flags(&with, &[], Path::new("/srv/journal")).unwrap_err();
+    assert!(
+        why.starts_with("--native-deny-read: /srv/not-the-pool: "),
+        "{why}"
+    );
+}
+
 /// Asserts that every start read-denies the pool's directory, the auto-login password and each
 /// of the places only the privacy controls guard (`PRIVACY_ONLY_PLACES`), with no
 /// `--native-deny-read` and no path of the agent's own given. It catches a run that reads the

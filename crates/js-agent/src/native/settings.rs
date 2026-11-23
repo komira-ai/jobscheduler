@@ -167,6 +167,12 @@ impl NativeSettings {
         let mut denies: Vec<PathBuf> = denied.iter().map(|path| real_or_planned(path)).collect();
         denies.push(real_or_planned(state));
         for path in flags.deny_read {
+            // The pool's directory is the agent's to make at start (`Pool::open`): a deny of it,
+            // or of a path below it, is resolved as the pool's own is, made or not.
+            if path.starts_with(state) {
+                denies.push(real_or_planned(path));
+                continue;
+            }
             let found = fs::canonicalize(path);
             denies.push(
                 found.map_err(|why| format!("--native-deny-read: {}: {why}", path.display()))?,
