@@ -18,6 +18,7 @@ const NEED_AGENT_POOL: [&str; 10] = [
     "--placement",
     "--estimate-feed",
     "--cpu-slack",
+    "--placement-curves",
     "--cold-cpu-millis",
     "--cold-memory-bytes",
     "--cold-memory-bytes-on",

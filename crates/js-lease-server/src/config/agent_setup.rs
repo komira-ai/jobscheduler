@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_registry::PoolConfig;
-use js_sched_placer::sizes::{ColdMemoryOn, ColdSize};
+use js_sched_placer::sizes::{ColdMemoryOn, ColdSize, Curves};
 use js_types::ProviderId;
 
 use super::{Cli, Config, CpuSlack, DispatchTimes, LiveClients, check_pool, listen};
@@ -44,6 +44,9 @@ pub(crate) struct AgentSetup {
     /// `--cold-memory-bytes-on` or `server.cold_memory_bytes_on`: the cold memory of the jobs
     /// of each operating system it names, in place of `cold`'s.
     pub(crate) cold_memory_on: ColdMemoryOn,
+    /// `--placement-curves`, or `server.placement_curves`: whether the engine learns profiles
+    /// in shadow.
+    pub(crate) curves: Curves,
     /// `server.max_lease_wall`: the one up to which the placement engine trusts a wall time
     /// for backfill.
     pub(crate) max_lease_wall: Option<Duration>,
@@ -182,6 +185,7 @@ pub(super) fn agents(cli: &Cli, clients: &LiveClients) -> Result<Box<AgentSetup>
         },
         cold_memory_on: cold_memory_on(&cli.cold_memory_bytes_on)
             .map_err(|why| StartupError::new("--cold-memory-bytes-on", why))?,
+        curves: cli.placement_curves,
         max_lease_wall: None,
         job_limits: JobLimits::default(),
         jobs: listen::job_store(cli),

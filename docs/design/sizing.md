@@ -293,7 +293,7 @@ pool's `memory_schedulable_percent` per host (a job's booking is no limit of its
 **Covered leases.** The placer's engine used to drop the reading's list of leases the measurement covers, so admission charged a
 host's measured CPU and every job's booking again: a host of jobs that use their booking was refused at about half its cores. The
 engine now covers the job leases it held at the previous accepted reading of the host and still holds, as
-`placement-by-load.md` defines covered leases (a lease placed since then is still charged in full on top of the measurement).
+`placement-by-load.md` defines covered leases. A lease placed between that reading and the newest is seen by the newest: it is charged in full on top of the window before the newest, and that sum is raised to the measurement rather than added to it. Only a lease placed after the newest reading is charged in full on top of the measurement.
 
 **Why a host is not full.** Each refusal of a host to a queued job is reported with the predicate that refused and its figures:
 `cpu` (the CPU side of the load predicate, with the measured CPU), `predicted-memory` (the memory side), `booked-memory` (the flat

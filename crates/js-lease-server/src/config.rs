@@ -12,7 +12,7 @@ use js_system_clock::{SystemClock, SystemMonotonic};
 use js_types::Monotonic;
 
 use js_registry::{OsSessions, SessionSource};
-use js_sched_placer::sizes::{DEFAULT_COLD_CPU_MILLIS, DEFAULT_COLD_MEMORY_BYTES};
+use js_sched_placer::sizes::{Curves, DEFAULT_COLD_CPU_MILLIS, DEFAULT_COLD_MEMORY_BYTES};
 
 use crate::agent_tokens::PoolTokens;
 use crate::alerts::{DEFAULT_ALERT_REPEAT, alert_sink};
@@ -36,6 +36,7 @@ mod feed_retention;
 mod job_wall;
 mod listen;
 mod placement;
+mod placement_curves;
 mod private;
 mod resolve;
 mod retention;
@@ -59,6 +60,7 @@ pub(crate) use listen::{
 pub use placement::Placement;
 use placement::check_pool;
 pub(crate) use placement::{checked, placer, split};
+pub(crate) use placement_curves::parse as parse_curves;
 pub(crate) use private::{read_private, read_private_reason};
 pub(crate) use retention::{
     DEFAULT_JOB_ALLOCATION_RETENTION, DEFAULT_JOB_RETENTION, JOB_RETENTION_MUST,
@@ -186,6 +188,16 @@ pub struct Cli {
     /// the flag the engine's own default is used, which is 1.1.
     #[arg(long, value_parser = CpuSlack::parse)]
     pub cpu_slack: Option<CpuSlack>,
+    /// Whether the placement engine learns a CPU and a memory profile for each job class from
+    /// the series its runs recorded: `off` (the default) learns nothing; `shadow` learns and
+    /// logs one line per run it checks against its class's profile. Placement is the same in
+    /// both. Needs `--agent-pool-config`.
+    #[arg(
+        long,
+        default_value = "off",
+        value_parser = placement_curves::parse
+    )]
+    pub placement_curves: Curves,
     /// The CPU, in millicores from 250, a queued job that names no CPU books while neither its
     /// class, its fallback class nor its client has a run with a CPU sample, by default 22000 (22
     /// cores); above a quarter of the most cores a registered host has, that quarter. Needs `--agent-pool-config`.
@@ -676,6 +688,7 @@ impl Config {
             "server.estimate_feed",
         ));
         let cpu_slack = server.agents.cpu_slack().unwrap_or_default();
+        let curves = server.agents.curves();
         // The order the pool's Default platform lists its machine providers in; a pool with
         // no platform (a joined one) keeps the order of no configuration.
         let providers = plan
@@ -691,6 +704,7 @@ impl Config {
             cpu_slack,
             cold: server.agents.cold(),
             cold_memory_on: server.agents.cold_memory_on(),
+            curves,
             max_lease_wall: server.max_lease_wall,
             job_limits,
             jobs: server.agents.job_store(server.job_store_windows()),
@@ -891,6 +905,12 @@ impl Config {
     /// value given, or the engine's default, 1.1x.
     pub fn cpu_slack(&self) -> CpuSlack {
         self.agents.cpu_slack
+    }
+
+    /// Whether the placement engine learns profiles in shadow (`--placement-curves`, or
+    /// `server.placement_curves`): `off` unless set.
+    pub fn placement_curves(&self) -> Curves {
+        self.agents.curves
     }
 
     /// How long an ended job's record and result are kept after the job ends

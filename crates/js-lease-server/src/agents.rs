@@ -272,6 +272,7 @@ fn placed_in(
         cpu_slack,
         cold,
         cold_memory_on,
+        curves,
         max_lease_wall,
         job_limits,
         jobs,
@@ -296,8 +297,7 @@ fn placed_in(
     let placer = placer(
         max_lease_wall,
         cpu_slack,
-        memory,
-        cold,
+        (memory, cold, curves),
         cold_memory_on,
         clock,
     );

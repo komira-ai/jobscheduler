@@ -94,6 +94,8 @@ pub(crate) struct Lanes {
     pub(crate) cpu_cov_c: Lane,
     /// Uncovered leases of both kinds.
     pub(crate) cpu_unc: Lane,
+    /// Of those, the leases no reading has seen (placed after the newest one).
+    pub(crate) cpu_unseen: Lane,
     /// Memory of every lease counted here.
     pub(crate) mem_all: Lane,
     /// Of those, the uncovered.
@@ -102,6 +104,8 @@ pub(crate) struct Lanes {
     /// hold them.
     pub(crate) timed_cpu_cov_p: u64,
     pub(crate) timed_cpu_unc_p: u64,
+    /// Of `timed_cpu_unc_p`, the flat cores of the unseen leases counted here.
+    pub(crate) timed_cpu_unseen_p: u64,
     /// The flat memory of the covered / uncovered leases counted here.
     pub(crate) timed_mem_cov: u64,
     pub(crate) timed_mem_unc: u64,
@@ -134,6 +138,12 @@ impl Lanes {
                     (true, false) => self.cpu_cov_p.shift(slot, v, up),
                     (false, _) => self.cpu_unc.shift(slot, v, up),
                 }
+                if !e.seen {
+                    self.cpu_unseen.shift(slot, v, up);
+                }
+            }
+            if !e.seen {
+                shift(&mut self.timed_cpu_unseen_p, e.cost.cpu_millis, up);
             }
             let sum = if e.covered {
                 &mut self.timed_cpu_cov_p

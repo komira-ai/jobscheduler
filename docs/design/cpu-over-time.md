@@ -1,6 +1,6 @@
 # Scheduling on CPU use over time
 
-Status: design for review. Nothing here is built except the replay (`crates/js-cpu-replay`). Companion to
+Status: design for review. Built so far: the replay (`crates/js-cpu-replay`), step 1 (record) and step 2 (learn in shadow, `--placement-curves shadow`). Nothing else here is built. Companion to
 [sizing.md](sizing.md) (how a class's CPU is booked) and [placement-by-load.md](placement-by-load.md) (the
 load rule and the time profiles designed for leases, never wired to jobs).
 
@@ -388,7 +388,7 @@ negative and fades; each release reads the other's results.
 - **Mac hosts:** the Mac runtime reports each run's usage and, with `--cpu-series`, its CPU series, from the samples of the
   run's processes (`docs/design/mac-runtime.md`, section 4), so Mac classes learn as Linux's do.
 - **Settings** (flags, each off or at today's value by default): agent `--cpu-series`, `--host-second-samples`;
-  server `--placement-curves off|shadow|on`, `--curve-hosts`, `--curve-horizon-seconds 128`, `--curve-slot-seconds
+  server `--placement-curves off|shadow|on` (today the flag takes `off` and `shadow`; `on` comes with step 4), `--curve-hosts`, `--curve-horizon-seconds 128`, `--curve-slot-seconds
   2`, `--curve-min-runs 8`, `--curve-fit-ratio 0.8`, `--curve-bias-fade-seconds 10`, `--curve-max-hold-seconds 30`
   (held jobs are only ones not yet started); the CPU slack stays 1.1. Off equals today's behaviour exactly.
 

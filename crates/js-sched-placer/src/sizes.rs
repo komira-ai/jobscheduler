@@ -110,6 +110,12 @@
 //!   over five seconds (`cpu_peak`, as its host reported it) is kept in its usage and not
 //!   booked: a peak booking held a host to a few jobs whose peaks fill it while their use
 //!   left most of it idle.
+//!
+//! # Profiles
+//!
+//! With [`Curves::Shadow`] each class also learns a CPU and a memory profile of its runs' recorded
+//! series ([`js_sizing::Profile`]), and a run freed while serving logs how its class's profile
+//! predicted it. The profiles are read by nothing that books a job.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -130,8 +136,11 @@ use tracing::{info, warn};
 use crate::place::SchedPlacer;
 
 pub use js_types::{SIZE_CLASS_LABEL, SIZE_FALLBACK_LABEL};
+pub use profile::Curves;
 pub use teach::Teaching;
 
+#[path = "sizes_profile.rs"]
+mod profile;
 #[path = "sizes_teach.rs"]
 mod teach;
 
@@ -247,6 +256,9 @@ pub struct JobSizes {
     /// What a teaching of the ended jobs begun and not taught ([`Teaching`]) holds; `None`
     /// otherwise, when a freed job is taught at once.
     held: Option<Held>,
+    /// The CPU and memory profiles learned in shadow, a pair for each class; `None` with
+    /// [`Curves::Off`]. Nothing the sizes book reads them.
+    profiles: Option<profile::Profiles>,
 }
 
 /// The freed jobs a teaching of the ended jobs holds until it is taught ([`Teaching`]).
@@ -284,6 +296,16 @@ impl JobSizes {
             cold_on: on,
             ..self
         }
+    }
+
+    /// This history with the profiles `curves` names: [`Curves::Off`] keeps none,
+    /// [`Curves::Shadow`] learns a CPU and a memory profile for each class from every run it
+    /// observes, and logs a line for each run freed while serving. The sizes it books are the
+    /// same in both.
+    #[must_use]
+    pub fn with_curves(mut self, curves: Curves) -> Self {
+        self.profiles = (curves == Curves::Shadow).then(profile::Profiles::default);
+        self
     }
 
     /// The estimator's key of `job`'s class.
@@ -463,9 +485,16 @@ impl JobSizes {
     /// are known the run is judged against a host of unlimited memory, so one that would
     /// reach the largest host's memory is counted until the bounds say otherwise.
     pub fn observe(&mut self, job: &JobRecord, booked: Booked) -> bool {
+        self.observe_logged(job, booked, false)
+    }
+
+    /// [`JobSizes::observe`], which also logs the check of the run against its class's profile
+    /// when `log` is set (a run freed while serving, not one read from the history).
+    fn observe_logged(&mut self, job: &JobRecord, booked: Booked, log: bool) -> bool {
         let Some((run, day)) = run_of(job, booked) else {
             return false;
         };
+        self.profile_run(job, &run, log);
         let taught = self.teaches(job, &run, day);
         // A kill raises the floor of the class and of its fallback, never of every class of
         // the client.
@@ -486,7 +515,7 @@ impl JobSizes {
         match &mut self.held {
             Some(held) => held.runs.push((job, booked)),
             None => {
-                let _ = self.observe(&job, booked);
+                let _ = self.observe_logged(&job, booked, true);
             }
         }
     }
