@@ -1,7 +1,8 @@
 //! A run's CPU second by second (`--cpu-series`) over the stand-in `crun`: the runtime takes
 //! the `usage_usec` of the lease's `cpu.stat` at each poll of the running job, on the agent's
 //! monotonic clock, and gives the series once the job has ended. Each test moves its own
-//! monotonic clock by hand and writes the `cpu.stat` itself; nothing waits for time.
+//! monotonic clock by hand and writes the `cpu.stat` itself; nothing waits for time. A job that
+//! is stopped is started with [`crate::adopt::started`], so the stop comes once its script is up.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -67,9 +68,7 @@ fn a_polled_job_gives_its_cpu_by_the_second_and_ends_where_the_end_was_seen() {
     let node = Node::new("series-polled");
     let mut runtime = open(&node, true, mono);
     at(&MONO, 10);
-    let id = runtime
-        .create_and_start(&node.spec("r9-hold"))
-        .expect("started");
+    let id = crate::adopt::started(&node, &mut runtime, &node.spec("r9-hold"));
     for (seconds, used) in [(11, SECOND), (12, 3 * SECOND)] {
         at(&MONO, seconds);
         cpu_stat(&node, &id.0, used);
@@ -103,9 +102,7 @@ fn a_job_of_an_agent_without_the_flag_gives_no_series() {
     let node = Node::new("series-off");
     let mut runtime = open(&node, false, mono);
     at(&MONO, 10);
-    let id = runtime
-        .create_and_start(&node.spec("r9-hold"))
-        .expect("started");
+    let id = crate::adopt::started(&node, &mut runtime, &node.spec("r9-hold"));
     at(&MONO, 11);
     cpu_stat(&node, &id.0, SECOND);
     assert_eq!(runtime.poll(&id), Ok(Status::Running));
@@ -128,9 +125,7 @@ fn a_job_whose_cpu_stat_cannot_be_read_at_its_end_gives_no_series() {
     let node = Node::new("series-blind");
     let mut runtime = open(&node, true, mono);
     at(&MONO, 10);
-    let id = runtime
-        .create_and_start(&node.spec("r9-hold"))
-        .expect("started");
+    let id = crate::adopt::started(&node, &mut runtime, &node.spec("r9-hold"));
     at(&MONO, 11);
     cpu_stat(&node, &id.0, SECOND);
     assert_eq!(runtime.poll(&id), Ok(Status::Running));

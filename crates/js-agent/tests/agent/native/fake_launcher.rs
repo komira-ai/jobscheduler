@@ -65,6 +65,8 @@ pub enum Failing {
 struct State {
     launched: Vec<Launched>,
     failing: Failing,
+    /// The pid of each program started, which is also its process group's id.
+    groups: Vec<i32>,
 }
 
 /// The fake launcher. Shared by the runtime and the test.
@@ -80,6 +82,7 @@ impl FakeLauncher {
             state: Mutex::new(State {
                 launched: Vec::new(),
                 failing: Failing::No,
+                groups: Vec::new(),
             }),
         })
     }
@@ -96,6 +99,11 @@ impl FakeLauncher {
     /// Every launch asked, in order.
     pub fn launched(&self) -> Vec<Launched> {
         self.state().launched.clone()
+    }
+
+    /// The process group of every program a launch started, in order: the job's pid.
+    pub fn groups(&self) -> Vec<i32> {
+        self.state().groups.clone()
     }
 
     /// The last launch asked.
@@ -146,6 +154,9 @@ impl Launcher for FakeLauncher {
                     .stderr(stderr)
                     .process_group(0)
                     .spawn()?;
+                if let Ok(group) = i32::try_from(child.id()) {
+                    self.state().groups.push(group);
+                }
                 Ok(Box::new(FakeSupervised {
                     child: Some(child),
                     record_dir: launched.record_dir,

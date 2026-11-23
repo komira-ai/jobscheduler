@@ -13,6 +13,7 @@ pub fn to_wire(reading: &Reading) -> NodeLoad {
         seq: reading.seq,
         mono_usec: sample.mono_usec,
         cpu_usage_usec: sample.cpu_usage_usec,
+        host_cpu_usec: Some(sample.host_cpu_usec),
         working_set_bytes: sample.working_set_bytes,
         active_file_bytes: sample.active_file_bytes,
         actions_cpu_limited: sample.cpu_limited,
