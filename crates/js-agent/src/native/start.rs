@@ -40,7 +40,8 @@ use js_mac_pool::seatbelt::{AbsPath, MountGrant};
 use super::journal::RunRecord;
 use super::run::{Job, Run};
 use super::{
-    NativeRuntime, accounts, bundle, cwd, env, fail, files, logs, make_dir, mounts, profile, xcode,
+    NativeRuntime, accounts, bundle, cwd, env, fail, files, logs, make_dir, mounts, profile, put,
+    xcode,
 };
 use crate::bundle::Pinned;
 use crate::lifecycle::{Body, RunHandle, RunSpec, Runtime, RuntimeError, Status, check_run_env};
@@ -125,6 +126,7 @@ impl NativeRuntime {
         };
         self.mark(&mut marks, STEPS[2]);
         let plans = self.plans.remove(&spec.run_id).unwrap_or_default();
+        let put = put::found_in(&plans);
         let lent = Lent {
             spec,
             native,
@@ -137,6 +139,9 @@ impl NativeRuntime {
         match self.launch(lent, &mut marks) {
             Ok(mut run) => {
                 run.marks = marks;
+                if let Some(found) = put {
+                    put::begin(&mut self.puts, &lease, &mut run, found);
+                }
                 self.runs.insert(lease.clone(), run);
                 Ok(RunHandle(lease))
             }

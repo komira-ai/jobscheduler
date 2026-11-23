@@ -211,6 +211,36 @@ fn a_host_path_must_lie_beneath_a_root_that_allows_its_mode() {
     assert!(h.fake.created().is_empty());
 }
 
+/// Asserts that a host path the runtime takes itself (as a Mac's native runtime takes its put
+/// targets below `--native-put-root`) is not held to the agent's roots: a read-write mount
+/// beneath no root is refused `input-not-allowed` until the runtime says it takes the paths
+/// below it, then admitted and left to the runtime's lookup; a path beside it is still
+/// refused. Catches a put target refused because it is no mount root (which made the put
+/// root a mount root, and so on the state root's file system), and a claim that admits more
+/// than its paths.
+#[test]
+fn a_host_path_the_runtime_takes_itself_is_not_held_to_the_roots() {
+    let mut h = harness("rootfs-owned");
+    let put = h.dir.path("put");
+    let target = format!("{}/cas/b/b1/n1", put.display());
+    let with = |job_id: &str, path: &str| JobStartSpec {
+        mounts: vec![mount(path, "/work/.kbf-out", MountMode::ReadWrite)],
+        ..start(job_id)
+    };
+    let not_allowed =
+        |job_id: &str| vec![format!("refused {job_id} {}", refusal::INPUT_NOT_ALLOWED)];
+    let events = h.apply(vec![job_start(with("before", &target))]);
+    assert_eq!(refused(&events, "before"), not_allowed("before"));
+
+    h.fake.own_host_paths(&put);
+    let events = h.apply(vec![job_start(with("taken", &target))]);
+    assert_eq!(refused(&events, "taken"), Vec::<String>::new());
+    assert_eq!(listing(&h, "taken").state, HeldState::Starting);
+    let beside = h.dir.path("put-other").join("x").display().to_string();
+    let events = h.apply(vec![job_start(with("beside", &beside))]);
+    assert_eq!(refused(&events, "beside"), not_allowed("beside"));
+}
+
 /// Asserts that a run start that mounts a named root (the legacy form, which the lifecycle
 /// resolves by path) is refused `invalid-mount` by a runtime that binds none, and creates
 /// nothing. Catches a host path bound by its text, between whose check and bind a job that
