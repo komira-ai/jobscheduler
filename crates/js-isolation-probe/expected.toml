@@ -2,67 +2,88 @@
 # by name (src/expect.rs). The run fails when an answer differs or a pinned probe did not run;
 # a probe with no line here is printed as UNPINNED and fails nothing.
 #
-# They are what a job must get with the job's network `none` and the arguments of
-# docs/runbooks/mac-isolation-probe.md, on macOS 27 with the agent's Seatbelt profile. Where
-# a Mac answered otherwise and the answer is a hole, the pin keeps the answer a job must get,
-# so the run fails by that name until the hole is closed; the comment says what the Mac did.
-# A change of an answer is a change of what a job can do: it comes with the code that
-# changes it, in the same pull request, and the runbook's table says why each one is so.
+# They are what a job must get in the Mac job shape: a fresh slot account per job (its home
+# `/Users/<account>`, 0700, deleted when the job is removed), the job's `HOME` and `TMPDIR`
+# below the run directory (`<account home>/exec/.home`, `.tmp`), the one Seatbelt profile the
+# agent builds, a supervisor that sets exactly the account's group, network `none`, and the
+# arguments of docs/runbooks/mac-isolation-probe.md. Where a Mac answers otherwise and the
+# answer is a hole, the pin keeps the answer a job must get, so the run fails by that name
+# until the hole is closed.
+#
+# A change of an answer is a change of what a job can do: it comes with the code that changes
+# it, in the same pull request, with the reason beside it.
 #
 # Words: allowed, denied, n/a, found, gone, limited, unlimited, info, error.
 
 [probe]
-# The run directory is the job's own; the whole home is writable (the profile's write grant).
+# The run directory is the only place in the account's home a job writes.
 "write:run-dir" = "allowed"
-# A slot's home is emptied by its reset, so it has no Library folders and the probe makes
-# none: a job can make them, but neither it nor the reset can remove them again (on macOS 27
-# the reset of a slot whose home had Library/Preferences failed and replaced the slot).
+# HOME is a fresh folder below the run directory with no Library; the probe makes none, so
+# both are n/a (a write there would be in the run directory, which is the job's own).
 "write:home-launchagents" = "n/a"
 "write:home-preferences" = "n/a"
-# Every place outside the home: the profile denies the write.
+# The account's own per-user temporary folder (/private/var/folders), which the profile grants
+# so toolchains can keep their caches.
+"write:user-temp-dir" = "allowed"
+# The pool hosts have no Homebrew; a host that has it answers denied and fails here by name.
+"write:opt-homebrew" = "n/a"
+# The account's real home (from the account database) outside the run directory: the
+# profile grants writes below exec/ only. A fresh home has no Library, and the probe never
+# makes one, so its preferences are n/a; the write in the home itself says a job cannot make it.
+"write:account-home" = "denied"
+"write:account-home-preferences" = "n/a"
+# Every place outside the run directory: the profile denies the write (or the modes do).
 "write:private-tmp" = "denied"
 "write:private-var-tmp" = "denied"
 "write:users-shared" = "denied"
 "write:library-caches" = "denied"
-# The pool hosts have no Homebrew; a host that has it answers denied and fails here by name.
-"write:opt-homebrew" = "n/a"
 "write:usr-local" = "denied"
 "write:etc" = "denied"
 "write:library-launchdaemons" = "denied"
-"write:user-temp-dir" = "denied"
 "write:other-home" = "denied"
+"write:root-home" = "denied"
 "write:bundle-store" = "denied"
-# Reads: the other pool user's home is 0700, the agent's and helper's state are root's.
-# sudoers is root:wheel 0440. A macOS 27 job read it (allowed, though the same uid outside
-# the job could not): see priv:group-wheel.
+# Reads. sudoers is root:wheel 0440: a job holds no wheel. The privacy database and Time
+# Machine's preferences are kept from a job by the profile's read denies (root reads them).
 "read:sudoers" = "denied"
+"read:tcc-dir" = "denied"
+"read:tcc-db" = "denied"
+"read:timemachine-prefs" = "denied"
 "read:other-home" = "denied"
-# The flags file is 0644 and holds no secret (the token is a file of its own).
+"read:root-home" = "denied"
+# The flags file is 0644 and holds no secret (no token: a Mac joins by its host certificate).
 "read:agent-flags" = "allowed"
-# The agent's token file: an agent enrolled without one has none, and the probe says n/a.
 "read:agent-token" = "n/a"
 "read:agent-state" = "denied"
+"read:accounts-ledger" = "denied"
 "read:helper-state" = "denied"
 # Another service's key (0640, its own group).
 "read:host-key" = "denied"
-# A job whose network is `none` runs under the profile's `(deny network*)`.
+# Root-owned files with mode 0040 of a group a job must not hold: a slot account's group, and
+# everyone (12). The control file (0644) proves the folder is reachable.
+"read:slot-group-file" = "denied"
+"read:everyone-group-file" = "denied"
+"read:control-file" = "allowed"
+# Network `none`: the profile denies every connect and lookup.
 "connect:job-service" = "denied"
 "connect:lan-host" = "denied"
 "connect:metadata" = "denied"
 "connect:public" = "denied"
 "connect:loopback" = "denied"
-# An address the host's packet filter lets jobs with an allow-list reach: not a `none` job.
 "connect:pf-endpoint" = "denied"
 "lookup:public-name" = "denied"
-# A pool user is no administrator and has no password; the profile refuses to start a setuid
-# tool at all (EPERM), so sudo, su, crontab and at never run.
+# A job cannot reach the helper's socket at all, so no request of it can ask for anything.
+"connect-unix:helper-socket" = "denied"
+# A slot account is no administrator and has no password; the profile refuses to start a
+# setuid tool (EPERM), so sudo, su, crontab and at never run.
 "priv:sudo" = "denied"
 "priv:su" = "denied"
 "priv:admin-group" = "denied"
-# The job's process holds its user's groups only. A macOS 27 job could read root:wheel 0440
-# files, which only a process holding wheel can: these two say which groups it holds.
+# The job's process holds its account's group only: no wheel (0), no admin (80).
 "priv:group-wheel" = "denied"
 "priv:group-admin" = "denied"
+# The setuid programs a job could execute by their modes: listed for review, never run.
+"setuid:programs" = "info"
 "priv:record-same-value" = "denied"
 "priv:account-attribute" = "denied"
 # The profile denies job creation (launchctl's bootstrap is refused).
@@ -70,8 +91,8 @@
 "priv:launchd-gui" = "denied"
 "priv:crontab" = "denied"
 "priv:at-job" = "denied"
-# The native runtime sets the file size (4 GiB) and process (512) limits; descriptors keep
-# the system's soft 256.
+# The supervisor sets the file size and process limits; descriptors keep the system's soft
+# limit; memory is limited by booking, not by rlimit.
 "limit:file-size" = "limited"
 "limit:processes" = "limited"
 "limit:descriptors" = "limited"
@@ -84,16 +105,16 @@
 [leave]
 # Named semaphores are left allowed on purpose (Python's multiprocessing needs them).
 "leave:named-semaphore" = "allowed"
-# System V objects are not denied by the profile; the reset removes the uid's.
+# System V objects are not denied by the profile; the removal takes the uid's.
 "leave:sysv-semaphore" = "allowed"
 "leave:sysv-shared-memory" = "allowed"
-# The profile denies user preference writes. An emptied home has no Library/Preferences
-# or Library/Keychains, and the probe makes neither (n/a); with them it must be denied.
+# HOME has no Library/Preferences or Library/Keychains, and the probe makes neither.
 "leave:preferences" = "n/a"
+"leave:keychain" = "n/a"
 "leave:launch-services" = "denied"
 "leave:pasteboard" = "denied"
-"leave:keychain" = "n/a"
-# Nothing stops a process from starting its own session; the reset kills by uid.
+# Nothing stops a process from starting its own session; the removal sweeps the job's
+# audit session and the uid.
 "leave:background-process" = "allowed"
 "leave:crontab" = "denied"
 "leave:at-job" = "denied"
@@ -103,20 +124,25 @@
 "leave:file:run-dir" = "allowed"
 "leave:file:home-launchagents" = "n/a"
 "leave:file:home-preferences" = "n/a"
+"leave:file:user-temp-dir" = "allowed"
+"leave:file:opt-homebrew" = "n/a"
+"leave:file:account-home" = "denied"
+"leave:file:account-home-preferences" = "n/a"
 "leave:file:private-tmp" = "denied"
 "leave:file:private-var-tmp" = "denied"
 "leave:file:users-shared" = "denied"
 "leave:file:library-caches" = "denied"
-"leave:file:opt-homebrew" = "n/a"
 "leave:file:usr-local" = "denied"
 "leave:file:etc" = "denied"
 "leave:file:library-launchdaemons" = "denied"
-"leave:file:user-temp-dir" = "denied"
 "leave:file:other-home" = "denied"
+"leave:file:root-home" = "denied"
 "leave:file:bundle-store" = "denied"
 
 [find-same-slot]
-# A named semaphore outlives the reset: no interface of macOS lists it.
+# The next account of the same slot (same uid, a fresh record and home) finds nothing the
+# last job left, except a named semaphore: no interface of macOS lists one, so nothing can
+# remove it but its name (find does, on this slot).
 "find:named-semaphore" = "found"
 "find:sysv-semaphore" = "gone"
 "find:sysv-shared-memory" = "gone"
@@ -130,9 +156,14 @@
 "find:launchd-user" = "gone"
 "find:launchd-gui" = "gone"
 "find:account-attribute" = "gone"
+# The per-user temporary folder is the same folder for the slot's next account (macOS finds
+# it by uid and GeneratedUID): what a job left there must be gone.
+"find:file:user-temp-dir" = "gone"
 "find:file:run-dir" = "gone"
 "find:file:home-launchagents" = "gone"
 "find:file:home-preferences" = "gone"
+"find:file:account-home" = "gone"
+"find:file:account-home-preferences" = "gone"
 "find:file:private-tmp" = "gone"
 "find:file:private-var-tmp" = "gone"
 "find:file:users-shared" = "gone"
@@ -141,12 +172,12 @@
 "find:file:usr-local" = "gone"
 "find:file:etc" = "gone"
 "find:file:library-launchdaemons" = "gone"
-"find:file:user-temp-dir" = "gone"
 "find:file:other-home" = "gone"
+"find:file:root-home" = "gone"
 "find:file:bundle-store" = "gone"
 
 [find-other-slot]
-# The semaphore's name is the host's, not the user's: another user sees it exists.
+# The semaphore's name is the host's, not the account's: another account sees it exists.
 "find:named-semaphore" = "found"
 "find:sysv-semaphore" = "gone"
 "find:sysv-shared-memory" = "gone"
@@ -160,10 +191,12 @@
 "find:launchd-user" = "gone"
 "find:launchd-gui" = "gone"
 "find:account-attribute" = "gone"
-# Another user's home is 0700: its files cannot be looked at.
-"find:file:run-dir" = "n/a"
-"find:file:home-launchagents" = "n/a"
-"find:file:home-preferences" = "n/a"
+# The leaver's home was deleted with its account.
+"find:file:run-dir" = "gone"
+"find:file:home-launchagents" = "gone"
+"find:file:home-preferences" = "gone"
+"find:file:account-home" = "gone"
+"find:file:account-home-preferences" = "gone"
 "find:file:private-tmp" = "gone"
 "find:file:private-var-tmp" = "gone"
 "find:file:users-shared" = "gone"
@@ -173,4 +206,5 @@
 "find:file:etc" = "gone"
 "find:file:library-launchdaemons" = "gone"
 "find:file:other-home" = "gone"
+"find:file:root-home" = "gone"
 "find:file:bundle-store" = "gone"

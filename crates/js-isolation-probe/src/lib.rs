@@ -64,6 +64,8 @@ pub enum Command {
     Leave(LeaveArgs),
     /// Look for the markers `leave` made; on the same slot, remove what is left.
     Find(FindArgs),
+    /// Wait and end: a job that holds its slot, so that the next job is lent another.
+    Hold(HoldArgs),
     /// The background process `leave` starts: start a session and wait.
     #[command(hide = true)]
     Linger(LingerArgs),
@@ -86,6 +88,9 @@ pub struct ProbeArgs {
     /// A host name to look up, `NAME=HOST`; repeatable.
     #[arg(long = "lookup", value_parser = host::named)]
     pub lookups: Vec<Named>,
+    /// A Unix socket to try one connect to, `NAME=PATH` (the helper's socket); repeatable.
+    #[arg(long = "connect-unix", value_parser = host::named)]
+    pub unix: Vec<Named>,
 }
 
 /// `leave`'s flags.
@@ -122,6 +127,14 @@ pub struct FindArgs {
     pub left_by_home: PathBuf,
 }
 
+/// `hold`'s flags.
+#[derive(Debug, Args)]
+pub struct HoldArgs {
+    /// How long to wait before ending, in seconds.
+    #[arg(long)]
+    pub secs: u64,
+}
+
 /// `linger`'s flags.
 #[derive(Debug, Args)]
 pub struct LingerArgs {
@@ -153,7 +166,7 @@ pub fn token(arg: &str) -> Result<String, String> {
 }
 
 impl Command {
-    /// The phase this command runs, or `None` for `linger`.
+    /// The phase this command runs, or `None` for `hold` and `linger`.
     #[must_use]
     pub fn phase(&self) -> Option<Phase> {
         match self {
@@ -162,6 +175,7 @@ impl Command {
                 reads: a.reads.clone(),
                 connects: a.connects.clone(),
                 lookups: a.lookups.clone(),
+                unix: a.unix.clone(),
             }),
             Self::Leave(a) => Some(Phase::Leave {
                 token: a.token.clone(),
@@ -175,7 +189,7 @@ impl Command {
                 user: a.left_by_user.clone(),
                 home: a.left_by_home.clone(),
             }),
-            Self::Linger(_) => None,
+            Self::Hold(_) | Self::Linger(_) => None,
         }
     }
 }
@@ -184,12 +198,20 @@ impl Command {
 /// could not run.
 #[must_use]
 pub fn run(cli: &Cli) -> ExitCode {
-    if let Command::Linger(args) = &cli.command {
-        return linger(args.secs);
+    match &cli.command {
+        Command::Hold(args) => return hold(args.secs),
+        Command::Linger(args) => return linger(args.secs),
+        _ => {}
     }
     cli.command
         .phase()
         .map_or(ExitCode::from(2), |phase| on_this_host(&phase))
+}
+
+/// `hold`: waits `secs` in the job's own session and ends.
+fn hold(secs: u64) -> ExitCode {
+    std::thread::sleep(std::time::Duration::from_secs(secs));
+    ExitCode::SUCCESS
 }
 
 /// `linger`: leaves the job's session (so a stop of the job's process group misses it) and
@@ -244,6 +266,8 @@ mod tests {
             "job-service=127.0.0.1:1",
             "--lookup",
             "public=example.org",
+            "--connect-unix",
+            "helper-socket=/run/s",
         ]);
         let one = |name: &str, value: &str| {
             vec![Named {
@@ -258,8 +282,12 @@ mod tests {
                 reads: one("agent-flags", "/f"),
                 connects: one("job-service", "127.0.0.1:1"),
                 lookups: one("public", "example.org"),
+                unix: one("helper-socket", "/run/s"),
             })
         );
+        let cli = Cli::parse_from(["p", "hold", "--secs", "5"]);
+        assert_eq!(format!("{:?}", cli.command), "Hold(HoldArgs { secs: 5 })");
+        assert_eq!(cli.command.phase(), None);
         let cli = Cli::parse_from(["p", "leave", "--token", "t1"]);
         assert_eq!(
             cli.command.phase(),

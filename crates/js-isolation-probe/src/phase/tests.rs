@@ -39,11 +39,16 @@ fn host<'a>(tools: &'a Fake, who: Who, writes: &'a dyn Fn(&Who) -> Vec<Target>) 
     Host {
         tools,
         who,
-        groups: vec![20],
+        ids: Ids {
+            gid: 20,
+            egid: 20,
+            groups: vec![20, 12],
+        },
         writes,
         reads: vec![],
         connect_limit: Duration::from_secs(30),
         many: 20,
+        setuid_dirs: vec![],
     }
 }
 
@@ -84,6 +89,10 @@ fn probe_prints_every_probe_in_order_and_judges_by_the_pins() {
             name: "literal".to_owned(),
             value: "127.0.0.1".to_owned(),
         }],
+        unix: vec![Named {
+            name: "helper-socket".to_owned(),
+            value: dir.join("no-socket").display().to_string(),
+        }],
     };
     let tools = Fake::default()
         .exit(
@@ -108,7 +117,7 @@ fn probe_prints_every_probe_in_order_and_judges_by_the_pins() {
     assert_eq!(
         lines[0],
         format!(
-            "# js-isolation-probe probe as pool-1 (uid 601), home {}, in {}",
+            "# js-isolation-probe probe as pool-1 (uid 601, gid 20, egid 20, groups 20 12), home {}, in {}",
             who.home.display(),
             who.cwd.display()
         )
@@ -118,7 +127,7 @@ fn probe_prints_every_probe_in_order_and_judges_by_the_pins() {
         .filter_map(|l| l.split_once(": ").map(|(name, _)| name))
         .collect();
     assert_eq!(
-        &names[..15],
+        &names[..17],
         [
             "write:run-dir",
             "write:shared",
@@ -126,11 +135,13 @@ fn probe_prints_every_probe_in_order_and_judges_by_the_pins() {
             "read:agent-token",
             "connect:loopback",
             "lookup:literal",
+            "connect-unix:helper-socket",
             "priv:sudo",
             "priv:su",
             "priv:admin-group",
             "priv:group-wheel",
             "priv:group-admin",
+            "setuid:programs",
             "priv:record-same-value",
             "priv:launchd-user",
             "priv:launchd-gui",
@@ -157,7 +168,8 @@ fn probe_prints_every_probe_in_order_and_judges_by_the_pins() {
 
 #[test]
 fn leave_keeps_its_markers_and_says_how_to_find_them() {
-    let (dir, who) = layout("phase-leave");
+    let (dir, mut who) = layout("phase-leave");
+    who.account_home = Some(dir.join("account"));
     let tag = token("pl");
     let _sweep = ipc::Sweep(tag.clone());
     let tools = Fake::default();
@@ -177,6 +189,15 @@ fn leave_keeps_its_markers_and_says_how_to_find_them() {
     let mut out = Vec::new();
     assert!(run(&phase, &host, &pins, &mut out).unwrap());
     let lines = printed(&out);
+    assert_eq!(
+        lines[0],
+        format!(
+            "# js-isolation-probe leave as pool-1 (uid 601, gid 20, egid 20, groups 20 12), home {}, account home {}, in {}",
+            who.home.display(),
+            dir.join("account").display(),
+            who.cwd.display()
+        )
+    );
     assert_eq!(
         lines[1],
         format!(
@@ -296,6 +317,7 @@ fn a_failed_write_to_the_output_is_an_error() {
             reads: vec![],
             connects: vec![],
             lookups: vec![],
+            unix: vec![],
         },
         Phase::Leave {
             token: "t1".to_owned(),

@@ -3,15 +3,16 @@
 //! background process. Everything it hands over is tested with a fake elsewhere; this is the
 //! one place that names the real ones.
 
-use std::ffi::CStr;
+use std::ffi::{CStr, OsStr};
 use std::io::Write as _;
+use std::os::unix::ffi::OsStrExt as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
 use crate::expect::Pins;
 use crate::host::{self, Who};
-use crate::phase::{self, Host, Phase};
+use crate::phase::{self, Host, Ids, Phase};
 use crate::tools::System;
 
 /// `confstr` name of the user's temporary directory under `/private/var/folders`.
@@ -23,17 +24,20 @@ const TOOL_LIMIT: Duration = Duration::from_secs(30);
 const CONNECT_LIMIT: Duration = Duration::from_secs(5);
 /// How many small files `probe` makes.
 const MANY: u32 = 10_000;
+/// The folders whose setuid and setgid programs `probe` lists.
+const SETUID_DIRS: [&str; 5] = ["/bin", "/sbin", "/usr/bin", "/usr/sbin", "/usr/libexec"];
 
 pub(crate) fn run(phase: &Phase) -> ExitCode {
     match prepare().and_then(|(who, tools, pins)| {
         let host = Host {
             tools: &tools,
             who,
-            groups: groups()?,
+            ids: ids()?,
             writes: &host::writes,
             reads: host::reads(),
             connect_limit: CONNECT_LIMIT,
             many: MANY,
+            setuid_dirs: SETUID_DIRS.iter().map(PathBuf::from).collect(),
         };
         let mut out = std::io::stdout().lock();
         let passed = phase::run(phase, &host, &pins, &mut out).map_err(|e| e.to_string())?;
@@ -54,7 +58,8 @@ fn prepare() -> Result<(Who, System, Pins), String> {
     let cwd = std::env::current_dir().map_err(|e| format!("the working directory: {e}"))?;
     let exe = std::env::current_exe().map_err(|e| format!("this program's path: {e}"))?;
     let uid = rustix::process::getuid().as_raw();
-    let who = Who::from_env(uid, |k| std::env::var_os(k), cwd, user_temp())?;
+    let mut who = Who::from_env(uid, |k| std::env::var_os(k), cwd, user_temp())?;
+    who.account_home = account_home(uid);
     Ok((
         who,
         System {
@@ -65,17 +70,46 @@ fn prepare() -> Result<(Who, System, Pins), String> {
     ))
 }
 
-/// The process's effective and supplementary group ids, in order, each once.
-fn groups() -> Result<Vec<u32>, String> {
-    let mut gids: Vec<u32> = rustix::process::getgroups()
+/// The process's real and effective group ids and its supplementary groups.
+fn ids() -> Result<Ids, String> {
+    let groups = rustix::process::getgroups()
         .map_err(|e| format!("the process's groups: {e}"))?
         .into_iter()
         .map(rustix::process::Gid::as_raw)
         .collect();
-    gids.push(rustix::process::getegid().as_raw());
-    gids.sort_unstable();
-    gids.dedup();
-    Ok(gids)
+    Ok(Ids {
+        gid: rustix::process::getgid().as_raw(),
+        egid: rustix::process::getegid().as_raw(),
+        groups,
+    })
+}
+
+/// The home the account database names for `uid`, when it names one.
+fn account_home(uid: u32) -> Option<PathBuf> {
+    let mut buf = vec![0u8; 4096];
+    // SAFETY: an all-zero `passwd` is a valid value of the plain C struct (null pointers and
+    // zero numbers); getpwuid_r only writes it.
+    let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut found: *mut libc::passwd = std::ptr::null_mut();
+    // FFI-BOUNDARY: `entry`, `buf` and `found` are ours and outlive the call; getpwuid_r fills
+    // `entry` with pointers into `buf` (4096 bytes, its length passed) and sets `found` to
+    // `&entry` or null. Nothing is freed: all of it is on this stack frame or in `buf`.
+    let rc = unsafe {
+        libc::getpwuid_r(
+            uid,
+            &raw mut entry,
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            &raw mut found,
+        )
+    };
+    if rc != 0 || found.is_null() || entry.pw_dir.is_null() {
+        return None;
+    }
+    // SAFETY: getpwuid_r succeeded and `pw_dir` is not null, so it points at a NUL-terminated
+    // string inside `buf`, which is alive here.
+    let dir = unsafe { CStr::from_ptr(entry.pw_dir) };
+    Some(PathBuf::from(OsStr::from_bytes(dir.to_bytes())))
 }
 
 /// The user's `DARWIN_USER_TEMP_DIR`, when the system names one.

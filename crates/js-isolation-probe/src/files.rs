@@ -4,7 +4,7 @@
 
 use std::fs::{self, OpenOptions};
 use std::io;
-use std::os::unix::fs::OpenOptionsExt as _;
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 
 use crate::host::{Named, Target};
@@ -127,6 +127,38 @@ pub fn read(named: &Named) -> Line {
             .detail(format!("{shown}: opened, {} bytes", meta.len())),
         Err(err) => Line::refused(name, &err, shown),
     }
+}
+
+/// `setuid:programs`: the programs in `dirs` that carry the setuid or setgid bit and that
+/// this process may execute by their modes. They are listed, never run: the sandbox may still
+/// refuse to start them (the `priv:` probes start four). A folder that cannot be listed and an
+/// entry that cannot be looked at are skipped.
+#[must_use]
+pub fn setuid(dirs: &[PathBuf]) -> Line {
+    let mut found = Vec::new();
+    for dir in dirs {
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue;
+        };
+        for path in entries.flatten().map(|entry| entry.path()) {
+            let Ok(meta) = fs::metadata(&path) else {
+                continue;
+            };
+            let raised = meta.mode() & 0o6000 != 0;
+            if meta.is_file()
+                && raised
+                && rustix::fs::access(&path, rustix::fs::Access::EXEC_OK).is_ok()
+            {
+                found.push(path.display().to_string());
+            }
+        }
+    }
+    found.sort();
+    Line::new("setuid:programs", Outcome::Info).detail(format!(
+        "{} executable: {}",
+        found.len(),
+        found.join(" ")
+    ))
 }
 
 /// `space:run-volume`: free space and free inodes of the volume `dir` is on.
@@ -396,5 +428,30 @@ mod tests {
             Path::new("/r"),
         );
         assert!(text.starts_with("could not remove /r: "), "{text}");
+    }
+
+    #[test]
+    fn setuid_programs_are_listed_when_executable_and_never_run() {
+        let dir = TestDir::under(std::env::temp_dir(), "files-setuid");
+        let mode = |name: &str, m: u32| {
+            let path = dir.join(name);
+            fs::write(&path, b"#!/bin/sh\nexit 9\n").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(m)).unwrap();
+        };
+        mode("su", 0o4755);
+        mode("wall", 0o2755);
+        mode("plain", 0o755);
+        mode("closed", 0o4644);
+        fs::create_dir(dir.join("sub")).unwrap();
+        std::os::unix::fs::symlink(dir.join("gone"), dir.join("dangling")).unwrap();
+        let line = setuid(&[dir.to_path_buf(), dir.join("absent")]);
+        assert_eq!(
+            line.to_string(),
+            format!(
+                "setuid:programs: info; 2 executable: {} {}",
+                dir.join("su").display(),
+                dir.join("wall").display()
+            )
+        );
     }
 }

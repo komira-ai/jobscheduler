@@ -28,8 +28,8 @@ pub struct Host<'a> {
     pub tools: &'a dyn Tools,
     /// Who the job runs as.
     pub who: Who,
-    /// The process's effective and supplementary group ids.
-    pub groups: Vec<u32>,
+    /// The process's group ids.
+    pub ids: Ids,
     /// The built-in write targets for an account ([`crate::host::writes`] on a Mac).
     pub writes: &'a dyn Fn(&Who) -> Vec<Target>,
     /// The built-in reads ([`crate::host::reads`] on a Mac).
@@ -38,6 +38,31 @@ pub struct Host<'a> {
     pub connect_limit: Duration,
     /// How many small files `probe` makes.
     pub many: u32,
+    /// The folders whose setuid and setgid programs `probe` lists.
+    pub setuid_dirs: Vec<PathBuf>,
+}
+
+/// A process's group ids.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ids {
+    /// The real group id.
+    pub gid: u32,
+    /// The effective group id.
+    pub egid: u32,
+    /// The supplementary groups, as `getgroups` gives them.
+    pub groups: Vec<u32>,
+}
+
+impl Ids {
+    /// Every group id the process holds, in order, each once.
+    #[must_use]
+    pub fn all(&self) -> Vec<u32> {
+        let mut all = self.groups.clone();
+        all.extend([self.gid, self.egid]);
+        all.sort_unstable();
+        all.dedup();
+        all
+    }
 }
 
 /// The phase to run, with its arguments.
@@ -53,6 +78,8 @@ pub enum Phase {
         connects: Vec<Named>,
         /// `--lookup NAME=HOST`.
         lookups: Vec<Named>,
+        /// `--connect-unix NAME=PATH`.
+        unix: Vec<Named>,
     },
     /// `leave`.
     Leave {
@@ -90,6 +117,7 @@ pub fn run(phase: &Phase, host: &Host<'_>, pins: &Pins, out: &mut dyn Write) -> 
             reads,
             connects,
             lookups,
+            unix,
         } => {
             let tag = format!("probe-{}", std::process::id());
             let probe = Probe {
@@ -97,10 +125,11 @@ pub fn run(phase: &Phase, host: &Host<'_>, pins: &Pins, out: &mut dyn Write) -> 
                 reads,
                 connects,
                 lookups,
+                unix,
             };
             (
                 Section::Probe,
-                vec![header("probe", who)],
+                vec![header("probe", host)],
                 probe.lines(host, &tag),
             )
         }
@@ -117,7 +146,7 @@ pub fn run(phase: &Phase, host: &Host<'_>, pins: &Pins, out: &mut dyn Write) -> 
             );
             (
                 Section::Leave,
-                vec![header("leave", who), next],
+                vec![header("leave", host), next],
                 leave(host, token, writes, *linger_secs),
             )
         }
@@ -140,7 +169,7 @@ pub fn run(phase: &Phase, host: &Host<'_>, pins: &Pins, out: &mut dyn Write) -> 
             };
             (
                 section,
-                vec![header("find", who), format!("# left by uid {uid}: {slot}")],
+                vec![header("find", host), format!("# left by uid {uid}: {slot}")],
                 find(host, token, writes, &leaver, same),
             )
         }
@@ -156,11 +185,26 @@ pub fn run(phase: &Phase, host: &Host<'_>, pins: &Pins, out: &mut dyn Write) -> 
     Ok(verdict.passed())
 }
 
-fn header(phase: &str, who: &Who) -> String {
+/// The first line: the phase, the account and its group ids, `HOME`, the account's own home
+/// when it is known, and the working directory.
+fn header(phase: &str, host: &Host<'_>) -> String {
+    let who = &host.who;
+    let ids = &host.ids;
+    let groups = ids
+        .groups
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let account = who.account_home.as_ref().map_or_else(String::new, |home| {
+        format!(", account home {}", home.display())
+    });
     format!(
-        "# js-isolation-probe {phase} as {} (uid {}), home {}, in {}",
+        "# js-isolation-probe {phase} as {} (uid {}, gid {}, egid {}, groups {groups}), home {}{account}, in {}",
         who.user,
         who.uid,
+        ids.gid,
+        ids.egid,
         who.home.display(),
         who.cwd.display()
     )
@@ -171,6 +215,7 @@ struct Probe<'p> {
     reads: &'p [Named],
     connects: &'p [Named],
     lookups: &'p [Named],
+    unix: &'p [Named],
 }
 
 impl Probe<'_> {
@@ -192,10 +237,12 @@ impl Probe<'_> {
                 .map(|n| net::connect(n, host.connect_limit)),
         );
         lines.extend(self.lookups.iter().map(net::lookup));
+        lines.extend(self.unix.iter().map(net::connect_unix));
         lines.push(privilege::sudo(host.tools));
         lines.push(privilege::su(host.tools));
         lines.push(privilege::admin(host.tools, who));
-        lines.extend(privilege::groups(&host.groups));
+        lines.extend(privilege::groups(&host.ids.all()));
+        lines.push(files::setuid(&host.setuid_dirs));
         lines.push(privilege::record_same_value(host.tools, who));
         lines.extend(
             Kind::PRIVILEGED

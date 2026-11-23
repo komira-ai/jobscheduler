@@ -1,8 +1,10 @@
-//! Network probes: one TCP connect to each address an argument names, and one name lookup per
-//! named host. Only connects and lookups: no scan, nothing sent.
+//! Network probes: one TCP connect to each address an argument names, one connect to each
+//! named Unix socket, and one name lookup per named host. Only connects and lookups: no scan,
+//! nothing sent.
 
 use std::io;
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs as _};
+use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
 use crate::host::Named;
@@ -58,6 +60,28 @@ fn short(err: &io::Error) -> String {
     match text.find(" (os error") {
         Some(at) => text[..at].to_owned(),
         None => text,
+    }
+}
+
+/// `connect-unix:<name>`: one connect to the Unix socket at `PATH`. A connection, or a
+/// refusal by the socket's end (nothing listens, but the path was reached), is
+/// [`Outcome::Allowed`]; a refusal by the file modes or the sandbox is [`Outcome::Denied`]; a
+/// path that is not there is [`Outcome::NotApplicable`].
+#[must_use]
+pub fn connect_unix(named: &Named) -> Line {
+    let name = format!("connect-unix:{}", named.name);
+    let path = &named.value;
+    match UnixStream::connect(path) {
+        Ok(_) => Line::new(name, Outcome::Allowed).detail(format!("{path}: connected")),
+        Err(err) if err.raw_os_error() == Some(libc::ECONNREFUSED) => {
+            Line::new(name, Outcome::Allowed)
+                .errno_of(&err)
+                .detail(format!("{path}: nothing listens, but it was reached"))
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            Line::new(name, Outcome::NotApplicable).detail(format!("{path} is absent"))
+        }
+        Err(err) => Line::refused(name, &err, format!("{path}: {}", short(&err))),
     }
 }
 
@@ -172,6 +196,51 @@ mod tests {
         assert_eq!(
             line.to_string(),
             "lookup:public-name: denied; example.org: failed to lookup address information"
+        );
+    }
+
+    #[test]
+    fn a_unix_socket_is_reached_refused_or_absent() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::os::unix::net::UnixListener;
+
+        let dir = js_testkit::dir::TestDir::under(std::env::temp_dir(), "net-unix");
+        let path = dir.join("s");
+        let shown = path.display().to_string();
+        let listener = UnixListener::bind(&path).unwrap();
+        assert_eq!(
+            connect_unix(&named("helper-socket", &shown)).to_string(),
+            format!("connect-unix:helper-socket: allowed; {shown}: connected")
+        );
+        drop(listener);
+        // The file stays; nothing listens on it.
+        assert_eq!(
+            connect_unix(&named("helper-socket", &shown)).to_string(),
+            format!(
+                "connect-unix:helper-socket: allowed (ECONNREFUSED); {shown}: nothing listens, but it was reached"
+            )
+        );
+        let absent = dir.join("absent").display().to_string();
+        assert_eq!(
+            connect_unix(&named("helper-socket", &absent)).to_string(),
+            format!("connect-unix:helper-socket: n/a; {absent} is absent")
+        );
+        // A path through a regular file: neither reached nor refused by modes.
+        let odd = dir.join("s/x").display().to_string();
+        assert_eq!(
+            connect_unix(&named("helper-socket", &odd)).to_string(),
+            format!("connect-unix:helper-socket: error (ENOTDIR); {odd}: Not a directory")
+        );
+        // A folder the modes close (the tests run as a user, never as root).
+        let closed = dir.join("closed");
+        std::fs::create_dir(&closed).unwrap();
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let inner = closed.join("s").display().to_string();
+        let line = connect_unix(&named("helper-socket", &inner));
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            line.to_string(),
+            format!("connect-unix:helper-socket: denied (EACCES); {inner}: Permission denied")
         );
     }
 }

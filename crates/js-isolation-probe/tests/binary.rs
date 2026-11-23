@@ -26,6 +26,16 @@ fn linger_with_no_time_ends_at_once() {
 }
 
 #[test]
+fn hold_waits_in_its_own_session_and_ends_well() {
+    let out = Command::new(exe())
+        .args(["hold", "--secs", "0"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert!(out.stdout.is_empty(), "hold prints nothing");
+}
+
+#[test]
 fn a_bad_token_is_a_usage_error_before_anything_runs() {
     let out = Command::new(exe())
         .args(["leave", "--token", "Not-A-Token"])

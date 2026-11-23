@@ -12,10 +12,14 @@ pub struct Who {
     pub uid: u32,
     /// The user's name.
     pub user: String,
-    /// The user's home: the run directory, all of which the profile lets the job write.
+    /// `HOME` as the job gets it: the account's home (the pool's older shape) or a folder below
+    /// the run directory (`<account home>/exec/.home`).
     pub home: PathBuf,
-    /// The job's working directory (`<home>/exec`).
+    /// The job's working directory, the run directory (`<account home>/exec`).
     pub cwd: PathBuf,
+    /// The account's own home, as the account database names it, when known: a job must not
+    /// write in it outside the run directory.
+    pub account_home: Option<PathBuf>,
     /// The user's `DARWIN_USER_TEMP_DIR` under `/private/var/folders`, when the system names
     /// one.
     pub user_temp: Option<PathBuf>,
@@ -49,27 +53,41 @@ impl Who {
             user,
             home,
             cwd,
+            account_home: None,
             user_temp,
         })
     }
 
-    /// The same places for the account that left markers: `uid`, `user` and `home` from the
-    /// leaver, the working directory at the same place under the leaver's home, and no user
-    /// temp directory (another account's is not known).
+    /// The same places for the account that left markers: `uid`, `user` and `HOME` from the
+    /// leaver, its working directory and account home where they are to its `HOME` as this
+    /// account's are to this `HOME` (below it, or above it), and no user temp directory
+    /// (another account's is not known).
     #[must_use]
     pub fn leaver(&self, uid: u32, user: &str, home: &Path) -> Self {
-        let cwd = self
-            .cwd
-            .strip_prefix(&self.home)
-            .map_or_else(|_| self.cwd.clone(), |rest| home.join(rest));
+        let cwd = same_place(&self.cwd, &self.home, home).unwrap_or_else(|| self.cwd.clone());
+        let account_home = self
+            .account_home
+            .as_ref()
+            .and_then(|mine| same_place(mine, &self.home, home));
         Self {
             uid,
             user: user.to_owned(),
             home: home.to_path_buf(),
             cwd,
+            account_home,
             user_temp: None,
         }
     }
+}
+
+/// The place that is to `their_home` as `mine` is to `my_home`: below it by the same path, or
+/// above it by as many steps; `None` when `mine` is neither.
+fn same_place(mine: &Path, my_home: &Path, their_home: &Path) -> Option<PathBuf> {
+    if let Ok(below) = mine.strip_prefix(my_home) {
+        return Some(their_home.join(below));
+    }
+    let up = my_home.strip_prefix(mine).ok()?.components().count();
+    their_home.ancestors().nth(up).map(Path::to_path_buf)
 }
 
 /// A place a probe writes a file in.
@@ -93,9 +111,10 @@ impl Target {
 /// The places every write probe tries, for the account `who`: the run directory, which must
 /// be writable, and the places a job must not write: the shared temporary and cache folders,
 /// the package managers' prefixes, `/etc`, the system's launch daemons, and the user's own
-/// launch agents and preferences. Those two are tried only when the home has them: a folder
-/// a job makes under `~/Library` is one a job's sandbox cannot remove again, and so neither can
-/// the probe.
+/// launch agents and preferences, and, when the account's own home is known, that home and
+/// its preferences. The `Library` folders are tried only when they are there: a folder a job
+/// makes under `~/Library` is one a job's sandbox cannot remove again, and so neither can the
+/// probe.
 #[must_use]
 pub fn writes(who: &Who) -> Vec<Target> {
     let mut targets = vec![
@@ -111,19 +130,42 @@ pub fn writes(who: &Who) -> Vec<Target> {
         Target::new("home-launchagents", who.home.join("Library/LaunchAgents")),
         Target::new("home-preferences", who.home.join("Library/Preferences")),
     ];
+    if let Some(home) = &who.account_home {
+        targets.push(Target::new("account-home", home.clone()));
+        targets.push(Target::new(
+            "account-home-preferences",
+            home.join("Library/Preferences"),
+        ));
+    }
     if let Some(dir) = &who.user_temp {
         targets.push(Target::new("user-temp-dir", dir.clone()));
     }
     targets
 }
 
-/// The reads every read probe tries: the host's sudoers file.
+/// The reads every read probe tries: the host's sudoers file (root:wheel 0440), and the
+/// privacy database's folder, the database, and Time Machine's preferences, which only the
+/// privacy controls and the profile's read denies keep from a job.
 #[must_use]
 pub fn reads() -> Vec<Named> {
-    vec![Named {
-        name: "sudoers".to_owned(),
-        value: "/private/etc/sudoers".to_owned(),
-    }]
+    [
+        ("sudoers", "/private/etc/sudoers"),
+        ("tcc-dir", "/Library/Application Support/com.apple.TCC"),
+        (
+            "tcc-db",
+            "/Library/Application Support/com.apple.TCC/TCC.db",
+        ),
+        (
+            "timemachine-prefs",
+            "/Library/Preferences/com.apple.TimeMachine.plist",
+        ),
+    ]
+    .into_iter()
+    .map(|(name, value)| Named {
+        name: name.to_owned(),
+        value: value.to_owned(),
+    })
+    .collect()
 }
 
 /// A host-specific place or address an argument names: `NAME=VALUE`.
@@ -175,6 +217,7 @@ pub(crate) fn test_who(home: &Path) -> Who {
         user: "pool-1".to_owned(),
         home: home.to_path_buf(),
         cwd: home.join("exec"),
+        account_home: None,
         user_temp: None,
     }
 }
@@ -239,6 +282,19 @@ mod tests {
         assert_eq!(them.cwd, Path::new("/Users/pool-0/exec"));
         assert_eq!(them.user, "pool-0");
         assert_eq!(them.uid, 600);
+        assert_eq!(them.account_home, None);
+        // The current shape: HOME below the run directory, the account's home above it.
+        let now = Who {
+            home: PathBuf::from("/Users/a1/exec/.home"),
+            cwd: PathBuf::from("/Users/a1/exec"),
+            account_home: Some(PathBuf::from("/Users/a1")),
+            ..me.clone()
+        };
+        let them = now.leaver(700, "a0", Path::new("/Users/a0/exec/.home"));
+        assert_eq!(them.cwd, Path::new("/Users/a0/exec"));
+        assert_eq!(them.account_home.as_deref(), Some(Path::new("/Users/a0")));
+        // A HOME too short to step up from leaves no account home.
+        assert_eq!(now.leaver(700, "a0", Path::new("/")).account_home, None);
         let odd = Who {
             cwd: PathBuf::from("/elsewhere"),
             ..me
@@ -270,9 +326,16 @@ mod tests {
             ]
         );
         who.user_temp = Some(PathBuf::from("/private/var/folders/x/T"));
-        let last = writes(&who).pop().unwrap();
-        assert_eq!(last.name, "user-temp-dir");
-        assert_eq!(reads()[0].value, "/private/etc/sudoers");
+        who.account_home = Some(PathBuf::from("/Users/a1"));
+        let all = writes(&who);
+        let names: Vec<&str> = all[11..].iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["account-home", "account-home-preferences", "user-temp-dir"]
+        );
+        assert_eq!(all[12].dir, Path::new("/Users/a1/Library/Preferences"));
+        let reads: Vec<String> = reads().into_iter().map(|n| n.name).collect();
+        assert_eq!(reads, ["sudoers", "tcc-dir", "tcc-db", "timemachine-prefs"]);
     }
 
     #[test]
