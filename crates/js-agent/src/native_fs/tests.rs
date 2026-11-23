@@ -326,7 +326,8 @@ fn trees_below_the_root_are_taken_canonical() {
 /// by exact equality: the root itself, a `..` and a link that lead out of the root, another
 /// run's tree, the run's own folder and the provider's (above its trees), a tree mounted
 /// read-write, one without `no_exec`, and a mount that holds the root; and that a directory
-/// that is not there is `input-unavailable`. Catches a tree that opens the whole mount, one
+/// below the root that is not there, and one outside it that cannot be looked up for another
+/// reason, are `input-unavailable`. Catches a tree that opens the whole mount, one
 /// that opens a directory outside it, a job that names another run's tree (or every run's)
 /// as a host path, one a job may write or run, and a grant above the root that reopens every
 /// run's trees.
@@ -388,6 +389,17 @@ fn a_tree_that_is_not_one_read_only_tree_below_the_root_is_refused() {
             "{}: holds the trees root {root}: its grant would open every run's trees",
             above.display()
         ))
+    );
+    // Outside the root, only a directory that is not there is passed over: one that cannot
+    // be looked up for another reason is refused.
+    fs::write(t.outside.join("file"), "").unwrap();
+    let through_file = t.outside.join("file/x");
+    assert_eq!(
+        tree_rules(&t.root, OWN, &[kbf(&through_file)]),
+        Err(NativeRefusal {
+            code: refusal::INPUT_UNAVAILABLE,
+            why: format!("{}: Not a directory (os error 20)", through_file.display()),
+        })
     );
     let gone = t.root.join("mount-provider/gone");
     assert_eq!(
