@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 
 use js_agent_wire::{
-    HeldRun, HeldState, HostPort, Isolation, JobSpec, JobUsage, LogReport, NativeSpec, Outcome,
-    RunResult, StartSizing, Taint, refusal,
+    CpuSeries, HeldRun, HeldState, HostPort, Isolation, JobSpec, JobUsage, LogReport, NativeSpec,
+    Outcome, RunResult, StartSizing, Taint, refusal,
 };
 use serde::{Deserialize, Serialize};
 
@@ -381,6 +381,10 @@ pub(super) struct Job {
     /// a result read back from the state root, which never reports a zero for what it does
     /// not know.
     pub(super) usage: Option<JobUsage>,
+    /// The job's CPU second by second, as the runtime recorded it, read with the result: a job
+    /// keyed by job lists it in its result. `None` for a runtime that records none, and for a
+    /// result read back from the state root or a run adopted already ended.
+    pub(super) cpu_series: Option<CpuSeries>,
     /// What the job's booking came from, as its start said ([`Given::sizing`]): `None` for a
     /// run start and for a job taken over from an earlier agent.
     pub(super) sizing: Option<StartSizing>,
@@ -647,6 +651,7 @@ impl Job {
             result: None,
             input_failure: None,
             usage: None,
+            cpu_series: None,
             sizing: None,
             logs: None,
             findings: Vec::new(),
@@ -690,6 +695,7 @@ impl Job {
             findings: Vec::new(),
             started_usec: None,
             usage: None,
+            cpu_series: None,
             sizing: None,
             cgroup: None,
             cgroup_missing_told: false,
@@ -727,6 +733,7 @@ impl Job {
             result: None,
             input_failure: None,
             usage: None,
+            cpu_series: None,
             sizing: None,
             logs: None,
             findings: Vec::new(),

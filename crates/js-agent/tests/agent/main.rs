@@ -22,6 +22,8 @@ mod container;
 mod cordon;
 #[cfg(target_os = "linux")]
 mod cpu_ceiling;
+#[cfg(target_os = "linux")]
+mod cpu_series;
 mod credential;
 mod credential_e2e;
 #[cfg(target_os = "linux")]

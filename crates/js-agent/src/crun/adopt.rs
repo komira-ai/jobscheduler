@@ -486,6 +486,8 @@ impl CrunRuntime {
             marks: Vec::new(),
             // Its peak counts from its first poll here: what it used before is not known.
             peak: super::peak::PeakWindow::default(),
+            // Its series, if recorded, starts at its first poll too, and is partial.
+            series: self.cpu_series.then(super::series::SeriesRecorder::adopted),
         }
     }
 

@@ -39,5 +39,6 @@ mod removes;
 mod resume;
 mod runs;
 mod s3_compat;
+mod series;
 mod stop;
 mod sweep;

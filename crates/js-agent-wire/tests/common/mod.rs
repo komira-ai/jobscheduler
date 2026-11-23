@@ -153,6 +153,8 @@ pub fn load() -> NodeLoad {
             cpu_peak_window_millis: 2500,
             ws_max_bytes: 2 << 30,
         }],
+        second_cpu_millis: Vec::new(),
+        second_cpu_pressure_some_permille: Vec::new(),
         dropped: js_agent_wire::LoadDrops::default(),
     }
 }
