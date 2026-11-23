@@ -198,7 +198,7 @@ impl NativeRuntime {
         let cwd = cwd::open(&exec, &native.cwd, &make)
             .map_err(|why| RuntimeError::new(why.to_string()))?;
         let dev = developer_dir.as_deref();
-        let (native, base) = match &pinned {
+        let (native, base, bundle_net) = match &pinned {
             Some(pinned) => {
                 let prepared =
                     bundle::prepare(pinned, native, &exec, (uid, &tmp, dev), &self.hand_over)
@@ -206,12 +206,11 @@ impl NativeRuntime {
                 let body = NativeSpec {
                     program: prepared.program,
                     args: prepared.args,
-                    network: prepared.network,
                     ..native.clone()
                 };
-                (body, prepared.env)
+                (body, prepared.env, Some(prepared.network))
             }
-            None => (native.clone(), env::plain(native, &tmp, dev)),
+            None => (native.clone(), env::plain(native, &tmp, dev), None),
         };
         self.mark(marks, STEPS[4]);
         let files = spec.files.as_deref();
@@ -249,7 +248,10 @@ impl NativeRuntime {
             .map(|rules| rules.mount_trees())
             .transpose()
             .map_err(|why| fail(&"the trees", &why))?;
-        let built = profile::build(&self.config, &native, &home, (&read_only, &grants), trees)?;
+        let level = profile::level(&self.config, native.network, bundle_net);
+        let deny_ports = self.denied_ports(&level)?;
+        let net = profile::RunNet { level, deny_ports };
+        let built = profile::build(&self.config, &net, &home, (&read_only, &grants), trees)?;
         self.mark(marks, STEPS[5]);
         // The job start's environment over the agent's (its values win), then the account's
         // names, which no job may set.

@@ -53,12 +53,12 @@ use serde_json::json;
 /// The variable naming the directory the tests work in.
 const ROOT: &str = "JS_NATIVE_PRIV_ROOT";
 
-/// A run's output committed to the put ingest for real.
-#[cfg(target_os = "macos")]
+// For real: a job on loopback with the host's ports denied, a run's output committed to the
+// put ingest, and the VM runtime.
+#[path = "native_privileged/loopback.rs"]
+mod loopback;
 #[path = "native_privileged/put.rs"]
 mod put;
-/// The VM runtime for real; macOS only, as it boots a VM.
-#[cfg(target_os = "macos")]
 #[path = "native_privileged/vm.rs"]
 mod vm;
 /// The uids of the pool's slots: free on the machine, and outside the farm's range (600
@@ -159,6 +159,7 @@ fn runtime_with(fixture: &Fixture, adjust: impl FnOnce(&mut NativeConfig)) -> Na
         },
         homes: fs::canonicalize(&fixture.homes).unwrap(),
         network: Ceiling::Off,
+        host_ports: Default::default(),
         tool_roots: vec![PathBuf::from("/usr/bin"), PathBuf::from("/bin")],
         read_denies: vec![
             denied(&fixture.state),
@@ -177,6 +178,31 @@ fn runtime_with(fixture: &Fixture, adjust: impl FnOnce(&mut NativeConfig)) -> Na
     let term = TERMS.fetch_add(1, Ordering::SeqCst);
     let launcher = SystemLauncher::at(supervisor_binary());
     NativeRuntime::over(Some(pool(fixture)), Arc::new(launcher), config, term).unwrap()
+}
+
+/// The configuration of a production open (`NativeRuntime::open`) over the pool's state
+/// directory `state`, which the open makes, with the homes in `/Users`, the read denies
+/// `read_denies` and the lease journal `journal`.
+fn opened(state: &Path, journal: PathBuf, read_denies: Vec<AbsPath>) -> NativeConfig {
+    NativeConfig {
+        accounts: Accounts {
+            state: state.to_path_buf(),
+            slots: slots(),
+            ready: 0,
+        },
+        homes: PathBuf::from("/Users"),
+        network: Ceiling::Off,
+        host_ports: Default::default(),
+        tool_roots: vec![PathBuf::from("/usr/bin"), PathBuf::from("/bin")],
+        read_denies,
+        mount_roots: Vec::new(),
+        read_model: ReadModel::Open,
+        journal,
+        max_file_bytes: 1 << 30,
+        max_processes: 512,
+        egress: None,
+        full_disk_access: FullDiskAccess::Granted,
+    }
 }
 
 /// A run of `program args` whose scratch directory (the log files) is made here.
@@ -296,24 +322,8 @@ fn process_uids() -> Vec<u32> {
 fn the_production_open_makes_the_pools_directory_and_passes_the_self_test() {
     let fixture = fixture();
     let state = fixture.root.join("opened-accounts");
-    let config = NativeConfig {
-        accounts: Accounts {
-            state: state.clone(),
-            slots: slots(),
-            ready: 0,
-        },
-        homes: PathBuf::from("/Users"),
-        network: Ceiling::Off,
-        tool_roots: vec![PathBuf::from("/usr/bin"), PathBuf::from("/bin")],
-        read_denies: vec![AbsPath::new(&state).unwrap()],
-        mount_roots: Vec::new(),
-        read_model: ReadModel::Open,
-        journal: fixture.root.join("opened-leases"),
-        max_file_bytes: 1 << 30,
-        max_processes: 512,
-        egress: None,
-        full_disk_access: FullDiskAccess::Granted,
-    };
+    let denies = vec![AbsPath::new(&state).unwrap()];
+    let config = opened(&state, fixture.root.join("opened-leases"), denies);
     let launcher = Arc::new(SystemLauncher::at(supervisor_binary()));
     let term = TERMS.fetch_add(1, Ordering::SeqCst);
     let mut rt = NativeRuntime::open(launcher, config, term)
@@ -338,27 +348,11 @@ fn the_production_open_makes_the_pools_directory_and_passes_the_self_test() {
 fn a_job_writes_its_accounts_own_temporary_and_cache_folders_and_nothing_else_there() {
     let fixture = fixture();
     let state = fixture.root.join("own-folders-accounts");
-    let config = NativeConfig {
-        accounts: Accounts {
-            state: state.clone(),
-            slots: slots(),
-            ready: 0,
-        },
-        homes: PathBuf::from("/Users"),
-        network: Ceiling::Off,
-        tool_roots: vec![PathBuf::from("/usr/bin"), PathBuf::from("/bin")],
-        read_denies: vec![
-            AbsPath::new(&state).unwrap(),
-            AbsPath::new(&fixture.root.join("scratch")).unwrap(),
-        ],
-        mount_roots: Vec::new(),
-        read_model: ReadModel::Open,
-        journal: fixture.root.join("own-folders-leases"),
-        max_file_bytes: 1 << 30,
-        max_processes: 512,
-        egress: None,
-        full_disk_access: FullDiskAccess::Granted,
-    };
+    let denies = vec![
+        AbsPath::new(&state).unwrap(),
+        AbsPath::new(&fixture.root.join("scratch")).unwrap(),
+    ];
+    let config = opened(&state, fixture.root.join("own-folders-leases"), denies);
     let launcher = Arc::new(SystemLauncher::at(supervisor_binary()));
     let term = TERMS.fetch_add(1, Ordering::SeqCst);
     // The production open, which attaches the folder finder itself: the test does not.

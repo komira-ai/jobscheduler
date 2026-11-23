@@ -194,23 +194,25 @@ fn a_run_lives_in_the_home_of_the_account_the_pool_lent_it() {
     }
 }
 
-/// Asserts the network rules of the profile: `off` has no loopback rule, `loopback` has it,
-/// and an open network has no network rule at all; a request above the ceiling, given to the
-/// runtime directly, is still held at the ceiling. An agent refuses such a start before it
+/// Asserts the network rules of the profile: a job of the level `none` (`off` on the wire) and
+/// one asking `loopback` have the loopback rule under every ceiling but `off`, which denies the
+/// network, and an open network has no network rule at all; a request above the ceiling,
+/// given to the runtime directly, is still held at the ceiling. An agent refuses such a start before it
 /// reaches the runtime (`check_native`); the profile's own bound is a defence in depth.
 ///
-/// Catches: a profile that grants more than the ceiling and a level mapped to the wrong
-/// rules.
+/// Catches: a profile that grants more than the ceiling, a level mapped to the wrong rules,
+/// and a `none` job left with the network denied where the ceiling allows loopback.
 #[test]
 fn a_runs_network_is_the_lower_of_its_request_and_the_agents_cap() {
     let loopback = "(allow network* (remote ip \"localhost:*\"))";
     let cases = [
-        (Ceiling::Loopback, NetworkLevel::Off, false, true),
+        (Ceiling::Loopback, NetworkLevel::Off, true, true),
+        (Ceiling::Off, NetworkLevel::Off, false, true),
         (Ceiling::Loopback, NetworkLevel::Loopback, true, true),
         (Ceiling::Loopback, NetworkLevel::On, true, true),
         (Ceiling::Off, NetworkLevel::On, false, true),
         (Ceiling::On, NetworkLevel::On, false, false),
-        (Ceiling::On, NetworkLevel::Off, false, true),
+        (Ceiling::On, NetworkLevel::Off, true, true),
     ];
     for (n, (cap, asked, has_loopback, denies)) in cases.into_iter().enumerate() {
         let mut rig = Rig::with(&format!("net{n}"), |config| {

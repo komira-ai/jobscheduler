@@ -100,6 +100,19 @@
 //! A start that names a `tree` input, which is retired and which no server sends, is refused
 //! `native-unsupported`.
 //!
+//! # Loopback
+//!
+//! A job of the level `none` gets loopback, as a Linux job has its own: its profile lets it
+//! listen on `127.0.0.1` and `::1` and connect to loopback, when the agent's ceiling
+//! (`--native-network`) is `loopback` or above; under the ceiling `off` it has no network at
+//! all (`native/network.rs`). A Mac has one loopback for every user, so every profile that
+//! reaches loopback denies, by port, the host's own services: the ports of
+//! `--native-host-port` (the fixed ports of the host's services, denied whether they listen or
+//! not) and the port of every listener on loopback or a wildcard address that no job account
+//! holds, listed when the run starts ([`crate::mac_listen`]). A listing that fails fails the
+//! start. The agent lists the host's listeners once at its own start too, and does not start
+//! when it cannot read them. Two jobs of one Mac can reach each other's listeners.
+//!
 //! What this runtime does not do yet: stage a `stage` input (this agent keeps no stage
 //! trees: a start that names one is refused `native-unsupported`), forward a declared port (a
 //! start that declares any is refused `ports-not-supported`, see `native/network.rs`).
@@ -132,7 +145,7 @@ mod settings;
 mod start;
 mod xcode;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Display;
 use std::fs::{self, File};
 use std::io;
@@ -144,7 +157,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use js_agent_wire::{
     BUNDLE_PROGRAM_PREFIX, HostPort, InputRef, LogReport, LogTail, NativeSpec, refusal,
 };
-use js_mac_pool::seatbelt::{AbsPath, ReadModel};
+use js_mac_pool::seatbelt::{AbsPath, Net, ReadModel};
 use js_mac_session::full_disk_access::FullDiskAccess;
 
 use crate::bundle::Placer;
@@ -155,6 +168,7 @@ use crate::lifecycle::{
 };
 use crate::logs::LiveLogs;
 use crate::mac_accounts::{Pool, Retired};
+use crate::mac_listen::{ListenerTable, MacListeners};
 use crate::mac_supervisor::Launcher;
 use crate::mac_sweep::{MacTable, ProcessTable};
 
@@ -180,8 +194,13 @@ pub struct NativeConfig {
     /// kernel resolves.
     pub homes: PathBuf,
     /// The most network a run may ask for (`--native-network`): a start above it is refused
-    /// (`network-above-ceiling`), never run with less.
+    /// (`network-above-ceiling`), never run with less. It also says whether a job of the level
+    /// `none` gets loopback (`loopback` and above) or no network (`off`).
     pub network: Ceiling,
+    /// The ports of the host's own services (`--native-host-port`): every run whose profile
+    /// reaches loopback is denied binding or reaching them, whether or not they listen, beside
+    /// the ports of the host's listeners found at its start ([`crate::mac_listen`]).
+    pub host_ports: BTreeSet<u16>,
     /// The directories a start's program must lie under.
     pub tool_roots: Vec<PathBuf>,
     /// Paths no run may read, such as the agent's state and scratch roots, every mount root
@@ -241,6 +260,8 @@ pub struct NativeRuntime {
     new_session: bool,
     /// The process table a run's processes are swept from (`native/end.rs`).
     table: Arc<dyn ProcessTable + Send + Sync>,
+    /// The listeners of the host, whose ports a run's profile denies (`crate::mac_listen`).
+    listeners: Arc<dyn ListenerTable>,
     /// The account the last removal retired, and what its retirement showed.
     last_retired: Option<(String, Retired)>,
     /// The put ingest runs' outputs are committed to, when the agent was given one
@@ -345,6 +366,7 @@ impl NativeRuntime {
             now_ms: system_clock(),
             new_session: true,
             table: Arc::new(MacTable),
+            listeners: Arc::new(MacListeners),
             last_retired: None,
             put: None,
             puts: BTreeMap::new(),
@@ -426,6 +448,54 @@ impl NativeRuntime {
     #[must_use]
     pub fn with_process_table(self, table: Arc<dyn ProcessTable + Send + Sync>) -> Self {
         Self { table, ..self }
+    }
+
+    /// The same runtime, reading the host's listeners from `listeners` in place of the Mac's
+    /// own. For tests; an agent never calls it.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_listener_table(self, listeners: Arc<dyn ListenerTable>) -> Self {
+        Self { listeners, ..self }
+    }
+
+    /// The ports the profile of a run at `net` denies: none at [`Net::Off`], which denies the
+    /// network; otherwise `--native-host-port` and the ports of the host's listeners now
+    /// ([`crate::mac_listen::denied_ports`]).
+    ///
+    /// # Errors
+    ///
+    /// The listeners cannot be read: the run is not started, since a host service could be
+    /// missed.
+    fn denied_ports(&self, net: &Net) -> Result<Vec<u16>, RuntimeError> {
+        if *net == Net::Off {
+            return Ok(Vec::new());
+        }
+        let slots = self.config.accounts.slots;
+        crate::mac_listen::denied_ports(&*self.listeners, &self.config.host_ports, slots)
+            .map_err(|why| fail(&"the host's listeners", &why))
+    }
+
+    /// At the agent's start, when a job can reach loopback (a ceiling above `off`): the
+    /// host's listeners are read once, so an agent that could not deny them does not start,
+    /// and each one a run will be denied is logged.
+    fn host_listeners_readable(&self) -> Result<(), RuntimeError> {
+        if self.config.network == Ceiling::Off {
+            return Ok(());
+        }
+        let found = self.listeners.listeners().map_err(|why| {
+            fail(
+                &"--native-network",
+                &format!("a job reaches loopback, and the host's listeners cannot be read: {why}"),
+            )
+        })?;
+        let slots = self.config.accounts.slots;
+        for listener in crate::mac_listen::host_listeners(found, slots) {
+            tracing::info!(
+                "the host's listener {} is denied to every run",
+                crate::mac_listen::describe(&listener)
+            );
+        }
+        Ok(())
     }
 
     /// The same runtime, giving a run's files to its account through `hand_over` in place of
@@ -588,9 +658,11 @@ impl Runtime for NativeRuntime {
         false
     }
 
-    /// At the agent's start: with a ceiling of `on`, the pf anchor must be in force.
+    /// At the agent's start: with a ceiling of `on`, the pf anchor must be in force, and with
+    /// any ceiling above `off` the host's listeners must be readable.
     fn check_egress(&self) -> Result<(), RuntimeError> {
-        self.pf_in_force()
+        self.pf_in_force()?;
+        self.host_listeners_readable()
     }
 
     /// Before every native start, after [`Runtime::check_native`] admitted its level: a job

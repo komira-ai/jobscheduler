@@ -192,9 +192,11 @@ pf by uid is a control on the packets a pool user's sockets send, and it has lim
   loopback connection, so "pool user to another pool user's listener" cannot be refused
   by a rule keyed on the sender. Builds and tests that talk to themselves over 127.0.0.1
   need loopback, so it is passed (IPv4 only) and not narrowed. A pool user can therefore
-  reach any listener on 127.0.0.1, including the agent's and the host's own loopback
-  services; those must not rely on the network for access control (use a unix socket
-  with file modes, or check the peer uid).
+  reach any listener on 127.0.0.1 as far as pf goes. The job's Seatbelt profile denies the
+  host's own loopback services by port (the agent's `--native-host-port` and the host
+  listeners it finds when the run starts), but another pool user's listener stays
+  reachable, so a service must not rely on the network for access control (use a unix
+  socket with file modes, or check the peer uid).
 - **The node's own address.** A connection from a pool user to the node's own non-loopback
   address leaves through `lo0` and meets the rules as any other destination: blocked
   unless that address is a listed endpoint (and dropped, not refused, like every blocked

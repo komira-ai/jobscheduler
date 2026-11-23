@@ -147,6 +147,7 @@ fn the_native_settings_carry_the_xcodes_the_hello_listed() {
         account_ready: None,
         homes: None,
         network: None,
+        host_ports: &[],
         tool_roots: &[],
         deny_read: &[],
         max_file_mib: None,

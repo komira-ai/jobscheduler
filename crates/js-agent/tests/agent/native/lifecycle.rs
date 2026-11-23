@@ -144,7 +144,8 @@ impl Native {
         };
         let mut runtime = opened
             .unwrap()
-            .with_process_table(super::end::GroupTable::new(launcher.clone()));
+            .with_process_table(super::end::GroupTable::new(launcher.clone()))
+            .with_listener_table(super::no_listeners());
         match (hand_over, slots) {
             (Some(hand_over), _) => runtime = runtime.with_hand_over(hand_over),
             (None, 1) => {}

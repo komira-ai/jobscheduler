@@ -131,6 +131,7 @@ fn runtime(fixture: &Fixture, exe: &Path) -> NativeRuntime {
         },
         homes: fs::canonicalize(&fixture.homes).unwrap(),
         network: Ceiling::On,
+        host_ports: Default::default(),
         tool_roots: vec![
             PathBuf::from("/usr/bin"),
             PathBuf::from("/bin"),

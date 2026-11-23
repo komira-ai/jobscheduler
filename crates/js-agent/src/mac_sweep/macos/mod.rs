@@ -5,7 +5,7 @@
 //! Nothing here is reached by the Linux test jobs; the decisions it serves are tested there
 //! over a fake table.
 
-mod procs;
+pub(crate) mod procs;
 #[cfg(test)]
 mod root_tests;
 #[cfg(test)]

@@ -1,10 +1,11 @@
 //! The flags that configure native jobs, checked.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use js_mac_pool::seatbelt::{AbsPath, ReadModel};
+use js_mac_pool::seatbelt::{AbsPath, MAX_PORTS, ReadModel};
 use js_mac_session::full_disk_access::FullDiskAccess;
 
 use super::NativeConfig;
@@ -54,6 +55,8 @@ pub struct NativeFlags<'a> {
     pub homes: Option<&'a Path>,
     /// `--native-network`.
     pub network: Option<&'a str>,
+    /// `--native-host-port`, each.
+    pub host_ports: &'a [u16],
     /// `--native-tool-root`, each.
     pub tool_roots: &'a [PathBuf],
     /// `--native-deny-read`, each.
@@ -92,7 +95,8 @@ impl NativeSettings {
     /// The text names the flag at fault: a native flag without `--native-accounts`, no
     /// `--native-account-range` or one the pool refuses, more ready accounts than slots, a
     /// path that is not absolute, a home directory other than the pool's, a network level
-    /// that is none of `off`, `loopback`, `on` and `open`, a `--native-pf-*` flag beside
+    /// that is none of `off`, `loopback`, `on` and `open`, a host port of 0 or more than
+    /// [`MAX_PORTS`] of them, a `--native-pf-*` flag beside
     /// `open` (or beside any value but `on`), a limit of 0 or one too large, or a root a
     /// profile cannot name.
     pub fn from_flags(
@@ -106,6 +110,7 @@ impl NativeSettings {
                 ("--native-account-ready", flags.account_ready.is_some()),
                 ("--native-homes", flags.homes.is_some()),
                 ("--native-network", flags.network.is_some()),
+                ("--native-host-port", !flags.host_ports.is_empty()),
                 ("--native-tool-root", !flags.tool_roots.is_empty()),
                 ("--native-deny-read", !flags.deny_read.is_empty()),
                 ("--native-max-file-mib", flags.max_file_mib.is_some()),
@@ -147,6 +152,7 @@ impl NativeSettings {
                  (the pf flags limit the network of --native-network on)"
             ));
         }
+        let host_ports = host_ports_of(flags.host_ports)?;
         let egress = PfPolicy::from_flags(&flags.pf, network == Ceiling::On)?;
         let tool_roots: Vec<PathBuf> = match flags.tool_roots {
             [] => DEFAULT_TOOL_ROOTS
@@ -203,6 +209,7 @@ impl NativeSettings {
                 accounts,
                 homes,
                 network,
+                host_ports,
                 tool_roots,
                 read_denies,
                 mount_roots: Vec::new(),
@@ -345,6 +352,21 @@ impl NativeSettings {
 /// The account pool of `--native-accounts` (`state`): its slots, which
 /// `--native-account-range` must give, and how many accounts it keeps ready (by default one, at
 /// most one per slot).
+/// The ports of `--native-host-port`, each once.
+fn host_ports_of(given: &[u16]) -> Result<BTreeSet<u16>, String> {
+    if given.contains(&0) {
+        return Err("--native-host-port: 0 is no port a service listens on".to_owned());
+    }
+    let ports: BTreeSet<u16> = given.iter().copied().collect();
+    if ports.len() > MAX_PORTS {
+        return Err(format!(
+            "--native-host-port: {} ports, more than {MAX_PORTS}",
+            ports.len()
+        ));
+    }
+    Ok(ports)
+}
+
 fn accounts_of(
     state: &Path,
     range: Option<&str>,

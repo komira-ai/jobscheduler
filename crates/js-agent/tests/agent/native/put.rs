@@ -549,6 +549,7 @@ fn the_settings_keep_the_put_ingest_and_the_runtime_gets_it() {
         account_ready: None,
         homes: None,
         network: None,
+        host_ports: &[],
         tool_roots: &[],
         deny_read: &[],
         max_file_mib: None,

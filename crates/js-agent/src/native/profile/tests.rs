@@ -1,10 +1,10 @@
 //! The profile of a native run: where it lets a job write, and that the places only the
 //! privacy controls guard stay denied.
 
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use js_mac_pool::seatbelt::{AbsPath, MountGrant, ReadModel};
+use js_mac_pool::seatbelt::{AbsPath, MountGrant, Net, ReadModel};
 use js_mac_session::full_disk_access::FullDiskAccess;
 
 use super::*;
@@ -30,6 +30,7 @@ fn config() -> NativeConfig {
         },
         homes: PathBuf::from("/srv/homes"),
         network: Ceiling::Loopback,
+        host_ports: BTreeSet::new(),
         tool_roots: vec![PathBuf::from("/usr/bin")],
         read_denies,
         mount_roots: Vec::new(),
@@ -42,16 +43,11 @@ fn config() -> NativeConfig {
     }
 }
 
-fn body(program: &str, args: &[&str]) -> NativeSpec {
-    NativeSpec {
-        program: program.to_owned(),
-        args: args.iter().map(|arg| (*arg).to_owned()).collect(),
-        env: BTreeMap::new(),
-        cwd: String::new(),
-        inputs: Vec::new(),
-        outputs: Vec::new(),
-        network: NetworkLevel::Off,
-        ports: Vec::new(),
+/// The network of a run of the level `none` under [`config`]'s ceiling, with no host port.
+fn none() -> RunNet {
+    RunNet {
+        level: level(&config(), NetworkLevel::Off, None),
+        deny_ports: Vec::new(),
     }
 }
 
@@ -89,7 +85,7 @@ fn covers(grant: &str, place: &str) -> bool {
 #[test]
 fn a_run_may_write_below_its_run_directory_alone() {
     let home = Path::new("/srv/homes/kbf-acct-4");
-    let profile = build(&config(), &body("/bin/echo", &[]), home, (&[], &[]), None).unwrap();
+    let profile = build(&config(), &none(), home, (&[], &[]), None).unwrap();
     let rule = "(allow file-write* (subpath (param \"RUN\")) (literal \"/dev/null\") (subpath \"/dev/fd\"))";
     let writes: Vec<&str> = profile
         .text()
@@ -124,14 +120,7 @@ fn a_run_may_write_below_its_run_directory_alone() {
 fn each_privacy_only_place_is_denied_after_every_grant_that_holds_it() {
     let home = Path::new("/srv/homes/kbf-acct-4");
     let grants = [mount("/srv/mounts/work")];
-    let profile = build(
-        &config(),
-        &body("/bin/echo", &[]),
-        home,
-        (&[], &grants),
-        None,
-    )
-    .unwrap();
+    let profile = build(&config(), &none(), home, (&[], &grants), None).unwrap();
     let params = profile.params();
     let lines: Vec<&str> = profile.text().lines().collect();
     for place in PRIVACY_ONLY_PLACES {
@@ -170,14 +159,7 @@ fn a_mount_in_a_privacy_only_place_is_refused() {
         "/System/Volumes/Data/Library/Application Support/com.apple.TCC/sub",
     ] {
         let grants = [mount(place)];
-        let why = build(
-            &config(),
-            &body("/bin/echo", &[]),
-            home,
-            (&[], &grants),
-            None,
-        )
-        .unwrap_err();
+        let why = build(&config(), &none(), home, (&[], &grants), None).unwrap_err();
         assert_eq!(
             why.0,
             format!("a mount: {place} lies in a place only the privacy controls guard")
@@ -192,16 +174,7 @@ fn a_mount_in_a_privacy_only_place_is_refused() {
 fn a_mount_beside_a_privacy_only_place_is_built() {
     let home = Path::new("/srv/homes/kbf-acct-4");
     let grants = [mount("/Library/Application Support/com.apple.TCC2")];
-    assert!(
-        build(
-            &config(),
-            &body("/bin/echo", &[]),
-            home,
-            (&[], &grants),
-            None
-        )
-        .is_ok()
-    );
+    assert!(build(&config(), &none(), home, (&[], &grants), None).is_ok());
 }
 
 /// Asserts the homes roots of a pool whose homes are `/Users`, by the exact list: the homes
@@ -234,14 +207,7 @@ fn the_homes_roots_are_the_homes_and_roots_home_under_both_spellings() {
 fn other_homes_and_roots_home_are_denied_reads_and_the_own_home_is_granted_back() {
     let home = Path::new("/srv/homes/kbf-acct-4");
     let grants = [mount("/srv/mounts/work")];
-    let profile = build(
-        &config(),
-        &body("/bin/echo", &[]),
-        home,
-        (&[], &grants),
-        None,
-    )
-    .unwrap();
+    let profile = build(&config(), &none(), home, (&[], &grants), None).unwrap();
     let params = profile.params();
     let lines: Vec<&str> = profile.text().lines().collect();
     let roots = home_roots(Path::new("/srv/homes"));
@@ -292,14 +258,7 @@ fn a_mount_over_a_homes_root_is_refused() {
         "/System/Volumes/Data/srv",
     ] {
         let grants = [mount(place)];
-        let why = build(
-            &config(),
-            &body("/bin/echo", &[]),
-            home,
-            (&[], &grants),
-            None,
-        )
-        .unwrap_err();
+        let why = build(&config(), &none(), home, (&[], &grants), None).unwrap_err();
         assert_eq!(
             why.0, "the policy: a mount grant holds a read-denied path",
             "{place}"
@@ -318,14 +277,7 @@ fn the_trees_given_to_the_build_are_granted_and_none_grants_nothing() {
     let root = AbsPath::parse("/srv/store/trees").unwrap();
     let tree = AbsPath::parse("/srv/store/trees/abc").unwrap();
     let trees = js_mac_pool::seatbelt::MountTrees::new(root, vec![tree]).unwrap();
-    let with = build(
-        &config(),
-        &body("/bin/echo", &[]),
-        home,
-        (&[], &[]),
-        Some(trees),
-    )
-    .unwrap();
+    let with = build(&config(), &none(), home, (&[], &[]), Some(trees)).unwrap();
     let params = with.params();
     assert!(params.contains(&("MOUNT".to_owned(), "/srv/store/trees".to_owned())));
     assert!(params.contains(&("MT_0".to_owned(), "/srv/store/trees/abc".to_owned())));
@@ -334,7 +286,81 @@ fn the_trees_given_to_the_build_are_granted_and_none_grants_nothing() {
             .lines()
             .any(|line| line == "(allow file-read* (subpath (param \"MT_0\")))")
     );
-    let without = build(&config(), &body("/bin/echo", &[]), home, (&[], &[]), None).unwrap();
+    let without = build(&config(), &none(), home, (&[], &[]), None).unwrap();
     assert!(!without.params().iter().any(|(name, _)| name == "MOUNT"));
     assert!(!without.text().contains("MT_0"));
+}
+
+/// Asserts the level of a run's profile for every ceiling and every level a start asks: the
+/// job level `none` (`off` on the wire) is loopback under the ceilings `loopback`, `on` and
+/// `open` and no network under `off`; `loopback` is loopback, `on` and `open` the open profile;
+/// each met with the ceiling; and a bundle's `network_max` lowers it further (`off` takes even
+/// loopback). Catches a `none` job left with the network denied on a Mac whose ceiling allows
+/// loopback, one given loopback under the ceiling `off`, and a bundle cap that raises a level.
+#[test]
+fn a_none_job_gets_loopback_under_every_ceiling_but_off() {
+    let at = |ceiling: Ceiling, asked: NetworkLevel, bundle: Option<Net>| {
+        let config = NativeConfig {
+            network: ceiling,
+            ..config()
+        };
+        level(&config, asked, bundle)
+    };
+    for ceiling in [Ceiling::Loopback, Ceiling::On, Ceiling::Open] {
+        assert_eq!(
+            at(ceiling, NetworkLevel::Off, None),
+            Net::Loopback,
+            "{ceiling}"
+        );
+        assert_eq!(at(ceiling, NetworkLevel::Loopback, None), Net::Loopback);
+    }
+    for asked in [NetworkLevel::Off, NetworkLevel::Loopback, NetworkLevel::On] {
+        assert_eq!(at(Ceiling::Off, asked, None), Net::Off, "{asked:?}");
+    }
+    assert_eq!(at(Ceiling::On, NetworkLevel::On, None), Net::On);
+    assert_eq!(at(Ceiling::Open, NetworkLevel::Open, None), Net::On);
+    assert_eq!(at(Ceiling::Loopback, NetworkLevel::On, None), Net::Loopback);
+    assert_eq!(at(Ceiling::On, NetworkLevel::Off, Some(Net::Off)), Net::Off);
+    assert_eq!(
+        at(Ceiling::On, NetworkLevel::Off, Some(Net::On)),
+        Net::Loopback
+    );
+    assert_eq!(
+        at(Ceiling::Open, NetworkLevel::Open, Some(Net::Loopback)),
+        Net::Loopback
+    );
+}
+
+/// Asserts that a run's denied ports reach its profile as a bind deny at any address and a
+/// connect deny on loopback, after the loopback grants, and that a run with no network names
+/// none. Catches the agent's host ports dropped between the runtime and the profile.
+#[test]
+fn the_denied_ports_reach_the_profile() {
+    let home = Path::new("/srv/homes/kbf-acct-1");
+    let net = RunNet {
+        level: Net::Loopback,
+        deny_ports: vec![9300, 12049],
+    };
+    let profile = build(&config(), &net, home, (&[], &[]), None).unwrap();
+    let text = profile.text();
+    let grant = text
+        .find("(allow network* (remote ip \"localhost:*\"))")
+        .expect("the loopback grant");
+    for port in [9300, 12049] {
+        for rule in [
+            format!("(deny network* (local ip \"*:{port}\"))"),
+            format!("(deny network* (remote ip \"localhost:{port}\"))"),
+        ] {
+            let at = text
+                .find(&rule)
+                .unwrap_or_else(|| panic!("{rule}:\n{text}"));
+            assert!(at > grant, "{rule} after the grant");
+        }
+    }
+    let off = RunNet {
+        level: Net::Off,
+        deny_ports: vec![9300],
+    };
+    let profile = build(&config(), &off, home, (&[], &[]), None).unwrap();
+    assert!(!profile.text().contains("9300"), "{}", profile.text());
 }

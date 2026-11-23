@@ -43,7 +43,8 @@ const OFF_RULES: [&str; 2] = [
     "(allow network-outbound (literal \"/private/var/run/syslog\"))",
 ];
 
-/// Any loopback connect, and listeners on loopback only.
+/// Any loopback connect, and listeners on loopback only; the host's ports are denied after
+/// these (`port_denies`).
 const LOOPBACK_RULES: [&str; 2] = [
     "(allow network-inbound (local ip \"localhost:*\"))",
     "(allow network* (remote ip \"localhost:*\"))",
@@ -117,7 +118,8 @@ impl Profile {
     /// a write grant), then the exec denies of the mounts that are `no_exec`, after every
     /// grant so no grant reopens them; the network; a deny of unix-socket connect and bind
     /// under each read-denied path (after the network rules, so no network allow
-    /// reaches the agent's sockets); process info; the floor.
+    /// reaches the agent's sockets); the denies of the host's ports (after the network rules,
+    /// so no level reopens them); process info; the floor.
     ///
     /// A later rule wins, so the floor beats everything before it.
     ///
@@ -171,6 +173,7 @@ impl Profile {
         mount_rules(policy, &mut lines, &mut params);
 
         net_rules(policy, &mut lines);
+        port_denies(policy, &mut lines);
         for i in 0..policy.read_denies().len() {
             lines.push(format!(
                 "(deny network-outbound (remote unix-socket (subpath (param \"RD_{i}\"))))"
@@ -292,6 +295,21 @@ fn mount_rules(policy: &Policy, lines: &mut Vec<String>, params: &mut Vec<(Strin
                 "(deny file-map-executable (subpath (param \"GR_{i}\")))"
             ));
         }
+    }
+}
+
+/// For each denied port, lowest first: no bind or listen on it at any local address, and
+/// no connect or send to it on loopback. Nothing under [`Net::Off`], whose `(deny
+/// network*)` denies every port already. The remote host is `localhost` and not `*`: a
+/// level that reaches other hosts keeps their ports (a store's `9300` elsewhere is not the
+/// host's own service).
+fn port_denies(policy: &Policy, lines: &mut Vec<String>) {
+    if *policy.net() == Net::Off {
+        return;
+    }
+    for port in policy.denied_ports() {
+        lines.push(format!("(deny network* (local ip \"*:{port}\"))"));
+        lines.push(format!("(deny network* (remote ip \"localhost:{port}\"))"));
     }
 }
 

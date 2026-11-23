@@ -50,7 +50,8 @@ impl Machine for OverAccounts {
         );
         let runtime = runtime
             .map_err(|why| why.to_string())?
-            .with_process_table(super::end::GroupTable::new(self.launcher.clone()));
+            .with_process_table(super::end::GroupTable::new(self.launcher.clone()))
+            .with_listener_table(super::no_listeners());
         Ok((Box::new(runtime), Vec::new()))
     }
 

@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use js_agent_wire::{NativeSpec, NetworkLevel};
+use js_agent_wire::NetworkLevel;
 use js_mac_pool::seatbelt::{
     AbsPath, Caps, MountGrant, MountTrees, Narrowing, Net, Policy, Profile, SlotLayout,
 };
@@ -58,7 +58,27 @@ pub(super) fn run_dir(home: &Path) -> PathBuf {
     home.join(RUN_DIR)
 }
 
-/// The profile of `native` under the policy of `config`, run as an account whose home is
+/// The network of a run's profile: its level ([`level`]) and the ports it is denied, the host's
+/// own (`NativeRuntime::denied_ports`).
+pub(super) struct RunNet {
+    /// The level.
+    pub level: Net,
+    /// The ports of the host's services, denied at every level but [`Net::Off`].
+    pub deny_ports: Vec<u16>,
+}
+
+/// The level of a run's profile: what its start asks ([`net_of`]), met with the agent's
+/// ceiling and, for a run that pins a bundle, with the bundle's `network_max`. A job of the
+/// level `none` gets loopback under every ceiling but `off`, which leaves it no network.
+pub(super) fn level(config: &NativeConfig, asked: NetworkLevel, bundle: Option<Net>) -> Net {
+    let level = config.network.net().narrow(net_of(asked));
+    match bundle {
+        Some(cap) => level.narrow(cap),
+        None => level,
+    }
+}
+
+/// The profile of a run at `net` under the policy of `config`, run as an account whose home is
 /// `home`: writes are granted to the run directory (`<home>/exec`) and to the grants in
 /// `mounts` (the run's job mounts and its account's own per-user temporary and cache folders),
 /// and nowhere else, `read_only` (the run's files directory, the `dest`
@@ -78,7 +98,7 @@ pub(super) fn run_dir(home: &Path) -> PathBuf {
 /// cannot be built.
 pub(super) fn build(
     config: &NativeConfig,
-    native: &NativeSpec,
+    net: &RunNet,
     home: &Path,
     (read_only, mounts): (&[(&str, PathBuf)], &[MountGrant]),
     trees: Option<MountTrees>,
@@ -109,10 +129,8 @@ pub(super) fn build(
         read_denies: config.read_denies.clone(),
         mounts: mounts.to_vec(),
     };
-    // The policy never grants more than the ceiling. That is a defence in depth only: a
-    // start above the ceiling was refused by `check_native` before its account was lent, so
-    // this narrowing lowers nothing the agent admitted. What can still lower the level is the
-    // bundle's `network_max` (`bundle::lower`), applied to `native` before this.
+    // The policy never grants more than the ceiling: `net.level` was met with it already
+    // ([`level`]), so the cap lowers nothing here; it is a defence in depth.
     let caps = Caps {
         net: config.network.net(),
         read_model: config.read_model,
@@ -122,8 +140,9 @@ pub(super) fn build(
         .map(|root| AbsPath::new(root).map_err(|why| fail(&root.display(), &why)))
         .collect::<Result<Vec<AbsPath>, RuntimeError>>()?;
     let narrowing = Narrowing {
-        net: Some(net_of(native.network)),
+        net: Some(net.level.clone()),
         deny_homes,
+        deny_ports: net.deny_ports.clone(),
         ..Narrowing::default()
     };
     let policy = Policy::base(layout, caps)
@@ -132,11 +151,13 @@ pub(super) fn build(
     Profile::for_policy(&policy).map_err(|why| fail(&"the profile", &why))
 }
 
-/// The network level of a start as the profile's. `on` and `open` are one profile, with no
-/// network rule: the packet filter, which only `on` requires, is what tells them apart.
+/// The network level of a start as the profile's. `off`, the job level `none`, is loopback, as
+/// a Linux job of that level has its own (the ceiling `off` lowers it to no network). `on` and
+/// `open` are one profile, with no network rule: the packet filter, which only `on` requires,
+/// is what tells them apart.
 fn net_of(level: NetworkLevel) -> Net {
     match level {
-        NetworkLevel::Off => Net::Off,
+        NetworkLevel::Off => Net::Loopback,
         NetworkLevel::Loopback => Net::Loopback,
         NetworkLevel::On | NetworkLevel::Open => Net::On,
     }

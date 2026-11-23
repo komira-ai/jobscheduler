@@ -14,7 +14,7 @@ use std::mem::{MaybeUninit, size_of};
 use super::super::Proc;
 
 /// The pids of every process of the Mac, as `proc_listallpids` gives them.
-fn all_pids() -> io::Result<Vec<libc::pid_t>> {
+pub(crate) fn all_pids() -> io::Result<Vec<libc::pid_t>> {
     // SAFETY: a null buffer of size 0 asks only for the number of processes; nothing is
     // written.
     let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
@@ -74,7 +74,7 @@ pub(super) fn list(with_asid: bool, asid_of: fn(i32) -> Option<i32>) -> io::Resu
 }
 
 /// The short BSD info of `pid`, or `None` when it is gone.
-fn short_info(pid: libc::pid_t) -> io::Result<Option<libc::proc_bsdshortinfo>> {
+pub(crate) fn short_info(pid: libc::pid_t) -> io::Result<Option<libc::proc_bsdshortinfo>> {
     let mut info = MaybeUninit::<libc::proc_bsdshortinfo>::zeroed();
     let size = i32::try_from(size_of::<libc::proc_bsdshortinfo>()).map_err(io::Error::other)?;
     // SAFETY: `info` is a writable `proc_bsdshortinfo` of `size` bytes, ours for the call,
@@ -106,7 +106,7 @@ fn short_info(pid: libc::pid_t) -> io::Result<Option<libc::proc_bsdshortinfo>> {
 }
 
 /// A NUL-terminated name of at most `raw.len()` bytes, as text.
-fn c_name(raw: &[libc::c_char]) -> String {
+pub(crate) fn c_name(raw: &[libc::c_char]) -> String {
     let bytes: Vec<u8> = raw
         .iter()
         .take_while(|&&c| c != 0)

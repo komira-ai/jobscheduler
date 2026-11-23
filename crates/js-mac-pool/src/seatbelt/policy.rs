@@ -16,6 +16,11 @@ use crate::xcode::HostXcode;
 /// on the `sandbox-exec` command line.
 pub const MAX_LISTED: usize = 64;
 
+/// The most host ports one policy denies ([`Narrowing::deny_ports`]); each is two rules of
+/// the profile. A host lists more of its own listeners than a run lists paths, so the bound
+/// is its own.
+pub const MAX_DENIED_PORTS: usize = 256;
+
 /// Which reads the profile permits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadModel {
@@ -61,6 +66,9 @@ pub enum PolicyError {
     /// emitted after the homes' denies, would reopen it.
     #[error("a homes root lies in the run's own home")]
     HomesInOwnHome,
+    /// Port 0 was named among the denied ports: it is no port a service holds.
+    #[error("port 0 named as a denied port")]
+    DeniedPortZero,
 }
 
 /// One host directory a run may use, granted by its canonical path (Seatbelt matches the
@@ -118,6 +126,7 @@ pub struct Policy {
     mounts: BTreeSet<MountGrant>,
     trees: Option<MountTrees>,
     net: Net,
+    denied_ports: BTreeSet<u16>,
     read_model: ReadModel,
     allow: Option<AllowGrants>,
 }
@@ -196,6 +205,7 @@ impl Policy {
             mounts: layout.mounts.into_iter().collect(),
             trees: layout.trees,
             net: caps.net,
+            denied_ports: BTreeSet::new(),
             read_model: caps.read_model,
             allow: None,
         };
@@ -253,10 +263,11 @@ impl Policy {
     /// This policy with `narrowing` applied. No narrowing widens anything.
     ///
     /// # Errors
-    /// [`PolicyError::TooMany`] for a list that grows over [`MAX_LISTED`],
-    /// [`PolicyError::MountOverReadDeny`] for a read deny or a homes root added at or below
-    /// a mount grant (the grant would reopen it), and [`PolicyError::HomesInOwnHome`] for a
-    /// homes root at or below the run's own home.
+    /// [`PolicyError::TooMany`] for a list that grows over [`MAX_LISTED`] (the denied
+    /// ports over [`MAX_DENIED_PORTS`]), [`PolicyError::MountOverReadDeny`] for a read deny
+    /// or a homes root added at or below a mount grant (the grant would reopen it),
+    /// [`PolicyError::HomesInOwnHome`] for a homes root at or below the run's own home, and
+    /// [`PolicyError::DeniedPortZero`] for a denied port 0.
     pub fn narrowed(mut self, narrowing: Narrowing) -> Result<Self, PolicyError> {
         if let Some(net) = narrowing.net {
             self.net = self.net.narrow(net);
@@ -267,6 +278,7 @@ impl Policy {
         self.inputs.extend(narrowing.protect);
         self.read_denies.extend(narrowing.deny_read);
         self.homes.extend(narrowing.deny_homes);
+        self.denied_ports.extend(narrowing.deny_ports);
         self.check()?;
         Ok(self)
     }
@@ -288,6 +300,12 @@ impl Policy {
         bounded(self.read_denies.len(), "read denies")?;
         bounded(self.homes.len(), "homes")?;
         bounded(self.mounts.len(), "mounts")?;
+        if self.denied_ports.len() > MAX_DENIED_PORTS {
+            return Err(PolicyError::TooMany("denied ports"));
+        }
+        if self.denied_ports.contains(&0) {
+            return Err(PolicyError::DeniedPortZero);
+        }
         let over = |mount: &MountGrant| {
             self.read_denies
                 .iter()
@@ -333,6 +351,10 @@ impl Policy {
         &self.homes
     }
 
+    pub(super) fn denied_ports(&self) -> &BTreeSet<u16> {
+        &self.denied_ports
+    }
+
     /// The run's own home: the directory just below the deepest homes root that holds the
     /// run directory below it (`/Users/<account>` for `/Users/<account>/exec`), or the run
     /// directory itself when no root holds it. A prefix of the run directory, by whole
@@ -372,7 +394,7 @@ fn bounded(len: usize, what: &'static str) -> Result<(), PolicyError> {
 
 /// A request to narrow a policy. Every field can only take something away or add a
 /// deny: a level is met with the policy's level (the lower wins), the user-folder grant
-/// can be dropped, and paths can be added to the denies. There is no field
+/// can be dropped, and paths and ports can be added to the denies. There is no field
 /// that adds a grant or raises a level (the own home's read grant that follows the homes'
 /// denies gives back only what they took).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -393,4 +415,10 @@ pub struct Narrowing {
     /// below the own home is refused ([`PolicyError::HomesInOwnHome`]), and so is a mount
     /// grant at or above a root ([`PolicyError::MountOverReadDeny`]).
     pub deny_homes: Vec<AbsPath>,
+    /// Ports the host's own services hold or are configured to hold: at every level but
+    /// [`Net::Off`] (which denies all of them already) the profile denies the run a bind or
+    /// a listen on the port at any local address and a connect or a send to it on
+    /// loopback, after the network grants, so no level reopens them. Each port once, at
+    /// most [`MAX_DENIED_PORTS`]; port 0 is refused ([`PolicyError::DeniedPortZero`]).
+    pub deny_ports: Vec<u16>,
 }

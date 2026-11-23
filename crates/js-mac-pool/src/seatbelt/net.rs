@@ -63,7 +63,8 @@ impl Ports {
 /// resolution, and `Loopback` cuts name resolution too (only `On` resolves names).
 /// Loopback is shared by every user of the Mac, so concurrent runs can reach each
 /// other's listeners at `Ports` and `Loopback`; that is a channel among concurrent runs
-/// of one consumer, not a boundary between tenants.
+/// of one consumer, not a boundary between tenants. The host's own services are denied by
+/// port at every level but `Off` ([`Narrowing::deny_ports`](super::Narrowing::deny_ports)).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Net {
     /// Nothing: no loopback, no outbound, no DNS. One unix socket by path (the system

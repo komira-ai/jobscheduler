@@ -52,7 +52,9 @@
 //!   another user's process (`proc_pidpath`, `proc_pidinfo`) but does not hide that the
 //!   process exists: the kernel's process list (`sysctl`, which `pgrep` reads) is the same
 //!   with and without it. Hiding another user's processes is the user boundary's job.
-//! - Loopback is shared by every user of the Mac; see [`Net`].
+//! - Loopback is shared by every user of the Mac; see [`Net`]. The ports the host's own
+//!   services hold are denied by number ([`Narrowing::deny_ports`]); a listener of another
+//!   run is reachable.
 //! - The profile compiler rejects `localhost:LOW-HIGH`, so per-port allows are
 //!   single `localhost:PORT` entries ([`Ports`]).
 //! - Under [`Net::Remote`] and [`Net::On`] no address can be denied: the profile
@@ -87,7 +89,8 @@ pub use grant::{Match, PinnedTree, ReadGrant, is_directory_wide, kind_rules};
 pub use net::{MAX_PORTS, Net, Ports, PortsError};
 pub use path::{AbsPath, MAX_PATH_BYTES, PathError};
 pub use policy::{
-    Caps, MAX_LISTED, MountGrant, Narrowing, Policy, PolicyError, ReadModel, SlotLayout,
+    Caps, MAX_DENIED_PORTS, MAX_LISTED, MountGrant, Narrowing, Policy, PolicyError, ReadModel,
+    SlotLayout,
 };
 pub use profile::{BuildError, Profile, SANDBOX_EXEC};
 pub use scan::{PrivilegedScan, scan_privileged};

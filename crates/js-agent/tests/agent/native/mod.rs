@@ -20,6 +20,7 @@ pub(crate) mod fake_accounts;
 pub(crate) mod fake_launcher;
 mod files;
 mod grant;
+mod host_ports;
 mod inputs;
 mod job_home;
 mod journal;
@@ -49,12 +50,29 @@ use std::sync::Arc;
 
 use js_agent::lifecycle::{Body, RunHandle, RunSpec, Runtime, Status};
 use js_agent::mac_accounts::{Places, Pool, Settings, Slots};
+use js_agent::mac_listen::{Listener, ListenerTable};
 use js_agent::native::{Accounts, Ceiling, HandOver, NativeConfig, NativeRuntime};
 use js_agent_wire::{Isolation, NativeSpec, NetworkLevel};
 use js_mac_pool::seatbelt::{AbsPath, ReadModel};
 use js_mac_session::full_disk_access::FullDiskAccess;
 
 pub use crate::support::Scratch;
+
+/// A host with no listener. The runs of these tests are the test user's, who cannot read other
+/// users' sockets; the agent, as root, can (the root tests of `mac_listen::macos`), and
+/// `host_ports.rs` gives a runtime a table with listeners to deny.
+pub fn no_listeners() -> Arc<dyn ListenerTable> {
+    Arc::new(Listening(Vec::new()))
+}
+
+/// A host whose listeners are these.
+pub struct Listening(pub Vec<Listener>);
+
+impl ListenerTable for Listening {
+    fn listeners(&self) -> std::io::Result<Vec<Listener>> {
+        Ok(self.0.clone())
+    }
+}
 pub use fake_accounts::FakeAccounts;
 pub use fake_launcher::{Failing, FakeLauncher, Launched};
 
@@ -134,6 +152,7 @@ pub fn config(dir: &Scratch, settings: &Settings) -> NativeConfig {
         },
         homes: settings.homes.clone(),
         network: Ceiling::Loopback,
+        host_ports: Default::default(),
         tool_roots: vec![PathBuf::from("/usr/bin"), PathBuf::from("/bin")],
         read_denies: vec![AbsPath::parse("/srv/js-state").unwrap()],
         mount_roots: Vec::new(),
@@ -191,7 +210,8 @@ impl Rig {
         adjust(&mut config, &dir);
         let rt = NativeRuntime::over(Some(pool.clone()), launcher.clone(), config, TERM)
             .unwrap()
-            .with_process_table(end::GroupTable::new(launcher.clone()));
+            .with_process_table(end::GroupTable::new(launcher.clone()))
+            .with_listener_table(no_listeners());
         let rt = match slots {
             1 => rt,
             _ => rt.with_hand_over(keep_owner()),
@@ -233,6 +253,7 @@ impl Rig {
         NativeRuntime::over(Some(pool), self.launcher.clone(), config, TERM + 1)
             .unwrap()
             .with_process_table(end::GroupTable::new(self.launcher.clone()))
+            .with_listener_table(no_listeners())
     }
 
     /// A run of `native`, with its scratch directory made as the lifecycle makes it.

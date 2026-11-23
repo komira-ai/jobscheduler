@@ -193,8 +193,10 @@ fn a_program_outside_the_bundle_still_gets_the_bundles_environment() {
 }
 
 /// Asserts that the network a run gets is the lowest of what the start asks, what the
-/// bundle's tools need and what the agent allows. It catches a start that asks for more than
-/// the bundle's config says its tools need, and a bundle that raises the agent's cap.
+/// bundle's tools need and what the agent allows (`loopback` here): a job of the level `none`
+/// (`off` on the wire) gets loopback unless its bundle needs no network. It catches a start
+/// that asks for more than the bundle's config says its tools need, a bundle that raises the
+/// agent's cap, and a `none` job left with no loopback.
 #[test]
 fn the_network_is_the_lowest_of_the_request_the_bundle_and_the_agent() {
     let loopback = "(allow network* (remote ip \"localhost:*\"))";
@@ -202,7 +204,9 @@ fn the_network_is_the_lowest_of_the_request_the_bundle_and_the_agent() {
         ("loopback", NetworkLevel::On, true),
         ("off", NetworkLevel::On, false),
         ("on", NetworkLevel::Loopback, true),
-        ("loopback", NetworkLevel::Off, false),
+        ("loopback", NetworkLevel::Off, true),
+        ("on", NetworkLevel::Off, true),
+        ("off", NetworkLevel::Off, false),
     ];
     for (n, (needed, asked, has_loopback)) in cases.into_iter().enumerate() {
         let mut spec = Spec::standard();

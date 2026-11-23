@@ -23,6 +23,7 @@ fn the_real_pfctl_is_not_enforced_for_a_user_who_is_not_root() {
         account_ready: None,
         homes: None,
         network: Some("on"),
+        host_ports: &[],
         tool_roots: &[],
         deny_read: &[],
         max_file_mib: None,
