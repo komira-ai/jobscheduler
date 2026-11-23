@@ -49,6 +49,10 @@ pub const FLAGS_FILE: &str = "/etc/js-agent/flags";
 /// The lease server's CA, beside the flags.
 const CA_FILE: &str = "/etc/js-agent/ca.pem";
 
+/// The account pool's directory (`--native-accounts`), which the agent makes when it opens the
+/// pool, and opens it only when it holds Full Disk Access.
+pub const NATIVE_ACCOUNTS: &str = "/var/db/js-agent/accounts";
+
 /// The bundle allow list, beside the flags.
 const BUNDLE_ALLOW_FILE: &str = "/etc/js-agent/bundle-allow";
 
@@ -369,7 +373,7 @@ fn flags(server: &str) -> String {
         "--host-cert=/var/lib/hostkeeper/identity/host.crt",
         "--host-key=/var/lib/hostkeeper/identity/host.key",
         "# The native runtime's account pool.",
-        "--native-accounts=/var/db/js-agent/accounts",
+        &format!("--native-accounts={NATIVE_ACCOUNTS}"),
         "--native-account-range=700-799",
         "--native-account-ready=1",
         "# No network for a job: no pf anchor and no --native-pf-* flag.",
