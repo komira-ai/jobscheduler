@@ -13,6 +13,7 @@ mod bundle;
 #[cfg(target_os = "macos")]
 mod disclaim;
 pub(crate) mod end;
+mod ended;
 mod env;
 pub(crate) mod fake_accounts;
 pub(crate) mod fake_launcher;

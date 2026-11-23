@@ -725,10 +725,22 @@ pub(crate) fn runtime(
         Some(store) => runtime.with_bundles(Arc::clone(store)),
         None => runtime,
     };
-    let mut runtime = runtime
+    let runtime = runtime
         .with_xcodes(native.xcodes().to_vec())
         .with_live_logs(native.logs().live())
         .with_put(native.put().cloned());
+    self_tested(runtime)
+}
+
+/// `runtime` after its self-test, which runs before the agent says hello: a failed self-test
+/// ends the start with the text of its flag. Split from [`runtime`] so a test can run it over a
+/// runtime made with a fake launcher.
+///
+/// # Errors
+///
+/// The self-test failed, naming why.
+#[doc(hidden)]
+pub fn self_tested(mut runtime: NativeRuntime) -> Result<(Box<dyn Runtime>, Vec<String>), String> {
     runtime
         .self_test()
         .map_err(|why| format!("--native-accounts: the self-test failed: {why}"))?;

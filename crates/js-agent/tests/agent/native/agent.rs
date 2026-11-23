@@ -11,6 +11,7 @@ use std::sync::Arc;
 use clap::Parser as _;
 use js_agent::lifecycle::Local;
 use js_agent::native::fence::PRIVACY_ONLY_PLACES;
+use js_agent::native::grant::PRIVACY_DIR;
 use js_agent::native::{NativeFlags, NativeSettings, PfFlags};
 use js_agent::{Backend, Cli, Machine, RuntimeBuild, System};
 use js_agent_wire::refusal;
@@ -19,9 +20,10 @@ use js_mac_session::full_disk_access::FullDiskAccess;
 use serde_json::Value;
 use std::path::Path;
 
+use super::{Failing, Rig};
 use crate::bundle::fake::{FakeHost, digest};
 use crate::bundle::fixture::{no_registry, placer};
-use crate::jobs::fake::FakeMachine;
+use crate::jobs::fake::{Build, FakeMachine};
 use crate::support::{
     CountingSleeper, Host, Jobs, Lowest, Ran, Scratch, Script, ScriptConnector, code, flags,
     mac_host, run_on, run_on_defaulted, run_with_store, welcome,
@@ -113,12 +115,21 @@ pub(crate) fn hello_on(
     answer: crate::support::Reply,
 ) -> (Ran, Value) {
     let refs: Vec<&str> = extra.iter().map(String::as_str).collect();
-    let args = flags(&refs);
+    hello_with(host, &refs, answer, FakeMachine::new())
+}
+
+/// [`hello_on`] over `machine`, with the flags `refs`.
+fn hello_with(
+    host: &Host,
+    refs: &[&str],
+    answer: crate::support::Reply,
+    machine: FakeMachine,
+) -> (Ran, Value) {
+    let args = flags(refs);
     let (script, sent) = Script::new(vec![answer]);
     let connector = ScriptConnector::of(script);
     let mut sleeper = CountingSleeper::stopping_at(1);
-    let machine = Arc::new(FakeMachine::new());
-    let jobs: Jobs<'_> = (machine, None);
+    let jobs: Jobs<'_> = (Arc::new(machine), None);
     let ran = run_on(&args, host, &connector, &mut sleeper, &mut Lowest, jobs);
     let hello = sent
         .borrow()
@@ -979,4 +990,120 @@ fn a_mac_agent_mounts_the_scratch_volume_before_it_opens_its_roots() {
         [data, list, info, mount.as_str()],
         "{ran_commands:?}"
     );
+}
+
+/// Asserts that a Mac agent given a flag only a Linux build has, in the spaced and the attached
+/// spelling, ends with status 2 before anything is sent, with exactly the refusal that names
+/// the flag, says it is Linux only, and names `--native-accounts` as what this build runs.
+/// Catches a refusal that leaves out what the Mac build runs jobs with, or one that reaches
+/// clap's unknown-flag text instead.
+#[test]
+fn a_linux_only_flag_is_refused_on_a_mac_naming_native_accounts() {
+    let cases: [(&[&str], &str); 2] = [
+        (&["--container-bin", "/bin/sh"], "container-bin"),
+        (&["--job-user=x"], "job-user"),
+    ];
+    for (extra, name) in cases {
+        let args = flags(extra);
+        let (script, sent) = Script::new(vec![welcome(1)]);
+        let connector = ScriptConnector::of(script);
+        let mut sleeper = CountingSleeper::stopping_at(1);
+        let jobs: Jobs<'_> = (Arc::new(FakeMachine::new()), None);
+        let ran = run_on_defaulted(
+            &args,
+            &mac_host(),
+            &connector,
+            &mut sleeper,
+            &mut Lowest,
+            jobs,
+        );
+        assert_eq!(ran.status(), code(2), "{extra:?}: {}", ran.err);
+        assert!(sent.borrow().is_empty(), "{extra:?}: something was sent");
+        assert_eq!(
+            ran.err,
+            format!(
+                "js-agent: --{name}: Linux only (a flag of crun or of the container engine): \
+                 this macOS build runs native jobs (--native-accounts)\n"
+            ),
+            "{extra:?}"
+        );
+    }
+}
+
+/// Asserts that a native agent whose runtime cannot be made ends with status 2 before the
+/// hello, and that the text of its last line is exactly the reason under `--native-accounts`,
+/// the flag of the native runtime. Catches a start failure told under another runtime's flag,
+/// one that loses the reason, and an agent that says hello with no worker.
+#[test]
+fn a_native_worker_that_cannot_start_ends_the_agent_naming_native_accounts() {
+    let dir = Scratch::new("native-agent-worker-fails");
+    let extra = native_flags(&dir);
+    let refs: Vec<&str> = extra.iter().map(String::as_str).collect();
+    let machine = FakeMachine::failing(Build::RuntimeFails);
+    let (ran, hello) = hello_with(&mac_host(), &refs, welcome(1), machine);
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    assert_eq!(
+        ran.err.lines().last(),
+        Some("js-agent: --native-accounts: the engine does not answer"),
+        "{}",
+        ran.err
+    );
+    assert_eq!(hello, Value::Null);
+}
+
+/// Asserts that the agent judges Full Disk Access from the file reader it is given, not from
+/// the real file system: with the privacy directory not in the fake's files the hello says
+/// `undetermined` (a listing that failed for another reason than permission), and with it
+/// there but unlistable it says `not-granted`. A listing of the real directory of a test run
+/// gives neither of the first. Catches an agent that lists the real directory, one that asks
+/// another directory than [`PRIVACY_DIR`], and one that does not report what it found.
+#[test]
+fn the_agent_judges_full_disk_access_from_its_own_file_reader() {
+    let cases = [
+        (mac_host().files, "undetermined"),
+        (
+            mac_host().files.with_unlistable_dir(PRIVACY_DIR),
+            "not-granted",
+        ),
+    ];
+    for (n, (files, expected)) in cases.into_iter().enumerate() {
+        let dir = Scratch::new(&format!("native-agent-fda{n}"));
+        let mut host = mac_host();
+        host.files = files;
+        let (ran, hello) = hello_on(&host, &native_flags(&dir), welcome(1));
+        assert_eq!(ran.status(), code(0), "{expected}: {}", ran.err);
+        assert_eq!(hello["capabilities"][FULL_DISK_ACCESS], expected);
+    }
+}
+
+/// Asserts that the self-test the agent runs before its hello ends the start when it fails,
+/// with a text that begins with `--native-accounts: the self-test failed: ` and the
+/// supervisor's failure, and that a passing one runs `/usr/bin/true` once through an account
+/// it then retires, and gives back the runtime with no warning. Catches a start that says hello over a pool that cannot run a
+/// job, one that tells the failure under another flag, and one that skips the self-test.
+#[test]
+fn the_self_test_ends_the_start_when_it_fails() {
+    let rig = Rig::new("agent-self-test-fails");
+    rig.launcher.fail(Failing::Setup);
+    let why = match js_agent::platform::self_tested(rig.rt) {
+        Ok(_) => panic!("the self-test must fail"),
+        Err(why) => why,
+    };
+    let prefix = "--native-accounts: the self-test failed: \
+                  the supervisor: ended before the job started: SetupFailed";
+    assert!(why.starts_with(prefix), "{why}");
+
+    let rig = Rig::new("agent-self-test-passes");
+    let lent = rig.accounts.records();
+    assert_eq!(lent.len(), 1, "{lent:?}");
+    let (_, warnings) = js_agent::platform::self_tested(rig.rt).unwrap();
+    assert_eq!(warnings, Vec::<String>::new());
+    let launched = rig.launcher.launched();
+    assert_eq!(launched.len(), 1, "the self-test starts one supervisor");
+    assert_eq!(launched[0].program, "/usr/bin/true");
+    assert!(
+        rig.accounts.records().iter().all(|a| !lent.contains(a)),
+        "the self-test's account is retired"
+    );
+    assert!(rig.pool.held().is_empty(), "{:?}", rig.pool.held());
 }

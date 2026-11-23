@@ -8,6 +8,7 @@ use std::io;
 use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use js_agent::mac_supervisor::{
@@ -59,6 +60,21 @@ pub enum Failing {
     Launch,
     /// The supervisor starts and fails a setup step: no job starts.
     Setup,
+    /// The job starts (as a real process); the first look at its end finds it exited with
+    /// status 7, and every later look finds nothing: the supervisor's record is read once.
+    ExitOnce,
+    /// The job starts (as a real process); the first look at its end finds that a setup step
+    /// failed, so the end is no job's exit.
+    SetupAtExit,
+}
+
+/// What the test changes while the supervisors it started run.
+#[derive(Debug, Default)]
+struct Controls {
+    /// How many times any supervisor was looked at for its end.
+    looks: AtomicUsize,
+    /// Whether a look at a supervisor's end fails.
+    ask_fails: AtomicBool,
 }
 
 #[derive(Debug)]
@@ -67,12 +83,15 @@ struct State {
     failing: Failing,
     /// The pid of each program started, which is also its process group's id.
     groups: Vec<i32>,
+    /// The pid the next jobs report as theirs, when it is not their real pid.
+    job_pid: Option<i32>,
 }
 
 /// The fake launcher. Shared by the runtime and the test.
 #[derive(Debug)]
 pub struct FakeLauncher {
     state: Mutex<State>,
+    controls: Arc<Controls>,
 }
 
 impl FakeLauncher {
@@ -83,7 +102,9 @@ impl FakeLauncher {
                 launched: Vec::new(),
                 failing: Failing::No,
                 groups: Vec::new(),
+                job_pid: None,
             }),
+            controls: Arc::new(Controls::default()),
         })
     }
 
@@ -94,6 +115,22 @@ impl FakeLauncher {
     /// The next launches fail as `failing` says.
     pub fn fail(&self, failing: Failing) {
         self.state().failing = failing;
+    }
+
+    /// The next jobs report `pid` as their pid (and so their process group), in place of
+    /// their real one.
+    pub fn report_job_pid(&self, pid: i32) {
+        self.state().job_pid = Some(pid);
+    }
+
+    /// Whether a look at a supervisor's end fails from now on.
+    pub fn fail_looks(&self, fails: bool) {
+        self.controls.ask_fails.store(fails, Ordering::SeqCst);
+    }
+
+    /// How many times a supervisor was looked at for its end, by a poll or a removal.
+    pub fn looks(&self) -> usize {
+        self.controls.looks.load(Ordering::SeqCst)
     }
 
     /// Every launch asked, in order.
@@ -131,18 +168,23 @@ impl Launcher for FakeLauncher {
             env: request.env.to_vec(),
             cwd: request.cwd.to_path_buf(),
         };
-        let failing = {
+        let (failing, job_pid) = {
             let mut state = self.state();
             state.launched.push(launched.clone());
-            state.failing
+            (state.failing, state.job_pid)
         };
+        let controls = self.controls.clone();
         match failing {
             Failing::Launch => Err(io::Error::other("the supervisor cannot be started")),
             Failing::Setup => Ok(Box::new(FakeSupervised {
                 child: None,
                 record_dir: launched.record_dir,
+                controls,
+                job_pid,
+                mode: failing,
+                gave: false,
             })),
-            Failing::No => {
+            Failing::No | Failing::ExitOnce | Failing::SetupAtExit => {
                 let [stdin, stdout, stderr] = request.stdio;
                 let child = Command::new(&launched.program)
                     .args(&launched.args)
@@ -160,6 +202,10 @@ impl Launcher for FakeLauncher {
                 Ok(Box::new(FakeSupervised {
                     child: Some(child),
                     record_dir: launched.record_dir,
+                    controls,
+                    job_pid,
+                    mode: failing,
+                    gave: false,
                 }))
             }
         }
@@ -170,6 +216,13 @@ impl Launcher for FakeLauncher {
 struct FakeSupervised {
     child: Option<Child>,
     record_dir: PathBuf,
+    controls: Arc<Controls>,
+    /// The pid to report as the job's, in place of the child's.
+    job_pid: Option<i32>,
+    /// How the launch was told to fail.
+    mode: Failing,
+    /// Whether the one record of [`Failing::ExitOnce`] or [`Failing::SetupAtExit`] was given.
+    gave: bool,
 }
 
 impl Supervised for FakeSupervised {
@@ -184,13 +237,41 @@ impl Supervised for FakeSupervised {
                 why: "the profile was refused".to_owned(),
             }),
             Some(child) => Ok(Ready {
-                job_pid: i32::try_from(child.id()).unwrap_or(i32::MAX),
+                job_pid: self
+                    .job_pid
+                    .unwrap_or_else(|| i32::try_from(child.id()).unwrap_or(i32::MAX)),
                 asid: None,
             }),
         }
     }
 
     fn try_exit(&mut self) -> io::Result<Option<ExitRecord>> {
+        self.controls.looks.fetch_add(1, Ordering::SeqCst);
+        if self.controls.ask_fails.load(Ordering::SeqCst) {
+            return Err(io::Error::other("the supervisor cannot be asked"));
+        }
+        let first = !std::mem::replace(&mut self.gave, true);
+        match (self.mode, first) {
+            (Failing::ExitOnce, true) => {
+                return Ok(Some(ExitRecord {
+                    ended: Ended::Exited(7),
+                    job_pid: None,
+                    asid: None,
+                }));
+            }
+            (Failing::ExitOnce, false) => return Ok(None),
+            (Failing::SetupAtExit, _) => {
+                return Ok(Some(ExitRecord {
+                    ended: Ended::SetupFailed {
+                        step: Step::Profile,
+                        why: "the profile was refused".to_owned(),
+                    },
+                    job_pid: None,
+                    asid: None,
+                }));
+            }
+            _ => {}
+        }
         let Some(child) = &mut self.child else {
             return Ok(None);
         };
