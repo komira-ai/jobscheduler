@@ -15,15 +15,44 @@ mod root_tests;
 mod sys;
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub(super) use as_account::AsAccount;
 pub(super) use sys::{clear_user_flags, rename_excl, strip_acl};
 
+use super::Account;
+use super::cycle::Runner as _;
 use super::host::{
     AccountHost, CommandOutput, LiveProcess, NewUser, PrintAnswer, UserRecord, merge_record,
     present_in_any,
 };
+
+/// The per-user temporary and cache folders of `account` (`DARWIN_USER_TEMP_DIR`, then
+/// `DARWIN_USER_CACHE_DIR`), asked of the system as the account by `getconf` (which makes
+/// them when the slot has none yet) and checked: each a directory below
+/// `/private/var/folders` that the account's uid owns ([`super::user_dirs::checked`]).
+///
+/// # Errors
+/// `getconf` could not run as the account or failed, or an answer is not the account's own
+/// folder.
+pub fn own_folders(account: &Account, home: &Path) -> io::Result<Vec<PathBuf>> {
+    let root = Path::new("/private/var/folders");
+    super::user_dirs::NAMES
+        .iter()
+        .map(|name| {
+            let command = ["/usr/bin/getconf".to_owned(), (*name).to_owned()];
+            let ran = AsAccount.run(account, home, &command)?;
+            if ran.code != Some(0) {
+                return Err(io::Error::other(format!(
+                    "getconf {name} as {}: {}",
+                    account.name,
+                    ran.stderr.trim()
+                )));
+            }
+            super::user_dirs::checked(&ran.stdout, root, account.uid)
+        })
+        .collect()
+}
 
 /// The macOS host.
 #[derive(Clone, Copy, Debug, Default)]
