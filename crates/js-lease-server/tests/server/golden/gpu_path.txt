@@ -30,6 +30,7 @@
 --max-requests default=100 required=false
 --metrics-listen default=none required=false
 --placement default=none required=false values=registry|js-sched
+--placement-curves default=off required=false
 --profile-store-bytes default=268435456 required=false
 --read-timeout default=30s required=false
 --ready-listen default=none required=false

@@ -5,6 +5,8 @@ mod calibration;
 mod cpu;
 mod life;
 mod memory;
+mod profile;
+mod profile_check;
 mod reference;
 mod safety;
 mod storage;
