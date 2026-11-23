@@ -57,6 +57,10 @@ pub struct CrunSettings {
     /// Whether each run's CPU is recorded second by second and reported with its result
     /// (`--cpu-series`); off by default.
     pub cpu_series: bool,
+    /// Whether each run's non-file memory (`memory.current - (file - shmem)` of its group) is
+    /// recorded second by second and reported with its result (`--memory-series`); off by
+    /// default.
+    pub memory_series: bool,
     /// Whether a host job (`isolation = host`) is launched (`--allow-host-jobs`); without it
     /// one is refused before anything is made.
     pub host_jobs: bool,

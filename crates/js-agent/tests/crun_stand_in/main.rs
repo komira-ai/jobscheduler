@@ -31,6 +31,7 @@ mod host_ports;
 mod images;
 mod layered;
 mod logs;
+mod memory_series;
 mod network;
 mod node;
 mod open;

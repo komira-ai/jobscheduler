@@ -26,6 +26,10 @@ pub struct Sample {
     pub host_cpu_usec: u64,
     /// The actions cgroup's `memory.current` less its `inactive_file`.
     pub working_set_bytes: u64,
+    /// The whole host's non-file memory, in bytes: `MemTotal - MemFree - (Buffers + Cached -
+    /// Shmem)` of `/proc/meminfo`. `None` when that file cannot be read or lacks a line; the
+    /// rest of the sample stands.
+    pub host_nonfile_bytes: Option<u64>,
     /// The actions cgroup's `active_file`.
     pub active_file_bytes: u64,
     /// Whether the actions cgroup has a CPU limit, from its `cpu.max`. A reader that cannot

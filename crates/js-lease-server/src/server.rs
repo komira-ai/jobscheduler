@@ -37,7 +37,7 @@ use crate::ticker::{IntervalTicker, Tick, Ticker};
 use crate::tls;
 use crate::usage::ProfileCurves;
 use crate::usage_hub::UsageCounters;
-use crate::util::or_pending;
+use crate::util::{blocking, or_pending};
 
 /// A running server. Dropping it stops serving and ticking; [`Running::shutdown`] stops
 /// it the orderly way (requests in flight finish, one last tick).
@@ -62,6 +62,10 @@ pub struct Running {
     tls: Option<tls::Tls>,
     /// How long [`Running::hold`] keeps serving (`--drain-hold`).
     drain_hold: Duration,
+    /// The teaching of the job sizes from the ended jobs ([`crate::job_sizes`]), which the
+    /// start does not wait for; a stop ends its read at the next page and waits for it, unless
+    /// it was taken to be awaited before.
+    sizes: Option<JoinHandle<usize>>,
 }
 
 /// A listener beside the one of `--listen`: the agent routes alone (`server.agent_listen`),
@@ -196,11 +200,22 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
 /// lock is tried once and a held lock refuses the start, and `retry` is dropped. A Postgres
 /// store has no lock: it opens at once.
 pub async fn start_waiting<T: Ticker, C: Ticker, R: Ticker>(
-    mut config: Config,
+    config: Config,
     clock: SharedClock,
     ticker: T,
     checks: C,
     retry: R,
+) -> Result<Running, StartupError> {
+    start_held(config, clock, (ticker, checks, retry), None).await
+}
+
+/// [`start_waiting`], whose teaching of the job sizes ([`crate::job_sizes`]) waits for `hold`
+/// (a test's) to be sent or dropped before it reads; `None` reads at once.
+async fn start_held<T: Ticker, C: Ticker, R: Ticker>(
+    mut config: Config,
+    clock: SharedClock,
+    (ticker, checks, retry): (T, C, R),
+    hold: Option<oneshot::Receiver<()>>,
 ) -> Result<Running, StartupError> {
     let logs = config.logs().sink();
     let log_reads = job_api::logs::Ctx::from_config(config.logs(), &clock);
@@ -263,6 +278,8 @@ pub async fn start_waiting<T: Ticker, C: Ticker, R: Ticker>(
         checker,
         cached,
     } = open(prepared, &clock)?;
+    // The ended jobs are read and taught while the server serves; nothing waits for them.
+    let sizes = teach_sizes(&shared, hold);
     shared.agents().set_duty_period(duty_period);
     // The name this server claims dispatch messages by: where it serves agents, and its pid.
     let agents_at = agent_listener.as_ref().map_or(addr, |(_, agents)| *agents);
@@ -367,6 +384,20 @@ pub async fn start_waiting<T: Ticker, C: Ticker, R: Ticker>(
         scaler,
         tls,
         drain_hold: limits.drain_hold,
+        sizes: Some(sizes),
+    })
+}
+
+/// Teaches the job sizes the ended jobs the start began to teach ([`crate::job_sizes`]), off
+/// the runtime's threads, once `hold` is sent or dropped (`None`: at once); the task answers
+/// how many taught a class a memory sample.
+fn teach_sizes(shared: &Arc<Shared>, hold: Option<oneshot::Receiver<()>>) -> JoinHandle<usize> {
+    let shared = shared.clone();
+    tokio::spawn(async move {
+        if let Some(hold) = hold {
+            let _ = hold.await;
+        }
+        blocking(move || shared.agents().sizes.teach()).await
     })
 }
 
@@ -923,6 +954,10 @@ impl Running {
         let Polling { stop, mut task } = self.polling;
         let _ = stop.send(());
         let _ = (&mut task.0).await;
+        self.shared.agents().sizes.stop();
+        if let Some(sizes) = self.sizes.take() {
+            let _ = sizes.await;
+        }
         final_tick(&self.shared).await;
         served
     }
@@ -931,3 +966,7 @@ impl Running {
 #[cfg(test)]
 #[path = "server_shutdown_tests.rs"]
 mod shutdown_tests;
+
+#[cfg(test)]
+#[path = "server_sizes_tests.rs"]
+mod sizes_tests;

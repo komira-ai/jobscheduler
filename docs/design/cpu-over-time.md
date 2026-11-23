@@ -246,10 +246,12 @@ teaches the class: a run slowed by contention may only raise it, as today.
   for (close to) the peak memory usage". It records only each window's peak, with a 48 h half-life. It takes the
   maximum for minimal tolerance of out-of-memory kills, the 98th percentile for low tolerance, and between them the
   larger of the 60th percentile and half the peak; then a 10 to 15% margin and the maximum over the last hour.
-- **What is taken here:** #1035's rule as it is. The maximum over recent runs is Autopilot's choice for minimal
-  tolerance, which is ours because a job here may not be killed.
-- **The host's measured memory:** the whole host's memory in use (today the jobs' group's working set, READ:
-  `NodeLoad.working_set_bytes`), used as for CPU.
+- **What is taken here:** #1035's rule, with the peak of each run's non-file memory (`memory.current` less
+  `file - shmem`, sampled about once a second into the result's `memory_series`, pairs combined by their maximum)
+  in place of `memory.peak`, which also counts the page cache of files the job read (`sizing.md`, 7.7). The maximum
+  over recent runs is Autopilot's choice for minimal tolerance, which is ours because a job here may not be killed.
+- **The host's measured memory:** the whole host's non-file memory (`host_nonfile_bytes` of the heartbeat's load,
+  from `/proc/meminfo`), the same measure, in place of the jobs' group's working set.
 - **Nothing is ever killed for memory.** A host whose bookings leave no room is refused as `booked-memory`.
 
 ## 5. The placement rule

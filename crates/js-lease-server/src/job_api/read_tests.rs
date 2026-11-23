@@ -422,6 +422,7 @@ fn exit_3() -> JobEnd {
             usage: Some(used()),
             logs: None,
             cpu_series: None,
+            memory_series: None,
         },
     }
 }

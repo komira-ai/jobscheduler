@@ -294,7 +294,12 @@ fn vet_holds_pressure_to_a_thousand_and_each_list_to_its_cap() {
 #[test]
 fn the_released_server_and_this_one_read_each_others_loads() {
     let new = with_seconds(vec![1500, 20], vec![3, 4]);
-    let old: ReleasedLoad = serde_json::from_value(serde_json::to_value(&new).unwrap()).unwrap();
+    // A load that also carries the host's non-file memory reads in the released server the same.
+    let held = NodeLoad {
+        host_nonfile_bytes: Some(5 << 30),
+        ..new.clone()
+    };
+    let old: ReleasedLoad = serde_json::from_value(serde_json::to_value(&held).unwrap()).unwrap();
     let plain: ReleasedLoad =
         serde_json::from_value(serde_json::to_value(load()).unwrap()).unwrap();
     assert_eq!(old, plain);

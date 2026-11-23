@@ -124,6 +124,7 @@ fn result_with(logs: Option<LogReport>) -> JobResult {
         input_failure: None,
         usage: None,
         cpu_series: None,
+        memory_series: None,
     }
 }
 
