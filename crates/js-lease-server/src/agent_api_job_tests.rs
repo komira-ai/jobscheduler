@@ -488,3 +488,157 @@ async fn a_host_is_packed_by_load_only_when_its_hello_reports_load_admission() {
         .filter(|id| rig.job(id).state == JobState::Queued);
     assert_eq!(waiting.count(), 1, "the fourth job does not wait");
 }
+
+/// The job `id` as a queued job of [`spec`].
+fn queued_job(id: &str) -> NewJob {
+    NewJob {
+        id: Some(JobId::parse(id).unwrap()),
+        spec: spec(),
+        priority: 0,
+        client: None,
+    }
+}
+
+/// One heartbeat of `agent`, through the route and the placement turn it pokes, whose reply
+/// the agent takes.
+async fn beat_and_take(rig: &super::job_rig::Rig, agent: &mut FakeAgent) {
+    let reply = rig.beat(agent).await.unwrap();
+    agent.take(&reply);
+}
+
+/// Under `--placement js-sched`, on a pool whose one host is fetching the job's bundle: the
+/// host's first start of the job is refused `bundle-pending`, and the job goes back to the
+/// queue rather than failing. While the host is barred (the clock, moved by the test, short of
+/// the bundle-pending bar) the job waits queued and the host is sent no start; once the bar
+/// lapses the job is placed on the same host again under a new allocation, the host (whose
+/// fetch has ended) runs it, and the job succeeds. It never reads failed to start. Catches a
+/// bundle-pending refusal that fails the job (the client then reports a failed start the
+/// client does not retry), a job sent its start again on every beat while its host fetches, and
+/// a requeued job never placed on the host that refused it.
+#[tokio::test]
+async fn a_start_refused_bundle_pending_runs_on_the_same_host_once_its_fetch_ended() {
+    let mut rig = clocked_rig("bundle_pending_same_host", true, JobLimits::default());
+    rig.register("host-m", true);
+    let mut agent = FakeAgent::new("host-m");
+    rig.beat(&agent).await.unwrap();
+    let id = rig
+        .jobs
+        .insert_queued(queued_job("job-b"))
+        .unwrap()
+        .record
+        .id;
+    // The beat's placement turn places the job; its start rides on the next beat.
+    beat_and_take(&rig, &mut agent).await;
+    beat_and_take(&rig, &mut agent).await;
+    assert!(agent.holds("job-b"), "the host was not sent the start");
+    let refused = rig.allocation(&id).allocation_id;
+    agent.end_naming(
+        "job-b",
+        (Outcome::FailedToStart, None),
+        (Some("bundle-pending"), None),
+    );
+    beat_and_take(&rig, &mut agent).await;
+    assert_eq!(
+        rig.job(&id).state,
+        JobState::Queued,
+        "the job was not requeued"
+    );
+
+    let step = crate::job_held::BUNDLE_PENDING_BAR / 6;
+    for beat in 0..5 {
+        rig.advance(step);
+        rig.tick();
+        beat_and_take(&rig, &mut agent).await;
+        let job = rig.job(&id);
+        assert_eq!(job.state, JobState::Queued, "beat {beat}: inside the bar");
+        assert!(
+            !agent.holds("job-b"),
+            "beat {beat}: sent the start while barred"
+        );
+    }
+
+    // The bar lapses: the server's tick places the job, and its start rides on the next beat.
+    rig.advance(step);
+    rig.tick();
+    beat_and_take(&rig, &mut agent).await;
+    let placed = rig.allocation(&id);
+    assert_eq!(placed.host.as_str(), "host-m");
+    assert_ne!(
+        placed.allocation_id, refused,
+        "the refused allocation was reused"
+    );
+    assert!(
+        agent.holds("job-b"),
+        "the host was not sent the start again"
+    );
+    agent.run("job-b");
+    beat_and_take(&rig, &mut agent).await;
+    agent.end("job-b", Outcome::Succeeded, Some(0));
+    beat_and_take(&rig, &mut agent).await;
+    assert_eq!(rig.job(&id).state, JobState::Succeeded);
+    let requeued = rig
+        .job(&id)
+        .queue
+        .events()
+        .iter()
+        .filter(|event| {
+            (event.kind == JobEventKind::Requeued)
+                & (event.host.as_ref().map(HostId::as_str) == Some("host-m"))
+        })
+        .count();
+    assert_eq!(
+        requeued, 1,
+        "the refusal is not one REQUEUED event naming the host"
+    );
+}
+
+/// A job whose host keeps refusing it `bundle-pending` (a fetch that does not end) is sent back
+/// to the queue on every refusal, more times than any bound on held or capacity requeues, and
+/// ends only by the pool's queue rule: at its `max_queue_wait` from its submit it fails to start
+/// with `no-capacity`, as any job no host took in time, and never as the agent's refusal. The
+/// clock is the rig's, moved by the test. Catches a bundle-pending job kept in the queue past
+/// its queue wait, and one ended as the agent's refusal by a count of its requeues.
+#[tokio::test]
+async fn a_job_refused_bundle_pending_until_its_queue_wait_ends_fails_as_no_capacity() {
+    let wait = std::time::Duration::from_secs(600);
+    let limits = JobLimits {
+        max_queue_wait: wait,
+        ..JobLimits::DEFAULT
+    };
+    let mut rig = clocked_rig("bundle_pending_queue_wait", true, limits);
+    rig.register("host-m", true);
+    let mut agent = FakeAgent::new("host-m");
+    rig.beat(&agent).await.unwrap();
+    let id = rig
+        .jobs
+        .insert_queued(queued_job("job-w"))
+        .unwrap()
+        .record
+        .id;
+    let step = crate::job_held::BUNDLE_PENDING_BAR / 6;
+    let mut refusals = 0;
+    while !rig.job(&id).state.is_ended() {
+        let state = rig.job(&id).state;
+        assert!(refusals <= 100, "the job was never ended: {state:?}");
+        if agent.holds("job-w") {
+            agent.end_naming(
+                "job-w",
+                (Outcome::FailedToStart, None),
+                (Some("bundle-pending"), None),
+            );
+            refusals += 1;
+        }
+        beat_and_take(&rig, &mut agent).await;
+        rig.advance(step);
+        rig.tick();
+    }
+    assert_eq!(
+        rig.job(&id).state,
+        JobState::FailedToStart(StartFailure::NoCapacity)
+    );
+    let bounds = JobLimits::DEFAULT.capacity_requeues + crate::job_held::MAX_HELD_REQUEUES;
+    assert!(
+        refusals > bounds,
+        "only {refusals} refusals before the queue wait ended"
+    );
+}
