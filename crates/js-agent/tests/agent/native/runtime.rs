@@ -252,7 +252,7 @@ fn the_agents_own_paths_are_denied_to_the_run() {
 /// Asserts that the profile is built from the policy and the paths of the run only: two
 /// runs that differ only in their environment, one of them with a value that would break
 /// out of a quoted string, are given the same profile text and the same parameters (but the
-/// run directory's own).
+/// run directory's and the account's home, `RUN` and `OWN`).
 ///
 /// Catches: a value of the job's environment that reaches the profile.
 #[test]
@@ -274,7 +274,7 @@ fn the_profile_does_not_depend_on_the_jobs_environment() {
         launches[at]
             .params
             .iter()
-            .filter(|(name, _)| name != "RUN")
+            .filter(|(name, _)| name != "RUN" && name != "OWN")
             .cloned()
             .collect()
     };
