@@ -56,10 +56,14 @@ const FILE_BYTES: u64 = 64 * 1024;
 /// The most processes the slot user may have.
 const PROCESSES: u32 = 300;
 
+/// The unit of `ulimit -f` in macOS's `/bin/sh`, which is bash 3.2: 1024 bytes, in POSIX mode
+/// too (512-byte units in POSIX mode came with a later bash).
+const SH_BLOCK: u64 = 1024;
+
 /// What the job does: prints its ids (its group list from the kernel, through `act`), its
-/// process limits and its file-size limits (`sh` is bash in POSIX mode, whose `ulimit -f`
-/// counts 512-byte blocks), waits for a line on its input (the test looks at its audit session
-/// meanwhile), then writes twice the file limit and prints how `dd` ended.
+/// process limits and its file-size limits in [`SH_BLOCK`]s, waits for a line on its input (the
+/// test looks at its audit session meanwhile), then writes twice the file limit and prints how
+/// `dd` ended.
 fn job(act: &str) -> String {
     format!(
         r#"echo "ids $(/usr/bin/id -u) $(/usr/bin/id -g) $('{act}' groups)"
@@ -327,7 +331,7 @@ fn as_root_the_supervisor_drops_opens_a_session_and_sets_the_limits() {
     };
     assert_eq!(line(), format!("ids {uid_text} {gid_text} {gid}"));
     assert_eq!(line(), format!("processes {PROCESSES} {PROCESSES}"));
-    let blocks = FILE_BYTES / 512;
+    let blocks = FILE_BYTES / SH_BLOCK;
     assert_eq!(line(), format!("file blocks {blocks} {blocks}"));
 
     let ready = ready(&folders, &mut supervisor);
