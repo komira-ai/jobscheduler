@@ -471,7 +471,10 @@ fn a_stop_sends_term_to_the_whole_job_group() {
 
 /// Asserts that one run cannot read another run's files: the first writes a file in its
 /// run directory and is not removed, the second (another account) is refused it, and root
-/// reads it, which shows the path is right and the refusal is the uid's. It catches homes that other slot accounts can enter.
+/// reads it, which shows the path is right. The first account's home lies below the homes,
+/// which the second run's profile denies but for its own run directory, so the profile
+/// refuses the walk into it (`Operation not permitted`) before the home's `0700` mode is
+/// asked. It catches homes that other slot accounts can enter.
 #[test]
 #[ignore = "needs root and creates users"]
 fn one_runs_files_are_closed_to_another_run() {
@@ -492,7 +495,11 @@ fn one_runs_files_are_closed_to_another_run() {
     assert_eq!(settle(&mut rt, &second), exited(1));
     let tail = rt.log_tail(&second).unwrap().unwrap();
     assert_eq!(tail.stdout, "", "the second run read the first's file");
-    assert!(tail.stderr.contains("Permission denied"), "{}", tail.stderr);
+    assert!(
+        tail.stderr.contains("Operation not permitted"),
+        "{}",
+        tail.stderr
+    );
     rt.remove(&first).unwrap();
     rt.remove(&second).unwrap();
 }
@@ -537,8 +544,8 @@ fn a_read_deny_is_refused_to_a_real_account_the_modes_would_let_in() {
 /// Asserts what the isolation probe's `read:other-home` asks of a Mac, as a real slot account:
 /// a home of another user, made by the test below the pool's homes with mode `0755` and a file
 /// of mode `0644` in it (root's, so its modes let every user list and read it), can be neither
-/// listed nor read by the run, and the refusal is the profile's (`Operation not permitted`,
-/// where the modes would answer `Permission denied`); the same run writes, reads and lists
+/// listed nor read by the run, and the refusal is the profile's (`Operation not permitted`:
+/// the modes let every user in, so nothing else refuses); the same run writes, reads and lists
 /// its own run directory, which lies below the same homes. It prints the probe's answer,
 /// `read:other-home = denied`, once both refusals are shown.
 ///
