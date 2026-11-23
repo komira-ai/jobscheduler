@@ -3,6 +3,7 @@
 //! environment and limits, an agent without Full Disk Access, and the self-test.
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt as _;
 
 use js_agent::lifecycle::{Exit, RunHandle, Runtime, RuntimeError, Status};
 use js_agent::native::{Journal, NativeRuntime, STEPS};
@@ -346,6 +347,15 @@ fn the_supervisor_is_asked_for_the_account_the_limits_and_the_profile() {
         launched.record_dir,
         rig.dir.path("scratch").join("spec").join("supervisor")
     );
+    assert_eq!(
+        fs::metadata(&launched.record_dir)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777,
+        0o700,
+        "the supervisor's records are the agent's alone"
+    );
     assert_eq!(launched.program, "/bin/echo");
     assert_eq!(launched.args, ["a", "b c"]);
     let exec = rig.home_of(&lent).join("exec");
@@ -408,7 +418,8 @@ fn without_full_disk_access_there_is_no_pool_and_every_start_is_refused() {
 }
 
 /// Asserts that the self-test runs `/usr/bin/true` through a lent account and retires it,
-/// leaving no lease, and that a self-test whose supervisor fails its setup fails.
+/// leaving no lease, that a self-test whose supervisor fails its setup fails, and that one
+/// whose job exits other than 0 fails naming how it ended and leaves no lease.
 ///
 /// Catches: an agent that says hello while its supervisor or its pool cannot run a job.
 #[test]
@@ -433,6 +444,16 @@ fn the_self_test_runs_true_through_an_account_and_retires_it() {
         why.0
     );
     assert_eq!(live(&rig), Vec::<String>::new());
+
+    let mut rig = Rig::new("self-test-exit");
+    rig.launcher.fail(Failing::ExitOnce);
+    let why = rig.rt.self_test().unwrap_err();
+    assert_eq!(
+        why.0,
+        "/usr/bin/true ended as Exited(Exit { code: 7, oom_killed: false })"
+    );
+    assert_eq!(live(&rig), Vec::<String>::new());
+    assert!(rig.pool.held().is_empty());
 }
 
 /// Asserts that a stop sends `SIGTERM` to the job's group (a job that ends on it exits
@@ -562,4 +583,158 @@ fn the_accounts_own_folders_are_granted_and_nothing_else_below_them() {
         .unwrap_err();
     assert_eq!(why.0, "the account's own folders: getconf failed");
     nothing_left(&rig, &lent, 0);
+}
+
+/// Asserts that the self-test's scratch directory is `self-test` below the pool's state
+/// directory (the supervisor's records are made in it), that what an earlier self-test left
+/// there is removed before each run, that the directory is private to the agent (mode 0700),
+/// and that a second self-test over the same directory passes.
+///
+/// Catches: a self-test whose scratch is elsewhere, one that trips over or reuses the files
+/// of an earlier self-test, and a scratch directory other users can enter.
+#[test]
+fn the_self_test_scratch_is_fresh_private_and_below_the_state_directory() {
+    let mut rig = Rig::new("self-test-scratch");
+    let scratch = rig.dir.path("accounts").join("self-test");
+    for round in 0..2 {
+        fs::create_dir_all(scratch.join("old/nested")).unwrap();
+        fs::write(scratch.join("leftover"), b"left").unwrap();
+        ready_account(&rig);
+        rig.rt.self_test().unwrap();
+        assert_eq!(
+            rig.launcher.last().record_dir,
+            scratch.join("supervisor"),
+            "round {round}"
+        );
+        assert!(!scratch.join("leftover").exists(), "round {round}");
+        assert!(!scratch.join("old").exists(), "round {round}");
+        assert_eq!(
+            fs::metadata(&scratch).unwrap().permissions().mode() & 0o7777,
+            0o700,
+            "round {round}"
+        );
+        assert_eq!(live(&rig), Vec::<String>::new());
+    }
+    assert_eq!(rig.launcher.launched().len(), 2);
+}
+
+/// Asserts that a self-test whose scratch directory cannot be made fresh (its parent is a
+/// file, so the removal fails with an error other than "not found") fails naming that
+/// directory and the cause, and starts no supervisor.
+///
+/// Catches: a self-test that goes on over a scratch directory it could not make, and an error
+/// that does not say which directory it was.
+#[test]
+fn a_self_test_scratch_that_cannot_be_made_fails_naming_it() {
+    let mut rig = Rig::in_dir("self-test-blocked", 1, |config, dir| {
+        let blocker = dir.path("blocker");
+        fs::write(&blocker, b"a file").unwrap();
+        config.accounts.state = blocker.join("state");
+    });
+    let scratch = rig.dir.path("blocker").join("state").join("self-test");
+    let why = rig.rt.self_test().unwrap_err();
+    assert_eq!(
+        why.0,
+        format!("{}: Not a directory (os error 20)", scratch.display())
+    );
+    assert!(rig.launcher.launched().is_empty());
+    assert_eq!(live(&rig), Vec::<String>::new());
+}
+
+/// Asserts that a self-test whose run is still going when its polls are used up fails with
+/// `/usr/bin/true did not end`, and still removes the run: its lease is done, its account is
+/// retired and the pool holds none. The test gives the self-test no polls, so the run has not
+/// been seen to end however fast it is.
+///
+/// Catches: a self-test that passes, or hangs, over a job that never ends, and one that leaves
+/// the run's account lent or its lease live after giving up.
+#[test]
+fn a_self_test_whose_job_does_not_end_fails_and_removes_the_run() {
+    let rig = Rig::new("self-test-hangs");
+    let lent = ready_account(&rig);
+    let mut rig = Rig {
+        rt: rig.rt.with_self_test_polls(0),
+        ..rig
+    };
+    let why = rig.rt.self_test().unwrap_err();
+    assert_eq!(why.0, "/usr/bin/true did not end");
+    assert_eq!(rig.launcher.launched().len(), 1);
+    assert!(!rig.accounts.records().contains(&lent), "retired");
+    assert!(rig.pool.held().is_empty());
+    assert_eq!(live(&rig), Vec::<String>::new());
+}
+
+/// Asserts that the production `open` installs the finder of the lent account's own per-user
+/// folders (so a real run may write them), even with no pool, and that the test constructor
+/// `over` installs none.
+///
+/// Catches: a production runtime opened without the folders finder, whose runs could not
+/// write the cache folders `xcrun` needs.
+#[test]
+fn the_production_open_installs_the_own_folders_finder() {
+    let dir = Scratch::new("native-own-finder");
+    let settings = pool_settings(&dir, 1);
+    let mut cfg = config(&dir, &settings);
+    cfg.full_disk_access = FullDiskAccess::NotGranted;
+    let opened = NativeRuntime::open(super::FakeLauncher::new(), cfg.clone(), TERM).unwrap();
+    assert!(opened.has_own_folders());
+    let over = NativeRuntime::over(None, super::FakeLauncher::new(), cfg, TERM).unwrap();
+    assert!(!over.has_own_folders());
+}
+
+/// Asserts that an existing state directory is left as it is by the open (not an error of its
+/// own, not changed to mode 0700) and the pool then refuses it: here the mode 0777 lets others
+/// write in it, so the open fails with `the account pool: ...` and the directory keeps its
+/// mode and its contents.
+///
+/// Catches: an open that fails on a directory that is already there, one that rewrites its
+/// mode, and a pool refusal that does not say it is the pool's.
+#[test]
+fn a_pool_that_refuses_the_existing_state_directory_ends_the_open_naming_the_pool() {
+    let dir = Scratch::new("native-pool-refused");
+    let settings = pool_settings(&dir, 1);
+    let mut cfg = config(&dir, &settings);
+    let state = dir.path("loose-state");
+    fs::create_dir(&state).unwrap();
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o777)).unwrap();
+    fs::write(state.join("marker"), b"mine").unwrap();
+    cfg.accounts.state = state.clone();
+    let why = NativeRuntime::open(super::FakeLauncher::new(), cfg, TERM)
+        .err()
+        .expect("no runtime over a pool that refuses")
+        .0;
+    assert!(why.starts_with("the account pool: "), "{why}");
+    assert!(why.len() > "the account pool: ".len(), "{why}");
+    assert_eq!(
+        fs::metadata(&state).unwrap().permissions().mode() & 0o7777,
+        0o777
+    );
+    assert_eq!(fs::read(state.join("marker")).unwrap(), b"mine");
+}
+
+/// Asserts that a state directory that cannot be made (its parent is missing, or is a file)
+/// ends the open with its path and the operating system's reason, and makes nothing.
+///
+/// Catches: an open that swallows every error of making the directory (and goes on to the
+/// pool), or that names no path.
+#[test]
+fn a_state_directory_that_cannot_be_made_ends_the_open_naming_it() {
+    let dir = Scratch::new("native-state-unmade");
+    let settings = pool_settings(&dir, 1);
+    let missing = dir.path("no-such-parent").join("state");
+    fs::write(dir.path("a-file"), b"a file").unwrap();
+    let below_file = dir.path("a-file").join("state");
+    for (state, reason) in [
+        (missing, "No such file or directory (os error 2)"),
+        (below_file, "Not a directory (os error 20)"),
+    ] {
+        let mut cfg = config(&dir, &settings);
+        cfg.accounts.state = state.clone();
+        let why = NativeRuntime::open(super::FakeLauncher::new(), cfg, TERM)
+            .err()
+            .expect("no runtime without a state directory")
+            .0;
+        assert_eq!(why, format!("{}: {reason}", state.display()));
+        assert!(!state.exists());
+    }
 }

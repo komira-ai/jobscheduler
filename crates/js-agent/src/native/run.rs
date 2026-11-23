@@ -102,3 +102,38 @@ pub(super) fn exit_of(ended: &Ended) -> Option<Exit> {
         oom_killed: false,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::exit_of;
+    use crate::lifecycle::Exit;
+    use crate::mac_supervisor::{Ended, Step};
+
+    /// Asserts how each way a start can end is told: an exit code is the run's, a signal is
+    /// 128 and the signal, and a failed setup step ends no job, so it has no exit.
+    ///
+    /// Catches: a setup failure told as an exit (a run that never ran reported with a
+    /// code), and a signal told as its bare number.
+    #[test]
+    fn a_job_end_is_told_as_a_shell_tells_it_and_a_setup_failure_has_none() {
+        assert_eq!(
+            exit_of(&Ended::Exited(3)),
+            Some(Exit {
+                code: 3,
+                oom_killed: false
+            })
+        );
+        assert_eq!(
+            exit_of(&Ended::Signalled(9)),
+            Some(Exit {
+                code: 137,
+                oom_killed: false
+            })
+        );
+        let failed = Ended::SetupFailed {
+            step: Step::Profile,
+            why: "x".to_owned(),
+        };
+        assert_eq!(exit_of(&failed), None);
+    }
+}
