@@ -25,7 +25,7 @@ type Row = readonly [page: string, shown: string, file: string, says: string];
 const ROWS: readonly Row[] = [
   ['index', 'jobscheduler is a generic scheduler for jobs and compute', 'README.md', 'A generic job and compute scheduler'],
   ['index', 'through Docker, Podman or crun', 'crates/js-agent/src/lib.rs', 'through the container engine at `--container-bin`'],
-  ['index', '(through Docker, Podman or crun) and native jobs on a Mac', 'crates/js-agent/src/lib.rs', 'with it the macOS build runs native jobs'],
+  ['index', '(through Docker, Podman or crun) and native jobs on a Mac', 'crates/js-agent/src/platform/macos.rs', 'with it the macOS build runs native jobs'],
   ['index', 'the only placement; <code>--placement</code> is deprecated and does nothing</span></td>', 'crates/js-lease-server/src/config.rs', 'Deprecated, and does nothing'],
   ['index', 'jobscheduler is a scheduler for jobs and compute', 'README.md', 'A generic job and compute scheduler'],
   ['index', 'Open source, Apache 2.0', 'LICENSE', 'Apache License Version 2.0'],
@@ -41,7 +41,7 @@ const ROWS: readonly Row[] = [
   ['index', '; TLS</td><td><span class="tag tag-ok">works today</span></td>', 'crates/js-lease-server/src/lib.rs', '`--tls-cert`, `--tls-key` | PEM files; both or neither'],
   ['index', '<td>Agents that register with a join token and run', 'crates/js-agent/src/lib.rs', 'the pool\'s join token'],
   ['index', 'container jobs on Linux or native jobs on a Mac</td><td><span class="tag tag-ok">works today</span></td>', 'crates/js-agent/src/lib.rs', 'the `docker` or `podman` program that runs container jobs'],
-  ['index', 'container jobs on Linux or native jobs on a Mac</td><td><span class="tag tag-ok">works today</span></td>', 'crates/js-agent/src/lib.rs', 'with it the macOS build runs native jobs'],
+  ['index', 'container jobs on Linux or native jobs on a Mac</td><td><span class="tag tag-ok">works today</span></td>', 'crates/js-agent/src/platform/macos.rs', 'with it the macOS build runs native jobs'],
   ['index', '<td>Pools of class <code>whole-node</code> or <code>gpu-host</code></td><td><span class="tag tag-ok">works today</span></td>', 'crates/js-lease-server/src/agent_pool.rs', 'a shipped class (`whole-node`, or `gpu-host`, kept as an alias)'],
   ['index', 'launches nothing until the pool file says <code>live</code></span></td>', 'crates/js-lease-server/src/lib.rs', '`launch` is `plan` unless the file says `live`: a pool in `plan` launches nothing'],
   ['index', '<td><code>js-sched</code> placing the jobs</td><td><span class="tag tag-ok">built</span> <span class="tag tag-muted">the only placement; <code>--placement</code> is deprecated and does nothing</span></td>', 'crates/js-lease-server/src/lib.rs', '`--placement js-sched` | deprecated, and does nothing: `js-sched` is the only placement'],

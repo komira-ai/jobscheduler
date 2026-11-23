@@ -1,15 +1,15 @@
 //! The working directory of a native run: `native.cwd`, a path relative to the run's
-//! `exec/` directory (empty for `exec/` itself), resolved there and handed to the helper as
-//! the open directory its `run` request carries.
+//! `exec/` directory (empty for `exec/` itself), resolved there to a canonical path, which the
+//! supervisor is started in.
 //!
 //! A path that leaves `exec/` is refused, by name, before anything starts: an absolute path
 //! or one with a `..` part at once (also at admission, [`check`]), and one that reaches
 //! outside through a link (an input may carry links) when it is resolved, after the inputs
-//! are staged and before the helper's `run`. No process of the run's user exists then, so
-//! nothing can swap a name between the resolution and the open. A part of the path that is
-//! not there is made, `0700` and the user's, as `exec/` is.
+//! are staged and before the supervisor starts. No process of the run's account exists then,
+//! so nothing can swap a name between the resolution and the start. A part of the path that
+//! is not there is made, `0700` and the account's, as `exec/` is.
 
-use std::fs::{self, File};
+use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
@@ -41,19 +41,20 @@ pub(super) fn check(cwd: &str) -> Result<(), CwdError> {
     }
 }
 
-/// Opens the working directory `cwd` below `exec`, making each part that is not there with
-/// `make` (as the user's). A part that is a link is followed only to a directory below
-/// `exec`.
+/// The working directory `cwd` below `exec`, canonical, making each part that is not there
+/// with `make` (as the account's). A part that is a link is followed only to a directory
+/// below `exec`. It is looked up before any process of the account exists, so nothing can
+/// change it between this and the start.
 ///
 /// # Errors
 ///
 /// The path leaves `exec` ([`CwdError::Escapes`]), or a part is not a directory or cannot be
-/// made, or the directory cannot be opened ([`CwdError::Unusable`]).
+/// made ([`CwdError::Unusable`]).
 pub(super) fn open(
     exec: &Path,
     cwd: &str,
     make: super::files::MakeDir<'_>,
-) -> Result<File, CwdError> {
+) -> Result<PathBuf, CwdError> {
     check(cwd)?;
     let unusable = |why: io::Error| CwdError::Unusable(cwd.to_owned(), why);
     let root = fs::canonicalize(exec).map_err(unusable)?;
@@ -80,5 +81,5 @@ pub(super) fn open(
             return Err(unusable(why));
         }
     }
-    File::open(&at).map_err(unusable)
+    Ok(at)
 }

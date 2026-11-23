@@ -53,8 +53,8 @@
 //! ([`record::from_status`]). [`FakeLauncher`] runs shell text with no supervisor and writes
 //! the same records, for tests.
 //!
-//! Nothing in the agent calls [`SystemLauncher`] yet: the native runtime's start of a job is
-//! its caller. The decisions here are tested on every platform; the system calls of the
+//! The native runtime's start of a job (`crate::native`) calls [`SystemLauncher`], for every
+//! native job and for its self-test. The decisions here are tested on every platform; the system calls of the
 //! audit session, the drop, the limits and the profile are in `macos` and only macOS has them
 //! (elsewhere each step fails, as `macOS only`).
 

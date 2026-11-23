@@ -1,21 +1,19 @@
-//! The lease journal: which lease users this agent may have asked the helper for and not
-//! yet seen deleted.
+//! The lease journal: which leases this agent may have lent an account for and not yet seen
+//! retired.
 //!
-//! A lease is written (and synced to disk) before `user-create` is sent, and marked done
-//! after `user-delete` answered or after a failed start was undone. A process that dies,
-//! stops or is rescued with runs going leaves them in the journal; the next process (or the
-//! rescue) reads the journal and ends every lease in it that has no run. The file is
-//! append-only text, one `+ <lease>`, `- <lease>` or `= <lease> <run>` per line; a line that
-//! is none of them (a torn last line) is ignored, and the leases that are live are the added
-//! ones not yet removed.
+//! A lease is written (and synced to disk) before the pool lends it an account, and marked done
+//! after the account was retired or after a failed start was undone. A process that dies,
+//! stops or is rescued with runs going leaves them in the journal; the account pool's next open
+//! retires their accounts, and the next process (or the rescue) lists each lease that has a run
+//! as ended and drops the rest (`native/adopt.rs`). The file is append-only text, one
+//! `+ <lease>`, `- <lease>` or `= <lease> <run>` per line; a line that is none of them (a torn
+//! last line) is ignored, and the leases that are live are the added ones not yet removed.
 //!
-//! A `=` line is written once the helper has started the lease's process: `<run>` is a
-//! [`RunRecord`] in JSON, what a later process needs to find the run again (through the
-//! helper's `watch`) and to finish it as the process that started it would (its labels, its
-//! scratch directory and home, its declared outputs, its bundle). A live lease with such a
-//! line is not ended by the next process: it is listed for adoption (`native/adopt.rs`).
-//! The kind of line is new; a journal reader from before it skips it as it skips a torn line,
-//! and so ends the run as it always did, and a journal written before it has no such line.
+//! A `=` line is written once the supervisor said the lease's job started: `<run>` is a
+//! [`RunRecord`] in JSON, what a later process needs to report the run as the process that
+//! started it would (its labels, its scratch directory and home, its declared outputs, its
+//! bundle, its account). Fields were only ever added, each with a default, so a record of an
+//! earlier release reads, and an earlier release skips the fields it does not know.
 //!
 //! An append and a [`retire`](Journal::retire) hold an exclusive `flock` on `<journal>.lock`
 //! while they work, so a worker that is still alive (wedged, not dead) cannot add a lease
@@ -30,23 +28,24 @@ use js_agent_wire::OutputSpec;
 use rustix::fs::{FlockOperation, flock};
 use serde::{Deserialize, Serialize};
 
-/// What the journal keeps of a run the helper started, for a later process of the agent to
-/// adopt it.
+/// What the journal keeps of a run whose job started, for a later process of the agent to
+/// report it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunRecord {
-    /// The pid the helper reported for the run's process.
+    /// The pid of the run's job, as its supervisor reported it.
     pub pid: u32,
     /// When the run started, in milliseconds since the Unix epoch.
     pub started_ms: u64,
-    /// The run's own deadline the helper was asked to hold, in milliseconds after the start;
-    /// `None` when it holds none.
+    /// A deadline of the run's own, in milliseconds after the start, that a process outside the
+    /// agent held; `None` when none did, as for every run now (the lifecycle holds the wall
+    /// limit).
     #[serde(default)]
     pub deadline_ms: Option<u64>,
     /// The run's labels, as the lifecycle gave them.
     pub labels: BTreeMap<String, String>,
     /// The run's scratch directory (its log files).
     pub scratch: PathBuf,
-    /// The home of the run's user.
+    /// The home of the run's account.
     pub home: PathBuf,
     /// The outputs the start declared.
     #[serde(default)]
@@ -54,6 +53,12 @@ pub struct RunRecord {
     /// The bundle the run pinned, if any.
     #[serde(default)]
     pub bundle: Option<String>,
+    /// The name of the account the run was lent; `None` in a record of an earlier release.
+    #[serde(default)]
+    pub account: Option<String>,
+    /// The uid of that account; `None` in a record of an earlier release.
+    #[serde(default)]
+    pub uid: Option<u32>,
 }
 
 /// The journal in the file at a path.
@@ -71,7 +76,7 @@ impl Journal {
         }
     }
 
-    /// Writes that `lease` may have a user, and syncs the file and its directory.
+    /// Writes that `lease` may have an account, and syncs the file and its directory.
     ///
     /// # Errors
     ///
@@ -80,7 +85,7 @@ impl Journal {
         self.append('+', lease)
     }
 
-    /// Writes that `lease` has no user (any more).
+    /// Writes that `lease` has no account (any more).
     ///
     /// # Errors
     ///
@@ -89,7 +94,7 @@ impl Journal {
         self.append('-', lease)
     }
 
-    /// Writes what is needed to adopt the run of `lease`, which the helper started.
+    /// Writes the run record of `lease`, whose job started.
     ///
     /// # Errors
     ///

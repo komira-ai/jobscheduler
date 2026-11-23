@@ -52,7 +52,7 @@ pub struct FoundQuota {
 }
 
 /// Starts the worker when the runtime of this build is configured (Linux: the crun runtime or
-/// `--container-bin`; macOS: `--native-helper-socket`), and `None` when it is not: an agent
+/// `--container-bin`; macOS: `--native-accounts`), and `None` when it is not: an agent
 /// started with `--no-jobs` registers and heartbeats and runs
 /// no job. The worker has built the lifecycle and adopted the containers an earlier process
 /// left when this returns, and the lines it has to say (the engine's warnings, what it
@@ -65,7 +65,7 @@ pub struct FoundQuota {
 ///
 /// The text names `--container-bin` (the engine is not Docker or Podman or does not
 /// answer, the agent cannot see the host, or the containers of an earlier run cannot be
-/// listed) or `--native-helper-socket` (the helper does not answer).
+/// listed) or `--native-accounts` (the account pool cannot be opened).
 pub fn start(
     local: Local,
     hello: &Hello,

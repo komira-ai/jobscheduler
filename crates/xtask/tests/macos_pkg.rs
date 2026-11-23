@@ -586,7 +586,7 @@ fn program_arguments(plist: &str) -> Vec<String> {
 
 /// Every flag the agent's plist gives, and every flag of the Mac flags file it names, is one the macOS build of the agent has: a flag of every
 /// build (this build's parser knows it, and it is no Linux build's flag) or a flag of the macOS
-/// build's runtime (`platform::MACOS_ONLY`), the helper's socket among them. It runs on every
+/// build's runtime (`platform::MACOS_ONLY`), the account pool's flags among them. It runs on every
 /// build, so a Linux pull request that renames a flag the plist names fails here, and not only
 /// in the macOS beta stage. Catches a plist that names a flag the Mac agent refuses at start.
 #[test]
@@ -602,7 +602,7 @@ fn the_agents_plist_names_only_flags_of_the_macos_agent() {
         .filter_map(|word| word.strip_prefix("--"))
         .map(|word| word.split('=').next().unwrap_or(word))
         .collect();
-    assert!(flags.contains(&"native-helper-socket"), "{flags:?}");
+    assert!(flags.contains(&"native-accounts"), "{flags:?}");
     assert!(flags.contains(&"native-network"), "{flags:?}");
     for flag in flags {
         let common = command
@@ -614,7 +614,7 @@ fn the_agents_plist_names_only_flags_of_the_macos_agent() {
 }
 
 /// The agent's plist parses as a command line of the macOS build of the agent (the native
-/// flags exist in that build only), with the pool and the helper's socket it names.
+/// flags exist in that build only); the plist alone names no account pool.
 #[cfg(target_os = "macos")]
 #[test]
 fn the_agents_plist_names_flags_the_agent_accepts() {
@@ -637,10 +637,7 @@ fn the_agents_plist_names_flags_the_agent_accepts() {
         cli.flags_file.as_deref(),
         Some(Path::new("/etc/js-agent/flags"))
     );
-    assert_eq!(
-        cli.os.native_helper_socket.as_deref(),
-        Some(Path::new("/var/run/js-mac-session/socket"))
-    );
+    assert_eq!(cli.os.native_accounts, None);
 }
 
 /// What a Mac's `/etc/js-agent/flags` holds, one word per line, with documentation addresses.
@@ -650,6 +647,9 @@ const MAC_FLAGS: &str = "# the Mac build host group\n\
     --ca-cert=/etc/js-agent/ca.pem\n\
     --host-id-from-facts=/var/lib/hostkeeper/facts.json\n\
     --native-network=on\n\
+    --native-accounts=/var/db/js-agent/accounts\n\
+    --native-account-range=700-799\n\
+    --native-account-ready=1\n\
     --native-pf-uid-start=600\n\
     --native-pf-uid-count=100\n\
     --native-pf-endpoint=192.0.2.10:443\n\
@@ -682,27 +682,21 @@ fn the_agents_plist_names_flags_the_agent_accepts_with_a_flags_file_expanded() {
         Some(Path::new("/var/lib/hostkeeper/facts.json"))
     );
     assert_eq!(
-        cli.os.native_helper_socket.as_deref(),
-        Some(Path::new("/var/run/js-mac-session/socket"))
+        cli.os.native_accounts.as_deref(),
+        Some(Path::new("/var/db/js-agent/accounts"))
     );
+    assert_eq!(cli.os.native_account_range.as_deref(), Some("700-799"));
 }
 
 #[test]
-fn the_helpers_plist_names_flags_the_helper_accepts_and_a_socket_the_agent_dials() {
+fn the_helpers_plist_names_flags_the_helper_accepts() {
     let plist = Daemon::session("cdhash H\"abc\"").render();
     let words = program_arguments(&plist);
     assert_eq!(words[0], format!("{BIN_DIR}/js-mac-session"));
-    let args = js_mac_session::start::Args::try_parse_from(
+    js_mac_session::start::Args::try_parse_from(
         std::iter::once("js-mac-session".to_owned()).chain(words.into_iter().skip(1)),
     )
     .unwrap_or_else(|e| panic!("{e}"));
-    let agent = program_arguments(&Daemon::agent().render());
-    let socket = agent
-        .iter()
-        .position(|w| w == "--native-helper-socket")
-        .map(|at| PathBuf::from(&agent[at + 1]))
-        .unwrap();
-    assert_eq!(args.socket, socket);
 }
 
 /// The pf daemon's plist parses as a command line of the `js-mac-provision` the package carries,

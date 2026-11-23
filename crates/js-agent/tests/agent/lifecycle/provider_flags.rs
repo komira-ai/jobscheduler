@@ -1,7 +1,8 @@
 //! The flags of the node-local mount providers (`--mount-provider NAME=SOCKET`,
 //! `--mount-provider-user NAME=USER` and `--mount-provider-wait SECS`, `docs/design/mount-providers.md`, section 4): checked when
-//! the agent starts, before it says hello, and taken by a crun agent only. The hello's
-//! `mount-provider.<name>` is `jobs::crun_gpu_hello`'s.
+//! the agent starts, before it says hello, and on Linux taken by a crun agent only (a macOS
+//! agent takes them for its native runtime). The hello's `mount-provider.<name>` is
+//! `jobs::crun_gpu_hello`'s.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -9,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use clap::Parser as _;
 use js_agent::Cli;
-use js_agent::lifecycle::{DEFAULT_PROVIDER_WAIT_SECS, Local, MountProviders};
+use js_agent::lifecycle::{DEFAULT_PROVIDER_WAIT_SECS, Local, MountProviders, UserNames};
 
 use crate::support::{Scratch, code, linux_host, run_scripted, welcome};
 
@@ -238,7 +239,8 @@ fn a_providers_user_by_name_is_its_uid_in_the_passwd_file() {
         ("tier".to_owned(), "tierstore".to_owned()),
         ("cache".to_owned(), "cache".to_owned()),
     ];
-    let given = MountProviders::from_flags(&sockets, &users, None, &passwd).unwrap();
+    let given =
+        MountProviders::from_flags(&sockets, &users, None, UserNames::Passwd(&passwd)).unwrap();
     assert_eq!(
         given.sockets(),
         [
@@ -248,11 +250,12 @@ fn a_providers_user_by_name_is_its_uid_in_the_passwd_file() {
     );
     let missing = dir.path("no-passwd");
     let by_uid = [("tier".to_owned(), "991".to_owned())];
-    let taken = MountProviders::from_flags(&sockets, &by_uid, None, &missing).unwrap();
+    let taken =
+        MountProviders::from_flags(&sockets, &by_uid, None, UserNames::Passwd(&missing)).unwrap();
     assert_eq!(taken.sockets()[0].2, 991);
     let refused = |user: &str, file: &Path| {
         let users = [("tier".to_owned(), user.to_owned())];
-        MountProviders::from_flags(&sockets, &users, None, file).err()
+        MountProviders::from_flags(&sockets, &users, None, UserNames::Passwd(file)).err()
     };
     assert_eq!(
         refused("nobody-here", &passwd),
@@ -275,5 +278,60 @@ fn a_providers_user_by_name_is_its_uid_in_the_passwd_file() {
             missing.display()
         )),
         "{unread}"
+    );
+}
+
+/// Asserts that a provider's user given by name on a Mac is the uid the directory service
+/// gives that name, asked once for each name and never for a uid, and that a name the service
+/// does not know and a service that cannot be asked are refused naming the flag, by exact
+/// equality. Catches a Mac's service account (absent from `/etc/passwd`) taken for root, and
+/// an error of the service taken as no user.
+#[test]
+fn a_providers_user_by_name_on_a_mac_is_its_uid_in_the_directory_service() {
+    use std::cell::RefCell;
+
+    let dir = Scratch::new("life-provider-directory");
+    let sockets = [
+        ("tier".to_owned(), dir.path("tier.sock")),
+        ("cache".to_owned(), dir.path("cache.sock")),
+    ];
+    let asked = RefCell::new(Vec::new());
+    let directory = |name: &str| {
+        asked.borrow_mut().push(name.to_owned());
+        match name {
+            "_tierstore" => Ok(Some(398)),
+            "broken" => Err(std::io::Error::other("opendirectoryd is not running")),
+            _ => Ok(None),
+        }
+    };
+    let users = [
+        ("tier".to_owned(), "_tierstore".to_owned()),
+        ("cache".to_owned(), "7".to_owned()),
+    ];
+    let given =
+        MountProviders::from_flags(&sockets, &users, None, UserNames::Directory(&directory))
+            .unwrap();
+    assert_eq!(
+        given.sockets(),
+        [
+            ("tier".to_owned(), dir.path("tier.sock"), 398),
+            ("cache".to_owned(), dir.path("cache.sock"), 7)
+        ]
+    );
+    assert_eq!(*asked.borrow(), ["_tierstore"]);
+    let refused = |user: &str| {
+        let users = [("tier".to_owned(), user.to_owned())];
+        MountProviders::from_flags(&sockets, &users, None, UserNames::Directory(&directory)).err()
+    };
+    assert_eq!(
+        refused("_nobody"),
+        Some("--mount-provider-user tier: no user \"_nobody\" in the directory service".to_owned())
+    );
+    assert_eq!(
+        refused("broken"),
+        Some(
+            "--mount-provider-user tier: the directory service: opendirectoryd is not running"
+                .to_owned()
+        )
     );
 }

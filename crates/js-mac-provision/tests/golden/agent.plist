@@ -15,8 +15,6 @@
 		<string>/var/db/js-agent/state</string>
 		<string>--scratch-root</string>
 		<string>/var/db/js-agent/scratch/runs</string>
-		<string>--native-helper-socket</string>
-		<string>/var/run/js-mac-session/socket</string>
 	</array>
 	<key>UserName</key>
 	<string>root</string>
