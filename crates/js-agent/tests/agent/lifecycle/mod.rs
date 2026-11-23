@@ -36,6 +36,7 @@ mod network;
 mod notes;
 mod outputs_committed;
 mod owed;
+mod owed_at_start;
 mod per_job;
 mod prepare;
 #[cfg(target_os = "linux")]

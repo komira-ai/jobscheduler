@@ -131,7 +131,8 @@ clear ends it.
   clean re-checks and the server's acknowledgement. Every other restored taint stays pinned until an operator moves the marker
   aside: `unchecked` of any kind, `cleanup-failed`,
   `check-owed`, `host-job` and `marker-unreadable`. A restored
-  taint beside which a non-clearable one is sealed at start (owed records make `check-owed`, a host job taken over) is
+  taint beside which a non-clearable one is sealed at start (an owed check that cannot run or finds a process makes
+  `check-owed`, a host job taken over) is
   pinned too: the seal pins it. So is one the pin file names: when the pin happened in an earlier process, `taint.pinned`
   holds the marker's taint, and a restored residue equal to it, field for field, stays pinned; a pin file that cannot be
   read pins; one that names another taint is a stale file of an operator-cleared taint and is ignored. The decision is
@@ -255,6 +256,32 @@ success line names no taint: the report has a detail on success only for a chang
 second detail would need a format change. A rollback onto a release that predates self-clearing
 leaves such a taint standing, and that agent refuses starts until an operator clears it; that is
 accepted, because a halt would stop every release of the group.
+
+## Owed checks run at the start
+
+A process of the agent that ends inside a job's cleanup window leaves the job's `owed-*` record. That happens on an update's
+hand-over or drain whose bound passes with a cleanup under way, on a second stop, or on a crash. The next process used to taint
+itself `check-owed` for every such record, and that taint never clears: one node of a busy pool once started an update with 58
+records and took no work until an operator cleared it. The record's check needs nothing the next process cannot rebuild. The
+check is host-wide, and the run id only names the finding. So the next process runs it:
+
+- It reads the records before it takes any container over. A record is complete when it holds its run id, as `owe` writes it.
+  The host is tainted `check-owed` at once, with no check run, when the records cannot be listed (`owed-records-unreadable`),
+  when one is not complete (`owed-record-incomplete`, naming that run), or when the hook cannot judge without a baseline
+  (`CheckHook::checks_owed_at_start`, false on a Mac, no check named).
+- Once the containers are taken over and the leftovers swept, it runs one check for all the records:
+  `CheckHook::run_restored`, the rules that need no baseline, with every container taken over or that could not be removed
+  counted as live. Its notes are logged as findings of no run.
+- A pass removes every record and logs `owed-checked`. The host is not tainted.
+- A finding taints the host `check-owed`, naming the first run, with the finding's code as the check and what it found as
+  the detail, and keeps every record. The finding is a process of the job users' range outside a live container, or a
+  process table that cannot be read. So does a record that cannot be removed after a pass (`owed-record-failed`). The
+  agent never clears `check-owed`, so a residue found here stays until an operator looks, as before.
+
+Only processes are judged that way, as for every check. Nothing changes in the record's format, and an older agent that reads
+a record this one wrote taints as it always did. The update hook is unchanged. A drain still waits for the records before it
+stops the agent, and `verify` after a drain's stop still halts on a record (`owed_check`). The code is `Lifecycle::owed_at_start` and
+`Lifecycle::check_owed` (`lifecycle/machine/owed.rs`).
 
 ## A process outside the groups a job can be in
 

@@ -113,6 +113,13 @@ pub mod code {
     /// The records of owed checks in the state root could not be listed when the agent
     /// started, so the host is tainted ([`reason::CHECK_OWED`](crate::lifecycle::taint::reason)).
     pub const OWED_UNREADABLE: &str = "owed-records-unreadable";
+    /// A record of owed checks found when the agent started does not hold its run id (a
+    /// write cut short), so the host is tainted
+    /// ([`reason::CHECK_OWED`](crate::lifecycle::taint::reason)) and the check is not run.
+    pub const OWED_INCOMPLETE: &str = "owed-record-incomplete";
+    /// The checks owed by runs of an earlier process (records found when the agent started)
+    /// ran at the start, passed, and their records were removed: the host is not tainted.
+    pub const OWED_CHECKED: &str = "owed-checked";
     /// A held result or the retired list could not be written to the state root.
     pub const HELD_FAILED: &str = "held-record-failed";
     /// A held result or the retired list in the state root could not be read at start.

@@ -60,16 +60,32 @@
 //!
 //! The state root holds one more kind of file: `owed-<run id>`, the record that a job's
 //! post-job checks are owed (see [`StateRoot::owe`]). It is written, synced, before the
-//! first step of the job's cleanup and removed once the checks have run; one found when the
-//! agent starts taints the host with the reason [`reason::CHECK_OWED`].
+//! first step of the job's cleanup and removed once the checks have run. It holds the run
+//! id; one that holds anything else (empty, after a write cut short) is not complete
+//! ([`StateRoot::owed_complete`]).
 //!
-//! **A restart or a `SIGTERM` inside the cleanup window leaves an `owed-*` record, and so
-//! taints the host at the next start.** The window runs from before the first step of a
+//! **A restart or a `SIGTERM` inside the cleanup window leaves an `owed-*` record, and the
+//! next start runs the check it records.** The window runs from before the first step of a
 //! job's cleanup (the container's removal) until its checks have run, and it is not short:
 //! it holds a container removal and the checks. An agent that is stopped, restarted or
-//! killed in it, a stop on `SIGTERM` included, leaves the record behind, and the next
-//! process finds it and taints the host (`check-owed`): the agent cannot tell what the job
-//! left behind before the new baseline was taken. The agent never clears that taint: no
+//! killed in it, a stop on `SIGTERM` included (an update's hand-over or drain whose bound
+//! passed with a cleanup under way, a second stop), leaves the record behind. The next
+//! process cannot tell what the job left behind before its own baseline was taken, so it
+//! runs the check, once it has taken the containers over, by the rules that need no
+//! baseline ([`CheckHook::run_restored`](super::CheckHook::run_restored): a process of the
+//! job users' range outside a live container is a finding whatever the baseline holds). A
+//! clean check removes every record and logs `owed-checked`; nothing is tainted. The host is
+//! tainted with the reason [`reason::CHECK_OWED`], and every record kept, when:
+//! - the check finds a process (the check is `process-as-job-user`) or cannot run (the
+//!   check is the code of what it could not read);
+//! - a record is not complete (the check is `owed-record-incomplete`), or the records cannot
+//!   be listed (`owed-records-unreadable`);
+//! - a record cannot be removed after a clean check (`owed-record-failed`);
+//! - the hook cannot judge without a baseline
+//!   ([`CheckHook::checks_owed_at_start`](super::CheckHook::checks_owed_at_start), false
+//!   on a Mac), as before (no check named).
+//!
+//! The agent never clears that taint: no
 //! re-check can show that what the job left was not already part of the baseline. A clear
 //! (the agent's or an operator's) **must remove the `owed-*` records as well as
 //! `taint.json`** (and move `taint.pinned` aside): clearing the marker alone leaves the records, and the very next start
@@ -391,6 +407,19 @@ impl StateRoot {
             Err(why) if why.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(why) => Err(why),
         }
+    }
+
+    /// Whether the record of the checks owed by `run_id` is complete: it holds the run id
+    /// and nothing else, as [`StateRoot::owe`] writes it. A record that cannot be read, one
+    /// left empty by a write cut short, or one that holds anything else is not.
+    pub fn owed_complete(&self, run_id: &str) -> bool {
+        let mut body = Vec::new();
+        let limit = u64::try_from(run_id.len())
+            .unwrap_or(u64::MAX)
+            .saturating_add(1);
+        File::open(self.owed_path(run_id))
+            .and_then(|file| file.take(limit).read_to_end(&mut body))
+            .is_ok_and(|_| body == run_id.as_bytes())
     }
 
     /// The runs whose checks are owed, sorted.
