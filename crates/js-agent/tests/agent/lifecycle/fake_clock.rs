@@ -1,4 +1,5 @@
-//! The clocks the lifecycle's tests move by hand: nothing here reads the time.
+//! The clocks of the fake runtime: one a test moves, and one that has no Unix time. A child
+//! of `fake`, which re-exports them.
 
 use std::cell::Cell;
 use std::rc::Rc;

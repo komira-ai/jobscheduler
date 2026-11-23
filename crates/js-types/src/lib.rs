@@ -35,6 +35,7 @@ mod class;
 mod clock;
 pub mod cordon;
 mod cpu_ceiling;
+mod cpu_series;
 mod digest;
 pub mod env;
 mod ids;
@@ -64,6 +65,7 @@ pub use booking::{Candidate, Held, HostCapacity};
 pub use class::{Admission, ClassError, ResourceClass};
 pub use clock::{Clock, ManualClock, Monotonic, Timestamp};
 pub use cpu_ceiling::{CpuCeiling, CpuCeilingError};
+pub use cpu_series::{CPU_SERIES_MAX_POINTS, CpuSeries};
 pub use digest::{BundleRef, BundleRefError, DigestRef, DigestRefError};
 pub use ids::{
     ClassId, CordonHolder, HostId, IdError, LeaseId, ProviderId, RequestId, RequestIdError,

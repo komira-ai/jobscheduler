@@ -54,6 +54,9 @@ pub struct CrunSettings {
     /// The operator's CPU ceiling (`--cpu-ceiling`): each lease is held to its booked CPU
     /// times it, a `cpu.max` beside its `cpu.weight`; none (the default) for no ceiling.
     pub cpu_ceiling: Option<js_contain::CpuCeiling>,
+    /// Whether each run's CPU is recorded second by second and reported with its result
+    /// (`--cpu-series`); off by default.
+    pub cpu_series: bool,
     /// Whether a host job (`isolation = host`) is launched (`--allow-host-jobs`); without it
     /// one is refused before anything is made.
     pub host_jobs: bool,

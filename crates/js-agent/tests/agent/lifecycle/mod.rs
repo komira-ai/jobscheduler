@@ -10,6 +10,7 @@ mod adopt;
 mod blind_cgroup;
 mod cleanup;
 mod concurrent_start;
+mod cpu_series;
 mod creating;
 pub mod deferring;
 mod disk;

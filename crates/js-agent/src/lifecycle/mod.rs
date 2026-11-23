@@ -563,6 +563,8 @@ pub struct Local {
     pub settle: Duration,
     /// `--taint-recheck-ms`, or [`DEFAULT_TAINT_RECHECK`].
     pub taint_recheck: Duration,
+    /// `--host-second-samples`: the worker also takes the node's CPU per second.
+    pub host_second_samples: bool,
     /// `--stop-grace`, or [`DEFAULT_STOP_GRACE`].
     pub stop_grace: Duration,
     /// `--drain-wait`, or the stop grace.
@@ -737,6 +739,7 @@ impl Local {
         let tmp_gib = job_tmp_gib(cli)?;
         let settle = jobs.settle;
         let taint_recheck = jobs.taint_recheck;
+        let host_second_samples = jobs.host_second_samples;
         let egress = std::mem::take(&mut jobs.egress);
         let allow_host_jobs = jobs.allow_host_jobs;
         let allow_fuse_jobs = jobs.allow_fuse_jobs;
@@ -759,6 +762,7 @@ impl Local {
             state,
             settle,
             taint_recheck,
+            host_second_samples,
             stop_grace,
             drain_wait,
             image_allow: image_allow(&cli.image_allow)?,

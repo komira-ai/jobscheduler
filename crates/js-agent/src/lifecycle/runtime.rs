@@ -19,8 +19,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use js_agent_wire::{
-    HostPort, Isolation, JobUsage, LogReport, LogTail, NativeSpec, NetworkCeiling, NetworkLevel,
-    PortRange, refusal,
+    CpuSeries, HostPort, Isolation, JobUsage, LogReport, LogTail, NativeSpec, NetworkCeiling,
+    NetworkLevel, PortRange, refusal,
 };
 use js_types::{JobNetwork, PortMap};
 
@@ -585,6 +585,15 @@ pub trait Runtime {
     /// control group to read, or cannot read both counters (cgroup version 1, no
     /// `memory.peak`): never a zero for what is not known. The default has none.
     fn usage(&mut self, _id: &RunHandle) -> Option<JobUsage> {
+        None
+    }
+
+    /// The CPU second by second of the exited container `id` over its run, read beside
+    /// [`Runtime::usage`], before the container and its group are removed; a job keyed by job
+    /// lists it in its result. `None` when the runtime does not record it (it is not asked
+    /// to, or it has no per-job CPU source: a macOS native job, a VM and a container-engine
+    /// job record nothing yet), and when the run had no time to record. The default has none.
+    fn cpu_series(&mut self, _id: &RunHandle) -> Option<CpuSeries> {
         None
     }
 

@@ -194,6 +194,9 @@ incremental = false
 # `test` profile, so this half alone reaches it; a `dev` override would only slow
 # debug builds. A name that matches no package only draws a cargo warning:
 # crates/xtask/tests/profile_overrides.rs checks the names.
+[profile.test.package.js-cpu-replay]
+opt-level = 2
+
 [profile.test.package.js-sched]
 opt-level = 2
 

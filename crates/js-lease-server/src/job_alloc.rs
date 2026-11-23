@@ -24,7 +24,7 @@ use js_jobs::{
     JobState, JobStore, JobStoreError, Output, ResultReason, Row, StartFailure,
 };
 use js_state::Store;
-use js_types::HostId;
+use js_types::{CpuSeries, HostId};
 use js_usage::{
     AllocationId, Booked as UsageBooked, DrainOutcome, EndedReason, EndedRow, ProfileKey, Used,
 };
@@ -159,7 +159,8 @@ pub(crate) fn lose_on_absent<S: Store, I: IdSource>(
 /// id), on its host, with what it booked; queued from the job's submit to this placement,
 /// run from its start to its end (zero for a job that never ran, unknown for a job whose
 /// row is gone), ended at the free, for the reason it was freed, with what it was measured to
-/// use ([`used_of`]), and under the name of its class as its profile ([`profile_of`]).
+/// use ([`used_of`]) and its CPU series ([`series_of`]), and under the name of its class as its
+/// profile ([`profile_of`]).
 pub(crate) fn history(job: Option<&JobRecord>, freed: &AllocationRecord) -> Vec<Row> {
     let end = freed.freed_at.unwrap_or(freed.created_at);
     let ran = |job: &JobRecord| {
@@ -182,6 +183,7 @@ pub(crate) fn history(job: Option<&JobRecord>, freed: &AllocationRecord) -> Vec<
         actual_end: millis(end.as_duration()),
         error_ms: None,
         used: job.and_then(used_of),
+        cpu_series: job.and_then(series_of),
     };
     let rows = named.map(|id| js_usage::ended_writes(&row(id)).to_vec());
     rows.unwrap_or_default()
@@ -214,6 +216,13 @@ fn used_of(job: &JobRecord) -> Option<Used> {
         memory_bytes: usage.peak_memory_bytes,
         cpu_mean_milli: cpu_milli,
     })
+}
+
+/// The CPU series `job`'s host reported with its result, as the usage history keeps it; `None`
+/// for a job with no result and for one whose host reported none. It is kept as reported,
+/// whether or not the host also reported a usage and whatever total CPU it comes to.
+fn series_of(job: &JobRecord) -> Option<CpuSeries> {
+    job.result.as_ref()?.cpu_series.clone()
 }
 
 /// What `booked` comes to in the usage history.
