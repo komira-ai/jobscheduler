@@ -586,3 +586,99 @@ fn the_settings_keep_the_put_ingest_and_the_runtime_gets_it() {
         assert!(!runtime.owns_host_path("/srv/elsewhere/x"));
     }
 }
+
+/// Asserts that the put flags reach the native settings the agent is built from, as its
+/// configuration step reads the command line (`Local::from_cli`): none without them; given
+/// the name of the test's own user, the node is that user's uid and primary group as the
+/// directory service answers them; given a number, that number for both; the root kept
+/// canonical. And that the flags without `--native-accounts` are refused naming it, and a root
+/// whose name a profile cannot hold is refused with the profile's reason. Catches a lookup
+/// that answers the uid for the group, settings that lose the put ingest between the flags
+/// and the runtime, put flags that an agent with no native jobs silently ignores, and a root
+/// the agent would accept only to fail every run's profile.
+#[test]
+fn the_put_flags_reach_the_settings_the_agent_is_built_from() {
+    use clap::Parser as _;
+    use js_agent::lifecycle::Local;
+    use js_agent::{Backend, Cli};
+
+    use super::agent::private;
+    use crate::support::Scratch;
+
+    let dir = Scratch::new("native-put-local");
+    fs::create_dir_all(dir.path("put")).unwrap();
+    let canonical = fs::canonicalize(dir.path("put")).unwrap();
+    let put = dir.path("put").display().to_string();
+    let accounts = dir.path("accounts").display().to_string();
+    let (state, scratch) = (private(&dir, "state"), private(&dir, "scratch"));
+    let roots = ["--state-root", &state, "--scratch-root", &scratch];
+    let native = [
+        &roots[..],
+        &[
+            "--native-accounts",
+            &accounts,
+            "--native-account-range",
+            "501-510",
+        ],
+    ]
+    .concat();
+    let cli = |extra: &[&str]| {
+        let argv = [
+            "js-agent",
+            "--server",
+            "http://127.0.0.1:1",
+            "--pool",
+            "macs",
+        ];
+        Cli::try_parse_from(argv.iter().chain(extra.iter())).unwrap()
+    };
+    let settings = |extra: &[&str]| {
+        let local = Local::from_cli(&cli(&[&native[..], extra].concat()), 0).unwrap();
+        match local.backend {
+            Some(Backend::Native(settings)) => settings,
+            _ => panic!("no native backend"),
+        }
+    };
+    assert_eq!(settings(&[]).put(), None, "no put flags");
+    let me_name = std::env::var("USER").expect("the test's user name");
+    let named = settings(&["--native-put-root", &put, "--native-put-user", &me_name]);
+    let want = PutConfig {
+        root: canonical.clone(),
+        node: node(),
+    };
+    assert_eq!(
+        named.put(),
+        Some(&want),
+        "by name: the user's uid and primary group"
+    );
+    let numbered = settings(&["--native-put-root", &put, "--native-put-user", "281"]);
+    let want = PutConfig {
+        root: canonical.clone(),
+        node: Node { uid: 281, gid: 281 },
+    };
+    assert_eq!(numbered.put(), Some(&want), "by number");
+
+    let alone = [
+        &roots[..],
+        &["--native-put-root", &put, "--native-put-user", "281"],
+    ]
+    .concat();
+    let why = Local::from_cli(&cli(&alone), 0).unwrap_err();
+    assert_eq!(why, "--native-put-root: needs --native-accounts");
+
+    fs::create_dir(dir.path("put\u{1}odd")).unwrap();
+    let odd = fs::canonicalize(dir.path("put\u{1}odd")).unwrap();
+    let given = odd.display().to_string();
+    let extra = [
+        "--native-put-root",
+        given.as_str(),
+        "--native-put-user",
+        "281",
+    ];
+    let why = Local::from_cli(&cli(&[&native[..], &extra[..]].concat()), 0).unwrap_err();
+    let reason = AbsPath::new(&odd).unwrap_err();
+    assert_eq!(
+        why,
+        format!("--native-put-root: {}: {reason}", odd.display())
+    );
+}

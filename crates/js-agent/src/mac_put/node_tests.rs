@@ -72,3 +72,26 @@ fn a_missing_folder_fails_the_hand_over_by_name() {
         "{why}"
     );
 }
+
+/// Proves a link in the job directory's place fails the hand-over, naming the directory, and
+/// leaves the directory it names as it was: its mode is not set to the put directory's. Catches
+/// a hand-over that follows a link (a `chmod` by path) and so opens a directory outside the
+/// put root to the node's group.
+#[test]
+fn a_link_in_the_job_directorys_place_is_not_followed() {
+    let scratch = TestDir::under(std::env::temp_dir(), "put-node-link");
+    let root = scratch.path().join("put");
+    fs::create_dir_all(root.join("cas/b/r1")).unwrap();
+    let outside = scratch.path().join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::set_permissions(&outside, fs::Permissions::from_mode(0o755)).unwrap();
+    let to = target(&root);
+    std::os::unix::fs::symlink(&outside, &to.dir).unwrap();
+    let why = hand_over(&root, &to, me().uid, me()).unwrap_err();
+    assert!(
+        why.to_string()
+            .starts_with(&format!("{}: ", to.dir.display())),
+        "{why}"
+    );
+    assert_eq!(fs::metadata(&outside).unwrap().mode() & 0o7777, 0o755);
+}
