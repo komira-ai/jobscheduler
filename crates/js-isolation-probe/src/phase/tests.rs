@@ -207,7 +207,7 @@ fn leave_keeps_its_markers_and_says_how_to_find_them() {
     );
     assert!(
         lines.iter().any(|l| l
-            == "leave:background-process: allowed; pid 4242, cannot look back: exit 1: unknown"),
+            == "leave:background-process: denied; pid 4242, accepted, but not there right after"),
         "{lines:?}"
     );
     assert!(who.cwd.join(files::marker_name(&tag)).exists());

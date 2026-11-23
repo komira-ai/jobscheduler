@@ -49,6 +49,9 @@
 "read:tcc-dir" = "denied"
 "read:tcc-db" = "denied"
 "read:timemachine-prefs" = "denied"
+# Another user's home must not be readable. A home the system made 0755 with an ACL (a console
+# user's) lets every user list it, and the profile has no read deny for the other homes yet:
+# a job listed one on macOS 27, so this pin fails by name until the profile denies it.
 "read:other-home" = "denied"
 "read:root-home" = "denied"
 # The flags file is 0644 and holds no secret (no token: a Mac joins by its host certificate).
@@ -56,7 +59,9 @@
 "read:agent-token" = "n/a"
 "read:agent-state" = "denied"
 "read:accounts-ledger" = "denied"
-"read:helper-state" = "denied"
+# The helper is retired in this shape (the agent runs jobs itself): its state and socket are
+# absent. On a host that still runs it, both must be denied.
+"read:helper-state" = "n/a"
 # Another service's key (0640, its own group).
 "read:host-key" = "denied"
 # Root-owned files with mode 0040 of a group a job must not hold: a slot account's group, and
@@ -72,8 +77,9 @@
 "connect:loopback" = "denied"
 "connect:pf-endpoint" = "denied"
 "lookup:public-name" = "denied"
-# A job cannot reach the helper's socket at all, so no request of it can ask for anything.
-"connect-unix:helper-socket" = "denied"
+# A job cannot reach the helper's socket at all, so no request of it can ask for anything; the
+# helper is retired here (see read:helper-state).
+"connect-unix:helper-socket" = "n/a"
 # A slot account is no administrator and has no password; the profile refuses to start a
 # setuid tool (EPERM), so sudo, su, crontab and at never run.
 "priv:sudo" = "denied"
@@ -111,7 +117,9 @@
 # HOME has no Library/Preferences or Library/Keychains, and the probe makes neither.
 "leave:preferences" = "n/a"
 "leave:keychain" = "n/a"
-"leave:launch-services" = "denied"
+# The registration goes into the account's own Launch Services database, under its per-user
+# folder, which the removal takes (find on the same slot: gone).
+"leave:launch-services" = "allowed"
 "leave:pasteboard" = "denied"
 # Nothing stops a process from starting its own session; the removal sweeps the job's
 # audit session and the uid.
@@ -127,7 +135,9 @@
 "leave:file:user-temp-dir" = "allowed"
 "leave:file:opt-homebrew" = "n/a"
 "leave:file:account-home" = "denied"
-"leave:file:account-home-preferences" = "n/a"
+# By the time leave writes files, the system (Launch Services, acting for the account) has made
+# Library/Preferences in the account's home; the profile denies the job a write there.
+"leave:file:account-home-preferences" = "denied"
 "leave:file:private-tmp" = "denied"
 "leave:file:private-var-tmp" = "denied"
 "leave:file:users-shared" = "denied"
@@ -148,11 +158,14 @@
 "find:sysv-shared-memory" = "gone"
 "find:preferences" = "gone"
 "find:launch-services" = "gone"
-"find:pasteboard" = "gone"
+# The sandbox gives a job no pasteboard (leave: denied), so it cannot look either.
+"find:pasteboard" = "n/a"
 "find:keychain" = "gone"
 "find:background-process" = "gone"
-"find:crontab" = "gone"
-"find:at-job" = "gone"
+# crontab, atq and at are setuid: the profile refuses to start them, so no job can leave a
+# crontab or an at job (leave: denied) and none can look.
+"find:crontab" = "n/a"
+"find:at-job" = "n/a"
 "find:launchd-user" = "gone"
 "find:launchd-gui" = "gone"
 "find:account-attribute" = "gone"
@@ -173,7 +186,8 @@
 "find:file:etc" = "gone"
 "find:file:library-launchdaemons" = "gone"
 "find:file:other-home" = "gone"
-"find:file:root-home" = "gone"
+# Root's home is 0750: a job can neither write there (leave: denied) nor look.
+"find:file:root-home" = "n/a"
 "find:file:bundle-store" = "gone"
 
 [find-other-slot]
@@ -183,12 +197,16 @@
 "find:sysv-shared-memory" = "gone"
 "find:preferences" = "gone"
 "find:launch-services" = "gone"
-"find:pasteboard" = "gone"
+# The sandbox gives a job no pasteboard (leave: denied), so it cannot look either.
+"find:pasteboard" = "n/a"
 "find:keychain" = "gone"
 "find:background-process" = "gone"
-"find:crontab" = "gone"
-"find:at-job" = "gone"
-"find:launchd-user" = "gone"
+# crontab, atq and at are setuid: the profile refuses to start them, so no job can leave a
+# crontab or an at job (leave: denied) and none can look.
+"find:crontab" = "n/a"
+"find:at-job" = "n/a"
+# Another account's launchd domain cannot be printed.
+"find:launchd-user" = "n/a"
 "find:launchd-gui" = "gone"
 "find:account-attribute" = "gone"
 # The leaver's home was deleted with its account.
@@ -206,5 +224,6 @@
 "find:file:etc" = "gone"
 "find:file:library-launchdaemons" = "gone"
 "find:file:other-home" = "gone"
-"find:file:root-home" = "gone"
+# Root's home is 0750: a job can neither write there (leave: denied) nor look.
+"find:file:root-home" = "n/a"
 "find:file:bundle-store" = "gone"

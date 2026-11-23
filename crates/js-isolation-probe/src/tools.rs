@@ -299,10 +299,12 @@ pub(crate) mod fake {
             code: ran.code,
             stdout: ran.stdout.clone(),
             stderr: ran.stderr.clone(),
-            start: ran
-                .start
-                .as_ref()
-                .map(|e| io::Error::new(e.kind(), e.to_string())),
+            start: ran.start.as_ref().map(|e| {
+                e.raw_os_error().map_or_else(
+                    || io::Error::new(e.kind(), e.to_string()),
+                    io::Error::from_raw_os_error,
+                )
+            }),
             timed_out: ran.timed_out,
         }
     }

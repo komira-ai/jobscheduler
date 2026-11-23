@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use crate::host::Who;
 use crate::ipc::{self, SysV};
-use crate::outcome::{Line, Outcome};
+use crate::outcome::{Line, Outcome, refusal};
 use crate::tools::{Ran, Tools};
 
 const DEFAULTS: &str = "/usr/bin/defaults";
@@ -20,7 +20,7 @@ const LSREGISTER: &str = "/System/Library/Frameworks/CoreServices.framework/Fram
 const PBCOPY: &str = "/usr/bin/pbcopy";
 const PBPASTE: &str = "/usr/bin/pbpaste";
 const SECURITY: &str = "/usr/bin/security";
-const PS: &str = "/bin/ps";
+const PGREP: &str = "/usr/bin/pgrep";
 const CRONTAB: &str = "/usr/bin/crontab";
 const AT: &str = "/usr/bin/at";
 const ATQ: &str = "/usr/bin/atq";
@@ -225,17 +225,9 @@ fn at_job_number(stderr: &[u8]) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// A line of `ps -axo pid=,pgid=,uid=,command=` that is the run's `linger`: `(pid, pgid,
-/// uid)`.
-fn linger_row(row: &str, tag: &str) -> Option<(i32, i32, u32)> {
-    let mut words = row.split_whitespace();
-    let pid = words.next()?.parse().ok()?;
-    let pgid = words.next()?.parse().ok()?;
-    let uid = words.next()?.parse().ok()?;
-    let rest: Vec<&str> = words.collect();
-    let lingers = rest.get(1) == Some(&"linger");
-    let tagged = rest.windows(2).any(|w| w[0] == "--token" && w[1] == tag);
-    (lingers && tagged).then_some((pid, pgid, uid))
+/// The `pgrep -f` pattern of the run's `linger`: its words and the token, which ends there.
+fn linger_pattern(tag: &str) -> String {
+    format!("linger --token {tag}( |$)")
 }
 
 /// Makes the marker of `kind`. A made marker is [`Outcome::Allowed`], with the handle its
@@ -371,6 +363,11 @@ fn make_crontab(ctx: &Ctx<'_>, name: &str, tag: &str) -> (Line, Option<String>) 
     // Only an account with no crontab, or an empty one, gets the probe's: one that cannot be
     // read might hold someone's, which installing and removing the probe's would replace.
     let existing = ctx.tools.run(CRONTAB, &["-l"], b"");
+    if let Some(err) = &existing.start
+        && refusal(err) == Outcome::Denied
+    {
+        return (existing.line(name), None);
+    }
     if tool_look(&existing, !existing.out().is_empty(), &["no crontab"]) != Look::Gone {
         return (
             Line::new(name, Outcome::NotApplicable).detail(format!(
@@ -413,7 +410,11 @@ pub fn look(ctx: &Ctx<'_>, kind: Kind, tag: &str, leaver: &Who) -> Look {
         }
         Kind::Preferences => {
             let ran = tools.run(DEFAULTS, &["read", DOMAIN, "marker"], b"");
-            tool_look(&ran, ran.ok() && ran.out() == tag, &["does not exist"])
+            tool_look(
+                &ran,
+                ran.ok() && ran.out() == tag,
+                &["does not exist", "not found"],
+            )
         }
         Kind::LaunchServices => {
             let ran = tools.run(LSREGISTER, &["-dump"], b"");
@@ -460,7 +461,8 @@ pub fn look(ctx: &Ctx<'_>, kind: Kind, tag: &str, leaver: &Who) -> Look {
         Kind::AccountAttribute => {
             let ran = tools.run(DSCL, &[".", "-read", &record(&leaver.user), ATTRIBUTE], b"");
             let held = ran.ok() && ran.out().contains(tag);
-            tool_look(&ran, held, &["No such key"])
+            // eDSRecordNotFound: the leaver's record was deleted, and the attribute with it.
+            tool_look(&ran, held, &["No such key", "eDSRecordNotFound"])
         }
     }
 }
@@ -496,21 +498,28 @@ fn tool_look(ran: &Ran, held: bool, absent: &[&str]) -> Look {
     }
 }
 
+/// Looks for the run's `linger` with `pgrep -f`, which lists every user's processes and,
+/// unlike `ps` (setuid), a job's sandbox lets start: exit 0 with the pids is found, exit 1
+/// (no process matched) is gone, anything else cannot tell.
 fn look_process(tools: &dyn Tools, tag: &str) -> Look {
-    let ran = tools.run(PS, &["-axo", "pid=,pgid=,uid=,command="], b"");
+    let ran = tools.run(PGREP, &["-f", &linger_pattern(tag)], b"");
+    if ran.start.is_none() && ran.code == Some(1) {
+        return Look::Gone;
+    }
     if !ran.ok() {
         return Look::CannotLook(ran.why());
     }
-    let text = String::from_utf8_lossy(&ran.stdout);
-    match text.lines().find_map(|row| linger_row(row, tag)) {
-        Some((pid, pgid, uid)) => Look::Found {
+    match ran
+        .out()
+        .lines()
+        .next()
+        .and_then(|p| p.trim().parse::<i32>().ok())
+    {
+        Some(pid) => Look::Found {
             handle: Some(pid.to_string()),
-            detail: format!(
-                "pid {pid} uid {uid}{}",
-                if pgid == pid { ", its own group" } else { "" }
-            ),
+            detail: format!("pid {pid}"),
         },
-        None => Look::Gone,
+        None => Look::CannotLook(format!("pgrep printed no pid: {:?}", ran.out())),
     }
 }
 

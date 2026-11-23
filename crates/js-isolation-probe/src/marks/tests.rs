@@ -409,17 +409,13 @@ fn a_keychain_item_is_found_or_said_to_be_absent() {
 #[test]
 fn the_background_process_is_started_found_by_its_token_and_killed() {
     let (_dir, who) = home("marks-linger");
-    let ps = "/bin/ps -axo pid=,pgid=,uid=,command=";
+    let pgrep = "/usr/bin/pgrep -f linger --token t1( |$)";
     let tools = Fake::default()
-        .exit(
-            ps,
-            0,
-            "  1     1     0 /sbin/launchd\n 4242  4242   601 /b/js-isolation-probe linger --token t1 --secs 60\n",
-            "",
-        )
-        .exit(ps, 0, " 77  70   600 /b/js-isolation-probe linger --token t1 --secs 60\n", "")
-        .exit(ps, 0, " 4242 4242 601 /b/js-isolation-probe linger --token t2 --secs 60\n", "")
-        .exit(ps, 1, "", "ps: not allowed");
+        .exit(pgrep, 0, "4242\n", "")
+        .exit(pgrep, 0, "77\n78\n", "")
+        .exit(pgrep, 1, "", "")
+        .exit(pgrep, 0, "", "")
+        .exit(pgrep, 2, "", "pgrep: bad pattern");
     let ctx = ctx(&tools, &who);
     let line = leave(&ctx, Kind::BackgroundProcess, "t1");
     assert_eq!(
@@ -430,20 +426,39 @@ fn the_background_process_is_started_found_by_its_token_and_killed() {
     let line = find(&ctx, Kind::BackgroundProcess, "t1", &who, true);
     assert_eq!(
         line.to_string(),
-        "find:background-process: found; pid 77 uid 600, removed"
+        "find:background-process: found; pid 77, removed"
     );
     assert_eq!(*tools.killed.borrow(), [77]);
+    // pgrep's exit 1: no process matched.
     assert_eq!(
-        find(&ctx, Kind::BackgroundProcess, "t1", &who, true).outcome,
-        Outcome::Gone
+        find(&ctx, Kind::BackgroundProcess, "t1", &who, true).to_string(),
+        "find:background-process: gone"
     );
     assert_eq!(
-        find(&ctx, Kind::BackgroundProcess, "t1", &who, true).outcome,
-        Outcome::NotApplicable
+        find(&ctx, Kind::BackgroundProcess, "t1", &who, true).to_string(),
+        "find:background-process: n/a; cannot look: pgrep printed no pid: \"\""
+    );
+    assert_eq!(
+        find(&ctx, Kind::BackgroundProcess, "t1", &who, true).to_string(),
+        "find:background-process: n/a; cannot look: exit 2: pgrep: bad pattern"
     );
     assert_eq!(
         remove(&ctx, Kind::BackgroundProcess, "t1", &who, None),
         Err("no pid".to_owned())
+    );
+}
+
+#[test]
+fn a_process_look_that_cannot_start_cannot_tell() {
+    let (_dir, who) = home("marks-linger-nolook");
+    let tools = Fake::default().on(
+        "/usr/bin/pgrep -f linger --token t1( |$)",
+        Ran::unstarted(io::Error::from_raw_os_error(libc::EPERM)),
+    );
+    let ctx = ctx(&tools, &who);
+    assert_eq!(
+        find(&ctx, Kind::BackgroundProcess, "t1", &who, false).to_string(),
+        "find:background-process: n/a; cannot look: cannot start: Operation not permitted (os error 1)"
     );
 }
 
@@ -462,29 +477,6 @@ fn a_background_process_that_cannot_start_or_be_killed_says_so() {
         "leave:background-process: denied (EPERM); starting it"
     );
     assert!(remove(&ctx, Kind::BackgroundProcess, "t1", &who, Some("5")).is_err());
-}
-
-#[test]
-fn only_the_lingers_row_with_the_token_is_taken() {
-    let row = |r: &str| linger_row(r, "t1");
-    assert_eq!(
-        row("5 5 600 /p linger --token t1 --secs 9"),
-        Some((5, 5, 600))
-    );
-    for bad in [
-        "",
-        "x",
-        "5",
-        "5 x",
-        "5 5",
-        "5 5 x",
-        "5 5 600",
-        "5 5 600 /p probe --token t1",
-        "5 5 600 /p linger --token t11",
-        "5 5 600 /p linger --secs 9",
-    ] {
-        assert_eq!(row(bad), None, "{bad:?}");
-    }
 }
 
 #[test]
@@ -538,6 +530,56 @@ fn a_crontab_that_cannot_be_read_is_never_replaced() {
         "priv:crontab: n/a; the account has a crontab, or it cannot be read (exit 1: crontab: permission denied); it is left as it is"
     );
     assert_eq!(tools.lines(), ["/usr/bin/crontab -l"]);
+}
+
+#[test]
+fn a_crontab_tool_the_sandbox_will_not_start_is_a_denial() {
+    let (_dir, who) = home("marks-cron-refused");
+    let tools = Fake::default().on(
+        "/usr/bin/crontab -l",
+        Ran::unstarted(io::Error::from_raw_os_error(libc::EPERM)),
+    );
+    let refused = ctx(&tools, &who);
+    assert_eq!(
+        try_and_undo(&refused, Kind::Crontab, "t1").to_string(),
+        "priv:crontab: denied (EPERM); cannot start: Operation not permitted (os error 1)"
+    );
+    assert_eq!(tools.lines(), ["/usr/bin/crontab -l"]);
+    // A tool that is not there is no refusal: the crontab cannot be read, so it is left alone.
+    let tools = Fake::default().on("/usr/bin/crontab -l", missing());
+    let absent = ctx(&tools, &who);
+    assert_eq!(
+        try_and_undo(&absent, Kind::Crontab, "t1").outcome,
+        Outcome::NotApplicable
+    );
+    assert_eq!(tools.lines(), ["/usr/bin/crontab -l"]);
+}
+
+#[test]
+fn a_missing_preferences_domain_and_a_deleted_record_are_gone() {
+    let (_dir, who) = home("marks-gone-words");
+    let tools = Fake::default()
+        .exit(
+            "/usr/bin/defaults read com.komira.js-isolation-probe marker",
+            1,
+            "",
+            "Error: Domain 'com.komira.js-isolation-probe' not found.",
+        )
+        .exit(
+            "/usr/bin/dscl . -read /Users/pool-1 dsAttrTypeNative:js-isolation-probe",
+            56,
+            "",
+            "<dscl_cmd> DS Error: -14136 (eDSRecordNotFound)",
+        );
+    let ctx = ctx(&tools, &who);
+    assert_eq!(
+        find(&ctx, Kind::Preferences, "t1", &who, false).outcome,
+        Outcome::Gone
+    );
+    assert_eq!(
+        find(&ctx, Kind::AccountAttribute, "t1", &who, false).outcome,
+        Outcome::Gone
+    );
 }
 
 #[test]
