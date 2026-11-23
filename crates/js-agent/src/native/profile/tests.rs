@@ -300,3 +300,35 @@ fn a_mount_over_a_homes_root_is_refused() {
         );
     }
 }
+
+/// Asserts that the trees given to `build` are granted by the profile: the mount root is a
+/// read-denied parameter, the tree is a read-allowed one, and the same start without trees
+/// has neither.
+///
+/// Catches: a build that drops the trees it is given, so a run could not read its own trees.
+#[test]
+fn the_trees_given_to_the_build_are_granted_and_none_grants_nothing() {
+    let home = Path::new("/srv/homes/kbf-acct-4");
+    let root = AbsPath::parse("/srv/store/trees").unwrap();
+    let tree = AbsPath::parse("/srv/store/trees/abc").unwrap();
+    let trees = js_mac_pool::seatbelt::MountTrees::new(root, vec![tree]).unwrap();
+    let with = build(
+        &config(),
+        &body("/bin/echo", &[]),
+        home,
+        (&[], &[]),
+        Some(trees),
+    )
+    .unwrap();
+    let params = with.params();
+    assert!(params.contains(&("MOUNT".to_owned(), "/srv/store/trees".to_owned())));
+    assert!(params.contains(&("MT_0".to_owned(), "/srv/store/trees/abc".to_owned())));
+    assert!(
+        with.text()
+            .lines()
+            .any(|line| line == "(allow file-read* (subpath (param \"MT_0\")))")
+    );
+    let without = build(&config(), &body("/bin/echo", &[]), home, (&[], &[]), None).unwrap();
+    assert!(!without.params().iter().any(|(name, _)| name == "MOUNT"));
+    assert!(!without.text().contains("MT_0"));
+}

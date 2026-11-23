@@ -493,7 +493,6 @@ pub enum Build {
     /// It builds.
     Fine,
     /// The runtime cannot be made.
-    #[cfg(target_os = "linux")]
     RuntimeFails,
     /// The runtime panics while it is made.
     #[cfg(target_os = "linux")]
@@ -693,7 +692,6 @@ impl FakeMachine {
         }
     }
 
-    #[cfg(target_os = "linux")]
     pub fn failing(build: Build) -> Self {
         Self {
             build,
@@ -709,7 +707,6 @@ impl Machine for FakeMachine {
 
     fn runtime(&self, build: &RuntimeBuild<'_>) -> Result<(Box<dyn Runtime>, Vec<String>), String> {
         match self.build {
-            #[cfg(target_os = "linux")]
             Build::RuntimeFails => Err("the engine does not answer".to_owned()),
             #[cfg(target_os = "linux")]
             Build::Panics => panic!("the runtime panics while it is made"),

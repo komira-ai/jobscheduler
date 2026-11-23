@@ -243,6 +243,9 @@ pub struct NativeRuntime {
     /// What finds the lent account's own per-user temporary and cache folders, which its
     /// run may write; none grants nothing there.
     own_folders: Option<OwnFolders>,
+    /// How many polls the self-test makes for its run to end; none is the default
+    /// ([`NativeRuntime::with_self_test_polls`] sets it for tests).
+    self_test_polls: Option<u32>,
 }
 
 /// Finds an account's own per-user temporary and cache folders (its uid's, below
@@ -334,6 +337,7 @@ impl NativeRuntime {
             table: Arc::new(MacTable),
             last_retired: None,
             own_folders: None,
+            self_test_polls: None,
         })
     }
 
@@ -366,6 +370,27 @@ impl NativeRuntime {
     pub fn with_own_folders(self, find: OwnFolders) -> Self {
         Self {
             own_folders: Some(find),
+            ..self
+        }
+    }
+
+    /// Whether the runtime finds the lent account's own per-user folders
+    /// ([`NativeRuntime::with_own_folders`]): [`NativeRuntime::open`] sets it, the other
+    /// constructors do not. For tests; an agent never calls it.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn has_own_folders(&self) -> bool {
+        self.own_folders.is_some()
+    }
+
+    /// The same runtime, its self-test making at most `polls` polls for its run to end (the
+    /// default when never called): with none, the run is still going when the count is
+    /// reached, so the self-test stops and removes it. For tests; an agent never calls it.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_self_test_polls(self, polls: u32) -> Self {
+        Self {
+            self_test_polls: Some(polls),
             ..self
         }
     }

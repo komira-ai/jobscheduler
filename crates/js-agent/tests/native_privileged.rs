@@ -322,17 +322,44 @@ fn the_production_open_makes_the_pools_directory_and_passes_the_self_test() {
 }
 
 /// Asserts, as root with the real supervisor and the account's folders asked of the system as
-/// the account (`mac_accounts::own_folders`), that a job may write in its account's own
-/// per-user temporary and cache folders (what `getconf` gives it as `DARWIN_USER_TEMP_DIR` and
-/// `DARWIN_USER_CACHE_DIR`) and in no other part of that per-user folder (its `0`), and that
+/// the account (`mac_accounts::own_folders`, attached by the production `NativeRuntime::open`,
+/// not by the test), that a job may write in its account's own per-user temporary and cache
+/// folders (what `getconf` gives it as `DARWIN_USER_TEMP_DIR` and `DARWIN_USER_CACHE_DIR`) and
+/// in no other part of that per-user folder (its `0`), and that
 /// the retirement empties what it wrote. Catches `xcrun` refused its cache (a compiler that
-/// fails under the profile) and a grant that reaches beyond the two folders.
+/// fails under the profile), a grant that reaches beyond the two folders, and an open that
+/// no longer attaches the folder finder.
 #[test]
 #[ignore = "needs root and creates users"]
 fn a_job_writes_its_accounts_own_temporary_and_cache_folders_and_nothing_else_there() {
     let fixture = fixture();
-    let own: js_agent::native::OwnFolders = Arc::new(js_agent::mac_accounts::own_folders);
-    let mut rt = runtime(fixture).with_own_folders(own);
+    let state = fixture.root.join("own-folders-accounts");
+    let config = NativeConfig {
+        accounts: Accounts {
+            state: state.clone(),
+            slots: slots(),
+            ready: 0,
+        },
+        homes: PathBuf::from("/Users"),
+        network: Ceiling::Off,
+        tool_roots: vec![PathBuf::from("/usr/bin"), PathBuf::from("/bin")],
+        read_denies: vec![
+            AbsPath::new(&state).unwrap(),
+            AbsPath::new(&fixture.root.join("scratch")).unwrap(),
+        ],
+        mount_roots: Vec::new(),
+        read_model: ReadModel::Open,
+        journal: fixture.root.join("own-folders-leases"),
+        max_file_bytes: 1 << 30,
+        max_processes: 512,
+        egress: None,
+        full_disk_access: FullDiskAccess::Granted,
+    };
+    let launcher = Arc::new(SystemLauncher::at(supervisor_binary()));
+    let term = TERMS.fetch_add(1, Ordering::SeqCst);
+    // The production open, which attaches the folder finder itself: the test does not.
+    let mut rt = NativeRuntime::open(launcher, config, term)
+        .unwrap_or_else(|why| panic!("the production open: {why}"));
     let script = "t=$(/usr/bin/getconf DARWIN_USER_TEMP_DIR) \
         && c=$(/usr/bin/getconf DARWIN_USER_CACHE_DIR) \
         && : > \"$t/js-own\" && : > \"$c/js-own\" \
