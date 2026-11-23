@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 use js_agent_wire::NetworkCeiling;
 use js_jobs::{AllocationRecord, AllocationStep, Booked, Capacity, HostBooking};
-use js_sched::ProviderRank;
+use js_sched::{ProviderRank, Refusal, RefusalKind};
 use js_types::HostId;
 
 /// A host a pass may place on: the network ceiling its hello advertises, whether it reported
@@ -117,6 +117,27 @@ impl Room {
         self.lines.get(host).is_none_or(|line| {
             let booked = on_host(booked, line.quota_disk_bytes);
             line.capacity.has_room(&line.booking, &booked)
+        })
+    }
+
+    /// Why `host` has no room for `booked` by memory, when that is why: the memory its
+    /// allocations book, the memory `booked` adds and the memory it can book, as a booked-memory
+    /// refusal. `None` when the host has no capacity, `booked` is a whole host or its memory fits.
+    pub(crate) fn memory_refusal(&self, host: &HostId, booked: Booked) -> Option<Refusal> {
+        let line = self.lines.get(host)?;
+        let Booked::Shape { memory_bytes, .. } = booked else {
+            return None;
+        };
+        let (counted, limit) = (line.booking.memory_bytes, line.capacity.memory_bytes);
+        let fits = counted
+            .checked_add(memory_bytes)
+            .is_some_and(|total| total <= limit);
+        (!fits).then_some(Refusal {
+            kind: RefusalKind::BookedMemory,
+            counted,
+            new: memory_bytes,
+            limit,
+            measured_cpu_millis: 0,
         })
     }
 
