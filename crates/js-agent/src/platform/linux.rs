@@ -150,6 +150,13 @@ pub struct Flags {
     /// job is held to its booking.
     #[arg(long, value_name = "MULTIPLE")]
     pub cpu_ceiling: Option<js_contain::CpuCeiling>,
+    /// Record each job's CPU second by second and send it with the job's result
+    /// (`cpu_series`): at most 128 points of a sixteenth of a core, a granularity that
+    /// doubles when a run outlasts them, and the agent's own run length. Read from the same
+    /// samples of each job's cgroup as the job's CPU peak. Off by default. Taken by the crun
+    /// runtime only: a job of the container engine records none.
+    #[arg(long)]
+    pub cpu_series: bool,
     /// The dedicated non-root user every `crun` command of the crun runtime runs as, such as
     /// `jsjob`: the account whose ranges in `/etc/subuid` and `/etc/subgid` (at least 65536
     /// ids each) every job's user namespace is mapped onto. It must exist, with a uid and a
@@ -427,6 +434,7 @@ impl Flags {
             ("--allow-host-jobs", self.allow_host_jobs),
             ("--allow-fuse-jobs", self.allow_fuse_jobs),
             ("--cpu-ceiling", self.cpu_ceiling.is_some()),
+            ("--cpu-series", self.cpu_series),
             ("--watch-dir", !self.watch_dirs.is_empty()),
             ("--settle-ms", self.settle_ms.is_some()),
             ("--taint-recheck-ms", self.taint_recheck_ms.is_some()),
@@ -754,9 +762,11 @@ pub(crate) fn jobs(
     );
     let from_flags = Settings::from_flags(&os.engine(), agent).map_err(|why| why.to_string())?;
     Ok(Jobs {
-        container: crun
-            .or(from_flags)
-            .map(|settings| settings.with_cpu_ceiling(os.cpu_ceiling)),
+        container: crun.or(from_flags).map(|settings| {
+            settings
+                .with_cpu_ceiling(os.cpu_ceiling)
+                .with_cpu_series(os.cpu_series)
+        }),
         layout,
         egress,
         settle: crate::lifecycle::settle(os.settle_ms)?,
