@@ -127,6 +127,124 @@ pub(crate) fn hello_on(
     (ran, hello)
 }
 
+/// Asserts the resource limit flags through the whole macOS agent, as its command line and its
+/// start read them: beside a native agent's flags, no limit flag gives the native runtime the
+/// defaults (4096 MiB a file, 512 processes), and `--native-max-file-mib 128` (the least)
+/// with `--native-max-processes 64` gives it 128 MiB in bytes and 64 processes, each agent
+/// saying hello. A size below 128, a 0, a size that does not fit in bytes and a process count
+/// of `u32::MAX` end the agent with status 2 before the hello, by exact text; with
+/// `--no-jobs` each flag is refused by name. Catches a Mac agent that drops a limit given on
+/// its command line, checks it only in a struct no command line reaches, or starts with a
+/// limit it refused.
+#[test]
+fn the_limit_flags_go_through_the_mac_agents_start() {
+    let dir = Scratch::new("native-limits-agent");
+    // The native flags make their directories once; each run of the agent reuses them.
+    let base = native_flags(&dir);
+    let run = |extra: &[&str]| {
+        let mut given = base.clone();
+        given.extend(extra.iter().map(|flag| (*flag).to_owned()));
+        let refs: Vec<&str> = given.iter().map(String::as_str).collect();
+        let args = flags(&refs);
+        let (script, sent) = Script::new(vec![welcome(1)]);
+        let connector = ScriptConnector::of(script);
+        let mut sleeper = CountingSleeper::stopping_at(1);
+        let machine = Arc::new(FakeMachine::new());
+        let jobs: Jobs<'_> = (machine.clone(), None);
+        let ran = run_on(
+            &args,
+            &mac_host(),
+            &connector,
+            &mut sleeper,
+            &mut Lowest,
+            jobs,
+        );
+        let said_hello = !sent.borrow().is_empty();
+        (ran, said_hello, machine.limits_seen())
+    };
+    let started: [(&[&str], (u64, u32)); 2] = [
+        (&[], (4096 << 20, 512)),
+        (
+            &[
+                "--native-max-file-mib",
+                "128",
+                "--native-max-processes",
+                "64",
+            ],
+            (128 << 20, 64),
+        ),
+    ];
+    for (extra, limits) in started {
+        let (ran, said_hello, seen) = run(extra);
+        assert_eq!(ran.status(), code(0), "{extra:?}: {}", ran.err);
+        assert!(said_hello, "{extra:?}: no hello");
+        assert_eq!(seen, vec![limits], "{extra:?}");
+    }
+    let too_big = (u64::MAX >> 20) + 1;
+    let too_big_text = too_big.to_string();
+    let refused: [(&[&str], String); 5] = [
+        (
+            &["--native-max-file-mib", "127"],
+            "--native-max-file-mib: 127 is below 128, the largest output a build writes by \
+             default"
+                .to_owned(),
+        ),
+        (
+            &["--native-max-file-mib", "0"],
+            "--native-max-file-mib and --native-max-processes: above 0".to_owned(),
+        ),
+        (
+            &["--native-max-processes", "0"],
+            "--native-max-file-mib and --native-max-processes: above 0".to_owned(),
+        ),
+        (
+            &["--native-max-file-mib", &too_big_text],
+            format!("--native-max-file-mib: {too_big} is too large"),
+        ),
+        (
+            &["--native-max-processes", "4294967295"],
+            "--native-max-processes: 4294967295 is too large".to_owned(),
+        ),
+    ];
+    for (extra, why) in refused {
+        let (ran, said_hello, seen) = run(extra);
+        assert_eq!(ran.status(), code(2), "{why}: {}", ran.err);
+        assert_eq!(
+            ran.err.lines().last(),
+            Some(format!("js-agent: {why}").as_str()),
+            "{}",
+            ran.err
+        );
+        assert!(!said_hello, "{why}");
+        assert_eq!(seen, Vec::new(), "{why}");
+    }
+    for (flag, value) in [
+        ("--native-max-file-mib", "256"),
+        ("--native-max-processes", "64"),
+    ] {
+        let args = flags(&["--no-jobs", flag, value]);
+        let (script, sent) = Script::new(vec![welcome(1)]);
+        let connector = ScriptConnector::of(script);
+        let mut sleeper = CountingSleeper::stopping_at(1);
+        let jobs: Jobs<'_> = (Arc::new(FakeMachine::new()), None);
+        let ran = run_on_defaulted(
+            &args,
+            &mac_host(),
+            &connector,
+            &mut sleeper,
+            &mut Lowest,
+            jobs,
+        );
+        assert_eq!(ran.status(), code(2), "{flag}: {}", ran.err);
+        assert_eq!(
+            ran.err,
+            format!("js-agent: {flag}: not with --no-jobs (an agent that runs no job)\n"),
+            "{flag}"
+        );
+        assert!(sent.borrow().is_empty(), "{flag}: something was sent");
+    }
+}
+
 /// Asserts that a Mac agent given its account pool starts its worker and reports `runtime` and
 /// `exec` as `sandbox-exec` beside `os`, and the Full Disk Access it found (the test runner
 /// holds none, so it says `not-granted` or `undetermined`, never `granted`), and that with no
