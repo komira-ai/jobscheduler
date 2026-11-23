@@ -60,6 +60,9 @@ An example, with documentation addresses:
 --ca-cert=/etc/js-agent/ca.pem
 --host-id-from-facts=/var/lib/hostkeeper/facts.json
 --native-network=on
+--native-accounts=/var/db/js-agent/accounts
+--native-account-range=700-799
+--native-account-ready=1
 --native-pf-uid-start=600
 --native-pf-uid-count=100
 --native-pf-endpoint=192.0.2.10:443
