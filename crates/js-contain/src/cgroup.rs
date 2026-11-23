@@ -19,16 +19,21 @@
 //! operator sets). CPU is compressible: `cpu.weight` from the booked CPU, never
 //! `cpu.max`.
 //!
-//! [`LeasePolicy::HardMemory`] is the other policy, the agent's for a job: `memory.max` the
-//! booking and `memory.swap.max` 0, so a lease's memory is what the lease-server's arithmetic
-//! assumes it is and an OOM kill is the job's own ([`SwapKill`] has nothing to watch: no
-//! swap). Its CPU booking is what the job is guaranteed (placement packs a host by the
-//! bookings), and nothing holds a job below what it needs: there is no `cpu.max`, so a job
-//! uses every core no other job wants. `cpu.weight` from the booking is how the kernel keeps
-//! the guarantee when the host is busier than planned: leases that all want CPU get the cores
-//! in proportion to their bookings. An operator's ceiling, when set
-//! ([`CpuCeiling`](crate::CpuCeiling)), is a `cpu.max` beside the weight
-//! ([`LeaseCgroup::hold_cpu`]).
+//! [`LeasePolicy::TrackedMemory`] is the other policy, the agent's for a job: the memory booking
+//! is no limit. The lease gets no `memory.max` and no `memory.swap.max`, so a job that uses more
+//! than it booked keeps running on what the host has (swap, compressed or not, absorbs a little
+//! of it), and its use is measured (`memory.peak`, `memory.swap.peak`) and reported, for the
+//! placement to pack hosts by. The bound on all jobs together is the share of the host that the
+//! placement books (`memory_schedulable_percent`); nothing in the lease enforces it. A job the
+//! kernel's OOM killer picks dies whole (`memory.oom.group`), and since the lease has no limit of
+//! its own, the kill is the node's ([`OomOutcome::BusyNode`]), not the lease's, unless the job
+//! put a `memory.max` on a cgroup of its own inside the lease. Its CPU booking is what
+//! the job is guaranteed (placement packs a host by the bookings), and nothing holds a job below
+//! what it needs: there is no `cpu.max`, so a job uses every core no other job wants.
+//! `cpu.weight` from the booking is how the kernel keeps the guarantee when the host is busier
+//! than planned: leases that all want CPU get the cores in proportion to their bookings. An
+//! operator's ceiling, when set ([`CpuCeiling`](crate::CpuCeiling)), is a `cpu.max` beside the
+//! weight ([`LeaseCgroup::hold_cpu`]).
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -76,17 +81,11 @@ pub enum LeasePolicy {
     /// `cpu.weight` only.
     #[default]
     BuildHost,
-    /// The memory booking is the limit and the CPU booking the guarantee: `memory.max` the
-    /// booking, `memory.swap.max` 0, `cpu.weight` from the booked CPU, and no `cpu.max` (an
+    /// The memory booking is tracked, not enforced, and the CPU booking is the guarantee: no
+    /// `memory.max` and no `memory.swap.max` (the job may use more than it booked, swap
+    /// included), `memory.oom.group` 1, `cpu.weight` from the booked CPU, and no `cpu.max` (an
     /// operator's ceiling is written apart, [`LeaseCgroup::hold_cpu`]).
-    HardMemory,
-}
-
-/// The hard `memory.max` for a lease that booked `memory_bytes` under
-/// [`LeasePolicy::HardMemory`].
-#[must_use]
-pub fn hard_memory_max(memory_bytes: u64) -> Option<u64> {
-    (memory_bytes > 0).then_some(memory_bytes)
+    TrackedMemory,
 }
 
 /// When the driver kills a lease that keeps pushing into swap at its own cap.
@@ -311,14 +310,9 @@ impl LeaseCgroup {
                     self.write("memory.max", &max.to_string())?;
                 }
             }
-            LeasePolicy::HardMemory => {
-                // A kernel without swap accounting has no `memory.swap.max`: the write
-                // then fails and so does the lease, rather than a job that can swap.
-                if let Some(max) = hard_memory_max(resources.memory_bytes()) {
-                    self.write("memory.max", &max.to_string())?;
-                    self.write("memory.swap.max", "0")?;
-                }
-            }
+            // No memory limit of the lease's own: the booking is what placement counted, not a
+            // bound, and the kernel's `max` stands for both memory and swap.
+            LeasePolicy::TrackedMemory => {}
         }
         if let Some(weight) = cpu_weight(resources.cpu_millis()) {
             self.write("cpu.weight", &weight.to_string())?;

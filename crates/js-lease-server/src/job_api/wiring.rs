@@ -82,7 +82,7 @@ pub(crate) fn from_server(
         Arc::clone(&jobs),
     );
     let submit = submit::Ctx::served(max_job_wall, Arc::new(admission));
-    let submit = submit.placing(Arc::clone(agents));
+    let submit = submit.poking(Arc::clone(agents));
     let shared: Arc<Shared> = Arc::clone(state);
     let hosts: Arc<dyn Hosts> = shared;
     let pools: Arc<dyn Pools> = match state.pools() {

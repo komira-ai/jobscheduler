@@ -210,7 +210,7 @@ impl Maker {
         self.mark(marks, "dirs");
         let booking = Resources::new(spec.cpu_millis, spec.memory_bytes, 0, None)?;
         cgroup
-            .create_with(&booking, None, LeasePolicy::HardMemory)
+            .create_with(&booking, None, LeasePolicy::TrackedMemory)
             .and_then(|()| cgroup.hold_cpu(container.limits.cpu_ceiling_millis.unwrap_or(0)))
             .map_err(|why| Fault::step("make the lease's cgroup", &why))?;
         for file in JOB_OWNED_FILES {
