@@ -23,7 +23,7 @@ use js_state::{ManualClock, StoreTime};
 use js_types::HostId;
 use tokio::runtime::Runtime;
 
-use crate::jobs_support::left_the_queue;
+use crate::jobs_support::{JobBody, left_the_queue, submit_body};
 use crate::live_update_rig::{
     Agent, Busy, Edge, Gate, HOSTS, HeadLock, PER_HOST, Serving, due, post_at, server,
     server_minting, server_reading, signal, state_at, submit_at,
@@ -429,8 +429,15 @@ fn a_server_turns_ready_while_the_serving_server_changes_jobs_without_a_pause() 
     Runtime::new().unwrap().block_on(async {
         let a = server(&url, "busy_a").await;
         let a_jobs = a.running.job_addr().unwrap();
-        // A host joined, so the jobs are admitted; what it has no room for waits queued.
+        // A host joined, so the jobs are admitted. A job that takes all of the host's 8 cores
+        // is placed on it first, so no seed has room there and every seed stays queued: A's
+        // placement poller, which each submit pokes and which runs on a task of its own, places
+        // none of them, whenever its pass runs, under the serving server's writes.
         Agent::new("burst-1", true).hello(a.addr()).await;
+        let made = submit_body(&a, &JobBody::new("filler").needs(8000, 1 << 30).json()).await;
+        assert_eq!(made.status, 201, "{}", made.body);
+        let placed = left_the_queue(&a, "filler").await;
+        assert_eq!(placed["state"], "JOB_STATE_PLACED", "{placed}");
         let mut ids = Vec::new();
         for n in 0..JOBS {
             let id = format!("seed-{n:03}");
