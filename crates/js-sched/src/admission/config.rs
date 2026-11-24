@@ -489,4 +489,54 @@ mod tests {
             "--placement-key-share: invalid value \"101\""
         );
     }
+
+    /// Behaviour: `--placement-pack-limit` sets `pack_limit_permille` in thousandths (with or
+    /// without the dashes) from 0 to 1000; a value above 1000, not a number, negative or a
+    /// fraction is refused with the flag and the value as given, and the config is left as
+    /// it was; `normalised` brings a field set past 1000 down to it; the default is 800.
+    /// Catches: a typo such as 1001 clamped and run, a failed parse changing the limit, and
+    /// the limit not reaching the score.
+    #[test]
+    fn the_pack_limit_flag_parses_in_thousandths() {
+        let mut cfg = LoadConfig::default();
+        assert_eq!(cfg.pack_limit_permille, 800);
+        assert_eq!(cfg.apply_flag("--placement-pack-limit", "650"), Ok(()));
+        assert_eq!(cfg.pack_limit_permille, 650);
+        assert_eq!(cfg.apply_flag("--placement-pack-limit", "800"), Ok(()));
+        assert_eq!(cfg.pack_limit_permille, 800);
+        assert_eq!(cfg.apply_flag("--placement-pack-limit", "0"), Ok(()));
+        assert_eq!(cfg.pack_limit_permille, 0);
+        assert_eq!(cfg.apply_flag("placement-pack-limit", "1000"), Ok(()));
+        assert_eq!(cfg.pack_limit_permille, 1000);
+        let before = cfg;
+        for value in ["1001", "abc", "-1", "0.8", "80%", ""] {
+            assert_eq!(
+                cfg.apply_flag("--placement-pack-limit", value),
+                Err(FlagError::Invalid {
+                    flag: "--placement-pack-limit".to_owned(),
+                    value: value.to_owned()
+                })
+            );
+        }
+        assert_eq!(cfg, before, "a refused value changes nothing");
+        assert_eq!(
+            cfg.apply_flag("--placement-pack-limit", "abc")
+                .unwrap_err()
+                .to_string(),
+            "--placement-pack-limit: invalid value \"abc\""
+        );
+        let wild = LoadConfig {
+            pack_limit_permille: 5_000,
+            ..LoadConfig::default()
+        }
+        .normalised();
+        assert_eq!(wild.pack_limit_permille, 1000);
+        let within = LoadConfig {
+            pack_limit_permille: 640,
+            ..LoadConfig::default()
+        }
+        .normalised();
+        assert_eq!(within.pack_limit_permille, 640);
+        assert_eq!(LoadConfig::default().pack_limit_permille, 800);
+    }
 }
