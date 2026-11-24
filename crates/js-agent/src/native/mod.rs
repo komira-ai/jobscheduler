@@ -100,6 +100,14 @@
 //! A start that names a `tree` input, which is retired and which no server sends, is refused
 //! `native-unsupported`.
 //!
+//! # Loopback
+//!
+//! A job of the level `none` gets loopback, as a Linux job has its own: its profile lets it
+//! listen on `127.0.0.1` and `::1` and connect to loopback, when the agent's ceiling
+//! (`--native-network`) is `loopback` or above; under the ceiling `off` it has no network at
+//! all (`native/profile.rs`, `level`). A Mac has one loopback for every user, so a job can
+//! reach the host's own services on loopback and the listeners of the other jobs of the Mac.
+//!
 //! What this runtime does not do yet: stage a `stage` input (this agent keeps no stage
 //! trees: a start that names one is refused `native-unsupported`), forward a declared port (a
 //! start that declares any is refused `ports-not-supported`, see `native/network.rs`).
@@ -184,7 +192,8 @@ pub struct NativeConfig {
     /// kernel resolves.
     pub homes: PathBuf,
     /// The most network a run may ask for (`--native-network`): a start above it is refused
-    /// (`network-above-ceiling`), never run with less.
+    /// (`network-above-ceiling`), never run with less. It also says whether a job of the level
+    /// `none` gets loopback (`loopback` and above) or no network (`off`).
     pub network: Ceiling,
     /// The directories a start's program must lie under.
     pub tool_roots: Vec<PathBuf>,

@@ -306,14 +306,18 @@ agent's ceiling is `--native-network`:
 
 | Job level | `--native-network` value | What the job gets | Needs |
 |---|---|---|---|
-| `none` | `off` (the default) | the profile denies the network | nothing |
+| `none` | `off` (the default) | loopback alone (see below); under the ceiling `off`, the profile denies the network | nothing |
 | `allow-list` | `on` | the profile allows the network; the anchor limits it to the listed endpoints | the anchor in force (the `--native-pf-*` flags), checked at start and before each `allow-list` job (`egress-unchecked`) |
 | `open` | `open` | the profile allows the network; nothing filters it | nothing; a `--native-pf-*` flag beside it stops the agent at start |
 
-`loopback` is a ceiling with no job level of its own: it admits a job with no network and a
-native body that asks for `loopback`, which every run of the Mac shares. A job that asks for
+`loopback` is a ceiling with no job level of its own: it admits a job of the level `none` and
+a native body that asks for `loopback`. Under it, as under `on` and `open`, a job of the level
+`none` gets loopback: it can listen on `127.0.0.1` and `::1` and connect to loopback, as a
+Linux job can in its own namespace; under `off` it gets no network at all. Loopback is shared
+by every user of the Mac: a job reaches the host's own services on loopback and the other jobs'
+loopback listeners. A job that asks for
 more than the ceiling is refused at start (`network-above-ceiling`, before any user is made)
-and is never run with less. Jobs with no network, loopback only or `open` never ask `pfctl`.
+and is never run with less. Jobs of the level `none`, `loopback` bodies and `open` jobs never ask `pfctl`.
 The hello reports the ceiling as `egress`: `none` for `off` and `loopback`, `allow-list` for
 `on`, `open` for `open`, and no `egress-ports`. A bundle's `seatbelt.network_max` is not a
 ceiling: it says what the bundle's tools need and lowers the profile of an admitted job to it.

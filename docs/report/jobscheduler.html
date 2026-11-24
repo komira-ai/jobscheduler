@@ -352,7 +352,7 @@ main>section>figure.wide,main>section>.tblw.wide{width:min(72rem,calc(100vw - 3r
 <tr><td>41</td><td>A host goes silent for good and the provider gives no signal</td><td>Accepted</td><td><code data-test="crates/js-sim-cell/tests/faults.rs">agents_killed_for_good_leave_no_booking_once_clients_release</code></td><td>Five of fifty agents die for good; their hosts read lost and take no new job, and once the clients give up and cancel, nothing stays booked on them.</td></tr>
 <tr><td>43</td><td>A start never completes</td><td>Open</td><td><code data-test="crates/js-sim-cell/tests/jobs.rs">a_silent_host_never_requeues_a_placed_job_and_start_timeout_ends_it</code></td><td>The start never completes because the host is silent, not because an image fetch sticks: after the start timeout the job fails to start, <code>start-timeout</code>; its allocation is kept, releasing, while the host is silent, and freed once the host confirms the container gone.</td></tr>
 </tbody></table></div>
-<p>Rows of section 8 with no scenario (36 of 51): 2, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18, 19, 20, 21, 22, 23, 24, 27, 28, 29, 30, 32, 37, 40, 42, 44, 45, 46, 47, 48, 49, 50, 51.</p>
+<p>Rows of section 8 with no scenario (37 of 52): 2, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18, 19, 20, 21, 22, 23, 24, 27, 28, 29, 30, 32, 37, 40, 42, 44, 45, 46, 47, 48, 49, 50, 51, 52.</p>
 <!-- gen-report rows end -->
 
 <h3 id="testing">Other tests</h3>
