@@ -651,7 +651,7 @@ fn where_16_gib_goes(retry: bool, config: LoadConfig) -> String {
 #[test]
 fn a_retry_is_scored_with_the_cold_miss_factor() {
     // The pack limit is lifted to 1.0x: this test is about key 2 (the miss factor), and
-    // `a` with the lease booked is at 0.875 of its memory, past the default 0.8.
+    // `a` with the lease booked is at 0.875 of its memory, past the default 0.5.
     let config = || LoadConfig {
         pack_limit_permille: 1_000,
         ..LoadConfig::default()
@@ -660,7 +660,7 @@ fn a_retry_is_scored_with_the_cold_miss_factor() {
     assert_eq!(where_16_gib_goes(true, config()), "b");
 }
 
-/// Behaviour: under the default pack limit (0.8x) the same first run of 16 GiB does not
+/// Behaviour: under the default pack limit (0.5x) the same first run of 16 GiB does not
 /// go to `a`: `a` holds 40 of 64 GiB booked, 56 with the lease is 0.875, past the limit,
 /// while the empty `b` stays within it, so the lease goes to `b`, as the rerun does.
 /// Catches: a host packed past the pack limit while another is within it.
