@@ -244,7 +244,12 @@ fn a_whole_host_reading_covers_the_leases_that_ran_through_it() {
     let outbox = Arc::new(Outbox::new());
     outbox.set_window(Duration::from_secs(5));
     let fake = Fake::new(
-        &[ticks(100, 0, 0), ticks(200, 0, 0), ticks(300, 0, 0)],
+        &[
+            ticks(100, 0, 0),
+            ticks(200, 0, 0),
+            ticks(300, 0, 0),
+            ticks(400, 0, 0),
+        ],
         100,
         Some(1 << 30),
     );
