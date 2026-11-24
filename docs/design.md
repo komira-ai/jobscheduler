@@ -98,6 +98,8 @@ The history of the earlier amendments (the first, capabilities, the refinement, 
 
 Added by the hosts amendment ([design/hosts.md](design/hosts.md); 5.18, D56 to D65; steps 59 to 64; K42 to K48): hosts that run many jobs, spot hosts, price data, several clouds, the swap at the machine cap. Changed in place: ucdk Job classes book their declared size (were `BookAll`, D7), and the sentences that read as one job per machine or VM.
 
+Proposed, not built: linux-arm64 jobs on the farm Macs, in one Linux VM per Mac that the Mac's own agent drives, with the Linux nodes' sandbox and tierstore inside it ([design/linux-arm64-on-macs.md](design/linux-arm64-on-macs.md)).
+
 ## 2. Goals and non-goals
 
 Goals:
