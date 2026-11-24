@@ -132,7 +132,7 @@ fn the_table_adds_up_each_class_of_enough_lines() {
          | a b\\|c | 2 | 2 | 23.3 | 12.8 | 66.6 | yes | 5.0 | 1 | 10.0 | 5.0 | 50.0 | yes |\n\
          | c | 2 | 0 | - | - | - | - | 0.0 | 0 | - | - | - | - |\n\
          \n\
-         Shaped, of the 2 classes in the table: 1 by CPU (50.0%), 1 by memory (50.0%).\n\
+         Classes in the table: 2; shaped by CPU: 1 (50.0%), by memory: 1 (50.0%).\n\
          CPU error the curve removes against the flat line: 5.0 core-s over the table's classes \
          (33.3% of the flat line's 15.0 core-s), 5.0 core-s over its CPU-shaped classes.\n"
     );
@@ -180,7 +180,7 @@ fn a_curve_worse_than_the_flat_line_removes_less_than_nothing() {
     );
     assert!(
         table.ends_with(
-            "Shaped, of the 1 classes in the table: 0 by CPU (0.0%), 0 by memory (0.0%).\n\
+            "Classes in the table: 1; shaped by CPU: 0 (0.0%), by memory: 0 (0.0%).\n\
              CPU error the curve removes against the flat line: -1.5 core-s over the table's \
              classes (-155.0% of the flat line's 1.0 core-s), 0.0 core-s over its CPU-shaped \
              classes.\n"

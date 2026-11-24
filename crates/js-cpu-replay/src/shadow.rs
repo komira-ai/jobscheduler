@@ -6,14 +6,14 @@
 //! curve and of the flat level over the run. [`parse`] reads those lines out of a log (any
 //! other line is skipped) and [`table`] adds them up per class:
 //!
-//! - **mean error**: the sum over the class's checked runs of |run mean - profile level|, as a
-//!   share of the sum of the run means;
+//! - **mean error**: the sum of |run mean - profile level|, as a share of the sum of the run
+//!   means, over the class's runs whose line gives both;
 //! - **peak error**: the sum of |run peak - predicted peak|, as a share of the sum of the run
-//!   peaks;
+//!   peaks, over the runs whose line gives both;
 //! - **curve / flat**: the curve's error as a share of the flat level's, over the scored runs
 //!   (a profile is shaped when the share is at most 80% over its self-check window);
-//! - **shaped**: whether the class's profile was shaped after its last logged run, as the
-//!   server said;
+//! - **shaped**: whether the class's profile was shaped after its last run whose line says
+//!   so, as the server said;
 //! - **CPU error removed**: the flat level's CPU error minus the curve's, in core-seconds, over
 //!   the scored runs. The line holds no booking, so this is what the curve would have predicted
 //!   better than the flat line, not CPU a booking would have given back.
@@ -326,8 +326,8 @@ pub fn table(checks: &[Check], min_runs: usize, hide_classes: bool) -> String {
     let flat: u64 = kept.iter().map(|(_, class)| class.cpu.flat).sum();
     let _ = writeln!(
         out,
-        "\nShaped, of the {} classes in the table: {cpu_shaped} by CPU ({}%), {memory_shaped} by \
-         memory ({}%).\nCPU error the curve removes against the flat line: {} core-s over the \
+        "\nClasses in the table: {}; shaped by CPU: {cpu_shaped} ({}%), by memory: \
+         {memory_shaped} ({}%).\nCPU error the curve removes against the flat line: {} core-s over the \
          table's classes ({}% of the flat line's {} core-s), {} core-s over its CPU-shaped \
          classes.",
         kept.len(),
