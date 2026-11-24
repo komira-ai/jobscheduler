@@ -62,9 +62,9 @@ did not make fails the verb. Nothing is fetched when the command fails.
 The release build fetches the five binaries in `target/aarch64-apple-darwin/release/`, and the
 package build the package, its `SHA256SUMS`, the three programs with their sums and the `xtask` the
 Mac built (which the signing job checks the signed package with). The Linux runner then does what
-needs no Mac: `sha256sum --check` of what it fetched, the archives (`cargo xtask release stage` and
-GNU `tar` with the options the hosted build uses, so the archives are byte for byte the same files)
-and the uploads of the artifacts.
+needs no Mac: `sha256sum --check` of what it fetched, the archives (`cargo xtask release pack`, which stages each archive as `release stage` does and
+writes the `tar.gz` with the options the hosted build uses, so the archives are byte for byte the
+same files) and the uploads of the artifacts.
 
 ## Authentication
 
@@ -75,11 +75,12 @@ secret is stored. The tailnet identity is the organisation variables `TS_CLIENT_
 organisation variables `FARM_ADDRESS`, `FARM_INSTANCE`, `FARM_TLS` and `FARM_DARWIN_ARM64_PROPERTIES`;
 no file of the repository holds an endpoint or a property set. Membership of the network is the gate.
 
-A run without the variables (a fork's) fails by name: the first step after the checkout of each
-job that holds the token, `Check the farm is configured`, exits 1 under `::error::the farm is not
-configured: FARM_ADDRESS is not set` when `FARM_ADDRESS` is empty, before the toolchain, the
-download of xtask and the join. No job ends green having built nothing, and no later step is
-guarded by the address; only the join is guarded, by `TS_CLIENT_ID`.
+A run without the variables (a fork's) fails by name: `xtask mac-farm` exits 1 with `the farm is not
+configured: --address is empty (FARM_ADDRESS is not set)` when `--address` is empty, so the verb is
+the check and no step of the workflow guards it. No job ends green having built nothing, and no step
+is guarded by the address; only the join is guarded, by `TS_CLIENT_ID`. Every `run:` of the workflow
+is one command line (the version is checked by `release stamp` and `release next-version`, which
+refuse what is not MAJOR.MINOR.PATCH).
 
 The variables are not secrets, so a step's `env:` header in the log shows them; the verb prints
 `::add-mask::` for the address before it prints anything else.

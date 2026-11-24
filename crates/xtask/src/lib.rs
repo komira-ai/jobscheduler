@@ -18,7 +18,7 @@
 //!   this checkout run on a Mac of the build farm as one REAPI action, with the checkout, the
 //!   crates of `Cargo.lock` for `aarch64-apple-darwin` and the pinned Rust toolchain as its
 //!   inputs; its output printed, and each `--output` it made fetched to the same path here.
-//!   With no `--address` it prints a notice and passes.
+//!   With no `--address` it fails, naming `FARM_ADDRESS`.
 //! - `debs --pins <file> --dir <dir>` ([`debs`]): the Debian packages a CI job installs with
 //!   `dpkg`, pinned by version and SHA-256 in a file of `.github/debs/`: the files the actions
 //!   cache restored into `--dir` when they match, and otherwise each downloaded from the pinned
@@ -31,6 +31,10 @@
 //!   the patch version after a version (the macOS update package's), and laying down the files
 //!   of each release archive (docs/release.md).
 //!
+//! - `release pack --bins "<bin> ..." --target <triple> --version <version> --mtime-of <commit>
+//!   --out <dir>` ([`release::pack`]): each binary's release archive, staged as `release stage`
+//!   stages it and packed as a reproducible `.tar.gz` (name order, the commit's time, owner 0/0,
+//!   no name or time in the gzip header).
 //! - `release macos-leg --target <triple> --builds "<package>:<bin> ..." --min-macos <x.y> --out
 //!   <dir>` ([`release::macos_leg`]): on a Mac, the release's macOS leg from a checkout:
 //!   the release build of each binary, its archive directory, its minimum macOS and its
@@ -494,6 +498,8 @@ enum ReleaseVerb {
     NextVersion(release::next_version::NextVersionArgs),
     /// Lay down the files of one release archive.
     Stage(release::stage::StageArgs),
+    /// Stage and archive each binary of a release leg as a reproducible `.tar.gz`.
+    Pack(release::pack::PackArgs),
     /// Build, stage, check and package the darwin leg of a release.
     MacosLeg(release::macos_leg::LegArgs),
     /// Refuse a macOS program that is not signed as the release signs it (a Mac only).
@@ -658,6 +664,7 @@ fn run(cli: Cli) -> Result<String, Error> {
             ReleaseVerb::Stamp(args) => release::stamp::run(&args)?,
             ReleaseVerb::NextVersion(args) => release::next_version::run(&args)?,
             ReleaseVerb::Stage(args) => release::stage::run(&args)?,
+            ReleaseVerb::Pack(args) => release::pack::run(&args)?,
             ReleaseVerb::MacosLeg(args) => release::macos_leg::run(&args)?,
             ReleaseVerb::CheckCodeSignature(args) => release::code_signature::run(&args)?,
             ReleaseVerb::Deb(args) => release::deb::run(&args)?,

@@ -6,7 +6,7 @@
 # it was told to make.
 #
 # `what: release` builds the five Apple silicon binaries with `cargo xtask release macos-leg`
-# (the same command as artifacts.yml's `build-macos`), packs the archives and uploads them as
+# (the same command as artifacts.yml's `build-macos`), packs the archives with `cargo xtask release pack` and uploads them as
 # `dist-aarch64-apple-darwin`, which artifacts.yml's `sums` downloads with the other legs.
 # `what: pkg` builds the installer package of the version (job `pkg`) and of the next patch
 # version, which the first-install test updates the agent to (job `pkg-update`), with
@@ -24,7 +24,7 @@
 # farm's Tailscale network (workload identity federation, tag `tag:ci`: no stored secret). Each
 # runs no code compiled from the repository at that point: the job `xtask`, which holds no token,
 # builds xtask and uploads it, and a job that holds the token downloads that binary and runs it
-# (`mac-farm`, `release stamp`, `release stage`, `release next-version`). No step of it runs
+# (`mac-farm`, `release stamp`, `release pack`, `release next-version`). No step of it runs
 # `cargo` at all (`cargo fetch` runs inside the verb, which downloads crates and compiles
 # nothing), and the lint refuses one. No job names a secret.
 #
@@ -37,9 +37,12 @@
 # The farm is the organisation variables FARM_ADDRESS, FARM_INSTANCE, FARM_TLS and
 # FARM_DARWIN_ARM64_PROPERTIES, and the tailnet identity TS_CLIENT_ID and TS_AUDIENCE; no
 # repository holds an endpoint or a property set. A run that has none of them (a fork's) fails
-# at the first step after the checkout of each job that holds the token, by name ("the farm is
-# not configured: FARM_ADDRESS is not set"), and builds nothing: no job ends green without
+# at `xtask mac-farm`, which refuses an empty --address by name ("the farm is not configured:
+# --address is empty (FARM_ADDRESS is not set)"), and builds nothing: no job ends green without
 # having built.
+#
+# Every `run:` of this file is one command line: what a step does is a verb of xtask, and
+# crates/xtask/tests/release_workflow holds the file to it.
 name: macos-farm
 
 on:
@@ -117,16 +120,6 @@ jobs:
         with:
           ref: ${{ env.COMMIT }}
           persist-credentials: false
-      # The farm is the organisation's variables: a run without them has nothing to build on, so
-      # it fails here, by name, and never ends green with nothing built.
-      - name: Check the farm is configured
-        env:
-          FARM_ADDRESS: ${{ vars.FARM_ADDRESS }}
-        run: |
-          if [ -z "$FARM_ADDRESS" ]; then
-            echo "::error::the farm is not configured: FARM_ADDRESS is not set"
-            exit 1
-          fi
       # `cargo fetch`, which the verb runs, needs the pinned toolchain's files.
       - run: rustup toolchain install
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -135,13 +128,6 @@ jobs:
           path: tools
       - name: Make xtask executable
         run: chmod +x tools/xtask
-      - name: Check the version
-        run: |
-          set -euo pipefail
-          if ! [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-            echo "::error::the version must be MAJOR.MINOR.PATCH"
-            exit 1
-          fi
       # The release version goes into this checkout only, which the verb sends, so the binaries
       # print it; the repository keeps its own version.
       - name: Stamp the release version
@@ -162,26 +148,11 @@ jobs:
           FARM_INSTANCE: ${{ vars.FARM_INSTANCE }}
           FARM_TLS: ${{ vars.FARM_TLS || 'false' }}
           FARM_PROPERTIES: ${{ vars.FARM_DARWIN_ARM64_PROPERTIES }}
-        run: |
-          set -euo pipefail
-          outputs=()
-          for bin in $BINS; do
-            outputs+=(--output "target/$TARGET/release/$bin")
-          done
-          tools/xtask mac-farm --address "$FARM_ADDRESS" --instance "$FARM_INSTANCE" --tls "$FARM_TLS" --properties "$FARM_PROPERTIES" --scratch "$RUNNER_TEMP/mac-farm" --env MACOSX_DEPLOYMENT_TARGET=11.0 "${outputs[@]}" -- xtask release macos-leg --target "$TARGET" --builds "$BUILDS" --min-macos 11.0 --out target/macos-leg
+        run: tools/xtask mac-farm --address "$FARM_ADDRESS" --instance "$FARM_INSTANCE" --tls "$FARM_TLS" --properties "$FARM_PROPERTIES" --scratch "$RUNNER_TEMP/mac-farm" --env MACOSX_DEPLOYMENT_TARGET=11.0 --output target/aarch64-apple-darwin/release/js --output target/aarch64-apple-darwin/release/js-agent --output target/aarch64-apple-darwin/release/js-bundle --output target/aarch64-apple-darwin/release/js-mac-session --output target/aarch64-apple-darwin/release/js-mac-provision -- xtask release macos-leg --target "$TARGET" --builds "$BUILDS" --min-macos 11.0 --out target/macos-leg
       # Archives that depend only on the commit and the binaries: sorted names, the commit's time
       # as the modification time, numeric owner 0/0, no name or time in the gzip header.
       - name: Pack the archives
-        run: |
-          set -euo pipefail
-          mkdir dist
-          mtime="$(git log -1 --format=%ct "$COMMIT")"
-          for bin in $BINS; do
-            name="$bin-$VERSION-$TARGET"
-            tools/xtask release stage --bin "$bin" --target "$TARGET" --version "$VERSION" --out "stage-$bin"
-            tar -C "stage-$bin" --sort=name --mtime="@$mtime" --owner=0 --group=0 --numeric-owner -cf - "$name" | gzip -n > "dist/$name.tar.gz"
-          done
-          ls -l dist
+        run: tools/xtask release pack --bins "$BINS" --target "$TARGET" --version "$VERSION" --mtime-of "$COMMIT" --out dist
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dist-aarch64-apple-darwin
@@ -204,16 +175,6 @@ jobs:
         with:
           ref: ${{ env.COMMIT }}
           persist-credentials: false
-      # The farm is the organisation's variables: a run without them has nothing to build on, so
-      # it fails here, by name, and never ends green with nothing built.
-      - name: Check the farm is configured
-        env:
-          FARM_ADDRESS: ${{ vars.FARM_ADDRESS }}
-        run: |
-          if [ -z "$FARM_ADDRESS" ]; then
-            echo "::error::the farm is not configured: FARM_ADDRESS is not set"
-            exit 1
-          fi
       - run: rustup toolchain install
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -221,13 +182,6 @@ jobs:
           path: tools
       - name: Make xtask executable
         run: chmod +x tools/xtask
-      - name: Check the version
-        run: |
-          set -euo pipefail
-          if ! [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-            echo "::error::the version must be MAJOR.MINOR.PATCH"
-            exit 1
-          fi
       - name: Stamp the version
         run: tools/xtask release stamp --to "$VERSION"
       - name: Join the farm's Tailscale network
@@ -247,11 +201,12 @@ jobs:
           FARM_TLS: ${{ vars.FARM_TLS || 'false' }}
           FARM_PROPERTIES: ${{ vars.FARM_DARWIN_ARM64_PROPERTIES }}
         run: tools/xtask mac-farm --address "$FARM_ADDRESS" --instance "$FARM_INSTANCE" --tls "$FARM_TLS" --properties "$FARM_PROPERTIES" --scratch "$RUNNER_TEMP/mac-farm" --env MACOSX_DEPLOYMENT_TARGET=11.0 --output "dist/js-agent-$VERSION-macos-arm64.pkg" --output dist/SHA256SUMS --output target/release/js-agent --output target/release/js-mac-session --output target/release/js-mac-provision --output target/release/PROGRAMS.SHA256SUMS --output target/debug/xtask -- xtask pkg build-macos --version "$VERSION"
-      - name: The fetched files are the ones that were summed
-        run: |
-          set -euo pipefail
-          (cd dist && sha256sum --check --strict SHA256SUMS)
-          (cd target/release && sha256sum --check --strict PROGRAMS.SHA256SUMS)
+      - name: The fetched package is the one that was summed
+        working-directory: dist
+        run: sha256sum --check --strict SHA256SUMS
+      - name: The fetched programs are the ones that were summed
+        working-directory: target/release
+        run: sha256sum --check --strict PROGRAMS.SHA256SUMS
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: js-agent-macos-pkg-unsigned
@@ -291,16 +246,6 @@ jobs:
         with:
           ref: ${{ env.COMMIT }}
           persist-credentials: false
-      # The farm is the organisation's variables: a run without them has nothing to build on, so
-      # it fails here, by name, and never ends green with nothing built.
-      - name: Check the farm is configured
-        env:
-          FARM_ADDRESS: ${{ vars.FARM_ADDRESS }}
-        run: |
-          if [ -z "$FARM_ADDRESS" ]; then
-            echo "::error::the farm is not configured: FARM_ADDRESS is not set"
-            exit 1
-          fi
       - run: rustup toolchain install
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -308,13 +253,6 @@ jobs:
           path: tools
       - name: Make xtask executable
         run: chmod +x tools/xtask
-      - name: Check the version
-        run: |
-          set -euo pipefail
-          if ! [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-            echo "::error::the version must be MAJOR.MINOR.PATCH"
-            exit 1
-          fi
       - name: Name the next version
         id: next
         run: tools/xtask release next-version --version "$VERSION" --output "$GITHUB_OUTPUT"

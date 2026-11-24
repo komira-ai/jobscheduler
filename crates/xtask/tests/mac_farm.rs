@@ -750,17 +750,18 @@ fn git_and_cargo_failing_fail_the_run_with_their_stderr() {
 }
 
 /// Catches the verb missing from the command line a workflow runs, a flag that is wrong not
-/// ending the run with its message and exit 1, and no address not ending 0 with a notice.
+/// ending the run with its message and exit 1, and no address passing instead of failing by
+/// name.
 #[test]
-fn the_binary_ends_0_with_no_farm_and_1_for_a_wrong_flag() {
-    let notice = Process::new(XTASK)
+fn the_binary_ends_1_with_no_farm_or_a_wrong_flag() {
+    let unset = Process::new(XTASK)
         .args(["mac-farm", "--address", "", "--scratch", "s", "--", "test"])
         .output()
         .expect("run");
-    assert!(notice.status.success());
+    assert_eq!(unset.status.code(), Some(1));
     assert_eq!(
-        String::from_utf8_lossy(&notice.stdout),
-        "::notice::mac-farm runs nothing: the variable FARM_ADDRESS is not set\n"
+        String::from_utf8_lossy(&unset.stderr),
+        "xtask: mac-farm: the farm is not configured: --address is empty (FARM_ADDRESS is not set)\n"
     );
     let wrong = Process::new(XTASK)
         .args([

@@ -314,9 +314,8 @@ fn the_jobs_that_hold_the_token_run_only_the_prebuilt_xtask() {
 
 /// Asserts that the `release` job builds on the farm and archives what the hosted build does: the
 /// same five `package:binary` entries (`BUILDS`, read from `build-macos`), `BINS` the binaries
-/// of those entries and the one list the verb fetches (`--output` for each) and the pack step
-/// archives, the deployment target and the floor both 11.0, `release stage` for each binary (once,
-/// the list of what an archive holds), GNU tar with the hosted build's options, and the artifact
+/// of those entries, which the five literal `--output` flags the verb fetches name and `release
+/// pack --bins` archives, the deployment target and the floor both 11.0, and the artifact
 /// `dist-aarch64-apple-darwin` uploaded as `build-macos` uploads it, which `sums` expects the
 /// five archives of. Catches an output the pack step does not archive, an archive of a file the
 /// verb does not fetch, a binary dropped from one of the two builds, and an artifact `sums`
@@ -340,33 +339,24 @@ fn the_release_job_fetches_what_it_packs_and_uploads_what_sums_downloads() {
         bins(MACOS_BUILDS)
     );
     let run = step(release, "Build the binaries on a farm Mac").join("\n");
+    let flags: String = bins(MACOS_BUILDS)
+        .iter()
+        .map(|bin| format!(" --output target/aarch64-apple-darwin/release/{bin}"))
+        .collect();
     assert!(
-        run.contains("for bin in $BINS; do\n            outputs+=(--output \"target/$TARGET/release/$bin\")\n          done\n"),
+        run.contains(&format!(
+            r#" --env MACOSX_DEPLOYMENT_TARGET=11.0{flags} -- xtask release macos-leg --target "$TARGET" --builds "$BUILDS" --min-macos 11.0 --out target/macos-leg"#
+        )),
         "{run}"
     );
-    assert!(
-        run.contains(r#" --env MACOSX_DEPLOYMENT_TARGET=11.0 "${outputs[@]}" -- xtask release macos-leg --target "$TARGET" --builds "$BUILDS" --min-macos 11.0 --out target/macos-leg"#),
-        "{run}"
-    );
-    assert_eq!(run.matches("--output").count(), 1, "{run}");
+    assert_eq!(run.matches("--output").count(), 5, "{run}");
     let pack = step(release, "Pack the archives").join("\n");
-    assert!(pack.contains("for bin in $BINS; do\n"), "{pack}");
-    assert_eq!(pack.matches("release stage").count(), 1, "{pack}");
     assert!(
-        pack.contains(r#"tools/xtask release stage --bin "$bin" --target "$TARGET" --version "$VERSION" --out "stage-$bin""#),
+        pack.contains(r#"run: tools/xtask release pack --bins "$BINS" --target "$TARGET" --version "$VERSION" --mtime-of "$COMMIT" --out dist"#),
         "{pack}"
     );
-    let options = r#"-C "stage-$bin" --sort=name --mtime="@$mtime" --owner=0 --group=0 --numeric-owner -cf - "$name" | gzip -n > "dist/$name.tar.gz""#;
-    assert!(
-        pack.contains(&format!("            tar {options}")),
-        "{pack}"
-    );
-    assert!(
-        step(hosted, "Package")
-            .join("\n")
-            .contains(&format!("            gtar {options}")),
-        "the hosted build archives with the same options"
-    );
+    assert_eq!(pack.matches("release pack").count(), 1, "{pack}");
+    assert!(!pack.contains("tar "), "{pack}");
     // The uploads are the same artifact, so `sums` downloads either.
     let theirs = uploads(release);
     assert_eq!(theirs, uploads(hosted));
@@ -383,9 +373,9 @@ fn the_release_job_fetches_what_it_packs_and_uploads_what_sums_downloads() {
         let asset = format!("{bin}-$VERSION-aarch64-apple-darwin.tar.gz");
         assert!(sums.contains(&asset), "{asset} is not expected: {sums}");
     }
-    // Nothing that packs is guarded by the farm's address: the job fails before it (see
-    // `a_run_without_a_farm_fails_by_name_before_anything_else`), so no archive is made from
-    // nothing and none is skipped.
+    // Nothing that packs is guarded by the farm's address: the verb fails without it (see
+    // `a_run_without_a_farm_fails_by_name_in_the_verb`), so no archive is made from nothing and
+    // none is skipped.
     assert!(!pack.contains("        if:"), "{pack}");
 }
 
@@ -451,16 +441,23 @@ fn the_package_jobs_upload_what_the_hosted_package_jobs_upload() {
     // The fetched sums are checked against the fetched files, on this runner.
     let checked = step(
         job(&all, "pkg"),
-        "The fetched files are the ones that were summed",
+        "The fetched package is the one that was summed",
     )
     .join("\n");
     assert!(
-        checked.contains("(cd dist && sha256sum --check --strict SHA256SUMS)"),
+        checked.contains(
+            "        working-directory: dist\n        run: sha256sum --check --strict SHA256SUMS"
+        ),
         "{checked}"
     );
+    let programs = step(
+        job(&all, "pkg"),
+        "The fetched programs are the ones that were summed",
+    )
+    .join("\n");
     assert!(
-        checked.contains("(cd target/release && sha256sum --check --strict PROGRAMS.SHA256SUMS)"),
-        "{checked}"
+        programs.contains("        working-directory: target/release\n        run: sha256sum --check --strict PROGRAMS.SHA256SUMS"),
+        "{programs}"
     );
     // The verb that builds is the one the hosted action's steps became, for the version asked.
     let pkg = step(job(&all, "pkg"), "Build the package on a farm Mac").join("\n");
@@ -541,50 +538,38 @@ fn the_hosted_jobs_and_the_farm_calls_are_each_others_negation() {
     );
 }
 
-/// Asserts that each job that holds the token fails by name when the organisation variable
-/// FARM_ADDRESS is empty: the first step after the checkout is `Check the farm is configured`
-/// (before the toolchain, the download of xtask and the join), it reads the variable through its
-/// `env:` and exits 1 under an `::error::` that says so, and no later step is guarded by the
-/// address (only the join, by the tailnet identity). Catches a farm run that ends green having
-/// built nothing, a check moved behind a step that takes minutes, and a guard that skips a step
-/// the check already settled.
+/// Asserts that a run without a farm fails in the verb and not in the workflow: the `xtask
+/// mac-farm` step of each job that holds the token is unguarded (no `if:`) and reads the address
+/// from the organisation variable, no step is named for a check of the farm, and no step of the
+/// token jobs is guarded by FARM_ADDRESS (only the join is guarded, by the tailnet identity).
+/// Catches a farm run that ends green having built nothing and a guard that skips the verb.
 #[test]
-fn a_run_without_a_farm_fails_by_name_before_anything_else() {
+fn a_run_without_a_farm_fails_by_name_in_the_verb() {
     let text = read_workflow("macos-farm.yml");
     let all = jobs(&text);
-    for name in ["release", "pkg", "pkg-update"] {
+    for (name, build) in [
+        ("release", "Build the binaries on a farm Mac"),
+        ("pkg", "Build the package on a farm Mac"),
+        ("pkg-update", "Build the update package on a farm Mac"),
+    ] {
         let lines = job(&all, name);
-        let starts: Vec<&String> = lines.iter().filter(|l| l.starts_with("      - ")).collect();
+        let verb = step(lines, build).join("\n");
         assert!(
-            starts[0].starts_with("      - uses: actions/checkout@"),
-            "{name}: {}",
-            starts[0]
-        );
-        assert_eq!(
-            starts[1], "      - name: Check the farm is configured",
-            "{name}"
-        );
-        let check = step(lines, "Check the farm is configured").join("\n");
-        assert!(
-            check.contains("        env:\n          FARM_ADDRESS: ${{ vars.FARM_ADDRESS }}\n"),
-            "{name}: {check}"
+            verb.contains("          FARM_ADDRESS: ${{ vars.FARM_ADDRESS }}\n"),
+            "{name}: {verb}"
         );
         assert!(
-            check.contains(r#"if [ -z "$FARM_ADDRESS" ]; then"#),
-            "{name}: {check}"
+            verb.contains("run: tools/xtask mac-farm --address \"$FARM_ADDRESS\""),
+            "{name}: {verb}"
         );
         assert!(
-            check
-                .contains(r#"echo "::error::the farm is not configured: FARM_ADDRESS is not set""#),
-            "{name}: {check}"
-        );
-        assert!(check.contains("exit 1\n"), "{name}: {check}");
-        assert!(
-            !check.contains("        if:"),
-            "{name}: the check is ungated"
+            !verb.contains("        if:"),
+            "{name}: the verb is unguarded"
         );
         let body = code(lines).join("\n");
         assert!(!body.contains("FARM_ADDRESS != ''"), "{name}: {body}");
+        assert!(!body.contains("Check the farm"), "{name}: {body}");
+        assert!(!body.contains("-z \"$FARM_ADDRESS\""), "{name}: {body}");
         let gated: Vec<&str> = code(lines)
             .into_iter()
             .filter(|l| l.starts_with("        if:"))
@@ -594,5 +579,70 @@ fn a_run_without_a_farm_fails_by_name_before_anything_else() {
             ["        if: ${{ vars.TS_CLIENT_ID != '' }}"],
             "{name}: only the join is guarded"
         );
+    }
+}
+
+/// The lines of `text` that are `run:` steps, with the line itself, and the reasons a step is more
+/// than one command: a block scalar, or a line with `&&`, `||`, `;`, `$(`, a backtick, or a `for `
+/// or `if ` keyword.
+fn multi_command_runs(text: &str) -> Vec<String> {
+    let mut problems = Vec::new();
+    for line in text.lines().filter(|l| !l.trim_start().starts_with('#')) {
+        let Some((_, rest)) = line.split_once("run:") else {
+            continue;
+        };
+        if !(line.trim_start().starts_with("run:") || line.trim_start().starts_with("- run:")) {
+            continue;
+        }
+        let rest = rest.trim();
+        if rest.starts_with('|') || rest.starts_with('>') {
+            problems.push(format!("block scalar: {line}"));
+            continue;
+        }
+        let words = format!(" {rest} ");
+        for banned in ["&&", "||", ";", "$(", "`", " for ", " if "] {
+            if words.contains(banned) {
+                problems.push(format!("{banned:?}: {line}"));
+            }
+        }
+    }
+    problems
+}
+
+/// Asserts that every `run:` of macos-farm.yml is one command line: no block scalar, and no `&&`,
+/// `||`, `;`, command substitution, backtick, `for` or `if`; what a step does is a verb of xtask.
+/// Catches a shell script grown back into a step. The negative case runs the same reader on a
+/// copy of the text with a multi-line run put in, and on one with each banned form.
+#[test]
+fn every_step_of_macos_farm_yml_is_one_command() {
+    let text = read_workflow("macos-farm.yml");
+    assert!(text.contains("run: "), "the file has run steps");
+    assert_eq!(multi_command_runs(&text), Vec::<String>::new());
+
+    let with_block = text.replacen(
+        "        run: chmod +x tools/xtask\n",
+        "        run: |\n          set -euo pipefail\n          chmod +x tools/xtask\n",
+        1,
+    );
+    assert_ne!(with_block, text);
+    assert_eq!(
+        multi_command_runs(&with_block),
+        ["block scalar:         run: |"]
+    );
+    for banned in ["&&", "||", ";", "$(", "`"] {
+        let with_form = text.replacen(
+            "run: chmod +x tools/xtask\n",
+            &format!("run: chmod +x tools/xtask {banned} true\n"),
+            1,
+        );
+        assert_eq!(multi_command_runs(&with_form).len(), 1, "{banned}");
+    }
+    for keyword in ["for", "if"] {
+        let with_keyword = text.replacen(
+            "run: chmod +x tools/xtask\n",
+            &format!("run: {keyword} true tools/xtask\n"),
+            1,
+        );
+        assert_eq!(multi_command_runs(&with_keyword).len(), 1, "{keyword}");
     }
 }

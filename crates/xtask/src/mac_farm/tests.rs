@@ -454,17 +454,19 @@ fn each_stage_prints_its_own_line() {
     );
 }
 
-/// Catches a run with no farm configured (a fork, a repository with no farm) that fails or
-/// tries to connect instead of saying so and passing.
+/// Catches a run with no farm configured (an unset `FARM_ADDRESS`) that passes having built
+/// nothing, or tries to connect: it fails naming the variable, before anything is listed or
+/// fetched.
 #[test]
-fn no_address_runs_nothing_and_says_so() {
+fn no_address_is_refused_by_name() {
     let a = Args {
         address: "  ".to_owned(),
+        git: PathBuf::from("/nonexistent/git"),
         ..args()
     };
     assert_eq!(
-        run(&a).expect("a notice"),
-        ["::notice::mac-farm runs nothing: the variable FARM_ADDRESS is not set"]
+        run(&a).expect_err("refused").to_string(),
+        "the farm is not configured: --address is empty (FARM_ADDRESS is not set)"
     );
 }
 

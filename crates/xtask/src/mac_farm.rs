@@ -33,8 +33,8 @@
 //! prints after them shows it. (A workflow step's own header still shows the values of its
 //! `env:`; that is the workflow's to keep out.)
 //!
-//! With an empty `--address` the verb prints a notice and exits 0: a fork, or a repository with
-//! no farm, runs nothing and fails nothing.
+//! With an empty `--address` the verb fails, naming the variable that feeds it: a job that runs
+//! it means to build on the farm, and one with no farm must not pass having built nothing.
 
 pub mod client;
 pub mod outputs;
@@ -100,8 +100,7 @@ const OUTPUT_TAIL: &str = "JOB_OUTPUT_TAIL";
 /// The flags of the verb.
 #[derive(Debug, Clone, ClapArgs)]
 pub struct Args {
-    /// The farm's REAPI address, `grpc://<host>:<port>`. Empty: print a notice and run
-    /// nothing.
+    /// The farm's REAPI address, `grpc://<host>:<port>`; empty is refused.
     #[arg(long)]
     pub address: String,
     /// The instance name sent on every request. Empty: the empty instance.
@@ -143,6 +142,9 @@ pub struct Args {
 /// Why the flags do not make a run.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum Problem {
+    /// `--address` is empty.
+    #[error("the farm is not configured: --address is empty (FARM_ADDRESS is not set)")]
+    NoAddress,
     /// `--address` is not `grpc://<host>:<port>`.
     #[error("the address {0:?} is not grpc://<host>:<port>")]
     Address(String),
@@ -250,6 +252,9 @@ impl Settings {
     /// The [`Problem`] of the first flag that is wrong.
     pub fn of(args: &Args) -> Result<Settings, Problem> {
         let address = args.address.trim();
+        if address.is_empty() {
+            return Err(Problem::NoAddress);
+        }
         let host = address.strip_prefix("grpc://").unwrap_or_default();
         let port = host.rsplit_once(':').map(|(_, p)| p).unwrap_or_default();
         let plain = !host.contains('/') && !host.chars().any(char::is_whitespace);
@@ -701,11 +706,6 @@ pub fn run_with(
 /// [`Error`], for every end but a command that exited 0 on a farm Mac and outputs that were
 /// written.
 pub fn run(args: &Args) -> Result<Vec<String>, Error> {
-    if args.address.trim().is_empty() {
-        return Ok(vec![
-            "::notice::mac-farm runs nothing: the variable FARM_ADDRESS is not set".to_owned(),
-        ]);
-    }
     let root = std::env::current_dir().map_err(io("read the working directory".to_owned()))?;
     run_in(args, &root, toolchain::parse(toolchain::PINS)?, &mut https)
 }
