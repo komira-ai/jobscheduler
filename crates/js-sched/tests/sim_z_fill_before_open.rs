@@ -1,7 +1,10 @@
-//! Sim z: fill before open. Two 88-thread hosts; the score takes a lease to the host it
-//! fits most tightly (key 5), keeps off a host's 10% slack while another host takes the
-//! lease inside 100% (key 1, above key 5), and keeps off a host with no room for the
-//! memory miss while another has it (key 2, an ordering that never refuses).
+//! Sim z: fill before open. Two 88-thread hosts. Under the default pack limit a host is
+//! packed only until its bookings reach 0.8x of its capacity, and the next lease opens a
+//! host within the limit. With the limit lifted to 1.0x (`unpacked`), the score takes a
+//! lease to the host it fits most tightly (key 5), keeps off a host's 10% slack while
+//! another host takes the lease inside 100% (key 1, above key 5), and keeps off a host
+//! with no room for the memory miss while another has it (key 2, an ordering that never
+//! refuses).
 //!
 //! Logical time only; no assertion reads a clock.
 
@@ -44,9 +47,10 @@ fn rig_with_forty_on_a_at(cfg: LoadConfig) -> Rig {
     r
 }
 
-/// Key 5 and key 1, with the pack limit lifted to 1.0x: the first 12 four-core leases go
-/// to `A` (88 cores: best fit toward 100%), the 13th goes to `B` and not into `A`'s 10% slack (92 cores, 4.5% above `tol`),
-/// and the leases after it stay on `B`, which still has room inside 100%.
+/// Key 5 and key 1, with the pack limit lifted to 1.0x: the first 12 four-core leases go to
+/// `A` (88 cores: best fit toward 100%), the 13th goes to `B` and not into `A`'s 10% slack
+/// (92 cores, 4.5% above `tol`), and the leases after it stay on `B`, which still has room
+/// inside 100%.
 #[test]
 fn twelve_leases_fill_a_to_100_percent_and_the_13th_opens_b() {
     let mut r = rig_with_forty_on_a();
@@ -67,8 +71,6 @@ fn twelve_leases_fill_a_to_100_percent_and_the_13th_opens_b() {
     );
 }
 
-/// Key 1 is what keeps the 13th out of `A`'s slack: the predicate admits it there. With
-/// `B` cordoned for the round, `A` is the only host left and takes the 13th at 92 cores.
 /// Behaviour: under the default pack limit (0.8x of 88 cores is 70.4) `A` is packed only
 /// to the limit: it holds 40 cores and takes seven leases (68 cores), the 8th would book
 /// 72 and is past the limit, so it opens `B`, and the leases after it stay on `B`, which
@@ -89,6 +91,8 @@ fn under_the_default_limit_seven_leases_fill_a_to_80_percent_and_the_8th_opens_b
     assert_eq!(r.s.load_view(&w("B")).unwrap().left_cpu_millis, 36_000);
 }
 
+/// Key 1 is what keeps the 13th out of `A`'s slack: the predicate admits it there. With
+/// `B` cordoned for the round, `A` is the only host left and takes the 13th at 92 cores.
 #[test]
 fn the_predicate_admits_the_13th_lease_into_as_slack() {
     let mut r = rig_with_forty_on_a();
@@ -103,7 +107,10 @@ fn the_predicate_admits_the_13th_lease_into_as_slack() {
 /// so key 1 no longer separates the hosts. Before the pack limit, key 5 (the tighter fit)
 /// then took the 13th to `A`; now `A` with the lease booked is past the limit (even at
 /// 1.0x it books 1.045), `B` is within it, so the 13th goes to `B` by the pack limit
-/// and no lease is placed in a slack zone.
+/// and no lease is placed in a slack zone. No pack limit lets a lease book a host past 100%
+/// while another host is within the limit, so the tolerance no longer decides here; key 1
+/// over the tolerance still decides in
+/// `twelve_leases_fill_a_to_100_percent_and_the_13th_opens_b`.
 #[test]
 fn with_as_overshoot_inside_the_tolerance_the_pack_limit_still_takes_the_13th_to_b() {
     let mut r = rig_with_forty_on_a_at(LoadConfig {

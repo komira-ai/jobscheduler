@@ -5,10 +5,10 @@
 //! predicate refused, so it cannot admit anything and cannot move the fault bound. It
 //! compares the new lease's charge with each candidate's predicted load, slot by slot, and
 //! prefers the worker the lease fits most tightly, as long as that worker's bookings stay
-//! within the pack limit (80% of its capacity by default) with the lease. When no
-//! candidate stays within it, the lease goes to the candidate whose bookings are the
-//! smallest share of its capacity. Two keys come before the pack limit: overshoot of the
-//! capacity (key 1) and room for a memory miss (key 2). It is integer arithmetic only, so a replay ranks the
+//! within the pack limit (80% of its capacity by default) with the lease. When no candidate
+//! stays within it, the lease goes to the candidate whose bookings are the smallest share
+//! of its capacity. Two keys come before the pack limit: overshoot of the capacity (key 1)
+//! and room for a memory miss (key 2). It is integer arithmetic only, so a replay ranks the
 //! same way every time. Time is in logical minutes; nothing here reads a clock.
 //!
 //! Everything the score needs about costs and load comes through one seam,
@@ -238,10 +238,11 @@ pub struct ScoreConfig {
     fit: FitShape,
 }
 
-/// How key 5, the fit, is computed. Keys 1 to 4, the pack limit and the tie-breaks are the same in every
-/// shape; only the fit changes, so a harness can run every shape through one code path.
-/// Placement always uses [`FitShape::Squared`]; the other shapes are for comparing
-/// rankers in simulations, which are integration tests and so cannot see `cfg(test)`.
+/// How key 5, the fit, is computed. Keys 1 to 4, the pack limit and the tie-breaks are the
+/// same in every shape; only the fit changes, so a harness can run every shape through one
+/// code path. Placement always uses [`FitShape::Squared`]; the other shapes are for
+/// comparing rankers in simulations, which are integration tests and so cannot see
+/// `cfg(test)`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum FitShape {
     /// The weighted sum of `2 * min^2 + b * (max - min)^2` over the lease's `L` minutes.
@@ -336,8 +337,9 @@ impl Default for ScoreConfig {
 }
 
 /// Where a worker stands against the pack limit with the new lease booked; the smaller is
-/// the better. The score compares it after key 2 and before key 3. A worker within the limit comes before every worker past it, and
-/// workers past it come in the order of their booked share: the least full first.
+/// the better. The score compares it after key 2 and before key 3. A worker within the
+/// limit comes before every worker past it, and workers past it come in the order of their
+/// booked share: the least full first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Pack {
     /// The worker's bookings with the lease stay at or under the limit in CPU and in

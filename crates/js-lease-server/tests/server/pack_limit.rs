@@ -1,6 +1,7 @@
 //! `--pack-limit` and `server.pack_limit`: how full the placement engine packs a host
-//! before it places on the least full one. These tests read the flag and the key and their refusals; what the
-//! limit does to a start is tested in process, in `src/sched/engine_tests.rs`.
+//! before it places on the least full one. These tests read the flag and the key and
+//! their refusals; what the limit does to a placement is tested on the job engine, in
+//! `crates/js-sched-placer/src/engine_pack_tests.rs`.
 
 use std::ffi::OsString;
 

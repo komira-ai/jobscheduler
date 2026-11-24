@@ -1,7 +1,7 @@
 //! The pack limit through the scheduler: a host is packed (the tightest fit first) only
-//! while its bookings with the new lease stay within 0.8x of its CPU; once no host stays
-//! within it, the lease goes to the least full by booked share. Logical time only; no
-//! assertion reads a clock.
+//! while its bookings with the new lease stay within 0.8x of its CPU and of its memory;
+//! once no host stays within it, the lease goes to the least full by booked share. Logical
+//! time only; no assertion reads a clock.
 
 #[path = "load_rig/mod.rs"]
 mod load_rig;
@@ -76,8 +76,8 @@ fn place(r: &mut Rig, cpu: u64) -> String {
 /// the job went to the host the rule names, and no host was booked above its 1.0x while
 /// another host could still take the job within it; at the end every host is full at 1.0x.
 ///
-/// Fails on main: there the best fit packs the first host to its whole ten cores before the
-/// second is touched, so the ninth job lands on the first host.
+/// Catches: best fit with no pack limit, which packs the first host to its whole ten cores
+/// before the second is touched, so the ninth job lands on the first host.
 #[test]
 fn a_burst_fills_each_host_to_the_limit_then_goes_to_the_least_full() {
     const HOSTS: [&str; 6] = ["h1", "h2", "h3", "h4", "h5", "h6"];
@@ -139,7 +139,7 @@ fn a_burst_fills_each_host_to_the_limit_then_goes_to_the_least_full() {
 /// the 30% host, since with it the 85% host would be at 90%, past the limit. Run both ways
 /// round (the names swapped), so the answer is not the tie-break's (first by name or hash).
 ///
-/// Fails on main: the best fit takes the fuller host.
+/// Catches: best fit with no pack limit, which takes the fuller host.
 #[test]
 fn a_job_goes_to_the_30_percent_host_not_the_85_percent_one() {
     for (heavy, light) in [("a", "b"), ("b", "a")] {
@@ -159,7 +159,7 @@ fn a_job_goes_to_the_30_percent_host_not_the_85_percent_one() {
 /// within the limit (60%) still goes to it, as before: packing is kept below the limit.
 /// Run both ways round.
 ///
-/// Passes on main too: it pins the packing that the pack limit keeps.
+/// It pins the packing within the limit, which the pack limit keeps.
 #[test]
 fn below_the_limit_the_fuller_host_is_still_packed() {
     for (full, light) in [("a", "b"), ("b", "a")] {
@@ -172,11 +172,11 @@ fn below_the_limit_the_fuller_host_is_still_packed() {
 }
 
 /// Behaviour: the boundary of the packing: a job that leaves the fuller host at exactly 80%
-/// goes to it; a job that would leave it at 85% goes to the 20% host instead. Run both ways
+/// goes to it; a job that would leave it at 90% goes to the 20% host instead. Run both ways
 /// round.
 ///
-/// The exact-80% half passes on main; the 85% half fails on main, where the fuller host is
-/// packed whatever it is booked to.
+/// Catches (the 90% half): best fit with no pack limit, where the fuller host is packed
+/// whatever it is booked to.
 #[test]
 fn a_job_that_would_take_the_fuller_host_past_the_limit_goes_to_the_other() {
     for (full, light) in [("a", "b"), ("b", "a")] {
@@ -245,7 +245,7 @@ fn held_farm() -> (Rig, Vec<StartLease>, OperationId) {
 /// left on its leases, not the one with the fewest leases, and starts on it once its leases
 /// end; the placement score does not touch the reservation.
 ///
-/// Passes on main too: it pins the reservation that the pack limit leaves unchanged.
+/// It pins the reservation, which the pack limit leaves unchanged.
 #[test]
 fn a_whole_machine_request_still_holds_the_worker_with_the_least_remaining_time() {
     let (mut r, a_leases, head) = held_farm();
@@ -266,8 +266,8 @@ fn a_whole_machine_request_still_holds_the_worker_with_the_least_remaining_time(
 /// each job the chosen host is the one the rule names, `a` holds only its two leases, and
 /// the reservation is kept.
 ///
-/// Fails on main: the best fit packs one of the two past 80%, to its full ten cores, before
-/// the other is touched.
+/// Catches: best fit with no pack limit, which packs one of the two past 80%, to its full
+/// ten cores, before the other is touched.
 #[test]
 fn small_jobs_beside_a_held_worker_follow_the_pack_limit_on_the_others() {
     let (mut r, _, head) = held_farm();
