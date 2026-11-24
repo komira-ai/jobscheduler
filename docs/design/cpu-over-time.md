@@ -330,7 +330,16 @@ accepts. What corrects is the next placement:
   prints, per class of at least `--min-runs` check lines (default 16), the runs, the mean and peak error of the run
   against the profile, the curve's error as a share of the flat level's, whether the profile is shaped, and the CPU
   error the curve removes against the flat line; `--hide-classes` numbers the classes instead of naming them. The
-  check line holds no booking, so the last figure is prediction error, not CPU a booking gives back.
+  check line holds no booking, so the last figure is prediction error, not CPU a booking gives back. The log is read
+  in time order: with several server tasks, sort their lines by timestamp first. A job logged by two servers (the
+  overlap of a rolling update) counts once.
+- **Step 2 on the farm** (MEASURED, 4 h 10 min of normal builds, releases 0.1.379 to 0.1.383 under `shadow`):
+  29,256 check lines over 5,335 classes, 330 of them with at least 16 lines. Of those 330, 28 (8.4%) were shaped by
+  CPU and 38 (11.5%) by memory. Over their scored runs the curve's CPU error was 95.4% of the flat line's: it removed
+  56,920 core-seconds of 1,217,183 (4.6%), and the 28 CPU-shaped classes 2,908 of them. Not every run is in it: 44%
+  of the lines' CPU series disagree with the run's exact CPU time by more than 5% (they are mostly short runs, which
+  a per-second series cannot match that closely: INFERRED), and 17% carry no series (the Macs record none). The
+  check lines were 16% of the server's log bytes.
 - **Shapes:** each job's CPU is bracketed by a "blip" (five seconds at its peak) and a "burst" (its peak while its
   CPU lasts). Without a recorded peak both are flat.
 - **Arms:** listed in the table below. Each runs at the recorded arrival speed and at 4x.

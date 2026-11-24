@@ -326,11 +326,10 @@ fn shadow_prints_the_table_of_a_logs_check_lines() {
     let mut packed = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
     std::io::Write::write_all(&mut packed, CHECK.as_bytes()).unwrap();
     let packed = scratch.put("server.log.gz", &packed.finish().unwrap());
-    assert!(
-        said(&["shadow", packed.as_str()])
-            .unwrap()
-            .starts_with("1 check lines, 1 classes, 0 with at least 16 lines\n")
-    );
+    assert!(said(&["shadow", packed.as_str()]).unwrap().starts_with(
+        "1 check lines (and 0 repeating a job's line, left out), 1 classes, 0 with at \
+                 least 16 lines\n"
+    ));
     // A check line with no class names its line.
     let broken = scratch.put(
         "broken.log",
@@ -339,6 +338,6 @@ fn shadow_prints_the_table_of_a_logs_check_lines() {
     let error = said(&["shadow", broken.as_str()]).unwrap_err();
     assert_eq!(
         error.to_string(),
-        "the log: line 1: no class and CPU status"
+        "the log: line 1: no job, class and CPU status"
     );
 }

@@ -1,9 +1,9 @@
 use super::*;
 
-/// A check line as the server's log writes it, with `rest` after the class.
-fn line(class: &str, rest: &str) -> String {
+/// A check line of `job` as the server's log writes it, with `rest` after the class.
+fn line(job: &str, class: &str, rest: &str) -> String {
     format!(
-        "2026-11-24T17:00:00.000000Z  INFO js_sched_placer::sizes_profile: {MESSAGE} job=j1 \
+        "2026-11-24T17:00:00.000000Z  INFO js_sched_placer::sizes_profile: {MESSAGE} job={job} \
          class={class} {rest}"
     )
 }
@@ -54,11 +54,11 @@ fn log() -> String {
     [
         "2026-11-24T17:00:00.000000Z  INFO js_lease_server::job_pass: the job pass ended"
             .to_owned(),
-        line("a b|c", &first),
-        line("b", "cpu=\"partial\" memory=\"partial\""),
-        line("c", "cpu=\"not-a-success\" memory=\"not-a-success\""),
-        line("a b|c", &second),
-        line("c", "cpu=\"not-a-success\" memory=\"not-a-success\""),
+        line("j1", "a b|c", &first),
+        line("j2", "b", "cpu=\"partial\" memory=\"partial\""),
+        line("j3", "c", "cpu=\"not-a-success\" memory=\"not-a-success\""),
+        line("j4", "a b|c", &second),
+        line("j5", "c", "cpu=\"not-a-success\" memory=\"not-a-success\""),
     ]
     .join("\n")
 }
@@ -70,6 +70,7 @@ fn check_lines_read_with_every_field_and_other_lines_are_skipped() {
     assert_eq!(
         checks[0],
         Check {
+            job: "j1".to_owned(),
             class: "a b|c".to_owned(),
             cpu: Dim {
                 status: "learned".to_owned(),
@@ -96,6 +97,7 @@ fn check_lines_read_with_every_field_and_other_lines_are_skipped() {
     assert_eq!(
         checks[1],
         Check {
+            job: "j2".to_owned(),
             class: "b".to_owned(),
             cpu: Dim {
                 status: "partial".to_owned(),
@@ -121,7 +123,8 @@ fn the_table_adds_up_each_class_of_enough_lines() {
     let checks = parse(&log()).unwrap();
     assert_eq!(
         table(&checks, 2, false),
-        "5 check lines, 3 classes, 2 with at least 2 lines\n\
+        "5 check lines (and 0 repeating a job's line, left out), 3 classes, 2 with at least 2 \
+         lines\n\
          CPU: learned 1, not-a-success 2, not-learned 1, partial 1\n\
          memory: learned 1, no-series 1, not-a-success 2, partial 1\n\
          \n\
@@ -142,7 +145,11 @@ fn the_table_adds_up_each_class_of_enough_lines() {
 fn hidden_classes_are_numbered_most_lines_first() {
     let mut log = log();
     log.push('\n');
-    log.push_str(&line("c", "cpu=\"not-a-success\" memory=\"not-a-success\""));
+    log.push_str(&line(
+        "j6",
+        "c",
+        "cpu=\"not-a-success\" memory=\"not-a-success\"",
+    ));
     let table = table(&parse(&log).unwrap(), 1, true);
     let rows: Vec<&str> = table
         .lines()
@@ -173,7 +180,7 @@ fn a_curve_worse_than_the_flat_line_removes_less_than_nothing() {
             [1000, 1000, 1000, 1000, 2550, 1000]
         ),
     );
-    let table = table(&parse(&line("x", &rest)).unwrap(), 1, false);
+    let table = table(&parse(&line("j1", "x", &rest)).unwrap(), 1, false);
     assert!(
         table.contains("| x | 1 | 1 | 0.0 | 0.0 | 255.0 | no | -1.5 | 0 | - | - | - | - |\n"),
         "{table}"
@@ -200,22 +207,23 @@ fn a_log_without_check_lines_gives_an_empty_table() {
              classes (-% of the flat line's 0.0 core-s), 0.0 core-s over its CPU-shaped classes."
         )
     );
-    assert!(
-        table(&checks, 16, false)
-            .starts_with("0 check lines, 0 classes, 0 with at least 16 lines\nCPU: \nmemory: \n")
-    );
+    assert!(table(&checks, 16, false).starts_with(
+        "0 check lines (and 0 repeating a job's line, left out), 0 classes, 0 with at least 16 \
+             lines\nCPU: \nmemory: \n"
+    ));
 }
 
 #[test]
-fn a_check_line_without_its_class_or_status_is_refused_by_line() {
+fn a_check_line_without_its_job_class_or_status_is_refused_by_line() {
     let cases = [
         format!("first\n{MESSAGE} job=j1 cpu=\"learned\""),
         format!("first\n{MESSAGE} job=j1 class=a"),
+        format!("first\n{MESSAGE} class=a cpu=\"learned\""),
     ];
     for log in cases {
         let error = parse(&log).unwrap_err();
-        assert_eq!(error, ShadowError::NoClass { line: 2 });
-        assert_eq!(error.to_string(), "line 2: no class and CPU status");
+        assert_eq!(error, ShadowError::Unnamed { line: 2 });
+        assert_eq!(error.to_string(), "line 2: no job, class and CPU status");
     }
 }
 
@@ -235,7 +243,7 @@ fn a_value_that_is_not_a_number_or_a_truth_is_refused_with_its_field() {
         ),
     ];
     for (rest, field, value) in cases {
-        let error = parse(&line("a", rest)).unwrap_err();
+        let error = parse(&line("j1", "a", rest)).unwrap_err();
         assert_eq!(
             error,
             ShadowError::Value {
@@ -254,5 +262,32 @@ fn a_quoted_value_runs_to_its_quote_or_to_the_end() {
     assert_eq!(
         read,
         BTreeMap::from([("cpu", "not learned"), ("cpu_runs", "3"), ("memory", "cut")])
+    );
+}
+
+#[test]
+fn a_second_line_of_the_same_job_is_left_out_and_counted() {
+    let rest = fields_of(
+        "cpu",
+        "millicores",
+        ("learned", "true"),
+        [1000, 1000, 1000, 1000, 0, 1000],
+    );
+    let mut log = log();
+    log.push('\n');
+    log.push_str(&line("j1", "a b|c", &rest));
+    let table = table(&parse(&log).unwrap(), 2, false);
+    assert!(
+        table.starts_with(
+            "5 check lines (and 1 repeating a job's line, left out), 3 classes, 2 with at \
+             least 2 lines\nCPU: learned 1, not-a-success 2, not-learned 1, partial 1\n"
+        ),
+        "{table}"
+    );
+    assert!(
+        table.contains(
+            "| a b\\|c | 2 | 2 | 23.3 | 12.8 | 66.6 | yes | 5.0 | 1 | 10.0 | 5.0 | 50.0 | yes |\n"
+        ),
+        "{table}"
     );
 }

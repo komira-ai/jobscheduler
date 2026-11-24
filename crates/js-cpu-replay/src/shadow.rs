@@ -20,7 +20,7 @@
 //!
 //! Each figure is computed from the lines alone; the run counts are lines, not jobs.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 /// The message of the server's check line.
@@ -29,9 +29,9 @@ pub const MESSAGE: &str = "a run was checked against its class's profile";
 /// A check line that does not read.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ShadowError {
-    /// The line names no class, or no CPU status after it.
-    #[error("line {line}: no class and CPU status")]
-    NoClass {
+    /// The line names no job, class or CPU status, in that order.
+    #[error("line {line}: no job, class and CPU status")]
+    Unnamed {
         /// The line, counted from 1 in the log.
         line: usize,
     },
@@ -72,6 +72,8 @@ pub struct Dim {
 /// One check line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Check {
+    /// The job whose run was checked.
+    pub job: String,
     /// The class's name, as the server logged it.
     pub class: String,
     /// The CPU check.
@@ -149,13 +151,17 @@ pub fn parse(log: &str) -> Result<Vec<Check>, ShadowError> {
         // status, which follows it.
         let (head, tail) = after
             .split_once(" cpu=")
-            .ok_or(ShadowError::NoClass { line })?;
-        let (_, class) = head
-            .split_once("class=")
-            .ok_or(ShadowError::NoClass { line })?;
+            .ok_or(ShadowError::Unnamed { line })?;
+        let (job, class) = head
+            .split_once(" class=")
+            .ok_or(ShadowError::Unnamed { line })?;
+        let (_, job) = job
+            .split_once("job=")
+            .ok_or(ShadowError::Unnamed { line })?;
         let tail = format!("cpu={tail}");
         let fields = fields(&tail);
         checks.push(Check {
+            job: job.to_owned(),
             class: class.to_owned(),
             cpu: dim(&fields, "cpu", "millicores", line)?,
             memory: dim(&fields, "memory", "mib", line)?,
@@ -250,11 +256,20 @@ fn statuses<'a>(checks: impl Iterator<Item = &'a Dim>) -> String {
 
 /// The report of `checks`: what the lines hold, then one table row per class of at least
 /// `min_runs` lines, most lines first, named as logged or, with `hide_classes`, `class 1`,
-/// `class 2` and so on; then the shaped share and the CPU error removed.
+/// `class 2` and so on; then the shaped share and the CPU error removed. A job's run counts
+/// once: a later line of the same job (two servers serve together while one replaces the
+/// other, and each logs the runs it sees end) is left out, and the count of those is said.
 #[must_use]
 pub fn table(checks: &[Check], min_runs: usize, hide_classes: bool) -> String {
+    let mut seen = BTreeSet::new();
+    let lines = checks.len();
+    let checks: Vec<&Check> = checks
+        .iter()
+        .filter(|check| seen.insert(check.job.as_str()))
+        .collect();
+    let repeated = lines - checks.len();
     let mut classes = BTreeMap::<&str, Class>::new();
-    for check in checks {
+    for check in &checks {
         let class = classes.entry(check.class.as_str()).or_default();
         class.lines += 1;
         class.cpu.add(&check.cpu);
@@ -269,7 +284,8 @@ pub fn table(checks: &[Check], min_runs: usize, hide_classes: bool) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "{} check lines, {} classes, {} with at least {min_runs} lines",
+        "{} check lines (and {repeated} repeating a job's line, left out), {} classes, {} with \
+         at least {min_runs} lines",
         checks.len(),
         classes.len(),
         kept.len(),
