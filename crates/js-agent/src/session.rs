@@ -96,9 +96,12 @@
 //! - The wait after a heartbeat whose reply the worker took ends as soon as the worker has
 //!   news for the server: a job taken as a start, that runs, or ended
 //!   ([`Session::beats_on_news`], [`Worker::ring_on_news`]). So the heartbeat after a start
-//!   leaves once the worker has taken it, not an interval after the reply that carried it, and
-//!   it is the one the server holds for the next placement; a start's `running` reaches the
-//!   server the moment its container runs, on the heartbeat that follows.
+//!   leaves once the worker has taken it, not an interval after the reply that carried it. To a
+//!   host whose starts ride on the heartbeat it is the one the server holds for the next
+//!   placement, briefly, and the start's `running` follows on the heartbeat after its reply; a
+//!   host that polls dispatch takes its starts from the poll, its server answers that
+//!   heartbeat at once, and the start's `running` reaches the server on the heartbeat that
+//!   leaves the moment its container runs.
 //! - A `taint_ack` counts only when the heartbeat it answers carried the taint. The
 //!   session clears it from a reply to a heartbeat that did not, so the worker never
 //!   marks as told a taint the server was not told. A `taint_cleared_ack` counts only when the
