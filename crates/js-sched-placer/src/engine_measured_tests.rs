@@ -1,8 +1,8 @@
 //! The hosts' measured load in a walk over the queued jobs: which host a job goes to when
 //! several fit, and what a host whose reading went stale is charged. Every host is of 8 cores
 //! and 16 GiB (8800 m allowed at the default slack of 1.1) and holds four jobs that book one
-//! core each; readings are fed with the farm time they arrive at, and the walk runs at a farm
-//! time the test names.
+//! core each, unless the test says otherwise; readings are fed with the farm time they arrive
+//! at, and the walk runs at a farm time the test names.
 
 use std::collections::BTreeMap;
 
@@ -13,7 +13,7 @@ use js_types::{HostId, Resources};
 
 use super::Engine;
 use super::jobs::OpenHost;
-use super::rig::{Tables, at, engine, host};
+use super::rig::{Tables, at, beat, engine, host};
 
 const GIB: u64 = 1 << 30;
 
@@ -61,6 +61,23 @@ fn walk(e: &mut Engine, names: &[&str], id: &str, cpu: u64, now_ms: u64) -> Opti
         .collect();
     let (decided, _) = e.walk_jobs(&[job], &open, at(now_ms));
     decided.into_iter().next().map(|(_, host, _, _)| host)
+}
+
+/// Walks the new jobs `ids`, each of `cpu` millicores and 1 GiB, in one walk over the hosts
+/// `names` at `now_ms`: the host each was placed on, in the order they were placed.
+fn walk_all(e: &mut Engine, names: &[&str], ids: &[&str], cpu: u64, now_ms: u64) -> Vec<HostId> {
+    let tables = Tables::new();
+    let needs = Needs::Shape(Resources::new(cpu, GIB, 0, None).unwrap());
+    let jobs: Vec<_> = ids
+        .iter()
+        .map(|id| tables.submit_with(id, needs.clone(), 600))
+        .collect();
+    let open: BTreeMap<HostId, OpenHost> = names
+        .iter()
+        .map(|name| (host(name), OpenHost::default()))
+        .collect();
+    let (decided, _) = e.walk_jobs(&jobs, &open, at(now_ms));
+    decided.into_iter().map(|(_, host, _, _)| host).collect()
 }
 
 /// Behaviour: two hosts book the same four cores and both fit a job of 200 m, but one
@@ -144,5 +161,62 @@ fn a_stale_reading_charges_the_bookings_and_carries_no_measurement() {
         e.heard(&host(fresh), Some(&reading(2, 4_000)), at(25_000));
         let chosen = walk(&mut e, &["a", "b"], "j3", 200, 30_000);
         assert_eq!(chosen, Some(host(fresh)), "stale {stale}");
+    }
+}
+
+/// Behaviour: a burst of six one-core jobs walked at once over three hosts of 8 cores, one of
+/// which already holds two one-core jobs and the others none, is spread: the first four go to
+/// the two idle hosts, and each host ends within one core of the others (three, three and two),
+/// whichever host is the busy one. No host has a reading, so each is charged what its jobs
+/// book. Catches the walk filling the fullest host that fits first: all six on the busy host (8
+/// of its 8 cores) and the idle hosts left empty. A build's jobs book their class's mean CPU and
+/// start together, so the host filled so runs far past its cores while the others stand idle.
+#[test]
+fn a_burst_of_jobs_is_spread_over_the_hosts_instead_of_filling_the_busiest() {
+    let (held, none): (&[u64], &[u64]) = (&[1, 2], &[]);
+    let names = ["a", "b", "c"];
+    for busy in names {
+        let hosts: Vec<(&str, &[u64])> = names
+            .into_iter()
+            .map(|name| (name, if name == busy { held } else { none }))
+            .collect();
+        let mut e = engine(&hosts);
+        beat(&mut e, &names, 0);
+        let ids = ["j1", "j2", "j3", "j4", "j5", "j6"];
+        let placed = walk_all(&mut e, &names, &ids, 1_000, 0);
+        assert_eq!(placed.len(), ids.len(), "busy {busy}: {placed:?}");
+        assert!(
+            placed[..4].iter().all(|on| on.as_str() != busy),
+            "busy {busy}: {placed:?}"
+        );
+        let mut cores: BTreeMap<&str, u64> = names.into_iter().map(|name| (name, 0)).collect();
+        cores.insert(busy, 2);
+        for on in &placed {
+            *cores.get_mut(on.as_str()).unwrap() += 1;
+        }
+        let mut counts: Vec<u64> = cores.values().copied().collect();
+        counts.sort_unstable();
+        assert_eq!(counts, [2, 3, 3], "busy {busy}: {cores:?}");
+    }
+}
+
+/// Behaviour: of a host whose four jobs book four cores and that is measured below them (3000
+/// m: its jobs use less than they book) and an idle host whose own services keep half a core
+/// busy (500 m measured, nothing booked), a new job of one core goes to the idle host, whichever
+/// of the two is which. Catches the idle host taken as distrusted because it is measured above
+/// its (empty) bookings, and so ranked after the busy host: with a storage service on every host,
+/// every idle host is measured so.
+#[test]
+fn an_idle_host_whose_own_services_use_a_little_cpu_takes_the_job_before_a_busy_one() {
+    let (held, none): (&[u64], &[u64]) = (&[1, 2, 3, 4], &[]);
+    for (busy, idle) in [("a", "b"), ("b", "a")] {
+        let mut e = engine(&[(busy, held), (idle, none)]);
+        measures(&mut e, busy, 3_000);
+        measures(&mut e, idle, 500);
+        let (b, i) = (e.load_of(busy).unwrap(), e.load_of(idle).unwrap());
+        assert_eq!((b.fallback, b.left_cpu_millis), (false, 4_000));
+        assert_eq!((i.fallback, i.left_cpu_millis), (false, 500));
+        let chosen = walk(&mut e, &["a", "b"], "j1", 1_000, 10_000);
+        assert_eq!(chosen, Some(host(idle)), "busy {busy}");
     }
 }
