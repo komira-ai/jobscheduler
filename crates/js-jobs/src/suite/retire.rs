@@ -237,12 +237,12 @@ pub fn retire_node_judges_again_a_row_that_moved_or_went_and_deletes_nothing_on_
     assert!(has_row(&rig, "host-b"), "{name}: a failed commit deleted");
 
     rig.put_raw("hosts/binding/host-b", b"not json".to_vec());
+    let said = rig.jobs.retire_node(&b, GRACE).err();
+    let said = said.map(|error| error.to_string());
+    let named = "the row hosts/binding/host-b cannot be read: ";
     assert!(
-        matches!(
-            rig.jobs.retire_node(&b, GRACE),
-            Err(JobStoreError::Corrupt { key, .. }) if key == "hosts/binding/host-b"
-        ),
-        "{name}: a binding that cannot be read"
+        said.as_deref().is_some_and(|text| text.starts_with(named)),
+        "{name}: a binding that cannot be read: {said:?}"
     );
     assert!(
         has_row(&rig, "host-b"),
