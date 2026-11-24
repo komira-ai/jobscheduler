@@ -225,7 +225,7 @@ instead: 7.10.) A class books the median (the nearest-rank 50th percentile) of i
 recent runs' mean CPU: the CPU time of a run over its wall time, the cores it used on average. The mean is what placement needs.
 Placement admits a host by its measured load (`placement-by-load.md`), and the CPU slack (1.1x by default) bounds that measured load,
 not the sum of the bookings; so a booking that is a job's average, packed to the slack, fills a host with the work it does, where a
-booking of the burst held a host to a few jobs whose peaks fill it while their use left most of it idle. A job that bursts above its
+booking of every class's burst held a host to a few jobs whose peaks fill it while their use left most of it idle (only a class whose bursts are a heavy tail books them, 7.10). A job that bursts above its
 booking uses what its host has idle or shares by weight (`cpu.weight`, from the booking): it runs slower when the host is busy, it
 does not fail, and a host whose measured load reaches the slack takes no new job until it falls. The median books what half of the
 runs of a class use or less: half the runs burst above their booking, and one outlier run does not hold the class high for the next
@@ -247,10 +247,10 @@ such a peak, its peaks are a heavy tail (20 cores is over twice its 2) and it bo
 **What placement packs.** Placement packs these bookings with the load-based admission of `placement-by-load.md` and the CPU slack
 (default 1.1x), both unchanged. A host is charged the larger of its measured CPU and the bookings of the jobs it ran through the last
 reading, plus the bookings of the jobs placed since (covered leases, below). With the admission's floor at its default (1), a
-measurement below the bookings does not release room: a host whose jobs are between bursts is still booked by their means, and it is
+measurement below the bookings does not release room: a host whose jobs are between bursts is still booked by their means (a heavy-tail class's by its peaks, 7.10), and it is
 busy at about those means. A measurement above them (a job bursting past its booking) blocks new jobs until it falls. The floor stays
 at 1: between-burst room is not released. With no measurement of a host yet, the bookings are all the host is charged, so a host
-takes up to its slack in bookings, which are means.
+takes up to its slack in bookings, which are means (or, for a heavy-tail class, its peaks, 7.10).
 
 **Unknown jobs.** A class with no CPU history books its kind's learned CPU, else its client's, and only a client with no history
 at all books the cold CPU: by default 22 cores, held at a quarter of the largest host, the most any class books. Its first run is
@@ -290,7 +290,7 @@ pool's `memory_schedulable_percent` per host (a job's booking is no limit of its
   heavy tail booked at 20 (7.10), tests 2, genrules 0.5, and a step averaging 30, booked the 22-core quarter of the host, at the
   head of every ten) places 10 jobs (one of the large step, then three each of tests, genrules and compiles), booked 89.5 of the
   96.8 cores and 26.3 GB of memory (a host with no reading charges each lease at least a core, so 91 are charged), and the next
-  large step, which needs 22, waits: the host is full by CPU bookings, not by memory (15 jobs at the old 16 GiB). Its bookings are the jobs' means, so a host that is measured busy is refused by its load, not
+  large step, which needs 22, waits: the host is full by CPU bookings, not by memory (15 jobs at the old 16 GiB). Its bookings are the jobs' means (the compiles' their 20-core peaks, a heavy tail), so a host that is measured busy is refused by its load, not
   by the sum of the bookings.
 
 **Covered leases.** The placer's engine used to drop the reading's list of leases the measurement covers, so admission charged a
