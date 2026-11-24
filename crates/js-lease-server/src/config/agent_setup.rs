@@ -169,6 +169,7 @@ pub(super) fn agents(cli: &Cli, clients: &LiveClients) -> Result<Box<AgentSetup>
         });
     }
     let cpu_slack = cli.cpu_slack.unwrap_or_default();
+    let cold_on = cold_on_of(cli)?;
     Ok(Box::new(AgentSetup {
         tokens,
         pool,
@@ -184,14 +185,7 @@ pub(super) fn agents(cli: &Cli, clients: &LiveClients) -> Result<Box<AgentSetup>
             cpu_millis: cli.cold_cpu_millis,
             memory_bytes: cli.cold_memory_bytes,
         },
-        cold_on: ColdOn {
-            memory: per_os(&cli.cold_memory_bytes_on)
-                .map(ColdMemoryOn::new)
-                .map_err(|why| StartupError::new("--cold-memory-bytes-on", why))?,
-            cpu: per_os(&cli.cold_cpu_millis_on)
-                .map(ColdCpuOn::new)
-                .map_err(|why| StartupError::new("--cold-cpu-millis-on", why))?,
-        },
+        cold_on,
         curves: cli.placement_curves,
         max_lease_wall: None,
         job_limits: JobLimits::default(),
@@ -200,6 +194,23 @@ pub(super) fn agents(cli: &Cli, clients: &LiveClients) -> Result<Box<AgentSetup>
         providers: None,
         dispatch: DispatchTimes::default(),
     }))
+}
+
+/// `--cold-memory-bytes-on` and `--cold-cpu-millis-on`: the cold memory and the cold CPU of
+/// the jobs of each operating system they name.
+///
+/// # Errors
+///
+/// An operating system one of them names twice, naming that flag.
+fn cold_on_of(cli: &Cli) -> Result<ColdOn, StartupError> {
+    let memory = per_os(&cli.cold_memory_bytes_on)
+        .map_err(|why| StartupError::new("--cold-memory-bytes-on", why))?;
+    let cpu = per_os(&cli.cold_cpu_millis_on)
+        .map_err(|why| StartupError::new("--cold-cpu-millis-on", why))?;
+    Ok(ColdOn {
+        memory: ColdMemoryOn::new(memory),
+        cpu: ColdCpuOn::new(cpu),
+    })
 }
 
 /// The least cold memory of an operating system: 1 GiB, the least memory the estimator books,
