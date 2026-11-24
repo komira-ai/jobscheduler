@@ -109,6 +109,10 @@ valid_pool() { [[ "$1" =~ ^[A-Za-z0-9._-]{1,64}$ ]]; }
 valid_sha() { [[ "$1" =~ ^[0-9a-f]{64}$ ]]; }
 valid_number() { [[ "$1" =~ ^[0-9]{1,10}$ ]]; }
 
+# shell_quoted WORD: WORD as one shell word in single quotes (a ' in it written '\''), so a printed command line
+# pasted into a shell passes WORD as it is (the default mount unit has a backslash a shell would drop unquoted).
+shell_quoted() { printf "'%s'\n" "${1//\'/\'\\\'\'}"; }
+
 # version_ge A B: 0 when major.minor of A is at least that of B ("1.14.1" "1.14").
 version_ge() {
   local a1 a2 b1 b2
@@ -747,11 +751,13 @@ step_scratch_quota() {
     return 0
   fi
   [ "$remount" = 1 ] || return 0
-  act "unmount $SCRATCH (systemctl stop $MOUNT_UNIT)" systemctl stop "$MOUNT_UNIT" || { ABORT=1; return 0; }
-  if ! act "mount it again with $QUOTA_OPTION (systemctl start $MOUNT_UNIT)" systemctl start "$MOUNT_UNIT"; then
+  local unit_word
+  unit_word=$(shell_quoted "$MOUNT_UNIT")
+  act "unmount $SCRATCH (systemctl stop $unit_word)" systemctl stop "$MOUNT_UNIT" || { ABORT=1; return 0; }
+  if ! act "mount it again with $QUOTA_OPTION (systemctl start $unit_word)" systemctl start "$MOUNT_UNIT"; then
     ABORT=1
     say "  STOP: $SCRATCH is unmounted and the host is left drained, with nothing after this step done."
-    say "  Recover: systemctl start $MOUNT_UNIT   (then read the manifest, and run this script again)"
+    say "  Recover: systemctl start $unit_word   (then read the manifest, and run this script again)"
     return 0
   fi
   if [ "$RUN_MODE" = apply ]; then

@@ -698,7 +698,8 @@ fn a_write_that_fails_installs_nothing_and_records_nothing() {
 
 /// The mount does not start after it was stopped: the remaining steps do not run (the scratch
 /// directories are not made on the root filesystem under the mount point), the run exits 1, the
-/// manifest keeps the unit edit, and the output says how to start the mount again.
+/// manifest keeps the unit edit, and the output says how to start the mount again, with the unit
+/// in single quotes.
 #[test]
 fn a_mount_that_does_not_start_again_aborts_the_run_and_says_how_to_recover() {
     let mut rig = Rig::new("start-fails");
@@ -706,7 +707,8 @@ fn a_mount_that_does_not_start_again_aborts_the_run_and_says_how_to_recover() {
     let out = rig.apply();
     assert_eq!(out.code, 1, "{}", out.text);
     assert!(
-        out.text.contains(&format!("systemctl start {MOUNT}")),
+        out.text
+            .contains(&format!("  Recover: systemctl start '{MOUNT}'   (then")),
         "{}",
         out.text
     );
@@ -727,4 +729,211 @@ fn a_mount_that_does_not_start_again_aborts_the_run_and_says_how_to_recover() {
         calls.contains(&format!("systemctl stop {MOUNT}")),
         "{calls:?}"
     );
+}
+
+/// The words a shell makes of `line`, for the little of the shell the printed command lines use:
+/// blanks between words, single quotes (their text taken as it is), and a backslash outside them
+/// (dropped, the character after it taken as it is). Any other character the shell would treat
+/// specially fails the test, so a command line is never passed because the tokenizer did not
+/// model it.
+fn shell_words(line: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word: Option<String> = None;
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            ' ' | '\t' => {
+                if let Some(done) = word.take() {
+                    words.push(done);
+                }
+            }
+            '\'' => {
+                let into = word.get_or_insert_with(String::new);
+                loop {
+                    match chars.next() {
+                        Some('\'') => break,
+                        Some(other) => into.push(other),
+                        None => panic!("an unterminated single quote in {line:?}"),
+                    }
+                }
+            }
+            '\\' => {
+                let next = chars
+                    .next()
+                    .unwrap_or_else(|| panic!("a backslash ends {line:?}"));
+                word.get_or_insert_with(String::new).push(next);
+            }
+            '"' | '$' | '`' | ';' | '&' | '|' | '<' | '>' | '(' | ')' | '*' | '?' | '[' | ']'
+            | '#' | '~' | '{' | '}' | '\n' => {
+                panic!("{c:?} is not modelled, in {line:?}")
+            }
+            other => word.get_or_insert_with(String::new).push(other),
+        }
+    }
+    words.extend(word);
+    words
+}
+
+/// The tokenizer the next tests read the output with is the shell's reading of what they use: an
+/// unquoted backslash is dropped (the old Recover line's unit came out as
+/// `var-lib-jsx2dagent-scratch.mount`), a single-quoted one is kept, and `'\''` puts a single
+/// quote inside a quoted word.
+#[test]
+fn shell_words_reads_quotes_and_backslashes_as_a_shell_does() {
+    assert_eq!(
+        shell_words(r"systemctl start var-lib-js\x2dagent-scratch.mount"),
+        ["systemctl", "start", "var-lib-jsx2dagent-scratch.mount"]
+    );
+    assert_eq!(
+        shell_words(r"  systemctl  start 'var-lib-js\x2dagent-scratch.mount' "),
+        ["systemctl", "start", r"var-lib-js\x2dagent-scratch.mount"]
+    );
+    assert_eq!(
+        shell_words(r"systemctl start 'it'\''s.mount' ''"),
+        ["systemctl", "start", "it's.mount", ""]
+    );
+}
+
+/// The command lines the scratch step prints that name the mount unit: the parenthesised
+/// `systemctl stop`/`start` of each `would:`, `doing:` and `FAILED:` line, and the Recover line
+/// up to its note. Each is read as a shell reads a pasted line.
+fn printed_unit_commands(text: &str) -> Vec<(String, Vec<String>)> {
+    let mut found = Vec::new();
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("  Recover: ") {
+            let (command, _) = rest
+                .split_once("   (then")
+                .unwrap_or_else(|| panic!("no note after the command: {line:?}"));
+            found.push((line.to_owned(), shell_words(command)));
+        } else if let Some(at) = line
+            .find("(systemctl stop ")
+            .or_else(|| line.find("(systemctl start "))
+        {
+            let command = line[at + 1..]
+                .strip_suffix(')')
+                .unwrap_or_else(|| panic!("the command does not end the line: {line:?}"));
+            found.push((line.to_owned(), shell_words(command)));
+        }
+    }
+    found
+}
+
+/// Each printed command line that names the mount unit, pasted into a shell, gives `systemctl`
+/// exactly `unit` after its verb; `want` is the lines expected, by their start.
+fn assert_unit_commands(out: &Out, unit: &str, want: &[&str]) {
+    let found = printed_unit_commands(&out.text);
+    let starts: Vec<&str> = found
+        .iter()
+        .map(|(line, _)| {
+            want.iter()
+                .copied()
+                .find(|w| line.starts_with(w))
+                .unwrap_or_else(|| panic!("an unexpected command line {line:?}: {}", out.text))
+        })
+        .collect();
+    assert_eq!(starts, want, "{}", out.text);
+    for (line, words) in &found {
+        let verb = if line.contains("systemctl stop ") {
+            "stop"
+        } else {
+            "start"
+        };
+        assert_eq!(words, &["systemctl", verb, unit], "{line}");
+    }
+}
+
+/// A mount unit called `unit` in place of the default: its file, and the answers about it.
+fn with_mount_unit(rig: &mut Rig, unit: &str, start_code: u8) {
+    rig.write(&format!("etc/systemd/system/{unit}"), &mount_unit("loop"));
+    let r = |rel: &str| rig.path(rel).display().to_string();
+    let rules = [
+        rule(
+            "systemctl",
+            &format!("show -p FragmentPath,DropInPaths -- {unit}"),
+            0,
+            &esc(&format!(
+                "FragmentPath=/etc/systemd/system/{unit}\nDropInPaths=\n"
+            )),
+            &[],
+        ),
+        rule(
+            "systemctl",
+            &format!("cat -- {unit}"),
+            0,
+            &format!("@{}", r(&format!("etc/systemd/system/{unit}"))),
+            &[],
+        ),
+        rule(
+            "systemctl",
+            &format!("stop {unit}"),
+            0,
+            "",
+            &[format!("write={}=", r("mount-options"))],
+        ),
+        rule("systemctl", &format!("start {unit}"), start_code, "", &[]),
+    ];
+    for one in rules {
+        rig.rule(one);
+    }
+}
+
+const DRY_LINES: [&str; 2] = ["  would: unmount ", "  would: mount it again "];
+/// An apply prints the plan first, then what it does.
+const APPLY_LINES: [&str; 6] = [
+    "  would: unmount ",
+    "  would: mount it again ",
+    "  doing: unmount ",
+    "  doing: mount it again ",
+    "  FAILED: mount it again ",
+    "  Recover: ",
+];
+
+/// The mount does not start again: the Recover line, and every command line the dry run and the
+/// apply print with the unit, pasted into a shell, start (or stop) exactly the unit: the default
+/// one, whose `\x2d` a shell would turn into `x2d` unquoted, and one named with
+/// `--scratch-mount-unit` that holds a single quote and a backslash. The unit the script itself
+/// ran is that name too, and the manifest's last line names the same pasteable command.
+#[test]
+fn the_printed_command_lines_start_the_mount_unit_they_name_when_pasted() {
+    for (name, unit) in [
+        ("recover-default", MOUNT),
+        ("recover-quoted", r"js-agent's-scratch\x2dfs.mount"),
+    ] {
+        let mut rig = Rig::new(name);
+        if unit != MOUNT {
+            with_mount_unit(&mut rig, unit, 1);
+        } else {
+            rig.rule(rule("systemctl", &format!("start {MOUNT}"), 1, "", &[]));
+        }
+        let mut dry: Vec<String> = ["--server", SERVER, "--pool", "farm"]
+            .map(str::to_owned)
+            .to_vec();
+        dry.extend(rig.file_args());
+        let mut apply = rig.apply_args();
+        if unit != MOUNT {
+            for args in [&mut dry, &mut apply] {
+                args.extend(["--scratch-mount-unit".to_owned(), unit.to_owned()]);
+            }
+        }
+        let out = rig.run(&dry.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(out.code, 0, "{}", out.text);
+        assert_unit_commands(&out, unit, &DRY_LINES);
+
+        let out = rig.run(&apply.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(out.code, 1, "{}", out.text);
+        assert_unit_commands(&out, unit, &APPLY_LINES);
+        let calls = rig.calls();
+        assert!(
+            calls.contains(&format!("systemctl stop {unit}"))
+                && calls.contains(&format!("systemctl start {unit}")),
+            "{calls:?}"
+        );
+        let manifest = rig.text("var/lib/js-crun-host-setup/manifest");
+        let last = manifest.lines().last().expect("a line");
+        let failed = last
+            .strip_prefix("incomplete\t1\tmount it again with prjquota (")
+            .and_then(|l| l.strip_suffix(')'))
+            .unwrap_or_else(|| panic!("{manifest}"));
+        assert_eq!(shell_words(failed), ["systemctl", "start", unit], "{last}");
+    }
 }
