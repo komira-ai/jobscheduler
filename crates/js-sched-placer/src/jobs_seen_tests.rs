@@ -44,6 +44,7 @@ impl JobStarts for Failures {
 struct Offered {
     open: BTreeMap<HostId, OpenHost>,
     hello: BTreeSet<HostId>,
+    tainted: BTreeSet<HostId>,
     whole: Option<WholeNodeConfig>,
 }
 
@@ -57,6 +58,7 @@ impl Offered {
                 .map(|h| (h.clone(), OpenHost::default()))
                 .collect(),
             hello: names.into_iter().collect(),
+            tainted: BTreeSet::new(),
             whole: None,
         }
     }
@@ -65,6 +67,7 @@ impl Offered {
         JobHosts {
             open: &self.open,
             hello: &self.hello,
+            tainted: &self.tainted,
             whole: self.whole.as_ref(),
         }
     }
