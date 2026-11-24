@@ -4,7 +4,8 @@
 //! The score ranks only the workers the predicate passed. It is handed no worker the
 //! predicate refused, so it cannot admit anything and cannot move the fault bound. It
 //! compares the new lease's charge with each candidate's predicted load, slot by slot, and
-//! prefers the worker the lease fits most tightly. It is integer arithmetic only, so a
+//! prefers the worker the lease fits most tightly (best fit; [`FitShape::Spread`] prefers
+//! the emptiest instead). It is integer arithmetic only, so a
 //! replay ranks the same way every time. Time is in logical minutes; nothing here reads a
 //! clock.
 //!

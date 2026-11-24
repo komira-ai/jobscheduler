@@ -52,15 +52,7 @@ fn measures(e: &mut Engine, name: &str, used: u64) {
 /// Walks one new job `id` of `cpu` millicores and 1 GiB over the hosts `names` at `now_ms`:
 /// the host it was placed on.
 fn walk(e: &mut Engine, names: &[&str], id: &str, cpu: u64, now_ms: u64) -> Option<HostId> {
-    let tables = Tables::new();
-    let needs = Needs::Shape(Resources::new(cpu, GIB, 0, None).unwrap());
-    let job = tables.submit_with(id, needs, 600);
-    let open: BTreeMap<HostId, OpenHost> = names
-        .iter()
-        .map(|name| (host(name), OpenHost::default()))
-        .collect();
-    let (decided, _) = e.walk_jobs(&[job], &open, at(now_ms));
-    decided.into_iter().next().map(|(_, host, _, _)| host)
+    walk_all(e, names, &[id], cpu, now_ms).into_iter().next()
 }
 
 /// Walks the new jobs `ids`, each of `cpu` millicores and 1 GiB, in one walk over the hosts
