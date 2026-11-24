@@ -16,10 +16,10 @@ update hook (`/usr/bin/js-agent update-hook`) for every update.
 | `js-agent` (the release binary) | `/usr/bin/js-agent` | static, byte for byte what the release builds |
 | `js-agent-crun.service` | `/usr/lib/systemd/system/js-agent-crun.service` | the agent, run with crun; the one unit hostkeeper starts, stops and enables |
 | `js-agent-crun-gpu.service` | `/usr/lib/systemd/system/js-agent-crun-gpu.service` | the oneshot that writes the GPU drop-in; pulled in by the agent's unit |
-| `tmpfiles.conf` | `/usr/lib/tmpfiles.d/js-agent-crun.conf` | the directories of the unit |
+| `tmpfiles.conf` | `/usr/lib/tmpfiles.d/js-agent-crun.conf` | the directories of the unit; the package's one tmpfiles.d file |
 | `sysusers.conf` | `/usr/lib/sysusers.d/js-agent.conf` | the job user `jsjob` the unit names with `--job-user`, which the postinst makes (and gives its subordinate ranges) |
 | `../js-agent.service` | `/usr/lib/systemd/system/js-agent.service` | the agent run through Docker or Podman, for a host that installs the package by hand; hostkeeper does not start it |
-| `../tmpfiles.conf` | `/usr/lib/tmpfiles.d/js-agent.conf` | the directories of that unit |
+| `../tmpfiles.conf` | `/usr/share/js-agent/tmpfiles.conf` | the directories of that unit, which its `ExecStartPre` applies; outside tmpfiles.d, so boot does not read it |
 | `../crun_host_setup.sh` | `/usr/share/js-agent/crun_host_setup.sh` | the host setup script, mode 0755 |
 | `LICENSE` | `/usr/share/doc/js-agent/copyright` | |
 
@@ -62,7 +62,13 @@ hand:
 | `scratch root`, `path permissions` | the scratch filesystem mounted at `/var/lib/js-agent/scratch` (the unit starts only on a mount point there), XFS with project quotas (`prjquota`): each job's `/tmp` and `/var/tmp` is a directory there bounded by a project quota (`--job-tmp-gib`), and an agent whose scratch filesystem has no `prjquota` starts no job (each start is refused `quota-unavailable`, and the finding `quota-unhealthy` says why) | the disk is the host's |
 | `cgroup v2 delegation` | cgroup v2 and systemd 254 or newer | the unit asks for it (`Delegate=yes`, `DelegateSubgroup=supervisor`) |
 
-The directories are the package's tmpfiles file's, applied at boot. The unit runs no tmpfiles
+The directories are the package's tmpfiles file's, applied at boot: `/etc/js-agent` and the
+state root 0700, `/var/lib/js-agent`, the scratch mount and its `runs` directory 0711. It is the
+package's one file in a tmpfiles.d directory, so no other line of the package names these paths
+(systemd-tmpfiles applies the first line it reads for a path and ignores the rest). The engine
+unit's file (`/usr/share/js-agent/tmpfiles.conf`, mode 0700 for the same paths) is applied only by
+that unit's `ExecStartPre`, so starting `js-agent.service` on a crun host closes the directories
+again and the crun unit then refuses to start. The unit runs no tmpfiles
 step: the agent makes its state root (mode 0700) and its scratch root (mode 0711) itself at each
 start when they are missing, the leaf only (a missing parent is a miss its start check reports),
 and never changes one that exists.

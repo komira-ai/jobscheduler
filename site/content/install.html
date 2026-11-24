@@ -55,9 +55,9 @@ memory_bytes = 17179869184</pre></div>
   </li>
   <li>
     <h3>Install the agent on a Linux host <span class="tag tag-ok">works today</span></h3>
-    <p>The agent runs as root, with a rootful Docker or Podman beside it, and refuses to start under <code>ProtectSystem=</code>, <code>PrivateMounts=</code> or <code>PrivatePIDs=</code>. The unit runs <code>/usr/bin/js-agent</code> and reads <code>/usr/lib/tmpfiles.d/js-agent.conf</code>. <code>apt-get install js-agent</code> from the repository puts the binary, the unit and the tmpfiles file there; without the package, put the binary at the first path, <code>js-agent.service</code> in <code>/usr/lib/systemd/system</code> and <code>tmpfiles.conf</code> from <code>packaging/js-agent</code> at the second, where the Debian package puts them. Then, as root:</p>
+    <p>The agent runs as root, with a rootful Docker or Podman beside it, and refuses to start under <code>ProtectSystem=</code>, <code>PrivateMounts=</code> or <code>PrivatePIDs=</code>. The unit runs <code>/usr/bin/js-agent</code> and reads <code>/usr/share/js-agent/tmpfiles.conf</code>. <code>apt-get install js-agent</code> from the repository puts the binary, the unit and the tmpfiles file there; without the package, put the binary at the first path, <code>js-agent.service</code> in <code>/usr/lib/systemd/system</code> and <code>tmpfiles.conf</code> from <code>packaging/js-agent</code> at the second, where the Debian package puts them. Then, as root:</p>
     <ol>
-      <li>make the directories: <code>systemd-tmpfiles --create /usr/lib/tmpfiles.d/js-agent.conf</code>;</li>
+      <li>make the directories: <code>systemd-tmpfiles --create /usr/share/js-agent/tmpfiles.conf</code>;</li>
       <li>write the pool's join token to <code>/etc/js-agent/token</code>, mode 0600;</li>
       <li>mount a disk of its own at <code>/var/lib/js-agent/scratch</code> (the agent refuses a state root on the same disk as the scratch root);</li>
       <li><code>systemctl edit js-agent</code>: clear <code>ExecStart=</code> and set the whole line again with this host's <code>--server</code> and <code>--pool</code> (the shipped <code>--server</code> is a placeholder the agent refuses);</li>

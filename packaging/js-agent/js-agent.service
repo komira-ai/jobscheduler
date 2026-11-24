@@ -5,8 +5,9 @@
 # (systemd-sysusers) and its subordinate id ranges, and nothing else: nothing starts or
 # configures the agent. The sequence, as
 # root:
-#   1. systemd-tmpfiles --create /usr/lib/tmpfiles.d/js-agent.conf
-#        makes the directories below (dpkg does not run systemd-tmpfiles; a reboot would)
+#   1. systemd-tmpfiles --create /usr/share/js-agent/tmpfiles.conf
+#        makes the directories below with this unit's modes (dpkg does not run
+#        systemd-tmpfiles; the unit's ExecStartPre runs this file at every start)
 #   2. write the pool's join token to /etc/js-agent/token, mode 0600
 #   3. mount a disk of its own at /var/lib/js-agent/scratch (an /etc/fstab line, then
 #        `systemctl daemon-reload`, then `mount`)
@@ -45,7 +46,10 @@
 # unit then shows "start condition failed" in `systemctl status` and does not loop.
 # RequiresMountsFor orders the start after the mount at boot. ExecStartPre makes the
 # directories again before every start, so their modes are right when a disk was mounted
-# after step 1.
+# after step 1. Its file is not in a tmpfiles.d directory, so boot does not read it: the
+# package's one tmpfiles.d file is the crun unit's (/usr/lib/tmpfiles.d/js-agent-crun.conf),
+# which declares /var/lib/js-agent and the scratch root 0711, and ExecStartPre sets them to
+# 0700 again before this unit's agent starts.
 #
 # The host credential and the token: the agent reads the token file at every start, also after
 # the server has retired the token and the agent holds a host credential. Keep
@@ -82,7 +86,7 @@ ConditionPathIsMountPoint=/var/lib/js-agent/scratch
 
 [Service]
 Type=simple
-ExecStartPre=+systemd-tmpfiles --create /usr/lib/tmpfiles.d/js-agent.conf
+ExecStartPre=+systemd-tmpfiles --create /usr/share/js-agent/tmpfiles.conf
 # TimeoutStopSec bounds the drain that SIGTERM starts: the agent lets the running jobs finish
 # for --drain-wait, stops them (up to --stop-grace), and waits up to 30 s more for the server to
 # acknowledge their results. TimeoutStopSec must be at least --drain-wait + --stop-grace + 30 s
