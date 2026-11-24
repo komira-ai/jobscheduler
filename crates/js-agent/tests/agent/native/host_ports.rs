@@ -153,3 +153,77 @@ fn the_agent_does_not_start_with_more_ports_to_deny_than_a_profile_holds() {
     let at = rig_at("ports-at-bound", Ceiling::Loopback, many(255));
     assert!(at.rt.check_egress().is_ok());
 }
+
+/// Asserts that `--native-host-port`, given more than once on the command line, reaches the
+/// native settings the agent is built from (`Local::from_cli`) as its ports, each once and
+/// lowest first; that no flag gives none; that port 0 is refused by name and a number above
+/// 65535 by the parser; and that the flag without `--native-accounts` is refused naming it.
+/// Catches a flag clap accepts and the platform then drops on its way to the runtime, which
+/// the tests over hand-made settings cannot see.
+#[test]
+fn the_host_ports_of_the_command_line_reach_the_settings_the_agent_is_built_from() {
+    use clap::Parser as _;
+    use js_agent::lifecycle::Local;
+    use js_agent::{Backend, Cli};
+
+    use super::agent::private;
+    use crate::support::Scratch;
+
+    let dir = Scratch::new("native-host-ports-local");
+    let accounts = dir.path("accounts").display().to_string();
+    let (state, scratch) = (private(&dir, "state"), private(&dir, "scratch"));
+    let roots = ["--state-root", &state, "--scratch-root", &scratch];
+    let native = [
+        &roots[..],
+        &[
+            "--native-accounts",
+            &accounts,
+            "--native-account-range",
+            "501-510",
+        ],
+    ]
+    .concat();
+    let parse = |extra: &[&str]| {
+        let argv = [
+            "js-agent",
+            "--server",
+            "http://127.0.0.1:1",
+            "--pool",
+            "macs",
+        ];
+        Cli::try_parse_from(argv.iter().chain(extra.iter()))
+    };
+    let ports = |extra: &[&str]| -> Vec<u16> {
+        let cli = parse(&[&native[..], extra].concat()).unwrap();
+        match Local::from_cli(&cli, 0).unwrap().backend {
+            Some(Backend::Native(settings)) => {
+                settings.config().host_ports.iter().copied().collect()
+            }
+            _ => panic!("no native backend"),
+        }
+    };
+    assert_eq!(ports(&[]), Vec::<u16>::new(), "no flag, no host port");
+    let given = [
+        "--native-host-port",
+        "12049",
+        "--native-host-port=9300",
+        "--native-host-port",
+        "12049",
+    ];
+    assert_eq!(ports(&given), [9300, 12049]);
+
+    let zero = parse(&[&native[..], &["--native-host-port", "0"]].concat()).unwrap();
+    assert_eq!(
+        Local::from_cli(&zero, 0).unwrap_err(),
+        "--native-host-port: 0 is no port a service listens on"
+    );
+    assert!(
+        parse(&[&native[..], &["--native-host-port", "65536"]].concat()).is_err(),
+        "a number above 65535 is no port"
+    );
+    let alone = parse(&[&roots[..], &["--native-host-port", "9300"]].concat()).unwrap();
+    assert_eq!(
+        Local::from_cli(&alone, 0).unwrap_err(),
+        "--native-host-port: needs --native-accounts"
+    );
+}
