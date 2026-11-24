@@ -222,7 +222,7 @@ fn a_package_missing_any_of_its_nine_files_is_named() {
             "usr/lib/tmpfiles.d/js-agent-crun.conf",
             "usr/lib/sysusers.d/js-agent.conf",
             "usr/lib/systemd/system/js-agent.service",
-            "usr/lib/tmpfiles.d/js-agent.conf",
+            "usr/share/js-agent/tmpfiles.conf",
             "usr/share/js-agent/crun_host_setup.sh",
             "usr/share/doc/js-agent/copyright",
         ]

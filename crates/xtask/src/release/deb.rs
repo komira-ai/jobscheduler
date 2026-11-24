@@ -123,8 +123,11 @@ pub const FILES: [PackagedFile; 9] = [
             "../../../../packaging/js-agent/js-agent.service"
         )),
     },
+    // Not in a tmpfiles.d directory: its modes are the engine unit's, which its `ExecStartPre`
+    // applies, and the crun unit's file above declares the same paths with the modes that unit
+    // needs (systemd-tmpfiles would apply one of the two at boot and ignore the other).
     PackagedFile {
-        path: "/usr/lib/tmpfiles.d/js-agent.conf",
+        path: "/usr/share/js-agent/tmpfiles.conf",
         mode: 0o644,
         text: Some(include_str!("../../../../packaging/js-agent/tmpfiles.conf")),
     },

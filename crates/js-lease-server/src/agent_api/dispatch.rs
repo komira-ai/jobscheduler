@@ -40,7 +40,10 @@
 //!    allocation as it is now. A start whose allocation is not the booked one the message
 //!    names, whose job has ended or has a cancel intent, or that cannot be built (logged) is
 //!    left out of the reply and stays claimed until its lease ends; every end of a job deletes
-//!    its start. At most [`js_agent_wire::limits::MAX_COMMANDS`] messages are answered; the
+//!    its start. A start that cannot be built because it breaks a rule of the wire (a job
+//!    admitted with an environment the wire refuses, before `SubmitJob` checked it) is one no
+//!    host could be sent: its job is ended `failed-to-start` (`agent-refused`, with the wire's
+//!    code as its detail) in the same claim, which deletes the start. At most [`js_agent_wire::limits::MAX_COMMANDS`] messages are answered; the
 //!    rest stay claimed until their lease ends. A failed claim is a 500 `state-write-failed`.
 //! 4. **The hold.** With nothing to answer the poll is held for 5 s at most (the hold of a
 //!    held beat, `crate::held_beat::MAX_HOLD`) and claims again when a placement on this
@@ -70,8 +73,8 @@ use js_agent_wire::{
     Phase, limits, refusal,
 };
 use js_jobs::{
-    AllocationId, AllocationRecord, AllocationStep, DispatchKind, DispatchMessage, JobRecord,
-    JobStoreError,
+    AllocationId, AllocationRecord, AllocationStep, DispatchKind, DispatchMessage, JobEnd,
+    JobRecord, JobState, JobStoreError, StartFailure,
 };
 use js_registry::{Credential, Refusal};
 use js_types::HostId;
@@ -84,7 +87,7 @@ use super::{
 use crate::admit::reports_dispatch_poll;
 use crate::agents::Agents;
 use crate::held_beat::Watch;
-use crate::job_start::start_of;
+use crate::job_start::{Unsendable, start_of};
 use crate::job_store::ServerJobs;
 use crate::per_job::BeatContext;
 use crate::util::blocking;
@@ -294,7 +297,11 @@ fn handed_out(
 }
 
 /// The start the claimed start `message` hands out, built from the job and allocation rows as
-/// they are now; `None` when it is not to be sent ([`startable`]) or cannot be built.
+/// they are now; `None` when it is not to be sent ([`startable`]) or cannot be built. A start
+/// that breaks a rule of the wire ([`Unsendable::Invalid`]) is one the job's own record makes,
+/// which no host and no later poll can send: its job is ended ([`end_unsendable`]). Any other
+/// start that cannot be built (the host has not reported what the job needs) is logged and
+/// stays claimed.
 fn start_for(
     jobs: &ServerJobs,
     context: &BeatContext<'_>,
@@ -307,13 +314,54 @@ fn start_for(
     let rows = job
         .zip(allocation)
         .filter(|(job, allocation)| startable(message, job, allocation));
-    Ok(rows
-        .and_then(|(job, allocation)| {
-            start_of(&job, &allocation, context)
-                .inspect_err(|why| warn!(job = %job.id, %why, "a dispatched start is not sent"))
-                .ok()
-        })
-        .map(Dispatched::start))
+    let Some((job, allocation)) = rows else {
+        return Ok(None);
+    };
+    match start_of(&job, &allocation, context) {
+        Ok(start) => Ok(Some(Dispatched::start(start))),
+        Err(Unsendable::Invalid { code, field }) => {
+            end_unsendable(jobs, context, &job, code, field);
+            Ok(None)
+        }
+        Err(why) => {
+            warn!(job = %job.id, %why, "a dispatched start is not sent");
+            Ok(None)
+        }
+    }
+}
+
+/// Ends `job`, whose start breaks the wire's rule `code` on `field`, `failed-to-start` as a
+/// start its agent refused with that code ([`StartFailure::AgentRefused`], the code kept as
+/// the job's detail), which is what an agent sent the start would answer; the end deletes the
+/// job's start and, the host never having had it, queues no stop. The failure is counted when
+/// this end commits, and not when the job had ended another way first. An end that does not commit is logged and the start stays claimed, so its
+/// next delivery reads the rows again and ends the job then.
+fn end_unsendable(
+    jobs: &ServerJobs,
+    context: &BeatContext<'_>,
+    job: &JobRecord,
+    code: &'static str,
+    field: &'static str,
+) {
+    let failure = StartFailure::AgentRefused;
+    let end = JobEnd::Refused {
+        failure,
+        detail: code.to_owned(),
+    };
+    match jobs.end_job(&job.id, end) {
+        // A job another writer ended between the read and the end keeps that end, which
+        // `end_job` returns unwritten: it is not counted, nor logged as this failure.
+        Ok(record) => Some(record)
+            .filter(|record| record.state == JobState::FailedToStart(failure))
+            .into_iter()
+            .for_each(|_| {
+                warn!(job = %job.id, code, field, "a dispatched start breaks a rule of the wire; its job failed to start");
+                context.metrics.start_failed(failure);
+            }),
+        Err(error) => {
+            warn!(job = %job.id, code, field, %error, "a job whose start breaks a rule of the wire could not be ended");
+        }
+    }
 }
 
 /// Whether the start `message` is still one to send for `job` on `allocation`: the allocation
