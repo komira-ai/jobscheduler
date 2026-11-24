@@ -190,4 +190,49 @@ mod tests {
         assert_eq!(shown("1"), "1.0");
         assert_eq!(PackLimit::default().to_string(), "0.8");
     }
+
+    /// A server configuration from the flags `extra` beside one pool, as the program
+    /// checks them.
+    fn config_with(dir: &std::path::Path, extra: &[&str]) -> crate::config::Config {
+        use std::os::unix::fs::PermissionsExt;
+        let write = |name: &str, text: &str, mode: u32| {
+            let path = dir.join(name);
+            std::fs::write(&path, text).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            path.display().to_string()
+        };
+        let pool = "name = \"burst\"\nclass = \"burst-host\"\nmax_machines = 2\n\n\
+                    [shape]\ncpu_millis = 8000\nmemory_bytes = 17179869184\n\n\
+                    [capabilities]\narch = \"x86_64\"\n";
+        let mut args = vec![
+            "js-lease-server".to_owned(),
+            "--listen=127.0.0.1:0".to_owned(),
+            format!("--state-file={}", dir.join("state").display()),
+            "--boot=initialise".to_owned(),
+            format!("--token-file={}", write("token", &"t".repeat(40), 0o600)),
+            format!("--agent-pool-config={}", write("pool.toml", pool, 0o644)),
+        ];
+        args.extend(extra.iter().map(|flag| (*flag).to_owned()));
+        let cli = crate::config::Cli::try_parse_from(args).unwrap();
+        crate::config::Config::from_cli(cli).unwrap()
+    }
+
+    /// Asserts that the server's configuration carries `--pack-limit` as given, and
+    /// js-sched's default without it. Catches a flag read and then dropped before the
+    /// configuration the engine is built from.
+    #[test]
+    fn the_configuration_carries_the_flag_or_the_default() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/pack_limit");
+        let dir = js_testkit::dir::TestDir::under(root, "flag");
+        let given = config_with(dir.path(), &["--pack-limit=0.65"]);
+        assert_eq!(given.pack_limit().permille(), 650);
+        let dir = js_testkit::dir::TestDir::under(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/pack_limit"),
+            "default",
+        );
+        assert_eq!(
+            config_with(dir.path(), &[]).pack_limit(),
+            PackLimit::default()
+        );
+    }
 }
