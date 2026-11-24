@@ -1,14 +1,16 @@
 //! `server.cold_cpu_millis` and `server.cold_memory_bytes` read from a configuration file and
 //! reaching the placement engine: the agent side assembled from the file as the server
 //! assembles it, one host of 88 cores and 251 GiB registered, and a pass over a queued job
-//! that names no CPU or memory. And `--cold-memory-bytes-on`, the cold memory of the jobs of an
-//! operating system, over one Mac of 28 cores and 96 GiB. No listener is bound and no
-//! connection is made.
+//! that names no CPU or memory. And `--cold-memory-bytes-on` and `--cold-cpu-millis-on`, the cold
+//! memory and CPU of the jobs of an operating system, over one Mac of 28 cores and 96 GiB. No
+//! listener is bound and no connection is made.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use js_jobs::{Booked, JobId, JobSpec, JobState, Needs, NewJob};
 use js_registry::Credential;
+use js_sched_placer::sizes::{ColdCpuOn, ColdMemoryOn};
 use js_types::{ManualClock, Resources, Timestamp};
 use serde_json::json;
 
@@ -16,7 +18,7 @@ use crate::agent_api::job_rig::{spec, tables};
 use crate::agents::assemble_placed;
 use crate::clock::SharedClock;
 use crate::config::Cli;
-use crate::config::Config;
+use crate::config::{ColdOn, Config};
 use crate::kinds::{Kinds, OwnerOnlyFiles};
 use crate::sched::engine_rig::{GIB, T0};
 use crate::sched::wiring_tests::{JOIN, config_of, config_result, scratch, write};
@@ -69,8 +71,15 @@ fn naming_nothing(class: &str) -> JobSpec {
 /// that names no CPU or memory and whose class has no runs, on its one registered host.
 fn cold_booking(name: &str, extra: &str) -> Booked {
     let dir = scratch(name);
-    let text = file_text(dir.path(), extra);
-    let path = write(dir.path(), "js.toml", &text, 0o644);
+    let (config, shared) = file_config(dir.path(), extra);
+    booking_of(config, &shared, &FARM)
+}
+
+/// The configuration of the file written into `dir` whose `[server]` table ends with `extra`,
+/// read on a clock at [`T0`], and that clock.
+fn file_config(dir: &std::path::Path, extra: &str) -> (Config, SharedClock) {
+    let text = file_text(dir, extra);
+    let path = write(dir, "js.toml", &text, 0o644);
     let shared = SharedClock::new(ManualClock::new(Timestamp::from_millis(T0)));
     let config = Config::from_config_file(
         std::path::Path::new(&path),
@@ -79,7 +88,7 @@ fn cold_booking(name: &str, extra: &str) -> Booked {
         shared.clone(),
     )
     .unwrap();
-    booking_of(config, &shared, &FARM)
+    (config, shared)
 }
 
 /// The agent pool `farm` of `--agent-pool-config`: hosts of 88 cores and 251 GiB.
@@ -393,4 +402,138 @@ fn the_cold_memory_of_an_os_is_refused_out_of_range_twice_and_without_a_pool() {
         .unwrap()
         .to_string();
     assert_eq!(said, "--cold-memory-bytes-on: requires --agent-pool-config");
+}
+
+/// The Mac's cold size this server sets beside a server-wide 4 cores and 16 GiB: one core and
+/// 4 GiB for `macos`.
+const MAC_COLD: [&str; 8] = [
+    "--cold-cpu-millis",
+    "4000",
+    "--cold-memory-bytes",
+    "17179869184",
+    "--cold-memory-bytes-on",
+    "macos=4294967296",
+    "--cold-cpu-millis-on",
+    "macos=1000",
+];
+
+/// Asserts that `--cold-cpu-millis-on macos=1000` makes the server book a `macos` job that
+/// names nothing, of a class with no runs, one core on a Mac in place of `--cold-cpu-millis`'s
+/// four, with the cold memory of `--cold-memory-bytes-on` beside it or the server-wide memory
+/// without it; that an entry for another operating system changes nothing for it; and that on a
+/// Linux farm host a job that names no `os` books the server-wide 4 cores and 16 GiB whether
+/// the Mac's entries are given or not. Catches the flag read and then dropped on the way to the
+/// engine, an entry applied to the jobs of every system, and Mac entries that change what the
+/// Linux hosts book.
+#[test]
+fn the_cold_cpu_of_an_os_is_what_the_server_books_its_class_with_no_runs() {
+    assert_eq!(
+        mac_flag_booking("cold_cpu_on_macos", &MAC_COLD),
+        share(1000, 4 * GIB)
+    );
+    let cpu_only = [&MAC_COLD[..4], &MAC_COLD[6..]].concat();
+    assert_eq!(
+        mac_flag_booking("cold_cpu_on_cpu_only", &cpu_only),
+        share(1000, 16 * GIB)
+    );
+    let on_linux = [&MAC_COLD[..4], &["--cold-cpu-millis-on", "linux=1000"]].concat();
+    assert_eq!(
+        mac_flag_booking("cold_cpu_on_linux", &on_linux),
+        share(4000, 16 * GIB)
+    );
+    for (name, extra) in [
+        ("cold_cpu_on_farm_none", &MAC_COLD[..4]),
+        ("cold_cpu_on_farm_macs", &MAC_COLD[..]),
+    ] {
+        assert_eq!(
+            flag_booking(name, extra),
+            share(4000, 16 * GIB),
+            "{extra:?}"
+        );
+    }
+}
+
+/// Asserts that a `--cold-cpu-millis-on` value that is not `OS=MILLIS`, names no system, or
+/// gives millicores under 250, over 4294967295 or that are not a whole number is refused naming
+/// the flag and what is wrong; that a system given twice is refused at start; and that the flag
+/// without `--agent-pool-config` is refused naming it. Catches a cold CPU under the
+/// estimator's least, one entry silently taking the place of another, and a flag accepted
+/// where nothing reads it.
+#[test]
+fn the_cold_cpu_of_an_os_is_refused_out_of_range_twice_and_without_a_pool() {
+    let range = "is not from 250 (a quarter core) to 4294967295";
+    for (bad, why) in [
+        ("macos", "must be OS=MILLIS, such as macos=1000".to_owned()),
+        ("=1000", "the operating system is empty".to_owned()),
+        ("macos=249", format!("macos: 249 {range}")),
+        ("macos=4294967296", format!("macos: 4294967296 {range}")),
+        (
+            "macos=1000m",
+            "\"1000m\" is not a whole number of millicores".to_owned(),
+        ),
+    ] {
+        let given = format!("--cold-cpu-millis-on={bad}");
+        let said = Cli::try_parse_from(["js-lease-server", &given])
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            said.contains("'--cold-cpu-millis-on <OS=MILLIS>'"),
+            "{bad}: {said}"
+        );
+        assert!(said.contains(&why), "{bad}: {said}");
+    }
+    let dir = scratch("cold_cpu_on_twice");
+    let twice = [
+        "--cold-cpu-millis-on",
+        "macos=1000",
+        "--cold-cpu-millis-on",
+        "macos=2000",
+    ];
+    let said = config_result(dir.path(), MAC_POOL, &twice, "initialise")
+        .err()
+        .unwrap()
+        .to_string();
+    assert_eq!(said, "--cold-cpu-millis-on: macos is given twice");
+
+    let dir = scratch("cold_cpu_on_no_pool");
+    let token = write(dir.path(), "token", &"t".repeat(40), 0o600);
+    let state = dir.path().join("leases.toml").into_os_string();
+    let args: Vec<std::ffi::OsString> = vec![
+        "js-lease-server".into(),
+        "--state-file".into(),
+        state,
+        "--boot".into(),
+        "initialise".into(),
+        "--token-file".into(),
+        token,
+        "--cold-cpu-millis-on".into(),
+        "macos=1000".into(),
+    ];
+    let said = Config::from_cli(Cli::try_parse_from(args).unwrap())
+        .err()
+        .unwrap()
+        .to_string();
+    assert_eq!(said, "--cold-cpu-millis-on: requires --agent-pool-config");
+}
+
+/// Asserts that a configuration file's `cold_cpu_millis_on` and `cold_memory_bytes_on` reach
+/// the agent side the server assembles, each as the file gives it, and that a file that gives
+/// neither leaves both empty. Catches the file's per-system CPU read and then dropped.
+#[test]
+fn the_file_s_cold_cpu_and_memory_of_an_os_reach_the_agent_side() {
+    let extra = "cold_cpu_millis_on = { macos = 1000 }\n\
+                 cold_memory_bytes_on = { macos = 4294967296 }";
+    let dir = scratch("cold_on_file");
+    let (config, _) = file_config(dir.path(), extra);
+    let cpu = BTreeMap::from([("macos".to_owned(), 1000)]);
+    let memory = BTreeMap::from([("macos".to_owned(), 4 * GIB)]);
+    let both = ColdOn {
+        memory: ColdMemoryOn::new(memory),
+        cpu: ColdCpuOn::new(cpu),
+    };
+    assert_eq!(config.agents.cold_on, both);
+    let dir = scratch("cold_on_file_none");
+    let (config, _) = file_config(dir.path(), "");
+    assert_eq!(config.agents.cold_on, ColdOn::default());
 }
