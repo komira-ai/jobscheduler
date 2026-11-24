@@ -189,6 +189,7 @@ fn a_pass_logs_one_line_per_host_and_counts_each_refusal() {
     let on = JobHosts {
         open: &open,
         hello: &hello,
+        tainted: &std::collections::BTreeSet::new(),
         whole: None,
     };
     let told = Told::default();
@@ -279,6 +280,7 @@ fn a_host_full_by_memory_bookings_is_refused_for_memory_and_says_so() {
     let on = JobHosts {
         open: &open,
         hello: &hello,
+        tainted: &std::collections::BTreeSet::new(),
         whole: None,
     };
     let told = Told::default();

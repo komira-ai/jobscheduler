@@ -112,6 +112,8 @@ pub struct Engine {
     whole_jobs: BTreeMap<js_jobs::JobId, OperationId>,
     /// The whole-node settings the scheduler has now, if it has any.
     whole_settings: Option<js_registry::WholeNodeConfig>,
+    /// The tainted hosts the engine cordoned in the scheduler ([`Engine::sync_taints`]).
+    tainted: BTreeSet<HostId>,
     /// The job leases the engine held on each host when the scheduler last accepted a load
     /// reading of it: the leases the next reading can cover. A host whose reading the
     /// scheduler dropped has none.
@@ -148,6 +150,7 @@ impl Engine {
             jobs: BTreeMap::new(),
             whole_jobs: BTreeMap::new(),
             whole_settings: None,
+            tainted: BTreeSet::new(),
             at_reading: BTreeMap::new(),
             sizes: JobSizes::with_cold(settings.cold).with_curves(settings.curves),
             refused: refusals::Book::default(),
@@ -206,6 +209,9 @@ impl Engine {
             return;
         }
         let _ = self.sched.forget_worker(&map::worker(host));
+        // Forgetting the worker drops its cordon: a host that comes back still tainted is
+        // cordoned again by the next pass.
+        self.tainted.remove(host);
         self.at_reading.remove(host);
         self.hosts.remove(host);
     }
