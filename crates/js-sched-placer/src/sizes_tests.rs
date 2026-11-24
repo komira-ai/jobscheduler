@@ -694,6 +694,7 @@ pub(super) fn pass(placer: &SchedPlacer, tables: &Tables) -> Vec<JobId> {
     let hosts = JobHosts {
         open: &open,
         hello: &hello,
+        tainted: &std::collections::BTreeSet::new(),
         whole: None,
     };
     placer

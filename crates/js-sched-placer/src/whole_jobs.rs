@@ -13,8 +13,11 @@
 //! 2. Unmarks every stored mark whose job is not a queued whole-host job (the table holds
 //!    none in normal operation: a cancel, a placement and a failed prepare delete the mark in
 //!    the commit that writes the job).
-//! 3. Cancels the operation of every job that is no longer a queued whole-host job, and of
-//!    one the scheduler finished.
+//! 3. Cordons in the scheduler each tainted host ([`WholeJobs::tainted`]) and uncordons each
+//!    one whose taint was cleared, and puts back every grant a job holds on a tainted host,
+//!    keeping its queue time: a tainted host never becomes open, so a job granted it would
+//!    wait there for ever while another host could take it. Then cancels the operation of
+//!    every job that is no longer a queued whole-host job, and of one the scheduler finished.
 //! 4. Queues each queued whole-host job the engine does not queue yet, as a whole-machine
 //!    request held to the time the job was submitted, with the bars its row holds (its failed
 //!    prepares, and the hosts that refused its start as held) and the mark the table holds
@@ -68,6 +71,11 @@ pub struct WholeJobs<'a> {
     pub hello: &'a BTreeSet<HostId>,
     /// The hosts that may take a job now (the pass's open hosts).
     pub open: &'a BTreeSet<HostId>,
+    /// The hosts a taint closes until it is cleared (a refusal `host-unsafe`, a host job's
+    /// run), which no pass offers: they are cordoned in the engine's scheduler, so a
+    /// whole-host job is neither marked nor granted there, and a grant a job holds there is
+    /// put back. A host closed only for a passing cause (a release under way) is not one.
+    pub tainted: &'a BTreeSet<HostId>,
     /// The pool's whole-node settings; `None`: the pool has none, and no whole-host job is
     /// placed.
     pub settings: Option<&'a WholeNodeConfig>,
@@ -122,6 +130,7 @@ impl Engine {
         if self.whole_settings.is_none() {
             return steps;
         }
+        self.sync_taints(input.tainted, now);
         self.cancel_jobs(&wanted);
         steps.extend(self.queue_jobs(input, &queue, now));
         self.whole_tick(now);
@@ -503,3 +512,7 @@ pub fn failed_prepare(
 #[cfg(test)]
 #[path = "whole_jobs_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "whole_jobs_taint_tests.rs"]
+mod taint_tests;

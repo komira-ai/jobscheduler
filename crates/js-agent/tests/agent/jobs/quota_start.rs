@@ -334,6 +334,7 @@ fn server_admits(hello: &Hello) -> usize {
     let hosts = JobHosts {
         open: &open,
         hello: &said_hello,
+        tainted: &std::collections::BTreeSet::new(),
         whole: None,
     };
     let placed = placer.place_jobs_with(&jobs, &hosts, (&NoStarts, &Unread));

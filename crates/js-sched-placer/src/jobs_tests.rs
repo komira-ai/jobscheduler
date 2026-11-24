@@ -185,6 +185,7 @@ impl Rig {
         let on = JobHosts {
             open: &open,
             hello: &hello,
+            tainted: &std::collections::BTreeSet::new(),
             whole,
         };
         let jobs = &self.tables.jobs;
@@ -837,6 +838,7 @@ fn a_job_with_no_exec_mode_is_placed_on_a_host_of_either() {
     let on = JobHosts {
         open: &open,
         hello: &hello,
+        tainted: &std::collections::BTreeSet::new(),
         whole: None,
     };
     let recorder = Recorder::default();
@@ -856,6 +858,7 @@ fn a_job_with_no_exec_mode_is_placed_on_a_host_of_either() {
     let on = JobHosts {
         open: &open,
         hello: &hello,
+        tainted: &std::collections::BTreeSet::new(),
         whole: None,
     };
     rig.placer.heard(&host("a"), None);

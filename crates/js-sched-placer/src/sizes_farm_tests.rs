@@ -484,6 +484,7 @@ fn pass_by_load(placer: &SchedPlacer, tables: &Tables) -> Vec<JobId> {
     let hosts = JobHosts {
         open: &open,
         hello: &hello,
+        tainted: &std::collections::BTreeSet::new(),
         whole: None,
     };
     placer
