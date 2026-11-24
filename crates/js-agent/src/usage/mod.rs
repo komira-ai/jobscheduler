@@ -19,8 +19,10 @@
 //! Delivery is at least once. When the server processed a beat but the reply was lost (a
 //! transport error), the agent cannot know, keeps the minutes and sends them again; the
 //! server dedupes by (lease, minute). Dropped minutes (too old, or refused) are logged by
-//! the worker with their count, not sent. Without `--actions-cgroup` there is no
-//! collector and the heartbeat carries no load.
+//! the worker with their count, not sent. On Linux, without `--actions-cgroup` there is no
+//! collector and the heartbeat carries no load. A Mac, which has no control groups, samples
+//! its host's own counters ([`HostSampler`], `usage/macos.rs`): the load is the host's busy
+//! time and non-file memory, with no lease minutes.
 //!
 //! The window is the heartbeat interval of the current session: when a later session is
 //! welcomed with another interval, the sampling and the binner's gap rule follow it.
@@ -53,7 +55,11 @@ mod binner;
 mod cgroup;
 mod clock;
 mod collect;
+mod flags;
 mod host;
+mod host_sampler;
+#[cfg(target_os = "macos")]
+pub mod macos;
 mod outbox;
 mod sampler;
 mod wire;
@@ -68,11 +74,13 @@ pub use cgroup::{
 };
 pub use clock::{MINUTE_USEC, MonotonicClock, UsageClock};
 pub use collect::Collector;
+pub use flags::SampleFlags;
 pub use host::{
     HostCpu, PROC_CPU_PRESSURE, PROC_MEMINFO, PROC_STAT, host_cpu, host_nonfile,
     parse_meminfo_nonfile_bytes, parse_proc_stat_busy_usec,
 };
+pub use host_sampler::{CpuTicks, HostSampler, HostStatistics, VmPages};
 pub use js_agent_usage::SecondRates;
 pub use outbox::{Outbox, Reading};
-pub use sampler::{LeaseCgroup, LeaseSample, Sample, SampleError, Sampler};
+pub use sampler::{LeaseCgroup, LeaseSample, NodeSampler, Sample, SampleError, Sampler};
 pub use wire::to_wire;

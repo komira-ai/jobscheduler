@@ -2,7 +2,7 @@
 //! worker is made over is the native one, its runtime is the real one over a pool of a fake
 //! host and a fake launcher (made by a machine of this module, which gives a worker the
 //! runtime a Mac agent with Full Disk Access would make), its cleanup is the native checks,
-//! and it says it reports no load.
+//! and its load is the Mac host's, with no line at start that says the heartbeat carries none.
 
 use std::sync::Arc;
 
@@ -81,8 +81,9 @@ fn over_accounts(dir: &Scratch) -> (OverAccounts, Arc<FakeAccounts>, Arc<FakeLau
 /// published as a result with the exit code and what the program printed; the account the run
 /// was lent is retired (its record and home gone) and the scratch directory goes; an
 /// acknowledgement drops the run. It also asserts that a worker over the native backend says
-/// at start that the heartbeat carries no load. It catches a native agent whose worker keeps
-/// a result from the server, or leaves the account.
+/// nothing at start of a load it cannot carry: the Mac host's counters are its load. It
+/// catches a native agent whose worker keeps a result from the server, or leaves the account,
+/// and one whose heartbeat still carries no load.
 #[test]
 fn a_native_result_stays_published_until_it_is_acknowledged() {
     let dir = Scratch::new("native-worker");
@@ -94,9 +95,7 @@ fn a_native_result_stays_published_until_it_is_acknowledged() {
     let worker = Worker::start(plan).unwrap();
     let lines = worker.take_lines();
     assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("native runs report no load")),
+        !lines.iter().any(|line| line.starts_with("usage:")),
         "{lines:?}"
     );
 

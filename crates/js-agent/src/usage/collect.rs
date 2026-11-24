@@ -16,11 +16,16 @@
 //!   learn from it. They are named in the `clocks`, so the server knows how long they ran.
 //! - **A run that ended** since the last run has its open minute closed, and is reported
 //!   once more as a minute (never as a covered lease).
+//! - **A whole-host reading** (a Mac's, [`NodeSampler::covers_every_lease`]) has no lease of
+//!   its own to read: it covers every lease that was running at the last reading published and
+//!   still is, since the host's figures hold all of what they used. The server then charges
+//!   them by that measurement, not by their bookings on top of it.
 //! - **`seq`** counts the samples of this process from 1; a new process starts again at 1,
 //!   which the server reads as a new series.
 //! - **The seconds** (with `--host-second-samples`): [`Collector::step`], which the worker calls
 //!   after every step in place of `due`, reads the whole host's `/proc/stat` and `/proc/pressure/cpu`
-//!   (through [`super::host_cpu`], not the actions group's files)
+//!   (through [`super::host_cpu`], not the actions group's files; on a Mac the host's CPU load,
+//!   [`super::HostSampler`])
 //!   when at least a second has passed since the last such read, and keeps the busy CPU and the
 //!   CPU pressure of each interval (`js_agent_usage::Seconds`), the newest 16 of each. A run
 //!   publishes them in its reading and starts again; they are sent once, so a beat that fails
@@ -37,19 +42,21 @@ use js_agent_wire::limits::{MAX_LOAD_MINUTES, MAX_LOAD_SECONDS};
 use super::binner::Binner;
 use super::clock::UsageClock;
 use super::outbox::{Outbox, Reading};
-use super::sampler::{LeaseCgroup, SampleError, Sampler};
+use super::sampler::{LeaseCgroup, NodeSampler, SampleError, Sampler};
 use crate::facts::FileReader;
 use crate::lifecycle::RunningLease;
 
 /// Samples the node on the worker's thread. See the [module](self).
 pub struct Collector {
-    sampler: Sampler<Box<dyn FileReader>>,
+    sampler: Box<dyn NodeSampler>,
     clock: Box<dyn UsageClock>,
     outbox: Arc<Outbox>,
     binner: Option<Binner>,
     seq: u64,
     last: Option<u64>,
     tracked: BTreeSet<String>,
+    /// The leases running at the last reading that was published.
+    read: BTreeSet<String>,
     unreadable: Option<SampleError>,
     /// How many dropped minutes the operator has been told of.
     told_dropped: u64,
@@ -68,17 +75,29 @@ impl Collector {
         clock: Box<dyn UsageClock>,
         outbox: Arc<Outbox>,
     ) -> Self {
+        Self::with_sampler(Box::new(Sampler::new(files, actions_dir)), clock, outbox)
+    }
+
+    /// A collector of what `sampler` reads (the cgroup tree on Linux, the host's own counters
+    /// on a Mac), timed by `clock` and publishing in `outbox`, which also says whether it
+    /// takes the per-second series.
+    pub fn with_sampler(
+        sampler: Box<dyn NodeSampler>,
+        clock: Box<dyn UsageClock>,
+        outbox: Arc<Outbox>,
+    ) -> Self {
         Self {
             seconds: outbox
                 .host_seconds()
                 .then(|| Seconds::new(MAX_LOAD_SECONDS)),
-            sampler: Sampler::new(files, actions_dir),
+            sampler,
             clock,
             outbox,
             binner: None,
             seq: 0,
             last: None,
             tracked: BTreeSet::new(),
+            read: BTreeSet::new(),
             unreadable: None,
             told_dropped: 0,
         }
@@ -173,6 +192,12 @@ impl Collector {
             binner.lease_ended(ended);
         }
         self.tracked = alive.iter().map(|id| (*id).to_owned()).collect();
+        // A whole-host reading holds every lease that ran since the last one.
+        let whole: Vec<String> = alive
+            .iter()
+            .filter(|id| self.read.contains(**id))
+            .map(|id| (*id).to_owned())
+            .collect();
         let watched: Vec<LeaseCgroup> = running
             .iter()
             .filter(|lease| !lease.adopted)
@@ -189,7 +214,13 @@ impl Collector {
             Err(why) => return self.cannot_read(why),
         };
         self.unreadable = None;
-        let covered = binner.observe(&sample).covered;
+        let observed = binner.observe(&sample).covered;
+        let covered = if self.sampler.covers_every_lease() {
+            whole
+        } else {
+            observed
+        };
+        self.read = self.tracked.clone();
         let minutes = binner.take(MAX_LOAD_MINUTES, sample.mono_usec);
         sample.leases.clear();
         self.seq += 1;

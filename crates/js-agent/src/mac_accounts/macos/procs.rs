@@ -14,11 +14,18 @@ const SZOMB: u32 = 5;
 
 /// The live processes whose effective or real uid is `uid`.
 pub(super) fn live_processes(uid: u32) -> io::Result<Vec<LiveProcess>> {
+    Ok(pids_of(uid)?.into_iter().filter_map(live).collect())
+}
+
+/// The pids of the processes whose effective or real uid is `uid`, each once; a zombie (one
+/// that has exited and waits to be reaped) among them. Also what the usage of a native run is
+/// sampled from (`crate::mac_usage`).
+pub(crate) fn pids_of(uid: u32) -> io::Result<BTreeSet<libc::pid_t>> {
     let mut pids = BTreeSet::new();
     for filter in [PROC_UID_ONLY, PROC_RUID_ONLY] {
         pids.extend(list_pids(filter, uid)?);
     }
-    Ok(pids.into_iter().filter_map(live).collect())
+    Ok(pids)
 }
 
 /// The pids `libproc` lists for `filter` (by effective or real uid) and `uid`.

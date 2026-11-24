@@ -271,6 +271,7 @@ fn placed_in(
         require_host_credential,
         cpu_slack,
         cold,
+        cold_memory_on,
         curves,
         max_lease_wall,
         job_limits,
@@ -293,7 +294,13 @@ fn placed_in(
     // memory the pool's percent says (every pool's is the first's: `check_more`); the
     // registry books the whole shape.
     let (pool, memory) = split(pool);
-    let placer = placer(max_lease_wall, cpu_slack, (memory, cold, curves), clock);
+    let placer = placer(
+        max_lease_wall,
+        cpu_slack,
+        (memory, cold, curves),
+        cold_memory_on,
+        clock,
+    );
     let (later, more_tokens): (Vec<_>, Vec<_>) = more
         .into_iter()
         .map(|more| (split(more.pool).0, more.tokens))

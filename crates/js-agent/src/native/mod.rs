@@ -156,7 +156,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use js_agent_wire::{
-    BUNDLE_PROGRAM_PREFIX, HostPort, InputRef, LogReport, LogTail, NativeSpec, refusal,
+    BUNDLE_PROGRAM_PREFIX, CpuSeries, HostPort, InputRef, JobUsage, LogReport, LogTail,
+    MemorySeries, NativeSpec, refusal,
 };
 use js_mac_pool::seatbelt::{AbsPath, MAX_DENIED_PORTS, Net, ReadModel};
 use js_mac_session::full_disk_access::FullDiskAccess;
@@ -172,6 +173,9 @@ use crate::mac_accounts::{Pool, Retired};
 use crate::mac_listen::{ListenerTable, MacListeners};
 use crate::mac_supervisor::Launcher;
 use crate::mac_sweep::{MacTable, ProcessTable};
+use crate::mac_usage::macos::MacProcesses;
+use crate::mac_usage::{ProcessUsage, Series};
+use crate::usage::{MonotonicClock, UsageClock as _};
 
 pub use accounts::Accounts;
 pub use files::HandOver;
@@ -278,6 +282,12 @@ pub struct NativeRuntime {
     /// How many polls the self-test makes for its run to end; none is the default
     /// ([`NativeRuntime::with_self_test_polls`] sets it for tests).
     self_test_polls: Option<u32>,
+    /// What a run's processes are sampled from at each poll ([`crate::mac_usage`]).
+    processes: Arc<dyn ProcessUsage>,
+    /// The series each run records (`--cpu-series`, `--memory-series`).
+    series: Series,
+    /// The monotonic clock the samples are timed by, in microseconds.
+    mono_us: Clock,
 }
 
 /// Finds an account's own per-user temporary and cache folders (its uid's, below
@@ -287,6 +297,12 @@ pub type OwnFolders =
 
 /// A wall clock: milliseconds since the Unix epoch.
 pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
+
+/// The system's monotonic clock, in microseconds since the runtime was made.
+fn system_mono_clock() -> Clock {
+    let clock = MonotonicClock::new();
+    Arc::new(move || clock.now_usec())
+}
 
 /// The system's wall clock.
 fn system_clock() -> Clock {
@@ -374,6 +390,9 @@ impl NativeRuntime {
             committed: BTreeMap::new(),
             own_folders: None,
             self_test_polls: None,
+            processes: Arc::new(MacProcesses::new()),
+            series: Series::default(),
+            mono_us: system_mono_clock(),
         })
     }
 
@@ -441,6 +460,22 @@ impl NativeRuntime {
             new_session: false,
             ..self
         }
+    }
+
+    /// The same runtime, sampling the usage of a run's processes from `processes` in place of
+    /// the Mac's own. For tests, whose runs are the test user's own processes; an agent never
+    /// calls it.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_process_usage(self, processes: Arc<dyn ProcessUsage>) -> Self {
+        Self { processes, ..self }
+    }
+
+    /// The same runtime, its runs recording the series `series` names (`--cpu-series`,
+    /// `--memory-series`) and sending them with their results.
+    #[must_use]
+    pub fn with_series(self, series: Series) -> Self {
+        Self { series, ..self }
     }
 
     /// The same runtime, sweeping a run's processes from `table` in place of the Mac's own.
@@ -660,6 +695,27 @@ impl Runtime for NativeRuntime {
 
     fn logs_report(&mut self, id: &RunHandle) -> Option<LogReport> {
         self.runs.get(&id.0).and_then(|run| run.logs.report())
+    }
+
+    /// What the run's processes used: from the samples of the polls and the supervisor's wait
+    /// of the job (`crate::mac_usage`); none for a run this process did not start, or one
+    /// with neither.
+    fn usage(&mut self, id: &RunHandle) -> Option<JobUsage> {
+        let job = self.runs.get(&id.0)?.job.as_ref()?;
+        job.usage.usage(job.reaped)
+    }
+
+    /// The run's CPU second by second, with `--cpu-series`.
+    fn cpu_series(&mut self, id: &RunHandle) -> Option<CpuSeries> {
+        let job = self.runs.get(&id.0)?.job.as_ref()?;
+        job.usage.cpu_series((self.mono_us)(), job.reaped)
+    }
+
+    /// The run's memory (the footprint of its processes) second by second, with
+    /// `--memory-series`.
+    fn memory_series(&mut self, id: &RunHandle) -> Option<MemorySeries> {
+        let job = self.runs.get(&id.0)?.job.as_ref()?;
+        job.usage.memory_series((self.mono_us)())
     }
 
     /// What the removal of `id` committed to the put ingest (`native/put.rs`), once.

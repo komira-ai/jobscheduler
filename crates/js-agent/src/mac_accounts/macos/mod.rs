@@ -9,7 +9,7 @@
 
 mod as_account;
 mod directory;
-mod procs;
+pub(crate) mod procs;
 #[cfg(test)]
 mod root_tests;
 mod sys;

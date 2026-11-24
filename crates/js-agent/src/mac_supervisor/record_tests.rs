@@ -9,8 +9,8 @@ use std::process::ExitStatus;
 use js_testkit::dir::TestDir;
 
 use super::{
-    EXIT, Ended, ExitRecord, READY, Ready, Records, Step, from_status, parse_exit, parse_ready,
-    status_of, whole,
+    EXIT, Ended, ExitRecord, JobRusage, READY, Ready, Records, Step, from_status, parse_exit,
+    parse_ready, status_of, whole,
 };
 use crate::mac_supervisor::status;
 
@@ -47,6 +47,7 @@ fn every_end() -> Vec<ExitRecord> {
             ended,
             job_pid: Some(4321),
             asid: Some(77),
+            usage: None,
         })
         .collect()
 }
@@ -89,6 +90,7 @@ fn records_round_trip_and_partial_text_reads_as_not_written() {
         },
         job_pid: None,
         asid: None,
+        usage: None,
     };
     assert_eq!(
         serde_json::to_string(&failed).unwrap(),
@@ -116,6 +118,7 @@ fn the_job_status_and_setup_failure_are_told_apart() {
             ended,
             job_pid: None,
             asid: None,
+            usage: None,
         })
     };
     assert_eq!(of(Ended::Exited(125)), 125);
@@ -185,4 +188,37 @@ fn a_short_write_is_an_error() {
     let short = whole(12, 40).unwrap_err();
     assert_eq!(short.kind(), std::io::ErrorKind::WriteZero);
     assert_eq!(short.to_string(), "wrote 12 of the record's 40 bytes");
+}
+
+/// Asserts that an exit record with the job's usage writes it as `usage` and reads it back,
+/// and that a record without the field, as a supervisor from before it writes, reads with no
+/// usage and the rest unchanged. Catches a usage lost on the way to the agent, and an agent
+/// that refuses the record of a supervisor that is older or newer than itself.
+#[test]
+fn an_exit_record_carries_the_job_s_usage_and_one_without_it_still_reads() {
+    let used = ExitRecord {
+        ended: Ended::Exited(0),
+        job_pid: Some(12),
+        asid: Some(77),
+        usage: Some(JobRusage {
+            cpu_usec: 1_250_000,
+            max_rss_bytes: 6 << 20,
+        }),
+    };
+    let text = serde_json::to_string(&used).unwrap();
+    assert_eq!(
+        text,
+        r#"{"ended":{"how":"exited","value":0},"job_pid":12,"asid":77,"usage":{"cpu_usec":1250000,"max_rss_bytes":6291456}}"#
+    );
+    assert_eq!(parse_exit(&text), Some(used.clone()));
+    let older = r#"{"ended":{"how":"exited","value":0},"job_pid":12,"asid":77}"#;
+    let read = parse_exit(older).unwrap();
+    assert_eq!(read.usage, None);
+    assert_eq!(
+        read,
+        ExitRecord {
+            usage: None,
+            ..used
+        }
+    );
 }

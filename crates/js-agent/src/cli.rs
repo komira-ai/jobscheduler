@@ -137,6 +137,10 @@ pub struct Cli {
     /// `--mount-provider-wait`), which both builds take.
     #[command(flatten)]
     pub providers: crate::lifecycle::ProviderFlags,
+    /// What the agent records beyond each job's usage (`--cpu-series`, `--memory-series`,
+    /// `--host-second-samples`), which both builds take.
+    #[command(flatten)]
+    pub samples: crate::usage::SampleFlags,
     /// Bound each run's disk with a project quota on the scratch root's file system. At
     /// start the agent probes the root and refuses to start unless the file system
     /// enforces project quota; then it advertises `scratch-quota=project` and

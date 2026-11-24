@@ -47,6 +47,7 @@ use crate::bundle::Pinned;
 use crate::lifecycle::{Body, RunHandle, RunSpec, Runtime, RuntimeError, Status, check_run_env};
 use crate::mac_accounts::{Account, Pool};
 use crate::mac_supervisor::{LaunchRequest, SuperviseSpec};
+use crate::mac_usage::RunUsage;
 
 /// The names of the steps of a start, in the order they are done.
 pub const STEPS: [&str; 8] = [
@@ -329,6 +330,8 @@ impl NativeRuntime {
                 ready,
                 kill_after: None,
                 sweeping: false,
+                usage: RunUsage::starting((self.mono_us)(), self.series),
+                reaped: None,
             }),
         })
     }

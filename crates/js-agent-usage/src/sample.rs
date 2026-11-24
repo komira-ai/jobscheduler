@@ -19,15 +19,19 @@ pub struct Sample {
     /// The clock reading taken right after the CPU counters.
     pub mono_usec: u64,
     /// The actions cgroup's `usage_usec`. It is the cgroup's own counter, never a sum of
-    /// the leases', because a removed descendant's usage stays in its parent's counter.
+    /// the leases', because a removed descendant's usage stays in its parent's counter. A
+    /// host with no control groups (a Mac) gives its whole busy time, as `host_cpu_usec`.
     pub cpu_usage_usec: u64,
-    /// The whole host's CPU busy time since boot, in microseconds, from `/proc/stat`: every
-    /// process of the host counts, the jobs and everything else. A counter that only grows.
+    /// The whole host's CPU busy time since boot, in microseconds, from `/proc/stat` (on a
+    /// Mac its CPU load ticks): every process of the host counts, the jobs and everything
+    /// else. A counter that only grows.
     pub host_cpu_usec: u64,
-    /// The actions cgroup's `memory.current` less its `inactive_file`.
+    /// The actions cgroup's `memory.current` less its `inactive_file`; on a host with no
+    /// control groups (a Mac) its whole non-file memory, as `host_nonfile_bytes`.
     pub working_set_bytes: u64,
     /// The whole host's non-file memory, in bytes: `MemTotal - MemFree - (Buffers + Cached -
-    /// Shmem)` of `/proc/meminfo`. `None` when that file cannot be read or lacks a line; the
+    /// Shmem)` of `/proc/meminfo` (on a Mac its anonymous pages less the purgeable ones, its
+    /// wired pages and the compressor's). `None` when that file cannot be read or lacks a line; the
     /// rest of the sample stands.
     pub host_nonfile_bytes: Option<u64>,
     /// The actions cgroup's `active_file`.

@@ -39,6 +39,7 @@ mod runtime;
 mod settings;
 mod silence;
 mod steps;
+mod usage;
 mod worker;
 mod xcode;
 
@@ -50,7 +51,7 @@ use std::sync::Arc;
 
 use js_agent::lifecycle::{Body, RunHandle, RunSpec, Runtime, Status};
 use js_agent::mac_accounts::{Places, Pool, Settings, Slots};
-use js_agent::mac_listen::{Listener, ListenerTable};
+use js_agent::mac_usage::Series;
 use js_agent::native::{Accounts, Ceiling, HandOver, NativeConfig, NativeRuntime};
 use js_agent_wire::{Isolation, NativeSpec, NetworkLevel};
 use js_mac_pool::seatbelt::{AbsPath, ReadModel};
@@ -208,10 +209,12 @@ impl Rig {
         let pool = open_pool(&dir, &settings, &accounts);
         let mut config = config(&dir, &settings);
         adjust(&mut config, &dir);
+        // The runs are the test user's own processes: their usage is sampled from a fake
+        // that finds none, so no test reads (or waits on) every process of the user.
         let rt = NativeRuntime::over(Some(pool.clone()), launcher.clone(), config, TERM)
             .unwrap()
             .with_process_table(end::GroupTable::new(launcher.clone()))
-            .with_listener_table(no_listeners());
+            .with_process_usage(Arc::new(usage::Fixed::none()));
         let rt = match slots {
             1 => rt,
             _ => rt.with_hand_over(keep_owner()),
@@ -239,6 +242,13 @@ impl Rig {
         Self { rt, ..self }
     }
 
+    /// The same rig, its runtime sampling its runs' processes from `processes` and recording
+    /// the series `series` names.
+    pub fn sampling(self, processes: Arc<usage::Fixed>, series: Series) -> Self {
+        let rt = self.rt.with_process_usage(processes).with_series(series);
+        Self { rt, ..self }
+    }
+
     /// The same rig, its runtime holding `xcodes`: a start may name the build of one.
     pub fn holding(self, xcodes: Vec<js_agent::xcode::Xcode>) -> Self {
         let rt = self.rt.with_xcodes(xcodes);
@@ -253,7 +263,7 @@ impl Rig {
         NativeRuntime::over(Some(pool), self.launcher.clone(), config, TERM + 1)
             .unwrap()
             .with_process_table(end::GroupTable::new(self.launcher.clone()))
-            .with_listener_table(no_listeners())
+            .with_process_usage(Arc::new(usage::Fixed::none()))
     }
 
     /// A run of `native`, with its scratch directory made as the lifecycle makes it.
