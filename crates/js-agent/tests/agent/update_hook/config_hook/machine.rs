@@ -23,6 +23,8 @@ use crate::support::Scratch;
 struct Tree {
     _files: Scratch,
     params: Params,
+    /// A staged release directory, for `prepare`.
+    staged: std::path::PathBuf,
 }
 
 impl Tree {
@@ -44,6 +46,7 @@ impl Tree {
             );
         }
         Tree {
+            staged: files.path("staged"),
             _files: files,
             params: Params::parse(&params).unwrap(),
         }
@@ -67,7 +70,7 @@ impl Tree {
             own_host_id: &own_host_id,
             ..Machine::system()
         };
-        run_on(step, &self.params, &machine, units, &Ticks::default())
+        run_on(step, None, &self.params, &machine, units, &Ticks::default())
     }
 }
 
@@ -190,19 +193,57 @@ fn over_a_real_server_cutover_records_the_session_and_verify_waits_for_another()
 }
 
 /// Asserts that, on the machine's own ports, `prepare` succeeds without asking the unit manager
-/// or the lease server for anything.
+/// or the lease server for anything, and keeps the file the staged package places at its path
+/// below the machine's root `/`; that a `rollback` then puts that file back; and that a
+/// `prepare` without the staged release directory is `bad_args` and keeps nothing.
 ///
-/// Catches a machine whose ports are built to do work at the start of a step that does none.
+/// Catches a machine whose ports are built to do work at the start of a step that does none,
+/// one that maps the staged tree below another root than `/`, and one that runs `prepare` with
+/// no package to read.
 #[test]
-fn on_the_machine_prepare_runs_without_touching_the_unit_or_the_server() {
+fn on_the_machine_prepare_keeps_what_the_staged_package_replaces_below_the_root() {
     let tree = Tree::new("config-machine-prepare", UNIT);
     let machine = Machine {
         stat: &as_root,
         ..Machine::system()
     };
-    let done = run_step(Step::Prepare, &tree.params, &machine);
+    let done = run_step(Step::Prepare, None, &tree.params, &machine);
+    assert_eq!(done.outcome, Outcome::Failure);
+    assert_eq!(done.report.reason, Some(Reason::BadArgs));
+    assert_eq!(
+        done.report.detail.as_deref(),
+        Some("prepare needs the staged release directory")
+    );
+    assert!(!tree.params.state_dir.exists());
+
+    tree.flags(&["--server=https://before.example:7300"]);
+    let flags = fs::canonicalize(&tree.params.flags_file).unwrap();
+    let placed = tree
+        .staged
+        .join("tree")
+        .join(flags.strip_prefix("/").unwrap());
+    fs::create_dir_all(placed.parent().unwrap()).unwrap();
+    fs::write(&placed, "--server=https://after.example:7300\n").unwrap();
+    let done = run_step(Step::Prepare, Some(&tree.staged), &tree.params, &machine);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
     assert!(tree.params.state_dir.is_dir());
+
+    fs::copy(&placed, &flags).unwrap();
+    let done = run_step(Step::Rollback, None, &tree.params, &machine);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    let kept = tree.params.state_dir.join("kept");
+    assert_eq!(
+        done.report.detail,
+        Some(format!(
+            "put back as before the update: {}; cutover restarted nothing: the unit is left as it is; the copy stays in {}, as removing the package deletes the files it placed",
+            flags.display(),
+            kept.display()
+        ))
+    );
+    assert_eq!(
+        fs::read_to_string(&flags).unwrap(),
+        "--server=https://before.example:7300\n"
+    );
 }
 
 /// Asserts that, on the machine's own ports, `cleanup` with no record left succeeds without
@@ -216,7 +257,7 @@ fn on_the_machine_a_cleanup_with_no_record_has_finished() {
         stat: &as_root,
         ..Machine::system()
     };
-    let done = run_step(Step::Cleanup, &tree.params, &machine);
+    let done = run_step(Step::Cleanup, None, &tree.params, &machine);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
     assert_eq!(
         done.report.detail.as_deref(),
@@ -236,7 +277,7 @@ fn on_the_machine_a_rollback_with_nothing_restarted_leaves_the_unit_alone() {
         stat: &as_root,
         ..Machine::system()
     };
-    let done = run_step(Step::Rollback, &tree.params, &machine);
+    let done = run_step(Step::Rollback, None, &tree.params, &machine);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
     assert_eq!(
         done.report.detail.as_deref(),

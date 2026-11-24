@@ -1,6 +1,6 @@
 //! `prepare`, `cleanup` and the state directory every step opens: the lock, the record's unit.
 
-use js_agent::update_hook::config::{Held, Reason, Record, cleanup, prepare};
+use js_agent::update_hook::config::{Held, Reason, Record, cleanup};
 use js_agent::update_hook::{Class, Outcome};
 
 use super::super::step_rig::as_root;
@@ -13,7 +13,7 @@ use super::rig::{Rig, all_steps};
 #[test]
 fn prepare_changes_nothing_but_makes_the_state_directory() {
     let rig = Rig::new("config-prepare");
-    let done = rig.run(prepare);
+    let done = rig.prepare();
     assert_eq!(done.outcome, Outcome::Success);
     assert_eq!(done.report, Default::default());
     assert!(rig.params.state_dir.is_dir());
@@ -31,7 +31,7 @@ fn prepare_changes_nothing_but_makes_the_state_directory() {
 #[test]
 fn prepare_makes_a_state_directory_under_a_symlinked_top_directory() {
     let rig = Rig::behind_a_system_link("config-prepare-link");
-    let done = rig.run(prepare);
+    let done = rig.prepare();
     assert_eq!(done.outcome, Outcome::Success);
     assert_eq!(done.report, Default::default());
     assert!(rig.params.state_dir.is_dir());
@@ -49,14 +49,14 @@ fn a_step_that_finds_the_state_directory_locked_is_refused_and_does_nothing() {
     let rig = Rig::new("config-locked");
     let held = Held::open_or_make(&rig.params.state_dir, &as_root).unwrap();
     for step in all_steps() {
-        let done = rig.run(step);
+        let done = step(&rig);
         assert_eq!(done.outcome, Outcome::Failure);
         assert_eq!(done.report.reason, Some(Reason::Locked));
         assert!(done.report.detail.unwrap().starts_with("cannot lock "),);
     }
     assert!(rig.units.log.borrow().is_empty());
     drop(held);
-    assert_eq!(rig.run(prepare).outcome, Outcome::Success);
+    assert_eq!(rig.prepare().outcome, Outcome::Success);
 }
 
 /// Asserts that a record of another unit is `state_invalid` in every step, and nothing is done.
@@ -71,7 +71,7 @@ fn a_record_of_another_unit_is_state_invalid_in_every_step() {
         ..rig.fresh()
     });
     for step in all_steps() {
-        let done = rig.run(step);
+        let done = step(&rig);
         assert_eq!(done.report.reason, Some(Reason::StateInvalid));
         assert_eq!(
             done.report.detail.as_deref(),

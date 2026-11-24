@@ -226,7 +226,10 @@ verify_timeout_secs = 300
 rollback_timeout_secs = 420
 ```
 
-`unit` is the daemon's launchd label. The restart is `bootout` (which returns when the agent has
+The hook keeps the files the package replaces in `/var/db/js-agent-config/kept` and puts them
+back in `rollback`, as the Linux package's section describes; a first install's copy stays there
+after its rollback, since removing the package deletes the receipt's files. `unit` is the daemon's
+launchd label. The restart is `bootout` (which returns when the agent has
 exited, up to its 120 s `ExitTimeOut`) and `bootstrap`, held back like the update hook's while
 `/etc/js-agent/flags` is absent. The hook works whichever came first, the agent's package or the
 config package: a label that is not loaded is bootstrapped, one that is loaded is booted out

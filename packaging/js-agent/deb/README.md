@@ -234,10 +234,15 @@ over by restarting the agent. Its manifest names
 
 and hostkeeper runs `/usr/bin/js-agent config-hook <step> [<dir>] --params <file>`, with the same
 exit statuses, last line and lock as the update hook above. The installer has put the new files in
-place before `cutover`, and the previous version's back before `rollback`.
+place before `cutover`. For an update it puts the previous version's back before `rollback`; a first
+install has no previous version, so the installer has replaced whatever was at the package's paths
+(a flags file placed by hand) and removes the package only after `rollback`. The hook therefore keeps
+those files itself (the kept copy, below) and puts them back in `rollback`.
 
-- `prepare` reads and checks the params, and deletes the record an earlier update left when its
-  `cleanup` did not run, so the update it begins restarts the agent again.
+- `prepare` reads and checks the params, keeps the kept copy, and deletes the record an earlier
+  update left when its `cleanup` did not run, so the update it begins restarts the agent again. A
+  path it cannot keep (a directory where the package places a file, a file it cannot read) ends it
+  `keep_failed` (class environment) before the installer replaces anything.
 - `cutover` checks that the flags file now in place parses as the agent's flags and names a host
   id (a facts file read included). If it does not, the step ends `bad_config` (reversible) with
   nothing restarted, and hostkeeper rolls the files back. Otherwise it notes the session the lease
@@ -250,12 +255,18 @@ place before `cutover`, and the previous version's back before `rollback`.
 - `verify` waits until the unit is active and the lease server shows the host `live` in a session
   other than the noted one: `no_hello` when none comes in `verify_timeout_secs` less 15 s,
   `lease_unreachable` (class environment) when the server could not be asked, `start_failed` when
-  the unit is down.
-- `rollback` restarts the unit onto the previous files. With `/etc/js-agent/token` in place it also
-  waits up to 60 s for the agent's hello, and tells in its detail when none came: a missing hello
-  never fails a rollback. A `cutover` that restarted nothing leaves the unit alone.
-- `cleanup` deletes the hook's record once `verify` succeeded (`not_verified`, reversible,
-  before).
+  the unit is down. Once it has seen the hello it removes the kept copy; a copy it cannot remove is
+  told in its detail and left for `cleanup`.
+- `rollback` first puts the kept files back: each path that holds other than what was there before
+  the update is written back, bytes, mode, owner and group; one that already holds it (an update's
+  previous version, which the installer put back) is not written; one where nothing was is left to
+  the installer. Its detail says which were put back, which were already as before and where
+  nothing was. A copy it cannot put back fails it (`restore_failed`, class environment) before the
+  unit is touched. Then it restarts the unit onto those files. With `/etc/js-agent/token` in place
+  it also waits up to 60 s for the agent's hello, and tells in its detail when none came: a missing
+  hello never fails a rollback. A `cutover` that restarted nothing leaves the unit alone.
+- `cleanup` deletes the kept copy, if `verify` left one, and the hook's record once `verify`
+  succeeded (`not_verified`, reversible, before).
 - `uninstall` does nothing to the service: the files go with the package, and the agent keeps
   running on what it read.
 
@@ -273,7 +284,25 @@ verify_timeout_secs = 300
 rollback_timeout_secs = 420
 ```
 
-`state_dir` is the hook's lock and record, root's, mode 0700 (the hook makes it). The bounds must
+`state_dir` is the hook's lock and record, root's, mode 0700 (the hook makes it). Of the updater's
+keys the hook reads `updater.previous_version`, which is absent on a first install.
+
+The kept copy is `kept/` in `state_dir`: `kept/index.json` says what was at each path (a regular
+file's mode, owner and group, a link's target, owner and group, or nothing) and `kept/<n>` holds the
+bytes of the file of the entry at position `n` of its `entries` (counted from 0, links and paths
+where nothing was included). The paths are every file and link below `tree/` of the staged release
+directory `prepare` is given, at the same path below `/`, and the flags file. The copy is written
+as `kept.making` and renamed to `kept` when whole, and is removed the same way. It is removed after
+a `verify` that succeeded (or by `cleanup`), and at the end of a `rollback`, except a first install's
+whose copy holds a file or link: hostkeeper removes a first install's package after its hook's
+`rollback`, and that removal (`dpkg --purge`, or the receipt's files on a Mac) deletes every file the
+package placed, the one just put back among them. The agent keeps running on the files put back, and
+the copy stays in `kept/`, as the rollback's detail says, for an operator to copy back
+(`cp -p /var/lib/js-agent-config/kept/<n> <path>`, where `<path>` is the `path` of the entry at
+position `n`) or for the
+next install's `prepare`. A `prepare` that finds a copy keeps it as it is unless the record beside
+it says `verify` succeeded: the copy is then of an update that neither took nor rolled back, whose
+files may be the ones in place. The bounds must
 exceed what the steps wait for: `cutover` 180 s (the wait for the start and a margin) plus the
 wait for the agent to stop, which is what is left of it, so 420 s allows 240 s; `verify` 15 s;
 `rollback` 240 s plus its wait for the stop, so 420 s allows 180 s. The hook refuses shorter

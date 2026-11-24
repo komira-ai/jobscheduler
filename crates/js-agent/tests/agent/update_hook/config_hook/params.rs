@@ -1,5 +1,6 @@
 //! The params table of the config hook: the eight keys it requires, the paths and bounds it
-//! refuses, the keys of the updater it ignores and any other key it refuses.
+//! refuses, the updater's previous version it reads, the other keys of the updater it ignores
+//! and any other key it refuses.
 
 use js_agent::update_hook::config::{
     CUTOVER_MIN_SECS, KEYS, Params, ParamsError, ROLLBACK_MIN_SECS, VERIFY_MIN_SECS,
@@ -57,6 +58,7 @@ fn a_table_with_the_eight_keys_is_read() {
         ),
         (600, 300, 600)
     );
+    assert_eq!(params.previous_version, None);
     assert_eq!(KEYS.len(), 8);
     let files = Scratch::new("config-hook-params-file");
     let file = files.write("params.toml", &good(), 0o600);
@@ -156,8 +158,9 @@ fn a_bound_shorter_than_its_waits_is_refused_and_the_least_is_read() {
     );
 }
 
-/// Asserts that the updater's keys (`updater.*`) are ignored, and that any other key is refused
-/// by name.
+/// Asserts that the updater's keys (`updater.*`) are ignored but for the previous version, which
+/// is read (an update's, as against a first install's, where it is absent) and must be text, and
+/// that any other key is refused by name.
 ///
 /// Catches a hook that refuses what the updater adds, and one that lets a misspelt key of the
 /// package go unseen.
@@ -170,6 +173,16 @@ fn the_updaters_keys_are_ignored_and_any_other_key_is_refused() {
     assert_eq!(
         Params::parse(&with_updater).unwrap(),
         Params::parse(&good()).unwrap()
+    );
+    let update = format!("{}\"updater.previous_version\" = \"1.4.0\"\n", good());
+    assert_eq!(
+        Params::parse(&update).unwrap().previous_version.as_deref(),
+        Some("1.4.0")
+    );
+    let not_text = format!("{}\"updater.previous_version\" = 3\n", good());
+    assert_eq!(
+        refusal(&not_text),
+        "params key \"updater.previous_version\" must be a string"
     );
     let error = Params::parse(&format!("{}cutover_timeout = 5\n", good())).unwrap_err();
     assert!(matches!(&error, ParamsError::Unknown(key) if key == "cutover_timeout"));
