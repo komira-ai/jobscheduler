@@ -48,7 +48,7 @@ fn artifacts_yml_is_started_only_by_the_release_s_call() {
         body,
         [
             "    needs: [plan]",
-            "    if: ${{ !cancelled() && github.event_name == 'push' && needs.plan.outputs.release == 'true' }}",
+            "    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}",
             "    permissions:",
             "      contents: read",
             "      id-token: write",
@@ -60,10 +60,22 @@ fn artifacts_yml_is_started_only_by_the_release_s_call() {
     );
 }
 
+/// The condition of the hosted Apple silicon build: the repository variable MACOS_ON_FARM is not
+/// `true`.
+pub const HOSTED_MACOS_IF: &str = "    if: ${{ vars.MACOS_ON_FARM != 'true' }}";
+
+/// The condition of the call of the farm's build: the variable is `true`. Exactly the negation of
+/// [`HOSTED_MACOS_IF`], so one of the two jobs runs and never both.
+pub const FARM_MACOS_IF: &str = "    if: ${{ vars.MACOS_ON_FARM == 'true' }}";
+
+/// The condition of `sums`: the Linux legs built, and one of the two Apple silicon builds did.
+const SUMS_IF: &str = "    if: ${{ !cancelled() && needs.build.result == 'success' && (needs.build-macos.result == 'success' || needs.macos-farm.result == 'success') }}";
+
 /// Asserts that `attest` and `verify` each run only for a push to main (one `if:`, that one),
-/// in that order after `sums`, and that `build` and `sums` have no condition of their own (the
-/// release's call runs them for a push alone). Catches a signing job that a pull request
-/// would run, and a build that skips itself.
+/// in that order after `sums`, and that `build` has no condition of its own (the release's call
+/// runs it for a push alone) and `sums` only the one that takes whichever of `build-macos` and
+/// `macos-farm` ran. Catches a signing job that a pull request would run, a build that skips
+/// itself, and a `sums` that runs after a failed Linux leg or with neither Apple silicon build.
 #[test]
 fn attest_and_verify_run_only_for_a_push_to_main() {
     let text = artifacts_workflow();
@@ -77,8 +89,66 @@ fn attest_and_verify_run_only_for_a_push_to_main() {
         );
     }
     assert!(ifs(job(&jobs, "build")).is_empty());
-    assert!(ifs(job(&jobs, "sums")).is_empty());
-    assert!(job(&jobs, "sums").iter().any(|l| l == "    needs: [build]"));
+    assert_eq!(ifs(job(&jobs, "sums")), [SUMS_IF]);
+    assert!(
+        job(&jobs, "sums")
+            .iter()
+            .any(|l| l == "    needs: [build, build-macos, macos-farm]")
+    );
+}
+
+/// Asserts that the Apple silicon archives come from exactly one of two jobs: `build-macos`
+/// under [`HOSTED_MACOS_IF`] and the call `macos-farm` under [`FARM_MACOS_IF`], which are each
+/// other's negation. The call asks for the release version and `what: release`, grants
+/// `contents: read` and `id-token: write` (the most its jobs can hold) and nothing else, and has
+/// no steps of its own. Catches both jobs running (a duplicate `dist-aarch64-apple-darwin`
+/// artifact), neither running, and a call that grants a write besides the token.
+#[test]
+fn the_apple_silicon_archives_come_from_one_of_the_hosted_build_and_the_farm() {
+    let text = artifacts_workflow();
+    let jobs = jobs(&text);
+    assert_eq!(ifs(job(&jobs, "build-macos")), [HOSTED_MACOS_IF]);
+    assert_eq!(ifs(job(&jobs, "macos-farm")), [FARM_MACOS_IF]);
+    assert_eq!(
+        HOSTED_MACOS_IF.replace(" != ", " == "),
+        FARM_MACOS_IF,
+        "the two conditions are each other's negation"
+    );
+    let body: Vec<&str> = job(&jobs, "macos-farm")
+        .iter()
+        .map(String::as_str)
+        .filter(|l| !l.trim_start().starts_with('#') && !l.trim().is_empty())
+        .collect();
+    assert_eq!(
+        body,
+        [
+            FARM_MACOS_IF,
+            "    permissions:",
+            "      contents: read",
+            "      id-token: write",
+            "    uses: ./.github/workflows/macos-farm.yml",
+            "    with:",
+            "      version: ${{ inputs.version }}",
+            "      what: release",
+        ]
+    );
+    let hosted = job(&jobs, "build-macos")
+        .iter()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        hosted.contains("    permissions:\n      contents: read\n    env:"),
+        "{hosted}"
+    );
+    assert!(!hosted.contains("id-token"), "{hosted}");
+    // Both upload the one artifact `sums` downloads with the other legs' (`dist-*`).
+    assert!(
+        hosted
+            .contains("          name: dist-aarch64-apple-darwin\n          path: dist/*.tar.gz\n"),
+        "{hosted}"
+    );
 }
 
 /// Asserts that `attest`, which holds `id-token: write`, checks out nothing, builds nothing and

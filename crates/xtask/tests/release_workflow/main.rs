@@ -17,10 +17,11 @@ mod calls;
 mod debs;
 mod fast_lane;
 mod images;
+mod macos_farm;
 mod secrets;
 mod smoke;
 
-use calls::{CALLERS, calls};
+use calls::{ARTIFACTS_CALLS, CALLERS, calls};
 
 /// The text of `.github/workflows/<file>`.
 fn read_workflow(file: &str) -> String {
@@ -71,27 +72,34 @@ fn job<'a>(jobs: &'a [(String, Vec<String>)], name: &str) -> &'a [String] {
         .1
 }
 
-/// Asserts, in both files, that every action and called workflow `uses:` names a full 40-digit
-/// commit SHA with its version in a comment (the local calls of the release's jobs,
-/// [`CALLERS`], excepted), that the top level grants nothing, and that every job runs on a
-/// GitHub-hosted runner image of a pinned version, or is one of the release's calls.
+/// Asserts, in the three files, that every action and called workflow `uses:` names a full
+/// 40-digit commit SHA with its version in a comment (the local calls of the release's jobs,
+/// [`CALLERS`], and of artifacts.yml's, [`ARTIFACTS_CALLS`], excepted), that the top level grants
+/// nothing, and that every job runs on a GitHub-hosted runner image of a pinned version, or is
+/// one of the calls: `ubuntu-24.04` or the matrix's runner, and in artifacts.yml the one job
+/// `build-macos`, `macos-15`. macos-farm.yml calls nothing and runs on `ubuntu-24.04` alone.
 #[test]
 fn actions_are_pinned_and_the_top_grants_nothing() {
     for (file, text, least) in [
         ("release.yml", workflow(), 7),
         ("artifacts.yml", artifacts_workflow(), 9),
+        ("macos-farm.yml", read_workflow("macos-farm.yml"), 7),
     ] {
         let mut uses = 0;
         for line in text.lines().filter(|l| {
             l.trim_start().starts_with("- uses:") || l.trim_start().starts_with("uses:")
         }) {
             if line.trim().starts_with("uses: ./.github/workflows/") {
-                assert_eq!(file, "release.yml", "{line}");
+                let calls: &[(&str, &str)] = match file {
+                    "release.yml" => &CALLERS,
+                    "artifacts.yml" => &ARTIFACTS_CALLS,
+                    _ => &[],
+                };
                 assert!(
-                    CALLERS
+                    calls
                         .iter()
                         .any(|(_, called)| line.trim() == format!("uses: {called}")),
-                    "{line}"
+                    "{file}: {line}"
                 );
                 continue;
             }
@@ -112,15 +120,20 @@ fn actions_are_pinned_and_the_top_grants_nothing() {
                 .filter(|l| l.trim_start().starts_with("runs-on:"))
                 .collect();
             if let Some(called) = calls(&lines) {
-                assert_eq!(file, "release.yml", "{name}");
-                assert!(
-                    CALLERS.contains(&(name.as_str(), called)),
-                    "{name}: {called}"
-                );
+                let calls: &[(&str, &str)] = match file {
+                    "release.yml" => &CALLERS,
+                    "artifacts.yml" => &ARTIFACTS_CALLS,
+                    _ => &[],
+                };
+                assert!(calls.contains(&(name.as_str(), called)), "{name}: {called}");
                 assert!(runs_on.is_empty(), "{name}");
                 continue;
             }
             assert_eq!(runs_on.len(), 1, "{file}: {name}");
+            if (file, name.as_str()) == ("artifacts.yml", "build-macos") {
+                assert_eq!(runs_on[0].trim(), "runs-on: macos-15", "{file}: {name}");
+                continue;
+            }
             assert!(
                 runs_on[0].contains("ubuntu-24.04") || runs_on[0].contains("matrix.runner"),
                 "{file}: {name}: {}",
@@ -160,7 +173,7 @@ fn a_push_to_main_is_the_only_releasing_trigger() {
     assert_eq!(ifs.len(), 1);
     assert_eq!(
         ifs[0].as_str(),
-        "    if: ${{ !cancelled() && github.event_name == 'push' && needs.plan.outputs.release == 'true' }}"
+        "    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}"
     );
     let push = "github.event_name == 'push' && github.ref == 'refs/heads/main'";
     let jobs = jobs(&text);
@@ -310,25 +323,40 @@ fn gamma_is_off_by_variable_and_sets_the_lease_server_alone() {
     assert!(tool.contains("cargo build -p xtask --locked --release"));
 }
 
-/// Asserts that the build matrix has the Apple-silicon leg (a `macos-15` runner building
-/// `js`, `js-agent`, `js-bundle` and the two Mac host tools only, the lease server being
-/// Linux-only) and that the archives are made with GNU tar, which a Mac has as `gtar`: the archive options are GNU's, and the
-/// reproducibility of the files depends on them.
+/// The five binaries of the Apple silicon build, as `package:binary`, in the order the builds
+/// list them: `js`, `js-agent`, `js-bundle` and the two Mac host tools only, the lease server
+/// and js-mdm being Linux-only.
+const MACOS_BUILDS: &str = "js-cli:js js-agent:js-agent js-bundle-cli:js-bundle js-mac-session:js-mac-session js-mac-provision:js-mac-provision";
+
+/// Asserts that the Apple-silicon archives are built by the job `build-macos` (a `macos-15`
+/// runner building [`MACOS_BUILDS`] only, with `cargo xtask release macos-leg`) and no longer by
+/// the `build` matrix, and that its archives are made with GNU tar, which a Mac has as `gtar`:
+/// the archive options are GNU's, and the reproducibility of the files depends on them.
 #[test]
 fn the_macos_leg_builds_the_client_agent_bundle_and_mac_tools_and_packs_with_gnu_tar() {
     let text = artifacts_workflow();
     let jobs = jobs(&text);
     let build = job(&jobs, "build").join("\n");
+    assert!(!build.contains("apple-darwin"), "{build}");
+    assert!(!build.contains("gtar"), "{build}");
+    let mac = job(&jobs, "build-macos").join("\n");
+    assert!(mac.contains("    runs-on: macos-15\n"), "{mac}");
     assert!(
-        build.contains(
-            "- target: aarch64-apple-darwin\n            runner: macos-15\n            builds: js-cli:js js-agent:js-agent js-bundle-cli:js-bundle js-mac-session:js-mac-session js-mac-provision:js-mac-provision\n"
-        ),
-        "{build}"
+        mac.contains(&format!("      BUILDS: {MACOS_BUILDS}\n")),
+        "{mac}"
     );
     assert!(
-        build.contains("if command -v gtar > /dev/null; then\n            tar=gtar\n          fi")
+        mac.contains("      TARGET: aarch64-apple-darwin\n"),
+        "{mac}"
     );
-    assert!(build.contains(r#""$tar" -C "stage-$bin" --sort=name"#));
+    assert!(
+        mac.contains("command -v gtar > /dev/null || brew install gnu-tar"),
+        "{mac}"
+    );
+    assert!(
+        mac.contains(r#"gtar -C "stage-$bin" --sort=name --mtime="@$mtime""#),
+        "{mac}"
+    );
 }
 
 /// Asserts that the files of every archive are laid down by `cargo xtask release stage`, the one
@@ -353,7 +381,8 @@ fn the_archives_are_staged_by_the_xtask_list_and_nothing_else() {
 
 /// Asserts that the `sums` job expects the `js-bundle` archive of every target (the Mac and both
 /// Linux architectures), so a build that stops making one fails before anything is attested,
-/// and that all three matrix legs build it. The two Mac host tools are expected for darwin only.
+/// and that both Linux legs of the matrix and the Mac build (`build-macos`, and the farm's, which
+/// has its own test) build it. The two Mac host tools are expected for darwin only.
 #[test]
 fn the_js_bundle_archive_is_built_and_expected_for_both_targets() {
     let text = artifacts_workflow();
@@ -374,9 +403,11 @@ fn the_js_bundle_archive_is_built_and_expected_for_both_targets() {
     let build = job(&jobs, "build").join("\n");
     assert_eq!(
         build.matches("js-bundle-cli:js-bundle").count(),
-        3,
+        2,
         "{build}"
     );
+    let mac = job(&jobs, "build-macos").join("\n");
+    assert_eq!(mac.matches("js-bundle-cli:js-bundle").count(), 1, "{mac}");
 }
 
 /// Asserts that `js-mdm` is built for the two Linux targets only, by the same `build` entry as
@@ -411,27 +442,26 @@ fn the_js_mdm_archive_is_built_and_expected_for_linux_only() {
     );
 }
 
-/// Asserts that the Apple-silicon build pins the deployment target to 11.0 and that the
-/// check step fails a binary whose minimum macOS is above it, so a newer runner image's
-/// SDK cannot silently raise what the binaries need.
+/// Asserts that the Apple-silicon build pins the deployment target to 11.0 (in the job's
+/// environment, so every command of the job sees it) and gives `release macos-leg` the same
+/// floor to hold each binary's minimum macOS against, which that verb reads from `otool` and
+/// fails above it (tests/release_macos_leg.rs), so a newer runner image's SDK cannot silently
+/// raise what the binaries need.
 #[test]
 fn the_macos_leg_pins_the_deployment_target_and_checks_each_binary() {
     let text = artifacts_workflow();
     let jobs = jobs(&text);
+    let mac = job(&jobs, "build-macos").join("\n");
+    assert!(
+        mac.contains("      MACOSX_DEPLOYMENT_TARGET: \"11.0\"\n"),
+        "{mac}"
+    );
+    assert!(
+        mac.contains(r#"run: cargo xtask release macos-leg --target "$TARGET" --builds "$BUILDS" --min-macos 11.0 --out target/macos-leg"#),
+        "{mac}"
+    );
     let build = job(&jobs, "build").join("\n");
-    assert!(
-        build.contains("*-apple-darwin) export MACOSX_DEPLOYMENT_TARGET=11.0 ;;"),
-        "{build}"
-    );
-    assert!(
-        build.contains(r#"otool -l "target/$TARGET/release/$bin""#),
-        "{build}"
-    );
-    assert!(build.contains("above the pinned 11.0"), "{build}");
-    assert!(
-        build.contains(r#"if [ -z "$minos" ]; then"#),
-        "a binary with no minos must fail the check, not pass it: {build}"
-    );
+    assert!(!build.contains("MACOSX_DEPLOYMENT_TARGET"), "{build}");
 }
 
 /// One leg of the `build` matrix: its target, its runner and its `package:binary` entries.
@@ -440,9 +470,9 @@ struct Leg {
     target: String,
     runner: String,
     builds: Vec<String>,
-    /// The platform of the .deb the leg makes (`linux-x86_64`), empty for the Mac leg.
+    /// The platform of the .deb the leg makes (`linux-x86_64`).
     deb: String,
-    /// The architecture in that .deb's file name (`amd64`), empty for the Mac leg.
+    /// The architecture in that .deb's file name (`amd64`).
     deb_arch: String,
 }
 
@@ -534,11 +564,7 @@ fn the_linux_arm64_leg_builds_the_five_linux_binaries_on_a_hosted_arm_runner() {
         legs.iter()
             .map(|leg| leg.target.as_str())
             .collect::<Vec<_>>(),
-        [
-            "x86_64-unknown-linux-musl",
-            "aarch64-unknown-linux-musl",
-            "aarch64-apple-darwin"
-        ]
+        ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"]
     );
 }
 
@@ -598,7 +624,7 @@ fn the_sums_job_expects_every_linux_binary_for_both_architectures_and_the_list_i
     assert_eq!(have, wanted);
     let mut wanted = archives;
     wanted.sort();
-    // What the matrix builds is what `sums` expects.
+    // What the matrix and the Apple silicon build build is what `sums` expects.
     let mut built: Vec<String> = legs(job(&jobs, "build"))
         .iter()
         .flat_map(|leg| {
@@ -608,6 +634,10 @@ fn the_sums_job_expects_every_linux_binary_for_both_architectures_and_the_list_i
             })
         })
         .collect();
+    built.extend(MACOS_BUILDS.split_whitespace().map(|entry| {
+        let (_, bin) = entry.split_once(':').expect("package:binary");
+        format!("{bin}-$VERSION-aarch64-apple-darwin.tar.gz")
+    }));
     built.sort();
     assert_eq!(built, wanted);
     // `ls | LC_ALL=C sort` orders the files by their bytes, with the version in the names.
@@ -787,109 +817,32 @@ fn the_musl_tools_are_installed_for_both_musl_legs() {
     }
 }
 
-/// Whether the shell `case` pattern `pattern` (only `*` and literal text) matches `word`.
-fn glob(pattern: &str, word: &str) -> bool {
-    assert!(
-        !pattern.contains(['?', '[', '|', '"', '\'']),
-        "a pattern this test does not read: {pattern}"
-    );
-    let parts: Vec<&str> = pattern.split('*').collect();
-    let (first, last) = (parts[0], parts[parts.len() - 1]);
-    if parts.len() == 1 {
-        return word == pattern;
-    }
-    if !word.starts_with(first) || word.len() < first.len() + last.len() {
-        return false;
-    }
-    let mut rest = &word[first.len()..word.len() - last.len()];
-    if !word.ends_with(last) {
-        return false;
-    }
-    for middle in &parts[1..parts.len() - 1] {
-        match rest.find(middle) {
-            Some(at) => rest = &rest[at + middle.len()..],
-            None => return false,
-        }
-    }
-    true
-}
-
-/// The pattern matcher above.
-#[test]
-fn the_glob_reader_matches_stars_and_literals() {
-    assert!(glob("*-linux-musl", "aarch64-unknown-linux-musl"));
-    assert!(glob("*-linux-musl", "x86_64-unknown-linux-musl"));
-    assert!(!glob("*-linux-musl", "aarch64-apple-darwin"));
-    assert!(!glob("x86_64-*-linux-musl", "aarch64-unknown-linux-musl"));
-    assert!(glob("x86_64-*-linux-musl", "x86_64-unknown-linux-musl"));
-    assert!(glob("a*b*c", "aXbYc"));
-    assert!(!glob("a*b*c", "aXcYb"));
-    assert!(!glob("ab*ba", "aba"));
-    assert!(glob("exact", "exact"));
-    assert!(!glob("exact", "exactly"));
-}
-
-/// The arms of the first `case "$TARGET" in` of `lines`: each pattern with the lines of its body.
-fn target_case(lines: &[String]) -> Vec<(String, Vec<String>)> {
-    let start = lines
-        .iter()
-        .position(|l| l.trim() == r#"case "$TARGET" in"#)
-        .expect("a case on $TARGET");
-    let indent = lines[start].len() - lines[start].trim_start().len();
-    let mut arms: Vec<(String, Vec<String>)> = Vec::new();
-    for line in &lines[start + 1..] {
-        let rest = line.trim_start();
-        let at = line.len() - rest.len();
-        if at == indent && rest == "esac" {
-            return arms;
-        }
-        if at == indent + 2 && rest.ends_with(')') {
-            arms.push((rest.trim_end_matches(')').to_owned(), Vec::new()));
-        } else if let Some((_, body)) = arms.last_mut() {
-            body.push(rest.to_owned());
-        }
-    }
-    panic!("no esac")
-}
-
-/// Asserts that in "Check the binaries" the `case` arm that `aarch64-unknown-linux-musl` falls in
-/// is the static check, the same arm as the x86_64 Linux target's: every binary of `$BUILDS` is
-/// read with `readelf -d` and one with a `NEEDED` entry fails the job. Catches a pattern
-/// narrowed to the x86_64 name, which would let a dynamically linked arm64 binary through.
+/// Asserts that "Check the binaries" is the static check for every leg of the matrix (both are
+/// Linux musl targets now, so it has no `case` on the target): every binary of `$BUILDS` is read
+/// with `readelf -d` and one with a `NEEDED` entry fails the job, and the version check after it
+/// runs every binary. Catches a check put back under a pattern narrowed to the x86_64 name, which
+/// would let a dynamically linked arm64 binary through, and a version check made conditional.
 #[test]
 fn the_static_check_covers_the_arm64_linux_leg() {
     let text = artifacts_workflow();
     let jobs = jobs(&text);
     let check = step(job(&jobs, "build"), "Check the binaries");
-    let arms = target_case(check);
-    let matching = |target: &str| -> Vec<&(String, Vec<String>)> {
-        arms.iter()
-            .filter(|(pattern, _)| glob(pattern, target))
-            .collect()
-    };
-    let arm = matching("aarch64-unknown-linux-musl");
-    assert_eq!(arm.len(), 1, "{arms:?}");
-    assert_eq!(arm, matching("x86_64-unknown-linux-musl"));
-    let body = arm[0].1.join("\n");
+    let body = check.join("\n");
+    assert!(!body.contains("case \"$TARGET\" in"), "{body}");
     assert!(body.contains("for entry in $BUILDS; do"), "{body}");
     assert!(
         body.contains(r#"if readelf -d "target/$TARGET/release/$bin" | grep -q NEEDED; then"#),
         "{body}"
     );
     assert!(
-        body.contains("echo \"::error::$bin links shared libraries\"\nexit 1"),
+        body.contains("echo \"::error::$bin links shared libraries\"\n              exit 1"),
         "{body}"
     );
-    // The Mac target takes the other arm, not this one.
-    let mac = matching("aarch64-apple-darwin");
-    assert_eq!(mac.len(), 1, "{arms:?}");
-    assert_ne!(mac, arm);
-    // And the version check after the case runs every binary on every leg.
-    let all = check.join("\n");
-    let esac = all.find("esac").expect("esac");
+    // The version check after it runs every binary on every leg.
+    let readelf = body.find("readelf").expect("readelf");
     assert!(
-        all[esac..].contains(r#"printed="$("target/$TARGET/release/$bin" --version)""#),
-        "{all}"
+        body[readelf..].contains(r#"printed="$("target/$TARGET/release/$bin" --version)""#),
+        "{body}"
     );
 }
 

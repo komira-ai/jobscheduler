@@ -2,14 +2,17 @@
 //! `id-token: write` on a pull request, and only under its exact `if:`; farm-connect pinned by
 //! commit with exactly the variables it is given; the triggers, the runner, the rights, and the
 //! build through `cargo xtask farm-build` after farm-connect; and no other workflow's job holding
-//! the token on a pull request. Each rule is shown to refuse its defect by putting it into the
-//! committed workflow and reading the exact problems the lint reports.
+//! the token on a pull request but under a push to main or a manual run, a check of the `if:`'s
+//! conjuncts that follows the calls of other workflows, the signer artifacts.yml's one holder
+//! besides its calls, and macos-farm.yml's token jobs that run no repository code. Each rule is
+//! shown to refuse its defect by putting it into the committed workflow and reading the exact
+//! problems the lint reports.
 
 use super::farm::{
     BUILD_RUN, CONNECT_INPUTS, FARM_CONNECT, FILE, JOB_IF, ON_PROBLEM, PATCH_ARTIFACT, RUNNER,
     TOP_PERMISSIONS_PROBLEM, UPLOAD_IF, patch_file, problems, token_problems, upload_inputs,
 };
-use super::support::{text_of, workflows};
+use super::support::{in_job, text_of, workflows};
 use super::yaml;
 
 /// The problems of the farm.yml text `text`; a text that is not YAML is its own problem.
@@ -377,12 +380,47 @@ fn the_job_runs_on_its_one_runner() {
     );
 }
 
+/// The problem of a job of a workflow a pull request starts that holds the token under another
+/// `if:` than a push to main or a manual run.
+fn on_a_pull_request(file: &str, job: &str) -> String {
+    format!(
+        "{file}: job {job} holds `id-token: write` on a pull request (its `if:` does not pin a push to main or a manual run)"
+    )
+}
+
+/// The problem of a job below a call that holds the token where nothing above it pins an event.
+fn below_a_call(file: &str, chain: &str) -> String {
+    format!(
+        "{file}: job {chain} holds `id-token: write` on a pull request (neither its `if:` nor the calls above it pin a push to main or a manual run)"
+    )
+}
+
+/// The repository's workflows with `from` replaced by `to` inside the job `job` of `file`.
+fn changed_job(file: &str, job: &str, from: &str, to: &str) -> Vec<(String, String)> {
+    let mut all = workflows();
+    let found = all
+        .iter_mut()
+        .find(|(name, _)| name == file)
+        .unwrap_or_else(|| panic!("{file}"));
+    found.1 = in_job(&found.1, job, from, to);
+    all
+}
+
+/// A workflow `file` that starts on `on` (a line of YAML) with `jobs` (the YAML under `jobs:`).
+fn file_of(file: &str, on: &str, jobs: &str) -> (String, String) {
+    (
+        file.to_owned(),
+        format!("name: {file}\n{on}\njobs:\n{jobs}"),
+    )
+}
+
 #[test]
 fn no_other_workflow_holds_the_token_on_a_pull_request_but_under_a_push() {
     // Catches: a token grant the farm lane's exception would be copied into, in a workflow that a
-    // pull request starts: the committed ones hold none outside a push.
+    // pull request starts: the committed ones hold none outside a push or a manual run, and a
+    // call that loses its push condition is named with the jobs below it that hold the token.
     assert_eq!(token_problems(&workflows()), Vec::<String>::new());
-    let released = "if: ${{ !cancelled() && github.event_name == 'push' && needs.plan.outputs.release == 'true' }}";
+    let released = "if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}";
     assert_eq!(
         token_problems(&changed(
             "release.yml",
@@ -390,7 +428,23 @@ fn no_other_workflow_holds_the_token_on_a_pull_request_but_under_a_push() {
             "if: ${{ !cancelled() && needs.plan.outputs.release == 'true' }}"
         )),
         [
-            "release.yml: job artifacts holds `id-token: write` on a pull request (its `if:` does not pin a push)"
+            on_a_pull_request("release.yml", "artifacts"),
+            below_a_call("release.yml", "artifacts -> artifacts.yml/macos-farm"),
+        ]
+    );
+    let packaged = "  beta-macos-pkg:\n    needs: [plan, artifacts]\n    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}\n";
+    assert_eq!(
+        token_problems(&changed(
+            "release.yml",
+            packaged,
+            "  beta-macos-pkg:\n    needs: [plan, artifacts]\n    if: ${{ needs.plan.outputs.release == 'true' }}\n"
+        )),
+        [
+            on_a_pull_request("release.yml", "beta-macos-pkg"),
+            below_a_call(
+                "release.yml",
+                "beta-macos-pkg -> js-agent-macos-pkg.yml/farm"
+            ),
         ]
     );
     assert_eq!(
@@ -409,9 +463,11 @@ fn no_other_workflow_holds_the_token_on_a_pull_request_but_under_a_push() {
 fn a_new_workflow_that_a_pull_request_starts_may_not_hold_the_token_without_a_push() {
     // Catches: the grant spelled as `write-all`, or in a workflow on `pull_request_target` or on a
     // merge group, or in the list form of `on`; and that a workflow no pull request starts, or a
-    // job that pins a push, is left alone.
-    let refused = "new.yml: job token holds `id-token: write` on a pull request (its `if:` does not pin a push)";
-    let push_only = "    if: ${{ github.event_name == 'push' }}\n";
+    // job that pins a push or a manual run, is left alone.
+    let refused = on_a_pull_request("new.yml", "token");
+    let push_only =
+        "    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}\n";
+    let dispatch_only = "    if: ${{ github.event_name == 'workflow_dispatch' }}\n";
     for on in [
         "on: pull_request",
         "on: [push, pull_request_target]",
@@ -421,14 +477,16 @@ fn a_new_workflow_that_a_pull_request_starts_may_not_hold_the_token_without_a_pu
         for grant in ["{ id-token: write }", "write-all"] {
             assert_eq!(
                 token_problems(&[workflow(on, grant, "")]),
-                [refused],
+                [refused.as_str()],
                 "{on} {grant}"
             );
-            assert_eq!(
-                token_problems(&[workflow(on, grant, push_only)]),
-                Vec::<String>::new(),
-                "{on} {grant} under a push"
-            );
+            for pinned in [push_only, dispatch_only] {
+                assert_eq!(
+                    token_problems(&[workflow(on, grant, pinned)]),
+                    Vec::<String>::new(),
+                    "{on} {grant} under {pinned}"
+                );
+            }
         }
         assert_eq!(
             token_problems(&[workflow(on, "{ contents: read }", "")]),
@@ -446,6 +504,356 @@ fn a_new_workflow_that_a_pull_request_starts_may_not_hold_the_token_without_a_pu
 }
 
 #[test]
+fn the_push_check_reads_the_top_level_conjuncts_of_the_if_and_not_its_text() {
+    // Catches: a condition that names a push and also lets a pull request through (`||` with
+    // another event, a negation, another event's name, a name inside a string, a ref alone, a
+    // variable), which a search of the text for `== 'push'` accepts; and that every spelling of a
+    // push to main or a manual run is accepted: the conjunct alone, among others, with the ref,
+    // in a parenthesised `||` of the two events, nested, and without `${{ }}`.
+    let refused = [
+        "${{ github.event_name == 'push' || github.event_name == 'pull_request' }}",
+        "${{ github.event_name == 'pull_request' || github.event_name == 'push' }}",
+        "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' || github.ref == 'refs/heads/topic' }}",
+        "${{ (github.event_name == 'push' || github.event_name == 'pull_request') && github.ref == 'refs/heads/main' }}",
+        "${{ !(github.event_name == 'push') }}",
+        "${{ github.event_name != 'workflow_dispatch' }}",
+        "${{ github.event_name != 'pull_request' }}",
+        "${{ github.event_name == 'pull_request' }}",
+        "${{ github.event_name == 'push_' }}",
+        "${{ github.event_name == 'a && github.event_name == ''push''' }}",
+        "${{ github.ref == 'refs/heads/main' }}",
+        "${{ github.event_name == 'push' }}",
+        "${{ github.event_name == 'push' && github.ref == 'refs/heads/topic' }}",
+        "${{ !cancelled() && github.event_name == 'push' && needs.plan.outputs.release == 'true' }}",
+        "${{ needs.a.result == 'success' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}",
+        "${{ (github.event_name == 'push') }}",
+        "github.event_name == 'push'",
+        "${{ vars.MACOS_ON_FARM != 'true' }}",
+        "${{ contains(github.event_name, 'push') }}",
+        "${{ always() }}",
+        "${{ (github.event_name) == 'x' }}",
+        "${{ }}",
+        "''",
+    ];
+    for condition in refused {
+        assert_eq!(
+            token_problems(&[workflow(
+                "on: pull_request",
+                "{ id-token: write }",
+                &format!("    if: {condition}\n")
+            )]),
+            [on_a_pull_request("new.yml", "token")],
+            "{condition}"
+        );
+    }
+    let accepted = [
+        "${{ github.event_name == 'workflow_dispatch' }}",
+        "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}",
+        "${{ github.ref == 'refs/heads/main' && github.event_name == 'push' }}",
+        "${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}",
+        "${{ (github.event_name == 'push') && (github.ref == 'refs/heads/main') }}",
+        "${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' }}",
+        "${{ inputs.what == 'release' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch') }}",
+        "${{ needs.a.result == 'success' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}",
+        "${{ ((github.event_name == 'workflow_dispatch')) }}",
+        "github.event_name == 'push' && github.ref == 'refs/heads/main'",
+    ];
+    for condition in accepted {
+        assert_eq!(
+            token_problems(&[workflow(
+                "on: pull_request",
+                "{ id-token: write }",
+                &format!("    if: {condition}\n")
+            )]),
+            Vec::<String>::new(),
+            "{condition}"
+        );
+    }
+    // The job with no `if:` at all, and a job that holds no token whatever its `if:`.
+    assert_eq!(
+        token_problems(&[workflow("on: pull_request", "{ id-token: write }", "")]),
+        [on_a_pull_request("new.yml", "token")]
+    );
+    assert_eq!(
+        token_problems(&[workflow(
+            "on: pull_request",
+            "{ contents: read }",
+            "    if: ${{ github.event_name == 'pull_request' }}\n"
+        )]),
+        Vec::<String>::new()
+    );
+}
+
+/// A caller `a.yml` started by a pull request whose call job `call` has `call_if` (a line of YAML
+/// or empty) and no permissions, and the callee `b.yml` with `jobs`.
+fn chain(call_if: &str, jobs: &str) -> Vec<(String, String)> {
+    vec![
+        file_of(
+            "a.yml",
+            "on: pull_request",
+            &format!("  call:\n{call_if}    uses: ./.github/workflows/b.yml\n"),
+        ),
+        file_of("b.yml", "on: workflow_call", jobs),
+    ]
+}
+
+/// The job `token` of a callee: runs on a runner, holds the token, under `job_if`.
+fn token_job(job_if: &str) -> String {
+    format!(
+        "  token:\n    runs-on: ubuntu-24.04\n{job_if}    permissions: {{ id-token: write }}\n    steps:\n      - run: true\n"
+    )
+}
+
+#[test]
+fn the_jobs_a_pull_request_reaches_through_a_call_are_held_to_the_same_rule() {
+    // Catches: a called workflow's job that holds the token under a call that does not pin an
+    // event, which no check of the calling workflow alone sees (the call job here has no
+    // permissions of its own); and that the call's `if:`, the job's own, a dispatch and a push
+    // each let it be, as does a callee that holds no token.
+    let push = "    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}\n";
+    let dispatch = "    if: ${{ github.event_name == 'workflow_dispatch' }}\n";
+    assert_eq!(
+        token_problems(&chain("", &token_job(""))),
+        [below_a_call("a.yml", "call -> b.yml/token")]
+    );
+    assert_eq!(
+        token_problems(&chain(
+            "    if: ${{ vars.MACOS_ON_FARM == 'true' }}\n",
+            &token_job("")
+        )),
+        [below_a_call("a.yml", "call -> b.yml/token")]
+    );
+    for pinned in [push, dispatch] {
+        assert_eq!(
+            token_problems(&chain(pinned, &token_job(""))),
+            Vec::<String>::new(),
+            "the call pins: {pinned}"
+        );
+        assert_eq!(
+            token_problems(&chain("", &token_job(pinned))),
+            Vec::<String>::new(),
+            "the job pins: {pinned}"
+        );
+    }
+    assert_eq!(
+        token_problems(&chain(
+            "",
+            "  quiet:\n    runs-on: ubuntu-24.04\n    permissions: { contents: read }\n    steps:\n      - run: true\n"
+        )),
+        Vec::<String>::new()
+    );
+    // A call of a workflow of another repository is not followed.
+    assert_eq!(
+        token_problems(&[file_of(
+            "a.yml",
+            "on: pull_request",
+            "  call:\n    uses: someone/else/.github/workflows/b.yml@0123456789abcdef0123456789abcdef01234567\n"
+        )]),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_call_below_a_call_is_followed_and_what_cannot_be_followed_is_named() {
+    // Catches: a token job two calls down (named by the whole chain, with no pin above it, or a
+    // pin at the middle that covers it), a call of a file that is not in the repository, and a
+    // chain of calls that comes back to a file it is inside, which would never end.
+    let middle = |call_if: &str, jobs: &str| {
+        vec![
+            file_of(
+                "a.yml",
+                "on: pull_request",
+                "  call:\n    uses: ./.github/workflows/b.yml\n",
+            ),
+            file_of(
+                "b.yml",
+                "on: workflow_call",
+                &format!("  again:\n{call_if}    uses: ./.github/workflows/c.yml\n"),
+            ),
+            file_of("c.yml", "on: workflow_call", jobs),
+        ]
+    };
+    assert_eq!(
+        token_problems(&middle("", &token_job(""))),
+        [below_a_call("a.yml", "call -> b.yml/again -> c.yml/token")]
+    );
+    assert_eq!(
+        token_problems(&middle(
+            "    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}\n",
+            &token_job("")
+        )),
+        Vec::<String>::new()
+    );
+    let missing = vec![file_of(
+        "a.yml",
+        "on: pull_request",
+        "  call:\n    uses: ./.github/workflows/gone.yml\n",
+    )];
+    assert_eq!(
+        token_problems(&missing),
+        ["a.yml: job call calls ./.github/workflows/gone.yml, a workflow this lint cannot read"]
+    );
+    let looped = vec![
+        file_of(
+            "a.yml",
+            "on: pull_request",
+            "  call:\n    uses: ./.github/workflows/b.yml\n",
+        ),
+        file_of(
+            "b.yml",
+            "on: workflow_call",
+            "  back:\n    uses: ./.github/workflows/b.yml\n",
+        ),
+    ];
+    assert_eq!(
+        token_problems(&looped),
+        ["a.yml: job call -> b.yml/back calls b.yml, which the chain is already inside"]
+    );
+}
+
+#[test]
+fn artifacts_yml_lets_only_attest_and_the_calls_of_other_files_hold_the_token() {
+    // Catches: a job of the signer's file that holds the token and could mint one that names it as
+    // the signer (a build job, `sums`, a token at the top), though the release's call, which
+    // pins a push, is the only way the file runs; and that `attest`, and a call of another file
+    // (local or of another repository) that holds the token for its own jobs, are left alone.
+    assert_eq!(token_problems(&workflows()), Vec::<String>::new());
+    let refused = |job: &str| {
+        format!(
+            "artifacts.yml: job {job} holds `id-token: write`, which only attest and a call of another workflow file may"
+        )
+    };
+    for job in ["build", "sums", "verify"] {
+        assert_eq!(
+            token_problems(&changed_job(
+                "artifacts.yml",
+                job,
+                "      contents: read\n",
+                "      contents: read\n      id-token: write\n"
+            )),
+            [refused(job)],
+            "{job}"
+        );
+    }
+    assert_eq!(
+        token_problems(&changed(
+            "artifacts.yml",
+            "\npermissions: {}\n",
+            "\npermissions:\n  id-token: write\n"
+        )),
+        ["artifacts.yml: holds `id-token: write` at its top level, for every job"]
+    );
+    // Another call, of this repository or another, may hold it; a call of the file itself may not.
+    let other = |uses: &str| {
+        changed_job(
+            "artifacts.yml",
+            "macos-farm",
+            "    uses: ./.github/workflows/macos-farm.yml\n",
+            &format!("    uses: {uses}\n"),
+        )
+    };
+    assert_eq!(
+        token_problems(&other("./.github/workflows/beta.yml")),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        token_problems(&other(
+            "someone/else/.github/workflows/b.yml@0123456789abcdef0123456789abcdef01234567"
+        )),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        token_problems(&other("./.github/workflows/artifacts.yml")),
+        [
+            refused("macos-farm"),
+            "release.yml: job artifacts -> artifacts.yml/macos-farm calls artifacts.yml, which the chain is already inside"
+                .to_owned()
+        ]
+    );
+}
+
+#[test]
+fn the_jobs_of_macos_farm_yml_that_hold_the_token_run_no_repository_code() {
+    // Catches: a job that holds the token running any `cargo` (build, run, test, xtask, check,
+    // clippy, install, fetch; behind a toolchain, a flag with or without a value, a path or a
+    // pipeline), using an action of this repository, or under an `if:` that does not pin a push
+    // to main or a manual run; and that the real file, whose jobs run `rustup` and the prebuilt
+    // `tools/xtask`, and the job that holds no token, which builds xtask, are left alone.
+    assert_eq!(token_problems(&workflows()), Vec::<String>::new());
+    let stamp = r#"run: tools/xtask release stamp --to "$VERSION""#;
+    let holds = "macos-farm.yml: job release holds `id-token: write` and runs `cargo`";
+    for run in [
+        r#"run: cargo xtask release stamp --to "$VERSION""#,
+        "run: cargo +stable build --locked",
+        "run: cargo --locked build",
+        "run: set -e; cargo run -p xtask",
+        "run: (cargo test) | tee log",
+        r#"run: echo "$(cargo xtask x)""#,
+        "run: cargo check",
+        "run: cargo clippy --all-targets",
+        "run: cargo install --path .",
+        "run: cargo --manifest-path x build",
+        "run: cargo -C dir build",
+        "run: cargo fetch --locked",
+        "run: cargo",
+        "run: ~/.cargo/bin/cargo build",
+        "run: |\n          set -e\n          cargo metadata",
+    ] {
+        assert_eq!(
+            token_problems(&changed_job("macos-farm.yml", "release", stamp, run)),
+            [holds],
+            "{run}"
+        );
+    }
+    for run in [
+        "run: rustup toolchain install",
+        "run: echo cargo-deny",
+        r#"run: tools/xtask release stamp --to "$VERSION""#,
+    ] {
+        assert_eq!(
+            token_problems(&changed_job("macos-farm.yml", "release", stamp, run)),
+            Vec::<String>::new(),
+            "{run}"
+        );
+    }
+    let action = "      - run: rustup toolchain install\n";
+    assert_eq!(
+        token_problems(&changed_job(
+            "macos-farm.yml",
+            "pkg",
+            action,
+            &format!("{action}      - uses: ./.github/actions/js-agent-next-version\n")
+        )),
+        [
+            "macos-farm.yml: job pkg holds `id-token: write` and uses the repository's own action ./.github/actions/js-agent-next-version"
+        ]
+    );
+    assert_eq!(
+        token_problems(&changed_job(
+            "macos-farm.yml",
+            "pkg-update",
+            "    if: ${{ inputs.what == 'pkg' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch') }}\n",
+            "    if: ${{ inputs.what == 'pkg' }}\n"
+        )),
+        [
+            "macos-farm.yml: job pkg-update holds `id-token: write` and its `if:` does not pin a push to main or a manual run"
+        ]
+    );
+    assert_eq!(
+        token_problems(&changed_job(
+            "macos-farm.yml",
+            "xtask",
+            "      contents: read\n",
+            "      contents: read\n      id-token: write\n"
+        )),
+        [
+            "macos-farm.yml: job xtask holds `id-token: write` and its `if:` does not pin a push to main or a manual run",
+            "macos-farm.yml: job xtask holds `id-token: write` and runs `cargo`"
+        ]
+    );
+}
+
+#[test]
 fn a_workflow_that_is_not_yaml_is_a_problem_and_farm_yml_is_not_judged_here() {
     // Catches: an unreadable workflow skipped as if it held no token, and the farm lane's own file
     // refused by the rule that holds the others.
@@ -457,5 +865,20 @@ fn a_workflow_that_is_not_yaml_is_a_problem_and_farm_yml_is_not_judged_here() {
     assert_eq!(
         token_problems(&[(FILE.to_owned(), farm)]),
         Vec::<String>::new()
+    );
+    // An unreadable farm.yml is not judged either, and a call of it cannot be followed.
+    assert_eq!(
+        token_problems(&[(FILE.to_owned(), "a: [".to_owned())]),
+        Vec::<String>::new()
+    );
+    let call = file_of(
+        "a.yml",
+        "on: pull_request",
+        "  call:\n    uses: ./.github/workflows/farm.yml\n",
+    );
+    let found = token_problems(&[call, (FILE.to_owned(), "a: [".to_owned())]);
+    assert_eq!(
+        found,
+        ["a.yml: job call calls ./.github/workflows/farm.yml, a workflow this lint cannot read"]
     );
 }
