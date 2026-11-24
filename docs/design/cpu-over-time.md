@@ -326,6 +326,11 @@ accepts. What corrects is the next placement:
   - the memory rule before #1035.
 - **Contention** (ASSUMED): a host asked for more than its cores gives each job cores/demand of what it asks, and the
   job runs longer by that factor. Nothing is lost to cache or switching.
+- `js-cpu-replay shadow <log>` reads the job service's own log under `--placement-curves shadow` (step 2) and
+  prints, per class of at least `--min-runs` check lines (default 16), the runs, the mean and peak error of the run
+  against the profile, the curve's error as a share of the flat level's, whether the profile is shaped, and the CPU
+  error the curve removes against the flat line; `--hide-classes` numbers the classes instead of naming them. The
+  check line holds no booking, so the last figure is prediction error, not CPU a booking gives back.
 - **Shapes:** each job's CPU is bracketed by a "blip" (five seconds at its peak) and a "burst" (its peak while its
   CPU lasts). Without a recorded peak both are flat.
 - **Arms:** listed in the table below. Each runs at the recorded arrival speed and at 4x.

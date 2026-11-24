@@ -13,6 +13,7 @@ use flate2::write::GzEncoder;
 use crate::convert::{ConvertError, convert, results};
 use crate::report::report;
 use crate::rows::{self, RowsError};
+use crate::shadow::{self, ShadowError};
 use crate::sim::Farm;
 use crate::trace::{self, TraceError};
 
@@ -56,6 +57,18 @@ pub enum Command {
         /// The trace; a name ending in `.gz` is read compressed.
         trace: PathBuf,
     },
+    /// Prints, per class, how close the job service's shadow profiles came to its runs, from
+    /// the server's log (`--placement-curves shadow`).
+    Shadow {
+        /// The server's log; a name ending in `.gz` is read compressed.
+        log: PathBuf,
+        /// The fewest check lines a class needs for a row.
+        #[arg(long, default_value_t = 16)]
+        min_runs: usize,
+        /// Names the classes `class 1`, `class 2` and so on instead of as logged.
+        #[arg(long)]
+        hide_classes: bool,
+    },
 }
 
 /// What can go wrong between the files and the report.
@@ -86,6 +99,9 @@ pub enum Error {
     /// The store's rows do not read.
     #[error(transparent)]
     Rows(#[from] RowsError),
+    /// A check line of the server's log does not read.
+    #[error("the log: {0}")]
+    Shadow(#[from] ShadowError),
     /// The output cannot be written.
     #[error("cannot write the output: {0}")]
     Output(#[from] io::Error),
@@ -175,6 +191,14 @@ pub fn run(cli: &Cli, out: &mut dyn Write) -> Result<(), Error> {
         Command::Run { trace: path } => {
             let jobs = trace::parse(&read(path)?)?;
             out.write_all(report(&jobs, Farm::OURS).as_bytes())?;
+        }
+        Command::Shadow {
+            log,
+            min_runs,
+            hide_classes,
+        } => {
+            let checks = shadow::parse(&read(log)?)?;
+            out.write_all(shadow::table(&checks, *min_runs, *hide_classes).as_bytes())?;
         }
     }
     Ok(())
