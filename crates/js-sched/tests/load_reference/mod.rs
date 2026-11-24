@@ -34,7 +34,7 @@
 //! the memory key (2) and the fallback key (3) of the score.
 //!
 //! The settings are the document's defaults: slack 10%, score tolerance 1% of capacity,
-//! key share 25%, balance 1, pack limit 80% (800 thousandths).
+//! key share 25%, balance 1, pack limit 50% (500 thousandths).
 
 #![allow(
     dead_code,
@@ -59,7 +59,7 @@ pub const BALANCE: u128 = 1;
 pub const UNMEASURED_FLOOR_MILLIS: u64 = 1_000;
 /// `--placement-pack-limit`: the share of its cores or memory, in thousandths, up to which
 /// a worker is packed; past it, the least full worker comes first.
-pub const PACK_LIMIT_PERMILLE: u128 = 800;
+pub const PACK_LIMIT_PERMILLE: u128 = 500;
 /// The minutes of the horizon `H`.
 pub const HORIZON: u128 = 30;
 const PPM: u128 = 1_000_000;

@@ -5,7 +5,7 @@
 //! predicate refused, so it cannot admit anything and cannot move the fault bound. It
 //! compares the new lease's charge with each candidate's predicted load, slot by slot, and
 //! prefers the worker the lease fits most tightly, as long as that worker's bookings stay
-//! within the pack limit (80% of its capacity by default) with the lease. When no candidate
+//! within the pack limit (50% of its capacity by default) with the lease. When no candidate
 //! stays within it, the lease goes to the candidate whose bookings are the smallest share
 //! of its capacity. Two keys come before the pack limit: overshoot of the capacity (key 1)
 //! and room for a memory miss (key 2). It is integer arithmetic only, so a replay ranks the
@@ -154,7 +154,7 @@ pub const MAX_BALANCE: u32 = 4;
 pub const MAX_PACK_LIMIT_PERMILLE: u32 = 1000;
 
 /// The default `--placement-pack-limit`, in thousandths of a worker's capacity: 0.8x.
-pub const DEFAULT_PACK_LIMIT_PERMILLE: u32 = 800;
+pub const DEFAULT_PACK_LIMIT_PERMILLE: u32 = 500;
 
 /// A charge or a load at one slot: CPU in millicores, memory in bytes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -324,7 +324,7 @@ impl ScoreConfig {
 }
 
 impl Default for ScoreConfig {
-    /// Balance 1, tolerance 1% of capacity, key share 25%, pack limit 80% of capacity.
+    /// Balance 1, tolerance 1% of capacity, key share 25%, pack limit 50% of capacity.
     fn default() -> Self {
         Self {
             balance: 1,
