@@ -141,7 +141,7 @@ mod ipc;
 mod launchd;
 mod ledger;
 #[cfg(target_os = "macos")]
-mod macos;
+pub(crate) mod macos;
 mod make;
 mod pool;
 mod proof;

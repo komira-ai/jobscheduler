@@ -29,11 +29,16 @@ pub enum Reason {
     LeaseUnreachable,
     /// `cleanup` before a `verify` succeeded.
     NotVerified,
+    /// The copy of the files the package replaces could not be made, or a copy could not be
+    /// removed.
+    KeepFailed,
+    /// `rollback` could not put the kept files back.
+    RestoreFailed,
 }
 
 impl Reason {
     /// Every reason.
-    pub const ALL: [Reason; 10] = [
+    pub const ALL: [Reason; 12] = [
         Reason::BadArgs,
         Reason::BadParams,
         Reason::Locked,
@@ -44,6 +49,8 @@ impl Reason {
         Reason::NoHello,
         Reason::LeaseUnreachable,
         Reason::NotVerified,
+        Reason::KeepFailed,
+        Reason::RestoreFailed,
     ];
 
     /// The token in the JSON.
@@ -60,6 +67,8 @@ impl Reason {
             Reason::NoHello => "no_hello",
             Reason::LeaseUnreachable => "lease_unreachable",
             Reason::NotVerified => "not_verified",
+            Reason::KeepFailed => "keep_failed",
+            Reason::RestoreFailed => "restore_failed",
         }
     }
 }

@@ -2,7 +2,7 @@
 //! notes the session the lease server shows, restarts the unit (stop, wait for it to be down,
 //! start, wait for it to be active) and does not restart twice.
 
-use js_agent::update_hook::config::{CUTOVER_RETRY_SECS, Reason, cutover, prepare, verify};
+use js_agent::update_hook::config::{CUTOVER_RETRY_SECS, Reason, cutover, verify};
 use js_agent::update_hook::{Class, Outcome};
 
 use super::rig::{Rig, Say};
@@ -130,13 +130,13 @@ fn a_server_that_cannot_be_asked_defers_the_cutover_before_anything_is_restarted
 fn prepare_clears_a_record_an_earlier_update_left_and_the_next_cutover_restarts_again() {
     let rig = fresh("config-cutover-next-update");
     rig.lease.say(&[Say::Host("live", Some(1000))]);
-    assert_eq!(rig.run(prepare).outcome, Outcome::Success);
+    assert_eq!(rig.prepare().outcome, Outcome::Success);
     assert_eq!(rig.run(cutover).outcome, Outcome::Success);
     rig.lease.say(&[Say::Host("live", Some(2000))]);
     assert_eq!(rig.run(verify).outcome, Outcome::Success);
     assert!(rig.record().unwrap().verified);
     rig.units.log.borrow_mut().clear();
-    let done = rig.run(prepare);
+    let done = rig.prepare();
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
     assert!(rig.record().is_none());
     assert_eq!(rig.run(cutover).outcome, Outcome::Success);

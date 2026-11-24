@@ -45,8 +45,8 @@ fn a_start_or_a_cleanup_under_way_keeps_the_jobs_from_being_handed_over() {
 /// Asserts that a stop asked of a running job keeps the jobs from being handed over until
 /// the job has ended and its checks have run, and that a cleanup stuck on a removal that
 /// keeps failing keeps them too. Catches a handover that leaves a stop half done, which the
-/// next process does not know of, or a cleanup with its checks owed, which taints the host
-/// at the next start.
+/// next process does not know of, or a cleanup with its checks owed, which the next process
+/// must then check at its start.
 #[test]
 fn a_stop_asked_or_a_cleanup_that_fails_keeps_the_jobs_from_being_handed_over() {
     let mut h = Harness::new("handover-stop");

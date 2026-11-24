@@ -1,7 +1,7 @@
 //! The requeue after a start a host refused ([`crate::JobStore::requeue_held`]): one
 //! commit that puts a placed or starting job, of a share of a host or of the whole host, back
 //! to queued with the bars and note it is given and the host appended to its held refusals or
-//! its capacity refusals,
+//! its capacity refusals (or to neither, for a bundle-pending refusal),
 //! frees the allocation with `Refused`, writes the rows given beside it and deletes the
 //! allocation's start from the host's dispatch queue without queueing a stop. It counts no
 //! failed prepare, writes nothing when its commit fails, is refused for a job or allocation it
@@ -482,5 +482,81 @@ pub fn a_capacity_refusal_requeues_the_job_and_names_the_host_in_its_own_list<B:
         (twice.held_refusals, twice.capacity_refusals),
         (vec![host("host-b")], vec![host("host-a"), host("host-c")]),
         "{name}: the second capacity refusal did not follow the first"
+    );
+}
+
+/// A job whose start `host-a` refused while it fetches the job's bundle goes back to queued as
+/// after a held refusal (its allocation freed with `Refused` at once, its start gone from the
+/// dispatch queue with no stop, the bars and the note given, no failed prepare counted), and
+/// the host is appended to neither its held refusals nor its capacity refusals, which keep
+/// what earlier refusals wrote. Catches a bundle-pending refusal counted as a held or a capacity
+/// one, and one that clears the lists.
+pub fn a_bundle_pending_refusal_requeues_the_job_and_names_the_host_in_no_list<B: Backend>(
+    backend: &B,
+) {
+    let name = "a_bundle_pending_refusal_requeues_the_job_and_names_the_host_in_no_list";
+    let rig = rig(backend);
+    let id = rig.placed("bp-first");
+    rig.tick();
+    let capacity = HeldRequeue {
+        refused: RequeuedFor::Capacity,
+        prepare_bars: BTreeMap::new(),
+        queue: None,
+    };
+    rig.jobs
+        .requeue_held(&id, capacity, &|_| Vec::new())
+        .expect("a capacity refusal requeues");
+    rig.tick();
+    rig.jobs
+        .place(&id, host("host-a"), share())
+        .expect("placed again");
+    let placed = rig.jobs.get_job(&id).expect("reads").expect("recorded");
+    let booked = rig
+        .jobs
+        .get_allocation(&id)
+        .expect("reads")
+        .expect("booked");
+    let now = rig.store.now().expect("the store's clock");
+    let requeue = HeldRequeue {
+        refused: RequeuedFor::BundlePending,
+        ..held_on_a(&rig)
+    };
+    let (queued, freed) = rig
+        .jobs
+        .requeue_held(&id, requeue.clone(), &history)
+        .expect("a bundle-pending refusal requeues");
+    let mut trail = placed.queue.clone();
+    trail.apply_all(requeue.queue.as_slice(), now);
+    assert_eq!(
+        queued,
+        JobRecord {
+            state: JobState::Queued,
+            host: None,
+            placed_at: None,
+            prepare_bars: requeue.prepare_bars.clone(),
+            queue: trail,
+            ..placed.clone()
+        },
+        "{name}: the job is not queued with its lists as they were, and nothing else"
+    );
+    assert_eq!(
+        (queued.held_refusals, queued.capacity_refusals),
+        (Vec::new(), vec![host("host-a")]),
+        "{name}: the bundle-pending refusal changed a refusal list"
+    );
+    assert_eq!(
+        freed,
+        AllocationRecord {
+            step: AllocationStep::Freed,
+            freed_at: Some(now),
+            end_reason: Some(EndReason::Refused),
+            ..booked
+        },
+        "{name}: the allocation is not freed with the refusal's reason"
+    );
+    assert_eq!(
+        dispatch_of(&rig, "host-a"),
+        [],
+        "{name}: the start was left in the dispatch queue or a stop was queued"
     );
 }

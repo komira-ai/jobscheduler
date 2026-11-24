@@ -1,6 +1,6 @@
 # Scheduling on CPU use over time
 
-Status: design for review. Nothing here is built except the replay (`crates/js-cpu-replay`). Companion to
+Status: design for review. Built so far: the replay (`crates/js-cpu-replay`), step 1 (record) and step 2 (learn in shadow, `--placement-curves shadow`). Nothing else here is built. Companion to
 [sizing.md](sizing.md) (how a class's CPU is booked) and [placement-by-load.md](placement-by-load.md) (the
 load rule and the time profiles designed for leases, never wired to jobs).
 
@@ -246,10 +246,12 @@ teaches the class: a run slowed by contention may only raise it, as today.
   for (close to) the peak memory usage". It records only each window's peak, with a 48 h half-life. It takes the
   maximum for minimal tolerance of out-of-memory kills, the 98th percentile for low tolerance, and between them the
   larger of the 60th percentile and half the peak; then a 10 to 15% margin and the maximum over the last hour.
-- **What is taken here:** #1035's rule as it is. The maximum over recent runs is Autopilot's choice for minimal
-  tolerance, which is ours because a job here may not be killed.
-- **The host's measured memory:** the whole host's memory in use (today the jobs' group's working set, READ:
-  `NodeLoad.working_set_bytes`), used as for CPU.
+- **What is taken here:** #1035's rule, with the peak of each run's non-file memory (`memory.current` less
+  `file - shmem`, sampled about once a second into the result's `memory_series`, pairs combined by their maximum)
+  in place of `memory.peak`, which also counts the page cache of files the job read (`sizing.md`, 7.7). The maximum
+  over recent runs is Autopilot's choice for minimal tolerance, which is ours because a job here may not be killed.
+- **The host's measured memory:** the whole host's non-file memory (`host_nonfile_bytes` of the heartbeat's load,
+  from `/proc/meminfo`), the same measure, in place of the jobs' group's working set.
 - **Nothing is ever killed for memory.** A host whose bookings leave no room is refused as `booked-memory`.
 
 ## 5. The placement rule
@@ -383,9 +385,10 @@ negative and fades; each release reads the other's results.
 - **Delay on purpose** (a job not yet started), decided by the perfect-curve arm; **a spread term**, by step 3.
 
 ## 12. Mac hosts, settings
-- **Mac hosts:** the Mac runtime has no `usage` method (READ), so Mac classes stay flat until Linux shows a gain.
+- **Mac hosts:** the Mac runtime reports each run's usage and, with `--cpu-series`, its CPU series, from the samples of the
+  run's processes (`docs/design/mac-runtime.md`, section 4), so Mac classes learn as Linux's do.
 - **Settings** (flags, each off or at today's value by default): agent `--cpu-series`, `--host-second-samples`;
-  server `--placement-curves off|shadow|on`, `--curve-hosts`, `--curve-horizon-seconds 128`, `--curve-slot-seconds
+  server `--placement-curves off|shadow|on` (today the flag takes `off` and `shadow`; `on` comes with step 4), `--curve-hosts`, `--curve-horizon-seconds 128`, `--curve-slot-seconds
   2`, `--curve-min-runs 8`, `--curve-fit-ratio 0.8`, `--curve-bias-fade-seconds 10`, `--curve-max-hold-seconds 30`
   (held jobs are only ones not yet started); the CPU slack stays 1.1. Off equals today's behaviour exactly.
 

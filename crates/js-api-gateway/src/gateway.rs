@@ -26,6 +26,8 @@ pub enum Rpc {
     UncordonHost,
     /// `ClearHostTaint`, served at `POST /v1/hosts/{host_id}:cleartaint`.
     ClearHostTaint,
+    /// `RetireHost`, served at `POST /v1/hosts/{host_id}:retire`.
+    RetireHost,
     /// `ListPools`, served at `GET /v1/pools`.
     ListPools,
     /// `ListProviders`, served at `GET /v1/providers`.
@@ -49,6 +51,7 @@ impl Rpc {
             Self::CordonHost => "CordonHost",
             Self::UncordonHost => "UncordonHost",
             Self::ClearHostTaint => "ClearHostTaint",
+            Self::RetireHost => "RetireHost",
             Self::ListPools => "ListPools",
             Self::ListProviders => "ListProviders",
             Self::GetUsage => "GetUsage",
@@ -150,6 +153,15 @@ pub const ROUTES: &[Route] = &[
         output: "jobscheduler.v1.ClearHostTaintResponse",
     },
     Route {
+        verb: Verb::Post,
+        template: "/v1/hosts/{host_id}:retire",
+        rpc: Rpc::RetireHost,
+        body: true,
+        status: 200,
+        input: "jobscheduler.v1.RetireHostRequest",
+        output: "jobscheduler.v1.RetireHostResponse",
+    },
+    Route {
         verb: Verb::Get,
         template: "/v1/pools",
         rpc: Rpc::ListPools,
@@ -248,6 +260,12 @@ async fn call<T: ::js_proto::v1::job_service_server::JobService>(
             let request = decode_as::<::js_proto::v1::ClearHostTaintRequest>(&input)?;
             let request = ::tonic::Request::from_parts(::tonic::metadata::MetadataMap::new(), extensions, request);
             let response = service.clear_host_taint(request).await;
+            answer_of(output, response.map(|response| ::prost::Message::encode_to_vec(response.get_ref())))
+        }
+        Rpc::RetireHost => {
+            let request = decode_as::<::js_proto::v1::RetireHostRequest>(&input)?;
+            let request = ::tonic::Request::from_parts(::tonic::metadata::MetadataMap::new(), extensions, request);
+            let response = service.retire_host(request).await;
             answer_of(output, response.map(|response| ::prost::Message::encode_to_vec(response.get_ref())))
         }
         Rpc::ListPools => {

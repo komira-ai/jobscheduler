@@ -46,6 +46,7 @@ fn job_result(id: &str) -> JobResult {
         input_failure: None,
         usage: None,
         cpu_series: None,
+        memory_series: None,
     }
 }
 

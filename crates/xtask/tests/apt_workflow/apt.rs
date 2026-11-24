@@ -330,10 +330,17 @@ pub fn is_role_job(name: &str) -> bool {
 }
 
 /// The jobs besides the apt jobs that may hold `id-token: write` in `release.yml`: the call of
-/// artifacts.yml, whose jobs sign, `pkg-upload` (the macOS package's upload, which assumes the
+/// artifacts.yml, whose jobs sign, the call of js-agent-macos-pkg.yml (`beta-macos-pkg`), whose call
+/// of macos-farm.yml holds the token for the farm's network, `pkg-upload` (the macOS package's upload, which assumes the
 /// role of the apt jobs: `pkg_upload.rs` holds its shape), the gamma step, and the call of docker-swarm-updater's deploy
 /// workflow, which asks for a token for each request to the deploy front.
-const TOKEN_HOLDERS: [&str; 4] = ["artifacts", "pkg-upload", "gamma", "cp-deploy"];
+const TOKEN_HOLDERS: [&str; 5] = [
+    "artifacts",
+    "beta-macos-pkg",
+    "pkg-upload",
+    "gamma",
+    "cp-deploy",
+];
 
 /// The verb each kind of job runs, and no other kind: the index job of the suite `testing` merges
 /// the release's packages (`apt index`), the one of `stable` promotes the entries testing lists
@@ -406,7 +413,7 @@ pub fn apt_problems(doc: &Node) -> Vec<String> {
         }
         if !holds_role && !TOKEN_HOLDERS.contains(&name) && holds_token(found) {
             problems.push(format!(
-                "{name}: holds `id-token: write`; only artifacts, pkg-upload, gamma, cp-deploy and the apt jobs that read and write may"
+                "{name}: holds `id-token: write`; only artifacts, beta-macos-pkg, pkg-upload, gamma, cp-deploy and the apt jobs that read and write may"
             ));
         }
         for verb in [PKG_VERB, DESCRIPTOR_VERB] {

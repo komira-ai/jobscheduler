@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 
 use crate::release::Version;
 
+pub mod build;
+
 /// The package identifier.
 pub const IDENTIFIER: &str = "com.komira.js-agent";
 
@@ -37,7 +39,7 @@ pub struct Entry {
 }
 
 /// The directory of the package's own files, below the volume.
-const PREFIX: &str = "Library/Application Support/js-agent";
+pub const PREFIX: &str = "Library/Application Support/js-agent";
 
 /// The files of the payload: path, mode.
 fn files() -> Vec<(String, u32)> {
@@ -323,9 +325,12 @@ pub fn problems(inspected: &Inspected, version: &str) -> Vec<String> {
     found
 }
 
-/// Reads the package with `pkgutil` and `lsbom`.
-#[cfg(target_os = "macos")]
-fn inspect(pkg: &Path) -> Result<Inspected, Error> {
+/// Reads the package with the programs `pkgutil` and `lsbom` name.
+///
+/// # Errors
+/// [`Error::Tool`] when a program does not start or fails, or the archive does not hold one
+/// component; [`Error::Io`] when the component's files cannot be read.
+pub fn inspect_with(pkg: &Path, pkgutil: &str, lsbom: &str) -> Result<Inspected, Error> {
     use std::process::Command;
     let tool = |program: &str, args: &[&Path]| -> Result<String, Error> {
         let out = Command::new(program)
@@ -344,7 +349,7 @@ fn inspect(pkg: &Path) -> Result<Inspected, Error> {
     static CALLS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("xtask-macpkg-{}-{call}", std::process::id()));
-    tool("pkgutil", &[Path::new("--expand-full"), pkg, &dir])?;
+    tool(pkgutil, &[Path::new("--expand-full"), pkg, &dir])?;
     let read = || -> Result<Inspected, Error> {
         // A product archive holds the component in a directory of its own.
         let mut component = dir.clone();
@@ -363,7 +368,7 @@ fn inspect(pkg: &Path) -> Result<Inspected, Error> {
             }
             component = inner.remove(0);
         }
-        let bom = tool("lsbom", &[&component.join("Bom")])?;
+        let bom = tool(lsbom, &[&component.join("Bom")])?;
         let mut scripts = Vec::new();
         if let Ok(items) = std::fs::read_dir(component.join("Scripts")) {
             for item in items.flatten() {
@@ -381,6 +386,12 @@ fn inspect(pkg: &Path) -> Result<Inspected, Error> {
     let inspected = read();
     let _ = std::fs::remove_dir_all(&dir);
     inspected
+}
+
+/// Reads the package with `pkgutil` and `lsbom`.
+#[cfg(target_os = "macos")]
+fn inspect(pkg: &Path) -> Result<Inspected, Error> {
+    inspect_with(pkg, "pkgutil", "lsbom")
 }
 
 #[cfg(not(target_os = "macos"))]

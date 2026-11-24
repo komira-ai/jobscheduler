@@ -9,7 +9,7 @@ use std::time::Duration;
 use clap::ValueEnum;
 use js_registry::PoolConfig;
 use js_sched::{Backfill, MemoryPercent};
-use js_sched_placer::sizes::ColdSize;
+use js_sched_placer::sizes::{ColdMemoryOn, ColdSize, Curves};
 
 use super::CpuSlack;
 use crate::clock::SharedClock;
@@ -87,25 +87,36 @@ pub(crate) fn split(pool: PoolConfig) -> (PoolConfig, MemoryPercent) {
 }
 
 /// The placer the registry takes: its one engine is built with `cpu_slack`, the share
-/// `memory` of each host's memory, the `cold` size of a job class with no estimate, and
-/// backfill: work may backfill a host a whole-node request has set aside, up to
-/// `max_lease_wall` (`server.max_lease_wall`; none: any wall time). `clock` is the
-/// registry's.
+/// `memory` of each host's memory, the `cold` size of a job class with no estimate (and
+/// `cold_on`, the cold memory of the jobs of each operating system the server names), the
+/// `curves` mode (`--placement-curves`), and backfill: work may backfill a host a
+/// whole-node request has set aside, up to `max_lease_wall` (`server.max_lease_wall`;
+/// none: any wall time). `clock` is the registry's.
 pub(crate) fn placer(
     max_lease_wall: Option<Duration>,
     cpu_slack: CpuSlack,
-    memory: MemoryPercent,
-    cold: ColdSize,
+    (memory, cold, curves): (MemoryPercent, ColdSize, Curves),
+    cold_on: ColdMemoryOn,
     clock: &SharedClock,
 ) -> Arc<SchedPlacer> {
+    let settings = settings_of(max_lease_wall, cpu_slack, (memory, cold, curves));
+    Arc::new(SchedPlacer::new(settings, clock.clone()).with_cold_memory_on(cold_on))
+}
+
+/// The engine's settings from the server's configuration, as [`placer`] takes them.
+fn settings_of(
+    max_lease_wall: Option<Duration>,
+    cpu_slack: CpuSlack,
+    (memory, cold, curves): (MemoryPercent, ColdSize, Curves),
+) -> Settings {
     let ceiling = max_lease_wall.unwrap_or(Duration::MAX);
-    let settings = Settings {
+    Settings {
         backfill: Backfill::enforced(ceiling),
         load: cpu_slack.load_config(),
         memory,
         cold,
-    };
-    Arc::new(SchedPlacer::new(settings, clock.clone()))
+        curves,
+    }
 }
 
 /// `head` (`pool "<name>"`), once the pool it names is one the engine can place on
@@ -151,6 +162,22 @@ mod tests {
              give the pool capabilities with an arch"
         );
         assert!(check_pool(&pool(&[]).placing_by_hello(), place).is_ok());
+    }
+
+    /// Asserts that the settings the engine is built with carry the `curves` mode given,
+    /// `shadow` and `off` each, with the other settings as given. Catches a mode dropped
+    /// on the way to the engine and one swapped for the default.
+    #[test]
+    fn the_curves_mode_reaches_the_engine_settings() {
+        let slack = CpuSlack::default();
+        let memory = MemoryPercent::clamped(100);
+        let cold = ColdSize::default();
+        for curves in [Curves::Shadow, Curves::Off] {
+            let made = settings_of(None, slack, (memory, cold, curves));
+            assert_eq!(made.curves, curves);
+            assert_eq!(made.cold, cold);
+            assert_eq!(made.memory, memory);
+        }
     }
 
     /// Asserts the three answers of a given value, each message in full: none leaves

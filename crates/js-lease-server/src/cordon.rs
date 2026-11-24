@@ -35,6 +35,24 @@ pub(crate) const CORDON_UNSAVED: &str = "cordon-unsaved";
 /// over a restart could not be written.
 pub(crate) const TAINT_UNSAVED: &str = "taint-unsaved";
 
+/// The answer when a retirement could not be read or written to the job store or the bindings.
+pub(crate) const RETIRE_UNSAVED: &str = "retire-unsaved";
+
+/// The answer to a retirement of a host heard within the grace.
+pub(crate) const HOST_LIVE: &str = "host-live";
+
+/// The answer to a retirement of a host on which a job's allocation is live.
+pub(crate) const HOST_HOLDS_JOBS: &str = "host-holds-jobs";
+
+/// The answer to a retirement of a tainted host.
+pub(crate) const HOST_TAINTED: &str = "host-tainted";
+
+/// The answer to a retirement of a cordoned host.
+pub(crate) const HOST_CORDONED: &str = "host-cordoned";
+
+/// The answer to a retirement of a host with a scale-down mark.
+pub(crate) const HOST_MARKED: &str = "host-marked";
+
 /// The answer for a host the registry does not hold.
 pub(crate) const UNKNOWN_HOST: &str = "unknown-host";
 

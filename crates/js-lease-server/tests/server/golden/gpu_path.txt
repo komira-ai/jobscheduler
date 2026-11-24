@@ -12,6 +12,7 @@
 --client-token default=none required=false
 --cold-cpu-millis default=22000 required=false
 --cold-memory-bytes default=4294967296 required=false
+--cold-memory-bytes-on default=none required=false
 --config default=none required=false
 --cpu-slack default=none required=false
 --drain-hold default=15s required=false
@@ -30,6 +31,7 @@
 --max-requests default=100 required=false
 --metrics-listen default=none required=false
 --placement default=none required=false values=registry|js-sched
+--placement-curves default=off required=false
 --profile-store-bytes default=268435456 required=false
 --read-timeout default=30s required=false
 --ready-listen default=none required=false

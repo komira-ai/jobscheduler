@@ -9,7 +9,10 @@
 //!   session and the account's uid, the supervisor among them), and so does every later poll
 //!   until a sweep leaves none; only then is the end read, so a job the sweep ended reads as
 //!   its killed supervisor's status (128 and 9). A job that ended within the grace is not
-//!   swept by the poll: what it left is the removal's.
+//!   swept by the poll: what it left is the removal's. A poll that finds the job running
+//!   samples the usage of the account's processes ([`crate::mac_usage`]); the poll that reads
+//!   the end keeps what the exit record says the supervisor's wait of the job found, and ends
+//!   the run's series there.
 //! - **Stop.** `SIGTERM` to the job's process group, so a job may flush (nothing for a run
 //!   that has ended: its job is reaped, and its pid may be another's), and the grace's end
 //!   noted; a second stop changes neither. The lifecycle owns the wall limit and calls the
@@ -27,7 +30,6 @@
 //!   outputs that could not be copied, or a commit that failed, fail it only as
 //!   [`RuntimeError::outputs`], after everything else is done.
 
-use std::io;
 use std::time::Duration;
 
 use rustix::process::Signal;
@@ -35,13 +37,15 @@ use rustix::process::Signal;
 use super::run::{Job, exit_of};
 use super::{NativeRuntime, accounts, end, logs, outputs, put};
 use crate::lifecycle::{RunHandle, RuntimeError, Status};
-use crate::mac_supervisor::ExitRecord;
 use crate::mac_sweep::ProcessTable;
+use crate::mac_usage::ProcessUsage;
 
 impl NativeRuntime {
-    /// How the run `id` is now.
+    /// How the run `id` is now. A run still running has its processes sampled
+    /// ([`sample`]); the poll that sees its end ends its series there.
     pub(super) fn poll_run(&mut self, id: &RunHandle) -> Status {
         let now = (self.now_ms)();
+        let mono = (self.mono_us)();
         let Some(run) = self.runs.get_mut(&id.0) else {
             return Status::Gone;
         };
@@ -49,7 +53,7 @@ impl NativeRuntime {
             run.ended = match &mut run.job {
                 None => Some(Status::Gone),
                 Some(job) if job.sweeping => swept_then_told(&id.0, job, &*self.table),
-                Some(job) => match told(&id.0, job.supervised.try_exit()) {
+                Some(job) => match told(&id.0, job) {
                     None if job.kill_after.is_some_and(|after| now >= after) => {
                         job.sweeping = true;
                         swept_then_told(&id.0, job, &*self.table)
@@ -57,6 +61,12 @@ impl NativeRuntime {
                     seen => seen,
                 },
             };
+            if let Some(job) = run.job.as_mut() {
+                match run.ended {
+                    None => sample(&id.0, job, mono, &*self.processes),
+                    Some(_) => job.usage.end_at(mono),
+                }
+            }
             if matches!(run.ended, Some(Status::Exited(_))) {
                 logs::end(&mut run.logs, &run.scratch);
             }
@@ -133,18 +143,31 @@ fn swept_then_told(lease: &str, job: &mut Job, table: &dyn ProcessTable) -> Opti
     if !end::end_processes(lease, job, table).clean {
         return None;
     }
-    told(lease, job.supervised.try_exit())
+    told(lease, job)
 }
 
-/// How the run ended, as the supervisor was `asked`: `None` while the job runs; a setup that
-/// ended no job, or a supervisor that cannot be asked, leaves the run gone.
-fn told(lease: &str, asked: io::Result<Option<ExitRecord>>) -> Option<Status> {
-    match asked {
+/// How the run ended, as `job`'s supervisor says when asked: `None` while the job runs; a
+/// setup that ended no job, or a supervisor that cannot be asked, leaves the run gone. An exit
+/// record's usage (what the supervisor's wait of the job said) is kept in `job`.
+fn told(lease: &str, job: &mut Job) -> Option<Status> {
+    match job.supervised.try_exit() {
         Ok(None) => None,
-        Ok(Some(record)) => Some(exit_of(&record.ended).map_or(Status::Gone, Status::Exited)),
+        Ok(Some(record)) => {
+            job.reaped = record.usage;
+            Some(exit_of(&record.ended).map_or(Status::Gone, Status::Exited))
+        }
         Err(why) => {
             tracing::warn!("native {lease}: the supervisor cannot be asked: {why}");
             Some(Status::Gone)
         }
+    }
+}
+
+/// Takes a sample of the usage of `job`'s processes, those of its account's uid, at `mono`
+/// microseconds. A listing that fails takes none, and the next poll tries again.
+fn sample(lease: &str, job: &mut Job, mono: u64, processes: &dyn ProcessUsage) {
+    match processes.of_uid(job.account.uid) {
+        Ok(found) => job.usage.observe(mono, &found),
+        Err(why) => tracing::debug!("native {lease}: no usage sample: {why}"),
     }
 }

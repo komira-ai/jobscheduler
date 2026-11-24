@@ -172,6 +172,35 @@ pub enum Beat {
     NoSession(Option<NodeRow>),
 }
 
+/// How [`crate::JobStore::retire_node`] judged the retirement of a host's row. Every answer but
+/// [`Retire::Retired`] deleted nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Retire {
+    /// The row was deleted at the version read.
+    Retired,
+    /// The host has no row: there is nothing to delete.
+    Absent,
+    /// The row is kept, for the reason given.
+    Refused(Kept),
+}
+
+/// Why a host's row is kept rather than retired or forgotten: what the host still is, or still
+/// holds or is owed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kept {
+    /// The host was heard within the grace: it is live.
+    Live,
+    /// A job's allocation on the host is live: a job placed, starting or running there, or one
+    /// ending there whose stop the host has not confirmed.
+    HoldsJobs,
+    /// The host is tainted: a `taint/<host>` row, or a taint on its stored binding.
+    Tainted,
+    /// The host is cordoned (`cordon/<host>`).
+    Cordoned,
+    /// The host has a scale-down mark (`hostmark/<host>`).
+    Marked,
+}
+
 #[cfg(test)]
 mod tests {
     use super::SessionDigest;

@@ -347,8 +347,8 @@ the same `received->taken` row is 0 ms p50 and 3 ms p90.
   still discarded on the worker first: it is the runtime's own state. A removal that is done is not
   made again while the quota waits for the project's usage to read zero.
 - **The order and the outcomes are unchanged.** The record that the checks are owed is written on the
-  worker before either removal is asked, so a restart while one runs still taints the host
-  (`check-owed`). A removal that fails taints `cleanup-failed` with the same check as before, and
+  worker before either removal is asked, so a restart while one runs leaves the record, and the next
+  start runs the owed check (tainting the host `check-owed` when it finds something or cannot run). A removal that fails taints `cleanup-failed` with the same check as before, and
   the slot stays booked; the job waits in its stage, with its slot booked, while a removal runs.
 - **The cleanup is measured.** When a run's cleanup passes, the lifecycle logs
   `job: Cleaned { run_id, timeline: CleanupTimeline { steps, worker_ms } }`: the milliseconds after
@@ -381,7 +381,7 @@ the same `received->taken` row is 0 ms p50 and 3 ms p90.
 - No wire, record or configuration format changes; the journal gains the `Cleaned` line. The
   `Started` line is unchanged, so `js-start-timeline` reads it as before.
 - A crash while a removal runs off the worker leaves what a crash during a removal on the worker
-  left: the owed record (the next start taints the host) and the lease's sidecar (the start-up pass
+  left: the owed record (the next start runs the owed check) and the lease's sidecar (the start-up pass
   removes the lease).
 - A thread that panics during a removal loses the run it was given: the removal answers a failure
   (the host is tainted `cleanup-failed`) and the next removal takes the lease apart by its sidecar.

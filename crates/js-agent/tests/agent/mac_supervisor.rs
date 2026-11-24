@@ -185,8 +185,9 @@ mod macos {
     /// A job that exits 7: the status is 7, the ready record has the pid the job prints (its
     /// group is checked from outside the sandbox, where `ps` may look, by
     /// `the_job_runs_in_the_chosen_directory_and_its_own_group`), no audit session (none was
-    /// asked for), and the exit record has the code. Catches a supervisor that execs the job in
-    /// its own place, or reports a code it did not see.
+    /// asked for), and the exit record has the code and what the job used. Catches a supervisor
+    /// that execs the job in its own place, reports a code it did not see, or records no
+    /// usage.
     #[test]
     fn a_job_s_pid_and_code_are_recorded() {
         let folders = Folders::new("supervisor-code");
@@ -198,13 +199,18 @@ mod macos {
         let pid = ready.job_pid;
         assert_eq!(String::from_utf8_lossy(&output.stdout), format!("{pid}\n"));
         assert_eq!(ready.asid, None);
+        let exit = exit.unwrap();
+        // The supervisor's wait says what the job used: a shell holds some memory.
+        let usage = exit.usage.expect("the job's usage");
+        assert!(usage.max_rss_bytes > 0, "{usage:?}");
         assert_eq!(
             exit,
-            Some(ExitRecord {
+            ExitRecord {
                 ended: Ended::Exited(7),
                 job_pid: Some(pid),
                 asid: None,
-            })
+                usage: Some(usage),
+            }
         );
     }
 

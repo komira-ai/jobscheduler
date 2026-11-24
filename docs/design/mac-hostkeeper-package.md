@@ -12,6 +12,9 @@ package holds, what hostkeeper requires, how a release reaches the Macs, and whi
   component with `pkgbuild` (no scripts) and checks it with `cargo xtask pkg check-macos`. Its `sign` job runs in the
   release's call (`sign: true`) and in a signing run (by hand, `sign: true`, on a branch of this repository), in the environment `pkg-signing`; without that environment's secrets
   it skips with a notice.
+- When the repository variable `MACOS_ON_FARM` is `true` (or a manual run sets `farm`), the unsigned package and the
+  update package are built on a Mac of the build farm from a Linux runner instead (`macos-farm.yml`,
+  `docs/mac-farm.md`), and uploaded as the same artifacts; the signing jobs stay on hosted runners.
 - `release.yml` calls it as `beta-macos-pkg` with the release's version. Its job `pkg-upload` puts the signed package
   in the package repository once `publish` passed and `beta-macos-pkg` has ended (it waits for no beta test), before
   the release's `desired` starts `hostkeeper-desired.yml`.

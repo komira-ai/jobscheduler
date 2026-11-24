@@ -91,6 +91,7 @@ fn result(cpu_series: Option<CpuSeries>) -> JobResult {
         input_failure: None,
         usage: Some(usage()),
         cpu_series,
+        memory_series: None,
     }
 }
 

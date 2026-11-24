@@ -24,8 +24,9 @@ use js_proto::v1::{
     GetUsageResponse, Job, JobFile, JobResult, JobSpec, JobState, JobTimes, ListHostsRequest,
     ListHostsResponse, ListJobsRequest, ListJobsResponse, ListPoolsRequest, ListPoolsResponse,
     ListProvidersRequest, ListProvidersResponse, LogGap, LogStream, Needs, NetworkLevel,
-    PortForward, ResourceUsage, ResultReason, StartFailureCode, SubmitJobRequest,
-    SubmitJobResponse, UncordonHostRequest, UncordonHostResponse,
+    PortForward, ResourceUsage, ResultReason, RetireHostRequest, RetireHostResponse,
+    StartFailureCode, SubmitJobRequest, SubmitJobResponse, UncordonHostRequest,
+    UncordonHostResponse,
 };
 use prost::Message;
 use prost_reflect::{DescriptorPool, DynamicMessage};
@@ -230,6 +231,14 @@ impl JobService for Stub {
             cleared_reason: "residue".to_owned(),
         };
         self.answer("ClearHostTaint", request, response)
+    }
+
+    async fn retire_host(
+        &self,
+        request: Request<RetireHostRequest>,
+    ) -> Result<Response<RetireHostResponse>, Status> {
+        let response = RetireHostResponse { retired: true };
+        self.answer("RetireHost", request, response)
     }
 
     async fn list_pools(

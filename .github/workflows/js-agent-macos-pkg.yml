@@ -1,11 +1,12 @@
-# The js-agent installer package for macOS (packaging/js-agent-macos): built on a hosted
-# Apple silicon runner from the release build of js-agent, js-mac-session and js-mac-provision,
-# with pkgbuild and productbuild, and read back by the xtask `pkg check-macos` verb, which
-# refuses anything but the files, modes and owners the package is meant to have, and any
-# script. It is a hostkeeper `macos-pkg` package (docs/design/mac-hostkeeper-package.md): the
-# file is `js-agent-<version>-macos-arm64.pkg`, it carries no preinstall or postinstall script,
-# and hostkeeper's coordinator orders it onto the Macs of a host group. It publishes nothing
-# itself: release.yml's `pkg-upload` job puts the signed package in the package repository.
+# The js-agent installer package for macOS (packaging/js-agent-macos): built on a hosted Apple
+# silicon runner (or on a Mac of the build farm, see below) from the release build of js-agent,
+# js-mac-session and js-mac-provision, with pkgbuild and productbuild, and read back by the xtask
+# `pkg check-macos` verb, which refuses anything but the files, modes and owners the package is
+# meant to have, and any script. It is a hostkeeper `macos-pkg` package
+# (docs/design/mac-hostkeeper-package.md): the file is `js-agent-<version>-macos-arm64.pkg`, it
+# carries no preinstall or postinstall script, and hostkeeper's coordinator orders it onto the Macs
+# of a host group. It publishes nothing itself: release.yml's `pkg-upload` job puts the signed
+# package in the package repository.
 #
 # `build`, `sign-code`, `package` and `sign` are the chain that makes the package that is
 # released; `build-update` and `first-install` are for the first-install test. `build` runs in the
@@ -18,6 +19,16 @@
 # `build-update` builds a second package, of the next patch version, with the same action, beside
 # `build`: the first install updates the agent to it. It is uploaded as its own artifact and no
 # job signs it or releases it.
+#
+# Where `build` and `build-update` run. On hosted Apple silicon runners unless the repository
+# variable MACOS_ON_FARM is `true` or a manual run sets `farm`, when the call job `farm` runs
+# macos-farm.yml instead (docs/mac-farm.md): the same two unsigned packages built on a Mac of the
+# build farm from a Linux runner, uploaded as the same artifacts, so every job below takes
+# whichever side ran. `farm` holds `id-token: write`, which a call grants the jobs of the file it
+# calls (they join the farm's network); those jobs are jobs of macos-farm.yml, and no token of
+# theirs can sign as artifacts.yml, the one signer hosts trust. A run on the farm has no
+# `Refused` step like `build`'s: the signing jobs' own `if:` keeps them off anywhere but a branch
+# of this repository or main.
 #
 # `first-install` runs on a manual run alone, on any branch: it calls
 # js-agent-macos-first-install.yml, which installs the unsigned package `build` made the way
@@ -86,6 +97,11 @@ on:
         required: false
         type: boolean
         default: false
+      farm:
+        description: Build on the farm's Macs instead of a hosted runner
+        required: false
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       version:
@@ -94,6 +110,11 @@ on:
         type: string
       sign:
         description: Sign the programs and the package (a signing run, on a branch of komira-ai/jobscheduler)
+        required: false
+        type: boolean
+        default: false
+      farm:
+        description: Build on the farm's Macs, to try a branch before MACOS_ON_FARM is set
         required: false
         type: boolean
         default: false
@@ -116,6 +137,7 @@ jobs:
   build:
     # The check's name (`build` alone is also a job of js-agent-deb.yml).
     name: js-agent-macos-pkg
+    if: ${{ vars.MACOS_ON_FARM != 'true' && !inputs.farm }}
     runs-on: macos-15
     timeout-minutes: 60
     permissions:
@@ -175,6 +197,7 @@ jobs:
   # lengthens nothing. It is not signed and no release takes it.
   build-update:
     name: js-agent-macos-pkg-update
+    if: ${{ vars.MACOS_ON_FARM != 'true' && !inputs.farm }}
     runs-on: macos-15
     timeout-minutes: 60
     permissions:
@@ -200,9 +223,21 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  # The unsigned packages and programs on a Mac of the build farm, in place of `build` and
+  # `build-update` (see the top of this file).
+  farm:
+    if: ${{ vars.MACOS_ON_FARM == 'true' || inputs.farm }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/macos-farm.yml
+    with:
+      version: ${{ inputs.version }}
+      what: pkg
+
   sign-code:
-    needs: [build]
-    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && inputs.sign) || (github.event_name == 'workflow_dispatch' && inputs.sign && github.repository == 'komira-ai/jobscheduler' && startsWith(github.ref, 'refs/heads/')) }}
+    needs: [build, farm]
+    if: ${{ !cancelled() && (needs.build.result == 'success' || needs.farm.result == 'success') && ((github.event_name == 'push' && github.ref == 'refs/heads/main' && inputs.sign) || (github.event_name == 'workflow_dispatch' && inputs.sign && github.repository == 'komira-ai/jobscheduler' && startsWith(github.ref, 'refs/heads/'))) }}
     environment: pkg-signing
     runs-on: macos-15
     timeout-minutes: 60
@@ -312,8 +347,8 @@ jobs:
           retention-days: 1
 
   package:
-    needs: [build, sign-code]
-    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && inputs.sign) || (github.event_name == 'workflow_dispatch' && inputs.sign && github.repository == 'komira-ai/jobscheduler' && startsWith(github.ref, 'refs/heads/')) }}
+    needs: [build, farm, sign-code]
+    if: ${{ !cancelled() && needs.sign-code.result == 'success' && ((github.event_name == 'push' && github.ref == 'refs/heads/main' && inputs.sign) || (github.event_name == 'workflow_dispatch' && inputs.sign && github.repository == 'komira-ai/jobscheduler' && startsWith(github.ref, 'refs/heads/'))) }}
     runs-on: macos-15
     timeout-minutes: 60
     permissions:
@@ -347,8 +382,8 @@ jobs:
           retention-days: 7
 
   sign:
-    needs: [build, package]
-    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && inputs.sign) || (github.event_name == 'workflow_dispatch' && inputs.sign && github.repository == 'komira-ai/jobscheduler' && startsWith(github.ref, 'refs/heads/')) }}
+    needs: [build, farm, package]
+    if: ${{ !cancelled() && needs.package.result == 'success' && (needs.build.result == 'success' || needs.farm.result == 'success') && ((github.event_name == 'push' && github.ref == 'refs/heads/main' && inputs.sign) || (github.event_name == 'workflow_dispatch' && inputs.sign && github.repository == 'komira-ai/jobscheduler' && startsWith(github.ref, 'refs/heads/'))) }}
     environment: pkg-signing
     runs-on: macos-15
     timeout-minutes: 60
@@ -451,8 +486,8 @@ jobs:
           retention-days: 7
 
   first-install:
-    needs: [build, build-update]
-    if: ${{ github.event_name == 'workflow_dispatch' }}
+    needs: [build, build-update, farm]
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && (needs.farm.result == 'success' || (needs.build.result == 'success' && needs.build-update.result == 'success')) }}
     permissions:
       contents: read
     uses: ./.github/workflows/js-agent-macos-first-install.yml

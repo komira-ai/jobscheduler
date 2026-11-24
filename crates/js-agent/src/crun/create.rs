@@ -120,6 +120,9 @@ pub(super) struct Maker {
     /// Whether a run's CPU is recorded second by second
     /// ([`CrunSettings::cpu_series`](super::CrunSettings::cpu_series)).
     pub(super) cpu_series: bool,
+    /// Whether a run's non-file memory is recorded second by second
+    /// ([`CrunSettings::memory_series`](super::CrunSettings::memory_series)).
+    pub(super) memory_series: bool,
 }
 
 /// What the worker settles of a start before its lease is made.
@@ -156,6 +159,7 @@ impl CrunRuntime {
             logs: self.logs.clone(),
             cpu_ceiling: self.cpu_ceiling,
             cpu_series: self.cpu_series,
+            memory_series: self.memory_series,
         }
     }
 
@@ -412,6 +416,7 @@ impl Maker {
             peak: super::peak::PeakWindow::default(),
             // Started with the container (`start`).
             series: None,
+            memory_series: None,
         })
     }
 
@@ -426,7 +431,10 @@ impl Maker {
         run.peak.observe(mono, 0);
         run.series = self
             .cpu_series
-            .then(|| super::series::SeriesRecorder::starting(mono, 0));
+            .then(|| crate::series::cpu::SeriesRecorder::starting(mono, 0));
+        run.memory_series = self
+            .memory_series
+            .then(|| crate::series::memory::MemoryRecorder::starting(mono));
         let started = self
             .oci
             .start_supervised(&run.spec, run.logs.file_cap(self.logs.as_ref()))

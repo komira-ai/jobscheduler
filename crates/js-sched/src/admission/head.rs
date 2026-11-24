@@ -211,6 +211,7 @@ mod tests {
             fallback: measured == 0,
             floor_cpu: 0,
             measured,
+            before: measured,
             working_set,
         }
     }

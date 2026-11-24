@@ -26,6 +26,8 @@ test = false
 [dependencies]
 clap.workspace = true
 flate2.workspace = true
+# `mac-farm`: its uploads, at most a few at a time, and the messages of a streamed upload.
+futures-util.workspace = true
 hex.workspace = true
 # `channels check-apt` runs the agent's own start check of the job user on the installed system.
 js-agent = { path = "../js-agent" }
@@ -43,6 +45,10 @@ js-lease-server = { path = "../js-lease-server" }
 js-proto = { path = "../js-proto" }
 prost.workspace = true
 prost-types.workspace = true
+# `mac-farm`'s REAPI client: the channel to the farm (TLS with the system's roots when `--tls true`)
+# and the generated clients of the Remote Execution API (build.rs).
+tonic = { workspace = true, features = ["transport", "tls-ring", "tls-native-roots"] }
+tonic-prost.workspace = true
 # The scratch directory and the guarded server child of `site-demo`.
 js-testkit = { path = "../js-testkit" }
 # `fetch --extract tar.xz` (and the xz archives its tests make).
@@ -70,7 +76,14 @@ tokio = { workspace = true, features = ["net", "rt", "time"] }
 toml.workspace = true
 ureq.workspace = true
 
+[build-dependencies]
+# The vendored Remote Execution API protos (proto/third_party), compiled for `mac-farm`.
+protox.workspace = true
+tonic-prost-build.workspace = true
+
 [dev-dependencies]
+# The fake farm of tests/mac_farm.rs serves its three services from one server (tonic's router).
+tonic = { workspace = true, features = ["router"] }
 # The registry in this process the smoke bundle is published to and pulled from
 # (tests/smoke_bundle.rs).
 js-testkit = { path = "../js-testkit", features = ["oci-registry"] }

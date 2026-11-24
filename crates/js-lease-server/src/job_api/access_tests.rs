@@ -16,8 +16,9 @@ use js_proto::v1::{
     CordonHostRequest, CordonHostResponse, GetJobRequest, GetJobResponse, GetLogsRequest,
     GetLogsResponse, GetResultRequest, GetResultResponse, GetUsageRequest, GetUsageResponse,
     ListHostsRequest, ListHostsResponse, ListJobsRequest, ListJobsResponse, ListPoolsRequest,
-    ListPoolsResponse, ListProvidersRequest, ListProvidersResponse, SubmitJobRequest,
-    SubmitJobResponse, UncordonHostRequest, UncordonHostResponse,
+    ListPoolsResponse, ListProvidersRequest, ListProvidersResponse, RetireHostRequest,
+    RetireHostResponse, SubmitJobRequest, SubmitJobResponse, UncordonHostRequest,
+    UncordonHostResponse,
 };
 use js_registry::{HostState, HostView};
 use js_state::ManualClock;
@@ -40,17 +41,17 @@ use crate::hosts::HostList;
 use crate::status::PoolsView;
 
 /// The token of `ci`, a client.
-const CI: &str = "ci-token-0123456789-abcdefghijklmnopqrst";
+pub(super) const CI: &str = "ci-token-0123456789-abcdefghijklmnopqrst";
 
 /// The token of `kbf`, a client.
 const KBF: &str = "kbf-token-0123456789-abcdefghijklmnopqrs";
 
 /// The token of `ops`, an operator.
-const OPS: &str = "ops-token-0123456789-abcdefghijklmnopqrs";
+pub(super) const OPS: &str = "ops-token-0123456789-abcdefghijklmnopqrs";
 
 /// The clients `default` (operator, [`TOKEN`]), `ci` and `kbf` (clients) and `ops`
 /// (operator).
-fn clients() -> LiveClients {
+pub(super) fn clients() -> LiveClients {
     let token = |text: &str| parse_token(text.as_bytes()).expect("a valid token");
     let mut clients = Clients::only(&token(TOKEN), "--token-file");
     for (name, role, text) in [
@@ -101,7 +102,7 @@ fn h1() -> HostView {
     }
 }
 
-/// Hosts that list `h1` and acknowledge every cordon, uncordon and clear of a taint.
+/// Hosts that list `h1` and acknowledge every cordon, uncordon, clear of a taint and retirement.
 struct AnyHost;
 
 #[tonic::async_trait]
@@ -120,6 +121,10 @@ impl Hosts for AnyHost {
 
     async fn clear_taint(&self, _: &HostId) -> Result<Option<String>, Refused> {
         Ok(Some("residue".to_owned()))
+    }
+
+    async fn retire(&self, _: &HostId) -> Result<bool, Refused> {
+        Ok(true)
     }
 }
 
@@ -173,6 +178,7 @@ enum Call {
     Cordon,
     Uncordon,
     ClearTaint,
+    Retire,
     ListPools,
     ListProviders,
     GetUsage,
@@ -261,6 +267,15 @@ async fn answer(rig: &Writes, token: &str, call: Call) -> (Code, String) {
                     .await,
             )
         }
+        Call::Retire => {
+            let request = RetireHostRequest {
+                host_id: "h1".to_owned(),
+            };
+            status(
+                rig.grpc_as::<_, RetireHostResponse>(token, "RetireHost", request)
+                    .await,
+            )
+        }
         Call::ListPools => status(
             rig.grpc_as::<_, ListPoolsResponse>(token, "ListPools", ListPoolsRequest {})
                 .await,
@@ -284,7 +299,7 @@ async fn answer(rig: &Writes, token: &str, call: Call) -> (Code, String) {
 }
 
 /// Records the queued job `id` of `client` (`None`: recorded before clients were named).
-fn recorded(rig: &Writes, id: &str, client: Option<&str>) {
+pub(super) fn recorded(rig: &Writes, id: &str, client: Option<&str>) {
     let new = NewJob {
         id: Some(job_id(id)),
         spec: crate::agent_api::job_rig::spec(),
@@ -336,6 +351,7 @@ async fn each_role_is_answered_as_the_role_table_says() {
         Call::Cordon,
         Call::Uncordon,
         Call::ClearTaint,
+        Call::Retire,
         Call::ListPools,
         Call::ListProviders,
         Call::GetUsage,
@@ -542,7 +558,7 @@ fn line(
     code: &str,
 ) -> BTreeMap<String, String> {
     let job = match call {
-        "CordonHost" | "UncordonHost" | "ClearHostTaint" => "",
+        "CordonHost" | "UncordonHost" | "ClearHostTaint" | "RetireHost" => "",
         _ => target,
     };
     [
@@ -561,10 +577,10 @@ fn line(
 }
 
 /// Asserts, with a subscriber that collects every event, that each state-changing call
-/// (`SubmitJob`, `CancelJob`, `CordonHost`, `UncordonHost`, `ClearHostTaint`) writes exactly
+/// (`SubmitJob`, `CancelJob`, `CordonHost`, `UncordonHost`, `ClearHostTaint`, `RetireHost`) writes exactly
 /// one info event of this crate, whose fields are exactly the method, the client, its role,
 /// the target (the job, or the host), the outcome and the code; that a client's cordon, its
-/// clear of a taint and its cancel of
+/// clear of a taint, its retirement and its cancel of
 /// another client's job each log `denied` (the cancel although its answer is `unknown-job`),
 /// and a cancel of a job with no row `not-found`; and that no field of any event holds a
 /// token, at any level. Catches a call with no line or two, a line that misses who called or what it
@@ -640,9 +656,26 @@ async fn each_state_change_logs_one_line_with_who_what_and_how_it_ended() {
             ),
         ),
         (
+            CI,
+            Call::Retire,
+            line(
+                "RetireHost",
+                "ci",
+                "client",
+                "h1",
+                "denied",
+                "PermissionDenied",
+            ),
+        ),
+        (
             OPS,
             Call::ClearTaint,
             line("ClearHostTaint", "ops", "operator", "h1", "ok", "Ok"),
+        ),
+        (
+            OPS,
+            Call::Retire,
+            line("RetireHost", "ops", "operator", "h1", "ok", "Ok"),
         ),
         (
             OPS,
@@ -813,81 +846,6 @@ async fn an_answered_read_logs_at_debug_and_a_refused_one_at_info() {
     }
 }
 
-/// The service of [`served`] with a listing that reads windows of two rows and at most two
-/// rows a call, so a page is cut at the bound after one window.
-async fn served_in_small_windows() -> Writes {
-    let clock = Arc::new(ManualClock::default());
-    clock.advance(Duration::from_millis(START_MS));
-    let (_, jobs) = tables_on(Arc::clone(&clock), Retention::DEFAULT);
-    let shared = SharedClock::new(OneClock(clock));
-    let two = std::num::NonZeroUsize::new(2).expect("two");
-    let read = super::read::Ctx {
-        scan_window: two,
-        scan_bound: two,
-        ..super::read::Ctx::default()
-    };
-    let api = JobApi::new(Arc::new(jobs), shared).with_read(read);
-    Writes::over(api, clients()).await
-}
-
-/// Every page of `ListJobs` for `token`, following the tokens to the end: each page's ids
-/// and the token it answered.
-async fn pages(rig: &Writes, token: &str) -> Vec<(Vec<String>, String)> {
-    let mut pages = Vec::new();
-    let mut at = String::new();
-    loop {
-        let request = ListJobsRequest {
-            page_token: at.clone(),
-            page_size: 10,
-            ..ListJobsRequest::default()
-        };
-        let page: ListJobsResponse = rig
-            .grpc_as(token, "ListJobs", request)
-            .await
-            .expect("a listing");
-        let ids = page.jobs.into_iter().map(|job| job.id).collect();
-        at = page.next_page_token.clone();
-        pages.push((ids, page.next_page_token));
-        if at.is_empty() {
-            return pages;
-        }
-    }
-}
-
-/// Asserts, over a table where another client's jobs sit between and after a client's own,
-/// and pages cut at a bound of two rows, that every page token a client is answered names
-/// one of its own jobs (never the last row read, another client's), that a page cut at the
-/// bound with none of its jobs reads on to its next job, and that following the tokens lists
-/// exactly its jobs; while an operator's page cut at the bound still carries the last row
-/// read. Catches a client told another client's job id through a page token, and a client's
-/// listing that ends early or repeats a job.
-#[tokio::test]
-async fn a_clients_page_token_never_names_another_clients_job() {
-    let rig = served_in_small_windows().await;
-    for (id, client) in [
-        ("a-ci", "ci"),
-        ("b-kbf", "kbf"),
-        ("c-kbf", "kbf"),
-        ("d-kbf", "kbf"),
-        ("e-ci", "ci"),
-    ] {
-        recorded(&rig, id, Some(client));
-    }
-    let by_ci = pages(&rig, CI).await;
-    let tokens: Vec<&str> = by_ci.iter().map(|(_, token)| token.as_str()).collect();
-    assert_eq!(tokens, ["job/a-ci", ""], "{by_ci:?}");
-    let ids: Vec<String> = by_ci.into_iter().flat_map(|(ids, _)| ids).collect();
-    assert_eq!(ids, ["a-ci", "e-ci"]);
-    let by_ops = pages(&rig, OPS).await;
-    assert_eq!(
-        by_ops[0],
-        (
-            vec!["a-ci".to_owned(), "b-kbf".to_owned()],
-            "job/b-kbf".to_owned()
-        )
-    );
-}
-
 /// Asserts that every method called on the service directly, with no caller (a request no
 /// bearer layer admitted), is `UNAUTHENTICATED` with an empty message, the fleet calls and
 /// the job calls alike, and that nothing is recorded. Catches a call that runs as nobody, or
@@ -952,6 +910,12 @@ async fn a_call_with_no_caller_is_unauthenticated() {
         ),
         status(
             api.clear_host_taint(Request::new(ClearHostTaintRequest {
+                host_id: "h1".to_owned(),
+            }))
+            .await,
+        ),
+        status(
+            api.retire_host(Request::new(RetireHostRequest {
                 host_id: "h1".to_owned(),
             }))
             .await,

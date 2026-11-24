@@ -754,6 +754,10 @@ mod job_tests;
 pub(crate) mod pool_tests;
 
 #[cfg(test)]
+#[path = "agent_api_retire_tests.rs"]
+mod retire_tests;
+
+#[cfg(test)]
 #[path = "agent_api_job_cases.rs"]
 mod job_cases;
 

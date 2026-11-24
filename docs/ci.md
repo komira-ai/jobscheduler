@@ -102,6 +102,9 @@ before it is queued, not on a merge group, and are not required. `farm.yml`, the
 
 The macOS checks keep their place: the beta stage of `release.yml` on the push to `main`
 (`beta.yml`, `js-agent-macos-pkg.yml` and `macos-probe.yml`), which holds back only the macOS
-archives of a release. A merge group, like a pull request, runs nothing on macOS. A change
+archives of a release. A merge group, like a pull request, runs nothing on macOS. When the
+repository variable `MACOS_ON_FARM` is `true`, the Apple silicon archives and the installer package
+of that stage are built on the build farm's Macs from a Linux runner instead of a hosted macOS
+runner (`macos-farm.yml`, [mac-farm.md](mac-farm.md)); the tests and the probe stay hosted. A change
 whose macOS tests should be seen before it merges is tried by a manual run of `beta.yml` on its
 branch (`gh workflow run beta.yml --ref <branch>`), the same job on the same hosted runner.

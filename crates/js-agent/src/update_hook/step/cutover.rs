@@ -16,7 +16,8 @@
 //!    no cordon held (it was killed between the placing and the confirming), so a cordon of ours
 //!    that is gone is put back within the cap, and a cap that is spent, a lease that came in or
 //!    an `owed-*` record (a job of the running agent whose checks have not run yet: stopping the
-//!    agent now would leave the record and taint the host) defers (75, class environment,
+//!    agent now would leave the record, whose check the next agent then runs at its start, or
+//!    taints the host for when it cannot) defers (75, class environment,
 //!    `drain_bound`) with nothing stopped; the records are read after the host and the taint
 //!    again after the records, so a check that failed meanwhile with a taint the restarted agent
 //!    will not re-check halts (76). A failed lift of the cordon on the way is no reason to fail:

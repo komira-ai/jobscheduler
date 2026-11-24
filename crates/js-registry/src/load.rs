@@ -11,8 +11,11 @@
 //! Two fields exist only on the scheduler's side, `cpu_throttled_usec` and
 //! `cpu_pressure_some_total_usec` (telemetry the wire does not carry yet); they read 0
 //! here, and 0 there means **not measured**, not "no throttling". Nothing else in the
-//! conversion invents a value. The working set is the agent's `memory.current` less
-//! `inactive_file`, clamped at 0 when the inactive file is larger.
+//! conversion invents a value. The working set is the whole host's non-file memory when the
+//! agent sends it (`host_nonfile_bytes`, with no active file pages: it holds no page cache),
+//! else its actions cgroup's `memory.current` less `inactive_file`, clamped at 0 when the
+//! inactive file is larger, with the group's active file pages
+//! ([`WireLoad::node_memory_bytes`]).
 //!
 //! The wire's two per-second lists (`second_cpu_millis`, `second_cpu_pressure_some_permille`)
 //! are not part of that conversion: they are kept beside the converted load as
@@ -57,8 +60,8 @@ pub fn node_load(wire: &WireLoad) -> Result<NodeLoad, BadLease> {
         seq: wire.seq,
         mono_usec: wire.mono_usec,
         cpu_usage_usec: wire.node_cpu_usec(),
-        memory_working_set_bytes: wire.working_set_bytes,
-        memory_active_file_bytes: wire.active_file_bytes,
+        memory_working_set_bytes: wire.node_memory_bytes().0,
+        memory_active_file_bytes: wire.node_memory_bytes().1,
         covered: wire
             .covered
             .iter()

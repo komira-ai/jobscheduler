@@ -55,6 +55,8 @@ mod jobs;
 mod join_round_trip;
 mod lifecycle;
 mod mac_supervisor;
+#[cfg(target_os = "linux")]
+mod memory_series;
 #[cfg(target_os = "macos")]
 mod native;
 mod provider_client;

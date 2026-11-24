@@ -134,6 +134,7 @@ impl Supervision {
             ended: from_status(status),
             job_pid: self.ready.map(|ready| ready.job_pid),
             asid: self.ready.and_then(|ready| ready.asid),
+            usage: None,
         })
     }
 }

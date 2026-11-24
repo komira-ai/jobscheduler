@@ -274,11 +274,12 @@ fn a_job_can_read_its_own_home() {
 const CONNECT: &str = r#"use IO::Socket::INET; exit(IO::Socket::INET->new(PeerAddr => "127.0.0.1", PeerPort => $ARGV[0]) ? 0 : 1)"#;
 
 /// Asserts the network of the profile for real: a loopback connect succeeds when the start
-/// asks for loopback under a loopback ceiling, is refused when it asks for none, and is refused
-/// when the ceiling is none whatever the start asks. The runtime is driven directly, so this is
+/// asks for loopback or for none (the job level `none`, `off` on the wire) under a loopback
+/// ceiling, and is refused when the ceiling is `off` whatever the start asks. The runtime is driven directly, so this is
 /// the profile's own bound: an agent refuses such a start before it reaches the runtime
 /// (`check_native`), and the profile never grants more than the ceiling all the same. Catches a
-/// level that is not applied to the program, and a profile that grants more than the ceiling.
+/// level that is not applied to the program, a profile that grants more than the ceiling, and a
+/// `none` job left without the loopback a Linux job has.
 #[test]
 fn a_loopback_connect_follows_the_lower_of_request_and_cap() {
     use js_agent_wire::NetworkLevel;
@@ -287,7 +288,8 @@ fn a_loopback_connect_follows_the_lower_of_request_and_cap() {
     let port = listener.local_addr().unwrap().port().to_string();
     let cases = [
         (Ceiling::Loopback, NetworkLevel::Loopback, 0),
-        (Ceiling::Loopback, NetworkLevel::Off, 1),
+        (Ceiling::Loopback, NetworkLevel::Off, 0),
+        (Ceiling::Off, NetworkLevel::Off, 1),
         (Ceiling::Off, NetworkLevel::On, 1),
     ];
     for (n, (cap, asked, code)) in cases.into_iter().enumerate() {

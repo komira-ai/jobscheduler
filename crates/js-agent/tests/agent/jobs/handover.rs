@@ -362,6 +362,34 @@ fn a_check_under_way_is_waited_for_and_the_next_process_starts_untainted() {
     assert_eq!(snapshot.results[0].run_id, "r1");
 }
 
+/// Asserts that the next process after a hand-over runs a post-job check the earlier process
+/// left owed with the agent's own Linux checks, by the rules that need no baseline: on a quiet
+/// host it removes the record, starts untainted and keeps the job it adopted running. The
+/// record is written as `owe` writes it before a cleanup's first step, standing for a job
+/// whose cleanup was under way when the earlier process ended (a hand-over whose bound passed,
+/// a second stop). Catches a start that taints the host `check-owed` for a check it can run.
+#[test]
+fn the_next_process_runs_a_check_left_owed_and_starts_untainted() {
+    let dir = Scratch::new("jobs-handover-owed-left");
+    let machine = FakeMachine::new();
+    let worker = running(&dir, &machine, &["r1"]);
+    let (exit, _, _) = handed(&dir, &worker, vec![welcome(1), beat_ok()], LONG, |_| {
+        Wake::Stop
+    });
+    assert_eq!(exit, Exit::Stopped);
+    js_agent::lifecycle::StateRoot::open(&state(&dir))
+        .unwrap()
+        .owe("r0")
+        .unwrap();
+
+    let next = next_process(&dir, &machine, worker);
+    let snapshot = next.snapshot();
+    assert_eq!(snapshot.taint, None);
+    assert!(owed(&dir).is_empty(), "{:?}", owed(&dir));
+    assert_eq!(snapshot.held.len(), 1);
+    assert_eq!(snapshot.held[0].state, HeldState::Running);
+}
+
 /// Asserts the end of a handover that the work under way does not let happen: with a pull
 /// that never ends, the agent leaves once the drain wait has passed, says that what was under
 /// way is left, and stops nothing; a second stop request ends it the same way at once.
