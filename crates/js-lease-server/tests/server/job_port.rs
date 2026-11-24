@@ -18,7 +18,8 @@ use js_lease_server::{
 use js_proto::v1::job_service_client::JobServiceClient;
 use js_proto::v1::{
     ClearHostTaintRequest, CordonHostRequest, GetJobRequest, GetUsageRequest, Host,
-    ListHostsRequest, ListPoolsRequest, ListProvidersRequest, UncordonHostRequest,
+    ListHostsRequest, ListPoolsRequest, ListProvidersRequest, RetireHostRequest,
+    UncordonHostRequest,
 };
 use js_types::Timestamp;
 use js_types::{CpuSeries, HostId};
@@ -524,11 +525,12 @@ async fn gateway_post(job: SocketAddr, path: &str) -> Reply {
     request(job, "POST", path, Some(TOKEN), Some(b"{}")).await
 }
 
-/// Asserts that the seven fleet calls are served on a real server's job port, over gRPC and
+/// Asserts that the eight fleet calls are served on a real server's job port, over gRPC and
 /// over the gateway: with one host registered in one elastic pool and one ended booking in
 /// the usage sink, `ListHosts` lists the host, `CordonHost` and `UncordonHost` change its
 /// cordon (each one made over one transport and read back over both), `ClearHostTaint` of
-/// the untainted host answers it with `cleared` false over both, `ListPools` and
+/// the untainted host answers it with `cleared` false over both, `RetireHost` of an id that
+/// never said hello answers `retired` false over both, `ListPools` and
 /// `ListProviders` name the pool `gpu`, `GetUsage` returns the ended booking by job and
 /// host with its CPU series, and a cordon of a host the registry does not hold is `NOT_FOUND` `unknown-host`
 /// over gRPC and 500 `internal` over the gateway, whose error table does not name it yet. It catches a server that builds the job
@@ -585,6 +587,15 @@ async fn the_fleet_calls_are_served_on_the_job_port() {
     assert_eq!(clean.status, 200, "{}", clean.body);
     assert_eq!(clean.json()["host"]["id"], FLEET_HOST);
     assert_eq!(clean.json()["cleared"], Value::Null);
+
+    let retire = RetireHostRequest {
+        host_id: "never-said-hello".to_owned(),
+    };
+    let nothing = grpc.retire_host(authed(retire)).await.unwrap();
+    assert!(!nothing.into_inner().retired);
+    let nothing = gateway_post(job, "/v1/hosts/never-said-hello:retire").await;
+    assert_eq!(nothing.status, 200, "{}", nothing.body);
+    assert_eq!(nothing.json()["retired"], Value::Null);
 
     let unknown = CordonHostRequest {
         host_id: "no-such-host".to_owned(),

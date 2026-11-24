@@ -133,6 +133,23 @@ service JobService {
       body: "*"
     };
   }
+  // Retires the id of a lost host, so that its pool has room for a new id. Operator only.
+  // The host's row in the job store is deleted at the version read, with its stored binding
+  // and this server's record of it, so that neither the pool's count over the rows nor this
+  // server's own count holds the id any more: a host that changed its id (a host-certificate
+  // join after a token join with another id) can then join a pool at its max_machines. It
+  // is refused while the host is live (heard within the grace) or holds or is owed work (a
+  // job placed on it or ending on it, a taint, a cordon or a scale-down mark), each
+  // FAILED_PRECONDITION with its own code, and nothing is written. A host with nothing left
+  // to retire answers retired false and nothing is written, so a repeat is harmless; with
+  // several servers over one store, the same call on each forgets that server's record.
+  // The call does not reach the agent.
+  rpc RetireHost(RetireHostRequest) returns (RetireHostResponse) {
+    option (google.api.http) = {
+      post: "/v1/hosts/{host_id}:retire"
+      body: "*"
+    };
+  }
   // Lists the pools. Changes nothing.
   rpc ListPools(ListPoolsRequest) returns (ListPoolsResponse) {
     option (google.api.http) = {
@@ -364,6 +381,19 @@ message ClearHostTaintResponse {
   // The reason code of the taint the call cleared, as Host.taint_reason gives it. Empty when
   // cleared is false.
   string cleared_reason = 3;
+}
+
+// The request of RetireHost.
+message RetireHostRequest {
+  // The id of the host to retire.
+  string host_id = 1;
+}
+
+// The answer of RetireHost.
+message RetireHostResponse {
+  // The call deleted something of the host: its row, its stored binding or this server's
+  // record of it. False: there was nothing of it to retire, and nothing was written.
+  bool retired = 1;
 }
 
 // The request of ListPools.

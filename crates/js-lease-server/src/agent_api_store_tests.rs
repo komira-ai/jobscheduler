@@ -32,6 +32,9 @@ use crate::join_tokens::JoinTokens;
 #[path = "agent_api_store_clear_tests.rs"]
 mod clear;
 
+#[path = "agent_api_store_retire_tests.rs"]
+mod retire;
+
 #[path = "agent_api_host_cert_tests.rs"]
 mod host_cert;
 

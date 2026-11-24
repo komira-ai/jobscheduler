@@ -275,6 +275,7 @@ hollow!(
     cordon_host: CordonHostRequest -> CordonHostResponse,
     uncordon_host: UncordonHostRequest -> UncordonHostResponse,
     clear_host_taint: ClearHostTaintRequest -> ClearHostTaintResponse,
+    retire_host: RetireHostRequest -> RetireHostResponse,
     list_pools: ListPoolsRequest -> ListPoolsResponse,
     list_providers: ListProvidersRequest -> ListProvidersResponse,
     get_usage: GetUsageRequest -> GetUsageResponse
@@ -483,6 +484,11 @@ async fn the_calls_the_model_does_not_serve_answer_unimplemented() {
             .err()
             .map(|s| s.code()),
         client
+            .retire_host(v1::RetireHostRequest::default())
+            .await
+            .err()
+            .map(|s| s.code()),
+        client
             .list_pools(v1::ListPoolsRequest::default())
             .await
             .err()
@@ -498,7 +504,7 @@ async fn the_calls_the_model_does_not_serve_answer_unimplemented() {
             .err()
             .map(|s| s.code()),
     ];
-    assert_eq!(codes, [Some(Code::Unimplemented); 8]);
+    assert_eq!(codes, [Some(Code::Unimplemented); 9]);
     let status = client.get_usage(v1::GetUsageRequest::default()).await.err();
     assert_eq!(
         status.map(|s| s.message().to_string()),

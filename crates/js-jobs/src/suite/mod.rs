@@ -51,6 +51,7 @@ mod queue;
 mod queued_index;
 mod races;
 mod retention;
+mod retire;
 mod rows;
 mod scrub;
 mod silence;
@@ -85,6 +86,7 @@ pub use queue::*;
 pub use queued_index::*;
 pub use races::*;
 pub use retention::*;
+pub use retire::*;
 pub use rows::*;
 pub use scrub::*;
 pub use silence::*;
@@ -269,6 +271,9 @@ where
     nodes_lists_every_readable_row_heard_or_not(backend);
     forget_silent_nodes_deletes_only_the_rows_that_hold_nothing(backend);
     forget_silent_nodes_keeps_a_row_that_moved_and_refuses_an_unreadable_binding(backend);
+    retire_node_deletes_a_lost_row_so_a_full_pool_admits_a_new_id(backend);
+    retire_node_keeps_the_row_of_a_host_that_holds_or_is_owed_work(backend);
+    retire_node_judges_again_a_row_that_moved_or_went_and_deletes_nothing_on_a_failure(backend);
     two_servers_claiming_one_host_at_once_hand_out_each_message_once(backend);
     a_message_whose_claim_lapses_is_handed_out_again_by_the_store_clock(backend);
     an_ack_deletes_only_what_was_handed_out_and_a_repeat_changes_nothing(backend);
@@ -469,6 +474,9 @@ macro_rules! job_store_tests {
             nodes_lists_every_readable_row_heard_or_not,
             forget_silent_nodes_deletes_only_the_rows_that_hold_nothing,
             forget_silent_nodes_keeps_a_row_that_moved_and_refuses_an_unreadable_binding,
+            retire_node_deletes_a_lost_row_so_a_full_pool_admits_a_new_id,
+            retire_node_keeps_the_row_of_a_host_that_holds_or_is_owed_work,
+            retire_node_judges_again_a_row_that_moved_or_went_and_deletes_nothing_on_a_failure,
             two_servers_claiming_one_host_at_once_hand_out_each_message_once,
             a_message_whose_claim_lapses_is_handed_out_again_by_the_store_clock,
             an_ack_deletes_only_what_was_handed_out_and_a_repeat_changes_nothing,

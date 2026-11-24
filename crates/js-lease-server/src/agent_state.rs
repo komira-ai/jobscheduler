@@ -651,6 +651,31 @@ impl BindingStore {
         Ok(self.lock().saw(host, row))
     }
 
+    /// Deletes the stored binding of `host`, a host the operator retired whose record the
+    /// registry has forgotten, at the version [`BindingStore::stored`] last read it at, and
+    /// holds none for it, so that no save puts it back or deletes it again: whether a binding
+    /// was deleted (`false` when that read found none). A binding this server's registry never
+    /// held is deleted too, so that no server's restart puts the host back from it. Nothing in
+    /// file mode, where the save after the registry forgot the host writes the file without it.
+    ///
+    /// # Errors
+    ///
+    /// The store could not be written, or another server wrote the row since it was read:
+    /// nothing was deleted, and the same call again (after a read) is the retry.
+    pub(crate) fn forget(&self, host: &HostId) -> io::Result<bool> {
+        let Keeper::Store(store, _) = &self.keeper else {
+            return Ok(false);
+        };
+        let mut written = self.lock();
+        let Some(version) = written.versions.get(host).copied() else {
+            written.hold(host, None);
+            return Ok(false);
+        };
+        host_keys::commit_one(&**store, (key(host), None, Cond::Version(version)))?;
+        written.hold(host, None);
+        Ok(true)
+    }
+
     /// Whether the bindings are kept in the file (no store setting).
     pub(crate) fn in_file(&self) -> bool {
         matches!(self.keeper, Keeper::File(_))

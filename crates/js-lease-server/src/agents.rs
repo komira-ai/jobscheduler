@@ -979,6 +979,9 @@ mod cordons;
 #[path = "agents_taints.rs"]
 pub(crate) mod taints;
 
+#[path = "agents_retire.rs"]
+pub(crate) mod retire;
+
 #[cfg(test)]
 #[path = "agents_mint_tests.rs"]
 mod mint_tests;

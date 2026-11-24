@@ -1,9 +1,10 @@
-//! The fleet calls: `ListHosts`, `CordonHost`, `UncordonHost`, `ClearHostTaint`, `ListPools`,
-//! `ListProviders` and `GetUsage` (design section 3.6). Only a caller of the role `operator`
-//! reaches them: the service's dispatch (`mod.rs`) answers any other `PERMISSION_DENIED`
-//! `operator-only` before a function here runs. An operator reads the hosts with the
-//! resources booked on each, the pools, the machine providers and the ended bookings; the
-//! changes are a host's cordon and the clear of its stored taint. A client never sees an
+//! The fleet calls: `ListHosts`, `CordonHost`, `UncordonHost`, `ClearHostTaint`, `RetireHost`,
+//! `ListPools`, `ListProviders` and `GetUsage` (design section 3.6). Only a caller of the role
+//! `operator` reaches them: the service's dispatch (`mod.rs`) answers any other
+//! `PERMISSION_DENIED` `operator-only` before a function here runs. An operator reads the hosts
+//! with the resources booked on each, the pools, the machine providers and the ended bookings;
+//! the changes are a host's cordon, the clear of its stored taint and the retirement of a lost
+//! host's id. A client never sees an
 //! allocation as a job concept: what is booked on a host is a read-only [`wire::HostBooking`]
 //! in its listing.
 //!
@@ -42,19 +43,28 @@
 //! that holds another taint refuses it), then the registry forgets the taint. It answers
 //! whether a taint was cleared and its reason, writes nothing for a host with none, and is
 //! `UNAVAILABLE` `taint-unsaved` when it cannot be made durable.
+//!
+//! A retirement of a host id ([`Hosts::retire`]) deletes the host's row in the job store, this
+//! server's record of it and its stored binding, so that a pool at its `max_machines` has room
+//! for a new id (`crate::agents::retire`). A live host, and one that holds a job's allocation, a
+//! taint, a cordon or a scale-down mark, is refused `FAILED_PRECONDITION` with `host-live`,
+//! `host-holds-jobs`, `host-tainted`, `host-cordoned` or `host-marked`, and nothing is written;
+//! a store that fails is `UNAVAILABLE` `retire-unsaved`, and the same call again is the retry. An
+//! id with nothing left to retire answers `retired` false and writes nothing. An id no host can
+//! have is `NOT_FOUND` `unknown-host`.
 
 use std::fmt;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_jobs::{AllocationRecord, Booked, JobRecord};
+use js_jobs::{AllocationRecord, Booked, JobRecord, Kept};
 use js_proto::v1 as wire;
 use js_proto::v1::{
     ClearHostTaintRequest, ClearHostTaintResponse, CordonHostRequest, CordonHostResponse,
     GetUsageRequest, GetUsageResponse, ListHostsRequest, ListHostsResponse, ListPoolsRequest,
-    ListPoolsResponse, ListProvidersRequest, ListProvidersResponse, UncordonHostRequest,
-    UncordonHostResponse,
+    ListPoolsResponse, ListProvidersRequest, ListProvidersResponse, RetireHostRequest,
+    RetireHostResponse, UncordonHostRequest, UncordonHostResponse,
 };
 use js_registry::{HostMark, HostState};
 use js_types::HostId;
@@ -64,9 +74,13 @@ use tonic::{Request, Response, Status};
 
 use super::JobApi;
 use crate::agents::CordonFault;
+use crate::agents::retire::RetireFault;
 use crate::api::Shared;
 use crate::checks::State;
-use crate::cordon::{self, CORDON_UNSAVED, INVALID_CORDON, TAINT_UNSAVED, UNKNOWN_HOST};
+use crate::cordon::{
+    self, CORDON_UNSAVED, HOST_CORDONED, HOST_HOLDS_JOBS, HOST_LIVE, HOST_MARKED, HOST_TAINTED,
+    INVALID_CORDON, RETIRE_UNSAVED, TAINT_UNSAVED, UNKNOWN_HOST,
+};
 use crate::hosts::{self, HostEntry, HostList, MemoryView, ShapeView, Source};
 use crate::status::Status as PoolStatus;
 use crate::status::{CheckView, MachineView, NamedCheckView, PoolView, PoolsView, ProviderState};
@@ -117,9 +131,14 @@ pub(crate) trait Hosts: Send + Sync {
     /// the reason code of the taint cleared; `None`, with nothing written, when the host has
     /// none.
     async fn clear_taint(&self, host: &HostId) -> Result<Option<String>, Refused>;
+
+    /// Retires `host`: deletes its row, this server's record of it and its stored binding,
+    /// when it is not live and holds nothing; whether anything of it was deleted (`false`, with
+    /// nothing written, when nothing was left to retire).
+    async fn retire(&self, host: &HostId) -> Result<bool, Refused>;
 }
 
-/// Why a cordon, an uncordon or a clear of a taint was not acknowledged.
+/// Why a cordon, an uncordon, a clear of a taint or a retirement was not acknowledged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Refused {
     /// The registry holds no such host: it never said hello, was forgotten, or is static.
@@ -131,6 +150,11 @@ pub(crate) enum Refused {
     /// another taint than this server's), or holds on this server but the bindings that keep
     /// it over a restart could not be written.
     TaintUnsaved,
+    /// A retirement was refused, for the reason given: nothing was written.
+    Kept(Kept),
+    /// A retirement could not be read or written to the stores: what it deleted before stays
+    /// deleted, and the same call again does the rest.
+    RetireUnsaved,
 }
 
 /// The status of the pools, as `GET /v1/pools` reads it.
@@ -310,6 +334,18 @@ pub(super) async fn clear_host_taint(
     }))
 }
 
+/// `RetireHost`: retires the id of a lost host that holds nothing, so that its pool has room
+/// for a new id; an id with nothing left to retire changes nothing.
+pub(super) async fn retire_host(
+    api: &JobApi,
+    request: Request<RetireHostRequest>,
+) -> Result<Response<RetireHostResponse>, Status> {
+    let served = served(api)?;
+    let host = known(&request.into_inner().host_id)?;
+    let retired = served.hosts.0.retire(&host).await.map_err(refusal)?;
+    Ok(Response::new(RetireHostResponse { retired }))
+}
+
 /// `ListPools`: the elastic pools, by name; none for a server without one.
 pub(super) async fn list_pools(
     api: &JobApi,
@@ -395,12 +431,25 @@ fn known(id: &str) -> Result<HostId, Status> {
     HostId::new(id).map_err(|_| Status::not_found(UNKNOWN_HOST))
 }
 
-/// The answer to a refused cordon, uncordon or clear of a taint.
+/// The answer to a refused cordon, uncordon, clear of a taint or retirement.
 fn refusal(refused: Refused) -> Status {
     match refused {
         Refused::UnknownHost => Status::not_found(UNKNOWN_HOST),
         Refused::Unsaved => Status::unavailable(CORDON_UNSAVED),
         Refused::TaintUnsaved => Status::unavailable(TAINT_UNSAVED),
+        Refused::Kept(kept) => Status::failed_precondition(kept_code(kept)),
+        Refused::RetireUnsaved => Status::unavailable(RETIRE_UNSAVED),
+    }
+}
+
+/// The code of a retirement refused for `kept`.
+fn kept_code(kept: Kept) -> &'static str {
+    match kept {
+        Kept::Live => HOST_LIVE,
+        Kept::HoldsJobs => HOST_HOLDS_JOBS,
+        Kept::Tainted => HOST_TAINTED,
+        Kept::Cordoned => HOST_CORDONED,
+        Kept::Marked => HOST_MARKED,
     }
 }
 
@@ -801,6 +850,11 @@ impl Hosts for Shared {
         let cleared = cleared.map_err(refused_taint)?;
         Ok(cleared.map(|taint| taint.reason))
     }
+
+    async fn retire(&self, host: &HostId) -> Result<bool, Refused> {
+        let retired = self.agents().retire(host).await;
+        retired.map_err(refused_retire)
+    }
 }
 
 /// A cordon or uncordon that was not done, or not made durable, as the host's own route
@@ -817,6 +871,14 @@ fn refused_taint(fault: CordonFault) -> Refused {
     match fault {
         CordonFault::NotHeld => Refused::UnknownHost,
         CordonFault::Unsaved => Refused::TaintUnsaved,
+    }
+}
+
+/// A retirement that was refused, or not made durable, as the call answers it.
+fn refused_retire(fault: RetireFault) -> Refused {
+    match fault {
+        RetireFault::Kept(kept) => Refused::Kept(kept),
+        RetireFault::Unsaved => Refused::RetireUnsaved,
     }
 }
 
