@@ -234,8 +234,8 @@ fn running(id: &str) -> RunningLease {
 
 /// Asserts that a whole-host reading covers each lease that was running at the last reading
 /// published and still is: none at the first reading (no lease has a baseline), the lease that
-/// ran through the second, not the one that started since, and not one taken over from an
-/// earlier process. Catches a Mac load that covers no lease, which the server would charge
+/// ran through the second, not the one that started since, not one taken over from an earlier
+/// process, and not one that has ended since. Catches a Mac load that covers no lease, which the server would charge
 /// at each lease's booking on top of the host's measured use, so that a Mac's running jobs
 /// would count twice.
 #[test]
@@ -269,6 +269,10 @@ fn a_whole_host_reading_covers_the_leases_that_ran_through_it() {
     clock.0.set(15_000_000);
     assert_eq!(collector.run(&now), Vec::<String>::new());
     assert_eq!(outbox.take().expect("a load").covered, ["1-1", "1-2"]);
+    outbox.delivered();
+    clock.0.set(20_000_000);
+    assert_eq!(collector.run(&[running("1-1")]), Vec::<String>::new());
+    assert_eq!(outbox.take().expect("a load").covered, ["1-1"]);
 }
 
 /// A node sampler of control groups that read none: a fixed node, and no lease.
