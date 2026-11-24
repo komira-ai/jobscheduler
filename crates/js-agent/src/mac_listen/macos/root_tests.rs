@@ -21,9 +21,11 @@ const OTHER: u32 = 58_125;
 /// The group the listener runs in (`staff`).
 const STAFF: u32 = 20;
 
-/// Listens on each address of the arguments at port 0, prints the ports in the same order on
-/// one line, and waits to be killed.
-const LISTEN: &str = r#"use IO::Socket::IP; $| = 1; my @s = map { IO::Socket::IP->new(Listen => 1, LocalHost => $_, LocalPort => 0) or die "$_: $!" } @ARGV; print join(" ", map { $_->sockport } @s), "\n"; sleep 600"#;
+/// Listens on each address of `HOSTS` (written into the script, not passed as arguments:
+/// perl runs a child whose uids root changed in taint mode, which refuses a socket address
+/// taken from the command line) at port 0, prints the ports in the same order on one line,
+/// and waits to be killed.
+const LISTEN: &str = r#"use IO::Socket::IP; $| = 1; my @s = map { IO::Socket::IP->new(Listen => 1, LocalHost => $_, LocalPort => 0) or die "$_: $!" } (HOSTS); print join(" ", map { $_->sockport } @s), "\n"; sleep 600"#;
 
 fn require_root() {
     assert!(
@@ -40,10 +42,14 @@ struct Stand {
 
 impl Stand {
     fn on(hosts: &[&str]) -> Self {
+        let quoted = hosts
+            .iter()
+            .map(|host| format!("\"{host}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
         let mut child = Command::new("/usr/bin/perl")
             .arg("-e")
-            .arg(LISTEN)
-            .args(hosts)
+            .arg(LISTEN.replace("HOSTS", &quoted))
             .uid(OTHER)
             .gid(STAFF)
             .stdout(Stdio::piped())
