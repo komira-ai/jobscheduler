@@ -38,10 +38,11 @@
 //!   process left are adopted) before [`Worker::start`] returns, so the first hello can
 //!   list them.
 //! - **The worker samples the usage** of the leases that run, once per heartbeat interval,
-//!   when `--actions-cgroup` is given: after a step it calls [`Collector::step`], which takes
-//!   the per-second sample when `--host-second-samples` is on and says whether a window has
-//!   passed; if so, the worker reads the cgroup files on its own thread and publishes the
-//!   reading in the [`Outbox`] the session takes it from. The session never reads a cgroup file.
+//!   when `--actions-cgroup` is given on Linux, and always on a Mac (the host's own counters):
+//!   after a step it calls [`Collector::step`], which takes the per-second sample when
+//!   `--host-second-samples` is on and says whether a window has passed; if so, the worker
+//!   reads the cgroup files (a Mac's host counters) on its own thread and publishes the reading
+//!   in the [`Outbox`] the session takes it from. The session never reads a cgroup file.
 //! - **A whole-node lease is prepared on the worker's thread.** The post-job checks and the
 //!   readiness hook block, so the session asks through [`WorkerHost`]: it sends a prepare or
 //!   restore order without waiting and reads the last answer the worker published, which
@@ -881,9 +882,8 @@ fn build(plan: Plan, clock: SharedClock, wake: Wake) -> Result<Built, String> {
     // theirs is released.
     lines.extend(describe(&providers.attach(&mut life, &*machine, &host_id)?));
     let collector = usage.and_then(|outbox| match actions {
-        Ok(dir) => Some(Collector::new(
-            machine.cgroup_files(),
-            &dir,
+        Ok(sampler) => Some(Collector::with_sampler(
+            sampler,
             machine.usage_clock(),
             outbox,
         )),

@@ -61,7 +61,8 @@ server's TLS offers only `http/1.1` in ALPN (`crates/js-lease-server/src/tls.rs`
 - `JobResult.memory_series` (`MemorySeries`: `granularity_secs`, `points`, `run_usec` and `partial`), the job's non-file memory over
   its run, sent by an agent started with `--memory-series`: at most 128 points (`MEMORY_SERIES_MAX_POINTS`), each the most of
   `memory.current - (file - shmem)` of the job's group the agent's about-once-a-second polls saw in `granularity_secs` seconds of
-  the run, in MiB rounded up (`MEMORY_SERIES_BYTES_PER_POINT`), in order from its start. Pairs are combined by their maximum when a
+  the run, in MiB rounded up (`MEMORY_SERIES_BYTES_PER_POINT`), in order from its start; on a Mac, whose native runtime sends it too,
+  the physical footprint of the run's processes together, which counts no file page either. Pairs are combined by their maximum when a
   run outlasts its points, and a span with no sample holds the last sample before it. It is decoded as `cpu_series` is: only a
   power-of-two granularity and at most 128 points decode, anything else reads as absent, and a server from before it ignores it.
   The job service books a class's memory from its peak (`docs/design/sizing.md`, section 7.7).
@@ -72,7 +73,8 @@ server's TLS offers only `http/1.1` in ALPN (`crates/js-lease-server/src/tls.rs`
   point is the mean over what is left of the run after the others. `run_usec` is the run as the agent measured it on its monotonic
   clock, from the moment the container was started to the poll that saw it end (at most one worker step, a second, after the end);
   `partial` (left out when false) marks a run the agent adopted after a restart of its own, whose series starts at its first sample
-  after the restart. The `crun` runtime of an agent started with `--cpu-series` sends it; other runtimes and agents send none. It
+  after the restart. The `crun` runtime of an agent started with `--cpu-series` sends it, and so does a Mac's native runtime (its
+  points from the CPU time of the run's processes, sampled at each poll); other runtimes and agents send none. It
   decodes only when well formed (a power-of-two granularity, at most 128 points of 16 bits) and is decoded as `logs` is: anything
   else reads as absent and is never part of a result's acceptance. A server from before the field ignores it.
 - `JobStartSpec.sizing` (`StartSizing`: the optional `class`, and `cpu` and `memory`, each `named`, `class`, `fallback`, `cold` or
@@ -318,7 +320,7 @@ digits), with the comma that joins it to the message. Derived, and measured by t
   (measured by `a_series_at_its_widest_adds_its_bytes_to_a_result` in `tests/memory_series.rs`). The agent's
   `results_budget` counts it with the rest of the result.
 - `second_cpu_millis` and `second_cpu_pressure_some_permille` in a heartbeat's load (the per-second busy CPU and CPU pressure of the whole
-  host, from `/proc/stat` and `/proc/pressure/cpu`; the design of komira-ai/jobscheduler#1033, section 3; sent by an agent started with `--host-second-samples`), `,"second_cpu_millis":[...]`
+  host, from `/proc/stat` and `/proc/pressure/cpu`, on a Mac from its CPU load ticks with no pressure list; the design of komira-ai/jobscheduler#1033, section 3; sent by an agent started with `--host-second-samples`), `,"second_cpu_millis":[...]`
   with 16 values of 10 digits: 22 + (16 × 10 + 15) + 1 = 198, and `,"second_cpu_pressure_some_permille":[...]` with 16 values of 4 digits: 38 + (16 × 4 + 15) + 1 = 118, so **316**
   bytes per heartbeat at the widest (measured by `the_lists_at_their_widest_add_their_documented_bytes_to_a_load`; the maximal load of
   `a_load_at_every_cap_with_96_held_and_8_results_stays_under_the_budget` carries both at their widest and stays inside `MAX_LOAD_BYTES`).

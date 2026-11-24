@@ -431,10 +431,10 @@ impl Maker {
         run.peak.observe(mono, 0);
         run.series = self
             .cpu_series
-            .then(|| super::series::SeriesRecorder::starting(mono, 0));
+            .then(|| crate::series::cpu::SeriesRecorder::starting(mono, 0));
         run.memory_series = self
             .memory_series
-            .then(|| super::memory_series::MemoryRecorder::starting(mono));
+            .then(|| crate::series::memory::MemoryRecorder::starting(mono));
         let started = self
             .oci
             .start_supervised(&run.spec, run.logs.file_cap(self.logs.as_ref()))

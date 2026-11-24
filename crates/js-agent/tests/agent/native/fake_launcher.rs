@@ -12,7 +12,13 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use js_agent::mac_supervisor::{
-    Ended, ExitRecord, LaunchRequest, Launcher, Ready, Step, Supervised,
+    Ended, ExitRecord, JobRusage, LaunchRequest, Launcher, Ready, Step, Supervised,
+};
+
+/// What every job the fake reaps reports it used, as a supervisor's `wait4` would.
+pub const REAPED: JobRusage = JobRusage {
+    cpu_usec: 2_500_000,
+    max_rss_bytes: 48 << 20,
 };
 
 /// What one launch was asked: the supervisor's spec, as fields, and what it inherits.
@@ -267,6 +273,7 @@ impl Supervised for FakeSupervised {
                     ended: Ended::Exited(7),
                     job_pid: None,
                     asid: None,
+                    usage: None,
                 }));
             }
             (Failing::ExitOnce, false) => return Ok(None),
@@ -278,6 +285,7 @@ impl Supervised for FakeSupervised {
                     },
                     job_pid: None,
                     asid: None,
+                    usage: None,
                 }));
             }
             _ => {}
@@ -294,6 +302,7 @@ impl Supervised for FakeSupervised {
             },
             job_pid,
             asid: None,
+            usage: Some(REAPED),
         }))
     }
 

@@ -51,6 +51,7 @@
 //! | `--cpu-slack <multiplier>` | how far above a host's cores the scheduler may charge it, from `1.0` to `2.0` with at most three decimals, such as `1.1`; the scheduler's own default (1.1) unless given. A job is placed on a host whose agent does not report `load-admission` only where the summed bookings of its jobs stay within what its hello offers, with no slack. Needs `--agent-pool-config` |
 //! | `--placement-curves <off\|shadow>` | `off` unless given. `shadow` learns a CPU profile and a memory profile for each job class from the series its runs recorded, and logs one line per run it checks, naming the run's mean and peak against what the class's profile predicted; the profiles are built again from the job records after a restart. Placement is the same in both modes: nothing is booked, moved, throttled or killed by a profile. Any other value is refused, `placement_curves must be off or shadow; got "on"`. Needs `--agent-pool-config` |
 //! | `--cold-cpu-millis <n>`, `--cold-memory-bytes <n>` | what a queued job that names no CPU or no memory books, for that dimension, while neither its class, its fallback class nor its client has a run (`docs/design/sizing.md`, section 7.7): millicores from `250`, bytes from `1073741824` (1 GiB). Each left out is its default, `22000` (22 cores) and `4294967296` (4 GiB); a CPU above a quarter of the most cores a registered host has books that quarter, and a memory above the most a registered host has books that most. Needs `--agent-pool-config` |
+//! | `--cold-memory-bytes-on <os>=<n>` | the memory a queued job whose `os` constraint is `<os>` (as the job gives it, such as `macos`) books in place of `--cold-memory-bytes`, while neither its class, its fallback class nor its client has a run: bytes from `1073741824` (1 GiB), and above the most a registered host has, that most. A job of any other `os`, or of none, books `--cold-memory-bytes`. Repeatable, each `<os>` once; a value that is not `<os>=<n>`, an empty `<os>` and one given twice are refused at start. Needs `--agent-pool-config` |
 //! | `--estimate-feed` | deprecated, and does nothing: no lease is costed by an estimate any more. The flag is accepted with the warning `--estimate-feed is deprecated and does nothing: no lease is costed by an estimate any more (drop the flag)`, and is still refused beside `--usage-off` and without `--agent-pool-config` |
 //! | `--token-file <path>`, `--client-token <NAME>=<PATH>` | `--token-file`: required: a regular file owned by the server's user, mode 0600 or 0400, holding one token of printable ASCII of at least 32 bytes ([`MIN_TOKEN_BYTES`]; trailing whitespace is dropped). A shorter token is refused at start. The token of `GET /v1/hosts` and the join, brake and usage routes, and on the job service the token of the client named `default`. `--client-token`: repeatable, none by default: one more client of the job service (see `docs/design/configuration.md`), `NAME=PATH` or `NAME:ROLE=PATH`: its name (1 to 40 bytes of letters, digits, `.`, `_` and `-`, each name once, not `default`), its role (`client`, the default, or `operator`; the client `default` is an operator) and the file of its own token, checked as `--token-file`'s is and read again at every tick. A bad entry is refused by its position without repeating it; a short token, a file others can read, a name or a token another client has, and a token the join token file holds are refused naming the entry, never the token. Needs `--job-listen` |
 //! | `--tick` | how often the job pass runs and, with agent registration on, the agent registry is advanced (reservation drain and prepare deadlines), `5s` unless given |
@@ -73,7 +74,8 @@
 //!
 //! A start that is refused prints the flag at fault and exits with status 2. The
 //! hello limit flags, `--require-host-credential`, `--placement`, `--estimate-feed`,
-//! `--cpu-slack`, `--placement-curves`, `--cold-cpu-millis`, `--cold-memory-bytes` and `--job-listen` need
+//! `--cpu-slack`, `--placement-curves`, `--cold-cpu-millis`, `--cold-memory-bytes`,
+//! `--cold-memory-bytes-on` and `--job-listen` need
 //! `--agent-pool-config`, and are refused without it.
 //!
 //! # The configuration file
@@ -126,6 +128,9 @@
 //! # that names no CPU or memory books while neither its class, its fallback class nor its
 //! # client has a run; each left out is its default (22000, 4294967296: 22 cores and 4 GiB);
 //! # the CPU held at a quarter of the largest host's cores, the memory at the largest host; the flags' names (--cold-cpu-millis, --cold-memory-bytes) and rules
+//! # cold_memory_bytes_on (a table, such as { macos = 4294967296 }; none): the cold memory of the
+//! # jobs whose `os` is each key, in place of cold_memory_bytes, each 1073741824 or more; the rules
+//! # of --cold-memory-bytes-on
 //! # estimate_feed (false): deprecated, as the flag; true warns and does nothing; refused unless a
 //! # pool registers agents, and refused as true beside usage_off = true
 //! # usage_db (usage.db beside state_file), usage_off (false), profile_store_bytes (268435456),

@@ -92,6 +92,18 @@ pub enum Ended {
     },
 }
 
+/// What the job and the processes it waited for used, as the supervisor's `wait4` of the job
+/// reported it: the job's own CPU and that of every descendant whose end was waited for (by
+/// the job or by a descendant of it), and the largest resident set any one of them reached. A
+/// process the job left to run on after it, or that ended unwaited for, is not in it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobRusage {
+    /// The CPU time, user and system together, in microseconds.
+    pub cpu_usec: u64,
+    /// The largest resident set one of the processes reached, in bytes.
+    pub max_rss_bytes: u64,
+}
+
 /// The exit record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExitRecord {
@@ -101,6 +113,11 @@ pub struct ExitRecord {
     pub job_pid: Option<i32>,
     /// The job's audit session, when it was started in a new one.
     pub asid: Option<i32>,
+    /// What the job used, when it was started and waited for. Left out of the record when
+    /// `None`; a record that lacks it (a setup that failed, a supervisor from before it) reads
+    /// as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<JobRusage>,
 }
 
 /// The ready record in `text`, or `None` when it is empty or not (yet) a whole record.

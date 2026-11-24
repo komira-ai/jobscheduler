@@ -218,7 +218,6 @@ mod peak;
 mod pull;
 mod remove;
 mod rootfs;
-mod series;
 mod settings;
 mod spec;
 #[cfg(test)]
@@ -329,11 +328,11 @@ struct Run {
     /// its first poll) each time it is polled ([`peak::PeakWindow`]).
     peak: peak::PeakWindow,
     /// Its CPU second by second, from the same samples as the peak
-    /// ([`series::SeriesRecorder`]); none without `--cpu-series`.
-    series: Option<series::SeriesRecorder>,
+    /// ([`crate::series::cpu::SeriesRecorder`]); none without `--cpu-series`.
+    series: Option<crate::series::cpu::SeriesRecorder>,
     /// Its non-file memory second by second, sampled at the same polls
-    /// ([`memory_series::MemoryRecorder`]); none without `--memory-series`.
-    memory_series: Option<memory_series::MemoryRecorder>,
+    /// ([`crate::series::memory::MemoryRecorder`]); none without `--memory-series`.
+    memory_series: Option<crate::series::memory::MemoryRecorder>,
 }
 
 /// A container runtime over `crun`. Dropping it leaves its runs as they are, their network

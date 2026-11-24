@@ -23,8 +23,8 @@ fn parse(extra: &[&str]) -> Result<Cli, clap::Error> {
 /// recording that is on by default, and a flag that wants an argument.
 #[test]
 fn the_flag_is_a_switch_and_off_by_default() {
-    assert!(!parse(&[]).expect("parses").os.cpu_series);
-    assert!(parse(&["--cpu-series"]).expect("parses").os.cpu_series);
+    assert!(!parse(&[]).expect("parses").samples.cpu_series);
+    assert!(parse(&["--cpu-series"]).expect("parses").samples.cpu_series);
     assert!(parse(&["--cpu-series", "yes"]).is_err());
 }
 

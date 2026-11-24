@@ -84,6 +84,7 @@ fn the_fake_launcher_runs_its_text_and_writes_the_records() {
         ended: Ended::Exited(5),
         job_pid: Some(ready.job_pid),
         asid: None,
+        usage: None,
     };
     assert_eq!(record, want);
     assert_eq!(run.try_exit().unwrap(), Some(want.clone()));

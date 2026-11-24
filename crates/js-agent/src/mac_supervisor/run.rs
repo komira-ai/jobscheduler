@@ -3,6 +3,7 @@
 //! responsibility (`crates/xtask/src/spawn_sites.rs`, `KEEPERS`).
 
 use std::io::{self, Write};
+use std::os::unix::process::ExitStatusExt as _;
 use std::path::Path;
 use std::process::{Child, ExitStatus};
 
@@ -10,7 +11,7 @@ use js_mac_pool::seatbelt::SandboxInit;
 use js_mac_session::disclaim::{Kept, Program};
 use rustix::process::{Pid, Signal, kill_process_group};
 
-use super::record::{Ended, ExitRecord, Ready, Records, Step, ended_of, status_of};
+use super::record::{Ended, ExitRecord, JobRusage, Ready, Records, Step, ended_of, status_of};
 use super::{SuperviseSpec, VERB, status};
 
 /// The calls of the supervisor's steps, one method a step, so a test can watch their order and
@@ -70,16 +71,25 @@ pub trait SuperviseHost {
     fn write_exit(&self, records: &mut Records, record: &ExitRecord) -> io::Result<()>;
 }
 
+/// How the job ended, and what it used ([`JobRusage`]), as its wait reported them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reaped {
+    /// Its wait status.
+    pub status: ExitStatus,
+    /// What it and the processes it waited for used.
+    pub usage: JobRusage,
+}
+
 /// The job's process, as the supervisor holds it.
 pub trait JobChild {
     /// Its pid, also the id of its process group.
     fn pid(&self) -> i32;
 
-    /// Waits until it ends (a wait an interrupting signal does not end); how it ended.
+    /// Waits until it ends and reaps it: how it ended and what it used.
     ///
     /// # Errors
     /// It cannot be waited for.
-    fn wait(&mut self) -> io::Result<ExitStatus>;
+    fn wait(&mut self) -> io::Result<Reaped>;
 
     /// Kills its process group (`SIGKILL`).
     ///
@@ -175,10 +185,11 @@ fn run_job(
         return setup_failed(Step::Records, &why, Some(job_pid), asid);
     }
     match child.wait() {
-        Ok(status) => ExitRecord {
-            ended: ended_of(status),
+        Ok(reaped) => ExitRecord {
+            ended: ended_of(reaped.status),
             job_pid: Some(job_pid),
             asid,
+            usage: Some(reaped.usage),
         },
         Err(why) => {
             let _ = child.kill_group();
@@ -202,6 +213,7 @@ fn setup_failed(
         },
         job_pid,
         asid,
+        usage: None,
     }
 }
 
@@ -269,13 +281,51 @@ impl JobChild for SystemJob {
         Pid::from_child(&self.0).as_raw_nonzero().get()
     }
 
-    /// The standard library's wait, which waits again when a signal interrupts it.
-    fn wait(&mut self) -> io::Result<ExitStatus> {
-        self.0.wait()
+    /// `wait4` of the job, which reaps it and says what it used. This process installs no
+    /// signal handler, so no signal interrupts the wait. The [`Child`] is not waited for
+    /// again: it was reaped here, and dropping it neither waits nor kills.
+    fn wait(&mut self) -> io::Result<Reaped> {
+        let mut status: libc::c_int = 0;
+        // SAFETY: `rusage` is a C struct of integers, for which all zeroes is a valid value.
+        let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+        // SAFETY: both pointers are to live locals of the types `wait4` writes, and it keeps
+        // neither after it returns.
+        let reaped = unsafe { libc::wait4(self.pid(), &raw mut status, 0, &raw mut usage) };
+        if reaped < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Reaped {
+            status: ExitStatus::from_raw(status),
+            usage: rusage_of(&usage),
+        })
     }
 
     fn kill_group(&mut self) -> io::Result<()> {
         Ok(kill_process_group(Pid::from_child(&self.0), Signal::KILL)?)
+    }
+}
+
+/// The bytes of one unit of `ru_maxrss`: bytes on macOS, KiB on Linux.
+#[cfg(target_os = "macos")]
+const MAXRSS_UNIT: u64 = 1;
+/// The bytes of one unit of `ru_maxrss`: bytes on macOS, KiB on Linux.
+#[cfg(not(target_os = "macos"))]
+const MAXRSS_UNIT: u64 = 1024;
+
+/// What `usage`, as `wait4` filled it, says the job used: its user and system time together,
+/// and its largest resident set in bytes. A negative field (which the kernel never reports)
+/// counts as 0.
+fn rusage_of(usage: &libc::rusage) -> JobRusage {
+    let micros = |time: libc::timeval| {
+        let seconds = u64::try_from(time.tv_sec).unwrap_or(0);
+        let micros = u64::try_from(time.tv_usec).unwrap_or(0);
+        seconds.saturating_mul(1_000_000).saturating_add(micros)
+    };
+    JobRusage {
+        cpu_usec: micros(usage.ru_utime).saturating_add(micros(usage.ru_stime)),
+        max_rss_bytes: u64::try_from(usage.ru_maxrss)
+            .unwrap_or(0)
+            .saturating_mul(MAXRSS_UNIT),
     }
 }
 

@@ -9,7 +9,7 @@ use std::time::Duration;
 use clap::ValueEnum;
 use js_registry::PoolConfig;
 use js_sched::{Backfill, MemoryPercent};
-use js_sched_placer::sizes::{ColdSize, Curves};
+use js_sched_placer::sizes::{ColdMemoryOn, ColdSize, Curves};
 
 use super::CpuSlack;
 use crate::clock::SharedClock;
@@ -87,7 +87,8 @@ pub(crate) fn split(pool: PoolConfig) -> (PoolConfig, MemoryPercent) {
 }
 
 /// The placer the registry takes: its one engine is built with `cpu_slack`, the share
-/// `memory` of each host's memory, the `cold` size of a job class with no estimate, the
+/// `memory` of each host's memory, the `cold` size of a job class with no estimate (and
+/// `cold_on`, the cold memory of the jobs of each operating system the server names), the
 /// `curves` mode (`--placement-curves`), and backfill: work may backfill a host a
 /// whole-node request has set aside, up to `max_lease_wall` (`server.max_lease_wall`;
 /// none: any wall time). `clock` is the registry's.
@@ -95,10 +96,11 @@ pub(crate) fn placer(
     max_lease_wall: Option<Duration>,
     cpu_slack: CpuSlack,
     (memory, cold, curves): (MemoryPercent, ColdSize, Curves),
+    cold_on: ColdMemoryOn,
     clock: &SharedClock,
 ) -> Arc<SchedPlacer> {
     let settings = settings_of(max_lease_wall, cpu_slack, (memory, cold, curves));
-    Arc::new(SchedPlacer::new(settings, clock.clone()))
+    Arc::new(SchedPlacer::new(settings, clock.clone()).with_cold_memory_on(cold_on))
 }
 
 /// The engine's settings from the server's configuration, as [`placer`] takes them.

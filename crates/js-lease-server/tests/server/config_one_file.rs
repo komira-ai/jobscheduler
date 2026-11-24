@@ -187,6 +187,7 @@ fn beside() -> Vec<(Vec<&'static str>, String)> {
         key("--cpu-slack", "1.1"),
         key("--cold-cpu-millis", "2000"),
         key("--cold-memory-bytes", "8589934592"),
+        key("--cold-memory-bytes-on", "macos=4294967296"),
         key("--placement-curves", "shadow"),
         key("--tick", "3s"),
         key("--tls-cert", "/cert"),
