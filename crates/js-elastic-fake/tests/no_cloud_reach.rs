@@ -110,10 +110,22 @@ const LAMBDA_DEFAULT_ADDRESS: &str = "crates/js-provider-lambdalabs/src/kind.rs"
 /// The files that write protobuf type URLs, by exact path: the refusal a gRPC status
 /// carries is packed in a `google.protobuf.Any`, whose type URL starts with
 /// [`type_url_prefix`]. The prefix names a type, not a host anything connects to.
-const TYPE_URL_FILES: [&str; 2] = [
+const TYPE_URL_FILES: [&str; 5] = [
     "crates/js-proto/src/refusal.rs",
     "crates/js-proto/tests/golden/refusal_status.hex",
+    // The fake farm of xtask's `mac-farm` tests, and the tests, pack REAPI operations and
+    // results in `google.protobuf.Any`.
+    "crates/xtask/src/mac_farm/tests.rs",
+    "crates/xtask/tests/mac_farm.rs",
+    "crates/xtask/tests/mac_farm/fake.rs",
 ];
+
+/// The googleapis protocol files xtask's `mac-farm` is generated from, vendored as upstream
+/// wrote them: their comments link Google's documentation and name the hosts of its own
+/// services, and nothing generated from them connects anywhere but the address `mac-farm` is
+/// given. Every file here is pinned by SHA-256 in `PINS`, and `tests/mac_farm_pins.rs` refuses
+/// a file that is not, so nothing written here can name a host.
+const VENDORED_PROTOS: &str = "crates/xtask/proto/third_party/googleapis/";
 
 /// The file of the object-store client's tests that holds the published Signature Version 4
 /// vectors, by exact path. Their requests name [`signing_vector_hosts`], which the published
@@ -157,6 +169,7 @@ fn rules() -> Vec<Rule> {
                 .chain(EC2_HOST_FILES)
                 .chain(GCE_HOST_FILES)
                 .chain(APT_ROLE_FILES)
+                .chain([VENDORED_PROTOS])
                 .collect(),
         },
         Rule {
@@ -348,8 +361,28 @@ fn the_scan_fails_on_planted_reaches_and_passes_the_guarded_places() {
         file(SIGNING_VECTOR_FILE, &signing_vector_hosts().join("\n")),
         file(APT_ROLE_FILES[0], &sts_audience),
         file(&format!("{}tests.rs", APT_ROLE_FILES[1]), &sts_audience),
+        file(TYPE_URL_FILES[2], &type_url),
+        file(
+            &format!("{VENDORED_PROTOS}google/api/client.proto"),
+            &joined(&["// See https://cloud.", "google.com/apis"]),
+        ),
     ];
     assert_eq!(violations(&guarded, &rules), Vec::<String>::new());
+
+    // The vendored protos' allowance is their directory only: the code generated from them,
+    // or a proto of xtask's own, naming a host is still named.
+    let docs_host = joined(&["https://cloud.", "google.com/apis"]);
+    let outside = [
+        file("crates/xtask/src/mac_farm/proto.rs", &docs_host),
+        file(
+            "crates/xtask/proto/third_party/remote-apis/x.proto",
+            &docs_host,
+        ),
+    ];
+    let found = violations(&outside, &rules);
+    assert_eq!(found.len(), 2, "{found:#?}");
+    assert!(found[0].starts_with("crates/xtask/src/mac_farm/proto.rs "));
+    assert!(found[1].starts_with("crates/xtask/proto/third_party/remote-apis/x.proto "));
 
     // The role exchange's allowance is its own files only: the rest of the apt publisher
     // naming the same host is still named.
