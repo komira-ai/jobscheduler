@@ -156,10 +156,13 @@ fn taint() -> Taint {
 /// taint. A `taint/` row of a host the registry holds is put on the registry's record and
 /// returned, once, and not for a record that holds a taint already or a host it does not
 /// hold. The hosts heard from are the rows' hosts and the hosts the registry holds live, and a
-/// binding that cannot be read is skipped. It catches an offer that drops a host another
+/// binding that cannot be read is skipped. The tainted hosts are offered apart: each host a
+/// `taint/` row, a binding's taint or the registry's record taints, and none closed only for a
+/// passing cause. It catches an offer that drops a host another
 /// server took the hello of, one that keeps offering a host a row, a binding or the
 /// registry's own record closes, a taint row of a held host that is never carried to the
-/// binding, and a pass that stops on one binding it cannot read.
+/// binding, a tainted host left out of the tainted hosts or a host closed for a passing cause
+/// put in them, and a pass that stops on one binding it cannot read.
 #[test]
 fn a_read_offers_the_open_hosts_of_the_rows_and_the_registry_and_no_closed_one() {
     let w = world("rows_offered", true);
@@ -322,6 +325,22 @@ fn a_read_offers_the_open_hosts_of_the_rows_and_the_registry_and_no_closed_one()
     .map(String::from)
     .into();
     assert_eq!(heard, expected);
+    // The hosts a taint closes: by a `taint/` row alone (`far-taint`), a stored binding's taint
+    // alone (`far-bound-taint`), the registry's record (with a row or without one) and a row
+    // taken on by the record; not a host closed only by a mark, a cordon, a release under way,
+    // an unclean listing or a phase that is not serving.
+    let tainted = names(&mut offered.tainted.iter().map(ToString::to_string));
+    let expected: BTreeSet<String> = [
+        "far-bound-taint",
+        "far-taint",
+        "held-adopted",
+        "held-adopted-twice",
+        "held-norow-tainted",
+        "held-taint",
+    ]
+    .map(String::from)
+    .into();
+    assert_eq!(tainted, expected);
     assert_eq!(
         offered.adopted,
         [(host("held-adopted"), JobId::parse("job-t1").unwrap())],

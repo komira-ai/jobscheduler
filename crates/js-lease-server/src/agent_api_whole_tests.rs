@@ -14,7 +14,7 @@ use js_jobs::{
 };
 use js_registry::WholeNodeConfig;
 use js_state::StoreTime;
-use js_types::Clock;
+use js_types::{Clock, JobEventKind};
 
 use super::job_rig::{FakeAgent, Rig, spec, starts, stops, whole_rig};
 use crate::job_pass::store_time;
@@ -442,6 +442,139 @@ async fn a_host_unsafe_refusal_taints_the_host() {
     pass_time(&rig, &mut agent, 600).await;
     place_all(&rig);
     assert_eq!(rig.job(&job).state, JobState::Queued);
+}
+
+/// The host `name` as the registry holds it is tainted, and the taint's reason.
+fn taint_reason(rig: &Rig, name: &str) -> Option<String> {
+    let host = js_types::HostId::new(name).unwrap();
+    let view = rig.agents.registry.own_host(&host).unwrap();
+    view.host.taint.map(|taint| taint.reason)
+}
+
+/// Two hosts; `host-a` refuses its prepare `host-unsafe`: the job goes back to the queue with
+/// no bar of its own and `host-a` is tainted, and the pass after the refusing heartbeat places
+/// it on `host-b`, which is idle, where it is prepared and starts; `host-a` is named no
+/// allocation again. It catches komira-ai/jobscheduler#834, a requeued job left on the
+/// tainted host's grant that stays queued while `host-b` is idle.
+#[tokio::test]
+async fn a_host_unsafe_refusal_places_the_job_on_the_other_host() {
+    let (mut rig, mut a) = served("whole_host_unsafe_other");
+    rig.register("host-b", true);
+    let mut b = FakeAgent::new("host-b");
+    beat(&rig, &mut b).await;
+    let job = prepare(&rig, &mut a, "job-w").await;
+    assert_eq!(rig.allocation(&job).host.as_str(), "host-a");
+    a.refuse(RefusalReason::HostUnsafe);
+    beat(&rig, &mut a).await;
+    let requeued = rig.job(&job);
+    assert_eq!(
+        (requeued.state, requeued.failed_prepares),
+        (JobState::Placed, 1)
+    );
+    assert!(requeued.prepare_bars.is_empty());
+    assert_eq!(rig.allocation(&job).host.as_str(), "host-b");
+    a.serve_again();
+    place_all(&rig);
+    assert_eq!(rig.states(&job), (JobState::Placed, AllocationStep::Booked));
+    let reply = beat(&rig, &mut a).await;
+    assert_eq!(reply.exclusive, None);
+    let reply = beat(&rig, &mut b).await;
+    assert_eq!(reply.exclusive, Some(lease(&rig, &job)));
+    assert_eq!(b.phase, Phase::Preparing);
+    b.report_ready();
+    beat(&rig, &mut b).await;
+    assert_eq!(rig.job(&job).state, JobState::Starting);
+    assert!(taint_reason(&rig, "host-a").is_some());
+    assert_eq!(taint_reason(&rig, "host-b"), None);
+}
+
+/// Every host refuses its prepare `host-unsafe`, one after the other, under a pool that ends a
+/// job only after three failed prepares: the first refusal sends the job to the other host,
+/// and after the second both hosts are tainted and the job stays queued. The hosts' taints say
+/// `host-unsafe`, and the job's trail holds each placement and each requeue, naming its host.
+/// The passes that follow over ten minutes commit nothing (only the heartbeats' own row writes
+/// do), name no allocation to either host, and leave the job's row as it was. It catches a job
+/// ended because every host is tainted, one whose refusals leave no trace, and one that is
+/// marked, granted or rewritten on every pass.
+#[tokio::test]
+async fn a_job_every_host_refused_host_unsafe_stays_queued_and_writes_nothing() {
+    let rules = WholeNodeConfig {
+        max_replace: 3,
+        ..WholeNodeConfig::dedicated(2)
+    };
+    let mut rig = whole_rig("whole_host_unsafe_every", rules, None);
+    rig.register("host-a", true);
+    rig.register("host-b", true);
+    let mut agents = [FakeAgent::new("host-a"), FakeAgent::new("host-b")];
+    let job = queue_whole(&rig, "job-w", 600);
+    place_all(&rig);
+    let mut refused = Vec::new();
+    for (round, after) in [(1, JobState::Placed), (2, JobState::Queued)] {
+        let on = rig.allocation(&job).host.to_string();
+        let agent = agents.iter_mut().find(|agent| agent.host == on).unwrap();
+        beat(&rig, agent).await;
+        assert_eq!(agent.phase, Phase::Preparing);
+        agent.refuse(RefusalReason::HostUnsafe);
+        beat(&rig, agent).await;
+        agent.serve_again();
+        refused.push(on);
+        let requeued = rig.job(&job);
+        assert_eq!((requeued.state, requeued.failed_prepares), (after, round));
+    }
+    let mut both = refused.clone();
+    both.sort();
+    assert_eq!(both, ["host-a", "host-b"]);
+    let unsafe_host = Some("host-unsafe".to_owned());
+    assert_eq!(taint_reason(&rig, "host-a"), unsafe_host);
+    assert_eq!(taint_reason(&rig, "host-b"), unsafe_host);
+    let noted = rig.job(&job).queue;
+    assert_eq!(noted.code(), js_types::QueueCode::WaitingForWholeHost);
+    let trail: Vec<(JobEventKind, &str, Option<&str>)> = noted
+        .events()
+        .iter()
+        .map(|event| {
+            let host = event.host.as_ref().map(js_types::HostId::as_str);
+            (event.kind, event.detail.as_str(), host)
+        })
+        .collect();
+    let requeued = |host| {
+        let detail = match host {
+            "host-a" => "the whole-host prepare on host host-a failed; the job is queued again",
+            _ => "the whole-host prepare on host host-b failed; the job is queued again",
+        };
+        (JobEventKind::Requeued, detail, Some(host))
+    };
+    let placed = |host| {
+        let detail = match host {
+            "host-a" => "placed on host host-a",
+            _ => "placed on host host-b",
+        };
+        (JobEventKind::Placed, detail, Some(host))
+    };
+    let (first, second) = (refused[0].as_str(), refused[1].as_str());
+    assert_eq!(
+        trail,
+        [
+            placed(first),
+            requeued(first),
+            placed(second),
+            requeued(second)
+        ]
+    );
+
+    for _ in 0..20 {
+        rig.advance(30 * SECOND);
+        for agent in &mut agents {
+            let reply = beat(&rig, agent).await;
+            assert_eq!(reply.exclusive, None);
+        }
+        let before = rig.commits();
+        place_all(&rig);
+        assert_eq!(rig.commits(), before);
+    }
+    let still = rig.job(&job);
+    assert_eq!((still.state, still.failed_prepares), (JobState::Queued, 2));
+    assert_eq!(still.queue, noted);
 }
 
 /// A hello restarts the prepare of a placed whole-host job: the first listing after it moves

@@ -16,6 +16,7 @@
 //!   [`SCALE_HOSTS`], 24,000;
 //! - the one host that never answers: one host for [`BACKOFF_SETTLE`], 3,000 s, make 600;
 //! - a refusal: [`REFUSAL_HOSTS`] for [`REFUSAL_SETTLE`], 900 s, make 720;
+//! - the host-unsafe refusal: [`UNSAFE_HOSTS`] for [`UNSAFE_SETTLE`], 900 s, make 360;
 //! - the race: [`RACE_HOSTS`] for [`RACE_SETTLE`], 1,800 s, make 720 for each of the
 //!   [`RACE_SWEEP`] scenarios;
 //! - the restarts of a committed host: [`COMMIT_HOSTS`] for [`COMMIT_SETTLE`], 900 s, make
@@ -176,17 +177,16 @@ const REFUSAL_PATIENCE: Duration = Duration::from_secs(300);
 /// [`REFUSAL_RUN`] at time zero, so that one job is placed on each host. The job on the
 /// refusing host goes back to the queue and the other three succeed.
 ///
-/// For every reason but `host-unsafe` the refused job is placed again on a host that is
-/// free once one of the others ended, never on the refusing host within the bar: every
-/// job succeeds, exactly one is placed again, and at the end every host serves. A
-/// `host-unsafe` refusal taints the host it came from instead, which is then out of
-/// service for good (`serving_but`); the three other jobs succeed, and the client gives up
-/// on the job that was refused after [`REFUSAL_PATIENCE`]: where the refused job goes next
-/// is not stated.
+/// For every reason the refused job is placed again on a host that is free once one of
+/// the others ended, never on the refusing host within the bar: every job succeeds, and
+/// exactly one is placed again. For every reason but `host-unsafe` every host serves at
+/// the end; a `host-unsafe` refusal taints the host it came from instead, which is then
+/// out of service for good (`serving_but`), and the refused job still goes to one of the
+/// other hosts within [`REFUSAL_PATIENCE`], the client's patience.
 ///
 /// Red for a server that ends the job at the refusal, places it on the refusing host again
-/// within [`BACKOFF`], or does not taint a host that refused as unsafe (or taints one that
-/// did not).
+/// within [`BACKOFF`], leaves a job refused `host-unsafe` queued while another host is free,
+/// or does not taint a host that refused as unsafe (or taints one that did not).
 pub fn a_refusal(reason: RefusalReason) -> Scenario {
     let unsafe_host = reason == RefusalReason::HostUnsafe;
     let jobs = REFUSAL_HOSTS;
@@ -199,18 +199,48 @@ pub fn a_refusal(reason: RefusalReason) -> Scenario {
         .at(Duration::ZERO, agent_refuses_prepare(agents(0..1), reason))
         .expect(Expect::all_items_terminal())
         .settle_within(REFUSAL_SETTLE);
-    if unsafe_host {
-        return scenario
-            .expect(Expect::terminal_count(jobs - 1, HowEnded::Succeeded))
-            .expect(Expect::terminal_count(1, HowEnded::GaveUp))
-            .expect(Expect::serving_but(&[0]));
-    }
-    scenario
+    let scenario = scenario
         .expect(Expect::terminal_count(jobs, HowEnded::Succeeded))
         .expect(Expect::held_and_released(jobs))
         .expect(Expect::jobs_placed_again(1))
-        .expect(Expect::kept_off_a_failed_host(BACKOFF))
-        .expect(Expect::every_host_serving())
+        .expect(Expect::kept_off_a_failed_host(BACKOFF));
+    if unsafe_host {
+        return scenario.expect(Expect::serving_but(&[0]));
+    }
+    scenario.expect(Expect::every_host_serving())
+}
+
+/// The host-unsafe refusal of komira-ai/jobscheduler#834: two hosts, the first refusing.
+pub const UNSAFE_HOSTS: usize = 2;
+const UNSAFE_SETTLE: Duration = Duration::from_secs(900);
+
+/// Proves that a whole-host job refused `host-unsafe` goes to the other, free host in a
+/// later pass: two hosts, the first one's agent refuses every prepare with `host-unsafe`,
+/// and one whole-host job of [`REFUSAL_RUN`] at time zero, placed first on the refusing
+/// host. The refusal taints that host and puts the job back in the queue; the next passes
+/// place it on the second host, which is idle, where it starts, runs and succeeds on its
+/// second allocation. The tainted host stays out of service (`serving_but`). Red for a
+/// server that keeps the requeued job off every host (it stays queued with the second
+/// host idle until the settle), places it on the tainted host again, or does not taint it.
+pub fn a_host_unsafe_refusal_goes_to_the_other_host() -> Scenario {
+    let job = ItemId(0);
+    Scenario::new("a_whole_host_job_refused_host_unsafe_is_placed_on_the_other_host")
+        .scratch(env!("CARGO_TARGET_TMPDIR"))
+        .server(pool(UNSAFE_HOSTS))
+        .hosts("burst", UNSAFE_HOSTS)
+        .work(1, Work::whole_host(REFUSAL_RUN))
+        .at(
+            Duration::ZERO,
+            agent_refuses_prepare(agents(0..1), RefusalReason::HostUnsafe),
+        )
+        .expect(Expect::all_items_terminal())
+        .expect(Expect::terminal_count(1, HowEnded::Succeeded))
+        .expect(Expect::job_state(job, JobState::Succeeded))
+        .expect(Expect::allocations_of(job, 2))
+        .expect(Expect::jobs_placed_again(1))
+        .expect(Expect::launched_on(&[1], Duration::ZERO))
+        .expect(Expect::serving_but(&[0]))
+        .settle_within(UNSAFE_SETTLE)
 }
 
 /// Every refusal scenario, one for each reason of [`REFUSAL_REASONS`].
