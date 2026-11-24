@@ -43,7 +43,8 @@ second rule:
   its hello advertises (`egress`, `egress-ports`) covers the job's network level and each of its ports; a host that advertised none
   reads as level none with no port.
 - **Rank.** In a pool that scales, `FirstFit` (6.5): the first fitting host in hierarchy order, then host order, so work packs onto the
-  fewest hosts and the rest go idle and are released (5.8, 5.10).
+  fewest hosts and the rest go idle and are released (5.8, 5.10). Among the hosts a provider keeps (`static`), which are never released,
+  the job engine spreads instead: the emptiest host with room first ([placement-by-load.md](placement-by-load.md), The job engine spreads).
 - **Demand.** Queued bookings that fit no existing host, none about to be freed and none `registering` are placed by the same fit and
   rank onto empty hosts of the pool's shape; the empty hosts used are the demand for new machines, bounded by `max_step` and
   `max_machines`. Demand is hosts, never a count of jobs or leases (5.11).

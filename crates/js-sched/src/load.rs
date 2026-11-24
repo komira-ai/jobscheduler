@@ -226,9 +226,13 @@ pub struct ScoreConfig {
 }
 
 /// How key 5, the fit, is computed. Keys 1 to 4 and the tie-breaks are the same in every
-/// shape; only the fit changes, so a harness can run every shape through one code path.
-/// Placement always uses [`FitShape::Squared`]; the other shapes are for comparing
-/// rankers in simulations, which are integration tests and so cannot see `cfg(test)`.
+/// shape but [`FitShape::Spread`], which also narrows key 3; otherwise only the fit
+/// changes, so a harness can run every shape through one code path. A scheduler scores
+/// with [`FitShape::Squared`] unless it is built with another
+/// ([`crate::Scheduler::with_score_fit`]), and always with it among the hosts of a provider
+/// that launches them ([`crate::ProviderRank::launching`]); the job engine places with
+/// [`FitShape::Spread`]. `Linear` and `Flat` are for comparing rankers in simulations,
+/// which are integration tests and so cannot see `cfg(test)`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum FitShape {
     /// The weighted sum of `2 * min^2 + b * (max - min)^2` over the lease's `L` minutes.
@@ -241,6 +245,15 @@ pub enum FitShape {
     /// each of the `L` fit slots, by their mean over those slots (`area / L`, floor
     /// division): the fit of a lease and a host that were charged flat.
     Flat,
+    /// The emptiest host first: the weighted sum over the lease's `L` minutes of
+    /// `10^6 - min`, the share of the binding resource in use once the lease is on the
+    /// host. A burst of leases is spread over the hosts with room instead of filling the
+    /// fullest one first. Key 3 (distrusted) is the fallback alone here: a host measured
+    /// above the predictions of its leases is not distrusted, since its fresh measurement
+    /// is already the load the fit reads, and an idle host whose own services keep a core
+    /// busy (measured above its empty predictions) would otherwise lose every lease to a
+    /// busy host.
+    Spread,
 }
 
 impl ScoreConfig {
@@ -343,7 +356,7 @@ impl ScoreKey {
     }
 
     /// Key 3: the worker is in fallback or measured (the whole host) above the predictions
-    /// of its covered leases.
+    /// of its covered leases; under [`FitShape::Spread`], in fallback only.
     #[must_use]
     pub const fn distrusted(&self) -> bool {
         self.distrusted
@@ -600,6 +613,8 @@ impl Scorer {
                         w * (2 * lo * lo + balance * (hi - lo) * (hi - lo))
                     }
                     FitShape::Linear => w * (2 * lo + balance * (hi - lo)),
+                    // `lo` is a leftover in parts per million, so at most `PPM`.
+                    FitShape::Spread => w * (PPM - lo),
                 };
                 for (sum, v) in area.iter_mut().zip([
                     load.cpu_millis,
@@ -630,7 +645,8 @@ impl Scorer {
         ScoreKey {
             slack,
             memory_unsafe,
-            distrusted: host.fallback || host.measured_above_predicted,
+            distrusted: host.fallback
+                || (self.config.fit != FitShape::Spread && host.measured_above_predicted),
             concentrated: same_key * PPM > u128::from(self.config.key_share_ppm) * u128::from(tc),
             fit,
             uncovered: host.uncovered_leases,

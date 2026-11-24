@@ -24,9 +24,10 @@ use js_sched_placer::sizes::DEFAULT_COLD_CPU_MILLIS;
 pub const TICK_MS: u64 = 1000;
 /// The window a host is read over, in milliseconds (the agent's default heartbeat).
 pub const WINDOW_MS: u64 = 5000;
-/// How the placer's score ranks a host that admits a job, the least first: how far its figure
-/// goes past 101% of its cores, whether it is measured above its bookings, and the reverse of
-/// the figure (the tightest fit first).
+/// How the replay ranks a host that admits a job, the least first, as the placer's score did
+/// before the job engine spread jobs (best fit): how far its figure goes past 101% of its
+/// cores, whether it is measured above its bookings, and the reverse of the figure (the
+/// tightest fit first).
 type Rank = (u64, bool, Reverse<u64>);
 
 /// The rank of a job taken alone onto an empty host: any, as none ranks.
@@ -582,10 +583,12 @@ impl<'a> World<'a> {
     }
 
     /// The placement pass of the job service: the queue in order, each job to a host its
-    /// rule admits it on, until a job no host takes. Of the hosts that admit it, the placer's
-    /// score (`Scorer` in `js-sched/src/load.rs`) prefers, in order: the least figure past
-    /// 101% of the cores (key 1), a host not measured above its bookings (key 3), and the
-    /// host the job fits most tightly, the highest figure (key 5); the lower index on a tie.
+    /// rule admits it on, until a job no host takes. Of the hosts that admit it, the replay
+    /// prefers, as the placer's best-fit score (`FitShape::Squared` in `js-sched/src/load.rs`)
+    /// does: the least figure past 101% of the cores (key 1), a host not measured above its
+    /// bookings (key 3), and the host the job fits most tightly, the highest figure (key 5);
+    /// the lower index on a tie. The job engine now spreads its jobs instead
+    /// (`FitShape::Spread`); the replay keeps best fit, which its pinned reports were made with.
     fn place(&mut self, now: u64) {
         let farm = self.setup.farm;
         let limit = farm.milli.saturating_mul(self.arm.limit_permille) / 1000;

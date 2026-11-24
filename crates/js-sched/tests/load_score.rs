@@ -4,7 +4,11 @@
 #[path = "load_rig/mod.rs"]
 mod load_rig;
 
-use js_sched::{EVALUATIONS_PER_WORKER, Event, Load, LoadConfig, least_loaded};
+use js_sched::{
+    EVALUATIONS_PER_WORKER, Event, FitShape, Load, LoadConfig, ProviderRank, Scheduler,
+    least_loaded,
+};
+use js_types::ProviderId;
 use js_types::sched::{LeaseKind, Resources, StartLease, WorkKey};
 
 use load_rig::{GIB, Rig, w, warm};
@@ -51,6 +55,50 @@ fn a_lease_goes_to_the_fuller_worker_that_fits() {
     load(&mut r, "a", &["b"], 4);
     r.action(1_000, 4 * GIB, Some(warm(1_000, 0)));
     assert_eq!(on(&r.tick()), ["a"]);
+}
+
+/// Shows: a scheduler built with the spread fit sends the lease to the emptier worker that
+/// fits instead: `a` holds four cores, `b` none, and the next lease goes to `b`, whichever of
+/// the load settings and the fit is given first (the load settings leave the fit as it is).
+#[test]
+fn with_the_spread_fit_a_lease_goes_to_the_emptier_worker() {
+    let spread_then_load = Scheduler::new(1)
+        .with_score_fit(FitShape::Spread)
+        .with_load_config(LoadConfig::default());
+    let load_then_spread = Scheduler::new(1)
+        .with_load_config(LoadConfig::default())
+        .with_score_fit(FitShape::Spread);
+    for s in [spread_then_load, load_then_spread] {
+        let mut r = Rig::on();
+        r.s = s;
+        r.up("a", node());
+        r.up("b", node());
+        load(&mut r, "a", &["b"], 4);
+        r.action(1_000, 4 * GIB, Some(warm(1_000, 0)));
+        assert_eq!(on(&r.tick()), ["b"]);
+        assert_eq!(r.s.load_counters().scored, 1);
+    }
+}
+
+/// Shows: under the spread fit, the hosts of a provider that launches them, and releases them
+/// when idle, are still packed: `a` holds four cores, `b` none, both of a launching provider,
+/// and the next lease goes to `a` so that `b` can go idle. The same hosts of a provider that
+/// keeps them get it spread, to `b`.
+#[test]
+fn with_the_spread_fit_the_hosts_of_a_launching_provider_are_still_packed() {
+    let cloud = ProviderRank::new(ProviderId::new("cloud").unwrap(), 0);
+    for (rank, to) in [(cloud.clone().launching(), "a"), (cloud, "b")] {
+        let mut r = Rig::on();
+        r.s = Scheduler::new(1).with_score_fit(FitShape::Spread);
+        r.up("a", node());
+        r.up("b", node());
+        for name in ["a", "b"] {
+            r.s.set_provider_rank(&w(name), Some(rank.clone()));
+        }
+        load(&mut r, "a", &["b"], 4);
+        r.action(1_000, 4 * GIB, Some(warm(1_000, 0)));
+        assert_eq!(on(&r.tick()), [to], "{rank:?}");
+    }
 }
 
 /// Shows: the score reads only the workers the predicate passed. `a` is full (refused by

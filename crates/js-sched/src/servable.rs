@@ -590,7 +590,9 @@ impl Servable {
             hosts,
         };
         let names: Vec<&'a WorkerId> = shared.iter().map(|p| p.name).collect();
-        let mut scorer = adm.scorer();
+        // The candidates are of one provider ([`of_first_provider`]).
+        let launched = shared.iter().any(|p| workers[p.name].launched());
+        let mut scorer = adm.scorer(launched);
         let choice = scorer.choose_among(&model, &names)?;
         adm.count_scored(scorer.evaluations(), &choice);
         Some(choice.worker)

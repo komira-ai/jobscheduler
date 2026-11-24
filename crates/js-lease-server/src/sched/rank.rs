@@ -66,13 +66,16 @@ pub(crate) fn order_of(resolved: &Resolved, pool: &ProviderId) -> Option<Vec<Pro
 /// provider for a host whose binding names no instance (or that has none), the position of the
 /// launching provider (the first that is not `static`) for one whose binding names an
 /// instance. `None` when the platform lists no provider of that kind: such a host is no
-/// candidate on this platform (it stays in the host table).
+/// candidate on this platform (it stays in the host table). A launched host's rank says its
+/// provider launches it ([`ProviderRank::launching`]): the engine packs such hosts, so that
+/// the idle ones can be released, and spreads the work over the `static` ones.
 pub(crate) fn rank(order: &[ProviderId], binding: Option<&Binding>) -> Option<ProviderRank> {
     let launched = binding.and_then(Binding::instance).is_some();
     let mut listed = order.iter().enumerate();
     let (position, provider) = listed.find(|(_, provider)| (**provider != STATIC) == launched)?;
     let position = u32::try_from(position).unwrap_or(u32::MAX);
-    Some(ProviderRank::new(provider.clone(), position))
+    let rank = ProviderRank::new(provider.clone(), position);
+    Some(if launched { rank.launching() } else { rank })
 }
 
 #[cfg(test)]

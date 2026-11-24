@@ -22,14 +22,21 @@
 //! window at most: the reading has seen it, and it is charged in full on top of the window
 //! before the newest, which holds none of its use, and not on top of the measurement. Only an
 //! allocation taken after the newest reading is charged in full beside the measurement.
+//!
+//! Of the hosts with room for a job, the engine's scheduler takes the emptiest
+//! ([`js_sched::FitShape::Spread`]), not the fullest one that fits: a job's booking is its
+//! class's mean CPU, and the jobs of a build arrive together, so a host filled to its cores
+//! by bookings runs far more than its cores while the hosts beside it stand idle. Hosts a
+//! provider launches are still packed, so that the idle ones can be released
+//! ([`js_sched::ProviderRank::launching`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use js_caps::NodeCaps;
 use js_sched::harness::feed;
 use js_sched::{
-    Backfill, DaemonInstance, Event, LoadConfig, MemoryPercent, OpState, Prediction, Recovered,
-    RecoveredLease, Request, Scheduler,
+    Backfill, DaemonInstance, Event, FitShape, LoadConfig, MemoryPercent, OpState, Prediction,
+    Recovered, RecoveredLease, Request, Scheduler,
 };
 use js_types::sched::usage::{LeaseCost, NodeLoad};
 use js_types::sched::{
@@ -134,12 +141,14 @@ pub struct Engine {
 
 impl Engine {
     /// An engine built with `settings` at `now`, over no host: the registry's hosts come with
-    /// [`Engine::host_up`].
+    /// [`Engine::host_up`]. Its scheduler spreads the jobs over the hosts with room
+    /// ([`FitShape::Spread`]), but for the hosts of a provider that launches them.
     pub fn build(settings: Settings, now: FarmTime) -> Self {
         let sched = Scheduler::new(TERM)
             .with_backfill(settings.backfill)
             .with_load_config(settings.load)
-            .with_memory_percent(settings.memory);
+            .with_memory_percent(settings.memory)
+            .with_score_fit(FitShape::Spread);
         Self {
             sched,
             hosts: BTreeMap::new(),

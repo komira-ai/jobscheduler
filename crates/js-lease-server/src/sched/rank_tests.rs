@@ -65,6 +65,24 @@ fn rank_of_a_static_host_and_a_bound_elastic_host() {
     assert_eq!(at(&[id("cloud")], None), None);
 }
 
+/// Asserts that the rank of a host whose binding names an instance says its provider launches
+/// it, and that of a host whose binding names none (or that has no binding) says its provider
+/// keeps it, in either order of the providers. It catches a launched host spread over like a
+/// kept one (its idle hosts are then never released) and a kept host packed like a launched one.
+#[test]
+fn a_launched_host_s_rank_says_its_provider_launches_it() {
+    let launches = |order: &[ProviderId], binding: Option<&Binding>| {
+        rank(order, binding).map(|rank| rank.launches())
+    };
+    let launched = bound(Some(("cloud", "cloud-7")));
+    let joined = bound(None);
+    for order in [[STATIC, id("cloud")], [id("cloud"), STATIC]] {
+        assert_eq!(launches(&order, Some(&launched)), Some(true));
+        assert_eq!(launches(&order, Some(&joined)), Some(false));
+        assert_eq!(launches(&order, None), Some(false));
+    }
+}
+
 /// Asserts that a configuration that names no platform keeps `static` first and the pool's
 /// launched hosts after. It catches a default order that puts the launched hosts first.
 #[test]

@@ -18,13 +18,35 @@ use crate::scheduler::Worker;
 pub struct ProviderRank {
     position: u32,
     provider: ProviderId,
+    launches: bool,
 }
 
 impl ProviderRank {
-    /// The rank of `provider`, listed at `position` (0 first).
+    /// The rank of `provider`, listed at `position` (0 first): a provider whose hosts are
+    /// kept, idle or not ([`ProviderRank::launching`] for one that launches them).
     #[must_use]
     pub const fn new(provider: ProviderId, position: u32) -> Self {
-        Self { position, provider }
+        Self {
+            position,
+            provider,
+            launches: false,
+        }
+    }
+
+    /// The same rank, of a provider that launches its hosts and releases them when idle: the
+    /// score packs its hosts (best fit) so that some go idle, where it spreads the work over
+    /// the hosts of a provider that keeps them ([`crate::Scheduler::with_score_fit`]).
+    #[must_use]
+    pub const fn launching(mut self) -> Self {
+        self.launches = true;
+        self
+    }
+
+    /// Whether the provider launches its hosts and releases them when idle
+    /// ([`ProviderRank::launching`]).
+    #[must_use]
+    pub const fn launches(&self) -> bool {
+        self.launches
     }
 
     /// Where the platform lists the provider, 0 first.
@@ -46,6 +68,12 @@ impl Worker {
     /// (`u32::MAX`, a position no platform lists).
     pub(crate) fn provider_order(&self) -> u32 {
         self.rank.as_ref().map_or(u32::MAX, ProviderRank::position)
+    }
+
+    /// Whether this worker's provider launches its hosts ([`ProviderRank::launching`]); a
+    /// worker with no rank is kept.
+    pub(crate) fn launched(&self) -> bool {
+        self.rank.as_ref().is_some_and(ProviderRank::launches)
     }
 }
 

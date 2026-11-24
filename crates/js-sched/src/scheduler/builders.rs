@@ -1,4 +1,4 @@
-//! The builders that set the load, memory and curve settings of a scheduler.
+//! The builders that set the load, memory, curve and score settings of a scheduler.
 
 use std::sync::Arc;
 
@@ -7,6 +7,7 @@ use js_types::sched::usage::CurveSource;
 use super::Scheduler;
 use crate::admission::LoadConfig;
 use crate::headroom::MemoryPercent;
+use crate::load::FitShape;
 
 impl Scheduler {
     /// This scheduler, admitting actions as `config` says. A scheduler built with
@@ -45,6 +46,17 @@ impl Scheduler {
     #[must_use]
     pub fn with_curves(mut self, curves: Arc<dyn CurveSource + Send + Sync>) -> Self {
         self.admission.use_curves(curves);
+        self
+    }
+
+    /// This scheduler, scoring the workers that pass the predicate with `fit` as key 5
+    /// ([`FitShape`]); without it, [`FitShape::Squared`] (best fit). The workers of a provider
+    /// that launches its hosts ([`crate::ProviderRank::launching`]) are scored with the squared
+    /// fit whatever `fit` is, so that work packs onto the fewest of them and the idle ones can
+    /// be released. The load settings ([`Scheduler::with_load_config`]) leave it as it is.
+    #[must_use]
+    pub fn with_score_fit(mut self, fit: FitShape) -> Self {
+        self.admission.score_fit(fit);
         self
     }
 }

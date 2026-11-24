@@ -33,30 +33,31 @@ fn second_after(
 }
 
 /// Asserts that the heartbeats' load readings choose among the hosts that fit: the host
-/// that carries job 1 reports all 8 of its cores busy and a 15 GiB working set, the other
-/// an idle one, and job 2 goes to the idle host; with the same hosts and no load in the
-/// heartbeats it goes where booking alone sends it, beside job 1 (the host the job fits most
-/// tightly). It catches readings not fed to the engine, and readings fed to the wrong host
-/// (which would send it to the busy one).
+/// without job 1 reports all 8 of its cores busy and a 15 GiB working set, the one with job 1
+/// an idle one, and job 2 goes to the idle host, beside job 1; with the same hosts and no load
+/// in the heartbeats it goes where booking alone sends it, to the emptier host (the engine
+/// spreads jobs over the hosts with room). It catches readings not fed to the engine, and
+/// readings fed to the wrong host (which would send it to the busy one).
 #[test]
 fn load_readings_choose_among_hosts_that_fit() {
-    let busy = |first: &str| {
+    let other_busy = |first: &str| {
         if first.is_empty() {
-            [Some(reading(1, 0, GIB)), Some(reading(2, 0, GIB))]
-        } else {
             let ws = 15 * GIB;
             [Some(reading(1, 8_000, ws)), Some(reading(2, 8_000, ws))]
+        } else {
+            [Some(reading(1, 0, GIB)), Some(reading(2, 0, GIB))]
         }
     };
-    let (first, second) = second_after("load_chooses", busy);
-    assert_ne!(second, first);
-    let (first, second) = second_after("load_absent", |_| [None, None]);
+    let (first, second) = second_after("load_chooses", other_busy);
     assert_eq!(second, first);
+    let (first, second) = second_after("load_absent", |_| [None, None]);
+    assert_ne!(second, first);
 }
 
 /// Asserts that a heartbeat whose load the vet drops (an active file figure past the most
 /// the wire takes) still counts as a beat and feeds no reading: the registry keeps every
-/// host live with no reading, and job 2 goes where booking alone sends it. The dropped
+/// host live with no reading, and job 2 goes where booking alone sends it, to the host
+/// without job 1 (the engine spreads jobs over the hosts with room). The dropped
 /// readings say all 8 cores of each host are busy with a working set the engine would
 /// take, so had they been fed, the engine would place job 2 nowhere. It catches a beat
 /// whose bad load reaches the engine, and a bad load that loses the beat.
@@ -76,7 +77,7 @@ fn a_heartbeat_with_a_bad_load_still_counts_as_a_beat() {
     let listed = r.agents.registry.hosts();
     assert!(listed.iter().all(|host| host.state == HostState::Live));
     assert!(listed.iter().all(|host| host.load.is_none()));
-    assert_eq!(r.place("job-2", 1_000, 1 << 20).unwrap(), first);
+    assert_ne!(r.place("job-2", 1_000, 1 << 20).unwrap(), first);
 }
 
 /// Asserts the CPU slack through the server's configuration: with no `--cpu-slack` (the

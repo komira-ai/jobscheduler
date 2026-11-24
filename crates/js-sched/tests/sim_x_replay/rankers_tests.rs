@@ -138,6 +138,9 @@ fn fit_by_rule(fit: FitShape, load: &[Charge], new: &[Charge], l: usize) -> u128
             let (lo, hi) = two(mean(load), mean(new));
             (0..l).map(weight).sum::<u128>() * (2 * lo * lo + (hi - lo) * (hi - lo))
         }
+        FitShape::Spread => (0..l)
+            .map(|s| weight(s) * (1_000_000 - two(load[s], new[s]).0))
+            .sum(),
     }
 }
 
@@ -209,15 +212,22 @@ fn rankers_three_four_five_choose_three_hosts_on_the_shape_table() {
 
 /// Shows: key 5 of each ranker is what the rule says, host by host, restated from the rule
 /// in this file (the weighted sum, the weighted sum of squares, the square of the mean over
-/// the fit slots). Catches a Linear that squares, a Flat that averages the wrong slots or
-/// weights twice, and a fit that covers more or fewer slots than `L`.
+/// the fit slots, the weighted sum of the binding share in use). Catches a Linear that
+/// squares, a Flat that averages the wrong slots or weights twice, a Spread that reads the
+/// leftover instead of what is in use, and a fit that covers more or fewer slots than `L`.
 #[test]
 fn key_five_is_the_rule_restated_for_each_fit() {
     let m = shape_table();
     let new = [cm(NEW); SLOTS];
     for (name, d) in SHAPES {
         let load: Vec<Charge> = shape_loads(&d).iter().map(|v| cm(*v)).collect();
-        for fit in [FitShape::Squared, FitShape::Linear, FitShape::Flat] {
+        let fits = [
+            FitShape::Squared,
+            FitShape::Linear,
+            FitShape::Flat,
+            FitShape::Spread,
+        ];
+        for fit in fits {
             assert_eq!(
                 key(fit, &m, name).fit(),
                 fit_by_rule(fit, &load, &new, L as usize),

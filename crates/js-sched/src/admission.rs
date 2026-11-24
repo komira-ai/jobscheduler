@@ -90,7 +90,7 @@ pub use profile::HORIZON_MINUTES;
 pub(crate) use profile::{H_PLUS as H_PLUS_SLOT, Profile};
 
 use crate::input::Request;
-use crate::load::{Charge, ScoreConfig, Scorer};
+use crate::load::{Charge, FitShape, ScoreConfig, Scorer};
 use crate::refusal::{Refusal, RefusalKind, RefusalLog, Refusals};
 
 use guard::{Resource, ShapeGuard};
@@ -264,10 +264,13 @@ pub(crate) struct Admission {
     curves: Curves,
     guard: ShapeGuard,
     refusals: RefusalLog,
+    /// How the score computes key 5 ([`crate::Scheduler::with_score_fit`]).
+    fit: FitShape,
 }
 
 impl Default for Admission {
-    /// A scheduler is built admitting by load, as [`LoadConfig::default`] says.
+    /// A scheduler is built admitting by load, as [`LoadConfig::default`] says, and scoring
+    /// with the squared fit.
     fn default() -> Self {
         Self {
             cfg: LoadConfig::default(),
@@ -276,6 +279,7 @@ impl Default for Admission {
             curves: Curves(Arc::new(NoCurves)),
             guard: ShapeGuard::default(),
             refusals: RefusalLog::default(),
+            fit: FitShape::Squared,
         }
     }
 }
@@ -283,6 +287,10 @@ impl Default for Admission {
 impl Admission {
     pub(crate) fn configure(&mut self, cfg: LoadConfig) {
         self.cfg = cfg.normalised();
+    }
+
+    pub(crate) fn score_fit(&mut self, fit: FitShape) {
+        self.fit = fit;
     }
 
     pub(crate) fn use_curves(&mut self, curves: Arc<dyn CurveSource + Send + Sync>) {
@@ -506,9 +514,18 @@ impl Admission {
         c.curve_flat += u64::from(!cpu && !memory && self.curves.0.curve(key).is_some());
     }
 
-    /// The scorer for the current settings.
-    pub(crate) fn scorer(&self) -> Scorer {
-        Scorer::new(ScoreConfig::of(&self.cfg))
+    /// The scorer for the current settings: with the fit the scheduler was built with
+    /// ([`crate::Scheduler::with_score_fit`]) among hosts that are kept, and with the squared
+    /// fit (best fit) among the hosts of a provider that launches them (`launched`,
+    /// [`crate::ProviderRank::launching`]), so that work packs onto the fewest of them and
+    /// the others go idle and can be released.
+    pub(crate) fn scorer(&self, launched: bool) -> Scorer {
+        let fit = if launched {
+            FitShape::Squared
+        } else {
+            self.fit
+        };
+        Scorer::new(ScoreConfig::of(&self.cfg).with_fit(fit))
     }
 
     /// Counts a placement the score made: the evaluations it spent and how it decided.
@@ -776,9 +793,14 @@ mod tests {
     /// Catches: the fit shape a config is built with not being the one it reports.
     #[test]
     fn a_config_reports_its_fit_shape() {
-        use crate::load::FitShape;
         assert_eq!(ScoreConfig::default().fit(), FitShape::Squared);
-        for fit in [FitShape::Squared, FitShape::Linear, FitShape::Flat] {
+        let shapes = [
+            FitShape::Squared,
+            FitShape::Linear,
+            FitShape::Flat,
+            FitShape::Spread,
+        ];
+        for fit in shapes {
             assert_eq!(ScoreConfig::default().with_fit(fit).fit(), fit);
         }
     }
