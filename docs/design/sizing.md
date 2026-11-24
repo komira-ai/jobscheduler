@@ -88,8 +88,9 @@ no run of its own books its fallback class's figure (the same formula over the k
 on its platform (a third key every run of the client but a memory kill teaches), else the cold size, and at least its own kill floor.
 A fallback whose figure reaches the host is no fallback. Only a client with no fresh run at all books the cold size: `server.cold_cpu_millis` and
 `server.cold_memory_bytes` (or their flags), each one left out its default: 22 cores and 4 GiB; a job whose `os` constraint the server names
-in `server.cold_memory_bytes_on` (`--cold-memory-bytes-on OS=BYTES`) books that operating system's memory in place of `cold_memory_bytes`
-(the name as the job gives it; a job of another `os`, or of none, books `cold_memory_bytes`). The cold CPU is never more than a quarter of
+in `server.cold_memory_bytes_on` (`--cold-memory-bytes-on OS=BYTES`) books that operating system's memory in place of `cold_memory_bytes`,
+and one it names in `server.cold_cpu_millis_on` (`--cold-cpu-millis-on OS=MILLIS`) that operating system's CPU in place of
+`cold_cpu_millis` (the name as the job gives it; a job of another `os`, or of none, books the server's). The cold CPU is never more than a quarter of
 the most cores of the hosts the engine knows (the most any class books, so that the first run of an unknown class has room for
 the cores it uses), and the cold memory never more than the most bookable memory (the pool's `memory_schedulable_percent` applied) of the hosts the engine knows, and at
 least the class's kill floor. The CPU is the class's own learned CPU, else its fallback class's, else its client's (the first
@@ -111,8 +112,10 @@ booking it died at next (the floor), and each run's peak with its margin raises 
 The cold memory of an operating system is set for the hosts of one platform without changing the others'. A farm whose build hosts
 run with `cold_memory_bytes` at 16 GiB has Macs with 88 GiB of bookable memory, which that size fills at five jobs a Mac
 whatever their CPU; `cold_memory_bytes_on = { macos = 4294967296 }` books a new Mac class 4 GiB and leaves the build hosts' 16 GiB as
-it is. It is a setting, not a share of the hosts: a share (the cold CPU's quarter of the cores, say) would change what every
-platform books at once. A Mac's classes learn from their runs as Linux's do once its agent reports their usage.
+it is. With 4 GiB a Mac is then held by the cold CPU: at `cold_cpu_millis` 4000 seven jobs fill its 28 cores at the CPU slack of
+1.1; `cold_cpu_millis_on = { macos = 1000 }` books a new Mac class one core, and the Mac's memory holds it at 22. It is a setting, not a
+share of the hosts: a share (the cold CPU's quarter of the cores, say) would change what every platform books at once. A Mac's classes
+learn from their runs as Linux's do once its agent reports their usage.
 
 The size is decided by the placement pass, not at submit, and is not written on the job: its needs stay as submitted, so a retried
 submit with the same id is still the same job. What it was booked is its allocation's `booked`, and which history sized it its

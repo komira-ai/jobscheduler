@@ -43,8 +43,8 @@ mod retention;
 mod store;
 mod tokens;
 pub(crate) use agent_setup::AgentSetup;
-pub(crate) use agent_setup::cold_entry;
-use agent_setup::{MorePool, agents, check_more, parse_cold_on};
+use agent_setup::{MorePool, agents, check_more, parse_cold_cpu_on, parse_cold_on};
+pub(crate) use agent_setup::{cold_cpu_entry, cold_entry};
 pub use cpu_slack::{CpuSlack, CpuSlackError};
 pub(crate) use dispatch::{
     DEFAULT_LEASE_SECS, DEFAULT_RECHECK_MS, DispatchTimes, MOST_LEASE_SECS, MOST_RECHECK_MS,
@@ -59,7 +59,7 @@ pub(crate) use listen::{
 };
 pub use placement::Placement;
 use placement::check_pool;
-pub(crate) use placement::{checked, placer, split};
+pub(crate) use placement::{ColdOn, checked, placer, split};
 pub(crate) use placement_curves::parse as parse_curves;
 pub(crate) use private::{read_private, read_private_reason};
 pub(crate) use retention::{
@@ -224,6 +224,14 @@ pub struct Cli {
     /// Repeatable, each `OS` once. Needs `--agent-pool-config`.
     #[arg(long = "cold-memory-bytes-on", value_name = "OS=BYTES", value_parser = parse_cold_on)]
     pub cold_memory_bytes_on: Vec<(String, u64)>,
+    /// The CPU a queued job whose `os` constraint is `OS` books in place of
+    /// `--cold-cpu-millis`, while neither its class, its fallback class nor its client has a run
+    /// with a CPU sample: `OS=MILLIS`, such as `macos=1000`, the name as jobs give it and the
+    /// millicores from 250 to 4294967295; above a quarter of the most cores a registered host
+    /// has, that quarter. A job of any other `os`, or of none, books `--cold-cpu-millis`.
+    /// Repeatable, each `OS` once. Needs `--agent-pool-config`.
+    #[arg(long = "cold-cpu-millis-on", value_name = "OS=MILLIS", value_parser = parse_cold_cpu_on)]
+    pub cold_cpu_millis_on: Vec<(String, u64)>,
     /// Deprecated, and does nothing: no lease is costed by an estimate any more. The flag
     /// is accepted with a warning. Needs `--agent-pool-config`; not allowed with
     /// `--usage-off`.
@@ -703,7 +711,10 @@ impl Config {
             require_host_credential: server.agents.require_host_credential(),
             cpu_slack,
             cold: server.agents.cold(),
-            cold_memory_on: server.agents.cold_memory_on(),
+            cold_on: ColdOn {
+                memory: server.agents.cold_memory_on(),
+                cpu: server.agents.cold_cpu_on(),
+            },
             curves,
             max_lease_wall: server.max_lease_wall,
             job_limits,
