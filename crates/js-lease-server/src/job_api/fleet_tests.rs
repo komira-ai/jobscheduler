@@ -200,6 +200,14 @@ async fn clear_taint(api: &JobApi, host: &str) -> Result<ClearHostTaintResponse,
     answer.map(Response::into_inner)
 }
 
+async fn retire(api: &JobApi, host: &str) -> Result<RetireHostResponse, Status> {
+    let request = RetireHostRequest {
+        host_id: host.to_owned(),
+    };
+    let answer = retire_host(api, Request::new(request)).await;
+    answer.map(Response::into_inner)
+}
+
 /// A taint of reason `residue` that the check `daemonised-child` found after the run `run-1`.
 fn residue() -> Taint {
     Taint {
@@ -451,6 +459,44 @@ async fn cordon_unsaved_is_unavailable_but_holds() {
     assert!(s.bindings_file().unwrap().contains("cordon_until_ms"));
 }
 
+/// Asserts `RetireHost` over the server's own state (bindings in the file): a live host is
+/// refused `FAILED_PRECONDITION` `host-live` and stays held; once it is lost, a retirement whose
+/// bindings file cannot be written is `UNAVAILABLE` `retire-unsaved`, the registry having
+/// forgotten the host; the same call once the file can be written answers `retired` false and
+/// leaves a bindings file without the host, and the listing no longer holds it. Catches a live
+/// host retired, an unsaved retirement acknowledged, and a repeat that cannot finish the save
+/// (a restart would put the host back from the file).
+#[tokio::test]
+async fn a_retire_refuses_a_live_host_and_its_repeat_finishes_an_unsaved_one() {
+    let s = server("retire-unsaved");
+    s.register("h1");
+    assert!(s.shared.agents().save_bindings().await);
+    assert!(s.bindings_file().unwrap().contains("h1"));
+    let id = HostId::new("h1").unwrap();
+    let live = (Code::FailedPrecondition, HOST_LIVE.to_owned());
+    assert_eq!(refused(retire(&s.api, "h1").await), live);
+    assert!(
+        s.registry.own_host(&id).is_some(),
+        "a live host was forgotten"
+    );
+
+    let past_grace = js_agent_wire::DEFAULT_GRACE_MS + 1;
+    s.clock.advance(Duration::from_millis(past_grace));
+    let blocker = s.dir.path().join("bindings.tmp");
+    std::fs::create_dir(&blocker).unwrap();
+    let unsaved = (Code::Unavailable, RETIRE_UNSAVED.to_owned());
+    assert_eq!(refused(retire(&s.api, "h1").await), unsaved);
+    assert!(s.registry.own_host(&id).is_none());
+    assert!(
+        s.bindings_file().unwrap().contains("h1"),
+        "the file was written"
+    );
+    std::fs::remove_dir(&blocker).unwrap();
+    assert!(!retire(&s.api, "h1").await.unwrap().retired);
+    assert!(!s.bindings_file().unwrap().contains("h1"));
+    assert!(list(&s.api).await.iter().all(|host| host.id != "h1"));
+}
+
 /// Asserts the operator's clear end to end over the server's own state: a tainted host (its
 /// taint in the registry and in the bindings file) takes no queued job and `ListHosts` shows
 /// its reason; the call answers `cleared` with the reason, `ListHosts` and the host in the
@@ -637,10 +683,13 @@ fn api_over(
 
 /// The hosts of a fake: listed from these registry views, as the server lists them, and
 /// answering every cordon, uncordon and clear of a taint with `answer` (a clear that `answer`
-/// accepts cleared a taint of reason `residue`).
+/// accepts cleared a taint of reason `residue`), and every retirement with `retired`, noting
+/// the host each one named in `retire_asked`.
 struct FakeHosts {
     views: Vec<HostView>,
     answer: Result<bool, Refused>,
+    retired: Result<bool, Refused>,
+    retire_asked: std::sync::Mutex<Vec<HostId>>,
 }
 
 impl FakeHosts {
@@ -648,6 +697,8 @@ impl FakeHosts {
         FakeHosts {
             views: Vec::new(),
             answer: Ok(true),
+            retired: Ok(true),
+            retire_asked: std::sync::Mutex::default(),
         }
     }
 }
@@ -669,6 +720,11 @@ impl Hosts for FakeHosts {
     async fn clear_taint(&self, _: &HostId) -> Result<Option<String>, Refused> {
         let cleared = self.answer?;
         Ok(cleared.then(|| "residue".to_owned()))
+    }
+
+    async fn retire(&self, host: &HostId) -> Result<bool, Refused> {
+        self.retire_asked.lock().unwrap().push(host.clone());
+        self.retired
     }
 }
 

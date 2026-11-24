@@ -53,7 +53,10 @@ heartbeat that it is tainted, and the server takes that as the host's taint agai
 A job store taint row that a failed write left behind (the server logs a warning that names the
 host) is put back on the binding at the next start; start the server once after such a warning,
 then clear the taint with the call. Until it is cleared the host keeps counting toward the
-pool's `max_machines`.
+pool's `max_machines`. A host that will not come back under its id (a machine given up, or one
+that joins again under another id) stops counting once its id is retired: once it is lost and
+its taint cleared, `RetireHost` (`js host retire --host-id ID`) deletes its row, binding and
+record (docs/http-gateway.md).
 
 ## What the agent needs
 

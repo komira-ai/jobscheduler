@@ -104,6 +104,23 @@ impl JobClient {
         answer.map_err(|_| self.timed_out(attempt)).and_then(|answer| answer.map(tonic::Response::into_inner).map_err(|status| self.classify(attempt, &status)))
     }
 
+    /// Retires the id of a lost host, so that its pool has room for a new id. Operator only.
+    /// The host's row in the job store is deleted at the version read, with its stored binding
+    /// and this server's record of it, so that neither the pool's count over the rows nor this
+    /// server's own count holds the id any more: a host that changed its id (a host-certificate
+    /// join after a token join with another id) can then join a pool at its max_machines. It
+    /// is refused while the host is live (heard within the grace) or holds or is owed work (a
+    /// job placed on it or ending on it, a taint, a cordon or a scale-down mark), each
+    /// FAILED_PRECONDITION with its own code, and nothing is written. A host with nothing left
+    /// to retire answers retired false and nothing is written, so a repeat is harmless; with
+    /// several servers over one store, the same call on each forgets that server's record.
+    /// The call does not reach the agent.
+    pub async fn retire_host(&mut self, request: v1::RetireHostRequest) -> Result<v1::RetireHostResponse, JobError> {
+        let (attempt, request) = self.begin(request);
+        let answer = tokio::time::timeout(self.limit, self.service.retire_host(request)).await;
+        answer.map_err(|_| self.timed_out(attempt)).and_then(|answer| answer.map(tonic::Response::into_inner).map_err(|status| self.classify(attempt, &status)))
+    }
+
     /// Lists the pools. Changes nothing.
     pub async fn list_pools(&mut self, request: v1::ListPoolsRequest) -> Result<v1::ListPoolsResponse, JobError> {
         let (attempt, request) = self.begin(request);

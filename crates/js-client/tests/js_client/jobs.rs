@@ -10,7 +10,8 @@ use js_client::jobs::{Dialer, JobClient, JobError};
 use js_proto::v1::{
     CancelJobRequest, ClearHostTaintRequest, CordonHostRequest, GetJobRequest, GetLogsRequest,
     GetResultRequest, GetUsageRequest, JobSpec, ListHostsRequest, ListJobsRequest,
-    ListPoolsRequest, ListProvidersRequest, Needs, SubmitJobRequest, UncordonHostRequest,
+    ListPoolsRequest, ListProvidersRequest, Needs, RetireHostRequest, SubmitJobRequest,
+    UncordonHostRequest,
 };
 use prost::Message as _;
 use tonic::Code;
@@ -254,6 +255,9 @@ async fn job_client_sends_the_bearer_on_every_call() {
     jobs.clear_host_taint(ClearHostTaintRequest::default())
         .await
         .unwrap();
+    jobs.retire_host(RetireHostRequest::default())
+        .await
+        .unwrap();
     jobs.list_pools(ListPoolsRequest {}).await.unwrap();
     jobs.list_providers(ListProvidersRequest {}).await.unwrap();
     jobs.get_usage(GetUsageRequest::default()).await.unwrap();
@@ -275,6 +279,7 @@ async fn job_client_sends_the_bearer_on_every_call() {
             "CordonHost",
             "UncordonHost",
             "ClearHostTaint",
+            "RetireHost",
             "ListPools",
             "ListProviders",
             "GetUsage",
@@ -456,6 +461,7 @@ async fn every_call_classifies_a_refusal_and_a_lost_answer() {
         "CordonHost",
         "UncordonHost",
         "ClearHostTaint",
+        "RetireHost",
         "ListPools",
         "ListProviders",
         "GetUsage",
@@ -490,6 +496,7 @@ async fn every_call_classifies_a_refusal_and_a_lost_answer() {
                 .await
                 .err(),
         );
+        said.push(jobs.retire_host(RetireHostRequest::default()).await.err());
         said.push(jobs.list_pools(ListPoolsRequest {}).await.err());
         said.push(jobs.list_providers(ListProvidersRequest {}).await.err());
         said.push(jobs.get_usage(GetUsageRequest::default()).await.err());
