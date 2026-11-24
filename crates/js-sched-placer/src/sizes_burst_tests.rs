@@ -101,10 +101,12 @@ fn burst(peaks: bool) -> BTreeMap<String, u64> {
         })
         .collect();
     let hello = std::collections::BTreeSet::new();
+    let tainted = std::collections::BTreeSet::new();
     let hosts = JobHosts {
         open: &open,
         hello: &hello,
         whole: None,
+        tainted: &tainted,
     };
     let placed = placer
         .place_jobs_with(&tables.jobs, &hosts, (&Quiet, &Quiet))
