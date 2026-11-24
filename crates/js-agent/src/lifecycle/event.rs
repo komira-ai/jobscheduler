@@ -106,7 +106,7 @@ pub struct StartTimeline {
 /// ([`LookupStamps::open_ms`]):
 /// `LookupStamps { queued_at_ms: Q, started_at_ms: S, ended_at_ms: E, queue_ms: S-Q,
 /// open_ms: E-S }`.
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct LookupStamps {
     /// When the lookup was asked of the pool.
     pub queued_at_ms: u64,

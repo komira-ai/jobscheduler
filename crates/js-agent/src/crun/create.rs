@@ -281,10 +281,8 @@ impl CrunRuntime {
         }
         // What the run's assembly made of its layers and mounts: the run's removal unmounts
         // it, or, for a run that is not made, the lifecycle's discard (`Runtime::discard_fs`).
-        let (assembled, lookup) = match self.fs.as_mut().and_then(|fs| fs.take(&spec.run_id)) {
-            Some((made, lookup)) => (Some(made), lookup),
-            None => (None, None),
-        };
+        let taken = self.fs.as_mut().and_then(|fs| fs.take(&spec.run_id));
+        let (assembled, lookup) = taken.map_or((None, None), |(made, lookup)| (Some(made), lookup));
         // A root of layers alone has no image.
         let image = match given.is_empty() {
             true => PinnedImage {
