@@ -39,7 +39,7 @@ use js_types::{HostId, Shape};
 
 use crate::map;
 use crate::room::Room;
-use crate::sizes::{ColdMemoryOn, ColdSize, Curves, JobSizes};
+use crate::sizes::{ColdCpuOn, ColdMemoryOn, ColdSize, Curves, JobSizes};
 
 #[path = "jobs.rs"]
 pub mod jobs;
@@ -166,6 +166,14 @@ impl Engine {
     #[must_use]
     pub fn with_cold_memory_on(mut self, on: ColdMemoryOn) -> Self {
         self.sizes = std::mem::take(&mut self.sizes).with_cold_memory_on(on);
+        self
+    }
+
+    /// The same engine, a job of an operating system `on` names booking that cold CPU while its
+    /// class has no CPU sample, in place of [`Settings::cold`]'s ([`ColdCpuOn`]).
+    #[must_use]
+    pub fn with_cold_cpu_on(mut self, on: ColdCpuOn) -> Self {
+        self.sizes = std::mem::take(&mut self.sizes).with_cold_cpu_on(on);
         self
     }
 

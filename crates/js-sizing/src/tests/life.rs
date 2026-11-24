@@ -100,7 +100,7 @@ fn life_survives_storage_and_a_version_1_record_decodes() {
     assert_eq!(decoded.life_minutes(), 4);
     // A version 1 record: version byte 1, no minute ring, resealed checksum.
     let bytes = summary.encode();
-    let mut v1 = bytes[..bytes.len() - 8 - 32].to_vec();
+    let mut v1 = bytes[..bytes.len() - 8 - 4 * 32 - 32].to_vec();
     v1[0] = 1;
     let sum = crate::codec::checksum(&v1);
     v1.extend_from_slice(&sum.to_le_bytes());

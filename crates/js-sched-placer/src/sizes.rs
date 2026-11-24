@@ -34,12 +34,12 @@
 //! - **Cold.** A class with no history of its own, whose client has no fresh run either, books
 //!   the cold size ([`ColdSize`]): the server's `cold_cpu_millis` and `cold_memory_bytes`, which
 //!   default to [`DEFAULT_COLD_CPU_MILLIS`] (22 cores) and [`DEFAULT_COLD_MEMORY_BYTES`] (4 GiB),
-//!   and for a job whose `os` the server names in `cold_memory_bytes_on` ([`ColdMemoryOn`]) that
-//!   operating system's memory in place of `cold_memory_bytes` (a Mac's jobs need not book what a
-//!   build host's do); its CPU never more than a quarter of the most cores a known host has (the
-//!   most any class books, so that the first run of an unknown class has room for the cores it
-//!   uses), its memory never more than the most a known host has ([`Bounds`] of [`bounds_of`])
-//!   and at least the class's memory floor.
+//!   and for a job whose `os` the server names in `cold_memory_bytes_on` ([`ColdMemoryOn`]) or
+//!   `cold_cpu_millis_on` ([`ColdCpuOn`]) that operating system's memory or CPU in place of the
+//!   server's (a Mac's jobs need not book what a build host's do); its CPU never more than a
+//!   quarter of the most cores a known host has (the most any class books, so that the first run
+//!   of an unknown class has room for the cores it uses), its memory never more than the most a
+//!   known host has ([`Bounds`] of [`bounds_of`]) and at least the class's memory floor.
 //! - **Too large.** A class whose own runs ask for the most bookable memory a host has or more
 //!   books all of that memory: it waits for a host with nothing else on it.
 //! - **CPU.** The learned CPU of the class, else of its fallback class, else of the client's
@@ -48,7 +48,10 @@
 //!   most a quarter of the most cores a host has; the cold CPU when none has a sample. A booking is a share of its
 //!   host's CPU, not a ceiling. Placement packs these bookings within the CPU slack and admits
 //!   by the host's measured load, so a job's bursts above its mean are the load's to judge,
-//!   not its booking's.
+//!   not its booking's, unless they are a heavy tail: a class whose runs' five-second peaks
+//!   (the 90th percentile of them, over at least five runs that reported one) are over twice
+//!   its median books that percentile instead, under the same quarter-host cap
+//!   (`docs/design/sizing.md`, 7.10), so a burst of its jobs spreads over the hosts.
 //!
 //! [`JobSizes::sized_from`] says which of these sized a job, and each placement of a job the
 //! history sized is logged with it.
@@ -107,9 +110,9 @@
 //!   CPU is a lower bound and may only raise its class's CPU: the history a server rebuilds
 //!   at its start from runs taken under a ceiling therefore never holds a class down at it;
 //! - its CPU sample is its mean, its CPU time over its wall time. The most cores its group used
-//!   over five seconds (`cpu_peak`, as its host reported it) is kept in its usage and not
-//!   booked: a peak booking held a host to a few jobs whose peaks fill it while their use
-//!   left most of it idle.
+//!   over five seconds (`cpu_peak`, as its host reported it) goes beside the sample, and books
+//!   its class only when the class's peaks are a heavy tail: a peak booking of every class held
+//!   a host to a few jobs whose peaks fill it while their use left most of it idle.
 //!
 //! # Profiles
 //!
@@ -204,12 +207,12 @@ impl ColdSize {
             ..bounds
         }
     }
+}
 
-    /// The CPU a cold class books under `bounds`: this cold CPU held at a quarter of the most
-    /// cores a host has ([`host_share`]), and at least a quarter core.
-    fn cpu(self, bounds: &Bounds) -> u64 {
-        self.cpu_millis.min(host_share(bounds)).max(CPU_STEP)
-    }
+/// `cpu_millis`, a CPU a class books (learned or cold), held at a quarter of the most cores a
+/// host has under `bounds` ([`host_share`]), and at least a quarter core.
+fn held_cpu(cpu_millis: u64, bounds: &Bounds) -> u64 {
+    cpu_millis.min(host_share(bounds)).max(CPU_STEP)
 }
 
 /// The cold memory the server sets for the jobs of each operating system it names
@@ -234,6 +237,29 @@ impl ColdMemoryOn {
     }
 }
 
+/// The cold CPU the server sets for the jobs of each operating system it names
+/// (`--cold-cpu-millis-on`, `server.cold_cpu_millis_on`), in millicores, in place of
+/// [`ColdSize::cpu_millis`]: keyed by the `os` a job's constraints name, as it names it (such
+/// as `macos`). A job that names no `os`, or one with no entry, books the server's cold CPU.
+/// Each is held at a quarter of the most cores a known host has, and at least a quarter core,
+/// as the server's is.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ColdCpuOn(BTreeMap<String, u64>);
+
+impl ColdCpuOn {
+    /// The cold CPU of each operating system `entries` names, in millicores.
+    #[must_use]
+    pub fn new(entries: BTreeMap<String, u64>) -> Self {
+        Self(entries)
+    }
+
+    /// The cold CPU set for the jobs of `os`, if any.
+    #[must_use]
+    pub fn of(&self, os: &str) -> Option<u64> {
+        self.0.get(os).copied()
+    }
+}
+
 pub use js_jobs::SizedFrom;
 
 /// The history of every class the server has seen, and the job allocations live at the last
@@ -244,6 +270,8 @@ pub struct JobSizes {
     cold: ColdSize,
     /// The cold memory of the jobs of an operating system the server names.
     cold_on: ColdMemoryOn,
+    /// The cold CPU of the jobs of an operating system the server names.
+    cold_cpu_on: ColdCpuOn,
     summaries: Summaries,
     /// Each job whose allocation was live at the last pass, with what it booked.
     live: BTreeMap<JobId, Booked>,
@@ -294,6 +322,16 @@ impl JobSizes {
     pub fn with_cold_memory_on(self, on: ColdMemoryOn) -> Self {
         Self {
             cold_on: on,
+            ..self
+        }
+    }
+
+    /// The same sizes, a class with no CPU sample of a job whose `os` is one `on` names booking
+    /// that operating system's cold CPU in place of the server's.
+    #[must_use]
+    pub fn with_cold_cpu_on(self, on: ColdCpuOn) -> Self {
+        Self {
+            cold_cpu_on: on,
             ..self
         }
     }
@@ -434,7 +472,8 @@ impl JobSizes {
     /// The CPU `job` books on `day` under `bounds`: the learned CPU of its own class, else of
     /// its fallback class, else of its client's whole history (the first that has a CPU
     /// sample), at most a [`HOST_CPU_SHARE`]th of the most cores a host has ([`host_share`]) and
-    /// at least a quarter core; the cold CPU, held at the same share, when none has a sample.
+    /// at least a quarter core; the cold CPU ([`JobSizes::cold_cpu`]), held at the same share,
+    /// when none has a sample.
     fn cpu_of(&self, job: &JobRecord, day: Day, bounds: &Bounds) -> u64 {
         let keys = [
             Some(Self::key_of(job)),
@@ -446,9 +485,17 @@ impl JobSizes {
             .flatten()
             .find_map(|key| self.summaries.cpu(key, day, bounds));
         learned.map_or_else(
-            || self.cold.cpu(bounds),
-            |cpu| u64::from(cpu).min(host_share(bounds)).max(CPU_STEP),
+            || self.cold_cpu(job, bounds),
+            |cpu| held_cpu(u64::from(cpu), bounds),
         )
+    }
+
+    /// The cold CPU `job` books under `bounds`: the one set for its `os` ([`ColdCpuOn`]), else
+    /// the server's, held at a quarter of the most cores a host has and at least a quarter core.
+    fn cold_cpu(&self, job: &JobRecord, bounds: &Bounds) -> u64 {
+        let os = job.spec.constraints.os.as_deref().unwrap_or("");
+        let cpu = self.cold_cpu_on.of(os).unwrap_or(self.cold.cpu_millis);
+        held_cpu(cpu, bounds)
     }
 
     /// The jobs whose allocations were live at the last call and are not in `live` now, each
@@ -601,10 +648,12 @@ fn run_of(job: &JobRecord, booked: Booked) -> Option<(Run, Day)> {
         cpu_held: result
             .usage
             .is_some_and(|usage| held(usage, (cpu, wall), cpu_millis)),
-        // The sample is the run's mean CPU, not its five-second peak (kept in its usage):
-        // placement admits by measured load, and a booking of the peak would hold a host to
-        // a few jobs that each use a fraction of it.
-        cpu_peak_millis: None,
+        // The sample is the run's mean CPU; its five-second peak goes beside it, and books
+        // its class only when the class's peaks are a heavy tail far above its median.
+        cpu_peak_millis: result
+            .usage
+            .and_then(|usage| usage.cpu_peak)
+            .map(|peak| u32::try_from(peak.millicores).unwrap_or(u32::MAX)),
     };
     Some((run, day_of_millis(millis(ended.as_duration()))))
 }

@@ -11,6 +11,7 @@
 --boot default=none required=false values=initialise|resume
 --client-token default=none required=false
 --cold-cpu-millis default=22000 required=false
+--cold-cpu-millis-on default=none required=false
 --cold-memory-bytes default=4294967296 required=false
 --cold-memory-bytes-on default=none required=false
 --config default=none required=false

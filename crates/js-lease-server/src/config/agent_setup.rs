@@ -7,10 +7,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_registry::PoolConfig;
-use js_sched_placer::sizes::{ColdMemoryOn, ColdSize, Curves};
+use js_sched_placer::sizes::{ColdCpuOn, ColdMemoryOn, ColdSize, Curves};
 use js_types::ProviderId;
 
-use super::{Cli, Config, DispatchTimes, LiveClients, LoadSetting, check_pool, listen};
+use super::{Cli, ColdOn, Config, DispatchTimes, LiveClients, LoadSetting, check_pool, listen};
 use crate::agent_pool;
 use crate::agent_tokens::{AgentTokens, PoolTokens};
 use crate::error::StartupError;
@@ -41,9 +41,10 @@ pub(crate) struct AgentSetup {
     /// its fallback class nor its client has a run (each absent one its default,
     /// 22 cores and 4 GiB).
     pub(crate) cold: ColdSize,
-    /// `--cold-memory-bytes-on` or `server.cold_memory_bytes_on`: the cold memory of the jobs
-    /// of each operating system it names, in place of `cold`'s.
-    pub(crate) cold_memory_on: ColdMemoryOn,
+    /// `--cold-memory-bytes-on` and `--cold-cpu-millis-on`, or `server.cold_memory_bytes_on`
+    /// and `server.cold_cpu_millis_on`: the cold memory and the cold CPU of the jobs of each
+    /// operating system they name, in place of `cold`'s.
+    pub(crate) cold_on: ColdOn,
     /// `--placement-curves`, or `server.placement_curves`: whether the engine learns profiles
     /// in shadow.
     pub(crate) curves: Curves,
@@ -171,6 +172,7 @@ pub(super) fn agents(cli: &Cli, clients: &LiveClients) -> Result<Box<AgentSetup>
         cpu_slack: cli.cpu_slack.unwrap_or_default(),
         pack_limit: cli.pack_limit.unwrap_or_default(),
     };
+    let cold_on = cold_on_of(cli)?;
     Ok(Box::new(AgentSetup {
         tokens,
         pool,
@@ -186,8 +188,7 @@ pub(super) fn agents(cli: &Cli, clients: &LiveClients) -> Result<Box<AgentSetup>
             cpu_millis: cli.cold_cpu_millis,
             memory_bytes: cli.cold_memory_bytes,
         },
-        cold_memory_on: cold_memory_on(&cli.cold_memory_bytes_on)
-            .map_err(|why| StartupError::new("--cold-memory-bytes-on", why))?,
+        cold_on,
         curves: cli.placement_curves,
         max_lease_wall: None,
         job_limits: JobLimits::default(),
@@ -196,6 +197,23 @@ pub(super) fn agents(cli: &Cli, clients: &LiveClients) -> Result<Box<AgentSetup>
         providers: None,
         dispatch: DispatchTimes::default(),
     }))
+}
+
+/// `--cold-memory-bytes-on` and `--cold-cpu-millis-on`: the cold memory and the cold CPU of
+/// the jobs of each operating system they name.
+///
+/// # Errors
+///
+/// An operating system one of them names twice, naming that flag.
+fn cold_on_of(cli: &Cli) -> Result<ColdOn, StartupError> {
+    let memory = per_os(&cli.cold_memory_bytes_on)
+        .map_err(|why| StartupError::new("--cold-memory-bytes-on", why))?;
+    let cpu = per_os(&cli.cold_cpu_millis_on)
+        .map_err(|why| StartupError::new("--cold-cpu-millis-on", why))?;
+    Ok(ColdOn {
+        memory: ColdMemoryOn::new(memory),
+        cpu: ColdCpuOn::new(cpu),
+    })
 }
 
 /// The least cold memory of an operating system: 1 GiB, the least memory the estimator books,
@@ -219,6 +237,49 @@ pub fn parse_cold_on(text: &str) -> Result<(String, u64), String> {
     cold_entry(os, bytes)
 }
 
+/// The least cold CPU of an operating system: a quarter core, the least CPU the estimator
+/// books, as for `--cold-cpu-millis`.
+pub(crate) const COLD_CPU_LEAST: u64 = 250;
+
+/// The most cold CPU of an operating system: the most millicores a host can report, as for
+/// `--cold-cpu-millis`.
+pub(crate) const COLD_CPU_MOST: u64 = u32::MAX as u64;
+
+/// One value of `--cold-cpu-millis-on`, `OS=MILLIS`: the name of an operating system as a
+/// job's `os` constraint gives it, and its cold CPU in millicores ([`cold_cpu_entry`]).
+///
+/// # Errors
+///
+/// The text says what is wrong: no `=`, millicores that are not a whole number, or what
+/// [`cold_cpu_entry`] refuses.
+pub fn parse_cold_cpu_on(text: &str) -> Result<(String, u64), String> {
+    let (os, millis) = text
+        .split_once('=')
+        .ok_or_else(|| "must be OS=MILLIS, such as macos=1000".to_owned())?;
+    let millis = millis
+        .parse::<u64>()
+        .map_err(|_| format!("{millis:?} is not a whole number of millicores"))?;
+    cold_cpu_entry(os, millis)
+}
+
+/// The cold CPU `millis` of the operating system `os`, checked: a name that is not empty and
+/// millicores from 250 (a quarter core) to 4294967295.
+///
+/// # Errors
+///
+/// The text says what is wrong.
+pub(crate) fn cold_cpu_entry(os: &str, millis: u64) -> Result<(String, u64), String> {
+    if os.is_empty() {
+        return Err("the operating system is empty".to_owned());
+    }
+    if !(COLD_CPU_LEAST..=COLD_CPU_MOST).contains(&millis) {
+        return Err(format!(
+            "{os}: {millis} is not from 250 (a quarter core) to 4294967295"
+        ));
+    }
+    Ok((os.to_owned(), millis))
+}
+
 /// The cold memory `bytes` of the operating system `os`, checked: a name that is not empty and
 /// bytes from 1073741824 (1 GiB).
 ///
@@ -237,19 +298,20 @@ pub(crate) fn cold_entry(os: &str, bytes: u64) -> Result<(String, u64), String> 
     Ok((os.to_owned(), bytes))
 }
 
-/// The cold memory of each operating system `entries` names.
+/// The value of each operating system `entries` names, as one of the repeatable per-system
+/// flags gives them (`--cold-memory-bytes-on`, `--cold-cpu-millis-on`).
 ///
 /// # Errors
 ///
 /// An operating system named twice.
-pub(crate) fn cold_memory_on(entries: &[(String, u64)]) -> Result<ColdMemoryOn, String> {
+pub(crate) fn per_os(entries: &[(String, u64)]) -> Result<BTreeMap<String, u64>, String> {
     let mut on = BTreeMap::new();
-    for (os, bytes) in entries {
-        if on.insert(os.clone(), *bytes).is_some() {
+    for (os, value) in entries {
+        if on.insert(os.clone(), *value).is_some() {
             return Err(format!("{os} is given twice"));
         }
     }
-    Ok(ColdMemoryOn::new(on))
+    Ok(on)
 }
 
 /// The shared join tokens of the file at `path`, which `place` names: a refusal names it,

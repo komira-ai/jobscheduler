@@ -48,15 +48,20 @@
 //!   [`Fallback::OverCap`]: the caller books cold and the ladder and digest floors
 //!   decide.
 //! * **CPU.** `round_up_250m(P50(sample))`, clamped to `[250 m, node cpus]`: the
-//!   nearest-rank median of the last 32 kept samples, where a run's
-//!   sample is its peak over a short window ([`Run::cpu_peak_millis`]) when measured, else
+//!   nearest-rank median of the last 32 kept samples, where a run's sample is its mean,
 //!   `cpu_usage / wall` (a 0.3-core action costs 500 m); [`COLD_CPU_MILLIS`] with no CPU
-//!   sample. A sample taken at or
+//!   sample. Each sample keeps its run's peak over a short window
+//!   ([`Run::cpu_peak_millis`]) beside it when measured. A key with a **heavy tail** (at
+//!   least [`TAIL_MIN_PEAKS`] of its last 32 samples carry a peak, and the nearest-rank
+//!   90th percentile of those peaks, [`TAIL_PERMILLE`], is over [`TAIL_RATIO`] times the
+//!   median booking) books `round_up_250m(P90(peak))` instead, with the same clamp: its runs
+//!   burst far above their mean, and a host filled by its median runs them over its cores.
+//!   A sample taken at or
 //!   above [`CPU_PRESSURE_MAX_PERMILLE`] node pressure, with no pressure reading, or
 //!   from a run held at a ceiling ([`Run::cpu_held`]: its mean is a lower bound), is
-//!   kept only when it exceeds the key's current estimate ([`COLD_CPU_MILLIS`] for a key
-//!   with no sample), so under load an estimate can only rise. [`Observed::cpu`] says
-//!   which happened and [`Summaries::cpu_counts`] counts it.
+//!   kept (with its peak) only when its mean exceeds the median of the key's means
+//!   ([`COLD_CPU_MILLIS`] for a key with no sample), so under load an estimate can only
+//!   rise. [`Observed::cpu`] says which happened and [`Summaries::cpu_counts`] counts it.
 //! * **Hints.** The final memory and CPU are the larger of the estimate and the client's
 //!   hint: an estimate never gives less than the client asked for.
 //! * **Safety.** An own-limit kill sets `oom_floor` to at least the next rung the caller
@@ -164,7 +169,8 @@ pub use store::{
 pub use summary::{
     COLD_CPU_MILLIS, CPU_MIN_MILLIS, CPU_PRESSURE_MAX_PERMILLE, DECAY_DAYS, DECAY_RUNS,
     KILL_WINDOW_RUNS, KillFloor, LIFE_HORIZON, MAX_DAY, MIN_MEMORY, MIN_SAMPLES, MIN_WALL_US,
-    MIXED_RATIO, N_MIN, RAISE_ONLY_DAYS, Summary, floor_ceiling, kill_floor,
+    MIXED_RATIO, N_MIN, RAISE_ONLY_DAYS, Summary, TAIL_MIN_PEAKS, TAIL_PERMILLE, TAIL_RATIO,
+    floor_ceiling, kill_floor,
 };
 
 /// One mebibyte.
