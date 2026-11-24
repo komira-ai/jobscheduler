@@ -86,7 +86,10 @@
 //! heartbeat is watched from before the store is read, so a placement after the read wakes
 //! it; the reply is then built again from the store and carries the start. A heartbeat that
 //! lists a job as `starting` is held for [`crate::held_beat::starting_hold`] (200 ms) at most
-//! instead, so the start's `running` is not kept a whole hold.
+//! instead, so the start's `running` is not kept a whole hold. A host that polls dispatch (below)
+//! takes its starts from the poll, so a placement ends its hold, and a beat of it that lists a
+//! job `starting` is paced rather than held ([`held::hold`]): answered at once, or within 200 ms of
+//! the host's last such answer, without `beat_now`.
 //!
 //! # The dispatch poll
 //!

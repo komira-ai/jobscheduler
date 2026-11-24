@@ -13,7 +13,10 @@
 //! A heartbeat that lists a job as `starting` is held for [`starting_hold`] at most instead:
 //! the agent sends that heartbeat as soon as its worker has taken the start, and the start's
 //! `running` rides on the next one, so the hold is kept short, while a placement still wakes
-//! it at once.
+//! it at once. A host that polls dispatch gets its starts from the poll, not in this reply, so
+//! its beat with a start under way is not held for a bound but paced ([`Starts::paced`]): answered
+//! at once after a quiet spell, and no more often than once per [`starting_hold`] while such
+//! beats follow each other closely.
 //!
 //! The wakes are this process's: a placement made by another server is not seen here, and
 //! its start goes out on the host's next heartbeat, at most one hold later. (A host that polls
@@ -61,10 +64,17 @@ pub(crate) const STARTING_WINDOW_MS: u64 = 2_000;
 /// The jobs each host's held beats list as `starting`, each with the time (milliseconds, on the
 /// server's clock) a hold first saw it so. Only the jobs the last held beat of a host listed are
 /// kept, and a host whose last held beat listed none is not kept.
+///
+/// For a host that polls dispatch it also keeps when a beat of the host that listed a start was
+/// last answered ([`Starts::paced`]), which spaces those answers, while that spacing lasts.
 #[derive(Default)]
 pub(crate) struct Starts {
     /// By host, by job id. Its lock is a leaf.
     seen: Mutex<BTreeMap<HostId, BTreeMap<String, u64>>>,
+    /// By host, when (milliseconds, on the server's clock) a paced beat of the host was last
+    /// answered; a host whose spacing has passed is forgotten at the next answer. Its lock is a
+    /// leaf.
+    answered: Mutex<BTreeMap<HostId, u64>>,
 }
 
 impl Starts {
@@ -86,6 +96,39 @@ impl Starts {
             seen.insert(host.clone(), now);
         }
         young
+    }
+
+    /// How long a beat of `host` that lists a start, arriving at `now_ms`, waits before it is
+    /// answered: what is left of `spacing` since the last such beat of the host was answered
+    /// ([`Starts::answered`]), nothing when that was `spacing` ago or more, or never. So the
+    /// first of them after a quiet spell is answered at once, and those that follow it closely
+    /// are answered no more often than once per `spacing`.
+    pub(crate) fn paced(&self, host: &HostId, now_ms: u64, spacing: Duration) -> Duration {
+        let answered = self.answered.lock().unwrap_or_else(PoisonError::into_inner);
+        let spacing_ms = u64::try_from(spacing.as_millis()).unwrap_or(u64::MAX);
+        let free_ms = answered
+            .get(host)
+            .map_or(0, |last| last.saturating_add(spacing_ms));
+        Duration::from_millis(free_ms.saturating_sub(now_ms))
+    }
+
+    /// Records that a beat of `host` that listed a start was answered at `now_ms`, and forgets
+    /// every host whose last answer is `spacing` or more before it (its next beat is answered at
+    /// once either way), so the record holds only the hosts whose spacing still lasts.
+    pub(crate) fn answered(&self, host: &HostId, now_ms: u64, spacing: Duration) {
+        let mut answered = self.answered.lock().unwrap_or_else(PoisonError::into_inner);
+        let spacing_ms = u64::try_from(spacing.as_millis()).unwrap_or(u64::MAX);
+        answered.retain(|_, last| last.saturating_add(spacing_ms) > now_ms);
+        answered.insert(host.clone(), now_ms);
+    }
+
+    /// How many hosts the pacing record holds.
+    #[cfg(test)]
+    pub(crate) fn paced_hosts(&self) -> usize {
+        self.answered
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
     }
 }
 

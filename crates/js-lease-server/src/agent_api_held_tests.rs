@@ -16,6 +16,7 @@ use crate::job_expiry::JobLimits;
 
 use super::job_rig::{FakeAgent, Rig, clocked_rig, starts, whole_rig};
 use super::whole_tests::{place_all, queue_share, queue_whole, rules};
+use js_jobs::JobId;
 
 /// A bound no test reaches: a hold a test does not end returns at it.
 const LONG: Duration = Duration::from_secs(60);
@@ -301,7 +302,10 @@ fn a_listing_with_a_young_starting_job_takes_the_short_bound_and_any_other_the_n
     let (rig, mut agent) = held_rig("held_limit", Duration::from_secs(2));
     let rig = rig.holding_starting_for(Duration::from_secs(1));
     let host = HostId::new("host-a").unwrap();
-    let limit = |agent: &FakeAgent| super::held::limit(&rig.agents, &host, &agent.listing());
+    let limit = |agent: &FakeAgent| {
+        let young = super::held::young_start(&rig.agents, &host, &agent.listing());
+        super::held::bound(&rig.agents, young)
+    };
     let (short, normal) = (Duration::from_secs(1), Duration::from_secs(2));
     assert_eq!(limit(&agent), normal);
     agent.hold("job-1", "alloc-1", HeldState::Running);
@@ -392,4 +396,171 @@ async fn a_draining_server_places_no_job() {
             .len(),
         0
     );
+}
+
+/// A placing server holding replies for `bound`, and paces replies to beats that list a young
+/// start by `starting`, with `host-a` registered as an agent that takes held replies and polls
+/// dispatch (its starts come by the poll, never in a heartbeat's reply); that agent.
+fn polling_rig(name: &str, bound: Duration, starting: Duration) -> (Rig, FakeAgent) {
+    let mut rig = clocked_rig(name, true, JobLimits::default())
+        .holding_for(bound)
+        .holding_starting_for(starting);
+    let capabilities = serde_json::json!({
+        "per-job": "true",
+        "held-beat": "true",
+        js_agent_wire::DISPATCH_CAPABILITY: "true",
+        "arch": "x86_64",
+    });
+    rig.register_with("host-a", capabilities);
+    (rig, FakeAgent::new("host-a"))
+}
+
+/// The reply to a beat of a host that polls dispatch that ended with nothing to send and asks
+/// the agent to beat again when it has news, not at once.
+fn on_news() -> HeartbeatReply {
+    HeartbeatReply::default()
+}
+
+/// Whether `bound`, the bound a paced hold was given, is nearly the whole of `spacing`: the rig's
+/// store moves the server's clock by a few milliseconds a commit, so a beat right after an
+/// answer waits a little less than the spacing, never more.
+fn nearly_whole(bound: Option<Duration>, spacing: Duration) -> bool {
+    bound.is_some_and(|bound| bound <= spacing && bound > spacing / 2)
+}
+
+/// Has `agent` list the job `id`, which the poll handed it, as `starting` under its allocation.
+fn taken(rig: &Rig, agent: &mut FakeAgent, id: &JobId) {
+    let allocation = rig.allocation(id).allocation_id.to_string();
+    agent.hold(id.as_str(), &allocation, HeldState::Starting);
+}
+
+/// Asserts that a placement on a host that polls dispatch ends the hold of its idle heartbeat:
+/// the reply carries no start (the poll does), is answered after the one wait, and does not say
+/// `beat_now`, so the agent's next heartbeat leaves when its worker has taken the start. It
+/// catches a hold that rebuilds an empty reply at the wake and holds on to the bound: the agent's
+/// one heartbeat thread then stays in that request through the whole start and reports its
+/// `running` up to the bound late.
+#[tokio::test]
+async fn a_placement_ends_the_held_beat_of_a_host_that_polls_dispatch() {
+    let (rig, agent) = polling_rig("held_polling_wake", LONG, LONG);
+    let job = queue_share(&rig, "job-1", 600);
+    let placed = async {
+        waited(&rig, 1).await;
+        rig.tick();
+    };
+    let (reply, ()) = tokio::join!(rig.beat(&agent), placed);
+    assert_eq!(reply.unwrap(), on_news());
+    assert_eq!(waits(&rig), 1);
+    assert_eq!(rig.states(&job), (JobState::Placed, AllocationStep::Booked));
+}
+
+/// Asserts the path of one start on an idle host that polls dispatch: the beat that lists the
+/// start `starting` is answered at once (no hold began) without `beat_now`, so the agent's next
+/// heartbeat leaves when the container runs; that heartbeat reports the job `running` to the
+/// store as it arrives, while its reply is held, and a placement then ends that hold too. The
+/// short bound is long here, so a beat held to it would never be answered in the test. It
+/// catches the beat with a start held to the short bound, which keeps the agent from reporting
+/// `running` until the hold ends, and a reply that asks the agent to beat again at once.
+#[tokio::test]
+async fn a_lone_start_on_a_host_that_polls_dispatch_is_not_held_and_its_running_goes_at_once() {
+    let (rig, mut agent) = polling_rig("held_polling_lone", LONG, LONG);
+    let job = queue_share(&rig, "job-1", 600);
+    place_all(&rig);
+    taken(&rig, &mut agent, &job);
+    let reply = rig.beat(&agent).await.unwrap();
+    assert_eq!(reply, on_news());
+    assert_eq!(waits(&rig), 0);
+    assert_eq!(rig.agents.wakes.last_bound(), None);
+    agent.run("job-1");
+    let next = async {
+        waited(&rig, 1).await;
+        assert_eq!(rig.states(&job).0, JobState::Running);
+        queue_share(&rig, "job-2", 600);
+        place_all(&rig);
+    };
+    let (reply, ()) = tokio::join!(rig.beat(&agent), next);
+    assert_eq!(reply.unwrap(), on_news());
+    assert_eq!(rig.agents.wakes.last_bound(), Some(LONG));
+}
+
+/// Asserts that close beats of a host that polls dispatch with a start under way are paced: the
+/// first is answered at once; the next three, each sent as soon as the one before was answered
+/// (as an agent with news to tell does), are each held for nearly the whole spacing (here ended
+/// by a wake); once the spacing has passed on the server's clock since the last answer, the
+/// next is answered at once again. No reply says `beat_now`. So such a host is answered no more
+/// often than once per spacing, as a held beat with a start was before, plus once per wake. It
+/// catches pacing that answers every beat of a burst at once, pacing that never lets a beat go
+/// at once again, and a paced reply that asks the agent to beat again at once.
+#[tokio::test]
+async fn close_beats_of_a_host_that_polls_dispatch_with_a_start_under_way_are_paced() {
+    // Shorter than the window, so the start is still young when the spacing has passed.
+    let spacing = Duration::from_secs(1);
+    let (rig, mut agent) = polling_rig("held_polling_burst", LONG, spacing);
+    let host = HostId::new("host-a").unwrap();
+    let job = queue_share(&rig, "job-1", 600);
+    place_all(&rig);
+    taken(&rig, &mut agent, &job);
+    assert_eq!(rig.beat(&agent).await.unwrap(), on_news());
+    assert_eq!(waits(&rig), 0);
+    for n in 1..=3 {
+        let woken = async {
+            waited(&rig, n).await;
+            rig.agents.wakes.wake(&host);
+        };
+        let (reply, ()) = tokio::join!(rig.beat(&agent), woken);
+        assert_eq!(reply.unwrap(), on_news());
+        assert_eq!(waits(&rig), n);
+        assert!(nearly_whole(rig.agents.wakes.last_bound(), spacing));
+    }
+    rig.advance(spacing);
+    assert_eq!(rig.beat(&agent).await.unwrap(), on_news());
+    assert_eq!(waits(&rig), 3);
+}
+
+/// Asserts that a paced beat of a host that polls dispatch that no wake ends is answered at the
+/// end of its spacing, empty and without `beat_now`; that a beat whose start has been `starting`
+/// for longer than the window is still paced (answered at once once the spacing has passed),
+/// not held to the normal bound; and that a beat of such a host that lists no start (its job
+/// runs) is held to the normal bound and answered at it with `beat_now`, as any host's. It
+/// catches a paced hold that never ends, a paced reply at the end of its spacing that asks the
+/// agent to beat again at once (a burst would then beat in a loop), a long start whose beat is
+/// held to the normal bound (its `running` then waits up to that bound), and pacing applied to
+/// a beat with no start.
+#[tokio::test]
+async fn a_paced_beat_ends_at_its_spacing_a_long_start_stays_paced_and_no_start_is_held() {
+    let spacing = Duration::from_millis(200);
+    let (rig, mut agent) = polling_rig("held_polling_spacing", Duration::ZERO, spacing);
+    let job = queue_share(&rig, "job-1", 600);
+    place_all(&rig);
+    taken(&rig, &mut agent, &job);
+    assert_eq!(rig.beat(&agent).await.unwrap(), on_news());
+    assert_eq!(rig.beat(&agent).await.unwrap(), on_news());
+    assert_eq!(waits(&rig), 1);
+    assert!(nearly_whole(rig.agents.wakes.last_bound(), spacing));
+    rig.advance(Duration::from_millis(STARTING_WINDOW_MS));
+    assert_eq!(rig.beat(&agent).await.unwrap(), on_news());
+    assert_eq!(waits(&rig), 1);
+    agent.run("job-1");
+    assert_eq!(rig.beat(&agent).await.unwrap(), quiet_held());
+    assert_eq!(waits(&rig), 2);
+    assert_eq!(rig.agents.wakes.last_bound(), Some(Duration::ZERO));
+}
+
+/// Asserts that a paced beat of a host that polls dispatch held when the server begins to drain
+/// is answered at the drain saying `beat_now`, so the agent's next heartbeat goes at once to a
+/// server that still accepts one. It catches pacing that drops the drain's `beat_now` and leaves
+/// the agent waiting its interval on a server that is going away.
+#[tokio::test]
+async fn a_paced_beat_held_at_a_drain_says_beat_now() {
+    let (rig, mut agent) = polling_rig("held_polling_drain", LONG, LONG);
+    let job = queue_share(&rig, "job-1", 600);
+    place_all(&rig);
+    taken(&rig, &mut agent, &job);
+    assert_eq!(rig.beat(&agent).await.unwrap(), on_news());
+    let drain = async {
+        waited(&rig, 1).await;
+        rig.agents.draining.begin();
+    };
+    let (reply, ()) = tokio::join!(rig.beat(&agent), drain);
+    assert_eq!(reply.unwrap(), quiet_held());
 }
