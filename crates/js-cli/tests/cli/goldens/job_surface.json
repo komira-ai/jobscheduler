@@ -51,7 +51,7 @@
         "required": false
       },
       {
-        "doc": "The environment of the job, by variable name.",
+        "doc": "The environment of the job, by variable name. It is refused naming spec.env when a name is one the agent sets (HOME, TMPDIR and the rest) or one that steers the loader, the agent or a shell (LD_*, DYLD_*, JS_*, IFS and the rest), a name is not [A-Za-z_][A-Za-z0-9_]*, a value holds a NUL, or it is over the start's caps.",
         "field": [
           "spec",
           "env"
