@@ -4,9 +4,12 @@
 //! The score ranks only the workers the predicate passed. It is handed no worker the
 //! predicate refused, so it cannot admit anything and cannot move the fault bound. It
 //! compares the new lease's charge with each candidate's predicted load, slot by slot, and
-//! prefers the worker the lease fits most tightly. It is integer arithmetic only, so a
-//! replay ranks the same way every time. Time is in logical minutes; nothing here reads a
-//! clock.
+//! prefers the worker the lease fits most tightly, as long as that worker's bookings stay
+//! within the pack limit (80% of its capacity by default) with the lease. When no
+//! candidate stays within it, the lease goes to the candidate whose bookings are the
+//! smallest share of its capacity. Two keys come before the pack limit: overshoot of the
+//! capacity (key 1) and room for a memory miss (key 2). It is integer arithmetic only, so a replay ranks the
+//! same way every time. Time is in logical minutes; nothing here reads a clock.
 //!
 //! Everything the score needs about costs and load comes through one seam,
 //! [`PredictedLoad`]. Placement provides it as a [`SlotLoad`]: the figures the predicate
@@ -147,6 +150,12 @@ const COLD_MEMORY_MISS: (u128, u128) = (163, 100);
 /// The largest `--placement-score-balance`.
 pub const MAX_BALANCE: u32 = 4;
 
+/// The largest `--placement-pack-limit`, in thousandths of a worker's capacity: 1.0x.
+pub const MAX_PACK_LIMIT_PERMILLE: u32 = 1000;
+
+/// The default `--placement-pack-limit`, in thousandths of a worker's capacity: 0.8x.
+pub const DEFAULT_PACK_LIMIT_PERMILLE: u32 = 800;
+
 /// A charge or a load at one slot: CPU in millicores, memory in bytes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Charge {
@@ -194,6 +203,9 @@ pub struct HostFacts {
     pub new_key_millis: u64,
     /// How many of the worker's leases are uncovered by its last measurement.
     pub uncovered_leases: u32,
+    /// What the worker has booked with the new lease's booking added: CPU in millicores,
+    /// memory in bytes. The pack limit compares it with the capacity.
+    pub booked_with_lease: Charge,
 }
 
 /// The one seam the score reads costs and load through. The admission predicate provides
@@ -222,10 +234,11 @@ pub struct ScoreConfig {
     balance: u32,
     slack_tol_ppm: u64,
     key_share_ppm: u64,
+    pack_limit_permille: u32,
     fit: FitShape,
 }
 
-/// How key 5, the fit, is computed. Keys 1 to 4 and the tie-breaks are the same in every
+/// How key 5, the fit, is computed. Keys 1 to 4, the pack limit and the tie-breaks are the same in every
 /// shape; only the fit changes, so a harness can run every shape through one code path.
 /// Placement always uses [`FitShape::Squared`]; the other shapes are for comparing
 /// rankers in simulations, which are integration tests and so cannot see `cfg(test)`.
@@ -245,8 +258,9 @@ pub enum FitShape {
 
 impl ScoreConfig {
     /// `--placement-score-balance` `balance` (0 to [`MAX_BALANCE`]),
-    /// `--placement-score-slack-tol-ppm` and `--placement-key-share` in parts per million.
-    /// `None` when `balance` is above the range.
+    /// `--placement-score-slack-tol-ppm` and `--placement-key-share` in parts per million,
+    /// with the default pack limit ([`DEFAULT_PACK_LIMIT_PERMILLE`]). `None` when
+    /// `balance` is above the range.
     #[must_use]
     pub const fn new(balance: u32, slack_tol_ppm: u64, key_share_ppm: u64) -> Option<Self> {
         if balance > MAX_BALANCE {
@@ -256,8 +270,27 @@ impl ScoreConfig {
             balance,
             slack_tol_ppm,
             key_share_ppm,
+            pack_limit_permille: DEFAULT_PACK_LIMIT_PERMILLE,
             fit: FitShape::Squared,
         })
+    }
+
+    /// This config with `--placement-pack-limit` at `permille` thousandths of a worker's
+    /// capacity, brought down to [`MAX_PACK_LIMIT_PERMILLE`].
+    #[must_use]
+    pub const fn with_pack_limit(mut self, permille: u32) -> Self {
+        self.pack_limit_permille = if permille > MAX_PACK_LIMIT_PERMILLE {
+            MAX_PACK_LIMIT_PERMILLE
+        } else {
+            permille
+        };
+        self
+    }
+
+    /// The pack limit, in thousandths of a worker's capacity.
+    #[must_use]
+    pub const fn pack_limit_permille(&self) -> u32 {
+        self.pack_limit_permille
     }
 
     /// This config with the fit computed as `fit`. Placement never calls it: it scores with
@@ -283,19 +316,55 @@ impl ScoreConfig {
             balance: cfg.score_balance.min(MAX_BALANCE),
             slack_tol_ppm: cfg.score_slack_tol_ppm,
             key_share_ppm: u64::from(cfg.key_share_percent.min(100)) * 10_000,
+            pack_limit_permille: cfg.pack_limit_permille.min(MAX_PACK_LIMIT_PERMILLE),
             fit: FitShape::Squared,
         }
     }
 }
 
 impl Default for ScoreConfig {
-    /// Balance 1, tolerance 1% of capacity, key share 25%.
+    /// Balance 1, tolerance 1% of capacity, key share 25%, pack limit 80% of capacity.
     fn default() -> Self {
         Self {
             balance: 1,
             slack_tol_ppm: 10_000,
             key_share_ppm: 250_000,
+            pack_limit_permille: DEFAULT_PACK_LIMIT_PERMILLE,
             fit: FitShape::Squared,
+        }
+    }
+}
+
+/// Where a worker stands against the pack limit with the new lease booked; the smaller is
+/// the better. The score compares it after key 2 and before key 3. A worker within the limit comes before every worker past it, and
+/// workers past it come in the order of their booked share: the least full first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Pack {
+    /// The worker's bookings with the lease stay at or under the limit in CPU and in
+    /// memory: the fit (key 5) packs it.
+    Within,
+    /// The worker's bookings with the lease pass the limit in CPU or in memory; it holds
+    /// the larger of the two shares, in parts per million of its capacity, rounded up.
+    Past(u64),
+}
+
+impl Pack {
+    /// Where a worker of CPU capacity `cpu` millicores and memory capacity `memory` bytes,
+    /// with `booked` booked (the new lease included), stands against `limit_permille`. A
+    /// resource the worker has none of is one it cannot fill: its share is 0.
+    fn of(booked: Charge, cpu: u64, memory: u64, limit_permille: u32) -> Self {
+        let share = |booked: u64, capacity: u64| -> u128 {
+            if capacity == 0 {
+                0
+            } else {
+                (u128::from(booked) * PPM).div_ceil(u128::from(capacity))
+            }
+        };
+        let binding = share(booked.cpu_millis, cpu).max(share(booked.memory_bytes, memory));
+        if binding * 1000 <= u128::from(limit_permille) * PPM {
+            Self::Within
+        } else {
+            Self::Past(u64::try_from(binding).unwrap_or(u64::MAX))
         }
     }
 }
@@ -305,6 +374,7 @@ impl Default for ScoreConfig {
 pub struct ScoreKey {
     slack: u128,
     memory_unsafe: bool,
+    pack: Pack,
     distrusted: bool,
     concentrated: bool,
     fit: u128,
@@ -320,7 +390,11 @@ pub struct ScoreKey {
 pub enum DecidedBy {
     /// Key 1 to 5 (the number): the first key on which the two differed.
     Key(u8),
-    /// Tie-break 1 to 5 (the number): keys 1 to 5 were equal and this was the first
+    /// Keys 1 and 2 were equal and the pack limit told the two apart: one was within it and
+    /// the other past it, or both were past it with different booked shares.
+    PackLimit,
+    /// Tie-break 1 to 5 (the number): keys 1 to 5 and the pack limit were equal and this
+    /// was the first
     /// tie-break on which the two differed. 1 is fewer uncovered leases, 2 the larger
     /// CPU capacity, 3 the larger headroom over the next five minutes, 4 the hash of
     /// lease and worker, 5 the worker id.
@@ -340,6 +414,13 @@ impl ScoreKey {
     #[must_use]
     pub const fn memory_unsafe(&self) -> bool {
         self.memory_unsafe
+    }
+
+    /// The pack limit, between keys 2 and 3: where the worker stands against it with the
+    /// lease booked.
+    #[must_use]
+    pub const fn pack(&self) -> Pack {
+        self.pack
     }
 
     /// Key 3: the worker is in fallback or measured (the whole host) above the predictions
@@ -391,14 +472,17 @@ impl ScoreKey {
         &self.worker
     }
 
-    /// The first rule, in the order keys 1 to 5 then the tie-breaks, on which `self` and
-    /// `other` differ. Two keys of different workers always differ in the last.
+    /// The first rule, in the order keys 1 and 2, the pack limit, keys 3 to 5, then the
+    /// tie-breaks, on which `self` and `other` differ. Two keys of different workers always
+    /// differ in the last.
     #[must_use]
     pub fn decided_by(&self, other: &Self) -> DecidedBy {
         if self.slack != other.slack {
             DecidedBy::Key(1)
         } else if self.memory_unsafe != other.memory_unsafe {
             DecidedBy::Key(2)
+        } else if self.pack != other.pack {
+            DecidedBy::PackLimit
         } else if self.distrusted != other.distrusted {
             DecidedBy::Key(3)
         } else if self.concentrated != other.concentrated {
@@ -418,17 +502,20 @@ impl ScoreKey {
         }
     }
 
-    /// Whether keys 1 to 5 are equal: only the tie-breaks tell the two apart.
+    /// Whether keys 1 to 5 and the pack limit are equal: only the tie-breaks tell the two
+    /// apart.
     fn same_primary_keys(&self, other: &Self) -> bool {
         (
             self.slack,
             self.memory_unsafe,
+            self.pack,
             self.distrusted,
             self.concentrated,
             self.fit,
         ) == (
             other.slack,
             other.memory_unsafe,
+            other.pack,
             other.distrusted,
             other.concentrated,
             other.fit,
@@ -450,7 +537,8 @@ pub struct Choice<'a> {
     pub distrusted: bool,
     /// Key 4: the chosen worker is concentrated.
     pub concentrated: bool,
-    /// The best two candidates were equal in keys 1 to 5 and a tie-break decided.
+    /// The best two candidates were equal in keys 1 to 5 and the pack limit, and a
+    /// tie-break decided.
     pub tie_break: bool,
 }
 
@@ -630,6 +718,12 @@ impl Scorer {
         ScoreKey {
             slack,
             memory_unsafe,
+            pack: Pack::of(
+                host.booked_with_lease,
+                tc,
+                tm,
+                self.config.pack_limit_permille,
+            ),
             distrusted: host.fallback || host.measured_above_predicted,
             concentrated: same_key * PPM > u128::from(self.config.key_share_ppm) * u128::from(tc),
             fit,

@@ -77,6 +77,13 @@ pub struct LoadConfig {
     /// `--placement-key-share`: the share of a worker's CPU, in percent, that one action
     /// key may take before key 4 prefers another worker. Default 25; at most 100.
     pub key_share_percent: u32,
+    /// `--placement-pack-limit`: the share of a worker's capacity, in thousandths, its
+    /// bookings may reach with a new lease before the score prefers another worker (after
+    /// keys 1 and 2, before key 3). A worker within it is packed (the fit, key 5, prefers
+    /// the fullest); when no candidate stays
+    /// within it the lease goes to the least full by booked share. Default 800 (0.8x); at
+    /// most [`crate::MAX_PACK_LIMIT_PERMILLE`] (1.0x).
+    pub pack_limit_permille: u32,
 }
 
 /// The most CPU slack `--placement-cpu-slack` accepts, in thousandths: 2.0x of the cores.
@@ -125,6 +132,7 @@ impl Default for LoadConfig {
             score_balance: 1,
             score_slack_tol_ppm: 10_000,
             key_share_percent: 25,
+            pack_limit_permille: crate::load::DEFAULT_PACK_LIMIT_PERMILLE,
         }
     }
 }
@@ -143,16 +151,20 @@ impl LoadConfig {
             profile_floor_permille: self.profile_floor_permille.clamp(500, floor),
             score_balance: self.score_balance.min(crate::load::MAX_BALANCE),
             key_share_percent: self.key_share_percent.min(100),
+            pack_limit_permille: self
+                .pack_limit_permille
+                .min(crate::load::MAX_PACK_LIMIT_PERMILLE),
             ..self
         }
     }
 
     /// Sets the placement flag `name` (`--placement-score-balance`,
-    /// `--placement-score-slack-tol-ppm`, `--placement-key-share` or
-    /// `--placement-cpu-slack`, with or without the leading dashes) to `value`. Nothing
-    /// changes on an error. The balance is 0 to 4, the key share 0 to 100 (a trailing `%`
-    /// is allowed) and the CPU slack 0 to 1000 thousandths (0 is 1.0x of the cores); a
-    /// value outside is refused rather than clamped, so a typo is not run.
+    /// `--placement-score-slack-tol-ppm`, `--placement-key-share`,
+    /// `--placement-cpu-slack` or `--placement-pack-limit`, with or without the leading
+    /// dashes) to `value`. Nothing changes on an error. The balance is 0 to 4, the key
+    /// share 0 to 100 (a trailing `%` is allowed), the CPU slack 0 to 1000 thousandths (0
+    /// is 1.0x of the cores) and the pack limit 0 to 1000 thousandths of the capacity (800
+    /// is 0.8x); a value outside is refused rather than clamped, so a typo is not run.
     ///
     /// # Errors
     /// [`FlagError`] for another flag or a value out of range.
@@ -178,6 +190,13 @@ impl LoadConfig {
                     return Err(invalid());
                 }
                 self.s_cpu_permille = n;
+            }
+            "placement-pack-limit" => {
+                let n: u32 = value.parse().map_err(|_| invalid())?;
+                if n > crate::load::MAX_PACK_LIMIT_PERMILLE {
+                    return Err(invalid());
+                }
+                self.pack_limit_permille = n;
             }
             "placement-key-share" => {
                 let n: u32 = value

@@ -151,9 +151,9 @@ mod queue;
 pub mod queue_status;
 mod refusal;
 pub use load::{
-    Charge, Choice, DecidedBy, EVALUATIONS_PER_WORKER, FitShape, H_PLUS, HORIZON, HostFacts,
-    LeaseFacts, Load, MAX_BALANCE, PredictedLoad, SLOTS, ScoreConfig, ScoreKey, Scorer,
-    least_loaded,
+    Charge, Choice, DEFAULT_PACK_LIMIT_PERMILLE, DecidedBy, EVALUATIONS_PER_WORKER, FitShape,
+    H_PLUS, HORIZON, HostFacts, LeaseFacts, Load, MAX_BALANCE, MAX_PACK_LIMIT_PERMILLE, Pack,
+    PredictedLoad, SLOTS, ScoreConfig, ScoreKey, Scorer, least_loaded,
 };
 pub use probe::{ProbeHost, ProbeRefusal, admit_probe};
 pub use provider_rank::ProviderRank;

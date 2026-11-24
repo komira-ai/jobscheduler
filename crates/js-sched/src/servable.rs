@@ -550,6 +550,7 @@ impl Servable {
                     same_key_millis: w.load_state.same_key_millis(attempt.cost.key_hash),
                     new_key_millis: 0,
                     uncovered_leases: w.load_state.uncovered_leases(),
+                    booked_with_lease: w.booked_with(request),
                 };
                 // The figures the predicate charges at every slot; slot 0 is what it
                 // admitted the lease with (`p.left`, `p.cost`).
