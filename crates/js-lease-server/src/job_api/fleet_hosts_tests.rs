@@ -223,6 +223,83 @@ async fn a_cordon_whose_host_is_gone_is_not_found() {
     assert_eq!(refused(clear_taint(&api, "gone").await), unknown);
 }
 
+/// Asserts that a retire answers `retired` as the hosts answered it (`true` for `Ok(true)`,
+/// `false` for `Ok(false)`), and that the hosts were asked once per call about the host the
+/// request named. Catches a response that always says retired, one that drops the answer,
+/// and a call made about another host than the one named.
+#[tokio::test]
+async fn a_retire_answers_whether_anything_was_retired() {
+    let hosts = Arc::new(FakeHosts::new());
+    let api = api_over(hosts.clone(), Arc::new(FakePools(no_pools)), None);
+    assert!(retire(&api, "lost-1").await.unwrap().retired);
+    let nothing = Arc::new(FakeHosts {
+        retired: Ok(false),
+        ..FakeHosts::new()
+    });
+    let none = api_over(nothing.clone(), Arc::new(FakePools(no_pools)), None);
+    assert!(!retire(&none, "lost-2").await.unwrap().retired);
+    let asked = |hosts: &FakeHosts| hosts.retire_asked.lock().unwrap().clone();
+    assert_eq!(asked(&hosts), [HostId::new("lost-1").unwrap()]);
+    assert_eq!(asked(&nothing), [HostId::new("lost-2").unwrap()]);
+}
+
+/// Asserts that each reason a retire is refused is answered with its own status and code:
+/// `FAILED_PRECONDITION` `host-live`, `host-holds-jobs`, `host-tainted`, `host-cordoned` and
+/// `host-marked` for the five reasons a host is kept, `UNAVAILABLE` `retire-unsaved` for a
+/// store that failed, `NOT_FOUND` `unknown-host` for a refused unknown host; and that an id
+/// no host can have (spaces, capitals, a bang, empty) is `NOT_FOUND` `unknown-host` without
+/// the hosts being asked. Catches two reasons sharing a code, a failed store answered as a
+/// refusal that should not be retried, and an invalid id that reaches the hosts.
+#[tokio::test]
+async fn each_refused_retire_is_answered_with_its_own_code() {
+    let cases = [
+        (
+            Refused::Kept(Kept::Live),
+            Code::FailedPrecondition,
+            "host-live",
+        ),
+        (
+            Refused::Kept(Kept::HoldsJobs),
+            Code::FailedPrecondition,
+            "host-holds-jobs",
+        ),
+        (
+            Refused::Kept(Kept::Tainted),
+            Code::FailedPrecondition,
+            "host-tainted",
+        ),
+        (
+            Refused::Kept(Kept::Cordoned),
+            Code::FailedPrecondition,
+            "host-cordoned",
+        ),
+        (
+            Refused::Kept(Kept::Marked),
+            Code::FailedPrecondition,
+            "host-marked",
+        ),
+        (Refused::RetireUnsaved, Code::Unavailable, "retire-unsaved"),
+        (Refused::UnknownHost, Code::NotFound, "unknown-host"),
+    ];
+    for (why, code, message) in cases {
+        let hosts = Arc::new(FakeHosts {
+            retired: Err(why),
+            ..FakeHosts::new()
+        });
+        let api = api_over(hosts.clone(), Arc::new(FakePools(no_pools)), None);
+        let wants = (code, message.to_owned());
+        assert_eq!(refused(retire(&api, "lost-1").await), wants, "{why:?}");
+        assert_eq!(hosts.retire_asked.lock().unwrap().len(), 1, "{why:?}");
+    }
+    let hosts = Arc::new(FakeHosts::new());
+    let api = api_over(hosts.clone(), Arc::new(FakePools(no_pools)), None);
+    let unknown = (Code::NotFound, UNKNOWN_HOST.to_owned());
+    for id in ["Not A Host!", ""] {
+        assert_eq!(refused(retire(&api, id).await), unknown, "{id:?}");
+    }
+    assert!(hosts.retire_asked.lock().unwrap().is_empty());
+}
+
 /// The message types `ListHostsResponse` is made of, with the enums they use: its own
 /// message and every type a field of one of them names, transitively.
 fn host_list_types() -> Vec<(String, Vec<String>)> {

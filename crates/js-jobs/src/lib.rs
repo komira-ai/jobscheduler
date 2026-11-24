@@ -67,7 +67,8 @@
 //! server places over the live rows, whichever server took the host's hello. A hello of a host
 //! new to its pool is counted against the pool's cap over every server's rows
 //! ([`JobStore::hello_node_in_pool`]), and a row silent long enough that holds nothing is
-//! deleted ([`JobStore::forget_silent_nodes`]).
+//! deleted ([`JobStore::forget_silent_nodes`]), or sooner, when the operator retires the host,
+//! once it is silent past the grace and holds nothing ([`JobStore::retire_node`]).
 //!
 //! The **dispatch queue** holds what a host's agent is to do, one [`DispatchMessage`] per row
 //! (`dispatch/<host>/<seq>`): a start, queued by the transaction that books the host (by the
@@ -117,7 +118,7 @@
 //! | `hosts/binding/<host>` | the server's binding of `<host>` (its own JSON, not this crate's): read by the placement's transaction for its `taint_reason` and checked at the version read |
 //! | `cordon/<host>` | the cordon of `<host>`: the holder it names, if any (the time it lapses is the row's expiry, so a lapsed cordon is an absent row); written by [`JobStore::cordon_host`] and [`JobStore::restore_cordon`], deleted by [`JobStore::uncordon_host`] or by its expiry, listed whole by [`JobStore::cordons`]; checked absent by every placement's transaction; a store written before cordons has none and opens unchanged |
 //! | `hostbook/<host>` | the reservation row of `<host>`: the allocation id of the last placement made with [`JobStore::place_reserving`], whose version is what a placement's picture of the host is checked against; an earlier build has none, and a host with none is placed on as one whose row is absent |
-//! | `node/<host>` | the [`NodeRecord`] of `<host>`: its session (the epoch of its last hello and the digest of that hello's secret), what the hello announced, its phase, load and listing flags, the epoch and sequence of the last applied beat and `heard_at`, the store's clock at the last hello or applied beat; written by [`JobStore::hello_node`] and [`JobStore::beat_node`], deleted by [`JobStore::forget_node`]; a store written before nodes has none and opens unchanged |
+//! | `node/<host>` | the [`NodeRecord`] of `<host>`: its session (the epoch of its last hello and the digest of that hello's secret), what the hello announced, its phase, load and listing flags, the epoch and sequence of the last applied beat and `heard_at`, the store's clock at the last hello or applied beat; written by [`JobStore::hello_node`] and [`JobStore::beat_node`], deleted by [`JobStore::forget_node`], [`JobStore::forget_silent_nodes`] and [`JobStore::retire_node`]; a store written before nodes has none and opens unchanged |
 //! | `meta/cordons/restored` | empty: the cordons an earlier release kept only in a server's host bindings were carried into `cordon/` ([`JobStore::restore_cordons`]); no later start carries any again |
 //! | `meta/jobs/schema` | the schema version, four bytes big-endian, written once with `Cond::Absent` by the first store to open; a higher one is accepted |
 //! | `idx/job/active/<id>` | empty: the job has not ended |
@@ -172,6 +173,7 @@
 //! | [`JobStore::hello_node_in_pool`] | as [`JobStore::hello_node`] for a host that has a row; for one that has none, put `node/<host>` if absent and `pool/<pool>` if absent or at the version read, when the pool's rows are fewer than its cap; nothing otherwise |
 //! | [`JobStore::forget_node`] | delete `node/<host>` at the version given; nothing when the row is not at it |
 //! | [`JobStore::forget_silent_nodes`] | per silent host, claim `node/<host>` and delete it at the version read when the host holds no live allocation, taint, cordon or mark; nothing otherwise |
+//! | [`JobStore::retire_node`] | when the host's row is silent past the grace, claim `node/<host>` and delete it at the version read when the host holds no live allocation, taint, cordon or mark; nothing otherwise; a row that moved or went first is read again |
 //! | [`JobStore::mark_host`] | put `hostmark/<host>` if absent or at the version read |
 //! | [`JobStore::unmark_host`] | delete `hostmark/<host>` at the version given |
 //! | [`JobStore::drop_taints`] | delete each `taint/<host>` it is given at the version read, while it names the job given, in one transaction; nothing when none is left |
@@ -238,7 +240,8 @@ pub use ids::{
     MAX_CLIENT_NAME_LEN, MAX_JOB_ID_LEN, MintError, RandomIds,
 };
 pub use node::{
-    AppliedBeat, Beat, LoadReading, NodeHello, NodeRecord, NodeRow, NodeState, SessionDigest,
+    AppliedBeat, Beat, Kept, LoadReading, NodeHello, NodeRecord, NodeRow, NodeState, Retire,
+    SessionDigest,
 };
 pub use queue::{JobEvent, MAX_JOB_EVENTS, QueueTrail};
 pub use record::{

@@ -22,7 +22,7 @@
 //! | `logs.rs` | `GetLogs` with a stream, which `read.rs` hands it after reading the job's row |
 //! | `submit.rs` | `SubmitJob` (with `validate.rs`, the checks of a submitted job) |
 //! | `cancel.rs` | `CancelJob` |
-//! | `fleet.rs` | `ListHosts`, `CordonHost`, `UncordonHost`, `ClearHostTaint`, `ListPools`, `ListProviders`, `GetUsage` |
+//! | `fleet.rs` | `ListHosts`, `CordonHost`, `UncordonHost`, `ClearHostTaint`, `RetireHost`, `ListPools`, `ListProviders`, `GetUsage` |
 //!
 //! The [`JobService`] implementation below hands each call to its group's function and
 //! writes the call's log line ([`logged`]). Serving a call replaces the body of that function
@@ -45,12 +45,12 @@
 //! client (`client`) and its role (`role`), the job or host the request names (`target`; `job`
 //! holds the job alone), the outcome (`outcome`: `ok`, `denied`, `not-found`, `refused` or
 //! `failed`, [`roles::outcome`]) and the gRPC code (`code`). It is the audit line of the calls
-//! that change state, `SubmitJob`, `CancelJob`, `CordonHost`, `UncordonHost` and
-//! `ClearHostTaint`, denied ones among them. The line is at info, except for a read call
-//! ([`READ_CALLS`]) that answered: that line is at debug, since its clients poll it hundreds
-//! of times a second and an info line each would bury everything else in the log. Every read
-//! call that is refused or fails still writes its line at info. No line holds a token or its
-//! digest.
+//! that change state, `SubmitJob`, `CancelJob`, `CordonHost`, `UncordonHost`,
+//! `ClearHostTaint` and `RetireHost`, denied ones among them. The line is at info, except for
+//! a read call ([`READ_CALLS`]) that answered: that line is at debug, since its clients poll
+//! it hundreds of times a second and an info line each would bury everything else in the log.
+//! Every read call that is refused or fails still writes its line at info. No line holds a
+//! token or its digest.
 //!
 //! # One context per group
 //!
@@ -104,8 +104,9 @@ use js_proto::v1::{
     CordonHostRequest, CordonHostResponse, GetJobRequest, GetJobResponse, GetLogsRequest,
     GetLogsResponse, GetResultRequest, GetResultResponse, GetUsageRequest, GetUsageResponse,
     ListHostsRequest, ListHostsResponse, ListJobsRequest, ListJobsResponse, ListPoolsRequest,
-    ListPoolsResponse, ListProvidersRequest, ListProvidersResponse, SubmitJobRequest,
-    SubmitJobResponse, UncordonHostRequest, UncordonHostResponse,
+    ListPoolsResponse, ListProvidersRequest, ListProvidersResponse, RetireHostRequest,
+    RetireHostResponse, SubmitJobRequest, SubmitJobResponse, UncordonHostRequest,
+    UncordonHostResponse,
 };
 use tonic::{Code, Request, Response, Status};
 use tower::Layer;
@@ -134,6 +135,8 @@ pub(crate) use auth::{Bearer, BearerLayer};
 pub use wiring::SERVED_CALLS;
 pub(crate) use wiring::{from_server, port};
 
+#[cfg(test)]
+mod access_pages_tests;
 #[cfg(test)]
 mod access_tests;
 #[cfg(test)]
@@ -516,6 +519,20 @@ impl JobService for JobApi {
             Target::Host(&host),
             &answer,
         );
+        answer
+    }
+
+    async fn retire_host(
+        &self,
+        request: Request<RetireHostRequest>,
+    ) -> Result<Response<RetireHostResponse>, Status> {
+        let caller = caller_of(&request);
+        let host = request.get_ref().host_id.clone();
+        let answer = match operator(caller.as_ref()) {
+            Ok(()) => fleet::retire_host(self, request).await,
+            Err(status) => Err(status),
+        };
+        logged("RetireHost", caller.as_ref(), Target::Host(&host), &answer);
         answer
     }
 

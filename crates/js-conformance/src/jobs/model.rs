@@ -12,8 +12,9 @@ use js_proto::v1::{
     CordonHostRequest, CordonHostResponse, GetJobRequest, GetJobResponse, GetLogsRequest,
     GetLogsResponse, GetResultRequest, GetResultResponse, GetUsageRequest, GetUsageResponse,
     ListHostsRequest, ListHostsResponse, ListJobsRequest, ListJobsResponse, ListPoolsRequest,
-    ListPoolsResponse, ListProvidersRequest, ListProvidersResponse, RefusalCode, SubmitJobRequest,
-    SubmitJobResponse, UncordonHostRequest, UncordonHostResponse,
+    ListPoolsResponse, ListProvidersRequest, ListProvidersResponse, RefusalCode, RetireHostRequest,
+    RetireHostResponse, SubmitJobRequest, SubmitJobResponse, UncordonHostRequest,
+    UncordonHostResponse,
 };
 use tonic::transport::Channel;
 use tonic::{Request, Response, Status};
@@ -582,6 +583,13 @@ impl JobService for ReferenceJobs {
         &self,
         _: Request<ClearHostTaintRequest>,
     ) -> Result<Response<ClearHostTaintResponse>, Status> {
+        unserved()
+    }
+
+    async fn retire_host(
+        &self,
+        _: Request<RetireHostRequest>,
+    ) -> Result<Response<RetireHostResponse>, Status> {
         unserved()
     }
 
