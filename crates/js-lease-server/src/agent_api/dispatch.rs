@@ -74,7 +74,7 @@ use js_agent_wire::{
 };
 use js_jobs::{
     AllocationId, AllocationRecord, AllocationStep, DispatchKind, DispatchMessage, JobEnd,
-    JobRecord, JobStoreError, StartFailure,
+    JobRecord, JobState, JobStoreError, StartFailure,
 };
 use js_registry::{Credential, Refusal};
 use js_types::HostId;
@@ -334,7 +334,7 @@ fn start_for(
 /// start its agent refused with that code ([`StartFailure::AgentRefused`], the code kept as
 /// the job's detail), which is what an agent sent the start would answer; the end deletes the
 /// job's start and, the host never having had it, queues no stop. The failure is counted when
-/// the end commits. An end that does not commit is logged and the start stays claimed, so its
+/// this end commits, and not when the job had ended another way first. An end that does not commit is logged and the start stays claimed, so its
 /// next delivery reads the rows again and ends the job then.
 fn end_unsendable(
     jobs: &ServerJobs,
@@ -349,10 +349,15 @@ fn end_unsendable(
         detail: code.to_owned(),
     };
     match jobs.end_job(&job.id, end) {
-        Ok(_) => {
-            warn!(job = %job.id, code, field, "a dispatched start breaks a rule of the wire; its job failed to start");
-            context.metrics.start_failed(failure);
-        }
+        // A job another writer ended between the read and the end keeps that end, which
+        // `end_job` returns unwritten: it is not counted, nor logged as this failure.
+        Ok(record) => Some(record)
+            .filter(|record| record.state == JobState::FailedToStart(failure))
+            .into_iter()
+            .for_each(|_| {
+                warn!(job = %job.id, code, field, "a dispatched start breaks a rule of the wire; its job failed to start");
+                context.metrics.start_failed(failure);
+            }),
         Err(error) => {
             warn!(job = %job.id, code, field, %error, "a job whose start breaks a rule of the wire could not be ended");
         }

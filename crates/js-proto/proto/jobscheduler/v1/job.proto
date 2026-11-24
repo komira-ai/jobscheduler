@@ -228,7 +228,10 @@ enum StartFailureCode {
   // The whole-host prepare failed as many times as the pool allows.
   START_FAILURE_CODE_EXCLUSIVE_NOT_READY = 3;
   // The host's agent refused the start, for example because the host is tainted or the
-  // image fetch failed; the start failure detail holds the agent's own code.
+  // image fetch failed; the start failure detail holds the agent's own code. The server
+  // fails a start the same way when it breaks a rule of the agent's wire (a job admitted
+  // before the rule was checked at submit); the detail then holds the wire's code, such as
+  // invalid-env.
   START_FAILURE_CODE_AGENT_REFUSED = 4;
   // An input the job named could not be read on its host: a host path of a layer or mount
   // that is missing, is not a directory, cannot be read, or did not answer in time. The
