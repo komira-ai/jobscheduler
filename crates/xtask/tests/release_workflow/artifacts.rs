@@ -274,8 +274,13 @@ fn only_artifacts_yml_signs() {
     );
 }
 
-/// The jobs `needs:` names of a job, from the flow form `[a, b]` or a single name.
+/// The jobs `needs:` names of a job, from the flow form `[a, b]` or a single name. Panics on the
+/// block form (`needs:` with the names on the lines below), which it does not read.
 fn needs(lines: &[String]) -> Vec<String> {
+    assert!(
+        !lines.iter().any(|l| l.trim_end() == "    needs:"),
+        "a block-form needs: {lines:?}"
+    );
     lines
         .iter()
         .find_map(|l| l.strip_prefix("    needs: "))
@@ -334,9 +339,9 @@ fn unguarded_below_the_farm_gate(text: &str) -> Vec<String> {
 
 /// Asserts that every job below the MACOS_ON_FARM gate, in artifacts.yml and in
 /// js-agent-macos-pkg.yml, opens its `if:` with `!cancelled()` and checks a need's result; and
-/// that the check names artifacts.yml's `attest` and `verify` with the `if:` they had before
-/// (each alone and both), a job that has `!cancelled()` but checks no result, a job that checks
-/// a result without `!cancelled()`, and a job with no `if:` at all. Catches a job below the gate
+/// that the check names each of these defects: `attest` and `verify` with the `if:` they had
+/// before (each alone and both), `!cancelled()` with no result check, a result check with no
+/// `!cancelled()`, and no `if:` at all. Catches a job below the gate
 /// that GitHub skips in every run, as `attest` and `verify` were, which leaves release.yml's
 /// `publish` without the `bundles` artifact.
 #[test]
