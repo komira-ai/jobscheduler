@@ -3,7 +3,9 @@
 # x86_64-unknown-linux-musl -p js-agent --bin js-agent`) and packaged with `cargo xtask release
 # deb`, which refuses a binary that does not print the version and lists in the package exactly
 # what packaging/js-agent/deb holds. `dpkg-deb --info` and `dpkg-deb --contents` show the control
-# file and the files, and the package is kept as a workflow artifact for seven days. A change that
+# file and the files; the files are unpacked into an empty root, `systemd-tmpfiles --create --root`
+# makes the directories the package's tmpfiles.d files declare there and `stat` prints their modes;
+# and the package is kept as a workflow artifact for seven days. A change that
 # breaks the musl release binary or the package is red on the pull request and not on the release
 # push.
 #
@@ -82,6 +84,17 @@ jobs:
         run: dpkg-deb --info "dist/js-agent_${VERSION}_amd64.deb"
       - name: List the files of the .deb
         run: dpkg-deb --contents "dist/js-agent_${VERSION}_amd64.deb"
+      # The package's tmpfiles.d files applied as on a fresh host, to a root that holds the
+      # package's files alone: systemd-tmpfiles reads every tmpfiles.d file below that root and
+      # makes the directories they declare there, and stat prints the mode each was given. The
+      # root is unpacked as root, as dpkg unpacks a package: systemd-tmpfiles refuses to walk from
+      # a directory of another user into one of root's.
+      - name: Unpack the .deb into an empty root
+        run: sudo dpkg-deb --extract "dist/js-agent_${VERSION}_amd64.deb" "$RUNNER_TEMP/deb-root"
+      - name: Make the directories of the package's tmpfiles.d files in that root
+        run: sudo systemd-tmpfiles --create --root "$RUNNER_TEMP/deb-root"
+      - name: Show the modes of the directories made
+        run: stat --format "%a %U:%G %n" "$RUNNER_TEMP/deb-root/etc/js-agent" "$RUNNER_TEMP/deb-root/var/lib/js-agent" "$RUNNER_TEMP/deb-root/var/lib/js-agent/state" "$RUNNER_TEMP/deb-root/var/lib/js-agent/scratch" "$RUNNER_TEMP/deb-root/var/lib/js-agent/scratch/runs"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: js-agent-deb
