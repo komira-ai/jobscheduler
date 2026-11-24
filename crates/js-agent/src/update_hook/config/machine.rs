@@ -7,19 +7,22 @@
 //! file names `--host-cert` and `--host-key` (no bearer), else by the host credential in the
 //! agent's state root, else by the token file. Nothing here is an environment variable.
 
+use std::path::Path;
 use std::time::Duration;
 
 use js_mac_provision::daemon::AGENT_EXIT_TIMEOUT_SECS;
 use js_types::HostId;
-use js_update_hook::{Clock, Step, Units};
+use js_update_hook::{Clock, Outcome, Step, Units};
 
 use crate::facts::SystemCommands;
 use crate::own_host::{Lease, RequestLimit};
 use crate::update_hook::machine::{connect_with, platform_units};
 use crate::update_hook::{FLAGS_FILE_KEY, Machine, MachineLease, StopRunner, SystemClock};
 
+use super::reason::{Reason, Report};
 use super::steps::{self, Env};
 use super::{Done, Params};
+use crate::update_hook::ArgsError;
 
 /// The lease server's own-host routes as the flags file now in place says, for the host it
 /// names (its own id when the file names none).
@@ -49,10 +52,13 @@ fn lease_of(params: &Params, machine: &Machine<'_>) -> Result<Box<dyn Lease>, St
     )))
 }
 
-/// Runs `step` over `units` and `clock` and the rest of `machine`.
+/// Runs `step` over `units` and `clock` and the rest of `machine`, on the host's root `/`.
+/// `artifact` is the staged release directory, which `prepare` needs and no other step takes;
+/// `prepare` without it fails `bad_args` and does nothing.
 #[must_use]
 pub fn run_on(
     step: Step,
+    artifact: Option<&Path>,
     params: &Params,
     machine: &Machine<'_>,
     units: &dyn Units,
@@ -64,22 +70,33 @@ pub fn run_on(
         clock,
         stat: machine.stat,
         lease: &lease,
+        root: Path::new("/"),
     };
-    match step {
-        Step::Prepare => steps::prepare(&env, params),
-        Step::Cutover => steps::cutover(&env, params),
-        Step::Verify => steps::verify(&env, params),
-        Step::Rollback => steps::rollback(&env, params),
-        Step::Cleanup => steps::cleanup(&env, params),
+    match (step, artifact) {
+        (Step::Prepare, Some(staged)) => steps::prepare(&env, params, staged),
+        (Step::Prepare, None) => Done {
+            outcome: Outcome::Failure,
+            report: Report::failure(Reason::BadArgs, ArgsError::MissingArtifact.to_string()),
+        },
+        (Step::Cutover, _) => steps::cutover(&env, params),
+        (Step::Verify, _) => steps::verify(&env, params),
+        (Step::Rollback, _) => steps::rollback(&env, params),
+        (Step::Cleanup, _) => steps::cleanup(&env, params),
     }
 }
 
 /// Runs `step` on this machine: the unit manager of the platform (`systemctl`, or `launchctl`
-/// with the kickstart held back while the flags file is absent) and the real clock.
+/// with the kickstart held back while the flags file is absent) and the real clock. `artifact`
+/// is as [`run_on`] takes it.
 #[must_use]
-pub fn run_step(step: Step, params: &Params, machine: &Machine<'_>) -> Done {
+pub fn run_step(
+    step: Step,
+    artifact: Option<&Path>,
+    params: &Params,
+    machine: &Machine<'_>,
+) -> Done {
     let commands = SystemCommands::default();
     let stop = StopRunner::new(Duration::from_secs(u64::from(AGENT_EXIT_TIMEOUT_SECS)));
     let units = platform_units(&commands, &stop, &params.flags_file);
-    run_on(step, params, machine, &units, &SystemClock)
+    run_on(step, artifact, params, machine, &units, &SystemClock)
 }

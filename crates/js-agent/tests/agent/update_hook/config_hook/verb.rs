@@ -60,7 +60,7 @@ fn params_text() -> String {
     text("/var/lib/js-agent-config-test", 600, 300, 600)
 }
 
-/// Asserts that every reason is a token the updater accepts, that the tokens are the ten the
+/// Asserts that every reason is a token the updater accepts, that the tokens are the twelve the
 /// hook documents, and that no two are alike.
 ///
 /// Catches a misspelt or over-long token, which the updater reads as no reason.
@@ -79,7 +79,9 @@ fn every_reason_is_a_token_the_updater_accepts() {
             "start_failed",
             "no_hello",
             "lease_unreachable",
-            "not_verified"
+            "not_verified",
+            "keep_failed",
+            "restore_failed"
         ]
     );
     for token in &tokens {

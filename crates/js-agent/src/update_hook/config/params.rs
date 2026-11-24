@@ -1,8 +1,9 @@
 //! The `--params <file>` table of the config hook.
 //!
 //! The package manifest's `[params]` table is a flat table of scalars; the updater adds keys of
-//! the namespace `updater.`, which this hook ignores. Every key of [`KEYS`] is required and any
-//! other key is refused:
+//! the namespace `updater.`, of which this hook reads `updater.previous_version` (absent on a
+//! first install) and ignores the rest. Every key of [`KEYS`] is required and any other key is
+//! refused:
 //!
 //! - `unit`: the systemd unit (a launchd label on a Mac) of the agent the hook restarts;
 //! - `flags_file`: the host's agent flags, the file `js-agent --flags-file` reads, where the
@@ -23,8 +24,9 @@ use js_update_hook::{
 
 use crate::update_hook::params::{is_scalar, required_path, required_seconds, string_of};
 use crate::update_hook::{
-    CUTOVER_TIMEOUT_KEY, FLAGS_FILE_KEY, ParamsError as TableError, ROLLBACK_TIMEOUT_KEY,
-    STATE_DIR_KEY, STATE_ROOT_KEY, TOKEN_FILE_KEY, UNIT_KEY, VERIFY_TIMEOUT_KEY,
+    CUTOVER_TIMEOUT_KEY, FLAGS_FILE_KEY, PREVIOUS_VERSION_KEY, ParamsError as TableError,
+    ROLLBACK_TIMEOUT_KEY, STATE_DIR_KEY, STATE_ROOT_KEY, TOKEN_FILE_KEY, UNIT_KEY,
+    VERIFY_TIMEOUT_KEY,
 };
 
 /// The reserved namespace of the updater: its keys are ignored.
@@ -103,6 +105,9 @@ pub struct Params {
     pub verify_secs: u64,
     /// The updater's bound on `rollback` (`rollback_timeout_secs`).
     pub rollback_secs: u64,
+    /// The version that runs now (`updater.previous_version`); `None` on a first install, whose
+    /// package the updater removes after `rollback`.
+    pub previous_version: Option<String>,
 }
 
 impl Params {
@@ -146,6 +151,7 @@ impl Params {
             cutover_secs: bound(&table, CUTOVER_TIMEOUT_KEY, CUTOVER_MIN_SECS)?,
             verify_secs: bound(&table, VERIFY_TIMEOUT_KEY, VERIFY_MIN_SECS)?,
             rollback_secs: bound(&table, ROLLBACK_TIMEOUT_KEY, ROLLBACK_MIN_SECS)?,
+            previous_version: string_of(&table, PREVIOUS_VERSION_KEY)?,
         })
     }
 }

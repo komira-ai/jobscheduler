@@ -12,15 +12,19 @@
 //! directory for the whole step, every step safe to run twice, nothing from the environment.
 //! The agent reads its flags once, at its start, so the hand-over of new flags is a restart:
 //!
-//! - `prepare` reads and checks the params and nothing else;
+//! - `prepare` reads and checks the params, and keeps in its state directory what is at each
+//!   path the staged package places and at the flags file (see [`kept`]), before the installer
+//!   replaces it;
 //! - `cutover` checks that the flags file now in place is one the agent can use (it parses as
 //!   the agent's flags and names a host id, a facts file read included), else it ends
 //!   `bad_config` with nothing restarted; notes the session the lease server shows for the
 //!   host; restarts the unit;
-//! - `verify` waits for the unit to be active and the host to be `live` in another session;
-//! - `rollback` restarts the unit onto the previous files and, with the join token in place,
-//!   waits for the hello without failing on it;
-//! - `cleanup` deletes the record, once `verify` has succeeded;
+//! - `verify` waits for the unit to be active and the host to be `live` in another session, and
+//!   then removes the kept copy;
+//! - `rollback` puts the kept files back, restarts the unit onto them and, with the join token in
+//!   place, waits for the hello without failing on it;
+//! - `cleanup` deletes the record (and a kept copy `verify` could not remove), once `verify` has
+//!   succeeded;
 //! - `uninstall` does nothing to the service: the files go with the package, and the agent keeps
 //!   running on what it read.
 //!
@@ -29,6 +33,7 @@
 //! parsed and before any signal handler is installed.
 
 mod args;
+mod kept;
 mod machine;
 mod params;
 mod reason;
@@ -70,6 +75,7 @@ pub struct Host<'a> {
 fn machine_step(invocation: &crate::update_hook::Invocation, params: &Params) -> Done {
     run_step(
         invocation.step,
+        invocation.artifact.as_deref(),
         params,
         &crate::update_hook::Machine::system(),
     )
