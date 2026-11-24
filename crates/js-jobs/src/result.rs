@@ -211,11 +211,13 @@ pub enum JobEnd {
     /// Its host's agent refused the start, or failed it while preparing, with its own code:
     /// it did not get to run. `failure` is [`StartFailure::InputUnavailable`] for
     /// `input-unavailable` and [`StartFailure::AgentRefused`] for any other code; `detail`,
-    /// the code, is kept as the job's [`JobRecord::start_failure_detail`].
+    /// the code, is kept as the job's [`JobRecord::start_failure_detail`]. The server ends a
+    /// job this way too, as [`StartFailure::AgentRefused`] with the wire's refusal code, when
+    /// the job's start breaks a rule of the wire and so could never be sent to a host.
     Refused {
         /// Why, as a client reads it.
         failure: StartFailure,
-        /// The agent's code.
+        /// The agent's code, or the wire's when the server refused the start.
         detail: String,
     },
     /// It ran, did not succeed, and an input its host provides failed while it ran: failed,

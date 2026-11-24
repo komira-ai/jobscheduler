@@ -13,7 +13,7 @@
 //! | `spec.jobId` | empty (the store mints an id), or 1 to 63 bytes of letters, digits, `.`, `_` and `-` | `field: spec.jobId` |
 //! | `spec.image` | `NAME[:TAG]@sha256:<64 hex>`: a tag alone is refused; empty only beside `spec.layers` | `field: spec.image` |
 //! | `spec.command` | with an empty image, an absolute path in normal form ([`js_types::path::absolute`]) | `field: spec.command` |
-//! | `spec.env` | names and values as given; nothing to refuse | |
+//! | `spec.env` | as a start's environment is (`js_agent_wire::check_env`): at most `js_agent_wire::limits::MAX_ENV` entries; each name non-empty, of `[A-Za-z_][A-Za-z0-9_]*`, at most `MAX_ENV_KEY_LEN` bytes and not one the agent owns or that steers the loader, the agent or a shell ([`js_types::env::env_name_reserved`]: `HOME`, `TMPDIR`, `LD_*`, `JS_*`, `IFS` and the rest); each value without NUL; the values and names within the wire's caps | `field: spec.env: invalid-env` |
 //! | `spec.needs` | `whole_host` with no other need; a GPU count with a class (from `gpu_class`, else `constraints.accelerator.model`) and a class with a count | `field: spec.needs`, `spec.needs.gpus`, `spec.needs.gpuClass` |
 //! | `spec.constraints` | `os` empty, `linux` or `macos`; `arch` any name, `aarch64` stored as `arm64`; `exec` a known mode, and not `sandbox-exec` for a job with layers or a host port at a job port of its own; `isaLevel` empty or a level; `osVersion` empty or a whole major version of one to four digits without a leading zero; `xcode` empty or a build id ([`js_agent_wire::is_xcode_build`]: 1 to 32 bytes of letters, digits, `.`, `_` and `-`, the first a letter or digit); `accelerator` keys valid and not contradicting the booked class; `isolation` a known value (unspecified is contained), and not `host` for a job with layers, mounts or host ports | `field: spec.constraints.<name>` |
 //! | `spec.wallLimitSeconds` | present and above 0, and at most the ceiling | the refusals `wall-time-not-positive` and `wall-time-above-ceiling` |
@@ -52,7 +52,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use js_agent_wire::{Layer, RunFile, is_xcode_build, validate_files};
+use js_agent_wire::{Layer, RunFile, check_env, is_xcode_build, validate_files};
 use js_caps::{FLAG_SET, LAYERED_ROOTFS, XCODE, mount_provider_key};
 use js_jobs::{
     Constraints, DeclaredPort, Isolation, JobFiles, JobId, JobSpec, Needs, NetworkPolicy,
@@ -92,6 +92,9 @@ pub(crate) struct Valid {
 pub(crate) enum Fault {
     /// The field, by its JSON name, is not valid.
     Field(&'static str),
+    /// The field, by its JSON name, breaks a rule of the wire's check of a start, whose
+    /// refusal code (one of `js_agent_wire::refusal`) the answer carries.
+    Wire(&'static str, &'static str),
     /// The field, by its JSON name, of the port at this index of `spec.ports`.
     Port(usize, &'static str),
     /// The field, by its JSON name (a path below the entry for a provider source's field:
@@ -119,6 +122,7 @@ pub(crate) fn job(spec: Option<&v1::JobSpec>, ceiling: Duration) -> Result<Valid
         .map(ImageDigestRef::parse)
         .transpose()
         .map_err(|_| Fault::Field("spec.image"))?;
+    env(&spec.env)?;
     let constraints = spec.constraints.clone().unwrap_or_default();
     let resources = resources(spec.needs.as_ref(), &constraints)?;
     let (mut kept, mut capabilities) = host(&constraints)?;
@@ -460,6 +464,12 @@ fn files(files: &[v1::JobFile]) -> Result<JobFiles, Fault> {
             .map(|file| (file.name, file.contents.into_bytes()))
             .collect(),
     ))
+}
+
+/// The environment, checked as a start's is, so that no job is admitted whose start the wire
+/// would refuse and which would then never be sent.
+fn env(env: &BTreeMap<String, String>) -> Result<(), Fault> {
+    check_env("spec.env", env).map_err(|error| Fault::Wire("spec.env", error.code()))
 }
 
 /// The labels, checked as a lease's are.

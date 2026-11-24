@@ -3,7 +3,9 @@
 //! uploads live logs.
 //!
 //! A start the wire cannot carry is not sent ([`Unsendable`]): the job then waits as placed
-//! (or, for a whole-host job, as starting), and the start timeout ends it. Nothing here
+//! (or, for a whole-host job, as starting), and the start timeout ends it, except that the
+//! dispatch poll ends at once a job whose start breaks a rule of the wire
+//! ([`Unsendable::Invalid`], `crate::agent_api::dispatch`). Nothing here
 //! guesses a value the records do not hold: a GPU device index, a network level the host's
 //! agent does not report it can give, a job id or a file the wire's grammar refuses.
 //!

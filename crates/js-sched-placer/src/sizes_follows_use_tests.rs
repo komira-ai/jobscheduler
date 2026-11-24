@@ -8,12 +8,12 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use js_jobs::{JobRecord, JobSpec};
+use js_jobs::{CpuPeak, JobEnd, JobRecord, JobSpec, Output, ResourceUsage};
 use js_types::Labels;
 
 use super::super::{ColdSize, SIZE_FALLBACK_LABEL, SizedFrom};
 use super::{
-    GIB, JobSizes, MIB, SIZE_CLASS_LABEL, Tables, booked, bounds_of, capacity, exited, needs,
+    GIB, JobSizes, MIB, SIZE_CLASS_LABEL, Tables, booked, bounds_of, capacity, needs, output,
     queued, queued_by, ran_for, spec_of,
 };
 
@@ -53,11 +53,30 @@ fn target_runs(
         .map(|run| {
             let id = format!("{class}-{prefix}{run}");
             let booked = booked(4000, booking);
-            let end = exited(0, peak(run), wall);
+            let end = one_core(peak(run), wall);
             let job = ran_for(tables, (&id, None), step_spec(class), booked, end, wall);
             (job, booked)
         })
         .collect()
+}
+
+/// An exit with code 0 after `wall` that peaked at `peak` bytes and used a core, on average
+/// and at its busiest (its five-second CPU peak is a core too).
+fn one_core(peak: u64, wall: Duration) -> JobEnd {
+    let usage = output(peak, wall).usage.map(|usage| ResourceUsage {
+        cpu_peak: Some(CpuPeak {
+            millicores: 1000,
+            window_usec: 5_000_000,
+        }),
+        ..usage
+    });
+    JobEnd::Exited {
+        exit_code: 0,
+        output: Output {
+            usage,
+            ..Output::default()
+        },
+    }
 }
 
 /// Sizes over one farm host with the cold size [`COLD`], taught `runs` with what each booked.

@@ -263,11 +263,11 @@ control and its files back:
 | `/usr/bin/js-agent` | 0755 | the release binary, byte for byte |
 | `/usr/lib/systemd/system/js-agent-crun.service` | 0644 | `packaging/js-agent/deb/js-agent-crun.service`, the agent run with crun |
 | `/usr/lib/systemd/system/js-agent-crun-gpu.service` | 0644 | `packaging/js-agent/deb/js-agent-crun-gpu.service`, the oneshot that writes the GPU drop-in |
-| `/usr/lib/tmpfiles.d/js-agent-crun.conf` | 0644 | `packaging/js-agent/deb/tmpfiles.conf`, the directories of the unit |
+| `/usr/lib/tmpfiles.d/js-agent-crun.conf` | 0644 | `packaging/js-agent/deb/tmpfiles.conf`, the directories of the unit, the package's one tmpfiles.d file |
 | `/usr/lib/sysusers.d/js-agent.conf` | 0644 | `packaging/js-agent/deb/sysusers.conf`, the job user `jsjob` of the unit |
 | `/usr/lib/systemd/system/js-agent.service` | 0644 | `packaging/js-agent/js-agent.service`, the agent run through Docker or Podman on a host without hostkeeper |
-| `/usr/lib/tmpfiles.d/js-agent.conf` | 0644 | `packaging/js-agent/tmpfiles.conf`, the directories of that unit |
 | `/usr/share/js-agent/crun_host_setup.sh` | 0755 | `packaging/js-agent/crun_host_setup.sh`, the held host setup script |
+| `/usr/share/js-agent/tmpfiles.conf` | 0644 | `packaging/js-agent/tmpfiles.conf`, the directories of that unit, which its `ExecStartPre` applies (outside tmpfiles.d, so boot reads only the crun unit's file) |
 | `/usr/share/doc/js-agent/copyright` | 0644 | `LICENSE` |
 
 The package is `js-agent`, version `X.Y.Z`, architecture `amd64` or `arm64`. Its one dependency,

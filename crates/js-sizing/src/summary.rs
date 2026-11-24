@@ -34,6 +34,15 @@ pub const CPU_PRESSURE_MAX_PERMILLE: u16 = 100;
 /// A key is mixed when the largest of its last 32 samples is over this many times their
 /// median.
 pub const MIXED_RATIO: u64 = 4;
+/// A key's CPU has a heavy tail when the 90th percentile of its runs' peaks
+/// ([`Run::cpu_peak_millis`]) is over this many times the median of their means: such a
+/// key books that percentile of its peaks ([`Summary::cpu`]).
+pub const TAIL_RATIO: u32 = 2;
+/// The percentile of the peaks a heavy-tail key books, in thousandths: the 90th.
+pub const TAIL_PERMILLE: usize = 900;
+/// The fewest of a key's last 32 CPU samples that must carry a peak before its tail is
+/// judged: below it the key books the median of its means, whatever its peaks.
+pub const TAIL_MIN_PEAKS: usize = 5;
 /// The latest day a summary accepts (about 2,700 years of days): later days are
 /// clamped, and a stored row beyond it is corrupt.
 pub const MAX_DAY: u32 = 1_000_000;
@@ -56,14 +65,19 @@ const CPU_STEP: u32 = 250;
 /// A success this close to its memory limit is treated as having hit it.
 const NEAR_LIMIT_PERCENT: u128 = 95;
 
-/// The run's CPU sample in millicores: its peak ([`Run::cpu_peak_millis`]) when it has one,
-/// else its mean parallelism, capped to `u32` so the cast cannot truncate.
+/// The run's CPU sample in millicores: its mean parallelism (CPU time over wall time),
+/// capped to `u32` so the cast cannot truncate.
 fn cpu_millis(run: &Run) -> u32 {
-    let mean = || {
-        let millis = u128::from(run.cpu_usage_us) * 1000 / u128::from(run.wall_us);
-        millis.min(u128::from(u32::MAX)) as u32
-    };
-    run.cpu_peak_millis.unwrap_or_else(mean)
+    let millis = u128::from(run.cpu_usage_us) * 1000 / u128::from(run.wall_us);
+    millis.min(u128::from(u32::MAX)) as u32
+}
+
+/// The nearest-rank `permille`th percentile of `values` (the `ceil(permille / 1000 * n)`-th
+/// smallest), after sorting them; 0 for no values.
+fn percentile(values: &mut [u32], permille: usize) -> u32 {
+    values.sort_unstable();
+    let rank = (values.len() * permille).div_ceil(1000);
+    values.get(rank.saturating_sub(1)).copied().unwrap_or(0)
 }
 
 /// The last minute (0-indexed) a run reached: its wall time in whole minutes, saturating
@@ -117,7 +131,7 @@ pub fn floor_ceiling(host_memory: u64) -> u64 {
     host_memory.saturating_sub(1) / MEMORY_STEP * MEMORY_STEP
 }
 
-/// Everything the estimator keeps for one key (about 700 bytes). Fields are crate
+/// Everything the estimator keeps for one key (about 850 bytes). Fields are crate
 /// private; [`Summary::encode`] and [`Summary::decode`] are the storage form.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Summary {
@@ -139,6 +153,9 @@ pub struct Summary {
     pub(crate) cpu_n: u64,
     /// The last 32 CPU samples, in millicores.
     pub(crate) cpu_ring: [u32; RING],
+    /// For each sample in `cpu_ring`, the peak of its run in millicores; 0 when the run
+    /// had none measured. Parallel to `cpu_ring`.
+    pub(crate) cpu_peak_ring: [u32; RING],
     /// For each run in `ring`, the last minute (0-indexed) it reached: its wall time in
     /// whole minutes, saturating at 255. Parallel to `ring`.
     pub(crate) minute_ring: [u8; RING],
@@ -168,6 +185,7 @@ impl Summary {
             day_max: [0; DAYS],
             cpu_n: 0,
             cpu_ring: [0; RING],
+            cpu_peak_ring: [0; RING],
             minute_ring: [0; RING],
             oom_floor: 0,
             floor_anchor: 0,
@@ -267,7 +285,7 @@ impl Summary {
                 Err(Discard::NotASample)
             }
         };
-        let used = run.cpu_usage_us > 0 || run.cpu_peak_millis.is_some_and(|peak| peak > 0);
+        let used = run.cpu_usage_us > 0;
         let cpu = if run.outcome == Outcome::Success && trusted && used {
             self.observe_cpu(run, bounds)
         } else {
@@ -277,19 +295,21 @@ impl Summary {
     }
 
     /// A CPU measurement: kept when the node was quiet and the run was not held at a
-    /// ceiling, otherwise only when it exceeds the current estimate (a starved or held
-    /// run never overstates its demand, it only understates it).
+    /// ceiling, otherwise only when its mean exceeds the median of the key's means (a
+    /// starved or held run never overstates its demand, it only understates it). Its peak,
+    /// if measured, is kept or dropped with it.
     fn observe_cpu(&mut self, run: &Run, bounds: &Bounds) -> CpuSample {
         let millis = cpu_millis(run);
+        let peak = run.cpu_peak_millis.unwrap_or(0);
         let quiet = !run.cpu_held
             && run
                 .node_cpu_pressure_permille
                 .is_some_and(|p| p < CPU_PRESSURE_MAX_PERMILLE);
         if quiet {
-            self.record_cpu(millis);
+            self.record_cpu(millis, peak);
             CpuSample::Kept
-        } else if millis > self.cpu(bounds) {
-            self.record_cpu(millis);
+        } else if millis > self.median_cpu(bounds) {
+            self.record_cpu(millis, peak);
             CpuSample::Raised
         } else {
             CpuSample::Dropped
@@ -359,9 +379,10 @@ impl Summary {
         self.n_total += 1;
     }
 
-    fn record_cpu(&mut self, millis: u32) {
+    fn record_cpu(&mut self, millis: u32, peak: u32) {
         let slot = (self.cpu_n % RING as u64) as usize;
         self.cpu_ring[slot] = millis;
+        self.cpu_peak_ring[slot] = peak;
         self.cpu_n += 1;
     }
 
@@ -486,22 +507,48 @@ impl Summary {
         })
     }
 
-    /// The CPU estimate in millicores: [`COLD_CPU_MILLIS`] while there is no CPU sample,
-    /// else the median (P50) of the recent samples, rounded up to
-    /// 250 m, between [`CPU_MIN_MILLIS`] and the node's CPUs.
+    /// The CPU estimate in millicores: [`COLD_CPU_MILLIS`] while there is no CPU sample;
+    /// else, for a key with a heavy tail, the 90th percentile of its recent runs' peaks
+    /// ([`TAIL_PERMILLE`]), and for any other key the median (P50) of their means; rounded up
+    /// to 250 m, between [`CPU_MIN_MILLIS`] and the node's CPUs. A key has a heavy tail when
+    /// at least [`TAIL_MIN_PEAKS`] of its last 32 samples carry a peak and the percentile of
+    /// those peaks is over [`TAIL_RATIO`] times the median booking.
     pub(crate) fn cpu(&self, bounds: &Bounds) -> u32 {
-        let node = bounds.node_cpu_millis;
+        let median = self.median_cpu(bounds);
+        let kept = self.cpu_n.min(RING as u64) as usize;
+        let mut peaks: Vec<u32> = self.cpu_peak_ring[..kept]
+            .iter()
+            .copied()
+            .filter(|peak| *peak > 0)
+            .collect();
+        if peaks.len() < TAIL_MIN_PEAKS {
+            return median;
+        }
+        let tail = percentile(&mut peaks, TAIL_PERMILLE);
+        if tail > median.saturating_mul(TAIL_RATIO) {
+            Self::booking(tail, bounds)
+        } else {
+            median
+        }
+    }
+
+    /// The median (P50) of the recent samples' means rounded up to 250 m, between
+    /// [`CPU_MIN_MILLIS`] and the node's CPUs; [`COLD_CPU_MILLIS`] while there is no CPU
+    /// sample. A pressured or held sample is kept only above it.
+    fn median_cpu(&self, bounds: &Bounds) -> u32 {
         if !self.has_cpu_sample() {
             // No measurement: the key is counted at what an unlearned action costs.
-            return COLD_CPU_MILLIS.min(node);
+            return COLD_CPU_MILLIS.min(bounds.node_cpu_millis);
         }
-        let low = CPU_MIN_MILLIS.min(node);
         let kept = self.cpu_n.min(RING as u64) as usize;
-        let mut sorted = self.cpu_ring[..kept].to_vec();
-        sorted.sort_unstable();
-        // Nearest rank: the ceil(0.5 * kept)-th smallest; no samples is 0.
-        let rank = kept.div_ceil(2);
-        let p50 = sorted.get(rank.saturating_sub(1)).copied().unwrap_or(0);
-        (p50.div_ceil(CPU_STEP).saturating_mul(CPU_STEP)).clamp(low, node)
+        let mut means = self.cpu_ring[..kept].to_vec();
+        Self::booking(percentile(&mut means, 500), bounds)
+    }
+
+    /// `millis` rounded up to 250 m, between [`CPU_MIN_MILLIS`] and the node's CPUs.
+    fn booking(millis: u32, bounds: &Bounds) -> u32 {
+        let node = bounds.node_cpu_millis;
+        let low = CPU_MIN_MILLIS.min(node);
+        (millis.div_ceil(CPU_STEP).saturating_mul(CPU_STEP)).clamp(low, node)
     }
 }

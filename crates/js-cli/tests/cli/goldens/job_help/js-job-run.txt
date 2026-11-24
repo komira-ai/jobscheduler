@@ -68,7 +68,7 @@ Options:
           The Xcode the job runs with, by build id such as 16C5032a (its ProductBuildVersion): 1 to 32 bytes of letters, digits, dot, underscore and dash, starting with a letter or digit. A host is capable when its agent reports that build among its installed Xcodes, and the job runs with that Xcode's developer directory, never the host's selected one. Empty: none.
 
       --spec.env <KEY=VALUE>
-          The environment of the job, by variable name. KEY=VALUE; repeat for more.
+          The environment of the job, by variable name. It is refused naming spec.env when a name is one the agent sets (HOME, TMPDIR and the rest) or one that steers the loader, the agent or a shell (LD_*, DYLD_*, JS_*, IFS and the rest), a name is not [A-Za-z_][A-Za-z0-9_]*, a value holds a NUL, or it is over the start's caps. KEY=VALUE; repeat for more.
 
       --spec.files-file <PATH>
           The files the host writes for the job before it starts. Read from a file holding the field's value in proto3 JSON.
