@@ -148,6 +148,8 @@ fn a_row_says_each_figure_of_an_outcome() {
         plan_error: 4_000_000,
         booked: 30_000_000,
         above_booking: 5_000_000,
+        booked_peak: 6000,
+        placed: vec![2],
         ..Outcome::default()
     };
     let mut text = String::new();
@@ -160,7 +162,7 @@ fn a_row_says_each_figure_of_an_outcome() {
     );
     assert_eq!(
         text,
-        "| A median, 1.1 | blip | 720 | 0 | 2 | 2 | 2.5 | 10.0 | 4.0 | 10.0 | 12.0 | 50.0 | 1.50 | 25.0 | 10.0 | 50.0 |\n"
+        "| A median, 1.1 | blip | 720 | 0 | 2 | 2 | 2.5 | 10.0 | 4.0 | 10.0 | 12.0 | 50.0 | 1.50 | 25.0 | 10.0 | 50.0 | 1.50 | 0.000 | 4 |\n"
     );
     outcome.over_ms = 0;
     let mut text = String::new();
@@ -172,6 +174,17 @@ fn a_row_says_each_figure_of_an_outcome() {
         (farm, 20_000_000),
     );
     assert!(text.contains("| 0.0 | - | 10.0 | 12.0 |"), "{text}");
+}
+
+/// The Gini coefficient of the jobs placed per host: 0 for an even spread, for no hosts and
+/// for no jobs, `1 - 1/n` when one host of `n` took every job, and between for an uneven one.
+#[test]
+fn the_gini_of_placements_is_0_when_even_and_near_1_when_one_host_takes_all() {
+    assert_eq!(gini(&[]), 0.0);
+    assert_eq!(gini(&[0, 0]), 0.0);
+    assert_eq!(gini(&[3, 3, 3]), 0.0);
+    assert_eq!(gini(&[4, 0, 0, 0]), 0.75);
+    assert_eq!(gini(&[3, 1]), 0.25);
 }
 
 #[test]
