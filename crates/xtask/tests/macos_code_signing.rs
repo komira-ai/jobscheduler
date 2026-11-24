@@ -80,9 +80,22 @@ fn job_text(text: &str, name: &str) -> String {
     jobs(text).get(name).map_or(String::new(), |j| j.join("\n"))
 }
 
-/// The condition of the jobs that sign: the release's call that asks, on a push to main, or a
-/// signing run on a branch of this repository (macos_pkg_workflow/signing_run.rs).
-const SIGN_IF: &str = "if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && inputs.sign) || (github.event_name == 'workflow_dispatch' && inputs.sign && github.repository == 'komira-ai/jobscheduler' && startsWith(github.ref, 'refs/heads/')) }}";
+/// The signing condition of the jobs that sign: the release's call that asks, on a push to main,
+/// or a signing run on a branch of this repository (macos_pkg_workflow/signing_run.rs).
+const SIGN_COND: &str = "(github.event_name == 'push' && github.ref == 'refs/heads/main' && inputs.sign) || (github.event_name == 'workflow_dispatch' && inputs.sign && github.repository == 'komira-ai/jobscheduler' && startsWith(github.ref, 'refs/heads/'))";
+
+/// The `if:` of `sign-code`: not cancelled, the unsigned programs built by `build` or by `farm`
+/// (whichever ran), and the signing condition.
+fn sign_code_if() -> String {
+    format!(
+        "if: ${{{{ !cancelled() && (needs.build.result == 'success' || needs.farm.result == 'success') && ({SIGN_COND}) }}}}"
+    )
+}
+
+/// The `if:` of `package`: not cancelled, `sign-code` succeeded, and the signing condition.
+fn package_if() -> String {
+    format!("if: ${{{{ !cancelled() && needs.sign-code.result == 'success' && ({SIGN_COND}) }}}}")
+}
 
 /// What `security import` answers on a hosted runner that holds Apple's intermediate already,
 /// in the step's environment.
@@ -131,7 +144,8 @@ fn signing_problems(text: &str, action: &str) -> Vec<String> {
     let signing_four = at_four(&sign_code);
     let package_four = at_four(all.get("package").map_or(&[][..], Vec::as_slice));
     want(
-        signing_four.iter().any(|l| l == SIGN_IF) && package_four.iter().any(|l| l == SIGN_IF),
+        signing_four.iter().any(|l| *l == sign_code_if())
+            && package_four.iter().any(|l| *l == package_if()),
         "sign-code and package do not run under the signing condition alone",
     );
     want(
@@ -143,11 +157,11 @@ fn signing_problems(text: &str, action: &str) -> Vec<String> {
         "package or build runs in an environment",
     );
     want(
-        signing_four.iter().any(|l| l == "needs: [build]")
+        signing_four.iter().any(|l| l == "needs: [build, farm]")
             && package_four
                 .iter()
-                .any(|l| l == "needs: [build, sign-code]"),
-        "sign-code does not wait for build, or package for build and sign-code",
+                .any(|l| l == "needs: [build, farm, sign-code]"),
+        "sign-code does not wait for build and farm, or package for build, farm and sign-code",
     );
     for word in [
         "actions/checkout",
@@ -351,6 +365,20 @@ fn the_programs_are_signed_in_a_keyed_job_and_packaged_in_a_keyless_one() {
 fn each_way_of_leaving_the_signing_shape_is_named() {
     let text = read(WORKFLOW);
     let action = read(ACTION);
+    let sign_code_head = format!(
+        "  sign-code:\n    needs: [build, farm]\n    {}\n",
+        sign_code_if()
+    );
+    let sign_code_other =
+        "  sign-code:\n    needs: [build, farm]\n    if: ${{ github.event_name != 'x' }}\n";
+    let package_head = format!(
+        "  package:\n    needs: [build, farm, sign-code]\n    {}\n    runs-on: macos-15\n",
+        package_if()
+    );
+    let package_environment = format!(
+        "  package:\n    needs: [build, farm, sign-code]\n    {}\n    environment: pkg-signing\n    runs-on: macos-15\n",
+        package_if()
+    );
     let cases: [(&str, &str, &str); 29] = [
         (
             "          /usr/bin/security list-keychains -d user -s \"$keychain\"\n",
@@ -384,8 +412,8 @@ fn each_way_of_leaving_the_signing_shape_is_named() {
             "calls cat by name",
         ),
         (
-            "  sign-code:\n    needs: [build]\n    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && inputs.sign) || (github.event_name == 'workflow_dispatch' && inputs.sign && github.repository == 'komira-ai/jobscheduler' && startsWith(github.ref, 'refs/heads/')) }}\n",
-            "  sign-code:\n    needs: [build]\n    if: ${{ github.event_name != 'x' }}\n",
+            &sign_code_head,
+            sign_code_other,
             "do not run under the signing condition alone",
         ),
         (
@@ -394,8 +422,8 @@ fn each_way_of_leaving_the_signing_shape_is_named() {
             "does not run in the environment pkg-signing",
         ),
         (
-            "  package:\n    needs: [build, sign-code]\n",
-            "  package:\n    needs: [build]\n",
+            "  package:\n    needs: [build, farm, sign-code]\n",
+            "  package:\n    needs: [build, farm]\n",
             "does not wait for build",
         ),
         (
@@ -414,8 +442,8 @@ fn each_way_of_leaving_the_signing_shape_is_named() {
             "a secret is named outside the env of the step that uses it",
         ),
         (
-            "  package:\n    needs: [build, sign-code]\n    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && inputs.sign) || (github.event_name == 'workflow_dispatch' && inputs.sign && github.repository == 'komira-ai/jobscheduler' && startsWith(github.ref, 'refs/heads/')) }}\n    runs-on: macos-15\n",
-            "  package:\n    needs: [build, sign-code]\n    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && inputs.sign) || (github.event_name == 'workflow_dispatch' && inputs.sign && github.repository == 'komira-ai/jobscheduler' && startsWith(github.ref, 'refs/heads/')) }}\n    environment: pkg-signing\n    runs-on: macos-15\n",
+            &package_head,
+            &package_environment,
             "package or build runs in an environment",
         ),
         (
@@ -553,7 +581,7 @@ fn the_installer_signature_is_put_on_the_package_made_of_the_signed_programs() {
     );
     assert!(!sign.contains("js-agent-macos-pkg-unsigned"), "{sign}");
     assert!(sign.contains("name: js-agent-macos-checker"), "{sign}");
-    assert!(sign.contains("needs: [build, package]"), "{sign}");
+    assert!(sign.contains("needs: [build, farm, package]"), "{sign}");
 }
 
 /// The README names the secrets the signing job reads and the profile the owner installs.

@@ -2,7 +2,7 @@
 //! waits for the plan and runs only on its release, that the promotion waits for the install
 //! check, and which of them hold `id-token: write`. The shape of each job is `tests/apt_workflow`.
 
-use super::{artifacts_workflow, holders, job, jobs, workflow};
+use super::{artifacts_workflow, holders, job, jobs, read_workflow, workflow};
 
 /// The jobs of the apt repository in `text`, in file order: the read, index and write jobs of both
 /// suites in every attempt, and `check-apt`.
@@ -71,16 +71,21 @@ fn the_apt_jobs_are_gated_on_the_release_and_the_promotion_on_the_install_check(
 }
 
 /// Asserts that in release.yml `id-token: write` is held by `artifacts` (the call, whose grant
-/// is the most its jobs can hold), `pkg-upload` (the macOS package's upload, in file order after
+/// is the most its jobs can hold), `beta-macos-pkg` (the call whose called workflow calls the
+/// farm's, which holds it for the farm's network), `pkg-upload` (the macOS package's upload, in file order after
 /// `artifacts`), `gamma`, `cp-deploy` (the call of docker-swarm-updater's
 /// deploy workflow) and the apt jobs that read and write (never the index jobs, which hold the
-/// signing key, nor `check-apt`), and `attestations: write` by `artifacts` alone; and that in
-/// artifacts.yml both are held by `attest` and by no other job.
+/// signing key, nor `check-apt`), and `attestations: write` by `artifacts` alone; that in
+/// artifacts.yml both are held by `attest` and by no other job but that `id-token: write` is also
+/// held by the call of macos-farm.yml, `macos-farm`, whose jobs' tokens name that file and cannot
+/// sign as artifacts.yml; and that in js-agent-macos-pkg.yml the call `farm` alone holds it, and
+/// in macos-farm.yml the three jobs that join the farm's network.
 #[test]
 fn only_attest_pkg_upload_gamma_cp_deploy_and_the_apt_read_and_write_jobs_hold_id_token() {
     let release = workflow();
     let mut want = vec![
         "artifacts".to_owned(),
+        "beta-macos-pkg".to_owned(),
         "pkg-upload".to_owned(),
         "gamma".to_owned(),
         "cp-deploy".to_owned(),
@@ -90,11 +95,23 @@ fn only_attest_pkg_upload_gamma_cp_deploy_and_the_apt_read_and_write_jobs_hold_i
             .into_iter()
             .filter(|name| name.contains("-apt-read") || name.contains("-apt-write")),
     );
-    assert_eq!(want.len(), 16, "{want:?}");
+    assert_eq!(want.len(), 17, "{want:?}");
     assert_eq!(holders(&release, "id-token: write"), want);
     assert_eq!(holders(&release, "attestations: write"), ["artifacts"]);
     let artifacts = artifacts_workflow();
-    assert_eq!(holders(&artifacts, "id-token: write"), ["attest"]);
+    assert_eq!(
+        holders(&artifacts, "id-token: write"),
+        ["macos-farm", "attest"]
+    );
     assert_eq!(holders(&artifacts, "attestations: write"), ["attest"]);
     assert!(holders(&artifacts, "contents: write").is_empty());
+    let package = read_workflow("js-agent-macos-pkg.yml");
+    assert_eq!(holders(&package, "id-token: write"), ["farm"]);
+    assert!(holders(&package, "contents: write").is_empty());
+    let farm = read_workflow("macos-farm.yml");
+    assert_eq!(
+        holders(&farm, "id-token: write"),
+        ["release", "pkg", "pkg-update"]
+    );
+    assert!(holders(&farm, "contents: write").is_empty());
 }

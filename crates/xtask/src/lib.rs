@@ -13,6 +13,12 @@
 //!   `--patch` and the command that applies it to the job summary `--summary`; then
 //!   `buck2 build <label>` with its progress in the log, failed unless its summary says `local: 0`
 //!   (every action ran on the build farm or came from its cache), and buck2's daemon stopped after.
+//! - `mac-farm --address <grpc://host:port> --properties <k=v,...> --scratch <dir> [--output
+//!   <path>]... [--env NAME=VALUE]... -- <cargo arguments>` ([`mac_farm`]): one Cargo command of
+//!   this checkout run on a Mac of the build farm as one REAPI action, with the checkout, the
+//!   crates of `Cargo.lock` for `aarch64-apple-darwin` and the pinned Rust toolchain as its
+//!   inputs; its output printed, and each `--output` it made fetched to the same path here.
+//!   With no `--address` it prints a notice and passes.
 //! - `debs --pins <file> --dir <dir>` ([`debs`]): the Debian packages a CI job installs with
 //!   `dpkg`, pinned by version and SHA-256 in a file of `.github/debs/`: the files the actions
 //!   cache restored into `--dir` when they match, and otherwise each downloaded from the pinned
@@ -98,6 +104,10 @@
 //! - `pkg stage-macos` and `pkg check-macos` ([`macpkg`]): the macOS installer package's
 //!   payload (it has no script), laid down for `pkgbuild`, and the built package read back with
 //!   `pkgutil` and `lsbom` and refused unless it is exactly that.
+//! - `pkg build-macos --version <X.Y.Z>` ([`macpkg::build`]): the package of a stamped checkout
+//!   built on a Mac in one command, as the `js-agent-macos-pkg` action builds it: the three
+//!   programs, their version lines and the cdhash, the plists, the stage, `pkgbuild` and
+//!   `productbuild`, the read-back, and the sums of the package and of the programs.
 //! - `site-demo [--out <path>] [--bin-dir <dir>] [--port <n>] [--job-port <n>] [--ready-timeout <s>]` ([`site_demo`]):
 //!   records the demonstration on the landing page of jobscheduler.dev, `site/test/demo.transcript`:
 //!   builds the server and the client, starts the server with the job service on and a pool no agent
@@ -155,6 +165,7 @@ pub mod fetch;
 pub mod image;
 pub mod job_surface;
 pub mod layering;
+pub mod mac_farm;
 pub mod mac_root;
 pub mod mac_test_artifact;
 pub mod macpkg;
@@ -197,6 +208,9 @@ pub enum Error {
     /// The farm lane's build failed.
     #[error(transparent)]
     Farm(#[from] farm::Error),
+    /// A Cargo command on a build farm Mac failed, or its outputs could not be fetched.
+    #[error("mac-farm: {0}")]
+    MacFarm(#[from] mac_farm::Error),
     /// The fetch verb failed.
     #[error(transparent)]
     Fetch(#[from] fetch::Error),
@@ -210,6 +224,9 @@ pub enum Error {
     /// The macOS package could not be staged or checked.
     #[error(transparent)]
     MacPkg(#[from] macpkg::Error),
+    /// The macOS package could not be built.
+    #[error(transparent)]
+    MacPkgBuild(#[from] macpkg::build::Error),
     /// A program `count-run` ran ended with a failure status, which is also this one's.
     #[error("the program ended with status {0}")]
     Child(u8),
@@ -307,6 +324,9 @@ enum Verb {
         #[arg(long)]
         run_id: u64,
     },
+    /// Run a Cargo command of this checkout on a Mac of the build farm as one remote action
+    /// (its toolchain and crates sent with it), print its output, and fetch the files it makes.
+    MacFarm(mac_farm::Args),
     /// Make a directory hold exactly the pinned Debian packages of this host's architecture,
     /// each checked against its SHA-256: those already there, the rest downloaded.
     Debs {
@@ -452,9 +472,15 @@ enum Verb {
 #[derive(Subcommand)]
 enum PkgVerb {
     /// Lay the macOS package's payload and scripts down, ready for `pkgbuild`.
-    StageMacos(macpkg::StageArgs),
+    #[command(name = "stage-macos")]
+    Stage(macpkg::StageArgs),
     /// Refuse a macOS package that is not exactly the js-agent package (a Mac only).
-    CheckMacos(macpkg::CheckArgs),
+    #[command(name = "check-macos")]
+    Check(macpkg::CheckArgs),
+    /// Build the macOS package of the stamped checkout here, on a Mac: programs, plists, stage,
+    /// `pkgbuild`, `productbuild`, the read-back and the sums.
+    #[command(name = "build-macos")]
+    Build(macpkg::build::BuildArgs),
 }
 
 /// The `release` verbs.
@@ -535,6 +561,7 @@ fn run(cli: Cli) -> Result<String, Error> {
                 &mut std::io::stderr(),
             )?)
         }
+        Verb::MacFarm(args) => Ok(mac_farm::run(&args)?.join("\n")),
         Verb::Debs { pins, dir } => {
             let roots = fetch::host_roots();
             Ok(debs::run(
@@ -622,8 +649,9 @@ fn run(cli: Cli) -> Result<String, Error> {
         Verb::ImageRecipe(args) => Ok(image::run(&args)?),
         Verb::Channels { verb } => Ok(channels::run(verb)?.join("\n")),
         Verb::Pkg { verb } => Ok(match verb {
-            PkgVerb::StageMacos(args) => macpkg::stage(&args)?,
-            PkgVerb::CheckMacos(args) => macpkg::check(&args)?,
+            PkgVerb::Stage(args) => macpkg::stage(&args)?,
+            PkgVerb::Check(args) => macpkg::check(&args)?,
+            PkgVerb::Build(args) => macpkg::build::run(&args)?,
         }),
         Verb::Release { verb } => Ok(match verb {
             ReleaseVerb::Plan(args) => release::plan::run(&args)?,

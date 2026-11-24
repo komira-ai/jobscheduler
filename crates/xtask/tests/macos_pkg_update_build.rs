@@ -167,8 +167,8 @@ fn each_way_of_leaving_the_update_build_shape_is_named() {
     let release = read(RELEASE);
     let on_workflow: [(&str, &str, &str); 7] = [
         (
-            "  build-update:\n    name: js-agent-macos-pkg-update\n    runs-on: macos-15\n",
-            "  build-update:\n    name: js-agent-macos-pkg-update\n    runs-on: macos-14\n",
+            "  build-update:\n    name: js-agent-macos-pkg-update\n    if: ${{ vars.MACOS_ON_FARM != 'true' && !inputs.farm }}\n    runs-on: macos-15\n",
+            "  build-update:\n    name: js-agent-macos-pkg-update\n    if: ${{ vars.MACOS_ON_FARM != 'true' && !inputs.farm }}\n    runs-on: macos-14\n",
             "build-update does not run on macos-15",
         ),
         (
@@ -187,8 +187,8 @@ fn each_way_of_leaving_the_update_build_shape_is_named() {
             "build-update does not upload dist/ as js-agent-macos-pkg-update-unsigned for a day",
         ),
         (
-            "  sign:\n    needs: [build, package]\n",
-            "  sign:\n    needs: [build, package, build-update]\n",
+            "  sign:\n    needs: [build, farm, package]\n",
+            "  sign:\n    needs: [build, farm, package, build-update]\n",
             "the update package reaches build or sign",
         ),
         (
