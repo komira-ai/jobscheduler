@@ -86,13 +86,23 @@ fn a_silent_host_is_left_out_of_the_retry_for_reserve_backoff() {
 /// A host that refuses its prepare, for each reason the wire has, is not given the job
 /// again within the bar and the job is placed on another host; a `host-unsafe` refusal taints
 /// the host, which stays out of service, while the other reasons leave every host serving.
-/// Catches a refusal that ends the job, a retry on the refusing host, a host not tainted
-/// after an unsafe refusal and one tainted after another reason.
+/// Catches a refusal that ends the job, a retry on the refusing host, a job refused
+/// `host-unsafe` that is never placed again, a host not tainted after an unsafe refusal and
+/// one tainted after another reason.
 #[test]
 fn a_refused_prepare_goes_elsewhere_for_each_refusal_reason() {
     for (_, scenario) in whole_host_prepare::every_refusal() {
         scenario.run_seeds(SEEDS);
     }
+}
+
+/// A whole-host job refused `host-unsafe` on the first of two hosts is placed on the second,
+/// idle one in a later pass and succeeds there, the first staying tainted
+/// (komira-ai/jobscheduler#834). Catches a requeued job kept off every host by what is left
+/// of its try on the tainted host, which stays queued while the other host is idle.
+#[test]
+fn a_whole_host_job_refused_host_unsafe_is_placed_on_the_other_host() {
+    whole_host_prepare::a_host_unsafe_refusal_goes_to_the_other_host().run_seeds(SEEDS);
 }
 
 /// Every variant of `RefusalReason`, in the order the wire lists them, built by a match

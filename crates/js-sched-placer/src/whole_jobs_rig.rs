@@ -262,12 +262,41 @@ pub(crate) fn run_with(
     now_ms: u64,
 ) -> Vec<WholeJobStep> {
     beat(engine, &["a", "b"], now_ms);
+    pass_of(
+        engine,
+        (queued, marks),
+        (hello, open, &BTreeSet::new()),
+        now_ms,
+    )
+}
+
+/// A pass of `engine` at `now_ms` over `queued` and `marks`, every host of `hello` heard from
+/// first: those of `open` may take a job, and those of `tainted` are closed by a taint.
+pub(crate) fn run_tainted(
+    engine: &mut Engine,
+    (queued, marks): (&[JobRecord], &[MarkRecord]),
+    (hello, open, tainted): (&BTreeSet<HostId>, &BTreeSet<HostId>, &BTreeSet<HostId>),
+    now_ms: u64,
+) -> Vec<WholeJobStep> {
+    let heard: Vec<&str> = hello.iter().map(HostId::as_str).collect();
+    beat(engine, &heard, now_ms);
+    pass_of(engine, (queued, marks), (hello, open, tainted), now_ms)
+}
+
+/// The pass of [`run_tainted`], with no host heard from.
+fn pass_of(
+    engine: &mut Engine,
+    (queued, marks): (&[JobRecord], &[MarkRecord]),
+    (hello, open, tainted): (&BTreeSet<HostId>, &BTreeSet<HostId>, &BTreeSet<HostId>),
+    now_ms: u64,
+) -> Vec<WholeJobStep> {
     let settings = settings();
     let input = WholeJobs {
         queued,
         marks,
         hello,
         open,
+        tainted,
         settings: Some(&settings),
         claim_by: at(15_000),
     };
