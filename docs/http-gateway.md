@@ -429,8 +429,12 @@ answer from what the commit returned; neither holds anything of its own outside 
    job's capabilities, where placement reads them. The wall limit is present, above 0 and at most
    the ceiling, `--max-job-wall` (30 days unless given). The network level is a known one;
    each port is 1 to 65535 and no host port is given twice (refused naming
-   `spec.ports[<i>].hostPort` or `.containerPort`); the files are checked as a start's
-   files are; the labels as a caller's labels are (`Labels::from_caller`). The layers,
+   `spec.ports[<i>].hostPort` or `.containerPort`); the environment is checked as a start's
+   environment is (a name the agent sets, such as `HOME` or `TMPDIR`, one that steers the
+   loader, the agent or a shell, such as `LD_*`, `DYLD_*`, `JS_*` or `IFS`, a name outside
+   `[A-Za-z_][A-Za-z0-9_]*`, a value with a NUL or an environment over the wire's caps is
+   refused naming `spec.env`, with the wire's code: `spec.env: invalid-env`); the files are
+   checked as a start's files are; the labels as a caller's labels are (`Labels::from_caller`). The layers,
    mounts and host ports (`docs/design/job-rootfs.md`, section 2.5) are at most 16, 64 and
    16; each layer and mount has one source this server knows (else refused naming
    `spec.layers[<i>]` or `spec.mounts[<i>]`, "no source this server knows"); a host path is

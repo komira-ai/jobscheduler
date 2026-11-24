@@ -22,6 +22,9 @@ use crate::agent_api::serve_hello;
 use crate::agent_api::whole_tests::{queue_share, rules};
 use crate::job_expiry::JobLimits;
 
+#[path = "dispatch_unbuilt_tests.rs"]
+mod unbuilt;
+
 /// A bound no test reaches: a hold or a recheck a test does not end returns at it.
 const LONG: Duration = Duration::from_secs(60);
 

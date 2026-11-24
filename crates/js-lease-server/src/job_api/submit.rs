@@ -177,6 +177,7 @@ impl JobApi {
 fn refused(fault: Fault) -> Status {
     match fault {
         Fault::Field(field) => Status::invalid_argument(format!("field: {field}")),
+        Fault::Wire(field, code) => Status::invalid_argument(format!("field: {field}: {code}")),
         Fault::Port(at, field) => {
             Status::invalid_argument(format!("field: spec.ports[{at}].{field}"))
         }
