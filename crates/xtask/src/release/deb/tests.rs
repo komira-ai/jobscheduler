@@ -277,13 +277,13 @@ fn the_data_archive_holds_the_nine_files_and_their_directories() {
             ("./usr/lib/sysusers.d/js-agent.conf", 0o644),
             ("./usr/lib/tmpfiles.d/", 0o755),
             ("./usr/lib/tmpfiles.d/js-agent-crun.conf", 0o644),
-            ("./usr/lib/tmpfiles.d/js-agent.conf", 0o644),
             ("./usr/share/", 0o755),
             ("./usr/share/doc/", 0o755),
             ("./usr/share/doc/js-agent/", 0o755),
             ("./usr/share/doc/js-agent/copyright", 0o644),
             ("./usr/share/js-agent/", 0o755),
             ("./usr/share/js-agent/crun_host_setup.sh", 0o755),
+            ("./usr/share/js-agent/tmpfiles.conf", 0o644),
         ]
     );
     for entry in &entries {
@@ -485,7 +485,7 @@ fn the_files_table_names_the_nine_files_and_their_sources() {
             "packaging/js-agent/js-agent.service",
         ),
         (
-            "/usr/lib/tmpfiles.d/js-agent.conf",
+            "/usr/share/js-agent/tmpfiles.conf",
             "packaging/js-agent/tmpfiles.conf",
         ),
         (

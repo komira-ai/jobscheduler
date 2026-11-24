@@ -256,7 +256,7 @@ fn the_unit_starts_only_with_a_mount_at_the_scratch_root() {
 fn the_unit_makes_its_directories_before_every_start() {
     assert_eq!(
         unit_value("ExecStartPre"),
-        "+systemd-tmpfiles --create /usr/lib/tmpfiles.d/js-agent.conf"
+        "+systemd-tmpfiles --create /usr/share/js-agent/tmpfiles.conf"
     );
 }
 
