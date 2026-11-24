@@ -118,7 +118,9 @@ between `MIN_HEARTBEAT_INTERVAL_MS` 250 and `MAX_HEARTBEAT_INTERVAL_MS` 3,600,00
 86,400,000. A start rides on the reply to the host's next heartbeat and is resent on every reply until the host lists it (section
 5.7, step 3). To an agent that reported `held-beat` the server holds a reply with nothing to send open for up to the interval (at
 most 5 s; at most 200 ms when the beat lists a job `starting` that a hold first saw so less than 2 s ago) and answers it as soon as a job is placed on the host; such a reply says `beat_now`, and the agent sends its next
-heartbeat at once ([held-beat.md](held-beat.md)). On any 409 to a heartbeat (the server sends `stale-epoch` or `unknown-host`) or a 403 `session-mismatch`, the agent
+heartbeat at once ([held-beat.md](held-beat.md)). For a host that polls dispatch, a placement ends the hold and a beat with such a
+start (one listed `starting`, however long) is answered at once (or, after another such answer less than 200 ms before, at the end
+of those 200 ms), both without `beat_now`, so the agent's next heartbeat leaves when its worker has news. On any 409 to a heartbeat (the server sends `stale-epoch` or `unknown-host`) or a 403 `session-mismatch`, the agent
 says hello again at once if its last heartbeat was accepted (`verdict` in `crates/js-agent/src/session.rs`). Every other 4xx except
 403 `pool-full`, 408 and 429 is fatal: 401, 413 `body-too-large`, 400 `invalid-hello` or `invalid-heartbeat`, `unsupported-protocol`
 and the other 403s end the session and the agent exits with status 2, because the same message would be refused again (the test

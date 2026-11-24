@@ -51,6 +51,13 @@ interval: up to 10 s with the defaults (`--tick 5s`, interval 5 s), up to 2 s at
    it open for the pool's heartbeat interval, at most 5 s, and answers it with `beat_now`; a beat that lists
    a job `starting` that a hold first saw so less than 2 s ago is held at most 200 ms instead
    (`held_beat::STARTING_HOLD`, `STARTING_WINDOW_MS`), so that start's `running` is not kept a whole hold.
+   A host that polls dispatch takes its starts from the poll, never from this reply, so holding its
+   beat delivers nothing and only keeps the agent's one heartbeat thread from reporting a start's
+   `running`: such a beat that lists a job `starting` (however long it has been so) is paced instead
+   (`held_beat::Starts::paced`), answered at once when no such beat of the host was answered in the
+   last `STARTING_HOLD` (200 ms) and held for the rest of those 200 ms otherwise, and, answered at
+   once or at the end of its spacing, its reply does not say `beat_now`, so the agent's next
+   heartbeat leaves when its worker has news (the container runs, or the start ends).
    A reply that is
    not held but carries no command (only acknowledgements, which are answered once) says `beat_now` too,
    so the heartbeat after a job's end is held at once; a reply with a command, which is sent again until
@@ -60,7 +67,9 @@ interval: up to 10 s with the defaults (`--tick 5s`, interval 5 s), up to 2 s at
    (`JobStarts::placed`). The held reply's stops and starts are built again from the store over the
    listing the beat brought (`per_job::commands_now`) and the reply is answered at once with the start (or,
    for a job that books the whole host, with the allocation to prepare for). A wake that comes between the
-   store read and the hold is kept, so none is lost. A wake that brings nothing to send holds on.
+   store read and the hold is kept, so none is lost. A wake that brings nothing to send holds on, except
+   for a host that polls dispatch: its start went out on the poll, so the wake ends the hold, and the reply
+   does not say `beat_now` (the agent beats again when its worker has news of the start).
 
 Submit to start on an idle host is then one poke, one pass, one store read and one reply, with no tick
 and no interval in it. What the poke adds to the time from the submit's commit to the placement is the
@@ -108,4 +117,5 @@ answered on it at once. The start's `running` rides on the heartbeat after it.
   heartbeat, sent at once, is served in full and answers `state-write-failed` if the store still fails.
 - **Reports during a hold.** A job's state change on the host reaches the server in the agent's next
   heartbeat, which leaves when the held reply returns: at most one hold later (200 ms for a beat that lists
-  a young start), as it was at most one interval later before.
+  a young start), as it was at most one interval later before. For a host that polls dispatch, a beat with
+  a start under way is answered at once unless another was answered less than 200 ms before.
