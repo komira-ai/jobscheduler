@@ -48,7 +48,10 @@
 //!   most a quarter of the most cores a host has; the cold CPU when none has a sample. A booking is a share of its
 //!   host's CPU, not a ceiling. Placement packs these bookings within the CPU slack and admits
 //!   by the host's measured load, so a job's bursts above its mean are the load's to judge,
-//!   not its booking's.
+//!   not its booking's, unless they are a heavy tail: a class whose runs' five-second peaks
+//!   (the 90th percentile of them, over at least five runs that reported one) are over twice
+//!   its median books that percentile instead, under the same quarter-host cap
+//!   (`docs/design/sizing.md`, 7.10), so a burst of its jobs spreads over the hosts.
 //!
 //! [`JobSizes::sized_from`] says which of these sized a job, and each placement of a job the
 //! history sized is logged with it.
@@ -107,9 +110,9 @@
 //!   CPU is a lower bound and may only raise its class's CPU: the history a server rebuilds
 //!   at its start from runs taken under a ceiling therefore never holds a class down at it;
 //! - its CPU sample is its mean, its CPU time over its wall time. The most cores its group used
-//!   over five seconds (`cpu_peak`, as its host reported it) is kept in its usage and not
-//!   booked: a peak booking held a host to a few jobs whose peaks fill it while their use
-//!   left most of it idle.
+//!   over five seconds (`cpu_peak`, as its host reported it) goes beside the sample, and books
+//!   its class only when the class's peaks are a heavy tail: a peak booking of every class held
+//!   a host to a few jobs whose peaks fill it while their use left most of it idle.
 //!
 //! # Profiles
 //!
@@ -601,10 +604,12 @@ fn run_of(job: &JobRecord, booked: Booked) -> Option<(Run, Day)> {
         cpu_held: result
             .usage
             .is_some_and(|usage| held(usage, (cpu, wall), cpu_millis)),
-        // The sample is the run's mean CPU, not its five-second peak (kept in its usage):
-        // placement admits by measured load, and a booking of the peak would hold a host to
-        // a few jobs that each use a fraction of it.
-        cpu_peak_millis: None,
+        // The sample is the run's mean CPU; its five-second peak goes beside it, and books
+        // its class only when the class's peaks are a heavy tail far above its median.
+        cpu_peak_millis: result
+            .usage
+            .and_then(|usage| usage.cpu_peak)
+            .map(|peak| u32::try_from(peak.millicores).unwrap_or(u32::MAX)),
     };
     Some((run, day_of_millis(millis(ended.as_duration()))))
 }
