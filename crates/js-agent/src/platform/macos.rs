@@ -15,8 +15,7 @@
 //! | `--native-account-range <first>-<last>` | the uids of the pool's slots, both included (`700-799` is 100 slots); no default; from 501 to 60000; nothing else on the Mac may use them; needs `--native-accounts` |
 //! | `--native-account-ready <n>` | how many accounts the pool keeps made and ready to lend; by default 1; at most the number of slots; needs `--native-accounts` |
 //! | `--native-homes <path>` | (macOS build only) the directory the accounts' homes are in; the pool makes them in `/Users`, so the only value is `/Users`, the default; needs `--native-accounts` |
-//! | `--native-network <level>` | (macOS build only) the most network a native job may ask for: `off` (the default), `loopback`, `on` or `open`; a job that asks for more is refused at start (`network-above-ceiling`), never run with less; a job's level maps onto these values (`none` is `off`, `allow-list` is `on`, `open` is `open`), and a job of the level `none`, like a native body that asks for `loopback`, gets loopback under every value but `off`, which gives it no network at all; loopback is shared by every run of the Mac, and the host's own services on it are denied by port (`--native-host-port` below); `on` needs the pf anchor of `js-mac-provision` (the `--native-pf-*` flags below): the agent does not start with `on` unless the anchor is enforced, and before every `allow-list` job it checks again and refuses the job (`egress-unchecked`) if it is not; `open` allows the network with no filter and needs no anchor: the scheduler, the cloud metadata address and the rest of the network are reachable from the job, and a `--native-pf-*` flag beside it stops the agent at start; a start that declares ports is refused (`ports-not-supported`); the hello reports the value as `egress` (`none` for `off` and `loopback`); needs `--native-accounts` |
-//! | `--native-host-port <port>` | (macOS build only) a port the host's own services hold on loopback, such as the tierstore node's file service and its S3 address; repeatable, from 1 to 65535, at most 64; every run whose profile reaches loopback is denied listening on it at any address and connecting to it on loopback, whether or not the service listens then (so no job takes the port while its service restarts); a run is also denied the port of every listener on loopback or a wildcard address that no slot account holds, as the agent lists them at the run's start; with a value of `--native-network` above `off` the agent reads those listeners at its own start and does not start when it cannot; needs `--native-accounts` |
+//! | `--native-network <level>` | (macOS build only) the most network a native job may ask for: `off` (the default), `loopback`, `on` or `open`; a job that asks for more is refused at start (`network-above-ceiling`), never run with less; a job's level maps onto these values (`none` is `off`, `allow-list` is `on`, `open` is `open`), and a job of the level `none`, like a native body that asks for `loopback`, gets loopback under every value but `off`, which gives it no network at all; loopback is shared by every run of the Mac and by the host's own services on it; `on` needs the pf anchor of `js-mac-provision` (the `--native-pf-*` flags below): the agent does not start with `on` unless the anchor is enforced, and before every `allow-list` job it checks again and refuses the job (`egress-unchecked`) if it is not; `open` allows the network with no filter and needs no anchor: the scheduler, the cloud metadata address and the rest of the network are reachable from the job, and a `--native-pf-*` flag beside it stops the agent at start; a start that declares ports is refused (`ports-not-supported`); the hello reports the value as `egress` (`none` for `off` and `loopback`); needs `--native-accounts` |
 //! | `--native-pf-uid-start <uid>`, `--native-pf-uid-count <n>` | (macOS build only) the uids whose egress the anchor limits; both required with `--native-network on`, refused otherwise (with `open` the agent does not start) |
 //! | `--native-pf-endpoint <ip:port>` | (macOS build only) an endpoint the pool may reach, as given to `js-mac-provision install --endpoint`; repeatable; needs `--native-network on` |
 //! | `--native-pf-anchor <name>`, `--native-pf-state-dir <path>`, `--native-pfctl <path>` | (macOS build only) the anchor (default `com.apple/com.komira.js.pool`), the provisioner's state directory (default `/var/db/com.komira.js-pf`) and the `pfctl` (default `/sbin/pfctl`); absolute paths; need `--native-network on` |
@@ -110,8 +109,7 @@ pub struct Flags {
     /// never run with less. A job's level maps onto these values: `none` is `off`,
     /// `allow-list` is `on`, `open` is `open`; a job of the level `none` gets loopback under
     /// every value but `off`, which gives it no network at all. Loopback is shared by every
-    /// run of the Mac; the host's services on it are denied by port (`--native-host-port`).
-    /// `on` is limited by the pf anchor of `js-mac-provision` (see
+    /// run of the Mac and by the host's own services on it. `on` is limited by the pf anchor of `js-mac-provision` (see
     /// `--native-pf-uid-start`): the agent does not start with `on` unless the anchor is in
     /// force, and refuses each `allow-list` job (`egress-unchecked`) while it is not. `open`
     /// allows the network with no filter and needs no anchor: it leaves the scheduler, the
@@ -120,11 +118,6 @@ pub struct Flags {
     /// as `egress` (`none` for `off` and `loopback`). Needs `--native-accounts`.
     #[arg(long, value_name = "off|loopback|on|open")]
     pub native_network: Option<String>,
-    /// A port the host's own services hold on loopback (repeatable, 1 to 65535, at most 64),
-    /// denied to every run that reaches loopback whether or not it is listened on, beside the
-    /// ports of the host's listeners found at the run's start. Needs `--native-accounts`.
-    #[arg(long = "native-host-port", value_name = "PORT")]
-    pub native_host_ports: Vec<u16>,
     /// A path no native run may read, in addition to the agent's own roots, its token,
     /// instance and CA files, `--native-accounts`, `/etc/kcpassword` and the places only the
     /// privacy controls guard; repeatable. It must exist. Needs `--native-accounts`.
@@ -210,7 +203,7 @@ impl Flags {
     /// (`--no-jobs`) refuses them all. A test walks the flags clap knows and fails when one is
     /// missing here.
     #[must_use]
-    pub fn given(&self) -> [(&'static str, bool); 21] {
+    pub fn given(&self) -> [(&'static str, bool); 20] {
         [
             ("--native-accounts", self.native_accounts.is_some()),
             (
@@ -223,7 +216,6 @@ impl Flags {
             ),
             ("--native-homes", self.native_homes.is_some()),
             ("--native-network", self.native_network.is_some()),
-            ("--native-host-port", !self.native_host_ports.is_empty()),
             ("--native-deny-read", !self.native_deny_read.is_empty()),
             ("--native-max-file-mib", self.native_max_file_mib.is_some()),
             (
@@ -253,7 +245,6 @@ impl Flags {
             account_ready: self.native_account_ready,
             homes: self.native_homes.as_deref(),
             network: self.native_network.as_deref(),
-            host_ports: &self.native_host_ports,
             tool_roots: &self.native_tool_roots,
             deny_read: &self.native_deny_read,
             max_file_mib: self.native_max_file_mib,

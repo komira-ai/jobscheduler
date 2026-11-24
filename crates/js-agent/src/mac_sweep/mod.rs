@@ -29,7 +29,7 @@
 
 mod decide;
 #[cfg(target_os = "macos")]
-pub(crate) mod macos;
+mod macos;
 mod table;
 #[cfg(test)]
 mod tests;

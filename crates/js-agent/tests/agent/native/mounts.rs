@@ -650,7 +650,6 @@ fn the_mount_roots_are_read_denies_of_every_run() {
         account_ready: None,
         homes: None,
         network: None,
-        host_ports: &[],
         tool_roots: &[],
         deny_read: &[],
         max_file_mib: None,

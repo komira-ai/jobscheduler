@@ -54,8 +54,7 @@ impl MacRig {
         let launcher = Arc::new(SystemLauncher::at(env!("CARGO_BIN_EXE_js-agent")));
         let rt = NativeRuntime::over(Some(pool), launcher, config, TERM)
             .unwrap()
-            .without_new_session()
-            .with_listener_table(super::no_listeners());
+            .without_new_session();
         Self { rt, dir, settings }
     }
 
@@ -568,8 +567,7 @@ fn the_supervisor_of_a_removed_run_is_reaped() {
     });
     let mut rt = NativeRuntime::over(Some(pool), launcher.clone(), config(&dir, &settings), TERM)
         .unwrap()
-        .without_new_session()
-        .with_listener_table(super::no_listeners());
+        .without_new_session();
     assert_eq!(rt.self_test(), Ok(()));
     let pids = launcher.pids.lock().unwrap().clone();
     assert_eq!(pids.len(), 1);

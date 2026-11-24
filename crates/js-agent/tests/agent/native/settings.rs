@@ -27,7 +27,6 @@ fn flags<'a>(network: Option<&'a str>, tool_roots: &'a [PathBuf]) -> NativeFlags
         account_ready: None,
         homes: None,
         network,
-        host_ports: &[],
         tool_roots,
         deny_read: &[],
         max_file_mib: None,
@@ -106,13 +105,6 @@ fn native_jobs_need_the_accounts_directory() {
                 ..bare()
             },
             "--native-network",
-        ),
-        (
-            NativeFlags {
-                host_ports: &[9300],
-                ..bare()
-            },
-            "--native-host-port",
         ),
         (
             NativeFlags {
@@ -775,38 +767,6 @@ fn the_check_the_flags_make_asks_the_pfctl_they_name() {
         verdict("/nonexistent/pfctl"),
         Err(ProvisionError::Run { .. })
     ));
-}
-
-/// Asserts that `--native-host-port` reaches the configuration as its ports, each once and
-/// lowest first, that no flag gives none, and that port 0 and more than 64 ports are refused
-/// naming the flag, by exact text. Catches a host port dropped between the flag and the
-/// profile, and a `*:0` deny that would reach every run.
-#[test]
-fn the_host_ports_are_checked_and_handed_on() {
-    let journal = Path::new("/srv/journal");
-    let with = |ports: &[u16]| {
-        let given = NativeFlags {
-            host_ports: ports,
-            ..flags(None, &[])
-        };
-        NativeSettings::from_flags(&given, &[], journal).map(|found| found.unwrap())
-    };
-    let none = with(&[]).unwrap();
-    assert!(none.config().host_ports.is_empty());
-    let given = with(&[12049, 9300, 12049]).unwrap();
-    let ports: Vec<u16> = given.config().host_ports.iter().copied().collect();
-    assert_eq!(ports, [9300, 12049]);
-    assert_eq!(
-        with(&[9300, 0]).unwrap_err(),
-        "--native-host-port: 0 is no port a service listens on"
-    );
-    let many: Vec<u16> = (1..=65).collect();
-    assert_eq!(
-        with(&many).unwrap_err(),
-        "--native-host-port: 65 ports, more than 64"
-    );
-    let most: Vec<u16> = (1..=64).collect();
-    assert_eq!(with(&most).unwrap().config().host_ports.len(), 64);
 }
 
 /// The settings of `network` with the pf flags `pf`.

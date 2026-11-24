@@ -233,7 +233,6 @@ fn settings(network: &str) -> NativeSettings {
         account_ready: None,
         homes: None,
         network: Some(network),
-        host_ports: &[],
         tool_roots: &[],
         deny_read: &[],
         max_file_mib: None,
@@ -305,9 +304,8 @@ fn the_runtime_asks_only_when_its_cap_is_on() {
     let asks = job_at("r1", NetworkLevel::On).native.unwrap();
     let mut cfg = config(&dir, &settings);
     cfg.egress = Some(check.clone());
-    let below = NativeRuntime::over(Some(pool.clone()), launcher.clone(), cfg.clone(), TERM)
-        .unwrap()
-        .with_listener_table(super::no_listeners());
+    let below =
+        NativeRuntime::over(Some(pool.clone()), launcher.clone(), cfg.clone(), TERM).unwrap();
     assert!(below.check_egress().is_ok());
     assert!(below.check_native_egress(&asks).is_ok());
     assert_eq!(check.calls(), 0);

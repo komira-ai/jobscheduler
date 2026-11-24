@@ -7,7 +7,7 @@
 //!
 //! | Job level | `--native-network` value | Needs |
 //! |---|---|---|
-//! | `none` | `off` | nothing: the sandbox allows loopback alone (the host's own ports denied), or no network under the ceiling `off` |
+//! | `none` | `off` | nothing: the sandbox allows loopback alone, or no network under the ceiling `off` |
 //! | `allow-list` | `on` | the pf anchor of the pool, checked before each job |
 //! | `open` | `open` | nothing: the sandbox allows the network, no filter rule |
 //!
@@ -34,8 +34,7 @@ use crate::egress::NetworkRefusal;
 /// packet filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NativeNet {
-    /// The job level `none`: loopback alone, with the host's own ports denied, or no network
-    /// under the ceiling `off`.
+    /// The job level `none`: loopback alone, or no network under the ceiling `off`.
     Off,
     /// The sandbox allows loopback only: what a native body that asks `loopback` gets. No job
     /// level maps to it.
@@ -79,7 +78,7 @@ pub enum Ceiling {
     #[default]
     Off,
     /// `loopback`: a job of the level `none`, and a native body that asks for `loopback`, use
-    /// loopback, which every run of the Mac shares; the host's own ports on it are denied.
+    /// loopback, which every run and every service of the Mac shares.
     Loopback,
     /// `on`: a job may use the network as the pool's pf anchor allows it; the agent needs the
     /// anchor in force (the `--native-pf-*` flags).

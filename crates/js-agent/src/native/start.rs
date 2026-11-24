@@ -249,9 +249,7 @@ impl NativeRuntime {
             .map(|rules| rules.mount_trees())
             .transpose()
             .map_err(|why| fail(&"the trees", &why))?;
-        let level = profile::level(&self.config, native.network, bundle_net);
-        let deny_ports = self.denied_ports(&level)?;
-        let net = profile::RunNet { level, deny_ports };
+        let net = profile::level(&self.config, native.network, bundle_net);
         let built = profile::build(&self.config, &net, &home, (&read_only, &grants), trees)?;
         self.mark(marks, STEPS[5]);
         // The job start's environment over the agent's (its values win), then the account's

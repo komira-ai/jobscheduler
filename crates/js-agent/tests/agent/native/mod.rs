@@ -20,7 +20,6 @@ pub(crate) mod fake_accounts;
 pub(crate) mod fake_launcher;
 mod files;
 mod grant;
-mod host_ports;
 mod inputs;
 mod job_home;
 mod journal;
@@ -58,22 +57,6 @@ use js_mac_pool::seatbelt::{AbsPath, ReadModel};
 use js_mac_session::full_disk_access::FullDiskAccess;
 
 pub use crate::support::Scratch;
-
-/// A host with no listener. The runs of these tests are the test user's, who cannot read other
-/// users' sockets; the agent, as root, can (the root tests of `mac_listen::macos`), and
-/// `host_ports.rs` gives a runtime a table with listeners to deny.
-pub fn no_listeners() -> Arc<dyn ListenerTable> {
-    Arc::new(Listening(Vec::new()))
-}
-
-/// A host whose listeners are these.
-pub struct Listening(pub Vec<Listener>);
-
-impl ListenerTable for Listening {
-    fn listeners(&self) -> std::io::Result<Vec<Listener>> {
-        Ok(self.0.clone())
-    }
-}
 pub use fake_accounts::FakeAccounts;
 pub use fake_launcher::{Failing, FakeLauncher, Launched};
 
@@ -153,7 +136,6 @@ pub fn config(dir: &Scratch, settings: &Settings) -> NativeConfig {
         },
         homes: settings.homes.clone(),
         network: Ceiling::Loopback,
-        host_ports: Default::default(),
         tool_roots: vec![PathBuf::from("/usr/bin"), PathBuf::from("/bin")],
         read_denies: vec![AbsPath::parse("/srv/js-state").unwrap()],
         mount_roots: Vec::new(),

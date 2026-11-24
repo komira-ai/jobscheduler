@@ -720,11 +720,7 @@ impl Machine for FakeMachine {
                     let Backend::Native(native) = build.backend;
                     let launcher = crate::native::fake_launcher::FakeLauncher::new();
                     let opened = NativeRuntime::open(launcher, native.config().clone(), 1);
-                    // The test's user cannot read other users' sockets (the agent, as root,
-                    // can): the host has no listener.
-                    let runtime = opened
-                        .map_err(|why| why.to_string())?
-                        .with_listener_table(crate::native::no_listeners());
+                    let runtime = opened.map_err(|why| why.to_string())?;
                     self.bundles_seen
                         .lock()
                         .unwrap()

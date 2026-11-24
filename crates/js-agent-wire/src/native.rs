@@ -42,8 +42,8 @@ pub const BUNDLE_ENTRYPOINT_MAX: usize = 64;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NetworkLevel {
-    /// The job level `none`. A Mac agent gives it loopback alone, with the host's own ports
-    /// denied, under every `--native-network` but `off`, and no network under `off`.
+    /// The job level `none`. A Mac agent gives it loopback alone under every
+    /// `--native-network` but `off`, and no network under `off`.
     #[default]
     Off,
     /// The loopback interface only.

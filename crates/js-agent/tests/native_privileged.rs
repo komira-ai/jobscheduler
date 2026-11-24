@@ -53,8 +53,8 @@ use serde_json::json;
 /// The variable naming the directory the tests work in.
 const ROOT: &str = "JS_NATIVE_PRIV_ROOT";
 
-// For real: a job on loopback with the host's ports denied, a run's output committed to the
-// put ingest, and the VM runtime.
+// For real: a job on loopback, a run's output committed to the put ingest, and the VM
+// runtime.
 #[path = "native_privileged/loopback.rs"]
 mod loopback;
 #[path = "native_privileged/put.rs"]
@@ -159,7 +159,6 @@ fn runtime_with(fixture: &Fixture, adjust: impl FnOnce(&mut NativeConfig)) -> Na
         },
         homes: fs::canonicalize(&fixture.homes).unwrap(),
         network: Ceiling::Off,
-        host_ports: Default::default(),
         tool_roots: vec![PathBuf::from("/usr/bin"), PathBuf::from("/bin")],
         read_denies: vec![
             denied(&fixture.state),
@@ -192,7 +191,6 @@ fn opened(state: &Path, journal: PathBuf, read_denies: Vec<AbsPath>) -> NativeCo
         },
         homes: PathBuf::from("/Users"),
         network: Ceiling::Off,
-        host_ports: Default::default(),
         tool_roots: vec![PathBuf::from("/usr/bin"), PathBuf::from("/bin")],
         read_denies,
         mount_roots: Vec::new(),

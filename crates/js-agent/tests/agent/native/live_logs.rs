@@ -404,8 +404,7 @@ fn an_earlier_run_listed_ended_goes_on_from_the_record_without_a_gap_or_a_repeat
     let pool = open_pool(&kept, &settings, &accounts);
     let mut again = NativeRuntime::over(Some(pool), launcher, config(&kept, &settings), TERM + 1)
         .unwrap()
-        .with_live_logs(live.logs.clone())
-        .with_listener_table(super::no_listeners());
+        .with_live_logs(live.logs.clone());
     assert!(
         again.reclaim().is_empty(),
         "the run has a record: listed, not dropped"

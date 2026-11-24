@@ -64,13 +64,12 @@ pub const LINUX_ONLY: [&str; 32] = [
 /// The flags only a macOS build has (its [`Flags`] there), without the leading `--`. A Linux
 /// build refuses each by name; a test of the macOS build holds the list to the flags clap
 /// knows there.
-pub const MACOS_ONLY: [&str; 21] = [
+pub const MACOS_ONLY: [&str; 20] = [
     "native-accounts",
     "native-account-range",
     "native-account-ready",
     "native-homes",
     "native-network",
-    "native-host-port",
     "native-deny-read",
     "native-max-file-mib",
     "native-max-processes",

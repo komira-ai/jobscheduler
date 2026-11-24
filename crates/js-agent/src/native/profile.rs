@@ -58,15 +58,6 @@ pub(super) fn run_dir(home: &Path) -> PathBuf {
     home.join(RUN_DIR)
 }
 
-/// The network of a run's profile: its level ([`level`]) and the ports it is denied, the host's
-/// own (`NativeRuntime::denied_ports`).
-pub(super) struct RunNet {
-    /// The level.
-    pub level: Net,
-    /// The ports of the host's services, denied at every level but [`Net::Off`].
-    pub deny_ports: Vec<u16>,
-}
-
 /// The level of a run's profile: what its start asks ([`net_of`]), met with the agent's
 /// ceiling and, for a run that pins a bundle, with the bundle's `network_max`. A job of the
 /// level `none` gets loopback under every ceiling but `off`, which leaves it no network.
@@ -78,7 +69,7 @@ pub(super) fn level(config: &NativeConfig, asked: NetworkLevel, bundle: Option<N
     }
 }
 
-/// The profile of a run at `net` under the policy of `config`, run as an account whose home is
+/// The profile of a run at the level `net` ([`level`]) under the policy of `config`, run as an account whose home is
 /// `home`: writes are granted to the run directory (`<home>/exec`) and to the grants in
 /// `mounts` (the run's job mounts and its account's own per-user temporary and cache folders),
 /// and nowhere else, `read_only` (the run's files directory, the `dest`
@@ -98,7 +89,7 @@ pub(super) fn level(config: &NativeConfig, asked: NetworkLevel, bundle: Option<N
 /// cannot be built.
 pub(super) fn build(
     config: &NativeConfig,
-    net: &RunNet,
+    net: &Net,
     home: &Path,
     (read_only, mounts): (&[(&str, PathBuf)], &[MountGrant]),
     trees: Option<MountTrees>,
@@ -129,7 +120,7 @@ pub(super) fn build(
         read_denies: config.read_denies.clone(),
         mounts: mounts.to_vec(),
     };
-    // The policy never grants more than the ceiling: `net.level` was met with it already
+    // The policy never grants more than the ceiling: `net` was met with it already
     // ([`level`]), so the cap lowers nothing here; it is a defence in depth.
     let caps = Caps {
         net: config.network.net(),
@@ -140,9 +131,8 @@ pub(super) fn build(
         .map(|root| AbsPath::new(root).map_err(|why| fail(&root.display(), &why)))
         .collect::<Result<Vec<AbsPath>, RuntimeError>>()?;
     let narrowing = Narrowing {
-        net: Some(net.level.clone()),
+        net: Some(net.clone()),
         deny_homes,
-        deny_ports: net.deny_ports.clone(),
         ..Narrowing::default()
     };
     let policy = Policy::base(layout, caps)

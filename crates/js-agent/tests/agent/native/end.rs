@@ -310,8 +310,7 @@ fn runtime(rig: Rig, now: &Arc<AtomicU64>, table: Arc<Recording>) -> (Rig, Nativ
     )
     .unwrap()
     .with_clock(Arc::new(move || clock.load(Ordering::Relaxed)))
-    .with_process_table(table)
-    .with_listener_table(super::no_listeners());
+    .with_process_table(table);
     (rig, rt)
 }
 

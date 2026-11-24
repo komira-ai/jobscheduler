@@ -21,11 +21,6 @@ pub enum Child {
         /// The address.
         addr: SocketAddr,
     },
-    /// Listen on a TCP address (port 0 is any free port).
-    Listen {
-        /// The address.
-        addr: SocketAddr,
-    },
     /// Resolve a name through the system resolver, printing the addresses.
     Resolve {
         /// The host name.
@@ -55,7 +50,6 @@ pub fn run(child: &Child) -> ExitCode {
         Child::Connect { addr } => {
             std::net::TcpStream::connect_timeout(addr, CONNECT_LIMIT).map(|_| String::new())
         }
-        Child::Listen { addr } => std::net::TcpListener::bind(addr).map(|_| String::new()),
         Child::Resolve { host } => resolve(host),
         Child::Read { path } => read_text(path),
         Child::Env { name } => Ok(env_text(name)),
@@ -100,18 +94,6 @@ mod tests {
 
     fn scratch(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("js-mac-probe-{}-{name}", std::process::id()))
-    }
-
-    /// Asserts that the listen mode succeeds on a free loopback port and fails on one a
-    /// listener of this test holds. Catches a mode that reports a listen it did not make.
-    #[test]
-    fn listen_succeeds_on_a_free_port_and_fails_on_a_taken_one() {
-        let free: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        assert_eq!(run(&Child::Listen { addr: free }), ExitCode::SUCCESS);
-        let taken = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = taken.local_addr().unwrap();
-        assert_eq!(run(&Child::Listen { addr }), ExitCode::FAILURE);
-        drop(taken);
     }
 
     #[test]

@@ -1,7 +1,6 @@
 //! The profile of a native run: where it lets a job write, and that the places only the
 //! privacy controls guard stay denied.
 
-use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use js_mac_pool::seatbelt::{AbsPath, MountGrant, Net, ReadModel};
@@ -30,7 +29,6 @@ fn config() -> NativeConfig {
         },
         homes: PathBuf::from("/srv/homes"),
         network: Ceiling::Loopback,
-        host_ports: BTreeSet::new(),
         tool_roots: vec![PathBuf::from("/usr/bin")],
         read_denies,
         mount_roots: Vec::new(),
@@ -43,12 +41,9 @@ fn config() -> NativeConfig {
     }
 }
 
-/// The network of a run of the level `none` under [`config`]'s ceiling, with no host port.
-fn none() -> RunNet {
-    RunNet {
-        level: level(&config(), NetworkLevel::Off, None),
-        deny_ports: Vec::new(),
-    }
+/// The network of a run of the level `none` under [`config`]'s ceiling.
+fn none() -> Net {
+    level(&config(), NetworkLevel::Off, None)
 }
 
 /// A read-write mount grant of `path`.
@@ -329,38 +324,4 @@ fn a_none_job_gets_loopback_under_every_ceiling_but_off() {
         at(Ceiling::Open, NetworkLevel::Open, Some(Net::Loopback)),
         Net::Loopback
     );
-}
-
-/// Asserts that a run's denied ports reach its profile as a bind deny at any address and a
-/// connect deny on loopback, after the loopback grants, and that a run with no network names
-/// none. Catches the agent's host ports dropped between the runtime and the profile.
-#[test]
-fn the_denied_ports_reach_the_profile() {
-    let home = Path::new("/srv/homes/kbf-acct-1");
-    let net = RunNet {
-        level: Net::Loopback,
-        deny_ports: vec![9300, 12049],
-    };
-    let profile = build(&config(), &net, home, (&[], &[]), None).unwrap();
-    let text = profile.text();
-    let grant = text
-        .find("(allow network* (remote ip \"localhost:*\"))")
-        .expect("the loopback grant");
-    for port in [9300, 12049] {
-        for rule in [
-            format!("(deny network* (local ip \"*:{port}\"))"),
-            format!("(deny network* (remote ip \"localhost:{port}\"))"),
-        ] {
-            let at = text
-                .find(&rule)
-                .unwrap_or_else(|| panic!("{rule}:\n{text}"));
-            assert!(at > grant, "{rule} after the grant");
-        }
-    }
-    let off = RunNet {
-        level: Net::Off,
-        deny_ports: vec![9300],
-    };
-    let profile = build(&config(), &off, home, (&[], &[]), None).unwrap();
-    assert!(!profile.text().contains("9300"), "{}", profile.text());
 }
