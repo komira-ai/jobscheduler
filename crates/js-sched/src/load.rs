@@ -153,7 +153,7 @@ pub const MAX_BALANCE: u32 = 4;
 /// The largest `--placement-pack-limit`, in thousandths of a worker's capacity: 1.0x.
 pub const MAX_PACK_LIMIT_PERMILLE: u32 = 1000;
 
-/// The default `--placement-pack-limit`, in thousandths of a worker's capacity: 0.8x.
+/// The default `--placement-pack-limit`, in thousandths of a worker's capacity: 0.5x.
 pub const DEFAULT_PACK_LIMIT_PERMILLE: u32 = 500;
 
 /// A charge or a load at one slot: CPU in millicores, memory in bytes.
