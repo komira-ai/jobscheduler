@@ -9,7 +9,8 @@ publish.workspace = true
 
 # `js-cpu-replay`: replays the job service's recorded jobs against rules for packing CPU on a
 # host (docs/design/cpu-over-time.md). `convert` turns an export of job records into an
-# anonymised trace; `run` replays a trace and prints the report.
+# anonymised trace; `run` replays a trace and prints the report; `shadow` prints the
+# per-class table of the server's shadow check lines.
 [[bin]]
 name = "js-cpu-replay"
 path = "src/main.rs"
