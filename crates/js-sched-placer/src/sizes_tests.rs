@@ -942,3 +942,6 @@ mod follows_use;
 
 #[path = "sizes_memory_series_tests.rs"]
 mod memory_series;
+
+#[path = "sizes_burst_tests.rs"]
+mod burst;

@@ -13,7 +13,8 @@ with no CPU limit). **MEASURED**, counted from the export or the farm's metrics,
 
 ### The problem, in five lines
 1. A job's CPU booking is the median of its class's last 32 runs' mean CPU (CPU time over wall time,
-   komira-ai/jobscheduler#1026). A class is a job type, for example the compile of one target. MEASURED in the first
+   komira-ai/jobscheduler#1026); a class whose five-second peaks are a heavy tail books the 90th percentile of those
+   peaks instead (`sizing.md`, 7.10). A class is a job type, for example the compile of one target. MEASURED in the first
    8 minutes after the change, against the hour before: jobs per host 3 to 4 became 30 to 36; hosts about 20% busy
    became about 99%; jobs finished per minute 58 became 128; median queue wait 15 min became 4 min; median run time
    32 s became 65 s; load average on an 88-thread host 13 to 26 became 250 to 330.
@@ -348,6 +349,7 @@ against 1,322 s recorded after the first hour (REPLAY). The time from placement 
 |---|---|---|---|---|---|
 | as deployed, no readings, 1.1 | 65.4 | 355.5 | 18.4% | 17.8% | 9,199 |
 | today: median, 1.1 | 65.1 | 351.3 | 15.7% | 19.7% | 9,192 |
+| heavy tail p90, 1.1 (`sizing.md`, 7.10) | 65.1 | 351.3 | 15.7% | 19.7% | 9,192 |
 | median, 1.0 | 66.9 | 494.6 | 10.4% | 3.3% | 9,152 |
 | median, 0.9 | 68.7 | 740.4 | 5.5% | 2.3% | 8,481 |
 | decayed mean (12 h), 1.1 | 64.8 | 339.5 | 13.1% | 21.6% | 9,195 |
@@ -360,6 +362,9 @@ against 1,322 s recorded after the first hour (REPLAY). The time from placement 
 | perfect curve, 1.1 | 58.7 | 347.9 | 1.7% | 4.9% | 9,217 |
 
 What to read from the table:
+- **The heavy-tail row equals today's median:** the window's records carry no five-second peak, so no class has a tail
+  to book. `farm.report.md` also gives, per row, the most CPU booked on a host at once, the Gini coefficient of the
+  jobs placed per host and the core-seconds the hosts were asked for past their cores.
 - **At the recorded speed only the perfect curve clearly wins:** 8.6% less total time. Lower limits and higher
   quantiles cut slowdown but add more wait than they save.
 - **At saturation the model rewards overcommit:** its sharing loses no CPU, so the cost of overcommit beyond
