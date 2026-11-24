@@ -15,6 +15,16 @@ use js_sched::{Event, LoadConfig, Prediction};
 use load_rig::{GIB, Rig, cold, w, warm};
 use support_score_z_ad::{hold, host, on, place};
 
+/// The default configuration with the pack limit lifted to 1.0x. Sim z is about key 1
+/// against key 5 and the memory keys, with hosts filled to 100%; under the default
+/// limit (0.8x) a host is packed only to 80%, which the sibling tests below pin.
+fn unpacked() -> LoadConfig {
+    LoadConfig {
+        pack_limit_permille: 1_000,
+        ..LoadConfig::default()
+    }
+}
+
 /// A flat 4-core lease with no memory of note.
 fn four_cores() -> Prediction {
     warm(4_000, 0)
@@ -22,7 +32,7 @@ fn four_cores() -> Prediction {
 
 /// `A` holds 40 cores flat (one lease), `B` is empty; hosts of 88 threads.
 fn rig_with_forty_on_a() -> Rig {
-    rig_with_forty_on_a_at(LoadConfig::default())
+    rig_with_forty_on_a_at(unpacked())
 }
 
 /// [`rig_with_forty_on_a`] with the placement settings `cfg`.
@@ -34,8 +44,8 @@ fn rig_with_forty_on_a_at(cfg: LoadConfig) -> Rig {
     r
 }
 
-/// Key 5 and key 1: the first 12 four-core leases go to `A` (88 cores: best fit toward
-/// 100%), the 13th goes to `B` and not into `A`'s 10% slack (92 cores, 4.5% above `tol`),
+/// Key 5 and key 1, with the pack limit lifted to 1.0x: the first 12 four-core leases go
+/// to `A` (88 cores: best fit toward 100%), the 13th goes to `B` and not into `A`'s 10% slack (92 cores, 4.5% above `tol`),
 /// and the leases after it stay on `B`, which still has room inside 100%.
 #[test]
 fn twelve_leases_fill_a_to_100_percent_and_the_13th_opens_b() {
@@ -59,6 +69,26 @@ fn twelve_leases_fill_a_to_100_percent_and_the_13th_opens_b() {
 
 /// Key 1 is what keeps the 13th out of `A`'s slack: the predicate admits it there. With
 /// `B` cordoned for the round, `A` is the only host left and takes the 13th at 92 cores.
+/// Behaviour: under the default pack limit (0.8x of 88 cores is 70.4) `A` is packed only
+/// to the limit: it holds 40 cores and takes seven leases (68 cores), the 8th would book
+/// 72 and is past the limit, so it opens `B`, and the leases after it stay on `B`, which
+/// is within the limit, not on `A`, which is past it. `A` ends at 68 of 88 cores, `B` at
+/// 36 (nine leases).
+/// Catches: a host packed past the pack limit while another host is within it.
+#[test]
+fn under_the_default_limit_seven_leases_fill_a_to_80_percent_and_the_8th_opens_b() {
+    let mut r = rig_with_forty_on_a_at(LoadConfig::default());
+    for n in 1..=7 {
+        assert_eq!(place(&mut r, four_cores()), "A", "lease {n} fills A");
+    }
+    assert_eq!(r.s.load_view(&w("A")).unwrap().left_cpu_millis, 68_000);
+    for n in 8..=16 {
+        assert_eq!(place(&mut r, four_cores()), "B", "lease {n} opens B");
+    }
+    assert_eq!(r.s.load_view(&w("A")).unwrap().left_cpu_millis, 68_000);
+    assert_eq!(r.s.load_view(&w("B")).unwrap().left_cpu_millis, 36_000);
+}
+
 #[test]
 fn the_predicate_admits_the_13th_lease_into_as_slack() {
     let mut r = rig_with_forty_on_a();
@@ -69,18 +99,20 @@ fn the_predicate_admits_the_13th_lease_into_as_slack() {
     assert_eq!(r.s.load_view(&w("A")).unwrap().left_cpu_millis, 92_000);
 }
 
-/// Catches: the 13th lease kept off `A` by something other than key 1: with the slack
-/// tolerance raised to 5%, `A` at 92 of 88 cores (4.5% over) is inside it, so key 1 no
-/// longer separates the hosts and key 5, the tighter fit, takes the 13th to `A`.
+/// With the slack tolerance raised to 5%, `A` at 92 of 88 cores (4.5% over) is inside it,
+/// so key 1 no longer separates the hosts. Before the pack limit, key 5 (the tighter fit)
+/// then took the 13th to `A`; now `A` with the lease booked is past the limit (even at
+/// 1.0x it books 1.045), `B` is within it, so the 13th goes to `B` by the pack limit
+/// and no lease is placed in a slack zone.
 #[test]
-fn with_as_overshoot_inside_the_tolerance_the_13th_goes_to_a() {
+fn with_as_overshoot_inside_the_tolerance_the_pack_limit_still_takes_the_13th_to_b() {
     let mut r = rig_with_forty_on_a_at(LoadConfig {
         score_slack_tol_ppm: 50_000,
-        ..LoadConfig::default()
+        ..unpacked()
     });
     hold(&mut r, "A", &["B"], 12, four_cores());
-    assert_eq!(place(&mut r, four_cores()), "A");
-    assert_eq!(r.s.load_view(&w("A")).unwrap().left_cpu_millis, 92_000);
+    assert_eq!(place(&mut r, four_cores()), "B");
+    assert_eq!(r.s.load_view(&w("A")).unwrap().left_cpu_millis, 88_000);
     assert_eq!(
         r.s.load_counters().chose_slack,
         0,
@@ -92,7 +124,7 @@ fn with_as_overshoot_inside_the_tolerance_the_13th_goes_to_a() {
 /// memory, one 76-core lease each, so that CPU (80 cores with the new lease) leaves
 /// about as much unused as memory does and the fit is decided by the memory leftover.
 fn memory_pair(a_gib: u64, b_gib: u64) -> Rig {
-    let mut r = Rig::on();
+    let mut r = Rig::new(unpacked());
     r.up("A", host(100));
     r.up("B", host(100));
     hold(&mut r, "A", &["B"], 1, warm(76_000, a_gib * GIB));
@@ -145,7 +177,7 @@ fn cold_leases_spread_over_the_hosts_with_room_before_any_packs() {
 #[test]
 fn a_cold_lease_is_held_to_the_larger_miss() {
     let go = |hint: Prediction| {
-        let mut r = Rig::on();
+        let mut r = Rig::new(unpacked());
         for name in ["A", "B", "C"] {
             r.up(name, host(20));
         }

@@ -51,12 +51,12 @@ fn f_a_burst_in_one_round_is_admitted_up_to_the_headroom_and_spread() {
         }
         let mut per: Vec<usize> = ["n0", "n1", "n2"].map(|n| w.running_on(n)).to_vec();
         if first == 12 {
-            // Best fit: the first worker fills to its 8 cores, the second takes the rest,
-            // whichever workers the score picks.
+            // A worker is packed only to the pack limit (6 of 8 cores booked), then the
+            // least full takes the next: 6 and 6, whichever workers the score picks.
             per.sort_unstable_by(|a, b| b.cmp(a));
             assert_eq!(
                 per,
-                [8, 4, 0],
+                [6, 6, 0],
                 "placed by the score, not above the headroom"
             );
         } else {

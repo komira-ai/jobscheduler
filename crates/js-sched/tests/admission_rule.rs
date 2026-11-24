@@ -621,9 +621,9 @@ fn a_retry_up_the_ladder_is_charged_at_the_rung() {
 
 /// Where a lease charged 16 GiB goes: `a` (64 GiB) already holds 40 GiB, `b` (128 GiB) is
 /// empty. With `retry` the lease is the rerun of one that ran out of memory; without, it
-/// is a first run predicted at 16 GiB.
-fn where_16_gib_goes(retry: bool) -> String {
-    let mut r = Rig::on();
+/// is a first run predicted at 16 GiB. `config` is the load configuration of the rig.
+fn where_16_gib_goes(retry: bool, config: LoadConfig) -> String {
+    let mut r = Rig::new(config);
     r.up("a", Resources::new(8_000, 64 * GIB));
     r.up("b", Resources::new(8_000, 128 * GIB));
     r.feed(js_sched::Event::Cordon { worker: w("b") });
@@ -650,8 +650,24 @@ fn where_16_gib_goes(retry: bool) -> String {
 /// `b`, while a first run of the same 16 GiB goes to `a`, the better fit.
 #[test]
 fn a_retry_is_scored_with_the_cold_miss_factor() {
-    assert_eq!(where_16_gib_goes(false), "a");
-    assert_eq!(where_16_gib_goes(true), "b");
+    // The pack limit is lifted to 1.0x: this test is about key 2 (the miss factor), and
+    // `a` with the lease booked is at 0.875 of its memory, past the default 0.8.
+    let config = || LoadConfig {
+        pack_limit_permille: 1_000,
+        ..LoadConfig::default()
+    };
+    assert_eq!(where_16_gib_goes(false, config()), "a");
+    assert_eq!(where_16_gib_goes(true, config()), "b");
+}
+
+/// Behaviour: under the default pack limit (0.8x) the same first run of 16 GiB does not
+/// go to `a`: `a` holds 40 of 64 GiB booked, 56 with the lease is 0.875, past the limit,
+/// while the empty `b` stays within it, so the lease goes to `b`, as the rerun does.
+/// Catches: a host packed past the pack limit while another is within it.
+#[test]
+fn a_first_run_that_would_pack_a_host_past_the_limit_goes_to_the_empty_one() {
+    assert_eq!(where_16_gib_goes(false, LoadConfig::default()), "b");
+    assert_eq!(where_16_gib_goes(true, LoadConfig::default()), "b");
 }
 
 /// Catches: a VM's booked cost left out of the sums (it runs outside the measured
