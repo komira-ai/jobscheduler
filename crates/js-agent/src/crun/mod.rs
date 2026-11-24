@@ -263,8 +263,8 @@ use tokio::runtime::{Builder, Runtime as TokioRuntime};
 use crate::cli_runtime::container_name;
 use crate::host_ports::Forwarder;
 use crate::lifecycle::{
-    Created, Exit, FilesRoot, Found, FsPrepared, JobFs, Prefetcher, Prepared, Removal, RunHandle,
-    RunSpec, Runtime, RuntimeError, Status, Ticket, Wake, Whereabouts,
+    Created, Exit, FilesRoot, Found, FsPrepared, JobFs, LookupStamps, Prefetcher, Prepared,
+    Removal, RunHandle, RunSpec, Runtime, RuntimeError, Status, Ticket, Wake, Whereabouts,
 };
 use crate::logs::{LiveLogs, RunLogs};
 use ledger::{Entry, Ledger};
@@ -324,6 +324,9 @@ struct Run {
     fs: Option<rootfs::RunFs>,
     /// The steps of its start, until [`Runtime::start_steps`] takes them.
     marks: make::Marks,
+    /// The stamps of the lookup of a host path its start waited on, until
+    /// [`Runtime::lookup_stamps`] takes them; none without host paths.
+    lookup: Option<LookupStamps>,
     /// Its CPU over time, for its peak: sampled from its start (or, for an adopted run, from
     /// its first poll) each time it is polled ([`peak::PeakWindow`]).
     peak: peak::PeakWindow,
@@ -500,7 +503,10 @@ impl CrunRuntime {
             ledger,
             swept: SweepReport::default(),
             logs: None,
-            fs: settings.fs.map(fs::Fs::open).transpose()?,
+            fs: settings
+                .fs
+                .map(|fs| fs::Fs::open(fs).map(|fs| fs.with_clock(Arc::new(hooks.now_ms))))
+                .transpose()?,
             creates: create::Creates::new()?,
             removals: remove::Removals::new()?,
         };
@@ -666,6 +672,10 @@ impl Runtime for CrunRuntime {
         let run = self.runs.get_mut(&id.0);
         run.map(|run| std::mem::take(&mut run.marks))
             .unwrap_or_default()
+    }
+
+    fn lookup_stamps(&mut self, id: &RunHandle) -> Option<LookupStamps> {
+        self.runs.get_mut(&id.0)?.lookup.take()
     }
 
     fn create_and_start(&mut self, spec: &RunSpec) -> Result<RunHandle, RuntimeError> {

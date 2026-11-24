@@ -49,7 +49,8 @@ use super::{CgroupSettings, CrunRuntime, EgressPort, Hooks, Run, State, gpu, net
 use crate::cli_runtime::container_name;
 use crate::host_ports::Forwarder;
 use crate::lifecycle::{
-    Body, Created, FilesRoot, Forgetter, RunHandle, RunSpec, RuntimeError, check_run_env, label,
+    Body, Created, FilesRoot, Forgetter, LookupStamps, RunHandle, RunSpec, RuntimeError,
+    check_run_env, label,
 };
 use crate::logs::{LiveLogs, RunLogs};
 use crate::pool::{Pending, Poll, Pool};
@@ -134,6 +135,9 @@ pub(super) struct Head {
     image: PinnedImage,
     gpu: gpu::Wiring,
     assembled: Option<Assembled>,
+    /// The stamps of the lookup of a host path the start waited on, for
+    /// [`Runtime::lookup_stamps`](crate::lifecycle::Runtime::lookup_stamps).
+    lookup: Option<LookupStamps>,
     labels: BTreeMap<String, String>,
     entry: Entry,
     marks: Marks,
@@ -277,7 +281,10 @@ impl CrunRuntime {
         }
         // What the run's assembly made of its layers and mounts: the run's removal unmounts
         // it, or, for a run that is not made, the lifecycle's discard (`Runtime::discard_fs`).
-        let assembled = self.fs.as_mut().and_then(|fs| fs.take(&spec.run_id));
+        let (assembled, lookup) = match self.fs.as_mut().and_then(|fs| fs.take(&spec.run_id)) {
+            Some((made, lookup)) => (Some(made), lookup),
+            None => (None, None),
+        };
         // A root of layers alone has no image.
         let image = match given.is_empty() {
             true => PinnedImage {
@@ -310,6 +317,7 @@ impl CrunRuntime {
             image,
             gpu,
             assembled,
+            lookup,
             labels,
             entry,
             marks: vec![("begin", now)],
@@ -375,6 +383,7 @@ impl Maker {
             image,
             gpu,
             assembled,
+            lookup,
             labels,
             entry,
             mut marks,
@@ -413,6 +422,7 @@ impl Maker {
             logs: RunLogs::asked(self.logs.as_ref(), spec.log_sink.as_ref()),
             fs: assembled.map(|made| rootfs::RunFs::new(made.sources)),
             marks,
+            lookup,
             peak: super::peak::PeakWindow::default(),
             // Started with the container (`start`).
             series: None,
