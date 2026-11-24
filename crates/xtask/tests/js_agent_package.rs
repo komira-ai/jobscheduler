@@ -451,7 +451,7 @@ fn run_lines(text: &str) -> Vec<String> {
 }
 
 /// The commands the workflow may run, each a prefix of a whole `run:` line.
-const ALLOWED_RUNS: [&str; 9] = [
+const ALLOWED_RUNS: [&str; 12] = [
     "rustup toolchain install",
     "cargo xtask debs --pins .github/debs/musl-tools.toml --dir \"$RUNNER_TEMP/debs/musl-tools\"",
     "sudo dpkg --install \"$RUNNER_TEMP\"/debs/musl-tools/*.deb",
@@ -461,9 +461,13 @@ const ALLOWED_RUNS: [&str; 9] = [
     "cargo xtask release deb --binary \"target/$TARGET/release/js-agent\" --version \"$VERSION\" --platform linux-x86_64 --out dist",
     "dpkg-deb --info \"dist/js-agent_${VERSION}_amd64.deb\"",
     "dpkg-deb --contents \"dist/js-agent_${VERSION}_amd64.deb\"",
+    "sudo dpkg-deb --extract \"dist/js-agent_${VERSION}_amd64.deb\" \"$RUNNER_TEMP/deb-root\"",
+    "sudo systemd-tmpfiles --create --root \"$RUNNER_TEMP/deb-root\"",
+    "stat --format \"%a %U:%G %n\" \"$RUNNER_TEMP/deb-root/",
 ];
 
-/// The workflow builds the agent, packages it, shows the package and uploads it as a workflow
+/// The workflow builds the agent, packages it, shows the package, makes the directories of its
+/// tmpfiles.d files in an empty root it unpacked the package into, and uploads it as a workflow
 /// artifact, and does nothing else with the .deb: no write scope on the repository, packages or
 /// releases, no signing or verification (the release does those in artifacts.yml), no action but
 /// these four pinned by commit (the cache's two hold the pinned musl-tools packages), and only

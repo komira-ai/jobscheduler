@@ -1,5 +1,6 @@
 //! The js-agent .deb: its bytes, its control file and its refusals.
 
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -308,6 +309,124 @@ fn the_data_archive_holds_the_nine_files_and_their_directories() {
     assert_eq!(
         content("./usr/share/doc/js-agent/copyright"),
         std::fs::read(repo_root().join("LICENSE")).ok()
+    );
+}
+
+/// What one line of a tmpfiles.d file declares for its path: the file it is in, its type and its
+/// mode (`-` when the line has none).
+type Declared = (String, String, String);
+
+/// The directories systemd-tmpfiles reads its configuration from, as paths in the data archive.
+const TMPFILES_DIRS: [&str; 4] = [
+    "./etc/tmpfiles.d/",
+    "./run/tmpfiles.d/",
+    "./usr/local/lib/tmpfiles.d/",
+    "./usr/lib/tmpfiles.d/",
+];
+
+/// For each path a line of a tmpfiles.d file among `files` (path in the archive, text) names, what
+/// every such line declares, in the order of `files` and of their lines. Comments, blank lines and
+/// files outside [`TMPFILES_DIRS`] declare nothing.
+fn declarations(files: &[(&str, &str)]) -> BTreeMap<String, Vec<Declared>> {
+    let mut found: BTreeMap<String, Vec<Declared>> = BTreeMap::new();
+    for (file, text) in files {
+        if !TMPFILES_DIRS.iter().any(|dir| file.starts_with(dir)) {
+            continue;
+        }
+        for line in text
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            found.entry(fields[1].to_owned()).or_default().push((
+                (*file).to_owned(),
+                fields[0].to_owned(),
+                fields.get(2).copied().unwrap_or("-").to_owned(),
+            ));
+        }
+    }
+    found
+}
+
+/// Asserts that the package's tmpfiles.d files declare each path once, and that the one
+/// declaration is the crun unit's (`js-agent-crun.conf`): `/var/lib/js-agent`, the scratch mount and
+/// its runs directory 0711 (the job's ids walk down through them), `/etc/js-agent` and the state
+/// root 0700. systemd-tmpfiles applies the first line it reads for a path and ignores the others
+/// ("Duplicate line"), so a path two files declare gets whichever mode sorts first.
+///
+/// Catches komira-ai/jobscheduler#1013: a package with a second tmpfiles.d file that declares
+/// `/var/lib/js-agent` and its scratch mount 0700, which a fresh host applied, so the crun unit
+/// refused to start ("/var/lib/js-agent/scratch is not searchable by the job user").
+#[test]
+fn each_path_of_the_packages_tmpfiles_files_is_declared_once_with_the_crun_modes() {
+    let members = read_ar(&package(&binary(false), Platform::LinuxX86_64));
+    let texts: Vec<(String, String)> = read_tar_gz(&members[2].content)
+        .into_iter()
+        .filter(|e| !e.directory)
+        .map(|e| (e.path, String::from_utf8_lossy(&e.content).into_owned()))
+        .collect();
+    let files: Vec<(&str, &str)> = texts
+        .iter()
+        .map(|(path, text)| (path.as_str(), text.as_str()))
+        .collect();
+    let declared = declarations(&files);
+    let twice: Vec<String> = declared
+        .iter()
+        .filter(|(_, lines)| lines.len() > 1)
+        .map(|(path, lines)| format!("{path} is declared {} times: {lines:?}", lines.len()))
+        .collect();
+    assert_eq!(twice, Vec::<String>::new());
+    let file = "./usr/lib/tmpfiles.d/js-agent-crun.conf";
+    let want: BTreeMap<String, Vec<Declared>> = [
+        ("/etc/js-agent", "0700"),
+        ("/var/lib/js-agent", "0711"),
+        ("/var/lib/js-agent/scratch", "0711"),
+        ("/var/lib/js-agent/scratch/runs", "0711"),
+        ("/var/lib/js-agent/state", "0700"),
+    ]
+    .into_iter()
+    .map(|(path, mode)| {
+        (
+            path.to_owned(),
+            vec![(file.to_owned(), "d".to_owned(), mode.to_owned())],
+        )
+    })
+    .collect();
+    assert_eq!(declared, want);
+}
+
+/// Asserts what the test above counts: every line of a file in any directory systemd-tmpfiles
+/// reads, by its path, so two files that declare one path are both listed, with different modes
+/// or the same, and a line of any type (`L` included, whose mode is `-`); and nothing from a
+/// comment, a blank line, or a file elsewhere in the package.
+#[test]
+fn every_line_of_every_tmpfiles_directory_is_counted_and_nothing_else() {
+    let (usr, etc) = ("./usr/lib/tmpfiles.d/a.conf", "./etc/tmpfiles.d/b.conf");
+    let first = "# d /commented 0700 root root -\n\nd /x 0700 root root -\nd /y 0711 root root -\n";
+    let second = "d /x 0711 root root -\n  d /y 0711 root root -\nL /z - - - - /usr/bin\n";
+    let elsewhere = "d /x 0700 root root -\nd /w 0700 root root -\n";
+    let declared = declarations(&[
+        (usr, first),
+        (etc, second),
+        ("./usr/share/js-agent/tmpfiles.conf", elsewhere),
+    ]);
+    let line = |file: &str, kind: &str, mode: &str| -> Declared {
+        (file.to_owned(), kind.to_owned(), mode.to_owned())
+    };
+    assert_eq!(
+        declared,
+        BTreeMap::from([
+            (
+                "/x".to_owned(),
+                vec![line(usr, "d", "0700"), line(etc, "d", "0711")]
+            ),
+            (
+                "/y".to_owned(),
+                vec![line(usr, "d", "0711"), line(etc, "d", "0711")]
+            ),
+            ("/z".to_owned(), vec![line(etc, "L", "-")]),
+        ])
     );
 }
 
