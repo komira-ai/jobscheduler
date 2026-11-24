@@ -269,7 +269,7 @@ fn placed_in(
         mint_provider,
         hello_limit,
         require_host_credential,
-        cpu_slack,
+        load,
         cold,
         cold_memory_on,
         curves,
@@ -296,7 +296,7 @@ fn placed_in(
     let (pool, memory) = split(pool);
     let placer = placer(
         max_lease_wall,
-        cpu_slack,
+        load,
         (memory, cold, curves),
         cold_memory_on,
         clock,
@@ -362,7 +362,7 @@ fn placed_in(
         rows_read: Mutex::default(),
         logs,
         job_limits,
-        cpu_slack,
+        cpu_slack: load.cpu_slack,
         duty_period_ms: AtomicU64::new(0),
         meter: OnceLock::new(),
         placing: Mutex::default(),

@@ -12,8 +12,8 @@ use super::{Load, Section};
 use crate::config::{
     BootMode, CpuSlack, DEFAULT_LEASE_SECS, DEFAULT_RECHECK_MS, DispatchTimes, FeedRetention,
     JOB_FEED_RETENTION_MUST, JOB_RETENTION_MUST, JobListen, Limits, MAX_JOB_WALL_MUST,
-    MOST_LEASE_SECS, MOST_RECHECK_MS, MetricsListen, Placement, ReadyListen, TlsFiles, Token,
-    cold_entry, not_loopback, not_private, parse_curves, parse_job_feed_retention,
+    MOST_LEASE_SECS, MOST_RECHECK_MS, MetricsListen, PackLimit, Placement, ReadyListen, TlsFiles,
+    Token, cold_entry, not_loopback, not_private, parse_curves, parse_job_feed_retention,
     parse_job_retention, parse_max_job_wall, parse_token,
 };
 use crate::error::StartupError;
@@ -49,6 +49,7 @@ const SERVER_KEYS: &[&str] = &[
     "placement",
     "estimate_feed",
     "cpu_slack",
+    "pack_limit",
     "cold_cpu_millis",
     "cold_memory_bytes",
     "cold_memory_bytes_on",
@@ -153,6 +154,7 @@ pub(crate) struct AgentKeys {
     placement: Option<Placement>,
     estimate_feed: Option<bool>,
     cpu_slack: Option<CpuSlack>,
+    pack_limit: Option<PackLimit>,
     cold: ColdSize,
     cold_on: ColdMemoryOn,
     curves: Curves,
@@ -188,6 +190,11 @@ impl AgentKeys {
     /// The CPU slack the file gives, if it gives one; absent, the engine's default.
     pub(crate) fn cpu_slack(&self) -> Option<CpuSlack> {
         self.cpu_slack
+    }
+
+    /// The pack limit the file gives, if it gives one; absent, the engine's default.
+    pub(crate) fn pack_limit(&self) -> Option<PackLimit> {
+        self.pack_limit
     }
 
     /// What a job that books nothing books while neither its class, its fallback class nor its
@@ -287,6 +294,7 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
         placement: read_placement(&mut s)?,
         estimate_feed: s.boolean("estimate_feed")?,
         cpu_slack: read_cpu_slack(&mut s)?,
+        pack_limit: read_pack_limit(&mut s)?,
         cold: read_cold(&mut s)?,
         cold_on: read_cold_on(&mut s)?,
         curves: read_curves(&mut s)?,
@@ -517,6 +525,19 @@ fn read_cpu_slack(s: &mut Section) -> Result<Option<CpuSlack>, StartupError> {
     };
     let slack = CpuSlack::parse(&text).map_err(|err| s.fail("cpu_slack", &err.to_string()))?;
     Ok(Some(slack))
+}
+
+/// `pack_limit`, the key of `--pack-limit`: a number written as the fraction, such as `0.8`,
+/// read as the flag reads its text. A string, even one that spells a number, is refused.
+fn read_pack_limit(s: &mut Section) -> Result<Option<PackLimit>, StartupError> {
+    let text = match s.map.remove("pack_limit") {
+        None => return Ok(None),
+        Some(toml::Value::Float(number)) => number.to_string(),
+        Some(toml::Value::Integer(number)) => number.to_string(),
+        Some(_) => return Err(s.fail("pack_limit", "must be a number such as 0.8")),
+    };
+    let limit = PackLimit::parse(&text).map_err(|err| s.fail("pack_limit", &err.to_string()))?;
+    Ok(Some(limit))
 }
 
 /// `placement_curves`, the key of `--placement-curves`: `"off"` or `"shadow"`, read as the
