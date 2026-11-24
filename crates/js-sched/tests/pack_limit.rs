@@ -1,5 +1,5 @@
 //! The pack limit through the scheduler: a host is packed (the tightest fit first) only
-//! while its bookings with the new lease stay within 0.8x of its CPU and of its memory;
+//! while its bookings with the new lease stay within 0.5x of its CPU and of its memory;
 //! once no host stays within it, the lease goes to the least full by booked share. Logical
 //! time only; no assertion reads a clock.
 
@@ -15,9 +15,9 @@ use js_whole::WholeNodeConfig;
 
 use load_rig::{GIB, Rig, caps, w, warm};
 
-/// A host of ten cores: 8 000 millicores is its 0.8x pack limit, 10 000 its capacity.
+/// A host of ten cores: 5 000 millicores is its 0.5x pack limit, 10 000 its capacity.
 const CPU: u64 = 10_000;
-const LIMIT: u64 = 8_000;
+const LIMIT: u64 = 5_000;
 const CORE: u64 = 1_000;
 
 fn node() -> Resources {
@@ -68,16 +68,16 @@ fn place(r: &mut Rig, cpu: u64) -> String {
 }
 
 /// Behaviour: a burst of sixty one-core jobs submitted together over six empty hosts of ten
-/// cores. The first eight go to one host (its 0.8x limit is eight cores, reached exactly);
-/// the ninth goes to another host (this one would pass the limit with it) and that host is
-/// filled to the limit the same way, and so on until every host is at the limit (48 jobs).
+/// cores. The first five go to one host (its 0.5x limit is five cores, reached exactly);
+/// the sixth goes to another host (this one would pass the limit with it) and that host is
+/// filled to the limit the same way, and so on until every host is at the limit (30 jobs).
 /// From then on no host is within the limit with another job, so each job goes to the least
-/// full host: the next six take every host to nine cores, the last six to ten. At each step
+/// full host: the next six take every host to six cores, and so on in rounds of six up to ten. At each step
 /// the job went to the host the rule names, and no host was booked above its 1.0x while
 /// another host could still take the job within it; at the end every host is full at 1.0x.
 ///
 /// Catches: best fit with no pack limit, which packs the first host to its whole ten cores
-/// before the second is touched, so the ninth job lands on the first host.
+/// before the second is touched, so the sixth job lands on the first host.
 #[test]
 fn a_burst_fills_each_host_to_the_limit_then_goes_to_the_least_full() {
     const HOSTS: [&str; 6] = ["h1", "h2", "h3", "h4", "h5", "h6"];
@@ -122,9 +122,9 @@ fn a_burst_fills_each_host_to_the_limit_then_goes_to_the_least_full() {
             "job {n}: {host} booked past 1.0x while another host fit the job within it"
         );
     }
-    assert!(order[..8].iter().all(|h| *h == order[0]), "{order:?}");
-    assert_ne!(order[8], order[0], "the ninth job leaves the full host");
-    for (i, chunk) in order[..48].chunks(8).enumerate() {
+    assert!(order[..5].iter().all(|h| *h == order[0]), "{order:?}");
+    assert_ne!(order[5], order[0], "the sixth job leaves the full host");
+    for (i, chunk) in order[..30].chunks(5).enumerate() {
         assert!(chunk.iter().all(|h| *h == chunk[0]), "block {i}: {chunk:?}");
     }
     // The scheduler's own bookings are what the replay says, host by host.
@@ -134,10 +134,30 @@ fn a_burst_fills_each_host_to_the_limit_then_goes_to_the_least_full() {
     }
 }
 
+/// Behaviour: two hosts both past the limit with the new job, at 85% and 60% of equal
+/// capacity (twenty cores): no host stays within 50%, so the job goes to the least full, the
+/// 60% host (65% with it), not the fuller one. Run both ways round.
+///
+/// Catches: best fit with no pack limit, which takes the fuller host.
+#[test]
+fn when_every_host_is_past_the_limit_the_job_goes_to_the_least_full() {
+    for (heavy, light) in [("a", "b"), ("b", "a")] {
+        let mut r = Rig::on();
+        for name in ["a", "b"] {
+            r.up(name, Resources::new(2 * CPU, 64 * GIB));
+        }
+        load(&mut r, heavy, &[light], 17, CORE);
+        load(&mut r, light, &[heavy], 12, CORE);
+        assert_eq!(place(&mut r, CORE), light, "heavy is {heavy}");
+        assert_eq!((booked(&r, heavy), booked(&r, light)), (17_000, 13_000));
+    }
+}
+
 /// Behaviour: one host booked at 85% and one at 30% of equal capacity (twenty cores, so
 /// that jobs of a core, the least a lease is charged, make the shares): a new job goes to
-/// the 30% host, since with it the 85% host would be at 90%, past the limit. Run both ways
-/// round (the names swapped), so the answer is not the tie-break's (first by name or hash).
+/// the 30% host: with it that host is at 35%, within the 50% limit, while the 85% host would
+/// be at 90%, past it. Run both ways round (the names swapped), so the answer is not the
+/// tie-break's (first by name or hash).
 ///
 /// Catches: best fit with no pack limit, which takes the fuller host.
 #[test]
@@ -155,8 +175,8 @@ fn a_job_goes_to_the_30_percent_host_not_the_85_percent_one() {
     }
 }
 
-/// Behaviour: two hosts under the limit, at 50% and 20%: a job that leaves the fuller one
-/// within the limit (60%) still goes to it, as before: packing is kept below the limit.
+/// Behaviour: two hosts under the limit, at 40% and 10%: a job that leaves the fuller one
+/// within the limit (50%) still goes to it, as before: packing is kept below the limit.
 /// Run both ways round.
 ///
 /// It pins the packing within the limit, which the pack limit keeps.
@@ -164,35 +184,35 @@ fn a_job_goes_to_the_30_percent_host_not_the_85_percent_one() {
 fn below_the_limit_the_fuller_host_is_still_packed() {
     for (full, light) in [("a", "b"), ("b", "a")] {
         let mut r = farm(&["a", "b"]);
-        load(&mut r, full, &[light], 5, CORE);
-        load(&mut r, light, &[full], 2, CORE);
+        load(&mut r, full, &[light], 4, CORE);
+        load(&mut r, light, &[full], 1, CORE);
         assert_eq!(place(&mut r, CORE), full, "fuller is {full}");
-        assert_eq!((booked(&r, full), booked(&r, light)), (6_000, 2_000));
+        assert_eq!((booked(&r, full), booked(&r, light)), (5_000, 1_000));
     }
 }
 
-/// Behaviour: the boundary of the packing: a job that leaves the fuller host at exactly 80%
-/// goes to it; a job that would leave it at 90% goes to the 20% host instead. Run both ways
+/// Behaviour: the boundary of the packing: a job that leaves the fuller host at exactly 50%
+/// goes to it; a job that would leave it at 60% goes to the 10% host instead. Run both ways
 /// round.
 ///
-/// Catches (the 90% half): best fit with no pack limit, where the fuller host is packed
+/// Catches (the 60% half): best fit with no pack limit, where the fuller host is packed
 /// whatever it is booked to.
 #[test]
 fn a_job_that_would_take_the_fuller_host_past_the_limit_goes_to_the_other() {
     for (full, light) in [("a", "b"), ("b", "a")] {
         let mut r = farm(&["a", "b"]);
-        load(&mut r, full, &[light], 7, CORE);
-        load(&mut r, light, &[full], 2, CORE);
-        // 70% + 10% = 80% exactly: within.
+        load(&mut r, full, &[light], 4, CORE);
+        load(&mut r, light, &[full], 1, CORE);
+        // 40% + 10% = 50% exactly: within.
         assert_eq!(
             place(&mut r, CORE),
             full,
             "to exactly the limit, fuller {full}"
         );
         assert_eq!(booked(&r, full), LIMIT);
-        // 80% + 10% = 90%: past; the other host (20%, 30% with it) is within.
+        // 50% + 10% = 60%: past; the other host (10%, 20% with it) is within.
         assert_eq!(place(&mut r, CORE), light, "past the limit, fuller {full}");
-        assert_eq!((booked(&r, full), booked(&r, light)), (LIMIT, 3_000));
+        assert_eq!((booked(&r, full), booked(&r, light)), (LIMIT, 2_000));
     }
 }
 
@@ -261,12 +281,12 @@ fn a_whole_machine_request_still_holds_the_worker_with_the_least_remaining_time(
 
 /// Behaviour: while `a` is held, small jobs are placed on `b` and `c` by the pack limit and
 /// never on `a`: `b` and `c` (one core booked each) take jobs of a core one round at a time
-/// until a host is at 80% (eight cores), the next job goes to the other host (still within
+/// until a host is at 50% (five cores), the next job goes to the other host (still within
 /// with it), and when both are at the limit the following jobs go to the least full. At
 /// each job the chosen host is the one the rule names, `a` holds only its two leases, and
 /// the reservation is kept.
 ///
-/// Catches: best fit with no pack limit, which packs one of the two past 80%, to its full
+/// Catches: best fit with no pack limit, which packs one of the two past 50%, to its full
 /// ten cores, before the other is touched.
 #[test]
 fn small_jobs_beside_a_held_worker_follow_the_pack_limit_on_the_others() {
@@ -301,8 +321,8 @@ fn small_jobs_beside_a_held_worker_follow_the_pack_limit_on_the_others() {
         assert_eq!(booked(&r, "a"), 2 * CORE, "job {n}: nothing went to a");
         assert_eq!(r.s.reservation(head), Some(&w("a")), "job {n}");
     }
-    // One host to 8 cores (7 jobs), the other to 8 (7 more), then one job each (9 cores).
-    assert!(order[..7].iter().all(|h| *h == order[0]), "{order:?}");
-    assert_ne!(order[7], order[0], "{order:?}");
+    // One host to 5 cores (4 jobs), the other to 5 (4 more), then alternating (9 cores each).
+    assert!(order[..4].iter().all(|h| *h == order[0]), "{order:?}");
+    assert_ne!(order[4], order[0], "{order:?}");
     assert_eq!((model["b"], model["c"]), (9_000, 9_000));
 }

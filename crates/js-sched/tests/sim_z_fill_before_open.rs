@@ -1,5 +1,5 @@
 //! Sim z: fill before open. Two 88-thread hosts. Under the default pack limit a host is
-//! packed only until its bookings reach 0.8x of its capacity, and the next lease opens a
+//! packed only until its bookings reach 0.5x of its capacity, and the next lease opens a
 //! host within the limit. With the limit lifted to 1.0x (`unpacked`), the score takes a
 //! lease to the host it fits most tightly (key 5), keeps off a host's 10% slack while
 //! another host takes the lease inside 100% (key 1, above key 5), and keeps off a host
@@ -20,7 +20,7 @@ use support_score_z_ad::{hold, host, on, place};
 
 /// The default configuration with the pack limit lifted to 1.0x. Sim z is about key 1
 /// against key 5 and the memory keys, with hosts filled to 100%; under the default
-/// limit (0.8x) a host is packed only to 80%, which the sibling tests below pin.
+/// limit (0.5x) a host is packed only to 50%, which the sibling tests below pin.
 fn unpacked() -> LoadConfig {
     LoadConfig {
         pack_limit_permille: 1_000,
@@ -71,24 +71,22 @@ fn twelve_leases_fill_a_to_100_percent_and_the_13th_opens_b() {
     );
 }
 
-/// Behaviour: under the default pack limit (0.8x of 88 cores is 70.4) `A` is packed only
-/// to the limit: it holds 40 cores and takes seven leases (68 cores), the 8th would book
-/// 72 and is past the limit, so it opens `B`, and the leases after it stay on `B`, which
-/// is within the limit, not on `A`, which is past it. `A` ends at 68 of 88 cores, `B` at
-/// 36 (nine leases).
+/// Behaviour: under the default pack limit (0.5x of 88 cores is 44) `A` is packed only
+/// to the limit: it holds 40 cores and takes one lease (44 cores, exactly the limit), the
+/// 2nd would book 48 and is past the limit, so it opens `B`, and the leases after it stay on
+/// `B`, which is within the limit, not on `A`, which is past it. `A` ends at 44 of 88 cores,
+/// `B` at 44 (eleven leases).
 /// Catches: a host packed past the pack limit while another host is within it.
 #[test]
-fn under_the_default_limit_seven_leases_fill_a_to_80_percent_and_the_8th_opens_b() {
+fn under_the_default_limit_one_lease_fills_a_to_50_percent_and_the_2nd_opens_b() {
     let mut r = rig_with_forty_on_a_at(LoadConfig::default());
-    for n in 1..=7 {
-        assert_eq!(place(&mut r, four_cores()), "A", "lease {n} fills A");
-    }
-    assert_eq!(r.s.load_view(&w("A")).unwrap().left_cpu_millis, 68_000);
-    for n in 8..=16 {
+    assert_eq!(place(&mut r, four_cores()), "A", "lease 1 fills A");
+    assert_eq!(r.s.load_view(&w("A")).unwrap().left_cpu_millis, 44_000);
+    for n in 2..=12 {
         assert_eq!(place(&mut r, four_cores()), "B", "lease {n} opens B");
     }
-    assert_eq!(r.s.load_view(&w("A")).unwrap().left_cpu_millis, 68_000);
-    assert_eq!(r.s.load_view(&w("B")).unwrap().left_cpu_millis, 36_000);
+    assert_eq!(r.s.load_view(&w("A")).unwrap().left_cpu_millis, 44_000);
+    assert_eq!(r.s.load_view(&w("B")).unwrap().left_cpu_millis, 44_000);
 }
 
 /// Key 1 is what keeps the 13th out of `A`'s slack: the predicate admits it there. With
@@ -163,7 +161,9 @@ fn with_no_room_for_the_miss_anywhere_the_lease_goes_to_the_better_fit() {
 /// never `A` (16 GiB held, which fits a 4 GiB lease exactly and so fits best).
 #[test]
 fn cold_leases_spread_over_the_hosts_with_room_before_any_packs() {
-    let mut r = Rig::on();
+    // The pack limit is lifted to 1.0x: this test is about the memory miss (key 2), and
+    // `A` at 16 of 20 GiB is past the default 0.5x whatever the miss.
+    let mut r = Rig::new(unpacked());
     for name in ["A", "B", "C"] {
         r.up(name, host(20));
     }
