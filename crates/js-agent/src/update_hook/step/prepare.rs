@@ -526,8 +526,8 @@ fn bad_artifact(why: impl ToString) -> Done {
 /// busy host there almost always is one. A drain waits for them (`owed`), and an agent that
 /// hands its runs over finishes them before it ends; a check that fails writes its taint before
 /// its record goes, and this judges that taint as any other. A record left by an agent that
-/// stopped inside the window becomes a `check-owed` taint at the agent's next start, which this
-/// refuses.
+/// stopped inside the window is a check the agent's next start runs: a clean check removes it,
+/// and one that finds something or cannot run becomes a `check-owed` taint, which this refuses.
 pub(super) fn refuse_taint(env: &Env<'_>) -> Result<(), Done> {
     let state = env.ports.state;
     match state
@@ -557,7 +557,8 @@ pub(super) fn owed(env: &Env<'_>) -> Result<Vec<String>, Done> {
 /// [`refuse_taint`], and an `owed-*` record halts too: for the steps that run where no agent
 /// that could settle the record runs (a first install's `prepare` and `cutover`) or once this
 /// update has stopped the agent (`verify`, and `cutover` and `rollback` after the stop). The
-/// stopped agent can no longer settle it, and the agent started next taints itself for it.
+/// stopped agent can no longer settle it; the agent started next runs its check at its start
+/// (or taints itself for it when it cannot), and the hook does not wait for that.
 pub(super) fn refuse_host(env: &Env<'_>) -> Result<(), Done> {
     refuse_taint(env)?;
     refuse_owed(env)
@@ -566,8 +567,9 @@ pub(super) fn refuse_host(env: &Env<'_>) -> Result<(), Done> {
 /// [`refuse_host`] for an update that hands the runs over (`handover`): only the taint. The
 /// agents on either side of a handover run their jobs' post-job checks while the hook waits
 /// for them, so a record of owed checks is a check under way. The agent the hook stops finishes
-/// its checks before it ends, and a record one leaves anyway taints the next start
-/// (`check-owed`), which then halts here as a taint.
+/// its checks before it ends, and a record one leaves anyway is a check the next start runs,
+/// which taints it (`check-owed`) only when the check finds something or cannot run; that taint
+/// then halts here.
 pub(super) fn refuse_host_in(env: &Env<'_>, handover: bool) -> Result<(), Done> {
     match handover {
         true => refuse_taint(env),

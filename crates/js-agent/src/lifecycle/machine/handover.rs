@@ -11,8 +11,9 @@ impl Lifecycle {
     /// for its images or providers, or whose container is being made, would be lost at the
     /// next start: nothing of it is recorded as running), no stop is (a stop the next process
     /// does not know of would not be finished), and no finished job's cleanup has begun (its
-    /// checks are owed from its first step until they have run, and a record left owed taints
-    /// the host at the next start).
+    /// checks are owed from its first step until they have run, and a record left owed is a
+    /// check the next process must run at its start, which taints the host when it cannot run
+    /// it or the check finds something; see `owed`).
     pub fn quiet_for_handover(&self) -> bool {
         self.jobs.iter().all(|job| match job.stage {
             Stage::Running(_) => job.cause.is_none(),

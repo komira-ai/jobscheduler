@@ -15,21 +15,11 @@ use super::provided::Attached;
 use super::{Lifecycle, MAX_JOBS, SLOTS, Slots};
 use crate::lifecycle::quota::QuotaHealth;
 use crate::lifecycle::runtime::{Found, Runtime, RuntimeError, Status};
-use crate::lifecycle::taint::{TaintState, reason};
+use crate::lifecycle::taint::TaintState;
 use crate::lifecycle::{
     CheckHook, Clock, Config, DEFAULT_SETTLE, DEFAULT_TAINT_RECHECK, Event, Finding, Wake, code,
     label,
 };
-
-/// The taint of a record of owed checks: the run it names, or the check code when the
-/// records could not be listed.
-fn owed_taint(run_id: Option<String>, check: Option<&str>) -> Taint {
-    Taint {
-        reason: reason::CHECK_OWED.to_owned(),
-        run_id,
-        check: check.map(str::to_owned),
-    }
-}
 
 impl Lifecycle {
     /// Starts the lifecycle of an agent that has just started, taking over the labelled
@@ -55,6 +45,10 @@ impl Lifecycle {
     /// result of a run taken over is set on it, which then makes no second one when its
     /// container is seen to have exited, and any other is held by a job that owns nothing, so
     /// the next heartbeat lists it again. A file that cannot be read is dropped and reported.
+    ///
+    /// The records of checks an earlier process owed are read before any container is taken
+    /// over, and the checks they record are run once the containers are taken over and the
+    /// leftovers swept, with every container on the host live (see `owed`).
     ///
     /// What the runtime lists is the agent's own ([`Runtime::list_labelled`] is
     /// scoped by the agent label); the listing removes nothing, so a container that was
@@ -114,7 +108,7 @@ impl Lifecycle {
         let mut events = Vec::new();
         let now = this.clock.now_ms();
         this.quota_health = QuotaHealth::at_start(this.config.quota.as_ref(), now, &mut events);
-        this.owed_at_start(&mut events);
+        let owed = this.owed_at_start(&mut events);
         let mut stuck = Vec::new();
         for (_, container) in found {
             let now = this.clock.now_ms();
@@ -186,6 +180,8 @@ impl Lifecycle {
             }
         }
         this.clear_leftovers(&leftover, &mut events);
+        // The containers are taken over and the leftovers swept: what is live is known.
+        this.check_owed(&owed, &mut events);
         this.restore_held(&mut events);
         Ok((this, events))
     }
@@ -251,23 +247,10 @@ impl Lifecycle {
         }
     }
 
-    /// Taints the host when the state root holds the record of a job whose checks were owed
-    /// and never ran (the previous process stopped after the job's cleanup began and before
-    /// its checks finished), or cannot be listed: what the job left behind may already be
-    /// part of the baseline the new process takes.
-    fn owed_at_start(&mut self, events: &mut Vec<Event>) {
-        let owed = match self.config.state.owed() {
-            Ok(runs) if runs.is_empty() => return,
-            Ok(runs) => owed_taint(runs.first().cloned(), None),
-            Err(_) => owed_taint(None, Some(code::OWED_UNREADABLE)),
-        };
-        self.seal(owed, events);
-    }
-
-    /// Taints the host with `taint` and writes the marker; a marker that cannot be written
-    /// is a finding that belongs to no run.
-    fn seal(&mut self, taint: Taint, events: &mut Vec<Event>) {
-        if let Err(why) = self.taint.seal(taint, None, events) {
+    /// Taints the host with `taint`, saying `detail` when there is one, and writes the
+    /// marker; a marker that cannot be written is a finding that belongs to no run.
+    pub(super) fn seal(&mut self, taint: Taint, detail: Option<String>, events: &mut Vec<Event>) {
+        if let Err(why) = self.taint.seal(taint, detail, events) {
             events.push(Event::Finding(Finding {
                 run_id: None,
                 code: code::TAINT_WRITE_FAILED,
@@ -332,14 +315,14 @@ impl Lifecycle {
         // removal that may fail.
         if may_change_host(found) {
             let run = label_id(found, label::RUN);
-            self.seal(host_taint_of(run), events);
+            self.seal(host_taint_of(run), None, events);
         }
         let _ = self.runtime.stop(id, self.config.stop_grace);
         let (code, fate, stuck) = match self.runtime.remove(id) {
             Ok(()) => (code::UNADOPTABLE, "stopped and removed".to_owned(), None),
             Err(failed) => {
                 // A container that stays on the host is a cleanup that failed.
-                self.seal(cleanup_taint(None, code::UNADOPTABLE_KEPT), events);
+                self.seal(cleanup_taint(None, code::UNADOPTABLE_KEPT), None, events);
                 (
                     code::UNADOPTABLE_KEPT,
                     format!("not removed, still on the host and booked: {failed}"),

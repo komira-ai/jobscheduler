@@ -9,8 +9,8 @@
 //! [`HANDOVER_FILE`] in the state root (`--state-root`), and the agent's runs can be adopted
 //! by its next process, it hands over instead: it takes no new job, announces `draining`, waits
 //! until no start, stop or post-job check is under way (a start the process left half made
-//! would cost the job, a stop would be left unfinished, and a check left owed taints the host
-//! at the next start), and exits with status 0 leaving every run as it is, but for the host-port
+//! would cost the job, a stop would be left unfinished, and a check left owed is run again by
+//! the next process at its start, or taints the host when that process cannot run it), and exits with status 0 leaving every run as it is, but for the host-port
 //! connections the agent itself carries for a run (`--host-port`), which end with it: the next
 //! process offers the ports again. The next process adopts the runs, lists them in its
 //! first heartbeat and reports their results.

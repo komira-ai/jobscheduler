@@ -164,9 +164,12 @@
 //! - **A job that the agent did not see end, partly.** The baseline is taken when the
 //!   agent starts. From before the first step of a job's cleanup until its checks have run
 //!   the state root holds a record that the checks are owed (see
-//!   [`StateRoot::owe`](crate::lifecycle::StateRoot::owe)); an agent that starts and finds
-//!   one taints the host, because what the job left behind may already be part of the new
-//!   baseline. A job whose container was still running when the agent stopped is adopted
+//!   [`StateRoot::owe`](crate::lifecycle::StateRoot::owe)). An agent that starts and finds
+//!   one runs the check itself, with the rules that need no baseline (what the job left
+//!   behind may already be part of the new baseline): a process of the job users' range
+//!   outside a live container taints the host (`check-owed`), and so does a process table
+//!   that cannot be read; a clean host removes the records. Only processes are judged that
+//!   way, as for every check. A job whose container was still running when the agent stopped is adopted
 //!   and checked when it ends, but what it did before the stop is part of the baseline the
 //!   new process took.
 //! - **A mount's options**, remounts, and mounts that disappeared: only a new mount is
@@ -596,6 +599,12 @@ impl CheckHook for Integrity {
 
     fn run_restored(&mut self, job: &Finished<'_>) -> Result<(), CheckFinding> {
         self.judge(job, true)
+    }
+
+    /// The baseline-free rule of [`CheckHook::run_restored`] judges every process of the job
+    /// users' range outside a live container, whatever the baseline holds.
+    fn checks_owed_at_start(&self) -> bool {
+        true
     }
 
     fn notes(&mut self) -> Vec<CheckNote> {
