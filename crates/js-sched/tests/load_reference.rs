@@ -18,12 +18,12 @@
 //!    reaches it for a request that owns every candidate whole
 //!    (`an_action_that_owns_a_worker_whole_is_not_scored`); two distinct workers never hash alike.
 //!
-//! The pack limit (80% of a worker's cores or memory booked, with the new request) sits
+//! The pack limit (50% of a worker's cores or memory booked, with the new request) sits
 //! between keys 2 and 3; its tests are `a_worker_within_the_pack_limit_comes_before_one_past_it`,
 //! `past_the_pack_limit_the_least_full_worker_comes_first`,
 //! `a_worker_exactly_at_the_pack_limit_is_within_it` and
 //! `memory_binds_the_pack_limit_when_it_is_the_larger_share`. The tests of other keys that
-//! reach 80% only incidentally place with the limit out of the way (`placer_unpacked`).
+//! reach 50% only incidentally place with the limit out of the way (`placer_unpacked`).
 
 #[path = "load_reference/mod.rs"]
 mod load_reference;
@@ -67,7 +67,7 @@ fn placer(hosts: Vec<Host>, next_seq: u64) -> Placer {
 }
 
 /// A round whose pack limit is out of the way: every share a test reaches is within it. For
-/// the tests of keys that cross 80% of a worker only incidentally.
+/// the tests of keys that cross 50% of a worker only incidentally.
 fn placer_unpacked(hosts: Vec<Host>, next_seq: u64) -> Placer {
     placer(hosts, next_seq).with_pack_limit(1_000_000)
 }
@@ -166,7 +166,7 @@ fn room_is_what_the_load_does_not_decide() {
 /// the fit prefers the fuller worker; and an overshoot inside the tolerance must not count.
 #[test]
 fn the_slack_zone_is_used_only_when_no_worker_fits_inside_a_hundred_percent() {
-    // This test is about key 1 and its workers pass 80% of their cores on the way, so the
+    // This test is about key 1 and its workers pass 50% of their cores on the way, so the
     // pack limit (which would put the emptier worker first) is placed out of the way.
     let k = key(1);
     // 10-core workers. `a` is at 9 cores: a lease of 2 takes it to 11 (110%), which the
@@ -202,7 +202,9 @@ fn the_fit_prefers_the_worker_that_leaves_about_a_third_of_its_cores() {
         host("b", 10, 32, &[5_000]),
         host("c", 10, 32, &[7_000]),
     ];
-    let mut p = placer(hosts, 0);
+    // The leftovers are 70%, 40% and 20%, so two of the workers pass 50% of their cores: the
+    // test is about the fit alone, so the pack limit is placed out of the way.
+    let mut p = placer_unpacked(hosts, 0);
     assert_eq!(
         place(&mut p, 1, &key(1), cores(1_000), 0, &[0, 1, 2]),
         Some(1)
@@ -433,18 +435,18 @@ fn a_tie_goes_to_the_larger_headroom_before_the_hash() {
     }
 }
 
-/// Behaviour: a worker whose cores and memory, with the new request booked, stay within 80%
+/// Behaviour: a worker whose cores and memory, with the new request booked, stay within 50%
 /// is placed before one past it, though the fit prefers the fuller (past) worker.
-/// Catches: the pack limit missing (the fit alone packs `a` to 90%) or ordered after the fit.
+/// Catches: the pack limit missing (the fit alone packs `a` to 60%) or ordered after the fit.
 #[test]
 fn a_worker_within_the_pack_limit_comes_before_one_past_it() {
-    // 10-core workers. `a` holds 8 cores, 9 of 10 cores with the request (past 80%); `b` is
-    // empty, 1 of 10. The fit prefers `a` (leftover 10%: .83 against .9: 1.63).
+    // 10-core workers. `a` holds 5 cores, 6 of 10 cores with the request (past 50%); `b` is
+    // empty, 1 of 10. The fit prefers the fuller `a`.
     let k = key(1);
-    let mut p = placer(vec![host("a", 10, 32, &[8_000]), host("b", 10, 32, &[])], 0);
+    let mut p = placer(vec![host("a", 10, 32, &[5_000]), host("b", 10, 32, &[])], 0);
     assert_eq!(place(&mut p, 1, &k, cores(1_000), 0, &[0, 1]), Some(1));
-    // With `a` at 7 cores the request takes it to 8 of 10, within: the fit packs `a`.
-    let mut p = placer(vec![host("a", 10, 32, &[7_000]), host("b", 10, 32, &[])], 0);
+    // With `a` at 4 cores the request takes it to 5 of 10, within: the fit packs `a`.
+    let mut p = placer(vec![host("a", 10, 32, &[4_000]), host("b", 10, 32, &[])], 0);
     assert_eq!(place(&mut p, 1, &k, cores(1_000), 0, &[0, 1]), Some(0));
 }
 
@@ -454,7 +456,7 @@ fn a_worker_within_the_pack_limit_comes_before_one_past_it() {
 #[test]
 fn past_the_pack_limit_the_least_full_worker_comes_first() {
     // 10-core workers at 8.5, 8.2 and 8.9 cores: 9.5, 9.2 and 9.9 with the request, all
-    // past 80% and inside 100%. The fit prefers the fullest, `c`; the least full is `b`.
+    // past 50% and inside 100%. The fit prefers the fullest, `c`; the least full is `b`.
     let hosts = vec![
         host("a", 10, 32, &[8_500]),
         host("b", 10, 32, &[8_200]),
@@ -472,14 +474,14 @@ fn past_the_pack_limit_the_least_full_worker_comes_first() {
     assert_eq!(place(&mut p, 1, &key(1), cores(1_000), 0, &[0, 1]), Some(1));
 }
 
-/// Behaviour: a worker whose binding share with the request is exactly 80% is within the
+/// Behaviour: a worker whose binding share with the request is exactly 50% is within the
 /// limit; a millicore more puts it past.
 /// Catches: the boundary taken as a strict less-than.
 #[test]
 fn a_worker_exactly_at_the_pack_limit_is_within_it() {
-    // `b` at 7 cores is exactly 8 of 10 with the request; `a` at 7.001 is 8.001, past. The
+    // `b` at 4 cores is exactly 5 of 10 with the request; `a` at 4.001 is 5.001, past. The
     // fit prefers the fuller `a`; only the limit puts `b` first.
-    let hosts = vec![host("a", 10, 32, &[7_001]), host("b", 10, 32, &[7_000])];
+    let hosts = vec![host("a", 10, 32, &[4_001]), host("b", 10, 32, &[4_000])];
     let mut p = placer(hosts, 0);
     assert_eq!(place(&mut p, 1, &key(1), cores(1_000), 0, &[0, 1]), Some(1));
 }
@@ -493,10 +495,10 @@ fn memory_binds_the_pack_limit_when_it_is_the_larger_share() {
     // 10 cores and 10 GiB each; the request is a core and a GiB.
     let mem =
         |name: &str, cpu: &[u64], gib: u64| host(name, 10, 10, cpu).with_booked_memory(gib * GIB);
-    // `a`: 6 cores booked, 7 of 10 with the request (70%), and 8 GiB booked, 9 of 10 (90%):
-    // past on memory. `b`: 2 cores (30%) and 0 GiB (10%): within. The fit prefers `a`
+    // `a`: 4 cores booked, 5 of 10 with the request (50%), and 8 GiB booked, 9 of 10 (90%):
+    // past on memory. `b`: 1 core (20%) and 0 GiB (10%): within. The fit prefers `a`
     // (memory is not charged to it, so the fuller cores win); the limit puts `b` first.
-    let hosts = vec![mem("a", &[6_000], 8), mem("b", &[2_000], 0)];
+    let hosts = vec![mem("a", &[4_000], 8), mem("b", &[1_000], 0)];
     let mut p = placer(hosts, 0);
     assert_eq!(place(&mut p, 1, &key(1), cores(1_000), 0, &[0, 1]), Some(1));
     // Both past: `a` is 85% on cores (7.5 booked, 8.5 with the request) and 10% on memory;

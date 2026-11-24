@@ -34,14 +34,14 @@ fn explained(fake: &Fake, order: &[&str]) -> (String, DecidedBy) {
     (w.as_str().to_owned(), by)
 }
 
-/// Behaviour: a worker whose bookings with the lease are exactly the limit (0.8x of its
-/// CPU, 800 permille) is within it; one millicore more is past it, with the share in parts
+/// Behaviour: a worker whose bookings with the lease are exactly the limit (0.5x of its
+/// CPU, 500 permille) is within it; one millicore more is past it, with the share in parts
 /// per million rounded up.
 /// Catches: the limit compared with `<` instead of `<=`.
 #[test]
 fn exactly_at_the_limit_is_within_and_one_millicore_over_is_past() {
-    assert_eq!(pack_of(booked(80_000, 0)), Pack::Within);
-    assert_eq!(pack_of(booked(80_001, 0)), Pack::Past(800_010));
+    assert_eq!(pack_of(booked(50_000, 0)), Pack::Within);
+    assert_eq!(pack_of(booked(50_001, 0)), Pack::Past(500_010));
     assert_eq!(pack_of(booked(0, 0)), Pack::Within);
 }
 
@@ -50,7 +50,7 @@ fn exactly_at_the_limit_is_within_and_one_millicore_over_is_past() {
 /// within; when the CPU share is the larger it binds instead.
 #[test]
 fn memory_is_the_binding_share_when_it_is_the_larger() {
-    assert_eq!(pack_of(booked(10_000, 800_000)), Pack::Within);
+    assert_eq!(pack_of(booked(10_000, 500_000)), Pack::Within);
     assert_eq!(pack_of(booked(10_000, 900_000)), Pack::Past(900_000));
     assert_eq!(pack_of(booked(95_000, 850_000)), Pack::Past(950_000));
 }
@@ -119,7 +119,7 @@ fn past_the_limit_the_least_full_host_comes_first() {
 #[test]
 fn within_the_limit_beats_past_it_even_when_the_fit_is_worse() {
     let fake = Fake::new(vec![
-        ("within", booked(70_000, 0).cpu_load(|_| 10_000)),
+        ("within", booked(40_000, 0).cpu_load(|_| 10_000)),
         ("past", booked(85_000, 0).cpu_load(|_| 84_000)),
     ]);
     assert!(key(&fake, "past").fit() < key(&fake, "within").fit());
@@ -132,8 +132,8 @@ fn within_the_limit_beats_past_it_even_when_the_fit_is_worse() {
 #[test]
 fn within_the_limit_the_fullest_host_is_still_packed() {
     let fake = Fake::new(vec![
-        ("full", booked(70_000, 0).cpu_load(|_| 60_000)),
-        ("light", booked(30_000, 0).cpu_load(|_| 20_000)),
+        ("full", booked(45_000, 0).cpu_load(|_| 40_000)),
+        ("light", booked(20_000, 0).cpu_load(|_| 10_000)),
     ]);
     assert_eq!(pick(&fake, &["light", "full"]), "full");
     assert_eq!(
@@ -207,7 +207,7 @@ fn the_pack_limit_comes_before_key_3() {
 #[test]
 fn the_pack_limit_is_reported_as_the_deciding_rule() {
     let fake = Fake::new(vec![
-        ("within", booked(70_000, 0)),
+        ("within", booked(40_000, 0)),
         ("past_a", booked(85_000, 0)),
         ("past_b", booked(90_000, 0)),
     ]);
@@ -279,13 +279,13 @@ fn with_pack_limit_sets_and_clamps() {
 }
 
 /// Behaviour: a config made by `ScoreConfig::new` and the default one both have the
-/// default pack limit, 800 permille (0.8x).
+/// default pack limit, 500 permille (0.5x).
 #[test]
-fn the_default_pack_limit_is_800_permille() {
-    assert_eq!(DEFAULT_PACK_LIMIT_PERMILLE, 800);
-    assert_eq!(ScoreConfig::default().pack_limit_permille(), 800);
+fn the_default_pack_limit_is_500_permille() {
+    assert_eq!(DEFAULT_PACK_LIMIT_PERMILLE, 500);
+    assert_eq!(ScoreConfig::default().pack_limit_permille(), 500);
     let made = ScoreConfig::new(1, 10_000, 250_000).expect("balance in range");
-    assert_eq!(made.pack_limit_permille(), 800);
+    assert_eq!(made.pack_limit_permille(), 500);
     assert_eq!(made, ScoreConfig::default());
 }
 
@@ -301,7 +301,7 @@ fn the_score_config_of_a_load_config_carries_the_pack_limit() {
     };
     assert_eq!(
         ScoreConfig::of(&crate::LoadConfig::default()).pack_limit_permille(),
-        800
+        500
     );
     assert_eq!(of(650).pack_limit_permille(), 650);
     assert_eq!(of(0).pack_limit_permille(), 0);
