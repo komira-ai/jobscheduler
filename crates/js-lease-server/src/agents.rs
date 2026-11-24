@@ -271,7 +271,7 @@ fn placed_in(
         require_host_credential,
         cpu_slack,
         cold,
-        cold_memory_on,
+        cold_on,
         curves,
         max_lease_wall,
         job_limits,
@@ -298,7 +298,7 @@ fn placed_in(
         max_lease_wall,
         cpu_slack,
         (memory, cold, curves),
-        cold_memory_on,
+        cold_on,
         clock,
     );
     let (later, more_tokens): (Vec<_>, Vec<_>) = more

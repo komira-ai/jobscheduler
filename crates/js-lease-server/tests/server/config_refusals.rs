@@ -70,7 +70,8 @@ fn an_unknown_table_or_field_is_refused_with_the_known_ones() {
          max_lease_wall, max_connections, handshake_timeout, header_timeout, read_timeout, write_timeout, \
          max_requests, drain_timeout, drain_hold, agent_hello_burst, agent_hello_interval, \
          require_host_credential, placement, estimate_feed, cpu_slack, cold_cpu_millis, \
-         cold_memory_bytes, cold_memory_bytes_on, placement_curves, usage_db, usage_off, \
+         cold_memory_bytes, cold_memory_bytes_on, cold_cpu_millis_on, placement_curves, usage_db, \
+         usage_off, \
          profile_store_bytes, \
          history_retention_days, alert_webhook_url, alert_webhook_token_file, alert_repeat_after, \
          max_spend_per_day_total, max_spend_per_month_total, max_spend_since_go_total, \
