@@ -22,8 +22,19 @@
 //! full leftover; the request must still be one the worker's memory can hold, and an
 //! action at the whole host's memory runs alone.
 //!
+//! The pack limit is the one place memory is counted: it reads what a worker has *booked*
+//! (the cores and memory its leases asked for, not what the load rule charges), with the
+//! new request added. Its bookings are the host's own: the cores of its leases (a lease
+//! is booked what it asks for, which is what it is charged before the floor) and the
+//! memory given to [`Host::with_booked_memory`], the sum of the memory its leases asked
+//! for. The binding share is the larger of the cores' and the memory's, exact integers,
+//! a resource the worker has none of counting 0. A worker within the limit (share at most
+//! [`PACK_LIMIT_PERMILLE`] thousandths) comes before every worker past it, and workers
+//! past it come in order of that share, the least full first; the rule sits between
+//! the memory key (2) and the fallback key (3) of the score.
+//!
 //! The settings are the document's defaults: slack 10%, score tolerance 1% of capacity,
-//! key share 25%, balance 1.
+//! key share 25%, balance 1, pack limit 80% (800 thousandths).
 
 #![allow(
     dead_code,
@@ -46,6 +57,9 @@ pub const KEY_SHARE_PPM: u128 = 250_000;
 pub const BALANCE: u128 = 1;
 /// The least a lease is charged on a worker that never sent a reading, in millicores.
 pub const UNMEASURED_FLOOR_MILLIS: u64 = 1_000;
+/// `--placement-pack-limit`: the share of its cores or memory, in thousandths, up to which
+/// a worker is packed; past it, the least full worker comes first.
+pub const PACK_LIMIT_PERMILLE: u128 = 800;
 /// The minutes of the horizon `H`.
 pub const HORIZON: u128 = 30;
 const PPM: u128 = 1_000_000;
@@ -71,6 +85,8 @@ pub struct Host {
     pub whole: bool,
     /// Each lease it holds, as the action key and the cores it was charged when placed.
     leases: Vec<(WorkKey, u64)>,
+    /// The memory its leases asked for, in bytes (see [`Host::with_booked_memory`]).
+    booked_memory: u64,
     /// The cores it is charged: the sum over `leases`, each at least the floor.
     charged: u64,
 }
@@ -95,6 +111,7 @@ impl Host {
             booked_vms,
             whole,
             leases: Vec::new(),
+            booked_memory: 0,
             charged: 0,
         };
         for (key, cpu) in leases {
@@ -102,6 +119,43 @@ impl Host {
             host.leases.push((key, cpu));
         }
         host
+    }
+
+    /// This host with `bytes` of memory booked by its leases: the sum of what each asked
+    /// for. The pack limit reads it; the load rule charges no memory.
+    #[must_use]
+    pub fn with_booked_memory(mut self, bytes: u64) -> Self {
+        self.booked_memory = bytes;
+        self
+    }
+
+    /// The cores its leases asked for: each lease's charge before the floor.
+    fn booked_cpu(&self) -> u64 {
+        self.leases.iter().map(|(_, cpu)| *cpu).sum()
+    }
+
+    /// Where the host stands against the pack limit with a lease of `request` booked.
+    fn pack_with(&self, request: &Resources, limit_permille: u128) -> Pack {
+        let cpu = (
+            u128::from(self.booked_cpu() + request.cpu_millis),
+            u128::from(self.capacity.cpu_millis),
+        );
+        let memory = (
+            u128::from(self.booked_memory) + u128::from(request.memory_bytes),
+            u128::from(self.capacity.memory_bytes),
+        );
+        // A resource of no capacity has share 0: it is never the binding one.
+        let shares: Vec<(u128, u128)> = [cpu, memory].into_iter().filter(|r| r.1 > 0).collect();
+        let within = shares.iter().all(|(b, c)| b * 1_000 <= limit_permille * c);
+        if within {
+            return Pack::Within;
+        }
+        let binding = shares
+            .iter()
+            .map(|(b, c)| (b * PPM).div_ceil(*c))
+            .max()
+            .unwrap_or(0);
+        Pack::Past(binding)
     }
 
     /// The least a lease is charged here, in millicores.
@@ -164,10 +218,20 @@ impl Host {
         self.whole |= self.owns_whole(request);
         self.booked_gpus += request.gpus;
         self.booked_vms += request.vms;
+        self.booked_memory += request.memory_bytes;
         let charge = self.charge_of(request);
         self.charged += charge.max(self.floor());
         self.leases.push((key.clone(), charge));
     }
+}
+
+/// Where a worker stands against the pack limit with the new lease booked: within it, or
+/// past it by the share of its binding resource in parts per million, rounded up. `Within`
+/// is the smaller, so it comes first; among `Past`, the smaller share.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Pack {
+    Within,
+    Past(u128),
 }
 
 /// One queued request, as a round meets it.
@@ -193,6 +257,9 @@ struct Rank {
     /// 2: a memory miss would not fit. Always 0 here: a lease with no learned cost
     /// charges no memory.
     memory_unsafe: bool,
+    /// The pack limit, between keys 2 and 3: within it before past it, past it the least
+    /// full first.
+    pack: Pack,
     /// 4: the lease's key would take more than its share of the worker's cores.
     concentrated: bool,
     /// 5: the leftover of the binding resource squared, and the stranded resource.
@@ -260,6 +327,9 @@ pub struct Placer {
     kept: BTreeMap<OperationId, WorkerId>,
     /// The worker each head holds this round.
     holds: BTreeMap<OperationId, WorkerId>,
+    /// The pack limit in thousandths: [`PACK_LIMIT_PERMILLE`] unless a test that is about
+    /// another key moves it out of the way with [`Placer::with_pack_limit`].
+    pack_limit_permille: u128,
 }
 
 impl Placer {
@@ -284,7 +354,17 @@ impl Placer {
             held_pools: BTreeSet::new(),
             kept,
             holds: BTreeMap::new(),
+            pack_limit_permille: PACK_LIMIT_PERMILLE,
         }
+    }
+
+    /// This round with the pack limit at `permille` thousandths. The fleet simulations
+    /// never call it; a test of another key uses it to keep the pack limit out of the way
+    /// (a limit past every share the test reaches puts every worker within it).
+    #[must_use]
+    pub fn with_pack_limit(mut self, permille: u128) -> Self {
+        self.pack_limit_permille = permille;
+        self
     }
 
     /// The workers the heads hold now.
@@ -378,6 +458,7 @@ impl Placer {
         Rank {
             slack: SLOT_WEIGHTS * over.saturating_sub(TOLERANCE_PPM),
             memory_unsafe: false,
+            pack: host.pack_with(&ask.resources, self.pack_limit_permille),
             concentrated: u128::from(same_key + p_bar) * PPM
                 > KEY_SHARE_PPM * u128::from(host.capacity.cpu_millis),
             fit: FIT_WEIGHTS * (2 * lo * lo + BALANCE * (hi - lo) * (hi - lo)),

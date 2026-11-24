@@ -18,6 +18,7 @@ impl Checker {
             w.whole,
             charged,
         )
+        .with_booked_memory(w.booked.memory_bytes)
     }
 }
 
