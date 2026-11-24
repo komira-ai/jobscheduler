@@ -534,7 +534,7 @@ fn read_pack_limit(s: &mut Section) -> Result<Option<PackLimit>, StartupError> {
         None => return Ok(None),
         Some(toml::Value::Float(number)) => number.to_string(),
         Some(toml::Value::Integer(number)) => number.to_string(),
-        Some(_) => return Err(s.fail("pack_limit", "must be a number such as 0.8")),
+        Some(_) => return Err(s.fail("pack_limit", "must be a number such as 0.5")),
     };
     let limit = PackLimit::parse(&text).map_err(|err| s.fail("pack_limit", &err.to_string()))?;
     Ok(Some(limit))

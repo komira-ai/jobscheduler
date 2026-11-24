@@ -18,14 +18,14 @@ const DECIMALS: usize = 3;
 
 /// The pack limit of the placement engine: the thousandths of a host's capacity (the larger
 /// of its CPU and memory share) up to which the engine packs the fullest host, from 0 (0.0)
-/// to [`MAX_PACK_LIMIT_PERMILLE`] (1.0). The default is js-sched's, 0.8.
+/// to [`MAX_PACK_LIMIT_PERMILLE`] (1.0). The default is js-sched's, 0.5.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PackLimit(u32);
 
 /// A `pack_limit` that is not a fraction from 0.0 to 1.0 with at most three decimals.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
-    "{KEY} must be a fraction of the host's capacity from 0.0 to {max}, with at most three decimals, such as 0.8; got {given:?}",
+    "{KEY} must be a fraction of the host's capacity from 0.0 to {max}, with at most three decimals, such as 0.5; got {given:?}",
     max = fraction(MAX_PACK_LIMIT_PERMILLE)
 )]
 pub struct PackLimitError {
@@ -172,7 +172,7 @@ mod tests {
             assert_eq!(
                 err.to_string(),
                 format!(
-                    "pack_limit must be a fraction of the host's capacity from 0.0 to 1.0, with at most three decimals, such as 0.8; got {text:?}"
+                    "pack_limit must be a fraction of the host's capacity from 0.0 to 1.0, with at most three decimals, such as 0.5; got {text:?}"
                 ),
             );
         }
@@ -188,7 +188,7 @@ mod tests {
         assert_eq!(shown("0.005"), "0.005");
         assert_eq!(shown("0.250"), "0.25");
         assert_eq!(shown("1"), "1.0");
-        assert_eq!(PackLimit::default().to_string(), "0.8");
+        assert_eq!(PackLimit::default().to_string(), "0.5");
     }
 
     /// A server configuration from the flags `extra` beside one pool, as the program

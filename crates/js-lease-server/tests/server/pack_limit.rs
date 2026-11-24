@@ -47,11 +47,11 @@ fn parsed(args: Vec<OsString>) -> Result<Config, String> {
 /// The refusal of `given` as a limit, after what names the flag or key.
 fn out_of_range(given: &str) -> String {
     format!(
-        "pack_limit must be a fraction of the host's capacity from 0.0 to 1.0, with at most three decimals, such as 0.8; got {given:?}"
+        "pack_limit must be a fraction of the host's capacity from 0.0 to 1.0, with at most three decimals, such as 0.5; got {given:?}"
     )
 }
 
-/// Asserts the flag's parse: absent it is js-sched's default (0.8, read from js-sched and
+/// Asserts the flag's parse: absent it is js-sched's default (0.5, read from js-sched and
 /// not written here); `0.0`, `0.65` and `1.0` are read as thousandths of the capacity. It
 /// catches a flag that is not read and a default restated here that drifts.
 #[test]
@@ -111,7 +111,7 @@ fn pack_limit_values_outside_the_range_are_refused() {
     for value in ["\"abc\"", "\"\"", "\"0.8\"", "true"] {
         let scratch = Scratch::new("pack_limit_key_type");
         let text = text_of(&scratch, &format!("pack_limit = {value}"));
-        let expected = "server.pack_limit: must be a number such as 0.8";
+        let expected = "server.pack_limit: must be a number such as 0.5";
         assert_eq!(refusal(&scratch, &text), expected, "{value}");
     }
 }

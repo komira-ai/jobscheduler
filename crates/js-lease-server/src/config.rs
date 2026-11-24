@@ -192,7 +192,7 @@ pub struct Cli {
     pub cpu_slack: Option<CpuSlack>,
     /// How full the placement engine packs a host before it places on the least full one,
     /// as a fraction of the host's capacity from 0.0 to 1.0 with at most three decimals,
-    /// such as `0.8`. Without the flag the engine's own default is used, which is 0.8.
+    /// such as `0.5`. Without the flag the engine's own default is used, which is 0.5.
     #[arg(long, value_parser = PackLimit::parse)]
     pub pack_limit: Option<PackLimit>,
     /// Whether the placement engine learns a CPU and a memory profile for each job class from
@@ -918,7 +918,7 @@ impl Config {
     }
 
     /// The pack limit of the placement engine (`--pack-limit`, or `server.pack_limit`): the
-    /// value given, or the engine's default, 0.8.
+    /// value given, or the engine's default, 0.5.
     pub fn pack_limit(&self) -> PackLimit {
         self.agents.load.pack_limit
     }
