@@ -22,6 +22,7 @@
 //! | `spec.hostPorts` | the rules of `rootfs` | `field: spec.hostPorts[i].<name>` |
 //! | `spec.files` | as a start's run files are (`js_agent_wire::validate_files`) | `field: spec.files` |
 //! | `spec.labels` | as a lease's labels are (`Labels::from_caller`) | `field: spec.labels` |
+//! | `spec.historyKey` | empty, or 1 to 512 bytes of printable ASCII (`0x20` to `0x7e`), kept as sent ([`HistoryKey`]) | `field: spec.historyKey: bad-length`, `field: spec.historyKey: not-printable-ascii` |
 //! | `spec.layers`, `spec.mounts` | the rules of `rootfs` | `field: spec.layers[i].<name>`, `spec.mounts[i].<name>` |
 //!
 //! The cross-field rules (an empty image, its command, `exec`, `needs.wholeHost` and
@@ -60,8 +61,8 @@ use js_jobs::{
 use js_proto::v1;
 use js_types::{
     ACCEL_COUNT_KEY, ACCEL_FORM_FACTOR_KEY, ACCEL_INTERCONNECT_KEY, ACCEL_MEMORY_GIB_KEY,
-    ACCEL_MODEL_KEY, ACCEL_VENDOR_KEY, AcceleratorNeed, ExecMode, ImageDigestRef, IsaLevel, Labels,
-    OS_VERSION_KEY, Os, Requirements, Resources, normalise_arch,
+    ACCEL_MODEL_KEY, ACCEL_VENDOR_KEY, AcceleratorNeed, ExecMode, HistoryKey, ImageDigestRef,
+    IsaLevel, Labels, OS_VERSION_KEY, Os, Requirements, Resources, normalise_arch,
 };
 // The network level a job asks a host for, by a name of its own: the type's own name followed
 // by a path separator reads as the server's network module to the source scan of design
@@ -132,6 +133,7 @@ pub(crate) fn job(spec: Option<&v1::JobSpec>, ceiling: Duration) -> Result<Valid
     let host_ports = rootfs::host_ports(&spec.host_ports, &ports)?;
     let files = files(&spec.files)?;
     let labels = labels(&spec.labels)?;
+    let history_key = history_key(&spec.history_key)?;
     let layers = rootfs::layers(&spec.layers)?;
     let mounts = rootfs::mounts(&spec.mounts)?;
     let accelerator = AcceleratorNeed::requested(&capabilities, resources.shape())
@@ -199,6 +201,7 @@ pub(crate) fn job(spec: Option<&v1::JobSpec>, ceiling: Duration) -> Result<Valid
         layers,
         mounts,
         host_ports,
+        history_key,
     };
     Ok(Valid {
         id,
@@ -475,6 +478,17 @@ fn env(env: &BTreeMap<String, String>) -> Result<(), Fault> {
 /// The labels, checked as a lease's are.
 fn labels(labels: &BTreeMap<String, String>) -> Result<Labels, Fault> {
     Labels::from_caller(labels).map_err(|_| Fault::Field("spec.labels"))
+}
+
+/// The history key: none when empty, else kept as sent when it is a [`HistoryKey`] (1 to
+/// 512 bytes of printable ASCII), refused with the word of its fault otherwise.
+fn history_key(text: &str) -> Result<Option<HistoryKey>, Fault> {
+    if text.is_empty() {
+        return Ok(None);
+    }
+    HistoryKey::parse(text)
+        .map(Some)
+        .map_err(|fault| Fault::Wire("spec.historyKey", fault.code()))
 }
 
 #[cfg(test)]

@@ -933,6 +933,9 @@ mod cold;
 #[path = "sizes_fallback_tests.rs"]
 mod fallback;
 
+#[path = "sizes_named_tests.rs"]
+mod named;
+
 #[path = "sizes_client_tests.rs"]
 mod client;
 

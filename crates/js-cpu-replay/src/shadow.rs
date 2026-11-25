@@ -148,9 +148,11 @@ pub fn parse(log: &str) -> Result<Vec<Check>, ShadowError> {
             continue;
         };
         // The class is the server's text as it stands, spaces and all: it runs to the CPU
-        // status, which follows it.
+        // status, which follows it, the last ` cpu=` of the line (the fields after it are
+        // `cpu_*` and `memory*`), so a class that holds ` cpu=` itself is read whole. The job
+        // id before it is an id, so the first ` class=` ends it.
         let (head, tail) = after
-            .split_once(" cpu=")
+            .rsplit_once(" cpu=")
             .ok_or(ShadowError::Unnamed { line })?;
         let (job, class) = head
             .split_once(" class=")

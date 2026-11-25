@@ -16,7 +16,9 @@ use std::time::Duration;
 use js_agent_wire::{HostPort, JobMount, Layer, MountMode, MountSource, PortProtocol, Propagation};
 use js_state::conformance::Backend;
 use js_state::{CommitStats, Cond, ManualClock, Store, Txn, Versioned};
-use js_types::{CpuSeries, ExecMode, HostId, ImageDigestRef, Labels, ReservedKey, Resources};
+use js_types::{
+    CpuSeries, ExecMode, HistoryKey, HostId, ImageDigestRef, Labels, ReservedKey, Resources,
+};
 
 use crate::interfere::Interfere;
 use crate::{
@@ -724,6 +726,10 @@ pub(crate) fn full_spec() -> JobSpec {
                 protocol: PortProtocol::Tcp,
             },
         ],
+        history_key: Some(
+            HistoryKey::parse("root//crates/js-sched:js-sched rust_compile build")
+                .expect("a size class"),
+        ),
     }
 }
 

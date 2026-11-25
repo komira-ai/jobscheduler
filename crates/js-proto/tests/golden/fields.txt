@@ -56,6 +56,7 @@ JobSpec.host_ports = 32 : repeated HostPort
 JobSpec.files = 40 : repeated JobFile
 JobSpec.priority = 50 : int32
 JobSpec.labels = 51 : map<string, string>
+JobSpec.history_key = 52 : string
 JobSpec.layers = 60 : repeated Layer
 JobSpec.mounts = 61 : repeated Mount
 JobState.JOB_STATE_UNSPECIFIED = 0

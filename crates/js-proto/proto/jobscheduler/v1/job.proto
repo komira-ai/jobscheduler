@@ -46,9 +46,9 @@ enum Isolation {
 
 // The resources a job needs of its host. A host is capable when it has at least each of
 // them. A job that leaves cpu_millis or memory_bytes at 0 (or sends no needs) is booked, for
-// each of them, the size the history of its class gives: the class is the job's label
-// size-class, else its image's name and command. A class with too few runs books what the
-// class named by its label size-fallback gives, else the server's cold size (4 cores and
+// each of them, the size the history of its class gives: the class is the job's history_key,
+// else its label size-class, else its image's name and command. A class with too few runs
+// books what the class named by its label size-fallback gives, else the server's cold size (4 cores and
 // 16 GiB unless the server sets another), held at the most cores and the most bookable memory
 // a host has; never less than what the class was killed at. A class
 // whose runs need more memory than any host has books the whole of the largest. What a
@@ -176,9 +176,18 @@ message JobSpec {
   // the job already made only in its priority is the same job (design section 5.3).
   int32 priority = 50;
   // The client's labels, by key. A listing can filter by them. The label size-class names
-  // the job's class, whose history sizes what Needs leaves at 0; the label size-fallback
-  // names a class whose history sizes it while the job's own class has fewer than five runs.
+  // the job's class when history_key is empty; the label size-fallback names a class whose
+  // history sizes the job while its own class has no run.
   map<string, string> labels = 51;
+  // The key the job's usage history is kept under, whose history sizes what Needs leaves at
+  // 0: the work the job runs, one key per kind of work. For a build action, the full path of
+  // its build target and the kind of the action, for example
+  // "komira//src/json:json mojo_compile". 1 to 512 bytes of printable ASCII (0x20 to 0x7e),
+  // kept, keyed and logged as sent: never lowered, cut or hashed. Refused naming
+  // spec.historyKey (bad-length or not-printable-ascii) otherwise. Empty: the label size-class
+  // names the class, else the image's name and command do. It is part of the job a same-id
+  // resubmit is compared on.
+  string history_key = 52;
   // The read-only layers of the job's root, base first, stacked on image (or in place of it,
   // when image is empty): at most 16. A later layer's file hides an earlier one's. With
   // layers, the root is writable and the writes are the job's own, and the job runs in a
