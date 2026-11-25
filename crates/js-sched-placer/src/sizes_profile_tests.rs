@@ -22,6 +22,10 @@ use crate::sizes::{JobSizes, SizedFrom, bounds_of};
 /// The start of every line a checked run logs.
 const PREFIX: &str = " INFO a run was checked against its class's profile";
 
+/// The message of the line that says the shadow checks start.
+const START: &str =
+    " INFO placement curves: the shadow checks start, the profiles learned from the ended jobs";
+
 /// What a test's own subscriber writes: every line, kept for [`Lines::take`].
 #[derive(Clone, Default)]
 struct Lines(Arc<Mutex<Vec<u8>>>);
@@ -53,6 +57,17 @@ impl Lines {
         let text = String::from_utf8(std::mem::take(&mut *held)).unwrap();
         text.lines()
             .filter(|line| line.contains("a run was checked against its class's profile"))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The check lines and the lines saying the checks start, written so far, in order,
+    /// emptied.
+    fn profile_lines(&self) -> Vec<String> {
+        let mut held = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let text = String::from_utf8(std::mem::take(&mut *held)).unwrap();
+        text.lines()
+            .filter(|line| line.starts_with(PREFIX) | line.starts_with(START))
             .map(str::to_owned)
             .collect()
     }
@@ -289,6 +304,93 @@ fn a_teaching_logs_the_runs_it_held_and_not_the_ended_jobs_it_read() {
     assert!(logged[0].contains("cpu_runs=3 "), "{logged:?}");
     let mut engine = placer.engine();
     assert_eq!(class(engine.sizes(), &first).cpu.runs(), 3);
+}
+
+/// A placer whose engine profiles by `curves`, on `clock`.
+fn placer_with(curves: Curves, clock: &ManualClock) -> SchedPlacer {
+    let settings = Settings {
+        curves,
+        ..Settings::default()
+    };
+    SchedPlacer::new(settings, clock.clone())
+}
+
+/// Asserts the line a start's teaching logs in shadow: nothing while the ended jobs are read and
+/// a run the passes free is held; at the teaching, one line naming the two classes the three
+/// ended jobs made, the three jobs and the 300 whole seconds the placer's clock moved since the
+/// teaching began (300.9 s), then the held run's check; and a run a pass frees after it logs its
+/// check alone. Catches a start whose checks begin with no line, a line logged before the ended
+/// jobs are taught or after the held runs, and a line logged again by a later pass.
+#[test]
+fn a_teaching_in_shadow_logs_once_that_the_checks_start_before_the_held_runs() {
+    let (lines, _guard) = capture();
+    let tables = Tables::new();
+    good(&tables, "h0", "h", &[16; 10]);
+    good(&tables, "h1", "h", &[16; 10]);
+    good(&tables, "g0", "g", &[16; 10]);
+    let clock = ManualClock::new(Timestamp::from_millis(1_000));
+    let placer = placer_with(Curves::Shadow, &clock);
+    let mut teaching = placer.begin_teaching(&tables.jobs).unwrap();
+    assert!(!teaching.read_page(&tables.jobs).unwrap());
+    let held = good(&tables, "h2", "h", &[16; 10]);
+    placer.engine().sizes().freed_run(held, bk());
+    assert_eq!(lines.profile_lines(), Vec::<String>::new());
+    clock.advance(Duration::from_millis(300_900));
+    placer.teach(teaching);
+    let logged = lines.profile_lines();
+    assert_eq!(logged.len(), 2, "{logged:?}");
+    assert_eq!(
+        logged[0],
+        format!("{START} classes=2 ended_jobs=3 took_secs=300")
+    );
+    assert!(
+        logged[1].starts_with(&format!("{PREFIX} job=h2 class=h ")),
+        "{logged:?}"
+    );
+    let after = good(&tables, "h3", "h", &[16; 10]);
+    placer.engine().sizes().freed_run(after, bk());
+    let logged = lines.profile_lines();
+    assert_eq!(logged.len(), 1, "{logged:?}");
+    assert!(
+        logged[0].starts_with(&format!("{PREFIX} job=h3 class=h ")),
+        "{logged:?}"
+    );
+}
+
+/// Asserts the line of a teaching taught before its read finished (a stop or a failed read):
+/// it names no class, no ended job and no time, since the clock did not move, and the checks
+/// start all the same. Catches a line left out when nothing was read, and ended jobs counted
+/// that were not taught.
+#[test]
+fn a_teaching_not_read_through_logs_that_the_checks_start_from_nothing() {
+    let (lines, _guard) = capture();
+    let tables = Tables::new();
+    good(&tables, "h0", "h", &[16; 10]);
+    let clock = ManualClock::new(Timestamp::from_millis(0));
+    let placer = placer_with(Curves::Shadow, &clock);
+    let teaching = placer.begin_teaching(&tables.jobs).unwrap();
+    placer.teach(teaching);
+    let expected = vec![format!("{START} classes=0 ended_jobs=0 took_secs=0")];
+    assert_eq!(lines.profile_lines(), expected);
+}
+
+/// Asserts that with the profiles off a teaching logs neither that the checks start nor any
+/// check, read through or not. Catches the line logged where no check follows it.
+#[test]
+fn a_teaching_with_the_profiles_off_logs_no_start() {
+    let (lines, _guard) = capture();
+    let tables = Tables::new();
+    good(&tables, "h0", "h", &[16; 10]);
+    let clock = ManualClock::new(Timestamp::from_millis(0));
+    let placer = placer_with(Curves::Off, &clock);
+    let mut teaching = placer.begin_teaching(&tables.jobs).unwrap();
+    assert!(!teaching.read_page(&tables.jobs).unwrap());
+    let held = good(&tables, "h1", "h", &[16; 10]);
+    placer.engine().sizes().freed_run(held, bk());
+    clock.advance(Duration::from_secs(60));
+    placer.teach(teaching);
+    placer.teach(placer.begin_teaching(&tables.jobs).unwrap());
+    assert_eq!(lines.profile_lines(), Vec::<String>::new());
 }
 
 /// Asserts that a run that did not succeed teaches no profile and logs `not-a-success` for both

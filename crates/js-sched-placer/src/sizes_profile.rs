@@ -12,7 +12,10 @@
 //! slowed by contention or held at a ceiling, or was and used more than the class's level (a
 //! slowed run may only raise its class). It teaches the memory profile when it succeeded and
 //! its memory series is whole. A class's profiles are kept for at most [`MAX_PROFILES`] classes.
-//! A restart rebuilds them from the job records the store keeps.
+//! A restart rebuilds them from the job records the store keeps; the runs freed while it reads
+//! them are held, and once the ended jobs are taught one line says the checks start
+//! ([`JobSizes::log_checks_start`]), before the held runs' checks. Every line of this module is
+//! logged under the target `js_sched_placer::sizes::profile`.
 
 use std::collections::BTreeMap;
 
@@ -336,6 +339,22 @@ impl JobSizes {
         job.result
             .iter()
             .for_each(|result| profiles.feed(job, result, run, log));
+    }
+
+    /// Logs, when profiles are kept, that the checks start: a start's teaching of the ended jobs
+    /// ([`crate::place::SchedPlacer::teach`]) has taught `ended_jobs` of them in `took`, and the
+    /// profiles hold the classes they made. Called once per teaching, after the ended jobs and
+    /// before the runs the passes held, whose check lines follow it.
+    pub(super) fn log_checks_start(&self, ended_jobs: usize, took: std::time::Duration) {
+        let Some(profiles) = self.profiles.as_ref() else {
+            return;
+        };
+        info!(
+            classes = profiles.classes.len(),
+            ended_jobs,
+            took_secs = took.as_secs(),
+            "placement curves: the shadow checks start, the profiles learned from the ended jobs"
+        );
     }
 }
 
