@@ -67,6 +67,7 @@ fn reading(seq: u64, bad: bool) -> Wire {
         mono_usec: seq * 5_000_000,
         cpu_usage_usec: seq * 1_000_000,
         host_cpu_usec: None,
+        host_cpu_pressure_some_usec: None,
         working_set_bytes: if bad { MAX_MEMORY_BYTES + 1 } else { 1 << 30 },
         active_file_bytes: 0,
         host_nonfile_bytes: None,

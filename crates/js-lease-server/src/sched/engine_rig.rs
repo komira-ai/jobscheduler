@@ -190,6 +190,7 @@ pub(super) fn reading(seq: u64, cores: u64, working_set: u64) -> Wire {
         mono_usec: seq * 5_000_000,
         cpu_usage_usec: seq * 5 * cores * 1_000,
         host_cpu_usec: None,
+        host_cpu_pressure_some_usec: None,
         working_set_bytes: working_set,
         active_file_bytes: 0,
         host_nonfile_bytes: None,

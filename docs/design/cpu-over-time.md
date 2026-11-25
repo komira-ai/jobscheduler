@@ -29,7 +29,9 @@ with no CPU limit). **MEASURED**, counted from the export or the farm's metrics,
 2. A booking is one number. A class can average a few cores and burst to 20 for a few seconds. The sum of bookings
    can then sit at 1.1x of a host's cores while the real demand in some seconds is several times that.
 3. Even read, a host cannot measure above its cores (READ: `NodeLoad::busy_millicores_since`, `WorkerLoad::left`):
-   it reads 88 and admits until bookings reach 96.8. Only pressure shows overload, and no agent sends it.
+   it reads 88 and admits until bookings reach 96.8. Only pressure shows overload, and no agent sent it. (Since
+   then the agent sends the host's `/proc/pressure/cpu` `some` total and the measured term is the cores demanded,
+   busy plus waiting: `NodeLoad::demand_millicores_since`, `docs/design/placement-by-load.md`, Signals.)
 4. The agent reads every job's CPU counter once a second, keeps the highest five-second rate, and throws the rest
    away (READ: `crates/js-agent/src/crun/peak.rs`, `PeakWindow`). The server therefore cannot tell a steady 2 cores
    from 1 core for 60 s followed by 20 cores for 3 s.
@@ -277,8 +279,8 @@ L_h(k) = sum_j E_j(k) + B_h * max(0, 1 - k/5)
 B_h    = max(0, measured_busy_h - sum over covered jobs of E_j(0))          // 0 when the reading is stale
 fits(n, h)  <=>  for every slot k in 0..64:  L_h(k) + E_n(k) <= cap
 ```
-`measured_busy_h` is the whole host's busy CPU (section 3), the larger of the last two windows, stale after 15 s
-(READ: `WorkerLoad::measured`); work that is no job's shows in `B_h` at every reading. "Covered" means running at the previous reading. At slot 0 this is today's load rule; with all profiles
+`measured_busy_h` is the whole host's measured CPU (section 3; the cores demanded, busy plus waiting), the larger of
+the last two windows, stale after 15 s (READ: `WorkerLoad::measured`); work that is no job's shows in `B_h` at every reading. "Covered" means running at the previous reading. At slot 0 this is today's load rule; with all profiles
 flat every slot holds the same number. That equality is the first test. Among hosts where the job fits, the existing
 scorer ranks them. The two flat checks that exist (`Room::fits`, and `Capacity::has_room` in `place_claimed`) stay,
 so the curve rule can only hold a job that today would be placed. After the 30 s hold bound the job skips the curve

@@ -128,6 +128,7 @@ impl<S: HostStatistics> NodeSampler for HostSampler<S> {
             mono_usec,
             cpu_usage_usec: busy,
             host_cpu_usec: busy,
+            host_cpu_pressure_some_usec: None,
             working_set_bytes: nonfile,
             host_nonfile_bytes: Some(nonfile),
             active_file_bytes: 0,
