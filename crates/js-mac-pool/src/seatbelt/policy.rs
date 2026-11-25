@@ -9,6 +9,7 @@ use super::grant::{PinnedTree, ReadGrant};
 use super::net::Net;
 use super::path::AbsPath;
 use super::selftest::Assurance;
+use super::trees::MountTrees;
 use crate::xcode::HostXcode;
 
 /// The most entries any one list of a policy holds. Each is a rule and a `-D` parameter
@@ -43,6 +44,23 @@ pub enum PolicyError {
     /// More than one Xcode was granted.
     #[error("more than one Xcode granted")]
     TwoXcodes,
+    /// A mount grant is the trees' mount root, above it or below it: its read grant would
+    /// reopen what the trees' rule denies.
+    #[error("a mount grant overlaps the trees' mount root")]
+    MountOverTrees,
+    /// Trees were given to a policy of the allow read model, whose read grants are made of
+    /// proof objects only ([`Policy::allowing`]).
+    #[error("trees on a mount need the open read model")]
+    TreesNeedOpenModel,
+    /// A mount grant is a read-denied path or lies above one: its grant, emitted after the
+    /// read denies, would reopen the denied path. (A grant below a denied path is the
+    /// intended way to open part of it.)
+    #[error("a mount grant holds a read-denied path")]
+    MountOverReadDeny,
+    /// A homes root is the run's own home or lies below it: the own home's read grant,
+    /// emitted after the homes' denies, would reopen it.
+    #[error("a homes root lies in the run's own home")]
+    HomesInOwnHome,
 }
 
 /// One host directory a run may use, granted by its canonical path (Seatbelt matches the
@@ -73,6 +91,10 @@ pub struct SlotLayout {
     /// Host directories granted to this run, after the read denies (so a mount under a
     /// denied mount root is readable again) and before the network rules.
     pub mounts: Vec<MountGrant>,
+    /// The run's own trees on the store's shared mount, if the host has one: nothing else
+    /// below the mount's root is readable. Rendered before the read denies, so a read deny
+    /// also holds inside a tree.
+    pub trees: Option<MountTrees>,
 }
 
 /// What the agent allows at most, from its flags.
@@ -92,7 +114,9 @@ pub struct Policy {
     uid_entry: Option<AbsPath>,
     inputs: BTreeSet<AbsPath>,
     read_denies: BTreeSet<AbsPath>,
+    homes: BTreeSet<AbsPath>,
     mounts: BTreeSet<MountGrant>,
+    trees: Option<MountTrees>,
     net: Net,
     read_model: ReadModel,
     allow: Option<AllowGrants>,
@@ -158,19 +182,37 @@ impl Policy {
     /// The widest policy for `layout` that `caps` allow.
     ///
     /// # Errors
-    /// [`PolicyError::TooMany`] for a list over [`MAX_LISTED`].
+    /// [`PolicyError::TooMany`] for a list over [`MAX_LISTED`],
+    /// [`PolicyError::MountOverReadDeny`] for a mount grant at or above a read-denied path,
+    /// [`PolicyError::MountOverTrees`] for a mount grant that overlaps the trees' mount
+    /// root, and [`PolicyError::TreesNeedOpenModel`] for trees under the allow read model.
     pub fn base(layout: SlotLayout, caps: Caps) -> Result<Self, PolicyError> {
         let policy = Self {
             run: layout.run,
             uid_entry: layout.uid_entry,
             inputs: layout.inputs.into_iter().collect(),
             read_denies: layout.read_denies.into_iter().collect(),
+            homes: BTreeSet::new(),
             mounts: layout.mounts.into_iter().collect(),
+            trees: layout.trees,
             net: caps.net,
             read_model: caps.read_model,
             allow: None,
         };
         policy.check()?;
+        if let Some(trees) = &policy.trees {
+            if policy.read_model != ReadModel::Open {
+                return Err(PolicyError::TreesNeedOpenModel);
+            }
+            let root = trees.root();
+            if policy
+                .mounts
+                .iter()
+                .any(|mount| mount.path.starts_with(root) || root.starts_with(&mount.path))
+            {
+                return Err(PolicyError::MountOverTrees);
+            }
+        }
         Ok(policy)
     }
 
@@ -211,7 +253,10 @@ impl Policy {
     /// This policy with `narrowing` applied. No narrowing widens anything.
     ///
     /// # Errors
-    /// [`PolicyError::TooMany`] for a list that grows over [`MAX_LISTED`].
+    /// [`PolicyError::TooMany`] for a list that grows over [`MAX_LISTED`],
+    /// [`PolicyError::MountOverReadDeny`] for a read deny or a homes root added at or below
+    /// a mount grant (the grant would reopen it), and [`PolicyError::HomesInOwnHome`] for a
+    /// homes root at or below the run's own home.
     pub fn narrowed(mut self, narrowing: Narrowing) -> Result<Self, PolicyError> {
         if let Some(net) = narrowing.net {
             self.net = self.net.narrow(net);
@@ -221,6 +266,7 @@ impl Policy {
         }
         self.inputs.extend(narrowing.protect);
         self.read_denies.extend(narrowing.deny_read);
+        self.homes.extend(narrowing.deny_homes);
         self.check()?;
         Ok(self)
     }
@@ -240,7 +286,27 @@ impl Policy {
     fn check(&self) -> Result<(), PolicyError> {
         bounded(self.inputs.len(), "inputs")?;
         bounded(self.read_denies.len(), "read denies")?;
-        bounded(self.mounts.len(), "mounts")
+        bounded(self.homes.len(), "homes")?;
+        bounded(self.mounts.len(), "mounts")?;
+        let over = |mount: &MountGrant| {
+            self.read_denies
+                .iter()
+                .chain(&self.homes)
+                .any(|deny| deny.starts_with(&mount.path))
+        };
+        if self.mounts.iter().any(over) {
+            return Err(PolicyError::MountOverReadDeny);
+        }
+        let own = self.own_home();
+        let in_own = |home: &AbsPath| {
+            home.as_str()
+                .strip_prefix(own)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+        };
+        if self.homes.iter().any(in_own) {
+            return Err(PolicyError::HomesInOwnHome);
+        }
+        Ok(())
     }
 
     pub(super) fn allow(&self) -> Option<&AllowGrants> {
@@ -263,8 +329,37 @@ impl Policy {
         &self.read_denies
     }
 
+    pub(super) fn homes(&self) -> &BTreeSet<AbsPath> {
+        &self.homes
+    }
+
+    /// The run's own home: the directory just below the deepest homes root that holds the
+    /// run directory below it (`/Users/<account>` for `/Users/<account>/exec`), or the run
+    /// directory itself when no root holds it. A prefix of the run directory, by whole
+    /// components.
+    pub(super) fn own_home(&self) -> &str {
+        let run = self.run.as_str();
+        let holder = self
+            .homes
+            .iter()
+            .filter(|home| self.run.starts_with(home) && self.run != **home)
+            .map(|home| home.as_str().len())
+            .max();
+        let Some(len) = holder else {
+            return run;
+        };
+        let end = run[len + 1..]
+            .find('/')
+            .map_or(run.len(), |at| len + 1 + at);
+        &run[..end]
+    }
+
     pub(super) fn mounts(&self) -> &BTreeSet<MountGrant> {
         &self.mounts
+    }
+
+    pub(super) fn trees(&self) -> Option<&MountTrees> {
+        self.trees.as_ref()
     }
 }
 
@@ -278,7 +373,8 @@ fn bounded(len: usize, what: &'static str) -> Result<(), PolicyError> {
 /// A request to narrow a policy. Every field can only take something away or add a
 /// deny: a level is met with the policy's level (the lower wins), the user-folder grant
 /// can be dropped, and paths can be added to the denies. There is no field
-/// that adds a grant or raises a level.
+/// that adds a grant or raises a level (the own home's read grant that follows the homes'
+/// denies gives back only what they took).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Narrowing {
     /// A level to meet with the policy's.
@@ -289,4 +385,12 @@ pub struct Narrowing {
     pub protect: Vec<AbsPath>,
     /// More paths to read-deny.
     pub deny_read: Vec<AbsPath>,
+    /// Roots of users' homes to read-deny, the run's own home below one excepted (the
+    /// directory just below the deepest root that holds the run directory): their denies
+    /// come before every read grant of the profile, so the own home (granted back right
+    /// after them, with the names of its ancestors), the trees and the mount grants still
+    /// open what they name, and the read denies still close what they name. A root at or
+    /// below the own home is refused ([`PolicyError::HomesInOwnHome`]), and so is a mount
+    /// grant at or above a root ([`PolicyError::MountOverReadDeny`]).
+    pub deny_homes: Vec<AbsPath>,
 }

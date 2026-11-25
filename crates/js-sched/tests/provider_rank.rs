@@ -55,7 +55,7 @@ fn load(r: &mut Rig, worker: &str, others: &[&str], count: u64) {
     }
 }
 
-/// `static-1` and `cloud-1`, both free, the one named `loaded` holding four one-core
+/// `static-1` and `cloud-1`, both free, the one named `loaded` holding three one-core
 /// actions: the one the score prefers (it fills before it opens).
 fn two_free(loaded: &str) -> Rig {
     let mut r = Rig::on();
@@ -66,7 +66,7 @@ fn two_free(loaded: &str) -> Rig {
     } else {
         "static-1"
     };
-    load(&mut r, loaded, &[other], 4);
+    load(&mut r, loaded, &[other], 3);
     r
 }
 
@@ -131,13 +131,13 @@ fn a_free_worker_of_a_later_provider_takes_what_the_first_cannot_now() {
 
 /// Asserts that within the first provider the score decides as it does with no ranks at
 /// all: of two free workers of the first provider and a free worker of a later one that the
-/// score prefers to both (it holds four actions, the fill closest to full), the action goes to
-/// the first provider's worker the score prefers (`static-2`, which holds three); and with the
+/// score prefers to both (it holds three actions, the fill closest to full), the action goes to
+/// the first provider's worker the score prefers (`static-2`, which holds two); and with the
 /// two equal, to the worker the unranked tie-break picks between those two alone. It catches a
 /// score that crosses providers, and a changed order within one.
 #[test]
 fn within_one_provider_load_decides() {
-    // `cloud-1` holds four actions and `static-2` holds `static_2`; ranked, or unranked with
+    // `cloud-1` holds three actions and `static-2` holds `static_2`; ranked, or unranked with
     // `cloud-1` cordoned or not.
     #[derive(Clone, Copy, PartialEq)]
     enum Mode {
@@ -150,7 +150,7 @@ fn within_one_provider_load_decides() {
         for name in ["static-1", "static-2", "cloud-1"] {
             r.up(name, node());
         }
-        load(&mut r, "cloud-1", &["static-1", "static-2"], 4);
+        load(&mut r, "cloud-1", &["static-1", "static-2"], 3);
         load(&mut r, "static-2", &["static-1", "cloud-1"], static_2);
         if mode == Mode::Ranked {
             r.s.set_provider_rank(&w("static-1"), rank("static", 0));
@@ -169,8 +169,8 @@ fn within_one_provider_load_decides() {
             .map(|s| (*s).to_owned())
             .collect::<Vec<String>>()
     };
-    assert_eq!(rig(3, Mode::Unranked), ["cloud-1"], "the score alone");
-    assert_eq!(rig(3, Mode::Ranked), ["static-2"]);
+    assert_eq!(rig(2, Mode::Unranked), ["cloud-1"], "the score alone");
+    assert_eq!(rig(2, Mode::Ranked), ["static-2"]);
     // Equal: the tie-break between the two, the same lease asked, as the score gives it
     // with the later provider's worker out of the way.
     assert_eq!(rig(0, Mode::Ranked), rig(0, Mode::CloudCordoned));

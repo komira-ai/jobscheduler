@@ -9,7 +9,7 @@ use js_agent_wire::limits::MAX_LOG_STREAM_LEN;
 use js_state::conformance::Backend;
 use js_state::{Cond, Store, StoreError, StoreTime, Txn};
 
-use super::{Rig, cancelled, exited, job_id, output, rig};
+use super::{Rig, cancelled, exited, job_id, output, rig, series};
 use crate::codec::{LATER_FORMAT, encode_job};
 use crate::interfere::INJECTED;
 use crate::{
@@ -79,6 +79,8 @@ pub fn a_result_is_readable_until_the_retention_end_and_not_after<B: Backend>(ba
             cpu_peak: None,
         }),
         logs: None,
+        cpu_series: Some(series()),
+        memory_series: None,
         input_failure: None,
     };
     assert_eq!(
@@ -513,6 +515,8 @@ pub fn an_overlong_tail_is_cut_on_a_character_boundary<B: Backend>(backend: &B) 
             truncated: false,
             usage: None,
             logs: None,
+            cpu_series: None,
+            memory_series: None,
         },
     };
     let ended = rig.jobs.end_job(&id, end).expect("ends");

@@ -48,7 +48,7 @@ use crate::status::Status;
 /// (`cargo xtask gen-job-surface` writes that text), and a test of this file sends every call
 /// to the service `from_server` builds and fails when one answers otherwise than this list
 /// says.
-pub const SERVED_CALLS: [Rpc; 13] = [
+pub const SERVED_CALLS: [Rpc; 14] = [
     Rpc::SubmitJob,
     Rpc::GetJob,
     Rpc::ListJobs,
@@ -59,6 +59,7 @@ pub const SERVED_CALLS: [Rpc; 13] = [
     Rpc::CordonHost,
     Rpc::UncordonHost,
     Rpc::ClearHostTaint,
+    Rpc::RetireHost,
     Rpc::ListPools,
     Rpc::ListProviders,
     Rpc::GetUsage,
@@ -82,7 +83,7 @@ pub(crate) fn from_server(
         Arc::clone(&jobs),
     );
     let submit = submit::Ctx::served(max_job_wall, Arc::new(admission));
-    let submit = submit.placing(Arc::clone(agents));
+    let submit = submit.poking(Arc::clone(agents));
     let shared: Arc<Shared> = Arc::clone(state);
     let hosts: Arc<dyn Hosts> = shared;
     let pools: Arc<dyn Pools> = match state.pools() {

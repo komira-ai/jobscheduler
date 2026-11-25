@@ -37,6 +37,10 @@ pub(super) struct Entry {
     pub(super) vm: bool,
     /// The newest accepted reading lists it as running for the whole window.
     pub(super) covered: bool,
+    /// It was on the ledger when the newest accepted reading was taken in, so the reading's
+    /// window may hold some of its CPU: at minute 0 its cores are added to the window before
+    /// the newest, not to the measurement. Every covered lease is seen.
+    pub(super) seen: bool,
     /// How it is charged over time, when it is charged by curve or to an expected life.
     pub(super) profile: Option<Arc<Profile>>,
     /// Its age in whole minutes as of the newest accepted reading (its own clock); 0 for
@@ -64,6 +68,7 @@ impl Entry {
             cost,
             vm,
             covered: false,
+            seen: false,
             profile,
             age: 0,
             clocked: false,
@@ -110,6 +115,9 @@ pub(crate) struct Ended {
 pub(crate) struct Totals {
     pub(crate) cpu_covered: u64,
     pub(crate) cpu_uncovered: u64,
+    /// Of `cpu_uncovered`, the cores of the leases placed after the newest accepted reading
+    /// was taken in: no reading has seen them.
+    pub(crate) cpu_unseen: u64,
     pub(crate) mem_covered: u64,
     pub(crate) mem_uncovered: u64,
     pub(crate) vm_cpu: u64,
@@ -137,6 +145,13 @@ impl Totals {
         } else {
             *cpu = cpu.saturating_sub(c.cpu_millis);
             *mem = mem.saturating_sub(c.memory_bytes);
+        }
+        if !entry.vm && !entry.seen {
+            self.cpu_unseen = if up {
+                self.cpu_unseen.saturating_add(c.cpu_millis)
+            } else {
+                self.cpu_unseen.saturating_sub(c.cpu_millis)
+            };
         }
         if !entry.vm {
             if up {
@@ -175,6 +190,15 @@ impl Totals {
         self.cpu_uncovered
             .saturating_sub(l.timed_cpu_unc_p)
             .saturating_add(l.cpu_unc.at(slot))
+    }
+
+    /// What the leases no accepted reading has seen are charged `slot` minutes ahead: the
+    /// part of [`Totals::cpu_uncovered_at`] that is placed after the newest reading.
+    pub(crate) fn cpu_unseen_at(&self, slot: usize) -> u64 {
+        let l = &self.lanes;
+        self.cpu_unseen
+            .saturating_sub(l.timed_cpu_unseen_p)
+            .saturating_add(l.cpu_unseen.at(slot))
     }
 
     /// Memory the action leases are charged `slot` minutes ahead, covered or not.
@@ -233,8 +257,12 @@ pub(crate) struct Left {
     /// it through [`Left::charged_cpu`].
     pub(crate) floor_cpu: u64,
     /// The measured cores, in millicores, the left side holds (0 when it is charged by
-    /// prediction alone).
+    /// prediction alone: `fallback` tells that from a host measured idle).
     pub(crate) measured: u64,
+    /// The cores of the window before the newest, which ended before any lease the newest
+    /// reading has seen uncovered was placed ([`WorkerLoad::measured_before`]); `measured`
+    /// when there is no such window, and 0 when charged by prediction alone.
+    pub(crate) before: u64,
     /// The working set that counts against memory (0 when charged by prediction alone).
     pub(crate) working_set: u64,
 }
@@ -312,7 +340,7 @@ impl WorkerLoad {
         for entry in self.ledger.values_mut() {
             entry.ws_over = 0;
         }
-        self.cover(&BTreeSet::new());
+        self.cover(&BTreeSet::new(), false);
     }
 
     /// Records that one more cold lease was admitted in the window of `now`.
@@ -333,10 +361,14 @@ impl WorkerLoad {
         }
     }
 
-    fn cover(&mut self, covered: &BTreeSet<LeaseId>) {
+    /// Rebuilds the sums with `covered` as the leases that ran the whole window; every
+    /// action lease on the ledger is `seen` by the reading taken in, or none when there is
+    /// no reading (and then `covered` is empty, so every covered lease is seen).
+    fn cover(&mut self, covered: &BTreeSet<LeaseId>, seen: bool) {
         self.totals = Totals::default();
         for (lease, entry) in &mut self.ledger {
             entry.covered = !entry.vm && covered.contains(lease);
+            entry.seen = !entry.vm && seen;
             entry.aged = !entry.covered || entry.clocked;
             self.totals.shift(entry, true);
         }
@@ -411,7 +443,7 @@ impl WorkerLoad {
             arrived: now,
             windows: [window, older],
         });
-        self.cover(&covered);
+        self.cover(&covered, true);
         if let Some(measured) = self.measured() {
             counters.floor_windows += 1;
             if self.totals.cpu_covered_at(0, cfg) > u64::from(measured) {
@@ -432,8 +464,17 @@ impl WorkerLoad {
         r.windows.iter().flatten().copied().max()
     }
 
-    /// Whether the measured CPU is above the predicted sum of the covered leases
-    /// (`M > P_c`): the predictions are known to be too low here. Plain, before the floor.
+    /// Cores busy, in millicores, over the window before the newest: it ended at the
+    /// reading before the newest, so it holds none of the CPU of a lease placed after that
+    /// reading. [`WorkerLoad::measured`] when there is no such window yet.
+    pub(crate) fn measured_before(&self) -> Option<u32> {
+        let r = self.readings.as_ref()?;
+        r.windows[1].or_else(|| self.measured())
+    }
+
+    /// Whether the measured CPU, the whole host's, is above the predicted sum of the covered
+    /// leases (`M > P_c`): the predictions are too low here, or work besides the leases
+    /// keeps the host busy. Plain, before the floor.
     pub(crate) fn measured_above_covered(&self) -> bool {
         self.measured()
             .is_some_and(|m| u64::from(m) > self.totals.cpu_covered)
@@ -521,9 +562,14 @@ impl WorkerLoad {
     /// By measurement (a fresh signal):
     ///
     /// ```text
-    /// cpu = max(measured, f * sum p(covered)) + sum p(uncovered) + V_cpu
+    /// cpu = max(measured, max(before, f * sum p(covered)) + sum p(seen)) + sum p(unseen) + V_cpu
     /// mem = max(sum m(all), working_set + sum m(uncovered)) + V_mem
     /// ```
+    ///
+    /// A lease placed before the newest reading was taken in is seen by it: some of what it
+    /// has used is in the measurement, so its cores are added to the window before the
+    /// newest ([`WorkerLoad::measured_before`]), not to the measurement. Only the leases
+    /// placed after that reading (unseen) are charged on top of the measurement.
     ///
     /// Without one, the fallback charges every lease its full predicted cost once, and
     /// the working set is not read. On a worker that never sent an accepted reading each
@@ -533,13 +579,15 @@ impl WorkerLoad {
         let t = &self.totals;
         if let Some(reading) = self.fresh_reading(now, cfg) {
             let measured = u64::from(self.measured().unwrap_or(0));
+            let before = u64::from(self.measured_before().unwrap_or(0));
             let ws = self.working_set_counted(reading, capacity, cfg);
             Left {
-                cpu: horizon::cpu_left(t, 0, measured, cfg),
+                cpu: horizon::cpu_left(t, 0, (measured, before), cfg),
                 mem: horizon::mem_left(t, 0, ws),
                 fallback: false,
                 floor_cpu: 0,
                 measured,
+                before,
                 working_set: ws,
             }
         } else if self.measured_once {
@@ -549,6 +597,7 @@ impl WorkerLoad {
                 fallback: true,
                 floor_cpu: 0,
                 measured: 0,
+                before: 0,
                 working_set: 0,
             }
         } else {
@@ -565,6 +614,7 @@ impl WorkerLoad {
                 fallback: true,
                 floor_cpu: floor,
                 measured: 0,
+                before: 0,
                 working_set: 0,
             }
         }
@@ -586,7 +636,7 @@ impl WorkerLoad {
         }
         let t = &self.totals;
         (
-            horizon::cpu_left(t, slot, left.measured, cfg),
+            horizon::cpu_left(t, slot, (left.measured, left.before), cfg),
             horizon::mem_left(t, slot, left.working_set),
         )
     }
@@ -632,7 +682,7 @@ impl WorkerLoad {
             let (new, limit) = (left.charged_cpu(cost), cfg.cpu_limit(capacity));
             if left.cpu.saturating_add(new) > limit {
                 let refusal = Refusal::new(RefusalKind::Cpu, left.cpu, new, limit);
-                return Err(refusal.measured(left.measured));
+                return Err(refusal.measured((!left.fallback).then_some(left.measured)));
             }
             let limit = cfg.mem_limit(capacity);
             if left.mem.saturating_add(cost.memory_bytes) > limit {
@@ -836,6 +886,76 @@ mod tests {
         assert_eq!(*load.totals(), Totals::default());
     }
 
+    /// Catches: a lease placed before a reading counted again beside the measurement, which
+    /// holds some of what it used; such a lease hidden in the measurement, which may be other
+    /// work, instead of added to the window before it was placed; and a lease placed after
+    /// the reading taken into the measurement's maximum. A covered lease (30 cores) and two
+    /// uncovered ones (one by curve, one flat) are on the ledger when a reading is taken in.
+    /// Two more are placed after it, and a VM, which no reading sees. At minute 0 the seen
+    /// leases are added to the larger of the window before and the covered charge, that is
+    /// raised to the measurement, and the unseen leases and the VM are added on top; later
+    /// minutes have no measurement. A new session leaves no lease seen, and the sums are
+    /// empty when the leases go.
+    #[test]
+    fn leases_placed_before_a_reading_are_added_to_the_window_before_it() {
+        let mut load = WorkerLoad::default();
+        let cfg = LoadConfig::default();
+        let capacity = Resources::new(400_000, 64 * GIB);
+        let mut counters = LoadCounters::default();
+        let read = |seq: u64, covered: Vec<LeaseId>| NodeLoad {
+            seq,
+            mono_usec: seq * 5_000_000,
+            covered,
+            ..NodeLoad::default()
+        };
+        let now = FarmTime::from_millis(0);
+        let by_curve = || Some(profile(true, true, false, None));
+        load.insert(lease(4), cost(30_000, GIB), false, None);
+        load.insert(lease(0), cost(20_000, GIB), false, by_curve());
+        load.insert(lease(1), cost(20_000, GIB), false, None);
+        for (seq, covered) in [(1, Vec::new()), (2, vec![lease(4)])] {
+            let reading = read(seq, covered);
+            load.accept(
+                reading,
+                now,
+                &capacity,
+                capacity.memory_bytes,
+                &cfg,
+                &mut counters,
+            );
+        }
+        load.insert(lease(2), cost(20_000, GIB), false, by_curve());
+        load.insert(lease(3), cost(20_000, GIB), false, None);
+        load.insert(lease(5), cost(10_000, GIB), true, None);
+        let t = *load.totals();
+        // Seen: lease 0 by curve (60 cores, the larger of minutes 0 and 1), lease 1 flat
+        // (20). Unseen: the same again. The VM is in neither.
+        assert_eq!(t.cpu_uncovered_at(0), 2 * (60_000 + 20_000));
+        assert_eq!(
+            (t.cpu_unseen_at(0), t.cpu_unseen),
+            (60_000 + 20_000, 40_000)
+        );
+        let (seen, unseen, vm) = (80_000, 80_000, 10_000);
+        let at = |measured, before| horizon::cpu_left(&t, 0, (measured, before), &cfg);
+        // The covered charge above the window before; then the window before above it.
+        assert_eq!(at(30_000, 0), 30_000 + seen + unseen + vm);
+        assert_eq!(at(60_000, 50_000), 50_000 + seen + unseen + vm);
+        // The measurement above both sums: it holds the seen leases' use.
+        assert_eq!(at(150_000, 10_000), 150_000 + unseen + vm);
+        assert_eq!(
+            horizon::cpu_left(&t, 5, (150_000, 10_000), &cfg),
+            30_000 + seen + unseen + vm
+        );
+        load.new_session();
+        let t = *load.totals();
+        assert_eq!(t.cpu_unseen, t.cpu_uncovered);
+        assert_eq!(t.cpu_unseen_at(0), t.cpu_uncovered_at(0));
+        for i in 0..6 {
+            load.remove(lease(i));
+        }
+        assert_eq!(*load.totals(), Totals::default());
+    }
+
     fn keyed(cpu: u64, hash: u64) -> LeaseCost {
         LeaseCost {
             key_hash: hash,
@@ -854,7 +974,7 @@ mod tests {
         load.insert(lease(3), keyed(4_000, 8), false, None);
         load.insert(lease(4), keyed(8_000, 7), true, None);
         load.insert(lease(5), keyed(16_000, 0), false, None);
-        load.cover(&BTreeSet::from([lease(1)]));
+        load.cover(&BTreeSet::from([lease(1)]), true);
         assert_eq!(load.same_key_millis(7), 3_000);
         assert_eq!(load.same_key_millis(8), 4_000);
         assert_eq!(load.same_key_millis(9), 0);
@@ -870,7 +990,7 @@ mod tests {
         load.insert(lease(2), cost(1_000, 0), false, None);
         load.insert(lease(3), cost(1_000, 0), true, None);
         assert_eq!(load.uncovered_leases(), 2);
-        load.cover(&BTreeSet::from([lease(2), lease(3)]));
+        load.cover(&BTreeSet::from([lease(2), lease(3)]), true);
         assert_eq!(load.uncovered_leases(), 1);
     }
 
@@ -887,7 +1007,7 @@ mod tests {
         let mut load = WorkerLoad::default();
         load.insert(lease(1), cost(1_000, 0), false, None);
         load.insert(lease(2), cost(5_000, 0), false, None);
-        load.cover(&BTreeSet::from([lease(1)]));
+        load.cover(&BTreeSet::from([lease(1)]), true);
         assert!(!load.measured_above_covered(), "no window yet");
         load.readings = Some(readings([Some(1_000), None]));
         assert!(!load.measured_above_covered(), "equal is not above");

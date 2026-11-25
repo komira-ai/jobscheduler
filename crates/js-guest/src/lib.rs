@@ -60,6 +60,8 @@ pub mod sim_parse;
 pub mod sim_primed;
 pub mod sim_run;
 #[cfg(test)]
+mod sim_stream_tests;
+#[cfg(test)]
 mod sim_tests;
 pub mod sim_user;
 pub mod sim_xctest;

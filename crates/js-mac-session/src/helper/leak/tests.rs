@@ -164,8 +164,8 @@ fn break_the_reset(rig: &Rig) {
 #[test]
 fn a_live_lease_s_user_is_no_item_and_is_one_once_its_lease_ended() {
     let rig = baselined("leak-live-lease");
-    let uid = rig.helper.user_create("5.1", None).unwrap();
-    rig.helper.user_create("5.2", None).unwrap();
+    let uid = rig.helper.user_create("5.1").unwrap();
+    rig.helper.user_create("5.2").unwrap();
     assert_eq!(rig.helper.scan().unwrap(), ScanReport::default());
     break_the_reset(&rig);
     rig.helper.user_delete("5.1").unwrap_err();
@@ -213,7 +213,7 @@ const PLANTS: [(&str, Plant, &str); 11] = [
     (
         "the user of a slot broken at the end of its lease",
         |rig| {
-            rig.helper.user_create("5.1", None).unwrap();
+            rig.helper.user_create("5.1").unwrap();
             break_the_reset(rig);
             rig.helper.user_delete("5.1").unwrap_err();
         },
@@ -480,7 +480,7 @@ fn baseline_outside_its_window_is_refused() {
     let error = rig.helper.baseline().unwrap_err();
     assert!(error.contains("this boot's identifier"), "{error}");
     rig.host.state().fail.clear();
-    rig.helper.user_create("1.1", None).unwrap();
+    rig.helper.user_create("1.1").unwrap();
     // The user exists and the window is opened again (an apply while it lived).
     open_window(&rig);
     let error = rig.helper.baseline().unwrap_err();
@@ -498,7 +498,7 @@ fn baseline_outside_its_window_is_refused() {
 fn the_first_lease_user_closes_the_window() {
     let rig = furnished("leak-first");
     open_window(&rig);
-    rig.helper.user_create("1.1", None).unwrap();
+    rig.helper.user_create("1.1").unwrap();
     assert!(!rig.dir.join("baseline-window").exists());
     rig.helper.kill_uid("1.1").unwrap();
     rig.helper.user_delete("1.1").unwrap();
@@ -506,11 +506,11 @@ fn the_first_lease_user_closes_the_window() {
     assert!(error.contains("window is closed"), "{error}");
     // A window that cannot be removed (a directory with something in it).
     std::fs::create_dir_all(rig.dir.join("baseline-window/x")).unwrap();
-    let error = rig.helper.user_create("1.2", None).unwrap_err().to_string();
+    let error = rig.helper.user_create("1.2").unwrap_err().to_string();
     assert!(error.contains("closing "), "{error}");
     assert!(rig.helper.pool_status().leased.is_empty());
     std::fs::remove_dir_all(rig.dir.join("baseline-window")).unwrap();
-    assert_eq!(rig.helper.user_create("1.2", None), Ok(me()));
+    assert_eq!(rig.helper.user_create("1.2"), Ok(me()));
 }
 
 /// Catches: a baseline that cannot be written reported as recorded.
@@ -558,7 +558,7 @@ fn reboot_dirty_needs_the_helpers_own_dirty_scan() {
     // Dirty, then a lease user: stale (the reboot would cut the new lease).
     std::fs::write(&plant, "x").unwrap();
     rig.helper.scan().unwrap();
-    rig.helper.user_create("1.1", None).unwrap();
+    rig.helper.user_create("1.1").unwrap();
     refused(&rig);
     // Dirty, then a scan refused for want of a baseline.
     rig.helper.scan().unwrap();

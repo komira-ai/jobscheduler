@@ -276,36 +276,35 @@ async fn the_containers_cgroup_kills_as_a_group_on_out_of_memory() {
     assert_eq!(lines, ["0::/", "1"], "{}", run.said);
 }
 
-/// Catches a job that reads `max` in its own `memory.max` while its lease holds it to the
-/// memory booking (a tool that sizes itself from that file then sizes itself to the node),
-/// and one that reads a CPU ceiling: with the limits naming the lease's booking of 512 MiB,
-/// the job reads `536870912` there, `max 100000` in its `cpu.max` (the CPU booking is a
-/// share, so there is none), and its `pids.max` is the limit given.
+/// Catches a job that reads its memory booking as a limit in its own cgroup (a tool that sizes
+/// itself from that file would size itself to a booking the job may go past), a swap limit,
+/// and a CPU ceiling: a lease that booked 512 MiB under the agent's policy runs a job that
+/// reads `max` in its `memory.max` and its `memory.swap.max`, `max 100000` in its `cpu.max`
+/// (the CPU booking is a share, so there is none), and its `pids.max` is the limit given.
 #[tokio::test]
 #[ignore = "real crun, root and a job user: run through cargo xtask crun-tests --job-user"]
-async fn the_job_reads_its_booking_in_its_own_cgroup() {
+async fn the_job_reads_no_memory_or_cpu_limit_in_its_own_cgroup() {
     let cell = Cell::new("booking");
-    let shape = Shape::default();
     let lease = cell.lease(
         "booking",
         &[
             "/bin/sh",
             "-c",
-            "cat /sys/fs/cgroup/cpu.max /sys/fs/cgroup/memory.max /sys/fs/cgroup/pids.max",
+            "cat /sys/fs/cgroup/cpu.max /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.swap.max \
+             /sys/fs/cgroup/pids.max",
         ],
         Shape {
             limits: ContainerLimits {
                 pids: 32_768,
-                memory_bytes: Some(shape.memory),
                 ..ContainerLimits::DEFAULT
             },
-            ..shape
+            ..Shape::default()
         },
     );
     let running = cell.start(&lease).await;
     let run = cell.finish(&lease, running).await;
     let lines: Vec<&str> = run.out().lines().collect();
-    assert_eq!(lines, ["max 100000", "536870912", "32768"], "{}", run.said);
+    assert_eq!(lines, ["max 100000", "max", "max", "32768"], "{}", run.said);
 }
 
 /// Catches an exec-root overlay mounted without the pinned options, and one that can run

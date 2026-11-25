@@ -29,8 +29,11 @@ clap = { version = "4.6.7", features = ["derive"] }
 # macOS only (js-mac-session): CFData for the caller's audit token.
 core-foundation = "0.10.1"
 dispatch2 = { version = "0.3.1", default-features = false, features = ["std", "objc2"] }
-ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std"] }
 flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
+# The concurrent uploads and the request streams of xtask's `mac-farm` (a REAPI client), and the
+# fake farm of its tests. Already in Cargo.lock at this version through tonic, so the lock gains no
+# package.
+futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 getrandom = "0.2.17"
 # The HTTP/JSON gateway (js-api-gateway): the Rust names of generated methods and messages,
 # by the same conversion prost and tonic use. In the lock already through prost-build.
@@ -195,6 +198,9 @@ incremental = false
 # `test` profile, so this half alone reaches it; a `dev` override would only slow
 # debug builds. A name that matches no package only draws a cargo warning:
 # crates/xtask/tests/profile_overrides.rs checks the names.
+[profile.test.package.js-cpu-replay]
+opt-level = 2
+
 [profile.test.package.js-sched]
 opt-level = 2
 

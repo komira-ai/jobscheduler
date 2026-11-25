@@ -35,7 +35,7 @@ fn the_previous_releases_ledger_is_the_one_it_shipped() {
 #[test]
 fn the_previous_release_reads_this_releases_state() {
     let rig = rig("previous-reads-new", 1);
-    let uid = rig.helper.user_create("73.1", None).unwrap();
+    let uid = rig.helper.user_create("73.1").unwrap();
     {
         let mut state = rig.host.state();
         state.gui.insert(uid);
@@ -96,5 +96,5 @@ fn this_release_reads_the_previous_releases_state() {
         .position(|c| c == "create_user kbf-lease-pool-0");
     assert!(deleted.unwrap() < made.unwrap(), "{calls:#?}");
     assert!(!rig.dir.join(format!("gui-teardown.{uid}")).exists());
-    assert_eq!(rig.helper.user_create("74.2", None), Ok(uid));
+    assert_eq!(rig.helper.user_create("74.2"), Ok(uid));
 }

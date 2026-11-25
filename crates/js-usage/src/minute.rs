@@ -21,7 +21,7 @@ pub const ENTRY_LEN: usize = 17;
 pub struct NodeMinute {
     /// Wall minutes since the Unix epoch.
     pub minute: u64,
-    /// Mean CPU the node used over the readings in the minute, in millicores.
+    /// Mean CPU the whole host was busy over the readings in the minute, in millicores.
     pub cpu_millis: u32,
     /// The largest working set read in the minute, in bytes.
     pub ws_max_bytes: u64,

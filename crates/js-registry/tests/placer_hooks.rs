@@ -66,12 +66,16 @@ fn reading(seq: u64, bad: bool) -> Wire {
         seq,
         mono_usec: seq * 5_000_000,
         cpu_usage_usec: seq * 1_000_000,
+        host_cpu_usec: None,
         working_set_bytes: if bad { MAX_MEMORY_BYTES + 1 } else { 1 << 30 },
         active_file_bytes: 0,
+        host_nonfile_bytes: None,
         actions_cpu_limited: false,
         covered: Vec::new(),
         clocks: Vec::new(),
         minutes: Vec::new(),
+        second_cpu_millis: Vec::new(),
+        second_cpu_pressure_some_permille: Vec::new(),
         dropped: LoadDrops::default(),
     }
 }

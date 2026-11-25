@@ -9,14 +9,13 @@ use super::{artifacts_workflow, job, jobs, legs, step, workflow};
 const DEBS: [(&str, &str); 2] = [("amd64", "linux-x86_64"), ("arm64", "linux-arm64")];
 
 /// The `deb` and `deb_arch` of each leg, by target.
-const LEG_DEBS: [(&str, &str, &str); 3] = [
+const LEG_DEBS: [(&str, &str, &str); 2] = [
     ("x86_64-unknown-linux-musl", "linux-x86_64", "amd64"),
     ("aarch64-unknown-linux-musl", "linux-arm64", "arm64"),
-    ("aarch64-apple-darwin", "", ""),
 ];
 
 /// Asserts that the matrix names, for each leg, the platform and the architecture of its .deb
-/// (the two Linux legs; the Mac leg has none), that every leg builds `js-agent`, and that the
+/// (the two Linux legs, the only legs of the matrix; the Apple silicon build has none), that every leg builds `js-agent`, and that the
 /// `build` job packages it in three named steps (`release deb`, `dpkg-deb --info`, `dpkg-deb
 /// --contents`), each running one command under `matrix.deb != ''`, after the binaries are
 /// checked and before the artifact is uploaded, with the binary just built, the release version

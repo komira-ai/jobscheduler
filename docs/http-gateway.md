@@ -46,6 +46,7 @@ writes it between the markers below, and `cargo xtask gen-job-surface --check --
 | `POST /v1/hosts/{host_id}:cordon` | `CordonHost` | 200 |
 | `POST /v1/hosts/{host_id}:uncordon` | `UncordonHost` | 200 |
 | `POST /v1/hosts/{host_id}:cleartaint` | `ClearHostTaint` | 200 |
+| `POST /v1/hosts/{host_id}:retire` | `RetireHost` | 200 |
 | `GET /v1/pools` | `ListPools` | 200 |
 | `GET /v1/providers` | `ListProviders` | 200 |
 | `GET /v1/usage` | `GetUsage` | 200 |
@@ -194,7 +195,7 @@ request.
 | `SubmitJob` | yes | yes |
 | `GetJob`, `GetResult`, `GetLogs`, `CancelJob` | its own jobs only | every job |
 | `ListJobs` | its own jobs only, whatever the filter | every job |
-| `ListHosts`, `CordonHost`, `UncordonHost`, `ClearHostTaint`, `ListPools`, `ListProviders`, `GetUsage` | `PERMISSION_DENIED` `operator-only` (403 `operator-only`) | yes |
+| `ListHosts`, `CordonHost`, `UncordonHost`, `ClearHostTaint`, `RetireHost`, `ListPools`, `ListProviders`, `GetUsage` | `PERMISSION_DENIED` `operator-only` (403 `operator-only`) | yes |
 
 A client's own jobs are the ones recorded with its name. A job recorded with no client
 (submitted before clients were named) belongs to no client, so only an operator can read or
@@ -241,7 +242,7 @@ along with them.
 
 - `call`: the method.
 - `client` and `role`: the caller, from its token.
-- `target`: the job id, or the host for `CordonHost`, `UncordonHost` and `ClearHostTaint`; empty for a listing.
+- `target`: the job id, or the host for `CordonHost`, `UncordonHost`, `ClearHostTaint` and `RetireHost`; empty for a listing.
 - `job`: the job alone, as before.
 - `outcome`: `ok`, `denied` (a client's fleet call, or another client's job, logged as
   `denied` although the answer is `unknown-job`), `not-found`, `refused` (an argument, a
@@ -249,7 +250,7 @@ along with them.
 - `code`: the gRPC code.
 
 This includes the state-changing calls `SubmitJob`, `CancelJob`, `CordonHost`,
-`UncordonHost` and `ClearHostTaint`. The line is at info, except for a read call that
+`UncordonHost`, `ClearHostTaint` and `RetireHost`. The line is at info, except for a read call that
 answered: `GetJob`, `ListJobs`, `GetResult`, `GetLogs`, `ListHosts`, `ListPools`,
 `ListProviders` and `GetUsage`, when the outcome is `ok`, write their line at debug, since their
 clients poll them many times a second. A read call that is refused or fails writes its line at
@@ -273,7 +274,7 @@ A request carries at most 64 KiB over either transport: a larger gateway body is
 | `GetJob`, `ListJobs`, `GetResult`, `GetLogs` | `read.rs` |
 | `SubmitJob` | `submit.rs` (its checks in `validate.rs`) |
 | `CancelJob` | `cancel.rs` |
-| `ListHosts`, `CordonHost`, `UncordonHost`, `ClearHostTaint`, `ListPools`, `ListProviders`, `GetUsage` | `fleet.rs` |
+| `ListHosts`, `CordonHost`, `UncordonHost`, `ClearHostTaint`, `RetireHost`, `ListPools`, `ListProviders`, `GetUsage` | `fleet.rs` |
 
 ### Serving the read calls
 
@@ -428,8 +429,12 @@ answer from what the commit returned; neither holds anything of its own outside 
    job's capabilities, where placement reads them. The wall limit is present, above 0 and at most
    the ceiling, `--max-job-wall` (30 days unless given). The network level is a known one;
    each port is 1 to 65535 and no host port is given twice (refused naming
-   `spec.ports[<i>].hostPort` or `.containerPort`); the files are checked as a start's
-   files are; the labels as a caller's labels are (`Labels::from_caller`). The layers,
+   `spec.ports[<i>].hostPort` or `.containerPort`); the environment is checked as a start's
+   environment is (a name the agent sets, such as `HOME` or `TMPDIR`, one that steers the
+   loader, the agent or a shell, such as `LD_*`, `DYLD_*`, `JS_*` or `IFS`, a name outside
+   `[A-Za-z_][A-Za-z0-9_]*`, a value with a NUL or an environment over the wire's caps is
+   refused naming `spec.env`, with the wire's code: `spec.env: invalid-env`); the files are
+   checked as a start's files are; the labels as a caller's labels are (`Labels::from_caller`). The layers,
    mounts and host ports (`docs/design/job-rootfs.md`, section 2.5) are at most 16, 64 and
    16; each layer and mount has one source this server knows (else refused naming
    `spec.layers[<i>]` or `spec.mounts[<i>]`, "no source this server knows"); a host path is
@@ -468,13 +473,13 @@ answer from what the commit returned; neither holds anything of its own outside 
 4. **Commit, then answer.** The job is inserted as queued in one transaction; the answer is
    the job as recorded (201 over the gateway). A failed commit is `state-write-failed` and
    nothing was recorded.
-5. **Place now, when nothing is ahead.** When no queued job had the new job's priority or a
-   higher one, the call runs the placement pass itself before it answers, and the answer is
-   the job as it then stands: `placed` with its host when a host had room, `queued` when none
-   had. The placement wakes the host's held heartbeat, whose reply carries the start
-   ([`design/held-beat.md`](design/held-beat.md)). A job with a queued job of its priority or
-   above ahead of it, and a retry of a job already recorded, is answered as recorded and
-   placed by the next pass.
+5. **Poke the placement poller.** The call pokes the server's placement poller and answers:
+   a new job is answered `queued`, with no host, always, and the call never places it itself.
+   The poller's pass places it, on its own task right after the answer, when a host has room;
+   the placement wakes the host's held heartbeat, whose reply carries the start
+   ([`design/held-beat.md`](design/held-beat.md)). A client that wants the host and the start
+   reads the job (`GET /v1/jobs/{id}`) until it has left `queued`. A retry of a job already
+   recorded is answered with the job as it now is.
 
 **`CancelJob`** commits one transaction and answers the job as it then stands. A queued job is
 cancelled at once (it has no allocation), with a result of reason cancelled and its retention
@@ -526,6 +531,24 @@ generated paragraph above.
   itself ([design/taint-self-clearing.md](design/taint-self-clearing.md)). The call is for the
   taints the agent's word does not end: a host job's and a refused whole-host prepare's, and
   one held for an agent too old to send `tainted`.
+- `RetireHost` retires the id of a lost host, so that its pool has room for a new id: a host
+  whose id changed (a host-certificate join after a token join with another `--host-id`), or a
+  host that is gone, leaves a row in the job store, a stored binding and the server's record,
+  and each keeps counting toward the pool's `max_machines`, so a pool sized to its machines
+  refuses the new id `pool-full`. The call deletes the row at the version it read, then
+  forgets the server's record and deletes the stored binding (in file mode, saves the bindings
+  file without it), under the lock a hello takes. It is refused, with nothing written, while
+  the host is live (heard within the grace): `FAILED_PRECONDITION` `host-live`; while a job's
+  allocation on it is live (placed, starting, running, or ending without the host's
+  confirmation): `host-holds-jobs`; and while it is tainted, cordoned or marked for scale-down:
+  `host-tainted`, `host-cordoned`, `host-marked`. A hello or beat that lands between the read
+  and the delete keeps the row, and the host is then live. `retired` says something of the host
+  was deleted; an id with nothing left answers `retired` false and writes nothing, so a repeat
+  is harmless. When a store cannot be read or written the answer is `UNAVAILABLE`
+  `retire-unsaved`, and the same call again finishes what the first left. Each server keeps its
+  own record of a host: with several servers over one store, the call made on each forgets that
+  server's record (or it leaves when that server forgets the host as lost). A rename is: drain
+  the old host, retire its id, start it under the new id. The call does not reach the agent.
 - `ListPools` and `ListProviders` read the status `GET /v1/pools` writes: per elastic pool its
   name, kind, state, reasons, memory, machine count and last tick; per pool's provider its
   credentials check and its own checks, and the machines it launched. Nothing else of the
@@ -541,7 +564,12 @@ generated paragraph above.
 - `GetUsage` reads the ended bookings of leases in the usage store and of jobs in the job
   store (see `usage-store.md`) as one listing, oldest end first (then by id, a lease's record
   before a job's with the same end and id), from `from_ms` included to `to_ms` excluded, of one
-  host or one job when asked; a job's record carries the job id in `job_id`. A page holds
+  host or one job when asked; a job's record carries the job id in `job_id`. A job's record
+  carries `cpu_series` (`cpuSeries` over the gateway) when its host's agent reported the job's CPU
+  second by second with its result: `granularity_secs` (the seconds each point covers: 1, 2, 4,
+  and so on), `points` (the mean CPU of each span in sixteenths of a core, at most 128), `run_usec`
+  (the run as the agent measured it) and `partial` (the series misses the start of the run), kept
+  as reported; it is absent for a job whose agent reported none, and for a lease's record. A page holds
   `page_size` records (100 when 0, at most 1000); the filters apply before the page is cut.
   `next_page_token` names the page's last record, its key and which store it came from: the
   next page starts right after it, so no record is read twice or skipped while records are
@@ -551,8 +579,10 @@ generated paragraph above.
 
 Over the gateway, a fleet call's `INVALID_ARGUMENT` is 400 `invalid-argument` as for any call,
 but the gateway's error table does not name the fleet calls' other refusals yet: `unknown-host`
-(`NOT_FOUND`), and `cordon-unsaved`, `taint-unsaved`, `store-unavailable` and `usage-unavailable`
-(`UNAVAILABLE`), each answer 500 `internal`.
+(`NOT_FOUND`), `host-live`, `host-holds-jobs`, `host-tainted`, `host-cordoned` and
+`host-marked` (`FAILED_PRECONDITION`), and `cordon-unsaved`, `taint-unsaved`, `retire-unsaved`,
+`store-unavailable` and `usage-unavailable` (`UNAVAILABLE`), each answer 500 `internal`; `js`
+calls the service over gRPC and prints the code.
 
 None of the reads takes a write lock, writes a row or counts anything. The hand-written
 `GET /v1/hosts` and `GET /v1/pools` routes stay beside these calls with their own bodies.

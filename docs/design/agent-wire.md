@@ -39,7 +39,7 @@ server's TLS offers only `http/1.1` in ALPN (`crates/js-lease-server/src/tls.rs`
 - `Heartbeat`: `host_id`, `epoch`, `session`, `phase`, `held` (`HeldRun`), `results` (`RunResult`), `taint`, `taint_cleared` (the taint the agent
   cleared itself, until `taint_ack`; `docs/design/taint-self-clearing.md`), `tainted` (whether the agent holds a taint as it sends the beat;
   absent from an agent that predates it and from a session that runs no jobs), `exclusive_ready`,
-  `exclusive_refused`, `load` (`NodeLoad`, telemetry: a malformed one reads as absent), `disk_gib`, and the per-job lists `jobs`
+  `exclusive_refused`, `load` (`NodeLoad`, telemetry: a malformed one reads as absent; it may carry the per-second lists `second_cpu_millis` and `second_cpu_pressure_some_permille`), `disk_gib`, and the per-job lists `jobs`
   (`HeldJob`, each with its `JobResult`) and `retired_jobs`, and `seq` (the beat's sequence in its session: raised for every heartbeat the agent sends, a retry included, starting at 1 after each welcome; a server applies a beat only when its `seq` is newer than the newest it applied; absent from an older agent, ignored by an older server).
 - `HeartbeatReply`: `commands`, `result_acks` (`ResultAck`), `taint_ack`, `taint_cleared_ack`, `host_taint` (the taint the server holds for
   the host once it has taken the beat, informational, absent when it holds none), `exclusive`, and the per-job lists `job_acks`
@@ -51,13 +51,32 @@ server's TLS offers only `http/1.1` in ALPN (`crates/js-lease-server/src/tls.rs`
   `JobResult.logs` (each stream's length and dropped bytes). An agent announces them with the hello capability `log-upload`, and a
   server sends `log_sink` and `log_grant` only to an agent that reported it. Each is decoded as `load` is: a malformed value reads as
   absent, so a log field never refuses a start or a heartbeat.
-- `JobResult.usage` (`JobUsage`: `peak_memory_bytes` and `cpu_usage_usec`, and the optional `cpu_throttle` (`CpuThrottle`: `periods` and `throttled_periods`, the `nr_periods` and `nr_throttled` of `cpu.stat`; `periods` 0 means the group had no `cpu.max`) `cpu_pressure_some_usec` (the `some` total of `cpu.pressure`) and `cpu_peak` (`CpuPeak`: `millicores` and `window_usec`, the most CPU the job's group used over any window of `window_usec` of its run: the largest `(usage_usec[i+k] - usage_usec[i]) * 1000 / elapsed` over the agent's one-second samples of `cpu.stat` with a five-second window; a run shorter than the window reports its whole-run mean with the window its wall time), absent for an agent from before them; a `cpu_throttle` or `cpu_peak` that does not decode reads as absent and leaves the rest of the usage), what the job's control group counted, read by the agent
+- `JobResult.usage` (`JobUsage`: `peak_memory_bytes` and `cpu_usage_usec`, and the optional `cpu_throttle` (`CpuThrottle`: `periods` and `throttled_periods`, the `nr_periods` and `nr_throttled` of `cpu.stat`; `periods` 0 means the group had no `cpu.max`) `cpu_pressure_some_usec` (the `some` total of `cpu.pressure`) and `cpu_peak` (`CpuPeak`: `millicores` and `window_usec`, the most CPU the job's group used over any window of `window_usec` of its run: the largest `(usage_usec[i+k] - usage_usec[i]) * 1000 / elapsed` over the agent's one-second samples of `cpu.stat` with a five-second window; a run shorter than the window reports its whole-run mean with the window its wall time) and `peak_swap_bytes` (`memory.swap.peak`, the most swap the group held at once, which `peak_memory_bytes` leaves out), absent for an agent from before them; a `cpu_throttle`, `cpu_peak` or `peak_swap_bytes` that does not decode reads as absent and leaves the rest of the usage), what the job's control group counted, read by the agent
   from `memory.peak` and the `usage_usec` of `cpu.stat` of the job's lease group once the job ended and before the group is
   removed. It is absent, never zero, when either file cannot be read (cgroup version 1, a kernel without `memory.peak`) and for
   a result an agent read back from its state root after a restart. It is decoded as `logs` is: a malformed value reads as absent
   and is never part of a result's acceptance. A server from before the field ignores it, and a result from an agent from before it
   reads with no usage; the lease server stores it as the job's resource usage, which is what the placement history is taught from
   (`docs/design/sizing.md`, section 7.7).
+- `JobResult.memory_series` (`MemorySeries`: `granularity_secs`, `points`, `run_usec` and `partial`), the job's non-file memory over
+  its run, sent by an agent started with `--memory-series`: at most 128 points (`MEMORY_SERIES_MAX_POINTS`), each the most of
+  `memory.current - (file - shmem)` of the job's group the agent's about-once-a-second polls saw in `granularity_secs` seconds of
+  the run, in MiB rounded up (`MEMORY_SERIES_BYTES_PER_POINT`), in order from its start; on a Mac, whose native runtime sends it too,
+  the physical footprint of the run's processes together, which counts no file page either. Pairs are combined by their maximum when a
+  run outlasts its points, and a span with no sample holds the last sample before it. It is decoded as `cpu_series` is: only a
+  power-of-two granularity and at most 128 points decode, anything else reads as absent, and a server from before it ignores it.
+  The job service books a class's memory from its peak (`docs/design/sizing.md`, section 7.7).
+- `JobResult.cpu_series` (`CpuSeries`: `granularity_secs`, `points`, `run_usec` and `partial`; the design of
+  komira-ai/jobscheduler#1033, section 3), the job's CPU over its run: at most 128 points (`CPU_SERIES_MAX_POINTS`), each the mean CPU of the job's group over
+  `granularity_secs` seconds of the run in sixteenths of a core, in order from its start. The series starts at one second a point;
+  each time a run outlasts its points, neighbouring points are combined in pairs by their mean and the granularity doubles. The last
+  point is the mean over what is left of the run after the others. `run_usec` is the run as the agent measured it on its monotonic
+  clock, from the moment the container was started to the poll that saw it end (at most one worker step, a second, after the end);
+  `partial` (left out when false) marks a run the agent adopted after a restart of its own, whose series starts at its first sample
+  after the restart. The `crun` runtime of an agent started with `--cpu-series` sends it, and so does a Mac's native runtime (its
+  points from the CPU time of the run's processes, sampled at each poll); other runtimes and agents send none. It
+  decodes only when well formed (a power-of-two granularity, at most 128 points of 16 bits) and is decoded as `logs` is: anything
+  else reads as absent and is never part of a result's acceptance. A server from before the field ignores it.
 - `JobStartSpec.sizing` (`StartSizing`: the optional `class`, and `cpu` and `memory`, each `named`, `class`, `fallback`, `cold` or
   `over-cap`), what the job's booking came from: its size class, and for each of its CPU and memory whether the job named it or
   which history sized it. The lease server fills it from the job and its allocation's `sized_from`; the agent writes it in its
@@ -99,7 +118,9 @@ between `MIN_HEARTBEAT_INTERVAL_MS` 250 and `MAX_HEARTBEAT_INTERVAL_MS` 3,600,00
 86,400,000. A start rides on the reply to the host's next heartbeat and is resent on every reply until the host lists it (section
 5.7, step 3). To an agent that reported `held-beat` the server holds a reply with nothing to send open for up to the interval (at
 most 5 s; at most 200 ms when the beat lists a job `starting` that a hold first saw so less than 2 s ago) and answers it as soon as a job is placed on the host; such a reply says `beat_now`, and the agent sends its next
-heartbeat at once ([held-beat.md](held-beat.md)). On any 409 to a heartbeat (the server sends `stale-epoch` or `unknown-host`) or a 403 `session-mismatch`, the agent
+heartbeat at once ([held-beat.md](held-beat.md)). For a host that polls dispatch, a placement ends the hold and a beat with such a
+start (one listed `starting`, however long) is answered at once (or, after another such answer less than 200 ms before, at the end
+of those 200 ms), both without `beat_now`, so the agent's next heartbeat leaves when its worker has news. On any 409 to a heartbeat (the server sends `stale-epoch` or `unknown-host`) or a 403 `session-mismatch`, the agent
 says hello again at once if its last heartbeat was accepted (`verdict` in `crates/js-agent/src/session.rs`). Every other 4xx except
 403 `pool-full`, 408 and 429 is fatal: 401, 413 `body-too-large`, 400 `invalid-hello` or `invalid-heartbeat`, `unsupported-protocol`
 and the other 403s end the session and the agent exits with status 2, because the same message would be refused again (the test
@@ -119,6 +140,7 @@ constant is in `crates/js-agent-wire/src/lib.rs`).
 | `MAX_IDENTITY_DOCUMENT_LEN`, `MAX_IDENTITY_SIGNATURE_LEN` | 16 KiB; 4 KiB | a hello's `identity`: its `document` (at least 1 byte) and its `signature` (may be empty) |
 | `MAX_DETAIL_LEN`, `MAX_LOG_STREAM_LEN` | 1,024 bytes; 8 KiB | a result's `detail` (and a job result's `input_failure`); each log stream of a result's tail |
 | `MAX_LOAD_BYTES` | 28 KiB | a `NodeLoad` at every cap, serialised |
+| `MAX_LOAD_SECONDS` | 16 | values in each of a load's `second_cpu_millis` and `second_cpu_pressure_some_permille` (three beats at the 5 s default) |
 | `HEARTBEAT_BODY_BUDGET` | 65,536 bytes | the heartbeat body; "the server's own limit must equal it" |
 | `BODY_LIMIT` (`js-lease-server/src/api.rs`) | 64 KiB | the request bodies of the agent routes; for hello and heartbeat `read` in `agent_api.rs` answers 413 `body-too-large` |
 | `REPLY_LIMIT` (`js-client/src/client.rs`) | 1 MiB | the largest answer the client reads |
@@ -289,8 +311,22 @@ digits), with the comma that joins it to the message. Derived, and measured by t
 
 - `usage` in a job's result, `,"usage":{"peak_memory_bytes":N,"cpu_usage_usec":N}`: 1 + 7 + 1 + 1 + (20 + 20) + 1 + (17 + 20) + 1 =
   **89** bytes per result. The three optional counters, `,"cpu_throttle":{"periods":N,"throttled_periods":N}`,
-  `,"cpu_pressure_some_usec":N` and `,"cpu_peak":{"millicores":N,"window_usec":N}`, add 89 + 46 + 82 = 217 more at 20 digits each, so **306** bytes in all (both figures measured by
+  `,"cpu_pressure_some_usec":N` and `,"cpu_peak":{"millicores":N,"window_usec":N}`, add 89 + 46 + 82 = 217 more at 20 digits each, so **306** bytes;
+  the swap peak, `,"peak_swap_bytes":N`, adds 39 more, so **345** bytes in all (the three figures measured by
   `usage_at_its_widest_adds_its_documented_bytes_to_a_result`). The agent's `results_budget` counts it with the rest of the result.
+- `cpu_series` in a job's result, `,"cpu_series":{"granularity_secs":N,"points":[...],"run_usec":N,"partial":true}` with 128 points
+  of 5 digits: 14 + (1 + 19 + 10) + 11 + (128 × 5 + 127) + 1 + (1 + 11 + 20) + 15 + 1 = **871** bytes per result (measured by
+  `a_series_at_its_widest_adds_its_documented_bytes_to_a_result`). The agent's `results_budget` counts it with the rest of the result.
+- `memory_series` in a job's result, `,"memory_series":{"granularity_secs":N,"points":[...],"run_usec":N,"partial":true}` with 128
+  points of 10 digits: 17 + (1 + 19 + 10) + 11 + (128 × 10 + 127) + 1 + (1 + 11 + 20) + 15 + 1 = **1,514** bytes per result
+  (measured by `a_series_at_its_widest_adds_its_bytes_to_a_result` in `tests/memory_series.rs`). The agent's
+  `results_budget` counts it with the rest of the result.
+- `second_cpu_millis` and `second_cpu_pressure_some_permille` in a heartbeat's load (the per-second busy CPU and CPU pressure of the whole
+  host, from `/proc/stat` and `/proc/pressure/cpu`, on a Mac from its CPU load ticks with no pressure list; the design of komira-ai/jobscheduler#1033, section 3; sent by an agent started with `--host-second-samples`), `,"second_cpu_millis":[...]`
+  with 16 values of 10 digits: 22 + (16 × 10 + 15) + 1 = 198, and `,"second_cpu_pressure_some_permille":[...]` with 16 values of 4 digits: 38 + (16 × 4 + 15) + 1 = 118, so **316**
+  bytes per heartbeat at the widest (measured by `the_lists_at_their_widest_add_their_documented_bytes_to_a_load`; the maximal load of
+  `a_load_at_every_cap_with_96_held_and_8_results_stays_under_the_budget` carries both at their widest and stays inside `MAX_LOAD_BYTES`).
+  Each decodes as the load's lists do (an element that is not a number of its type is dropped, counted as malformed; elements past 16 as over the cap); `vet` empties a pressure list with a value above 1000.
 
 The heartbeat's 65,536-byte body is what these press on: 8 results with `logs` add 8 × 157 = 1,256 bytes, and a beat carries one
 `log_grant_state`; the agent's `results_budget` is to count both before it fits log tails (Planned, with the fields).

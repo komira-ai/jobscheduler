@@ -354,6 +354,8 @@ impl Node {
             host_ports: HostPorts::default(),
             fs: None,
             cpu_ceiling: None,
+            cpu_series: false,
+            memory_series: false,
         }
     }
 

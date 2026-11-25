@@ -6,7 +6,8 @@
 //!
 //! ```text
 //! CPU:    F(tau) + U(tau) + V_cpu + c_new(tau)                           <= C_cpu * (1 + s_cpu)
-//!         F(0) = max(measured, f * sum p(covered flat) + sum c(covered by curve))
+//!         F(0) + U(0) = max(measured, max(before, F_c) + U_seen(0)) + U_unseen(0)
+//!         F_c = f * sum p(covered flat) + sum c(covered by curve)
 //! memory: max(sum R(tau, all), working_set + sum R(tau, uncovered)) + V_mem + R_new(tau)
 //!                                                                         <= C_mem * (1 + s_mem)
 //! ```
@@ -14,6 +15,13 @@
 //! Memory is checked at `tau = 0` alone: every term of its left side falls (or stays) as
 //! `tau` grows, since a lease is charged the remaining maximum of its curve, which never
 //! rises with the minute, or a flat figure, or nothing after its expected life.
+//!
+//! `U_seen` is the charge of the uncovered leases that were on the ledger when the newest
+//! reading was taken in: they ran for part of its window at most, so some of what they
+//! used is in the measurement. They are added in full to `before`, the cores of the window
+//! ahead of the newest, which holds none of it, and the result is raised to the
+//! measurement rather than added to it. `U_unseen` is the charge of the leases placed
+//! after that reading, which no reading holds any of.
 //!
 //! The measurement enters at `tau = 0` only, and only raises the figure. At every later
 //! slot only the curves count. With no lease charged over time the slot-0 inequalities are
@@ -36,17 +44,36 @@ use super::profile::{Profile, SLOTS};
 use crate::refusal::{Refusal, RefusalKind};
 
 /// The CPU a worker is charged `slot` minutes ahead, before a new lease: the covered
-/// leases (at slot 0 raised to the measurement), the uncovered, and the VMs' booked cores.
-pub(crate) fn cpu_left(t: &Totals, slot: usize, measured: u64, cfg: &LoadConfig) -> u64 {
+/// leases, the uncovered, and the VMs' booked cores. `(measured, before)` are the
+/// measurement and the window before the newest ([`Left::before`]).
+///
+/// At slot 0 the covered leases are raised to the measurement. The uncovered leases the
+/// newest reading has seen (placed before it was taken in) ran part of its window at
+/// most, so some of their use is in the measurement and none is in the window before:
+/// they are added in full to the larger of that window and the covered charge, and the
+/// result is raised to the measurement. Only the leases placed after the newest reading
+/// are added to the measurement itself. So a rise in the newest window is taken to be the
+/// seen leases' own use, up to their predictions, and is not counted a second time.
+pub(crate) fn cpu_left(
+    t: &Totals,
+    slot: usize,
+    (measured, before): (u64, u64),
+    cfg: &LoadConfig,
+) -> u64 {
     let covered = t.cpu_covered_at(slot, cfg);
-    let covered = if slot == 0 {
-        covered.max(measured)
-    } else {
+    let uncovered = t.cpu_uncovered_at(slot);
+    let charged = if slot == 0 {
+        let unseen = t.cpu_unseen_at(slot);
+        let seen = uncovered.saturating_sub(unseen);
         covered
+            .max(before)
+            .saturating_add(seen)
+            .max(measured)
+            .saturating_add(unseen)
+    } else {
+        covered.saturating_add(uncovered)
     };
-    covered
-        .saturating_add(t.cpu_uncovered_at(slot))
-        .saturating_add(t.vm_cpu)
+    charged.saturating_add(t.vm_cpu)
 }
 
 /// The memory a worker is charged `slot` minutes ahead, before a new lease.
@@ -93,11 +120,12 @@ pub(crate) fn refusal(
     let new_cpu = |slot: usize| new_charge(cost, profile, left, capacity, slot).0;
     let new_mem = new_charge(cost, profile, left, capacity, 0).1;
     for slot in 0..SLOTS {
-        let at = cpu_left(t, slot, left.measured, cfg);
+        let at = cpu_left(t, slot, (left.measured, left.before), cfg);
         let new = new_cpu(slot);
         if at.saturating_add(new) > cpu_limit {
             let refusal = Refusal::new(RefusalKind::Cpu, at, new, cpu_limit);
-            return Some(refusal.measured(left.measured));
+            // Only a host charged by measurement is judged over the horizon.
+            return Some(refusal.measured(Some(left.measured)));
         }
     }
     // Memory is checked at minute 0 alone: a charge by curve is the remaining maximum

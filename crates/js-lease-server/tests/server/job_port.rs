@@ -18,10 +18,11 @@ use js_lease_server::{
 use js_proto::v1::job_service_client::JobServiceClient;
 use js_proto::v1::{
     ClearHostTaintRequest, CordonHostRequest, GetJobRequest, GetUsageRequest, Host,
-    ListHostsRequest, ListPoolsRequest, ListProvidersRequest, UncordonHostRequest,
+    ListHostsRequest, ListPoolsRequest, ListProvidersRequest, RetireHostRequest,
+    UncordonHostRequest,
 };
-use js_types::HostId;
 use js_types::Timestamp;
+use js_types::{CpuSeries, HostId};
 use js_usage::{AllocationId, DrainOutcome, EndedPage, EndedQuery, EndedReason, EndedRow};
 use rustls::crypto::ring::default_provider;
 use rustls::pki_types::pem::PemObject;
@@ -39,7 +40,7 @@ use crate::agents_support::{JOIN, POOL, hello_body, session, start_agents};
 use crate::config_support::{PoolText, clock, file, kinds, quote, quoted, server};
 use crate::jobs_support::{
     JobBody, beat_with, cancel, commands, exited, job_agent, job_args, job_server, job_state,
-    one_start, per_job_hello, running, submit_body,
+    left_the_queue, one_start, per_job_hello, running, submit_body,
 };
 use crate::support::{Harness, Reply, Scratch, TOKEN, guard, request, unanswered};
 use crate::tls::{connector, test_identity, tls_request};
@@ -236,8 +237,9 @@ async fn the_listener_stops_with_the_server() {
 }
 
 /// Asserts that a job holds its host until its agent reports it ended: with one host of
-/// 8 cores registered, a job of 6 cores is answered `JOB_STATE_PLACED` by its own submit
-/// (201, no tick) and the agent's next heartbeat reply carries its one `job_start`; the agent
+/// 8 cores registered, a job of 6 cores is answered `JOB_STATE_QUEUED` by its own submit
+/// (201), leaves the queue `JOB_STATE_PLACED` and the agent's next heartbeat reply carries its
+/// one `job_start`; the agent
 /// lists it running and the job reads `JOB_STATE_RUNNING`; a second job of 6 cores has no
 /// room and is queued (201) and, while the first runs, a heartbeat carries no command and
 /// the second still reads `JOB_STATE_QUEUED`;
@@ -262,7 +264,9 @@ async fn a_job_holds_its_host_until_its_agent_reports_it_ended() {
 
     let first = submit_body(&h, &wide("held-1").json()).await;
     assert_eq!(first.status, 201, "{}", first.body);
-    assert_eq!(first.json()["job"]["state"], "JOB_STATE_PLACED");
+    assert_eq!(first.json()["job"]["state"], "JOB_STATE_QUEUED");
+    let placed = left_the_queue(&h, "held-1").await;
+    assert_eq!(placed["state"], "JOB_STATE_PLACED");
     let (started, allocation) = one_start(&beat_with(&h, &agent, &[]).await);
     assert_eq!(started, "held-1");
     let held = beat_with(&h, &agent, &[running("held-1")]).await;
@@ -284,10 +288,17 @@ async fn a_job_holds_its_host_until_its_agent_reports_it_ended() {
     );
     // This agent sends no beat sequence, so the host is free once two applied heartbeats in a
     // row no longer list the first job: the first omission only counts.
-    for _ in 0..2 {
-        let freed = beat_with(&h, &agent, &[]).await;
-        assert_eq!(commands(&freed), (vec![], vec![]), "{freed}");
-    }
+    let counted = beat_with(&h, &agent, &[]).await;
+    assert_eq!(commands(&counted), (vec![], vec![]), "{counted}");
+    // The second omission frees the host inside its own beat, and the placement poller runs
+    // on a task of its own, poked by the beats before: its pass may place `held-2` between
+    // the free and the reply, which then carries that start. The reply carries no stop and no
+    // other start; the start is sent again on the next beat either way.
+    let freed = beat_with(&h, &agent, &[]).await;
+    let (starts, stops) = commands(&freed);
+    let started: Vec<&str> = starts.iter().map(|(job, _)| job.as_str()).collect();
+    assert!(matches!(started[..], [] | ["held-2"]), "{freed}");
+    assert!(stops.is_empty(), "{freed}");
     h.ticks.step().await;
     let (started, _) = one_start(&beat_with(&h, &agent, &[]).await);
     assert_eq!(started, "held-2");
@@ -431,6 +442,7 @@ fn ended_row() -> EndedRow {
         actual_end: 1_000_000,
         error_ms: None,
         used: None,
+        cpu_series: CpuSeries::new(2, vec![0, 16, 40], 5_500_000, true),
     }
 }
 
@@ -513,13 +525,14 @@ async fn gateway_post(job: SocketAddr, path: &str) -> Reply {
     request(job, "POST", path, Some(TOKEN), Some(b"{}")).await
 }
 
-/// Asserts that the seven fleet calls are served on a real server's job port, over gRPC and
+/// Asserts that the eight fleet calls are served on a real server's job port, over gRPC and
 /// over the gateway: with one host registered in one elastic pool and one ended booking in
 /// the usage sink, `ListHosts` lists the host, `CordonHost` and `UncordonHost` change its
 /// cordon (each one made over one transport and read back over both), `ClearHostTaint` of
-/// the untainted host answers it with `cleared` false over both, `ListPools` and
+/// the untainted host answers it with `cleared` false over both, `RetireHost` of an id that
+/// never said hello answers `retired` false over both, `ListPools` and
 /// `ListProviders` name the pool `gpu`, `GetUsage` returns the ended booking by job and
-/// host, and a cordon of a host the registry does not hold is `NOT_FOUND` `unknown-host`
+/// host with its CPU series, and a cordon of a host the registry does not hold is `NOT_FOUND` `unknown-host`
 /// over gRPC and 500 `internal` over the gateway, whose error table does not name it yet. It catches a server that builds the job
 /// service without the fleet group's context, whose every fleet call answers `UNIMPLEMENTED`
 /// (`501`).
@@ -575,6 +588,15 @@ async fn the_fleet_calls_are_served_on_the_job_port() {
     assert_eq!(clean.json()["host"]["id"], FLEET_HOST);
     assert_eq!(clean.json()["cleared"], Value::Null);
 
+    let retire = RetireHostRequest {
+        host_id: "never-said-hello".to_owned(),
+    };
+    let nothing = grpc.retire_host(authed(retire)).await.unwrap();
+    assert!(!nothing.into_inner().retired);
+    let nothing = gateway_post(job, "/v1/hosts/never-said-hello:retire").await;
+    assert_eq!(nothing.status, 200, "{}", nothing.body);
+    assert_eq!(nothing.json()["retired"], Value::Null);
+
     let unknown = CordonHostRequest {
         host_id: "no-such-host".to_owned(),
         cordon_secs: None,
@@ -618,10 +640,29 @@ async fn the_fleet_calls_are_served_on_the_job_port() {
     assert_eq!(usage.records.len(), 1);
     assert_eq!(usage.records[0].job_id, ENDED_JOB);
     assert_eq!(usage.records[0].host_id, ENDED_HOST);
+    let series = usage.records[0].cpu_series.clone().expect("a series");
+    assert_eq!(
+        (
+            series.granularity_secs,
+            series.points,
+            series.run_usec,
+            series.partial
+        ),
+        (2, vec![0, 16, 40], 5_500_000, true)
+    );
     assert_eq!(usage.next_page_token, "");
     let reply = request(job, "GET", "/v1/usage", Some(TOKEN), None).await;
     assert_eq!(reply.status, 200, "{}", reply.body);
     assert_eq!(reply.json()["records"].as_array().map(Vec::len), Some(1));
     assert_eq!(reply.json()["records"][0]["jobId"], ENDED_JOB);
     assert_eq!(reply.json()["records"][0]["hostId"], ENDED_HOST);
+    assert_eq!(
+        reply.json()["records"][0]["cpuSeries"],
+        json!({
+            "granularitySecs": 2,
+            "points": [0, 16, 40],
+            "runUsec": "5500000",
+            "partial": true
+        })
+    );
 }

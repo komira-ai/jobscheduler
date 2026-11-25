@@ -2,8 +2,8 @@
 //! read as it is in the repository. Three jobs: `build` runs in the release's beta stage and by hand
 //! (never on a pull request), holds no secret and signs nothing, and builds a hostkeeper
 //! `macos-pkg` package (no script, the file `js-agent-<version>-macos-arm64.pkg`, the helper's
-//! plist naming the agent of the same package by its cdhash); `sign` runs only on main (by hand,
-//! or in the release's call that asks for it), in the protected environment `pkg-signing`, takes
+//! plist naming the agent of the same package by its cdhash); `sign` runs in the release's call that
+//! asks for it and in a signing run (signing_run.rs), in the environment `pkg-signing`, takes
 //! the checked unsigned package from `build` without rebuilding, and is the only place a secret
 //! is named, on the step that signs and nowhere else. Nothing is notarized. `first-install` calls
 //! the first-install workflow on a manual run alone (never in the release's call), with the
@@ -81,6 +81,13 @@ fn indent(line: &str) -> usize {
     line.len() - line.trim_start().len()
 }
 
+/// What the first-install call waits for: the three jobs that build the two unsigned packages.
+const FIRST_INSTALL_NEEDS: &str = "needs: [build, build-update, farm]";
+
+/// The condition of the first-install call: not cancelled, a manual run, and the packages built
+/// by whichever side ran (the farm made both, or the hosted `build` and `build-update` each did).
+const FIRST_INSTALL_IF: &str = "if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && (needs.farm.result == 'success' || (needs.build.result == 'success' && needs.build-update.result == 'success')) }}";
+
 /// The call of the first-install workflow: the one `uses:` that is not pinned to a commit.
 const FIRST_INSTALL_USES: &str = "uses: ./.github/workflows/js-agent-macos-first-install.yml";
 
@@ -103,6 +110,7 @@ fn the_workflow_has_a_build_job_a_first_install_call_and_a_sign_job() {
         [
             "build",
             "build-update",
+            "farm",
             "first-install",
             "package",
             "sign",
@@ -117,8 +125,10 @@ fn the_workflow_has_a_build_job_a_first_install_call_and_a_sign_job() {
 }
 
 /// One line per way the job `first-install` of the workflow `text` is not the call of the
-/// first-install workflow that only a manual run makes: after `build` and `build-update`, for the event
-/// `workflow_dispatch` alone, with `contents: read`, the version typed by hand, and no secret.
+/// first-install workflow that only a manual run makes: after the unsigned packages were built (by
+/// `build` and `build-update` on hosted runners or by `farm`, which a skipped side does not hold
+/// back), for the event `workflow_dispatch` alone, with `contents: read`, the version typed by
+/// hand, and no secret.
 fn call_problems(text: &str) -> Vec<String> {
     let all = jobs(text);
     let Some(job) = all.get("first-install") else {
@@ -137,11 +147,11 @@ fn call_problems(text: &str) -> Vec<String> {
         }
     };
     want(
-        at_four.contains(&"needs: [build, build-update]"),
-        "the call does not wait for build and build-update alone",
+        at_four.contains(&FIRST_INSTALL_NEEDS),
+        "the call does not wait for build, build-update and farm alone",
     );
     want(
-        at_four.contains(&"if: ${{ github.event_name == 'workflow_dispatch' }}"),
+        at_four.contains(&FIRST_INSTALL_IF),
         "the call is not for the event workflow_dispatch alone",
     );
     want(
@@ -191,29 +201,33 @@ fn the_first_install_job_is_a_manual_run_only_call_with_no_secret() {
 #[test]
 fn each_way_of_changing_the_first_install_call_is_named() {
     let text = read(WORKFLOW);
-    let head = "  first-install:\n    needs: [build, build-update]\n    if: ${{ github.event_name == 'workflow_dispatch' }}\n    permissions:\n      contents: read\n    uses: ./.github/workflows/js-agent-macos-first-install.yml\n    with:\n      version: ${{ inputs.version }}\n";
+    let head = format!(
+        "  first-install:\n    {FIRST_INSTALL_NEEDS}\n    {FIRST_INSTALL_IF}\n    permissions:\n      contents: read\n    uses: ./.github/workflows/js-agent-macos-first-install.yml\n    with:\n      version: ${{{{ inputs.version }}}}\n"
+    );
+    let head = head.as_str();
     assert!(text.contains(head));
     for (to, says) in [
         (
-            head.replace("needs: [build, build-update]\n", ""),
-            "the call does not wait for build and build-update alone",
+            head.replace(&format!("    {FIRST_INSTALL_NEEDS}\n"), ""),
+            "the call does not wait for build, build-update and farm alone",
         ),
         (
-            head.replace("needs: [build, build-update]", "needs: [build]"),
-            "the call does not wait for build and build-update alone",
-        ),
-        (
-            head.replace(
-                "needs: [build, build-update]",
-                "needs: [build, build-update, sign]",
-            ),
-            "the call does not wait for build and build-update alone",
+            head.replace(FIRST_INSTALL_NEEDS, "needs: [build, build-update]"),
+            "the call does not wait for build, build-update and farm alone",
         ),
         (
             head.replace(
-                "    if: ${{ github.event_name == 'workflow_dispatch' }}\n",
-                "",
+                FIRST_INSTALL_NEEDS,
+                "needs: [build, build-update, farm, sign]",
             ),
+            "the call does not wait for build, build-update and farm alone",
+        ),
+        (
+            head.replace(&format!("    {FIRST_INSTALL_IF}\n"), ""),
+            "the call is not for the event workflow_dispatch alone",
+        ),
+        (
+            head.replace("!cancelled() && ", ""),
             "the call is not for the event workflow_dispatch alone",
         ),
         (
@@ -289,12 +303,27 @@ fn the_workflow_is_called_by_the_release_and_started_by_hand_but_never_by_a_pull
             "required: false",
             "type: boolean",
             "default: false",
+            "farm:",
+            "description: Build on the farm's Macs instead of a hosted runner",
+            "required: false",
+            "type: boolean",
+            "default: false",
             "workflow_dispatch:",
             "inputs:",
             "version:",
             "description: The package version, MAJOR.MINOR.PATCH",
             "required: true",
             "type: string",
+            "sign:",
+            "description: Sign the programs and the package (a signing run, on a branch of komira-ai/jobscheduler)",
+            "required: false",
+            "type: boolean",
+            "default: false",
+            "farm:",
+            "description: Build on the farm's Macs, to try a branch before MACOS_ON_FARM is set",
+            "required: false",
+            "type: boolean",
+            "default: false",
         ]
     );
     assert!(!text.contains("pull_request"));
@@ -326,11 +355,20 @@ fn the_workflow_holds_read_access_only_and_publishes_nothing() {
             .take_while(|l| indent(l) > 4)
             .map(|l| l.trim())
             .collect();
-        assert_eq!(perms, ["contents: read"], "{name}");
+        // The call of macos-farm.yml also grants the token its jobs hold to join the farm's
+        // network, which names macos-farm.yml, not artifacts.yml, as the signer; no job here
+        // holds a write otherwise.
+        let want: &[&str] = if name == "farm" {
+            &["contents: read", "id-token: write"]
+        } else {
+            &["contents: read"]
+        };
+        assert_eq!(perms, want, "{name}");
     }
     let body = code(&text).join("\n");
-    assert!(!body.contains("write"), "a write scope");
-    assert!(!body.contains("id-token"));
+    let writes: Vec<&str> = body.lines().filter(|l| l.contains("write")).collect();
+    assert_eq!(writes, ["      id-token: write"], "a write scope");
+    assert_eq!(body.matches("id-token").count(), 1);
     for word in [
         "gh release",
         "releases",
@@ -350,9 +388,10 @@ fn every_action_is_pinned_to_a_commit_and_the_jobs_that_run_steps_run_on_macos_1
         .into_iter()
         .filter(|l| l.contains("uses:"))
         .collect();
-    // The calls that are not pinned are the local workflow and the local actions, which are this
-    // repository's own: the package action in the three jobs that build a package, and the action
-    // that names the next version.
+    // The calls that are not pinned are the local workflows and the local actions, which are this
+    // repository's own: the package action in the three jobs that build a package, the action
+    // that names the next version, and the workflows that build on the farm and test the first
+    // install.
     let local: Vec<&str> = uses
         .iter()
         .filter(|l| l.contains("uses: ./"))
@@ -364,6 +403,7 @@ fn every_action_is_pinned_to_a_commit_and_the_jobs_that_run_steps_run_on_macos_1
             "uses: ./.github/actions/js-agent-macos-pkg",
             "uses: ./.github/actions/js-agent-next-version",
             "uses: ./.github/actions/js-agent-macos-pkg",
+            "uses: ./.github/workflows/macos-farm.yml",
             "uses: ./.github/actions/js-agent-macos-pkg",
             FIRST_INSTALL_USES,
         ]
@@ -484,7 +524,7 @@ fn a_secret_is_named_only_in_the_environment_of_the_step_that_uses_it() {
 }
 
 #[test]
-fn the_sign_job_runs_only_on_main_by_hand_or_when_the_release_asks_in_the_protected_environment() {
+fn the_sign_job_runs_under_the_signing_condition_in_the_protected_environment() {
     let text = read(WORKFLOW);
     let sign = jobs(&text)["sign"].clone();
     let at_four: Vec<&str> = sign
@@ -492,9 +532,12 @@ fn the_sign_job_runs_only_on_main_by_hand_or_when_the_release_asks_in_the_protec
         .filter(|l| indent(l) == 4)
         .map(|l| l.trim())
         .collect();
-    assert!(at_four.contains(&SIGN_IF), "{at_four:?}");
+    assert!(at_four.contains(&sign_if("sign").as_str()), "{at_four:?}");
     assert!(at_four.contains(&"environment: pkg-signing"), "{at_four:?}");
-    assert!(at_four.contains(&"needs: [build, package]"), "{at_four:?}");
+    assert!(
+        at_four.contains(&"needs: [build, farm, package]"),
+        "{at_four:?}"
+    );
 }
 
 #[test]
@@ -513,10 +556,6 @@ fn the_sign_job_runs_no_cargo_and_rebuilds_nothing() {
 }
 
 const PRESENT: &str = "steps.signing.outputs.state == 'present'";
-
-/// The `if:` of the sign job: a manual run on main, or the release's call that sets `sign` (a
-/// push to main); a pull request is neither.
-const SIGN_IF: &str = "if: ${{ (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (inputs.sign && github.ref == 'refs/heads/main' && github.event_name == 'push') }}";
 
 #[test]
 fn signing_is_one_step_gated_on_the_presence_check_and_nothing_is_notarized() {
@@ -911,27 +950,9 @@ fn each_way_of_leaving_the_hostkeeper_package_shape_is_named() {
 }
 
 #[test]
-fn the_sign_condition_refuses_a_pull_request_and_a_push_that_does_not_ask() {
-    // A manual run counts on main alone, and the release's call counts when it asks (`sign`),
-    // on main, for a push: no part of the condition is optional.
-    let text = read(WORKFLOW);
-    let sign = jobs(&text)["sign"].clone();
-    let line = sign
-        .iter()
-        .find(|l| indent(l) == 4 && l.trim().starts_with("if:"))
-        .expect("the sign job's condition")
-        .trim();
-    assert_eq!(line, SIGN_IF);
-    for part in [
-        "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'",
-        "inputs.sign && github.ref == 'refs/heads/main' && github.event_name == 'push'",
-    ] {
-        assert!(line.contains(part), "{part}");
-    }
-    // The condition is a disjunction of those two parts and nothing looser.
-    assert_eq!(line.matches("||").count(), 1, "{line}");
-    assert!(!line.contains("pull_request"));
-    // The release's call is the one that sets `sign`, and the other callers do not.
+fn the_release_is_the_one_caller_that_asks_to_sign() {
+    // When the condition signs is signing_run.rs's question; this is that the release's call
+    // asks it to.
     let release = std::fs::read_to_string(
         Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
             .join(".github/workflows/release.yml"),
@@ -942,4 +963,8 @@ fn the_sign_condition_refuses_a_pull_request_and_a_push_that_does_not_ask() {
     ));
 }
 
+mod expr;
+mod signing_run;
 mod version_check;
+
+use signing_run::sign_if;

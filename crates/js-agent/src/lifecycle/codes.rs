@@ -50,8 +50,13 @@ pub mod code {
     /// The runtime could not remove a container.
     pub const CONTAINER_REMOVE_FAILED: &str = "container-remove-failed";
     /// A native run was removed (its processes and its user are gone) and one or more of
-    /// its declared outputs could not be copied. The host holds nothing of it: not a taint.
+    /// its declared outputs could not be copied, or could not be committed to the put
+    /// ingest. The host holds nothing of it: not a taint.
     pub const OUTPUTS_FAILED: &str = "outputs-failed";
+    /// A native run's removal committed its collected outputs to the put ingest as one
+    /// object. The message is a JSON object with the fields `key` (the key the object is
+    /// stored under), `sha256` (the SHA-256 of its bytes) and `bytes` (their length).
+    pub const OUTPUTS_COMMITTED: &str = "outputs-committed";
     /// The scratch directory could not be made or removed.
     pub const SCRATCH_FAILED: &str = "scratch-failed";
     /// A labelled container could not be accounted for after a restart.
@@ -108,6 +113,13 @@ pub mod code {
     /// The records of owed checks in the state root could not be listed when the agent
     /// started, so the host is tainted ([`reason::CHECK_OWED`](crate::lifecycle::taint::reason)).
     pub const OWED_UNREADABLE: &str = "owed-records-unreadable";
+    /// A record of owed checks found when the agent started does not hold its run id (a
+    /// write cut short), so the host is tainted
+    /// ([`reason::CHECK_OWED`](crate::lifecycle::taint::reason)) and the check is not run.
+    pub const OWED_INCOMPLETE: &str = "owed-record-incomplete";
+    /// The checks owed by runs of an earlier process (records found when the agent started)
+    /// ran at the start, passed, and their records were removed: the host is not tainted.
+    pub const OWED_CHECKED: &str = "owed-checked";
     /// A held result or the retired list could not be written to the state root.
     pub const HELD_FAILED: &str = "held-record-failed";
     /// A held result or the retired list in the state root could not be read at start.

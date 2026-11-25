@@ -86,7 +86,10 @@
 //! heartbeat is watched from before the store is read, so a placement after the read wakes
 //! it; the reply is then built again from the store and carries the start. A heartbeat that
 //! lists a job as `starting` is held for [`crate::held_beat::starting_hold`] (200 ms) at most
-//! instead, so the start's `running` is not kept a whole hold.
+//! instead, so the start's `running` is not kept a whole hold. A host that polls dispatch (below)
+//! takes its starts from the poll, so a placement ends its hold, and a beat of it that lists a
+//! job `starting` is paced rather than held ([`held::hold`]): answered at once, or within 200 ms of
+//! the host's last such answer, without `beat_now`.
 //!
 //! # The dispatch poll
 //!
@@ -636,24 +639,20 @@ async fn serve_jobs(
             .as_ref()
             .map_or_else(|| Err(JobStoreError::NodeMoved { host: host() }), apply);
         // A listing a newer beat or hello overtook is answered from the rows as they stand.
-        let served = match served {
+        match served {
             Err(JobStoreError::NodeMoved { .. }) => {
                 let answer = rows_answer(&inputs.jobs, &context, (listed, retired), inputs.room);
                 answer.map(|answer| (answer, false))
             }
             served => served,
-        };
-        // What the listing ended or freed, and the load the beat brought, can make room
-        // for a queued job: a pass places it, and its start rides on the host's next reply,
-        // or on this one when it is held (the placement wakes it). A beat that changed
-        // nothing the pass depends on runs none. A host job the pass placed has tainted its
-        // host: the taint is kept below.
-        let placed_taints = placing.place_jobs_after_beat();
-        (served, placed_taints)
+        }
     })
     .await;
-    let (served, placed_taints) = served;
-    agents.keep_taints(placed_taints).await;
+    // What the listing ended or freed, and the load the beat brought, can make room for a
+    // queued job: the beat pokes the placement poller, whose pass places it when something
+    // the pass depends on changed since the last one ([`crate::poller::Poller::poke_after_beat`]),
+    // and its start rides on the host's next reply, or on a held one (the placement wakes it).
+    agents.poller.poke_after_beat();
     let host = &kept.host;
     match served {
         Ok((served, taint_changed)) => {
@@ -756,6 +755,10 @@ mod job_tests;
 #[cfg(test)]
 #[path = "agent_api_pool_tests.rs"]
 pub(crate) mod pool_tests;
+
+#[cfg(test)]
+#[path = "agent_api_retire_tests.rs"]
+mod retire_tests;
 
 #[cfg(test)]
 #[path = "agent_api_job_cases.rs"]

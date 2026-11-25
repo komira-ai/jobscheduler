@@ -13,6 +13,12 @@
 //!   `--patch` and the command that applies it to the job summary `--summary`; then
 //!   `buck2 build <label>` with its progress in the log, failed unless its summary says `local: 0`
 //!   (every action ran on the build farm or came from its cache), and buck2's daemon stopped after.
+//! - `mac-farm --address <grpc://host:port> --properties <k=v,...> --scratch <dir> [--output
+//!   <path>]... [--env NAME=VALUE]... -- <cargo arguments>` ([`mac_farm`]): one Cargo command of
+//!   this checkout run on a Mac of the build farm as one REAPI action, with the checkout, the
+//!   crates of `Cargo.lock` for `aarch64-apple-darwin` and the pinned Rust toolchain as its
+//!   inputs; its output printed, and each `--output` it made fetched to the same path here.
+//!   With no `--address` it fails, naming `FARM_ADDRESS`.
 //! - `debs --pins <file> --dir <dir>` ([`debs`]): the Debian packages a CI job installs with
 //!   `dpkg`, pinned by version and SHA-256 in a file of `.github/debs/`: the files the actions
 //!   cache restored into `--dir` when they match, and otherwise each downloaded from the pinned
@@ -25,6 +31,10 @@
 //!   the patch version after a version (the macOS update package's), and laying down the files
 //!   of each release archive (docs/release.md).
 //!
+//! - `release pack --bins "<bin> ..." --target <triple> --version <version> --mtime-of <commit>
+//!   --out <dir>` ([`release::pack`]): each binary's release archive, staged as `release stage`
+//!   stages it and packed as a reproducible `.tar.gz` (name order, the commit's time, owner 0/0,
+//!   no name or time in the gzip header).
 //! - `release macos-leg --target <triple> --builds "<package>:<bin> ..." --min-macos <x.y> --out
 //!   <dir>` ([`release::macos_leg`]): on a Mac, the release's macOS leg from a checkout:
 //!   the release build of each binary, its archive directory, its minimum macOS and its
@@ -62,6 +72,9 @@
 //! - `postgres-for-tests --bin-dir <dir> --data-dir <dir> --socket-dir <dir> --github-env <file>`
 //!   ([`postgres_for_tests`]): a Postgres server for the tests that need one, on a runner with
 //!   no service container (the macOS job), and its URL for the later steps.
+//! - `mac-test-artifact --test <name> --target <triple> --build-json <file> --out <dir> --commit
+//!   <sha> --summary <file> --github-env <file>` ([`mac_test_artifact`]): a Mac root test binary
+//!   and the `js-agent` it starts, staged for an operator with their SHA-256 sums.
 //!
 //! - `deploy --service NAME... --version X.Y.Z --url <coordinator>` ([`deploy`]): the gamma
 //!   step of a release, setting the version of each service on the update coordinator in
@@ -95,6 +108,10 @@
 //! - `pkg stage-macos` and `pkg check-macos` ([`macpkg`]): the macOS installer package's
 //!   payload (it has no script), laid down for `pkgbuild`, and the built package read back with
 //!   `pkgutil` and `lsbom` and refused unless it is exactly that.
+//! - `pkg build-macos --version <X.Y.Z>` ([`macpkg::build`]): the package of a stamped checkout
+//!   built on a Mac in one command, as the `js-agent-macos-pkg` action builds it: the three
+//!   programs, their version lines and the cdhash, the plists, the stage, `pkgbuild` and
+//!   `productbuild`, the read-back, and the sums of the package and of the programs.
 //! - `site-demo [--out <path>] [--bin-dir <dir>] [--port <n>] [--job-port <n>] [--ready-timeout <s>]` ([`site_demo`]):
 //!   records the demonstration on the landing page of jobscheduler.dev, `site/test/demo.transcript`:
 //!   builds the server and the client, starts the server with the job service on and a pool no agent
@@ -127,8 +144,9 @@
 //!   test rather than a verb: `cargo test -p xtask --test layering`.
 //! - [`spawn_sites`]: every program the crates `js-agent` and `js-mac-session` are built
 //!   from (themselves and their path dependencies built for macOS) start goes through
-//!   `js_mac_session::disclaim`, used by a test rather than a verb: `cargo test -p xtask
-//!   --test spawn_sites`.
+//!   `js_mac_session::disclaim`, and only the files of `KEEPERS` keep a program's privacy
+//!   responsibility, used by tests rather than a verb: `cargo test -p xtask --test
+//!   spawn_sites` and `--test spawn_sites_keepers`.
 //!
 //! Exit status: 0 when the verb passed, 1 when it failed (one reason on stderr), 2 on a
 //! usage error.
@@ -151,7 +169,9 @@ pub mod fetch;
 pub mod image;
 pub mod job_surface;
 pub mod layering;
+pub mod mac_farm;
 pub mod mac_root;
+pub mod mac_test_artifact;
 pub mod macpkg;
 pub mod merge_profiles;
 pub mod postgres_for_tests;
@@ -192,6 +212,9 @@ pub enum Error {
     /// The farm lane's build failed.
     #[error(transparent)]
     Farm(#[from] farm::Error),
+    /// A Cargo command on a build farm Mac failed, or its outputs could not be fetched.
+    #[error("mac-farm: {0}")]
+    MacFarm(#[from] mac_farm::Error),
     /// The fetch verb failed.
     #[error(transparent)]
     Fetch(#[from] fetch::Error),
@@ -205,6 +228,9 @@ pub enum Error {
     /// The macOS package could not be staged or checked.
     #[error(transparent)]
     MacPkg(#[from] macpkg::Error),
+    /// The macOS package could not be built.
+    #[error(transparent)]
+    MacPkgBuild(#[from] macpkg::build::Error),
     /// A program `count-run` ran ended with a failure status, which is also this one's.
     #[error("the program ended with status {0}")]
     Child(u8),
@@ -217,6 +243,9 @@ pub enum Error {
     /// The Postgres server for the tests could not be started.
     #[error(transparent)]
     PostgresForTests(#[from] postgres_for_tests::Error),
+    /// A Mac root test binary could not be staged.
+    #[error("mac-test-artifact: {0}")]
+    MacTestArtifact(#[from] mac_test_artifact::Error),
     /// A coverage shard's raw profiles could not be merged.
     #[error("merge-profiles: {0}")]
     MergeProfiles(#[from] merge_profiles::Error),
@@ -299,6 +328,9 @@ enum Verb {
         #[arg(long)]
         run_id: u64,
     },
+    /// Run a Cargo command of this checkout on a Mac of the build farm as one remote action
+    /// (its toolchain and crates sent with it), print its output, and fetch the files it makes.
+    MacFarm(mac_farm::Args),
     /// Make a directory hold exactly the pinned Debian packages of this host's architecture,
     /// each checked against its SHA-256: those already there, the rest downloaded.
     Debs {
@@ -405,6 +437,9 @@ enum Verb {
     /// Start a Postgres server for the tests that need one, from an installed Postgres's
     /// programs, and append its URL (`KBF_TEST_POSTGRES_URL`) to the workflow's environment file.
     PostgresForTests(postgres_for_tests::Args),
+    /// Stage a Mac root test binary and the `js-agent` it starts, checked to be arm64 Mach-O
+    /// executables, with their SHA-256 sums, for the manual Mac root-test workflows.
+    MacTestArtifact(mac_test_artifact::Args),
     /// Merge the raw coverage profiles at the top of a directory into one indexed profile,
     /// with the toolchain's llvm-profdata.
     MergeProfiles(merge_profiles::Args),
@@ -441,9 +476,15 @@ enum Verb {
 #[derive(Subcommand)]
 enum PkgVerb {
     /// Lay the macOS package's payload and scripts down, ready for `pkgbuild`.
-    StageMacos(macpkg::StageArgs),
+    #[command(name = "stage-macos")]
+    Stage(macpkg::StageArgs),
     /// Refuse a macOS package that is not exactly the js-agent package (a Mac only).
-    CheckMacos(macpkg::CheckArgs),
+    #[command(name = "check-macos")]
+    Check(macpkg::CheckArgs),
+    /// Build the macOS package of the stamped checkout here, on a Mac: programs, plists, stage,
+    /// `pkgbuild`, `productbuild`, the read-back and the sums.
+    #[command(name = "build-macos")]
+    Build(macpkg::build::BuildArgs),
 }
 
 /// The `release` verbs.
@@ -457,6 +498,8 @@ enum ReleaseVerb {
     NextVersion(release::next_version::NextVersionArgs),
     /// Lay down the files of one release archive.
     Stage(release::stage::StageArgs),
+    /// Stage and archive each binary of a release leg as a reproducible `.tar.gz`.
+    Pack(release::pack::PackArgs),
     /// Build, stage, check and package the darwin leg of a release.
     MacosLeg(release::macos_leg::LegArgs),
     /// Refuse a macOS program that is not signed as the release signs it (a Mac only).
@@ -524,6 +567,7 @@ fn run(cli: Cli) -> Result<String, Error> {
                 &mut std::io::stderr(),
             )?)
         }
+        Verb::MacFarm(args) => Ok(mac_farm::run(&args)?.join("\n")),
         Verb::Debs { pins, dir } => {
             let roots = fetch::host_roots();
             Ok(debs::run(
@@ -604,20 +648,23 @@ fn run(cli: Cli) -> Result<String, Error> {
         }
         Verb::SiteChanged(args) => Ok(site_changed::run(&args)?),
         Verb::PostgresForTests(args) => Ok(postgres_for_tests::run(&args)?),
+        Verb::MacTestArtifact(args) => Ok(mac_test_artifact::run(&args)?),
         Verb::MergeProfiles(args) => Ok(merge_profiles::run(&args)?),
         Verb::GenJobSurface(args) => Ok(job_surface::run(&args)?),
         Verb::GenReport(args) => Ok(report::run(&args)?),
         Verb::ImageRecipe(args) => Ok(image::run(&args)?),
         Verb::Channels { verb } => Ok(channels::run(verb)?.join("\n")),
         Verb::Pkg { verb } => Ok(match verb {
-            PkgVerb::StageMacos(args) => macpkg::stage(&args)?,
-            PkgVerb::CheckMacos(args) => macpkg::check(&args)?,
+            PkgVerb::Stage(args) => macpkg::stage(&args)?,
+            PkgVerb::Check(args) => macpkg::check(&args)?,
+            PkgVerb::Build(args) => macpkg::build::run(&args)?,
         }),
         Verb::Release { verb } => Ok(match verb {
             ReleaseVerb::Plan(args) => release::plan::run(&args)?,
             ReleaseVerb::Stamp(args) => release::stamp::run(&args)?,
             ReleaseVerb::NextVersion(args) => release::next_version::run(&args)?,
             ReleaseVerb::Stage(args) => release::stage::run(&args)?,
+            ReleaseVerb::Pack(args) => release::pack::run(&args)?,
             ReleaseVerb::MacosLeg(args) => release::macos_leg::run(&args)?,
             ReleaseVerb::CheckCodeSignature(args) => release::code_signature::run(&args)?,
             ReleaseVerb::Deb(args) => release::deb::run(&args)?,

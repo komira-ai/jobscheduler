@@ -11,12 +11,11 @@ use std::io;
 use std::time::Duration;
 
 use js_lease_server::Limits;
-use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpSocket, TcpStream};
 
-use crate::agents_support::{JOIN, agent_args, job_host_args, post};
-use crate::jobs_support::{JobBody, job_agent, per_job_hello, submit, submit_body};
+use crate::agents_support::{agent_args, job_host_args};
+use crate::jobs_support::{job_agent, job_state, left_the_queue, per_job_hello, submit};
 use crate::support::{Harness, Scratch, TOKEN, config, guard, parse_reply, request, until};
 
 /// A route behind the client token that reads a request body, so a body that stalls holds
@@ -244,12 +243,14 @@ pub(crate) async fn stall_in_body(addr: std::net::SocketAddr) -> TcpStream {
 }
 
 /// Asserts that a stop is bounded by the drain timeout (the read timeout is long, so it
-/// is not what ends the stall): a request stalled in its body
-/// is cut, the stop still returns and the last tick still runs (a queued job that no tick
-/// has placed, whose only room was a tainted host the operator then cleared, is placed on
-/// that host by it), and the client sees the connection end with no answer. The job is
-/// queued by arrangement, since a submit places a job on a host with room. It catches a
-/// stop that skips the last tick behind a stalled request.
+/// is not what ends the stall): a request stalled in its body is cut, the stop still returns
+/// and the last tick still runs, and the client sees the connection end with no answer. The
+/// last tick is seen by what only a tick's job pass does: `job-q` is placed on `host-1` and
+/// never started, the clock is moved past its start timeout, and the last tick ends it
+/// `start-timeout`. No placement pass ends a job, so the placement poller's pass that the
+/// submit pokes, which runs on a task of its own whenever it gets to, cannot change what the
+/// test reads before or after the stop. It catches a stop that skips the last tick behind a
+/// stalled request.
 #[tokio::test]
 async fn a_stalled_request_cannot_hold_up_a_stop() {
     let limits = Limits {
@@ -259,45 +260,35 @@ async fn a_stalled_request_cannot_hold_up_a_stop() {
     };
     let scratch = Scratch::new("limit_drain");
     let config = config(job_host_args(&scratch)).unwrap().with_limits(limits);
-    let h = Harness::over(scratch, config).await;
-    // `job-q` has to be queued when the stop comes, though a submit places a job on a host
-    // with room. `host-1` reports a taint, so it takes nothing; `job-big` fills `host-2`, so
-    // `job-q` is admitted and queued; the operator then clears the taint, which places
-    // nothing, and only the last tick of the stop places `job-q` on `host-1`.
-    let tainted = job_agent(&h, &per_job_hello("host-1")).await;
-    let mut beat = tainted.beat();
-    beat["taint"] = json!({ "reason": "residue" });
-    let told = post(&h, "/v1/agent/heartbeat", Some(JOIN), &beat).await;
-    assert_eq!(told.json()["taint_ack"], true, "{}", told.body);
-    job_agent(&h, &per_job_hello("host-2")).await;
-    let big = submit_body(&h, &JobBody::new("job-big").needs(8000, 1 << 30).json()).await;
-    assert_eq!(big.json()["job"]["state"], "JOB_STATE_PLACED");
+    // The job store reads the harness's clock, so the start deadline it stamps is passed when
+    // the test moves the clock.
+    let h = Harness::over_on_one_clock(scratch, config).await;
+    job_agent(&h, &per_job_hello("host-1")).await;
     assert_eq!(submit(&h, "job-q").await.status, 201);
-    let cleared = request(
-        h.running.job_addr().unwrap(),
-        "POST",
-        "/v1/hosts/host-1:cleartaint",
-        Some(TOKEN),
-        Some(b"{}"),
-    )
-    .await;
-    assert_eq!(cleared.status, 200, "{}", cleared.body);
+    let placed = left_the_queue(&h, "job-q").await;
+    assert_eq!(placed["state"], "JOB_STATE_PLACED", "{placed}");
+    // Past the pool's start timeout (15 minutes) and the deadline floor of the boot (two
+    // minutes); no tick is stepped, so the job is still placed when the stop comes.
+    h.clock.advance(START_TIMEOUT_PASSED);
     let mut stalled = stall_in_body(h.addr()).await;
     let jobs = h.scratch.path("leases.toml.jobs");
-    assert_eq!(
-        crate::jobs_support::job_state(&h, "job-q").await,
-        "JOB_STATE_QUEUED"
-    );
+    assert_eq!(job_state(&h, "job-q").await, "JOB_STATE_PLACED");
 
     h.running.shutdown().await.unwrap();
     let mut seen = Vec::new();
     guard(stalled.read_to_end(&mut seen)).await.unwrap();
     assert!(seen.is_empty());
-    let placed = crate::restart::stored(&jobs);
-    let job_q = placed
+    let stored = crate::restart::stored(&jobs);
+    let job_q = stored
         .iter()
         .find(|line| line.starts_with("job-q "))
         .unwrap();
-    assert!(job_q.starts_with("job-q Placed "), "{placed:?}");
-    assert!(job_q.contains(" host-1 "), "{placed:?}");
+    assert!(
+        job_q.starts_with("job-q FailedToStart(StartTimeout) "),
+        "{stored:?}"
+    );
 }
+
+/// How far [`a_stalled_request_cannot_hold_up_a_stop`] moves the clock: past the pool's
+/// default start timeout of 15 minutes.
+const START_TIMEOUT_PASSED: Duration = Duration::from_secs(16 * 60);

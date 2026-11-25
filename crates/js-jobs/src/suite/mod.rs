@@ -16,7 +16,7 @@ use std::time::Duration;
 use js_agent_wire::{HostPort, JobMount, Layer, MountMode, MountSource, PortProtocol, Propagation};
 use js_state::conformance::Backend;
 use js_state::{CommitStats, Cond, ManualClock, Store, Txn, Versioned};
-use js_types::{ExecMode, HostId, ImageDigestRef, Labels, ReservedKey, Resources};
+use js_types::{CpuSeries, ExecMode, HostId, ImageDigestRef, Labels, ReservedKey, Resources};
 
 use crate::interfere::Interfere;
 use crate::{
@@ -51,6 +51,7 @@ mod queue;
 mod queued_index;
 mod races;
 mod retention;
+mod retire;
 mod rows;
 mod scrub;
 mod silence;
@@ -85,6 +86,7 @@ pub use queue::*;
 pub use queued_index::*;
 pub use races::*;
 pub use retention::*;
+pub use retire::*;
 pub use rows::*;
 pub use scrub::*;
 pub use silence::*;
@@ -245,6 +247,7 @@ where
     a_failed_prepare_requeues_the_job_with_its_count_and_bars(backend);
     a_held_refusal_requeues_the_job_without_counting_a_failure(backend);
     a_capacity_refusal_requeues_the_job_and_names_the_host_in_its_own_list(backend);
+    a_bundle_pending_refusal_requeues_the_job_and_names_the_host_in_no_list(backend);
     a_held_refusal_refuses_what_it_cannot_requeue(backend);
     a_held_refusal_loses_to_a_change_of_either_row(backend);
     the_last_failed_prepare_ends_the_job_failed_to_start(backend);
@@ -268,6 +271,9 @@ where
     nodes_lists_every_readable_row_heard_or_not(backend);
     forget_silent_nodes_deletes_only_the_rows_that_hold_nothing(backend);
     forget_silent_nodes_keeps_a_row_that_moved_and_refuses_an_unreadable_binding(backend);
+    retire_node_deletes_a_lost_row_so_a_full_pool_admits_a_new_id(backend);
+    retire_node_keeps_the_row_of_a_host_that_holds_or_is_owed_work(backend);
+    retire_node_judges_again_a_row_that_moved_or_went_and_deletes_nothing_on_a_failure(backend);
     two_servers_claiming_one_host_at_once_hand_out_each_message_once(backend);
     a_message_whose_claim_lapses_is_handed_out_again_by_the_store_clock(backend);
     an_ack_deletes_only_what_was_handed_out_and_a_repeat_changes_nothing(backend);
@@ -444,6 +450,7 @@ macro_rules! job_store_tests {
             a_failed_prepare_requeues_the_job_with_its_count_and_bars,
             a_held_refusal_requeues_the_job_without_counting_a_failure,
             a_capacity_refusal_requeues_the_job_and_names_the_host_in_its_own_list,
+            a_bundle_pending_refusal_requeues_the_job_and_names_the_host_in_no_list,
             a_held_refusal_refuses_what_it_cannot_requeue,
             a_held_refusal_loses_to_a_change_of_either_row,
             the_last_failed_prepare_ends_the_job_failed_to_start,
@@ -467,6 +474,9 @@ macro_rules! job_store_tests {
             nodes_lists_every_readable_row_heard_or_not,
             forget_silent_nodes_deletes_only_the_rows_that_hold_nothing,
             forget_silent_nodes_keeps_a_row_that_moved_and_refuses_an_unreadable_binding,
+            retire_node_deletes_a_lost_row_so_a_full_pool_admits_a_new_id,
+            retire_node_keeps_the_row_of_a_host_that_holds_or_is_owed_work,
+            retire_node_judges_again_a_row_that_moved_or_went_and_deletes_nothing_on_a_failure,
             two_servers_claiming_one_host_at_once_hand_out_each_message_once,
             a_message_whose_claim_lapses_is_handed_out_again_by_the_store_clock,
             an_ack_deletes_only_what_was_handed_out_and_a_repeat_changes_nothing,
@@ -737,7 +747,8 @@ pub(crate) fn whole_host_spec() -> JobSpec {
     }
 }
 
-/// What a host reports of a job that stopped: short tails and the resources it used.
+/// What a host reports of a job that stopped: short tails, the resources it used and its CPU
+/// series.
 pub(crate) fn output() -> Output {
     Output {
         stdout: "done\n".to_owned(),
@@ -751,7 +762,14 @@ pub(crate) fn output() -> Output {
             cpu_peak: None,
         }),
         logs: None,
+        cpu_series: Some(series()),
+        memory_series: None,
     }
+}
+
+/// The CPU series [`output`] carries: two points at 2 s a point.
+pub(crate) fn series() -> CpuSeries {
+    CpuSeries::new(2, vec![16, 40], 3_000_000, false).expect("a well-formed series")
 }
 
 /// An exit with `exit_code` and [`output`].

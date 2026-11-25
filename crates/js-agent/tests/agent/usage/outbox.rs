@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use js_agent::usage::{ClosedMinute, MAX_UNSENT_AGE_USEC, Outbox, Reading, Sample};
+use js_agent::usage::{ClosedMinute, MAX_UNSENT_AGE_USEC, Outbox, Reading, Sample, SecondRates};
 use serde_json::json;
 
 /// One closed minute of `lease` with a mean of `mean` thousandths of a core.
@@ -25,7 +25,9 @@ pub fn reading(seq: u64, at: u64, minutes: Vec<ClosedMinute>) -> Reading {
         sample: Sample {
             mono_usec: at,
             cpu_usage_usec: 7_000,
+            host_cpu_usec: 6_000,
             working_set_bytes: 8_000,
+            host_nonfile_bytes: None,
             active_file_bytes: 9_000,
             cpu_limited: true,
             leases: Vec::new(),
@@ -34,6 +36,7 @@ pub fn reading(seq: u64, at: u64, minutes: Vec<ClosedMinute>) -> Reading {
         covered: vec!["1-1".to_owned()],
         clocks: vec![("1-1".to_owned(), 10), ("1-2".to_owned(), 20)],
         minutes,
+        seconds: SecondRates::default(),
     }
 }
 
@@ -60,6 +63,7 @@ fn a_reading_is_sent_field_for_field() {
             "seq": 3,
             "mono_usec": 5_000,
             "cpu_usage_usec": 7_000,
+            "host_cpu_usec": 6_000,
             "working_set_bytes": 8_000,
             "active_file_bytes": 9_000,
             "actions_cpu_limited": true,

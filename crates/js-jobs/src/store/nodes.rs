@@ -27,7 +27,7 @@ use crate::codec::node_fields::{decode_node, encode_node};
 use crate::error::JobStoreError;
 use crate::ids::IdSource;
 use crate::keys;
-use crate::node::{AppliedBeat, Beat, NodeHello, NodeRecord, NodeRow, NodeState};
+use crate::node::{AppliedBeat, Beat, Kept, NodeHello, NodeRecord, NodeRow, NodeState, Retire};
 
 /// The host's record the row `key` holds, which must name the host of its key.
 fn node_at(key: &str, row: &Versioned) -> Result<NodeRow, JobStoreError> {
@@ -393,6 +393,53 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         Ok(deleted)
     }
 
+    /// Deletes the row of `host`, which the operator retires, when the host is silent and holds
+    /// nothing: its `heard_at` is more than `grace` before the store's time now (so it is not
+    /// live), and it holds no live allocation, no taint (its own row or its binding's), no
+    /// cordon and no scale-down mark, as [`JobStore::forget_silent_nodes`] judges a row it
+    /// forgets. It is that forget for one host, without waiting out the lost-host retention.
+    /// The host's row is claimed and deleted at the version read; a hello or beat that lands
+    /// between the read and the delete moves the row, and the row is read and judged again (so
+    /// a host that came back is [`Kept::Live`]), as is a row another server deleted first
+    /// ([`Retire::Absent`]).
+    ///
+    /// # Errors
+    /// [`JobStoreError::UnknownRow`] or [`JobStoreError::Corrupt`] when the host's row, its
+    /// binding or an allocation row it reads cannot be read; [`JobStoreError::Store`], its clock
+    /// included. Nothing is deleted.
+    pub fn retire_node(&self, host: &HostId, grace: Duration) -> Result<Retire, JobStoreError> {
+        loop {
+            let Some(row) = self.read_node(host)? else {
+                return Ok(Retire::Absent);
+            };
+            let now = self.store.now()?;
+            if heard_within(row.record.heard_at, grace, now) {
+                return Ok(Retire::Refused(Kept::Live));
+            }
+            let claim = [keys::node(host)];
+            let mut refused = None;
+            let outcome = self
+                .store
+                .claim_decide(&claim, &mut |read| match kept_by(read, host).transpose() {
+                    None => Some(Txn::new().delete(keys::node(host), Cond::Version(row.version))),
+                    Some(kept) => {
+                        refused = Some(kept);
+                        None
+                    }
+                })?;
+            match (outcome, refused) {
+                (Claim::Committed(_), _) => {
+                    self.note_node(host, None);
+                    return Ok(Retire::Retired);
+                }
+                (Claim::Declined, Some(kept)) => return kept.map(Retire::Refused),
+                // The row moved (a hello or a beat) or went (another server deleted it) since
+                // it was read: it is read and judged again.
+                _ => {}
+            }
+        }
+    }
+
     /// Writes `record` as its host's row at the absence or version of `read`: the row as
     /// written, or `None` when the row changed since it was read.
     fn put_node(
@@ -453,8 +500,7 @@ fn hello_record(
 }
 
 /// Whether the rows `read` shows let the row of `host`, read at `version`, be forgotten: it is
-/// still at that version, and the host holds no live allocation, no taint (its own row or its
-/// binding's), no cordon and no scale-down mark.
+/// still at that version, and the host holds nothing ([`kept_by`]).
 fn holds_nothing(
     read: &mut dyn TxnRead,
     host: &HostId,
@@ -463,18 +509,31 @@ fn holds_nothing(
     let same = read
         .get(&keys::node(host))?
         .is_some_and(|row| row.version == version);
+    Ok(same & kept_by(read, host)?.is_none())
+}
+
+/// What the rows `read` shows `host` still holds or is owed, which keeps its row: a live
+/// allocation first, then a taint (its own row or its binding's), a cordon and a scale-down
+/// mark; `None` when it holds none of them.
+fn kept_by(read: &mut dyn TxnRead, host: &HostId) -> Result<Option<Kept>, JobStoreError> {
     let binding_key = keys::binding(host);
-    let tainted = match read.get(&binding_key)? {
+    let binding_taint = match read.get(&binding_key)? {
         Some(row) => binding_tainted(&binding_key, &row.value)?,
         None => false,
     };
-    let rows_absent = [keys::taint(host), keys::cordon(host), keys::hostmark(host)];
-    let mut absent = true;
-    for key in rows_absent {
-        absent &= read.get(&key)?.is_none();
-    }
+    let taint_row = read.get(&keys::taint(host))?.is_some();
+    let cordoned = read.get(&keys::cordon(host))?.is_some();
+    let marked = read.get(&keys::hostmark(host))?.is_some();
     let booked = booked_in(read, host)?;
-    Ok(same & !tainted & absent & (booked.allocations == 0))
+    let reasons = [
+        (booked.allocations > 0, Kept::HoldsJobs),
+        (binding_taint | taint_row, Kept::Tainted),
+        (cordoned, Kept::Cordoned),
+        (marked, Kept::Marked),
+    ];
+    Ok(reasons
+        .into_iter()
+        .find_map(|(holds, kept)| holds.then_some(kept)))
 }
 
 /// Whether a row heard at `heard_at` is heard within `grace` of `now`.

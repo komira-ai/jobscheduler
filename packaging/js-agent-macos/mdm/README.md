@@ -2,7 +2,14 @@
 
 `js-agent-full-disk-access.mobileconfig` grants Full Disk Access (the privacy service
 `SystemPolicyAllFiles`) to `js-agent` itself, and to nothing else: not the root helper
-`js-mac-session`, which holds no grant.
+`js-mac-session`, which holds no grant. A native job and its supervisor are to be started without
+the disclaim, so that they answer for `js-agent` and hold what it holds; every other program
+`js-agent` starts is started disclaimed (see `../README.md`, "Privacy grants"). The profile's
+`Comment` says why the agent holds the grant: it deletes the accounts native jobs run as, and a
+job it starts through a supervisor, as its own slot user under a sandbox profile, is to read the
+build trees tierstore mounts. The `Comment` is text only: a Mac that holds the profile from
+before keeps the grant unchanged, shows the earlier text until the profile is uploaded again,
+and needs no `PayloadVersion` change (it is the profile format's version, 1).
 It is one `com.apple.TCC.configuration-profile-policy` payload with one entry:
 
 | key | value |

@@ -57,6 +57,7 @@
 //! js job result --job-id ID       js job logs --job-id ID
 //! js host list                    js host cordon --host-id ID [--cordon-secs <dur>]
 //! js host uncordon --host-id ID   js host host-taint --host-id ID
+//! js host retire --host-id ID
 //! js pool list                    js provider list
 //! js usage [--from-ms N] [--to-ms N] [--host-id ID] [--job-id ID] ...
 //! js job wait --job-id ID         js job follow --job-id ID [--stream stdout|stderr]

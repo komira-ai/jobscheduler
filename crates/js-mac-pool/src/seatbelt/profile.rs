@@ -3,6 +3,7 @@
 use std::ffi::OsString;
 
 use super::allow;
+use super::apply::{InitError, SandboxInit};
 use super::net::Net;
 use super::policy::{Policy, ReadModel};
 
@@ -41,6 +42,16 @@ const OFF_RULES: [&str; 2] = [
     "(deny network*)",
     "(allow network-outbound (literal \"/private/var/run/syslog\"))",
 ];
+
+/// Any loopback connect, and listeners on loopback only.
+const LOOPBACK_RULES: [&str; 2] = [
+    "(allow network-inbound (local ip \"localhost:*\"))",
+    "(allow network* (remote ip \"localhost:*\"))",
+];
+
+/// Name lookups: the resolver's socket by path. `mach-lookup` is not denied, so the
+/// resolver's Mach service needs no rule.
+const RESOLVER: &str = "(allow network-outbound (literal \"/private/var/run/mDNSResponder\"))";
 
 /// The floor, emitted last and not removable: nothing in a policy reaches this constant.
 /// Denied services: registering a mach name, mounting, creating a POSIX shared memory
@@ -91,7 +102,15 @@ pub struct Profile {
 impl Profile {
     /// The profile of `policy`, in a fixed order: version and `(allow default)`; the
     /// write denies; the write grants (the run directory, the user's folder entry,
-    /// `/dev/null` and `/dev/fd`); the read denies, each with a write deny of the same
+    /// `/dev/null` and `/dev/fd`); when the policy has homes roots
+    /// ([`Narrowing::deny_homes`](super::Narrowing::deny_homes)), a read deny of each root,
+    /// then a read grant of the run's own home (the directory just below the deepest root
+    /// that holds the run directory) and a metadata grant on it and its ancestors (so the
+    /// run's own home stays readable and a path walk reaches it); the
+    /// trees on a mount (an exec deny, an executable-mapping
+    /// deny and a read deny of the mount's root, then for each tree a read grant and a
+    /// metadata grant on the tree and its ancestors, so a path walk reaches it); the read
+    /// denies, each with a write deny of the same
     /// path (a read-denied path inside a granted directory is not writable either); the
     /// write protection of inputs; the mount grants (for each mount a read grant of its
     /// path, a metadata grant on the path and its ancestors, and for a read-write mount
@@ -102,8 +121,8 @@ impl Profile {
     ///
     /// A later rule wins, so the floor beats everything before it.
     ///
-    /// Under [`ReadModel::Allow`] the reads are an allow-list: after the write grants come
-    /// the default read deny, the names of the ancestors of every granted place, the base
+    /// Under [`ReadModel::Allow`] the reads are an allow-list: after the write grants (and
+    /// the homes' rules) come the default read deny, the names of the ancestors of every granted place, the base
     /// set of the macOS version, the run's places, the pinned trees, the Xcode and the
     /// kinds, then a deny of each setuid file; the read denies and everything after
     /// them are as in the open model.
@@ -133,9 +152,11 @@ impl Profile {
         }
         grant.push_str(" (literal \"/dev/null\") (subpath \"/dev/fd\"))");
         lines.push(grant);
+        home_rules(policy, &mut lines, &mut params);
         if let Some(allow) = policy.allow() {
             allow::reads(allow, policy.uid_entry(), &mut lines, &mut params);
         }
+        tree_rules(policy, &mut lines, &mut params);
 
         for (i, path) in policy.read_denies().iter().enumerate() {
             lines.push(format!("(deny file-read* (subpath (param \"RD_{i}\")))"));
@@ -178,6 +199,16 @@ impl Profile {
         &self.params
     }
 
+    /// The text and the parameters as the C strings an in-process apply takes.
+    ///
+    /// # Errors
+    /// An [`InitError`] for a NUL byte; a profile of this builder holds none (its text is
+    /// constants and parameter names, and an [`AbsPath`](super::AbsPath) refuses NUL), so
+    /// the error is the check, not an expected outcome.
+    pub fn sandbox_init(&self) -> Result<SandboxInit, InitError> {
+        SandboxInit::new(&self.text, &self.params)
+    }
+
     /// The full command: `sandbox-exec`, a `-D NAME=value` pair per parameter, `-p` and
     /// the profile, then `program` and its `args`. `program` is absolute (an [`AbsPath`](super::AbsPath)
     /// or a [`ToolPath`](super::ToolPath)'s path), so `sandbox-exec` does not search `PATH`.
@@ -199,6 +230,44 @@ impl Profile {
 fn push_all(lines: &mut Vec<String>, rules: &[&str]) {
     for rule in rules {
         lines.push((*rule).to_owned());
+    }
+}
+
+/// The homes' read denies, then the reads of the run's own home and the metadata of its
+/// ancestors, granted back (the own home is a parameter, `OWN`): they precede every other read rule, so each later grant opens what it names
+/// and each read deny closes what it names. Nothing for a policy without homes roots.
+fn home_rules(policy: &Policy, lines: &mut Vec<String>, params: &mut Vec<(String, String)>) {
+    if policy.homes().is_empty() {
+        return;
+    }
+    for (i, home) in policy.homes().iter().enumerate() {
+        params.push((format!("HM_{i}"), home.as_str().to_owned()));
+        lines.push(format!("(deny file-read* (subpath (param \"HM_{i}\")))"));
+    }
+    params.push(("OWN".to_owned(), policy.own_home().to_owned()));
+    lines.push("(allow file-read* (subpath (param \"OWN\")))".to_owned());
+    lines.push("(allow file-read-metadata (path-ancestors (param \"OWN\")))".to_owned());
+}
+
+/// The trees on the shared mount: nothing below the root is run or mapped executable (a
+/// tree is read, never executed: the read grants below would otherwise let a run execute
+/// what it reads, since the profile allows by default), no read below the root, then each
+/// tree's reads and the metadata of the tree and its ancestors (the root's included, so a
+/// walk can pass it but not list it).
+fn tree_rules(policy: &Policy, lines: &mut Vec<String>, params: &mut Vec<(String, String)>) {
+    let Some(trees) = policy.trees() else {
+        return;
+    };
+    params.push(("MOUNT".to_owned(), trees.root().as_str().to_owned()));
+    lines.push("(deny process-exec* (subpath (param \"MOUNT\")))".to_owned());
+    lines.push("(deny file-map-executable (subpath (param \"MOUNT\")))".to_owned());
+    lines.push("(deny file-read* (subpath (param \"MOUNT\")))".to_owned());
+    for (i, tree) in trees.trees().iter().enumerate() {
+        params.push((format!("MT_{i}"), tree.as_str().to_owned()));
+        lines.push(format!("(allow file-read* (subpath (param \"MT_{i}\")))"));
+        lines.push(format!(
+            "(allow file-read-metadata (path-ancestors (param \"MT_{i}\")))"
+        ));
     }
 }
 
@@ -238,8 +307,17 @@ fn net_rules(policy: &Policy, lines: &mut Vec<String>) {
         }
         Net::Loopback => {
             push_all(lines, &OFF_RULES);
-            lines.push("(allow network-inbound (local ip \"localhost:*\"))".to_owned());
-            lines.push("(allow network* (remote ip \"localhost:*\"))".to_owned());
+            push_all(lines, &LOOPBACK_RULES);
+        }
+        Net::Remote(ports) => {
+            push_all(lines, &OFF_RULES);
+            push_all(lines, &LOOPBACK_RULES);
+            for port in ports.iter() {
+                lines.push(format!(
+                    "(allow network-outbound (remote tcp \"*:{port}\"))"
+                ));
+            }
+            lines.push(RESOLVER.to_owned());
         }
     }
 }

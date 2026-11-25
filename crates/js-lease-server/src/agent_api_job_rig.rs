@@ -44,6 +44,10 @@ use crate::logs::{Scope, SinkTemplate, StoreClock as LogClock};
 mod replies;
 pub(crate) use replies::{starts, stops};
 
+#[path = "agent_api_job_rig_logs.rs"]
+mod logging;
+pub(crate) use logging::*;
+
 /// What [`Rig::place`] books: a share of a host with no GPU.
 pub(crate) const BOOKED: Booked = Booked::Shape {
     cpu_millis: 1500,
@@ -153,125 +157,6 @@ pub(crate) struct Rig {
     _dir: TestDir,
 }
 
-/// The store a log sink names, as the agent and the server see it.
-pub(crate) const LOG_ENDPOINT: &str = "https://objects.example";
-
-/// The region of [`LOG_ENDPOINT`].
-pub(crate) const LOG_REGION: &str = "us-east-1";
-
-/// The bucket of the log sink.
-pub(crate) const LOG_BUCKET: &str = "logs";
-
-/// The log prefix of the sink: one the prefix `a/bc/` is outside of.
-pub(crate) const LOG_PREFIX: &str = "a/b";
-
-/// How long a host credential is asked to live.
-pub(crate) const LOG_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
-
-/// A server named `name` that holds the job tables and minting through a fake minter, whose
-/// hosts are lost after `grace_ms` of silence; the fake minter and the server's grants.
-pub(crate) fn logging_rig(name: &str, grace_ms: u64) -> (Rig, Logs) {
-    logging_over(name, grace_ms, None, START_MS)
-}
-
-/// [`logging_rig`] over the job tables of `tables` (a store a server ran on before) when
-/// given (and on its clock), with the clock at `now_ms`: a server rebuilt on the same store,
-/// with a new registry and nothing of the log credentials held before. Its registry, server
-/// and minter read one manual clock, which [`Rig::advance`] moves; fresh job tables get a
-/// clock of their own, which a commit's sync moves and nothing else.
-pub(crate) fn logging_over(
-    name: &str,
-    grace_ms: u64,
-    tables: Option<&Rig>,
-    now_ms: u64,
-) -> (Rig, Logs) {
-    let clock = tables.map_or_else(Arc::default, |rig| Arc::clone(&rig.clock));
-    let since = js_state::Clock::now(&*clock).as_duration();
-    let target = std::time::Duration::from_millis(now_ms);
-    clock.advance(target.saturating_sub(since));
-    let shared = SharedClock::new(OneClock(Arc::clone(&clock)));
-    let endpoint = Endpoint::parse(LOG_ENDPOINT, LOG_REGION, LOG_BUCKET, true).unwrap();
-    let store = FakeStore::new(endpoint.clone(), Arc::new(LogClock(shared.clone())));
-    let minter = Arc::new(FakeMinter::new(store));
-    let grants = grants_over(
-        endpoint,
-        Arc::clone(&minter) as Arc<dyn js_logmint::Minter>,
-        &shared,
-    );
-    let extra = Extra {
-        grace_ms: Some(grace_ms),
-        logs: Some(Arc::clone(&grants)),
-        tables: tables.map(|rig| (Arc::clone(&rig.store), Arc::clone(&rig.jobs))),
-        store_clock: Some(Arc::default()),
-        whole: None,
-    };
-    let kept = (JobLimits::default(), Retention::DEFAULT);
-    let rig = rig_on(name, (true, false), kept, (clock, shared.clone()), extra);
-    let logs = Logs {
-        minter,
-        grants,
-        clock: shared,
-    };
-    (rig, logs)
-}
-
-/// The grants of a sink at `endpoint` under [`LOG_PREFIX`], minting with `minter` on `clock`.
-pub(crate) fn grants_over(
-    endpoint: Endpoint,
-    minter: Arc<dyn js_logmint::Minter>,
-    clock: &SharedClock,
-) -> Arc<LogGrants> {
-    let prefix = LogPrefix::new(LOG_PREFIX).unwrap();
-    let template = SinkTemplate {
-        endpoint,
-        prefix: prefix.clone(),
-    };
-    let scope = Scope {
-        bucket: Bucket::new(LOG_BUCKET).unwrap(),
-        prefix,
-        ttl: LOG_TTL,
-    };
-    Arc::new(LogGrants::new(template, scope, minter, clock.clone()))
-}
-
-/// The log side of a [`logging_rig`].
-pub(crate) struct Logs {
-    /// The fake minter, which counts the mints per host and can fail or hold them.
-    pub(crate) minter: Arc<FakeMinter>,
-    /// The grants the server holds.
-    pub(crate) grants: Arc<LogGrants>,
-    /// The server's clock.
-    clock: SharedClock,
-}
-
-impl Logs {
-    /// Waits until no mint is running; never for a time.
-    pub(crate) async fn settle(&self) {
-        let grants = Arc::clone(&self.grants);
-        blocking(move || grants.settle()).await;
-    }
-
-    /// Waits until `n` mints are held by the blocked minter.
-    pub(crate) async fn held(&self, n: usize) {
-        let minter = Arc::clone(&self.minter);
-        blocking(move || minter.wait_for_held(n)).await;
-    }
-
-    /// A client of the fake store signing with `grant`, as the agent signs its uploads.
-    pub(crate) fn client(&self, grant: &LogGrant) -> LogStore<FakeStore, LogClock> {
-        let endpoint = Endpoint::parse(LOG_ENDPOINT, LOG_REGION, LOG_BUCKET, true).unwrap();
-        let credential = js_logstore::Credential {
-            access_key_id: grant.access_key_id.clone(),
-            secret_access_key: grant.secret_access_key.clone(),
-            session_token: grant.session_token.clone(),
-            expires_at: std::time::UNIX_EPOCH
-                + std::time::Duration::from_millis(grant.expires_at_ms),
-        };
-        let clock = LogClock(self.clock.clone());
-        LogStore::new(self.minter.store().clone(), clock, endpoint, credential)
-    }
-}
-
 /// The store under a server's job tables, and the tables.
 pub(crate) type Tables = (Arc<Interfere<Fake>>, Arc<ServerJobs>);
 
@@ -344,7 +229,8 @@ pub(crate) fn rig(name: &str, with_jobs: bool) -> Rig {
 }
 
 /// A server named `name` holding the job tables and placing with `js-sched`
-/// (`--placement js-sched`), so its heartbeats run the pass over the queued jobs. Its hosts
+/// (`--placement js-sched`), so the poller's turn the rig runs after each heartbeat
+/// ([`Rig::beat_reporting`]) runs the pass over the queued jobs. Its hosts
 /// report an `arch`, which the scheduler needs to describe them.
 pub(crate) fn placing_rig(name: &str) -> Rig {
     rig_of(name, true, true)
@@ -660,8 +546,23 @@ impl Rig {
         self.beat_reporting(agent, None).await
     }
 
-    /// The heartbeat of `agent`'s host reporting `taint`, answered by the route.
+    /// The heartbeat of `agent`'s host reporting `taint`, answered by the route, and then the
+    /// turn of the placement poller the heartbeat poked, which the server runs on a task of its
+    /// own right after the beat ([`crate::poller::poked_pass`]): a job the beat made room for is
+    /// placed before this returns, and its start rides on the next beat.
     pub(crate) async fn beat_reporting(
+        &self,
+        agent: &FakeAgent,
+        taint: Option<Taint>,
+    ) -> Result<HeartbeatReply, Refused> {
+        let reply = self.beat_unpolled(agent, taint).await;
+        crate::poller::poked_pass(&self.agents).await;
+        reply
+    }
+
+    /// The heartbeat of `agent`'s host reporting `taint`, answered by the route, with no turn
+    /// of the placement poller after it: what the route alone does.
+    pub(crate) async fn beat_unpolled(
         &self,
         agent: &FakeAgent,
         taint: Option<Taint>,
@@ -748,9 +649,11 @@ struct Held {
 
 /// An agent that speaks the per-job messages, as the agent does: a start is taken once per
 /// job id and held as `starting`; a stop of a held job ends it `killed`; a stop of a job it
-/// does not hold retires the id, listed until the server acknowledges it; an acknowledged
-/// result is dropped with its container at once, and the id is fenced, so a start that
-/// arrives later is not run. It makes a container only when told to run a job.
+/// does not hold retires the id, listed until the server acknowledges it, and fences the id, so
+/// a start of the job that arrives later is not run; an acknowledged result is dropped with its
+/// container at once, and its fence (the job id with the allocation id) is kept, so a start of
+/// that allocation that arrives later is not run, while a start of the job under another
+/// allocation (the job placed here again after a requeue) is. It makes a container only when told to run a job.
 ///
 /// A reply that names an allocation (`exclusive`) makes it prepare: its phase is `preparing`
 /// until a test has it report the host ready ([`FakeAgent::report_ready`]) or refused
@@ -766,6 +669,8 @@ pub(crate) struct FakeAgent {
     held: BTreeMap<String, Held>,
     retired: BTreeSet<String>,
     fenced: BTreeSet<String>,
+    /// The fences of the results it was answered: each job id with its allocation id.
+    answered: BTreeSet<(String, String)>,
     /// The jobs it made a container for, in order.
     pub(crate) launched: Vec<String>,
     /// Whether it reports `log_grant_state`.
@@ -794,6 +699,7 @@ impl FakeAgent {
             held: BTreeMap::new(),
             retired: BTreeSet::new(),
             fenced: BTreeSet::new(),
+            answered: BTreeSet::new(),
             launched: Vec::new(),
             uploads: false,
             grant: None,
@@ -884,7 +790,8 @@ impl FakeAgent {
             _ => {}
         }
         for spec in starts(reply) {
-            if !self.fenced.contains(&spec.job_id) {
+            let fence = (spec.job_id.clone(), spec.allocation_id.clone());
+            if !self.fenced.contains(&spec.job_id) & !self.answered.contains(&fence) {
                 self.held.entry(spec.job_id.clone()).or_insert(Held {
                     allocation_id: spec.allocation_id.clone(),
                     state: HeldState::Starting,
@@ -906,8 +813,9 @@ impl FakeAgent {
             }
         }
         for ack in &reply.job_acks {
-            self.held.remove(&ack.job_id);
-            self.fenced.insert(ack.job_id.clone());
+            let held = self.held.remove(&ack.job_id);
+            let fence = held.map(|held| (ack.job_id.clone(), held.allocation_id));
+            self.answered.extend(fence);
         }
         for id in &reply.retired_acks {
             self.retired.remove(id);
@@ -956,11 +864,16 @@ impl FakeAgent {
         ended.input_failure = input_failure.map(str::to_owned);
     }
 
-    /// The held job `id` ends with a clean exit whose result reports `usage`.
-    pub(crate) fn end_with_usage(&mut self, id: &str, usage: js_agent_wire::JobUsage) {
-        self.end(id, Outcome::Succeeded, Some(0));
-        let ended = self.held.get_mut(id).unwrap().result.as_mut().unwrap();
-        ended.usage = Some(usage);
+    /// The result the held job `id` ended with reports `usage`.
+    pub(crate) fn report(&mut self, id: &str, usage: js_agent_wire::JobUsage) {
+        let held = self.held.get_mut(id).unwrap();
+        held.result.as_mut().unwrap().usage = Some(usage);
+    }
+
+    /// The result the held job `id` ended with reports the CPU series `series`.
+    pub(crate) fn report_series(&mut self, id: &str, series: js_agent_wire::CpuSeries) {
+        let held = self.held.get_mut(id).unwrap();
+        held.result.as_mut().unwrap().cpu_series = Some(series);
     }
 
     /// The held job `id` ends with a clean exit whose result reports `logs`.
@@ -994,5 +907,7 @@ pub(crate) fn result(
         logs: None,
         input_failure: None,
         usage: None,
+        cpu_series: None,
+        memory_series: None,
     }
 }

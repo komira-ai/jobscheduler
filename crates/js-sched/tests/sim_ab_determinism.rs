@@ -97,6 +97,7 @@ impl Host {
                 same_key_millis: 0,
                 new_key_millis: 0,
                 uncovered_leases: 0,
+                booked_with_lease: Charge::default(),
             },
             load: [Charge::default(); SLOTS],
             new: [Charge::default(); SLOTS],

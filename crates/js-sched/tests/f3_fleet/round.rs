@@ -162,5 +162,6 @@ impl Check {
             whole,
             charged,
         )
+        .with_booked_memory(booked.memory_bytes)
     }
 }

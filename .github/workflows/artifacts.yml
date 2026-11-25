@@ -22,10 +22,21 @@
 # by a push of its own: the version is decided by `plan` (at the push, without waiting for
 # `ci`), and a build made before that could carry a version another release has taken.
 #
-# Only `attest` holds `id-token: write` and `attestations: write`, and only for a push to main
-# (its `if:`; crates/xtask/tests/release_workflow holds both). While it holds them no
-# repository code runs and nothing is built: it runs pinned actions, two `sha256sum --check`
-# and a `cp` per bundle. The files reach it through the run's artifact store, where a job that
+# The Apple silicon archives come from one of two jobs, by the repository variable
+# MACOS_ON_FARM: `build-macos` on a hosted Apple silicon runner unless it is `true`, and the call
+# job `macos-farm` (macos-farm.yml, docs/mac-farm.md) when it is, which builds on a Mac of the
+# build farm from a Linux runner. Both upload `dist-aarch64-apple-darwin`, and `sums` takes
+# whichever ran.
+#
+# Of the jobs of this file, only `attest` holds `id-token: write` and `attestations: write` to
+# sign, and only for a push to main (its `if:`; crates/xtask/tests/release_workflow holds both).
+# The one other job that holds `id-token: write` is `macos-farm`, because a call grants the
+# token that the jobs of the file it calls hold (to join the farm's network). Those are jobs of
+# macos-farm.yml, whose tokens name that file as their workflow, so no token of theirs can sign
+# as this file; crates/xtask/tests/apt_workflow refuses `id-token: write` in any other job of
+# this file that is not a call of another workflow file. While `attest` holds the two writes no
+# repository code runs and nothing is built: it runs pinned actions, two `sha256sum --check` and
+# a `cp` per bundle. The files reach it through the run's artifact store, where a job that
 # ran repository code could have replaced them, so it first refuses sums other than the ones
 # `sums` made (their SHA-256 is a job output) and then files that differ from the sums.
 # `verify` then checks every file's attestation, and each package's and image's bundle, before
@@ -62,9 +73,9 @@ jobs:
         # on a hosted runner of its own architecture (no cross linker, no emulation), so the
         # check step below runs every binary on the kind of host it is for. The lease server
         # and js-mdm are Linux-only; the client, the agent, the js-bundle CLI and the Mac host
-        # tools (js-mac-session, js-mac-provision) also build for Apple silicon. `deb` is the
-        # platform `release deb` makes the Debian package of js-agent for, and `deb_arch` the
-        # architecture its file name carries; the Mac leg makes none.
+        # tools (js-mac-session, js-mac-provision) also build for Apple silicon, in
+        # `build-macos` or `macos-farm` below. `deb` is the platform `release deb` makes the
+        # Debian package of js-agent for, and `deb_arch` the architecture its file name carries.
         include:
           # Static musl binaries: they run on gcr.io/distroless/cc-debian12 and on any
           # Linux host of their architecture, whatever its libc. rustls links ring, which
@@ -79,11 +90,6 @@ jobs:
             builds: js-lease-server:js-lease-server js-cli:js js-agent:js-agent js-bundle-cli:js-bundle js-mdm:js-mdm
             deb: linux-arm64
             deb_arch: arm64
-          - target: aarch64-apple-darwin
-            runner: macos-15
-            builds: js-cli:js js-agent:js-agent js-bundle-cli:js-bundle js-mac-session:js-mac-session js-mac-provision:js-mac-provision
-            deb: ''
-            deb_arch: ''
     env:
       TARGET: ${{ matrix.target }}
       VERSION: ${{ inputs.version }}
@@ -123,11 +129,6 @@ jobs:
       - name: Name musl-gcc as the arm64 musl compiler
         if: ${{ matrix.target == 'aarch64-unknown-linux-musl' }}
         run: sudo ln -s /usr/bin/musl-gcc /usr/local/bin/aarch64-linux-musl-gcc
-      # The archives are made with GNU tar's options; the runner has Homebrew's gnu-tar
-      # (`gtar`), and this installs it if an image does not.
-      - name: Install GNU tar
-        if: ${{ matrix.target == 'aarch64-apple-darwin' }}
-        run: command -v gtar > /dev/null || brew install gnu-tar
       - run: rustup target add "$TARGET"
       # The release version goes into this checkout only (Cargo.toml and Cargo.lock), so
       # the binaries print it; the repository keeps its own version.
@@ -143,16 +144,6 @@ jobs:
           # commit's time as the modification time, numeric owner 0/0, no name or time in
           # the gzip header. A full re-run then makes the same files as the first run.
           mtime="$(git log -1 --format=%ct "$COMMIT")"
-          # The oldest macOS the Apple silicon binaries must run on; a newer runner image
-          # must not raise it (the check step below reads each binary's minos).
-          case "$TARGET" in
-            *-apple-darwin) export MACOSX_DEPLOYMENT_TARGET=11.0 ;;
-          esac
-          # The options below are GNU tar's: on a Mac, Homebrew's gnu-tar is `gtar`.
-          tar=tar
-          if command -v gtar > /dev/null; then
-            tar=gtar
-          fi
           for entry in $BUILDS; do
             package="${entry%%:*}"
             bin="${entry##*:}"
@@ -162,7 +153,7 @@ jobs:
             # and, in the Linux js-lease-server archive of either architecture,
             # updater.d/js-lease-server.toml.
             cargo xtask release stage --bin "$bin" --target "$TARGET" --version "$VERSION" --out "stage-$bin"
-            "$tar" -C "stage-$bin" --sort=name --mtime="@$mtime" --owner=0 --group=0 --numeric-owner -cf - "$name" | gzip -n > "dist/$name.tar.gz"
+            tar -C "stage-$bin" --sort=name --mtime="@$mtime" --owner=0 --group=0 --numeric-owner -cf - "$name" | gzip -n > "dist/$name.tar.gz"
           done
           ls -l dist
       - name: Check the binaries
@@ -172,33 +163,14 @@ jobs:
             bin="${entry##*:}"
             file "target/$TARGET/release/$bin"
           done
-          case "$TARGET" in
-            *-apple-darwin)
-              for entry in $BUILDS; do
-                bin="${entry##*:}"
-                minos="$(otool -l "target/$TARGET/release/$bin" | awk '/LC_BUILD_VERSION/ {b=1} b && $1 == "minos" {print $2; exit}')"
-                echo "$bin minos $minos"
-                if [ -z "$minos" ]; then
-                  echo "::error::$bin has no LC_BUILD_VERSION minos to check"
-                  exit 1
-                fi
-                if [ "$(printf '%s\n%s\n' "$minos" 11.0 | sort -V | tail -n 1)" != "11.0" ]; then
-                  echo "::error::$bin needs macOS $minos, above the pinned 11.0"
-                  exit 1
-                fi
-              done
-              ;;
-            *-linux-musl)
-              for entry in $BUILDS; do
-                bin="${entry##*:}"
-                # A static binary has no dynamic loader and no shared libraries.
-                if readelf -d "target/$TARGET/release/$bin" | grep -q NEEDED; then
-                  echo "::error::$bin links shared libraries"
-                  exit 1
-                fi
-              done
-              ;;
-          esac
+          for entry in $BUILDS; do
+            bin="${entry##*:}"
+            # A static binary has no dynamic loader and no shared libraries.
+            if readelf -d "target/$TARGET/release/$bin" | grep -q NEEDED; then
+              echo "::error::$bin links shared libraries"
+              exit 1
+            fi
+          done
           # Every binary runs on the build host and prints the release version on the first
           # line of --version; js-agent prints a `runtimes:` line after it.
           for entry in $BUILDS; do
@@ -216,10 +188,10 @@ jobs:
           done
         env:
           BUILDS: ${{ matrix.builds }}
-      # The Debian package of js-agent for this leg's platform (the Linux legs; the Mac leg has
-      # none), made of the js-agent binary built and checked above and the files in
-      # packaging/js-agent/deb (crates/xtask/src/release/deb.rs). It refuses a binary that does
-      # not print this version. It lands in dist beside the archives.
+      # The Debian package of js-agent for this leg's platform, made of the js-agent binary built
+      # and checked above and the files in packaging/js-agent/deb
+      # (crates/xtask/src/release/deb.rs). It refuses a binary that does not print this version.
+      # It lands in dist beside the archives.
       - name: Package js-agent as a .deb
         if: ${{ matrix.deb != '' }}
         env:
@@ -235,10 +207,10 @@ jobs:
         env:
           DEB_ARCH: ${{ matrix.deb_arch }}
         run: dpkg-deb --contents "dist/js-agent_${VERSION}_${DEB_ARCH}.deb"
-      # The container image of js-lease-server for this leg's target (the Linux legs; the Mac
-      # leg has none), made of the js-lease-server binary built and checked above and the
-      # repository's LICENSE (crates/xtask/src/release/server_image.rs). It refuses a binary
-      # that does not hold this version. It lands in dist beside the archives.
+      # The container image of js-lease-server for this leg's target, made of the js-lease-server
+      # binary built and checked above and the repository's LICENSE
+      # (crates/xtask/src/release/server_image.rs). It refuses a binary that does not hold this
+      # version. It lands in dist beside the archives.
       - name: Build the js-lease-server image
         if: ${{ endsWith(matrix.target, '-linux-musl') }}
         run: cargo xtask release image --binary "target/$TARGET/release/js-lease-server" --version "$VERSION" --target "$TARGET" --out dist
@@ -252,10 +224,84 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # The Apple silicon archives, built on a hosted Apple silicon runner, unless the repository
+  # variable MACOS_ON_FARM is `true`, when `macos-farm` builds them on the build farm instead.
+  # `cargo xtask release macos-leg` builds the five binaries and checks each one's minimum macOS
+  # and version; the archives are made as `build` makes them, and uploaded under the name `sums`
+  # takes.
+  build-macos:
+    name: build aarch64-apple-darwin
+    if: ${{ vars.MACOS_ON_FARM != 'true' }}
+    runs-on: macos-15
+    permissions:
+      contents: read
+    env:
+      TARGET: aarch64-apple-darwin
+      VERSION: ${{ inputs.version }}
+      BUILDS: js-cli:js js-agent:js-agent js-bundle-cli:js-bundle js-mac-session:js-mac-session js-mac-provision:js-mac-provision
+      # The oldest macOS the binaries must run on; a newer runner image must not raise it
+      # (`release macos-leg` reads each binary's minos).
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.COMMIT }}
+          persist-credentials: false
+      - run: rustup toolchain install
+      # The archives are made with GNU tar's options; the runner has Homebrew's gnu-tar
+      # (`gtar`), and this installs it if an image does not.
+      - name: Install GNU tar
+        run: command -v gtar > /dev/null || brew install gnu-tar
+      - run: rustup target add "$TARGET"
+      # The release version goes into this checkout only (Cargo.toml and Cargo.lock), so
+      # the binaries print it; the repository keeps its own version.
+      - name: Stamp the release version
+        run: cargo xtask release stamp --to "$VERSION"
+      - name: Build and check the binaries
+        run: cargo xtask release macos-leg --target "$TARGET" --builds "$BUILDS" --min-macos 11.0 --out target/macos-leg
+      - name: Package
+        run: |
+          set -euo pipefail
+          mkdir dist
+          # Archives that depend only on the commit and the binaries: sorted names, the
+          # commit's time as the modification time, numeric owner 0/0, no name or time in
+          # the gzip header. A full re-run then makes the same files as the first run.
+          mtime="$(git log -1 --format=%ct "$COMMIT")"
+          # The options below are GNU tar's: on a Mac, Homebrew's gnu-tar is `gtar`.
+          for entry in $BUILDS; do
+            bin="${entry##*:}"
+            name="$bin-$VERSION-$TARGET"
+            cargo xtask release stage --bin "$bin" --target "$TARGET" --version "$VERSION" --out "stage-$bin"
+            gtar -C "stage-$bin" --sort=name --mtime="@$mtime" --owner=0 --group=0 --numeric-owner -cf - "$name" | gzip -n > "dist/$name.tar.gz"
+          done
+          ls -l dist
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist-aarch64-apple-darwin
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  # The same archives, built on a Mac of the build farm from a Linux runner, when the repository
+  # variable MACOS_ON_FARM is `true` (macos-farm.yml, docs/mac-farm.md). The call grants
+  # `id-token: write`, which its jobs hold for the farm's network; their tokens name
+  # macos-farm.yml, not this file, as the workflow (see the top of this file).
+  macos-farm:
+    if: ${{ vars.MACOS_ON_FARM == 'true' }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/macos-farm.yml
+    with:
+      version: ${{ inputs.version }}
+      what: release
+
   # One SHA256SUMS over every asset (the archives, the two .debs and the two images), checked before anything is
   # attested or published. No repository code runs here.
   sums:
-    needs: [build]
+    needs: [build, build-macos, macos-farm]
+    # The Apple silicon archives come from whichever of `build-macos` and `macos-farm` ran.
+    if: ${{ !cancelled() && needs.build.result == 'success' && (needs.build-macos.result == 'success' || needs.macos-farm.result == 'success') }}
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -297,10 +343,12 @@ jobs:
   # Push to main only: build provenance for every file, from SHA256SUMS, and a provenance
   # attestation of each .deb and each image alone, whose bundle is copied beside it as
   # `<file>.sigstore.json`.
-  # See the top of this file.
+  # See the top of this file. `!cancelled()` and the check of `sums`'s result: without a status
+  # function GitHub skips a job when any job above it was skipped, and one of `build-macos` and
+  # `macos-farm` always is.
   attest:
     needs: [sums]
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    if: ${{ !cancelled() && needs.sums.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -367,9 +415,10 @@ jobs:
   # this file on refs/heads/main at the commit, from a GitHub-hosted runner; and each .deb and
   # each image verifies from its bundle as well, as release.yml's apt jobs verify a .deb and a
   # deployer verifies an image.
+  # `!cancelled()` and the check of `attest`'s result, as `attest` has them.
   verify:
     needs: [attest]
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    if: ${{ !cancelled() && needs.attest.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: read

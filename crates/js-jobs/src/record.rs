@@ -299,7 +299,8 @@ pub enum StartFailure {
     /// A whole-host prepare failed as often as the pool allows.
     ExclusiveNotReady,
     /// The agent refused the job (a tainted host, a failed image fetch, a host path it does
-    /// not allow).
+    /// not allow), or the server did, for a start that breaks a rule of the wire the agent
+    /// would hold it to (`invalid-env`, for one).
     AgentRefused,
     /// An input the job named could not be read on its host (`input-unavailable`): the
     /// host's state, not the job's.
@@ -457,12 +458,12 @@ pub enum Booked {
 /// Which history sized a job that books nothing of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SizedFrom {
-    /// Its own class's estimate.
+    /// Its own class's runs: the class has a fresh run of its own.
     Class,
-    /// Its fallback class's estimate, in place of the cold size, raised by its own class's
-    /// runs and floor.
+    /// Its fallback class's runs, else its client's, in place of the cold size: its own class
+    /// has no run; raised only by its own class's floor.
     Fallback,
-    /// The cold size: neither its class nor a fallback class has an estimate.
+    /// The cold size: neither its class, nor its fallback class, nor its client has a run.
     Cold,
     /// The whole of the most bookable memory a host has: its class's runs reach it.
     OverCap,

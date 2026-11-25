@@ -10,6 +10,10 @@ The lane is additive and advisory. `.github/workflows/farm.yml` runs it on every
 on every pull request from a branch of this repository (not a fork's, not Dependabot's). No check
 of it is required, and a build farm outage turns it red and holds nothing.
 
+The same farm also builds the macOS files of a release on its Macs, from a Linux runner, when the
+repository variable `MACOS_ON_FARM` is `true`: that is `macos-farm.yml`, with Cargo and not Buck2
+([mac-farm.md](mac-farm.md)).
+
 ## What it builds
 
 `buck2 build //:ci` runs three steps for each member of the workspace:
@@ -113,6 +117,7 @@ the binary is static and the check passes.
 | `js-bundle` | `tests/pack.rs` binds a Unix socket below `TMPDIR` (#170) |
 | `js-guest` | its serve tests bind a Unix socket below `TMPDIR` (#170); `tests/as_root.rs` holds `#[ignore]`d root tests |
 | `js-vmm` | the lease-system tests bind a Unix socket below `TMPDIR` (#170) |
+| `js-isolation-probe` | its network tests bind a Unix socket below `TMPDIR` (#170) |
 | `js-caps` | `tests/accel.rs` scans the sources of every member |
 | `js-watch` | `tests/read_only.rs` reads other members' sources and walks `crates/` |
 | `js-elastic-fake` | `tests/no_cloud_reach.rs` reads every manifest and source file of the repository |

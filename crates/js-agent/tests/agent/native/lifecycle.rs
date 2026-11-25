@@ -1,14 +1,17 @@
 //! A native job through the lifecycle: the start, the exit, the stop and the wall limit
 //! end the run as they end a container's, the user is removed with the run, and a start
 //! the runtime cannot serve is refused with the code the server reads. The runtime is the
-//! real one, over the fake helper.
+//! real one, over the real account pool on a fake host and the fake launcher (`mod.rs`): the
+//! programs run, as the test's own user, and what the runtime asked of the supervisor is read
+//! from the launcher.
 
 use std::fs;
 use std::sync::Arc;
 
 use js_agent::bundle::{Admission, Placer, Registry, Settings};
-use js_agent::lifecycle::{Config, Event, Lifecycle};
-use js_agent::native::{Ceiling, Enforcer, HandOver, NativeChecks};
+use js_agent::lifecycle::{Config, Event, Lifecycle, NoChecks};
+use js_agent::mac_accounts::{Pool, Settings as PoolSettings};
+use js_agent::native::{Ceiling, Enforcer, HandOver, Journal};
 use js_agent_wire::{
     BookedResources, Command, InputRef, JobSpec, JobStartSpec, NetworkLevel, Outcome, RunSpec,
     refusal,
@@ -18,9 +21,11 @@ use js_oci::{Allow, Digest};
 use js_types::{Arch, Os};
 use serde_json::json;
 
-use super::fake_helper::FakeHelper;
 use super::pf_gate::{Fake, Verdict};
-use super::{TERM, native, parse};
+use super::{
+    FakeAccounts, FakeLauncher, Launched, TERM, config, keep_owner, native, open_pool,
+    pool_settings,
+};
 use crate::bundle::wired::{Served, rig};
 use crate::lifecycle::fake::ManualClock;
 use crate::lifecycle::{cleanup, config_in, names, reply, reply_json};
@@ -32,15 +37,22 @@ type SettingsCase = (&'static str, fn(&mut Settings, &Served));
 /// A named change to a start.
 type SpecCase = (&'static str, fn(&mut JobSpec));
 
-/// A lifecycle over a native runtime over a fake helper.
+/// The slots of the pool of a lifecycle that gives nothing away ([`keep_owner`]): enough for
+/// the runs of the lifecycle's four CPUs at once.
+const SLOTS: u32 = 4;
+
+/// A lifecycle over a native runtime over a pool on a fake host and a fake launcher.
 pub(super) struct Native {
     pub(super) life: Lifecycle,
-    pub(super) fake: FakeHelper,
+    pub(super) launcher: Arc<FakeLauncher>,
+    pub(super) accounts: Arc<FakeAccounts>,
+    pub(super) pool: Arc<Pool>,
+    pub(super) settings: PoolSettings,
     pub(super) clock: ManualClock,
     pub(super) dir: Scratch,
 }
 
-/// The most steps a test takes for the helper's thread to report an end.
+/// The most steps a test takes for a program to end.
 const STEPS: u32 = 50_000_000;
 
 fn canonical(dir: &Scratch, name: &str) -> AbsPath {
@@ -79,18 +91,27 @@ impl Native {
         adjust: impl FnOnce(&mut NativeConfig),
         gated: bool,
     ) -> Self {
-        Self::made(name, bundles, adjust, gated, |_| {}, None)
+        Self::made(name, bundles, adjust, gated, |_| {}, None, SLOTS)
     }
 
     /// A lifecycle whose configuration `life` has changed (its files root is `files` in the
     /// test's directory, the agent's), over a runtime that gives a run's files to its user
-    /// through `hand_over` when one is given and with `lchown` otherwise.
+    /// through `hand_over` when one is given and with `lchown` otherwise (the pool has one
+    /// slot then, the test's own uid, so `lchown` gives nothing away).
     pub(super) fn with_files(
         name: &str,
         life: impl FnOnce(&mut Config),
         hand_over: Option<HandOver>,
     ) -> Self {
-        Self::made(name, None, |_: &mut NativeConfig| {}, true, life, hand_over)
+        Self::made(
+            name,
+            None,
+            |_: &mut NativeConfig| {},
+            true,
+            life,
+            hand_over,
+            1,
+        )
     }
 
     fn made(
@@ -100,21 +121,34 @@ impl Native {
         gated: bool,
         life: impl FnOnce(&mut Config),
         hand_over: Option<HandOver>,
+        slots: u32,
     ) -> Self {
         let dir = Scratch::new(&format!("native-life-{name}"));
         let mut config = config_in(&dir, false);
         life(&mut config);
-        let fake = FakeHelper::start(&dir);
-        let mut runtime_config = super::config(&fake);
+        let accounts = FakeAccounts::new();
+        let launcher = FakeLauncher::new();
+        let settings = pool_settings(&dir, slots);
+        let pool = open_pool(&dir, &settings, &accounts);
+        let mut runtime_config = self::config(&dir, &settings);
         runtime_config.read_denies = vec![canonical(&dir, "state"), canonical(&dir, "scratch")];
         adjust(&mut runtime_config);
         let opened = match gated {
-            true => NativeRuntime::open(fake.client(), runtime_config, TERM),
-            false => NativeRuntime::open_ungated(fake.client(), runtime_config, TERM),
+            true => NativeRuntime::over(Some(pool.clone()), launcher.clone(), runtime_config, TERM),
+            false => NativeRuntime::open_ungated(
+                Some(pool.clone()),
+                launcher.clone(),
+                runtime_config,
+                TERM,
+            ),
         };
-        let mut runtime = opened.unwrap();
-        if let Some(hand_over) = hand_over {
-            runtime = runtime.with_hand_over(hand_over);
+        let mut runtime = opened
+            .unwrap()
+            .with_process_table(super::end::GroupTable::new(launcher.clone()));
+        match (hand_over, slots) {
+            (Some(hand_over), _) => runtime = runtime.with_hand_over(hand_over),
+            (None, 1) => {}
+            (None, _) => runtime = runtime.with_hand_over(keep_owner()),
         }
         if let Some((store, admission)) = bundles {
             config.bundle = Some(admission);
@@ -124,16 +158,43 @@ impl Native {
         let (life, _) = Lifecycle::adopt(
             config,
             Box::new(runtime),
-            Box::new(NativeChecks::over(fake.client())),
+            Box::new(NoChecks),
             Box::new(clock.clone()),
         )
         .unwrap();
         Self {
             life,
-            fake,
+            launcher,
+            accounts,
+            pool,
+            settings,
             clock,
             dir,
         }
+    }
+
+    /// The `n`th launch the runtime asked of the supervisor (the runs, in the order they
+    /// started).
+    pub(super) fn launch(&self, n: usize) -> Launched {
+        self.launcher.launched()[n].clone()
+    }
+
+    /// The account of the `n`th launch.
+    pub(super) fn account_of(&self, n: usize) -> String {
+        let launched = self.launch(n);
+        launched.var("USER").expect("the run's USER").to_owned()
+    }
+
+    /// The home of the account of the `n`th launch.
+    pub(super) fn home_of(&self, n: usize) -> std::path::PathBuf {
+        self.settings.homes.join(self.account_of(n))
+    }
+
+    /// Asserts that nothing was started or lent: no launch, and no lease in the journal.
+    pub(super) fn made_no_run(&self) {
+        assert!(self.launcher.launched().is_empty(), "no supervisor");
+        let journal = Journal::new(&self.dir.path("native-leases"));
+        assert_eq!(journal.live().unwrap(), Vec::<String>::new(), "no lease");
     }
 
     pub(super) fn apply(&mut self, commands: Vec<Command>) -> Vec<String> {
@@ -154,7 +215,7 @@ impl Native {
             }
             std::thread::yield_now();
         }
-        panic!("the lifecycle never got there: the fake helper never reported the end");
+        panic!("the lifecycle never got there: the program never ended");
     }
 
     pub(super) fn scratch_of(&self, run_id: &str) -> std::path::PathBuf {
@@ -173,20 +234,35 @@ pub(super) fn job(run_id: &str, program: &str) -> JobSpec {
     spec
 }
 
-/// Asserts the whole life of a native job: it starts, its exit makes a result with the
-/// code and the tail of what it printed, the cleanup runs in the container order (the
-/// helper is asked to kill and delete the user, the scratch directory goes, the checks
-/// pass, the slot is freed), nothing of the user is left, and the acknowledged result is
-/// forgotten. It catches a native job that runs without the lifecycle's accounting, a
-/// result without its log, and a lease user left on the Mac.
+/// A native start of `program` with `args`, as [`job`] with the program's arguments.
+pub(super) fn job_with(run_id: &str, program: &str, args: &[&str]) -> JobSpec {
+    let mut spec = job(run_id, program);
+    spec.native = Some(native(program, args));
+    spec
+}
+
+/// A start of a program that runs until it is stopped.
+pub(super) fn sleeper(run_id: &str) -> JobSpec {
+    job_with(run_id, "/bin/sleep", &["3600"])
+}
+
+/// Asserts the whole life of a native job: it starts (the supervisor is asked once), its
+/// exit makes a result with the code and the tail of what it printed, the cleanup runs in
+/// the container order (the account is retired and its home goes, the scratch directory
+/// goes, the checks pass, the slot is freed), nothing of the account is left, and the
+/// acknowledged result is forgotten. It catches a native job that runs without the
+/// lifecycle's accounting, a result without its log, and an account left on the Mac.
 #[test]
 fn a_native_job_runs_to_its_result_and_its_user_is_removed() {
     let mut h = Native::new("run");
-    h.fake.print(b"hello\n", b"");
-    assert_eq!(h.start(job("r1", "/bin/echo")), ["started r1"]);
+    assert_eq!(
+        h.start(job_with("r1", "/bin/echo", &["hello"])),
+        ["started r1"]
+    );
     assert_eq!(h.life.held().len(), 1);
     assert!(h.scratch_of("r1").is_dir());
-    h.fake.exit("7.0", 0);
+    let (account, home) = (h.account_of(0), h.home_of(0));
+    assert!(h.accounts.records().contains(&account));
     let events = h.until(|life| life.busy_slots().is_empty());
     let mut want = vec!["result r1".to_owned()];
     want.extend(cleanup("r1"));
@@ -197,31 +273,24 @@ fn a_native_job_runs_to_its_result_and_its_user_is_removed() {
         (Outcome::Succeeded, Some(0))
     );
     assert_eq!(result.log_tail.as_ref().unwrap().stdout, "hello\n");
-    assert_eq!(
-        h.fake.verbs(),
-        [
-            "boot-reset",
-            "user-create 7.0",
-            "pool-status",
-            "run 7.0",
-            "kill-uid 7.0",
-            "user-delete 7.0"
-        ]
-    );
+    assert_eq!(h.launcher.launched().len(), 1);
     assert!(!h.scratch_of("r1").exists());
-    assert!(!h.fake.home_of("7.0").exists());
+    assert!(!home.exists());
+    assert!(!h.accounts.records().contains(&account));
     let ack = reply_json(&json!({ "result_acks": [{ "run_id": "r1", "ack": "ACCEPTED" }] }));
     h.life.apply(&ack);
     assert!(h.life.held().is_empty());
 }
 
-/// Asserts that a stop ends the run through the helper's `stop` and the run ends as stopped,
-/// and that the removal kills before it deletes. It catches a stop that leaves the program
-/// running and a result that reports the stop's signal as the job's own failure.
+/// Asserts that a stop ends the run (the job's group is sent `SIGTERM`) and the run ends as
+/// stopped, and that the removal retires its account and takes its home. It catches a stop
+/// that leaves the program running and a result that reports the stop's signal as the job's
+/// own failure.
 #[test]
 fn a_stop_kills_the_user_and_the_run_ends_as_killed() {
     let mut h = Native::new("stop");
-    h.start(job("r1", "/bin/sleep"));
+    h.start(sleeper("r1"));
+    let (account, home) = (h.account_of(0), h.home_of(0));
     assert!(
         h.apply(vec![Command::Stop {
             run_id: "r1".to_owned()
@@ -231,31 +300,32 @@ fn a_stop_kills_the_user_and_the_run_ends_as_killed() {
     h.until(|life| !life.results().is_empty());
     let result = &h.life.results()[0];
     assert_eq!((result.outcome, result.exit_code), (Outcome::Killed, None));
-    assert_eq!(
-        h.fake.verbs()[4..],
-        ["stop 7.0", "kill-uid 7.0", "user-delete 7.0"]
-    );
+    h.until(|life| life.busy_slots().is_empty());
+    assert!(!home.exists());
+    assert!(!h.accounts.records().contains(&account));
 }
 
-/// Asserts that a run past its wall limit is stopped and reported timed out. It catches a
-/// native job that runs for ever.
+/// Asserts that a run past its wall limit is stopped and reported timed out, and its account
+/// is retired. It catches a native job that runs for ever.
 #[test]
 fn a_run_past_its_wall_limit_is_killed_and_timed_out() {
     let mut h = Native::new("wall");
-    h.start(job("r1", "/bin/sleep"));
+    h.start(sleeper("r1"));
+    let home = h.home_of(0);
     h.clock.advance(60_000);
     h.until(|life| !life.results().is_empty());
     let result = &h.life.results()[0];
     assert_eq!(result.outcome, Outcome::TimedOut);
-    assert_eq!(h.fake.verbs()[4], "stop 7.0");
+    h.until(|life| life.busy_slots().is_empty());
+    assert!(!home.exists());
 }
 
 /// Asserts that a start named by its image, an image alone and an image with a `run`,
 /// `os` and `arch`, is refused by a native runtime that holds no bundle store with
-/// `image-unsupported-here` before anything is made: the helper sees no user, no run
+/// `image-unsupported-here` before anything is made: no account is lent, no run
 /// directory is made and the booking is intact. It catches an image start answered
 /// `native-unsupported` (the code of a native body this runtime cannot stage), one that
-/// reaches the helper and fails late, and a runtime without a store that claims it can run
+/// reaches the supervisor and fails late, and a runtime without a store that claims it can run
 /// the image.
 #[test]
 fn an_image_start_on_the_native_path_is_refused_with_a_typed_code() {
@@ -268,7 +338,7 @@ fn an_image_start_on_the_native_path_is_refused_with_a_typed_code() {
     for (n, spec) in [image_only, with_run].into_iter().enumerate() {
         let mut h = Native::new(&format!("image{n}"));
         assert_eq!(h.start(spec), ["refused r1 image-unsupported-here"], "{n}");
-        assert_eq!(h.fake.verbs(), ["boot-reset"]);
+        h.made_no_run();
         assert!(!h.scratch_of("r1").exists());
         assert_eq!(h.life.free().cpu_millis, 4000);
         let result = &h.life.results()[0];
@@ -336,7 +406,7 @@ fn a_native_job_start_with_env_is_answered_for_its_image_not_its_env() {
             format!("refused j2 {}", refusal::IMAGE_UNSUPPORTED_HERE)
         ]
     );
-    assert_eq!(h.fake.verbs(), ["boot-reset"]);
+    h.made_no_run();
     assert!(!h.scratch_of("j1").exists());
     assert_eq!(h.life.free().cpu_millis, 4000);
 }
@@ -345,7 +415,7 @@ fn a_native_job_start_with_env_is_answered_for_its_image_not_its_env() {
 /// the server reads: a program outside the tool roots (`invalid-program`), a `stage` input
 /// it keeps no tree for and a retired `tree` input (`native-unsupported`), a mount input
 /// whose path is not below the root (`invalid-mount`). (A working directory that leaves
-/// `exec/` is refused by the wire before it gets here, `invalid-job`.) Nothing is made: the helper sees no user, the scratch directory is not made and the
+/// `exec/` is refused by the wire before it gets here, `invalid-job`.) Nothing is made: no account is lent, the scratch directory is not made and the
 /// booking is intact. It catches a refused start that still costs a user, and a job whose
 /// inputs are dropped without a word. (Outputs and run files are served:
 /// `native/outputs.rs` and `native/files.rs`.)
@@ -387,7 +457,7 @@ fn a_start_the_runtime_cannot_serve_is_refused_and_makes_nothing() {
     for (n, (code, spec)) in table.into_iter().enumerate() {
         let mut h = Native::new(&format!("refuse{n}"));
         assert_eq!(h.start(spec), [format!("refused r1 {code}")], "{code}");
-        assert_eq!(h.fake.verbs(), ["boot-reset"]);
+        h.made_no_run();
         assert!(!h.scratch_of("r1").exists());
         assert_eq!(h.life.free().cpu_millis, 4000);
         let result = &h.life.results()[0];
@@ -459,9 +529,9 @@ impl Imaged {
         (result.outcome, result.detail.clone())
     }
 
-    /// Asserts the helper was asked for nothing but its boot reset: no user was made.
+    /// Asserts nothing was started or lent: no account was made for a run.
     fn made_no_user(&self) {
-        assert_eq!(self.h.fake.verbs(), ["boot-reset"]);
+        self.h.made_no_run();
     }
 }
 
@@ -513,31 +583,22 @@ fn a_second_job_reuses_the_pinned_bundle() {
         s.h.start(image_job("r1", &image, "@bundle/tool")),
         ["started r1"]
     );
-    let tool = parse(&s.h.fake.run_of("7.0").argv).tail[0].clone();
-    s.h.fake.exit("7.0", 0);
+    let tool = s.h.launch(0).program;
     s.h.until(|life| life.busy_slots().is_empty());
-    for (run_id, lease) in [("r2", "7.1"), ("r3", "7.2")] {
+    for (n, (run_id, lease)) in [("r2", "7.1"), ("r3", "7.2")].into_iter().enumerate() {
         let started = s.h.start(image_job(run_id, &image, "@bundle/tool"));
         assert_eq!(started, [format!("started {run_id}")]);
         assert!(
             s.store.pin(&image, lease).is_err(),
             "{lease} holds the pin while it runs"
         );
-        let run = s.h.fake.run_of(lease);
-        assert_eq!(parse(&run.argv).tail[0], tool, "{lease} runs the same tree");
-        let home = s.h.fake.home_of(lease);
-        let work = home.join("exec/.trees/work");
-        let copy = ("WORKROOT".to_owned(), work.display().to_string());
-        assert!(run.env.contains(&copy), "{:?}", run.env);
+        let run = s.h.launch(n + 1);
+        assert_eq!(run.program, tool, "{lease} runs the same tree");
+        let work = s.h.home_of(n + 1).join("exec/.trees/work");
+        assert_eq!(run.var("WORKROOT"), Some(work.to_str().unwrap()));
         assert!(work.join("run.sh").is_file(), "{lease} has its own copy");
     }
-    assert_ne!(
-        s.h.fake.home_of("7.1").join("trees/work"),
-        s.h.fake.home_of("7.2").join("trees/work")
-    );
-    for lease in ["7.1", "7.2"] {
-        s.h.fake.exit(lease, 0);
-    }
+    assert_ne!(s.h.home_of(1), s.h.home_of(2));
     s.h.until(|life| life.busy_slots().is_empty());
     for lease in ["7.0", "7.1", "7.2"] {
         assert!(
@@ -644,8 +705,8 @@ fn a_non_allowed_prefix_is_refused() {
 }
 
 /// An image whose bundle is held but whose `run` names an entrypoint the bundle lacks is
-/// refused `invalid-program` before the runtime is asked: the helper is never asked for a
-/// user, and no pin is left. It catches an entrypoint checked after a user was made for it,
+/// refused `invalid-program` before the runtime is asked: no account is lent, and no pin is
+/// left. It catches an entrypoint checked after a user was made for it,
 /// and an image start whose program is read from nowhere.
 #[test]
 fn an_image_reference_whose_entrypoint_is_missing_makes_no_user() {
@@ -696,7 +757,7 @@ fn an_image_start_the_runtime_cannot_run_is_refused_before_its_bundle_is_fetched
 
 /// Asserts that a job start with a `run` and an environment, on a Mac runtime that runs
 /// image starts (it holds a bundle store), starts once its bundle is held and runs with the
-/// job's environment in the helper's `run`. It catches the job's environment dropped on the
+/// job's environment in the supervisor's request. It catches the job's environment dropped on the
 /// one path where a job start reaches the native runtime.
 #[test]
 fn an_image_job_start_with_env_runs_with_its_env() {
@@ -709,7 +770,7 @@ fn an_image_job_start_with_env_runs_with_its_env() {
     spec.arch = Some(Arch::Arm64);
     let events = s.h.apply(vec![Command::JobStart(Box::new(spec))]);
     assert_eq!(events, ["started j1"]);
-    let env = s.h.fake.run_of("7.0").env;
+    let env = s.h.launch(0).env;
     assert!(env.contains(&("A".to_owned(), "1".to_owned())), "{env:?}");
 }
 
@@ -736,11 +797,7 @@ fn an_image_run_that_asks_for_the_network_is_checked_against_the_anchor() {
         s.h.start(networked.clone()),
         ["refused r1 egress-unchecked"]
     );
-    let verbs = s.h.fake.verbs();
-    assert!(
-        !verbs.iter().any(|verb| verb.starts_with("user-create")),
-        "{verbs:?}"
-    );
+    s.made_no_user();
     check.answer(Verdict::Enforced);
     networked.run_id = "r2".to_owned();
     assert_eq!(s.h.start(networked), ["started r2"]);

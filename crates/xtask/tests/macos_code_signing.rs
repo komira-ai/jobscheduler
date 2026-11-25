@@ -3,8 +3,10 @@
 //! made of them. The table, the verb and the profile are in code_signature_verb.rs.
 //!
 //! The workflow is read as it is in the repository. `build` builds the three programs and holds
-//! no secret. `sign-code` runs on main in the protected environment, signs them with the team's
-//! Developer ID Application identity and nothing built from the repository runs in it. `package`
+//! no secret. `sign-code` runs under the signing condition (macos_pkg_workflow/signing_run.rs) in
+//! the environment `pkg-signing`, signs them with the team's Developer ID Application identity,
+//! and nothing built from the repository runs in it; macos_sign_code_run.rs runs its signing
+//! step. `package`
 //! holds no secret and makes the package of the signed programs after checking each one. `sign`
 //! (macos_pkg_workflow.rs) signs that package.
 
@@ -78,9 +80,40 @@ fn job_text(text: &str, name: &str) -> String {
     jobs(text).get(name).map_or(String::new(), |j| j.join("\n"))
 }
 
-/// The condition of the jobs that run on main only: a manual run on main, or the release's call
-/// that asks for signing, for a push.
-const SIGN_IF: &str = "if: ${{ (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (inputs.sign && github.ref == 'refs/heads/main' && github.event_name == 'push') }}";
+/// The signing condition of the jobs that sign: the release's call that asks, on a push to main,
+/// or a signing run on a branch of this repository (macos_pkg_workflow/signing_run.rs).
+const SIGN_COND: &str = "(github.event_name == 'push' && github.ref == 'refs/heads/main' && inputs.sign) || (github.event_name == 'workflow_dispatch' && inputs.sign && github.repository == 'komira-ai/jobscheduler' && startsWith(github.ref, 'refs/heads/'))";
+
+/// The `if:` of `sign-code`: not cancelled, the unsigned programs built by `build` or by `farm`
+/// (whichever ran), and the signing condition.
+fn sign_code_if() -> String {
+    format!(
+        "if: ${{{{ !cancelled() && (needs.build.result == 'success' || needs.farm.result == 'success') && ({SIGN_COND}) }}}}"
+    )
+}
+
+/// The `if:` of `package`: not cancelled, `sign-code` succeeded, and the signing condition.
+fn package_if() -> String {
+    format!("if: ${{{{ !cancelled() && needs.sign-code.result == 'success' && ({SIGN_COND}) }}}}")
+}
+
+/// What `security import` answers on a hosted runner that holds Apple's intermediate already,
+/// in the step's environment.
+const ALREADY_EXISTS: &str = "ALREADY_EXISTS: \"security: SecKeychainItemImport: The specified item already exists in the keychain.\"";
+
+/// The import of the intermediate: its answer kept and printed, and a failure passed only when
+/// the answer is exactly [`ALREADY_EXISTS`] (macos_sign_code_run.rs runs it).
+const IMPORT: &str = r#"          imported=true
+          /usr/bin/security import "$RUNNER_TEMP/DeveloperIDG2CA.cer" -t cert -f x509 -k "$keychain" > "$RUNNER_TEMP/import-intermediate.txt" 2>&1 || imported=false
+          /bin/cat "$RUNNER_TEMP/import-intermediate.txt"
+          if [ "$imported" = false ]; then
+            if ! printf '%s\n' "$ALREADY_EXISTS" | /usr/bin/cmp -s - "$RUNNER_TEMP/import-intermediate.txt"; then
+              echo "::error::the import of Apple's intermediate failed with the answer above"
+              exit 1
+            fi
+            echo "the runner holds Apple's intermediate already"
+          fi
+          identity="$(/usr/bin/security find-identity -v -p codesigning "$keychain" "#;
 
 // ---- the workflow ----
 
@@ -111,8 +144,9 @@ fn signing_problems(text: &str, action: &str) -> Vec<String> {
     let signing_four = at_four(&sign_code);
     let package_four = at_four(all.get("package").map_or(&[][..], Vec::as_slice));
     want(
-        signing_four.iter().any(|l| l == SIGN_IF) && package_four.iter().any(|l| l == SIGN_IF),
-        "sign-code and package do not run on main alone, by hand or in the release's call",
+        signing_four.iter().any(|l| *l == sign_code_if())
+            && package_four.iter().any(|l| *l == package_if()),
+        "sign-code and package do not run under the signing condition alone",
     );
     want(
         signing_four.iter().any(|l| l == "environment: pkg-signing"),
@@ -123,11 +157,11 @@ fn signing_problems(text: &str, action: &str) -> Vec<String> {
         "package or build runs in an environment",
     );
     want(
-        signing_four.iter().any(|l| l == "needs: [build]")
+        signing_four.iter().any(|l| l == "needs: [build, farm]")
             && package_four
                 .iter()
-                .any(|l| l == "needs: [build, sign-code]"),
-        "sign-code does not wait for build, or package for build and sign-code",
+                .any(|l| l == "needs: [build, farm, sign-code]"),
+        "sign-code does not wait for build and farm, or package for build, farm and sign-code",
     );
     for word in [
         "actions/checkout",
@@ -186,12 +220,16 @@ fn signing_problems(text: &str, action: &str) -> Vec<String> {
         for token in line.split(|c: char| c.is_whitespace() || "();|&\"'".contains(c)) {
             if [
                 "security", "codesign", "curl", "shasum", "openssl", "base64", "uuidgen", "awk",
+                "cat", "cmp",
             ]
             .contains(&token)
             {
                 want(false, &format!("sign-code calls {token} by name"));
             }
-            if token.starts_with("/usr/bin/") || token.starts_with("/usr/sbin/") {
+            if token.starts_with("/usr/bin/")
+                || token.starts_with("/usr/sbin/")
+                || token.starts_with("/bin/")
+            {
                 absolute += 1;
             }
         }
@@ -215,6 +253,18 @@ fn signing_problems(text: &str, action: &str) -> Vec<String> {
             && sign_text.contains("--proto '=https'")
             && sign_text.contains("echo \"$INTERMEDIATE_SHA256  $RUNNER_TEMP/DeveloperIDG2CA.cer\" | /usr/bin/shasum -a 256 --check"),
         "Apple's intermediate is not fetched over HTTPS and held to its SHA-256",
+    );
+    want(
+        sign_text.contains(
+            "/usr/bin/security list-keychains -d user -s \"$keychain\"\n          /usr/bin/curl ",
+        ),
+        "the job's keychain is not made the user's only keychain before the lookups by name",
+    );
+    want(
+        sign_text.contains(&format!("          {ALREADY_EXISTS}\n"))
+            && sign_text.contains(IMPORT)
+            && sign_text.matches("security import").count() == 2,
+        "the import of Apple's intermediate does not pass the runner's duplicate answer alone",
     );
     want(
         sign_text.contains(&format!("IDENTITY: \"{APPLICATION_IDENTITY}\""))
@@ -315,11 +365,56 @@ fn the_programs_are_signed_in_a_keyed_job_and_packaged_in_a_keyless_one() {
 fn each_way_of_leaving_the_signing_shape_is_named() {
     let text = read(WORKFLOW);
     let action = read(ACTION);
-    let cases: [(&str, &str, &str); 23] = [
+    let sign_code_head = format!(
+        "  sign-code:\n    needs: [build, farm]\n    {}\n",
+        sign_code_if()
+    );
+    let sign_code_other =
+        "  sign-code:\n    needs: [build, farm]\n    if: ${{ github.event_name != 'x' }}\n";
+    let package_head = format!(
+        "  package:\n    needs: [build, farm, sign-code]\n    {}\n    runs-on: macos-15\n",
+        package_if()
+    );
+    let package_environment = format!(
+        "  package:\n    needs: [build, farm, sign-code]\n    {}\n    environment: pkg-signing\n    runs-on: macos-15\n",
+        package_if()
+    );
+    let cases: [(&str, &str, &str); 29] = [
         (
-            "  sign-code:\n    needs: [build]\n    if: ${{ (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (inputs.sign && github.ref == 'refs/heads/main' && github.event_name == 'push') }}\n",
-            "  sign-code:\n    needs: [build]\n    if: ${{ github.event_name != 'x' }}\n",
-            "do not run on main alone",
+            "          /usr/bin/security list-keychains -d user -s \"$keychain\"\n",
+            "",
+            "not made the user's only keychain",
+        ),
+        (
+            // The import as it was on the first signing run on main: the duplicate fails the job.
+            "          imported=true\n          /usr/bin/security import \"$RUNNER_TEMP/DeveloperIDG2CA.cer\" -t cert -f x509 -k \"$keychain\" > \"$RUNNER_TEMP/import-intermediate.txt\" 2>&1 || imported=false\n",
+            "          /usr/bin/security import \"$RUNNER_TEMP/DeveloperIDG2CA.cer\" -t cert -f x509 -k \"$keychain\"\n          imported=true\n",
+            "does not pass the runner's duplicate answer alone",
+        ),
+        (
+            "The specified item already exists in the keychain.\"\n",
+            "already exists\"\n",
+            "does not pass the runner's duplicate answer alone",
+        ),
+        (
+            "| /usr/bin/cmp -s - \"$RUNNER_TEMP/import-intermediate.txt\"",
+            "| /usr/bin/grep -q -F -f - \"$RUNNER_TEMP/import-intermediate.txt\"",
+            "does not pass the runner's duplicate answer alone",
+        ),
+        (
+            "              echo \"::error::the import of Apple's intermediate failed with the answer above\"\n              exit 1\n",
+            "              echo \"::error::the import of Apple's intermediate failed with the answer above\"\n",
+            "does not pass the runner's duplicate answer alone",
+        ),
+        (
+            "          /bin/cat \"$RUNNER_TEMP/import-intermediate.txt\"\n",
+            "          cat \"$RUNNER_TEMP/import-intermediate.txt\"\n",
+            "calls cat by name",
+        ),
+        (
+            &sign_code_head,
+            sign_code_other,
+            "do not run under the signing condition alone",
         ),
         (
             "    environment: pkg-signing\n    runs-on: macos-15\n    timeout-minutes: 60\n    permissions:\n      contents: read\n    steps:\n      - name: Check the signing secrets\n        env:\n          MACOS_APPLICATION_P12:",
@@ -327,8 +422,8 @@ fn each_way_of_leaving_the_signing_shape_is_named() {
             "does not run in the environment pkg-signing",
         ),
         (
-            "  package:\n    needs: [build, sign-code]\n",
-            "  package:\n    needs: [build]\n",
+            "  package:\n    needs: [build, farm, sign-code]\n",
+            "  package:\n    needs: [build, farm]\n",
             "does not wait for build",
         ),
         (
@@ -347,8 +442,8 @@ fn each_way_of_leaving_the_signing_shape_is_named() {
             "a secret is named outside the env of the step that uses it",
         ),
         (
-            "  package:\n    needs: [build, sign-code]\n    if: ${{ (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (inputs.sign && github.ref == 'refs/heads/main' && github.event_name == 'push') }}\n    runs-on: macos-15\n",
-            "  package:\n    needs: [build, sign-code]\n    if: ${{ (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (inputs.sign && github.ref == 'refs/heads/main' && github.event_name == 'push') }}\n    environment: pkg-signing\n    runs-on: macos-15\n",
+            &package_head,
+            &package_environment,
             "package or build runs in an environment",
         ),
         (
@@ -486,7 +581,7 @@ fn the_installer_signature_is_put_on_the_package_made_of_the_signed_programs() {
     );
     assert!(!sign.contains("js-agent-macos-pkg-unsigned"), "{sign}");
     assert!(sign.contains("name: js-agent-macos-checker"), "{sign}");
-    assert!(sign.contains("needs: [build, package]"), "{sign}");
+    assert!(sign.contains("needs: [build, farm, package]"), "{sign}");
 }
 
 /// The README names the secrets the signing job reads and the profile the owner installs.

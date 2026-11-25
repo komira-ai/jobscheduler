@@ -12,7 +12,9 @@
 //!   run (or job) is listed, a stop until it leaves the held list (or the job listing, or
 //!   its id is in `retired_jobs`), a cancel for as long as the host
 //!   lists the run, the acknowledgement of every result the heartbeat still carries and
-//!   the acknowledgement of every heartbeat that carries the taint.
+//!   the acknowledgement of every heartbeat that carries the taint. The dispatch poller
+//!   does not drop what the queue refused: it holds the messages and hands them over again
+//!   when the worker takes an order and so makes room (module `delivery`).
 //! - **State comes out as a snapshot.** After every order and every step the worker
 //!   publishes the held runs, the results not yet acknowledged, the jobs a job start began
 //!   and the retired job ids, the taint to report and whether the host is tainted at all
@@ -38,10 +40,11 @@
 //!   process left are adopted) before [`Worker::start`] returns, so the first hello can
 //!   list them.
 //! - **The worker samples the usage** of the leases that run, once per heartbeat interval,
-//!   when `--actions-cgroup` is given: after a step it asks its [`Collector`] whether a
-//!   window has passed and, if so, reads the cgroup files on its own thread and publishes
-//!   the reading in the [`Outbox`] the session takes it from. The session never reads a
-//!   cgroup file.
+//!   when `--actions-cgroup` is given on Linux, and always on a Mac (the host's own counters):
+//!   after a step it calls [`Collector::step`], which takes the per-second sample when
+//!   `--host-second-samples` is on and says whether a window has passed; if so, the worker
+//!   reads the cgroup files (a Mac's host counters) on its own thread and publishes the reading
+//!   in the [`Outbox`] the session takes it from. The session never reads a cgroup file.
 //! - **A whole-node lease is prepared on the worker's thread.** The post-job checks and the
 //!   readiness hook block, so the session asks through [`WorkerHost`]: it sends a prepare or
 //!   restore order without waiting and reads the last answer the worker published, which
@@ -101,12 +104,12 @@ use std::cell::Cell;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::Duration;
 
-use js_agent_wire::{Command, HeartbeatReply, HeldJob, HeldRun, HeldState, RunResult, Taint};
+use js_agent_wire::{HeartbeatReply, HeldJob, HeldRun, HeldState, RunResult, Taint};
 
 use crate::cli_runtime::CALL_LIMIT;
 use crate::facts::Platform;
@@ -115,6 +118,7 @@ use crate::lifecycle::{Config, Contact, Lifecycle, MountProviders, Status, Wake,
 use crate::readiness::{HookWindow, WorkerHook};
 
 mod bell;
+mod delivery;
 mod nudge;
 mod park;
 mod quiesce;
@@ -123,6 +127,7 @@ mod replies;
 use crate::system::{Backend, Machine, RuntimeBuild, SharedClock};
 use crate::usage::{Collector, Outbox};
 use crate::vm::VmSettings;
+pub use delivery::Delivery;
 pub use park::Parked;
 use quiesce::take_asked;
 pub use quiesce::{LeaseAnswers, WorkerHost};
@@ -482,6 +487,8 @@ struct Shared {
     asked_restore: Mutex<Option<String>>,
     /// The worker thread has ended: it returned, or it panicked.
     ended: AtomicBool,
+    /// How many orders the worker has taken from its queue: each made room (module `delivery`).
+    taken: AtomicU64,
     /// When the order or step the worker is inside is due to be done, on the lifecycle's
     /// clock ([`stall_bound`] after it began), plus one; 0 while it waits for an order.
     busy_until: AtomicU64,
@@ -524,17 +531,6 @@ impl Shared {
         drop(published);
         self.changed.notify_all();
     }
-}
-
-/// What became of a reply handed to the worker.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Delivery {
-    /// The reply waits in the queue.
-    Delivered,
-    /// The worker is busy and the queue is full: the reply was dropped.
-    Full,
-    /// Nobody reads the queue any more: the worker's thread is gone.
-    Gone,
 }
 
 /// A way to talk to the worker that can be copied: for a test to wait for it.
@@ -698,39 +694,6 @@ impl Worker {
         }
     }
 
-    /// Hands a reply to the worker without waiting: [`Delivery::Full`] when the worker is
-    /// busy and the reply was dropped, [`Delivery::Gone`] when nobody reads the queue. The
-    /// reply is stamped with the clock now, so a start that waits in the queue has its
-    /// `valid_for_ms` counted from the moment it arrived.
-    pub fn try_deliver(&self, reply: HeartbeatReply) -> Delivery {
-        self.deliver(reply, true)
-    }
-
-    /// [`Worker::try_deliver`] for the commands of a dispatch poll's answer: they are acted
-    /// on as a reply's are, and the lease the host holds is left as it is.
-    pub fn try_deliver_commands(&self, commands: Vec<Command>) -> Delivery {
-        let reply = HeartbeatReply {
-            commands,
-            ..HeartbeatReply::default()
-        };
-        self.deliver(reply, false)
-    }
-
-    fn deliver(&self, reply: HeartbeatReply, whole: bool) -> Delivery {
-        let received_ms = self.clock.now_ms();
-        let reply = Box::new(reply);
-        let order = Order::Reply {
-            reply,
-            received_ms,
-            whole,
-        };
-        match self.handle.orders.try_send(order) {
-            Ok(()) => Delivery::Delivered,
-            Err(TrySendError::Full(_)) => Delivery::Full,
-            Err(TrySendError::Disconnected(_)) => Delivery::Gone,
-        }
-    }
-
     /// Says that the server was heard now, on the lifecycle's clock: a welcome, or a
     /// heartbeat reply the session accepted, whether or not [`Worker::try_deliver`] found
     /// room for it. The silence after which the lifecycle stops every job counts from the
@@ -881,9 +844,8 @@ fn build(plan: Plan, clock: SharedClock, wake: Wake) -> Result<Built, String> {
     // theirs is released.
     lines.extend(describe(&providers.attach(&mut life, &*machine, &host_id)?));
     let collector = usage.and_then(|outbox| match actions {
-        Ok(dir) => Some(Collector::new(
-            machine.cgroup_files(),
-            &dir,
+        Ok(sampler) => Some(Collector::with_sampler(
+            sampler,
             machine.usage_clock(),
             outbox,
         )),
@@ -921,6 +883,7 @@ fn work(
         let mut lines = Vec::new();
         let mut settle = None;
         let order = inbox.recv_timeout(step_every);
+        shared.took(order.is_ok());
         // The step below sees all that was done before it: a ring from now on nudges again.
         shared.nudge_queued.store(false, Ordering::SeqCst);
         let asked = order.as_ref().map_or(0, |order| match order {
@@ -990,7 +953,7 @@ fn work(
         answers.follow(life.exclusive());
         let sampled = usage
             .as_mut()
-            .filter(|collector| collector.due())
+            .and_then(|collector| collector.step().then_some(collector))
             .map(|collector| {
                 let mut said = life.find_cgroups();
                 said.extend(collector.run(&life.running()));

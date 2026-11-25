@@ -18,7 +18,7 @@ fn steps_parse_or_are_refused() {
          spawn-child --pid - setsid ;; sleep 1 ;; exit 0 ; spawn-child --pid f spawn-child id ; \
          run /bin/x a b ; setsid ; alloc 32 ; burn 0.5 ; upper o i ; rename a b ; symlink t l ; chmod 750 p ; \
          chmod 7777 q ; wait-for w 1.5 ; sleep-once o 0.5 ; mkdir m/n ; cat c ; mtime t 946684800 ; pgid ; \
-         leads ; write-lines w ; write-lines w a b ; copy o i j ; remove r ; mkfifo p ; \
+         groups ; leads ; write-lines w ; write-lines w a b ; copy o i j ; remove r ; mkfifo p ; \
          truncate t 2048 ; zeros 3 ; zeros --stderr 4 ; ignore-signal 15 ; test -e e ; \
          test ! -d d ; test -x x ; points-to l t ; holds h a b ; inode-links o a b ; try-read r ; try-write w ; \
          try-list d ; tcp-listen 127.0.0.1:0 pf 1.5 ; tcp-listen [::1]:8080 pf 0 ; \
@@ -99,6 +99,7 @@ fn steps_parse_or_are_refused() {
             secs: 946_684_800,
         },
         Step::Pgid,
+        Step::Groups,
         Step::Leads,
         Step::WriteLines {
             path: "w",
@@ -203,6 +204,7 @@ fn steps_parse_or_are_refused() {
         "env",
         "env a b c",
         "pwd x",
+        "groups 20",
         "kill-self 0",
         "kill-self TERM",
         "spawn-child",

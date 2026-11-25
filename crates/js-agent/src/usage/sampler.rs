@@ -1,4 +1,7 @@
-//! One reading of the machine's actions cgroup and of each lease's cgroup.
+//! One reading of the host's CPU busy time, of the machine's actions cgroup and of each
+//! lease's cgroup ([`Sampler`]), and what the collector samples a node with ([`NodeSampler`]:
+//! that cgroup tree on Linux, the host's own counters on a Mac,
+//! [`HostSampler`](super::HostSampler)).
 
 use crate::facts::FileReader;
 
@@ -11,6 +14,7 @@ use super::cgroup::{
     parse_usage_usec, working_set,
 };
 use super::clock::UsageClock;
+use super::host::{HostCpu, host_cpu, host_nonfile};
 
 /// A lease whose cgroup is to be read.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +33,9 @@ pub enum SampleError {
     /// The actions cgroup's `cpu.stat` is unreadable or has no `usage_usec`.
     #[error("the node cpu.stat cannot be read")]
     NodeCpuStat,
+    /// The host's `/proc/stat` is unreadable or has no `cpu` line of eight numbers.
+    #[error("the host /proc/stat cannot be read")]
+    HostCpuStat,
     /// The actions cgroup's `memory.current` is unreadable or not a number.
     #[error("the node memory.current cannot be read")]
     NodeMemoryCurrent,
@@ -39,6 +46,55 @@ pub enum SampleError {
     /// the cgroup is limited is not guessed.
     #[error("the node cpu.max cannot be read")]
     NodeCpuMax,
+    /// The CPU load of a host with no control groups (a Mac) cannot be read.
+    #[error("the host CPU load cannot be read")]
+    HostCpuLoad,
+    /// The memory statistics of a host with no control groups (a Mac) cannot be read.
+    #[error("the host memory statistics cannot be read")]
+    HostMemory,
+}
+
+/// What the collector samples the node with ([`super::Collector`]): the cgroup tree under the
+/// actions group on Linux ([`Sampler`]), the host's own counters on a host with no control
+/// groups ([`HostSampler`](super::HostSampler)).
+pub trait NodeSampler {
+    /// One reading of the node and of each of `leases`, with exactly one read of `clock`,
+    /// right after the CPU counters. A node that cannot be read is an error, so that no zero
+    /// is invented; a lease that cannot be read is left out and counted.
+    ///
+    /// # Errors
+    ///
+    /// The [`SampleError`] that says what could not be read.
+    fn sample(
+        &mut self,
+        clock: &dyn UsageClock,
+        leases: &[LeaseCgroup],
+    ) -> Result<Sample, SampleError>;
+
+    /// The whole host's CPU counters, for the per-second series; `None` when they cannot be
+    /// read (no zero is invented).
+    fn host_counters(&mut self) -> Option<HostCpu>;
+
+    /// Whether a reading is of the whole host and so holds every lease's use, though it reads
+    /// none on its own (a host with no control groups). By default not: a lease is covered
+    /// only when its own group was read.
+    fn covers_every_lease(&self) -> bool {
+        false
+    }
+}
+
+impl<F: FileReader> NodeSampler for Sampler<F> {
+    fn sample(
+        &mut self,
+        clock: &dyn UsageClock,
+        leases: &[LeaseCgroup],
+    ) -> Result<Sample, SampleError> {
+        Sampler::sample(self, clock, leases)
+    }
+
+    fn host_counters(&mut self) -> Option<HostCpu> {
+        Sampler::host_counters(self)
+    }
 }
 
 /// Reads the cgroup tree under the actions directory through a [`FileReader`].
@@ -56,10 +112,13 @@ impl<F: FileReader> Sampler<F> {
         }
     }
 
-    /// Reads the node and then each of `leases`, with exactly one read of `clock`.
+    /// Reads the node and then each of `leases`, with exactly one read of `clock`, taken
+    /// right after the two CPU counters (the actions cgroup's, then the host's).
     ///
-    /// A node file that cannot be read is an error, so that no zero is invented. A lease
-    /// that cannot be read is left out and counted in `unreadable_leases`.
+    /// A node file that cannot be read is an error, so that no zero is invented. The host's
+    /// `/proc/meminfo` is the exception: when it cannot be read the sample carries no host
+    /// memory, and the CPU it measured still counts. A lease that cannot be read is left out
+    /// and counted in `unreadable_leases`.
     pub fn sample(
         &self,
         clock: &dyn UsageClock,
@@ -69,6 +128,9 @@ impl<F: FileReader> Sampler<F> {
         let cpu = self
             .value(dir, "cpu.stat", parse_usage_usec)
             .ok_or(SampleError::NodeCpuStat)?;
+        let host = host_cpu(&self.files)
+            .map(|host| host.busy_usec)
+            .ok_or(SampleError::HostCpuStat)?;
         let mono_usec = clock.now_usec();
         let current = self
             .value(dir, "memory.current", parse_single_u64)
@@ -90,12 +152,22 @@ impl<F: FileReader> Sampler<F> {
         Ok(Sample {
             mono_usec,
             cpu_usage_usec: cpu,
+            host_cpu_usec: host,
             working_set_bytes: working_set(current, inactive),
+            host_nonfile_bytes: host_nonfile(&self.files),
             active_file_bytes: active,
             cpu_limited: limited,
             leases: read.into_iter().flatten().collect(),
             unreadable_leases: u32::try_from(unreadable).unwrap_or(u32::MAX),
         })
+    }
+
+    /// The whole host's CPU counters, for the per-second series ([`host_cpu`]): the busy time
+    /// of every CPU and the `some` total of the host's CPU pressure. `None` when `/proc/stat`
+    /// cannot be read (no zero is invented); the pressure alone is `None` when
+    /// `/proc/pressure/cpu` cannot be read.
+    pub fn host_counters(&self) -> Option<HostCpu> {
+        host_cpu(&self.files)
     }
 
     /// The number `parse` finds in the file `name` of `dir`.

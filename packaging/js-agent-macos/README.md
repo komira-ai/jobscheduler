@@ -37,8 +37,9 @@ shipped: nothing in them is a placeholder. The third daemon, `js-agent.pf-pool`
 (`js-mac-provision pf-pool-plist`), is described below.
 
 - The agent's plist names `--flags-file /etc/js-agent/flags` and `--token-file
-  /etc/js-agent/token`, and the fixed state root, scratch root and helper socket. The host's
-  own values (`--server`, `--pool`, `--native-network` and the `--native-pf-*` flags) are in
+  /etc/js-agent/token`, and the fixed state root and scratch root. The host's
+  own values (`--server`, `--pool`, `--native-network`, `--native-accounts`,
+  `--native-account-range`, `--native-account-ready` and the `--native-pf-*` flags) are in
   `/etc/js-agent/flags`, which a per-group configuration package installs. The plist carries
   no server and no pool.
 - The helper's plist holds its caller to `cdhash H"<40 hex>"`, the code directory hash of
@@ -58,6 +59,9 @@ An example, with documentation addresses:
 --pool=mac
 --ca-cert=/etc/js-agent/ca.pem
 --host-id-from-facts=/var/lib/hostkeeper/facts.json
+--native-accounts=/var/db/js-agent/accounts
+--native-account-range=700-799
+--native-account-ready=1
 --native-network=on
 --native-pf-uid-start=600
 --native-pf-uid-count=100
@@ -65,7 +69,8 @@ An example, with documentation addresses:
 --native-pf-endpoint=192.0.2.11:443
 ```
 
-Without the file the agent does not start.
+Without the file the agent does not start, nor without `--native-accounts` (or `--no-jobs`, for
+an agent that runs no job).
 The file must be a regular file owned by root, not writable by group or others.
 `--host-id-from-facts` makes the host's id the `host_id` of hostkeeper's facts file, the name the
 coordinator enrolled the Mac under, so one file serves every Mac of the group.
@@ -149,12 +154,21 @@ for a day: the first install updates the agent to it, and nothing signs it or re
 `build` made on the runner, the way hostkeeper does, runs the update hook's prepare,
 cutover, verify and cleanup as root with launchd loading the jobs, rolls a config package over
 the agent and updates the agent to the package `build-update` made (the release runs it as its own
-beta job, `beta-macos-first-install`). Three more jobs run only on main (by hand, or in the release's call), in this order.
+beta job, `beta-macos-first-install`). Three more jobs run in the release's call (on a push to
+main) and in a signing run, in this order. A signing run is a manual run with `sign` set, on a
+branch of this repository (`gh workflow run js-agent-macos-pkg.yml --ref <branch> -f version=X -f
+sign=true`): it signs and checks the programs and the package exactly as the release does and
+publishes nothing (the signed files stay artifacts of the run), so a change to the signing is
+proved before it merges. On a tag or in a fork's copy it fails by name at the first step of
+`build`. A manual run without `sign` signs nothing.
 `sign-code` runs in the environment `pkg-signing`: it takes the three programs from `build`,
 checks them against `build`'s sums, imports the application certificate into a temporary
 keychain for `/usr/bin/codesign` alone, imports Apple's Developer ID G2 intermediate (fetched
-over HTTPS and held to its SHA-256), finds the identity `Developer ID Application: Komira AI,
-Inc. (U7RTX4XD3X)` there, fails when it expires within 30 days, and signs each program with
+over HTTPS and held to its SHA-256; a hosted runner that holds it already makes `security import`
+answer `The specified item already exists in the keychain.`, and that answer alone, exactly,
+passes), finds the identity `Developer ID Application: Komira AI, Inc. (U7RTX4XD3X)` among the
+keychain's valid code-signing identities (`find-identity -v` lists it only when its chain builds
+to Apple's root), fails when it expires within 30 days, and signs each program with
 `codesign --options runtime --timestamp` under the identifier of the table in
 `crates/xtask/src/release/mac_programs.rs` (`com.komira.js-agent`, `com.komira.js-agent.session`,
 `com.komira.js-agent.provision`). It runs nothing built from the repository, and it fails,
@@ -170,8 +184,9 @@ a temporary keychain, finds the "Developer ID Installer" identity there by its S
 does not notarize. When the environment or the installer certificate's secrets are not set `sign`
 prints a notice and skips every step after the first, and the run succeeds.
 
-`pkg-signing` is created by a repository administrator, with a rule that only main may
-deploy to it and with these secrets as environment secrets (none is in the tree):
+`pkg-signing` is created by a repository administrator with these secrets as environment
+secrets (none is in the tree). It admits every branch of this repository, which the signing run
+needs; anyone who can push a branch can already run a workflow of that branch in it:
 
 - `MACOS_INSTALLER_P12`: the "Developer ID Installer" certificate and key, a PKCS#12 file, base64.
 - `MACOS_INSTALLER_P12_PASSWORD`: its password.
@@ -211,9 +226,18 @@ verify_timeout_secs = 300
 rollback_timeout_secs = 420
 ```
 
-`unit` is the daemon's launchd label. The restart is `bootout` (which returns when the agent has
+The hook keeps the files the package replaces in `/var/db/js-agent-config/kept` and puts them
+back in `rollback`, as the Linux package's section describes; a first install's copy stays there
+after its rollback, since removing the package deletes the receipt's files. `unit` is the daemon's
+launchd label. The restart is `bootout` (which returns when the agent has
 exited, up to its 120 s `ExitTimeOut`) and `bootstrap`, held back like the update hook's while
-`/etc/js-agent/flags` is absent. The unit port has run against a fake of `launchctl` only.
+`/etc/js-agent/flags` is absent. The hook works whichever came first, the agent's package or the
+config package: a label that is not loaded is bootstrapped, one that is loaded is booted out
+first. When `bootstrap` or `kickstart -k` fails, the start reads `launchctl print` again and
+makes the other command once if launchd now calls for it (a `bootstrap` refused with exit 5
+because the label was loaded meanwhile becomes a `kickstart -k` of an idle service, or nothing
+for a running one), as the update hook's start does (`crates/js-update-hook/src/launch_units.rs`,
+"When launchd refuses the start"). The unit port has run against a fake of `launchctl` only.
 
 ## Privacy grants (TCC)
 
@@ -226,31 +250,53 @@ updates replace it in place) and the program's designated requirement, which nam
 `com.komira.js-agent`, Apple's Developer ID chain and the team and no hash, so every release of
 the program meets it. That is why the release signs the programs (see Signing), and `cargo test -p
 xtask` holds the profile to the table the signing uses. The root helper `js-mac-session` and
-`js-mac-provision` need no grant. A grant given to the helper or the agent, by hand or by a
-profile, never reaches a job. macOS lets a
-process use the grants of its *responsible* process, which is whoever started it, unless
-the starter disclaims that responsibility as it starts it. Every process the helper
-starts for a job (the job's program, and `launchctl` with the helper's `as-user` mode for
-a GUI session), and every program the agent starts itself (its probes, the `sandbox-exec`
-self-test, `pfctl`), is started with that responsibility disclaimed
-(`crates/js-mac-session/src/disclaim.rs`; the design is in
-`docs/design/spawn-disclaim.md`). A job's process therefore answers for itself, and the
-processes it starts answer for it: none of them holds the agent's or the helper's grants.
-What a job may do is then what its own program was granted. A grant that someone gave a
-job's program itself (an app the job runs, say) is that program's, and the disclaim does
-not take it away.
+`js-mac-provision` need no grant. A native job and its supervisor are started without the
+disclaim: they keep the responsibility, so they answer for `js-agent` and hold what `js-agent`
+holds, Full Disk Access included. macOS lets a process use the grants of its *responsible*
+process, which is whoever started it, unless the starter disclaims that responsibility as it
+starts it. Every process between `js-agent` and the job is started so, and a job's own children
+(compilers, shells, `buck2`) follow their parent and answer for the agent too. The reason is
+the build trees: tierstore serves them over a network file system (NFS) loopback mount, and a
+job started disclaimed is judged by its own code signature and is refused every read of that
+mount, Apple's own tools (`ls`, `cat`, `python3`, compilers) included. Measured on a Mac
+(macOS 27): disclaimed, the reads fail with `Operation not permitted` and the system log shows
+the network-volumes privacy service denied; started as ordinary children of the signed,
+profile-granted `js-agent`, the same reads as the same pool user succeed.
 
-The hosted CI runner has no grant to give, so CI checks the disclaim and not a refused
-read: on the macOS runner the agent's tests read back the responsible process of the
-processes the helper's `run` and the agent start, and see that each is the process itself.
-To check a host by hand that a grant does not reach a job: give `js-mac-session` Full
-Disk Access in Privacy & Security, run a native job whose program is `/bin/ls` with the
-argument `/Library/Application Support/com.apple.TCC`, and see it fail with `Operation not
-permitted`. A refusal is also what a grant that did not take effect gives, so check the
-grant the same way with a release from before the disclaim (one whose
-`crates/js-mac-session/src/disclaim.rs` does not exist): there the same job answers for
-the helper and lists the directory. Remove the grant afterwards. `sudo launchctl procinfo <pid>` of a running job's
-process shows its `responsible pid` equal to its own pid.
+What keeps a job from using the rest of the grant is the slot user it runs as (Unix
+permissions) and the Seatbelt profile applied in the job's child before its program runs.
+Measured on a Mac, the prototype's profile does not keep such a job out of three places only
+the privacy controls protect: the system privacy database's directory, the database, and
+`/Library/Preferences/com.apple.TimeMachine.plist`. How that is closed is not decided
+(`docs/design/spawn-disclaim.md`, "The fence, measured").
+
+Every other program `js-agent` starts stays disclaimed, which is the default of
+`js_mac_session::disclaim::Program` (`crates/js-mac-session/src/disclaim.rs`; the design is in
+`docs/design/spawn-disclaim.md`): its probes (`sw_vers`, `sysctl`), `pfctl`, `launchctl`,
+`ioreg`, and the agent re-executing itself in place.
+Not decided: the VM launcher (`js-vmm lease`), which stays disclaimed for now, and the
+graphical-session start (`launchctl asuser`), which launchd starts in the user's session and
+which is not measured and stays disclaimed. After an unattended restart a Mac has no logged-in
+user, so a start that needs a user's graphical session cannot happen until someone logs in.
+
+The agent starts every native job through its supervisor, whose starts keep the
+responsibility (`js-agent __supervise-native`, `crates/js-agent/src/mac_supervisor`), so the
+job answers for the agent and holds its grant; the slot account and the Seatbelt profile are
+what fence it. A call that keeps the responsibility (`Program::keep_responsibility`) is
+allowed only in the files the `KEEPERS` constant of `crates/xtask/src/spawn_sites.rs` lists: the
+supervisor's `launch.rs` (the agent's start of the supervisor) and `run.rs` (its start of the
+job).
+
+The hosted CI runner has no grant to give, so CI checks the starts and not a refused read: on
+the macOS runner the agent's tests read back the responsible process of the processes the
+helper's `run` and the agent start, and see that each disclaimed one is the process itself.
+To see by hand whose grants a process uses, run a native job and run `sudo launchctl procinfo
+<pid>` on its process. Today the helper starts the job disclaimed, so the `responsible pid`
+equals the job's own pid. Once the supervisor starts jobs, the `responsible pid` is the agent's
+pid. To see the effect, run a native job whose program is `/bin/ls` with the argument
+`/Library/Application Support/com.apple.TCC`: it fails with `Operation not permitted` today,
+and once the supervisor starts jobs it lists the directory unless the Seatbelt profile refuses
+the read, which the prototype's profile, measured, does not.
 
 ## Network
 
@@ -260,14 +306,18 @@ agent's ceiling is `--native-network`:
 
 | Job level | `--native-network` value | What the job gets | Needs |
 |---|---|---|---|
-| `none` | `off` (the default) | the profile denies the network | nothing |
+| `none` | `off` (the default) | loopback alone (see below); under the ceiling `off`, the profile denies the network | nothing |
 | `allow-list` | `on` | the profile allows the network; the anchor limits it to the listed endpoints | the anchor in force (the `--native-pf-*` flags), checked at start and before each `allow-list` job (`egress-unchecked`) |
 | `open` | `open` | the profile allows the network; nothing filters it | nothing; a `--native-pf-*` flag beside it stops the agent at start |
 
-`loopback` is a ceiling with no job level of its own: it admits a job with no network and a
-native body that asks for `loopback`, which every run of the Mac shares. A job that asks for
+`loopback` is a ceiling with no job level of its own: it admits a job of the level `none` and
+a native body that asks for `loopback`. Under it, as under `on` and `open`, a job of the level
+`none` gets loopback: it can listen on `127.0.0.1` and `::1` and connect to loopback, as a
+Linux job can in its own namespace; under `off` it gets no network at all. Loopback is shared
+by every user of the Mac: a job reaches the host's own services on loopback and the other jobs'
+loopback listeners. A job that asks for
 more than the ceiling is refused at start (`network-above-ceiling`, before any user is made)
-and is never run with less. Jobs with no network, loopback only or `open` never ask `pfctl`.
+and is never run with less. Jobs of the level `none`, `loopback` bodies and `open` jobs never ask `pfctl`.
 The hello reports the ceiling as `egress`: `none` for `off` and `loopback`, `allow-list` for
 `on`, `open` for `open`, and no `egress-ports`. A bundle's `seatbelt.network_max` is not a
 ceiling: it says what the bundle's tools need and lowers the profile of an admitted job to it.

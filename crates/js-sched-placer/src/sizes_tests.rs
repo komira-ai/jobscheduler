@@ -1,5 +1,5 @@
 //! The sizes of the jobs that book nothing ([`JobSizes`]) and the history the placer teaches
-//! them ([`SchedPlacer::learn_freed`] at each pass, [`SchedPlacer::learn_ended`] at a start):
+//! them ([`SchedPlacer::learn_freed`] at each pass, [`SchedPlacer::learn_ended`] at once):
 //! the job tables on the in-memory fake, every clock the test's.
 
 use std::collections::BTreeMap;
@@ -23,8 +23,8 @@ use crate::engine::jobs::{JobHosts, JobStarts, OpenHost, PassMetrics};
 use crate::engine::rig::{Tables, at, host, spec_of};
 use crate::place::SchedPlacer;
 
-const GIB: u64 = 1 << 30;
-const MIB: u64 = 1 << 20;
+pub(super) const GIB: u64 = 1 << 30;
+pub(super) const MIB: u64 = 1 << 20;
 
 /// A host's bookable capacity: `cpu_millis` and `memory_bytes`.
 fn capacity(cpu_millis: u64, memory_bytes: u64) -> Capacity {
@@ -47,12 +47,12 @@ fn bounds() -> Bounds {
 }
 
 /// Needs of `cpu_millis` and `memory_bytes`.
-fn needs(cpu_millis: u64, memory_bytes: u64) -> Needs {
+pub(super) fn needs(cpu_millis: u64, memory_bytes: u64) -> Needs {
     Needs::Shape(Resources::new(cpu_millis, memory_bytes, 0, None).unwrap())
 }
 
 /// A share booked at `cpu_millis` and `memory_bytes`.
-fn booked(cpu_millis: u64, memory_bytes: u64) -> Booked {
+pub(super) fn booked(cpu_millis: u64, memory_bytes: u64) -> Booked {
     Booked::Shape {
         cpu_millis,
         memory_bytes,
@@ -62,7 +62,7 @@ fn booked(cpu_millis: u64, memory_bytes: u64) -> Booked {
 }
 
 /// The spec of a job of the class `class` (by its label) that asks for `needs`.
-fn of_class(class: &str, needs: Needs) -> JobSpec {
+pub(super) fn of_class(class: &str, needs: Needs) -> JobSpec {
     let mut spec = spec_of(needs, 600);
     let labels = BTreeMap::from([(SIZE_CLASS_LABEL.to_owned(), class.to_owned())]);
     spec.labels = Labels::from_caller(&labels).unwrap();
@@ -71,9 +71,9 @@ fn of_class(class: &str, needs: Needs) -> JobSpec {
 
 /// What the host of a new agent reported: `peak` bytes at most and `cpu` of CPU time, no CPU
 /// pressure and no throttled period, and a CPU peak equal to the run's mean over the ten
-/// seconds [`ran`] gives each run (so the run's CPU is a measurement, and a class books what
-/// its runs used).
-fn output(peak: u64, cpu: Duration) -> Output {
+/// seconds [`ran`] gives each run (the run's CPU is a measurement, and a class books the mean
+/// its runs used, their CPU time over their wall time; the peak is reported, not booked).
+pub(super) fn output(peak: u64, cpu: Duration) -> Output {
     Output {
         usage: Some(ResourceUsage {
             cpu_time: cpu,
@@ -93,7 +93,7 @@ fn output(peak: u64, cpu: Duration) -> Output {
 }
 
 /// An exit with `code` after using `peak` bytes and `cpu` of CPU time.
-fn exited(code: i32, peak: u64, cpu: Duration) -> JobEnd {
+pub(super) fn exited(code: i32, peak: u64, cpu: Duration) -> JobEnd {
     JobEnd::Exited {
         exit_code: code,
         output: output(peak, cpu),
@@ -103,7 +103,7 @@ fn exited(code: i32, peak: u64, cpu: Duration) -> JobEnd {
 /// Records the job `id` of `spec` (for `client`, when one is given), places it booked as
 /// `booked`, starts it at `start_ms` and ends it as `end` ten seconds later, freeing its
 /// allocation: the ended record.
-fn ran(
+pub(super) fn ran(
     tables: &Tables,
     job: (&str, Option<&str>),
     spec: JobSpec,
@@ -150,7 +150,7 @@ fn ran_for(
 
 /// `n` runs of `class` booked as `booked`, each ending as `end` gives: the ended records, for
 /// the ids `<prefix>-<n>`.
-fn runs(
+pub(super) fn runs(
     tables: &Tables,
     prefix: &str,
     n: usize,
@@ -512,13 +512,16 @@ fn a_job_that_never_ran_had_the_whole_host_or_no_result_teaches_nothing() {
     assert!(!sizes.observe(&unstarted, booked(1, GIB)), "never started");
 }
 
-/// Asserts that a success whose peak came within 5% of its booking (a contained job's booking
-/// is its limit, so the agent held it there) books its class a step above that booking: 4 GiB
-/// x 1.2 + 128 MiB, 5 GiB; one at 90% of it is an honest peak, with the same margin; and a run
-/// booked 0 has no limit and is a run. Catches a run held at its limit taken as the class's
-/// need, which books the class at the limit that held it again, run after run.
+/// Asserts that a success's peak sizes its class at least from its peak whatever its booking,
+/// since a booking is no limit (a contained job has no `memory.max`): five runs at 4 GiB less
+/// 100 MiB under a 4 GiB booking book the next job 5 GiB (they reached their booking, a step
+/// above it, which is also their peak with the margin), one run that used 6 GiB under a 4 GiB
+/// booking raises the next booking to 7.5 GiB at once and nothing kills it (it is a success,
+/// which teaches no floor), and runs at 90% of the booking book theirs. Catches a run at or
+/// above its booking taken as held at it with no margin, which keeps the class at a booking its
+/// jobs outgrow.
 #[test]
-fn a_success_at_its_booking_books_the_class_a_step_above_it() {
+fn a_success_at_or_above_its_booking_books_its_peak_and_raises_the_next_at_once() {
     let tables = Tables::new();
     let near = || exited(0, 4 * GIB - 100 * MIB, Duration::from_secs(10));
     let jobs = runs(&tables, "near", 5, "build", booked(2000, 4 * GIB), near);
@@ -527,6 +530,20 @@ fn a_success_at_its_booking_books_the_class_a_step_above_it() {
         size(&taught(&jobs, booked(2000, 4 * GIB)), &next).1,
         5 * GIB
     );
+    let over = || exited(0, 6 * GIB, Duration::from_secs(10));
+    let mut jobs = jobs;
+    jobs.extend(runs(
+        &tables,
+        "over",
+        1,
+        "build",
+        booked(2000, 4 * GIB),
+        over,
+    ));
+    let sizes = taught(&jobs, booked(2000, 4 * GIB));
+    assert_eq!(size(&sizes, &next).1, 30 * 256 * MIB, "raised at once");
+    let class = sizes.summaries.get(&JobSizes::key_of(&next)).unwrap();
+    assert_eq!(class.oom_floor(), 0, "a success raises no floor");
     let below = || exited(0, 4 * GIB - 400 * MIB, Duration::from_secs(10));
     let jobs = runs(&tables, "below", 5, "build", booked(2000, 4 * GIB), below);
     assert_eq!(
@@ -540,47 +557,6 @@ fn a_success_at_its_booking_books_the_class_a_step_above_it() {
         sizes.observe(&unbooked[0], booked(2000, 0)),
         "a run with no booking is a run"
     );
-}
-
-/// Asserts the case of a compile whose runs outgrew the class's booking: five runs of
-/// 6450 MiB (booked 12 GiB) book the class 7.75 GiB; a run held at that booking (peak
-/// 7894 MiB) books the next 9.5 GiB, and runs of the same peak under 9.5 GiB keep it there.
-/// Catches a class whose runs sit at the booking it learned, booked there again for every
-/// later run.
-#[test]
-fn a_class_held_at_its_booking_leaves_it_and_then_stays() {
-    let tables = Tables::new();
-    let next = queued("next", of_class("compile", needs(0, 0)));
-    let learned = || exited(0, 6450 * MIB, Duration::from_secs(30));
-    let mut history: Vec<(JobRecord, Booked)> = runs(
-        &tables,
-        "learn",
-        5,
-        "compile",
-        booked(2000, 12 * GIB),
-        learned,
-    )
-    .into_iter()
-    .map(|job| (job, booked(2000, 12 * GIB)))
-    .collect();
-    let teach = |history: &[(JobRecord, Booked)]| {
-        let mut sizes = JobSizes::with_cold(MODULE_COLD);
-        sizes.set_bounds(Some(bounds()));
-        for (job, booked) in history {
-            assert!(sizes.observe(job, *booked), "{} teaches a run", job.id);
-        }
-        sizes
-    };
-    assert_eq!(size(&teach(&history), &next).1, 7936 * MIB);
-    let pinned = || exited(0, 7894 * MIB, Duration::from_secs(30));
-    let at_cap = booked(2000, 7936 * MIB);
-    let held = runs(&tables, "held", 1, "compile", at_cap, pinned);
-    history.extend(held.into_iter().map(|job| (job, at_cap)));
-    assert_eq!(size(&teach(&history), &next).1, 9728 * MIB, "a step above");
-    let roomy = booked(2000, 9728 * MIB);
-    let fits = runs(&tables, "fits", 5, "compile", roomy, pinned);
-    history.extend(fits.into_iter().map(|job| (job, roomy)));
-    assert_eq!(size(&teach(&history), &next).1, 9728 * MIB, "and stays");
 }
 
 /// Asserts that runs taught before any host is known are kept and taught when the first
@@ -698,7 +674,7 @@ impl JobStarts for Quiet {
 }
 
 /// A placer over the host `a` of eight cores and 16 GiB, on a clock at zero.
-fn placer() -> SchedPlacer {
+pub(super) fn placer() -> SchedPlacer {
     let clock = ManualClock::new(Timestamp::from_millis(0));
     let settings = Settings {
         cold: MODULE_COLD,
@@ -712,13 +688,14 @@ fn placer() -> SchedPlacer {
 }
 
 /// One pass of `placer` over `tables` with `a` open: the jobs it placed.
-fn pass(placer: &SchedPlacer, tables: &Tables) -> Vec<JobId> {
+pub(super) fn pass(placer: &SchedPlacer, tables: &Tables) -> Vec<JobId> {
     placer.heard(&host("a"), None);
     let open = BTreeMap::from([(host("a"), OpenHost::default())]);
     let hello = std::collections::BTreeSet::new();
     let hosts = JobHosts {
         open: &open,
         hello: &hello,
+        tainted: &std::collections::BTreeSet::new(),
         whole: None,
     };
     placer
@@ -727,13 +704,13 @@ fn pass(placer: &SchedPlacer, tables: &Tables) -> Vec<JobId> {
 }
 
 /// What the allocation of `id` books.
-fn allocation(tables: &Tables, id: &str) -> Booked {
+pub(super) fn allocation(tables: &Tables, id: &str) -> Booked {
     let id = JobId::parse(id).unwrap();
     tables.jobs.get_allocation(&id).unwrap().unwrap().booked
 }
 
 /// Records the queued job `id` of `class` that books nothing.
-fn submit(tables: &Tables, id: &str, class: &str) {
+pub(super) fn submit(tables: &Tables, id: &str, class: &str) {
     submit_by(tables, id, class, None);
 }
 
@@ -755,7 +732,7 @@ fn finish(tables: &Tables, id: &str) {
 
 /// Starts the placed job `id` and ends it with a peak of `peak` bytes and three cores, freeing
 /// it.
-fn finish_at(tables: &Tables, id: &str, peak: u64) {
+pub(super) fn finish_at(tables: &Tables, id: &str, peak: u64) {
     let id = JobId::parse(id).unwrap();
     tables
         .jobs
@@ -961,3 +938,15 @@ mod client;
 
 #[path = "sizes_farm_tests.rs"]
 mod farm;
+
+#[path = "sizes_follows_use_tests.rs"]
+mod follows_use;
+
+#[path = "sizes_memory_series_tests.rs"]
+mod memory_series;
+
+#[path = "sizes_burst_tests.rs"]
+mod burst;
+
+#[path = "sizes_at_booking_tests.rs"]
+mod at_booking;

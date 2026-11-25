@@ -1,7 +1,7 @@
 //! The runtime of this build, chosen when it is compiled: a Linux build runs its jobs with
 //! `crun` (`js-contain`), or, opted in with `--allow-container-engine`, through the container
-//! engine at `--container-bin`; a macOS build runs native jobs through the root helper
-//! `js-mac-session` ([`crate::native`]), with the VM backend beside them ([`crate::vm`]). Only
+//! engine at `--container-bin`; a macOS build runs native jobs as accounts of its own pool,
+//! started by its supervisor ([`crate::native`]), with the VM backend beside them ([`crate::vm`]). Only
 //! this module is compiled per platform: `linux.rs` or `macos.rs` defines the flags of the
 //! build's runtime ([`Flags`], flattened into [`crate::Cli`]), the checks the agent makes of
 //! them at start, the [`Backend`] the worker runs jobs with, and what the hello says of it.
@@ -26,7 +26,7 @@ compile_error!("js-agent builds for Linux (the crun runtime) and macOS (the nati
 /// The flags only a Linux build has (its [`Flags`] there), without the leading `--`. A macOS
 /// build refuses each by name; a test of the Linux build holds the list to the flags clap
 /// knows there.
-pub const LINUX_ONLY: [&str; 35] = [
+pub const LINUX_ONLY: [&str; 32] = [
     "allow-host-jobs",
     "allow-fuse-jobs",
     "watch-dir",
@@ -59,16 +59,15 @@ pub const LINUX_ONLY: [&str; 35] = [
     "image-allow-loopback",
     "settle-ms",
     "taint-recheck-ms",
-    "mount-provider",
-    "mount-provider-user",
-    "mount-provider-wait",
 ];
 
 /// The flags only a macOS build has (its [`Flags`] there), without the leading `--`. A Linux
 /// build refuses each by name; a test of the macOS build holds the list to the flags clap
 /// knows there.
-pub const MACOS_ONLY: [&str; 15] = [
-    "native-helper-socket",
+pub const MACOS_ONLY: [&str; 20] = [
+    "native-accounts",
+    "native-account-range",
+    "native-account-ready",
     "native-homes",
     "native-network",
     "native-deny-read",
@@ -81,6 +80,9 @@ pub const MACOS_ONLY: [&str; 15] = [
     "native-pf-anchor",
     "native-pf-state-dir",
     "native-pfctl",
+    "native-trees-root",
+    "native-put-root",
+    "native-put-user",
     "vm-driver",
     "vm-store",
 ];

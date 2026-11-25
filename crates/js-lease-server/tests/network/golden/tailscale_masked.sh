@@ -105,16 +105,18 @@ chmod 0700 /usr/local/lib/js-agent/gpu-toolkit-hook
 cat > /etc/systemd/system/js-agent.service <<'UNIT'
 [Unit]
 Description=jobscheduler agent
-After=network-online.target
+After=network-online.target docker.service containerd.service
 Requires=js-metadata-block.service
 After=js-metadata-block.service
 Wants=network-online.target
 RequiresMountsFor=/var/lib/js-agent/scratch
+ConditionPathIsMountPoint=/var/lib/js-agent/scratch
 
 [Service]
+TimeoutStopSec=120
 ExecStart=/usr/local/bin/js-agent --server "https://sched.example.org:7301" --token-file /etc/jobscheduler/token --instance-file /etc/jobscheduler/instance --pool "gpu" --host-id "<HOST>" --allow-container-engine --container-bin /usr/bin/docker --container-subuid js-jobs --container-pull missing --gpu-toolkit-hook /usr/local/lib/js-agent/gpu-toolkit-hook --state-root /var/lib/js-agent/state --scratch-root /var/lib/js-agent/scratch
 Restart=always
-RestartSec=5
+RestartSec=30
 
 [Install]
 WantedBy=multi-user.target

@@ -94,6 +94,28 @@ async fn a_renewed_certificate_carries_on_the_same_session_and_job() {
     let body = body.to_string().into_bytes();
     let submitted = tls_request(job, &trusted, "POST", "/v1/jobs", Some(TOKEN), Some(&body)).await;
     assert_eq!(submitted.status, 201, "{}", submitted.body);
+    // The submit answers the job queued; the placement poller places it on its own task, and
+    // the start rides on the first beat after that placement.
+    let mut reads = 0;
+    while tls_request(
+        job,
+        &trusted,
+        "GET",
+        "/v1/jobs/renewed-1",
+        Some(TOKEN),
+        None,
+    )
+    .await
+    .json()["job"]["state"]
+        == "JOB_STATE_QUEUED"
+    {
+        reads += 1;
+        assert!(
+            reads < 10_000,
+            "renewed-1 is still queued after {reads} reads"
+        );
+        tokio::task::yield_now().await;
+    }
 
     let started = first.beat(None, &beat).await.unwrap();
     assert_eq!(started.status, 200, "{}", started.body);

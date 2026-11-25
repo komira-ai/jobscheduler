@@ -4,7 +4,8 @@ use serde_json::json;
 
 use crate::agents_support::{JOIN, post};
 use crate::jobs_support::{
-    beat_with, cancel, commands, job_agent, job_of, job_server, per_job_hello, submit,
+    beat_with, cancel, commands, job_agent, job_of, job_server, left_the_queue, per_job_hello,
+    submit,
 };
 use crate::support::{Harness, TOKEN, exchange_authorized, request};
 
@@ -78,7 +79,8 @@ async fn the_scheme_is_case_insensitive() {
 /// client is read and cancelled by another client that holds the same token (each request
 /// here is its own connection), because the job has no owner the server checks. A
 /// per-tenant token would fail this test, which is the point of pinning it. The job is
-/// placed by its submit (the host has room), so the read says `JOB_STATE_PLACED`; the other
+/// answered queued by its submit and then placed (the host has room), so the read says
+/// `JOB_STATE_PLACED` once it has left the queue; the other
 /// client's cancel is the intent a placed job takes (`cancelRequested`), the host is told to
 /// stop it and, once the host says it never held it, the job reads `JOB_STATE_CANCELLED`.
 #[tokio::test]
@@ -88,7 +90,10 @@ async fn one_token_is_one_trust_domain() {
     let made = submit(&h, "job-1").await;
     assert_eq!(made.status, 201, "{}", made.body);
     assert_eq!(made.json()["job"]["id"], "job-1");
+    assert_eq!(made.json()["job"]["state"], "JOB_STATE_QUEUED");
 
+    let placed = left_the_queue(&h, "job-1").await;
+    assert_eq!(placed["state"], "JOB_STATE_PLACED");
     let read = job_of(&h, "job-1").await;
     assert_eq!(read.status, 200, "{}", read.body);
     assert_eq!(read.json()["job"]["state"], "JOB_STATE_PLACED");

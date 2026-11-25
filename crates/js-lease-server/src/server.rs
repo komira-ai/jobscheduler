@@ -37,7 +37,7 @@ use crate::ticker::{IntervalTicker, Tick, Ticker};
 use crate::tls;
 use crate::usage::ProfileCurves;
 use crate::usage_hub::UsageCounters;
-use crate::util::or_pending;
+use crate::util::{blocking, or_pending};
 
 /// A running server. Dropping it stops serving and ticking; [`Running::shutdown`] stops
 /// it the orderly way (requests in flight finish, one last tick).
@@ -55,11 +55,17 @@ pub struct Running {
     slots: Arc<Slots>,
     serving: JoinHandle<()>,
     ticking: Ticking,
+    /// The placement poller ([`crate::poller`]), which each submit and heartbeat pokes.
+    polling: Polling,
     _checking: Checking,
     scaler: Option<Scaler>,
     tls: Option<tls::Tls>,
     /// How long [`Running::hold`] keeps serving (`--drain-hold`).
     drain_hold: Duration,
+    /// The teaching of the job sizes from the ended jobs ([`crate::job_sizes`]), which the
+    /// start does not wait for; a stop ends its read at the next page and waits for it, unless
+    /// it was taken to be awaited before.
+    sizes: Option<JoinHandle<usize>>,
 }
 
 /// A listener beside the one of `--listen`: the agent routes alone (`server.agent_listen`),
@@ -194,11 +200,22 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
 /// lock is tried once and a held lock refuses the start, and `retry` is dropped. A Postgres
 /// store has no lock: it opens at once.
 pub async fn start_waiting<T: Ticker, C: Ticker, R: Ticker>(
-    mut config: Config,
+    config: Config,
     clock: SharedClock,
     ticker: T,
     checks: C,
     retry: R,
+) -> Result<Running, StartupError> {
+    start_held(config, clock, (ticker, checks, retry), None).await
+}
+
+/// [`start_waiting`], whose teaching of the job sizes ([`crate::job_sizes`]) waits for `hold`
+/// (a test's) to be sent or dropped before it reads; `None` reads at once.
+async fn start_held<T: Ticker, C: Ticker, R: Ticker>(
+    mut config: Config,
+    clock: SharedClock,
+    (ticker, checks, retry): (T, C, R),
+    hold: Option<oneshot::Receiver<()>>,
 ) -> Result<Running, StartupError> {
     let logs = config.logs().sink();
     let log_reads = job_api::logs::Ctx::from_config(config.logs(), &clock);
@@ -261,6 +278,8 @@ pub async fn start_waiting<T: Ticker, C: Ticker, R: Ticker>(
         checker,
         cached,
     } = open(prepared, &clock)?;
+    // The ended jobs are read and taught while the server serves; nothing waits for them.
+    let sizes = teach_sizes(&shared, hold);
     shared.agents().set_duty_period(duty_period);
     // The name this server claims dispatch messages by: where it serves agents, and its pid.
     let agents_at = agent_listener.as_ref().map_or(addr, |(_, agents)| *agents);
@@ -341,6 +360,11 @@ pub async fn start_waiting<T: Ticker, C: Ticker, R: Ticker>(
         scaler.clone().map(|scaler| (scaler, cached)),
     ));
     let ticking = Ticking(tokio::spawn(ticking));
+    let (stop_polling, polling_stopped) = oneshot::channel();
+    let polling = Polling {
+        stop: stop_polling,
+        task: Ticking(tokio::spawn(poll_loop(shared.clone(), polling_stopped))),
+    };
     let checking = Checking(checker.map(|checker| tokio::spawn(checker.run(checks))));
     gate.set(Phase::Ready);
     Ok(Running {
@@ -355,10 +379,25 @@ pub async fn start_waiting<T: Ticker, C: Ticker, R: Ticker>(
         slots,
         serving: tokio::spawn(serving),
         ticking,
+        polling,
         _checking: checking,
         scaler,
         tls,
         drain_hold: limits.drain_hold,
+        sizes: Some(sizes),
+    })
+}
+
+/// Teaches the job sizes the ended jobs the start began to teach ([`crate::job_sizes`]), off
+/// the runtime's threads, once `hold` is sent or dropped (`None`: at once); the task answers
+/// how many taught a class a memory sample.
+fn teach_sizes(shared: &Arc<Shared>, hold: Option<oneshot::Receiver<()>>) -> JoinHandle<usize> {
+    let shared = shared.clone();
+    tokio::spawn(async move {
+        if let Some(hold) = hold {
+            let _ = hold.await;
+        }
+        blocking(move || shared.agents().sizes.teach()).await
     })
 }
 
@@ -612,9 +651,18 @@ pub(crate) fn open(prepared: Prepared, clock: &SharedClock) -> Result<Opened, St
     })
 }
 
-/// The tick task, ended when it is dropped: a server that is dropped must not go on
-/// ticking.
+/// The tick task or the placement poller, ended when it is dropped: a server that is dropped
+/// must not go on ticking or placing.
 struct Ticking(JoinHandle<()>);
+
+/// The placement poller's task, with the signal that stops it between two passes: an orderly
+/// stop ([`Running::shutdown`]) waits for a pass under way to end, so nothing the pass holds
+/// outlives the stop. Dropped, it is aborted.
+struct Polling {
+    /// Sent to stop the poller once its pass under way, if any, has ended.
+    stop: oneshot::Sender<()>,
+    task: Ticking,
+}
 
 impl Drop for Ticking {
     fn drop(&mut self) {
@@ -663,6 +711,24 @@ async fn tick_loop<T: Ticker>(
     loop {
         let tick = ticker.next().await;
         tick_once(&shared, side.as_ref(), tick).await;
+    }
+}
+
+/// The placement poller of `shared`'s agent side: one pass over the queued jobs after each
+/// poke ([`crate::poller::poked`], [`crate::poller::run`]), until `stopped` fires (or its
+/// sender is dropped), which it heeds only between passes. A panic in a pass ends it as one in
+/// the tick ends the tick loop: `/healthz` then answers that the server is not ticking, and the
+/// supervisor of the process must restart it.
+async fn poll_loop(shared: Arc<Shared>, mut stopped: oneshot::Receiver<()>) {
+    let _alive = Alive(shared.clone());
+    let agents = Arc::clone(shared.agents());
+    loop {
+        tokio::select! {
+            biased;
+            _ = &mut stopped => return,
+            () = crate::poller::poked(&agents) => {}
+        }
+        crate::poller::run(&agents).await;
     }
 }
 
@@ -883,6 +949,15 @@ impl Running {
         }
         self.ticking.0.abort();
         let _ = (&mut self.ticking.0).await;
+        // The poller ends after the pass it may be running, so that pass lets go of the state
+        // before the last tick and before the stop returns.
+        let Polling { stop, mut task } = self.polling;
+        let _ = stop.send(());
+        let _ = (&mut task.0).await;
+        self.shared.agents().sizes.stop();
+        if let Some(sizes) = self.sizes.take() {
+            let _ = sizes.await;
+        }
         final_tick(&self.shared).await;
         served
     }
@@ -891,3 +966,7 @@ impl Running {
 #[cfg(test)]
 #[path = "server_shutdown_tests.rs"]
 mod shutdown_tests;
+
+#[cfg(test)]
+#[path = "server_sizes_tests.rs"]
+mod sizes_tests;

@@ -22,6 +22,9 @@ use crate::agent_api::serve_hello;
 use crate::agent_api::whole_tests::{queue_share, rules};
 use crate::job_expiry::JobLimits;
 
+#[path = "dispatch_unbuilt_tests.rs"]
+mod unbuilt;
+
 /// A bound no test reaches: a hold or a recheck a test does not end returns at it.
 const LONG: Duration = Duration::from_secs(60);
 
@@ -298,9 +301,11 @@ async fn a_poll_with_nothing_due_ends_at_the_bound() {
 
 /// Catches a placement that wakes the held heartbeat of a host but not its held poll (or the
 /// poll's watch taking the heartbeat's over, which the host's two holds would do if they shared
-/// one). A host holds a heartbeat and a poll; the pass places a job on it; the poll is answered
-/// with the start, and the heartbeat, which was woken too (it waits again), carries no start
-/// since the queue hands it out.
+/// one), and a heartbeat woken with nothing to send that holds on to the bound. A host holds a
+/// heartbeat and a poll; the pass places a job on it; the poll is answered with the start, and
+/// the heartbeat, woken too after its one wait, is answered with no start (the queue hands it
+/// out) and without `beat_now`: the agent's one heartbeat thread is free again, and its next
+/// heartbeat leaves when its worker has news of the start (taken, running), not a hold later.
 #[tokio::test]
 async fn a_placement_wakes_the_held_poll_and_the_held_heartbeat_of_the_host() {
     let mut rig = clocked_rig("dispatch_wake", true, JobLimits::default()).holding_for(LONG);
@@ -309,27 +314,17 @@ async fn a_placement_wakes_the_held_poll_and_the_held_heartbeat_of_the_host() {
     let rig = timed(rig, LONG, NEVER);
     let agent = FakeAgent::new("host-a");
     queue_share(&rig, "job-1", 600);
-    let beat = rig.beat(&agent);
-    tokio::pin!(beat);
     let placing = async {
         waited(&rig, 1).await;
         beat_waited(&rig, 1).await;
         rig.tick();
-        beat_waited(&rig, 2).await;
     };
-    let conduct = async {
-        tokio::select! {
-            biased;
-            () = placing => {}
-            _ = &mut beat => panic!("the heartbeat ended before the wake"),
-        }
-    };
-    let (reply, ()) = tokio::join!(polled(&rig, Vec::new()), conduct);
+    let (reply, held, ()) = tokio::join!(polled(&rig, Vec::new()), rig.beat(&agent), placing);
     assert_eq!(names(&reply.unwrap()), [start("job-1")]);
-    rig.agents.draining.begin();
-    let held = beat.await.unwrap();
+    let held = held.unwrap();
     assert!(starts(&held).is_empty(), "the queue hands the start out");
-    assert!(held.beat_now);
+    assert!(!held.beat_now);
+    assert_eq!(*rig.agents.wakes.waits().borrow(), 1);
 }
 
 /// Catches a held poll that never looks at the store again unless this server places: a message

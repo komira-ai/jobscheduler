@@ -700,3 +700,33 @@ async fn a_job_history_does_not_serve_an_unserved_group() {
     let answer = usage_of(&api, GetUsageRequest::default()).await;
     assert_eq!(refused(answer).0, Code::Unimplemented);
 }
+
+/// Asserts that `GetUsage` tells the CPU series a job's record holds, field for field (its
+/// granularity, its points as numbers, its run length and its partial flag), beside the record's
+/// other fields, and tells none for a job record without one and for a lease record, which has
+/// none. It catches a series lost between the job store's record and the answer, a field read
+/// into another, and a series told for a record that has none.
+#[tokio::test]
+async fn usage_tells_the_cpu_series_of_a_job_record() {
+    let s = server("usage-series");
+    let with = EndedRow {
+        cpu_series: js_types::CpuSeries::new(8, vec![0, 16, 40, 65535], 70_000_000, true),
+        ..ended("job-with", 1000)
+    };
+    job_ended(&s, &with);
+    job_ended(&s, &ended("job-without", 2000));
+    s.sink.allocation_ended(&ended("1-9", 3000)).unwrap();
+    let page = usage_of(&s.api, GetUsageRequest::default()).await.unwrap();
+    assert_eq!(job_ids(&page), ["job-with", "job-without", "1-9"]);
+    assert_eq!(
+        page.records[0].cpu_series,
+        Some(wire::CpuSeries {
+            granularity_secs: 8,
+            points: vec![0, 16, 40, 65535],
+            run_usec: 70_000_000,
+            partial: true,
+        })
+    );
+    assert_eq!(page.records[1].cpu_series, None);
+    assert_eq!(page.records[2].cpu_series, None);
+}

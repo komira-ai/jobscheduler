@@ -16,13 +16,14 @@
 //!    to the file it names, which must lie inside its tree and be a program.
 //!
 //! The pins end with the run: [`Pinned`] unpins when it is dropped, whichever way the start
-//! or the run ends. The clones are inside the user's home, which the helper sweeps when it
-//! deletes the user.
+//! or the run ends. The clones are inside the account's home, which the account's retirement
+//! deletes.
 //!
 //! The profile of a run that pins a bundle is the same as any native run's: reads are open
 //! (`ReadModel::Open`, the only model with a profile builder), so the store's trees need no
 //! grant. The network is the lower of what the start asks and what the bundle's tools need
-//! (`seatbelt.network_max`). That is not the agent's ceiling (`--native-network`): a start
+//! (`seatbelt.network_max`): a bundle of `off` takes from a run even the loopback a job of the
+//! level `none` gets. That is not the agent's ceiling (`--native-network`): a start
 //! above the ceiling was refused before its user was made, and is never lowered to it; the
 //! bundle only says its tools need no more than its `network_max`, so the profile grants no
 //! more.
@@ -33,8 +34,9 @@ use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::Path;
 use std::sync::Arc;
 
-use js_agent_wire::{BUNDLE_PROGRAM_PREFIX, NativeSpec, NetworkLevel};
+use js_agent_wire::{BUNDLE_PROGRAM_PREFIX, NativeSpec};
 use js_bundle::{BundleConfig, Inputs, MaterialiseError, Materialised, materialise};
+use js_mac_pool::seatbelt::Net;
 use js_treestore::Owner;
 
 use crate::bundle::{Pinned, PlaceError, Placer};
@@ -77,9 +79,9 @@ pub(super) struct Prepared {
     pub args: Vec<String>,
     /// The environment: the agent's, the bundle's rules, then the job's.
     pub env: Vec<(String, String)>,
-    /// The network the run's profile gets: the start's, lowered to the bundle's
-    /// `network_max`.
-    pub network: NetworkLevel,
+    /// The most network the run's profile gets: the bundle's `network_max`, which the run's
+    /// own level is met with (`profile::level`).
+    pub network: Net,
 }
 
 /// Pins the bundle `pin` for the run of `lease`. `entrypoint` is the name the start's
@@ -109,9 +111,10 @@ pub(super) fn prepare(
     native: &NativeSpec,
     home: &Path,
     (uid, tmp, developer_dir): (u32, &Path, Option<&Path>),
+    hand_over: &super::HandOver,
 ) -> Result<Prepared, Prepare> {
     let under = home.join(super::profile::JOB_TREES_DIR);
-    super::make_dir(&under, uid)?;
+    super::make_dir(&under, uid, hand_over)?;
     let gid = fs::metadata(home)?.gid();
     let owner = Owner::new(uid, gid).ok_or(Prepare::Owner)?;
     let writable = pinned.clone_writable(&under, owner)?;
@@ -129,7 +132,7 @@ pub(super) fn prepare(
         Some(name) => entrypoint_file(pinned.config(), &made, name)?,
         None => native.program.clone(),
     };
-    let network = lower(native.network, pinned.config());
+    let network = cap(pinned.config());
     Ok(Prepared {
         program,
         args: made.args,
@@ -175,28 +178,13 @@ fn entrypoint_file(
     Ok(text.to_owned())
 }
 
-/// How much network a level is, lowest first. `on` and `open` give one profile (no network
-/// rule), and `open` is the more: a bundle whose tools need `on` lowers an `open` start to it.
-fn rank(level: NetworkLevel) -> u8 {
-    match level {
-        NetworkLevel::Off => 0,
-        NetworkLevel::Loopback => 1,
-        NetworkLevel::On => 2,
-        NetworkLevel::Open => 3,
-    }
-}
-
-/// The lower of what the start asks and what the bundle's tools need: a statement of the
-/// tools' needs, applied to the profile after the start was admitted, and not a ceiling that
-/// refuses.
-fn lower(asked: NetworkLevel, config: &BundleConfig) -> NetworkLevel {
-    let needed = match config.seatbelt.network_max {
-        js_bundle::NetworkLevel::Off => NetworkLevel::Off,
-        js_bundle::NetworkLevel::Loopback => NetworkLevel::Loopback,
-        js_bundle::NetworkLevel::On => NetworkLevel::On,
-    };
-    match rank(asked) <= rank(needed) {
-        true => asked,
-        false => needed,
+/// The most network the bundle's tools need (`seatbelt.network_max`), as a profile's level:
+/// a statement of the tools' needs, met with the run's level after the start was admitted,
+/// and not a ceiling that refuses.
+fn cap(config: &BundleConfig) -> Net {
+    match config.seatbelt.network_max {
+        js_bundle::NetworkLevel::Off => Net::Off,
+        js_bundle::NetworkLevel::Loopback => Net::Loopback,
+        js_bundle::NetworkLevel::On => Net::On,
     }
 }

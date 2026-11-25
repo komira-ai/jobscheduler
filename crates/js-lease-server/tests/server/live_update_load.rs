@@ -5,7 +5,8 @@
 //! jobs are submitted to every server that serves, and the hosts end what they run as rounds
 //! go by. Each server is stopped as a termination signal stops it ([`signal`], then
 //! `Running::shutdown`) while it is inside a transaction of a pull: a placement (its mint of the
-//! allocation id parked by a [`Gate`]) for the first roll, a dispatch claim (waiting on the
+//! allocation id parked by a [`Gate`]; the placement is its poller's, made after the submit was
+//! answered queued) for the first roll, a dispatch claim (waiting on the
 //! store's commit head, held by a [`HeadLock`]) for the second. A second test kills a server
 //! after its claim of a dispatch message committed and before the agent read the reply.
 //! Nothing waits on time: rounds, ticks and the barriers' events drive every step, and the
@@ -22,8 +23,9 @@ use js_state::{ManualClock, StoreTime};
 use js_types::HostId;
 use tokio::runtime::Runtime;
 
+use crate::jobs_support::{JobBody, left_the_queue, submit_body};
 use crate::live_update_rig::{
-    Agent, Busy, Edge, Gate, HOSTS, HeadLock, PER_HOST, Serving, due, job_at, post_at, server,
+    Agent, Busy, Edge, Gate, HOSTS, HeadLock, PER_HOST, Serving, due, post_at, server,
     server_minting, server_reading, signal, state_at, submit_at,
 };
 use crate::support::{Harness, T0, guard, request};
@@ -107,9 +109,9 @@ impl Fleet {
     }
 
     /// Rounds until every job was started and the hosts hold at most `most` for two rounds in
-    /// a row, so the next job submitted is placed at once and is the only one placed. The two
-    /// rounds are for the servers: a host's container of an acknowledged end is freed by its
-    /// later listings, so a server counts it until then.
+    /// a row, so the next job submitted is placed at once by its server's poller and is the
+    /// only one placed. The two rounds are for the servers: a host's container of an
+    /// acknowledged end is freed by its later listings, so a server counts it until then.
     async fn calm(
         &mut self,
         edge: &mut Edge,
@@ -136,11 +138,13 @@ impl Fleet {
 
 /// Asserts that a rolling update of two servers under load fails no job. Server A serves the
 /// three hosts that poll dispatch and runs jobs; server B (the next release) starts beside it
-/// and both serve, jobs submitted to each. A is signalled while a placement it pulled is parked
-/// inside its claimed transaction: the placement commits and its start reaches its host (one
-/// that polls) from B at B's first claim, so A left no claim to lapse; a job submitted to A
-/// after the signal is admitted and stays queued through A's tick, though the hosts have room,
-/// until B places it. The fourth host, of the release before the queue, says hello to B then.
+/// and both serve, jobs submitted to each. A job is answered queued when submitted; its
+/// server's poller places it a moment later. A is signalled while a placement its poller
+/// pulled is parked inside its claimed transaction: the placement commits and its start
+/// reaches its host (one that polls) from B at B's first claim, so A left no claim to lapse;
+/// a job submitted to A after the signal is admitted and stays queued through A's tick,
+/// though the hosts have room, until B places it. The fourth host, of the release before the queue, says hello to B
+/// then.
 /// A exits; server C (the release after) starts beside B, and B is signalled while its claim
 /// of a dispatch message waits inside its transaction: the claim commits and the poll is
 /// answered with the start, and a job submitted to B after the signal stays queued through B's
@@ -188,22 +192,28 @@ fn a_rolling_update_of_two_servers_under_load_fails_no_job() {
         }
 
         // A is signalled while a placement it pulled is parked inside its transaction: the
-        // job's id is the client's, so the first mint is the placement's of the allocation.
+        // job's id is the client's, so the first mint is the placement's of the allocation,
+        // made by A's poller after the submit was answered queued.
         // Room for the pulled job and one more on the three hosts that poll.
         fleet
             .calm(&mut edge, b_jobs, (HOSTS - 1) * PER_HOST - 2, &[&a, &b])
             .await;
         gate.arm(0);
         let pulled = fleet.id();
-        let submitting = tokio::spawn(submit_at(a_jobs, pulled.clone()));
+        let made = submit_at(a_jobs, pulled.clone()).await;
+        assert_eq!(made.status, 201, "{}", made.body);
+        assert_eq!(
+            made.json()["job"]["state"],
+            "JOB_STATE_QUEUED",
+            "{}",
+            made.body
+        );
+        fleet.jobs.push(pulled.clone());
         let parked = gate.parked().await;
         signal(&a).await;
         edge.remove(&a);
         parked.release();
-        let made = guard(submitting).await.unwrap();
-        assert_eq!(made.status, 201, "{}", made.body);
-        fleet.jobs.push(pulled.clone());
-        let placed = job_at(b_jobs, &pulled).await;
+        let placed = left_the_queue(&b, &pulled).await;
         assert_eq!(placed["state"], "JOB_STATE_PLACED", "{placed}");
         // A claimed nothing after the signal: B hands the start out at its first claim.
         let host = placed["hostId"].as_str().unwrap().to_owned();
@@ -251,7 +261,7 @@ fn a_rolling_update_of_two_servers_under_load_fails_no_job() {
                 .calm(&mut edge, c_jobs, HOSTS * PER_HOST - 2, &[&b, &c])
                 .await;
             let id = fleet.submit(b_jobs).await;
-            let read = job_at(b_jobs, &id).await;
+            let read = left_the_queue(&b, &id).await;
             assert_eq!(read["state"], "JOB_STATE_PLACED", "{read}");
             let host = read["hostId"].as_str().unwrap().to_owned();
             if fleet.agent(&host).polls() {
@@ -352,6 +362,12 @@ fn a_server_killed_mid_dispatch_leaves_the_start_to_the_other_after_the_lease() 
         agent.hello(a.addr()).await;
         let made = submit_at(a.running.job_addr().unwrap(), "job-1".to_owned()).await;
         assert_eq!(made.status, 201, "{}", made.body);
+        assert_eq!(
+            made.json()["job"]["state"],
+            "JOB_STATE_QUEUED",
+            "{}",
+            made.body
+        );
         let lost = post_at(a.addr(), "/v1/agent/dispatch", &agent.poll_body(false)).await;
         assert_eq!(lost.status, 200, "{}", lost.body);
         let messages = lost.json()["messages"].clone();
@@ -413,8 +429,15 @@ fn a_server_turns_ready_while_the_serving_server_changes_jobs_without_a_pause() 
     Runtime::new().unwrap().block_on(async {
         let a = server(&url, "busy_a").await;
         let a_jobs = a.running.job_addr().unwrap();
-        // A host joined, so the jobs are admitted; what it has no room for waits queued.
+        // A host joined, so the jobs are admitted. A job that takes all of the host's 8 cores
+        // is placed on it first, so no seed has room there and every seed stays queued: A's
+        // placement poller, which each submit pokes and which runs on a task of its own, places
+        // none of them, whenever its pass runs, under the serving server's writes.
         Agent::new("burst-1", true).hello(a.addr()).await;
+        let made = submit_body(&a, &JobBody::new("filler").needs(8000, 1 << 30).json()).await;
+        assert_eq!(made.status, 201, "{}", made.body);
+        let placed = left_the_queue(&a, "filler").await;
+        assert_eq!(placed["state"], "JOB_STATE_PLACED", "{placed}");
         let mut ids = Vec::new();
         for n in 0..JOBS {
             let id = format!("seed-{n:03}");

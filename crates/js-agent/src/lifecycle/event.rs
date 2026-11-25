@@ -47,7 +47,8 @@ pub struct JobBooking {
     /// The CPU booked, in thousandths of a core: the lease's `cpu.weight`, a share of the
     /// node's cores and never a ceiling.
     pub cpu_millis: u64,
-    /// The memory booked, in bytes: the lease's `memory.max`, with no swap.
+    /// The memory booked, in bytes: what placement counted for the job, not a limit (the lease
+    /// has no `memory.max`, and the job may use swap).
     pub memory_bytes: u64,
     /// The size class and which history gave the CPU and the memory, as the job's start said
     /// ([`JobStartSpec::sizing`](js_agent_wire::JobStartSpec::sizing)); `None` for a run start,
@@ -88,6 +89,60 @@ pub struct StartTimeline {
     /// at (milliseconds since the Unix epoch), in order; empty for a runtime that keeps none
     /// ([`Runtime::start_steps`](super::Runtime::start_steps)).
     pub runtime: Vec<(&'static str, u64)>,
+    /// The lookup of a host path that the start waited on (the open of the path beneath its
+    /// root, which on a FUSE file system is the file system's own lookup of the tree), as the
+    /// runtime gives it ([`Runtime::lookup_stamps`](super::Runtime::lookup_stamps)); `None`
+    /// for a start with no host path and for a runtime that keeps none.
+    pub lookup: Option<LookupStamps>,
+}
+
+/// When the lookup of one host path was asked of the runtime's pool of lookups, when a
+/// thread of the pool began it and when it ended, each the wall clock time in milliseconds
+/// since the Unix epoch, as one host's clock read them. A start with several host paths is
+/// given the lookup that ended last, the one it waited on.
+///
+/// It is logged with the two spans it gives beside the stamps, the time it waited in the
+/// pool's queue ([`LookupStamps::queue_ms`]) and the time the open took
+/// ([`LookupStamps::open_ms`]):
+/// `LookupStamps { queued_at_ms: Q, started_at_ms: S, ended_at_ms: E, queue_ms: S-Q,
+/// open_ms: E-S }`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct LookupStamps {
+    /// When the lookup was asked of the pool.
+    pub queued_at_ms: u64,
+    /// When a thread of the pool began it.
+    pub started_at_ms: u64,
+    /// When the open returned.
+    pub ended_at_ms: u64,
+}
+
+impl LookupStamps {
+    /// The milliseconds the lookup waited in the pool's queue for a thread: from when it was
+    /// asked to when a thread began it, none for a clock that stepped back.
+    #[must_use]
+    pub fn queue_ms(&self) -> u64 {
+        self.started_at_ms.saturating_sub(self.queued_at_ms)
+    }
+
+    /// The milliseconds the open took on its thread: from when the thread began it to when
+    /// it returned, none for a clock that stepped back.
+    #[must_use]
+    pub fn open_ms(&self) -> u64 {
+        self.ended_at_ms.saturating_sub(self.started_at_ms)
+    }
+}
+
+impl std::fmt::Debug for LookupStamps {
+    /// The stamps, then the two spans they give.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LookupStamps")
+            .field("queued_at_ms", &self.queued_at_ms)
+            .field("started_at_ms", &self.started_at_ms)
+            .field("ended_at_ms", &self.ended_at_ms)
+            .field("queue_ms", &self.queue_ms())
+            .field("open_ms", &self.open_ms())
+            .finish()
+    }
 }
 
 /// When each step of a finished run's cleanup was done, carried by [`Event::Cleaned`] and so

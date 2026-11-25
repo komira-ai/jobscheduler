@@ -5,11 +5,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent::lifecycle::{
-    Created, FsPrepared, JobFs, Prepared, Removal, RunHandle, Runtime, Status, Wake, Whereabouts,
-    label,
+    Created, FsPrepared, JobFs, LookupStamps, OutputsReport, Prepared, Removal, RunHandle, Runtime,
+    Status, Wake, Whereabouts, label,
 };
 use js_agent::vm::{VmRuntime, WithVms};
-use js_agent_wire::{JobUsage, LogReport, LogTail, NativeSpec, NetworkLevel, PortRange, refusal};
+use js_agent_wire::{
+    JobUsage, LogReport, LogTail, MemorySeries, NativeSpec, NetworkLevel, PortRange, refusal,
+};
 use js_vm_lease::fake::FakeDriver;
 use js_vm_lease::{ExecEnd, Step};
 
@@ -30,7 +32,8 @@ fn split(driver: &Arc<FakeDriver>) -> (WithVms, FakeRuntime) {
 
 /// Asserts that a run with the VM kind is made by the VM runtime and one without it by the
 /// other runtime, and that each later call about a run (poll, tail, log report, control
-/// group, where its container is, stop, removal) goes to the runtime that made it: a running
+/// group, where its container is, stop, removal, what the removal committed) goes to the
+/// runtime that made it: a running
 /// VM run of a router whose other runtime places its containers in groups has no container
 /// process to be blind to, and a container's first process outside its group is the other
 /// runtime's answer. Catches a VM start run as a native job on the host, a container's calls
@@ -66,6 +69,7 @@ fn each_run_goes_to_the_runtime_of_its_kind() {
     let tail = with.log_tail(&in_vm).unwrap().unwrap();
     assert_eq!(tail.stdout, "vm out");
     assert_eq!(with.logs_report(&in_vm), None);
+    assert_eq!(with.outputs_report(&in_vm), None);
     assert_eq!(with.cgroup(&in_vm), None);
     with.stop(&in_vm, GRACE).unwrap();
     with.remove(&in_vm).unwrap();
@@ -91,6 +95,7 @@ fn each_run_goes_to_the_runtime_of_its_kind() {
         cpu_throttle: None,
         cpu_pressure_some_usec: None,
         cpu_peak: None,
+        peak_swap_bytes: None,
     };
     fake.report_usage("run-plain", counted);
     fake.set_cgroup("run-plain", "/sys/fs/cgroup/run-plain");
@@ -103,8 +108,16 @@ fn each_run_goes_to_the_runtime_of_its_kind() {
     assert!(with.cgroup(&on_host).is_some());
     with.stop(&on_host, GRACE).unwrap();
     assert_eq!(fake.stops().len(), 1);
+    let committed = OutputsReport {
+        key: "cas/b/b1/n1/pack".to_owned(),
+        sha256: "0".repeat(64),
+        bytes: 3,
+    };
+    fake.commit_outputs("run-plain", committed.clone());
     with.remove(&on_host).unwrap();
     assert!(fake.gone("run-plain"));
+    assert_eq!(with.outputs_report(&on_host), Some(committed));
+    assert_eq!(with.outputs_report(&on_host), None, "answered once");
 }
 
 /// Asserts that a removal is asked of the runtime that holds the run: a container's of the
@@ -230,6 +243,14 @@ fn every_host_question_is_the_other_runtimes() {
     fake.steps_of("left", &[("begin", 7)]);
     let steps = with.start_steps(&RunHandle(leaked.clone()));
     assert_eq!(steps, [("begin", 7)]);
+    let stamps = LookupStamps {
+        queued_at_ms: 1,
+        started_at_ms: 2,
+        ended_at_ms: 4,
+    };
+    fake.lookup_of("left", stamps);
+    let given = with.lookup_stamps(&RunHandle(leaked.clone()));
+    assert_eq!(given, Some(stamps));
     fake.set_host_ports(&[PortRange::new(5432, 5433).unwrap()]);
     assert_eq!(with.host_ports(), [PortRange::new(5432, 5433).unwrap()]);
     fake.lose_host_ports("left", "taken");
@@ -252,6 +273,9 @@ fn every_host_question_is_the_other_runtimes() {
     fake.mount_in(Path::new("/mounts"));
     fake.refuse_layer_image("registry.example/l@sha256:0");
     assert!(with.layered_rootfs());
+    fake.own_host_paths(Path::new("/put"));
+    assert!(with.owns_host_path("/put/cas/b/b1/n1"));
+    assert!(!with.owns_host_path("/elsewhere"));
     assert_eq!(
         with.check_layer_image("registry.example/l@sha256:0"),
         alone.check_layer_image("registry.example/l@sha256:0")
@@ -292,4 +316,27 @@ fn native(program: &str, args: &[&str]) -> NativeSpec {
         network: NetworkLevel::Off,
         ports: Vec::new(),
     }
+}
+
+/// Proves the router asks the runtime that holds a run for the run's memory series: a
+/// container's series is the other runtime's answer, and a VM run, whose runtime records none,
+/// has none. Catches a router that keeps the trait's default and answers none for every run.
+#[test]
+fn a_memory_series_is_the_answer_of_the_runtime_that_holds_the_run() {
+    let driver = Arc::new(FakeDriver::new().answering(ExecEnd::Exited(0), "", ""));
+    let (mut with, fake) = split(&driver);
+    let in_vm = with.create_and_start(&spec("run-vm", &["make"])).unwrap();
+    let mut plain = spec("run-plain", &["make"]);
+    plain.labels.remove(label::KIND);
+    let on_host = with.create_and_start(&plain).unwrap();
+    assert_eq!(with.memory_series(&on_host), None);
+    let series = MemorySeries {
+        granularity_secs: 1,
+        points: vec![64, 128],
+        run_usec: 2_000_000,
+        partial: false,
+    };
+    fake.report_memory_series("run-plain", series.clone());
+    assert_eq!(with.memory_series(&on_host), Some(series));
+    assert_eq!(with.memory_series(&in_vm), None);
 }

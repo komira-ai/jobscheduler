@@ -466,7 +466,6 @@ impl CrunRuntime {
             spec: adopted_spec(&entry.name, fields.image_digest, &lease, cgroup.name()),
             labels: entry.labels.clone(),
             lease,
-            cap: js_contain::hard_memory_max(fields.booked.memory_bytes),
             backstop: cgroup.parent_ooms().ok(),
             cgroup,
             state: State::Created,
@@ -485,8 +484,17 @@ impl CrunRuntime {
             fs: self.run_fs_of(&entry.name),
             // An adopted run was started by an earlier process: no step of its start is here.
             marks: Vec::new(),
+            // Nor any lookup of its start.
+            lookup: None,
             // Its peak counts from its first poll here: what it used before is not known.
             peak: super::peak::PeakWindow::default(),
+            // Its series, if recorded, starts at its first poll too, and is partial.
+            series: self
+                .cpu_series
+                .then(crate::series::cpu::SeriesRecorder::adopted),
+            memory_series: self
+                .memory_series
+                .then(crate::series::memory::MemoryRecorder::adopted),
         }
     }
 
@@ -496,7 +504,7 @@ impl CrunRuntime {
         let ended = self
             .rt
             .block_on(self.oci.ended_as(&run.spec, record.end.clone()));
-        let (exit, tail) = concluded(ended, &record.tail, (&run.cgroup, run.cap, run.backstop));
+        let (exit, tail) = concluded(ended, &record.tail, (&run.cgroup, run.backstop));
         State::Ended(exit, tail)
     }
 

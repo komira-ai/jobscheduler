@@ -194,8 +194,9 @@ pub struct Settings {
 
 /// What the crun runtime is opened from, besides the settings every runtime has: the
 /// `crun` program, the job user's ids and the registries images may be pulled from. The
-/// agent's delegated actions cgroup is recorded when the runtime opens (the cgroup is set
-/// up then), and shared by the clones of the settings.
+/// directory of the agent's delegated actions cgroup (below the cgroup mount, as
+/// `--actions-cgroup` names one) is recorded when the runtime opens (the cgroup is set up
+/// then), and shared by the clones of the settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CrunPlan {
     /// The `crun` program (`--crun-bin`).
@@ -243,11 +244,23 @@ pub struct CrunPlan {
     /// The operator's CPU ceiling (`--cpu-ceiling`), set by [`Settings::with_cpu_ceiling`]:
     /// none by default.
     pub cpu_ceiling: Option<js_types::CpuCeiling>,
+    /// Whether each run's CPU is recorded second by second ([`CrunSettings::cpu_series`]),
+    /// set by [`Settings::with_cpu_series`]: off by default.
+    ///
+    /// [`CrunSettings::cpu_series`]: crate::crun::CrunSettings::cpu_series
+    pub cpu_series: bool,
+    /// Whether each run's non-file memory is recorded second by second
+    /// ([`CrunSettings::memory_series`]), set by [`Settings::with_memory_series`]: off by
+    /// default.
+    ///
+    /// [`CrunSettings::memory_series`]: crate::crun::CrunSettings::memory_series
+    pub memory_series: bool,
     actions: Arc<OnceLock<String>>,
 }
 
 impl CrunPlan {
-    /// Records the actions cgroup the runtime made; the first one recorded stays.
+    /// Records the directory of the actions cgroup the runtime made, the path the usage is
+    /// read from; the first one recorded stays.
     pub fn delegated(&self, actions: &str) {
         let _ = self.actions.set(actions.to_owned());
     }
@@ -374,6 +387,8 @@ impl Settings {
                 mount_roots: crate::lifecycle::MountRoots::default(),
                 layered: false,
                 cpu_ceiling: None,
+                cpu_series: false,
+                memory_series: false,
                 actions: Arc::new(OnceLock::new()),
             })),
         }
@@ -431,6 +446,26 @@ impl Settings {
         self.crun_mut()
             .into_iter()
             .for_each(|plan| plan.cpu_ceiling = ceiling);
+        self
+    }
+
+    /// These settings with `on` as whether the crun runtime records each run's CPU second by
+    /// second (`--cpu-series`); the settings of another runtime are as they were.
+    #[must_use]
+    pub fn with_cpu_series(mut self, on: bool) -> Self {
+        self.crun_mut()
+            .into_iter()
+            .for_each(|plan| plan.cpu_series = on);
+        self
+    }
+
+    /// These settings with `on` as whether the crun runtime records each run's non-file memory
+    /// second by second (`--memory-series`); the settings of another runtime are as they were.
+    #[must_use]
+    pub fn with_memory_series(mut self, on: bool) -> Self {
+        self.crun_mut()
+            .into_iter()
+            .for_each(|plan| plan.memory_series = on);
         self
     }
 

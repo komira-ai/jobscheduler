@@ -35,7 +35,7 @@ use js_contain::subids::IdFiles;
 use js_testkit::dir::TestDir;
 use serde_json::json;
 
-use super::crun_machine::{CrunMachine, On, euid};
+use super::crun_machine::{CrunMachine, On, euid, records_actions};
 use crate::crun_host::Fixture;
 use crate::server::{
     Agent, POOL_QUOTA_TOML, POOL_RUNS_QUICK_TOML, POOL_RUNS_TOML, QUICK_INTERVAL, Redirect, Server,
@@ -264,7 +264,7 @@ fn host_with_store_mounted() -> Host {
 }
 
 /// The checked settings of the crun runtime for the node, placed beside its scratch root.
-fn crun_settings() -> Settings {
+pub(super) fn crun_settings() -> Settings {
     let node = node();
     let (uid, gid) = (
         rustix::process::getuid().as_raw(),
@@ -390,7 +390,7 @@ fn the_system_opens_the_crun_runtime_for_crun_settings() {
         warnings.iter().any(|w| w.contains("--image-allow")),
         "{warnings:?}"
     );
-    assert_eq!(settings.actions_cgroup(), Some("/actions"));
+    records_actions(&settings, &node().cgroups, "actions");
     let range = settings.uid().range().expect("the mapping is recorded");
     assert!(range.contains(SUB) && range.contains(SUB + 65_535) && !range.contains(SUB + 65_536));
 }
@@ -1056,7 +1056,7 @@ fn the_agents_cgroups_are_set_up_when_the_runtime_opens() {
     let (mount, own) = tree("cg-leaf", "cpu memory pids\n", "0::/unit/supervisor\n");
     let settings = crun_settings();
     open(&mount, &own, &settings).expect("it opens");
-    assert_eq!(settings.actions_cgroup(), Some("/unit/actions"));
+    records_actions(&settings, &mount, "unit/actions");
     for cgroup in ["unit", "unit/actions"] {
         assert_eq!(enabled(&mount, cgroup), "+cpu +memory +pids", "{cgroup}");
     }
@@ -1064,7 +1064,7 @@ fn the_agents_cgroups_are_set_up_when_the_runtime_opens() {
     let (mount, own) = tree("cg-moved", "cpu memory pids\n", "0::/unit\n");
     let settings = crun_settings();
     open(&mount, &own, &settings).expect("it opens");
-    assert_eq!(settings.actions_cgroup(), Some("/unit/actions"));
+    records_actions(&settings, &mount, "unit/actions");
     let moved = fs::read_to_string(mount.join("unit/supervisor/cgroup.procs"));
     assert_eq!(moved.expect("the process was written").trim(), "4242");
     assert_eq!(enabled(&mount, "unit"), "+cpu +memory +pids");

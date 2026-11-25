@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use js_agent_wire::{HostPort, JobMount, Layer, MountMode, MountSource, PortProtocol, Propagation};
-use js_types::ExecMode;
+use js_types::{CpuSeries, ExecMode};
 use proptest::collection::{btree_map, vec};
 use proptest::prelude::*;
 use proptest::test_runner::RngSeed;
@@ -288,12 +288,18 @@ fn job_result() -> impl Strategy<Value = JobResult> {
                 proptest::option::of((any::<u64>(), any::<u64>())),
             )),
             proptest::option::of(any::<[u64; 4]>()),
+            proptest::option::of((
+                0u32..16,
+                vec(any::<u16>(), 0..=128),
+                any::<u64>(),
+                any::<bool>(),
+            )),
         ),
     )
         .prop_map(
             |(
                 (exit_code, reason, stdout_tail, stderr_tail, truncated, input_failure),
-                (q, p, s, e, usage, logs),
+                (q, p, s, e, usage, logs, series),
             )| {
                 JobResult {
                     exit_code,
@@ -333,6 +339,10 @@ fn job_result() -> impl Strategy<Value = JobResult> {
                             stderr_dropped,
                         },
                     ),
+                    cpu_series: series.and_then(|(shift, points, run_usec, partial)| {
+                        CpuSeries::new(1 << shift, points, run_usec, partial)
+                    }),
+                    memory_series: None,
                     input_failure,
                 }
             },

@@ -43,10 +43,12 @@ use crate::error::StartupError;
 use crate::held_beat::{self, Wakes};
 use crate::host_keys::Writes;
 use crate::job_expiry::JobLimits;
+use crate::job_sizes::Sizes;
 use crate::job_store::{self, FeedTrim, ServerJobs};
 use crate::join_tokens::{Admitted, JoinRefusal, JoinTokens, MintError, Minted, RevokeError};
 use crate::logs::{self, LogGrants};
 use crate::metrics::Meter;
+use crate::poller::Poller;
 use crate::rate::HelloLimiter;
 use crate::sched::place::SchedPlacer;
 use crate::sched::rank::static_then;
@@ -106,6 +108,8 @@ pub(crate) struct Agents {
     /// held ([`Agents::place_jobs`]); `None` only for a test's agent side built without
     /// one, which places no job.
     pub(crate) placer: Option<Arc<SchedPlacer>>,
+    /// The teaching of the job sizes the start began, which the server reads after it listens.
+    pub(crate) sizes: Sizes,
     /// The store's rows the last pass offered hosts by, which the next read takes each row from
     /// while it stands at the version it had ([`crate::sched`]). Its lock is a leaf.
     pub(crate) rows_read: Mutex<Option<Arc<crate::sched::jobs_rows::RowsRead>>>,
@@ -128,6 +132,8 @@ pub(crate) struct Agents {
     /// The gate of the server's pass over the queued jobs ([`Agents::place_jobs`]): one pass
     /// at a time, from its read of the open hosts to its last taint.
     pub(crate) placing: Mutex<()>,
+    /// The placement poller's wake signal ([`crate::poller`]), which each submit pokes.
+    pub(crate) poller: Poller,
     /// The heartbeats held open for a start ([`crate::held_beat`]), which every placement the
     /// pass commits wakes.
     pub(crate) wakes: Wakes,
@@ -209,7 +215,7 @@ pub(crate) fn assemble_in(
     placed.map(|(assembled, _)| assembled)
 }
 
-/// [`assemble`], with the placer the registry was given.
+/// [`assemble`], with the placer the registry was given and the sizes taught.
 #[cfg(test)]
 pub(crate) fn assemble_placed(
     agents: Box<AgentSetup>,
@@ -218,7 +224,9 @@ pub(crate) fn assemble_placed(
     state_file: &Path,
     logs: Option<Arc<LogGrants>>,
 ) -> Result<(Assembled, Arc<SchedPlacer>), StartupError> {
-    placed_in(agents, usage, clock, (state_file, None), logs)
+    let placed = placed_in(agents, usage, clock, (state_file, None), logs)?;
+    let _ = placed.0.sizes.teach();
+    Ok(placed)
 }
 
 /// The join tokens, the bindings read at start and their store: from the files beside the
@@ -261,8 +269,10 @@ fn placed_in(
         mint_provider,
         hello_limit,
         require_host_credential,
-        cpu_slack,
+        load,
         cold,
+        cold_on,
+        curves,
         max_lease_wall,
         job_limits,
         jobs,
@@ -284,7 +294,7 @@ fn placed_in(
     // memory the pool's percent says (every pool's is the first's: `check_more`); the
     // registry books the whole shape.
     let (pool, memory) = split(pool);
-    let placer = placer(max_lease_wall, cpu_slack, memory, cold, clock);
+    let placer = placer(max_lease_wall, load, (memory, cold, curves), cold_on, clock);
     let (later, more_tokens): (Vec<_>, Vec<_>) = more
         .into_iter()
         .map(|more| (split(more.pool).0, more.tokens))
@@ -301,7 +311,9 @@ fn placed_in(
     // the job store's row first. Its commit failing refuses the start, as a store
     // that cannot be read does.
     let restore_flag = jobs.as_ref().map(|setup| setup.flag);
-    let (jobs, job_feed, job_state) = match jobs {
+    // The sizes' teaching is begun, not read: the server listens before its read of the ended
+    // jobs (`crate::job_sizes`).
+    let (jobs, job_feed, job_state, sizes) = match jobs {
         Some(setup) => {
             let opened = job_store::open(
                 (state_file, kept.map(ServerStore::store)),
@@ -309,10 +321,11 @@ fn placed_in(
                 &job_sources,
             )?;
             restore_job_taints(&opened.jobs, &store, &mut bindings, setup.flag)?;
-            let _ = crate::job_sizes::learn(&placer, &opened.jobs);
-            (Some(opened.jobs), Some(opened.feed), Some(opened.store))
+            let sizes = crate::job_sizes::begin(&placer, &opened.jobs);
+            let (jobs, feed, state) = (opened.jobs, opened.feed, opened.store);
+            (Some(jobs), Some(feed), Some(state), sizes)
         }
-        None => (None, None, None),
+        None => (None, None, None, Sizes::default()),
     };
     for (host, binding) in &bindings {
         taints::put_back(&registry, host, binding, "start");
@@ -339,13 +352,15 @@ fn placed_in(
         job_state,
         usage_in_job_store,
         placer: Some(placer.clone()),
+        sizes,
         rows_read: Mutex::default(),
         logs,
         job_limits,
-        cpu_slack,
+        cpu_slack: load.cpu_slack,
         duty_period_ms: AtomicU64::new(0),
         meter: OnceLock::new(),
         placing: Mutex::default(),
+        poller: Poller::default(),
         wakes: Wakes::default(),
         dispatching: DispatchState::new(dispatch),
         draining: Drain::default(),
@@ -414,6 +429,7 @@ impl Agents {
             job_state: None,
             usage_in_job_store: false,
             placer: None,
+            sizes: Sizes::default(),
             rows_read: Mutex::default(),
             logs: None,
             job_limits: JobLimits::default(),
@@ -421,6 +437,7 @@ impl Agents {
             duty_period_ms: AtomicU64::new(0),
             meter: OnceLock::new(),
             placing: Mutex::default(),
+            poller: Poller::default(),
             wakes: Wakes::default(),
             dispatching: DispatchState::new(Default::default()),
             draining: Drain::default(),
@@ -485,7 +502,7 @@ impl Agents {
     }
 
     /// This agent side placing with `placer` (`--placement js-sched`), for a test of the
-    /// heartbeat's pass over the queued jobs. The registry must already hold it.
+    /// placement pass over the queued jobs. The registry must already hold it.
     #[cfg(test)]
     pub(crate) fn with_placer(self, placer: Arc<SchedPlacer>) -> Self {
         Self {
@@ -962,6 +979,9 @@ mod cordons;
 
 #[path = "agents_taints.rs"]
 pub(crate) mod taints;
+
+#[path = "agents_retire.rs"]
+pub(crate) mod retire;
 
 #[cfg(test)]
 #[path = "agents_mint_tests.rs"]

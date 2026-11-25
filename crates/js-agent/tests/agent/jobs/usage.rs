@@ -30,6 +30,9 @@ const DRAIN: Drain = Drain {
 /// whole core.
 fn counters(machine: &FakeMachine, k: u64) {
     let usage = format!("usage_usec {}\n", k * 30_000_000);
+    // The host was busy the same core: 3000 ticks of 10 ms in each window.
+    let host = format!("cpu  {} 0 0 0 0 0 0 0\n", k * 3_000);
+    machine.files.set("/proc/stat", &host);
     let dirs = [SLICE.to_owned(), format!("{SLICE}/docker-r1.scope")];
     for dir in dirs {
         machine.files.set(&format!("{dir}/cpu.stat"), &usage);
@@ -132,6 +135,7 @@ fn a_failed_send_requeues_and_the_next_beat_carries_the_minute_once() {
             "seq": 1,
             "mono_usec": 0,
             "cpu_usage_usec": 0,
+            "host_cpu_usec": 0,
             "working_set_bytes": MEMORY,
             "active_file_bytes": 0,
             "actions_cpu_limited": false,

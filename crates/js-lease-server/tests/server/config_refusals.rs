@@ -69,8 +69,10 @@ fn an_unknown_table_or_field_is_refused_with_the_known_ones() {
          scheduler_id, state_file, boot, client_token_file, tls_cert, tls_key, agent_client_ca, tick, \
          max_lease_wall, max_connections, handshake_timeout, header_timeout, read_timeout, write_timeout, \
          max_requests, drain_timeout, drain_hold, agent_hello_burst, agent_hello_interval, \
-         require_host_credential, placement, estimate_feed, cpu_slack, cold_cpu_millis, \
-         cold_memory_bytes, usage_db, usage_off, profile_store_bytes, \
+         require_host_credential, placement, estimate_feed, cpu_slack, pack_limit, cold_cpu_millis, \
+         cold_memory_bytes, cold_memory_bytes_on, cold_cpu_millis_on, placement_curves, usage_db, \
+         usage_off, \
+         profile_store_bytes, \
          history_retention_days, alert_webhook_url, alert_webhook_token_file, alert_repeat_after, \
          max_spend_per_day_total, max_spend_per_month_total, max_spend_since_go_total, \
          job_retention, job_feed_retention, job_allocation_retention, job_listen, max_job_wall, \
@@ -85,7 +87,7 @@ fn an_unknown_table_or_field_is_refused_with_the_known_ones() {
          memory_schedulable_percent, max_instances, max_machines, max_spend_per_hour, max_spend_per_day, \
          idle, max_age, min_host_lifetime, boot_timeout, boot_fail_cooldown_max, \
          boot_fail_trip_after, boot_fail_reset_after, launch, live_until, agent, join_token_file, provider, \
-         platforms, provider_limits, max_queue_wait, start_timeout, path_grace, network"
+         platforms, provider_limits, max_queue_wait, start_timeout, capacity_requeues, capacity_refusal_bar, path_grace, network"
     );
 }
 

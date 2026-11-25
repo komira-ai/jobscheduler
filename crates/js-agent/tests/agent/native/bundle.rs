@@ -1,8 +1,9 @@
 //! A native run that pins a bundle: the entrypoint it runs is a file of the bundle's trees,
 //! its environment and arguments are the bundle's, the trees the bundle writes to are the
 //! run's own copies, and the pins end with the run, however it ends. The runtime is the real
-//! one, over the fake helper, with a store that holds a real bundle. Each test says the
-//! defect it catches.
+//! one, over the real account pool on a fake host and the fake launcher, with a store that
+//! holds a real bundle; what the runtime asks the supervisor is read from the launcher. Each
+//! test says the defect it catches.
 
 use std::fs;
 use std::os::unix::fs::{PermissionsExt as _, symlink};
@@ -10,13 +11,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use js_agent::bundle::{Admission, Needs, Placer};
-use js_agent::lifecycle::{Body, RunHandle, RunSpec, Runtime};
-use js_agent::native::{Ceiling, NativeConfig};
+use js_agent::lifecycle::{Body, RunHandle, RunSpec, Runtime, Status};
+use js_agent::native::{Ceiling, Journal, NativeConfig};
 use js_agent_wire::{NetworkLevel, Outcome, refusal};
 use js_bundle::DottedVersion;
+use serde_json::json;
 
-use super::lifecycle::{Native, job};
-use super::{Rig, native, parse};
+use super::grant::{Over, job};
+use super::{Failing, Launched, Rig, TERM, native};
 use crate::bundle::fake::FakeHost;
 use crate::bundle::fixture::{Bundle, Spec, no_registry, placer, settings};
 use crate::lifecycle::{cleanup, names};
@@ -48,18 +50,10 @@ impl Stored {
         let store = placer(&dir, no_registry());
         let layout = bundle.layout(&dir, "layout");
         store.ensure_layout(&layout, &bundle.digest()).unwrap();
-        let Rig {
-            fake,
-            rt,
-            dir: work,
-        } = Rig::with(name, adjust);
-        let rt = rt.with_bundles(Arc::clone(&store));
+        let rig = Rig::with(name, adjust);
+        let rt = rig.rt.with_bundles(Arc::clone(&store));
         Self {
-            rig: Rig {
-                fake,
-                rt,
-                dir: work,
-            },
+            rig: Rig { rt, ..rig },
             store,
             bundle,
             _dir: dir,
@@ -96,13 +90,33 @@ fn text(path: &std::path::Path) -> String {
     path.display().to_string()
 }
 
-/// Asserts what a start that runs `@bundle/tool` gives the helper: the file of the tool
+/// The leases the rig's journal holds live.
+fn live(rig: &Rig) -> Vec<String> {
+    Journal::new(&rig.dir.path("native-leases")).live().unwrap()
+}
+
+/// Asserts that a start that failed before an account was lent made nothing: the pool's
+/// records are `ready` as they were, no supervisor was started and no lease is live.
+fn nothing_made(rig: &Rig, ready: &[String]) {
+    assert_eq!(rig.accounts.records(), ready);
+    assert!(rig.launcher.launched().is_empty());
+    assert_eq!(live(rig), Vec::<String>::new());
+}
+
+/// The environment variable `name` of a launch, every time it is given.
+fn vars<'a>(launched: &'a Launched, name: &str) -> Vec<&'a str> {
+    let given = launched.env.iter().filter(|(given, _)| given == name);
+    given.map(|(_, value)| value.as_str()).collect()
+}
+
+/// Asserts what a start that runs `@bundle/tool` gives the supervisor: the file of the tool
 /// tree as the program, the arguments with the bundle's placeholders resolved, the
 /// environment of the bundle's rules (a tree that is only read is the store's own, one that
 /// is written is the run's copy) with the job's own and `TMPDIR`, and a `.trees` directory in
-/// the home that is private to the user and holds the copy of the writable tree alone. It
-/// catches a program resolved to the wrong file, a placeholder that reaches the program
-/// unresolved, a tool that could write into the store, and a copy anyone else could read.
+/// the run directory that is private to the account and holds the copy of the writable tree
+/// alone. It catches a program resolved to the wrong file, a placeholder that reaches the
+/// program unresolved, a tool that could write into the store, and a copy anyone else could
+/// read.
 #[test]
 fn a_start_runs_the_entrypoint_with_the_bundles_arguments_and_environment() {
     let mut s = Stored::new("start");
@@ -116,22 +130,15 @@ fn a_start_runs_the_entrypoint_with_the_bundles_arguments_and_environment() {
     };
     body.env.insert("X".to_owned(), "1".to_owned());
     let id = s.rig.rt.create_and_start(&spec).unwrap();
-    assert_eq!(id, RunHandle("7.0".to_owned()));
-    assert_eq!(
-        s.rig.fake.verbs(),
-        ["boot-reset", "user-create 7.0", "pool-status", "run 7.0"]
-    );
-    let home = s.rig.fake.home_of("7.0");
-    let run = s.rig.fake.run_of("7.0");
+    assert_eq!(id, RunHandle(format!("{TERM}.0")));
+    let launched = s.rig.launcher.last();
+    let account = launched.var("USER").unwrap();
+    let home = s.rig.home_of(account);
     let tool = s.tree("tool");
-    let tail = parse(&run.argv).tail;
+    assert_eq!(launched.program, text(&tool.join("bin/tool")));
     assert_eq!(
-        tail,
-        [
-            text(&tool.join("bin/tool")),
-            "--flag".to_owned(),
-            text(&tool.join("lib/data.txt"))
-        ]
+        launched.args,
+        ["--flag".to_owned(), text(&tool.join("lib/data.txt"))]
     );
     for want in [
         ("TOOLROOT", text(&tool)),
@@ -139,8 +146,7 @@ fn a_start_runs_the_entrypoint_with_the_bundles_arguments_and_environment() {
         ("TMPDIR", text(&home.join("exec/.tmp"))),
         ("X", "1".to_owned()),
     ] {
-        let pair = (want.0.to_owned(), want.1.clone());
-        assert!(run.env.contains(&pair), "{want:?} not in {:?}", run.env);
+        assert_eq!(launched.var(want.0), Some(want.1.as_str()), "{}", want.0);
     }
     let mode = fs::metadata(home.join("exec/.trees"))
         .unwrap()
@@ -150,6 +156,8 @@ fn a_start_runs_the_entrypoint_with_the_bundles_arguments_and_environment() {
     let copied = fs::read_to_string(home.join("exec/.trees/work/run.sh")).unwrap();
     assert_eq!(copied, "#!/bin/sh\necho work\n");
     assert!(!home.join("exec/.trees/tool").exists());
+    s.rig.settle(&id);
+    s.rig.rt.remove(&id).unwrap();
 }
 
 /// Asserts that an entrypoint in the tree the bundle writes to runs from the run's copy, not
@@ -160,9 +168,13 @@ fn an_entrypoint_of_a_writable_tree_runs_from_the_runs_copy() {
     let mut s = Stored::new("writable");
     let spec = s.spec("r1", "@bundle/work", &[]);
     s.rig.rt.create_and_start(&spec).unwrap();
-    let home = fs::canonicalize(s.rig.fake.home_of("7.0")).unwrap();
-    let tail = parse(&s.rig.fake.run_of("7.0").argv).tail;
-    assert_eq!(tail, [text(&home.join("exec/.trees/work/run.sh"))]);
+    let launched = s.rig.launcher.last();
+    let account = launched.var("USER").unwrap();
+    let home = fs::canonicalize(s.rig.home_of(account)).unwrap();
+    assert_eq!(
+        launched.program,
+        text(&home.join("exec/.trees/work/run.sh"))
+    );
 }
 
 /// Asserts that a program that is not the bundle's runs as it would without the bundle,
@@ -173,15 +185,18 @@ fn a_program_outside_the_bundle_still_gets_the_bundles_environment() {
     let mut s = Stored::new("outside");
     let spec = s.spec("r1", "/usr/bin/true", &[]);
     s.rig.rt.create_and_start(&spec).unwrap();
-    let run = s.rig.fake.run_of("7.0");
-    assert_eq!(parse(&run.argv).tail, ["/usr/bin/true"]);
-    let toolroot = ("TOOLROOT".to_owned(), text(&s.tree("tool")));
-    assert!(run.env.contains(&toolroot), "{:?}", run.env);
+    let launched = s.rig.launcher.last();
+    assert_eq!(launched.program, "/usr/bin/true");
+    assert!(launched.args.is_empty());
+    let toolroot = text(&s.tree("tool"));
+    assert_eq!(launched.var("TOOLROOT"), Some(toolroot.as_str()));
 }
 
 /// Asserts that the network a run gets is the lowest of what the start asks, what the
-/// bundle's tools need and what the agent allows. It catches a start that asks for more than
-/// the bundle's config says its tools need, and a bundle that raises the agent's cap.
+/// bundle's tools need and what the agent allows (`loopback` here): a job of the level `none`
+/// (`off` on the wire) gets loopback unless its bundle needs no network. It catches a start
+/// that asks for more than the bundle's config says its tools need, a bundle that raises the
+/// agent's cap, and a `none` job left with no loopback.
 #[test]
 fn the_network_is_the_lowest_of_the_request_the_bundle_and_the_agent() {
     let loopback = "(allow network* (remote ip \"localhost:*\"))";
@@ -189,7 +204,9 @@ fn the_network_is_the_lowest_of_the_request_the_bundle_and_the_agent() {
         ("loopback", NetworkLevel::On, true),
         ("off", NetworkLevel::On, false),
         ("on", NetworkLevel::Loopback, true),
-        ("loopback", NetworkLevel::Off, false),
+        ("loopback", NetworkLevel::Off, true),
+        ("on", NetworkLevel::Off, true),
+        ("off", NetworkLevel::Off, false),
     ];
     for (n, (needed, asked, has_loopback)) in cases.into_iter().enumerate() {
         let mut spec = Spec::standard();
@@ -201,7 +218,7 @@ fn the_network_is_the_lowest_of_the_request_the_bundle_and_the_agent() {
         };
         body.network = asked;
         s.rig.rt.create_and_start(&run).unwrap();
-        let profile = parse(&s.rig.fake.run_of("7.0").argv).profile;
+        let profile = s.rig.launcher.last().profile;
         let said = format!("bundle {needed}, asked {asked:?}");
         assert_eq!(profile.contains(loopback), has_loopback, "{said}");
     }
@@ -228,7 +245,7 @@ fn bundle_network_max_still_lowers_the_profile() {
         let admitted = s.rig.rt.check_native(body).map_err(|why| why.code);
         assert_eq!(admitted, Ok(()), "open is admitted under open");
         s.rig.rt.create_and_start(&run).unwrap();
-        let profile = parse(&s.rig.fake.run_of("7.0").argv).profile;
+        let profile = s.rig.launcher.last().profile;
         assert_eq!(
             profile.contains("(deny network*)"),
             denies,
@@ -246,22 +263,23 @@ fn the_pins_live_as_long_as_the_run() {
     let mut s = Stored::new("pins");
     let spec = s.spec("r1", "@bundle/tool", &[]);
     let id = s.rig.rt.create_and_start(&spec).unwrap();
-    assert!(!s.unpinned("7.0"), "the run holds its pins");
-    s.rig.fake.exit("7.0", 0);
+    assert!(!s.unpinned(&id.0), "the run holds its pins");
     s.rig.settle(&id);
-    assert!(!s.unpinned("7.0"), "an ended run still holds its pins");
+    assert!(!s.unpinned(&id.0), "an ended run still holds its pins");
     s.rig.rt.remove(&id).unwrap();
-    assert!(s.unpinned("7.0"), "the removed run released them");
+    assert!(s.unpinned(&id.0), "the removed run released them");
 }
 
-/// Asserts that a start that fails before the user exists makes nothing (the helper is asked
-/// for no user and the store has no pin of the run), each for what it is: a bundle the store
-/// does not hold, a program the bundle lacks, a program that names a bundle when the start
-/// pins none, and a start that pins a bundle on a runtime that has no store. It catches a
-/// refusal that costs a lease user, and a pin left by a start that failed.
+/// Asserts that a start that fails before an account is lent makes nothing (the pool's
+/// records are as they were, no supervisor is started and no lease is live, and the store
+/// has no pin of the run), each for what it is: a bundle the store does not hold, a program
+/// the bundle lacks, a program that names a bundle when the start pins none, and a start
+/// that pins a bundle on a runtime that has no store. It catches a refusal that costs an
+/// account, and a pin left by a start that failed.
 #[test]
-fn a_start_that_fails_before_the_user_exists_makes_nothing() {
+fn a_start_that_fails_before_an_account_is_lent_makes_nothing() {
     let mut s = Stored::new("early");
+    let ready = s.rig.accounts.records();
     let mut unheld = s.spec("r1", "@bundle/tool", &[]);
     unheld.bundle = Some(format!("toolchain@sha256:{}", "e".repeat(64)));
     let cases = [
@@ -271,40 +289,47 @@ fn a_start_that_fails_before_the_user_exists_makes_nothing() {
     for (spec, said) in cases {
         let why = s.rig.rt.create_and_start(&spec).unwrap_err();
         assert!(why.0.contains(said), "{why}");
-        assert_eq!(s.rig.fake.verbs(), ["boot-reset"]);
-        assert!(s.unpinned("7.0"));
+        nothing_made(&s.rig, &ready);
     }
     let mut unpinned = s.rig.spec("r3", native("@bundle/tool", &[]));
     unpinned.bundle = None;
     let why = s.rig.rt.create_and_start(&unpinned).unwrap_err();
     assert!(why.0.contains("pins none"), "{why}");
+    nothing_made(&s.rig, &ready);
+    for lease in ["7.0", "7.1", "7.2"] {
+        assert!(s.unpinned(lease), "{lease}");
+    }
     let mut bare = Rig::new("early-bare");
+    let ready = bare.accounts.records();
     let mut pinned = bare.spec("r4", native("/usr/bin/true", &[]));
     pinned.bundle = Some(s.bundle.pin());
     let why = bare.rt.create_and_start(&pinned).unwrap_err();
     assert!(why.0.contains("no bundle store"), "{why}");
-    assert_eq!(bare.fake.verbs(), ["boot-reset"]);
+    nothing_made(&bare, &ready);
 }
 
-/// Asserts every way a start fails once the user exists: an entrypoint that is a file that
-/// cannot run, a directory, a file the tree lacks, a program that a store changed under the
-/// agent has turned into a link out of its tree, a locked variable the job sets, and a helper
-/// that refuses `run`. Each ends with the user killed and deleted and the pins released, and
-/// the error says which. It catches a program run from outside the bundle, and a failed
-/// start that leaves a user or a pin.
+/// Asserts every way a start fails once the account is lent: an entrypoint that is a file
+/// that cannot run, a directory, a file the tree lacks, a program that a store changed under
+/// the agent has turned into a link out of its tree, a locked variable the job sets, and a
+/// supervisor that cannot be started. Each ends with the account retired (its record gone
+/// and the pool holding none), no live lease and the pins released, and the error says
+/// which. It catches a program run from outside the bundle, and a failed start that leaves
+/// an account or a pin.
 #[test]
-fn a_start_that_fails_after_the_user_exists_removes_the_user_and_the_pins() {
+fn a_start_that_fails_after_the_account_is_lent_retires_it_and_releases_the_pins() {
     let cases = [
         ("@bundle/data", "not an executable file"),
         ("@bundle/dir", "not an executable file"),
         ("@bundle/absent", "No such file"),
         ("@bundle/tool", "leads out of its tree"),
         ("@bundle/work", "WORKROOT"),
-        ("@bundle/work", "run: "),
+        ("@bundle/work", "the supervisor: "),
     ];
     for (n, (program, said)) in cases.into_iter().enumerate() {
         let mut s = Stored::new(&format!("late{n}"));
+        let lent = s.rig.accounts.records().remove(0);
         let mut spec = s.spec("r1", program, &[]);
+        let mut launches = 0;
         match n {
             3 => {
                 let file = s.tree("tool").join("bin/tool");
@@ -317,22 +342,20 @@ fn a_start_that_fails_after_the_user_exists_removes_the_user_and_the_pins() {
                 };
                 body.env.insert("WORKROOT".to_owned(), "x".to_owned());
             }
-            5 => s.rig.fake.refuse("run", "no"),
+            5 => {
+                s.rig.launcher.fail(Failing::Launch);
+                launches = 1;
+            }
             _ => {}
         }
         let why = s.rig.rt.create_and_start(&spec).unwrap_err();
         assert!(why.0.contains(said), "{program}: {why}");
-        assert_eq!(
-            s.rig.fake.verbs()[..2],
-            ["boot-reset", "user-create 7.0"],
-            "{program}"
-        );
-        let verbs = s.rig.fake.verbs();
-        assert_eq!(
-            verbs[verbs.len() - 2..],
-            ["kill-uid 7.0", "user-delete 7.0"],
-            "{program}"
-        );
+        let records = s.rig.accounts.records();
+        assert_eq!(records.len(), 1, "{program}: {records:?}");
+        assert_ne!(records[0], lent, "{program}: the account is retired");
+        assert!(s.rig.pool.held().is_empty(), "{program}");
+        assert_eq!(live(&s.rig), Vec::<String>::new(), "{program}");
+        assert_eq!(s.rig.launcher.launched().len(), launches, "{program}");
         assert!(s.unpinned("7.0"), "{program}");
     }
 }
@@ -361,7 +384,7 @@ fn the_runtime_checks_a_bundle_program_against_its_store() {
 
 /// A lifecycle over a runtime with a store that holds the standard bundle, which judges
 /// starts by an admission over a host that holds it too.
-fn lifecycle(name: &str) -> (Native, Bundle, Arc<Placer>, Scratch) {
+fn lifecycle(name: &str) -> (Over, Bundle, Arc<Placer>, Scratch) {
     let dir = Scratch::new(&format!("native-bundle-life-{name}"));
     let src = dir.path("src");
     fs::create_dir(&src).unwrap();
@@ -382,17 +405,21 @@ fn lifecycle(name: &str) -> (Native, Bundle, Arc<Placer>, Scratch) {
         );
     });
     let admission = Admission::new(settings(&dir), host);
-    let life = Native::with(name, Some((Arc::clone(&store), admission)));
+    let life = Over::of(
+        Rig::new(&format!("bundle-life-{name}")),
+        Some((Arc::clone(&store), admission)),
+    );
     (life, bundle, store, dir)
 }
 
 /// A bundle job through the lifecycle: it starts, runs the entrypoint, ends with a result,
-/// and the cleanup runs in order; afterwards the store holds no pin of the run and the helper
-/// has no user of it. It catches a job whose bundle is pinned outside the lifecycle's
+/// and the cleanup runs in order; afterwards the store holds no pin of the run and the pool
+/// holds no account of it. It catches a job whose bundle is pinned outside the lifecycle's
 /// accounting, and a pin that outlives the result.
 #[test]
 fn a_bundle_job_runs_to_its_result_and_its_pins_are_released() {
     let (mut h, bundle, store, _dir) = lifecycle("run");
+    let lent = h.accounts.records().remove(0);
     let mut spec = job("r1", "@bundle/tool");
     spec.bundle = Some(bundle.pin());
     assert_eq!(h.start(spec), ["started r1"]);
@@ -400,7 +427,6 @@ fn a_bundle_job_runs_to_its_result_and_its_pins_are_released() {
         store.pin(&bundle.pin(), "7.0").is_err(),
         "pinned while it runs"
     );
-    h.fake.exit("7.0", 0);
     let events = h.until(|life| life.busy_slots().is_empty());
     let mut want = vec!["result r1".to_owned()];
     want.extend(cleanup("r1"));
@@ -411,29 +437,26 @@ fn a_bundle_job_runs_to_its_result_and_its_pins_are_released() {
         store.pin(&bundle.pin(), "7.0").is_ok(),
         "released with the run"
     );
-    assert_eq!(
-        h.fake.verbs(),
-        [
-            "boot-reset",
-            "user-create 7.0",
-            "pool-status",
-            "run 7.0",
-            "kill-uid 7.0",
-            "user-delete 7.0"
-        ]
-    );
+    let launched = h.launcher.launched();
+    assert_eq!(launched.len(), 1);
+    assert_eq!(launched[0].var("USER"), Some(lent.as_str()));
+    let records = h.accounts.records();
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_ne!(records[0], lent, "the run's account is retired");
 }
 
 /// A bundle job that names a program the bundle lacks is refused `invalid-program` by the
 /// lifecycle's admission, before the runtime is asked for anything. It catches an
-/// entrypoint checked only after a user was made for it.
+/// entrypoint checked only after an account was lent for it.
 #[test]
 fn a_bundle_job_for_a_program_the_bundle_lacks_is_refused_by_the_admission() {
     let (mut h, bundle, _store, _dir) = lifecycle("lacks");
+    let ready = h.accounts.records();
     let mut spec = job("r1", "@bundle/gcc");
     spec.bundle = Some(bundle.pin());
     assert_eq!(h.start(spec), ["refused r1 invalid-program"]);
-    assert_eq!(h.fake.verbs(), ["boot-reset"]);
+    assert!(h.launcher.launched().is_empty());
+    assert_eq!(h.accounts.records(), ready);
     let result = &h.life.results()[0];
     assert_eq!(result.outcome, Outcome::FailedToStart);
     assert_eq!(result.detail.as_deref(), Some(refusal::INVALID_PROGRAM));
@@ -441,10 +464,11 @@ fn a_bundle_job_for_a_program_the_bundle_lacks_is_refused_by_the_admission() {
 
 /// Asserts that a job environment that names `TMPDIR`, which the agent sets, is refused before
 /// anything is made, as it is for a run that pins no bundle. It catches a bundle run that
-/// makes its user before it finds the environment unusable.
+/// lends its account before it finds the environment unusable.
 #[test]
-fn a_job_that_sets_tmpdir_is_refused_before_a_user_is_made() {
+fn a_job_that_sets_tmpdir_is_refused_before_an_account_is_lent() {
     let mut s = Stored::new("tmpdir");
+    let ready = s.rig.accounts.records();
     let mut spec = s.spec("r1", "@bundle/tool", &[]);
     let Body::Native(body) = &mut spec.body else {
         panic!("a native body");
@@ -453,45 +477,29 @@ fn a_job_that_sets_tmpdir_is_refused_before_a_user_is_made() {
         .insert("TMPDIR".to_owned(), "/private/tmp".to_owned());
     let why = s.rig.rt.create_and_start(&spec).unwrap_err();
     assert!(why.0.contains("TMPDIR"), "{}", why.0);
-    assert_eq!(s.rig.fake.verbs(), ["boot-reset"]);
+    nothing_made(&s.rig, &ready);
     assert!(s.unpinned("7.0"));
 }
 
-/// Asserts that a run adopted by the next process has its bundle pinned again for it while
-/// the next runtime holds the store, and that a store that no longer has the bundle leaves
-/// the run adopted, unpinned. It catches an adopted run whose toolchain trees the store may
-/// evict under it, and an adoption that fails because a pin did.
+/// Asserts that after a restart (a new runtime over the same state and the same store) the
+/// earlier run is listed and ended, and its bundle is not pinned again for it: the pins ended
+/// with the earlier process, and a run that is only ended holds no trees the store could not
+/// evict. It catches a restart that adopts a run it cannot watch, and one that keeps pins for
+/// it that nothing would ever release.
 #[test]
-fn an_adopted_run_has_its_bundle_pinned_again() {
-    use js_agent::native::NativeRuntime;
-    use js_mac_session::helper::RESET_ALREADY;
-
-    let mut s = Stored::new("adopt");
+fn a_restarted_agent_pins_nothing_for_the_earlier_run() {
+    let mut s = Stored::new("restart");
     let spec = s.spec("r1", "@bundle/tool", &[]);
-    s.rig.rt.create_and_start(&spec).unwrap();
-    let Stored {
-        rig: Rig { fake, rt, dir },
-        store,
-        bundle,
-        _dir,
-    } = s;
-    drop(rt);
-    assert!(
-        store.pin(&bundle.pin(), "7.0").is_ok(),
-        "the pins end with the process"
-    );
-    fake.refuse("boot-reset", RESET_ALREADY);
-    let open = |term| NativeRuntime::open(fake.client(), super::config(&fake), term).unwrap();
-    let mut next = open(super::TERM + 1).with_bundles(Arc::clone(&store));
-    assert_eq!(next.list_labelled().unwrap().len(), 1);
-    assert!(
-        store.pin(&bundle.pin(), "7.0").is_err(),
-        "held for the adopted run"
-    );
-    drop(next);
-    let empty = placer(&dir, no_registry());
-    let mut bare = open(super::TERM + 2).with_bundles(empty);
-    assert_eq!(bare.list_labelled().unwrap().len(), 1);
+    let old = s.rig.rt.create_and_start(&spec).unwrap();
+    assert!(!s.unpinned(&old.0), "held while the process lives");
+    let next = s.rig.reopened().with_bundles(Arc::clone(&s.store));
+    drop(std::mem::replace(&mut s.rig.rt, next));
+    assert!(s.unpinned(&old.0), "the pins end with the process");
+    assert_eq!(s.rig.rt.list_labelled().unwrap().len(), 1);
+    assert_eq!(s.rig.rt.poll(&old).unwrap(), Status::Gone);
+    assert!(s.unpinned(&old.0), "an ended run is not pinned again");
+    s.rig.rt.remove(&old).unwrap();
+    assert!(s.unpinned(&old.0));
 }
 
 /// Asserts that a start that pins a bundle and names a held Xcode runs with one
@@ -507,14 +515,51 @@ fn a_bundle_run_naming_a_held_xcode_gets_its_developer_dir() {
     s.rig.rt = s.rig.rt.with_xcodes(vec![held]);
     let mut spec = s.spec("r1", "@bundle/tool", &[]);
     spec.xcode = Some("16F6".to_owned());
-    s.rig.rt.create_and_start(&spec).unwrap();
-    let dirs = |lease: &str| -> Vec<String> {
-        let run = s.rig.fake.run_of(lease);
-        let found = run.env.iter().filter(|(name, _)| name == "DEVELOPER_DIR");
-        found.map(|(_, value)| value.clone()).collect()
-    };
-    assert_eq!(dirs("7.0"), ["/Applications/Xcode.app/Contents/Developer"]);
+    let id = s.rig.rt.create_and_start(&spec).unwrap();
+    assert_eq!(
+        vars(&s.rig.launcher.last(), "DEVELOPER_DIR"),
+        ["/Applications/Xcode.app/Contents/Developer"]
+    );
+    s.rig.settle(&id);
+    s.rig.rt.remove(&id).unwrap();
     let plain = s.spec("r2", "@bundle/tool", &[]);
     s.rig.rt.create_and_start(&plain).unwrap();
-    assert!(dirs("7.1").is_empty());
+    assert!(vars(&s.rig.launcher.last(), "DEVELOPER_DIR").is_empty());
+}
+
+/// Asserts that a bundle rule that sets a name of the run's account (`USER`, `LOGNAME`,
+/// `xcrun_db`) loses to the account's value: each name is given once to the supervisor, `USER`
+/// and `LOGNAME` are the lent account, `xcrun_db` is the file in the run's temporary
+/// directory, and the bundle's own values are given nowhere.
+///
+/// Catches: a start that leaves the bundle's value beside the account's, so the job could be
+/// handed the bundle's name for itself, or a name given twice.
+#[test]
+fn a_bundle_rule_for_an_account_name_loses_to_the_accounts_value() {
+    let mut spec = Spec::standard();
+    for name in ["USER", "LOGNAME", "xcrun_db"] {
+        spec.env
+            .push(json!({"name": name, "op": "set", "values": ["bundle-value"], "locked": false}));
+    }
+    let mut s = Stored::of("acct-env", spec);
+    let run = s.spec("r1", "@bundle/tool", &[]);
+    let id = s.rig.rt.create_and_start(&run).unwrap();
+    let launched = s.rig.launcher.last();
+    let lent = launched.var("USER").unwrap().to_owned();
+    let home = s.rig.home_of(&lent);
+    assert!(home.exists());
+    assert_eq!(vars(&launched, "USER"), [lent.as_str()]);
+    assert_eq!(vars(&launched, "LOGNAME"), [lent.as_str()]);
+    let db = text(&home.join("exec/.tmp/xcrun_db"));
+    assert_eq!(vars(&launched, "xcrun_db"), [db.as_str()]);
+    assert!(
+        !launched
+            .env
+            .iter()
+            .any(|(_, value)| value == "bundle-value"),
+        "{:?}",
+        launched.env
+    );
+    s.rig.settle(&id);
+    s.rig.rt.remove(&id).unwrap();
 }

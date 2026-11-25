@@ -67,7 +67,8 @@ pub fn key_hash(key: &WorkKey) -> u64 {
         })
 }
 
-/// One reading of the node's action cgroup, taken by the agent.
+/// One reading of the node, taken by the agent: the whole host's CPU, its memory in use, and
+/// the leases.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NodeLoad {
     /// Counts readings within one agent process, one more for each. A reading whose `seq`
@@ -76,15 +77,19 @@ pub struct NodeLoad {
     /// The agent's monotonic clock, in microseconds, when the reading was taken. The only
     /// time base used for windows.
     pub mono_usec: u64,
-    /// Cumulative CPU time of the actions cgroup, in microseconds. Descendants removed
-    /// since an earlier reading are still included.
+    /// Cumulative CPU busy time of the whole host, in microseconds: every process counts,
+    /// the leases and everything else (the agent, the storage service, the kernel). From an
+    /// agent of an earlier release, which sends no host counter, the actions cgroup's
+    /// cumulative CPU time instead.
     pub cpu_usage_usec: u64,
-    /// Memory in use by the actions cgroup that cannot simply be dropped: `memory.current`
-    /// minus the inactive file pages. Clamped at 0 when the inactive file is the
-    /// larger.
+    /// Memory in use that cannot simply be dropped: the whole host's non-file memory (its
+    /// anonymous and kernel memory and its shared memory and tmpfs, no page cache) from an
+    /// agent that sends it; from one that does not, the actions cgroup's `memory.current`
+    /// minus its inactive file pages, clamped at 0 when the inactive file is the larger.
     pub memory_working_set_bytes: u64,
-    /// The actions cgroup's active file pages (`active_file` of `memory.stat`), in bytes.
-    /// Hot page cache that `memory_working_set_bytes` still counts; admission caps this part.
+    /// The active file pages counted in `memory_working_set_bytes` (`active_file` of the
+    /// actions cgroup's `memory.stat`), in bytes; 0 with the whole host's non-file memory,
+    /// which counts none. Hot page cache; admission caps this part.
     pub memory_active_file_bytes: u64,
     /// The leases that ran for the whole window since the previous reading, by the
     /// agent's own start.

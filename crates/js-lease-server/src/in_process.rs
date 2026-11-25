@@ -4,11 +4,12 @@
 //!
 //! [`InProcess::start`] builds what [`crate::start_with_checks`] builds, from the same
 //! [`Config`] and [`SharedClock`], by the same code, and stops before anything a listener
-//! needs. It binds no socket and spawns no task: no serve loop, no tick loop, no scaler loop
-//! and no check loop. Requests are answered by the routers it hands out, called as
-//! `tower::Service`s ([`InProcess::client_router`], [`InProcess::agent_router`]), and time acts
-//! only when the caller says [`InProcess::tick`]. It reads no environment and no clock but the
-//! [`SharedClock`] it is given. What only a listener reads (the listen addresses, the TLS
+//! needs. It binds no socket and spawns no task: no serve loop, no tick loop, no scaler loop,
+//! no placement poller and no check loop. Requests are answered by the routers it hands out,
+//! called as `tower::Service`s ([`InProcess::client_router`], [`InProcess::agent_router`]), time
+//! acts only when the caller says [`InProcess::tick`], and the placement a submit or a heartbeat
+//! pokes for runs when the caller says [`InProcess::poll`] (or at the next tick). It reads no
+//! environment and no clock but the [`SharedClock`] it is given. What only a listener reads (the listen addresses, the TLS
 //! acceptor, the connection limits, `--drain-timeout`) is not used.
 //!
 //! The metrics time what they measure on the configuration's monotonic clock, which is the
@@ -77,7 +78,9 @@ struct Checks {
 impl InProcess {
     /// Builds the server `config` describes, on `clock`: the agent side, and the elastic pool
     /// with its scaler and checks when the configuration has one. Each failure to start names the flag at fault, as
-    /// [`crate::start_with_checks`] does, except that no listen address can fail.
+    /// [`crate::start_with_checks`] does, except that no listen address can fail. Unlike a
+    /// server, which teaches the job sizes the ended jobs after it listens, it teaches them
+    /// before it returns.
     pub fn start(mut config: Config, clock: SharedClock) -> Result<Self, StartupError> {
         let log_reads = job_api::logs::Ctx::from_config(config.logs(), &clock);
         let store = config.store.take().map(ServerStore::open).transpose()?;
@@ -89,6 +92,9 @@ impl InProcess {
             cached,
             ..
         } = open(prepared, &clock)?;
+        // In process the start teaches the job sizes before it returns, as a step of its own:
+        // a simulation's first pass books from the history its store holds.
+        let _ = shared.agents().sizes.teach();
         let checks = checker.map(|checker| Checks {
             checker,
             schedule: Schedule::first(clock.now()),
@@ -151,6 +157,15 @@ impl InProcess {
         if let Some(scaler) = &self.scaler {
             scaler.tick().await;
         }
+    }
+
+    /// The placement poller's turn, which the server runs on a task of its own and this seam
+    /// leaves to its caller: when a submit or a heartbeat has poked the poller since the last
+    /// turn, one pass over the queued jobs (the forced one after a submit, the heartbeat's
+    /// skip-if-unchanged one otherwise), and `true`; otherwise nothing, and `false`. A caller
+    /// that never calls it has its jobs placed by the next tick.
+    pub async fn poll(&self) -> bool {
+        crate::poller::poked_pass(self.shared.agents()).await
     }
 
     /// A handle on the agent registry (the same registry the routes and the tick use);

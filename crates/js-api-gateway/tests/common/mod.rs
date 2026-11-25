@@ -14,8 +14,8 @@ use axum::http::{HeaderMap, Request as HttpRequest, StatusCode};
 use js_api_gateway::router;
 use js_proto::v1::job_service_server::JobService;
 use js_proto::v1::{
-    Availability, Host, HostBooking, HostMark, HostSource, HostState, Machine, Memory, Pool,
-    Provider, ProviderCheck, Shape, UsageRecord, WholeHostOutcome,
+    Availability, CpuSeries, Host, HostBooking, HostMark, HostSource, HostState, Machine, Memory,
+    Pool, Provider, ProviderCheck, Shape, UsageRecord, WholeHostOutcome,
 };
 use js_proto::v1::{
     CancelJobRequest, CancelJobResponse, ClearHostTaintRequest, ClearHostTaintResponse,
@@ -24,8 +24,9 @@ use js_proto::v1::{
     GetUsageResponse, Job, JobFile, JobResult, JobSpec, JobState, JobTimes, ListHostsRequest,
     ListHostsResponse, ListJobsRequest, ListJobsResponse, ListPoolsRequest, ListPoolsResponse,
     ListProvidersRequest, ListProvidersResponse, LogGap, LogStream, Needs, NetworkLevel,
-    PortForward, ResourceUsage, ResultReason, StartFailureCode, SubmitJobRequest,
-    SubmitJobResponse, UncordonHostRequest, UncordonHostResponse,
+    PortForward, ResourceUsage, ResultReason, RetireHostRequest, RetireHostResponse,
+    StartFailureCode, SubmitJobRequest, SubmitJobResponse, UncordonHostRequest,
+    UncordonHostResponse,
 };
 use prost::Message;
 use prost_reflect::{DescriptorPool, DynamicMessage};
@@ -232,6 +233,14 @@ impl JobService for Stub {
         self.answer("ClearHostTaint", request, response)
     }
 
+    async fn retire_host(
+        &self,
+        request: Request<RetireHostRequest>,
+    ) -> Result<Response<RetireHostResponse>, Status> {
+        let response = RetireHostResponse { retired: true };
+        self.answer("RetireHost", request, response)
+    }
+
     async fn list_pools(
         &self,
         request: Request<ListPoolsRequest>,
@@ -313,6 +322,12 @@ impl JobService for Stub {
                     whole_host: WholeHostOutcome::Drained.into(),
                     mark_give_ups: 1,
                     estimated_run_ms: Some(0),
+                    cpu_series: Some(CpuSeries {
+                        granularity_secs: 2,
+                        points: vec![0, 16, 40],
+                        run_usec: 5_500_000,
+                        partial: true,
+                    }),
                 }],
                 next_page_token: "usage-page-2".to_owned(),
             },

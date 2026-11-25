@@ -123,6 +123,8 @@ fn result_with(logs: Option<LogReport>) -> JobResult {
         logs,
         input_failure: None,
         usage: None,
+        cpu_series: None,
+        memory_series: None,
     }
 }
 

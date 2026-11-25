@@ -181,14 +181,21 @@
 //! - **A check owed is not lost with the agent.** Before the first step of a job's cleanup
 //!   the agent records, in the state root, that the job's checks are owed; it removes the
 //!   record once they have run (and, when they found something, once the taint is on
-//!   disk). If the agent stops in between, the record is found when the next process
-//!   starts, and the host is tainted (`check-owed`): what the job left behind may be part
-//!   of the baseline the new process took. A record that cannot be written holds the
-//!   cleanup where it is, the container included; one that cannot be removed holds the
-//!   slot. **A restart or a `SIGTERM` inside the cleanup window therefore taints the host
-//!   at the next start**, and the agent never clears that taint (see below); an operator's
-//!   clear must remove the `owed-*` records and `taint.pinned` as well as `taint.json`, or the next start
-//!   taints the host again (see [`taint`]).
+//!   disk). If the agent stops in between (an update's hand-over or drain that ends with
+//!   a cleanup under way, a second stop, a crash), the record is found when the next
+//!   process starts, and that process runs the check itself once it has taken the
+//!   containers over, by the rules that need no baseline ([`CheckHook::run_restored`]):
+//!   what the job left behind may be part of the baseline the new process took. A clean
+//!   host removes the records and is not tainted. The host is tainted (`check-owed`)
+//!   instead when the check finds a process or cannot run, when a directory of the run is
+//!   still there after the start's sweep, when a record is not complete
+//!   (it does not hold its run id), when the records cannot be listed or removed, or when
+//!   the hook cannot judge without a baseline ([`CheckHook::checks_owed_at_start`]). A
+//!   record that cannot be written holds the cleanup where it is, the container included;
+//!   one that cannot be removed holds the slot. The agent never clears a `check-owed`
+//!   taint (see below); an operator's clear must remove the `owed-*` records and
+//!   `taint.pinned` as well as `taint.json`, or the next start taints the host again (see
+//!   [`taint`]).
 //! - **A taint whose cause is gone clears itself.** A taint of a process a job left, or of
 //!   an input the checks could not read, is re-checked while the host is idle (every run
 //!   over, `Blocked` ones included): two clean full checks `--taint-recheck-ms` apart make
@@ -329,12 +336,14 @@ use crate::platform::Backend;
 use crate::quota::ScratchQuota;
 
 pub use codes::{code, detail};
-pub use event::{CleanupTimeline, Event, Finding, JobBooking, Skip, StartTimeline};
+pub use event::{CleanupTimeline, Event, Finding, JobBooking, LookupStamps, Skip, StartTimeline};
 pub use finding::{CHECK_DETAIL_MAX, CheckFinding, CheckNote};
 pub use machine::{
     Lifecycle, Quiet, RETIRED_CAP, RETIRED_LISTED, Restored, RunningLease, SLOTS, Slots,
 };
-pub use mount_providers::{DEFAULT_PROVIDER_WAIT_SECS, MAX_PROVIDER_WAIT_SECS, MountProviders};
+pub use mount_providers::{
+    DEFAULT_PROVIDER_WAIT_SECS, MAX_PROVIDER_WAIT_SECS, MountProviders, ProviderFlags, UserNames,
+};
 pub use mounts::{Beneath, MountError, MountRoots};
 pub use prefetch::{Forgetter, Prefetcher, PullFuture};
 pub use provider::{ProviderAnswer, ProviderCall, Providers};
@@ -349,9 +358,9 @@ pub use quota_flags::{
 use quota_flags::{job_tmp_gib, scratch_quota_limits};
 pub use run_files::{DEFAULT_ROOT as DEFAULT_RUN_FILES_ROOT, FilesRoot};
 pub use runtime::{
-    Body, Created, Exit, Found, FsPrepared, HostSource, JobFs, NativeRefusal, Prepared, Removal,
-    ResolvedMount, RunHandle, RunSpec, Runtime, RuntimeError, Status, Ticket, Whereabouts,
-    check_run_env, label,
+    Body, Created, Exit, Found, FsPrepared, HostSource, JobFs, NativeRefusal, OutputsReport,
+    Prepared, Removal, ResolvedMount, RunHandle, RunSpec, Runtime, RuntimeError, Status, Ticket,
+    Whereabouts, check_run_env, label,
 };
 pub use scratch::{DirLayout, ScratchRoot};
 pub use settle::{DEFAULT_SETTLE, MAX_SETTLE_MS, settle};
@@ -422,6 +431,15 @@ pub trait CheckHook {
     /// As [`CheckHook::run`].
     fn run_restored(&mut self, job: &Finished<'_>) -> Result<(), CheckFinding> {
         self.run(job)
+    }
+
+    /// Whether [`CheckHook::run_restored`] judges the host without the baseline, so that the
+    /// post-job checks a run of an earlier process owed (an `owed-*` record found when the agent
+    /// starts) can run at the start instead of tainting the host (see
+    /// [`taint`](crate::lifecycle::taint)). The default is `false`: such a record taints the
+    /// host (`check-owed`).
+    fn checks_owed_at_start(&self) -> bool {
+        false
     }
 
     /// What the last `run` or `run_restored` saw change that does not taint the host, drained
@@ -519,8 +537,8 @@ impl Config {
 pub struct Local {
     /// The `--mount-root` and `--mount-root-ro` flags, canonicalised.
     pub mounts: MountRoots,
-    /// The `--mount-provider` and `--mount-provider-wait` flags, checked: none for an agent
-    /// given none (and for a macOS build, which has no such flag).
+    /// The `--mount-provider`, `--mount-provider-user` and `--mount-provider-wait` flags,
+    /// checked: none for an agent given none.
     pub providers: MountProviders,
     /// `--scratch-quota` was given.
     pub scratch_quota: bool,
@@ -545,7 +563,7 @@ pub struct Local {
     /// `--scratch-root`, when given.
     pub scratch: Option<ScratchRoot>,
     /// `--run-files-root`, or for containers the default under `/run` when that can be
-    /// made; always none without `--container-bin` or `--native-helper-socket`.
+    /// made; always none without `--container-bin` or `--native-accounts`.
     pub files: Option<FilesRoot>,
     /// Why the default run files root could not be used, for a warning; none when it was
     /// used, was not needed, or `--run-files-root` was given (then a fault is an error).
@@ -561,6 +579,8 @@ pub struct Local {
     pub settle: Duration,
     /// `--taint-recheck-ms`, or [`DEFAULT_TAINT_RECHECK`].
     pub taint_recheck: Duration,
+    /// `--host-second-samples`: the worker also takes the node's CPU per second.
+    pub host_second_samples: bool,
     /// `--stop-grace`, or [`DEFAULT_STOP_GRACE`].
     pub stop_grace: Duration,
     /// `--drain-wait`, or the stop grace.
@@ -735,6 +755,7 @@ impl Local {
         let tmp_gib = job_tmp_gib(cli)?;
         let settle = jobs.settle;
         let taint_recheck = jobs.taint_recheck;
+        let host_second_samples = jobs.host_second_samples;
         let egress = std::mem::take(&mut jobs.egress);
         let allow_host_jobs = jobs.allow_host_jobs;
         let allow_fuse_jobs = jobs.allow_fuse_jobs;
@@ -757,6 +778,7 @@ impl Local {
             state,
             settle,
             taint_recheck,
+            host_second_samples,
             stop_grace,
             drain_wait,
             image_allow: image_allow(&cli.image_allow)?,

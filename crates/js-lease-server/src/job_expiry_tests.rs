@@ -21,6 +21,7 @@ const SECOND: Duration = Duration::from_secs(1);
 const LIMITS: JobLimits = JobLimits {
     max_queue_wait: Duration::from_secs(1800),
     start_timeout: Duration::from_secs(600),
+    ..JobLimits::DEFAULT
 };
 
 /// Job tables on a clock at an hour past its origin.
@@ -212,6 +213,8 @@ fn the_limits_are_the_pools_settings() {
         max_queue_wait: Duration::from_secs(1800),
         start_timeout: Duration::from_secs(90),
         path_grace: Duration::from_secs(5),
+        capacity_requeues: 8,
+        capacity_refusal_bar: Duration::from_secs(60),
     };
     let limits = JobLimits::of(&settings);
     assert_eq!(
@@ -224,6 +227,7 @@ fn the_limits_are_the_pools_settings() {
         JobLimits {
             max_queue_wait: Duration::from_secs(3600),
             start_timeout: Duration::from_secs(900),
+            ..JobLimits::DEFAULT
         }
     );
 }

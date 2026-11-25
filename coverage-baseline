@@ -25,11 +25,13 @@ js-client                   0      0
 js-conformance              0      0
 js-contain                  0      0
 js-coverage                 0      0
+js-cpu-replay               0      0
 js-elastic                  0      0
 js-elastic-fake             0      0
 js-guest                    0      0
 js-guest-wire               0      0
 js-host-step                0      0
+js-isolation-probe          0      0
 js-jobs                     0      0
 js-lease-server             0      0
 js-logmint                  0      0

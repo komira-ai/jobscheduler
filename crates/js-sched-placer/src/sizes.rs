@@ -18,33 +18,40 @@
 //!
 //! [`JobSizes::sized`] books, for each dimension the job leaves at zero:
 //!
-//! - **Learned.** A class with at least [`js_sizing::N_MIN`] fresh runs books the estimate of
-//!   [`js_sizing::Summaries::estimate`]: `1.2 x` the largest peak of its recent runs plus
-//!   128 MiB (at least 1 GiB, never below a memory kill's floor).
+//! - **Learned.** A class with a fresh memory sample of its own books what its own runs ask
+//!   for ([`js_sizing::Summaries::peak_memory`]: `1.2 x` the largest peak of its recent runs
+//!   plus 128 MiB, at least 1 GiB, never below a memory kill's floor), from its first run on,
+//!   whatever their number or spread: neither its kind's largest peak nor the cold size holds
+//!   it above what it uses.
 //! - **Fallback.** A job may name a second class in its label [`SIZE_FALLBACK_LABEL`] (a build
-//!   farm names the kind of step, where its `size-class` names the target). A class with fewer
-//!   runs books the memory its fallback's runs ask for ([`js_sizing::Summaries::peak_memory`]:
-//!   `1.2 x` their largest recent peak plus 128 MiB, whatever their number or spread): the
-//!   fallback class's, else, when the job names none or that class has no fresh run, the
+//!   farm names the kind of step, where its `size-class` names the target). A class with no
+//!   run of its own books the memory its fallback's runs ask for (the same figure of theirs):
+//!   the fallback class's, else, when the job names none or that class has no fresh run, the
 //!   client's whole history on the job's platform ([`JobSizes::client_key_of`], which every run
-//!   of the client but a memory kill teaches). Its own runs and its kill floor raise it: it books the largest of
-//!   the three, so a class is never booked below a peak of its own. The fallback class is the
-//!   class of that name, under the same client and platform (`docs/design/sizing.md`, 7.8).
+//!   of the client but a memory kill teaches), and at least its own kill floor. The fallback
+//!   class is the class of that name, under the same client and platform
+//!   (`docs/design/sizing.md`, 7.8).
 //! - **Cold.** A class with no history of its own, whose client has no fresh run either, books
 //!   the cold size ([`ColdSize`]): the server's `cold_cpu_millis` and `cold_memory_bytes`, which
-//!   default to [`DEFAULT_COLD_CPU_MILLIS`] (22 cores) and [`DEFAULT_COLD_MEMORY_BYTES`] (4 GiB);
-//!   its CPU never more than a quarter of the most cores a known host has (the most any class
-//!   books, so that the first run of an unknown class has room to show its peak), its memory
-//!   never more than the most a known host has ([`Bounds`] of [`bounds_of`]) and at least the
-//!   class's memory floor. The cold memory is also the estimator's default booking.
-//! - **Too large.** A class whose booking reaches the most bookable memory a host has books
-//!   all of that memory: it waits for a host with nothing else on it.
+//!   default to [`DEFAULT_COLD_CPU_MILLIS`] (22 cores) and [`DEFAULT_COLD_MEMORY_BYTES`] (4 GiB),
+//!   and for a job whose `os` the server names in `cold_memory_bytes_on` ([`ColdMemoryOn`]) or
+//!   `cold_cpu_millis_on` ([`ColdCpuOn`]) that operating system's memory or CPU in place of the
+//!   server's (a Mac's jobs need not book what a build host's do); its CPU never more than a
+//!   quarter of the most cores a known host has (the most any class books, so that the first run
+//!   of an unknown class has room for the cores it uses), its memory never more than the most a
+//!   known host has ([`Bounds`] of [`bounds_of`]) and at least the class's memory floor.
+//! - **Too large.** A class whose own runs ask for the most bookable memory a host has or more
+//!   books all of that memory: it waits for a host with nothing else on it.
 //! - **CPU.** The learned CPU of the class, else of its fallback class, else of the client's
-//!   whole history (the first with a CPU sample): the 90th percentile of its runs' peaks (the
-//!   most cores a run used over five seconds, as its host measured it), rounded up to a quarter
-//!   core, and at most a quarter of the most cores a host has; the cold CPU when none has a
-//!   sample. A booking is a share of its host's CPU, not a ceiling, and placement packs these
-//!   peaks.
+//!   whole history (the first with a CPU sample): the median of its runs' mean CPU (CPU time
+//!   over wall time; the nearest-rank 50th percentile), rounded up to a quarter core, and at
+//!   most a quarter of the most cores a host has; the cold CPU when none has a sample. A booking is a share of its
+//!   host's CPU, not a ceiling. Placement packs these bookings within the CPU slack and admits
+//!   by the host's measured load, so a job's bursts above its mean are the load's to judge,
+//!   not its booking's, unless they are a heavy tail: a class whose runs' five-second peaks
+//!   (the 90th percentile of them, over at least five runs that reported one) are over twice
+//!   its median books that percentile instead, under the same quarter-host cap
+//!   (`docs/design/sizing.md`, 7.10), so a burst of its jobs spreads over the hosts.
 //!
 //! [`JobSizes::sized_from`] says which of these sized a job, and each placement of a job the
 //! history sized is logged with it.
@@ -54,19 +61,21 @@
 //! retried submit with the same id is still the same job, and a queued job is booked by the
 //! history as it stands when it is placed. Its allocation records what it was booked.
 //!
-//! The memory booking is the job's limit on its host (a contained job's `memory.max`); the
-//! CPU booking is its share of the host's CPU and what placement packs with, not a ceiling. The
-//! CPU slack and the memory percent of its host bound both as they bound every booking, and
-//! nothing here books above them.
+//! The memory booking is what placement counts, not a limit (a contained job has no
+//! `memory.max`): a job that needs more runs on what its host has, and its run raises its
+//! class's next booking. The CPU booking is its share of the host's CPU and what placement packs
+//! with, not a ceiling. The CPU slack and the memory percent of its host bound both as they bound
+//! every booking, and nothing here books above them.
 //!
 //! # The history
 //!
 //! The estimator learns from a job when its allocation is freed: [`JobSizes::freed`] names
 //! the jobs whose live allocations are gone since the last pass, and
 //! [`JobSizes::observe`] feeds each one that ended with a result, with what its allocation
-//! booked. At a server's start, [`JobSizes::observe`] is fed every ended job the job store
-//! still holds, in the order they ended ([`crate::place::SchedPlacer::learn_ended`]): the job
-//! records are the history, and nothing else is stored. A run is taught to the job's class
+//! booked. After a server's start, [`JobSizes::observe`] is fed every ended job the job store
+//! still holds, in the order they ended, and then the runs the passes freed meanwhile, which
+//! were held for it ([`Teaching`]): the job records are the history, and nothing else is
+//! stored. A run is taught to the job's class
 //! and, when the job names one, to its fallback class (once, when the two are one class), and,
 //! unless it is a memory kill, to its client's whole history on its platform
 //! ([`JobSizes::client_key_of`]).
@@ -75,14 +84,27 @@
 //!
 //! - its outcome is its result's: an exit with code 0 is a success, any other exit, a wall
 //!   limit or a failed input a failure (which teaches the memory nothing), a cancel a cancel,
-//!   and a stop for memory a kill at its own limit (a contained job's memory limit is its
-//!   booking), which raises the class's floor to twice the booking it died at;
-//! - its peak memory and CPU time are what its host reported in the job's result (`usage`, read
-//!   from the job's control group); a job with none has no peak, and a success with no peak teaches
-//!   the memory nothing; its wall time is from its start to its end;
-//! - its memory limit is its booking (what the agent writes as a contained job's `memory.max`;
-//!   a booking of 0 has none): a success whose peak came within 5% of it needed at least the
-//!   limit, and its class books a step above it next ([`js_sizing::Run::memory_limit_bytes`]);
+//!   and a stop for memory (an agent from before the booking stopped being a limit, which held
+//!   a job at its booking) a kill at its booking, which raises the class's floor to twice the
+//!   booking it died at;
+//! - its peak memory is the peak of the non-file memory series its host reported in the job's
+//!   result (`memory_series`: what the job held that the kernel cannot drop, sampled about once
+//!   a second, so no page cache of the files it read), and, for a run with no whole series, the
+//!   group's `memory.peak` of its `usage`; its CPU time is its `usage`'s; a job with neither has
+//!   no peak, and a success with no peak teaches the memory nothing; its wall time is from its
+//!   start to its end;
+//! - a success's peak is a measurement whatever its booking: the booking is no limit, so a peak
+//!   at or above it is what the run used, and a peak above it raises the class's next booking
+//!   at once (with the margin);
+//! - but a success whose group's `memory.peak` came within 5% of its booking and stayed within
+//!   it reached its booking: a host that holds a job at its booking (the docker and podman
+//!   runtime's `--memory`, whose limit counts the page cache the non-file peak leaves out)
+//!   held it there, so its peak does not show what it needed. The estimator books its class a
+//!   step above the booking next (`1.2 x` the booking plus 128 MiB, rounded up to 256 MiB), and
+//!   again while its runs keep reaching it, up to the whole host
+//!   ([`js_sizing::Run::limit_hits`]);
+//! - a run under a second gives its peak (its series' when a poll sampled it, else the group's
+//!   `memory.peak`, which is exact) and no CPU sample;
 //! - its CPU contention is its own: how long some task of its group waited for a CPU per unit
 //!   of wall time (`cpu.pressure`, as its host reported it). Below a tenth, the sample is a
 //!   measurement; at or above it the run's CPU may only raise its class's CPU, since a run that
@@ -94,21 +116,27 @@
 //!   its booking used to set), when its mean CPU came within 5% of its booked CPU. A held run's
 //!   CPU is a lower bound and may only raise its class's CPU: the history a server rebuilds
 //!   at its start from runs taken under a ceiling therefore never holds a class down at it;
-//! - its CPU sample is its peak, the most cores its group used over five seconds (`cpu_peak`,
-//!   as its host reported it). A run with no peak reported (an agent from before it, and every
-//!   run recorded before it) has only its mean, which is a lower bound of its peak: it counts
-//!   as held.
+//! - its CPU sample is its mean, its CPU time over its wall time. The most cores its group used
+//!   over five seconds (`cpu_peak`, as its host reported it) goes beside the sample, and books
+//!   its class only when the class's peaks are a heavy tail: a peak booking of every class held
+//!   a host to a few jobs whose peaks fill it while their use left most of it idle.
+//!
+//! # Profiles
+//!
+//! With [`Curves::Shadow`] each class also learns a CPU and a memory profile of its runs' recorded
+//! series ([`js_sizing::Profile`]), and a run freed while serving logs how its class's profile
+//! predicted it. The profiles are read by nothing that books a job.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use js_jobs::{
-    AllocationRecord, AllocationStep, Booked, IdSource, JobId, JobRecord, JobStore, JobStoreError,
-    MAX_PAGE, Needs, ResourceUsage, ResultReason,
+    AllocationRecord, Booked, IdSource, JobId, JobRecord, JobStore, Needs, ResourceUsage,
+    ResultReason,
 };
 use js_sizing::{
-    Basis, Bounds, Day, Hint, Instance, Key, N_MIN, Outcome, PlatformClass, Run, STALE_DAYS, Shape,
-    Summaries, Summary,
+    Basis, Bounds, Day, Instance, Key, MIN_WALL_US, Outcome, PlatformClass, Run, Shape, Summaries,
+    Summary,
 };
 use js_types::HostId;
 use js_types::sched::FarmTime;
@@ -118,11 +146,18 @@ use tracing::{info, warn};
 use crate::place::SchedPlacer;
 
 pub use js_types::{SIZE_CLASS_LABEL, SIZE_FALLBACK_LABEL};
+pub use profile::Curves;
+pub use teach::Teaching;
+
+#[path = "sizes_profile.rs"]
+mod profile;
+#[path = "sizes_teach.rs"]
+mod teach;
 
 /// The CPU a class books unless the server sets another when neither it, its fallback class nor
 /// its client has a CPU sample: 22 cores, a quarter of the farm's 88-core hosts, and held at a
 /// quarter of the largest host the engine knows: the most any class books, so that the first
-/// run of an unknown class has the room to show its peak (`docs/design/sizing.md`, 7.9).
+/// run of an unknown class has the room for the cores it uses (`docs/design/sizing.md`, 7.9).
 pub const DEFAULT_COLD_CPU_MILLIS: u64 = 22_000;
 
 /// The memory a class books unless the server sets another when neither it, its fallback class
@@ -136,16 +171,17 @@ const CPU_STEP: u64 = 250;
 /// The milliseconds of a day.
 const DAY_MILLIS: u64 = 86_400_000;
 
-/// A mean CPU within this many hundredths of the CPU a run was held to was held there.
+/// A mean CPU within this many hundredths of the CPU a run was held to was held at it, and
+/// a group's memory peak within this many hundredths of its booking reached it.
 const AT_LIMIT_PERCENT: u64 = 95;
 
 /// A run throttled in at least one period in this many was held at its CPU ceiling (5%).
 const HELD_PERIODS: u64 = 20;
 
 /// A class books at most this share of the most cores a host has (one quarter, 22 of 88
-/// cores): no class's history books a host's CPU alone, four jobs bursting at their peaks at
-/// once fit a host, and a job that waits for that much room (the walk holds a host for the
-/// first job that waits on it) leaves at most a quarter of the host unbooked meanwhile.
+/// cores): no class's history books a host's CPU alone, and a job that waits for that much
+/// room (the walk holds a host for the first job that waits on it) leaves at most a quarter of
+/// the host unbooked meanwhile.
 const HOST_CPU_SHARE: u64 = 4;
 /// What a class with no estimate books ([`JobSizes::sized`]): the server's `cold_cpu_millis`
 /// and `cold_memory_bytes`, by default ([`ColdSize::default`]) 22 cores and 4 GiB. A CPU above a
@@ -156,8 +192,8 @@ pub struct ColdSize {
     /// The CPU a cold class books, in millicores; at least 250 (a quarter core) when the
     /// server reads it from its file or flags.
     pub cpu_millis: u64,
-    /// The memory a cold class books, in bytes, and the least a class books before five runs;
-    /// at least 1 GiB when the server reads it from its file or flags.
+    /// The memory a cold class books, in bytes (a class, its fallback and its client with no
+    /// fresh run); at least 1 GiB when the server reads it from its file or flags.
     pub memory_bytes: u64,
 }
 
@@ -179,11 +215,56 @@ impl ColdSize {
             ..bounds
         }
     }
+}
 
-    /// The CPU a cold class books under `bounds`: this cold CPU held at a quarter of the most
-    /// cores a host has ([`host_share`]), and at least a quarter core.
-    fn cpu(self, bounds: &Bounds) -> u64 {
-        self.cpu_millis.min(host_share(bounds)).max(CPU_STEP)
+/// `cpu_millis`, a CPU a class books (learned or cold), held at a quarter of the most cores a
+/// host has under `bounds` ([`host_share`]), and at least a quarter core.
+fn held_cpu(cpu_millis: u64, bounds: &Bounds) -> u64 {
+    cpu_millis.min(host_share(bounds)).max(CPU_STEP)
+}
+
+/// The cold memory the server sets for the jobs of each operating system it names
+/// (`--cold-memory-bytes-on`, `server.cold_memory_bytes_on`), in bytes, in place of
+/// [`ColdSize::memory_bytes`]: keyed by the `os` a job's constraints name, as it names it (such
+/// as `macos`). A job that names no `os`, or one with no entry, books the server's cold memory.
+/// Each is held at the most bookable memory a known host has, as the server's is.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ColdMemoryOn(BTreeMap<String, u64>);
+
+impl ColdMemoryOn {
+    /// The cold memory of each operating system `entries` names, in bytes.
+    #[must_use]
+    pub fn new(entries: BTreeMap<String, u64>) -> Self {
+        Self(entries)
+    }
+
+    /// The cold memory set for the jobs of `os`, if any.
+    #[must_use]
+    pub fn of(&self, os: &str) -> Option<u64> {
+        self.0.get(os).copied()
+    }
+}
+
+/// The cold CPU the server sets for the jobs of each operating system it names
+/// (`--cold-cpu-millis-on`, `server.cold_cpu_millis_on`), in millicores, in place of
+/// [`ColdSize::cpu_millis`]: keyed by the `os` a job's constraints name, as it names it (such
+/// as `macos`). A job that names no `os`, or one with no entry, books the server's cold CPU.
+/// Each is held at a quarter of the most cores a known host has, and at least a quarter core,
+/// as the server's is.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ColdCpuOn(BTreeMap<String, u64>);
+
+impl ColdCpuOn {
+    /// The cold CPU of each operating system `entries` names, in millicores.
+    #[must_use]
+    pub fn new(entries: BTreeMap<String, u64>) -> Self {
+        Self(entries)
+    }
+
+    /// The cold CPU set for the jobs of `os`, if any.
+    #[must_use]
+    pub fn of(&self, os: &str) -> Option<u64> {
+        self.0.get(os).copied()
     }
 }
 
@@ -195,6 +276,10 @@ pub use js_jobs::SizedFrom;
 pub struct JobSizes {
     /// What a class with no estimate books.
     cold: ColdSize,
+    /// The cold memory of the jobs of an operating system the server names.
+    cold_on: ColdMemoryOn,
+    /// The cold CPU of the jobs of an operating system the server names.
+    cold_cpu_on: ColdCpuOn,
     summaries: Summaries,
     /// Each job whose allocation was live at the last pass, with what it booked.
     live: BTreeMap<JobId, Booked>,
@@ -204,6 +289,23 @@ pub struct JobSizes {
     /// The runs observed before any bounds were known, in the order they came: taught when
     /// the first bounds come.
     pending: Vec<(Key, Run, Day)>,
+    /// What a teaching of the ended jobs begun and not taught ([`Teaching`]) holds; `None`
+    /// otherwise, when a freed job is taught at once.
+    held: Option<Held>,
+    /// The CPU and memory profiles learned in shadow, a pair for each class; `None` with
+    /// [`Curves::Off`]. Nothing the sizes book reads them.
+    profiles: Option<profile::Profiles>,
+}
+
+/// The freed jobs a teaching of the ended jobs holds until it is taught ([`Teaching`]).
+#[derive(Debug, Default)]
+struct Held {
+    /// Each job a pass freed, with what it booked, in the order the passes freed them: taught
+    /// after the ended jobs.
+    runs: Vec<(JobRecord, Booked)>,
+    /// Every job [`JobSizes::freed`] named since the teaching began, its run held or not yet:
+    /// the passes teach them, so the teaching leaves them out of the ended jobs it read.
+    named: BTreeSet<JobId>,
 }
 
 impl JobSizes {
@@ -220,6 +322,36 @@ impl JobSizes {
             cold,
             ..Self::default()
         }
+    }
+
+    /// The same sizes, a class with no estimate of a job whose `os` is one `on` names booking
+    /// that operating system's cold memory in place of the server's.
+    #[must_use]
+    pub fn with_cold_memory_on(self, on: ColdMemoryOn) -> Self {
+        Self {
+            cold_on: on,
+            ..self
+        }
+    }
+
+    /// The same sizes, a class with no CPU sample of a job whose `os` is one `on` names booking
+    /// that operating system's cold CPU in place of the server's.
+    #[must_use]
+    pub fn with_cold_cpu_on(self, on: ColdCpuOn) -> Self {
+        Self {
+            cold_cpu_on: on,
+            ..self
+        }
+    }
+
+    /// This history with the profiles `curves` names: [`Curves::Off`] keeps none,
+    /// [`Curves::Shadow`] learns a CPU and a memory profile for each class from every run it
+    /// observes, and logs a line for each run freed while serving. The sizes it books are the
+    /// same in both.
+    #[must_use]
+    pub fn with_curves(mut self, curves: Curves) -> Self {
+        self.profiles = (curves == Curves::Shadow).then(profile::Profiles::default);
+        self
     }
 
     /// The estimator's key of `job`'s class.
@@ -300,21 +432,22 @@ impl JobSizes {
     /// The CPU and memory the history of `job`'s class books on `day`, under `bounds`, and
     /// which history that was (the module docs).
     ///
-    /// The memory: a class with at least [`N_MIN`] fresh runs (a class idle over
-    /// [`STALE_DAYS`] has none) books its own estimate. Any other class books the largest of
-    /// what its fallback's runs ask for (the fallback class's, else the client's whole
-    /// history's; the cold memory when the client has none), what its own runs ask for and its
+    /// The memory: a class with a fresh memory sample of its own (a class idle over
+    /// [`js_sizing::STALE_DAYS`] has none) books what its own runs ask for
+    /// ([`js_sizing::Summaries::peak_memory`]: `1.2 x` their largest recent peak plus 128 MiB,
+    /// at least 1 GiB, and its kill floor), from its first run on, whatever their number or
+    /// spread. Any other class books what its fallback's runs ask for (the fallback class's,
+    /// else the client's whole history's; the cold memory when the client has none), and its
     /// kill floor. A booking that reaches the most bookable memory a host has books all of it.
     fn size_of(&self, job: &JobRecord, day: Day, bounds: &Bounds) -> (u64, u64, SizedFrom) {
         let key = Self::key_of(job);
         let cpu = self.cpu_of(job, day, bounds);
-        let fresh = |own: &&Summary| day.0.saturating_sub(own.last_seen().0) <= STALE_DAYS;
-        let own = self.summaries.get(&key).filter(fresh);
-        if own.is_some_and(|own| own.samples() >= N_MIN) {
-            return match self.summaries.estimate(&key, day, bounds, &Hint::default()) {
-                Ok(estimate) => (cpu, estimate.memory_bytes, SizedFrom::Class),
-                // A fresh class with five runs has an estimate unless it reaches the host.
-                Err(_) => (cpu, bounds.host_memory, SizedFrom::OverCap),
+        let floor = self.summaries.key_floor(&key, bounds);
+        if let Some(own) = self.summaries.peak_memory(&key, day, bounds) {
+            return if own >= bounds.host_memory {
+                (cpu, bounds.host_memory, SizedFrom::OverCap)
+            } else {
+                (cpu, own.max(floor), SizedFrom::Class)
             };
         }
         let peak = |key: &Key| {
@@ -324,27 +457,31 @@ impl JobSizes {
         let fallback = Self::fallback_key_of(job)
             .and_then(|key| peak(&key))
             .or_else(|| peak(&Self::client_key_of(job)));
-        let (base, from) = match fallback {
-            Some(memory) => (memory, SizedFrom::Fallback),
-            None => (bounds.default_memory, SizedFrom::Cold),
-        };
-        let own_peak = self.summaries.peak_memory(&key, day, bounds).unwrap_or(0);
-        let floor = self.summaries.key_floor(&key, bounds);
-        // The base and the floor stay within the host; only the class's own runs reach it.
-        let memory = base.max(own_peak).max(floor);
-        if own_peak >= bounds.host_memory {
-            (cpu, bounds.host_memory, SizedFrom::OverCap)
-        } else if own_peak > base {
-            (cpu, memory, SizedFrom::Class)
-        } else {
-            (cpu, memory, from)
+        // The base and the floor stay within the host.
+        match fallback {
+            Some(memory) => (cpu, memory.max(floor), SizedFrom::Fallback),
+            None => (
+                cpu,
+                self.cold_memory(job, bounds).max(floor),
+                SizedFrom::Cold,
+            ),
         }
+    }
+
+    /// The cold memory `job` books under `bounds`: the one set for its `os` ([`ColdMemoryOn`])
+    /// held at the most bookable memory a host has, else the server's (held there already).
+    fn cold_memory(&self, job: &JobRecord, bounds: &Bounds) -> u64 {
+        let os = job.spec.constraints.os.as_deref().unwrap_or("");
+        self.cold_on.of(os).map_or(bounds.default_memory, |memory| {
+            memory.min(bounds.host_memory)
+        })
     }
 
     /// The CPU `job` books on `day` under `bounds`: the learned CPU of its own class, else of
     /// its fallback class, else of its client's whole history (the first that has a CPU
     /// sample), at most a [`HOST_CPU_SHARE`]th of the most cores a host has ([`host_share`]) and
-    /// at least a quarter core; the cold CPU, held at the same share, when none has a sample.
+    /// at least a quarter core; the cold CPU ([`JobSizes::cold_cpu`]), held at the same share,
+    /// when none has a sample.
     fn cpu_of(&self, job: &JobRecord, day: Day, bounds: &Bounds) -> u64 {
         let keys = [
             Some(Self::key_of(job)),
@@ -356,9 +493,17 @@ impl JobSizes {
             .flatten()
             .find_map(|key| self.summaries.cpu(key, day, bounds));
         learned.map_or_else(
-            || self.cold.cpu(bounds),
-            |cpu| u64::from(cpu).min(host_share(bounds)).max(CPU_STEP),
+            || self.cold_cpu(job, bounds),
+            |cpu| held_cpu(u64::from(cpu), bounds),
         )
+    }
+
+    /// The cold CPU `job` books under `bounds`: the one set for its `os` ([`ColdCpuOn`]), else
+    /// the server's, held at a quarter of the most cores a host has and at least a quarter core.
+    fn cold_cpu(&self, job: &JobRecord, bounds: &Bounds) -> u64 {
+        let os = job.spec.constraints.os.as_deref().unwrap_or("");
+        let cpu = self.cold_cpu_on.of(os).unwrap_or(self.cold.cpu_millis);
+        held_cpu(cpu, bounds)
     }
 
     /// The jobs whose allocations were live at the last call and are not in `live` now, each
@@ -369,10 +514,14 @@ impl JobSizes {
             .map(|allocation| (allocation.job.clone(), allocation.booked))
             .collect();
         let before = std::mem::replace(&mut self.live, now);
-        before
+        let freed: Vec<(JobId, Booked)> = before
             .into_iter()
             .filter(|(job, _)| !self.live.contains_key(job))
-            .collect()
+            .collect();
+        if let Some(held) = &mut self.held {
+            held.named.extend(freed.iter().map(|(job, _)| job.clone()));
+        }
+        freed
     }
 
     /// Counts the allocation of `job`, booking `booked`, live from the pass that placed it, so
@@ -386,14 +535,21 @@ impl JobSizes {
     /// are known). A job that has not ended, ended with no result (lost, failed to start),
     /// booked the whole host or never started teaches nothing. Answers whether the run taught
     /// the class a memory sample: a run the estimator discards (a success with no measured
-    /// peak or under a second of wall time, a failure, a cancel, a success at or above the
+    /// peak, a failure, a cancel, a success at or above the
     /// largest host's memory) is still recorded as seen, but answers `false`. Before any bounds
     /// are known the run is judged against a host of unlimited memory, so one that would
     /// reach the largest host's memory is counted until the bounds say otherwise.
     pub fn observe(&mut self, job: &JobRecord, booked: Booked) -> bool {
+        self.observe_logged(job, booked, false)
+    }
+
+    /// [`JobSizes::observe`], which also logs the check of the run against its class's profile
+    /// when `log` is set (a run freed while serving, not one read from the history).
+    fn observe_logged(&mut self, job: &JobRecord, booked: Booked, log: bool) -> bool {
         let Some((run, day)) = run_of(job, booked) else {
             return false;
         };
+        self.profile_run(job, &run, log);
         let taught = self.teaches(job, &run, day);
         // A kill raises the floor of the class and of its fallback, never of every class of
         // the client.
@@ -408,6 +564,17 @@ impl JobSizes {
         taught
     }
 
+    /// Teaches the run of `job`, freed booked as `booked` ([`JobSizes::observe`]), or holds it
+    /// while a teaching of the ended jobs is begun and not taught ([`Teaching`]).
+    fn freed_run(&mut self, job: JobRecord, booked: Booked) {
+        match &mut self.held {
+            Some(held) => held.runs.push((job, booked)),
+            None => {
+                let _ = self.observe_logged(&job, booked, true);
+            }
+        }
+    }
+
     /// Whether the estimator would take `run` of `job` as a memory sample, judged on a summary
     /// of its own that is then dropped, against the known bounds (a host of unlimited memory
     /// before any are known).
@@ -420,6 +587,22 @@ impl JobSizes {
         let mut trial = Summary::new(Self::key_of(job).basis(), day);
         trial.observe(run, day, &bounds).memory.is_ok()
     }
+}
+
+/// The memory a run of `result` teaches its class: the peak of its non-file memory series (the
+/// most the job held that the kernel cannot drop, sampled about once a second) when its host
+/// reported a whole one with a point; else the group's `memory.peak`, which counts the page
+/// cache of the files the job read too (an agent without `--memory-series`, a runtime that
+/// records no series, a run adopted after a restart of its agent, whose series misses its
+/// start, and a run so short no poll sampled it).
+fn peak_of(result: &js_jobs::JobResult) -> Option<u64> {
+    let whole = result
+        .memory_series
+        .as_ref()
+        .filter(|series| !series.partial);
+    whole
+        .and_then(js_types::MemorySeries::peak_bytes)
+        .or_else(|| result.usage.map(|usage| usage.peak_memory_bytes))
 }
 
 /// The run of `job`, booked as `booked`, as the estimator takes it (the module docs), with the
@@ -442,32 +625,56 @@ fn run_of(job: &JobRecord, booked: Booked) -> Option<(Run, Day)> {
         ResultReason::Cancelled => Outcome::Cancelled,
     };
     let killed = outcome == Outcome::OwnLimitKill;
-    let peak = result.usage.map(|usage| usage.peak_memory_bytes);
+    let peak = peak_of(result);
     let cpu = result.usage.map_or(0, |usage| micros(usage.cpu_time));
     let wall = micros(ended.since(started));
+    // A successful run under a second gives its peak (its series' if a poll sampled it, else
+    // the group's `memory.peak`, exact whatever the run's length) and no CPU sample (its mean
+    // over so short a wall is no measure): the estimator takes a memory sample from a run of
+    // at least a second, and a CPU sample only from a run that used CPU time. No other outcome
+    // is a sample of either.
+    let (wall_us, cpu_us) = if wall < MIN_WALL_US {
+        (MIN_WALL_US, 0)
+    } else {
+        (wall, cpu)
+    };
     let run = Run {
         outcome,
-        wall_us: wall,
+        wall_us,
         peak_memory_bytes: peak,
+        // A run's peak is a measurement whatever its booking, unless the run reached its
+        // booking (below); a kill keeps its booking, which its floor is raised from.
         booked_memory_bytes: memory_bytes,
         raised_memory_bytes: killed.then(|| memory_bytes.saturating_mul(2)),
-        // The agent holds a contained job to its booking (its `memory.max`); a booking of 0
-        // has no limit. The estimator judges whether the run reached it.
-        memory_limit_bytes: (memory_bytes > 0).then_some(memory_bytes),
-        limit_hits: 0,
+        limit_hits: u64::from(
+            result
+                .usage
+                .is_some_and(|usage| reached(usage, memory_bytes)),
+        ),
         swap_peak_bytes: 0,
-        cpu_usage_us: cpu,
+        cpu_usage_us: cpu_us,
         node_cpu_pressure_permille: result.usage.map(|usage| contention(usage, wall)),
-        // A run with no peak measured has only its mean, a lower bound of its peak.
         cpu_held: result
             .usage
-            .is_some_and(|usage| usage.cpu_peak.is_none() | held(usage, (cpu, wall), cpu_millis)),
+            .is_some_and(|usage| held(usage, (cpu, wall), cpu_millis)),
+        // The sample is the run's mean CPU; its five-second peak goes beside it, and books
+        // its class only when the class's peaks are a heavy tail far above its median.
         cpu_peak_millis: result
             .usage
             .and_then(|usage| usage.cpu_peak)
             .map(|peak| u32::try_from(peak.millicores).unwrap_or(u32::MAX)),
     };
     Some((run, day_of_millis(millis(ended.as_duration()))))
+}
+
+/// Whether a run booked `booked` bytes reached its booking: its group's `memory.peak` came
+/// within [`AT_LIMIT_PERCENT`] of the booking and stayed within it, as a host that holds a job
+/// at its booking leaves it. A booking of 0 is never reached, and a group peak past the
+/// booking is a run that used more than it booked, which no host held: a measurement.
+fn reached(usage: ResourceUsage, booked: u64) -> bool {
+    let peak = u128::from(usage.peak_memory_bytes);
+    let booked = u128::from(booked);
+    (booked > 0) & (peak <= booked) & (peak * 100 >= booked * u128::from(AT_LIMIT_PERCENT))
 }
 
 /// The most CPU a class books under `bounds`: a [`HOST_CPU_SHARE`]th of the most cores a host
@@ -620,7 +827,8 @@ impl SchedPlacer {
 
     /// Teaches the history the jobs whose allocations `live` (the live allocations a pass read)
     /// no longer holds since the last pass: each is read from `jobs` once, and taught what it
-    /// ran ([`JobSizes::observe`]). A job the store no longer holds teaches nothing; a read that
+    /// ran ([`JobSizes::observe`]), or held until the teaching of the ended jobs begun is taught
+    /// ([`Teaching`]). A job the store no longer holds teaches nothing; a read that
     /// fails is logged and the job's run is let go (the history is a guide, not a record).
     pub(crate) fn learn_freed<S: js_state::Store, I: IdSource>(
         &self,
@@ -632,55 +840,14 @@ impl SchedPlacer {
             match jobs.get_job(&id) {
                 Ok(job) => {
                     let mut engine = self.engine();
-                    job.iter().for_each(|job| {
-                        let _ = engine.sizes().observe(job, booked);
-                    });
+                    job.into_iter()
+                        .for_each(|job| engine.sizes().freed_run(job, booked));
                 }
                 Err(error) => {
                     warn!(job = %id, %error, "a freed job was not read; its run teaches no size")
                 }
             }
         }
-    }
-
-    /// Teaches the history every ended job `jobs` holds whose allocation is freed, with what it
-    /// booked, in the order the jobs ended, and takes the live allocations as those of the last pass: what a
-    /// server does once at its start, before its first pass, so that the history outlives a
-    /// restart for as long as the store keeps the jobs. Answers how many runs taught a class a
-    /// memory sample ([`JobSizes::observe`]): a job that ended with no measured usage is read
-    /// and not counted.
-    ///
-    /// # Errors
-    /// The first [`JobStoreError`] of a read: nothing is taught.
-    pub fn learn_ended<S: js_state::Store, I: IdSource>(
-        &self,
-        jobs: &JobStore<S, I>,
-    ) -> Result<usize, JobStoreError> {
-        let mut ended = Vec::new();
-        let mut resume = None;
-        loop {
-            let page = jobs.list_jobs(None, resume.as_ref(), MAX_PAGE)?;
-            for job in page.jobs.into_iter().filter(|job| job.result.is_some()) {
-                let allocation = jobs.get_allocation(&job.id)?;
-                let freed =
-                    allocation.filter(|allocation| allocation.step == AllocationStep::Freed);
-                ended.extend(freed.map(|allocation| (job, allocation.booked)));
-            }
-            resume = page.resume;
-            if resume.is_none() {
-                break;
-            }
-        }
-        ended.sort_by_key(|(job, _)| job.ended_at);
-        let live = jobs.live_allocations()?;
-        let mut engine = self.engine();
-        let sizes = engine.sizes();
-        let taught = ended
-            .iter()
-            .filter(|(job, booked)| sizes.observe(job, *booked))
-            .count();
-        let _ = sizes.freed(&live);
-        Ok(taught)
     }
 }
 

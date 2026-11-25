@@ -15,7 +15,8 @@ use super::{
 
 /// An exit with code 0 after `cpu` of CPU time and a 1 GiB peak, with the CPU `throttle` and
 /// `pressure` its host reported, from a new agent: its CPU peak is the run's mean over the ten
-/// seconds [`ran`] gives each run.
+/// seconds [`ran`] gives each run (the peak is reported and kept, and the class books the
+/// mean).
 fn reported(cpu: Duration, throttle: Option<CpuThrottle>, pressure: Option<Duration>) -> JobEnd {
     JobEnd::Exited {
         exit_code: 0,
@@ -38,7 +39,7 @@ fn reported(cpu: Duration, throttle: Option<CpuThrottle>, pressure: Option<Durat
 /// The CPU the class `c` books after a run that used one core in its ten seconds (measured:
 /// no pressure, no throttled period) and then ten runs ending as `then` gives, each booked
 /// `then_booked` millicores: ten, so that a measurement lower than the core is the class's
-/// 90th percentile (the 10th smallest of eleven) and a lower bound is not.
+/// median (the 6th smallest of eleven) and a lower bound is not.
 fn cpu_after(then: impl Fn() -> JobEnd, then_booked: u64) -> u64 {
     let tables = Tables::new();
     let measured = reported(
@@ -129,10 +130,55 @@ fn a_run_under_contention_or_held_at_a_ceiling_only_raises_the_class_cpu() {
     }
 }
 
+/// Asserts that a class books the mean CPU of its runs (CPU time over wall time), the median of
+/// them, unless their five-second peaks are a heavy tail: five runs that used a core over their
+/// ten seconds book a core when their host reported a peak of two cores (twice the mean, no
+/// tail) or no peak at all (an agent from before it), and six cores, their peak, when it
+/// reported six. A run with no peak is not taken as held. Catches a class whose runs burst six
+/// times over its booking still booked at its mean, a class booked at a peak only twice its
+/// mean, and a run with no peak reported that teaches its class nothing.
+#[test]
+fn a_class_books_the_mean_cpu_of_its_runs_unless_their_peaks_are_a_heavy_tail() {
+    let tables = Tables::new();
+    for (class, peak, books) in [
+        ("peaked", Some(6000), 6000),
+        ("steady", Some(2000), 1000),
+        ("no-peak", None, 1000),
+    ] {
+        let end = || JobEnd::Exited {
+            exit_code: 0,
+            output: Output {
+                usage: Some(ResourceUsage {
+                    cpu_time: Duration::from_secs(10),
+                    peak_memory_bytes: GIB,
+                    cpu_throttle: Some(CpuThrottle {
+                        periods: 0,
+                        throttled_periods: 0,
+                    }),
+                    cpu_pressure_some: Some(Duration::ZERO),
+                    cpu_peak: peak.map(|millicores| CpuPeak {
+                        millicores,
+                        window_usec: 5_000_000,
+                    }),
+                }),
+                ..Output::default()
+            },
+        };
+        let jobs = runs(&tables, class, 5, class, booked(4000, 4 * GIB), end);
+        let mut sizes = JobSizes::with_cold(MODULE_COLD);
+        sizes.set_bounds(Some(bounds()));
+        for job in &jobs {
+            assert!(sizes.observe(job, booked(4000, 4 * GIB)), "{}", job.id);
+        }
+        let next = queued("next", of_class(class, needs(0, 0)));
+        assert_eq!(size(&sizes, &next).0, books, "{class}");
+    }
+}
+
 /// Asserts that a class books at most a quarter of the cores of the largest host (rounded down
-/// to a quarter core) and at least a quarter core: runs that peaked at six cores book two on a
-/// host of eight cores, four on one of sixteen, six on one of 32 and half a core on one of
-/// two, and runs that peaked at a tenth of a core book a quarter core. Catches a class whose
+/// to a quarter core) and at least a quarter core: a run that used six cores on average books
+/// two on a host of eight cores, four on one of sixteen, six on one of 32 and half a core on
+/// one of two, and a run that used a tenth of a core books a quarter core. Catches a class whose
 /// history books a host's CPU alone, and one booked no CPU.
 #[test]
 fn the_learned_cpu_is_at_most_a_quarter_of_the_largest_hosts_cores_and_at_least_a_quarter_core() {

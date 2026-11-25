@@ -5,12 +5,14 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use js_agent_wire::{JobUsage, LogReport, LogTail, NativeSpec, NetworkCeiling, PortRange};
+use js_agent_wire::{
+    CpuSeries, JobUsage, LogReport, LogTail, MemorySeries, NativeSpec, NetworkCeiling, PortRange,
+};
 
 use super::VmRuntime;
 use crate::lifecycle::{
-    Created, Found, FsPrepared, JobFs, NativeRefusal, Prepared, Removal, RunHandle, RunSpec,
-    Runtime, RuntimeError, Status, Ticket, Wake, Whereabouts, label,
+    Created, Found, FsPrepared, JobFs, LookupStamps, NativeRefusal, OutputsReport, Prepared,
+    Removal, RunHandle, RunSpec, Runtime, RuntimeError, Status, Ticket, Wake, Whereabouts, label,
 };
 
 /// The agent's runtime and its VM runtime; see the [module](self).
@@ -45,6 +47,10 @@ impl Runtime for WithVms {
 
     fn start_steps(&mut self, id: &RunHandle) -> Vec<(&'static str, u64)> {
         self.owner(id).start_steps(id)
+    }
+
+    fn lookup_stamps(&mut self, id: &RunHandle) -> Option<LookupStamps> {
+        self.owner(id).lookup_stamps(id)
     }
 
     fn create_and_start(&mut self, spec: &RunSpec) -> Result<RunHandle, RuntimeError> {
@@ -104,8 +110,25 @@ impl Runtime for WithVms {
         self.owner(id).logs_report(id)
     }
 
+    fn outputs_report(&mut self, id: &RunHandle) -> Option<OutputsReport> {
+        self.owner(id).outputs_report(id)
+    }
+
+    /// The other runtime's: a VM start has no mount of a host path.
+    fn owns_host_path(&self, path: &str) -> bool {
+        self.other.owns_host_path(path)
+    }
+
     fn usage(&mut self, id: &RunHandle) -> Option<JobUsage> {
         self.owner(id).usage(id)
+    }
+
+    fn cpu_series(&mut self, id: &RunHandle) -> Option<CpuSeries> {
+        self.owner(id).cpu_series(id)
+    }
+
+    fn memory_series(&mut self, id: &RunHandle) -> Option<MemorySeries> {
+        self.owner(id).memory_series(id)
     }
 
     fn check_native(&self, native: &NativeSpec) -> Result<(), NativeRefusal> {

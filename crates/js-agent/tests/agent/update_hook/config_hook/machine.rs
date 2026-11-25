@@ -13,7 +13,7 @@ use js_agent::{CredentialFile, Login};
 
 use super::super::lease_stub::{Reply, Stub};
 use super::super::step_rig::as_root;
-use super::super::unit_conformance::{Launchctl, Service, plist_of};
+use super::super::unit_conformance::{Exit, Launchctl, Service, plist_of};
 use super::rig::{Ticks, UNIT, UnitScript, text};
 use crate::cordon::http::enrol;
 use crate::support::Scratch;
@@ -23,6 +23,8 @@ use crate::support::Scratch;
 struct Tree {
     _files: Scratch,
     params: Params,
+    /// A staged release directory, for `prepare`.
+    staged: std::path::PathBuf,
 }
 
 impl Tree {
@@ -44,6 +46,7 @@ impl Tree {
             );
         }
         Tree {
+            staged: files.path("staged"),
             _files: files,
             params: Params::parse(&params).unwrap(),
         }
@@ -67,7 +70,7 @@ impl Tree {
             own_host_id: &own_host_id,
             ..Machine::system()
         };
-        run_on(step, &self.params, &machine, units, &Ticks::default())
+        run_on(step, None, &self.params, &machine, units, &Ticks::default())
     }
 }
 
@@ -190,19 +193,57 @@ fn over_a_real_server_cutover_records_the_session_and_verify_waits_for_another()
 }
 
 /// Asserts that, on the machine's own ports, `prepare` succeeds without asking the unit manager
-/// or the lease server for anything.
+/// or the lease server for anything, and keeps the file the staged package places at its path
+/// below the machine's root `/`; that a `rollback` then puts that file back; and that a
+/// `prepare` without the staged release directory is `bad_args` and keeps nothing.
 ///
-/// Catches a machine whose ports are built to do work at the start of a step that does none.
+/// Catches a machine whose ports are built to do work at the start of a step that does none,
+/// one that maps the staged tree below another root than `/`, and one that runs `prepare` with
+/// no package to read.
 #[test]
-fn on_the_machine_prepare_runs_without_touching_the_unit_or_the_server() {
+fn on_the_machine_prepare_keeps_what_the_staged_package_replaces_below_the_root() {
     let tree = Tree::new("config-machine-prepare", UNIT);
     let machine = Machine {
         stat: &as_root,
         ..Machine::system()
     };
-    let done = run_step(Step::Prepare, &tree.params, &machine);
+    let done = run_step(Step::Prepare, None, &tree.params, &machine);
+    assert_eq!(done.outcome, Outcome::Failure);
+    assert_eq!(done.report.reason, Some(Reason::BadArgs));
+    assert_eq!(
+        done.report.detail.as_deref(),
+        Some("prepare needs the staged release directory")
+    );
+    assert!(!tree.params.state_dir.exists());
+
+    tree.flags(&["--server=https://before.example:7300"]);
+    let flags = fs::canonicalize(&tree.params.flags_file).unwrap();
+    let placed = tree
+        .staged
+        .join("tree")
+        .join(flags.strip_prefix("/").unwrap());
+    fs::create_dir_all(placed.parent().unwrap()).unwrap();
+    fs::write(&placed, "--server=https://after.example:7300\n").unwrap();
+    let done = run_step(Step::Prepare, Some(&tree.staged), &tree.params, &machine);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
     assert!(tree.params.state_dir.is_dir());
+
+    fs::copy(&placed, &flags).unwrap();
+    let done = run_step(Step::Rollback, None, &tree.params, &machine);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    let kept = tree.params.state_dir.join("kept");
+    assert_eq!(
+        done.report.detail,
+        Some(format!(
+            "put back as before the update: {}; cutover restarted nothing: the unit is left as it is; the copy stays in {}, as removing the package deletes the files it placed",
+            flags.display(),
+            kept.display()
+        ))
+    );
+    assert_eq!(
+        fs::read_to_string(&flags).unwrap(),
+        "--server=https://before.example:7300\n"
+    );
 }
 
 /// Asserts that, on the machine's own ports, `cleanup` with no record left succeeds without
@@ -216,7 +257,7 @@ fn on_the_machine_a_cleanup_with_no_record_has_finished() {
         stat: &as_root,
         ..Machine::system()
     };
-    let done = run_step(Step::Cleanup, &tree.params, &machine);
+    let done = run_step(Step::Cleanup, None, &tree.params, &machine);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
     assert_eq!(
         done.report.detail.as_deref(),
@@ -236,7 +277,7 @@ fn on_the_machine_a_rollback_with_nothing_restarted_leaves_the_unit_alone() {
         stat: &as_root,
         ..Machine::system()
     };
-    let done = run_step(Step::Rollback, &tree.params, &machine);
+    let done = run_step(Step::Rollback, None, &tree.params, &machine);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
     assert_eq!(
         done.report.detail.as_deref(),
@@ -244,17 +285,13 @@ fn on_the_machine_a_rollback_with_nothing_restarted_leaves_the_unit_alone() {
     );
 }
 
-/// Asserts that on a Mac's unit manager `cutover` boots the service out, bootstraps it again
-/// and sees it running, and records the restart.
-///
-/// Catches a restart written for systemd's verbs: a launchd service that is stopped is no longer
-/// loaded, and only a bootstrap brings it back.
-#[test]
-fn on_launchd_cutover_boots_the_service_out_and_bootstraps_it_again() {
-    let label = "com.example.agent";
-    // A server that has not heard the host yet: there is no session to note.
+/// One config-hook `cutover` on a Mac's unit manager over `tool`, the fake `launchctl` the test
+/// set up for `label`: the flags file in place (the gate the kickstart waits on), a token, and a
+/// lease server that has not heard the host yet, so there is no session to note. Returns what
+/// the step ended with and the tree's record.
+fn launchd_cutover(name: &str, label: &str, tool: &Launchctl) -> (Done, Option<Record>) {
     let stub = Stub::start(&[Reply::Answer(409, r#"{"error":"unknown-host"}"#)]);
-    let tree = Tree::new("config-machine-launchd", label);
+    let tree = Tree::new(name, label);
     tree.flags(&[
         &format!("--server={}", stub.url),
         "--pool=farm",
@@ -262,28 +299,98 @@ fn on_launchd_cutover_boots_the_service_out_and_bootstraps_it_again() {
     ]);
     fs::write(&tree.params.token_file, "tok-0123456789\n").unwrap();
     fs::set_permissions(&tree.params.token_file, fs::Permissions::from_mode(0o600)).unwrap();
-    let tool = Launchctl::default();
-    tool.plists.borrow_mut().insert(label.to_owned());
-    tool.load(label, Service::running());
     let clock = Ticks::default();
-    let units = LaunchUnits::new(&tool)
+    let units = LaunchUnits::new(tool)
         .with_clock(&clock)
         .with_gate(Path::new(&tree.params.flags_file));
     let done = tree.run(Step::Cutover, Err("unused"), &units);
+    assert_eq!(stub.stop(), 1);
+    (done, tree.record())
+}
+
+/// The command line `launchctl <verb> ...` the fake ran.
+fn line(args: &str) -> String {
+    format!("/bin/launchctl {args}")
+}
+
+/// Asserts that on a Mac's unit manager `cutover` boots the service out, bootstraps it again
+/// and sees it running, and records the restart: the order where the agent was loaded before
+/// its config package came.
+///
+/// Catches a restart written for systemd's verbs: a launchd service that is stopped is no longer
+/// loaded, and only a bootstrap brings it back.
+#[test]
+fn on_launchd_cutover_boots_the_service_out_and_bootstraps_it_again() {
+    let label = "com.example.agent";
+    let tool = Launchctl::default();
+    tool.load(label, Service::running());
+    let (done, record) = launchd_cutover("config-machine-launchd", label, &tool);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
     let calls = tool.calls();
-    let at = |line: &str| calls.iter().position(|call| call == line).unwrap();
+    let at = |args: &str| calls.iter().position(|call| *call == line(args)).unwrap();
     assert!(
-        at(&format!("/bin/launchctl bootout system/{label}"))
-            < at(&format!(
-                "/bin/launchctl bootstrap system {}",
-                plist_of(label)
-            )),
+        at(&format!("bootout system/{label}"))
+            < at(&format!("bootstrap system {}", plist_of(label))),
         "{calls:?}"
     );
-    let record = tree.record().unwrap();
+    let record = record.unwrap();
     assert!(record.restarted);
     assert_eq!(record.session_started_ms, None);
     assert_eq!(tool.loaded.borrow()[label].state, "running");
-    assert_eq!(stub.stop(), 1);
+}
+
+/// Asserts that `cutover` on a Mac whose agent's plist is installed and not loaded (the order
+/// where the config package came first) bootstraps it, boots nothing out, and records the
+/// restart.
+///
+/// Catches a restart that needs a loaded service to begin with.
+#[test]
+fn on_launchd_cutover_bootstraps_a_service_that_is_not_loaded() {
+    let label = "com.example.agent";
+    let tool = Launchctl::default();
+    tool.plists.borrow_mut().insert(label.to_owned());
+    let (done, record) = launchd_cutover("config-machine-launchd-unloaded", label, &tool);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    let calls = tool.calls();
+    assert!(
+        calls.contains(&line(&format!("bootstrap system {}", plist_of(label)))),
+        "{calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|call| call.contains("bootout")),
+        "{calls:?}"
+    );
+    assert!(record.unwrap().restarted);
+    assert_eq!(tool.loaded.borrow()[label].state, "running");
+}
+
+/// Asserts that `cutover` succeeds when launchd holds the label by the time the hook bootstraps
+/// it (it was loaded after the hook's `print` found it absent, and `bootstrap` exits 5): a
+/// service that runs is left running, one that is idle is kicked, and the restart is recorded.
+///
+/// Catches a config hook that halts with `cannot start <label>: /bin/launchctl: exit status: 5`
+/// on a service that is loaded when the hook expected it not to be.
+#[test]
+fn on_launchd_cutover_restarts_a_service_launchd_loaded_before_the_bootstrap() {
+    let label = "com.example.agent";
+    for (behind, kicks) in [
+        (Service::running(), 0),
+        (Service::new("not running", 1, Exit::Code(0)), 1),
+    ] {
+        let tool = Launchctl::default();
+        tool.load(label, Service::running());
+        tool.loaded_behind
+            .borrow_mut()
+            .insert(label.to_owned(), behind);
+        let (done, record) = launchd_cutover("config-machine-launchd-behind", label, &tool);
+        assert_eq!(done.outcome, Outcome::Success, "{kicks}: {done:?}");
+        let calls = tool.calls();
+        let kicked = calls
+            .iter()
+            .filter(|call| **call == line(&format!("kickstart -k system/{label}")))
+            .count();
+        assert_eq!(kicked, kicks, "{calls:?}");
+        assert!(record.unwrap().restarted, "{kicks}");
+        assert_eq!(tool.loaded.borrow()[label].state, "running", "{kicks}");
+    }
 }

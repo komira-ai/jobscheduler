@@ -4,7 +4,6 @@ use std::path::Path;
 
 use js_agent::native::{NativeFlags, NativeSettings, PfFlags};
 
-use super::fake_helper::FakeHelper;
 use crate::support::Scratch;
 
 /// Asserts that, run by a user who is not root, the check the flags make over the Mac's own
@@ -17,11 +16,12 @@ fn the_real_pfctl_is_not_enforced_for_a_user_who_is_not_root() {
         return;
     }
     let dir = Scratch::new("native-mac-pf");
-    let fake = FakeHelper::start(&dir);
     let state = dir.path("pf-state");
     let flags = NativeFlags {
-        socket: Some(fake.socket()),
-        homes: Some(fake.homes()),
+        accounts: Some(Path::new("/srv/accounts")),
+        account_range: Some("501-510"),
+        account_ready: None,
+        homes: None,
         network: Some("on"),
         tool_roots: &[],
         deny_read: &[],

@@ -363,6 +363,8 @@ fn a_heartbeat_with_log_fields_stays_inside_the_totals_the_existing_test_fixes()
             logs,
             input_failure: None,
             usage: None,
+            cpu_series: None,
+            memory_series: None,
         }),
     };
     let len = |beat: &Heartbeat| serde_json::to_string(beat).unwrap().len();
@@ -400,8 +402,10 @@ fn beat_at_every_cap() -> (NodeLoad, Heartbeat) {
         seq: u64::MAX,
         mono_usec: u64::MAX,
         cpu_usage_usec: u64::MAX,
+        host_cpu_usec: Some(u64::MAX),
         working_set_bytes: MAX_MEMORY_BYTES,
         active_file_bytes: MAX_MEMORY_BYTES,
+        host_nonfile_bytes: None,
         actions_cpu_limited: true,
         covered: (0..MAX_LOAD_LEASES as u64).map(worst_id).collect(),
         clocks: (0..MAX_LOAD_LEASES as u64)
@@ -410,6 +414,8 @@ fn beat_at_every_cap() -> (NodeLoad, Heartbeat) {
         minutes: (0..MAX_LOAD_MINUTES as u64)
             .map(|i| minute(&worst_id(i), TAIL_MINUTE, max, max, MAX_MEMORY_BYTES))
             .collect(),
+        second_cpu_millis: vec![max; MAX_LOAD_SECONDS],
+        second_cpu_pressure_some_permille: vec![1000; MAX_LOAD_SECONDS],
         dropped: LoadDrops::default(),
     };
     let mut checked = load.clone();
@@ -445,6 +451,7 @@ fn beat_at_every_cap() -> (NodeLoad, Heartbeat) {
 fn cap_table_is_the_documented_one() {
     assert_eq!(MAX_LOAD_LEASES, 96);
     assert_eq!(MAX_LOAD_MINUTES, 64);
+    assert_eq!(MAX_LOAD_SECONDS, 16);
     assert_eq!(TAIL_MINUTE, 63);
     assert_eq!(MAX_LEASE_REF_LEN, 41);
     assert_eq!(HEARTBEAT_BODY_BUDGET, 65_536);

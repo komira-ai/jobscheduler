@@ -14,7 +14,9 @@ use serde_json::{Value, json};
 use tokio::runtime::Runtime;
 
 use crate::agents_support::{JOIN, Session, entry, hosts, job_hello, job_host_args, post};
-use crate::jobs_support::{JobBody, commands, exited, job_agent, job_state, running, submit_body};
+use crate::jobs_support::{
+    JobBody, commands, exited, job_agent, job_state, left_the_queue, running, submit_body,
+};
 use crate::store_support::store_file;
 use crate::support::{Harness, Scratch};
 
@@ -225,9 +227,16 @@ fn an_update_during_live_jobs_loses_doubles_and_strands_nothing() {
             "the second host was told its starts"
         );
         first.running.shutdown().await.unwrap();
-        // The second server places over every live host row, so the passes of those beats
-        // already placed the two queued jobs on the third host (its row is live from its hello
-        // to the first server), and its beats there were told the starts.
+        // The second server places over every live host row, so the passes those beats poked
+        // place the two queued jobs on the third host (its row is live from its hello to the
+        // first server). The passes run on the second server's poller, after the beats that
+        // poked them; once both jobs left the queue, the third host's next beat is told the
+        // starts and the one after lists them running.
+        for id in all {
+            left_the_queue(&second, id).await;
+        }
+        hosts[2].beat(&second).await;
+        hosts[2].beat(&second).await;
         let moved = states(&second, &all).await;
         assert_eq!(count(&moved, "JOB_STATE_RUNNING"), 6, "{moved:?}");
         assert_eq!(hosts[2].running.len(), 2, "{moved:?}");

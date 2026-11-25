@@ -21,6 +21,11 @@ pub const CALLERS: [(&str, &str); 6] = [
     ),
 ];
 
+/// The jobs of artifacts.yml that call a workflow, and the workflow each calls: the build of the
+/// Apple silicon archives on the build farm.
+pub const ARTIFACTS_CALLS: [(&str, &str); 1] =
+    [("macos-farm", "./.github/workflows/macos-farm.yml")];
+
 /// The `uses:` value of a job that calls a workflow (`uses:` at the job's own level), if it is one.
 pub fn calls(lines: &[String]) -> Option<&str> {
     lines

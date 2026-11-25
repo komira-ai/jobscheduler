@@ -133,6 +133,14 @@ pub struct Cli {
     /// see to it that there is none.
     #[arg(long = "mount-root-ro", value_name = "NAME=PATH", value_parser = named_path)]
     pub mount_roots_ro: Vec<(String, PathBuf)>,
+    /// The node-local mount providers (`--mount-provider`, `--mount-provider-user`,
+    /// `--mount-provider-wait`), which both builds take.
+    #[command(flatten)]
+    pub providers: crate::lifecycle::ProviderFlags,
+    /// What the agent records beyond each job's usage (`--cpu-series`, `--memory-series`,
+    /// `--host-second-samples`), which both builds take.
+    #[command(flatten)]
+    pub samples: crate::usage::SampleFlags,
     /// Bound each run's disk with a project quota on the scratch root's file system. At
     /// start the agent probes the root and refuses to start unless the file system
     /// enforces project quota; then it advertises `scratch-quota=project` and
@@ -332,8 +340,8 @@ pub struct Cli {
     /// offers (`disk-gib`) is reduced by the part of the budget the store has not used yet.
     /// The hello reports `bundle-root` (this path) and `bundle` (the manifest digests the
     /// store holds, that the deny and allow lists let through) only when the agent can run a
-    /// bundle: it runs native jobs (`--native-helper-socket`) and the store opened; without
-    /// the helper it reports neither. A job that pins a bundle runs `@bundle/<entrypoint>`
+    /// bundle: it runs native jobs (`--native-accounts`) and the store opened; without
+    /// it the agent reports neither. A job that pins a bundle runs `@bundle/<entrypoint>`
     /// from the store's trees, under the same profile as any native job. Until a server says it
     /// takes a longer value, `bundle` holds one digest. Roll out servers first, then agents,
     /// then this flag, then placement by `bundle`.
@@ -429,7 +437,7 @@ static REMOVED: [(&str, &str); 4] = [
         "runtime",
         "--runtime: removed. The runtime is the build's: a Linux build runs crun (or, with \
          --allow-container-engine and --container-bin, the container engine), a macOS build the \
-         native runtime of --native-helper-socket; --no-jobs starts an agent that runs no job",
+         native runtime of --native-accounts; --no-jobs starts an agent that runs no job",
     ),
 ];
 

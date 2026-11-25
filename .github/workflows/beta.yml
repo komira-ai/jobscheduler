@@ -94,6 +94,20 @@ jobs:
           [ "$checked" -gt 0 ] || { echo "::error::no Mach-O binary found to check"; exit 1; }
       # --no-fail-fast: a red run names every failing test, as in the Linux `test` job, but with js-sim-cell's feature `slow-families` on, which that job leaves off.
       - run: cargo test --workspace --locked --no-fail-fast --features js-sim-cell/slow-families --exclude js-contain --exclude js-host-step --exclude js-mac-first-install --exclude js-mdm
+      # The account module's privileged calls run for real, as root (crates/js-agent/src/mac_accounts/macos/root_tests.rs):
+      # a directory record made and deleted, every process of a uid killed, a program run as an account.
+      # The run above skips them by name (#[ignore], with the reason); this step runs exactly them.
+      # It runs whatever the workspace step above ended with: its result is its own.
+      - name: Run the account module's root tests
+        if: ${{ !cancelled() }}
+        run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-agent --lib --locked -- --ignored --test-threads=1 mac_accounts::macos::root_tests
+      # The put ingest's hand-over runs for real, as root (crates/js-agent/src/mac_put/root_tests.rs):
+      # the key's folders given to another user, the job's directory to its group, the owners and modes read back,
+      # and a link in the job directory's place not followed.
+      # The run above skips them by name (#[ignore], with the reason); this step runs exactly them, as one command.
+      - name: Run the put ingest's root tests
+        if: ${{ !cancelled() }}
+        run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-agent --lib --locked -- --ignored --test-threads=1 mac_put::root_tests
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
         with:
@@ -102,3 +116,27 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+      # The supervisor's privileged calls (crates/js-agent/tests/mac_supervisor_root.rs, every
+      # test `#[ignore]`, so the step above lists them as ignored and runs none): the real audit
+      # session, drop to the slot user and limits, each read back from the system, as root.
+      # It runs after the cache is saved, so no file root writes into `target` is cached, and
+      # also when a test of the step above failed, so a red run still says how these went.
+      - name: Run the supervisor's root tests as root
+        if: ${{ !cancelled() }}
+        run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-agent --test mac_supervisor_root --locked -- --ignored --nocapture --test-threads=1
+      # The native runtime's root tests (crates/js-agent/tests/native_privileged.rs, each
+      # `#[ignore]` by name in the run above): a real account pool over the Mac's directory and
+      # processes, the real supervisor, the run directories given to the slot account, a stop
+      # signalling the job's group, the account retired. They run after the cache is saved, as
+      # they leave root-owned files in target. They make their own directory below /private/var.
+      # The VM test needs a signed js-vmm and a base image.
+      - name: Run the native runtime's root tests as root
+        if: ${{ !cancelled() }}
+        run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-agent --test native_privileged --locked -- --ignored --nocapture --test-threads=1 --skip a_command_runs_in_a_fresh_vm
+      # The sweep's privileged calls (crates/js-agent/src/mac_sweep/macos/root_tests.rs, each
+      # `#[ignore]` by name in the run above): every user's processes listed with their real and
+      # effective uid and their audit session, and SIGKILL to other users' processes, as root.
+      # It runs whenever the job was not cancelled, so a red test step above does not hide it.
+      - name: Run the sweep's root tests as root
+        if: ${{ !cancelled() }}
+        run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-agent --lib --locked -- --ignored --nocapture --test-threads=1 mac_sweep::macos::root_tests

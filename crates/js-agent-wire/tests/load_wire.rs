@@ -29,12 +29,16 @@ fn minimal() -> NodeLoad {
         seq: 1,
         mono_usec: 2,
         cpu_usage_usec: 3,
+        host_cpu_usec: None,
         working_set_bytes: 4,
         active_file_bytes: 0,
+        host_nonfile_bytes: None,
         actions_cpu_limited: false,
         covered: Vec::new(),
         clocks: Vec::new(),
         minutes: Vec::new(),
+        second_cpu_millis: Vec::new(),
+        second_cpu_pressure_some_permille: Vec::new(),
         dropped: LoadDrops::default(),
     }
 }
@@ -55,7 +59,7 @@ fn load_wire_form() {
     assert_eq!(
         serde_json::to_string(&load()).unwrap(),
         concat!(
-            r#"{"seq":7,"mono_usec":9000000,"cpu_usage_usec":4500000,"#,
+            r#"{"seq":7,"mono_usec":9000000,"cpu_usage_usec":4500000,"host_cpu_usec":40500000,"#,
             r#""working_set_bytes":3221225472,"active_file_bytes":1048576,"#,
             r#""actions_cpu_limited":true,"covered":["3-4"],"#,
             r#""clocks":[{"lease_id":"3-4","started_mono_usec":1000000}],"#,
@@ -87,6 +91,25 @@ fn minimal_load_takes_defaults() {
     let text = json!({"seq": 1, "mono_usec": 2, "cpu_usage_usec": 3, "working_set_bytes": 4});
     let beat = decode(body_with(text));
     assert_eq!(beat.load, Some(minimal()));
+}
+
+/// Asserts the host's CPU counter across releases: a load from an agent of an earlier
+/// release, without `host_cpu_usec`, decodes with none, and a receiver then reads the host's
+/// CPU from `cpu_usage_usec`; a load with it decodes it, and the receiver reads that. It
+/// catches a new agent's host counter lost on the way, and an old agent's load read as
+/// having no CPU.
+#[test]
+fn the_host_cpu_counter_is_optional_and_read_before_the_actions_one() {
+    let old = decode(body_with(json!({
+        "seq": 1, "mono_usec": 2, "cpu_usage_usec": 3, "working_set_bytes": 4,
+    })));
+    let old = old.load.expect("a load");
+    assert_eq!((old.host_cpu_usec, old.node_cpu_usec()), (None, 3));
+    let new = decode(body_with(json!({
+        "seq": 1, "mono_usec": 2, "cpu_usage_usec": 3, "host_cpu_usec": 30, "working_set_bytes": 4,
+    })));
+    let new = new.load.expect("a load");
+    assert_eq!((new.host_cpu_usec, new.node_cpu_usec()), (Some(30), 30));
 }
 
 /// Asserts that a body from before the load existed decodes with `load` `None` and

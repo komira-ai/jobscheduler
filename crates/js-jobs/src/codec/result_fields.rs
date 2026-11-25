@@ -1,6 +1,7 @@
 //! The result fields of a job row, tags 31 (the reason) to 40 (the usage), 43 (the stream
-//! lengths), 58 (the code of an input that failed, `rootfs_fields`) and 60 to 62 (the CPU
-//! throttle counters, the CPU pressure and the CPU peak of the usage). They are written only when the job has
+//! lengths), 58 (the code of an input that failed, `rootfs_fields`), 60 to 62 (the CPU
+//! throttle counters, the CPU pressure and the CPU peak of the usage) and 64 (the CPU series).
+//! They are written only when the job has
 //! a result, and the reason is what says it has one: a row without it, as every row written before results were stored, reads with no
 //! result. A result without tag 43, as every result written before the lengths were stored,
 //! reads with none; a build from before tag 43 keeps it as a field it does not know and writes
@@ -8,10 +9,26 @@
 //! only beside tag 40: a row with one of them and no tag 40 reads with no usage. A usage
 //! without them, as every one written before them, reads with `None`; a build from before
 //! them keeps them as fields it does not know and writes them back unchanged.
+//!
+//! Tag 64 is the job's CPU series as its host reported it: written when the result has a
+//! well-formed one, whether or not it has a usage, and read whenever the row holds it. A result
+//! without it, as every one written before it, reads with none; a build from before it keeps it
+//! as a field it does not know and writes it back unchanged. Its value is the granularity in
+//! seconds (`u16`), the run length in microseconds (`u64`), the partial flag (a byte, 0 or 1),
+//! then each point (`u16`), all big-endian: 11 bytes and two for each point, so 267 bytes for
+//! the most a series holds (128 points).
+//!
+//! Tag 65 is the job's non-file memory series as its host reported it, written and read as tag
+//! 64 is, and kept the same way by a build from before it. Its value has the same 11-byte head,
+//! then each point (`u32`, MiB), big-endian: 523 bytes for 128 points.
 
 use js_state::StoreTime;
+use js_types::{CpuSeries, MemorySeries};
 
-use self::job_result_tag::{RESULT_CPU_PEAK, RESULT_CPU_PRESSURE_SOME, RESULT_CPU_THROTTLE};
+use self::job_result_tag::{
+    RESULT_CPU_PEAK, RESULT_CPU_PRESSURE_SOME, RESULT_CPU_SERIES, RESULT_CPU_THROTTLE,
+    RESULT_MEMORY_SERIES,
+};
 use super::rootfs_fields::job_rootfs_tag::RESULT_INPUT_FAILURE as INPUT_FAILURE;
 use super::{
     DecodeError, Fields, Writer, bool_of, byte_of, i32_of, job_tag as t, text, text_of, time,
@@ -27,6 +44,10 @@ const TIME_LEN: usize = 12;
 /// The bytes of a lengths value: four `u64`.
 const LOGS_LEN: usize = 32;
 
+/// The bytes of a series value before its points: the granularity (`u16`), the run length
+/// (`u64`) and the partial flag (a byte).
+const SERIES_HEAD_LEN: usize = 11;
+
 /// The job-row tags of the usage's CPU counters, beside the result tags of
 /// [`crate::codec::job_tag`].
 pub(crate) mod job_result_tag {
@@ -41,6 +62,14 @@ pub(crate) mod job_result_tag {
     /// window in microseconds, each a u64), written beside
     /// [`RESULT_USAGE`](crate::codec::job_tag::RESULT_USAGE) when the agent reported it. Read only beside [`RESULT_USAGE`](crate::codec::job_tag::RESULT_USAGE).
     pub const RESULT_CPU_PEAK: u16 = 62;
+    /// The job's CPU series (11 bytes: the granularity in seconds as a u16, the run length in
+    /// microseconds as a u64 and the partial flag as a byte, then each point as a u16), written
+    /// when the result has a well-formed one. Read whether or not the result has a usage.
+    pub const RESULT_CPU_SERIES: u16 = 64;
+    /// The job's non-file memory series (the 11-byte head of [`RESULT_CPU_SERIES`], then each
+    /// point as a u32 of MiB), written when the result has a well-formed one. Read whether or
+    /// not the result has a usage.
+    pub const RESULT_MEMORY_SERIES: u16 = 65;
 }
 
 /// Puts the fields of `result`, when there is one, in `row`.
@@ -72,6 +101,22 @@ pub(super) fn put_result(row: &mut Writer, result: Option<&JobResult>) {
         row.put_opt(RESULT_CPU_PEAK, used.cpu_peak.map(peak));
     }
     row.put_opt(t::RESULT_LOGS, result.logs.map(lengths));
+    row.put_opt(
+        RESULT_CPU_SERIES,
+        result
+            .cpu_series
+            .as_ref()
+            .filter(|series| series.is_well_formed())
+            .map(series),
+    );
+    row.put_opt(
+        RESULT_MEMORY_SERIES,
+        result
+            .memory_series
+            .as_ref()
+            .filter(|series| series.is_well_formed())
+            .map(memory_series),
+    );
     row.put_opt(INPUT_FAILURE, result.input_failure.as_deref().map(text));
 }
 
@@ -105,6 +150,8 @@ pub(super) fn take_result(fields: &mut Fields) -> Result<Option<JobResult>, Deco
             ..used
         }),
         logs: fields.opt(t::RESULT_LOGS, lengths_of)?,
+        cpu_series: fields.opt(RESULT_CPU_SERIES, series_of)?,
+        memory_series: fields.opt(RESULT_MEMORY_SERIES, memory_series_of)?,
         input_failure: fields.opt(INPUT_FAILURE, text_of)?,
     }))
 }
@@ -138,6 +185,70 @@ fn lengths_of(tag: u16, value: Vec<u8>) -> Result<LogLengths, DecodeError> {
         stdout_dropped: word(2),
         stderr_dropped: word(3),
     })
+}
+
+/// A series value: the granularity (`u16`), the run length (`u64`), the partial flag (a byte),
+/// then each point (`u16`), all big-endian.
+fn series(series: &CpuSeries) -> Vec<u8> {
+    let mut out = u16::try_from(series.granularity_secs)
+        .unwrap_or_default()
+        .to_be_bytes()
+        .to_vec();
+    out.extend_from_slice(&series.run_usec.to_be_bytes());
+    out.push(u8::from(series.partial));
+    out.extend(series.points.iter().flat_map(|point| point.to_be_bytes()));
+    out
+}
+
+fn series_of(tag: u16, value: Vec<u8>) -> Result<CpuSeries, DecodeError> {
+    let (head, points) = value
+        .split_first_chunk::<SERIES_HEAD_LEN>()
+        .ok_or(DecodeError::BadLength { tag })?;
+    if points.len() % 2 != 0 {
+        return Err(DecodeError::BadLength { tag });
+    }
+    let [g0, g1, r0, r1, r2, r3, r4, r5, r6, r7, partial] = *head;
+    let (pairs, _) = points.as_chunks::<2>();
+    let points = pairs.iter().map(|pair| u16::from_be_bytes(*pair)).collect();
+    CpuSeries::new(
+        u32::from(u16::from_be_bytes([g0, g1])),
+        points,
+        u64::from_be_bytes([r0, r1, r2, r3, r4, r5, r6, r7]),
+        bool_of(tag, vec![partial])?,
+    )
+    .ok_or(DecodeError::BadValue { tag })
+}
+
+/// A memory series value: the head of a [`series`] value, then each point (`u32`), all
+/// big-endian.
+fn memory_series(series: &MemorySeries) -> Vec<u8> {
+    let mut out = u16::try_from(series.granularity_secs)
+        .unwrap_or_default()
+        .to_be_bytes()
+        .to_vec();
+    out.extend_from_slice(&series.run_usec.to_be_bytes());
+    out.push(u8::from(series.partial));
+    out.extend(series.points.iter().flat_map(|point| point.to_be_bytes()));
+    out
+}
+
+fn memory_series_of(tag: u16, value: Vec<u8>) -> Result<MemorySeries, DecodeError> {
+    let (head, points) = value
+        .split_first_chunk::<SERIES_HEAD_LEN>()
+        .ok_or(DecodeError::BadLength { tag })?;
+    if points.len() % 4 != 0 {
+        return Err(DecodeError::BadLength { tag });
+    }
+    let [g0, g1, r0, r1, r2, r3, r4, r5, r6, r7, partial] = *head;
+    let (words, _) = points.as_chunks::<4>();
+    let points = words.iter().map(|word| u32::from_be_bytes(*word)).collect();
+    MemorySeries::new(
+        u32::from(u16::from_be_bytes([g0, g1])),
+        points,
+        u64::from_be_bytes([r0, r1, r2, r3, r4, r5, r6, r7]),
+        bool_of(tag, vec![partial])?,
+    )
+    .ok_or(DecodeError::BadValue { tag })
 }
 
 /// A usage value: the CPU time as a time value, then the peak memory as a `u64`.

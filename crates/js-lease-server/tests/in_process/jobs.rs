@@ -35,13 +35,15 @@ fn job_config(scratch: &Scratch, jobs: bool) -> Config {
 
 /// Asserts that a job submitted without an id through the job router is answered 201 under
 /// the id the given source minted (its bits as 32 hex digits), queued at the given store
-/// clock's time (42 s) and, the registered host having room, placed on it by the submit
-/// itself (`JOB_STATE_PLACED`, host `host-a`, placed at the same time); and that the tables
-/// `jobs()` read hold that job, placed, stamped with the same time; and that the router
+/// clock's time (42 s) and still queued (`JOB_STATE_QUEUED`, no host: a submit only queues
+/// the job and pokes the placement, which this server leaves to its next tick); that after
+/// one tick the registered host, having room, holds it (`JOB_STATE_PLACED`, host `host-a`,
+/// placed at the same time); and that the tables `jobs()` read hold that job, placed,
+/// stamped with the same time; and that the router
 /// refuses a call without the bearer token. It catches a seam that mints from the system's
 /// random source or stamps with the system's clock whatever it is given (for the queueing or
 /// the placement), a job router that is not the one the tables serve, a submit that leaves a
-/// job queued over a host with room, and one served without the token.
+/// job queued over a host with room after the tick, and one served without the token.
 #[tokio::test]
 async fn the_job_service_is_served_through_the_seam_on_the_given_clock_and_ids() {
     let scratch = Scratch::new("jobs-seam");
@@ -74,10 +76,22 @@ async fn the_job_service_is_served_through_the_seam_on_the_given_clock_and_ids()
     assert_eq!(submitted.status, 201, "{:?}", submitted.body);
     let minted = "07".repeat(16);
     assert_eq!(submitted.body["job"]["id"], minted.as_str());
-    assert_eq!(submitted.body["job"]["state"], "JOB_STATE_PLACED");
-    assert_eq!(submitted.body["job"]["hostId"], "host-a");
+    assert_eq!(submitted.body["job"]["state"], "JOB_STATE_QUEUED");
+    assert!(
+        submitted.body["job"]["hostId"].is_null(),
+        "{:?}",
+        submitted.body
+    );
     assert_eq!(submitted.body["job"]["times"]["queuedAtMs"], "42000");
-    assert_eq!(submitted.body["job"]["times"]["placedAtMs"], "42000");
+
+    server.tick().await;
+    let path = format!("/v1/jobs/{minted}");
+    let placed = routed(&router, "GET", &path, Some(TOKEN), None).await;
+    assert_eq!(placed.status, 200, "{:?}", placed.body);
+    assert_eq!(placed.body["job"]["state"], "JOB_STATE_PLACED");
+    assert_eq!(placed.body["job"]["hostId"], "host-a");
+    assert_eq!(placed.body["job"]["times"]["queuedAtMs"], "42000");
+    assert_eq!(placed.body["job"]["times"]["placedAtMs"], "42000");
 
     let jobs = server.jobs().expect("the job tables are open");
     let id = JobId::parse(&minted).unwrap();
@@ -88,9 +102,52 @@ async fn the_job_service_is_served_through_the_seam_on_the_given_clock_and_ids()
         StoreTime::from_duration(Duration::from_secs(42))
     );
 
-    let path = format!("/v1/jobs/{minted}");
     let refused = routed(&router, "GET", &path, None, None).await;
     assert_eq!(refused.status, 401, "{:?}", refused.body);
+}
+
+/// Asserts that the seam's poll runs the placement poller's turn the server would run on a task
+/// of its own: before any submit it has no poke and does nothing; after a submit, answered
+/// `JOB_STATE_QUEUED`, it takes the submit's poke and places the job on the host with room, with
+/// no tick; and a second poll finds no poke left. It catches a seam whose submit cannot be
+/// placed before a tick, a poll that runs a pass without a poke, and a poke kept after its pass.
+#[tokio::test]
+async fn a_poll_after_a_submit_places_the_job_with_no_tick() {
+    let scratch = Scratch::new("jobs-seam-poll");
+    let (_clock, shared) = clock();
+    let server = InProcess::start(job_config(&scratch, true), shared).unwrap();
+    let hello = routed(
+        &server.agent_router(),
+        "POST",
+        "/v1/agent/hello",
+        Some(JOIN),
+        Some(&hello_body("host-a")),
+    )
+    .await;
+    assert_eq!(hello.status, 200, "{:?}", hello.body);
+    assert!(!server.poll().await);
+
+    let router = server.job_router().expect("the job service is on");
+    let spec = json!({
+        "spec": {
+            "jobId": "job-p",
+            "image": IMAGE,
+            "needs": { "cpuMillis": "1000", "memoryBytes": "1073741824" },
+            "wallLimitSeconds": "60",
+        }
+    });
+    let submitted = routed(&router, "POST", "/v1/jobs", Some(TOKEN), Some(&spec)).await;
+    assert_eq!(submitted.status, 201, "{:?}", submitted.body);
+    assert_eq!(submitted.body["job"]["state"], "JOB_STATE_QUEUED");
+    assert!(server.poll().await);
+    let read = routed(&router, "GET", "/v1/jobs/job-p", Some(TOKEN), None).await;
+    assert_eq!(
+        (&read.body["job"]["state"], &read.body["job"]["hostId"]),
+        (&json!("JOB_STATE_PLACED"), &json!("host-a")),
+        "{:?}",
+        read.body
+    );
+    assert!(!server.poll().await);
 }
 
 /// Asserts that a server with no `--job-listen`, with and without job sources given (which

@@ -1,57 +1,33 @@
 //! A container runtime that lives in memory, and a clock a test moves. Nothing here
 //! starts a process or waits.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
 use js_agent::lifecycle::{
-    Clock, Exit, Found, FsPrepared, JobFs, NativeRefusal, Prepared, RunHandle, RunSpec, Runtime,
-    RuntimeError, Status, Ticket, Wake, Whereabouts, label,
+    Exit, Found, FsPrepared, JobFs, LookupStamps, NativeRefusal, OutputsReport, Prepared,
+    RunHandle, RunSpec, Runtime, RuntimeError, Status, Ticket, Wake, Whereabouts, label,
 };
 use js_agent_wire::{
-    HostPort, JobUsage, LogReport, LogTail, NativeSpec, NetworkCeiling, PortRange,
+    CpuSeries, HostPort, JobUsage, LogReport, LogTail, MemorySeries, NativeSpec, NetworkCeiling,
+    PortRange,
 };
 
 #[path = "fake_checks.rs"]
 mod checks;
+#[path = "fake_clock.rs"]
+mod clock;
 #[path = "fake_fs.rs"]
 mod fs;
+#[path = "fake_outputs.rs"]
+mod outputs;
+#[path = "fake_timeline.rs"]
+mod timeline;
 pub use checks::ScriptedChecks;
-
-/// A clock that moves only when a test says so. Clones share one reading.
-#[derive(Clone, Default)]
-pub struct ManualClock(Rc<Cell<u64>>);
-
-impl ManualClock {
-    pub fn advance(&self, ms: u64) {
-        self.0.set(self.0.get() + ms);
-    }
-}
-
-/// The Unix time in milliseconds at which a [`ManualClock`] reads zero.
-pub const UNIX_ORIGIN_MS: u64 = 1_800_000_000_000;
-
-impl Clock for ManualClock {
-    fn now_ms(&self) -> u64 {
-        self.0.get()
-    }
-
-    fn unix_ms(&self) -> Option<u64> {
-        Some(UNIX_ORIGIN_MS + self.0.get())
-    }
-}
-
-/// A [`ManualClock`] that has no Unix time.
-pub struct NoUnixClock(pub ManualClock);
-
-impl Clock for NoUnixClock {
-    fn now_ms(&self) -> u64 {
-        self.0.now_ms()
-    }
-}
+pub use clock::{ManualClock, NoUnixClock, UNIX_ORIGIN_MS};
 
 /// The agent label of every container the fake makes.
 const AGENT: &str = "fake-host";
@@ -96,6 +72,13 @@ struct State {
     reports: BTreeMap<String, LogReport>,
     /// What `usage` answers for a run, by run id.
     usages: BTreeMap<String, JobUsage>,
+    /// What a run's removal commits, by run id, and `outputs_report` answers, by container.
+    committed: BTreeMap<String, OutputsReport>,
+    answers: BTreeMap<String, OutputsReport>,
+    /// What `cpu_series` answers for a run, by run id.
+    series: BTreeMap<String, CpuSeries>,
+    /// What `memory_series` answers for a run, by run id.
+    memory_series: BTreeMap<String, MemorySeries>,
     /// The control group directory of the container of each run.
     cgroups: BTreeMap<String, PathBuf>,
     /// The control group the first process of the container of a run runs in, outside the
@@ -140,6 +123,8 @@ struct State {
     egress_asks: u32,
     /// What `start_steps` answers, once, by run id.
     steps: BTreeMap<String, Vec<(&'static str, u64)>>,
+    /// What `lookup_stamps` answers, once, by run id.
+    lookups: BTreeMap<String, LookupStamps>,
     /// What the runtime was given to ring (`set_wake`).
     wake: Wake,
     /// What `host_ports` answers; none by default, as the trait's default.
@@ -187,6 +172,8 @@ struct FsScript {
     unreadable: Vec<String>,
     /// The directory the runs' mounts are under (`mounts_of`).
     mounts: Option<PathBuf>,
+    /// The host paths below which the runtime takes a mount source itself (`owns_host_path`).
+    owned: Option<PathBuf>,
 }
 
 /// Where a scripted pull stands.
@@ -333,8 +320,22 @@ impl FakeRuntime {
             .insert(run_id.to_owned(), usage);
     }
 
+    /// The runtime recorded `series` for `run_id`: `cpu_series` answers it.
+    pub fn report_cpu_series(&self, run_id: &str, series: CpuSeries) {
+        let mut state = self.state.borrow_mut();
+        state.series.insert(run_id.to_owned(), series);
+    }
+
+    /// The runtime recorded `series` for `run_id`: `memory_series` answers it.
+    pub fn report_memory_series(&self, run_id: &str, series: MemorySeries) {
+        let mut state = self.state.borrow_mut();
+        state.memory_series.insert(run_id.to_owned(), series);
+    }
+
     /// Makes the next `times` calls named `call` (`create`, `poll`, `stop`, `remove`, `logs`,
     /// `list` or `egress`, the egress check) fail; `u32::MAX` for as long as the test wants.
+    /// `outputs` makes a removal remove the container and fail as its outputs not copied
+    /// (`RuntimeError::outputs`).
     pub fn fail(&self, call: &'static str, times: u32) {
         self.state.borrow_mut().failing.insert(call, times);
     }
@@ -365,12 +366,6 @@ impl FakeRuntime {
     pub fn ring_wake(&self) {
         let wake = self.state.borrow().wake.clone();
         wake.wake();
-    }
-
-    /// `start_steps` answers `steps` for `run_id`, once.
-    pub fn steps_of(&self, run_id: &str, steps: &[(&'static str, u64)]) {
-        let mut state = self.state.borrow_mut();
-        state.steps.insert(run_id.to_owned(), steps.to_vec());
     }
 
     /// How many times the egress check was asked for.
@@ -628,6 +623,12 @@ impl Runtime for FakeRuntime {
         self.state.borrow().fs.is_some()
     }
 
+    fn owns_host_path(&self, path: &str) -> bool {
+        let state = self.state.borrow();
+        let owned = state.fs.as_ref().and_then(|fs| fs.owned.as_deref());
+        owned.is_some_and(|below| Path::new(path).starts_with(below))
+    }
+
     fn check_layer_image(&self, image: &str) -> Result<(), String> {
         let state = self.state.borrow();
         let refused = state
@@ -753,10 +754,11 @@ impl Runtime for FakeRuntime {
     }
 
     fn start_steps(&mut self, id: &RunHandle) -> Vec<(&'static str, u64)> {
-        let mut state = self.state.borrow_mut();
-        let run_id = state.containers.get(&id.0).map(|c| c.run_id.clone());
-        let steps = run_id.and_then(|run_id| state.steps.remove(&run_id));
-        steps.unwrap_or_default()
+        self.take_steps(id)
+    }
+
+    fn lookup_stamps(&mut self, id: &RunHandle) -> Option<LookupStamps> {
+        self.take_lookup(id)
     }
 
     fn create_and_start(&mut self, spec: &RunSpec) -> Result<RunHandle, RuntimeError> {
@@ -856,10 +858,28 @@ impl Runtime for FakeRuntime {
         run.and_then(|run| state.reports.get(&run).copied())
     }
 
+    fn outputs_report(&mut self, id: &RunHandle) -> Option<OutputsReport> {
+        self.state.borrow_mut().answers.remove(&id.0)
+    }
+
     fn usage(&mut self, id: &RunHandle) -> Option<JobUsage> {
         let state = self.state.borrow();
         let run = state.containers.get(&id.0).map(|c| c.run_id.clone());
         run.and_then(|run| state.usages.get(&run).copied())
+    }
+
+    fn cpu_series(&mut self, id: &RunHandle) -> Option<CpuSeries> {
+        let state = self.state.borrow();
+        state
+            .series
+            .get(&state.containers.get(&id.0)?.run_id)
+            .cloned()
+    }
+
+    fn memory_series(&mut self, id: &RunHandle) -> Option<MemorySeries> {
+        let state = self.state.borrow();
+        let run = &state.containers.get(&id.0)?.run_id;
+        state.memory_series.get(run).cloned()
     }
 
     fn log_tail(&mut self, id: &RunHandle) -> Result<Option<LogTail>, RuntimeError> {
@@ -895,8 +915,7 @@ impl Runtime for FakeRuntime {
         if self.fails("remove") {
             return Err(err("remove"));
         }
-        self.state.borrow_mut().containers.remove(&id.0);
-        Ok(())
+        self.removed(id)
     }
 
     fn places_in_cgroup(&self) -> bool {

@@ -137,6 +137,8 @@ impl Lifecycle {
                         }
                         job.logs = runtime.logs_report(&id);
                         job.usage = runtime.usage(&id);
+                        job.cpu_series = runtime.cpu_series(&id);
+                        job.memory_series = runtime.memory_series(&id);
                     }
                     job.result = Some(result);
                     job.input_failure = input_failure(job.cause, how, runtime.input_failure(&id));
@@ -251,8 +253,8 @@ impl Lifecycle {
         loop {
             let stage = job.stage.clone();
             // The checks are owed from before the first step of the cleanup until they have
-            // run: an agent that stops in between leaves the record, and the next start
-            // taints the host. Without the record nothing could be removed. It is written on
+            // run: an agent that stops in between leaves the record, and the next start runs
+            // the check itself, or taints the host when it cannot (see `owed`). Without the record nothing could be removed. It is written on
             // the worker, before any removal is asked of a thread.
             if stage.cleaning() && !job.owed {
                 match config.state.owe(&run_id) {
@@ -269,16 +271,22 @@ impl Lifecycle {
                 Stage::Removing(id) => match runtime.removing(&id) {
                     Removal::Pending => return,
                     Removal::Done(Ok(())) => {
+                        // What the removal committed of the run's outputs to the put ingest
+                        // is a finding: the result was built at the exit, before the removal.
+                        // A removal that fails as outputs committed nothing.
+                        if let Some(report) = runtime.outputs_report(&id) {
+                            job.note(code::OUTPUTS_COMMITTED, report.note(), events);
+                        }
                         events.push(Event::ContainerRemoved {
                             run_id: run_id.clone(),
                         });
                         job.stage = Stage::Scratch;
                     }
                     // Everything of the run is gone and only the copy of an output failed (a
-                    // link where an output was declared, an output over its cap): the host
-                    // holds nothing of the job, so it is a finding and not a taint, and the
-                    // cleanup goes on. Only the native runtime (a macOS build's) copies outputs.
-                    #[cfg(target_os = "macos")]
+                    // link where an output was declared, an output over its cap), or its
+                    // commit to the put ingest: the host holds nothing of the job, so it is a
+                    // finding and not a taint, and the cleanup goes on. Only the native
+                    // runtime of a Mac copies outputs.
                     Removal::Done(Err(why)) if why.is_outputs() => {
                         job.note(code::OUTPUTS_FAILED, why.to_string(), events);
                         events.push(Event::ContainerRemoved {

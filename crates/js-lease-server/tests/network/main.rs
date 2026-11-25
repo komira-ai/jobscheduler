@@ -10,6 +10,7 @@ mod lambda_host;
 mod metadata_block;
 mod oauth_file;
 mod one_layer;
+mod packaged_unit;
 mod render;
 mod render_limits;
 mod support;

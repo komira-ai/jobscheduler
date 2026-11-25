@@ -19,8 +19,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use js_agent_wire::{
-    HostPort, Isolation, JobUsage, LogReport, LogTail, NativeSpec, NetworkCeiling, NetworkLevel,
-    PortRange, refusal,
+    CpuSeries, HostPort, Isolation, JobUsage, LogReport, LogTail, MemorySeries, NativeSpec,
+    NetworkCeiling, NetworkLevel, PortRange, refusal,
 };
 use js_types::{JobNetwork, PortMap};
 
@@ -266,8 +266,7 @@ enum Kind {
     /// The agent cannot see the host ([`RuntimeError::blind`]).
     Blind,
     /// A removal that ended everything of the run and could not copy a declared output
-    /// ([`RuntimeError::outputs`]): the native runtime's (a macOS build's).
-    #[cfg(target_os = "macos")]
+    /// ([`RuntimeError::outputs`]): the native runtime's.
     Outputs,
 }
 
@@ -291,17 +290,17 @@ impl RuntimeError {
     }
 
     /// A removal that did everything a removal does (the run's processes and its user are
-    /// gone) but could not copy one or more of the run's declared outputs. Nothing of the
-    /// run is left on the host, so the lifecycle reports it and does not taint the host. Only
-    /// the native runtime copies outputs.
-    #[cfg(target_os = "macos")]
-    pub(crate) fn outputs(text: impl Into<String>) -> Self {
+    /// gone) but could not copy one or more of the run's declared outputs, or could not
+    /// commit them to the put ingest. Nothing of the run is left on the host, so the
+    /// lifecycle reports it and does not taint the host. Only the native runtime of a Mac
+    /// copies outputs.
+    pub fn outputs(text: impl Into<String>) -> Self {
         Self(text.into(), Kind::Outputs)
     }
 
-    /// Whether the failure is only that outputs were not copied ([`RuntimeError::outputs`]).
-    #[cfg(target_os = "macos")]
-    pub(crate) fn is_outputs(&self) -> bool {
+    /// Whether the failure is only that outputs were not copied or not committed
+    /// ([`RuntimeError::outputs`]).
+    pub fn is_outputs(&self) -> bool {
         self.1 == Kind::Outputs
     }
 }
@@ -385,6 +384,31 @@ pub enum Removal {
     Pending,
 }
 
+/// What the removal of a native Mac run committed of its collected outputs to tierstore's
+/// put ingest ([`Runtime::outputs_report`]): the object's key, the SHA-256 its bytes have,
+/// and how many there are. The lifecycle keeps it as the finding `outputs-committed`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputsReport {
+    /// The object's key, `cas/b/<build>/<nonce>/pack`.
+    pub key: String,
+    /// The SHA-256 of its bytes, in lowercase hex, as the commit declared it.
+    pub sha256: String,
+    /// How many bytes it holds.
+    pub bytes: u64,
+}
+
+impl OutputsReport {
+    /// The text of the finding: a JSON object with the fields `key`, `sha256` and `bytes`.
+    pub(crate) fn note(&self) -> String {
+        serde_json::json!({
+            "key": self.key,
+            "sha256": self.sha256,
+            "bytes": self.bytes,
+        })
+        .to_string()
+    }
+}
+
 /// What the lifecycle needs of a container runtime.
 pub trait Runtime {
     /// Begins getting `image` onto the host when it is not there, and says where that
@@ -424,6 +448,14 @@ pub trait Runtime {
     /// keeps none.
     fn start_steps(&mut self, _id: &RunHandle) -> Vec<(&'static str, u64)> {
         Vec::new()
+    }
+
+    /// The stamps of the lookup of a host path that the start of the container `id` waited
+    /// on, for the start's [`StartTimeline`](super::StartTimeline): of the start's lookups,
+    /// the one that ended last. Asked once, after [`Runtime::create_and_start`] returned `id`;
+    /// a second call has none. `None` for a start with no host path; the default keeps none.
+    fn lookup_stamps(&mut self, _id: &RunHandle) -> Option<super::LookupStamps> {
+        None
     }
 
     /// Creates and starts the container of `spec`. A call that fails leaves no
@@ -545,12 +577,42 @@ pub trait Runtime {
         None
     }
 
-    /// What the control group of the exited container `id` used (its peak memory and CPU
-    /// time), read beside [`Runtime::logs_report`], before the container and its group are
-    /// removed; a job keyed by job lists it in its result. `None` when the runtime has no
-    /// control group to read, or cannot read both counters (cgroup version 1, no
-    /// `memory.peak`): never a zero for what is not known. The default has none.
+    /// What the removal of `id` committed of the run's outputs to the put ingest, asked once
+    /// the removal is done and has succeeded (`Removal::Done(Ok(()))`); the runtime forgets
+    /// it when it answers, so a second ask has none. A removal that committed nothing (no put
+    /// target, no output, or outputs not copied or not committed, which fails the removal as
+    /// [`RuntimeError::outputs`]) has none, and so does the default: only the native runtime
+    /// of a Mac commits outputs.
+    fn outputs_report(&mut self, _id: &RunHandle) -> Option<OutputsReport> {
+        None
+    }
+
+    /// What the exited run `id` used (its peak memory and CPU time), read beside
+    /// [`Runtime::logs_report`], before the run is removed: the crun runtime reads its control
+    /// group, the native runtime of a Mac its processes' samples and its supervisor's wait. A
+    /// job keyed by job lists it in its result. `None` when the runtime has nothing to read, or
+    /// cannot read both counters (cgroup version 1, no `memory.peak`; a native run neither
+    /// sampled nor waited for): never a zero for what is not known. The default has none.
     fn usage(&mut self, _id: &RunHandle) -> Option<JobUsage> {
+        None
+    }
+
+    /// The CPU second by second of the exited container `id` over its run, read beside
+    /// [`Runtime::usage`], before the container and its group are removed; a job keyed by job
+    /// lists it in its result. `None` when the runtime does not record it (it is not asked
+    /// to, or it has no per-job CPU source: a VM and a container-engine job record nothing
+    /// yet), and when the run had no time to record. The crun runtime and the native runtime
+    /// of a Mac record it with `--cpu-series`. The default has none.
+    fn cpu_series(&mut self, _id: &RunHandle) -> Option<CpuSeries> {
+        None
+    }
+
+    /// The memory second by second of the exited run `id` over its run (the non-file memory
+    /// of a crun run's group, the footprint of a Mac native run's processes), read beside
+    /// [`Runtime::cpu_series`]; a job keyed by job lists it in its result. `None` when the
+    /// runtime does not record it (without `--memory-series`), and when the run had no sample.
+    /// The default has none.
+    fn memory_series(&mut self, _id: &RunHandle) -> Option<MemorySeries> {
         None
     }
 
@@ -696,6 +758,16 @@ pub trait Runtime {
     /// either through a runtime that does not is refused
     /// [`refusal::ROOTFS_UNSUPPORTED_HERE`] before anything is made, never run without them.
     fn layered_rootfs(&self) -> bool {
+        false
+    }
+
+    /// Whether this runtime takes the host path `path` of a job start's mount itself, as the
+    /// target of what it writes after the run, rather than as a source beneath the agent's
+    /// mount roots: the native runtime's put targets below `--native-put-root`, which no job
+    /// is ever given. The admission then does not hold `path` to the mount roots; the
+    /// runtime's own lookup ([`Runtime::resolve_fs`]) accepts it or refuses it. The default
+    /// takes none.
+    fn owns_host_path(&self, _path: &str) -> bool {
         false
     }
 

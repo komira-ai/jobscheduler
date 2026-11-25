@@ -67,6 +67,8 @@ fn job_result() -> JobResult {
         logs: None,
         input_failure: None,
         usage: None,
+        cpu_series: None,
+        memory_series: None,
     }
 }
 

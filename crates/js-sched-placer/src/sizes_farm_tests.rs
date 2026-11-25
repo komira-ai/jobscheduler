@@ -7,22 +7,26 @@
 //! 3.2 GB, and before the change every one of them ran under a `cpu.max` of its booking (0.25
 //! to 1.25 cores) and used all of it, booked at the cold memory (16 GiB), reported by an agent
 //! that measured no CPU peak. The kinds below are that mix: per kind, a spread of memory peaks,
-//! the most cores a run of it uses over five seconds (what a new agent reports, and what a
-//! class books) and the mean cores it uses over its whole run, when nothing holds it.
+//! the most cores a run of it uses over five seconds (what a new agent reports, kept in the
+//! job's usage) and the mean cores it uses over its whole run, when nothing holds it (what a
+//! class books).
 
 use std::collections::BTreeMap;
 use std::time::Duration;
 
 use js_jobs::{
-    Booked, CpuPeak, CpuThrottle, JobEnd, JobId, JobRecord, JobSpec, Needs, NewJob, Output,
-    ResourceUsage,
+    Booked, Capacity, CpuPeak, CpuThrottle, JobEnd, JobId, JobRecord, JobSpec, Needs, NewJob,
+    Output, ResourceUsage,
 };
+use js_registry::Placer as _;
+use js_types::sched::usage::NodeLoad;
 use js_types::{Labels, ManualClock, Resources, Shape, Timestamp};
 
 use super::{
-    GIB, Tables, at, booked, bounds_of, capacity, host, needs, pass, queued, ran, ran_for,
+    GIB, Quiet, Tables, at, booked, bounds_of, capacity, host, needs, pass, queued, ran, ran_for,
 };
 use crate::engine::Settings;
+use crate::engine::jobs::{JobHosts, OpenHost};
 use crate::engine::rig::spec_of;
 use crate::place::SchedPlacer;
 use crate::sizes::{JobSizes, SIZE_CLASS_LABEL, SIZE_FALLBACK_LABEL, SizedFrom};
@@ -148,7 +152,8 @@ fn sized(sizes: &JobSizes, job: &JobRecord) -> (u64, u64, SizedFrom) {
 
 /// The farm's history before the change: every target of every kind ran one to three times,
 /// booked the old cold memory (16 GiB) and a CPU ceiling it used all of (a quarter core to one
-/// and a quarter), reported by an agent with no CPU peak, no throttle counters and no pressure.
+/// and a quarter), reported by an agent with no CPU peak, no throttle counters and no pressure:
+/// each used 99% of its ceiling, so each is held.
 fn capped_history(tables: &Tables) -> Vec<(JobRecord, Booked)> {
     let mut history = Vec::new();
     for kind in &KINDS {
@@ -168,14 +173,14 @@ fn capped_history(tables: &Tables) -> Vec<(JobRecord, Booked)> {
 }
 
 /// Asserts, over the farm-shaped history above, what every target is booked next: at least
-/// the largest peak it ever had (no target is booked below a peak of its own), from its kind's
-/// peaks and not the cold size, at most twice the real peaks in sum (here 1.78 times),
-/// and so 97 of its jobs fit a farm host by memory where 15 did at 16 GiB. Catches a young
-/// target booked the cold memory (the 16 GiB that filled the farm's hosts at 15 jobs), a
-/// fallback that drops a target's own larger peak, and a kind's estimate thrown away for
-/// being spread (its largest peak over four times its median).
+/// the largest peak it ever had (no target is booked below a peak of its own), from its own
+/// peaks and not its kind's largest or the cold size, so the bookings sum to 1.37 times the
+/// real peaks (1.78 when each young target booked its kind's largest) and 126 of its jobs fit a
+/// farm host by memory (97 then, and 15 at 16 GiB). Catches a young target booked the cold
+/// memory (the 16 GiB that filled the farm's hosts at 15 jobs) or held at its kind's largest
+/// peak, and a target booked below a peak of its own.
 #[test]
-fn the_farms_targets_book_their_kinds_peaks_not_the_cold_size_and_never_below_their_own() {
+fn the_farms_targets_book_their_own_peaks_not_their_kinds_or_the_cold_size() {
     let tables = Tables::new();
     let history = capped_history(&tables);
     let sizes = farm_taught(&history);
@@ -198,10 +203,10 @@ fn the_farms_targets_book_their_kinds_peaks_not_the_cold_size_and_never_below_th
         }
     }
     let factor_hundredths = booked_sum * 100 / peak_sum;
-    assert_eq!(factor_hundredths, 178, "booked over peaks, in hundredths");
+    assert_eq!(factor_hundredths, 137, "booked over peaks, in hundredths");
     assert_eq!(
         HOST.1 / (booked_sum / jobs),
-        97,
+        126,
         "jobs a host fits by memory"
     );
     assert_eq!(
@@ -212,14 +217,16 @@ fn the_farms_targets_book_their_kinds_peaks_not_the_cold_size_and_never_below_th
 }
 
 /// Asserts the CPU of a class whose whole history ran held at a quarter core (a server's
-/// first start after the change): the 32 old runs report no CPU peak, so each counts as held
-/// and teaches no CPU, and the class's first job books the cold CPU (22 cores on a farm host),
+/// first start after the change): the 32 old runs used 248 m of their 250 m booking (within
+/// 5%, with no throttle counters), so each counts as held and, at no more than the cold
+/// estimate, teaches no CPU, and the class's first job books the cold CPU (22 cores on a farm host),
 /// not the 250 m the old history would have held it at; its first run of a new agent, which
-/// peaked at 20 cores on a busy host (contention 40%), books 20 cores at once, since a run
-/// that waited may still raise; and quiet runs that peaked at 0.3 cores bring it down to
-/// 500 m after nine of them (the 90th percentile of ten samples is the 9th smallest). Catches capped history kept as measurements (the class would
-/// stay at 250 m: the absorbing floor), a contended run that cannot raise, and a booking that
-/// never comes down.
+/// used 6 cores on average (peaking at 20) on a busy host (contention 40%), books its mean,
+/// 6 cores, at once, since a run that waited may still raise; and quiet runs of 0.3 cores
+/// bring it down to 500 m with the first of them (the median of two samples, 6 cores and 0.3,
+/// is the smaller, the 1st smallest; 0.3 rounds up to 500 m). Catches capped history kept as
+/// measurements (the class would stay at 250 m: the absorbing floor), a contended run that
+/// cannot raise, and a booking that never comes down.
 #[test]
 fn a_class_held_at_a_quarter_core_rises_to_its_real_use_in_one_run_and_falls_on_quiet_runs() {
     let tables = Tables::new();
@@ -251,7 +258,7 @@ fn a_class_held_at_a_quarter_core_rises_to_its_real_use_in_one_run_and_falls_on_
         booked(22_000, 4 * GIB),
     ));
     let sizes = farm_taught(&history);
-    assert_eq!(sized(&sizes, &next).0, 20_000, "after one new run");
+    assert_eq!(sized(&sizes, &next).0, 6000, "after one new run: its mean");
 
     let mut falls_after = None;
     for run in 1..=12 {
@@ -267,14 +274,14 @@ fn a_class_held_at_a_quarter_core_rises_to_its_real_use_in_one_run_and_falls_on_
             falls_after = Some(run);
         }
     }
-    assert_eq!(falls_after, Some(9), "quiet runs before the booking falls");
+    assert_eq!(falls_after, Some(1), "quiet runs before the booking falls");
 }
 
-/// Asserts the CPU of a class while agents from before the CPU peak still hold each job at its
-/// booking (a new server beside old agents): runs that report no peak, held at the cold CPU
-/// (22 cores), keep the class at it, however many, and never lower it, with the throttle
-/// counters or without them. Catches a run with no peak taken as a measurement, which brought
-/// the farm's classes down to a quarter core and never let them up.
+/// Asserts the CPU of a class while its jobs are still held at their booking (a new server
+/// beside old agents): runs held at the cold CPU (22 cores), whose mean CPU is a lower bound,
+/// keep the class at it, however many, and never lower it, with the throttle counters or
+/// without them. Catches a held run taken as a measurement, which brought the farm's classes
+/// down to a quarter core and never let them up.
 #[test]
 fn runs_still_held_at_their_booking_never_lower_a_class() {
     let tables = Tables::new();
@@ -300,8 +307,8 @@ fn runs_still_held_at_their_booking_never_lower_a_class() {
     }
 }
 
-/// Asserts the most a class's history books of a host's CPU: a class whose runs peak at all 88
-/// cores of an idle host books a quarter of them (22 cores), so four of its jobs leave a farm
+/// Asserts the most a class's history books of a host's CPU: a class whose runs use all 88
+/// cores of an idle host on average books a quarter of them (22 cores), so four of its jobs leave a farm
 /// host 8.8 cores of its 96.8 (88 at the default slack of 1.1) for other jobs, and its runs
 /// do not book a host alone. Catches a learned CPU clamped only at the host's cores.
 #[test]
@@ -335,17 +342,19 @@ fn farm_placer() -> SchedPlacer {
     placer
 }
 
-/// Asserts what one pass of the placer puts on one farm host once the history has seen each
-/// kind run with a new agent: from 240 queued steps of the mix (a link step that peaks at all
-/// 88 cores, booked a quarter of them, first among every ten), the host is charged to within
-/// one compile (its peak, 20 cores) of its CPU slack limit (96.8 cores), and within its
-/// memory, and holds every kind. Measured: 9 jobs are placed (a link step of 22 cores, two
-/// compiles of 20, three tests of 4 and three genrules of 1), charged 77.0 cores (19.8 below
-/// the limit; the next job of the queue, a compile, needs 20 and waits for the room, holding
-/// the host) and 23.9 GB of memory (22.3 GiB of 251). The host is full by CPU long before it
-/// is by memory, where the old cold memory of 16 GiB held 15 jobs. Catches CPU
-/// bookings that leave the host short of full, one class's jobs taking the host alone, and a
-/// kind that never gets a place.
+/// Asserts what one pass of the placer puts on one farm host, with no load reading yet, once
+/// the history has seen each kind run with a new agent: from 240 queued steps of the mix (a
+/// link step that uses 30 cores, booked a quarter of the host, first among every ten), each
+/// class books its runs' mean CPU, but a compile, whose runs average 6 cores and burst to 20
+/// (a heavy tail: over twice its mean), books its peak, and the host is charged to within one
+/// compile's mean (6 cores) of its CPU slack limit (96.8 cores), within its memory, and holds
+/// every kind. Worked by hand from the bookings: 10 jobs are placed (a link step of 22 cores,
+/// then three of each test of 2, genrule of 0.5 and compile of 20), booked 89.5 cores and
+/// charged 91.0 (a host with no reading charges a lease at least a core, so each genrule
+/// counts 1; the next job of the queue, a link step, needs 22 and waits for the room, holding
+/// the host), and 26.3 GB of memory. Catches CPU bookings that leave the host short of full,
+/// a compile booked at its mean that bursts the host past its cores, one class's jobs taking
+/// the host alone, and a kind that never gets a place.
 #[test]
 fn a_farm_host_is_booked_full_by_the_mix_and_holds_every_kind() {
     let tables = Tables::new();
@@ -420,35 +429,85 @@ fn a_farm_host_is_booked_full_by_the_mix_and_holds_every_kind() {
     assert!(left <= HOST.0 * 11 / 10, "{left}");
     assert!(cpu <= left, "{cpu} booked, {left} charged");
     assert!(
-        left > HOST.0 * 11 / 10 - KINDS[0].cpu_peak,
+        left > HOST.0 * 11 / 10 - KINDS[0].cores,
         "{left}: within one compile of the slack limit"
     );
     assert!(memory <= HOST.1, "{memory}");
     assert_eq!(kinds.len(), 4, "{kinds:?}");
     assert_eq!(
         (placed.len(), cpu, memory),
-        (9, 77_000, 23_890_755_584),
+        (10, 89_500, 26_306_674_688),
         "jobs placed, CPU and memory booked"
     );
 }
 
-/// Asserts what a compile that needs 20 cores for 30 seconds does to its class on a farm host
-/// (88 cores, 251 GiB, the default cold size): its one run, booked the cold 22 cores, used 20
-/// cores for 30 seconds, reported by a new agent (a peak of 20 cores over five seconds, no
-/// throttled period, 1% CPU pressure). The job's stored usage is 600 seconds of CPU time and
-/// a peak of 20_000 m; the next job of the class books 20 cores (not the cold 22, and not
-/// its mean over the run, which is also 20 here); and one pass over a single 88-core host
-/// with six such jobs queued places four (4 x 20 = 80 cores fit the 96.8-core slack limit, a
-/// fifth would make 100), charged 80 cores, which leaves the host 16.8 cores of booking
-/// room. Catches a peak the sizer does not store or learn, a booking not held at the peak,
-/// and a pass that places more jobs than the host's CPU slack allows.
+/// Two load readings of the farm host `a` as its agent sends them, `busy` millicores in use
+/// between them, the first at `from` ms on the placer's `clock` and the second five seconds
+/// later; `seq` numbers the first, and `used` is the CPU time its agent had counted by then,
+/// in microseconds: the CPU time counted at the second.
+fn measure(
+    placer: &SchedPlacer,
+    clock: &ManualClock,
+    (seq, from, used): (u64, u64, u64),
+    busy: u64,
+) -> u64 {
+    let reading = |seq: u64, used: u64| NodeLoad {
+        seq,
+        mono_usec: seq * 5_000_000,
+        cpu_usage_usec: used,
+        ..NodeLoad::default()
+    };
+    clock.set(Timestamp::from_millis(from));
+    placer.heard(&host("a"), Some(&reading(seq, used)));
+    let after = used + busy * 5000;
+    clock.set(Timestamp::from_millis(from + 5000));
+    placer.heard(&host("a"), Some(&reading(seq + 1, after)));
+    after
+}
+
+/// One pass of `placer` over `tables` with the farm host `a` open as a host whose agent reports
+/// load admission, held to its slacked capacity (96.8 cores and its memory) as the server
+/// holds such a host: the jobs it placed.
+fn pass_by_load(placer: &SchedPlacer, tables: &Tables) -> Vec<JobId> {
+    let offer = OpenHost {
+        load_admission: true,
+        capacity: Some(Capacity {
+            cpu_millis: HOST.0 * 11 / 10,
+            memory_bytes: HOST.1,
+            disk_bytes: 0,
+            accelerators: 0,
+        }),
+        ..OpenHost::default()
+    };
+    let open = BTreeMap::from([(host("a"), offer)]);
+    let hello = std::collections::BTreeSet::new();
+    let hosts = JobHosts {
+        open: &open,
+        hello: &hello,
+        tainted: &std::collections::BTreeSet::new(),
+        whole: None,
+    };
+    placer
+        .place_jobs_with(&tables.jobs, &hosts, (&Quiet, &Quiet))
+        .unwrap()
+}
+
+/// Asserts the farm's case: a compile whose one run, booked the cold 22 cores, used 2 cores on
+/// average over 30 seconds and peaked at 20 over five (a new agent's report: no throttled
+/// period, 1% CPU pressure) keeps its peak in its usage, and its class books its mean, 2
+/// cores. A farm host (88 cores) whose agent reports load admission, measured at 10 cores
+/// busy, then takes all twelve such jobs queued in one pass, where a booking of the peak took
+/// four (4 x 20 of the 96.8-core slack limit); and once it is measured at 95 cores busy,
+/// another compile waits although the bookings on it sum to 24 cores: the slack bounds the
+/// measured load. Catches a class booked its peak, which held each farm host to four Mojo
+/// compiles while it used a tenth of its cores.
 #[test]
-fn a_compile_that_needs_20_cores_for_30_seconds_books_20_and_four_fit_a_host() {
+fn a_compile_that_peaks_at_20_cores_books_its_mean_and_a_host_with_measured_room_takes_twelve() {
     let tables = Tables::new();
     let class = "zig-cc.compile";
     let spec = || step_spec(class, "zig-cc");
     let end = exit_with(ResourceUsage {
-        cpu_time: Duration::from_secs(600),
+        cpu_time: Duration::from_secs(60),
         peak_memory_bytes: 2 * GIB,
         cpu_throttle: UNCAPPED,
         cpu_pressure_some: Some(Duration::from_millis(300)),
@@ -467,49 +526,65 @@ fn a_compile_that_needs_20_cores_for_30_seconds_books_20_and_four_fit_a_host() {
         Duration::from_secs(30),
     );
     let usage = run.result.as_ref().unwrap().usage.unwrap();
-    assert_eq!(usage.cpu_time, Duration::from_secs(600));
-    assert_eq!(usage.cpu_peak.unwrap().millicores, 20_000);
+    assert_eq!(
+        usage.cpu_peak.unwrap().millicores,
+        20_000,
+        "the peak is kept"
+    );
 
     let sizes = farm_taught(&[(run, cold)]);
     let next = queued("compile-next", spec());
-    assert_eq!(sized(&sizes, &next).0, 20_000, "the next job's CPU");
+    assert_eq!(sized(&sizes, &next).0, 2000, "the next job's CPU: the mean");
 
-    let placer = farm_placer();
+    let clock = ManualClock::new(Timestamp::from_millis(0));
+    let placer = SchedPlacer::new(Settings::default(), clock.clone());
+    let caps = BTreeMap::from([("arch".to_owned(), "x86_64".to_owned())]);
+    let resources = Resources::new(HOST.0, HOST.1, 0, None).unwrap();
+    placer
+        .engine()
+        .host_up(&host("a"), &Shape::new(resources, caps), at(0));
     placer.learn_ended(&tables.jobs).unwrap();
-    for n in 0..6 {
+    let queue = |name: &str| {
         let new = NewJob {
-            id: Some(JobId::parse(&format!("queued-{n}")).unwrap()),
+            id: Some(JobId::parse(name).unwrap()),
             spec: spec(),
             priority: 0,
             client: None,
         };
         tables.jobs.insert_queued(new).unwrap();
+    };
+    for n in 0..12 {
+        queue(&format!("queued-{n:02}"));
     }
-    let placed = pass(&placer, &tables);
-    assert_eq!(placed.len(), 4, "4 x 20 cores fit 96.8, a fifth does not");
+    let used = measure(&placer, &clock, (1, 5000, 0), 10_000);
+    let placed = pass_by_load(&placer, &tables);
+    assert_eq!(placed.len(), 12, "every one: a peak booking placed four");
     for id in &placed {
         let Booked::Shape { cpu_millis, .. } =
             tables.jobs.get_allocation(id).unwrap().unwrap().booked
         else {
             panic!("a share")
         };
-        assert_eq!(cpu_millis, 20_000);
+        assert_eq!(cpu_millis, 2000);
     }
-    let left = placer.engine().load_of("a").unwrap().left_cpu_millis;
-    assert_eq!(left, 80_000, "charged CPU");
-    assert_eq!(HOST.0 * 11 / 10 - left, 16_800, "booking room left");
+
+    measure(&placer, &clock, (3, 15_000, used), 95_000);
+    queue("late");
+    assert!(pass_by_load(&placer, &tables).is_empty(), "95 + 2 > 96.8");
+    let late = tables.jobs.get_job(&JobId::parse("late").unwrap()).unwrap();
+    assert_eq!(late.unwrap().state, js_jobs::JobState::Queued);
 }
 
 /// Asserts the source and size of a young target when its kind gives no figure: a kind (and so
 /// the client's whole history) whose runs reach the host is no fallback, so a target of it
 /// whose own runs peaked at 6 GiB books its own peak with the margin (`class`, 7.5 GiB), one
-/// whose runs peaked at 1 GiB books the cold memory (`cold`, 4 GiB), and the target with five
+/// whose runs peaked at 1 GiB books its own too (`class`, 1.5 GiB), and the target with five
 /// runs of 220 GiB on a 251 GiB host, whose estimate with the margin reaches the host, books
 /// the whole host (`over-cap`). Under another client, a target of a kind that gives a figure
 /// books the kind's (`fallback`). Catches a target booked below a peak of its own, and a settled
 /// target past the host given a share.
 #[test]
-fn a_young_target_books_the_larger_of_its_own_peak_and_its_fallback_and_a_large_one_the_host() {
+fn a_young_target_books_its_own_peak_whatever_its_kind_and_a_large_one_the_host() {
     let tables = Tables::new();
     let mut history = Vec::new();
     let mut run = |(id, client): (&str, Option<&str>), class: &str, peak: u64| {
@@ -530,7 +605,7 @@ fn a_young_target_books_the_larger_of_its_own_peak_and_its_fallback_and_a_large_
     let big = sized(&sizes, &next("kind.mix.big"));
     assert_eq!((big.1, big.2), (30 * 256 * (1 << 20), SizedFrom::Class));
     let small = sized(&sizes, &next("kind.mix.small"));
-    assert_eq!((small.1, small.2), (4 * GIB, SizedFrom::Cold));
+    assert_eq!((small.1, small.2), (6 * 256 * (1 << 20), SizedFrom::Class));
     let huge = sized(&sizes, &next("kind.mix.huge"));
     assert_eq!((huge.1, huge.2), (HOST.1, SizedFrom::OverCap));
     let other = queued_for("other", "kind.mix.fresh");

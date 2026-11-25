@@ -305,3 +305,52 @@ fn a_host_with_no_capacity_always_fits_and_a_whole_host_fits_an_empty_host_only(
     assert!(!room.fits(&host("a"), shape(1, 1, 0)));
     room.add(&host("c"), shape(1, 1, 0));
 }
+
+/// Asserts what the ledger says of a host that has no room by memory: with 6 of 8 GiB booked, a
+/// share of 3 GiB is refused for booked memory with the figures 6 GiB counted, 3 GiB new and
+/// 8 GiB allowed, and a share of exactly the 2 GiB left is not; a share refused for CPU alone, a
+/// whole host, a host with no capacity and one the ledger does not know have no memory refusal,
+/// and a share whose memory would overflow the sum is refused for memory. Catches a
+/// host full by memory refused with nothing said, and a host refused for CPU said to be full of
+/// memory.
+#[test]
+fn a_host_out_of_memory_by_its_bookings_has_a_booked_memory_refusal_and_no_other_does() {
+    let rig = Rig::new();
+    let held = rig.hold("held", "a", shape(7000, 6 * GIB, 0));
+    let open = BTreeMap::from([
+        (host("a"), offer(capacity(8000, 8 * GIB, 0), false)),
+        (host("b"), OpenHost::default()),
+    ]);
+    let room = Room::of(&open, std::slice::from_ref(&held));
+    let refusal = |kind, counted, new, limit| js_sched::Refusal {
+        kind,
+        counted,
+        new,
+        limit,
+        measured_cpu_millis: None,
+    };
+    assert_eq!(
+        room.memory_refusal(&host("a"), shape(1, 3 * GIB, 0)),
+        Some(refusal(
+            js_sched::RefusalKind::BookedMemory,
+            6 * GIB,
+            3 * GIB,
+            8 * GIB
+        ))
+    );
+    assert_eq!(room.memory_refusal(&host("a"), shape(1, 2 * GIB, 0)), None);
+    assert!(!room.fits(&host("a"), shape(2000, GIB, 0)), "full of CPU");
+    assert_eq!(room.memory_refusal(&host("a"), shape(2000, GIB, 0)), None);
+    assert_eq!(room.memory_refusal(&host("a"), Booked::WholeHost), None);
+    assert_eq!(room.memory_refusal(&host("b"), shape(1, u64::MAX, 0)), None);
+    assert_eq!(room.memory_refusal(&host("c"), shape(1, u64::MAX, 0)), None);
+    assert_eq!(
+        room.memory_refusal(&host("a"), shape(1, u64::MAX, 0)),
+        Some(refusal(
+            js_sched::RefusalKind::BookedMemory,
+            6 * GIB,
+            u64::MAX,
+            8 * GIB
+        ))
+    );
+}

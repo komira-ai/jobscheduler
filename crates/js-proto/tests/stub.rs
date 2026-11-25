@@ -20,8 +20,8 @@ use js_proto::v1::{
     JobTimes, ListHostsRequest, ListHostsResponse, ListJobsRequest, ListJobsResponse,
     ListPoolsRequest, ListPoolsResponse, ListProvidersRequest, ListProvidersResponse, Machine,
     Memory, Pool, Provider, ProviderCatalog, ProviderCheck, Refusal, RefusalCode, ResourceUsage,
-    ResultReason, Shape, SubmitJobRequest, SubmitJobResponse, UncordonHostRequest,
-    UncordonHostResponse, UsageRecord, WholeHostOutcome,
+    ResultReason, RetireHostRequest, RetireHostResponse, Shape, SubmitJobRequest,
+    SubmitJobResponse, UncordonHostRequest, UncordonHostResponse, UsageRecord, WholeHostOutcome,
 };
 use tokio::io::DuplexStream;
 use tonic::codegen::Service;
@@ -84,6 +84,7 @@ enum Call {
     CordonHost(CordonHostRequest),
     UncordonHost(UncordonHostRequest),
     ClearHostTaint(ClearHostTaintRequest),
+    RetireHost(RetireHostRequest),
     ListPools(ListPoolsRequest),
     ListProviders(ListProvidersRequest),
     GetUsage(GetUsageRequest),
@@ -196,6 +197,16 @@ impl JobService for Recording {
         )
     }
 
+    async fn retire_host(
+        &self,
+        request: Request<RetireHostRequest>,
+    ) -> Result<Response<RetireHostResponse>, Status> {
+        self.record(
+            Call::RetireHost(request.into_inner()),
+            answers::retire_host(),
+        )
+    }
+
     async fn list_pools(
         &self,
         request: Request<ListPoolsRequest>,
@@ -285,6 +296,12 @@ mod requests {
     pub fn clear_host_taint() -> ClearHostTaintRequest {
         ClearHostTaintRequest {
             host_id: "tainted-host".to_owned(),
+        }
+    }
+
+    pub fn retire_host() -> RetireHostRequest {
+        RetireHostRequest {
+            host_id: "lost-host".to_owned(),
         }
     }
 
@@ -448,6 +465,10 @@ mod answers {
         }
     }
 
+    pub fn retire_host() -> RetireHostResponse {
+        RetireHostResponse { retired: true }
+    }
+
     pub fn list_pools() -> ListPoolsResponse {
         ListPoolsResponse {
             pools: vec![Pool {
@@ -514,6 +535,7 @@ mod answers {
                 whole_host: WholeHostOutcome::Drained.into(),
                 mark_give_ups: 1,
                 estimated_run_ms: Some(55_000),
+                cpu_series: None,
             }],
             next_page_token: "usage-page-3".to_owned(),
         }
@@ -530,7 +552,7 @@ fn code<T>(reply: Result<Response<T>, Status>) -> Code {
     reply.map(|_| ()).expect_err("the call fails").code()
 }
 
-/// Asserts that each of the 13 methods carries its request to the stub's own handler with
+/// Asserts that each of the 14 methods carries its request to the stub's own handler with
 /// every field intact, and carries that handler's answer back with every field intact.
 /// Catches a field dropped on the way and a method wired to another method's handler.
 #[tokio::test]
@@ -578,6 +600,10 @@ async fn every_method_round_trips_through_a_stub() {
         answers::clear_host_taint()
     );
     assert_eq!(
+        answer(client.retire_host(requests::retire_host()).await),
+        answers::retire_host()
+    );
+    assert_eq!(
         answer(client.list_pools(ListPoolsRequest {}).await),
         answers::list_pools()
     );
@@ -602,6 +628,7 @@ async fn every_method_round_trips_through_a_stub() {
             Call::CordonHost(requests::cordon_host()),
             Call::UncordonHost(requests::uncordon_host()),
             Call::ClearHostTaint(requests::clear_host_taint()),
+            Call::RetireHost(requests::retire_host()),
             Call::ListPools(ListPoolsRequest {}),
             Call::ListProviders(ListProvidersRequest {}),
             Call::GetUsage(requests::get_usage()),
@@ -678,7 +705,7 @@ impl JobService for OnlyGetJob {
 }
 
 /// Asserts that a server implementing only `GetJob` answers it and answers each of the
-/// other 12 methods `UNIMPLEMENTED`, so a partial server fails closed.
+/// other 13 methods `UNIMPLEMENTED`, so a partial server fails closed.
 #[tokio::test]
 async fn unimplemented_default_methods_answer_unimplemented() {
     let mut client = connect(OnlyGetJob).await;
@@ -700,9 +727,10 @@ async fn unimplemented_default_methods_answer_unimplemented() {
         code(client.cordon_host(requests::cordon_host()).await),
         code(client.uncordon_host(requests::uncordon_host()).await),
         code(client.clear_host_taint(requests::clear_host_taint()).await),
+        code(client.retire_host(requests::retire_host()).await),
         code(client.list_pools(ListPoolsRequest {}).await),
         code(client.list_providers(ListProvidersRequest {}).await),
         code(client.get_usage(requests::get_usage()).await),
     ];
-    assert_eq!(codes, [Code::Unimplemented; 12]);
+    assert_eq!(codes, [Code::Unimplemented; 13]);
 }

@@ -113,3 +113,38 @@ fn a_start_takes_the_short_hold_for_the_window_from_when_a_hold_first_saw_it() {
     assert!(!starts.young(&a, &[], again));
     assert!(starts.young(&a, &["job-2"], again + 1));
 }
+
+/// Asserts how a host's beats that list a young start are paced: the first of a host is
+/// answered at once; after an answer at `t`, one at `t` waits the whole spacing, one 300 ms later
+/// the rest of it, and one a whole spacing later or more nothing; another host is paced on its
+/// own; a later answer restarts the spacing; the record keeps only the hosts whose spacing still
+/// lasts. It catches pacing that holds the first start of an idle host (its `running` then waits
+/// for the hold), pacing that lets a burst of starts answer every beat at once, one host's
+/// answers spacing another's, and a record that grows with every host that ever started a job.
+#[test]
+fn beats_with_a_start_are_answered_at_most_once_per_spacing_per_host() {
+    let starts = Starts::default();
+    let spacing = Duration::from_millis(1_000);
+    let (a, b) = (host("host-a"), host("host-b"));
+    assert_eq!(starts.paced(&a, 5_000, spacing), Duration::ZERO);
+    starts.answered(&a, 5_000, spacing);
+    assert_eq!(starts.paced(&a, 5_000, spacing), spacing);
+    assert_eq!(starts.paced(&a, 5_300, spacing), Duration::from_millis(700));
+    assert_eq!(starts.paced(&a, 6_000, spacing), Duration::ZERO);
+    assert_eq!(starts.paced(&a, 9_000, spacing), Duration::ZERO);
+    assert_eq!(starts.paced(&b, 5_000, spacing), Duration::ZERO);
+    starts.answered(&a, 5_600, spacing);
+    assert_eq!(starts.paced(&a, 6_000, spacing), Duration::from_millis(600));
+    assert_eq!(
+        starts.paced(&a, 0, Duration::MAX),
+        Duration::from_millis(u64::MAX)
+    );
+    assert_eq!(starts.paced_hosts(), 1);
+    starts.answered(&b, 6_599, spacing);
+    assert_eq!(starts.paced_hosts(), 2);
+    starts.answered(&b, 6_600, spacing);
+    assert_eq!(starts.paced_hosts(), 1);
+    assert_eq!(starts.paced(&a, 6_600, spacing), Duration::ZERO);
+    starts.answered(&a, 0, Duration::MAX);
+    assert_eq!(starts.paced_hosts(), 2);
+}

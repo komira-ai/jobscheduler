@@ -35,6 +35,7 @@ mod class;
 mod clock;
 pub mod cordon;
 mod cpu_ceiling;
+mod cpu_series;
 mod digest;
 pub mod env;
 mod ids;
@@ -42,6 +43,7 @@ mod isa;
 mod job;
 mod labels;
 mod memory;
+mod memory_series;
 mod network;
 pub mod path;
 mod queue;
@@ -64,6 +66,7 @@ pub use booking::{Candidate, Held, HostCapacity};
 pub use class::{Admission, ClassError, ResourceClass};
 pub use clock::{Clock, ManualClock, Monotonic, Timestamp};
 pub use cpu_ceiling::{CpuCeiling, CpuCeilingError};
+pub use cpu_series::{CPU_SERIES_MAX_POINTS, CpuSeries};
 pub use digest::{BundleRef, BundleRefError, DigestRef, DigestRefError};
 pub use ids::{
     ClassId, CordonHolder, HostId, IdError, LeaseId, ProviderId, RequestId, RequestIdError,
@@ -75,6 +78,7 @@ pub use job::{
 };
 pub use labels::{LabelError, Labels, RESERVED_PREFIX, ReservedKey};
 pub use memory::{MEMORY_PERCENT_KEY, MemoryHeadroom, MemoryPercent, MemoryPercentError};
+pub use memory_series::{MEMORY_SERIES_BYTES_PER_POINT, MEMORY_SERIES_MAX_POINTS, MemorySeries};
 pub use network::{JobNetwork, PortMap, UnknownJobNetwork};
 pub use queue::{JobEventKind, QueueCode, QueueNote};
 pub use request::{Request, RequestError};

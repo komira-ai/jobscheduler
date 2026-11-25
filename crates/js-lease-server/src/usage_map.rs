@@ -64,8 +64,8 @@ pub(crate) fn load_in(load: &NodeLoad) -> Mapped {
         load: LoadIn {
             seq: load.seq,
             mono_usec: load.mono_usec,
-            cpu_usage_usec: load.cpu_usage_usec,
-            working_set_bytes: load.working_set_bytes,
+            cpu_usage_usec: load.node_cpu_usec(),
+            working_set_bytes: load.node_memory_bytes().0,
             actions_cpu_limited: load.actions_cpu_limited,
             covered,
             minutes,
@@ -104,6 +104,7 @@ mod tests {
     fn the_registry_converter_and_the_usage_converter_agree() {
         let mut load = wire();
         load.seq = u64::MAX;
+        load.host_cpu_usec = Some(88_000_000);
         load.active_file_bytes = 12_345;
         load.actions_cpu_limited = false;
         load.covered.push("5-6".into());
@@ -126,13 +127,39 @@ mod tests {
         assert_eq!(ours, theirs);
     }
 
+    /// Asserts a load that sends the host's non-file memory (`host_nonfile_bytes`) reaches the
+    /// plain form with that as its working set, whatever the cgroup's working set and active
+    /// file pages say, that one without it keeps the cgroup's working set, and that the two
+    /// converters still agree on both (the registry's active file pages being 0 when the host's
+    /// figure is sent). It catches a placement that counts the cgroup's page cache when the
+    /// host sent what it holds, and one converter taking the host's figure while the other does
+    /// not.
+    #[test]
+    fn the_working_set_is_the_hosts_non_file_memory_when_the_agent_sends_it() {
+        let mut load = wire();
+        load.active_file_bytes = 777;
+        assert_eq!(load_in(&load).load.working_set_bytes, 1 << 30);
+        load.host_nonfile_bytes = Some(5 << 30);
+        load.vet().unwrap();
+        assert_eq!(load_in(&load).load.working_set_bytes, 5 << 30);
+        let ours = js_registry::node_load(&load).unwrap();
+        assert_eq!(
+            (ours.memory_working_set_bytes, ours.memory_active_file_bytes),
+            (5 << 30, 0)
+        );
+        let theirs = js_types::sched::usage::NodeLoad::from(load_in(&load).load);
+        assert_eq!(ours, theirs);
+    }
+
     fn wire() -> NodeLoad {
         NodeLoad {
             seq: 7,
             mono_usec: 6_000_000,
             cpu_usage_usec: 5_000_000,
+            host_cpu_usec: None,
             working_set_bytes: 1 << 30,
             active_file_bytes: 0,
+            host_nonfile_bytes: None,
             actions_cpu_limited: true,
             covered: vec!["3-4".into()],
             clocks: vec![LeaseClock {
@@ -146,6 +173,8 @@ mod tests {
                 cpu_peak_window_millis: 2500,
                 ws_max_bytes: 1 << 29,
             }],
+            second_cpu_millis: Vec::new(),
+            second_cpu_pressure_some_permille: Vec::new(),
             dropped: LoadDrops::default(),
         }
     }
@@ -183,6 +212,17 @@ mod tests {
                 working_set_max_bytes: 1 << 29,
             }]
         );
+    }
+
+    /// Asserts that the node minutes are built from the whole host's CPU when the agent sends
+    /// it (`host_cpu_usec`), and from the actions cgroup's when it does not (an agent of an
+    /// earlier release). It catches node rows that keep counting only the jobs' CPU.
+    #[test]
+    fn the_node_cpu_is_the_hosts_when_the_agent_sends_it() {
+        let mut load = wire();
+        assert_eq!(load_in(&load).load.cpu_usage_usec, 5_000_000);
+        load.host_cpu_usec = Some(42_000_000);
+        assert_eq!(load_in(&load).load.cpu_usage_usec, 42_000_000);
     }
 
     /// Asserts that a record whose lease id is not `<term>-<seq>` in canonical decimal is

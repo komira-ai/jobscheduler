@@ -1,6 +1,7 @@
 //! The runtime conformance suite (`tests/runtime_suite`) over `FakeRuntime`: every case
 //! runs in every test run. The same cases run over `CrunRuntime` and a real `crun` in the
-//! `crun_runtime` test binary.
+//! `crun_runtime` test binary, but the kill at a run's own memory limit, which is this one's
+//! own.
 
 use std::cell::RefCell;
 use std::fs;
@@ -9,7 +10,8 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use js_agent::lifecycle::{
-    Capacity, Config, DirLayout, MountRoots, RunHandle, RunSpec, ScratchRoot, StateRoot,
+    Capacity, Config, DirLayout, Exit, MountRoots, RunHandle, RunSpec, ScratchRoot, StateRoot,
+    Status,
 };
 use js_agent_wire::LogTail;
 use js_testkit::dir::TestDir;
@@ -140,6 +142,24 @@ impl Subject for FakeSubject {
 }
 
 conformance!(fake_subject, any());
+
+/// Proves that a program the kernel kills at the run's own memory booking exits 137 with
+/// the memory flag set, the answer the server retries with more memory on. Catches a
+/// runtime that reports the kill as an ordinary exit. The case of a runtime that holds a run at
+/// its booking, which the shared list leaves out (the crun runtime writes no memory limit): the
+/// fake still models one.
+#[test]
+fn a_kill_at_the_runs_own_memory_limit_is_flagged() {
+    let s = &mut fake_subject("a_kill_at_the_runs_own_memory_limit_is_flagged");
+    let id = runtime_suite::begin(s, "r1", Program::Hog { own_limit: true });
+    s.settled(&id);
+    let want = Status::Exited(Exit {
+        code: 137,
+        oom_killed: true,
+    });
+    assert_eq!(runtime_suite::poll(s, &id), want);
+    runtime_suite::clean_up(s);
+}
 
 /// A runtime that gives only what the trait requires.
 struct Bare;

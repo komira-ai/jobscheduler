@@ -310,13 +310,13 @@ impl Rig {
 }
 
 /// Asserts a job from the submitter's side to the agent's and back: the job is submitted
-/// (201) and, with the host idle, reads placed at once (the submit call places it); the start
+/// (201, queued) and, with the host idle, the server's placement poller places it; the start
 /// reaches the agent in an answer of the dispatch poll (not in a heartbeat's reply) and the
 /// agent creates the container; the heartbeat after lists it, is held (the agent beats
 /// again at once) and the job reads running; with the whole budget booked a second job stays
 /// queued; when the container exits the next heartbeat carries the result, which the server
 /// records (succeeded, reason exit) and acknowledges, and the agent drops it; the second job
-/// is then placed on the budget that came back and reads running. It catches a submit that
+/// is then placed on the budget that came back and reads running. It catches a poller that
 /// leaves a job on an idle host queued, a start that never reaches the container runtime, a
 /// result that never reaches the server or is never acknowledged, a budget that never
 /// returns, and a reply with a start that is held, or one with nothing that is not.
@@ -324,7 +324,7 @@ impl Rig {
 fn a_job_goes_through_the_agent_and_its_result_comes_back() {
     let rig = rig("jobs_e2e_flow", &["--drain-wait", "0"]);
     let job = rig.queued(4000);
-    assert_eq!(rig.view(&job).0, "JOB_STATE_PLACED");
+    assert_eq!(rig.server.left_the_queue(&job), "JOB_STATE_PLACED");
 
     rig.delivered();
     assert_eq!(rig.machine.world.created(), [job.as_str()]);
@@ -398,6 +398,7 @@ fn the_agent_sends_its_load_to_a_real_server() {
     let run = rig.queued(1000);
     let files = &rig.machine.files;
     files.set(&format!("{slice}/cpu.stat"), "usage_usec 10\n");
+    files.set("/proc/stat", "cpu  1 0 0 0 0 0 0 0\n");
     files.set(&format!("{slice}/memory.current"), "4096\n");
     files.set(&format!("{slice}/cpu.max"), "max 100000\n");
     files.set(

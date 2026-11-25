@@ -2,7 +2,7 @@
 //! jobs and stored marks of the tables handed over at each pass, and the writes the engine
 //! answers. The clocks are the test's: milliseconds passed by hand.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use js_agent_wire::RefusalReason;
@@ -34,6 +34,7 @@ fn pass(
         marks,
         hello: &both,
         open: &both,
+        tainted: &BTreeSet::new(),
         settings,
         claim_by: at(15_000),
     };

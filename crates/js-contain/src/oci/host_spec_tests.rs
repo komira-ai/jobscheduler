@@ -146,14 +146,15 @@ fn a_host_container_is_in_its_leases_cgroup_with_the_contained_limits() {
     assert_eq!(host["process"]["oomScoreAdj"], 0);
 }
 
-/// Catches a host job whose cgroup reads `max` for `memory.max` while a contained job's
-/// reads its booking: a host container's own cgroup gets the same files as a contained
-/// one's for the same limits (a host job has no cgroup namespace, but a tool that follows
-/// `/proc/self/cgroup` reads the `ctr` cgroup's files). Neither gets a `cpu.max`.
+/// Catches a host job whose cgroup gets a limit a contained job's does not: a host
+/// container's own cgroup gets the same files as a contained one's for the same limits (a
+/// host job has no cgroup namespace, but a tool that follows `/proc/self/cgroup` reads the
+/// `ctr` cgroup's files), with an operator's CPU ceiling repeated in both. Neither gets a
+/// `memory.max`.
 #[test]
-fn a_host_container_repeats_the_booking_like_a_contained_one() {
+fn a_host_container_gets_the_cgroup_files_of_a_contained_one() {
     let mut contained = contained();
-    contained.limits.memory_bytes = Some(3 << 30);
+    contained.limits.cpu_ceiling_millis = Some(3000);
     let host = ContainerSpec {
         isolation: Isolation::Host,
         exec_root: "/scratch/runs/r1".to_owned(),
@@ -166,7 +167,7 @@ fn a_host_container_repeats_the_booking_like_a_contained_one() {
         unified(&host),
         json!({
             "memory.oom.group": "1",
-            "memory.max": (3u64 << 30).to_string(),
+            "cpu.max": "300000 100000",
         })
     );
     assert_eq!(unified(&host), unified(&contained));
