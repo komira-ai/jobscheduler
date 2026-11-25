@@ -286,7 +286,7 @@ impl Summaries {
     }
 
     /// The memory the largest recent samples of `key` ask for on `now`, whatever their
-    /// number or dispersion: `round_up_256MiB(max(1.2 * long_max + 128 MiB, held,
+    /// number or dispersion: `round_up_256MiB(max(1.2 * max(long_max, held) + 128 MiB,
     /// floor))`, at least [`crate::MIN_MEMORY`], over the fresh summaries of the key's
     /// levels (the larger of L1 and L2). `None` when no fresh summary holds a memory
     /// sample. It ignores the default booking, [`N_MIN`] and the mixed rule, and it can

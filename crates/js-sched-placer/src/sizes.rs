@@ -94,8 +94,15 @@
 //!   no peak, and a success with no peak teaches the memory nothing; its wall time is from its
 //!   start to its end;
 //! - a success's peak is a measurement whatever its booking: the booking is no limit, so a peak
-//!   at or above it is what the run used, and a peak above it raises the class's next booking
-//!   at once (with the margin);
+//!   above it is what the run used, and raises the class's next booking at once (with the
+//!   margin);
+//! - but a success whose group's `memory.peak` came within 5% of its booking and stayed within
+//!   it reached its booking: a host that holds a job at its booking (the docker and podman
+//!   runtime's `--memory`, whose limit counts the page cache the non-file peak leaves out)
+//!   held it there, so its peak does not show what it needed. The estimator books its class a
+//!   step above the booking next (`1.2 x` the booking plus 128 MiB, rounded up to 256 MiB), and
+//!   again while its runs keep reaching it, up to the whole host
+//!   ([`js_sizing::Run::limit_hits`]);
 //! - a run under a second gives its peak (its series' when a poll sampled it, else the group's
 //!   `memory.peak`, which is exact) and no CPU sample;
 //! - its CPU contention is its own: how long some task of its group waited for a CPU per unit
@@ -164,7 +171,8 @@ const CPU_STEP: u64 = 250;
 /// The milliseconds of a day.
 const DAY_MILLIS: u64 = 86_400_000;
 
-/// A mean CPU within this many hundredths of the CPU a run was held to was held at it.
+/// A mean CPU within this many hundredths of the CPU a run was held to was held at it, and
+/// a group's memory peak within this many hundredths of its booking reached it.
 const AT_LIMIT_PERCENT: u64 = 95;
 
 /// A run throttled in at least one period in this many was held at its CPU ceiling (5%).
@@ -634,14 +642,15 @@ fn run_of(job: &JobRecord, booked: Booked) -> Option<(Run, Day)> {
         outcome,
         wall_us,
         peak_memory_bytes: peak,
-        // A booking is no limit (a contained job has no `memory.max`), so a run's peak is a
-        // measurement whatever its booking, and one above the booking raises the class's next
-        // booking at once. The estimator derives a limit from the booking it is given, so a
-        // run that was not killed is given none; a kill (an agent that still held a job at a
-        // limit) keeps its booking, which its floor is raised from.
-        booked_memory_bytes: if killed { memory_bytes } else { 0 },
+        // A run's peak is a measurement whatever its booking, unless the run reached its
+        // booking (below); a kill keeps its booking, which its floor is raised from.
+        booked_memory_bytes: memory_bytes,
         raised_memory_bytes: killed.then(|| memory_bytes.saturating_mul(2)),
-        limit_hits: 0,
+        limit_hits: u64::from(
+            result
+                .usage
+                .is_some_and(|usage| reached(usage, memory_bytes)),
+        ),
         swap_peak_bytes: 0,
         cpu_usage_us: cpu_us,
         node_cpu_pressure_permille: result.usage.map(|usage| contention(usage, wall)),
@@ -656,6 +665,16 @@ fn run_of(job: &JobRecord, booked: Booked) -> Option<(Run, Day)> {
             .map(|peak| u32::try_from(peak.millicores).unwrap_or(u32::MAX)),
     };
     Some((run, day_of_millis(millis(ended.as_duration()))))
+}
+
+/// Whether a run booked `booked` bytes reached its booking: its group's `memory.peak` came
+/// within [`AT_LIMIT_PERCENT`] of the booking and stayed within it, as a host that holds a job
+/// at its booking leaves it. A booking of 0 is never reached, and a group peak past the
+/// booking is a run that used more than it booked, which no host held: a measurement.
+fn reached(usage: ResourceUsage, booked: u64) -> bool {
+    let peak = u128::from(usage.peak_memory_bytes);
+    let booked = u128::from(booked);
+    (booked > 0) & (peak <= booked) & (peak * 100 >= booked * u128::from(AT_LIMIT_PERCENT))
 }
 
 /// The most CPU a class books under `bounds`: a [`HOST_CPU_SHARE`]th of the most cores a host

@@ -13,7 +13,7 @@ Constants that are scattered today become one value:
 
 ```rust
 struct SizingPolicy {
-    limit_of: fn(booking) -> limit,   // today memory_max: 1.5 x + 512 MiB
+    limit_of: fn(booking) -> limit,   // build hosts: 1.5 x + 512 MiB; js-agent: none, or the booking (docker, podman)
     round: u64, min: u64,             // 256 MiB steps
     slack_frac: Ratio, headroom: u64, // 20% + 128 MiB
     n_min: usize,                     // 5; gates lowering below the default booking
@@ -34,9 +34,9 @@ struct SizingPolicy {
 (formerly 11.3, dropped with the ucdk realization: [ucdk.md](ucdk.md)).
 
 ## 7.3 One limit rule
-The 1.5x + 512 MiB rule lives in `cgroup.rs`, in `memory_max()` in the estimator, and in the native driver. The Start `limits` field plus
-`SizingPolicy::limit_of` make the scheduler the one source: the scheduler computes the limit, sends it, and the estimator's censoring
-decision ("did this run hit its limit") uses the same function. A provider may still enforce a stricter limit and say so in usage.
+The build-host 1.5x + 512 MiB rule lives in `cgroup.rs` (`LeasePolicy::BuildHost`) and in the native driver; the estimator derives no
+limit from a booking. The Start `limits` field plus `SizingPolicy::limit_of` make the scheduler the one source: the scheduler computes
+the limit, sends it, and the job service's decision ("did this run reach its limit", `Run::limit_hits`) uses the same limit. A provider may still enforce a stricter limit and say so in usage.
 
 ## 7.4 Ladder per class
 `--memory-ladder-gib` is server-wide. The generic form is per resource class: an unseen request climbs its class's ladder; an
@@ -45,7 +45,7 @@ The cap is an explicit core query, `cap_of(request)`, which keeps `Scheduler::me
 cordoned or not, that serves the request's kind, platform, CPU and GPU needs, and always the pool the killed run used. It is not
 Fit's candidate set, which leaves cordoned pools out; a `cap_of` built on Fit's view would change the rung a killed run climbs to
 during a cordon or drain. For a pool that scales, the cap is the largest shape the pool can acquire (the memory of
-its biggest configured shape, 5.7), not the live fleet. Because the limit is 1.5x + 512 MiB, a 12 GiB booking has an 18.5 GiB limit
+its biggest configured shape, 5.7), not the live fleet. Because the build-host limit is 1.5x + 512 MiB, a 12 GiB booking has an 18.5 GiB limit
 and the next rung (16 GiB) is below the limit that just failed; whether to move to "above the limit" is D4, not part of the extraction.
 The scheduler interface stays `set_size_key`, `key_floor_bound`, `lower_key_floor`, `restore_floors`
 (`crates/kbf-sched/src/scheduler/memory.rs`). The ladder becomes a plugin behind `RetryPolicy`, because `memory.rs` today mixes retry
@@ -152,10 +152,16 @@ its start (`taught`) counts the runs that gave a class a sample, not the jobs it
 **What a run teaches.** When a pass sees a job's allocation freed, it reads the job once and gives the estimator one run: an exit 0 is
 a success; any other exit, a wall limit or a failed input a failure, which teaches the memory nothing; a stop for memory is a kill at
 the job's own limit, which raises the class's floor to twice the booking it died at (only an agent that still held a job at its
-booking reports it). A success's peak is a measurement whatever its booking: the agent writes no `memory.max`, so the placer no longer
-counts a success whose peak came within 5% of its booking as having hit its limit and gives the estimator no limit for a run that
-was not killed. A peak at or above the booking is taken as it is, and a run that used more than its booking raises the class's next
-booking at once, with the margin. A run under a second gives a memory sample (its series' peak when a poll sampled it, else the
+booking reports it); the kill is a sample of at least that booking. A success's peak is a measurement whatever its booking: the crun
+runtime writes no `memory.max`, so a peak above the booking is taken as it is, and a run that used more than its booking raises the
+class's next booking at once, with the margin. But a success whose group's `memory.peak` came within 5% of its booking and stayed
+within it reached its booking: a host that holds a job at its booking (the docker and podman runtime's `--memory`, whose limit counts
+the page cache that the non-file peak leaves out) held it there, so its peak does not show what it needed. The placer counts it as
+having reached its booking (`Run::limit_hits`), and the estimator takes it as a held sample of the larger of its peak and its booking,
+sized with the same margin: its class books a step above the booking next (`1.2 x` the booking plus 128 MiB, rounded up to 256 MiB),
+steps again while its runs keep reaching it, and stays there once they fit. A held sample is kept below the host, so the step stops
+at the whole host (`over-cap`). A run's swap peak, which the agent reports, is not in the job record, so a run that a host short of
+memory squeezed into swap is not yet counted. A run under a second gives a memory sample (its series' peak when a poll sampled it, else the
 group's `memory.peak`, exact whatever the run's length) and no CPU sample: the placer hands the estimator a one-second wall and no CPU time for it. A run's CPU sample is its mean: its CPU time over its wall time, which every run
 reports. The most cores its group used over any five seconds of the run, which the agent measures from the group's `cpu.stat` every
 second and reports beside the CPU time (`cpu_peak`), is kept beside the sample and is not the sample: it books a class only when the class's peaks are a heavy tail (7.10). A run's sample is a measurement only when its own contention is low and nothing held it: its
