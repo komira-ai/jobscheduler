@@ -147,7 +147,8 @@ fn numbers(set: &FileDescriptorSet, name: &str) -> Vec<(String, i32)> {
 }
 
 /// Asserts that the queue status fields are additions in the schema: the golden holds each
-/// row once, `Job` numbers them 33 to 36 after the shipped fields with no number used twice,
+/// row once, `Job` numbers them 33 to 36 after the shipped fields with no number used twice
+/// (the attempt fields after them are `tests/retry.rs`'s),
 /// and the two enums number their values in order from an unspecified zero. Catches a
 /// renumbered or reused field number and a value renumbered or inserted before another.
 #[test]
@@ -165,7 +166,7 @@ fn the_queue_status_fields_are_numbered_after_the_shipped_ones() {
     assert_eq!(used.len(), job.len(), "a number is used twice: {job:?}");
     let added: Vec<(&str, i32)> = job
         .iter()
-        .filter(|(_, number)| *number > 32)
+        .filter(|(_, number)| (33..=36).contains(number))
         .map(|(name, number)| (name.as_str(), *number))
         .collect();
     assert_eq!(

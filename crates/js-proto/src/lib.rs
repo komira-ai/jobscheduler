@@ -71,6 +71,32 @@ impl fmt::Debug for v1::JobFile {
     }
 }
 
+/// A callback's signing key is secret (whoever holds it can sign calls the receiver trusts),
+/// so `Debug` prints the URL's scheme and host, the length of the key and the deadline, and
+/// nothing else: no log line or panic message that prints a job leaks the key, nor the URL's
+/// path or query, which may carry the receiver's own reference.
+impl fmt::Debug for v1::Callback {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Callback")
+            .field("url_origin", &url_origin(&self.url))
+            .field("signing_key_len", &self.signing_key.len())
+            .field("deadline_seconds", &self.deadline_seconds)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The scheme and the host (with its port) of `url`: the text before its path, query or
+/// fragment, with any userinfo left out. A text with no `://` gives the empty text, since
+/// nothing in it is known to be a host.
+fn url_origin(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return String::new();
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = authority.rsplit('@').next().unwrap_or_default();
+    format!("{scheme}://{host}")
+}
+
 /// The booking and the capability keys a job's needs and constraints state: the one
 /// conversion of `js_caps::request_need`, called with what the lease body passes it, the
 /// GPU count, the class when it is not empty, and the accelerator object field by field.
@@ -114,7 +140,7 @@ pub const FILE_DESCRIPTOR_SET: &[u8] = include_bytes!(concat!(
 
 #[cfg(test)]
 mod tests {
-    use super::v1::{JobFile, JobSpec, SubmitJobRequest};
+    use super::v1::{Callback, JobFile, JobSpec, SubmitJobRequest};
 
     fn secret_file() -> JobFile {
         JobFile {
@@ -145,7 +171,62 @@ mod tests {
                 r#"args: [], env: {}, needs: None, constraints: None, wall_limit_seconds: None, "#,
                 r#"network: Unspecified, ports: [], host_ports: [], files: [JobFile { "#,
                 r#"name: "upload-url", contents_len: 16, .. }], priority: 0, labels: {}, "#,
-                r#"history_key: "", layers: [], mounts: [] }) }"#,
+                r#"history_key: "", layers: [], mounts: [], retry: None, callback: None }) }"#,
+            )
+        );
+    }
+
+    /// A callback whose key is 32 bytes and whose URL is `url`.
+    fn secret_callback(url: &str) -> Callback {
+        Callback {
+            url: url.to_owned(),
+            signing_key: b"k3y-k3y-k3y-k3y-k3y-k3y-k3y-k3y!".to_vec(),
+            deadline_seconds: Some(60),
+        }
+    }
+
+    /// Asserts the whole `Debug` text of a callback and of a submit that carries one: the
+    /// URL's scheme and host with its port, the key's length and the deadline, never the key,
+    /// nor the URL's userinfo, path, query or fragment. A URL with no `://` shows no part of
+    /// itself. Catches the generated `Debug`, which prints the key and the whole URL, coming
+    /// back, and an origin that keeps the userinfo or the receiver's reference.
+    #[test]
+    fn debug_of_a_callback_shows_the_origin_and_key_length_only() {
+        let cases = [
+            (
+                "https://hooks.example:8443/js-done/ref-7?x=1#f",
+                "https://hooks.example:8443",
+            ),
+            ("https://user:pw@hooks.example/p", "https://hooks.example"),
+            ("https://hooks.example", "https://hooks.example"),
+            ("https://hooks.example?ref=7", "https://hooks.example"),
+            ("hooks.example/js-done/ref-7", ""),
+        ];
+        for (url, origin) in cases {
+            assert_eq!(
+                format!("{:?}", secret_callback(url)),
+                format!(
+                    "Callback {{ url_origin: {origin:?}, signing_key_len: 32, \
+                     deadline_seconds: Some(60), .. }}"
+                ),
+                "{url}"
+            );
+        }
+        let request = SubmitJobRequest {
+            spec: Some(JobSpec {
+                callback: Some(secret_callback("https://h.example/ref")),
+                ..JobSpec::default()
+            }),
+        };
+        assert_eq!(
+            format!("{request:?}"),
+            concat!(
+                r#"SubmitJobRequest { spec: Some(JobSpec { job_id: "", image: "", command: "", "#,
+                r#"args: [], env: {}, needs: None, constraints: None, wall_limit_seconds: None, "#,
+                r#"network: Unspecified, ports: [], host_ports: [], files: [], priority: 0, "#,
+                r#"labels: {}, history_key: "", layers: [], mounts: [], retry: None, "#,
+                r#"callback: Some(Callback { url_origin: "https://h.example", "#,
+                r#"signing_key_len: 32, deadline_seconds: Some(60), .. }) }) }"#,
             )
         );
     }

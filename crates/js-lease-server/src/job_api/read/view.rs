@@ -31,6 +31,11 @@
 //!   `layered-rootfs` capability a submit records beside them has no field and is not shown.
 //! - The record keeps the agent's code of a start it refused: it is the job's
 //!   `start_failure_detail`, empty for every other job.
+//! - The record keeps no retry policy, callback or attempts: a submit refuses a job that
+//!   carries a policy or a callback (`validate.rs`), so every job has one attempt. A job shows
+//!   no `retry`, no `callback`, no `callback_status`, an empty history, nothing dropped and
+//!   no not-before, and it and its result show attempt 0, which the job API reads as the
+//!   first.
 
 use std::time::Duration;
 
@@ -286,6 +291,8 @@ fn spec(id: &str, spec: &JobSpec, priority: i32) -> v1::JobSpec {
             .history_key
             .as_ref()
             .map_or_else(String::new, |class| class.as_str().to_owned()),
+        retry: None,
+        callback: None,
     }
 }
 
@@ -328,6 +335,11 @@ pub(crate) fn job(job: &JobRecord) -> v1::Job {
         attempts: job.queue.attempts(),
         events: job.queue.events().iter().map(event).collect(),
         dropped_events: job.queue.dropped_events(),
+        attempt: 0,
+        attempt_history: Vec::new(),
+        retry_not_before_ms: None,
+        callback_status: None,
+        dropped_attempts: 0,
     }
 }
 
@@ -424,5 +436,6 @@ fn stored(state: i32, result: &JobResult) -> v1::JobResult {
         }),
         usage: result.usage.map(usage),
         input_failure: result.input_failure.clone(),
+        attempt: 0,
     }
 }

@@ -12,8 +12,8 @@
 //!   is not included anywhere. The messages, and the client and server traits of
 //!   `JobService`: the client is generated without tonic's transport, so it cannot
 //!   connect by itself, and the server trait has a default body for every method that
-//!   answers `UNIMPLEMENTED`. `JobFile` gets no generated `Debug`, which would print its
-//!   secret contents.
+//!   answers `UNIMPLEMENTED`. `JobFile` and `Callback` get no generated `Debug`, which would
+//!   print a file's secret contents and a callback's signing key.
 //! - Package `jobscheduler.rpc`, the wire form of `google.rpc.Status` that refusals are
 //!   carried in. It is compiled on its own so that it is not in the service's descriptor
 //!   set; `google.protobuf.Any` is `prost_types::Any`.
@@ -50,6 +50,10 @@ const PROVIDER_FILE: &str = "jobscheduler/provider/v1/provider.proto";
 /// contents; `src/lib.rs` writes one that prints the name and the length only.
 const JOB_FILE: &str = ".jobscheduler.v1.JobFile";
 
+/// The message whose generated `Debug` is left out, because it would print the secret
+/// signing key; `src/lib.rs` writes one that prints the key's length only.
+const CALLBACK: &str = ".jobscheduler.v1.Callback";
+
 /// The file in `OUT_DIR` that holds the encoded descriptor set of the service.
 const DESCRIPTOR_SET: &str = "jobscheduler_v1_descriptor_set.bin";
 
@@ -67,7 +71,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     )?;
     builder(&out)
         .generate_default_stubs(true)
-        .skip_debug([JOB_FILE])
+        .skip_debug([JOB_FILE, CALLBACK])
         .compile_fds(service.file_descriptor_set())?;
 
     let mut status = protox::Compiler::new([INCLUDE])?;

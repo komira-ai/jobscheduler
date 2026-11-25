@@ -1273,6 +1273,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-callback"
+version = "0.1.0"
+dependencies = [
+ "js-types",
+ "thiserror",
+]
+
+[[package]]
 name = "js-caps"
 version = "0.1.0"
 dependencies = [

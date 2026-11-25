@@ -446,6 +446,7 @@ fn result_of_exit_3(times: v1::JobTimes) -> v1::JobResult {
             gpus: 0,
         }),
         input_failure: None,
+        attempt: 0,
     }
 }
 

@@ -434,6 +434,84 @@
         "oneof": null,
         "repeated": false,
         "required": false
+      },
+      {
+        "doc": "The most attempts, the first included. 0 or 1: no retry.",
+        "field": [
+          "spec",
+          "retry",
+          "max_attempts"
+        ],
+        "kind": "U32",
+        "name": "spec.retry.max-attempts",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "The wait before the second attempt, in seconds. Absent: 10. Cut to 3600.",
+        "field": [
+          "spec",
+          "retry",
+          "initial_backoff_seconds"
+        ],
+        "kind": "Seconds",
+        "name": "spec.retry.initial-backoff-seconds",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "The longest wait, jitter included. Absent: the larger of 300 and the initial wait. Cut to 3600.",
+        "field": [
+          "spec",
+          "retry",
+          "max_backoff_seconds"
+        ],
+        "kind": "Seconds",
+        "name": "spec.retry.max-backoff-seconds",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "Where the server POSTs: an https URL with no userinfo or fragment. Its address must pass the server's address rule (docs/design/job-retry-and-completion-callback.md, section 5.3).",
+        "field": [
+          "spec",
+          "callback",
+          "url"
+        ],
+        "kind": "Text",
+        "name": "spec.callback.url",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "The key the server signs each call with: 32 to 64 bytes. Secret: no response of the service carries it, so this field is empty in every job a read returns.",
+        "field": [
+          "spec",
+          "callback",
+          "signing_key"
+        ],
+        "kind": "File",
+        "name": "spec.callback.signing-key-file",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "How long the server keeps trying, in seconds from the job's end. Absent: 86400. Cut to the job's retention end.",
+        "field": [
+          "spec",
+          "callback",
+          "deadline_seconds"
+        ],
+        "kind": "Seconds",
+        "name": "spec.callback.deadline-seconds",
+        "oneof": null,
+        "repeated": false,
+        "required": false
       }
     ],
     "idempotency": "Unknown",
@@ -674,6 +752,17 @@
         ],
         "kind": "Bool",
         "name": "follow",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "The attempt whose output to read, from 1. Absent: the latest (Job.attempt). Read only with a stream. This server reads only the latest attempt and ignores the field.",
+        "field": [
+          "attempt"
+        ],
+        "kind": "U32",
+        "name": "attempt",
         "oneof": null,
         "repeated": false,
         "required": false

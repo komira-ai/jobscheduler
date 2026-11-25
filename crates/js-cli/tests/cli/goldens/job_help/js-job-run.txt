@@ -21,6 +21,15 @@ Options:
       --spec.args <TEXT>
           The arguments the program is started with, in order. Repeat for more.
 
+      --spec.callback.deadline-seconds <DURATION>
+          How long the server keeps trying, in seconds from the job's end. Absent: 86400. Cut to the job's retention end. A duration: 90, 90s, 15m or 2h.
+
+      --spec.callback.signing-key-file <PATH>
+          The key the server signs each call with: 32 to 64 bytes. Secret: no response of the service carries it, so this field is empty in every job a read returns. Read from a file holding the field's value in proto3 JSON.
+
+      --spec.callback.url <TEXT>
+          Where the server POSTs: an https URL with no userinfo or fragment. Its address must pass the server's address rule (docs/design/job-retry-and-completion-callback.md, section 5.3).
+
       --spec.command <TEXT>
           The program to run. Empty: the image's default. How it combines with the image's own entrypoint and command is set by the server that implements SubmitJob. With an empty image, the absolute path of the program in the job's root.
 
@@ -119,6 +128,15 @@ Options:
 
       --spec.priority <N>
           The job's priority among queued jobs. 0 when not given. A resubmit that differs from the job already made only in its priority is the same job (design section 5.3).
+
+      --spec.retry.initial-backoff-seconds <DURATION>
+          The wait before the second attempt, in seconds. Absent: 10. Cut to 3600. A duration: 90, 90s, 15m or 2h.
+
+      --spec.retry.max-attempts <N>
+          The most attempts, the first included. 0 or 1: no retry.
+
+      --spec.retry.max-backoff-seconds <DURATION>
+          The longest wait, jitter included. Absent: the larger of 300 and the initial wait. Cut to 3600. A duration: 90, 90s, 15m or 2h.
 
       --spec.wall-limit-seconds <DURATION>
           The most seconds the job may run, counted from running. The service refuses a job without one (absent or 0, wall-time-not-positive) and one above its ceiling (wall-time-above-ceiling). A duration: 90, 90s, 15m or 2h.

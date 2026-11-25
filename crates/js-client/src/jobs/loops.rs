@@ -342,6 +342,7 @@ where
             from_offset: Some(from),
             max_bytes: None,
             follow: Some(true),
+            attempt: None,
         };
         let page = match client.get_logs(request).await {
             Ok(page) => page,

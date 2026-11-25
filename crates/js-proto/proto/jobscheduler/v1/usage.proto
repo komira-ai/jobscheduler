@@ -56,6 +56,8 @@ message UsageRecord {
   // the agent reported none (an agent from before it, or one that does not record it), or
   // the series it sent was not well formed.
   CpuSeries cpu_series = 23;
+  // The attempt of the job the booking was for, from 1. Absent: 1.
+  optional uint32 attempt = 24;
 }
 
 // A job's CPU over its run: at most 128 points, each the mean CPU of the job over

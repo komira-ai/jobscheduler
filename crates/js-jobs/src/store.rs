@@ -19,6 +19,8 @@ use crate::record::{
 };
 use crate::result::{JobEnd, Output, Retention};
 
+mod attempts;
+mod callbacks;
 mod cordons;
 mod dispatch;
 mod duties;
