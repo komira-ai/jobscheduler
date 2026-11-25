@@ -13,8 +13,8 @@ with no CPU limit). **MEASURED**, counted from the export or the farm's metrics,
 
 ### The problem, in five lines
 1. A job's CPU booking is the median of its class's last 32 runs' mean CPU (CPU time over wall time,
-   komira-ai/jobscheduler#1026); a class whose five-second peaks are a heavy tail books the 90th percentile of those
-   peaks instead (`sizing.md`, 7.10). A class is a job type, for example the compile of one target. MEASURED in the first
+   komira-ai/jobscheduler#1026), whatever its runs' five-second peaks (`sizing.md`, 7.11; the heavy-tail booking of 7.10
+   books no job of the placer). A class is a job type, for example the compile of one target. MEASURED in the first
    8 minutes after the change, against the hour before: jobs per host 3 to 4 became 30 to 36; hosts about 20% busy
    became about 99%; jobs finished per minute 58 became 128; median queue wait 15 min became 4 min; median run time
    32 s became 65 s; load average on an 88-thread host 13 to 26 became 250 to 330.
@@ -334,6 +334,14 @@ accepts. What corrects is the next placement:
   check line holds no booking, so the last figure is prediction error, not CPU a booking gives back. The log is read
   in time order: with several server tasks, sort their lines by timestamp first. A job logged by two servers (the
   overlap of a rolling update) counts once.
+- The check lines and the line that starts them are logged under the target `js_sched_placer::sizes::profile`.
+  A start reads and teaches every ended job its store keeps before any check is logged (MEASURED on the farm, two
+  starts of release 0.1.391, from each start's `listening` line to its `the job sizes were taught` line, which
+  gives `taught` and `pages`: 560,413 and 568,989 jobs, 683 and 690 pages, 6 min 57 s and 4 min 45 s); the runs
+  that end meanwhile are held. Once taught,
+  the server logs `placement curves: the shadow checks start, the profiles learned from the ended jobs` with
+  `classes`, `ended_jobs` and `took_secs`, then the held runs' checks in one burst, then each run as a pass frees
+  it.
 - **Step 2 on the farm** (MEASURED, 4 h 10 min of normal builds, releases 0.1.379 to 0.1.383 under `shadow`):
   29,256 check lines over 5,335 classes, 330 of them with at least 16 lines. Of those 330, 28 (8.4%) were shaped by
   CPU and 38 (11.5%) by memory. Over their scored runs the curve's CPU error was 95.4% of the flat line's: it removed
