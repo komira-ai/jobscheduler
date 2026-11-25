@@ -600,13 +600,18 @@ impl<'a> World<'a> {
         .into_iter()
         .filter(|start| start.ms > 0)
         .collect();
+        // A class's bursts fall at one point of its runs under `ClassBurst`, else by the run.
+        let at = match self.setup.shape {
+            Shape::ClassBurst => spot(job.class as usize),
+            _ => spot(index),
+        };
         phases.extend(shape::phases(
             self.setup.shape,
             run,
             job.cpu_ms,
             job.peak_milli,
             farm.milli,
-            spot(index),
+            at,
         ));
         let var = [Some(job.class), job.fallback, Some(job.client)]
             .iter()
