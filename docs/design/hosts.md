@@ -40,7 +40,7 @@ read as one job to a whole machine, and are changed in place:
   share a host (D56, step 59);
 - the scaler's demand was "machines' worth of the shape": it is now the hosts needed to hold the queued bookings after packing (5.8, section 3);
 - a Job's size was "rounded up to a pool shape": the shape is the smallest host of a pool, and the size is the booking placed on a host
-  that has room (ucdk.md);
+  that has room (the ucdk realization, since dropped: ucdk.md);
 - the text on VMs said what a fresh VM per run means for one run, and not that several such VMs are on one host at once (vm-backend.md,
   machines.md).
 

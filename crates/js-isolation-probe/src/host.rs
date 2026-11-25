@@ -143,11 +143,17 @@ pub fn writes(who: &Who) -> Vec<Target> {
     targets
 }
 
-/// The reads every read probe tries: the host's sudoers file (root:wheel 0440), and the
-/// privacy database's folder, the database, and Time Machine's preferences, which only the
-/// privacy controls and the profile's read denies keep from a job.
+/// The reads every read probe tries for the account `who`: the host's sudoers file
+/// (root:wheel 0440), and the privacy database's folder, the database, and Time Machine's
+/// preferences, which only the privacy controls and the profile's read denies keep from a job;
+/// and, when the account's own home is known, that home, which a job may read (it holds the
+/// run directory) where it may read no other user's.
 #[must_use]
-pub fn reads() -> Vec<Named> {
+pub fn reads(who: &Who) -> Vec<Named> {
+    let own = who
+        .account_home
+        .as_ref()
+        .map(|home| ("account-home", home.display().to_string()));
     [
         ("sudoers", "/private/etc/sudoers"),
         ("tcc-dir", "/Library/Application Support/com.apple.TCC"),
@@ -161,9 +167,11 @@ pub fn reads() -> Vec<Named> {
         ),
     ]
     .into_iter()
+    .map(|(name, value)| (name, value.to_owned()))
+    .chain(own)
     .map(|(name, value)| Named {
         name: name.to_owned(),
-        value: value.to_owned(),
+        value,
     })
     .collect()
 }
@@ -334,8 +342,22 @@ mod tests {
             ["account-home", "account-home-preferences", "user-temp-dir"]
         );
         assert_eq!(all[12].dir, Path::new("/Users/a1/Library/Preferences"));
-        let reads: Vec<String> = reads().into_iter().map(|n| n.name).collect();
-        assert_eq!(reads, ["sudoers", "tcc-dir", "tcc-db", "timemachine-prefs"]);
+        let reads = reads(&who);
+        let names: Vec<&str> = reads.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "sudoers",
+                "tcc-dir",
+                "tcc-db",
+                "timemachine-prefs",
+                "account-home"
+            ]
+        );
+        assert_eq!(reads[4].value, "/Users/a1");
+        who.account_home = None;
+        let names: Vec<String> = super::reads(&who).into_iter().map(|n| n.name).collect();
+        assert_eq!(names, ["sudoers", "tcc-dir", "tcc-db", "timemachine-prefs"]);
     }
 
     #[test]

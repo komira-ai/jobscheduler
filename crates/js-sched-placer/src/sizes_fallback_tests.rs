@@ -210,8 +210,9 @@ fn target_runs(
 
 /// Asserts that a memory kill of a target booked from its kind raises the target to at least
 /// twice the booking it died at, and teaches the kind the kill too: with a kind at 1.5 GiB, a
-/// target killed at 1.5 GiB books 3.5 GiB next (the kill is a sample of its 2.75 GiB limit,
-/// `1.2 x 2.75 GiB + 128 MiB`, over its 3 GiB floor), and so does a new target of the kind.
+/// target killed at 1.5 GiB books 3 GiB next (its floor, twice the booking it died at, over the
+/// kill's own sample of its 1.5 GiB limit, `1.2 x 1.5 GiB + 128 MiB`, 2 GiB), and so does a new
+/// target of the kind.
 /// Catches a kill floor lost because the size came from the kind, and a kill that teaches
 /// only the target (its siblings would die at the same size).
 #[test]
@@ -232,8 +233,8 @@ fn a_kill_of_a_target_booked_from_its_kind_raises_the_target_and_the_kind() {
     let mut sizes = taught(&jobs, booked(2000, 4 * GIB));
     assert!(sizes.observe(&oom, booked(1000, 6 * 256 * MIB)));
     jobs.push(oom);
-    let raised = 14 * 256 * MIB;
-    assert!(raised >= 2 * 6 * 256 * MIB);
+    let raised = 12 * 256 * MIB;
+    assert_eq!(raised, 2 * 6 * 256 * MIB);
     assert_eq!(size(&sizes, &step("oom-next", "oom")), (1000, raised));
     assert_eq!(size(&sizes, &step("sibling", "sibling")), (1000, raised));
 }

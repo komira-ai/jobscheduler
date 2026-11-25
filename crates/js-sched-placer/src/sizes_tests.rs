@@ -512,12 +512,13 @@ fn a_job_that_never_ran_had_the_whole_host_or_no_result_teaches_nothing() {
     assert!(!sizes.observe(&unstarted, booked(1, GIB)), "never started");
 }
 
-/// Asserts that a success's peak sizes its class whatever its booking, since a booking is no
-/// limit (a contained job has no `memory.max`): five runs at 4 GiB less 100 MiB under a 4 GiB
-/// booking book the next job their peak with the margin (5 GiB), one run that used 6 GiB under
-/// a 4 GiB booking raises the next booking to 7.5 GiB at once and nothing kills it (it is a
-/// success, which teaches no floor), and runs at 90% of the booking book theirs. Catches a run
-/// at or above its booking taken as held at a limit, which keeps the class at a booking its
+/// Asserts that a success's peak sizes its class at least from its peak whatever its booking,
+/// since a booking is no limit (a contained job has no `memory.max`): five runs at 4 GiB less
+/// 100 MiB under a 4 GiB booking book the next job 5 GiB (they reached their booking, a step
+/// above it, which is also their peak with the margin), one run that used 6 GiB under a 4 GiB
+/// booking raises the next booking to 7.5 GiB at once and nothing kills it (it is a success,
+/// which teaches no floor), and runs at 90% of the booking book theirs. Catches a run at or
+/// above its booking taken as held at it with no margin, which keeps the class at a booking its
 /// jobs outgrow.
 #[test]
 fn a_success_at_or_above_its_booking_books_its_peak_and_raises_the_next_at_once() {
@@ -946,3 +947,6 @@ mod memory_series;
 
 #[path = "sizes_burst_tests.rs"]
 mod burst;
+
+#[path = "sizes_at_booking_tests.rs"]
+mod at_booking;

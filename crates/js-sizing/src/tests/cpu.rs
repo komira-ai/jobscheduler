@@ -147,7 +147,8 @@ fn peak_memory_ignores_the_mixed_rule_and_the_default() {
     assert_eq!(peak(&s, &k), Some(3 * GIB + GIB / 4));
 }
 
-/// Rule: a sample that hit its limit (held) and a kill floor count in the answer.
+/// Rule: a sample that hit its limit (held, a lower bound sized with the margin) and a kill
+/// floor count in the answer.
 #[test]
 fn peak_memory_includes_held_samples_and_the_floor() {
     let mut s = Summaries::default();
@@ -158,7 +159,11 @@ fn peak_memory_includes_held_samples_and_the_floor() {
         ..success(3 * GIB)
     };
     feed(&mut s, &k, &at_limit, 2);
-    assert_eq!(peak(&s, &k), Some(3 * GIB), "the held peak, no margin");
+    assert_eq!(
+        peak(&s, &k),
+        Some(3840 * MIB),
+        "the held limit with the margin"
+    );
     s.observe(&k, &heavy_kill(), DAY, &Bounds::default());
     assert_eq!(
         peak(&s, &k),

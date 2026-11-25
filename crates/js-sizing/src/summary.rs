@@ -1,7 +1,7 @@
 //! The per-key summary: what is kept, how a run enters it, what it estimates.
 
 use crate::key::{Basis, Day};
-use crate::run::{Bounds, CpuSample, Discard, Observed, Outcome, Run, memory_max};
+use crate::run::{Bounds, CpuSample, Discard, Observed, Outcome, Run};
 use crate::{GIB, MIB};
 
 /// The smallest memory estimate.
@@ -62,8 +62,6 @@ const RING: usize = 32;
 const DAYS: usize = 8;
 const SLACK: u64 = 128 * MIB;
 const CPU_STEP: u32 = 250;
-/// A success this close to its memory limit is treated as having hit it.
-const NEAR_LIMIT_PERCENT: u128 = 95;
 
 /// The run's CPU sample in millicores: its mean parallelism (CPU time over wall time),
 /// capped to `u32` so the cast cannot truncate.
@@ -136,12 +134,13 @@ pub fn floor_ceiling(host_memory: u64) -> u64 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Summary {
     pub(crate) basis: Basis,
-    /// Memory samples seen (kills and censored successes included).
+    /// Memory samples seen (kills and held successes included).
     pub(crate) n_total: u64,
-    /// Maximum of each chunk of 32 uncensored memory samples, slot `chunk % 9`.
+    /// Maximum of each chunk of 32 measured (not held) memory samples, slot `chunk % 9`.
     pub(crate) chunk_max: [u64; SLOTS],
-    /// Maximum of each chunk's censored samples (`min(peak, booked)` of a run that hit
-    /// its limit): they hold an estimate and are never given headroom.
+    /// Maximum of each chunk's held samples, lower bounds of a run's need (`max(peak, limit)`
+    /// of a run that reached its limit, the peak of one that swapped), sized with the usual
+    /// margin.
     pub(crate) chunk_held: [u64; SLOTS],
     /// The last 32 samples as contributed, for the dispersion test.
     pub(crate) ring: [u64; RING],
@@ -228,13 +227,13 @@ impl Summary {
         self.oom_floor > 0 || self.raise_only(self.last_seen)
     }
 
-    /// The maximum uncensored memory sample over the last 257 to 288 runs (at least 256).
+    /// The maximum measured (not held) memory sample over the last 257 to 288 runs (at least 256).
     pub fn long_max(&self) -> u64 {
         self.chunk_max.iter().copied().fold(0, u64::max)
     }
 
     /// Whether the last 32 samples are far apart: such a key (a shared or bimodal
-    /// shape) is never lowered, and only a kill raises it.
+    /// shape) is never lowered.
     pub fn mixed(&self) -> bool {
         let kept = self.n_total.min(RING as u64) as usize;
         let mut sorted = self.ring[..kept].to_vec();
@@ -259,7 +258,7 @@ impl Summary {
                     if peak >= host {
                         Err(Discard::OverCap)
                     } else {
-                        self.record_success(run, peak, now);
+                        self.record_success(run, peak, now, host);
                         self.decay(now);
                         Ok(())
                     }
@@ -267,11 +266,12 @@ impl Summary {
                 _ => Err(Discard::Untrusted),
             },
             Outcome::OwnLimitKill => {
-                // The kill's use is rarely known; it died at its limit, which is
-                // derived from the booking, not read from the record.
-                let limit = memory_max(run.booked_memory_bytes).unwrap_or(0);
+                // The kill's use is rarely known; it died at its limit, which is its
+                // booking (a host that kills a job for memory holds it at its booking).
                 let used = run.peak_memory_bytes.unwrap_or(0);
-                let sample = used.max(limit).min(host.saturating_sub(1));
+                let sample = used
+                    .max(run.booked_memory_bytes)
+                    .min(host.saturating_sub(1));
                 if sample == 0 {
                     // Nothing booked and nothing measured: not a kill we can act on.
                     Err(Discard::Untrusted)
@@ -338,19 +338,20 @@ impl Summary {
         self.cpu_n > 0
     }
 
-    /// A success that touched its memory limit says only that the booking was not
-    /// enough to be killed at: it contributes `min(peak, booked)`, which holds an
-    /// estimate but never raises it.
-    fn record_success(&mut self, run: &Run, peak: u64, now: Day) {
-        let near_limit = memory_max(run.booked_memory_bytes)
-            .is_some_and(|limit| u128::from(peak) * 100 >= u128::from(limit) * NEAR_LIMIT_PERCENT);
-        if run.limit_hits > 0 || run.swap_peak_bytes > 0 || near_limit {
-            self.record_memory(
-                peak.min(run.booked_memory_bytes),
-                true,
-                now,
-                minutes_reached(run),
-            );
+    /// A success whose peak does not show what it needed contributes a held sample, a lower
+    /// bound of its need, which the estimate sizes with the usual margin: one that reached
+    /// its booking ([`Run::limit_hits`]) needed at least the booking, so it contributes the
+    /// larger of its peak and its booking (below the host), and its class books a step above
+    /// that booking next; one that swapped had more than its peak in use, and contributes its
+    /// peak.
+    fn record_success(&mut self, run: &Run, peak: u64, now: Day, host: u64) {
+        if run.limit_hits > 0 {
+            let need = peak
+                .max(run.booked_memory_bytes)
+                .min(host.saturating_sub(1));
+            self.record_memory(need, true, now, minutes_reached(run));
+        } else if run.swap_peak_bytes > 0 {
+            self.record_memory(peak, true, now, minutes_reached(run));
         } else {
             self.record_memory(peak, false, now, minutes_reached(run));
         }
@@ -487,17 +488,17 @@ impl Summary {
         memory.max(MIN_MEMORY)
     }
 
-    /// The largest recent peaks with the usual margin, rounded up to a step:
-    /// `round_up(max(1.2 * long_max + 128 MiB, held))`.
+    /// The largest recent peaks and held samples with the usual margin, rounded up to a
+    /// step: `round_up(1.2 * max(long_max, held) + 128 MiB)`.
     fn sized_memory(&self) -> u64 {
-        let max = self.long_max();
         let held = self.chunk_held.iter().copied().fold(0, u64::max);
+        let max = self.long_max().max(held);
         let sized = max.saturating_add(max.div_ceil(5)).saturating_add(SLACK);
-        round_up(sized.max(held), MEMORY_STEP)
+        round_up(sized, MEMORY_STEP)
     }
 
     /// What the largest recent samples ask for whatever their number or dispersion:
-    /// `round_up(max(1.2 * long_max + 128 MiB, held, floor))`, at least [`MIN_MEMORY`];
+    /// `round_up(max(1.2 * max(long_max, held) + 128 MiB, floor))`, at least [`MIN_MEMORY`];
     /// `None` when the summary holds no memory sample.
     pub(crate) fn peak_memory(&self, bounds: &Bounds) -> Option<u64> {
         (self.n_total > 0).then(|| {

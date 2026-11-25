@@ -212,7 +212,7 @@ fn two_kills_in_256_runs_make_the_key_raise_only() {
     assert_eq!(at(&s, &k, Day(DAY.0 + 6)).unwrap().memory_bytes, 4 * GIB);
     assert_eq!(
         at(&s, &k, Day(DAY.0 + 7)).unwrap().memory_bytes,
-        3 * GIB,
+        2816 * MIB,
         "the seventh day lowers again"
     );
 }
