@@ -458,7 +458,10 @@ fn the_note_s_lock_takes_a_free_or_poisoned_mutex_and_never_waits_for_a_held_one
         let _held = mutex.lock().unwrap();
         std::thread::scope(|scope| {
             let other = scope.spawn(|| super::lock_if_free(&mutex).is_none());
-            assert!(other.join().unwrap(), "a held mutex was waited for or taken");
+            assert!(
+                other.join().unwrap(),
+                "a held mutex was waited for or taken"
+            );
         });
     }
     let poisoned = std::thread::scope(|scope| {
