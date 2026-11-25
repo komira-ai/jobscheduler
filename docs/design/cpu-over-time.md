@@ -1,6 +1,6 @@
 # Scheduling on CPU use over time
 
-Status: design for review. Built so far: the replay (`crates/js-cpu-replay`), step 1 (record) and step 2 (learn in shadow, `--placement-curves shadow`). Nothing else here is built. Companion to
+Status: design for review. Built so far: the replay (`crates/js-cpu-replay`), step 1 (record) and step 2 (learn in shadow, `--placement-curves shadow`); steps 3 and 4 are built as [placement-profiles-live.md](placement-profiles-live.md) revised them, behind `--placement-curves on`. Companion to
 [sizing.md](sizing.md) (how a class's CPU is booked) and [placement-by-load.md](placement-by-load.md) (the
 load rule and the time profiles designed for leases, never wired to jobs).
 

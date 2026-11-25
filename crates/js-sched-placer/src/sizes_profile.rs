@@ -1,4 +1,4 @@
-//! The profiles a class learns in shadow (`docs/design/cpu-over-time.md`, step 2): for each
+//! The profiles a class learns in shadow and on (`docs/design/cpu-over-time.md`, step 2): for each
 //! class, a CPU profile and a memory profile of the series its successful runs recorded
 //! ([`js_sizing::Profile`]).
 //!

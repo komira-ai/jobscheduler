@@ -147,8 +147,8 @@ pub trait PassMetrics {
     fn store_write_failed(&self);
     /// The pass took the job tables `from` there ([`TablesFrom`]); by default, nothing is told.
     fn job_tables(&self, _from: TablesFrom) {}
-    /// A host refused a queued job for the predicate named `reason` (`cpu`, `predicted-memory`,
-    /// `booked-memory`, `cold-cap`); by default, nothing is told.
+    /// A host refused a queued job for the predicate named `reason` (`cpu`, `cpu-curve`,
+    /// `predicted-memory`, `booked-memory`, `cold-cap`); by default, nothing is told.
     fn refused(&self, _host: &HostId, _reason: &'static str) {}
     /// A queued job of a curve class waited past the wait bound with no host fitting its curve,
     /// and is tested with its flat number from now on; by default, nothing is told.
