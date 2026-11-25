@@ -53,7 +53,9 @@ pub(super) struct LiveJob {
     host: HostId,
     /// What its allocation books, in millicores: its flat number.
     flat_millis: u64,
-    /// Its class, once its record is read.
+    /// Its class, once its record is read, when it books by its class's curve: it left its CPU
+    /// at 0 ([`leaves_cpu`]). A job that named its CPU is charged its flat number, as it was
+    /// booked.
     key: Option<Key>,
     /// When it started, in milliseconds since the epoch, once it has.
     started_ms: Option<u64>,
@@ -300,7 +302,7 @@ impl Engine {
         let started = job.started_at.map(|at| millis(at.as_duration()));
         let held = self.book.live.get_mut(&job.id);
         held.into_iter().for_each(|held| {
-            held.key = Some(JobSizes::key_of(job));
+            held.key = leaves_cpu(job).then(|| JobSizes::key_of(job));
             held.started_ms = started;
         });
     }
@@ -390,6 +392,11 @@ impl Engine {
         let flat = walker.request.resources.cpu_millis;
         let own = walker.curve.as_ref();
         let mut fitted = self.fit_tables(&curved, &booking_of(own.map(|own| &own.curve), flat));
+        // A round in which the curve fits a host ends the wait: the bound counts the time no
+        // host fitted the curve, not the time since the first such round.
+        if own.is_some() & !fitted.hosts.is_empty() {
+            self.book.waits.remove(&walker.job);
+        }
         if let Some(own) = own.filter(|_| fitted.hosts.is_empty())
             && self.wait_over(walker, own, now)
         {

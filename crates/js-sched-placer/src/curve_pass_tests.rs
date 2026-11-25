@@ -62,17 +62,29 @@ fn placer_in(curves: Curves, curve: CurveSettings) -> (SchedPlacer, ManualClock)
     (placer, clock)
 }
 
-/// Records the job `id` of `class` booked `cpu` millicores and 64 MiB, placed on `a`, and starts
-/// it at the store's time now when `started` says so (else it is only starting): its allocation.
+/// Records the job `id` of `class`, which leaves its CPU to its class's history, booked `cpu`
+/// millicores and 64 MiB, placed on `a`, and starts it at the store's time now when `started`
+/// says so (else it is only starting): its allocation.
 fn running(
     tables: &Tables,
     (id, class): (&str, &str),
     (cpu, started): (u64, bool),
 ) -> AllocationRecord {
+    running_named(tables, (id, class), (0, cpu), started)
+}
+
+/// [`running`], the job naming `named` millicores of CPU in its needs (0: none, sized by the
+/// history) and booked `cpu`.
+fn running_named(
+    tables: &Tables,
+    (id, class): (&str, &str),
+    (named, cpu): (u64, u64),
+    started: bool,
+) -> AllocationRecord {
     let id = JobId::parse(id).unwrap();
     let new = NewJob {
         id: Some(id.clone()),
-        spec: spec_of_class(class, cpu, 64 * MIB),
+        spec: spec_of_class(class, named, 64 * MIB),
         priority: 0,
         client: None,
     };
@@ -296,6 +308,31 @@ fn a_pass_charges_each_live_job_at_the_age_its_record_shows() {
         BTreeMap::from([(host("a"), 500)]),
         "both past their burst"
     );
+}
+
+/// Asserts that a running job is charged by its class's curve only when it left its CPU to the
+/// history, as it was booked: a job of `early` that named its 1000 m (and was booked flat) is
+/// charged 1000 m at every slot, so the host's fullest slot is 1000 m; the same job leaving its
+/// CPU at 0 is charged its class's burst at age 0 (22 000 m).
+/// Catches a running job that named its CPU charged by its class's curve, which would let the
+/// host take jobs onto the cores the named job uses.
+#[test]
+fn a_running_job_that_named_its_cpu_is_charged_its_flat_number_at_every_slot() {
+    for (named, peak) in [(1_000, 1_000), (0, 22_000)] {
+        let tables = Tables::new();
+        let (placer, _) = placer_in(Curves::On, CurveSettings::default());
+        teach(
+            placer.engine().sizes(),
+            &tables,
+            ("early", 24),
+            &burst_at(20, 352, 140),
+        );
+        tables.set_ms(NOW_MS);
+        running_named(&tables, ("held", "early"), (named, 1_000), true);
+        assert!(pass(&placer, &tables, offering(96_800), &Counting::default()).is_empty());
+        let peaks = placer.curve_view().unwrap().host_peaks;
+        assert_eq!(peaks, BTreeMap::from([(host("a"), peak)]), "named {named}");
+    }
 }
 
 /// Asserts how the engine follows the live allocations of the job table under the curve mode: a

@@ -630,6 +630,60 @@ fn a_job_is_tested_with_its_flat_number_after_exactly_the_wait_bound() {
     assert!(engine.book.expired.is_empty());
 }
 
+/// Asserts that the wait bound counts the time no host fitted the curve, not the time since the
+/// first such walk: a job of `early` whose curve fits no host at the first walk starts its wait;
+/// at a walk 10 s later its curve fits the host (the jobs that filled it ended) but the host's
+/// memory refuses it (a job holding all of it), and the wait ends there; at a walk 31 s after the
+/// first the host is full by CPU again, and the job waits from then, not expired. Catches a wait
+/// kept across a walk in which the curve fitted, which would test a job flat after 11 s with no
+/// fit.
+#[test]
+fn a_walk_in_which_the_curve_fits_ends_the_wait() {
+    let tables = Tables::new();
+    let mut engine = packed(30_000, &tables);
+    let early = queued_of(&tables, "new-early", "early");
+    let queued = std::slice::from_ref(&early);
+    let (done, _) = walk(&mut engine, queued, (&["a"], NOW_MS));
+    assert!(done.is_empty());
+    assert_eq!(engine.book.waits.get(&early.id), Some(&at(NOW_MS)));
+    let _ = engine.take_refused();
+
+    for at in 0..3 {
+        let fill = JobId::parse(&format!("fill-{at}")).unwrap();
+        engine.job_failed(&fill);
+        engine.book.live.remove(&fill);
+    }
+    let hog = Booked::Shape {
+        cpu_millis: 250,
+        memory_bytes: 256 * GIB,
+        disk_bytes: 0,
+        accelerators: 0,
+    };
+    let hog_id = JobId::parse("hog").unwrap();
+    engine.take_job(&hog_id, &host("a"), hog, Vec::new());
+    let (done, _) = walk(&mut engine, queued, (&["a"], NOW_MS + 10_000));
+    assert!(done.is_empty(), "refused by memory");
+    assert!(
+        refusal(&mut engine, "a", RefusalKind::CpuCurve).is_none(),
+        "the curve fitted"
+    );
+    assert_eq!(engine.book.waits.get(&early.id), None, "the wait ended");
+
+    engine.job_failed(&hog_id);
+    for at in 0..3 {
+        live(
+            &mut engine,
+            "a",
+            (&format!("fill-{at}"), 30_000),
+            (None, None),
+        );
+    }
+    let (done, _) = walk(&mut engine, queued, (&["a"], NOW_MS + 31_000));
+    assert!(done.is_empty());
+    assert_eq!(engine.take_curve_expiries(), 0, "not expired");
+    assert_eq!(engine.book.waits.get(&early.id), Some(&at(NOW_MS + 31_000)));
+}
+
 /// Asserts that a wait bound of 0 never delays a job: a job whose curve fits no host is tested
 /// with its flat number in the same walk and placed, counted once. Catches a bound of 0 that
 /// still waits for a later walk.

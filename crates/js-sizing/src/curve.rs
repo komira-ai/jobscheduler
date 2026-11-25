@@ -168,12 +168,7 @@ impl Curve {
         if own < MIN_SLOT_RUNS {
             return flat_millis;
         }
-        let ahead = i + k;
-        let slot = if k < TAIL_SLOT && ahead < TAIL_SLOT {
-            ahead
-        } else {
-            TAIL_SLOT
-        };
+        let slot = i.saturating_add(k).min(TAIL_SLOT);
         let product = u128::from(self.booking(slot)) * self.reach(slot) as u128;
         u64::try_from(product.div_ceil(own as u128)).unwrap_or(u64::MAX)
     }

@@ -372,7 +372,8 @@ fn a_job_past_128_seconds_is_charged_the_tail() {
 
 /// The slot ahead is the tail from slot 64 on, weighted by the share of the runs at the
 /// job's slot that lasted past 128 s: from slot 1, 62 slots ahead is still a start slot
-/// and 63 is the tail; `k` of the tail slot and beyond is the tail.
+/// and 63 is the tail; `k` of the tail slot and beyond is the tail, the largest `k` included
+/// (no overflow of the job's slot plus `k`).
 #[test]
 fn a_slot_ahead_past_the_start_slots_is_the_tail() {
     let mut p = class(&[32; 128], 4);
@@ -385,4 +386,5 @@ fn a_slot_ahead_past_the_start_slots_is_the_tail() {
     assert_eq!(c.charge(126_000, 1, 777), 1000);
     assert_eq!(c.charge(0, TAIL_SLOT, 777), 1000);
     assert_eq!(c.charge(0, TAIL_SLOT + 5, 777), 1000);
+    assert_eq!(c.charge(2000, usize::MAX, 777), 1000, "no overflow");
 }
