@@ -67,8 +67,9 @@ impl Sizes {
     /// taught a class a memory sample (a job that ended with no usage is not counted). It
     /// blocks on the store's reads: the server runs it off the runtime's threads. A read that
     /// fails, or a stop, is logged and teaches the held runs alone, as a start whose read failed
-    /// did; the passes teach what they free from then on. With no teaching begun, or once it is
-    /// taught, it does nothing and answers 0.
+    /// did; the passes teach what they free from then on. Under `--placement-curves shadow` the
+    /// placer logs here, read through or not, that the shadow checks start (no run is checked
+    /// before). With no teaching begun, or once it is taught, it does nothing and answers 0.
     pub(crate) fn teach(&self) -> usize {
         let begun = self
             .begun
