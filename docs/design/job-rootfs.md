@@ -1176,8 +1176,10 @@ port 0.
   it (`input-not-allowed`); a missing path, a file instead of a directory, an unreadable directory
   (`input-unavailable`); a path swapped for a link after resolution leaves the clone where it was;
 - the preparing stage: the job stays `starting` while the fake opener holds a lookup and starts when it is released;
-  another job is admitted, started and ended meanwhile; a lookup held past 60 s fails `input-unavailable`; four held
-  lookups and a fifth that waits its bound; an image layer pending and a host path ready, and the reverse; a stop, a
+  another job is admitted, started and ended meanwhile; a lookup held past 60 s fails `input-unavailable`; a start
+  naming the most host paths (16 layers, 64 mounts) has every lookup running at once; with the pool's 80 threads held,
+  one more lookup waits for one to end and is refused at its bound though no thread took it; hung lookups hold no
+  thread of the assemblies and checks; an image layer pending and a host path ready, and the reverse; a stop, a
   cancel and a lease end while preparing, each after the assembly began, unmount what was mounted;
 - admission: an image layer outside `--image-allow` refused `image-not-allowed`; an image layer from a registry on
   `127.0.0.1` with a port, given by `--image-allow-loopback`, pulled over plain HTTP from an in-process registry on

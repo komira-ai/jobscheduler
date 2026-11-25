@@ -14,8 +14,8 @@
 //! `js-lookups`) and makes none on demand, so a hung provider holds at most those threads of
 //! each; every call waits for a thread in the order it was asked, and the caller gives up on
 //! its answer at a deadline of its own clock ([`Pending::poll`]) whether or not a thread ever
-//! took it. A thread stuck in the
-//! kernel stays stuck until the file system answers or is unmounted.
+//! took it. A thread stuck in the kernel stays stuck until the file system answers or is
+//! unmounted.
 //!
 //! A task that answered rings the pool's [`Wake`] ([`Pool::set_wake`]), so the lifecycle's
 //! worker asks for the answer at once instead of at its next step.
