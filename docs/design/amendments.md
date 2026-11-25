@@ -8,7 +8,7 @@ design.md.
 Deleted: the delegated provider flavour and its former section 5.5 (`Flavour` leaves `js-provider`); the delegated-only unknown rules
 (the delegated outcome-table column, its start and stop outcome rules, "silence is Unknown"), so the three-answer rule covers two places,
 a lease on an agent and a machine at a capacity provider (5.6); non-goal N2 as written, the quota-ceiling cap of the ladder (7.4), the "no
-standing cloud credential" rule of 11.1, and D1 as an open question; the kbf history (former section 4), moved unchanged to
+standing cloud credential" rule of 11.1 (section 11 is now superseded, ucdk.md), and D1 as an open question; the kbf history (former section 4), moved unchanged to
 `kbf-today.md`, with 5.3, 7, 11 and steps 0 to 22 moved to companions.
 
 Added: the capacity-provider interface and the `static` and `aws` kinds (5.5); standing cloud access for the aws provider, the role it

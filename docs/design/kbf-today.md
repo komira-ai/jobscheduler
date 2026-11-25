@@ -140,6 +140,10 @@ input). So today nothing compares a trace before and after a PR, and any Debug-f
 mechanisms and both line formats, and states whether the 64-bit hash is replaced.
 
 ## 4.6 ucdk
+*Superseded (2026-11-24):* this section describes ucdk at the commit named in the header. ucdk has since removed its deployment side
+(komira-ai/ucdk#28): `ucdk-proto`, `ucdk-plan`, `ucdk-provider` and `ucdk-engine`, and with them `Job`, the plan and the `Provider`
+trait named below, are gone. What is true today is in [ucdk.md](ucdk.md).
+
 ucdk declares compute and does not schedule it. `Job` is in `ucdk/crates/ucdk-proto/proto/ucdk/resource/v1/resource.proto` (image, args,
 size, retries, timeout default 600 s, environment, secret environment, on-demand or cron trigger). It lowers to a `run` node and a
 `Schedule` role node (field 11, role "schedule"; `ucdk/crates/ucdk-plan/src/catalog/`), which the clouds realize as their own scheduler
