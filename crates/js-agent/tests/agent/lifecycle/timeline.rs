@@ -3,7 +3,7 @@
 //! the runtime gives them. The clock moves only when a test moves it (and while the fake's
 //! create takes its scripted time), so every number here is the test's.
 
-use js_agent::lifecycle::{Clock, Event, JobBooking, StartTimeline};
+use js_agent::lifecycle::{Clock, Event, JobBooking, LookupStamps, StartTimeline};
 use js_agent::{Machine, System};
 use js_agent_wire::Command;
 
@@ -59,6 +59,7 @@ fn a_start_is_logged_with_each_step_from_its_arrival_to_its_create() {
             ("created", 13),
         ],
         runtime: vec![("begin", 1_000), ("bundle", 1_003)],
+        lookup: None,
     };
     assert_eq!(events, started("r1", timeline));
 }
@@ -89,6 +90,7 @@ fn a_start_that_waits_for_its_image_shows_the_wait() {
             ("created", 250),
         ],
         runtime: Vec::new(),
+        lookup: None,
     };
     assert_eq!(h.life.step(), started("r1", timeline));
 }
@@ -96,12 +98,19 @@ fn a_start_that_waits_for_its_image_shows_the_wait() {
 /// Asserts the timeline of a start with layers and mounts and no provider: its directories
 /// are made at its admission, its host paths found at the step 20 after it arrived, its
 /// assembly answered at the next (50), and its container created then; it has no `provided`
-/// step. Catches the steps of a start that waits for its file system dropped or put out of
-/// order, and a `provided` mark on a start with no provider.
+/// step; the stamps of the lookup it waited on are the runtime's, under the job's id.
+/// Catches the steps of a start that waits for its file system dropped or put out of order,
+/// a `provided` mark on a start with no provider, and the runtime's lookup stamps lost.
 #[test]
 fn a_start_with_layers_shows_its_lookups_and_its_assembly() {
     let mut h = harness("timeline-layers");
     let spec = layered(&h, "j1");
+    let lookup = LookupStamps {
+        queued_at_ms: UNIX_ORIGIN_MS + 1,
+        started_at_ms: UNIX_ORIGIN_MS + 6,
+        ended_at_ms: UNIX_ORIGIN_MS + 18,
+    };
+    h.fake.lookup_of("j1", lookup);
     assert!(h.apply(vec![job_start(spec)]).is_empty());
     h.clock.advance(20);
     assert!(h.life.step().is_empty());
@@ -119,6 +128,7 @@ fn a_start_with_layers_shows_its_lookups_and_its_assembly() {
             ("created", 50),
         ],
         runtime: Vec::new(),
+        lookup: Some(lookup),
     };
     assert_eq!(h.life.step(), started_booking("j1", timeline, 100));
 }
@@ -146,6 +156,7 @@ fn a_failed_start_leaves_no_timeline_behind() {
             ("created", 0),
         ],
         runtime: Vec::new(),
+        lookup: None,
     };
     let start = reply(vec![Command::Start(Box::new(job("r2")))]);
     assert_eq!(h.life.apply_at(&start, 5), started("r2", timeline));
@@ -175,6 +186,7 @@ fn a_job_start_is_logged_with_its_placement_time_and_its_arrival_in_unix_time() 
             ("created", 6),
         ],
         runtime: Vec::new(),
+        lookup: None,
     };
     assert_eq!(events, started("j1", timeline));
 }
@@ -199,6 +211,7 @@ fn a_job_start_without_a_placement_time_has_none_in_its_timeline() {
             ("created", 0),
         ],
         runtime: Vec::new(),
+        lookup: None,
     };
     assert_eq!(events, started("j1", timeline));
 }
@@ -226,6 +239,7 @@ fn a_clock_without_unix_time_leaves_the_arrival_out_of_the_timeline() {
             ("created", 0),
         ],
         runtime: Vec::new(),
+        lookup: None,
     };
     assert_eq!(events, started("j1", timeline));
 }

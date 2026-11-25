@@ -58,6 +58,7 @@ impl Lifecycle {
                 .map(|now| now.saturating_sub(since_received)),
             steps: vec![("taken", taken.saturating_sub(received))],
             runtime: Vec::new(),
+            lookup: None,
         };
         self.starting.insert(run_id.to_owned(), timeline);
         self.mark(run_id, "admitted");
@@ -71,10 +72,11 @@ impl Lifecycle {
     }
 
     /// The timeline of the start `run_id`, whose container `id` the runtime created, with
-    /// the runtime's steps; it is no longer kept.
+    /// the runtime's steps and the stamps of the lookup it waited on; it is no longer kept.
     pub(super) fn take_timeline(&mut self, run_id: &str, id: &RunHandle) -> StartTimeline {
         let mut timeline = self.starting.remove(run_id).unwrap_or_default();
         timeline.runtime = self.runtime.start_steps(id);
+        timeline.lookup = self.runtime.lookup_stamps(id);
         timeline
     }
 

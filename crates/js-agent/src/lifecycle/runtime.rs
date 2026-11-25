@@ -450,6 +450,14 @@ pub trait Runtime {
         Vec::new()
     }
 
+    /// The stamps of the lookup of a host path that the start of the container `id` waited
+    /// on, for the start's [`StartTimeline`](super::StartTimeline): of the start's lookups,
+    /// the one that ended last. Asked once, after [`Runtime::create_and_start`] returned `id`;
+    /// a second call has none. `None` for a start with no host path; the default keeps none.
+    fn lookup_stamps(&mut self, _id: &RunHandle) -> Option<super::LookupStamps> {
+        None
+    }
+
     /// Creates and starts the container of `spec`. A call that fails leaves no
     /// container behind: the backend rolls back what it created. A run id that already has a
     /// container (running, exited or not yet removed) is refused, and that container is left
