@@ -273,3 +273,37 @@ fn every_read_is_recorded_in_order_with_its_key_or_prefix() {
     recording.clear();
     assert_eq!(recording.reads(), Vec::new());
 }
+
+/// Asserts that a stamped transaction is recorded as a write of each key it puts, committed or
+/// not as it was, that one whose build declines is not recorded, and that its clock reading is
+/// the store's own, read inside the call and not recorded as a read. It catches a stamped
+/// commit that bypasses the record, and a recorder that counts its clock as a read of the
+/// caller's.
+#[test]
+fn a_stamped_transaction_is_recorded_as_it_committed_and_its_clock_is_not_a_read() {
+    let recording = RecordingStore::new(fake());
+    let mut stamps = Vec::new();
+    let mut put = |value: &'static str| {
+        recording
+            .txn_stamped(&mut |now| {
+                stamps.push(now);
+                Some(Txn::new().put("t", value, Cond::Absent))
+            })
+            .expect("store")
+    };
+    assert!(matches!(put("1"), Some(Ok(_))));
+    assert!(matches!(put("2"), Some(Err(_))));
+    let declined = recording.txn_stamped(&mut |_| None).expect("store");
+    assert_eq!(declined, None);
+    // The fake's clock starts at zero; its commit moves it on.
+    assert_eq!(stamps.len(), 2);
+    assert_eq!(stamps[0], StoreTime::ZERO);
+    assert_eq!(
+        recording.writes(),
+        [
+            write("t", WriteKind::Put, true),
+            write("t", WriteKind::Put, false)
+        ]
+    );
+    assert_eq!(recording.reads(), Vec::new());
+}

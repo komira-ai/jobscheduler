@@ -163,6 +163,21 @@ impl Store for RecordingStore {
         result
     }
 
+    fn txn_stamped(
+        &self,
+        build: &mut dyn FnMut(StoreTime) -> Option<Txn>,
+    ) -> Result<Option<Result<Commit, Conflict>>, StoreError> {
+        let mut built = None;
+        let result = self.inner.txn_stamped(&mut |now| {
+            built = build(now);
+            built.clone()
+        });
+        if let Some(txn) = built {
+            self.record(&txn, matches!(result, Ok(Some(Ok(_)))));
+        }
+        result
+    }
+
     fn get(&self, key: &str) -> Result<Option<Versioned>, StoreError> {
         self.read(Read::Get(key.to_owned()));
         self.inner.get(key)

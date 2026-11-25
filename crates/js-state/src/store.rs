@@ -129,6 +129,27 @@ pub trait Store: Send + Sync {
         Ok(self.apply_batch(vec![txn])?.swap_remove(0))
     }
 
+    /// Applies one transaction that `build` makes from the store's clock as read for this
+    /// transaction: a caller that stamps the time into the rows it writes (when a record was
+    /// made) takes the store's own reading this way, with no [`Store::now`] of its own before
+    /// the transaction. `build` returns `None` to decline: nothing is written then, and the
+    /// answer is `None`. It may be called again, with the reading of the new run, when the
+    /// backend runs the transaction again after a deadlock.
+    ///
+    /// The provided implementation reads [`Store::now`] and applies the transaction with
+    /// [`Store::txn`]. The Postgres backend reads its clock in the transaction's first round
+    /// trip instead.
+    ///
+    /// # Errors
+    /// [`StoreError`] when the backend fails, its clock included: nothing is written then.
+    fn txn_stamped(
+        &self,
+        build: &mut dyn FnMut(StoreTime) -> Option<Txn>,
+    ) -> Result<Option<Result<Commit, Conflict>>, StoreError> {
+        let now = self.now()?;
+        build(now).map(|txn| self.txn(txn)).transpose()
+    }
+
     /// The committed head revision: every revision at or below it has committed. `None` for a
     /// store that cannot say, which is one only this process writes (its own writes are what a
     /// caller counts then). A caller that cached what it read compares two readings: equal
@@ -271,6 +292,13 @@ impl Store for std::sync::Arc<dyn Store> {
 
     fn txn(&self, txn: Txn) -> Result<Result<Commit, Conflict>, StoreError> {
         (**self).txn(txn)
+    }
+
+    fn txn_stamped(
+        &self,
+        build: &mut dyn FnMut(StoreTime) -> Option<Txn>,
+    ) -> Result<Option<Result<Commit, Conflict>>, StoreError> {
+        (**self).txn_stamped(build)
     }
 
     fn head(&self) -> Result<Option<Revision>, StoreError> {
@@ -440,14 +468,26 @@ mod tests {
         assert_eq!(<Arc<dyn Store> as Store>::reap_expired(&handle), Ok(1));
         assert_eq!(inner.get("k/c").expect("store"), None);
 
-        // The feed holds four rows now (three puts and the expiry); a trim through the
+        // A stamped transaction through the handle is built from the store's clock and
+        // committed to the store underneath.
+        let stamped = <Arc<dyn Store> as Store>::txn_stamped(&handle, &mut |now| {
+            assert_eq!(now, clock.now());
+            Some(Txn::new().put("s/a", b"4".to_vec(), Cond::Absent))
+        });
+        assert!(matches!(stamped, Ok(Some(Ok(_)))), "{stamped:?}");
+        assert_eq!(
+            inner.get("s/a").expect("store").map(|row| row.value),
+            Some(b"4".to_vec())
+        );
+
+        // The feed holds five rows now (four puts and the expiry); a trim through the
         // handle removes the first two from the store underneath.
         assert_eq!(
             <Arc<dyn Store> as Store>::trim_feed(&handle, Revision(2)),
             Ok(2)
         );
         let left = inner.changes(Revision(2), 10).expect("store");
-        assert_eq!(left.rows.len(), 2);
+        assert_eq!(left.rows.len(), 3);
     }
 
     // Catches a successor that steps into the surrogate gap (no char there, so the

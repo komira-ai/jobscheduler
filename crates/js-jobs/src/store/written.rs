@@ -9,7 +9,7 @@
 use std::sync::PoisonError;
 use std::sync::atomic::Ordering;
 
-use js_state::{Commit, Conflict, Op, Revision, Store, Txn};
+use js_state::{Commit, Conflict, Op, Revision, Store, StoreError, StoreTime, Txn};
 
 use super::JobStore;
 use crate::error::JobStoreError;
@@ -23,6 +23,21 @@ const FEED_PAGE: usize = 512;
 /// How many transactions one store batch of [`JobStore::write_each`] carries. Each is one
 /// row's (with its index entries), so a batch locks about this many rows for one round trip.
 pub(crate) const GROUP: usize = 100;
+
+/// How many rows `txn` writes, each at a revision of its own, when every operation of it is a
+/// put; `None` otherwise ([`Step::rows`]).
+fn row_count(txn: &Txn) -> Option<u64> {
+    let puts = txn.ops().iter().all(|op| matches!(op, Op::Put { .. }));
+    puts.then_some(txn.change_count())
+}
+
+/// The failure of a stamped write whose transaction the store did not apply although it was
+/// built, which a store that keeps [`Store::txn_stamped`]'s contract never answers.
+fn declined() -> JobStoreError {
+    JobStoreError::Store(StoreError::Failed(
+        "the store declined a transaction that was built".to_owned(),
+    ))
+}
 
 /// The store's head as the last reading read it, and the head at the last commit that changed
 /// a job table as far as the readings since have told.
@@ -113,22 +128,55 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         txn: Txn,
     ) -> Result<Result<(Commit, Step), Conflict>, JobStoreError> {
         let txn = self.guard_txn(txn);
-        let puts = txn.ops().iter().all(|op| matches!(op, Op::Put { .. }));
-        let rows = puts.then_some(txn.change_count());
+        let rows = row_count(&txn);
         let answer = self.store.txn(txn);
         let writes = self.writes.fetch_add(1, Ordering::SeqCst);
-        let step = |commit: Commit| {
-            let revision = commit.revision;
-            let step = Step {
-                instance: self.instance,
-                writes,
-                revision,
-                rows,
-            };
-            (commit, step)
-        };
-        match answer? {
-            Ok(commit) => Ok(Ok(step(commit))),
+        self.stepped(answer?, writes, rows)
+    }
+
+    /// [`JobStore::write_stepped`] of the transaction `build` makes from the store's clock as
+    /// the transaction reads it ([`Store::txn_stamped`]), with what `build` made beside it (the
+    /// record the transaction writes, stamped with that reading). When the store runs the
+    /// transaction again, `build` is called again and its last answer is the one given.
+    ///
+    /// # Errors
+    /// What `build` failed with, and nothing is written; as for [`JobStore::write_stepped`].
+    pub(super) fn write_stamped<T>(
+        &self,
+        build: &mut dyn FnMut(StoreTime) -> Result<(Txn, T), JobStoreError>,
+    ) -> Result<(T, Result<(Commit, Step), Conflict>), JobStoreError> {
+        let (mut made, mut failed, mut rows) = (None, None, None);
+        let answer = self.store.txn_stamped(&mut |now| {
+            let (txn, value) = build(now).map_err(|error| failed = Some(error)).ok()?;
+            let txn = self.guard_txn(txn);
+            rows = row_count(&txn);
+            made = Some(value);
+            Some(txn)
+        });
+        let writes = self.writes.fetch_add(1, Ordering::SeqCst);
+        failed.map_or(Ok(()), Err)?;
+        // `build` answered, so the store applied what it built.
+        let (answer, value) = answer?.zip(made).ok_or_else(declined)?;
+        Ok((value, self.stepped(answer, writes, rows)?))
+    }
+
+    /// The answer of a write that `writes` writes came before, of a transaction of `rows` rows.
+    fn stepped(
+        &self,
+        answer: Result<Commit, Conflict>,
+        writes: u64,
+        rows: Option<u64>,
+    ) -> Result<Result<(Commit, Step), Conflict>, JobStoreError> {
+        match answer {
+            Ok(commit) => {
+                let step = Step {
+                    instance: self.instance,
+                    writes,
+                    revision: commit.revision,
+                    rows,
+                };
+                Ok(Ok((commit, step)))
+            }
             Err(conflict) => self.refuse_moved(conflict).map(Err),
         }
     }

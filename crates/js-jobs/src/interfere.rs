@@ -267,6 +267,27 @@ impl<S: Store> Store for Interfere<S> {
         self.inner.apply_batch(batch)
     }
 
+    /// A stamped transaction is a commit that reads the clock: a clock failed by
+    /// [`Interfere::fail_clock`] fails it before it reaches the wrapped store, and the hook and
+    /// the failure countdown of commits apply as they do to [`Store::apply_batch`]. The wrapped
+    /// store's own `txn_stamped` runs it, so a store that reads its clock inside the
+    /// transaction does so here too.
+    fn txn_stamped(
+        &self,
+        build: &mut dyn FnMut(StoreTime) -> Option<Txn>,
+    ) -> Result<Option<Result<Commit, Conflict>>, StoreError> {
+        self.called("txn_stamped");
+        if self.fail_clock.load(Ordering::SeqCst) {
+            return Err(lock(&self.error).clone());
+        }
+        let hook = lock(&self.before).take();
+        if let Some(hook) = hook {
+            hook();
+        }
+        self.countdown(&self.fail_at)?;
+        self.inner.txn_stamped(build)
+    }
+
     fn head(&self) -> Result<Option<Revision>, StoreError> {
         self.called("head");
         if std::mem::take(&mut *lock(&self.fail_head)) {

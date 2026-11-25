@@ -37,9 +37,11 @@
 //!    refusal `no-capable-host` (`FAILED_PRECONDITION`, 422) and nothing is recorded: no row,
 //!    no id.
 //! 4. **Commit before the answer.** The job is inserted as queued in one transaction of the
-//!    store ([`js_jobs::JobStore::insert_queued`]), with the name of the client the bearer
-//!    layer named (never a value of the request); only after it returns is the answer
-//!    built, from the record it returns. A store that fails is `INTERNAL` with the message
+//!    store ([`js_jobs::JobStore::insert_queued_after_get`], handed what step 2 read, so the
+//!    id is read once), with the name of the client the bearer layer named (never a value of
+//!    the request) and the store's clock as that transaction reads it as its submit time;
+//!    only after it returns is the answer built, from the record it returns. A job step 2
+//!    found is answered from what step 2 read. A store that fails is `INTERNAL` with the message
 //!    `state-write-failed` (500 `state-write-failed`), and a store too busy to take the call
 //!    ([`js_state::StoreError::Unavailable`]: no connection came free, or a statement waited
 //!    past its limit) is `UNAVAILABLE` with the same message (503 `state-write-failed`), which
@@ -245,16 +247,15 @@ pub(super) async fn submit_job(
     let client = Some(caller.name.clone());
     let request = request.into_inner();
     let valid = validate::job(request.spec.as_ref(), served.ceiling).map_err(refused)?;
-    let held = match valid.id.clone() {
+    let stored = match valid.id.clone() {
         Some(id) => api
             .on_tables(move |jobs| jobs.get_job(&id))
             .await
-            .map_err(not_written())?
-            .is_some(),
-        None => false,
+            .map_err(not_written())?,
+        None => None,
     };
     let isolation = valid.spec.constraints.isolation;
-    if !held
+    if stored.is_none()
         && !served
             .admission
             .0
@@ -270,7 +271,7 @@ pub(super) async fn submit_job(
         client,
     };
     let inserted = api
-        .on_tables(move |jobs| jobs.insert_queued(new))
+        .on_tables(move |jobs| jobs.insert_queued_after_get(new, stored))
         .await
         .map_err(not_written())?;
     if !caller.owns(&inserted.record) {
@@ -312,3 +313,7 @@ mod poke_tests;
 #[cfg(test)]
 #[path = "submit_rows_tests.rs"]
 mod rows_tests;
+
+#[cfg(test)]
+#[path = "submit_reads_tests.rs"]
+mod reads_tests;
