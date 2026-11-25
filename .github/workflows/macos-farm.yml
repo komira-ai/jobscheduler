@@ -1,0 +1,287 @@
+# The macOS build of the release, and of the js-agent installer package, on the Macs of the build
+# farm instead of a GitHub-hosted macOS runner (docs/mac-farm.md). The jobs run on hosted Linux
+# runners: `cargo xtask mac-farm` sends one Cargo command to the farm as one remote action on its
+# Mac platform, with the checkout, the crates of Cargo.lock for aarch64-apple-darwin and the
+# pinned Rust toolchain as the action's inputs, prints the command's output and fetches the files
+# it was told to make.
+#
+# `what: release` builds the five Apple silicon binaries with `cargo xtask release macos-leg`
+# (the same command as artifacts.yml's `build-macos`), packs the archives with `cargo xtask release pack` and uploads them as
+# `dist-aarch64-apple-darwin`, which artifacts.yml's `sums` downloads with the other legs.
+# `what: pkg` builds the installer package of the version (job `pkg`) and of the next patch
+# version, which the first-install test updates the agent to (job `pkg-update`), with
+# `cargo xtask pkg build-macos`, and uploads exactly the artifacts of js-agent-macos-pkg.yml's
+# `build` and `build-update`.
+#
+# Why it is a file of its own. The signer identity of an attestation is the workflow file that
+# ran the signing step, and every farm host trusts `artifacts.yml` on `refs/heads/main` alone
+# (the top of artifacts.yml). Any job of artifacts.yml that held `id-token: write` could mint a
+# token with that identity. These jobs hold it, for the farm's network (below), so they are jobs
+# of this file: the tokens of a called workflow's job name that workflow's file, and no token of
+# this file can sign as artifacts.yml. artifacts.yml and js-agent-macos-pkg.yml only call it.
+#
+# What holds the token. Only the jobs `release`, `pkg` and `pkg-update`, for the OIDC join of the
+# farm's Tailscale network (workload identity federation, tag `tag:ci`: no stored secret). Each
+# runs no code compiled from the repository at that point: the job `xtask`, which holds no token,
+# builds xtask and uploads it, and a job that holds the token downloads that binary and runs it
+# (`mac-farm`, `release stamp`, `release pack`, `release next-version`). No step of it runs
+# `cargo` at all (`cargo fetch` runs inside the verb, which downloads crates and compiles
+# nothing), and the lint refuses one. No job names a secret.
+#
+# When it runs. Under a push to main, or a manual run (`workflow_dispatch`), never for a pull
+# request or a merge group: every job that holds the token has an `if:` that pins one of the two
+# events, which crates/xtask/tests/apt_workflow holds every workflow to. A caller's own `if:`
+# decides which of its events call this file; a manual run takes a version and what to build, to
+# try a branch.
+#
+# The farm is the organisation variables FARM_ADDRESS, FARM_INSTANCE, FARM_TLS and
+# FARM_DARWIN_ARM64_PROPERTIES, and the tailnet identity TS_CLIENT_ID and TS_AUDIENCE; no
+# repository holds an endpoint or a property set. A run that has none of them (a fork's) fails
+# at `xtask mac-farm`, which refuses an empty --address by name ("the farm is not configured:
+# --address is empty (FARM_ADDRESS is not set)"), and builds nothing: no job ends green without
+# having built.
+#
+# Every `run:` of this file is one command line: what a step does is a verb of xtask, and
+# crates/xtask/tests/release_workflow holds the file to it.
+name: macos-farm
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: The release version X.Y.Z, which the binaries print and the files are named by
+        type: string
+        required: true
+      what:
+        description: "What to build: release (the archives) or pkg (the installer package and its update package)"
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      version:
+        description: The version X.Y.Z, which the binaries print and the files are named by
+        type: string
+        required: true
+      what:
+        description: What to build
+        type: choice
+        options: [release, pkg]
+        required: true
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  VERSION: ${{ inputs.version }}
+  # The commit the run is at: the caller's, the pushed commit.
+  COMMIT: ${{ github.sha }}
+
+jobs:
+  # xtask, built without a token or a secret, for the jobs that hold the token to run.
+  xtask:
+    if: ${{ inputs.what == 'release' || inputs.what == 'pkg' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.COMMIT }}
+          persist-credentials: false
+      - run: rustup toolchain install
+      - run: cargo build -p xtask --locked
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mac-farm-xtask-${{ inputs.what }}
+          path: target/debug/xtask
+          if-no-files-found: error
+          retention-days: 1
+
+  # The five binaries for Apple silicon, built on a farm Mac and archived here as artifacts.yml's
+  # `build-macos` archives them.
+  release:
+    needs: [xtask]
+    if: ${{ inputs.what == 'release' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      TARGET: aarch64-apple-darwin
+      # `<package>:<bin>` of each binary, and the binaries: the files the verb fetches and the
+      # archives made of them.
+      BUILDS: js-cli:js js-agent:js-agent js-bundle-cli:js-bundle js-mac-session:js-mac-session js-mac-provision:js-mac-provision
+      BINS: js js-agent js-bundle js-mac-session js-mac-provision
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.COMMIT }}
+          persist-credentials: false
+      # `cargo fetch`, which the verb runs, needs the pinned toolchain's files.
+      - run: rustup toolchain install
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: mac-farm-xtask-release
+          path: tools
+      - name: Make xtask executable
+        run: chmod +x tools/xtask
+      # The release version goes into this checkout only, which the verb sends, so the binaries
+      # print it; the repository keeps its own version.
+      - name: Stamp the release version
+        run: tools/xtask release stamp --to "$VERSION"
+      - name: Join the farm's Tailscale network
+        if: ${{ vars.TS_CLIENT_ID != '' }}
+        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
+        with:
+          oauth-client-id: ${{ vars.TS_CLIENT_ID }}
+          audience: ${{ vars.TS_AUDIENCE }}
+          tags: tag:ci
+      # The oldest macOS the binaries must run on, as in the hosted build: a newer Mac must not
+      # raise it (`release macos-leg` reads each binary's minos).
+      - name: Build the binaries on a farm Mac
+        timeout-minutes: 60
+        env:
+          FARM_ADDRESS: ${{ vars.FARM_ADDRESS }}
+          FARM_INSTANCE: ${{ vars.FARM_INSTANCE }}
+          FARM_TLS: ${{ vars.FARM_TLS || 'false' }}
+          FARM_PROPERTIES: ${{ vars.FARM_DARWIN_ARM64_PROPERTIES }}
+        run: tools/xtask mac-farm --address "$FARM_ADDRESS" --instance "$FARM_INSTANCE" --tls "$FARM_TLS" --properties "$FARM_PROPERTIES" --scratch "$RUNNER_TEMP/mac-farm" --env MACOSX_DEPLOYMENT_TARGET=11.0 --output target/aarch64-apple-darwin/release/js --output target/aarch64-apple-darwin/release/js-agent --output target/aarch64-apple-darwin/release/js-bundle --output target/aarch64-apple-darwin/release/js-mac-session --output target/aarch64-apple-darwin/release/js-mac-provision -- xtask release macos-leg --target "$TARGET" --builds "$BUILDS" --min-macos 11.0 --out target/macos-leg
+      # Archives that depend only on the commit and the binaries: sorted names, the commit's time
+      # as the modification time, numeric owner 0/0, no name or time in the gzip header.
+      - name: Pack the archives
+        run: tools/xtask release pack --bins "$BINS" --target "$TARGET" --version "$VERSION" --mtime-of "$COMMIT" --out dist
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist-aarch64-apple-darwin
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  # The installer package of the version, built on a farm Mac: the three programs, the checks the
+  # hosted `build` makes, the package and its SHA256SUMS, which are checked again here.
+  pkg:
+    needs: [xtask]
+    if: ${{ inputs.what == 'pkg' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.COMMIT }}
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: mac-farm-xtask-pkg
+          path: tools
+      - name: Make xtask executable
+        run: chmod +x tools/xtask
+      - name: Stamp the version
+        run: tools/xtask release stamp --to "$VERSION"
+      - name: Join the farm's Tailscale network
+        if: ${{ vars.TS_CLIENT_ID != '' }}
+        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
+        with:
+          oauth-client-id: ${{ vars.TS_CLIENT_ID }}
+          audience: ${{ vars.TS_AUDIENCE }}
+          tags: tag:ci
+      # The package, its SHA256SUMS, the three programs with theirs, and the xtask that built
+      # them, which the signing job checks the signed package with.
+      - name: Build the package on a farm Mac
+        timeout-minutes: 60
+        env:
+          FARM_ADDRESS: ${{ vars.FARM_ADDRESS }}
+          FARM_INSTANCE: ${{ vars.FARM_INSTANCE }}
+          FARM_TLS: ${{ vars.FARM_TLS || 'false' }}
+          FARM_PROPERTIES: ${{ vars.FARM_DARWIN_ARM64_PROPERTIES }}
+        run: tools/xtask mac-farm --address "$FARM_ADDRESS" --instance "$FARM_INSTANCE" --tls "$FARM_TLS" --properties "$FARM_PROPERTIES" --scratch "$RUNNER_TEMP/mac-farm" --env MACOSX_DEPLOYMENT_TARGET=11.0 --output "dist/js-agent-$VERSION-macos-arm64.pkg" --output dist/SHA256SUMS --output target/release/js-agent --output target/release/js-mac-session --output target/release/js-mac-provision --output target/release/PROGRAMS.SHA256SUMS --output target/debug/xtask -- xtask pkg build-macos --version "$VERSION"
+      - name: The fetched package is the one that was summed
+        working-directory: dist
+        run: sha256sum --check --strict SHA256SUMS
+      - name: The fetched programs are the ones that were summed
+        working-directory: target/release
+        run: sha256sum --check --strict PROGRAMS.SHA256SUMS
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: js-agent-macos-pkg-unsigned
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: js-agent-macos-programs-unsigned
+          path: |
+            target/release/js-agent
+            target/release/js-mac-session
+            target/release/js-mac-provision
+            target/release/PROGRAMS.SHA256SUMS
+          if-no-files-found: error
+          retention-days: 1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: js-agent-macos-checker
+          path: target/debug/xtask
+          if-no-files-found: error
+          retention-days: 1
+
+  # The package the first install updates the agent to: the next patch version of the same
+  # programs, in a job of its own so that it runs beside `pkg`. It is not signed and no release
+  # takes it.
+  pkg-update:
+    needs: [xtask]
+    if: ${{ inputs.what == 'pkg' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.COMMIT }}
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: mac-farm-xtask-pkg
+          path: tools
+      - name: Make xtask executable
+        run: chmod +x tools/xtask
+      - name: Name the next version
+        id: next
+        run: tools/xtask release next-version --version "$VERSION" --output "$GITHUB_OUTPUT"
+      - name: Stamp the next version
+        env:
+          NEXT: ${{ steps.next.outputs.version }}
+        run: tools/xtask release stamp --to "$NEXT"
+      - name: Join the farm's Tailscale network
+        if: ${{ vars.TS_CLIENT_ID != '' }}
+        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
+        with:
+          oauth-client-id: ${{ vars.TS_CLIENT_ID }}
+          audience: ${{ vars.TS_AUDIENCE }}
+          tags: tag:ci
+      - name: Build the update package on a farm Mac
+        timeout-minutes: 60
+        env:
+          FARM_ADDRESS: ${{ vars.FARM_ADDRESS }}
+          FARM_INSTANCE: ${{ vars.FARM_INSTANCE }}
+          FARM_TLS: ${{ vars.FARM_TLS || 'false' }}
+          FARM_PROPERTIES: ${{ vars.FARM_DARWIN_ARM64_PROPERTIES }}
+          NEXT: ${{ steps.next.outputs.version }}
+        run: tools/xtask mac-farm --address "$FARM_ADDRESS" --instance "$FARM_INSTANCE" --tls "$FARM_TLS" --properties "$FARM_PROPERTIES" --scratch "$RUNNER_TEMP/mac-farm" --env MACOSX_DEPLOYMENT_TARGET=11.0 --output "dist/js-agent-$NEXT-macos-arm64.pkg" --output dist/SHA256SUMS -- xtask pkg build-macos --version "$NEXT"
+      - name: The fetched package is the one that was summed
+        working-directory: dist
+        run: sha256sum --check --strict SHA256SUMS
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: js-agent-macos-pkg-update-unsigned
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1

@@ -8,6 +8,7 @@ ListHosts
 CordonHost
 UncordonHost
 ClearHostTaint
+RetireHost
 ListPools
 ListProviders
 GetUsage

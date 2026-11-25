@@ -649,9 +649,11 @@ struct Held {
 
 /// An agent that speaks the per-job messages, as the agent does: a start is taken once per
 /// job id and held as `starting`; a stop of a held job ends it `killed`; a stop of a job it
-/// does not hold retires the id, listed until the server acknowledges it; an acknowledged
-/// result is dropped with its container at once, and the id is fenced, so a start that
-/// arrives later is not run. It makes a container only when told to run a job.
+/// does not hold retires the id, listed until the server acknowledges it, and fences the id, so
+/// a start of the job that arrives later is not run; an acknowledged result is dropped with its
+/// container at once, and its fence (the job id with the allocation id) is kept, so a start of
+/// that allocation that arrives later is not run, while a start of the job under another
+/// allocation (the job placed here again after a requeue) is. It makes a container only when told to run a job.
 ///
 /// A reply that names an allocation (`exclusive`) makes it prepare: its phase is `preparing`
 /// until a test has it report the host ready ([`FakeAgent::report_ready`]) or refused
@@ -667,6 +669,8 @@ pub(crate) struct FakeAgent {
     held: BTreeMap<String, Held>,
     retired: BTreeSet<String>,
     fenced: BTreeSet<String>,
+    /// The fences of the results it was answered: each job id with its allocation id.
+    answered: BTreeSet<(String, String)>,
     /// The jobs it made a container for, in order.
     pub(crate) launched: Vec<String>,
     /// Whether it reports `log_grant_state`.
@@ -695,6 +699,7 @@ impl FakeAgent {
             held: BTreeMap::new(),
             retired: BTreeSet::new(),
             fenced: BTreeSet::new(),
+            answered: BTreeSet::new(),
             launched: Vec::new(),
             uploads: false,
             grant: None,
@@ -785,7 +790,8 @@ impl FakeAgent {
             _ => {}
         }
         for spec in starts(reply) {
-            if !self.fenced.contains(&spec.job_id) {
+            let fence = (spec.job_id.clone(), spec.allocation_id.clone());
+            if !self.fenced.contains(&spec.job_id) & !self.answered.contains(&fence) {
                 self.held.entry(spec.job_id.clone()).or_insert(Held {
                     allocation_id: spec.allocation_id.clone(),
                     state: HeldState::Starting,
@@ -807,8 +813,9 @@ impl FakeAgent {
             }
         }
         for ack in &reply.job_acks {
-            self.held.remove(&ack.job_id);
-            self.fenced.insert(ack.job_id.clone());
+            let held = self.held.remove(&ack.job_id);
+            let fence = held.map(|held| (ack.job_id.clone(), held.allocation_id));
+            self.answered.extend(fence);
         }
         for id in &reply.retired_acks {
             self.retired.remove(id);
@@ -901,5 +908,6 @@ pub(crate) fn result(
         input_failure: None,
         usage: None,
         cpu_series: None,
+        memory_series: None,
     }
 }

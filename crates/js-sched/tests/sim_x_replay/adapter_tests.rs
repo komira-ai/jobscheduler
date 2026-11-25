@@ -592,20 +592,20 @@ fn assert_slot_zero(r: &Rig, m: &ScoreModel, name: &str) {
 }
 
 /// Shows: the scorer's case "a lease goes to the fuller worker that fits" gives the same
-/// worker through the adapter as through the scheduler: `a` holds four cores, `b` none, and
-/// the lease goes to `a`; the adapter's slot 0 equals the scheduler's left side on both.
+/// worker through the adapter as through the scheduler: `a` holds three cores, `b` none, and
+/// the lease goes to `a` (4 of 8 cores with it, exactly the pack limit); the adapter's slot 0 equals the scheduler's left side on both.
 /// Catches an adapter that disagrees with the predicate's own figures.
 #[test]
 fn conformance_the_fuller_worker_that_fits() {
     let mut r = Rig::on();
     r.up("a", node());
     r.up("b", node());
-    load(&mut r, "a", &["b"], 4);
+    load(&mut r, "a", &["b"], 3);
     r.action(1_000, 4 * GIB, Some(warm(1_000, 0)));
     let m = model_of(&r, &["a", "b"]);
     assert_slot_zero(&r, &m, "a");
     assert_slot_zero(&r, &m, "b");
-    assert_eq!(m.load(&id("a"), 0).cpu_millis, 4_000);
+    assert_eq!(m.load(&id("a"), 0).cpu_millis, 3_000);
     let cands = names(&["a", "b"]);
     let ours = ScoreRanker::new().place(&m, &cands).map(WorkerId::as_str);
     let theirs: Vec<String> = r

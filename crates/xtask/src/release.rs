@@ -55,6 +55,7 @@ pub mod include;
 pub mod mac_programs;
 pub mod macos_leg;
 pub mod next_version;
+pub mod pack;
 pub mod plan;
 pub mod server_image;
 pub mod smoke_bundle;

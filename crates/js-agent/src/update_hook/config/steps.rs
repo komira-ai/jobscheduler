@@ -1,17 +1,22 @@
 //! The steps of the config hook, over the ports: `prepare`, `cutover`, `verify`, `rollback`
 //! and `cleanup`. `uninstall` does nothing and has no body here.
 //!
-//! A config package's files are in place before `cutover` (the installer's activate) and the
-//! previous version's are back before `rollback`. What the hook adds is the hand-over: the
-//! agent reads its flags once, at its start, so a new flags file takes effect by restarting the
+//! A config package's files are in place before `cutover` (the installer's activate). Before
+//! `rollback` an update's previous version is back, but a first install has no previous version:
+//! the installer has replaced whatever file was at the package's paths (one a person placed) and
+//! removes the package only after `rollback`. What the hook adds is the hand-over: the agent
+//! reads its flags once, at its start, so a new flags file takes effect by restarting the
 //! agent's unit, and the proof that it did is the agent's hello on the lease server, a session
-//! other than the one the server showed before the restart.
+//! other than the one the server showed before the restart. And it keeps the files the package
+//! replaces as they were (see [`kept`](super::kept)), so that `rollback` puts them back before
+//! it restarts the unit, first install or not.
 //!
 //! Every step but `prepare` and `cleanup` ends with the unit as it found it or restarted;
-//! none changes the flags file. Each takes the state directory's lock first (making the
-//! directory when it is not there) and loads the record, which must be of the unit the params
-//! name.
+//! only `rollback` changes the files the package placed, to put back what was kept. Each takes
+//! the state directory's lock first (making the directory when it is not there) and loads the
+//! record, which must be of the unit the params name.
 
+use std::path::Path;
 use std::time::Duration;
 
 use js_update_hook::{
@@ -23,6 +28,7 @@ use crate::update_hook::step::{Life, life};
 use crate::update_hook::{Class, HostReading, Lease, LeaseError, StatFn};
 
 use super::Done;
+use super::kept::{self, KeptError};
 use super::params::{HELLO_WAIT_SECS, Params};
 use super::reason::{Reason, Report};
 use super::record::{Held, Invalid, Record, StateError};
@@ -44,6 +50,8 @@ pub struct Env<'a> {
     pub stat: &'a StatFn,
     /// The lease server's own-host routes for the host the flags file now in place names.
     pub lease: &'a LeaseOf<'a>,
+    /// The host's root, below which a package's files are placed (`/` on a machine).
+    pub root: &'a Path,
 }
 
 fn ended(outcome: Outcome, report: Report) -> Done {
@@ -80,6 +88,11 @@ fn environment(reason: Reason, detail: impl Into<String>) -> Done {
 /// The state directory, the lock or the record is not as the hook requires.
 fn state_failure(error: StateError) -> Done {
     failure(error.reason(), error.to_string())
+}
+
+/// The kept copy could not be made or removed.
+fn keep_failure(error: KeptError) -> Done {
+    environment(Reason::KeepFailed, error.to_string())
 }
 
 /// How long hostkeeper waits before it tries a `cutover` again that could not ask the lease
@@ -128,19 +141,41 @@ fn is_new_session(host: &HostReading, before: Option<u64>) -> bool {
             .is_some_and(|session| Some(session) != before)
 }
 
-/// `prepare`: the params were read and are sound, which is all there is to check. It takes the
-/// lock, so that a step still running refuses it. It begins a new update, so a record it finds
-/// is of an earlier one whose `cleanup` never ran, and is deleted: left, its marks would make
-/// this update's `cutover` and `verify` succeed without restarting anything.
+/// `prepare`: the params were read and are sound. It takes the lock, so that a step still
+/// running refuses it. It keeps, in the state directory, what is at each path the package staged
+/// in `staged` places and at the flags file, before the installer replaces it (see
+/// [`kept`](super::kept)); a path it cannot keep (a directory, one it cannot read) ends the step
+/// `keep_failed`, before anything is replaced. It begins a new update, so a record it finds is of
+/// an earlier one whose `cleanup` never ran, and is deleted: left, its marks would make this
+/// update's `cutover` and `verify` succeed without restarting anything.
+///
+/// A copy it finds is of an earlier update that neither verified nor rolled back (`verify` and
+/// `rollback` remove theirs), so the files in place may be that update's: it is kept as it is,
+/// and this update puts back the same files. Only a copy whose record says that `verify`
+/// succeeded is replaced.
 #[must_use]
-pub fn prepare(env: &Env<'_>, params: &Params) -> Done {
-    prepare_run(env, params).unwrap_or_else(|done| done)
+pub fn prepare(env: &Env<'_>, params: &Params, staged: &Path) -> Done {
+    prepare_run(env, params, staged).unwrap_or_else(|done| done)
 }
 
-fn prepare_run(env: &Env<'_>, params: &Params) -> Result<Done, Done> {
-    let (held, _) = open_state(env, params)?;
+fn prepare_run(env: &Env<'_>, params: &Params, staged: &Path) -> Result<Done, Done> {
+    let (held, loaded) = open_state(env, params)?;
+    let unfinished = if loaded.is_some_and(|record| record.verified) {
+        false
+    } else {
+        kept::exists(&params.state_dir).map_err(keep_failure)?
+    };
+    let done = if unfinished {
+        success_with(
+            "kept as it is the copy of the files from before an update that did not finish",
+        )
+    } else {
+        let paths = kept::placed(env.root, staged, &params.flags_file).map_err(keep_failure)?;
+        kept::keep(&params.state_dir, &paths).map_err(keep_failure)?;
+        success()
+    };
     held.delete().map_err(state_failure)?;
-    Ok(success())
+    Ok(done)
 }
 
 /// `cutover`: checks the flags file now in place, notes the host's session, restarts the unit.
@@ -276,7 +311,7 @@ fn verify_run(env: &Env<'_>, params: &Params) -> Result<Done, Done> {
         ));
     };
     if record.verified {
-        return Ok(success());
+        return Ok(drop_kept(params));
     }
     let lease = (env.lease)(params).map_err(|why| failure(Reason::BadConfig, why))?;
     let bound_ms = params
@@ -322,28 +357,72 @@ fn verify_run(env: &Env<'_>, params: &Params) -> Result<Done, Done> {
     // After the observation, so that a mark means it was made.
     record.verified = true;
     save(&held, &record)?;
-    Ok(success())
+    Ok(drop_kept(params))
 }
 
-/// `rollback`: the previous files are back, so the unit is restarted onto them, and the agent's
-/// hello is waited for when the join token file (`token_file`) exists. A missing hello never fails the
-/// rollback (a host must not be wedged by it): it is told in the detail.
+/// The end of a `verify` that succeeded: the kept copy is removed, as nothing rolls this update
+/// back now. A copy that cannot be removed does not fail the step; `cleanup` removes it.
+fn drop_kept(params: &Params) -> Done {
+    match kept::discard(&params.state_dir) {
+        Ok(()) => success(),
+        Err(why) => success_with(format!("the kept copy is left for cleanup: {why}")),
+    }
+}
+
+/// `rollback`: first the files `prepare` kept are put back, each path that holds other than
+/// what was there before the update written back (an update's previous version is already back,
+/// so nothing is written; a first install's files are replaced by the ones it replaced); a path
+/// that held nothing is left to the installer. A copy that cannot be put back fails the step
+/// (`restore_failed`, class environment) before the unit is touched, the copy and the record left
+/// for a rerun. Then the unit is restarted onto the files, and the agent's hello is waited for
+/// when the join token file (`token_file`) exists. A missing hello never fails the rollback (a
+/// host must not be wedged by it): it is told in the detail.
 ///
 /// A `cutover` that never began the restart (a flags file refused, a step that never ran) left
-/// the unit on the config it has: there is nothing to undo, and the unit is not touched. The
-/// record is deleted at the end, so a rerun restarts nothing.
+/// the unit on the config it has: the files are put back, and the unit is not touched. The
+/// record is deleted at the end, so a rerun restarts nothing, and so is the copy, except on a
+/// first install whose copy holds a file or link: the updater removes the package after this
+/// step, and its removal deletes every file the package placed, the one just put back among
+/// them, so the copy stays in the state directory, where the next `prepare` keeps it.
 #[must_use]
 pub fn rollback(env: &Env<'_>, params: &Params) -> Done {
     rollback_run(env, params).unwrap_or_else(|done| done)
 }
 
+/// The end of a `rollback`: the copy removed (or, on a first install, kept and said so) and the
+/// record deleted. What the detail says of the copy. A copy that cannot be removed does not fail
+/// the step, whose work is done: it is told, and it holds the files now in place, so the next
+/// `prepare`, which keeps it, keeps what it would have read.
+fn finish_rollback(
+    held: &Held,
+    params: &Params,
+    put: Option<&kept::PutBack>,
+) -> Result<String, Done> {
+    let told = if params.previous_version.is_none() && put.is_some_and(kept::PutBack::holds_any) {
+        format!(
+            "; the copy stays in {}, as removing the package deletes the files it placed",
+            kept::dir_of(&params.state_dir).display()
+        )
+    } else {
+        match kept::discard(&params.state_dir) {
+            Ok(()) => String::new(),
+            Err(why) => format!("; the kept copy could not be removed: {why}"),
+        }
+    };
+    held.delete().map_err(state_failure)?;
+    Ok(told)
+}
+
 fn rollback_run(env: &Env<'_>, params: &Params) -> Result<Done, Done> {
     let (held, loaded) = open_state(env, params)?;
+    let put = kept::put_back(&params.state_dir)
+        .map_err(|why| environment(Reason::RestoreFailed, why.to_string()))?;
+    let restored = put.as_ref().map(kept::PutBack::told).unwrap_or_default();
     if !loaded.is_some_and(|record| record.restart_begun) {
-        held.delete().map_err(state_failure)?;
-        return Ok(success_with(
-            "cutover restarted nothing: the unit is left as it is",
-        ));
+        let stays = finish_rollback(&held, params, put.as_ref())?;
+        return Ok(success_with(format!(
+            "{restored}cutover restarted nothing: the unit is left as it is{stays}"
+        )));
     }
     let lease = (env.lease)(params);
     let waiting = params.token_file.exists();
@@ -361,8 +440,10 @@ fn rollback_run(env: &Env<'_>, params: &Params) -> Result<Done, Done> {
         (true, Err(why)) => format!("not waiting for a hello: {why}"),
         (true, Ok(lease)) => hello_after(env, lease.as_ref(), before),
     };
-    held.delete().map_err(state_failure)?;
-    Ok(success_with(format!("the unit was restarted; {hello}")))
+    let stays = finish_rollback(&held, params, put.as_ref())?;
+    Ok(success_with(format!(
+        "{restored}the unit was restarted; {hello}{stays}"
+    )))
 }
 
 /// Waits, for at most [`HELLO_WAIT_SECS`], for the host to be live in a session other than
@@ -382,8 +463,8 @@ fn hello_after(env: &Env<'_>, lease: &dyn Lease, before: Option<u64>) -> String 
     }
 }
 
-/// `cleanup`: deletes the record, once `verify` has succeeded. A `cleanup` that finds no record
-/// has finished before.
+/// `cleanup`: deletes the kept copy, if `verify` left one, and the record, once `verify` has
+/// succeeded. A `cleanup` that finds no record has finished before.
 #[must_use]
 pub fn cleanup(env: &Env<'_>, params: &Params) -> Done {
     cleanup_run(env, params).unwrap_or_else(|done| done)
@@ -400,6 +481,7 @@ fn cleanup_run(env: &Env<'_>, params: &Params) -> Result<Done, Done> {
             "the record does not say that verify succeeded",
         ));
     }
+    kept::discard(&params.state_dir).map_err(keep_failure)?;
     held.delete().map_err(state_failure)?;
     Ok(success())
 }

@@ -29,6 +29,9 @@ mod provider;
 #[path = "submit_xcode_tests.rs"]
 mod xcode;
 
+#[path = "submit_env_tests.rs"]
+mod env;
+
 /// The answer of a refusal by `code`, as the gateway says it, beside its gRPC code.
 fn refusal(code: RefusalCode) -> (StatusCode, Value) {
     said(&refusal_status(code, ""))

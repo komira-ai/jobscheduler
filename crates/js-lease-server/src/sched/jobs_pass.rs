@@ -168,6 +168,7 @@ impl Agents {
         let hosts = JobHosts {
             open: &offered.open,
             hello: &offered.hello,
+            tainted: &offered.tainted,
             whole: self.registry.whole_node(),
         };
         let starts = Tainted {

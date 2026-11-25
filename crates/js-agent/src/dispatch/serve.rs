@@ -4,7 +4,7 @@ use std::path::Path;
 
 use js_agent_wire::HostCredential;
 
-use super::{Cell, Next, Poller};
+use super::{Cell, Next, Poller, ROOM_WAIT};
 use crate::backoff::Jitter;
 use crate::login::Login;
 use crate::transport::{Connector, Transport};
@@ -44,18 +44,27 @@ impl Dial<'_> {
 
 /// Polls for the sessions `cell` is given until it is closed: each poll on a transport of
 /// its own ([`Dial::open`]), the answers handed to `worker`, and a wait after a failure
-/// (any answer but a usable 200, any transport error) as `jitter` says.
+/// (any answer but a usable 200, any transport error) as `jitter` says. Messages the worker
+/// had no room for are held and handed over when it makes room, before the next poll is
+/// posted; meanwhile no transport is made. The poller's lines go to the cell.
 pub fn serve(cell: &Cell, dial: &Dial<'_>, worker: &Worker, jitter: Box<dyn Jitter>) {
     let mut poller = Poller::new(worker, jitter);
     while let Some((generation, route)) = cell.wait_route() {
-        let next = match dial.open(route.credential.as_ref()) {
-            Ok(mut transport) => poller.poll(&mut *transport, &route),
-            Err(_) => poller.failed(None),
-        };
+        let next =
+            poller
+                .hand_over()
+                .unwrap_or_else(|| match dial.open(route.credential.as_ref()) {
+                    Ok(mut transport) => poller.poll(&mut *transport, &route),
+                    Err(_) => poller.failed(None),
+                });
+        cell.note(poller.take_lines());
         match next {
             Next::Again => {}
             Next::After(wait) => {
                 cell.pause(wait, generation);
+            }
+            Next::Room(seen) => {
+                worker.wait_room(seen, ROOM_WAIT);
             }
         }
     }

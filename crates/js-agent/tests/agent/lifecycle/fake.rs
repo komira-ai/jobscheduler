@@ -8,11 +8,12 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use js_agent::lifecycle::{
-    Exit, Found, FsPrepared, JobFs, NativeRefusal, OutputsReport, Prepared, RunHandle, RunSpec,
-    Runtime, RuntimeError, Status, Ticket, Wake, Whereabouts, label,
+    Exit, Found, FsPrepared, JobFs, LookupStamps, NativeRefusal, OutputsReport, Prepared,
+    RunHandle, RunSpec, Runtime, RuntimeError, Status, Ticket, Wake, Whereabouts, label,
 };
 use js_agent_wire::{
-    CpuSeries, HostPort, JobUsage, LogReport, LogTail, NativeSpec, NetworkCeiling, PortRange,
+    CpuSeries, HostPort, JobUsage, LogReport, LogTail, MemorySeries, NativeSpec, NetworkCeiling,
+    PortRange,
 };
 
 #[path = "fake_checks.rs"]
@@ -23,6 +24,8 @@ mod clock;
 mod fs;
 #[path = "fake_outputs.rs"]
 mod outputs;
+#[path = "fake_timeline.rs"]
+mod timeline;
 pub use checks::ScriptedChecks;
 pub use clock::{ManualClock, NoUnixClock, UNIX_ORIGIN_MS};
 
@@ -74,6 +77,8 @@ struct State {
     answers: BTreeMap<String, OutputsReport>,
     /// What `cpu_series` answers for a run, by run id.
     series: BTreeMap<String, CpuSeries>,
+    /// What `memory_series` answers for a run, by run id.
+    memory_series: BTreeMap<String, MemorySeries>,
     /// The control group directory of the container of each run.
     cgroups: BTreeMap<String, PathBuf>,
     /// The control group the first process of the container of a run runs in, outside the
@@ -118,6 +123,8 @@ struct State {
     egress_asks: u32,
     /// What `start_steps` answers, once, by run id.
     steps: BTreeMap<String, Vec<(&'static str, u64)>>,
+    /// What `lookup_stamps` answers, once, by run id.
+    lookups: BTreeMap<String, LookupStamps>,
     /// What the runtime was given to ring (`set_wake`).
     wake: Wake,
     /// What `host_ports` answers; none by default, as the trait's default.
@@ -319,6 +326,12 @@ impl FakeRuntime {
         state.series.insert(run_id.to_owned(), series);
     }
 
+    /// The runtime recorded `series` for `run_id`: `memory_series` answers it.
+    pub fn report_memory_series(&self, run_id: &str, series: MemorySeries) {
+        let mut state = self.state.borrow_mut();
+        state.memory_series.insert(run_id.to_owned(), series);
+    }
+
     /// Makes the next `times` calls named `call` (`create`, `poll`, `stop`, `remove`, `logs`,
     /// `list` or `egress`, the egress check) fail; `u32::MAX` for as long as the test wants.
     /// `outputs` makes a removal remove the container and fail as its outputs not copied
@@ -353,12 +366,6 @@ impl FakeRuntime {
     pub fn ring_wake(&self) {
         let wake = self.state.borrow().wake.clone();
         wake.wake();
-    }
-
-    /// `start_steps` answers `steps` for `run_id`, once.
-    pub fn steps_of(&self, run_id: &str, steps: &[(&'static str, u64)]) {
-        let mut state = self.state.borrow_mut();
-        state.steps.insert(run_id.to_owned(), steps.to_vec());
     }
 
     /// How many times the egress check was asked for.
@@ -747,10 +754,11 @@ impl Runtime for FakeRuntime {
     }
 
     fn start_steps(&mut self, id: &RunHandle) -> Vec<(&'static str, u64)> {
-        let mut state = self.state.borrow_mut();
-        let run_id = state.containers.get(&id.0).map(|c| c.run_id.clone());
-        let steps = run_id.and_then(|run_id| state.steps.remove(&run_id));
-        steps.unwrap_or_default()
+        self.take_steps(id)
+    }
+
+    fn lookup_stamps(&mut self, id: &RunHandle) -> Option<LookupStamps> {
+        self.take_lookup(id)
     }
 
     fn create_and_start(&mut self, spec: &RunSpec) -> Result<RunHandle, RuntimeError> {
@@ -866,6 +874,12 @@ impl Runtime for FakeRuntime {
             .series
             .get(&state.containers.get(&id.0)?.run_id)
             .cloned()
+    }
+
+    fn memory_series(&mut self, id: &RunHandle) -> Option<MemorySeries> {
+        let state = self.state.borrow();
+        let run = &state.containers.get(&id.0)?.run_id;
+        state.memory_series.get(run).cloned()
     }
 
     fn log_tail(&mut self, id: &RunHandle) -> Result<Option<LogTail>, RuntimeError> {

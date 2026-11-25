@@ -5,11 +5,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent::lifecycle::{
-    Created, FsPrepared, JobFs, OutputsReport, Prepared, Removal, RunHandle, Runtime, Status, Wake,
-    Whereabouts, label,
+    Created, FsPrepared, JobFs, LookupStamps, OutputsReport, Prepared, Removal, RunHandle, Runtime,
+    Status, Wake, Whereabouts, label,
 };
 use js_agent::vm::{VmRuntime, WithVms};
-use js_agent_wire::{JobUsage, LogReport, LogTail, NativeSpec, NetworkLevel, PortRange, refusal};
+use js_agent_wire::{
+    JobUsage, LogReport, LogTail, MemorySeries, NativeSpec, NetworkLevel, PortRange, refusal,
+};
 use js_vm_lease::fake::FakeDriver;
 use js_vm_lease::{ExecEnd, Step};
 
@@ -241,6 +243,14 @@ fn every_host_question_is_the_other_runtimes() {
     fake.steps_of("left", &[("begin", 7)]);
     let steps = with.start_steps(&RunHandle(leaked.clone()));
     assert_eq!(steps, [("begin", 7)]);
+    let stamps = LookupStamps {
+        queued_at_ms: 1,
+        started_at_ms: 2,
+        ended_at_ms: 4,
+    };
+    fake.lookup_of("left", stamps);
+    let given = with.lookup_stamps(&RunHandle(leaked.clone()));
+    assert_eq!(given, Some(stamps));
     fake.set_host_ports(&[PortRange::new(5432, 5433).unwrap()]);
     assert_eq!(with.host_ports(), [PortRange::new(5432, 5433).unwrap()]);
     fake.lose_host_ports("left", "taken");
@@ -306,4 +316,27 @@ fn native(program: &str, args: &[&str]) -> NativeSpec {
         network: NetworkLevel::Off,
         ports: Vec::new(),
     }
+}
+
+/// Proves the router asks the runtime that holds a run for the run's memory series: a
+/// container's series is the other runtime's answer, and a VM run, whose runtime records none,
+/// has none. Catches a router that keeps the trait's default and answers none for every run.
+#[test]
+fn a_memory_series_is_the_answer_of_the_runtime_that_holds_the_run() {
+    let driver = Arc::new(FakeDriver::new().answering(ExecEnd::Exited(0), "", ""));
+    let (mut with, fake) = split(&driver);
+    let in_vm = with.create_and_start(&spec("run-vm", &["make"])).unwrap();
+    let mut plain = spec("run-plain", &["make"]);
+    plain.labels.remove(label::KIND);
+    let on_host = with.create_and_start(&plain).unwrap();
+    assert_eq!(with.memory_series(&on_host), None);
+    let series = MemorySeries {
+        granularity_secs: 1,
+        points: vec![64, 128],
+        run_usec: 2_000_000,
+        partial: false,
+    };
+    fake.report_memory_series("run-plain", series.clone());
+    assert_eq!(with.memory_series(&on_host), Some(series));
+    assert_eq!(with.memory_series(&in_vm), None);
 }

@@ -3659,6 +3659,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2cdfc673aabd30fe8fee92e65837b644c37c5d47f0f97ae6d5e0f1237d15e1b"
 dependencies = [
  "async-trait",
+ "axum",
  "base64 0.22.1",
  "bytes",
  "h2",
@@ -3670,9 +3671,11 @@ dependencies = [
  "hyper-util",
  "percent-encoding",
  "pin-project",
+ "rustls-native-certs",
  "socket2",
  "sync_wrapper",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tokio-util",
  "tower",
@@ -4187,6 +4190,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "flate2",
+ "futures-util",
  "hex",
  "js-agent",
  "js-api-gateway",
@@ -4222,6 +4226,9 @@ dependencies = [
  "thiserror",
  "tokio",
  "toml",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
  "ureq",
 ]
 

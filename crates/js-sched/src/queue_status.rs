@@ -5,8 +5,9 @@
 //! Pass 1 (the placement walk over the open hosts) reaches [`Outcome::Waiting`],
 //! [`Outcome::WholeHost`] and [`Outcome::Placed`]; pass 2 (the acquire of a machine, with its
 //! failover) reaches [`Outcome::Refused`] and [`Outcome::Launched`]; a failed whole-host prepare
-//! reaches [`Outcome::Requeued`], a start a held host refused [`Outcome::HeldRequeued`] and a
-//! start a host refused for capacity [`Outcome::CapacityRequeued`]. A pass-2 reason outlives
+//! reaches [`Outcome::Requeued`], a start a held host refused [`Outcome::HeldRequeued`], a
+//! start a host refused for capacity [`Outcome::CapacityRequeued`] and a start a host refused
+//! while it fetches the job's bundle [`Outcome::BundlePendingRequeued`]. A pass-2 reason outlives
 //! pass 1's "nothing is free": a job that shows [`QueueCode::QuotaBackoff`],
 //! [`QueueCode::FailingOver`] or [`QueueCode::WaitingForMachine`] keeps it through
 //! [`Outcome::Waiting`], and through an [`Outcome::WholeHost`] with no host being emptied for
@@ -67,6 +68,15 @@ pub enum Outcome {
     CapacityRequeued {
         /// The host that refused the start.
         host: HostId,
+    },
+    /// `host` was fetching the bundle the placed job names and did not hold it yet when the
+    /// job's start reached it (the agent's code `bundle-pending`), and the job went back to the
+    /// queue. `whole_host`: the job books a whole host.
+    BundlePendingRequeued {
+        /// The host that refused the start.
+        host: HostId,
+        /// Whether the job books the whole host.
+        whole_host: bool,
     },
 }
 
@@ -151,6 +161,21 @@ pub fn note(outcome: &Outcome, current: QueueCode) -> Option<QueueNote> {
                 code: QueueCode::WaitingForCapacity,
                 detail: format!(
                     "host {host} had no room for the job when its start reached it; the job is queued again"
+                ),
+                event: Some(Kind::Requeued),
+                host: Some(host.clone()),
+                attempt: false,
+            });
+        }
+        Outcome::BundlePendingRequeued { host, whole_host } => {
+            let code = match whole_host {
+                true => QueueCode::WaitingForWholeHost,
+                false => QueueCode::WaitingForCapacity,
+            };
+            return Some(QueueNote {
+                code,
+                detail: format!(
+                    "host {host} is still fetching the job's bundle and refused the start; the job is queued again"
                 ),
                 event: Some(Kind::Requeued),
                 host: Some(host.clone()),

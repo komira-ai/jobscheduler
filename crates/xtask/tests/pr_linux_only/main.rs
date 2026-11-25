@@ -185,15 +185,18 @@ fn the_first_install_workflow_started_by_a_pull_request_is_refused() {
 
 #[test]
 fn the_release_dry_run_builds_nothing_on_arm_or_macos() {
-    // artifacts.yml's build matrix names arm64 and macOS runners; only the `if:` of the
-    // `artifacts` call keeps a pull request's dry run off it.
-    let call = "    if: ${{ !cancelled() && github.event_name == 'push' && needs.plan.outputs.release == 'true' }}\n";
+    // artifacts.yml's build matrix names an arm64 runner, its `build-macos` job a macOS one and
+    // its `macos-farm` call a workflow the lint does not follow; only the `if:` of the
+    // `artifacts` call keeps a pull request's dry run off them.
+    let call = "    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}\n";
     let ungated = "    if: ${{ !cancelled() && needs.plan.outputs.release == 'true' }}\n";
     let (_, problems) = lint(&changed("release.yml", call, ungated));
     assert_eq!(
         problems,
         [
-            "release.yml/artifacts -> artifacts.yml/build: runs on ubuntu-24.04-arm, macos-15, not Linux x86_64 (ubuntu-*)"
+            "release.yml/artifacts -> artifacts.yml/build: runs on ubuntu-24.04-arm, not Linux x86_64 (ubuntu-*)",
+            "release.yml/artifacts -> artifacts.yml/build-macos: runs on macos-15, not Linux x86_64 (ubuntu-*)",
+            "release.yml/artifacts -> artifacts.yml/macos-farm: calls a workflow again, which the lint does not follow"
         ]
     );
 }
@@ -310,9 +313,16 @@ fn the_beta_stage_runs_after_the_build_and_holds_back_only_the_macos_archives() 
             [format!("./.github/workflows/{file}")],
             "{name}"
         );
+        // `beta-macos-pkg` also grants the token, which its called workflow's call of
+        // macos-farm.yml holds (a called job can hold no more than its call grants).
+        let permissions: &[&str] = if name == "beta-macos-pkg" {
+            &["contents: read", "id-token: write"]
+        } else {
+            &["contents: read"]
+        };
         assert_eq!(
             block(lines, 4, "permissions").expect("permissions"),
-            ["contents: read"],
+            permissions,
             "{name}"
         );
         assert!(

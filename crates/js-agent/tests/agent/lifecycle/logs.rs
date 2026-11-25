@@ -178,6 +178,7 @@ fn full_load() -> NodeLoad {
         host_cpu_usec: None,
         working_set_bytes: MAX_MEMORY_BYTES,
         active_file_bytes: MAX_MEMORY_BYTES,
+        host_nonfile_bytes: None,
         actions_cpu_limited: true,
         covered: (0..MAX_LOAD_LEASES).map(id).collect(),
         clocks: (0..MAX_LOAD_LEASES)

@@ -46,7 +46,7 @@ fn result_len(job: &Job, result: &RunResult) -> usize {
                 job.logs,
                 job.input_failure.clone(),
                 job.usage,
-                job.cpu_series.clone(),
+                (job.cpu_series.clone(), job.memory_series.clone()),
             )) + RESULT_KEY_LEN
         }
     }

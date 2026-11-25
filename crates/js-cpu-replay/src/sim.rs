@@ -60,8 +60,12 @@ impl Farm {
 pub enum Bookings {
     /// What the job was booked on the farm, as recorded.
     Recorded,
-    /// What the placer's sizing books it from the history the replay has seen so far.
+    /// What the placer's sizing books it from the history the replay has seen so far, every
+    /// run taught without its peak: the median of its class's runs' means.
     Learned,
+    /// [`Bookings::Learned`] with each run taught with its recorded peak, as the placer teaches
+    /// it: a class whose peaks are a heavy tail books the 90th percentile of them.
+    Tailed,
     /// The placer's memory, and a CPU from the class's last runs (else its fallback's, else
     /// its client's) weighted by `2^(-age / half_life_ms)`, as Autopilot weights its samples:
     /// their weighted mean, or with `quantile_permille` the load-weighted quantile of their
@@ -207,6 +211,10 @@ pub struct Outcome {
     pub booked: u128,
     /// The CPU the jobs used beyond their booking, in millicore-ms.
     pub above_booking: u128,
+    /// The most CPU booked on one host at once, in millicores.
+    pub booked_peak: u64,
+    /// The jobs started on each host, by host index.
+    pub placed: Vec<u64>,
 }
 
 /// A job running on a host.
@@ -450,18 +458,24 @@ pub fn as_placed(jobs: &[Job], setup: Setup) -> Outcome {
 impl<'a> World<'a> {
     fn new(jobs: &'a [Job], arm: Arm, setup: Setup) -> Self {
         let farm = setup.farm;
+        let sizer = Sizer::new(farm.milli, farm.bytes);
         Self {
             jobs,
             arm,
             setup,
             hosts: vec![Host::default(); farm.hosts],
             queue: VecDeque::new(),
-            sizer: Sizer::new(farm.milli, farm.bytes),
+            sizer: if arm.bookings == Bookings::Tailed {
+                sizer.with_peaks()
+            } else {
+                sizer
+            },
             spreads: BTreeMap::new(),
             histories: BTreeMap::new(),
             outcome: Outcome {
                 slowed: vec![0; jobs.len()],
                 waited: vec![0; jobs.len()],
+                placed: vec![0; farm.hosts],
                 ..Outcome::default()
             },
             dirty: false,
@@ -524,7 +538,7 @@ impl<'a> World<'a> {
                 milli: u64::from(job.booked_milli),
                 bytes: u64::from(job.booked_mib) << 20,
             },
-            Bookings::Learned => self.sizer.book(job, day_of(now)),
+            Bookings::Learned | Bookings::Tailed => self.sizer.book(job, day_of(now)),
             Bookings::Decayed {
                 half_life_ms,
                 quantile_permille,
@@ -650,6 +664,9 @@ impl<'a> World<'a> {
         let host = &mut self.hosts[at];
         host.bytes += new.booking.bytes;
         host.runs.push(new);
+        let booked = host.runs.iter().map(|run| run.booking.milli).sum::<u64>();
+        self.outcome.booked_peak = self.outcome.booked_peak.max(booked);
+        self.outcome.placed[at] += 1;
     }
 
     /// Runs every host for the tick that starts at `now`.
@@ -746,5 +763,7 @@ fn spot(index: usize) -> u64 {
     ((index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32) % 1000
 }
 
+#[cfg(test)]
+mod tail_tests;
 #[cfg(test)]
 mod tests;

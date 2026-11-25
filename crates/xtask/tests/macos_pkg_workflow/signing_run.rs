@@ -7,8 +7,26 @@
 
 use super::*;
 
-/// The `if:` of `sign-code`, `package` and `sign`.
-pub const SIGN_IF: &str = "if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && inputs.sign) || (github.event_name == 'workflow_dispatch' && inputs.sign && github.repository == 'komira-ai/jobscheduler' && startsWith(github.ref, 'refs/heads/')) }}";
+/// The signing condition alone, which `sign-code`, `package` and `sign` each hold in their `if:`
+/// (parenthesised) beside what they wait for.
+pub const SIGN_COND: &str = "(github.event_name == 'push' && github.ref == 'refs/heads/main' && inputs.sign) || (github.event_name == 'workflow_dispatch' && inputs.sign && github.repository == 'komira-ai/jobscheduler' && startsWith(github.ref, 'refs/heads/'))";
+
+/// That the unsigned programs were built, by `build` on a hosted runner or by `farm` on the build
+/// farm: whichever ran succeeded (the other was skipped).
+const RAN: &str = "(needs.build.result == 'success' || needs.farm.result == 'success')";
+
+/// The `if:` of `sign-code`, `package` or `sign`: not cancelled, what the job takes succeeded,
+/// and the signing condition. A skipped `build` or `farm` does not skip them, as it would with
+/// the default condition, so `!cancelled()` is spelled out.
+pub fn sign_if(job: &str) -> String {
+    let before = match job {
+        "sign-code" => format!("!cancelled() && {RAN}"),
+        "package" => "!cancelled() && needs.sign-code.result == 'success'".to_owned(),
+        "sign" => format!("!cancelled() && needs.package.result == 'success' && {RAN}"),
+        other => panic!("{other} is not a signing job"),
+    };
+    format!("if: ${{{{ {before} && ({SIGN_COND}) }}}}")
+}
 
 /// The name of the first step of `build`, which refuses a signing run anywhere but a branch of
 /// this repository.
@@ -199,17 +217,74 @@ fn a_push_to_main_that_asks_and_a_signing_run_on_a_branch_sign_and_nothing_else_
     let text = read(WORKFLOW);
     for job in SIGNING_JOBS {
         let line = job_if(&text, job);
-        assert_eq!(line, SIGN_IF, "{job}");
+        assert_eq!(line, sign_if(job), "{job}");
         let condition = line.trim_start_matches("if: ");
         for run in &RUNS {
+            // What the job takes succeeded: the hosted `build` ran, `farm` was skipped.
+            let mut names = run.names();
+            names.extend([
+                ("needs.build.result", "success"),
+                ("needs.farm.result", "skipped"),
+                ("needs.sign-code.result", "success"),
+                ("needs.package.result", "success"),
+            ]);
             assert_eq!(
-                expr::holds(condition, &run.names()),
+                expr::holds(condition, &names),
                 Ok(run.signs),
                 "{job}: {}",
                 run.what
             );
         }
     }
+}
+
+#[test]
+fn a_signing_job_runs_after_whichever_side_built_and_not_after_a_failure_or_a_cancel() {
+    // Catches: a signing job skipped because the side that did not run was skipped (the default
+    // condition's reading of a skipped need), one that runs after a failed build or farm, after
+    // neither, after a failed job it takes, or in a cancelled run; and one that waits for both
+    // sides, which are never both run.
+    let text = read(WORKFLOW);
+    let release = RUNS[0].names();
+    let ran = |job: &str, results: &[(&'static str, &'static str)], cancelled: &'static str| {
+        let mut names = release.clone();
+        names.extend(results.iter().copied());
+        names.insert("cancelled()", cancelled);
+        let line = job_if(&text, job);
+        expr::holds(line.trim_start_matches("if: "), &names).expect("the condition")
+    };
+    for (build, farm, runs) in [
+        ("success", "skipped", true),
+        ("skipped", "success", true),
+        ("failure", "skipped", false),
+        ("skipped", "failure", false),
+        ("skipped", "skipped", false),
+        ("cancelled", "skipped", false),
+    ] {
+        let sides = [
+            ("needs.build.result", build),
+            ("needs.farm.result", farm),
+            ("needs.sign-code.result", "success"),
+            ("needs.package.result", "success"),
+        ];
+        for job in ["sign-code", "sign"] {
+            assert_eq!(ran(job, &sides, "false"), runs, "{job}: {build} {farm}");
+            assert!(!ran(job, &sides, "true"), "{job} runs in a cancelled run");
+        }
+    }
+    let sides = |sign_code: &'static str, package: &'static str| {
+        [
+            ("needs.build.result", "success"),
+            ("needs.farm.result", "skipped"),
+            ("needs.sign-code.result", sign_code),
+            ("needs.package.result", package),
+        ]
+    };
+    for (previous, runs) in [("success", true), ("skipped", false), ("failure", false)] {
+        assert_eq!(ran("package", &sides(previous, "success"), "false"), runs);
+        assert_eq!(ran("sign", &sides("success", previous), "false"), runs);
+    }
+    assert!(!ran("package", &sides("success", "success"), "true"));
 }
 
 #[test]
@@ -234,7 +309,7 @@ fn every_manual_run_with_sign_either_signs_or_is_refused_and_never_both() {
     // Catches: a gap between the two conditions, where a manual run asked to sign neither signs
     // nor fails, and an overlap, where a run is refused and signs.
     let text = read(WORKFLOW);
-    let sign = SIGN_IF.trim_start_matches("if: ");
+    let sign = format!("${{{{ {SIGN_COND} }}}}");
     let refusal = refusal_if(&text);
     for git_ref in [
         "refs/heads/main",
@@ -250,7 +325,7 @@ fn every_manual_run_with_sign_either_signs_or_is_refused_and_never_both() {
                 ("github.repository", repository),
                 ("inputs.sign", "true"),
             ]);
-            let signs = expr::holds(sign, &names).expect("the signing condition");
+            let signs = expr::holds(&sign, &names).expect("the signing condition");
             let refused = expr::holds(&refusal, &names).expect("the refusal");
             assert!(
                 signs != refused,
@@ -357,7 +432,16 @@ fn the_sign_input_is_read_only_by_the_signing_conditions_and_the_refusal() {
         .map(str::trim)
         .collect();
     let refusal = format!("if: {}", refusal_if(&text));
-    assert_eq!(readers, [refusal.as_str(), SIGN_IF, SIGN_IF, SIGN_IF]);
+    let [code, package, sign] = ["sign-code", "package", "sign"].map(sign_if);
+    assert_eq!(
+        readers,
+        [
+            refusal.as_str(),
+            code.as_str(),
+            package.as_str(),
+            sign.as_str()
+        ]
+    );
     assert!(!text.contains("github.event.inputs"));
 }
 

@@ -5,9 +5,10 @@
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use js_agent::update_hook::config::{Done, Env, Params, Record};
+use js_agent::update_hook::config::{Done, Env, Params, Record, prepare};
 use js_agent::update_hook::{Clock, HostReading, Lease, LeaseError, PortError, UnitState, Units};
 use js_agent::update_hook::{Cordoned, Uncordoned};
 
@@ -97,6 +98,10 @@ pub struct UnitScript {
     pub on_start: RefCell<Vec<(&'static str, &'static str)>>,
     pub fail: RefCell<Vec<&'static str>>,
     pub log: RefCell<Vec<String>>,
+    /// The file read at each start, as the agent reads its flags then.
+    pub watch: RefCell<Option<PathBuf>>,
+    /// What the watched file held at each start; `None` when it could not be read.
+    pub started_on: RefCell<Vec<Option<Vec<u8>>>>,
 }
 
 impl Default for UnitScript {
@@ -108,6 +113,8 @@ impl Default for UnitScript {
             on_start: RefCell::new(vec![("active", "running")]),
             fail: RefCell::default(),
             log: RefCell::default(),
+            watch: RefCell::default(),
+            started_on: RefCell::default(),
         }
     }
 }
@@ -160,6 +167,12 @@ impl Units for UnitScript {
     fn start(&self, _: &str) -> Result<(), PortError> {
         self.log.borrow_mut().push("start".to_owned());
         self.broken("start")?;
+        let read = self
+            .watch
+            .borrow()
+            .as_ref()
+            .and_then(|path| fs::read(path).ok());
+        self.started_on.borrow_mut().push(read);
         self.then(&self.on_start.borrow());
         Ok(())
     }
@@ -191,6 +204,10 @@ impl Clock for Ticks {
 pub struct Rig {
     _files: Scratch,
     pub params: Params,
+    /// The host's root the steps place files below: the params' paths are in it.
+    pub root: PathBuf,
+    /// The staged release directory `prepare` is given (its package's files below `tree`).
+    pub staged: PathBuf,
     pub units: UnitScript,
     pub lease: LeaseScript,
     pub clock: Ticks,
@@ -203,7 +220,15 @@ impl Rig {
         let files = Scratch::new(name);
         let root = files.path("tree");
         fs::create_dir_all(&root).unwrap();
-        Rig::at(files, &root)
+        Rig::at(files, &root, "")
+    }
+
+    /// A rig whose params are of an update from the packaged version 1.4.0, not a first install.
+    pub fn update(name: &str) -> Rig {
+        let files = Scratch::new(name);
+        let root = files.path("tree");
+        fs::create_dir_all(&root).unwrap();
+        Rig::at(files, &root, "\"updater.previous_version\" = \"1.4.0\"\n")
     }
 
     /// A rig whose every path is under `var/lib`, where `var` is a link to `private/var` as on
@@ -213,15 +238,20 @@ impl Rig {
         let top = files.path("tree");
         fs::create_dir_all(top.join("private/var")).unwrap();
         std::os::unix::fs::symlink("private/var", top.join("var")).unwrap();
-        Rig::at(files, &top.join("var/lib"))
+        Rig::at(files, &top.join("var/lib"), "")
     }
 
-    fn at(files: Scratch, root: &std::path::Path) -> Rig {
-        let params = Params::parse(&text(&root.display().to_string(), 600, 300, 600)).unwrap();
+    fn at(files: Scratch, root: &Path, extra: &str) -> Rig {
+        let table = text(&root.display().to_string(), 600, 300, 600) + extra;
+        let params = Params::parse(&table).unwrap();
+        let units = UnitScript::default();
+        *units.watch.borrow_mut() = Some(params.flags_file.clone());
         Rig {
+            staged: files.path("staged"),
             _files: files,
             params,
-            units: UnitScript::default(),
+            root: root.to_owned(),
+            units,
             lease: LeaseScript::default(),
             clock: Ticks::default(),
             flags: RefCell::default(),
@@ -276,8 +306,14 @@ impl Rig {
             clock: &self.clock,
             stat: &as_root,
             lease: &lease,
+            root: &self.root,
         };
         step(&env, &self.params)
+    }
+
+    /// Runs `prepare` of the release staged in [`Rig::staged`] on the fakes.
+    pub fn prepare(&self) -> Done {
+        self.run(|env, params| prepare(env, params, &self.staged))
     }
 }
 
@@ -298,11 +334,17 @@ pub fn text(root: &str, cutover: u64, verify: u64, rollback: u64) -> String {
     )
 }
 
-/// A step of the hook, by its function.
-pub type StepFn = for<'a, 'b> fn(&Env<'a>, &'b Params) -> Done;
+/// A step of the hook run on a rig.
+pub type StepFn = fn(&Rig) -> Done;
 
 /// The five steps.
 pub fn all_steps() -> [StepFn; 5] {
-    use js_agent::update_hook::config::{cleanup, cutover, prepare, rollback, verify};
-    [prepare, cutover, verify, rollback, cleanup]
+    use js_agent::update_hook::config::{cleanup, cutover, rollback, verify};
+    [
+        Rig::prepare,
+        |rig| rig.run(cutover),
+        |rig| rig.run(verify),
+        |rig| rig.run(rollback),
+        |rig| rig.run(cleanup),
+    ]
 }

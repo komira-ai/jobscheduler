@@ -15,7 +15,7 @@
 //! | `--native-account-range <first>-<last>` | the uids of the pool's slots, both included (`700-799` is 100 slots); no default; from 501 to 60000; nothing else on the Mac may use them; needs `--native-accounts` |
 //! | `--native-account-ready <n>` | how many accounts the pool keeps made and ready to lend; by default 1; at most the number of slots; needs `--native-accounts` |
 //! | `--native-homes <path>` | (macOS build only) the directory the accounts' homes are in; the pool makes them in `/Users`, so the only value is `/Users`, the default; needs `--native-accounts` |
-//! | `--native-network <level>` | (macOS build only) the most network a native job may ask for: `off` (the default), `loopback`, `on` or `open`; a job that asks for more is refused at start (`network-above-ceiling`), never run with less; a job's level maps onto these values (`none` is `off`, `allow-list` is `on`, `open` is `open`; `loopback` is a ceiling only, shared by every run of the Mac); `on` needs the pf anchor of `js-mac-provision` (the `--native-pf-*` flags below): the agent does not start with `on` unless the anchor is enforced, and before every `allow-list` job it checks again and refuses the job (`egress-unchecked`) if it is not; `open` allows the network with no filter and needs no anchor: the scheduler, the cloud metadata address and the rest of the network are reachable from the job, and a `--native-pf-*` flag beside it stops the agent at start; a start that declares ports is refused (`ports-not-supported`); the hello reports the value as `egress` (`none` for `off` and `loopback`); needs `--native-accounts` |
+//! | `--native-network <level>` | (macOS build only) the most network a native job may ask for: `off` (the default), `loopback`, `on` or `open`; a job that asks for more is refused at start (`network-above-ceiling`), never run with less; a job's level maps onto these values (`none` is `off`, `allow-list` is `on`, `open` is `open`), and a job of the level `none`, like a native body that asks for `loopback`, gets loopback under every value but `off`, which gives it no network at all; loopback is shared by every run of the Mac and by the host's own services on it; `on` needs the pf anchor of `js-mac-provision` (the `--native-pf-*` flags below): the agent does not start with `on` unless the anchor is enforced, and before every `allow-list` job it checks again and refuses the job (`egress-unchecked`) if it is not; `open` allows the network with no filter and needs no anchor: the scheduler, the cloud metadata address and the rest of the network are reachable from the job, and a `--native-pf-*` flag beside it stops the agent at start; a start that declares ports is refused (`ports-not-supported`); the hello reports the value as `egress` (`none` for `off` and `loopback`); needs `--native-accounts` |
 //! | `--native-pf-uid-start <uid>`, `--native-pf-uid-count <n>` | (macOS build only) the uids whose egress the anchor limits; both required with `--native-network on`, refused otherwise (with `open` the agent does not start) |
 //! | `--native-pf-endpoint <ip:port>` | (macOS build only) an endpoint the pool may reach, as given to `js-mac-provision install --endpoint`; repeatable; needs `--native-network on` |
 //! | `--native-pf-anchor <name>`, `--native-pf-state-dir <path>`, `--native-pfctl <path>` | (macOS build only) the anchor (default `com.apple/com.komira.js.pool`), the provisioner's state directory (default `/var/db/com.komira.js-pf`) and the `pfctl` (default `/sbin/pfctl`); absolute paths; need `--native-network on` |
@@ -46,10 +46,12 @@ use crate::lifecycle::{
     Local, MountProviders, NATIVE_JOURNAL, Runtime, StateRoot, UserNames, scratch_volume,
 };
 use crate::mac_supervisor::{Launcher, SystemLauncher};
+use crate::mac_usage::Series;
 use crate::native::Ceiling;
 use crate::native::{self, NativeFlags, NativeRuntime, NativeSettings, PfFlags, PutFlags};
 use crate::registry_credentials::RegistryCredentials;
 use crate::system::{Machine, RuntimeBuild, System};
+use crate::usage::{HostSampler, NodeSampler, macos::MacHost};
 use crate::{Failure, Services};
 use js_agent_wire::LOG_UPLOAD_CAPABILITY;
 use js_caps::{EXEC, FLAG_SET, RUNTIME};
@@ -105,8 +107,9 @@ pub struct Flags {
     /// The most network a native job may ask for: `off` (the default), `loopback`, `on` or
     /// `open`. A job that asks for more is refused at start (`network-above-ceiling`) and is
     /// never run with less. A job's level maps onto these values: `none` is `off`,
-    /// `allow-list` is `on`, `open` is `open`; `loopback` is a ceiling only, shared by every
-    /// run of the Mac. `on` is limited by the pf anchor of `js-mac-provision` (see
+    /// `allow-list` is `on`, `open` is `open`; a job of the level `none` gets loopback under
+    /// every value but `off`, which gives it no network at all. Loopback is shared by every
+    /// run of the Mac and by the host's own services on it. `on` is limited by the pf anchor of `js-mac-provision` (see
     /// `--native-pf-uid-start`): the agent does not start with `on` unless the anchor is in
     /// force, and refuses each `allow-list` job (`egress-unchecked`) while it is not. `open`
     /// allows the network with no filter and needs no anchor: it leaves the scheduler, the
@@ -348,6 +351,7 @@ pub(crate) fn open(
         .given()
         .into_iter()
         .chain(cli.providers.given())
+        .chain(cli.samples.given())
         .find_map(|(flag, given)| given.then_some(flag));
     if cli.no_jobs {
         return match given {
@@ -430,7 +434,7 @@ pub(crate) struct Jobs {
     pub(crate) settle: Duration,
     /// The default taint re-check.
     pub(crate) taint_recheck: Duration,
-    /// No per-second samples: the flag is Linux's.
+    /// `--host-second-samples`.
     pub(crate) host_second_samples: bool,
     /// No host jobs.
     pub(crate) allow_host_jobs: bool,
@@ -475,7 +479,7 @@ pub(crate) fn jobs(
         egress: crate::egress::Config::default(),
         settle: crate::lifecycle::DEFAULT_SETTLE,
         taint_recheck: crate::lifecycle::taint::DEFAULT_TAINT_RECHECK,
-        host_second_samples: false,
+        host_second_samples: cli.samples.host_second_samples,
         allow_host_jobs: false,
         allow_fuse_jobs: false,
         providers,
@@ -533,7 +537,11 @@ impl Jobs {
         let native = match native {
             Some(native) => {
                 let put = native::put_of(put, &node_of_name)?;
-                Some(native.with_put(put))
+                let series = Series {
+                    cpu: cli.samples.cpu_series,
+                    memory: cli.samples.memory_series,
+                };
+                Some(native.with_put(put).with_series(series))
             }
             None if put.native_put_root.is_some() || put.native_put_user.is_some() => {
                 return Err("--native-put-root: needs --native-accounts".to_owned());
@@ -728,7 +736,8 @@ pub(crate) fn runtime(
     let runtime = runtime
         .with_xcodes(native.xcodes().to_vec())
         .with_live_logs(native.logs().live())
-        .with_put(native.put().cloned());
+        .with_put(native.put().cloned())
+        .with_series(native.series());
     self_tested(runtime)
 }
 
@@ -747,13 +756,16 @@ pub fn self_tested(mut runtime: NativeRuntime) -> Result<(Box<dyn Runtime>, Vec<
     Ok((Box::new(runtime), Vec::new()))
 }
 
-/// The post-job checks of a backend's jobs, and the cgroup directory the usage of the leases
-/// is read from (or why there is none).
-pub(crate) type Checks = (Box<dyn CheckHook>, Result<String, &'static str>);
+/// The post-job checks of a backend's jobs, and what the host's load is sampled with.
+pub(crate) type Checks = (
+    Box<dyn CheckHook>,
+    Result<Box<dyn NodeSampler>, &'static str>,
+);
 
 /// The checks after a native job: none. The account's retirement proves everything of the
 /// run's uid gone ([`crate::mac_accounts`]); a leak scan of the rest of the Mac needs a
-/// baseline nothing records yet. And why its usage is not read.
+/// baseline nothing records yet. And the sampler of the Mac's load ([`HostSampler`] over
+/// [`MacHost`]: its CPU load and memory statistics, carried as a Linux host's `/proc`).
 ///
 /// # Errors
 ///
@@ -764,11 +776,9 @@ pub(crate) fn checks(
     _watch: Vec<PathBuf>,
     _settle: Duration,
 ) -> Result<Checks, String> {
-    Ok((Box::new(NoChecks), Err(NO_NATIVE_USAGE)))
+    let sampler: Box<dyn NodeSampler> = Box::new(HostSampler::new(MacHost::new()));
+    Ok((Box::new(NoChecks), Ok(sampler)))
 }
-
-/// Why the heartbeat of a native agent carries no load.
-const NO_NATIVE_USAGE: &str = "usage: native runs report no load yet: the heartbeat carries none";
 
 /// Adds the capabilities of the host contract to the hello of an agent that runs native
 /// jobs: `runtime` and `exec` are `sandbox-exec`, `run-files` when `run_files` (the agent

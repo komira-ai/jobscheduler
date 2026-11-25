@@ -13,7 +13,7 @@ use axum::http::StatusCode;
 use js_api_gateway::BODY_LIMIT;
 use js_proto::v1::{
     ClearHostTaintRequest, CordonHostRequest, GetJobRequest, GetUsageRequest, JobSpec, JobState,
-    ListJobsRequest, SubmitJobRequest,
+    ListJobsRequest, RetireHostRequest, SubmitJobRequest,
 };
 use prost::Message;
 use prost_reflect::DynamicMessage;
@@ -50,6 +50,7 @@ async fn bad_job_id_is_a_400_naming_the_field() {
         ("POST", "/v1/hosts/:uncordon".to_owned(), "hostId"),
         ("POST", "/v1/hosts/:cordon".to_owned(), "hostId"),
         ("POST", "/v1/hosts/:cleartaint".to_owned(), "hostId"),
+        ("POST", "/v1/hosts/:retire".to_owned(), "hostId"),
         ("GET", "/v1/usage?job_id=bad~id".to_owned(), "jobId"),
     ];
     for (method, path, field) in &refused {
@@ -629,6 +630,30 @@ async fn clearing_a_taint_is_a_post_that_names_the_host_in_the_path() {
 
     let (stub, router) = serve();
     let reply = send(&router, "GET", "/v1/hosts/host-a:cleartaint", "").await;
+    assert_eq!(reply.status, StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(stub.rpcs(), Vec::<&str>::new());
+}
+
+/// Asserts that `POST /v1/hosts/{host_id}:retire` reaches the service as `RetireHost` with
+/// the host of the path, percent-decoded once, from an empty body, and that the answer
+/// carries `retired` as JSON; and that a `GET` of the path is a 405 that calls nothing.
+/// Catches a route the table lacks, a host that is dropped or decoded twice, and a retire
+/// that a read-only method can reach.
+#[tokio::test]
+async fn retiring_a_host_is_a_post_that_names_the_host_in_the_path() {
+    let (stub, router) = serve();
+    let reply = send(&router, "POST", "/v1/hosts/host%5Fa:retire", "").await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.json()["retired"], json!(true));
+    assert_eq!(
+        stub.only_request::<RetireHostRequest>(),
+        RetireHostRequest {
+            host_id: "host_a".to_owned(),
+        }
+    );
+
+    let (stub, router) = serve();
+    let reply = send(&router, "GET", "/v1/hosts/host-a:retire", "").await;
     assert_eq!(reply.status, StatusCode::METHOD_NOT_ALLOWED);
     assert_eq!(stub.rpcs(), Vec::<&str>::new());
 }

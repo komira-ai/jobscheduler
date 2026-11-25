@@ -10,10 +10,10 @@ use js_jobs::{JobEnd, JobId, JobRecord};
 use js_sizing::Bounds;
 use js_types::{ManualClock, Resources, Shape, Timestamp};
 
-use super::super::ColdSize;
+use super::super::{ColdCpuOn, ColdMemoryOn, ColdSize};
 use super::{
     GIB, JobSizes, MIB, Tables, at, booked, bounds_of, capacity, exited, host, needs, of_class,
-    output, pass, queued, queued_by, runs, size, submit,
+    output, pass, queued, queued_by, ran, runs, size, submit,
 };
 use crate::engine::Settings;
 use crate::place::SchedPlacer;
@@ -327,4 +327,253 @@ fn a_pass_records_which_history_sized_each_placed_job() {
     assert_eq!(sized_from("sized"), Some(js_jobs::SizedFrom::Cold));
     assert_eq!(sized_from("cpu-named"), Some(js_jobs::SizedFrom::Cold));
     assert_eq!(sized_from("both-named"), None);
+}
+
+/// The cold size of the farm the Macs share: 4 cores and 16 GiB server-wide.
+const SHARED: ColdSize = ColdSize {
+    cpu_millis: 4000,
+    memory_bytes: 16 * GIB,
+};
+
+/// A cold memory of 4 GiB for the jobs of `macos`.
+fn macs_at_4_gib() -> ColdMemoryOn {
+    ColdMemoryOn::new(BTreeMap::from([("macos".to_owned(), 4 * GIB)]))
+}
+
+/// A job of class `class`, with no runs, that books nothing and names `os` (none for `None`).
+fn cold_on(id: &str, class: &str, os: Option<&str>) -> JobRecord {
+    let mut spec = of_class(class, needs(0, 0));
+    spec.constraints.os = os.map(str::to_owned);
+    queued(id, spec)
+}
+
+/// Asserts that a class with no runs of a job whose `os` the server names books that operating
+/// system's cold memory (4 GiB for `macos`), while a job of another `os` or of none books the
+/// server's (16 GiB), each with the server's cold CPU; that an operating system's memory above
+/// the largest host is held at that host's memory; and that a name is matched as the job gives
+/// it (`macOS` is not `macos`). Catches a per-system memory that reaches the Linux jobs (the
+/// farm's build hosts would then book a quarter of what they do), one that is not read, and one
+/// that books more than any host has.
+#[test]
+fn a_job_of_an_os_the_server_names_books_that_os_s_cold_memory() {
+    let mut sizes = JobSizes::with_cold(SHARED).with_cold_memory_on(macs_at_4_gib());
+    sizes.set_bounds(farm_bounds());
+    for (os, booked) in [
+        (Some("macos"), (4000, 4 * GIB)),
+        (Some("linux"), (4000, 16 * GIB)),
+        (None, (4000, 16 * GIB)),
+        (Some("macOS"), (4000, 16 * GIB)),
+    ] {
+        let job = cold_on("cold", "build", os);
+        assert_eq!(size(&sizes, &job), booked, "{os:?}");
+    }
+    let huge = ColdMemoryOn::new(BTreeMap::from([("macos".to_owned(), 512 * GIB)]));
+    let mut held = JobSizes::with_cold(SHARED).with_cold_memory_on(huge);
+    held.set_bounds(farm_bounds());
+    let job = cold_on("cold", "build", Some("macos"));
+    assert_eq!(size(&held, &job), (4000, HOST.1));
+    assert_eq!(ColdMemoryOn::default().of("macos"), None);
+    assert_eq!(macs_at_4_gib().of("macos"), Some(4 * GIB));
+}
+
+/// A placer whose engine takes `cold` and, when given, `on`, over one Mac `a` (28 cores and
+/// 88 GiB of bookable memory, `os` `macos`; the host [`pass`] opens), on a clock at zero.
+fn mac_placer(cold: ColdSize, on: Option<ColdMemoryOn>) -> SchedPlacer {
+    let placer = placer_of(cold, on, None);
+    host_on(&placer, "macos", (28_000, 88 * GIB));
+    placer
+}
+
+/// A placer whose engine takes `cold` and, when given, the cold memory `memory_on` and the cold
+/// CPU `cpu_on` of the operating systems they name, with no host, on a clock at zero.
+fn placer_of(
+    cold: ColdSize,
+    memory_on: Option<ColdMemoryOn>,
+    cpu_on: Option<ColdCpuOn>,
+) -> SchedPlacer {
+    let clock = ManualClock::new(Timestamp::from_millis(0));
+    let settings = Settings {
+        cold,
+        ..Settings::default()
+    };
+    let placer = SchedPlacer::new(settings, clock);
+    let placer = match memory_on {
+        Some(on) => placer.with_cold_memory_on(on),
+        None => placer,
+    };
+    match cpu_on {
+        Some(on) => placer.with_cold_cpu_on(on),
+        None => placer,
+    }
+}
+
+/// Opens host `a` on `placer`: `(cpu_millis, memory_bytes)` of `os`, `arm64` for `macos` and
+/// `x86_64` for any other.
+fn host_on(placer: &SchedPlacer, os: &str, (cpu_millis, memory_bytes): (u64, u64)) {
+    let arch = if os == "macos" { "arm64" } else { "x86_64" };
+    let caps = BTreeMap::from([
+        ("os".to_owned(), os.to_owned()),
+        ("arch".to_owned(), arch.to_owned()),
+    ]);
+    let resources = Resources::new(cpu_millis, memory_bytes, 0, None).unwrap();
+    placer
+        .engine()
+        .host_up(&host("a"), &Shape::new(resources, caps), at(0));
+}
+
+/// Asserts what one pass places on one Mac of 40 queued `macos` jobs of 40 classes that have no
+/// runs and book nothing, under a server-wide cold size of 4 cores and 16 GiB: without a cold
+/// memory for `macos`, each books 16 GiB and five fill the Mac's memory (5 x 16 GiB fits 88 GiB,
+/// 6 do not) whatever their CPU; with 4 GiB for `macos`, each books 4 GiB and seven are placed,
+/// held by the CPU (7 x 4 cores fit the 28 cores at the CPU slack of 1.1, 8 do not). Catches a
+/// placer whose engine is built without the operating system's memory.
+#[test]
+fn a_pass_on_a_mac_books_the_mac_s_cold_memory() {
+    for (on, placed, each) in [
+        (None, 5, booked(4000, 16 * GIB)),
+        (Some(macs_at_4_gib()), 7, booked(4000, 4 * GIB)),
+    ] {
+        let tables = Tables::new();
+        let placer = mac_placer(SHARED, on.clone());
+        for n in 0..40 {
+            let mut spec = of_class(&format!("target-{n:02}"), needs(0, 0));
+            spec.constraints.os = Some("macos".to_owned());
+            let new = js_jobs::NewJob {
+                id: Some(JobId::parse(&format!("job-{n:02}")).unwrap()),
+                spec,
+                priority: 0,
+                client: None,
+            };
+            tables.jobs.insert_queued(new).unwrap();
+        }
+        let ids = pass(&placer, &tables);
+        assert_eq!(ids.len(), placed, "{on:?}");
+        let first = JobId::parse("job-00").unwrap();
+        let allocation = tables.jobs.get_allocation(&first).unwrap().unwrap();
+        assert_eq!(allocation.booked, each, "{on:?}");
+    }
+}
+
+/// A cold CPU of one core for the jobs of `macos`.
+fn macs_at_1_core() -> ColdCpuOn {
+    ColdCpuOn::new(BTreeMap::from([("macos".to_owned(), 1000)]))
+}
+
+/// Asserts that a class with no runs of a job whose `os` the server names in the cold CPU books
+/// that operating system's CPU (one core for `macos`), with the server's cold memory, or with
+/// the operating system's cold memory when that is set too; that a job of another `os`, of
+/// none, or of `macOS` books the server's four cores; that an operating system's CPU above a
+/// quarter of the largest host's cores books that quarter (22 cores on the farm's host), and
+/// one under a quarter core books a quarter core. Catches a per-system CPU that reaches the
+/// Linux jobs, one that is not read, one that takes the memory's place, and one that books
+/// more of a host than any class may.
+#[test]
+fn a_job_of_an_os_the_server_names_books_that_os_s_cold_cpu() {
+    let mut sizes = JobSizes::with_cold(SHARED).with_cold_cpu_on(macs_at_1_core());
+    sizes.set_bounds(farm_bounds());
+    for (os, booked) in [
+        (Some("macos"), (1000, 16 * GIB)),
+        (Some("linux"), (4000, 16 * GIB)),
+        (None, (4000, 16 * GIB)),
+        (Some("macOS"), (4000, 16 * GIB)),
+    ] {
+        let job = cold_on("cold", "build", os);
+        assert_eq!(size(&sizes, &job), booked, "{os:?}");
+    }
+    let mut both = JobSizes::with_cold(SHARED)
+        .with_cold_memory_on(macs_at_4_gib())
+        .with_cold_cpu_on(macs_at_1_core());
+    both.set_bounds(farm_bounds());
+    let mac = cold_on("cold", "build", Some("macos"));
+    assert_eq!(size(&both, &mac), (1000, 4 * GIB));
+    let linux = cold_on("cold", "build", Some("linux"));
+    assert_eq!(size(&both, &linux), (4000, 16 * GIB));
+    for (millis, held) in [(200_000, 22_000), (100, 250)] {
+        let on = ColdCpuOn::new(BTreeMap::from([("macos".to_owned(), millis)]));
+        let mut sizes = JobSizes::with_cold(SHARED).with_cold_cpu_on(on);
+        sizes.set_bounds(farm_bounds());
+        assert_eq!(size(&sizes, &mac), (held, 16 * GIB), "{millis}");
+    }
+    assert_eq!(ColdCpuOn::default().of("macos"), None);
+    assert_eq!(macs_at_1_core().of("macos"), Some(1000));
+}
+
+/// Asserts that the first run of a `macos` class takes its CPU and memory over from the Mac's
+/// cold size: a class with no run books one core and 4 GiB, and after one run that used a core
+/// and a half and peaked at 2 GiB it books 1500 millicores and 2.75 GiB, not the Mac's cold
+/// CPU. Catches a per-system cold CPU that outlives the class's history.
+#[test]
+fn the_first_run_of_a_mac_class_takes_over_from_the_mac_s_cold_cpu() {
+    let tables = Tables::new();
+    let mut spec = of_class("build", needs(0, 0));
+    spec.constraints.os = Some("macos".to_owned());
+    let end = exited(0, 2 * GIB, Duration::from_secs(15));
+    let run = ran(&tables, ("run-0", None), spec, booked(1000, 4 * GIB), end);
+    let mut sizes = JobSizes::with_cold(SHARED)
+        .with_cold_memory_on(macs_at_4_gib())
+        .with_cold_cpu_on(macs_at_1_core());
+    sizes.set_bounds(farm_bounds());
+    let next = cold_on("next", "build", Some("macos"));
+    assert_eq!(size(&sizes, &next), (1000, 4 * GIB));
+    assert!(sizes.observe(&run, booked(1000, 4 * GIB)));
+    assert_eq!(size(&sizes, &next), (1500, 11 * 256 * MIB));
+}
+
+/// Asserts what one pass places of 40 queued jobs of 40 classes that have no runs and book
+/// nothing, under a server-wide cold size of 4 cores and 16 GiB with one core and 4 GiB for
+/// `macos`. On one Mac (28 cores, 88 GiB): 22 `macos` jobs, each booked one core and 4 GiB,
+/// held by the memory (22 x 4 GiB fits 88 GiB, 23 do not; 22 cores are under the 30.8 the CPU
+/// slack of 1.1 allows), where the server-wide size alone places five and the cold memory alone
+/// seven. On one Linux host (88 cores, 251 GiB) the jobs that name no `os` book the server's 4
+/// cores and 16 GiB and 15 are placed (15 x 16 GiB fits 251 GiB, 16 do not), with the Mac's
+/// entries set or not. Catches a placer whose engine is built without the operating system's
+/// CPU, and Mac entries that change what a Linux host takes.
+#[test]
+fn a_pass_on_a_mac_with_its_cold_cpu_and_memory_places_more_than_five() {
+    let mac_cases = [
+        (None, None, 5, booked(4000, 16 * GIB)),
+        (Some(macs_at_4_gib()), None, 7, booked(4000, 4 * GIB)),
+        (
+            Some(macs_at_4_gib()),
+            Some(macs_at_1_core()),
+            22,
+            booked(1000, 4 * GIB),
+        ),
+    ];
+    for (memory_on, cpu_on, placed, each) in mac_cases {
+        let placer = placer_of(SHARED, memory_on, cpu_on.clone());
+        host_on(&placer, "macos", (28_000, 88 * GIB));
+        let (ids, first) = queue_and_pass(&placer, Some("macos"));
+        assert_eq!(ids, placed, "{cpu_on:?}");
+        assert_eq!(first, each, "{cpu_on:?}");
+    }
+    for on in [None, Some(macs_at_1_core())] {
+        let memory_on = on.as_ref().map(|_| macs_at_4_gib());
+        let placer = placer_of(SHARED, memory_on, on.clone());
+        host_on(&placer, "linux", (88_000, 251 * GIB));
+        let (ids, first) = queue_and_pass(&placer, None);
+        assert_eq!(ids, 15, "{on:?}");
+        assert_eq!(first, booked(4000, 16 * GIB), "{on:?}");
+    }
+}
+
+/// Queues 40 jobs of 40 classes with no runs that book nothing and name `os`, runs one pass of
+/// `placer`, and gives how many it placed and what the first job booked.
+fn queue_and_pass(placer: &SchedPlacer, os: Option<&str>) -> (usize, js_jobs::Booked) {
+    let tables = Tables::new();
+    for n in 0..40 {
+        let mut spec = of_class(&format!("target-{n:02}"), needs(0, 0));
+        spec.constraints.os = os.map(str::to_owned);
+        let new = js_jobs::NewJob {
+            id: Some(JobId::parse(&format!("job-{n:02}")).unwrap()),
+            spec,
+            priority: 0,
+            client: None,
+        };
+        tables.jobs.insert_queued(new).unwrap();
+    }
+    let ids = pass(placer, &tables);
+    let first = JobId::parse("job-00").unwrap();
+    let allocation = tables.jobs.get_allocation(&first).unwrap().unwrap();
+    (ids.len(), allocation.booked)
 }

@@ -181,14 +181,21 @@
 //! - **A check owed is not lost with the agent.** Before the first step of a job's cleanup
 //!   the agent records, in the state root, that the job's checks are owed; it removes the
 //!   record once they have run (and, when they found something, once the taint is on
-//!   disk). If the agent stops in between, the record is found when the next process
-//!   starts, and the host is tainted (`check-owed`): what the job left behind may be part
-//!   of the baseline the new process took. A record that cannot be written holds the
-//!   cleanup where it is, the container included; one that cannot be removed holds the
-//!   slot. **A restart or a `SIGTERM` inside the cleanup window therefore taints the host
-//!   at the next start**, and the agent never clears that taint (see below); an operator's
-//!   clear must remove the `owed-*` records and `taint.pinned` as well as `taint.json`, or the next start
-//!   taints the host again (see [`taint`]).
+//!   disk). If the agent stops in between (an update's hand-over or drain that ends with
+//!   a cleanup under way, a second stop, a crash), the record is found when the next
+//!   process starts, and that process runs the check itself once it has taken the
+//!   containers over, by the rules that need no baseline ([`CheckHook::run_restored`]):
+//!   what the job left behind may be part of the baseline the new process took. A clean
+//!   host removes the records and is not tainted. The host is tainted (`check-owed`)
+//!   instead when the check finds a process or cannot run, when a directory of the run is
+//!   still there after the start's sweep, when a record is not complete
+//!   (it does not hold its run id), when the records cannot be listed or removed, or when
+//!   the hook cannot judge without a baseline ([`CheckHook::checks_owed_at_start`]). A
+//!   record that cannot be written holds the cleanup where it is, the container included;
+//!   one that cannot be removed holds the slot. The agent never clears a `check-owed`
+//!   taint (see below); an operator's clear must remove the `owed-*` records and
+//!   `taint.pinned` as well as `taint.json`, or the next start taints the host again (see
+//!   [`taint`]).
 //! - **A taint whose cause is gone clears itself.** A taint of a process a job left, or of
 //!   an input the checks could not read, is re-checked while the host is idle (every run
 //!   over, `Blocked` ones included): two clean full checks `--taint-recheck-ms` apart make
@@ -329,7 +336,7 @@ use crate::platform::Backend;
 use crate::quota::ScratchQuota;
 
 pub use codes::{code, detail};
-pub use event::{CleanupTimeline, Event, Finding, JobBooking, Skip, StartTimeline};
+pub use event::{CleanupTimeline, Event, Finding, JobBooking, LookupStamps, Skip, StartTimeline};
 pub use finding::{CHECK_DETAIL_MAX, CheckFinding, CheckNote};
 pub use machine::{
     Lifecycle, Quiet, RETIRED_CAP, RETIRED_LISTED, Restored, RunningLease, SLOTS, Slots,
@@ -424,6 +431,15 @@ pub trait CheckHook {
     /// As [`CheckHook::run`].
     fn run_restored(&mut self, job: &Finished<'_>) -> Result<(), CheckFinding> {
         self.run(job)
+    }
+
+    /// Whether [`CheckHook::run_restored`] judges the host without the baseline, so that the
+    /// post-job checks a run of an earlier process owed (an `owed-*` record found when the agent
+    /// starts) can run at the start instead of tainting the host (see
+    /// [`taint`](crate::lifecycle::taint)). The default is `false`: such a record taints the
+    /// host (`check-owed`).
+    fn checks_owed_at_start(&self) -> bool {
+        false
     }
 
     /// What the last `run` or `run_restored` saw change that does not taint the host, drained

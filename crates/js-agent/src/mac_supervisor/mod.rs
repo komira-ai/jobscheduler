@@ -33,8 +33,9 @@
 //! 7. `spawn`: starts the job's program in a process group of its own, keeping the
 //!    responsibility, with the verb's own environment, working directory and standard streams;
 //!    then writes the ready record ([`Ready`]: the job's pid, which is its group's id, and the
-//!    audit session), waits for the job, writes the exit record ([`ExitRecord`]) and exits with
-//!    the job's status.
+//!    audit session), waits for the job (`wait4`, which also says what the job and every
+//!    descendant whose end was waited for used: [`JobRusage`]), writes the exit record
+//!    ([`ExitRecord`], with that usage) and exits with the job's status.
 //!
 //! **Its exit status** ([`record::status_of`]): the job's code; 128 and the signal for a job a
 //! signal ended; [`status::SETUP_FAILED`] (125) when a step failed; [`status::USAGE`] (2) for a
@@ -75,7 +76,7 @@ pub use fake::FakeLauncher;
 pub use launch::{
     LaunchRequest, Launcher, Supervised, Supervision, SupervisorChild, SystemLauncher,
 };
-pub use record::{Ended, ExitRecord, Ready, Step};
+pub use record::{Ended, ExitRecord, JobRusage, Ready, Step};
 pub use spec::SuperviseSpec;
 
 /// The verb `main` answers before anything else.

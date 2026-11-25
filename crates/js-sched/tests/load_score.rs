@@ -42,13 +42,14 @@ fn load(r: &mut Rig, worker: &str, others: &[&str], count: u64) {
 }
 
 /// Shows: a lease goes to the worker it fits most tightly, not the one least loaded now
-/// (fill before open): `a` holds four cores, `b` none, and the next lease goes to `a`.
+/// (fill before open): `a` holds three cores, `b` none, and the next lease goes to `a` (4 of 8 cores, exactly
+/// the pack limit of 0.5x, so within it).
 #[test]
 fn a_lease_goes_to_the_fuller_worker_that_fits() {
     let mut r = Rig::on();
     r.up("a", node());
     r.up("b", node());
-    load(&mut r, "a", &["b"], 4);
+    load(&mut r, "a", &["b"], 3);
     r.action(1_000, 4 * GIB, Some(warm(1_000, 0)));
     assert_eq!(on(&r.tick()), ["a"]);
 }

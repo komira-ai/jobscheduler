@@ -152,6 +152,7 @@ fn a_falling_counter_is_no_use_and_a_huge_rate_saturates() {
 /// Catches an adopted run's series sent as whole, and one that starts before the run's first
 /// sample: it takes no CPU from that sample (what the run used before is not known), counts
 /// what it used from there, and says it is partial.
+#[cfg(target_os = "linux")]
 #[test]
 fn an_adopted_run_starts_at_its_first_sample_and_is_partial() {
     let mut recorder = SeriesRecorder::adopted();
@@ -171,6 +172,7 @@ fn an_adopted_run_starts_at_its_first_sample_and_is_partial() {
 
 /// Catches an adopted run that is never sampled reporting a series: with no sample before its
 /// end, its end is its first sample and there is no time in it.
+#[cfg(target_os = "linux")]
 #[test]
 fn an_adopted_run_never_sampled_has_no_series() {
     assert_eq!(SeriesRecorder::adopted().finish(5 * S, 9 * S), None);

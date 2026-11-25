@@ -22,8 +22,9 @@ use js_proto::v1::{
     CordonHostRequest, CordonHostResponse, GetJobRequest, GetJobResponse, GetLogsRequest,
     GetLogsResponse, GetResultRequest, GetResultResponse, GetUsageRequest, GetUsageResponse,
     ListHostsRequest, ListHostsResponse, ListJobsRequest, ListJobsResponse, ListPoolsRequest,
-    ListPoolsResponse, ListProvidersRequest, ListProvidersResponse, SubmitJobRequest,
-    SubmitJobResponse, UncordonHostRequest, UncordonHostResponse,
+    ListPoolsResponse, ListProvidersRequest, ListProvidersResponse, RetireHostRequest,
+    RetireHostResponse, SubmitJobRequest, SubmitJobResponse, UncordonHostRequest,
+    UncordonHostResponse,
 };
 use js_state::Store;
 use js_state::fake::{Fake, Flaw};
@@ -93,11 +94,12 @@ const SERVED: [&str; 5] = ["GetJob", "ListJobs", "CancelJob", "GetResult", "GetL
 
 /// The methods the fleet group (`fleet.rs`) serves once its context is given the server's
 /// handles ([`fleet::Ctx::served`]), as the server's service is.
-const FLEET: [&str; 7] = [
+const FLEET: [&str; 8] = [
     "ListHosts",
     "CordonHost",
     "UncordonHost",
     "ClearHostTaint",
+    "RetireHost",
     "ListPools",
     "ListProviders",
     "GetUsage",
@@ -330,6 +332,7 @@ recorded! {
     cordon_host: CordonHostRequest => CordonHostResponse;
     uncordon_host: UncordonHostRequest => UncordonHostResponse;
     clear_host_taint: ClearHostTaintRequest => ClearHostTaintResponse;
+    retire_host: RetireHostRequest => RetireHostResponse;
     list_pools: ListPoolsRequest => ListPoolsResponse;
     list_providers: ListProvidersRequest => ListProvidersResponse;
     get_usage: GetUsageRequest => GetUsageResponse;
@@ -440,6 +443,10 @@ impl fleet::Hosts for NoHosts {
     }
 
     async fn clear_taint(&self, _: &HostId) -> Result<Option<String>, fleet::Refused> {
+        Err(fleet::Refused::UnknownHost)
+    }
+
+    async fn retire(&self, _: &HostId) -> Result<bool, fleet::Refused> {
         Err(fleet::Refused::UnknownHost)
     }
 }

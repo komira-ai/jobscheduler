@@ -78,7 +78,9 @@ struct Checks {
 impl InProcess {
     /// Builds the server `config` describes, on `clock`: the agent side, and the elastic pool
     /// with its scaler and checks when the configuration has one. Each failure to start names the flag at fault, as
-    /// [`crate::start_with_checks`] does, except that no listen address can fail.
+    /// [`crate::start_with_checks`] does, except that no listen address can fail. Unlike a
+    /// server, which teaches the job sizes the ended jobs after it listens, it teaches them
+    /// before it returns.
     pub fn start(mut config: Config, clock: SharedClock) -> Result<Self, StartupError> {
         let log_reads = job_api::logs::Ctx::from_config(config.logs(), &clock);
         let store = config.store.take().map(ServerStore::open).transpose()?;
@@ -90,6 +92,9 @@ impl InProcess {
             cached,
             ..
         } = open(prepared, &clock)?;
+        // In process the start teaches the job sizes before it returns, as a step of its own:
+        // a simulation's first pass books from the history its store holds.
+        let _ = shared.agents().sizes.teach();
         let checks = checker.map(|checker| Checks {
             checker,
             schedule: Schedule::first(clock.now()),

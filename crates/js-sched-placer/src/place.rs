@@ -48,7 +48,7 @@ use js_types::sched::usage::NodeLoad;
 use super::engine::jobs::Decided;
 use super::engine::jobs_seen::{Kept, Seen};
 use super::engine::{Engine, Settings};
-use super::sizes::day_of;
+use super::sizes::{ColdCpuOn, ColdMemoryOn, day_of};
 
 /// The placer the registry is given: it keeps the engine, the scheduler that places the
 /// queued jobs, and follows the registry's hosts.
@@ -108,6 +108,34 @@ impl SchedPlacer {
             tables: Mutex::default(),
             #[cfg(any(test, feature = "test-support"))]
             skipped: AtomicU64::new(0),
+        }
+    }
+
+    /// The same placer, its engine booking a job of an operating system `on` names that cold
+    /// memory while the job's class has no estimate ([`Engine::with_cold_memory_on`]).
+    #[must_use]
+    pub fn with_cold_memory_on(self, on: ColdMemoryOn) -> Self {
+        let engine = self
+            .engine
+            .into_inner()
+            .unwrap_or_else(PoisonError::into_inner);
+        Self {
+            engine: Mutex::new(engine.with_cold_memory_on(on)),
+            ..self
+        }
+    }
+
+    /// The same placer, its engine booking a job of an operating system `on` names that cold
+    /// CPU while the job's class has no CPU sample ([`Engine::with_cold_cpu_on`]).
+    #[must_use]
+    pub fn with_cold_cpu_on(self, on: ColdCpuOn) -> Self {
+        let engine = self
+            .engine
+            .into_inner()
+            .unwrap_or_else(PoisonError::into_inner);
+        Self {
+            engine: Mutex::new(engine.with_cold_cpu_on(on)),
+            ..self
         }
     }
 

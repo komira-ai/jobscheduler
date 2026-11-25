@@ -41,9 +41,10 @@ pub struct Run {
     /// CPU time used (user plus system) in microseconds.
     pub cpu_usage_us: u64,
     /// The most CPU the run used over a short window of it (the job server's agent measures
-    /// five seconds), in millicores, if measured: when given, it is the run's CPU sample in
-    /// place of its mean (`cpu_usage_us` over `wall_us`), so the estimate is of the cores a run
-    /// of the key needs at its busiest.
+    /// five seconds), in millicores, if measured. The run's CPU sample stays its mean
+    /// (`cpu_usage_us` over `wall_us`); the peak is kept beside it, and a key whose recent
+    /// peaks are far above the median of its means books them (a heavy tail,
+    /// [`crate::Summary`]'s CPU rule in the crate docs). `None` and `Some(0)` are no peak.
     pub cpu_peak_millis: Option<u32>,
     /// The CPU contention the run met, in tenths of a percent, if known: the node's CPU
     /// pressure (`avg10`) when the run started, or the run's own wait for a CPU per unit of

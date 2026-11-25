@@ -6,7 +6,9 @@
 //! quarter of the host and at least a quarter core; the cold CPU when none has a sample),
 //! the memory of `size_of`, and the run `run_of` teaches. A run's contention is what the
 //! replay modelled for it (the time it was slowed, over its wall time), so a slowed run can
-//! only raise its class, as on the farm. No job is held at a CPU ceiling (no `cpu.max`).
+//! only raise its class, as on the farm. No job is held at a CPU ceiling (no `cpu.max`). A
+//! run is taught with its recorded peak only by a sizer [`Sizer::with_peaks`] made, as `run_of`
+//! teaches it now; otherwise without, as it did before the heavy-tail rule.
 
 use js_sched_placer::sizes::{DEFAULT_COLD_CPU_MILLIS, DEFAULT_COLD_MEMORY_BYTES};
 use js_sizing::{
@@ -56,6 +58,10 @@ fn key(index: u32) -> Key {
 pub struct Sizer {
     summaries: Summaries,
     bounds: Bounds,
+    /// Whether a run is taught with its recorded peak, as the placer teaches it: a class whose
+    /// peaks are a heavy tail then books them. Without, every class books the median of its
+    /// runs' means, as the placer did before it read the peak.
+    peaks: bool,
 }
 
 impl Sizer {
@@ -70,6 +76,16 @@ impl Sizer {
                 host_memory: host_bytes,
                 node_cpu_millis: u32::try_from(host_milli).unwrap_or(u32::MAX),
             },
+            peaks: false,
+        }
+    }
+
+    /// The same sizer, teaching each run with its recorded peak ([`Sizer::peaks`]).
+    #[must_use]
+    pub fn with_peaks(self) -> Self {
+        Self {
+            peaks: true,
+            ..self
         }
     }
 
@@ -158,7 +174,7 @@ impl Sizer {
             limit_hits: u64::from(at_limit),
             swap_peak_bytes: 0,
             cpu_usage_us: job.cpu_ms.saturating_mul(1000),
-            cpu_peak_millis: None,
+            cpu_peak_millis: job.peak_milli.filter(|_| self.peaks),
             node_cpu_pressure_permille: Some(u16::try_from(permille).unwrap_or(u16::MAX)),
             cpu_held: false,
         };

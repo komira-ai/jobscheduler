@@ -36,6 +36,7 @@ impl Checker {
         let capacity = Resources::new(w.capacity[0], w.capacity[1]).with_gpus(w.capacity[2]);
         let charged = w.charged.values().cloned().collect();
         Host::new(name.clone(), capacity, w.booked[2], 0, w.whole, charged)
+            .with_booked_memory(w.booked[1])
     }
 
     /// The reference placement of the load rule over `names`, the workers placement may use.

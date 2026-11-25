@@ -347,8 +347,8 @@ the same `received->taken` row is 0 ms p50 and 3 ms p90.
   still discarded on the worker first: it is the runtime's own state. A removal that is done is not
   made again while the quota waits for the project's usage to read zero.
 - **The order and the outcomes are unchanged.** The record that the checks are owed is written on the
-  worker before either removal is asked, so a restart while one runs still taints the host
-  (`check-owed`). A removal that fails taints `cleanup-failed` with the same check as before, and
+  worker before either removal is asked, so a restart while one runs leaves the record, and the next
+  start runs the owed check (tainting the host `check-owed` when it finds something or cannot run). A removal that fails taints `cleanup-failed` with the same check as before, and
   the slot stays booked; the job waits in its stage, with its slot booked, while a removal runs.
 - **The cleanup is measured.** When a run's cleanup passes, the lifecycle logs
   `job: Cleaned { run_id, timeline: CleanupTimeline { steps, worker_ms } }`: the milliseconds after
@@ -381,7 +381,7 @@ the same `received->taken` row is 0 ms p50 and 3 ms p90.
 - No wire, record or configuration format changes; the journal gains the `Cleaned` line. The
   `Started` line is unchanged, so `js-start-timeline` reads it as before.
 - A crash while a removal runs off the worker leaves what a crash during a removal on the worker
-  left: the owed record (the next start taints the host) and the lease's sidecar (the start-up pass
+  left: the owed record (the next start runs the owed check) and the lease's sidecar (the start-up pass
   removes the lease).
 - A thread that panics during a removal loses the run it was given: the removal answers a failure
   (the host is tainted `cleanup-failed`) and the next removal takes the lease apart by its sidecar.
@@ -391,6 +391,86 @@ the same `received->taken` row is 0 ms p50 and 3 ms p90.
 - The farm measurement after this agent ships: `received->taken` p50 in a burst of the same size,
   `the job worker is busy` counts, and the `Cleaned` lines' `worker_ms` against their steps.
 - The post-job checks and the owed record's syncs still run on the worker, once for each job.
+
+## Fifth part: the held beat of a host that polls dispatch
+
+### Why, read in the code
+
+- **The agent tells the server `running` only on a heartbeat, and it has one heartbeat thread.** The
+  session posts a heartbeat and waits for the reply (`run.rs`, `drive_holding`); the bell the worker
+  rings when the container runs ends only the wait between two heartbeats, never a request in
+  flight. So `running` reaches the server when the held request in flight at that moment returns.
+- **The third part's hold.** A beat that lists a job `starting` is held up to `STARTING_HOLD`
+  (200 ms) so that it is the heartbeat the server holds for the host's next placement, which a
+  placement on the host answers at once. While it is held, `running` waits for it: up to 200 ms
+  after the container runs, about 100 ms on average for a start that runs at a random point of
+  the hold (inferred from the bound, not measured apart).
+- **For a host that polls dispatch the hold delivers nothing.** Its starts come by its poll
+  (`dispatch/`), and the beat's reply leaves out every start the dispatch queue carries
+  (`per_job::commands_now`). So a placement on such a host wakes the held beat, the rebuilt reply is
+  empty, and the beat is held on to its bound: the normal one (the interval, at most 5 s) for the
+  idle host's beat that was waiting when the job was placed. The agent's one heartbeat thread stays
+  in that request through the whole start, and `running` reaches the server up to that bound late.
+  Every agent since the poll (komira-ai/jobscheduler#949) reports `dispatch-poll`, and a server that
+  holds the job tables, which per-job starts need, serves the poll to it, so this is the path of
+  every such host.
+
+### What this part changes
+
+Only the server's hold of a host that polls dispatch; a host that does not (an agent from before the
+poll) is held as before, because the hold is how its starts reach it.
+
+- **A placement ends the hold.** A wake whose rebuilt reply is still empty ends the hold, and the
+  reply does not say `beat_now`. The agent's next heartbeat then leaves when its worker has news
+  (the start taken, running or ended), or after the interval.
+- **A beat with a start under way is paced, not held.** A beat that lists a job `starting`, however
+  long it has been so, is answered at once when no such beat of the host was answered in the last
+  `starting_hold` (200 ms) on the server's clock, and held for the rest of those 200 ms otherwise
+  (`held_beat::Starts::paced`). Answered at once or at the end of its spacing, its reply does not
+  say `beat_now`, so the agent's next heartbeat is the one that leaves when the container runs. A
+  wake or a drain that ends such a hold answers as it does for any hold (a wake with nothing to
+  send as above, a drain with `beat_now`). The third part's 2 s window does not apply to such a
+  host: it kept a long start from beating five times a second, which a reply without `beat_now`
+  cannot cause, and past it the beat was held to the normal bound, which would keep `running`
+  back up to 5 s again.
+
+One start on an idle host is then: the placement ends the idle beat's hold; the worker takes the
+start and the beat that lists it `starting` is answered at once; the container runs and the beat
+that lists it `running` leaves at once and is committed as it arrives.
+
+### Decisions
+
+- **Server side, no wire change.** The agent already beats again on news after a reply without
+  `beat_now`, and every agent that reports `dispatch-poll` (komira-ai/jobscheduler#949) has the bell
+  for news, a start taken among it (komira-ai/jobscheduler#930, komira-ai/jobscheduler#941), so it
+  does so, so the server alone decides how soon a beat is answered. The agent's single heartbeat
+  thread stays; a second heartbeat in flight would need the session's state (`seq`, the taint
+  acknowledgements) kept per request.
+- **Paced, not answered at once every time.** A burst of starts on a host makes news many times a
+  second (each start taken, each running). Pacing answers the beats of such a host with a start
+  under way no more often than once per 200 ms, which is how often the third part's hold answered them;
+  the beats of a host with one start under way are not held at all.
+- **The bound.** Against the third part, for a host that polls dispatch: the beats with a start
+  under way are answered at most once per `starting_hold`, as they were, and each placement on this
+  server ends at most one hold, so a host sends at most one beat more per placement on it. The
+  agent's next beat after a paced or woken reply waits for news or the interval, never 0 ms.
+- **The pacing record is per host, on the server's clock, in the process.** It is one number a
+  host, kept only while the host's spacing lasts (each answer forgets the hosts whose spacing has
+  passed); another server process paces on its own, and a beat answered there is not counted here.
+
+### Compatibility and failure modes
+
+- No wire, record or configuration format changes.
+- An agent that does not report `dispatch-poll` is held as before (third part).
+- A start whose news never comes (a start that hangs) leaves the agent's next beat to the interval,
+  which is what a host with no held beat always had.
+- A placement on another server does not wake this one's hold; as before, its start goes out on the
+  poll, and the host's held beat ends at its bound.
+
+### What is left
+
+- The farm measurement after this server ships: the time from a container's `running` to the server's
+  job state `running`, read from the job store's records against the agents' `Started` lines.
 
 ## Tests
 
@@ -407,4 +487,9 @@ and the line), `crun/fs/fs_tests.rs` (the lookups), `crun/budget_tests.rs` (the 
 adds `tests/agent/lifecycle/removing.rs` (a start taken while a removal runs, the cleanup's
 timeline, failures and a restart while a removal runs), `tests/crun_stand_in/removes.rs` (`crun`'s
 removals off the worker), `lifecycle/machine/run_dirs.rs`'s unit tests and `tests/agent/vm/split.rs`
-(the router).
+(the router). The fifth part adds js-lease-server's `agent_api_held_tests.rs` cases for a host that
+polls dispatch (a placement ends the hold, a lone start's beat is answered at once and its `running`
+committed as it arrives, close beats paced, the end of a paced hold and a start past the window, a
+beat that lists no start, a drain), `held_beat_tests.rs`
+(the pacing's arithmetic and its record), and changes `agent_api/dispatch_tests.rs`'s placement case to the
+heartbeat being answered at the wake.

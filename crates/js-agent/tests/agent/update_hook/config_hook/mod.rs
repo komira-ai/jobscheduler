@@ -8,6 +8,7 @@ mod params;
 mod rig;
 mod steps_cleanup;
 mod steps_cutover;
+mod steps_kept;
 mod steps_rollback;
 mod steps_verify;
 mod verb;

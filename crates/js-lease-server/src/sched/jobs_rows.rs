@@ -6,7 +6,9 @@
 //! row that says its last listing was not clean ([`js_jobs::JobStore::unclean_nodes`]), no
 //! `taint/<host>` row, no binding that holds a taint, no `hostmark/<host>` row. A host this server's registry also holds is closed too by what the
 //! registry holds of it (a taint, a scale-down mark, a release under way, a cordon in force).
-//! The store's cordons are dropped by the placer itself.
+//! The store's cordons are dropped by the placer itself. The hosts a taint closes (a
+//! `taint/<host>` row, a binding's taint, the registry's) are offered apart, as
+//! [`Offered::tainted`], so that no whole-host job is held to one of them.
 //!
 //! These reads choose what the pass tries; the placement's own transaction decides on the rows
 //! it reads ([`js_jobs::JobStore::place_claimed`]), so a host closed after the reads is refused
@@ -43,6 +45,11 @@ pub(super) struct Offered {
     pub(super) open: BTreeMap<HostId, OpenHost>,
     /// Every host whose row is live, and every host the registry holds live with a hello.
     pub(super) hello: BTreeSet<HostId>,
+    /// The hosts of `hello` a taint closes until it is cleared, none of which is open: a
+    /// `taint/<host>` row, a binding that holds a taint, or a taint on the registry's record.
+    /// Not a host closed only for a passing cause (a scale-down mark, a release under way, a
+    /// cordon, a listing that was not clean).
+    pub(super) tainted: BTreeSet<HostId>,
     /// The `taint/<host>` rows of hosts this registry holds that it took on, each with the job
     /// that placed there.
     pub(super) adopted: Vec<(HostId, JobId)>,
@@ -248,6 +255,11 @@ impl Agents {
         for host in &offered.hello {
             let view = views.get(host);
             let row = live.get(host);
+            let bound_taint = binding_of(host).is_some_and(|bound| bound.taint().is_some());
+            let held_taint = view.is_some_and(|view| view.taint.is_some());
+            if bound_taint | held_taint | taints.contains_key(host) {
+                offered.tainted.insert(host.clone());
+            }
             // A host is offered because it has a live row or the registry holds it live, so
             // one with no row has a view.
             let seen = match row {
@@ -262,8 +274,7 @@ impl Agents {
             let Some(seen) = seen else {
                 continue;
             };
-            let tainted = binding_of(host).is_some_and(|bound| bound.taint().is_some());
-            let closed = taints.contains_key(host) | marks.contains(host) | tainted;
+            let closed = taints.contains_key(host) | marks.contains(host) | bound_taint;
             let closed = closed | unclean.contains(host);
             let here = view.is_none_or(|view| open_here(view, now, row.is_some()));
             if !(seen.open & !closed & here) {

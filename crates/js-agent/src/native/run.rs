@@ -10,7 +10,8 @@ use crate::bundle::Pinned;
 use crate::lifecycle::{Exit, Status};
 use crate::logs::RunLogs;
 use crate::mac_accounts::Account;
-use crate::mac_supervisor::{Ended, Ready, Supervised};
+use crate::mac_supervisor::{Ended, JobRusage, Ready, Supervised};
+use crate::mac_usage::RunUsage;
 
 /// A run: its scratch directory (where its log files and its supervisor's records are), its
 /// declared outputs, and, for a run this process started, its account and supervisor.
@@ -58,6 +59,10 @@ pub(super) struct Job {
     /// every poll sweeps the run's processes, and reads the job's end only after a sweep that
     /// left none.
     pub(super) sweeping: bool,
+    /// What the run's processes used, from the samples of the polls ([`crate::mac_usage`]).
+    pub(super) usage: RunUsage,
+    /// What the supervisor's wait of the job said it used, once its exit record says.
+    pub(super) reaped: Option<JobRusage>,
 }
 
 impl Run {

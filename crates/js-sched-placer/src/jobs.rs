@@ -641,6 +641,8 @@ pub struct JobHosts<'a> {
     pub open: &'a BTreeMap<HostId, OpenHost>,
     /// The hosts that said hello to this server.
     pub hello: &'a BTreeSet<HostId>,
+    /// The hosts a taint closes, none of them open ([`WholeJobs::tainted`]).
+    pub tainted: &'a BTreeSet<HostId>,
     /// The pool's whole-node settings, if it has any.
     pub whole: Option<&'a WholeNodeConfig>,
 }
@@ -660,10 +662,11 @@ impl SchedPlacer {
         open: &BTreeMap<HostId, OpenHost>,
         (starts, metrics): (&dyn JobStarts, &dyn PassMetrics),
     ) -> Result<Vec<JobId>, JobStoreError> {
-        let hello = BTreeSet::new();
+        let none = BTreeSet::new();
         let hosts = JobHosts {
             open,
-            hello: &hello,
+            hello: &none,
+            tainted: &none,
             whole: None,
         };
         self.place_jobs_with(jobs, &hosts, (starts, metrics))
@@ -724,12 +727,10 @@ impl SchedPlacer {
         let now = self.now();
         let grace = hosts.whole.map_or(0, |whole| whole.regain_grace_ms);
         let open: BTreeSet<HostId> = hosts.open.keys().cloned().collect();
-        // The whole-host engine marks and commits only the jobs that book the whole host and
-        // run contained: it does not yet hold a job to the hosts that run host jobs, so a
-        // whole-host job with host isolation stays queued.
-        // Nor does it hold a job to the hosts that report `layered-rootfs`, so a whole-host job
-        // with layers, mounts or host ports (which the job service refuses at submit) stays
-        // queued too, rather than drain a host that could not be sent its start.
+        // The whole-host engine marks and commits only contained jobs: it does not yet hold a
+        // job to the hosts that run host jobs or report `layered-rootfs`, so a whole-host job
+        // with host isolation, or with layers, mounts or host ports (which the job service
+        // refuses at submit), stays queued rather than drain a host it could not start on.
         let whole: Vec<JobRecord> = queued
             .iter()
             .filter(|job| {
@@ -744,6 +745,7 @@ impl SchedPlacer {
             marks,
             hello: hosts.hello,
             open: &open,
+            tainted: hosts.tainted,
             settings: hosts.whole,
             claim_by: self.boot().saturating_add(Duration::from_millis(grace)),
         };

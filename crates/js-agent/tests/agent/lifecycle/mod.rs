@@ -29,12 +29,14 @@ mod layout;
 mod lease_dir;
 mod live_logs;
 mod logs;
+mod memory_series;
 mod mounts;
 mod native_bodies;
 mod network;
 mod notes;
 mod outputs_committed;
 mod owed;
+mod owed_at_start;
 mod per_job;
 mod prepare;
 #[cfg(target_os = "linux")]

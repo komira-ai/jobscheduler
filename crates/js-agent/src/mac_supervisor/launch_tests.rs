@@ -97,6 +97,7 @@ fn profile_refused() -> (ExitRecord, String) {
         },
         job_pid: None,
         asid: None,
+        usage: None,
     };
     let text = serde_json::to_string(&record).unwrap();
     (record, text)
@@ -193,6 +194,7 @@ fn try_exit_answers_at_once() {
             ended: Ended::Signalled(9),
             job_pid: Some(4321),
             asid: Some(77),
+            usage: None,
         })
     );
 

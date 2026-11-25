@@ -1,6 +1,6 @@
 # Scheduling on CPU use over time
 
-Status: design for review. Nothing here is built except the replay (`crates/js-cpu-replay`). Companion to
+Status: design for review. Built so far: the replay (`crates/js-cpu-replay`), step 1 (record) and step 2 (learn in shadow, `--placement-curves shadow`). Nothing else here is built. Companion to
 [sizing.md](sizing.md) (how a class's CPU is booked) and [placement-by-load.md](placement-by-load.md) (the
 load rule and the time profiles designed for leases, never wired to jobs).
 
@@ -13,7 +13,8 @@ with no CPU limit). **MEASURED**, counted from the export or the farm's metrics,
 
 ### The problem, in five lines
 1. A job's CPU booking is the median of its class's last 32 runs' mean CPU (CPU time over wall time,
-   komira-ai/jobscheduler#1026). A class is a job type, for example the compile of one target. MEASURED in the first
+   komira-ai/jobscheduler#1026); a class whose five-second peaks are a heavy tail books the 90th percentile of those
+   peaks instead (`sizing.md`, 7.10). A class is a job type, for example the compile of one target. MEASURED in the first
    8 minutes after the change, against the hour before: jobs per host 3 to 4 became 30 to 36; hosts about 20% busy
    became about 99%; jobs finished per minute 58 became 128; median queue wait 15 min became 4 min; median run time
    32 s became 65 s; load average on an 88-thread host 13 to 26 became 250 to 330.
@@ -246,10 +247,12 @@ teaches the class: a run slowed by contention may only raise it, as today.
   for (close to) the peak memory usage". It records only each window's peak, with a 48 h half-life. It takes the
   maximum for minimal tolerance of out-of-memory kills, the 98th percentile for low tolerance, and between them the
   larger of the 60th percentile and half the peak; then a 10 to 15% margin and the maximum over the last hour.
-- **What is taken here:** #1035's rule as it is. The maximum over recent runs is Autopilot's choice for minimal
-  tolerance, which is ours because a job here may not be killed.
-- **The host's measured memory:** the whole host's memory in use (today the jobs' group's working set, READ:
-  `NodeLoad.working_set_bytes`), used as for CPU.
+- **What is taken here:** #1035's rule, with the peak of each run's non-file memory (`memory.current` less
+  `file - shmem`, sampled about once a second into the result's `memory_series`, pairs combined by their maximum)
+  in place of `memory.peak`, which also counts the page cache of files the job read (`sizing.md`, 7.7). The maximum
+  over recent runs is Autopilot's choice for minimal tolerance, which is ours because a job here may not be killed.
+- **The host's measured memory:** the whole host's non-file memory (`host_nonfile_bytes` of the heartbeat's load,
+  from `/proc/meminfo`), the same measure, in place of the jobs' group's working set.
 - **Nothing is ever killed for memory.** A host whose bookings leave no room is refused as `booked-memory`.
 
 ## 5. The placement rule
@@ -324,6 +327,20 @@ accepts. What corrects is the next placement:
   - the memory rule before #1035.
 - **Contention** (ASSUMED): a host asked for more than its cores gives each job cores/demand of what it asks, and the
   job runs longer by that factor. Nothing is lost to cache or switching.
+- `js-cpu-replay shadow <log>` reads the job service's own log under `--placement-curves shadow` (step 2) and
+  prints, per class of at least `--min-runs` check lines (default 16), the runs, the mean and peak error of the run
+  against the profile, the curve's error as a share of the flat level's, whether the profile is shaped, and the CPU
+  error the curve removes against the flat line; `--hide-classes` numbers the classes instead of naming them. The
+  check line holds no booking, so the last figure is prediction error, not CPU a booking gives back. The log is read
+  in time order: with several server tasks, sort their lines by timestamp first. A job logged by two servers (the
+  overlap of a rolling update) counts once.
+- **Step 2 on the farm** (MEASURED, 4 h 10 min of normal builds, releases 0.1.379 to 0.1.383 under `shadow`):
+  29,256 check lines over 5,335 classes, 330 of them with at least 16 lines. Of those 330, 28 (8.4%) were shaped by
+  CPU and 38 (11.5%) by memory. Over their scored runs the curve's CPU error was 95.4% of the flat line's: it removed
+  56,920 core-seconds of 1,217,183 (4.6%), and the 28 CPU-shaped classes 2,908 of them. Not every run is in it: 44%
+  of the lines' CPU series disagree with the run's exact CPU time by more than 5% (they are mostly short runs, which
+  a per-second series cannot match that closely: INFERRED), and 17% carry no series (the Macs record none). The
+  check lines were 16% of the server's log bytes.
 - **Shapes:** each job's CPU is bracketed by a "blip" (five seconds at its peak) and a "burst" (its peak while its
   CPU lasts). Without a recorded peak both are flat.
 - **Arms:** listed in the table below. Each runs at the recorded arrival speed and at 4x.
@@ -346,6 +363,7 @@ against 1,322 s recorded after the first hour (REPLAY). The time from placement 
 |---|---|---|---|---|---|
 | as deployed, no readings, 1.1 | 65.4 | 355.5 | 18.4% | 17.8% | 9,199 |
 | today: median, 1.1 | 65.1 | 351.3 | 15.7% | 19.7% | 9,192 |
+| heavy tail p90, 1.1 (`sizing.md`, 7.10) | 65.1 | 351.3 | 15.7% | 19.7% | 9,192 |
 | median, 1.0 | 66.9 | 494.6 | 10.4% | 3.3% | 9,152 |
 | median, 0.9 | 68.7 | 740.4 | 5.5% | 2.3% | 8,481 |
 | decayed mean (12 h), 1.1 | 64.8 | 339.5 | 13.1% | 21.6% | 9,195 |
@@ -358,6 +376,9 @@ against 1,322 s recorded after the first hour (REPLAY). The time from placement 
 | perfect curve, 1.1 | 58.7 | 347.9 | 1.7% | 4.9% | 9,217 |
 
 What to read from the table:
+- **The heavy-tail row equals today's median:** the window's records carry no five-second peak, so no class has a tail
+  to book. `farm.report.md` also gives, per row, the most CPU booked on a host at once, the Gini coefficient of the
+  jobs placed per host and the core-seconds the hosts were asked for past their cores.
 - **At the recorded speed only the perfect curve clearly wins:** 8.6% less total time. Lower limits and higher
   quantiles cut slowdown but add more wait than they save.
 - **At saturation the model rewards overcommit:** its sharing loses no CPU, so the cost of overcommit beyond
@@ -383,9 +404,10 @@ negative and fades; each release reads the other's results.
 - **Delay on purpose** (a job not yet started), decided by the perfect-curve arm; **a spread term**, by step 3.
 
 ## 12. Mac hosts, settings
-- **Mac hosts:** the Mac runtime has no `usage` method (READ), so Mac classes stay flat until Linux shows a gain.
+- **Mac hosts:** the Mac runtime reports each run's usage and, with `--cpu-series`, its CPU series, from the samples of the
+  run's processes (`docs/design/mac-runtime.md`, section 4), so Mac classes learn as Linux's do.
 - **Settings** (flags, each off or at today's value by default): agent `--cpu-series`, `--host-second-samples`;
-  server `--placement-curves off|shadow|on`, `--curve-hosts`, `--curve-horizon-seconds 128`, `--curve-slot-seconds
+  server `--placement-curves off|shadow|on` (today the flag takes `off` and `shadow`; `on` comes with step 4), `--curve-hosts`, `--curve-horizon-seconds 128`, `--curve-slot-seconds
   2`, `--curve-min-runs 8`, `--curve-fit-ratio 0.8`, `--curve-bias-fade-seconds 10`, `--curve-max-hold-seconds 30`
   (held jobs are only ones not yet started); the CPU slack stays 1.1. Off equals today's behaviour exactly.
 

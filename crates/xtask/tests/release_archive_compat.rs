@@ -253,17 +253,24 @@ fn touch_all(path: &Path, secs: u64) {
 /// cannot start.
 #[test]
 fn an_arm64_archive_is_byte_identical_when_made_again_and_reads_back_with_gnu_tar() {
-    // The options here are the workflow's: a change there must come here too.
-    let workflow = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/artifacts.yml"),
-    )
-    .expect("read artifacts.yml");
-    assert!(
-        workflow.contains(&format!(
-            r#""$tar" -C "stage-$bin" {WORKFLOW_ARCHIVE_OPTIONS}"#
-        )),
-        "artifacts.yml no longer archives with {WORKFLOW_ARCHIVE_OPTIONS}"
-    );
+    // The options here are the workflow's: a change there must come here too. The Linux legs
+    // of artifacts.yml run GNU `tar`; the hosted Mac build runs Homebrew's `gtar`. macos-farm.yml
+    // packs with `release pack`, whose own tests are in tests/release_pack.rs.
+    for (file, tar) in [
+        ("artifacts.yml", r#"            tar -C "stage-$bin""#),
+        ("artifacts.yml", r#"            gtar -C "stage-$bin""#),
+    ] {
+        let workflow = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../.github/workflows")
+                .join(file),
+        )
+        .unwrap_or_else(|e| panic!("read {file}: {e}"));
+        assert!(
+            workflow.contains(&format!("{tar} {WORKFLOW_ARCHIVE_OPTIONS}")),
+            "{file} no longer archives with {tar} {WORKFLOW_ARCHIVE_OPTIONS}"
+        );
+    }
 
     let tmp = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "archive-arm64-again");
     let repo = checkout_for(&tmp, ARM_TARGET);

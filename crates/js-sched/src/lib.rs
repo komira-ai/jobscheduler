@@ -24,7 +24,10 @@
 //!   serving the lease kind and satisfies the action's platform (`js-caps` matching),
 //!   spread over the workers that have room: to the one with the least booked (or, under
 //!   admission by load, charged), as a share of its capacity (the larger of its CPU and
-//!   memory shares), then the fewest leases, then the first by name;
+//!   memory shares), then the fewest leases, then the first by name. With load placement
+//!   on, the score ranks the workers instead: slack, memory, the pack limit (a worker is
+//!   packed by best fit while its bookings with the lease stay within it, and past it the
+//!   least full comes first), then best fit within the limit;
 //! - admission by measured and predicted load ([`LoadConfig`], [`PlacementLoad`]): an
 //!   action is admitted to a worker when what the worker's readings measure, plus the
 //!   predicted cost of the leases no reading covers yet, plus the cost of the new lease,
@@ -122,7 +125,7 @@
 //! - what a pass records of why a queued job waits ([`queue_status::note`]): the queue code
 //!   and event an outcome of pass 1 or pass 2 gives a job.
 //!
-//! Not yet: placement scoring beyond the spread (alignment, best fit), a reservation for
+//! Not yet: a reservation for
 //! a large `action` request (an action asking for most of a worker's cores waits, because spreading leaves no worker with the cores), reclaimed room and preemption, a budget for the
 //! leases given up for reconnection, and committing submissions so that a new leader
 //! inherits the queue. In v0 the scheduler runs on the leader only.
@@ -151,9 +154,9 @@ mod queue;
 pub mod queue_status;
 mod refusal;
 pub use load::{
-    Charge, Choice, DecidedBy, EVALUATIONS_PER_WORKER, FitShape, H_PLUS, HORIZON, HostFacts,
-    LeaseFacts, Load, MAX_BALANCE, PredictedLoad, SLOTS, ScoreConfig, ScoreKey, Scorer,
-    least_loaded,
+    Charge, Choice, DEFAULT_PACK_LIMIT_PERMILLE, DecidedBy, EVALUATIONS_PER_WORKER, FitShape,
+    H_PLUS, HORIZON, HostFacts, LeaseFacts, Load, MAX_BALANCE, MAX_PACK_LIMIT_PERMILLE, Pack,
+    PredictedLoad, SLOTS, ScoreConfig, ScoreKey, Scorer, least_loaded,
 };
 pub use probe::{ProbeHost, ProbeRefusal, admit_probe};
 pub use provider_rank::ProviderRank;

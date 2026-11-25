@@ -3,7 +3,9 @@
 //!
 //! The subset: `${{ … }}` around the expression; `||`, `&&`, `!`, `==` and `!=` with GitHub's
 //! precedence (`!` binds tightest, then the comparisons, then `&&`, then `||`); parentheses;
-//! string literals in single quotes; `startsWith(a, b)`, which ignores case as GitHub's does; and
+//! string literals in single quotes; `startsWith(a, b)`, which ignores case as GitHub's does;
+//! `cancelled()`, true when the table says the run was cancelled (the name `cancelled()` is
+//! `true`) and false otherwise; and
 //! dotted names (`github.ref`) looked up in a table, a name not in it being empty, as an unset
 //! value is. A name under `inputs.` whose value is `true` or `false` is that boolean, as GitHub
 //! gives a `type: boolean` input (so `false` is falsy, unlike the string). Strings compare as
@@ -155,6 +157,13 @@ impl Parser<'_> {
                 if self.take(&Token::Open) {
                     if name == "startsWith" {
                         return self.starts_with();
+                    }
+                    if name == "cancelled" {
+                        if !self.take(&Token::Close) {
+                            return Err("cancelled() takes no arguments".to_owned());
+                        }
+                        let value = self.names.get("cancelled()").copied().unwrap_or_default();
+                        return Ok(Value::Bool(value == "true"));
                     }
                     return Err(format!("the function {name} is not understood"));
                 }

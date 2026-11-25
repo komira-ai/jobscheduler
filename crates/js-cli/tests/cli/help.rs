@@ -19,7 +19,7 @@ const JOIN_TOKEN: [&[&str]; 3] = [
 
 /// The program and the job commands, whose help is held to `goldens/job_help/`: the
 /// generated ones, and the hand-written `job wait`, `job follow` and `job run`.
-const JOB: [&[&str]; 21] = [
+const JOB: [&[&str]; 22] = [
     &[],
     &["job"],
     &["job", "submit"],
@@ -36,6 +36,7 @@ const JOB: [&[&str]; 21] = [
     &["host", "cordon"],
     &["host", "uncordon"],
     &["host", "host-taint"],
+    &["host", "retire"],
     &["pool"],
     &["pool", "list"],
     &["provider"],

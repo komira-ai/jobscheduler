@@ -34,8 +34,12 @@
 //! [`token_problems`] holds every other workflow to the same scope: in a workflow that starts on
 //! `pull_request`, `pull_request_target` or `merge_group` (a merge group of the merge queue runs a
 //! queued pull request's code, docs/ci.md), no job and no top level holds `id-token: write`
-//! unless the job's `if:` pins a push (`github.event_name == 'push'`), as the jobs of `release.yml`
-//! that sign and publish do.
+//! unless the job's `if:` pins a push to main or a manual run (its top-level `&&` conjuncts, or a
+//! parenthesised `||` of such, are read: `github.event_name == 'push' || github.event_name ==
+//! 'pull_request'` pins nothing), as the jobs of `release.yml` that sign and publish do. The jobs
+//! of a workflow such a workflow calls are held to it too, unless the call or the job pins one.
+//! In `artifacts.yml`, the signer, no job but `attest` and a call of another workflow file holds
+//! the token, and in `macos-farm.yml` a job that holds it runs no repository code.
 
 use std::collections::BTreeMap;
 
@@ -277,41 +281,297 @@ fn holds_token(permissions: Option<&Node>) -> bool {
     })
 }
 
-/// What is wrong with the grants of `id-token: write` in `workflows` (file name, text), other than
-/// those of [`FILE`]: a workflow that starts on a pull request or a merge group holds none at its
-/// top level, and a job of it holds one only when its `if:` pins a push.
-pub fn token_problems(workflows: &[(String, String)]) -> Vec<String> {
-    let mut problems = Vec::new();
-    for (file, text) in workflows.iter().filter(|(file, _)| file != FILE) {
-        let doc = match yaml::load(text) {
-            Ok(doc) => doc,
-            Err(why) => {
-                problems.push(format!("{file}: {why}"));
+/// The workflow whose signing the farm hosts trust, the one file whose jobs may not hold
+/// `id-token: write` but for [`SIGNER_JOB`] and the calls of other workflow files.
+pub const SIGNER_FILE: &str = "artifacts.yml";
+/// The one job of [`SIGNER_FILE`] that holds the token to sign.
+pub const SIGNER_JOB: &str = "attest";
+/// The workflow that builds on the build farm's Macs, whose jobs hold the token to join the
+/// farm's network and so run no code compiled from the repository.
+pub const FARM_BUILD_FILE: &str = "macos-farm.yml";
+/// The prefix of the `uses:` of a call of a workflow of this repository.
+const LOCAL_CALL: &str = "./.github/workflows/";
+/// What the `if:` of a job that holds the token must pin: a push together with [`MAIN_REF`], or a
+/// manual run.
+const PUSH: &str = "github.event_name == 'push'";
+/// The ref a push must be to, in the same `&&` conjunction as [`PUSH`].
+const MAIN_REF: &str = "github.ref == 'refs/heads/main'";
+const DISPATCH: &str = "github.event_name == 'workflow_dispatch'";
+
+/// The parts of `text` between the occurrences of `operator` outside parentheses and single
+/// quotes, trimmed.
+fn split_top<'a>(text: &'a str, operator: &str) -> Vec<&'a str> {
+    let mut parts = Vec::new();
+    let (mut depth, mut quoted, mut from) = (0i32, false, 0);
+    let mut at = 0;
+    while at < text.len() {
+        let rest = &text[at..];
+        let c = rest.chars().next().unwrap_or_default();
+        match c {
+            '\'' => quoted = !quoted,
+            '(' if !quoted => depth += 1,
+            ')' if !quoted => depth -= 1,
+            _ if !quoted && depth == 0 && rest.starts_with(operator) => {
+                parts.push(text[from..at].trim());
+                at += operator.len();
+                from = at;
                 continue;
             }
-        };
-        let on = names(entry(&doc, "on"));
+            _ => {}
+        }
+        at += c.len_utf8();
+    }
+    parts.push(text[from..].trim());
+    parts
+}
+
+/// `text` without the one pair of parentheses that encloses all of it, if it has one.
+fn unparenthesised(text: &str) -> &str {
+    let Some(inner) = text.strip_prefix('(').and_then(|t| t.strip_suffix(')')) else {
+        return text;
+    };
+    // `(a) && (b)` starts and ends with a parenthesis but is not one group: the first group must
+    // close at the end.
+    let mut depth = 0i32;
+    let mut quoted = false;
+    for c in inner.chars() {
+        match c {
+            '\'' => quoted = !quoted,
+            '(' if !quoted => depth += 1,
+            ')' if !quoted => depth -= 1,
+            _ => {}
+        }
+        if depth < 0 {
+            return text;
+        }
+    }
+    inner.trim()
+}
+
+/// The `&&` conjuncts of `text` (one branch, no top-level `||`), with each parenthesised conjunct
+/// that has no `||` of its own replaced by its conjuncts; a parenthesised `||` stays whole.
+fn conjuncts(text: &str) -> Vec<&str> {
+    let mut found = Vec::new();
+    for conjunct in split_top(text, "&&") {
+        let inner = unparenthesised(conjunct);
+        if inner != conjunct && split_top(inner, "||").len() == 1 {
+            found.extend(conjuncts(inner));
+        } else {
+            found.push(conjunct);
+        }
+    }
+    found
+}
+
+/// Whether the condition `expression` (the text of an `if:`, with or without `${{ }}`) holds only
+/// on a push to main or a manual run: every `||` branch of it does, and a branch does when its
+/// top-level `&&` conjuncts include [`DISPATCH`], or both [`PUSH`] and [`MAIN_REF`], or a
+/// parenthesised condition that does.
+fn pins_push_or_dispatch(expression: &str) -> bool {
+    let text = expression.trim();
+    let text = text
+        .strip_prefix("${{")
+        .and_then(|t| t.strip_suffix("}}"))
+        .unwrap_or(text)
+        .trim();
+    let text = unparenthesised(text);
+    let branches = split_top(text, "||");
+    if branches.len() > 1 {
+        return branches.into_iter().all(pins_push_or_dispatch);
+    }
+    let all = conjuncts(text);
+    (all.contains(&PUSH) && all.contains(&MAIN_REF))
+        || all.iter().any(|conjunct| {
+            *conjunct == DISPATCH
+                || (unparenthesised(conjunct) != *conjunct
+                    && pins_push_or_dispatch(unparenthesised(conjunct)))
+        })
+}
+
+/// Whether the job `job` pins a push or a manual run in its `if:`.
+fn job_pins(job: &Node) -> bool {
+    entry(job, "if")
+        .and_then(Node::as_str)
+        .is_some_and(pins_push_or_dispatch)
+}
+
+/// The file of this repository that the job `job` calls, if it calls one.
+fn local_call(job: &Node) -> Option<&str> {
+    entry(job, "uses")
+        .and_then(Node::as_str)
+        .and_then(|u| u.strip_prefix(LOCAL_CALL))
+}
+
+/// The name of the job `name`, empty when it is not text.
+fn text_of_name(name: &Node) -> &str {
+    name.as_str().unwrap_or_default()
+}
+
+/// What is wrong with the jobs that the call `job` (reached as `label`, from a workflow a pull
+/// request starts, `file`) runs: a job of the called workflow that holds the token where neither
+/// it nor the chain of calls above it pins a push or a manual run, a call of a workflow that is
+/// not in `docs`, and a chain that comes back to a workflow it is inside. `pinned` says whether
+/// the chain above already pins one; `inside` is the files the chain is inside.
+fn chain_problems(
+    file: &str,
+    label: &str,
+    job: &Node,
+    pinned: bool,
+    docs: &BTreeMap<&str, Node>,
+    inside: &mut Vec<String>,
+) -> Vec<String> {
+    let Some(called) = local_call(job) else {
+        return Vec::new();
+    };
+    let Some(doc) = docs.get(called) else {
+        return vec![format!(
+            "{file}: job {label} calls {LOCAL_CALL}{called}, a workflow this lint cannot read"
+        )];
+    };
+    if inside.iter().any(|f| f == called) {
+        return vec![format!(
+            "{file}: job {label} calls {called}, which the chain is already inside"
+        )];
+    }
+    inside.push(called.to_owned());
+    let mut problems = Vec::new();
+    for (name, inner) in entry(doc, "jobs").map_or(&[][..], entries) {
+        let label = format!("{label} -> {called}/{}", text_of_name(name));
+        let pinned = pinned || job_pins(inner);
+        if holds_token(entry(inner, "permissions")) && !pinned {
+            problems.push(format!(
+                "{file}: job {label} holds `id-token: write` on a pull request (neither its `if:` nor the calls above it pin a push to main or a manual run)"
+            ));
+        }
+        problems.extend(chain_problems(file, &label, inner, pinned, docs, inside));
+    }
+    inside.pop();
+    problems
+}
+
+/// What is wrong with the grants of `id-token: write` in [`SIGNER_FILE`], the document `doc`: its
+/// top level holds none, and no job does but [`SIGNER_JOB`] (which signs) and a call of another
+/// workflow file, whose jobs' tokens name that file as their workflow, not this one.
+fn signer_problems(file: &str, doc: &Node) -> Vec<String> {
+    let mut problems = Vec::new();
+    if holds_token(entry(doc, "permissions")) {
+        problems.push(format!(
+            "{file}: holds `id-token: write` at its top level, for every job"
+        ));
+    }
+    for (name, job) in entry(doc, "jobs").map_or(&[][..], entries) {
+        let name = text_of_name(name);
+        let calls_another = entry(job, "uses")
+            .and_then(Node::as_str)
+            .is_some_and(|u| u != format!("{LOCAL_CALL}{SIGNER_FILE}"));
+        if name != SIGNER_JOB && !calls_another && holds_token(entry(job, "permissions")) {
+            problems.push(format!(
+                "{file}: job {name} holds `id-token: write`, which only {SIGNER_JOB} and a call of another workflow file may"
+            ));
+        }
+    }
+    problems
+}
+
+/// Whether `run` (the text of a step's `run:`) invokes `cargo`: a word of it, or the last
+/// component of a path, is `cargo`.
+fn runs_cargo(run: &str) -> bool {
+    run.split(|c: char| c.is_whitespace() || ";&|()\"'`".contains(c))
+        .any(|w| w.rsplit('/').next() == Some("cargo"))
+}
+
+/// What is wrong with the jobs of [`FARM_BUILD_FILE`], the document `doc`, that hold the token:
+/// each pins a push or a manual run itself, and runs none of this repository's code: no local
+/// action and no `cargo` at all in a `run:` (the verb runs `cargo fetch` itself), only the binary a
+/// job without the token built.
+fn farm_build_problems(file: &str, doc: &Node) -> Vec<String> {
+    let mut problems = Vec::new();
+    for (name, job) in entry(doc, "jobs").map_or(&[][..], entries) {
+        let name = text_of_name(name);
+        if !holds_token(entry(job, "permissions")) {
+            continue;
+        }
+        if !job_pins(job) {
+            problems.push(format!(
+                "{file}: job {name} holds `id-token: write` and its `if:` does not pin a push to main or a manual run"
+            ));
+        }
+        for step in steps(job) {
+            if let Some(action) = entry(step, "uses")
+                .and_then(Node::as_str)
+                .filter(|u| u.starts_with("./"))
+            {
+                problems.push(format!(
+                    "{file}: job {name} holds `id-token: write` and uses the repository's own action {action}"
+                ));
+            }
+            if entry(step, "run")
+                .and_then(Node::as_str)
+                .is_some_and(runs_cargo)
+            {
+                problems.push(format!(
+                    "{file}: job {name} holds `id-token: write` and runs `cargo`"
+                ));
+            }
+        }
+    }
+    problems
+}
+
+/// What is wrong with the grants of `id-token: write` in `workflows` (file name, text), other than
+/// those of [`FILE`]:
+/// - a workflow that starts on a pull request or a merge group holds none at its top level, and a
+///   job of it holds one only when its `if:` pins a push to main or a manual run (a real check of
+///   the top-level `&&` conjuncts, not a search of the text), as the jobs of `release.yml` that
+///   sign and publish do;
+/// - the same holds for the jobs of a workflow such a workflow calls (`uses:
+///   ./.github/workflows/<file>`, followed to any depth): a called job that holds the token is
+///   refused unless it or a call above it pins a push or a manual run;
+/// - in [`SIGNER_FILE`], whether or not a pull request starts it, no job but [`SIGNER_JOB`] holds
+///   the token except a call of another workflow file (see [`signer_problems`]);
+/// - in [`FARM_BUILD_FILE`] a job that holds it runs no repository code (see
+///   [`farm_build_problems`]).
+pub fn token_problems(workflows: &[(String, String)]) -> Vec<String> {
+    let mut problems = Vec::new();
+    let mut docs = BTreeMap::new();
+    for (file, text) in workflows {
+        match yaml::load(text) {
+            Ok(doc) => {
+                docs.insert(file.as_str(), doc);
+            }
+            Err(why) if file != FILE => problems.push(format!("{file}: {why}")),
+            Err(_) => {}
+        }
+    }
+    for (file, doc) in docs.iter().filter(|(file, _)| **file != FILE) {
+        if *file == SIGNER_FILE {
+            problems.extend(signer_problems(file, doc));
+        }
+        if *file == FARM_BUILD_FILE {
+            problems.extend(farm_build_problems(file, doc));
+        }
+        let on = names(entry(doc, "on"));
         if !on
             .iter()
             .any(|e| e == "pull_request" || e == "pull_request_target" || e == "merge_group")
         {
             continue;
         }
-        if holds_token(entry(&doc, "permissions")) {
+        if holds_token(entry(doc, "permissions")) {
             problems.push(format!(
                 "{file}: holds `id-token: write` at its top level, for every job a pull request starts"
             ));
         }
-        for (name, job) in entry(&doc, "jobs").map_or(&[][..], entries) {
-            let pins_push = entry(job, "if")
-                .and_then(Node::as_str)
-                .is_some_and(|c| c.contains("github.event_name == 'push'"));
-            if holds_token(entry(job, "permissions")) && !pins_push {
+        for (name, job) in entry(doc, "jobs").map_or(&[][..], entries) {
+            let name = text_of_name(name);
+            let pinned = job_pins(job);
+            if holds_token(entry(job, "permissions")) && !pinned {
                 problems.push(format!(
-                    "{file}: job {} holds `id-token: write` on a pull request (its `if:` does not pin a push)",
-                    name.as_str().unwrap_or_default()
+                    "{file}: job {name} holds `id-token: write` on a pull request (its `if:` does not pin a push to main or a manual run)"
                 ));
             }
+            let mut inside = vec![(*file).to_owned()];
+            problems.extend(chain_problems(file, name, job, pinned, &docs, &mut inside));
         }
     }
     problems

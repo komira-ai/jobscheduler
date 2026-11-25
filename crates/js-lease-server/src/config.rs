@@ -12,7 +12,7 @@ use js_system_clock::{SystemClock, SystemMonotonic};
 use js_types::Monotonic;
 
 use js_registry::{OsSessions, SessionSource};
-use js_sched_placer::sizes::{DEFAULT_COLD_CPU_MILLIS, DEFAULT_COLD_MEMORY_BYTES};
+use js_sched_placer::sizes::{Curves, DEFAULT_COLD_CPU_MILLIS, DEFAULT_COLD_MEMORY_BYTES};
 
 use crate::agent_tokens::PoolTokens;
 use crate::alerts::{DEFAULT_ALERT_REPEAT, alert_sink};
@@ -35,14 +35,17 @@ mod estimate_feed;
 mod feed_retention;
 mod job_wall;
 mod listen;
+mod pack_limit;
 mod placement;
+mod placement_curves;
 mod private;
 mod resolve;
 mod retention;
 mod store;
 mod tokens;
 pub(crate) use agent_setup::AgentSetup;
-use agent_setup::{MorePool, agents, check_more};
+use agent_setup::{MorePool, agents, check_more, parse_cold_cpu_on, parse_cold_on};
+pub(crate) use agent_setup::{cold_cpu_entry, cold_entry};
 pub use cpu_slack::{CpuSlack, CpuSlackError};
 pub(crate) use dispatch::{
     DEFAULT_LEASE_SECS, DEFAULT_RECHECK_MS, DispatchTimes, MOST_LEASE_SECS, MOST_RECHECK_MS,
@@ -55,9 +58,11 @@ pub(crate) use job_wall::{MAX_JOB_WALL_MUST, parse_max_job_wall};
 pub(crate) use listen::{
     JobListen, MetricsListen, ReadyListen, clear_text, not_loopback, not_private,
 };
+pub use pack_limit::{PackLimit, PackLimitError};
 pub use placement::Placement;
 use placement::check_pool;
-pub(crate) use placement::{checked, placer, split};
+pub(crate) use placement::{ColdOn, LoadSetting, checked, placer, split};
+pub(crate) use placement_curves::parse as parse_curves;
 pub(crate) use private::{read_private, read_private_reason};
 pub(crate) use retention::{
     DEFAULT_JOB_ALLOCATION_RETENTION, DEFAULT_JOB_RETENTION, JOB_RETENTION_MUST,
@@ -185,6 +190,21 @@ pub struct Cli {
     /// the flag the engine's own default is used, which is 1.1.
     #[arg(long, value_parser = CpuSlack::parse)]
     pub cpu_slack: Option<CpuSlack>,
+    /// How full the placement engine packs a host before it places on the least full one,
+    /// as a fraction of the host's capacity from 0.0 to 1.0 with at most three decimals,
+    /// such as `0.5`. Without the flag the engine's own default is used, which is 0.5.
+    #[arg(long, value_parser = PackLimit::parse)]
+    pub pack_limit: Option<PackLimit>,
+    /// Whether the placement engine learns a CPU and a memory profile for each job class from
+    /// the series its runs recorded: `off` (the default) learns nothing; `shadow` learns and
+    /// logs one line per run it checks against its class's profile. Placement is the same in
+    /// both. Needs `--agent-pool-config`.
+    #[arg(
+        long,
+        default_value = "off",
+        value_parser = placement_curves::parse
+    )]
+    pub placement_curves: Curves,
     /// The CPU, in millicores from 250, a queued job that names no CPU books while neither its
     /// class, its fallback class nor its client has a run with a CPU sample, by default 22000 (22
     /// cores); above a quarter of the most cores a registered host has, that quarter. Needs `--agent-pool-config`.
@@ -203,6 +223,22 @@ pub struct Cli {
         value_parser = clap::value_parser!(u64).range(1_073_741_824..)
     )]
     pub cold_memory_bytes: u64,
+    /// The memory a queued job whose `os` constraint is `OS` books in place of
+    /// `--cold-memory-bytes`, while neither its class, its fallback class nor its client has a
+    /// fresh run: `OS=BYTES`, such as `macos=4294967296`, the name as jobs give it and the
+    /// bytes from 1073741824 (1 GiB); above the most bookable memory a registered host has,
+    /// that most. A job of any other `os`, or of none, books `--cold-memory-bytes`.
+    /// Repeatable, each `OS` once. Needs `--agent-pool-config`.
+    #[arg(long = "cold-memory-bytes-on", value_name = "OS=BYTES", value_parser = parse_cold_on)]
+    pub cold_memory_bytes_on: Vec<(String, u64)>,
+    /// The CPU a queued job whose `os` constraint is `OS` books in place of
+    /// `--cold-cpu-millis`, while neither its class, its fallback class nor its client has a run
+    /// with a CPU sample: `OS=MILLIS`, such as `macos=1000`, the name as jobs give it and the
+    /// millicores from 250 to 4294967295; above a quarter of the most cores a registered host
+    /// has, that quarter. A job of any other `os`, or of none, books `--cold-cpu-millis`.
+    /// Repeatable, each `OS` once. Needs `--agent-pool-config`.
+    #[arg(long = "cold-cpu-millis-on", value_name = "OS=MILLIS", value_parser = parse_cold_cpu_on)]
+    pub cold_cpu_millis_on: Vec<(String, u64)>,
     /// Deprecated, and does nothing: no lease is costed by an estimate any more. The flag
     /// is accepted with a warning. Needs `--agent-pool-config`; not allowed with
     /// `--usage-off`.
@@ -666,7 +702,11 @@ impl Config {
             server.agents.estimate_feed(),
             "server.estimate_feed",
         ));
-        let cpu_slack = server.agents.cpu_slack().unwrap_or_default();
+        let load = LoadSetting {
+            cpu_slack: server.agents.cpu_slack().unwrap_or_default(),
+            pack_limit: server.agents.pack_limit().unwrap_or_default(),
+        };
+        let curves = server.agents.curves();
         // The order the pool's Default platform lists its machine providers in; a pool with
         // no platform (a joined one) keeps the order of no configuration.
         let providers = plan
@@ -679,8 +719,13 @@ impl Config {
             mint_provider,
             hello_limit: server.agents.hello_limit(),
             require_host_credential: server.agents.require_host_credential(),
-            cpu_slack,
+            load,
             cold: server.agents.cold(),
+            cold_on: ColdOn {
+                memory: server.agents.cold_memory_on(),
+                cpu: server.agents.cold_cpu_on(),
+            },
+            curves,
             max_lease_wall: server.max_lease_wall,
             job_limits,
             jobs: server.agents.job_store(server.job_store_windows()),
@@ -880,7 +925,19 @@ impl Config {
     /// The CPU slack of the placement engine (`--cpu-slack`, or `server.cpu_slack`): the
     /// value given, or the engine's default, 1.1x.
     pub fn cpu_slack(&self) -> CpuSlack {
-        self.agents.cpu_slack
+        self.agents.load.cpu_slack
+    }
+
+    /// The pack limit of the placement engine (`--pack-limit`, or `server.pack_limit`): the
+    /// value given, or the engine's default, 0.5.
+    pub fn pack_limit(&self) -> PackLimit {
+        self.agents.load.pack_limit
+    }
+
+    /// Whether the placement engine learns profiles in shadow (`--placement-curves`, or
+    /// `server.placement_curves`): `off` unless set.
+    pub fn placement_curves(&self) -> Curves {
+        self.agents.curves
     }
 
     /// How long an ended job's record and result are kept after the job ends

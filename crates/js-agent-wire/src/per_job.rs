@@ -445,8 +445,8 @@ pub struct JobResult {
     /// keeps its meaning beside it. A server from before the field ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_failure: Option<String>,
-    /// What the job's control group used, when the agent could read it ([`JobUsage`]); absent
-    /// otherwise, and left out of the text. Never part of the result's acceptance: a value
+    /// What the job's control group (on a Mac, its processes) used, when the agent could read
+    /// it ([`JobUsage`]); absent otherwise, and left out of the text. Never part of the result's acceptance: a value
     /// that does not decode reads as absent and [`JobResult::validate`] does not look at it.
     /// A server from before the field ignores it, and a result from an agent from before it
     /// reads as absent here.
@@ -468,19 +468,35 @@ pub struct JobResult {
         deserialize_with = "log_sink::lenient"
     )]
     pub cpu_series: Option<CpuSeries>,
+    /// The job's non-file memory second by second over its run, as its host recorded it
+    /// ([`MemorySeries`]): sent by an agent started with `--memory-series` whose runtime samples
+    /// the job's memory, and absent otherwise, and left out of the text. Never part of the
+    /// result's acceptance: a value that does not decode, or is not a well-formed series, reads
+    /// as absent and leaves the rest of the result intact. A server from before the field
+    /// ignores it, and a result from an agent from before it reads as absent here.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "log_sink::lenient"
+    )]
+    pub memory_series: Option<MemorySeries>,
 }
 
 /// What one job used while it ran, as its host read it from the job's control group once it
-/// ended. The first two numbers are measured; an agent that cannot read one of them sends no
+/// ended (a Mac, which runs a job as processes of its own account, from samples of those
+/// processes and its supervisor's wait of the job). The first two numbers are measured; an agent that cannot read one of them sends no
 /// [`JobUsage`] at all, so a zero is a measured zero and never an unknown. The two that
 /// follow, the CPU peak and the swap peak are optional: each is absent for an agent from
 /// before it and when the agent could not read that counter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobUsage {
-    /// The most memory the job's group held at once, in bytes (`memory.peak`).
+    /// The most memory the job's group held at once, in bytes (`memory.peak`). On a Mac the
+    /// more of the most physical footprint the job's processes held together at one sample
+    /// and the largest resident set one of them reached.
     pub peak_memory_bytes: u64,
     /// The CPU time the job's group used, in microseconds (`usage_usec` of `cpu.stat`), the
-    /// unit of `cpu_usage_usec` in [`crate::LoadReport`].
+    /// unit of `cpu_usage_usec` in [`crate::LoadReport`]. On a Mac the user and system time
+    /// of the job's processes and of those they waited for.
     pub cpu_usage_usec: u64,
     /// The job group's CPU throttle counters when it ended ([`CpuThrottle`]). Absent for an
     /// agent from before the field and when the counters could not be read; a value that does
@@ -597,6 +613,84 @@ impl TryFrom<CpuSeriesText> for CpuSeries {
         if text.points.len() > CPU_SERIES_MAX_POINTS {
             return Err(format!(
                 "{} points, more than {CPU_SERIES_MAX_POINTS}",
+                text.points.len()
+            ));
+        }
+        Ok(Self {
+            granularity_secs: text.granularity_secs,
+            points: text.points,
+            run_usec: text.run_usec,
+            partial: text.partial,
+        })
+    }
+}
+
+/// The most points a [`MemorySeries`] holds.
+pub const MEMORY_SERIES_MAX_POINTS: usize = 128;
+
+/// The bytes of one unit of a [`MemorySeries`] point: one MiB.
+pub const MEMORY_SERIES_BYTES_PER_POINT: u64 = 1 << 20;
+
+/// A job's non-file memory over its run: at most [`MEMORY_SERIES_MAX_POINTS`] points, each the
+/// most the job's group held over `granularity_secs` seconds of its run, in order from its
+/// start, in MiB rounded up ([`MEMORY_SERIES_BYTES_PER_POINT`]).
+///
+/// Non-file memory is `memory.current - (file - shmem)` of the group's `memory.stat`: its
+/// anonymous and kernel memory and its shared memory and tmpfs pages, which the kernel cannot
+/// drop, and none of the page cache of the files it read, which it can. On a Mac, which runs a
+/// job as the processes of an account, it is their physical footprint together, which counts
+/// no file page either. The agent samples it about once a second while the job runs.
+///
+/// The series starts at one second a point. Each time a run outlasts its points, neighbouring
+/// points are combined in pairs by their maximum and the granularity doubles, as a
+/// [`CpuSeries`] doubles, so the largest point is the most any sample saw. A point holds the
+/// samples taken in its span; a span with no sample (a pause of the agent) holds the last
+/// sample before it, so a gap never reads as nothing held.
+///
+/// It decodes only when well formed: `granularity_secs` a power of two and at most
+/// [`MEMORY_SERIES_MAX_POINTS`] points; anything else fails to decode (and so, inside a
+/// [`JobResult`], reads as absent).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "MemorySeriesText")]
+pub struct MemorySeries {
+    /// The seconds each point covers: 1, 2, 4, 8 and so on.
+    pub granularity_secs: u32,
+    /// The most non-file memory of each span of the run, in MiB rounded up.
+    pub points: Vec<u32>,
+    /// The job's run as the agent measured it, in microseconds of its monotonic clock: from
+    /// the moment its container was made (or, for a `partial` series, from the agent's first
+    /// sample of it) to its last sample.
+    pub run_usec: u64,
+    /// Whether the series misses the start of the run: a run the agent adopted after a
+    /// restart of its own, whose series starts at its first sample after the restart. Left
+    /// out when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub partial: bool,
+}
+
+/// A [`MemorySeries`] as text, before it is checked.
+#[derive(Deserialize)]
+struct MemorySeriesText {
+    granularity_secs: u32,
+    points: Vec<u32>,
+    run_usec: u64,
+    #[serde(default)]
+    partial: bool,
+}
+
+impl TryFrom<MemorySeriesText> for MemorySeries {
+    type Error = String;
+
+    fn try_from(text: MemorySeriesText) -> Result<Self, Self::Error> {
+        if !text.granularity_secs.is_power_of_two() {
+            return Err(format!(
+                "granularity_secs {} is not a power of two",
+                text.granularity_secs
+            ));
+        }
+        if text.points.len() > MEMORY_SERIES_MAX_POINTS {
+            return Err(format!(
+                "{} points, more than {MEMORY_SERIES_MAX_POINTS}",
                 text.points.len()
             ));
         }

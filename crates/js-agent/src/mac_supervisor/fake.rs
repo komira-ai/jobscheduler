@@ -83,6 +83,7 @@ impl Supervised for FakeRun {
                 ended: ended_of(status),
                 job_pid: Some(self.ready.job_pid),
                 asid: None,
+                usage: None,
             };
             self.records.write_exit(&record)?;
             self.exit = Some(record);

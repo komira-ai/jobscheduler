@@ -4,12 +4,14 @@
 //! News is what the server has not heard and acts on: a run or a job newly listed, whatever
 //! its state, that runs now, ended, or holds a new result; a result not yet reported; a job id
 //! newly retired; a taint to report or its clear. A start the worker has only just taken,
-//! listed as `starting`, is news: the heartbeat that leaves for it is the one the server holds
-//! for the host's next placement, so a placement is delivered by it and not by the heartbeat
-//! after the interval. The server holds a beat that lists a start for a short bound only, so
-//! the start's `running` is not kept behind that hold. A start already listed as `starting`
-//! and unchanged is not news, and a run or a job that is gone from the listing is not either:
-//! it went because the server acknowledged it.
+//! listed as `starting`, is news: for a host whose starts ride on the heartbeat, the heartbeat
+//! that leaves for it is the one the server holds for the host's next placement, so a placement
+//! is delivered by it and not by the heartbeat after the interval. The server holds a beat that
+//! lists a start for a short bound only, so the start's `running` is not kept behind that hold;
+//! for a host that polls dispatch it answers that beat at once, unless such beats come closely
+//! one after another. A start already listed as `starting` and unchanged is not news, and a
+//! run or a job that is gone from the listing is not either: it went because the server
+//! acknowledged it.
 //!
 //! The bell is the sleeper's ([`Sleeper::bell`](crate::Sleeper::bell)); a worker given none
 //! rings nothing. Nothing is lost when the session is not waiting: the bell stays rung until

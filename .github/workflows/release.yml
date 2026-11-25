@@ -70,22 +70,23 @@
 # (js-agent-macos-pkg.yml: the installer package of js-agent, built and signed),
 # `beta-macos-first-install` (js-agent-macos-first-install.yml: the first install of that
 # package through hostkeeper's installer and the update hook, as root, after `beta-macos-pkg`)
-# and `beta-macos-probe` (macos-probe.yml) run on the hosted macOS runners, and `promote-macos`
-# adds the macOS archives (`*-aarch64-apple-darwin.tar.gz`) to the published release when all
-# four and `publish` succeeded. `pkg-upload` puts the signed package in the package repository
-# (`pkg/jobscheduler/<version>/`) and maps `js-agent` to `pkg/jobscheduler` in the repository's
-# descriptor (`hostkeeper-repository.json`, which a coordinator reads to find the package), where
-# hostkeeper-desired.yml finds it, as soon as
-# `beta-macos-pkg` has ended and `publish` succeeded: a package that failed to build or sign is
-# left out (hosts on macOS then keep their version) and the deploy goes on without it, so
-# `desired` waits for the package job's end but never for its success, and for no test of the
-# beta stage. `publish` leaves the archives out, and nothing else waits for the beta stage: not
-# the Linux assets, the .debs, the apt repository, gamma, the control-plane deploy or hostkeeper.
-# A pull request runs none of it. The tag is made first of those: `publish`
-# makes a draft release, uploads the files built, attested and verified, and publishes it in one
-# call, which creates the tag. A failed run leaves no tag. A re-run of a failed run continues the
-# same draft and adds what is missing; a published release is never changed, a draft that is
-# stale or differs is replaced (see `publish`).
+# and `beta-macos-probe` (macos-probe.yml) run on the hosted macOS runners (the build of the Apple
+# silicon archives in `artifacts` and of the package in `beta-macos-pkg` runs on the build farm's
+# Macs instead when the repository variable MACOS_ON_FARM is `true`, docs/mac-farm.md), and
+# `promote-macos` adds the macOS archives (`*-aarch64-apple-darwin.tar.gz`) to the published release
+# when all four and `publish` succeeded. `pkg-upload` puts the signed package in the package
+# repository (`pkg/jobscheduler/<version>/`) and maps `js-agent` to `pkg/jobscheduler` in the
+# repository's descriptor (`hostkeeper-repository.json`, which a coordinator reads to find the
+# package), where hostkeeper-desired.yml finds it, as soon as `beta-macos-pkg` has ended and
+# `publish` succeeded: a package that failed to build or sign is left out (hosts on macOS then keep
+# their version) and the deploy goes on without it, so `desired` waits for the package job's end but
+# never for its success, and for no test of the beta stage. `publish` leaves the archives out, and
+# nothing else waits for the beta stage: not the Linux assets, the .debs, the apt repository, gamma,
+# the control-plane deploy or hostkeeper. A pull request runs none of it. The tag is made first of
+# those: `publish` makes a draft release, uploads the files built, attested and verified, and
+# publishes it in one call, which creates the tag. A failed run leaves no tag. A re-run of a failed
+# run continues the same draft and adds what is missing; a published release is never changed, a
+# draft that is stale or differs is replaced (see `publish`).
 #
 # The apt repository, https://packages.komira.ai/apt (docs/release.md), after `publish`: the two
 # .debs go into the suite `testing` (the jobs `testing-apt-*`: read, index and write, in up to
@@ -123,9 +124,13 @@
 # repository variables CP_DEPLOY_ENDPOINT and CP_DEPLOY_TAILSCALE_TAGS are set (docs/release.md,
 # "The control-plane deploy").
 #
-# Permissions are per job. Only `artifacts`, `pkg-upload`, `gamma`, `cp-deploy` and the apt read
-# and write jobs hold id-token write here, and `artifacts` also attestations write, only because a called workflow
-# can hold no more than its calling job grants: in artifacts.yml only `attest` holds them. Only
+# Permissions are per job. Only `artifacts`, `beta-macos-pkg`, `pkg-upload`, `gamma`, `cp-deploy`
+# and the apt read and write jobs hold id-token write here, and `artifacts` also attestations
+# write, only because a called workflow can hold no more than its calling job grants: in
+# artifacts.yml only `attest` holds them to sign, and its call of macos-farm.yml holds id-token
+# write for the farm's network (a token that names macos-farm.yml, not artifacts.yml, as its
+# workflow). `beta-macos-pkg` grants id-token write for the same reason: js-agent-macos-pkg.yml's
+# call of macos-farm.yml holds it. Only
 # `publish` holds contents write. No job that holds a token or the signing key checks out or
 # compiles this repository's code (the one job that compiles any is docker-swarm-updater's deploy
 # job, which `cp-deploy` calls: it builds the updater's own client from the commit it is pinned
@@ -197,13 +202,14 @@ jobs:
   # The files of the release, built and signed by artifacts.yml (see the top of that file): the
   # signer of every attestation is that file, the one farm hosts trust, not this one. Its jobs run
   # in this run, at this commit, under this event: a push to main. A called workflow gets no more
-  # permission than its calling job grants, so this job grants what `attest` needs; each job of
-  # artifacts.yml then holds only its own (only `attest` holds the two writes).
+  # permission than its calling job grants, so this job grants what `attest` needs and what the
+  # call of macos-farm.yml needs; each job of artifacts.yml then holds only its own (only `attest`
+  # holds the two writes, and `macos-farm` the token alone).
   artifacts:
     needs: [plan]
-    # A push only: a pull request builds nothing here (its dry run is `plan`), since the build legs include
-    # arm64 and macOS runners, which no pull request starts.
-    if: ${{ !cancelled() && github.event_name == 'push' && needs.plan.outputs.release == 'true' }}
+    # A push to main only: a pull request builds nothing here (its dry run is `plan`), since the
+    # build legs include arm64 and macOS runners, which no pull request starts.
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}
     permissions:
       contents: read
       id-token: write
@@ -492,7 +498,9 @@ jobs:
   # fail, since the package goes into the deploy's targets; none waits for
   # `beta-macos-first-install`, which installs the unsigned package `beta-macos-pkg` built).
   # A push to main only; a pull request runs none of them. Each job calls a workflow that holds
-  # `contents: read` alone.
+  # `contents: read` alone, but `beta-macos-pkg`, whose called workflow has a job that calls
+  # macos-farm.yml (for the build of the package on the farm, when the repository variable
+  # MACOS_ON_FARM is `true`) and so holds `id-token: write` as well.
   # Only `beta-macos-pkg` is given secrets (`secrets: inherit`), since a called workflow sees
   # none of the caller's repository or organization secrets otherwise: in
   # js-agent-macos-pkg.yml only the `sign` job, which this call asks for (`sign: true`, on a
@@ -511,6 +519,7 @@ jobs:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}
     permissions:
       contents: read
+      id-token: write
     uses: ./.github/workflows/js-agent-macos-pkg.yml
     with:
       version: ${{ needs.plan.outputs.version }}

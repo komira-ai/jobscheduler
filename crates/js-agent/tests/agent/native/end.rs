@@ -1,11 +1,13 @@
 //! The end of a run's processes: the stop, its grace and the sweep at the poll, and the sweep
 //! that comes first in a removal.
 //!
-//! The runs here are the test user's own processes, and the account's uid is the test
+//! The runs here are the test user's own processes, and the first account's uid is the test
 //! user's, so no test sweeps the Mac's real process table by uid: that would end the test
 //! runner. The runtime sweeps a [`GroupTable`] instead, which shows only the process groups
 //! of the programs this rig's launcher started (each fake supervisor is its job, in a group of
-//! its own) and the sweeping process as root, and whose kill is a real `SIGKILL`. A
+//! its own), each as a process of the uid its launch was asked to run it as (on a Mac the job
+//! runs as its account, so a sweep of one account's uid never meets another account's run),
+//! and the sweeping process as root, and whose kill is a real `SIGKILL`. A
 //! [`Recording`] table on top of it adds processes that are not real (a detached process, one
 //! that never dies), and records every listing, every kill and, at each listing, what a probe
 //! saw of the run's outputs and account.
@@ -88,10 +90,15 @@ fn sweeper() -> Proc {
 
 /// A process of the account that is not real: the table ends it by taking it out.
 fn fake(pid: i32, name: &str) -> Proc {
+    owned(pid, me(), name)
+}
+
+/// A process of the uid `uid`, as the table shows it.
+fn owned(pid: i32, uid: u32, name: &str) -> Proc {
     Proc {
         pid,
-        uid: me(),
-        ruid: me(),
+        uid,
+        ruid: uid,
         asid: None,
         name: name.to_owned(),
     }
@@ -119,18 +126,18 @@ impl GroupTable {
         self.ended.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Every live pid of the launcher's groups.
-    fn pids(&self) -> Vec<i32> {
+    /// Every live pid of the launcher's groups, with the uid of its group's launch.
+    fn pids(&self) -> Vec<(i32, u32)> {
         let ended = self.ended().clone();
-        let mut pids: Vec<i32> = self
+        let mut pids: Vec<(i32, u32)> = self
             .launcher
-            .groups()
+            .owned_groups()
             .into_iter()
-            .flat_map(members)
-            .filter(|pid| !ended.contains(pid))
+            .flat_map(|(group, uid)| members(group).into_iter().map(move |pid| (pid, uid)))
+            .filter(|(pid, _)| !ended.contains(pid))
             .collect();
         pids.sort_unstable();
-        pids.dedup();
+        pids.dedup_by_key(|(pid, _)| *pid);
         pids
     }
 }
@@ -138,12 +145,16 @@ impl GroupTable {
 impl ProcessTable for GroupTable {
     fn list(&self, _with_asid: bool) -> io::Result<Vec<Proc>> {
         let mut procs = vec![sweeper()];
-        procs.extend(self.pids().into_iter().map(|pid| fake(pid, "job")));
+        procs.extend(
+            self.pids()
+                .into_iter()
+                .map(|(pid, uid)| owned(pid, uid, "job")),
+        );
         Ok(procs)
     }
 
     fn kill(&self, pid: i32) {
-        if !self.pids().contains(&pid) {
+        if !self.pids().iter().any(|(live, _)| *live == pid) {
             return;
         }
         if let Some(target) = Pid::from_raw(pid) {
@@ -537,4 +548,44 @@ fn a_failed_sweep_still_retires_the_account_and_reports_held_when_retire_does() 
     rt.remove(&id).unwrap();
     assert_eq!(table.listings(), 2, "the removal tried again swept again");
     assert!(!rig.accounts.records().contains(&name));
+}
+
+/// Two runs on two accounts of the pool, each shown in the table under its own account's uid:
+/// the first ends by itself and its removal sweeps its account, and the second, a program that
+/// runs until it is stopped, still runs after that removal; its own stop and removal then end
+/// it.
+///
+/// Catches: a sweep that ends a process of another account's run, which the lifecycle reads as
+/// that run's own exit (`failed`, not `killed`, when one step stops both runs and removes the
+/// first before the second's stop is sent).
+#[test]
+fn a_removal_sweeps_its_own_account_and_leaves_another_accounts_run_running() {
+    let mut rig = Rig::in_dir("sweep-own", 2, |_, _| {});
+    let first = rig.start("r1", "/usr/bin/true", &[]);
+    let second = rig.start("r2", "/bin/sleep", &["600"]);
+    let uids: Vec<u32> = rig
+        .launcher
+        .launched()
+        .iter()
+        .map(|launched| launched.uid)
+        .collect();
+    assert_eq!(
+        uids,
+        [me(), me() + 1],
+        "an account each, the first the test's uid"
+    );
+    let exited = Status::Exited(Exit {
+        code: 0,
+        oom_killed: false,
+    });
+    assert_eq!(rig.settle(&first), exited);
+    rig.rt.remove(&first).unwrap();
+    assert_eq!(
+        rig.rt.poll(&second).unwrap(),
+        Status::Running,
+        "the first run's sweep ended the second run"
+    );
+    rig.rt.stop(&second, std::time::Duration::ZERO).unwrap();
+    assert!(matches!(rig.settle(&second), Status::Exited(_)));
+    rig.rt.remove(&second).unwrap();
 }

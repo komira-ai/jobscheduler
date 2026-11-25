@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use js_agent_wire::limits::MAX_LOG_STREAM_LEN;
 use js_state::StoreTime;
-use js_types::CpuSeries;
+use js_types::{CpuSeries, MemorySeries};
 
 use crate::ids::JobId;
 use crate::record::{JobRecord, JobState, StartFailure};
@@ -144,6 +144,9 @@ pub struct JobResult {
     /// Its CPU second by second over its run, when the agent reported it; kept as reported
     /// beside `usage` and never part of it.
     pub cpu_series: Option<CpuSeries>,
+    /// Its non-file memory second by second over its run, when the agent reported it; kept as
+    /// reported beside `usage` and never part of it. Job sizing books a class from its peak.
+    pub memory_series: Option<MemorySeries>,
     /// With [`ResultReason::InputFailed`], the agent's code of the input that failed
     /// (`input-unreadable`, `host-port-lost`); `None` otherwise.
     pub input_failure: Option<String>,
@@ -166,6 +169,8 @@ pub struct Output {
     pub logs: Option<LogLengths>,
     /// Its CPU over its run, when the agent reported a well-formed series.
     pub cpu_series: Option<CpuSeries>,
+    /// Its non-file memory over its run, when the agent reported a well-formed series.
+    pub memory_series: Option<MemorySeries>,
 }
 
 /// How a job ended: what [`crate::JobStore::end_job`] records.
@@ -206,11 +211,13 @@ pub enum JobEnd {
     /// Its host's agent refused the start, or failed it while preparing, with its own code:
     /// it did not get to run. `failure` is [`StartFailure::InputUnavailable`] for
     /// `input-unavailable` and [`StartFailure::AgentRefused`] for any other code; `detail`,
-    /// the code, is kept as the job's [`JobRecord::start_failure_detail`].
+    /// the code, is kept as the job's [`JobRecord::start_failure_detail`]. The server ends a
+    /// job this way too, as [`StartFailure::AgentRefused`] with the wire's refusal code, when
+    /// the job's start breaks a rule of the wire and so could never be sent to a host.
     Refused {
         /// Why, as a client reads it.
         failure: StartFailure,
-        /// The agent's code.
+        /// The agent's code, or the wire's when the server refused the start.
         detail: String,
     },
     /// It ran, did not succeed, and an input its host provides failed while it ran: failed,
@@ -382,6 +389,7 @@ pub(crate) fn ended(
                 usage: output.usage,
                 logs: output.logs,
                 cpu_series: output.cpu_series,
+                memory_series: output.memory_series,
                 input_failure,
             }
         });
@@ -514,6 +522,7 @@ mod tests {
             }),
             logs: Some(LENGTHS),
             cpu_series: Some(series()),
+            memory_series: Some(memory_series()),
         }
     }
 
@@ -521,9 +530,13 @@ mod tests {
         CpuSeries::new(4, vec![8, 16], 6_000_000, false).expect("a series")
     }
 
+    fn memory_series() -> MemorySeries {
+        MemorySeries::new(2, vec![300, 400], 6_000_000, false).expect("a series")
+    }
+
     // Catches an end mapped to the wrong state or reason (a clean exit read as failed, a wall
     // limit read as an exit, a cancel without its reason), an exit code dropped or invented,
-    // the stream lengths or the CPU series the host reported dropped from the result, and a
+    // the stream lengths or the CPU or memory series the host reported dropped from the result, and a
     // result made for a job that was lost or failed to start.
     #[test]
     fn every_end_has_its_state_and_its_result() {
@@ -616,6 +629,7 @@ mod tests {
                         }),
                         logs: Some(LENGTHS),
                         cpu_series: Some(series()),
+                        memory_series: Some(memory_series()),
                         input_failure: None,
                     },
                     "{end:?}"

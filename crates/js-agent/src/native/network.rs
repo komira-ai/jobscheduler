@@ -7,12 +7,15 @@
 //!
 //! | Job level | `--native-network` value | Needs |
 //! |---|---|---|
-//! | `none` | `off` | nothing: the sandbox denies the network |
+//! | `none` | `off` | nothing: the sandbox allows loopback alone, or no network under the ceiling `off` |
 //! | `allow-list` | `on` | the pf anchor of the pool, checked before each job |
 //! | `open` | `open` | nothing: the sandbox allows the network, no filter rule |
 //!
-//! `loopback` is a ceiling with no job level of its own. A job above the ceiling is refused
-//! ([`admit`]), never run with less. A native body says its level as a [`NetworkLevel`]
+//! A job of the level `none` is admitted under every ceiling and gets loopback, as a Linux job
+//! of that level has its own, unless the ceiling is `off`: that ceiling leaves it no network at
+//! all (the profile's level is met with the ceiling, `profile::level`). `loopback` is a ceiling
+//! with no job level of its own. A job above the ceiling is refused ([`admit`]), never run with
+//! less. A native body says its level as a [`NetworkLevel`]
 //! (`off`, `on`, `open`; and `loopback`, which [`of_body`] keeps as a level of its own).
 //!
 //! The bundle's `seatbelt.network_max` is not a ceiling: it says what the bundle's tools
@@ -31,7 +34,7 @@ use crate::egress::NetworkRefusal;
 /// packet filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NativeNet {
-    /// The sandbox denies the network (`none`).
+    /// The job level `none`: loopback alone, or no network under the ceiling `off`.
     Off,
     /// The sandbox allows loopback only: what a native body that asks `loopback` gets. No job
     /// level maps to it.
@@ -70,10 +73,12 @@ impl NativeNet {
 /// ceiling is not above this one.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Ceiling {
-    /// `off`, the default: no job may use the network.
+    /// `off`, the default: no job may use the network, loopback included: a job of the level
+    /// `none` runs with the network denied.
     #[default]
     Off,
-    /// `loopback`: a job may use loopback, which every run of the Mac shares.
+    /// `loopback`: a job of the level `none`, and a native body that asks for `loopback`, use
+    /// loopback, which every run and every service of the Mac shares.
     Loopback,
     /// `on`: a job may use the network as the pool's pf anchor allows it; the agent needs the
     /// anchor in force (the `--native-pf-*` flags).
@@ -213,9 +218,9 @@ mod tests {
 
     const JOB_LEVELS: [JobNetwork; 3] = [JobNetwork::None, JobNetwork::AllowList, JobNetwork::Open];
 
-    /// Asserts that a job that asks for no network gets the sandbox with the network denied,
-    /// which needs no anchor. Catches `none` mapped to loopback or to a level that opens the
-    /// network.
+    /// Asserts that a job of the level `none` is `NativeNet::Off` (whose profile is loopback
+    /// alone, or no network under the ceiling `off`: `profile::level`), which needs no anchor.
+    /// Catches `none` mapped to a level that opens the network or asks for the pf anchor.
     #[test]
     fn none_maps_to_off() {
         assert_eq!(wanted(JobNetwork::None), NativeNet::Off);

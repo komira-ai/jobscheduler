@@ -45,7 +45,14 @@ struct State {
     credential: Option<HostCredential>,
     /// The agent is ending or draining: no poll is made any more.
     closed: bool,
+    /// The poller's lines not yet taken, at most `LINES_CAP`.
+    lines: Vec<String>,
+    /// The lines dropped since the last take because `LINES_CAP` were waiting.
+    lost: u64,
 }
+
+/// The most poller lines the cell keeps for the session to print; the rest are counted.
+const LINES_CAP: usize = 64;
 
 /// The meeting place of the heartbeat loop, which publishes a route at every welcome, and
 /// the poller, which waits for one. Every wait ends on an event (a welcome, the close); the
@@ -64,6 +71,8 @@ impl Cell {
             route: None,
             credential,
             closed: false,
+            lines: Vec::new(),
+            lost: 0,
         };
         Self {
             state: Mutex::new(state),
@@ -95,6 +104,48 @@ impl Cell {
         });
         drop(state);
         self.changed.notify_all();
+    }
+
+    /// Keeps the poller's `lines` for the session to print ([`Cell::take_lines`]); past 64
+    /// waiting they are counted and dropped.
+    pub fn note(&self, lines: Vec<String>) {
+        let mut state = self.lock();
+        for line in lines {
+            match state.lines.len() < LINES_CAP {
+                true => state.lines.push(line),
+                false => state.lost = state.lost.saturating_add(1),
+            }
+        }
+        drop(state);
+        self.changed.notify_all();
+    }
+
+    /// Waits until the poller has left a line, the cell is closed or `guard` passes, then
+    /// takes the lines as [`Cell::take_lines`] does: for a test to wait for the poller, with
+    /// a guard against a hang, not a time the caller expects.
+    pub fn wait_lines(&self, guard: Duration) -> Vec<String> {
+        let waiting = |state: &mut State| !state.closed && state.lines.is_empty();
+        let (state, _) = self
+            .changed
+            .wait_timeout_while(self.lock(), guard, waiting)
+            .unwrap_or_else(PoisonError::into_inner);
+        drop(state);
+        self.take_lines()
+    }
+
+    /// The poller's lines since the last call; a first line says how many were dropped when
+    /// more than 64 piled up.
+    pub fn take_lines(&self) -> Vec<String> {
+        let mut state = self.lock();
+        let mut lines = std::mem::take(&mut state.lines);
+        if state.lost > 0 {
+            lines.insert(
+                0,
+                format!("dispatch: {} log line(s) were dropped", state.lost),
+            );
+            state.lost = 0;
+        }
+        lines
     }
 
     /// Ends the poller: it takes no route from now on, and a pause ends at once.
