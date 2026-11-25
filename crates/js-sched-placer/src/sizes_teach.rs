@@ -16,11 +16,17 @@
 //! is left out of the read, which may have found it already freed: the passes teach it, once. A teaching whose read failed or stopped before its
 //! last page teaches none of what it read, as a start whose read failed does, and still teaches
 //! the runs the passes held.
+//!
+//! With the profiles in shadow, the runs the passes held are checked against their classes'
+//! profiles only when they are taught, so a teaching logs, after the ended jobs and before the
+//! held runs' checks, one line saying the checks start: the classes profiled, the ended jobs
+//! taught (none for a teaching not read through) and the seconds the teaching took.
 
 use std::collections::BTreeSet;
 
 use js_jobs::{AllocationStep, Booked, IdSource, JobRecord, JobStore, JobStoreError, MAX_PAGE};
 use js_state::ResumeToken;
+use js_types::sched::FarmTime;
 
 use super::Held;
 use crate::place::SchedPlacer;
@@ -40,6 +46,8 @@ pub struct Teaching {
     pages: usize,
     /// Whether the last page was read.
     read: bool,
+    /// The placer's farm time when the teaching was begun.
+    begun_at: FarmTime,
 }
 
 impl Teaching {
@@ -101,15 +109,18 @@ impl SchedPlacer {
             resume: None,
             pages: 0,
             read: false,
+            begun_at: self.now(),
         })
     }
 
     /// Teaches the history `teaching` (the module docs): when it was read through, each ended
     /// job it read that the passes do not follow, in the order the jobs ended; then each run the
     /// passes held since it was begun, in the order they freed them. From then on each pass
-    /// teaches what it frees. Answers how many of the ended jobs read taught a class a memory
-    /// sample ([`crate::sizes::JobSizes::observe`]); 0 for a teaching not read through, which
-    /// teaches the held runs alone.
+    /// teaches what it frees. With profiles kept (`Curves::Shadow`) it logs, between the two,
+    /// that the shadow checks start: the classes profiled, the ended jobs taught and the
+    /// seconds since the teaching was begun, on the placer's clock. Answers how many of the
+    /// ended jobs read taught a class a memory sample ([`crate::sizes::JobSizes::observe`]); 0
+    /// for a teaching not read through, which teaches the held runs alone.
     pub fn teach(&self, teaching: Teaching) -> usize {
         let mut engine = self.engine();
         let sizes = engine.sizes();
@@ -128,6 +139,8 @@ impl SchedPlacer {
             .iter()
             .filter(|(job, booked)| sizes.observe(job, *booked))
             .count();
+        let took = self.now().saturating_duration_since(teaching.begun_at);
+        sizes.log_checks_start(ended.len(), took);
         for (job, booked) in &held.runs {
             let _ = sizes.observe_logged(job, *booked, true);
         }
