@@ -56,10 +56,10 @@ impl BookedFrom {
 /// result, beside the booking; it decides nothing by it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StartSizing {
-    /// The name of the job's size class, the key its runs are learned under: the size class
+    /// The name of the job's size class, the key its runs are learned under: the history key
     /// its client sent, else its `size-class` label, else `run-` and a hash of its image name
-    /// and command. 1 to [`js_types::MAX_SIZE_CLASS_LEN`] bytes of printable ASCII, kept as
-    /// the client wrote it ([`StartSizing::checked`], [`js_types::SizeClassName`]); absent
+    /// and command. 1 to [`js_types::MAX_HISTORY_KEY_LEN`] bytes of printable ASCII, kept as
+    /// the client wrote it ([`StartSizing::checked`], [`js_types::HistoryKey`]); absent
     /// when the server names none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub class: Option<String>,
@@ -70,12 +70,12 @@ pub struct StartSizing {
 }
 
 impl StartSizing {
-    /// The sizing as the agent keeps it: a class that is no [`js_types::SizeClassName`] (a
+    /// The sizing as the agent keeps it: a class that is no [`js_types::HistoryKey`] (a
     /// line break, a control byte, a byte above ASCII, over 512 bytes) is left out, so that the
     /// journal line it goes into stays one line; the rest is kept.
     #[must_use]
     pub fn checked(self) -> Self {
-        let valid = |class: &String| js_types::SizeClassName::parse(class).is_ok();
+        let valid = |class: &String| js_types::HistoryKey::parse(class).is_ok();
         Self {
             class: self.class.filter(valid),
             ..self
@@ -135,7 +135,7 @@ mod tests {
             cpu: BookedFrom::Class,
             memory: BookedFrom::Cold,
         };
-        let long = "a".repeat(js_types::MAX_SIZE_CLASS_LEN + 1);
+        let long = "a".repeat(js_types::MAX_HISTORY_KEY_LEN + 1);
         for bad in ["two\nlines", "tab\there", "caf\u{e9}", "", long.as_str()] {
             assert_eq!(
                 sizing(bad).checked(),
@@ -147,7 +147,7 @@ mod tests {
                 "{bad:?}"
             );
         }
-        let edge = "a".repeat(js_types::MAX_SIZE_CLASS_LEN);
+        let edge = "a".repeat(js_types::MAX_HISTORY_KEY_LEN);
         for good in [
             "root.crates.js-sched.js-sched",
             "run-00ff00ff00ff00ff",

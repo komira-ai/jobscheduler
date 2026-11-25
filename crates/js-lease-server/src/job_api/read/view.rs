@@ -282,8 +282,8 @@ fn spec(id: &str, spec: &JobSpec, priority: i32) -> v1::JobSpec {
         host_ports: spec.host_ports.iter().map(host_port).collect(),
         layers: spec.layers.iter().map(layer).collect(),
         mounts: spec.mounts.iter().map(mount).collect(),
-        size_class: spec
-            .size_class
+        history_key: spec
+            .history_key
             .as_ref()
             .map_or_else(String::new, |class| class.as_str().to_owned()),
     }

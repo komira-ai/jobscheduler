@@ -78,7 +78,7 @@ pub(crate) fn spec() -> JobSpec {
         layers: Vec::new(),
         mounts: Vec::new(),
         host_ports: Vec::new(),
-        size_class: Default::default(),
+        history_key: Default::default(),
     }
 }
 

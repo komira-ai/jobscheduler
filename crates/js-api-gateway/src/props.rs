@@ -246,7 +246,7 @@ fn job_spec() -> impl Strategy<Value = JobSpec> {
         |(
             (job_id, image, command, args, env),
             (needs, constraints, wall_limit_seconds, network),
-            (ports, files, priority, labels, size_class),
+            (ports, files, priority, labels, history_key),
             (host_ports, layers, mounts),
         )| JobSpec {
             job_id,
@@ -274,7 +274,7 @@ fn job_spec() -> impl Strategy<Value = JobSpec> {
             host_ports,
             layers,
             mounts,
-            size_class,
+            history_key,
         },
     )
 }
@@ -352,7 +352,7 @@ fn word() -> impl Strategy<Value = String> {
             "args",
             "env",
             "labels",
-            "sizeClass",
+            "historyKey",
             "needs",
             "cpuMillis",
             "wallLimitSeconds",

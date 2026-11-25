@@ -194,7 +194,7 @@ pub(crate) fn history(job: Option<&JobRecord>, freed: &AllocationRecord) -> Vec<
 /// The history key of `job`'s row: the name of its class
 /// ([`js_sched_placer::sizes::class_name`]), the same for every run of what it builds and
 /// never its id or image digest. `None` for a name that is no profile key (a `size-class`
-/// label that starts with `.`, `_` or `-`, or a size class with a capital, a space, a slash, a
+/// label that starts with `.`, `_` or `-`, or a history key with a capital, a space, a slash, a
 /// colon or over 128 bytes): the row's `class` keeps it.
 fn profile_of(job: &JobRecord) -> Option<ProfileKey> {
     ProfileKey::parse(&js_sched_placer::sizes::class_name(job)).ok()

@@ -1,11 +1,11 @@
-//! The class a client names in the job's own field (`JobSpec::size_class`): it is the class
+//! The class a client names in the job's own field (`JobSpec::history_key`): it is the class
 //! as sent, ahead of the `size-class` label, in the class's name, its history key and the
 //! placement log, and a label of the same text is the same class.
 
 use std::collections::BTreeMap;
 
 use js_jobs::{JobId, JobSpec, NewJob};
-use js_types::{Labels, SizeClassName};
+use js_types::{HistoryKey, Labels};
 
 use super::fallback::{Lines, process_sink};
 use super::{
@@ -25,7 +25,7 @@ fn target(len: usize, pad: char) -> String {
 /// The spec of a job that books nothing and names `class` in its field.
 fn named(class: &str) -> JobSpec {
     let mut spec = spec_of(needs(0, 0), 600);
-    spec.size_class = Some(SizeClassName::parse(class).unwrap());
+    spec.history_key = Some(HistoryKey::parse(class).unwrap());
     spec
 }
 
@@ -40,7 +40,7 @@ fn the_field_is_the_class_as_sent_ahead_of_the_label() {
     let job = queued("field", named(&long));
     assert_eq!(class_name(&job), long);
     let mut both = of_class("label-class", needs(0, 0));
-    both.size_class = Some(SizeClassName::parse(&long).unwrap());
+    both.history_key = Some(HistoryKey::parse(&long).unwrap());
     let both = queued("both", both);
     assert_eq!(class_name(&both), long);
     assert_eq!(JobSizes::key_of(&both), JobSizes::key_of(&job));

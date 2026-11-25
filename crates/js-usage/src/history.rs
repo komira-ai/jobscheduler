@@ -274,7 +274,7 @@ pub struct EndedRow {
     /// before the field.
     pub cpu_series: Option<CpuSeries>,
     /// The name of the class the allocation's job was sized as, as the scheduler names it
-    /// (for a job, its size class as its client sent it: up to 512 bytes of printable ASCII,
+    /// (for a job, its history key as its client sent it: up to 512 bytes of printable ASCII,
     /// spaces, slashes and colons kept); `None` for an allocation of no job. Unlike
     /// [`Self::profile`] it is any text, so a class that is no profile key is kept too. Stored
     /// after the series and written only when present, so a row without one is the bytes it

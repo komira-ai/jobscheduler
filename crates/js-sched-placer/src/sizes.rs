@@ -4,9 +4,9 @@
 //!
 //! # The class
 //!
-//! A job's class is the size class its client sent in the job's own field
-//! ([`js_jobs::JobSpec::size_class`], up to 512 bytes of printable ASCII, such as a build
-//! target's full name and the kind of its step) when it names one, else the value of its label
+//! A job's class is the history key its client sent in the job's own field
+//! ([`js_jobs::JobSpec::history_key`], up to 512 bytes of printable ASCII, such as a build
+//! target's full path and the kind of its action) when it sends one, else the value of its label
 //! [`SIZE_CLASS_LABEL`] when it has one, each as it is, else its image's name (without the
 //! digest, so a rebuilt image keeps the history) and its command. The arguments are not part of
 //! it: a client's arguments name what one run works on (an action's digest, a lease, a deadline,
@@ -142,7 +142,7 @@ use js_sizing::{
     Summary,
 };
 use js_types::sched::FarmTime;
-use js_types::{HostId, SizeClassName};
+use js_types::{HistoryKey, HostId};
 use sha2::{Digest as _, Sha256};
 use tracing::{info, warn};
 
@@ -753,8 +753,8 @@ fn day_of_millis(millis: u64) -> Day {
     Day(u32::try_from(millis / DAY_MILLIS).unwrap_or(u32::MAX))
 }
 
-/// The name of `job`'s class, the history key a usage row records and the logs name: its
-/// size class as its client sent it, else its `size-class` label, each as it is, else `run-`
+/// The name of `job`'s class, the key its history is kept under, which a usage row records and
+/// the logs name: its history key as its client sent it, else its `size-class` label, each as it is, else `run-`
 /// and the 16 hex digits of the hash of its image name and command (never its image digest,
 /// its id or its args, which change with every build or run).
 #[must_use]
@@ -765,12 +765,12 @@ pub fn class_name(job: &JobRecord) -> String {
     }
 }
 
-/// The class `job`'s client named: its size class, else its `size-class` label.
+/// The class `job`'s client named: its history key, else its `size-class` label.
 fn named_class(job: &JobRecord) -> Option<&str> {
     let spec = &job.spec;
-    spec.size_class
+    spec.history_key
         .as_ref()
-        .map(SizeClassName::as_str)
+        .map(HistoryKey::as_str)
         .or_else(|| spec.labels.get(SIZE_CLASS_LABEL))
 }
 
@@ -791,7 +791,7 @@ fn key_under(job: &JobRecord, hash: u64) -> Key {
 }
 
 /// The first 8 bytes, big-endian, of the SHA-256 of `job`'s class text: `label`, NUL and the
-/// class its client named ([`named_class`]; a size class and a label of the same text are one
+/// class its client named ([`named_class`]; a history key and a label of the same text are one
 /// class), else `run`, NUL, its image name, NUL and its command joined by NUL.
 fn class_hash(job: &JobRecord) -> u64 {
     let spec = &job.spec;

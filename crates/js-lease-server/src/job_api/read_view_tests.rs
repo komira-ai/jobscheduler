@@ -141,7 +141,7 @@ fn full_shown() -> v1::JobSpec {
             container_port: Some(15432),
             protocol: v1::PortProtocol::Tcp.into(),
         }],
-        size_class: Default::default(),
+        history_key: Default::default(),
     }
 }
 

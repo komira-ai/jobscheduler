@@ -209,9 +209,9 @@ pub fn same_id_different_job_is_a_conflict<B: Backend>(backend: &B) {
             spec.files = crate::JobFiles::Contents(files);
         }),
         ("labels", |spec| spec.labels = js_types::Labels::default()),
-        ("size class", |spec| spec.size_class = None),
-        ("size class text", |spec| {
-            spec.size_class = js_types::SizeClassName::parse("root//crates/js-sched:js-sched").ok();
+        ("history key", |spec| spec.history_key = None),
+        ("history key text", |spec| {
+            spec.history_key = js_types::HistoryKey::parse("root//crates/js-sched:js-sched").ok();
         }),
         ("a layer", |spec| {
             spec.layers.pop();

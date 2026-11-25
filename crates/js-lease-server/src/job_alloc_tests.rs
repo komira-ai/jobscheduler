@@ -590,20 +590,20 @@ fn a_build_targets_class_names_its_history_row() {
     }
 }
 
-/// Asserts that the history row of a job that names a 200-byte size class (a build target's
+/// Asserts that the history row of a job that sends a 200-byte history key (a build target's
 /// full name with slashes, a colon, capitals and spaces) keeps that class byte for byte as its
 /// `class`, with no profile (the name is no profile key), and that a job labelled with a short
 /// class keeps it as both. Catches a class cut, lowered or dropped on its way to the usage
 /// store, so a booking's row could not say which target it was.
 #[test]
-fn a_size_class_is_kept_byte_for_byte_in_the_history_row() {
+fn a_history_key_is_kept_byte_for_byte_in_the_history_row() {
     let (_, store, jobs) = timed();
     let long = format!("Komira//{}json:json mojo_compile build", "src/".repeat(40));
     let long = format!("{long}{}", " x".repeat((200 - long.len()) / 2));
     let long = format!("{long}{}", "y".repeat(200 - long.len()));
     assert_eq!(long.len(), 200);
     let mut full = spec();
-    full.size_class = Some(js_types::SizeClassName::parse(&long).unwrap());
+    full.history_key = Some(js_types::HistoryKey::parse(&long).unwrap());
     let mut labelled = spec();
     let map = std::collections::BTreeMap::from([("size-class".to_owned(), "compile".to_owned())]);
     labelled.labels = js_types::Labels::from_caller(&map).unwrap();

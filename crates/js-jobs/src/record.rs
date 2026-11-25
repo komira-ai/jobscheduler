@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use js_agent_wire::{HostPort, JobMount, JobStartSpec, Layer};
 use js_state::StoreTime;
-use js_types::{ExecMode, HostId, ImageDigestRef, Labels, Resources, SizeClassName};
+use js_types::{ExecMode, HistoryKey, HostId, ImageDigestRef, Labels, Resources};
 use sha2::{Digest as _, Sha256};
 
 use crate::codec::Carried;
@@ -230,9 +230,9 @@ pub struct JobSpec {
     /// (`container_port` is never `None` in a job the job service recorded) and its protocol.
     /// Not [`Self::ports`], which go the other way, and not booked on the host.
     pub host_ports: Vec<HostPort>,
-    /// The name of the job's size class as its client sent it (`spec.size_class`); `None` when
+    /// The key of the job's usage history as its client sent it (`spec.history_key`); `None` when
     /// it sent none, and the `size-class` label or the image and command name the class.
-    pub size_class: Option<SizeClassName>,
+    pub history_key: Option<HistoryKey>,
 }
 
 impl JobSpec {
@@ -266,7 +266,7 @@ impl JobSpec {
             layers,
             mounts,
             host_ports,
-            size_class,
+            history_key,
         } = self;
         (*image == submitted.image)
             & (*command == submitted.command)
@@ -282,7 +282,7 @@ impl JobSpec {
             & (*layers == submitted.layers)
             & (*mounts == submitted.mounts)
             & (*host_ports == submitted.host_ports)
-            & (*size_class == submitted.size_class)
+            & (*history_key == submitted.history_key)
     }
 
     /// This spec with its files' contents replaced by their digests: what an ended job keeps.
