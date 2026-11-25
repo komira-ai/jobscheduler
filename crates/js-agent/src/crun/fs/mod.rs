@@ -32,6 +32,8 @@ mod assemble_tests;
 #[cfg(test)]
 mod fs_tests;
 #[cfg(test)]
+mod lookups_tests;
+#[cfg(test)]
 mod stamps_tests;
 #[cfg(test)]
 mod tests;
@@ -67,6 +69,9 @@ pub const MOUNTS_DIR: &str = "/run/js-agent/mounts";
 
 /// How long the lookup of one host path may take, from when it is asked.
 pub const LOOKUP_MS: u64 = 60_000;
+
+/// The threads of the lookups' pool (`js-lookups`).
+pub(crate) const LOOKUP_THREADS: usize = pool::THREADS;
 
 /// How long the check of a job's sources after it ended may take.
 pub const CHECK_MS: u64 = 5_000;
@@ -280,7 +285,7 @@ impl Fs {
             calls: settings.calls,
             paths: settings.paths,
             image_allow: settings.image_allow,
-            lookups: Pool::named(pool::THREADS, "js-lookups")?,
+            lookups: Pool::named(LOOKUP_THREADS, "js-lookups")?,
             pool: Pool::named(pool::THREADS, "js-paths")?,
             preps: BTreeMap::new(),
             now_ms: Arc::new(super::settings::system_now_ms),
