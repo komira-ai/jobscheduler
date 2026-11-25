@@ -1,6 +1,6 @@
 # Scheduling on CPU use over time
 
-Status: design for review. Built so far: the replay (`crates/js-cpu-replay`), step 1 (record) and step 2 (learn in shadow, `--placement-curves shadow`). Nothing else here is built. Companion to
+Status: design for review. Built so far: the replay (`crates/js-cpu-replay`), step 1 (record) and step 2 (learn in shadow, `--placement-curves shadow`); steps 3 and 4 are built as [placement-profiles-live.md](placement-profiles-live.md) revised them, behind `--placement-curves on`. Companion to
 [sizing.md](sizing.md) (how a class's CPU is booked) and [placement-by-load.md](placement-by-load.md) (the
 load rule and the time profiles designed for leases, never wired to jobs).
 
@@ -68,7 +68,9 @@ with no CPU limit). **MEASURED**, counted from the export or the farm's metrics,
    agent and everything else count (the owner's ruling). A job's series comes from its own cgroup.
 3. For each class the server keeps a decayed distribution of per-second CPU (section 4): a level, a start shape
    for ages 0 to 128 s in 2-second slots, and a tail. Memory is learned per class the same way (section 4).
-4. Today's median booking stays the flat ceiling beside it (decision 3).
+4. Today's median booking stays the flat ceiling beside it (decision 3). Reversed by
+   [placement-profiles-live.md](placement-profiles-live.md): under `--placement-curves on`, on a curve host, the
+   curve rule replaces the flat CPU checks.
 5. For each host the placer adds up, for every 2-second slot of the next 128 s, what its jobs are expected to use at
    their current ages.
 6. A job fits a host if, at every slot, that sum plus the job's own profile stays at or under cores x slack (slack
@@ -108,7 +110,8 @@ with no CPU limit). **MEASURED**, counted from the export or the farm's metrics,
    throughput within 2%. The machinery of steps 2 to 4 is worth weeks only at that size; if step 1's data bounds the
    prize below it, stop at step 1.
 3. **Keep today's flat ceiling beside the curve rule** (the curve rule only holds a job, never admits more).
-   Recommend yes. The overshoot comes with bursts of arrivals, so the curve rule's value is spreading their starts.
+   Recommend yes. Reversed by [placement-profiles-live.md](placement-profiles-live.md) section 7: on a curve host
+   the curve rule replaces the flat CPU checks, so it can admit more as well as fewer. The overshoot comes with bursts of arrivals, so the curve rule's value is spreading their starts.
 4. **Hold bound: 30 s**, enough to spread one burst of arrivals (section 6); a shorter bound gives it back to today's
    rule.
 5. **Gate on the replay, and stop if shape does not pay.** Recommend yes, with the pass mark of decision 2. On flat
@@ -229,7 +232,8 @@ Class and fallbacks are unchanged (READ: `sizes.rs` `key_under`: class, fallback
   adds 2.6% total time, so it is kept to the start.
 - **The tail:** the decayed mean after 128 s. A burst shorter than a point is averaged away, and the host reading
   (`B_h`) catches it.
-- **Today's median stays the flat ceiling** (decision 3). The distribution feeds only the curve rule.
+- **Today's median stays the flat ceiling** (decision 3, reversed by
+  [placement-profiles-live.md](placement-profiles-live.md)). The distribution feeds only the curve rule.
 
 **A wrong estimate.** It is never acted on against a running job. It overcommits its host until the jobs end, and it
 teaches the class: a run slowed by contention may only raise it, as today.
@@ -325,12 +329,21 @@ accepts. What corrects is the next placement:
   - the placer's sizing (mirrored from `JobSizes` over `js-sizing`) and its score (keys 1, 3, 5);
   - host readings every 5 s, as #1036 makes real (the arm "as deployed" has none, as before it);
   - the memory rule before #1035.
+- The arm `A median, curves packed, 1.1` replays the curve mode of `placement-profiles-live.md` on the shapes the replay
+  synthesises (the trace has each job's mean and peak, not its series): each class learns every successful run's
+  synthesised series in 2 s means, a job of a class that passes the four checks books its curve, a host takes a job
+  when the curves fit at every slot ahead (`Rule::Packed`), and a job that waited 30 s at the head is tested flat.
+  Its `booked/used` integrates the curve over each job's wall time. The residual of the design is the replay's
+  measured CPU beyond the jobs' charges. On the farm trace, which records no peaks, every series is flat.
 - **Contention** (ASSUMED): a host asked for more than its cores gives each job cores/demand of what it asks, and the
   job runs longer by that factor. Nothing is lost to cache or switching.
 - `js-cpu-replay shadow <log>` reads the job service's own log under `--placement-curves shadow` (step 2) and
   prints, per class of at least `--min-runs` check lines (default 16), the runs, the mean and peak error of the run
   against the profile, the curve's error as a share of the flat level's, whether the profile is shaped, and the CPU
-  error the curve removes against the flat line; `--hide-classes` numbers the classes instead of naming them. The
+  error the curve removes against the flat line, and the three that read the class's last 16 lines for the booking
+  mode (`CPU peak over %`, `CPU series usable %`, and `CPU curve`: `yes` when all four checks of
+  `placement-profiles-live.md` section 4 hold at the last line); `--hide-classes` numbers the classes instead of
+  naming them. The
   check line holds no booking, so the last figure is prediction error, not CPU a booking gives back. The log is read
   in time order: with several server tasks, sort their lines by timestamp first. A job logged by two servers (the
   overlap of a rolling update) counts once.
@@ -417,9 +430,10 @@ negative and fades; each release reads the other's results.
 - **Mac hosts:** the Mac runtime reports each run's usage and, with `--cpu-series`, its CPU series, from the samples of the
   run's processes (`docs/design/mac-runtime.md`, section 4), so Mac classes learn as Linux's do.
 - **Settings** (flags, each off or at today's value by default): agent `--cpu-series`, `--host-second-samples`;
-  server `--placement-curves off|shadow|on` (today the flag takes `off` and `shadow`; `on` comes with step 4), `--curve-hosts`, `--curve-horizon-seconds 128`, `--curve-slot-seconds
-  2`, `--curve-min-runs 8`, `--curve-fit-ratio 0.8`, `--curve-bias-fade-seconds 10`, `--curve-max-hold-seconds 30`
-  (held jobs are only ones not yet started); the CPU slack stays 1.1. Off equals today's behaviour exactly.
+  server `--placement-curves off|shadow|on`; the CPU slack stays 1.1. Off equals today's behaviour exactly. The
+  live mode's other settings are the file keys `server.curve_hosts` and `server.curve_max_wait_seconds`
+  ([placement-profiles-live.md](placement-profiles-live.md) section 5); the slot length, horizon, run minimum and fit
+  ratio are the profile's constants, not settings, and the readings residual is carried, not faded.
 
 ## 14. Considered and not chosen
 - **A reserve from the classes' spread:** 0.6% less total time than today's rule at the recorded speed, 6% more at 4x

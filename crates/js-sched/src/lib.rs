@@ -39,7 +39,9 @@
 //!   [`PlacementLoad::Off`], set through [`Scheduler::with_load_config`], is the rollback
 //!   switch to the booked rule; it is not a supported mode.
 //!   The rule, its settings and its counters are described in the `admission` module's
-//!   source;
+//!   source. A caller that packs CPU curves itself leaves the CPU of an operation on some
+//!   workers to itself ([`Scheduler::set_cpu_judged`]): no CPU test of the scheduler is made
+//!   there, and its refusals are [`RefusalKind::CpuCurve`];
 //! - iOS device leases ([`DEVICE_LEASES_PER_WORKER`]): a request with `ios.device=1`
 //!   goes only to a worker whose report lists a device satisfying every device
 //!   attribute of the request, books that one device by id until the lease ends, and

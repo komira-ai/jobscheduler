@@ -1,21 +1,25 @@
 //! The `[server]` table of the configuration file: its keys and the client token file.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use js_elastic::SchedulerId;
 use js_jobs::Retention;
-use js_sched_placer::sizes::{ColdCpuOn, ColdMemoryOn, ColdSize, Curves};
+use js_sched_placer::curves::{
+    CurveHosts, CurveSettings, DEFAULT_CURVE_MAX_WAIT, MAX_CURVE_MAX_WAIT_SECS,
+};
+use js_sched_placer::sizes::{ColdCpuOn, ColdMemoryOn, ColdSize};
+use js_types::HostId;
 
 use super::{Load, Section};
 use crate::config::{
-    BootMode, CpuSlack, DEFAULT_LEASE_SECS, DEFAULT_RECHECK_MS, DispatchTimes, FeedRetention,
-    JOB_FEED_RETENTION_MUST, JOB_RETENTION_MUST, JobListen, Limits, MAX_JOB_WALL_MUST,
-    MOST_LEASE_SECS, MOST_RECHECK_MS, MetricsListen, PackLimit, Placement, ReadyListen, TlsFiles,
-    Token, cold_cpu_entry, cold_entry, not_loopback, not_private, parse_curves,
-    parse_job_feed_retention, parse_job_retention, parse_max_job_wall, parse_token,
+    BootMode, CpuSlack, CurveSetting, DEFAULT_LEASE_SECS, DEFAULT_RECHECK_MS, DispatchTimes,
+    FeedRetention, JOB_FEED_RETENTION_MUST, JOB_RETENTION_MUST, JobListen, Limits,
+    MAX_JOB_WALL_MUST, MOST_LEASE_SECS, MOST_RECHECK_MS, MetricsListen, PackLimit, Placement,
+    ReadyListen, TlsFiles, Token, cold_cpu_entry, cold_entry, not_loopback, not_private,
+    parse_curves, parse_job_feed_retention, parse_job_retention, parse_max_job_wall, parse_token,
 };
 use crate::error::StartupError;
 use crate::job_store::JobStoreSetup;
@@ -56,6 +60,8 @@ const SERVER_KEYS: &[&str] = &[
     "cold_memory_bytes_on",
     "cold_cpu_millis_on",
     "placement_curves",
+    "curve_hosts",
+    "curve_max_wait_seconds",
     "usage_db",
     "usage_off",
     "profile_store_bytes",
@@ -160,7 +166,7 @@ pub(crate) struct AgentKeys {
     cold: ColdSize,
     cold_on: ColdMemoryOn,
     cold_cpu_on: ColdCpuOn,
-    curves: Curves,
+    curves: CurveSetting,
     job_listen: Option<SocketAddr>,
 }
 
@@ -220,10 +226,11 @@ impl AgentKeys {
         self.cold_cpu_on.clone()
     }
 
-    /// The placement engine's curves mode the file gives (`placement_curves`); `off` when
-    /// the key is absent.
-    pub(crate) fn curves(&self) -> Curves {
-        self.curves
+    /// The placement engine's curves mode the file gives (`placement_curves`; `off` when
+    /// the key is absent) with its hosts and wait bound (`curve_hosts` and
+    /// `curve_max_wait_seconds`).
+    pub(crate) fn curves(&self) -> CurveSetting {
+        self.curves.clone()
     }
 
     /// Where the job service is served, when the file turns it on.
@@ -550,13 +557,29 @@ fn read_pack_limit(s: &mut Section) -> Result<Option<PackLimit>, StartupError> {
     Ok(Some(limit))
 }
 
-/// `placement_curves`, the key of `--placement-curves`: `"off"` or `"shadow"`, read as the
-/// flag reads its text; absent, `off`.
-fn read_curves(s: &mut Section) -> Result<Curves, StartupError> {
+/// `placement_curves`, the key of `--placement-curves`: `"off"`, `"shadow"` or `"on"`, read as
+/// the flag reads its text; absent, `off`. With it `curve_hosts`, an array of host ids (absent:
+/// every host), and `curve_max_wait_seconds`, a whole number from 0 to 300 (absent: 30), which
+/// have no flags, are read in every mode and act only under `on`.
+fn read_curves(s: &mut Section) -> Result<CurveSetting, StartupError> {
     let text = s.string("placement_curves")?;
     let read = text.as_deref().map(parse_curves).transpose();
-    let curves = read.map_err(|said| s.fail("placement_curves", &said))?;
-    Ok(curves.unwrap_or_default())
+    let mode = read.map_err(|said| s.fail("placement_curves", &said))?;
+    let mut named = BTreeSet::new();
+    for name in s.names("curve_hosts")?.unwrap_or_default() {
+        let id = HostId::new(&name).map_err(|err| s.fail("curve_hosts", &err.to_string()))?;
+        named.insert(id);
+    }
+    let most = MAX_CURVE_MAX_WAIT_SECS;
+    let default = DEFAULT_CURVE_MAX_WAIT.as_secs();
+    let wait = s.bounded("curve_max_wait_seconds", 0, most, default)?;
+    Ok(CurveSetting {
+        mode: mode.unwrap_or_default(),
+        settings: CurveSettings {
+            hosts: CurveHosts::new(named),
+            max_wait: Duration::from_secs(wait),
+        },
+    })
 }
 
 /// The least `cold_cpu_millis`: a quarter core, the least CPU the estimator books.

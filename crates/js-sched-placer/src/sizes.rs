@@ -123,9 +123,14 @@
 //!
 //! # Profiles
 //!
-//! With [`Curves::Shadow`] each class also learns a CPU and a memory profile of its runs' recorded
-//! series ([`js_sizing::Profile`]), and a run freed while serving logs how its class's profile
-//! predicted it. The profiles are read by nothing that books a job.
+//! With [`Curves::Shadow`] or [`Curves::On`] each class also learns a CPU and a memory profile of
+//! its runs' recorded series ([`js_sizing::Profile`]), and a run freed while serving logs how
+//! its class's profile predicted it. The sizes above are the same in all three modes: a
+//! profile never changes what a job books, which is what its allocation records and its agent
+//! weighs. Under [`Curves::On`] the placer reads a class's profile once the class passes its
+//! four checks ([`JobSizes::curve_of`]) and tests a job that leaves its CPU at 0 against the
+//! hosts by the class's CPU over the job's age, not by its sized number alone
+//! (`docs/design/placement-profiles-live.md`); a job that names its CPU books it flat.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -149,6 +154,9 @@ pub use js_types::{SIZE_CLASS_LABEL, SIZE_FALLBACK_LABEL};
 pub use profile::Curves;
 pub use teach::Teaching;
 
+#[cfg(test)]
+#[path = "sizes_curve_rig.rs"]
+pub(crate) mod curve_rig;
 #[path = "sizes_profile.rs"]
 mod profile;
 #[path = "sizes_teach.rs"]
@@ -292,9 +300,12 @@ pub struct JobSizes {
     /// What a teaching of the ended jobs begun and not taught ([`Teaching`]) holds; `None`
     /// otherwise, when a freed job is taught at once.
     held: Option<Held>,
-    /// The CPU and memory profiles learned in shadow, a pair for each class; `None` with
-    /// [`Curves::Off`]. Nothing the sizes book reads them.
+    /// The CPU and memory profiles learned in shadow and on, a pair for each class; `None` with
+    /// [`Curves::Off`]. Nothing the sizes book reads them; [`JobSizes::curve_of`] reads them
+    /// under [`Curves::On`].
     profiles: Option<profile::Profiles>,
+    /// The mode the profiles are kept for: what [`JobSizes::curve_of`] answers by.
+    curves: Curves,
 }
 
 /// The freed jobs a teaching of the ended jobs holds until it is taught ([`Teaching`]).
@@ -345,12 +356,13 @@ impl JobSizes {
     }
 
     /// This history with the profiles `curves` names: [`Curves::Off`] keeps none,
-    /// [`Curves::Shadow`] learns a CPU and a memory profile for each class from every run it
-    /// observes, and logs a line for each run freed while serving. The sizes it books are the
-    /// same in both.
+    /// [`Curves::Shadow`] and [`Curves::On`] learn a CPU and a memory profile for each class
+    /// from every run they observe, and log a line for each run freed while serving. The sizes
+    /// it books ([`JobSizes::sized`]) are the same in all three.
     #[must_use]
     pub fn with_curves(mut self, curves: Curves) -> Self {
-        self.profiles = (curves == Curves::Shadow).then(profile::Profiles::default);
+        self.profiles = (curves != Curves::Off).then(profile::Profiles::default);
+        self.curves = curves;
         self
     }
 
@@ -813,7 +825,7 @@ fn text_hash(text: &str) -> u64 {
 }
 
 /// `duration` in whole milliseconds, saturating.
-fn millis(duration: Duration) -> u64 {
+pub(crate) fn millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 

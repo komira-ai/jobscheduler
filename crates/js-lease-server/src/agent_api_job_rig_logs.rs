@@ -54,6 +54,7 @@ pub(crate) fn logging_over(
         tables: tables.map(|rig| (Arc::clone(&rig.store), Arc::clone(&rig.jobs))),
         store_clock: Some(Arc::default()),
         whole: None,
+        ..Extra::default()
     };
     let kept = (JobLimits::default(), Retention::DEFAULT);
     let rig = rig_on(name, (true, false), kept, (clock, shared.clone()), extra);

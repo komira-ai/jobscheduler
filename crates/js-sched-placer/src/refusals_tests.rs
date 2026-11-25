@@ -438,3 +438,21 @@ fn a_measured_hosts_refusal_line_carries_the_measurement_it_used() {
         "{logged}"
     );
 }
+
+/// Behaviour: a refusal of the kind a caller reports for a worker whose CPU it judges
+/// (`cpu-curve`) is spelled in millicores as a CPU refusal is, with no reading note: the
+/// figures read `counted 9000m + new 2000m > limit 10000m` and nothing else.
+#[test]
+fn a_cpu_curve_refusal_is_spelled_in_millicores() {
+    let refusal = Refusal {
+        kind: RefusalKind::CpuCurve,
+        counted: 9_000,
+        new: 2_000,
+        limit: 10_000,
+        measured_cpu_millis: None,
+    };
+    assert_eq!(
+        super::figures(&refusal),
+        "counted 9000m + new 2000m > limit 10000m"
+    );
+}

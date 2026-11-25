@@ -350,7 +350,7 @@ mod tests {
             let load = worker(released);
             let left = load.left(at, &capacity, &cfg);
             let cost = lease_cost(6_000, cold);
-            load.admits(&cost, None, &left, &capacity, at, &cfg)
+            load.admits(&cost, None, &left, &capacity, (at, false), &cfg)
                 .is_ok()
                 .then_some(instant)
         })

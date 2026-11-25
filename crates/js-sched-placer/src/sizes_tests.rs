@@ -114,7 +114,7 @@ pub(super) fn ran(
 }
 
 /// [`ran`] with a wall time of `wall` instead of ten seconds.
-fn ran_for(
+pub(super) fn ran_for(
     tables: &Tables,
     (id, client): (&str, Option<&str>),
     spec: JobSpec,

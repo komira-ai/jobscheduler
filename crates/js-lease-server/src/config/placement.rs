@@ -11,7 +11,7 @@ use js_registry::PoolConfig;
 use js_sched::{Backfill, MemoryPercent};
 use js_sched_placer::sizes::{ColdCpuOn, ColdMemoryOn, ColdSize, Curves};
 
-use super::{CpuSlack, PackLimit};
+use super::{CpuSlack, CurveSetting, PackLimit};
 use crate::clock::SharedClock;
 use crate::error::StartupError;
 use crate::file::Registering;
@@ -107,22 +107,23 @@ impl LoadSetting {
 /// the pack limit), the share
 /// `memory` of each host's memory, the `cold` size of a job class with no estimate (and
 /// `cold_on`, the cold memory and the cold CPU of the jobs of each operating system the server
-/// names), the `curves` mode (`--placement-curves`), and backfill: work may backfill a host a
+/// names), the `curves` mode (`--placement-curves`) and its hosts and wait bound, and backfill: work may backfill a host a
 /// whole-node request has set aside, up to `max_lease_wall` (`server.max_lease_wall`; none: any
 /// wall time). `clock` is the registry's.
 pub(crate) fn placer(
     max_lease_wall: Option<Duration>,
     load: LoadSetting,
-    (memory, cold, curves): (MemoryPercent, ColdSize, Curves),
+    (memory, cold, curves): (MemoryPercent, ColdSize, CurveSetting),
     cold_on: ColdOn,
     clock: &SharedClock,
 ) -> Arc<SchedPlacer> {
-    let settings = settings_of(max_lease_wall, load, (memory, cold, curves));
+    let settings = settings_of(max_lease_wall, load, (memory, cold, curves.mode));
     let placer = SchedPlacer::new(settings, clock.clone());
     Arc::new(
         placer
             .with_cold_memory_on(cold_on.memory)
-            .with_cold_cpu_on(cold_on.cpu),
+            .with_cold_cpu_on(cold_on.cpu)
+            .with_curve_settings(curves.settings),
     )
 }
 
@@ -230,6 +231,43 @@ mod tests {
             assert_eq!(made.curves, curves);
             assert_eq!(made.cold, cold);
             assert_eq!(made.memory, memory);
+        }
+    }
+
+    /// Asserts that the placer the server builds reports a curve view (as `/metrics` reads
+    /// it) exactly when its mode is `on`, with the hosts and the wait bound given, and none
+    /// under `off` and `shadow`, whatever hosts and wait bound are given. Catches a mode that
+    /// does not reach the placer and curve settings that turn the mode on by themselves.
+    #[test]
+    fn the_placer_reports_a_curve_view_only_at_on() {
+        let clock = SharedClock::new(js_types::ManualClock::new(
+            js_types::Timestamp::from_millis(0),
+        ));
+        let (memory, cold) = (MemoryPercent::clamped(100), ColdSize::default());
+        let named = js_sched_placer::curves::CurveSettings {
+            hosts: js_sched_placer::curves::CurveHosts::new(
+                [js_types::HostId::new("h-1").unwrap()].into(),
+            ),
+            max_wait: Duration::from_secs(0),
+        };
+        for (mode, viewed) in [
+            (Curves::Off, false),
+            (Curves::Shadow, false),
+            (Curves::On, true),
+        ] {
+            let curves = CurveSetting {
+                mode,
+                settings: named.clone(),
+            };
+            let load = LoadSetting::default();
+            let made = placer(
+                None,
+                load,
+                (memory, cold, curves),
+                ColdOn::default(),
+                &clock,
+            );
+            assert_eq!(made.curve_view().is_some(), viewed, "{mode:?}");
         }
     }
 

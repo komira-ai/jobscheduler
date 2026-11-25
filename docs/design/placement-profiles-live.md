@@ -1,6 +1,10 @@
 # Booking from the learned profiles: the live mode after `--placement-curves shadow`
 
-Status: design for review. Nothing here is built. It follows [cpu-over-time.md](cpu-over-time.md), whose steps 1
+Status: built behind `--placement-curves on`, off by default: the four checks, the curve booking, the packing rule
+on the curve hosts, the pack limit's fullest slot, the wait bound, `server.curve_hosts`,
+`server.curve_max_wait_seconds`, the metrics of section 5, the `shadow` table's three columns and a curve arm of the
+replay (on synthesised lives: the trace still carries no series). Not built: the decide-in-shadow line of section 4.
+The code references below are to the commit the design was written at. It follows [cpu-over-time.md](cpu-over-time.md), whose steps 1
 (record) and 2 (learn in shadow, komira-ai/jobscheduler#1057) are built, and fixes what its steps 3 (decide in
 shadow) and 4 (enforce) book, gate and roll out. Companions: [sizing.md](sizing.md) (how a class is booked today)
 and [placement-by-load.md](placement-by-load.md) (the load predicate and the pack limit).

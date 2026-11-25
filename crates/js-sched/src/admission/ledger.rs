@@ -658,7 +658,8 @@ impl WorkerLoad {
     /// On a worker charged by measurement, when the new lease or a lease on the worker is
     /// charged over time, the lease must fit at every slot of the horizon
     /// ([`horizon::refusal`]); otherwise at the one flat figure. `profile` is how the new
-    /// lease is charged over time, if it is. Then the flat-memory guard
+    /// lease is charged over time, if it is. With `cpu_judged` ([`crate::Scheduler::set_cpu_judged`])
+    /// no CPU inequality is tested, at one figure or at any slot. Then the flat-memory guard
     /// ([`horizon::flat_memory_refusal`]), which every lease that adds memory passes on
     /// either path. Only actions come here: a whole-machine lease is not judged, and an
     /// action at the whole host's memory is placed on a worker with no lease, whose flat
@@ -669,18 +670,16 @@ impl WorkerLoad {
         profile: Option<&Profile>,
         left: &Left,
         capacity: &Resources,
-        now: FarmTime,
+        (now, cpu_judged): (FarmTime, bool),
         cfg: &LoadConfig,
     ) -> Result<(), Refusal> {
         if !left.fallback && (self.totals.has_timed() || profile.is_some_and(Profile::timed)) {
-            if let Some(refusal) =
-                horizon::refusal(&self.totals, cost, profile, left, capacity, cfg)
-            {
-                return Err(refusal);
-            }
+            let over =
+                horizon::refusal(&self.totals, cost, profile, left, capacity, cfg, cpu_judged);
+            over.map_or(Ok(()), Err)?;
         } else {
             let (new, limit) = (left.charged_cpu(cost), cfg.cpu_limit(capacity));
-            if left.cpu.saturating_add(new) > limit {
+            if !cpu_judged && left.cpu.saturating_add(new) > limit {
                 let refusal = Refusal::new(RefusalKind::Cpu, left.cpu, new, limit);
                 return Err(refusal.measured((!left.fallback).then_some(left.measured)));
             }

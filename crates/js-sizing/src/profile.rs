@@ -25,6 +25,9 @@ pub const MIN_SLOT_RUNS: usize = 4;
 pub const CHECK_RUNS: usize = 16;
 /// A class is shaped when the curve's error is at most this per mille of flat's.
 pub const FIT_PERMILLE: u64 = 800;
+/// A run overran its predicted peak when its peak is more than this per mille of it
+/// (1250: more than 25% above).
+pub const OVERRUN_PERMILLE: u64 = 1250;
 /// The histogram's log-spaced buckets.
 pub const BUCKETS: usize = 64;
 
@@ -108,6 +111,9 @@ pub struct Checked {
     pub curve_error: Option<u64>,
     /// The flat level's error in unit-seconds; `None` when not scored.
     pub flat_error: Option<u64>,
+    /// Whether the run's peak overran its predicted peak (see [`OVERRUN_PERMILLE`]); `None`
+    /// when the run was not scored, `Some(false)` for a scored run with no predicted peak.
+    pub overran: Option<bool>,
     /// The self-check window after the call.
     pub window: Window,
     /// Whether the profile is shaped after the call.
@@ -187,7 +193,8 @@ struct Parsed {
 pub struct Profile {
     unit: Unit,
     runs: VecDeque<Kept>,
-    scores: VecDeque<(u64, u64)>,
+    /// Each scored run's curve error, flat error and whether it overran its predicted peak.
+    scores: VecDeque<(u64, u64, bool)>,
 }
 
 impl Profile {
@@ -214,6 +221,7 @@ impl Profile {
             predicted_peak: None,
             curve_error: None,
             flat_error: None,
+            overran: None,
             window: self.window(),
             shaped: self.shaped(),
         };
@@ -227,13 +235,16 @@ impl Profile {
         out.actual_mean = ratio(parsed.kept.total(), u128::from(parsed.secs)).unwrap_or(0);
         let scored = self.runs.len() >= MIN_RUNS;
         if let Some((curve, flat, peak)) = scored.then(|| self.score(&parsed, &weights, level)) {
-            self.scores.push_back((curve, flat));
+            let overran = peak
+                .is_some_and(|p| u64::from(parsed.peak) * 1000 > u64::from(p) * OVERRUN_PERMILLE);
+            self.scores.push_back((curve, flat, overran));
             if self.scores.len() > CHECK_RUNS {
                 self.scores.pop_front();
             }
             out.curve_error = Some(curve);
             out.flat_error = Some(flat);
             out.predicted_peak = peak;
+            out.overran = Some(overran);
         }
         let raises = level.is_some_and(|l| out.actual_mean > l);
         out.learned = clean | raises;
@@ -320,7 +331,7 @@ impl Profile {
 
     /// The sum of the last [`CHECK_RUNS`] scored runs' errors.
     pub fn window(&self) -> Window {
-        let sum = |pick: fn(&(u64, u64)) -> u64| {
+        let sum = |pick: fn(&(u64, u64, bool)) -> u64| {
             self.scores
                 .iter()
                 .fold(0u64, |a, s| a.saturating_add(pick(s)))
@@ -330,6 +341,17 @@ impl Profile {
             curve_error: sum(|s| s.0),
             flat_error: sum(|s| s.1),
         }
+    }
+
+    /// Scored runs in the window that overran their predicted peak: the peak was more than
+    /// [`OVERRUN_PERMILLE`] per mille of it.
+    pub fn overruns(&self) -> usize {
+        self.scores.iter().filter(|s| s.2).count()
+    }
+
+    /// Kept runs that lasted past 128 s: the runs the tail is a mean of.
+    pub fn tail_runs(&self) -> usize {
+        self.runs.iter().filter(|r| r.tail_secs > 0).count()
     }
 
     /// Whether the class has a shape: it keeps [`MIN_RUNS`] runs, the window is full and
