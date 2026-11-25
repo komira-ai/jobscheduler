@@ -168,8 +168,16 @@ pub(crate) fn words(run: &str) -> Vec<String> {
 
 /// The value of `--flag` in `words`.
 fn flag<'a>(words: &'a [String], flag: &str) -> Option<&'a str> {
-    let at = words.iter().position(|w| w == flag)?;
-    words.get(at + 1).map(String::as_str)
+    flags(words, flag).into_iter().next()
+}
+
+/// Every value of `--flag` in `words`, in order.
+fn flags<'a>(words: &'a [String], flag: &str) -> Vec<&'a str> {
+    words
+        .windows(2)
+        .filter(|w| w[0] == flag)
+        .map(|w| w[1].as_str())
+        .collect()
 }
 
 /// The variable names `$NAME` and `${NAME}` in `text`.
@@ -289,15 +297,22 @@ fn fetch_site(steps: &[Step], i: usize) -> Result<String, String> {
         }
     }
     let words = words(run);
-    let url = flag(&words, "--url").ok_or("the fetch has no --url")?;
+    let urls = flags(&words, "--url");
+    if urls.is_empty() {
+        return Err("the fetch has no --url".to_owned());
+    }
     let sha = flag(&words, "--sha256").ok_or("the fetch has no --sha256")?;
     let sha_var = one_variable(sha)
         .ok_or_else(|| format!("the fetch's --sha256 {sha:?} is not one variable"))?;
-    let versions = variables(url);
-    if versions.is_empty() {
-        return Err(format!(
-            "the fetch's --url {url:?} names no version variable"
-        ));
+    let mut versions = BTreeSet::new();
+    for url in urls {
+        let named = variables(url);
+        if named.is_empty() {
+            return Err(format!(
+                "the fetch's --url {url:?} names no version variable"
+            ));
+        }
+        versions.extend(named);
     }
     let cache = flag(&words, "--cache").ok_or("the fetch has no --cache")?;
     let rest = cache_rest(cache)
