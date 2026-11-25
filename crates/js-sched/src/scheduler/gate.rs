@@ -23,6 +23,9 @@ pub(super) struct Gate {
     /// The workers an operation may be placed on, for an operation held to some
     /// ([`Scheduler::place_only_on`]).
     only: BTreeMap<OperationId, BTreeSet<WorkerId>>,
+    /// The workers whose CPU the caller judges for an operation, each with the booked CPU
+    /// the pack limit reads there ([`Scheduler::set_cpu_judged`]).
+    judged: BTreeMap<OperationId, BTreeMap<WorkerId, u64>>,
 }
 
 /// The holds of one placement round.
@@ -69,6 +72,11 @@ impl Gate {
         self.only.get(&operation)
     }
 
+    /// The workers whose CPU the caller judges for `operation`, with their booked CPU.
+    pub(super) fn judged(&self, operation: OperationId) -> Option<&BTreeMap<WorkerId, u64>> {
+        self.judged.get(&operation)
+    }
+
     /// The end of a round: its holds are the ones the next round keeps.
     pub(super) fn end_round(&mut self, holds: Holds) {
         self.last = holds.by_operation;
@@ -79,6 +87,7 @@ impl Gate {
     pub(super) fn forget(&mut self, operation: OperationId) {
         self.last.remove(&operation);
         self.only.remove(&operation);
+        self.judged.remove(&operation);
     }
 }
 
@@ -137,6 +146,22 @@ impl Scheduler {
         self.backfill.only.insert(operation, workers);
     }
 
+    /// Leaves the CPU of `operation` on `workers` to the caller, each with the CPU booked
+    /// there, in millicores, with the operation's lease added (the caller's own sum, over
+    /// the lease's curve and the leases there). From the next placement round, on a worker
+    /// named, none of the scheduler's CPU tests is made of the operation: not the load
+    /// predicate's CPU inequality, at minute 0 or over the horizon, and, where admission is
+    /// not by load, not the sum of booked CPU; the pack limit reads the CPU figure given in
+    /// place of the worker's booked sum. Memory, the cold cap, GPUs, VM slots, the capacity
+    /// bound of a single request and every other check stay as they are, and the caller
+    /// reports its own CPU refusals as [`crate::RefusalKind::CpuCurve`]. A worker not named
+    /// is judged as ever. A second call replaces the map (an empty one restores the
+    /// scheduler's tests), and the map is dropped with the operation, as
+    /// [`Scheduler::place_only_on`]'s set is.
+    pub fn set_cpu_judged(&mut self, operation: OperationId, workers: BTreeMap<WorkerId, u64>) {
+        self.backfill.judged.insert(operation, workers);
+    }
+
     /// How long queued `operation` counts for backfill ([`Backfill`]): its max wall time
     /// and the P90 of its key's wall minutes, as the setting reads them.
     pub(super) fn backfill_duration(&self, operation: OperationId) -> Option<u64> {
@@ -149,7 +174,7 @@ impl Scheduler {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use js_caps::NodeCaps;
     use js_types::sched::{
@@ -228,6 +253,17 @@ mod tests {
         assert_eq!(s.backfill.only(op), Some(&only_a()));
         assert!(s.forget_queued(op).is_some());
         assert_eq!(s.backfill.only(op), None);
+    }
+
+    /// Catches: a judged-CPU map kept for an operation forgotten as queued, which would hand
+    /// its figures to the next operation to take the id and keep the table growing.
+    #[test]
+    fn a_forgotten_operation_leaves_no_judged_map() {
+        let (mut s, op) = queued();
+        s.set_cpu_judged(op, BTreeMap::from([(WorkerId::new("a"), 1_000)]));
+        assert_eq!(s.backfill.judged(op).map(BTreeMap::len), Some(1));
+        assert!(s.forget_queued(op).is_some());
+        assert_eq!(s.backfill.judged(op), None);
     }
 
     /// Catches: a set dropped when the operation's lease is undone (it would then be placed

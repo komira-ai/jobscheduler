@@ -528,7 +528,7 @@ impl Admission {
     pub(crate) fn note_refusal(&mut self, worker: &js_types::sched::WorkerId, refusal: Refusal) {
         let c = &mut self.counters;
         match refusal.kind {
-            RefusalKind::Cpu => c.refused_cpu += 1,
+            RefusalKind::Cpu | RefusalKind::CpuCurve => c.refused_cpu += 1,
             RefusalKind::PredictedMemory => c.refused_predicted_memory += 1,
             RefusalKind::BookedMemory => c.refused_booked_memory += 1,
             RefusalKind::ColdCap => c.refused_cold_cap += 1,

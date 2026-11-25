@@ -4,7 +4,8 @@
 //! its kind and the numbers behind it, so a caller can say why a host is not filled.
 //! The scheduler keeps the refusals of a round in a bounded buffer
 //! ([`crate::Scheduler::take_refusals`]) and counts them by kind in
-//! [`crate::LoadCounters`].
+//! [`crate::LoadCounters`]. The kind [`RefusalKind::CpuCurve`] is the caller's alone: the
+//! scheduler makes no CPU test on a worker whose CPU the caller judges.
 
 use js_types::sched::WorkerId;
 
@@ -22,15 +23,19 @@ pub enum RefusalKind {
     BookedMemory,
     /// The cold cap: the cold leases admitted in this window reach the cap.
     ColdCap,
+    /// The slot-by-slot CPU check a caller makes on a worker whose CPU it judges
+    /// ([`crate::Scheduler::set_cpu_judged`]); the scheduler itself never makes it.
+    CpuCurve,
 }
 
 impl RefusalKind {
     /// Every kind, in a fixed order.
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::Cpu,
         Self::PredictedMemory,
         Self::BookedMemory,
         Self::ColdCap,
+        Self::CpuCurve,
     ];
 
     /// The kind's name as logs and metrics spell it.
@@ -41,6 +46,7 @@ impl RefusalKind {
             Self::PredictedMemory => "predicted-memory",
             Self::BookedMemory => "booked-memory",
             Self::ColdCap => "cold-cap",
+            Self::CpuCurve => "cpu-curve",
         }
     }
 }

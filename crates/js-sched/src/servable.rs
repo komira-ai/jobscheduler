@@ -30,7 +30,6 @@ use js_types::sched::usage::LeaseCost;
 use crate::admission::{
     Admission, Blocked, Left, Profile, Ratio, binding, clamped, new_charge, pick, start_time,
 };
-use crate::backfill;
 use crate::cordon::Cordons;
 use crate::input::Request;
 use crate::load::{Charge, HostFacts, LeaseFacts, Load, SLOTS, SlotHost, SlotLoad, least_loaded};
@@ -40,7 +39,10 @@ use crate::refusal::RefusalKind;
 use crate::scheduler::Worker;
 use crate::unservable::Unservable;
 
+mod attempt;
 mod matches;
+
+pub(crate) use attempt::Attempt;
 
 pub(crate) use matches::Matches;
 use matches::Memo;
@@ -55,56 +57,6 @@ pub(crate) enum Verdict {
     /// None that placement may use is, but a cordoned one is; why, naming them. The
     /// work waits: a cordon is temporary by intent, so it is not refused for it.
     Cordoned(Unservable),
-}
-
-/// One request to place: what it is, which workers are out, and what it will be charged.
-pub(crate) struct Attempt<'a> {
-    pub(crate) request: &'a Request,
-    /// Workers held for a whole-machine lease or a blocked head ahead of it.
-    pub(crate) reserved: &'a BTreeSet<WorkerId>,
-    /// The start time of each worker in `reserved` (farm milliseconds; `None`: not known):
-    /// the request is placed there only as backfill that ends by it.
-    pub(crate) starts: &'a BTreeMap<WorkerId, Option<u64>>,
-    /// How long the request counts for backfill ([`crate::Backfill`]); `None` never fits.
-    pub(crate) backfill: Option<u64>,
-    /// Workers barred to it ([`crate::Bar`] other than a back-off): never granted to it.
-    pub(crate) barred: &'a BTreeSet<WorkerId>,
-    /// Workers its earlier runs ended on as the farm's fault.
-    pub(crate) avoid: &'a BTreeSet<WorkerId>,
-    /// A key floor raised its memory: a worker it would own whole is out.
-    pub(crate) not_whole: bool,
-    /// The only workers it may go on, when it is held to some
-    /// ([`crate::Scheduler::place_only_on`]).
-    pub(crate) only: Option<&'a BTreeSet<WorkerId>>,
-    /// What it is charged if placed now (before the clamp to a worker's capacity).
-    pub(crate) cost: LeaseCost,
-    /// How it is charged over time, if it is (see [`Admission::profile_of`]).
-    pub(crate) profile: Option<Arc<Profile>>,
-    /// The lease it gets if placed now.
-    pub(crate) lease: LeaseId,
-    /// `L` of the lease's key where it is charged by a curve, else 1: the minutes the
-    /// score's fit looks at.
-    pub(crate) fit_minutes: u8,
-}
-
-impl Attempt<'_> {
-    /// Whether the request may go on `worker` at `now`: one of the workers it is held to,
-    /// if it is held to some, not barred to it, and either no one holds it or it fits
-    /// there as backfill ([`backfill::fits`]).
-    fn may_use(&self, worker: &WorkerId, now: FarmTime) -> bool {
-        let allowed = self.only.is_none_or(|only| only.contains(worker));
-        allowed && !self.barred.contains(worker) && self.may_share(worker, now)
-    }
-
-    /// Whether the request may go on `worker` at `now` as far as holds go: a worker no
-    /// one holds, or a held one where it fits as backfill ([`backfill::fits`]).
-    fn may_share(&self, worker: &WorkerId, now: FarmTime) -> bool {
-        !self.reserved.contains(worker)
-            || self
-                .starts
-                .get(worker)
-                .is_some_and(|start| backfill::fits(now.as_millis(), self.backfill, *start))
-    }
 }
 
 /// A candidate the predicate admitted, with what it computed for it.
@@ -316,7 +268,8 @@ impl Servable {
             .into_iter()
             .filter(|name| {
                 attempt.may_use(name, now)
-                    && workers[*name].has_room(request, by_load)
+                    && workers[*name]
+                        .has_room(request, by_load || attempt.judged_on(name).is_some())
                     && workers[*name].fits_before_end(now, wall)
                     && (!attempt.not_whole || !workers[*name].exclusive(request))
                     && (!vm_by_load || Self::vm_within_flat_memory(adm, &workers[*name], attempt))
@@ -463,7 +416,7 @@ impl Servable {
                 Self::profile_on(w, attempt).map(|p| &**p),
                 &left,
                 &w.capacity,
-                now,
+                (now, attempt.judged_on(name).is_some()),
                 &adm.cfg,
             ) {
                 Ok(()) => admitted.push(Passed {
@@ -498,6 +451,17 @@ impl Servable {
             .profile
             .as_ref()
             .filter(|_| !worker.exclusive(attempt.request))
+    }
+
+    /// What `worker` would have booked with the lease added, as the pack limit reads it: the
+    /// CPU the caller gave if it judges the request's CPU there, else the worker's own sum.
+    fn booked_with(worker: &Worker, attempt: &Attempt<'_>, name: &WorkerId) -> Charge {
+        let booked = worker.booked_with(attempt.request);
+        let cpu_millis = attempt.judged_on(name).unwrap_or(booked.cpu_millis);
+        Charge {
+            cpu_millis,
+            ..booked
+        }
     }
 
     fn loads<'a>(admitted: &[Passed<'a>]) -> Vec<(&'a WorkerId, Load)> {
@@ -550,7 +514,7 @@ impl Servable {
                     same_key_millis: w.load_state.same_key_millis(attempt.cost.key_hash),
                     new_key_millis: 0,
                     uncovered_leases: w.load_state.uncovered_leases(),
-                    booked_with_lease: w.booked_with(request),
+                    booked_with_lease: Self::booked_with(w, attempt, p.name),
                 };
                 // The figures the predicate charges at every slot; slot 0 is what it
                 // admitted the lease with (`p.left`, `p.cost`).

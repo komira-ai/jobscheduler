@@ -159,7 +159,7 @@ impl Refused {
 /// load the host's fresh reading measured, or that it had none and was charged by bookings.
 fn figures(refusal: &Refusal) -> String {
     let (unit, scale) = match refusal.kind {
-        RefusalKind::Cpu => ("m", 1),
+        RefusalKind::Cpu | RefusalKind::CpuCurve => ("m", 1),
         RefusalKind::PredictedMemory | RefusalKind::BookedMemory => ("MiB", 1 << 20),
         RefusalKind::ColdCap => ("cold", 1),
     };
