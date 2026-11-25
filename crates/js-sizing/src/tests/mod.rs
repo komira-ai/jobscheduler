@@ -3,6 +3,7 @@
 
 mod calibration;
 mod cpu;
+mod curve;
 mod life;
 mod memory;
 mod profile;

@@ -150,6 +150,7 @@
 #![forbid(unsafe_code)]
 
 mod codec;
+mod curve;
 mod key;
 mod profile;
 mod run;
@@ -158,11 +159,15 @@ mod summary;
 #[cfg(test)]
 mod tests;
 
+pub use curve::{
+    CURVE_SLOTS, Checks, Clamp, Curve, MAX_OVERRUNS, MIN_USABLE_SERIES, SeriesWindow, TAIL_SLOT,
+    age_slot,
+};
 pub use key::{Basis, Cfg, Day, Instance, Key, Level, PlatformClass, Shape};
 pub use profile::{
     BUCKETS, CHECK_RUNS, CPU_UNIT, Checked, Combine, FIT_PERMILLE, HALF_LIFE_MS, MAX_RUNS,
-    MEMORY_UNIT, MIN_RUNS, MIN_SLOT_RUNS, Profile, RunSeries, SLOT_SECS, START_SLOTS, Unit, Window,
-    series_agrees,
+    MEMORY_UNIT, MIN_RUNS, MIN_SLOT_RUNS, OVERRUN_PERMILLE, Profile, RunSeries, SLOT_SECS,
+    START_SLOTS, Unit, Window, series_agrees,
 };
 pub use run::{Bounds, CpuSample, Discard, Hint, Observed, Outcome, Run};
 pub use store::{
