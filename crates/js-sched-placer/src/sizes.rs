@@ -345,12 +345,12 @@ impl JobSizes {
     }
 
     /// This history with the profiles `curves` names: [`Curves::Off`] keeps none,
-    /// [`Curves::Shadow`] learns a CPU and a memory profile for each class from every run it
-    /// observes, and logs a line for each run freed while serving. The sizes it books are the
-    /// same in both.
+    /// [`Curves::Shadow`] and [`Curves::On`] learn a CPU and a memory profile for each class
+    /// from every run they observe, and log a line for each run freed while serving. The sizes
+    /// it books ([`JobSizes::sized`]) are the same in all three.
     #[must_use]
     pub fn with_curves(mut self, curves: Curves) -> Self {
-        self.profiles = (curves == Curves::Shadow).then(profile::Profiles::default);
+        self.profiles = (curves != Curves::Off).then(profile::Profiles::default);
         self
     }
 

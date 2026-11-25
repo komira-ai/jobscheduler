@@ -37,12 +37,15 @@ use js_types::sched::{
 };
 use js_types::{HostId, Shape};
 
+use crate::curves::{CurveSettings, CurveView};
 use crate::map;
 use crate::room::Room;
 use crate::sizes::{ColdCpuOn, ColdMemoryOn, ColdSize, Curves, JobSizes};
 
 #[path = "jobs.rs"]
 pub mod jobs;
+#[path = "jobs_walker.rs"]
+mod jobs_walker;
 #[path = "jobs_seen.rs"]
 pub(crate) mod jobs_seen;
 pub use jobs_seen::TablesFrom;
@@ -76,8 +79,9 @@ pub struct Settings {
     /// What a job that books nothing books while its class has no estimate
     /// (`server.cold_cpu_millis`, `server.cold_memory_bytes`); by default 22 cores and 4 GiB.
     pub cold: ColdSize,
-    /// Whether the history learns a CPU and a memory profile for each class
-    /// (`--placement-curves`); off by default. Placement is the same in both.
+    /// Whether the history learns a CPU and a memory profile for each class, and whether the
+    /// curve hosts book by them (`--placement-curves`); off by default. Placement is the same
+    /// with [`Curves::Off`] and [`Curves::Shadow`].
     pub curves: Curves,
 }
 
@@ -128,6 +132,10 @@ pub struct Engine {
     /// What each open host has room for in the walk under way, which a placement is held to
     /// ([`crate::room`]); empty (every host has room) until a pass sets it.
     room: Room,
+    /// The `--placement-curves` mode the engine was built with.
+    curves: Curves,
+    /// Where and how [`Curves::On`] books by curve.
+    curve: CurveSettings,
     /// How many placement rounds the walks over the queued jobs ran, for the tests that
     /// count them ([`jobs`]).
     #[cfg(any(test, feature = "test-support"))]
@@ -156,9 +164,25 @@ impl Engine {
             refused: refusals::Book::default(),
             whole_seq: 0,
             room: Room::default(),
+            curves: settings.curves,
+            curve: CurveSettings::default(),
             #[cfg(any(test, feature = "test-support"))]
             job_rounds: 0,
         }
+    }
+
+    /// The same engine, booking by curve under [`Curves::On`] as `curve` says: on the hosts it
+    /// names, with its wait bound.
+    #[must_use]
+    pub fn with_curve_settings(mut self, curve: CurveSettings) -> Self {
+        self.curve = curve;
+        self
+    }
+
+    /// What `/metrics` reads of the curve mode; `None` unless it is [`Curves::On`].
+    #[must_use]
+    pub fn curve_view(&self) -> Option<CurveView> {
+        (self.curves == Curves::On).then(CurveView::default)
     }
 
     /// The same engine, a job of an operating system `on` names booking that cold memory while

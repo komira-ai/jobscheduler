@@ -32,8 +32,8 @@ use super::{JobSizes, class_name, micros, millis};
 /// whose last run ended earliest.
 pub const MAX_PROFILES: usize = 2048;
 
-/// Whether the history learns profiles: the server's `--placement-curves`. Placement is the same
-/// in both.
+/// Whether the history learns profiles, and whether it books from them: the server's
+/// `--placement-curves`. Placement is the same with [`Curves::Off`] and [`Curves::Shadow`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Curves {
     /// Learns nothing and logs nothing.
@@ -42,24 +42,29 @@ pub enum Curves {
     /// Learns a CPU and a memory profile for each class and logs one line for each run it
     /// checks while serving.
     Shadow,
+    /// Learns and logs as [`Curves::Shadow`] does, and books a class that passes its four
+    /// checks by its CPU curve on the curve hosts (`docs/design/placement-profiles-live.md`).
+    On,
 }
 
 impl Curves {
-    /// The word the server's flag and file give this mode: `off` or `shadow`.
+    /// The word the server's flag and file give this mode: `off`, `shadow` or `on`.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Off => "off",
             Self::Shadow => "shadow",
+            Self::On => "on",
         }
     }
 
-    /// The mode `word` names: exactly `off` or `shadow`; `None` for any other.
+    /// The mode `word` names: exactly `off`, `shadow` or `on`; `None` for any other.
     #[must_use]
     pub fn parse(word: &str) -> Option<Self> {
         match word {
             "off" => Some(Self::Off),
             "shadow" => Some(Self::Shadow),
+            "on" => Some(Self::On),
             _ => None,
         }
     }

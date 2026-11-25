@@ -112,13 +112,14 @@ use js_jobs::{
 use js_registry::{HostState, HostView, WholeNodeConfig};
 use js_sched::ceiling::within_ceiling;
 use js_sched::queue_status::{self, Outcome};
-use js_sched::{Event, Prediction, Request};
+use js_sched::{Event, Request};
 use js_types::Timestamp;
 use js_types::sched::{FarmTime, LeaseId as SchedLeaseId, LeaseKind, OperationId, Qos, WorkKey};
 use js_types::{EXEC_KEY, HostId, JobNetwork, QueueCode, QueueNote, Resources};
 use tracing::warn;
 
-use super::whole_jobs::{self, WholeJobStep, WholeJobs};
+use super::jobs_walker::{Walker, walker};
+use super::whole_jobs::{WholeJobStep, WholeJobs};
 use super::{Engine, Placed, TablesFrom, recovered_as};
 use crate::map::{self, MapError};
 use crate::place::SchedPlacer;
@@ -147,6 +148,9 @@ pub trait PassMetrics {
     /// A host refused a queued job for the predicate named `reason` (`cpu`, `predicted-memory`,
     /// `booked-memory`, `cold-cap`); by default, nothing is told.
     fn refused(&self, _host: &HostId, _reason: &'static str) {}
+    /// A queued job of a curve class waited past the wait bound with no host fitting its curve,
+    /// and is tested with its flat number from now on; by default, nothing is told.
+    fn curve_wait_expired(&self) {}
 }
 
 /// The term of the leases the engine places for jobs: each is numbered by its operation, so
@@ -177,23 +181,6 @@ fn capacity_of<'a>(hosts: &'a JobHosts<'_>, host: &HostId) -> Option<&'a Capacit
         .open
         .get(host)
         .and_then(|offer| offer.capacity.as_ref())
-}
-
-/// A queued job, as a pass offers it to the engine.
-struct Walker {
-    job: JobId,
-    /// Whether the job runs on the machine itself (host isolation).
-    host_isolation: bool,
-    /// The hosts its bars keep it off at the walk's time ([`whole_jobs::barred_hosts`]).
-    barred: BTreeSet<HostId>,
-    request: Request,
-    booked: Booked,
-    /// The network level the job asks for.
-    network: JobNetwork,
-    /// The host ports the job declares, sorted, each once.
-    host_ports: Vec<u16>,
-    wall: Duration,
-    charge: Prediction,
 }
 
 impl Engine {
@@ -512,41 +499,6 @@ impl Engine {
             }
         }
     }
-}
-
-/// The queued `job` as a pass offers it to the engine at `now`; `None` for a job that books the
-/// whole host (the pass queues it with [`Engine::whole_jobs`]), and for one whose constraints
-/// are no platform requirements (logged).
-fn walker(job: &JobRecord, now: FarmTime) -> Option<Walker> {
-    let Needs::Shape(resources) = &job.spec.needs else {
-        return None;
-    };
-    let request = job_request(job, resources)
-        .inspect_err(|error| warn!(job = %job.id, %error, "a queued job's constraints are no platform requirements; it is not placed"))
-        .ok()?;
-    let ports: BTreeSet<u16> = job.spec.ports.iter().map(|port| port.host).collect();
-    let charge = Prediction {
-        cpu_millis: resources.cpu_millis(),
-        memory_bytes: resources.memory_bytes(),
-        cold: false,
-        life_minutes: 1,
-    };
-    Some(Walker {
-        job: job.id.clone(),
-        host_isolation: job.spec.constraints.isolation == Isolation::Host,
-        barred: whole_jobs::barred_hosts(job, now),
-        request,
-        booked: Booked::Shape {
-            cpu_millis: resources.cpu_millis(),
-            memory_bytes: resources.memory_bytes(),
-            disk_bytes: resources.disk_bytes(),
-            accelerators: resources.gpus(),
-        },
-        network: job_network(job.spec.network),
-        host_ports: ports.into_iter().collect(),
-        wall: Duration::from_secs(job.spec.wall_limit_secs),
-        charge,
-    })
 }
 
 /// The scheduler's request for the queued `job`, which needs `resources`: its capabilities

@@ -48,6 +48,7 @@ use js_types::sched::usage::NodeLoad;
 use super::engine::jobs::Decided;
 use super::engine::jobs_seen::{Kept, Seen};
 use super::engine::{Engine, Settings};
+use super::curves::{CurveSettings, CurveView};
 use super::sizes::{ColdCpuOn, ColdMemoryOn, day_of};
 
 /// The placer the registry is given: it keeps the engine, the scheduler that places the
@@ -137,6 +138,27 @@ impl SchedPlacer {
             engine: Mutex::new(engine.with_cold_cpu_on(on)),
             ..self
         }
+    }
+
+    /// The same placer, its engine booking by curve under [`crate::sizes::Curves::On`] as
+    /// `curve` says ([`Engine::with_curve_settings`]).
+    #[must_use]
+    pub fn with_curve_settings(self, curve: CurveSettings) -> Self {
+        let engine = self
+            .engine
+            .into_inner()
+            .unwrap_or_else(PoisonError::into_inner);
+        Self {
+            engine: Mutex::new(engine.with_curve_settings(curve)),
+            ..self
+        }
+    }
+
+    /// What `/metrics` reads of the curve mode ([`Engine::curve_view`]); `None` unless it is
+    /// [`crate::sizes::Curves::On`].
+    #[must_use]
+    pub fn curve_view(&self) -> Option<CurveView> {
+        self.engine().curve_view()
     }
 
     /// `decided` with each placement's [`Placement::sized_from`](js_jobs::Placement::sized_from):

@@ -12,6 +12,7 @@
 //! With the `test-support` feature, the placer and the engine also answer what a test reads
 //! of them: what the scheduler books and charges on a host, and the scheduler itself.
 
+pub mod curves;
 pub mod engine;
 pub mod map;
 pub mod place;
