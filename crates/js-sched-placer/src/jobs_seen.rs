@@ -127,6 +127,10 @@ impl PassMetrics for Watched<'_> {
     fn refused(&self, host: &HostId, reason: &'static str) {
         self.metrics.refused(host, reason);
     }
+
+    fn curve_wait_expired(&self) {
+        self.metrics.curve_wait_expired();
+    }
 }
 
 /// When each of `cordons` lapses, each with the time it had left at `now`.

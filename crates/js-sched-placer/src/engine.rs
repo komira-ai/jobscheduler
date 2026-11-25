@@ -14,14 +14,18 @@
 //! whole host is queued in the engine as a whole-machine request of the same scheduler
 //! ([`whole_jobs`]): the pass marks, grants and cancels it from what the job tables hold.
 //!
-//! The engine is given no learned curves: each allocation is charged what it books, and each
-//! host by its load readings when it has fresh ones. The leases a reading covers are the
-//! engine's own: the job allocations it held on the host at the previous reading the scheduler
-//! accepted and holds still, which ran through the whole window between the two. An allocation
-//! the engine took before the newest reading but after the one before it ran for part of the
-//! window at most: the reading has seen it, and it is charged in full on top of the window
-//! before the newest, which holds none of its use, and not on top of the measurement. Only an
-//! allocation taken after the newest reading is charged in full beside the measurement.
+//! The scheduler is given no learned curves: each allocation is charged what it books (its flat
+//! number, in every mode), and each host by its load readings when it has fresh ones. Under
+//! `--placement-curves on` the engine itself tests a job against a curve host slot by slot
+//! (`curve_room`) and the scheduler makes no CPU test of that host.
+//!
+//! The leases a reading covers are the engine's own: the job allocations it held on the host at
+//! the previous reading the scheduler accepted and holds still, which ran through the whole
+//! window between the two. An allocation the engine took before the newest reading but after
+//! the one before it ran for part of the window at most: the reading has seen it, and it is
+//! charged in full on top of the window before the newest, which holds none of its use, and not
+//! on top of the measurement. Only an allocation taken after the newest reading is charged in
+//! full beside the measurement.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -42,12 +46,14 @@ use crate::map;
 use crate::room::Room;
 use crate::sizes::{ColdCpuOn, ColdMemoryOn, ColdSize, Curves, JobSizes};
 
+#[path = "curve_room.rs"]
+mod curve_room;
 #[path = "jobs.rs"]
 pub mod jobs;
-#[path = "jobs_walker.rs"]
-mod jobs_walker;
 #[path = "jobs_seen.rs"]
 pub(crate) mod jobs_seen;
+#[path = "jobs_walker.rs"]
+mod jobs_walker;
 pub use jobs_seen::TablesFrom;
 #[path = "refusals.rs"]
 pub mod refusals;
@@ -81,7 +87,9 @@ pub struct Settings {
     pub cold: ColdSize,
     /// Whether the history learns a CPU and a memory profile for each class, and whether the
     /// curve hosts book by them (`--placement-curves`); off by default. Placement is the same
-    /// with [`Curves::Off`] and [`Curves::Shadow`].
+    /// with [`Curves::Off`] and [`Curves::Shadow`]; with [`Curves::On`] a job of a class that
+    /// passes its checks is placed on a curve host by its CPU over time, not by its flat number
+    /// ([`CurveSettings`]).
     pub curves: Curves,
 }
 
@@ -136,6 +144,12 @@ pub struct Engine {
     curves: Curves,
     /// Where and how [`Curves::On`] books by curve.
     curve: CurveSettings,
+    /// The CPU slack of the load settings, in thousandths: a curve host holds its booked CPU at
+    /// every slot to its cores times one plus this ([`curve_room`]).
+    cpu_slack_permille: u32,
+    /// What the curve mode keeps beside the scheduler: the live jobs it charges, the waits of
+    /// the jobs whose curve fits no host and the tables of the curve hosts ([`curve_room`]).
+    book: curve_room::CurveBook,
     /// How many placement rounds the walks over the queued jobs ran, for the tests that
     /// count them ([`jobs`]).
     #[cfg(any(test, feature = "test-support"))]
@@ -166,6 +180,8 @@ impl Engine {
             room: Room::default(),
             curves: settings.curves,
             curve: CurveSettings::default(),
+            cpu_slack_permille: settings.load.normalised().s_cpu_permille,
+            book: curve_room::CurveBook::default(),
             #[cfg(any(test, feature = "test-support"))]
             job_rounds: 0,
         }
@@ -182,7 +198,7 @@ impl Engine {
     /// What `/metrics` reads of the curve mode; `None` unless it is [`Curves::On`].
     #[must_use]
     pub fn curve_view(&self) -> Option<CurveView> {
-        (self.curves == Curves::On).then(CurveView::default)
+        self.curve_view_of()
     }
 
     /// The same engine, a job of an operating system `on` names booking that cold memory while

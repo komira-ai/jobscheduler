@@ -45,10 +45,10 @@ use js_types::Shape;
 use js_types::sched::FarmTime;
 use js_types::sched::usage::NodeLoad;
 
+use super::curves::{CurveSettings, CurveView};
 use super::engine::jobs::Decided;
 use super::engine::jobs_seen::{Kept, Seen};
 use super::engine::{Engine, Settings};
-use super::curves::{CurveSettings, CurveView};
 use super::sizes::{ColdCpuOn, ColdMemoryOn, day_of};
 
 /// The placer the registry is given: it keeps the engine, the scheduler that places the

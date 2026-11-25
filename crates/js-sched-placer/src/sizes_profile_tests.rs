@@ -28,7 +28,7 @@ const START: &str =
 
 /// What a test's own subscriber writes: every line, kept for [`Lines::take`].
 #[derive(Clone, Default)]
-struct Lines(Arc<Mutex<Vec<u8>>>);
+pub(crate) struct Lines(Arc<Mutex<Vec<u8>>>);
 
 impl io::Write for Lines {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
@@ -51,6 +51,13 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Lines {
 }
 
 impl Lines {
+    /// Every line written so far, emptied.
+    pub(crate) fn taken(&self) -> Vec<String> {
+        let mut held = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let text = String::from_utf8(std::mem::take(&mut *held)).unwrap();
+        text.lines().map(str::to_owned).collect()
+    }
+
     /// The lines of a checked run written so far, emptied.
     fn checked(&self) -> Vec<String> {
         let mut held = self.0.lock().unwrap_or_else(PoisonError::into_inner);
@@ -88,14 +95,25 @@ fn process_sink() {
 }
 
 /// A subscriber that keeps every line this test's thread logs, until the guard drops.
-fn capture() -> (Lines, tracing::subscriber::DefaultGuard) {
+pub(crate) fn capture() -> (Lines, tracing::subscriber::DefaultGuard) {
+    subscribed(false)
+}
+
+/// [`capture`], each line written with its target.
+pub(crate) fn capture_targets() -> (Lines, tracing::subscriber::DefaultGuard) {
+    subscribed(true)
+}
+
+/// A subscriber that keeps every line this test's thread logs, with its target when `target`
+/// says so.
+fn subscribed(target: bool) -> (Lines, tracing::subscriber::DefaultGuard) {
     process_sink();
     let lines = Lines::default();
     let subscriber = tracing_subscriber::fmt()
         .with_writer(lines.clone())
         .with_ansi(false)
         .without_time()
-        .with_target(false)
+        .with_target(target)
         .finish();
     (lines, tracing::subscriber::set_default(subscriber))
 }
@@ -173,8 +191,9 @@ fn class<'a>(sizes: &'a JobSizes, job: &JobRecord) -> &'a ClassProfile {
     &sizes.profiles.as_ref().unwrap().classes[&JobSizes::key_of(job)]
 }
 
-/// Asserts that the server's two words name the two modes, that anything else names none, and
-/// that the mode is off by default. Catches a flag that takes `on` or another spelling.
+/// Asserts that the server's three words name the three modes, that anything else names none,
+/// and that the mode is off by default. Catches a flag that takes another spelling, and a mode
+/// that does not round-trip through its word.
 #[test]
 fn the_modes_are_named_off_and_shadow_and_off_is_the_default() {
     assert_eq!(Curves::default(), Curves::Off);
@@ -184,15 +203,15 @@ fn the_modes_are_named_off_and_shadow_and_off_is_the_default() {
         [
             Some(Curves::Off),
             Some(Curves::Shadow),
-            None,
+            Some(Curves::On),
             None,
             None,
             None
         ]
     );
     assert_eq!(
-        [Curves::Off, Curves::Shadow].map(Curves::as_str),
-        ["off", "shadow"]
+        [Curves::Off, Curves::Shadow, Curves::On].map(Curves::as_str),
+        ["off", "shadow", "on"]
     );
 }
 
@@ -656,9 +675,10 @@ fn a_new_class_at_the_cap_evicts_the_class_whose_last_run_ended_earliest() {
     assert!(none.is_empty());
 }
 
-/// Asserts that placement is the same with the profiles off and in shadow: after the same five
-/// runs (each with its series) the next job of the class is booked the same, from the same
-/// history, and each run teaches the same. Catches a profile that changes what a class books.
+/// Asserts that the sizes booked are the same with the profiles off, in shadow and on: after the
+/// same five runs (each with its series) the next job of the class is booked the same, from the
+/// same history, and each run teaches the same. Catches a profile that changes what a class
+/// books.
 #[test]
 fn the_sizes_booked_are_the_same_with_the_profiles_off_and_in_shadow() {
     let tables = Tables::new();
@@ -681,7 +701,7 @@ fn the_sizes_booked_are_the_same_with_the_profiles_off_and_in_shadow() {
     let next = queued.jobs.insert_queued(new).unwrap().record;
     let bounds = bounds_of([Capacity::new(32_000, 16 * GIB)]);
     let mut books = Vec::new();
-    for curves in [Curves::Off, Curves::Shadow] {
+    for curves in [Curves::Off, Curves::Shadow, Curves::On] {
         let mut sizes = sizes_with(curves);
         sizes.set_bounds(bounds);
         for job in &jobs {
@@ -690,15 +710,20 @@ fn the_sizes_booked_are_the_same_with_the_profiles_off_and_in_shadow() {
         books.push((sizes.sized(&next, Day(0)), sizes.sized_from(&next, Day(0))));
     }
     assert_eq!(books[0], books[1]);
+    assert_eq!(books[0], books[2]);
     assert_ne!(books[0].0, next, "the class's runs size it");
     assert_eq!(books[0].1, Some(SizedFrom::Class));
 }
 
-/// Asserts that the engine keeps profiles only for the setting that asks for them. Catches a
-/// setting that never reaches the history.
+/// Asserts that the engine keeps profiles only for the setting that asks for them (shadow and
+/// on). Catches a setting that never reaches the history.
 #[test]
 fn the_engine_builds_its_history_with_the_curves_setting() {
-    for (curves, kept) in [(Curves::Off, false), (Curves::Shadow, true)] {
+    for (curves, kept) in [
+        (Curves::Off, false),
+        (Curves::Shadow, true),
+        (Curves::On, true),
+    ] {
         let settings = Settings {
             curves,
             ..Settings::default()
