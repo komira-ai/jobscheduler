@@ -334,6 +334,14 @@ accepts. What corrects is the next placement:
   check line holds no booking, so the last figure is prediction error, not CPU a booking gives back. The log is read
   in time order: with several server tasks, sort their lines by timestamp first. A job logged by two servers (the
   overlap of a rolling update) counts once.
+- The check lines and the line that starts them are logged under the target `js_sched_placer::sizes::profile`.
+  A start reads and teaches every ended job its store keeps before any check is logged (MEASURED on the farm, two
+  starts of release 0.1.391, from each start's `listening` line to its `the job sizes were taught` line, which
+  gives `taught` and `pages`: 560,413 and 568,989 jobs, 683 and 690 pages, 6 min 57 s and 4 min 45 s); the runs
+  that end meanwhile are held. Once taught,
+  the server logs `placement curves: the shadow checks start, the profiles learned from the ended jobs` with
+  `classes`, `ended_jobs` and `took_secs`, then the held runs' checks in one burst, then each run as a pass frees
+  it.
 - **Step 2 on the farm** (MEASURED, 4 h 10 min of normal builds, releases 0.1.379 to 0.1.383 under `shadow`):
   29,256 check lines over 5,335 classes, 330 of them with at least 16 lines. Of those 330, 28 (8.4%) were shaped by
   CPU and 38 (11.5%) by memory. Over their scored runs the curve's CPU error was 95.4% of the flat line's: it removed
