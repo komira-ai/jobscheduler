@@ -94,8 +94,8 @@
 //!   no peak, and a success with no peak teaches the memory nothing; its wall time is from its
 //!   start to its end;
 //! - a success's peak is a measurement whatever its booking: the booking is no limit, so a peak
-//!   at or above it is what the run used, and a peak above it raises the class's next booking
-//!   at once (with the margin);
+//!   above it is what the run used, and raises the class's next booking at once (with the
+//!   margin);
 //! - but a success whose group's `memory.peak` came within 5% of its booking and stayed within
 //!   it reached its booking: a host that holds a job at its booking (the docker and podman
 //!   runtime's `--memory`, whose limit counts the page cache the non-file peak leaves out)
