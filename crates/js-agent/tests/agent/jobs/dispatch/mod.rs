@@ -5,6 +5,7 @@
 //! another thread is for an event with a hang guard. The poller's thread, the session's cell
 //! and the whole agent are in `threads`.
 
+mod held;
 mod live;
 mod threads;
 
@@ -12,7 +13,7 @@ use std::time::Duration;
 
 use js_agent::dispatch::{Cell, Next, Poller, Route};
 use js_agent::lifecycle::Quiet;
-use js_agent::{CredentialState, Delivery, QUEUE, Quiesce, WorkerHost};
+use js_agent::{CredentialState, Delivery, Quiesce, WorkerHost};
 use js_agent_wire::limits::MAX_COMMANDS;
 use js_agent_wire::{
     BookedResources, DISPATCH_PATH, DispatchReply, Dispatched, JobStartSpec, Welcome,
@@ -20,7 +21,7 @@ use js_agent_wire::{
 use serde_json::{Value, json};
 
 use super::fake::FakeMachine;
-use super::{start, starts};
+use super::start;
 use crate::support::{Lowest, Reply, SECRET, Scratch, Script, limited, refused, reply, welcome};
 
 /// How long a test waits for another thread before it gives up: a guard against a hang, not
@@ -452,46 +453,62 @@ fn an_invalid_message_is_neither_acted_on_nor_acknowledged_but_its_neighbours_ar
 }
 
 /// Asserts that an answer whose messages are all invalid hands the worker nothing and
-/// acknowledges nothing, and that a worker with no room for the answer (its queue is full
-/// while it is held inside a call) gets nothing acknowledged either, so the server hands the
-/// start out again after its hold; the next poll that finds room is acknowledged. Catches an
-/// empty reply sent to the worker for every quiet poll, and a start acknowledged though the
-/// worker dropped it.
+/// acknowledges nothing, and is polled on at once; the next start is taken and acknowledged as
+/// usual. Catches an empty reply sent to the worker for every quiet poll (it would take a slot
+/// of the queue), and an answer with nothing to act on taken for one the worker had no room
+/// for (the poller would wait for room it does not need).
 #[test]
-fn nothing_is_acknowledged_that_the_worker_did_not_take() {
-    let dir = Scratch::new("jobs-dispatch-full");
+fn an_answer_of_invalid_messages_hands_the_worker_nothing_and_acknowledges_nothing() {
+    let dir = Scratch::new("jobs-dispatch-all-invalid");
     let machine = FakeMachine::new();
     let worker = start(&dir, &machine);
-    machine.world.hold_creates();
-    assert_eq!(worker.try_deliver(starts(&["r0"])), Delivery::Delivered);
-    machine.world.wait_entered(1);
-    for _ in 0..QUEUE {
-        assert_eq!(worker.try_deliver(starts(&["r0"])), Delivery::Delivered);
-    }
     let mut bodiless = Dispatched::start(spec("j2"));
     bodiless.start = None;
     let (mut script, sent) = Script::new(vec![
         handed(vec![bodiless]),
         handed(vec![Dispatched::start(spec("j1"))]),
         quiet(),
-        handed(vec![Dispatched::start(spec("j1"))]),
-        quiet(),
     ]);
     let mut poller = Poller::new(&worker, Box::new(Lowest));
+    let taken = worker.taken();
 
     assert_eq!(poller.poll(&mut script, &route(1)), Next::Again);
-    assert_eq!(poller.poll(&mut script, &route(1)), Next::Again, "full");
-    assert_eq!(poller.poll(&mut script, &route(1)), Next::Again);
-    machine.world.release();
     assert!(worker.handle().settle());
+    assert_eq!(worker.taken(), taken + 1, "the settle alone was an order");
     assert_eq!(poller.poll(&mut script, &route(1)), Next::Again);
     assert_eq!(poller.poll(&mut script, &route(1)), Next::Again);
 
     let bodies = polls(&sent);
-    for (n, body) in bodies[1..=3].iter().enumerate() {
-        assert_eq!(acked(body), Vec::<String>::new(), "poll {}", n + 1);
-    }
-    assert_eq!(acked(&bodies[4]), ["start:alloc-j1"]);
+    assert_eq!(acked(&bodies[1]), Vec::<String>::new());
+    assert_eq!(acked(&bodies[2]), ["start:alloc-j1"]);
+}
+
+/// Asserts that the cell keeps the poller's lines in order for the session to take once, at
+/// most 64 of them, and that the lines past them are counted and said in a first line of the
+/// next take; and that a wait for lines ends at once at the close. Catches lines that pile up
+/// without bound while nobody takes them, and dropped lines nobody hears of.
+#[test]
+fn the_cell_keeps_the_poller_lines_up_to_its_cap_and_counts_the_rest() {
+    let cell = Cell::new(None);
+    assert_eq!(cell.take_lines(), Vec::<String>::new());
+    cell.note(vec!["one".to_owned(), "two".to_owned()]);
+    assert_eq!(cell.take_lines(), ["one", "two"]);
+    assert_eq!(cell.take_lines(), Vec::<String>::new(), "taken once");
+
+    cell.note((0..66).map(|n| format!("line {n}")).collect());
+    let lines = cell.wait_lines(GUARD);
+    assert_eq!(lines.len(), 65);
+    assert_eq!(lines[0], "dispatch: 2 log line(s) were dropped");
+    assert_eq!(lines[1], "line 0");
+    assert_eq!(lines[64], "line 63");
+    assert_eq!(
+        cell.take_lines(),
+        Vec::<String>::new(),
+        "the count starts again"
+    );
+
+    cell.close();
+    assert_eq!(cell.wait_lines(GUARD), Vec::<String>::new());
 }
 
 /// Asserts that a route prints without its secrets, and a poll does not carry a credential.
