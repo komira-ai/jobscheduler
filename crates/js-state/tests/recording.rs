@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_state::fake::{Fake, Flaw};
-use js_state::recording::{RecordingStore, Write, WriteKind};
+use js_state::recording::{Read, RecordingStore, Write, WriteKind};
 use js_state::{
     Changes, Commit, CommitStats, Cond, Conflict, ManualClock, Revision, ScanPage, ScanRange,
     Store, StoreError, StoreTime, Txn, Versioned,
@@ -235,4 +235,41 @@ fn a_decided_transaction_is_recorded_as_it_committed_or_conflicted() {
         ]
     );
     assert!(recording.head().unwrap().is_some());
+}
+
+/// Asserts that every get, prefix scan, range scan and clock read is recorded in the order it
+/// was asked for, with its key or prefix, that the feed, the head, the counters and a write
+/// are not reads, and that `clear` forgets the reads too. It catches a recorder that misses a
+/// kind of read (a test that counts a component's round trips would then count too few) and
+/// one that records a read as another kind.
+#[test]
+fn every_read_is_recorded_in_order_with_its_key_or_prefix() {
+    let recording = RecordingStore::new(fake());
+    recording
+        .txn(Txn::new().put("r/a", "1", Cond::Any))
+        .expect("store")
+        .expect("commit");
+    assert_eq!(recording.reads(), Vec::new());
+    recording.get("r/a").expect("get");
+    recording.get("r/none").expect("get");
+    recording.scan_prefix("r/").expect("scan");
+    recording
+        .scan_range(ScanRange::new("s/", std::num::NonZeroUsize::MIN))
+        .expect("range");
+    recording.now().expect("the clock");
+    recording.changes(Revision::ZERO, 10).expect("feed");
+    recording.head().expect("head");
+    let _ = recording.commit_stats();
+    assert_eq!(
+        recording.reads(),
+        [
+            Read::Get("r/a".to_owned()),
+            Read::Get("r/none".to_owned()),
+            Read::ScanPrefix("r/".to_owned()),
+            Read::ScanRange("s/".to_owned()),
+            Read::Now,
+        ]
+    );
+    recording.clear();
+    assert_eq!(recording.reads(), Vec::new());
 }

@@ -1,6 +1,6 @@
-//! A [`Store`] that forwards to another and remembers every write it was asked for, so
-//! a test can assert which keys a component touched (and with what kind of operation)
-//! after the fact. Test support: it lives here and not in `js-testkit` because that
+//! A [`Store`] that forwards to another and remembers every write it was asked for, and every
+//! read that names keys or the clock, so a test can assert which keys a component touched (and
+//! with what kind of operation) and what it read, after the fact. Test support: it lives here and not in `js-testkit` because that
 //! crate depends on no kbf crate, and a store wrapper needs this one.
 
 use std::collections::BTreeSet;
@@ -37,14 +37,29 @@ pub struct Write {
     pub committed: bool,
 }
 
+/// One read a [`RecordingStore`] was asked for. The feed, the head and the counters are not
+/// recorded, nor what a decision of [`Store::claim_decide`] reads inside its transaction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Read {
+    /// A get of the key.
+    Get(String),
+    /// A prefix scan under the prefix.
+    ScanPrefix(String),
+    /// A range scan (C8) under the prefix.
+    ScanRange(String),
+    /// A read of the store's clock ([`Store::now`]).
+    Now,
+}
+
 #[derive(Default)]
 struct Log {
     writes: Vec<Write>,
+    reads: Vec<Read>,
     reaps: usize,
 }
 
-/// Forwards every call to the store underneath and records the writes. A
-/// precondition-only operation (a check) is not a write and is not recorded.
+/// Forwards every call to the store underneath and records the writes and the reads ([`Read`]).
+/// A precondition-only operation (a check) is not a write and is not recorded.
 pub struct RecordingStore {
     inner: Arc<dyn Store>,
     log: Mutex<Log>,
@@ -71,6 +86,12 @@ impl RecordingStore {
         self.log().writes.clone()
     }
 
+    /// Every recorded read, in the order it was asked for.
+    #[must_use]
+    pub fn reads(&self) -> Vec<Read> {
+        self.log().reads.clone()
+    }
+
     /// The distinct keys written, sorted.
     #[must_use]
     pub fn keys(&self) -> BTreeSet<String> {
@@ -84,9 +105,13 @@ impl RecordingStore {
         self.log().reaps
     }
 
-    /// Forgets what was recorded so far.
+    /// Forgets what was recorded so far: the writes, the reads and the reaps.
     pub fn clear(&self) {
         *self.log() = Log::default();
+    }
+
+    fn read(&self, read: Read) {
+        self.log().reads.push(read);
     }
 
     fn record(&self, txn: &Txn, committed: bool) {
@@ -139,14 +164,17 @@ impl Store for RecordingStore {
     }
 
     fn get(&self, key: &str) -> Result<Option<Versioned>, StoreError> {
+        self.read(Read::Get(key.to_owned()));
         self.inner.get(key)
     }
 
     fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, Versioned)>, StoreError> {
+        self.read(Read::ScanPrefix(prefix.to_owned()));
         self.inner.scan_prefix(prefix)
     }
 
     fn scan_range(&self, scan: ScanRange<'_>) -> Result<ScanPage, StoreError> {
+        self.read(Read::ScanRange(scan.prefix.to_owned()));
         self.inner.scan_range(scan)
     }
 
@@ -168,6 +196,7 @@ impl Store for RecordingStore {
     }
 
     fn now(&self) -> Result<StoreTime, StoreError> {
+        self.read(Read::Now);
         self.inner.now()
     }
 }

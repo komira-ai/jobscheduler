@@ -379,6 +379,11 @@ impl Pool {
         }
     }
 
+    /// How many messages carrying statements the pool's connections have sent ([`super::Conn`]).
+    pub(super) fn sent(&self) -> u64 {
+        self.dial.sent.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Drops every idle session. The sessions on loan are judged when they come back.
     pub(super) fn discard_idle(&self) {
         let idle = {

@@ -287,6 +287,7 @@ impl PostgresConfig {
             pg: self.timeouts.network(self.pg.clone()),
             tls: self.tls.clone(),
             session: String::new(),
+            sent: Arc::default(),
         }
     }
 
@@ -622,6 +623,15 @@ impl PostgresStore {
     #[must_use]
     pub fn retries(&self) -> u64 {
         self.retries.load(Ordering::Relaxed)
+    }
+
+    /// How many messages carrying statements this store's connections have sent to the server,
+    /// each a round trip: a read is one, and a transaction one for each of its statements, its
+    /// `BEGIN` and its `COMMIT` included (several statements sent as one text count once). A
+    /// new connection's own setup counts too; a statement's prepare does not.
+    #[must_use]
+    pub fn statements(&self) -> u64 {
+        self.pool.sent()
     }
 
     /// The configuration this store was opened with.
