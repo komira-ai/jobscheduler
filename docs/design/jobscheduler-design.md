@@ -103,7 +103,7 @@ jobscheduler is the service that answers these. It is one scheduler service (`js
 - Multi-tenant isolation beyond job ownership. The job service names its clients, each with its own token and a role: a `client` sees and cancels only its own jobs, an `operator` everything (`docs/http-gateway.md`, "Clients, roles and token reload"). The lease routes keep one token and one trust domain (section 11).
 - High availability of the service in the first target. It is one active writer over Postgres; whether to add a standby is open (section 13, question 1).
 - Hosting a public listener. The service is meant to sit on a private network.
-- Being a workflow engine. It places and contains jobs; retry policy and result interpretation belong to the client.
+- Being a workflow engine. It places and contains jobs; result interpretation belongs to the client. The service retries a job only as the job's retry policy asks, which is never by default, and only after a start failure or a lost host ([job-retry-and-completion-callback.md](job-retry-and-completion-callback.md); decided, not yet built).
 - Holding capacity for a client: reservations of capacity or of a whole host for a time, with jobs sent into them. Not in v1 (section 13, question 24).
 - Delegating execution to a cloud's batch or container service in v1. The Default platform's machine providers supply machines and never run a job. The other platform kinds (Kubernetes, Cloud Run, ECS) are planned (section 3.7) and not built in v1.
 - A VM backend. The helper crates exist; the runtime does not (section 12).
