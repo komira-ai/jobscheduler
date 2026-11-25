@@ -359,11 +359,11 @@ then books its own median or tail.
 
 **Proof.** `crates/js-sizing/src/tests/tail.rs` holds the rule's boundaries (exactly twice the median books the median, one
 millicore more the tail; four peaks are not a tail, five are; a tail ages out after 32 runs; peaks survive storage, and a version 2
-row books its median). `crates/js-sched-placer/src/sizes_burst_tests.rs`
-(`a_burst_of_a_heavy_tail_class_books_no_host_past_its_cores_while_another_fits`): a class of ten runs averaging 2.75 cores and
-peaking at 16 to 70 books 22 cores (its 52-core 90th percentile held to a quarter of a host), and a burst of 24 of its jobs over six
-88-core hosts books four on each host, 88 cores; the same runs reported without peaks book 2.75 cores and the whole burst lands on
-one host. `js-cpu-replay` replays a trace with the arm `A heavy tail p90, 1.1` beside `A median, 1.1` and reports, per arm, the
+row books its median). `crates/js-cpu-replay/src/sim/tail_tests.rs`
+(`a_burst_of_a_heavy_tail_class_spreads_when_its_peaks_are_booked`) replays a burst of such a class with its runs taught their
+peaks. While the placer taught the peaks, a class of ten runs averaging 2.75 cores and peaking at 16 to 70 booked 22 cores (its
+52-core 90th percentile held to a quarter of a host), and a burst of 24 of its jobs over six 88-core hosts booked four on each
+host; the placer's test of that burst now asserts the mean booking of 7.11. `js-cpu-replay` replays a trace with the arm `A heavy tail p90, 1.1` beside `A median, 1.1` and reports, per arm, the
 most CPU booked on a host at once, the Gini coefficient of the jobs placed per host and the core-seconds the hosts were asked for
 past their cores.
 
