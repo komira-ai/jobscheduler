@@ -457,6 +457,64 @@ async fn a_scrape_reads_the_curve_view_of_a_placer_at_on_and_none_otherwise() {
     assert_eq!(seen.curves, expected);
 }
 
+/// Asserts the curve families through the mounted route, over a server whose placer is at `on`:
+/// a job of a class that ran once and ended, taught at the start (its class has a profile that
+/// fails its checks), and a job placed on `host-a` that named its 1.5 cores (booked flat, so
+/// charged 1500 m at every slot) make GET /metrics answer `js_curve_classes` with no class by
+/// curve and one flat, and `js_host_cpu_booked_peak_millicores` of 1500 for `host-a`, beside
+/// the summed bookings. Catches a route whose scrape leaves out the placer's view, and a view
+/// the scrape reads before the passes that make it.
+#[tokio::test]
+async fn get_metrics_at_on_answers_the_curve_classes_and_each_curve_hosts_peak() {
+    let mut rig = crate::agent_api::job_rig::clocked_curve_rig("metrics_curve_route");
+    rig.register("host-a", true);
+    let old = queue(&rig, "old-ran");
+    let jobs = &rig.jobs;
+    jobs.place(&old, HostId::new("host-a").unwrap(), BOOKED)
+        .unwrap();
+    jobs.transition(&old, JobState::Placed, JobState::Starting)
+        .unwrap();
+    jobs.transition(&old, JobState::Starting, JobState::Running)
+        .unwrap();
+    rig.advance(Duration::from_secs(10));
+    jobs.end_and_free(&old, exited(0), js_jobs::EndReason::Exited)
+        .unwrap();
+    let placer = rig.agents.placer.clone().unwrap();
+    // The run reports no usage, so it teaches no memory sample (0), but its class's profile.
+    assert_eq!(crate::job_sizes::begin(&placer, jobs).teach(), 0);
+    rig.place("new-live", "host-a");
+    let agent = crate::agent_api::job_rig::FakeAgent::new("host-a");
+    rig.beat(&agent).await.unwrap();
+    let fixture = Fixture {
+        shared: shared_over(&rig),
+        rig,
+        recorder: Arc::new(Recorder::default()),
+        ids: Vec::new(),
+    };
+    let (status, _, body) = answer(&fixture, from(Some("10.0.0.9:4000"), "/metrics")).await;
+    assert_eq!(status, StatusCode::OK);
+    let lines = |family: &str| -> Vec<&str> {
+        body.lines()
+            .filter(|line| line.starts_with(family))
+            .collect()
+    };
+    assert_eq!(
+        lines("js_curve_classes{"),
+        [
+            "js_curve_classes{state=\"curve\"} 0",
+            "js_curve_classes{state=\"flat\"} 1"
+        ]
+    );
+    assert_eq!(
+        lines("js_host_cpu_booked_peak_millicores{"),
+        ["js_host_cpu_booked_peak_millicores{host=\"host-a\"} 1500"]
+    );
+    assert_eq!(
+        lines("js_host_cpu_booked_millicores{host=\"host-a\"}"),
+        ["js_host_cpu_booked_millicores{host=\"host-a\"} 1500"]
+    );
+}
+
 /// Asserts that an agent's refusal code is a label of its own only when it is 1 to 64 characters
 /// of `a-z`, `0-9` and `-` (a code with a digit among them), and is counted as `other` otherwise (a capital, a space, a quote,
 /// no characters, 65 characters), and that with no refusal counted the family is only its HELP
