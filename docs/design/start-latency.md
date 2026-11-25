@@ -250,7 +250,7 @@ Read with `js-start-timeline` over that node's `journalctl -u js-agent-crun` for
   is watched in the second, as before.
 - **The lookups have their own threads** (`crun/fs/pool.rs`, now `pool.rs`): `js-lookups` for the lookups of host
   paths, `js-paths` for the assemblies and the checks, four threads each. A hung provider tree now
-  holds at most four threads of each.
+  holds at most four threads of each. (The sixth part gives `js-lookups` 80 threads.)
 
 ### Decisions
 
@@ -472,6 +472,69 @@ that lists it `running` leaves at once and is committed as it arrives.
 - The farm measurement after this server ships: the time from a container's `running` to the server's
   job state `running`, read from the job store's records against the agents' `Started` lines.
 
+## Sixth part: the lookups' pool as wide as one start's host paths
+
+### Measured on the nodes (before)
+
+The `queue_ms` of the `Started` lines (the time the lookup a start waited on spent waiting for a
+thread of `js-lookups`), one day of `journalctl -u js-agent-crun` on five nodes of one pool,
+starts with a host path only:
+
+| node | starts | p50 | p90 | p99 | over 20 ms |
+|---|---|---|---|---|---|
+| a | 6,670 | 0 | 302 | 3,124 | 25.3% |
+| b | 6,421 | 0 | 91 | 1,450 | 16.4% |
+| c | 6,968 | 0 | 230 | 2,892 | 21.5% |
+| d | 6,336 | 0 | 216 | 1,031 | 23.3% |
+| e | 6,760 | 0 | 225 | 4,891 | 24.5% |
+
+The open itself (`open_ms`) was 82-96 ms p50 and 328-354 ms p90 on the same nodes, so a start that
+waited for a thread waited behind four lookups of about that length. Measured from the same lines:
+the most lookups whose `[queued_at_ms, ended_at_ms)` covered another's ask was 32-73 a node; with
+each moved to begin when it was asked (inferred: as if no lookup had waited), 32-48. Each `Started`
+line carries one lookup, the one its start waited on, so a start with several host paths counts once.
+
+### Why, read in the code
+
+- **Every pool had four threads** (`pool::THREADS`). A lookup is a blocking open of the host path
+  beneath its root (on a tier store, the FUSE lookup of the tree) and holds its thread for as long
+  as the open takes, so a fifth lookup, of the same start or another, waited for one to end.
+- **Nothing bounds the starts in their lookups but the jobs the agent holds.** A job start's CPU
+  and memory are the placement's to judge (`admit`, `placed`), so the agent holds up to
+  `limits::MAX_HELD` (4096) jobs, any of which may be in its lookups. A pool wider than every lookup
+  that could be in flight (4096 x 80) is not a bound.
+- **One start's lookups are bounded:** at most `limits::MAX_LAYERS` (16) layers and
+  `limits::MAX_MOUNTS` (64) mounts, each a host path at most, so 80.
+
+### What this part changes
+
+`js-lookups` has `LOOKUP_THREADS` = `MAX_LAYERS + MAX_MOUNTS` = 80 threads (`crun/fs/mod.rs`); every
+other pool keeps `pool::THREADS` (4). A start's own lookups never wait for one another, and the
+nodes' measured demand fits in the pool with room to spare.
+
+### Decisions
+
+- **One start's most host paths, not a guess.** It is the one bound the code gives on lookups; it is
+  above what the nodes were measured to have in flight. It moves with the wire's limits.
+- **Fixed, never made on demand.** A provider that hangs now holds up to 80 threads of
+  `js-lookups`, and still no thread of `js-paths`, `js-create`, `js-remove` or `js-scratch`: its
+  starts fail `input-unavailable` at their 60 s bound as before, and an assembly, a create, a removal
+  or a cleanup is never behind it. A thread stuck in the kernel uses no CPU; its stack is reserved
+  address space, touched only as far as the open goes. Before, four such threads stopped every
+  lookup of every start on the host.
+- **The other pools stay at four.** The `Started` line stamps the lookup's wait alone, so there is
+  no measurement of a wait on another pool to widen it by.
+
+### Compatibility and failure modes
+
+- No wire, record or configuration format changes. The `Started` line is unchanged.
+- An agent with more than 80 lookups in flight queues the rest as before, each bounded by its 60 s.
+
+### What is left
+
+- After deploy: the `queue_ms` of the `Started` lines, the target being a p90 under 20 ms on every
+  node.
+
 ## Tests
 
 The tests drive the lifecycle with counted, ordered fakes and an injected clock; none asserts a
@@ -492,4 +555,7 @@ polls dispatch (a placement ends the hold, a lone start's beat is answered at on
 committed as it arrives, close beats paced, the end of a paced hold and a start past the window, a
 beat that lists no start, a drain), `held_beat_tests.rs`
 (the pacing's arithmetic and its record), and changes `agent_api/dispatch_tests.rs`'s placement case to the
-heartbeat being answered at the wake.
+heartbeat being answered at the wake. The sixth part adds `crun/fs/lookups_tests.rs` (a start naming the
+most host paths has all its lookups running at once, a lookup past the pool's threads waits for one
+to end and its bound, lookups that hang hold no thread of the assemblies and checks), which takes
+over `fs_tests.rs`'s case of four held lookups and a fifth.

@@ -38,6 +38,8 @@ pub struct AgentResult {
 
 /// The result lines of `text` by job id: every line that holds `job: result ` and names a
 /// run, whatever comes before (a journal's prefix); a job named twice keeps its last line.
+/// Each `key=value` word is read by [`words`], so a class the agent quoted (a build target's
+/// full name with its spaces) is read whole.
 #[must_use]
 pub fn results(text: &str) -> BTreeMap<String, AgentResult> {
     let mut by_job = BTreeMap::new();
@@ -45,19 +47,15 @@ pub fn results(text: &str) -> BTreeMap<String, AgentResult> {
         let Some((_, words)) = line.split_once("job: result ") else {
             continue;
         };
-        let words: BTreeMap<&str, &str> = words
-            .split_whitespace()
-            .filter_map(|word| word.split_once('='))
-            .filter(|(_, value)| *value != "-")
-            .collect();
+        let words = self::words(words);
         let Some(run) = words.get("run") else {
             continue;
         };
         let number = |key: &str| words.get(key).and_then(|value| value.parse().ok());
         by_job.insert(
-            (*run).to_owned(),
+            run.clone(),
             AgentResult {
-                class: words.get("class").map(|class| (*class).to_owned()),
+                class: words.get("class").cloned(),
                 cpu_usec: number("cpu_usage_usec"),
                 pressure_usec: number("cpu_pressure_some_usec"),
                 peak_milli: number("cpu_peak_millicores"),
@@ -65,6 +63,43 @@ pub fn results(text: &str) -> BTreeMap<String, AgentResult> {
         );
     }
     by_job
+}
+
+/// The `key=value` words of `text`, split at whitespace: a value runs to the next whitespace,
+/// or, when it opens with `"`, to the next `"` that no `\` escapes, with each `\` and the
+/// character after it read as that character (the agent's `class_word` writes a class that
+/// is not one word so). A value `-` that is not quoted is not known and is left out; a word
+/// without `=` is skipped; a quoted value the line ends inside runs to the end.
+fn words(text: &str) -> BTreeMap<String, String> {
+    let mut words = BTreeMap::new();
+    let mut chars = text.chars().peekable();
+    loop {
+        while chars.next_if(|c| c.is_whitespace()).is_some() {}
+        if chars.peek().is_none() {
+            return words;
+        }
+        let mut key = String::new();
+        while let Some(c) = chars.next_if(|c| !c.is_whitespace() && *c != '=') {
+            key.push(c);
+        }
+        if chars.next_if_eq(&'=').is_none() {
+            continue;
+        }
+        let mut value = String::new();
+        let quoted = chars.next_if_eq(&'"').is_some();
+        if quoted {
+            while let Some(c) = chars.next().filter(|c| *c != '"') {
+                value.extend(if c == '\\' { chars.next() } else { Some(c) });
+            }
+        } else {
+            while let Some(c) = chars.next_if(|c| !c.is_whitespace()) {
+                value.push(c);
+            }
+        }
+        if quoted || value != "-" {
+            words.insert(key, value);
+        }
+    }
 }
 
 /// Why an export does not convert.
@@ -350,6 +385,35 @@ mod tests {
                 ..AgentResult::default()
             }
         );
+    }
+
+    /// Asserts that a class the agent quoted is read whole, a build target's full name with
+    /// its spaces, slashes and colon, and the words after it still read; that `\"` and `\\`
+    /// in it read as `"` and `\`; that a quoted `-` is a class while a bare one is not; that a
+    /// word without `=` is skipped; and that a line that ends inside a quote (or after a lone
+    /// `\` in one) keeps what it read. Catches a full class cut at its first space, its words
+    /// read as other fields, and a class that is `-` lost.
+    #[test]
+    fn a_quoted_class_is_read_whole() {
+        let text = "job: result run=r1 class=\"komira//src/json:json mojo_compile build\" \
+                    cpu_from=class cpu_usage_usec=9\n\
+                    job: result run=r2 stray class=\"say \\\"hi\\\" a\\\\b\" cpu_usage_usec=3\n\
+                    job: result run=r3 class=\"-\"\n\
+                    job: result run=r4 cpu_usage_usec=4 class=\"open to the end\n\
+                    job: result run=r5 class=\"lone\\";
+        let read = results(text);
+        let class = |run: &str| read[run].class.clone();
+        assert_eq!(
+            class("r1").as_deref(),
+            Some("komira//src/json:json mojo_compile build")
+        );
+        assert_eq!(read["r1"].cpu_usec, Some(9));
+        assert_eq!(class("r2").as_deref(), Some("say \"hi\" a\\b"));
+        assert_eq!(read["r2"].cpu_usec, Some(3));
+        assert_eq!(class("r3").as_deref(), Some("-"));
+        assert_eq!(class("r4").as_deref(), Some("open to the end"));
+        assert_eq!(read["r4"].cpu_usec, Some(4));
+        assert_eq!(class("r5").as_deref(), Some("lone"));
     }
 
     #[test]

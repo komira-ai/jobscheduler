@@ -240,12 +240,13 @@ fn job_spec() -> impl Strategy<Value = JobSpec> {
         vec((text(), text()), 0..3),
         any::<i32>(),
         entries(),
+        text(),
     );
     (strings, resources, rest, rootfs()).prop_map(
         |(
             (job_id, image, command, args, env),
             (needs, constraints, wall_limit_seconds, network),
-            (ports, files, priority, labels),
+            (ports, files, priority, labels, history_key),
             (host_ports, layers, mounts),
         )| JobSpec {
             job_id,
@@ -273,6 +274,7 @@ fn job_spec() -> impl Strategy<Value = JobSpec> {
             host_ports,
             layers,
             mounts,
+            history_key,
         },
     )
 }
@@ -350,6 +352,7 @@ fn word() -> impl Strategy<Value = String> {
             "args",
             "env",
             "labels",
+            "historyKey",
             "needs",
             "cpuMillis",
             "wallLimitSeconds",

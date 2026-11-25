@@ -42,6 +42,7 @@ use crate::record::{
 pub(crate) mod dispatch_fields;
 mod file_fields;
 pub(crate) mod host_fields;
+mod key_fields;
 mod mark_fields;
 pub(crate) mod node_fields;
 mod queue_fields;
@@ -62,7 +63,8 @@ pub(crate) use test_support::{LATER_FORMAT, field_of, rearranged, set_field};
 pub(crate) const FORMAT: u8 = 1;
 
 /// The tags of a job row (whole-host tags 45, 46, 59 and 63 are in `whole_fields`, isolation tag
-/// 47 in `host_fields`, queue tags 48 to 53 in `queue_fields`, 54 to 58 in `rootfs_fields`).
+/// 47 in `host_fields`, queue tags 48 to 53 in `queue_fields`, 54 to 58 in `rootfs_fields`, the
+/// history key 66 in `key_fields`).
 pub(crate) mod job_tag {
     /// The job's id (text).
     pub const ID: u16 = 1;
@@ -364,13 +366,7 @@ fn put_spec(row: &mut Writer, spec: &JobSpec) {
     row.put(t::PORTS, ports);
     file_fields::put_files(row, &spec.files);
     rootfs_fields::put_spec(row, &spec.layers, &spec.mounts, &spec.host_ports);
-    row.put(
-        t::LABELS,
-        map(spec
-            .labels
-            .iter()
-            .map(|(k, v)| (k.as_bytes(), v.as_bytes()))),
-    );
+    key_fields::put(row, &spec.labels, spec.history_key.as_ref());
 }
 
 /// The row of `job`.
@@ -879,6 +875,7 @@ fn take_spec(fields: &mut Fields) -> Result<JobSpec, DecodeError> {
     let files = file_fields::take_files(fields)?;
     let labels = fields.opt(t::LABELS, labels_of)?.unwrap_or_default();
     let (layers, mounts, host_ports) = rootfs_fields::take_spec(fields)?;
+    let history_key = key_fields::take_history_key(fields)?;
     Ok(JobSpec {
         image,
         command,
@@ -894,6 +891,7 @@ fn take_spec(fields: &mut Fields) -> Result<JobSpec, DecodeError> {
         layers,
         mounts,
         host_ports,
+        history_key,
     })
 }
 

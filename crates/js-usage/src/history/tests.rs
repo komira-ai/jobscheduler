@@ -37,6 +37,7 @@ pub(crate) fn row(end: u64) -> EndedRow {
             cpu_mean_milli: 1100,
         }),
         cpu_series: None,
+        class: Default::default(),
     }
 }
 
@@ -57,6 +58,7 @@ fn bare(end: u64, id: &str) -> EndedRow {
         error_ms: None,
         used: None,
         cpu_series: None,
+        class: Default::default(),
     }
 }
 
@@ -214,22 +216,29 @@ fn the_bytes_of_a_row_are_pinned() {
 
 /// Catches: a reader that refuses a row a later build wrote with a field added at the end,
 /// which would make every added field cost the older build its history. The bytes come after
-/// the last field this build knows, the CPU series, on a row without one and on a row with one.
+/// the last field this build knows, the class, on rows with and without a CPU series and a
+/// class.
 #[test]
 fn bytes_after_the_known_fields_are_a_later_builds_fields_and_are_ignored() {
     let series = CpuSeries::new(4, vec![8, 16, 24], 9_000_000, false);
     for cpu_series in [None, series] {
-        let known = EndedRow {
-            cpu_series,
-            ..row(9)
-        };
-        let mut later = encode(&known);
-        if known.cpu_series.is_none() {
-            // A byte 0 stands for the absent series, so what follows it is the later build's.
-            later.push(0);
+        for class in [None, Some("cell//pkg:name build".to_owned())] {
+            let known = EndedRow {
+                cpu_series: cpu_series.clone(),
+                class,
+                ..row(9)
+            };
+            let mut later = encode(&known);
+            // A byte 0 stands for each absent field, so what follows them is the later build's.
+            if known.cpu_series.is_none() && known.class.is_none() {
+                later.push(0);
+            }
+            if known.class.is_none() {
+                later.push(0);
+            }
+            later.extend_from_slice(&[1, 0x81, 0x01, 7]);
+            assert_eq!(decode(&later), Ok(known));
         }
-        later.extend_from_slice(&[1, 0x81, 0x01, 7]);
-        assert_eq!(decode(&later), Ok(known));
     }
 }
 

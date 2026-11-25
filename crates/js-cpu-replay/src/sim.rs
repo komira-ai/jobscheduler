@@ -71,8 +71,9 @@ pub enum Bookings {
     /// What the placer's sizing books it from the history the replay has seen so far, every
     /// run taught without its peak: the median of its class's runs' means.
     Learned,
-    /// [`Bookings::Learned`] with each run taught with its recorded peak, as the placer teaches
-    /// it: a class whose peaks are a heavy tail books the 90th percentile of them.
+    /// [`Bookings::Learned`] with each run taught with its recorded peak, as the placer taught
+    /// it under the heavy-tail rule: a class whose peaks are a heavy tail books the 90th
+    /// percentile of them.
     Tailed,
     /// The placer's memory, and a CPU from the class's last runs (else its fallback's, else
     /// its client's) weighted by `2^(-age / half_life_ms)`, as Autopilot weights its samples:

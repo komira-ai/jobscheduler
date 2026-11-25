@@ -590,6 +590,7 @@ pub fn spec_of(needs: Needs) -> JobSpec {
         layers: Vec::new(),
         mounts: Vec::new(),
         host_ports: Vec::new(),
+        history_key: Default::default(),
     }
 }
 

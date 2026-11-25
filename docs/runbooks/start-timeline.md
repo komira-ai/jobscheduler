@@ -69,7 +69,8 @@ network is wired).
 ## The lookup it waited on (`lookup`)
 
 A start with layers or mounts opens each of its host paths beneath its root on the `crun` runtime's
-pool of lookups (`js-lookups`, four threads). On a FUSE file system, such as a tier store's tree, the
+pool of lookups (`js-lookups`, 80 threads: one for each host path a start may name, 16 layers and
+64 mounts). On a FUSE file system, such as a tier store's tree, the
 open is the file system's own lookup of the tree. Each lookup is stamped with the runtime's wall
 clock (milliseconds since the Unix epoch) three times: `queued_at_ms` when the worker asked the pool
 for it, `started_at_ms` when a thread of the pool began it and `ended_at_ms` when the open returned.

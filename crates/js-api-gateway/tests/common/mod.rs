@@ -459,6 +459,7 @@ pub fn spec() -> JobSpec {
             no_exec: true,
             propagation: js_proto::v1::MountPropagation::Private.into(),
         }],
+        history_key: Default::default(),
     }
 }
 

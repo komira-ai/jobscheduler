@@ -443,6 +443,7 @@ fn ended_row() -> EndedRow {
         error_ms: None,
         used: None,
         cpu_series: CpuSeries::new(2, vec![0, 16, 40], 5_500_000, true),
+        class: Default::default(),
     }
 }
 

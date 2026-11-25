@@ -402,7 +402,7 @@ fn only_a_job_the_history_sizes_has_a_source() {
 
 /// What a test's own subscriber writes: every line, kept for [`Lines::take`].
 #[derive(Clone, Default)]
-struct Lines(Arc<Mutex<Vec<u8>>>);
+pub(super) struct Lines(Arc<Mutex<Vec<u8>>>);
 
 impl io::Write for Lines {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
@@ -426,7 +426,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Lines {
 
 impl Lines {
     /// The lines written so far, emptied.
-    fn take(&self) -> String {
+    pub(super) fn take(&self) -> String {
         let mut held = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         String::from_utf8(std::mem::take(&mut *held)).unwrap()
     }
@@ -436,7 +436,7 @@ impl Lines {
 /// nowhere. Tracing settles whether a line is wanted from the subscribers it knows when a
 /// thread first reaches the line; without this one, a test thread with no subscriber can
 /// settle the placement line as never wanted before the capturing test reaches it.
-fn process_sink() {
+pub(super) fn process_sink() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         let _ = tracing_subscriber::fmt()

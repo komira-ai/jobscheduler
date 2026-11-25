@@ -47,7 +47,8 @@ pub struct Run {
     /// five seconds), in millicores, if measured. The run's CPU sample stays its mean
     /// (`cpu_usage_us` over `wall_us`); the peak is kept beside it, and a key whose recent
     /// peaks are far above the median of its means books them (a heavy tail,
-    /// [`crate::Summary`]'s CPU rule in the crate docs). `None` and `Some(0)` are no peak.
+    /// [`crate::Summary`]'s CPU rule in the crate docs). `None` and `Some(0)` are no peak; the
+    /// job server's placer teaches `None` (`docs/design/sizing.md`, 7.11).
     pub cpu_peak_millis: Option<u32>,
     /// The CPU contention the run met, in tenths of a percent, if known: the node's CPU
     /// pressure (`avg10`) when the run started, or the run's own wait for a CPU per unit of

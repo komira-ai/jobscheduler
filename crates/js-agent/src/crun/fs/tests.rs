@@ -164,6 +164,8 @@ pub(super) struct Paths {
     pub(super) gate: Option<Gate>,
     /// Each check alone says it began, then waits for a word, when set: a lookup is not held.
     pub(super) check_gate: Option<Gate>,
+    /// Each lookup alone says it began, then waits for a word, when set: a check is not held.
+    pub(super) lookup_gate: Option<Gate>,
     /// A search of a mount's source: refused with this error, or allowed.
     pub(super) search: Option<i32>,
     /// The ids of each search, in the order made.
@@ -184,6 +186,18 @@ impl Paths {
         let (go, going) = channel();
         let paths = Self {
             gate: Some((Mutex::new(began), Mutex::new(going))),
+            ..Self::default()
+        };
+        (paths, beginning, go)
+    }
+
+    /// Reads where only the lookups wait for a word on the second channel, having said so on
+    /// the first.
+    pub(super) fn holding_lookups() -> (Self, Receiver<()>, Sender<()>) {
+        let (began, beginning) = channel();
+        let (go, going) = channel();
+        let paths = Self {
+            lookup_gate: Some((Mutex::new(began), Mutex::new(going))),
             ..Self::default()
         };
         (paths, beginning, go)
@@ -214,6 +228,7 @@ impl PathCalls for Paths {
     fn open_beneath(&self, dir: BorrowedFd<'_>, rest: &Path) -> Result<OwnedFd, ResolveError> {
         self.opens.fetch_add(1, Ordering::SeqCst);
         wait_at(self.gate.as_ref());
+        wait_at(self.lookup_gate.as_ref());
         Kernel.open_beneath(dir, rest)
     }
 

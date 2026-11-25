@@ -10,11 +10,12 @@
 //!   beside it (the lifecycle's own, [`Lifecycle::with_cleanup_threads`]).
 //!
 //! A call on a FUSE file system blocks in the kernel until the file system answers, and one
-//! that has hung never returns. A pool has a fixed number of threads and makes none on
-//! demand, so a hung provider holds at most those threads of each; every call waits for a thread
-//! in the order it was asked, and the caller gives up on its answer at a deadline of its
-//! own clock ([`Pending::poll`]) whether or not a thread ever took it. A thread stuck in the
-//! kernel stays stuck until the file system answers or is unmounted.
+//! that has hung never returns. A pool has a fixed number of threads ([`THREADS`], or more for
+//! `js-lookups`) and makes none on demand, so a hung provider holds at most those threads of
+//! each; every call waits for a thread in the order it was asked, and the caller gives up on
+//! its answer at a deadline of its own clock ([`Pending::poll`]) whether or not a thread ever
+//! took it. A thread stuck in the kernel stays stuck until the file system answers or is
+//! unmounted.
 //!
 //! A task that answered rings the pool's [`Wake`] ([`Pool::set_wake`]), so the lifecycle's
 //! worker asks for the answer at once instead of at its next step.
@@ -28,7 +29,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::lifecycle::Wake;
 
-/// The threads of each pool of a node.
+/// The threads of each pool of a node but the lookups' (`js-lookups`, which has one for each
+/// host path a start may name: `crun::fs::LOOKUP_THREADS`).
 pub(crate) const THREADS: usize = 4;
 
 /// What a thread of the pool runs.

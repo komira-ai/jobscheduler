@@ -4,15 +4,18 @@
 //!
 //! # The class
 //!
-//! A job's class is the value of its label [`SIZE_CLASS_LABEL`] when it has one, else its
-//! image's name (without the digest, so a rebuilt image keeps the history) and its command. The
-//! arguments are not part of it: a client's arguments name what one run works on (an action's
-//! digest, a lease, a deadline, a grant), which no other run shares, so a class that held them
-//! would be a class of one run and never learn. A client that runs different work under one
-//! image and command names each work's class in the label. The estimator's key is that class's
-//! SHA-256 (its first eight bytes), under the client that submitted the job (two clients never
-//! share a class) and the job's platform (its `os` and `arch`, as it names them), on the cgroup
-//! basis.
+//! A job's class is the history key its client sent in the job's own field
+//! ([`js_jobs::JobSpec::history_key`], up to 512 bytes of printable ASCII, such as a build
+//! target's full path and the kind of its action) when it sends one, else the value of its label
+//! [`SIZE_CLASS_LABEL`] when it has one, each as it is, else its image's name (without the
+//! digest, so a rebuilt image keeps the history) and its command. The arguments are not part of
+//! it: a client's arguments name what one run works on (an action's digest, a lease, a deadline,
+//! a grant), which no other run shares, so a class that held them would be a class of one run
+//! and never learn. A client that runs different work under one image and command names each
+//! work's class. The estimator's key is that class's SHA-256 (its first eight bytes; a field and
+//! a label of the same text are one class), under the client that submitted the job (two
+//! clients never share a class) and the job's platform (its `os` and `arch`, as it names them),
+//! on the cgroup basis.
 //!
 //! # The size
 //!
@@ -48,10 +51,8 @@
 //!   most a quarter of the most cores a host has; the cold CPU when none has a sample. A booking is a share of its
 //!   host's CPU, not a ceiling. Placement packs these bookings within the CPU slack and admits
 //!   by the host's measured load, so a job's bursts above its mean are the load's to judge,
-//!   not its booking's, unless they are a heavy tail: a class whose runs' five-second peaks
-//!   (the 90th percentile of them, over at least five runs that reported one) are over twice
-//!   its median books that percentile instead, under the same quarter-host cap
-//!   (`docs/design/sizing.md`, 7.10), so a burst of its jobs spreads over the hosts.
+//!   not its booking's, however far its runs' five-second peaks are above it
+//!   (`docs/design/sizing.md`, 7.11): the pack limit spreads a burst of its jobs.
 //!
 //! [`JobSizes::sized_from`] says which of these sized a job, and each placement of a job the
 //! history sized is logged with it.
@@ -117,9 +118,8 @@
 //!   CPU is a lower bound and may only raise its class's CPU: the history a server rebuilds
 //!   at its start from runs taken under a ceiling therefore never holds a class down at it;
 //! - its CPU sample is its mean, its CPU time over its wall time. The most cores its group used
-//!   over five seconds (`cpu_peak`, as its host reported it) goes beside the sample, and books
-//!   its class only when the class's peaks are a heavy tail: a peak booking of every class held
-//!   a host to a few jobs whose peaks fill it while their use left most of it idle.
+//!   over five seconds (`cpu_peak`, as its host reported it) is not taught: a booking of the
+//!   peaks held a host to a few jobs whose peaks fill it while their use left most of it idle.
 //!
 //! # Profiles
 //!
@@ -143,8 +143,8 @@ use js_sizing::{
     Basis, Bounds, Day, Instance, Key, MIN_WALL_US, Outcome, PlatformClass, Run, Shape, Summaries,
     Summary,
 };
-use js_types::HostId;
 use js_types::sched::FarmTime;
+use js_types::{HistoryKey, HostId};
 use sha2::{Digest as _, Sha256};
 use tracing::{info, warn};
 
@@ -669,12 +669,10 @@ fn run_of(job: &JobRecord, booked: Booked) -> Option<(Run, Day)> {
         cpu_held: result
             .usage
             .is_some_and(|usage| held(usage, (cpu, wall), cpu_millis)),
-        // The sample is the run's mean CPU; its five-second peak goes beside it, and books
-        // its class only when the class's peaks are a heavy tail far above its median.
-        cpu_peak_millis: result
-            .usage
-            .and_then(|usage| usage.cpu_peak)
-            .map(|peak| u32::try_from(peak.millicores).unwrap_or(u32::MAX)),
+        // The sample is the run's mean CPU, and the class books the median of them. The
+        // five-second peak is not taught: a booking of the peaks held a host to four compiles
+        // averaging a few cores, while CPU is a share a burst can wait for, not a limit.
+        cpu_peak_millis: None,
     };
     Some((run, day_of_millis(millis(ended.as_duration()))))
 }
@@ -762,15 +760,25 @@ fn day_of_millis(millis: u64) -> Day {
     Day(u32::try_from(millis / DAY_MILLIS).unwrap_or(u32::MAX))
 }
 
-/// The name of `job`'s class, the history key a usage row records: its `size-class` label as
-/// it is, else `run-` and the 16 hex digits of the hash of its image name and command (never
-/// its image digest, its id or its args, which change with every build or run).
+/// The name of `job`'s class, the key its history is kept under, which a usage row records and
+/// the logs name: its history key as its client sent it, else its `size-class` label, each as it is, else `run-`
+/// and the 16 hex digits of the hash of its image name and command (never its image digest,
+/// its id or its args, which change with every build or run).
 #[must_use]
 pub fn class_name(job: &JobRecord) -> String {
-    match job.spec.labels.get(SIZE_CLASS_LABEL) {
+    match named_class(job) {
         Some(class) => class.to_owned(),
         None => format!("run-{:016x}", class_hash(job)),
     }
+}
+
+/// The class `job`'s client named: its history key, else its `size-class` label.
+fn named_class(job: &JobRecord) -> Option<&str> {
+    let spec = &job.spec;
+    spec.history_key
+        .as_ref()
+        .map(HistoryKey::as_str)
+        .or_else(|| spec.labels.get(SIZE_CLASS_LABEL))
 }
 
 /// The estimator's key of the class whose hash is `hash`, under `job`'s client and platform,
@@ -789,11 +797,12 @@ fn key_under(job: &JobRecord, hash: u64) -> Key {
     )
 }
 
-/// The first 8 bytes, big-endian, of the SHA-256 of `job`'s class text: `label`, NUL and its
-/// `size-class` label, else `run`, NUL, its image name, NUL and its command joined by NUL.
+/// The first 8 bytes, big-endian, of the SHA-256 of `job`'s class text: `label`, NUL and the
+/// class its client named ([`named_class`]; a history key and a label of the same text are one
+/// class), else `run`, NUL, its image name, NUL and its command joined by NUL.
 fn class_hash(job: &JobRecord) -> u64 {
     let spec = &job.spec;
-    match spec.labels.get(SIZE_CLASS_LABEL) {
+    match named_class(job) {
         Some(class) => label_hash(class),
         None => {
             let image = spec.image.as_ref().map_or("", |image| image.name());
