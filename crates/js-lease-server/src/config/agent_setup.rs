@@ -7,10 +7,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_registry::PoolConfig;
-use js_sched_placer::sizes::{ColdCpuOn, ColdMemoryOn, ColdSize, Curves};
+use js_sched_placer::curves::CurveSettings;
+use js_sched_placer::sizes::{ColdCpuOn, ColdMemoryOn, ColdSize};
 use js_types::ProviderId;
 
-use super::{Cli, ColdOn, Config, DispatchTimes, LiveClients, LoadSetting, check_pool, listen};
+use super::{
+    Cli, ColdOn, Config, CurveSetting, DispatchTimes, LiveClients, LoadSetting, check_pool, listen,
+};
 use crate::agent_pool;
 use crate::agent_tokens::{AgentTokens, PoolTokens};
 use crate::error::StartupError;
@@ -46,8 +49,9 @@ pub(crate) struct AgentSetup {
     /// operating system they name, in place of `cold`'s.
     pub(crate) cold_on: ColdOn,
     /// `--placement-curves`, or `server.placement_curves`: whether the engine learns profiles
-    /// in shadow.
-    pub(crate) curves: Curves,
+    /// and books by them, with `server.curve_hosts` and `server.curve_max_wait_seconds`
+    /// (no flags) for the mode `on`.
+    pub(crate) curves: CurveSetting,
     /// `server.max_lease_wall`: the one up to which the placement engine trusts a wall time
     /// for backfill.
     pub(crate) max_lease_wall: Option<Duration>,
@@ -189,7 +193,10 @@ pub(super) fn agents(cli: &Cli, clients: &LiveClients) -> Result<Box<AgentSetup>
             memory_bytes: cli.cold_memory_bytes,
         },
         cold_on,
-        curves: cli.placement_curves,
+        curves: CurveSetting {
+            mode: cli.placement_curves,
+            settings: CurveSettings::default(),
+        },
         max_lease_wall: None,
         job_limits: JobLimits::default(),
         jobs: listen::job_store(cli),

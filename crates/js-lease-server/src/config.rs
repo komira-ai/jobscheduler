@@ -62,7 +62,7 @@ pub use pack_limit::{PackLimit, PackLimitError};
 pub use placement::Placement;
 use placement::check_pool;
 pub(crate) use placement::{ColdOn, LoadSetting, checked, placer, split};
-pub(crate) use placement_curves::parse as parse_curves;
+pub(crate) use placement_curves::{CurveSetting, parse as parse_curves};
 pub(crate) use private::{read_private, read_private_reason};
 pub(crate) use retention::{
     DEFAULT_JOB_ALLOCATION_RETENTION, DEFAULT_JOB_RETENTION, JOB_RETENTION_MUST,
@@ -197,8 +197,8 @@ pub struct Cli {
     pub pack_limit: Option<PackLimit>,
     /// Whether the placement engine learns a CPU and a memory profile for each job class from
     /// the series its runs recorded: `off` (the default) learns nothing; `shadow` learns and
-    /// logs one line per run it checks against its class's profile. Placement is the same in
-    /// both. Needs `--agent-pool-config`.
+    /// logs one line per run it checks, placing as `off` does; `on` learns as `shadow` does
+    /// and books a class passing its checks by its CPU curve. Needs `--agent-pool-config`.
     #[arg(
         long,
         default_value = "off",
@@ -934,10 +934,10 @@ impl Config {
         self.agents.load.pack_limit
     }
 
-    /// Whether the placement engine learns profiles in shadow (`--placement-curves`, or
-    /// `server.placement_curves`): `off` unless set.
+    /// Whether the placement engine learns profiles, and books by them
+    /// (`--placement-curves`, or `server.placement_curves`): `off` unless set.
     pub fn placement_curves(&self) -> Curves {
-        self.agents.curves
+        self.agents.curves.mode
     }
 
     /// How long an ended job's record and result are kept after the job ends

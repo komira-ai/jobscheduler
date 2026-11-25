@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use js_jobs::JobState;
 use js_registry::HostMark;
+use js_sched_placer::curves::CurveView;
 use js_types::HostId;
 
 use super::{FAILURE_CODES, Histogram, Recorder, TABLES_FROM};
@@ -87,11 +88,13 @@ pub(crate) struct HostSeen {
     pub(crate) mark: Option<HostMark>,
 }
 
-/// What a scrape read: the job tables (`None` without the job service) and the hosts.
+/// What a scrape read: the job tables (`None` without the job service), the hosts, and the
+/// curve view of the placer (`None` unless it books by curve).
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Snapshot {
     pub(crate) jobs: Option<JobsSeen>,
     pub(crate) hosts: Vec<HostSeen>,
+    pub(crate) curves: Option<CurveView>,
 }
 
 /// `value` as a label value: a backslash, a double quote and a line feed escaped.
@@ -191,15 +194,21 @@ pub(crate) fn render(seen: &Snapshot, recorder: &Recorder) -> String {
         let _ = writeln!(out, "{name}{{from=\"{from}\"}} {count}");
     }
     refusals(&mut out, recorder);
+    let expired = recorder.curve_wait_expiries.load(Ordering::Relaxed);
+    let help = "Queued jobs of a curve class that waited past the wait bound (server.curve_max_wait_seconds) with no host fitting their curve, and were tested with their flat number from then on. A rise means curves book more than the hosts can give.";
+    counter(&mut out, "js_curve_wait_expiries_total", help, expired);
     start_refusals(&mut out, recorder);
     acquires(&mut out, recorder);
     hosts(&mut out, seen);
+    if let Some(view) = &seen.curves {
+        curves(&mut out, view);
+    }
     out
 }
 
 fn refusals(out: &mut String, recorder: &Recorder) {
     let name = "js_placement_refusals_total";
-    let help = "Refusals of a host to a queued job by the placement, by host and by the predicate that refused: cpu (CPU slack), predicted-memory (the load predicate's memory side), booked-memory (the flat memory guard) or cold-cap. A job is counted once for each host that refused it, in each pass.";
+    let help = "Refusals of a host to a queued job by the placement, by host and by the predicate that refused: cpu (CPU slack), cpu-curve (the curve hosts' slot-by-slot CPU check), predicted-memory (the load predicate's memory side), booked-memory (the flat memory guard) or cold-cap. A job is counted once for each host that refused it, in each pass.";
     family(out, name, "counter", help);
     for ((host, reason), count) in recorder.refusals() {
         let host = label(&host);
@@ -288,5 +297,21 @@ fn hosts(out: &mut String, seen: &Snapshot) {
     for (host, mark) in marked {
         let (host, state) = (label(host.host.as_str()), mark_text(mark));
         let _ = writeln!(out, "{name}{{host=\"{host}\",state=\"{state}\"}} 1");
+    }
+}
+
+/// The families of the curve mode, written only when the placer books by curve: the classes
+/// booking their curve and those booking flat, and the fullest booked slot of each curve host.
+fn curves(out: &mut String, view: &CurveView) {
+    let name = "js_curve_classes";
+    let help = "Job classes with a profile, by how they are booked: curve (passing all four checks, booked by their CPU curve) or flat (failing a check, booked their flat number).";
+    family(out, name, "gauge", help);
+    let _ = writeln!(out, "{name}{{state=\"curve\"}} {}", view.curve_classes);
+    let _ = writeln!(out, "{name}{{state=\"flat\"}} {}", view.flat_classes);
+    let name = "js_host_cpu_booked_peak_millicores";
+    let help = "The fullest slot of each curve host's booked CPU curve at the last placement pass, in thousandths of a core; js_host_cpu_booked_millicores stays the sum of flat bookings.";
+    family(out, name, "gauge", help);
+    for (host, peak) in &view.host_peaks {
+        let _ = writeln!(out, "{name}{{host=\"{}\"}} {peak}", label(host.as_str()));
     }
 }
