@@ -20,6 +20,11 @@ prove each rule, and how the work splits into tasks that can run in parallel.
 Each needs a decision before section 10's tasks start. Each has a recommendation; the rest of the page is written as if every
 recommendation is taken.
 
+**Settled by the API owner: when the callback is sent.** The callback is sent only after retries are exhausted. Each job gets one
+callback, sent once the job reaches its final state, and never one per attempt. The final state is one of: succeeded; failed with no
+retry left (an outcome no condition names, or the last allowed attempt); or cancelled. Section 6 states this as rule C1. The questions
+below no longer include it.
+
 1. **Should the service retry at all?** Section 2.2 of the design lists "being a workflow engine" as a non-goal and says that "retry
    policy and result interpretation belong to the client". kbf's own design says "the job service retries nothing". This page proposes a
    narrow exception: an opt-in, bounded policy over outcomes the service can judge (the host's faults, and a non-zero exit only when the
@@ -72,7 +77,8 @@ After:
   attempt's outcome does not retry, the attempts run out, or the job ends while it waits for its next attempt (a cancel, or the queue
   wait running out). `Job.attempt` names the current attempt, and `Job.attempt_history` lists the attempts that have ended, with each
   one's host, times and outcome.
-- A job may carry a `callback`: a URL the server sends one signed POST to when the job ends. The call is retried until the receiver
+- A job may carry a `callback`: a URL the server sends one signed POST to once the job reaches its final state, after its retries
+  are exhausted, and never per attempt (rule C1, section 6). The call is retried until the receiver
   answers 2xx or the delivery deadline passes. Its progress is stored in Postgres and survives a server restart, and `Job.callback_status`
   shows it.
 
@@ -520,16 +526,23 @@ exists:
 
 ## 6. How the two meet
 
-- **The callback fires once, on the final end.** `retry_txn` writes no callback row. Only `end_txn` writes one, and it runs only when no
-  attempt follows. A job retried three times and then succeeding is called back once, with `state: SUCCEEDED`, `attempts: 4` and the four
+- **Rule C1: one callback per job, sent only after retries are exhausted.** The callback is sent once the job reaches its final
+  state, and never per attempt. The final state is one of:
+  - succeeded;
+  - failed with no retry left: the outcome is one no condition names, or it is the last allowed attempt. This covers `FAILED`, `LOST`
+    and `FAILED_TO_START`;
+  - cancelled.
+
+  The store enforces this. `retry_txn` writes no callback row. Only `end_txn` writes one, and `end_txn` runs only when no attempt
+  follows. A job retried three times that then succeeds is called back once, with `state: SUCCEEDED`, `attempts: 4` and the four
   attempts in `attempt_history`.
 - **The final state** is the state the job ended in. That is the last attempt's outcome when the attempts ran out or the outcome was not
   retryable, for example `LOST`. It is `CANCELLED` or `FAILED_TO_START` with `NO_CAPACITY` when the job ended while it waited for its next
   attempt. In every case `attempt_history` carries what each attempt did, so a client sees, for example, that attempt 1 exited non-zero
   before the retry found no capacity.
 - **A cancel during a backoff** ends the job `CANCELLED` in one commit through `end_txn`, so the callback row is written in that commit.
-- **No callback per attempt.** A client that wants to see attempts as they happen reads `GetJob`. Calling per attempt would multiply
-  deliveries and make "once" depend on the policy.
+- **No callback per attempt,** by rule C1. A client that wants to see attempts as they happen reads `GetJob`. No option asks for a
+  call per attempt. Such an option would multiply deliveries and make "once" depend on the policy.
 
 ## 7. Compatibility
 
@@ -613,6 +626,7 @@ listen on loopback port 0, with no DNS (T12). Postgres is reached through `js_te
 | The next attempt waits for the previous allocation, also when its host is silent | `js-lease-server` `the_next_attempt_waits_for_the_previous_allocation`, `a_silent_hosts_attempt_holds_its_retry_until_the_queue_wait` | F |
 | A result resent after `retry_txn` is `Ack::Stale` | `js-lease-server` `a_result_resent_after_a_retry_is_stale` | F |
 | `retry_txn` keeps files, sets no retention end and writes no callback row | `js-jobs` `a_retry_keeps_files_and_writes_no_callback` | C |
+| Rule C1: a job retried to each final state (succeeded, failed with no retry left, cancelled) gets exactly one callback, sent after its last attempt, and none before it | `js-sim-cell` scenario `one_callback_after_retries_are_exhausted` | H |
 | One `Attempt` and one `UsageRecord` per attempt; `queued_at_ms` stays the first submit | `js-lease-server` `each_attempt_has_its_history_entry_and_usage_record` | F |
 | A crash between an attempt's end and its retry makes one retry | `js-sim-cell` scenario `restart_between_attempts` | H |
 | A whole-host attempt lost while running is retried with `max_replace` counted again | `js-sim-cell` scenario `whole_host_retry` | H |
@@ -719,5 +733,6 @@ Each choice below is the one most consistent with the merged code. The owner may
 - **`max_attempts` is refused above its ceiling; a deadline is cut to the retention end.** The attempt count changes how many times the
   work runs. The deadline only bounds how long the server tries.
 - **The callback body carries no output.** The receiver reads the outputs with its own token.
+- **Rule C1 is settled by the API owner,** not a choice of this page: one callback per job, sent only after retries are exhausted.
 - **Two releases per feature,** act then accept, so instances of two versions over one store never mishandle a job. The gate is an
   internal `Config` field, not a setting.
