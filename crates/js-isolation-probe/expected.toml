@@ -33,6 +33,9 @@
 "write:account-home" = "denied"
 "write:account-home-preferences" = "n/a"
 # Every place outside the run directory: the profile denies the write (or the modes do).
+# The shared folder of the homes, another user's home and root's home are below the roots
+# whose reads the profile denies, so a job may not even look at them (EPERM); the probe
+# still tries the write, which the profile denies too.
 "write:private-tmp" = "denied"
 "write:private-var-tmp" = "denied"
 "write:users-shared" = "denied"
@@ -52,6 +55,9 @@
 # Another user's home must not be readable, whatever its modes.
 "read:other-home" = "denied"
 "read:root-home" = "denied"
+# The account's own home holds the run directory: the profile grants it back for reading
+# (writes stay below exec/), so a job reads its own home and no other user's.
+"read:account-home" = "allowed"
 # The flags file is 0644 and holds no secret (no token: a Mac joins by its host certificate).
 "read:agent-flags" = "allowed"
 "read:agent-token" = "n/a"
@@ -136,6 +142,8 @@
 # By the time leave writes files, the system (Launch Services, acting for the account) has made
 # Library/Preferences in the account's home; the profile denies the job a write there.
 "leave:file:account-home-preferences" = "denied"
+# The homes' shared folder, another user's home and root's home: the look and the write are
+# denied, as in [probe].
 "leave:file:private-tmp" = "denied"
 "leave:file:private-var-tmp" = "denied"
 "leave:file:users-shared" = "denied"
@@ -183,6 +191,8 @@
 "find:file:usr-local" = "gone"
 "find:file:etc" = "gone"
 "find:file:library-launchdaemons" = "gone"
+# The profile denies a look below the homes, but a marker that was never made answers that it
+# does not exist (ENOENT) before the deny is reached, so these say gone.
 "find:file:other-home" = "gone"
 # Root's home is 0750: a job can neither write there (leave: denied) nor look.
 "find:file:root-home" = "n/a"
@@ -221,6 +231,8 @@
 "find:file:usr-local" = "gone"
 "find:file:etc" = "gone"
 "find:file:library-launchdaemons" = "gone"
+# The profile denies a look below the homes, but a marker that was never made answers that it
+# does not exist (ENOENT) before the deny is reached, so these say gone.
 "find:file:other-home" = "gone"
 # Root's home is 0750: a job can neither write there (leave: denied) nor look.
 "find:file:root-home" = "n/a"
