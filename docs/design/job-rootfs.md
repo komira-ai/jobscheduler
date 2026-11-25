@@ -778,7 +778,7 @@ three things, each on a thread pool that is not the lifecycle worker:
 
 - **its images**, the image and every image layer, each through the prefetcher (single flight per image; `prepare`
   takes the set and answers `Ready` when all are);
-- **its host paths**, each resolved (4.2, steps 1 and 2) on a pool of four threads of their own (`js-lookups`) with a bound of 60 s
+- **its host paths**, each resolved (4.2, steps 1 and 2) on a pool of 80 threads of their own (`js-lookups`, one for each host path a start may name) with a bound of 60 s
   each; a path that is missing or unreadable is `input-unavailable` at once, and one that has not answered by the bound
   is `input-unavailable` then;
 - **the assembly**, once both are ready: the lease directory, its quota, the clones (4.2, step 3), the targets, the
@@ -1035,8 +1035,9 @@ which includes the heartbeat that carried the start. Nothing new is reported.
 
 Why the lookups and mounts stay off the lifecycle worker: a lookup on a FUSE file system blocks in the kernel until
 the file system answers, and one that has hung never returns; the worker serves every other job. The `js-lookups` pool
-has four threads and makes none on demand, so a hung provider holds at most four of them, and further lookups wait their
-60 s and fail `input-unavailable`. The assemblies and the after-exit checks run on a second pool of four (`js-paths`), so
+has 80 threads (as many as the host paths one start may name: 16 layers and 64 mounts) and makes none on demand, so a
+hung provider holds at most 80 of them and no thread of another pool, and further lookups wait their 60 s and fail
+`input-unavailable`. The assemblies and the after-exit checks run on a second pool of four (`js-paths`), so
 an assembly held by a hung file system never delays another start's lookups. A thread stuck in the kernel stays stuck until the file system answers or is
 unmounted; that is the provider's to fix, and the host reports it only through failed starts.
 

@@ -1,10 +1,10 @@
 //! A job's file system on the `crun` runtime (`docs/design/job-rootfs.md`, sections 4.2 to
 //! 4.7 and 8): [`Fs`], which holds the roots a job's host paths lie beneath (opened when
 //! the agent starts), the directory of the runs' mounts (`<mounts>`, made a private mount
-//! of its own when the agent starts) and two pools of threads (`js-lookups` for the lookups
-//! of host paths, `js-paths` for the assemblies and the checks, so a start's lookups never
-//! wait behind another's assembly or check), and prepares each run's file system off the
-//! lifecycle's worker:
+//! of its own when the agent starts) and two pools of threads (`js-lookups`, `LOOKUP_THREADS`
+//! threads, for the lookups of host paths; `js-paths`, `pool::THREADS` threads, for the
+//! assemblies and the checks, so a start's lookups never wait behind another's assembly or
+//! check), and prepares each run's file system off the lifecycle's worker:
 //!
 //! 1. each host path is opened beneath its root, and a mount's `sub_path` beneath it, on the
 //!    lookups' pool ([`Fs::resolve`]), each lookup bounded by [`LOOKUP_MS`] on the lifecycle's
@@ -44,7 +44,7 @@ use std::os::fd::{AsFd as _, OwnedFd};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use js_agent_wire::{Layer, refusal};
+use js_agent_wire::{Layer, limits, refusal};
 use js_contain::job_fs::{MountCalls, ResolveError, make_private_dir, open_root};
 
 use crate::pool::{self, Pending, Poll, Pool};
@@ -70,8 +70,11 @@ pub const MOUNTS_DIR: &str = "/run/js-agent/mounts";
 /// How long the lookup of one host path may take, from when it is asked.
 pub const LOOKUP_MS: u64 = 60_000;
 
-/// The threads of the lookups' pool (`js-lookups`).
-pub(crate) const LOOKUP_THREADS: usize = pool::THREADS;
+/// The threads of the lookups' pool (`js-lookups`): as many as the host paths one start may
+/// name, every layer ([`limits::MAX_LAYERS`]) and every mount ([`limits::MAX_MOUNTS`]) a host
+/// path, so the lookups of one start never wait for a thread behind one another. Fixed, as
+/// every pool's: a provider that hangs holds at most these threads, and none of another pool.
+pub(crate) const LOOKUP_THREADS: usize = limits::MAX_LAYERS + limits::MAX_MOUNTS;
 
 /// How long the check of a job's sources after it ended may take.
 pub const CHECK_MS: u64 = 5_000;
