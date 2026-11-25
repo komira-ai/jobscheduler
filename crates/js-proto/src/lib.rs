@@ -86,12 +86,22 @@ impl fmt::Debug for v1::Callback {
 }
 
 /// The scheme and the host (with its port) of `url`: the text before its path, query or
-/// fragment, with any userinfo left out. A text with no `://` gives the empty text, since
-/// nothing in it is known to be a host.
+/// fragment, with any userinfo left out. A text that does not start with a scheme (a letter,
+/// then letters, digits, `+`, `-` or `.`) followed by `://` gives the empty text, since
+/// nothing in it is known to be a host: a `://` later in the text, in a path or a query, is
+/// not taken for the end of a scheme.
 fn url_origin(url: &str) -> String {
     let Some((scheme, rest)) = url.split_once("://") else {
         return String::new();
     };
+    let mut letters = scheme.bytes();
+    let starts = letters
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic());
+    let rest_ok = letters.all(|byte| byte.is_ascii_alphanumeric() || b"+-.".contains(&byte));
+    if !(starts && rest_ok) {
+        return String::new();
+    }
     let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
     let host = authority.rsplit('@').next().unwrap_or_default();
     format!("{scheme}://{host}")
@@ -187,8 +197,9 @@ mod tests {
 
     /// Asserts the whole `Debug` text of a callback and of a submit that carries one: the
     /// URL's scheme and host with its port, the key's length and the deadline, never the key,
-    /// nor the URL's userinfo, path, query or fragment. A URL with no `://` shows no part of
-    /// itself. Catches the generated `Debug`, which prints the key and the whole URL, coming
+    /// nor the URL's userinfo, path, query or fragment. A text that does not start with a scheme
+    /// and `://` (none at all, one only inside its query, an empty scheme, one starting with a
+    /// digit) shows no part of itself. Catches the generated `Debug`, which prints the key and the whole URL, coming
     /// back, and an origin that keeps the userinfo or the receiver's reference.
     #[test]
     fn debug_of_a_callback_shows_the_origin_and_key_length_only() {
@@ -201,6 +212,10 @@ mod tests {
             ("https://hooks.example", "https://hooks.example"),
             ("https://hooks.example?ref=7", "https://hooks.example"),
             ("hooks.example/js-done/ref-7", ""),
+            ("hooks.example/js-done/ref-7?next=https://x", ""),
+            ("user:pw@h.example/p?u=https://x", ""),
+            ("://h.example/ref-7", ""),
+            ("1https://h.example/ref-7", ""),
         ];
         for (url, origin) in cases {
             assert_eq!(
