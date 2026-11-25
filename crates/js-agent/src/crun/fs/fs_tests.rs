@@ -426,7 +426,7 @@ fn an_assembly_is_asked_once_and_taken_once() {
     assert_eq!(fs_.sources_of("lease"), 2);
     assert_eq!(fs_.sources_of("other"), 0);
     let made = fs_.take("r").expect("made");
-    assert_eq!(made.sources, 2);
+    assert_eq!(made.0.sources, 2);
     assert!(fs_.take("r").is_none(), "taken once");
 }
 

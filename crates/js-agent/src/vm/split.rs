@@ -11,8 +11,8 @@ use js_agent_wire::{
 
 use super::VmRuntime;
 use crate::lifecycle::{
-    Created, Found, FsPrepared, JobFs, NativeRefusal, OutputsReport, Prepared, Removal, RunHandle,
-    RunSpec, Runtime, RuntimeError, Status, Ticket, Wake, Whereabouts, label,
+    Created, Found, FsPrepared, JobFs, LookupStamps, NativeRefusal, OutputsReport, Prepared,
+    Removal, RunHandle, RunSpec, Runtime, RuntimeError, Status, Ticket, Wake, Whereabouts, label,
 };
 
 /// The agent's runtime and its VM runtime; see the [module](self).
@@ -47,6 +47,10 @@ impl Runtime for WithVms {
 
     fn start_steps(&mut self, id: &RunHandle) -> Vec<(&'static str, u64)> {
         self.owner(id).start_steps(id)
+    }
+
+    fn lookup_stamps(&mut self, id: &RunHandle) -> Option<LookupStamps> {
+        self.owner(id).lookup_stamps(id)
     }
 
     fn create_and_start(&mut self, spec: &RunSpec) -> Result<RunHandle, RuntimeError> {

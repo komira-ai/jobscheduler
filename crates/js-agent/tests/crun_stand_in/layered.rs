@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use js_agent::crun::fs::{FsSettings, Kernel, PathCalls};
 use js_agent::crun::{CrunRuntime, CrunSettings};
 use js_agent::lifecycle::{
-    Body, FsPrepared, JobFs, MountRoots, RunHandle, RunSpec, Runtime, Status,
+    Body, FsPrepared, JobFs, LookupStamps, MountRoots, RunHandle, RunSpec, Runtime, Status,
 };
 use js_agent_wire::{JobMount, Layer, MountMode, MountSource, Propagation, refusal};
 use js_contain::job_fs::{Attributes, MountCalls, ResolveError};
@@ -270,6 +270,43 @@ fn a_layered_run_is_made_over_its_assembled_root_and_removed_with_its_mounts() {
     assert_eq!(calls.of("detach"), detached);
     assert!(!mounts.exists());
     assert!(pins(&node, &id.0).is_empty());
+}
+
+/// Proves the start of a layered run gives the stamps of the lookup it waited on once,
+/// stamped on the runtime's clock (the node's, which reads 5000: the system's would read the
+/// Unix time now), and that a start with no host path, a second ask and a run the runtime
+/// does not hold give none. Catches the stamps lost between the file system and the run,
+/// stamped on another clock than the runtime's, or given twice.
+#[test]
+fn a_layered_runs_start_gives_its_lookups_stamps_once() {
+    let node = Node::new("layered-stamps");
+    let calls = Arc::new(Calls::default());
+    let mut runtime = open(settings(&node, &calls, Paths::default()));
+    let spec = node.spec("l20-exit");
+    assert_eq!(
+        prepare(&mut runtime, &spec, &job_fs(&node)),
+        FsPrepared::Ready
+    );
+    let id = runtime.create_and_start(&spec).expect("started");
+    let stamps = LookupStamps {
+        queued_at_ms: 5000,
+        started_at_ms: 5000,
+        ended_at_ms: 5000,
+    };
+    assert_eq!(runtime.lookup_stamps(&id), Some(stamps));
+    assert_eq!(runtime.lookup_stamps(&id), None, "given once");
+    let plain = node.spec("l21-exit");
+    let lease = runtime.lease_dir("l21-exit").expect("beside the runs");
+    std::fs::create_dir_all(lease).expect("its lease directory, as the lifecycle makes it");
+    let tmp = runtime.tmp_dir("l21-exit").expect("beside the runs");
+    std::fs::create_dir_all(tmp).expect("its temporary directory, as the lifecycle makes it");
+    let bare = runtime.create_and_start(&plain).expect("started");
+    assert_eq!(runtime.lookup_stamps(&bare), None, "no host path");
+    assert_eq!(runtime.lookup_stamps(&RunHandle("none".to_owned())), None);
+    for id in [id, bare] {
+        runtime.wait_ended(&id);
+        runtime.remove(&id).expect("removed");
+    }
 }
 
 /// Proves a root of layers alone (no image) runs the job's command as given, with the

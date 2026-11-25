@@ -150,6 +150,7 @@ fn the_timeline_of_a_start_with_a_provider_shows_provided_between_dirs_and_resol
             ("created", 70),
         ],
         runtime: Vec::new(),
+        lookup: None,
     };
     assert_eq!(
         h.life.step(),
