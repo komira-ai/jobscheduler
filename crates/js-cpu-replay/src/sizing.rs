@@ -8,7 +8,7 @@
 //! replay modelled for it (the time it was slowed, over its wall time), so a slowed run can
 //! only raise its class, as on the farm. No job is held at a CPU ceiling (no `cpu.max`). A
 //! run is taught with its recorded peak only by a sizer [`Sizer::with_peaks`] made, as `run_of`
-//! teaches it now; otherwise without, as it did before the heavy-tail rule.
+//! taught it under the heavy-tail rule; otherwise without, as `run_of` teaches it.
 
 use js_sched_placer::sizes::{DEFAULT_COLD_CPU_MILLIS, DEFAULT_COLD_MEMORY_BYTES};
 use js_sizing::{
@@ -58,9 +58,9 @@ fn key(index: u32) -> Key {
 pub struct Sizer {
     summaries: Summaries,
     bounds: Bounds,
-    /// Whether a run is taught with its recorded peak, as the placer teaches it: a class whose
-    /// peaks are a heavy tail then books them. Without, every class books the median of its
-    /// runs' means, as the placer did before it read the peak.
+    /// Whether a run is taught with its recorded peak, as the placer taught it under the
+    /// heavy-tail rule: a class whose peaks are a heavy tail then books them. Without, every
+    /// class books the median of its runs' means, as the placer does.
     peaks: bool,
 }
 

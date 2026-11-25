@@ -131,17 +131,15 @@ fn a_run_under_contention_or_held_at_a_ceiling_only_raises_the_class_cpu() {
 }
 
 /// Asserts that a class books the mean CPU of its runs (CPU time over wall time), the median of
-/// them, unless their five-second peaks are a heavy tail: five runs that used a core over their
-/// ten seconds book a core when their host reported a peak of two cores (twice the mean, no
-/// tail) or no peak at all (an agent from before it), and six cores, their peak, when it
-/// reported six. A run with no peak is not taken as held. Catches a class whose runs burst six
-/// times over its booking still booked at its mean, a class booked at a peak only twice its
-/// mean, and a run with no peak reported that teaches its class nothing.
+/// them, whatever their five-second peaks: five runs that used a core over their ten seconds
+/// book a core when their host reported a peak of six cores, of two, or no peak at all (an
+/// agent from before it). A run with no peak is not taken as held. Catches a class booked at
+/// its runs' peaks, and a run with no peak reported that teaches its class nothing.
 #[test]
-fn a_class_books_the_mean_cpu_of_its_runs_unless_their_peaks_are_a_heavy_tail() {
+fn a_class_books_the_mean_cpu_of_its_runs_whatever_their_peaks() {
     let tables = Tables::new();
     for (class, peak, books) in [
-        ("peaked", Some(6000), 6000),
+        ("peaked", Some(6000), 1000),
         ("steady", Some(2000), 1000),
         ("no-peak", None, 1000),
     ] {
