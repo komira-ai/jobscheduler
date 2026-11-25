@@ -129,7 +129,7 @@ mod tests {
     /// ASCII, a name over the bound) kept, and a valid one (a build target's full name with
     /// its spaces, slashes and colon, the longest) or the sources dropped with it.
     #[test]
-    fn a_class_that_is_no_size_class_name_is_left_out_and_the_rest_kept() {
+    fn a_class_that_is_no_history_key_is_left_out_and_the_rest_kept() {
         let sizing = |class: &str| StartSizing {
             class: Some(class.to_owned()),
             cpu: BookedFrom::Class,
