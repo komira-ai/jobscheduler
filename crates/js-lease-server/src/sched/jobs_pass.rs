@@ -132,7 +132,8 @@ impl Agents {
     /// takes the job tables the last one read with the job added, rather than reading them
     /// again, when that commit is the only write of the job store since
     /// ([`SchedPlacer::note_inserted`](super::place::SchedPlacer::note_inserted)). Whether it
-    /// was added; never for an agent side without a placer.
+    /// was added; never for an agent side without a placer, nor while a pass holds the tables
+    /// (it does not wait for one).
     pub(crate) fn note_inserted(&self, inserted: &Inserted) -> bool {
         let placer = self.placer.as_ref();
         placer.is_some_and(|placer| placer.note_inserted(inserted))

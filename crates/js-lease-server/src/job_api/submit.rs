@@ -50,7 +50,9 @@
 //! 5. **Poke the poller, answer queued.** When the service places jobs ([`Ctx::poking`]), the
 //!    call tells the placer of the job the commit recorded ([`Agents::note_inserted`]: when the
 //!    commit is the only write of the job store since the placer last read the job tables, the
-//!    next pass takes the job added to those tables rather than reading all four again), pokes
+//!    next pass takes the job added to those tables rather than reading all four again; while a
+//!    pass holds those tables, reading them again, the call does not wait for it and tells the
+//!    placer nothing, and that pass or the next reads the job from the store), pokes
 //!    the placement poller ([`crate::poller::Poller::poke`]) and answers. It never places the
 //!    job itself: the answer for a new job is the job as the commit recorded it, `queued` with
 //!    no host, always. The poller's pass, the tick's or a heartbeat's places it
@@ -284,7 +286,8 @@ pub(super) async fn submit_job(
 }
 
 /// Tells the placer of `agents` of the job just recorded, `inserted`, so that the next pass
-/// does not read the job tables again for it ([`Agents::note_inserted`]), and pokes the
+/// does not read the job tables again for it ([`Agents::note_inserted`], which never waits for
+/// a pass that holds them), and pokes the
 /// placement poller ([`crate::poller::Poller::poke`]); the job's record as the commit recorded
 /// it. The poke comes after the commit, so the pass it brings reads the job.
 async fn poke(agents: &Arc<Agents>, inserted: Inserted) -> JobRecord {
