@@ -12,7 +12,9 @@
 //!   run (or job) is listed, a stop until it leaves the held list (or the job listing, or
 //!   its id is in `retired_jobs`), a cancel for as long as the host
 //!   lists the run, the acknowledgement of every result the heartbeat still carries and
-//!   the acknowledgement of every heartbeat that carries the taint.
+//!   the acknowledgement of every heartbeat that carries the taint. The dispatch poller
+//!   does not drop what the queue refused: it holds the messages and hands them over again
+//!   when the worker takes an order and so makes room (module `delivery`).
 //! - **State comes out as a snapshot.** After every order and every step the worker
 //!   publishes the held runs, the results not yet acknowledged, the jobs a job start began
 //!   and the retired job ids, the taint to report and whether the host is tainted at all
@@ -102,12 +104,12 @@ use std::cell::Cell;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::Duration;
 
-use js_agent_wire::{Command, HeartbeatReply, HeldJob, HeldRun, HeldState, RunResult, Taint};
+use js_agent_wire::{HeartbeatReply, HeldJob, HeldRun, HeldState, RunResult, Taint};
 
 use crate::cli_runtime::CALL_LIMIT;
 use crate::facts::Platform;
@@ -116,6 +118,7 @@ use crate::lifecycle::{Config, Contact, Lifecycle, MountProviders, Status, Wake,
 use crate::readiness::{HookWindow, WorkerHook};
 
 mod bell;
+mod delivery;
 mod nudge;
 mod park;
 mod quiesce;
@@ -124,6 +127,7 @@ mod replies;
 use crate::system::{Backend, Machine, RuntimeBuild, SharedClock};
 use crate::usage::{Collector, Outbox};
 use crate::vm::VmSettings;
+pub use delivery::Delivery;
 pub use park::Parked;
 use quiesce::take_asked;
 pub use quiesce::{LeaseAnswers, WorkerHost};
@@ -483,6 +487,8 @@ struct Shared {
     asked_restore: Mutex<Option<String>>,
     /// The worker thread has ended: it returned, or it panicked.
     ended: AtomicBool,
+    /// How many orders the worker has taken from its queue: each made room (module `delivery`).
+    taken: AtomicU64,
     /// When the order or step the worker is inside is due to be done, on the lifecycle's
     /// clock ([`stall_bound`] after it began), plus one; 0 while it waits for an order.
     busy_until: AtomicU64,
@@ -525,17 +531,6 @@ impl Shared {
         drop(published);
         self.changed.notify_all();
     }
-}
-
-/// What became of a reply handed to the worker.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Delivery {
-    /// The reply waits in the queue.
-    Delivered,
-    /// The worker is busy and the queue is full: the reply was dropped.
-    Full,
-    /// Nobody reads the queue any more: the worker's thread is gone.
-    Gone,
 }
 
 /// A way to talk to the worker that can be copied: for a test to wait for it.
@@ -696,39 +691,6 @@ impl Worker {
             rescue,
             contact: Contact::default(),
             silence: None,
-        }
-    }
-
-    /// Hands a reply to the worker without waiting: [`Delivery::Full`] when the worker is
-    /// busy and the reply was dropped, [`Delivery::Gone`] when nobody reads the queue. The
-    /// reply is stamped with the clock now, so a start that waits in the queue has its
-    /// `valid_for_ms` counted from the moment it arrived.
-    pub fn try_deliver(&self, reply: HeartbeatReply) -> Delivery {
-        self.deliver(reply, true)
-    }
-
-    /// [`Worker::try_deliver`] for the commands of a dispatch poll's answer: they are acted
-    /// on as a reply's are, and the lease the host holds is left as it is.
-    pub fn try_deliver_commands(&self, commands: Vec<Command>) -> Delivery {
-        let reply = HeartbeatReply {
-            commands,
-            ..HeartbeatReply::default()
-        };
-        self.deliver(reply, false)
-    }
-
-    fn deliver(&self, reply: HeartbeatReply, whole: bool) -> Delivery {
-        let received_ms = self.clock.now_ms();
-        let reply = Box::new(reply);
-        let order = Order::Reply {
-            reply,
-            received_ms,
-            whole,
-        };
-        match self.handle.orders.try_send(order) {
-            Ok(()) => Delivery::Delivered,
-            Err(TrySendError::Full(_)) => Delivery::Full,
-            Err(TrySendError::Disconnected(_)) => Delivery::Gone,
         }
     }
 
@@ -921,6 +883,7 @@ fn work(
         let mut lines = Vec::new();
         let mut settle = None;
         let order = inbox.recv_timeout(step_every);
+        shared.took(order.is_ok());
         // The step below sees all that was done before it: a ring from now on nudges again.
         shared.nudge_queued.store(false, Ordering::SeqCst);
         let asked = order.as_ref().map_or(0, |order| match order {

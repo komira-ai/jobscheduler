@@ -612,11 +612,13 @@ impl<'a> Session<'a> {
         rescued.collect()
     }
 
-    /// The lines to print since the last call: the worker's, and the health verdict's changes.
+    /// The lines to print since the last call: the worker's, the dispatch poller's, and the
+    /// health verdict's changes.
     pub fn job_lines(&self) -> Vec<String> {
         let lines = self.jobs.iter().map(|jobs| jobs.worker.take_lines());
+        let dispatch = self.dispatch.iter().map(|cell| cell.take_lines());
         let health = self.health.iter().map(|health| health.take_lines());
-        lines.chain(health).flatten().collect()
+        lines.chain(dispatch).chain(health).flatten().collect()
     }
 
     /// What the worker publishes (nothing, for a session with no worker), and whether the

@@ -33,10 +33,23 @@
 //!   they are acted on as the commands of a heartbeat's reply are, and the answer says
 //!   nothing of the whole-node lease or the acknowledgements, so what the host holds of
 //!   them stays as the last heartbeat's reply left it. When the worker took them, each message's acknowledgement
-//!   ([`Dispatched::ack`]) goes into the next poll; when it was full or gone nothing is
-//!   acknowledged, and the server hands the messages out again once its hold on them ends.
+//!   ([`Dispatched::ack`]) goes into the next poll, and the agent polls again at once.
 //!   A message that fails its check is neither acted on nor acknowledged, and costs the
-//!   messages beside it nothing. The agent polls again at once.
+//!   messages beside it nothing.
+//! - **A worker with no room.** When the worker's queue is full the poller holds the messages
+//!   ([`Next::Room`]) and posts no poll: it waits for the worker to take an order, which
+//!   makes room ([`Worker::wait_room`](crate::Worker::wait_room), at most [`ROOM_WAIT`] before
+//!   it looks at the cell again), hands the messages over, and polls at once with their
+//!   acknowledgements. So they are acknowledged as soon as the worker has room, and not
+//!   handed out again by the server after its claim on them (`dispatch_lease_secs`, 10 s by
+//!   default) ends, while the worker is busy no longer than that. They keep the time their answer
+//!   arrived, so a start's timeline counts the hold. Messages for a worker whose thread is
+//!   gone, or that ended while they were held, are dropped and not acknowledged.
+//! - **Counts and lines.** The poller counts the answers the worker could not queue when they
+//!   arrived and the polls that failed ([`Counts`]), and logs one line for each such answer,
+//!   each hand-over of held messages (with how long after their arrival) and each failed
+//!   poll, with the counts; the lines go through the [`Cell`] to the session, which prints
+//!   them with the worker's.
 //! - **Anything else: a transport error, any status but 200 (404, 408, 429, 5xx, and the
 //!   refusals 400, 401, 403, 409), or an answer that is not usable.** The agent waits as the
 //!   session does after a failure ([`Backoff`](crate::Backoff): doubling, capped, jittered,
@@ -64,7 +77,7 @@ mod poller;
 mod serve;
 
 pub use cell::{Cell, Route};
-pub use poller::{Next, Poller};
+pub use poller::{Counts, Next, Poller, ROOM_WAIT};
 pub use serve::{Dial, serve};
 
 #[cfg(doc)]
