@@ -15,7 +15,8 @@ numbers refer to design.md.
     non-zero exit is retried up to `max_retries` and a kbf class with budget zero is not retried.
 25. Schedule triggers and run records; the launcher API. *Proves:* run record before return; missed ticks skipped; overlap rules, all
     with an injected clock.
-26. ucdk side: the launcher wiring and, later, the provider crate, in the ucdk repository.
+26. ucdk side: the launcher wiring and, later, the provider crate, in the ucdk repository. *Superseded (2026-11-24):* dropped when
+    ucdk removed its deployment side in komira-ai/ucdk#28 ([ucdk.md](ucdk.md)).
 
 **Phase E. Capacity providers and pools.** Steps 27 to 29 need no agent. Step 30 needs steps 20 and 21a. Step 31 is tested on fake agents.
 
