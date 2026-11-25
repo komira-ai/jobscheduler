@@ -1,5 +1,6 @@
-//! A burst of a heavy-tail class over six equal build-farm hosts: the class's runs average a
-//! few cores and burst to many, and the burst is placed in one pass with no load reading.
+//! A burst of a class over six equal build-farm hosts: the class's runs average a few cores
+//! and burst to many over five seconds, and the burst is placed in one pass with no load
+//! reading.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -25,6 +26,19 @@ const PEAKS: [u64; 10] = [
     16_000, 16_000, 16_000, 17_000, 18_000, 20_000, 30_000, 40_000, 52_000, 70_000,
 ];
 
+/// The CPU time of each of those runs: 2.75 cores over ten seconds.
+const CPU_TIME: Duration = Duration::from_millis(27_500);
+
+/// The five-second peaks of ten runs of a compile shaped like the farm's Mojo compiles, in
+/// millicores: 16 to 66 cores (the farm's were 20.8 at the median and 37.6 at the 90th
+/// percentile), each run averaging 3.6 cores over its ten seconds.
+const COMPILE_PEAKS: [u64; 10] = [
+    16_000, 18_000, 20_000, 21_000, 24_000, 28_000, 31_000, 34_000, 38_000, 66_000,
+];
+
+/// The CPU time of each of those runs: 3.6 cores over ten seconds.
+const COMPILE_CPU_TIME: Duration = Duration::from_secs(36);
+
 /// The jobs of the burst.
 const BURST: usize = 24;
 
@@ -44,11 +58,12 @@ fn six_hosts() -> SchedPlacer {
     placer
 }
 
-/// An exit with code 0 after ten seconds at 2.75 cores on average and 2 GiB, whose host
-/// reported a five-second peak of `peak` millicores (`None`: an agent from before the peak).
-fn compiled(peak: Option<u64>) -> JobEnd {
+/// An exit with code 0 that used `cpu_time` and 2 GiB (over the ten seconds [`ran`] gives a
+/// run), whose host reported a five-second peak of `peak` millicores (`None`: an agent from
+/// before the peak).
+fn compiled(cpu_time: Duration, peak: Option<u64>) -> JobEnd {
     let usage = ResourceUsage {
-        cpu_time: Duration::from_millis(27_500),
+        cpu_time,
         peak_memory_bytes: 2 * GIB,
         cpu_throttle: None,
         cpu_pressure_some: Some(Duration::ZERO),
@@ -66,15 +81,19 @@ fn compiled(peak: Option<u64>) -> JobEnd {
     }
 }
 
-/// Places a burst of [`BURST`] jobs of the class `node.tools`, whose history is its ten runs of
-/// [`PEAKS`] (`peaks` false: the same runs with no peak reported), over the six hosts in one
-/// pass; answers the CPU booked on each host, by host.
-fn burst(peaks: bool) -> BTreeMap<String, u64> {
+/// Places a burst of `jobs` jobs of the class `node.tools`, whose history is one run for each
+/// of `peaks` that used `cpu_time` (`reported` false: the same runs with no peak reported),
+/// over the six hosts in one pass; answers the CPU booked on each host, by host.
+fn burst(
+    (cpu_time, peaks): (Duration, &[u64]),
+    reported: bool,
+    jobs: usize,
+) -> BTreeMap<String, u64> {
     let tables = Tables::new();
     let placer = six_hosts();
-    for (run, peak) in PEAKS.into_iter().enumerate() {
+    for (run, peak) in peaks.iter().enumerate() {
         let spec = of_class("node.tools", needs(0, 0));
-        let end = compiled(peaks.then_some(peak));
+        let end = compiled(cpu_time, reported.then_some(*peak));
         ran(
             &tables,
             (&format!("seen-{run}"), None),
@@ -84,7 +103,7 @@ fn burst(peaks: bool) -> BTreeMap<String, u64> {
         );
     }
     placer.learn_ended(&tables.jobs).unwrap();
-    for at in 0..BURST {
+    for at in 0..jobs {
         let new = NewJob {
             id: Some(JobId::parse(&format!("q-{at:02}")).unwrap()),
             spec: of_class("node.tools", needs(0, 0)),
@@ -124,35 +143,45 @@ fn burst(peaks: bool) -> BTreeMap<String, u64> {
     by_host
 }
 
-/// Asserts that a burst of a heavy-tail class over six equal hosts books no host past its
-/// cores (1.0x) while another host has room: the class's ten runs averaged 2.75 cores and
-/// peaked at 16 to 70, so each job books the 90th percentile of the peaks (52 cores) held to a
-/// quarter of a host (22 cores), and the 24 jobs of the burst are four on each host, 88 cores
-/// booked on each. With the same runs reported without peaks, each job books its class's
-/// median (2.75 cores) and the burst lands on two hosts: the pack limit fills the first to half
-/// its cores (16 jobs, 44 cores booked for jobs whose peaks are at least 16 cores each, 256
-/// together, on a host of 88) and the other 8 go to the second, while the other four stay
-/// empty. Catches a heavy-tail class booked at its mean, which lets a burst of its jobs run a
-/// host far past its cores while others stay idle.
+/// Asserts that a burst of a class whose runs burst far over their mean books the class's mean
+/// and is spread by the pack limit, not by its peaks: the class's ten runs averaged 2.75 cores
+/// and peaked at 16 to 70, and each of the 24 jobs books the median of the means (2.75 cores)
+/// whether the runs reported their peaks or not. The pack limit fills the first host to half
+/// its cores (16 jobs, 44 cores booked) and the other 8 go to the second (22 cores), each host
+/// well under its cores by booking; a burst that uses its peaks at once shares the host's CPU
+/// by weight and the measured load holds the next pass. Catches the peaks booked again (the 90th
+/// percentile, 52 cores, held to a quarter of the host: four jobs of 22 cores on each host).
 #[test]
-fn a_burst_of_a_heavy_tail_class_books_no_host_past_its_cores_while_another_fits() {
-    let tailed = burst(true);
-    assert_eq!(
-        tailed.len(),
-        HOSTS.len(),
-        "every host takes a share: {tailed:?}"
-    );
-    for (name, cpu) in &tailed {
-        assert_eq!(*cpu, HOST.0, "host {name} booked to its cores, not past");
-    }
-    let median = burst(false);
+fn a_burst_of_a_class_with_high_peaks_books_its_mean_and_is_spread_by_the_pack_limit() {
     let half = HOST.0 / 2;
     let two_hosts = BTreeMap::from([
         ("a".to_owned(), half),
         ("b".to_owned(), 2750 * BURST as u64 - half),
     ]);
-    assert_eq!(
-        median, two_hosts,
-        "the burst at the median, packed to half a host"
-    );
+    for reported in [true, false] {
+        assert_eq!(
+            burst((CPU_TIME, &PEAKS), reported, BURST),
+            two_hosts,
+            "peaks reported: {reported}"
+        );
+    }
+}
+
+/// Asserts that a compile shaped like the farm's Mojo compiles, whose ten runs averaged 3.6
+/// cores and peaked at 16 to 66 cores over five seconds, books 3.75 cores (its mean rounded up
+/// to a quarter core) on the farm's 88-core hosts, the same as when its runs reported no peak.
+/// The boundaries: the median of the means (3.6 cores) is what is booked, not the 90th
+/// percentile of the peaks (38 cores, over twice the mean) held to the quarter of the host
+/// (22 cores), and a peak that is reported changes nothing. Catches the compile booked at
+/// 22 cores, which held each host to four of them while they used about 15 of its 88.
+#[test]
+fn a_compile_averaging_3_6_cores_with_high_five_second_peaks_books_3_75_cores_not_22() {
+    for reported in [true, false] {
+        let booked = burst((COMPILE_CPU_TIME, &COMPILE_PEAKS), reported, 1);
+        assert_eq!(
+            booked,
+            BTreeMap::from([("a".to_owned(), 3750)]),
+            "peaks reported: {reported}"
+        );
+    }
 }

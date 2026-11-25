@@ -13,8 +13,8 @@ with no CPU limit). **MEASURED**, counted from the export or the farm's metrics,
 
 ### The problem, in five lines
 1. A job's CPU booking is the median of its class's last 32 runs' mean CPU (CPU time over wall time,
-   komira-ai/jobscheduler#1026); a class whose five-second peaks are a heavy tail books the 90th percentile of those
-   peaks instead (`sizing.md`, 7.10). A class is a job type, for example the compile of one target. MEASURED in the first
+   komira-ai/jobscheduler#1026), whatever its runs' five-second peaks (`sizing.md`, 7.11; the heavy-tail booking of 7.10
+   books no job of the placer). A class is a job type, for example the compile of one target. MEASURED in the first
    8 minutes after the change, against the hour before: jobs per host 3 to 4 became 30 to 36; hosts about 20% busy
    became about 99%; jobs finished per minute 58 became 128; median queue wait 15 min became 4 min; median run time
    32 s became 65 s; load average on an 88-thread host 13 to 26 became 250 to 330.
