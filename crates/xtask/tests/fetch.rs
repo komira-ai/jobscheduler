@@ -173,7 +173,6 @@ fn fetch_installs_a_matching_download_and_refuses_a_mismatch() {
         &Sha256::of(TOOL),
         &Unpack::Raw,
         &out,
-        None,
         std::slice::from_ref(&ca),
     )
     .expect("fetch");
@@ -189,7 +188,7 @@ fn fetch_installs_a_matching_download_and_refuses_a_mismatch() {
     let dir = scratch("fetch-mismatch");
     let other = dir.join("tool");
     let pinned = Sha256::of(b"another tool");
-    let result = fetch::fetch(&url, &pinned, &Unpack::Raw, &other, None, &[ca]);
+    let result = fetch::fetch(&url, &pinned, &Unpack::Raw, &other, &[ca]);
     assert!(
         matches!(result, Err(fetch::Error::Mismatch { .. })),
         "{result:?}"
@@ -292,6 +291,27 @@ fn member() -> Unpack {
     }
 }
 
+/// [`fetch::fetch_cached`] of `url` alone, over real HTTPS trusting `ca`, its pauses between
+/// rounds recorded rather than slept: the line, or the error.
+fn cached(
+    url: &str,
+    sha256: &Sha256,
+    unpack: &Unpack,
+    out: &Path,
+    cache: &Path,
+    ca: CertificateDer<'static>,
+) -> Result<String, fetch::Error> {
+    let urls = [url.to_owned()];
+    let req = fetch::Cached {
+        urls: &urls,
+        sha256,
+        unpack,
+        out,
+        cache,
+    };
+    fetch::fetch_cached(&req, &fetch::https(&[ca], fetch::ATTEMPT_TIMEOUT), &|_| {})
+}
+
 /// Serves `body` with `status` at every path over TLS, counting the requests: the base URL,
 /// the CA and the count.
 fn counted(
@@ -319,11 +339,11 @@ fn a_cached_file_that_matches_is_installed_without_a_download() {
     std::fs::write(&cache, &archive).expect("seed the cache");
     let out = dir.join("bin").join("tool");
     let pin = Sha256::of(&archive);
-    let line = fetch::fetch(&url, &pin, &member(), &out, Some(&cache), &[ca]).expect("fetch");
+    let line = cached(&url, &pin, &member(), &out, &cache, ca).expect("fetch");
     assert_eq!(
         line,
         format!(
-            "ok: the cached {} of {url} has SHA-256 {pin}; installed {}",
+            "ok: the cached {} has SHA-256 {pin}; nothing was downloaded; installed {}",
             cache.display(),
             out.display()
         )
@@ -344,7 +364,7 @@ fn a_cached_file_that_does_not_match_is_refused_without_a_download() {
     std::fs::write(&cache, b"another file").expect("seed the cache");
     let out = dir.join("bin").join("tool");
     let pin = Sha256::of(&archive);
-    let err = fetch::fetch(&url, &pin, &member(), &out, Some(&cache), &[ca]).unwrap_err();
+    let err = cached(&url, &pin, &member(), &out, &cache, ca).unwrap_err();
     assert_eq!(
         err.to_string(),
         format!(
@@ -370,15 +390,7 @@ fn a_cached_file_that_matches_but_does_not_unpack_is_refused() {
     let other = Unpack::TarGz {
         member: "tool-1.0/other".into(),
     };
-    let err = fetch::fetch(
-        &url,
-        &Sha256::of(&archive),
-        &other,
-        &out,
-        Some(&cache),
-        &[ca],
-    )
-    .unwrap_err();
+    let err = cached(&url, &Sha256::of(&archive), &other, &out, &cache, ca).unwrap_err();
     assert_eq!(err, fetch::Error::NoMember("tool-1.0/other".into()));
     assert_eq!(requests.load(Ordering::SeqCst), 0);
     assert!(!out.exists());
@@ -394,7 +406,7 @@ fn a_miss_downloads_keeps_the_archive_and_installs() {
     let cache = dir.join("pinned").join("tool.tar.gz");
     let out = dir.join("bin").join("tool");
     let pin = Sha256::of(&archive);
-    let line = fetch::fetch(&url, &pin, &member(), &out, Some(&cache), &[ca]).expect("fetch");
+    let line = cached(&url, &pin, &member(), &out, &cache, ca).expect("fetch");
     assert_eq!(
         line,
         format!(
@@ -415,8 +427,9 @@ fn a_miss_downloads_keeps_the_archive_and_installs() {
     assert!(!fetch::part_path(&cache).exists());
 }
 
-/// Asserts that on a miss a download that is not the pinned file is neither kept nor
-/// installed, so the cache never saves it.
+/// Asserts that on a miss a download that is not the pinned file is refused in every round,
+/// each attempt naming both digests, and is neither kept nor installed, so the cache never
+/// saves it.
 #[test]
 fn a_miss_whose_download_does_not_match_keeps_nothing() {
     let (url, ca, _) = counted("200 OK", b"a different archive".to_vec());
@@ -424,12 +437,16 @@ fn a_miss_whose_download_does_not_match_keeps_nothing() {
     let cache = dir.join("pinned").join("tool.tar.gz");
     let out = dir.join("tool");
     let pin = Sha256::of(&tool_tar_gz());
-    let err = fetch::fetch(&url, &pin, &member(), &out, Some(&cache), &[ca]).unwrap_err();
+    let err = cached(&url, &pin, &member(), &out, &cache, ca).unwrap_err();
+    let attempt = format!(
+        "{url}: SHA-256 {}, not the pinned one",
+        Sha256::of(b"a different archive")
+    );
     assert_eq!(
         err,
-        fetch::Error::Mismatch {
-            expected: pin,
-            actual: Sha256::of(b"a different archive"),
+        fetch::Error::NotCached {
+            cache: cache.clone(),
+            attempts: vec![attempt; fetch::WAITS.len()],
         }
     );
     assert!(!cache.exists() && !fetch::part_path(&cache).exists());
@@ -447,22 +464,14 @@ fn a_miss_whose_download_does_not_unpack_keeps_nothing() {
     let other = Unpack::TarGz {
         member: "nope".into(),
     };
-    let err = fetch::fetch(
-        &url,
-        &Sha256::of(&archive),
-        &other,
-        &out,
-        Some(&cache),
-        &[ca],
-    )
-    .unwrap_err();
+    let err = cached(&url, &Sha256::of(&archive), &other, &out, &cache, ca).unwrap_err();
     assert_eq!(err, fetch::Error::NoMember("nope".into()));
     assert!(!cache.exists() && !out.exists());
 }
 
-/// Asserts that a cold cache with the release download failing (a 504, as in an outage) is
-/// one error line naming the cache path and the download's failure, with nothing kept or
-/// installed.
+/// Asserts that a cold cache with the release download failing (a 504, as in an outage) in
+/// every round is one error line naming the cache path and each attempt's failure, with
+/// nothing kept or installed.
 #[test]
 fn a_miss_whose_download_fails_says_so_in_one_line() {
     let (url, ca, requests) = counted("504 Gateway Timeout", b"upstream timed out".to_vec());
@@ -470,13 +479,15 @@ fn a_miss_whose_download_fails_says_so_in_one_line() {
     let cache = dir.join("tool.tar.gz");
     let out = dir.join("tool");
     let pin = Sha256::of(&tool_tar_gz());
-    let err = fetch::fetch(&url, &pin, &member(), &out, Some(&cache), &[ca]).unwrap_err();
-    assert_eq!(requests.load(Ordering::SeqCst), 1);
+    let err = cached(&url, &pin, &member(), &out, &cache, ca).unwrap_err();
+    assert_eq!(requests.load(Ordering::SeqCst), fetch::WAITS.len());
+    let attempts = vec![format!("{url}: download {url}: http status: 504"); fetch::WAITS.len()];
     assert_eq!(
         err.to_string(),
         format!(
-            "{cache:?} was not in the actions cache, and the download failed: \
-             download {url}: http status: 504; nothing was installed"
+            "{cache:?} was not in the actions cache, and no download was the pinned file: {}; \
+             nothing was installed",
+            attempts.join("; ")
         )
     );
     assert!(!cache.exists() && !out.exists());
@@ -491,13 +502,13 @@ fn a_cache_path_that_cannot_be_read_is_an_error() {
     let cache = dir.join("tool.tar.gz");
     std::fs::create_dir_all(&cache).expect("mkdir");
     let out = dir.join("tool");
-    let err = fetch::fetch(
+    let err = cached(
         &url,
         &Sha256::of(&tool_tar_gz()),
         &member(),
         &out,
-        Some(&cache),
-        &[ca],
+        &cache,
+        ca,
     )
     .unwrap_err();
     let fetch::Error::Cache { cache: named, why } = &err else {
@@ -520,15 +531,7 @@ fn a_download_that_cannot_be_kept_installs_nothing() {
     std::fs::write(&blocker, b"a file, not a directory").expect("write");
     let cache = blocker.join("tool.tar.gz");
     let out = dir.join("tool");
-    let err = fetch::fetch(
-        &url,
-        &Sha256::of(&archive),
-        &member(),
-        &out,
-        Some(&cache),
-        &[ca],
-    )
-    .unwrap_err();
+    let err = cached(&url, &Sha256::of(&archive), &member(), &out, &cache, ca).unwrap_err();
     assert!(
         matches!(&err, fetch::Error::Cache { cache: named, .. } if named == &cache),
         "{err:?}"
@@ -536,8 +539,9 @@ fn a_download_that_cannot_be_kept_installs_nothing() {
     assert!(!out.exists());
 }
 
-/// Asserts that the verb with `--cache` installs a matching cached file and exits 0 without
-/// downloading: its URL is plain HTTP, which a download refuses.
+/// Asserts that the verb with `--cache` takes `--url` more than once and installs a matching
+/// cached file, printing the hit line exactly, and exits 0 without downloading: its URLs are
+/// plain HTTP, which a download refuses.
 #[test]
 fn the_verb_installs_a_cached_file_with_exit_0() {
     let dir = scratch("cli-cache-hit");
@@ -546,47 +550,56 @@ fn the_verb_installs_a_cached_file_with_exit_0() {
     let out = dir.join("bin").join("tool");
     let (plain, _) = serve(false, |_, _| response("200 OK", &[], b"not this"));
     let pin = Sha256::of(TOOL).to_string();
-    let (code, err) = xtask_fetch(&[
-        "--url",
-        &format!("{plain}/tool"),
-        "--sha256",
-        &pin,
-        "--out",
-        out.to_str().expect("utf-8"),
-        "--cache",
-        cache.to_str().expect("utf-8"),
-    ]);
-    assert_eq!(code, Some(0), "{err}");
+    let run = Command::new(XTASK)
+        .arg("fetch")
+        .args([
+            "--url",
+            &format!("{plain}/one"),
+            "--url",
+            &format!("{plain}/two"),
+        ])
+        .args(["--sha256", &pin, "--out", out.to_str().expect("utf-8")])
+        .args(["--cache", cache.to_str().expect("utf-8")])
+        .output()
+        .expect("run xtask");
+    let err = String::from_utf8_lossy(&run.stderr);
+    assert_eq!(run.status.code(), Some(0), "{err}");
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout),
+        format!(
+            "ok: the cached {} has SHA-256 {pin}; nothing was downloaded; installed {}\n",
+            cache.display(),
+            out.display()
+        )
+    );
     assert_eq!(std::fs::read(&out).expect("out"), TOOL);
 }
 
-/// Asserts that the verb with a cold `--cache` and a failing download exits 1 with exactly
-/// one line on stderr, saying the file was not in the cache and the download failed.
+/// Asserts that a second `--url` without `--cache` is a usage error (exit 2) before any
+/// download, rather than dropped or tried by the one-attempt fetch: the server counts every
+/// request it gets.
 #[test]
-fn the_verb_with_a_cold_cache_and_a_failed_download_exits_1_in_one_line() {
-    let dir = scratch("cli-cache-cold");
-    let cache = dir.join("pinned").join("tool.tar.gz");
+fn several_urls_without_a_cache_exit_2() {
+    let dir = scratch("cli-urls");
     let out = dir.join("tool");
-    let (plain, _) = serve(false, |_, _| response("200 OK", &[], TOOL));
-    let url = format!("{plain}/tool");
+    let (url, _, requests) = counted("200 OK", TOOL.to_vec());
     let (code, err) = xtask_fetch(&[
+        "--url",
+        &url,
         "--url",
         &url,
         "--sha256",
         PIN,
         "--out",
         out.to_str().expect("utf-8"),
-        "--cache",
-        cache.to_str().expect("utf-8"),
     ]);
-    assert_eq!(code, Some(1), "{err}");
-    assert_eq!(err.lines().count(), 1, "{err}");
-    let head = format!(
-        "xtask: {cache:?} was not in the actions cache, and the download failed: download {url}: "
+    assert_eq!(code, Some(2), "{err}");
+    assert_eq!(
+        err,
+        "xtask: --url is given once without --cache: only a cached fetch tries several URLs\n"
     );
-    assert!(err.starts_with(&head), "{err}");
-    assert!(err.ends_with("; nothing was installed\n"), "{err}");
-    assert!(!cache.exists() && !out.exists());
+    assert_eq!(requests.load(Ordering::SeqCst), 0);
+    assert!(!out.exists());
 }
 
 /// Asserts that when the file cannot be installed (`--out`'s directory is a file), the fetch
@@ -606,7 +619,7 @@ fn an_install_that_fails_is_an_error_on_a_hit_and_on_a_miss() {
         let blocker = dir.join("bin");
         std::fs::write(&blocker, b"a file, not a directory").expect("write");
         let out = blocker.join("tool");
-        let err = fetch::fetch(&url, &pin, &member(), &out, Some(&cache), &[ca]).unwrap_err();
+        let err = cached(&url, &pin, &member(), &out, &cache, ca).unwrap_err();
         assert!(
             matches!(&err, fetch::Error::Install { path, .. } if path == &out),
             "{hit}: {err:?}"

@@ -3,12 +3,12 @@
 //!
 //! A pinned tool is downloaded only by `cargo xtask fetch`: a `run:` that names a GitHub
 //! release download (`releases/download/`) and is not a fetch is refused. Every fetch is
-//! one command with no `if:`, whose `--sha256` is one variable, whose `--url` names its
-//! version by variable, and whose `--cache` is `"$RUNNER_TEMP/<file>"`, a path no other
-//! fetch of its job uses. Right around it are
+//! one command with no `if:`, whose `--sha256` is one variable, whose every `--url` (a fetch
+//! may give several, tried in turn on a miss) names its version by variable, and whose
+//! `--cache` is `"$RUNNER_TEMP/<file>"`, a path no other fetch of its job uses. Right around it are
 //!   - before it, `actions/cache/restore` pinned by commit, with an `id:`, no `if:`, and in
 //!     its `with:` exactly the fetch's cache path (`${{ runner.temp }}/<file>`) and a key
-//!     whose only expressions are `env.<V>` for each variable of the URL and for the
+//!     whose only expressions are `env.<V>` for each variable of the URLs and for the
 //!     `--sha256` variable: a new version or a new pin is a new key, and no `restore-keys`
 //!     can hand back another version's archive;
 //!   - after it, `actions/cache/save` pinned by commit, with `if:` exactly
@@ -279,6 +279,27 @@ fn a_fetch_of_another_shape_is_refused() {
         1,
     );
     refused(&two, "not one command");
+}
+
+/// Asserts that a fetch may give `--url` more than once (the mirrors it tries in turn on a
+/// miss), and that then every one of them must name its version by variable, and the key must
+/// hold the variables of them all.
+#[test]
+fn every_url_of_a_fetch_with_several_keeps_the_rule() {
+    let one = "--url \"https://github.com/o/tool/releases/download/v$V/tool.tar.gz\"";
+    let mirror = |url: &str| with(one, &format!("{one} --url \"{url}\""));
+    assert_eq!(
+        errors(&mirror("https://mirror.example/tool-$V.tar.gz")),
+        Vec::<String>::new()
+    );
+    refused(
+        &mirror("https://mirror.example/tool-1.0.tar.gz"),
+        "the fetch's --url \"https://mirror.example/tool-1.0.tar.gz\" names no version variable",
+    );
+    refused(
+        &mirror("https://mirror.example/$W/tool-$V.tar.gz"),
+        "is not of the URL's version and the pinned SHA-256 alone",
+    );
 }
 
 /// Asserts that a restore of another shape is refused: absent (the fetch first in its job,

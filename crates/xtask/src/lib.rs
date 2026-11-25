@@ -281,9 +281,10 @@ enum Verb {
     /// Download a pinned file, check its SHA-256 and install it (mode 0755), or with `--tree`
     /// a directory of a tar.
     Fetch {
-        /// Where to download it from (HTTPS; redirects must stay on HTTPS).
-        #[arg(long)]
-        url: String,
+        /// Where to download it from (HTTPS; redirects must stay on HTTPS). With `--cache`, it
+        /// may be given more than once: the URLs are tried in turn, in rounds, on a miss.
+        #[arg(long, required = true)]
+        url: Vec<String>,
         /// The SHA-256 of the download (before unpacking), 64 lowercase hex digits.
         #[arg(long)]
         sha256: fetch::Sha256,
@@ -537,14 +538,24 @@ fn run(cli: Cli) -> Result<String, Error> {
         } => {
             let unpack = fetch::Unpack::new(extract, member, tree).map_err(Error::Usage)?;
             let roots = fetch::host_roots();
-            Ok(fetch::fetch(
-                &url,
-                &sha256,
-                &unpack,
-                &out,
-                cache.as_deref(),
-                &roots,
-            )?)
+            match (cache, url.as_slice()) {
+                (Some(cache), urls) => Ok(fetch::fetch_cached(
+                    &fetch::Cached {
+                        urls,
+                        sha256: &sha256,
+                        unpack: &unpack,
+                        out: &out,
+                        cache: &cache,
+                    },
+                    &fetch::https(&roots, fetch::ATTEMPT_TIMEOUT),
+                    &std::thread::sleep,
+                )?),
+                (None, [url]) => Ok(fetch::fetch(url, &sha256, &unpack, &out, &roots)?),
+                (None, _) => Err(Error::Usage(
+                    "--url is given once without --cache: only a cached fetch tries several URLs"
+                        .to_owned(),
+                )),
+            }
         }
         Verb::FarmBuild {
             buck2,
