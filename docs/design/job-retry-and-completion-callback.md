@@ -314,7 +314,20 @@ enum JobEventKind { ... JOB_EVENT_KIND_RETRY_SCHEDULED = 8; } // detail names th
 - **History.** Each ended attempt appends an `Attempt`, in the commit that queues the next attempt or ends the job, and a
   `RETRY_SCHEDULED` event when another follows. With no ceiling on `max_attempts`, the history keeps the newest 256 attempts and counts
   the rest in `dropped_attempts`, as `events` and `dropped_events` do. 256 entries of a few dozen bytes each keep a job row well under the
-  store's row sizes. The 32-event bound of `Job.events` is unchanged.
+  store's row sizes. The 32-event bound of `Job.events` is unchanged. The bound limits only what `GetJob` returns. Every attempt's
+  host and placement time are kept in the attempt rows below, with no limit on their number, so every attempt's logs stay readable
+  (section 3.8).
+- **Attempt rows.** Each attempt that ran gets a row of its own, `attempt/<job id>/<n, 10 digits>`. It holds the attempt's host id,
+  `placed_at` and `ended_at`, in the same tag-length-value form as a job row, and it is written in the commit that ends or retries that
+  attempt.
+  - **Size.** About 100 bytes per attempt, beside the job row. The job row itself stays bounded.
+  - **Write cost.** One more key in the commit of `retry_txn` or `end_txn`.
+  - **Read cost.** One point read, and only for a `GetLogs` of an attempt no longer in `attempt_history`. `GetJob` never reads the rows.
+  - **Sweep.** The retention sweep deletes a job's attempt rows by a prefix scan of `attempt/<job id>/`, in batches of the sweep's
+    size, before it deletes the job row. So an interrupted sweep resumes from the job row's due entry and leaves no orphan. The sweep
+    also deletes attempt rows whose job row is gone, which only a rolled-back build can leave, as for `callback/` rows (section 5.5).
+    A job id becomes reusable only after its rows are gone, so a new job with that id never meets an old job's rows.
+  - **Old builds.** It is a new key prefix, which an older build neither reads nor deletes.
 - **The job's own fields are the current attempt's.** `host_id`, `times.placed_at_ms`, `times.started_at_ms`, `start_failure` and the
   result are the current attempt's. When the job is queued for a retry, they are cleared, as a failed prepare clears host and placement
   today, and the attempt's values move into `attempt_history`. `times.queued_at_ms` stays the first submit. An earlier attempt's tails
@@ -356,11 +369,13 @@ enum JobEventKind { ... JOB_EVENT_KIND_RETRY_SCHEDULED = 8; } // detail names th
 - **Reading.** `GetLogsRequest` gains `optional uint32 attempt = 6`: the attempt whose output to read, from 1. Absent: the latest
   (`Job.attempt`). `attempt` is read only with a stream. A request without a stream answers the result's tails as before, and only the
   final attempt has a result.
-  - **Errors.** An attempt above the current one is refused `OUT_OF_RANGE`. An attempt dropped from `attempt_history` (section 3.7) is
-    `NOT_FOUND`, because its host is no longer on record.
+  - **Errors.** An attempt of 0 is an invalid-argument error. An attempt above the current one is refused `OUT_OF_RANGE`. An attempt
+    that was never placed has no row and no logs: the job ended while it waited, so no number was given to it. Every attempt that ran
+    is readable, however many there were.
   - **The current attempt** is read exactly as a job is read today.
   - **An earlier attempt** is read as a job that ended without a result is read today. It is ended for that read, so no follow waits.
-    Its prefix comes from its host and number, and the placement cutoff from its own `Attempt.times`. Its length comes from what the
+    Its prefix comes from its host and number, and the placement cutoff from its placement time. Both are taken from its `Attempt` in
+    `attempt_history` when it is still there, and from its attempt row (section 3.7) when it is not. Its length comes from what the
     store holds, since it has no result. The job's own state does not decide it. Today's reader answers an empty page for a queued job
     (`crates/js-lease-server/src/job_api/logs.rs`). Task J limits that early answer to the current attempt, so attempt 1's logs can be
     read while the job waits in backoff.
@@ -610,8 +625,8 @@ renumbered, and no shipped field takes another meaning.
 - **Old agents.** The agent wire does not change. A retry is a new placement with a new allocation id. It reaches a host that ran the
   job before only if that host's agent reports `start-fence` (section 3.5). The attempt's log prefix is built by the server and passes
   every agent's check (section 3.8).
-- **Stored rows.** Older builds carry the new job tags (`Carried`). The `callback/` rows and `idx/callback/` entries are a new key
-  prefix, which an older build neither reads nor deletes.
+- **Stored rows.** Older builds carry the new job tags (`Carried`). The `callback/` rows, the `idx/callback/` entries and the `attempt/`
+  rows are new key prefixes, which an older build neither reads nor deletes.
 - **Instances of two versions over one store** (multi-instance.md, section 7). During a rolling update, an older instance could end a
   job that has a policy without retrying it, or end a job with a callback without making its row due. So each feature lands in two
   releases:
@@ -692,9 +707,11 @@ The tests follow the repository's rules:
 | `retry_txn` keeps files, sets no retention end and leaves the callback armed | `js-jobs` `a_retry_keeps_files_and_leaves_the_callback_armed` | C, D |
 | One `Attempt` and one `UsageRecord` per attempt; `queued_at_ms` stays the first submit | `js-lease-server` `each_attempt_has_its_history_entry_and_usage_record` | F |
 | History keeps the newest 256 and counts the rest | `js-jobs` `attempt_history_keeps_its_bound_and_counts_the_dropped` | C |
+| Every attempt that ran has its row, written in the commit that ends or retries it, with its host and times | `js-jobs` `each_attempt_writes_its_row_in_its_commit` | C |
+| The sweep deletes every attempt row of a job before the job row, across batches and an interrupted sweep, and deletes orphans | `js-jobs` `the_sweep_deletes_a_jobs_attempt_rows_first`, `the_sweep_deletes_orphan_attempt_rows` | C |
 | Attempt 1's log prefix is today's; attempt `n ≥ 2`'s is `prefix/H/S/job_id/` and passes the agent's prefix check; a job whose id looks like an attempt segment (`_a2`, or 63 hex digits) never shares a key with another job's attempt | `js-lease-server` `each_attempt_gets_its_own_log_prefix`; `js-agent-wire` `an_attempt_prefix_passes_the_start_check` | J |
 | A configured prefix of 412 to 476 bytes: no live logs for attempts after the first, the reader agrees, a warning at start | `js-lease-server` `an_attempt_prefix_that_does_not_fit_runs_without_live_logs` | J |
-| `GetLogs` `attempt`: absent reads the latest; each attempt reads its own bytes; attempt 1 is readable while the job waits in backoff; above the current is `OUT_OF_RANGE`; a dropped one is `NOT_FOUND` | `js-lease-server` `get_logs_reads_the_attempt_asked_for`, `an_earlier_attempts_logs_read_during_backoff` | J |
+| `GetLogs` `attempt`: absent reads the latest; each attempt reads its own bytes; attempt 1 is readable while the job waits in backoff; 0 is an invalid argument; above the current is `OUT_OF_RANGE`; an attempt dropped from `attempt_history` (attempt 1 of a job with 300 attempts) still reads its own bytes, through its row | `js-lease-server` `get_logs_reads_the_attempt_asked_for`, `an_earlier_attempts_logs_read_during_backoff`, `a_dropped_attempts_logs_read_through_its_row` | J |
 | A crash between an attempt's end and its retry makes one retry | `js-sim-cell` scenario `restart_between_attempts` | H |
 | A whole-host attempt lost while running is retried with `max_replace` counted again | `js-sim-cell` scenario `whole_host_retry` | H |
 | Over every run: no job runs more than `max_attempts` times; no two attempts of a job hold an allocation at once | `js-sim-cell` `Invariant::AttemptsBounded`, `Invariant::OneAttemptAtATime` | H |
@@ -744,10 +761,10 @@ interfaces of task A.
 | --- | --- | --- | --- |
 | **A. Interfaces** | The proto additions of sections 3.1, 3.7, 3.8, 5.2 and 5.5, with `golden/fields.txt` rows and goldens. `SubmitJob` refuses `retry` and `callback`. The Rust signatures below, with bodies that never retry and never deliver. | none | js-proto, js-types, js-jobs, js-callback (new), js-lease-server |
 | **B. Retry decision** | The classing table, the job-fault refusal codes, the backoff and jitter. Pure (R4). | A | js-types |
-| **C. Attempt store** | Tags 66 and 68 to 72, `retry_txn`, the reset of the pre-run counters, the history bound, `UsageRecord.attempt`, the shared store tests. | A | js-jobs, js-usage |
+| **C. Attempt store** | Tags 66 and 68 to 72, `retry_txn`, the reset of the pre-run counters, the history bound, the `attempt/` rows and their sweep, `UsageRecord.attempt`, the shared store tests. | A | js-jobs, js-usage |
 | **D. Callback store** | Tag 67 and the key's digest; the `callback/` row written at submit and made due in `end_txn`; claim, answer, expire and key erasure; the boot raise; the sweep. | A | js-jobs |
 | **E. Delivery** | The Standard Webhooks signer, the address rule with its resolver argument, the sender (`ureq`, no proxy, no redirects, no body read, a time limit), the answer classes. | A | js-callback |
-| **J. Attempt logs** | The attempt's log prefix and its length rule; `GetLogsRequest.attempt` and the reader of an earlier attempt. | A | js-lease-server, js-agent-wire (test only) |
+| **J. Attempt logs** | The attempt's log prefix and its length rule; `GetLogsRequest.attempt` and the reader of an earlier attempt, from `attempt_history` or its `attempt/` row (the row's read through the store interface task A fixes). | A | js-lease-server, js-agent-wire (test only) |
 | **F. Server retry (act)** | `end_of` and the loss paths ask `decide`. Placement honours `retry_not_before`, the 15-minute bar, the `start-fence` rule and the freed previous allocation. The queue wait counts from the backoff end. The API mapping; metrics. | B, C | js-lease-server, js-sched-placer |
 | **G. Server callback (act)** | The submit checks, the delivery threads, `callback_status`, the key's redaction from every output, metrics. | D, E | js-lease-server |
 | **H. Simulation and conformance** | The invariants and scenarios of section 9, and the reference service. | F, G, J | js-sim-cell, js-conformance |
@@ -772,6 +789,7 @@ impl JobStore {
     pub fn claim_callbacks(&self, by: &InstanceId, now: StoreTime, limit: usize) -> Result<Vec<CallbackClaim>, JobStoreError>;
     pub fn answer_callback(&self, claim: CallbackClaim, answer: CallbackAnswer, now: StoreTime) -> Result<(), JobStoreError>;
     pub fn callback_status(&self, id: &JobId) -> Result<Option<CallbackStatus>, JobStoreError>;
+    pub fn attempt_row(&self, id: &JobId, attempt: u32) -> Result<Option<AttemptRow>, JobStoreError>; // host, placed_at, ended_at
 }
 // insert_queued takes the callback's key and writes it into the armed callback/ row; end_txn makes the row due.
 
@@ -806,8 +824,13 @@ owner may reverse any of them.
   agent changes.
 - **The hosts a job ran on are kept as a set apart from the history,** so the `start-fence` rule does not depend on the history's
   bound.
-- **The history keeps the newest 256 attempts.** With no ceiling on `max_attempts`, the job row needs a bound, and `events` already
-  sets the pattern of a bound with a drop count.
+- **The history keeps the newest 256 attempts, and every attempt keeps a row of its own.** With no ceiling on `max_attempts`, the job
+  row needs a bound, and `events` already sets the pattern of a bound with a drop count. The small per-attempt row keeps every
+  attempt's logs readable, as decision 9 requires. It costs about 100 bytes and one key per attempt, plus a point read for an old
+  attempt's logs.
+- **The other option, listing the store under the attempt's hash segment,** was rejected. The segment sits below the host segment, so
+  a read would need one listing call per host the job ever ran on, and it would lose the attempt's placement time, which the reader
+  uses as its cutoff.
 - **Unknown agent refusal codes are the host's**, as kbf reads them today, and `max_attempts` bounds the cost.
 - **The jitter comes from the job id**, so the retry decision stays pure and replays in simulation.
 - **The key lives only in the callback row**, while delivery needs it. The job row holds its digest, so idempotency works without a
