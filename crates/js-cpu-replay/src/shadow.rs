@@ -14,14 +14,29 @@
 //!   (a profile is shaped when the share is at most 80% over its self-check window);
 //! - **shaped**: whether the class's profile was shaped after its last run whose line says
 //!   so, as the server said;
+//! - **CPU peak over**: of the class's last 16 scored lines, the share whose peak was more than
+//!   25% above the predicted peak (a scored line with no predicted peak did not overrun);
+//!   check 3 of the four a class passes to book its curve;
+//! - **CPU series usable**: of the class's last 16 lines, the share whose CPU status is
+//!   `learned` or `not-learned`, as against a missing or disagreeing series; check 4;
+//! - **CPU curve**: `yes` when all four checks hold at the class's last line (the shaped
+//!   column is checks 1 and 2, as the server said; at most 3 of the last scored lines
+//!   overran; at least 12 of the last lines were usable, a count, so a class of fewer than
+//!   16 lines needs 12), as the job service decides it; else `no`. A log of a release that
+//!   does not log the predicted peak prints `-` for the overruns and `no`;
 //! - **CPU error removed**: the flat level's CPU error minus the curve's, in core-seconds, over
 //!   the scored runs. The line holds no booking, so this is what the curve would have predicted
 //!   better than the flat line, not CPU a booking would have given back.
 //!
-//! Each figure is computed from the lines alone; the run counts are lines, not jobs.
+//! Each figure is computed from the lines alone, in log order; the run counts are lines, not
+//! jobs.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
+
+mod checks;
+
+use checks::Window;
 
 /// The message of the server's check line.
 pub const MESSAGE: &str = "a run was checked against its class's profile";
@@ -269,7 +284,12 @@ pub fn table(checks: &[Check], min_runs: usize, hide_classes: bool) -> String {
         .collect();
     let repeated = lines - checks.len();
     let mut classes = BTreeMap::<&str, Class>::new();
+    let mut cpu_lines = BTreeMap::<&str, Vec<&Dim>>::new();
     for check in &checks {
+        cpu_lines
+            .entry(check.class.as_str())
+            .or_default()
+            .push(&check.cpu);
         let class = classes.entry(check.class.as_str()).or_default();
         class.lines += 1;
         class.cpu.add(&check.cpu);
@@ -298,26 +318,31 @@ pub fn table(checks: &[Check], min_runs: usize, hide_classes: bool) -> String {
     );
     out.push_str(
         "\n| class | lines | CPU scored | CPU mean error % | CPU peak error % | CPU curve/flat % \
-         | CPU shaped | CPU error removed (core-s) | memory scored | memory mean error % \
+         | CPU shaped | CPU peak over % | CPU series usable % | CPU curve \
+         | CPU error removed (core-s) | memory scored | memory mean error % \
          | memory peak error % | memory curve/flat % | memory shaped |\n\
-         |---|--:|--:|--:|--:|--:|---|--:|--:|--:|--:|--:|---|\n",
+         |---|--:|--:|--:|--:|--:|---|--:|--:|---|--:|--:|--:|--:|--:|---|\n",
     );
-    for (number, (name, class)) in kept.iter().enumerate() {
+    for (number, (logged, class)) in kept.iter().enumerate() {
         let name = if hide_classes {
             format!("class {}", number + 1)
         } else {
-            name.replace('|', "\\|")
+            logged.replace('|', "\\|")
         };
         let (cpu, memory) = (class.cpu, class.memory);
+        let window = Window::of(cpu_lines.get(logged).map_or(&[][..], Vec::as_slice));
         let _ = writeln!(
             out,
-            "| {name} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+            "| {name} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
             class.lines,
             cpu.scored,
             share(cpu.mean_error, cpu.means),
             share(cpu.peak_error, cpu.peaks),
             share(cpu.curve, cpu.flat),
             said(cpu.shaped),
+            window.over_share(),
+            window.usable_share(),
+            window.books_curve(cpu.shaped),
             core_seconds(cpu.removed()),
             memory.scored,
             share(memory.mean_error, memory.means),
