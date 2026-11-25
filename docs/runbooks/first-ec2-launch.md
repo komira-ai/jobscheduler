@@ -27,7 +27,7 @@ name   = "aws"
 kind   = "ec2"
 region = "<region>"
 images = { arm64 = "<ami id>", x86_64 = "<ami id>" }     # at least one architecture
-# optional: purchase = ["on-demand"]      # the default; "spot" is the other term launched. Capacity Block offers are listed in the catalog but not launched yet
+# optional: purchase = ["on-demand"]      # the default; "spot" and "capacity-block" are the others; a Capacity Block offer is bought, then launched into
 # optional: allowed_instance_types = ["<instance type>"]
 # optional: capacity_block_hours = <hours>
 ```

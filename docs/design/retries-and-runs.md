@@ -8,8 +8,8 @@ shared), *platform fault* (shared budget, which also takes instance reclaim, tha
 *task failure*: the attempt ran and the work failed (a non-zero exit). kbf's budget for it is zero, because a failed action is a result and not a retry. For ucdk classes the portable
 `max_retries` (UJ1) is one budget that counts every failed attempt on the platform-fault, not-started and task-failure axes together,
 so a Job whose container exits non-zero is retried exactly as under the cloud's native batch engines; timeout (UJ2) applies per attempt.
-The ladder and loss axes are extra capabilities, not part of the portable contract. The ucdk conformance kit has a UJ1/UJ2 case that
-fails on a non-zero exit; step 24b adds the axis.
+The ladder and loss axes are extra capabilities, not part of the portable contract. The ucdk conformance kit this paragraph used to
+cite, with its UJ1/UJ2 case, went with ucdk's `Provider` crate in komira-ai/ucdk#28 ([ucdk.md](ucdk.md)); step 24b adds the axis.
 
 An attempt can also end `evicted`: the scheduler retired its machine on purpose, because the pool was at its machine cap with a growing
 queue (D62, hosts.md section 11), and the attempt was still running when the drain grace ended; it is never reported failed. It is requeued as a new attempt and **charges no budget**: not platform fault, not loss, not task failure

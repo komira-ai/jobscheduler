@@ -31,7 +31,7 @@ struct SizingPolicy {
 `SizingPolicy::kbf()` returns the current values and the property test asserts that every existing estimator output is unchanged (step
 14). The codec's length depends on fixed slot counts, so those stay fixed or the codec version byte is raised
 (`crates/kbf-estimator/src/codec.rs`). In `Declared` mode history only informs a warning or a suggested size and never raises a booking
-(11.3).
+(formerly 11.3, dropped with the ucdk realization: [ucdk.md](ucdk.md)).
 
 ## 7.3 One limit rule
 The 1.5x + 512 MiB rule lives in `cgroup.rs`, in `memory_max()` in the estimator, and in the native driver. The Start `limits` field plus
