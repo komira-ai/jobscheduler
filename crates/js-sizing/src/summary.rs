@@ -508,6 +508,25 @@ impl Summary {
         })
     }
 
+    /// What a typical recent sample asks for: the median of the last 32 memory samples (the
+    /// middle one, the larger of the two middle ones for an even count; kills and held samples
+    /// as recorded) with the usual margin, and the floor:
+    /// `round_up(max(1.2 * median + 128 MiB, floor))`, at least [`MIN_MEMORY`]; `None` when the
+    /// summary holds no memory sample.
+    pub(crate) fn median_memory(&self, bounds: &Bounds) -> Option<u64> {
+        let kept = usize::try_from(self.n_total).map_or(RING, |n| n.min(RING));
+        let mut samples = self.ring[..kept].to_vec();
+        samples.sort_unstable();
+        samples.get(kept / 2).map(|median| {
+            let sized = median
+                .saturating_add(median.div_ceil(5))
+                .saturating_add(SLACK);
+            round_up(sized, MEMORY_STEP)
+                .max(round_up(self.floor(bounds), MEMORY_STEP))
+                .max(MIN_MEMORY)
+        })
+    }
+
     /// The CPU estimate in millicores: [`COLD_CPU_MILLIS`] while there is no CPU sample;
     /// else, for a key with a heavy tail, the 90th percentile of its recent runs' peaks
     /// ([`TAIL_PERMILLE`]), and for any other key the median (P50) of their means; rounded up
