@@ -45,6 +45,7 @@ fn run(booking: u64, var: u64, phases: Vec<Phase>, start: u64) -> Running {
             milli: booking,
             bytes: 0,
         },
+        curve: None,
         var,
         left: phases[0].ms as f64,
         phases,

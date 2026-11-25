@@ -325,12 +325,21 @@ accepts. What corrects is the next placement:
   - the placer's sizing (mirrored from `JobSizes` over `js-sizing`) and its score (keys 1, 3, 5);
   - host readings every 5 s, as #1036 makes real (the arm "as deployed" has none, as before it);
   - the memory rule before #1035.
+- The arm `A median, curves packed, 1.1` replays the curve mode of `placement-profiles-live.md` on the shapes the replay
+  synthesises (the trace has each job's mean and peak, not its series): each class learns every successful run's
+  synthesised series in 2 s means, a job of a class that passes the four checks books its curve, a host takes a job
+  when the curves fit at every slot ahead (`Rule::Packed`), and a job that waited 30 s at the head is tested flat.
+  Its `booked/used` integrates the curve over each job's wall time. The residual of the design is the replay's
+  measured CPU beyond the jobs' charges. On the farm trace, which records no peaks, every series is flat.
 - **Contention** (ASSUMED): a host asked for more than its cores gives each job cores/demand of what it asks, and the
   job runs longer by that factor. Nothing is lost to cache or switching.
 - `js-cpu-replay shadow <log>` reads the job service's own log under `--placement-curves shadow` (step 2) and
   prints, per class of at least `--min-runs` check lines (default 16), the runs, the mean and peak error of the run
   against the profile, the curve's error as a share of the flat level's, whether the profile is shaped, and the CPU
-  error the curve removes against the flat line; `--hide-classes` numbers the classes instead of naming them. The
+  error the curve removes against the flat line, and the three that read the class's last 16 lines for the booking
+  mode (`CPU peak over %`, `CPU series usable %`, and `CPU curve`: `yes` when all four checks of
+  `placement-profiles-live.md` section 4 hold at the last line); `--hide-classes` numbers the classes instead of
+  naming them. The
   check line holds no booking, so the last figure is prediction error, not CPU a booking gives back. The log is read
   in time order: with several server tasks, sort their lines by timestamp first. A job logged by two servers (the
   overlap of a rolling update) counts once.

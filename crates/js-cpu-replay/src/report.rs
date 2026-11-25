@@ -9,7 +9,7 @@ use crate::sim::{Arm, Bookings, Farm, Outcome, Rule, Setup, as_placed, replay};
 use crate::trace::{End, Job};
 
 /// The ways of packing the report compares, in its order.
-pub const ARMS: [Arm; 14] = [
+pub const ARMS: [Arm; 15] = [
     Arm {
         name: "recorded bookings",
         bookings: Bookings::Recorded,
@@ -26,6 +26,12 @@ pub const ARMS: [Arm; 14] = [
         name: "A median, 1.1",
         bookings: Bookings::Learned,
         rule: Rule::Booked,
+        limit_permille: 1100,
+    },
+    Arm {
+        name: "A median, curves packed, 1.1",
+        bookings: Bookings::Curve,
+        rule: Rule::Packed,
         limit_permille: 1100,
     },
     Arm {

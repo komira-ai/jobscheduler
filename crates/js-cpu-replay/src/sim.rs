@@ -11,14 +11,22 @@
 //! gets the same share of what it asks (`cores / asked`), so each runs slower by that much.
 //! A job's phases ([`crate::shape`]) are in its own time; a slowed job takes longer, and the
 //! time it lost is its slowdown.
+//!
+//! The curve mode ([`curve`]) books and packs by what each class learned of its jobs' CPU over
+//! their age.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, VecDeque};
+use std::rc::Rc;
+
+use js_sizing::Curve;
 
 use crate::shape::{self, Phase, Shape};
 use crate::sizing::{Booking, Sizer, day_of};
 use crate::trace::{End, Job};
 use js_sched_placer::sizes::DEFAULT_COLD_CPU_MILLIS;
+
+pub mod curve;
 
 /// One tick, in milliseconds.
 pub const TICK_MS: u64 = 1000;
@@ -77,6 +85,13 @@ pub enum Bookings {
         /// The quantile, in thousandths; `None` for the weighted mean.
         quantile_permille: Option<u64>,
     },
+    /// [`Bookings::Learned`], and a job of a class that passes the four checks of
+    /// `js_sizing::Checks` books its CPU curve over its age instead: each class learns, at
+    /// each successful run's end, the run's series as the replay synthesised it
+    /// ([`crate::shape`]) in 2 s means. A job's `booking` stays its flat step; the curve
+    /// books beside it ([`Rule::Packed`] places by it, and the outcome's `booked` integrates
+    /// it). See [`curve`].
+    Curve,
 }
 
 /// One run a class's decayed estimate is taken over.
@@ -141,6 +156,14 @@ pub enum Rule {
     /// job's life, known exactly (an oracle: the best any learned curve could do), within the
     /// limit at every moment.
     Curve,
+    /// The curves of the jobs on the host and the new job's, within the limit at every slot
+    /// ahead (`docs/design/placement-profiles-live.md` section 3): each running job is charged
+    /// what its curve says it still books at that slot, weighted by the share of its class's
+    /// runs that reach it (its flat booking when it has no curve), and the host's residual (its
+    /// reading beyond its jobs' charges now) is carried to every slot. A host is ranked by
+    /// the fullest slot with the new job, without the residual. With no curve it is
+    /// [`Rule::Booked`]. See [`curve`].
+    Packed,
     /// The placer as it ran before its hosts' readings reached it (komira-ai/jobscheduler#1036):
     /// no reading, so every job is charged the larger of its booking and one core
     /// (`UNMEASURED_CPU_FLOOR_MILLIS` in `js-sched`), and no host is ranked behind another
@@ -224,6 +247,8 @@ struct Running {
     job: usize,
     /// What it booked.
     booking: Booking,
+    /// The curve it books beside its flat `booking`, when its class passes the checks.
+    curve: Option<Rc<Curve>>,
     /// Its class's variance of CPU, in millicores squared.
     var: u64,
     /// Its phases.
@@ -321,7 +346,7 @@ impl Host {
     /// The CPU `rule` holds it to be using.
     fn planned(&self, rule: Rule) -> u64 {
         match rule {
-            Rule::Booked => {
+            Rule::Booked | Rule::Packed => {
                 let (covered, not) = self.split();
                 self.measured().max(covered) + not
             }
@@ -339,6 +364,7 @@ impl Host {
     /// The figure `rule` gives it with `new` on it, or `None` past `limit`.
     fn figure(&self, rule: Rule, new: &Running, limit: u64) -> Option<u64> {
         let figure = match rule {
+            Rule::Packed => return self.packed(new, limit),
             Rule::Booked | Rule::Measured => self.planned(rule) + new.booking.milli,
             Rule::Unread => self.planned(rule) + new.booking.milli.max(UNREAD_FLOOR_MILLI),
             Rule::Reserve { z_tenths } => self.reserved(z_tenths, new.booking.milli, new.var),
@@ -422,6 +448,8 @@ struct World<'a> {
     /// Whether anything that can change a placement happened since the last pass: a job
     /// joined an empty queue, a job ended or the hosts were read.
     dirty: bool,
+    /// What the curve mode has learned and waits for.
+    curves: curve::Curves,
 }
 
 /// Replays `jobs` (a trace, in arrival order) placed by `arm` under `setup`.
@@ -479,6 +507,7 @@ impl<'a> World<'a> {
                 ..Outcome::default()
             },
             dirty: false,
+            curves: curve::Curves::default(),
         }
     }
 
@@ -538,7 +567,9 @@ impl<'a> World<'a> {
                 milli: u64::from(job.booked_milli),
                 bytes: u64::from(job.booked_mib) << 20,
             },
-            Bookings::Learned | Bookings::Tailed => self.sizer.book(job, day_of(now)),
+            Bookings::Learned | Bookings::Tailed | Bookings::Curve => {
+                self.sizer.book(job, day_of(now))
+            }
             Bookings::Decayed {
                 half_life_ms,
                 quantile_permille,
@@ -585,6 +616,7 @@ impl<'a> World<'a> {
         Running {
             job: index,
             booking,
+            curve: None,
             var,
             left: phases[0].ms as f64,
             phases,
@@ -605,7 +637,8 @@ impl<'a> World<'a> {
         let limit = farm.milli.saturating_mul(self.arm.limit_permille) / 1000;
         let tolerance = farm.milli + farm.milli / 100;
         while let Some(&index) = self.queue.front() {
-            let new = self.running(index, now);
+            let mut new = self.running(index, now);
+            self.curved(&mut new, now);
             let mut best: Option<(Rank, usize)> = None;
             for (at, host) in self.hosts.iter().enumerate() {
                 if host.bytes + new.booking.bytes > farm.bytes {
@@ -629,6 +662,7 @@ impl<'a> World<'a> {
             let alone = best.is_none() && self.stuck(&new, limit);
             self.outcome.alone += usize::from(alone);
             let Some((_, at)) = best.or(alone.then_some((ALONE, 0))) else {
+                self.stall(&new, now);
                 return;
             };
             self.queue.pop_front();
@@ -661,6 +695,7 @@ impl<'a> World<'a> {
         let wait = now.saturating_sub(arrived);
         self.outcome.waits.push(wait);
         self.outcome.waited[new.job] = wait;
+        self.curves.placed();
         let host = &mut self.hosts[at];
         host.bytes += new.booking.bytes;
         host.runs.push(new);
@@ -723,7 +758,7 @@ impl<'a> World<'a> {
         outcome.last_end_ms = outcome.last_end_ms.max(end);
         outcome.own_ms += run.own;
         outcome.slowed_ms += slowed;
-        let booked = u128::from(run.booking.milli) * u128::from(wall);
+        let booked = run.booked(wall);
         let used = u128::from(job.cpu_ms) * 1000;
         outcome.booked += booked;
         outcome.above_booking += used.saturating_sub(booked);
@@ -731,6 +766,7 @@ impl<'a> World<'a> {
         self.sizer
             .learn(job, (ran, slowed), run.booking, day_of(end));
         if job.end == End::Ok && run.run >= TICK_MS {
+            self.teach_curve(&run, end, slowed);
             let mean = job.cpu_ms * 1000 / run.run;
             let host = self.setup.farm.milli.max(mean);
             let peak = job.peak_milli.map_or(mean, u64::from).clamp(mean, host);
