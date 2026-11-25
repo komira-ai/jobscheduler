@@ -35,6 +35,7 @@ mod estimate_feed;
 mod feed_retention;
 mod job_wall;
 mod listen;
+mod pack_limit;
 mod placement;
 mod placement_curves;
 mod private;
@@ -57,9 +58,10 @@ pub(crate) use job_wall::{MAX_JOB_WALL_MUST, parse_max_job_wall};
 pub(crate) use listen::{
     JobListen, MetricsListen, ReadyListen, clear_text, not_loopback, not_private,
 };
+pub use pack_limit::{PackLimit, PackLimitError};
 pub use placement::Placement;
 use placement::check_pool;
-pub(crate) use placement::{ColdOn, checked, placer, split};
+pub(crate) use placement::{ColdOn, LoadSetting, checked, placer, split};
 pub(crate) use placement_curves::parse as parse_curves;
 pub(crate) use private::{read_private, read_private_reason};
 pub(crate) use retention::{
@@ -188,6 +190,11 @@ pub struct Cli {
     /// the flag the engine's own default is used, which is 1.1.
     #[arg(long, value_parser = CpuSlack::parse)]
     pub cpu_slack: Option<CpuSlack>,
+    /// How full the placement engine packs a host before it places on the least full one,
+    /// as a fraction of the host's capacity from 0.0 to 1.0 with at most three decimals,
+    /// such as `0.5`. Without the flag the engine's own default is used, which is 0.5.
+    #[arg(long, value_parser = PackLimit::parse)]
+    pub pack_limit: Option<PackLimit>,
     /// Whether the placement engine learns a CPU and a memory profile for each job class from
     /// the series its runs recorded: `off` (the default) learns nothing; `shadow` learns and
     /// logs one line per run it checks against its class's profile. Placement is the same in
@@ -695,7 +702,10 @@ impl Config {
             server.agents.estimate_feed(),
             "server.estimate_feed",
         ));
-        let cpu_slack = server.agents.cpu_slack().unwrap_or_default();
+        let load = LoadSetting {
+            cpu_slack: server.agents.cpu_slack().unwrap_or_default(),
+            pack_limit: server.agents.pack_limit().unwrap_or_default(),
+        };
         let curves = server.agents.curves();
         // The order the pool's Default platform lists its machine providers in; a pool with
         // no platform (a joined one) keeps the order of no configuration.
@@ -709,7 +719,7 @@ impl Config {
             mint_provider,
             hello_limit: server.agents.hello_limit(),
             require_host_credential: server.agents.require_host_credential(),
-            cpu_slack,
+            load,
             cold: server.agents.cold(),
             cold_on: ColdOn {
                 memory: server.agents.cold_memory_on(),
@@ -915,7 +925,13 @@ impl Config {
     /// The CPU slack of the placement engine (`--cpu-slack`, or `server.cpu_slack`): the
     /// value given, or the engine's default, 1.1x.
     pub fn cpu_slack(&self) -> CpuSlack {
-        self.agents.cpu_slack
+        self.agents.load.cpu_slack
+    }
+
+    /// The pack limit of the placement engine (`--pack-limit`, or `server.pack_limit`): the
+    /// value given, or the engine's default, 0.5.
+    pub fn pack_limit(&self) -> PackLimit {
+        self.agents.load.pack_limit
     }
 
     /// Whether the placement engine learns profiles in shadow (`--placement-curves`, or

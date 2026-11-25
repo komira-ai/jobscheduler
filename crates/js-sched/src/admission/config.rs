@@ -77,6 +77,13 @@ pub struct LoadConfig {
     /// `--placement-key-share`: the share of a worker's CPU, in percent, that one action
     /// key may take before key 4 prefers another worker. Default 25; at most 100.
     pub key_share_percent: u32,
+    /// `--placement-pack-limit`: the share of a worker's capacity, in thousandths, its
+    /// bookings may reach with a new lease before the score prefers another worker (after
+    /// keys 1 and 2, before key 3). A worker within it is packed (the fit, key 5, prefers
+    /// the fullest); when no candidate stays
+    /// within it the lease goes to the least full by booked share. Default 500 (0.5x); at
+    /// most [`crate::MAX_PACK_LIMIT_PERMILLE`] (1.0x).
+    pub pack_limit_permille: u32,
 }
 
 /// The most CPU slack `--placement-cpu-slack` accepts, in thousandths: 2.0x of the cores.
@@ -125,6 +132,7 @@ impl Default for LoadConfig {
             score_balance: 1,
             score_slack_tol_ppm: 10_000,
             key_share_percent: 25,
+            pack_limit_permille: crate::load::DEFAULT_PACK_LIMIT_PERMILLE,
         }
     }
 }
@@ -143,16 +151,20 @@ impl LoadConfig {
             profile_floor_permille: self.profile_floor_permille.clamp(500, floor),
             score_balance: self.score_balance.min(crate::load::MAX_BALANCE),
             key_share_percent: self.key_share_percent.min(100),
+            pack_limit_permille: self
+                .pack_limit_permille
+                .min(crate::load::MAX_PACK_LIMIT_PERMILLE),
             ..self
         }
     }
 
     /// Sets the placement flag `name` (`--placement-score-balance`,
-    /// `--placement-score-slack-tol-ppm`, `--placement-key-share` or
-    /// `--placement-cpu-slack`, with or without the leading dashes) to `value`. Nothing
-    /// changes on an error. The balance is 0 to 4, the key share 0 to 100 (a trailing `%`
-    /// is allowed) and the CPU slack 0 to 1000 thousandths (0 is 1.0x of the cores); a
-    /// value outside is refused rather than clamped, so a typo is not run.
+    /// `--placement-score-slack-tol-ppm`, `--placement-key-share`,
+    /// `--placement-cpu-slack` or `--placement-pack-limit`, with or without the leading
+    /// dashes) to `value`. Nothing changes on an error. The balance is 0 to 4, the key
+    /// share 0 to 100 (a trailing `%` is allowed), the CPU slack 0 to 1000 thousandths (0
+    /// is 1.0x of the cores) and the pack limit 0 to 1000 thousandths of the capacity (500
+    /// is 0.5x); a value outside is refused rather than clamped, so a typo is not run.
     ///
     /// # Errors
     /// [`FlagError`] for another flag or a value out of range.
@@ -178,6 +190,13 @@ impl LoadConfig {
                     return Err(invalid());
                 }
                 self.s_cpu_permille = n;
+            }
+            "placement-pack-limit" => {
+                let n: u32 = value.parse().map_err(|_| invalid())?;
+                if n > crate::load::MAX_PACK_LIMIT_PERMILLE {
+                    return Err(invalid());
+                }
+                self.pack_limit_permille = n;
             }
             "placement-key-share" => {
                 let n: u32 = value
@@ -469,5 +488,55 @@ mod tests {
             .to_string(),
             "--placement-key-share: invalid value \"101\""
         );
+    }
+
+    /// Behaviour: `--placement-pack-limit` sets `pack_limit_permille` in thousandths (with or
+    /// without the dashes) from 0 to 1000; a value above 1000, not a number, negative or a
+    /// fraction is refused with the flag and the value as given, and the config is left as
+    /// it was; `normalised` brings a field set past 1000 down to it; the default is 500.
+    /// Catches: a typo such as 1001 clamped and run, a failed parse changing the limit, and
+    /// the limit not reaching the score.
+    #[test]
+    fn the_pack_limit_flag_parses_in_thousandths() {
+        let mut cfg = LoadConfig::default();
+        assert_eq!(cfg.pack_limit_permille, 500);
+        assert_eq!(cfg.apply_flag("--placement-pack-limit", "650"), Ok(()));
+        assert_eq!(cfg.pack_limit_permille, 650);
+        assert_eq!(cfg.apply_flag("--placement-pack-limit", "800"), Ok(()));
+        assert_eq!(cfg.pack_limit_permille, 800);
+        assert_eq!(cfg.apply_flag("--placement-pack-limit", "0"), Ok(()));
+        assert_eq!(cfg.pack_limit_permille, 0);
+        assert_eq!(cfg.apply_flag("placement-pack-limit", "1000"), Ok(()));
+        assert_eq!(cfg.pack_limit_permille, 1000);
+        let before = cfg;
+        for value in ["1001", "abc", "-1", "0.8", "80%", ""] {
+            assert_eq!(
+                cfg.apply_flag("--placement-pack-limit", value),
+                Err(FlagError::Invalid {
+                    flag: "--placement-pack-limit".to_owned(),
+                    value: value.to_owned()
+                })
+            );
+        }
+        assert_eq!(cfg, before, "a refused value changes nothing");
+        assert_eq!(
+            cfg.apply_flag("--placement-pack-limit", "abc")
+                .unwrap_err()
+                .to_string(),
+            "--placement-pack-limit: invalid value \"abc\""
+        );
+        let wild = LoadConfig {
+            pack_limit_permille: 5_000,
+            ..LoadConfig::default()
+        }
+        .normalised();
+        assert_eq!(wild.pack_limit_permille, 1000);
+        let within = LoadConfig {
+            pack_limit_permille: 640,
+            ..LoadConfig::default()
+        }
+        .normalised();
+        assert_eq!(within.pack_limit_permille, 640);
+        assert_eq!(LoadConfig::default().pack_limit_permille, 500);
     }
 }

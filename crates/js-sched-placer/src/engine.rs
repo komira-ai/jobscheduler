@@ -416,6 +416,10 @@ fn recovered_as(
 mod measured_tests;
 
 #[cfg(test)]
+#[path = "engine_pack_tests.rs"]
+mod pack_tests;
+
+#[cfg(test)]
 mod tests {
     use js_types::Resources;
     use js_types::sched::WorkerId;

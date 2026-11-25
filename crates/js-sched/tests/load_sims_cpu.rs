@@ -34,7 +34,8 @@ fn cold(cpu_millis: u64, memory_bytes: u64) -> Prediction {
 /// the headroom (all sixty on the first worker, or more than the predicate allows on
 /// each), and a placement that ignores the score. Three 8-core workers take 8 leases of a
 /// core each (8800 of 1000), however the submissions come in, and a burst of twelve is
-/// placed by best fit: eight on one worker, four on a second, none on the third.
+/// placed under the default pack limit: four on one worker (0.5x of 8 cores allows four),
+/// four on a second, four on the third.
 #[test]
 fn f_a_burst_in_one_round_is_admitted_up_to_the_headroom_and_spread() {
     for (first, second) in [(60, 0), (30, 30), (12, 0)] {
@@ -51,12 +52,13 @@ fn f_a_burst_in_one_round_is_admitted_up_to_the_headroom_and_spread() {
         }
         let mut per: Vec<usize> = ["n0", "n1", "n2"].map(|n| w.running_on(n)).to_vec();
         if first == 12 {
-            // Best fit: the first worker fills to its 8 cores, the second takes the rest,
+            // A worker is packed only to the pack limit (4 of 8 cores booked), then the
+            // next lease opens a worker within it and packs that one: 4, 4 and 4,
             // whichever workers the score picks.
             per.sort_unstable_by(|a, b| b.cmp(a));
             assert_eq!(
                 per,
-                [8, 4, 0],
+                [4, 4, 4],
                 "placed by the score, not above the headroom"
             );
         } else {
@@ -480,8 +482,8 @@ fn b_a_blocked_head_starts_within_the_bound_and_pools_do_not_meet() {
     );
     // Leases that end one after the other, 12 to 26 ticks in: room appears piecemeal, which
     // is what a stream of small work fills up.
-    // The score packs the first eight leases onto one Linux worker and the next eight onto
-    // the other, so each worker's leases end in the same four steps.
+    // The score packs each Linux worker to the pack limit (four one-core leases of eight),
+    // then places the other eight on the least full: eight on each.
     for i in 0..8 {
         let ticks = 12 + 2 * i;
         let lease = Spec::flat("small", 1_000, 12 + 2 * (i % 4), warm(1_000, 0));

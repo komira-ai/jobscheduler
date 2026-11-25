@@ -11,7 +11,7 @@ use js_registry::PoolConfig;
 use js_sched::{Backfill, MemoryPercent};
 use js_sched_placer::sizes::{ColdCpuOn, ColdMemoryOn, ColdSize, Curves};
 
-use super::CpuSlack;
+use super::{CpuSlack, PackLimit};
 use crate::clock::SharedClock;
 use crate::error::StartupError;
 use crate::file::Registering;
@@ -86,7 +86,25 @@ pub(crate) fn split(pool: PoolConfig) -> (PoolConfig, MemoryPercent) {
     (pool.booking_whole_memory(), percent)
 }
 
-/// The placer the registry takes: its one engine is built with `cpu_slack`, the share
+/// The operator's two load settings of the placement engine: how far above a host's cores it
+/// may be charged, and how full a host is packed before the least full one is chosen.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct LoadSetting {
+    /// `--cpu-slack`.
+    pub(crate) cpu_slack: CpuSlack,
+    /// `--pack-limit`.
+    pub(crate) pack_limit: PackLimit,
+}
+
+impl LoadSetting {
+    /// js-sched's load settings with both values and every other setting at its default.
+    fn load_config(self) -> js_sched::LoadConfig {
+        self.pack_limit.apply(self.cpu_slack.load_config())
+    }
+}
+
+/// The placer the registry takes: its one engine is built with `load` (the CPU slack and
+/// the pack limit), the share
 /// `memory` of each host's memory, the `cold` size of a job class with no estimate (and
 /// `cold_on`, the cold memory and the cold CPU of the jobs of each operating system the server
 /// names), the `curves` mode (`--placement-curves`), and backfill: work may backfill a host a
@@ -94,12 +112,12 @@ pub(crate) fn split(pool: PoolConfig) -> (PoolConfig, MemoryPercent) {
 /// wall time). `clock` is the registry's.
 pub(crate) fn placer(
     max_lease_wall: Option<Duration>,
-    cpu_slack: CpuSlack,
+    load: LoadSetting,
     (memory, cold, curves): (MemoryPercent, ColdSize, Curves),
     cold_on: ColdOn,
     clock: &SharedClock,
 ) -> Arc<SchedPlacer> {
-    let settings = settings_of(max_lease_wall, cpu_slack, (memory, cold, curves));
+    let settings = settings_of(max_lease_wall, load, (memory, cold, curves));
     let placer = SchedPlacer::new(settings, clock.clone());
     Arc::new(
         placer
@@ -121,13 +139,13 @@ pub(crate) struct ColdOn {
 /// The engine's settings from the server's configuration, as [`placer`] takes them.
 fn settings_of(
     max_lease_wall: Option<Duration>,
-    cpu_slack: CpuSlack,
+    load: LoadSetting,
     (memory, cold, curves): (MemoryPercent, ColdSize, Curves),
 ) -> Settings {
     let ceiling = max_lease_wall.unwrap_or(Duration::MAX);
     Settings {
         backfill: Backfill::enforced(ceiling),
-        load: cpu_slack.load_config(),
+        load: load.load_config(),
         memory,
         cold,
         curves,
@@ -179,12 +197,32 @@ mod tests {
         assert!(check_pool(&pool(&[]).placing_by_hello(), place).is_ok());
     }
 
+    /// Asserts that the settings the engine is built with carry the pack limit and the CPU
+    /// slack given, each beside the other's value and js-sched's defaults for the rest.
+    /// Catches a limit dropped on the way to the engine, one swapped for the default, and
+    /// the slack lost when the limit is set.
+    #[test]
+    fn the_pack_limit_and_slack_reach_the_engine_settings() {
+        let (memory, cold) = (MemoryPercent::clamped(100), ColdSize::default());
+        let load = LoadSetting {
+            cpu_slack: CpuSlack::parse("1.5").unwrap(),
+            pack_limit: PackLimit::parse("0.65").unwrap(),
+        };
+        let made = settings_of(None, load, (memory, cold, Curves::Off));
+        assert_eq!(made.load.pack_limit_permille, 650);
+        assert_eq!(made.load.s_cpu_permille, 500);
+        let default = js_sched::LoadConfig::default();
+        assert_eq!(made.load.s_mem_permille, default.s_mem_permille);
+        let plain = settings_of(None, LoadSetting::default(), (memory, cold, Curves::Off));
+        assert_eq!(plain.load, default);
+    }
+
     /// Asserts that the settings the engine is built with carry the `curves` mode given,
     /// `shadow` and `off` each, with the other settings as given. Catches a mode dropped
     /// on the way to the engine and one swapped for the default.
     #[test]
     fn the_curves_mode_reaches_the_engine_settings() {
-        let slack = CpuSlack::default();
+        let slack = LoadSetting::default();
         let memory = MemoryPercent::clamped(100);
         let cold = ColdSize::default();
         for curves in [Curves::Shadow, Curves::Off] {

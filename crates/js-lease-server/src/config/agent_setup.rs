@@ -10,7 +10,7 @@ use js_registry::PoolConfig;
 use js_sched_placer::sizes::{ColdCpuOn, ColdMemoryOn, ColdSize, Curves};
 use js_types::ProviderId;
 
-use super::{Cli, ColdOn, Config, CpuSlack, DispatchTimes, LiveClients, check_pool, listen};
+use super::{Cli, ColdOn, Config, DispatchTimes, LiveClients, LoadSetting, check_pool, listen};
 use crate::agent_pool;
 use crate::agent_tokens::{AgentTokens, PoolTokens};
 use crate::error::StartupError;
@@ -34,8 +34,8 @@ pub(crate) struct AgentSetup {
     pub(crate) hello_limit: HelloLimit,
     /// `--require-host-credential`.
     pub(crate) require_host_credential: bool,
-    /// `--cpu-slack`, or the engine's default.
-    pub(crate) cpu_slack: CpuSlack,
+    /// `--cpu-slack` and `--pack-limit`, each or the engine's default.
+    pub(crate) load: LoadSetting,
     /// `--cold-cpu-millis` and `--cold-memory-bytes`, or `server.cold_cpu_millis` and
     /// `server.cold_memory_bytes`: what a job that books nothing books while neither its class,
     /// its fallback class nor its client has a run (each absent one its default,
@@ -168,7 +168,10 @@ pub(super) fn agents(cli: &Cli, clients: &LiveClients) -> Result<Box<AgentSetup>
             tokens: PoolTokens { pool: name, tokens },
         });
     }
-    let cpu_slack = cli.cpu_slack.unwrap_or_default();
+    let load = LoadSetting {
+        cpu_slack: cli.cpu_slack.unwrap_or_default(),
+        pack_limit: cli.pack_limit.unwrap_or_default(),
+    };
     let cold_on = cold_on_of(cli)?;
     Ok(Box::new(AgentSetup {
         tokens,
@@ -180,7 +183,7 @@ pub(super) fn agents(cli: &Cli, clients: &LiveClients) -> Result<Box<AgentSetup>
             interval: cli.agent_hello_interval,
         },
         require_host_credential: cli.require_host_credential,
-        cpu_slack,
+        load,
         cold: ColdSize {
             cpu_millis: cli.cold_cpu_millis,
             memory_bytes: cli.cold_memory_bytes,

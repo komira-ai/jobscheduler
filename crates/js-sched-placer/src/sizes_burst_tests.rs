@@ -129,10 +129,11 @@ fn burst(peaks: bool) -> BTreeMap<String, u64> {
 /// peaked at 16 to 70, so each job books the 90th percentile of the peaks (52 cores) held to a
 /// quarter of a host (22 cores), and the 24 jobs of the burst are four on each host, 88 cores
 /// booked on each. With the same runs reported without peaks, each job books its class's
-/// median (2.75 cores) and the whole burst lands on one host, 66 cores booked for jobs whose
-/// peaks are at least 16 cores each (384 together) on a host of 88, while the other five stay
-/// empty. Catches a heavy-tail class booked at its mean, which lets a burst of its jobs run one
-/// host far past its cores while the others stay idle.
+/// median (2.75 cores) and the burst lands on two hosts: the pack limit fills the first to half
+/// its cores (16 jobs, 44 cores booked for jobs whose peaks are at least 16 cores each, 256
+/// together, on a host of 88) and the other 8 go to the second, while the other four stay
+/// empty. Catches a heavy-tail class booked at its mean, which lets a burst of its jobs run a
+/// host far past its cores while others stay idle.
 #[test]
 fn a_burst_of_a_heavy_tail_class_books_no_host_past_its_cores_while_another_fits() {
     let tailed = burst(true);
@@ -145,6 +146,13 @@ fn a_burst_of_a_heavy_tail_class_books_no_host_past_its_cores_while_another_fits
         assert_eq!(*cpu, HOST.0, "host {name} booked to its cores, not past");
     }
     let median = burst(false);
-    let one_host = BTreeMap::from([("a".to_owned(), 2750 * BURST as u64)]);
-    assert_eq!(median, one_host, "the burst at the median, on one host");
+    let half = HOST.0 / 2;
+    let two_hosts = BTreeMap::from([
+        ("a".to_owned(), half),
+        ("b".to_owned(), 2750 * BURST as u64 - half),
+    ]);
+    assert_eq!(
+        median, two_hosts,
+        "the burst at the median, packed to half a host"
+    );
 }
