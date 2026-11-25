@@ -12,8 +12,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::check;
-use crate::limits;
 use crate::per_job::CpuThrottle;
 
 /// Which history gave one dimension of a job's booking, as the server's placement recorded
@@ -58,10 +56,11 @@ impl BookedFrom {
 /// result, beside the booking; it decides nothing by it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StartSizing {
-    /// The name of the job's size class, the key its runs are learned under: its
-    /// `size-class` label, else `run-` and a hash of its image name and command. At most
-    /// [`limits::MAX_ID_LEN`] bytes of `[A-Za-z0-9._-]`, leading alphanumeric
-    /// ([`StartSizing::checked`]); absent when the server names none.
+    /// The name of the job's size class, the key its runs are learned under: the size class
+    /// its client sent, else its `size-class` label, else `run-` and a hash of its image name
+    /// and command. 1 to [`js_types::MAX_SIZE_CLASS_LEN`] bytes of printable ASCII, kept as
+    /// the client wrote it ([`StartSizing::checked`], [`js_types::SizeClassName`]); absent
+    /// when the server names none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub class: Option<String>,
     /// Where the CPU booking came from.
@@ -71,13 +70,12 @@ pub struct StartSizing {
 }
 
 impl StartSizing {
-    /// The sizing as the agent keeps it: a class outside the grammar of an id is left out,
-    /// so that the journal line it goes into stays one line of plain words; the rest is kept.
+    /// The sizing as the agent keeps it: a class that is no [`js_types::SizeClassName`] (a
+    /// line break, a control byte, a byte above ASCII, over 512 bytes) is left out, so that the
+    /// journal line it goes into stays one line; the rest is kept.
     #[must_use]
     pub fn checked(self) -> Self {
-        let at = check::At::new("sizing", crate::refusal::INVALID_JOB).field("sizing.class");
-        let valid =
-            |class: &String| check::token(at, class, limits::MAX_ID_LEN, check::ident_byte).is_ok();
+        let valid = |class: &String| js_types::SizeClassName::parse(class).is_ok();
         Self {
             class: self.class.filter(valid),
             ..self
@@ -127,17 +125,18 @@ mod tests {
         );
     }
 
-    /// Catches a class that would break the journal line (a line break, a space, a name over
-    /// the bound) kept, and a valid one or the sources dropped with it.
+    /// Catches a class that would break the journal line (a line break, a tab, a byte above
+    /// ASCII, a name over the bound) kept, and a valid one (a build target's full name with
+    /// its spaces, slashes and colon, the longest) or the sources dropped with it.
     #[test]
-    fn a_class_outside_the_id_grammar_is_left_out_and_the_rest_kept() {
+    fn a_class_that_is_no_size_class_name_is_left_out_and_the_rest_kept() {
         let sizing = |class: &str| StartSizing {
             class: Some(class.to_owned()),
             cpu: BookedFrom::Class,
             memory: BookedFrom::Cold,
         };
-        let long = "a".repeat(limits::MAX_ID_LEN + 1);
-        for bad in ["two\nlines", "a b", "", "-lead", long.as_str()] {
+        let long = "a".repeat(js_types::MAX_SIZE_CLASS_LEN + 1);
+        for bad in ["two\nlines", "tab\there", "caf\u{e9}", "", long.as_str()] {
             assert_eq!(
                 sizing(bad).checked(),
                 StartSizing {
@@ -148,10 +147,12 @@ mod tests {
                 "{bad:?}"
             );
         }
-        let edge = "a".repeat(limits::MAX_ID_LEN);
+        let edge = "a".repeat(js_types::MAX_SIZE_CLASS_LEN);
         for good in [
             "root.crates.js-sched.js-sched",
             "run-00ff00ff00ff00ff",
+            "komira//src/json:json mojo_compile build",
+            "-lead",
             edge.as_str(),
         ] {
             assert_eq!(sizing(good).checked(), sizing(good), "{good}");

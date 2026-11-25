@@ -284,6 +284,7 @@ fn queued_job(id: &str, disk_bytes: u64) -> NewJob {
         layers: Vec::new(),
         mounts: Vec::new(),
         host_ports: Vec::new(),
+        size_class: Default::default(),
     };
     NewJob {
         id: Some(JobId::parse(id).unwrap()),

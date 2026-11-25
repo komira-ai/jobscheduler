@@ -291,3 +291,18 @@ fn a_second_line_of_the_same_job_is_left_out_and_counted() {
         "{table}"
     );
 }
+
+/// Asserts that a class holding the text ` cpu=` and ` class=` (a size class may hold any
+/// printable ASCII) is read whole, and the CPU status after it still read. Catches a class cut
+/// at its own ` cpu=`, whose check would be filed under another class with its fields misread.
+#[test]
+fn a_class_holding_cpu_and_class_words_is_read_whole() {
+    let class = "cell//pkg:name build x cpu=1 class=y";
+    let checks = parse(&line("j1", class, "cpu=\"not-a-success\"")).unwrap();
+    assert_eq!(checks.len(), 1);
+    assert_eq!(
+        (checks[0].job.as_str(), checks[0].class.as_str()),
+        ("j1", class)
+    );
+    assert_eq!(checks[0].cpu.status, "not-a-success");
+}

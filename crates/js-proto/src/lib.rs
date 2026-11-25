@@ -145,7 +145,7 @@ mod tests {
                 r#"args: [], env: {}, needs: None, constraints: None, wall_limit_seconds: None, "#,
                 r#"network: Unspecified, ports: [], host_ports: [], files: [JobFile { "#,
                 r#"name: "upload-url", contents_len: 16, .. }], priority: 0, labels: {}, "#,
-                r#"layers: [], mounts: [] }) }"#,
+                r#"size_class: "", layers: [], mounts: [] }) }"#,
             )
         );
     }

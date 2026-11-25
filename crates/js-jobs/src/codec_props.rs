@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use js_agent_wire::{HostPort, JobMount, Layer, MountMode, MountSource, PortProtocol, Propagation};
-use js_types::{CpuSeries, ExecMode};
+use js_types::{CpuSeries, ExecMode, SizeClassName};
 use proptest::collection::{btree_map, vec};
 use proptest::prelude::*;
 use proptest::test_runner::RngSeed;
@@ -197,12 +197,13 @@ fn spec() -> impl Strategy<Value = JobSpec> {
             vec((any::<u16>(), any::<u16>()), 0..4),
             job_files(),
             labels(),
+            size_class(),
         ),
     )
         .prop_map(
             |(
                 ((digit, layers, mounts, host_ports), command, args, env, needs, constraints),
-                (wall, network, ports, files, labels),
+                (wall, network, ports, files, labels, size_class),
             )| {
                 let image = digit.map(|digit| format!("team/app:1@{}", digest(digit)));
                 JobSpec {
@@ -223,9 +224,19 @@ fn spec() -> impl Strategy<Value = JobSpec> {
                     layers,
                     mounts,
                     host_ports,
+                    size_class,
                 }
             },
         )
+}
+
+/// A job's size class: none, or 1 to 512 bytes of printable ASCII.
+fn size_class() -> impl Strategy<Value = Option<SizeClassName>> {
+    proptest::option::of(
+        "[ -~]{1,512}".prop_map(|text| {
+            SizeClassName::parse(&text).expect("printable ASCII of 1 to 512 bytes")
+        }),
+    )
 }
 
 /// A job's files as either form a row holds: the contents of a job that has not ended, or

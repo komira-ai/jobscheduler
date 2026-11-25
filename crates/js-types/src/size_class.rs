@@ -1,10 +1,11 @@
-//! The class a job is sized by when it leaves its CPU or memory to the scheduler: the value of
-//! its label [`SIZE_CLASS_LABEL`] (`docs/design/sizing.md`, section 7.7). A client names the
+//! The class a job is sized by when it leaves its CPU or memory to the scheduler, in its label
+//! form: the value of its label [`SIZE_CLASS_LABEL`] (`docs/design/sizing.md`, section 7.7),
+//! which names the class of a job that sends no size class in its own field
+//! ([`crate::SizeClassName`], which takes a target's full name as it is). A client names the
 //! work a job runs there, so that every run of that work reads and teaches one history.
 //!
-//! A build farm names the build target an action belongs to. A target's name
-//! (`root//crates/js-sched:js-sched`) is not a label value, which is 1 to 63 bytes of
-//! `[a-z0-9._-]`, so [`SizeClass::of_target`] writes it as one:
+//! A target's name (`root//crates/js-sched:js-sched`) is not a label value, which is 1 to 63
+//! bytes of `[a-z0-9._-]`, so [`SizeClass::of_target`] writes it as one:
 //!
 //! - letters are lowered, and every run of bytes outside `[a-z0-9_-]` (`//`, `/`, `:`, `.`,
 //!   a space, anything not ASCII) is one `.`; the result starts and ends with a letter or a

@@ -388,7 +388,7 @@
         "required": false
       },
       {
-        "doc": "The client's labels, by key. A listing can filter by them. The label size-class names the job's class, whose history sizes what Needs leaves at 0; the label size-fallback names a class whose history sizes it while the job's own class has fewer than five runs.",
+        "doc": "The client's labels, by key. A listing can filter by them. The label size-class names the job's class when size_class is empty; the label size-fallback names a class whose history sizes the job while its own class has no run.",
         "field": [
           "spec",
           "labels"
@@ -397,6 +397,18 @@
         "name": "spec.labels",
         "oneof": null,
         "repeated": true,
+        "required": false
+      },
+      {
+        "doc": "The name of the job's size class, whose history sizes what Needs leaves at 0: the work the job runs, such as a build target as its build tool writes it with the kind of step. 1 to 512 bytes of printable ASCII (0x20 to 0x7e), kept, logged and keyed as sent: never lowered, cut or hashed. Refused naming spec.sizeClass (bad-length or not-printable-ascii) otherwise. Empty: the label size-class names the class, else the image's name and command do. It is part of the job a same-id resubmit is compared on.",
+        "field": [
+          "spec",
+          "size_class"
+        ],
+        "kind": "Text",
+        "name": "spec.size-class",
+        "oneof": null,
+        "repeated": false,
         "required": false
       },
       {

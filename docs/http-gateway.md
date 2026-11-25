@@ -434,7 +434,9 @@ answer from what the commit returned; neither holds anything of its own outside 
    loader, the agent or a shell, such as `LD_*`, `DYLD_*`, `JS_*` or `IFS`, a name outside
    `[A-Za-z_][A-Za-z0-9_]*`, a value with a NUL or an environment over the wire's caps is
    refused naming `spec.env`, with the wire's code: `spec.env: invalid-env`); the files are
-   checked as a start's files are; the labels as a caller's labels are (`Labels::from_caller`). The layers,
+   checked as a start's files are; the labels as a caller's labels are (`Labels::from_caller`);
+   the size class (`sizeClass`) is empty or 1 to 512 bytes of printable ASCII, kept as sent,
+   else refused naming `spec.sizeClass: bad-length` or `spec.sizeClass: not-printable-ascii`. The layers,
    mounts and host ports (`docs/design/job-rootfs.md`, section 2.5) are at most 16, 64 and
    16; each layer and mount has one source this server knows (else refused naming
    `spec.layers[<i>]` or `spec.mounts[<i>]`, "no source this server knows"); a host path is

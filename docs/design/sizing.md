@@ -66,15 +66,22 @@ A job that leaves `Needs.cpu_millis` or `Needs.memory_bytes` at 0 (or sends no n
 of its class gives (`crates/js-sched-placer/src/sizes.rs`). A dimension the job names is booked as named. This is the generic key of
 7.1 for jobs:
 
-- **class**: the value of the job's label `size-class` when it has one (the name of the work, such as the build target), else its
-  image's name (not its digest) and command. The arguments are never part of it: a client's arguments name what one run works on (an
-  action's digest, a lease, a deadline), so a class that held them would hold one run and never learn. A client that runs different
-  work under one image and command names each work's class in the label. The estimator's shape is the first eight bytes of the
-  class's SHA-256. A label value is 1 to 63 bytes of `[a-z0-9._-]`, which a build target's name is not, so
-  `js_types::SizeClass::of_target` (`crates/js-types/src/size_class.rs`) writes one as a class: letters lowered, each run of other
-  bytes one `.` (`root//crates/js-sched:js-sched` is `root.crates.js-sched.js-sched`), and a class over 63 bytes cut to its last
-  whole words within 46 bytes plus `-` and the 16 hex digits of the FNV-1a hash of the whole class. Targets that differ only in case
-  or separators share a class. A build farm labels each action's job with its target's class and leaves the CPU and memory at 0.
+- **class**: the job's size class as its client sent it in `JobSpec.size_class` (the name of the work, such as a build target as
+  its build tool writes it with the kind of its step: `komira//src/json:json mojo_compile build`), else the value of its label
+  `size-class` when it has one, else its image's name (not its digest) and command. The arguments are never part of it: a client's
+  arguments name what one run works on (an action's digest, a lease, a deadline), so a class that held them would hold one run and
+  never learn. A client that runs different work under one image and command names each work's class. The estimator's shape is the
+  first eight bytes of the SHA-256 of `label`, NUL and the class's text (for the field and the label alike, so a field and a label of
+  the same text are one class). The field is 1 to 512 bytes of printable ASCII (`js_types::SizeClassName`), checked at submit
+  (refused `field: spec.sizeClass: bad-length` or `not-printable-ascii`) and kept, keyed, logged (`class=`) and recorded in the
+  usage row as sent: the scheduler never lowers, cuts or hashes it into another name. The label stays accepted for clients that
+  send no field: a label value is 1 to 63 bytes of `[a-z0-9._-]`, which a build target's name is not, so
+  `js_types::SizeClass::of_target` (`crates/js-types/src/size_class.rs`) writes a target as a label value (letters lowered, each run
+  of other bytes one `.`, a value over 63 bytes cut to its last whole words within 46 bytes plus `-` and the 16 hex digits of a
+  hash). A build farm names each action's job's class in the field and leaves the CPU and memory at 0.
+  A history kept under a cut label name stays under it: a client that moves to the field starts a new class under the full name,
+  booked from its fallback class (7.8) until its first run, and the old class is no longer taught and ages out (60 days idle, and the
+  job store's retention bounds what a server reads back at its start).
 - **partition**: the client that submitted the job; **platform**: the job's `os` and `arch` as it names them; **basis**: cgroup.
 
 The estimator is `js-sizing`: memory is `1.2 x` the largest recent peak plus 128 MiB (at least 1 GiB), CPU the median of
@@ -183,8 +190,9 @@ what is taught so far (at a start, its fallback's or the cold size), and the run
 jobs, so the history once taught is the one a server that read everything before its first pass holds. A failed read is logged and
 every class starts cold, the held runs still taught. Each job's usage history row now carries what its host reported
 (`used`: the peak memory, and the CPU per second of its run as both the highest and the mean), so `GetUsage` can set what a host
-used beside what it booked, and is kept under the name of the job's class as its `profile`: the `size-class` label as it is, else
-`run-` and the 16 hex digits of the class's shape. The name is what the job builds (for example `kbf.cargo-test.kbf-server`), the
+used beside what it booked, and carries the name of the job's class as it is as its `class` (the size class, else the `size-class`
+label, else `run-` and the 16 hex digits of the class's shape), and that name as its `profile` too when it is a profile key (1 to
+128 bytes of `[a-z0-9._-]`; a full target's name is not). The name is what the job builds (for example `kbf.cargo-test.kbf-server`), the
 same for every run of it and never its job id or image digest, so the rows of one build read side by side.
 
 ## 7.8 The fallback class
@@ -196,10 +204,10 @@ assumes, and each kind runs many times a minute.
 
 **What.** A job may name a second class in its label `size-fallback` (`js_types::SIZE_FALLBACK_LABEL`, a value like any
 `size-class`): the class whose history sizes it while its own class has no run. A build farm sends the target as
-`size-class` and the action's kind as `size-fallback`.
+the job's size class (`JobSpec.size_class`) and the action's kind as `size-fallback`.
 
-- The fallback class is keyed exactly as a `size-class` of that name is (the same client, platform and basis), so a job whose
-  `size-class` is `zig-cc` and one whose `size-fallback` is `zig-cc` read and teach one history.
+- The fallback class is keyed exactly as a size class of that name is (the same client, platform and basis), so a job whose
+  size class (field or `size-class` label) is `zig-cc` and one whose `size-fallback` is `zig-cc` read and teach one history.
 - Every run a job teaches is taught to its own class and to its fallback class (once, when they are the same class). The kind
   therefore learns from every target of the kind, and each target from its own runs, so the target takes over as its runs come.
 - **Booking.** A job whose own class has a fresh memory sample books what its own runs ask for (`1.2 x` their largest recent peak
@@ -319,7 +327,8 @@ counts them as `js_placement_refusals_total{host,reason}`. Before, the only reas
 (`WAITING_FOR_CAPACITY`), and the scheduler's count of blocked requests was not exported.
 
 **On the farm.** The before and after pictures are the same read-only reads of the job service (`js --json usage`, the ended
-bookings, joined by job id with `js --json job list`, each job's `size-class` and `size-fallback`): per kind the peaks and mean
+bookings, joined by job id with `js --json job list`, each job's size class (`sizeClass`, or the `size-class` label of a job that sends
+no field) and `size-fallback`): per kind the peaks and mean
 CPU, and the share of runs whose mean CPU came within 5% of their booked CPU (held); per host the jobs at once, the summed
 bookings against the summed peaks and the booked against the used CPU; per class and hour the booked CPU, the mean CPU as a share
 of it and the booked memory against the peak. After both changes, the held share is about 0, the summed memory bookings are within
@@ -352,7 +361,7 @@ from lifting a class.
 
 **Mixed classes.** A class whose jobs differ widely in size (one mixed 50x) books its tail for every job, small ones included. The
 placer cannot tell a job of such a class's small mode from one of its large mode before it runs: a job record names no input size,
-and its arguments name only one action. The split is the client's: a client that sends one `size-class` for work of two sizes
+and its arguments name only one action. The split is the client's: a client that sends one size class for work of two sizes
 splits it by naming each size its own class (a build farm can add the size of an action's inputs to the class it sends), and each
 then books its own median or tail.
 

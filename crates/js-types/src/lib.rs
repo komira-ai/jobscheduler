@@ -32,6 +32,7 @@
 mod accel;
 mod booking;
 mod class;
+mod class_name;
 mod clock;
 pub mod cordon;
 mod cpu_ceiling;
@@ -64,6 +65,7 @@ pub use accel::{
 };
 pub use booking::{Candidate, Held, HostCapacity};
 pub use class::{Admission, ClassError, ResourceClass};
+pub use class_name::{MAX_SIZE_CLASS_LEN, SizeClassError, SizeClassName};
 pub use clock::{Clock, ManualClock, Monotonic, Timestamp};
 pub use cpu_ceiling::{CpuCeiling, CpuCeilingError};
 pub use cpu_series::{CPU_SERIES_MAX_POINTS, CpuSeries};

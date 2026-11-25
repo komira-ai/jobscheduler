@@ -63,6 +63,7 @@ pub fn spec(contents: &str) -> JobSpec {
         host_ports: Vec::new(),
         layers: Vec::new(),
         mounts: Vec::new(),
+        size_class: Default::default(),
     }
 }
 

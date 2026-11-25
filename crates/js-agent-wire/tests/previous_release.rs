@@ -766,37 +766,43 @@ fn an_old_agent_skips_the_xcode_of_an_xcode_start() {
 }
 
 /// Asserts that an agent from before `sizing` reads a reply whose job start carries one as it
-/// reads one without (its ids, image, command and wall limit intact), and that this version
-/// reads that release's reply with no sizing on its starts. Catches a field an older agent
-/// cannot skip, which would cost it the job start.
+/// reads one without (its ids, image, command and wall limit intact), with a class of the id
+/// grammar and with a build target's full name (spaces, slashes and a colon), and that this
+/// version reads that release's reply with no sizing on its starts. Catches a field or a class
+/// an older agent cannot skip, which would cost it the job start.
 #[test]
 fn an_old_agent_ignores_sizing() {
-    let Command::JobStart(mut spec) = job_start("build-42") else {
-        unreachable!("job_start makes a job start");
-    };
-    spec.sizing = Some(js_agent_wire::StartSizing {
-        class: Some("root.crates.js-sched.js-sched".into()),
-        cpu: js_agent_wire::BookedFrom::Class,
-        memory: js_agent_wire::BookedFrom::OverCap,
-    });
-    assert_eq!(spec.validate(), Ok(()));
-    let reply = HeartbeatReply {
-        commands: vec![Command::JobStart(spec)],
-        ..HeartbeatReply::default()
-    };
-    let wire = serde_json::to_value(&reply).unwrap();
-    assert_eq!(
-        wire["commands"][0]["sizing"],
-        json!({"class": "root.crates.js-sched.js-sched", "cpu": "class", "memory": "over-cap"})
-    );
-    let old: previous::JobReply = serde_json::from_value(wire).unwrap();
-    let previous::JobCommand::JobStart(start) = &old.commands[0] else {
-        panic!("the job start is lost: {:?}", old.commands);
-    };
-    assert_eq!(
-        (start.job_id.as_str(), start.wall_ms, start.command.clone()),
-        ("build-42", 60_000, vec!["make".to_owned()])
-    );
+    for class in [
+        "root.crates.js-sched.js-sched",
+        "komira//src/json:json mojo_compile build",
+    ] {
+        let Command::JobStart(mut spec) = job_start("build-42") else {
+            unreachable!("job_start makes a job start");
+        };
+        spec.sizing = Some(js_agent_wire::StartSizing {
+            class: Some(class.into()),
+            cpu: js_agent_wire::BookedFrom::Class,
+            memory: js_agent_wire::BookedFrom::OverCap,
+        });
+        assert_eq!(spec.validate(), Ok(()));
+        let reply = HeartbeatReply {
+            commands: vec![Command::JobStart(spec)],
+            ..HeartbeatReply::default()
+        };
+        let wire = serde_json::to_value(&reply).unwrap();
+        assert_eq!(
+            wire["commands"][0]["sizing"],
+            json!({"class": class, "cpu": "class", "memory": "over-cap"})
+        );
+        let old: previous::JobReply = serde_json::from_value(wire).unwrap();
+        let previous::JobCommand::JobStart(start) = &old.commands[0] else {
+            panic!("the job start is lost: {:?}", old.commands);
+        };
+        assert_eq!(
+            (start.job_id.as_str(), start.wall_ms, start.command.clone()),
+            ("build-42", 60_000, vec!["make".to_owned()])
+        );
+    }
     let decoded: HeartbeatReply = serde_json::from_value(fixture(REPLY)).unwrap();
     for command in &decoded.commands {
         if let Command::JobStart(spec) = command {

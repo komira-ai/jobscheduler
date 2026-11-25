@@ -4,15 +4,18 @@
 //!
 //! # The class
 //!
-//! A job's class is the value of its label [`SIZE_CLASS_LABEL`] when it has one, else its
-//! image's name (without the digest, so a rebuilt image keeps the history) and its command. The
-//! arguments are not part of it: a client's arguments name what one run works on (an action's
-//! digest, a lease, a deadline, a grant), which no other run shares, so a class that held them
-//! would be a class of one run and never learn. A client that runs different work under one
-//! image and command names each work's class in the label. The estimator's key is that class's
-//! SHA-256 (its first eight bytes), under the client that submitted the job (two clients never
-//! share a class) and the job's platform (its `os` and `arch`, as it names them), on the cgroup
-//! basis.
+//! A job's class is the size class its client sent in the job's own field
+//! ([`js_jobs::JobSpec::size_class`], up to 512 bytes of printable ASCII, such as a build
+//! target's full name and the kind of its step) when it names one, else the value of its label
+//! [`SIZE_CLASS_LABEL`] when it has one, each as it is, else its image's name (without the
+//! digest, so a rebuilt image keeps the history) and its command. The arguments are not part of
+//! it: a client's arguments name what one run works on (an action's digest, a lease, a deadline,
+//! a grant), which no other run shares, so a class that held them would be a class of one run
+//! and never learn. A client that runs different work under one image and command names each
+//! work's class. The estimator's key is that class's SHA-256 (its first eight bytes; a field and
+//! a label of the same text are one class), under the client that submitted the job (two
+//! clients never share a class) and the job's platform (its `os` and `arch`, as it names them),
+//! on the cgroup basis.
 //!
 //! # The size
 //!
@@ -138,8 +141,8 @@ use js_sizing::{
     Basis, Bounds, Day, Instance, Key, MIN_WALL_US, Outcome, PlatformClass, Run, Shape, Summaries,
     Summary,
 };
-use js_types::HostId;
 use js_types::sched::FarmTime;
+use js_types::{HostId, SizeClassName};
 use sha2::{Digest as _, Sha256};
 use tracing::{info, warn};
 
@@ -750,15 +753,25 @@ fn day_of_millis(millis: u64) -> Day {
     Day(u32::try_from(millis / DAY_MILLIS).unwrap_or(u32::MAX))
 }
 
-/// The name of `job`'s class, the history key a usage row records: its `size-class` label as
-/// it is, else `run-` and the 16 hex digits of the hash of its image name and command (never
-/// its image digest, its id or its args, which change with every build or run).
+/// The name of `job`'s class, the history key a usage row records and the logs name: its
+/// size class as its client sent it, else its `size-class` label, each as it is, else `run-`
+/// and the 16 hex digits of the hash of its image name and command (never its image digest,
+/// its id or its args, which change with every build or run).
 #[must_use]
 pub fn class_name(job: &JobRecord) -> String {
-    match job.spec.labels.get(SIZE_CLASS_LABEL) {
+    match named_class(job) {
         Some(class) => class.to_owned(),
         None => format!("run-{:016x}", class_hash(job)),
     }
+}
+
+/// The class `job`'s client named: its size class, else its `size-class` label.
+fn named_class(job: &JobRecord) -> Option<&str> {
+    let spec = &job.spec;
+    spec.size_class
+        .as_ref()
+        .map(SizeClassName::as_str)
+        .or_else(|| spec.labels.get(SIZE_CLASS_LABEL))
 }
 
 /// The estimator's key of the class whose hash is `hash`, under `job`'s client and platform,
@@ -777,11 +790,12 @@ fn key_under(job: &JobRecord, hash: u64) -> Key {
     )
 }
 
-/// The first 8 bytes, big-endian, of the SHA-256 of `job`'s class text: `label`, NUL and its
-/// `size-class` label, else `run`, NUL, its image name, NUL and its command joined by NUL.
+/// The first 8 bytes, big-endian, of the SHA-256 of `job`'s class text: `label`, NUL and the
+/// class its client named ([`named_class`]; a size class and a label of the same text are one
+/// class), else `run`, NUL, its image name, NUL and its command joined by NUL.
 fn class_hash(job: &JobRecord) -> u64 {
     let spec = &job.spec;
-    match spec.labels.get(SIZE_CLASS_LABEL) {
+    match named_class(job) {
         Some(class) => label_hash(class),
         None => {
             let image = spec.image.as_ref().map_or("", |image| image.name());

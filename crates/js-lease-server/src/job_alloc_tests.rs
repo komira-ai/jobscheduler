@@ -325,6 +325,7 @@ fn a_freed_job_allocation_writes_one_usage_row() {
             error_ms: None,
             used: None,
             cpu_series: None,
+            class: Some(js_sched_placer::sizes::class_name(&job)),
         };
         assert_eq!(history_rows(&store), [row], "{freed:?}");
         assert_eq!(usage_keys(), 2, "{freed:?}: the row and its index entry");
@@ -587,6 +588,54 @@ fn a_build_targets_class_names_its_history_row() {
         let name = ProfileKey::parse(class.as_str()).unwrap();
         assert_eq!(profile_of(&job), Some(name), "{target}");
     }
+}
+
+/// Asserts that the history row of a job that names a 200-byte size class (a build target's
+/// full name with slashes, a colon, capitals and spaces) keeps that class byte for byte as its
+/// `class`, with no profile (the name is no profile key), and that a job labelled with a short
+/// class keeps it as both. Catches a class cut, lowered or dropped on its way to the usage
+/// store, so a booking's row could not say which target it was.
+#[test]
+fn a_size_class_is_kept_byte_for_byte_in_the_history_row() {
+    let (_, store, jobs) = timed();
+    let long = format!("Komira//{}json:json mojo_compile build", "src/".repeat(40));
+    let long = format!("{long}{}", " x".repeat((200 - long.len()) / 2));
+    let long = format!("{long}{}", "y".repeat(200 - long.len()));
+    assert_eq!(long.len(), 200);
+    let mut full = spec();
+    full.size_class = Some(js_types::SizeClassName::parse(&long).unwrap());
+    let mut labelled = spec();
+    let map = std::collections::BTreeMap::from([("size-class".to_owned(), "compile".to_owned())]);
+    labelled.labels = js_types::Labels::from_caller(&map).unwrap();
+    for (id, spec) in [("full-1", full), ("short-1", labelled)] {
+        let (job, _) = placed(&jobs, id, "host-a", spec, BOOKED);
+        jobs.transition(&job.id, JobState::Placed, JobState::Starting)
+            .unwrap();
+        jobs.transition(&job.id, JobState::Starting, JobState::Running)
+            .unwrap();
+        let end = JobEnd::Exited {
+            exit_code: 0,
+            output: Output::default(),
+        };
+        jobs.end_job(&job.id, end).unwrap();
+        free_allocation(&jobs, &job.id, Freed::HostConfirmed).unwrap();
+    }
+    let rows: Vec<_> = history_rows(&store)
+        .into_iter()
+        .map(|row| (row.id.to_string(), row.class, row.profile))
+        .collect();
+    let compile = ProfileKey::parse("compile").unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            ("full-1".to_owned(), Some(long), None),
+            (
+                "short-1".to_owned(),
+                Some("compile".to_owned()),
+                Some(compile)
+            ),
+        ]
+    );
 }
 
 /// Asserts that the history row of a freed job carries the CPU series its result holds, as
