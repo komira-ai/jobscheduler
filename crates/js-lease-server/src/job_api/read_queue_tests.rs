@@ -300,6 +300,7 @@ async fn every_code_and_kind_is_shown_as_its_own_value() {
         (QueueCode::FailingOver, C::FailingOver),
         (QueueCode::Placed, C::Placed),
         (QueueCode::WaitingForMachine, C::WaitingForMachine),
+        (QueueCode::WaitingForRetry, C::WaitingForRetry),
     ];
     for (code, value) in codes {
         jobs.note_queue(&fresh, &[note(code, "", None, false)])
@@ -317,6 +318,7 @@ async fn every_code_and_kind_is_shown_as_its_own_value() {
         (JobEventKind::Placed, K::Placed),
         (JobEventKind::Requeued, K::Requeued),
         (JobEventKind::WaitingForMachine, K::WaitingForMachine),
+        (JobEventKind::RetryScheduled, K::RetryScheduled),
     ];
     let notes: Vec<QueueNote> = kinds
         .iter()

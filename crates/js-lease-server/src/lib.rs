@@ -807,6 +807,7 @@ mod job_expiry;
 mod job_held;
 mod job_loss;
 mod job_pass;
+mod job_retry;
 mod job_sizes;
 mod job_start;
 mod job_store;

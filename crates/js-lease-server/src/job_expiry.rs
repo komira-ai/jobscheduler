@@ -5,7 +5,9 @@
 //! its prepare deadline bounds instead (see the table below).
 //!
 //! Each limit is counted from an instant the job's record stores, never from the boot or from
-//! the last pass: the queue wait from when the job was queued, the start timeout from its
+//! the last pass: the queue wait from when the job's current attempt became placeable (its
+//! submit for the first attempt, the end of the backoff its retry set for a later one:
+//! `docs/design/job-retry-and-completion-callback.md`, section 3.4), the start timeout from its
 //! placement commit. Each deadline is also held to at least the job's deadline floor, which
 //! a boot raises to the boot plus 120 s ([`js_jobs::JobStore::raise_at_boot`], see
 //! [`crate::job_pass`]), so an outage longer than a limit fails no job at the first tick
@@ -13,7 +15,7 @@
 //!
 //! | state | deadline |
 //! |---|---|
-//! | queued | `max(queued_at + max_queue_wait, deadline_floor)` |
+//! | queued | `max(placeable_from + max_queue_wait, deadline_floor)`, `placeable_from` the submit or the retry's not-before |
 //! | placed, starting | `max(placed_at + start_timeout, deadline_floor)` |
 //! | placed, whole host | none: its prepare deadline governs it ([`crate::job_whole`]) |
 //! | starting, whole host | `max(prepare_deadline + start_timeout, deadline_floor)` |
@@ -25,7 +27,11 @@
 //! (the placement's time when its allocation records none). A queued whole-host job that
 //! waits past its queue wait ends with its mark deleted in the same commit.
 //!
-//! A job ends at its deadline, not after it. A running job is never touched here: its wall
+//! A job ends at its deadline, not after it, except that a start that timed out retries when
+//! the job's retry policy leaves another attempt ([`crate::job_retry`]): the job is queued for
+//! its next attempt instead, in one commit with its allocation's move to releasing, and its
+//! host barred for 15 minutes. A queue wait that runs out never retries. A running job is
+//! never touched here: its wall
 //! limit is counted by its agent (design section 5.7). The end of a placed or starting job
 //! moves its allocation to releasing in the same commit ([`js_jobs::JobStore::end_job`]);
 //! the host is told to stop the job on each heartbeat reply while it still lists it
@@ -38,6 +44,7 @@ use js_jobs::{JobEnd, JobId, JobRecord, JobState, JobStoreError, Needs, StartFai
 use js_state::StoreTime;
 
 use crate::file::PoolSettings;
+use crate::job_retry::{self, Settled};
 use crate::job_store::ServerJobs;
 use crate::metrics::MetricsSink;
 
@@ -98,7 +105,7 @@ pub(crate) fn deadline(
     let whole = matches!(job.spec.needs, Needs::WholeHost);
     let (from, limit, failure) = match job.state {
         JobState::Queued => (
-            job.submitted_at,
+            job.attempt.retry_not_before().unwrap_or(job.submitted_at),
             limits.max_queue_wait,
             StartFailure::NoCapacity,
         ),
@@ -135,9 +142,11 @@ pub(crate) fn due(
 
 /// Ends each job of `jobs` that is out of time at `now` under `limits`, each in one commit
 /// with its allocation's move to releasing (a queued whole-host job's with its mark's delete),
-/// and returns those it ended with how. The jobs read are the queued ones and those of every
-/// live allocation (a placed or starting job always has one), each with its allocation's
-/// prepare deadline. A job that moved on between the read and its commit (placed, started,
+/// or retries it when its start timed out and its retry policy leaves another attempt, and
+/// returns those it ended with how. The jobs read are the queued ones and those of every live
+/// allocation that is not queued (a placed or starting job always has one; a queued job holds
+/// one only while its previous attempt's is released, and is read once, as queued), each with
+/// its allocation's prepare deadline. A job that moved on between the read and its commit (placed, started,
 /// ended, or changed by a heartbeat) is left for the next pass, which reads it again; a job
 /// that another writer ended in between keeps that end and is not returned. Each job it ends
 /// is told to `metrics` as its commit lands, so a pass that fails later still counts it.
@@ -156,6 +165,7 @@ pub(crate) fn expire(
     for allocation in jobs.live_allocations()? {
         let prepared = allocation.prepare_deadline;
         let job = jobs.get_job(&allocation.job)?;
+        let job = job.filter(|job| job.state != JobState::Queued);
         waiting.extend(job.map(|job| (job, prepared)));
     }
     let mut ended = Vec::new();
@@ -167,7 +177,11 @@ pub(crate) fn expire(
         let unmark = (job.state == JobState::Queued) & matches!(job.spec.needs, Needs::WholeHost);
         let result = match unmark {
             true => jobs.end_and_unmark(&job.id, end),
-            false => jobs.end_job(&job.id, end),
+            false => match job_retry::end_or_retry(jobs, &job, end, metrics) {
+                Ok(Settled::Ended(record)) => Ok(record),
+                Ok(Settled::Retried(_)) => continue,
+                Err(error) => Err(error),
+            },
         };
         match result {
             Ok(record) => {

@@ -8,16 +8,18 @@
 //!    deadline fails its prepare, going back to queued or, after `max_replace` of them,
 //!    failing to start with `exclusive-not-ready`, its allocation freed in the same commit
 //!    (no container exists to confirm). Then ([`job_expiry::expire`]): a queued job past its
-//!    pool's `max_queue_wait` fails to start with `no-capacity`; a placed or starting job
-//!    past its pool's `start_timeout` fails to start with `start-timeout`, its allocation
-//!    moving to releasing in the same commit (the stop rides on each heartbeat reply while
+//!    pool's `max_queue_wait` (counted from its submit, or for a later attempt from the end of
+//!    its retry's backoff) fails to start with `no-capacity`; a placed or starting job past its
+//!    pool's `start_timeout` fails to start with `start-timeout`, or is queued for its next
+//!    attempt when its retry policy leaves one ([`crate::job_retry`]), its allocation moving to
+//!    releasing in the same commit (the stop rides on each heartbeat reply while
 //!    the host lists the job, [`crate::per_job::stops_for`]). Then the retention sweep
 //!    deletes each ended job past its retention end with its result
 //!    ([`js_jobs::JobStore::tick`]); a job that has not ended is never deleted, and no log
 //!    object is touched.
 //! 2. **Settle allocations** ([`job_loss::lose_absent`]): each host that holds a live
 //!    allocation is read once; a host the provider reads absent has its allocations freed and
-//!    its jobs lost.
+//!    its jobs lost, or queued for their next attempt when their retry policy leaves one.
 //!
 //! After the passes, whether they succeeded or not, the tick trims the job store's change feed to its newest
 //! `--job-feed-retention` changes ([`crate::job_store::FeedTrim`]); a failed trim is logged

@@ -31,26 +31,30 @@
 //!   `layered-rootfs` capability a submit records beside them has no field and is not shown.
 //! - The record keeps the agent's code of a start it refused: it is the job's
 //!   `start_failure_detail`, empty for every other job.
-//! - The record keeps no retry policy, callback or attempts: a submit refuses a job that
-//!   carries a policy or a callback (`validate.rs`), so every job has one attempt. A job shows
-//!   no `retry`, no `callback`, no `callback_status`, an empty history, nothing dropped and
-//!   no not-before, and it and its result show attempt 0, which the job API reads as the
-//!   first.
+//! - The record keeps a job's retry policy, which its spec shows as given; it keeps no
+//!   callback, so a job shows no `callback` and no `callback_status`.
+//! - The record keeps a job's attempts (`docs/design/job-retry-and-completion-callback.md`,
+//!   section 3.7): the job and its result show its current attempt (from 1, also for a row
+//!   written before attempts were kept), the ended attempts its history keeps
+//!   ([`attempt`]) with the count of those dropped, and, while the job is queued for a
+//!   retry, when its next attempt may be placed. The record keeps that time after the next
+//!   placement, which no longer waits for it: a job past the queue shows none. The hosts that
+//!   held an attempt have no field and are not shown.
 
 use std::time::Duration;
 
 use js_agent_wire::{HostPort, JobMount, Layer, MountMode, MountSource, PortProtocol, Propagation};
 use js_caps::XCODE;
 use js_jobs::{
-    Isolation, JobEvent, JobRecord, JobResult, JobSpec, JobState, Needs, NetworkPolicy,
-    ResourceUsage, ResultReason, StartFailure,
+    Attempt, AttemptOutcome, Isolation, JobEvent, JobRecord, JobResult, JobSpec, JobState, Needs,
+    NetworkPolicy, ResourceUsage, ResultReason, StartFailure,
 };
 use js_proto::v1;
 use js_state::StoreTime;
 use js_types::{
     ACCEL_COUNT_KEY, ACCEL_FORM_FACTOR_KEY, ACCEL_INTERCONNECT_KEY, ACCEL_KEYS,
     ACCEL_MEMORY_GIB_KEY, ACCEL_MODEL_KEY, ACCEL_VENDOR_KEY, ExecMode, JobEventKind,
-    OS_VERSION_KEY, QueueCode,
+    OS_VERSION_KEY, QueueCode, RetryPolicy,
 };
 
 use crate::job_api::validate::ISA_LEVEL_KEY;
@@ -84,16 +88,68 @@ pub(crate) fn state(state: JobState) -> v1::JobState {
 /// Why a job in `state` failed to start; unspecified for every other state.
 fn start_failure(state: JobState) -> v1::StartFailureCode {
     match state {
-        JobState::FailedToStart(StartFailure::NoCapacity) => v1::StartFailureCode::NoCapacity,
-        JobState::FailedToStart(StartFailure::StartTimeout) => v1::StartFailureCode::StartTimeout,
-        JobState::FailedToStart(StartFailure::ExclusiveNotReady) => {
-            v1::StartFailureCode::ExclusiveNotReady
-        }
-        JobState::FailedToStart(StartFailure::AgentRefused) => v1::StartFailureCode::AgentRefused,
-        JobState::FailedToStart(StartFailure::InputUnavailable) => {
-            v1::StartFailureCode::InputUnavailable
-        }
-        _ => v1::StartFailureCode::Unspecified,
+        JobState::FailedToStart(failure) => start_failure_code(Some(failure)),
+        _ => start_failure_code(None),
+    }
+}
+
+/// The start failure code of the job service that `failure` is shown as; unspecified for
+/// none.
+fn start_failure_code(failure: Option<StartFailure>) -> v1::StartFailureCode {
+    match failure {
+        Some(StartFailure::NoCapacity) => v1::StartFailureCode::NoCapacity,
+        Some(StartFailure::StartTimeout) => v1::StartFailureCode::StartTimeout,
+        Some(StartFailure::ExclusiveNotReady) => v1::StartFailureCode::ExclusiveNotReady,
+        Some(StartFailure::AgentRefused) => v1::StartFailureCode::AgentRefused,
+        Some(StartFailure::InputUnavailable) => v1::StartFailureCode::InputUnavailable,
+        None => v1::StartFailureCode::Unspecified,
+    }
+}
+
+/// The outcome of the job service that `outcome` is shown as.
+fn outcome(outcome: AttemptOutcome) -> v1::AttemptOutcome {
+    match outcome {
+        AttemptOutcome::Succeeded => v1::AttemptOutcome::Succeeded,
+        AttemptOutcome::Failed => v1::AttemptOutcome::Failed,
+        AttemptOutcome::HostLost => v1::AttemptOutcome::HostLost,
+        AttemptOutcome::StartFailed => v1::AttemptOutcome::StartFailed,
+        AttemptOutcome::Cancelled => v1::AttemptOutcome::Cancelled,
+    }
+}
+
+/// One ended attempt of a job as the job service shows it: its number, host, times (queued
+/// from when it became placeable), and how it ended.
+fn attempt(attempt: &Attempt) -> v1::Attempt {
+    let end = &attempt.end;
+    v1::Attempt {
+        number: attempt.number,
+        host_id: attempt.host.as_str().to_owned(),
+        outcome: outcome(end.outcome).into(),
+        times: Some(v1::JobTimes {
+            queued_at_ms: millis(attempt.queued_at),
+            placed_at_ms: Some(millis(attempt.placed_at)),
+            started_at_ms: attempt.started_at.map(millis),
+            ended_at_ms: Some(millis(attempt.ended_at)),
+        }),
+        exit_code: end.exit_code,
+        reason: end
+            .reason
+            .map_or(v1::ResultReason::Unspecified, reason)
+            .into(),
+        start_failure: start_failure_code(end.start_failure).into(),
+        start_failure_detail: end.start_failure_detail.clone().unwrap_or_default(),
+        retried: attempt.retried,
+    }
+}
+
+/// A job's retry policy as the job service shows it: its waits in whole seconds, as a submit
+/// gave them.
+fn retry(policy: &RetryPolicy) -> v1::RetryPolicy {
+    let seconds = |wait: Duration| u32::try_from(wait.as_secs()).unwrap_or(u32::MAX);
+    v1::RetryPolicy {
+        max_attempts: policy.max_attempts,
+        initial_backoff_seconds: policy.initial_backoff.map(seconds),
+        max_backoff_seconds: policy.max_backoff.map(seconds),
     }
 }
 
@@ -291,7 +347,7 @@ fn spec(id: &str, spec: &JobSpec, priority: i32) -> v1::JobSpec {
             .history_key
             .as_ref()
             .map_or_else(String::new, |class| class.as_str().to_owned()),
-        retry: None,
+        retry: spec.retry.as_ref().map(retry),
         callback: None,
     }
 }
@@ -335,11 +391,15 @@ pub(crate) fn job(job: &JobRecord) -> v1::Job {
         attempts: job.queue.attempts(),
         events: job.queue.events().iter().map(event).collect(),
         dropped_events: job.queue.dropped_events(),
-        attempt: 0,
-        attempt_history: Vec::new(),
-        retry_not_before_ms: None,
+        attempt: job.attempt.number(),
+        attempt_history: job.attempt.history().iter().map(attempt).collect(),
+        retry_not_before_ms: job
+            .attempt
+            .retry_not_before()
+            .filter(|_| job.state == JobState::Queued)
+            .map(millis),
         callback_status: None,
-        dropped_attempts: 0,
+        dropped_attempts: job.attempt.dropped(),
     }
 }
 
@@ -368,6 +428,7 @@ fn queue_code(code: QueueCode) -> Option<v1::QueueStatusCode> {
         QueueCode::FailingOver => V::FailingOver,
         QueueCode::Placed => V::Placed,
         QueueCode::WaitingForMachine => V::WaitingForMachine,
+        QueueCode::WaitingForRetry => V::WaitingForRetry,
     };
     Some(value)
 }
@@ -384,6 +445,7 @@ fn event(event: &JobEvent) -> v1::JobEvent {
         JobEventKind::Placed => V::Placed,
         JobEventKind::Requeued => V::Requeued,
         JobEventKind::WaitingForMachine => V::WaitingForMachine,
+        JobEventKind::RetryScheduled => V::RetryScheduled,
     };
     v1::JobEvent {
         at_ms: millis(event.at),
@@ -406,20 +468,23 @@ fn usage(usage: ResourceUsage) -> v1::ResourceUsage {
 /// The result of `job`, which has ended, from the result it stored: its state, exit code,
 /// reason, tails, times, usage and the code of an input that failed. A job that ended without a result (lost, or failed to
 /// start) shows its state and its record's times, and no exit code, reason, tail or usage.
+/// Both show the job's current attempt, which is its last.
 pub(crate) fn result(job: &JobRecord) -> v1::JobResult {
     let state = state(job.state).into();
+    let attempt = job.attempt.number();
     match &job.result {
-        Some(result) => stored(state, result),
+        Some(result) => stored((state, attempt), result),
         None => v1::JobResult {
             state,
             times: Some(times(job)),
+            attempt,
             ..v1::JobResult::default()
         },
     }
 }
 
-/// The stored `result` of a job that ended in `state`.
-fn stored(state: i32, result: &JobResult) -> v1::JobResult {
+/// The stored `result` of a job that ended in `state` with its attempt `attempt`.
+fn stored((state, attempt): (i32, u32), result: &JobResult) -> v1::JobResult {
     let timing = &result.timing;
     v1::JobResult {
         state,
@@ -436,6 +501,6 @@ fn stored(state: i32, result: &JobResult) -> v1::JobResult {
         }),
         usage: result.usage.map(usage),
         input_failure: result.input_failure.clone(),
-        attempt: 0,
+        attempt,
     }
 }

@@ -154,6 +154,8 @@ mod logs_rig;
 #[cfg(test)]
 mod logs_tests;
 #[cfg(test)]
+mod read_attempts_tests;
+#[cfg(test)]
 mod read_list_tests;
 #[cfg(test)]
 mod read_queue_tests;

@@ -32,7 +32,7 @@ use js_types::{HostId, Shape, Timestamp};
 
 use super::engine::jobs::{OpenHost, open_to_jobs};
 use super::rank::rank;
-use crate::admit::{reports_host_jobs, reports_load_admission};
+use crate::admit::{reports_host_jobs, reports_load_admission, reports_start_fence};
 use crate::agents::Agents;
 use crate::config::CpuSlack;
 use crate::job_store::ServerJobs;
@@ -303,6 +303,7 @@ impl Agents {
                 rank: Some(ranked),
                 capacity: Some(capacity),
                 quota_disk_bytes: capabilities.and_then(quota_default),
+                start_fence: capabilities.is_some_and(reports_start_fence),
             };
             offered.open.insert(host.clone(), offer);
         }

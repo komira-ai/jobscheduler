@@ -50,6 +50,8 @@ use crate::sizes::{ColdCpuOn, ColdMemoryOn, ColdSize, Curves, JobSizes};
 mod curve_room;
 #[path = "jobs.rs"]
 pub mod jobs;
+#[path = "jobs_retry.rs"]
+mod jobs_retry;
 #[path = "jobs_seen.rs"]
 pub(crate) mod jobs_seen;
 #[path = "jobs_walker.rs"]

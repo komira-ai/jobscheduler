@@ -15,7 +15,12 @@
 //!   job by the placement, by host and by the predicate that refused (`cpu`,
 //!   `predicted-memory`, `booked-memory`, `cold-cap`, `cpu-curve`), and each job whose wait for
 //!   its CPU curve ran out so that it was tested flat, and each job start a host's agent refused,
-//!   by host and refusal code. A start failure or a loss is counted as
+//!   by host and refusal code, and each attempt of a job that ended in a way that retries and
+//!   was followed by another (`js_job_retries_total`, by `outcome`: `start-failed` or
+//!   `host-lost`), and each job that ended so with no attempt left under its retry policy
+//!   (`js_job_attempts_exhausted_total`) (`docs/design/job-retry-and-completion-callback.md`,
+//!   section 4). A start failure or a loss is counted as the end of a job, so an attempt that
+//!   retries counts as a retry and not as a start failure or a loss. Each is counted as
 //!   its commit lands, so a pass that fails later still counts what it ended. The paths that count them call
 //!   a [`MetricsSink`], and do not know the exporter: without `--metrics-listen` the sink is
 //!   [`NoMetrics`], which counts nothing.
@@ -78,6 +83,31 @@ pub(crate) trait MetricsSink: Send + Sync + std::fmt::Debug {
     /// A queued job of a curve class waited past the wait bound with no host fitting its
     /// curve, and is tested with its flat number from then on; by default, nothing is counted.
     fn curve_wait_expired(&self) {}
+    /// An attempt of a job ended as `outcome` says and the job's next attempt was queued; by
+    /// default, nothing is counted.
+    fn job_retried(&self, _outcome: RetryOutcome) {}
+    /// A job ended in a way that retries while its retry policy had no attempt left; by
+    /// default, nothing is counted.
+    fn attempts_exhausted(&self) {}
+}
+
+/// How an attempt that retries ended: the label of `js_job_retries_total`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RetryOutcome {
+    /// The attempt failed to start for a cause of its host.
+    StartFailed,
+    /// The attempt's host was lost.
+    HostLost,
+}
+
+/// The retry outcomes, in the order they are written, as the metric spells them.
+const RETRY_OUTCOMES: [&str; 2] = ["start-failed", "host-lost"];
+
+fn retry_slot(outcome: RetryOutcome) -> usize {
+    match outcome {
+        RetryOutcome::StartFailed => 0,
+        RetryOutcome::HostLost => 1,
+    }
 }
 
 /// The longest refusal code of an agent that is kept as a metric label value.
@@ -376,6 +406,8 @@ pub(crate) struct Recorder {
     refusals: Mutex<BTreeMap<(String, &'static str), u64>>,
     start_refusals: Mutex<BTreeMap<(String, String), u64>>,
     curve_wait_expiries: AtomicU64,
+    retries: [AtomicU64; 2],
+    attempts_exhausted: AtomicU64,
 }
 
 impl Default for Recorder {
@@ -392,6 +424,8 @@ impl Default for Recorder {
             refusals: Mutex::default(),
             start_refusals: Mutex::default(),
             curve_wait_expiries: AtomicU64::new(0),
+            retries: Default::default(),
+            attempts_exhausted: AtomicU64::new(0),
         }
     }
 }
@@ -451,6 +485,14 @@ impl MetricsSink for Recorder {
     fn curve_wait_expired(&self) {
         self.curve_wait_expiries.fetch_add(1, Ordering::Relaxed);
     }
+
+    fn job_retried(&self, outcome: RetryOutcome) {
+        self.retries[retry_slot(outcome)].fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn attempts_exhausted(&self) {
+        self.attempts_exhausted.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 impl Recorder {
@@ -486,3 +528,7 @@ mod tests;
 #[cfg(test)]
 #[path = "metrics/events_tests.rs"]
 mod events_tests;
+
+#[cfg(test)]
+#[path = "metrics/retry_tests.rs"]
+mod retry_tests;

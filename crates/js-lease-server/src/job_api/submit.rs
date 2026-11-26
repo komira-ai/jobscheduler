@@ -80,7 +80,7 @@ use super::JobApi;
 use super::fleet::Handle;
 use super::read::view;
 use super::roles::Caller;
-use super::validate::{self, Fault};
+use super::validate::{self, Accepts, Fault};
 use crate::agents::Agents;
 use crate::util::blocking;
 
@@ -122,6 +122,9 @@ struct Served {
     /// The agent side whose placement poller each recorded job pokes (step 5); `None`: the call
     /// only commits, and the tick's pass finds the queued row.
     poking: Option<Handle<Agents>>,
+    /// The fields this release refuses until it accepts them, of which it takes these: none,
+    /// but in tests (`Ctx::accepting_retry`).
+    accepts: Accepts,
 }
 
 impl Ctx {
@@ -135,6 +138,7 @@ impl Ctx {
                 ceiling,
                 admission: Handle(admission),
                 poking: None,
+                accepts: Accepts::default(),
             }),
         }
     }
@@ -156,6 +160,17 @@ impl Ctx {
     #[cfg(test)]
     pub(super) fn marked(mark: u32) -> Ctx {
         Ctx { mark, served: None }
+    }
+
+    /// This context, taking a job's retry policy: what the release that accepts a policy will
+    /// do, which tests do now. Nothing for a context that is not served.
+    #[cfg(test)]
+    pub(super) fn accepting_retry(mut self) -> Ctx {
+        self.served = self.served.map(|served| Served {
+            accepts: Accepts { retry: true },
+            ..served
+        });
+        self
     }
 
     /// The ceiling of a served context; `None` when the call is not served.
@@ -242,7 +257,8 @@ pub(super) async fn submit_job(
     };
     let client = Some(caller.name.clone());
     let request = request.into_inner();
-    let valid = validate::job(request.spec.as_ref(), served.ceiling).map_err(refused)?;
+    let valid =
+        validate::job(request.spec.as_ref(), served.ceiling, served.accepts).map_err(refused)?;
     let held = match valid.id.clone() {
         Some(id) => api
             .on_tables(move |jobs| jobs.get_job(&id))

@@ -24,7 +24,7 @@
 //! | `spec.labels` | as a lease's labels are (`Labels::from_caller`) | `field: spec.labels` |
 //! | `spec.historyKey` | empty, or 1 to 512 bytes of printable ASCII (`0x20` to `0x7e`), kept as sent ([`HistoryKey`]) | `field: spec.historyKey: bad-length`, `field: spec.historyKey: not-printable-ascii` |
 //! | `spec.layers`, `spec.mounts` | the rules of `rootfs` | `field: spec.layers[i].<name>`, `spec.mounts[i].<name>` |
-//! | `spec.retry` | absent: this release does not retry a job, so it refuses one that asks, whatever the policy says | `field: spec.retry: retry-not-enabled` |
+//! | `spec.retry` | absent, until the release that accepts a policy: this release refuses one, whatever it says; once accepted ([`Accepts::retry`], which only tests set yet), a `maxBackoffSeconds` given below the effective initial wait (`initialBackoffSeconds`, 10 when absent, cut to 3600) is refused, and nothing else is: `maxAttempts` has no ceiling | `field: spec.retry: retry-not-enabled`, `field: spec.retry.maxBackoffSeconds` |
 //! | `spec.callback` | absent: this release calls no job back, so it refuses one that asks, whatever the callback says | `field: spec.callback: callback-not-enabled` |
 //!
 //! The cross-field rules (an empty image, its command, `exec`, `needs.wholeHost` and
@@ -64,7 +64,7 @@ use js_proto::v1;
 use js_types::{
     ACCEL_COUNT_KEY, ACCEL_FORM_FACTOR_KEY, ACCEL_INTERCONNECT_KEY, ACCEL_MEMORY_GIB_KEY,
     ACCEL_MODEL_KEY, ACCEL_VENDOR_KEY, AcceleratorNeed, ExecMode, HistoryKey, ImageDigestRef,
-    IsaLevel, Labels, OS_VERSION_KEY, Os, Requirements, Resources, normalise_arch,
+    IsaLevel, Labels, OS_VERSION_KEY, Os, Requirements, Resources, RetryPolicy, normalise_arch,
 };
 // The network level a job asks a host for, by a name of its own: the type's own name followed
 // by a path separator reads as the server's network module to the source scan of design
@@ -76,6 +76,16 @@ use super::rootfs;
 /// The capability key a job's least ISA level is recorded under: the key a lease request
 /// names it by.
 pub(crate) const ISA_LEVEL_KEY: &str = "isa_level";
+
+/// The fields a submit acts on that this release refuses until the release that accepts them
+/// (`docs/design/job-retry-and-completion-callback.md`, section 7): the default accepts none.
+/// A field of the server's own, never a setting: only tests accept a policy yet, so that the
+/// release that can retry a job runs end to end before any submit asks it to.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Accepts {
+    /// Whether a job may carry a retry policy (`spec.retry`).
+    pub(crate) retry: bool,
+}
 
 /// A submitted job that passed every check.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,11 +124,16 @@ pub(crate) enum Fault {
     WallAboveCeiling,
 }
 
-/// The job `spec` checked against `ceiling`, the most a wall limit may be.
+/// The job `spec` checked against `ceiling`, the most a wall limit may be, with the fields
+/// `accepts` takes.
 ///
 /// # Errors
 /// The [`Fault`] of the first field, in the message's order, that is not valid.
-pub(crate) fn job(spec: Option<&v1::JobSpec>, ceiling: Duration) -> Result<Valid, Fault> {
+pub(crate) fn job(
+    spec: Option<&v1::JobSpec>,
+    ceiling: Duration,
+    accepts: Accepts,
+) -> Result<Valid, Fault> {
     let spec = spec.ok_or(Fault::Field("spec"))?;
     let id = id(&spec.job_id)?;
     let image = Some(spec.image.as_str())
@@ -139,7 +154,8 @@ pub(crate) fn job(spec: Option<&v1::JobSpec>, ceiling: Duration) -> Result<Valid
     let history_key = history_key(&spec.history_key)?;
     let layers = rootfs::layers(&spec.layers)?;
     let mounts = rootfs::mounts(&spec.mounts)?;
-    not_enabled(spec)?;
+    not_enabled(spec, accepts)?;
+    let retry = retry(spec.retry.as_ref())?;
     let accelerator = AcceleratorNeed::requested(&capabilities, resources.shape())
         .map_err(|_| Fault::Field("spec.constraints.accelerator"))?;
     imageless(image.as_ref(), &spec.command, &layers)?;
@@ -206,8 +222,8 @@ pub(crate) fn job(spec: Option<&v1::JobSpec>, ceiling: Duration) -> Result<Valid
         mounts,
         host_ports,
         history_key,
-        // A spec that carries a policy was refused above (`not_enabled`).
-        retry: None,
+        // Absent unless `accepts` takes a policy (`not_enabled`).
+        retry,
         // `SubmitJob` refuses a job with a callback before it gets here, until the release
         // that accepts one.
         callback: None,
@@ -500,19 +516,44 @@ fn history_key(text: &str) -> Result<Option<HistoryKey>, Fault> {
         .map_err(|fault| Fault::Wire("spec.historyKey", fault.code()))
 }
 
-/// A job that carries a retry policy or a callback is refused, the policy first, whatever
-/// either holds (an empty policy or callback included): this release would record the job
-/// without them, so it would run once and call nothing back while its client believed
-/// otherwise (`docs/design/job-retry-and-completion-callback.md`, section 7). The refusal
-/// repeats nothing of either, so neither a callback's URL nor its key is ever in an answer.
-fn not_enabled(spec: &v1::JobSpec) -> Result<(), Fault> {
-    if spec.retry.is_some() {
+/// A job that carries a retry policy `accepts` does not take, or a callback, is refused, the
+/// policy first, whatever either holds (an empty policy or callback included): every instance
+/// over the store must be one that acts on them before any accepts them, or an older one would
+/// end the job without retrying it or calling it back while its client believed otherwise
+/// (`docs/design/job-retry-and-completion-callback.md`, section 7). The refusal repeats nothing
+/// of either, so neither a callback's URL nor its key is ever in an answer.
+fn not_enabled(spec: &v1::JobSpec, accepts: Accepts) -> Result<(), Fault> {
+    if spec.retry.is_some() & !accepts.retry {
         return Err(Fault::Wire("spec.retry", "retry-not-enabled"));
     }
     if spec.callback.is_some() {
         return Err(Fault::Wire("spec.callback", "callback-not-enabled"));
     }
     Ok(())
+}
+
+/// The retry policy `policy` as the record keeps it, its waits in whole seconds, as given
+/// (`docs/design/job-retry-and-completion-callback.md`, section 3.1): `None` when absent. A
+/// longest wait below the effective initial wait ([`RetryPolicy::initial_wait`]) is refused;
+/// nothing else is, so `max_attempts` may be anything its type holds, 0 and 1 meaning one
+/// attempt.
+fn retry(policy: Option<&v1::RetryPolicy>) -> Result<Option<RetryPolicy>, Fault> {
+    let Some(policy) = policy else {
+        return Ok(None);
+    };
+    let seconds = |seconds: u32| Duration::from_secs(u64::from(seconds));
+    let kept = RetryPolicy {
+        max_attempts: policy.max_attempts,
+        initial_backoff: policy.initial_backoff_seconds.map(seconds),
+        max_backoff: policy.max_backoff_seconds.map(seconds),
+    };
+    if kept
+        .max_backoff
+        .is_some_and(|max| max < kept.initial_wait())
+    {
+        return Err(Fault::Field("spec.retry.maxBackoffSeconds"));
+    }
+    Ok(Some(kept))
 }
 
 #[cfg(test)]

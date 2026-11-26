@@ -26,8 +26,8 @@
 //! in the queue for ever. The two counts are kept apart: a held refusal does not count against
 //! the capacity bound and the other way round. Bundle-pending refusals are not counted: a fetch
 //! ends on its own (the agent then runs the job, or answers `bundle-fetch-failed`, which ends
-//! it), and the job's queue deadline (the pool's `max_queue_wait`, from its submit) ends a job
-//! that waits longer. A cancelled job's refusal, and every other code (among them the bundle
+//! it), and the job's queue deadline (the pool's `max_queue_wait`, from its submit, or for a
+//! later attempt from the end of its retry's backoff) ends a job that waits longer. A cancelled job's refusal, and every other code (among them the bundle
 //! refusals that asking again cannot change: `bundle-fetch-failed`, `bundle-not-allowed`,
 //! `bundle-denied` and the rest), end the job as before.
 

@@ -465,6 +465,7 @@ fn queue_code() -> impl Strategy<Value = js_types::QueueCode> {
         Just(C::FailingOver),
         Just(C::Placed),
         Just(C::WaitingForMachine),
+        Just(C::WaitingForRetry),
     ]
 }
 
@@ -479,6 +480,7 @@ fn event_kind() -> impl Strategy<Value = js_types::JobEventKind> {
         Just(K::Placed),
         Just(K::Requeued),
         Just(K::WaitingForMachine),
+        Just(K::RetryScheduled),
     ]
 }
 

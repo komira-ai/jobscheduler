@@ -11,7 +11,7 @@ use js_registry::HostMark;
 use js_sched_placer::curves::CurveView;
 use js_types::HostId;
 
-use super::{FAILURE_CODES, Histogram, Recorder, TABLES_FROM};
+use super::{FAILURE_CODES, Histogram, RETRY_OUTCOMES, Recorder, TABLES_FROM};
 use crate::hosts::mark_text;
 
 /// The job states, in the order they are written. A job that failed to start is counted under
@@ -176,6 +176,17 @@ pub(crate) fn render(seen: &Snapshot, recorder: &Recorder) -> String {
     let lost = recorder.lost.load(Ordering::Relaxed);
     let help = "Jobs lost with their host or container.";
     counter(&mut out, "js_jobs_lost_total", help, lost);
+    let name = "js_job_retries_total";
+    let help = "Attempts of jobs that ended in a way that retries and were followed by another, by how they ended: start-failed (a start failure of the host's) or host-lost.";
+    family(&mut out, name, "counter", help);
+    for (outcome, count) in RETRY_OUTCOMES.iter().zip(&recorder.retries) {
+        let count = count.load(Ordering::Relaxed);
+        let _ = writeln!(out, "{name}{{outcome=\"{outcome}\"}} {count}");
+    }
+    let exhausted = recorder.attempts_exhausted.load(Ordering::Relaxed);
+    let help =
+        "Jobs that ended in a way that retries with no attempt left under their retry policy.";
+    counter(&mut out, "js_job_attempts_exhausted_total", help, exhausted);
     let failed = recorder.store_write_failures.load(Ordering::Relaxed);
     let help = "Passes over the job tables the server makes itself (the job pass, a placement, a heartbeat's job listing) that failed, so their write did not commit.";
     counter(&mut out, "js_store_write_failures_total", help, failed);

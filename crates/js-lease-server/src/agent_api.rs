@@ -783,3 +783,11 @@ mod held_tests;
 #[cfg(test)]
 #[path = "agent_api_whole_restart_tests.rs"]
 mod whole_restart_tests;
+
+#[cfg(test)]
+#[path = "agent_api_retry_tests.rs"]
+mod retry_tests;
+
+#[cfg(test)]
+#[path = "agent_api_retry_end_tests.rs"]
+mod retry_end_tests;

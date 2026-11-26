@@ -18,8 +18,9 @@
 //! `initial` and `max` the policy's effective waits and the jitter `j` in `[0, 0.1)` taken
 //! from SHA-256 of the job's id and `n`, so one job's attempt always waits the same.
 //!
-//! The server refuses a job that carries a policy at submit (`retry-not-enabled`) until it can
-//! carry a retry out, so no job is retried yet.
+//! The server carries a retry out, but refuses a job that carries a policy at submit
+//! (`retry-not-enabled`) until the release that accepts one, so that every server over a store
+//! acts on a policy before any takes one; no submitted job is retried yet.
 
 use std::time::Duration;
 
@@ -38,6 +39,18 @@ pub struct RetryPolicy {
     /// The longest wait, jitter included. Absent: the larger of 5 minutes and the initial
     /// wait. Cut to an hour.
     pub max_backoff: Option<Duration>,
+}
+
+impl RetryPolicy {
+    /// The effective wait before the second attempt: the policy's initial wait, 10 seconds when
+    /// it gives none, cut to an hour. A longest wait given below it is not valid: the job
+    /// service refuses such a policy at submit.
+    #[must_use]
+    pub fn initial_wait(&self) -> Duration {
+        self.initial_backoff
+            .unwrap_or(DEFAULT_INITIAL_BACKOFF)
+            .min(BACKOFF_CEILING)
+    }
 }
 
 /// How one attempt of a job ended: one variant per row of the table in section 3.3 of the
@@ -167,10 +180,7 @@ pub fn decide(policy: &RetryPolicy, end: &AttemptEnd, attempt: u32, job: &JobId)
 /// The wait after attempt `attempt` (at least 1) of `job`, under `policy`'s effective waits.
 /// Computed in whole nanoseconds, so it is the same on every platform.
 fn backoff(policy: &RetryPolicy, attempt: u32, job: &JobId) -> Duration {
-    let initial = policy
-        .initial_backoff
-        .unwrap_or(DEFAULT_INITIAL_BACKOFF)
-        .min(BACKOFF_CEILING);
+    let initial = policy.initial_wait();
     let max = policy
         .max_backoff
         .unwrap_or_else(|| initial.max(DEFAULT_MAX_BACKOFF_FLOOR))
@@ -612,6 +622,33 @@ mod tests {
             format!("{retry:?}"),
             "Retry { wait: 10s }",
             "the wait is the decision's"
+        );
+    }
+
+    /// Asserts that the effective initial wait is the policy's own, 10 seconds when it gives
+    /// none, and an hour for one above an hour, whatever the longest wait says. Catches a
+    /// submit check that compares a longest wait with a default other than the one `decide`
+    /// waits, or with an initial wait `decide` cuts.
+    #[test]
+    fn the_initial_wait_is_the_policys_cut_to_an_hour() {
+        let secs = Duration::from_secs;
+        let wait = |initial: Option<u64>, max: Option<u64>| {
+            policy(3, initial.map(secs), max.map(secs)).initial_wait()
+        };
+        assert_eq!(wait(None, None), secs(10), "the default");
+        assert_eq!(
+            wait(None, Some(1)),
+            secs(10),
+            "the longest wait plays no part"
+        );
+        assert_eq!(wait(Some(0), None), secs(0), "none at all");
+        assert_eq!(wait(Some(42), Some(600)), secs(42), "as given");
+        assert_eq!(wait(Some(3600), None), secs(3600), "an hour");
+        assert_eq!(wait(Some(3601), None), secs(3600), "cut to an hour");
+        assert_eq!(
+            wait(Some(u64::from(u32::MAX)), None),
+            secs(3600),
+            "the largest a client can send"
         );
     }
 }

@@ -48,6 +48,7 @@ fn code_value(code: QueueCode) -> Option<Vec<u8>> {
         QueueCode::FailingOver => 4,
         QueueCode::Placed => 5,
         QueueCode::WaitingForMachine => 6,
+        QueueCode::WaitingForRetry => 7,
     };
     Some(vec![byte])
 }
@@ -61,6 +62,7 @@ fn code_of(tag: u16, value: Vec<u8>) -> Result<QueueCode, DecodeError> {
         4 => QueueCode::FailingOver,
         5 => QueueCode::Placed,
         6 => QueueCode::WaitingForMachine,
+        7 => QueueCode::WaitingForRetry,
         _ => QueueCode::Unspecified,
     })
 }
@@ -76,6 +78,7 @@ fn kind_byte(kind: JobEventKind) -> u8 {
         JobEventKind::Placed => 5,
         JobEventKind::Requeued => 6,
         JobEventKind::WaitingForMachine => 7,
+        JobEventKind::RetryScheduled => 8,
     }
 }
 
@@ -89,6 +92,7 @@ fn kind_of(byte: u8) -> JobEventKind {
         5 => JobEventKind::Placed,
         6 => JobEventKind::Requeued,
         7 => JobEventKind::WaitingForMachine,
+        8 => JobEventKind::RetryScheduled,
         _ => JobEventKind::Unspecified,
     }
 }

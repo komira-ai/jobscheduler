@@ -75,6 +75,7 @@ pub(super) fn open_hosts(names: &[&str], host_jobs: bool) -> BTreeMap<HostId, Op
         capacity: None,
         load_admission: false,
         quota_disk_bytes: None,
+        start_fence: false,
     };
     names
         .iter()
