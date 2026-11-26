@@ -8,14 +8,15 @@
 //! cgroup's ([`WireLoad::node_cpu_usec`]). The only other change is the form of a lease:
 //! the wire's `term-seq` text becomes a `sched::LeaseId`.
 //!
-//! Two fields exist only on the scheduler's side, `cpu_throttled_usec` and
-//! `cpu_pressure_some_total_usec` (telemetry the wire does not carry yet); they read 0
-//! here, and 0 there means **not measured**, not "no throttling". Nothing else in the
-//! conversion invents a value. The working set is the whole host's non-file memory when the
-//! agent sends it (`host_nonfile_bytes`, with no active file pages: it holds no page cache),
-//! else its actions cgroup's `memory.current` less `inactive_file`, clamped at 0 when the
-//! inactive file is larger, with the group's active file pages
-//! ([`WireLoad::node_memory_bytes`]).
+//! The host's CPU pressure, `host_cpu_pressure_some_usec`, becomes
+//! `cpu_pressure_some_total_usec`, and 0 when the agent does not send it. One field exists
+//! only on the scheduler's side, `cpu_throttled_usec` (telemetry the wire does not carry
+//! yet); it reads 0 here. 0 in either means **not measured**, not "no throttling" or "no
+//! waiting". Nothing else in the conversion invents a value. The working set is the whole
+//! host's non-file memory when the agent sends it (`host_nonfile_bytes`, with no active file
+//! pages: it holds no page cache), else its actions cgroup's `memory.current` less
+//! `inactive_file`, clamped at 0 when the inactive file is larger, with the group's active
+//! file pages ([`WireLoad::node_memory_bytes`]).
 //!
 //! The wire's two per-second lists (`second_cpu_millis`, `second_cpu_pressure_some_permille`)
 //! are not part of that conversion: they are kept beside the converted load as
@@ -69,7 +70,7 @@ pub fn node_load(wire: &WireLoad) -> Result<NodeLoad, BadLease> {
             .collect::<Result<_, _>>()?,
         actions_cpu_limited: wire.actions_cpu_limited,
         cpu_throttled_usec: 0,
-        cpu_pressure_some_total_usec: 0,
+        cpu_pressure_some_total_usec: wire.host_cpu_pressure_some_usec.unwrap_or(0),
         lease_clocks: wire
             .clocks
             .iter()

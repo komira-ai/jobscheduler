@@ -162,9 +162,10 @@ fn charges_of(curve: Option<&Curve>, age_ms: u64, flat_millis: u64) -> Vec<u64> 
 /// The residual of a host: what its readings and its scheduler charge show beyond its jobs'
 /// charges, `max(0, left - flat_sum, measured + vm - charged)`, all saturating. `left` is the
 /// scheduler's charge at slot 0 (every lease at its flat cost, the readings and the VMs in),
-/// `flat_sum` what the host's live jobs book, `measured` the cores its readings show busy (0
-/// with no usable reading), `vm` the VMs' CPU and `charged` the jobs' charges at slot 0. With
-/// every job charged flat the host's slot 0 is the scheduler's own.
+/// `flat_sum` what the host's live jobs book, `measured` the cores its readings show demanded,
+/// busy and waiting for a CPU ([`LoadView::measured_cpu_millis`]; 0 with no usable reading),
+/// `vm` the VMs' CPU and `charged` the jobs' charges at slot 0. With every job charged flat the
+/// host's slot 0 is the scheduler's own.
 fn residual(left: u64, flat_sum: u64, (measured, vm): (u64, u64), charged: u64) -> u64 {
     let booked = left.saturating_sub(flat_sum);
     let beyond = measured.saturating_add(vm).saturating_sub(charged);

@@ -16,6 +16,7 @@ fn full() -> Wire {
         mono_usec: 61_000_123,
         cpu_usage_usec: 125_000_456,
         host_cpu_usec: None,
+        host_cpu_pressure_some_usec: None,
         working_set_bytes: 7_000_000_789,
         active_file_bytes: 250_001,
         host_nonfile_bytes: None,
@@ -62,6 +63,7 @@ fn back(load: &NodeLoad) -> Wire {
         mono_usec: load.mono_usec,
         cpu_usage_usec: load.cpu_usage_usec,
         host_cpu_usec: None,
+        host_cpu_pressure_some_usec: None,
         working_set_bytes: load.memory_working_set_bytes,
         active_file_bytes: load.memory_active_file_bytes,
         host_nonfile_bytes: None,
@@ -95,7 +97,8 @@ fn back(load: &NodeLoad) -> Wire {
 /// Asserts the conversion of a load with a distinct value in every field, field by field
 /// (the working set stays bytes, the active file lands in the active file, the clocks and
 /// minutes keep their order and lease), and that converting back gives the wire load again.
-/// The two fields only the scheduler's type has read 0. It catches two fields swapped, a
+/// The throttled time, which only the scheduler's type has, reads 0, and so does the CPU
+/// pressure, which this load does not send. It catches two fields swapped, a
 /// unit scaled on the way, and a record dropped or reordered.
 #[test]
 fn a_wire_load_converts_field_for_field_and_back() {
@@ -123,6 +126,34 @@ fn a_wire_load_converts_field_for_field_and_back() {
     assert_eq!(back(&load), wire);
 }
 
+/// Asserts the host's CPU pressure reaches the scheduler's load as it was sent, the counter
+/// admission reads demand above the host's cores from, up to `u64::MAX`; and that a load
+/// without it (an agent of an earlier release, or a host with no pressure accounting) reads 0,
+/// not measured. Catches the counter dropped on the way, scaled, or put in another field.
+#[test]
+fn the_hosts_cpu_pressure_converts_and_reads_0_when_absent() {
+    for sent in [1, 9_876_543_210, u64::MAX] {
+        let wire = Wire {
+            host_cpu_pressure_some_usec: Some(sent),
+            ..full()
+        };
+        let load = node_load(&wire).unwrap();
+        assert_eq!(
+            (load.cpu_pressure_some_total_usec, load.cpu_throttled_usec),
+            (sent, 0)
+        );
+        let plain = node_load(&full()).unwrap();
+        assert_eq!(
+            NodeLoad {
+                cpu_pressure_some_total_usec: sent,
+                ..plain.clone()
+            },
+            load
+        );
+        assert_eq!(plain.cpu_pressure_some_total_usec, 0);
+    }
+}
+
 /// Asserts the round trip at the extremes: every counter at `u64::MAX`, the largest
 /// memory the wire allows, the largest lease ids and millicore figures; and a load with
 /// no lists at all. It catches a narrowing cast and a saturating conversion that would
@@ -135,6 +166,7 @@ fn the_round_trip_holds_at_the_extremes_and_when_empty() {
         mono_usec: u64::MAX,
         cpu_usage_usec: u64::MAX,
         host_cpu_usec: None,
+        host_cpu_pressure_some_usec: None,
         working_set_bytes: MAX_MEMORY_BYTES,
         active_file_bytes: MAX_MEMORY_BYTES,
         host_nonfile_bytes: None,
@@ -358,6 +390,7 @@ fn the_schedulers_cpu_is_the_whole_hosts_when_the_agent_sends_it() {
         mono_usec: seq * 5_000_000,
         cpu_usage_usec: seq * 5_000_000,
         host_cpu_usec: host.map(|cores| seq * 5_000_000 * cores),
+        host_cpu_pressure_some_usec: None,
         ..full()
     };
     let busy = |host: Option<u64>| {

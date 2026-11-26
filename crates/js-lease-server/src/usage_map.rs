@@ -24,9 +24,9 @@ pub(crate) fn lease_of(text: &str) -> Option<LeaseId> {
 }
 
 /// `load` as plain values. [`js_registry::node_load`] is the other converter of the wire
-/// load (for the hosts view): the two agree except that the active file pages are 0 here,
-/// as `NodeLoad::from(LoadIn)` sets them on purpose, and `node_load` keeps them; a test
-/// pins that.
+/// load (for the hosts view and admission): the two agree except that the active file pages
+/// and the host's CPU pressure are 0 here, as `NodeLoad::from(LoadIn)` sets them on purpose
+/// (the usage seam keeps neither), and `node_load` keeps them; a test pins that.
 ///
 /// Records with an id that does not parse are dropped and
 /// counted in [`Mapped::unparsable`].
@@ -97,15 +97,16 @@ mod tests {
     use super::*;
 
     /// Asserts the two converters of a wire load agree: for a vetted load,
-    /// `js_registry::node_load` with the active file pages zeroed equals
-    /// `NodeLoad::from(load_in(..).load)`, and the active file pages are the only
-    /// difference. It catches one converter gaining or changing a field the other does not.
+    /// `js_registry::node_load` with the active file pages and the CPU pressure zeroed equals
+    /// `NodeLoad::from(load_in(..).load)`, and those two are the only difference. It catches
+    /// one converter gaining or changing a field the other does not.
     #[test]
     fn the_registry_converter_and_the_usage_converter_agree() {
         let mut load = wire();
         load.seq = u64::MAX;
         load.host_cpu_usec = Some(88_000_000);
         load.active_file_bytes = 12_345;
+        load.host_cpu_pressure_some_usec = Some(67_890);
         load.actions_cpu_limited = false;
         load.covered.push("5-6".into());
         load.clocks.push(LeaseClock {
@@ -121,8 +122,15 @@ mod tests {
         });
         load.vet().unwrap();
         let mut ours = js_registry::node_load(&load).unwrap();
-        assert_eq!(ours.memory_active_file_bytes, 12_345);
+        assert_eq!(
+            (
+                ours.memory_active_file_bytes,
+                ours.cpu_pressure_some_total_usec
+            ),
+            (12_345, 67_890)
+        );
         ours.memory_active_file_bytes = 0;
+        ours.cpu_pressure_some_total_usec = 0;
         let theirs = js_types::sched::usage::NodeLoad::from(load_in(&load).load);
         assert_eq!(ours, theirs);
     }
@@ -157,6 +165,7 @@ mod tests {
             mono_usec: 6_000_000,
             cpu_usage_usec: 5_000_000,
             host_cpu_usec: None,
+            host_cpu_pressure_some_usec: None,
             working_set_bytes: 1 << 30,
             active_file_bytes: 0,
             host_nonfile_bytes: None,
