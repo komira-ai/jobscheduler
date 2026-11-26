@@ -184,10 +184,10 @@ fn with_no_end_known_the_hold_falls_back_to_the_load_order() {
 }
 
 /// Catches: an overdue lease kept charged: at 600 s every lease on `b` is past its
-/// estimate of a minute, so they count as released now and `b` starts the head at once,
-/// while `a`'s leases (700 s) free their cores later.
+/// estimate of a minute, so they count as released a minute from now and `b` starts the
+/// head at 660 s, while `a`'s leases (700 s) free their cores later.
 #[test]
-fn an_overdue_lease_counts_as_released_now() {
+fn an_overdue_lease_counts_as_released_a_minute_from_now() {
     let curves = Curves::new("load");
     for n in 4..8 {
         curves.set_life(&format!("k{n}"), 1);
@@ -201,6 +201,26 @@ fn an_overdue_lease_counts_as_released_now() {
     r.beat("b", None);
     r.tick();
     assert_eq!(r.s.head_hold(op), Some(&w("b")));
+}
+
+/// Catches: an overdue lease counted as released now. At 600 s every lease on `b` is past
+/// its estimate of a minute and counts as released at 660 s; `a`'s leases end at 630 s, so
+/// `a` starts the head first and holds it. Released now, `b` would start it at 600 s.
+#[test]
+fn an_overdue_lease_does_not_start_the_head_before_a_lease_that_ends_in_the_margin() {
+    let curves = Curves::new("load");
+    for n in 4..8 {
+        curves.set_life(&format!("k{n}"), 1);
+    }
+    let mut r = two_loaded(Some(curves), 1_000, 1_000);
+    walls(&mut r, 0, [Some(630); 4]);
+    walls(&mut r, 4, [Some(900); 4]);
+    let op = head(&mut r, 6_000);
+    r.ms = 600_000;
+    r.beat("a", None);
+    r.beat("b", None);
+    r.tick();
+    assert_eq!(r.s.head_hold(op), Some(&w("a")));
 }
 
 /// Catches: the start time read from the end bound alone when a lease has an earlier

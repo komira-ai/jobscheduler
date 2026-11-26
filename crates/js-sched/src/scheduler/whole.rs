@@ -61,6 +61,13 @@ use super::{Scheduler, Worker};
 use crate::backfill;
 use crate::servable::{Placed, Servable, serves};
 
+/// How long a lease already at or past its end is taken to hold its worker from now: the
+/// time for whatever ends it (its executor's wall limit, the next tick of the service that
+/// enforces it) to do so. The same minute backfill keeps spare before a start
+/// ([`js_whole::cost::DEFAULT_BACKFILL_MARGIN_MS`]), so a worker whose only lease is late
+/// takes no backfill.
+const OVERDUE_MARGIN_MS: u64 = js_whole::cost::DEFAULT_BACKFILL_MARGIN_MS;
+
 /// Why a whole-machine request that fits nowhere holds no worker though it has waited
 /// out `drain_after` ([`Scheduler::whole_wait`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -413,6 +420,13 @@ impl Scheduler {
     /// The end bound (start plus max wall time, the latest time there is for a lease with
     /// none) and the estimated end (start plus the P90 of the wall minutes of its key, raw;
     /// unknown when the key has none) of a lease of `operation` started at `start`.
+    ///
+    /// A lease whose end (its estimate cut to its bound, else its bound) is now or already
+    /// past still holds its worker until something ends it, so it is read as ending
+    /// [`OVERDUE_MARGIN_MS`] from now: the bound is that time and the estimate is dropped.
+    /// It never reads as ending now, so a worker whose leases are late never looks cheaper
+    /// to drain than one whose leases end within the margin. A lease that ends after now
+    /// keeps its own times, however soon.
     fn end_times(
         &self,
         operation: OperationId,
@@ -427,12 +441,17 @@ impl Scheduler {
             .admission
             .wall_minutes_p90(key)
             .map(|minutes| start.saturating_add(u64::from(minutes).saturating_mul(60_000)));
+        let now = self.now.as_millis();
+        if estimate.map_or(bound, |estimate| estimate.min(bound)) <= now {
+            return (now.saturating_add(OVERDUE_MARGIN_MS), None);
+        }
         (bound, estimate)
     }
 
     /// The end of each lease held or placed this round, as farm milliseconds: its estimate
-    /// cut to its bound, else its bound; `None` for a lease with neither. A lease placed
-    /// this round starts now.
+    /// cut to its bound, else its bound, and a margin from now for a lease at or past that
+    /// end ([`OVERDUE_MARGIN_MS`]); `None` for a lease with neither. A lease placed this
+    /// round starts now.
     pub(super) fn lease_ends(
         &self,
         placed: &[(OperationId, Placed)],

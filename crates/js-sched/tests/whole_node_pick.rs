@@ -153,6 +153,21 @@ fn with_settings_an_owner_action_holds_the_worker_that_empties_first() {
     assert_eq!(f.held_for(op), Some(&w("a")));
 }
 
+/// Catches: with settings, an owner action held on a worker whose lease is past its bound
+/// as though it were empty. At 100 s `a`'s lease of 60 s still runs and reads as ending a
+/// minute from now; `b`'s ends 30 s from now, so `b` is held.
+#[test]
+fn with_settings_an_owner_action_does_not_take_a_worker_whose_lease_is_late() {
+    let mut f = with_settings(4);
+    f.worker("a");
+    f.lease_on("a", secs(60));
+    f.worker("b");
+    assert!(f.advance(100_000).is_empty());
+    f.lease_on("b", secs(30));
+    let op = owner(&mut f);
+    assert_eq!(f.held_for(op), Some(&w("b")));
+}
+
 /// Catches: with settings, four owner actions in one pool each holding a worker: one
 /// hold per pool, the first in queue order.
 #[test]

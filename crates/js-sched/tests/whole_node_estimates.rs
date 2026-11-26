@@ -19,7 +19,7 @@ use std::sync::Arc;
 use crate::whole_rig::{Farm, request, secs, w};
 use js_sched::Scheduler;
 use js_types::sched::usage::{Curve, CurveSource};
-use js_types::sched::{LeaseKind, WorkKey};
+use js_types::sched::{FarmTime, LeaseKind, OperationId, WorkKey};
 use js_whole::WholeNodeConfig;
 
 /// P90 wall minutes for the keys of the leases the rig starts: `(n, minutes)` is the key
@@ -123,6 +123,73 @@ fn with_no_curves_the_bounds_decide() {
     f.lease_on("a", secs(600));
     f.worker("b");
     f.lease_on("b", secs(300));
+    let whole = f.whole();
+    assert_eq!(f.held_for(whole), Some(&w("b")));
+}
+
+/// `a` holds a lease of 60 s, past its bound at 100 s; `b` then takes a lease of
+/// `b_wall` seconds, and a whole-machine request arrives: the farm and the request.
+fn late_a_against_b(b_wall: u64) -> (Farm, OperationId) {
+    let mut f = farm(None);
+    f.worker("a");
+    f.lease_on("a", secs(60));
+    f.worker("b");
+    assert!(f.advance(100_000).is_empty());
+    f.lease_on("b", secs(b_wall));
+    let whole = f.whole();
+    (f, whole)
+}
+
+/// Catches: a lease past its bound read as ending now, so its worker looks empty. At 100 s
+/// `a`'s lease of 60 s still runs; `b`'s ends at 130 s. Read as a minute from now (160 s),
+/// `a` is the dearer and `b` is held; read as now, `a` would be held.
+#[test]
+fn a_lease_past_its_bound_does_not_make_its_worker_the_cheapest() {
+    let (f, whole) = late_a_against_b(30);
+    assert_eq!(f.held_for(whole), Some(&w("b")));
+}
+
+/// Catches: the late lease read as ending other than exactly a minute from now. Against a
+/// lease of `b` that ends 59 s from now `b` is held; against one that ends 60 s from now the
+/// two cost the same and the lower name `a` is held, with the tail it was chosen on at
+/// 160 s (a minute past 100 s), not the passed bound of 60 s.
+#[test]
+fn a_lease_past_its_bound_reads_as_ending_a_minute_from_now() {
+    let (f, whole) = late_a_against_b(59);
+    assert_eq!(f.held_for(whole), Some(&w("b")));
+    let (f, whole) = late_a_against_b(60);
+    assert_eq!(f.held_for(whole), Some(&w("a")));
+    let mark = f.s.whole_mark(whole).expect("the request marks a");
+    assert_eq!(mark.tail_end, Some(FarmTime::from_millis(160_000)));
+}
+
+/// Catches: only the bound checked for lateness. `a`'s lease may run 900 s but its key
+/// takes a minute at the P90, so by 120 s it has run past its estimate: it reads as ending
+/// at 180 s, after `b`'s lease (150 s), and `b` is held; read as its passed estimate, `a`
+/// would cost nothing and be held.
+#[test]
+fn a_lease_past_its_estimate_reads_as_ending_a_minute_from_now() {
+    let mut f = farm(Some(Lives::of(&[(1, 1)])));
+    f.worker("a");
+    f.lease_on("a", secs(900));
+    f.worker("b");
+    assert!(f.advance(120_000).is_empty());
+    f.lease_on("b", secs(30));
+    let whole = f.whole();
+    assert_eq!(f.held_for(whole), Some(&w("b")));
+}
+
+/// Catches: a lease with no bound left at its passed estimate. `a`'s lease has no max
+/// wall and its key takes a minute at the P90; at 120 s it reads as ending at 180 s, not at
+/// 60 s, and `b` (150 s) is held.
+#[test]
+fn a_lease_with_no_bound_past_its_estimate_reads_as_ending_a_minute_from_now() {
+    let mut f = farm(Some(Lives::of(&[(1, 1)])));
+    f.worker("a");
+    f.place_on("a", None);
+    f.worker("b");
+    assert!(f.advance(120_000).is_empty());
+    f.lease_on("b", secs(30));
     let whole = f.whole();
     assert_eq!(f.held_for(whole), Some(&w("b")));
 }
