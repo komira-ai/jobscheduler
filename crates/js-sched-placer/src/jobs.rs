@@ -48,7 +48,9 @@
 //!    the network ceiling its hello advertises, whether it reported that it runs host jobs and
 //!    the machine provider it is of, read again on every pass. Of the hosts that could take a
 //!    job now (capable, with room under the CPU slack and the memory percent, and with room in the
-//!    host's [`OpenHost::capacity`] for the summed bookings: [`crate::room`]), the job goes to
+//!    host's [`OpenHost::capacity`] for the summed bookings: [`crate::room`]; on a host that
+//!    books by CPU curve under `--placement-curves on`, with every slot of its booked CPU curve
+//!    within the slack instead of the CPU of both: `Engine::by_curve`), the job goes to
 //!    one of the first provider in the Default platform's order (pass 1 of design section 5.6),
 //!    and the scheduler's score chooses among that provider's hosts alone; a busy, draining,
 //!    tainted or too small host of an earlier provider never keeps it off a free one of a
@@ -112,13 +114,14 @@ use js_jobs::{
 use js_registry::{HostState, HostView, WholeNodeConfig};
 use js_sched::ceiling::within_ceiling;
 use js_sched::queue_status::{self, Outcome};
-use js_sched::{Event, Prediction, Request};
+use js_sched::{Event, Request};
 use js_types::Timestamp;
 use js_types::sched::{FarmTime, LeaseId as SchedLeaseId, LeaseKind, OperationId, Qos, WorkKey};
 use js_types::{EXEC_KEY, HostId, JobNetwork, QueueCode, QueueNote, Resources};
 use tracing::warn;
 
-use super::whole_jobs::{self, WholeJobStep, WholeJobs};
+use super::jobs_walker::{Walker, walker};
+use super::whole_jobs::{WholeJobStep, WholeJobs};
 use super::{Engine, Placed, TablesFrom, recovered_as};
 use crate::map::{self, MapError};
 use crate::place::SchedPlacer;
@@ -144,9 +147,12 @@ pub trait PassMetrics {
     fn store_write_failed(&self);
     /// The pass took the job tables `from` there ([`TablesFrom`]); by default, nothing is told.
     fn job_tables(&self, _from: TablesFrom) {}
-    /// A host refused a queued job for the predicate named `reason` (`cpu`, `predicted-memory`,
-    /// `booked-memory`, `cold-cap`); by default, nothing is told.
+    /// A host refused a queued job for the predicate named `reason` (`cpu`, `cpu-curve`,
+    /// `predicted-memory`, `booked-memory`, `cold-cap`); by default, nothing is told.
     fn refused(&self, _host: &HostId, _reason: &'static str) {}
+    /// A queued job of a curve class waited past the wait bound with no host fitting its curve,
+    /// and is tested with its flat number from now on; by default, nothing is told.
+    fn curve_wait_expired(&self) {}
 }
 
 /// The term of the leases the engine places for jobs: each is numbered by its operation, so
@@ -172,28 +178,11 @@ pub struct JobHold {
 pub use crate::room::OpenHost;
 
 /// The capacity the pass holds a placement on `host` to, when the host offers one.
-fn capacity_of<'a>(hosts: &'a JobHosts<'_>, host: &HostId) -> Option<&'a Capacity> {
+pub(super) fn capacity_of<'a>(hosts: &'a JobHosts<'_>, host: &HostId) -> Option<&'a Capacity> {
     hosts
         .open
         .get(host)
         .and_then(|offer| offer.capacity.as_ref())
-}
-
-/// A queued job, as a pass offers it to the engine.
-struct Walker {
-    job: JobId,
-    /// Whether the job runs on the machine itself (host isolation).
-    host_isolation: bool,
-    /// The hosts its bars keep it off at the walk's time ([`whole_jobs::barred_hosts`]).
-    barred: BTreeSet<HostId>,
-    request: Request,
-    booked: Booked,
-    /// The network level the job asks for.
-    network: JobNetwork,
-    /// The host ports the job declares, sorted, each once.
-    host_ports: Vec<u16>,
-    wall: Duration,
-    charge: Prediction,
 }
 
 impl Engine {
@@ -386,8 +375,11 @@ impl Engine {
         }
         self.sizes.set_bounds(bounds_of(self.capacities()));
         let day = day_of(now);
-        let sized = queued.iter().map(|job| self.sizes.sized(job, day));
-        let walkers: Vec<Walker> = sized.filter_map(|job| walker(&job, now)).collect();
+        self.begin_curve_walk(nodes.keys(), queued, now);
+        let sized = queued.iter().map(|job| (job, self.sizes.sized(job, day)));
+        let walkers: Vec<Walker> = sized
+            .filter_map(|(job, sized)| Some(self.shaped(walker(&sized, now)?, job, now)))
+            .collect();
         let usable: Vec<BTreeSet<&HostId>> = walkers
             .iter()
             .map(|walker| {
@@ -426,6 +418,7 @@ impl Engine {
             },
         );
         self.sched.drop_matches();
+        self.end_curve_walk();
         let decided = walkers.into_iter().zip(placed).zip(&usable);
         let mut placements = Vec::new();
         let mut waiting = Vec::new();
@@ -466,7 +459,7 @@ impl Engine {
         let free = room.iter().filter(|host| capable.contains(host));
         let free = free.filter(|host| !self.port_held_on(host, &walker.host_ports));
         let (free, full): (Vec<_>, Vec<_>) =
-            free.partition(|host| self.room.fits(host, walker.booked));
+            free.partition(|host| self.room_fits(host, walker.booked));
         // A host the bookings fill by memory is refused here, before the scheduler sees it:
         // say so, as the scheduler's refusals are said.
         for host in full {
@@ -474,7 +467,8 @@ impl Engine {
                 self.book_refusal(&walker.job, map::worker(host), refusal);
             }
         }
-        let only: BTreeSet<_> = free.into_iter().map(map::worker).collect();
+        let curved = self.by_curve(walker, free, now);
+        let only: BTreeSet<_> = curved.hosts.into_iter().map(map::worker).collect();
         if only.is_empty() {
             let next = OperationId(operation.0.saturating_add(1));
             self.sched.recover(JOB_TERM, next, operation.0, Vec::new());
@@ -489,6 +483,7 @@ impl Engine {
             self.job_rounds = self.job_rounds.saturating_add(1);
         }
         let request = (operation, walker.request.clone());
+        self.judge_cpu(operation, curved.judged);
         let granted = self.place_one(request, (walker.wall, walker.charge), only, now);
         self.book_refusals(&walker.job);
         // A placement held below changes the scheduler; a round that placed nothing ticked it
@@ -503,6 +498,7 @@ impl Engine {
                 let placed = Placed { lease, operation };
                 self.hold_job(&walker.job, &host, walker.host_ports.clone(), placed);
                 self.room.add(&host, walker.booked);
+                self.placed_by_curve(walker, &host);
                 self.sizes.placed(&walker.job, walker.booked);
                 Some(host)
             }
@@ -512,41 +508,6 @@ impl Engine {
             }
         }
     }
-}
-
-/// The queued `job` as a pass offers it to the engine at `now`; `None` for a job that books the
-/// whole host (the pass queues it with [`Engine::whole_jobs`]), and for one whose constraints
-/// are no platform requirements (logged).
-fn walker(job: &JobRecord, now: FarmTime) -> Option<Walker> {
-    let Needs::Shape(resources) = &job.spec.needs else {
-        return None;
-    };
-    let request = job_request(job, resources)
-        .inspect_err(|error| warn!(job = %job.id, %error, "a queued job's constraints are no platform requirements; it is not placed"))
-        .ok()?;
-    let ports: BTreeSet<u16> = job.spec.ports.iter().map(|port| port.host).collect();
-    let charge = Prediction {
-        cpu_millis: resources.cpu_millis(),
-        memory_bytes: resources.memory_bytes(),
-        cold: false,
-        life_minutes: 1,
-    };
-    Some(Walker {
-        job: job.id.clone(),
-        host_isolation: job.spec.constraints.isolation == Isolation::Host,
-        barred: whole_jobs::barred_hosts(job, now),
-        request,
-        booked: Booked::Shape {
-            cpu_millis: resources.cpu_millis(),
-            memory_bytes: resources.memory_bytes(),
-            disk_bytes: resources.disk_bytes(),
-            accelerators: resources.gpus(),
-        },
-        network: job_network(job.spec.network),
-        host_ports: ports.into_iter().collect(),
-        wall: Duration::from_secs(job.spec.wall_limit_secs),
-        charge,
-    })
 }
 
 /// The scheduler's request for the queued `job`, which needs `resources`: its capabilities
@@ -641,6 +602,8 @@ pub struct JobHosts<'a> {
     pub open: &'a BTreeMap<HostId, OpenHost>,
     /// The hosts that said hello to this server.
     pub hello: &'a BTreeSet<HostId>,
+    /// The hosts a taint closes, none of them open ([`WholeJobs::tainted`]).
+    pub tainted: &'a BTreeSet<HostId>,
     /// The pool's whole-node settings, if it has any.
     pub whole: Option<&'a WholeNodeConfig>,
 }
@@ -660,10 +623,11 @@ impl SchedPlacer {
         open: &BTreeMap<HostId, OpenHost>,
         (starts, metrics): (&dyn JobStarts, &dyn PassMetrics),
     ) -> Result<Vec<JobId>, JobStoreError> {
-        let hello = BTreeSet::new();
+        let none = BTreeSet::new();
         let hosts = JobHosts {
             open,
-            hello: &hello,
+            hello: &none,
+            tainted: &none,
             whole: None,
         };
         self.place_jobs_with(jobs, &hosts, (starts, metrics))
@@ -724,12 +688,10 @@ impl SchedPlacer {
         let now = self.now();
         let grace = hosts.whole.map_or(0, |whole| whole.regain_grace_ms);
         let open: BTreeSet<HostId> = hosts.open.keys().cloned().collect();
-        // The whole-host engine marks and commits only the jobs that book the whole host and
-        // run contained: it does not yet hold a job to the hosts that run host jobs, so a
-        // whole-host job with host isolation stays queued.
-        // Nor does it hold a job to the hosts that report `layered-rootfs`, so a whole-host job
-        // with layers, mounts or host ports (which the job service refuses at submit) stays
-        // queued too, rather than drain a host that could not be sent its start.
+        // The whole-host engine marks and commits only contained jobs: it does not yet hold a
+        // job to the hosts that run host jobs or report `layered-rootfs`, so a whole-host job
+        // with host isolation, or with layers, mounts or host ports (which the job service
+        // refuses at submit), stays queued rather than drain a host it could not start on.
         let whole: Vec<JobRecord> = queued
             .iter()
             .filter(|job| {
@@ -744,6 +706,7 @@ impl SchedPlacer {
             marks,
             hello: hosts.hello,
             open: &open,
+            tainted: hosts.tainted,
             settings: hosts.whole,
             claim_by: self.boot().saturating_add(Duration::from_millis(grace)),
         };
@@ -754,6 +717,7 @@ impl SchedPlacer {
             engine.set_room(Room::of(hosts.open, live));
             engine.whole_jobs(&input, now)
         };
+        self.read_live_curves(jobs, live);
         let mut noted = Noted {
             codes: queued
                 .iter()
@@ -786,11 +750,12 @@ impl SchedPlacer {
         }
         let (decided, waiting) = self.engine().walk_jobs(queued, hosts.open, now);
         self.engine().take_refused().announce(metrics);
+        self.tell_expiries(metrics);
         for (job, host, booked, mut placement) in self.sized_from_of(queued, decided, now) {
             placement.queue = noted.placed(&job, &host);
-            let capacity = capacity_of(hosts, &host);
+            let capacity = self.commit_capacity_of(hosts, &host);
             let booked = room::booked_on(hosts.open, &host, booked);
-            match jobs.place_claimed(&job, &host, booked, &placement, capacity) {
+            match jobs.place_claimed(&job, &host, booked, &placement, capacity.as_ref()) {
                 Ok((record, _)) => {
                     self.log_sized(&record, &host, now);
                     told(&record, &host, (starts, metrics));

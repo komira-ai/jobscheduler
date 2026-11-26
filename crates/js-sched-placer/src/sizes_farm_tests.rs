@@ -345,14 +345,19 @@ fn farm_placer() -> SchedPlacer {
 /// Asserts what one pass of the placer puts on one farm host, with no load reading yet, once
 /// the history has seen each kind run with a new agent: from 240 queued steps of the mix (a
 /// link step that uses 30 cores, booked a quarter of the host, first among every ten), each
-/// class books its runs' mean CPU, and the host is charged to within one compile (its mean,
-/// 6 cores) of its CPU slack limit (96.8 cores), within its memory, and holds every kind.
-/// Worked by hand from the bookings: 19 jobs are placed (two link steps of 22 cores, six
-/// compiles of 6, five tests of 2 and six genrules of 0.5), booked 93.0 cores and charged
-/// 96.0 (a host with no reading charges a lease at least a core, so each genrule counts 1;
-/// the next job of the queue, a test, needs 2 and waits for the room, holding the host), and
-/// 48.9 GB of memory. Catches CPU bookings that leave the host short of full, one class's
-/// jobs taking the host alone, and a kind that never gets a place.
+/// class books its runs' mean CPU, a compile too, whose runs average 6 cores and burst to 20
+/// (its peaks book nothing), and the host is charged to within one compile's mean (6 cores) of
+/// its CPU slack limit (96.8 cores), within its memory, and holds every kind. Worked by hand
+/// from the bookings: 19 jobs are placed (a link step of 22 cores, three each of a test of 2,
+/// a genrule of 0.5 and a compile of 6, the next link step, then three genrules, three
+/// compiles and two tests), booked 93.0 cores and charged 96.0 (a host with no reading charges
+/// a lease at least a core, so each of the six genrules counts 1; the next job of the queue, a
+/// test, needs 2 and waits for the room, holding the host), and 36 GiB of memory: each is a new
+/// target, booked from its kind's median run with the margin (a link step 2.75 GiB, a test
+/// 2.5, a compile 1.75, a genrule 1.25), not its kind's largest peak (45.5 GiB). Catches CPU
+/// bookings that leave the host short of full, a compile booked at its five-second peak (which
+/// places 10 jobs and leaves the host to four compiles), one class's jobs taking the host
+/// alone, and a kind that never gets a place.
 #[test]
 fn a_farm_host_is_booked_full_by_the_mix_and_holds_every_kind() {
     let tables = Tables::new();
@@ -434,7 +439,7 @@ fn a_farm_host_is_booked_full_by_the_mix_and_holds_every_kind() {
     assert_eq!(kinds.len(), 4, "{kinds:?}");
     assert_eq!(
         (placed.len(), cpu, memory),
-        (19, 93_000, 48_855_252_992),
+        (19, 93_000, 36 * GIB),
         "jobs placed, CPU and memory booked"
     );
 }
@@ -482,6 +487,7 @@ fn pass_by_load(placer: &SchedPlacer, tables: &Tables) -> Vec<JobId> {
     let hosts = JobHosts {
         open: &open,
         hello: &hello,
+        tainted: &std::collections::BTreeSet::new(),
         whole: None,
     };
     placer

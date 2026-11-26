@@ -5,13 +5,18 @@
 //! job numbers its lease as the job table does, and a whole-host job granted there instead
 //! is put back ([`Engine::settle_whole`]). The helpers here walk the queue's operations
 //! (the grants put back, the grants a heartbeat lists) and take the pool's whole-node
-//! settings into the scheduler ([`Engine::take_settings`]).
+//! settings into the scheduler ([`Engine::take_settings`]), and keep the tainted hosts out of
+//! the rounds ([`Engine::sync_taints`]).
+
+use std::collections::BTreeSet;
 
 use js_registry::WholeNodeConfig;
-use js_sched::{OpState, Scheduler};
+use js_sched::{Event, OpState, Scheduler};
+use js_types::HostId;
 use js_types::sched::{FarmTime, LeaseId as SchedLeaseId, OperationId, WorkerId};
 
 use super::{Engine, TERM};
+use crate::map;
 
 /// The term the engine numbers the grants of the whole-host jobs it queues in.
 pub const WHOLE_TERM: u64 = 3;
@@ -26,6 +31,28 @@ impl Engine {
         let sched = std::mem::replace(&mut self.sched, Scheduler::new(TERM));
         self.sched = sched.with_whole_node(settings.clone());
         self.whole_settings = Some(settings.clone());
+    }
+
+    /// Brings the scheduler's cordons to `tainted`, the hosts a taint closes now: each host
+    /// newly in it is cordoned, so that no round marks it or grants it, and each host the
+    /// engine cordoned that is no longer in it is uncordoned. Then every grant of a
+    /// whole-host job on a host of `tainted` is put back, keeping the job's queue time: a
+    /// cordon leaves a grant made before it standing, and the job would wait on a host that
+    /// never becomes open.
+    pub(super) fn sync_taints(&mut self, tainted: &BTreeSet<HostId>, now: FarmTime) {
+        let cleared: Vec<HostId> = self.tainted.difference(tainted).cloned().collect();
+        let new: Vec<HostId> = tainted.difference(&self.tainted).cloned().collect();
+        for host in new {
+            let worker = map::worker(&host);
+            self.feed(now, Event::Cordon { worker });
+        }
+        for host in cleared {
+            let worker = map::worker(&host);
+            self.feed(now, Event::Uncordon { worker });
+        }
+        self.tainted.clone_from(tainted);
+        let barred: BTreeSet<WorkerId> = tainted.iter().map(map::worker).collect();
+        self.unplace_whole_where(|worker| barred.contains(worker));
     }
 
     /// Runs one placement round of the queued whole-host jobs, in a term of their own, so

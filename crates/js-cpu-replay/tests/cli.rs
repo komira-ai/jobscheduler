@@ -305,3 +305,59 @@ fn the_program_prints_a_report_and_fails_on_a_missing_trace() {
             .starts_with("js-cpu-replay: cannot read")
     );
 }
+
+/// A check line of the server's log, compressed or not.
+const CHECK: &str = "2026-11-24T16:48:06.974256Z  INFO js_sched_placer::sizes::profile: a run \
+    was checked against its class's profile job=k1 class=build cpu=\"learned\" cpu_runs=3 \
+    cpu_shaped=false cpu_mean_millicores=1500 cpu_level_millicores=1437 \
+    cpu_peak_millicores=1937 memory=\"learned\" memory_runs=3 memory_shaped=false \
+    memory_mean_mib=144 memory_level_mib=91 memory_peak_mib=301\n";
+
+/// A check line of the current release: the run peaked at 3 cores over a predicted peak of 2.
+const CHECK_NOW: &str = "2026-11-24T16:48:07.974256Z  INFO js_sched_placer::sizes::profile: a run \
+    was checked against its class's profile job=k2 class=tool cpu=\"learned\" cpu_runs=9 \
+    cpu_shaped=true cpu_mean_millicores=1000 cpu_level_millicores=1000 \
+    cpu_peak_millicores=3000 cpu_predicted_peak_millicores=2000 cpu_curve_error=100 \
+    cpu_flat_error=1000 memory=\"no-series\"\n";
+
+/// Asserts the table prints a log of the release before (no predicted peak) as `-` for the
+/// overruns and `no` for the curve, the same log compressed and a line with no class by line,
+/// and the current release's line as one overrun of one scored line (a class of one line is not yet `yes`).
+#[test]
+fn shadow_prints_the_table_of_a_logs_check_lines() {
+    let scratch = Scratch::new("shadow");
+    let plain = scratch.put("server.log", CHECK.as_bytes());
+    let table = said(&["shadow", plain.as_str(), "--min-runs", "1"]).unwrap();
+    let now = scratch.put("now.log", CHECK_NOW.as_bytes());
+    let table_now = said(&["shadow", now.as_str(), "--min-runs", "1"]).unwrap();
+    assert!(
+        table_now.contains(
+            "| tool | 1 | 1 | 0.0 | 33.3 | 10.0 | yes | 100.0 | 100.0 | no | 0.9 | 0 | - | - | - | - |\n"
+        ),
+        "{table_now}"
+    );
+    assert!(
+        table.contains(
+            "| build | 1 | 0 | 4.2 | - | - | no | - | 100.0 | no | 0.0 | 0 | 36.8 | - | - | no |\n"
+        ),
+        "{table}"
+    );
+    // Compressed, at the default of 16 lines a class.
+    let mut packed = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    std::io::Write::write_all(&mut packed, CHECK.as_bytes()).unwrap();
+    let packed = scratch.put("server.log.gz", &packed.finish().unwrap());
+    assert!(said(&["shadow", packed.as_str()]).unwrap().starts_with(
+        "1 check lines (and 0 repeating a job's line, left out), 1 classes, 0 with at \
+                 least 16 lines\n"
+    ));
+    // A check line with no class names its line.
+    let broken = scratch.put(
+        "broken.log",
+        b"a run was checked against its class's profile\n",
+    );
+    let error = said(&["shadow", broken.as_str()]).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "the log: line 1: no job, class and CPU status"
+    );
+}

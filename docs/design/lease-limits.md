@@ -36,9 +36,8 @@ the keys `tenant`, `run`, `validation-run`, `definition`, `instance`, `scheduler
 `[a-z0-9._-]`. The caller mints the validation run id; the scheduler only carries and applies it. A user label under the reserved prefix
 is refused at submit. Labels flow request, lease, `Start`, agent. A capacity provider tags each instance it launches with `pool`,
 `acquire` and `scheduler` (the scheduler's instance id), and the lease once one is bound, as `jobscheduler.dev/*` instance tags (aws), so `list` and the
-reaper can find what is ours and attribution can read it. In ucdk the adapter translates the label set into `Stamp.extra`
-(`ucdk/crates/ucdk-provider/src/stamp.rs`); a tagless kind cannot carry it, so a class that carries a validation run id is refused at
-submit on such a kind unless its adapter defines a name rule that includes the id.
+reaper can find what is ours and attribution can read it. (A ucdk adapter that carried the label set into ucdk's `Stamp.extra` was
+planned; ucdk removed its stamps and `Provider` trait in komira-ai/ucdk#28 and the plan was dropped, [ucdk.md](ucdk.md).)
 
 Runs are not nodes in any ledger, so the sweep key is the `instance` label. Destroying a Job definition, or the environment, cancels or
 drains its runs and sweeps billable leftovers by that label; the sweep is part of the closed-world delete, with a test on the fake.

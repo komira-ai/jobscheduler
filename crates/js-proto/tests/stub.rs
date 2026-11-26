@@ -351,6 +351,7 @@ mod answers {
                 gpus: 2,
             }),
             input_failure: None,
+            attempt: 2,
         }
     }
 
@@ -536,6 +537,7 @@ mod answers {
                 mark_give_ups: 1,
                 estimated_run_ms: Some(55_000),
                 cpu_series: None,
+                attempt: Some(2),
             }],
             next_page_token: "usage-page-3".to_owned(),
         }

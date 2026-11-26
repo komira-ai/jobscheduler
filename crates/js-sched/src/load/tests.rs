@@ -32,6 +32,7 @@ impl Host {
                 same_key_millis: 0,
                 new_key_millis: 0,
                 uncovered_leases: 0,
+                booked_with_lease: Charge::default(),
             },
             load: [Charge::default(); SLOTS],
             new: [Charge::default(); SLOTS],
@@ -776,6 +777,7 @@ fn a_chosen_worker_says_how_it_was_decided() {
 }
 
 mod explained;
+mod pack;
 
 /// Catches: the score's slot numbering drifting from the predicate's: placement reads the
 /// predicate's figures by slot number, so the slots (minutes `0..=HORIZON` then `H+`) must

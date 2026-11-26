@@ -14,6 +14,7 @@ pub fn to_wire(reading: &Reading) -> NodeLoad {
         mono_usec: sample.mono_usec,
         cpu_usage_usec: sample.cpu_usage_usec,
         host_cpu_usec: Some(sample.host_cpu_usec),
+        host_cpu_pressure_some_usec: sample.host_cpu_pressure_some_usec,
         working_set_bytes: sample.working_set_bytes,
         active_file_bytes: sample.active_file_bytes,
         host_nonfile_bytes: sample.host_nonfile_bytes,

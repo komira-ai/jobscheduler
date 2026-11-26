@@ -9,8 +9,11 @@
 //! highest memory and the mean CPU as varints); then, only when the row has one, the CPU
 //! series: a byte 1, the granularity in seconds, the run length in microseconds (each a varint),
 //! the partial flag (a byte, 0 or 1), the number of points (a varint) and each point (a
-//! varint). A row without a series ends after `used`, the bytes it was before the field; a
-//! reader that finds bytes after `used` reads a series, and a byte 0 there is an absent one.
+//! varint), written as a byte 0 when the row has none but has a class; then, only when the row
+//! has one, the class (a byte 1 and the text, any UTF-8, kept as it is). A row without a series
+//! or a class ends after `used`, the bytes it was before those fields; a reader that finds bytes
+//! after `used` reads a series, and a byte 0 there is an absent one, and one that finds bytes
+//! after the series reads a class.
 //!
 //! A text is a varint length and that many bytes of UTF-8. An optional field is a byte 0
 //! (absent) or 1 followed by the field. A varint is little-endian base 128, 7 bits a byte, high
@@ -99,19 +102,23 @@ pub(crate) fn encode(row: &EndedRow) -> Vec<u8> {
         put_varint(out, used.memory_bytes);
         put_varint(out, used.cpu_mean_milli);
     });
-    if let Some(series) = row
+    let series = row
         .cpu_series
         .as_ref()
-        .filter(|series| series.is_well_formed())
-    {
-        out.push(1);
-        put_varint(&mut out, u64::from(series.granularity_secs));
-        put_varint(&mut out, series.run_usec);
-        out.push(u8::from(series.partial));
-        put_varint(&mut out, series.points.len() as u64);
-        for point in &series.points {
-            put_varint(&mut out, u64::from(*point));
-        }
+        .filter(|series| series.is_well_formed());
+    if series.is_some() || row.class.is_some() {
+        put_opt(&mut out, series, |out, series| {
+            put_varint(out, u64::from(series.granularity_secs));
+            put_varint(out, series.run_usec);
+            out.push(u8::from(series.partial));
+            put_varint(out, series.points.len() as u64);
+            for point in &series.points {
+                put_varint(out, u64::from(*point));
+            }
+        });
+    }
+    if let Some(class) = &row.class {
+        put_opt(&mut out, Some(class), |out, class| put_text(out, class));
     }
     out
 }
@@ -224,6 +231,12 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<EndedRow, EndedRowError> {
     } else {
         r.opt("cpu_series", series)?
     };
+    // A row from before the class ends here.
+    let class = if r.rest.is_empty() {
+        None
+    } else {
+        r.opt("class", |r| r.text("class").map(str::to_owned))?
+    };
     Ok(EndedRow {
         id,
         profile,
@@ -239,6 +252,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<EndedRow, EndedRowError> {
         error_ms,
         used,
         cpu_series,
+        class,
     })
 }
 

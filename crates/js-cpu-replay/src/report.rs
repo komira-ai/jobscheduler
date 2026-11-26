@@ -9,7 +9,7 @@ use crate::sim::{Arm, Bookings, Farm, Outcome, Rule, Setup, as_placed, replay};
 use crate::trace::{End, Job};
 
 /// The ways of packing the report compares, in its order.
-pub const ARMS: [Arm; 13] = [
+pub const ARMS: [Arm; 15] = [
     Arm {
         name: "recorded bookings",
         bookings: Bookings::Recorded,
@@ -25,6 +25,18 @@ pub const ARMS: [Arm; 13] = [
     Arm {
         name: "A median, 1.1",
         bookings: Bookings::Learned,
+        rule: Rule::Booked,
+        limit_permille: 1100,
+    },
+    Arm {
+        name: "A median, curves packed, 1.1",
+        bookings: Bookings::Curve,
+        rule: Rule::Packed,
+        limit_permille: 1100,
+    },
+    Arm {
+        name: "A heavy tail p90, 1.1",
+        bookings: Bookings::Tailed,
         rule: Rule::Booked,
         limit_permille: 1100,
     },
@@ -490,8 +502,9 @@ fn options(text: &mut String, jobs: &[Job], farm: Farm) {
             "## Options, arrivals at {speed}x\n\n\
              | arm | shape | jobs/h | wait p50 s | p90 s | p99 s | jobs per host | host-time over \
              cores % | asked past cores, mean | slowdown % | time in system, mean s | CPU used % | booked/used | used above \
-             booking % | plan error % | host-time above plan % |\n\
-             |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+             booking % | plan error % | host-time above plan % | most booked on a host, x \
+             cores | Gini of placements | core-s past cores |\n\
+             |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
         );
         let mut alone = 0;
         for arm in ARMS {
@@ -522,7 +535,8 @@ fn row(text: &mut String, arm: Arm, shape: Shape, outcome: &Outcome, (farm, cpu)
     };
     let _ = writeln!(
         text,
-        "| {} | {} | {:.0} | {} | {} | {} | {:.1} | {} | {} | {} | {:.1} | {} | {:.2} | {} | {} | {} |",
+        "| {} | {} | {:.0} | {} | {} | {} | {:.1} | {} | {} | {} | {:.1} | {} | {:.2} | {} | {} | {} | \
+         {:.2} | {:.3} | {} |",
         arm.name,
         shape.name(),
         outcome.waits.len() as f64 * 3_600_000.0 / span,
@@ -541,7 +555,23 @@ fn row(text: &mut String, arm: Arm, shape: Shape, outcome: &Outcome, (farm, cpu)
         percent(outcome.above_booking as f64, cpu as f64),
         percent(outcome.plan_error as f64, capacity),
         percent(outcome.under_ms as f64, host_time),
+        outcome.booked_peak as f64 / farm.milli as f64,
+        gini(&outcome.placed),
+        outcome.over_excess / 1_000_000,
     );
+}
+
+/// The Gini coefficient of `counts`: the mean absolute difference between every two of them
+/// over twice their mean, 0 when they are all equal (or there are none) and `1 - 1/n` when one
+/// holds everything.
+fn gini(counts: &[u64]) -> f64 {
+    let total: u64 = counts.iter().sum();
+    let differences: u64 = counts
+        .iter()
+        .flat_map(|a| counts.iter().map(move |b| a.abs_diff(*b)))
+        .sum();
+    let n = counts.len().max(1) as f64;
+    differences as f64 / (2.0 * n * total.max(1) as f64)
 }
 
 #[cfg(test)]

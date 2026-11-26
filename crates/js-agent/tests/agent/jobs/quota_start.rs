@@ -284,6 +284,7 @@ fn queued_job(id: &str, disk_bytes: u64) -> NewJob {
         layers: Vec::new(),
         mounts: Vec::new(),
         host_ports: Vec::new(),
+        history_key: Default::default(),
     };
     NewJob {
         id: Some(JobId::parse(id).unwrap()),
@@ -334,6 +335,7 @@ fn server_admits(hello: &Hello) -> usize {
     let hosts = JobHosts {
         open: &open,
         hello: &said_hello,
+        tainted: &std::collections::BTreeSet::new(),
         whole: None,
     };
     let placed = placer.place_jobs_with(&jobs, &hosts, (&NoStarts, &Unread));

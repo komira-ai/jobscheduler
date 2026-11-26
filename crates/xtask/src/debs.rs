@@ -13,8 +13,8 @@
 //!    is there and its SHA-256 is the pinned one, and refuses it, without replacing it, when its
 //!    SHA-256 is another;
 //! 3. when it is not there, downloads it from each mirror in turn, in [`WAITS`]`.len()` rounds
-//!    with the pause of [`WAITS`] before each round, each attempt given up after
-//!    [`ATTEMPT_TIMEOUT`], and keeps the first download whose SHA-256 is the pinned one (written
+//!    with the pause of [`WAITS`] before each round ([`fetch::first_pinned`]), each attempt
+//!    given up after [`ATTEMPT_TIMEOUT`], and keeps the first download whose SHA-256 is the pinned one (written
 //!    through a `.part` file and renamed, mode 0644). A download of other bytes is one more
 //!    failed attempt. When every attempt failed, the error names each one, in order.
 //!
@@ -30,12 +30,7 @@ use serde::Deserialize;
 
 use crate::fetch::{self, Sha256};
 
-/// The pause before each round of downloads: none before the first.
-pub const WAITS: [Duration; 3] = [
-    Duration::ZERO,
-    Duration::from_secs(10),
-    Duration::from_secs(30),
-];
+pub use crate::fetch::{Get, WAITS};
 
 /// How long one download may take.
 pub const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(120);
@@ -233,9 +228,6 @@ fn pin(written: Written, arch: Arch) -> Result<Pin, String> {
     })
 }
 
-/// The download of one URL: its bytes, or why it failed (one line).
-pub type Get<'a> = &'a dyn Fn(&str) -> Result<Vec<u8>, String>;
-
 /// Downloads over HTTPS trusting `roots`, each attempt given up after [`ATTEMPT_TIMEOUT`].
 pub fn https<'a>(
     roots: &'a [CertificateDer<'static>],
@@ -316,41 +308,24 @@ fn dir_error(path: &Path) -> impl FnOnce(std::io::Error) -> Error + '_ {
     }
 }
 
-/// The pinned bytes of `pin` from the first of `mirrors` that gives them, round after round,
-/// and the line that says where they came from.
+/// The pinned bytes of `pin` from the first of `mirrors` that gives them, round after round
+/// ([`fetch::first_pinned`]), and the line that says where they came from.
 fn download(
     mirrors: &[String],
     pin: &Pin,
     get: Get<'_>,
     pause: &dyn Fn(Duration),
 ) -> Result<(Vec<u8>, String), Error> {
-    let mut attempts = Vec::new();
-    for wait in WAITS {
-        pause(wait);
-        for mirror in mirrors {
-            let url = format!("{mirror}/{}", pin.path);
-            let failed = match get(&url) {
-                Ok(bytes) if Sha256::of(&bytes) == pin.sha256 => {
-                    let mut line = format!("ok: {url} has SHA-256 {}", pin.sha256);
-                    if !attempts.is_empty() {
-                        line.push_str(&format!(
-                            ", after {} failed: {}",
-                            attempts.len(),
-                            attempts.join("; ")
-                        ));
-                    }
-                    return Ok((bytes, line));
-                }
-                Ok(bytes) => format!("SHA-256 {}, not the pinned one", Sha256::of(&bytes)),
-                Err(why) => why.replace(['\r', '\n'], " "),
-            };
-            attempts.push(format!("{url}: {failed}"));
-        }
-    }
-    Err(Error::Unavailable {
-        name: pin.name.clone(),
-        attempts,
-    })
+    let urls: Vec<String> = mirrors
+        .iter()
+        .map(|mirror| format!("{mirror}/{}", pin.path))
+        .collect();
+    fetch::first_pinned(&urls, &pin.sha256, get, pause)
+        .map(|(bytes, from)| (bytes, format!("ok: {from}")))
+        .map_err(|attempts| Error::Unavailable {
+            name: pin.name.clone(),
+            attempts,
+        })
 }
 
 #[cfg(test)]

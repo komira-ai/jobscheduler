@@ -3,13 +3,16 @@
 
 mod calibration;
 mod cpu;
+mod curve;
 mod life;
+mod median;
 mod memory;
 mod profile;
 mod profile_check;
 mod reference;
 mod safety;
 mod storage;
+mod tail;
 
 use crate::*;
 

@@ -11,14 +11,22 @@
 //! gets the same share of what it asks (`cores / asked`), so each runs slower by that much.
 //! A job's phases ([`crate::shape`]) are in its own time; a slowed job takes longer, and the
 //! time it lost is its slowdown.
+//!
+//! The curve mode ([`curve`]) books and packs by what each class learned of its jobs' CPU over
+//! their age.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, VecDeque};
+use std::rc::Rc;
+
+use js_sizing::Curve;
 
 use crate::shape::{self, Phase, Shape};
 use crate::sizing::{Booking, Sizer, day_of};
 use crate::trace::{End, Job};
 use js_sched_placer::sizes::DEFAULT_COLD_CPU_MILLIS;
+
+pub mod curve;
 
 /// One tick, in milliseconds.
 pub const TICK_MS: u64 = 1000;
@@ -60,8 +68,13 @@ impl Farm {
 pub enum Bookings {
     /// What the job was booked on the farm, as recorded.
     Recorded,
-    /// What the placer's sizing books it from the history the replay has seen so far.
+    /// What the placer's sizing books it from the history the replay has seen so far, every
+    /// run taught without its peak: the median of its class's runs' means.
     Learned,
+    /// [`Bookings::Learned`] with each run taught with its recorded peak, as the placer taught
+    /// it under the heavy-tail rule: a class whose peaks are a heavy tail books the 90th
+    /// percentile of them.
+    Tailed,
     /// The placer's memory, and a CPU from the class's last runs (else its fallback's, else
     /// its client's) weighted by `2^(-age / half_life_ms)`, as Autopilot weights its samples:
     /// their weighted mean, or with `quantile_permille` the load-weighted quantile of their
@@ -73,6 +86,13 @@ pub enum Bookings {
         /// The quantile, in thousandths; `None` for the weighted mean.
         quantile_permille: Option<u64>,
     },
+    /// [`Bookings::Learned`], and a job of a class that passes the four checks of
+    /// `js_sizing::Checks` books its CPU curve over its age instead: each class learns, at
+    /// each successful run's end, the run's series as the replay synthesised it
+    /// ([`crate::shape`]) in 2 s means. A job's `booking` stays its flat step; the curve
+    /// books beside it ([`Rule::Packed`] places by it, and the outcome's `booked` integrates
+    /// it). See [`curve`].
+    Curve,
 }
 
 /// One run a class's decayed estimate is taken over.
@@ -137,6 +157,14 @@ pub enum Rule {
     /// job's life, known exactly (an oracle: the best any learned curve could do), within the
     /// limit at every moment.
     Curve,
+    /// The curves of the jobs on the host and the new job's, within the limit at every slot
+    /// ahead (`docs/design/placement-profiles-live.md` section 3): each running job is charged
+    /// what its curve says it still books at that slot, weighted by the share of its class's
+    /// runs that reach it (its flat booking when it has no curve), and the host's residual (its
+    /// reading beyond its jobs' charges now) is carried to every slot. A host is ranked by
+    /// the fullest slot with the new job, without the residual. With no curve it is
+    /// [`Rule::Booked`]. See [`curve`].
+    Packed,
     /// The placer as it ran before its hosts' readings reached it (komira-ai/jobscheduler#1036):
     /// no reading, so every job is charged the larger of its booking and one core
     /// (`UNMEASURED_CPU_FLOOR_MILLIS` in `js-sched`), and no host is ranked behind another
@@ -207,6 +235,10 @@ pub struct Outcome {
     pub booked: u128,
     /// The CPU the jobs used beyond their booking, in millicore-ms.
     pub above_booking: u128,
+    /// The most CPU booked on one host at once, in millicores.
+    pub booked_peak: u64,
+    /// The jobs started on each host, by host index.
+    pub placed: Vec<u64>,
 }
 
 /// A job running on a host.
@@ -216,6 +248,8 @@ struct Running {
     job: usize,
     /// What it booked.
     booking: Booking,
+    /// The curve it books beside its flat `booking`, when its class passes the checks.
+    curve: Option<Rc<Curve>>,
     /// Its class's variance of CPU, in millicores squared.
     var: u64,
     /// Its phases.
@@ -313,7 +347,7 @@ impl Host {
     /// The CPU `rule` holds it to be using.
     fn planned(&self, rule: Rule) -> u64 {
         match rule {
-            Rule::Booked => {
+            Rule::Booked | Rule::Packed => {
                 let (covered, not) = self.split();
                 self.measured().max(covered) + not
             }
@@ -331,6 +365,7 @@ impl Host {
     /// The figure `rule` gives it with `new` on it, or `None` past `limit`.
     fn figure(&self, rule: Rule, new: &Running, limit: u64) -> Option<u64> {
         let figure = match rule {
+            Rule::Packed => return self.packed(new, limit),
             Rule::Booked | Rule::Measured => self.planned(rule) + new.booking.milli,
             Rule::Unread => self.planned(rule) + new.booking.milli.max(UNREAD_FLOOR_MILLI),
             Rule::Reserve { z_tenths } => self.reserved(z_tenths, new.booking.milli, new.var),
@@ -414,6 +449,8 @@ struct World<'a> {
     /// Whether anything that can change a placement happened since the last pass: a job
     /// joined an empty queue, a job ended or the hosts were read.
     dirty: bool,
+    /// What the curve mode has learned and waits for.
+    curves: curve::Curves,
 }
 
 /// Replays `jobs` (a trace, in arrival order) placed by `arm` under `setup`.
@@ -450,21 +487,28 @@ pub fn as_placed(jobs: &[Job], setup: Setup) -> Outcome {
 impl<'a> World<'a> {
     fn new(jobs: &'a [Job], arm: Arm, setup: Setup) -> Self {
         let farm = setup.farm;
+        let sizer = Sizer::new(farm.milli, farm.bytes);
         Self {
             jobs,
             arm,
             setup,
             hosts: vec![Host::default(); farm.hosts],
             queue: VecDeque::new(),
-            sizer: Sizer::new(farm.milli, farm.bytes),
+            sizer: if arm.bookings == Bookings::Tailed {
+                sizer.with_peaks()
+            } else {
+                sizer
+            },
             spreads: BTreeMap::new(),
             histories: BTreeMap::new(),
             outcome: Outcome {
                 slowed: vec![0; jobs.len()],
                 waited: vec![0; jobs.len()],
+                placed: vec![0; farm.hosts],
                 ..Outcome::default()
             },
             dirty: false,
+            curves: curve::Curves::default(),
         }
     }
 
@@ -524,7 +568,9 @@ impl<'a> World<'a> {
                 milli: u64::from(job.booked_milli),
                 bytes: u64::from(job.booked_mib) << 20,
             },
-            Bookings::Learned => self.sizer.book(job, day_of(now)),
+            Bookings::Learned | Bookings::Tailed | Bookings::Curve => {
+                self.sizer.book(job, day_of(now))
+            }
             Bookings::Decayed {
                 half_life_ms,
                 quantile_permille,
@@ -555,13 +601,18 @@ impl<'a> World<'a> {
         .into_iter()
         .filter(|start| start.ms > 0)
         .collect();
+        // A class's bursts fall at one point of its runs under `ClassBurst`, else by the run.
+        let at = match self.setup.shape {
+            Shape::ClassBurst => spot(job.class as usize),
+            _ => spot(index),
+        };
         phases.extend(shape::phases(
             self.setup.shape,
             run,
             job.cpu_ms,
             job.peak_milli,
             farm.milli,
-            spot(index),
+            at,
         ));
         let var = [Some(job.class), job.fallback, Some(job.client)]
             .iter()
@@ -571,6 +622,7 @@ impl<'a> World<'a> {
         Running {
             job: index,
             booking,
+            curve: None,
             var,
             left: phases[0].ms as f64,
             phases,
@@ -591,7 +643,8 @@ impl<'a> World<'a> {
         let limit = farm.milli.saturating_mul(self.arm.limit_permille) / 1000;
         let tolerance = farm.milli + farm.milli / 100;
         while let Some(&index) = self.queue.front() {
-            let new = self.running(index, now);
+            let mut new = self.running(index, now);
+            self.curved(&mut new, now);
             let mut best: Option<(Rank, usize)> = None;
             for (at, host) in self.hosts.iter().enumerate() {
                 if host.bytes + new.booking.bytes > farm.bytes {
@@ -615,6 +668,7 @@ impl<'a> World<'a> {
             let alone = best.is_none() && self.stuck(&new, limit);
             self.outcome.alone += usize::from(alone);
             let Some((_, at)) = best.or(alone.then_some((ALONE, 0))) else {
+                self.stall(&new, now);
                 return;
             };
             self.queue.pop_front();
@@ -647,9 +701,13 @@ impl<'a> World<'a> {
         let wait = now.saturating_sub(arrived);
         self.outcome.waits.push(wait);
         self.outcome.waited[new.job] = wait;
+        self.curves.placed();
         let host = &mut self.hosts[at];
         host.bytes += new.booking.bytes;
         host.runs.push(new);
+        let booked = host.runs.iter().map(|run| run.booking.milli).sum::<u64>();
+        self.outcome.booked_peak = self.outcome.booked_peak.max(booked);
+        self.outcome.placed[at] += 1;
     }
 
     /// Runs every host for the tick that starts at `now`.
@@ -706,7 +764,7 @@ impl<'a> World<'a> {
         outcome.last_end_ms = outcome.last_end_ms.max(end);
         outcome.own_ms += run.own;
         outcome.slowed_ms += slowed;
-        let booked = u128::from(run.booking.milli) * u128::from(wall);
+        let booked = run.booked(wall);
         let used = u128::from(job.cpu_ms) * 1000;
         outcome.booked += booked;
         outcome.above_booking += used.saturating_sub(booked);
@@ -714,6 +772,7 @@ impl<'a> World<'a> {
         self.sizer
             .learn(job, (ran, slowed), run.booking, day_of(end));
         if job.end == End::Ok && run.run >= TICK_MS {
+            self.teach_curve(&run, end, slowed);
             let mean = job.cpu_ms * 1000 / run.run;
             let host = self.setup.farm.milli.max(mean);
             let peak = job.peak_milli.map_or(mean, u64::from).clamp(mean, host);
@@ -746,5 +805,7 @@ fn spot(index: usize) -> u64 {
     ((index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32) % 1000
 }
 
+#[cfg(test)]
+mod tail_tests;
 #[cfg(test)]
 mod tests;

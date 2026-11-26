@@ -16,7 +16,8 @@ fn up(value: u64) -> u64 {
 struct Reference {
     /// Every memory sample as contributed: (value, censored, day).
     samples: Vec<(u64, bool, u32)>,
-    cpu: Vec<u32>,
+    /// Every kept CPU sample: (mean, peak; 0 for none).
+    cpu: Vec<(u32, u32)>,
     floor: u64,
     anchor: usize,
     floor_day: u32,
@@ -61,12 +62,11 @@ impl Reference {
                 let usable = |p: &u64| trusted && *p > 0 && *p < b.host_memory;
                 if let Some(peak) = run.peak_memory_bytes.filter(usable) {
                     {
-                        let limit = memory_max(run.booked_memory_bytes);
-                        let near =
-                            limit.is_some_and(|l| u128::from(peak) * 100 >= u128::from(l) * 95);
-                        if run.limit_hits > 0 || run.swap_peak_bytes > 0 || near {
-                            self.samples
-                                .push((peak.min(run.booked_memory_bytes), true, now));
+                        if run.limit_hits > 0 {
+                            let need = peak.max(run.booked_memory_bytes).min(b.host_memory - 1);
+                            self.samples.push((need, true, now));
+                        } else if run.swap_peak_bytes > 0 {
+                            self.samples.push((peak, true, now));
                         } else {
                             self.samples.push((peak, false, now));
                         }
@@ -75,9 +75,10 @@ impl Reference {
                 }
             }
             Outcome::OwnLimitKill => {
-                let limit = memory_max(run.booked_memory_bytes).unwrap_or(0);
                 let used = run.peak_memory_bytes.unwrap_or(0);
-                let sample = used.max(limit).min(b.host_memory.saturating_sub(1));
+                let sample = used
+                    .max(run.booked_memory_bytes)
+                    .min(b.host_memory.saturating_sub(1));
                 if sample > 0 {
                     self.samples.push((sample, false, now));
                     self.kill(run, now, b);
@@ -85,27 +86,47 @@ impl Reference {
             }
             _ => {}
         }
-        let used = run.cpu_usage_us > 0 || run.cpu_peak_millis.is_some_and(|peak| peak > 0);
-        if run.outcome == Outcome::Success && trusted && used {
+        if run.outcome == Outcome::Success && trusted && run.cpu_usage_us > 0 {
             let mean = u128::from(run.cpu_usage_us) * 1000 / u128::from(run.wall_us);
             let mean = mean.min(u128::from(u32::MAX)) as u32;
-            let millis = run.cpu_peak_millis.unwrap_or(mean);
             let quiet = !run.cpu_held && run.node_cpu_pressure_permille.is_some_and(|p| p < 100);
-            if quiet || millis > self.cpu_estimate(b) {
-                self.cpu.push(millis);
+            if quiet || mean > self.cpu_median(b) {
+                self.cpu.push((mean, run.cpu_peak_millis.unwrap_or(0)));
             }
         }
     }
 
-    /// The CPU estimate by scanning the last 32 samples; 2000 m while there are none.
-    fn cpu_estimate(&self, b: &Bounds) -> u32 {
+    /// The median booking of the last 32 samples' means; 2000 m while there are none.
+    fn cpu_median(&self, b: &Bounds) -> u32 {
         if self.cpu.is_empty() {
             return 2000.min(b.node_cpu_millis);
         }
-        let mut last: Vec<u32> = self.cpu.iter().rev().take(32).copied().collect();
+        let mut last: Vec<u32> = self.cpu.iter().rev().take(32).map(|(m, _)| *m).collect();
         last.sort_unstable();
-        let p50 = last[last.len().div_ceil(2) - 1];
-        p50.div_ceil(250)
+        Self::booked(last[last.len().div_ceil(2) - 1], b)
+    }
+
+    /// The CPU estimate by scanning the last 32 samples: the 90th percentile of their
+    /// peaks when five or more have one and it is over twice the median booking, else
+    /// the median booking.
+    fn cpu_estimate(&self, b: &Bounds) -> u32 {
+        let median = self.cpu_median(b);
+        let mut peaks: Vec<u32> = (self.cpu.iter().rev().take(32))
+            .map(|(_, p)| *p)
+            .filter(|p| *p > 0)
+            .collect();
+        peaks.sort_unstable();
+        match peaks.len() {
+            n if n >= 5 && peaks[(n * 9).div_ceil(10) - 1] > 2 * median => {
+                Self::booked(peaks[(n * 9).div_ceil(10) - 1], b)
+            }
+            _ => median,
+        }
+    }
+
+    fn booked(millis: u32, b: &Bounds) -> u32 {
+        millis
+            .div_ceil(250)
             .saturating_mul(250)
             .clamp(250.min(b.node_cpu_millis), b.node_cpu_millis)
     }
@@ -168,13 +189,14 @@ impl Reference {
         let raise_only = day.max(self.last_seen).min(MAX_DAY) < self.until;
         let max = self.window(false).into_iter().max().unwrap_or(0);
         let held = self.window(true).into_iter().max().unwrap_or(0);
-        let sized = max
-            .saturating_add(max.div_ceil(5))
+        let top = max.max(held);
+        let sized = top
+            .saturating_add(top.div_ceil(5))
             .saturating_add(128 * MIB);
         let mut memory = if self.mixed() {
-            b.default_memory.max(floor).max(up(sized.max(held)))
+            b.default_memory.max(floor).max(up(sized))
         } else {
-            let memory = up(sized.max(held).max(floor));
+            let memory = up(sized.max(floor));
             if n < 5 || raise_only {
                 memory.max(b.default_memory)
             } else {

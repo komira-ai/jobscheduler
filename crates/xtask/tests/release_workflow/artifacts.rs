@@ -4,8 +4,16 @@
 
 use super::{artifacts_workflow, job, jobs, workflow};
 
-/// The condition of the jobs that sign or check signatures: a push to main.
-const PUSH_TO_MAIN: &str =
+/// The condition of `attest`: `sums` passed, and a push to main. `!cancelled()` because without a
+/// status function GitHub skips a job below a skipped one, and one of `build-macos` and
+/// `macos-farm` is skipped in every run.
+const ATTEST_IF: &str = "    if: ${{ !cancelled() && needs.sums.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}";
+
+/// The condition of `verify`: `attest` passed, and a push to main (as [`ATTEST_IF`]).
+const VERIFY_IF: &str = "    if: ${{ !cancelled() && needs.attest.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}";
+
+/// The `if:` that artifacts.yml's `attest` and `verify` had while they skipped in every run.
+const SKIPPED_IF: &str =
     "    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}";
 
 /// The text between `on:` and the next top-level key.
@@ -71,18 +79,24 @@ pub const FARM_MACOS_IF: &str = "    if: ${{ vars.MACOS_ON_FARM == 'true' }}";
 /// The condition of `sums`: the Linux legs built, and one of the two Apple silicon builds did.
 const SUMS_IF: &str = "    if: ${{ !cancelled() && needs.build.result == 'success' && (needs.build-macos.result == 'success' || needs.macos-farm.result == 'success') }}";
 
-/// Asserts that `attest` and `verify` each run only for a push to main (one `if:`, that one),
-/// in that order after `sums`, and that `build` has no condition of its own (the release's call
-/// runs it for a push alone) and `sums` only the one that takes whichever of `build-macos` and
-/// `macos-farm` ran. Catches a signing job that a pull request would run, a build that skips
-/// itself, and a `sums` that runs after a failed Linux leg or with neither Apple silicon build.
+/// Asserts that `attest` and `verify` each run only for a push to main and only after the job
+/// before them passed (one `if:`, [`ATTEST_IF`] and [`VERIFY_IF`]), in that order after `sums`,
+/// and that `build` has no condition of its own (the release's call runs it for a push alone)
+/// and `sums` only the one that takes whichever of `build-macos` and `macos-farm` ran. Catches a
+/// signing job that a pull request would run, a signing job that GitHub skips because the Apple
+/// silicon build it does not use was skipped (no `bundles` artifact, so release.yml's `publish`
+/// fails), a signing job that runs after `sums` failed, a build that skips itself, and a `sums`
+/// that runs after a failed Linux leg or with neither Apple silicon build.
 #[test]
 fn attest_and_verify_run_only_for_a_push_to_main() {
     let text = artifacts_workflow();
     let jobs = jobs(&text);
-    for (name, needs) in [("attest", "[sums]"), ("verify", "[attest]")] {
+    for (name, needs, condition) in [
+        ("attest", "[sums]", ATTEST_IF),
+        ("verify", "[attest]", VERIFY_IF),
+    ] {
         let lines = job(&jobs, name);
-        assert_eq!(ifs(lines), [PUSH_TO_MAIN], "{name}");
+        assert_eq!(ifs(lines), [condition], "{name}");
         assert!(
             lines.iter().any(|l| *l == format!("    needs: {needs}")),
             "{name}"
@@ -257,5 +271,117 @@ fn only_artifacts_yml_signs() {
     assert_eq!(
         signing_jobs(&[("release.yml", signed), ("artifacts.yml", artifacts)]),
         ["release.yml/publish", "artifacts.yml/attest"]
+    );
+}
+
+/// The jobs `needs:` names of a job, from the flow form `[a, b]` or a single name. Panics on the
+/// block form (`needs:` with the names on the lines below), which it does not read.
+fn needs(lines: &[String]) -> Vec<String> {
+    assert!(
+        !lines.iter().any(|l| l.trim_end() == "    needs:"),
+        "a block-form needs: {lines:?}"
+    );
+    lines
+        .iter()
+        .find_map(|l| l.strip_prefix("    needs: "))
+        .map(|list| {
+            list.trim_start_matches('[')
+                .trim_end_matches(']')
+                .split(',')
+                .map(|n| n.trim().to_string())
+                .filter(|n| !n.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The jobs of a workflow that sit below a job gated on MACOS_ON_FARM (one of each gated pair is
+/// skipped in every run) and whose `if:` does not open with `!cancelled()` or checks no need's
+/// result, in file order. GitHub skips such a job whenever a job anywhere above it was skipped,
+/// so it never runs; and `!cancelled()` without a result check would run it after a failed need.
+fn unguarded_below_the_farm_gate(text: &str) -> Vec<String> {
+    let jobs = jobs(text);
+    let mut below: Vec<&str> = jobs
+        .iter()
+        .filter(|(_, lines)| ifs(lines).iter().any(|l| l.contains("vars.MACOS_ON_FARM")))
+        .map(|(name, _)| name.as_str())
+        .collect();
+    loop {
+        let more: Vec<&str> = jobs
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .filter(|name| !below.contains(name))
+            .filter(|name| {
+                needs(job(&jobs, name))
+                    .iter()
+                    .any(|n| below.contains(&n.as_str()))
+            })
+            .collect();
+        if more.is_empty() {
+            break;
+        }
+        below.extend(more);
+    }
+    jobs.iter()
+        .filter(|(name, lines)| {
+            let gated = ifs(lines).iter().any(|l| l.contains("vars.MACOS_ON_FARM"));
+            let guarded = ifs(lines).iter().any(|l| {
+                l.starts_with("    if: ${{ !cancelled() && ")
+                    && needs(lines)
+                        .iter()
+                        .any(|n| l.contains(&format!("needs.{n}.result == 'success'")))
+            });
+            below.contains(&name.as_str()) && !gated && !guarded
+        })
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
+/// Asserts that every job below the MACOS_ON_FARM gate, in artifacts.yml and in
+/// js-agent-macos-pkg.yml, opens its `if:` with `!cancelled()` and checks a need's result; and
+/// that the check names each of these defects: `attest` and `verify` with the `if:` they had
+/// before (each alone and both), `!cancelled()` with no result check, a result check with no
+/// `!cancelled()`, and no `if:` at all. Catches a job below the gate
+/// that GitHub skips in every run, as `attest` and `verify` were, which leaves release.yml's
+/// `publish` without the `bundles` artifact.
+#[test]
+fn every_job_below_the_farm_gate_runs_when_one_side_of_it_is_skipped() {
+    let text = artifacts_workflow();
+    assert_eq!(unguarded_below_the_farm_gate(&text), Vec::<String>::new());
+    assert_eq!(
+        unguarded_below_the_farm_gate(&super::read_workflow("js-agent-macos-pkg.yml")),
+        Vec::<String>::new()
+    );
+    let with = |pairs: &[(&str, &str)]| {
+        pairs.iter().fold(text.clone(), |t, (from, to)| {
+            assert_eq!(t.matches(from).count(), 1, "{from}");
+            t.replace(from, to)
+        })
+    };
+    assert_eq!(
+        unguarded_below_the_farm_gate(&with(&[(ATTEST_IF, SKIPPED_IF)])),
+        ["attest"]
+    );
+    assert_eq!(
+        unguarded_below_the_farm_gate(&with(&[(VERIFY_IF, SKIPPED_IF)])),
+        ["verify"]
+    );
+    assert_eq!(
+        unguarded_below_the_farm_gate(&with(&[(ATTEST_IF, SKIPPED_IF), (VERIFY_IF, SKIPPED_IF)])),
+        ["attest", "verify"]
+    );
+    let no_result = "    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}";
+    assert_eq!(
+        unguarded_below_the_farm_gate(&with(&[(VERIFY_IF, no_result)])),
+        ["verify"]
+    );
+    let no_status = "    if: ${{ needs.attest.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}";
+    assert_eq!(
+        unguarded_below_the_farm_gate(&with(&[(VERIFY_IF, no_status)])),
+        ["verify"]
+    );
+    assert_eq!(
+        unguarded_below_the_farm_gate(&with(&[(&format!("{VERIFY_IF}\n"), "")])),
+        ["verify"]
     );
 }

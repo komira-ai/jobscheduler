@@ -1,7 +1,7 @@
 //! The per-key summary: what is kept, how a run enters it, what it estimates.
 
 use crate::key::{Basis, Day};
-use crate::run::{Bounds, CpuSample, Discard, Observed, Outcome, Run, memory_max};
+use crate::run::{Bounds, CpuSample, Discard, Observed, Outcome, Run};
 use crate::{GIB, MIB};
 
 /// The smallest memory estimate.
@@ -34,6 +34,15 @@ pub const CPU_PRESSURE_MAX_PERMILLE: u16 = 100;
 /// A key is mixed when the largest of its last 32 samples is over this many times their
 /// median.
 pub const MIXED_RATIO: u64 = 4;
+/// A key's CPU has a heavy tail when the 90th percentile of its runs' peaks
+/// ([`Run::cpu_peak_millis`]) is over this many times the median of their means: such a
+/// key books that percentile of its peaks ([`Summary::cpu`]).
+pub const TAIL_RATIO: u32 = 2;
+/// The percentile of the peaks a heavy-tail key books, in thousandths: the 90th.
+pub const TAIL_PERMILLE: usize = 900;
+/// The fewest of a key's last 32 CPU samples that must carry a peak before its tail is
+/// judged: below it the key books the median of its means, whatever its peaks.
+pub const TAIL_MIN_PEAKS: usize = 5;
 /// The latest day a summary accepts (about 2,700 years of days): later days are
 /// clamped, and a stored row beyond it is corrupt.
 pub const MAX_DAY: u32 = 1_000_000;
@@ -53,17 +62,20 @@ const RING: usize = 32;
 const DAYS: usize = 8;
 const SLACK: u64 = 128 * MIB;
 const CPU_STEP: u32 = 250;
-/// A success this close to its memory limit is treated as having hit it.
-const NEAR_LIMIT_PERCENT: u128 = 95;
 
-/// The run's CPU sample in millicores: its peak ([`Run::cpu_peak_millis`]) when it has one,
-/// else its mean parallelism, capped to `u32` so the cast cannot truncate.
+/// The run's CPU sample in millicores: its mean parallelism (CPU time over wall time),
+/// capped to `u32` so the cast cannot truncate.
 fn cpu_millis(run: &Run) -> u32 {
-    let mean = || {
-        let millis = u128::from(run.cpu_usage_us) * 1000 / u128::from(run.wall_us);
-        millis.min(u128::from(u32::MAX)) as u32
-    };
-    run.cpu_peak_millis.unwrap_or_else(mean)
+    let millis = u128::from(run.cpu_usage_us) * 1000 / u128::from(run.wall_us);
+    millis.min(u128::from(u32::MAX)) as u32
+}
+
+/// The nearest-rank `permille`th percentile of `values` (the `ceil(permille / 1000 * n)`-th
+/// smallest), after sorting them; 0 for no values.
+fn percentile(values: &mut [u32], permille: usize) -> u32 {
+    values.sort_unstable();
+    let rank = (values.len() * permille).div_ceil(1000);
+    values.get(rank.saturating_sub(1)).copied().unwrap_or(0)
 }
 
 /// The last minute (0-indexed) a run reached: its wall time in whole minutes, saturating
@@ -117,17 +129,18 @@ pub fn floor_ceiling(host_memory: u64) -> u64 {
     host_memory.saturating_sub(1) / MEMORY_STEP * MEMORY_STEP
 }
 
-/// Everything the estimator keeps for one key (about 700 bytes). Fields are crate
+/// Everything the estimator keeps for one key (about 850 bytes). Fields are crate
 /// private; [`Summary::encode`] and [`Summary::decode`] are the storage form.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Summary {
     pub(crate) basis: Basis,
-    /// Memory samples seen (kills and censored successes included).
+    /// Memory samples seen (kills and held successes included).
     pub(crate) n_total: u64,
-    /// Maximum of each chunk of 32 uncensored memory samples, slot `chunk % 9`.
+    /// Maximum of each chunk of 32 measured (not held) memory samples, slot `chunk % 9`.
     pub(crate) chunk_max: [u64; SLOTS],
-    /// Maximum of each chunk's censored samples (`min(peak, booked)` of a run that hit
-    /// its limit): they hold an estimate and are never given headroom.
+    /// Maximum of each chunk's held samples, lower bounds of a run's need (`max(peak, limit)`
+    /// of a run that reached its limit, the peak of one that swapped), sized with the usual
+    /// margin.
     pub(crate) chunk_held: [u64; SLOTS],
     /// The last 32 samples as contributed, for the dispersion test.
     pub(crate) ring: [u64; RING],
@@ -139,6 +152,9 @@ pub struct Summary {
     pub(crate) cpu_n: u64,
     /// The last 32 CPU samples, in millicores.
     pub(crate) cpu_ring: [u32; RING],
+    /// For each sample in `cpu_ring`, the peak of its run in millicores; 0 when the run
+    /// had none measured. Parallel to `cpu_ring`.
+    pub(crate) cpu_peak_ring: [u32; RING],
     /// For each run in `ring`, the last minute (0-indexed) it reached: its wall time in
     /// whole minutes, saturating at 255. Parallel to `ring`.
     pub(crate) minute_ring: [u8; RING],
@@ -168,6 +184,7 @@ impl Summary {
             day_max: [0; DAYS],
             cpu_n: 0,
             cpu_ring: [0; RING],
+            cpu_peak_ring: [0; RING],
             minute_ring: [0; RING],
             oom_floor: 0,
             floor_anchor: 0,
@@ -210,13 +227,13 @@ impl Summary {
         self.oom_floor > 0 || self.raise_only(self.last_seen)
     }
 
-    /// The maximum uncensored memory sample over the last 257 to 288 runs (at least 256).
+    /// The maximum measured (not held) memory sample over the last 257 to 288 runs (at least 256).
     pub fn long_max(&self) -> u64 {
         self.chunk_max.iter().copied().fold(0, u64::max)
     }
 
     /// Whether the last 32 samples are far apart: such a key (a shared or bimodal
-    /// shape) is never lowered, and only a kill raises it.
+    /// shape) is never lowered.
     pub fn mixed(&self) -> bool {
         let kept = self.n_total.min(RING as u64) as usize;
         let mut sorted = self.ring[..kept].to_vec();
@@ -241,7 +258,7 @@ impl Summary {
                     if peak >= host {
                         Err(Discard::OverCap)
                     } else {
-                        self.record_success(run, peak, now);
+                        self.record_success(run, peak, now, host);
                         self.decay(now);
                         Ok(())
                     }
@@ -249,11 +266,12 @@ impl Summary {
                 _ => Err(Discard::Untrusted),
             },
             Outcome::OwnLimitKill => {
-                // The kill's use is rarely known; it died at its limit, which is
-                // derived from the booking, not read from the record.
-                let limit = memory_max(run.booked_memory_bytes).unwrap_or(0);
+                // The kill's use is rarely known; it died at its limit, which is its
+                // booking (a host that kills a job for memory holds it at its booking).
                 let used = run.peak_memory_bytes.unwrap_or(0);
-                let sample = used.max(limit).min(host.saturating_sub(1));
+                let sample = used
+                    .max(run.booked_memory_bytes)
+                    .min(host.saturating_sub(1));
                 if sample == 0 {
                     // Nothing booked and nothing measured: not a kill we can act on.
                     Err(Discard::Untrusted)
@@ -267,7 +285,7 @@ impl Summary {
                 Err(Discard::NotASample)
             }
         };
-        let used = run.cpu_usage_us > 0 || run.cpu_peak_millis.is_some_and(|peak| peak > 0);
+        let used = run.cpu_usage_us > 0;
         let cpu = if run.outcome == Outcome::Success && trusted && used {
             self.observe_cpu(run, bounds)
         } else {
@@ -277,19 +295,21 @@ impl Summary {
     }
 
     /// A CPU measurement: kept when the node was quiet and the run was not held at a
-    /// ceiling, otherwise only when it exceeds the current estimate (a starved or held
-    /// run never overstates its demand, it only understates it).
+    /// ceiling, otherwise only when its mean exceeds the median of the key's means (a
+    /// starved or held run never overstates its demand, it only understates it). Its peak,
+    /// if measured, is kept or dropped with it.
     fn observe_cpu(&mut self, run: &Run, bounds: &Bounds) -> CpuSample {
         let millis = cpu_millis(run);
+        let peak = run.cpu_peak_millis.unwrap_or(0);
         let quiet = !run.cpu_held
             && run
                 .node_cpu_pressure_permille
                 .is_some_and(|p| p < CPU_PRESSURE_MAX_PERMILLE);
         if quiet {
-            self.record_cpu(millis);
+            self.record_cpu(millis, peak);
             CpuSample::Kept
-        } else if millis > self.cpu(bounds) {
-            self.record_cpu(millis);
+        } else if millis > self.median_cpu(bounds) {
+            self.record_cpu(millis, peak);
             CpuSample::Raised
         } else {
             CpuSample::Dropped
@@ -318,19 +338,20 @@ impl Summary {
         self.cpu_n > 0
     }
 
-    /// A success that touched its memory limit says only that the booking was not
-    /// enough to be killed at: it contributes `min(peak, booked)`, which holds an
-    /// estimate but never raises it.
-    fn record_success(&mut self, run: &Run, peak: u64, now: Day) {
-        let near_limit = memory_max(run.booked_memory_bytes)
-            .is_some_and(|limit| u128::from(peak) * 100 >= u128::from(limit) * NEAR_LIMIT_PERCENT);
-        if run.limit_hits > 0 || run.swap_peak_bytes > 0 || near_limit {
-            self.record_memory(
-                peak.min(run.booked_memory_bytes),
-                true,
-                now,
-                minutes_reached(run),
-            );
+    /// A success whose peak does not show what it needed contributes a held sample, a lower
+    /// bound of its need, which the estimate sizes with the usual margin: one that reached
+    /// its booking ([`Run::limit_hits`]) needed at least the booking, so it contributes the
+    /// larger of its peak and its booking (below the host), and its class books a step above
+    /// that booking next; one that swapped had more than its peak in use, and contributes its
+    /// peak.
+    fn record_success(&mut self, run: &Run, peak: u64, now: Day, host: u64) {
+        if run.limit_hits > 0 {
+            let need = peak
+                .max(run.booked_memory_bytes)
+                .min(host.saturating_sub(1));
+            self.record_memory(need, true, now, minutes_reached(run));
+        } else if run.swap_peak_bytes > 0 {
+            self.record_memory(peak, true, now, minutes_reached(run));
         } else {
             self.record_memory(peak, false, now, minutes_reached(run));
         }
@@ -359,9 +380,10 @@ impl Summary {
         self.n_total += 1;
     }
 
-    fn record_cpu(&mut self, millis: u32) {
+    fn record_cpu(&mut self, millis: u32, peak: u32) {
         let slot = (self.cpu_n % RING as u64) as usize;
         self.cpu_ring[slot] = millis;
+        self.cpu_peak_ring[slot] = peak;
         self.cpu_n += 1;
     }
 
@@ -466,17 +488,17 @@ impl Summary {
         memory.max(MIN_MEMORY)
     }
 
-    /// The largest recent peaks with the usual margin, rounded up to a step:
-    /// `round_up(max(1.2 * long_max + 128 MiB, held))`.
+    /// The largest recent peaks and held samples with the usual margin, rounded up to a
+    /// step: `round_up(1.2 * max(long_max, held) + 128 MiB)`.
     fn sized_memory(&self) -> u64 {
-        let max = self.long_max();
         let held = self.chunk_held.iter().copied().fold(0, u64::max);
+        let max = self.long_max().max(held);
         let sized = max.saturating_add(max.div_ceil(5)).saturating_add(SLACK);
-        round_up(sized.max(held), MEMORY_STEP)
+        round_up(sized, MEMORY_STEP)
     }
 
     /// What the largest recent samples ask for whatever their number or dispersion:
-    /// `round_up(max(1.2 * long_max + 128 MiB, held, floor))`, at least [`MIN_MEMORY`];
+    /// `round_up(max(1.2 * max(long_max, held) + 128 MiB, floor))`, at least [`MIN_MEMORY`];
     /// `None` when the summary holds no memory sample.
     pub(crate) fn peak_memory(&self, bounds: &Bounds) -> Option<u64> {
         (self.n_total > 0).then(|| {
@@ -486,22 +508,67 @@ impl Summary {
         })
     }
 
-    /// The CPU estimate in millicores: [`COLD_CPU_MILLIS`] while there is no CPU sample,
-    /// else the median (P50) of the recent samples, rounded up to
-    /// 250 m, between [`CPU_MIN_MILLIS`] and the node's CPUs.
+    /// What a typical recent sample asks for: the median of the last 32 memory samples (the
+    /// middle one, the larger of the two middle ones for an even count; kills and held samples
+    /// as recorded) with the usual margin, and the floor:
+    /// `round_up(max(1.2 * median + 128 MiB, floor))`, at least [`MIN_MEMORY`]; `None` when the
+    /// summary holds no memory sample.
+    pub(crate) fn median_memory(&self, bounds: &Bounds) -> Option<u64> {
+        let kept = usize::try_from(self.n_total).map_or(RING, |n| n.min(RING));
+        let mut samples = self.ring[..kept].to_vec();
+        samples.sort_unstable();
+        samples.get(kept / 2).map(|median| {
+            let sized = median
+                .saturating_add(median.div_ceil(5))
+                .saturating_add(SLACK);
+            round_up(sized, MEMORY_STEP)
+                .max(round_up(self.floor(bounds), MEMORY_STEP))
+                .max(MIN_MEMORY)
+        })
+    }
+
+    /// The CPU estimate in millicores: [`COLD_CPU_MILLIS`] while there is no CPU sample;
+    /// else, for a key with a heavy tail, the 90th percentile of its recent runs' peaks
+    /// ([`TAIL_PERMILLE`]), and for any other key the median (P50) of their means; rounded up
+    /// to 250 m, between [`CPU_MIN_MILLIS`] and the node's CPUs. A key has a heavy tail when
+    /// at least [`TAIL_MIN_PEAKS`] of its last 32 samples carry a peak and the percentile of
+    /// those peaks is over [`TAIL_RATIO`] times the median booking.
     pub(crate) fn cpu(&self, bounds: &Bounds) -> u32 {
-        let node = bounds.node_cpu_millis;
+        let median = self.median_cpu(bounds);
+        let kept = self.cpu_n.min(RING as u64) as usize;
+        let mut peaks: Vec<u32> = self.cpu_peak_ring[..kept]
+            .iter()
+            .copied()
+            .filter(|peak| *peak > 0)
+            .collect();
+        if peaks.len() < TAIL_MIN_PEAKS {
+            return median;
+        }
+        let tail = percentile(&mut peaks, TAIL_PERMILLE);
+        if tail > median.saturating_mul(TAIL_RATIO) {
+            Self::booking(tail, bounds)
+        } else {
+            median
+        }
+    }
+
+    /// The median (P50) of the recent samples' means rounded up to 250 m, between
+    /// [`CPU_MIN_MILLIS`] and the node's CPUs; [`COLD_CPU_MILLIS`] while there is no CPU
+    /// sample. A pressured or held sample is kept only above it.
+    fn median_cpu(&self, bounds: &Bounds) -> u32 {
         if !self.has_cpu_sample() {
             // No measurement: the key is counted at what an unlearned action costs.
-            return COLD_CPU_MILLIS.min(node);
+            return COLD_CPU_MILLIS.min(bounds.node_cpu_millis);
         }
-        let low = CPU_MIN_MILLIS.min(node);
         let kept = self.cpu_n.min(RING as u64) as usize;
-        let mut sorted = self.cpu_ring[..kept].to_vec();
-        sorted.sort_unstable();
-        // Nearest rank: the ceil(0.5 * kept)-th smallest; no samples is 0.
-        let rank = kept.div_ceil(2);
-        let p50 = sorted.get(rank.saturating_sub(1)).copied().unwrap_or(0);
-        (p50.div_ceil(CPU_STEP).saturating_mul(CPU_STEP)).clamp(low, node)
+        let mut means = self.cpu_ring[..kept].to_vec();
+        Self::booking(percentile(&mut means, 500), bounds)
+    }
+
+    /// `millis` rounded up to 250 m, between [`CPU_MIN_MILLIS`] and the node's CPUs.
+    fn booking(millis: u32, bounds: &Bounds) -> u32 {
+        let node = bounds.node_cpu_millis;
+        let low = CPU_MIN_MILLIS.min(node);
+        (millis.div_ceil(CPU_STEP).saturating_mul(CPU_STEP)).clamp(low, node)
     }
 }

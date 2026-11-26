@@ -169,6 +169,45 @@ fn what_a_result_does_not_know_is_a_dash() {
     );
 }
 
+/// Asserts the class word of a result line for each kind of class: a one-word class as it is
+/// (slashes and a colon kept), a build target's full name with its kind words in double
+/// quotes as sent, a `"` and a `\` in a class escaped by a `\`, and a class that is `-` quoted
+/// so it does not read as no class. Catches a class whose spaces would split it into words
+/// the replay reads as other fields, and a class cut, lowered or hashed in the journal.
+#[test]
+fn a_result_line_names_the_class_whole_quoting_one_that_is_not_one_word() {
+    let line = |class: &str| {
+        let mut booked = quarter_core(false);
+        booked.sizing = Some(js_agent_wire::StartSizing {
+            class: Some(class.to_owned()),
+            cpu: js_agent_wire::BookedFrom::Class,
+            memory: js_agent_wire::BookedFrom::Cold,
+        });
+        let event = Event::ResultReady {
+            run_id: "r1".to_owned(),
+            booked,
+            usage: None,
+        };
+        describe(&[event]).remove(0)
+    };
+    let word = |line: String| {
+        let (_, after) = line.split_once(" class=").unwrap();
+        let (class, _) = after.split_once(" cpu_from=class").unwrap();
+        class.to_owned()
+    };
+    for (class, written) in [
+        ("cell//pkg:name", "cell//pkg:name"),
+        (
+            "komira//src/json:json mojo_compile build",
+            "\"komira//src/json:json mojo_compile build\"",
+        ),
+        ("say \"hi\" a\\b", "\"say \\\"hi\\\" a\\\\b\""),
+        ("-", "\"-\""),
+    ] {
+        assert_eq!(word(line(class)), written, "{class}");
+    }
+}
+
 /// Asserts that the line of a start carries its booking and its sizing beside its timeline.
 /// It catches a start line that says when the job started but not what it booked or where
 /// the booking came from.
@@ -183,9 +222,46 @@ fn a_start_is_logged_with_its_booking_and_its_sizing() {
         describe(&[event]),
         [
             "job: Started { run_id: \"r1\", timeline: StartTimeline { received_ms: 0, \
-             placed_at_ms: None, received_at_ms: None, steps: [], runtime: [] }, booked: \
+             placed_at_ms: None, received_at_ms: None, steps: [], runtime: [], lookup: None }, booked: \
              JobBooking { cpu_millis: 250, memory_bytes: 17179869184, sizing: Some(StartSizing \
              { class: Some(\"root.crates.js-sched.js-sched\"), cpu: Class, memory: Cold }) } }"
+        ]
+    );
+}
+
+/// Asserts that the line of a start carries the stamps of the lookup it waited on with the
+/// two spans they give, under the start's id (a job's id for a job start, the key that joins
+/// it with the server's line of the job): asked at 1000, begun at 1030 and ended at 1075 is
+/// 30 in the pool's queue and 45 to open. A clock that stepped back gives spans of 0, not a
+/// wrapped number. Catches a start line without its lookup, and spans that are not the
+/// stamps' differences.
+#[test]
+fn a_start_is_logged_with_the_stamps_of_its_lookup() {
+    let started = |queued_at_ms, started_at_ms, ended_at_ms| Event::Started {
+        run_id: "job-7".to_owned(),
+        timeline: crate::lifecycle::StartTimeline {
+            lookup: Some(crate::lifecycle::LookupStamps {
+                queued_at_ms,
+                started_at_ms,
+                ended_at_ms,
+            }),
+            ..crate::lifecycle::StartTimeline::default()
+        },
+        booked: crate::lifecycle::JobBooking::default(),
+    };
+    assert_eq!(
+        describe(&[started(1000, 1030, 1075), started(1030, 1000, 990)]),
+        [
+            "job: Started { run_id: \"job-7\", timeline: StartTimeline { received_ms: 0, \
+             placed_at_ms: None, received_at_ms: None, steps: [], runtime: [], lookup: \
+             Some(LookupStamps { queued_at_ms: 1000, started_at_ms: 1030, ended_at_ms: 1075, \
+             queue_ms: 30, open_ms: 45 }) }, booked: JobBooking { cpu_millis: 0, \
+             memory_bytes: 0, sizing: None } }",
+            "job: Started { run_id: \"job-7\", timeline: StartTimeline { received_ms: 0, \
+             placed_at_ms: None, received_at_ms: None, steps: [], runtime: [], lookup: \
+             Some(LookupStamps { queued_at_ms: 1030, started_at_ms: 1000, ended_at_ms: 990, \
+             queue_ms: 0, open_ms: 0 }) }, booked: JobBooking { cpu_millis: 0, \
+             memory_bytes: 0, sizing: None } }",
         ]
     );
 }

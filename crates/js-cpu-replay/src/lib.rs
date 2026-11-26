@@ -7,7 +7,10 @@
 //! each way of packing ([`report::ARMS`]), with the placer's own sizing
 //! ([`sizing`]), each job's CPU spread over its life two ways that bracket what was recorded
 //! ([`shape`]) and a host's cores shared between its jobs as the kernel shares them
-//! ([`sim`]), and prints what each did ([`report`]).
+//! ([`sim`]), and prints what each did ([`report`]). One arm books each class's CPU curve over
+//! a job's age, learned from the series the replay synthesises, and places by the curves
+//! ([`sim::curve`]). `shadow` reads the job service's own log
+//! and prints, per class, how close its shadow profiles came to the runs ([`shadow`]).
 //!
 //! The replay reads no clock, random source or environment variable: a trace gives the same
 //! report every time. Only `convert --rows` opens a scratch store, with the wall clock and the
@@ -19,6 +22,7 @@ pub mod cli;
 pub mod convert;
 pub mod report;
 pub mod rows;
+pub mod shadow;
 pub mod shape;
 pub mod sim;
 pub mod sizing;

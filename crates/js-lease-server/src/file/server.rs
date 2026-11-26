@@ -1,20 +1,25 @@
 //! The `[server]` table of the configuration file: its keys and the client token file.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use js_elastic::SchedulerId;
 use js_jobs::Retention;
-use js_sched_placer::sizes::{ColdMemoryOn, ColdSize, Curves};
+use js_sched_placer::curves::{
+    CurveHosts, CurveSettings, DEFAULT_CURVE_MAX_WAIT, MAX_CURVE_MAX_WAIT_SECS,
+};
+use js_sched_placer::sizes::{ColdCpuOn, ColdMemoryOn, ColdSize};
+use js_types::HostId;
 
 use super::{Load, Section};
 use crate::config::{
-    BootMode, CpuSlack, DEFAULT_LEASE_SECS, DEFAULT_RECHECK_MS, DispatchTimes, FeedRetention,
-    JOB_FEED_RETENTION_MUST, JOB_RETENTION_MUST, JobListen, Limits, MAX_JOB_WALL_MUST,
-    MOST_LEASE_SECS, MOST_RECHECK_MS, MetricsListen, Placement, ReadyListen, TlsFiles, Token,
-    cold_entry, not_loopback, not_private, parse_curves, parse_job_feed_retention,
-    parse_job_retention, parse_max_job_wall, parse_token,
+    BootMode, CpuSlack, CurveSetting, DEFAULT_LEASE_SECS, DEFAULT_RECHECK_MS, DispatchTimes,
+    FeedRetention, JOB_FEED_RETENTION_MUST, JOB_RETENTION_MUST, JobListen, Limits,
+    MAX_JOB_WALL_MUST, MOST_LEASE_SECS, MOST_RECHECK_MS, MetricsListen, PackLimit, Placement,
+    ReadyListen, TlsFiles, Token, cold_cpu_entry, cold_entry, not_loopback, not_private,
+    parse_curves, parse_job_feed_retention, parse_job_retention, parse_max_job_wall, parse_token,
 };
 use crate::error::StartupError;
 use crate::job_store::JobStoreSetup;
@@ -49,10 +54,14 @@ const SERVER_KEYS: &[&str] = &[
     "placement",
     "estimate_feed",
     "cpu_slack",
+    "pack_limit",
     "cold_cpu_millis",
     "cold_memory_bytes",
     "cold_memory_bytes_on",
+    "cold_cpu_millis_on",
     "placement_curves",
+    "curve_hosts",
+    "curve_max_wait_seconds",
     "usage_db",
     "usage_off",
     "profile_store_bytes",
@@ -153,9 +162,11 @@ pub(crate) struct AgentKeys {
     placement: Option<Placement>,
     estimate_feed: Option<bool>,
     cpu_slack: Option<CpuSlack>,
+    pack_limit: Option<PackLimit>,
     cold: ColdSize,
     cold_on: ColdMemoryOn,
-    curves: Curves,
+    cold_cpu_on: ColdCpuOn,
+    curves: CurveSetting,
     job_listen: Option<SocketAddr>,
 }
 
@@ -190,6 +201,11 @@ impl AgentKeys {
         self.cpu_slack
     }
 
+    /// The pack limit the file gives, if it gives one; absent, the engine's default.
+    pub(crate) fn pack_limit(&self) -> Option<PackLimit> {
+        self.pack_limit
+    }
+
     /// What a job that books nothing books while neither its class, its fallback class nor its
     /// client has a run:
     /// `cold_cpu_millis` and `cold_memory_bytes` as the file gives them, each absent one its
@@ -204,10 +220,17 @@ impl AgentKeys {
         self.cold_on.clone()
     }
 
-    /// The placement engine's curves mode the file gives (`placement_curves`); `off` when
-    /// the key is absent.
-    pub(crate) fn curves(&self) -> Curves {
-        self.curves
+    /// The cold CPU of the jobs of each operating system `cold_cpu_millis_on` names, in place
+    /// of `cold_cpu_millis`; none when the file gives no such table.
+    pub(crate) fn cold_cpu_on(&self) -> ColdCpuOn {
+        self.cold_cpu_on.clone()
+    }
+
+    /// The placement engine's curves mode the file gives (`placement_curves`; `off` when
+    /// the key is absent) with its hosts and wait bound (`curve_hosts` and
+    /// `curve_max_wait_seconds`).
+    pub(crate) fn curves(&self) -> CurveSetting {
+        self.curves.clone()
     }
 
     /// Where the job service is served, when the file turns it on.
@@ -287,8 +310,10 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
         placement: read_placement(&mut s)?,
         estimate_feed: s.boolean("estimate_feed")?,
         cpu_slack: read_cpu_slack(&mut s)?,
+        pack_limit: read_pack_limit(&mut s)?,
         cold: read_cold(&mut s)?,
-        cold_on: read_cold_on(&mut s)?,
+        cold_on: ColdMemoryOn::new(read_per_os(&mut s, &COLD_MEMORY_ON)?),
+        cold_cpu_on: ColdCpuOn::new(read_per_os(&mut s, &COLD_CPU_ON)?),
         curves: read_curves(&mut s)?,
         job_listen: s.address("job_listen")?,
     };
@@ -519,13 +544,42 @@ fn read_cpu_slack(s: &mut Section) -> Result<Option<CpuSlack>, StartupError> {
     Ok(Some(slack))
 }
 
-/// `placement_curves`, the key of `--placement-curves`: `"off"` or `"shadow"`, read as the
-/// flag reads its text; absent, `off`.
-fn read_curves(s: &mut Section) -> Result<Curves, StartupError> {
+/// `pack_limit`, the key of `--pack-limit`: a number written as the fraction, such as `0.8`,
+/// read as the flag reads its text. A string, even one that spells a number, is refused.
+fn read_pack_limit(s: &mut Section) -> Result<Option<PackLimit>, StartupError> {
+    let text = match s.map.remove("pack_limit") {
+        None => return Ok(None),
+        Some(toml::Value::Float(number)) => number.to_string(),
+        Some(toml::Value::Integer(number)) => number.to_string(),
+        Some(_) => return Err(s.fail("pack_limit", "must be a number such as 0.5")),
+    };
+    let limit = PackLimit::parse(&text).map_err(|err| s.fail("pack_limit", &err.to_string()))?;
+    Ok(Some(limit))
+}
+
+/// `placement_curves`, the key of `--placement-curves`: `"off"`, `"shadow"` or `"on"`, read as
+/// the flag reads its text; absent, `off`. With it `curve_hosts`, an array of host ids (absent:
+/// every host), and `curve_max_wait_seconds`, a whole number from 0 to 300 (absent: 30), which
+/// have no flags, are read in every mode and act only under `on`.
+fn read_curves(s: &mut Section) -> Result<CurveSetting, StartupError> {
     let text = s.string("placement_curves")?;
     let read = text.as_deref().map(parse_curves).transpose();
-    let curves = read.map_err(|said| s.fail("placement_curves", &said))?;
-    Ok(curves.unwrap_or_default())
+    let mode = read.map_err(|said| s.fail("placement_curves", &said))?;
+    let mut named = BTreeSet::new();
+    for name in s.names("curve_hosts")?.unwrap_or_default() {
+        let id = HostId::new(&name).map_err(|err| s.fail("curve_hosts", &err.to_string()))?;
+        named.insert(id);
+    }
+    let most = MAX_CURVE_MAX_WAIT_SECS;
+    let default = DEFAULT_CURVE_MAX_WAIT.as_secs();
+    let wait = s.bounded("curve_max_wait_seconds", 0, most, default)?;
+    Ok(CurveSetting {
+        mode: mode.unwrap_or_default(),
+        settings: CurveSettings {
+            hosts: CurveHosts::new(named),
+            max_wait: Duration::from_secs(wait),
+        },
+    })
 }
 
 /// The least `cold_cpu_millis`: a quarter core, the least CPU the estimator books.
@@ -556,23 +610,54 @@ fn read_cold(s: &mut Section) -> Result<ColdSize, StartupError> {
     })
 }
 
-/// `cold_memory_bytes_on`: a table of each operating system's cold memory, its keys the names
-/// as jobs give them (`macos = 4294967296`), its values whole numbers of bytes from 1 GiB (the
-/// rules of `--cold-memory-bytes-on`). Left out, none.
-fn read_cold_on(s: &mut Section) -> Result<ColdMemoryOn, StartupError> {
-    let key = "cold_memory_bytes_on";
+/// How one entry of a per-system table is checked: the name of the operating system and its
+/// value, to the entry or what is wrong.
+type CheckEntry = fn(&str, u64) -> Result<(String, u64), String>;
+
+/// A table of each operating system's value: its key, what its values count and how an entry
+/// is checked.
+struct PerOs {
+    /// The key of the `[server]` table.
+    key: &'static str,
+    /// What a value counts, as a refusal names it: `bytes`, `millicores`.
+    unit: &'static str,
+    /// The check of one entry, the flag's.
+    entry: CheckEntry,
+}
+
+/// `cold_memory_bytes_on`: each operating system's cold memory, whole numbers of bytes from
+/// 1 GiB (the rules of `--cold-memory-bytes-on`).
+const COLD_MEMORY_ON: PerOs = PerOs {
+    key: "cold_memory_bytes_on",
+    unit: "bytes",
+    entry: cold_entry,
+};
+
+/// `cold_cpu_millis_on`: each operating system's cold CPU, whole numbers of millicores from
+/// 250 to 4294967295 (the rules of `--cold-cpu-millis-on`).
+const COLD_CPU_ON: PerOs = PerOs {
+    key: "cold_cpu_millis_on",
+    unit: "millicores",
+    entry: cold_cpu_entry,
+};
+
+/// The table `of` names, each of its keys the name of an operating system as jobs give it
+/// (`macos = 4294967296`) and each value a whole number its check takes. Left out, none.
+fn read_per_os(s: &mut Section, of: &PerOs) -> Result<BTreeMap<String, u64>, StartupError> {
+    let PerOs { key, unit, entry } = *of;
     let Some(table) = s.table(key)? else {
-        return Ok(ColdMemoryOn::default());
+        return Ok(BTreeMap::new());
     };
-    let mut entries = Vec::new();
+    let mut entries = BTreeMap::new();
     for (os, value) in table {
-        let bytes = value
+        let number = value
             .as_integer()
-            .and_then(|bytes| u64::try_from(bytes).ok())
-            .ok_or_else(|| s.fail(key, &format!("{os}: must be a whole number of bytes")))?;
-        entries.push(cold_entry(&os, bytes).map_err(|why| s.fail(key, &why))?);
+            .and_then(|number| u64::try_from(number).ok())
+            .ok_or_else(|| s.fail(key, &format!("{os}: must be a whole number of {unit}")))?;
+        let (os, number) = entry(&os, number).map_err(|why| s.fail(key, &why))?;
+        entries.insert(os, number);
     }
-    Ok(ColdMemoryOn::new(entries.into_iter().collect()))
+    Ok(entries)
 }
 
 /// The usage keys. The rules are the flags': a budget and a retention of at least 1, and no
@@ -755,6 +840,72 @@ mod tests {
             ),
         ] {
             assert_eq!(cold_on_of(extra), Err(said), "{extra}");
+        }
+    }
+
+    /// The cold CPU of each operating system the `[server]` table with its required keys and
+    /// `extra` gives.
+    fn cold_cpu_on_of(extra: &str) -> Result<ColdCpuOn, String> {
+        let required = "state_file = \"js\"\nboot = \"initialise\"\nclient_token_file = \"t\"";
+        let table: toml::Table = format!("{required}\n{extra}").parse().unwrap();
+        let server = read_server(table).map_err(|err| err.to_string())?;
+        Ok(server.agents.cold_cpu_on())
+    }
+
+    /// Asserts that `cold_cpu_millis_on` is read as a table of each operating system's
+    /// millicores, from the least (250) to the most (4294967295), beside the cold memory of
+    /// `cold_memory_bytes_on` and apart from it, and that left out it names none; and that a
+    /// value that is not a whole number of millicores, one under the least or over the most, an
+    /// empty name or a key that is not a table is refused at start naming the key and what is
+    /// wrong. Catches a table that is not read, one read into the cold memory's place, an entry
+    /// under the estimator's least CPU, and a name no job could give.
+    #[test]
+    fn the_cold_cpu_of_each_os_is_read_and_refused_out_of_range() {
+        assert_eq!(cold_cpu_on_of(""), Ok(ColdCpuOn::default()));
+        let both = "cold_cpu_millis_on = { macos = 250, linux = 4294967295 }\n\
+                    cold_memory_bytes_on = { macos = 4294967296 }";
+        let entries = [
+            ("macos".to_owned(), 250),
+            ("linux".to_owned(), 4_294_967_295),
+        ];
+        assert_eq!(
+            cold_cpu_on_of(both),
+            Ok(ColdCpuOn::new(entries.into_iter().collect()))
+        );
+        let memory = [("macos".to_owned(), 4 << 30)];
+        assert_eq!(
+            cold_on_of(both),
+            Ok(ColdMemoryOn::new(memory.into_iter().collect()))
+        );
+        let key = "server.cold_cpu_millis_on";
+        let range = "is not from 250 (a quarter core) to 4294967295";
+        for (extra, said) in [
+            (
+                "cold_cpu_millis_on = { macos = \"1000m\" }",
+                format!("{key}: macos: must be a whole number of millicores"),
+            ),
+            (
+                "cold_cpu_millis_on = { macos = -1 }",
+                format!("{key}: macos: must be a whole number of millicores"),
+            ),
+            (
+                "cold_cpu_millis_on = { macos = 249 }",
+                format!("{key}: macos: 249 {range}"),
+            ),
+            (
+                "cold_cpu_millis_on = { macos = 4294967296 }",
+                format!("{key}: macos: 4294967296 {range}"),
+            ),
+            (
+                "cold_cpu_millis_on = { \"\" = 1000 }",
+                format!("{key}: the operating system is empty"),
+            ),
+            (
+                "cold_cpu_millis_on = 1000",
+                format!("{key}: must be a table"),
+            ),
+        ] {
+            assert_eq!(cold_cpu_on_of(extra), Err(said), "{extra}");
         }
     }
 

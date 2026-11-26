@@ -45,10 +45,11 @@ use js_types::Shape;
 use js_types::sched::FarmTime;
 use js_types::sched::usage::NodeLoad;
 
+use super::curves::{CurveSettings, CurveView};
 use super::engine::jobs::Decided;
 use super::engine::jobs_seen::{Kept, Seen};
 use super::engine::{Engine, Settings};
-use super::sizes::{ColdMemoryOn, day_of};
+use super::sizes::{ColdCpuOn, ColdMemoryOn, day_of};
 
 /// The placer the registry is given: it keeps the engine, the scheduler that places the
 /// queued jobs, and follows the registry's hosts.
@@ -123,6 +124,41 @@ impl SchedPlacer {
             engine: Mutex::new(engine.with_cold_memory_on(on)),
             ..self
         }
+    }
+
+    /// The same placer, its engine booking a job of an operating system `on` names that cold
+    /// CPU while the job's class has no CPU sample ([`Engine::with_cold_cpu_on`]).
+    #[must_use]
+    pub fn with_cold_cpu_on(self, on: ColdCpuOn) -> Self {
+        let engine = self
+            .engine
+            .into_inner()
+            .unwrap_or_else(PoisonError::into_inner);
+        Self {
+            engine: Mutex::new(engine.with_cold_cpu_on(on)),
+            ..self
+        }
+    }
+
+    /// The same placer, its engine booking by curve under [`crate::sizes::Curves::On`] as
+    /// `curve` says ([`Engine::with_curve_settings`]).
+    #[must_use]
+    pub fn with_curve_settings(self, curve: CurveSettings) -> Self {
+        let engine = self
+            .engine
+            .into_inner()
+            .unwrap_or_else(PoisonError::into_inner);
+        Self {
+            engine: Mutex::new(engine.with_curve_settings(curve)),
+            ..self
+        }
+    }
+
+    /// What `/metrics` reads of the curve mode ([`Engine::curve_view`]); `None` unless it is
+    /// [`crate::sizes::Curves::On`].
+    #[must_use]
+    pub fn curve_view(&self) -> Option<CurveView> {
+        self.engine().curve_view()
     }
 
     /// `decided` with each placement's [`Placement::sized_from`](js_jobs::Placement::sized_from):

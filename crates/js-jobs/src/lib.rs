@@ -77,6 +77,17 @@
 //! holding each for a lease on the store's clock, and deletes them when the agent acknowledges
 //! them ([`JobStore::ack_dispatch`]); an end deletes its job's start.
 //!
+//! A job's **attempts** and its **completion callback**
+//! (`docs/design/job-retry-and-completion-callback.md`) have their operations here:
+//! [`JobStore::retry_txn`] queues a job's next attempt after one ended ([`AttemptRecord`]),
+//! [`JobStore::attempt_row`] reads where and when an attempt ran ([`AttemptRow`]),
+//! [`JobStore::claim_callbacks`] and [`JobStore::answer_callback`] hand out a due callback
+//! to one instance ([`InstanceId`], [`CallbackClaim`]) and record its answer, and
+//! [`JobStore::callback_status`] reads where a job's delivery stands ([`CallbackStatus`]).
+//! This release keeps neither attempt nor callback rows: a retry is refused as the illegal
+//! move it is, no job has an attempt row or a callback, none is ever due, and an answer is
+//! stale.
+//!
 //! # Results and retention
 //!
 //! A result keeps, beside the tails, the length of each output stream and the bytes each
@@ -214,6 +225,8 @@
 //! ([`job_store_tests!`]), `interfere` is the store wrapper its failure and race checks
 //! use, and `rows` reads and writes a stored row's bytes for the fuzz targets.
 
+mod attempt;
+mod callback;
 mod codec;
 mod error;
 mod ids;
@@ -233,11 +246,13 @@ pub mod suite;
 #[cfg(any(test, feature = "test-support"))]
 pub use ids::ScriptedIds;
 
+pub use attempt::{AttemptOutcome, AttemptRecord, AttemptRow};
+pub use callback::{CallbackClaim, CallbackState, CallbackStatus};
 pub use codec::DecodeError;
 pub use error::JobStoreError;
 pub use ids::{
-    AllocationId, ClientName, ClientNameError, DEFAULT_CLIENT_NAME, IdSource, JobId, JobIdError,
-    MAX_CLIENT_NAME_LEN, MAX_JOB_ID_LEN, MintError, RandomIds,
+    AllocationId, ClientName, ClientNameError, DEFAULT_CLIENT_NAME, IdSource, InstanceId, JobId,
+    JobIdError, MAX_CLIENT_NAME_LEN, MAX_JOB_ID_LEN, MintError, RandomIds,
 };
 pub use node::{
     AppliedBeat, Beat, Kept, LoadReading, NodeHello, NodeRecord, NodeRow, NodeState, Retire,

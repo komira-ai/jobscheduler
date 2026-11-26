@@ -1,4 +1,4 @@
-//! The memory estimate: formula, statistic, samples, censoring, hierarchy, hosts, hints, CPU.
+//! The memory estimate: formula, statistic, samples, held samples, hierarchy, hosts, hints, CPU.
 
 use super::*;
 
@@ -210,7 +210,7 @@ fn a_zero_field_never_changes_the_estimate() {
     assert!(seen.memory.is_ok() && seen.cpu == CpuSample::Skipped);
 }
 
-// ---- M2: a run that hit its limit is censored ----------------------------------------
+// ---- M2: a run that reached its booking needed at least the booking ---------------------
 
 fn held_estimate(run: Run, times: usize) -> u64 {
     let mut s = Summaries::default();
@@ -219,95 +219,129 @@ fn held_estimate(run: Run, times: usize) -> u64 {
     memory(&s, &k)
 }
 
-/// M2: a success that reached its limit (any of: the limit was hit, it swapped, its
-/// peak is within 5% of the limit) contributes `min(peak, booked)`: it holds the
-/// estimate at the booking and gives it no headroom.
-#[test]
-fn a_success_that_hit_its_limit_holds_the_estimate() {
-    let at_limit = Run {
-        booked_memory_bytes: 4 * GIB,
-        ..success(6 * GIB + GIB / 2)
-    };
-    assert_eq!(held_estimate(at_limit, 5), 4 * GIB, "near the limit");
-    let hits = Run {
-        limit_hits: 1,
-        booked_memory_bytes: 4 * GIB,
-        ..success(GIB)
-    };
-    assert_eq!(
-        held_estimate(hits, 5),
-        GIB,
-        "memory.events max, sample min(peak, booked)"
-    );
-    let hits_high = Run {
-        limit_hits: 3,
-        booked_memory_bytes: 4 * GIB,
-        ..success(5 * GIB)
-    };
-    assert_eq!(held_estimate(hits_high, 5), 4 * GIB, "min(peak, booked)");
-    let swapped = Run {
-        swap_peak_bytes: 1,
-        booked_memory_bytes: 4 * GIB,
-        ..success(3 * GIB)
-    };
-    assert_eq!(held_estimate(swapped, 5), 3 * GIB, "swap");
-    let plain = Run {
-        booked_memory_bytes: 4 * GIB,
-        ..success(3 * GIB)
-    };
-    assert_eq!(
-        held_estimate(plain, 5),
-        3840 * MIB,
-        "no sign of the limit: headroom applies"
-    );
-}
-
-/// M2: the 95% boundary is inclusive and exact in integers.
-#[test]
-fn the_near_limit_boundary_is_exact() {
-    let booked = 8 * GIB;
-    let limit = memory_max(booked).unwrap();
-    assert_eq!(limit % 20, 0);
-    let edge = limit / 100 * 95;
-    let run = |peak| Run {
+/// A success that used `peak`, booked at `booked`, that the caller does not count as having
+/// reached its booking.
+fn booked_at(booked: u64, peak: u64) -> Run {
+    Run {
         booked_memory_bytes: booked,
         ..success(peak)
-    };
+    }
+}
+
+/// A success that used `peak`, booked at `booked`, that the caller counts as having reached
+/// its booking once.
+fn at_booking(booked: u64, peak: u64) -> Run {
+    Run {
+        limit_hits: 1,
+        ..booked_at(booked, peak)
+    }
+}
+
+/// A run of a key that needs `need`, booked `booked`, as a host that holds a job at its
+/// booking reports it: its peak is `min(need, booked)`, and the caller counts it as having
+/// reached its booking when that peak came within 5% of the booking.
+fn held_to(booked: u64, need: u64) -> Run {
+    let peak = need.min(booked);
+    Run {
+        limit_hits: u64::from(peak * 100 >= booked * 95),
+        ..booked_at(booked, peak)
+    }
+}
+
+/// M2: a success that reached its booking ([`Run::limit_hits`]) needed at least the booking:
+/// it is a held sample of the larger of its peak and its booking, sized with the usual
+/// margin, so its key books a step above the booking. A success that swapped is a held sample
+/// of its peak; any other success is an honest one, whatever its booking. Catches a run held
+/// at its booking recorded as `min(peak, booked)` with no margin, which books its key at that
+/// booking again, and a run that reached its booking sized from its lower peak alone.
+#[test]
+fn a_success_that_reached_its_booking_books_a_step_above_it() {
+    // 4 GiB x 1.2 + 128 MiB = 5044 MiB -> 5 GiB.
     assert_eq!(
-        held_estimate(run(edge), 5),
-        8 * GIB,
-        "at 95%: censored, held at booked"
+        held_estimate(at_booking(4 * GIB, 4 * GIB - 100 * MIB), 5),
+        5 * GIB,
+        "at its booking"
     );
     assert_eq!(
-        held_estimate(run(edge - 1), 5),
-        14 * GIB + GIB / 2,
-        "just under: uncensored"
+        held_estimate(at_booking(4 * GIB, GIB), 5),
+        5 * GIB,
+        "at least the booking, whatever the peak read"
+    );
+    assert_eq!(
+        held_estimate(at_booking(4 * GIB, 5 * GIB), 5),
+        6 * GIB + GIB / 4,
+        "a peak above its booking: the peak (5 GiB x 1.2 + 128 MiB)"
+    );
+    let mut s = Summaries::default();
+    feed(&mut s, &linux(1), &at_booking(100 * GIB, 4 * GIB), 5);
+    assert_eq!(
+        estimate(&s, &linux(1)),
+        Err(Fallback::OverCap),
+        "a booking past the host: held just below it, which books the whole host"
+    );
+    let swapped = Run {
+        swap_peak_bytes: 1,
+        ..booked_at(4 * GIB, 3 * GIB)
+    };
+    assert_eq!(held_estimate(swapped, 5), 3840 * MIB, "swap: its peak");
+    assert_eq!(
+        held_estimate(booked_at(4 * GIB, 3 * GIB), 5),
+        3840 * MIB,
+        "below the booking: headroom over the peak"
+    );
+    assert_eq!(
+        held_estimate(booked_at(4 * GIB, 6 * GIB), 5),
+        7680 * MIB,
+        "a peak above the booking not counted: honest"
     );
 }
 
-/// M2: censored successes never raise an estimate past the booking; only a kill does.
+/// M2: a key held at its booking leaves it on the next run and then stays: ten runs of
+/// 6450 MiB book 7.75 GiB; one run that reached that booking with a peak of 6450 MiB books
+/// 9.5 GiB, a step above the booking, not 7.75 GiB from its peak; runs of the same peak that
+/// do not reach 9.5 GiB keep it there. Catches a key whose runs reach their booking booked
+/// at that booking (or below it) run after run, and a key that falls back once it fits.
 #[test]
-fn a_censored_success_never_raises_past_the_booking() {
+fn a_key_held_at_its_booking_books_a_step_above_it_and_stays_there() {
     let mut s = Summaries::default();
     let k = linux(1);
-    feed(&mut s, &k, &success(GIB), 10);
-    let saturated = Run {
-        booked_memory_bytes: 4 * GIB,
-        ..success(6 * GIB + GIB / 2)
-    };
-    feed(&mut s, &k, &saturated, 40);
-    assert_eq!(memory(&s, &k), 4 * GIB);
-    s.observe(&k, &kill(4 * GIB, 0, None), DAY, &Bounds::default());
-    assert!(memory(&s, &k) > 4 * GIB);
+    feed(&mut s, &k, &success(6450 * MIB), 10);
+    assert_eq!(memory(&s, &k), 7936 * MIB);
+    feed(&mut s, &k, &at_booking(7936 * MIB, 6450 * MIB), 1);
+    assert_eq!(memory(&s, &k), 9728 * MIB, "a step above the booking");
+    feed(&mut s, &k, &booked_at(9728 * MIB, 6450 * MIB), 40);
+    assert_eq!(memory(&s, &k), 9728 * MIB, "it fits: no further step");
 }
 
-/// M2 closed loop: peak(B) = min(anon + fill, limit(B)), 200 runs per key, the booking
-/// follows the estimate. Where the key fits it settles within 1.2 x (anon + fill) plus
-/// the slack and a step; where the first limit cuts it off (anon + fill at least 95% of
-/// the 6.5 GiB limit of a 4 GiB booking) the booking stays at 4 GiB, because a run
-/// that only reached its limit never raises it.
+/// M2: what a key that keeps reaching its booking costs before it fits: a compile that needs
+/// 10 GiB, booked 7.75 GiB from its earlier runs, is held at its booking on two runs (at
+/// 7.75 GiB, then at 9.5 GiB) and fits on the third (11.75 GiB); its first measured peak
+/// then books it 12.25 GiB, where it stays.
 #[test]
-fn a_closed_loop_settles_and_never_climbs_on_a_saturated_key() {
+fn a_key_that_needs_10_gib_from_7_75_is_held_on_two_runs_and_fits_on_the_third() {
+    let b = Bounds::default();
+    let (mut s, k) = (Summaries::default(), linux(1));
+    feed(&mut s, &k, &success(6450 * MIB), 10);
+    let mut bookings = Vec::new();
+    let mut held = 0;
+    for _ in 0..6 {
+        let booked = memory(&s, &k);
+        bookings.push(booked / MIB);
+        let run = held_to(booked, 10 * GIB);
+        held += run.limit_hits;
+        s.observe(&k, &run, DAY, &b);
+    }
+    assert_eq!(held, 2, "runs held at their booking before one fits");
+    assert_eq!(bookings, [7936, 9728, 12032, 12544, 12544, 12544]);
+}
+
+/// M2 closed loop: the booking follows the estimate and each run is held at its booking, so
+/// its peak is `min(need, booking)`, 200 runs per key. A key that needs more than its booking
+/// climbs a step per run that reaches the booking until it fits, then reaches it no more
+/// (none of the last 100 runs does) and never books above a step over the largest booking a
+/// run could still reach (`need / 0.95`).
+#[test]
+fn a_closed_loop_climbs_until_the_key_fits_and_then_settles() {
     let b = Bounds::default();
     for (seed, need) in [
         (1, 2 * GIB),
@@ -320,42 +354,74 @@ fn a_closed_loop_settles_and_never_climbs_on_a_saturated_key() {
     ] {
         let mut rng = Rng(seed * 0x9e37_79b9);
         let (mut s, k) = (Summaries::default(), linux(1));
-        let mut top = 0;
-        for _ in 0..200 {
+        let (mut top, mut late_hits) = (0, 0);
+        for run in 0..200 {
             let booked = s
                 .estimate(&k, DAY, &b, &Hint::default())
                 .map_or(b.default_memory, |est| est.memory_bytes);
             top = top.max(booked);
-            let wanted = need - rng.below(need / 5);
-            let limit = memory_max(booked).unwrap();
-            let run = Run {
-                booked_memory_bytes: booked,
-                ..success(wanted.min(limit))
-            };
-            s.observe(&k, &run, DAY, &b);
+            let held = held_to(booked, need - rng.below(need / 5));
+            if run >= 100 {
+                late_hits += held.limit_hits;
+            }
+            s.observe(&k, &held, DAY, &b);
         }
-        let ceiling = (need + need.div_ceil(5) + 128 * MIB).div_ceil(256 * MIB) * 256 * MIB;
-        if need * 100 >= memory_max(4 * GIB).unwrap() * 95 {
-            assert_eq!(top, 4 * GIB, "need {need}: a saturated key must not climb");
-        } else {
-            assert!(
-                top <= ceiling.max(4 * GIB),
-                "need {need}: top {top} > {ceiling}"
-            );
-        }
+        let reach = (need * 100).div_ceil(95);
+        let ceiling = (reach + reach.div_ceil(5) + 128 * MIB).div_ceil(256 * MIB) * 256 * MIB;
+        assert_eq!(late_hits, 0, "need {need}: still at its booking");
+        assert!(
+            top <= ceiling.max(4 * GIB),
+            "need {need}: top {top} > {ceiling}"
+        );
     }
 }
 
-/// S5: a kill is a sample of at least the limit derived from its booking, not of the
-/// record's `used` (0 when the killed run carried no usage).
+/// M2 cap: a key whose runs keep reaching their booking near the host climbs to the host and
+/// no further: from 48.25 GiB under a 64 GiB host, a run held at a 56 GiB booking makes the estimate
+/// [`Fallback::OverCap`] (the whole host), and more runs held at the host's whole memory keep
+/// it there, each a held sample kept below the host. Catches a step that books past the host,
+/// and a held sample at the host discarded, which would drop the key back to its peaks.
 #[test]
-fn a_kill_sample_uses_the_derived_limit() {
-    let mut s = Summaries::default();
+fn a_key_held_at_its_booking_near_the_host_stops_at_the_host() {
+    let b = Bounds::default();
+    let (mut s, k) = (Summaries::default(), linux(1));
+    feed(&mut s, &k, &success(40 * GIB), 10);
+    assert_eq!(memory(&s, &k), 48 * GIB + GIB / 4);
+    s.observe(&k, &at_booking(56 * GIB, 40 * GIB), DAY, &b);
+    assert_eq!(
+        estimate(&s, &k),
+        Err(Fallback::OverCap),
+        "a step reaches the host"
+    );
+    for _ in 0..40 {
+        let seen = s.observe(&k, &at_booking(b.host_memory, 40 * GIB), DAY, &b);
+        assert_eq!(seen.memory, Ok(()), "a held run at the host is kept");
+    }
+    assert_eq!(
+        estimate(&s, &k),
+        Err(Fallback::OverCap),
+        "and stays at the host"
+    );
+    assert_eq!(
+        s.get(&k).unwrap().long_max(),
+        40 * GIB,
+        "the held samples never become measured ones"
+    );
+}
+
+/// S5: a kill is a sample of at least the booking it died at (a host that kills a job for
+/// memory holds it at its booking), not the record's `used` (0 when the killed run carried no
+/// usage), nor the build host's derived `1.5 x booking + 512 MiB`; a use above the booking
+/// is the sample.
+#[test]
+fn a_kill_sample_is_at_least_the_booking_it_died_at() {
     let k = linux(1);
+    let mut s = Summaries::default();
     s.observe(&k, &kill(4 * GIB, 0, None), DAY, &Bounds::default());
-    assert_eq!(s.get(&k).unwrap().long_max(), 6 * GIB + GIB / 2);
-    assert_eq!(memory_max(0), None);
-    assert_eq!(memory_max(4 * GIB), Some(6 * GIB + GIB / 2));
+    assert_eq!(s.get(&k).unwrap().long_max(), 4 * GIB, "the booking");
+    let mut s = Summaries::default();
+    s.observe(&k, &kill(4 * GIB, 5 * GIB, None), DAY, &Bounds::default());
+    assert_eq!(s.get(&k).unwrap().long_max(), 5 * GIB, "a use above it");
 }
 
 /// A kill with nothing booked and nothing measured has no sample to give and no
@@ -383,11 +449,11 @@ fn a_kill_is_a_censored_sample() {
     let k = linux(1);
     s.observe(&k, &kill(4 * GIB, 5 * GIB, None), DAY, &Bounds::default());
     assert_eq!(s.get(&k).unwrap().samples(), 1);
-    // 6.5 GiB x 1.2 + 128 MiB = 7.925 GiB -> 8 GiB, above the 4.25 GiB floor.
-    assert_eq!(memory(&s, &k), 8 * GIB);
+    // 5 GiB x 1.2 + 128 MiB = 6.125 GiB -> 6.25 GiB, above the 4.25 GiB floor.
+    assert_eq!(memory(&s, &k), 6 * GIB + GIB / 4);
 }
 
-/// Rule 3.4.2: when the measured use is above the derived limit, the use is the
+/// Rule 3.4.2: when the measured use is above the limit the run died at, the use is the
 /// sample; neither exceeds the host.
 #[test]
 fn the_kill_sample_is_the_larger_of_use_and_limit() {
@@ -401,8 +467,8 @@ fn the_kill_sample_is_the_larger_of_use_and_limit() {
         s.get(&k).unwrap().long_max()
     };
     assert_eq!(sample(Some(7 * GIB), 4 * GIB), 7 * GIB);
-    assert_eq!(sample(Some(5 * GIB), 4 * GIB), 6 * GIB + GIB / 2);
-    assert_eq!(sample(None, 4 * GIB), 6 * GIB + GIB / 2);
+    assert_eq!(sample(Some(3 * GIB), 4 * GIB), 4 * GIB);
+    assert_eq!(sample(None, 4 * GIB), 4 * GIB);
     assert_eq!(sample(Some(100 * GIB), 4 * GIB), 64 * GIB - 1);
 }
 

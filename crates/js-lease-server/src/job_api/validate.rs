@@ -13,7 +13,7 @@
 //! | `spec.jobId` | empty (the store mints an id), or 1 to 63 bytes of letters, digits, `.`, `_` and `-` | `field: spec.jobId` |
 //! | `spec.image` | `NAME[:TAG]@sha256:<64 hex>`: a tag alone is refused; empty only beside `spec.layers` | `field: spec.image` |
 //! | `spec.command` | with an empty image, an absolute path in normal form ([`js_types::path::absolute`]) | `field: spec.command` |
-//! | `spec.env` | names and values as given; nothing to refuse | |
+//! | `spec.env` | as a start's environment is (`js_agent_wire::check_env`): at most `js_agent_wire::limits::MAX_ENV` entries; each name non-empty, of `[A-Za-z_][A-Za-z0-9_]*`, at most `MAX_ENV_KEY_LEN` bytes and not one the agent owns or that steers the loader, the agent or a shell ([`js_types::env::env_name_reserved`]: `HOME`, `TMPDIR`, `LD_*`, `JS_*`, `IFS` and the rest); each value without NUL; the values and names within the wire's caps | `field: spec.env: invalid-env` |
 //! | `spec.needs` | `whole_host` with no other need; a GPU count with a class (from `gpu_class`, else `constraints.accelerator.model`) and a class with a count | `field: spec.needs`, `spec.needs.gpus`, `spec.needs.gpuClass` |
 //! | `spec.constraints` | `os` empty, `linux` or `macos`; `arch` any name, `aarch64` stored as `arm64`; `exec` a known mode, and not `sandbox-exec` for a job with layers or a host port at a job port of its own; `isaLevel` empty or a level; `osVersion` empty or a whole major version of one to four digits without a leading zero; `xcode` empty or a build id ([`js_agent_wire::is_xcode_build`]: 1 to 32 bytes of letters, digits, `.`, `_` and `-`, the first a letter or digit); `accelerator` keys valid and not contradicting the booked class; `isolation` a known value (unspecified is contained), and not `host` for a job with layers, mounts or host ports | `field: spec.constraints.<name>` |
 //! | `spec.wallLimitSeconds` | present and above 0, and at most the ceiling | the refusals `wall-time-not-positive` and `wall-time-above-ceiling` |
@@ -22,7 +22,10 @@
 //! | `spec.hostPorts` | the rules of `rootfs` | `field: spec.hostPorts[i].<name>` |
 //! | `spec.files` | as a start's run files are (`js_agent_wire::validate_files`) | `field: spec.files` |
 //! | `spec.labels` | as a lease's labels are (`Labels::from_caller`) | `field: spec.labels` |
+//! | `spec.historyKey` | empty, or 1 to 512 bytes of printable ASCII (`0x20` to `0x7e`), kept as sent ([`HistoryKey`]) | `field: spec.historyKey: bad-length`, `field: spec.historyKey: not-printable-ascii` |
 //! | `spec.layers`, `spec.mounts` | the rules of `rootfs` | `field: spec.layers[i].<name>`, `spec.mounts[i].<name>` |
+//! | `spec.retry` | absent: this release does not retry a job, so it refuses one that asks, whatever the policy says | `field: spec.retry: retry-not-enabled` |
+//! | `spec.callback` | absent: this release calls no job back, so it refuses one that asks, whatever the callback says | `field: spec.callback: callback-not-enabled` |
 //!
 //! The cross-field rules (an empty image, its command, `exec`, `needs.wholeHost` and
 //! `isolation` beside the layers, mounts and host ports) are checked once those fields are, and
@@ -52,7 +55,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use js_agent_wire::{Layer, RunFile, is_xcode_build, validate_files};
+use js_agent_wire::{Layer, RunFile, check_env, is_xcode_build, validate_files};
 use js_caps::{FLAG_SET, LAYERED_ROOTFS, XCODE, mount_provider_key};
 use js_jobs::{
     Constraints, DeclaredPort, Isolation, JobFiles, JobId, JobSpec, Needs, NetworkPolicy,
@@ -60,8 +63,8 @@ use js_jobs::{
 use js_proto::v1;
 use js_types::{
     ACCEL_COUNT_KEY, ACCEL_FORM_FACTOR_KEY, ACCEL_INTERCONNECT_KEY, ACCEL_MEMORY_GIB_KEY,
-    ACCEL_MODEL_KEY, ACCEL_VENDOR_KEY, AcceleratorNeed, ExecMode, ImageDigestRef, IsaLevel, Labels,
-    OS_VERSION_KEY, Os, Requirements, Resources, normalise_arch,
+    ACCEL_MODEL_KEY, ACCEL_VENDOR_KEY, AcceleratorNeed, ExecMode, HistoryKey, ImageDigestRef,
+    IsaLevel, Labels, OS_VERSION_KEY, Os, Requirements, Resources, normalise_arch,
 };
 // The network level a job asks a host for, by a name of its own: the type's own name followed
 // by a path separator reads as the server's network module to the source scan of design
@@ -92,6 +95,10 @@ pub(crate) struct Valid {
 pub(crate) enum Fault {
     /// The field, by its JSON name, is not valid.
     Field(&'static str),
+    /// The field, by its JSON name, breaks a rule whose code the answer carries: one of the
+    /// wire's check of a start (`js_agent_wire::refusal`), or of this module's own (the
+    /// history key's, and `retry-not-enabled` and `callback-not-enabled`).
+    Wire(&'static str, &'static str),
     /// The field, by its JSON name, of the port at this index of `spec.ports`.
     Port(usize, &'static str),
     /// The field, by its JSON name (a path below the entry for a provider source's field:
@@ -119,6 +126,7 @@ pub(crate) fn job(spec: Option<&v1::JobSpec>, ceiling: Duration) -> Result<Valid
         .map(ImageDigestRef::parse)
         .transpose()
         .map_err(|_| Fault::Field("spec.image"))?;
+    env(&spec.env)?;
     let constraints = spec.constraints.clone().unwrap_or_default();
     let resources = resources(spec.needs.as_ref(), &constraints)?;
     let (mut kept, mut capabilities) = host(&constraints)?;
@@ -128,8 +136,10 @@ pub(crate) fn job(spec: Option<&v1::JobSpec>, ceiling: Duration) -> Result<Valid
     let host_ports = rootfs::host_ports(&spec.host_ports, &ports)?;
     let files = files(&spec.files)?;
     let labels = labels(&spec.labels)?;
+    let history_key = history_key(&spec.history_key)?;
     let layers = rootfs::layers(&spec.layers)?;
     let mounts = rootfs::mounts(&spec.mounts)?;
+    not_enabled(spec)?;
     let accelerator = AcceleratorNeed::requested(&capabilities, resources.shape())
         .map_err(|_| Fault::Field("spec.constraints.accelerator"))?;
     imageless(image.as_ref(), &spec.command, &layers)?;
@@ -195,6 +205,7 @@ pub(crate) fn job(spec: Option<&v1::JobSpec>, ceiling: Duration) -> Result<Valid
         layers,
         mounts,
         host_ports,
+        history_key,
     };
     Ok(Valid {
         id,
@@ -462,9 +473,41 @@ fn files(files: &[v1::JobFile]) -> Result<JobFiles, Fault> {
     ))
 }
 
+/// The environment, checked as a start's is, so that no job is admitted whose start the wire
+/// would refuse and which would then never be sent.
+fn env(env: &BTreeMap<String, String>) -> Result<(), Fault> {
+    check_env("spec.env", env).map_err(|error| Fault::Wire("spec.env", error.code()))
+}
+
 /// The labels, checked as a lease's are.
 fn labels(labels: &BTreeMap<String, String>) -> Result<Labels, Fault> {
     Labels::from_caller(labels).map_err(|_| Fault::Field("spec.labels"))
+}
+
+/// The history key: none when empty, else kept as sent when it is a [`HistoryKey`] (1 to
+/// 512 bytes of printable ASCII), refused with the word of its fault otherwise.
+fn history_key(text: &str) -> Result<Option<HistoryKey>, Fault> {
+    if text.is_empty() {
+        return Ok(None);
+    }
+    HistoryKey::parse(text)
+        .map(Some)
+        .map_err(|fault| Fault::Wire("spec.historyKey", fault.code()))
+}
+
+/// A job that carries a retry policy or a callback is refused, the policy first, whatever
+/// either holds (an empty policy or callback included): this release would record the job
+/// without them, so it would run once and call nothing back while its client believed
+/// otherwise (`docs/design/job-retry-and-completion-callback.md`, section 7). The refusal
+/// repeats nothing of either, so neither a callback's URL nor its key is ever in an answer.
+fn not_enabled(spec: &v1::JobSpec) -> Result<(), Fault> {
+    if spec.retry.is_some() {
+        return Err(Fault::Wire("spec.retry", "retry-not-enabled"));
+    }
+    if spec.callback.is_some() {
+        return Err(Fault::Wire("spec.callback", "callback-not-enabled"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

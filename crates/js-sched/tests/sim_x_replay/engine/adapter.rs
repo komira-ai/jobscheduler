@@ -212,6 +212,7 @@ impl PredictedLoad for ScoreModel {
             same_key_millis: h.same_key_millis,
             new_key_millis: self.lease.p_bar_cpu_millis,
             uncovered_leases: h.uncovered_leases,
+            booked_with_lease: Charge::default(),
         }
     }
 }

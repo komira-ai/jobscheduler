@@ -121,6 +121,16 @@ impl Worker {
         }
     }
 
+    /// What it would have booked with the lease of `request` added, as the pack limit of
+    /// the score reads it ([`crate::HostFacts::booked_with_lease`]).
+    pub(crate) fn booked_with(&self, request: &Request) -> crate::Charge {
+        let booked = self.booked.saturating_add(self.booking(request));
+        crate::Charge {
+            cpu_millis: booked.cpu_millis,
+            memory_bytes: booked.memory_bytes,
+        }
+    }
+
     /// `cost`, the charge of the lease of `request` on the load ledger, made the whole
     /// worker's CPUs and memory when the request owns it.
     pub(crate) fn charged_whole(&self, request: &Request, cost: LeaseCost) -> LeaseCost {

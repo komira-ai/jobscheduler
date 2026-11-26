@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent::lifecycle::{
-    Created, FsPrepared, JobFs, OutputsReport, Prepared, Removal, RunHandle, Runtime, Status, Wake,
-    Whereabouts, label,
+    Created, FsPrepared, JobFs, LookupStamps, OutputsReport, Prepared, Removal, RunHandle, Runtime,
+    Status, Wake, Whereabouts, label,
 };
 use js_agent::vm::{VmRuntime, WithVms};
 use js_agent_wire::{
@@ -243,6 +243,14 @@ fn every_host_question_is_the_other_runtimes() {
     fake.steps_of("left", &[("begin", 7)]);
     let steps = with.start_steps(&RunHandle(leaked.clone()));
     assert_eq!(steps, [("begin", 7)]);
+    let stamps = LookupStamps {
+        queued_at_ms: 1,
+        started_at_ms: 2,
+        ended_at_ms: 4,
+    };
+    fake.lookup_of("left", stamps);
+    let given = with.lookup_stamps(&RunHandle(leaked.clone()));
+    assert_eq!(given, Some(stamps));
     fake.set_host_ports(&[PortRange::new(5432, 5433).unwrap()]);
     assert_eq!(with.host_ports(), [PortRange::new(5432, 5433).unwrap()]);
     fake.lose_host_ports("left", "taken");

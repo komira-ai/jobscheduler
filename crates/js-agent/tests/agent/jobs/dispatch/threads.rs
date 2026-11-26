@@ -322,6 +322,45 @@ fn a_transport_that_cannot_be_made_is_a_failed_poll() {
     });
 }
 
+/// Asserts that the poller's thread holds an answer its worker has no room for, makes no
+/// transport and posts nothing while the queue stays full, and once the worker makes room
+/// hands the start over and posts the next poll at once with its acknowledgement; and that
+/// the poller's lines reach the cell. Catches a thread that polls on while it holds messages
+/// (it would make a transport for every try), and one that waits out a bound after the room
+/// appeared instead of the room itself.
+#[test]
+fn the_poller_thread_holds_what_the_worker_has_no_room_for_until_it_makes_room() {
+    let dir = Scratch::new("jobs-dispatch-serve-held");
+    let machine = FakeMachine::new();
+    let worker = start(&dir, &machine);
+    super::held::fill(&worker, &machine);
+    let cell = Cell::new(None);
+    let (connector, driver) = rig();
+
+    serving(&cell, &worker, &connector, || {
+        cell.publish("h1", &welcomed(1, "one", true, None), CredentialState::None);
+        driver.next();
+        driver.answer(handed(vec![Dispatched::start(spec("j1"))]));
+        assert_eq!(
+            cell.wait_lines(GUARD),
+            ["dispatch: the job worker has no room for 1 message(s) (undelivered answers: 1)"]
+        );
+        assert_eq!(connector.0.connects.load(Ordering::SeqCst), 1);
+        machine.world.release();
+        let (carrying, _) = driver.next();
+        assert_eq!(acked(&carrying), ["start:alloc-j1"]);
+        assert_eq!(connector.0.connects.load(Ordering::SeqCst), 2);
+        driver.answer(quiet());
+        assert_eq!(
+            cell.wait_lines(GUARD),
+            ["dispatch: the job worker took 1 held message(s) 0 ms after they arrived"]
+        );
+        driver.finish();
+    });
+    assert!(worker.handle().settle());
+    assert_eq!(worker.snapshot().jobs[0].job_id, "j1");
+}
+
 /// A session over a scripted transport and `worker`, telling `cell` its welcomes.
 fn session_over<'a>(script: &'a mut Script, worker: &'a Worker, cell: &'a Cell) -> Session<'a> {
     Session::new(hello("h1"), script, lowest())

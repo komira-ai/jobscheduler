@@ -76,6 +76,7 @@ mod mac_native;
 mod mac_os_version;
 mod memory_percent;
 mod metrics_listen;
+mod pack_limit;
 mod placement;
 mod placement_curves;
 mod platform_default;

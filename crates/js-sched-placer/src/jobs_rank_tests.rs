@@ -66,6 +66,7 @@ fn pass(
     let on = JobHosts {
         open: &open,
         hello: &hello,
+        tainted: &std::collections::BTreeSet::new(),
         whole: Some(&whole),
     };
     let placed = placer.place_jobs_with(&tables.jobs, &on, (&NoStarts, &Unmetered));

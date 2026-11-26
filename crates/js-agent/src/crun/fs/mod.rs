@@ -1,15 +1,17 @@
 //! A job's file system on the `crun` runtime (`docs/design/job-rootfs.md`, sections 4.2 to
 //! 4.7 and 8): [`Fs`], which holds the roots a job's host paths lie beneath (opened when
 //! the agent starts), the directory of the runs' mounts (`<mounts>`, made a private mount
-//! of its own when the agent starts) and two pools of threads (`js-lookups` for the lookups
-//! of host paths, `js-paths` for the assemblies and the checks, so a start's lookups never
-//! wait behind another's assembly or check), and prepares each run's file system off the
-//! lifecycle's worker:
+//! of its own when the agent starts) and two pools of threads (`js-lookups`, `LOOKUP_THREADS`
+//! threads, for the lookups of host paths; `js-paths`, `pool::THREADS` threads, for the
+//! assemblies and the checks, so a start's lookups never wait behind another's assembly or
+//! check), and prepares each run's file system off the lifecycle's worker:
 //!
 //! 1. each host path is opened beneath its root, and a mount's `sub_path` beneath it, on the
 //!    lookups' pool ([`Fs::resolve`]), each lookup bounded by [`LOOKUP_MS`] on the lifecycle's
 //!    clock; a start with none is ready at the first call, and a later call that adds host paths
-//!    keeps the lookups already begun and asks only the new ones;
+//!    keeps the lookups already begun and asks only the new ones. Each lookup is stamped on the
+//!    runtime's wall clock ([`Fs::with_clock`]) when it is asked, when a thread begins it and
+//!    when it ends ([`LookupStamps`]), and the run keeps the stamps of the one that ended last;
 //! 2. once they are open and the images are in the store, the assembly ([`assemble`]) runs
 //!    on the other pool ([`Fs::ask_assembly`]): clones, overlays, targets, each mount listed
 //!    in `<mounts>/<lease>/mounts` ([`list`]) before it is made;
@@ -30,6 +32,10 @@ mod assemble_tests;
 #[cfg(test)]
 mod fs_tests;
 #[cfg(test)]
+mod lookups_tests;
+#[cfg(test)]
+mod stamps_tests;
+#[cfg(test)]
 mod tests;
 
 use std::collections::BTreeMap;
@@ -38,14 +44,24 @@ use std::os::fd::{AsFd as _, OwnedFd};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use js_agent_wire::{Layer, refusal};
+use js_agent_wire::{Layer, limits, refusal};
 use js_contain::job_fs::{MountCalls, ResolveError, make_private_dir, open_root};
 
 use crate::pool::{self, Pending, Poll, Pool};
 pub(crate) use assemble::{Assembled, Lower, Owners, Plan, Unassembled};
 pub use kernel::{Kernel, PathCalls};
 
-use crate::lifecycle::{FsPrepared, HostSource, JobFs, MountRoots, NativeRefusal, RuntimeError};
+use crate::lifecycle::{
+    FsPrepared, HostSource, JobFs, LookupStamps, MountRoots, NativeRefusal, RuntimeError,
+};
+
+/// The wall clock the lookups are stamped on, in milliseconds since the Unix epoch: read on
+/// the worker when a lookup is asked and on the pool's thread when it begins and ends.
+pub(crate) type WallClock = Arc<dyn Fn() -> u64 + Send + Sync>;
+
+/// What a thread of the lookups' pool answers: the open path, or why it was not opened,
+/// with the lookup's stamps.
+type Looked = (Result<OwnedFd, NativeRefusal>, LookupStamps);
 
 /// Where the agent mounts what its runs' file systems are made of: outside the scratch
 /// root, which every release sweeps at its start, on a `tmpfs` a reboot clears.
@@ -53,6 +69,12 @@ pub const MOUNTS_DIR: &str = "/run/js-agent/mounts";
 
 /// How long the lookup of one host path may take, from when it is asked.
 pub const LOOKUP_MS: u64 = 60_000;
+
+/// The threads of the lookups' pool (`js-lookups`): as many as the host paths one start may
+/// name, every layer ([`limits::MAX_LAYERS`]) and every mount ([`limits::MAX_MOUNTS`]) a host
+/// path, so the lookups of one start never wait for a thread behind one another. Fixed, as
+/// every pool's: a provider that hangs holds at most these threads, and none of another pool.
+pub(crate) const LOOKUP_THREADS: usize = limits::MAX_LAYERS + limits::MAX_MOUNTS;
 
 /// How long the check of a job's sources after it ended may take.
 pub const CHECK_MS: u64 = 5_000;
@@ -120,9 +142,9 @@ struct Lookup {
 #[derive(Debug)]
 enum Opened {
     /// Asked of the lookups' pool: the answer to come.
-    Asked(Pending<Result<OwnedFd, NativeRefusal>>),
-    /// Open.
-    Open(OwnedFd),
+    Asked(Pending<Looked>),
+    /// Open, with when it was asked, begun and ended.
+    Open(OwnedFd, LookupStamps),
 }
 
 impl Lookup {
@@ -153,6 +175,9 @@ struct Prep {
     /// The start's layers and mounts.
     fs: JobFs,
     lookups: Vec<Lookup>,
+    /// The stamps of the lookup that ended last, kept when the assembly takes the open paths;
+    /// none for a run with no host path.
+    waited: Option<LookupStamps>,
     assembly: Assembly,
 }
 
@@ -189,6 +214,8 @@ pub(crate) struct Fs {
     pool: Pool,
     /// By run id.
     preps: BTreeMap<String, Prep>,
+    /// What the lookups are stamped on.
+    now_ms: WallClock,
 }
 
 impl Prep {
@@ -202,8 +229,10 @@ impl Prep {
             };
             match pending.poll(now_ms) {
                 Poll::Waiting => waiting = true,
-                Poll::Answered(Ok(opened)) => lookup.state = Opened::Open(opened),
-                Poll::Answered(Err(refused)) => return FsPrepared::Refused(refused),
+                Poll::Answered((Ok(opened), stamps)) => {
+                    lookup.state = Opened::Open(opened, stamps);
+                }
+                Poll::Answered((Err(refused), _)) => return FsPrepared::Refused(refused),
                 Poll::Unanswered(why) => {
                     return FsPrepared::Refused(NativeRefusal {
                         code: refusal::INPUT_UNAVAILABLE,
@@ -259,10 +288,19 @@ impl Fs {
             calls: settings.calls,
             paths: settings.paths,
             image_allow: settings.image_allow,
-            lookups: Pool::named(pool::THREADS, "js-lookups")?,
+            lookups: Pool::named(LOOKUP_THREADS, "js-lookups")?,
             pool: Pool::named(pool::THREADS, "js-paths")?,
             preps: BTreeMap::new(),
+            now_ms: Arc::new(super::settings::system_now_ms),
         })
+    }
+
+    /// Stamps the lookups asked from now on with `now_ms` instead of the system's wall clock:
+    /// the runtime's own clock ([`Hooks::now_ms`](super::Hooks::now_ms)), or a test's.
+    #[must_use]
+    pub(crate) fn with_clock(mut self, now_ms: WallClock) -> Self {
+        self.now_ms = now_ms;
+        self
     }
 
     /// Rings `wake` whenever a lookup, an assembly or a check asked from now on has answered.
@@ -316,6 +354,7 @@ impl Fs {
             image: String::new(),
             fs: JobFs::default(),
             lookups: Vec::new(),
+            waited: None,
             assembly: Assembly::Unasked,
         });
         // The image of the last call is the assembly's, whether or not its fs changed.
@@ -345,7 +384,8 @@ impl Fs {
         lookups
     }
 
-    /// Asks the lookups' pool to open `path` beneath its root, and `sub_path` beneath it.
+    /// Asks the lookups' pool to open `path` beneath its root, and `sub_path` beneath it,
+    /// stamped when it is asked, when a thread begins it and when it ends.
     fn look_up(&self, source: HostSource<'_>, now_ms: u64) -> Lookup {
         let (path, sub_path) = (source.path, source.sub_path);
         // Every root is held from the start: the one a path lies beneath is open.
@@ -357,25 +397,17 @@ impl Fs {
         let sub_path_text = sub_path.map(str::to_owned);
         let (given, sub_path) = (path.to_owned(), sub_path.map(PathBuf::from));
         let deadline = now_ms.saturating_add(LOOKUP_MS);
+        let clock = Arc::clone(&self.now_ms);
+        let queued_at_ms = clock();
         let pending = self.lookups.run(deadline, move || {
-            let Some((root, name, rest)) = root else {
-                let why = format!("{given} lies beneath no root of this agent");
-                return Err(not_allowed(why));
+            let started_at_ms = clock();
+            let opened = open_source(paths.as_ref(), root, (&given, sub_path));
+            let stamps = LookupStamps {
+                queued_at_ms,
+                started_at_ms,
+                ended_at_ms: clock(),
             };
-            let host_path = || format!("the host path {given} (root {name})");
-            let opened = paths
-                .open_beneath(root.as_fd(), &rest)
-                .map_err(|why| refusal_of(&host_path(), why))?;
-            match sub_path {
-                None => Ok(opened),
-                Some(sub_path) => paths
-                    .open_beneath(opened.as_fd(), &sub_path)
-                    .map_err(|why| {
-                        let named =
-                            format!("the sub_path {} of {}", sub_path.display(), host_path());
-                        refusal_of(&named, why)
-                    }),
-            }
+            (opened, stamps)
         });
         Lookup {
             path: path.to_owned(),
@@ -411,12 +443,20 @@ impl Fs {
             .get_mut(run_id)
             .ok_or_else(|| format!("run {run_id} has no file system being prepared"))?;
         let mut sources = Vec::new();
+        let mut waited: Option<LookupStamps> = None;
         for lookup in std::mem::take(&mut prep.lookups) {
             match lookup.state {
-                Opened::Open(opened) => sources.push(opened),
+                Opened::Open(opened, stamps) => {
+                    sources.push(opened);
+                    // The one that ended last; of two that ended at once, the earlier listed.
+                    if waited.is_none_or(|last| stamps.ended_at_ms > last.ended_at_ms) {
+                        waited = Some(stamps);
+                    }
+                }
                 Opened::Asked(_) => return Err(format!("{} is not open yet", lookup.path)),
             }
         }
+        prep.waited = waited;
         let mut trees = trees.into_iter();
         let layers = prep
             .fs
@@ -472,11 +512,13 @@ impl Fs {
         }
     }
 
-    /// What the assembly of the run `run_id` made, for its container: `None` for a run
-    /// whose file system was not assembled.
-    pub(crate) fn take(&mut self, run_id: &str) -> Option<Assembled> {
-        match self.preps.remove(run_id)?.assembly {
-            Assembly::Made(made) => Some(made),
+    /// What the assembly of the run `run_id` made, for its container, with the stamps of the
+    /// lookup of a host path it waited on (the one that ended last; none without host paths):
+    /// `None` for a run whose file system was not assembled.
+    pub(crate) fn take(&mut self, run_id: &str) -> Option<(Assembled, Option<LookupStamps>)> {
+        let prep = self.preps.remove(run_id)?;
+        match prep.assembly {
+            Assembly::Made(made) => Some((made, prep.waited)),
             _ => None,
         }
     }
@@ -536,6 +578,35 @@ impl Fs {
                     .map(|why| format!("{}: {why}", point.display()))
             })
         })
+    }
+}
+
+/// A root this agent holds: the root, opened, its name, and the rest of a path below it.
+type HeldRoot = (Arc<OwnedFd>, String, PathBuf);
+
+/// What a thread of the lookups' pool does: opens the host path `given` beneath `root` (none
+/// when it lies beneath no root of this agent), and `sub_path` beneath it, with `paths`.
+fn open_source(
+    paths: &dyn PathCalls,
+    root: Option<HeldRoot>,
+    (given, sub_path): (&str, Option<PathBuf>),
+) -> Result<OwnedFd, NativeRefusal> {
+    let Some((root, name, rest)) = root else {
+        let why = format!("{given} lies beneath no root of this agent");
+        return Err(not_allowed(why));
+    };
+    let host_path = || format!("the host path {given} (root {name})");
+    let opened = paths
+        .open_beneath(root.as_fd(), &rest)
+        .map_err(|why| refusal_of(&host_path(), why))?;
+    match sub_path {
+        None => Ok(opened),
+        Some(sub_path) => paths
+            .open_beneath(opened.as_fd(), &sub_path)
+            .map_err(|why| {
+                let named = format!("the sub_path {} of {}", sub_path.display(), host_path());
+                refusal_of(&named, why)
+            }),
     }
 }
 

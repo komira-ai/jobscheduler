@@ -33,17 +33,22 @@ pub struct Run {
     pub booked_memory_bytes: u64,
     /// For an own-limit kill: the booking the caller's ladder retries with.
     pub raised_memory_bytes: Option<u64>,
-    /// How many times the run reached its memory limit (`memory.events` `max`); 0 when
-    /// none or not measured.
+    /// How many times the run reached its booking, as the caller judges it (a host that holds
+    /// a job at its booking can count `memory.events` `max`; the job service counts one for a
+    /// run whose group's peak came within 5% of its booking without passing it); 0 when none
+    /// or not measured. A success that reached it needed at least its booking, and its key
+    /// books a step above the booking.
     pub limit_hits: u64,
     /// Swap the run peaked at, in bytes; 0 when none or not measured.
     pub swap_peak_bytes: u64,
     /// CPU time used (user plus system) in microseconds.
     pub cpu_usage_us: u64,
     /// The most CPU the run used over a short window of it (the job server's agent measures
-    /// five seconds), in millicores, if measured: when given, it is the run's CPU sample in
-    /// place of its mean (`cpu_usage_us` over `wall_us`), so the estimate is of the cores a run
-    /// of the key needs at its busiest.
+    /// five seconds), in millicores, if measured. The run's CPU sample stays its mean
+    /// (`cpu_usage_us` over `wall_us`); the peak is kept beside it, and a key whose recent
+    /// peaks are far above the median of its means books them (a heavy tail,
+    /// [`crate::Summary`]'s CPU rule in the crate docs). `None` and `Some(0)` are no peak; the
+    /// job server's placer teaches `None` (`docs/design/sizing.md`, 7.11).
     pub cpu_peak_millis: Option<u32>,
     /// The CPU contention the run met, in tenths of a percent, if known: the node's CPU
     /// pressure (`avg10`) when the run started, or the run's own wait for a CPU per unit of
@@ -54,17 +59,6 @@ pub struct Run {
     /// would have used. Such a sample is kept only when it exceeds the key's current
     /// estimate, whatever the pressure.
     pub cpu_held: bool,
-}
-
-/// The hard memory limit (`memory.max`) of a lease that booked `booked` bytes: the
-/// booking plus half of it plus 512 MiB, as the container driver sets it. `None` when
-/// nothing was booked (no limit).
-pub fn memory_max(booked: u64) -> Option<u64> {
-    (booked > 0).then(|| {
-        booked
-            .saturating_add(booked / 2)
-            .saturating_add(512 * crate::MIB)
-    })
 }
 
 /// What the caller books by default and the bound it must stay under.

@@ -1,6 +1,7 @@
 # jobscheduler: design
 
-Status: design, with a first slice merged. Project: jobscheduler. First user: kbf. Second user: ucdk.
+Status: design, with a first slice merged. Project: jobscheduler. First user: kbf. (ucdk, once the second user, does not use
+jobscheduler: section 11.)
 Audience: kbf and ucdk engineers, and the project owner who decides the open items in section 15.
 
 This is the first document of the jobscheduler repository (komira-ai/jobscheduler). Paths such as `crates/...` and `docs/...` refer to the
@@ -64,8 +65,8 @@ The decisions, in one place:
    implementer. Golden trace hashes (step 0) and golden persisted and wire bytes (step 1) stay byte-identical.
 10. **The wire grows additively.** `kbf.worker.v1` is kept. A generic `jobscheduler.agent.v1` package is added, and is the only agent
     wire; it also carries registration. The daemon moves to it last, and only after the server advertises it (10.3).
-11. **ucdk Jobs may use jobscheduler as a second realization.** ucdk 1.0 launches directly against the cloud; jobscheduler is an
-    optional realization of Job, bound to one (app, environment) (11).
+11. **ucdk Jobs may use jobscheduler as a second realization.** *Superseded (2026-11-24): dropped, section 11.* ucdk 1.0 launches
+    directly against the cloud; jobscheduler is an optional realization of Job, bound to one (app, environment) (11).
 12. **Lease correctness is always on; quotas belong to the platform.** Every request passes the start-contract checks (a required wall
     time, a stated fence, reserved label keys). A held lease has no time to live and is never renewed, and the reaper frees a lease whose max wall time has
     passed and a machine nothing holds (12.1). jobscheduler has no tenant caps, budgets or spend limits: Kubernetes and cloud-provider
@@ -372,7 +373,8 @@ Semantics, each with a conformance case (13.2):
 | `observe` | `Present(state)`; `Absent`; `Unknown` | Absent of an instance that held a lease is host-lost (5.6). Unknown changes nothing. |
 | `list` | instances, or an error | An error is not an empty list: the reaper does nothing on an error. |
 
-**Kinds.** Three, fully in [design/providers.md](design/providers.md):
+**Kinds.** Three, as first designed. The kinds in code today (`static`, `lambdalabs`, `ec2`, `gce`) are in
+[design/providers.md](design/providers.md):
 
 | Kind | `acquire` | `release` | `list` / `observe` | Identity of an instance |
 |---|---|---|---|---|
@@ -635,8 +637,8 @@ leasing it is level 2 (9.1). In short:
 - **7.2 Sizing policy.** The constants scattered in kbf become one `SizingPolicy` value; `SizingPolicy::kbf()` returns today's values and a
   property test asserts every estimator output is unchanged (step 14). `Declared` mode (ucdk) makes the declared size the booking and
   the ceiling.
-- **7.3 One limit rule.** The scheduler computes the limit (today 1.5 x the booking + 512 MiB), sends it in `Start.limits`, and the
-  estimator's censoring decision uses the same function.
+- **7.3 One limit rule.** The only limit a host holds a job to is its booking (the docker and podman runtime's `--memory`; the crun
+  runtime writes no `memory.max`). The job service judges whether a run reached it and tells the estimator (`Run::limit_hits`).
 - **7.4 Ladder per class.** An unseen request climbs its class's ladder; an out-of-memory kill moves to the next rung above the killed
   run's booking and below `cap_of(request)`. `cap_of(request)` is the largest machine the consumer holds a lease on or can lease from a pool matching the request's class and
   selectors, not the size of one lease. When the next rung exceeds the leases held, the consumer requests a whole-node lease (queued as
@@ -734,9 +736,10 @@ drivers, iOS device vocabulary and Xcode properties, the macOS logic that decide
 ## 10. The kbf / jobscheduler split
 
 ### 10.1 Principles
-- Dependency runs one way: kbf depends on jobscheduler; jobscheduler never depends on kbf. ucdk depends on jobscheduler's public client
-  API; jobscheduler never depends on ucdk. A layering test enforces both edges: no jobscheduler crate names a `kbf-*` or `ucdk-*` crate,
-  in the style of `crates/kbf-integration-test/tests/layering.rs`. kbf's own layering test (pure set, forbidden list, clippy-deny check)
+- Dependency runs one way: kbf depends on jobscheduler; jobscheduler never depends on kbf. A layering test enforces that edge: no
+  jobscheduler crate names a `kbf-*` crate or anything from kbf's repository (`crates/xtask/src/layering.rs`). No jobscheduler crate
+  depends on ucdk either, and ucdk does not use jobscheduler (11); no test names ucdk, since an unlisted path or git dependency is
+  refused as any is. kbf's own layering test (pure set, forbidden list, clippy-deny check)
   is updated in the same PR that moves a pure crate, so the checks never go vacuous (step 16).
 - A new provider is a new crate behind the `CapacityProvider` trait; the core and the lease server name no provider kind. A layering test
   fails if any crate below the binary names `aws` or another kind, and the binary's registry is the only place that lists them (5.7).
@@ -756,6 +759,7 @@ drivers, iOS device vocabulary and Xcode properties, the macOS logic that decide
 | `js-lease-server` (merged) | new | the job service and the operator routes; lists the hosts of the hosts file beside the registered ones; the pool-scaler tick; is the service of 5.16 (readiness, boot grace and a state check at steps 48 to 50) |
 | `js-cli` (merged) | new | the level-1 client; gains pool selection |
 | `js-proto` (merged) | new | the job service as protobuf (package `jobscheduler.v1`: jobs, hosts, pools, providers, usage) with its generated messages and gRPC client and server traits (runtime layer); no server implements it yet |
+| `js-callback` | new | a job's completion callback as the server sends it (runtime layer, `docs/design/job-retry-and-completion-callback.md`): the form check of a callback URL, and the signing key and answer classes it re-exports from `js-types`; the signer, the address rule and the sender come later |
 | `js-coverage` (merged) | new | the coverage ratchet (R6) |
 | `js-config` | new | the configuration schema and loader of 5.7 |
 | `js-provider-aws` | new | the `aws` capacity provider over a cloud-client trait with a fake (5.5); disabled by default |
@@ -809,19 +813,11 @@ matrix gate every step from 3 on; a wire change is optional-field only; rollback
 
 ## 11. ucdk Jobs on top
 
-The full section is in [design/ucdk.md](design/ucdk.md), sections 11.1 to 11.3. What the rest of this document relies on:
-
-- **11.1 Placement.** One jobscheduler instance is bound to one (app, environment). Its configuration declares that environment's
-  providers and pools (5.7), and a Job runs as a container on a `js-agent` host of one of them. The scheduler holds standing cloud access,
-  the role its aws provider assumes to launch and terminate instances; this replaces the earlier rule that it holds no standing
-  credential. A caller's launch still acts with the caller's identity. Scheduled triggers, pool scaling, the reaper and the leftover sweep
-  run with no caller present and use a delegated identity fixed when the definition or environment is created (K7). ucdk 1.0 keeps its
-  direct launcher; jobscheduler is an optional second realization, supported only after a conformance kit passes on a real cloud. The
-  launcher (`launch`, `status`, `logs`, `cancel`; UL1 to UL4) and the infrastructure provider live in ucdk and call the public client API.
-- **11.2 Mapping.** A Job's image and arguments are the payload; its size is rounded up to a pool shape; `max_retries` is one budget over
-  every failed attempt (8.1); the timeout is per attempt, enforced by the agent; a schedule trigger has one owner per realization.
-- **11.3 Gaps.** The class declares the fence default (D6); the scheduler owns run history (8.3); a declared size is the booking and a hard
-  ceiling (D7); the tenant is the (app, environment) pair from the authenticated caller (K7).
+**Superseded (2026-11-24).** This section planned jobscheduler as an optional second realization of ucdk Jobs, with ucdk's launcher
+and an infrastructure provider in ucdk calling the public client API. ucdk removed its deployment side in komira-ai/ucdk#28 (the `Job`
+resource, the `Provider` trait and its kit, the plan), so the plan was dropped and nothing of it was built here. What is true today is in
+[design/ucdk.md](design/ucdk.md): the two repositories do not use each other, and a caller of jobscheduler submits jobs through the job
+service of `js-proto`. Mentions of ucdk Jobs, ucdk classes or a run service for ucdk elsewhere in this document belong to that plan.
 
 ## 12. Lease limits, usage and labels
 
@@ -861,8 +857,7 @@ job (also one that reports no taint), each post-job check that taints finding so
 VM runtime (in memory, scripted: clone failure, a boot that never says ready, hostile guest frames, an unannounced exit, a failed destroy,
 a leaked clone, a changed image) and the fake agent's whole-node sequence are described in
 [design/vm-backend.md](design/vm-backend.md). Starting points:
-`kbf_daemon::Runtime`'s fake in `crates/kbf-daemon/src/runtime.rs` and `crates/kbf-sim-cell`. The fakes are the executable spec, as in
-ucdk (`ucdk/crates/ucdk-provider-fake`).
+`kbf_daemon::Runtime`'s fake in `crates/kbf-daemon/src/runtime.rs` and `crates/kbf-sim-cell`. The fakes are the executable spec.
 
 ### 13.2 Conformance suites
 `js-conformance` keeps its machinery (`Subject`, `Check::ALL`, `Verdict::NotApplicable`, which lists a check a subject cannot take part

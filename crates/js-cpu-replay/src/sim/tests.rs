@@ -45,6 +45,7 @@ fn run(booking: u64, var: u64, phases: Vec<Phase>, start: u64) -> Running {
             milli: booking,
             bytes: 0,
         },
+        curve: None,
         var,
         left: phases[0].ms as f64,
         phases,
@@ -304,7 +305,11 @@ fn an_idle_farm_skips_to_the_next_arrival_and_a_faster_trace_arrives_sooner() {
     );
     assert_eq!(twice.waits, vec![0]);
     assert_eq!(twice.last_end_ms, 1_801_000);
-    assert_eq!(replay(&[], BOOKED, flat(one(4000))), Outcome::default());
+    let nothing = Outcome {
+        placed: vec![0],
+        ..Outcome::default()
+    };
+    assert_eq!(replay(&[], BOOKED, flat(one(4000))), nothing);
 }
 
 #[test]

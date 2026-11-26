@@ -696,11 +696,13 @@ fn booked_in(
 
 /// Proves a job's booking and where it came from reach the journal at its start and at its
 /// result, with its usage and throttle counts at the result: a start that says its sizing
-/// is logged with it (its class and both sources), one whose class is outside the grammar
-/// of an id is logged without the class and with its sources, and one that says none is
-/// logged with its booking alone. Catches a sizing lost between the start and the job, a
-/// class that would break the line kept, the sizing of one job on another's line, and a
-/// result line without the usage the runtime read.
+/// is logged with it (its class and both sources), one whose class is a build target's full
+/// path and action kind (spaces, slashes and a colon) is logged with that class whole, one
+/// whose class is no history key (a line break) is logged without the class and with its
+/// sources, and one that says none is logged with its booking alone. Catches a sizing lost
+/// between the start and the job, a full history key dropped or cut, a class that would break
+/// the line kept, the sizing of one job on another's line, and a result line without the
+/// usage the runtime read.
 #[test]
 fn a_jobs_sizing_and_its_throttle_counts_reach_its_start_and_result_lines() {
     use js_agent::lifecycle::{Event, JobBooking};
@@ -716,8 +718,9 @@ fn a_jobs_sizing_and_its_throttle_counts_reach_its_start_and_result_lines() {
     let mut h = Harness::new("job-sizing-lines");
     let events = h.apply(vec![
         job_start(sized("j1", "root.crates.js-sched.js-sched")),
-        job_start(sized("j2", "two words")),
+        job_start(sized("j2", "komira//src/json:json mojo_compile")),
         job_start(start("j3")),
+        job_start(sized("j4", "two\nlines")),
     ]);
     let booking = |class: Option<&str>, sized: bool| JobBooking {
         cpu_millis: 1000,
@@ -733,8 +736,12 @@ fn a_jobs_sizing_and_its_throttle_counts_reach_its_start_and_result_lines() {
             "j1".to_owned(),
             booking(Some("root.crates.js-sched.js-sched"), true),
         ),
-        ("j2".to_owned(), booking(None, true)),
+        (
+            "j2".to_owned(),
+            booking(Some("komira//src/json:json mojo_compile"), true),
+        ),
         ("j3".to_owned(), booking(None, false)),
+        ("j4".to_owned(), booking(None, true)),
     ];
     assert_eq!(booked_in(&events), lines);
     let counted = JobUsage {
@@ -749,7 +756,7 @@ fn a_jobs_sizing_and_its_throttle_counts_reach_its_start_and_result_lines() {
         peak_swap_bytes: None,
     };
     h.fake.report_usage("j1", counted);
-    for job in ["j1", "j2", "j3"] {
+    for job in ["j1", "j2", "j3", "j4"] {
         h.fake.exit(job, 0);
     }
     let ended = h.life.step();
@@ -767,6 +774,7 @@ fn a_jobs_sizing_and_its_throttle_counts_reach_its_start_and_result_lines() {
             ("j1".to_owned(), Some(counted)),
             ("j2".to_owned(), None),
             ("j3".to_owned(), None),
+            ("j4".to_owned(), None),
         ]
     );
 }

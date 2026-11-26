@@ -11,6 +11,7 @@ use axum::http::header::CONTENT_TYPE;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use js_jobs::{AllocationRecord, Booked, JobStoreError, MAX_PAGE};
+use js_sched_placer::curves::CurveView;
 use tracing::warn;
 
 use super::Recorder;
@@ -71,7 +72,11 @@ pub(crate) async fn snapshot(
         Some(jobs) => Some(blocking(move || read_jobs(&jobs, page)).await?),
         None => None,
     };
-    Ok(combine(list, jobs))
+    let curves = match agents.placer.clone() {
+        Some(placer) => blocking(move || placer.curve_view()).await,
+        None => None,
+    };
+    Ok(combine(list, jobs, curves))
 }
 
 /// Every job of `jobs` counted by state at the store's clock now (by which each job's submit
@@ -96,13 +101,21 @@ fn read_jobs(
     Ok((seen, jobs.live_allocations()?))
 }
 
-/// The snapshot of the hosts of `list`, each booked with the live allocations of `jobs`, and of
-/// the jobs.
-fn combine(list: HostList, jobs: Option<(JobsSeen, Vec<AllocationRecord>)>) -> Snapshot {
+/// The snapshot of the hosts of `list`, each booked with the live allocations of `jobs`, of
+/// the jobs, and of the placer's curve view `curves`.
+fn combine(
+    list: HostList,
+    jobs: Option<(JobsSeen, Vec<AllocationRecord>)>,
+    curves: Option<CurveView>,
+) -> Snapshot {
     let (jobs, live) = jobs.map_or((None, Vec::new()), |(seen, live)| (Some(seen), live));
     let hosts = list.hosts.into_iter();
     let hosts = hosts.map(|entry| host_seen(entry, &live)).collect();
-    Snapshot { jobs, hosts }
+    Snapshot {
+        jobs,
+        hosts,
+        curves,
+    }
 }
 
 /// What `entry` has booked, of CPU and memory: its jobs' allocations, one that books the

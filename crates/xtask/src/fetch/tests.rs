@@ -4,10 +4,10 @@ use std::path::{Path, PathBuf};
 
 use super::*;
 
-const TOOL: &[u8] = b"\x7fELF a pinned tool's bytes";
+pub(super) const TOOL: &[u8] = b"\x7fELF a pinned tool's bytes";
 
 /// An empty directory of its own for one test.
-fn scratch(name: &str) -> PathBuf {
+pub(super) fn scratch(name: &str) -> PathBuf {
     let dir = std::env::current_exe()
         .expect("test binary")
         .parent()
@@ -22,7 +22,7 @@ fn scratch(name: &str) -> PathBuf {
 
 /// A tar of a directory `tool-1.0`, a decoy file, `tool-1.0/tool` holding `TOOL` and a
 /// symlink `tool-1.0/link`.
-fn tar() -> Vec<u8> {
+pub(super) fn tar() -> Vec<u8> {
     let mut b = tar::Builder::new(Vec::new());
     let mut dir = tar::Header::new_gnu();
     dir.set_entry_type(tar::EntryType::Directory);
@@ -324,19 +324,19 @@ fn extract_member_and_tree_must_agree() {
     }
 }
 
-fn xz(bytes: &[u8]) -> Vec<u8> {
+pub(super) fn xz(bytes: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     lzma_rs::xz_compress(&mut &bytes[..], &mut out).expect("xz");
     out
 }
 
-fn tar_xz(path: &str) -> Unpack {
+pub(super) fn tar_xz(path: &str) -> Unpack {
     Unpack::TarXz {
         member: member(path),
     }
 }
 
-fn tree(format: Format, top: &str) -> Unpack {
+pub(super) fn tree(format: Format, top: &str) -> Unpack {
     Unpack::Tree {
         format,
         top: member(top),
@@ -365,7 +365,7 @@ fn dir(b: &mut tar::Builder<Vec<u8>>, path: &str) {
 /// directory is not listed, and an empty listed directory `cc-1/empty/`; around them the
 /// decoys `cc-1.txt`, `other/cc` and `cc-1-extra/cc` (the last shares `cc-1` as a text
 /// prefix, not as a directory).
-fn toolchain() -> Vec<u8> {
+pub(super) fn toolchain() -> Vec<u8> {
     let mut b = tar::Builder::new(Vec::new());
     file(&mut b, "cc-1.txt", 0o644, b"decoy");
     dir(&mut b, "cc-1/");
@@ -381,7 +381,7 @@ fn toolchain() -> Vec<u8> {
 
 /// Every path under `root`, sorted, with `/` after a directory, and each file's mode and
 /// contents.
-fn listing(root: &Path) -> Vec<(String, u32, Vec<u8>)> {
+pub(super) fn listing(root: &Path) -> Vec<(String, u32, Vec<u8>)> {
     let mut found = Vec::new();
     let mut todo = vec![root.to_owned()];
     while let Some(at) = todo.pop() {

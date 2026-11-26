@@ -269,9 +269,9 @@ fn placed_in(
         mint_provider,
         hello_limit,
         require_host_credential,
-        cpu_slack,
+        load,
         cold,
-        cold_memory_on,
+        cold_on,
         curves,
         max_lease_wall,
         job_limits,
@@ -294,13 +294,7 @@ fn placed_in(
     // memory the pool's percent says (every pool's is the first's: `check_more`); the
     // registry books the whole shape.
     let (pool, memory) = split(pool);
-    let placer = placer(
-        max_lease_wall,
-        cpu_slack,
-        (memory, cold, curves),
-        cold_memory_on,
-        clock,
-    );
+    let placer = placer(max_lease_wall, load, (memory, cold, curves), cold_on, clock);
     let (later, more_tokens): (Vec<_>, Vec<_>) = more
         .into_iter()
         .map(|more| (split(more.pool).0, more.tokens))
@@ -362,7 +356,7 @@ fn placed_in(
         rows_read: Mutex::default(),
         logs,
         job_limits,
-        cpu_slack,
+        cpu_slack: load.cpu_slack,
         duty_period_ms: AtomicU64::new(0),
         meter: OnceLock::new(),
         placing: Mutex::default(),

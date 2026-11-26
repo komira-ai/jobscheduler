@@ -22,9 +22,13 @@ use crate::sizes::{JobSizes, SizedFrom, bounds_of};
 /// The start of every line a checked run logs.
 const PREFIX: &str = " INFO a run was checked against its class's profile";
 
+/// The message of the line that says the shadow checks start.
+const START: &str =
+    " INFO placement curves: the shadow checks start, the profiles learned from the ended jobs";
+
 /// What a test's own subscriber writes: every line, kept for [`Lines::take`].
 #[derive(Clone, Default)]
-struct Lines(Arc<Mutex<Vec<u8>>>);
+pub(crate) struct Lines(Arc<Mutex<Vec<u8>>>);
 
 impl io::Write for Lines {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
@@ -47,12 +51,30 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Lines {
 }
 
 impl Lines {
+    /// Every line written so far, emptied.
+    pub(crate) fn taken(&self) -> Vec<String> {
+        let mut held = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let text = String::from_utf8(std::mem::take(&mut *held)).unwrap();
+        text.lines().map(str::to_owned).collect()
+    }
+
     /// The lines of a checked run written so far, emptied.
     fn checked(&self) -> Vec<String> {
         let mut held = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         let text = String::from_utf8(std::mem::take(&mut *held)).unwrap();
         text.lines()
             .filter(|line| line.contains("a run was checked against its class's profile"))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The check lines and the lines saying the checks start, written so far, in order,
+    /// emptied.
+    fn profile_lines(&self) -> Vec<String> {
+        let mut held = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let text = String::from_utf8(std::mem::take(&mut *held)).unwrap();
+        text.lines()
+            .filter(|line| line.starts_with(PREFIX) | line.starts_with(START))
             .map(str::to_owned)
             .collect()
     }
@@ -73,14 +95,25 @@ fn process_sink() {
 }
 
 /// A subscriber that keeps every line this test's thread logs, until the guard drops.
-fn capture() -> (Lines, tracing::subscriber::DefaultGuard) {
+pub(crate) fn capture() -> (Lines, tracing::subscriber::DefaultGuard) {
+    subscribed(false)
+}
+
+/// [`capture`], each line written with its target.
+pub(crate) fn capture_targets() -> (Lines, tracing::subscriber::DefaultGuard) {
+    subscribed(true)
+}
+
+/// A subscriber that keeps every line this test's thread logs, with its target when `target`
+/// says so.
+fn subscribed(target: bool) -> (Lines, tracing::subscriber::DefaultGuard) {
     process_sink();
     let lines = Lines::default();
     let subscriber = tracing_subscriber::fmt()
         .with_writer(lines.clone())
         .with_ansi(false)
         .without_time()
-        .with_target(false)
+        .with_target(target)
         .finish();
     (lines, tracing::subscriber::set_default(subscriber))
 }
@@ -158,8 +191,9 @@ fn class<'a>(sizes: &'a JobSizes, job: &JobRecord) -> &'a ClassProfile {
     &sizes.profiles.as_ref().unwrap().classes[&JobSizes::key_of(job)]
 }
 
-/// Asserts that the server's two words name the two modes, that anything else names none, and
-/// that the mode is off by default. Catches a flag that takes `on` or another spelling.
+/// Asserts that the server's three words name the three modes, that anything else names none,
+/// and that the mode is off by default. Catches a flag that takes another spelling, and a mode
+/// that does not round-trip through its word.
 #[test]
 fn the_modes_are_named_off_and_shadow_and_off_is_the_default() {
     assert_eq!(Curves::default(), Curves::Off);
@@ -169,15 +203,15 @@ fn the_modes_are_named_off_and_shadow_and_off_is_the_default() {
         [
             Some(Curves::Off),
             Some(Curves::Shadow),
-            None,
+            Some(Curves::On),
             None,
             None,
             None
         ]
     );
     assert_eq!(
-        [Curves::Off, Curves::Shadow].map(Curves::as_str),
-        ["off", "shadow"]
+        [Curves::Off, Curves::Shadow, Curves::On].map(Curves::as_str),
+        ["off", "shadow", "on"]
     );
 }
 
@@ -289,6 +323,93 @@ fn a_teaching_logs_the_runs_it_held_and_not_the_ended_jobs_it_read() {
     assert!(logged[0].contains("cpu_runs=3 "), "{logged:?}");
     let mut engine = placer.engine();
     assert_eq!(class(engine.sizes(), &first).cpu.runs(), 3);
+}
+
+/// A placer whose engine profiles by `curves`, on `clock`.
+fn placer_with(curves: Curves, clock: &ManualClock) -> SchedPlacer {
+    let settings = Settings {
+        curves,
+        ..Settings::default()
+    };
+    SchedPlacer::new(settings, clock.clone())
+}
+
+/// Asserts the line a start's teaching logs in shadow: nothing while the ended jobs are read and
+/// a run the passes free is held; at the teaching, one line naming the two classes the three
+/// ended jobs made, the three jobs and the 300 whole seconds the placer's clock moved since the
+/// teaching began (300.9 s), then the held run's check; and a run a pass frees after it logs its
+/// check alone. Catches a start whose checks begin with no line, a line logged before the ended
+/// jobs are taught or after the held runs, and a line logged again by a later pass.
+#[test]
+fn a_teaching_in_shadow_logs_once_that_the_checks_start_before_the_held_runs() {
+    let (lines, _guard) = capture();
+    let tables = Tables::new();
+    good(&tables, "h0", "h", &[16; 10]);
+    good(&tables, "h1", "h", &[16; 10]);
+    good(&tables, "g0", "g", &[16; 10]);
+    let clock = ManualClock::new(Timestamp::from_millis(1_000));
+    let placer = placer_with(Curves::Shadow, &clock);
+    let mut teaching = placer.begin_teaching(&tables.jobs).unwrap();
+    assert!(!teaching.read_page(&tables.jobs).unwrap());
+    let held = good(&tables, "h2", "h", &[16; 10]);
+    placer.engine().sizes().freed_run(held, bk());
+    assert_eq!(lines.profile_lines(), Vec::<String>::new());
+    clock.advance(Duration::from_millis(300_900));
+    placer.teach(teaching);
+    let logged = lines.profile_lines();
+    assert_eq!(logged.len(), 2, "{logged:?}");
+    assert_eq!(
+        logged[0],
+        format!("{START} classes=2 ended_jobs=3 took_secs=300")
+    );
+    assert!(
+        logged[1].starts_with(&format!("{PREFIX} job=h2 class=h ")),
+        "{logged:?}"
+    );
+    let after = good(&tables, "h3", "h", &[16; 10]);
+    placer.engine().sizes().freed_run(after, bk());
+    let logged = lines.profile_lines();
+    assert_eq!(logged.len(), 1, "{logged:?}");
+    assert!(
+        logged[0].starts_with(&format!("{PREFIX} job=h3 class=h ")),
+        "{logged:?}"
+    );
+}
+
+/// Asserts the line of a teaching taught before its read finished (a stop or a failed read):
+/// it names no class, no ended job and no time, since the clock did not move, and the checks
+/// start all the same. Catches a line left out when nothing was read, and ended jobs counted
+/// that were not taught.
+#[test]
+fn a_teaching_not_read_through_logs_that_the_checks_start_from_nothing() {
+    let (lines, _guard) = capture();
+    let tables = Tables::new();
+    good(&tables, "h0", "h", &[16; 10]);
+    let clock = ManualClock::new(Timestamp::from_millis(0));
+    let placer = placer_with(Curves::Shadow, &clock);
+    let teaching = placer.begin_teaching(&tables.jobs).unwrap();
+    placer.teach(teaching);
+    let expected = vec![format!("{START} classes=0 ended_jobs=0 took_secs=0")];
+    assert_eq!(lines.profile_lines(), expected);
+}
+
+/// Asserts that with the profiles off a teaching logs neither that the checks start nor any
+/// check, read through or not. Catches the line logged where no check follows it.
+#[test]
+fn a_teaching_with_the_profiles_off_logs_no_start() {
+    let (lines, _guard) = capture();
+    let tables = Tables::new();
+    good(&tables, "h0", "h", &[16; 10]);
+    let clock = ManualClock::new(Timestamp::from_millis(0));
+    let placer = placer_with(Curves::Off, &clock);
+    let mut teaching = placer.begin_teaching(&tables.jobs).unwrap();
+    assert!(!teaching.read_page(&tables.jobs).unwrap());
+    let held = good(&tables, "h1", "h", &[16; 10]);
+    placer.engine().sizes().freed_run(held, bk());
+    clock.advance(Duration::from_secs(60));
+    placer.teach(teaching);
+    placer.teach(placer.begin_teaching(&tables.jobs).unwrap());
+    assert_eq!(lines.profile_lines(), Vec::<String>::new());
 }
 
 /// Asserts that a run that did not succeed teaches no profile and logs `not-a-success` for both
@@ -554,9 +675,10 @@ fn a_new_class_at_the_cap_evicts_the_class_whose_last_run_ended_earliest() {
     assert!(none.is_empty());
 }
 
-/// Asserts that placement is the same with the profiles off and in shadow: after the same five
-/// runs (each with its series) the next job of the class is booked the same, from the same
-/// history, and each run teaches the same. Catches a profile that changes what a class books.
+/// Asserts that the sizes booked are the same with the profiles off, in shadow and on: after the
+/// same five runs (each with its series) the next job of the class is booked the same, from the
+/// same history, and each run teaches the same. Catches a profile that changes what a class
+/// books.
 #[test]
 fn the_sizes_booked_are_the_same_with_the_profiles_off_and_in_shadow() {
     let tables = Tables::new();
@@ -579,7 +701,7 @@ fn the_sizes_booked_are_the_same_with_the_profiles_off_and_in_shadow() {
     let next = queued.jobs.insert_queued(new).unwrap().record;
     let bounds = bounds_of([Capacity::new(32_000, 16 * GIB)]);
     let mut books = Vec::new();
-    for curves in [Curves::Off, Curves::Shadow] {
+    for curves in [Curves::Off, Curves::Shadow, Curves::On] {
         let mut sizes = sizes_with(curves);
         sizes.set_bounds(bounds);
         for job in &jobs {
@@ -588,15 +710,20 @@ fn the_sizes_booked_are_the_same_with_the_profiles_off_and_in_shadow() {
         books.push((sizes.sized(&next, Day(0)), sizes.sized_from(&next, Day(0))));
     }
     assert_eq!(books[0], books[1]);
+    assert_eq!(books[0], books[2]);
     assert_ne!(books[0].0, next, "the class's runs size it");
     assert_eq!(books[0].1, Some(SizedFrom::Class));
 }
 
-/// Asserts that the engine keeps profiles only for the setting that asks for them. Catches a
-/// setting that never reaches the history.
+/// Asserts that the engine keeps profiles only for the setting that asks for them (shadow and
+/// on). Catches a setting that never reaches the history.
 #[test]
 fn the_engine_builds_its_history_with_the_curves_setting() {
-    for (curves, kept) in [(Curves::Off, false), (Curves::Shadow, true)] {
+    for (curves, kept) in [
+        (Curves::Off, false),
+        (Curves::Shadow, true),
+        (Curves::On, true),
+    ] {
         let settings = Settings {
             curves,
             ..Settings::default()

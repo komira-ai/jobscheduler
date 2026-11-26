@@ -270,6 +270,12 @@ fn each_kind_has_its_name() {
     let names: Vec<&str> = RefusalKind::ALL.iter().map(|kind| kind.as_str()).collect();
     assert_eq!(
         names,
-        ["cpu", "predicted-memory", "booked-memory", "cold-cap"]
+        [
+            "cpu",
+            "predicted-memory",
+            "booked-memory",
+            "cold-cap",
+            "cpu-curve"
+        ]
     );
 }

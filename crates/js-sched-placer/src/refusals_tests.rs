@@ -189,6 +189,7 @@ fn a_pass_logs_one_line_per_host_and_counts_each_refusal() {
     let on = JobHosts {
         open: &open,
         hello: &hello,
+        tainted: &std::collections::BTreeSet::new(),
         whole: None,
     };
     let told = Told::default();
@@ -279,6 +280,7 @@ fn a_host_full_by_memory_bookings_is_refused_for_memory_and_says_so() {
     let on = JobHosts {
         open: &open,
         hello: &hello,
+        tainted: &std::collections::BTreeSet::new(),
         whole: None,
     };
     let told = Told::default();
@@ -434,5 +436,23 @@ fn a_measured_hosts_refusal_line_carries_the_measurement_it_used() {
              (measured 9000m))"
         ),
         "{logged}"
+    );
+}
+
+/// Behaviour: a refusal of the kind a caller reports for a worker whose CPU it judges
+/// (`cpu-curve`) is spelled in millicores as a CPU refusal is, with no reading note: the
+/// figures read `counted 9000m + new 2000m > limit 10000m` and nothing else.
+#[test]
+fn a_cpu_curve_refusal_is_spelled_in_millicores() {
+    let refusal = Refusal {
+        kind: RefusalKind::CpuCurve,
+        counted: 9_000,
+        new: 2_000,
+        limit: 10_000,
+        measured_cpu_millis: None,
+    };
+    assert_eq!(
+        super::figures(&refusal),
+        "counted 9000m + new 2000m > limit 10000m"
     );
 }

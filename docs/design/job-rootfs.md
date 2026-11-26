@@ -778,7 +778,7 @@ three things, each on a thread pool that is not the lifecycle worker:
 
 - **its images**, the image and every image layer, each through the prefetcher (single flight per image; `prepare`
   takes the set and answers `Ready` when all are);
-- **its host paths**, each resolved (4.2, steps 1 and 2) on a pool of four threads of their own (`js-lookups`) with a bound of 60 s
+- **its host paths**, each resolved (4.2, steps 1 and 2) on a pool of 80 threads of their own (`js-lookups`, one for each host path a start may name) with a bound of 60 s
   each; a path that is missing or unreadable is `input-unavailable` at once, and one that has not answered by the bound
   is `input-unavailable` then;
 - **the assembly**, once both are ready: the lease directory, its quota, the clones (4.2, step 3), the targets, the
@@ -1035,8 +1035,9 @@ which includes the heartbeat that carried the start. Nothing new is reported.
 
 Why the lookups and mounts stay off the lifecycle worker: a lookup on a FUSE file system blocks in the kernel until
 the file system answers, and one that has hung never returns; the worker serves every other job. The `js-lookups` pool
-has four threads and makes none on demand, so a hung provider holds at most four of them, and further lookups wait their
-60 s and fail `input-unavailable`. The assemblies and the after-exit checks run on a second pool of four (`js-paths`), so
+has 80 threads (as many as the host paths one start may name: 16 layers and 64 mounts) and makes none on demand, so a
+hung provider holds at most 80 of them and no thread of another pool, and further lookups wait their 60 s and fail
+`input-unavailable`. The assemblies and the after-exit checks run on a second pool of four (`js-paths`), so
 an assembly held by a hung file system never delays another start's lookups. A thread stuck in the kernel stays stuck until the file system answers or is
 unmounted; that is the provider's to fix, and the host reports it only through failed starts.
 
@@ -1175,8 +1176,10 @@ port 0.
   it (`input-not-allowed`); a missing path, a file instead of a directory, an unreadable directory
   (`input-unavailable`); a path swapped for a link after resolution leaves the clone where it was;
 - the preparing stage: the job stays `starting` while the fake opener holds a lookup and starts when it is released;
-  another job is admitted, started and ended meanwhile; a lookup held past 60 s fails `input-unavailable`; four held
-  lookups and a fifth that waits its bound; an image layer pending and a host path ready, and the reverse; a stop, a
+  another job is admitted, started and ended meanwhile; a lookup held past 60 s fails `input-unavailable`; a start
+  naming the most host paths (16 layers, 64 mounts) has every lookup running at once; with the pool's 80 threads held,
+  one more lookup waits for one to end and is refused at its bound though no thread took it; hung lookups hold no
+  thread of the assemblies and checks; an image layer pending and a host path ready, and the reverse; a stop, a
   cancel and a lease end while preparing, each after the assembly began, unmount what was mounted;
 - admission: an image layer outside `--image-allow` refused `image-not-allowed`; an image layer from a registry on
   `127.0.0.1` with a port, given by `--image-allow-loopback`, pulled over plain HTTP from an in-process registry on

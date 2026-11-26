@@ -8,8 +8,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use js_agent::lifecycle::{
-    Exit, Found, FsPrepared, JobFs, NativeRefusal, OutputsReport, Prepared, RunHandle, RunSpec,
-    Runtime, RuntimeError, Status, Ticket, Wake, Whereabouts, label,
+    Exit, Found, FsPrepared, JobFs, LookupStamps, NativeRefusal, OutputsReport, Prepared,
+    RunHandle, RunSpec, Runtime, RuntimeError, Status, Ticket, Wake, Whereabouts, label,
 };
 use js_agent_wire::{
     CpuSeries, HostPort, JobUsage, LogReport, LogTail, MemorySeries, NativeSpec, NetworkCeiling,
@@ -24,6 +24,8 @@ mod clock;
 mod fs;
 #[path = "fake_outputs.rs"]
 mod outputs;
+#[path = "fake_timeline.rs"]
+mod timeline;
 pub use checks::ScriptedChecks;
 pub use clock::{ManualClock, NoUnixClock, UNIX_ORIGIN_MS};
 
@@ -121,6 +123,8 @@ struct State {
     egress_asks: u32,
     /// What `start_steps` answers, once, by run id.
     steps: BTreeMap<String, Vec<(&'static str, u64)>>,
+    /// What `lookup_stamps` answers, once, by run id.
+    lookups: BTreeMap<String, LookupStamps>,
     /// What the runtime was given to ring (`set_wake`).
     wake: Wake,
     /// What `host_ports` answers; none by default, as the trait's default.
@@ -362,12 +366,6 @@ impl FakeRuntime {
     pub fn ring_wake(&self) {
         let wake = self.state.borrow().wake.clone();
         wake.wake();
-    }
-
-    /// `start_steps` answers `steps` for `run_id`, once.
-    pub fn steps_of(&self, run_id: &str, steps: &[(&'static str, u64)]) {
-        let mut state = self.state.borrow_mut();
-        state.steps.insert(run_id.to_owned(), steps.to_vec());
     }
 
     /// How many times the egress check was asked for.
@@ -756,10 +754,11 @@ impl Runtime for FakeRuntime {
     }
 
     fn start_steps(&mut self, id: &RunHandle) -> Vec<(&'static str, u64)> {
-        let mut state = self.state.borrow_mut();
-        let run_id = state.containers.get(&id.0).map(|c| c.run_id.clone());
-        let steps = run_id.and_then(|run_id| state.steps.remove(&run_id));
-        steps.unwrap_or_default()
+        self.take_steps(id)
+    }
+
+    fn lookup_stamps(&mut self, id: &RunHandle) -> Option<LookupStamps> {
+        self.take_lookup(id)
     }
 
     fn create_and_start(&mut self, spec: &RunSpec) -> Result<RunHandle, RuntimeError> {

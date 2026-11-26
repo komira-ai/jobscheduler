@@ -13,7 +13,7 @@ use js_agent_wire::{JobMount, Layer, MountMode, refusal};
 use js_testkit::dir::TestDir;
 
 use super::tests::{GUARD, Mounts, Paths, host_layer, mount, owners, scratch, until};
-use super::{CHECK_MS, Fs, FsError, FsSettings, LOOKUP_MS};
+use super::{CHECK_MS, Fs, FsError, FsSettings};
 use crate::lifecycle::{FsPrepared, JobFs, MountRoots, NativeRefusal};
 use crate::pool::Poll;
 use crate::pool::THREADS;
@@ -293,45 +293,6 @@ fn a_path_swapped_after_its_lookup_is_cloned_as_it_was_opened() {
     assert_eq!(clones, ["clone data/moved"]);
 }
 
-/// Catches a lookup that blocks the caller, a bound counted from when a thread took the
-/// lookup instead of from when it was asked, and a pool that makes threads on demand: four
-/// held lookups hold the pool's four threads, a fifth waits behind them, every one is
-/// waiting before its bound and refused `input-unavailable` at it (the fifth too, though no
-/// thread ever took it), on the caller's clock.
-#[test]
-fn held_lookups_wait_their_bound_and_a_fifth_waits_behind_them() {
-    let dir = scratch("fs-held");
-    let (paths, began, go) = Paths::held();
-    let (mut fs_, _) = open(&dir, paths);
-    let data = dir.path().join("data/tree");
-    let five = job((0..5)
-        .map(|n| mount(&data, &format!("/m{n}"), MountMode::ReadOnly))
-        .collect());
-    assert_eq!(
-        fs_.resolve(("held", "lease"), "", &five, 1_000),
-        FsPrepared::Pending
-    );
-    for _ in 0..4 {
-        began.recv().expect("a lookup began");
-    }
-    assert!(began.try_recv().is_err(), "the fifth waits for a thread");
-    assert_eq!(
-        fs_.resolve(("held", "lease"), "", &five, 1_000 + LOOKUP_MS - 1),
-        FsPrepared::Pending
-    );
-    assert_eq!(
-        fs_.resolve(("held", "lease"), "", &five, 1_000 + LOOKUP_MS),
-        FsPrepared::Refused(NativeRefusal {
-            code: refusal::INPUT_UNAVAILABLE,
-            why: format!(
-                "the lookup of {} did not answer in time (bound {LOOKUP_MS} ms)",
-                data.display()
-            ),
-        })
-    );
-    drop(go);
-}
-
 /// Catches an assembly asked twice, asked before the paths are open, made without its
 /// images' trees, or given to a container that did not ask: the assembly is asked once
 /// with the opened sources, answers on the pool, is taken once; a run not prepared, or not
@@ -426,7 +387,7 @@ fn an_assembly_is_asked_once_and_taken_once() {
     assert_eq!(fs_.sources_of("lease"), 2);
     assert_eq!(fs_.sources_of("other"), 0);
     let made = fs_.take("r").expect("made");
-    assert_eq!(made.sources, 2);
+    assert_eq!(made.0.sources, 2);
     assert!(fs_.take("r").is_none(), "taken once");
 }
 

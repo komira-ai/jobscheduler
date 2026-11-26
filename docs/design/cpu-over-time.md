@@ -1,6 +1,6 @@
 # Scheduling on CPU use over time
 
-Status: design for review. Built so far: the replay (`crates/js-cpu-replay`), step 1 (record) and step 2 (learn in shadow, `--placement-curves shadow`). Nothing else here is built. Companion to
+Status: design for review. Built so far: the replay (`crates/js-cpu-replay`), step 1 (record) and step 2 (learn in shadow, `--placement-curves shadow`); steps 3 and 4 are built as [placement-profiles-live.md](placement-profiles-live.md) revised them, behind `--placement-curves on`. Companion to
 [sizing.md](sizing.md) (how a class's CPU is booked) and [placement-by-load.md](placement-by-load.md) (the
 load rule and the time profiles designed for leases, never wired to jobs).
 
@@ -13,7 +13,8 @@ with no CPU limit). **MEASURED**, counted from the export or the farm's metrics,
 
 ### The problem, in five lines
 1. A job's CPU booking is the median of its class's last 32 runs' mean CPU (CPU time over wall time,
-   komira-ai/jobscheduler#1026). A class is a job type, for example the compile of one target. MEASURED in the first
+   komira-ai/jobscheduler#1026), whatever its runs' five-second peaks (`sizing.md`, 7.11; the heavy-tail booking of 7.10
+   books no job of the placer). A class is a job type, for example the compile of one target. MEASURED in the first
    8 minutes after the change, against the hour before: jobs per host 3 to 4 became 30 to 36; hosts about 20% busy
    became about 99%; jobs finished per minute 58 became 128; median queue wait 15 min became 4 min; median run time
    32 s became 65 s; load average on an 88-thread host 13 to 26 became 250 to 330.
@@ -28,7 +29,9 @@ with no CPU limit). **MEASURED**, counted from the export or the farm's metrics,
 2. A booking is one number. A class can average a few cores and burst to 20 for a few seconds. The sum of bookings
    can then sit at 1.1x of a host's cores while the real demand in some seconds is several times that.
 3. Even read, a host cannot measure above its cores (READ: `NodeLoad::busy_millicores_since`, `WorkerLoad::left`):
-   it reads 88 and admits until bookings reach 96.8. Only pressure shows overload, and no agent sends it.
+   it reads 88 and admits until bookings reach 96.8. Only pressure shows overload, and no agent sent it. (Since
+   then the agent sends the host's `/proc/pressure/cpu` `some` total and the measured term is the cores demanded,
+   busy plus waiting: `NodeLoad::demand_millicores_since`, `docs/design/placement-by-load.md`, Signals.)
 4. The agent reads every job's CPU counter once a second, keeps the highest five-second rate, and throws the rest
    away (READ: `crates/js-agent/src/crun/peak.rs`, `PeakWindow`). The server therefore cannot tell a steady 2 cores
    from 1 core for 60 s followed by 20 cores for 3 s.
@@ -47,12 +50,12 @@ with no CPU limit). **MEASURED**, counted from the export or the farm's metrics,
     today's overload; the shape is the second question.
 - **Size of the prize, against the owner's 20%.** At steady load, jobs waited for a CPU 11 to 15% of the time
   (MEASURED). On the six hours replayed with jobs flat over their runs, a perfect per-job curve cuts mean time in
-  system (wait plus run) from 65.1 s to 59.5 s, 8.6% (REPLAY, recorded arrival speed). At saturation, the replay's
+  system (wait plus run) from 65.7 s to 60.1 s, 8.5% (REPLAY, recorded arrival speed). At saturation, the replay's
   sharing loses no CPU to overcommit, so there the rules that overcommit most finish soonest. The rest of the 20% can
   only come from what the model leaves out: cache and switching cost at 3x, and bursts the flat data hides. Step 1
   measures both (section 10).
 - **The replay assumes readings every 5 s** (section 10). The same rule without readings, as deployed before #1036,
-  spends 10.8% of host-time over the cores against 8.4% (REPLAY). The replay's bookings are learned from free runs,
+  spends 10.3% of host-time over the cores against 8.4% (REPLAY). The replay's bookings are learned from free runs,
   about four times the live ones, so the missing reading cost more live.
 - **The replay's own check is not yet met:** its waits with the recorded bookings are 2.3x shorter than recorded
   (575 s against 1,322 s after the first hour, REPLAY). Read differences between rules, not absolute waits.
@@ -67,7 +70,9 @@ with no CPU limit). **MEASURED**, counted from the export or the farm's metrics,
    agent and everything else count (the owner's ruling). A job's series comes from its own cgroup.
 3. For each class the server keeps a decayed distribution of per-second CPU (section 4): a level, a start shape
    for ages 0 to 128 s in 2-second slots, and a tail. Memory is learned per class the same way (section 4).
-4. Today's median booking stays the flat ceiling beside it (decision 3).
+4. Today's median booking stays the flat ceiling beside it (decision 3). Reversed by
+   [placement-profiles-live.md](placement-profiles-live.md): under `--placement-curves on`, on a curve host, the
+   curve rule replaces the flat CPU checks.
 5. For each host the placer adds up, for every 2-second slot of the next 128 s, what its jobs are expected to use at
    their current ages.
 6. A job fits a host if, at every slot, that sum plus the job's own profile stays at or under cores x slack (slack
@@ -107,7 +112,8 @@ with no CPU limit). **MEASURED**, counted from the export or the farm's metrics,
    throughput within 2%. The machinery of steps 2 to 4 is worth weeks only at that size; if step 1's data bounds the
    prize below it, stop at step 1.
 3. **Keep today's flat ceiling beside the curve rule** (the curve rule only holds a job, never admits more).
-   Recommend yes. The overshoot comes with bursts of arrivals, so the curve rule's value is spreading their starts.
+   Recommend yes. Reversed by [placement-profiles-live.md](placement-profiles-live.md) section 7: on a curve host
+   the curve rule replaces the flat CPU checks, so it can admit more as well as fewer. The overshoot comes with bursts of arrivals, so the curve rule's value is spreading their starts.
 4. **Hold bound: 30 s**, enough to spread one burst of arrivals (section 6); a shorter bound gives it back to today's
    rule.
 5. **Gate on the replay, and stop if shape does not pay.** Recommend yes, with the pass mark of decision 2. On flat
@@ -119,7 +125,7 @@ Three designs were compared. All three start with the same recording; they diffe
 - **Direct curves** (laying each class's mean-by-age profile over the host's other jobs): closest to the owner's
   idea; conditioning on age is exact; with flat profiles it equals today's rule. This is the base of this document.
 - **Statistical bound** (expected level plus a spread term): it assumes jobs are independent, which jobs placed in
-  the same second are not. Deferred. REPLAY: 2% less total time than today's rule at the recorded speed, 6% more at
+  the same second are not. Deferred. REPLAY: 0.6% less total time than today's rule at the recorded speed, 6% more at
   4x.
 - **Minimal** (host pressure gate plus a 30-second start charge): its strongest point is that measured busy cores
   cannot show overload (line 3 above). That point is adopted: pressure is recorded from step 1.
@@ -211,8 +217,8 @@ Class and fallbacks are unchanged (READ: `sizes.rs` `key_under`: class, fallback
 - **Decay.** A run's samples are weighted 2^(-age / 6 h) by the run's end, with at most the last 64 runs.
   - 6 h, not Autopilot's 12 h, because a class here runs tens of times an hour and changes with a commit. Over a
     working day a run's weight falls to 1/4.
-  - REPLAY: as a whole-run booking, a decayed mean with a 1 h and with a 12 h half-life gave the same total time
-    within 0.4% (64.5 s and 64.8 s), so the choice is not sensitive.
+  - REPLAY: as a whole-run booking, a decayed mean with a 1 h and with a 12 h half-life gave total times 2.0% apart
+    (65.1 s and 63.8 s), a quarter of what the perfect curve takes off, so the choice is not the deciding one.
 - **Kept per class:**
   - a histogram of all its samples, in 64 log-spaced buckets from 1/16 core to 88 cores;
   - for each 2 s slot of ages 0 to 128 s, the decayed mean and the decayed load-weighted 90th percentile;
@@ -220,15 +226,16 @@ Class and fallbacks are unchanged (READ: `sizes.rs` `key_under`: class, fallback
 
 **What placement takes from it, and for what:**
 - **The level:** the decayed mean of the samples (Autopilot's rule for batch CPU). It is the charge of a job beyond
-  its first 128 s, and of a class with no shape. REPLAY: as a whole-run booking it matches today's median in total
-  time (64.8 s against 65.1 s).
+  its first 128 s, and of a class with no shape. REPLAY: as a whole-run booking it is close to today's median in total
+  time (63.8 s against 65.7 s).
 - **The start:** for each 2 s slot of the first 128 s, the load-weighted 90th percentile. This is what a new job is
   checked against at admission, the only moment placement acts, and so the only place a high quantile pays.
-  REPLAY: used for a whole run, the load-weighted 90th percentile packs far less (2.1% slowdown, against 15.7%) but
-  adds 2.5% total time, so it is kept to the start.
+  REPLAY: used for a whole run, the load-weighted 90th percentile packs far less (2.1% slowdown, against 14.8%) but
+  adds 2.6% total time, so it is kept to the start.
 - **The tail:** the decayed mean after 128 s. A burst shorter than a point is averaged away, and the host reading
   (`B_h`) catches it.
-- **Today's median stays the flat ceiling** (decision 3). The distribution feeds only the curve rule.
+- **Today's median stays the flat ceiling** (decision 3, reversed by
+  [placement-profiles-live.md](placement-profiles-live.md)). The distribution feeds only the curve rule.
 
 **A wrong estimate.** It is never acted on against a running job. It overcommits its host until the jobs end, and it
 teaches the class: a run slowed by contention may only raise it, as today.
@@ -272,8 +279,8 @@ L_h(k) = sum_j E_j(k) + B_h * max(0, 1 - k/5)
 B_h    = max(0, measured_busy_h - sum over covered jobs of E_j(0))          // 0 when the reading is stale
 fits(n, h)  <=>  for every slot k in 0..64:  L_h(k) + E_n(k) <= cap
 ```
-`measured_busy_h` is the whole host's busy CPU (section 3), the larger of the last two windows, stale after 15 s
-(READ: `WorkerLoad::measured`); work that is no job's shows in `B_h` at every reading. "Covered" means running at the previous reading. At slot 0 this is today's load rule; with all profiles
+`measured_busy_h` is the whole host's measured CPU (section 3; the cores demanded, busy plus waiting), the larger of
+the last two windows, stale after 15 s (READ: `WorkerLoad::measured`); work that is no job's shows in `B_h` at every reading. "Covered" means running at the previous reading. At slot 0 this is today's load rule; with all profiles
 flat every slot holds the same number. That equality is the first test. Among hosts where the job fits, the existing
 scorer ranks them. The two flat checks that exist (`Room::fits`, and `Capacity::has_room` in `place_claimed`) stay,
 so the curve rule can only hold a job that today would be placed. After the 30 s hold bound the job skips the curve
@@ -324,8 +331,39 @@ accepts. What corrects is the next placement:
   - the placer's sizing (mirrored from `JobSizes` over `js-sizing`) and its score (keys 1, 3, 5);
   - host readings every 5 s, as #1036 makes real (the arm "as deployed" has none, as before it);
   - the memory rule before #1035.
+- The arm `A median, curves packed, 1.1` replays the curve mode of `placement-profiles-live.md` on the shapes the replay
+  synthesises (the trace has each job's mean and peak, not its series): each class learns every successful run's
+  synthesised series in 2 s means, a job of a class that passes the four checks books its curve, a host takes a job
+  when the curves fit at every slot ahead (`Rule::Packed`), and a job that waited 30 s at the head is tested flat.
+  Its `booked/used` integrates the curve over each job's wall time. The residual of the design is the replay's
+  measured CPU beyond the jobs' charges. On the farm trace, which records no peaks, every series is flat.
 - **Contention** (ASSUMED): a host asked for more than its cores gives each job cores/demand of what it asks, and the
   job runs longer by that factor. Nothing is lost to cache or switching.
+- `js-cpu-replay shadow <log>` reads the job service's own log under `--placement-curves shadow` (step 2) and
+  prints, per class of at least `--min-runs` check lines (default 16), the runs, the mean and peak error of the run
+  against the profile, the curve's error as a share of the flat level's, whether the profile is shaped, and the CPU
+  error the curve removes against the flat line, and the three that read the class's last 16 lines for the booking
+  mode (`CPU peak over %`, `CPU series usable %`, and `CPU curve`: `yes` when all four checks of
+  `placement-profiles-live.md` section 4 hold at the last line); `--hide-classes` numbers the classes instead of
+  naming them. The
+  check line holds no booking, so the last figure is prediction error, not CPU a booking gives back. The log is read
+  in time order: with several server tasks, sort their lines by timestamp first. A job logged by two servers (the
+  overlap of a rolling update) counts once.
+- The check lines and the line that starts them are logged under the target `js_sched_placer::sizes::profile`.
+  A start reads and teaches every ended job its store keeps before any check is logged (MEASURED on the farm, two
+  starts of release 0.1.391, from each start's `listening` line to its `the job sizes were taught` line, which
+  gives `taught` and `pages`: 560,413 and 568,989 jobs, 683 and 690 pages, 6 min 57 s and 4 min 45 s); the runs
+  that end meanwhile are held. Once taught,
+  the server logs `placement curves: the shadow checks start, the profiles learned from the ended jobs` with
+  `classes`, `ended_jobs` and `took_secs`, then the held runs' checks in one burst, then each run as a pass frees
+  it.
+- **Step 2 on the farm** (MEASURED, 4 h 10 min of normal builds, releases 0.1.379 to 0.1.383 under `shadow`):
+  29,256 check lines over 5,335 classes, 330 of them with at least 16 lines. Of those 330, 28 (8.4%) were shaped by
+  CPU and 38 (11.5%) by memory. Over their scored runs the curve's CPU error was 95.4% of the flat line's: it removed
+  56,920 core-seconds of 1,217,183 (4.6%), and the 28 CPU-shaped classes 2,908 of them. Not every run is in it: 44%
+  of the lines' CPU series disagree with the run's exact CPU time by more than 5% (they are mostly short runs, which
+  a per-second series cannot match that closely: INFERRED), and 17% carry no series (the Macs record none). The
+  check lines were 16% of the server's log bytes.
 - **Shapes:** each job's CPU is bracketed by a "blip" (five seconds at its peak) and a "burst" (its peak while its
   CPU lasts). Without a recorded peak both are flat.
 - **Arms:** listed in the table below. Each runs at the recorded arrival speed and at 4x.
@@ -340,27 +378,33 @@ against 1,322 s recorded after the first hour (REPLAY). The time from placement 
 20%, read the differences between rules, not absolute waits.
 
 **Results on that window, jobs flat over their runs** (REPLAY, `farm.report.md`).
+- The replay sizes memory as the job service does: a run whose peak came within 5% of its booking was held there (the
+  window's jobs ran under a `memory.max` of their booking), and its class books a step above that booking next.
 - Time in system is mean wait plus run, in seconds.
 - Slowdown is the time lost to contention, over the jobs' own time.
 - 1x is the recorded arrival speed; 4x reaches saturation.
 
 | rule | time in system 1x | 4x | slowdown 1x | 4x | jobs/h 4x |
 |---|---|---|---|---|---|
-| as deployed, no readings, 1.1 | 65.4 | 355.5 | 18.4% | 17.8% | 9,199 |
-| today: median, 1.1 | 65.1 | 351.3 | 15.7% | 19.7% | 9,192 |
-| median, 1.0 | 66.9 | 494.6 | 10.4% | 3.3% | 9,152 |
-| median, 0.9 | 68.7 | 740.4 | 5.5% | 2.3% | 8,481 |
-| decayed mean (12 h), 1.1 | 64.8 | 339.5 | 13.1% | 21.6% | 9,195 |
-| decayed mean (1 h), 1.1 | 64.5 | 337.6 | 12.5% | 22.0% | 9,187 |
-| load-weighted p90 (1 h), 1.1 | 66.7 | 563.8 | 2.1% | 4.5% | 8,878 |
-| reserve z=2, 1.1 | 63.7 | 372.3 | 10.4% | 14.4% | 9,189 |
-| measured load only, 1.0 | 66.1 | 473.0 | 17.8% | 6.4% | 9,158 |
-| measured load only, 1.1 | 66.5 | 318.3 | 28.0% | 57.6% | 9,192 |
-| perfect curve, 1.0 | 59.5 | 387.8 | 0% | 0% | 9,211 |
-| perfect curve, 1.1 | 58.7 | 347.9 | 1.7% | 4.9% | 9,217 |
+| as deployed, no readings, 1.1 | 65.4 | 393.0 | 16.1% | 22.4% | 9,182 |
+| today: median, 1.1 | 65.7 | 411.9 | 14.8% | 20.1% | 9,199 |
+| heavy tail p90, 1.1 (`sizing.md`, 7.10) | 65.7 | 411.9 | 14.8% | 20.1% | 9,199 |
+| median, 1.0 | 66.3 | 578.8 | 6.7% | 2.4% | 9,053 |
+| median, 0.9 | 69.5 | 798.2 | 6.5% | 2.0% | 8,393 |
+| decayed mean (12 h), 1.1 | 63.8 | 414.9 | 9.5% | 17.6% | 9,192 |
+| decayed mean (1 h), 1.1 | 65.1 | 414.7 | 12.4% | 17.9% | 9,196 |
+| load-weighted p90 (1 h), 1.1 | 67.4 | 634.4 | 2.1% | 4.2% | 8,735 |
+| reserve z=2, 1.1 | 65.3 | 436.3 | 12.4% | 13.2% | 9,195 |
+| measured load only, 1.0 | 65.5 | 552.2 | 13.3% | 4.8% | 9,133 |
+| measured load only, 1.1 | 65.3 | 407.5 | 22.9% | 32.5% | 9,175 |
+| perfect curve, 1.0 | 60.1 | 461.3 | 0% | 0% | 9,211 |
+| perfect curve, 1.1 | 59.3 | 420.9 | 1.6% | 4.2% | 9,215 |
 
 What to read from the table:
-- **At the recorded speed only the perfect curve clearly wins:** 8.6% less total time. Lower limits and higher
+- **The heavy-tail row equals today's median:** the window's records carry no five-second peak, so no class has a tail
+  to book. `farm.report.md` also gives, per row, the most CPU booked on a host at once, the Gini coefficient of the
+  jobs placed per host and the core-seconds the hosts were asked for past their cores.
+- **At the recorded speed only the perfect curve clearly wins:** 8.5% less total time. Lower limits and higher
   quantiles cut slowdown but add more wait than they save.
 - **At saturation the model rewards overcommit:** its sharing loses no CPU, so the cost of overcommit beyond
   slowdown (cache, switching) is not in it.
@@ -388,12 +432,13 @@ negative and fades; each release reads the other's results.
 - **Mac hosts:** the Mac runtime reports each run's usage and, with `--cpu-series`, its CPU series, from the samples of the
   run's processes (`docs/design/mac-runtime.md`, section 4), so Mac classes learn as Linux's do.
 - **Settings** (flags, each off or at today's value by default): agent `--cpu-series`, `--host-second-samples`;
-  server `--placement-curves off|shadow|on` (today the flag takes `off` and `shadow`; `on` comes with step 4), `--curve-hosts`, `--curve-horizon-seconds 128`, `--curve-slot-seconds
-  2`, `--curve-min-runs 8`, `--curve-fit-ratio 0.8`, `--curve-bias-fade-seconds 10`, `--curve-max-hold-seconds 30`
-  (held jobs are only ones not yet started); the CPU slack stays 1.1. Off equals today's behaviour exactly.
+  server `--placement-curves off|shadow|on`; the CPU slack stays 1.1. Off equals today's behaviour exactly. The
+  live mode's other settings are the file keys `server.curve_hosts` and `server.curve_max_wait_seconds`
+  ([placement-profiles-live.md](placement-profiles-live.md) section 5); the slot length, horizon, run minimum and fit
+  ratio are the profile's constants, not settings, and the readings residual is carried, not faded.
 
 ## 14. Considered and not chosen
-- **A reserve from the classes' spread:** 2% less total time than today's rule at the recorded speed, 6% more at 4x
+- **A reserve from the classes' spread:** 0.6% less total time than today's rule at the recorded speed, 6% more at 4x
   (REPLAY).
 - **Measured host load alone:** it lags and cannot read above the cores.
 - **A pressure gate and a start charge only:** the lightest design; it drops the owner's idea before there is data.

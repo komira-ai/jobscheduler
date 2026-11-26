@@ -210,8 +210,9 @@ fn target_runs(
 
 /// Asserts that a memory kill of a target booked from its kind raises the target to at least
 /// twice the booking it died at, and teaches the kind the kill too: with a kind at 1.5 GiB, a
-/// target killed at 1.5 GiB books 3.5 GiB next (the kill is a sample of its 2.75 GiB limit,
-/// `1.2 x 2.75 GiB + 128 MiB`, over its 3 GiB floor), and so does a new target of the kind.
+/// target killed at 1.5 GiB books 3 GiB next (its floor, twice the booking it died at, over the
+/// kill's own sample of its 1.5 GiB limit, `1.2 x 1.5 GiB + 128 MiB`, 2 GiB), and so does a new
+/// target of the kind.
 /// Catches a kill floor lost because the size came from the kind, and a kill that teaches
 /// only the target (its siblings would die at the same size).
 #[test]
@@ -232,8 +233,8 @@ fn a_kill_of_a_target_booked_from_its_kind_raises_the_target_and_the_kind() {
     let mut sizes = taught(&jobs, booked(2000, 4 * GIB));
     assert!(sizes.observe(&oom, booked(1000, 6 * 256 * MIB)));
     jobs.push(oom);
-    let raised = 14 * 256 * MIB;
-    assert!(raised >= 2 * 6 * 256 * MIB);
+    let raised = 12 * 256 * MIB;
+    assert_eq!(raised, 2 * 6 * 256 * MIB);
     assert_eq!(size(&sizes, &step("oom-next", "oom")), (1000, raised));
     assert_eq!(size(&sizes, &step("sibling", "sibling")), (1000, raised));
 }
@@ -401,7 +402,7 @@ fn only_a_job_the_history_sizes_has_a_source() {
 
 /// What a test's own subscriber writes: every line, kept for [`Lines::take`].
 #[derive(Clone, Default)]
-struct Lines(Arc<Mutex<Vec<u8>>>);
+pub(super) struct Lines(Arc<Mutex<Vec<u8>>>);
 
 impl io::Write for Lines {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
@@ -425,7 +426,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Lines {
 
 impl Lines {
     /// The lines written so far, emptied.
-    fn take(&self) -> String {
+    pub(super) fn take(&self) -> String {
         let mut held = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         String::from_utf8(std::mem::take(&mut *held)).unwrap()
     }
@@ -435,7 +436,7 @@ impl Lines {
 /// nowhere. Tracing settles whether a line is wanted from the subscribers it knows when a
 /// thread first reaches the line; without this one, a test thread with no subscriber can
 /// settle the placement line as never wanted before the capturing test reaches it.
-fn process_sink() {
+pub(super) fn process_sink() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         let _ = tracing_subscriber::fmt()
@@ -647,4 +648,90 @@ fn a_start_teaches_each_kind_from_the_ended_jobs_of_its_targets() {
     tables.jobs.insert_queued(new).unwrap();
     assert_eq!(pass(&placer, &tables).len(), 1);
     assert_eq!(allocation(&tables, "fresh"), booked(1000, 6 * 256 * MIB));
+}
+
+/// The runs of a kind `check` as a farm measured it: 31 targets whose runs peak at 0.27 GiB
+/// and one heavy target, `heavy`, whose run peaked at 7 GiB; one run each, one core each.
+fn check_kind(tables: &Tables) -> Vec<JobRecord> {
+    let light: Vec<String> = (0..31).map(|at| format!("check-t{at}")).collect();
+    let light: Vec<&str> = light.iter().map(String::as_str).collect();
+    let cpu = Duration::from_secs(10);
+    let mut jobs = kind_runs(tables, &light, "check", (GIB * 27 / 100, cpu));
+    jobs.extend(kind_runs(tables, &["heavy"], "check", (7 * GIB, cpu)));
+    jobs
+}
+
+/// Asserts the farm's case: a new target of the kind `check`, whose other targets peak at
+/// 0.27 GiB and one at 7 GiB, books 1 GiB (the kind's median run, 0.27 GiB with the margin, at
+/// least 1 GiB), not the 8.75 GiB its kind's largest peak asks for; the heavy target itself
+/// books its own 8.75 GiB. Then its own runs take over from the first: a first run that peaked
+/// at 3 GiB, over its 1 GiB booking, books its class 3.75 GiB next (its own peak with the
+/// margin), and a later run at 0.27 GiB does not lower it below its largest recent peak.
+/// Catches a fallback that books its kind's heaviest target for every new target, and a target
+/// that needed more than its kind's typical run held at that figure after its first run.
+#[test]
+fn a_new_check_target_books_its_kinds_median_run_not_its_heaviest_and_its_own_runs_take_over() {
+    let tables = Tables::new();
+    let mut jobs = check_kind(&tables);
+    let sizes = taught(&jobs, booked(2000, 4 * GIB));
+    let fresh = queued("check-new", of_kind("check-new", "check", needs(0, 0)));
+    let (_, memory) = size(&sizes, &fresh);
+    assert_ne!(
+        memory,
+        35 * 256 * MIB,
+        "not the kind's largest peak, 8.75 GiB"
+    );
+    assert_eq!(memory, GIB, "the kind's median run");
+    assert_eq!(sizes.sized_from(&fresh, Day(0)), Some(SizedFrom::Fallback));
+    let heavy = queued("heavy-next", of_kind("heavy", "check", needs(0, 0)));
+    assert_eq!(size(&sizes, &heavy).1, 35 * 256 * MIB, "its own peak");
+
+    let spec = of_kind("check-new", "check", needs(0, 0));
+    let over = exited(0, 3 * GIB, Duration::from_secs(10));
+    jobs.push(ran(
+        &tables,
+        ("check-new-0", None),
+        spec.clone(),
+        booked(1000, GIB),
+        over,
+    ));
+    let sizes = taught(&jobs, booked(1000, GIB));
+    let next = queued("check-new-1", spec.clone());
+    assert_eq!(
+        size(&sizes, &next).1,
+        15 * 256 * MIB,
+        "its first run, 3 GiB"
+    );
+    assert_eq!(sizes.sized_from(&next, Day(0)), Some(SizedFrom::Class));
+    let light = exited(0, GIB * 27 / 100, Duration::from_secs(10));
+    jobs.push(ran(
+        &tables,
+        ("check-new-2", None),
+        spec,
+        booked(1000, GIB),
+        light,
+    ));
+    let sizes = taught(&jobs, booked(1000, GIB));
+    assert_eq!(
+        size(&sizes, &next).1,
+        15 * 256 * MIB,
+        "its largest recent peak"
+    );
+}
+
+/// Asserts that the client's whole history, the last stand-in, books its median run too: a
+/// job of a new class that names no fallback, of a client whose runs are the `check` kind's
+/// (31 at 0.27 GiB, one at 7 GiB), books 1 GiB from its client, not 8.75 GiB. Catches the
+/// client's history booking its heaviest class for every new class.
+#[test]
+fn a_new_class_without_a_fallback_books_its_clients_median_run_not_its_heaviest() {
+    let tables = Tables::new();
+    let jobs = check_kind(&tables);
+    let sizes = taught(&jobs, booked(2000, 4 * GIB));
+    let unlabelled = queued("unlabelled", of_class("unlabelled", needs(0, 0)));
+    assert_eq!(size(&sizes, &unlabelled).1, GIB);
+    assert_eq!(
+        sizes.sized_from(&unlabelled, Day(0)),
+        Some(SizedFrom::Fallback)
+    );
 }

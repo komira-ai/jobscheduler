@@ -7,7 +7,8 @@
 //! lasts at that rate, nothing the rest of the time) and [`Shape::Blip`] the calmest that
 //! still reaches the peak for five seconds. A run's real life lies between the two, so
 //! every figure the replay reports is given under both. Without a recorded peak both are
-//! [`Shape::Flat`].
+//! [`Shape::Flat`]. [`Shape::ClassBurst`] is the burst at the same point of every run of a
+//! class: the shaped class the curve mode books by its curve, which a test replays.
 
 /// The window the agent measures a run's peak over, in milliseconds (`PeakWindow` in the
 /// agent's `crun/peak.rs`).
@@ -31,6 +32,9 @@ pub enum Shape {
     Blip,
     /// Its peak while its CPU time lasts at that rate, nothing the rest of the time.
     Burst,
+    /// [`Shape::Burst`], with the burst at the same point of every run of its class (where
+    /// the other shapes place it by the run).
+    ClassBurst,
 }
 
 impl Shape {
@@ -41,6 +45,7 @@ impl Shape {
             Shape::Flat => "flat",
             Shape::Blip => "blip",
             Shape::Burst => "burst",
+            Shape::ClassBurst => "class burst",
         }
     }
 }
@@ -94,7 +99,7 @@ pub fn phases(
     };
     match shape {
         Shape::Flat => flat,
-        Shape::Burst => burst(),
+        Shape::Burst | Shape::ClassBurst => burst(),
         Shape::Blip => {
             let in_window = peak.saturating_mul(PEAK_WINDOW_MS);
             if wall <= PEAK_WINDOW_MS || in_window > total {
@@ -153,7 +158,7 @@ mod tests {
 
     #[test]
     fn a_run_with_no_peak_is_flat_at_its_mean_whatever_the_shape() {
-        for shape in [Shape::Flat, Shape::Blip, Shape::Burst] {
+        for shape in [Shape::Flat, Shape::Blip, Shape::Burst, Shape::ClassBurst] {
             assert_eq!(
                 phases(shape, 60_000, 120_000, None, HOST, 500),
                 vec![phase(60_000, 2000)]
@@ -172,6 +177,11 @@ mod tests {
         );
         // Burst: 6 s at 20 cores, idle 54 s, half of it before.
         let burst = phases(Shape::Burst, 60_000, 120_000, peak, HOST, 500);
+        assert_eq!(
+            phases(Shape::ClassBurst, 60_000, 120_000, peak, HOST, 500),
+            burst,
+            "a class's burst is the burst, placed by the caller"
+        );
         assert_eq!(
             burst,
             vec![phase(27_000, 0), phase(6000, 20_000), phase(27_000, 0)]
@@ -220,8 +230,8 @@ mod tests {
             vec![phase(1, 1000), phase(9999, 0)]
         );
         assert_eq!(
-            [Shape::Flat, Shape::Blip, Shape::Burst].map(Shape::name),
-            ["flat", "blip", "burst"]
+            [Shape::Flat, Shape::Blip, Shape::Burst, Shape::ClassBurst].map(Shape::name),
+            ["flat", "blip", "burst", "class burst"]
         );
     }
 }

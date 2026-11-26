@@ -230,8 +230,8 @@ struct Readings {
     last: NodeLoad,
     /// The farm time the newest reading arrived at: the only time base of freshness.
     arrived: FarmTime,
-    /// Cores busy over the last two windows, newest first, in millicores. A window is
-    /// known once two consecutive readings have been accepted.
+    /// Cores demanded over the last two windows ([`NodeLoad::demand_millicores_since`]),
+    /// newest first, in millicores. Known once two consecutive readings are accepted.
     windows: [Option<u32>; 2],
 }
 
@@ -256,8 +256,8 @@ pub(crate) struct Left {
     /// The sum in `cpu` already holds it for the leases on the ledger; the new lease takes
     /// it through [`Left::charged_cpu`].
     pub(crate) floor_cpu: u64,
-    /// The measured cores, in millicores, the left side holds (0 when it is charged by
-    /// prediction alone: `fallback` tells that from a host measured idle).
+    /// The measured cores ([`WorkerLoad::measured`]), in millicores, the left side holds (0
+    /// when it is charged by prediction alone: `fallback` tells that from a host measured idle).
     pub(crate) measured: u64,
     /// The cores of the window before the newest, which ended before any lease the newest
     /// reading has seen uncovered was placed ([`WorkerLoad::measured_before`]); `measured`
@@ -398,16 +398,15 @@ impl WorkerLoad {
 
     /// Takes a heartbeat's reading in, or drops it.
     ///
-    /// The first reading of a session is a baseline and gives no window. After that a
-    /// reading is accepted when [`NodeLoad::busy_millicores_since`] gives the window
-    /// (its `seq` is above the last accepted one and neither the clock nor the counter
-    /// went back) and the figures are plausible: no more cores than
-    /// [`IMPLAUSIBLE_FACTOR`] times the worker's, no more memory than that times its.
-    /// The cores are judged against `capacity` and the memory against `raw_memory_bytes`,
-    /// what the worker reported: a working set is measured on the whole machine, so the
-    /// share admission books does not make a legitimate reading implausible.
-    /// A dropped reading forgets the baseline too, so the worker is charged by
-    /// prediction until two readings in a row are accepted again.
+    /// The first reading of a session is a baseline and gives no window. After that a reading
+    /// is accepted when [`NodeLoad::busy_millicores_since`] gives the window (`seq` above the
+    /// last accepted one, neither the clock nor the counter back) and the figures are
+    /// plausible: no more busy cores than [`IMPLAUSIBLE_FACTOR`] times the worker's, no more
+    /// memory than that times its. The cores are judged against `capacity` and the memory
+    /// against `raw_memory_bytes`, what the worker reported: a working set is measured on the
+    /// whole machine, so the share admission books does not make a legitimate reading
+    /// implausible. The window kept is the cores demanded. A dropped reading forgets the
+    /// baseline too, so the worker is charged by prediction until two in a row are accepted.
     pub(crate) fn accept(
         &mut self,
         load: NodeLoad,
@@ -420,11 +419,11 @@ impl WorkerLoad {
         let window = match &self.readings {
             None => None,
             Some(r) => match load.busy_millicores_since(&r.last) {
-                Some(cores) => Some(cores),
+                Some(cores) => Some((cores, load.demand_millicores_since(&r.last, cores))),
                 None => return self.drop_readings(counters),
             },
         };
-        let too_many_cores = window.is_some_and(|cores| {
+        let too_many_cores = window.is_some_and(|(cores, _)| {
             capacity.cpu_millis > 0
                 && u64::from(cores) > capacity.cpu_millis.saturating_mul(IMPLAUSIBLE_FACTOR)
         });
@@ -441,7 +440,7 @@ impl WorkerLoad {
         self.readings = Some(Readings {
             last: load,
             arrived: now,
-            windows: [window, older],
+            windows: [window.map(|(_, demand)| demand), older],
         });
         self.cover(&covered, true);
         if let Some(measured) = self.measured() {
@@ -457,24 +456,23 @@ impl WorkerLoad {
         self.new_session();
     }
 
-    /// Cores busy, in millicores: the larger of the last two windows, so a rise is
-    /// believed at once and a fall after two windows. `None` before the first window.
+    /// Cores demanded, busy and waiting, in millicores: the larger of the last two windows,
+    /// so a rise is believed at once and a fall after two windows. `None` before the first.
     pub(crate) fn measured(&self) -> Option<u32> {
         let r = self.readings.as_ref()?;
         r.windows.iter().flatten().copied().max()
     }
 
-    /// Cores busy, in millicores, over the window before the newest: it ended at the
-    /// reading before the newest, so it holds none of the CPU of a lease placed after that
-    /// reading. [`WorkerLoad::measured`] when there is no such window yet.
+    /// Cores demanded, in millicores, over the window before the newest, which ended at the
+    /// reading before the newest, so it holds none of the CPU of a lease placed after it.
+    /// [`WorkerLoad::measured`] when there is no such window yet.
     pub(crate) fn measured_before(&self) -> Option<u32> {
         let r = self.readings.as_ref()?;
         r.windows[1].or_else(|| self.measured())
     }
 
-    /// Whether the measured CPU, the whole host's, is above the predicted sum of the covered
-    /// leases (`M > P_c`): the predictions are too low here, or work besides the leases
-    /// keeps the host busy. Plain, before the floor.
+    /// Whether the measured CPU, the whole host's, is above the covered leases' predicted sum
+    /// (`M > P_c`, before the floor): the predictions are too low, or other work loads the host.
     pub(crate) fn measured_above_covered(&self) -> bool {
         self.measured()
             .is_some_and(|m| u64::from(m) > self.totals.cpu_covered)
@@ -658,7 +656,8 @@ impl WorkerLoad {
     /// On a worker charged by measurement, when the new lease or a lease on the worker is
     /// charged over time, the lease must fit at every slot of the horizon
     /// ([`horizon::refusal`]); otherwise at the one flat figure. `profile` is how the new
-    /// lease is charged over time, if it is. Then the flat-memory guard
+    /// lease is charged over time, if it is. With `cpu_judged` ([`crate::Scheduler::set_cpu_judged`])
+    /// no CPU inequality is tested, at one figure or at any slot. Then the flat-memory guard
     /// ([`horizon::flat_memory_refusal`]), which every lease that adds memory passes on
     /// either path. Only actions come here: a whole-machine lease is not judged, and an
     /// action at the whole host's memory is placed on a worker with no lease, whose flat
@@ -669,18 +668,16 @@ impl WorkerLoad {
         profile: Option<&Profile>,
         left: &Left,
         capacity: &Resources,
-        now: FarmTime,
+        (now, cpu_judged): (FarmTime, bool),
         cfg: &LoadConfig,
     ) -> Result<(), Refusal> {
         if !left.fallback && (self.totals.has_timed() || profile.is_some_and(Profile::timed)) {
-            if let Some(refusal) =
-                horizon::refusal(&self.totals, cost, profile, left, capacity, cfg)
-            {
-                return Err(refusal);
-            }
+            let over =
+                horizon::refusal(&self.totals, cost, profile, left, capacity, cfg, cpu_judged);
+            over.map_or(Ok(()), Err)?;
         } else {
             let (new, limit) = (left.charged_cpu(cost), cfg.cpu_limit(capacity));
-            if left.cpu.saturating_add(new) > limit {
+            if !cpu_judged && left.cpu.saturating_add(new) > limit {
                 let refusal = Refusal::new(RefusalKind::Cpu, left.cpu, new, limit);
                 return Err(refusal.measured((!left.fallback).then_some(left.measured)));
             }

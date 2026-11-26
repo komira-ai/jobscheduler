@@ -220,6 +220,7 @@ pub(crate) fn queue_job(scratch: &Scratch, id: &str) {
         layers: Vec::new(),
         mounts: Vec::new(),
         host_ports: Vec::new(),
+        history_key: Default::default(),
     };
     let new = NewJob {
         id: Some(JobId::parse(id).unwrap()),

@@ -7,7 +7,9 @@
 //! what its hello offers) or, for a host that reports load admission, the slacked capacity the
 //! store holds it to. A job that names no disk books the disk its host's agent books for it,
 //! the scratch quota's default ([`OpenHost::quota_disk_bytes`]), so the allocation the store
-//! records books what the agent books.
+//! records books what the agent books. A host that books by CPU curve is held to every axis but
+//! its CPU ([`Room::fits_without_cpu`]): the engine judges that one slot by slot
+//! ([`crate::engine`]).
 
 use std::collections::BTreeMap;
 
@@ -117,6 +119,19 @@ impl Room {
         self.lines.get(host).is_none_or(|line| {
             let booked = on_host(booked, line.quota_disk_bytes);
             line.capacity.has_room(&line.booking, &booked)
+        })
+    }
+
+    /// Whether `host` has room for `booked` on every axis but its CPU, which the caller judges
+    /// (a host that books by CPU curve); a host with no capacity always has.
+    pub fn fits_without_cpu(&self, host: &HostId, booked: Booked) -> bool {
+        self.lines.get(host).is_none_or(|line| {
+            let booked = on_host(booked, line.quota_disk_bytes);
+            let capacity = Capacity {
+                cpu_millis: u64::MAX,
+                ..line.capacity
+            };
+            capacity.has_room(&line.booking, &booked)
         })
     }
 

@@ -343,10 +343,12 @@ jobs:
   # Push to main only: build provenance for every file, from SHA256SUMS, and a provenance
   # attestation of each .deb and each image alone, whose bundle is copied beside it as
   # `<file>.sigstore.json`.
-  # See the top of this file.
+  # See the top of this file. `!cancelled()` and the check of `sums`'s result: without a status
+  # function GitHub skips a job when any job above it was skipped, and one of `build-macos` and
+  # `macos-farm` always is.
   attest:
     needs: [sums]
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    if: ${{ !cancelled() && needs.sums.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -413,9 +415,10 @@ jobs:
   # this file on refs/heads/main at the commit, from a GitHub-hosted runner; and each .deb and
   # each image verifies from its bundle as well, as release.yml's apt jobs verify a .deb and a
   # deployer verifies an image.
+  # `!cancelled()` and the check of `attest`'s result, as `attest` has them.
   verify:
     needs: [attest]
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    if: ${{ !cancelled() && needs.attest.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: read

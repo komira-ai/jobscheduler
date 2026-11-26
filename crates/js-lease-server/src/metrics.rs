@@ -13,14 +13,18 @@
 //!   provider is called included) and each that failed over (a `capacity` or `quota` refusal,
 //!   after which the next pass tries another offer), and each refusal of a host to a queued
 //!   job by the placement, by host and by the predicate that refused (`cpu`,
-//!   `predicted-memory`, `booked-memory`, `cold-cap`), and each job start a host's agent refused,
+//!   `predicted-memory`, `booked-memory`, `cold-cap`, `cpu-curve`), and each job whose wait for
+//!   its CPU curve ran out so that it was tested flat, and each job start a host's agent refused,
 //!   by host and refusal code. A start failure or a loss is counted as
 //!   its commit lands, so a pass that fails later still counts what it ended. The paths that count them call
 //!   a [`MetricsSink`], and do not know the exporter: without `--metrics-listen` the sink is
 //!   [`NoMetrics`], which counts nothing.
 //! - **Snapshots**, read at each scrape from the state `GET /v1/hosts` and the job service
 //!   read ([`scrape`]): the jobs by state, the age of the oldest queued job, and for each host
-//!   the CPU and memory booked and free and its whole-host mark. A scrape holds no lock of the
+//!   the CPU and memory booked and free and its whole-host mark, and under
+//!   `--placement-curves on` the classes booking by curve and flat and each curve host's fullest
+//!   booked slot, read from the placer ([`js_sched_placer::place::SchedPlacer::curve_view`]).
+//!   A scrape holds no lock of the
 //!   server's while it renders: the registry's is taken and dropped as `GET /v1/hosts`
 //!   takes it, and the job tables are read on the pool for blocking
 //!   calls. The parts are read one after another, not in one transaction: a job placed between
@@ -71,6 +75,9 @@ pub(crate) trait MetricsSink: Send + Sync + std::fmt::Debug {
     /// the code when it is 1 to 64 characters of `a-z`, `0-9` and `-`, and under `other`
     /// otherwise, so an agent's text never makes a label value of its own choosing.
     fn start_refused(&self, _host: &HostId, _code: &str) {}
+    /// A queued job of a curve class waited past the wait bound with no host fitting its
+    /// curve, and is tested with its flat number from then on; by default, nothing is counted.
+    fn curve_wait_expired(&self) {}
 }
 
 /// The longest refusal code of an agent that is kept as a metric label value.
@@ -122,6 +129,10 @@ impl js_sched_placer::engine::jobs::PassMetrics for PassSink<'_> {
 
     fn refused(&self, host: &HostId, reason: &'static str) {
         self.0.placement_refused(host, reason);
+    }
+
+    fn curve_wait_expired(&self) {
+        self.0.curve_wait_expired();
     }
 }
 
@@ -364,6 +375,7 @@ pub(crate) struct Recorder {
     acquires: Mutex<BTreeMap<String, Acquires>>,
     refusals: Mutex<BTreeMap<(String, &'static str), u64>>,
     start_refusals: Mutex<BTreeMap<(String, String), u64>>,
+    curve_wait_expiries: AtomicU64,
 }
 
 impl Default for Recorder {
@@ -379,6 +391,7 @@ impl Default for Recorder {
             acquires: Mutex::default(),
             refusals: Mutex::default(),
             start_refusals: Mutex::default(),
+            curve_wait_expiries: AtomicU64::new(0),
         }
     }
 }
@@ -433,6 +446,10 @@ impl MetricsSink for Recorder {
             .entry((host.as_str().to_owned(), code_label(code).to_owned()))
             .or_default();
         *seen += 1;
+    }
+
+    fn curve_wait_expired(&self) {
+        self.curve_wait_expiries.fetch_add(1, Ordering::Relaxed);
     }
 }
 

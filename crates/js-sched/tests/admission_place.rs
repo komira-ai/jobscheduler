@@ -56,25 +56,29 @@ fn config(mode: PlacementLoad) -> LoadConfig {
 
 /// Worker `b` holds four leases booked at a core each and measured at 1000 m; worker `a`
 /// holds one booked at a quarter core and measured at 6000 m (its lease is not the only
-/// thing on it). Returns where one more action goes under `mode`.
-fn where_one_more_goes(mode: PlacementLoad) -> String {
-    let mut r = Rig::new(config(mode));
+/// thing on it). Every lease books `memory` bytes. Returns where one more action goes under
+/// `mode`, with the pack limit at `pack_limit_permille`.
+fn where_one_more_goes(mode: PlacementLoad, memory: u64, pack_limit_permille: u32) -> String {
+    let mut r = Rig::new(LoadConfig {
+        pack_limit_permille,
+        ..config(mode)
+    });
     r.up("b", node());
     let b_held = leases(&{
         for _ in 0..4 {
-            r.action(1_000, 8 * GIB, Some(warm(250, 0)));
+            r.action(1_000, memory, Some(warm(250, 0)));
         }
         r.tick()
     });
     r.up("a", node());
-    r.action(250, 8 * GIB, Some(warm(250, 0)));
+    r.action(250, memory, Some(warm(250, 0)));
     let a_held = leases(&r.tick());
     assert_eq!((a_held.len(), b_held.len()), (1, 4));
     for held in [("a", 6_000, &a_held), ("b", 1_000, &b_held)] {
         r.window(held.0, 0, 0, held.2);
         r.window(held.0, held.1, 0, held.2);
     }
-    r.action(250, 8 * GIB, Some(warm(250, 0)));
+    r.action(250, memory, Some(warm(250, 0)));
     r.tick()[0].worker.as_str().to_owned()
 }
 
@@ -83,8 +87,28 @@ fn where_one_more_goes(mode: PlacementLoad) -> String {
 /// four booked cores that is measured at one), and the load rank leaking into `Off`.
 #[test]
 fn workers_are_ranked_by_what_they_are_charged() {
-    assert_eq!(where_one_more_goes(PlacementLoad::On), "b");
-    assert_eq!(where_one_more_goes(PlacementLoad::Off), "a");
+    // The pack limit is lifted to 1.0x: `b` is booked four of eight cores, so one more
+    // lease takes it past the default 0.5x, and this test is about ranking by charge,
+    // not about the limit.
+    assert_eq!(where_one_more_goes(PlacementLoad::On, 4 * GIB, 1_000), "b");
+    assert_eq!(where_one_more_goes(PlacementLoad::Off, 4 * GIB, 1_000), "a");
+}
+
+/// Behaviour: with each lease booking 8 GiB, `b` (four leases, 32 of 32 GiB booked) is
+/// past the pack limit with one more, while `a` (8 of 32 GiB) stays within it, so the
+/// lease goes to `a` (16 of 32 GiB with it, exactly the 0.5x limit) although `b` is the
+/// lighter worker by charge.
+/// Catches: the charge ranking overriding the pack limit.
+#[test]
+fn a_worker_booked_past_the_pack_limit_loses_to_one_within_it() {
+    assert_eq!(
+        where_one_more_goes(
+            PlacementLoad::On,
+            8 * GIB,
+            LoadConfig::default().pack_limit_permille
+        ),
+        "a"
+    );
 }
 
 /// What nine actions, each booking a quarter core and predicted at 4 GiB, do on one

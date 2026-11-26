@@ -1,0 +1,4 @@
+# The bytes JobSpec.retry adds to the encoding of common::spec("presigned-url-text") (the spec
+# golden/submit_job_request.hex carries), after the spec's bytes.
+b2 04 07  08 03  10 00  18 d8 04                        # 70 retry: max_attempts 3, initial_backoff_seconds 0 (present, so
+                                                        #    written), max_backoff_seconds 600

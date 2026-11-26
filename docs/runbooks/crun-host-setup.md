@@ -451,8 +451,9 @@ A rerun after a run that stopped at this check, with the unit already edited, do
 again: it reloads, checks, and goes on to the remount.
 
 If the mount does not start again after it was stopped, the run stops there, leaves the host
-drained and prints `systemctl start <mount unit>`; no later step runs, so nothing is made on the
-root filesystem under the mount point.
+drained and prints `systemctl start '<mount unit>'`, the unit in single quotes so that the pasted
+line starts it (a shell would drop the backslash of `\x2d` unquoted); no later step runs, so
+nothing is made on the root filesystem under the mount point.
 
 Where the scratch filesystem is not mounted at the moment, only the unit is edited and the option
 applies at its next mount.

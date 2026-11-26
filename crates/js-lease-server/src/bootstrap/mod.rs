@@ -30,12 +30,18 @@
 //! fails without a working driver and toolkit). The flag is on every offer: the agent runs
 //! the hook only when the host offers a GPU. The unit names the container program, the state root and the scratch root
 //! ([`CONTAINER_BIN`], [`STATE_ROOT`], [`SCRATCH_ROOT`] of `js-elastic`), and requires the
-//! scratch root's mount (`RequiresMountsFor=`), so a machine whose provider did not mount
+//! scratch root's mount (`RequiresMountsFor=`) and starts only when the scratch root is a
+//! mount point (`ConditionPathIsMountPoint=`), so a machine whose provider did not mount
 //! it does not start the agent. The script makes the two roots' directories; what puts a
 //! file system of its own under the scratch root, and what checks the driver and the
-//! container program, is the provider's `host_prep`. The unit restarts the agent always
-//! and never lists an exit status that stops the restart: the agent exits with a status
-//! on purpose and is to be started again.
+//! container program, is the provider's `host_prep`. The unit restarts the agent always,
+//! 30 seconds after an exit, and never lists an exit status that stops the restart: the
+//! agent exits with a status on purpose and is to be started again. It starts after the
+//! container engine's units (`docker.service`, which the script restarts under the remap,
+//! and `containerd.service`), so at shutdown the engine stops after the agent has drained,
+//! and gives the drain 120 seconds (`TimeoutStopSec=`), above the agent's default drain:
+//! the unit sets neither `--drain-wait` nor `--stop-grace`. These four settings are the
+//! packaged unit's (`packaging/js-agent/js-agent.service`).
 //!
 //! Not rendered here: the host contract check of what the agent finds, which the agent's
 //! own report makes at admission.
@@ -316,13 +322,18 @@ pub fn render(plan: &BootPlan, fill: Fill<'_>) -> Result<String, RenderError> {
     w.line("cat > /etc/systemd/system/js-agent.service <<'UNIT'");
     w.line("[Unit]");
     w.line("Description=jobscheduler agent");
-    w.line("After=network-online.target");
+    // The ordering, the mount condition, the stop timeout and the restart pace are the
+    // packaged unit's (packaging/js-agent/js-agent.service, whose comments give the reasons);
+    // tests/network/packaged_unit.rs holds the two units to the same values.
+    w.line("After=network-online.target docker.service containerd.service");
     w.line(&format!("Requires={METADATA_UNIT}"));
     w.line(&format!("After={METADATA_UNIT}"));
     w.line("Wants=network-online.target");
     w.line(&format!("RequiresMountsFor={SCRATCH_ROOT}"));
+    w.line(&format!("ConditionPathIsMountPoint={SCRATCH_ROOT}"));
     w.line("");
     w.line("[Service]");
+    w.line("TimeoutStopSec=120");
     let _ = writeln!(
         w.out,
         "ExecStart={AGENT_PATH} --server {} --token-file {TOKEN_PATH} --instance-file {INSTANCE_PATH} --pool {} --host-id {} {ENGINE_OPT_IN} --container-bin {CONTAINER_BIN} --container-subuid {SUBID_USER} --container-pull missing --gpu-toolkit-hook {GPU_TOOLKIT_HOOK_PATH} --state-root {STATE_ROOT} --scratch-root {SCRATCH_ROOT}",
@@ -331,7 +342,7 @@ pub fn render(plan: &BootPlan, fill: Fill<'_>) -> Result<String, RenderError> {
         unit_quoted(plan.host.as_str())
     );
     w.line("Restart=always");
-    w.line("RestartSec=5");
+    w.line("RestartSec=30");
     w.line("");
     w.line("[Install]");
     w.line("WantedBy=multi-user.target");

@@ -46,9 +46,9 @@ enum Isolation {
 
 // The resources a job needs of its host. A host is capable when it has at least each of
 // them. A job that leaves cpu_millis or memory_bytes at 0 (or sends no needs) is booked, for
-// each of them, the size the history of its class gives: the class is the job's label
-// size-class, else its image's name and command. A class with too few runs books what the
-// class named by its label size-fallback gives, else the server's cold size (4 cores and
+// each of them, the size the history of its class gives: the class is the job's history_key,
+// else its label size-class, else its image's name and command. A class with too few runs
+// books what the class named by its label size-fallback gives, else the server's cold size (4 cores and
 // 16 GiB unless the server sets another), held at the most cores and the most bookable memory
 // a host has; never less than what the class was killed at. A class
 // whose runs need more memory than any host has books the whole of the largest. What a
@@ -148,7 +148,10 @@ message JobSpec {
   string command = 3;
   // The arguments the program is started with, in order.
   repeated string args = 4;
-  // The environment of the job, by variable name.
+  // The environment of the job, by variable name. It is refused naming spec.env when a name
+  // is one the agent sets (HOME, TMPDIR and the rest) or one that steers the loader, the
+  // agent or a shell (LD_*, DYLD_*, JS_*, IFS and the rest), a name is not
+  // [A-Za-z_][A-Za-z0-9_]*, a value holds a NUL, or it is over the start's caps.
   map<string, string> env = 5;
   // The resources the job needs.
   Needs needs = 10;
@@ -173,9 +176,18 @@ message JobSpec {
   // the job already made only in its priority is the same job (design section 5.3).
   int32 priority = 50;
   // The client's labels, by key. A listing can filter by them. The label size-class names
-  // the job's class, whose history sizes what Needs leaves at 0; the label size-fallback
-  // names a class whose history sizes it while the job's own class has fewer than five runs.
+  // the job's class when history_key is empty; the label size-fallback names a class whose
+  // history sizes the job while its own class has no run.
   map<string, string> labels = 51;
+  // The key the job's usage history is kept under, whose history sizes what Needs leaves at
+  // 0: the work the job runs, one key per kind of work. For a build action, the full path of
+  // its build target and the kind of the action, for example
+  // "komira//src/json:json mojo_compile". 1 to 512 bytes of printable ASCII (0x20 to 0x7e),
+  // kept, keyed and logged as sent: never lowered, cut or hashed. Refused naming
+  // spec.historyKey (bad-length or not-printable-ascii) otherwise. Empty: the label size-class
+  // names the class, else the image's name and command do. It is part of the job a same-id
+  // resubmit is compared on.
+  string history_key = 52;
   // The read-only layers of the job's root, base first, stacked on image (or in place of it,
   // when image is empty): at most 16. A later layer's file hides an earlier one's. With
   // layers, the root is writable and the writes are the job's own, and the job runs in a
@@ -183,6 +195,42 @@ message JobSpec {
   repeated Layer layers = 60;
   // Trees at paths in the job's file system: at most 64. Empty: none.
   repeated Mount mounts = 61;
+  // Another attempt after a start failure or a lost host. Absent: one attempt, as before. It
+  // is part of the job a same-id resubmit is compared on. This server refuses a job that sets
+  // it (INVALID_ARGUMENT, retry-not-enabled) until a later release acts on it.
+  RetryPolicy retry = 70;
+  // The call the server makes once the job reaches its final state. Absent: none. It is part
+  // of the job a same-id resubmit is compared on, its key by digest. This server refuses a job
+  // that sets it (INVALID_ARGUMENT, callback-not-enabled) until a later release acts on it.
+  Callback callback = 71;
+}
+
+// Another attempt after a start failure or a lost host
+// (docs/design/job-retry-and-completion-callback.md). Each attempt runs the work again. Only a
+// job that sets this can go from a run back to queued. In one case two attempts can overlap: a
+// static host an operator removed while it still ran the job.
+message RetryPolicy {
+  // The most attempts, the first included. 0 or 1: no retry.
+  uint32 max_attempts = 1;
+  // The wait before the second attempt, in seconds. Absent: 10. Cut to 3600.
+  optional uint32 initial_backoff_seconds = 2;
+  // The longest wait, jitter included. Absent: the larger of 300 and the initial wait. Cut to
+  // 3600.
+  optional uint32 max_backoff_seconds = 3;
+}
+
+// A bare signed POST with no body and no job data, sent once the job reaches its final state
+// (docs/design/job-retry-and-completion-callback.md, sections 5.4 and 6).
+message Callback {
+  // Where the server POSTs: an https URL with no userinfo or fragment. Its address must pass
+  // the server's address rule (docs/design/job-retry-and-completion-callback.md, section 5.3).
+  string url = 1;
+  // The key the server signs each call with: 32 to 64 bytes. Secret: no response of the
+  // service carries it, so this field is empty in every job a read returns.
+  bytes signing_key = 2;
+  // How long the server keeps trying, in seconds from the job's end. Absent: 86400. Cut to
+  // the job's retention end.
+  optional uint32 deadline_seconds = 3;
 }
 
 // The states of a job (design section 3.2). Queued, placed, starting and running are live;
@@ -225,7 +273,10 @@ enum StartFailureCode {
   // The whole-host prepare failed as many times as the pool allows.
   START_FAILURE_CODE_EXCLUSIVE_NOT_READY = 3;
   // The host's agent refused the start, for example because the host is tainted or the
-  // image fetch failed; the start failure detail holds the agent's own code.
+  // image fetch failed; the start failure detail holds the agent's own code. The server
+  // fails a start the same way when it breaks a rule of the agent's wire (a job admitted
+  // before the rule was checked at submit); the detail then holds the wire's code, such as
+  // invalid-env.
   START_FAILURE_CODE_AGENT_REFUSED = 4;
   // An input the job named could not be read on its host: a host path of a layer or mount
   // that is missing, is not a directory, cannot be read, or did not answer in time. The
@@ -268,6 +319,9 @@ enum QueueStatusCode {
   QUEUE_STATUS_CODE_PLACED = 5;
   // A machine was launched for the job, and the job waits for it to join.
   QUEUE_STATUS_CODE_WAITING_FOR_MACHINE = 6;
+  // An attempt of the job ended and its retry policy asks for another: the job waits out its
+  // backoff, until Job.retry_not_before_ms.
+  QUEUE_STATUS_CODE_WAITING_FOR_RETRY = 7;
 }
 
 // Why a job is where it is in the queue, and since when.
@@ -301,6 +355,8 @@ enum JobEventKind {
   JOB_EVENT_KIND_REQUEUED = 6;
   // A machine was launched for the job.
   JOB_EVENT_KIND_WAITING_FOR_MACHINE = 7;
+  // An attempt ended and another was queued; the detail names the outcome and the wait.
+  JOB_EVENT_KIND_RETRY_SCHEDULED = 8;
 }
 
 // One event of a job's history.
@@ -348,13 +404,103 @@ message Job {
   // nothing has been recorded, and on a job that ended without being placed; a placed,
   // running or ended job that was placed shows placed.
   QueueStatus queue_status = 33;
-  // How many placement attempts the job had: each placement and each machine refused for it.
+  // How many placement attempts the job had, over all of the job's attempts: each placement
+  // and each machine refused for it.
   uint32 attempts = 34;
   // The job's newest events, oldest first: at most 32.
   repeated JobEvent events = 35;
   // How many older events were dropped to keep the bound, so this plus the events kept is
   // the number the job ever had.
   uint32 dropped_events = 36;
+  // The number of the current attempt, from 1, or of the last that ran. 0 (a job recorded
+  // before attempts were counted): 1.
+  uint32 attempt = 37;
+  // The attempts that ended, oldest first: at most the newest 256.
+  repeated Attempt attempt_history = 38;
+  // While the job waits out a backoff before its next attempt: when the wait ends, in
+  // milliseconds since the Unix epoch. Absent otherwise.
+  optional uint64 retry_not_before_ms = 39;
+  // How the job's callback is being delivered. Absent: the job has no callback.
+  CallbackStatus callback_status = 40;
+  // How many older attempts were dropped from attempt_history to keep its bound, so this plus
+  // the attempts kept is the number that ended.
+  uint32 dropped_attempts = 41;
+}
+
+// How one attempt of a job ended. A later release may append a value; a reader that meets one
+// it does not know reads it as unspecified.
+enum AttemptOutcome {
+  // Not an outcome: what a value this reader does not know reads as.
+  ATTEMPT_OUTCOME_UNSPECIFIED = 0;
+  // The job exited with code 0.
+  ATTEMPT_OUTCOME_SUCCEEDED = 1;
+  // The job ran and failed: the reason says how.
+  ATTEMPT_OUTCOME_FAILED = 2;
+  // The attempt's host was lost: the provider read it absent, or it did not list the job
+  // after a hello.
+  ATTEMPT_OUTCOME_HOST_LOST = 3;
+  // The attempt did not get to run: the start failure says why.
+  ATTEMPT_OUTCOME_START_FAILED = 4;
+  // The client cancelled the job.
+  ATTEMPT_OUTCOME_CANCELLED = 5;
+}
+
+// One attempt of a job that has ended.
+message Attempt {
+  // The attempt's number, from 1.
+  uint32 number = 1;
+  // The host the attempt was placed on.
+  string host_id = 2;
+  // How the attempt ended.
+  AttemptOutcome outcome = 3;
+  // The attempt's times. queued_at_ms: when this attempt became placeable.
+  JobTimes times = 4;
+  // The attempt's exit code, when its process exited by itself. Absent otherwise.
+  optional int32 exit_code = 5;
+  // How the attempt ended, as its result says. Unspecified for an attempt without a result.
+  ResultReason reason = 6;
+  // Why the attempt failed to start, when it did; unspecified otherwise.
+  StartFailureCode start_failure = 7;
+  // The agent's own code or text for a start failure, as on Job. Empty otherwise.
+  string start_failure_detail = 8;
+  // Another attempt was queued after this one.
+  bool retried = 9;
+}
+
+// Where the delivery of a job's callback stands. A later release may append a value; a reader
+// that meets one it does not know reads it as unspecified.
+enum CallbackState {
+  // Not a state: what a value this reader does not know reads as.
+  CALLBACK_STATE_UNSPECIFIED = 0;
+  // The job has not ended, so nothing is due.
+  CALLBACK_STATE_ARMED = 1;
+  // The job ended and the call has not been answered 2xx or 410 yet.
+  CALLBACK_STATE_PENDING = 2;
+  // The receiver answered 2xx.
+  CALLBACK_STATE_DELIVERED = 3;
+  // The delivery deadline passed first: nothing more is sent.
+  CALLBACK_STATE_EXPIRED = 4;
+  // The receiver answered 410: nothing more is sent.
+  CALLBACK_STATE_ABANDONED = 5;
+}
+
+// The delivery of a job's callback (docs/design/job-retry-and-completion-callback.md, section
+// 5.5).
+message CallbackStatus {
+  // Where the delivery stands.
+  CallbackState state = 1;
+  // How many calls were tried.
+  uint32 tries = 2;
+  // When the last call was tried, in milliseconds since the Unix epoch. Absent: none was.
+  optional uint64 last_try_at_ms = 3;
+  // The class of the last failure: refused-address (the address rule refused the URL's
+  // address) or failed (anything else). Empty: no try failed.
+  string last_failure = 4;
+  // When the receiver answered 2xx, in milliseconds since the Unix epoch. Absent: it has not.
+  optional uint64 delivered_at_ms = 5;
+  // Until when the server keeps trying, in milliseconds since the Unix epoch. Absent while the
+  // job has not ended.
+  optional uint64 deadline_at_ms = 6;
 }
 
 // How an ended job ended, as its result says.
@@ -409,6 +555,9 @@ message JobResult {
   // With RESULT_REASON_INPUT_FAILED: the agent's code, such as input-unreadable or
   // host-port-lost. Absent otherwise.
   optional string input_failure = 12;
+  // The attempt this result is of, from 1. 0 (a result recorded before attempts were
+  // counted): 1.
+  uint32 attempt = 13;
 }
 
 // Why the service refuses a submit. A refused submit records nothing, so the client may

@@ -84,7 +84,9 @@ pub(super) fn describe(events: &[Event]) -> Vec<String> {
 /// is no limit.
 ///
 /// The sources are [`BookedFrom::as_str`](js_agent_wire::BookedFrom::as_str)'s names. The run
-/// id and the class are ids of the wire's grammar, so the line is one line of words.
+/// id is an id of the wire's grammar and the class printable ASCII
+/// ([`StartSizing::checked`](js_agent_wire::StartSizing::checked)), so the line is one line;
+/// the class is one word as it is ([`class_word`]), or a quoted string when it holds a space.
 fn result_line(run_id: &str, booked: &JobBooking, usage: Option<&JobUsage>) -> String {
     let known = |value: Option<String>| value.unwrap_or_else(|| "-".to_owned());
     let sizing = booked.sizing.as_ref();
@@ -95,7 +97,7 @@ fn result_line(run_id: &str, booked: &JobBooking, usage: Option<&JobUsage>) -> S
         ("memory_bytes", booked.memory_bytes.to_string()),
         (
             "class",
-            known(sizing.and_then(|sizing| sizing.class.clone())),
+            known(sizing.and_then(|sizing| sizing.class.as_deref().map(class_word))),
         ),
         ("cpu_from", known(sizing.map(|s| s.cpu.as_str().to_owned()))),
         (
@@ -148,6 +150,18 @@ fn result_line(run_id: &str, booked: &JobBooking, usage: Option<&JobUsage>) -> S
         .map(|(key, value)| format!("{key}={value}"))
         .collect();
     format!("job: result {}", words.join(" "))
+}
+
+/// The class `class` as one word of a result line: as it is when it is one word (no space,
+/// `"` or `\`, and not `-`, which names no class), else in double quotes with each `"` and
+/// `\` escaped by a `\`, as a JSON string is, so `class=` still names the whole of it.
+fn class_word(class: &str) -> String {
+    let word = !class.contains([' ', '"', '\\']) & (class != "-");
+    if word {
+        return class.to_owned();
+    }
+    let escaped = class.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
 }
 
 /// The line of a new taint, one line that says what changed:

@@ -18,8 +18,9 @@ marked settled. The ids run D1 to D66 with no gaps. D26 is open. Superseded deci
   not above the limit just used (7.4). Options: keep (current behaviour) or move to above-the-limit, which is a behaviour change with its
   own replay proof and not part of the extraction. Recommend (c) with (a) as the default after a replay supports it, and keeping the
   ladder as it ships.
-- **D5. ucdk role.** (a) launcher only; (b) infrastructure provider only; (c) both. Recommend (c), launcher first, as an optional
-  realization beside ucdk's direct launcher (11.1).
+- **D5. ucdk role.** (Superseded (2026-11-24): ucdk removed its deployment side, its `Job` resource and its `Provider` trait in
+  komira-ai/ucdk#28, so there is no ucdk role to choose; see [ucdk.md](ucdk.md).) (a) launcher only; (b) infrastructure provider only;
+  (c) both. Recommend (c), launcher first, as an optional realization beside ucdk's direct launcher (11.1).
 - **D6. Fence.** (a) self-fence for everything; (b) the class declares a default (self-fence unless the definition declares hermetic or
   idempotent) and every request resolves and records its fence at submit, so no default is silent. Recommend (b).
 - **D7. Memory booking for non-kbf classes. Amended by D56.** (a) same as kbf; (b) `Book` for ucdk job classes, with the declared size as
@@ -27,14 +28,16 @@ marked settled. The ids run D1 to D66 with no gaps. D26 is open. Superseded deci
   Recommend (b); kbf actions keep today's rule.
 - **D8. Validation run id and label key.** The caller mints; the scheduler carries and applies; the key is `jobscheduler.dev/validation-run`
   (12.3). Recommend yes.
-- **D9. Triggers.** Cron-like triggers live in job definitions as data, with UJ3 semantics, when Job is realized by jobscheduler; the
+- **D9. Triggers.** (Superseded (2026-11-24): the ucdk realization is dropped, [ucdk.md](ucdk.md); jobscheduler has no triggers.)
+  Cron-like triggers live in job definitions as data, with UJ3 semantics, when Job is realized by jobscheduler; the
   cloud scheduler role node is dropped in that realization and kept in the direct one (11.2). Recommend yes.
 - **D10. Resources and capability schema.** Named resource vector in v1 with the lease-count cap separate; whole-device GPUs, no fractional
   GPUs. Capability schema: provider-registered, namespaced keys, unknown request keys refused, unknown report keys skipped. Recommend yes.
 - **D11. Consensus.** The generic core relies on the state store's conditional writes for who places (`crates/kbf-sched/src/scheduler/handoff.rs`), not on a
   consensus log. `crates/kbf-raft` exists in kbf. Options: (a) the core requires only the store; (b) the core also supports a replicated
   log. Recommend (a); `kbf-raft` stays in kbf until a second user asks.
-- **D12. Name collision.** jobscheduler's *capacity provider* and ucdk's *Provider* trait are different. Options: rename ours to *source*
+- **D12. Name collision.** (Superseded (2026-11-24): ucdk's `Provider` trait and the ucdk-side adapter are gone, komira-ai/ucdk#28,
+  so nothing collides; see [ucdk.md](ucdk.md).) jobscheduler's *capacity provider* and ucdk's *Provider* trait are different. Options: rename ours to *source*
   or *backend*; or keep and always qualify. The ucdk-side adapter lives in ucdk (11.1) and no jobscheduler code names ucdk's trait, so the
   clash is confined to prose. Recommend keeping "capacity provider" here and writing "infrastructure provider" for the ucdk side; the
   rename is the owner's option if the prose proves confusing. Inside this repository the merged trait `Provider` is renamed (D16).

@@ -9,11 +9,13 @@ js-agent: job: Started { run_id: "<run>", timeline: StartTimeline { received_ms:
   placed_at_ms: Some(P), received_at_ms: Some(A),
   steps: [("taken", a), ("admitted", b), ("ready", c), ("dirs", d), ("created", e)],
   runtime: [("begin", W1), ("recorded", W2), ("image", W3), ("dirs", W4), ("cgroup", W5),
-  ("bundle", W6), ("supervised", W7), ("running", W8)] } }
+  ("bundle", W6), ("supervised", W7), ("running", W8)],
+  lookup: Some(LookupStamps { queued_at_ms: Q, started_at_ms: S, ended_at_ms: E,
+  queue_ms: S-Q, open_ms: E-S }) }, booked: JobBooking { .. } }
 ```
 
-`R` and the lowercase letters are milliseconds on the agent's clock, `P`, `A` and the `W`s wall clock
-times (below). On a node the line is in the agent's
+`R` and the lowercase letters are milliseconds on the agent's clock, `P`, `A`, the `W`s, `Q`, `S` and
+`E` wall clock times (below). On a node the line is in the agent's
 journal: `journalctl -u <the agent's unit> | grep 'job: Started'`.
 
 ## Placement and arrival (`placed_at_ms`, `received_at_ms`)
@@ -63,6 +65,28 @@ of, and its config read), `dirs` (its directories made and given to the job's us
 cgroup made, limited and given to the job user), `bundle` (its bundle written), `supervised` (the
 supervisor made its files and said it is ready) and `running` (its sidecar says it runs and its
 network is wired).
+
+## The lookup it waited on (`lookup`)
+
+A start with layers or mounts opens each of its host paths beneath its root on the `crun` runtime's
+pool of lookups (`js-lookups`, 80 threads: one for each host path a start may name, 16 layers and
+64 mounts). On a FUSE file system, such as a tier store's tree, the
+open is the file system's own lookup of the tree. Each lookup is stamped with the runtime's wall
+clock (milliseconds since the Unix epoch) three times: `queued_at_ms` when the worker asked the pool
+for it, `started_at_ms` when a thread of the pool began it and `ended_at_ms` when the open returned.
+The line gives the stamps of the lookup that ended last (the one the start waited on; of two that
+ended at once, the one listed first), with the two spans they give:
+
+- `queue_ms`: `started_at_ms - queued_at_ms`, the time it waited for a thread of the pool;
+- `open_ms`: `ended_at_ms - started_at_ms`, the time the open took.
+
+A span is 0, not negative, when the wall clock stepped back between its stamps. `lookup` is `None`
+for a start with no host path and on a runtime other than `crun`. A lookup that failed or did not
+answer in time refuses the start, which then has no `Started` line.
+
+For a job start the line's `run_id` is the job's id, so the line joins by that id with the server's
+line of the same job. The stamps are on the node's wall clock: a difference with a time the server
+logged spans two hosts' clocks.
 
 ## The cleanup's line (`Cleaned`)
 

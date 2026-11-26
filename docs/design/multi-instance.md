@@ -188,8 +188,9 @@ The scheduling logic decides a placement and writes what the host must do as a m
   `dispatch-poll` and polls only for a session whose welcome says `dispatch_poll`; it polls on a thread of its own, on a new
   connection for each poll (so each can reach any instance), with the welcome's host, epoch and session. A 200 is handed to the
   worker in one delivery and its messages are acked in the next poll when the worker took them (an invalid message is neither acted on
-  nor acked, one the worker had no room for is not acked and comes again after `claim_until`); the acks stay until a poll that carried
-  them is answered 200. A transport error and every status but 200 (404 from a server without the route during an update, 408, 429, 5xx, and
+  nor acked; messages the worker had no room for are held, no poll is posted meanwhile, and they are handed over when the worker takes an
+  order and acked in the poll posted right after, so they come again after `claim_until` only when the worker stays full past it); the
+  acks stay until a poll that carried them is answered 200. A transport error and every status but 200 (404 from a server without the route during an update, 408, 429, 5xx, and
   the refusals 400, 401, 403, 409 of an instance that does not hold or will not serve the session) back off like a failed heartbeat
   and poll again with the same route, since the next poll may reach another instance and a halt would leave the starts that servers
   leave out of beat replies undelivered while heartbeats succeed. A welcome without the flag

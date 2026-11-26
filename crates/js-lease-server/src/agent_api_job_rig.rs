@@ -78,6 +78,7 @@ pub(crate) fn spec() -> JobSpec {
         layers: Vec::new(),
         mounts: Vec::new(),
         host_ports: Vec::new(),
+        history_key: Default::default(),
     }
 }
 
@@ -171,6 +172,8 @@ pub(crate) struct Extra {
     pub(crate) tables: Option<Tables>,
     pub(crate) store_clock: Option<Arc<StoreClock>>,
     pub(crate) whole: Option<WholePool>,
+    /// The placer's `--placement-curves` mode; `off` by default.
+    pub(crate) curves: js_sched_placer::sizes::Curves,
 }
 
 /// What makes a rig's pool a whole-node pool of hosts without GPUs ([`whole_rig`]): its
@@ -257,6 +260,19 @@ pub(crate) fn clocked_rig(name: &str, placing: bool, limits: JobLimits) -> Rig {
     clocked_rig_keeping(name, placing, (limits, Retention::DEFAULT))
 }
 
+/// [`clocked_rig`] placing, its placer at `--placement-curves on`.
+pub(crate) fn clocked_curve_rig(name: &str) -> Rig {
+    let clock = Arc::new(StoreClock::default());
+    clock.advance(std::time::Duration::from_millis(START_MS));
+    let shared = SharedClock::new(OneClock(Arc::clone(&clock)));
+    let kept = (JobLimits::default(), Retention::DEFAULT);
+    let extra = Extra {
+        curves: js_sched_placer::sizes::Curves::On,
+        ..Extra::default()
+    };
+    rig_on(name, (true, true), kept, (clock, shared), extra)
+}
+
 /// [`clocked_rig`], its jobs held to `limits` and each ended job kept for `retention`.
 pub(crate) fn clocked_rig_keeping(
     name: &str,
@@ -324,6 +340,7 @@ pub(crate) fn rig_on(
         let backfill = extra.whole.as_ref().and_then(|whole| whole.backfill);
         let settings = crate::sched::engine::Settings {
             backfill: backfill.map_or_else(Backfill::default, Backfill::enforced),
+            curves: extra.curves,
             ..crate::sched::engine::Settings::default()
         };
         Arc::new(crate::sched::place::SchedPlacer::new(

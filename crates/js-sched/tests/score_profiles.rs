@@ -242,6 +242,7 @@ impl PredictedLoad for Viewed<'_> {
             same_key_millis: 0,
             new_key_millis: 10_000,
             uncovered_leases: 1,
+            booked_with_lease: Charge::default(),
         }
     }
 }

@@ -47,6 +47,7 @@ fn the_first_run_is_learned_and_not_scored() {
             predicted_peak: None,
             curve_error: None,
             flat_error: None,
+            overran: None,
             window: Window::default(),
             shaped: false,
         }
@@ -379,4 +380,53 @@ fn an_unlearned_run_is_still_scored() {
     assert_eq!((c.curve_error, c.flat_error), (Some(20), Some(20)));
     assert_eq!(c.window.runs, 1);
     assert_eq!(p.runs(), 8);
+}
+
+/// A scored run overran its predicted peak when its peak is more than 25% above it: with
+/// a predicted peak of 16, a run peaking at 20 (exactly 25% over) did not and one peaking
+/// at 21 did. A run that was not scored (7 kept runs) has no verdict.
+#[test]
+fn a_run_overruns_its_predicted_peak_above_a_quarter() {
+    for (peak, overran) in [(16, false), (20, false), (21, true), (40, true)] {
+        let mut p = class(&[16; 4], 8);
+        let c = p.check_and_learn(pts(&[peak; 4]), E, true);
+        assert_eq!(c.predicted_peak, Some(16));
+        assert_eq!(c.overran, Some(overran), "peak {peak}");
+        assert_eq!(p.overruns(), usize::from(overran), "peak {peak}");
+    }
+    let mut p = class(&[16; 4], MIN_RUNS - 1);
+    let c = p.check_and_learn(pts(&[40; 4]), E, true);
+    assert_eq!((c.predicted_peak, c.overran), (None, None));
+    assert_eq!(p.overruns(), 0);
+}
+
+/// The overrun flags are kept with the scores, 16 of them: an overrun drops out of the
+/// count with the 16th run scored after it, not the 15th. The runs are not learned (their
+/// mean is not above the level), so every run is scored against the same class.
+#[test]
+fn the_overruns_window_drops_the_oldest_after_16() {
+    let mut p = class(&[16; 4], 8);
+    let c = p.check_and_learn(pts(&[60, 0, 0, 0]), E, false);
+    assert_eq!((c.learned, c.overran), (false, Some(true)));
+    assert_eq!(p.overruns(), 1);
+    for i in 1..CHECK_RUNS {
+        let c = p.check_and_learn(pts(&[16; 4]), E, false);
+        assert_eq!((c.learned, c.overran), (false, Some(false)));
+        assert_eq!(p.window().runs, i + 1);
+        assert_eq!(p.overruns(), 1, "after {i} more runs");
+    }
+    p.check_and_learn(pts(&[16; 4]), E, false);
+    assert_eq!(p.window().runs, CHECK_RUNS);
+    assert_eq!(p.overruns(), 0);
+}
+
+/// A run lasted past 128 s when it has a second from 128 s on: 128 s of points has none,
+/// 129 s has one. `tail_runs` counts the kept runs that have.
+#[test]
+fn tail_runs_counts_the_runs_past_128_seconds() {
+    let mut p = class(&[16; 128], 2);
+    assert_eq!(p.tail_runs(), 0);
+    learn(&mut p, &[16; 129], 3);
+    assert_eq!(p.tail_runs(), 3);
+    assert_eq!(p.runs(), 5);
 }

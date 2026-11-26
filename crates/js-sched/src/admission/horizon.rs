@@ -28,6 +28,9 @@
 //! the flat rule's, and every later slot reads the same figures or less, so the result is
 //! the flat rule's.
 //!
+//! On a worker whose CPU the caller judges ([`crate::Scheduler::set_cpu_judged`]) the CPU
+//! inequality is not evaluated at any slot; memory is.
+//!
 //! One further guard, on by default (`d` = 0, see [`flat_memory_refusal`]): the sum of
 //! the *flat* memory costs of every lease on the worker (cold and demoted ones included),
 //! with the new lease's, must stay within `(1 + d) * C_mem`, whatever way the new lease
@@ -106,7 +109,7 @@ pub(crate) fn new_charge(
 
 /// Why a lease of `cost`, charged over time as `profile` says (flat when `None`), does not
 /// fit a worker of `capacity` charged as `left`, or `None` if it fits at every slot.
-/// CPU is judged first, then memory. The flat-memory guard is [`flat_memory_refusal`].
+/// CPU is judged first (not at all when `cpu_judged`), then memory. The flat-memory guard is [`flat_memory_refusal`].
 pub(crate) fn refusal(
     t: &Totals,
     cost: &LeaseCost,
@@ -114,12 +117,15 @@ pub(crate) fn refusal(
     left: &Left,
     capacity: &Resources,
     cfg: &LoadConfig,
+    cpu_judged: bool,
 ) -> Option<Refusal> {
     let cpu_limit = cfg.cpu_limit(capacity);
     let mem_limit = cfg.mem_limit(capacity);
     let new_cpu = |slot: usize| new_charge(cost, profile, left, capacity, slot).0;
     let new_mem = new_charge(cost, profile, left, capacity, 0).1;
-    for slot in 0..SLOTS {
+    // On a worker whose CPU the caller judges ([`crate::Scheduler::set_cpu_judged`]) no slot
+    // of the curve is tested here.
+    for slot in 0..if cpu_judged { 0 } else { SLOTS } {
         let at = cpu_left(t, slot, (left.measured, left.before), cfg);
         let new = new_cpu(slot);
         if at.saturating_add(new) > cpu_limit {

@@ -14,6 +14,7 @@ use axum::extract::ConnectInfo;
 use axum::http::{Request as HttpRequest, StatusCode};
 use js_elastic::{Acquired, Reason, Refusal, RefusalCode};
 use js_jobs::{Booked, JobEnd, JobId, JobState, NewJob, Output, StartFailure};
+use js_sched_placer::curves::CurveView;
 use js_types::HostId;
 use tower::ServiceExt;
 
@@ -148,6 +149,7 @@ async fn fixture(name: &str) -> Fixture {
     }
     (0..2).for_each(|_| recorder.start_refused(&host_a, "no-capacity"));
     recorder.start_refused(&host_b, "input-not-allowed");
+    (0..2).for_each(|_| recorder.curve_wait_expired());
     let capacity = Acquired::Refused(Refusal {
         code: RefusalCode::Capacity,
         reason: Reason::Api("no capacity in the zone".to_owned()),
@@ -212,6 +214,7 @@ async fn without_the_job_tables_no_job_family_is_written() {
     let seen = super::render::Snapshot {
         jobs: None,
         hosts: Vec::new(),
+        curves: None,
     };
     let text = render(&seen, &Recorder::default());
     assert!(!text.contains("js_jobs{"), "{text}");
@@ -239,6 +242,7 @@ async fn a_scrape_without_the_job_tables_reads_the_hosts_alone() {
     let expected = super::render::Snapshot {
         jobs: None,
         hosts: vec![host],
+        curves: None,
     };
     assert_eq!(seen, expected);
 }
@@ -327,10 +331,188 @@ fn a_refusal_is_written_with_its_host_and_reason_labels() {
     let seen = super::render::Snapshot {
         jobs: None,
         hosts: Vec::new(),
+        curves: None,
     };
     let text = render(&seen, &recorder);
     let line = "\njs_placement_refusals_total{host=\"h\",reason=\"cpu\"} 1\n";
     assert!(text.contains(line), "{line} is not in:\n{text}");
+}
+
+/// Asserts that the curve wait expiry counter is written at zero before any expiry, as one
+/// line under its HELP and TYPE, and that it reads each expiry the pass sink forwards: three
+/// calls through the sink give 3. Catches a counter written only after its first event, a pass
+/// sink that does not forward the expiry, and one that counts it twice.
+#[test]
+fn the_pass_sink_counts_each_curve_wait_expiry_and_zero_is_written() {
+    use js_sched_placer::engine::jobs::PassMetrics;
+    let recorder = Recorder::default();
+    let seen = super::render::Snapshot {
+        jobs: None,
+        hosts: Vec::new(),
+        curves: None,
+    };
+    let zero = "# TYPE js_curve_wait_expiries_total counter\njs_curve_wait_expiries_total 0\n";
+    assert!(render(&seen, &recorder).contains(zero));
+    let sink = PassSink(&recorder);
+    (0..3).for_each(|_| sink.curve_wait_expired());
+    let three = "\njs_curve_wait_expiries_total 3\n";
+    assert!(render(&seen, &recorder).contains(three));
+}
+
+/// Asserts the two curve families of a scrape that read a view: `js_curve_classes` has its
+/// `curve` line then its `flat` line, each with its own count (3 and 5, so a swap shows), and
+/// `js_host_cpu_booked_peak_millicores` has a line for each host in the view in host order,
+/// with a host id written escaped; both under their HELP and TYPE as gauges. Catches counts
+/// that are swapped, a host left out or given another host's peak, and a label left unescaped.
+#[test]
+fn a_curve_view_is_written_as_its_classes_and_each_hosts_peak() {
+    let view = CurveView {
+        curve_classes: 3,
+        flat_classes: 5,
+        host_peaks: BTreeMap::from([
+            (HostId::new("host-b").unwrap(), 0),
+            (HostId::new("host-a").unwrap(), 12_250),
+        ]),
+    };
+    let seen = super::render::Snapshot {
+        jobs: None,
+        hosts: Vec::new(),
+        curves: Some(view),
+    };
+    let text = render(&seen, &Recorder::default());
+    let classes = "# TYPE js_curve_classes gauge\n\
+        js_curve_classes{state=\"curve\"} 3\n\
+        js_curve_classes{state=\"flat\"} 5\n";
+    assert!(text.contains(classes), "{text}");
+    let peaks = "# TYPE js_host_cpu_booked_peak_millicores gauge\n\
+        js_host_cpu_booked_peak_millicores{host=\"host-a\"} 12250\n\
+        js_host_cpu_booked_peak_millicores{host=\"host-b\"} 0\n";
+    assert!(text.contains(peaks), "{text}");
+    assert!(
+        text.ends_with(peaks),
+        "the peaks are the last family:\n{text}"
+    );
+}
+
+/// Asserts that a scrape with no curve view (the placer is not at `on`) writes neither curve
+/// family, and one with an empty view writes both families with their zero lines and no host
+/// line. Catches a family written when the mode is not `on`, and one dropped for an empty view.
+#[test]
+fn the_curve_families_are_written_only_when_there_is_a_view() {
+    let none = super::render::Snapshot {
+        jobs: None,
+        hosts: Vec::new(),
+        curves: None,
+    };
+    let text = render(&none, &Recorder::default());
+    assert!(!text.contains("js_curve_classes"), "{text}");
+    assert!(
+        !text.contains("js_host_cpu_booked_peak_millicores"),
+        "{text}"
+    );
+    let empty = super::render::Snapshot {
+        curves: Some(CurveView::default()),
+        ..none
+    };
+    let text = render(&empty, &Recorder::default());
+    assert!(
+        text.contains("js_curve_classes{state=\"curve\"} 0\njs_curve_classes{state=\"flat\"} 0\n")
+    );
+    assert!(
+        text.contains("# TYPE js_host_cpu_booked_peak_millicores gauge\n"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("js_host_cpu_booked_peak_millicores{"),
+        "{text}"
+    );
+}
+
+/// Asserts that a scrape reads the placer's curve view: over a server whose placer is at `on`
+/// the snapshot carries the view the placer gives, and over one whose placer is `off` (as the
+/// fixture's) it carries none, so a server not at `on` writes no curve family. Catches a scrape
+/// that never reads the placer and one that shows a view for a placer that gives none.
+#[tokio::test]
+async fn a_scrape_reads_the_curve_view_of_a_placer_at_on_and_none_otherwise() {
+    use js_sched_placer::engine::Settings;
+    use js_sched_placer::place::SchedPlacer;
+    use js_sched_placer::sizes::Curves;
+    let mut rig = crate::agent_api::job_rig::rig("metrics_curve_view", false);
+    rig.register("host-a", true);
+    let shared = shared_over(&rig);
+    let seen = snapshot(&shared, NonZeroUsize::MIN).await.unwrap();
+    assert_eq!(seen.curves, None);
+    let settings = Settings {
+        curves: Curves::On,
+        ..Settings::default()
+    };
+    let placer = SchedPlacer::new(settings, rig.shared.clone());
+    let expected = placer.curve_view();
+    assert!(expected.is_some());
+    drop(shared);
+    let agents = Arc::try_unwrap(rig.agents).ok().unwrap();
+    let agents = Arc::new(agents.with_placer(Arc::new(placer)));
+    let shared = Arc::new(Shared::new(parse_token(&TOKEN).unwrap(), agents));
+    let seen = snapshot(&shared, NonZeroUsize::MIN).await.unwrap();
+    assert_eq!(seen.curves, expected);
+}
+
+/// Asserts the curve families through the mounted route, over a server whose placer is at `on`:
+/// a job of a class that ran once and ended, taught at the start (its class has a profile that
+/// fails its checks), and a job placed on `host-a` that named its 1.5 cores (booked flat, so
+/// charged 1500 m at every slot) make GET /metrics answer `js_curve_classes` with no class by
+/// curve and one flat, and `js_host_cpu_booked_peak_millicores` of 1500 for `host-a`, beside
+/// the summed bookings. Catches a route whose scrape leaves out the placer's view, and a view
+/// the scrape reads before the passes that make it.
+#[tokio::test]
+async fn get_metrics_at_on_answers_the_curve_classes_and_each_curve_hosts_peak() {
+    let mut rig = crate::agent_api::job_rig::clocked_curve_rig("metrics_curve_route");
+    rig.register("host-a", true);
+    let old = queue(&rig, "old-ran");
+    let jobs = &rig.jobs;
+    jobs.place(&old, HostId::new("host-a").unwrap(), BOOKED)
+        .unwrap();
+    jobs.transition(&old, JobState::Placed, JobState::Starting)
+        .unwrap();
+    jobs.transition(&old, JobState::Starting, JobState::Running)
+        .unwrap();
+    rig.advance(Duration::from_secs(10));
+    jobs.end_and_free(&old, exited(0), js_jobs::EndReason::Exited)
+        .unwrap();
+    let placer = rig.agents.placer.clone().unwrap();
+    // The run reports no usage, so it teaches no memory sample (0), but its class's profile.
+    assert_eq!(crate::job_sizes::begin(&placer, jobs).teach(), 0);
+    rig.place("new-live", "host-a");
+    let agent = crate::agent_api::job_rig::FakeAgent::new("host-a");
+    rig.beat(&agent).await.unwrap();
+    let fixture = Fixture {
+        shared: shared_over(&rig),
+        rig,
+        recorder: Arc::new(Recorder::default()),
+        ids: Vec::new(),
+    };
+    let (status, _, body) = answer(&fixture, from(Some("10.0.0.9:4000"), "/metrics")).await;
+    assert_eq!(status, StatusCode::OK);
+    let lines = |family: &str| -> Vec<&str> {
+        body.lines()
+            .filter(|line| line.starts_with(family))
+            .collect()
+    };
+    assert_eq!(
+        lines("js_curve_classes{"),
+        [
+            "js_curve_classes{state=\"curve\"} 0",
+            "js_curve_classes{state=\"flat\"} 1"
+        ]
+    );
+    assert_eq!(
+        lines("js_host_cpu_booked_peak_millicores{"),
+        ["js_host_cpu_booked_peak_millicores{host=\"host-a\"} 1500"]
+    );
+    assert_eq!(
+        lines("js_host_cpu_booked_millicores{host=\"host-a\"}"),
+        ["js_host_cpu_booked_millicores{host=\"host-a\"} 1500"]
+    );
 }
 
 /// Asserts that an agent's refusal code is a label of its own only when it is 1 to 64 characters
@@ -342,6 +524,7 @@ fn a_refusal_code_outside_the_label_rule_is_counted_as_other() {
     let seen = super::render::Snapshot {
         jobs: None,
         hosts: Vec::new(),
+        curves: None,
     };
     let recorder = Recorder::default();
     let empty = render(&seen, &recorder);
@@ -383,6 +566,7 @@ fn a_pool_name_is_written_escaped() {
     let seen = super::render::Snapshot {
         jobs: None,
         hosts: Vec::new(),
+        curves: None,
     };
     let text = render(&seen, &recorder);
     let line = "\njs_acquires_total{pool=\"a\\\"b\\nc\"} 1\n";
@@ -403,6 +587,20 @@ fn a_label_value_escapes_backslash_quote_and_line_feed() {
 fn the_off_meter_times_nothing() {
     let (done, took) = Meter::off().timed(|| 7);
     assert_eq!((done, took), (7, Duration::ZERO));
+}
+
+/// Asserts that a sink with no counter of its own for the curve wait expiry (the sink of a
+/// server without `--metrics-listen`) takes the event and counts nothing, and the recorder
+/// beside it, told through the same trait object, counts it once. Catches an expiry that
+/// panics where no one counts it, and a recorder that is not reached through the trait.
+#[test]
+fn a_sink_without_a_counter_takes_a_curve_wait_expiry_and_the_recorder_counts_it() {
+    let recorder = Recorder::default();
+    let sinks: [&dyn MetricsSink; 2] = [&NoMetrics, &recorder];
+    for sink in sinks {
+        sink.curve_wait_expired();
+    }
+    assert_eq!(recorder.curve_wait_expiries.load(Ordering::Relaxed), 1);
 }
 
 /// A request for `path` from `peer`, as the listener hands it on.

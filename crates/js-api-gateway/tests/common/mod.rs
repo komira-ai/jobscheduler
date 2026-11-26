@@ -328,6 +328,7 @@ impl JobService for Stub {
                         run_usec: 5_500_000,
                         partial: true,
                     }),
+                    attempt: Some(2),
                 }],
                 next_page_token: "usage-page-2".to_owned(),
             },
@@ -391,7 +392,8 @@ pub fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         .collect()
 }
 
-/// A job spec with every field set; its file's contents are empty, as a read returns them.
+/// A job spec with every field set; its file's contents and its callback's key are empty, as a
+/// read returns them.
 pub fn spec() -> JobSpec {
     JobSpec {
         job_id: "job-1".to_owned(),
@@ -459,6 +461,17 @@ pub fn spec() -> JobSpec {
             no_exec: true,
             propagation: js_proto::v1::MountPropagation::Private.into(),
         }],
+        history_key: Default::default(),
+        retry: Some(js_proto::v1::RetryPolicy {
+            max_attempts: u32::MAX,
+            initial_backoff_seconds: Some(0),
+            max_backoff_seconds: Some(600),
+        }),
+        callback: Some(js_proto::v1::Callback {
+            url: "https://hooks.example/js-done/ref-1".to_owned(),
+            signing_key: Vec::new(),
+            deadline_seconds: Some(0),
+        }),
     }
 }
 
@@ -498,6 +511,28 @@ pub fn job() -> Job {
             host_id: Some("host-a".to_owned()),
         }],
         dropped_events: 4,
+        attempt: 2,
+        attempt_history: vec![js_proto::v1::Attempt {
+            number: 1,
+            host_id: "host-b".to_owned(),
+            outcome: js_proto::v1::AttemptOutcome::HostLost.into(),
+            times: Some(times()),
+            exit_code: Some(-1),
+            reason: ResultReason::Unspecified.into(),
+            start_failure: StartFailureCode::StartTimeout.into(),
+            start_failure_detail: "start-timeout".to_owned(),
+            retried: true,
+        }],
+        retry_not_before_ms: Some(BIG + 7000),
+        callback_status: Some(js_proto::v1::CallbackStatus {
+            state: js_proto::v1::CallbackState::Pending.into(),
+            tries: 1,
+            last_try_at_ms: Some(BIG + 8000),
+            last_failure: "failed".to_owned(),
+            delivered_at_ms: Some(0),
+            deadline_at_ms: Some(BIG + 9000),
+        }),
+        dropped_attempts: 1,
     }
 }
 
@@ -591,6 +626,7 @@ pub fn result() -> JobResult {
             gpus: 2,
         }),
         input_failure: Some("input-unreadable".to_owned()),
+        attempt: 2,
     }
 }
 
