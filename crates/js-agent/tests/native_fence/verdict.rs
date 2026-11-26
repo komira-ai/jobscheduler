@@ -118,16 +118,15 @@ impl fmt::Display for Answer {
     }
 }
 
-/// Who a probe process was: its pid, the process it answers to for the privacy controls and
-/// its uid.
+/// Who a probe process was: its pid and the process it answers to for the privacy controls.
+/// (Which account the job ran as the test reads itself, from the owner of the file the job
+/// wrote: see [`Outcomes::job_owner`].)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Who {
     /// The probe's own pid.
     pub pid: u32,
     /// The pid of its responsible process, `None` when the system could not say.
     pub responsible: Option<u32>,
-    /// The probe's uid.
-    pub uid: u32,
 }
 
 /// The marker that starts the text of every line a probe prints.
@@ -143,10 +142,7 @@ pub fn who_line(who: &Who) -> String {
     let responsible = who
         .responsible
         .map_or_else(|| "unreadable".to_owned(), |pid| pid.to_string());
-    format!(
-        "{PREFIX} who pid={} responsible={responsible} uid={}",
-        who.pid, who.uid
-    )
+    format!("{PREFIX} who pid={} responsible={responsible}", who.pid)
 }
 
 /// What one probe process printed.
@@ -175,7 +171,6 @@ fn parse_who(rest: &str) -> Option<Who> {
     Some(Who {
         pid: field(&fields, "pid")?.parse().ok()?,
         responsible,
-        uid: field(&fields, "uid")?.parse().ok()?,
     })
 }
 
@@ -211,6 +206,9 @@ pub struct Outcomes {
     pub test_responsible: Option<u32>,
     /// The uid of the pool's one slot.
     pub slot_uid: u32,
+    /// The owner of the file the job wrote in its run directory, which the test read before
+    /// the run was removed: the account the job ran as. `None` when there was no such file.
+    pub job_owner: Option<u32>,
     /// The test's ordinary child, as root, no profile.
     pub root: Report,
     /// A child as the slot uid, counted as the test, no profile.
@@ -354,13 +352,15 @@ pub fn verdict(o: &Outcomes) -> Verdict {
         ));
     }
     responsibility(o, &mut reasons);
-    if let Some(who) = o.job.who
-        && who.uid != o.slot_uid
-    {
-        reasons.push(format!(
-            "the job ran as uid {}, not the slot's uid {}",
-            who.uid, o.slot_uid
-        ));
+    match o.job_owner {
+        None => reasons.push(
+            "the job's own file was not found, so the account it ran as is not known".to_owned(),
+        ),
+        Some(owner) if owner != o.slot_uid => reasons.push(format!(
+            "the job's file is owned by {owner}, not by the slot's uid {}",
+            o.slot_uid
+        )),
+        Some(_) => {}
     }
     let unshown: Vec<String> = all
         .iter()
@@ -417,11 +417,10 @@ mod tests {
     /// The slot's uid in these tests.
     const SLOT: u32 = 4312;
 
-    fn who(pid: u32, responsible: u32, uid: u32) -> Option<Who> {
+    fn who(pid: u32, responsible: u32) -> Option<Who> {
         Some(Who {
             pid,
             responsible: Some(responsible),
-            uid,
         })
     }
 
@@ -435,7 +434,7 @@ mod tests {
     fn sound() -> Outcomes {
         let root = Report {
             answers: answers(&places(), Answer::Open),
-            who: who(10, TEST, 0),
+            who: who(10, TEST),
         };
         let mut counted = answers(&OTHER, Answer::Refused(13));
         counted.extend(answers(&PRIVACY, Answer::Open));
@@ -447,18 +446,19 @@ mod tests {
         Outcomes {
             test_responsible: Some(TEST),
             slot_uid: SLOT,
+            job_owner: Some(SLOT),
             root,
             counted: Report {
                 answers: counted,
-                who: who(11, TEST, SLOT),
+                who: who(11, TEST),
             },
             disclaimed: Report {
                 answers: disclaimed,
-                who: who(12, 12, SLOT),
+                who: who(12, 12),
             },
             job: Report {
                 answers: job,
-                who: who(13, TEST, SLOT),
+                who: who(13, TEST),
             },
         }
     }
@@ -485,7 +485,7 @@ mod tests {
     }
 
     /// Asserts that a job that opened a place fails, naming it, while the same run's controls
-    /// have failed too (root did not open the place, the job's uid is not the slot's): an
+    /// have failed too (root did not open the place, the job's file is not the slot's): an
     /// opened place is a fact whatever the controls say. Catches a verdict that lets a failed
     /// control hide an open.
     #[test]
@@ -493,7 +493,7 @@ mod tests {
         let mut o = sound();
         o.job.answers.insert("tcc-db".to_owned(), Answer::Open);
         o.root.answers.insert("tcc-db".to_owned(), Answer::Absent);
-        o.job.who = who(13, TEST, 0);
+        o.job_owner = Some(0);
         let verdict = verdict(&o);
         assert_eq!(verdict, Verdict::Fail(vec!["tcc-db".to_owned()]));
         assert_eq!(final_line(&verdict), "fence: FAIL tcc-db");
@@ -610,7 +610,6 @@ mod tests {
         o.job.who = Some(Who {
             pid: 13,
             responsible: None,
-            uid: SLOT,
         });
         assert_eq!(
             only_reason(&verdict(&o)),
@@ -631,40 +630,46 @@ mod tests {
     #[test]
     fn responsibility_that_is_not_the_assumed_one_is_inconclusive() {
         let mut o = sound();
-        o.root.who = who(10, 7, 0);
+        o.root.who = who(10, 7);
         assert_eq!(
             only_reason(&verdict(&o)),
             "root answers for pid 7, not for the test's responsible process 100"
         );
         let mut o = sound();
-        o.counted.who = who(11, 12, SLOT);
+        o.counted.who = who(11, 12);
         assert_eq!(
             only_reason(&verdict(&o)),
             "the counted slot process answers for pid 12, not for the test's responsible process 100"
         );
         let mut o = sound();
-        o.job.who = who(13, 13, SLOT);
+        o.job.who = who(13, 13);
         assert_eq!(
             only_reason(&verdict(&o)),
             "the job answers for pid 13, not for the test's responsible process 100"
         );
         let mut o = sound();
-        o.disclaimed.who = who(12, TEST, SLOT);
+        o.disclaimed.who = who(12, TEST);
         assert_eq!(
             only_reason(&verdict(&o)),
             "the disclaimed slot process answers for pid 100, not for itself (12)"
         );
     }
 
-    /// Asserts that a job whose uid is not the slot's makes the run inconclusive. Catches a
-    /// job that ran as another user being taken as the slot's.
+    /// Asserts that a job whose file is owned by another uid than the slot's, and a job whose
+    /// file the test did not find, make the run inconclusive. Catches a job that ran as
+    /// another user, or not at all, being taken as the slot's.
     #[test]
     fn a_job_that_did_not_run_as_the_slot_is_inconclusive() {
         let mut o = sound();
-        o.job.who = who(13, TEST, 501);
+        o.job_owner = Some(501);
         assert_eq!(
             only_reason(&verdict(&o)),
-            "the job ran as uid 501, not the slot's uid 4312"
+            "the job's file is owned by 501, not by the slot's uid 4312"
+        );
+        o.job_owner = None;
+        assert_eq!(
+            only_reason(&verdict(&o)),
+            "the job's own file was not found, so the account it ran as is not known"
         );
     }
 
@@ -778,10 +783,10 @@ mod tests {
     fn every_reason_is_in_the_final_line() {
         let mut o = sound();
         o.root.who = None;
-        o.job.who = who(13, TEST, 501);
+        o.job_owner = Some(501);
         assert_eq!(
             final_line(&verdict(&o)),
-            "fence: INCONCLUSIVE root printed no who line; the job ran as uid 501, not the slot's uid 4312"
+            "fence: INCONCLUSIVE root printed no who line; the job's file is owned by 501, not by the slot's uid 4312"
         );
     }
 
@@ -836,7 +841,6 @@ mod tests {
         let who = Who {
             pid: 7,
             responsible: None,
-            uid: 4312,
         };
         let text = [
             "running 1 test".to_owned(),
@@ -846,16 +850,13 @@ mod tests {
             ),
             "FENCE place".to_owned(),
             "FENCE place tcc-dir sideways".to_owned(),
-            "FENCE who pid=x responsible=1 uid=2".to_owned(),
+            "FENCE who pid=x responsible=1".to_owned(),
             place_line("tcc-dir", &Answer::Open),
             who_line(&who),
             "ok".to_owned(),
         ]
         .join("\n");
-        assert_eq!(
-            who_line(&who),
-            "FENCE who pid=7 responsible=unreadable uid=4312"
-        );
+        assert_eq!(who_line(&who), "FENCE who pid=7 responsible=unreadable");
         let report = parse_report(&text);
         assert_eq!(report.who, Some(who));
         assert_eq!(
@@ -868,7 +869,6 @@ mod tests {
         let counted = Who {
             pid: 8,
             responsible: Some(9),
-            uid: 0,
         };
         assert_eq!(parse_report(&who_line(&counted)).who, Some(counted));
         assert_eq!(parse_report("").who, None);

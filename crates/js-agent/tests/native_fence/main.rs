@@ -17,7 +17,7 @@
 //! runs it through `cargo xtask mac-root-tests`). Four processes each execute THIS binary in
 //! the role `probe` (`FENCE_ROLE=probe`, the places in `FENCE_PLACES` as `name=path` lines)
 //! and print one line per place and one about themselves (`FENCE place <name> <open|refused
-//! <errno>|absent|failed <errno>>`, `FENCE who pid=.. responsible=.. uid=..`). A directory is
+//! <errno>|absent|failed <errno>>`, `FENCE who pid=.. responsible=..`). A directory is
 //! probed by listing it, a file by opening it and reading up to 16 bytes (never printed):
 //!
 //! 1. root, the test's ordinary child, no profile: it must open every place. It shows the
@@ -49,8 +49,9 @@
 //! disclaimed slot process opened one of them (its other places are left to their modes, which
 //! may open the other user's home); a process's who line or responsible pid is missing; 1, 2
 //! and the job do not answer for the test's responsible process, or 3 does not answer for
-//! itself; the job's uid is not the slot's; the job's answer to a place root opened is not
-//! a refusal; the job could not link or clone its own file; or its link or clone of the
+//! itself; the file the job wrote in its run directory is missing or not owned by the slot's
+//! uid (the test reads its owner before the run is removed); the job's answer to a place root
+//! opened is not a refusal; the job could not link or clone its own file; or its link or clone of the
 //! database was not refused. Only a pass passes: the test asserts the verdict, so it never passes on a failed
 //! control.
 //!
@@ -205,7 +206,6 @@ fn probe() {
     let who = Who {
         pid,
         responsible: responsible(pid),
-        uid: rustix::process::getuid().as_raw(),
     };
     println!("{}", verdict::who_line(&who));
 }

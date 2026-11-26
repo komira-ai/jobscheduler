@@ -412,6 +412,18 @@ impl Drop for Trial {
     }
 }
 
+/// The owner of `fence-own`, the file the job wrote in its run directory (`exec` in the one
+/// account's home below the pool's homes), read before the run is removed: the account the
+/// job ran as. `None` when there is no such file.
+fn job_owner(fixture: &Fixture) -> Option<u32> {
+    fs::read_dir(&fixture.homes)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name() != "js-other-home")
+        .find_map(|entry| fs::metadata(entry.path().join("exec").join("fence-own")).ok())
+        .map(|meta| meta.uid())
+}
+
 /// Prints what a process answered, one line per place.
 fn show(label: &str, report: &Report) {
     println!("process {label}");
@@ -450,11 +462,13 @@ pub fn run() -> Verdict {
     if job.who.is_none() {
         eprintln!("the job ended {status:?}\nstdout:\n{stdout}\nstderr:\n{stderr}");
     }
+    let job_owner = job_owner(&fixture);
     trial.end().unwrap_or_else(|why| panic!("{why}"));
 
     let outcomes = Outcomes {
         test_responsible,
         slot_uid: fixture.uid,
+        job_owner,
         root,
         counted,
         disclaimed,
