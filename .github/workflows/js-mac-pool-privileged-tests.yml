@@ -86,3 +86,55 @@ jobs:
             dist/SHA256SUMS
           if-no-files-found: error
           retention-days: 7
+
+  # A trace of the read base set on the hosted macOS 26 image, as root, with a throwaway
+  # unprivileged user: crates/js-mac-pool/tests/trace_base_set.rs, uploaded as an artifact.
+  trace-macos-26:
+    runs-on: macos-26
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Show the host
+        run: |
+          sw_vers
+          uname -m
+          xcode-select -p
+          ls -ld /Applications/Xcode.app
+          /usr/bin/xcodebuild -version
+      - name: Make the pool user and the work root
+        run: |
+          set -euo pipefail
+          sudo dscl . -create /Users/jstrace
+          sudo dscl . -create /Users/jstrace UniqueID 6001
+          sudo dscl . -create /Users/jstrace PrimaryGroupID 20
+          sudo dscl . -create /Users/jstrace UserShell /usr/bin/false
+          sudo dscl . -create /Users/jstrace NFSHomeDirectory /var/empty
+          sudo mkdir -m 0755 /private/var/js-trace
+          sudo chown root:wheel /private/var/js-trace
+          real="$(cd /Applications/Xcode.app && pwd -P)"
+          echo "Xcode: $real"
+          ls -ld "$real"
+          sudo chown root:wheel "$real"
+          sudo chmod go-w "$real"
+      - run: cargo test -p js-mac-pool --test trace_base_set --locked --no-run
+      - name: Run the trace as root
+        run: sudo -E env "PATH=$PATH" "HOME=$HOME" JS_MAC_POOL_PRIV_ROOT=/private/var/js-trace JS_MAC_POOL_PRIV_OWNER_UID="$(id -u)" JS_MAC_POOL_PRIV_UID=6001 JS_MAC_POOL_PRIV_GID=20 cargo test -p js-mac-pool --test trace_base_set --locked -- --ignored --test-threads=1 --nocapture trace
+      - name: Collect the tables
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/trace"
+          sudo find /private/var/js-trace -maxdepth 1 -type f -exec cp {} "$RUNNER_TEMP/trace/" \;
+          sudo chown -R "$(id -u)" "$RUNNER_TEMP/trace"
+          ls -l "$RUNNER_TEMP/trace"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: trace-macos-26
+          path: ${{ runner.temp }}/trace
+          if-no-files-found: error
+          retention-days: 7
