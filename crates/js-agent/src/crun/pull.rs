@@ -10,10 +10,11 @@ use std::time::Duration;
 use async_trait::async_trait;
 use js_contain::oci::Oci;
 use js_contain::oci::image::{IMAGES_DIR, PinnedImage};
+use tokio::task::JoinHandle;
 
 use super::budget::{Book, Budget, Evicted, Store, admit, load};
 use super::spec::pinned;
-use crate::disk::{held_images, tree_bytes};
+use crate::disk::{held_image, held_images, tree_bytes};
 use crate::lifecycle::PullFuture;
 
 /// `image` in the store, fetched and unpacked if it is not, within `limit` for the whole.
@@ -51,6 +52,14 @@ impl Store for OciStore {
 
     fn held(&self) -> io::Result<Vec<(String, u64)>> {
         held_images(&self.images)
+    }
+
+    fn present(&self, image: &PinnedImage) -> bool {
+        let hex = image
+            .digest
+            .strip_prefix("sha256:")
+            .unwrap_or(&image.digest);
+        held_image(&self.images, hex)
     }
 
     async fn remove(&self, image: &PinnedImage) -> io::Result<()> {
@@ -109,13 +118,14 @@ impl Images {
         admit(budget, &*self.store, image).await
     }
 
-    /// `image` in the store for a start, which runs on the worker thread: the use of an
-    /// image the store holds must not wait for another image's measure or eviction.
+    /// `image` in the store for a start: the use of an image the store holds must not wait
+    /// for another image's measure or eviction, nor for the listing of the store.
     ///
     /// Without a budget this is the store's `ensure`. With a budget that is loaded and counts
-    /// the image, it is the store's `ensure` (a stat when the image is there) and then a use
-    /// of the image in the book, which counts for the order of eviction; no turn is taken.
-    /// Otherwise it is [`Images::ensure`] in full.
+    /// the image, or that is not loaded yet while the store holds the image (the listing
+    /// counts it), it is the store's `ensure` (a stat when the image is there) and then a
+    /// use of the image in the book, which counts for the order of eviction; no turn is
+    /// taken. Otherwise it is [`Images::ensure`] in full.
     ///
     /// # Errors
     /// As [`Images::ensure`].
@@ -123,12 +133,30 @@ impl Images {
         let Some(budget) = &self.budget else {
             return self.store.ensure(image).await;
         };
-        if !budget.holds(&image.digest) {
+        let listed_later = || !budget.loaded() && self.store.present(image);
+        if !budget.holds(&image.digest) && !listed_later() {
             return self.ensure(image).await;
         }
         self.store.ensure(image).await?;
         budget.book().touch(&image.digest);
         Ok(())
+    }
+
+    /// Counts the images the store holds now against the budget (the module `budget`'s
+    /// `load`), on a blocking thread of `rt`, so that neither a start nor a pull waits for
+    /// the walk of the store when the agent has just started. Nothing without a budget. A
+    /// store that cannot be listed is logged, and the first pull lists it again.
+    pub(super) fn count_held(self: &Arc<Self>, rt: &tokio::runtime::Runtime) -> JoinHandle<()> {
+        let images = Arc::clone(self);
+        let calls = rt.handle().clone();
+        rt.spawn_blocking(move || {
+            let Some(budget) = &images.budget else {
+                return;
+            };
+            if let Err(why) = calls.block_on(load(budget, &*images.store)) {
+                tracing::warn!("{why}: the first pull lists the store again");
+            }
+        })
     }
 
     /// The pull and unpack of `image` (a reference pinned by digest), counted against the

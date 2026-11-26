@@ -11,7 +11,7 @@ use super::own::{
     hosts_own_mount, hosts_own_process, is_live, job_can_be_in, runners_own, under_held,
 };
 use super::{Integrity, Problem, Process, Snapshot, WATCH_ENTRY_CAP, Watched, code};
-use crate::lifecycle::{CheckFinding, CheckNote, Finished};
+use crate::lifecycle::{CheckFinding, CheckNote, Checked, Finished};
 
 /// The host as it was read, and the inputs that could not be.
 pub(super) struct Reading {
@@ -65,6 +65,22 @@ struct Looked {
     residue: Vec<String>,
     /// The notes of the unreadable inputs, then of the changes.
     notes: Vec<CheckNote>,
+}
+
+/// The first look at the host after a job.
+enum First {
+    /// The host judged: no process would be a leftover, or the checks do not wait.
+    Judged(Looked),
+    /// A process would be a leftover: the processes of the first look (by
+    /// [`Process::key`]), of which the second look judges those still there.
+    Again(BTreeSet<(u32, u64)>),
+}
+
+/// What [`Integrity::poll_after`] keeps of a first look that waits: the run, and the
+/// processes it saw.
+pub(super) struct Again {
+    run_id: String,
+    seen: BTreeSet<(u32, u64)>,
 }
 
 /// `read`, or what `baseline` gives and the reason in `unread` when the input could not be
@@ -166,21 +182,47 @@ impl Integrity {
     /// compared, so what else changed during the wait is part of it. A process that starts
     /// during the wait is judged by the next check, and is not in the baseline this one may
     /// take. `restored` is the re-check of a taint read from the marker at start (see
-    /// `Integrity::compare`).
+    /// `Integrity::compare`). The wait is the view's ([`HostView::settle`]), on the caller's
+    /// thread; [`Integrity::poll_after`] leaves it to the lifecycle instead.
+    ///
+    /// [`HostView::settle`]: super::HostView::settle
     fn look(&self, job: &Finished<'_>, restored: bool) -> Result<Looked, Blind> {
+        match self.first_look(job, restored)? {
+            First::Judged(looked) => Ok(looked),
+            First::Again(seen) => {
+                self.view.settle(self.settle);
+                self.second_look(job, restored, &seen)
+            }
+        }
+    }
+
+    /// The first look of [`Integrity::look`]: the host judged, or, when a process would be a
+    /// leftover and the checks wait, the processes of this look.
+    fn first_look(&self, job: &Finished<'_>, restored: bool) -> Result<First, Blind> {
         let (first, mut notes) = self.observe().seen()?;
         let found = self.compare(&first, job, restored);
         if self.settle.is_zero() || found.residue.is_empty() {
             notes.extend(found.notes);
-            return Ok(Looked {
+            return Ok(First::Judged(Looked {
                 now: first,
                 residue: found.residue,
                 notes,
-            });
+            }));
         }
-        self.view.settle(self.settle);
+        Ok(First::Again(
+            first.processes.iter().map(Process::key).collect(),
+        ))
+    }
+
+    /// The second look of [`Integrity::look`], after the wait: the host now, of whose
+    /// processes only those in `seen` (the first look's) are judged.
+    fn second_look(
+        &self,
+        job: &Finished<'_>,
+        restored: bool,
+        seen: &BTreeSet<(u32, u64)>,
+    ) -> Result<Looked, Blind> {
         let (mut later, mut notes) = self.observe().seen()?;
-        let seen: BTreeSet<(u32, u64)> = first.processes.iter().map(Process::key).collect();
         later
             .processes
             .retain(|process| seen.contains(&process.key()));
@@ -321,7 +363,42 @@ impl Integrity {
     /// [`CheckHook::run_restored`](crate::lifecycle::CheckHook::run_restored) when `restored`.
     /// The notes of the check are kept for [`CheckHook::notes`](crate::lifecycle::CheckHook::notes).
     pub(super) fn judge(&mut self, job: &Finished<'_>, restored: bool) -> Result<(), CheckFinding> {
-        match self.look(job, restored) {
+        let looked = self.look(job, restored);
+        self.verdict(looked, job)
+    }
+
+    /// The check after `job` as [`CheckHook::poll`](crate::lifecycle::CheckHook::poll): the
+    /// first look, and when it would wait, [`Checked::Wait`] with the processes it saw kept
+    /// for the run; the next call for the same run takes the second look and gives the
+    /// verdict. A call for another run forgets what was kept and looks first.
+    pub(super) fn poll_after(&mut self, job: &Finished<'_>) -> Checked {
+        let looked = match self.pending.take() {
+            Some(again) if again.run_id == job.run_id => {
+                self.second_look(job, false, &again.seen)
+            }
+            _ => match self.first_look(job, false) {
+                Err(blind) => Err(blind),
+                Ok(First::Judged(looked)) => Ok(looked),
+                Ok(First::Again(seen)) => {
+                    self.pending = Some(Again {
+                        run_id: job.run_id.to_owned(),
+                        seen,
+                    });
+                    return Checked::Wait(self.settle);
+                }
+            },
+        };
+        Checked::Done(self.verdict(looked, job))
+    }
+
+    /// The verdict of a check after `job` that looked as `looked`: the notes kept, and the
+    /// baseline taken (a pass) or what only the notes look at absorbed (a leftover).
+    fn verdict(
+        &mut self,
+        looked: Result<Looked, Blind>,
+        job: &Finished<'_>,
+    ) -> Result<(), CheckFinding> {
+        match looked {
             Err(blind) => {
                 self.notes = blind.notes;
                 Err(CheckFinding::unchecked(

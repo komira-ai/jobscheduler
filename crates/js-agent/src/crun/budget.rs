@@ -34,9 +34,14 @@
 //! is kept, and the next one in order is evicted instead. Only then can an admission end with
 //! [`NoCapacity`] after it evicted something.
 //!
-//! The images the store held before this agent started are counted when the first pull
-//! starts ([`load`], before its fetch), all used before anything since, in the order of
-//! their digests. What a
+//! The images the store held before this agent started are counted by [`load`], which the
+//! runtime runs on a thread of its own when it starts
+//! ([`Images::count_held`](super::pull::Images::count_held)), and which the first pull runs
+//! again (before its fetch) when that has not counted them yet: all used before anything
+//! since, in the order of their digests, except an image a start used while the store was
+//! being listed, which keeps that use. Until then a start's use of an image the store holds
+//! takes no turn either ([`Images::use_held`](super::pull::Images::use_held)), so no start
+//! waits for the listing, which walks every image's tree. What a
 //! budget does not see: the images another agent on the same store pulls are counted only
 //! once a pull of this one meets them, and the bytes an unpack under way takes before it is
 //! published.
@@ -59,6 +64,10 @@ pub(super) trait Store: Send + Sync {
 
     /// Every image the store holds, by digest (`sha256:<hex>`), with the bytes it takes.
     fn held(&self) -> io::Result<Vec<(String, u64)>>;
+
+    /// Whether `image` is in the store now, read without measuring it: what [`Store::held`]
+    /// would list.
+    fn present(&self, image: &PinnedImage) -> bool;
 
     /// Removes `image` from the store. Refused when a lease pins it.
     async fn remove(&self, image: &PinnedImage) -> io::Result<()>;
@@ -103,6 +112,9 @@ pub(super) struct Book {
     uses: u64,
     /// Whether the images the store held before the first admission are counted.
     loaded: bool,
+    /// The last use of each image used before the book was loaded that it does not count
+    /// yet: [`load`] gives it to the image when it counts it.
+    early: BTreeMap<String, u64>,
 }
 
 impl Book {
@@ -115,6 +127,7 @@ impl Book {
             leases: BTreeMap::new(),
             uses: 0,
             loaded: false,
+            early: BTreeMap::new(),
         }
     }
 
@@ -124,11 +137,14 @@ impl Book {
         self.uses
     }
 
-    /// `digest` is used now, when the store holds it.
+    /// `digest` is used now, when the store holds it. Before the book is loaded, the use of
+    /// an image it does not count yet is kept for [`load`].
     pub(super) fn touch(&mut self, digest: &str) {
         let now = self.tick();
         if let Some(held) = self.held.get_mut(digest) {
             held.used = now;
+        } else if !self.loaded {
+            self.early.insert(digest.to_owned(), now);
         }
     }
 
@@ -234,6 +250,11 @@ impl Budget {
         book.loaded && book.held.contains_key(digest)
     }
 
+    /// Whether the images the store held at the start are counted yet.
+    pub(super) fn loaded(&self) -> bool {
+        self.book().loaded
+    }
+
     /// From now on each eviction is told to `evicted`; the first one given stays.
     pub(super) fn on_evict(&self, evicted: Evicted) {
         let _ = self.evicted.set(evicted);
@@ -248,8 +269,10 @@ impl Budget {
     }
 }
 
-/// Counts the images `store` holds, the first time it is called for `budget`: before the
-/// first pull's fetch, so that the image it brings is not taken for one that was there.
+/// Counts the images `store` holds, the first time it is called for `budget`: when the
+/// runtime starts, and before the first pull's fetch, so that the image it brings is not
+/// taken for one that was there. Each is used before anything since (in the order of their
+/// digests), or when a start used it before this (the book's early uses).
 ///
 /// # Errors
 /// The store cannot be listed ([`Store::held`]); the next call tries again.
@@ -263,12 +286,14 @@ pub(super) async fn load(budget: &Budget, store: &dyn Store) -> Result<(), Strin
         .map_err(|why| format!("the image budget: reading the image store: {why}"))?;
     let mut book = budget.book();
     for (digest, bytes) in held {
-        let pinned = PinnedImage {
+        let used = book.early.remove(&digest).unwrap_or(0);
+        let image = PinnedImage {
             reference: digest.clone(),
-            digest,
+            digest: digest.clone(),
         };
-        book.record(pinned, bytes);
+        book.held.insert(digest, Held { image, bytes, used });
     }
+    book.early.clear();
     book.loaded = true;
     Ok(())
 }

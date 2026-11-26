@@ -154,8 +154,17 @@ fn entry_bytes(meta: &std::fs::Metadata) -> u64 {
     meta.blocks().saturating_mul(512).max(meta.len())
 }
 
-/// The complete images in the store `dir` (a directory named by 64 lowercase hex digits
-/// with a `rootfs` directory in it, links not followed), by digest (`sha256:<hex>`), each
+/// Whether the store `dir` holds the complete image `hex`: `hex` is 64 lowercase hex
+/// digits, and `dir/hex` is a directory with a `rootfs` directory in it, links not followed.
+pub(crate) fn held_image(dir: &Path, hex: &str) -> bool {
+    let is_dir = |path: &Path| std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir());
+    hex.len() == 64
+        && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        && is_dir(&dir.join(hex))
+        && is_dir(&dir.join(hex).join("rootfs"))
+}
+
+/// The complete images in the store `dir` (each one [`held_image`]), by digest (`sha256:<hex>`), each
 /// with the disk it holds ([`tree_bytes`]); anything else there (an unpack under way, a
 /// removal set aside) is not an image. A store that is not there holds none.
 ///
@@ -166,14 +175,10 @@ pub(crate) fn held_images(dir: &Path) -> io::Result<Vec<(String, u64)>> {
         Err(why) if why.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         entries => entries?,
     };
-    let is_dir = |path: &Path| std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir());
     let mut held: Vec<(String, u64)> = entries
         .flatten()
         .filter_map(|entry| entry.file_name().into_string().ok())
-        .filter(|name| {
-            name.len() == 64 && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-        })
-        .filter(|hex| is_dir(&dir.join(hex)) && is_dir(&dir.join(hex).join("rootfs")))
+        .filter(|hex| held_image(dir, hex))
         .map(|hex| {
             let bytes = tree_bytes(&dir.join(&hex)).unwrap_or(0);
             (format!("sha256:{hex}"), bytes)
