@@ -314,7 +314,7 @@ fn restore(
                     // A rerun after the signal that handed the runs back in place: the request
                     // may still be there, and the signal is sent again.
                     if in_place::pending(env)? {
-                        signal_and_wait(env, params, held, record, &unit)?;
+                        signal_and_wait(env, params, held, record)?;
                     }
                 } else {
                     // The previous agent runs and was never signalled (the cutover's marks
@@ -326,7 +326,7 @@ fn restore(
             return await_hello(env, params, held, record);
         }
         if record.in_place {
-            hand_back(env, params, held, record, &unit)?;
+            hand_back(env, params, held, record)?;
             return await_hello(env, params, held, record);
         }
         // The new agent hands its runs over to the previous one as the cutover's did.
@@ -367,13 +367,7 @@ fn previous_not_running(record: &Record) -> String {
 /// (the cutover's in-place hand-over undone): the marks of the stop and of the link, the
 /// request, the mark of the start, each before the act it names, and the signal; then the wait
 /// until the agent has taken the request.
-fn hand_back(
-    env: &Env<'_>,
-    params: &Params,
-    held: &Held,
-    record: &mut Record,
-    unit: &str,
-) -> Result<(), Done> {
+fn hand_back(env: &Env<'_>, params: &Params, held: &Held, record: &mut Record) -> Result<(), Done> {
     refuse_host_in(env, record.handover)?;
     if !record.rb.stop_begun {
         mark_act(env, params, held, record, set_stop_begun)?;
@@ -386,21 +380,20 @@ fn hand_back(
     request_handover(env, record)?;
     // Not marked yet: only an agent this step has not signalled is handed the runs back here.
     mark_act(env, params, held, record, set_start_issued)?;
-    signal_and_wait(env, params, held, record, unit)
+    signal_and_wait(env, params, held, record)
 }
 
 /// Signals the agent and waits until it has taken the request, for at most the stop's bound; a
-/// unit that is not active meanwhile is brought up.
+/// unit that is not active meanwhile, or that the signal found with no agent, is brought up
+/// (see [`in_place::signal_and_wait`]).
 fn signal_and_wait(
     env: &Env<'_>,
     params: &Params,
     held: &Held,
     record: &mut Record,
-    unit: &str,
 ) -> Result<(), Done> {
-    in_place::signal(env, unit)?;
     let note = previous_not_running(record);
-    in_place::wait_taken(env, held, record, params, stop_bound_ms(params), &note)
+    in_place::signal_and_wait(env, held, record, params, stop_bound_ms(params), &note)
 }
 
 fn set_start_issued(record: &mut Record) {
