@@ -31,7 +31,7 @@
 //! 4. the job: a real native run through the agent's `NativeRuntime` and the real supervisor
 //!    (the responsibility is kept) under the production profile, run as the slot's account.
 //!    It probes the same places, then, in its working directory, makes a hard link and a
-//!    clone (`clonefile(2)`) of a file it wrote itself, which must open (its controls: the
+//!    clone (`clonefileat(2)`) of a file it wrote itself, which must open (its controls: the
 //!    job can link and clone there), and of the privacy database, which must be refused.
 //!
 //! The places: the six privacy-only places, root's home (`/private/var/root` and `/var/root`),
@@ -76,8 +76,6 @@
 mod mac;
 mod verdict;
 
-#[cfg(target_os = "macos")]
-use std::ffi::CString;
 use std::fs::{self, File};
 use std::io::{self, Read as _};
 use std::path::Path;
@@ -131,23 +129,17 @@ fn attempt(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// A clone of `target` named `to`, by `clonefile(2)` itself (a tool such as `cp -c` reads
-/// the source's metadata first, and so would be refused before it tried the clone).
+/// A clone of `target` named `to` in the working directory, through the tree store's safe
+/// binding of `clonefileat(2)` (`js_treestore::mac::Clonefile`, which clones a file as well as
+/// a directory). Its source is a path, so the clone is tried without a read of the source
+/// first (a tool such as `cp -c` reads the source's metadata first, and so would be refused
+/// before it tried the clone).
 #[cfg(target_os = "macos")]
 fn clone_file(target: &str, to: &str) -> io::Result<()> {
-    let target = CString::new(target)?;
-    let to = CString::new(to)?;
-    // SAFETY: both pointers come from `CString`s that live to the end of this function, so
-    // each is a valid NUL-terminated string for the whole call, and `clonefile` only reads
-    // them.
-    // FFI-BOUNDARY: the caller owns both strings and frees them; `clonefile` allocates
-    // nothing that the caller must free.
-    let status = unsafe { libc::clonefile(target.as_ptr(), to.as_ptr(), 0) };
-    if status == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
+    use js_treestore::mac::{Clonefile, Cloner as _};
+    use std::os::fd::AsFd as _;
+    let here = File::open(".")?;
+    Clonefile.clone_dir(Path::new(target), here.as_fd(), std::ffi::OsStr::new(to))
 }
 
 /// No clone off macOS (`clonefile` is the APFS call): the probe runs on a Mac only.

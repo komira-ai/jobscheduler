@@ -16,8 +16,9 @@ js-bundle = { path = "../js-bundle" }
 thiserror.workspace = true
 
 [dev-dependencies]
-# runner_links.rs calls clonefile(2) from a sandboxed child (macOS only).
-libc.workspace = true
+# runner_links.rs clones a file from a sandboxed child through the tree store's safe
+# `clonefileat` binding (macOS only). A dev-dependency is not a layering edge.
+js-treestore = { path = "../js-treestore" }
 
 [lints]
 workspace = true

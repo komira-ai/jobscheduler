@@ -18,13 +18,14 @@
 
 #![cfg(target_os = "macos")]
 
-use std::ffi::{CString, OsStr, OsString};
-use std::os::unix::ffi::OsStrExt;
+use std::ffi::{OsStr, OsString};
+use std::os::fd::AsFd as _;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use js_mac_pool::seatbelt::{AbsPath, Caps, Net, Policy, Profile, ReadModel, SlotLayout};
+use js_treestore::mac::{Clonefile, Cloner as _};
 
 /// The environment variable that names the role a child run of this binary plays.
 const ROLE: &str = "MAC_POOL_LINK_ROLE";
@@ -194,6 +195,22 @@ fn report(made: std::io::Result<()>, dst: &Path) {
     println!("LINK made={made} read={read}");
 }
 
+/// A clone of `src` named `dst`, through the tree store's safe binding of `clonefileat(2)`
+/// (`js_treestore::mac::Clonefile`, which clones a file as well as a directory). Its source
+/// is a path, so the clone is tried without a read of the source first, as an attacker's own
+/// call would be (a tool such as `cp -c` reads the source's metadata first and would be
+/// refused before it tried).
+fn clone_to(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let parent = dst
+        .parent()
+        .ok_or_else(|| std::io::Error::other("the destination has no directory"))?;
+    let name = dst
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("the destination has no name"))?;
+    let dir = std::fs::File::open(parent)?;
+    Clonefile.clone_dir(src, dir.as_fd(), name)
+}
+
 /// What a test does when it starts this binary as a child: nothing, unless the role says.
 /// Not `#[ignore]`: it is a no-op without the role, and the runs name it exactly.
 #[test]
@@ -205,21 +222,7 @@ fn child_of_the_links() {
     let dst = PathBuf::from(std::env::var_os(DST).expect("the destination"));
     match role.to_str() {
         Some("link") => report(std::fs::hard_link(&src, &dst), &dst),
-        Some("clone") => {
-            let from = CString::new(src.as_os_str().as_bytes()).expect("no NUL in the source");
-            let to = CString::new(dst.as_os_str().as_bytes()).expect("no NUL in the destination");
-            // SAFETY: `from` and `to` are NUL-terminated C strings that live until the end of
-            // this block, so both pointers are valid for the whole call; the flags are 0.
-            // FFI-BOUNDARY: the callee allocates nothing and keeps neither pointer; this
-            // function owns both strings and frees them when they drop.
-            let made = unsafe { libc::clonefile(from.as_ptr(), to.as_ptr(), 0) };
-            let made = if made == 0 {
-                Ok(())
-            } else {
-                Err(std::io::Error::last_os_error())
-            };
-            report(made, &dst);
-        }
+        Some("clone") => report(clone_to(&src, &dst), &dst),
         other => panic!("unknown role {other:?}"),
     }
 }
@@ -294,7 +297,7 @@ fn a_hard_link_to_a_denied_file_is_refused_or_cannot_be_read() {
 }
 
 /// Asserts that a sandboxed process which clones the denied file into the run directory
-/// (`clonefile`) never reads the secret, and that the same process without the sandbox makes
+/// (`clonefileat`) never reads the secret, and that the same process without the sandbox makes
 /// the clone and reads it. The control panics, with its reason, on a volume that is not APFS.
 ///
 /// Catches a read deny without a clone deny: the copy is a path no deny names.
