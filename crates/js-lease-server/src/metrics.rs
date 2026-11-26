@@ -120,8 +120,8 @@ pub(crate) enum SubmitPhase {
     InsertCheckout,
     /// Of the insert of the job as queued, the rest: its reads, its transaction and its commit.
     InsertTransaction,
-    /// The placer told of the job the commit recorded, its wait for the placer's tables
-    /// included; only when the service places jobs.
+    /// The placer told of the job the commit recorded, which never waits for a pass that holds
+    /// the placer's tables; only when the service places jobs.
     NoteInserted,
 }
 

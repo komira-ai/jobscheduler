@@ -23,6 +23,7 @@ fn hello() -> NodeHello {
         labels: std::collections::BTreeMap::new(),
         phase: Phase::Serving,
         agent_process: Some("proc-1".to_owned()),
+        agent_version: None,
     }
 }
 

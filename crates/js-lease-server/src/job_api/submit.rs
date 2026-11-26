@@ -41,10 +41,13 @@
 //!    refusal `no-capable-host` (`FAILED_PRECONDITION`, 422) and nothing is recorded: no row,
 //!    no id.
 //! 4. **Commit before the answer.** The job is inserted as queued in one transaction of the
-//!    store ([`js_jobs::JobStore::insert_queued`]), with the name of the client the bearer
-//!    layer named (never a value of the request); only after it returns is the answer
-//!    built, from the record it returns, with its callback's status when it has one (read in
-//!    the same call of the tables; a status that cannot be read is left out). A store that fails is `INTERNAL` with the message
+//!    store ([`js_jobs::JobStore::insert_queued_after_get`], handed what step 2 read, so the
+//!    id is read once), with the name of the client the bearer layer named (never a value of
+//!    the request) and the store's clock as that transaction reads it as its submit time;
+//!    only after it returns is the answer built, from the record it returns, with its
+//!    callback's status when it has one (read in the same call of the tables; a status that
+//!    cannot be read is left out). A job step 2 found is answered from what step 2 read. A
+//!    store that fails is `INTERNAL` with the message
 //!    `state-write-failed` (500 `state-write-failed`), and a store too busy to take the call
 //!    ([`js_state::StoreError::Unavailable`]: no connection came free, or a statement waited
 //!    past its limit) is `UNAVAILABLE` with the same message (503 `state-write-failed`), which
@@ -55,7 +58,9 @@
 //! 5. **Poke the poller, answer queued.** When the service places jobs ([`Ctx::poking`]), the
 //!    call tells the placer of the job the commit recorded ([`Agents::note_inserted`]: when the
 //!    commit is the only write of the job store since the placer last read the job tables, the
-//!    next pass takes the job added to those tables rather than reading all four again), pokes
+//!    next pass takes the job added to those tables rather than reading all four again; while a
+//!    pass holds those tables, reading them again, the call does not wait for it and tells the
+//!    placer nothing, and that pass or the next reads the job from the store), pokes
 //!    the placement poller ([`crate::poller::Poller::poke`]) and answers. It never places the
 //!    job itself: the answer for a new job is the job as the commit recorded it, `queued` with
 //!    no host, always. The poller's pass, the tick's or a heartbeat's places it
@@ -309,17 +314,17 @@ pub(super) async fn submit_job(
     });
     meter.sink().submit_phase(SubmitPhase::Validation, took);
     let valid = valid.map_err(refused)?;
-    let held = match valid.id.clone() {
+    let stored = match valid.id.clone() {
         Some(id) => {
             let read = api.on_tables(move |jobs| jobs.get_job(&id));
             let (found, took) = meter.timed_await(read).await;
             meter.sink().submit_phase(SubmitPhase::Get, took);
-            found.map_err(not_written())?.is_some()
+            found.map_err(not_written())?
         }
-        None => false,
+        None => None,
     };
     let isolation = valid.spec.constraints.isolation;
-    if !held {
+    if stored.is_none() {
         let asked = served.admission.0.can_ever_serve(&valid.wanted, isolation);
         let (servable, took) = meter.timed_await(asked).await;
         meter.sink().submit_phase(SubmitPhase::Admission, took);
@@ -336,7 +341,8 @@ pub(super) async fn submit_job(
     let inserting = meter.clone();
     let (inserted, statuses) = api
         .on_tables(move |jobs| {
-            let (inserted, took, checkout) = inserting.timed_checkouts(|| jobs.insert_queued(new));
+            let (inserted, took, checkout) =
+                inserting.timed_checkouts(|| jobs.insert_queued_after_get(new, stored));
             let sink = inserting.sink();
             sink.submit_phase(SubmitPhase::InsertCheckout, checkout);
             sink.submit_phase(
@@ -368,9 +374,10 @@ pub(super) async fn submit_job(
 }
 
 /// Tells the placer of `agents` of the job just recorded, `inserted`, so that the next pass
-/// does not read the job tables again for it ([`Agents::note_inserted`]), timed by `meter`, and
-/// pokes the placement poller ([`crate::poller::Poller::poke`]); the job's record as the commit
-/// recorded it. The poke comes after the commit, so the pass it brings reads the job.
+/// does not read the job tables again for it ([`Agents::note_inserted`], which never waits for
+/// a pass that holds them), timed by `meter`, and pokes the placement poller
+/// ([`crate::poller::Poller::poke`]); the job's record as the commit recorded it. The poke comes
+/// after the commit, so the pass it brings reads the job.
 async fn poke(agents: &Arc<Agents>, meter: &Meter, inserted: Inserted) -> JobRecord {
     let (noting, meter) = (Arc::clone(agents), meter.clone());
     let record = blocking(move || {
@@ -396,6 +403,10 @@ mod poke_tests;
 #[cfg(test)]
 #[path = "submit_rows_tests.rs"]
 mod rows_tests;
+
+#[cfg(test)]
+#[path = "submit_reads_tests.rs"]
+mod reads_tests;
 
 #[cfg(test)]
 #[path = "submit_phase_tests.rs"]

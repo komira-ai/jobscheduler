@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_state::fake::{Fake, Flaw};
-use js_state::recording::{RecordingStore, Write, WriteKind};
+use js_state::recording::{Read, RecordingStore, Write, WriteKind};
 use js_state::{
     Changes, Commit, CommitStats, Cond, Conflict, ManualClock, Revision, ScanPage, ScanRange,
     Store, StoreError, StoreTime, Txn, Versioned,
@@ -235,4 +235,80 @@ fn a_decided_transaction_is_recorded_as_it_committed_or_conflicted() {
         ]
     );
     assert!(recording.head().unwrap().is_some());
+}
+
+/// Asserts that every get, batched get, prefix scan, range scan and clock read is recorded in the order it
+/// was asked for, with its key or prefix, that the feed, the head, the counters and a write
+/// are not reads, and that `clear` forgets the reads too. It catches a recorder that misses a
+/// kind of read (a test that counts a component's round trips would then count too few) and
+/// one that records a read as another kind.
+#[test]
+fn every_read_is_recorded_in_order_with_its_key_or_prefix() {
+    let recording = RecordingStore::new(fake());
+    recording
+        .txn(Txn::new().put("r/a", "1", Cond::Any))
+        .expect("store")
+        .expect("commit");
+    assert_eq!(recording.reads(), Vec::new());
+    recording.get("r/a").expect("get");
+    recording.get("r/none").expect("get");
+    let many = recording
+        .get_many(&["r/a".to_owned(), "r/none".to_owned()])
+        .expect("get many");
+    assert_eq!(many.len(), 1);
+    recording.scan_prefix("r/").expect("scan");
+    recording
+        .scan_range(ScanRange::new("s/", std::num::NonZeroUsize::MIN))
+        .expect("range");
+    recording.now().expect("the clock");
+    recording.changes(Revision::ZERO, 10).expect("feed");
+    recording.head().expect("head");
+    let _ = recording.commit_stats();
+    assert_eq!(
+        recording.reads(),
+        [
+            Read::Get("r/a".to_owned()),
+            Read::Get("r/none".to_owned()),
+            Read::GetMany(vec!["r/a".to_owned(), "r/none".to_owned()]),
+            Read::ScanPrefix("r/".to_owned()),
+            Read::ScanRange("s/".to_owned()),
+            Read::Now,
+        ]
+    );
+    recording.clear();
+    assert_eq!(recording.reads(), Vec::new());
+}
+
+/// Asserts that a stamped transaction is recorded as a write of each key it puts, committed or
+/// not as it was, that one whose build declines is not recorded, and that its clock reading is
+/// the store's own, read inside the call and not recorded as a read. It catches a stamped
+/// commit that bypasses the record, and a recorder that counts its clock as a read of the
+/// caller's.
+#[test]
+fn a_stamped_transaction_is_recorded_as_it_committed_and_its_clock_is_not_a_read() {
+    let recording = RecordingStore::new(fake());
+    let mut stamps = Vec::new();
+    let mut put = |value: &'static str| {
+        recording
+            .txn_stamped(&mut |now| {
+                stamps.push(now);
+                Some(Txn::new().put("t", value, Cond::Absent))
+            })
+            .expect("store")
+    };
+    assert!(matches!(put("1"), Some(Ok(_))));
+    assert!(matches!(put("2"), Some(Err(_))));
+    let declined = recording.txn_stamped(&mut |_| None).expect("store");
+    assert_eq!(declined, None);
+    // The fake's clock starts at zero; its commit moves it on.
+    assert_eq!(stamps.len(), 2);
+    assert_eq!(stamps[0], StoreTime::ZERO);
+    assert_eq!(
+        recording.writes(),
+        [
+            write("t", WriteKind::Put, true),
+            write("t", WriteKind::Put, false)
+        ]
+    );
+    assert_eq!(recording.reads(), Vec::new());
 }

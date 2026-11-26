@@ -159,7 +159,7 @@ fn phase_series(out: &mut String, name: &str, phase: &str, histogram: &Histogram
 
 fn submit_phases(out: &mut String, recorder: &Recorder) {
     let name = "js_submit_phase_seconds";
-    let help = "How long each phase of each SubmitJob call took, by phase: validation (the checks of the job), get (the read of its id, for a job with one), admission (for a job not yet held), insert-checkout (of the insert, getting connections of the store's pool), insert-transaction (the rest of the insert) or note-inserted (the placer told of the job, its wait for the placer's tables included). A call is timed in each phase it reaches, whatever the answer.";
+    let help = "How long each phase of each SubmitJob call took, by phase: validation (the checks of the job), get (the read of its id, for a job with one), admission (for a job not yet held), insert-checkout (of the insert, getting connections of the store's pool), insert-transaction (the rest of the insert) or note-inserted (the placer told of the job, never waiting for a pass). A call is timed in each phase it reaches, whatever the answer.";
     family(out, name, "histogram", help);
     for (phase, histogram) in SUBMIT_PHASES.iter().zip(&recorder.submit_phases) {
         phase_series(out, name, phase, histogram);

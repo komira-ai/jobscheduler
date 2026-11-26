@@ -93,6 +93,7 @@ pub(crate) async fn refresh(agents: &Arc<Agents>, host: &HostId) -> io::Result<(
             labels: record.labels,
             phase: record.state.phase,
             agent_process: record.agent_process,
+            agent_version: record.agent_version,
             silent_for: now.since(record.heard_at),
             binding: binding.map(|binding| binding.with_taint(None).with_cordon(None)),
         };
@@ -199,7 +200,8 @@ pub(super) async fn hello_row(
 
 /// Writes the hello the registry admitted as `welcome` into the row of `host`
 /// ([`js_jobs::JobStore::hello_node_in_pool`], under the pool's cap when it has one): the digest
-/// of the welcome's secret, what the hello announced, and the shape the registry books. The
+/// of the welcome's secret, what the hello announced (its agent version included), and the
+/// shape the registry books. The
 /// store numbers the epoch, and the registry and `welcome` take that number. Nothing without
 /// the job tables. It blocks on the store.
 ///
@@ -228,6 +230,7 @@ pub(crate) fn record_hello(
         labels: hello.labels.clone(),
         phase: hello.phase,
         agent_process: hello.agent_process.clone(),
+        agent_version: Some(hello.agent_version.clone()),
     };
     let cap = agents.registry.pool_cap(&hello.pool).unwrap_or(usize::MAX);
     match jobs.hello_node_in_pool(host, &row, cap) {

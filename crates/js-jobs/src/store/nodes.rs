@@ -318,7 +318,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// read or written at: the way a beat, after the writes of its listing (made through
     /// [`JobStore::guarded`] at that version), records in its own write that the first listing
     /// is applied, whether the listing was clean, and the missing counts. The epoch, session,
-    /// the hello's fields (the agent process included), the last beat, `heard_at` and the
+    /// the hello's fields (the agent process and version included), the last beat, `heard_at` and the
     /// fields a later build wrote are kept. Returns the row as written, with its new version,
     /// or `None` when the row is not at that version any more (another beat or hello was
     /// applied, or the row was forgotten) and nothing was written.
@@ -484,6 +484,7 @@ fn hello_record(
         shape: hello.shape.clone(),
         labels: hello.labels.clone(),
         agent_process: hello.agent_process.clone(),
+        agent_version: hello.agent_version.clone(),
         state: NodeState {
             phase: hello.phase,
             load: None,

@@ -25,6 +25,8 @@ pub struct NodeSession {
     pub phase: Phase,
     /// The agent process id of the hello, when it sent one.
     pub agent_process: Option<String>,
+    /// The agent version of the hello, when the row keeps one.
+    pub agent_version: Option<String>,
     /// How long before now the row was last heard, by the store's clock.
     pub silent_for: Duration,
     /// The binding the row keeps, used when the registry holds none for the host.
@@ -58,8 +60,9 @@ impl Registry {
     /// if its hello had been admitted here, when the registry holds no record of the host,
     /// holds one awaiting its first hello, or holds one of an older epoch than
     /// `node.epoch`; the record keeps its taint, cordon, holder, mark and binding (the
-    /// binding of `node` when it has none), and the host is listed in the book and told to
-    /// the placer as a hello does. The host counts as heard `node.silent_for` ago.
+    /// binding of `node` when it has none), takes the agent version of `node`, and the host
+    /// is listed in the book and told to the placer as a hello does. The host counts as heard
+    /// `node.silent_for` ago.
     ///
     /// No admission check runs: the row is the decision another server already made. A
     /// record in session at the same or a newer epoch is kept as it is ([`Adopted::Kept`]), so
@@ -105,7 +108,7 @@ impl Registry {
                 phase: node.phase,
                 heard: Some(heard),
                 seated: None,
-                agent_version: None,
+                agent_version: node.agent_version,
                 labels: node.labels,
                 held: BTreeSet::new(),
                 beats: 0,
