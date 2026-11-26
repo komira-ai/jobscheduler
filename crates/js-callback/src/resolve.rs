@@ -39,19 +39,23 @@ pub struct SystemResolver;
 impl Resolve for SystemResolver {
     fn resolve(&self, host: &str, within: Duration) -> Result<Vec<IpAddr>, ResolveError> {
         let host = host.to_owned();
-        bounded(within, move || {
-            let found = (host.as_str(), 0).to_socket_addrs()?;
-            Ok(found.map(|address| address.ip()).collect())
-        })
+        bounded(
+            within,
+            Box::new(move || {
+                let found = (host.as_str(), 0).to_socket_addrs()?;
+                Ok(found.map(|address| address.ip()).collect())
+            }),
+        )
     }
 }
 
+/// A lookup [`bounded`] runs. It is boxed, not generic, so `bounded` is one function whatever
+/// the lookup, and its every line is run by the one copy every caller shares.
+type Lookup = Box<dyn FnOnce() -> io::Result<Vec<IpAddr>> + Send>;
+
 /// What `lookup` answers, run on a thread of its own, or [`ResolveError::TimedOut`] when it
 /// has not answered within `within`. A lookup that never answers keeps its thread.
-fn bounded(
-    within: Duration,
-    lookup: impl FnOnce() -> io::Result<Vec<IpAddr>> + Send + 'static,
-) -> Result<Vec<IpAddr>, ResolveError> {
+fn bounded(within: Duration, lookup: Lookup) -> Result<Vec<IpAddr>, ResolveError> {
     let (answer, answered) = mpsc::sync_channel(1);
     thread::spawn(move || answer.send(lookup()));
     match answered.recv_timeout(within) {
@@ -99,13 +103,17 @@ mod tests {
         let (keep, never) = mpsc::channel::<Vec<IpAddr>>();
         // Dropped when the hung lookup returns, so the test can wait for its thread to end.
         let (finished, ended) = mpsc::channel::<()>();
-        let hung = bounded(Duration::ZERO, move || {
-            let _finished = finished;
-            Ok(never.recv().unwrap_or_default())
-        });
-        let failed = bounded(Duration::from_secs(60), || {
-            Err(io::Error::new(io::ErrorKind::NotFound, "no such name"))
-        });
+        let hung = bounded(
+            Duration::ZERO,
+            Box::new(move || {
+                let _finished = finished;
+                Ok(never.recv().unwrap_or_default())
+            }),
+        );
+        let failed = bounded(
+            Duration::from_secs(60),
+            Box::new(|| Err(io::Error::new(io::ErrorKind::NotFound, "no such name"))),
+        );
         let errors = [hung, failed].map(|result| result.expect_err("no answer"));
         assert_eq!(
             errors.each_ref().map(ToString::to_string),
