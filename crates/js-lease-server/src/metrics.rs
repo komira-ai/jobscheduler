@@ -20,7 +20,9 @@
 //!   was followed by another (`js_job_retries_total`, by `outcome`: `start-failed` or
 //!   `host-lost`), and each job that ended so with no attempt left under its retry policy
 //!   (`js_job_attempts_exhausted_total`) (`docs/design/job-retry-and-completion-callback.md`,
-//!   section 4). A start failure or a loss is counted as the end of a job, so an attempt that
+//!   section 4), and how long each phase of each `SubmitJob` call took
+//!   (`js_submit_phase_seconds`, by `phase`, [`SubmitPhase`]). A start failure or a loss is
+//!   counted as the end of a job, so an attempt that
 //!   retries counts as a retry and not as a start failure or a loss. Each is counted as
 //!   its commit lands, so a pass that fails later still counts what it ended. The paths that count them call
 //!   a [`MetricsSink`], and do not know the exporter: without `--metrics-listen` the sink is
@@ -38,7 +40,8 @@
 //!   two reads can show as queued while its booking already counts.
 //!
 //! The text names no job, lease, run or token: its labels are a job state, a start failure
-//! code, a host's id, a pool's name, a host's mark and a callback's result, and nothing else. The route takes no
+//! code, a host's id, a pool's name, a host's mark, a callback's result and a phase of a
+//! submit, and nothing else. The route takes no
 //! token, so it is served only on a private address ([`crate::is_private_address`]), and
 //! only to a private peer, as `/status` is.
 
@@ -46,6 +49,7 @@ mod render;
 mod scrape;
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::Duration;
@@ -54,6 +58,7 @@ use js_callback::{CallbackAnswer, FailureClass};
 use js_elastic::{Acquired, Refusal, RefusalCode};
 use js_jobs::StartFailure;
 use js_sched_placer::engine::TablesFrom;
+use js_state::{Clock, StoreTime};
 use js_types::{HostId, Monotonic};
 
 pub(crate) use scrape::router;
@@ -95,6 +100,50 @@ pub(crate) trait MetricsSink: Send + Sync + std::fmt::Debug {
     /// A job ended in a way that retries while its retry policy had no attempt left; by
     /// default, nothing is counted.
     fn attempts_exhausted(&self) {}
+    /// The phase `phase` of a `SubmitJob` call took `took`; by default, nothing is counted.
+    fn submit_phase(&self, _phase: SubmitPhase, _took: Duration) {}
+}
+
+/// A phase of a `SubmitJob` call (`job_api/submit.rs`, steps 1 to 5): the label of
+/// `js_submit_phase_seconds`. A call is timed in each phase it reaches, whatever the phase's
+/// answer, and in no other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SubmitPhase {
+    /// The checks of the submitted job, with no I/O.
+    Validation,
+    /// The read of the job's id in the job tables, for a job with an id.
+    Get,
+    /// The question whether anything could ever serve the job, for a job not yet held.
+    Admission,
+    /// Of the insert of the job as queued, the time spent getting connections of the store's
+    /// pool (zero for a store with no pool).
+    InsertCheckout,
+    /// Of the insert of the job as queued, the rest: its reads, its transaction and its commit.
+    InsertTransaction,
+    /// The placer told of the job the commit recorded, which never waits for a pass that holds
+    /// the placer's tables; only when the service places jobs.
+    NoteInserted,
+}
+
+/// The phases of a submit, in the order they are written, as the metric spells them.
+const SUBMIT_PHASES: [&str; 6] = [
+    "validation",
+    "get",
+    "admission",
+    "insert-checkout",
+    "insert-transaction",
+    "note-inserted",
+];
+
+fn phase_slot(phase: SubmitPhase) -> usize {
+    match phase {
+        SubmitPhase::Validation => 0,
+        SubmitPhase::Get => 1,
+        SubmitPhase::Admission => 2,
+        SubmitPhase::InsertCheckout => 3,
+        SubmitPhase::InsertTransaction => 4,
+        SubmitPhase::NoteInserted => 5,
+    }
 }
 
 /// How an attempt that retries ended: the label of `js_job_retries_total`.
@@ -188,6 +237,18 @@ impl Monotonic for NoMetrics {
 pub(crate) struct Meter {
     sink: Arc<dyn MetricsSink>,
     monotonic: Arc<dyn Monotonic>,
+    /// The same clock, as a store's checkout tally reads one
+    /// ([`js_state::postgres::checkout_waits`]).
+    tally: Arc<dyn Clock>,
+}
+
+/// A monotonic clock read as a store's clock.
+struct Tallying(Arc<dyn Monotonic>);
+
+impl Clock for Tallying {
+    fn now(&self) -> StoreTime {
+        StoreTime::from_duration(self.0.reading())
+    }
 }
 
 /// The meter of a server without `--metrics-listen`.
@@ -197,7 +258,12 @@ static OFF: LazyLock<Meter> =
 impl Meter {
     /// `sink`, timing with `monotonic`.
     pub(crate) fn new(sink: Arc<dyn MetricsSink>, monotonic: Arc<dyn Monotonic>) -> Self {
-        Self { sink, monotonic }
+        let tally = Arc::new(Tallying(Arc::clone(&monotonic)));
+        Self {
+            sink,
+            monotonic,
+            tally,
+        }
     }
 
     /// The meter that counts nothing.
@@ -216,52 +282,68 @@ impl Meter {
         let done = work();
         (done, self.monotonic.reading().saturating_sub(began))
     }
+
+    /// Awaits `work`; what it gave and how long it took by the meter's clock.
+    pub(crate) async fn timed_await<T>(&self, work: impl Future<Output = T>) -> (T, Duration) {
+        let began = self.monotonic.reading();
+        let done = work.await;
+        (done, self.monotonic.reading().saturating_sub(began))
+    }
+
+    /// Runs `work` on this thread; what it returned, how long it took by the meter's clock, and
+    /// how much of that went to getting connections of a store's pool
+    /// ([`js_state::postgres::checkout_waits`]), never more than the whole.
+    pub(crate) fn timed_checkouts<T>(&self, work: impl FnOnce() -> T) -> (T, Duration, Duration) {
+        let began = self.tally.now();
+        let (done, waited) = js_state::postgres::checkout_waits(Arc::clone(&self.tally), work);
+        let took = self.tally.now().since(began);
+        (done, took, waited.min(took))
+    }
 }
 
-/// One histogram bucket: its upper bound in milliseconds, inclusive, and that bound as the
-/// `le` label says it.
+/// One histogram bucket: its upper bound, inclusive, and that bound as the `le` label says it.
 #[derive(Debug)]
 struct Bound {
-    millis: u64,
+    upto: Duration,
     le: &'static str,
 }
 
 /// The buckets of the queue wait: from a second to a day.
 const QUEUE_WAIT: &[Bound] = &[
     Bound {
-        millis: 1_000,
+        upto: Duration::from_millis(1_000),
         le: "1",
     },
     Bound {
-        millis: 5_000,
+        upto: Duration::from_millis(5_000),
         le: "5",
     },
     Bound {
-        millis: 30_000,
+        upto: Duration::from_millis(30_000),
         le: "30",
     },
     Bound {
-        millis: 60_000,
+        upto: Duration::from_millis(60_000),
         le: "60",
     },
     Bound {
-        millis: 300_000,
+        upto: Duration::from_millis(300_000),
         le: "300",
     },
     Bound {
-        millis: 900_000,
+        upto: Duration::from_millis(900_000),
         le: "900",
     },
     Bound {
-        millis: 3_600_000,
+        upto: Duration::from_millis(3_600_000),
         le: "3600",
     },
     Bound {
-        millis: 14_400_000,
+        upto: Duration::from_millis(14_400_000),
         le: "14400",
     },
     Bound {
-        millis: 86_400_000,
+        upto: Duration::from_millis(86_400_000),
         le: "86400",
     },
 ];
@@ -269,36 +351,88 @@ const QUEUE_WAIT: &[Bound] = &[
 /// The buckets of a job pass: from a millisecond to five seconds.
 const JOB_PASS: &[Bound] = &[
     Bound {
-        millis: 1,
+        upto: Duration::from_millis(1),
         le: "0.001",
     },
     Bound {
-        millis: 5,
+        upto: Duration::from_millis(5),
         le: "0.005",
     },
     Bound {
-        millis: 10,
+        upto: Duration::from_millis(10),
         le: "0.01",
     },
     Bound {
-        millis: 50,
+        upto: Duration::from_millis(50),
         le: "0.05",
     },
     Bound {
-        millis: 100,
+        upto: Duration::from_millis(100),
         le: "0.1",
     },
     Bound {
-        millis: 500,
+        upto: Duration::from_millis(500),
         le: "0.5",
     },
     Bound {
-        millis: 1_000,
+        upto: Duration::from_millis(1_000),
         le: "1",
     },
     Bound {
-        millis: 5_000,
+        upto: Duration::from_millis(5_000),
         le: "5",
+    },
+];
+
+/// The buckets of a phase of a submit: from 100 microseconds to a second.
+const SUBMIT_PHASE: &[Bound] = &[
+    Bound {
+        upto: Duration::from_micros(100),
+        le: "0.0001",
+    },
+    Bound {
+        upto: Duration::from_micros(250),
+        le: "0.00025",
+    },
+    Bound {
+        upto: Duration::from_micros(500),
+        le: "0.0005",
+    },
+    Bound {
+        upto: Duration::from_millis(1),
+        le: "0.001",
+    },
+    Bound {
+        upto: Duration::from_micros(2_500),
+        le: "0.0025",
+    },
+    Bound {
+        upto: Duration::from_millis(5),
+        le: "0.005",
+    },
+    Bound {
+        upto: Duration::from_millis(10),
+        le: "0.01",
+    },
+    Bound {
+        upto: Duration::from_millis(25),
+        le: "0.025",
+    },
+    Bound {
+        upto: Duration::from_millis(50),
+        le: "0.05",
+    },
+    Bound {
+        upto: Duration::from_millis(100),
+        le: "0.1",
+    },
+    Bound {
+        upto: Duration::from_millis(250),
+        le: "0.25",
+    },
+    Bound {
+        upto: Duration::from_secs(1),
+        le: "1",
     },
 ];
 
@@ -322,7 +456,7 @@ impl Histogram {
 
     fn observe(&self, value: Duration) {
         let mut bounds = self.bounds.iter();
-        let slot = bounds.position(|bound| value <= Duration::from_millis(bound.millis));
+        let slot = bounds.position(|bound| value <= bound.upto);
         let slot = slot.unwrap_or(self.bounds.len());
         self.counts[slot].fetch_add(1, Ordering::Relaxed);
         let micros = u64::try_from(value.as_micros()).unwrap_or(u64::MAX);
@@ -433,6 +567,7 @@ pub(crate) struct Recorder {
     retries: [AtomicU64; 2],
     attempts_exhausted: AtomicU64,
     callbacks: [AtomicU64; 4],
+    submit_phases: [Histogram; 6],
 }
 
 impl Default for Recorder {
@@ -452,6 +587,7 @@ impl Default for Recorder {
             retries: Default::default(),
             attempts_exhausted: AtomicU64::new(0),
             callbacks: Default::default(),
+            submit_phases: std::array::from_fn(|_| Histogram::new(SUBMIT_PHASE)),
         }
     }
 }
@@ -522,6 +658,10 @@ impl MetricsSink for Recorder {
 
     fn callback_answered(&self, answer: &CallbackAnswer) {
         self.callbacks[callback_slot(answer)].fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn submit_phase(&self, phase: SubmitPhase, took: Duration) {
+        self.submit_phases[phase_slot(phase)].observe(took);
     }
 }
 
