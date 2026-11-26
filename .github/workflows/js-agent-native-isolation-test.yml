@@ -14,9 +14,9 @@
 # (libtest flags come first.)
 #
 # Manual runs only, for an operator's own Mac: every release runs the test itself, on a hosted Mac,
-# in beta.yml's job `isolation` (through `cargo xtask mac-root-tests --only native_isolation`),
-# and a failure there holds back release.yml's `promote-macos`. It publishes nothing: the binary
-# is a workflow artifact for seven days.
+# in js-agent-native-isolation.yml (through `cargo xtask mac-root-tests --only native_isolation`),
+# whose verdict release.yml reports. It publishes nothing: the binary is a workflow artifact for
+# seven days.
 name: js-agent-native-isolation-test
 
 on:

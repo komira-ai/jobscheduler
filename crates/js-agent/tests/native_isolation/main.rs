@@ -73,8 +73,9 @@
 //! supervisor is the `js-agent` binary next to the test binary when there is one, else the
 //! one cargo built for it (`CARGO_BIN_EXE_js-agent`). See the `js-agent-native-isolation-test`
 //! workflow. `cargo xtask mac-root-tests --only native_isolation` sets all of that up and runs it;
-//! the release's beta stage runs it that way on a hosted Mac of its own (`.github/workflows/beta.yml`,
-//! job `isolation`), and a failure holds back the macOS archives. Never run it on a production host.
+//! the release's beta stage runs it that way on a hosted Mac of its own
+//! (`.github/workflows/js-agent-native-isolation.yml`) and reports the verdict. Never run it on a
+//! production host.
 //!
 //! One difference from production: the runtime here has the directory of this test binary as
 //! an extra tool root (the runs execute the binary), a read/exec allowance the agent

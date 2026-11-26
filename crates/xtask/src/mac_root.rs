@@ -28,7 +28,8 @@
 //! `--only <key>` (repeatable) runs just the targets of those [`Target::key`]s ([`select`]),
 //! in [`TARGETS`] order, and builds `js-mac-provision` only for its own target; a key that
 //! is no target's is refused first, on any system. The release's beta stage runs
-//! `--only native_isolation` on a hosted Mac of its own (`.github/workflows/beta.yml`).
+//! `--only native_isolation` on a hosted Mac of its own
+//! (`.github/workflows/js-agent-native-isolation.yml`).
 //!
 //! Every selected target runs even when one before it failed; the verb fails if any row is
 //! `FAIL`.

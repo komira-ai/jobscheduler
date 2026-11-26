@@ -95,6 +95,7 @@ fn every_job_a_pull_request_starts_runs_on_linux_x86_64() {
                 && !job.starts_with("macos-probe.yml/")
                 && !job.starts_with("js-agent-macos-pkg.yml/")
                 && !job.starts_with("js-agent-macos-first-install.yml/")
+                && !job.starts_with("js-agent-native-isolation.yml/")
                 && !job.contains("beta-macos")
                 && !job.contains("artifacts.yml/build"),
             "{job}"
@@ -142,17 +143,9 @@ fn a_beta_job_without_its_push_condition_is_refused() {
             .any(|j| j == "release.yml/beta-macos -> beta.yml/macos"),
         "{jobs:?}"
     );
-    assert!(
-        jobs.iter()
-            .any(|j| j == "release.yml/beta-macos -> beta.yml/isolation"),
-        "{jobs:?}"
-    );
     assert_eq!(
         problems,
-        [
-            "release.yml/beta-macos -> beta.yml/macos: runs on macos-15, not Linux x86_64 (ubuntu-*)",
-            "release.yml/beta-macos -> beta.yml/isolation: runs on macos-15, not Linux x86_64 (ubuntu-*)",
-        ]
+        ["release.yml/beta-macos -> beta.yml/macos: runs on macos-15, not Linux x86_64 (ubuntu-*)"]
     );
 }
 
@@ -165,6 +158,23 @@ fn the_first_install_job_without_its_push_condition_is_refused() {
     let (jobs, problems) = lint(&changed("release.yml", gate, ungated));
     let job =
         "release.yml/beta-macos-first-install -> js-agent-macos-first-install.yml/first-install";
+    assert!(jobs.iter().any(|j| j == job), "{jobs:?}");
+    assert_eq!(
+        problems,
+        [format!(
+            "{job}: runs on macos-15, not Linux x86_64 (ubuntu-*)"
+        )]
+    );
+}
+
+/// The isolation test's call without its push condition would start a macOS job on a pull
+/// request's dry run of release.yml, and the lint names the job in the called workflow.
+#[test]
+fn the_isolation_job_without_its_push_condition_is_refused() {
+    let gate = "  beta-macos-isolation:\n    needs: [plan, artifacts]\n    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}\n";
+    let ungated = "  beta-macos-isolation:\n    needs: [plan, artifacts]\n";
+    let (jobs, problems) = lint(&changed("release.yml", gate, ungated));
+    let job = "release.yml/beta-macos-isolation -> js-agent-native-isolation.yml/isolation";
     assert!(jobs.iter().any(|j| j == job), "{jobs:?}");
     assert_eq!(
         problems,
@@ -215,6 +225,7 @@ fn the_beta_stage_workflows_are_called_not_started_by_a_pull_request() {
         "beta.yml",
         "js-agent-macos-pkg.yml",
         "js-agent-macos-first-install.yml",
+        "js-agent-native-isolation.yml",
         "macos-probe.yml",
     ] {
         let w = Workflow::parse(file, &read(file));
@@ -307,6 +318,7 @@ fn the_beta_stage_runs_after_the_build_and_holds_back_only_the_macos_archives() 
             "js-agent-macos-first-install.yml",
         ),
         ("beta-macos-probe", "macos-probe.yml"),
+        ("beta-macos-isolation", "js-agent-native-isolation.yml"),
     ] {
         let lines = job(name);
         // The first install installs the package `beta-macos-pkg` built, so it waits for it.

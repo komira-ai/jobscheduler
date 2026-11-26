@@ -1,0 +1,58 @@
+# The two-run isolation test of the Mac slot accounts (crates/js-agent/tests/native_isolation,
+# every test `#[ignore]`d, root only), run as root on a hosted Apple silicon runner of its own:
+# run A leaves one item of each kind behind as its account, the run is removed as the agent
+# removes it, and run B, a new account on the same uid, looks for every item. It makes an account
+# and changes the machine, so it has a fresh runner, where no other test has made users.
+#
+# `cargo xtask mac-root-tests` (crates/xtask/src/mac_root.rs) refuses a Mac that has lease users,
+# builds the test (and the js-agent it starts) as the runner's user, copies the test binary into a
+# root-owned work directory the test's account can run it from (the supervisor is the js-agent
+# cargo built, which root starts from the build tree), runs the test as root with its root
+# directory and uid (4310), deletes the account it made, and fails on a failed test, on a verdict
+# other than PASS (the test exits non-zero for each) and on an account left. The work directory is
+# below /private/var, outside every place the test searches for what run A left
+# (/private/var/folders, /private/tmp, /Users/Shared, /Library/Caches). The test's own output
+# (its tables of what was seeded and what survived, and its verdict) is printed after.
+#
+# It is called, never started by a pull request: by release.yml's `beta-macos-isolation` on a
+# push to main, which reports its verdict (a failure is a red release run and a RELEASE-RED
+# issue) but does not hold back `promote-macos`. On a hosted runner the test reaches no verdict
+# today: launchd refuses the launch agent of the uid's `user/<uid>` domain to the job and to root
+# with "Bootstrap failed: 5: Input/output error" (the uid has no login session there), which the
+# design does not take as the proof that the kind has no path (docs/design/mac-lease-teardown.md),
+# so the minimum set is not met. The gate belongs on a farm Mac, whose pool uids are real
+# accounts; see docs/design/jobscheduler-design.md, section 12.2. A manual run (`gh workflow run
+# js-agent-native-isolation.yml --ref <branch>`) runs the same job on a branch.
+# js-agent-native-isolation-test.yml builds the binary for an operator's own Mac instead.
+# crates/xtask/tests/native_isolation_workflow.rs pins this file and its call.
+name: js-agent-native-isolation
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # The oldest macOS the binaries must run on, as in the release build.
+  MACOSX_DEPLOYMENT_TARGET: "11.0"
+
+jobs:
+  isolation:
+    name: js-agent-native-isolation
+    runs-on: macos-15
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Run the two-run isolation test as root
+        run: cargo xtask mac-root-tests --work /private/var/js-mac-root-tests --only native_isolation
+      - name: Print the isolation test's output
+        if: ${{ !cancelled() }}
+        run: cat target/mac-root-tests/native_isolation.log

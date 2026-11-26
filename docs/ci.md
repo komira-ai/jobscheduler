@@ -107,4 +107,4 @@ repository variable `MACOS_ON_FARM` is `true`, the Apple silicon archives and th
 of that stage are built on the build farm's Macs from a Linux runner instead of a hosted macOS
 runner (`macos-farm.yml`, [mac-farm.md](mac-farm.md)); the tests and the probe stay hosted. A change
 whose macOS tests should be seen before it merges is tried by a manual run of `beta.yml` on its
-branch (`gh workflow run beta.yml --ref <branch>`), the same jobs on the same hosted runners.
+branch (`gh workflow run beta.yml --ref <branch>`), the same job on the same hosted runner.
