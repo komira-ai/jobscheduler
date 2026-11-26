@@ -272,10 +272,10 @@ async fn a_job_whose_id_cannot_make_a_prefix_has_no_sink() {
     let (mut rig, logs) = logging_rig("logs_bad_id", LONG_GRACE);
     let mut before = super::job_rig::rig("logs_bad_id_before", true);
     for bad in ["_lead", "-lead"] {
-        assert_eq!(logs.grants.sink_for("host-a", bad), None, "{bad}");
+        assert_eq!(logs.grants.sink_for("host-a", bad, 1), None, "{bad}");
     }
     assert_eq!(
-        logs.grants.sink_for("host-a", "ok-1"),
+        logs.grants.sink_for("host-a", "ok-1", 1),
         Some(sink_of("host-a", "ok-1"))
     );
     rig.join("host-a", true).await;

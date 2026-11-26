@@ -206,6 +206,9 @@ pub(crate) fn job(spec: Option<&v1::JobSpec>, ceiling: Duration) -> Result<Valid
         mounts,
         host_ports,
         history_key,
+        // `SubmitJob` refuses a job with a callback before it gets here, until the release
+        // that accepts one.
+        callback: None,
     };
     Ok(Valid {
         id,

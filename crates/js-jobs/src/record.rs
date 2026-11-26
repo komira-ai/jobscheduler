@@ -7,6 +7,7 @@ use js_state::StoreTime;
 use js_types::{ExecMode, HistoryKey, HostId, ImageDigestRef, Labels, Resources};
 use sha2::{Digest as _, Sha256};
 
+use crate::callback::JobCallback;
 use crate::codec::Carried;
 use crate::ids::{AllocationId, ClientName, JobId};
 use crate::queue::QueueTrail;
@@ -233,6 +234,9 @@ pub struct JobSpec {
     /// The key of the job's usage history as its client sent it (`spec.history_key`); `None` when
     /// it sent none, and the `size-class` label or the image and command name the class.
     pub history_key: Option<HistoryKey>,
+    /// The completion callback, if the job asks for one: its key as submitted on a new job,
+    /// and its digest in every job read back ([`crate::CallbackKey`]).
+    pub callback: Option<JobCallback>,
 }
 
 impl JobSpec {
@@ -267,6 +271,7 @@ impl JobSpec {
             mounts,
             host_ports,
             history_key,
+            callback,
         } = self;
         (*image == submitted.image)
             & (*command == submitted.command)
@@ -283,6 +288,7 @@ impl JobSpec {
             & (*mounts == submitted.mounts)
             & (*host_ports == submitted.host_ports)
             & (*history_key == submitted.history_key)
+            & same_callback(callback.as_ref(), submitted.callback.as_ref())
     }
 
     /// This spec with its files' contents replaced by their digests: what an ended job keeps.
@@ -291,6 +297,15 @@ impl JobSpec {
             files: self.files.digested(),
             ..self
         }
+    }
+}
+
+/// Whether two jobs ask for the same callback: both none, or both the same one
+/// ([`JobCallback`] compares keys by digest).
+fn same_callback(mine: Option<&JobCallback>, theirs: Option<&JobCallback>) -> bool {
+    match (mine, theirs) {
+        (Some(mine), Some(theirs)) => mine.same_as(theirs),
+        (mine, theirs) => mine.is_none() & theirs.is_none(),
     }
 }
 

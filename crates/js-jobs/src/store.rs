@@ -340,10 +340,18 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// Without an id: an id is minted, and minted again if taken, at most [`MINT_TRIES`]
     /// times.
     ///
+    /// A job that asks for a callback ([`JobSpec::callback`]) gives its key
+    /// ([`crate::CallbackKey::Key`]): the commit that records the job writes the job row with
+    /// the key's digest in its place and the armed row `callback/<id>` with the key and a
+    /// `webhook-id` minted from the store's id source (`crate::keys::CALLBACK`). The record
+    /// answered, and every read after, holds the digest; a resubmit compares the callback by
+    /// it, so it may name the key in either form.
+    ///
     /// # Errors
     /// [`JobStoreError::JobIdConflict`], [`JobStoreError::IdSpaceExhausted`],
-    /// [`JobStoreError::UnknownRow`] when the id's row is one a later build wrote,
-    /// [`JobStoreError::Store`] or [`JobStoreError::Mint`].
+    /// [`JobStoreError::CallbackKeyMissing`] when a job this call would record names its
+    /// callback's key by its digest, [`JobStoreError::UnknownRow`] when the id's row is one a
+    /// later build wrote, [`JobStoreError::Store`] or [`JobStoreError::Mint`].
     pub fn insert_queued(&self, job: NewJob) -> Result<Inserted, JobStoreError> {
         let NewJob {
             id,
@@ -417,7 +425,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             return Ok(found);
         }
         let record = self.queued_record(id, spec, priority, client)?;
-        let txn = index::put_job(Txn::new(), None, &record, Cond::Absent)?;
+        let (txn, record) = self.recorded(record)?;
         match self.write_stepped(txn)? {
             Ok((_, step)) => Ok(Inserted {
                 record,
@@ -442,7 +450,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         for _ in 0..MINT_TRIES {
             let id = JobId::minted(self.ids.mint()?);
             let record = self.queued_record(id, spec.clone(), priority, client.cloned())?;
-            let txn = index::put_job(Txn::new(), None, &record, Cond::Absent)?;
+            let (txn, record) = self.recorded(record)?;
             if let Ok((_, step)) = self.write_stepped(txn)? {
                 return Ok(Inserted {
                     record,

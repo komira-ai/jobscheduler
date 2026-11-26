@@ -10,13 +10,14 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use js_agent_wire::{HostPort, JobMount, Layer, MountMode, MountSource, PortProtocol, Propagation};
-use js_types::{CpuSeries, ExecMode, HistoryKey};
+use js_types::{CpuSeries, ExecMode, HistoryKey, Labels, ReservedKey};
 use proptest::collection::{btree_map, vec};
 use proptest::prelude::*;
 use proptest::test_runner::RngSeed;
 
 use super::tests::{allocation, at, bare_job, full_job, full_result, shape};
 use super::*;
+use crate::callback::{CallbackKey, JobCallback, KeyDigest};
 use crate::record::{Exclusion, FileDigest, Isolation, JobFiles, SizedFrom};
 use crate::result::{CpuPeak, CpuThrottle};
 use crate::result::{JobResult, JobTiming, LogLengths, ResourceUsage, ResultReason};
@@ -198,12 +199,13 @@ fn spec() -> impl Strategy<Value = JobSpec> {
             job_files(),
             labels(),
             history_key(),
+            callback(),
         ),
     )
         .prop_map(
             |(
                 ((digit, layers, mounts, host_ports), command, args, env, needs, constraints),
-                (wall, network, ports, files, labels, history_key),
+                (wall, network, ports, files, labels, history_key, callback),
             )| {
                 let image = digit.map(|digit| format!("team/app:1@{}", digest(digit)));
                 JobSpec {
@@ -225,6 +227,7 @@ fn spec() -> impl Strategy<Value = JobSpec> {
                     mounts,
                     host_ports,
                     history_key,
+                    callback,
                 }
             },
         )
@@ -235,6 +238,23 @@ fn history_key() -> impl Strategy<Value = Option<HistoryKey>> {
     proptest::option::of(
         "[ -~]{1,512}"
             .prop_map(|text| HistoryKey::parse(&text).expect("printable ASCII of 1 to 512 bytes")),
+    )
+}
+
+/// A job's callback as a row holds it, or none: any URL, its key's digest, and any deadline or
+/// none.
+fn callback() -> impl Strategy<Value = Option<JobCallback>> {
+    let asked = (
+        any_text(),
+        any::<[u8; 32]>(),
+        proptest::option::of(any::<u32>()),
+    );
+    proptest::option::of(
+        asked.prop_map(|(url, digest, deadline_seconds)| JobCallback {
+            url,
+            key: CallbackKey::Digest(KeyDigest(digest)),
+            deadline_seconds,
+        }),
     )
 }
 

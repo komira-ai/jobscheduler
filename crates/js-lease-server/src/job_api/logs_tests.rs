@@ -33,7 +33,7 @@ fn out_max(job: &str, from: u64, max: u32) -> GetLogsRequest {
 
 /// The answer of a job in `state` whose page asked from `from` is `data` at `offset`, at the
 /// end or not, with `first` as its first-byte time.
-fn page(
+pub(super) fn page(
     state: v1::JobState,
     from: u64,
     offset: u64,
@@ -61,7 +61,7 @@ fn page(
 }
 
 /// The (code, message) of a refusal.
-fn refusal<T: std::fmt::Debug>(answer: Result<T, Status>) -> (Code, String) {
+pub(super) fn refusal<T: std::fmt::Debug>(answer: Result<T, Status>) -> (Code, String) {
     let status = answer.expect_err("the call is refused");
     (status.code(), status.message().to_owned())
 }

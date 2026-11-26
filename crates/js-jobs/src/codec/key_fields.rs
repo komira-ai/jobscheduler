@@ -9,9 +9,11 @@
 //! value that is not a [`HistoryKey`] (empty, over 512 bytes, or a byte outside printable
 //! ASCII) is [`DecodeError::BadValue`], as a refused label is.
 
-use js_types::{HistoryKey, Labels};
+use std::collections::BTreeMap;
 
-use super::{DecodeError, Fields, Writer, job_tag, map, text_of};
+use js_types::{HistoryKey, Labels, RESERVED_PREFIX, ReservedKey};
+
+use super::{DecodeError, Fields, Writer, job_tag, map, text_map_of, text_of};
 
 /// The tag the history key adds to a job row, after the ones of `job_tag` and the other
 /// `*_fields` modules.
@@ -31,6 +33,41 @@ pub(super) fn put(row: &mut Writer, labels: &Labels, history_key: Option<&Histor
         job_key_tag::HISTORY_KEY,
         history_key.map(|class| class.as_str().as_bytes().to_vec()),
     );
+}
+
+/// The labels of a row: none when the row lacks the tag.
+pub(super) fn take_labels(fields: &mut Fields) -> Result<Labels, DecodeError> {
+    Ok(fields.opt(job_tag::LABELS, labels_of)?.unwrap_or_default())
+}
+
+/// The reserved label keys a row may hold.
+const RESERVED: [ReservedKey; 5] = [
+    ReservedKey::Tenant,
+    ReservedKey::Run,
+    ReservedKey::ValidationRun,
+    ReservedKey::Definition,
+    ReservedKey::Instance,
+];
+
+/// A label set as a row holds it: the caller's labels, and the reserved ones the scheduler
+/// set, each checked as when it was first made. A reserved key this build does not know is
+/// one a later build sets: the row is [`DecodeError::Newer`], as for an enum value.
+fn labels_of(tag: u16, value: Vec<u8>) -> Result<Labels, DecodeError> {
+    let bad = DecodeError::BadValue { tag };
+    let (reserved, caller): (BTreeMap<String, String>, BTreeMap<String, String>) =
+        text_map_of(tag, value)?
+            .into_iter()
+            .partition(|(key, _)| key.starts_with(RESERVED_PREFIX));
+    let labels = Labels::from_caller(&caller).map_err(|_| bad)?;
+    reserved
+        .into_iter()
+        .try_fold(labels, |labels, (key, value)| {
+            let known = RESERVED
+                .into_iter()
+                .find(|reserved| reserved.key() == key)
+                .ok_or(DecodeError::Newer)?;
+            labels.with_reserved(known, &value).map_err(|_| bad)
+        })
 }
 
 /// The history key of a row: none when the row lacks the tag.
