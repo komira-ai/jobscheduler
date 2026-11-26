@@ -1,5 +1,5 @@
-//! What a scenario may state about jobs ([`super::Expect::jobs_read`] and the ten after
-//! it): the server's job and allocation tables as the cell read them
+//! What a scenario may state about jobs ([`super::Expect::jobs_read`] and the thirteen
+//! after it): the server's job and allocation tables as the cell read them
 //! ([`Observations::job_reads`], [`Observations::allocation_reads`]) and the jobs the
 //! agents launched ([`Observations::ledger`]). Each reads what the cell saw, read by read,
 //! and never asks the server when it is judged; [`crate::Cell::settle`] reads the tables
@@ -15,11 +15,11 @@ use std::time::Duration;
 
 use js_jobs::{AllocationId, AllocationStep, JobId, JobState};
 use js_sim::text::{list, time};
-use js_types::HostId;
 use js_types::sched::FarmTime;
+use js_types::{CallbackAnswer, HostId};
 
-use crate::jobs::JOB_PREFIX;
 use crate::jobs::read::{state_name, step_name};
+use crate::jobs::{CallbackCall, JOB_PREFIX};
 use crate::observe::{ItemId, Observations};
 use crate::text;
 
@@ -52,6 +52,13 @@ pub(super) enum JobFact {
     /// No job was placed again on a host it had an earlier allocation on, sooner than this
     /// after that allocation was created.
     KeptOff(Duration),
+    /// Exactly this many calls of the item's job were answered 2xx by the receiver.
+    CallbacksDelivered(ItemId, usize),
+    /// Exactly this many calls of the item's job were made to the receiver, whatever the
+    /// answer.
+    CallbackCalls(ItemId, usize),
+    /// The item's job was last read at this attempt.
+    Attempt(ItemId, u32),
 }
 
 /// The statement, what it wanted and what it got, of `fact` over `observations`.
@@ -132,6 +139,25 @@ pub(super) fn judged(fact: &JobFact, observations: &Observations) -> [String; 3]
             let none = list::<String>(&[], String::clone);
             [name, none, list(&soon, String::clone)]
         }
+        JobFact::CallbacksDelivered(item, count) => {
+            let mine = calls_of(observations, *item);
+            let delivered = mine.filter(|call| call.answer == CallbackAnswer::Delivered);
+            let name = format!("callbacks-delivered({})", text::item(*item));
+            [name, count.to_string(), delivered.count().to_string()]
+        }
+        JobFact::CallbackCalls(item, count) => {
+            let name = format!("callback-calls({})", text::item(*item));
+            let made = calls_of(observations, *item).count();
+            [name, count.to_string(), made.to_string()]
+        }
+        JobFact::Attempt(item, wanted) => {
+            let job = job_of(*item);
+            let mut reads = observations.attempt_reads.iter().rev();
+            let last = reads.find(|read| read.job.as_str() == job);
+            let got = last.map_or_else(|| UNREAD.to_owned(), |read| read.number.to_string());
+            let name = format!("attempt({})", text::item(*item));
+            [name, wanted.to_string(), got]
+        }
         JobFact::NoLaunch => {
             let launched: Vec<String> = observations
                 .ledger
@@ -202,6 +228,13 @@ fn placed_again_too_soon(observations: &Observations, span: Duration) -> Vec<Str
     soon
 }
 
+/// The calls the receiver got for the job of `item`, oldest first.
+fn calls_of(observations: &Observations, item: ItemId) -> impl Iterator<Item = &CallbackCall> {
+    let job = job_of(item);
+    let calls = observations.callback_calls.iter();
+    calls.filter(move |call| call.job.as_str() == job)
+}
+
 /// The id of the job the job front submits for `item`.
 fn job_of(item: ItemId) -> String {
     format!("{JOB_PREFIX}{}", item.0)
@@ -220,7 +253,7 @@ mod tests {
     use js_types::sched::FarmTime;
 
     use super::*;
-    use crate::jobs::AllocationRow;
+    use crate::jobs::{AllocationRow, CallbackCall};
     use crate::observe::RunId;
 
     fn job(n: u32) -> JobId {
@@ -433,6 +466,62 @@ mod tests {
         assert_eq!(
             got(&JobFact::NoLaunch, &ran),
             ("[sim-job-0/aa]".to_owned(), false)
+        );
+    }
+
+    /// A call the receiver got for job `n`, answered `answer`.
+    fn call(n: u32, answer: CallbackAnswer) -> CallbackCall {
+        CallbackCall {
+            job: job(n),
+            webhook_id: "id".to_owned(),
+            at: at(1),
+            answer,
+            ended: true,
+            state: Some(JobState::Succeeded),
+        }
+    }
+
+    /// Catches: a call of another item's job counted as the item's, a failed try counted as
+    /// a delivery, a delivery missed from the calls made, and a call count that leaves a
+    /// failed try out.
+    #[test]
+    fn callback_statements_count_the_calls_of_the_items_own_job() {
+        let failed = CallbackAnswer::Failed(js_types::FailureClass::Failed);
+        let seen = Observations::quiet()
+            .with_callback_call(call(0, failed))
+            .with_callback_call(call(0, CallbackAnswer::Delivered))
+            .with_callback_call(call(1, CallbackAnswer::Delivered));
+        assert_eq!(
+            judged(&JobFact::CallbacksDelivered(ItemId(0), 1), &seen),
+            ["callbacks-delivered(item0)", "1", "1"]
+        );
+        assert_eq!(
+            judged(&JobFact::CallbackCalls(ItemId(0), 3), &seen),
+            ["callback-calls(item0)", "3", "2"]
+        );
+        let none = JobFact::CallbacksDelivered(ItemId(2), 0);
+        assert_eq!(got(&none, &seen), ("0".to_owned(), true));
+    }
+
+    /// Catches: an attempt other than the last one read taken as the job's, one of another
+    /// job read as the item's, and a job never read shown as anything but `unread`.
+    #[test]
+    fn the_attempt_statement_reads_the_last_attempt_read_of_the_items_job() {
+        let seen = Observations::quiet()
+            .with_attempt_read(job(0), 1, 3, at(1))
+            .with_attempt_read(job(1), 1, 1, at(1))
+            .with_attempt_read(job(0), 2, 3, at(2));
+        assert_eq!(
+            judged(&JobFact::Attempt(ItemId(0), 2), &seen),
+            ["attempt(item0)", "2", "2"]
+        );
+        assert_eq!(
+            got(&JobFact::Attempt(ItemId(0), 1), &seen),
+            ("2".to_owned(), false)
+        );
+        assert_eq!(
+            got(&JobFact::Attempt(ItemId(9), 1), &seen),
+            ("unread".to_owned(), false)
         );
     }
 }

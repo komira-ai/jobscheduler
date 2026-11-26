@@ -249,6 +249,7 @@ impl AgentNode {
             counters: Counters::default(),
             ledger,
             prepare: Prepare::default(),
+            refusal: None,
             profile: AgentProfile::default(),
         };
         Self {
@@ -317,6 +318,14 @@ impl AgentNode {
     /// in this process and any that replaces it.
     pub fn set_prepare(&mut self, prepare: Prepare) {
         self.io.prepare = prepare;
+    }
+
+    /// Makes a fake per-job agent refuse every job start it is told of from now on with
+    /// `code` (`Some`), or take them again (`None`). A refused start launches nothing; its
+    /// result, `failed_to_start` with the code as detail, is kept until acknowledged. The
+    /// switch lives on the node, so a replacement process keeps it. A real agent ignores it.
+    pub fn set_start_refusal(&mut self, code: Option<String>) {
+        self.io.refusal = code;
     }
 
     /// Makes the agent say hello as `profile` says, from its next hello on, in this
@@ -436,6 +445,8 @@ struct Io {
     counters: Counters,
     ledger: Ledger,
     prepare: Prepare,
+    /// The code the agent refuses every per-job start with, when it refuses them.
+    refusal: Option<String>,
     profile: AgentProfile,
 }
 

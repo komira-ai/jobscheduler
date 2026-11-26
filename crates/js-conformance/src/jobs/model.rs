@@ -21,6 +21,10 @@ use tonic::{Request, Response, Status};
 
 use super::{JobHarness, Refused, Step, channel_to};
 
+mod attempts;
+
+use attempts::Kind;
+
 /// The default retention window: 60 seconds, the shortest the real service accepts.
 const RETENTION: Duration = Duration::from_secs(60);
 
@@ -69,6 +73,21 @@ pub enum Defect {
     ClientNotRecorded,
     /// An id no job has answers `INVALID_ARGUMENT` instead of `NOT_FOUND`.
     UnknownJobIsInvalid,
+    /// A job whose host is lost while it is placed, starting or running is never retried: it
+    /// ends lost although its retry policy leaves attempts.
+    NoRetryOnHostLoss,
+    /// A job whose start fails for a cause of its host is never retried: it ends failed to
+    /// start although its retry policy leaves attempts.
+    NoRetryOnStartFailure,
+    /// A job whose process exits with a nonzero code is retried as a lost host is, while its
+    /// retry policy leaves attempts, instead of ending failed.
+    ExitRetries,
+    /// A job whose cancel was asked for while an attempt held a host is retried when that
+    /// host is lost, as if no cancel had been asked for, instead of ending lost.
+    CancelRetries,
+    /// The callback of a job with a retry policy is made due at the end of each attempt that
+    /// retries, instead of once at the job's final end.
+    CallbackPerAttempt,
 }
 
 /// One recorded job: what the service answers for it, and what it keeps beside.
@@ -85,6 +104,9 @@ struct Stored {
     result: Option<v1::JobResult>,
     /// The instant the result expires and the sweep deletes the job, once it has ended.
     retention_ends: Option<u64>,
+    /// The instant the latest retry made the next attempt placeable: kept, with the job's
+    /// `retry_not_before_ms` shown only while the job waits for it.
+    retry_not_before: Option<u64>,
 }
 
 impl Stored {
@@ -93,7 +115,9 @@ impl Stored {
     }
 
     /// Ends the job in `state` at `now`, with a result of `reason` and `exit_code`. The job no
-    /// longer shows `cancel_requested`: the model has no lost end, the one end that keeps it.
+    /// longer shows `cancel_requested`; the one end that keeps it, a lost host, is made by
+    /// [`Inner::attempt_ended`], which puts it back. The ended attempt goes into the history
+    /// when it held a host, and a callback that is armed is made due.
     fn end(
         &mut self,
         state: v1::JobState,
@@ -102,8 +126,12 @@ impl Stored {
         clock: (u64, u64),
     ) {
         let (now, retention_ms) = clock;
+        self.close(state, exit_code, reason, false, now);
         self.state = state;
         self.job.state = state.into();
+        if state == v1::JobState::FailedToStart {
+            self.job.start_failure = v1::StartFailureCode::StartTimeout.into();
+        }
         let mut times = self.job.times.unwrap_or_default();
         times.ended_at_ms = Some(now);
         self.job.times = Some(times);
@@ -112,10 +140,13 @@ impl Stored {
             exit_code,
             reason: reason.into(),
             times: Some(times),
+            attempt: self.job.attempt,
             ..v1::JobResult::default()
         });
-        self.retention_ends = Some(now.saturating_add(retention_ms));
+        let retention_ends = now.saturating_add(retention_ms);
+        self.retention_ends = Some(retention_ends);
         self.job.cancel_requested = false;
+        self.due_callback(now, retention_ends);
     }
 }
 
@@ -210,13 +241,23 @@ impl Inner {
             }
         }
         let client = Some(self.client.clone()).filter(|_| !self.has(Defect::ClientNotRecorded));
+        let callback_status = spec.callback.as_ref().map(|_| v1::CallbackStatus {
+            state: v1::CallbackState::Armed.into(),
+            ..v1::CallbackStatus::default()
+        });
         let job = v1::Job {
             id: id.clone(),
             spec: Some(v1::JobSpec {
                 job_id: id.clone(),
+                callback: spec.callback.map(|callback| v1::Callback {
+                    signing_key: Vec::new(),
+                    ..callback
+                }),
                 ..spec
             }),
             state: v1::JobState::Queued.into(),
+            attempt: 1,
+            callback_status,
             times: Some(v1::JobTimes {
                 queued_at_ms: self.now_ms,
                 ..v1::JobTimes::default()
@@ -230,6 +271,7 @@ impl Inner {
             key,
             result: None,
             retention_ends: None,
+            retry_not_before: None,
         };
         self.jobs.insert(id, stored);
         Ok(job)
@@ -270,6 +312,17 @@ impl Inner {
 
     fn step(&mut self, job: &str, step: Step) -> Result<(), Refused> {
         use v1::JobState::{Failed, Placed, Queued, Running, Starting, Succeeded};
+        match step {
+            Step::HostLost => return self.attempt_ended(job, Kind::HostLost).map(|_| ()),
+            Step::StartFailed => return self.attempt_ended(job, Kind::StartFailed).map(|_| ()),
+            Step::DeliverCallback => return self.deliver_callback(job),
+            Step::Exit(code) if (code != 0) & self.has(Defect::ExitRetries) => {
+                if self.attempt_ended(job, Kind::Exited(code))? {
+                    return Ok(());
+                }
+            }
+            Step::Place | Step::Start | Step::Run | Step::Exit(_) => {}
+        }
         let any = self.has(Defect::AnyStepIsTaken);
         let ignores_code = self.has(Defect::ExitCodeIgnored);
         let loses_code = self.has(Defect::ResultLosesExitCode);
@@ -281,15 +334,16 @@ impl Inner {
             Step::Start => Starting,
             Step::Run => Running,
             Step::Exit(code) if code == 0 || ignores_code => Succeeded,
-            Step::Exit(_) => Failed,
+            Step::Exit(_) | Step::HostLost | Step::StartFailed | Step::DeliverCallback => Failed,
         };
+        let waits = (to == Placed) & stored.retry_not_before.is_some_and(|until| now < until);
         let edge = matches!(
             (stored.state, to),
             (Queued, Placed)
                 | (Placed, Starting)
                 | (Starting, Running)
                 | (Running, Succeeded | Failed)
-        );
+        ) & !waits;
         if !edge && !any {
             return Err(Refused);
         }
@@ -298,6 +352,12 @@ impl Inner {
             Placed => {
                 times.placed_at_ms = Some(now);
                 stored.job.host_id = HOST.to_string();
+                stored.job.retry_not_before_ms = None;
+                stored.job.queue_status = None;
+                let ended = usize::try_from(stored.job.attempt);
+                if ended.is_ok_and(|ended| ended == stored.job.attempt_history.len()) {
+                    stored.job.attempt += 1;
+                }
             }
             Running => times.started_at_ms = Some(now),
             _ => {}
@@ -336,6 +396,13 @@ impl Inner {
 /// real service compares the decoded job. `ListJobs` answers every job in id order and
 /// ignores filters and page sizes. A job submitted without an id gets 32 hex digits from a
 /// counter, so the ids of one service are deterministic.
+///
+/// It retries a job as the real one does: [`js_types::decide`] gives the wait, the history,
+/// the attempt number, the retry time, the queue status of the wait and the callback status
+/// are the real service's shape. It shows no events and no attempt counts of the queue, and
+/// no queue status for a job that is placed. It does not validate a retry policy or a
+/// callback, and it sends no callback: [`Step::DeliverCallback`] stands for a delivery try
+/// the receiver answers 2xx.
 ///
 /// The handle is cheap to clone, and every clone is the same service: a fake of another
 /// crate serves one clone to its client and calls the hooks ([`Self::step`],
@@ -413,7 +480,11 @@ impl ReferenceJobs {
     /// [`Step::Place`], placed to starting by [`Step::Start`], starting to running by
     /// [`Step::Run`], running to succeeded by [`Step::Exit`] of 0 and to failed by any
     /// other code. A placement stamps the host and the placed time, running stamps the
-    /// started time, and an exit ends the job with its result and its retention end.
+    /// started time, and an exit ends the job with its result and its retention end. A
+    /// placement of a job that waits for a retry is refused until the wait has passed, and
+    /// counts the next attempt. [`Step::HostLost`] and [`Step::StartFailed`] retry the
+    /// attempt or end the job as their docs say, and [`Step::DeliverCallback`] delivers a
+    /// callback that is due.
     ///
     /// # Errors
     /// [`Refused`] when the job is in no state the step starts from, or no job has the id.

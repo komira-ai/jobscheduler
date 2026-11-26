@@ -16,6 +16,9 @@ use js_sim_cell::{
 use js_types::sched::FarmTime;
 use js_types::{HostId, LeaseId, Resources};
 
+// The attempt and callback invariants' cases, a module of this test binary too.
+#[path = "invariants/attempts.rs"]
+mod attempts;
 // The boundary cases, a module of this test binary (not a test target of its own).
 #[path = "invariants/boundaries.rs"]
 mod boundaries;
@@ -953,10 +956,10 @@ fn a_step_that_touched_one_agent_is_not_checked_against_every_agent() {
     assert_eq!(flagged(&full), [Invariant::NoDoubleBooking]);
 }
 
-/// Asserts that every member of `Invariant::ALL` has a negative case in
-/// `NEGATIVE_CASES` or the whole-host, job or elastic module's table, that no two members share a name, and that each case is flagged
-/// by exactly the invariant of its row. Catches an invariant added without a negative
-/// case, two invariants reported under one name, and a negative case that passes by
+/// Asserts that every member of `Invariant::ALL` has a negative case in `NEGATIVE_CASES` or the
+/// whole-host, job, elastic or attempts module's table, that no two members share a name, and that
+/// each case is flagged by exactly the invariant of its row. Catches an invariant added without a
+/// negative case, two invariants reported under one name, and a negative case that passes by
 /// tripping another invariant.
 #[test]
 fn every_invariant_has_a_negative_case_in_the_table() {
@@ -971,7 +974,8 @@ fn every_invariant_has_a_negative_case_in_the_table() {
         .chain(elastic::NEGATIVE_CASES)
         .chain(usage::NEGATIVE_CASES)
         .chain(cordon::NEGATIVE_CASES)
-        .chain(walk::NEGATIVE_CASES);
+        .chain(walk::NEGATIVE_CASES)
+        .chain(attempts::NEGATIVE_CASES);
     let table = || jobs::table(NEGATIVE_CASES.iter().chain(others.clone()));
     for invariant in Invariant::ALL {
         let rows = table().filter(|(row, _)| *row == invariant);

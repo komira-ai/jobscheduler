@@ -16,7 +16,7 @@
 //!   agents sent and were sent for the whole-host handshake ([`ReadyReport`],
 //!   [`StartSeen`], [`StopSeen`]).
 //! - [`invariant`]: the oracle ([`Invariant`]), the [`Checker`] that tests it after each
-//!   step and once at the end, and the one-line [`Violation`] it reports. Twenty-eight
+//!   step and once at the end, and the one-line [`Violation`] it reports. Thirty-one
 //!   properties: no host booked past what it holds, no lease on two hosts and no host
 //!   listed twice ([`Invariant::NoDoubleBooking`]); each run launched at most once
 //!   ([`Invariant::AtMostOneLaunch`]); one terminal answer per item
@@ -57,7 +57,13 @@
 //!   second provider after it went unanswered ([`Invariant::NoSecondLaunchForOneAcquire`]),
 //!   no acquire of an instance type in a region inside the backoff of its quota refusal
 //!   ([`Invariant::QuotaPassOverHonoured`]), and no acquire while a registered host was
-//!   open and held no job ([`Invariant::FreeHostBeatsAcquire`]).
+//!   open and held no job ([`Invariant::FreeHostBeatsAcquire`]); and the three of a job's
+//!   attempts and callback: no job launched under more allocations than its retry policy
+//!   allows, and no attempt number read past it ([`Invariant::AttemptsBounded`]), no start
+//!   of a job read while an agent still holds it under another allocation
+//!   ([`Invariant::OneAttemptAtATime`]), and every call the callback receiver got made after
+//!   the job's row ended and under one webhook id
+//!   ([`Invariant::CallbackAfterTheFinalEnd`]).
 //! - [`bus`]: what an agent and the server send each other, one HTTP call as a request
 //!   and its answer ([`Msg`]), and how a trace writes it.
 //! - [`agent`]: the agent node ([`AgentNode`]), behind the real wire, which writes what it
@@ -188,8 +194,8 @@ pub use elastic::{
 pub use front::{Answer, CallKind, ClientPort, Front, FrontFactory};
 pub use invariant::{Checked, Checker, Invariant, NotSettled, Touched, Violation};
 pub use jobs::{
-    AllocationRead, AllocationRow, JOB_PREFIX, JobBeat, JobFront, JobRead, JobReply, JobStartSeen,
-    LostAnswer, ResultMade,
+    AllocationRead, AllocationRow, AttemptRead, CallbackCall, JOB_PREFIX, JobBeat, JobFront,
+    JobRead, JobReply, JobStartSeen, LostAnswer, ResultMade,
 };
 pub use ledger::{Acked, Completion, Ledger};
 pub use load::Load;
@@ -203,4 +209,4 @@ pub use replay::{Failure, FailureReport, drive, run};
 pub use scenario::{Call, Expect, HostIs, Passed, Scenario, ScenarioFailure, SeedRun};
 pub use server::{EPOCH_MS, JOBS_PATH, ServerNode, ServerSpec, Shape, Store, WHOLE_CLASS};
 pub use usage::{UsageReadFault, UsageRow};
-pub use work::Work;
+pub use work::{Callback, Retry, Work};
