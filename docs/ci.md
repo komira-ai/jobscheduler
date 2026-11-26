@@ -7,8 +7,8 @@ arm64 are the beta stage of the release, on the push to `main` (`docs/release.md
 
 ## The merge queue
 
-`main` takes a pull request only through GitHub's merge queue. A pull request whose checks
-passed is added to the queue. The queue makes a branch `gh-readonly-queue/main/pr-<n>-<sha>`
+With the ruleset below on, `main` takes a pull request only through GitHub's merge queue. A
+pull request whose checks passed is added to the queue. The queue makes a branch `gh-readonly-queue/main/pr-<n>-<sha>`
 holding `main`, the pull requests ahead of it in the queue and its own squash commit, runs
 `ci.yml` there (event `merge_group`), and moves `main` to that commit when the required check
 passed. A pull request is not brought up to date with `main` and checked again every time
@@ -88,6 +88,17 @@ and the repository's squash message settings are `squash_merge_commit_title: PR_
   hangs still ends red at its own timeout, so the queue sees a failure, not a silence.
 - **Advisories never block.** `deny` fails on licences, bans and sources; its advisories step
   is shown and does not fail the job.
+
+The ruleset and the two squash settings are turned on by the held script
+`tools/held/merge-queue/merge_queue.sh`, run by an admin of the repository. It is a dry run by
+default: it prints the settings and the ruleset now and after, and the exact API calls. With
+`--apply` it writes the squash settings first, then the ruleset (a new ruleset `main`, or the
+existing one with its other rules kept), reads both back, and prints the calls that undo the
+change: a `DELETE` of the ruleset it created (or a `PUT` of the old body), and a `PATCH` back to
+the old squash settings. It stops before writing anything when the repository is not public, when
+`ci.yml` on `main` does not start on `merge_group` or has no job `all-passed`, or when another
+ruleset already puts a merge queue or required checks on `main`. Deleting the ruleset turns the
+queue off, and pull requests merge directly again.
 
 A pull request whose group fails leaves the queue. The queue removes it and builds the pull
 requests behind it again without it; it comes back only when it is added to the queue again,
