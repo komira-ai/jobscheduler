@@ -18,7 +18,7 @@ use std::error::Error as _;
 use std::io;
 use std::panic::resume_unwind;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 
 use postgres::error::SqlState;
@@ -42,12 +42,14 @@ pub(super) fn off_runtime<R: Send>(f: impl FnOnce() -> R + Send) -> R {
 type Params<'a> = &'a [&'a (dyn ToSql + Sync)];
 
 /// How to make a connection: the client's settings with the network limits and the TLS mode
-/// in them, the TLS settings, and the statements a new session runs first.
+/// in them, the TLS settings, the statements a new session runs first, and the count every
+/// connection made from it adds each message it sends to ([`Conn`]).
 #[derive(Clone)]
 pub(super) struct Dial {
     pub(super) pg: Config,
     pub(super) tls: Tls,
     pub(super) session: String,
+    pub(super) sent: Arc<AtomicU64>,
 }
 
 /// Why [`Conn::connect`] failed.
@@ -99,6 +101,11 @@ const ENDED: [SqlState; 5] = [
 pub struct Conn {
     // Present until `drop`.
     client: Option<Client>,
+    /// The messages that carried statements to the server, each a round trip: one per call of
+    /// [`Conn::batch_execute`] (however many statements its text holds), [`Conn::execute`] and
+    /// the `query` calls, counted with every other connection of the same [`Dial`]. A prepare
+    /// is not counted.
+    sent: Arc<AtomicU64>,
 }
 
 impl Conn {
@@ -118,6 +125,7 @@ impl Conn {
         })?;
         let mut conn = Conn {
             client: Some(client),
+            sent: Arc::clone(&dial.sent),
         };
         conn.batch_execute(&dial.session).map_err(DialError::Pg)?;
         Ok(conn)
@@ -127,6 +135,12 @@ impl Conn {
         self.client
             .as_mut()
             .expect("the client is present until the connection is dropped")
+    }
+
+    /// The client, for a call that sends statements: the call is counted.
+    fn sending(&mut self) -> &mut Client {
+        self.sent.fetch_add(1, Ordering::Relaxed);
+        self.client()
     }
 
     /// Whether the server closed the connection.
@@ -148,7 +162,7 @@ impl Conn {
     /// # Errors
     /// The client's error.
     pub fn batch_execute(&mut self, query: &str) -> Result<(), postgres::Error> {
-        let client = self.client();
+        let client = self.sending();
         off_runtime(|| client.batch_execute(query))
     }
 
@@ -161,7 +175,7 @@ impl Conn {
         query: &T,
         params: Params<'_>,
     ) -> Result<u64, postgres::Error> {
-        let client = self.client();
+        let client = self.sending();
         off_runtime(|| client.execute(query, params))
     }
 
@@ -174,7 +188,7 @@ impl Conn {
         query: &T,
         params: Params<'_>,
     ) -> Result<Vec<Row>, postgres::Error> {
-        let client = self.client();
+        let client = self.sending();
         off_runtime(|| client.query(query, params))
     }
 
@@ -187,7 +201,7 @@ impl Conn {
         query: &T,
         params: Params<'_>,
     ) -> Result<Row, postgres::Error> {
-        let client = self.client();
+        let client = self.sending();
         off_runtime(|| client.query_one(query, params))
     }
 
@@ -200,7 +214,7 @@ impl Conn {
         query: &T,
         params: Params<'_>,
     ) -> Result<Option<Row>, postgres::Error> {
-        let client = self.client();
+        let client = self.sending();
         off_runtime(|| client.query_opt(query, params))
     }
 }

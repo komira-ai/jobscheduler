@@ -3,7 +3,7 @@
 //! and the job tables a pass read ([`Tables`]), so that a pass reads them again only when they
 //! changed ([`SchedPlacer::tables`]), and then only the rows that changed, from the store's feed,
 //! and not for a job a submit of this server just recorded, which is added to them instead
-//! ([`SchedPlacer::note_inserted`]).
+//! ([`SchedPlacer::note_inserted`]), unless a pass holds them at that moment.
 //!
 //! A pass ([`super::jobs`]) decides from:
 //!
@@ -50,7 +50,7 @@
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, MutexGuard, PoisonError};
+use std::sync::{Arc, MutexGuard, PoisonError, TryLockError};
 use std::time::Duration;
 
 use js_jobs::{
@@ -227,6 +227,15 @@ impl Tables {
             self.cordons = cordons;
         }
         changed
+    }
+}
+
+/// `mutex` locked, when no one holds it now; `None`, without waiting, when someone does.
+fn lock_if_free<T>(mutex: &std::sync::Mutex<T>) -> Option<MutexGuard<'_, T>> {
+    match mutex.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+        Err(TryLockError::WouldBlock) => None,
     }
 }
 
@@ -437,8 +446,15 @@ impl SchedPlacer {
     /// A job is added once, in queue order ([`queue_order`]): the tables may have been read
     /// after the commit landed and hold it already. The store's head the tables follow is left
     /// as it was, so the feed tells the commit again, which changes nothing then.
+    ///
+    /// It never waits: while a pass holds the tables (it reads them again, which takes as long
+    /// as the four reads do), nothing is added and the answer is `false`, so a submit that
+    /// calls it answers without waiting for the pass. That pass, or the next, reads the job
+    /// from the store, as any write of the job store makes it.
     pub fn note_inserted(&self, inserted: &Inserted) -> bool {
-        let mut kept = lock(&self.tables);
+        let Some(mut kept) = lock_if_free(&self.tables) else {
+            return false;
+        };
         let Some(read) = kept.as_mut() else {
             return false;
         };

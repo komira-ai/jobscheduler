@@ -231,18 +231,17 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         }
     }
 
-    /// The rows `entries` point at, each once, in key order, read by key; an entry whose row
-    /// is gone is passed over.
+    /// The rows `entries` point at, each once, in key order, read by key, [`SWEEP_BATCH`] keys
+    /// to a read ([`Store::get_many`]); an entry whose row is gone is passed over.
     pub(crate) fn rows_of(
         &self,
         entries: impl IntoIterator<Item = String>,
     ) -> Result<Vec<(String, Versioned)>, JobStoreError> {
         let keys: BTreeSet<String> = entries.into_iter().filter_map(|e| row_of(&e)).collect();
+        let keys: Vec<String> = keys.into_iter().collect();
         let mut rows = Vec::with_capacity(keys.len());
-        for key in keys {
-            if let Some(row) = self.store.get(&key)? {
-                rows.push((key, row));
-            }
+        for batch in keys.chunks(SWEEP_BATCH.get()) {
+            rows.extend(self.store.get_many(batch)?);
         }
         Ok(rows)
     }

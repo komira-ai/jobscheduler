@@ -7,7 +7,8 @@
 //! [`SchedPlacer::note_inserted`]: crate::place::SchedPlacer::note_inserted
 //! [`Interfere::take_reads`]: js_jobs::interfere::Interfere::take_reads
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread;
 use std::time::Duration;
 
 use js_jobs::interfere::{Interfere, Read};
@@ -21,6 +22,10 @@ use super::super::super::jobs::{JobStarts, PassMetrics};
 use super::super::super::rig::spec_of;
 use super::super::{Kept, Tables, TablesFrom};
 use super::{Offered, Rig};
+
+/// A bound a note that does not wait never meets: only a note that waits for the pass's read
+/// reaches it, and the test then fails instead of hanging on the pass it holds.
+const LONG: Duration = Duration::from_secs(60);
 
 /// The prefix of the one scan of each job table a pass takes: the queued jobs, the live
 /// allocations, the marks and the cordons.
@@ -489,4 +494,55 @@ fn kept_tables_follow_the_head_past_the_hosts_node_rows() {
     from.extend((0..batches).map(|_| TablesFrom::Kept));
     from.push(TablesFrom::Changed);
     assert_eq!(told.take(), from);
+}
+
+/// Asserts that a submit's note made while a pass reads the four tables again (the pass held
+/// on a gate the store holds its scan of the queued jobs, or of the cordons, at) answers `false`
+/// at once, before the gate opens, and adds nothing; the job is placed all the same, by the
+/// held pass when its read of the queue came after the commit, else by the next pass, which
+/// reads the tables from the store as the submit's write makes it. Before, the note waited on
+/// the pass for the whole read, and the submit that made it answered only then. It catches a
+/// note that waits for a pass, and a job left out once its note was skipped.
+#[test]
+fn a_note_made_while_a_pass_reads_the_tables_is_skipped_at_once_and_the_job_is_placed() {
+    for (gate, held_places) in [("idx/job/queued/", true), ("cordon/", false)] {
+        let rig = Rig::new();
+        let both = Offered::both();
+        let told = Told::default();
+        assert_eq!(rig.tick(&both, &told), Vec::<JobId>::new());
+        // A write since that read, so the next pass reads the tables again; it never fits.
+        rig.submit("never", 64_000, 0);
+        // The feed trimmed past that write, so the next pass reads the four tables in full
+        // rather than taking the write from the feed.
+        let head = rig.tables.jobs.feed_head().unwrap().unwrap();
+        rig.tables.store.trim_feed(head).unwrap();
+        let (entered_tx, entered) = mpsc::channel();
+        let (open, opened) = mpsc::channel::<()>();
+        rig.tables.store.before_next_scan(gate, move || {
+            entered_tx.send(()).unwrap();
+            // Until the test opens the gate, or drops it.
+            let _ = opened.recv();
+        });
+        let rig = &rig;
+        let (held, noted) = thread::scope(|scope| {
+            let pass = scope.spawn(|| rig.tick(&both, &told));
+            entered.recv().unwrap();
+            let fresh = rig.submit("fresh", 1000, 0);
+            let (noted_tx, noted) = mpsc::channel();
+            scope.spawn(move || noted_tx.send(rig.placer.note_inserted(&fresh)));
+            let noted = noted.recv_timeout(LONG);
+            drop(open);
+            (pass.join().unwrap(), noted)
+        });
+        assert_eq!(noted, Ok(false), "{gate}: the note waited for the pass");
+        let placed_by_held = held == [id("fresh")];
+        assert_eq!(placed_by_held, held_places, "{gate}: {held:?}");
+        let next = rig.tick(&both, &told);
+        let placed_by_next = next == [id("fresh")];
+        assert_eq!(placed_by_next, !held_places, "{gate}: {next:?}");
+        let from = told.take();
+        let read = [TablesFrom::Store, TablesFrom::Store, TablesFrom::Changed];
+        assert_eq!(from, read, "{gate}: nothing was added");
+        assert_eq!(rig.tables.jobs.queued().unwrap().len(), 1, "{gate}");
+    }
 }
