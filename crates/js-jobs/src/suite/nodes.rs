@@ -539,6 +539,48 @@ pub fn a_beat_through_one_server_is_read_by_another<B: Backend>(backend: &B) {
     );
 }
 
+/// Each hello writes the agent version it gives, never the one before it: a settle keeps the
+/// version, a later hello giving another version replaces it, and a later hello giving none
+/// leaves the row with none. Catches a version carried across a hello into the next session
+/// (the listing would name an agent that no longer runs) and a settle that drops it.
+pub fn each_hello_writes_its_own_agent_version<B: Backend>(backend: &B) {
+    let name = "each_hello_writes_its_own_agent_version";
+    let rig = rig(backend);
+    let node = host("host-a");
+    let version = |row: &NodeRow| row.record.agent_version.clone();
+    let first = rig.jobs.hello_node(&node, &hello()).expect("a hello");
+    let settled = rig
+        .jobs
+        .settle_node(&first, first.record.state.clone())
+        .expect("settles")
+        .expect("at the version read");
+    assert_eq!(
+        version(&settled),
+        Some("1.2.3".to_owned()),
+        "{name}: a settle dropped the version"
+    );
+    let upgraded = NodeHello {
+        agent_version: Some("1.3.0".to_owned()),
+        ..hello()
+    };
+    let second = rig.jobs.hello_node(&node, &upgraded).expect("a hello");
+    assert_eq!(
+        (second.record.epoch, version(&second)),
+        (2, Some("1.3.0".to_owned())),
+        "{name}: a later hello's version"
+    );
+    let unversioned = NodeHello {
+        agent_version: None,
+        ..hello()
+    };
+    rig.jobs.hello_node(&node, &unversioned).expect("a hello");
+    assert_eq!(
+        version(&stored(&rig.jobs, &node)),
+        None,
+        "{name}: a hello giving no version kept the one before"
+    );
+}
+
 /// `heard_at` is the store's clock at the hello or applied beat, and `live_nodes` judges it by
 /// the store's clock: with the store's clock at 100 s (the process's own clock reads a date
 /// decades on, so a stamp or comparison made by it could not give these answers), a row is
