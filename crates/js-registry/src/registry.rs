@@ -33,17 +33,9 @@ pub use beat::HeartbeatCheck;
 pub use cordon::{Cordoned, NotHeld, OwnHost, Uncordoned};
 pub use marks::Busy;
 
-/// Where a host's session stands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HostState {
-    /// The host was put back after a restart ([`Registry::restore_tainted`]) and has not
-    /// said hello since.
-    Awaiting,
-    /// The host said hello or heartbeat within the grace period.
-    Live,
-    /// The host has been silent for longer than the grace period.
-    Lost,
-}
+/// Where a host's session stands. A host put back after a restart
+/// ([`Registry::restore_tainted`]) is `Awaiting` until it says hello.
+pub use js_types::HostState;
 
 /// One host as the registry knows it: what an operator would list.
 #[derive(Debug, Clone, PartialEq, Eq)]
