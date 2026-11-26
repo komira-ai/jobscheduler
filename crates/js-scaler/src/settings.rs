@@ -211,6 +211,10 @@ const LIFETIME_MARGIN: Duration = Duration::from_secs(10 * 60);
 /// The default of [`Settings::prepare_timeout`]: 10 minutes, the registry's default.
 const PREPARE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
+/// The default of [`Settings::boot_timeout`]: 15 minutes. It is also the lease server's
+/// default for a pool table without `boot_timeout`.
+pub const BOOT_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
 /// The default of [`Settings::boot_fail_cooldown_max`]: 2 hours.
 pub const BOOT_FAIL_COOLDOWN_MAX: Duration = Duration::from_secs(2 * 3600);
 
@@ -241,7 +245,7 @@ impl Settings {
             max_spend_per_hour,
             max_spend_per_day,
             idle: Duration::from_secs(10 * 60),
-            boot_timeout: Duration::from_secs(15 * 60),
+            boot_timeout: BOOT_TIMEOUT,
             token_margin: Duration::from_secs(5 * 60),
             boot_fail_cooldown: Duration::from_secs(10 * 60),
             boot_fail_cooldown_max: BOOT_FAIL_COOLDOWN_MAX,

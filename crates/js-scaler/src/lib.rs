@@ -197,9 +197,9 @@ pub use record::{
     RecordsError, StoredExec, StoredOffer, VERSION,
 };
 pub use settings::{
-    ACQUIRE_RETRY, BOOT_FAIL_COOLDOWN_MAX, BOOT_FAIL_RESET_AFTER, BOOT_FAIL_TRIP_AFTER, Blocked,
-    Health, LaunchMode, OFFER_COOLDOWN, ProviderSettings, QUOTA_BACKOFF, SIZE_TOLERANCE_PERCENT,
-    Settings, UNNAMED_PROVIDER,
+    ACQUIRE_RETRY, BOOT_FAIL_COOLDOWN_MAX, BOOT_FAIL_RESET_AFTER, BOOT_FAIL_TRIP_AFTER,
+    BOOT_TIMEOUT, Blocked, Health, LaunchMode, OFFER_COOLDOWN, ProviderSettings, QUOTA_BACKOFF,
+    SIZE_TOLERANCE_PERCENT, Settings, UNNAMED_PROVIDER,
 };
 pub use state::{AcquirePlan, Action, PlanLine, State};
 pub use time::Millis;

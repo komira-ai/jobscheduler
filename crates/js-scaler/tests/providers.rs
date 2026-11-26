@@ -427,3 +427,13 @@ fn the_nearest_miss_reads_the_later_providers_offers() {
         Some(js_elastic::Dimension::Os)
     );
 }
+
+/// Asserts the default of `boot_timeout`: `BOOT_TIMEOUT` is fifteen minutes, and a pool
+/// built by `Settings::new` takes it. Catches a default that drifts from the constant the
+/// lease server reads for a pool without the key.
+#[test]
+fn the_default_boot_timeout_is_fifteen_minutes() {
+    assert_eq!(js_scaler::BOOT_TIMEOUT, Duration::from_secs(900));
+    let pool = Settings::new("gpu", 4, 1000, 100_000);
+    assert_eq!(pool.boot_timeout, js_scaler::BOOT_TIMEOUT);
+}

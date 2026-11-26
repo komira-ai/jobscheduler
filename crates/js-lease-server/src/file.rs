@@ -699,7 +699,7 @@ impl Elastic<'_> {
             let reason = "must not be below max_spend_per_hour";
             return Err(s.fail("max_spend_per_day", reason));
         }
-        let boot_timeout = keys.boot_timeout.unwrap_or(Duration::from_secs(900));
+        let boot_timeout = keys.boot_timeout.unwrap_or(js_scaler::BOOT_TIMEOUT);
         let given = lifetime::Given {
             idle: keys.idle,
             max_age: keys.max_age,
