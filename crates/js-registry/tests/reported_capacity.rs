@@ -299,6 +299,7 @@ fn an_adopted_session_is_booked_at_the_claim_its_row_keeps() {
         labels: map(&[]),
         phase: Phase::Serving,
         agent_process: None,
+        agent_version: None,
         silent_for: Duration::ZERO,
         binding: Some(Binding::new(cred("t"), None)),
     };

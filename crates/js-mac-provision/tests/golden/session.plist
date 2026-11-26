@@ -36,6 +36,16 @@
 	<integer>30</integer>
 	<key>ExitTimeOut</key>
 	<integer>20</integer>
+	<key>SoftResourceLimits</key>
+	<dict>
+		<key>NumberOfFiles</key>
+		<integer>65536</integer>
+	</dict>
+	<key>HardResourceLimits</key>
+	<dict>
+		<key>NumberOfFiles</key>
+		<integer>65536</integer>
+	</dict>
 	<key>StandardOutPath</key>
 	<string>/Library/Application Support/js-agent/log/js-mac-session.log</string>
 	<key>StandardErrorPath</key>

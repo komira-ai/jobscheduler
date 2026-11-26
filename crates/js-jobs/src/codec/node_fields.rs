@@ -8,8 +8,14 @@
 //! is optional. Its default is what a host that announced nothing of it reads as: no session
 //! digest, no shape, no labels, the phase `quarantined` (a phase text this build does not know
 //! reads so too, as on the wire: fail closed), no load, the first listing applied, the last
-//! listing clean, no beat applied, no container missed, no agent process (a hello from an agent that sent none). The two listing flags are markers
-//! named so that their absence is that default (`FIRST_LISTING_PENDING`, `LISTING_UNCLEAN`).
+//! listing clean, no beat applied, no container missed, no agent process (a hello from an agent
+//! that sent none), no agent version. The two listing flags are markers named so that their
+//! absence is that default (`FIRST_LISTING_PENDING`, `LISTING_UNCLEAN`).
+//!
+//! The agent version is written with the epoch of the hello that gave it, and read only while
+//! that is the row's epoch. A build that does not know the tag carries it, so a hello such a
+//! build takes leaves the version of the hello before; the epoch that hello moved on makes
+//! that version read as none, never as the version of the agent now in session.
 //!
 //! A shape is a marker tag and the six tags after it: the resources as a job row writes them
 //! and the capabilities as a map of text. A load is a marker and the six tags after it.
@@ -54,6 +60,9 @@ pub(crate) mod node_tag {
     pub const MISSING: u16 = 12;
     /// The agent process whose hello wrote the row (text); absent for an agent that sent none.
     pub const AGENT_PROCESS: u16 = 13;
+    /// The agent version of the hello that began the row's epoch: that epoch (u64), then the
+    /// version (text); absent for a hello that gave none.
+    pub const AGENT_VERSION: u16 = 14;
     /// Present (empty) when the row holds the host's announced shape, in the six tags after.
     pub const CLAIM: u16 = 20;
     /// Present (empty) when the row holds the shape the pool books, in the six tags after.
@@ -215,6 +224,22 @@ fn session_of(tag: u16, value: Vec<u8>) -> Result<SessionDigest, DecodeError> {
     Ok(SessionDigest::new(bytes))
 }
 
+/// The value of [`node_tag::AGENT_VERSION`]: the epoch of the hello that gave `version`, then
+/// `version`.
+fn version_value(epoch: u64, version: &str) -> Vec<u8> {
+    let mut value = epoch.to_be_bytes().to_vec();
+    value.extend_from_slice(version.as_bytes());
+    value
+}
+
+/// The epoch and the agent version a value of [`node_tag::AGENT_VERSION`] holds.
+fn version_of(tag: u16, value: Vec<u8>) -> Result<(u64, String), DecodeError> {
+    let (epoch, version) = value
+        .split_first_chunk::<8>()
+        .ok_or(DecodeError::BadLength { tag })?;
+    Ok((u64::from_be_bytes(*epoch), text_of(tag, version.to_vec())?))
+}
+
 /// The row of `node`.
 ///
 /// # Errors
@@ -244,6 +269,12 @@ pub(crate) fn encode_node(node: &NodeRecord) -> Result<Vec<u8>, JobStoreError> {
     }
     row.put(t::MISSING, missing_value(&state.missing_in_a_row));
     row.put_opt(t::AGENT_PROCESS, node.agent_process.as_deref().map(text));
+    row.put_opt(
+        t::AGENT_VERSION,
+        node.agent_version
+            .as_deref()
+            .map(|version| version_value(node.epoch, version)),
+    );
     put_shape(&mut row, t::CLAIM, node.claim.as_ref());
     put_shape(&mut row, t::SHAPE, node.shape.as_ref());
     put_load(&mut row, state.load.as_ref());
@@ -281,6 +312,10 @@ pub(crate) fn decode_node(row: &[u8]) -> Result<NodeRecord, DecodeError> {
     };
     let missing_in_a_row = fields.opt(t::MISSING, missing_of)?.unwrap_or_default();
     let agent_process = fields.opt(t::AGENT_PROCESS, text_of)?;
+    // A version another epoch's hello gave is not that of the agent in this epoch's session.
+    let agent_version = fields
+        .opt(t::AGENT_VERSION, version_of)?
+        .and_then(|(given_at, version)| (given_at == epoch).then_some(version));
     let claim = take_shape(&mut fields, t::CLAIM)?;
     let shape = take_shape(&mut fields, t::SHAPE)?;
     let load = take_load(&mut fields)?;
@@ -293,6 +328,7 @@ pub(crate) fn decode_node(row: &[u8]) -> Result<NodeRecord, DecodeError> {
         shape,
         labels,
         agent_process,
+        agent_version,
         state: NodeState {
             phase,
             load,
