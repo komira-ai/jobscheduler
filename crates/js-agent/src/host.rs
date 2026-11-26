@@ -25,9 +25,10 @@ use crate::facts::{
 use crate::identity;
 use crate::os_version;
 
-/// The hello, and what the operator should be told about how it was made.
+/// The hello, and what the operator should be told about how it was made. It is the host's hello
+/// as prepared by [`offer`], not a `js_elastic` offer (a cloud catalog entry for a machine type).
 #[derive(Debug)]
-pub struct Offer {
+pub struct PreparedHello {
     /// The hello to send.
     pub hello: Hello,
     /// Warnings, such as a failed GPU probe.
@@ -220,7 +221,7 @@ pub struct StoreView<'a> {
 /// version as `os_version` (read by the `os_version` module), the builds of the Xcodes of
 /// `site` that answered the survey as `xcode` ([`crate::xcode::survey`]; none, no key), and
 /// the versions of the simulator runtimes those Xcodes offer as `sim.<platform>`
-/// ([`crate::xcode::sim`]; none, no key); the ready Xcodes are in [`Offer::xcodes`]. A host
+/// ([`crate::xcode::sim`]; none, no key); the ready Xcodes are in [`PreparedHello::xcodes`]. A host
 /// that has a bundle store (`store`) also reports `bundle-root` and `bundle` (see
 /// [`crate::bundle`]), and the disk it offers (the
 /// shape's `disk_bytes` and `disk-gib`) leaves out the unused part of the store's budget:
@@ -239,7 +240,7 @@ pub fn offer(
     site: crate::xcode::Site<'_>,
     agent_version: &str,
     store: Option<StoreView<'_>>,
-) -> Result<Offer, String> {
+) -> Result<PreparedHello, String> {
     let detected = detect(platform, runner, files)?;
     let gpus = capped("--gpus", cli.gpus, detected.gpus.count)?;
     let cpu_millis = capped("--cpu-millis", cli.cpu_millis, detected.cpu_millis)?;
@@ -292,7 +293,7 @@ pub fn offer(
         .take(usize::try_from(gpus).unwrap_or(usize::MAX))
         .collect();
     let accelerator = facts::accelerator(gpu_class.as_deref(), gpus, &devices);
-    Ok(Offer {
+    Ok(PreparedHello {
         hello: Hello {
             agent_process: None,
             protocol: ProtocolRange::THIS,
