@@ -21,7 +21,9 @@ pub enum Poll {
     Quiet,
     /// The helper is gone: its exit code, or the signal that ended it.
     Gone {
+        /// The helper's exit code, when it exited.
         code: Option<i32>,
+        /// The signal that ended it, when one did.
         signal: Option<i32>,
     },
 }

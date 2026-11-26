@@ -84,23 +84,41 @@ pub enum BundleError {
     #[error(
         "{dir} is not a prepared base bundle: {file} is missing (build one with `js-vmm image base`)"
     )]
-    Missing { dir: PathBuf, file: &'static str },
+    Missing {
+        /// The bundle directory that was checked.
+        dir: PathBuf,
+        /// The name of the file that is not in it.
+        file: &'static str,
+    },
     /// `clonefile(2)` of one file failed.
     #[error("clonefile {src} -> {dst}: {source}")]
     Clone {
+        /// The file that was cloned.
         src: PathBuf,
+        /// Where the clone was to go.
         dst: PathBuf,
+        /// The error `clonefile(2)` returned.
         source: io::Error,
     },
     /// The immutable flag on a cloned file could not be cleared.
     #[error("clear the immutable flag on {path}: {source}")]
-    Unflag { path: PathBuf, source: io::Error },
+    Unflag {
+        /// The cloned file whose flag could not be cleared.
+        path: PathBuf,
+        /// The underlying I/O error.
+        source: io::Error,
+    },
     /// A new machine identifier could not be made.
     #[error("a new machine identifier: {0}")]
     NewIdentity(String),
     /// A file of the clone could not be written.
     #[error("write {path}: {source}")]
-    Write { path: PathBuf, source: io::Error },
+    Write {
+        /// The file of the clone that could not be written.
+        path: PathBuf,
+        /// The underlying I/O error.
+        source: io::Error,
+    },
     /// The destination of the clone already exists.
     #[error("{0} already exists: a clone never overwrites")]
     Exists(PathBuf),

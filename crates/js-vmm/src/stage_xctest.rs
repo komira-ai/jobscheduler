@@ -36,7 +36,14 @@ pub enum TestsError {
     NoXctestrun(PathBuf),
     /// The directory holds more than one `*.xctestrun` file.
     #[error("{dir} holds two *.xctestrun files ({a} and {b}); it must hold exactly one")]
-    TwoXctestruns { dir: PathBuf, a: String, b: String },
+    TwoXctestruns {
+        /// The directory that holds both.
+        dir: PathBuf,
+        /// The name of one `*.xctestrun` file.
+        a: String,
+        /// The name of the other.
+        b: String,
+    },
     /// The `.xctestrun` entry is not a regular file.
     #[error("{0} is not a regular file")]
     NotRegular(PathBuf),

@@ -30,6 +30,7 @@ pub enum Cmd {
     /// the VM. The probes start this as a child process.
     #[command(hide = true)]
     VmRun {
+        /// Path of the spec file to run.
         #[arg(long)]
         spec: PathBuf,
     },

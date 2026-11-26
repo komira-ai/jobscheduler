@@ -122,10 +122,20 @@ pub enum StageError {
     #[error(
         "{path}: a symbolic link to {target}, which leaves the app (pass --allow-external-links to copy it as a link)"
     )]
-    EscapingLink { path: PathBuf, target: PathBuf },
+    EscapingLink {
+        /// The symbolic link.
+        path: PathBuf,
+        /// Where it points.
+        target: PathBuf,
+    },
     /// The path is a fifo, socket or device, which is not copied.
     #[error("{path}: a {kind}, which is not copied")]
-    Special { path: PathBuf, kind: &'static str },
+    Special {
+        /// The fifo, socket or device.
+        path: PathBuf,
+        /// What it is, in words (`named pipe`, `socket`, `device`, `special file`).
+        kind: &'static str,
+    },
     /// The tree holds more entries than the limit.
     #[error("{0}: more than {1} entries")]
     TooMany(PathBuf, usize),
@@ -162,16 +172,30 @@ pub enum StageError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Node {
     /// A directory, with its mode.
-    Dir { rel: PathBuf, mode: u32 },
+    Dir {
+        /// The directory's path below Xcode.app.
+        rel: PathBuf,
+        /// Its permission bits (group and world write dropped).
+        mode: u32,
+    },
     /// A regular file copied from `src`, with its mode and size in bytes.
     File {
+        /// The file's path below Xcode.app.
         rel: PathBuf,
+        /// The file to copy from.
         src: PathBuf,
+        /// Its permission bits (group and world write dropped).
         mode: u32,
+        /// Its size in bytes.
         bytes: u64,
     },
     /// A symbolic link to `target`.
-    Link { rel: PathBuf, target: PathBuf },
+    Link {
+        /// The link's path below Xcode.app.
+        rel: PathBuf,
+        /// Where the link points.
+        target: PathBuf,
+    },
 }
 
 impl Node {

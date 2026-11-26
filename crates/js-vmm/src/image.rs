@@ -41,8 +41,11 @@ pub enum ImageError {
     /// The restore image's SHA-256 differs from the pinned digest.
     #[error("refusing {path}: its SHA-256 is {actual}, not the {expected} that was pinned")]
     Mismatch {
+        /// The restore image that was refused.
         path: PathBuf,
+        /// The pinned SHA-256 digest.
         expected: String,
+        /// The SHA-256 digest the file has.
         actual: String,
     },
     /// A file could not be read, written or fetched; carries the message.
