@@ -43,7 +43,9 @@
 //!
 //! A call waits at most [`Timeouts::checkout`] for a connection of the pool, and fails with
 //! [`StoreError::Unavailable`] past it; a statement the server ends at its
-//! `statement_timeout` or `lock_timeout` is [`StoreError::Unavailable`] too.
+//! `statement_timeout` or `lock_timeout` is [`StoreError::Unavailable`] too. A caller that
+//! wants to know how long its calls spent getting connections runs them under
+//! [`checkout_waits`].
 //!
 //! **Connections.** Every connection is made with the configuration's TLS mode
 //! ([`TlsMode`]: `sslmode`, with the root certificate `sslrootcert` names) and its limits
@@ -82,6 +84,7 @@ mod timeouts;
 mod tls;
 mod tx;
 mod url;
+mod waits;
 
 use std::fmt;
 use std::ops::Bound;
@@ -106,6 +109,7 @@ pub use timeouts::Timeouts;
 use tls::Tls;
 pub use tls::{TlsError, TlsMode};
 use tx::{Row, Tx, keys_of, micros};
+pub use waits::checkout_waits;
 
 use conn::{Dial, DialError, connection_lost};
 

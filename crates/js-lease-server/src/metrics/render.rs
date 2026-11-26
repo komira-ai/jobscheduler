@@ -11,7 +11,10 @@ use js_registry::HostMark;
 use js_sched_placer::curves::CurveView;
 use js_types::HostId;
 
-use super::{CALLBACK_RESULTS, FAILURE_CODES, Histogram, RETRY_OUTCOMES, Recorder, TABLES_FROM};
+use super::{
+    CALLBACK_RESULTS, FAILURE_CODES, Histogram, RETRY_OUTCOMES, Recorder, SUBMIT_PHASES,
+    TABLES_FROM,
+};
 use crate::hosts::mark_text;
 
 /// The job states, in the order they are written. A job that failed to start is counted under
@@ -139,6 +142,30 @@ fn histogram(out: &mut String, name: &str, help: &str, histogram: &Histogram) {
     let _ = writeln!(out, "{name}_count {count}");
 }
 
+/// The series of `histogram` under the label `phase="{phase}"`, with no family lines.
+fn phase_series(out: &mut String, name: &str, phase: &str, histogram: &Histogram) {
+    let (below, count, sum_micros) = histogram.read();
+    for (le, seen) in below {
+        let _ = writeln!(out, "{name}_bucket{{phase=\"{phase}\",le=\"{le}\"}} {seen}");
+    }
+    let sum = Duration::from_micros(sum_micros);
+    let _ = writeln!(
+        out,
+        "{name}_bucket{{phase=\"{phase}\",le=\"+Inf\"}} {count}"
+    );
+    let _ = writeln!(out, "{name}_sum{{phase=\"{phase}\"}} {}", seconds(sum));
+    let _ = writeln!(out, "{name}_count{{phase=\"{phase}\"}} {count}");
+}
+
+fn submit_phases(out: &mut String, recorder: &Recorder) {
+    let name = "js_submit_phase_seconds";
+    let help = "How long each phase of each SubmitJob call took, by phase: validation (the checks of the job), get (the read of its id, for a job with one), admission (for a job not yet held), insert-checkout (of the insert, getting connections of the store's pool), insert-transaction (the rest of the insert) or note-inserted (the placer told of the job, its wait for the placer's tables included). A call is timed in each phase it reaches, whatever the answer.";
+    family(out, name, "histogram", help);
+    for (phase, histogram) in SUBMIT_PHASES.iter().zip(&recorder.submit_phases) {
+        phase_series(out, name, phase, histogram);
+    }
+}
+
 fn counter(out: &mut String, name: &str, help: &str, value: u64) {
     family(out, name, "counter", help);
     let _ = writeln!(out, "{name} {value}");
@@ -215,6 +242,7 @@ pub(crate) fn render(seen: &Snapshot, recorder: &Recorder) -> String {
         let count = count.load(Ordering::Relaxed);
         let _ = writeln!(out, "{name}{{from=\"{from}\"}} {count}");
     }
+    submit_phases(&mut out, recorder);
     callbacks(&mut out, recorder);
     refusals(&mut out, recorder);
     let expired = recorder.curve_wait_expiries.load(Ordering::Relaxed);
