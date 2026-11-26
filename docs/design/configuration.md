@@ -123,18 +123,25 @@ same way (0, 101, a negative number or a word is refused at the check that reads
 
 | where | what it cuts |
 |---|---|
-| a `[[pool]]` of the `--config` file | the `shape` `memory_bytes` of a joined pool, and the floor memory (1 GiB) of an elastic pool |
-| the agent pool file (`--agent-pool-config`; top level, before `[shape]`) | the `[shape]` `memory_bytes` the pool books for each host |
+| a `[[pool]]` of the `--config` file | the memory of each host of a joined pool, and the floor memory (1 GiB) of an elastic pool |
+| the agent pool file (`--agent-pool-config`; top level, before `[shape]`) | the memory of each host the pool books |
 
-The server books `floor(memory x percent / 100)` bytes, computed once where the booked shape is built, and every booking path sees that
-number: a lease, a whole-node lease, a run's memory limit, a reservation and the host listing. It applies to the memory the operator
-configured and never to a figure an agent reports about itself: a host that claims more than the pool lists is still booked at the cut. A
-host's hello is held to the whole listed memory, not the cut (a host must really have the memory; the pool books less of it). `GET
-/v1/hosts` shows, per host, `memory: {configured_bytes, schedulable_percent, bookable_bytes}` (`shape.memory_bytes` is the bookable
-figure), and `GET /v1/pools` and `/status` show the same three for an elastic pool's floor.
+**A host's capacity is what it reports.** A registered host is booked at the CPU, memory, GPUs and disk its hello reports, less or more
+than the pool's `[shape]`: a host that reports less (a node that lost a DIMM, say) joins and is booked at what it has, and a host that
+reports more is booked at what it has too. The `[shape]` numbers are no floor and no ceiling; they are booked only for a host that has
+not said hello since a restart, until it does, and they size an elastic pool's launches and the cold and pack defaults. Only the host's
+capabilities are held to the pool's at its hello (`[capabilities]`, and the class of GPUs both name; refused `below-floor`). In a pool that
+declares `exec`, a host's GPUs are booked only when it reports a working `gpu-toolkit`; a pool whose `[shape]` has GPUs refuses a GPU
+host without one (`host-contract`).
+
+The server books `floor(memory x percent / 100)` bytes of that memory, computed once where the booked shape is built, and every booking
+path sees that number: a lease, a whole-node lease, a run's memory limit, a reservation and the host listing. The percent is never applied
+twice and a hello is not held to any memory. `GET /v1/hosts` shows, per host, `memory: {configured_bytes, schedulable_percent,
+bookable_bytes}`, where `configured_bytes` is the memory the host reports (the `[shape]`'s for a host that has not said hello since a
+restart) and `shape.memory_bytes` is the bookable figure; `GET /v1/pools` and `/status` show the same three for an elastic pool's floor.
 
 The percent of an agent pool (the agent pool file, or a `[[pool]]` whose hosts register) is the placement
-engine's rule instead: the registry's book takes each host's whole `[shape]` memory, and the engine books no more than
+engine's rule instead: the registry's book takes each host's whole booked memory, and the engine books no more than
 `floor(memory x percent / 100)` of it. What fits the pool is still judged at the cut, so a request above it is refused `no-fit`, and
 `GET /v1/hosts` shows `shape.memory_bytes` as the cut, beside `memory`.
 

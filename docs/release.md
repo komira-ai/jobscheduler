@@ -20,8 +20,9 @@ opens a `RELEASE-RED` issue (step 11) and is fixed forward.
    runs with `cargo nextest run --workspace`; not its `--ignored` live steps and not doctests), and
    with them the four longest test binaries of `js-sim-cell` (`faults`, `smoke`, `replay` and
    `whole_host_prepare`, built with `--features js-sim-cell/slow-families`) that `test` leaves out,
-   under cargo-nextest, in four shards on four runners, with a Postgres service as in `ci`, starting
-   from the Cargo cache `ci`'s `test` job saves on main (read only).
+   under cargo-nextest, in four shards on four runners, with a Postgres service as in `ci`, each
+   building from nothing: it restores no Cargo cache (`ci`'s `test` job builds with other
+   `RUSTFLAGS`, so its cache held nothing this build reused and only took the runner's disk).
 4. The `artifacts` job calls `.github/workflows/artifacts.yml` with that version; its jobs run in
    the same run, at the same commit. Its `build` stamps the version into the CI checkout, builds the binaries for
    `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` (`js-lease-server`, `js`, `js-agent`, `js-bundle`, `js-mdm`, for each of the two Linux architectures) and `aarch64-apple-darwin` (`js`, `js-agent`, `js-bundle`, `js-mac-session`, `js-mac-provision`), each Linux target on a GitHub-hosted runner of its own architecture, checks that

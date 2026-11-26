@@ -202,7 +202,7 @@ fn default_platform_can_ever_serve_follows_hosts_and_provider_caps() {
     let id = PlatformId::new("ours");
     let alone = platform(id.clone(), vec![registered.clone()], Some(hosts.clone()));
     assert!(alone.can_ever_serve(&wanting(2, 0)));
-    assert!(!alone.can_ever_serve(&wanting(8, 0)));
+    assert!(!alone.can_ever_serve(&wanting(9, 0)));
     assert!(!alone.can_ever_serve(&wanting(1, 1)));
     let exact = Requirements {
         disk_bytes: Some((99 << 30) + 1),

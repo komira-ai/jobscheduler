@@ -76,11 +76,12 @@ async fn listed(h: &Harness) -> Vec<(String, u64)> {
 
 /// Asserts that each pool's hosts join it with its own token: a node of `burst` with the
 /// first pool's token and a Mac of `mac-build` with the Macs', each welcomed into its own
-/// pool, listed and booked at its own pool's shape, and each heartbeat carried by its own
-/// token. It catches a second pool file that is read and never served, and every host booked
-/// as the first pool.
+/// pool, listed and booked at what its own hello reports (the Mac's 28 cores, more than
+/// its pool's 24), and each heartbeat carried by its own token. It catches a second pool
+/// file that is read and never served, every host booked as the first pool, and a host
+/// capped at its pool's shape.
 #[tokio::test]
-async fn each_host_joins_the_pool_its_token_belongs_to() {
+async fn each_host_joins_the_pool_its_token_belongs_to_and_is_booked_at_its_hello() {
     let h = two_pools("two_pools_join").await;
     let node = post(&h, "/v1/agent/hello", Some(JOIN), &hello_body("node-1")).await;
     let node = session(&node, "node-1");
@@ -98,7 +99,7 @@ async fn each_host_joins_the_pool_its_token_belongs_to() {
     let beat = post(&h, "/v1/agent/heartbeat", Some(JOIN), &node.beat()).await;
     assert_eq!(beat.status, 200, "{}", beat.body);
     let hosts = listed(&h).await;
-    assert_eq!(hosts, [("mac-1".into(), 24_000), ("node-1".into(), 8000)]);
+    assert_eq!(hosts, [("mac-1".into(), 28_000), ("node-1".into(), 8000)]);
 }
 
 /// Asserts that a shared token of one pool never registers a host into another: the first
@@ -162,9 +163,10 @@ async fn a_one_time_token_registers_its_host_only_into_its_instances_pool() {
 /// Asserts what a restart does to a tainted Mac on a server of two pools: the server puts
 /// it back awaiting, with its taint (the binding of the second pool is kept by the saves of
 /// the first's), and its hello with the Macs' token admits it into `mac-build` again with
-/// the taint and the Macs' shape, while an untainted node of `burst` simply says hello
+/// the taint and booked at the 28 cores its hello reports, while an untainted node of `burst` simply says hello
 /// again. It catches a restored host held to the first pool, which would refuse a tainted
-/// Mac its own pool after every restart, and a taint of the second pool lost.
+/// Mac its own pool after every restart, a taint of the second pool lost, and a restored Mac
+/// booked at its pool's 24 cores instead of its hello's.
 #[tokio::test]
 async fn a_tainted_host_of_the_second_pool_joins_it_again_after_a_restart() {
     let first = two_pools("two_pools_restart").await;
@@ -204,7 +206,7 @@ async fn a_tainted_host_of_the_second_pool_joins_it_again_after_a_restart() {
     assert_eq!(hosts["hosts"][0]["taint"]["reason"], "residue", "{hosts}");
     assert_eq!(
         listed(&h).await,
-        [("mac-1".into(), 24_000), ("node-1".into(), 8000)]
+        [("mac-1".into(), 28_000), ("node-1".into(), 8000)]
     );
 }
 
@@ -327,7 +329,7 @@ async fn the_first_pools_tokens_are_its_join_token_file_or_the_flag_but_not_both
 /// Asserts that a host that presents its certificate on a server of two pools is admitted into
 /// the pool its hello names, whichever that is, with the certificate's credential and no token:
 /// the Mac `mac-1` is welcomed into `mac-build` and the node `node-1` into `burst`, each listed
-/// at its own pool's shape and each issued no host credential. A certificate hello takes no
+/// at what its own hello reports (the Macs' 28 cores) and each issued no host credential. A certificate hello takes no
 /// pool from a token, so one that carries an instance of another provider is held to the pool
 /// it names too: the Mac `mac-2`, whose instance is the provider `burst`, is admitted into
 /// `mac-build`, where a one-time token for that instance would be refused.
@@ -368,6 +370,6 @@ async fn a_certificate_host_is_admitted_into_the_pool_its_hello_names() {
         .collect();
     assert_eq!(
         hosts,
-        [("mac-1", 24_000), ("mac-2", 24_000), ("node-1", 8000)]
+        [("mac-1", 28_000), ("mac-2", 28_000), ("node-1", 8000)]
     );
 }

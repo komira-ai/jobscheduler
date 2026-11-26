@@ -586,7 +586,7 @@ impl<'a> Pass<'a> {
     /// * the host's shape is not known (`HostFacts::shape` is `None`: the registry has not
     ///   heard it since a restart): the machine is registered and nothing is judged;
     /// * the record holds no offer ([`StoredOffer::nothing`]): the registry already held the
-    ///   hello to the pool's shape floor, so the machine is registered, nothing more is
+    ///   hello to the pool's capabilities, so the machine is registered, nothing more is
     ///   judged, and the record is named in [`State::unverified`] for the shell to log;
     /// * otherwise the hello is compared with the offer: a match registers the machine, a
     ///   mismatch is [`Pass::on_mismatch`].

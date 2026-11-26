@@ -225,10 +225,13 @@ jobs:
   # cargo-nextest in four shards on four runners, beside the build. It starts at the push,
   # without waiting for `plan`, so it is
   # not after anything on the clock; `turn`, and so `publish`, needs every shard to pass. Like
-  # `test` it has a Postgres service (js-state's tests fail without it) and restores the Cargo
-  # cache that `test` saves on main, read-only (the js-sim-cell binaries behind `slow-families` it
-  # builds itself): this job saves none. nextest runs no doctests;
-  # `ci` does. It holds `contents: read` alone and writes nothing that ships.
+  # `test` it has a Postgres service (js-state's tests fail without it). It restores no Cargo
+  # cache and saves none (its one cache is the pinned nextest tarball): `test` saves its cache
+  # with `RUSTFLAGS=-D warnings`, which this job does not set, so none of it was reused (a
+  # shard's log after an exact cache hit compiles 331 of the 332 packages `cargo metadata
+  # --filter-platform x86_64-unknown-linux-gnu` resolves), and the restored cache (about 13 GB
+  # compressed) and the full build on top of it filled a runner's disk. nextest runs no
+  # doctests; `ci` does. It holds `contents: read` alone and writes nothing that ships.
   unit-tests:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
@@ -259,14 +262,6 @@ jobs:
           ref: ${{ env.COMMIT }}
           persist-credentials: false
       - run: rustup toolchain install
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-${{ runner.os }}-${{ runner.arch }}-test-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-test-
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: nextest-cache
         with:

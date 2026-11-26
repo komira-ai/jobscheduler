@@ -67,9 +67,9 @@ fn cases() -> Vec<Case> {
     cases.push(case("live", live, hello("a"), "host-live"));
     let contract = fixture_of(config(2).with_exec(ExecMode::Container));
     cases.push(case("contract", contract, hello("a"), "host-contract"));
-    let mut small = hello("a");
-    small.shape.cpu_millis = 1;
-    cases.push(case("floor", fixture(2), small, "shape-not-accepted"));
+    let mut linux = hello("a");
+    linux.capabilities.insert("os".into(), "linux".into());
+    cases.push(case("capability", fixture(2), linux, "shape-not-accepted"));
     let mut quota = hello("a");
     quota
         .capabilities

@@ -244,7 +244,7 @@ async fn every_decoded_message_is_validated_before_use() {
 }
 
 /// Asserts each registry refusal on the wire with the status the API documents and
-/// nothing but the code in the body: unknown pool, shape not accepted (with the reason, `below-floor` or `quota-without-pool-disk`) and a full pool
+/// nothing but the code in the body: unknown pool, shape not accepted (with the reason, `below-floor` for a capability the pool names that the host reports with another value, or `quota-without-pool-disk`) and a full pool
 /// (403), a hello while the host is live (409), and on the heartbeat an unknown host and
 /// a stale epoch (409), a missing and a wrong session (403). It catches a status that
 /// tells an agent to say hello when it should wait, and a code that is not the wire's.
@@ -254,8 +254,8 @@ async fn refusals_have_their_status_and_code() {
     let a = join(&h, "burst-1").await;
     let mut elsewhere = hello_body("burst-2");
     elsewhere["pool"] = json!("other");
-    let mut small = hello_body("burst-2");
-    small["shape"]["cpu_millis"] = json!(1);
+    let mut other_arch = hello_body("burst-2");
+    other_arch["capabilities"]["arch"] = json!("arm64");
     // The pool books no disk and does not name `scratch-quota`; a host that enforces one
     // is refused for that, and says so under `reason`.
     let mut quota = hello_body("burst-2");
@@ -265,7 +265,7 @@ async fn refusals_have_their_status_and_code() {
         (hello_body("burst-1"), 409, json!({ "error": "host-live" })),
         (elsewhere, 403, json!({ "error": "unknown-pool" })),
         (
-            small,
+            other_arch,
             403,
             json!({ "error": "shape-not-accepted", "reason": "below-floor" }),
         ),
