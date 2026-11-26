@@ -128,6 +128,7 @@ fn a_valid_job_becomes_the_recorded_job_and_what_admission_asks() {
         mounts: Vec::new(),
         host_ports: Vec::new(),
         history_key: Default::default(),
+        callback: None,
     };
     let accelerator = AcceleratorNeed::requested(&capabilities, &resources).unwrap();
     assert!(accelerator.is_some());

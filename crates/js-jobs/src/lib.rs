@@ -84,9 +84,16 @@
 //! [`JobStore::claim_callbacks`] and [`JobStore::answer_callback`] hand out a due callback
 //! to one instance ([`InstanceId`], [`CallbackClaim`]) and record its answer, and
 //! [`JobStore::callback_status`] reads where a job's delivery stands ([`CallbackStatus`]).
-//! This release keeps neither attempt nor callback rows: a retry is refused as the illegal
-//! move it is, no job has an attempt row or a callback, none is ever due, and an answer is
-//! stale.
+//! This release keeps no attempt rows: a retry is refused as the illegal move it is, and no job
+//! has an attempt row.
+//!
+//! A job that asks for a callback ([`JobSpec::callback`], [`JobCallback`]) has its delivery in
+//! the row `callback/<job id>`, the one row that holds the callback's signing key: the job row
+//! holds the key's SHA-256 ([`CallbackKey::Digest`]), so a resubmit compares the callback by
+//! it. The row is written armed in the commit that records the job, made due in the commit
+//! that ends it (whichever operation ends it), claimed by one instance at a time, erases its key
+//! when the delivery is delivered, abandoned or expired, has its deadline raised at boot, and is
+//! deleted with the job's row at its retention end.
 //!
 //! # Results and retention
 //!
@@ -247,7 +254,9 @@ pub mod suite;
 pub use ids::ScriptedIds;
 
 pub use attempt::{AttemptOutcome, AttemptRecord, AttemptRow};
-pub use callback::{CallbackClaim, CallbackState, CallbackStatus};
+pub use callback::{
+    CallbackClaim, CallbackKey, CallbackState, CallbackStatus, JobCallback, KeyDigest,
+};
 pub use codec::DecodeError;
 pub use error::JobStoreError;
 pub use ids::{
