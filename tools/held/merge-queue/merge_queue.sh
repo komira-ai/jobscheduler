@@ -107,8 +107,9 @@ grep -q '^  all-passed:' <<<"$ci" ||
   stop "ci.yml on main has no job all-passed, the check the ruleset requires; nothing changed"
 echo "== ci.yml on main starts on merge_group and has the job all-passed"
 
-# The ruleset "main" of the repository, if there is one.
-id=$(gh api "repos/$REPO/rulesets" | jq -r --arg n "$NAME" '[.[] | select(.name == $n and .target == "branch")][0].id // empty')
+# The ruleset "main" of the repository itself, if there is one (the list also holds the
+# organization's rulesets; one of those named "main" is another ruleset).
+id=$(gh api "repos/$REPO/rulesets" | jq -r --arg n "$NAME" '[.[] | select(.name == $n and .target == "branch" and .source_type == "Repository")][0].id // empty')
 
 # Rules from any other ruleset (of this repository or of the organization) on main.
 effect=$(gh api "repos/$REPO/rules/branches/main")

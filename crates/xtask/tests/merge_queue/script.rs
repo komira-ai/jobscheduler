@@ -127,7 +127,8 @@ impl Ran {
         self.stdout.lines().collect()
     }
 
-    /// The lines after the line `header`, up to the next line that starts with `==`.
+    /// The lines after the line `header`, up to the next line that starts with `==` or the
+    /// `DONE:` line.
     fn section(&self, header: &str) -> Vec<&str> {
         let lines = self.lines();
         let at = lines
@@ -136,7 +137,7 @@ impl Ran {
             .unwrap_or_else(|| panic!("no {header:?} in {}", self.stdout));
         lines[at + 1..]
             .iter()
-            .take_while(|l| !l.starts_with("=="))
+            .take_while(|l| !l.starts_with("==") && !l.starts_with("DONE:"))
             .copied()
             .collect()
     }
@@ -179,7 +180,8 @@ impl Rig {
         body["node_id"] = json!("RRS_7");
         self.set(
             "rulesets.json",
-            &json!([{ "id": 7, "name": "main", "target": "branch" }]).to_string(),
+            &json!([{ "id": 7, "name": "main", "target": "branch", "source_type": "Repository" }])
+                .to_string(),
         );
         self.set("ruleset-7.json", &body.to_string());
     }
@@ -570,4 +572,46 @@ fn settings_that_read_back_otherwise_fail_the_apply() {
         ran.section("== to back out:"),
         [BACK_SETTINGS, BACK_CREATED]
     );
+}
+
+#[test]
+fn a_ruleset_main_of_the_organization_is_another_ruleset() {
+    let rig = Rig::new("org-main");
+    rig.set(
+        "rulesets.json",
+        &json!([{ "id": 99, "name": "main", "target": "branch", "source_type": "Organization" }])
+            .to_string(),
+    );
+    rig.set(
+        "rules.json",
+        &json!([{ "type": "merge_queue", "ruleset_id": 99 }]).to_string(),
+    );
+    let ran = rig.run(&["--apply"]);
+    assert_eq!(
+        (ran.status, ran.stderr.as_str()),
+        (
+            1,
+            "STOP: another ruleset already puts rules on main: merge_queue (ruleset 99); nothing changed\n"
+        )
+    );
+    assert!(ran.writes().is_empty(), "{:?}", ran.gh);
+    assert!(
+        !ran.gh.iter().any(|c| c.ends_with("/rulesets/99")),
+        "the organization's ruleset is never read as this one: {:?}",
+        ran.gh
+    );
+}
+
+#[test]
+fn an_organization_ruleset_main_without_rules_on_main_leaves_a_new_one_to_create() {
+    let rig = Rig::new("org-main-quiet");
+    rig.set(
+        "rulesets.json",
+        &json!([{ "id": 99, "name": "main", "target": "branch", "source_type": "Organization" }])
+            .to_string(),
+    );
+    let ran = rig.run(&["--apply"]);
+    assert_eq!((ran.status, ran.stderr.as_str()), (0, ""), "{}", ran.stdout);
+    assert_eq!(ran.writes(), [PATCH, POST]);
+    assert_eq!(rig.sent(), documented());
 }

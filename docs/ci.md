@@ -8,8 +8,8 @@ arm64 are the beta stage of the release, on the push to `main` (`docs/release.md
 ## The merge queue
 
 With the ruleset below on, `main` takes a pull request only through GitHub's merge queue. A
-pull request whose checks passed is added to the queue. The queue makes a branch `gh-readonly-queue/main/pr-<n>-<sha>`
-holding `main`, the pull requests ahead of it in the queue and its own squash commit, runs
+pull request whose checks passed is added to the queue. The queue makes a branch
+`gh-readonly-queue/main/pr-<n>-<sha>` holding `main`, the pull requests ahead of it in the queue and its own squash commit, runs
 `ci.yml` there (event `merge_group`), and moves `main` to that commit when the required check
 passed. A pull request is not brought up to date with `main` and checked again every time
 `main` moves: it is checked once more, on top of exactly what will be ahead of it.
