@@ -136,7 +136,7 @@ pub(crate) const SURFACE: &[Command] = &[
             Flag { name: "from-offset", field: &["from_offset"], kind: Kind::U64, repeated: false, required: false, oneof: None, doc: "The offset of the first byte wanted, counted from the stream's first byte. Absent: 0. Past the length of an ended job's stream: refused, OUT_OF_RANGE." },
             Flag { name: "max-bytes", field: &["max_bytes"], kind: Kind::U32, repeated: false, required: false, oneof: None, doc: "The most bytes of data in the answer. Absent: 262144 (256 KiB). A larger value than 1048576 (1 MiB) is cut to it; 0 is refused." },
             Flag { name: "follow", field: &["follow"], kind: Kind::Bool, repeated: false, required: false, oneof: None, doc: "Whether to wait, up to 20 seconds, for new bytes when none are there yet, then answer; an answer at the cap has no data. Absent: false. A job that has ended answers at once." },
-            Flag { name: "attempt", field: &["attempt"], kind: Kind::U32, repeated: false, required: false, oneof: None, doc: "The attempt whose output to read, from 1. Absent: the latest (Job.attempt). Read only with a stream. This server reads only the latest attempt and ignores the field." },
+            Flag { name: "attempt", field: &["attempt"], kind: Kind::U32, repeated: false, required: false, oneof: None, doc: "The attempt whose output to read, from 1. Absent: the latest (Job.attempt). Read only with a stream. 0 is an invalid argument; one above the job's current attempt is OUT_OF_RANGE." },
         ],
     },
     Command {

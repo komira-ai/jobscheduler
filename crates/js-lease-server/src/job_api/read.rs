@@ -178,7 +178,7 @@ impl JobApi {
 }
 
 /// The answer to a job that has no row: `unknown-job`.
-fn unknown_job() -> Status {
+pub(super) fn unknown_job() -> Status {
     Status::not_found("unknown-job")
 }
 
@@ -199,7 +199,7 @@ fn invalid(field: &str) -> Status {
 
 /// The answer to a read of the store that failed: `store-unavailable` (`UNAVAILABLE`) when the
 /// store was only too busy to take it, else `internal`. The cause is logged, never answered.
-fn read_failed(error: &js_jobs::JobStoreError) -> Status {
+pub(super) fn read_failed(error: &js_jobs::JobStoreError) -> Status {
     tracing::warn!(%error, "a read of the job tables failed");
     match error {
         js_jobs::JobStoreError::Store(js_state::StoreError::Unavailable(_)) => {

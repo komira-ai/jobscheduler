@@ -1,4 +1,5 @@
-//! The rig of the logs group's tests (`logs_tests.rs`, `logs_follow_tests.rs`): the job
+//! The rig of the logs group's tests (`logs_tests.rs`, `logs_follow_tests.rs`,
+//! `logs_attempt_tests.rs`): the job
 //! service with an object-store sink over js-logstore's fake store, its objects written by
 //! js-logstore's own client and layout, the store's clock and the service's one manual clock,
 //! and follows that wait on [`Steps`], which a test releases, so nothing sleeps.
@@ -26,7 +27,7 @@ use tokio::sync::{Semaphore, watch};
 use tonic::Status;
 
 use super::JobApi;
-use super::logs::{self, Waiter};
+use super::logs::{self, AttemptsOf, RowOf, Waiter};
 use super::read_tests::{self, clock, over_fake, service_clock};
 use crate::file::{AccessKey, Minting, ObjectStoreLogs};
 use crate::job_store::ServerJobs;
@@ -209,11 +210,17 @@ fn endpoint() -> Endpoint {
 
 /// The `[logs]` table of an object-store sink allowing `max_follow` waiting follows.
 pub(super) fn sink(max_follow: u64) -> ObjectStoreLogs {
+    sink_under(max_follow, PREFIX)
+}
+
+/// The `[logs]` table of an object-store sink under the log prefix `prefix`, allowing
+/// `max_follow` waiting follows.
+fn sink_under(max_follow: u64, prefix: &str) -> ObjectStoreLogs {
     let key = br#"{"access_key_id": "READKEY", "secret_access_key": "read-secret"}"#;
     let key = AccessKey::parse(key).expect("a key");
     ObjectStoreLogs {
         bucket: Bucket::new(BUCKET).expect("a bucket"),
-        prefix: LogPrefix::new(PREFIX).expect("a prefix"),
+        prefix: LogPrefix::new(prefix).expect("a prefix"),
         endpoint: endpoint(),
         read_key: key.clone(),
         minting: Minting::Sts {
@@ -248,13 +255,28 @@ impl Rig {
 
     /// The rig whose sink allows `max_follow` waiting follows.
     pub(super) async fn following(max_follow: u64) -> Rig {
+        Rig::built(max_follow, PREFIX, None).await
+    }
+
+    /// The rig whose sink is under the log prefix `prefix` and whose reader learns a job's
+    /// attempts from `attempts` and reads an attempt's row with `rows`.
+    pub(super) async fn attempted(prefix: &str, attempts: AttemptsOf, rows: RowOf) -> Rig {
+        Rig::built(256, prefix, Some((attempts, rows))).await
+    }
+
+    /// The rig whose sink, under the log prefix `prefix`, allows `max_follow` waiting follows,
+    /// and whose reader learns attempts as `attempts` says (as the server does when `None`).
+    async fn built(max_follow: u64, prefix: &str, attempts: Option<(AttemptsOf, RowOf)>) -> Rig {
         let clock = clock();
         let jobs = over_fake(&clock);
         let shared = service_clock(&clock);
         let store = FakeStore::new(endpoint(), Arc::new(StoreClock(shared.clone())));
         let read = store.issue(Policy {
             actions: vec![Action::Get, Action::List],
-            prefix: format!("{PREFIX}/"),
+            prefix: LogPrefix::new(prefix)
+                .expect("a prefix")
+                .as_str()
+                .to_owned(),
         });
         let write = store.issue(Policy {
             actions: vec![Action::Put, Action::Delete],
@@ -267,8 +289,12 @@ impl Rig {
         });
         let steps = Steps::new();
         let transport: Arc<dyn Transport> = tap.clone();
-        let ctx = logs::Ctx::over(transport, &sink(max_follow), read, &shared)
+        let ctx = logs::Ctx::over(transport, &sink_under(max_follow, prefix), read, &shared)
             .with_waiter(Arc::new(steps.clone()));
+        let ctx = match attempts {
+            Some((attempts, rows)) => ctx.with_attempts(attempts, rows),
+            None => ctx,
+        };
         let api = JobApi::new(Arc::clone(&jobs), shared).with_logs(ctx);
         let calls = read_tests::Rig::serving(Arc::new(api), jobs, clock).await;
         Rig {
@@ -300,8 +326,21 @@ impl Rig {
         bytes: &[u8],
         first_ms: u64,
     ) {
+        self.chunk_under(&prefix(job), stream, offset, bytes, first_ms);
+    }
+
+    /// Puts the chunk of `stream` at `offset` under the job prefix `prefix`, with `first_ms`
+    /// as its first-byte time.
+    pub(super) fn chunk_under(
+        &self,
+        prefix: &JobPrefix,
+        stream: Stream,
+        offset: u64,
+        bytes: &[u8],
+        first_ms: u64,
+    ) {
         let metadata = Metadata::from([(FIRST_BYTE_AT_MS.to_owned(), first_ms.to_string())]);
-        let key = prefix(job).chunk_key(stream, offset);
+        let key = prefix.chunk_key(stream, offset);
         self.writer
             .put(&key, bytes.to_vec(), &metadata)
             .expect("the chunk is put");
@@ -316,6 +355,11 @@ impl Rig {
     /// Puts the final file of `stream` of `job`.
     pub(super) fn final_file(&self, job: &str, stream: Stream, bytes: &[u8]) {
         self.put(&prefix(job).final_key(stream), bytes);
+    }
+
+    /// Puts the final file of stdout under the job prefix `prefix`.
+    pub(super) fn final_under(&self, prefix: &JobPrefix, bytes: &[u8]) {
+        self.put(&prefix.final_key(Stream::Stdout), bytes);
     }
 
     /// Puts `bytes` at `key`, with no metadata.
@@ -377,6 +421,7 @@ pub(super) fn uri(request: &GetLogsRequest) -> String {
     pairs.extend(request.from_offset.map(|from| format!("fromOffset={from}")));
     pairs.extend(request.max_bytes.map(|max| format!("maxBytes={max}")));
     pairs.extend(request.follow.map(|follow| format!("follow={follow}")));
+    pairs.extend(request.attempt.map(|attempt| format!("attempt={attempt}")));
     format!("/v1/jobs/{}/logs?{}", request.job_id, pairs.join("&"))
 }
 
