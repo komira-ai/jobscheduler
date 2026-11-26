@@ -477,6 +477,9 @@ pub struct Spy<'a> {
     pub systemd: RefCell<Result<String, String>>,
     /// What the agent does when the signal of the in-place request reaches it.
     pub on_signal: Cell<OnSignal>,
+    /// The state (`ActiveState`, `SubState`) a signal the unit manager refuses leaves the unit
+    /// in, as a unit whose agent had ended before the signal reads after it; `None` leaves it.
+    pub kill_refused_leaves: RefCell<Option<(&'static str, &'static str)>>,
     record_path: PathBuf,
     /// The Mac the host setup's commands and looks go to, once [`Spy::on_mac`] names one; until
     /// then a look is at the file system as it is.
@@ -562,6 +565,7 @@ impl<'a> Spy<'a> {
             tasks: RefCell::new(VecDeque::new()),
             systemd: RefCell::new(Ok(SYSTEMD_257.to_owned())),
             on_signal: Cell::new(OnSignal::Takes),
+            kill_refused_leaves: RefCell::new(None),
             world: &rig.world,
             kill: &rig.kill,
             state: rig.world.state_root(),
