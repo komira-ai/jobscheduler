@@ -114,8 +114,8 @@ jobs:
           sudo dscl . -create /Users/jstrace PrimaryGroupID 20
           sudo dscl . -create /Users/jstrace UserShell /usr/bin/false
           sudo dscl . -create /Users/jstrace NFSHomeDirectory /var/empty
-          sudo mkdir -m 0755 /private/var/js-trace
-          sudo chown root:wheel /private/var/js-trace
+          sudo mkdir -m 0755 /Users/js-trace
+          sudo chown root:wheel /Users/js-trace
           real="$(cd /Applications/Xcode.app && pwd -P)"
           echo "Xcode: $real"
           ls -ld "$real"
@@ -123,12 +123,12 @@ jobs:
           sudo chmod go-w "$real"
       - run: cargo test -p js-mac-pool --test trace_base_set --locked --no-run
       - name: Run the trace as root
-        run: sudo -E env "PATH=$PATH" "HOME=$HOME" JS_MAC_POOL_PRIV_ROOT=/private/var/js-trace JS_MAC_POOL_PRIV_OWNER_UID="$(id -u)" JS_MAC_POOL_PRIV_UID=6001 JS_MAC_POOL_PRIV_GID=20 cargo test -p js-mac-pool --test trace_base_set --locked -- --ignored --test-threads=1 --nocapture trace
+        run: sudo -E env "PATH=$PATH" "HOME=$HOME" JS_MAC_POOL_PRIV_ROOT=/Users/js-trace JS_MAC_POOL_PRIV_OWNER_UID="$(id -u)" JS_MAC_POOL_PRIV_UID=6001 JS_MAC_POOL_PRIV_GID=20 cargo test -p js-mac-pool --test trace_base_set --locked -- --ignored --test-threads=1 --nocapture trace
       - name: Collect the tables
         if: ${{ !cancelled() }}
         run: |
           mkdir -p "$RUNNER_TEMP/trace"
-          sudo find /private/var/js-trace -maxdepth 1 -type f -exec cp {} "$RUNNER_TEMP/trace/" \;
+          sudo find /Users/js-trace -maxdepth 1 -type f -exec cp {} "$RUNNER_TEMP/trace/" \;
           sudo chown -R "$(id -u)" "$RUNNER_TEMP/trace"
           ls -l "$RUNNER_TEMP/trace"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
