@@ -9,27 +9,74 @@
 //! So the request is taken when the file is gone. The wait here ends then if the unit is still
 //! active. A unit that is not active, because the agent ended instead of running again or the
 //! new program died, is brought up as a start is (see `bring_up`), which judges the start.
+//!
+//! A unit can read `active` and have no process to signal: under `Restart=always` a `Type=simple`
+//! unit whose agent dies at its start shows `active` for a moment on each try. A signal the unit
+//! manager refuses is therefore judged by the unit's state read after it: still active, the
+//! refusal is the failure; not active, no agent was there to ask, and the unit is brought up as
+//! above, its start judged as any start is. The agent it runs (on a cutover the staged release's,
+//! the link being moved already; on a rollback the previous one's) takes the request at its start.
 
 use crate::update_hook::{Done, Held, Params, Reason, Record, SYSTEMCTL};
 
 use super::Env;
 use super::cutover::{Life, bring_up, environment, life, pause, show};
 
+/// What [`signal`] found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Signalled {
+    /// The unit manager delivered the signal to the agent.
+    Sent,
+    /// The unit manager refused the signal and the unit was not active after: no agent was
+    /// there to take the request.
+    NoAgent,
+}
+
 /// Signals the main process of `unit` with SIGHUP, the request that the agent hands its runs
-/// over in place. A signal the unit manager refuses reached no agent, and the step fails as an
-/// environment matter with the request left on disk: the marks of the act are written already,
-/// so the request is what tells a rerun that the agent has not taken it, and the rerun signals
-/// again. (A stop that reaches the agent before a rerun finds the request too, and hands the runs
-/// over instead of draining, as the update meant.)
-pub(super) fn signal(env: &Env<'_>, unit: &str) -> Result<(), Done> {
+/// over in place. A signal the unit manager refuses while the unit is still active reached no
+/// agent, and the step fails as an environment matter with the request left on disk: the marks
+/// of the act are written already, so the request is what tells a rerun that the agent has not
+/// taken it, and the rerun signals again. (A stop that reaches the agent before a rerun finds the
+/// request too, and hands the runs over instead of draining, as the update meant.) A refusal
+/// after which the unit is not active is [`Signalled::NoAgent`]: the caller's wait brings the
+/// unit up, and the agent it runs takes the request at its start.
+pub(super) fn signal(env: &Env<'_>, unit: &str) -> Result<Signalled, Done> {
     env.ports.point();
     let args = ["kill", "--kill-whom=main", "--signal=SIGHUP", "--", unit];
-    env.runner.run(SYSTEMCTL, &args).map(|_| ()).map_err(|why| {
-        environment(
+    let Err(why) = env.runner.run(SYSTEMCTL, &args) else {
+        return Ok(Signalled::Sent);
+    };
+    let state = show(env, unit, Reason::StopFailed)?;
+    if matches!(life(&state), Life::Up) {
+        return Err(environment(
             Reason::StopFailed,
             format!("cannot signal {unit} to hand its runs over in place: {why}"),
-        )
-    })
+        ));
+    }
+    Ok(Signalled::NoAgent)
+}
+
+/// The signal, then the wait until the agent has taken the request (see [`wait_taken`]). After
+/// a signal that found no agent ([`Signalled::NoAgent`]) the wait brings the unit up, and the
+/// detail of a start that fails says that the unit was not active when it was signalled.
+pub(super) fn signal_and_wait(
+    env: &Env<'_>,
+    held: &Held,
+    record: &mut Record,
+    params: &Params,
+    bound_ms: u64,
+    suffix: &str,
+) -> Result<(), Done> {
+    let unit = record.update.unit.clone();
+    match signal(env, &unit)? {
+        Signalled::Sent => wait_taken(env, held, record, params, bound_ms, suffix),
+        Signalled::NoAgent => {
+            let suffix = format!(
+                "; {unit} was not active when it was signalled to hand its runs over in place (no agent was there to take the signal), so the unit was brought up instead{suffix}"
+            );
+            wait_taken(env, held, record, params, bound_ms, &suffix)
+        }
+    }
 }
 
 /// Whether the handover file is still there: the agent has not taken the request.
