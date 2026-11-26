@@ -89,6 +89,7 @@ pub(super) fn full_job() -> JobRecord {
         ],
         queue: crate::QueueTrail::default(),
         carried: Carried::default(),
+        attempt: crate::AttemptTrail::default(),
     }
 }
 
@@ -129,6 +130,7 @@ pub(super) fn bare_job() -> JobRecord {
         capacity_refusals: Vec::new(),
         queue: crate::QueueTrail::default(),
         carried: Carried::default(),
+        attempt: crate::AttemptTrail::default(),
     }
 }
 

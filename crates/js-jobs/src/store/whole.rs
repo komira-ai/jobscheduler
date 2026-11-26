@@ -308,6 +308,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             state: JobState::Placed,
             host: Some(host),
             placed_at: Some(now),
+            attempt: job.attempt.clone().placed(),
             ..job.clone()
         };
         placed.queue.apply_all(&placement.queue, now);

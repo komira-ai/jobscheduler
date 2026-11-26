@@ -206,6 +206,8 @@ pub(crate) fn job(spec: Option<&v1::JobSpec>, ceiling: Duration) -> Result<Valid
         mounts,
         host_ports,
         history_key,
+        // A spec that carries a policy was refused above (`not_enabled`).
+        retry: None,
     };
     Ok(Valid {
         id,

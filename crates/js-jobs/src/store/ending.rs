@@ -1,6 +1,9 @@
 //! Ending a job with its result and retention end, deleting the jobs past their retention
 //! end, deleting the freed allocations past their own window, and raising retention ends,
-//! deadline floors and mark deadlines at boot (design sections 3.2, 6.1 and 6.7). Apart from the release of a
+//! deadline floors and mark deadlines at boot (design sections 3.2, 6.1 and 6.7), with the rows of
+//! the attempts of a job deleted before the job's own and those whose job's row is gone found
+//! and deleted a page a tick (`docs/design/job-retry-and-completion-callback.md`, section 3.7).
+//! Apart from the release of a
 //! booked allocation in the transaction that ends its job, the only allocation rows written
 //! here are the freed ones [`JobStore::tick`] deletes: a freed row is kept for the store's
 //! allocation retention after its free ([`JobStore::with_allocation_retention`]) and then
@@ -8,9 +11,12 @@
 //! `usage/ended` row written beside its free, which no retention here touches; a booked or
 //! releasing row is never deleted.
 
-use js_state::{Cond, ResumeToken, Store, StoreTime, Txn, Version, Versioned};
-
+use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
+use std::sync::PoisonError;
 use std::time::Duration;
+
+use js_state::{Cond, ResumeToken, ScanRange, Store, StoreTime, Txn, Version, Versioned};
 
 use super::index::{Span, delete_allocation, delete_job, put_allocation, put_job};
 use super::marks::{mark_at, marked_at_boot};
@@ -24,6 +30,11 @@ use crate::result::{
     BOOT_GRACE, JobEnd, Retention, SWEEP_BATCH, digested_at_boot, ended, floored_at_boot,
     past_retention, raised_at_boot,
 };
+
+/// The most attempt rows one [`JobStore::tick`] reads in its search for rows whose job's row is
+/// gone: the search goes on from where the last tick stopped, so it walks every row over the
+/// ticks that follow at a small cost to each.
+pub(crate) const ORPHAN_PAGE: NonZeroUsize = NonZeroUsize::MIN.saturating_add(31);
 
 /// Whether `allocation` is freed and its free is at least `retention` before `now`, so the
 /// tick may delete its row. A freed row that holds no free time (none this build writes)
@@ -91,9 +102,24 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         let before = job.clone();
         let stop = !super::dispatch::told_by_host(&end);
         let ended = ended(job, end, now, self.retention);
-        let id = &ended.id;
-        let mut txn = put_job(Txn::new(), Some(&before), &ended, Cond::Version(version))?;
-        let read = self.read_allocation(id)?;
+        let txn = put_job(Txn::new(), Some(&before), &ended, Cond::Version(version))?;
+        let txn = self.released(txn, &before, stop, now)?;
+        Ok((txn, ended))
+    }
+
+    /// `txn` with the allocation of `before`, a job whose attempt ends at `now`, moved from
+    /// booked to releasing at the version read (one releasing or freed is left as it is), and
+    /// its start deleted from its host's dispatch queue and a stop queued as the `dispatch`
+    /// module of the store says, `stop` saying whether the end was the server's.
+    pub(super) fn released(
+        &self,
+        txn: Txn,
+        before: &JobRecord,
+        stop: bool,
+        now: StoreTime,
+    ) -> Result<Txn, JobStoreError> {
+        let mut txn = txn;
+        let read = self.read_allocation(&before.id)?;
         if let Some((allocation, version)) = &read
             && allocation.step == AllocationStep::Booked
         {
@@ -104,15 +130,17 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             txn = put_allocation(txn, Some(allocation), &releasing, Cond::Version(*version))?;
         }
         let allocation = read.map(|(allocation, _)| allocation);
-        let txn = self.queue_stop(txn, &before, allocation.as_ref(), stop, now)?;
-        Ok((txn, ended))
+        self.queue_stop(txn, before, allocation.as_ref(), stop, now)
     }
 
     /// Deletes, in one transaction, the rows of the jobs among `ids` that are past their
     /// retention end by the store's clock now, as [`sweep`](crate::sweep) lists them, and
     /// returns their ids. Each row is read again first and deleted at the version read, so a
     /// job whose retention end was raised since it was swept, or that is gone, is left as it
-    /// is. Only job rows are deleted: an allocation row stays as history.
+    /// is. Each job's attempt rows (`attempt/<id>/`) are deleted first: in the same transaction
+    /// when they fit a page of [`SWEEP_BATCH`](crate::SWEEP_BATCH), each full page before it in
+    /// a transaction of its own that checks the job's row at the version read. Only job and
+    /// attempt rows are deleted: an allocation row stays as history.
     ///
     /// # Errors
     /// [`JobStoreError::Stale`] (naming the first job of the transaction) when a row changed
@@ -129,7 +157,9 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// One pass of the retention sweep (design section 6.1, step 1): walks the job table in
     /// key order, [`SWEEP_BATCH`](crate::SWEEP_BATCH) rows at a time, and deletes the jobs
     /// of each batch that are past their retention end by the store's clock, read once at
-    /// the start of the pass, one transaction per batch, with their dispatch messages. It reads
+    /// the start of the pass, one transaction per batch, with their dispatch messages and their
+    /// attempt rows (as [`JobStore::delete_swept`] deletes them, so a job's row goes last and a
+    /// pass that stops part way leaves no attempt row without its job). It reads
     /// no system time: the time is the store's [`Clock`](js_state::Clock). A row a later build
     /// wrote is left as it is and logged. It returns the ids it deleted.
     ///
@@ -139,6 +169,12 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// backlog larger than a batch is cleared over the ticks that follow. A batch that loses to
     /// such a change deletes nothing and the next tick reads again. A booked or releasing row,
     /// and a row this build cannot read, is never deleted.
+    ///
+    /// Last it searches the next [`ORPHAN_PAGE`] attempt rows, from where the last tick of
+    /// this job store or of a view of it stopped, for rows whose job's row is gone (an older
+    /// build's sweep deletes a job's row and leaves its attempts), and deletes those in one
+    /// transaction that checks each such job's row still absent; a transaction that loses to a
+    /// job recorded since deletes nothing. It logs how many it deleted.
     ///
     /// # Errors
     /// [`JobStoreError::Corrupt`] when a job row does not parse; [`JobStoreError::Stale`] when
@@ -153,6 +189,10 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
                 collected = collected.len(),
                 "freed allocations past their retention deleted"
             );
+        }
+        let orphans = self.sweep_orphans()?;
+        if orphans > 0 {
+            tracing::info!(orphans, "attempt rows whose job's row is gone deleted");
         }
         Ok(deleted)
     }
@@ -213,6 +253,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         let mut txn = Txn::new();
         for (job, version) in read {
             if past_retention(&job, now) {
+                txn = self.without_attempts(txn, &job, version)?;
                 txn = delete_job(txn, &job, version);
                 due.push(job);
             }
@@ -223,6 +264,86 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             self.commit(first, txn)?;
         }
         Ok(due)
+    }
+
+    /// `txn` with a delete of every attempt row of `job`, read at `version`, each at the
+    /// version read: the rows that fit a page of [`SWEEP_BATCH`] in `txn`, beside the job's
+    /// own delete; before them, each full page deleted in a commit of its own that checks the
+    /// job's row still at `version`. The job's row goes last, so a sweep that stops between two
+    /// commits leaves no attempt row without its job, and the next tick, which finds the job
+    /// due again, deletes the rest.
+    ///
+    /// # Errors
+    /// [`JobStoreError::Stale`] when the job's row changed before a page's commit (its retention
+    /// end raised, say): that page is not deleted; [`JobStoreError::Store`].
+    fn without_attempts(
+        &self,
+        txn: Txn,
+        job: &JobRecord,
+        version: Version,
+    ) -> Result<Txn, JobStoreError> {
+        let prefix = keys::attempt_prefix(&job.id);
+        loop {
+            let page = self
+                .store
+                .scan_range(ScanRange::new(&prefix, SWEEP_BATCH))?;
+            let gone = |txn: Txn| {
+                page.rows.iter().fold(txn, |txn, (key, row)| {
+                    txn.delete(key.as_str(), Cond::Version(row.version))
+                })
+            };
+            if page.resume.is_none() {
+                return Ok(gone(txn));
+            }
+            let first = gone(Txn::new()).check(keys::job(&job.id), Cond::Version(version));
+            self.commit(&job.id, first)?;
+        }
+    }
+
+    /// The search for attempt rows whose job's row is gone (rows an older build's sweep
+    /// leaves, since it deletes a job's row and knows nothing of its attempts): reads the next
+    /// [`ORPHAN_PAGE`] attempt rows from where the last search stopped (from the first row
+    /// after it reached the last), and deletes, in one transaction at the versions read, the
+    /// rows of each job whose row is absent, with that absence a precondition. Returns how many
+    /// it deleted; with none, or when the transaction loses (a job of that id recorded since),
+    /// it deletes none and the search comes back to those rows on a later pass.
+    fn sweep_orphans(&self) -> Result<usize, JobStoreError> {
+        let from = self
+            .orphans
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let scan = ScanRange::new(keys::ATTEMPT, ORPHAN_PAGE);
+        let scan = match &from {
+            Some(token) => scan.resume(token),
+            None => scan,
+        };
+        let page = self.store.scan_range(scan)?;
+        *self.orphans.lock().unwrap_or_else(PoisonError::into_inner) = page.resume;
+        let mut by_job: BTreeMap<JobId, Vec<(String, Version)>> = BTreeMap::new();
+        for (key, row) in page.rows {
+            let Some(job) = keys::attempt_job(&key) else {
+                continue;
+            };
+            by_job.entry(job).or_default().push((key, row.version));
+        }
+        let mut txn = Txn::new();
+        let mut gone = 0;
+        for (job, rows) in by_job {
+            let key = keys::job(&job);
+            if self.store.get(&key)?.is_none() {
+                gone += rows.len();
+                txn = rows
+                    .into_iter()
+                    .fold(txn.check(key, Cond::Absent), |txn, (row, version)| {
+                        txn.delete(row, Cond::Version(version))
+                    });
+            }
+        }
+        if gone == 0 || self.write(txn)?.is_err() {
+            return Ok(0);
+        }
+        Ok(gone)
     }
 
     /// The allocation half of [`JobStore::tick`]: deletes, in one transaction at the versions

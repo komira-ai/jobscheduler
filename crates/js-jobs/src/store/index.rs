@@ -17,7 +17,7 @@ use std::ops::Bound;
 use js_state::{Cond, ResumeToken, ScanRange, Store, StoreTime, Txn, Version, Versioned};
 
 use super::{JobStore, allocation_at, job_at};
-use crate::codec::{encode_allocation, encode_job};
+use crate::codec::{encode_allocation, encode_attempt_row, encode_job};
 use crate::error::JobStoreError;
 use crate::ids::IdSource;
 use crate::keys;
@@ -76,7 +76,9 @@ fn moved(txn: Txn, before: &BTreeSet<String>, after: &BTreeSet<String>) -> Txn {
 }
 
 /// `txn` with a put of `job` on `cond`, its entries moved from those of `before`, the record
-/// the put replaces (`None` for a new row).
+/// the put replaces (`None` for a new row), and a put of the row of each attempt `job` has
+/// ended that `before` had not ([`keys::attempt`]): the rows go in the commit that ends or
+/// retries their attempts, whatever the key held (a row of an earlier job of the same id).
 pub(crate) fn put_job(
     txn: Txn,
     before: Option<&JobRecord>,
@@ -84,6 +86,14 @@ pub(crate) fn put_job(
     cond: Cond,
 ) -> Result<Txn, JobStoreError> {
     let txn = txn.put(keys::job(&job.id), encode_job(job)?, cond);
+    let known = before.map_or(0, |before| before.attempt.ended());
+    let ended = job.attempt.history().iter();
+    let txn = ended
+        .filter(|attempt| u64::from(attempt.number) > known)
+        .try_fold(txn, |txn, attempt| {
+            let row = encode_attempt_row(&job.id, attempt)?;
+            Ok::<_, JobStoreError>(txn.put(keys::attempt(&job.id, attempt.number), row, Cond::Any))
+        })?;
     let before = before.map(job_entries).unwrap_or_default();
     Ok(moved(txn, &before, &job_entries(job)))
 }

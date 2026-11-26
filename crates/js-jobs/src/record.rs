@@ -4,9 +4,10 @@ use std::collections::BTreeMap;
 
 use js_agent_wire::{HostPort, JobMount, JobStartSpec, Layer};
 use js_state::StoreTime;
-use js_types::{ExecMode, HistoryKey, HostId, ImageDigestRef, Labels, Resources};
+use js_types::{ExecMode, HistoryKey, HostId, ImageDigestRef, Labels, Resources, RetryPolicy};
 use sha2::{Digest as _, Sha256};
 
+use crate::attempt::AttemptTrail;
 use crate::codec::Carried;
 use crate::ids::{AllocationId, ClientName, JobId};
 use crate::queue::QueueTrail;
@@ -233,6 +234,8 @@ pub struct JobSpec {
     /// The key of the job's usage history as its client sent it (`spec.history_key`); `None` when
     /// it sent none, and the `size-class` label or the image and command name the class.
     pub history_key: Option<HistoryKey>,
+    /// How many attempts the job may have and the wait between two; `None`: one attempt.
+    pub retry: Option<RetryPolicy>,
 }
 
 impl JobSpec {
@@ -267,6 +270,7 @@ impl JobSpec {
             mounts,
             host_ports,
             history_key,
+            retry,
         } = self;
         (*image == submitted.image)
             & (*command == submitted.command)
@@ -283,6 +287,7 @@ impl JobSpec {
             & (*mounts == submitted.mounts)
             & (*host_ports == submitted.host_ports)
             & (*history_key == submitted.history_key)
+            & (*retry == submitted.retry)
     }
 
     /// This spec with its files' contents replaced by their digests: what an ended job keeps.
@@ -438,6 +443,8 @@ pub struct JobRecord {
     /// Why the job waits, its placement attempts and its newest events
     /// (`docs/design/queue-status.md`).
     pub queue: QueueTrail,
+    /// Its current attempt, the attempts that ended and when the next may be placed.
+    pub attempt: AttemptTrail,
     /// Fields a later build wrote, kept for the next write of the row.
     pub(crate) carried: Carried,
 }

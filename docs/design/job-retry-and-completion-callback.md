@@ -105,7 +105,8 @@ What does not change:
   until it is either compared or deliberately left out. Files are compared by their SHA-256 digests once either side has ended.
 - **Store.** Postgres holds an ordered key/value table with a version on each row (`crates/js-state/src/postgres/migrations/0001_state.sql`)
   and a change feed that copies each written row until it is trimmed (`--job-feed-retention`). A job is one row, `job/<id>`, a
-  tag-length-value record whose unknown tags are carried and written back (`crates/js-jobs/src/codec.rs`). The next free job tag is 66.
+  tag-length-value record whose unknown tags are carried and written back (`crates/js-jobs/src/codec.rs`). The next free job tag is 67
+  (66 is the history key's, which merged after this page was first written).
   A job's file contents, which are secret, are held in that row while the job is live and replaced by their digests when it ends.
   Several instances share one store and no instance leads (`docs/design/multi-instance.md`). Work is claimed row by row by
   compare-and-set.
@@ -335,7 +336,7 @@ enum JobEventKind { ... JOB_EVENT_KIND_RETRY_SCHEDULED = 8; } // detail names th
   `UsageRecord`, and its logs in the log store (section 3.8).
 - **Usage.** Each attempt's booking is already its own `UsageRecord`. It gains `attempt`. Sizing reads usage records as today. A lost
   attempt has no result and teaches the class nothing.
-- **Store.** The job record gains tags 66 (`retry`, in the spec), 67 (`callback`, in the spec, with its key replaced by the key's
+- **Store.** The job record gains tags 73 (`retry`, in the spec; 66 went to the history key first), 67 (`callback`, in the spec, with its key replaced by the key's
   digest, section 5.2), 68 (`attempt`), 69 (`attempt_history`), 70 (`retry_not_before`), 71 (`dropped_attempts`) and 72 (`attempt_hosts`, section 3.5, not in the API). A record without
   them reads as attempt 1 with no history and no callback. `callback_status` is not on the job row: `GetJob` reads it from the job's
   `callback/` row (section 5.5). No migration is needed: the store is one key/value table.

@@ -305,7 +305,7 @@ fn usage_of(tag: u16, value: Vec<u8>) -> Result<ResourceUsage, DecodeError> {
     })
 }
 
-fn reason_code(reason: ResultReason) -> u8 {
+pub(super) fn reason_code(reason: ResultReason) -> u8 {
     match reason {
         ResultReason::Exit => 0,
         ResultReason::WallLimit => 1,
@@ -315,7 +315,7 @@ fn reason_code(reason: ResultReason) -> u8 {
     }
 }
 
-fn reason_of(tag: u16, value: Vec<u8>) -> Result<ResultReason, DecodeError> {
+pub(super) fn reason_of(tag: u16, value: Vec<u8>) -> Result<ResultReason, DecodeError> {
     match byte_of(tag, &value)? {
         0 => Ok(ResultReason::Exit),
         1 => Ok(ResultReason::WallLimit),

@@ -160,8 +160,10 @@ pub(crate) fn lose_on_absent<S: Store, I: IdSource>(
 /// run from its start to its end (zero for a job that never ran, unknown for a job whose
 /// row is gone), ended at the free, for the reason it was freed, with what it was measured to
 /// use ([`used_of`]) and its CPU series ([`series_of`]), with the name of its class as it is
-/// ([`js_sched_placer::sizes::class_name`]: a full build target's name kept byte for byte), and
-/// under that name as its profile when it is a profile key ([`profile_of`]).
+/// ([`js_sched_placer::sizes::class_name`]: a full build target's name kept byte for byte),
+/// under that name as its profile when it is a profile key ([`profile_of`]), and with the job's
+/// attempt when it is not the first: the allocation is the job's current attempt's, since the
+/// next attempt is placed only once it is freed.
 pub(crate) fn history(job: Option<&JobRecord>, freed: &AllocationRecord) -> Vec<Row> {
     let end = freed.freed_at.unwrap_or(freed.created_at);
     let ran = |job: &JobRecord| {
@@ -186,6 +188,9 @@ pub(crate) fn history(job: Option<&JobRecord>, freed: &AllocationRecord) -> Vec<
         used: job.and_then(used_of),
         cpu_series: job.and_then(series_of),
         class: job.map(js_sched_placer::sizes::class_name),
+        attempt: job
+            .map(|job| job.attempt.number())
+            .filter(|number| *number > 1),
     };
     let rows = named.map(|id| js_usage::ended_writes(&row(id)).to_vec());
     rows.unwrap_or_default()
