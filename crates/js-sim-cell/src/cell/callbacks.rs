@@ -8,16 +8,18 @@ use crate::server::{SECOND_CLAIMER, ServerNode};
 
 impl Cell {
     /// Switches the callback receiver down now for `lasting`: it answers a failed try to
-    /// every call made before then, so the server keeps each callback due and tries it
-    /// again after its wait.
+    /// every call made before `lasting` has passed, so the server keeps each callback due
+    /// and tries it again after its wait. A cell with no server node has no receiver, and
+    /// the switch then changes nothing.
     pub fn set_callback_receiver_down(&mut self, lasting: Duration) {
         let now = self.sim.now();
-        let server = self.server().map(ServerNode::receiver);
-        server.cloned().unwrap_or_default().down_for(now, lasting);
+        if let Some(receiver) = self.server().map(ServerNode::receiver) {
+            receiver.down_for(now, lasting);
+        }
         self.record(format!("callback receiver down {}ms", lasting.as_millis()));
     }
 
-    /// Has a second instance of the server ([`SECOND_CLAIMER`]) claim every callback that
+    /// Has a second instance of the server (`sim-server-2`) claim every callback that
     /// is due now and never answer, as an instance that dies holding its claims: each claim
     /// lapses after 30 s, and the cell's server takes the callback again. How many it
     /// claimed.

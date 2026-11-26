@@ -67,8 +67,8 @@ fn restart_with_due_callbacks() {
 
 /// A cancel racing a retry never lets a job be tried again.
 #[test]
-fn a_cancel_racing_a_retry_ends_cancelled() {
-    retry::a_cancel_racing_a_retry_ends_cancelled().run_seeds(SEEDS);
+fn a_cancel_racing_a_retry_starts_no_attempt_after_it() {
+    retry::a_cancel_racing_a_retry_starts_no_attempt_after_it().run_seeds(SEEDS);
 }
 
 /// A late result of an earlier attempt is answered stale.

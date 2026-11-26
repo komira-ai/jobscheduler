@@ -132,7 +132,10 @@ impl Real {
 
 impl Real {
     /// Loses the host of `job`, which is placed, starting or running, as the job pass does when
-    /// the provider reads the host absent: the job is retried or ends lost.
+    /// the provider reads the host absent: the job is retried or ends lost. The observer reads
+    /// every host absent, so any other live job of the store is lost too; a scenario that took
+    /// this step beside another live job would then disagree with the reference service,
+    /// which loses only `job`.
     fn host_lost(&self, job: &JobRecord) -> Result<(), Refused> {
         let live = matches!(
             job.state,

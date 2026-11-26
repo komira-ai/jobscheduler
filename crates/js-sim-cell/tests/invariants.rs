@@ -956,10 +956,10 @@ fn a_step_that_touched_one_agent_is_not_checked_against_every_agent() {
     assert_eq!(flagged(&full), [Invariant::NoDoubleBooking]);
 }
 
-/// Asserts that every member of `Invariant::ALL` has a negative case in
-/// `NEGATIVE_CASES` or the whole-host, job, elastic or attempts module's table, that no two members share a name, and that each case is flagged
-/// by exactly the invariant of its row. Catches an invariant added without a negative
-/// case, two invariants reported under one name, and a negative case that passes by
+/// Asserts that every member of `Invariant::ALL` has a negative case in `NEGATIVE_CASES` or the
+/// whole-host, job, elastic or attempts module's table, that no two members share a name, and that
+/// each case is flagged by exactly the invariant of its row. Catches an invariant added without a
+/// negative case, two invariants reported under one name, and a negative case that passes by
 /// tripping another invariant.
 #[test]
 fn every_invariant_has_a_negative_case_in_the_table() {

@@ -38,7 +38,7 @@ use crate::observe::{Observations, Verdict};
 mod front;
 pub(crate) mod read;
 
-pub use front::{CALLBACK_KEY, CALLBACK_URL_PREFIX, JOB_PREFIX, JobFront, LostAnswer};
+pub use front::{JOB_PREFIX, JobFront, LostAnswer};
 
 /// A job's state as one read of the server's job table showed it, when it differed from
 /// the read before (or the job was not read before).

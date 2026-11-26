@@ -34,20 +34,21 @@ pub struct Receiver(Rc<RefCell<Held>>);
 impl Receiver {
     /// A receiver that answers 2xx and has got no call.
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Switches the receiver down at `now` for `lasting`: it answers a failed try to each
-    /// call made before `now` plus `lasting`.
-    pub fn down_for(&self, now: FarmTime, lasting: Duration) {
+    /// call made before `now` plus `lasting`. A later switch replaces the end of an earlier
+    /// one, shorter or longer.
+    pub(crate) fn down_for(&self, now: FarmTime, lasting: Duration) {
         self.0.borrow_mut().down_until = now.saturating_add(lasting);
     }
 
     /// Takes the call of `job` with `webhook_id` made at `at`, the job's row then in
     /// `state` (`None`: no such row), and answers it: a failed try while the receiver is
     /// down, else 2xx. The call is kept ([`Receiver::calls_after`]).
-    pub fn answer(
+    pub(crate) fn answer(
         &self,
         job: js_jobs::JobId,
         webhook_id: &str,

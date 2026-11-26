@@ -716,7 +716,7 @@ The tests follow the repository's rules:
 | A crash between an attempt's end and its retry makes one retry | `js-sim-cell` `tests/retry.rs` `restart_between_attempts`, and its negative case `agents_that_forget_an_unacknowledged_result_fail_the_restart_between_attempts` | H |
 | A whole-host attempt lost while running is retried with `max_replace` counted again | `js-sim-cell` `tests/retry.rs` `whole_host_retry` | H |
 | Over every run: no job runs more than `max_attempts` times; no two attempts of a job hold an allocation at once | `js-sim-cell` `Invariant::AttemptsBounded`, `Invariant::OneAttemptAtATime`, held by every scenario of `tests/retry.rs`; their negative cases `launched_past_the_limit`, `read_past_the_limit`, `start_beside_another_host` and `start_beside_the_same_host` (`tests/invariants/attempts.rs`), and `the_run_of_a_retried_job_gives_each_new_invariant_something_to_flag` (`tests/retry.rs`) | H |
-| A cancel racing a retry never lets a job be tried again after the cancel: a cancel that meets the queued job ends it cancelled, one asked while the job ran on a host read lost ends it lost | `js-sim-cell` `tests/retry.rs` `a_cancel_racing_a_retry_ends_cancelled` | H |
+| A cancel racing a retry never lets a job be tried again after the cancel: a cancel that meets the queued job ends it cancelled, one asked while the job ran on a host read lost ends it lost | `js-sim-cell` `tests/retry.rs` `a_cancel_racing_a_retry_starts_no_attempt_after_it` | H |
 | A late result of an earlier attempt is answered stale, and the allocation is freed before attempt 2 starts | `js-sim-cell` `tests/retry.rs` `a_late_result_of_an_earlier_attempt_is_stale` | H |
 | A record from before the fields reads as attempt 1 | `js-jobs` codec `a_record_without_attempt_tags_reads_as_attempt_one` | C |
 | An older reader carries the new tags and leaves callback rows | `js-jobs` `a_build_without_the_new_tags_carries_them`, `an_older_store_reader_leaves_callback_rows_intact` | C, D |
@@ -743,7 +743,7 @@ The tests follow the repository's rules:
 | The `webhook-id` is opaque: it does not hold the job id, and differs for a reused job id | `js-callback` `the_webhook_id_reveals_nothing_of_the_job` | E |
 | `callback_status` on `GetJob` follows the row | `js-lease-server` `get_job_shows_the_callback_status` | G |
 | A policy the server dropped is reported by `js-client` | `js-client` `a_dropped_policy_is_reported` | I |
-| The reference service and the real one agree, and each scenario fails against its `Defect` | `js-conformance` `retry_on_host_loss`, `retry_on_start_failure`, `no_retry_on_nonzero_exit`, `no_retry_on_cancel`, `callback_once_after_retries` | H |
+| The reference service and the real one agree, and each scenario fails against its `Defect` | `js-conformance` `Scenario::RetryOnHostLoss`, `RetryOnStartFailure`, `NoRetryOnNonzeroExit`, `NoRetryOnCancel`, `CallbackOnceAfterRetries`, each failed by its `Defect` in `tests/jobs_suite.rs` (`a_host_loss_that_never_retries_fails_the_retry_and_callback_scenarios` and the four after it); `js-lease-server` `the_real_job_service_passes_every_conformance_scenario` | H |
 
 Why this list is complete:
 - it covers every row of the classing table in 3.3;

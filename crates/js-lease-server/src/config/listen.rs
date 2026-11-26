@@ -13,7 +13,7 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-use super::{Cli, TlsFiles, is_private_address};
+use super::{Cli, Config, TlsFiles, is_private_address};
 use crate::error::StartupError;
 use crate::job_store::JobStoreSetup;
 
@@ -183,6 +183,24 @@ pub(super) fn agent_client_ca(cli: &Cli, has_tls: bool) -> Result<Option<PathBuf
             "requires --tls-cert and --tls-key: a certificate is asked for over TLS only",
         )),
         (ca, _) => Ok(ca.clone()),
+    }
+}
+
+impl Config {
+    /// The same configuration with the job service taking a job's retry policy and its completion
+    /// callback, which every flag and file of a shipped server refuses (`retry-not-enabled`,
+    /// `callback-not-enabled`; `docs/design/job-retry-and-completion-callback.md`, section 7).
+    /// Nothing changes while the job service is off. It is the only way to lift the two
+    /// refusals, and only a build with the `in-process` feature, which no shipped binary turns
+    /// on, has it.
+    #[cfg(feature = "in-process")]
+    #[must_use]
+    pub fn accepting_retry_and_callbacks(mut self) -> Self {
+        if let Some(job) = self.job_listen.as_mut() {
+            job.retry_refused = false;
+            job.callback_refused = false;
+        }
+        self
     }
 }
 

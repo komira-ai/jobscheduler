@@ -255,7 +255,7 @@ async fn start_held<T: Ticker, C: Ticker, R: Ticker>(
         false => Duration::ZERO,
     };
     let (prepared, listeners) = prepare(config, store, &clock)?;
-    let (callbacks, retry) = (listeners.callbacks(), listeners.retry());
+    let (callbacks, retry) = listeners.accepts();
     let tls = listeners
         .tls
         .as_ref()
@@ -433,16 +433,13 @@ pub(crate) struct Listeners {
 }
 
 impl Listeners {
-    /// Whether the job service takes a job's completion callback: never while
-    /// [`JobListen::callback_refused`] holds, which it does until the release that accepts one.
-    pub(crate) fn callbacks(&self) -> bool {
-        self.job_listen.is_some_and(|job| !job.callback_refused)
-    }
-
-    /// Whether the job service takes a job's retry policy: never while
-    /// [`JobListen::retry_refused`] holds, which it does until the release that accepts one.
-    pub(crate) fn retry(&self) -> bool {
-        self.job_listen.is_some_and(|job| !job.retry_refused)
+    /// Whether the job service takes a job's completion callback and its retry policy: never
+    /// while [`JobListen::callback_refused`] and [`JobListen::retry_refused`] hold, which they do
+    /// until the release that accepts them.
+    pub(crate) fn accepts(&self) -> (bool, bool) {
+        let job = self.job_listen;
+        let callbacks = job.is_some_and(|job| !job.callback_refused);
+        (callbacks, job.is_some_and(|job| !job.retry_refused))
     }
 }
 

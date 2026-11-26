@@ -68,7 +68,8 @@ pub const SERVED_CALLS: [Rpc; 14] = [
 /// The job service over the server's state: its job store and its clock, with each served
 /// group's context, a submitted job's wall limit held to `max_job_wall`, a job's completion
 /// callback refused unless `callbacks` and else judged by the cluster's address rule, a job's
-/// retry policy refused unless `retry`, and logs read as `logs` says. `None` when the server holds no job store: the job service is off.
+/// retry policy refused unless `retry`, and logs read as `logs` says. `None` when the server holds
+/// no job store: the job service is off.
 pub(crate) fn from_server(
     state: &Arc<Shared>,
     max_job_wall: Duration,

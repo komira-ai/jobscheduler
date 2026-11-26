@@ -2,7 +2,8 @@
 //! sections 5.3 to 5.5): [`THREADS`] threads per server, off the tick's path, each trying one
 //! due callback at a time.
 //!
-//! - **One try** ([`pass_with`], which [`Delivery::pass`] and the in-process seam make): claim one due callback from the store at its clock
+//! - **One try** ([`pass_with`], which [`Delivery::pass`] and the in-process seam make): claim one
+//!   due callback from the store at its clock
 //!   (`js_jobs::JobStore::claim_callbacks`, which holds it for this server for 30 s and expires
 //!   one past its deadline instead), POST it with the [`Sender`] (no proxy, no redirect, no
 //!   body read, [`SEND_LIMIT`]), and record the answer at the store's clock

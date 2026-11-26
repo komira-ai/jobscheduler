@@ -366,10 +366,10 @@ fn last_read(cell: &Cell, job: &str) -> Option<(FarmTime, JobState)> {
     Some((read.at, read.state))
 }
 
-/// What is wrong with how each job of [`a_cancel_racing_a_retry_ends_cancelled`] ended, or
-/// `None`: a job whose cancel was asked while it ran on its lost host ends lost (a job with a
-/// cancel asked for is never tried again, and its stop never reached the host), and every
-/// other ends cancelled; no job was launched after its cancel was asked.
+/// What is wrong with how each job of [`a_cancel_racing_a_retry_starts_no_attempt_after_it`] ended,
+/// or `None`: a job whose cancel was asked while it ran on its lost host ends lost (a job with a
+/// cancel asked for is never tried again, and its stop never reached the host), and every other
+/// ends cancelled; no job was launched after its cancel was asked.
 fn raced_jobs_end_as_the_server_promises(cell: &Cell) -> Option<String> {
     let seen = cell.observations();
     let launches = cell.ledger().launches();
@@ -407,22 +407,20 @@ fn raced_jobs_end_as_the_server_promises(cell: &Cell) -> Option<String> {
 }
 
 /// Proves that a job whose cancel races its retry is never tried again after the cancel:
-/// [`RACE_HOSTS`] hosts run [`RACE_JOBS`] jobs of 300 s that ask for three attempts, every
-/// host's agent is killed at [`LOSE_AT`] and replaced 10 s later, so the server reads each
-/// job lost, and each job is cancelled at a time of its own from [`CANCEL_AT`]: before, with
-/// and after the server's reading the jobs lost. A job whose cancel was asked while it ran on
-/// the lost host ends lost, as a job with a cancel intent does today, and is not retried; a
-/// job the server had put back in the queue (the retry won) is ended cancelled by the cancel
-/// at once; and the job that had started its second attempt is stopped there and ends
-/// cancelled. States that every job ended, that each ended as that says
-/// ([`raced_jobs_end_as_the_server_promises`]), that no allocation is left booked, that at
-/// least two jobs ended lost and at least two cancelled, and that no job was launched after
-/// its cancel was asked. Red for a server that retries
-/// a job whose cancel was asked for (`attempts-bounded`, a launch after the cancel), or
-/// leaves a cancelled job queued.
-pub fn a_cancel_racing_a_retry_ends_cancelled() -> Scenario {
+/// [`RACE_HOSTS`] hosts run [`RACE_JOBS`] jobs of 300 s that ask for three attempts, every host's
+/// agent is killed at [`LOSE_AT`] and replaced 10 s later, so the server reads each job lost, and
+/// each job is cancelled at a time of its own from [`CANCEL_AT`]: before, with and after the
+/// server's reading the jobs lost. A job whose cancel was asked while it ran on the lost host ends
+/// lost, as a job with a cancel intent does today, and is not retried; a job the server had put
+/// back in the queue (the retry won) is ended cancelled by the cancel at once; and the job that had
+/// started its second attempt is stopped there and ends cancelled. States that every job ended,
+/// that each ended as that says ([`raced_jobs_end_as_the_server_promises`]), that no allocation is
+/// left booked, that at least two jobs ended lost and at least two cancelled, and that no job was
+/// launched after its cancel was asked. Red for a server that retries a job whose cancel was asked
+/// for (`attempts-bounded`, a launch after the cancel), or leaves a cancelled job queued.
+pub fn a_cancel_racing_a_retry_starts_no_attempt_after_it() -> Scenario {
     let jobs = RACE_JOBS as usize;
-    let mut scenario = Scenario::new("a_cancel_racing_a_retry_ends_cancelled")
+    let mut scenario = Scenario::new("a_cancel_racing_a_retry_starts_no_attempt_after_it")
         .scratch(env!("CARGO_TARGET_TMPDIR"))
         .server(pool(RACE_HOSTS))
         .hosts("burst", RACE_HOSTS)

@@ -108,11 +108,11 @@ use store::StoreAt;
 pub use store::{SQLITE_FILE, STORE_LINE_FILE, Store};
 
 /// The name the cell's server claims the callbacks it delivers by.
-pub const CLAIMER: &str = "sim-server";
+pub(crate) const CLAIMER: &str = "sim-server";
 
 /// The name of the second instance that claims callbacks and vanishes
 /// ([`ServerNode::claim_callbacks_and_vanish`]).
-pub const SECOND_CLAIMER: &str = "sim-server-2";
+pub(crate) const SECOND_CLAIMER: &str = "sim-server-2";
 
 /// The wall time, in milliseconds since the Unix epoch, that virtual time zero stands
 /// for: 2027-01-01 00:00 UTC. Every clock of the cell counts from it.
@@ -439,7 +439,7 @@ impl ServerNode {
     /// them, as an instance that dies holding its claims: each claim lapses after 30 s, and
     /// the server's own delivery takes the callback again. How many it claimed; none while
     /// the server is down.
-    pub fn claim_callbacks_and_vanish(&self, claimer: &str) -> usize {
+    pub(crate) fn claim_callbacks_and_vanish(&self, claimer: &str) -> usize {
         let jobs = self.server().and_then(InProcess::jobs);
         let by = InstanceId::new(claimer);
         let claimed = jobs.and_then(|jobs| {
@@ -552,7 +552,7 @@ impl ServerNode {
     }
 
     /// Delivers every callback that is due to the receiver, one try each, as the server's
-    /// delivery threads do, claiming as [`CLAIMER`]: after each tick, and at no other time.
+    /// delivery threads do, claiming as `sim-server`: after each tick, and at no other time.
     /// A callback the receiver answers with a failed try is due again after a wait, so this
     /// ends.
     fn deliver_callbacks(&self, up: &Up) {

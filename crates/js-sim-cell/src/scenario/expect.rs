@@ -7,8 +7,9 @@
 //! [`Expect::marks_held`] reads the server's job store when it is judged).
 //! [`Expect::answer`] reads an answer the client kept (`answer.rs`). The five from
 //! [`Expect::pool_tripped`] to [`Expect::machines_joined`] read the elastic pool's clouds
-//! when they are judged, and the first of them its brake (`cloud.rs`). The fourteen from [`Expect::jobs_read`] on read the server's job and
-//! allocation tables as the cell read them, and the jobs the agents launched (`jobs.rs`).
+//! when they are judged, and the first of them its brake (`cloud.rs`). The fourteen from
+//! [`Expect::jobs_read`] on read the server's job and allocation tables as the cell read them,
+//! and the jobs the agents launched (`jobs.rs`).
 
 use std::time::Duration;
 

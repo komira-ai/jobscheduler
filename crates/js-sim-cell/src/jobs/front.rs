@@ -14,9 +14,9 @@
 //! A work that asks for a retry policy ([`Work::retry`]) submits it as `spec.retry`
 //! (`maxAttempts` and, when given, `initialBackoffSeconds` and `maxBackoffSeconds`), and
 //! one that asks for a callback ([`Work::callback`]) as `spec.callback`: the URL
-//! [`CALLBACK_URL_PREFIX`] and the job's id, the fixed signing key [`CALLBACK_KEY`] (the
+//! `CALLBACK_URL_PREFIX` and the job's id, the fixed signing key `CALLBACK_KEY` (the
 //! gateway's base64 of 32 bytes) and, when given, `deadlineSeconds`. A job that retries
-//! reads as queued, or placed, between its attempts, so the item keeps polling and ends only
+//! reads as queued between its attempts, so the item keeps polling and ends only
 //! at the job's final state.
 //!
 //! # The mapping
@@ -88,11 +88,12 @@ pub const JOB_PREFIX: &str = "sim-job-";
 
 /// What the URL of a job's completion callback starts with; the job's id follows. The
 /// receiver is the cell's own, so nothing is ever sent to it.
-pub const CALLBACK_URL_PREFIX: &str = "https://receiver.example/sim/";
+pub(crate) const CALLBACK_URL_PREFIX: &str = "https://receiver.example/sim/";
 
 /// The key every callback of a job is signed with, as the gateway's JSON writes bytes
-/// (base64): 32 bytes of 7.
-pub const CALLBACK_KEY: &str = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
+/// (base64): 32 bytes of 7. It is a fixed test value, not a secret: the receiver is the
+/// cell's own and checks no signature.
+pub(crate) const CALLBACK_KEY: &str = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
 
 /// Where an item is.
 #[derive(Clone, Copy, PartialEq, Eq)]

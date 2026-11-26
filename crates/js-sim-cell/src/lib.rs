@@ -194,8 +194,8 @@ pub use elastic::{
 pub use front::{Answer, CallKind, ClientPort, Front, FrontFactory};
 pub use invariant::{Checked, Checker, Invariant, NotSettled, Touched, Violation};
 pub use jobs::{
-    AllocationRead, AllocationRow, AttemptRead, CALLBACK_KEY, CALLBACK_URL_PREFIX, CallbackCall,
-    JOB_PREFIX, JobBeat, JobFront, JobRead, JobReply, JobStartSeen, LostAnswer, ResultMade,
+    AllocationRead, AllocationRow, AttemptRead, CallbackCall, JOB_PREFIX, JobBeat, JobFront,
+    JobRead, JobReply, JobStartSeen, LostAnswer, ResultMade,
 };
 pub use ledger::{Acked, Completion, Ledger};
 pub use load::Load;
