@@ -98,6 +98,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             let before = job.clone();
             let ended = ended(job, end, now, self.retention);
             txn = put_job(txn, Some(&before), &ended, Cond::Version(job_version))?;
+            txn = self.due_callback(txn, &ended, now)?;
             ended
         };
         let allocation = if allocation.step == AllocationStep::Freed {

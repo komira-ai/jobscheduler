@@ -1,12 +1,14 @@
-//! A job's attempts and its completion callback before the store keeps either: a retry is
-//! refused as the illegal move it is today, no job has an attempt row or a callback, none is
-//! due, an answer is stale, and none of it writes anything.
+//! A job's attempts before the store keeps them, and the callback operations on jobs that ask
+//! for none: a retry is refused as the illegal move it is today, no job has an attempt row, a
+//! job without a callback has no callback status and none is due, an answer to a claim no row
+//! holds is stale, and none of it writes anything.
 
 use js_state::conformance::Backend;
-use js_state::{StoreError, StoreTime, Version};
+use js_state::{StoreError, StoreTime};
 use js_types::{CallbackAnswer, FailureClass, SigningKey};
 
 use super::{job_id, rig};
+use crate::callback::Held;
 use crate::interfere::INJECTED;
 use crate::{
     AttemptOutcome, AttemptRecord, CallbackClaim, InstanceId, JobState, JobStoreError, StartFailure,
@@ -153,7 +155,10 @@ pub fn an_answer_to_a_claim_no_row_holds_is_stale<B: Backend>(backend: &B) {
         url: "https://hooks.example/js-done/ref-1".to_owned(),
         key: SigningKey::new(vec![b'k'; 32]).expect("a key"),
         webhook_id: "bXNnX2lk".to_owned(),
-        version: Version(1),
+        held: Held {
+            by: InstanceId::new("server-a"),
+            tries: 1,
+        },
     };
     let answers = [
         CallbackAnswer::Delivered,
