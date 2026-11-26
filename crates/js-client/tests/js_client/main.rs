@@ -1,7 +1,8 @@
 //! Behaviour of the HTTP client: the server address rules, the owner-only token file, the
 //! host identity (a client certificate that is reloaded between requests),
 //! and requests against small servers started in the test process on 127.0.0.1, over
-//! plain http and over TLS with a certificate made for the test; with the `jobs` feature,
+//! plain http and over TLS with a certificate made for the test, including the connection
+//! a client keeps between requests; with the `jobs` feature,
 //! the job client against an in-memory job server.
 
 mod client;
@@ -16,6 +17,7 @@ mod job_conformance;
 mod jobs;
 #[cfg(feature = "jobs")]
 mod loops;
+mod reuse;
 mod server_url;
 mod support;
 mod token;

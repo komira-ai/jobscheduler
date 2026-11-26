@@ -1,5 +1,5 @@
 //! The HTTP client: one agent per command, bound to one server and one token or one
-//! host identity.
+//! host identity, which keeps its connection to the server between requests.
 
 use std::fmt;
 use std::path::Path;
@@ -21,6 +21,19 @@ use crate::token;
 
 /// The longest a request may take from first byte to last, connect and TLS included.
 pub const REQUEST_LIMIT: Duration = Duration::from_secs(30);
+
+/// The longest a connection is kept idle for the next request. It is above the agent's
+/// heartbeat interval ([`js_agent_wire::DEFAULT_HEARTBEAT_INTERVAL_MS`], 5 s), so the beats of
+/// a host ride one connection, and below the time the lease server keeps an idle connection
+/// open (its `header_timeout`, 10 s by default), so the client lets a connection go before
+/// the server closes it under a request sent on it.
+const IDLE_LIMIT: Duration = Duration::from_secs(8);
+
+// The beats of a host at the default interval find their connection still kept.
+const _: () = assert!(
+    Duration::from_millis(js_agent_wire::DEFAULT_HEARTBEAT_INTERVAL_MS).as_nanos()
+        < IDLE_LIMIT.as_nanos()
+);
 
 /// The largest reply read: the wire's bound on a reply body,
 /// [`js_agent_wire::limits::REPLY_BODY_BUDGET`] (1 MiB). The server's answers are small.
@@ -261,8 +274,9 @@ fn authorized<B>(request: RequestBuilder<B>, bearer: Option<&str>) -> RequestBui
     }
 }
 
-/// The HTTP agent for one server: no proxy, no redirect, one connection per request, and
-/// TLS with `roots` and, when given, a client certificate.
+/// The HTTP agent for one server: no proxy, no redirect, at most one idle connection kept
+/// for at most [`IDLE_LIMIT`], and TLS with `roots` and, when given, a client certificate.
+/// The clones of a [`Client`] share the agent and so the connection.
 fn build_agent(https: bool, limit: Duration, roots: &RootCerts, cert: Option<ClientCert>) -> Agent {
     let tls = TlsConfig::builder()
         .provider(TlsProvider::Rustls)
@@ -276,10 +290,16 @@ fn build_agent(https: bool, limit: Duration, roots: &RootCerts, cert: Option<Cli
         .http_status_as_error(false)
         .https_only(https)
         .timeout_global(Some(limit))
-        // A connection that sat idle between two requests may have been closed by the
-        // other side, and a request sent on a dead one fails; every request opens its
-        // own.
-        .max_idle_connections(0)
+        // One idle connection is kept for the next request, so a host's heartbeats ride one
+        // TCP connection and one TLS handshake. It is let go after `IDLE_LIMIT`, before the
+        // server closes it. One the server said it would close (`Connection: close`, as on
+        // the answer to its `max_requests`th request) is not kept, and one it closed sooner
+        // (a drain, a restart) is found closed when it is taken from the pool and a new one
+        // is opened instead. Nothing is sent twice: a request that meets the server's close
+        // on the way fails as a request to an unreachable server does.
+        .max_idle_connections(1)
+        .max_idle_connections_per_host(1)
+        .max_idle_age(IDLE_LIMIT)
         .tls_config(tls)
         .build()
         .into()
