@@ -33,13 +33,15 @@
 use std::sync::Arc;
 
 use axum::Router;
-use js_jobs::JobStore;
+use js_callback::CallbackUrl;
+use js_jobs::{CallbackClaim, InstanceId, JobStore};
 use js_registry::Registry;
 use js_state::Store;
-use js_types::Clock;
+use js_types::{CallbackAnswer, Clock};
 use tokio::sync::Mutex;
 
 use crate::api::{Shared, agent_router, router};
+use crate::callbacks::pass_with;
 use crate::catalogs::Cached;
 use crate::checks::{Checker, Schedule};
 use crate::clock::SharedClock;
@@ -103,6 +105,7 @@ impl InProcess {
             &shared,
             listeners.max_job_wall,
             listeners.callbacks(),
+            listeners.retry(),
             log_reads,
         )
         .map(|api| job_api::port(api, listeners.clients));
@@ -143,6 +146,28 @@ impl InProcess {
     /// served from, to read; `None` while the job service is off.
     pub fn jobs(&self) -> Option<&JobStore<Arc<dyn Store>, ServerIds>> {
         self.shared.agents().jobs.as_deref()
+    }
+
+    /// One try of one due callback, as a delivery thread of a server makes it
+    /// ([`crate::callbacks`]): claims one due callback from the job tables, at their clock, as
+    /// `claimer`, hands it with its `webhook-timestamp` (the claim's instant, in seconds) to
+    /// `send` in place of the HTTP sender, and records the answer `send` gives at the tables'
+    /// clock. A callback whose URL this build refuses is never handed to `send`: its try fails.
+    /// Whether it claimed one; `false` while the job service is off. No thread runs here, so no
+    /// callback is tried until the caller says so.
+    pub fn deliver_callback(
+        &self,
+        claimer: &str,
+        send: &mut dyn FnMut(&CallbackClaim, u64) -> CallbackAnswer,
+    ) -> bool {
+        let agents = self.shared.agents();
+        let Some(jobs) = agents.jobs.as_deref() else {
+            return false;
+        };
+        let by = InstanceId::new(claimer);
+        let send =
+            &mut |_: &CallbackUrl, claim: &CallbackClaim, timestamp: u64| send(claim, timestamp);
+        pass_with(jobs, agents.meter(), &by, send)
     }
 
     /// One tick, its parts in this order and each run to its end: the elastic pool's checks

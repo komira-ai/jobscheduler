@@ -129,7 +129,7 @@ struct Served {
     /// only commits, and the tick's pass finds the queued row.
     poking: Option<Handle<Agents>>,
     /// The fields this release refuses until it accepts them, of which it takes these: none,
-    /// but in tests (`Ctx::accepting_retry`).
+    /// but in tests and simulations (`Ctx::accepting_retry`).
     accepts: Accepts,
     /// The address rule a job's callback is judged by (step 1); `None`: the call refuses a job
     /// that asks for a callback (`callback-not-enabled`), until the release that accepts one.
@@ -187,9 +187,8 @@ impl Ctx {
     }
 
     /// This context, taking a job's retry policy: what the release that accepts a policy will
-    /// do, which tests do now. Nothing for a context that is not served.
-    #[cfg(test)]
-    pub(super) fn accepting_retry(mut self) -> Ctx {
+    /// do, which a test or a simulation does now. Nothing for a context that is not served.
+    pub(crate) fn accepting_retry(mut self) -> Ctx {
         self.served = self.served.map(|served| Served {
             accepts: Accepts { retry: true },
             ..served

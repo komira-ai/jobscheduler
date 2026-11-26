@@ -255,7 +255,7 @@ async fn start_held<T: Ticker, C: Ticker, R: Ticker>(
         false => Duration::ZERO,
     };
     let (prepared, listeners) = prepare(config, store, &clock)?;
-    let callbacks = listeners.callbacks();
+    let (callbacks, retry) = (listeners.callbacks(), listeners.retry());
     let tls = listeners
         .tls
         .as_ref()
@@ -334,6 +334,7 @@ async fn start_held<T: Ticker, C: Ticker, R: Ticker>(
             &shared,
             listeners.max_job_wall,
             callbacks,
+            retry,
             log_reads,
         ))
         .map(|((listener, addr), api)| {
@@ -436,6 +437,12 @@ impl Listeners {
     /// [`JobListen::callback_refused`] holds, which it does until the release that accepts one.
     pub(crate) fn callbacks(&self) -> bool {
         self.job_listen.is_some_and(|job| !job.callback_refused)
+    }
+
+    /// Whether the job service takes a job's retry policy: never while
+    /// [`JobListen::retry_refused`] holds, which it does until the release that accepts one.
+    pub(crate) fn retry(&self) -> bool {
+        self.job_listen.is_some_and(|job| !job.retry_refused)
     }
 }
 

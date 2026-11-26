@@ -33,6 +33,11 @@ pub(crate) struct JobListen {
     /// that accepts one (`docs/design/job-retry-and-completion-callback.md`, section 7). No flag
     /// or key sets it; a test of the job service builds it off.
     pub(crate) callback_refused: bool,
+    /// Whether `SubmitJob` refuses a job that carries a retry policy (`retry-not-enabled`):
+    /// always, from the flags and the file alike, as [`JobListen::callback_refused`]. No flag or
+    /// key sets it; a test or a simulation builds a server with it off
+    /// (`Config::accepting_retry_and_callbacks`, cargo feature `in-process`).
+    pub(crate) retry_refused: bool,
 }
 
 /// The address the metrics are served on (`--metrics-listen`, `server.metrics_listen`), and
@@ -122,6 +127,7 @@ pub(super) fn job_listen(cli: &Cli) -> Option<JobListen> {
         addr,
         flag,
         callback_refused: true,
+        retry_refused: true,
     })
 }
 

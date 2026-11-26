@@ -2,7 +2,7 @@
 //! sections 5.3 to 5.5): [`THREADS`] threads per server, off the tick's path, each trying one
 //! due callback at a time.
 //!
-//! - **One try** ([`Delivery::pass`]): claim one due callback from the store at its clock
+//! - **One try** ([`pass_with`], which [`Delivery::pass`] and the in-process seam make): claim one due callback from the store at its clock
 //!   (`js_jobs::JobStore::claim_callbacks`, which holds it for this server for 30 s and expires
 //!   one past its deadline instead), POST it with the [`Sender`] (no proxy, no redirect, no
 //!   body read, [`SEND_LIMIT`]), and record the answer at the store's clock
@@ -29,7 +29,8 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use js_callback::{
-    AddressRule, CallbackAnswer, FailureClass, Resolve, Sender, SystemResolver, TlsRoots, check_url,
+    AddressRule, CallbackAnswer, CallbackUrl, FailureClass, Resolve, Sender, SystemResolver,
+    TlsRoots, check_url,
 };
 use js_jobs::{CallbackClaim, InstanceId, JobStoreError};
 use js_state::StoreTime;
@@ -136,56 +137,76 @@ impl Delivery {
     /// One try of one due callback, when one is due (the module docs); whether it claimed
     /// one. A store that cannot be read claims none, and is logged.
     pub(crate) fn pass(&self) -> bool {
-        let claimed = self.jobs.now().and_then(|now| {
-            let claims = self.jobs.claim_callbacks(&self.by, now, 1)?;
-            Ok((now, claims))
-        });
-        let (now, claims) = match claimed {
-            Ok(claimed) => claimed,
-            Err(error) => {
-                warn!(%error, "the due callbacks could not be claimed");
-                return false;
-            }
+        let send = &mut |url: &CallbackUrl, claim: &CallbackClaim, timestamp: u64| {
+            self.sender
+                .send(url, &claim.key, &claim.webhook_id, timestamp)
         };
-        let Some(claim) = claims.into_iter().next() else {
-            return false;
-        };
-        self.deliver(claim, now);
-        true
+        pass_with(&self.jobs, &self.meter, &self.by, send)
     }
+}
 
-    /// Sends `claim`, claimed at `now`, and records its answer.
-    fn deliver(&self, claim: CallbackClaim, now: StoreTime) {
-        let job = claim.job.clone();
-        let answer = match check_url(&claim.url) {
-            Ok(url) => {
-                let timestamp = now.as_duration().as_secs();
-                self.sender
-                    .send(&url, &claim.key, &claim.webhook_id, timestamp)
-            }
-            // A URL this build's submit would refuse (a later build's, or a row written past
-            // it) is never sent: the try fails, and is made again until its deadline.
-            Err(fault) => {
-                warn!(%job, code = fault.code(), "a callback whose URL this build refuses is not sent");
-                CallbackAnswer::Failed(FailureClass::Failed)
-            }
-        };
-        let answered = self
-            .jobs
-            .now()
-            .and_then(|at| self.jobs.answer_callback(claim, answer, at));
-        let result = callback_result(&answer);
-        match answered {
-            Ok(()) => {
-                self.meter.sink().callback_answered(&answer);
-                info!(%job, result, "a callback was tried");
-            }
-            Err(JobStoreError::Stale { .. }) => {
-                info!(%job, result, "a callback's claim lapsed before its answer was recorded");
-            }
-            Err(error) => {
-                warn!(%job, result, %error, "a callback's answer was not recorded: it is tried again when its claim lapses");
-            }
+/// One try of one due callback, when one is due: the claim at the job tables' clock as `by`,
+/// the check of its URL, `send` in place of the HTTP sender (handed the checked URL, the claim
+/// and the `webhook-timestamp`, the claim's instant in seconds), and the recording and the
+/// counting of its answer. The delivery threads ([`Delivery::pass`]) and the in-process seam
+/// (`InProcess::deliver_callback`) both make their tries here. Whether it claimed one. A store
+/// that cannot be read claims none, and is logged.
+pub(crate) fn pass_with(
+    jobs: &ServerJobs,
+    meter: &Meter,
+    by: &InstanceId,
+    send: &mut dyn FnMut(&CallbackUrl, &CallbackClaim, u64) -> CallbackAnswer,
+) -> bool {
+    let claimed = jobs.now().and_then(|now| {
+        let claims = jobs.claim_callbacks(by, now, 1)?;
+        Ok((now, claims))
+    });
+    let (now, claims) = match claimed {
+        Ok(claimed) => claimed,
+        Err(error) => {
+            warn!(%error, "the due callbacks could not be claimed");
+            return false;
+        }
+    };
+    let Some(claim) = claims.into_iter().next() else {
+        return false;
+    };
+    deliver(jobs, meter, claim, now, send);
+    true
+}
+
+/// Sends `claim`, claimed at `now`, with `send`, and records its answer.
+fn deliver(
+    jobs: &ServerJobs,
+    meter: &Meter,
+    claim: CallbackClaim,
+    now: StoreTime,
+    send: &mut dyn FnMut(&CallbackUrl, &CallbackClaim, u64) -> CallbackAnswer,
+) {
+    let job = claim.job.clone();
+    let answer = match check_url(&claim.url) {
+        Ok(url) => send(&url, &claim, now.as_duration().as_secs()),
+        // A URL this build's submit would refuse (a later build's, or a row written past
+        // it) is never sent: the try fails, and is made again until its deadline.
+        Err(fault) => {
+            warn!(%job, code = fault.code(), "a callback whose URL this build refuses is not sent");
+            CallbackAnswer::Failed(FailureClass::Failed)
+        }
+    };
+    let answered = jobs
+        .now()
+        .and_then(|at| jobs.answer_callback(claim, answer, at));
+    let result = callback_result(&answer);
+    match answered {
+        Ok(()) => {
+            meter.sink().callback_answered(&answer);
+            info!(%job, result, "a callback was tried");
+        }
+        Err(JobStoreError::Stale { .. }) => {
+            info!(%job, result, "a callback's claim lapsed before its answer was recorded");
+        }
+        Err(error) => {
+            warn!(%job, result, %error, "a callback's answer was not recorded: it is tried again when its claim lapses");
         }
     }
 }

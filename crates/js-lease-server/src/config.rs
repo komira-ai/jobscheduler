@@ -893,6 +893,22 @@ impl Config {
         self
     }
 
+    /// The same configuration with the job service taking a job's retry policy and its completion
+    /// callback, which every flag and file of a shipped server refuses (`retry-not-enabled`,
+    /// `callback-not-enabled`; `docs/design/job-retry-and-completion-callback.md`, section 7).
+    /// Nothing changes while the job service is off. It is the only way to lift the two
+    /// refusals, and only a build with the `in-process` feature, which no shipped binary turns
+    /// on, has it.
+    #[cfg(feature = "in-process")]
+    #[must_use]
+    pub fn accepting_retry_and_callbacks(mut self) -> Self {
+        if let Some(job) = self.job_listen.as_mut() {
+            job.retry_refused = false;
+            job.callback_refused = false;
+        }
+        self
+    }
+
     /// The same configuration timing the metrics on `clock`.
     pub fn with_monotonic(mut self, clock: Arc<dyn Monotonic>) -> Self {
         self.monotonic = clock;
