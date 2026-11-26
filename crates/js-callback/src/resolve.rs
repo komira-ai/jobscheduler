@@ -95,7 +95,12 @@ mod tests {
     #[test]
     fn a_lookup_ends_at_its_limit_or_with_its_error() {
         let (keep, never) = mpsc::channel::<Vec<IpAddr>>();
-        let hung = bounded(Duration::ZERO, move || Ok(never.recv().unwrap_or_default()));
+        // Dropped when the hung lookup returns, so the test can wait for its thread to end.
+        let (finished, ended) = mpsc::channel::<()>();
+        let hung = bounded(Duration::ZERO, move || {
+            let _finished = finished;
+            Ok(never.recv().unwrap_or_default())
+        });
         let failed = bounded(Duration::from_secs(60), || {
             Err(io::Error::new(io::ErrorKind::NotFound, "no such name"))
         });
@@ -106,6 +111,8 @@ mod tests {
                 "the lookup failed: no such name"
             ]
         );
+        // Released only now, so the limit was the only way out; then the lookup ends.
         drop(keep);
+        ended.recv().ok();
     }
 }
