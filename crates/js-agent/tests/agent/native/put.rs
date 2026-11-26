@@ -17,7 +17,7 @@ use js_agent_wire::{
 use js_mac_pool::seatbelt::AbsPath;
 use sha2::{Digest as _, Sha256};
 
-use super::{Rig, me, my_gid, native};
+use super::{Rig, gated, me, my_gid, native, open_gate};
 
 /// The node of these tests: the test's own user, which the hand-over needs no root for.
 fn node() -> Node {
@@ -89,6 +89,16 @@ fn handle() -> RunHandle {
 /// Starts the run `r1` (lease `7.0`) of the build service's shape: its put mount of
 /// `<root>/cas/b/b1/n1` at `/work/.kbf-out`, and `declared` outputs. Answers its folder.
 fn started(rig: &mut Rig, root: &Path, declared: Vec<OutputSpec>) -> PathBuf {
+    started_running(rig, root, declared, &[])
+}
+
+/// [`started`], the job's program `/bin/sh` given `args`.
+fn started_running(
+    rig: &mut Rig,
+    root: &Path,
+    declared: Vec<OutputSpec>,
+    args: &[&str],
+) -> PathBuf {
     let put = mount(
         &root.join("cas/b/b1/n1"),
         "/work/.kbf-out",
@@ -97,7 +107,7 @@ fn started(rig: &mut Rig, root: &Path, declared: Vec<OutputSpec>) -> PathBuf {
     let fs = fs_of(vec![put]);
     assert_eq!(rig.rt.check_job_fs(&fs, &[]), Ok(()));
     assert_eq!(rig.rt.resolve_fs("r1", "", &fs, 0), FsPrepared::Ready);
-    let mut body = native("/bin/sh", &[]);
+    let mut body = native("/bin/sh", args);
     body.outputs = declared;
     let spec = rig.spec("r1", body);
     rig.rt.create_and_start(&spec).unwrap();
@@ -162,8 +172,12 @@ fn a_put_mount_is_committed_once_before_the_retirement() {
 #[test]
 fn a_put_target_is_committed_by_the_process_that_takes_the_run_back() {
     let (mut rig, root) = rig("put-adopt");
-    let exec = started(&mut rig, &root, Vec::new());
+    let gate = rig.dir.path("gate");
+    let args = gated(&gate, "exit 0");
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let exec = started_running(&mut rig, &root, Vec::new(), &args);
     write_pack(&exec, b"packed before the restart");
+    open_gate(&gate);
     assert!(matches!(rig.settle(&handle()), Status::Exited(_)));
     let journal = js_agent::native::Journal::new(&rig.dir.path("native-leases"));
     let record = journal.runs().unwrap().remove("7.0").unwrap();

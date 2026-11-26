@@ -12,7 +12,7 @@ use js_agent::mac_supervisor::SupervisorId;
 use js_agent::native::{Journal, NativeRuntime, PutRecord, RunRecord};
 use js_agent_wire::{OutputKind, OutputSpec};
 
-use super::{Failing, Rig, native};
+use super::{Failing, Rig, gated, native, open_gate};
 use crate::support::Scratch;
 
 fn live(rig: &Rig) -> Vec<String> {
@@ -121,7 +121,10 @@ fn concurrent_adds_are_never_lost_to_a_retirement() {
 #[test]
 fn a_started_run_is_recorded_with_its_account_and_uid_until_it_is_removed() {
     let mut rig = Rig::new("journal-record");
-    let mut body = native("/usr/bin/true", &[]);
+    let gate = rig.dir.path("gate");
+    let args = gated(&gate, "exit 0");
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let mut body = native("/bin/sh", &args);
     body.outputs.push(OutputSpec {
         path: "out".to_owned(),
         kind: OutputKind::File,
@@ -159,6 +162,7 @@ fn a_started_run_is_recorded_with_its_account_and_uid_until_it_is_removed() {
         "{supervisor:?}"
     );
     assert_eq!(record.put, None);
+    open_gate(&gate);
     rig.settle(&id);
     rig.rt.remove(&id).unwrap();
     assert!(live(&rig).is_empty());

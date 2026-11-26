@@ -24,7 +24,9 @@ use js_agent::mac_supervisor::{Ended, ExitRecord, JobRusage};
 use js_agent::native::Journal;
 use js_agent_wire::{OutputKind, OutputSpec};
 
-use super::{Rig, native};
+use rustix::process::{Pid, Signal, kill_process_group};
+
+use super::{Rig, gated, native, open_gate};
 
 fn labels(run_id: &str) -> BTreeMap<String, String> {
     BTreeMap::from([
@@ -288,9 +290,9 @@ fn account(rig: &Rig, n: usize) -> String {
 fn a_restart_keeps_the_users_of_runs_it_takes_back_and_resets_the_rest() {
     let mut rig = Rig::in_dir("adopt-keep", 3, |_, _| {});
     let live = started_unsettled(&mut rig, "r1", "/bin/sleep", &["600"]);
-    let recorded = started(&mut rig, "r2", "/usr/bin/true", &[]);
+    let recorded = started_gated(&mut rig, "r2", "exit 0");
     write_exit(&rig, 1, &exit_record(0));
-    let lost = started(&mut rig, "r3", "/usr/bin/true", &[]);
+    let lost = started_gated(&mut rig, "r3", "exit 0");
     let names = [account(&rig, 0), account(&rig, 1), account(&rig, 2)];
 
     let (mut next, pool) = rig.reopened_with_pool();
@@ -338,6 +340,19 @@ fn a_restart_keeps_the_users_of_runs_it_takes_back_and_resets_the_rest() {
     );
 }
 
+/// Starts the run `run_id`, with its labels, as a job [`gated`] on a file of its own, opens the
+/// gate once the start has returned, and settles it: its supervisor was surely running when
+/// the runtime read its identity.
+fn started_gated(rig: &mut Rig, run_id: &str, work: &str) -> RunHandle {
+    let gate = rig.dir.path(&format!("gate-{run_id}"));
+    let args = gated(&gate, work);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let id = started_unsettled(rig, run_id, "/bin/sh", &args);
+    open_gate(&gate);
+    rig.settle(&id);
+    id
+}
+
 /// Starts `program args` as the run `run_id`, with its labels, and leaves it running.
 fn started_unsettled(rig: &mut Rig, run_id: &str, program: &str, args: &[&str]) -> RunHandle {
     let mut spec = rig.spec(run_id, native(program, args));
@@ -353,13 +368,17 @@ fn started_unsettled(rig: &mut Rig, run_id: &str, program: &str, args: &[&str]) 
 #[test]
 fn a_run_taken_back_has_its_outputs_collected() {
     let mut rig = Rig::new("adopt-outputs");
-    let mut body = native("/bin/sh", &["-c", "echo made > out.txt"]);
+    let gate = rig.dir.path("gate");
+    let args = gated(&gate, "echo made > out.txt");
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let mut body = native("/bin/sh", &args);
     body.outputs.push(OutputSpec {
         path: "out.txt".to_owned(),
         kind: OutputKind::File,
     });
     let spec = rig.spec("r1", body);
     let id = rig.rt.create_and_start(&spec).unwrap();
+    open_gate(&gate);
     rig.settle(&id);
     write_exit(&rig, 0, &exit_record(0));
     let mut next = rig.reopened();
@@ -405,6 +424,10 @@ fn a_run_recorded_by_an_earlier_release_is_not_taken_back() {
     assert_eq!(next.list_labelled().unwrap().len(), 1);
     assert_eq!(next.poll(&id).unwrap(), Status::Gone);
     next.remove(&id).unwrap();
+    // Nothing of an ended run is swept: the job is ended here.
+    for group in rig.launcher.groups() {
+        let _ = Pid::from_raw(group).map(|group| kill_process_group(group, Signal::KILL));
+    }
 }
 
 /// Asserts that a run taken back holds its account's uid at the next process's start: with one

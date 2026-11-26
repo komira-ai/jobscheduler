@@ -350,6 +350,24 @@ pub fn native(program: &str, args: &[&str]) -> NativeSpec {
     }
 }
 
+/// The arguments of `/bin/sh` for a job that waits until the file `gate` exists, then runs
+/// the shell text `work`: a job that is surely still running when its start returns (the fake
+/// supervisor is the job, and a later process knows it only while it runs or by its record).
+pub fn gated(gate: &Path, work: &str) -> Vec<String> {
+    let script = format!("while [ ! -e \"$1\" ]; do /bin/sleep 0.01; done; {work}");
+    vec![
+        "-c".to_owned(),
+        script,
+        "sh".to_owned(),
+        gate.display().to_string(),
+    ]
+}
+
+/// Opens `gate`: a job [`gated`] on it goes on.
+pub fn open_gate(gate: &Path) {
+    fs::write(gate, "").unwrap();
+}
+
 /// The value of the profile parameter `name` of a launch.
 pub fn param<'a>(launched: &'a Launched, name: &str) -> Option<&'a str> {
     launched
