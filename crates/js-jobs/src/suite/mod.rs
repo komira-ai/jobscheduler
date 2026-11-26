@@ -122,6 +122,7 @@ where
     a_retry_by_another_client_keeps_the_first(backend);
     the_same_job_is_found_by_value_not_by_bytes(backend);
     a_concurrent_insert_answers_from_the_job_it_made(backend);
+    a_read_handed_to_the_insert_is_not_made_again(backend);
     minted_ids_do_not_repeat_across_instances(backend);
     a_minted_id_collision_is_retried(backend);
     minting_stops_at_its_budget(backend);
@@ -147,6 +148,7 @@ where
     the_unclean_hosts_follow_the_rows_between_calls(backend);
     a_beat_of_an_old_epoch_after_a_newer_hello_is_stale(backend);
     a_beat_through_one_server_is_read_by_another(backend);
+    each_hello_writes_its_own_agent_version(backend);
     heard_at_is_the_store_clock_and_judges_live_nodes(backend);
     a_node_row_without_the_optional_fields_reads_and_keeps_a_later_builds_field(backend);
     forget_node_deletes_only_the_row_it_read_and_a_failed_write_changes_nothing(backend);
@@ -345,6 +347,7 @@ macro_rules! job_store_tests {
             a_retry_by_another_client_keeps_the_first,
             the_same_job_is_found_by_value_not_by_bytes,
             a_concurrent_insert_answers_from_the_job_it_made,
+            a_read_handed_to_the_insert_is_not_made_again,
             minted_ids_do_not_repeat_across_instances,
             a_minted_id_collision_is_retried,
             minting_stops_at_its_budget,
@@ -370,6 +373,7 @@ macro_rules! job_store_tests {
             the_unclean_hosts_follow_the_rows_between_calls,
             a_beat_of_an_old_epoch_after_a_newer_hello_is_stale,
             a_beat_through_one_server_is_read_by_another,
+            each_hello_writes_its_own_agent_version,
             heard_at_is_the_store_clock_and_judges_live_nodes,
             a_node_row_without_the_optional_fields_reads_and_keeps_a_later_builds_field,
             forget_node_deletes_only_the_row_it_read_and_a_failed_write_changes_nothing,

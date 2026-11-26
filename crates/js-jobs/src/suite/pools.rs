@@ -25,6 +25,7 @@ pub(super) fn hello_in(pool: &str) -> NodeHello {
         labels: std::collections::BTreeMap::new(),
         phase: Phase::Serving,
         agent_process: None,
+        agent_version: None,
     }
 }
 

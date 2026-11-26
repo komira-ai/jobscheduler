@@ -37,6 +37,7 @@ fn node(epoch: u64, secret: &str) -> NodeSession {
         labels: map(&[("rack", "r9")]),
         phase: js_agent_wire::Phase::Serving,
         agent_process: Some("proc-1".into()),
+        agent_version: Some("2.4.6".into()),
         silent_for: Duration::ZERO,
         binding: Some(Binding::new(cred("t"), None)),
     }
@@ -107,6 +108,33 @@ fn an_adopted_session_takes_the_heartbeat_that_carries_its_secret() {
     );
     assert_eq!(registry_beat(&fx, "sekret", 4), Err(Refusal::StaleEpoch));
     assert!(registry_beat(&fx, "sekret", 5).is_ok());
+}
+
+/// Catches an adopted session listed without the agent version its row keeps (a server
+/// restarted since the hello lists every host's version as unknown until the host says hello
+/// again), a heartbeat that drops it, and a version invented for a row that keeps none: the
+/// row's version is listed after the adoption and after a heartbeat, and a later session whose
+/// row keeps none lists none.
+#[test]
+fn an_adopted_session_lists_the_agent_version_its_row_keeps() {
+    let fx = fixture(2);
+    assert_eq!(
+        fx.registry.adopt(&host("a"), node(5, "sekret")),
+        Adopted::Installed
+    );
+    assert_eq!(view(&fx, "a").agent_version.as_deref(), Some("2.4.6"));
+    assert!(registry_beat(&fx, "sekret", 5).is_ok());
+    assert_eq!(view(&fx, "a").agent_version.as_deref(), Some("2.4.6"));
+
+    let unversioned = NodeSession {
+        agent_version: None,
+        ..node(6, "later")
+    };
+    assert_eq!(
+        fx.registry.adopt(&host("a"), unversioned),
+        Adopted::Installed
+    );
+    assert_eq!(view(&fx, "a").agent_version, None);
 }
 
 /// Catches an adopted host whose last-heard ignores the row: a row silent past the grace

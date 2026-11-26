@@ -120,6 +120,7 @@ fn hello_row() -> js_jobs::NodeHello {
         labels: std::collections::BTreeMap::new(),
         phase: js_agent_wire::Phase::Serving,
         agent_process: None,
+        agent_version: None,
     }
 }
 
