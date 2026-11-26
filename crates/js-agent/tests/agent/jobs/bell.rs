@@ -1,5 +1,5 @@
 //! The bell between the job worker and the session: the worker rings it for news, a worker
-//! with no room backs the session off, and the whole agent reports a start's `running` at once.
+//! with no room backs the session off (never past the interval), and the whole agent reports a start's `running` at once.
 //! Nothing here waits for a time: rings are counted, waits are recorded, and every wait on the
 //! worker is for an event with a hang guard.
 
@@ -21,8 +21,8 @@ use super::{acks, start, start_answer, starts};
 use crate::bounds::WakeBudget;
 use crate::lifecycle::job;
 use crate::support::{
-    Lowest, Scratch, Script, ScriptConnector, beat_ok, flags, hello, linux_host, lowest, reply,
-    welcome,
+    Highest, Lowest, Scratch, Script, ScriptConnector, beat_ok, flags, hello, linux_host, lowest,
+    refused, reply, welcome, welcome_with,
 };
 
 /// The drain the sessions of these tests carry; none of them drains.
@@ -178,6 +178,115 @@ fn a_reply_the_worker_has_no_room_for_waits_a_growing_backoff_until_one_is_taken
     );
     machine.world.release();
     assert!(worker.handle().settle());
+}
+
+/// How many replies in a row the worker has no room for in the tests of the busy cap: past the
+/// sixth, an uncapped backoff from 1 s doubling would wait 32 s or more.
+const FULL_FOR: usize = 10;
+
+/// A session whose worker is full: it is welcomed with `interval_ms` (grace three intervals and
+/// a millisecond), takes `r1`, whose create is held, fills the worker's queue with [`QUEUE`]
+/// replies, and then has `then` left to answer. Returns the waits of the ticks after the queue is
+/// full, with their notes, in order.
+fn waits_of_a_full_worker(
+    interval_ms: u64,
+    jitter: &'static mut dyn js_agent::Jitter,
+    then: Vec<crate::support::Reply>,
+) -> Vec<(Duration, Option<Note>)> {
+    let dir = Scratch::new("jobs-bell-busy-cap");
+    let machine = FakeMachine::new();
+    let worker = start(&dir, &machine);
+    machine.world.hold_creates();
+    let ticks = then.len();
+    let mut replies = vec![
+        welcome_with(1, interval_ms, interval_ms * 3 + 1),
+        reply(200, start_answer(&["r1"])),
+    ];
+    replies.extend((0..QUEUE).map(|_| reply(200, start_answer(&["r1"]))));
+    replies.extend(then);
+    let (mut script, _) = Script::new(replies);
+    let mut session = Session::new(hello("h1"), &mut script, jitter).with_jobs(&worker, DRAIN);
+    step(&mut session);
+    step(&mut session);
+    machine.world.wait_entered(1);
+    for n in 0..QUEUE {
+        assert_eq!(step(&mut session).1, None, "reply {n} has room");
+    }
+    let waits = (0..ticks).map(|_| step(&mut session)).collect();
+    machine.world.release();
+    assert!(worker.handle().settle());
+    waits
+}
+
+/// Proves a worker that stays full for ten replies in a row never stretches the wait before
+/// the next heartbeat past the welcome's interval: the busy backoff grows from half its first
+/// ceiling and is capped at the interval, so the host keeps beating inside its grace. Cases: the
+/// default 5 s interval with the lowest jitter (0.5, 1, 2 and 4 s, then the interval) and with
+/// the highest (1, 2 and 4 s, then the interval, the cap met from above by an 8 s ceiling), and a
+/// 1 s interval with both (the cap met at the first or second reply). Catches a busy reply that
+/// waits the uncapped failure backoff, whose sixth and later waits are 16 s to 60 s.
+#[test]
+fn a_worker_full_for_ten_replies_never_waits_past_the_interval() {
+    let ms = Duration::from_millis;
+    let cases: [(u64, &'static mut dyn js_agent::Jitter, [u64; 4]); 4] = [
+        (5_000, lowest(), [500, 1_000, 2_000, 4_000]),
+        (
+            5_000,
+            Box::leak(Box::new(Highest)),
+            [1_000, 2_000, 4_000, 5_000],
+        ),
+        (1_000, lowest(), [500, 1_000, 1_000, 1_000]),
+        (
+            1_000,
+            Box::leak(Box::new(Highest)),
+            [1_000, 1_000, 1_000, 1_000],
+        ),
+    ];
+    for (interval_ms, jitter, first) in cases {
+        let busy = (0..FULL_FOR)
+            .map(|_| reply(200, start_answer(&["r1"])))
+            .collect();
+        let waits = waits_of_a_full_worker(interval_ms, jitter, busy);
+        let mut expected: Vec<_> = first
+            .iter()
+            .map(|&wait| (ms(wait), Some(Note::Busy)))
+            .collect();
+        expected.resize(FULL_FOR, (ms(interval_ms), Some(Note::Busy)));
+        assert_eq!(waits, expected, "interval {interval_ms} ms");
+    }
+}
+
+/// Proves a reply the worker had no room for still ends a run of failed exchanges, as every
+/// accepted heartbeat does: after ten such replies a heartbeat answered 503 waits the first
+/// failure's backoff (500 ms at the lowest jitter), and the busy reply after it is still at
+/// the cap, the interval, since the failure did not empty the worker. Catches busy replies
+/// counted as failures, which would make that 503 wait 30 s, past the 15 s grace.
+#[test]
+fn busy_replies_do_not_lengthen_the_backoff_of_a_failure_after_them() {
+    let ms = Duration::from_millis;
+    let mut then: Vec<_> = (0..FULL_FOR)
+        .map(|_| reply(200, start_answer(&["r1"])))
+        .collect();
+    then.push(refused(503, "unavailable"));
+    then.push(reply(200, start_answer(&["r1"])));
+    let waits = waits_of_a_full_worker(5_000, lowest(), then);
+    let (failed, after) = (&waits[FULL_FOR], &waits[FULL_FOR + 1]);
+    assert_eq!(failed.0, ms(500), "{failed:?}");
+    assert!(
+        matches!(
+            failed.1,
+            Some(Note::Retrying {
+                what: "heartbeat",
+                ..
+            })
+        ),
+        "{failed:?}"
+    );
+    assert_eq!(
+        after,
+        &(ms(5_000), Some(Note::Busy)),
+        "still full, at the cap"
+    );
 }
 
 /// A sleeper for the whole agent: it rings a flag as its bell, settles the worker at a wait

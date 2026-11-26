@@ -91,8 +91,11 @@
 //!   a retired job id, a `taint_ack`) is handed to the worker, which checks it as a whole
 //!   and acts on each command in order; a command it refuses is logged by its place in the
 //!   reply. A reply the worker has no room for is dropped and noted ([`Note::Busy`]): the
-//!   server sends everything again, and the next heartbeat waits a backoff that grows while
-//!   the worker stays full ([`Backoff`]), so a full worker is not asked again at once.
+//!   server sends everything again, and the next heartbeat waits a backoff of its own that
+//!   grows while the worker stays full ([`Backoff`]), so a full worker is not asked again at
+//!   once, but never longer than the interval: the heartbeat is the host's presence, so a
+//!   busy worker never makes the host miss its grace. The reply is still an accepted
+//!   heartbeat, so it ends a run of failures like any other.
 //! - The wait after a heartbeat whose reply the worker took ends as soon as the worker has
 //!   news for the server: a job taken as a start, that runs, or ended
 //!   ([`Session::beats_on_news`], [`Worker::ring_on_news`]). So the heartbeat after a start
@@ -314,6 +317,9 @@ pub struct Session<'a> {
     live: Option<Live>,
     phase: Phase,
     backoff: Backoff,
+    /// The run of replies the worker had no room for: the wait after each, capped at the
+    /// interval.
+    busy: Backoff,
     proven: bool,
     /// The last session was lost before one heartbeat of it was accepted. A welcome then
     /// does not end the run of failures: a server that welcomes and at once refuses is
@@ -366,6 +372,7 @@ impl<'a> Session<'a> {
             hello,
             live: None,
             backoff: Backoff::default(),
+            busy: Backoff::default(),
             proven: false,
             lost_young: false,
             hold: None,
@@ -819,6 +826,7 @@ impl<'a> Session<'a> {
             Ok(reply) => {
                 self.proven = true;
                 self.lost_young = false;
+                self.backoff.reset();
                 self.jobs.iter().for_each(|jobs| jobs.worker.heard());
                 // `None` when the lease id the reply names is not acceptable: the agent
                 // then changes nothing.
@@ -840,17 +848,18 @@ impl<'a> Session<'a> {
                     ..reply
                 });
                 // A reply the worker had no room for is sent again by the server: the next
-                // heartbeat waits a backoff that grows while the worker stays full, not the
-                // interval and never nothing, so a full worker is not asked in a loop.
+                // heartbeat waits a backoff that grows while the worker stays full, never
+                // nothing, so a full worker is not asked in a loop, and never more than the
+                // interval, so the host keeps beating inside its grace.
                 let busy = accepted == Some(Note::Busy);
                 if !busy {
-                    self.backoff.reset();
+                    self.busy.reset();
                 }
                 self.news = !busy;
                 // A reply the server held open asks for the next heartbeat at once, so one is
                 // always waiting there for a start to ride on (`held-beat`).
                 let after = match (busy, beat_now) {
-                    (true, _) => self.backoff.next(&mut *self.jitter, None),
+                    (true, _) => self.busy.next(&mut *self.jitter, None).min(interval),
                     (false, true) => Duration::ZERO,
                     (false, false) => interval,
                 };
