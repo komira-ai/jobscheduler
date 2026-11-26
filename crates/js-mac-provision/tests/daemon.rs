@@ -142,3 +142,47 @@ fn the_plist_carries_no_environment_variables() {
         assert!(!daemon.render().contains("EnvironmentVariables"));
     }
 }
+
+/// The `NumberOfFiles` integer of the `key` dictionary (`SoftResourceLimits` or
+/// `HardResourceLimits`) of the plist `text`, or `None` when the plist sets none.
+fn number_of_files(text: &str, key: &str) -> Option<u64> {
+    let start =
+        format!("\t<key>{key}</key>\n\t<dict>\n\t\t<key>NumberOfFiles</key>\n\t\t<integer>");
+    let rest = &text[text.find(&start)? + start.len()..];
+    let (number, after) = rest.split_once("</integer>")?;
+    after
+        .starts_with("\n\t</dict>\n")
+        .then(|| number.parse().ok())?
+}
+
+/// The agent and the helper start with 65536 open files, soft and hard, and not with launchd's
+/// default soft limit of 256: the agent serves many runs at once, each with pipes, log streams,
+/// lease files and connections, and the helper's jobs inherit its limit. Catches a plist that
+/// sets no `SoftResourceLimits`, or a soft limit above its hard one, which launchd refuses.
+#[test]
+fn both_daemons_start_with_65536_open_files_soft_and_hard() {
+    for daemon in [agent(), session()] {
+        let text = daemon.render();
+        let soft = number_of_files(&text, "SoftResourceLimits");
+        let hard = number_of_files(&text, "HardResourceLimits");
+        assert_eq!(soft, Some(65536), "{text}");
+        assert_eq!(hard, Some(65536), "{text}");
+        assert!(soft > Some(256) && soft <= hard, "{text}");
+    }
+}
+
+/// The check above reads a limit only where the plist sets one: a plist with no resource limits,
+/// as both daemons' were and as the pf daemon's is (it runs `install` and exits), reads as none,
+/// and a malformed dictionary reads as none too, so the test above cannot pass on either.
+#[test]
+fn a_plist_without_resource_limits_reads_as_none() {
+    let pf = pf_pool_plist();
+    assert_eq!(number_of_files(&pf, "SoftResourceLimits"), None);
+    assert_eq!(number_of_files(&pf, "HardResourceLimits"), None);
+    let unclosed = "\t<key>SoftResourceLimits</key>\n\t<dict>\n\t\t<key>NumberOfFiles</key>\n\t\t<integer>65536</integer>\n\t<key>Label</key>\n";
+    assert_eq!(number_of_files(unclosed, "SoftResourceLimits"), None);
+    let not_a_number = "\t<key>SoftResourceLimits</key>\n\t<dict>\n\t\t<key>NumberOfFiles</key>\n\t\t<integer>many</integer>\n\t</dict>\n";
+    assert_eq!(number_of_files(not_a_number, "SoftResourceLimits"), None);
+    let unterminated = "\t<key>SoftResourceLimits</key>\n\t<dict>\n\t\t<key>NumberOfFiles</key>\n\t\t<integer>65536";
+    assert_eq!(number_of_files(unterminated, "SoftResourceLimits"), None);
+}
