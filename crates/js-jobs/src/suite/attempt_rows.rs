@@ -430,8 +430,12 @@ where
         );
         let job = rig.jobs.get_job(id).expect("reads").expect("the job");
         assert!(job.state.is_ended(), "{name}: {id} did not end");
-        assert!(
-            job.attempt.history().is_empty() && job.attempt.hosts().is_empty(),
+        assert_eq!(
+            (
+                job.attempt.history().is_empty(),
+                job.attempt.hosts().is_empty()
+            ),
+            (true, true),
             "{name}: {id}: a job that ran nowhere has a history"
         );
         assert_eq!(rig.jobs.attempt_row(id, 1), Ok(None), "{name}: {id}");

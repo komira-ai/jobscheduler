@@ -134,8 +134,12 @@ where
     want.sort();
     assert_eq!(after, want, "{name}: only the young job keeps rows");
     assert_eq!(before.len(), 5, "{name}: five rows before the sweep");
-    assert!(
-        rig.raw(&keys::job(&old)).is_none() && rig.raw(&keys::job(&young)).is_some(),
+    assert_eq!(
+        (
+            rig.raw(&keys::job(&old)).is_none(),
+            rig.raw(&keys::job(&young)).is_some()
+        ),
+        (true, true),
         "{name}: the old job's row is gone and the young job's is kept"
     );
 
