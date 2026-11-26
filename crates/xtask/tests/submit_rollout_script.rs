@@ -73,8 +73,8 @@ impl Rig {
              'release view'*) cat \"$FAKE_DIR/tag.txt\" ;;\n\
              'api repos/'*'/compare/'*) cat \"$FAKE_DIR/compare.txt\" ;;\n\
              'api repos/'*'/commits/'*) cat \"$FAKE_DIR/tag-sha.txt\" ;;\n\
-             'run list'*) cat \"$FAKE_DIR/run.txt\" ;;\n\
-             'run view'*) cat \"$FAKE_DIR/jobs.tsv\" ;;\n\
+             'run list'*) c=''; next=0; for a in \"$@\"; do [ \"$next\" = 1 ] && c=$a; next=0; [ \"$a\" = --commit ] && next=1; done; cat \"$FAKE_DIR/runs-$c.txt\" 2>/dev/null; exit 0 ;;\n\
+             'run view'*) cat \"$FAKE_DIR/status-$3.txt\" \"$FAKE_DIR/jobs-$3.tsv\" ;;\n\
              'run rerun'*) exit \"${FAKE_RERUN:-0}\" ;;\n\
              *) exit 9 ;;\n\
              esac\n",
@@ -98,14 +98,15 @@ impl Rig {
         rig.set("tag.txt", "v0.1.420\n");
         rig.set("compare.txt", "ahead\n");
         rig.set("tag-sha.txt", &format!("{TAG_SHA}\n"));
-        rig.set("run.txt", "4242\n");
-        rig.set("jobs.tsv", DEPLOY_FAILED);
+        rig.set(&format!("runs-{TAG_SHA}.txt"), "4242\n");
+        rig.set("status-4242.txt", "completed\n");
+        rig.set("jobs-4242.tsv", DEPLOY_FAILED);
         rig.set("containers.txt", &format!("{CONTAINER}\n"));
         rig.set(&format!("version-{CONTAINER}.txt"), "0.1.419\n");
         rig
     }
 
-    /// Replaces an answer of a stand-in (`tag.txt`, `jobs.tsv`...).
+    /// Replaces an answer of a stand-in (`tag.txt`, `jobs-4242.tsv`...).
     fn set(&self, file: &str, text: &str) {
         fs::write(self.dir.join(file), text).unwrap();
     }
@@ -197,7 +198,8 @@ fn a_dry_run_names_the_re_run_and_changes_nothing() {
         ]
     );
     assert!(
-        ran.gh[4].starts_with("run view 4242 --repo komira-ai/jobscheduler --json jobs --jq "),
+        ran.gh[4]
+            .starts_with("run view 4242 --repo komira-ai/jobscheduler --json status,jobs --jq "),
         "{ran:?}"
     );
     assert_eq!(ran.gh.len(), 5, "{ran:?}");
@@ -215,16 +217,16 @@ fn a_dry_run_names_the_re_run_and_changes_nothing() {
         [
             format!("newest release: v0.1.420 (contains {COMMIT})").as_str(),
             "running js-server_server: 0.1.419",
-            "release run: 4242",
+            "release run: 4242 (completed)",
             "job cp-deploy-digest: completed success",
             "job cp-deploy / deploy js-server: completed failure",
-            "rollout: gh run rerun 4242 --repo komira-ai/jobscheduler --failed   (cp-deploy / deploy js-server ended failed)",
+            "rollout: gh run rerun 4242 --repo komira-ai/jobscheduler --failed   (cp-deploy / deploy js-server failed; it re-runs every failed job of the run)",
             "dry run: nothing was changed; run again with --apply to re-run the failed jobs",
         ]
     );
     assert_eq!(rig.out("release.txt"), format!("v0.1.420 {COMMIT} ahead\n"));
     assert_eq!(rig.out("running.txt"), "0.1.419\n");
-    assert_eq!(rig.out("deploy-jobs.tsv"), DEPLOY_FAILED);
+    assert_eq!(rig.out("run.tsv"), format!("completed\n{DEPLOY_FAILED}"));
 }
 
 /// Asserts that `--apply` against a failed control-plane deploy re-runs the failed jobs of that
@@ -317,22 +319,130 @@ fn one_container_behind_is_not_rolled_out() {
 }
 
 /// Asserts that when the newest release does not contain the commit (it is `behind` or
-/// `diverged`) the script says so and exits 3 having read no container and no run. It catches a
-/// script that rolls out a release without the change.
+/// `diverged`) and the commit has no release run of its own, the script says a later release
+/// will carry it and exits 3, having read no container and re-run nothing. It catches a script
+/// that rolls out a release without the change.
 #[test]
-fn no_release_with_the_commit_is_not_yet() {
+fn no_release_with_the_commit_and_no_run_of_its_own_is_not_yet() {
     for status in ["behind", "diverged"] {
         let rig = Rig::new(&format!("not-yet-{status}"));
         rig.set("compare.txt", &format!("{status}\n"));
         let ran = rig.run(&["--apply"]);
         assert_eq!(ran.status, 3, "{ran:?}");
         assert!(ran.docker.is_empty(), "{ran:?}");
-        assert_eq!(ran.gh.len(), 2, "{ran:?}");
+        assert!(!reran(&ran), "{ran:?}");
+        assert_eq!(
+            ran.gh[2],
+            format!(
+                "run list --repo komira-ai/jobscheduler --workflow release.yml --commit {COMMIT} \
+                 --event push --json databaseId --jq .[0].databaseId // empty"
+            )
+        );
+        assert_eq!(ran.gh.len(), 3, "{ran:?}");
         assert_eq!(
             ran.stderr,
             format!(
-                "submit_rollout.sh: no release contains {COMMIT} yet: wait for the release run of a commit that does\n"
+                "submit_rollout.sh: no release contains {COMMIT} yet, and it has no release run of its own: the release of a later commit will carry it\n"
             )
+        );
+    }
+}
+
+/// The jobs of a release run of the commit that failed in its tests, before it published.
+const OWN_FAILED: &str = "plan\tcompleted\tsuccess\nunit-tests (1)\tcompleted\tfailure\n\
+                          unit-tests (2)\tcompleted\tsuccess\npublish\tcompleted\tskipped\n\
+                          cp-deploy / deploy js-server\tcompleted\tskipped\n";
+
+impl Rig {
+    /// A rig whose newest release does not contain the commit, and whose commit has its own
+    /// release run 777 in `status` with `jobs`.
+    fn own_run(name: &str, status: &str, jobs: &str) -> Rig {
+        let rig = Rig::new(name);
+        rig.set("compare.txt", "behind\n");
+        rig.set(&format!("runs-{COMMIT}.txt"), "777\n");
+        rig.set("status-777.txt", &format!("{status}\n"));
+        rig.set("jobs-777.tsv", jobs);
+        rig
+    }
+}
+
+/// Asserts that when the commit's own release run ended having failed before it published, a
+/// dry run names the re-run of that run's failed jobs and the failed job, reads no container and
+/// re-runs nothing; and `--apply` re-runs that run's failed jobs once. It catches a script that
+/// waits forever for a release a failed run will never make, or re-runs without `--apply`.
+#[test]
+fn the_commits_failed_release_run_is_re_run() {
+    let rig = Rig::own_run("own-failed", "completed", OWN_FAILED);
+    let ran = rig.run(&[]);
+    assert_eq!(ran.status, 0, "{ran:?}");
+    assert!(!reran(&ran), "{ran:?}");
+    assert!(ran.docker.is_empty(), "{ran:?}");
+    assert_eq!(
+        ran.stdout.lines().collect::<Vec<_>>(),
+        [
+            format!("newest release: v0.1.420 (does not contain {COMMIT}: behind)").as_str(),
+            format!("release run of {COMMIT}: 777 (completed)").as_str(),
+            "rollout: gh run rerun 777 --repo komira-ai/jobscheduler --failed   (its release run failed before publishing: unit-tests (1); it re-runs every failed job of the run)",
+            "dry run: nothing was changed; run again with --apply to re-run the failed jobs",
+        ]
+    );
+    assert_eq!(
+        rig.out("commit-run.tsv"),
+        format!("completed\n{OWN_FAILED}")
+    );
+    let ran = rig.run(&["--apply"]);
+    assert_eq!(ran.status, 0, "{ran:?}");
+    assert_eq!(
+        ran.gh.last().unwrap(),
+        "run rerun 777 --repo komira-ai/jobscheduler --failed"
+    );
+    assert_eq!(
+        ran.gh.iter().filter(|c| c.starts_with("run rerun")).count(),
+        1
+    );
+}
+
+/// Asserts the states of the commit's own release run the script waits for or refuses, none
+/// re-run even with `--apply`: still going with a failed job (exit 3: GitHub re-runs only an ended
+/// run), still going with none failed (exit 3), ended with none failed (exit 1: the run decided
+/// not to release), and published although no release contains the commit (exit 1).
+#[test]
+fn the_commits_release_run_states_it_does_not_re_run() {
+    let cases = [
+        (
+            "in_progress",
+            OWN_FAILED.to_owned(),
+            3,
+            "run 777 is still in_progress: its failed jobs can be re-run once it ends; run this again then".to_owned(),
+        ),
+        (
+            "in_progress",
+            "plan\tcompleted\tsuccess\nunit-tests (1)\tin_progress\t\n".to_owned(),
+            3,
+            format!("no release contains {COMMIT} yet: its release run 777 is still in_progress; wait for it, then run this again"),
+        ),
+        (
+            "completed",
+            "plan\tcompleted\tsuccess\npublish\tcompleted\tskipped\n".to_owned(),
+            1,
+            format!("no release contains {COMMIT}, yet its release run 777 ended with no failed job: read that run's plan before anything else"),
+        ),
+        (
+            "completed",
+            "publish\tcompleted\tsuccess\ncp-deploy / deploy js-server\tcompleted\tfailure\n".to_owned(),
+            1,
+            format!("release run 777 published, yet the newest release does not contain {COMMIT}: read the releases before anything else"),
+        ),
+    ];
+    for (status, jobs, exit, why) in cases {
+        let rig = Rig::own_run("own-state", status, &jobs);
+        let ran = rig.run(&["--apply"]);
+        assert_eq!(ran.status, exit, "{jobs:?} {ran:?}");
+        assert!(!reran(&ran), "{jobs:?} {ran:?}");
+        assert_eq!(
+            ran.stderr,
+            format!("submit_rollout.sh: {why}\n"),
+            "{jobs:?}"
         );
     }
 }
@@ -348,7 +458,7 @@ fn a_deploy_still_running_is_waited_for() {
         "",
     ] {
         let rig = Rig::new("pending");
-        rig.set("jobs.tsv", jobs);
+        rig.set("jobs-4242.tsv", jobs);
         let ran = rig.run(&["--apply"]);
         assert_eq!(ran.status, 3, "{jobs:?} {ran:?}");
         assert!(!reran(&ran), "{ran:?}");
@@ -366,7 +476,7 @@ fn a_deploy_still_running_is_waited_for() {
 fn a_deploy_that_passed_but_did_not_land_is_refused() {
     let rig = Rig::new("passed");
     rig.set(
-        "jobs.tsv",
+        "jobs-4242.tsv",
         "cp-deploy-digest\tcompleted\tsuccess\ncp-deploy / deploy js-server\tcompleted\tsuccess\n",
     );
     let ran = rig.run(&["--apply"]);
@@ -384,15 +494,90 @@ fn a_deploy_that_passed_but_did_not_land_is_refused() {
 fn a_skipped_deploy_is_refused() {
     let rig = Rig::new("skipped");
     rig.set(
-        "jobs.tsv",
+        "jobs-4242.tsv",
         "cp-deploy-digest\tcompleted\tskipped\ncp-deploy / deploy js-server\tcompleted\tskipped\n",
     );
     let ran = rig.run(&["--apply"]);
     assert_eq!(ran.status, 1, "{ran:?}");
     assert!(!reran(&ran), "{ran:?}");
+    assert_eq!(
+        ran.stderr,
+        "submit_rollout.sh: run 4242 skipped the control-plane deploy and no job of it failed (the deploy is off: docs/release.md): nothing here deploys\n"
+    );
+}
+
+/// Asserts that a deploy skipped because an earlier job of the run failed (here `publish`) is
+/// re-run with `--apply`, and the failed job is named. It catches a script that calls such a
+/// deploy "off" and offers no recovery.
+#[test]
+fn a_deploy_skipped_after_a_failed_job_is_re_run() {
+    let rig = Rig::new("upstream");
+    rig.set(
+        "jobs-4242.tsv",
+        "plan\tcompleted\tsuccess\npublish\tcompleted\tfailure\n\
+         cp-deploy-digest\tcompleted\tskipped\ncp-deploy / deploy js-server\tcompleted\tskipped\n",
+    );
+    let ran = rig.run(&[]);
+    assert_eq!(ran.status, 0, "{ran:?}");
     assert!(
-        ran.stderr.contains("skipped the control-plane deploy"),
+        ran.stdout.contains(
+            "rollout: gh run rerun 4242 --repo komira-ai/jobscheduler --failed   (the deploy, skipped after publish failed; it re-runs every failed job of the run)\n"
+        ),
         "{ran:?}"
+    );
+    assert!(!reran(&ran), "{ran:?}");
+    let ran = rig.run(&["--apply"]);
+    assert_eq!(ran.status, 0, "{ran:?}");
+    assert_eq!(ran.gh.last().unwrap(), RERUN);
+}
+
+/// Asserts that the deploy's state does not depend on the order its jobs are listed in: a failed
+/// job listed after a skipped or an unknown one still makes the deploy failed (and re-run), and a
+/// job not ended still wins over a failed one listed after it. It catches a script that keeps
+/// the first state it reads.
+#[test]
+fn the_deploy_state_does_not_depend_on_job_order() {
+    for jobs in [
+        "cp-deploy / deploy js-server\tcompleted\tskipped\ncp-deploy-digest\tcompleted\tfailure\n",
+        "cp-deploy / deploy js-server\tcompleted\tneutral\ncp-deploy-digest\tcompleted\tstartup_failure\n",
+    ] {
+        let rig = Rig::new("order");
+        rig.set("jobs-4242.tsv", jobs);
+        let ran = rig.run(&["--apply"]);
+        assert_eq!(ran.status, 0, "{jobs:?} {ran:?}");
+        assert_eq!(ran.gh.last().unwrap(), RERUN, "{jobs:?}");
+        assert!(
+            ran.stdout.contains("(cp-deploy-digest failed;"),
+            "{jobs:?} {ran:?}"
+        );
+    }
+    let rig = Rig::new("order-pending");
+    rig.set(
+        "jobs-4242.tsv",
+        "cp-deploy / deploy js-server\tcompleted\tfailure\ncp-deploy-digest\tin_progress\t\n",
+    );
+    let ran = rig.run(&["--apply"]);
+    assert_eq!(ran.status, 3, "{ran:?}");
+    assert!(!reran(&ran), "{ran:?}");
+}
+
+/// Asserts that a failed deploy in a run that has not ended (other jobs still run) is waited for:
+/// exit 3 and no re-run, even with `--apply`, because GitHub re-runs only a finished run. It
+/// catches a script that tries the re-run and fails on GitHub's refusal.
+#[test]
+fn a_run_still_going_is_waited_for() {
+    let rig = Rig::new("run-going");
+    rig.set("status-4242.txt", "in_progress\n");
+    let ran = rig.run(&["--apply"]);
+    assert_eq!(ran.status, 3, "{ran:?}");
+    assert!(!reran(&ran), "{ran:?}");
+    assert!(
+        ran.stdout.contains("release run: 4242 (in_progress)\n"),
+        "{ran:?}"
+    );
+    assert_eq!(
+        ran.stderr,
+        "submit_rollout.sh: run 4242 is still in_progress: its failed jobs can be re-run once it ends; run this again then\n"
     );
 }
 
@@ -403,7 +588,7 @@ fn a_cancelled_or_timed_out_deploy_is_re_run() {
     for conclusion in ["cancelled", "timed_out"] {
         let rig = Rig::new(&format!("ended-{conclusion}"));
         rig.set(
-            "jobs.tsv",
+            "jobs-4242.tsv",
             &format!(
                 "cp-deploy-digest\tcompleted\tsuccess\ncp-deploy / deploy js-server\tcompleted\t{conclusion}\n"
             ),
@@ -421,7 +606,7 @@ fn an_unknown_conclusion_is_refused() {
     for conclusion in ["neutral", "action_required"] {
         let rig = Rig::new(&format!("unknown-{conclusion}"));
         rig.set(
-            "jobs.tsv",
+            "jobs-4242.tsv",
             &format!("cp-deploy / deploy js-server\tcompleted\t{conclusion}\n"),
         );
         let ran = rig.run(&["--apply"]);
@@ -464,7 +649,7 @@ fn states_it_will_not_act_on() {
     );
 
     let rig = Rig::new("no-run");
-    rig.set("run.txt", "");
+    rig.set(&format!("runs-{TAG_SHA}.txt"), "");
     let ran = rig.run(&["--apply"]);
     assert_eq!(ran.status, 1, "{ran:?}");
     assert!(!reran(&ran), "{ran:?}");

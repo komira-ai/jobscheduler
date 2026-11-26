@@ -473,9 +473,52 @@ fn a_window_with_no_server_is_refused() {
         &second.replace(JS_LINE, "# none"),
     );
     assert_eq!(ran.status, 1, "{ran:?}");
-    assert!(
-        ran.stderr.contains("the js-server containers changed"),
-        "{ran:?}"
+    assert_eq!(ran.stdout, "");
+    assert_eq!(
+        ran.stderr,
+        "submit_rpc.sh: no js-server container in either reading: the window cannot say which server it measured\n"
+    );
+}
+
+/// Asserts that a frontend whose `rpc` lines carry their labels in another order (`step` after
+/// `form`) is read and counted the same. It catches a filter that needs `step` to come first.
+#[test]
+fn labels_in_another_order_are_read() {
+    let rig = Rig::new("label-order");
+    let swap = |text: String| {
+        text.replace(
+            "{step=\"rpc\",form=\"provider\"",
+            "{form=\"provider\",step=\"rpc\"",
+        )
+    };
+    rig.set(
+        "metrics-192.0.2.4:8982",
+        &swap(metrics("provider", [0, 10, 20, 20, 20], "0.5")),
+    );
+    let file = rig.path("out/r.txt");
+    let ran = rig.run(&["snapshot", &file]);
+    assert_eq!(ran.status, 0, "{ran:?}");
+    let text = fs::read_to_string(&file).unwrap();
+    assert_eq!(
+        text.lines()
+            .filter(|l| l.contains("form=\"provider\",step=\"rpc\""))
+            .count(),
+        7,
+        "{text}"
+    );
+    let first = text.clone();
+    let second = first
+        .replace("# at at-1000 1000", "# at at-2800 2800")
+        .replace("le=\"+Inf\"} 20", "le=\"+Inf\"} 21")
+        .replace(
+            "_sum{form=\"provider\",step=\"rpc\"} 0.5",
+            "_sum{form=\"provider\",step=\"rpc\"} 0.7",
+        );
+    let ran = rig.compute(&first, &second);
+    assert_eq!(ran.status, 0, "{ran:?}");
+    assert_eq!(
+        ran.stdout.lines().nth(3).unwrap(),
+        "rpc: count 1 (0.00/s), p50 > 100.0 ms, p90 > 100.0 ms, mean 200.0 ms"
     );
 }
 

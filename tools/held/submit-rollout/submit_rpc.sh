@@ -2,8 +2,8 @@
 # Measures the SubmitJob round trip as the build service's frontends see it
 # (docs/runbooks/submit-rollout.md): the `rpc` step of their histogram
 # `kbf_executor_step_seconds`, the time from the frontend's call of SubmitJob to the job service's
-# answer. It reads the histogram of every frontend twice, a window apart, and gives the p50 and
-# p90 of the submits in between, from the difference of the two readings.
+# answer. It reads the histogram of every frontend on this node twice, a window apart, and gives
+# the p50 and p90 of the submits in between, from the difference of the two readings.
 #
 # It only reads: `docker ps`, `docker inspect` and `docker network inspect` for the containers,
 # and an HTTP GET of each frontend's metrics port at its address on the node's `docker_gwbridge`
@@ -23,12 +23,13 @@
 # of the two (also written to D/result.txt).
 #
 # `compute` refuses (exit 1) a window over which the js-server containers changed (a deploy or a
-# restart: the window then measures two servers), and one with no submit. A frontend that is in
+# restart: the window then measures two servers), one with no js-server container in either
+# reading, and one with no submit. A frontend that is in
 # one reading only, or whose counts went down (it restarted), is left out and named.
 #
-# The quantile is Prometheus's histogram_quantile: linear inside the bucket that holds the rank.
-# So it is as coarse as the buckets (1, 2.5, 5, 10, 25, 50, 100, 250 ms, ...); a quantile past the
-# last finite bucket is printed as `>` that bound.
+# The quantile is Prometheus's histogram_quantile: linear inside the bucket that holds the rank, from
+# 0 for the first bucket. So it is as coarse as the buckets the frontends export, which the script
+# reads from the readings; a quantile past the last finite bucket is printed as `>` that bound.
 set -euo pipefail
 
 usage() {
@@ -125,7 +126,7 @@ read_once() {
     printf 'fe %s\n' "$id"
     while IFS= read -r line; do
       case "$line" in
-        'kbf_executor_step_seconds_'*'{step="rpc",'*) printf '%s\n' "$line" ;;
+        'kbf_executor_step_seconds_'*'step="rpc"'*) printf '%s\n' "$line" ;;
       esac
     done <<< "$metrics"
   done
@@ -192,7 +193,11 @@ $1 == "fe" { cur = $2; fe[f, cur] = 1; ids[cur] = 1; next }
 /^kbf_executor_step_seconds_sum/ { s[f, cur, label($0, "form")] = $NF; next }
 END {
   if (f != 2) { print "submit_rpc.sh: compute needs two readings" > "/dev/stderr"; exit 1 }
-  if (js[1] == "" || js[1] != js[2]) {
+  if (js[1] == "" && js[2] == "") {
+    print "submit_rpc.sh: no js-server container in either reading: the window cannot say which server it measured" > "/dev/stderr"
+    exit 1
+  }
+  if (js[1] != js[2]) {
     printf "submit_rpc.sh: the js-server containers changed during the window (a deploy or a restart):\n%s--\n%s", js[1], js[2] > "/dev/stderr"
     exit 1
   }
