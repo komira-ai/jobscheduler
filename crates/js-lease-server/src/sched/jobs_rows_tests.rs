@@ -102,6 +102,7 @@ impl World {
             labels: Default::default(),
             phase,
             agent_process: None,
+            agent_version: None,
         };
         self.jobs.hello_node(&host(host_name), &hello).unwrap()
     }
@@ -425,6 +426,7 @@ fn a_read_offers_a_host_by_the_rule_its_agent_enforces() {
             labels: Default::default(),
             phase: Phase::Serving,
             agent_process: None,
+            agent_version: None,
         };
         w.jobs.hello_node(&host(name), &hello).unwrap();
     }
@@ -464,6 +466,7 @@ fn a_host_with_no_claim_is_offered_the_shapes_capacity_without_slack() {
         labels: Default::default(),
         phase: Phase::Serving,
         agent_process: None,
+        agent_version: None,
     };
     w.jobs.hello_node(&host("far-bare"), &hello).unwrap();
     let offered = w.offered().unwrap();

@@ -472,6 +472,7 @@ mod tests {
             labels: std::collections::BTreeMap::new(),
             phase: js_agent_wire::Phase::Serving,
             agent_process: None,
+            agent_version: None,
         };
         jobs.hello_node(&host, &hello).expect("a hello");
         assert_eq!(

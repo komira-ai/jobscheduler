@@ -103,6 +103,9 @@ pub struct NodeHello {
     /// The agent process whose hello this is (`Hello.agent_process`); `None` for an agent that
     /// sends none.
     pub agent_process: Option<String>,
+    /// The version of the agent whose hello this is (`Hello.agent_version`); `None` writes no
+    /// version into the row.
+    pub agent_version: Option<String>,
 }
 
 /// The epoch and sequence of the last beat a row applied.
@@ -136,6 +139,10 @@ pub struct NodeRecord {
     /// The agent process whose hello wrote the row; `None` for an agent that sent none. Beats
     /// and settles keep it.
     pub agent_process: Option<String>,
+    /// The version of the agent whose hello began the row's epoch; `None` for a row whose
+    /// epoch's hello wrote none (a hello taken by a build that does not write it, or a row
+    /// written before the field). Beats and settles keep it.
+    pub agent_version: Option<String>,
     /// What the last hello or applied beat left.
     pub state: NodeState,
     /// The last beat applied in any epoch; `None` after a hello, until a beat is applied.
