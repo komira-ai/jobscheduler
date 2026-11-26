@@ -180,7 +180,8 @@ pub trait AccountHost: Send + Sync {
     /// The program could not be run.
     fn command(&self, program: &str, args: &[&str]) -> io::Result<CommandOutput>;
 
-    /// Waits a moment, between two looks at a uid that has not yet gone quiet.
+    /// Waits a moment: between two looks at a uid that has not yet gone quiet, and between
+    /// two asks to delete a record the directory refused.
     fn pause(&self);
 
     /// Milliseconds on a clock that only goes forward; only differences mean anything.
