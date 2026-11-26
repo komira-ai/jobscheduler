@@ -111,11 +111,12 @@ max_machines    = 6                   # required; from 1 to 262144, as in the ag
 memory_schedulable_percent = 90          # optional; from 1 to 100, default 100: the share of the shape's memory the pool books
 join_token_file = "/run/credentials/js/join-token"           # optional shared pool token
 heartbeat_interval = "10s"            # optional; as are grace ("1m") and lost_retention ("24h")
+prepare_timeout = "20m"               # optional; class whole-node only (refused on any other); default 10m: how long a whole-node lease may take to become ready
 ```
 
 A node joins with a one-time token (the mint refuses any other `provider` than the pool's name with a 400): `POST /v1/agent/join-tokens` with the client token and `{"provider": "nodes", "instance_id": "node-1"}`
 mints it, and the node's `--instance-file` holds `nodes:node-1`. The first hello swaps the token for a host credential. What the old
-`--agent-pool-config` file had and this kind lacks: the whole-node keys (`max_whole_node`, `drain_after`, ...).
+`--agent-pool-config` file had and this kind lacks: the whole-node keys other than `prepare_timeout` (`max_whole_node`, `drain_after`, ...).
 
 **Memory headroom.** One key, `memory_schedulable_percent`, a whole number from 1 to 100 (default 100), sets how much of the memory an
 operator configured the server books; there is no other memory knob. It is written in two places, each in its own format and read the
