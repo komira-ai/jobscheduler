@@ -180,6 +180,10 @@ js_curve_wait_expiries_total 2
 # TYPE js_agent_start_refusals_total counter
 js_agent_start_refusals_total{host="host-a",code="no-capacity"} 2
 js_agent_start_refusals_total{host="host-b",code="input-not-allowed"} 1
+# HELP js_agent_bodies_too_large_total Agents' hellos and heartbeats refused 413 body-too-large, their body over the cap the server reads (65536 bytes), by route. The agent ends at such an answer, so each is an agent that stopped.
+# TYPE js_agent_bodies_too_large_total counter
+js_agent_bodies_too_large_total{route="hello"} 1
+js_agent_bodies_too_large_total{route="heartbeat"} 2
 # HELP js_acquires_total Launches the scaler ran, by pool, whatever their answer.
 # TYPE js_acquires_total counter
 js_acquires_total{pool="gpu"} 3

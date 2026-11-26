@@ -181,14 +181,20 @@ impl Lifecycle {
     }
 
     /// The jobs a job start began, for the `jobs` of the next heartbeat, in the order of
-    /// [`Lifecycle::held`], each with its result once it has ended. A job is listed until
-    /// its container and scratch are gone and its result is acknowledged.
+    /// [`Lifecycle::held`], each with its result once it has ended and the heartbeat has room
+    /// for it (`listing`: oldest first; a result that waits is carried by a later heartbeat,
+    /// its job listed without it meanwhile). A job is listed until its container and scratch
+    /// are gone and its result is acknowledged.
     pub fn held_jobs(&self) -> Vec<HeldJob> {
-        self.keyed(Keyed::Job)
-            .map(|job| HeldJob {
+        let fit = self.fit();
+        self.jobs
+            .iter()
+            .zip(fit.carried)
+            .filter(|(job, _)| job.keyed == Keyed::Job)
+            .map(|(job, carried)| HeldJob {
                 job_id: job.run_id.clone(),
                 state: job.held_state(),
-                result: job.result.as_ref().map(|result| {
+                result: job.result.as_ref().filter(|_| carried).map(|result| {
                     let failure = job.input_failure.clone();
                     let series = (job.cpu_series.clone(), job.memory_series.clone());
                     job_result(result, job.logs, failure, job.usage, series)
@@ -198,8 +204,11 @@ impl Lifecycle {
     }
 
     /// The job ids retired on a stop for a job the agent did not hold, for the
-    /// `retired_jobs` of the next heartbeat, oldest first, until acknowledged.
+    /// `retired_jobs` of the next heartbeat, oldest first, until acknowledged: as many as
+    /// the heartbeat has room for beside its jobs and results (`listing`); the others are
+    /// listed by a later heartbeat.
     pub fn retired_jobs(&self) -> Vec<String> {
-        self.answered.clone()
+        let fit = self.fit();
+        self.answered.iter().take(fit.retired).cloned().collect()
     }
 }

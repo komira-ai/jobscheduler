@@ -150,12 +150,22 @@ constant is in `crates/js-agent-wire/src/lib.rs`).
 | `max_connections` (`js-lease-server/src/config.rs`) | 256 | connections the server holds at once (section 11) |
 
 `MAX_HELD` and `MAX_RESULTS` allow far more than a 64 KiB body can carry; the doc of `HEARTBEAT_BODY_BUDGET` says so. The agent
-lists at most `RETIRED_LISTED` 96 retired job ids (`crates/js-agent/src/lifecycle/machine/per_job.rs`) and fits its results to what
-the body leaves after the other lists, a reserve of `MAX_LOAD_BYTES` and a 4 KiB envelope (`results_budget`), by halving and then
-dropping log tails (`Lifecycle::fit_log_tails` in `crates/js-agent/src/lifecycle/machine/tails.rs`). That fitting is not a
-guarantee: when no tail is left to cut it stops, whatever the size. The held list, the job list without results, and results without
-tails are never cut, so a beat whose non-tail content passes the body limit is sent anyway, refused 413 `body-too-large`, and the
-agent exits 2. Section 2 sizes where that happens.
+holds what it lists to the body itself (`crates/js-agent/src/lifecycle/machine/listing.rs`). The body less a reserve of
+`MAX_LOAD_BYTES` and a 4 KiB envelope (`ENVELOPE_MARGIN`) leaves 32,768 bytes for the lists. Of these the held entries (`held`, and
+`jobs` without their results), each measured at its longest state, may take `LISTED_BUDGET` 24,576, which leaves `RESULT_RESERVE`
+8 KiB, more than the largest result without a log tail weighs (a test builds one). A start that would take the entries past that is
+skipped `Full` (`Lifecycle::listable`, in `may_start`) and the server sends it again; at 128-byte ids that is 147 entries. The
+results go out oldest first up to the first that does not fit what the entries leave; that one and the ones after it wait for a later
+beat, a job's entry listed without its result meanwhile (the server reads a listed job without a result as still running, so neither
+loses nor restarts it, and the first listing after a hello still names every job). The retired job ids, at most `RETIRED_LISTED` 96
+(`crates/js-agent/src/lifecycle/machine/per_job.rs`), go out oldest first in what the results leave (`Lifecycle::fit`). Before any
+result waits, the agent cuts log tails to fit all of them, by halving and then dropping them (`Lifecycle::fit_log_tails` in
+`crates/js-agent/src/lifecycle/machine/tails.rs`), and notes a `log-tail-cut` and a `log-tail-shed` finding, once each for a run,
+in its log. So a beat the agent builds stays within the body: a start's work is never listed past it, and the oldest result always
+fits. The lease server counts each hello and heartbeat it refuses 413 `body-too-large` under `js_agent_bodies_too_large_total`, by
+route (`crates/js-lease-server/src/metrics.rs`), since the agent ends at that answer and cannot report it. An agent restarted with
+more held work than the bound (results read back, containers taken over, up to `MAX_HELD`) lists all of it, as the first listing
+after a hello must, and takes no start until the entries are back under the bound.
 
 **The rule for change** (`crates/js-agent-wire/src/protocol.rs` and the crate's "Compatibility rule"): servers upgrade before
 agents. Within a major, fields are only added; a receiver ignores fields it does not know; a field a sender may leave out has a
@@ -286,15 +296,16 @@ At the documented list maxima, `MAX_HELD` 4,096 held runs and `MAX_RESULTS` 4,09
 Derived. They are 1,937,499 ÷ 65,536 = 29.6 and 1,650,710 ÷ 65,536 = 25.2 times the 65,536-byte body the server reads, so **the
 body limit, not the list caps and not the encoding, is what bounds a heartbeat**. Within it, with the envelope, n held runs take
 92 + 167n bytes of JSON (93 + 166n + n − 1 commas), so (65,536 − 92) ÷ 167 = 391 fit, and 22 + 136n of protobuf, so
-(65,536 − 22) ÷ 136 = 481 fit (both rounded down): 481 ÷ 391 = 1.23 times as many. Derived. Past those counts the beat is over the
-limit with no tail left to cut, the server answers 413 and the agent exits 2 (section 1), in either encoding; protobuf moves the
-point, it does not remove it. The registry once sent a host at most 256 live runs (its run table is deleted), and 256 held runs at 128-byte ids are
+(65,536 − 22) ÷ 136 = 481 fit (both rounded down): 481 ÷ 391 = 1.23 times as many. Derived. Past those counts the beat would be over
+the limit with no tail left to cut, in either encoding; protobuf moves the point, it does not remove it. The agent stops well before
+it: it takes a start only while its entries, at their longest state, stay within 24,576 bytes, 147 entries of 167 bytes at 128-byte
+ids, and leaves the rest of the body to the load, the envelope and the results (section 1). The registry once sent a host at most 256 live runs (its run table is deleted), and 256 held runs at 128-byte ids are
 92 + 167 × 256 = 42,844 bytes of JSON, inside the limit; a host that adds results, jobs and a load to that comes nearer. Derived.
 
 Log tails are where the two differ most. JSON writes a control character that has no short escape (anything but `\b`, `\t`,
 `\n`, `\f`, `\r`, which take 2 bytes) as `\u00XX`, six bytes for one, and `tails.rs` says so; a protobuf `string` holds the raw
 byte. In the worst case two streams of 8 KiB of such characters are 2×8,192×6 = 98,304 bytes of JSON, more than the whole body (the
-agent cuts them to fit, `results_budget`), and 2×(1+2+8,192) = 16,390 bytes of protobuf for the two strings, 1+3+16,390 = 16,394 with
+agent cuts them to fit, `results_room` in `listing.rs`), and 2×(1+2+8,192) = 16,390 bytes of protobuf for the two strings, 1+3+16,390 = 16,394 with
 the `LogTail` sub-message around them. Derived.
 
 ### The live-log fields
@@ -500,8 +511,8 @@ previous-release side of those tests is a copy of that release's structs and its
 
 **When the recommendation changes.**
 
-- *A measured limit.* Real heartbeats refused 413 `body-too-large`, or results whose tails the agent cuts to fit, at a rate that
-  matters. The first answers are inside JSON (a larger body limit, fewer or shorter list entries per beat); protobuf buys 1.23 times
+- *A measured limit.* Real heartbeats refused 413 `body-too-large` (`js_agent_bodies_too_large_total`), or results whose tails the
+  agent cuts to fit (its `log-tail-cut` and `log-tail-shed` findings), or starts it skips `Full`, at a rate that matters. The first answers are inside JSON (a larger body limit, fewer or shorter list entries per beat); protobuf buys 1.23 times
   for ids and more only for escaped tails.
 - *A second implementation of the agent* in another language, or a third party writing one. Then a `.proto` with generated types
   is the cheapest way to hold two codebases to one schema, and (B) is the move.
@@ -524,8 +535,8 @@ If the decision is (A):
    in `js-agent-wire` for as long as an agent of that release runs.
 3. Move the previous-release fixtures to the first release whose agent sends the per-job lists, so the both-direction tests cover
    per-job bodies as a released agent wrote them (`tests/fixtures/v0.1.135` predate them; open point 7).
-4. Bound what a heartbeat lists besides tails so that a beat whose non-tail content passes the body limit cannot be built (section 1:
-   it is refused 413 and the agent exits 2), in whichever encoding is kept; open point 2 asks how near real beats come.
+4. Bound what a heartbeat lists besides tails so that a beat whose non-tail content passes the body limit cannot be built, in
+   whichever encoding is kept; open point 2 asks how near real beats come. Built for JSON (section 1, `listing.rs`).
 
 If the decision is (B), in this order:
 
@@ -553,9 +564,9 @@ server, and the JSON fixtures and frozen copies.
 1. **Header and handshake bytes per exchange.** How large are the HTTP heads and the TLS handshake that each exchange makes? Settled
    by an in-process test that counts the bytes `js-client` writes and reads against the lease server on a loopback listener
    (`crates/js-client/src/client.rs`, `max_idle_connections`; `crates/js-lease-server/src/tls.rs`).
-2. **How near real beats come to the body limit.** Nothing counts 413 `body-too-large` answers or the tails the agent cuts. Settled
-   by reading `read` in `crates/js-lease-server/src/agent_api.rs` and `results_budget` in
-   `crates/js-agent/src/lifecycle/machine/tails.rs` against the hosts' own logs, which this note does not do.
+2. **How near real beats come to the body limit.** The lease server counts the 413 `body-too-large` answers by route
+   (`js_agent_bodies_too_large_total`), and the agent notes each run whose tail it cut (`log-tail-cut`) or left out
+   (`log-tail-shed`) and each start it skipped `Full`. Settled by reading those over the farm, which this note does not do.
 3. **How the run messages leave major 1 (steps 28 and 30).** A server without the run path admits a hello without `per-job` and answers
    the agent's heartbeats as a responder (section 1; `answer` in `crates/js-registry/src/registry/beat.rs`). It does not refuse the hello,
    because that would raise a floor. When the run messages can be dropped from the wire is settled by the last release whose agent

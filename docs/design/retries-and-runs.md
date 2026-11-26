@@ -33,4 +33,4 @@ collect their output.
 
 **The tail is the job's own text, returned as written to whoever can read the run. A task must not print secrets.** It is also untrusted bytes (it may hold ANSI escapes, U+202E or NUL): a consumer that prints it to a terminal must strip control characters.
 
-The agent keeps the held results within the heartbeat body (a job that prints control characters serialises six times as large): it halves the largest tails again and again, keeping the end and setting `truncated`; a tail that is empty and still does not fit is left out and the run notes a `log-tail-shed` finding.
+The agent keeps the held results within the heartbeat body (a job that prints control characters serialises six times as large): it halves the largest tails again and again, keeping the end and setting `truncated`, and the run notes a `log-tail-cut` finding; a tail that is empty and still does not fit is left out and the run notes a `log-tail-shed` finding. Results that still do not fit wait for a later heartbeat, oldest first out, the job listed without its result meanwhile.
