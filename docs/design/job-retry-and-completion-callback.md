@@ -105,7 +105,8 @@ What does not change:
   until it is either compared or deliberately left out. Files are compared by their SHA-256 digests once either side has ended.
 - **Store.** Postgres holds an ordered key/value table with a version on each row (`crates/js-state/src/postgres/migrations/0001_state.sql`)
   and a change feed that copies each written row until it is trimmed (`--job-feed-retention`). A job is one row, `job/<id>`, a
-  tag-length-value record whose unknown tags are carried and written back (`crates/js-jobs/src/codec.rs`). The next free job tag is 66.
+  tag-length-value record whose unknown tags are carried and written back (`crates/js-jobs/src/codec.rs`). The next free job tag is 67
+  (66 is the history key's, komira-ai/jobscheduler#1086).
   A job's file contents, which are secret, are held in that row while the job is live and replaced by their digests when it ends.
   Several instances share one store and no instance leads (`docs/design/multi-instance.md`). Work is claimed row by row by
   compare-and-set.
@@ -335,8 +336,8 @@ enum JobEventKind { ... JOB_EVENT_KIND_RETRY_SCHEDULED = 8; } // detail names th
   `UsageRecord`, and its logs in the log store (section 3.8).
 - **Usage.** Each attempt's booking is already its own `UsageRecord`. It gains `attempt`. Sizing reads usage records as today. A lost
   attempt has no result and teaches the class nothing.
-- **Store.** The job record gains tags 66 (`retry`, in the spec), 67 (`callback`, in the spec, with its key replaced by the key's
-  digest, section 5.2), 68 (`attempt`), 69 (`attempt_history`), 70 (`retry_not_before`), 71 (`dropped_attempts`) and 72 (`attempt_hosts`, section 3.5, not in the API). A record without
+- **Store.** The job record gains tags 67 (`retry`, in the spec), 68 (`callback`, in the spec, with its key replaced by the key's
+  digest, section 5.2), 69 (`attempt`), 70 (`attempt_history`), 71 (`retry_not_before`), 72 (`dropped_attempts`) and 73 (`attempt_hosts`, section 3.5, not in the API). A record without
   them reads as attempt 1 with no history and no callback. `callback_status` is not on the job row: `GetJob` reads it from the job's
   `callback/` row (section 5.5). No migration is needed: the store is one key/value table.
 - **The move.** A new store operation, `JobStore::retry_txn`, sits beside `end_txn` and outside `may_move`, as the existing requeues
@@ -354,7 +355,7 @@ enum JobEventKind { ... JOB_EVENT_KIND_RETRY_SCHEDULED = 8; } // detail names th
 - **The key.** Attempt 1 keeps today's prefix `P = prefix/H/job_id/`, so a job without retries, and every log written before this
   change, reads exactly as before. Attempt `n ≥ 2` gets `P = prefix/H/S/job_id/`, where `H` is that attempt's host and `S` is the 64
   lower-case hex digits of SHA-256 of `job id "/" n`.
-  - **No collision.** A job id is at most 63 bytes (`crates/js-jobs/src/ids.rs`), so a 64-byte `S` is never a job id. No job's
+  - **No collision.** A job id is at most 63 bytes (`crates/js-types/src/job_id.rs`), so a 64-byte `S` is never a job id. No job's
     attempt-1 prefix `prefix/H/Y/` can contain another job's later attempt. Two later attempts differ in `S`.
   - **Within the host's grant.** The last segment is still the job id, as the agent requires. The key stays under the host's prefix,
     which the host's credential already covers.
@@ -761,8 +762,8 @@ interfaces of task A.
 | --- | --- | --- | --- |
 | **A. Interfaces** | The proto additions of sections 3.1, 3.7, 3.8, 5.2 and 5.5, with `golden/fields.txt` rows and goldens. `SubmitJob` refuses `retry` and `callback`. The Rust signatures below, with bodies that never retry and never deliver. | none | js-proto, js-types, js-jobs, js-callback (new), js-lease-server |
 | **B. Retry decision** | The classing table, the job-fault refusal codes, the backoff and jitter. Pure (R4). | A | js-types |
-| **C. Attempt store** | Tags 66 and 68 to 72, `retry_txn`, the reset of the pre-run counters, the history bound, the `attempt/` rows and their sweep, `UsageRecord.attempt`, the shared store tests. | A | js-jobs, js-usage |
-| **D. Callback store** | Tag 67 and the key's digest; the `callback/` row written at submit and made due in `end_txn`; claim, answer, expire and key erasure; the boot raise; the sweep. | A | js-jobs |
+| **C. Attempt store** | Tags 67 and 69 to 73, `retry_txn`, the reset of the pre-run counters, the history bound, the `attempt/` rows and their sweep, `UsageRecord.attempt`, the shared store tests. | A | js-jobs, js-usage |
+| **D. Callback store** | Tag 68 and the key's digest; the `callback/` row written at submit and made due in `end_txn`; claim, answer, expire and key erasure; the boot raise; the sweep. | A | js-jobs |
 | **E. Delivery** | The Standard Webhooks signer, the address rule with its resolver argument, the sender (`ureq`, no proxy, no redirects, no body read, a time limit), the answer classes. | A | js-callback |
 | **J. Attempt logs** | The attempt's log prefix and its length rule; `GetLogsRequest.attempt` and the reader of an earlier attempt, from `attempt_history` or its `attempt/` row (the row's read through the store interface task A fixes). | A | js-lease-server, js-agent-wire (test only) |
 | **F. Server retry (act)** | `end_of` and the loss paths ask `decide`. Placement honours `retry_not_before`, the 15-minute bar, the `start-fence` rule and the freed previous allocation. The queue wait counts from the backoff end. The API mapping; metrics. | B, C | js-lease-server, js-sched-placer |

@@ -64,13 +64,16 @@ pub fn spec(contents: &str) -> JobSpec {
         layers: Vec::new(),
         mounts: Vec::new(),
         history_key: Default::default(),
+        retry: None,
+        callback: None,
     }
 }
 
 /// A job with every field set, as a read returns it: its file's contents are empty. The
-/// client and the queue status fields, added after `golden/job.hex` was written, are absent,
-/// so the golden stays the bytes of the schema before them
-/// (`the_client_field_is_additive_in_the_proto` and `tests/queue_status.rs` set them).
+/// client, the queue status and the attempt and callback fields, added after
+/// `golden/job.hex` was written, are absent, so the golden stays the bytes of the schema
+/// before them (`the_client_field_is_additive_in_the_proto`, `tests/queue_status.rs`,
+/// `tests/retry.rs` and `tests/callback.rs` set them).
 pub fn job() -> Job {
     Job {
         id: "job-1".to_owned(),
@@ -92,5 +95,10 @@ pub fn job() -> Job {
         attempts: 0,
         events: Vec::new(),
         dropped_events: 0,
+        attempt: 0,
+        attempt_history: Vec::new(),
+        retry_not_before_ms: None,
+        callback_status: None,
+        dropped_attempts: 0,
     }
 }

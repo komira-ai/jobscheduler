@@ -4,9 +4,9 @@
 //! fake behind a recording wrapper (`ServerSpec::ordered`). `tests/failover.rs` runs each
 //! over sixteen seeds; `tests/replay.rs` pins the headline's first seed in the golden file.
 //!
-//! Every host is a [`Shape::cpu_host`] (8 cores, no GPU), but a pool of the server's
-//! configuration file books every host at its floor, 1 core and 1 GiB, whatever its hello
-//! says; every job asks for [`JOB_CPU_MILLIS`], that one core, so each host, registered or
+//! Every host is a [`Shape::cpu_host`] (8 cores, 16 GiB, no GPU), and a registered host is
+//! booked at what its hello reports; every job asks for [`JOB_CPU_MILLIS`], a whole host's
+//! cores (a second job does not fit in the CPU slack), so each host, registered or
 //! launched, runs one job at a time, and the queue of jobs past the static hosts is demand
 //! on the clouds, one machine a job. The pool's class is not `whole-node`, which keeps no
 //! host for such jobs (`ServerSpec::ordered`).
@@ -141,11 +141,11 @@ pub fn server(statics: usize, ec2: u64, lambda: u64) -> ServerSpec {
     ServerSpec::ordered(POOL, shape(), statics, providers)
 }
 
-/// Each job's CPU: the one core the pool books for every host, so a host runs one job at a
-/// time.
-pub const JOB_CPU_MILLIS: u64 = 1_000;
+/// Each job's CPU: the eight cores every host reports and is booked at, so a host runs one
+/// job at a time.
+pub const JOB_CPU_MILLIS: u64 = 8_000;
 
-/// Each job's memory: half the GiB the pool books for every host.
+/// Each job's memory: half a GiB, well within every host's.
 pub const JOB_MEMORY_BYTES: u64 = 512 << 20;
 
 /// One job: [`RUN`] long, asking for [`JOB_CPU_MILLIS`] and [`JOB_MEMORY_BYTES`].

@@ -13,7 +13,11 @@
 //!    (`--max-job-wall`, [`DEFAULT_MAX_JOB_WALL`] unless set) `wall-time-above-ceiling`,
 //!    both `INVALID_ARGUMENT` with the `Refusal` detail (400, `field`
 //!    `spec.wallLimitSeconds`). Every check runs before the job's id is looked up, so a
-//!    retry of a job the ceiling now refuses is refused, not answered from the job.
+//!    retry of a job the ceiling now refuses is refused, not answered from the job. A job
+//!    that asks for a completion callback is refused `callback-not-enabled` unless the context
+//!    takes callbacks ([`Ctx::accepting_callbacks`], which only a test sets until the release
+//!    that accepts one); one that does has its URL's form, an address literal in its URL
+//!    against the address rule, and its key's length checked, and the key is never repeated.
 //! 2. **Idempotency.** For a job with an id, the tables are read first. An existing job with
 //!    the same id and the same job (every field but the priority, compared on the decoded
 //!    job [`js_jobs::JobSpec`]; for an ended job, whose files hold only their SHA-256, each
@@ -40,8 +44,10 @@
 //!    store ([`js_jobs::JobStore::insert_queued_after_get`], handed what step 2 read, so the
 //!    id is read once), with the name of the client the bearer layer named (never a value of
 //!    the request) and the store's clock as that transaction reads it as its submit time;
-//!    only after it returns is the answer built, from the record it returns. A job step 2
-//!    found is answered from what step 2 read. A store that fails is `INTERNAL` with the message
+//!    only after it returns is the answer built, from the record it returns, with its
+//!    callback's status when it has one (read in the same call of the tables; a status that
+//!    cannot be read is left out). A job step 2 found is answered from what step 2 read. A
+//!    store that fails is `INTERNAL` with the message
 //!    `state-write-failed` (500 `state-write-failed`), and a store too busy to take the call
 //!    ([`js_state::StoreError::Unavailable`]: no connection came free, or a statement waited
 //!    past its limit) is `UNAVAILABLE` with the same message (503 `state-write-failed`), which
@@ -73,16 +79,17 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use js_callback::AddressRule;
 use js_jobs::{Inserted, Isolation, JobRecord, JobStoreError, NewJob};
 use js_proto::refusal::refusal_status;
-use js_proto::v1::{RefusalCode, SubmitJobRequest, SubmitJobResponse};
+use js_proto::v1::{self, RefusalCode, SubmitJobRequest, SubmitJobResponse};
 use js_state::StoreError;
 use js_types::Requirements;
 use tonic::{Request, Response, Status};
 
 use super::JobApi;
 use super::fleet::Handle;
-use super::read::view;
+use super::read::{statuses, view};
 use super::roles::Caller;
 use super::validate::{self, Fault};
 use crate::agents::Agents;
@@ -126,6 +133,9 @@ struct Served {
     /// The agent side whose placement poller each recorded job pokes (step 5); `None`: the call
     /// only commits, and the tick's pass finds the queued row.
     poking: Option<Handle<Agents>>,
+    /// The address rule a job's callback is judged by (step 1); `None`: the call refuses a job
+    /// that asks for a callback (`callback-not-enabled`), until the release that accepts one.
+    callbacks: Option<Handle<AddressRule>>,
 }
 
 impl Ctx {
@@ -139,6 +149,7 @@ impl Ctx {
                 ceiling,
                 admission: Handle(admission),
                 poking: None,
+                callbacks: None,
             }),
         }
     }
@@ -149,6 +160,20 @@ impl Ctx {
     pub(crate) fn poking(mut self, agents: Arc<Agents>) -> Ctx {
         self.served = self.served.map(|served| Served {
             poking: Some(Handle(agents)),
+            ..served
+        });
+        self
+    }
+}
+
+impl Ctx {
+    /// This context, taking a job's completion callback and judging its address by `rule` (step
+    /// 1 of the module docs), where it refused every one. Nothing for a context that is not
+    /// served.
+    #[must_use]
+    pub(crate) fn accepting_callbacks(mut self, rule: AddressRule) -> Ctx {
+        self.served = self.served.map(|served| Served {
+            callbacks: Some(Handle(Arc::new(rule))),
             ..served
         });
         self
@@ -246,7 +271,8 @@ pub(super) async fn submit_job(
     };
     let client = Some(caller.name.clone());
     let request = request.into_inner();
-    let valid = validate::job(request.spec.as_ref(), served.ceiling).map_err(refused)?;
+    let callbacks = served.callbacks.as_ref().map(|rule| rule.0.as_ref());
+    let valid = validate::job(request.spec.as_ref(), served.ceiling, callbacks).map_err(refused)?;
     let stored = match valid.id.clone() {
         Some(id) => api
             .on_tables(move |jobs| jobs.get_job(&id))
@@ -270,8 +296,14 @@ pub(super) async fn submit_job(
         priority: valid.priority,
         client,
     };
-    let inserted = api
-        .on_tables(move |jobs| jobs.insert_queued_after_get(new, stored))
+    let (inserted, statuses) = api
+        .on_tables(move |jobs| {
+            let inserted = jobs.insert_queued_after_get(new, stored)?;
+            // The job is recorded: a status that cannot be read is left out of the answer.
+            let asked = statuses::asking([&inserted.record]);
+            let statuses = statuses::read(jobs, &asked).unwrap_or_default();
+            Ok((inserted, statuses))
+        })
         .await
         .map_err(not_written())?;
     if !caller.owns(&inserted.record) {
@@ -281,8 +313,12 @@ pub(super) async fn submit_job(
         Some(Handle(agents)) => poke(agents, inserted).await,
         None => inserted.record,
     };
+    let status = statuses.get(&record.id).map(view::callback_status);
     Ok(Response::new(SubmitJobResponse {
-        job: Some(view::job(&record)),
+        job: Some(v1::Job {
+            callback_status: status,
+            ..view::job(&record)
+        }),
     }))
 }
 

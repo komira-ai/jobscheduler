@@ -235,6 +235,45 @@ fn a_log_sink_for_another_jobs_prefix_fails_the_sink_check() {
     assert!(nested.log_sink_checked().is_ok());
 }
 
+/// Asserts that the prefix the server builds for a job's attempt after the first,
+/// `prefix/H/S/job_id/` with `S` the 64 hex digits of SHA-256 of `job_id "/" n`
+/// (`docs/design/job-retry-and-completion-callback.md`, section 3.8), passes the start's sink
+/// check as it is, at its shortest (no configured prefix) and at its longest (a configured
+/// prefix of 411 bytes, a 63-byte job id: exactly [`MAX_LOG_PREFIX_LEN`] bytes), and that one
+/// byte more is too long. Catches an agent whose check would set an attempt's sink aside, so
+/// that every attempt after the first ran without live logs.
+#[test]
+fn an_attempt_prefix_passes_the_start_check() {
+    let host = "js-c151e392ca52d573f45b9de84af4e5a1";
+    let attempt = "dce52b72a9a8a2b28569b8c66437a18639f0accebc7406445480938d39c62131";
+    for prefix in [
+        format!("js/{host}/{attempt}/build-42/"),
+        format!("{host}/{attempt}/build-42/"),
+    ] {
+        let mut spec = start();
+        spec.log_sink.as_mut().unwrap().prefix = prefix.clone();
+        assert!(spec.log_sink_checked().is_ok(), "{prefix}");
+    }
+    let job = "j".repeat(MAX_LOG_JOB_ID_LEN);
+    let configured = "p".repeat(411);
+    let longest = format!("{configured}/{host}/{attempt}/{job}/");
+    assert_eq!(longest.len(), MAX_LOG_PREFIX_LEN);
+    let mut spec = JobStartSpec {
+        log_sink: Some(sink()),
+        ..start_of(&job)
+    };
+    spec.log_sink.as_mut().unwrap().prefix = longest;
+    assert!(spec.log_sink_checked().is_ok());
+    spec.log_sink.as_mut().unwrap().prefix = format!("p{configured}/{host}/{attempt}/{job}/");
+    let err = spec.log_sink_checked().unwrap_err();
+    expect(
+        err,
+        "log_sink.prefix",
+        Rule::TooLong,
+        refusal::INVALID_LOG_SINK,
+    );
+}
+
 /// Asserts that a start whose sink fails its check, in each part, still passes `validate`
 /// and `require_pinned`, and is accepted in a reply. Catches a sink folded into the start's
 /// acceptance, which would make a logging defect fail a job.

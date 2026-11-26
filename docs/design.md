@@ -759,6 +759,7 @@ drivers, iOS device vocabulary and Xcode properties, the macOS logic that decide
 | `js-lease-server` (merged) | new | the job service and the operator routes; lists the hosts of the hosts file beside the registered ones; the pool-scaler tick; is the service of 5.16 (readiness, boot grace and a state check at steps 48 to 50) |
 | `js-cli` (merged) | new | the level-1 client; gains pool selection |
 | `js-proto` (merged) | new | the job service as protobuf (package `jobscheduler.v1`: jobs, hosts, pools, providers, usage) with its generated messages and gRPC client and server traits (runtime layer); no server implements it yet |
+| `js-callback` | new | a job's completion callback as the server sends it (runtime layer, `docs/design/job-retry-and-completion-callback.md`): the form check of a callback URL and its literal address, the Standard Webhooks signer, the address rule with its resolver argument, the sender (no proxy, no redirect, no body read, a time limit), and the signing key and answer classes it re-exports from `js-types`; `js-lease-server` checks a callback at submit and delivers it with them |
 | `js-coverage` (merged) | new | the coverage ratchet (R6) |
 | `js-config` | new | the configuration schema and loader of 5.7 |
 | `js-provider-aws` | new | the `aws` capacity provider over a cloud-client trait with a fake (5.5); disabled by default |

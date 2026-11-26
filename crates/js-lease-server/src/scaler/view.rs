@@ -96,8 +96,9 @@ fn hearing(state: HostState) -> Hearing {
 ///
 /// `shape` is `Some` only when the host announced one (the registry's `claim`), and `None`
 /// for a host that has announced none since the registry was put back after a restart. The
-/// shell never stands in the pool's floor (`host.shape`) or a stored shape: the floor is
-/// below any offer and would read as a hello that falls short.
+/// shell never stands in the booked shape (`host.shape`, the pool's shape for such a host)
+/// or a stored shape: the pool's shape may be below any offer and would read as a hello that
+/// falls short.
 pub(super) fn host_facts(host: HostView, pool: &str, exec: ExecMode, allocated: bool) -> HostFacts {
     let shape = host
         .claim

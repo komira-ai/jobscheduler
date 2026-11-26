@@ -69,7 +69,7 @@ what it books until then, and how the mode is turned on and back off.
    (section 3).
 6. **The pack limit** reads the host's largest booked slot over the horizon, with the job added. With every class
    flat this is today's sum of bookings (section 3).
-7. **Memory stays one number per class**, from the largest recent peak. A wrong memory figure can kill a job on a
+7. **Memory stays one number per class**, from the high end of its recent peaks (`sizing.md`, 7.7). A wrong memory figure can kill a job on a
    busy host, and that kill teaches no class (section 2).
 8. **Per class, curve booking is automatic.** A class books its curve only while it passes four checks, which
    `js-cpu-replay shadow` prints too. A class that fails one books flat at the next pass (section 4).
@@ -194,9 +194,9 @@ clamp(x) = min( max(x, 250m), host_share )      host_share = a quarter of the ho
     victim, which may be another job.
   - The agent reports that kill as an ordinary exit: "a node short of memory is not the booking's fault"
     (`crates/js-agent/src/crun/spec.rs:225-241`). So no class learns from it.
-- **So memory books today's figure in every mode.** That is the largest non-file peak over the last 257 to 288
+- **So memory books today's figure in every mode.** That was the largest non-file peak over the last 257 to 288
   runs, times 1.2 plus 128 MiB, rounded up to 256 MiB, at least 1 GiB, never below the class's kill floor
-  (`summary.rs:493-509`, komira-ai/jobscheduler#1035).
+  (komira-ai/jobscheduler#1035); it is now the 95th percentile of the last 32 runs' peaks in its place (`sizing.md`, 7.7).
 - The memory profile, which keeps 64 runs with a 6 h half-life, stays in shadow.
 - **Memory over time is not booked either.** Freeing a running job's memory as its curve falls is the memory half
   of the curve idea. For jobs of which 92.5% end within 128 s (MEASURED, `cpu-over-time.md` section 3) it frees

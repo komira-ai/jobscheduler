@@ -43,6 +43,7 @@ impl<S, I: Clone> JobStore<S, I> {
             }),
             retention: self.retention,
             allocation_retention: self.allocation_retention,
+            orphans: self.orphans.clone(),
         }
     }
 }

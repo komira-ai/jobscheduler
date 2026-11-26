@@ -322,7 +322,12 @@ impl Rig {
 /// returns, and a reply with a start that is held, or one with nothing that is not.
 #[test]
 fn a_job_goes_through_the_agent_and_its_result_comes_back() {
-    let rig = rig("jobs_e2e_flow", &["--drain-wait", "0"]);
+    // The host reports the pool's 4 cores (the flag lowers what is detected), so the first
+    // job books the whole of what the host is booked at.
+    let rig = rig(
+        "jobs_e2e_flow",
+        &["--drain-wait", "0", "--cpu-millis", "4000"],
+    );
     let job = rig.queued(4000);
     assert_eq!(rig.server.left_the_queue(&job), "JOB_STATE_PLACED");
 

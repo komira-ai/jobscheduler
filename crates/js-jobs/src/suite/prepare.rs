@@ -11,12 +11,13 @@ use js_state::{Cond, Store, Txn};
 
 use super::marks::{marked, rewrite, state_of};
 use super::whole::{history, injected, later, placed_whole, queue_of, requeue_with};
-use super::{host, job_id, rig, whole_host_spec};
+use super::{attempt_end, first_ended, host, job_id, rig, whole_host_spec};
 use crate::codec::{alloc_tag, set_field};
 use crate::keys;
 use crate::{
-    AllocationRecord, AllocationStep, Beside, Booked, EndReason, Exclusion, FailedPrepare,
-    HostBooking, JobId, JobRecord, JobState, JobStoreError, Placement, Retention, StartFailure,
+    AllocationRecord, AllocationStep, AttemptOutcome, Beside, Booked, EndReason, Exclusion,
+    FailedPrepare, HostBooking, JobId, JobRecord, JobState, JobStoreError, Placement, Retention,
+    StartFailure,
 };
 
 /// A failed prepare that is not terminal puts the job back to queued with the count and bars
@@ -179,6 +180,17 @@ pub fn the_last_failed_prepare_ends_the_job_failed_to_start<B: Backend>(backend:
             spec: placed.spec.clone().digested(),
             failed_prepares: 3,
             prepare_bars: failed.prepare_bars,
+            attempt: first_ended(
+                &placed,
+                now,
+                attempt_end(
+                    AttemptOutcome::StartFailed,
+                    None,
+                    None,
+                    Some(StartFailure::ExclusiveNotReady)
+                ),
+                false
+            ),
             ..placed
         },
         "{name}: the job did not end failed to start as an end writes it"

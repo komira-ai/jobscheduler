@@ -2,7 +2,7 @@
 //! (`v1::JobSpec`) becomes the job the tables record ([`js_jobs::JobSpec`]), its id and
 //! priority, and what admission asks of a host ([`Requirements`]), or the first field that
 //! is not valid. Every function here is pure: it reads the request and the ceiling, and
-//! nothing else.
+//! nothing else, and the address rule a callback's literal address is judged by.
 //!
 //! The fields are checked in the order the message declares them, and the first fault is
 //! the answer:
@@ -24,6 +24,8 @@
 //! | `spec.labels` | as a lease's labels are (`Labels::from_caller`) | `field: spec.labels` |
 //! | `spec.historyKey` | empty, or 1 to 512 bytes of printable ASCII (`0x20` to `0x7e`), kept as sent ([`HistoryKey`]) | `field: spec.historyKey: bad-length`, `field: spec.historyKey: not-printable-ascii` |
 //! | `spec.layers`, `spec.mounts` | the rules of `rootfs` | `field: spec.layers[i].<name>`, `spec.mounts[i].<name>` |
+//! | `spec.retry` | absent: this release does not retry a job, so it refuses one that asks, whatever the policy says | `field: spec.retry: retry-not-enabled` |
+//! | `spec.callback` | absent while the server takes no callback (until the release that accepts one), whatever it says; else the rules of `callback_check` | `field: spec.callback: callback-not-enabled`; `field: spec.callback.url: <code>`, `spec.callback.signingKey: bad-length` |
 //!
 //! The cross-field rules (an empty image, its command, `exec`, `needs.wholeHost` and
 //! `isolation` beside the layers, mounts and host ports) are checked once those fields are, and
@@ -54,6 +56,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use js_agent_wire::{Layer, RunFile, check_env, is_xcode_build, validate_files};
+use js_callback::AddressRule;
 use js_caps::{FLAG_SET, LAYERED_ROOTFS, XCODE, mount_provider_key};
 use js_jobs::{
     Constraints, DeclaredPort, Isolation, JobFiles, JobId, JobSpec, Needs, NetworkPolicy,
@@ -69,7 +72,7 @@ use js_types::{
 // section 8.6, which only the files that launch or check through a mode may name.
 use js_types::JobNetwork as Reach;
 
-use super::rootfs;
+use super::{callback_check, rootfs};
 
 /// The capability key a job's least ISA level is recorded under: the key a lease request
 /// names it by.
@@ -93,8 +96,9 @@ pub(crate) struct Valid {
 pub(crate) enum Fault {
     /// The field, by its JSON name, is not valid.
     Field(&'static str),
-    /// The field, by its JSON name, breaks a rule of the wire's check of a start, whose
-    /// refusal code (one of `js_agent_wire::refusal`) the answer carries.
+    /// The field, by its JSON name, breaks a rule whose code the answer carries: one of the
+    /// wire's check of a start (`js_agent_wire::refusal`), or of this module's own (the
+    /// history key's, `retry-not-enabled`, and the callback's, `callback_check`).
     Wire(&'static str, &'static str),
     /// The field, by its JSON name, of the port at this index of `spec.ports`.
     Port(usize, &'static str),
@@ -111,11 +115,17 @@ pub(crate) enum Fault {
     WallAboveCeiling,
 }
 
-/// The job `spec` checked against `ceiling`, the most a wall limit may be.
+/// The job `spec` checked against `ceiling`, the most a wall limit may be, with its callback,
+/// if it asks for one, judged by `callbacks`: refused while it is `None`, which is the server
+/// that takes no callback.
 ///
 /// # Errors
 /// The [`Fault`] of the first field, in the message's order, that is not valid.
-pub(crate) fn job(spec: Option<&v1::JobSpec>, ceiling: Duration) -> Result<Valid, Fault> {
+pub(crate) fn job(
+    spec: Option<&v1::JobSpec>,
+    ceiling: Duration,
+    callbacks: Option<&AddressRule>,
+) -> Result<Valid, Fault> {
     let spec = spec.ok_or(Fault::Field("spec"))?;
     let id = id(&spec.job_id)?;
     let image = Some(spec.image.as_str())
@@ -136,6 +146,8 @@ pub(crate) fn job(spec: Option<&v1::JobSpec>, ceiling: Duration) -> Result<Valid
     let history_key = history_key(&spec.history_key)?;
     let layers = rootfs::layers(&spec.layers)?;
     let mounts = rootfs::mounts(&spec.mounts)?;
+    not_enabled(spec)?;
+    let callback = callback_check::callback(spec.callback.as_ref(), callbacks)?;
     let accelerator = AcceleratorNeed::requested(&capabilities, resources.shape())
         .map_err(|_| Fault::Field("spec.constraints.accelerator"))?;
     imageless(image.as_ref(), &spec.command, &layers)?;
@@ -202,6 +214,9 @@ pub(crate) fn job(spec: Option<&v1::JobSpec>, ceiling: Duration) -> Result<Valid
         mounts,
         host_ports,
         history_key,
+        // A spec that carries a policy was refused above (`not_enabled`).
+        retry: None,
+        callback,
     };
     Ok(Valid {
         id,
@@ -489,6 +504,17 @@ fn history_key(text: &str) -> Result<Option<HistoryKey>, Fault> {
     HistoryKey::parse(text)
         .map(Some)
         .map_err(|fault| Fault::Wire("spec.historyKey", fault.code()))
+}
+
+/// A job that carries a retry policy is refused, whatever it holds (an empty policy
+/// included), before its callback is looked at: this release would record the job without
+/// it, so it would run once while its client believed otherwise
+/// (`docs/design/job-retry-and-completion-callback.md`, section 7).
+fn not_enabled(spec: &v1::JobSpec) -> Result<(), Fault> {
+    match spec.retry {
+        Some(_) => Err(Fault::Wire("spec.retry", "retry-not-enabled")),
+        None => Ok(()),
+    }
 }
 
 #[cfg(test)]

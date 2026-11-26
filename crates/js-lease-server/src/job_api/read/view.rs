@@ -7,7 +7,9 @@
 //! - The record's command is a list and the message's a single program: the program is the
 //!   list's first item, and the rest of the list goes before the arguments, so a command of
 //!   one item (what a submit records) reads back as it was given.
-//! - A file's contents are secret: every file is named, with empty contents.
+//! - A file's contents are secret: every file is named, with empty contents. So is a callback's
+//!   signing key, which the record holds only as its digest: a callback shows its URL and its
+//!   deadline as given, and an empty key.
 //! - The record keeps the ISA level, the least operating-system version and the accelerator a submit was given among its
 //!   capabilities, under the keys a lease request uses (`validate.rs`): they are shown in
 //!   their fields. Any other capability has no field and is not shown.
@@ -31,14 +33,21 @@
 //!   `layered-rootfs` capability a submit records beside them has no field and is not shown.
 //! - The record keeps the agent's code of a start it refused: it is the job's
 //!   `start_failure_detail`, empty for every other job.
+//! - The record keeps no retry policy or attempts: a submit refuses a job that carries a
+//!   policy (`validate.rs`), so every job has one attempt. A job shows no `retry`, an empty
+//!   history, nothing dropped and no not-before, and it and its result show attempt 0, which
+//!   the job API reads as the first.
+//! - Where a job's callback delivery stands (`callback_status`) is not in the record: it is
+//!   left absent here, and the read calls set it from the job's `callback/` row
+//!   ([`callback_status`] turns that row's status into the message).
 
 use std::time::Duration;
 
 use js_agent_wire::{HostPort, JobMount, Layer, MountMode, MountSource, PortProtocol, Propagation};
 use js_caps::XCODE;
 use js_jobs::{
-    Isolation, JobEvent, JobRecord, JobResult, JobSpec, JobState, Needs, NetworkPolicy,
-    ResourceUsage, ResultReason, StartFailure,
+    CallbackState, CallbackStatus, Isolation, JobCallback, JobEvent, JobRecord, JobResult, JobSpec,
+    JobState, Needs, NetworkPolicy, ResourceUsage, ResultReason, StartFailure,
 };
 use js_proto::v1;
 use js_state::StoreTime;
@@ -286,6 +295,40 @@ fn spec(id: &str, spec: &JobSpec, priority: i32) -> v1::JobSpec {
             .history_key
             .as_ref()
             .map_or_else(String::new, |class| class.as_str().to_owned()),
+        retry: None,
+        callback: spec.callback.as_ref().map(callback),
+    }
+}
+
+/// A job's callback as the job service shows it: its URL and deadline as given, and an empty
+/// key, whichever form the record holds it in.
+fn callback(callback: &JobCallback) -> v1::Callback {
+    v1::Callback {
+        url: callback.url.clone(),
+        signing_key: Vec::new(),
+        deadline_seconds: callback.deadline_seconds,
+    }
+}
+
+/// Where a job's callback delivery stands, as the job service shows it: each time in
+/// milliseconds since the store clock's origin, and the last failure's class by its word.
+pub(crate) fn callback_status(status: &CallbackStatus) -> v1::CallbackStatus {
+    let state = match status.state {
+        CallbackState::Armed => v1::CallbackState::Armed,
+        CallbackState::Pending => v1::CallbackState::Pending,
+        CallbackState::Delivered => v1::CallbackState::Delivered,
+        CallbackState::Expired => v1::CallbackState::Expired,
+        CallbackState::Abandoned => v1::CallbackState::Abandoned,
+    };
+    v1::CallbackStatus {
+        state: state.into(),
+        tries: status.tries,
+        last_try_at_ms: status.last_try_at.map(millis),
+        last_failure: status
+            .last_failure
+            .map_or_else(String::new, |class| class.as_str().to_owned()),
+        delivered_at_ms: status.delivered_at.map(millis),
+        deadline_at_ms: status.deadline_at.map(millis),
     }
 }
 
@@ -328,6 +371,11 @@ pub(crate) fn job(job: &JobRecord) -> v1::Job {
         attempts: job.queue.attempts(),
         events: job.queue.events().iter().map(event).collect(),
         dropped_events: job.queue.dropped_events(),
+        attempt: 0,
+        attempt_history: Vec::new(),
+        retry_not_before_ms: None,
+        callback_status: None,
+        dropped_attempts: 0,
     }
 }
 
@@ -424,5 +472,6 @@ fn stored(state: i32, result: &JobResult) -> v1::JobResult {
         }),
         usage: result.usage.map(usage),
         input_failure: result.input_failure.clone(),
+        attempt: 0,
     }
 }

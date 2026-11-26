@@ -86,10 +86,11 @@ fn marking_a_known_host_does_not_wait_for_its_runs() {
     assert!(fx.registry.hosts().is_empty());
 }
 
-/// Asserts the shape a host announced is listed as its claim: after a hello it is the
-/// hello's cpu, memory and gpus (not the pool's floor, which `shape` still shows), a
+/// Asserts the shape a host announced is listed as its claim and is what it is booked at:
+/// after a hello it is the hello's cpu, memory and gpus (8000 millicores, 16 GiB, more than
+/// the pool's shape, and `shape` shows the same), a
 /// heartbeat leaves it, and a host put back after a restart that has not said hello has
-/// none. It catches a claim taken from the floor, one lost at the next hello, and one
+/// none. It catches a claim taken from the pool's shape, one lost at the next hello, and one
 /// invented for a host that never spoke.
 #[test]
 fn a_host_lists_the_shape_it_announced() {
@@ -100,7 +101,7 @@ fn a_host_lists_the_shape_it_announced() {
     let claim = a.claim.unwrap();
     assert_eq!(claim.resources().cpu_millis(), 8000);
     assert_eq!(claim.resources().memory_bytes(), 16 << 30);
-    assert_eq!(a.shape.resources().cpu_millis(), 4000);
+    assert_eq!(a.shape.resources().cpu_millis(), 8000);
     let taint = Taint {
         reason: "residue".to_owned(),
         run_id: None,

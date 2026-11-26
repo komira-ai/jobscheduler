@@ -55,7 +55,8 @@ fn with_unknown_fields(bytes: &[u8]) -> Vec<u8> {
 }
 
 /// `Job` as a later version could define it: every field of this version at its number and
-/// type, and two fields added after it (a plain string and an optional integer).
+/// type, and two fields added after it (a plain string and an optional integer), at numbers
+/// far above any the schema uses so that a field this version adds never meets them.
 #[derive(Clone, PartialEq, Message)]
 struct LaterJob {
     #[prost(string, tag = "1")]
@@ -76,9 +77,9 @@ struct LaterJob {
     host_silent_since_ms: Option<u64>,
     #[prost(bool, tag = "31")]
     cancel_requested: bool,
-    #[prost(string, tag = "40")]
+    #[prost(string, tag = "1000")]
     platform_handle: String,
-    #[prost(uint64, optional, tag = "41")]
+    #[prost(uint64, optional, tag = "1001")]
     requeued_at_ms: Option<u64>,
 }
 
@@ -531,6 +532,7 @@ fn the_proto_change_is_additive() {
             from_offset: None,
             max_bytes: None,
             follow: None,
+            attempt: None,
         }
     );
     assert_eq!(request.stream(), LogStream::Unspecified);
@@ -543,6 +545,7 @@ fn the_proto_change_is_additive() {
         from_offset: Some((1 << 53) + 1),
         max_bytes: Some(0),
         follow: Some(true),
+        attempt: None,
     };
     let mut bytes = old_bytes.clone();
     bytes.extend_from_slice(&[0x10, 0x01]);

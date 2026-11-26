@@ -15,12 +15,14 @@
 //!   job by the placement, by host and by the predicate that refused (`cpu`,
 //!   `predicted-memory`, `booked-memory`, `cold-cap`, `cpu-curve`), and each job whose wait for
 //!   its CPU curve ran out so that it was tested flat, and each job start a host's agent refused,
-//!   by host and refusal code. A start failure or a loss is counted as
+//!   by host and refusal code, and each try of a job's completion callback whose answer was
+//!   recorded, by its result. A start failure or a loss is counted as
 //!   its commit lands, so a pass that fails later still counts what it ended. The paths that count them call
 //!   a [`MetricsSink`], and do not know the exporter: without `--metrics-listen` the sink is
 //!   [`NoMetrics`], which counts nothing.
 //! - **Snapshots**, read at each scrape from the state `GET /v1/hosts` and the job service
-//!   read ([`scrape`]): the jobs by state, the age of the oldest queued job, and for each host
+//!   read ([`scrape`]): the jobs by state, the age of the oldest queued job, the completion
+//!   callbacks still pending, and for each host
 //!   the CPU and memory booked and free and its whole-host mark, and under
 //!   `--placement-curves on` the classes booking by curve and flat and each curve host's fullest
 //!   booked slot, read from the placer ([`js_sched_placer::place::SchedPlacer::curve_view`]).
@@ -31,7 +33,7 @@
 //!   two reads can show as queued while its booking already counts.
 //!
 //! The text names no job, lease, run or token: its labels are a job state, a start failure
-//! code, a host's id, a pool's name and a host's mark, and nothing else. The route takes no
+//! code, a host's id, a pool's name, a host's mark and a callback's result, and nothing else. The route takes no
 //! token, so it is served only on a private address ([`crate::is_private_address`]), and
 //! only to a private peer, as `/status` is.
 
@@ -43,6 +45,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::Duration;
 
+use js_callback::{CallbackAnswer, FailureClass};
 use js_elastic::{Acquired, Refusal, RefusalCode};
 use js_jobs::StartFailure;
 use js_sched_placer::engine::TablesFrom;
@@ -78,6 +81,9 @@ pub(crate) trait MetricsSink: Send + Sync + std::fmt::Debug {
     /// A queued job of a curve class waited past the wait bound with no host fitting its
     /// curve, and is tested with its flat number from then on; by default, nothing is counted.
     fn curve_wait_expired(&self) {}
+    /// A try of a job's completion callback was answered `answer`, and the answer recorded;
+    /// by default, nothing is counted.
+    fn callback_answered(&self, _answer: &CallbackAnswer) {}
 }
 
 /// The longest refusal code of an agent that is kept as a metric label value.
@@ -324,6 +330,24 @@ const FAILURE_CODES: [&str; 5] = [
 /// them.
 const TABLES_FROM: [&str; 3] = ["store", "kept", "submitted"];
 
+/// The results of a callback's try, in the order they are written: a 2xx, a 410, a failure,
+/// and an address the rule refused.
+const CALLBACK_RESULTS: [&str; 4] = ["delivered", "abandoned", "failed", "refused-address"];
+
+/// The word a callback's `answer` is counted and logged under.
+pub(crate) fn callback_result(answer: &CallbackAnswer) -> &'static str {
+    CALLBACK_RESULTS[callback_slot(answer)]
+}
+
+fn callback_slot(answer: &CallbackAnswer) -> usize {
+    match answer {
+        CallbackAnswer::Delivered => 0,
+        CallbackAnswer::Abandoned => 1,
+        CallbackAnswer::Failed(FailureClass::Failed) => 2,
+        CallbackAnswer::Failed(FailureClass::RefusedAddress) => 3,
+    }
+}
+
 fn tables_slot(from: TablesFrom) -> usize {
     match from {
         TablesFrom::Store => 0,
@@ -376,6 +400,7 @@ pub(crate) struct Recorder {
     refusals: Mutex<BTreeMap<(String, &'static str), u64>>,
     start_refusals: Mutex<BTreeMap<(String, String), u64>>,
     curve_wait_expiries: AtomicU64,
+    callbacks: [AtomicU64; 4],
 }
 
 impl Default for Recorder {
@@ -392,6 +417,7 @@ impl Default for Recorder {
             refusals: Mutex::default(),
             start_refusals: Mutex::default(),
             curve_wait_expiries: AtomicU64::new(0),
+            callbacks: Default::default(),
         }
     }
 }
@@ -451,9 +477,32 @@ impl MetricsSink for Recorder {
     fn curve_wait_expired(&self) {
         self.curve_wait_expiries.fetch_add(1, Ordering::Relaxed);
     }
+
+    fn callback_answered(&self, answer: &CallbackAnswer) {
+        self.callbacks[callback_slot(answer)].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// The text a scrape of no job tables and no hosts answers, with the events `recorder` counted.
+#[cfg(test)]
+pub(crate) fn rendered(recorder: &Recorder) -> String {
+    let seen = render::Snapshot {
+        jobs: None,
+        hosts: Vec::new(),
+        curves: None,
+    };
+    render::render(&seen, recorder)
 }
 
 impl Recorder {
+    /// The callback answers counted, by result, in the order of [`CALLBACK_RESULTS`].
+    #[cfg(test)]
+    pub(crate) fn callbacks(&self) -> [u64; 4] {
+        self.callbacks
+            .each_ref()
+            .map(|count| count.load(Ordering::Relaxed))
+    }
+
     /// The starts an agent refused, by host and refusal code label.
     fn start_refusals(&self) -> BTreeMap<(String, String), u64> {
         self.start_refusals

@@ -63,7 +63,9 @@ record and its result, where a `DELETE` would read as removal. It is idempotent 
 a repeat answers 200 with the same final state. `GetLogs` without a `stream` answers the job's
 state and its result's tails. With a stream it reads one page of that stream from the log
 store. Its query parameters are `stream` (`LOG_STREAM_STDOUT` or `LOG_STREAM_STDERR`, the
-names of the `LogStream` enum), `fromOffset`, `maxBytes` and `follow`. In the answer `data` is
+names of the `LogStream` enum), `fromOffset`, `maxBytes`, `follow` and `attempt` (the attempt
+whose output to read, from 1; absent, the job's current attempt). In the
+answer `data` is
 base64 of the bytes, `offset` and `nextOffset` are decimal strings, `gaps` is a list of
 `{"offset", "length"}` objects with decimal strings, and `firstByteAtMs` is a decimal string
 when present. The mapping is the generic one of the other calls.
@@ -148,6 +150,7 @@ cause.
 | logs asked of a server whose log sink is `none` | 409 | `no-log-sink` |
 | live logs asked of a job that ran without them | 409 | `no-live-logs` |
 | a log offset past the end of the stream | 400 | `out-of-range`, `field` `fromOffset` |
+| logs asked of an attempt above the job's current one | 400 | `out-of-range`, `field` `attempt` |
 | too many follows open at once | 429 | `too-many-follows` |
 | the log store cannot be read | 503 | `log-store-unavailable` |
 | a fleet call of a client that is no operator (`PERMISSION_DENIED`, `operator-only`) | 403 | `operator-only` |
@@ -163,7 +166,7 @@ How the service's answer selects a row: a gRPC status that carries a `Refusal` i
 is answered by the refusal's code. Any other status is answered by its gRPC code and its
 message, which the service sets to the code of the table: `NOT_FOUND` with `unknown-job` (404)
 or `expired` (410), `FAILED_PRECONDITION` with `not-finished`, `no-log-sink` or `no-live-logs` (409),
-`OUT_OF_RANGE` with `field: fromOffset` (400 `out-of-range`), `RESOURCE_EXHAUSTED` with
+`OUT_OF_RANGE` with `field: fromOffset` or `field: attempt` (400 `out-of-range`), `RESOURCE_EXHAUSTED` with
 `too-many-follows` (429), `UNAVAILABLE` with `log-store-unavailable`, `store-unavailable` or
 `state-write-failed` (503, the same code), `PERMISSION_DENIED` with `operator-only` (403),
 `INTERNAL` with `state-write-failed` (500 `state-write-failed`), `UNIMPLEMENTED` (501), and
@@ -352,6 +355,14 @@ reported as a gap after that. A page ends before a gap, so the next call reports
 which the agent reported with the result; for a job lost without a result, once 30 seconds
 have passed since it ended, where its stored bytes end. A queued job answers an empty page.
 
+**Attempts.** `attempt` names the attempt whose output to read, from 1; absent, the job's
+current attempt, which is chosen once, so a follow keeps reading it. The current attempt is
+read as above. An earlier one, and the current one while the job waits for its next attempt
+or after it ended in that wait, is read as a job lost without a result: its end is where its
+stored bytes end, and no follow waits for it. Each attempt's output is kept apart, so an
+attempt reads only its own bytes. An attempt whose output the server cannot find answers
+`no-live-logs`.
+
 **Follow.** With `follow=true`, a page with nothing new (no gap, no data, not at the end) of
 a job that has not ended is a long poll: the server reads the store again every second and
 answers as soon as there is something or the job ends, and after 20 seconds answers the empty
@@ -367,6 +378,8 @@ stream.
 | a job without live logs: its id has no log prefix, or it ended with a result that reports no stream lengths | `FAILED_PRECONDITION`, `no-live-logs` | 409 `no-live-logs` |
 | `maxBytes` of 0 | `INVALID_ARGUMENT`, `field: maxBytes` | 400 `invalid-argument`, `field` `maxBytes` |
 | `fromOffset` past the length of an ended job's stream | `OUT_OF_RANGE`, `field: fromOffset` | 400 `out-of-range`, `field` `fromOffset` |
+| `attempt` of 0 | `INVALID_ARGUMENT`, `field: attempt` | 400 `invalid-argument`, `field` `attempt` |
+| `attempt` above the job's current attempt | `OUT_OF_RANGE`, `field: attempt` | 400 `out-of-range`, `field` `attempt` |
 | more than `max_follow` follows waiting | `RESOURCE_EXHAUSTED`, `too-many-follows` | 429 `too-many-follows` |
 | the store unreachable, slow, failing, or refusing the read key | `UNAVAILABLE`, `log-store-unavailable` | 503 `log-store-unavailable` |
 

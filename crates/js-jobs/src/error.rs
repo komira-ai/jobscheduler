@@ -42,6 +42,13 @@ pub enum JobStoreError {
     /// The id source failed.
     #[error(transparent)]
     Mint(#[from] MintError),
+    /// A new job's callback holds its key's digest, not the key, so its `callback/` row cannot
+    /// be armed. Only a resubmit of a recorded job may name its callback by the digest.
+    #[error("job {id} names its callback's key by its digest, so no delivery can be armed")]
+    CallbackKeyMissing {
+        /// The job.
+        id: JobId,
+    },
     /// The host's node row moved past the version the beat wrote: a newer beat or hello of the
     /// host was applied, so this beat's listing changes nothing more.
     #[error("the node row of host {host} moved past the version the beat wrote")]

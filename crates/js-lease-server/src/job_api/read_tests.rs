@@ -337,6 +337,8 @@ pub(super) fn spec(labels: &[(&str, &str)]) -> JobSpec {
         mounts: Vec::new(),
         host_ports: Vec::new(),
         history_key: Default::default(),
+        retry: None,
+        callback: None,
     }
 }
 
@@ -446,6 +448,7 @@ fn result_of_exit_3(times: v1::JobTimes) -> v1::JobResult {
             gpus: 0,
         }),
         input_failure: None,
+        attempt: 0,
     }
 }
 

@@ -86,14 +86,16 @@ of its class gives (`crates/js-sched-placer/src/sizes.rs`). A dimension the job 
   idle, and the job store's retention bounds what a server reads back at its start).
 - **partition**: the client that submitted the job; **platform**: the job's `os` and `arch` as it names them; **basis**: cgroup.
 
-The estimator is `js-sizing`: memory is `1.2 x` the largest recent peak plus 128 MiB (at least 1 GiB), CPU the median of
+The estimator is `js-sizing`: memory is `1.2 x` the high end of the recent peaks plus 128 MiB (at least 1 GiB), CPU the median of
 its runs' mean CPU (CPU time over wall time) rounded up to a quarter core, whatever its runs' five-second peaks (7.11; the
 heavy-tail rule of 7.10, which booked the 90th percentile of the peaks, books no job of the placer). A class with a fresh memory sample of its own books what its own runs ask for
-(`Summaries::peak_memory`: `1.2 x` their largest recent peak plus 128 MiB, rounded up to 256 MiB, at least 1 GiB, and its kill
-floor), from its first run on, whatever their number or spread. The kind's maximum and the client's no longer apply to it, and the
+(`Summaries::peak_memory`: `1.2 x` the nearest-rank 95th percentile of the peaks of its last 32 runs, which is their largest under
+20 runs and the second largest from 20 on, plus 128 MiB, rounded up to 256 MiB, at least 1 GiB, at least the same figure of a run of
+its last 256 that reached its booking, and its kill floor), from its first run on, whatever their number or spread. The kind's maximum and the client's no longer apply to it, and the
 estimator's own rules for mixed runs (the largest of 32 samples over 4x their median books at least the default) and for fewer than
 `N_MIN` samples no longer hold a job class at the cold size: the placer does not call `Summaries::estimate` for memory. A class with
-no run of its own books its fallback class's figure (the same formula over the kind's runs, 7.8), else the whole history of its client
+no run of its own books its fallback class's typical run (`Summaries::median_memory`: `1.2 x` the median peak of the kind's last 32 runs
+plus 128 MiB, rounded up to 256 MiB, at least 1 GiB, and the kind's kill floor only while the kind's kills are frequent, 7.8), else the same figure of the whole history of its client
 on its platform (a third key every run of the client but a memory kill teaches), else the cold size, and at least its own kill floor.
 A fallback whose figure reaches the host is no fallback. Only a client with no fresh run at all books the cold size: `server.cold_cpu_millis` and
 `server.cold_memory_bytes` (or their flags), each one left out its default: 22 cores and 4 GiB; a job whose `os` constraint the server names
@@ -112,6 +114,16 @@ jobs a host ran: booked memory was at the host's limit in 80% of samples while b
 16 GiB and a compile that uses 2.8 GB booked 16 GiB. Under the rule before this one, a class with fewer than five memory samples (which a run
 under a second never gave) booked its kind's or client's largest peak, a class whose peaks were spread booked the default, and a
 success near or above its booking could not raise it.
+
+**Why the high end of the last 32 runs, not the largest of 256.** The largest peak of a class's last 256 runs held one outlier
+for 256 runs: on the same farm a compile target whose runs peaked at 2.2 to 4.3 GiB in an hour booked 15 GiB in all of them, from a
+run of 12.4 GiB two hours before, and its hosts refused jobs for booked memory with under half of their memory in use. The 95th
+percentile of the last 32 runs drops one outlier among 20 or more and forgets a heavy run 32 runs later; a heavy mode that comes back
+(two or more of the last 32) still books. What it no longer holds is safe to leave: the booking is no limit (a run that needs more
+uses what its host has), placement counts a host's measured memory as well as its bookings, a run killed for the node's memory runs
+again elsewhere, and a run that reached its booking or was killed at its own limit raises its class (a held sample counts over the
+last 256 runs, and a kill's floor until it decays). With these rules, a replay of that farm's hour books 14% fewer GiB-seconds,
+and each host's median booked memory is 11 to 22 GiB lower.
 
 The cold default is a fixed size, not a share of the hosts. It was 16 GiB, which a farm whose hosts have 88 cores and 251 GiB
 filled at 15 jobs a host while its build jobs peaked at 0.6 to 3.2 GB; it is 4 GiB, above the largest of those peaks, and it books
@@ -163,7 +175,8 @@ a success; any other exit, a wall limit or a failed input a failure, which teach
 the job's own limit, which raises the class's floor to twice the booking it died at (only an agent that still held a job at its
 booking reports it); the kill is a sample of at least that booking. A success's peak is a measurement whatever its booking: the crun
 runtime writes no `memory.max`, so a peak above the booking is taken as it is, and a run that used more than its booking raises the
-class's next booking at once, with the margin. But a success whose group's `memory.peak` came within 5% of its booking and stayed
+class's next booking at once, with the margin, while it is one of fewer than 20 runs of its class; from the 20th run on it is one
+sample among the last 32, and it raises the booking when a second such run joins it (7.7: one outlier does not hold a class up). But a success whose group's `memory.peak` came within 5% of its booking and stayed
 within it reached its booking: a host that holds a job at its booking (the docker and podman runtime's `--memory`, whose limit counts
 the page cache that the non-file peak leaves out) held it there, so its peak does not show what it needed. The placer counts it as
 having reached its booking (`Run::limit_hits`), and the estimator takes it as a held sample of the larger of its peak and its booking,
@@ -212,18 +225,30 @@ the job's history key (`JobSpec.history_key`, the target's path and the action's
   history key (or `size-class` label) is `zig-cc` and one whose `size-fallback` is `zig-cc` read and teach one history.
 - Every run a job teaches is taught to its own class and to its fallback class (once, when they are the same class). The kind
   therefore learns from every target of the kind, and each target from its own runs, so the target takes over as its runs come.
-- **Booking.** A job whose own class has a fresh memory sample books what its own runs ask for (`1.2 x` their largest recent peak
-  plus 128 MiB, from the first run on, whatever their number or spread) and its own kill floor. A job whose own class has no run
-  books its fallback class's figure (the same formula over the kind's runs) and its own kill floor. A fallback class with no fresh
+- **Booking.** A job whose own class has a fresh memory sample books what its own runs ask for (`1.2 x` the 95th percentile of
+  the peaks of its last 32 runs plus 128 MiB, from the first run on, whatever their number or spread) and its own kill floor. A job
+  whose own class has no run books its fallback class's typical run (`1.2 x` the median peak of the kind's last 32 runs plus
+  128 MiB, at least 1 GiB, and the kind's kill floor only while the kind's kills are frequent) and its own kill floor. A fallback class with no fresh
   run (none, idle over 60 days, or one whose runs reach the host) is no fallback: the client's whole history on the job's platform
   stands in its place, and the cold size only when the client has no fresh run either. Its CPU is its own class's learned CPU when
   it has a CPU sample, else the fallback class's, else the client's.
-- The kill floor of the job's own class applies on every path; the fallback's own floor is part of what the fallback asks for.
-- The fallback's memory is the maximum of the kind's recent peaks with a margin, not a percentile, and not the cold memory for a
-  kind whose peaks are spread. It books only a target with no run of its own, that is its first job; one run of its own takes it
-  over, so a kind with one large target no longer holds its young targets at that peak. A target that needs more than its kind is
-  raised by its own runs and its kill floor. A kind whose peak with the margin reaches the host is no fallback at all (7.9 has the
-  farm's numbers). A client that runs such a target as a step of a kind of small steps names it a kind of its own.
+- The kill floor of the job's own class applies on every path. The fallback's own floor is part of what the fallback asks for
+  only while the fallback's kills are frequent: while it is raise-only, after two kill events within 256 of its runs, for 7 days
+  after the second. A kill belongs to the key that was killed: one kill of one target, at a booking that is no limit on the farm's
+  hosts, held every new target of its kind at twice that booking (`busybox_pin` at 8 GiB, twice the 4 GiB cold size, while its
+  runs peaked at 1.2 to 3.0 GiB, and `mojo_compile` at 19.5 GiB while its new targets' runs peaked under 3.2 GiB) for as long as
+  the floor stood, at least 256 runs and 7 days.
+- The fallback's memory is the kind's median run with a margin, not its largest peak, and not the cold memory for a kind whose
+  peaks are spread. It books only a target with no run of its own, that is its first job; one run of its own takes it over. The
+  maximum was the rule before, and it booked every new target at its kind's heaviest: after a build farm renamed its history keys,
+  most keys were new, a `check` whose runs peaked at 0.27 GiB was booked 8.75 GiB and a `mojo_compile` 19.5 GiB, and its hosts sat
+  at 238 of 250 GiB booked with 77 to 91 GiB in use, refusing jobs for booked memory while under a fifth of their CPU and memory was
+  in use. A target that needs more than its kind's typical run is not held to it: the booking is no limit, placement counts the
+  host's measured memory (`max(sum of bookings, working set + bookings of jobs the working set does not cover yet)`), and its first
+  run raises it at once. A kill still raises the target and the kind (their kill floors); the kind's floor books a new target only
+  while the kind's kills are frequent (above). A kind whose typical run with the margin
+  reaches the host is no fallback at all (7.9 has the farm's numbers). A client that runs such a target as a step of a kind of
+  small steps names it a kind of its own.
 - **Measuring.** Each placement of a job that booked nothing is logged with what sized it: `class` (its own class's estimate),
   `fallback` (its fallback class's estimate), `cold` (the cold size) or `over-cap` (the whole of the largest host's memory). The
   share of each over a window of farm work is how this section is judged. `fallback` also names a job sized from its
@@ -273,7 +298,7 @@ takes up to its slack in bookings, which are means.
 **Unknown jobs.** A class with no CPU history books its kind's learned CPU, else its client's, and only a client with no history
 at all books the cold CPU: by default 22 cores, held at a quarter of the largest host, the most any class books. Its first run is
 therefore placed with room for the most cores a class may use, and one run is enough to learn its mean. An unknown job's memory is
-its kind's or its client's peak with the margin, else the cold 4 GiB, until its first run; then its own peaks with the margin. Both are raised by a kill's floor (a booking, not a limit on the job).
+its kind's or its client's median run with the margin (7.8), else the cold 4 GiB, until its first run; then the high end of its own peaks with the margin (7.7). Both are raised by a kill's floor (a booking, not a limit on the job): its own, and its kind's while the kind's kills are frequent.
 
 **The history from before.** Every run a server rebuilds at its first start after the change has a mean: its CPU time over its wall
 time, from its job record. A server re-derives each run's sample from its job record as the run's mean when it reads the ended jobs after its start; there

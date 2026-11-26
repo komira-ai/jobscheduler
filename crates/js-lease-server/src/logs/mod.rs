@@ -71,6 +71,7 @@ use tracing::{info, warn};
 
 use crate::clock::SharedClock;
 
+pub(crate) mod attempt;
 mod setup;
 mod sink;
 
@@ -225,10 +226,12 @@ impl LogGrants {
         self.clock.now().millis()
     }
 
-    /// The sink of the job `job_id` on the host `host`, from the configuration and the host
-    /// alone: no credential in it. `None` for an id the object layout builds no prefix for.
-    pub(crate) fn sink_for(&self, host: &str, job_id: &str) -> Option<LogSink> {
-        self.template.sink_for(host, job_id)
+    /// The sink of attempt `attempt` of the job `job_id` on the host `host`, from the
+    /// configuration and the host alone: no credential in it. `None` for an id the object
+    /// layout builds no prefix for, and for an attempt whose prefix the log prefix leaves no
+    /// room for ([`attempt`]).
+    pub(crate) fn sink_for(&self, host: &str, job_id: &str, attempt: u32) -> Option<LogSink> {
+        self.template.sink_for(host, job_id, attempt)
     }
 
     /// The credential held for `agent`, unless none is or it has expired: a memory read.

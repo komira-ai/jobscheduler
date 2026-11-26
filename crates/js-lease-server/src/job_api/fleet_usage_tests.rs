@@ -730,3 +730,37 @@ async fn usage_tells_the_cpu_series_of_a_job_record() {
     assert_eq!(page.records[1].cpu_series, None);
     assert_eq!(page.records[2].cpu_series, None);
 }
+
+/// Asserts that `GetUsage` tells the attempt of a job record that is not its first (2 and a
+/// large one, as stored), tells none for a job record of a first attempt, and tells none for a
+/// lease record, which has none. It catches an attempt dropped between the job store's record
+/// and the answer, one told for a first attempt, and one read into another record.
+#[tokio::test]
+async fn usage_tells_the_attempt_of_a_job_record() {
+    let name = "usage_tells_the_attempt_of_a_job_record";
+    let s = server("usage-attempt");
+    let second = EndedRow {
+        attempt: Some(2),
+        ..ended("job-second", 1000)
+    };
+    let big = EndedRow {
+        attempt: Some(u32::MAX),
+        ..ended("job-big", 2000)
+    };
+    job_ended(&s, &second);
+    job_ended(&s, &big);
+    job_ended(&s, &ended("job-first", 3000));
+    s.sink.allocation_ended(&ended("1-9", 4000)).unwrap();
+    let page = usage_of(&s.api, GetUsageRequest::default()).await.unwrap();
+    assert_eq!(
+        job_ids(&page),
+        ["job-second", "job-big", "job-first", "1-9"],
+        "{name}: ids"
+    );
+    let attempts: Vec<Option<u32>> = page.records.iter().map(|r| r.attempt).collect();
+    assert_eq!(
+        attempts,
+        [Some(2), Some(u32::MAX), None, None],
+        "{name}: attempts"
+    );
+}

@@ -361,6 +361,21 @@ impl PostgresConfig {
         }
     }
 
+    /// The hosts the URL names by a name or an address, in its order, each as the URL writes
+    /// it, then each address its `hostaddr` names; a Unix socket directory is not among them.
+    /// The job service denies a completion callback every address these resolve to, as one of
+    /// the cluster's own.
+    #[must_use]
+    pub fn tcp_hosts(&self) -> Vec<String> {
+        let hosts = self.pg.get_hosts().iter();
+        let named = hosts.filter_map(|host| match host {
+            postgres::config::Host::Tcp(name) => Some(name.clone()),
+            _ => None,
+        });
+        let addresses = self.pg.get_hostaddrs().iter().map(ToString::to_string);
+        named.chain(addresses).collect()
+    }
+
     /// How many hosts the URL names (a list after `host=`, or comma-separated in the
     /// authority): each is a server the client may try.
     #[must_use]

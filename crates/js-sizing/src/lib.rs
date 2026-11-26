@@ -44,7 +44,15 @@
 //!   of the default booking, its floor and its own sized estimate
 //!   `round_up_256MiB(1.2 * max(M, held) + 128 MiB)`, so it is never booked below
 //!   its own largest recent peak with the margin. [`Summaries::peak_memory`] answers
-//!   what a key's largest recent samples ask for whatever their number or dispersion.
+//!   what the high end of a key's recent samples asks for whatever their number or
+//!   dispersion: the nearest-rank 95th percentile of its last 32 samples (the largest under
+//!   20 samples, the second largest from 20 on, so one outlier run does not hold it up), at
+//!   least its largest held sample of the 256 or more runs above and its floor, with the same
+//!   margin; [`Summaries::median_memory`] what its typical recent sample asks for (the median
+//!   of its last 32 samples, the larger middle one for an even count, with the same margin),
+//!   the figure of a key that stands in for another one, which takes the key's floor only
+//!   while the key is raise-only (its kills are frequent: a kill raises the key killed, not
+//!   every key it stands in for).
 //! * **Never a whole host.** A booking at or above the memory of the largest matching
 //!   live node ([`Bounds::host_memory`]) owns the host. The crate's key floors stay
 //!   strictly below it, and an estimate (with the client's hint) that would reach it is

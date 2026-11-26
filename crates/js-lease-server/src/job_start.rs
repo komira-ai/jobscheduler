@@ -217,9 +217,10 @@ pub(crate) fn start_of(
         .unwrap_or(spec.wall_limit_secs)
         .checked_mul(1000)
         .ok_or(Unsendable::WallLimit)?;
+    let attempt = crate::logs::attempt::Attempts::of(job).current;
     let log_sink = context
         .logs
-        .and_then(|logs| logs.sink_for(context.host.as_str(), job.id.as_str()));
+        .and_then(|logs| logs.sink_for(context.host.as_str(), job.id.as_str(), attempt));
     let os = spec
         .constraints
         .os

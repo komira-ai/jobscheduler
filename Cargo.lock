@@ -1273,6 +1273,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-callback"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "hmac",
+ "js-types",
+ "rcgen",
+ "rustls",
+ "sha2",
+ "thiserror",
+ "tracing",
+ "tracing-subscriber",
+ "ureq",
+]
+
+[[package]]
 name = "js-caps"
 version = "0.1.0"
 dependencies = [
@@ -1493,6 +1509,7 @@ dependencies = [
  "js-agent-wire",
  "js-alert",
  "js-api-gateway",
+ "js-callback",
  "js-caps",
  "js-cli",
  "js-conformance",
@@ -2017,6 +2034,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "sha2",
  "thiserror",
 ]
 

@@ -5,11 +5,14 @@ mod calibration;
 mod cpu;
 mod curve;
 mod life;
+mod median;
 mod memory;
 mod profile;
 mod profile_check;
+mod recent_peak;
 mod reference;
 mod safety;
+mod stand_in;
 mod storage;
 mod tail;
 

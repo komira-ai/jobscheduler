@@ -82,9 +82,9 @@ fn reading(seq: u64, bad: bool) -> Wire {
 }
 
 /// Catches: a hook that is not called where the registry changes its hosts, called with the
-/// claim instead of the pool's shape, or handed a reading that is not new (a repeated `seq`
-/// handed again would read to a placer as a counter that went back). The placer hears the
-/// hello with the pool's 4 cores (the agent claims 8), each accepted beat with the reading
+/// claim's cores, or handed a reading that is not new (a repeated `seq` handed again would
+/// read to a placer as a counter that went back). The placer hears the hello with the 8
+/// cores the agent claims (the pool lists 4), each accepted beat with the reading
 /// only when it brought a new one that passed the vet, and nothing of a beat the registry
 /// refuses.
 #[test]
@@ -92,7 +92,7 @@ fn the_placer_is_told_of_hellos_and_beats() {
     let told = Arc::new(Told::default());
     let fx = pool(told.clone());
     let epoch = fx.join("a", "t");
-    assert_eq!(told.said(), ["up a 4000"]);
+    assert_eq!(told.said(), ["up a 8000"]);
     let beat = |load: Option<Wire>| {
         let heartbeat = js_agent_wire::Heartbeat {
             load,
@@ -123,8 +123,9 @@ fn the_placer_is_told_of_hellos_and_beats() {
 
 /// Catches: a pool that books the whole memory for its placer still telling it the cut, showing
 /// its hosts with the whole memory (a reader of the host listing would take it as bookable),
-/// or no longer reporting the percent. At 90 the placer is told the host's whole 8 GiB, which
-/// it cuts itself, while the host listing shows the cut and 90 percent.
+/// or no longer reporting the percent. At 90 the placer is told the host's whole claimed 16
+/// GiB (the pool lists 8), which it cuts itself, while the host listing shows the cut of the
+/// claim and 90 percent.
 #[test]
 fn a_pool_that_books_whole_memory_tells_the_placer_the_whole_and_reports_the_percent() {
     let percent = js_types::MemoryPercent::new(90).unwrap();
@@ -134,11 +135,11 @@ fn a_pool_that_books_whole_memory_tells_the_placer_the_whole_and_reports_the_per
     let told = Arc::new(Told::default());
     let fx = with_placer(config, told.clone());
     fx.join("a", "t");
-    assert_eq!(*told.memory.lock().unwrap(), [8 << 30]);
+    assert_eq!(*told.memory.lock().unwrap(), [16 << 30]);
     let shown = fx.registry.hosts();
-    assert_eq!(shown[0].shape.resources().memory_bytes(), 7_730_941_132);
+    assert_eq!(shown[0].shape.resources().memory_bytes(), 15_461_882_265);
     assert_eq!(shown[0].memory.percent(), percent);
-    assert_eq!(shown[0].memory.bookable_bytes(), 7_730_941_132);
+    assert_eq!(shown[0].memory.bookable_bytes(), 15_461_882_265);
 }
 
 /// Catches: a host the registry forgets not told to the placer, so that a placer keeping

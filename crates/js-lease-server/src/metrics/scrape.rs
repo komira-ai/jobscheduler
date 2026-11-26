@@ -80,7 +80,8 @@ pub(crate) async fn snapshot(
 }
 
 /// Every job of `jobs` counted by state at the store's clock now (by which each job's submit
-/// was stamped, so its age is one clock's), `page` at a time, and the live allocations.
+/// was stamped, so its age is one clock's), `page` at a time, the pending completion callbacks,
+/// and the live allocations.
 fn read_jobs(
     jobs: &ServerJobs,
     page: NonZeroUsize,
@@ -98,6 +99,7 @@ fn read_jobs(
             break;
         }
     }
+    seen.callbacks_pending(jobs.callbacks_pending()?);
     Ok((seen, jobs.live_allocations()?))
 }
 

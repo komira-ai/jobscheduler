@@ -164,7 +164,11 @@ hostkeeper-install = { git = "https://github.com/komira-ai/hostkeeper", rev = "7
 hostkeeper-launchd = { git = "https://github.com/komira-ai/hostkeeper", rev = "75199c6468a18c0bd836ca9f198e0fdf8f907084" }
 hostkeeper-placed = { git = "https://github.com/komira-ai/hostkeeper", rev = "75199c6468a18c0bd836ca9f198e0fdf8f907084" }
 hostkeeper-steps = { git = "https://github.com/komira-ai/hostkeeper", rev = "75199c6468a18c0bd836ca9f198e0fdf8f907084" }
-ureq = { version = "3.4.2", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots"] }
+# Exactly one version: js-callback's sender checks every address in ureq's resolver hook
+# (`ureq::unversioned::resolver`), which ureq keeps outside its semver promise, so a new
+# version is taken only by changing this pin, and js-callback then fails to build if the hook
+# changed (docs/design/job-retry-and-completion-callback.md, section 5.3).
+ureq = { version = "=3.5.0", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots"] }
 webpki-roots = { version = "1.0.11", default-features = false }
 # Reads the validity of the certificate a TLS reload brings (js-lease-server); in the lock
 # already through rcgen.

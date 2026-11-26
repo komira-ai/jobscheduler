@@ -285,12 +285,16 @@ impl Summaries {
             .map_or(0, |summary| summary.floor(bounds))
     }
 
-    /// The memory the largest recent samples of `key` ask for on `now`, whatever their
-    /// number or dispersion: `round_up_256MiB(max(1.2 * max(long_max, held) + 128 MiB,
-    /// floor))`, at least [`crate::MIN_MEMORY`], over the fresh summaries of the key's
-    /// levels (the larger of L1 and L2). `None` when no fresh summary holds a memory
-    /// sample. It ignores the default booking, [`N_MIN`] and the mixed rule, and it can
-    /// reach `bounds.host_memory`: the caller decides what that means.
+    /// The memory the high end of the recent samples of `key` asks for on `now`, whatever
+    /// their number or dispersion: `round_up_256MiB(max(1.2 * max(p95, held) + 128 MiB,
+    /// floor))`, at least [`crate::MIN_MEMORY`], where `p95` is the nearest-rank 95th
+    /// percentile of the last 32 samples (the largest under 20 samples, the second largest
+    /// from 20 on) and `held` the largest held sample of the last 256 or more runs, over the
+    /// fresh summaries of the key's levels (the larger of L1 and L2). One outlier run among 20
+    /// or more, and any run older than the last 32, does not hold it up; a run that reached
+    /// its booking and a kill's floor do. `None` when no fresh summary holds a memory sample.
+    /// It ignores the default booking, [`N_MIN`] and the mixed rule, and it can reach
+    /// `bounds.host_memory`: the caller decides what that means.
     pub fn peak_memory(&self, key: &Key, now: Day, bounds: &Bounds) -> Option<u64> {
         let now = now.min(Day(MAX_DAY));
         let l1 = if key.has_cfg() { self.get(key) } else { None };
@@ -299,6 +303,28 @@ impl Summaries {
             .flatten()
             .filter(|summary| fresh(summary, now))
             .filter_map(|summary| summary.peak_memory(bounds))
+            .max()
+    }
+
+    /// The memory a typical recent sample of `key` asks for on `now`:
+    /// `round_up_256MiB(1.2 * median + 128 MiB)` of the last 32 samples (the larger middle one
+    /// for an even count), at least [`crate::MIN_MEMORY`], over the fresh summaries of the
+    /// key's levels (the larger of L1 and L2). `None` when no fresh summary holds a memory
+    /// sample. It is what a key that stands in for another books (a kind for a target with no
+    /// run of its own), where one heavy member must not size every other. A level's kill
+    /// floor counts only while that level is raise-only on `now`, that is while its kills are
+    /// frequent (two own-limit kill events within [`crate::KILL_WINDOW_RUNS`] runs, for
+    /// [`crate::RAISE_ONLY_DAYS`] days): one kill of one member raises that member's own key
+    /// ([`Summaries::key_floor`]), not every key the level stands in for. It can reach
+    /// `bounds.host_memory`.
+    pub fn median_memory(&self, key: &Key, now: Day, bounds: &Bounds) -> Option<u64> {
+        let now = now.min(Day(MAX_DAY));
+        let l1 = if key.has_cfg() { self.get(key) } else { None };
+        [l1, self.get(&key.l2())]
+            .into_iter()
+            .flatten()
+            .filter(|summary| fresh(summary, now))
+            .filter_map(|summary| summary.median_memory(bounds, now))
             .max()
     }
 

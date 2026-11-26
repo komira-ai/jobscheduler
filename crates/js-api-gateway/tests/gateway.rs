@@ -369,7 +369,7 @@ fn refusal_to_status_table_matches_golden() {
 }
 
 /// The messages each gRPC code is tried with in the status table.
-const MESSAGES: [&str; 13] = [
+const MESSAGES: [&str; 14] = [
     "unknown-job",
     "expired",
     "not-finished",
@@ -382,6 +382,7 @@ const MESSAGES: [&str; 13] = [
     "too-many-follows",
     "log-store-unavailable",
     "field: fromOffset",
+    "field: attempt",
     "store-unavailable",
 ];
 
@@ -527,6 +528,15 @@ async fn a_status_message_selects_the_row() {
                 "error": "out-of-range",
                 "field": "fromOffset",
                 "reason": "the offset is past the end of the stream",
+            }),
+        ),
+        (
+            Status::out_of_range("field: attempt"),
+            400,
+            json!({
+                "error": "out-of-range",
+                "field": "attempt",
+                "reason": "the job has no such attempt yet",
             }),
         ),
         (
@@ -901,8 +911,8 @@ async fn fleet_usage_and_log_answers_survive_the_mapping() {
 }
 
 /// Asserts that `GET /v1/jobs/x-1/logs?stream=LOG_STREAM_STDERR&fromOffset=9007199254740993
-/// &maxBytes=7&follow=true` calls `GetLogs` with exactly the stream `Stderr`, the offset
-/// 2^53+1, `max_bytes` of `Some(7)` and `follow`; and that an answer with bytes that are not
+/// &maxBytes=7&follow=true&attempt=2` calls `GetLogs` with exactly the stream `Stderr`, the
+/// offset 2^53+1, `max_bytes` of `Some(7)`, `follow` and the attempt `Some(2)`; and that an answer with bytes that are not
 /// UTF-8 (a NUL among them), offsets above 2^53, a gap and the first-byte time is written
 /// with `data` in base64, every 64-bit field as a decimal string and the gap as an object.
 /// Catches a query parameter lost or narrowed, and a 64-bit value rounded in JSON.
@@ -910,7 +920,7 @@ async fn fleet_usage_and_log_answers_survive_the_mapping() {
 async fn the_gateway_route_carries_the_new_fields() {
     let (stub, router) = serve();
     let uri = "/v1/jobs/x-1/logs?stream=LOG_STREAM_STDERR&fromOffset=9007199254740993\
-        &maxBytes=7&follow=true";
+        &maxBytes=7&follow=true&attempt=2";
     let reply = send(&router, "GET", uri, "").await;
     assert_eq!(reply.status, StatusCode::OK);
     assert_eq!(
@@ -921,6 +931,7 @@ async fn the_gateway_route_carries_the_new_fields() {
             from_offset: Some(BIG),
             max_bytes: Some(7),
             follow: Some(true),
+            attempt: Some(2),
         }
     );
     assert_eq!(

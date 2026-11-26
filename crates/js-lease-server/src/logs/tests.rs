@@ -196,7 +196,7 @@ fn a_logs_table_builds_the_grants_it_names() {
     };
     let logs = crate::file::LogsConfig::ObjectStore(Box::new(table));
     let grants = from_config(&logs, &clock).unwrap();
-    let sink = grants.sink_for("host-a", "build-42").unwrap();
+    let sink = grants.sink_for("host-a", "build-42", 1).unwrap();
     assert_eq!(
         sink,
         LogSink {
@@ -247,9 +247,9 @@ fn a_presigned_prefix_table_grants_each_host_the_prefix_of_its_jobs() {
     assert_eq!(grant.bucket(), LOG_BUCKET);
     let expires = UNIX_EPOCH + Duration::from_millis(START_MS) + LOG_TTL;
     assert_eq!(grant.expires_at(), expires);
-    let sink = grants.sink_for("host-a", "build-42").unwrap();
+    let sink = grants.sink_for("host-a", "build-42", 1).unwrap();
     assert_eq!(sink.prefix, format!("{}build-42/", grant.prefix()));
-    let other = grants.sink_for("host-b", "build-43").unwrap();
+    let other = grants.sink_for("host-b", "build-43", 1).unwrap();
     assert!(
         !other.prefix.starts_with(grant.prefix()),
         "{}",

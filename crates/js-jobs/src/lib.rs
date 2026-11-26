@@ -77,6 +77,27 @@
 //! holding each for a lease on the store's clock, and deletes them when the agent acknowledges
 //! them ([`JobStore::ack_dispatch`]); an end deletes its job's start.
 //!
+//! A job's **attempts** and its **completion callback**
+//! (`docs/design/job-retry-and-completion-callback.md`) have their operations here:
+//! [`JobStore::retry_txn`] queues a job's next attempt after one ended ([`AttemptRecord`]),
+//! [`JobStore::attempt_row`] reads where and when an attempt ran ([`AttemptRow`]),
+//! [`JobStore::claim_callbacks`] and [`JobStore::answer_callback`] hand out a due callback
+//! to one instance ([`InstanceId`], [`CallbackClaim`]) and record its answer, and
+//! [`JobStore::callback_status`] reads where a job's delivery stands ([`CallbackStatus`]).
+//! A job's record keeps its current attempt and the attempts that ended ([`AttemptTrail`]: the
+//! newest [`MAX_ATTEMPT_HISTORY`], the rest counted), and every attempt that ran has a row of
+//! its own, written in the commit that ends or retries it. A retry is the one move of a job
+//! that ran back to queued, open only to a job whose retry policy ([`JobSpec::retry`]) leaves
+//! it an attempt after the current one.
+//!
+//! A job that asks for a callback ([`JobSpec::callback`], [`JobCallback`]) has its delivery in
+//! the row `callback/<job id>`, the one row that holds the callback's signing key: the job row
+//! holds the key's SHA-256 ([`CallbackKey::Digest`]), so a resubmit compares the callback by
+//! it. The row is written armed in the commit that records the job, made due in the commit
+//! that ends it (whichever operation ends it), claimed by one instance at a time, erases its key
+//! when the delivery is delivered, abandoned or expired, has its deadline raised at boot, and is
+//! deleted with the job's row at its retention end.
+//!
 //! # Results and retention
 //!
 //! A result keeps, beside the tails, the length of each output stream and the bytes each
@@ -119,6 +140,7 @@
 //! | `cordon/<host>` | the cordon of `<host>`: the holder it names, if any (the time it lapses is the row's expiry, so a lapsed cordon is an absent row); written by [`JobStore::cordon_host`] and [`JobStore::restore_cordon`], deleted by [`JobStore::uncordon_host`] or by its expiry, listed whole by [`JobStore::cordons`]; checked absent by every placement's transaction; a store written before cordons has none and opens unchanged |
 //! | `hostbook/<host>` | the reservation row of `<host>`: the allocation id of the last placement made with [`JobStore::place_reserving`], whose version is what a placement's picture of the host is checked against; an earlier build has none, and a host with none is placed on as one whose row is absent |
 //! | `node/<host>` | the [`NodeRecord`] of `<host>`: its session (the epoch of its last hello and the digest of that hello's secret), what the hello announced, its phase, load and listing flags, the epoch and sequence of the last applied beat and `heard_at`, the store's clock at the last hello or applied beat; written by [`JobStore::hello_node`] and [`JobStore::beat_node`], deleted by [`JobStore::forget_node`], [`JobStore::forget_silent_nodes`] and [`JobStore::retire_node`]; a store written before nodes has none and opens unchanged |
+//! | `attempt/<id>/<n>` | the [`AttemptRow`] of attempt `<n>` (ten digits) of the job `<id>`, an attempt that ran: written in the commit that ends or retries it, read by [`JobStore::attempt_row`], deleted by the retention sweep before the job's row and, when the job's row is gone without it (an older build's sweep), by the tick's search ([`JobStore::tick`]); a store written before attempts has none and opens unchanged |
 //! | `meta/cordons/restored` | empty: the cordons an earlier release kept only in a server's host bindings were carried into `cordon/` ([`JobStore::restore_cordons`]); no later start carries any again |
 //! | `meta/jobs/schema` | the schema version, four bytes big-endian, written once with `Cond::Absent` by the first store to open; a higher one is accepted |
 //! | `idx/job/active/<id>` | empty: the job has not ended |
@@ -178,7 +200,8 @@
 //! | [`JobStore::unmark_host`] | delete `hostmark/<host>` at the version given |
 //! | [`JobStore::drop_taints`] | delete each `taint/<host>` it is given at the version read, while it names the job given, in one transaction; nothing when none is left |
 //! | [`JobStore::transition`] | put `job/<id>` at its version (a move that does not end the job) |
-//! | [`JobStore::end_job`] | put `job/<id>` at its version, with its result and retention end; also put a booked `alloc/<id>` at its version (to releasing); nothing for an ended job |
+//! | [`JobStore::end_job`] | put `job/<id>` at its version, with its result and retention end and, for a job that holds a host, the attempt it closes, and put that attempt's `attempt/<id>/<n>`; also put a booked `alloc/<id>` at its version (to releasing); nothing for an ended job |
+//! | [`JobStore::retry_txn`] | put `job/<id>` at its version (placed, starting or running to queued, with the attempt appended, the counts of its requeues reset, its host barred and its next attempt's not-before), put `attempt/<id>/<n>`, put a booked `alloc/<id>` at its version (to releasing), and delete the allocation's start from `dispatch/<host>/`, queueing a stop as [`JobStore::end_job`] does |
 //! | [`JobStore::requeue_failed_prepare`] | put `job/<id>` at its version (placed to queued), put `alloc/<id>` at its version (to freed) |
 //! | [`JobStore::request_cancel`] | put `job/<id>` at its version (for a queued job, its end as [`JobStore::end_job`] writes it, and delete `mark/<id>` at its version or check it absent), or nothing for an ended job or a second cancel |
 //! | [`JobStore::requeue_held`] | put `job/<id>` at its version (placed or starting to queued, with the bars, the queue note and the host appended to the held or the capacity refusals, or to neither for a bundle-pending refusal), put `alloc/<id>` at its version (to freed), put the caller's rows beside it, and delete the allocation's start from `dispatch/<host>/` at its version |
@@ -189,8 +212,8 @@
 //! | [`JobStore::free_with`] | as [`JobStore::free`], with the caller's rows put beside it (the usage history row of the allocation) |
 //! | [`JobStore::end_and_free`] | put `job/<id>` at its version (ended as [`JobStore::end_job`] ends it) unless it has ended, and put `alloc/<id>` at its version (to freed) unless it is freed; nothing when both are so |
 //! | [`JobStore::end_and_free_with`] | as [`JobStore::end_and_free`], with the caller's rows put beside the free when it frees |
-//! | [`JobStore::delete_swept`] | delete each `job/<id>` past its retention end at its version, or nothing when none is |
-//! | [`JobStore::tick`] | per batch of [`SWEEP_BATCH`] rows, delete each `job/<id>` past its retention end at its version; then delete up to [`SWEEP_BATCH`] freed `alloc/<id>` rows past the allocation retention, at their versions, in one transaction |
+//! | [`JobStore::delete_swept`] | delete each `job/<id>` past its retention end at its version, with its `attempt/<id>/` rows (a job with more than a page of [`SWEEP_BATCH`] of them has each full page deleted first in a transaction of its own that checks `job/<id>` at its version), or nothing when none is |
+//! | [`JobStore::tick`] | per batch of [`SWEEP_BATCH`] rows, delete each `job/<id>` past its retention end at its version, with its `attempt/<id>/` rows as [`JobStore::delete_swept`] deletes them; then delete up to [`SWEEP_BATCH`] freed `alloc/<id>` rows past the allocation retention, at their versions, in one transaction; then delete, at their versions, the `attempt/` rows of the next page of the search whose `job/<id>` is absent, checking it absent, in one transaction |
 //! | [`JobStore::raise_deadlines_at_boot`] | adds to the caller's transaction a put of each `job/<id>` whose retention end it raises, at its version |
 //! | [`JobStore::raise_at_boot`] | put each `job/<id>` whose retention end or deadline floor it raises, and each `mark/<id>` whose deadline it raises, at its version, each in a transaction of its own, or nothing when none is |
 //! | [`JobStore::put_mark`] | check `job/<id>` at its version (queued, whole host), put `mark/<id>` if absent or at its version |
@@ -214,6 +237,8 @@
 //! ([`job_store_tests!`]), `interfere` is the store wrapper its failure and race checks
 //! use, and `rows` reads and writes a stored row's bytes for the fuzz targets.
 
+mod attempt;
+mod callback;
 mod codec;
 mod error;
 mod ids;
@@ -233,11 +258,18 @@ pub mod suite;
 #[cfg(any(test, feature = "test-support"))]
 pub use ids::ScriptedIds;
 
+pub use attempt::{
+    Attempt, AttemptOutcome, AttemptRecord, AttemptRow, AttemptTrail, MAX_ATTEMPT_HISTORY,
+    RETRY_HOST_BAR,
+};
+pub use callback::{
+    CallbackClaim, CallbackKey, CallbackState, CallbackStatus, JobCallback, KeyDigest,
+};
 pub use codec::DecodeError;
 pub use error::JobStoreError;
 pub use ids::{
-    AllocationId, ClientName, ClientNameError, DEFAULT_CLIENT_NAME, IdSource, JobId, JobIdError,
-    MAX_CLIENT_NAME_LEN, MAX_JOB_ID_LEN, MintError, RandomIds,
+    AllocationId, ClientName, ClientNameError, DEFAULT_CLIENT_NAME, IdSource, InstanceId, JobId,
+    JobIdError, MAX_CLIENT_NAME_LEN, MAX_JOB_ID_LEN, MintError, RandomIds,
 };
 pub use node::{
     AppliedBeat, Beat, Kept, LoadReading, NodeHello, NodeRecord, NodeRow, NodeState, Retire,

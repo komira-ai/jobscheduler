@@ -60,8 +60,9 @@ machine leases (9.1).
 
 **The capacity.** A host's capacity is the vector its agent reports: `cpu_millis`, `memory_bytes`, `gpus`, `vms` (the dimensions of
 section 3 of design.md; `vms` is added to the code's dimensions in step 59 or 60; the agent offers what it is willing to give, total less
-booked, 5.15). The pool's shape is a floor, not the size: a host whose reported shape satisfies the pool's shape is admitted
-(`Shape::satisfies`, registration.md), and a larger host simply holds more.
+booked, 5.15). The pool's shape is no floor: a host is admitted whatever amounts it reports, when its capabilities meet the pool's
+(registration.md), and is booked at what it reports. A smaller host holds less, a larger one more; the pool's shape is booked only for a
+host that has not said hello since a restart.
 
 **The request vector.** Every lease, and every run the scheduler places itself, carries a request vector. It is what is booked:
 

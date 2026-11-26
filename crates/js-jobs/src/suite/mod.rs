@@ -9,24 +9,33 @@
 //! opened with; nothing reads the wall clock or sleeps, and a race is arranged by a hook that
 //! commits just before the operation's own commit ([`Interfere::before_next`]).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent_wire::{HostPort, JobMount, Layer, MountMode, MountSource, PortProtocol, Propagation};
 use js_state::conformance::Backend;
-use js_state::{CommitStats, Cond, ManualClock, Store, Txn, Versioned};
+use js_state::{CommitStats, Cond, ManualClock, Store, StoreTime, Txn, Versioned};
 use js_types::{
     CpuSeries, ExecMode, HistoryKey, HostId, ImageDigestRef, Labels, ReservedKey, Resources,
+    RetryPolicy,
 };
 
+use crate::codec::Carried;
 use crate::interfere::Interfere;
 use crate::{
-    Booked, Constraints, DeclaredPort, Isolation, JobEnd, JobId, JobSpec, JobState, JobStore,
-    Needs, NetworkPolicy, NewJob, Output, RandomIds, ResourceUsage,
+    Attempt, AttemptOutcome, AttemptRecord, AttemptTrail, Booked, Constraints, DeclaredPort,
+    Isolation, JobEnd, JobId, JobRecord, JobSpec, JobState, JobStore, Needs, NetworkPolicy, NewJob,
+    Output, RandomIds, ResourceUsage, ResultReason, StartFailure,
 };
 
+mod attempt_rows;
+mod attempt_sweep;
+mod attempts;
 mod boot;
+mod callback_claims;
+mod callback_rows;
+mod callbacks;
 mod claimed;
 mod clock;
 mod collect;
@@ -61,7 +70,13 @@ mod taints;
 mod unclean;
 mod whole;
 
+pub use attempt_rows::*;
+pub use attempt_sweep::*;
+pub use attempts::*;
 pub use boot::*;
+pub use callback_claims::*;
+pub use callback_rows::*;
+pub use callbacks::*;
 pub use claimed::*;
 pub use clock::*;
 pub use collect::*;
@@ -287,6 +302,26 @@ where
     the_sweep_deletes_a_jobs_messages_with_its_row(backend);
     a_dispatch_row_of_another_build_is_read_or_left(backend);
     a_failed_claim_or_ack_changes_nothing_and_says_so(backend);
+    a_retry_is_refused_as_an_illegal_move_and_writes_nothing(backend);
+    no_job_has_an_attempt_row_or_a_callback_yet(backend);
+    an_answer_to_a_claim_no_row_holds_is_stale(backend);
+    job_without_a_policy_ends_after_one_attempt(backend);
+    a_resubmit_with_another_policy_conflicts(backend);
+    a_retry_queues_the_next_attempt_with_its_counts_reset_and_its_host_barred(backend);
+    a_retry_keeps_files_and_sets_no_retention_end(backend);
+    a_retry_stops_its_start_only_where_the_server_decided_its_end(backend);
+    a_placement_after_a_retry_counts_the_next_attempt_and_a_requeue_does_not(backend);
+    cancel_in_backoff_ends_the_job_at_once_without_a_new_attempt(backend);
+    a_cancel_and_a_retry_on_one_version_make_one_change(backend);
+    two_retry_decisions_on_one_version_make_one_attempt(backend);
+    attempt_hosts_outlives_the_history_bound(backend);
+    attempt_history_keeps_its_bound_and_counts_the_dropped(backend);
+    each_attempt_writes_its_row_in_its_commit(backend);
+    an_attempt_row_is_read_only_for_an_ended_attempt_of_this_job(backend);
+    the_sweep_deletes_a_jobs_attempt_rows_first(backend);
+    the_sweep_deletes_orphan_attempt_rows(backend);
+    a_sweep_page_that_loses_to_a_change_of_its_job_deletes_nothing(backend);
+    a_sweep_transaction_holds_at_most_a_page_of_attempt_rows(backend);
 }
 
 /// One `#[test]` per check of the suite, named as the check is, each on a fresh backend from
@@ -491,6 +526,41 @@ macro_rules! job_store_tests {
             the_sweep_deletes_a_jobs_messages_with_its_row,
             a_dispatch_row_of_another_build_is_read_or_left,
             a_failed_claim_or_ack_changes_nothing_and_says_so,
+            a_retry_is_refused_as_an_illegal_move_and_writes_nothing,
+            no_job_has_an_attempt_row_or_a_callback_yet,
+            an_answer_to_a_claim_no_row_holds_is_stale,
+            job_without_a_policy_ends_after_one_attempt,
+            a_resubmit_with_another_policy_conflicts,
+            a_retry_queues_the_next_attempt_with_its_counts_reset_and_its_host_barred,
+            a_retry_keeps_files_and_sets_no_retention_end,
+            a_retry_stops_its_start_only_where_the_server_decided_its_end,
+            a_placement_after_a_retry_counts_the_next_attempt_and_a_requeue_does_not,
+            cancel_in_backoff_ends_the_job_at_once_without_a_new_attempt,
+            a_cancel_and_a_retry_on_one_version_make_one_change,
+            two_retry_decisions_on_one_version_make_one_attempt,
+            attempt_hosts_outlives_the_history_bound,
+            attempt_history_keeps_its_bound_and_counts_the_dropped,
+            each_attempt_writes_its_row_in_its_commit,
+            an_attempt_row_is_read_only_for_an_ended_attempt_of_this_job,
+            the_sweep_deletes_a_jobs_attempt_rows_first,
+            the_sweep_deletes_orphan_attempt_rows,
+            a_sweep_page_that_loses_to_a_change_of_its_job_deletes_nothing,
+            a_sweep_transaction_holds_at_most_a_page_of_attempt_rows,
+            the_signing_key_is_held_in_the_callback_row_only,
+            a_resubmit_with_another_policy_or_callback_conflicts,
+            an_end_makes_its_callback_due_in_the_same_commit,
+            an_older_store_reader_leaves_callback_rows_intact,
+            a_lapsed_callback_claim_is_taken_again,
+            one_claim_per_callback_row,
+            a_claim_drops_the_entries_no_row_calls_for,
+            each_answer_is_recorded_by_the_claim_that_holds_the_row,
+            the_signing_key_is_erased_when_delivery_ends,
+            a_callback_past_its_deadline_expires,
+            a_deadline_is_cut_to_the_retention_end,
+            the_sweep_deletes_a_callback_with_its_job,
+            boot_raises_due_callback_deadlines,
+            the_boot_deletes_an_orphan_callback,
+            the_pending_callbacks_are_counted,
         );
     };
 }
@@ -648,7 +718,9 @@ pub(crate) fn digest(digit: char) -> String {
     format!("sha256:{}", digit.to_string().repeat(64))
 }
 
-/// A spec with every field set to something other than its default.
+/// A spec with every field but the callback set to something other than its default: a job
+/// with a callback writes a `callback/` row and mints its `webhook-id`, which the checks of
+/// rows and ids that use this spec do not count ([`callback_spec`] is this spec with one).
 pub(crate) fn full_spec() -> JobSpec {
     let caller = BTreeMap::from([("team".to_owned(), "infra".to_owned())]);
     JobSpec {
@@ -732,6 +804,82 @@ pub(crate) fn full_spec() -> JobSpec {
             HistoryKey::parse("root//crates/js-sched:js-sched rust_compile build")
                 .expect("a size class"),
         ),
+        retry: Some(policy(3)),
+        callback: None,
+    }
+}
+
+/// How an attempt ended, spelled out: `outcome`, with the exit code, the result's reason and
+/// the start failure given, and no agent's code.
+pub(crate) fn attempt_end(
+    outcome: AttemptOutcome,
+    exit_code: Option<i32>,
+    reason: Option<ResultReason>,
+    start_failure: Option<StartFailure>,
+) -> AttemptRecord {
+    AttemptRecord {
+        outcome,
+        exit_code,
+        reason,
+        start_failure,
+        start_failure_detail: None,
+    }
+}
+
+/// The attempts of `before`, a job on its first attempt, once that attempt ended at `at` as
+/// `end` says, `retried` or not: the attempt in the history with `before`'s host and times,
+/// and the host among those that held one; the first attempt with nothing ended when `before`
+/// holds no host (it ran nowhere).
+pub(crate) fn first_ended(
+    before: &JobRecord,
+    at: StoreTime,
+    end: AttemptRecord,
+    retried: bool,
+) -> AttemptTrail {
+    let Some(host) = before.host.clone() else {
+        return AttemptTrail::default();
+    };
+    let attempt = Attempt {
+        number: 1,
+        host: host.clone(),
+        queued_at: before.submitted_at,
+        placed_at: before.placed_at.expect("a job with a host was placed"),
+        started_at: before.started_at,
+        ended_at: at,
+        end,
+        retried,
+        carried: Carried::default(),
+    };
+    AttemptTrail::from_parts(1, vec![attempt], 0, None, BTreeSet::from([host]))
+}
+
+/// A retry policy of `max_attempts` attempts, a 5-second first wait and a 1-minute longest.
+pub(crate) fn policy(max_attempts: u32) -> RetryPolicy {
+    RetryPolicy {
+        max_attempts,
+        initial_backoff: Some(Duration::from_secs(5)),
+        max_backoff: Some(Duration::from_secs(60)),
+    }
+}
+
+/// The URL of [`callback_spec`]'s callback: a reference of the receiver's in its path and query.
+pub(crate) const CALLBACK_URL: &str = "https://hooks.example/js-done/ref-1?token=t";
+
+/// The signing key of [`callback_spec`]'s callback.
+pub(crate) fn signing_key() -> js_types::SigningKey {
+    js_types::SigningKey::new(b"0123456789abcdef0123456789abcdef".to_vec()).expect("a key")
+}
+
+/// [`full_spec`] with a callback to [`CALLBACK_URL`], signed with [`signing_key`], tried for a
+/// minute after the job's end.
+pub(crate) fn callback_spec() -> JobSpec {
+    JobSpec {
+        callback: Some(crate::JobCallback {
+            url: CALLBACK_URL.to_owned(),
+            key: crate::CallbackKey::Key(signing_key()),
+            deadline_seconds: Some(60),
+        }),
+        ..full_spec()
     }
 }
 

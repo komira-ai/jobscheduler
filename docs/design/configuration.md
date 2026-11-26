@@ -123,18 +123,25 @@ same way (0, 101, a negative number or a word is refused at the check that reads
 
 | where | what it cuts |
 |---|---|
-| a `[[pool]]` of the `--config` file | the `shape` `memory_bytes` of a joined pool, and the floor memory (1 GiB) of an elastic pool |
-| the agent pool file (`--agent-pool-config`; top level, before `[shape]`) | the `[shape]` `memory_bytes` the pool books for each host |
+| a `[[pool]]` of the `--config` file | the memory of each host of a joined pool, and the floor memory (1 GiB) of an elastic pool |
+| the agent pool file (`--agent-pool-config`; top level, before `[shape]`) | the memory of each host the pool books |
 
-The server books `floor(memory x percent / 100)` bytes, computed once where the booked shape is built, and every booking path sees that
-number: a lease, a whole-node lease, a run's memory limit, a reservation and the host listing. It applies to the memory the operator
-configured and never to a figure an agent reports about itself: a host that claims more than the pool lists is still booked at the cut. A
-host's hello is held to the whole listed memory, not the cut (a host must really have the memory; the pool books less of it). `GET
-/v1/hosts` shows, per host, `memory: {configured_bytes, schedulable_percent, bookable_bytes}` (`shape.memory_bytes` is the bookable
-figure), and `GET /v1/pools` and `/status` show the same three for an elastic pool's floor.
+**A host's capacity is what it reports.** A registered host is booked at the CPU, memory, GPUs and disk its hello reports, less or more
+than the pool's `[shape]`: a host that reports less (a node that lost a DIMM, say) joins and is booked at what it has, and a host that
+reports more is booked at what it has too. The `[shape]` numbers are no floor and no ceiling; they are booked only for a host that has
+not said hello since a restart, until it does, and they size an elastic pool's launches and the cold and pack defaults. Only the host's
+capabilities are held to the pool's at its hello (`[capabilities]`, and the class of GPUs both name; refused `below-floor`). In a pool that
+declares `exec`, a host's GPUs are booked only when it reports a working `gpu-toolkit`; a pool whose `[shape]` has GPUs refuses a GPU
+host without one (`host-contract`).
+
+The server books `floor(memory x percent / 100)` bytes of that memory, computed once where the booked shape is built, and every booking
+path sees that number: a lease, a whole-node lease, a run's memory limit, a reservation and the host listing. The percent is never applied
+twice and a hello is not held to any memory. `GET /v1/hosts` shows, per host, `memory: {configured_bytes, schedulable_percent,
+bookable_bytes}`, where `configured_bytes` is the memory the host reports (the `[shape]`'s for a host that has not said hello since a
+restart) and `shape.memory_bytes` is the bookable figure; `GET /v1/pools` and `/status` show the same three for an elastic pool's floor.
 
 The percent of an agent pool (the agent pool file, or a `[[pool]]` whose hosts register) is the placement
-engine's rule instead: the registry's book takes each host's whole `[shape]` memory, and the engine books no more than
+engine's rule instead: the registry's book takes each host's whole booked memory, and the engine books no more than
 `floor(memory x percent / 100)` of it. What fits the pool is still judged at the cut, so a request above it is refused `no-fit`, and
 `GET /v1/hosts` shows `shape.memory_bytes` as the cut, beside `memory`.
 
@@ -211,6 +218,7 @@ port and counts nothing. Any other path, on that port, is answered as an unknown
 |---|---|---|---|
 | `js_jobs` | gauge | `state` | the jobs in the job tables, by state (`queued`, `placed`, `starting`, `running`, `succeeded`, `failed`, `cancelled`, `lost`, `failed-to-start`); only with the job service on |
 | `js_queue_oldest_age_seconds` | gauge | | how long the oldest queued job has waited since its submit, 0 with none queued; only with the job service on |
+| `js_callback_pending` | gauge | | the completion callbacks of ended jobs not yet delivered, abandoned or expired, claimed or not, read from the store's due entries; one past its deadline counts until a try finds it expired; only with the job service on |
 | `js_job_placements_total` | counter | | the queued jobs placed on a host |
 | `js_queue_wait_seconds` | histogram | | each placed job's wait from its submit to its placement |
 | `js_job_start_failures_total` | counter | `code` | the jobs that failed to start, by code (`no-capacity`, `start-timeout`, `exclusive-not-ready`, `agent-refused`, `input-unavailable`) |
@@ -218,6 +226,7 @@ port and counts nothing. Any other path, on that port, is answered as an unknown
 | `js_store_write_failures_total` | counter | | the passes over the job tables the server makes itself (the job pass, a placement, a heartbeat's job listing) that failed, so their write did not commit; a client's submit or cancel that fails is answered to the client |
 | `js_job_pass_duration_seconds` | histogram | | how long each job pass of the tick took |
 | `js_job_tables_total` | counter | `from` | the passes over the queued jobs, by where each took the job tables (the live allocations, the queued jobs, the marks and the cordons) from: `store` (read, as a write came since the last read), `kept` (no write since), `submitted` (no write since but the commits of this server's submits, whose jobs were added to the tables kept) |
+| `js_callback_deliveries_total` | counter | `result` | the tries of jobs' completion callbacks (docs/design/job-retry-and-completion-callback.md) whose answer this server recorded, by result: `delivered` (a 2xx), `abandoned` (a 410), `failed` (any other status, a timeout, a refused connection, a redirect, a name that did not resolve) or `refused-address` (the address rule refused an address of the receiver, and nothing was sent); a try whose claim lapsed before its answer, or whose answer the store did not take, is not counted |
 | `js_placement_refusals_total` | counter | `host`, `reason` | the refusals of a host to a queued job by the placement, by the predicate that refused: `cpu` (the CPU slack: what the host is charged plus the job's cores is above its cores times the slack), `predicted-memory` (the load predicate's memory side), `booked-memory` (the flat memory guard), `cpu-curve` (the curve hosts' slot-by-slot CPU check, under `placement_curves = "on"`) or `cold-cap` (the cold leases admitted this window reach the cap). A job is counted once for each host that refused it in each pass; a host refused for none of these (a lease cap, a job larger than the host) is not counted. The same refusals are logged: one info line per host per pass with the count of each reason and the figures of the latest, and one debug line for each, naming the job |
 | `js_curve_wait_expiries_total` | counter | | the queued jobs of a curve class that waited past `server.curve_max_wait_seconds` with no host fitting their curve, and were tested with their flat number from then on; written at 0 in every mode. A rise means curves book more than the hosts can give |
 | `js_agent_start_refusals_total` | counter | `host`, `code` | the job starts a host's agent refused, by the refusal code the agent listed (`no-capacity`, `input-not-allowed`, ...): the code itself when it is 1 to 64 characters of `a-z`, `0-9` and `-`, `other` otherwise, and `none` when the agent listed no code. A refusal is counted once, when the requeue or the end it brings is committed, whether the job then goes back to the queue (`host-held`, `no-capacity`, `bundle-pending`) or fails to start |
@@ -233,7 +242,8 @@ The counters count from the start of the process; a start failure or a loss is c
 still counts what it ended. The gauges are read at each scrape from the state `GET /v1/hosts` and the job service read, holding no lock
 of the server's while the text is written; a scrape whose read of the job tables fails is answered 503. The parts are read one after
 another, not in one transaction, so a job placed between two reads can show as queued while its booking already counts. The text
-names no job, lease, run or token: its labels are a state, a failure code, a host's id, a pool's name and a mark.
+names no job, lease, run, token or callback: its labels are a state, a failure code, a host's id, a pool's name, a mark and a callback's
+result.
 
 - **Address.** The route takes no token, so it is served only on a private address (the rule of `/status`: loopback, RFC 1918, the
   shared range a tailnet uses, link-local and IPv6 unique-local; a wildcard is accepted), and on each request only to a peer whose

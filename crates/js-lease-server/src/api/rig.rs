@@ -141,8 +141,9 @@ async fn text(reply: Response) -> (StatusCode, String) {
 }
 
 /// Asserts the host listing with a draining host: `mark` shows on the host that was drained,
-/// the body is exactly the golden text, and a host nobody drained shows no `mark`. It catches
-/// a key renamed, and a mark on a host that is not set aside.
+/// the body is exactly the golden text (the host's shape and memory are what its hello
+/// claimed, 8 cores and 16 GiB, not the pool's shape), and a host nobody drained shows no
+/// `mark`. It catches a key renamed, and a mark on a host that is not set aside.
 #[tokio::test]
 async fn the_host_listing_shows_the_mark() {
     let rig = Rig::new("listing").await;
@@ -157,7 +158,7 @@ async fn the_host_listing_shows_the_mark() {
     assert_eq!(body, GOLDEN, "{body}");
 }
 
-pub(super) const GOLDEN: &str = r#"{"hosts":[{"id":"a","source":"registered","state":"live","lost":false,"phase":"serving","shape":{"cpu_millis":4000,"memory_bytes":8589934592,"gpus":0},"memory":{"configured_bytes":8589934592,"schedulable_percent":100,"bookable_bytes":8589934592},"capabilities":{"arch":"arm64","os":"macos"},"labels":{},"agent_version":"0.1.0","releasing":false,"mark":"draining"}]}"#;
+pub(super) const GOLDEN: &str = r#"{"hosts":[{"id":"a","source":"registered","state":"live","lost":false,"phase":"serving","shape":{"cpu_millis":8000,"memory_bytes":17179869184,"gpus":0},"memory":{"configured_bytes":17179869184,"schedulable_percent":100,"bookable_bytes":17179869184},"capabilities":{"arch":"arm64","os":"macos"},"labels":{},"agent_version":"0.1.0","releasing":false,"mark":"draining"}]}"#;
 
 /// A writer the log lines of a test go to.
 #[derive(Clone, Default)]

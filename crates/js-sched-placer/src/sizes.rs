@@ -22,18 +22,25 @@
 //! [`JobSizes::sized`] books, for each dimension the job leaves at zero:
 //!
 //! - **Learned.** A class with a fresh memory sample of its own books what its own runs ask
-//!   for ([`js_sizing::Summaries::peak_memory`]: `1.2 x` the largest peak of its recent runs
-//!   plus 128 MiB, at least 1 GiB, never below a memory kill's floor), from its first run on,
-//!   whatever their number or spread: neither its kind's largest peak nor the cold size holds
-//!   it above what it uses.
+//!   for ([`js_sizing::Summaries::peak_memory`]: `1.2 x` the 95th percentile of the peaks of
+//!   its last 32 runs (their largest under 20 runs, the second largest from 20 on) plus 128 MiB,
+//!   at least 1 GiB, never below a run that reached its booking nor a memory kill's floor of
+//!   its own), from its first run on, whatever their number or spread: neither its kind's
+//!   largest peak, one outlier of its own, nor the cold size holds it above what it uses.
 //! - **Fallback.** A job may name a second class in its label [`SIZE_FALLBACK_LABEL`] (a build
 //!   farm names the kind of step, where its `size-class` names the target). A class with no
-//!   run of its own books the memory its fallback's runs ask for (the same figure of theirs):
-//!   the fallback class's, else, when the job names none or that class has no fresh run, the
-//!   client's whole history on the job's platform ([`JobSizes::client_key_of`], which every run
-//!   of the client but a memory kill teaches), and at least its own kill floor. The fallback
-//!   class is the class of that name, under the same client and platform
-//!   (`docs/design/sizing.md`, 7.8).
+//!   run of its own books what its fallback's typical run asks for
+//!   ([`js_sizing::Summaries::median_memory`]: `1.2 x` the median peak of its last 32 runs plus
+//!   128 MiB, at least 1 GiB), not its largest peak: a kind's heaviest target does not size
+//!   every new target of the kind. Nor does one kill of one target: the kind's kill floor
+//!   counts only while its kills are frequent (two kill events within 256 runs of the kind,
+//!   for 7 days after the second); a kill raises the target that was killed. That is the fallback class's, else,
+//!   when the job names none or that class has no fresh run, the client's whole history on the
+//!   job's platform ([`JobSizes::client_key_of`], which every run of the client but a memory
+//!   kill teaches), and at least its own kill floor. A target that needs more than its kind's
+//!   typical run runs on what its host has (the booking is no limit, and placement counts its
+//!   host's measured memory) and its first run sizes it. The fallback class is the class of
+//!   that name, under the same client and platform (`docs/design/sizing.md`, 7.8).
 //! - **Cold.** A class with no history of its own, whose client has no fresh run either, books
 //!   the cold size ([`ColdSize`]): the server's `cold_cpu_millis` and `cold_memory_bytes`, which
 //!   default to [`DEFAULT_COLD_CPU_MILLIS`] (22 cores) and [`DEFAULT_COLD_MEMORY_BYTES`] (4 GiB),
@@ -446,11 +453,13 @@ impl JobSizes {
     ///
     /// The memory: a class with a fresh memory sample of its own (a class idle over
     /// [`js_sizing::STALE_DAYS`] has none) books what its own runs ask for
-    /// ([`js_sizing::Summaries::peak_memory`]: `1.2 x` their largest recent peak plus 128 MiB,
-    /// at least 1 GiB, and its kill floor), from its first run on, whatever their number or
-    /// spread. Any other class books what its fallback's runs ask for (the fallback class's,
-    /// else the client's whole history's; the cold memory when the client has none), and its
-    /// kill floor. A booking that reaches the most bookable memory a host has books all of it.
+    /// ([`js_sizing::Summaries::peak_memory`]: `1.2 x` the 95th percentile of their last 32
+    /// peaks plus 128 MiB, at least 1 GiB, and its kill floor), from its first run on, whatever
+    /// their number or spread. Any other class books what its fallback's typical run asks for
+    /// ([`js_sizing::Summaries::median_memory`], of the fallback class, else of the client's
+    /// whole history; the cold memory when the client has none; the fallback's kill floor only
+    /// while its kills are frequent), and its own kill floor. A booking
+    /// of its own runs that reaches the most bookable memory a host has books all of it.
     fn size_of(&self, job: &JobRecord, day: Day, bounds: &Bounds) -> (u64, u64, SizedFrom) {
         let key = Self::key_of(job);
         let cpu = self.cpu_of(job, day, bounds);
@@ -462,13 +471,15 @@ impl JobSizes {
                 (cpu, own.max(floor), SizedFrom::Class)
             };
         }
-        let peak = |key: &Key| {
-            let peak = self.summaries.peak_memory(key, day, bounds);
-            peak.filter(|memory| *memory < bounds.host_memory)
+        // A stand-in books its typical run, not its heaviest: one large target of a kind
+        // must not size every new target of it.
+        let typical = |key: &Key| {
+            let typical = self.summaries.median_memory(key, day, bounds);
+            typical.filter(|memory| *memory < bounds.host_memory)
         };
         let fallback = Self::fallback_key_of(job)
-            .and_then(|key| peak(&key))
-            .or_else(|| peak(&Self::client_key_of(job)));
+            .and_then(|key| typical(&key))
+            .or_else(|| typical(&Self::client_key_of(job)));
         // The base and the floor stay within the host.
         match fallback {
             Some(memory) => (cpu, memory.max(floor), SizedFrom::Fallback),

@@ -1,4 +1,5 @@
-//! The bytes of the job, allocation, mark, taint, node and dispatch rows (most in `*_fields`).
+//! The bytes of the job, allocation, mark, taint, node, dispatch and callback rows (most in
+//! `*_fields`).
 //!
 //! A row is a format byte ([`FORMAT`]) and then fields, each a tag (two bytes, big-endian),
 //! a length (four bytes, big-endian) and that many bytes of value:
@@ -30,7 +31,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use js_state::StoreTime;
-use js_types::{HostId, ImageDigestRef, Labels, RESERVED_PREFIX, ReservedKey, Resources};
+use js_types::{HostId, ImageDigestRef, Resources};
 
 use crate::error::JobStoreError;
 use crate::ids::{AllocationId, ClientName, JobId};
@@ -39,6 +40,8 @@ use crate::record::{
     JobSpec, JobState, Needs, NetworkPolicy, StartFailure,
 };
 
+mod attempt_fields;
+pub(crate) mod callback_fields;
 pub(crate) mod dispatch_fields;
 mod file_fields;
 pub(crate) mod host_fields;
@@ -52,6 +55,7 @@ pub(crate) mod rootfs_fields;
 mod test_support;
 mod whole_fields;
 
+pub(crate) use attempt_fields::{decode_attempt_row, encode_attempt_row};
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use host_fields::job_host_tag;
 pub(crate) use host_fields::{decode_cordon, decode_taint, encode_cordon, encode_taint};
@@ -64,7 +68,8 @@ pub(crate) const FORMAT: u8 = 1;
 
 /// The tags of a job row (whole-host tags 45, 46, 59 and 63 are in `whole_fields`, isolation tag
 /// 47 in `host_fields`, queue tags 48 to 53 in `queue_fields`, 54 to 58 in `rootfs_fields`, the
-/// history key 66 in `key_fields`).
+/// history key 66 in `key_fields`, the callback 68 in `callback_fields`, the retry policy 67 and
+/// the attempts 69 to 73 in `attempt_fields`).
 pub(crate) mod job_tag {
     /// The job's id (text).
     pub const ID: u16 = 1;
@@ -367,6 +372,8 @@ fn put_spec(row: &mut Writer, spec: &JobSpec) {
     file_fields::put_files(row, &spec.files);
     rootfs_fields::put_spec(row, &spec.layers, &spec.mounts, &spec.host_ports);
     key_fields::put(row, &spec.labels, spec.history_key.as_ref());
+    attempt_fields::put_retry(row, spec.retry.as_ref());
+    callback_fields::put_spec(row, spec.callback.as_ref());
 }
 
 /// The row of `job`.
@@ -397,6 +404,7 @@ pub(crate) fn encode_job(job: &JobRecord) -> Result<Vec<u8>, JobStoreError> {
     );
     whole_fields::put_job(&mut row, job);
     queue_fields::put_job(&mut row, &job.queue);
+    attempt_fields::put_job(&mut row, &job.attempt)?;
     let format = rootfs_fields::format_of(job.spec.image.as_ref());
     row.finish_as(format, &job.carried)
 }
@@ -681,36 +689,6 @@ fn host_ports_of(tag: u16, value: Vec<u8>) -> Result<Vec<u16>, DecodeError> {
         .ok_or(DecodeError::BadValue { tag })
 }
 
-/// The reserved label keys a row may hold.
-const RESERVED: [ReservedKey; 5] = [
-    ReservedKey::Tenant,
-    ReservedKey::Run,
-    ReservedKey::ValidationRun,
-    ReservedKey::Definition,
-    ReservedKey::Instance,
-];
-
-/// A label set as a row holds it: the caller's labels, and the reserved ones the scheduler
-/// set, each checked as when it was first made. A reserved key this build does not know is
-/// one a later build sets: the row is [`DecodeError::Newer`], as for an enum value.
-fn labels_of(tag: u16, value: Vec<u8>) -> Result<Labels, DecodeError> {
-    let bad = DecodeError::BadValue { tag };
-    let (reserved, caller): (BTreeMap<String, String>, BTreeMap<String, String>) =
-        text_map_of(tag, value)?
-            .into_iter()
-            .partition(|(key, _)| key.starts_with(RESERVED_PREFIX));
-    let labels = Labels::from_caller(&caller).map_err(|_| bad)?;
-    reserved
-        .into_iter()
-        .try_fold(labels, |labels, (key, value)| {
-            let known = RESERVED
-                .into_iter()
-                .find(|reserved| reserved.key() == key)
-                .ok_or(DecodeError::Newer)?;
-            labels.with_reserved(known, &value).map_err(|_| bad)
-        })
-}
-
 fn job_id_of(tag: u16, value: Vec<u8>) -> Result<JobId, DecodeError> {
     JobId::parse(&text_of(tag, value)?).map_err(|_| DecodeError::BadValue { tag })
 }
@@ -873,9 +851,10 @@ fn take_spec(fields: &mut Fields) -> Result<JobSpec, DecodeError> {
     let network = fields.opt(t::NETWORK, network_of)?.unwrap_or_default();
     let ports = fields.opt(t::PORTS, ports_of)?.unwrap_or_default();
     let files = file_fields::take_files(fields)?;
-    let labels = fields.opt(t::LABELS, labels_of)?.unwrap_or_default();
+    let labels = key_fields::take_labels(fields)?;
     let (layers, mounts, host_ports) = rootfs_fields::take_spec(fields)?;
     let history_key = key_fields::take_history_key(fields)?;
+    let retry = attempt_fields::take_retry(fields)?;
     Ok(JobSpec {
         image,
         command,
@@ -892,6 +871,8 @@ fn take_spec(fields: &mut Fields) -> Result<JobSpec, DecodeError> {
         mounts,
         host_ports,
         history_key,
+        retry,
+        callback: callback_fields::take_spec(fields)?,
     })
 }
 
@@ -940,6 +921,7 @@ pub(crate) fn decode_job(row: &[u8]) -> Result<JobRecord, DecodeError> {
         held_refusals: whole.held_refusals,
         capacity_refusals: whole.capacity_refusals,
         queue: queue_fields::take_job(&mut fields)?,
+        attempt: attempt_fields::take_job(&mut fields)?,
         carried: fields.carried(),
     })
 }

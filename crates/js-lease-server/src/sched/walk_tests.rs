@@ -29,8 +29,8 @@ fn launched(name: &str, provider: &str) -> js_agent_wire::Hello {
     hello
 }
 
-/// The agent side of a server whose pool books 8 cores and 16 GiB of each host, from the
-/// flags (no platform), with `static-1` joined with the pool's token and `cloud-1` launched
+/// The agent side of a server whose pool lists 8 cores and 16 GiB, and whose two hosts claim
+/// 16 cores and 32 GiB and are booked so, from the flags (no platform), with `static-1` joined with the pool's token and `cloud-1` launched
 /// for the pool; `order` replaces the order of no configuration when given.
 fn two_providers(name: &str, order: Option<Vec<js_types::ProviderId>>) -> Rig {
     let dir = scratch(name);
@@ -88,7 +88,9 @@ fn default_platform_without_config_keeps_static_then_registered() {
 #[test]
 fn a_free_host_of_a_later_provider_is_used_before_any_launch() {
     let full = two_providers("walk_later_full", None);
-    assert_eq!(full.place("fill", 8_000, GIB).as_deref(), Some("static-1"));
+    for (id, cpu) in [("fill", 16_000), ("fill-slack", 1_600)] {
+        assert_eq!(full.place(id, cpu, GIB).as_deref(), Some("static-1"));
+    }
     assert_eq!(full.place("job", 1_000, GIB).as_deref(), Some("cloud-1"));
     assert!(queued(&full).is_empty());
 

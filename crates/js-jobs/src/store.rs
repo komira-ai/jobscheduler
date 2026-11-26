@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use js_state::{Cond, ResumeToken, ScanRange, Store, StoreTime, Txn, TxnRead, Version, Versioned};
 use js_types::HostId;
 
+use crate::attempt::AttemptTrail;
 use crate::codec::{Carried, DecodeError, decode_allocation, decode_job};
 use crate::error::JobStoreError;
 use crate::ids::{AllocationId, ClientName, IdSource, JobId, RandomIds};
@@ -19,6 +20,8 @@ use crate::record::{
 };
 use crate::result::{JobEnd, Output, Retention};
 
+mod attempts;
+mod callbacks;
 mod cordons;
 mod dispatch;
 mod duties;
@@ -44,6 +47,10 @@ pub use index::Backfill;
 pub use queue::queue_order;
 
 pub use whole::{FailedPrepare, Placement};
+
+// The suite pages its orphan rows as the tick does.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use ending::ORPHAN_PAGE;
 
 // The suite asserts the size of a store batch; nothing else outside `written` reads it.
 #[cfg(any(test, feature = "test-support"))]
@@ -134,6 +141,9 @@ pub struct JobStore<S, I = RandomIds> {
     retention: Retention,
     /// How long a freed allocation's row is kept after its free: applied by the tick.
     allocation_retention: Retention,
+    /// Where the tick's search for attempt rows whose job's row is gone goes on from: shared
+    /// with the guarded views.
+    orphans: Arc<std::sync::Mutex<Option<ResumeToken>>>,
 }
 
 /// The number the next job store this process makes gets ([`Written`]).
@@ -272,6 +282,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             guard: None,
             retention: Retention::DEFAULT,
             allocation_retention: Retention::ALLOCATION_DEFAULT,
+            orphans: Arc::default(),
         };
         jobs.backfill_indexes()?;
         Ok(jobs)
@@ -341,10 +352,18 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// The job's `submitted_at` is the store's clock as the transaction that records it reads
     /// it ([`Store::txn_stamped`]): no clock is read before.
     ///
+    /// A job that asks for a callback ([`JobSpec::callback`]) gives its key
+    /// ([`crate::CallbackKey::Key`]): the commit that records the job writes the job row with
+    /// the key's digest in its place and the armed row `callback/<id>` with the key and a
+    /// `webhook-id` minted from the store's id source (`crate::keys::CALLBACK`). The record
+    /// answered, and every read after, holds the digest; a resubmit compares the callback by
+    /// it, so it may name the key in either form.
+    ///
     /// # Errors
     /// [`JobStoreError::JobIdConflict`], [`JobStoreError::IdSpaceExhausted`],
-    /// [`JobStoreError::UnknownRow`] when the id's row is one a later build wrote,
-    /// [`JobStoreError::Store`] or [`JobStoreError::Mint`].
+    /// [`JobStoreError::CallbackKeyMissing`] when a job this call would record names its
+    /// callback's key by its digest, [`JobStoreError::UnknownRow`] when the id's row is one a
+    /// later build wrote, [`JobStoreError::Store`] or [`JobStoreError::Mint`].
     pub fn insert_queued(&self, job: NewJob) -> Result<Inserted, JobStoreError> {
         let stored = match &job.id {
             Some(id) => self.get_job(id)?,
@@ -399,10 +418,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         }
         let (record, written) = self.write_stamped(&mut |now| {
             let record = queued_record(id.clone(), spec.clone(), priority, client.clone(), now);
-            Ok((
-                index::put_job(Txn::new(), None, &record, Cond::Absent)?,
-                record,
-            ))
+            self.recorded(record)
         })?;
         match written {
             Ok((_, step)) => Ok(Inserted {
@@ -430,10 +446,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             let (record, written) = self.write_stamped(&mut |now| {
                 let record =
                     queued_record(id.clone(), spec.clone(), priority, client.cloned(), now);
-                Ok((
-                    index::put_job(Txn::new(), None, &record, Cond::Absent)?,
-                    record,
-                ))
+                self.recorded(record)
             })?;
             if let Ok((_, step)) = written {
                 return Ok(Inserted {
@@ -833,6 +846,7 @@ fn queued_record(
         held_refusals: Vec::new(),
         capacity_refusals: Vec::new(),
         queue: QueueTrail::default(),
+        attempt: AttemptTrail::default(),
         carried: Carried::default(),
         start_failure_detail: None,
     }

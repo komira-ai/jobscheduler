@@ -14,9 +14,9 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use js_proto::v1::job_service_server::JobService;
 use js_proto::v1::{
-    Accelerator, CancelJobRequest, Constraints, GetJobRequest, HostPort, JobFile, JobSpec, Layer,
-    ListJobsRequest, Mount, Needs, PortForward, ProviderSource, SubmitJobRequest,
-    SubmitJobResponse, layer, mount,
+    Accelerator, Callback, CancelJobRequest, Constraints, GetJobRequest, HostPort, JobFile,
+    JobSpec, Layer, ListJobsRequest, Mount, Needs, PortForward, ProviderSource, RetryPolicy,
+    SubmitJobRequest, SubmitJobResponse, layer, mount,
 };
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use proptest::collection::{btree_map, vec};
@@ -227,6 +227,34 @@ fn rootfs() -> impl Strategy<Value = (Vec<HostPort>, Vec<Layer>, Vec<Mount>)> {
     )
 }
 
+/// A job spec's retry policy and callback, each absent or with any value of its fields: the
+/// key any bytes, so its base64 in JSON is exercised at every length.
+fn retry_and_callback() -> impl Strategy<Value = (Option<RetryPolicy>, Option<Callback>)> {
+    let retry = (
+        any::<u32>(),
+        proptest::option::of(any::<u32>()),
+        proptest::option::of(any::<u32>()),
+    )
+        .prop_map(
+            |(max_attempts, initial_backoff_seconds, max_backoff_seconds)| RetryPolicy {
+                max_attempts,
+                initial_backoff_seconds,
+                max_backoff_seconds,
+            },
+        );
+    let callback = (
+        text(),
+        vec(any::<u8>(), 0..70),
+        proptest::option::of(any::<u32>()),
+    )
+        .prop_map(|(url, signing_key, deadline_seconds)| Callback {
+            url,
+            signing_key,
+            deadline_seconds,
+        });
+    (proptest::option::of(retry), proptest::option::of(callback))
+}
+
 fn job_spec() -> impl Strategy<Value = JobSpec> {
     let strings = (job_id(), text(), text(), vec(text(), 0..4), entries());
     let resources = (
@@ -242,12 +270,13 @@ fn job_spec() -> impl Strategy<Value = JobSpec> {
         entries(),
         text(),
     );
-    (strings, resources, rest, rootfs()).prop_map(
+    (strings, resources, rest, rootfs(), retry_and_callback()).prop_map(
         |(
             (job_id, image, command, args, env),
             (needs, constraints, wall_limit_seconds, network),
             (ports, files, priority, labels, history_key),
             (host_ports, layers, mounts),
+            (retry, callback),
         )| JobSpec {
             job_id,
             image,
@@ -275,6 +304,8 @@ fn job_spec() -> impl Strategy<Value = JobSpec> {
             layers,
             mounts,
             history_key,
+            retry,
+            callback,
         },
     )
 }

@@ -1,6 +1,7 @@
 //! A pool that places each host by what its hello reported (`PoolConfig::placing_by_hello`,
-//! the lease server's elastic pools): its shape is a floor that names no `arch`, every host
-//! is booked as the floor and placed by the capabilities its agent reported on top of it,
+//! the lease server's elastic pools): its shape names no `arch`, every host is booked at
+//! the numbers its hello reports and placed by the capabilities its agent reported on top
+//! of the pool's,
 //! and a request is placed by the capabilities the hosts reported. A pool without the
 //! setting (an agent or joined pool) places every host on its own shape, as before.
 
@@ -19,6 +20,14 @@ use support::*;
 fn floor() -> Shape {
     Shape::new(
         Resources::new(4000, 8 << 30, 0, None).unwrap(),
+        BTreeMap::new(),
+    )
+}
+
+/// The shape a [`hello`] claims: 8 cores and 16 GiB, more than the [`floor`], no capability.
+fn claimed() -> Shape {
+    Shape::new(
+        Resources::new(8000, 16 << 30, 0, None).unwrap(),
         BTreeMap::new(),
     )
 }
@@ -83,13 +92,12 @@ fn say(registry: &Registry, said: &js_agent_wire::Hello) {
     registry.hello(said, &cred("t")).unwrap();
 }
 
-/// Catches: a placer told the pool's booked shape in place of the host's (an elastic host
-/// that is no node of js-sched, having no `arch`), told the host's claimed numbers in place
-/// of the pool's, or told the reported capabilities in a pool that does not place by
-/// hello. The host claims 8 cores and reports `arch`, `os` and `runtime`: in a pool that
-/// places by hello the placer hears the pool's 4 cores with all three; in a pool of the
-/// same floor without the setting it hears the floor alone, as an agent or joined pool
-/// always told it.
+/// Catches: a placer told the pool's shape numbers in place of the host's claim (the host
+/// claims 8 cores, more than the pool's 4), or told the reported capabilities in a pool that
+/// does not place by hello. The host claims 8 cores and reports `arch`, `os` and `runtime`:
+/// in a pool that places by hello the placer hears its 8 cores with all three; in a pool of
+/// the same shape without the setting it hears its 8 cores and no capability, as an agent
+/// or joined pool always told it.
 #[test]
 fn the_placer_is_told_the_capabilities_the_hello_reported_only_when_the_pool_places_by_them() {
     let mut said = hello_of("a", "arm64");
@@ -103,11 +111,11 @@ fn the_placer_is_told_the_capabilities_the_hello_reported_only_when_the_pool_pla
     };
     assert_eq!(
         placed(by_hello()),
-        ["up a 4000 arch=arm64,os=macos,runtime=container"]
+        ["up a 8000 arch=arm64,os=macos,runtime=container"]
     );
     let name = ProviderId::new("builders").unwrap();
     let plain = PoolConfig::new(name, class(), floor(), 4);
-    assert_eq!(placed(plain), ["up a 4000 "]);
+    assert_eq!(placed(plain), ["up a 8000 "]);
 }
 
 /// Catches: the reported value written over the pool's where both name a key (a pool that
@@ -131,7 +139,7 @@ fn the_pools_value_stays_where_the_pool_and_the_hello_both_name_a_key() {
     say(&registry, &said);
     assert_eq!(
         told.said(),
-        ["up a 4000 arch=x86_64,isa_level=x86-64-v2,os=macos"]
+        ["up a 8000 arch=x86_64,isa_level=x86-64-v2,os=macos"]
     );
     let placed = registry.hosts().remove(0).placement_shape();
     assert_eq!(
@@ -158,7 +166,7 @@ fn a_host_that_says_hello_again_is_placed_by_its_latest_hello() {
         js_agent_wire::DEFAULT_GRACE_MS + 1,
     ));
     say(&registry, &hello_of("a", "x86_64"));
-    assert_eq!(told.said(), ["up a 4000 arch=x86_64,os=macos"]);
+    assert_eq!(told.said(), ["up a 8000 arch=x86_64,os=macos"]);
     let placed = registry.hosts().remove(0).placement_shape();
     assert_eq!(
         placed.capabilities(),
@@ -241,24 +249,24 @@ fn the_listing_places_a_host_by_its_hello_only_in_a_pool_that_places_by_it() {
         let fx = fixture_of(config);
         fx.hello(&hello_of("a", "arm64"), &cred("t")).unwrap();
         let shown = fx.registry.hosts().remove(0);
-        assert_eq!(shown.shape, floor());
+        assert_eq!(shown.shape, claimed());
         (shown.by_hello, shown.placement_shape())
     };
     let (by, placed) = view(by_hello());
     assert!(by);
     let caps = map(&[("arch", "arm64"), ("os", "macos")]);
-    assert_eq!(placed, Shape::new(floor().resources().clone(), caps));
+    assert_eq!(placed, Shape::new(claimed().resources().clone(), caps));
     let name = ProviderId::new("builders").unwrap();
     let (by, placed) = view(PoolConfig::new(name, class(), floor(), 4));
     assert!(!by);
-    assert_eq!(placed, floor());
+    assert_eq!(placed, claimed());
 }
 
 /// Catches: a placer told the pool floor's accelerator in place of the host's validated
 /// one (a host of `nvidia-a100-sxm4-80gb` in a pool whose floor names the family
 /// `nvidia-a100` would be a node of the family with no memory known, and js-sched would
 /// place no request for the variant on it). In a pool that does not place by hello, the
-/// placer is told exactly the shape the book lists: the floor's numbers and `os`, with the
+/// placer is told exactly the shape the book lists: the host's claimed numbers and `os`, with the
 /// accelerator facts of the hello, 80 GiB per device among them.
 #[test]
 fn the_placer_is_told_the_hosts_accelerator_facts_in_any_pool() {
@@ -288,7 +296,7 @@ fn the_placer_is_told_the_hosts_accelerator_facts_in_any_pool() {
         caps.contains(&"accelerator.memory-gib=80".to_owned()),
         "{caps:?}"
     );
-    assert_eq!(told.said(), [format!("up gpu-1 4000 {}", caps.join(","))]);
+    assert_eq!(told.said(), [format!("up gpu-1 8000 {}", caps.join(","))]);
 }
 
 /// Catches: a Mac placed by the pool's least `os_version` in place of the one it runs (a job
@@ -313,7 +321,7 @@ fn a_host_is_placed_by_the_os_version_it_reports_in_every_pool() {
         &told,
     );
     say(&registry, &said);
-    assert_eq!(told.said(), ["up a 4000 os=macos,os_version=27"]);
+    assert_eq!(told.said(), ["up a 8000 os=macos,os_version=27"]);
 
     let mut older = hello("b");
     older.capabilities.insert("os_version".into(), "15".into());
@@ -325,5 +333,5 @@ fn a_host_is_placed_by_the_os_version_it_reports_in_every_pool() {
     let told = Arc::new(Shapes::default());
     let (registry, _) = told_by(plain, &told);
     say(&registry, &said);
-    assert_eq!(told.said(), ["up a 4000 os_version=27"]);
+    assert_eq!(told.said(), ["up a 8000 os_version=27"]);
 }

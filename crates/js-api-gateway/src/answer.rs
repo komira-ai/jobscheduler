@@ -106,7 +106,8 @@ impl Answer {
     /// ([`Answer::of_refusal`]), else by its gRPC code and its message, which the service
     /// sets to the code of the error table. The message is never written to the answer;
     /// an `INVALID_ARGUMENT` message `field: <name>` gives the answer's `"field"`, and
-    /// `OUT_OF_RANGE` with `field: fromOffset` is a 400 naming that field.
+    /// `OUT_OF_RANGE` with `field: fromOffset` or `field: attempt` is a 400 naming that
+    /// field.
     #[must_use]
     pub fn of_status(status: &Status) -> Self {
         if let Some(refusal) = refusal_of(status) {
@@ -145,6 +146,11 @@ impl Answer {
                     "out-of-range",
                     Some("fromOffset".to_owned()),
                     "the offset is past the end of the stream",
+                ),
+                "field: attempt" => Self::refused(
+                    "out-of-range",
+                    Some("attempt".to_owned()),
+                    "the job has no such attempt yet",
                 ),
                 _ => Self::internal(),
             },

@@ -70,8 +70,9 @@ fn view(fx: &Fixture, id: &str) -> js_registry::HostView {
 }
 
 /// Each hello joins the pool it names: its welcome is that pool's name and timing, and the
-/// host is listed and booked as that pool's shape. It catches a registry that books every
-/// host as the first pool, or answers a host of the second with the first's timing.
+/// host is listed and booked at what it reports with that pool's capabilities. It catches a
+/// registry that books every host as the first pool, or answers a host of the second with
+/// the first's timing.
 #[test]
 fn a_hello_joins_the_pool_it_names_and_is_booked_as_that_pool() {
     let fx = two_pools(4);
@@ -82,9 +83,13 @@ fn a_hello_joins_the_pool_it_names_and_is_booked_as_that_pool() {
     assert_eq!(linux.heartbeat_interval_ms, 2_000);
     assert_eq!(linux.grace_ms, 10_000);
     assert_eq!(mac.grace_ms, js_agent_wire::DEFAULT_GRACE_MS);
-    assert_eq!(view(&fx, "mac-1").shape, pool_shape());
+    let mac_shape = view(&fx, "mac-1").shape;
+    assert_eq!(mac_shape.resources().cpu_millis(), 8_000);
+    assert_eq!(mac_shape.resources().memory_bytes(), 16 << 30);
+    assert_eq!(mac_shape.capabilities(), pool_shape().capabilities());
     let farm = view(&fx, "node-1").shape;
-    assert_eq!(farm.resources().cpu_millis(), 16_000);
+    assert_eq!(farm.resources().cpu_millis(), 32_000);
+    assert_eq!(farm.resources().memory_bytes(), 128 << 30);
     assert_eq!(farm.capabilities()["os"], "linux");
     assert_eq!(farm.capabilities()["exec"], "container");
     assert_eq!(fx.placer.hosts_kept(), 2);
@@ -137,7 +142,8 @@ fn a_hello_is_checked_against_the_floor_and_the_mode_of_its_own_pool() {
 
 /// A host id is one host in one pool: once a host is in one pool, a hello for its id in
 /// the other is refused as host-listed, even after it is lost, and its record stays as it
-/// was. It catches a host moved into another pool's shape by a hello that names that pool.
+/// was, still booked at what its first hello reported. It catches a host moved into another
+/// pool's shape by a hello that names that pool.
 #[test]
 fn a_host_of_one_pool_cannot_say_hello_in_another() {
     let fx = two_pools(4);
@@ -150,7 +156,9 @@ fn a_host_of_one_pool_cannot_say_hello_in_another() {
     let refused = fx.registry.hello(&moved, &cred("t")).unwrap_err();
     assert_eq!(refused, Refusal::HostListed);
     let kept = view(&fx, "h");
-    assert_eq!(kept.shape, pool_shape());
+    assert_eq!(kept.shape.resources().cpu_millis(), 8_000);
+    assert_eq!(kept.shape.resources().memory_bytes(), 16 << 30);
+    assert_eq!(kept.shape.capabilities(), pool_shape().capabilities());
     assert_eq!(kept.state, HostState::Lost);
     assert_eq!(kept.epoch, 1);
     assert_eq!(fx.hello(&hello("h"), &cred("t")).unwrap().epoch, 2);
