@@ -47,6 +47,13 @@ pub struct NodeLoad {
     /// every reading of its process.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_cpu_usec: Option<u64>,
+    /// How long some task of the host waited for a CPU, in microseconds, in all: the `some`
+    /// total of `/proc/pressure/cpu`, a counter that only grows. A receiver's admission reads
+    /// it over the same window as `host_cpu_usec`, to see demand above the host's cores.
+    /// Optional: an agent of an earlier release does not send it, nor one whose host has no
+    /// pressure accounting (a Mac, a kernel without it) or whose read of the file failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_cpu_pressure_some_usec: Option<u64>,
     /// Memory in use by the actions, in bytes (`memory.current - inactive_file`),
     /// required. At most [`limits::MAX_MEMORY_BYTES`]. A Mac, which has no actions group,
     /// sends the whole host's non-file memory here as in `host_nonfile_bytes`.
@@ -221,7 +228,8 @@ impl NodeLoad {
     /// Fails only for a scalar out of range (`working_set_bytes`, `active_file_bytes`,
     /// `host_nonfile_bytes`);
     /// the receiver then discards the load and keeps the heartbeat. Counters (`seq`,
-    /// `mono_usec`, `cpu_usage_usec`, `host_cpu_usec`) are unbounded here: whether one goes
+    /// `mono_usec`, `cpu_usage_usec`, `host_cpu_usec`, `host_cpu_pressure_some_usec`) are
+    /// unbounded here: whether one goes
     /// backwards is
     /// the receiver's state to judge. Calling it twice changes nothing the second time.
     pub fn vet(&mut self) -> Result<(), ValidationError> {
@@ -370,6 +378,7 @@ impl NodeLoad {
             mono_usec,
             cpu_usage_usec,
             host_cpu_usec: number(object, "host_cpu_usec"),
+            host_cpu_pressure_some_usec: number(object, "host_cpu_pressure_some_usec"),
             working_set_bytes,
             active_file_bytes: number(object, "active_file_bytes").unwrap_or_default(),
             host_nonfile_bytes: number(object, "host_nonfile_bytes"),

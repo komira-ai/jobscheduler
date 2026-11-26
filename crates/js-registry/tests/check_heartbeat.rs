@@ -366,6 +366,7 @@ fn load(seq: u64) -> NodeLoad {
         mono_usec: 1_000_000 + seq,
         cpu_usage_usec: 0,
         host_cpu_usec: None,
+        host_cpu_pressure_some_usec: None,
         working_set_bytes: 1 << 20,
         active_file_bytes: 0,
         host_nonfile_bytes: None,

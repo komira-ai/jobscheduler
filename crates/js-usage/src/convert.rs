@@ -35,9 +35,9 @@ impl From<ClockIn> for LeaseClock {
 }
 
 impl From<LoadIn> for NodeLoad {
-    /// The reading admission reads. What a [`LoadIn`] does not carry is 0: the active
-    /// file pages of the working set (so none is taken off it), and the throttled time
-    /// and CPU pressure, which are telemetry only.
+    /// The scheduler's form of a usage input. What a [`LoadIn`] does not carry is 0: the
+    /// active file pages of the working set (so none is taken off it), and the throttled
+    /// time and the CPU pressure, which read as not measured.
     fn from(l: LoadIn) -> Self {
         Self {
             seq: l.seq,
