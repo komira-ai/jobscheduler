@@ -8,8 +8,8 @@ use std::collections::BTreeSet;
 use common::*;
 use js_elastic::Offer;
 use js_scaler::{
-    Action, Blocked, HostFacts, HostState, LaunchMode, Mark, Phase, Settings, State, StoredOffer,
-    step,
+    Action, Blocked, HostFacts, HostMark, HostState, LaunchMode, Phase, Settings, State,
+    StoredOffer, step,
 };
 use js_types::{ExecMode, RequestId};
 
@@ -117,7 +117,7 @@ fn a_reserved_request_is_covered_until_the_reservation_is_given_up() {
     let mut rig = Rig::new(settings("gpu"));
     let mut busy = host("h1", "gpu");
     busy.busy = true;
-    busy.mark = Some(Mark::Reserved);
+    busy.mark = Some(HostMark::Reserved);
     rig.input.hosts = vec![busy];
     rig.input.waiting = vec![reserved("r1", "h1")];
     assert!(acquires(&rig.tick(at(0))).is_empty());
@@ -149,7 +149,7 @@ fn a_free_host_covers_one_request() {
     assert_eq!(acquires(&rig.tick(at(5 * SECOND))).len(), 1);
 
     let mut assigned = host("h2", "gpu");
-    assigned.mark = Some(Mark::Reserved);
+    assigned.mark = Some(HostMark::Reserved);
     rig.input.hosts = vec![assigned];
     rig.input.waiting = vec![reserved("r3", "h2")];
     assert!(acquires(&rig.tick(at(10 * SECOND))).is_empty());
@@ -162,7 +162,7 @@ fn a_free_host_covers_one_request() {
 fn a_host_that_cannot_serve_does_not_cover() {
     let breakers: [fn(&mut HostFacts); 7] = [
         |h| h.busy = true,
-        |h| h.mark = Some(Mark::Held),
+        |h| h.mark = Some(HostMark::Held),
         |h| h.state = HostState::Lost,
         |h| h.pool = "other".to_owned(),
         |h| shape(h).cpu_millis = 1000,

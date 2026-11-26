@@ -10,7 +10,7 @@ use js_types::RequestId;
 
 use crate::budget;
 use crate::caps::{check, holding, nearest_miss};
-use crate::input::{HostState, Input, Mark, PoolInput, Waiting};
+use crate::input::{HostMark, HostState, Input, PoolInput, Waiting};
 use crate::pass::{Pass, host_named};
 use crate::pick::walk;
 use crate::record::{CooldownReason, Phase, Record, Records};
@@ -252,7 +252,7 @@ impl Pass<'_> {
                 let serves = host_named(input, &record.name).is_some_and(|host| {
                     [
                         host.state == HostState::Live,
-                        host.mark == Some(Mark::Draining),
+                        host.mark == Some(HostMark::Draining),
                         host.shape
                             .as_ref()
                             .is_some_and(|shape| shape.fit(&request.demand).is_ok()),
@@ -297,7 +297,7 @@ impl Pass<'_> {
             .map(|i| &self.records.instances[i])
             .filter(|record| {
                 let marked = host_named(input, &record.name).is_some_and(|host| {
-                    (host.state, host.mark) == (HostState::Live, Some(Mark::Draining))
+                    (host.state, host.mark) == (HostState::Live, Some(HostMark::Draining))
                 });
                 [
                     record.phase == Phase::Registered,
@@ -324,8 +324,9 @@ impl Pass<'_> {
             .collect();
         for i in draining {
             let name = self.records.instances[i].name.clone();
-            let marked = host_named(input, &name)
-                .filter(|host| (host.state, host.mark) == (HostState::Live, Some(Mark::Draining)));
+            let marked = host_named(input, &name).filter(|host| {
+                (host.state, host.mark) == (HostState::Live, Some(HostMark::Draining))
+            });
             if let Some(host) = marked {
                 // A busy host that reached `max_age` stays draining: the mark cuts no work,
                 // and taking it back would let it live on.

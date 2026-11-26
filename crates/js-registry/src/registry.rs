@@ -37,6 +37,10 @@ pub use marks::Busy;
 /// ([`Registry::restore_tainted`]) is `Awaiting` until it says hello.
 pub use js_types::HostState;
 
+/// How a host is set aside: for whole-node use, or to be scaled away. The registry sets
+/// only [`HostMark::Draining`] and [`HostMark::Releasing`].
+pub use js_types::HostMark;
+
 /// One host as the registry knows it: what an operator would list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostView {
@@ -117,24 +121,6 @@ pub struct HostView {
     /// The per-second lists of the same load, for the hosts listing only: empty exactly when
     /// `load` is `None` or the agent sent none.
     pub load_seconds: crate::load::LoadSeconds,
-}
-
-/// How a host is set aside: for whole-node use, or to be scaled away. The registry sets
-/// only [`HostMark::Draining`] and [`HostMark::Releasing`]; the other two are the
-/// vocabulary of the host listing and the scaler's view, which the registry no longer
-/// produces.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HostMark {
-    /// Set aside for a waiting request.
-    Reserved,
-    /// A whole-node lease is committed on it.
-    Held,
-    /// Marked by [`Registry::drain`]: it holds no run and takes no new job. Only
-    /// [`Registry::undrain`] or [`Registry::release_host`] ends the mark.
-    Draining,
-    /// Marked by [`Registry::release_host`]: the host is being given back and takes no
-    /// job. Nothing clears the mark; [`Registry::remove`] drops the host.
-    Releasing,
 }
 
 struct State {

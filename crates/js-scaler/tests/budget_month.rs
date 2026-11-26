@@ -11,8 +11,8 @@ mod common;
 use common::*;
 use js_elastic::{HostStatus, Released};
 use js_scaler::{
-    AcquirePlan, AcquireResult, Action, Blocked, Budgets, Mark, Records, ReleaseResult, Settings,
-    State, Totals, overrun,
+    AcquirePlan, AcquireResult, Action, Blocked, Budgets, HostMark, Records, ReleaseResult,
+    Settings, State, Totals, overrun,
 };
 
 /// The most the monthly total allows, in cents.
@@ -41,7 +41,7 @@ struct Machine {
     cloud: String,
     start: u64,
     ended: Option<u64>,
-    mark: Option<Mark>,
+    mark: Option<HostMark>,
 }
 
 impl Machine {
@@ -136,9 +136,9 @@ fn run(budgets: Budgets, restarts: &[u64]) -> Outcome {
                     });
                 }
                 Action::Retire(name) | Action::Drain(name) => {
-                    mark(&mut machines, &name, Mark::Draining)
+                    mark(&mut machines, &name, HostMark::Draining)
                 }
-                Action::ReleaseHost(name) => mark(&mut machines, &name, Mark::Releasing),
+                Action::ReleaseHost(name) => mark(&mut machines, &name, HostMark::Releasing),
                 Action::Release { host, .. } => {
                     let found = machines
                         .iter_mut()
@@ -164,7 +164,7 @@ fn run(budgets: Budgets, restarts: &[u64]) -> Outcome {
 
 /// Sets the registry's mark on the host `name`: a host being drained takes no more work, so
 /// its job ends with it.
-fn mark(machines: &mut [Machine], name: &str, to: Mark) {
+fn mark(machines: &mut [Machine], name: &str, to: HostMark) {
     if let Some(machine) = machines
         .iter_mut()
         .find(|machine| machine.plan.name == name)

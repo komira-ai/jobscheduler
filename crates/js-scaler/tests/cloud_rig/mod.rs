@@ -18,7 +18,7 @@ use js_elastic::{
 };
 use js_elastic_fake::{Billing, ElasticFake, FakeClock};
 use js_scaler::{
-    AcquirePlan, AcquireResult, Action, HostFacts, Mark, Millis, Phase, Records, ReleaseResult,
+    AcquirePlan, AcquireResult, Action, HostFacts, HostMark, Millis, Phase, Records, ReleaseResult,
     Settings, State,
 };
 
@@ -85,7 +85,7 @@ pub struct Sim {
     /// What is on disk: the records of the last `Save` that ran.
     pub saved: Records,
     /// The registry's marks by host name.
-    pub marks: BTreeMap<String, Mark>,
+    pub marks: BTreeMap<String, HostMark>,
     /// How many requests wait this tick.
     pub waiting: usize,
     /// How many ticks the registry's view is incomplete for after a restart.
@@ -285,19 +285,19 @@ impl Sim {
                     });
                 }
                 Action::Drain(name) => {
-                    self.marks.insert(name, Mark::Draining);
+                    self.marks.insert(name, HostMark::Draining);
                 }
                 Action::Retire(name) => {
-                    self.marks.insert(name, Mark::Draining);
+                    self.marks.insert(name, HostMark::Draining);
                 }
                 Action::Undrain(name) => {
                     self.marks.remove(&name);
                 }
                 Action::ReleaseHost(name) => {
                     let quiet =
-                        [None, Some(Mark::Draining)].contains(&self.marks.get(&name).copied());
+                        [None, Some(HostMark::Draining)].contains(&self.marks.get(&name).copied());
                     if quiet {
-                        self.marks.insert(name, Mark::Releasing);
+                        self.marks.insert(name, HostMark::Releasing);
                     }
                 }
                 Action::Release { host, id } => {

@@ -8,7 +8,7 @@ mod common;
 use common::*;
 use js_elastic::{Held, HostRef, HostStatus, Offer};
 use js_scaler::{
-    Blocked, CooldownReason, HostFacts, HostState, Mark, Phase, Records, State, launchable,
+    Blocked, CooldownReason, HostFacts, HostMark, HostState, Phase, Records, State, launchable,
 };
 
 /// The name of the machine `record(Phase::Booting, 60, 0)` describes.
@@ -127,7 +127,7 @@ fn a_silent_host_with_stale_runs_is_released_once_its_lease_is_given_up() {
         assert_eq!(kinds(&actions), ["Save", "Drain", "ReleaseHost"]);
         assert_eq!(rig.phase(0), Phase::Draining);
 
-        rig.input.hosts[0].mark = Some(Mark::Releasing);
+        rig.input.hosts[0].mark = Some(HostMark::Releasing);
         let actions = rig.tick(at(3 * SECOND + 31 * MINUTE));
         assert_eq!(kinds(&actions), ["Save", "Revoke", "Release"]);
         assert_eq!(rig.state.silent_released, vec![name]);
@@ -141,8 +141,8 @@ fn a_silent_host_with_stale_runs_is_released_once_its_lease_is_given_up() {
 fn a_silent_host_that_still_books_a_lease_or_is_set_aside_is_held() {
     let cases: [fn(&mut HostFacts); 3] = [
         |host| host.lease_given_up = false,
-        |host| host.mark = Some(Mark::Held),
-        |host| host.mark = Some(Mark::Reserved),
+        |host| host.mark = Some(HostMark::Held),
+        |host| host.mark = Some(HostMark::Reserved),
     ];
     for change in cases {
         let (mut rig, _) = lost_mid_job(HostState::Lost, true);

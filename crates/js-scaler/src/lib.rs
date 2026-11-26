@@ -190,7 +190,7 @@ use crate::scale::Claims;
 
 pub use budget::{Budgets, Totals, overrun};
 pub use input::{
-    AcquireResult, HostFacts, HostState, Input, Mark, PoolInput, ReleaseResult, Waiting,
+    AcquireResult, HostFacts, HostMark, HostState, Input, PoolInput, ReleaseResult, Waiting,
 };
 pub use record::{
     Brake, Cooldown, CooldownReason, Go, OLDEST, OfferCooldown, Phase, Record, Records,
@@ -259,7 +259,7 @@ pub fn launchable(state: &State, input: &Input, now: Millis, demand: &Demand) ->
                     [
                         host.state == HostState::Live,
                         !host.busy,
-                        [None, Some(Mark::Draining)].contains(&host.mark),
+                        [None, Some(HostMark::Draining)].contains(&host.mark),
                     ]
                     .into_iter()
                     .all(|ok| ok)

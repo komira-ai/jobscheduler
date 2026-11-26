@@ -2,8 +2,8 @@
 //! are the `jobs` module's.
 
 use js_elastic::{Offer, PriceUnit};
-use js_registry::{HostMark, HostState, HostView};
-use js_scaler::{HostFacts, Mark};
+use js_registry::{HostState, HostView};
+use js_scaler::HostFacts;
 use js_types::{ExecMode, IsaLevel, Shape, normalise_arch};
 
 /// Bytes in a GiB, the unit of the `disk-gib` capability.
@@ -68,15 +68,6 @@ pub(super) fn offer_of(shape: &Shape, booked: &Shape, exec: ExecMode) -> Offer {
     }
 }
 
-fn mark_of(mark: HostMark) -> Mark {
-    match mark {
-        HostMark::Reserved => Mark::Reserved,
-        HostMark::Held => Mark::Held,
-        HostMark::Draining => Mark::Draining,
-        HostMark::Releasing => Mark::Releasing,
-    }
-}
-
 /// `host`, a host of the pool `pool` whose jobs run in `exec` mode, as the scaler reads it,
 /// where `allocated` says whether a live (booked or releasing) job allocation is on it. It
 /// is busy when it holds a live allocation (a whole-host one included) or the registry
@@ -100,7 +91,7 @@ pub(super) fn host_facts(host: HostView, pool: &str, exec: ExecMode, allocated: 
         shape,
         pool: pool.to_owned(),
         state: host.state,
-        mark: host.mark.map(mark_of),
+        mark: host.mark,
         busy: allocated | host.releasing,
         lease_given_up: (host.state != HostState::Live) & !allocated,
         id: host.id,

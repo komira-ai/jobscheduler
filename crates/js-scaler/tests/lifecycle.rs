@@ -6,7 +6,7 @@ mod common;
 
 use common::*;
 use js_elastic::{Claim, HostRef, HostStatus, Released};
-use js_scaler::{Action, Blocked, CooldownReason, Health, HostFacts, Mark, Phase, ReleaseResult};
+use js_scaler::{Action, Blocked, CooldownReason, Health, HostFacts, HostMark, Phase, ReleaseResult};
 
 /// A rig as `registered` leaves it, driven on to the drain: the host has been quiet for
 /// `idle`, the scaler asked to drain it and the registry shows it `Draining`. Returns the
@@ -15,7 +15,7 @@ fn draining() -> (Rig, js_scaler::AcquirePlan, u64) {
     let (mut rig, plan) = registered(settings("gpu"), "i-1", 2 * SECOND);
     let now = 2 * SECOND + 10 * MINUTE;
     rig.tick(at(now));
-    rig.input.hosts[0].mark = Some(Mark::Draining);
+    rig.input.hosts[0].mark = Some(HostMark::Draining);
     (rig, plan, now)
 }
 
@@ -44,12 +44,12 @@ fn a_quiet_host_is_drained_marked_revoked_and_released_until_gone() {
     assert_eq!(rig.phase(0), Phase::Draining);
     all.extend(actions);
 
-    rig.input.hosts[0].mark = Some(Mark::Draining);
+    rig.input.hosts[0].mark = Some(HostMark::Draining);
     let after = quiet + 11 * MINUTE;
     all.extend(rig.tick(at(after)));
     all.extend(rig.tick(at(after + SECOND)));
 
-    rig.input.hosts[0].mark = Some(Mark::Releasing);
+    rig.input.hosts[0].mark = Some(HostMark::Releasing);
     let actions = rig.tick(at(after + 2 * SECOND));
     assert_eq!(
         actions[2],
@@ -229,7 +229,7 @@ fn a_hello_below_its_offer_condemns_the_host_and_starts_the_cooldown() {
 #[test]
 fn a_condemned_host_is_never_taken_back_for_a_request() {
     let (mut rig, plan) = short(|h| shape(h).cpu_millis = 4000);
-    rig.input.hosts[0].mark = Some(Mark::Releasing);
+    rig.input.hosts[0].mark = Some(HostMark::Releasing);
     rig.input.waiting = vec![request("r2")];
     let actions = rig.tick(at(3 * SECOND));
     assert_eq!(count(&actions, "Undrain"), 0);
@@ -308,7 +308,7 @@ fn a_machine_the_provider_lost_is_released_and_removed() {
 fn failing_health_stops_launches_but_not_release() {
     let (mut rig, _, now) = draining();
     rig.pool().health = Health::Failing;
-    rig.input.hosts[0].mark = Some(Mark::Releasing);
+    rig.input.hosts[0].mark = Some(HostMark::Releasing);
     rig.input.waiting = vec![request("r2")];
     let actions = rig.tick(at(now + SECOND));
     assert_eq!(kinds(&actions), ["Save", "Revoke", "Release"]);

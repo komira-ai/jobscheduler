@@ -5,7 +5,7 @@
 //! Each alert has a key that holds while the thing it names holds, so the shell says it
 //! once and says it again only if it clears and comes back.
 
-use js_scaler::{Input, Mark, Millis, Phase, Record, Settings, State};
+use js_scaler::{HostMark, Input, Millis, Phase, Record, Settings, State};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The alerts that hold now, by key.
@@ -148,7 +148,7 @@ fn unmarked(input: &Input, name: &str) -> bool {
             host.id.as_str() == name,
             host.lease_given_up,
             !host.busy,
-            host.mark.is_none_or(|mark| mark == Mark::Draining),
+            host.mark.is_none_or(|mark| mark == HostMark::Draining),
         ]
         .into_iter()
         .all(|holds| holds)

@@ -14,6 +14,9 @@ use crate::settings::{Health, Settings};
 /// state covers no request, is never drained and is never released on its silence.
 pub use js_types::HostState;
 
+/// How a host is set aside: for whole-node use, or to be scaled away.
+pub use js_types::HostMark;
+
 /// One request waiting for a host, in queue order: the server's shell gives one for each
 /// queued job that holds no allocation. No rule of the step reads how long a request has
 /// waited.
@@ -28,19 +31,6 @@ pub struct Waiting {
     /// Such a request already has a host coming and is never given a machine; the host or
     /// machine so named is matched to no other request, and the host is not drained as idle.
     pub reserved: Option<HostId>,
-}
-
-/// How a host is set aside (`js_registry::HostMark`, variant for variant).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mark {
-    /// Set aside for a waiting request.
-    Reserved,
-    /// Committed to work: kept like a busy host.
-    Held,
-    /// Marked by the scaler: it takes no start of any kind.
-    Draining,
-    /// Marked by the scaler: it is being given back.
-    Releasing,
 }
 
 /// One host the registry knows, as the scaler needs it.
@@ -69,7 +59,7 @@ pub struct HostFacts {
     /// being judged against the offer: nothing is condemned and no cooldown starts.
     pub shape: Option<Offer>,
     /// How the host is set aside, if it is.
-    pub mark: Option<Mark>,
+    pub mark: Option<HostMark>,
     /// Whether the host holds work: the server's shell sets it when a live (booked or
     /// releasing) job allocation is on the host, a whole-host one included, or the
     /// registry still has runs of it to finish. A lease the registry books on the host does

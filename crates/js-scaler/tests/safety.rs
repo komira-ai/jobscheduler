@@ -4,7 +4,7 @@
 mod common;
 
 use common::*;
-use js_scaler::{HostFacts, HostState, Mark, Phase};
+use js_scaler::{HostFacts, HostMark, HostState, Phase};
 
 /// Asserts that a booting machine is not revoked and released at `boot_timeout` when the
 /// registry's view is incomplete: its host may have said hello and be holding work.
@@ -74,7 +74,7 @@ fn a_silent_host_that_shows_work_is_not_released() {
 /// all.
 #[test]
 fn a_silent_host_marked_held_is_not_released() {
-    assert_left_alone(silent_given_up(|host| host.mark = Some(Mark::Held)));
+    assert_left_alone(silent_given_up(|host| host.mark = Some(HostMark::Held)));
 }
 
 /// Asserts that a silent host that shows work is not revoked or released although the
@@ -83,7 +83,7 @@ fn a_silent_host_marked_held_is_not_released() {
 fn a_silent_host_that_shows_work_is_not_released_although_marked_releasing() {
     assert_left_alone(silent_given_up(|host| {
         host.busy = true;
-        host.mark = Some(Mark::Releasing);
+        host.mark = Some(HostMark::Releasing);
         host.lease_given_up = false;
     }));
 }
@@ -92,7 +92,7 @@ fn a_silent_host_that_shows_work_is_not_released_although_marked_releasing() {
 /// marked either.
 #[test]
 fn a_silent_host_marked_reserved_is_left_alone() {
-    let mut rig = silent_given_up(|host| host.mark = Some(Mark::Reserved));
+    let mut rig = silent_given_up(|host| host.mark = Some(HostMark::Reserved));
     assert_eq!(kinds(&rig.tick(at(3 * SECOND))), ["Save"]);
     for later in [3 * SECOND + 30 * MINUTE, 2 * HOUR] {
         assert!(only_saves(&rig.tick(at(later))));
@@ -105,7 +105,7 @@ fn a_silent_host_marked_reserved_is_left_alone() {
 #[test]
 fn a_silent_host_marked_releasing_is_released() {
     let mut rig = silent_given_up(|host| {
-        host.mark = Some(Mark::Releasing);
+        host.mark = Some(HostMark::Releasing);
         host.lease_given_up = false;
     });
     assert_eq!(count(&rig.tick(at(3 * SECOND)), "Release"), 0);

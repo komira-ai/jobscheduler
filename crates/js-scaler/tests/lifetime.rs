@@ -10,7 +10,7 @@ use std::time::Duration;
 use common::*;
 use js_elastic::{Acquired, HostStatus, Released};
 use js_scaler::{
-    AcquirePlan, AcquireResult, Action, Blocked, HostState, Mark, Phase, Records, ReleaseResult,
+    AcquirePlan, AcquireResult, Action, Blocked, HostMark, HostState, Phase, Records, ReleaseResult,
     Settings, State,
 };
 
@@ -56,7 +56,7 @@ fn a_host_that_never_goes_idle_is_retired_at_max_age_and_released_when_its_work_
     assert_eq!(actions[1], Action::Retire(plan.name.clone()));
     assert_eq!(rig.phase(0), Phase::Draining);
 
-    rig.input.hosts[0].mark = Some(Mark::Draining);
+    rig.input.hosts[0].mark = Some(HostMark::Draining);
     for step in 1..=40 {
         let actions = rig.tick(at(60 * MINUTE + step * 10 * MINUTE));
         assert!(actions.is_empty(), "{:?}", kinds(&actions));
@@ -68,7 +68,7 @@ fn a_host_that_never_goes_idle_is_retired_at_max_age_and_released_when_its_work_
     let actions = rig.tick(at(done));
     assert_eq!(actions, [Action::ReleaseHost(plan.name.clone())]);
 
-    rig.input.hosts[0].mark = Some(Mark::Releasing);
+    rig.input.hosts[0].mark = Some(HostMark::Releasing);
     let actions = rig.tick(at(done + SECOND));
     assert_eq!(count(&actions, "Release"), 1);
     assert_eq!(rig.phase(0), Phase::Releasing);
@@ -91,7 +91,7 @@ fn without_max_age_a_busy_host_is_never_retired() {
 fn a_host_held_by_a_whole_node_lease_is_retired_at_max_age() {
     let (mut rig, plan) = registered(bounded(), "i-1", 2 * SECOND);
     rig.input.hosts[0].busy = true;
-    rig.input.hosts[0].mark = Some(Mark::Held);
+    rig.input.hosts[0].mark = Some(HostMark::Held);
     let actions = rig.tick(at(60 * MINUTE));
     assert_eq!(actions[1], Action::Retire(plan.name));
 }
@@ -118,7 +118,7 @@ fn an_aged_host_covers_no_request() {
 fn a_retiring_host_is_not_taken_back_for_a_request() {
     let (mut rig, _) = registered(bounded(), "i-1", 2 * SECOND);
     rig.tick(at(60 * MINUTE));
-    rig.input.hosts[0].mark = Some(Mark::Draining);
+    rig.input.hosts[0].mark = Some(HostMark::Draining);
     rig.input.waiting = vec![request("r2")];
     let actions = rig.tick(at(61 * MINUTE));
     assert_eq!(count(&actions, "Undrain"), 0);
@@ -132,7 +132,7 @@ fn a_retiring_host_is_not_taken_back_for_a_request() {
 #[test]
 fn an_aged_registered_host_shown_draining_is_retired_not_undrained() {
     let (mut rig, _) = registered(bounded(), "i-1", 2 * SECOND);
-    rig.input.hosts[0].mark = Some(Mark::Draining);
+    rig.input.hosts[0].mark = Some(HostMark::Draining);
     let actions = rig.tick(at(60 * MINUTE));
     assert_eq!(count(&actions, "Undrain"), 0);
     assert_eq!(count(&actions, "Retire"), 1);
@@ -381,8 +381,8 @@ fn a_retired_host_is_released_when_its_last_lease_ends_within_the_lifetime() {
         rig.input.hosts[0].busy = now < work_ends;
         for action in rig.tick(at(now)) {
             match action {
-                Action::Retire(_) => rig.input.hosts[0].mark = Some(Mark::Draining),
-                Action::ReleaseHost(_) => rig.input.hosts[0].mark = Some(Mark::Releasing),
+                Action::Retire(_) => rig.input.hosts[0].mark = Some(HostMark::Draining),
+                Action::ReleaseHost(_) => rig.input.hosts[0].mark = Some(HostMark::Releasing),
                 Action::Release { .. } if cloud.terminated.is_none() => {
                     cloud.terminated = Some(now);
                 }
@@ -410,7 +410,7 @@ struct Machine {
     up_at: u64,
     gone_at: Option<u64>,
     busy_until: u64,
-    mark: Option<Mark>,
+    mark: Option<HostMark>,
     removed: bool,
 }
 
@@ -526,24 +526,24 @@ impl World {
             }
             Action::Drain(name) => {
                 if let Some(m) = self.named(&name).filter(|m| m.busy_until <= now) {
-                    m.mark = Some(Mark::Draining);
+                    m.mark = Some(HostMark::Draining);
                 }
             }
             Action::Retire(name) => {
                 if let Some(m) = self.named(&name) {
-                    m.mark = Some(Mark::Draining);
+                    m.mark = Some(HostMark::Draining);
                 }
             }
             Action::Undrain(name) => {
-                if let Some(m) = self.named(&name).filter(|m| m.mark == Some(Mark::Draining)) {
+                if let Some(m) = self.named(&name).filter(|m| m.mark == Some(HostMark::Draining)) {
                     m.mark = None;
                 }
             }
             Action::ReleaseHost(name) => {
                 let ready =
-                    |m: &&mut Machine| m.busy_until <= now && m.mark == Some(Mark::Draining);
+                    |m: &&mut Machine| m.busy_until <= now && m.mark == Some(HostMark::Draining);
                 if let Some(m) = self.named(&name).filter(ready) {
-                    m.mark = Some(Mark::Releasing);
+                    m.mark = Some(HostMark::Releasing);
                 }
             }
             Action::Release { host, .. } => {

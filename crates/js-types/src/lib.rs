@@ -45,6 +45,7 @@ mod cpu_series;
 mod digest;
 pub mod env;
 mod history_key;
+mod host_mark;
 mod host_state;
 mod ids;
 mod isa;
@@ -83,6 +84,7 @@ pub use cpu_ceiling::{CpuCeiling, CpuCeilingError};
 pub use cpu_series::{CPU_SERIES_MAX_POINTS, CpuSeries};
 pub use digest::{BundleRef, BundleRefError, DigestRef, DigestRefError};
 pub use history_key::{HistoryKey, HistoryKeyError, MAX_HISTORY_KEY_LEN};
+pub use host_mark::HostMark;
 pub use host_state::HostState;
 pub use ids::{
     ClassId, CordonHolder, HostId, IdError, LeaseId, ProviderId, RequestId, RequestIdError,
