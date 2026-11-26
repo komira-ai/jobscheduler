@@ -163,6 +163,20 @@ fn a_lease_past_its_bound_reads_as_ending_a_minute_from_now() {
     assert_eq!(mark.tail_end, Some(FarmTime::from_millis(160_000)));
 }
 
+/// Catches: a lease that ends exactly now read as ending now. At 100 s `a`'s lease of
+/// 100 s is at its bound and reads as ending at 160 s; `b`'s ends at 159 s and is held.
+#[test]
+fn a_lease_at_its_bound_now_reads_as_ending_a_minute_from_now() {
+    let mut f = farm(None);
+    f.worker("a");
+    f.lease_on("a", secs(100));
+    f.worker("b");
+    assert!(f.advance(100_000).is_empty());
+    f.lease_on("b", secs(59));
+    let whole = f.whole();
+    assert_eq!(f.held_for(whole), Some(&w("b")));
+}
+
 /// Catches: only the bound checked for lateness. `a`'s lease may run 900 s but its key
 /// takes a minute at the P90, so by 120 s it has run past its estimate: it reads as ending
 /// at 180 s, after `b`'s lease (150 s), and `b` is held; read as its passed estimate, `a`

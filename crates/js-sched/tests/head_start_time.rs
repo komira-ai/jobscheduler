@@ -1,8 +1,9 @@
 //! Which worker a blocked head of the queue holds: the one it can start on first. The
 //! start time of a partial request is the first instant at which its charge fits against
 //! the predicate once the leases on the worker are released at their ends (the lesser of
-//! the estimate and the max wall time); the measured load stays as it is. Every time is
-//! farm time fed to the scheduler.
+//! the estimate and the max wall time, or a minute from now for a lease already at or
+//! past that end); the measured load stays as it is. Every time is farm time fed to the
+//! scheduler.
 
 #[path = "load_curves/mod.rs"]
 mod load_curves;
