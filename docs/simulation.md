@@ -179,6 +179,7 @@ with `#[path = ...]`; they are not binaries of their own.
 | `job_front` | `tests/job_front.rs` | The job front, driven through a scripted client port: each answer of the job service mapped to its event, the submit's body (a whole host, or the work's own cpu and memory and wall limit), and what a cancel and a give-up do at each stage. |
 | `jobs` | `tests/jobs.rs` | The job scenario family, each over sixteen seeds over the job front: a submit whose answer the client lost, sent again under the same job id (row 1); a host silent before it lists a job's start, which the start timeout ends (rows 35 and 43); a job cancelled before its host lists the start (row 38); the headline over jobs (twenty hosts, forty jobs, four agents cut off and two killed mid-job and replaced: the two-hundred-host headline at a tenth of its size, since every pull request runs it); and a restart of the server with jobs in flight (rows 3 and 36). The headline is in `tests/cell/jobs_headline.rs`. |
 | `job_retry` | `tests/job_retry.rs` | Retry and completion callbacks in the cell, on the real server: a job whose first attempt is lost is retried with its item still waiting and succeeds, its callback made once after the last attempt; a job whose attempts run out ends lost; a job without a policy is lost at its first attempt; a start the agent refuses with a code of the host's is retried on another host, one refused on every attempt ends failed to start after its last, and one refused with a code of the job's (`invalid-job`) ends at its first; a receiver switched down is tried again with one webhook id until it answers, across a restart of the server; and a second instance that claims the due callbacks and vanishes, after which the cell's server delivers them once the claims lapse. |
+| `retry` | `tests/retry.rs` | The retry family, each over eight seeds over the job front, on the real server: a crash between an attempt's end and its retry (`restart_between_attempts`: the server stopped while an agent holds the result of a refused start, one retry after the restart, witness `result_resent`); a whole-host attempt lost while it runs and tried again with its failed prepares counted again from zero (`whole_host_retry`); a retried job's callback once, after its last attempt, at each final state (`one_callback_after_retries_are_exhausted`); callbacks due while the server is down, delivered after it restarts (`restart_with_due_callbacks`); a cancel racing a retry (`a_cancel_racing_a_retry_ends_cancelled`); a late result of an earlier attempt, answered stale (`a_late_result_of_an_earlier_attempt_is_stale`); and a callback claimed by a second instance that vanished, delivered once the claim lapsed (`a_lapsed_callback_claim_is_delivered_by_another_instance`). Two negative cases: agents that forget an unacknowledged result fail the restart between attempts, and the run of a retried job, changed in one place, is flagged by each of `attempts-bounded`, `one-attempt-at-a-time` and `callback-after-the-final-end`. The scenarios are in `tests/cell/retry.rs`. |
 | `job_actions` | `tests/job_actions.rs` | The machinery the job scenario family added, on the real server: the job front's lost-answer switch and the action that throws it, and the action that kills agents running listed jobs and replaces them. |
 | `broken_agent` | `tests/broken_agent.rs` | The negative cases of the harness: agents that lack a behaviour the server relies on must fail a named invariant, and correct agents must pass with the witness held. |
 | `faults` | `tests/faults.rs` | The fault family: agents that die and return, agents killed for good, a 30 s partition that heals, a lossy wire, a silent host holding a job it never listed, a start after its stop, a restart of the server, and a forgotten host seated again, each over sixteen seeds; three negative cases with defective agents. |
@@ -822,6 +823,19 @@ closes have no scenario: row 37 needs a host the provider read absent that comes
 still running its job, which the cell cannot bring about (see [What the cell does not
 model](#what-the-cell-does-not-model)), and row 42 (a cancel, then the provider reads the
 host absent) is not run.
+
+The retry family (`tests/retry.rs`, its scenarios in `tests/cell/retry.rs`) runs every
+invariant of `Invariant::ALL`, the three of retry and the callback among them, over the
+cell's server with retry and callbacks accepted (`Config::accepting_retry_and_callbacks`)
+and its callback receiver. It covers no row of section 8 of the jobscheduler design: its
+rows are those of section 8 of `docs/design/job-retry-and-completion-callback.md`. A job
+that is refused or lost waits its first backoff (10 s and the job's own jitter) and then
+needs another host, since the host that failed it is out of its next placement for 15
+minutes and the cell's agents do not report `start-fence`; every scenario is built so that
+a host is left. `a_cancel_racing_a_retry_ends_cancelled` states the server as built: a job
+whose cancel is asked while it runs on a host that is then read lost ends lost (a job with
+a cancel intent is lost, not cancelled, and is not tried again), and a cancel that meets
+the queued retry ends the job cancelled at once.
 
 The partition scenario of `tests/cell/partition.rs` cuts agents off while they run, but asserts only
 what the server as built and the design both promise (the invariants and every item
