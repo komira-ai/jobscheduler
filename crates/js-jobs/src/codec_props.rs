@@ -319,6 +319,7 @@ fn job_result() -> impl Strategy<Value = JobResult> {
                 proptest::option::of((any::<u64>(), any::<u64>())),
                 proptest::option::of((0..u64::MAX, 0..NANOS_PER_SEC)),
                 proptest::option::of((any::<u64>(), any::<u64>())),
+                proptest::option::of(any::<u64>()),
             )),
             proptest::option::of(any::<[u64; 4]>()),
             proptest::option::of((
@@ -346,7 +347,8 @@ fn job_result() -> impl Strategy<Value = JobResult> {
                         started_at: s,
                         ended_at: e,
                     },
-                    usage: usage.map(|((secs, nanos, peak), throttle, pressure, cpu_peak)| {
+                    usage: usage.map(
+                        |((secs, nanos, peak), throttle, pressure, cpu_peak, peak_swap_bytes)| {
                         ResourceUsage {
                             cpu_time: Duration::new(secs, nanos),
                             peak_memory_bytes: peak,
@@ -362,6 +364,7 @@ fn job_result() -> impl Strategy<Value = JobResult> {
                                 millicores,
                                 window_usec,
                             }),
+                            peak_swap_bytes,
                         }
                     }),
                     logs: logs.map(

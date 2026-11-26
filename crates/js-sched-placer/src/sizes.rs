@@ -111,6 +111,13 @@
 //!   step above the booking next (`1.2 x` the booking plus 128 MiB, rounded up to 256 MiB), and
 //!   again while its runs keep reaching it, up to the whole host
 //!   ([`js_sizing::Run::limit_hits`]);
+//! - a success whose host pushed part of it into swap (its `usage` reports a swap peak above
+//!   0, `memory.swap.peak`) had more in use than its peak, which counts memory alone: the
+//!   estimator takes it as a held sample of its peak plus its swap peak, so its class books
+//!   that sum with the margin next ([`js_sizing::Run::swap_peak_bytes`]). A run whose host
+//!   reported no swap peak (an agent from before it, a kernel that does not count a group's
+//!   swap, and every run recorded before it) counts as having swapped nothing, as every run did
+//!   before;
 //! - a run under a second gives its peak (its series' when a poll sampled it, else the group's
 //!   `memory.peak`, which is exact) and no CPU sample;
 //! - its CPU contention is its own: how long some task of its group waited for a CPU per unit
@@ -674,7 +681,10 @@ fn run_of(job: &JobRecord, booked: Booked) -> Option<(Run, Day)> {
                 .usage
                 .is_some_and(|usage| reached(usage, memory_bytes)),
         ),
-        swap_peak_bytes: 0,
+        swap_peak_bytes: result
+            .usage
+            .and_then(|usage| usage.peak_swap_bytes)
+            .unwrap_or(0),
         cpu_usage_us: cpu_us,
         node_cpu_pressure_permille: result.usage.map(|usage| contention(usage, wall)),
         cpu_held: result

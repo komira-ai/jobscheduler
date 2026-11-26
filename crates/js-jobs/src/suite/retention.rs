@@ -77,6 +77,7 @@ pub fn a_result_is_readable_until_the_retention_end_and_not_after<B: Backend>(ba
             cpu_throttle: None,
             cpu_pressure_some: None,
             cpu_peak: None,
+            peak_swap_bytes: None,
         }),
         logs: None,
         cpu_series: Some(series()),

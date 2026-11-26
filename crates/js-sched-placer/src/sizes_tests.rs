@@ -87,6 +87,7 @@ pub(super) fn output(peak: u64, cpu: Duration) -> Output {
                 millicores: u64::try_from(cpu.as_millis() / 10).unwrap(),
                 window_usec: 5_000_000,
             }),
+            peak_swap_bytes: None,
         }),
         ..Output::default()
     }

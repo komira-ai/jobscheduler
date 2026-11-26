@@ -39,7 +39,8 @@ pub struct Run {
     /// or not measured. A success that reached it needed at least its booking, and its key
     /// books a step above the booking.
     pub limit_hits: u64,
-    /// Swap the run peaked at, in bytes; 0 when none or not measured.
+    /// Swap the run peaked at, in bytes; 0 when none or not measured. A success that swapped
+    /// had this beside its peak in use, and is a held sample of their sum.
     pub swap_peak_bytes: u64,
     /// CPU time used (user plus system) in microseconds.
     pub cpu_usage_us: u64,

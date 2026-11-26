@@ -26,7 +26,9 @@
 //!   booking ([`Run::limit_hits`] above zero: the caller judges it) needed at least the
 //!   booking: it is a held sample of `max(peak, booked)`, so its key books a step above the
 //!   booking next, and steps again while its runs keep reaching it. A success that swapped
-//!   is a held sample of its peak. Held samples are sized with the same margin as measured
+//!   ([`Run::swap_peak_bytes`] above zero) had its swap in use beside its peak: it is a held
+//!   sample of its peak plus its swap peak (and, when it also reached its booking, of at least
+//!   the booking). Held samples are sized with the same margin as measured
 //!   ones, and a held sample is kept below the host, so its step never passes the host
 //!   (one that reaches it is [`Fallback::OverCap`], below). Every other success's peak is a
 //!   measurement whatever its booking. CPU samples are successful runs with CPU time that started below

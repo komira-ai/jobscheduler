@@ -152,8 +152,8 @@ pub struct Summary {
     /// Maximum of each chunk of 32 measured (not held) memory samples, slot `chunk % 9`.
     pub(crate) chunk_max: [u64; SLOTS],
     /// Maximum of each chunk's held samples, lower bounds of a run's need (`max(peak, limit)`
-    /// of a run that reached its limit, the peak of one that swapped), sized with the usual
-    /// margin.
+    /// of a run that reached its limit, its peak plus its swap peak for one that swapped), sized
+    /// with the usual margin.
     pub(crate) chunk_held: [u64; SLOTS],
     /// The last 32 samples as contributed, for the dispersion test.
     pub(crate) ring: [u64; RING],
@@ -352,19 +352,23 @@ impl Summary {
     }
 
     /// A success whose peak does not show what it needed contributes a held sample, a lower
-    /// bound of its need, which the estimate sizes with the usual margin: one that reached
-    /// its booking ([`Run::limit_hits`]) needed at least the booking, so it contributes the
-    /// larger of its peak and its booking (below the host), and its class books a step above
-    /// that booking next; one that swapped had more than its peak in use, and contributes its
-    /// peak.
+    /// bound of its need, which the estimate sizes with the usual margin: one that swapped
+    /// ([`Run::swap_peak_bytes`]) had its swap in use beside its peak, so it needed at least
+    /// their sum; one that reached its booking ([`Run::limit_hits`]) needed at least the
+    /// booking, so it contributes the larger of that and its booking, and its class books a step
+    /// above that booking next. A held sample is kept below the host. Any other success
+    /// contributes its peak as measured.
     fn record_success(&mut self, run: &Run, peak: u64, now: Day, host: u64) {
-        if run.limit_hits > 0 {
-            let need = peak
-                .max(run.booked_memory_bytes)
-                .min(host.saturating_sub(1));
+        let swapped = run.swap_peak_bytes > 0;
+        if run.limit_hits > 0 || swapped {
+            let used = peak.saturating_add(run.swap_peak_bytes);
+            let floor = if run.limit_hits > 0 {
+                run.booked_memory_bytes
+            } else {
+                0
+            };
+            let need = used.max(floor).min(host.saturating_sub(1));
             self.record_memory(need, true, now, minutes_reached(run));
-        } else if run.swap_peak_bytes > 0 {
-            self.record_memory(peak, true, now, minutes_reached(run));
         } else {
             self.record_memory(peak, false, now, minutes_reached(run));
         }

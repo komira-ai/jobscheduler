@@ -1,6 +1,7 @@
 //! The result fields of a job row, tags 31 (the reason) to 40 (the usage), 43 (the stream
 //! lengths), 58 (the code of an input that failed, `rootfs_fields`), 60 to 62 (the CPU
-//! throttle counters, the CPU pressure and the CPU peak of the usage) and 64 (the CPU series).
+//! throttle counters, the CPU pressure and the CPU peak of the usage), 64 (the CPU series), 65
+//! (the memory series) and 74 (the swap peak of the usage).
 //! They are written only when the job has
 //! a result, and the reason is what says it has one: a row without it, as every row written before results were stored, reads with no
 //! result. A result without tag 43, as every result written before the lengths were stored,
@@ -21,13 +22,18 @@
 //! Tag 65 is the job's non-file memory series as its host reported it, written and read as tag
 //! 64 is, and kept the same way by a build from before it. Its value has the same 11-byte head,
 //! then each point (`u32`, MiB), big-endian: 523 bytes for 128 points.
+//!
+//! Tag 74 is the usage's swap peak (a `u64` of bytes), written and read as tags 60 to 62 are:
+//! only for a usage that has it, and read only beside tag 40. A usage without it, as every one
+//! written before it, reads with `None`; a build from before it keeps it as a field it does not
+//! know and writes it back unchanged.
 
 use js_state::StoreTime;
 use js_types::{CpuSeries, MemorySeries};
 
 use self::job_result_tag::{
     RESULT_CPU_PEAK, RESULT_CPU_PRESSURE_SOME, RESULT_CPU_SERIES, RESULT_CPU_THROTTLE,
-    RESULT_MEMORY_SERIES,
+    RESULT_MEMORY_SERIES, RESULT_SWAP_PEAK,
 };
 use super::rootfs_fields::job_rootfs_tag::RESULT_INPUT_FAILURE as INPUT_FAILURE;
 use super::{
@@ -70,6 +76,9 @@ pub(crate) mod job_result_tag {
     /// point as a u32 of MiB), written when the result has a well-formed one. Read whether or
     /// not the result has a usage.
     pub const RESULT_MEMORY_SERIES: u16 = 65;
+    /// The most swap the group held at once, in bytes (u64), written beside
+    /// [`RESULT_USAGE`](crate::codec::job_tag::RESULT_USAGE) when the agent reported it. Read only beside [`RESULT_USAGE`](crate::codec::job_tag::RESULT_USAGE).
+    pub const RESULT_SWAP_PEAK: u16 = 74;
 }
 
 /// Puts the fields of `result`, when there is one, in `row`.
@@ -99,6 +108,10 @@ pub(super) fn put_result(row: &mut Writer, result: Option<&JobResult>) {
                 .map(|waited| time(StoreTime::from_duration(waited))),
         );
         row.put_opt(RESULT_CPU_PEAK, used.cpu_peak.map(peak));
+        row.put_opt(
+            RESULT_SWAP_PEAK,
+            used.peak_swap_bytes.map(|bytes| bytes.to_be_bytes().to_vec()),
+        );
     }
     row.put_opt(t::RESULT_LOGS, result.logs.map(lengths));
     row.put_opt(
@@ -128,6 +141,7 @@ pub(super) fn take_result(fields: &mut Fields) -> Result<Option<JobResult>, Deco
     let usage = fields.opt(t::RESULT_USAGE, usage_of)?;
     let cpu_throttle = fields.opt(RESULT_CPU_THROTTLE, throttle_of)?;
     let cpu_peak = fields.opt(RESULT_CPU_PEAK, peak_of)?;
+    let peak_swap_bytes = fields.opt(RESULT_SWAP_PEAK, u64_of)?;
     let cpu_pressure_some = fields
         .opt(RESULT_CPU_PRESSURE_SOME, time_of)?
         .map(StoreTime::as_duration);
@@ -147,6 +161,7 @@ pub(super) fn take_result(fields: &mut Fields) -> Result<Option<JobResult>, Deco
             cpu_throttle,
             cpu_pressure_some,
             cpu_peak,
+            peak_swap_bytes,
             ..used
         }),
         logs: fields.opt(t::RESULT_LOGS, lengths_of)?,
@@ -302,6 +317,7 @@ fn usage_of(tag: u16, value: Vec<u8>) -> Result<ResourceUsage, DecodeError> {
         cpu_throttle: None,
         cpu_pressure_some: None,
         cpu_peak: None,
+        peak_swap_bytes: None,
     })
 }
 
