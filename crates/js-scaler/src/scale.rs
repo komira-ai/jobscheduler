@@ -447,7 +447,7 @@ impl Pass<'_> {
     fn gate(&self, pool: &PoolInput) -> Option<Blocked> {
         let health = match pool.health {
             Health::Checking => Some(Blocked::Checking),
-            Health::Failing => Some(Blocked::Unavailable),
+            Health::Unavailable => Some(Blocked::Unavailable),
             Health::Available => None,
         };
         let list = pool.held.is_none().then_some(Blocked::ListFailed);

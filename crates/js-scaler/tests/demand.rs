@@ -416,7 +416,7 @@ fn a_request_falls_through_to_the_next_pool_and_answers_find_their_own_record() 
     assert_eq!(acquires(&no_fit.tick(at(0)))[0].pool, "second");
 
     let mut failing = two_pools(settings("first"));
-    failing.input.pools[0].health = js_scaler::Health::Failing;
+    failing.input.pools[0].health = js_scaler::Health::Unavailable;
     failing.input.waiting = vec![request("r1")];
     assert_eq!(acquires(&failing.tick(at(0)))[0].pool, "second");
     assert_eq!(failing.state.blocked["first"], Blocked::Unavailable);
@@ -497,9 +497,9 @@ fn a_plan_pool_shows_its_launches_and_makes_none() {
 fn a_pool_that_is_not_ready_launches_nothing() {
     let cases = [
         (js_scaler::Health::Checking, true, Blocked::Checking),
-        (js_scaler::Health::Failing, true, Blocked::Unavailable),
+        (js_scaler::Health::Unavailable, true, Blocked::Unavailable),
         (js_scaler::Health::Available, false, Blocked::ListFailed),
-        (js_scaler::Health::Failing, false, Blocked::Unavailable),
+        (js_scaler::Health::Unavailable, false, Blocked::Unavailable),
     ];
     for (health, listed_ok, expected) in cases {
         let mut rig = Rig::new(settings("gpu"));

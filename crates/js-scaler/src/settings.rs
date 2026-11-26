@@ -18,6 +18,9 @@ pub enum LaunchMode {
 
 /// What the pool's background checks say. Only `Available` lets a launch through; a
 /// pool in any state still scales down.
+///
+/// The lease server's check state (`checks::State`) maps onto this name for name:
+/// `Checking`, `Available` and `Unavailable`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Health {
     /// The first full check pass has not finished.
@@ -25,7 +28,7 @@ pub enum Health {
     /// The checks pass.
     Available,
     /// A check fails.
-    Failing,
+    Unavailable,
 }
 
 /// The settings of one elastic pool. Money is in the smallest part of the pool's price

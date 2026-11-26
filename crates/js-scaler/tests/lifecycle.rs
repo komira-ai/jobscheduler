@@ -307,7 +307,7 @@ fn a_machine_the_provider_lost_is_released_and_removed() {
 #[test]
 fn failing_health_stops_launches_but_not_release() {
     let (mut rig, _, now) = draining();
-    rig.pool().health = Health::Failing;
+    rig.pool().health = Health::Unavailable;
     rig.input.hosts[0].mark = Some(HostMark::Releasing);
     rig.input.waiting = vec![request("r2")];
     let actions = rig.tick(at(now + SECOND));

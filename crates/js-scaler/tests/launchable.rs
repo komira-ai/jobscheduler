@@ -27,7 +27,7 @@ fn a_request_is_launchable_when_a_live_available_pool_has_a_fitting_offer() {
     };
     assert!(!can(&Rig::new(plan_only)));
 
-    for health in [Health::Checking, Health::Failing] {
+    for health in [Health::Checking, Health::Unavailable] {
         let mut rig = Rig::new(settings("gpu"));
         rig.pool().health = health;
         assert!(!can(&rig));
