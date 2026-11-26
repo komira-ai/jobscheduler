@@ -806,7 +806,7 @@ fn record(row: EndedRow) -> wire::UsageRecord {
             run_usec: series.run_usec,
             partial: series.partial,
         }),
-        attempt: None,
+        attempt: row.attempt,
     }
 }
 

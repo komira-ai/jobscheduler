@@ -23,6 +23,7 @@ use crate::result::{CpuPeak, CpuThrottle};
 use crate::result::{JobResult, JobTiming, LogLengths, ResourceUsage, ResultReason};
 use crate::rows;
 use crate::suite::{digest, full_spec};
+use attempt::{attempt_trail, retry_policy};
 
 /// The same generated cases on every run.
 fn config(seed: u64) -> ProptestConfig {
@@ -199,13 +200,14 @@ fn spec() -> impl Strategy<Value = JobSpec> {
             job_files(),
             labels(),
             history_key(),
+            proptest::option::of(retry_policy()),
             callback(),
         ),
     )
         .prop_map(
             |(
                 ((digit, layers, mounts, host_ports), command, args, env, needs, constraints),
-                (wall, network, ports, files, labels, history_key, callback),
+                (wall, network, ports, files, labels, history_key, retry, callback),
             )| {
                 let image = digit.map(|digit| format!("team/app:1@{}", digest(digit)));
                 JobSpec {
@@ -227,6 +229,7 @@ fn spec() -> impl Strategy<Value = JobSpec> {
                     mounts,
                     host_ports,
                     history_key,
+                    retry,
                     callback,
                 }
             },
@@ -415,7 +418,7 @@ fn job() -> impl Strategy<Value = JobRecord> {
             proptest::collection::vec(host_id(), 0..4),
             proptest::collection::vec(host_id(), 0..4),
         ),
-        queue_trail(),
+        (queue_trail(), attempt_trail()),
     )
         .prop_map(
             |(
@@ -423,7 +426,7 @@ fn job() -> impl Strategy<Value = JobRecord> {
                 (placed_at, started_at, ended_at, host, cancel_requested, cancel_requested_at),
                 (result, retention_ends, deadline_floor, client, start_failure_detail),
                 (failed_prepares, prepare_bars, held_refusals, capacity_refusals),
-                queue,
+                (queue, attempt),
             )| JobRecord {
                 id: JobId::parse(&id).expect("an id"),
                 spec,
@@ -447,6 +450,7 @@ fn job() -> impl Strategy<Value = JobRecord> {
                 queue,
                 carried: Carried::default(),
                 start_failure_detail,
+                attempt,
             },
         )
 }
@@ -975,3 +979,6 @@ fn the_fixtures_the_generators_share_read_back() {
     full.retention_ends = Some(at(9));
     assert_eq!(decode_job(&encode_job(&full).expect("encodes")), Ok(full));
 }
+
+#[path = "codec_props_attempt.rs"]
+mod attempt;

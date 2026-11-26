@@ -93,6 +93,10 @@ fn the_layout_is_pinned_byte_for_byte() {
             66,
             b"root//crates/js-sched:js-sched rust_compile build".to_vec(),
         ),
+        (
+            67,
+            framed(&[&3u32.to_be_bytes(), &seconds(5), &seconds(60)]),
+        ),
     ]);
     // The rootfs fields (tags 54 to 58) are pinned by `rootfs_fields`' own tests.
     let full = super::rootfs_fields::tests::plain_job();

@@ -280,6 +280,11 @@ pub struct EndedRow {
     /// after the series and written only when present, so a row without one is the bytes it
     /// was before the field.
     pub class: Option<String>,
+    /// The attempt of the job the allocation booked for, when it is not the first
+    /// (`docs/design/job-retry-and-completion-callback.md`, section 3.7): `None` for a first
+    /// attempt and for an allocation of no job. Stored after the class and written only when
+    /// present, so the row of a first attempt is the bytes it was before the field.
+    pub attempt: Option<u32>,
 }
 
 /// The key of the row of allocation `id`, which ended at `ended_at_ms`.
@@ -454,6 +459,9 @@ impl<'a> EndedHistory<'a> {
     }
 }
 
+#[cfg(test)]
+#[path = "history/attempt_tests.rs"]
+mod attempt_tests;
 #[cfg(test)]
 mod class_tests;
 #[cfg(test)]

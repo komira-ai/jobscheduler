@@ -6,11 +6,11 @@ use std::time::Duration;
 
 use js_jobs::interfere::Interfere;
 use js_jobs::{
-    AllocationStep, Booked, EndReason, JobEnd, JobId, JobState, JobStore, JobStoreError, NewJob,
-    Output, ResourceUsage, ResultReason, StartFailure, keys,
+    AllocationStep, AttemptOutcome, AttemptRecord, Booked, EndReason, JobEnd, JobId, JobState,
+    JobStore, JobStoreError, NewJob, Output, ResourceUsage, ResultReason, StartFailure, keys,
 };
 use js_state::fake::{Fake, Flaw};
-use js_state::{Cond, ManualClock, Store, Txn};
+use js_state::{Cond, ManualClock, Store, StoreTime, Txn};
 use js_types::{CpuSeries, HostId};
 use js_usage::{
     AllocationId, Booked as UsageBooked, DrainOutcome, EndedHistory, EndedReason, EndedRow,
@@ -326,6 +326,7 @@ fn a_freed_job_allocation_writes_one_usage_row() {
             used: None,
             cpu_series: None,
             class: Some(js_sched_placer::sizes::class_name(&job)),
+            attempt: None,
         };
         assert_eq!(history_rows(&store), [row], "{freed:?}");
         assert_eq!(usage_keys(), 2, "{freed:?}: the row and its index entry");
@@ -690,4 +691,83 @@ fn the_history_row_of_a_free_carries_the_jobs_cpu_series() {
     assert_eq!(by_name("no-usage").used, None);
     assert_eq!(by_name("no-series").cpu_series, None);
     assert_eq!(by_name("lost").cpu_series, None);
+}
+
+/// Asserts that a job on its first attempt writes a usage row with no attempt, that after one
+/// retry (its host lost) the job's second placement, end and free write a second row with
+/// attempt 2, that the first attempt's row, written at its own free after the retry queued the
+/// job again, still says none, and that both rows exist, one per attempt, under the job's name.
+/// It catches an attempt left out of the row, one counted on the first attempt, and the second
+/// attempt's row lost behind the first's.
+#[test]
+fn each_attempt_of_a_retried_job_writes_its_own_usage_row() {
+    let name = "each_attempt_of_a_retried_job_writes_its_own_usage_row";
+    let (time, store, jobs) = timed();
+    let retrying = js_jobs::JobSpec {
+        retry: Some(js_types::RetryPolicy {
+            max_attempts: 3,
+            initial_backoff: None,
+            max_backoff: None,
+        }),
+        ..spec()
+    };
+    let (job, _) = placed(&jobs, "job-retry", "host-a", retrying, BOOKED);
+    time.advance(Duration::from_secs(1));
+    jobs.transition(&job.id, JobState::Placed, JobState::Starting)
+        .unwrap();
+    jobs.transition(&job.id, JobState::Starting, JobState::Running)
+        .unwrap();
+    time.advance(Duration::from_secs(2));
+    let lost = AttemptRecord {
+        outcome: AttemptOutcome::HostLost,
+        exit_code: None,
+        reason: None,
+        start_failure: None,
+        start_failure_detail: None,
+    };
+    let not_before = jobs.now().unwrap().saturating_add(Duration::from_secs(1));
+    let queued = jobs.retry_txn(&job.id, lost, not_before).unwrap();
+    assert_eq!(queued.attempt.number(), 1, "{name}: number after retry");
+    free_allocation(&jobs, &job.id, Freed::ProviderAbsent).unwrap();
+    let first = history_rows(&store);
+    assert_eq!(first.len(), 1, "{name}: one row after the first free");
+    assert_eq!(first[0].attempt, None, "{name}: first attempt's row");
+    assert_eq!(first[0].id.as_str(), "job-retry", "{name}: first id");
+    let entry = &queued.attempt.history()[0];
+    let ms = |from: StoreTime, to: StoreTime| u64::try_from(to.since(from).as_millis()).unwrap();
+    let started = entry.started_at.unwrap();
+    assert_eq!(
+        (first[0].queued_ms, first[0].run_ms),
+        (
+            Some(ms(entry.queued_at, entry.placed_at)),
+            Some(ms(started, entry.ended_at))
+        ),
+        "{name}: the first attempt's wait and run, from its history entry"
+    );
+    assert!(
+        first[0].run_ms >= Some(2000),
+        "{name}: the first attempt ran its two seconds"
+    );
+
+    time.advance(Duration::from_secs(3));
+    let host = HostId::new("host-a").unwrap();
+    let (_, second) = jobs.place(&job.id, host, BOOKED).unwrap();
+    assert_eq!(
+        jobs.get_job(&job.id).unwrap().unwrap().attempt.number(),
+        2,
+        "{name}: number after the second placement"
+    );
+    time.advance(Duration::from_secs(1));
+    jobs.end_job(&job.id, JobEnd::Lost).unwrap();
+    free_allocation(&jobs, &job.id, Freed::ProviderAbsent).unwrap();
+    let rows = history_rows(&store);
+    assert_eq!(rows.len(), 2, "{name}: one row per attempt");
+    assert_eq!(rows[0], first[0], "{name}: the first row is unchanged");
+    assert_eq!(rows[1].attempt, Some(2), "{name}: second attempt's row");
+    assert_eq!(rows[1].id.as_str(), "job-retry", "{name}: second id");
+    assert_eq!(
+        (rows[1].queued_ms, rows[1].run_ms),
+        (Some(ms(not_before, second.created_at)), Some(0)),
+        "{name}: the second attempt waited from its backoff's end and never started"
+    );
 }

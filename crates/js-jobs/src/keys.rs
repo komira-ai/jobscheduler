@@ -81,6 +81,14 @@ pub const CALLBACK: &str = "callback/";
 /// `idx/` space names it.
 pub const NODE: &str = "node/";
 
+/// `attempt/<id>/<n>`: the row of attempt `<n>` of the job `<id>`, an attempt that ran
+/// ([`crate::AttemptRow`]): `<n>` as ten digits, so a job's rows sort by number, and a job id
+/// holds no `/`, so one job's rows are a prefix no other job's share. Written in the commit
+/// that ends or retries the attempt, read by [`crate::JobStore::attempt_row`], and deleted by
+/// the retention sweep before the job's row ([`crate::JobStore::tick`]), which also deletes
+/// the rows whose job's row is gone. No `idx/` space names them.
+pub const ATTEMPT: &str = "attempt/";
+
 /// `meta/cordons/restored`: empty, written once by the first server that carried the cordons an
 /// earlier release kept only in its host bindings into the cordon table
 /// ([`crate::JobStore::restore_cordons`]); with it, no later start writes a cordon back.
@@ -106,6 +114,23 @@ pub fn allocation(id: &JobId) -> String {
 #[must_use]
 pub fn mark(id: &JobId) -> String {
     format!("{MARK}{id}")
+}
+
+/// The key of the row of attempt `number` of the job `id`.
+pub(crate) fn attempt(id: &JobId, number: u32) -> String {
+    format!("{ATTEMPT}{id}/{number:010}")
+}
+
+/// The prefix of every attempt row of the job `id`.
+pub(crate) fn attempt_prefix(id: &JobId) -> String {
+    format!("{ATTEMPT}{id}/")
+}
+
+/// The job whose attempt row `key` is; `None` for a key that is not one (outside
+/// [`ATTEMPT`], with no number, or naming no job id).
+pub(crate) fn attempt_job(key: &str) -> Option<JobId> {
+    let (id, _) = key.strip_prefix(ATTEMPT)?.split_once('/')?;
+    JobId::parse(id).ok()
 }
 
 /// The key of the taint of `host`.

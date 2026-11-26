@@ -214,6 +214,8 @@ pub(crate) fn job(
         mounts,
         host_ports,
         history_key,
+        // A spec that carries a policy was refused above (`not_enabled`).
+        retry: None,
         callback,
     };
     Ok(Valid {

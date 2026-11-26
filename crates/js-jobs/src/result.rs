@@ -24,6 +24,7 @@ use js_agent_wire::limits::MAX_LOG_STREAM_LEN;
 use js_state::StoreTime;
 use js_types::{CpuSeries, MemorySeries};
 
+use crate::attempt::{AttemptRecord, AttemptTrail};
 use crate::ids::JobId;
 use crate::record::{JobRecord, JobState, StartFailure};
 
@@ -357,9 +358,11 @@ fn tail_of(mut text: String) -> (String, bool) {
 /// `job` ended as `end` says at `now`: its state, its end time, its result (none for a job
 /// that was lost or failed to start, with the tails cut to the cap), the agent's code of a
 /// refused start, its retention end,
-/// `now` plus `retention`, and its files' contents replaced by their digests
-/// ([`crate::JobFiles`]). This is the one place a job record is made ended, so every write
-/// that ends a job drops the contents in the same write.
+/// `now` plus `retention`, its files' contents replaced by their digests
+/// ([`crate::JobFiles`]), and its current attempt, when it holds a host, appended to its
+/// attempts as the last ([`AttemptTrail::closed`]). This is the one place a job record is made
+/// ended, so every write that ends a job drops the contents, and closes the attempt that ran,
+/// in the same write.
 pub(crate) fn ended(
     job: JobRecord,
     end: JobEnd,
@@ -374,6 +377,7 @@ pub(crate) fn ended(
         ended_at: now,
     };
     let start_failure_detail = end.detail();
+    let attempt = AttemptTrail::closed(&job, AttemptRecord::of_end(&end), now, false);
     let result = end
         .report()
         .map(|(reason, exit_code, output, input_failure)| {
@@ -400,6 +404,7 @@ pub(crate) fn ended(
         result,
         start_failure_detail,
         retention_ends: Some(now.saturating_add(retention.window())),
+        attempt,
         ..job
     }
 }
@@ -505,6 +510,7 @@ mod tests {
             queue: crate::QueueTrail::default(),
             carried: crate::codec::Carried::default(),
             start_failure_detail: None,
+            attempt: crate::AttemptTrail::default(),
         }
     }
 

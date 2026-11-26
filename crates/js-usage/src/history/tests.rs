@@ -38,6 +38,7 @@ pub(crate) fn row(end: u64) -> EndedRow {
         }),
         cpu_series: None,
         class: Default::default(),
+        attempt: None,
     }
 }
 
@@ -59,6 +60,7 @@ fn bare(end: u64, id: &str) -> EndedRow {
         used: None,
         cpu_series: None,
         class: Default::default(),
+        attempt: None,
     }
 }
 
@@ -216,7 +218,7 @@ fn the_bytes_of_a_row_are_pinned() {
 
 /// Catches: a reader that refuses a row a later build wrote with a field added at the end,
 /// which would make every added field cost the older build its history. The bytes come after
-/// the last field this build knows, the class, on rows with and without a CPU series and a
+/// the last field this build knows, the attempt, on rows with and without a CPU series and a
 /// class.
 #[test]
 fn bytes_after_the_known_fields_are_a_later_builds_fields_and_are_ignored() {
@@ -236,6 +238,8 @@ fn bytes_after_the_known_fields_are_a_later_builds_fields_and_are_ignored() {
             if known.class.is_none() {
                 later.push(0);
             }
+            // The attempt, absent on these rows.
+            later.push(0);
             later.extend_from_slice(&[1, 0x81, 0x01, 7]);
             assert_eq!(decode(&later), Ok(known));
         }
