@@ -15,11 +15,6 @@ use sha2::Sha256;
 
 use crate::SigningKey;
 
-/// HMAC-SHA256's block, in bytes. The longest key a [`SigningKey`] holds fills it, so every
-/// key is padded with zeros to one block, as the HMAC definition pads a key no longer than a
-/// block.
-const BLOCK: usize = 64;
-
 /// How many bytes from the server's id source a `webhook-id` is minted from.
 pub const WEBHOOK_ID_BYTES: usize = 16;
 
@@ -32,15 +27,18 @@ pub fn sign(key: &SigningKey, webhook_id: &str, timestamp: u64) -> String {
 }
 
 /// The Standard Webhooks signature of `body` sent with `webhook_id` at `timestamp`, under
-/// `key`, which is at most [`BLOCK`] bytes.
+/// `key`. HMAC takes a key of any length (`new_from_slice` never refuses one), so the empty
+/// text of a refusal is never returned.
 fn signature(key: &[u8], webhook_id: &str, timestamp: u64, body: &[u8]) -> String {
-    let mut block = [0_u8; BLOCK];
-    block[..key.len()].copy_from_slice(key);
-    let mut mac = <Hmac<Sha256> as KeyInit>::new(&block.into());
-    mac.update(format!("{webhook_id}.{timestamp}.").as_bytes());
-    mac.update(body);
-    let digest: [u8; 32] = mac.finalize().into_bytes().into();
-    format!("v1,{}", STANDARD.encode(digest))
+    let keyed = <Hmac<Sha256> as KeyInit>::new_from_slice(key);
+    keyed
+        .map(|mut mac| {
+            mac.update(format!("{webhook_id}.{timestamp}.").as_bytes());
+            mac.update(body);
+            let digest: [u8; 32] = mac.finalize().into_bytes().into();
+            format!("v1,{}", STANDARD.encode(digest))
+        })
+        .unwrap_or_default()
 }
 
 /// The `webhook-id` of a job's callback, minted from `random`, [`WEBHOOK_ID_BYTES`] bytes the
