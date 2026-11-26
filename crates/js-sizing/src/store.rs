@@ -302,6 +302,25 @@ impl Summaries {
             .max()
     }
 
+    /// The memory a typical recent sample of `key` asks for on `now`:
+    /// `round_up_256MiB(max(1.2 * median + 128 MiB, floor))` of the last 32 samples (the
+    /// larger middle one for an even count), at least [`crate::MIN_MEMORY`], over the fresh
+    /// summaries of the key's levels (the larger of L1 and L2). `None` when no fresh summary
+    /// holds a memory sample. It is [`Summaries::peak_memory`] with the median in place of the
+    /// largest peak: what a key that stands in for another books (a kind for a target with no
+    /// run of its own), where one heavy member must not size every other. Like it, it can
+    /// reach `bounds.host_memory`.
+    pub fn median_memory(&self, key: &Key, now: Day, bounds: &Bounds) -> Option<u64> {
+        let now = now.min(Day(MAX_DAY));
+        let l1 = if key.has_cfg() { self.get(key) } else { None };
+        [l1, self.get(&key.l2())]
+            .into_iter()
+            .flatten()
+            .filter(|summary| fresh(summary, now))
+            .filter_map(|summary| summary.median_memory(bounds))
+            .max()
+    }
+
     /// The CPU estimate of `key` on `now`, in millicores, from the first fresh level (L1,
     /// then L2) that holds a CPU sample, whatever its number of memory samples; `None` when
     /// no fresh level holds one (the caller books its own unlearned CPU).
