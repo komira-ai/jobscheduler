@@ -273,3 +273,21 @@ fn a_runtime_without_host_jobs_refuses_a_host_job() {
         .collect();
     assert_eq!(cgroups, ["helpers"]);
 }
+
+/// Proves a host job that ends before it says it is up fails its start with how it ended
+/// and what it wrote to stderr, instead of leaving the test waiting for ever on a ready pipe
+/// that nothing will open: the job writes a line to stderr and exits 3 without opening it.
+/// Catches a start that waits only for the pipe.
+#[test]
+#[ignore = "real crun: run through cargo xtask crun-tests"]
+#[should_panic(
+    expected = "the host job ended before it was up: Ok(Exited(Exit { code: 3, oom_killed: false })), stderr \"gone\\n\""
+)]
+fn a_host_job_that_ends_before_it_is_up_fails_its_start() {
+    let mut s = crun_subject("host_job_ends_early");
+    s.prepared();
+    let mut runtime = s.open_allowing_host_jobs("crun-host-early");
+    let sync = s.sync_dir("e1");
+    let spec = host_spec(&mut s, "e1", "echo gone >&2; exit 3");
+    start_and_wait(&mut runtime, &spec, &sync);
+}
