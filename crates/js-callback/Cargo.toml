@@ -8,8 +8,23 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+# The `webhook-signature` value (base64 of HMAC-SHA256) and the `webhook-id` (base64url).
+base64.workspace = true
+hmac.workspace = true
 js-types = { path = "../js-types" }
+# The crypto provider of the sender's TLS, as the alert webhook's.
+rustls.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
+# The sender, with its resolver hook (pinned to one exact version at the workspace root).
+ureq.workspace = true
+
+[dev-dependencies]
+# The loopback receivers of the sender's tests: a test authority and its certificates.
+rcgen.workspace = true
+# The operator's log lines, captured by exact equality.
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true
