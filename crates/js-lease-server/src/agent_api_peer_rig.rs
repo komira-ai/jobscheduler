@@ -71,6 +71,7 @@ pub(crate) fn write_row(jobs: &ServerJobs, row: &Row<'_>, phase: Phase) {
         labels: BTreeMap::from([("zone".to_owned(), "z1".to_owned())]),
         phase,
         agent_process: None,
+        agent_version: None,
     };
     jobs.hello_node(&HostId::new(row.host).unwrap(), &hello)
         .unwrap();
