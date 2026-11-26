@@ -954,3 +954,6 @@ mod burst;
 
 #[path = "sizes_at_booking_tests.rs"]
 mod at_booking;
+
+#[path = "sizes_swap_tests.rs"]
+mod swap;

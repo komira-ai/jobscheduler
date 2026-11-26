@@ -110,7 +110,8 @@ pub(super) fn put_result(row: &mut Writer, result: Option<&JobResult>) {
         row.put_opt(RESULT_CPU_PEAK, used.cpu_peak.map(peak));
         row.put_opt(
             RESULT_SWAP_PEAK,
-            used.peak_swap_bytes.map(|bytes| bytes.to_be_bytes().to_vec()),
+            used.peak_swap_bytes
+                .map(|bytes| bytes.to_be_bytes().to_vec()),
         );
     }
     row.put_opt(t::RESULT_LOGS, result.logs.map(lengths));

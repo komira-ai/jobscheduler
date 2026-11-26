@@ -349,24 +349,25 @@ fn job_result() -> impl Strategy<Value = JobResult> {
                     },
                     usage: usage.map(
                         |((secs, nanos, peak), throttle, pressure, cpu_peak, peak_swap_bytes)| {
-                        ResourceUsage {
-                            cpu_time: Duration::new(secs, nanos),
-                            peak_memory_bytes: peak,
-                            cpu_throttle: throttle.map(|(periods, throttled_periods)| {
-                                CpuThrottle {
-                                    periods,
-                                    throttled_periods,
-                                }
-                            }),
-                            cpu_pressure_some: pressure
-                                .map(|(secs, nanos)| Duration::new(secs, nanos)),
-                            cpu_peak: cpu_peak.map(|(millicores, window_usec)| CpuPeak {
-                                millicores,
-                                window_usec,
-                            }),
-                            peak_swap_bytes,
-                        }
-                    }),
+                            ResourceUsage {
+                                cpu_time: Duration::new(secs, nanos),
+                                peak_memory_bytes: peak,
+                                cpu_throttle: throttle.map(|(periods, throttled_periods)| {
+                                    CpuThrottle {
+                                        periods,
+                                        throttled_periods,
+                                    }
+                                }),
+                                cpu_pressure_some: pressure
+                                    .map(|(secs, nanos)| Duration::new(secs, nanos)),
+                                cpu_peak: cpu_peak.map(|(millicores, window_usec)| CpuPeak {
+                                    millicores,
+                                    window_usec,
+                                }),
+                                peak_swap_bytes,
+                            }
+                        },
+                    ),
                     logs: logs.map(
                         |[stdout_bytes, stderr_bytes, stdout_dropped, stderr_dropped]| LogLengths {
                             stdout_bytes,

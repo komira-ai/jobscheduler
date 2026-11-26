@@ -231,7 +231,11 @@ fn the_swap_peak_of_a_usage_is_stored_under_tag_74_when_reported() {
             Some(20),
             "{bytes}"
         );
-        assert_eq!(decode_job(&row).expect("reads").result, job.result, "{bytes}");
+        assert_eq!(
+            decode_job(&row).expect("reads").result,
+            job.result,
+            "{bytes}"
+        );
     }
 
     let none = swapped(None);
@@ -267,7 +271,11 @@ fn a_build_without_tag_74_carries_the_swap_peak() {
     let row = job_row(&job);
     let mut older = decode_job(&without(&row, 74)).expect("reads without the tag");
     assert_eq!(
-        older.result.as_ref().and_then(|r| r.usage).map(|u| u.peak_swap_bytes),
+        older
+            .result
+            .as_ref()
+            .and_then(|r| r.usage)
+            .map(|u| u.peak_swap_bytes),
         Some(None),
         "not read"
     );

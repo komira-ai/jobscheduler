@@ -14,6 +14,7 @@ mod reference;
 mod safety;
 mod stand_in;
 mod storage;
+mod swap;
 mod tail;
 
 use crate::*;
