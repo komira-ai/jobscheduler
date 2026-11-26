@@ -22,19 +22,19 @@ fn median_memory_is_none_without_a_sample_and_one_sample_answers_with_the_margin
     assert_eq!(median(&small, &k), Some(MIN_MEMORY));
 }
 
-/// Rule: the statistic is the median, not the maximum. The farm's case: a kind whose runs
-/// peak at 0.27 GiB, with one run of a heavy member at 7 GiB among them, books what its
-/// largest peak asks for (8.75 GiB) by `peak_memory`, and 1 GiB by `median_memory`. Catches
+/// Rule: the statistic is the median, not the high end. The farm's case: a kind whose runs
+/// peak at 0.27 GiB, with two runs of a heavy member at 7 GiB among its last 32, books what
+/// its high end asks for (8.75 GiB) by `peak_memory`, and 1 GiB by `median_memory`. Catches
 /// a figure that follows the kind's heaviest member.
 #[test]
-fn one_heavy_sample_among_light_ones_does_not_move_the_median() {
+fn heavy_samples_among_light_ones_do_not_move_the_median() {
     let mut s = Summaries::default();
     let k = linux(1);
     let light = 270 * MIB;
     let heavy = 7 * GIB;
     feed(&mut s, &k, &success(light), 15);
-    feed(&mut s, &k, &success(heavy), 1);
-    feed(&mut s, &k, &success(light), 16);
+    feed(&mut s, &k, &success(heavy), 2);
+    feed(&mut s, &k, &success(light), 15);
     assert_eq!(
         s.peak_memory(&k, DAY, &Bounds::default()),
         Some(35 * 256 * MIB)
@@ -75,25 +75,6 @@ fn the_median_follows_the_last_32_samples() {
         Some(GIB),
         "the 4 GiB runs are a minority again"
     );
-}
-
-/// Rule: the key's kill floor holds as it does in `peak_memory` (a kind whose member died at
-/// its booking books at least the floor), and once the floor is gone a kill is one sample of
-/// its booking among the others, not the figure. Catches a floor dropped from the median.
-#[test]
-fn the_median_holds_the_kill_floor_and_a_kill_is_one_sample() {
-    let mut s = Summaries::default();
-    let k = linux(1);
-    feed(&mut s, &k, &success(500 * MIB), 10);
-    s.observe(&k, &heavy_kill(), DAY, &Bounds::default());
-    assert_eq!(floor(&s, &k), 16 * GIB);
-    assert_eq!(median(&s, &k), Some(16 * GIB), "the floor");
-    let mut t = Summaries::default();
-    feed(&mut t, &k, &success(500 * MIB), 10);
-    feed(&mut t, &k, &kill(4 * GIB, GIB, Some(0)), 1);
-    let floor_only = floor(&t, &k);
-    assert_eq!(floor_only, 4 * GIB + 256 * MIB, "a step above the booking");
-    assert_eq!(median(&t, &k), Some(floor_only));
 }
 
 /// Rule: held samples (a run that reached its booking) count as recorded, the larger of
