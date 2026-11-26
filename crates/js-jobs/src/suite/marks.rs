@@ -35,7 +35,7 @@ pub(super) fn after(from: StoreTime, secs: u64) -> StoreTime {
 
 /// A mark of `id` on `on` made now, with every field set: a tail end, and an exclusion of
 /// each kind, two with ends.
-fn full_mark<S: Store>(rig: &Rig<S>, id: &JobId, on: &str) -> MarkRecord {
+pub(super) fn full_mark<S: Store>(rig: &Rig<S>, id: &JobId, on: &str) -> MarkRecord {
     let made = now(rig);
     MarkRecord {
         tail_end: Some(after(made, 300)),

@@ -369,7 +369,7 @@ fn refusal_to_status_table_matches_golden() {
 }
 
 /// The messages each gRPC code is tried with in the status table.
-const MESSAGES: [&str; 13] = [
+const MESSAGES: [&str; 14] = [
     "unknown-job",
     "expired",
     "not-finished",
@@ -382,6 +382,7 @@ const MESSAGES: [&str; 13] = [
     "too-many-follows",
     "log-store-unavailable",
     "field: fromOffset",
+    "field: attempt",
     "store-unavailable",
 ];
 
@@ -527,6 +528,15 @@ async fn a_status_message_selects_the_row() {
                 "error": "out-of-range",
                 "field": "fromOffset",
                 "reason": "the offset is past the end of the stream",
+            }),
+        ),
+        (
+            Status::out_of_range("field: attempt"),
+            400,
+            json!({
+                "error": "out-of-range",
+                "field": "attempt",
+                "reason": "the job has no such attempt yet",
             }),
         ),
         (

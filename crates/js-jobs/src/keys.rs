@@ -67,6 +67,13 @@ pub const PERIODIC: &str = "periodic/";
 /// order ([`crate::JobStore::claim_dispatch`]). No `idx/` space names them.
 pub const DISPATCH: &str = "dispatch/";
 
+/// `callback/<id>`: the delivery of the completion callback of the job with that id
+/// (`docs/design/job-retry-and-completion-callback.md`, section 5.5), the one row that holds the
+/// callback's signing key. Written armed in the transaction that records the job, made due in
+/// the one that ends it, and deleted with the job's row at its retention end. Its pending row
+/// has one entry under `idx/callback/due/`.
+pub const CALLBACK: &str = "callback/";
+
 /// `node/<host>`: a host's presence ([`crate::NodeRecord`]): its session, what its hello
 /// announced and what its last applied beat left, written by [`crate::JobStore::hello_node`]
 /// and [`crate::JobStore::beat_node`] at the version read and deleted by
@@ -129,6 +136,12 @@ pub fn pool(pool: &str) -> String {
 #[must_use]
 pub fn binding(host: &HostId) -> String {
     format!("{BINDING}{host}")
+}
+
+/// The key of the callback delivery of the job `id`.
+#[must_use]
+pub fn callback(id: &JobId) -> String {
+    format!("{CALLBACK}{id}")
 }
 
 /// The key of the presence row of `host`.
@@ -205,6 +218,13 @@ pub(crate) const FREED: &str = "idx/alloc/freed/";
 /// `idx/alloc/unread/<id>`: an allocation row this build cannot read, as [`UNREAD_JOB`].
 pub(crate) const UNREAD_ALLOCATION: &str = "idx/alloc/unread/";
 
+/// `idx/callback/due/<at>/<id>`: a pending callback, `<at>` the nanoseconds of the instant a
+/// claim may next take it (the end of the claim that holds it, else its next try) as twenty
+/// digits, so the keys sort by that instant and then by job id. Its entries move only with the
+/// writes of their rows, and the backfill leaves them as they are; a claim that meets an entry
+/// its row no longer calls for deletes it.
+pub(crate) const CALLBACK_DUE: &str = "idx/callback/due/";
+
 /// The width of a time in an index key: the digits of `u64::MAX`.
 const STAMP_DIGITS: usize = 20;
 
@@ -234,6 +254,16 @@ pub(crate) fn due(end: StoreTime, id: &JobId) -> String {
 /// excluded, reads exactly the entries that end before `at`.
 pub(crate) fn due_below(at: StoreTime) -> String {
     format!("{DUE}{}", stamp(at))
+}
+
+/// The due entry of the callback of the job `id`, claimable from `at`.
+pub(crate) fn callback_due(at: StoreTime, id: &JobId) -> String {
+    format!("{CALLBACK_DUE}{}/{id}", stamp(at))
+}
+
+/// The first due entry of a callback claimable from `at`, as [`due_below`].
+pub(crate) fn callback_due_below(at: StoreTime) -> String {
+    format!("{CALLBACK_DUE}{}", stamp(at))
 }
 
 /// The on-host entry of the allocation of the job `id`, on `host`.

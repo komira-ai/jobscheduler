@@ -146,6 +146,8 @@ mod clients_tests;
 #[cfg(test)]
 mod conformance_tests;
 #[cfg(test)]
+mod logs_attempt_tests;
+#[cfg(test)]
 mod logs_follow_tests;
 #[cfg(test)]
 mod logs_rig;
