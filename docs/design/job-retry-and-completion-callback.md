@@ -354,7 +354,7 @@ enum JobEventKind { ... JOB_EVENT_KIND_RETRY_SCHEDULED = 8; } // detail names th
 - **The key.** Attempt 1 keeps today's prefix `P = prefix/H/job_id/`, so a job without retries, and every log written before this
   change, reads exactly as before. Attempt `n ≥ 2` gets `P = prefix/H/S/job_id/`, where `H` is that attempt's host and `S` is the 64
   lower-case hex digits of SHA-256 of `job id "/" n`.
-  - **No collision.** A job id is at most 63 bytes (`crates/js-jobs/src/ids.rs`), so a 64-byte `S` is never a job id. No job's
+  - **No collision.** A job id is at most 63 bytes (`crates/js-types/src/job_id.rs`), so a 64-byte `S` is never a job id. No job's
     attempt-1 prefix `prefix/H/Y/` can contain another job's later attempt. Two later attempts differ in `S`.
   - **Within the host's grant.** The last segment is still the job id, as the agent requires. The key stays under the host's prefix,
     which the host's credential already covers.

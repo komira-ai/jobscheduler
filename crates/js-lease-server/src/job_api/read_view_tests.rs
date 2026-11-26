@@ -142,6 +142,8 @@ fn full_shown() -> v1::JobSpec {
             protocol: v1::PortProtocol::Tcp.into(),
         }],
         history_key: Default::default(),
+        retry: None,
+        callback: None,
     }
 }
 
@@ -150,8 +152,9 @@ fn full_shown() -> v1::JobSpec {
 /// arguments, a file named with empty contents, the priority); a whole-host job with no
 /// command and the sandbox-exec mode on the open network; a job with no disk, GPU class,
 /// exec mode, network or isolation as absent or unspecified (a contained job reads back as
-/// unspecified, a host job as host); a placed job's host; and a running job
-/// whose cancel was asked for. Catches a field dropped or mapped to the wrong value, and a
+/// unspecified, a host job as host); a placed job's host; a running job whose cancel was
+/// asked for; and no retry policy, callback, callback status or attempt history, with attempt
+/// 0, since no record holds them. Catches a field dropped or mapped to the wrong value, and a
 /// file's contents shown.
 #[tokio::test]
 async fn get_job_shows_every_field_of_the_record() {
@@ -180,6 +183,11 @@ async fn get_job_shows_every_field_of_the_record() {
         attempts: 0,
         events: Vec::new(),
         dropped_events: 0,
+        attempt: 0,
+        attempt_history: Vec::new(),
+        retry_not_before_ms: None,
+        callback_status: None,
+        dropped_attempts: 0,
     };
     assert_eq!(rig.get_job("full-1").await.expect("read"), shown);
 

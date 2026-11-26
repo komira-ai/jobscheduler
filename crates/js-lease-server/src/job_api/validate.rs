@@ -24,6 +24,8 @@
 //! | `spec.labels` | as a lease's labels are (`Labels::from_caller`) | `field: spec.labels` |
 //! | `spec.historyKey` | empty, or 1 to 512 bytes of printable ASCII (`0x20` to `0x7e`), kept as sent ([`HistoryKey`]) | `field: spec.historyKey: bad-length`, `field: spec.historyKey: not-printable-ascii` |
 //! | `spec.layers`, `spec.mounts` | the rules of `rootfs` | `field: spec.layers[i].<name>`, `spec.mounts[i].<name>` |
+//! | `spec.retry` | absent: this release does not retry a job, so it refuses one that asks, whatever the policy says | `field: spec.retry: retry-not-enabled` |
+//! | `spec.callback` | absent: this release calls no job back, so it refuses one that asks, whatever the callback says | `field: spec.callback: callback-not-enabled` |
 //!
 //! The cross-field rules (an empty image, its command, `exec`, `needs.wholeHost` and
 //! `isolation` beside the layers, mounts and host ports) are checked once those fields are, and
@@ -93,8 +95,9 @@ pub(crate) struct Valid {
 pub(crate) enum Fault {
     /// The field, by its JSON name, is not valid.
     Field(&'static str),
-    /// The field, by its JSON name, breaks a rule of the wire's check of a start, whose
-    /// refusal code (one of `js_agent_wire::refusal`) the answer carries.
+    /// The field, by its JSON name, breaks a rule whose code the answer carries: one of the
+    /// wire's check of a start (`js_agent_wire::refusal`), or of this module's own (the
+    /// history key's, and `retry-not-enabled` and `callback-not-enabled`).
     Wire(&'static str, &'static str),
     /// The field, by its JSON name, of the port at this index of `spec.ports`.
     Port(usize, &'static str),
@@ -136,6 +139,7 @@ pub(crate) fn job(spec: Option<&v1::JobSpec>, ceiling: Duration) -> Result<Valid
     let history_key = history_key(&spec.history_key)?;
     let layers = rootfs::layers(&spec.layers)?;
     let mounts = rootfs::mounts(&spec.mounts)?;
+    not_enabled(spec)?;
     let accelerator = AcceleratorNeed::requested(&capabilities, resources.shape())
         .map_err(|_| Fault::Field("spec.constraints.accelerator"))?;
     imageless(image.as_ref(), &spec.command, &layers)?;
@@ -489,6 +493,21 @@ fn history_key(text: &str) -> Result<Option<HistoryKey>, Fault> {
     HistoryKey::parse(text)
         .map(Some)
         .map_err(|fault| Fault::Wire("spec.historyKey", fault.code()))
+}
+
+/// A job that carries a retry policy or a callback is refused, the policy first, whatever
+/// either holds (an empty policy or callback included): this release would record the job
+/// without them, so it would run once and call nothing back while its client believed
+/// otherwise (`docs/design/job-retry-and-completion-callback.md`, section 7). The refusal
+/// repeats nothing of either, so neither a callback's URL nor its key is ever in an answer.
+fn not_enabled(spec: &v1::JobSpec) -> Result<(), Fault> {
+    if spec.retry.is_some() {
+        return Err(Fault::Wire("spec.retry", "retry-not-enabled"));
+    }
+    if spec.callback.is_some() {
+        return Err(Fault::Wire("spec.callback", "callback-not-enabled"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -13,13 +13,14 @@ use js_proto::v1::{
     ListJobsRequest, Needs, PortForward, RefusalCode, SubmitJobRequest,
 };
 use prost::Message as _;
-use prost_reflect::{DescriptorPool, DynamicMessage};
+use prost_reflect::{DescriptorPool, DynamicMessage, Kind as FieldKind, MessageDescriptor};
 use serde_json::{Value, json};
 use tonic::Code;
 
 use crate::fake_jobs::{Answer, Fake, refusing};
 use crate::support::{Outcome, Scratch, TOKEN, run, services};
 
+mod callback;
 mod rootfs;
 
 /// A loopback origin over plain http; the in-memory dialer never dials it.
@@ -66,8 +67,31 @@ fn set(message: &DynamicMessage, path: &[&str]) -> bool {
     }
 }
 
-/// A sample value for a flag of `kind`, never the field's default.
-fn sample(kind: &Kind, scratch: &Scratch) -> String {
+/// What a `-file` flag's file holds for the field at `path` of `request`, in proto3 JSON: an
+/// empty list for a list, and the base64 of three bytes for a `bytes` field.
+fn file_json(request: &MessageDescriptor, path: &[&str]) -> &'static str {
+    let (last, rest) = path.split_last().expect("a flag names a field");
+    let mut message = request.clone();
+    for name in rest {
+        let field = message
+            .get_field_by_name(name)
+            .expect("a field of the path");
+        message = match field.kind() {
+            FieldKind::Message(inner) => inner,
+            other => panic!("{name} of {path:?} is {other:?}, not a message"),
+        };
+    }
+    let field = message.get_field_by_name(last).expect("the flag's field");
+    match (field.is_list(), field.kind()) {
+        (true, _) => "[]",
+        (false, FieldKind::Bytes) => r#""a2V5""#,
+        (false, other) => panic!("no sample file for {path:?} of {other:?}"),
+    }
+}
+
+/// A sample value for a flag of `kind` naming the field at `path` of `request`, never the
+/// field's default.
+fn sample(kind: &Kind, path: &[&str], request: &MessageDescriptor, scratch: &Scratch) -> String {
     match kind {
         Kind::Bool => "true".to_owned(),
         Kind::I32 | Kind::I64 | Kind::U32 | Kind::U64 => "7".to_owned(),
@@ -76,15 +100,19 @@ fn sample(kind: &Kind, scratch: &Scratch) -> String {
         Kind::Seconds => "2m".to_owned(),
         Kind::Enum(choices) => choices[choices.len() - 1].0.to_owned(),
         Kind::Pair(..) => "k=v".to_owned(),
-        Kind::File => scratch
-            .write("list.json", "[]", 0o600)
-            .display()
-            .to_string(),
+        Kind::File => {
+            let name = format!("{}.json", path.join("."));
+            scratch
+                .write(&name, file_json(request, path), 0o600)
+                .display()
+                .to_string()
+        }
     }
 }
 
-/// Asserts that every command of the table, given a value for each of its flags, exits 0
-/// having sent one request of its own call; and that the requests of `job submit`,
+/// Asserts that every command of the table, given a value for each of its flags (a `-file`
+/// flag a file of its field's JSON: a list, or a `bytes` field's base64), exits 0 having sent
+/// one request of its own call; and that the requests of `job submit`,
 /// `job list` and `usage` are what their flags say: repeated, map, dotted, duration and
 /// enum flags, and a `-file` flag. It catches a flag that is parsed and dropped, a value put
 /// in the wrong field, and a command whose call the dispatcher does not reach.
@@ -94,17 +122,17 @@ fn every_job_command_parses_its_flags() {
     let pool = DescriptorPool::decode(js_proto::FILE_DESCRIPTOR_SET).unwrap();
     for command in surface() {
         let fake = Fake::new();
+        let request = pool.get_message_by_name(command.request).unwrap();
         let mut words: Vec<String> = command.path.iter().map(|word| (*word).to_owned()).collect();
         for flag in command.flags {
             words.push(format!("--{}", flag.name));
-            words.push(sample(&flag.kind, &scratch));
+            words.push(sample(&flag.kind, flag.field, &request, &scratch));
         }
         let words: Vec<&str> = words.iter().map(String::as_str).collect();
         let got = js(&scratch, fake.dialer(), &words);
         assert_eq!((got.code, got.err.as_str()), (0, ""), "{words:?}");
         assert_eq!(fake.seen().len(), 1, "{words:?}");
         assert_eq!(fake.seen()[0].path, call(command.rpc), "{words:?}");
-        let request = pool.get_message_by_name(command.request).unwrap();
         let sent = DynamicMessage::decode(request, fake.seen()[0].message.as_slice()).unwrap();
         for flag in command
             .flags

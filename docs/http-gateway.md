@@ -63,7 +63,9 @@ record and its result, where a `DELETE` would read as removal. It is idempotent 
 a repeat answers 200 with the same final state. `GetLogs` without a `stream` answers the job's
 state and its result's tails. With a stream it reads one page of that stream from the log
 store. Its query parameters are `stream` (`LOG_STREAM_STDOUT` or `LOG_STREAM_STDERR`, the
-names of the `LogStream` enum), `fromOffset`, `maxBytes` and `follow`. In the answer `data` is
+names of the `LogStream` enum), `fromOffset`, `maxBytes`, `follow` and `attempt` (the attempt
+whose output to read; this release reads a job's latest attempt whatever it says). In the
+answer `data` is
 base64 of the bytes, `offset` and `nextOffset` are decimal strings, `gaps` is a list of
 `{"offset", "length"}` objects with decimal strings, and `firstByteAtMs` is a decimal string
 when present. The mapping is the generic one of the other calls.

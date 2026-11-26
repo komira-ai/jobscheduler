@@ -26,6 +26,7 @@ use crate::{
     Needs, NetworkPolicy, NewJob, Output, RandomIds, ResourceUsage,
 };
 
+mod attempts;
 mod boot;
 mod claimed;
 mod clock;
@@ -61,6 +62,7 @@ mod taints;
 mod unclean;
 mod whole;
 
+pub use attempts::*;
 pub use boot::*;
 pub use claimed::*;
 pub use clock::*;
@@ -489,6 +491,9 @@ macro_rules! job_store_tests {
             the_sweep_deletes_a_jobs_messages_with_its_row,
             a_dispatch_row_of_another_build_is_read_or_left,
             a_failed_claim_or_ack_changes_nothing_and_says_so,
+            a_retry_is_refused_as_an_illegal_move_and_writes_nothing,
+            no_job_has_an_attempt_row_or_a_callback_yet,
+            an_answer_to_a_claim_no_row_holds_is_stale,
         );
     };
 }
