@@ -200,8 +200,7 @@ fn the_macos_15_base_set_reads_nothing_the_macos_14_set_does_not() {
     }
 }
 
-#[test]
-fn a_macos_27_profile_without_grants_matches_its_golden() {
+fn bare_profile_of(major: MacosMajor) -> String {
     let bare = SlotLayout {
         inputs: vec![],
         read_denies: vec![],
@@ -214,20 +213,64 @@ fn a_macos_27_profile_without_grants_matches_its_golden() {
             ..Narrowing::default()
         })
         .unwrap()
-        .allowing(&assurance_for(MacosMajor::Macos27), vec![])
+        .allowing(&assurance_for(major), vec![])
         .unwrap();
+    text_of(&policy)
+}
+
+#[test]
+fn a_macos_26_profile_without_grants_matches_its_golden() {
     assert_eq!(
-        text_of(&policy),
+        bare_profile_of(MacosMajor::Macos26),
+        include_str!("goldens/allow_macos26_bare.sb")
+    );
+}
+
+#[test]
+fn a_macos_27_profile_without_grants_matches_its_golden() {
+    assert_eq!(
+        bare_profile_of(MacosMajor::Macos27),
         include_str!("goldens/allow_macos27_bare.sb")
     );
 }
+
+/// The table of the trace on the hosted macOS 26.7.2 image (build 25G332, arm64, Xcode
+/// 26.6), committed as the trace wrote it.
+const TRACE_MACOS_26: &str = include_str!("goldens/trace_macos26.tsv");
 
 /// The table of the trace on macOS 27.0.1 (build 26A434, arm64, Xcode 27.1), committed as
 /// the trace wrote it.
 const TRACE_MACOS_27: &str = include_str!("goldens/trace_macos27.tsv");
 
-fn trace_rows() -> Vec<Row> {
-    parse(TRACE_MACOS_27).expect("the table is in the table format")
+/// A traced version: its value, its table, and the host lines the table must carry.
+struct Traced {
+    major: MacosMajor,
+    table: &'static str,
+    host: [&'static str; 3],
+}
+
+const MACOS_26: Traced = Traced {
+    major: MacosMajor::Macos26,
+    table: TRACE_MACOS_26,
+    host: [
+        "# product-version=26.7.2\n",
+        "# build-version=25G332\n",
+        "# arch=arm64\n",
+    ],
+};
+
+const MACOS_27: Traced = Traced {
+    major: MacosMajor::Macos27,
+    table: TRACE_MACOS_27,
+    host: [
+        "# product-version=27.0.1\n",
+        "# build-version=26A434\n",
+        "# arch=arm64\n",
+    ],
+};
+
+fn trace_rows(traced: &Traced) -> Vec<Row> {
+    parse(traced.table).expect("the table is in the table format")
 }
 
 /// A table line (`literal /usr`, `subpath /bin`) as the base set spells it.
@@ -250,20 +293,15 @@ fn is_line(row: &Row) -> bool {
     matches!(row.kind, Kind::Name | Kind::Read)
 }
 
-/// The macOS 27 base set is what the trace produced: every name and read line that a
-/// workload touched or failed without, in the table's order, and the setuid files the
-/// traced image listed under the directories the set grants.
-#[test]
-fn the_macos_27_base_set_is_what_the_trace_produced() {
-    for header in [
-        "# product-version=27.0.1\n",
-        "# build-version=26A434\n",
-        "# arch=arm64\n",
-    ] {
-        assert!(TRACE_MACOS_27.contains(header), "{header:?}");
+/// The base set is what the trace produced: every name and read line that a workload
+/// touched or failed without, in the table's order, and the setuid files the traced image
+/// listed under the directories the set grants.
+fn assert_set_is_what_the_trace_produced(traced: &Traced) {
+    for header in traced.host {
+        assert!(traced.table.contains(header), "{header:?}");
     }
-    let rows = trace_rows();
-    let base = MacosMajor::Macos27.base();
+    let rows = trace_rows(traced);
+    let base = traced.major.base();
 
     let names: Vec<String> = rows
         .iter()
@@ -293,12 +331,21 @@ fn the_macos_27_base_set_is_what_the_trace_produced() {
     assert_eq!(base.setuid(), setuid);
 }
 
+#[test]
+fn the_macos_26_base_set_is_what_the_trace_produced() {
+    assert_set_is_what_the_trace_produced(&MACOS_26);
+}
+
+#[test]
+fn the_macos_27_base_set_is_what_the_trace_produced() {
+    assert_set_is_what_the_trace_produced(&MACOS_27);
+}
+
 /// A line no workload touched and none failed without is not in the set, whatever an
 /// older set held.
-#[test]
-fn the_macos_27_base_set_leaves_out_every_line_the_trace_found_unused() {
-    let base = MacosMajor::Macos27.base();
-    let rows = trace_rows();
+fn assert_set_leaves_out_every_unused_line(traced: &Traced) {
+    let base = traced.major.base();
+    let rows = trace_rows(traced);
     let unused: Vec<&Row> = rows
         .iter()
         .filter(|row| is_line(row) && !kept(row))
@@ -314,11 +361,20 @@ fn the_macos_27_base_set_leaves_out_every_line_the_trace_found_unused() {
     }
 }
 
+#[test]
+fn the_macos_26_base_set_leaves_out_every_line_the_trace_found_unused() {
+    assert_set_leaves_out_every_unused_line(&MACOS_26);
+}
+
+#[test]
+fn the_macos_27_base_set_leaves_out_every_line_the_trace_found_unused() {
+    assert_set_leaves_out_every_unused_line(&MACOS_27);
+}
+
 /// The trace ran clean: every workload and control worked with the whole set, every
 /// denied read was refused, and removing a line changed no denial.
-#[test]
-fn the_macos_27_trace_shows_every_workload_working_and_every_denial_holding() {
-    let rows = trace_rows();
+fn assert_trace_ran_clean(traced: &Traced) {
+    let rows = trace_rows(traced);
     let baselines: Vec<&Row> = rows
         .iter()
         .filter(|row| row.kind == Kind::Baseline)
@@ -344,14 +400,23 @@ fn the_macos_27_trace_shows_every_workload_working_and_every_denial_holding() {
     }
 }
 
+#[test]
+fn the_macos_26_trace_shows_every_workload_working_and_every_denial_holding() {
+    assert_trace_ran_clean(&MACOS_26);
+}
+
+#[test]
+fn the_macos_27_trace_shows_every_workload_working_and_every_denial_holding() {
+    assert_trace_ran_clean(&MACOS_27);
+}
+
 /// A newer major version never reads a place the reviewed macOS 15 set does not, and it
 /// denies exactly the setuid files of the traced image that lie under a directory it
 /// grants: the listed ones and the ones the trace found new, which lie in directories
 /// the set does not grant.
-#[test]
-fn the_macos_27_base_set_reads_nothing_the_macos_15_set_does_not() {
+fn assert_set_reads_nothing_the_macos_15_set_does_not(traced: &Traced) {
     let old = MacosMajor::Macos15.base();
-    let new = MacosMajor::Macos27.base();
+    let new = traced.major.base();
     for read in new.reads() {
         assert!(old.reads().contains(read), "{read:?}");
     }
@@ -364,7 +429,7 @@ fn the_macos_27_base_set_reads_nothing_the_macos_15_set_does_not() {
         .filter(|(how, _)| *how == Match::Subpath)
         .map(|(_, path)| *path)
         .collect();
-    let found: Vec<Row> = trace_rows()
+    let found: Vec<Row> = trace_rows(traced)
         .into_iter()
         .filter(|row| matches!(row.kind, Kind::Setuid | Kind::SetuidNew))
         .collect();
@@ -381,6 +446,16 @@ fn the_macos_27_base_set_reads_nothing_the_macos_15_set_does_not() {
         );
         assert_eq!(row.kind == Kind::Setuid, under, "{}", row.line);
     }
+}
+
+#[test]
+fn the_macos_26_base_set_reads_nothing_the_macos_15_set_does_not() {
+    assert_set_reads_nothing_the_macos_15_set_does_not(&MACOS_26);
+}
+
+#[test]
+fn the_macos_27_base_set_reads_nothing_the_macos_15_set_does_not() {
+    assert_set_reads_nothing_the_macos_15_set_does_not(&MACOS_27);
 }
 
 #[test]
@@ -665,9 +740,14 @@ fn macos_versions_are_read_from_a_product_version() {
         (" 14.5.1\n", Some(MacosMajor::Macos14)),
         ("15.0", Some(MacosMajor::Macos15)),
         ("15.8.2", Some(MacosMajor::Macos15)),
+        ("26.4", Some(MacosMajor::Macos26)),
+        ("26.6", Some(MacosMajor::Macos26)),
+        ("26.7.2", Some(MacosMajor::Macos26)),
         ("27.0.1", Some(MacosMajor::Macos27)),
+        ("27.2.1", Some(MacosMajor::Macos27)),
         ("16.0", None),
-        ("26.0", None),
+        ("25.0", None),
+        ("28.0", None),
         ("13.6", None),
         ("fourteen", None),
         ("", None),
@@ -681,18 +761,38 @@ fn macos_versions_are_read_from_a_product_version() {
     }
     assert_eq!(MacosMajor::from_major(14), Some(MacosMajor::Macos14));
     assert_eq!(MacosMajor::from_major(15), Some(MacosMajor::Macos15));
+    assert_eq!(MacosMajor::from_major(26), Some(MacosMajor::Macos26));
     assert_eq!(MacosMajor::from_major(27), Some(MacosMajor::Macos27));
     assert_eq!(MacosMajor::Macos14.major(), 14);
     assert_eq!(MacosMajor::Macos15.major(), 15);
+    assert_eq!(MacosMajor::Macos26.major(), 26);
     assert_eq!(MacosMajor::Macos27.major(), 27);
 }
 
+/// The Macs' pool admits macOS 26 and newer (`docs/design/mac-runtime.md`, section 5), and
+/// its Macs have run 26.4, 26.6 and 27.0.1 and run 27.2.1: each of those, and the hosted
+/// image the 26 set was traced on, has a base set, so the allow model is not refused on
+/// any of them.
+#[test]
+fn every_macos_the_pool_admits_has_a_base_set() {
+    let table = [
+        ("26.4", MacosMajor::Macos26),
+        ("26.6", MacosMajor::Macos26),
+        ("26.7.2", MacosMajor::Macos26),
+        ("27.0.1", MacosMajor::Macos27),
+        ("27.2.1", MacosMajor::Macos27),
+    ];
+    for (text, major) in table {
+        assert_eq!(MacosMajor::from_product_version(text), Ok(major), "{text}");
+    }
+}
+
 /// A major version without a reviewed base set has no value, so no allow profile of it
-/// can be built: the majors between the reviewed ones (16 to 26), the one after the
+/// can be built: the majors between the reviewed ones (16 to 25), the one after the
 /// newest (28) and the older ones fail closed.
 #[test]
 fn a_major_version_without_a_base_set_fails_closed() {
-    for major in [0, 1, 10, 11, 12, 13, 16, 17, 25, 26, 28, u32::MAX] {
+    for major in [0, 1, 10, 11, 12, 13, 16, 17, 24, 25, 28, u32::MAX] {
         assert_eq!(MacosMajor::from_major(major), None, "{major}");
         assert!(
             MacosMajor::from_product_version(&format!("{major}.0.1")).is_err(),
@@ -700,7 +800,7 @@ fn a_major_version_without_a_base_set_fails_closed() {
         );
     }
     let known: Vec<u32> = MacosMajor::ALL.iter().map(|m| m.major()).collect();
-    assert_eq!(known, [14, 15, 27]);
+    assert_eq!(known, [14, 15, 26, 27]);
 }
 
 /// A host on a version without a base set is refused with a reason that names the version

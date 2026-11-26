@@ -20,21 +20,23 @@ use super::scan::{PrivilegedScan, scan_privileged};
 ///
 /// The agent's duties around it: a host whose version has no value here refuses the allow
 /// model (`from_product_version` returns [`NoBaseSet`], whose text is the refusal; never
-/// default to the newest known version), and an [`Assurance`](super::Assurance) is made again at every start and after
-/// every OS update, never kept across them.
+/// default to the newest known version), and an [`Assurance`](super::Assurance) is made
+/// again at every start and after every OS update, never kept across them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MacosMajor {
     /// macOS 14 (Sonoma).
     Macos14,
     /// macOS 15 (Sequoia).
     Macos15,
+    /// macOS 26.
+    Macos26,
     /// macOS 27.
     Macos27,
 }
 
 impl MacosMajor {
     /// Every version that has a base set.
-    pub const ALL: [Self; 3] = [Self::Macos14, Self::Macos15, Self::Macos27];
+    pub const ALL: [Self; 4] = [Self::Macos14, Self::Macos15, Self::Macos26, Self::Macos27];
 
     /// The version with major number `major`, if it has a base set.
     #[must_use]
@@ -42,12 +44,13 @@ impl MacosMajor {
         match major {
             14 => Some(Self::Macos14),
             15 => Some(Self::Macos15),
+            26 => Some(Self::Macos26),
             27 => Some(Self::Macos27),
             _ => None,
         }
     }
 
-    /// The version of a `sw_vers -productVersion` text (`14.5`, `15.8.2`, `27.0.1`).
+    /// The version of a `sw_vers -productVersion` text (`14.5`, `15.8.2`, `26.7.2`, `27.0.1`).
     ///
     /// # Errors
     ///
@@ -60,9 +63,7 @@ impl MacosMajor {
             .next()
             .and_then(|major| major.parse().ok())
             .and_then(Self::from_major)
-            .ok_or_else(|| NoBaseSet {
-                version: version.to_owned(),
-            })
+            .ok_or_else(|| NoBaseSet::new(version))
     }
 
     /// The major number.
@@ -71,6 +72,7 @@ impl MacosMajor {
         match self {
             Self::Macos14 => 14,
             Self::Macos15 => 15,
+            Self::Macos26 => 26,
             Self::Macos27 => 27,
         }
     }
@@ -97,6 +99,7 @@ impl MacosMajor {
         match self {
             Self::Macos14 => &MACOS_14,
             Self::Macos15 => &MACOS_15,
+            Self::Macos26 => &MACOS_26,
             Self::Macos27 => &MACOS_27,
         }
     }
@@ -107,17 +110,23 @@ impl MacosMajor {
 /// Its text names the version and the versions that have a set, for the host's refusal.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
-    "macOS {version:?} has no Seatbelt base set (there are sets for macOS {}): \
-     the allow read model is refused on this host",
-    known()
+    "macOS {version:?} has no Seatbelt base set (there are sets for macOS {known}): the \
+     allow read model is refused on this host"
 )]
 pub struct NoBaseSet {
     version: String,
+    /// The majors that have a set, as the text lists them.
+    known: String,
 }
 
-fn known() -> String {
-    let majors: Vec<String> = MacosMajor::ALL.iter().map(|m| m.major().to_string()).collect();
-    majors.join(", ")
+impl NoBaseSet {
+    fn new(version: &str) -> Self {
+        let known: Vec<String> = MacosMajor::ALL.iter().map(|m| m.major().to_string()).collect();
+        Self {
+            version: version.to_owned(),
+            known: known.join(", "),
+        }
+    }
 }
 
 /// What every run of the allow-list model may read, and the setuid files it may not.
@@ -380,6 +389,67 @@ static MACOS_15: BaseSet = BaseSet {
 ///   `postqueue`, `traceroute`, `traceroute6`) lie under `/usr/libexec` and `/usr/sbin`,
 ///   which this set does not grant, so they are not readable by default.
 static MACOS_27: BaseSet = BaseSet {
+    names: &["/usr", "/var"],
+    reads: &[
+        (Match::Literal, "/"),
+        (Match::Subpath, "/System/Library"),
+        (Match::Subpath, "/System/Volumes/Preboot/Cryptexes"),
+        (Match::Subpath, "/usr/lib"),
+        (Match::Subpath, "/usr/bin"),
+        (Match::Subpath, "/usr/share"),
+        (Match::Subpath, "/bin"),
+        (Match::Subpath, "/private/var/db/timezone"),
+        (Match::Literal, "/dev/null"),
+        (Match::Literal, "/dev/tty"),
+    ],
+    setuid: &[
+        "/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/MacOS/ARDAgent",
+        "/bin/ps",
+        "/usr/bin/at",
+        "/usr/bin/atq",
+        "/usr/bin/atrm",
+        "/usr/bin/batch",
+        "/usr/bin/crontab",
+        "/usr/bin/login",
+        "/usr/bin/newgrp",
+        "/usr/bin/quota",
+        "/usr/bin/su",
+        "/usr/bin/sudo",
+        "/usr/bin/top",
+        "/usr/bin/write",
+    ],
+};
+
+/// The macOS 26 set, from a trace on the hosted macOS 26.7.2 image (build 25G332, arm64,
+/// Xcode 26.6). The reference workloads (`true`, a read of a granted tree, a bundle
+/// entrypoint, a compile and an ad-hoc `codesign` with the selected Xcode, a read through
+/// the time zone link) ran under the macOS 15 set with each line removed in turn, and
+/// `fs_usage` listed the paths they touch. A line is here only when a workload touched it
+/// or failed without it, so this set reads nothing the macOS 15 set does not. The
+/// workloads and the denied reads all gave their expected result with the whole 15 set.
+/// The table is `tests/goldens/trace_macos26.tsv`. Its lines are those of the macOS 27
+/// set, each kept for the same reason:
+///
+/// - names: `/var` is needed (the compile and the time zone read fail without it);
+///   `/usr` is looked at by every workload. `/etc` was not touched and is not carried
+///   over.
+/// - `/` is a data read, as in the other sets: every workload fails without it.
+/// - `/System/Library`, `/usr/lib`, `/usr/share`: needed by the compile (frameworks,
+///   `dyld`, the ICU data) and touched by every dynamically linked workload.
+/// - `/usr/bin`, `/bin`: touched by `true`, `bash`, `cat`, `cc` and `sandbox-exec`; no
+///   workload failed without them.
+/// - `/System/Volumes/Preboot/Cryptexes`: touched by `bash`, `cat`, `cc`, `codesign` and
+///   the linker; no workload failed without it.
+/// - `/private/var/db/timezone`: needed (the read through the time zone link fails
+///   without it); `fs_usage` listed no process for it.
+/// - `/dev/null` and `/dev/tty`: touched (`bash`, the trace binary, `xpcproxy`); no
+///   workload failed without them.
+/// - not carried over, because nothing touched them and no workload failed without them:
+///   `/etc`, `/dev/zero`, `/dev/random` and `/dev/urandom`.
+/// - setuid: the 14 setuid files of the image under a directory this set grants. The six
+///   the trace found new lie under `/usr/libexec` and `/usr/sbin`, which this set does
+///   not grant, so they are not readable by default.
+static MACOS_26: BaseSet = BaseSet {
     names: &["/usr", "/var"],
     reads: &[
         (Match::Literal, "/"),
