@@ -44,7 +44,12 @@ pub enum RequestError {
     EnvName(String),
     /// A path that must be plain and relative to its share is not.
     #[error("{what} {path:?} is not a plain relative path")]
-    NotRelative { what: &'static str, path: String },
+    NotRelative {
+        /// Which part of the request holds the path (`output` or `cwd`).
+        what: &'static str,
+        /// The offending path, as the request gave it.
+        path: String,
+    },
     /// A requested output is named `stdout` or `stderr`, or lies under one of them.
     #[error("output {0:?} is reserved for the command's stdout or stderr")]
     Reserved(String),

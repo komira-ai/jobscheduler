@@ -101,7 +101,10 @@ pub enum Served {
     /// The command was accepted and the shutdown program ran and succeeded. `acked` says
     /// whether the acknowledgement could be written first (the shutdown runs either way:
     /// the host asked for it).
-    Shutdown { acked: bool },
+    Shutdown {
+        /// Whether the acknowledgement was written to the host before the shutdown ran.
+        acked: bool,
+    },
     /// The command was accepted and acknowledged; the shutdown program failed.
     ShutdownFailed(String),
     /// The frame was not the command (or not a frame) and was refused; nothing ran.

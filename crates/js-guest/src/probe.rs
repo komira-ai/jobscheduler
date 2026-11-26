@@ -183,7 +183,10 @@ pub fn started_line(host: &dyn Host, out: &Path) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Delivered {
     /// The host acknowledged the frame on this attempt.
-    Vsock { attempt: u32 },
+    Vsock {
+        /// The attempt that worked, counted from 1.
+        attempt: u32,
+    },
     /// Vsock could not be used; the file is in the share.
     Share,
 }

@@ -14,7 +14,12 @@ pub enum ClientError {
     Wire(#[from] WireError),
     /// The guest refused the handshake or the request, for this reason.
     #[error("the guest refused ({reason:?}): {detail}")]
-    Refused { reason: Refusal, detail: String },
+    Refused {
+        /// Why the guest refused.
+        reason: Refusal,
+        /// The guest's own words about the refusal.
+        detail: String,
+    },
     /// The guest speaks a protocol version other than this host's.
     #[error("the guest speaks version {0}, this host {VERSION}")]
     Version(u16),
