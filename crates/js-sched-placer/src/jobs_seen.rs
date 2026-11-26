@@ -147,10 +147,6 @@ impl PassMetrics for Watched<'_> {
         self.metrics.store_write_failed();
     }
 
-    fn job_tables(&self, from: TablesFrom) {
-        self.metrics.job_tables(from);
-    }
-
     fn refused(&self, host: &HostId, reason: &'static str) {
         self.metrics.refused(host, reason);
     }
@@ -300,10 +296,10 @@ impl SchedPlacer {
             failed: Cell::new(false),
         };
         let placed = self.place_queued(jobs, hosts, (starts, &watched), &tables);
-        if placed.is_ok() && !watched.failed.get() {
+        if !watched.failed.get() {
             *lock(&self.seen) = Some(now);
         }
-        placed
+        Ok(placed)
     }
 
     /// What a pass on `hosts` would depend on, as it stands now, with `tables` the count of

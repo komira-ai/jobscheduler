@@ -141,39 +141,47 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// # Errors
     /// [`JobStoreError::Store`] when the head cannot be read.
     pub fn table_changes(&self, after: Revision) -> Result<Option<TableChanges>, JobStoreError> {
-        let Some(head) = self.store.head()? else {
+        changes_after(&*self.store, after)
+    }
+}
+
+/// [`JobStore::table_changes`] of `store`, one copy for every kind of store.
+fn changes_after(
+    store: &dyn Store,
+    after: Revision,
+) -> Result<Option<TableChanges>, JobStoreError> {
+    let Some(head) = store.head()? else {
+        return Ok(None);
+    };
+    let mut changes = TableChanges {
+        head: after,
+        queued: BTreeMap::new(),
+        live: BTreeMap::new(),
+        marks: false,
+        cordons: false,
+    };
+    let mut read = 0usize;
+    while changes.head < head {
+        let Ok(page) = store.changes(changes.head, PAGE) else {
             return Ok(None);
         };
-        let mut changes = TableChanges {
-            head: after,
-            queued: BTreeMap::new(),
-            live: BTreeMap::new(),
-            marks: false,
-            cordons: false,
-        };
-        let mut read = 0usize;
-        while changes.head < head {
-            let Ok(page) = self.store.changes(changes.head, PAGE) else {
-                return Ok(None);
-            };
-            read = read.saturating_add(page.rows.len());
-            if read > MOST_TABLE_CHANGES {
-                return Ok(None);
-            }
-            for change in page.rows {
-                if !changes.note(change) {
-                    return Ok(None);
-                }
-            }
-            // A feed that stops short of the head (a commit below it still to land) is read on
-            // from where it stopped by the next call.
-            if page.cursor <= changes.head {
-                break;
-            }
-            changes.head = page.cursor;
+        read = read.saturating_add(page.rows.len());
+        if read > MOST_TABLE_CHANGES {
+            return Ok(None);
         }
-        Ok(Some(changes))
+        for change in page.rows {
+            if !changes.note(change) {
+                return Ok(None);
+            }
+        }
+        // A feed that stops short of the head (a commit below it still to land) is read on
+        // from where it stopped by the next call.
+        if page.cursor <= changes.head {
+            break;
+        }
+        changes.head = page.cursor;
     }
+    Ok(Some(changes))
 }
 
 #[cfg(test)]

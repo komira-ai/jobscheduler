@@ -676,7 +676,7 @@ impl SchedPlacer {
         hosts: &JobHosts<'_>,
         (starts, metrics): (&dyn JobStarts, &dyn PassMetrics),
         tables: &super::jobs_seen::Tables,
-    ) -> Result<Vec<JobId>, JobStoreError> {
+    ) -> Vec<JobId> {
         // A host whose cordon the job store holds takes no new job, whichever server placed the
         // cordon (the registry knows another server's only from its tick). Each cordon lapses
         // by the clock, so it is judged at this pass.
@@ -799,7 +799,7 @@ impl SchedPlacer {
                 failed_write(metrics);
             }
         }
-        Ok(placed)
+        placed
     }
 
     /// Writes `step`, one decision of the engine for a whole-host job: the job a commit placed,
