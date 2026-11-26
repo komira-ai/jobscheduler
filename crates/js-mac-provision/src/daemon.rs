@@ -14,7 +14,7 @@
 //! agent's host-specific flags (server, pool, network mode) are read from [`FLAGS_FILE`],
 //! which a per-group configuration package installs.
 //!
-//! Both start with [`OPEN_FILES`] open files, soft and hard (`SoftResourceLimits` and
+//! Both start with 65536 open files, soft and hard (`SoftResourceLimits` and
 //! `HardResourceLimits`, `NumberOfFiles`), not with launchd's default soft limit of 256: the agent
 //! serves many runs at once, each with pipes, log streams, lease files and connections, and the
 //! jobs the helper starts inherit its limit. The kernel holds the limit to its own per-process

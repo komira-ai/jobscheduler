@@ -96,7 +96,7 @@ as owner), any script, and another identifier or version.
   `/Library/Application Support/js-agent/bin/js-agent --flags-file /etc/js-agent/flags --token-file
   /etc/js-agent/token --state-root /var/db/js-agent/state --scratch-root /var/db/js-agent/scratch/runs`
   (the account pool's flags, `--native-accounts` and `--native-account-range`, are in the flags file); it runs as root, with `RunAtLoad` false, `ThrottleInterval`
-  30, `ExitTimeOut` 120, `SoftResourceLimits` and `HardResourceLimits` of 65536 `NumberOfFiles` and its logs in `.../js-agent/log/js-agent.log` and `js-agent.err.log`. `KeepAlive` is
+  30, `ExitTimeOut` 120, 65536 open files soft and hard (`SoftResourceLimits` and `HardResourceLimits`, `NumberOfFiles`), and its logs in `.../js-agent/log/js-agent.log` and `js-agent.err.log`. `KeepAlive` is
   conditional on the flags file `/etc/js-agent/flags` (`PathState`), not on the token: a Mac joins by hostkeeper's
   host certificate, which the flags file names (`--host-cert`, `--host-key`), and has no token; the agent then reads no
   `--token-file`. It names no `--server` and no `--pool`: a host's own values (the
