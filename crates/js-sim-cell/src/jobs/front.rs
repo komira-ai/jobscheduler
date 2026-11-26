@@ -11,6 +11,14 @@
 //! poll until it is terminal, then reads its result once. An item not terminal by its
 //! give-up time is given up: the client reports [`HowEnded::GaveUp`] and cancels the job.
 //!
+//! A work that asks for a retry policy ([`Work::retry`]) submits it as `spec.retry`
+//! (`maxAttempts` and, when given, `initialBackoffSeconds` and `maxBackoffSeconds`), and
+//! one that asks for a callback ([`Work::callback`]) as `spec.callback`: the URL
+//! [`CALLBACK_URL_PREFIX`] and the job's id, the fixed signing key [`CALLBACK_KEY`] (the
+//! gateway's base64 of 32 bytes) and, when given, `deadlineSeconds`. A job that retries
+//! reads as queued, or placed, between its attempts, so the item keeps polling and ends only
+//! at the job's final state.
+//!
 //! # The mapping
 //!
 //! Every item is looked at in every poll, in item order, every [`POLL_EVERY`] while any
@@ -77,6 +85,14 @@ use crate::work::Work;
 
 /// What the id of an item's job starts with; the item's number follows.
 pub const JOB_PREFIX: &str = "sim-job-";
+
+/// What the URL of a job's completion callback starts with; the job's id follows. The
+/// receiver is the cell's own, so nothing is ever sent to it.
+pub const CALLBACK_URL_PREFIX: &str = "https://receiver.example/sim/";
+
+/// The key every callback of a job is signed with, as the gateway's JSON writes bytes
+/// (base64): 32 bytes of 7.
+pub const CALLBACK_KEY: &str = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
 
 /// Where an item is.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -305,15 +321,34 @@ fn submit_body(id: &str, work: &Work) -> Value {
         })
     };
     let wall = work.gives_up_after().as_secs().max(1);
-    json!({
-        "spec": {
-            "jobId": id,
-            "image": SIM_RUN_IMAGE,
-            "args": [work.runs_for().as_millis().to_string()],
-            "needs": needs,
-            "wallLimitSeconds": wall.to_string(),
+    let mut spec = json!({
+        "jobId": id,
+        "image": SIM_RUN_IMAGE,
+        "args": [work.runs_for().as_millis().to_string()],
+        "needs": needs,
+        "wallLimitSeconds": wall.to_string(),
+    });
+    if let Some(retry) = work.retry_policy() {
+        spec["retry"] = json!({ "maxAttempts": retry.max_attempts });
+        for (key, wait) in [
+            ("initialBackoffSeconds", retry.initial_backoff),
+            ("maxBackoffSeconds", retry.max_backoff),
+        ] {
+            if let Some(wait) = wait {
+                spec["retry"][key] = json!(wait.as_secs());
+            }
         }
-    })
+    }
+    if let Some(callback) = work.callback_spec() {
+        spec["callback"] = json!({
+            "url": format!("{CALLBACK_URL_PREFIX}{id}"),
+            "signingKey": CALLBACK_KEY,
+        });
+        if let Some(deadline) = callback.deadline {
+            spec["callback"]["deadlineSeconds"] = json!(deadline.as_secs());
+        }
+    }
+    json!({ "spec": spec })
 }
 
 /// A switch an action throws so that a [`JobFront`] loses the answer to its next

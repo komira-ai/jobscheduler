@@ -72,6 +72,7 @@ use crate::text;
 use crate::usage::UsageReadFault;
 use crate::work::Work;
 
+mod callbacks;
 mod cloud_faults;
 mod cordon;
 mod elastic;
@@ -907,6 +908,7 @@ impl Cell {
         self.observations.job_beats.extend(beats);
         self.observations.job_replies.extend(replies);
         self.observations.results_made.extend(made);
+        self.read_callbacks();
         self.checks += 1;
         let found = self
             .checker

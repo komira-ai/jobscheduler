@@ -79,7 +79,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER};
 use axum::http::{Method, Request, Response, StatusCode};
-use js_jobs::ScriptedIds;
+use js_jobs::{InstanceId, ScriptedIds};
 use js_lease_server::in_process::InProcess;
 use js_lease_server::{Config, SharedClock, StartupError};
 use js_registry::{HostMark, HostState, HostView, Registry, SessionSource};
@@ -95,15 +95,24 @@ use crate::elastic::{Cloud, SeededEntropy};
 use crate::observe::{ServerHost, ServerView};
 
 mod ids;
+mod receiver;
 mod spec;
 mod store;
 
 pub use ids::{SCRIPT_LEN, StoreClock, seeded};
+pub use receiver::Receiver;
 pub use spec::{
     ARCH, ARCH_KEY, CLIENT_TOKEN, JOIN_TOKEN, POOL_CLASS, ServerSpec, Shape, WHOLE_CLASS,
 };
 use store::StoreAt;
 pub use store::{SQLITE_FILE, STORE_LINE_FILE, Store};
+
+/// The name the cell's server claims the callbacks it delivers by.
+pub const CLAIMER: &str = "sim-server";
+
+/// The name of the second instance that claims callbacks and vanishes
+/// ([`ServerNode::claim_callbacks_and_vanish`]).
+pub const SECOND_CLAIMER: &str = "sim-server-2";
 
 /// The wall time, in milliseconds since the Unix epoch, that virtual time zero stands
 /// for: 2027-01-01 00:00 UTC. Every clock of the cell counts from it.
@@ -203,6 +212,8 @@ pub struct ServerNode {
     calls: BTreeMap<CallKey, u64>,
     /// The ids the job store mints, kept across a restart.
     ids: Arc<ScriptedIds>,
+    /// Where the callbacks of the jobs are sent, kept across a restart.
+    receiver: Receiver,
     /// The elastic pool's cloud, for a server of [`ServerSpec::elastic_pool`], or the cloud
     /// of each launching machine provider, first to last, for a server of
     /// [`ServerSpec::ordered`]; kept across a restart.
@@ -285,6 +296,7 @@ impl ServerNode {
             out: Vec::new(),
             calls: BTreeMap::new(),
             ids,
+            receiver: Receiver::new(),
             clouds,
             pool: spec.pool().to_owned(),
             entropy,
@@ -417,6 +429,26 @@ impl ServerNode {
         }
     }
 
+    /// The receiver of the jobs' completion callbacks.
+    #[must_use]
+    pub fn receiver(&self) -> &Receiver {
+        &self.receiver
+    }
+
+    /// Claims every callback that is due now as the instance `claimer` and never answers
+    /// them, as an instance that dies holding its claims: each claim lapses after 30 s, and
+    /// the server's own delivery takes the callback again. How many it claimed; none while
+    /// the server is down.
+    pub fn claim_callbacks_and_vanish(&self, claimer: &str) -> usize {
+        let jobs = self.server().and_then(InProcess::jobs);
+        let by = InstanceId::new(claimer);
+        let claimed = jobs.and_then(|jobs| {
+            let now = jobs.now().ok();
+            now.and_then(|now| jobs.claim_callbacks(&by, now, usize::MAX).ok())
+        });
+        claimed.map_or(0, |claims| claims.len())
+    }
+
     /// The server: its registry, scaler and counts; `None` while it is down.
     #[must_use]
     pub fn server(&self) -> Option<&InProcess> {
@@ -519,6 +551,22 @@ impl ServerNode {
         self.out.push(Output::Send { to: from, msg });
     }
 
+    /// Delivers every callback that is due to the receiver, one try each, as the server's
+    /// delivery threads do, claiming as [`CLAIMER`]: after each tick, and at no other time.
+    /// A callback the receiver answers with a failed try is due again after a wait, so this
+    /// ends.
+    fn deliver_callbacks(&self, up: &Up) {
+        let jobs = up.server.jobs();
+        let at = virtual_time(self.clock.now().millis());
+        let mut send = |claim: &js_jobs::CallbackClaim, _timestamp: u64| {
+            let row = jobs.and_then(|jobs| jobs.get_job(&claim.job).ok().flatten());
+            let state = row.map(|row| row.state);
+            self.receiver
+                .answer(claim.job.clone(), &claim.webhook_id, at, state)
+        };
+        while up.server.deliver_callback(CLAIMER, &mut send) {}
+    }
+
     /// Arms the next tick.
     fn arm(&mut self) {
         let after = self.tick;
@@ -536,6 +584,7 @@ impl StateMachine for ServerNode {
             Event::Timer { .. } => {
                 if let Some(up) = &self.up {
                     self.runtime.block_on(up.server.tick());
+                    self.deliver_callbacks(up);
                 }
                 self.read_brake();
                 let crashed = self.clouds.iter().filter(|cloud| cloud.take_crashed());
