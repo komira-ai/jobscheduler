@@ -129,7 +129,7 @@ async fn a_hello_whose_row_another_process_took_first_is_host_live() {
     };
     let body = Ok(hello_by("host-a", "proc-b"));
     let refused = serve_hello(&server.agents, server.who.clone(), None, body, &between).await;
-    let refused = refused.err().expect("refused");
+    let refused = refused.expect_err("refused");
     assert_eq!(said(&refused), (409, "host-live"));
     let row = world.row("host-a");
     assert_eq!(
@@ -158,13 +158,13 @@ async fn a_failed_silence_read_answers_internal() {
     let asked = as_operator(Request::new(GetJobRequest {
         job_id: job.id.to_string(),
     }));
-    let refused = api.get_job(asked).await.err().expect("refused");
+    let refused = api.get_job(asked).await.expect_err("refused");
     assert_eq!(
         (refused.code(), refused.message()),
         (tonic::Code::Internal, "internal")
     );
     let asked = as_operator(Request::new(ListJobsRequest::default()));
-    let refused = api.list_jobs(asked).await.err().expect("refused");
+    let refused = api.list_jobs(asked).await.expect_err("refused");
     assert_eq!(
         (refused.code(), refused.message()),
         (tonic::Code::Internal, "internal")

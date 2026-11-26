@@ -7,7 +7,7 @@ use std::time::Duration;
 use js_agent_wire::{DEFAULT_GRACE_MS, Phase};
 use js_jobs::{NodeHello, Retention, keys};
 use js_registry::{PoolConfig, Registry, SequentialSessions};
-use js_state::{Cond, ManualClock, Store, Txn};
+use js_state::{Cond, ManualClock, Store, StoreTime, Txn};
 use js_types::{HostId, ProviderId, ResourceClass, Resources, Shape};
 
 use super::{Silence, holding};
@@ -60,7 +60,7 @@ fn host(name: &str) -> HostId {
     HostId::new(name).unwrap()
 }
 
-/// Asserts the silence each row gives, all heard at one instant: none while a row is heard
+/// Asserts the silence each row gives, judged from its own `heard_at`: none while a row is heard
 /// within its pool's grace (at exactly the grace too), the instant the grace ran out once it is
 /// not; each pool's own grace (`farm` is silent while `burst` is still heard); the longest grace
 /// for a pool this server does not serve; none for a host with no row and for a row this build
@@ -82,40 +82,42 @@ fn each_row_is_silent_past_its_pools_grace_from_the_instant_it_ran_out() {
     }
     let txn = Txn::new().put(keys::node(&host("h-junk")), vec![0xff], Cond::Absent);
     store.txn(txn).expect("reaches").expect("writes");
-    let heard = jobs
-        .read_node(&host("h-burst"))
-        .unwrap()
-        .unwrap()
-        .record
-        .heard_at;
+    // Each write moves the store's clock on, so each row is judged from its own `heard_at`.
+    let heard = |name: &str| {
+        let row = jobs.read_node(&host(name)).unwrap().unwrap();
+        row.record.heard_at
+    };
+    let (burst, farm, other) = (heard("h-burst"), heard("h-farm"), heard("h-else"));
+    let to = |at: StoreTime| clock.advance(at.since(store.now().unwrap()));
     let hosts: BTreeSet<HostId> = ["h-burst", "h-farm", "h-else", "h-junk", "h-rowless"]
         .into_iter()
         .map(host)
         .collect();
     let read = || silence.read(&jobs, &hosts).unwrap();
-    let at = |grace: Duration| millis(heard.saturating_add(grace));
     let default = Duration::from_millis(DEFAULT_GRACE_MS);
+    let ms = Duration::from_millis(1);
 
     assert_eq!(read(), BTreeMap::new(), "just heard");
-    clock.advance(FARM_GRACE);
+    to(farm.saturating_add(FARM_GRACE));
     assert_eq!(read(), BTreeMap::new(), "farm heard its grace ago");
-    clock.advance(Duration::from_millis(1));
+    clock.advance(ms);
+    let farm_missed = (host("h-farm"), millis(farm.saturating_add(FARM_GRACE)));
     assert_eq!(
         read(),
-        BTreeMap::from([(host("h-farm"), at(FARM_GRACE))]),
-        "farm past its grace"
+        BTreeMap::from([farm_missed.clone()]),
+        "farm past its grace, burst and elsewhere heard within theirs"
     );
-    clock.advance(default - FARM_GRACE - Duration::from_millis(1));
+    to(burst.saturating_add(default));
     assert_eq!(
-        read().len(),
-        1,
-        "burst and elsewhere heard the default grace ago"
+        read(),
+        BTreeMap::from([farm_missed.clone()]),
+        "burst heard the default grace ago"
     );
-    clock.advance(Duration::from_millis(1));
+    to(other.saturating_add(default).saturating_add(ms));
     let expected = BTreeMap::from([
-        (host("h-burst"), at(default)),
-        (host("h-else"), at(default)),
-        (host("h-farm"), at(FARM_GRACE)),
+        (host("h-burst"), millis(burst.saturating_add(default))),
+        (host("h-else"), millis(other.saturating_add(default))),
+        farm_missed,
     ]);
     assert_eq!(read(), expected, "every readable row past its grace");
 
