@@ -380,8 +380,9 @@ mod tests {
     }
 
     /// Asserts that a refusal with each code naming the job's own fault ends the job, under a
-    /// policy with attempts left, and that the list holds the codes the design names and no
-    /// code twice. Catches a bad job retried on host after host until its attempts run out.
+    /// policy with attempts left, and that the list holds the codes the design names, the
+    /// host's two other bundle trust-policy codes, and no code twice. Catches a bad job
+    /// retried on host after host until its attempts run out.
     #[test]
     fn a_job_fault_refusal_never_retries() {
         for named in [
@@ -390,6 +391,8 @@ mod tests {
             "invalid-image",
             "image-not-allowed",
             "bundle-not-allowed",
+            "bundle-denied",
+            "bundle-registry-not-allowed",
         ] {
             assert!(JOB_FAULT_REFUSALS.contains(&named), "{named} is the job's");
         }
@@ -545,6 +548,14 @@ mod tests {
         assert_eq!(after(&high_cap, 3, "job-1"), retry(secs(3600)));
         let both_over = policy(9, Some(secs(7200)), Some(secs(7200)));
         assert_eq!(after(&both_over, 1, "job-1"), retry(secs(3600)));
+        // The largest waits the API can carry are cut before any arithmetic, at every attempt.
+        let largest = Some(secs(u64::from(u32::MAX)));
+        for attempt in [1, 13, u32::MAX - 1] {
+            let huge = policy(u32::MAX, largest, None);
+            assert_eq!(after(&huge, attempt, "job-1"), retry(secs(3600)));
+            let huge_both = policy(u32::MAX, largest, largest);
+            assert_eq!(after(&huge_both, attempt, "job-1"), retry(secs(3600)));
+        }
         // A longest wait below the initial one (refused at submit) still bounds the wait.
         let low_cap = policy(9, None, Some(secs(5)));
         assert_eq!(after(&low_cap, 1, "job-1"), retry(secs(5)));
