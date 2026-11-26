@@ -71,7 +71,8 @@ fn exited(code: i32) -> JobEnd {
 /// past its shape; a placed job booking the whole of `host-c`; two queued jobs, the older
 /// submitted 90 s before the scrape and 64 ms more of the store's own clock (2 ms for each of
 /// the 32 commits after it), the younger 5 s before it; `host-d` draining; and the recorder told of two placements, a start failure of
-/// each code, two losses, a failed write, two job passes, three launches of the pool `gpu`,
+/// each code, two losses, a failed write, two job passes, a submit's validation of 50 us and
+/// its insert's transaction of 2 ms, three launches of the pool `gpu`,
 /// one of them refused for capacity, and callback tries answered once delivered, twice
 /// abandoned, three times failed and four times refused by the address rule.
 async fn fixture(name: &str) -> Fixture {
@@ -140,6 +141,8 @@ async fn fixture(name: &str) -> Fixture {
     for (from, times) in sources.into_iter().zip(1..) {
         (0..times).for_each(|_| recorder.job_tables(from));
     }
+    recorder.submit_phase(SubmitPhase::Validation, Duration::from_micros(50));
+    recorder.submit_phase(SubmitPhase::InsertTransaction, Duration::from_millis(2));
     let (host_a, host_b) = (
         HostId::new("host-a").unwrap(),
         HostId::new("host-b").unwrap(),

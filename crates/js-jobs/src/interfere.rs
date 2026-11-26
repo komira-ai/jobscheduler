@@ -1,5 +1,6 @@
 //! [`Interfere`]: a store that delegates to another and, when told, fails a commit or lets a
-//! second writer commit first, and keeps the keys read through it. Test support: the suite uses
+//! second writer commit first, holds a scan where a test can wait on it, and keeps the keys
+//! read through it. Test support: the suite uses
 //! it to show that an operation writes nothing when its commit fails and that it pins the
 //! versions it read, and the server's tests to count what a pass reads. It also notes every
 //! call made on it while a decision of [`Store::claim_decide`] runs, which is a call on the store
@@ -34,6 +35,9 @@ pub struct Interfere<S> {
     /// Whether every clock read fails ([`Interfere::fail_clock`]).
     fail_clock: AtomicBool,
     before: Mutex<Option<Hook>>,
+    /// What runs before the next scan under a prefix, with that prefix
+    /// ([`Interfere::before_next_scan`]).
+    before_scan: Mutex<Option<(String, Hook)>>,
     /// The error a failed commit or read answers; [`StoreError::Failed`] with [`INJECTED`]
     /// until [`Interfere::fail_with`] says another.
     error: Mutex<StoreError>,
@@ -101,6 +105,7 @@ impl<S: Store> Interfere<S> {
             fail_head: Mutex::new(false),
             fail_clock: AtomicBool::new(false),
             before: Mutex::new(None),
+            before_scan: Mutex::new(None),
             error: Mutex::new(StoreError::Failed(INJECTED.to_owned())),
             reads: Mutex::new(Vec::new()),
             claim_reads: Arc::new(Mutex::new(Vec::new())),
@@ -175,6 +180,13 @@ impl<S: Store> Interfere<S> {
         *lock(&self.before) = Some(Box::new(hook));
     }
 
+    /// Runs `hook` just before the next scan (a prefix or a range scan) under exactly `prefix`
+    /// reaches the wrapped store, on the thread that scans: a hook that waits holds the reader
+    /// there, as a slow read would, until it returns. Scans under other prefixes pass by it.
+    pub fn before_next_scan(&self, prefix: &str, hook: impl FnOnce() + Send + 'static) {
+        *lock(&self.before_scan) = Some((prefix.to_owned(), Box::new(hook)));
+    }
+
     /// The reads that reached the wrapped store since the last call, in the order they came,
     /// taken: the next call answers only the reads made after this one. A read failed by
     /// [`Interfere::fail_read_after`] never reached it and is not logged.
@@ -199,6 +211,23 @@ impl<S: Store> Interfere<S> {
     fn called(&self, name: &'static str) {
         if self.deciding.load(Ordering::SeqCst) {
             lock(&self.while_deciding).push(name);
+        }
+    }
+
+    /// Runs the hook of [`Interfere::before_next_scan`] when it waits for a scan under `prefix`.
+    fn scanning(&self, prefix: &str) {
+        let hook = {
+            let mut slot = lock(&self.before_scan);
+            match slot.take() {
+                Some((wanted, hook)) if wanted == prefix => Some(hook),
+                other => {
+                    *slot = other;
+                    None
+                }
+            }
+        };
+        if let Some(hook) = hook {
+            hook();
         }
     }
 
@@ -236,6 +265,27 @@ impl<S: Store> Store for Interfere<S> {
         }
         self.countdown(&self.fail_at)?;
         self.inner.apply_batch(batch)
+    }
+
+    /// A stamped transaction is a commit that reads the clock: a clock failed by
+    /// [`Interfere::fail_clock`] fails it before it reaches the wrapped store, and the hook and
+    /// the failure countdown of commits apply as they do to [`Store::apply_batch`]. The wrapped
+    /// store's own `txn_stamped` runs it, so a store that reads its clock inside the
+    /// transaction does so here too.
+    fn txn_stamped(
+        &self,
+        build: &mut dyn FnMut(StoreTime) -> Option<Txn>,
+    ) -> Result<Option<Result<Commit, Conflict>>, StoreError> {
+        self.called("txn_stamped");
+        if self.fail_clock.load(Ordering::SeqCst) {
+            return Err(lock(&self.error).clone());
+        }
+        let hook = lock(&self.before).take();
+        if let Some(hook) = hook {
+            hook();
+        }
+        self.countdown(&self.fail_at)?;
+        self.inner.txn_stamped(build)
     }
 
     fn head(&self) -> Result<Option<Revision>, StoreError> {
@@ -283,12 +333,14 @@ impl<S: Store> Store for Interfere<S> {
 
     fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, Versioned)>, StoreError> {
         self.called("scan_prefix");
+        self.scanning(prefix);
         self.log(Read::Scan(prefix.to_owned()))?;
         self.inner.scan_prefix(prefix)
     }
 
     fn scan_range(&self, scan: ScanRange<'_>) -> Result<ScanPage, StoreError> {
         self.called("scan_range");
+        self.scanning(scan.prefix);
         self.log(Read::Scan(scan.prefix.to_owned()))?;
         self.inner.scan_range(scan)
     }
