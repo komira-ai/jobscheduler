@@ -96,7 +96,7 @@ as owner), any script, and another identifier or version.
   `/Library/Application Support/js-agent/bin/js-agent --flags-file /etc/js-agent/flags --token-file
   /etc/js-agent/token --state-root /var/db/js-agent/state --scratch-root /var/db/js-agent/scratch/runs`
   (the account pool's flags, `--native-accounts` and `--native-account-range`, are in the flags file); it runs as root, with `RunAtLoad` false, `ThrottleInterval`
-  30, `ExitTimeOut` 120 and its logs in `.../js-agent/log/js-agent.log` and `js-agent.err.log`. `KeepAlive` is
+  30, `ExitTimeOut` 120, `SoftResourceLimits` and `HardResourceLimits` of 65536 `NumberOfFiles` and its logs in `.../js-agent/log/js-agent.log` and `js-agent.err.log`. `KeepAlive` is
   conditional on the flags file `/etc/js-agent/flags` (`PathState`), not on the token: a Mac joins by hostkeeper's
   host certificate, which the flags file names (`--host-cert`, `--host-key`), and has no token; the agent then reads no
   `--token-file`. It names no `--server` and no `--pool`: a host's own values (the
@@ -109,7 +109,7 @@ as owner), any script, and another identifier or version.
 - The helper's plist is fixed text too, except for one value that the workflow bakes in when it builds: its program
   arguments are `/Library/Application Support/js-agent/bin/js-mac-session --socket /var/run/js-mac-session/socket
   --socket-group _jsagent --state-dir /var/db/js-mac-session --uid-range 600-699 --homes /Users --daemon-requirement
-  <REQ>`, with `ExitTimeOut` 20 and its logs in `.../js-agent/log/js-mac-session.log` and `js-mac-session.err.log`.
+  <REQ>`, with `ExitTimeOut` 20, the agent's 65536 open files soft and hard, and its logs in `.../js-agent/log/js-mac-session.log` and `js-mac-session.err.log`.
   `<REQ>` is `cdhash H"<40 hex>"`, the cdhash of the `js-agent` binary of this same package, which the workflow reads on
   the macOS runner with `codesign --display --verbose=4` (the linker signs an arm64 binary ad hoc, so every binary has
   one) and checks again on the staged file. The helper therefore needs no flags file, and `js-mac-session` is unchanged:

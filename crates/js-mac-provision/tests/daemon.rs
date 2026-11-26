@@ -146,10 +146,13 @@ fn the_plist_carries_no_environment_variables() {
 /// The `NumberOfFiles` integer of the `key` dictionary (`SoftResourceLimits` or
 /// `HardResourceLimits`) of the plist `text`, or `None` when the plist sets none.
 fn number_of_files(text: &str, key: &str) -> Option<u64> {
-    let start = format!("\t<key>{key}</key>\n\t<dict>\n\t\t<key>NumberOfFiles</key>\n\t\t<integer>");
+    let start =
+        format!("\t<key>{key}</key>\n\t<dict>\n\t\t<key>NumberOfFiles</key>\n\t\t<integer>");
     let rest = &text[text.find(&start)? + start.len()..];
     let (number, after) = rest.split_once("</integer>")?;
-    after.starts_with("\n\t</dict>\n").then(|| number.parse().ok())?
+    after
+        .starts_with("\n\t</dict>\n")
+        .then(|| number.parse().ok())?
 }
 
 /// The agent and the helper start with 65536 open files, soft and hard, and not with launchd's

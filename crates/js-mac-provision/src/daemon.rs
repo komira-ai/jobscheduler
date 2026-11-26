@@ -14,6 +14,12 @@
 //! agent's host-specific flags (server, pool, network mode) are read from [`FLAGS_FILE`],
 //! which a per-group configuration package installs.
 //!
+//! Both start with [`OPEN_FILES`] open files, soft and hard (`SoftResourceLimits` and
+//! `HardResourceLimits`, `NumberOfFiles`), not with launchd's default soft limit of 256: the agent
+//! serves many runs at once, each with pipes, log streams, lease files and connections, and the
+//! jobs the helper starts inherit its limit. The kernel holds the limit to its own per-process
+//! cap (`kern.maxfilesperproc`) where that is lower.
+//!
 //! The pf daemon is of another kind: it runs at load and every [`PF_POOL_INTERVAL_SECS`]
 //! seconds, and each run is `js-mac-provision install --flags-file` [`FLAGS_FILE`], which loads
 //! the anchor the agent's own flags name unless it is in force already, and does nothing while
@@ -49,6 +55,8 @@ pub const TOKEN_FILE: &str = "/etc/js-agent/token";
 /// for the engine calls. `launchctl bootout` returns when the agent has exited, so whatever stops
 /// it must wait at least this long.
 pub const AGENT_EXIT_TIMEOUT_SECS: u32 = 120;
+/// The open-files limit, soft and hard, of the agent and the helper.
+const OPEN_FILES: u32 = 65536;
 /// Seconds launchd waits between two starts of a daemon.
 pub const THROTTLE_SECS: u32 = 30;
 /// The helper's socket, which the agent dials.
@@ -171,6 +179,12 @@ impl Daemon {
             "\t<key>ExitTimeOut</key>\n\t<integer>{}</integer>",
             self.exit_timeout_secs
         );
+        for key in ["SoftResourceLimits", "HardResourceLimits"] {
+            let _ = writeln!(
+                text,
+                "\t<key>{key}</key>\n\t<dict>\n\t\t<key>NumberOfFiles</key>\n\t\t<integer>{OPEN_FILES}</integer>\n\t</dict>"
+            );
+        }
         let _ = writeln!(
             text,
             "\t<key>StandardOutPath</key>\n\t<string>{LOG_DIR}/{}.log</string>",
