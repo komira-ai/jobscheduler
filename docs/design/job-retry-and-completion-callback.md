@@ -1,8 +1,11 @@
 # A job's retry policy and its completion callback
 
 Companion to [jobscheduler-design.md](jobscheduler-design.md), sections 3.2 (jobs), 5.3 (submit, place, cancel), 5.4 (whole-host
-jobs), 6.3 (presence and loss) and 6.7 (restart recovery), and to [live-logs.md](live-logs.md). Status: **decided, not built**. The
-owner of the public job API has answered every question this page raised (section 0). Nothing here is built yet. The page changes the
+jobs), 6.3 (presence and loss) and 6.7 (restart recovery), and to [live-logs.md](live-logs.md). Status: **decided, partly built**. The
+owner of the public job API has answered every question this page raised (section 0). Built and merged: tasks A to G and J of section 10
+(the interfaces, the retry decision, the attempt store, the callback store, delivery, attempt logs, and the server's retry and callback
+code). Not on main: task H (komira-ai/jobscheduler#1120, open) and task I, the release that accepts a policy and a callback; until
+then `SubmitJob` refuses both. The page changes the
 public job API (`crates/js-proto/proto/jobscheduler/v1/job.proto`, `service.proto`, `usage.proto`).
 
 Two features are missing today:
@@ -491,7 +494,7 @@ With no allow-list, the server must still never be turned against itself or its 
    they name.
 
    **The cluster's own addresses** are this instance's listen addresses, the store host's resolved addresses, and the peer address each
-   host's heartbeat arrives from. The server does not record the last of these today. Task G adds it, in memory, per instance.
+   host's heartbeat arrives from. The server records the last of these in memory, per instance, from each heartbeat it accepts (task G).
 4. **No redirect is followed, no proxy is used, and the answer's body is not read.** A redirect counts as a failure.
 5. **A small oracle, stated.** A submitter sees `callback_status`: the state, the tries, the time of the last try, and
    `last_failure`, which holds only the class `refused-address` or `failed`. So of a URL it named, the submitter learns three things:

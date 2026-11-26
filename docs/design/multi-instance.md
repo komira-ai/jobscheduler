@@ -424,8 +424,8 @@ host reads.
 - **Host listings and `host_silent_since_ms`** (G5): the `node/` rows.
 - **`HostLive`** (G5, G15): a hello of a host whose row was heard within grace is refused as today, judged on the row, so every
   instance answers alike; the refusal read from the local record (`js-registry/src/registry.rs:470-474`) goes. A hello of the same
-  agent process (its welcome lost) takes the host over at once: G15 adds an optional hello field naming the agent process, which no
-  wire carries today. A new agent process, as after a restart, waits out the grace as now.
+  agent process (its welcome lost) takes the host over at once, through the optional hello field `Hello::agent_process` (`js-agent-wire/src/hello.rs:349`),
+  judged at `js-registry/src/registry/admit.rs:103-107`; it is built (G15). A new agent process, as after a restart, waits out the grace as now.
 - **`PoolFull`** (G5): the hello of a host new to the pool locks the pool's row `pool/<pool>` (read and written at `Cond::Version`
   in the hello transaction, so two such hellos of one pool are serialized) and counts the pool's `node/` rows that are not forgotten, as the registry counts its records today (a lost host inside retention counts). A known host is
   admitted as today.
@@ -446,7 +446,7 @@ Carried from komira-ai/hostkeeper's design, section 13:
 | A host enrolled in hostkeeper holds one per-host certificate the coordinator controls; no join tokens, no token passing, no per-service certificates, no revocation machinery (a compromised host is unplugged) | the certificate is the identity of every agent request (#922); G3 deletes the token and host-credential paths instead of making them N-safe | Built (the certificate); Designed (G3, the removal) |
 | No agent stickiness beyond TCP keep-alive plus a server-side connection max age | an agent keeps no connection: it opens one per request (`js-client/src/client.rs:282`). A job client may keep one, so the job listener closes a connection older than `client_connection_max_age` (a config key with a default) at the end of a request | Built (agents: no connection is kept); not needed for job clients, since any instance serves them (G10 deleted) |
 | The job-store cutover is a short pause with a dry-run copy, and a Postgres-to-SQLite export for rollback | #874 shipped the first start over Postgres with an empty job store ("drain the farm") and no copy or export tool | Designed (G12) |
-| A hello with the same credential and agent instance takes the host over at once | in section 0 no instance owns the host, so the hello is judged on the row on any instance; the same agent process is recognised by an optional hello field naming it, which G15 adds (none on the wire today); a new agent process waits out the grace, as today | Designed (G15) |
+| A hello with the same credential and agent instance takes the host over at once | in section 0 no instance owns the host, so the hello is judged on the row on any instance; the same agent process is recognised by an optional hello field naming it (`Hello::agent_process`, `js-agent-wire/src/hello.rs:349`; judged at `js-registry/src/registry/admit.rs:103-107`); a new agent process waits out the grace, as today | Built (G15) |
 | Losing one unflushed usage buffer when an instance dies is accepted | the minute buffer flushes every few minutes (`js-usage/src/hub.rs:448`) | Built |
 
 ## 7. Compatibility (B8)

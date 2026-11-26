@@ -10,7 +10,9 @@
 //! Quiet means: the agent holds no run (a result the server has not acknowledged is a run
 //! it holds), the host is not tainted (a container it could not remove taints it), and the post-job
 //! checks, run once more with nothing live, find nothing. A finding taints the host as
-//! after any job. The VM check of the design (5.1) is not here: no VM backend exists.
+//! after any job. The VM check of the design (5.1) is not here: the VM backend exists, but
+//! this gate has no VM-specific check, and a VM start goes through the same gate as any
+//! other start.
 
 use std::mem;
 
