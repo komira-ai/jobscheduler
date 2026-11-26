@@ -83,11 +83,9 @@ mod tests {
             )
         );
         // A NUL byte: the standard library refuses the name before any lookup.
-        let refused = resolver.resolve("a\0b", within);
-        assert!(
-            matches!(refused, Err(ResolveError::Lookup(ref error)) if error.kind() == io::ErrorKind::InvalidInput),
-            "{refused:?}"
-        );
+        let refused = resolver.resolve("a\0b", within).expect_err("a NUL byte");
+        let text = refused.to_string();
+        assert!(text.starts_with("the lookup failed: "), "{text}");
     }
 
     /// Asserts that a lookup that never answers (it waits on a channel nothing ever sends on)
