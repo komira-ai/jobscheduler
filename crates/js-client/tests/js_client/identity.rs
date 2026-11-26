@@ -591,7 +591,8 @@ fn an_identity_client_takes_no_bearer() {
     client.get("/a").unwrap();
     let seen = fake.seen();
     assert_eq!(seen[0].presented, vec![minted.der.clone()]);
-    assert!(!seen[0].request.to_ascii_lowercase().contains("authorization"));
+    let request = seen[0].request.to_ascii_lowercase();
+    assert!(!request.contains("authorization"), "{request}");
 }
 
 /// A named pipe at `path`, which a blocking open would wait on forever. `mkfifo`, not rustix's
