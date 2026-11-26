@@ -308,6 +308,7 @@ mod credential;
 pub mod crun;
 #[cfg(target_os = "linux")]
 pub mod crun_host;
+pub mod dev_exec;
 pub mod disk;
 pub mod dispatch;
 pub mod egress;
@@ -331,6 +332,7 @@ pub mod integrity;
 mod jobs;
 pub mod leak_scan;
 pub mod lifecycle;
+pub mod linux_vm;
 mod login;
 pub mod logs;
 pub mod mac_accounts;
@@ -369,7 +371,7 @@ mod warnings;
 mod worker;
 pub mod xcode;
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fmt::Display;
 use std::io::Write;
 use std::path::Path;
@@ -523,6 +525,13 @@ pub fn main_with(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> ExitCode {
+    // The prototype's development verbs: the Full Disk Access proof's, which only starts one
+    // program and waits for it, and the Linux VM prototype's, which runs its own threads.
+    match args.get(1).map(OsString::as_os_str).and_then(OsStr::to_str) {
+        Some(dev_exec::VERB) => return dev_exec::run(&args, err),
+        Some(linux_vm::VERB) => return linux_vm::run(&args, out, err),
+        _ => {}
+    }
     if let Some(code) = hidden_verbs::dispatch(&args, out, err) {
         return code;
     }

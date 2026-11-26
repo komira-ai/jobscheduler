@@ -62,12 +62,13 @@ impl Tree {
                 &tree.root().join(&rel).join("tests/bin"),
             );
             // The modules the agent's test-only binaries reach through `#[path]`: the fakes of
-            // `js-update-hook-fake`, and the measurement and the runtime host of
-            // `js-launch-measure`.
+            // `js-update-hook-fake`, the measurement and the runtime host of `js-launch-measure`,
+            // and the guest program of the Linux VM prototype, `js-vm-guest`.
             for dir in [
                 "tests/update_hook_fakes",
                 "tests/launch_measure",
                 "tests/runtime_host",
+                "tests/vm_guest",
             ] {
                 copy(
                     &repo().join(&rel).join(dir),

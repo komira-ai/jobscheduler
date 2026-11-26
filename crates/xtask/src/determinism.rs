@@ -758,6 +758,13 @@ pub const ALLOWED: &[Allowed] = &[
         reason: "the time in the name of the kept taint marker (`taint.json.cleared-<unix seconds>`, as an operator's clear names it); no decision reads it",
     },
     Allowed {
+        file: "crates/js-agent/src/linux_vm/clock.rs",
+        item: "now",
+        token: Token::InstantNow,
+        sites: 1,
+        reason: "the Linux VM prototype's own measurements (`js-agent __linux-vm`), a development verb the cell never runs",
+    },
+    Allowed {
         file: "crates/js-agent/src/mac_accounts/macos/sys.rs",
         item: "now_ms",
         token: Token::InstantNow,
