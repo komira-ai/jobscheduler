@@ -130,6 +130,9 @@ async fn fixture(name: &str) -> Fixture {
     }
     recorder.job_lost();
     recorder.job_lost();
+    (0..3).for_each(|_| recorder.job_retried(RetryOutcome::StartFailed));
+    recorder.job_retried(RetryOutcome::HostLost);
+    (0..2).for_each(|_| recorder.attempts_exhausted());
     recorder.store_write_failed();
     recorder.job_pass_took(Duration::from_millis(3));
     recorder.job_pass_took(Duration::from_millis(30));

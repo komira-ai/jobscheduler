@@ -42,6 +42,13 @@ js_job_start_failures_total{code="input-unavailable"} 1
 # HELP js_jobs_lost_total Jobs lost with their host or container.
 # TYPE js_jobs_lost_total counter
 js_jobs_lost_total 2
+# HELP js_job_retries_total Attempts of jobs that ended in a way that retries and were followed by another, by how they ended: start-failed (a start failure of the host's) or host-lost.
+# TYPE js_job_retries_total counter
+js_job_retries_total{outcome="start-failed"} 3
+js_job_retries_total{outcome="host-lost"} 1
+# HELP js_job_attempts_exhausted_total Jobs that ended in a way that retries with no attempt left under their retry policy.
+# TYPE js_job_attempts_exhausted_total counter
+js_job_attempts_exhausted_total 2
 # HELP js_store_write_failures_total Passes over the job tables the server makes itself (the job pass, a placement, a heartbeat's job listing) that failed, so their write did not commit.
 # TYPE js_store_write_failures_total counter
 js_store_write_failures_total 1

@@ -30,8 +30,9 @@
 //! found them, that pass failed no read and no write, and nothing waits from pass 2. A skipped
 //! pass would have placed nothing and written nothing, except what the clock alone changes:
 //! a whole-host job's mark that turns at its drain time or at the end of a bar, a stored mark
-//! whose host's hello is waited for past the server's start plus the regain grace, and the
-//! wall limit a backfill placement gets. Those are left to the next pass that runs, at the
+//! whose host's hello is waited for past the server's start plus the regain grace, the
+//! wall limit a backfill placement gets, and a retried job whose backoff ends (`jobs_retry`).
+//! Those are left to the next pass that runs, at the
 //! latest the tick's, which always runs ([`SchedPlacer::place_jobs_with`]).
 
 use std::cell::Cell;

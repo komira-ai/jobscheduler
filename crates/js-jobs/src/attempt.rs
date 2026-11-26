@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use js_state::StoreTime;
-use js_types::HostId;
+use js_types::{HostId, JobEventKind, QueueCode, QueueNote};
 
 use crate::codec::Carried;
 use crate::record::{Exclusion, JobRecord, JobState, StartFailure};
@@ -57,6 +57,37 @@ pub(crate) fn retry_barred(
         bars.insert(host.clone(), Exclusion::Until(until));
     }
     bars
+}
+
+/// The note a retry records on the job whose attempt `number`, held by `host`, ended as `end`
+/// and whose next attempt may be placed `wait` from the retry: the job waits for its retry
+/// ([`QueueCode::WaitingForRetry`]), with a [`JobEventKind::RetryScheduled`] event naming the
+/// host, and a detail that says how the attempt ended and the wait in whole seconds, rounded
+/// up. A retry is no placement attempt.
+pub(crate) fn retry_note(
+    host: &HostId,
+    end: &AttemptRecord,
+    number: u32,
+    wait: Duration,
+) -> QueueNote {
+    let how = match end.outcome {
+        AttemptOutcome::HostLost => "its host was lost",
+        AttemptOutcome::StartFailed => "it failed to start",
+        AttemptOutcome::Succeeded | AttemptOutcome::Failed | AttemptOutcome::Cancelled => {
+            "it ended"
+        }
+    };
+    let seconds = wait.as_secs() + u64::from(wait.subsec_nanos() > 0);
+    let next = number.saturating_add(1);
+    QueueNote {
+        code: QueueCode::WaitingForRetry,
+        detail: format!(
+            "attempt {number} on host {host} ended: {how}; attempt {next} may be placed in {seconds} s"
+        ),
+        event: Some(JobEventKind::RetryScheduled),
+        host: Some(host.clone()),
+        attempt: false,
+    }
 }
 
 /// How one attempt ended, as the job API's `AttemptOutcome` tells it.
@@ -92,8 +123,10 @@ pub struct AttemptRecord {
 impl AttemptRecord {
     /// How the attempt that `end` ends the job with ended: its outcome by the state `end`
     /// gives the job, its exit code and reason as its result has them, its start failure and
-    /// the agent's code of a refused start.
-    pub(crate) fn of_end(end: &JobEnd) -> AttemptRecord {
+    /// the agent's code of a refused start. What [`crate::JobStore::retry_txn`] is told of an
+    /// attempt that retries, as an end of the job records it.
+    #[must_use]
+    pub fn of_end(end: &JobEnd) -> AttemptRecord {
         let (exit_code, reason) = match end {
             JobEnd::Exited { exit_code, .. } => (Some(*exit_code), Some(ResultReason::Exit)),
             JobEnd::WallLimit { exit_code, .. } => (*exit_code, Some(ResultReason::WallLimit)),

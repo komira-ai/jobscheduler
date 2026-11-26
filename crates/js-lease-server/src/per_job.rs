@@ -8,8 +8,10 @@
 //! 1. **The listing is committed** ([`commit_listing`]). Each listed job is compared with the
 //!    store, one transaction per step, each step carrying the allocation change that goes with
 //!    it: `starting` moves placed to starting; `running` moves to running and stamps the start
-//!    (the wall clock runs from there); a result moves the job to its end and its allocation
-//!    to releasing, and is acknowledged; a start the host refused as held (`host-held`), for
+//!    (the wall clock runs from there); a result moves the job to its end (or, for a start
+//!    refused for a cause of the host with an attempt left under the job's retry policy, back
+//!    to the queue for its next attempt, [`crate::job_retry`]) and its allocation to
+//!    releasing, and is acknowledged; a start the host refused as held (`host-held`), for
 //!    capacity (`no-capacity`) or while it fetches the job's bundle (`bundle-pending`) sends the
 //!    job back to the queue and frees its allocation instead ([`crate::job_held`]), and is
 //!    acknowledged too. A job the agent ran and ended between two heartbeats is walked
@@ -19,7 +21,8 @@
 //!    and was told to stop is stopped and gone, so a cancelled job ends and its allocation is
 //!    freed in one commit.
 //! 3. **Confirmed containers are freed**: an allocation that is releasing, of a job that has
-//!    ended, whose host no longer lists the job, is freed ([`job_alloc::free_allocation`]). A
+//!    ended or whose attempt on it a retry ended ([`attempt_over`]), whose host no longer lists
+//!    the job, is freed ([`job_alloc::free_allocation`]). A
 //!    host that is only silent is never served here, so silence frees nothing. For an agent
 //!    that sends no beat sequence the server cannot tell an old beat from a new one (a beat
 //!    the agent gave up on can still be applied after a newer one), so its container is freed
@@ -27,8 +30,8 @@
 //!    the host's row ([`JobReply::missing`]).
 //! 4. **The reply is built** from what the store holds now: a stop for every job of the host
 //!    with a cancel intent that has not ended, every listed job the store has no live
-//!    allocation of on this host, and every listed job that ended without the host reporting
-//!    it ([`stops_for`]); then a start for every placed job the host does not list yet
+//!    allocation of on this host, and every listed job that ended, or whose attempt there a
+//!    retry ended, without the host reporting it ([`stops_for`]); then a start for every placed job the host does not list yet
 //!    ([`starts_for`]). A job that books the whole host is the exception on both sides: no
 //!    container exists while it is placed (the host prepares), so it is sent no stop, and it
 //!    is sent its start only once the host reported ready and the job is starting. The reply
@@ -58,6 +61,7 @@ use tracing::warn;
 use crate::job_alloc::{self, Freed};
 use crate::job_expiry::JobLimits;
 use crate::job_held;
+use crate::job_retry::{self, Settled};
 use crate::job_start::start_of;
 use crate::job_store::ServerJobs;
 use crate::logs::LogGrants;
@@ -169,9 +173,9 @@ pub(crate) fn serve(
         .collect();
     let mut missing = BTreeMap::new();
     for (allocation, job) in jobs.live_on(host)? {
-        let ended = job.as_ref().is_none_or(|job| job.state.is_ended());
+        let over = job.as_ref().is_none_or(attempt_over);
         let gone = !held.contains(allocation.job.as_str());
-        if (allocation.step != AllocationStep::Releasing) | !ended | !gone {
+        if (allocation.step != AllocationStep::Releasing) | !over | !gone {
             continue;
         }
         let before = missed.map(|missed| missed.get(&allocation.job).copied().unwrap_or(0));
@@ -347,7 +351,12 @@ fn report(
 /// it skipped when it ran and ended between two heartbeats ([`Ack::Accepted`]); a job that has
 /// already ended is left as it is ([`Ack::Duplicate`]); an end its state cannot take is logged
 /// and changes nothing ([`Ack::Stale`]); an outcome this version does not know is left
-/// unanswered. A start the host refused is told to the metrics with its code (`none` when it
+/// unanswered. An end that retries ([`job_retry::end_or_retry`]: a start refused for a cause of
+/// the host, when the job's retry policy leaves another attempt) queues the job's next attempt
+/// instead of ending it, and is answered [`Ack::Accepted`] too; a result the host resends after
+/// that names the allocation, now releasing, of a job that is queued, whose state takes no end,
+/// and is answered [`Ack::Stale`]. A start failure is told to the metrics when it ends the job.
+/// A start the host refused is told to the metrics with its code (`none` when it
 /// lists none) once, when the requeue or the end it brings is committed, whether it is sent
 /// back to the queue or ends the job; a duplicate, a stale listing and a commit that fails are
 /// not told.
@@ -390,14 +399,16 @@ fn commit_result(
         JobEnd::FailedToStart(failure) | JobEnd::Refused { failure, .. } => Some(*failure),
         _ => None,
     };
-    match jobs.end_job(&job.id, end) {
-        Ok(_) => {
+    match job_retry::end_or_retry(jobs, &job, end, context.metrics) {
+        Ok(settled) => {
             if refused {
                 tell_refused();
             }
-            failure
-                .into_iter()
-                .for_each(|failure| context.metrics.start_failed(failure));
+            if let Settled::Ended(_) = settled {
+                failure
+                    .into_iter()
+                    .for_each(|failure| context.metrics.start_failed(failure));
+            }
             Ok(Some(Ack::Accepted))
         }
         Err(JobStoreError::IllegalTransition { from, to, .. }) => {
@@ -550,6 +561,14 @@ fn refused(detail: Option<&str>) -> JobEnd {
     }
 }
 
+/// Whether the attempt of `job` that holds its live allocation is over: the job has ended, or
+/// it is queued again, which a job with a live allocation is only when that allocation is its
+/// previous attempt's, which a retry ended ([`crate::job_retry`]): the job's next attempt is
+/// placed only once that allocation is freed, so the job never has two at a time.
+pub(crate) fn attempt_over(job: &JobRecord) -> bool {
+    job.state.is_ended() | (job.state == JobState::Queued)
+}
+
 /// Whether `job`, placed on `allocation`, is a whole-host job still preparing: the host holds
 /// no container for it, so it is sent no stop and no start, and a cancel of it waits for the
 /// host to leave `preparing` ([`crate::job_whole`]).
@@ -559,8 +578,9 @@ fn preparing(allocation: &AllocationRecord, job: &JobRecord) -> bool {
 
 /// The jobs a host is told to stop, in id order: every job of `live` (the host's live
 /// allocations) with a cancel intent that has not ended (a whole-host job that is still
-/// preparing excepted), every listed job that has ended without the host listing its result,
-/// and every id of `unknown` (listed jobs the store holds no live allocation of on this
+/// preparing excepted), every listed job whose attempt on the host is over ([`attempt_over`]:
+/// the job ended, or a retry ended the attempt and queued the next) without the host listing
+/// its result, and every id of `unknown` (listed jobs the store holds no live allocation of on this
 /// host). It is resent on every heartbeat until the host stops listing the job or answers
 /// with its retired id. This is the one stop rule: a cancel, a start timeout or a wall limit
 /// that the store records reaches the host through it.
@@ -581,7 +601,8 @@ pub(crate) fn stops_for(
         let unreported = listing
             .get(job.id.as_str())
             .is_some_and(|held| held.result.is_none());
-        (job.cancel_requested & !ended & !preparing(allocation, job)) | (ended & unreported)
+        let cancelled = job.cancel_requested & !ended & !preparing(allocation, job);
+        cancelled | (attempt_over(job) & unreported)
     });
     let mut stops: BTreeSet<String> = stopped.map(|(_, job)| job.id.to_string()).collect();
     stops.extend(unknown.iter().cloned());

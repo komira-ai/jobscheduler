@@ -13,12 +13,12 @@ use js_types::{
     AcceleratorNeed, ExecMode, ImageDigestRef, IsaLevel, Labels, Requirements, Resources,
 };
 
-use super::{Fault, ISA_LEVEL_KEY, Valid, job};
+use super::{Accepts, Fault, ISA_LEVEL_KEY, Valid, job};
 use crate::job_api::writes_rig::{CEILING, image, wire};
 
 /// `spec` checked against the rig's ceiling.
 fn checked(spec: &v1::JobSpec) -> Result<Valid, Fault> {
-    job(Some(spec), CEILING, None)
+    job(Some(spec), CEILING, Accepts::default(), None)
 }
 
 /// The fault of `spec` changed by `change`.
@@ -293,7 +293,12 @@ fn the_wall_limit_is_present_positive_and_at_most_the_ceiling() {
     );
     let at = valid(|spec| spec.wall_limit_seconds = Some(ceiling));
     assert_eq!(at.spec.wall_limit_secs, ceiling);
-    let higher = job(Some(&wire("job-1")), Duration::from_secs(599), None);
+    let higher = job(
+        Some(&wire("job-1")),
+        Duration::from_secs(599),
+        Accepts::default(),
+        None,
+    );
     assert_eq!(higher, Err(Fault::WallAboveCeiling));
 }
 
@@ -364,7 +369,10 @@ fn a_malformed_xcode_build_is_refused_naming_its_field() {
 /// value through to the tables and a refusal that names another field than the one at fault.
 #[test]
 fn each_fault_names_its_field() {
-    assert_eq!(job(None, CEILING, None), Err(Fault::Field("spec")));
+    assert_eq!(
+        job(None, CEILING, Accepts::default(), None),
+        Err(Fault::Field("spec"))
+    );
     let long = "a".repeat(64);
     for id in [long.as_str(), "a b", "a/b", "é"] {
         let refused = fault(|spec| spec.job_id = id.to_owned());

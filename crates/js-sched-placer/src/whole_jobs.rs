@@ -458,7 +458,7 @@ fn exclusion_of_bar(bar: Bar) -> Exclusion {
 
 /// `at` on the scheduler's clock: the store's and the scheduler's both count milliseconds
 /// from the Unix epoch in the server.
-fn farm_of(at: StoreTime) -> FarmTime {
+pub(super) fn farm_of(at: StoreTime) -> FarmTime {
     let millis = u64::try_from(at.as_duration().as_millis());
     FarmTime::from_millis(millis.unwrap_or(u64::MAX))
 }

@@ -21,6 +21,16 @@
 //! Lost is terminal: a host that later lists a lost job is told to stop it and the job is never
 //! revived ([`crate::per_job::stops_for`]).
 //!
+//! **A lost host may retry the attempt** (`docs/design/job-retry-and-completion-callback.md`,
+//! section 3.3). Each way asks [`crate::job_retry::next`] first: a placed, starting or running
+//! job whose retry policy leaves an attempt after the current one, with no cancel asked for, is
+//! not lost but queued for its next attempt ([`crate::job_retry::retry`], in one commit with
+//! its allocation's move to releasing), its host barred for 15 minutes. On the first way the
+//! allocation is then freed for the provider's absence, in a commit of its own: a pass that
+//! stops between the two finds the allocation live on the absent host on its next read, and
+//! frees it then, the job being queued. On the second way the host's listing frees it, as it
+//! frees a lost job's. Every other job is lost as before.
+//!
 //! **Silence ends nothing.** No rule here, or anywhere in the job pass, compares how long a host
 //! has been silent with a duration: a host that goes silent for good and is never read absent
 //! keeps its jobs as they are and their allocations booked (design section 6.3; question 25,
@@ -32,7 +42,8 @@ use std::collections::BTreeSet;
 use js_jobs::{JobEnd, JobId, JobState, JobStoreError};
 use js_types::HostId;
 
-use crate::job_alloc;
+use crate::job_alloc::{self, Freed};
+use crate::job_retry::{self, Next, Settled};
 use crate::job_store::ServerJobs;
 use crate::metrics::MetricsSink;
 
@@ -55,9 +66,10 @@ pub(crate) trait Observe {
 }
 
 /// Settles the live allocations of each host `observer` reads absent (the first way of the
-/// module docs), one commit per allocation, and returns the jobs it made lost. Each host that
-/// holds a live allocation is read once; only [`Seen::Absent`] changes anything. Each job it
-/// loses is told to `metrics` as its commit lands.
+/// module docs), one commit per allocation (two for a job it retries: the retry, then the
+/// free), and returns the jobs it made lost. Each host that holds a live allocation is read
+/// once; only [`Seen::Absent`] changes anything. Each job it loses or retries is told to
+/// `metrics` as its commit lands, with a loss whose retry policy had no attempt left.
 ///
 /// # Errors
 /// The first [`JobStoreError`] of a read or a commit; what was committed before it stays, and
@@ -75,9 +87,20 @@ pub(crate) fn lose_absent(
         .collect();
     let mut lost = Vec::new();
     for allocation in live.iter().filter(|live| absent.contains(&live.host)) {
+        let job = jobs.get_job(&allocation.job)?;
+        let next = job.as_ref().map(|job| job_retry::next(job, &JobEnd::Lost));
+        if let (Some(job), Some(Next::Retry { wait })) = (&job, next) {
+            job_retry::retry(jobs, job, &JobEnd::Lost, wait, metrics)?;
+            job_alloc::free_allocation(jobs, &allocation.job, Freed::ProviderAbsent)?;
+            continue;
+        }
+        let exhausted = matches!(next, Some(Next::End { exhausted: true }));
         let ended = job_alloc::lose_on_absent(jobs, &allocation.job)?;
         lost.extend(ended.map(|job| {
             metrics.job_lost();
+            if exhausted {
+                metrics.attempts_exhausted();
+            }
             job.id
         }));
     }
@@ -85,10 +108,10 @@ pub(crate) fn lose_absent(
 }
 
 /// The jobs of `host` that are starting or running and that its listing `held` (the ids the
-/// host listed or retired) does not name, each lost in one commit with its allocation's move to
-/// releasing (the second way of the module docs), returned in id order. Called on the first
-/// listing of the host after its hello. Each job it loses is told to `metrics` as its commit
-/// lands.
+/// host listed or retired) does not name, each lost, or retried when its retry policy leaves
+/// another attempt, in one commit with its allocation's move to releasing (the second way of
+/// the module docs); the lost ones are returned in id order. Called on the first listing of the
+/// host after its hello. Each job it loses or retries is told to `metrics` as its commit lands.
 ///
 /// # Errors
 /// The first [`JobStoreError`] of a read or a commit; what was committed before it stays, and
@@ -101,10 +124,13 @@ pub(crate) fn lose_unlisted(
 ) -> Result<Vec<JobId>, JobStoreError> {
     let mut lost = Vec::new();
     for (allocation, job) in jobs.live_on(host)? {
-        let ran =
-            job.is_some_and(|job| matches!(job.state, JobState::Starting | JobState::Running));
-        if ran && !held.contains(allocation.job.as_str()) {
-            jobs.end_job(&allocation.job, JobEnd::Lost)?;
+        let ran = job
+            .as_ref()
+            .is_some_and(|job| matches!(job.state, JobState::Starting | JobState::Running));
+        let Some(job) = job.filter(|_| ran && !held.contains(allocation.job.as_str())) else {
+            continue;
+        };
+        if let Settled::Ended(_) = job_retry::end_or_retry(jobs, &job, JobEnd::Lost, metrics)? {
             metrics.job_lost();
             lost.push(allocation.job);
         }
