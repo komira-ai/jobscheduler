@@ -77,6 +77,60 @@ mod tests {
         }
     }
 
+    impl Sink {
+        fn text(&self) -> String {
+            let bytes = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            String::from_utf8_lossy(&bytes).into_owned()
+        }
+    }
+
+    /// A warning from a callsite of its own, reached only through this function.
+    fn warn_from_one_callsite(what: &str) {
+        tracing::warn!(what, "from the shared callsite");
+    }
+
+    /// Proves a capture sees an event at a callsite that another thread, with no subscriber
+    /// of its own, reached first while the capture was installed: once, from this thread.
+    /// Catches a capture that is the only live dispatcher, with which `tracing-core` caches
+    /// the callsite as never wanted from the other thread's lack of a subscriber.
+    #[test]
+    fn a_callsite_another_thread_reaches_first_is_still_captured() {
+        let sink = Sink::default();
+        let held = capture(sink.clone(), Level::WARN);
+        std::thread::spawn(|| warn_from_one_callsite("elsewhere"))
+            .join()
+            .expect("the other thread ends");
+        warn_from_one_callsite("here");
+        drop(held);
+        let text = sink.text();
+        assert_eq!(text.matches("from the shared callsite").count(), 1, "{text}");
+        assert!(text.contains("what=\"here\""), "{text}");
+    }
+
+    /// A warning from a callsite of its own, reached only through this function.
+    fn warn_around_a_rebuild(when: &str) {
+        tracing::warn!(when, "around the other thread's rebuild");
+    }
+
+    /// Proves a capture still sees the events of a callsite it already reached after another
+    /// thread, with no subscriber of its own, rebuilt the shared interest. Catches a capture
+    /// that is the only live dispatcher, with which the rebuild caches every callsite reached
+    /// so far as never wanted, from the other thread's lack of a subscriber.
+    #[test]
+    fn a_rebuild_on_another_thread_keeps_what_the_capture_sees() {
+        let sink = Sink::default();
+        let held = capture(sink.clone(), Level::WARN);
+        warn_around_a_rebuild("before");
+        std::thread::spawn(tracing::callsite::rebuild_interest_cache)
+            .join()
+            .expect("the other thread ends");
+        warn_around_a_rebuild("after");
+        drop(held);
+        let text = sink.text();
+        assert!(text.contains("when=\"before\""), "{text}");
+        assert!(text.contains("when=\"after\""), "{text}");
+    }
+
     /// Proves a capture holds the lock every capture takes for as long as it is installed,
     /// and releases it when dropped, and that it sees an event at its level and not one
     /// below it. Catches a capture that installs its subscriber without the lock, which lets
