@@ -5,7 +5,7 @@
 //! 12.5 of the design: [`Resources`] is the resource vector, [`ResourceClass`] is a
 //! resource class as data, [`Shape`] is what a host offers, [`LeaseId`] identifies a
 //! lease, [`Labels`] carry the reserved `jobscheduler.dev/` schema, and [`Request`] is
-//! what a caller asks for. [`ContainerSpec`] and [`Requirements`] say what a job runs and
+//! what a caller asks for. [`JobContainer`] and [`Requirements`] say what a job runs and
 //! what it needs of a host, on the platform of [`Os`], in the CPU vocabulary of [`Arch`] and
 //! [`IsaLevel`] and the accelerator vocabulary of [`Accelerator`] and [`AcceleratorNeed`],
 //! resolved through the alias table ([`ALIASES`], [`FAMILIES`]) that `js-caps` re-exports;
@@ -91,7 +91,7 @@ pub use ids::{
 };
 pub use isa::{Arch, ArmVersion, IsaLevel, UnknownArch, UnknownIsaLevel, X86Level, normalise_arch};
 pub use job::{
-    ContainerSpec, DISK_GIB_KEY, EXEC_KEY, ExecMode, ImageDigestRef, ImageRefError, OS_VERSION_KEY,
+    DISK_GIB_KEY, EXEC_KEY, ExecMode, ImageDigestRef, ImageRefError, JobContainer, OS_VERSION_KEY,
     Os, PlatformConflict, Requirements, RequirementsError, UnknownExecMode, UnknownOs,
 };
 pub use job_id::{JobId, JobIdError, MAX_JOB_ID_LEN};
