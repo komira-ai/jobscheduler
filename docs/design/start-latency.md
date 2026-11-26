@@ -273,9 +273,8 @@ Read with `js-start-timeline` over that node's `journalctl -u js-agent-crun` for
   record of every start whose admission returned.
 - **Two pools of four, not one larger pool.** One larger pool would still let assemblies take every
   thread; two keep a lookup from ever queueing behind an assembly.
-- **`Mount` is still sent on the step after `Prepare` is answered.** Sending it from the provider
-  client when `Prepare` answers would save one worker step per source, but it changes how the
-  client's flights are kept and is left for its own change.
+- **`Mount` was still sent on the step after `Prepare` was answered** in this part. The seventh part
+  below sends it from the provider client when `Prepare` answers.
 
 ### Compatibility and failure modes
 
@@ -291,7 +290,8 @@ Read with `js-start-timeline` over that node's `journalctl -u js-agent-crun` for
 ### What is left
 
 - The farm table after this agent and server ship, on the busy node and a node at normal load.
-- `Mount` sent by the provider client as soon as `Prepare` is answered (one worker step a source).
+- `Mount` sent by the provider client as soon as `Prepare` is answered (one worker step a source):
+  done in the seventh part below.
 - The connection of each heartbeat (a new TCP and TLS handshake every beat, `js-client`).
 - The p99: the integrity check's settle wait (1 s, on the worker, only after a job that left a
   process or mount behind) and the image budget's first walk after a restart, both on threads a
@@ -535,6 +535,53 @@ nodes' measured demand fits in the pool with room to spare.
 - After deploy: the `queue_ms` of the `Started` lines, the target being a p90 under 20 ms on every
   node.
 
+## Seventh part: `Mount` sent by the provider client when `Prepare` answers
+
+### Why, read in the code
+
+A source's `Mount` was sent only by the lifecycle: `Source::ask` (`lifecycle/machine/providing.rs`)
+asks `Prepare` and, in the ask that is handed its success, asks `Mount`. The client
+(`provider/mod.rs`) carried each call in a task of its own, and a `Prepare`'s success rang the wake,
+so the `Mount` went out only once the worker had stepped for that ring: after whatever the step was
+doing for other jobs, and after the steps of other starts queued before it. Each source waited for
+one worker step between the two calls, with the provider idle meanwhile.
+
+### What this part changes
+
+- **The task that carried a `Prepare` that succeeded sends its source's `Mount`.** The answer of the
+  `Prepare` is recorded and the `Mount` marked out in one turn of the flight table's lock
+  (`Flights::finish`, with the call that follows), and the same task then sends it. The `Mount` is
+  sent only once the `Prepare`'s answer is in, so the provider sees the two in the protocol's order.
+- **The lifecycle is unchanged.** Its next step is handed the `Prepare`'s success and asks `Mount`,
+  which finds the call out (`Pending`, nothing sent) or answered (the directory, handed over once).
+  A `Mount` the lifecycle had asked already is not replaced.
+- **One ring for the two calls.** A `Prepare` that is followed rings nothing; the `Mount`'s answer
+  rings as any answer does (at once for a success, after the retry pause for a failure, which the
+  lifecycle's ask then sends again as before).
+- **A `Release` forgets the source's `Prepare` and `Mount`** (`Flights::forget`). A start stopped
+  while its `Prepare` is out is released at its cleanup; without this its `Prepare` would still be
+  followed by a `Mount` after the release. The answers it forgets are of calls no one asks again.
+
+### Decisions
+
+- **In the client, not the lifecycle.** The lifecycle only polls; the client is what knows the
+  moment an answer arrives. The `Providers` contract says an implementation may send the `Mount`
+  itself, so the lifecycle's fakes, which do not, keep the same behaviour.
+- **Only after a success.** A refused `Prepare` ends the start, and an unavailable one is sent again
+  by the lifecycle; a `Mount` after either would be refused or premature.
+- **No chain past `Mount`.** Nothing follows a `Mount`, a `Release` or a `Sweep`.
+
+### Compatibility and failure modes
+
+- No wire, record or configuration format changes. The provider receives the same calls in the same
+  order: `Mount` after `Prepare` was answered, now sooner.
+- A provider that fails the `Mount` the client sent gets it again from the lifecycle's next ask, as a
+  `Mount` the lifecycle sent would.
+
+### What is left
+
+- The farm measurement after this agent ships: `admitted` to `provided` on starts with providers.
+
 ## Tests
 
 The tests drive the lifecycle with counted, ordered fakes and an injected clock; none asserts a
@@ -558,4 +605,8 @@ beat that lists no start, a drain), `held_beat_tests.rs`
 heartbeat being answered at the wake. The sixth part adds `crun/fs/lookups_tests.rs` (a start naming the
 most host paths has all its lookups running at once, a lookup past the pool's threads waits for one
 to end and its bound, lookups that hang hold no thread of the assemblies and checks), which takes
-over `fs_tests.rs`'s case of four held lookups and a fifth.
+over `fs_tests.rs`'s case of four held lookups and a fifth. The seventh part adds
+`tests/agent/provider_client/chain.rs` (a `Mount` sent with no ask after the `Prepare` answered,
+one ring for the two, a failed one sent again, a release that forgets its source) and
+`provider/flight_tests.rs`'s cases of the call that follows (marked out with the success, none
+after a refusal, a failure or a replaced call, never over a call of its own, none after a forget).

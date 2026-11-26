@@ -3,6 +3,9 @@
 //! socket in the test's scratch directory: what each kind of call is answered, how a call
 //! stays pending and is handed over, what a refusal and a failure become, what the client
 //! checks about a socket before it connects, the bound on a call, and what the provider sees.
+//! A `Prepare` that succeeds is followed by its source's `Mount`, which the client sends itself
+//! (`chain`), so a test that prepares takes that `Mount`'s answer ([`taken`]) instead of asking
+//! it first.
 //! No test waits for a clock: a test asks, waits for the answer to be in (`wait_answered`,
 //! which is bounded only by a guard that ends a hung test), and asks again. A call that the
 //! fake holds never answers, so a bound that ends it is not a race.
@@ -20,6 +23,8 @@ use js_proto::provider::v1 as pb;
 use js_testkit::mount_provider::{FakeProvider, Kind, Seen, mount_path};
 
 use js_testkit::dir::TestDir;
+
+mod chain;
 
 /// How long a test waits for an answer before it fails: far above any answer, and no test
 /// passes by it.
@@ -147,6 +152,30 @@ fn settle(client: &mut ProviderClient, provider: &str, call: &ProviderCall) -> P
     client.ask(provider, call)
 }
 
+/// Waits for the answer of `call`, which the client sent of itself (the `Mount` that follows a
+/// `Prepare` that succeeded), and asks for it: the first ask hands it over.
+fn taken(client: &mut ProviderClient, provider: &str, call: &ProviderCall) -> ProviderAnswer {
+    assert!(
+        client.wait_answered(provider, call, GUARD),
+        "no answer to {call:?} within the guard"
+    );
+    client.ask(provider, call)
+}
+
+/// The requests of `kind` the fake received so far.
+fn received(fake: &FakeProvider, kind: Kind) -> usize {
+    let of = |seen: &Seen| match seen {
+        Seen::Prepare(_) => Kind::Prepare,
+        Seen::Mount(_) => Kind::Mount,
+        Seen::Release(_) => Kind::Release,
+        Seen::Sweep(_) => Kind::Sweep,
+    };
+    fake.requests()
+        .iter()
+        .filter(|seen| of(seen) == kind)
+        .count()
+}
+
 /// Asserts that `answer` is `Unavailable` and its reason contains `text`.
 fn assert_unavailable(answer: &ProviderAnswer, text: &str) {
     match answer {
@@ -188,8 +217,13 @@ fn each_kind_of_call_is_answered_with_what_the_provider_gave() {
         ProviderAnswer::Done(None)
     );
     assert_eq!(
-        settle(&mut rig.client, NAME, &mount("r1", 0)),
+        taken(&mut rig.client, NAME, &mount("r1", 0)),
         ProviderAnswer::Done(Some(mount_path(HOST, "js.r1", 0)))
+    );
+    assert_eq!(
+        settle(&mut rig.client, NAME, &mount("r1", 0)),
+        ProviderAnswer::Done(Some(mount_path(HOST, "js.r1", 0))),
+        "a mount the lifecycle asks itself is sent and answered"
     );
     assert_eq!(
         settle(&mut rig.client, NAME, &release("r1", 0)),
@@ -222,7 +256,7 @@ fn a_held_call_stays_pending_then_its_answer_is_handed_over_once_then_it_is_sent
     rig.fake.unhold(Kind::Prepare);
     assert!(rig.client.wait_answered(NAME, &call, GUARD));
     assert_eq!(
-        rig.fake.requests().len(),
+        received(&rig.fake, Kind::Prepare),
         1,
         "the call was sent while it was out"
     );
@@ -233,7 +267,7 @@ fn a_held_call_stays_pending_then_its_answer_is_handed_over_once_then_it_is_sent
         "the answer was handed over once; asking again sends the call again"
     );
     assert!(rig.client.wait_answered(NAME, &call, GUARD));
-    assert_eq!(rig.fake.requests().len(), 2);
+    assert_eq!(received(&rig.fake, Kind::Prepare), 2);
     assert_eq!(rig.client.ask(NAME, &call), ProviderAnswer::Done(None));
     assert_eq!(rig.fake.prepared().len(), 1, "a prepare is idempotent");
 }
@@ -356,8 +390,8 @@ fn a_failed_call_has_not_rung_while_the_retry_pause_runs() {
 
 /// Asserts that two calls with different keys (two indexes of one run, and a prepare and a
 /// mount of one source) are each sent and each answered, so one call's answer is never
-/// handed to another's ask. It catches a table keyed by less than the kind, the run and the
-/// index.
+/// handed to another's ask: each prepare's mount, sent by the client, is handed the directory
+/// of its own index. It catches a table keyed by less than the kind, the run and the index.
 #[test]
 fn calls_with_different_keys_are_answered_apart() {
     let mut rig = rig("pc-keys");
@@ -369,11 +403,14 @@ fn calls_with_different_keys_are_answered_apart() {
     assert!(rig.client.wait_answered(NAME, &second, GUARD));
     assert_eq!(rig.client.ask(NAME, &first), ProviderAnswer::Done(None));
     assert_eq!(rig.client.ask(NAME, &second), ProviderAnswer::Done(None));
-    assert_eq!(
-        settle(&mut rig.client, NAME, &mount("r1", 1)),
-        ProviderAnswer::Done(Some(mount_path(HOST, "js.r1", 1)))
-    );
-    assert_eq!(rig.fake.requests().len(), 3);
+    for index in [1, 0] {
+        assert_eq!(
+            taken(&mut rig.client, NAME, &mount("r1", index)),
+            ProviderAnswer::Done(Some(mount_path(HOST, "js.r1", index)))
+        );
+    }
+    assert_eq!(received(&rig.fake, Kind::Prepare), 2);
+    assert_eq!(received(&rig.fake, Kind::Mount), 2);
 }
 
 /// Asserts that a ref the provider refuses (`INVALID_ARGUMENT`) is answered `Refused` with the
@@ -429,14 +466,23 @@ fn a_mount_of_an_unprepared_source_is_refused_and_a_release_of_one_succeeds() {
     );
 }
 
-/// Asserts that a mount the provider answers `UNAVAILABLE` twice is `Unavailable` each time
-/// with the provider's message, that asking again sends it again, and that it then gets the
-/// directory; and that a release the provider fails with another code (`INTERNAL`) is
+/// Asserts that a mount the provider answers `UNAVAILABLE` twice (the first time as the mount
+/// the client sends after the prepare) is `Unavailable` each time with the provider's message,
+/// that asking again sends it again, and that it then gets the directory; and that a release the provider fails with another code (`INTERNAL`) is
 /// `Unavailable` too, and succeeds when asked again. It catches an `UNAVAILABLE` or an
 /// unexpected code that ends the source for good, and a failed call that is not sent again.
 #[test]
 fn an_unavailable_provider_and_any_other_failure_are_unavailable_and_asked_again() {
-    let mut rig = rig("pc-unavail");
+    // A retry pause that never passes in the test: each failure is handed over as it is, and
+    // the ask after it sends the call again, whenever the test asks.
+    let mut rig = rig_with(
+        "pc-unavail",
+        CallBounds {
+            retry: GUARD,
+            ..CallBounds::default()
+        },
+    );
+    rig.fake.fail_mount(2);
     assert_eq!(
         settle(
             &mut rig.client,
@@ -445,13 +491,14 @@ fn an_unavailable_provider_and_any_other_failure_are_unavailable_and_asked_again
         ),
         ProviderAnswer::Done(None)
     );
-    rig.fake.fail_mount(2);
-    for _ in 0..2 {
-        assert_unavailable(
-            &settle(&mut rig.client, NAME, &mount("r1", 0)),
-            "the fake provider is not ready",
-        );
-    }
+    assert_unavailable(
+        &taken(&mut rig.client, NAME, &mount("r1", 0)),
+        "the fake provider is not ready",
+    );
+    assert_unavailable(
+        &settle(&mut rig.client, NAME, &mount("r1", 0)),
+        "the fake provider is not ready",
+    );
     assert_eq!(
         settle(&mut rig.client, NAME, &mount("r1", 0)),
         ProviderAnswer::Done(Some(mount_path(HOST, "js.r1", 0)))
@@ -703,8 +750,9 @@ fn the_client_can_move_to_another_thread() {
 /// Asserts what the provider received for each call: the agent's host id as `Source.agent`
 /// and `SweepRequest.agent`, `js.` before every run id (in the keep list
 /// of a sweep too), the index, the ref untouched, and each mode of the wire as the protocol's
-/// mode. It catches an id sent without its prefix, a ref altered on the way, a mode mapped to
-/// another, and a call that names another source than the one asked.
+/// mode, and each prepare followed by the mount of its own source. It catches an id sent
+/// without its prefix, a ref altered on the way, a mode mapped to another, and a call that
+/// names another source than the one asked.
 #[test]
 fn the_provider_sees_the_agents_id_the_prefixed_run_the_index_the_ref_and_the_mode() {
     let mut rig = rig("pc-saw");
@@ -729,11 +777,11 @@ fn the_provider_sees_the_agents_id_the_prefixed_run_the_index_the_ref_and_the_mo
             r#ref: reference,
             mode: protocol as i32,
         }));
+        taken(&mut rig.client, NAME, &mount("run-a", index));
+        expected.push(Seen::Mount(pb::MountRequest {
+            source: source("js.run-a", index),
+        }));
     }
-    settle(&mut rig.client, NAME, &mount("run-a", 3));
-    expected.push(Seen::Mount(pb::MountRequest {
-        source: source("js.run-a", 3),
-    }));
     settle(&mut rig.client, NAME, &release("run-a", 4));
     expected.push(Seen::Release(pb::ReleaseRequest {
         source: source("js.run-a", 4),
@@ -796,7 +844,7 @@ fn a_sweep_leaves_another_agents_sources_alone() {
     let remaining: BTreeMap<_, _> = [(held_key("host-b", "js.r1", 0), "k".to_owned())].into();
     assert_eq!(fake.prepared(), remaining);
     assert_eq!(
-        settle(&mut second, NAME, &mount("r1", 0)),
+        taken(&mut second, NAME, &mount("r1", 0)),
         ProviderAnswer::Done(Some(mount_path("host-b", "js.r1", 0)))
     );
 }
