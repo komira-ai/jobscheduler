@@ -139,7 +139,8 @@ pub struct State {
     pub mismatched: Vec<OfferCooldown>,
     /// The machines whose first hello this step registered with no offer to compare it with
     /// (a record made by [`StoredOffer::nothing`](crate::StoredOffer::nothing)): the
-    /// registry held the hello to the pool's shape floor, and nothing else was judged. The
+    /// registry held the hello to the pool's capabilities only (never to its CPU, memory,
+    /// disk or GPU amounts), and nothing else was judged. The
     /// shell logs each, since it means the offer record was lost.
     pub unverified: Vec<String>,
     /// The acquires refused for `capacity` or `quota` whose answers this step took in, with

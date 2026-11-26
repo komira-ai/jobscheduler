@@ -97,8 +97,9 @@ struct RawShape {
     #[serde(default)]
     gpus: u64,
     gpu_class: Option<String>,
-    /// Bytes of scratch disk the pool books for every host and the floor a host's hello
-    /// must meet. Zero or absent books no disk. A pool that names `scratch-quota` in its
+    /// The most scratch disk the pool books for a host: a host is booked the smaller of this
+    /// and the disk it reports, and no hello is refused for reporting less. Zero or absent
+    /// books no disk. A pool that names `scratch-quota` in its
     /// capabilities must set it above zero ([`PoolConfig::checked`]).
     #[serde(default)]
     disk_bytes: u64,
@@ -473,12 +474,12 @@ mod tests {
     }
 
     /// `memory_schedulable_percent` cuts the memory of `[shape]` the pool books, rounding
-    /// down, and leaves the floor a host must meet whole; a file without it books all of
+    /// down, and leaves the memory of the shape itself whole; a file without it books all of
     /// it; 0, 101, -1, a word and 90.5 are refused naming the key; the key placed after `[shape]` is a key of
     /// that table and refused. It catches a percent read and dropped, one that cuts the
-    /// floor instead of the booking, and one that rounds up.
+    /// shape instead of the booking, and one that rounds up.
     #[test]
-    fn the_memory_percent_cuts_what_is_booked_and_not_the_floor() {
+    fn the_memory_percent_cuts_what_is_booked_and_not_the_shape() {
         let whole = parse(MINIMAL).unwrap().memory_headroom();
         assert_eq!(whole.percent(), MemoryPercent::FULL);
         assert_eq!(whole.bookable_bytes(), 8_589_934_592);

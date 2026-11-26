@@ -78,8 +78,8 @@ impl Registry {
         booked: &Shape,
         claim: Option<&Shape>,
     ) -> Option<Shape> {
-        let at = self.pool_named(pool)?;
-        let by_hello = self.pool_at(at).places_by_hello();
-        Some(placement_shape(booked, claim, by_hello))
+        let config = self.pool_at(self.pool_named(pool)?);
+        let (by_hello, percent) = (config.places_by_hello(), config.book_percent());
+        Some(placement_shape(booked, claim, by_hello, percent))
     }
 }

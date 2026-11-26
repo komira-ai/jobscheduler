@@ -1,10 +1,10 @@
-//! Admission of Mac Studio hosts by a pool's one shape: the pool's `[shape]` is both the floor
-//! every hello must meet and what the pool books for every host it admits. A pool has one
-//! shape, so its hosts cannot be booked at different sizes: a host offering more is booked at
-//! the shape, and a host offering less is refused `shape-not-accepted` (`below-floor`). A pool
-//! that every Mac joins whole is therefore shaped to fit the smallest Mac (28 cores), and a
-//! Linux guest on the Macs, which reports its own cores and memory and another `os`, joins a
-//! pool of its own with a shape that fits the guest.
+//! Admission of Mac Studio hosts by a pool's one shape: a host's capacity is what it reports,
+//! and the pool's `[shape]` is the most the pool books of any host. A host offering more is
+//! booked at the shape; a host offering less joins and is booked at what it offers. Only the
+//! capabilities are held to the pool's: a host reporting another `arch` or `os` is refused
+//! `shape-not-accepted` (`below-floor`). A Linux guest on the Macs, which reports its own
+//! cores and memory and another `os`, joins a pool of its own with a shape that fits the
+//! guest.
 
 mod support;
 
@@ -66,8 +66,7 @@ fn assert_below_floor(fx: &Fixture, hello: &Hello) {
 }
 
 /// Asserts that a Mac offering exactly the pool's shape (28000 millicores, 103079215104
-/// bytes) joins and is booked at that shape: the floor is met with nothing to spare, so a
-/// floor that turned strict (more than, not at least) would refuse it.
+/// bytes) joins and is booked at that shape, the cap and the report being equal.
 #[test]
 fn a_mac_offering_exactly_the_pool_shape_joins() {
     assert_eq!(MAC_MEMORY, 103_079_215_104);
@@ -95,47 +94,54 @@ fn a_32_core_mac_joins_and_is_booked_at_the_pool_shape() {
     assert_eq!(claim.resources().cpu_millis(), LARGE_MAC_CPU);
 }
 
-/// Asserts that a Mac offering less than the pool's shape in either dimension is refused
-/// `below-floor` and that nothing is listed: one millicore under, one byte under, both
-/// under, a whole host of fewer cores (24), and a host of more than the shape on `x86_64`
-/// where the shape names `arm64`. The refusal leaves no record: the same host id then joins
-/// when it offers the shape. The pool books its shape for every host it
-/// admits, so admitting a smaller one would book cores or memory the host does not have.
-#[test]
-fn a_mac_offering_less_than_the_pool_shape_is_refused_below_floor() {
-    let fx = fixture_of(small_mac_pool());
-    let short = [
-        mac_hello("cpu-under", SMALL_MAC_CPU - 1, MAC_MEMORY),
-        mac_hello("memory-under", SMALL_MAC_CPU, MAC_MEMORY - 1),
-        mac_hello("both-under", SMALL_MAC_CPU - 1, MAC_MEMORY - 1),
-        mac_hello("mac-24", 24_000, MAC_MEMORY),
-    ];
-    let mut other_arch = mac_hello("other-arch", LARGE_MAC_CPU, MAC_MEMORY);
-    other_arch.capabilities = map(&[("os", "macos"), ("arch", "x86_64")]);
-    for refused in short.iter().chain([&other_arch]) {
-        assert_below_floor(&fx, refused);
-    }
-    assert!(fx.registry.hosts().is_empty());
-    fx.hello(
-        &mac_hello("cpu-under", SMALL_MAC_CPU, MAC_MEMORY),
-        &cred("t"),
-    )
-    .unwrap();
-    assert_eq!(fx.registry.hosts()[0].id.as_str(), "cpu-under");
+/// The CPU and memory `fx` lists host `name` at.
+fn listed(fx: &Fixture, name: &str) -> (u64, u64) {
+    let hosts = fx.registry.hosts();
+    let view = hosts.iter().find(|host| host.id.as_str() == name).unwrap();
+    let resources = view.shape.resources();
+    (resources.cpu_millis(), resources.memory_bytes())
 }
 
-/// Asserts that a pool shaped at the largest Mac (32 cores) refuses the 28-core Mac
-/// `below-floor` and admits the 32-core one: a pool shape sized to the larger Macs leaves
-/// the smaller ones out, so a pool all the Macs join is shaped to fit the smallest.
+/// Asserts that a Mac offering less than the pool's shape joins and is booked at what it
+/// offers: one millicore under, one byte under, both under, and a whole host of fewer cores
+/// (24) are each listed at their own cores and memory. A host of more than the shape on
+/// `x86_64` where the shape names `arm64` is still refused `below-floor` and leaves no
+/// record: the architecture is a capability, not an amount. It catches a floor that still
+/// refuses a smaller host, and a booking at the pool's numbers that would book cores or
+/// memory the host does not have.
 #[test]
-fn a_pool_shaped_at_32_cores_refuses_the_28_core_mac() {
+fn a_mac_offering_less_than_the_pool_shape_joins_at_what_it_offers() {
+    let fx = fixture_of(small_mac_pool());
+    let short = [
+        ("cpu-under", SMALL_MAC_CPU - 1, MAC_MEMORY),
+        ("memory-under", SMALL_MAC_CPU, MAC_MEMORY - 1),
+        ("both-under", SMALL_MAC_CPU - 1, MAC_MEMORY - 1),
+        ("mac-24", 24_000, MAC_MEMORY),
+    ];
+    for (name, cpu, memory) in short {
+        fx.hello(&mac_hello(name, cpu, memory), &cred("t")).unwrap();
+        assert_eq!(listed(&fx, name), (cpu, memory), "{name}");
+    }
+    let mut other_arch = mac_hello("other-arch", LARGE_MAC_CPU, MAC_MEMORY);
+    other_arch.capabilities = map(&[("os", "macos"), ("arch", "x86_64")]);
+    assert_below_floor(&fx, &other_arch);
+    let hosts = fx.registry.hosts();
+    assert_eq!(hosts.len(), 4);
+    assert!(hosts.iter().all(|host| host.id.as_str() != "other-arch"));
+}
+
+/// Asserts that a pool shaped at the largest Mac (32 cores) admits both the 28-core Mac and
+/// the 32-core one, each booked at its own cores: a pool shape sized to the larger Macs no
+/// longer leaves the smaller ones out.
+#[test]
+fn a_pool_shaped_at_32_cores_admits_the_28_core_mac_at_28() {
     let fx = fixture_of(mac_pool(LARGE_MAC_CPU, MAC_MEMORY));
-    assert_below_floor(&fx, &mac_hello("mac-28", SMALL_MAC_CPU, MAC_MEMORY));
+    fx.hello(&mac_hello("mac-28", SMALL_MAC_CPU, MAC_MEMORY), &cred("t"))
+        .unwrap();
     fx.hello(&mac_hello("mac-32", LARGE_MAC_CPU, MAC_MEMORY), &cred("t"))
         .unwrap();
-    let hosts = fx.registry.hosts();
-    assert_eq!(hosts.len(), 1);
-    assert_eq!(hosts[0].id.as_str(), "mac-32");
+    assert_eq!(listed(&fx, "mac-28"), (SMALL_MAC_CPU, MAC_MEMORY));
+    assert_eq!(listed(&fx, "mac-32"), (LARGE_MAC_CPU, MAC_MEMORY));
 }
 
 /// The pool `guests`: Linux on [`ARCH`] at [`GUEST_CPU`] and [`GUEST_MEMORY`].

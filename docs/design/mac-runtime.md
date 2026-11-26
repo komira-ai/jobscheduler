@@ -92,11 +92,11 @@ os_version = "26"
 
 - The floor only admits. Each Mac is placed by the version its own hello reports, not by the pool's value (`placement_shape` in `crates/js-registry/src/config.rs`). So a job that asks for 27 is placed only on the two Macs on 27, and a job that asks for 26, or for no version, on all four.
 - One pool per version would add nothing to placement and would cost more:
-  - Every Mac is booked at the same shape, so the version is the only thing that would differ.
+  - Every Mac is booked at what it reports, at most the pool's shape, so a second pool would not book Macs differently; the version is the only thing that would differ.
   - A version is matched as at least, and a pool has no ceiling, so a pool for 26 would still admit a Mac on 27. It could not hold its hosts to 26.
   - Each extra pool needs its own join tokens and the same `memory_schedulable_percent`.
   - A Mac names its pool in its flags, so each macOS update would also move the Mac to another pool.
-- 26 is the least version on the farm. The macOS runtime has been built and tested on 26.4, 26.6 and 27.0.1 only. A Mac below 26, or one whose hello reports no version (its probe failed, or its agent predates the report), is refused at its hello with `shape-not-accepted`, reason `below-floor`. That refusal shows in the agent's log, which is better than a Mac that joins and quietly serves only the jobs that ask for no version.
+- 26 is the least version on the farm. The macOS runtime has been built and tested on 26.4, 26.6 and 27.0.1 only. A Mac below 26, or one whose hello reports no version (its probe failed, or its agent predates the report), is refused at its hello with `shape-not-accepted`, reason `below-floor`. That refusal shows in the agent's log, which is better than a Mac that joins and quietly serves only the jobs that ask for no version. This floor is the `os_version` capability of the pool's `[capabilities]`, a version and not an amount, and it stays: a Mac is never refused for reporting fewer cores or less memory than the pool's `[shape]`, and is booked at what it reports.
 - Minor versions are not placed. 26.4 and 26.6 are the same version to the scheduler, and a job cannot ask for 26.6. No job needs that today.
 - Raising the floor, once every Mac runs 27, is an edit of this value in the pool file, made after the Macs are updated. A Mac still below the new floor is refused at its next hello.
 

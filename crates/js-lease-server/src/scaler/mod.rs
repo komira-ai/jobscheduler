@@ -597,7 +597,7 @@ impl Core {
             log_mismatch(cooled);
         }
         for name in &next.unverified {
-            warn!(host = %name, "no offer record was found for the machine; its hello was checked against the pool's shape floor only");
+            warn!(host = %name, "no offer record was found for the machine; its hello was checked against the pool's capabilities only");
         }
         let pending = (&memory.unrevoked, &memory.unremoved);
         let found = alert::alerts((next, input), now, &self.settings, pending);

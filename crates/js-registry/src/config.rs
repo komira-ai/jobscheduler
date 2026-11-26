@@ -8,7 +8,7 @@ use js_caps::{SCRATCH_DEFAULT_GIB, SCRATCH_QUOTA, SCRATCH_QUOTA_PROJECT};
 use js_provider::HostBook;
 use js_types::{
     ACCEL_KEYS, Admission, ExecMode, HostId, MemoryHeadroom, MemoryPercent, OS_VERSION_KEY,
-    ProviderId, ResourceClass, Shape,
+    ProviderId, ResourceClass, Resources, Shape,
 };
 
 use crate::WholeNodeConfig;
@@ -67,7 +67,7 @@ pub struct PoolConfig {
     /// [`PoolConfig::booking_whole_memory`], where it keeps the memory cut.
     fit: Shape,
     memory_percent: MemoryPercent,
-    /// The book takes the whole memory of `shape`; the percent is the placer's rule.
+    /// The book takes the whole memory of each host; the percent is the placer's rule.
     whole_memory: bool,
     max_machines: usize,
     heartbeat_interval_ms: u64,
@@ -83,14 +83,17 @@ pub struct PoolConfig {
 
 impl PoolConfig {
     /// A pool called `name` of hosts of `class`, holds at most `max_machines` hosts, and
-    /// books every host as `shape`.
+    /// books every host at most as `shape`.
     ///
-    /// `shape` is both the floor a host's claim must meet to join and, cut to the pool's
-    /// [`memory percent`](PoolConfig::with_memory_percent) (all of it unless set), the
-    /// shape the pool books: a job is placed and sized against the booked shape, never
-    /// against what a host says about itself, so a host that claims more than the pool
-    /// promises gains nothing. Its `disk_bytes` is both floor and booking, uncut. Timing
-    /// starts at the wire defaults, and a lost host that holds no
+    /// A host's capacity is what it reports. `shape` is no floor: a host that reports less
+    /// CPU, memory, disk or GPUs than `shape` joins all the same, and its capabilities alone
+    /// are held to the pool's. Each count of `shape` is the most the pool books of a host,
+    /// so a host is booked on each of CPU, memory, GPUs and disk at the smaller of what it
+    /// reports and what `shape` says, memory then cut to the pool's
+    /// [`memory percent`](PoolConfig::with_memory_percent) (all of it unless set): a host
+    /// that reports more than the pool promises gains nothing, and one that reports less is
+    /// booked at what it has. A host that has reported nothing since a restart is booked
+    /// at `shape`. Timing starts at the wire defaults, and a lost host that holds no
     /// booking is kept for [`DEFAULT_LOST_RETENTION_MS`].
     pub fn new(name: ProviderId, class: ResourceClass, shape: Shape, max_machines: usize) -> Self {
         Self {
@@ -174,7 +177,8 @@ impl PoolConfig {
 
     /// The same pool requiring the host contract of `exec`: a host is admitted only if
     /// it reports `runtime` equal to `exec` (and `exec`, when it reports one, equal to it),
-    /// and, in a pool whose shape has GPUs, a working `gpu-toolkit` (see
+    /// and, when the host is booked GPUs (the pool's shape has GPUs and the host reports
+    /// some), a working `gpu-toolkit` (see
     /// [`js_caps::HostContract`]). A host that does not is refused `host-contract` or
     /// `execution-mismatch` before its shape is compared.
     ///
@@ -195,13 +199,12 @@ impl PoolConfig {
         self
     }
 
-    /// The same pool booking `percent` of the memory of its shape, rounded down, for
-    /// every host: a job is placed and sized against the cut memory. A host's hello is still
-    /// held to the whole shape, so a host must really have the memory the pool lists; the pool
-    /// books less of it.
+    /// The same pool booking `percent` of the memory of each host, rounded down: of the
+    /// smaller of the memory the host reports and the memory of the pool's shape. A job is
+    /// placed and sized against the cut memory. A hello is not held to any memory.
     ///
-    /// The cut is made here and nowhere else, on the memory the operator configured, and
-    /// never on what a host claims.
+    /// The percent is set here and nowhere else; the registry applies it to each host as
+    /// it is listed.
     #[must_use]
     pub fn with_memory_percent(mut self, percent: MemoryPercent) -> Self {
         self.memory_percent = percent;
@@ -209,11 +212,12 @@ impl PoolConfig {
         self
     }
 
-    /// The same pool, whose book takes the whole memory of `[shape]` though the pool keeps
-    /// its memory percent: for a placer that holds every host to the percent itself (the
-    /// engine the server places with). The host listing ([`crate::Registry::hosts`]) still
-    /// shows each host's shape cut to the percent beside the memory headroom
-    /// ([`PoolConfig::memory_headroom`]); only the shape the book lists is the whole memory.
+    /// The same pool, whose book takes each host's whole memory (the smaller of what it
+    /// reports and the memory of `[shape]`) though the pool keeps its memory percent: for a
+    /// placer that holds every host to the percent itself (the engine the server places
+    /// with). The host listing ([`crate::Registry::hosts`]) still shows each host's shape
+    /// cut to the percent beside its memory headroom; only the shape the book lists is the
+    /// whole memory.
     #[must_use]
     pub fn booking_whole_memory(mut self) -> Self {
         self.whole_memory = true;
@@ -221,15 +225,15 @@ impl PoolConfig {
         self
     }
 
-    /// The same pool, whose shape is a floor every host meets rather than what each host
-    /// is: each host is placed on the pool's booked shape with the capabilities its last
+    /// The same pool, whose capabilities are what every host meets rather than what each
+    /// host is: each host is placed on the shape it is booked at with the capabilities its last
     /// hello reported added, `arch` included, where the pool's shape does not name them
     /// (the pool's value stays where both name a key), and with the hello's
     /// `accelerator.*` facts as for any pool. A job's capabilities the pool's shape does
     /// not name are then the hosts' to meet, by what their hellos reported. For a pool whose hosts are launched from offers that may differ, such as in
-    /// `arch` (an elastic pool of the server). The numbers booked are still the pool's.
-    /// Without it a host is placed on the pool's shape with only the hello's
-    /// `accelerator.*` facts.
+    /// `arch` (an elastic pool of the server). The numbers booked are the same either way.
+    /// Without it a host is placed on the pool's capabilities with only the hello's
+    /// `accelerator.*` and `os_version` facts.
     #[must_use]
     pub fn placing_by_hello(mut self) -> Self {
         self.by_hello = true;
@@ -267,11 +271,30 @@ impl PoolConfig {
         self.memory_percent
     }
 
-    /// The memory the pool lists for a host, the percent of it that is booked and what
-    /// that comes to.
+    /// The memory of the pool's shape, the percent of it that is booked and what that
+    /// comes to: the headroom of a host that reports that memory or more, and of a host
+    /// that has reported nothing since a restart.
     pub fn memory_headroom(&self) -> MemoryHeadroom {
         let configured = self.shape.resources().memory_bytes();
         MemoryHeadroom::new(configured, self.memory_percent)
+    }
+
+    /// The memory headroom of a host whose last hello claimed `claim`: the smaller of the
+    /// memory it reports and the memory of the pool's shape, at the pool's percent. With no
+    /// claim, the pool's ([`Self::memory_headroom`]).
+    pub(crate) fn headroom_of(&self, claim: Option<&Shape>) -> MemoryHeadroom {
+        let configured = self.shape.resources().memory_bytes();
+        let reported = claim.map_or(configured, |claim| claim.resources().memory_bytes());
+        MemoryHeadroom::new(configured.min(reported), self.memory_percent)
+    }
+
+    /// The percent of each host's memory the book lists: all of it with
+    /// [`Self::booking_whole_memory`], else the pool's memory percent.
+    pub(crate) fn book_percent(&self) -> MemoryPercent {
+        match self.whole_memory {
+            true => MemoryPercent::FULL,
+            false => self.memory_percent,
+        }
     }
 
     /// The execution mode the pool's hosts must run jobs in, when the pool declares one.
@@ -346,15 +369,19 @@ impl PoolConfig {
         &self.name
     }
 
-    /// The shape the pool books for every host of it.
+    /// The pool's `[shape]`: the most it books of any host, and what it books of a host that
+    /// has reported nothing since a restart. It is no floor a hello must meet.
     pub fn shape(&self) -> &Shape {
         &self.shape
     }
 
-    /// The shape a request must fit to fit the pool: the shape every host is booked as, with
-    /// its memory cut to the percent even with [`Self::booking_whole_memory`].
-    pub(crate) fn fit(&self) -> &Shape {
-        &self.fit
+    /// What may be booked on a host whose last hello claimed `claim`, with its memory cut
+    /// to the percent even with [`Self::booking_whole_memory`]: the fit shape with each
+    /// count capped by the claim's ([`capped`]), the pool's capabilities unchanged. With no
+    /// claim, the fit shape.
+    pub(crate) fn fit_of(&self, claim: Option<&Shape>) -> Shape {
+        let resources = capped(self.fit.resources(), claim, self.memory_percent);
+        Shape::new(resources, self.fit.capabilities().clone())
     }
 
     /// Lists `host` in `book`, free, as the pool books it.
@@ -362,17 +389,18 @@ impl PoolConfig {
         book.insert_host_with(host, self.booked.clone(), self.memory_headroom());
     }
 
-    /// Lists `host` in `book` for a hello whose accepted `claim` is known. The host books
-    /// as the pool does (the pool's numbers are the booking limits), but its
+    /// Lists `host` in `book` for a hello whose accepted `claim` is known. The host is
+    /// booked at what it reports, capped by the pool's numbers ([`placement_shape`]): on
+    /// each of CPU, memory, GPUs and disk the smaller of the claim's and the pool's, and its
     /// `accelerator.*` capabilities are those of the claim, which a hello validated, and
-    /// not the pool floor's, so placement sees the host's real family, variant facts and
+    /// not the pool's, so placement sees the host's real family, variant facts and
     /// measured memory; in a pool that places by hello ([`Self::placing_by_hello`]) the
     /// claim's other capabilities the pool's shape does not name are added too. A host
-    /// already listed is listed again with that shape.
+    /// already listed and free is listed again with that shape.
     pub(crate) fn list_claimed(&self, book: &mut HostBook, host: HostId, claim: Option<&Shape>) {
-        let shape = placement_shape(&self.booked, claim, self.by_hello);
+        let shape = placement_shape(&self.booked, claim, self.by_hello, self.book_percent());
         book.remove_free(&host);
-        book.insert_host_with(host, shape, self.memory_headroom());
+        book.insert_host_with(host, shape, self.headroom_of(claim));
     }
 
     pub(crate) fn max_machines(&self) -> usize {
@@ -391,17 +419,38 @@ impl PoolConfig {
         self.lost_retention_ms
     }
 }
-/// The shape a registered host is placed on: the resources and capabilities the pool books
-/// (`booked`), with its `accelerator.*` capabilities replaced by those of the host's
-/// validated claim, so its real family, variant facts and measured memory are matched while
-/// the pool's numbers stay the booking limits. With `by_hello`
+/// `resources`, the pool's numbers, with each count capped by the host's `claim`
+/// ([`Resources::capped_by`]), the claim's memory first cut to `percent`: what a host that
+/// reported `claim` is booked at. With no claim, `resources`.
+pub(crate) fn capped(
+    resources: &Resources,
+    claim: Option<&Shape>,
+    percent: MemoryPercent,
+) -> Resources {
+    claim.map_or_else(
+        || resources.clone(),
+        |claim| resources.capped_by(&claim.resources().with_memory_percent(percent)),
+    )
+}
+
+/// The shape a registered host is placed on: the resources the pool books (`booked`) capped
+/// by the host's validated claim ([`capped`], the claim's memory cut to `percent`, the share
+/// `booked` lists), so a host is booked at what it reports and at most at the pool's
+/// numbers; and the capabilities `booked` names, with its `accelerator.*` capabilities
+/// replaced by those of the claim, so its real family, variant facts and measured memory
+/// are matched. With `by_hello`
 /// ([`PoolConfig::placing_by_hello`]) the claim's other capabilities are added where
 /// `booked` does not name them; where both name one, the pool's value stays. The claim's
 /// `os_version` ([`OS_VERSION_KEY`]) replaces the pool's in every pool, as the accelerator
 /// facts do: the pool's value is a least version the claim met when the host joined
 /// (`os_version` is matched as at least), so a host is placed by the version it runs. A host
 /// without a claim keeps the pool's.
-pub(crate) fn placement_shape(booked: &Shape, claim: Option<&Shape>, by_hello: bool) -> Shape {
+pub(crate) fn placement_shape(
+    booked: &Shape,
+    claim: Option<&Shape>,
+    by_hello: bool,
+    percent: MemoryPercent,
+) -> Shape {
     let is_accel = |key: &String| ACCEL_KEYS.contains(&key.as_str());
     let replaced = |key: &String| is_accel(key) || key == OS_VERSION_KEY;
     let mut capabilities = booked.capabilities().clone();
@@ -415,7 +464,7 @@ pub(crate) fn placement_shape(booked: &Shape, claim: Option<&Shape>, by_hello: b
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
     capabilities.extend(added);
-    Shape::new(booked.resources().clone(), capabilities)
+    Shape::new(capped(booked.resources(), claim, percent), capabilities)
 }
 
 /// The quota in bytes a host enforces on a run that sets no `disk_bytes`: its

@@ -109,32 +109,46 @@ impl Registry {
         if live {
             return Err(Refusal::HostLive);
         }
-        let floor = config.shape();
+        let pool_shape = config.shape();
+        let claim = hello.to_shape().ok();
+        // A host's capacity is what it reports: it is booked at what its claim says, capped
+        // by the pool's numbers, and never refused for reporting less CPU, memory, disk or
+        // GPUs than the pool's shape. A shape that cannot be read books nothing and is
+        // refused below.
+        let booked = claim
+            .as_ref()
+            .map(|claim| pool_shape.resources().capped_by(claim.resources()));
+        let booked_gpus = booked.as_ref().map_or(0, |booked| booked.gpus());
         if let Some(exec) = config.exec() {
-            let contract = HostContract::new(exec, floor.resources().gpus() > 0);
+            let contract = HostContract::new(exec, booked_gpus > 0);
             contract.check(&hello.capabilities)?;
         }
-        let claim = hello.to_shape().ok();
-        let offers_floor = claim
+        // What is compared is what the host would be booked at, which it always holds:
+        // only the kinds can fail, the GPU class (and the accelerator model it names) of
+        // the GPUs it is booked, and the pool's capabilities.
+        let meets_pool = claim
             .as_ref()
-            .is_some_and(|claim| claim.satisfies(floor.resources(), floor.capabilities()));
-        if !offers_floor {
+            .zip(booked.as_ref())
+            .is_some_and(|(claim, booked)| claim.satisfies(booked, pool_shape.capabilities()));
+        if !meets_pool {
             return Err(Refusal::ShapeNotAccepted(ShapeFault::BelowFloor));
         }
         // A pool that names `scratch-quota` books a default for every job without disk, so
-        // a host must report one that counts and fits the pool's disk: otherwise its jobs
-        // without disk would book nothing, or never fit.
-        let quota_pool = floor.capabilities().contains_key(SCRATCH_QUOTA);
+        // a host must report one that counts and fits the disk it is booked at: otherwise
+        // its jobs without disk would book nothing, or never fit.
+        let booked_disk = booked.as_ref().map_or(0, |booked| booked.disk_bytes());
+        let quota_pool = pool_shape.capabilities().contains_key(SCRATCH_QUOTA);
         let default = quota_default(&hello.capabilities);
-        let fits = default.is_some_and(|bytes| bytes <= floor.resources().disk_bytes());
+        let fits = default.is_some_and(|bytes| bytes <= booked_disk);
         if [quota_pool, !fits].into_iter().all(|ok| ok) {
             return Err(Refusal::ShapeNotAccepted(ShapeFault::QuotaDefaultUnfit));
         }
         // A host that enforces a quota books a default for every job without disk, so a
-        // pool that books no disk (and does not name `scratch-quota`) would count 0 for
-        // jobs the host counts at its default, and the server would admit what the agent
-        // refuses. Such a host is refused rather than booked wrongly.
-        let books_no_disk = floor.resources().disk_bytes() == 0;
+        // host booked no disk (the pool books none, or the host reports none) in a pool
+        // that does not name `scratch-quota` would count 0 for jobs the host counts at its
+        // default, and the server would admit what the agent refuses. Such a host is
+        // refused rather than booked wrongly.
+        let books_no_disk = booked_disk == 0;
         if [!quota_pool, books_no_disk, default.is_some()]
             .into_iter()
             .all(|ok| ok)

@@ -31,7 +31,7 @@
 //! not among [`DETECTED_KEYS`]: [`is_mount_provider_key`] says whether a key is one.
 //!
 //! A pool that declares an execution mode makes a [`HostContract`] of it: `runtime` must
-//! equal the mode, and a pool with GPUs also needs `gpu-toolkit`. The check is
+//! equal the mode, and a host booked GPUs also needs `gpu-toolkit`. The check is
 //! [`HostContract::check`]; it answers with the [`Breach`] that decides which refusal
 //! the registry sends. Keys missing from a report are never filled in: an agent that
 //! predates the contract reports none of them.

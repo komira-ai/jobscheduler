@@ -18,8 +18,9 @@ use js_types::{HostId, Shape};
 /// own conversions. That crate depends on this one, so the registry cannot name that placer;
 /// it can only hold something the server hands it, which is this seam.
 pub trait Placer: Send + Sync {
-    /// `host` said hello and is listed, booked as `shape`, the pool's shape: a new host,
-    /// or one that comes back. Told under the registry's lock. The default does nothing.
+    /// `host` said hello and is listed, booked as `shape`: what the host reported, capped by
+    /// the pool's shape (the pool's shape for a host that reported nothing), with the
+    /// capabilities it is placed by. A new host, or one that comes back. Told under the registry's lock. The default does nothing.
     fn host_up(&self, host: &HostId, shape: &Shape) {
         let _ = (host, shape);
     }

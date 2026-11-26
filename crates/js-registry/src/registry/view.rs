@@ -10,15 +10,16 @@ use super::{HostState, HostView, Registry, State};
 use crate::config::placement_shape;
 
 impl HostView {
-    /// The shape the registry places the host on: the pool's booked [`Self::shape`], with
-    /// the `accelerator.*` capabilities of the host's validated [`Self::claim`] in place of
-    /// the pool's, so its real family, variant facts and measured memory are matched while
-    /// the pool's numbers stay the booking limits; with [`Self::by_hello`], also with the
-    /// claim's other capabilities that [`Self::shape`] does not name. Admission reads a
-    /// host's facts from it.
+    /// The shape the registry places the host on: [`Self::shape`], what the host is booked
+    /// at (what it reports, capped by the pool's numbers), with the `accelerator.*`
+    /// capabilities of the host's validated [`Self::claim`] in place of the pool's, so its
+    /// real family, variant facts and measured memory are matched; with
+    /// [`Self::by_hello`], also with the claim's other capabilities that [`Self::shape`]
+    /// does not name. Admission reads a host's facts from it.
     #[must_use]
     pub fn placement_shape(&self) -> Shape {
-        placement_shape(&self.shape, self.claim.as_ref(), self.by_hello)
+        let percent = self.memory.percent();
+        placement_shape(&self.shape, self.claim.as_ref(), self.by_hello, percent)
     }
 }
 
@@ -46,7 +47,8 @@ impl Registry {
     }
 
     /// The listing's view of one host, given the parts of the state that it reads: the
-    /// shape, the memory and the timing are those of the host's pool.
+    /// shape and the memory are what the host reported capped by its pool's, and the timing
+    /// is its pool's.
     pub(super) fn viewer(&self, now: Timestamp) -> impl Fn(&HostId, &Record) -> HostView + '_ {
         move |id, record| {
             let pool = self.pool_of(record);
@@ -66,8 +68,8 @@ impl Registry {
                 phase: record.phase,
                 lease: None,
                 leases: Vec::new(),
-                shape: pool.fit().clone(),
-                memory: pool.memory_headroom(),
+                shape: pool.fit_of(record.claim.as_ref()),
+                memory: pool.headroom_of(record.claim.as_ref()),
                 claim: record.claim.clone(),
                 by_hello: pool.places_by_hello(),
                 labels: record.labels.clone(),

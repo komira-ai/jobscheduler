@@ -292,7 +292,7 @@ fn placed_in(
     let limits = limits_of(largest.0, largest.1);
     // The scheduler picks the host of a start, and books the share of each host's
     // memory the pool's percent says (every pool's is the first's: `check_more`); the
-    // registry books the whole shape.
+    // registry books each host's whole booked memory.
     let (pool, memory) = split(pool);
     let placer = placer(max_lease_wall, load, (memory, cold, curves), cold_on, clock);
     let (later, more_tokens): (Vec<_>, Vec<_>) = more

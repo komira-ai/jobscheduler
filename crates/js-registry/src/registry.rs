@@ -60,16 +60,19 @@ pub struct HostView {
     /// Every lease booked on the host. Always empty: no lease is booked on a host any
     /// more.
     pub leases: Vec<LeaseId>,
-    /// The shape the pool books for the host (not the host's own claim), with its memory
-    /// cut to the pool's memory percent: what may be booked on it, also for a pool whose
-    /// placer keeps the percent ([`crate::PoolConfig::booking_whole_memory`]).
+    /// What the host is booked at, with its memory cut to the pool's memory percent: on
+    /// each of CPU, memory, GPUs and disk the smaller of what its `claim` reports and the
+    /// pool's shape (the pool's shape for a host with no claim), and the pool's
+    /// capabilities. It is what may be booked on it, also for a pool whose placer keeps
+    /// the percent ([`crate::PoolConfig::booking_whole_memory`]).
     pub shape: Shape,
-    /// The memory the pool lists for the host, the percent of it that may be booked and
-    /// what that comes to (the memory of `shape`).
+    /// The memory the host is booked at before the cut (the smaller of what it reports and
+    /// the pool's shape), the percent of it that may be booked and what that comes to (the
+    /// memory of `shape`).
     pub memory: MemoryHeadroom,
-    /// The shape the host announced at its last hello, which the registry checked against
-    /// the pool's floor; `None` for a host that has not said hello since a restart. A
-    /// scaler compares it with the machine it launched.
+    /// The shape the host announced at its last hello, whose capabilities the registry
+    /// checked against the pool's; `None` for a host that has not said hello since a
+    /// restart. A scaler compares it with the machine it launched.
     pub claim: Option<Shape>,
     /// Whether the host is placed by the capabilities of `claim` the pool's shape does not
     /// name as well ([`crate::PoolConfig::placing_by_hello`]); see
@@ -375,7 +378,10 @@ impl Registry {
     /// to another instance when its binding names one; the host id is not live; when
     /// the pool declares an execution mode ([`PoolConfig::with_exec`]), the host meets its
     /// contract ([`Refusal::HostContract`] and [`Refusal::ExecutionMismatch`] name the
-    /// capability at fault); the shape claimed offers at least the pool's shape; the pool has room for a host it
+    /// capability at fault); the shape claimed meets the pool's capabilities and GPU class
+    /// (`shape-not-accepted`, `below-floor`; the CPU, memory, disk and GPUs it reports are
+    /// not compared with the pool's shape: the host is booked at what it reports, capped by
+    /// the pool's numbers), and a scratch-quota default fits the disk it is booked at; the pool has room for a host it
     /// does not know (its own hosts only; hosts forgotten after the lost-host retention do
     /// not count); a
     /// session secret can be made. A
@@ -403,10 +409,11 @@ impl Registry {
     /// credentials (design D18) close it; there is no per-credential cap here.
     ///
     /// A pool that names `scratch-quota` also refuses (`shape-not-accepted`) a host whose
-    /// quota default does not count (see `quota_default`) or is more than the pool's disk.
-    /// A pool that books no disk and does not name `scratch-quota` refuses (also
-    /// `shape-not-accepted`) a host that reports a quota with a default that counts: the
-    /// pool would book nothing for jobs the host books at its default.
+    /// quota default does not count (see `quota_default`) or is more than the disk the host
+    /// is booked at (the smaller of the disk it reports and the pool's). A pool that does
+    /// not name `scratch-quota` refuses (also `shape-not-accepted`) a host booked no disk
+    /// (the pool books none, or the host reports none) that reports a quota with a default
+    /// that counts: the pool would book nothing for jobs the host books at its default.
     ///
     /// The runs a hello lists as held (the previous release's lease protocol) are never
     /// adopted: each is answered with a cancel in the host's next heartbeat reply (a

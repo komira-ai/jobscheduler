@@ -222,7 +222,7 @@ fn the_cooldown_survives_a_restart_and_expires_on_the_clock() {
 
 /// Asserts the two cases that judge nothing, kept apart. A booting record made by
 /// `StoredOffer::nothing` (the offer record was lost) whose hello is far below the offer
-/// the machine was launched for (it got past the registry's shape floor) is registered, not
+/// the machine was launched for (the registry compares no amounts) is registered, not
 /// condemned, cools nothing down, counts no failure, and is named as unverified for the
 /// shell to log. A booting record with a recorded offer whose host's shape is not known
 /// since a restart is registered and not condemned either, and is not named unverified: its

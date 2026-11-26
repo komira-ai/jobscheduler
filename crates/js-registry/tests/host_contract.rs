@@ -1,5 +1,5 @@
 //! The host contract at admission: a pool that declares an execution mode admits only a
-//! host that reports a runtime of that mode (and a toolkit, in a pool with GPUs), and a
+//! host that reports a runtime of that mode (and a toolkit, on a host booked GPUs), and a
 //! pool that declares none admits hosts as before.
 
 mod support;
@@ -115,20 +115,51 @@ fn a_gpu_pool_needs_the_toolkit() {
     assert!(fx.hello(&whole, &cred("t")).is_ok());
 }
 
-/// Asserts that the contract is checked before the shape: a host that is too small and
-/// has no runtime is told about the runtime, the thing an operator fixes first. It
-/// catches the two refusals swapped.
+/// Asserts that a host of a GPU pool that reports no GPU (one that lost its card, say)
+/// joins without the toolkit and is booked no GPU, while a host reporting a GPU still needs
+/// the toolkit: the toolkit is needed by the GPUs a host is booked, and a host is booked
+/// the GPUs it reports. It catches a contract held to the pool's GPU count, which would
+/// keep out a host that has nothing for the toolkit to reach.
+#[test]
+fn a_host_reporting_no_gpu_needs_no_toolkit() {
+    let fx = gpu_pool();
+    let runtime = [("runtime", "container"), ("exec", "container")];
+    fx.hello(&reporting("no-gpu", &runtime), &cred("t"))
+        .unwrap();
+    let listed = fx.registry.hosts();
+    assert_eq!(listed[0].shape.resources().gpus(), 0);
+    assert_eq!(listed[0].shape.resources().gpu_class(), None);
+    let refused = fx
+        .registry
+        .hello(&gpu_reporting("gpu", &runtime), &cred("t"))
+        .unwrap_err();
+    assert_eq!(
+        refused,
+        Refusal::HostContract {
+            field: "gpu-toolkit"
+        }
+    );
+}
+
+/// Asserts that the contract is checked before the shape: a host that reports another `os`
+/// than the pool's and has no runtime is told about the runtime, the thing an operator fixes
+/// first, and once it reports the runtime it is told about the `os`. A host that is small
+/// (100 millicores of the pool's 4000) and meets the contract joins: its size is not
+/// compared. It catches the two refusals swapped.
 #[test]
 fn the_contract_is_checked_before_the_shape() {
     let fx = pool(ExecMode::Container);
-    let mut small = hello("small");
-    small.shape.cpu_millis = 100;
-    let refused = fx.registry.hello(&small, &cred("t")).unwrap_err();
+    let mut linux = hello("linux");
+    linux.capabilities.insert("os".into(), "linux".into());
+    let refused = fx.registry.hello(&linux, &cred("t")).unwrap_err();
     assert_eq!(refused, Refusal::HostContract { field: "runtime" });
+    let mut linux = reporting("linux", &[("runtime", "container")]);
+    linux.capabilities.insert("os".into(), "linux".into());
+    let refused = fx.registry.hello(&linux, &cred("t")).unwrap_err();
+    assert_eq!(refused, Refusal::ShapeNotAccepted(ShapeFault::BelowFloor));
     let mut small = reporting("small", &[("runtime", "container")]);
     small.shape.cpu_millis = 100;
-    let refused = fx.registry.hello(&small, &cred("t")).unwrap_err();
-    assert_eq!(refused, Refusal::ShapeNotAccepted(ShapeFault::BelowFloor));
+    assert!(fx.hello(&small, &cred("t")).is_ok());
 }
 
 /// Asserts the compatibility of a pool that declares no mode: it admits an agent that

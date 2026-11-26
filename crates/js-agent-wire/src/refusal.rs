@@ -140,16 +140,20 @@ pub const INVALID_DISPATCH: &str = "invalid-dispatch";
 pub const INVALID_REPLY: &str = "invalid-reply";
 /// A hello naming a pool this server does not serve.
 pub const UNKNOWN_POOL: &str = "unknown-pool";
-/// A hello whose shape does not offer what the pool's shape promises.
+/// A hello whose shape the pool does not accept: its `reason` says why.
 pub const SHAPE_NOT_ACCEPTED: &str = "shape-not-accepted";
-/// The `reason` of a `shape-not-accepted` refusal when the host's claimed shape does not
-/// satisfy the pool's floor: resources, labels or capabilities.
+/// The `reason` of a `shape-not-accepted` refusal when the host's capabilities or labels do
+/// not meet the pool's, or its GPUs are of another class. Never sent for the CPU, memory,
+/// disk or GPUs a host reports: a host is booked at what it reports. A server that refused a
+/// smaller host for this reason before keeps the same text for the refusals it still makes.
 pub const SHAPE_BELOW_FLOOR: &str = "below-floor";
 /// The `reason` of a `shape-not-accepted` refusal when the pool names `scratch-quota` and
-/// the host's scratch quota default is absent, does not count, or exceeds the pool's disk.
+/// the host's scratch quota default is absent, does not count, or exceeds the disk the host
+/// is booked at (the smaller of the disk it reports and the pool's).
 pub const SHAPE_QUOTA_DEFAULT: &str = "quota-default-unfit";
 /// The `reason` of a `shape-not-accepted` refusal when the host enforces a scratch quota
-/// and the pool books no disk and does not name `scratch-quota`.
+/// and is booked no disk (the pool books none, or the host reports none), in a pool that
+/// does not name `scratch-quota`.
 pub const SHAPE_QUOTA_WITHOUT_DISK: &str = "quota-without-pool-disk";
 /// A hello from a new host id while the pool already holds as many hosts as it allows.
 pub const POOL_FULL: &str = "pool-full";
@@ -159,7 +163,7 @@ pub const HOST_BOUND: &str = "host-bound";
 /// absent, or not the one issued. Nothing about the host changes.
 pub const SESSION_MISMATCH: &str = "session-mismatch";
 /// A hello from a host that lacks what the pool requires of every host: no `runtime`
-/// capability, or no `gpu-toolkit` in a pool with GPUs. The refusal's `field` names the
+/// capability, or no `gpu-toolkit` on a host booked GPUs. The refusal's `field` names the
 /// capability. Only the operator can change it, so the agent does not ask again.
 pub const HOST_CONTRACT: &str = "host-contract";
 /// A hello from a host that reports another execution mode than the pool's `exec`: its

@@ -4,8 +4,7 @@ mod support;
 
 use std::sync::{Arc, Mutex};
 
-use js_agent_wire::refusal;
-use js_registry::{Placer, PoolConfig, Refusal, ShapeFault};
+use js_registry::{Placer, PoolConfig};
 use js_types::{ExecMode, HostId, MemoryPercent, Shape};
 use support::*;
 
@@ -84,28 +83,31 @@ fn a_larger_claim_never_raises_what_is_listed() {
     assert_eq!(view.memory.bookable_bytes(), NINETY);
 }
 
-/// Asserts that the hello is held to the whole listed memory, not the cut: a host that
-/// claims the cut memory (one byte under the listing) is refused `shape-not-accepted`
-/// and a host that claims exactly the listing joins. The host must really have the
-/// memory; the pool books less of it.
+/// Asserts that a hello is held to no memory: a host that reports less than the pool lists
+/// joins, and the percent is applied to what it reports. A host reporting the cut (90
+/// percent of the listing) is booked 90 percent of that, one reporting one byte under the
+/// listing is booked 90 percent of it, and one reporting exactly the listing is booked the
+/// pool's cut; the placer is told each host's whole reported memory, which it cuts itself.
+/// It catches a floor that still refuses the smaller hosts, a booking of memory the host
+/// does not have, and a percent applied to the pool's memory rather than the host's.
 #[test]
-fn a_hello_is_held_to_the_unreduced_memory() {
-    let fx = fixture_of(ninety());
-    let mut short = hello("short");
-    short.shape.memory_bytes = NINETY;
-    let refused = fx.registry.hello(&short, &cred("t")).unwrap_err();
-    assert_eq!(refused, Refusal::ShapeNotAccepted(ShapeFault::BelowFloor));
-    assert_eq!(refused.code(), refusal::SHAPE_NOT_ACCEPTED);
-    let mut under = hello("under");
-    under.shape.memory_bytes = LISTED - 1;
-    assert_eq!(
-        fx.registry.hello(&under, &cred("t")).unwrap_err(),
-        Refusal::ShapeNotAccepted(ShapeFault::BelowFloor)
-    );
-    let mut exact = hello("exact");
-    exact.shape.memory_bytes = LISTED;
-    assert!(fx.hello(&exact, &cred("t")).is_ok());
-    assert_eq!(fx.registry.hosts().len(), 1);
+fn a_hello_reporting_less_memory_is_booked_the_percent_of_it() {
+    let told = Arc::new(Told::default());
+    let fx = with_placer(ninety(), told.clone());
+    let cases = [("short", NINETY), ("under", LISTED - 1), ("exact", LISTED)];
+    for (name, memory) in cases {
+        let mut claim = hello(name);
+        claim.shape.memory_bytes = memory;
+        fx.hello(&claim, &cred("t")).unwrap();
+        let hosts = fx.registry.hosts();
+        let view = hosts.iter().find(|view| view.id.as_str() == name).unwrap();
+        assert_eq!(view.memory.configured_bytes(), memory, "{name}");
+        let cut = memory * 90 / 100;
+        assert_eq!(view.memory.bookable_bytes(), cut, "{name}");
+        assert_eq!(view.shape.resources().memory_bytes(), cut, "{name}");
+    }
+    assert_eq!(*told.memory.lock().unwrap(), [NINETY, LISTED - 1, LISTED]);
+    assert_eq!(fx.registry.hosts().len(), 3);
 }
 
 /// Asserts that the registry's view lists the memory the pool lists, the percent and the

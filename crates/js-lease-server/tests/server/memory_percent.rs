@@ -113,11 +113,14 @@ async fn the_agent_pool_percent_books_the_cut_whatever_the_claim() {
     );
 }
 
-/// Asserts that a hello is held to the memory the pool file lists, not to the cut: a host
-/// that claims the cut is refused `shape-not-accepted` and one that claims the listing is
-/// admitted. The host must really have the memory; the pool books less of it.
+/// Asserts that a hello is held to no memory and that a host is booked the cut of what it
+/// reports: a host claiming 14.4 GiB (the cut) in a pool that lists 16 GiB at 90 joins, a job
+/// needing one byte more than floor(14.4 GiB x 90 / 100) is refused `no-capable-host`, one
+/// needing exactly that is admitted, and `GET /v1/hosts` shows that as the host's memory. It
+/// catches a floor that still refuses the smaller host, and a host admitted but booked the
+/// pool's cut, which would place work on memory it does not have.
 #[tokio::test]
-async fn a_hello_must_meet_the_listed_memory_not_the_cut() {
+async fn a_host_claiming_less_than_the_listing_joins_and_is_booked_the_cut_of_its_claim() {
     let h = registering("mempct_agents_floor", &ninety_pool()).await;
     let short = post(
         &h,
@@ -126,19 +129,46 @@ async fn a_hello_must_meet_the_listed_memory_not_the_cut() {
         &claiming("short-1", POOLED_NINETY),
     )
     .await;
-    assert_eq!(short.status, 403, "{}", short.body);
+    session(&short, "short-1");
+    let cut = POOLED_NINETY * 90 / 100;
     assert_eq!(
-        short.json(),
-        json!({ "error": "shape-not-accepted", "reason": "below-floor" })
+        ask(&h, "over-by-one", cut + 1).await,
+        (422, "no-capable-host".to_owned())
     );
-    let exact = post(
-        &h,
-        "/v1/agent/hello",
-        Some(JOIN),
-        &claiming("exact-1", POOLED),
-    )
-    .await;
-    session(&exact, "exact-1");
+    assert_eq!(ask(&h, "at-the-cut", cut).await, (201, "queued".to_owned()));
+    let listing = hosts(&h).await;
+    let shown = entry(&listing, "short-1");
+    assert_eq!(shown["shape"]["memory_bytes"], cut);
+    assert_eq!(
+        shown["memory"],
+        json!({
+            "configured_bytes": POOLED_NINETY,
+            "schedulable_percent": 90,
+            "bookable_bytes": cut,
+        })
+    );
+}
+
+/// Asserts that a host claiming 15 GiB in a pool whose `[shape]` lists 16 GiB (no percent)
+/// joins and is booked against 15 GiB: a job needing one byte more than 15 GiB is refused
+/// `no-capable-host` and one needing 15 GiB is admitted. It catches the `below-floor`
+/// refusal that kept such a host out, and a booking at the pool's 16 GiB.
+#[tokio::test]
+async fn a_host_claiming_less_memory_than_the_pool_is_booked_at_its_claim() {
+    let h = registering("mempct_agents_less", POOL).await;
+    let claimed = POOLED - GIB;
+    session(
+        &post(&h, "/v1/agent/hello", Some(JOIN), &claiming("a-1", claimed)).await,
+        "a-1",
+    );
+    assert_eq!(
+        ask(&h, "over-by-one", claimed + 1).await,
+        (422, "no-capable-host".to_owned())
+    );
+    assert_eq!(
+        ask(&h, "at-the-claim", claimed).await,
+        (201, "queued".to_owned())
+    );
 }
 
 /// Asserts that an agent pool file without the key books all of its shape memory, and
