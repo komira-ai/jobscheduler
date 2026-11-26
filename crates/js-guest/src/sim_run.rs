@@ -20,6 +20,7 @@ pub const POLL: Duration = Duration::from_millis(50);
 pub trait Clock {
     /// Milliseconds since some fixed moment.
     fn now_ms(&self) -> u64;
+    /// Waits for `d`; an implementation may advance a fake clock instead of blocking.
     fn sleep(&self, d: Duration);
 }
 
@@ -29,6 +30,7 @@ pub struct SystemClock {
 }
 
 impl SystemClock {
+    /// A clock whose zero is now.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -117,6 +119,7 @@ impl Capture {
 }
 
 impl<C: Clock> ProcessRunner<C> {
+    /// A runner that reads time from `clock` and starts each command with exactly `env`.
     #[must_use]
     pub fn new(clock: C, env: Vec<(String, String)>) -> Self {
         Self { clock, env }

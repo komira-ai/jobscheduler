@@ -58,7 +58,9 @@ pub trait DiagHost {
     fn run(&self, program: &str, args: &[&str]) -> Value;
     /// The real and effective user ids and group ids.
     fn ids(&self) -> Value;
+    /// Whether `path` exists.
     fn exists(&self, path: &Path) -> bool;
+    /// Waits `d`.
     fn pause(&self, d: Duration);
     /// Connects to the host on vsock `port`, sends a `log` frame named `vsock-test` and
     /// waits for the acknowledgement: whether the connection was made, whether the frame

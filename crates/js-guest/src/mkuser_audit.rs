@@ -86,12 +86,15 @@ pub struct Counts {
 /// The frame of the step: counts and how it ended, nothing else.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuditFrame {
+    /// The id of the step the audit belongs to.
     pub step: String,
+    /// How the audit ended.
     pub status: Status,
     /// The exit code of the first `log show` that did not exit 0, or 0.
     pub exit: Option<i32>,
     /// The signal that ended it, if one did.
     pub signal: Option<i32>,
+    /// What the audit counted.
     #[serde(flatten)]
     pub counts: Counts,
 }

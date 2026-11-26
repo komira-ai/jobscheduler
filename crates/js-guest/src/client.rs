@@ -9,12 +9,16 @@ use crate::wire::{
 /// What went wrong talking to the guest.
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
+    /// Reading or writing a frame failed.
     #[error(transparent)]
     Wire(#[from] WireError),
+    /// The guest refused the handshake or the request, for this reason.
     #[error("the guest refused ({reason:?}): {detail}")]
     Refused { reason: Refusal, detail: String },
+    /// The guest speaks a protocol version other than this host's.
     #[error("the guest speaks version {0}, this host {VERSION}")]
     Version(u16),
+    /// The guest sent a message that does not fit this point of the conversation.
     #[error("unexpected message from the guest: {0:?}")]
     Unexpected(GuestMsg),
 }

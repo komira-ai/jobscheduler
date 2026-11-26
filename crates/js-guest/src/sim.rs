@@ -74,6 +74,7 @@ pub const DEVICE_NAME: &str = "kbf-sim";
 /// Where the screenshot is written (a directory the console user may write; the guest side
 /// makes it).
 pub const OUT_DIR: &str = "/private/var/kbf-sim/out";
+/// Where the screenshot file is written, inside [`OUT_DIR`].
 pub const SCREENSHOT_PATH: &str = "/private/var/kbf-sim/out/screenshot.jpg";
 /// The largest screenshot sent, in bytes before base64: 4/3 of it plus the frame's JSON
 /// wrapper stays under [`MAX_BODY_BYTES`].
@@ -98,6 +99,7 @@ const SUDO: &str = "/usr/bin/sudo";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Who {
+    /// The step runs as root.
     Root,
     /// The auto-login user, in that user's session.
     User,
@@ -106,9 +108,13 @@ pub enum Who {
 /// How long a step may take: the class picks the deadline from [`Config`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Class {
+    /// A short command (select, license, list, create, screenshot, shutdown).
     Quick,
+    /// `xcodebuild -runFirstLaunch`.
     FirstLaunch,
+    /// Adding or importing a staged runtime.
     RuntimeAdd,
+    /// Booting the device and the steps that wait on it (bootstatus, install, launch).
     Boot,
     /// The UI tests.
     XcTest,
@@ -117,19 +123,28 @@ pub enum Class {
 /// A step's argument list, some of which only earlier output can give.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Argv {
+    /// An argument list known when the plan is built.
     Fixed(Vec<String>),
     /// Built from the [`State`] when the step is due.
     Late(Late),
 }
 
+/// The step whose argument list [`State::resolve`] builds from earlier output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Late {
+    /// `simctl create` of the device.
     Create,
+    /// `simctl boot` of the device.
     Boot,
+    /// `simctl bootstatus -b`, which waits until the device has booted.
     BootStatus,
+    /// `simctl install` of the staged app.
     Install,
+    /// `simctl launch` of the installed app.
     Launch,
+    /// `simctl io screenshot` to [`SCREENSHOT_PATH`].
     Screenshot,
+    /// `simctl shutdown` of the device.
     Shutdown,
     /// `xcodebuild test-without-building` of the staged `.xctestrun`.
     XcTest,
@@ -138,14 +153,18 @@ pub enum Late {
 /// One command of the run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Step {
+    /// The step's name, which is also part of its frame's name.
     pub id: String,
+    /// Who runs the step.
     pub who: Who,
+    /// Which deadline the step gets.
     pub class: Class,
     /// The steps that must have succeeded.
     pub needs: Vec<String>,
     /// The steps that must have run to an end (succeeded or failed; not skipped, timed out
     /// or unbuildable): a step that reads what a failing step leaves.
     pub ran: Vec<String>,
+    /// The step's argument list.
     pub argv: Argv,
 }
 
@@ -310,10 +329,15 @@ pub fn plan(inputs: &Inputs) -> Vec<Step> {
 /// What the run has learnt from earlier steps.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct State {
+    /// The runtime identifier chosen from `simctl list runtimes`.
     pub runtime: Option<String>,
+    /// The device type identifier chosen for the device.
     pub device_type: Option<String>,
+    /// The device id `simctl create` printed.
     pub udid: Option<String>,
+    /// The staged app's bundle identifier, read from its `Info.plist`.
     pub bundle_id: Option<String>,
+    /// The name of the `.app` directory staged in [`simpaths::APP_DIR`].
     pub app: Option<String>,
     /// The `.xctestrun` to run.
     pub xctestrun: Option<String>,
@@ -377,10 +401,15 @@ impl State {
 /// The deadlines and caps of a run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
+    /// The deadline of a [`Class::Quick`] step.
     pub quick: Duration,
+    /// The deadline of a [`Class::FirstLaunch`] step.
     pub first_launch: Duration,
+    /// The deadline of a [`Class::RuntimeAdd`] step.
     pub runtime_add: Duration,
+    /// The deadline of a [`Class::Boot`] step.
     pub boot: Duration,
+    /// The deadline of a [`Class::XcTest`] step.
     pub xctest: Duration,
     /// How long the run waits for the auto-login user, counted in [`CONSOLE_POLL`] pauses.
     pub console_wait: Duration,
@@ -394,6 +423,7 @@ pub struct Config {
 pub const CONSOLE_POLL: Duration = Duration::from_secs(1);
 
 impl Config {
+    /// The deadline of a step of `class`.
     #[must_use]
     pub fn deadline(&self, class: Class) -> Duration {
         match class {
@@ -453,40 +483,52 @@ impl From<&SimArgs> for Config {
 /// How a command ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ended {
+    /// The command exited with this status code.
     Exited(i32),
+    /// The command was ended by this signal number.
     Signaled(i32),
     /// Still running at its deadline; it was killed.
     TimedOut,
+    /// The command could not be started; the text says why.
     SpawnFailed(String),
 }
 
 /// What running a command gave.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outcome {
+    /// How the command ended.
     pub ended: Ended,
+    /// The command's stdout, at most [`MAX_CAPTURE_BYTES`] bytes.
     pub stdout: Vec<u8>,
+    /// The command's stderr, at most [`MAX_CAPTURE_BYTES`] bytes.
     pub stderr: Vec<u8>,
     /// Whether more output than [`MAX_CAPTURE_BYTES`] came and was dropped.
     pub cut: bool,
+    /// How long the command ran, in milliseconds.
     pub ms: u64,
 }
 
 /// How a command whose stdout was streamed to a sink ended (nothing is kept).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Streamed {
+    /// How the command ended.
     pub ended: Ended,
+    /// How long the command ran, in milliseconds.
     pub ms: u64,
 }
 
 /// The console user: whose session the user steps run in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsoleUser {
+    /// The user's numeric id.
     pub uid: u32,
+    /// The user's account name.
     pub name: String,
 }
 
 /// What the run asks of the guest; a fake in tests.
 pub trait SimHost {
+    /// Whether the guest process runs as root.
     fn is_root(&self) -> bool;
     /// The names of the files in [`simpaths::RUNTIME_DIR`].
     fn runtime_images(&self) -> Vec<String>;
@@ -525,6 +567,7 @@ pub trait SimHost {
     /// # Errors
     /// No connection or reply, or the host refused the frame.
     fn send(&self, port: u32, frame: &Frame) -> Result<(), SendError>;
+    /// Waits for `d` (the wait for the console user pauses with this).
     fn pause(&self, d: Duration);
     /// The regular file `path` of at most `cap` bytes (`staged.json` and the prime's record);
     /// a file that cannot be read means nothing counts as done at prime.
@@ -538,9 +581,11 @@ pub trait SimHost {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
+    /// The command ran and exited zero.
     Ok,
     /// The command ran and exited non-zero or by a signal.
     Failed,
+    /// The command was still running at its deadline and was killed.
     Timeout,
     /// The command could not be built or started, or its output was unusable.
     Error,
@@ -551,20 +596,32 @@ pub enum Status {
 /// A step frame's body.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StepFrame {
+    /// The step's name.
     pub step: String,
+    /// The step's position in the plan, counted from one.
     pub index: usize,
+    /// Who ran the step.
     pub who: Who,
+    /// How the step ended.
     pub status: Status,
     /// The argument list as the step means it (without the wrapper that enters the user's
     /// session). Empty when it could not be built.
     pub argv: Vec<String>,
+    /// The exit code, if the command exited.
     pub exit: Option<i32>,
+    /// The signal number, if a signal ended the command.
     pub signal: Option<i32>,
+    /// How long the command ran, in milliseconds.
     pub ms: u64,
+    /// The deadline the command had, in seconds.
     pub deadline_secs: u64,
+    /// The tail of the command's stdout, as text.
     pub stdout: String,
+    /// The tail of the command's stderr, as text.
     pub stderr: String,
+    /// Whether the start of stdout was cut to fit [`Config::tail_bytes`].
     pub stdout_truncated: bool,
+    /// Whether the start of stderr was cut to fit [`Config::tail_bytes`].
     pub stderr_truncated: bool,
     /// What the run took from the output, or why the step is an error.
     pub note: Option<String>,
@@ -575,17 +632,23 @@ pub struct StepFrame {
 /// The frame that ends the run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SummaryFrame {
+    /// Whether the run reached its summary; always true in a summary the guest sends.
     pub complete: bool,
     /// Every step with its status, in order.
     pub steps: Vec<(String, Status)>,
+    /// Whether every step succeeded.
     pub ok: bool,
+    /// The runtime the device was created with, if one was chosen.
     pub runtime: Option<String>,
+    /// The device type the device was created with, if one was chosen.
     pub device_type: Option<String>,
+    /// The device id, if the device was created.
     pub udid: Option<String>,
     /// The screenshot's size in bytes when it was sent.
     pub screenshot_bytes: Option<usize>,
     /// Names of the frames that never reached the host.
     pub undelivered: Vec<String>,
+    /// Why the run stopped early or what went wrong outside any one step, if anything.
     pub note: Option<String>,
 }
 

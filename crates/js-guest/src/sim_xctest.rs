@@ -24,6 +24,7 @@ pub const XCTESTRUN_SUFFIX: &str = ".xctestrun";
 pub const RESULT_PATH: &str = "/private/var/kbf-sim/out/tests.xcresult";
 /// The step that runs the tests, and the step that reads their result bundle.
 pub const XCTEST_STEP: &str = "xctest";
+/// The step that reads the result bundle of the tests.
 pub const SUMMARY_STEP: &str = "xctest-summary";
 /// The longest failure message a frame carries, in bytes.
 pub const MAX_MESSAGE_BYTES: usize = 512;
@@ -101,9 +102,11 @@ pub fn steps(after: &str) -> Vec<Step> {
 /// One failed test.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Failure {
+    /// The name of the failed test.
     pub test: String,
     /// The first failure message of the test, cut to [`MAX_MESSAGE_BYTES`].
     pub message: String,
+    /// Whether `message` was cut.
     pub message_truncated: bool,
 }
 
@@ -112,11 +115,17 @@ pub struct Failure {
 pub struct XcTestFrame {
     /// Xcode's verdict (`Passed`, `Failed`, ...), as reported.
     pub result: String,
+    /// How many tests passed.
     pub passed: u64,
+    /// How many tests failed.
     pub failed: u64,
+    /// How many tests were skipped.
     pub skipped: u64,
+    /// How many tests failed as expected.
     pub expected_failures: u64,
+    /// How many tests ran in all.
     pub total: u64,
+    /// The failed tests that are listed.
     pub failures: Vec<Failure>,
     /// Failed tests past [`MAX_LISTED`] that are not listed.
     pub omitted: u64,

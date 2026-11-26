@@ -77,6 +77,7 @@ impl Runner for SystemRunner {
 
 /// Where connections come from.
 pub trait Incoming {
+    /// The type of one accepted connection.
     type Conn: Read + Write;
 
     /// The next connection, waiting for one.

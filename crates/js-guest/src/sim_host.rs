@@ -13,12 +13,14 @@ use crate::sim_run::{ProcessRunner, SystemClock, read_regular, read_wanted};
 use crate::sim_xctest;
 use crate::simpaths;
 
+/// The simulator host on a real macOS guest: runs the commands and reads the machine itself.
 pub struct RealSimHost {
     runner: ProcessRunner<SystemClock>,
     host: SystemHost,
 }
 
 impl RealSimHost {
+    /// A host that runs commands with the minimal environment a launch daemon needs.
     #[must_use]
     pub fn new() -> Self {
         // A launch daemon starts with neither; `xcodebuild` and `simctl` want both.
