@@ -468,8 +468,9 @@ fn a_mount_of_an_unprepared_source_is_refused_and_a_release_of_one_succeeds() {
 
 /// Asserts that a mount the provider answers `UNAVAILABLE` twice (the first time as the mount
 /// the client sends after the prepare) is `Unavailable` each time with the provider's message,
-/// that asking again sends it again, and that it then gets the directory; and that a release the provider fails with another code (`INTERNAL`) is
-/// `Unavailable` too, and succeeds when asked again. It catches an `UNAVAILABLE` or an
+/// that asking again sends it again, and that it then gets the directory; and that a release
+/// the provider fails with another code (`INTERNAL`) is `Unavailable` too, and succeeds when
+/// asked again. It catches an `UNAVAILABLE` or an
 /// unexpected code that ends the source for good, and a failed call that is not sent again.
 #[test]
 fn an_unavailable_provider_and_any_other_failure_are_unavailable_and_asked_again() {
