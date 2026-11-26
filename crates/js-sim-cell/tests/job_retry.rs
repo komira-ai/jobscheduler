@@ -10,10 +10,11 @@
 use std::path::Path;
 use std::time::Duration;
 
-use js_jobs::JobState;
+use js_jobs::{JobState, StartFailure};
 use js_sim::Faults;
 use js_sim_cell::actions::{
-    callback_receiver_down, claim_callbacks_and_vanish, kill_agents_mid_job, restart_server,
+    HOST_REFUSAL, agent_refuses_starts, agent_takes_starts, agents, callback_receiver_down,
+    claim_callbacks_and_vanish, kill_agents_mid_job, restart_server,
 };
 use js_sim_cell::{
     Action, CallbackCall, Cell, ClientEvent, Expect, HowEnded, ItemId, JobFront, ServerSpec, Setup,
@@ -252,4 +253,83 @@ fn a_lapsed_claim_of_a_second_instance_is_delivered_by_the_cells_server() {
     claim_callbacks_and_vanish().run(&mut cell);
     cell.stop_server();
     assert_eq!(cell.claim_callbacks_and_vanish(), 0);
+}
+
+/// Steps `cell` by a second until an agent has made a result, within a minute of `from`.
+fn until_a_result(cell: &mut Cell, from: u64) -> u64 {
+    let mut at = from;
+    while cell.observations().results_made.is_empty() {
+        at += 1_000;
+        assert!(at < from + 60_000, "an agent made a result");
+        run_to(cell, at);
+    }
+    at
+}
+
+/// Asserts that when every agent refuses the start with a code of the host's and takes starts
+/// again after the first refusal, a job that asks for two attempts is refused once (launching
+/// nothing, its result made as a held refusal), is placed again on the other host and
+/// succeeds: one launch only, attempts read 1 then 2, and the refused host is not the one
+/// that launched. Catches a refusal that launches the job, one that is not kept until
+/// acknowledged, and a host's code that does not retry.
+#[test]
+fn a_start_refused_with_a_hosts_code_is_retried_on_another_host() {
+    let mut cell = cell("job_retry_refused_once", 2);
+    run_to(&mut cell, 1_000);
+    agent_refuses_starts(agents(0..2), HOST_REFUSAL).run(&mut cell);
+    let item = cell.submit(&Work::run_for(RUN).retry(2));
+    let at = until_a_result(&mut cell, 1_000);
+    assert!(
+        cell.ledger().launches().is_empty(),
+        "a refused start launches nothing"
+    );
+    agent_takes_starts(agents(0..2)).run(&mut cell);
+    run_to(&mut cell, at + 300_000);
+    let seen = cell.observations();
+    let refused = seen.results_made[0].host.clone();
+    assert!(seen.results_made[0].held && seen.results_made.len() == 2);
+    let launches = cell.ledger().launches();
+    assert_eq!(launches.len(), 1, "{launches:?}");
+    assert_ne!(launches[0].host, refused);
+    for expect in [
+        Expect::attempts_of(item, 2),
+        Expect::job_state(item, JobState::Succeeded),
+        Expect::terminal_count(1, HowEnded::Succeeded),
+    ] {
+        assert_eq!(unmet(&cell, &expect), None, "{expect:?}");
+    }
+}
+
+/// Asserts that a job that asks for two attempts, on agents that refuse every start with a
+/// code of the host's, is refused on each attempt and ends failed to start (agent refused)
+/// after its second, with nothing launched. Catches a refused job that is tried a third
+/// time and one that is never refused again.
+#[test]
+fn a_job_refused_on_every_attempt_ends_failed_to_start_after_its_last() {
+    let mut cell = cell("job_retry_refused_always", 2);
+    run_to(&mut cell, 1_000);
+    agent_refuses_starts(agents(0..2), HOST_REFUSAL).run(&mut cell);
+    let item = cell.submit(&Work::run_for(RUN).retry(2));
+    run_to(&mut cell, 400_000);
+    assert!(cell.ledger().launches().is_empty());
+    let ended = JobState::FailedToStart(StartFailure::AgentRefused);
+    for expect in [Expect::attempts_of(item, 2), Expect::job_state(item, ended)] {
+        assert_eq!(unmet(&cell, &expect), None, "{expect:?}");
+    }
+}
+
+/// Asserts that a start refused with a code of the job's own (`invalid-job`) is not retried
+/// whatever the policy: the job asks for three attempts and ends failed to start (agent
+/// refused) at its first. Catches a job-fault refusal that retries.
+#[test]
+fn a_start_refused_with_a_jobs_code_ends_at_its_first_attempt() {
+    let mut cell = cell("job_retry_refused_job_fault", 2);
+    run_to(&mut cell, 1_000);
+    agent_refuses_starts(agents(0..2), "invalid-job").run(&mut cell);
+    let item = cell.submit(&Work::run_for(RUN).retry(3));
+    run_to(&mut cell, 200_000);
+    let ended = JobState::FailedToStart(StartFailure::AgentRefused);
+    for expect in [Expect::attempts_of(item, 1), Expect::job_state(item, ended)] {
+        assert_eq!(unmet(&cell, &expect), None, "{expect:?}");
+    }
 }

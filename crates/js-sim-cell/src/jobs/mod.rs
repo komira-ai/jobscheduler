@@ -141,8 +141,8 @@ pub struct ResultMade {
     pub job: JobId,
     /// When.
     pub at: FarmTime,
-    /// Whether it is a start the agent refused because its host is held (the code
-    /// `host-held`): the agent made nothing of the job.
+    /// Whether it is a start the agent refused (its host is held, code `host-held`, or the
+    /// start refusal of the cell is on): the agent launched nothing of the job.
     pub held: bool,
 }
 
