@@ -161,6 +161,11 @@ fn a_claim_holds_the_row_or_expires_it() {
         tries: 1,
     };
     assert!(!held.holds(&other));
+    let earlier = Held {
+        by: InstanceId::new("server-a"),
+        tries: 0,
+    };
+    assert!(!held.holds(&earlier));
     assert!(!pending().holds(&claim.held));
 
     let (expired, none) = pending().claimed(&by, at(160));

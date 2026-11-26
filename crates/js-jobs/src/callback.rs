@@ -52,8 +52,8 @@ pub struct JobCallback {
     pub url: String,
     /// The key, as submitted, or its digest, as stored.
     pub key: CallbackKey,
-    /// How long the server keeps trying, in seconds from the job's end; `None`:
-    /// [`DEFAULT_CALLBACK_DEADLINE`]. Either is cut to the job's retention end.
+    /// How long the server keeps trying, in seconds from the job's end; `None`: a day (86 400
+    /// seconds). Either is cut to the job's retention end.
     pub deadline_seconds: Option<u32>,
 }
 

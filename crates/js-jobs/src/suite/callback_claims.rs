@@ -51,8 +51,9 @@ fn row_holds_key<S: Store>(rig: &Rig<S>, id: &crate::JobId) -> bool {
 /// A claim hands out a due callback with its job, URL, key and `webhook-id` (the one minted at
 /// submit), counts a try at the claim's time and holds the row for 30 s: a claim before then
 /// gets nothing, one at its end gets the row again with the same `webhook-id` and the next try
-/// counted, and an answer of the lapsed claim is then stale and writes nothing, while the claim
-/// that holds the row is answered.
+/// counted, and an answer of the lapsed claim is then stale and writes nothing. An answer of a
+/// claim already answered (a failed try, a delivery) is stale, and so is one of an earlier claim
+/// by the same instance that holds the row again; only the claim that holds the row is answered.
 pub fn a_lapsed_callback_claim_is_taken_again<B: Backend>(backend: &B) {
     let name = "a_lapsed_callback_claim_is_taken_again";
     let rig = rig(backend);
@@ -109,15 +110,45 @@ pub fn a_lapsed_callback_claim_is_taken_again<B: Backend>(backend: &B) {
         "{name}: the lapsed claim's answer"
     );
     assert_eq!(rig.snapshot(), before, "{name}: a stale answer wrote");
+    // The second claim's try fails; after its wait (10 s, the second try's) server-b claims the
+    // row again, and only that third claim holds it, not the second, though both are server-b's.
     let holding = second.into_iter().next().expect("a claim");
+    let failed = CallbackAnswer::Failed(FailureClass::Failed);
     rig.jobs
-        .answer_callback(holding, CallbackAnswer::Delivered, now(&rig))
+        .answer_callback(holding.clone(), failed, now(&rig))
+        .expect("the holding claim's answer");
+    let before = rig.snapshot();
+    assert_eq!(
+        rig.jobs
+            .answer_callback(holding.clone(), CallbackAnswer::Delivered, now(&rig)),
+        Err(JobStoreError::Stale { id: id.clone() }),
+        "{name}: a second answer of a failed try"
+    );
+    assert_eq!(rig.snapshot(), before, "{name}: a second answer wrote");
+    rig.clock.advance(Duration::from_secs(10));
+    let third = claim_all(&rig, "server-b").pop().expect("due again");
+    assert_eq!(
+        rig.jobs
+            .answer_callback(holding, CallbackAnswer::Delivered, now(&rig)),
+        Err(JobStoreError::Stale { id: id.clone() }),
+        "{name}: an earlier claim of the same instance"
+    );
+    rig.jobs
+        .answer_callback(third.clone(), CallbackAnswer::Delivered, now(&rig))
         .expect("the holding claim's answer");
     assert_eq!(
         callback_row(&rig, &id).state,
         CallbackState::Delivered,
         "{name}: the holding claim's answer"
     );
+    let before = rig.snapshot();
+    assert_eq!(
+        rig.jobs
+            .answer_callback(third, CallbackAnswer::Delivered, now(&rig)),
+        Err(JobStoreError::Stale { id: id.clone() }),
+        "{name}: a second answer of a delivery"
+    );
+    assert_eq!(rig.snapshot(), before, "{name}: a second answer wrote");
 }
 
 /// No row is held by two claims: two instances claiming at once share the due rows between

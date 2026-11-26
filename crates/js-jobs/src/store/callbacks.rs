@@ -205,8 +205,8 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             .transpose()
     }
 
-    /// Claims up to `limit` callbacks due at `now` for the instance `by`, each until
-    /// [`CALLBACK_CLAIM_LEASE`](crate::callback::CALLBACK_CLAIM_LEASE) past `now`, so no other
+    /// Claims up to `limit` callbacks due at `now` for the instance `by`, each until 30 s past
+    /// `now`, so no other
     /// instance sends it meanwhile. The due entries are read in order of the instant each row
     /// became claimable; each row is claimed in a transaction of its own on its locked row
     /// (`FOR UPDATE SKIP LOCKED` on Postgres) and read again there, so a row another instance
