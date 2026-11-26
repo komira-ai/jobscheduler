@@ -356,9 +356,18 @@ fn a_shared_place_that_cannot_be_swept_holds_the_account_at_sweep() {
     assert!(held.why.contains("Shared: Not a directory"), "{}", held.why);
 }
 
-/// Asserts that a record that cannot be deleted holds the account at `record`, that nothing
-/// of the home is removed before it (the deletion goes record, home, folders), and that a
-/// record that is not there is no error.
+/// How many times the directory was asked to delete the record `name`, among `calls`.
+fn deletions(calls: &[String], name: &str) -> usize {
+    let call = format!("delete_account {name}");
+    calls.iter().filter(|made| **made == call).count()
+}
+
+/// Asserts that a record that cannot be deleted holds the account at `record` once the
+/// directory has been asked [`DELETE_ROUNDS`] times, with a pause between two and none
+/// after the last, naming the last refusal; that nothing of the home is removed before it
+/// (the deletion goes record, home, folders); and that a record that is not there is no
+/// error. Catches a retry that never gives up, or that lets a refusal that lasts (a missing
+/// Full Disk Access) delete nothing and still show the account gone.
 #[test]
 fn a_record_that_cannot_be_deleted_holds_the_account_at_record() {
     let (rig, pool, account) = lent("record");
@@ -369,6 +378,11 @@ fn a_record_that_cannot_be_deleted_holds_the_account_at_record() {
         held.why,
         "deleting the record kbf-acct-1: delete_account kbf-acct-1 failed"
     );
+    assert_eq!(
+        deletions(&rig.fake.take_calls(), "kbf-acct-1"),
+        DELETE_ROUNDS
+    );
+    assert_eq!(rig.fake.state().pauses, (DELETE_ROUNDS - 1) as u64);
     assert!(
         rig.home(1).is_dir(),
         "the home stays until the record is gone"
@@ -377,6 +391,67 @@ fn a_record_that_cannot_be_deleted_holds_the_account_at_record() {
     rig.fake.state().users.remove("kbf-acct-1");
     pool.retire(account).unwrap();
     assert!(!rig.home(1).exists());
+}
+
+/// Asserts that a record the directory refuses to delete once and deletes when asked again
+/// does not hold the account: the retirement asks twice with one pause between, the record
+/// and the home are gone, and the uid is free for the next account. Catches one refusal of
+/// the directory taken as final, which holds the account and taints the host for good
+/// although nothing of the account is left.
+#[test]
+fn a_record_refused_once_and_deleted_when_asked_again_does_not_hold_the_account() {
+    let (rig, pool, account) = lent("record-once");
+    rig.fake.fail_times("delete_account kbf-acct-1", 1);
+    let retired = pool.retire(account);
+    assert!(retired.is_ok(), "{:?}", retired.err());
+    assert_eq!(deletions(&rig.fake.take_calls(), "kbf-acct-1"), 2);
+    assert_eq!(rig.fake.state().pauses, 1);
+    assert!(!rig.fake.state().users.contains_key("kbf-acct-1"));
+    assert!(!rig.home(1).exists());
+    assert!(pool.held().is_empty());
+    assert!(
+        rig.log.text().contains(&format!(
+            "deleting the record kbf-acct-1 was refused (round 1 of {DELETE_ROUNDS}): \
+             delete_account kbf-acct-1 failed; asking again"
+        )),
+        "{}",
+        rig.log.text()
+    );
+}
+
+/// Asserts one side of the bound of the rounds: a record refused one time fewer than
+/// [`DELETE_ROUNDS`] is deleted at the last round. Catches a count that stops a round early.
+#[test]
+fn a_record_refused_until_the_last_round_is_deleted_at_it() {
+    let (rig, pool, account) = lent("record-last");
+    let refusals = u32::try_from(DELETE_ROUNDS - 1).unwrap();
+    rig.fake.fail_times("delete_account kbf-acct-1", refusals);
+    let retired = pool.retire(account);
+    assert!(retired.is_ok(), "{:?}", retired.err());
+    assert_eq!(
+        deletions(&rig.fake.take_calls(), "kbf-acct-1"),
+        DELETE_ROUNDS
+    );
+}
+
+/// Asserts the other side of the bound: a record refused [`DELETE_ROUNDS`] times holds the
+/// account at `record` although the directory would take the next ask, naming the last
+/// refusal. Catches a count that asks a round too many.
+#[test]
+fn a_record_refused_every_round_holds_the_account_though_the_next_ask_would_work() {
+    let (rig, pool, account) = lent("record-one-more");
+    let refusals = u32::try_from(DELETE_ROUNDS).unwrap();
+    rig.fake.fail_times("delete_account kbf-acct-1", refusals);
+    let held = held(pool.retire(account));
+    assert_eq!(held.step, Step::Record);
+    assert_eq!(
+        held.why,
+        "deleting the record kbf-acct-1: delete_account kbf-acct-1 failed"
+    );
+    assert_eq!(
+        deletions(&rig.fake.take_calls(), "kbf-acct-1"),
+        DELETE_ROUNDS
+    );
 }
 
 /// Asserts that a home that cannot be removed holds the account at `home`.

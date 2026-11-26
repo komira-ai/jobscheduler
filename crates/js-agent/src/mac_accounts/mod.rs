@@ -80,7 +80,9 @@
 //!       the processes alone;
 //!    2. removes its System V IPC objects;
 //!    3. removes what it owns in the shared places and launchd's per-uid files;
-//!    4. deletes the record and the home, and empties every per-user folder the uid owns
+//!    4. deletes the record (the directory is asked up to [`DELETE_ROUNDS`] times, with a
+//!       pause between two, since it has refused root a deletion once and taken it moments
+//!       later) and the home, and empties every per-user folder the uid owns
 //!       (an older account of the same uid may have left another besides the slot's): each
 //!       folder and its top-level directories stay, everything below them goes (except the
 //!       sealed system items above) and so does any non-directory at the top level. The removal is root's way: no link is followed
@@ -171,6 +173,10 @@ pub const MAX_NAME: usize = 31;
 /// How many rounds of kill and bootout end the processes and domains of a uid before the
 /// account is held.
 pub const KILL_ROUNDS: usize = 10;
+
+/// How many times the directory is asked to delete an account's record, with a pause between
+/// two, before the account is held at the record: a count, as [`KILL_ROUNDS`] is, never a time.
+pub const DELETE_ROUNDS: usize = 5;
 
 /// An account lent to a job. Never an administrator, and never has run a job before.
 #[derive(Clone, Debug, PartialEq, Eq)]
