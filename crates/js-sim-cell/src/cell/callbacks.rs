@@ -9,13 +9,12 @@ use crate::server::{SECOND_CLAIMER, ServerNode};
 impl Cell {
     /// Switches the callback receiver down now for `lasting`: it answers a failed try to
     /// every call made before `lasting` has passed, so the server keeps each callback due
-    /// and tries it again after its wait. A cell with no server node has no receiver, and
-    /// the switch then changes nothing.
+    /// and tries it again after its wait. A cell with no server node has no receiver a call
+    /// reaches, and the switch then reaches none.
     pub fn set_callback_receiver_down(&mut self, lasting: Duration) {
         let now = self.sim.now();
-        if let Some(receiver) = self.server().map(ServerNode::receiver) {
-            receiver.down_for(now, lasting);
-        }
+        let server = self.server().map(ServerNode::receiver);
+        server.cloned().unwrap_or_default().down_for(now, lasting);
         self.record(format!("callback receiver down {}ms", lasting.as_millis()));
     }
 

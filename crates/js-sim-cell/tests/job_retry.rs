@@ -333,3 +333,25 @@ fn a_start_refused_with_a_jobs_code_ends_at_its_first_attempt() {
         assert_eq!(unmet(&cell, &expect), None, "{expect:?}");
     }
 }
+
+/// Asserts that a start refusal set for an index that names no agent changes nothing: on a
+/// cell of one agent, the refusal set for agent 1 leaves agent 0 taking the start, so the job
+/// launches once, no held refusal is made, and the job succeeds. Catches a switch that lands
+/// on another agent than the one it names.
+#[test]
+fn a_start_refusal_for_an_index_with_no_agent_changes_nothing() {
+    let mut cell = cell("job_retry_refusal_no_agent", 1);
+    run_to(&mut cell, 1_000);
+    cell.set_start_refusal(1, Some(HOST_REFUSAL.to_owned()));
+    let item = cell.submit(&Work::run_for(RUN));
+    run_to(&mut cell, 200_000);
+    assert!(
+        cell.observations()
+            .results_made
+            .iter()
+            .all(|made| !made.held)
+    );
+    assert_eq!(cell.ledger().launches().len(), 1);
+    let expect = Expect::job_state(item, JobState::Succeeded);
+    assert_eq!(unmet(&cell, &expect), None, "{expect:?}");
+}

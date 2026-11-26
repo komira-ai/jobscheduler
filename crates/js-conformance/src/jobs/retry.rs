@@ -28,6 +28,10 @@ fn retrying(id: &str, max_attempts: u32) -> JobSpec {
     }
 }
 
+/// The deadline the callback of `call-deadline` names, shorter than the retention window,
+/// so the deadline the job shows is the job's end plus it.
+const CALLBACK_DEADLINE_SECONDS: u32 = 20;
+
 /// [`retrying`] with a completion callback: an https receiver and a 32-byte key.
 fn calling(id: &str, max_attempts: u32) -> JobSpec {
     JobSpec {
@@ -384,7 +388,7 @@ pub(super) async fn not_on_cancel<H: JobHarness>(harness: &mut H, notes: &mut No
 }
 
 /// The callback of a job with attempts: armed through every retry, due at the final end,
-/// delivered once.
+/// delivered once; a callback that names its deadline is due until the job's end plus it.
 pub(super) async fn callback_once<H: JobHarness>(harness: &mut H, notes: &mut Notes) {
     let mut client = harness.client();
 
@@ -501,6 +505,23 @@ pub(super) async fn callback_once<H: JobHarness>(harness: &mut H, notes: &mut No
     notes.expect(
         callback_of(&job) == Some((CallbackState::Delivered, 1)),
         "the callback of a cancelled job is delivered once",
+    );
+
+    let mut asked = calling("call-deadline", 1);
+    if let Some(callback) = asked.callback.as_mut() {
+        callback.deadline_seconds = Some(CALLBACK_DEADLINE_SECONDS);
+    }
+    submitted(&mut client, notes, "SubmitJob", asked).await;
+    drive(harness, notes, "call-deadline", &TO_RUNNING);
+    drive(harness, notes, "call-deadline", &[Step::Exit(0)]);
+    let job = read(&mut client, notes, "call-deadline").await;
+    let job = job.as_ref();
+    let ended = job.and_then(|job| job.times.as_ref()?.ended_at_ms);
+    let deadline = job.and_then(|job| job.callback_status.as_ref()?.deadline_at_ms);
+    let asked_ms = u64::from(CALLBACK_DEADLINE_SECONDS) * 1000;
+    notes.expect(
+        ended.is_some() & (deadline == ended.map(|ended| ended + asked_ms)),
+        &format!("a callback that names its deadline is due until the job's end plus it: ended {ended:?}, deadline {deadline:?}"),
     );
 
     submitted(&mut client, notes, "SubmitJob", spec("call-none")).await;
