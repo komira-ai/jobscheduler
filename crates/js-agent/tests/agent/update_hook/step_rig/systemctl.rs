@@ -29,8 +29,9 @@ pub enum OnSignal {
 
 impl Spy<'_> {
     /// The answer to a `systemctl` run: `--version` prints [`Spy::systemd`]; `kill` is an act
-    /// (it fails when the call `kill` is set to fail) and the agent reacts as [`Spy::on_signal`]
-    /// says; anything else, the reading of the unit's tasks, takes the next answer of
+    /// (it fails when the call `kill` is set to fail, leaving the unit as
+    /// [`Spy::kill_refused_leaves`] says) and the agent reacts as [`Spy::on_signal`] says;
+    /// anything else, the reading of the unit's tasks, takes the next answer of
     /// [`Spy::tasks`], and `0` once they are used up.
     pub(super) fn systemctl(&self, args: &[&str]) -> Result<String, String> {
         match args.first().copied() {
@@ -38,6 +39,10 @@ impl Spy<'_> {
             Some("kill") => {
                 self.act(format!("systemctl.{}", args.join(" ")));
                 if self.fail.borrow().contains("kill") {
+                    if let Some((active, sub)) = *self.kill_refused_leaves.borrow() {
+                        let unit = args.last().copied().unwrap_or_default();
+                        self.world.seed_unit(unit, active, sub);
+                    }
                     return Err("kill is down".to_owned());
                 }
                 self.kill

@@ -227,10 +227,8 @@ fn hand_over_in_place(
         mark_link_moved(env, held, record)?;
         mark(env, held, record, |record| record.start_issued = true)?;
     }
-    let unit = record.update.unit.clone();
-    in_place::signal(env, &unit)?;
     let note = staged_not_running(env, record);
-    in_place::wait_taken(env, held, record, params, stop_bound_ms(params), &note)
+    in_place::signal_and_wait(env, held, record, params, stop_bound_ms(params), &note)
 }
 
 /// The session the lease server shows for the host, for an update that hands the runs over:
