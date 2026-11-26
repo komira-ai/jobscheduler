@@ -55,6 +55,8 @@ pub(in super::super) struct State {
     pub(in super::super) calls: Vec<String>,
     /// Calls that fail: an operation (`kill_all`) or one call (`kill_all 700`).
     pub(in super::super) failing: BTreeSet<String>,
+    /// Calls that fail a given number of times more, then work: as [`State::failing`], by key.
+    pub(in super::super) failing_for: BTreeMap<String, u32>,
     /// How the grant answers: `None` is held.
     pub(in super::super) grant: Option<io::ErrorKind>,
     /// Whether `list_accounts` ignores its prefix.
@@ -126,6 +128,12 @@ impl Fake {
         self.state().failing.insert(key.to_owned());
     }
 
+    /// Makes the call `key` (an operation, or `<op> <argument>`) fail the next `times` times
+    /// it is made, then work.
+    pub(in super::super) fn fail_times(&self, key: &str, times: u32) {
+        self.state().failing_for.insert(key.to_owned(), times);
+    }
+
     /// Lets the call `key` work again.
     pub(in super::super) fn heal(&self, key: &str) {
         self.state().failing.remove(key);
@@ -184,6 +192,10 @@ impl Fake {
         state.calls.push(key.clone());
         state.clock += state.cost.get(op).copied().unwrap_or(0);
         if state.failing.contains(op) || state.failing.contains(&key) {
+            return Err(io::Error::other(format!("{key} failed")));
+        }
+        if let Some(left) = state.failing_for.get_mut(&key).filter(|left| **left > 0) {
+            *left -= 1;
             return Err(io::Error::other(format!("{key} failed")));
         }
         drop(state);

@@ -4,7 +4,7 @@ use super::error::Failure;
 use super::host::LiveProcess;
 use super::ledger::Record;
 use super::pool::Pool;
-use super::{KILL_ROUNDS, Proof, Step, folder, ipc, launchd, tree};
+use super::{DELETE_ROUNDS, KILL_ROUNDS, Proof, Step, folder, ipc, launchd, tree};
 
 /// Whether the kill rounds of a uid may ask launchd about it. Asking is not reading:
 /// `launchctl print user/<uid>` makes the user domain of any uid it names, and launchd then
@@ -166,17 +166,47 @@ impl Pool {
         self.prove_gone(name, uid)
     }
 
-    /// Step 4: the record, then the home, then the per-user folders of the uid, emptied and
-    /// kept (the system protects them from removal, and the next account of the slot has
-    /// the same ones). A record that is not there is no error.
+    /// Step 4: the record ([`Pool::delete_record`]), then the home, then the per-user folders
+    /// of the uid, emptied and kept (the system protects them from removal, and the next
+    /// account of the slot has the same ones). A record that is not there is no error.
     fn remove_account(&self, name: &str, uid: u32) -> Result<(), Failure> {
-        self.host.delete_account(name).map_err(|why| {
-            Failure::new(Step::Record, format!("deleting the record {name}: {why}"))
-        })?;
+        self.delete_record(name)?;
         tree::remove_named(&self.settings.homes.join(name), uid)
             .map_err(|why| Failure::new(Step::Home, why))?;
         folder::empty(&self.settings.user_folders, uid, &*self.os)
             .map_err(|why| Failure::new(Step::Folder, why))
+    }
+
+    /// Deletes the record `name`, asking the directory at most [`DELETE_ROUNDS`] times with a
+    /// pause between two: OpenDirectory has refused root the deletion of an account's record
+    /// once ("the current credentials do not have the appropriate privileges") and taken
+    /// the same deletion moments later, and a deletion that fails holds the account and
+    /// taints the host for good. A deletion is the same call each time (a record already
+    /// gone is no error), so asking again changes nothing else. A refusal that lasts, such as
+    /// one for want of Full Disk Access, is refused every round, and the last refusal holds
+    /// the account at [`Step::Record`] as one refusal did before. Each refusal followed by
+    /// another round is logged.
+    fn delete_record(&self, name: &str) -> Result<(), Failure> {
+        let mut round = 1;
+        loop {
+            match self.host.delete_account(name) {
+                Ok(_) => return Ok(()),
+                Err(why) if round < DELETE_ROUNDS => {
+                    tracing::warn!(
+                        "deleting the record {name} was refused (round {round} of \
+                         {DELETE_ROUNDS}): {why}; asking again"
+                    );
+                    self.host.pause();
+                    round += 1;
+                }
+                Err(why) => {
+                    return Err(Failure::new(
+                        Step::Record,
+                        format!("deleting the record {name}: {why}"),
+                    ));
+                }
+            }
+        }
     }
 
     /// Records how the deletion `done` of account `n` ended: `gone` when it was shown, else
