@@ -35,14 +35,9 @@ pub(super) fn put(row: &mut Writer, labels: &Labels, history_key: Option<&Histor
     );
 }
 
-/// The history key of a row: none when the row lacks the tag.
-pub(super) fn take_history_key(fields: &mut Fields) -> Result<Option<HistoryKey>, DecodeError> {
-    fields.opt(job_key_tag::HISTORY_KEY, history_key_of)
-}
-
-/// The history key a value holds.
-fn history_key_of(tag: u16, value: Vec<u8>) -> Result<HistoryKey, DecodeError> {
-    HistoryKey::parse(&text_of(tag, value)?).map_err(|_| DecodeError::BadValue { tag })
+/// The labels of a row: none when the row lacks the tag.
+pub(super) fn take_labels(fields: &mut Fields) -> Result<Labels, DecodeError> {
+    Ok(fields.opt(job_tag::LABELS, labels_of)?.unwrap_or_default())
 }
 
 /// The reserved label keys a row may hold.
@@ -57,7 +52,7 @@ const RESERVED: [ReservedKey; 5] = [
 /// A label set as a row holds it: the caller's labels, and the reserved ones the scheduler
 /// set, each checked as when it was first made. A reserved key this build does not know is
 /// one a later build sets: the row is [`DecodeError::Newer`], as for an enum value.
-pub(super) fn labels_of(tag: u16, value: Vec<u8>) -> Result<Labels, DecodeError> {
+fn labels_of(tag: u16, value: Vec<u8>) -> Result<Labels, DecodeError> {
     let bad = DecodeError::BadValue { tag };
     let (reserved, caller): (BTreeMap<String, String>, BTreeMap<String, String>) =
         text_map_of(tag, value)?
@@ -73,6 +68,16 @@ pub(super) fn labels_of(tag: u16, value: Vec<u8>) -> Result<Labels, DecodeError>
                 .ok_or(DecodeError::Newer)?;
             labels.with_reserved(known, &value).map_err(|_| bad)
         })
+}
+
+/// The history key of a row: none when the row lacks the tag.
+pub(super) fn take_history_key(fields: &mut Fields) -> Result<Option<HistoryKey>, DecodeError> {
+    fields.opt(job_key_tag::HISTORY_KEY, history_key_of)
+}
+
+/// The history key a value holds.
+fn history_key_of(tag: u16, value: Vec<u8>) -> Result<HistoryKey, DecodeError> {
+    HistoryKey::parse(&text_of(tag, value)?).map_err(|_| DecodeError::BadValue { tag })
 }
 
 #[cfg(test)]

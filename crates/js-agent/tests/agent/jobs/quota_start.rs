@@ -286,6 +286,7 @@ fn queued_job(id: &str, disk_bytes: u64) -> NewJob {
         host_ports: Vec::new(),
         history_key: Default::default(),
         retry: None,
+        callback: None,
     };
     NewJob {
         id: Some(JobId::parse(id).unwrap()),

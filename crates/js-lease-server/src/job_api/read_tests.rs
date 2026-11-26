@@ -338,6 +338,7 @@ pub(super) fn spec(labels: &[(&str, &str)]) -> JobSpec {
         host_ports: Vec::new(),
         history_key: Default::default(),
         retry: None,
+        callback: None,
     }
 }
 

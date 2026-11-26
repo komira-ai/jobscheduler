@@ -280,7 +280,8 @@ message GetLogsRequest {
   // an answer at the cap has no data. Absent: false. A job that has ended answers at once.
   optional bool follow = 5;
   // The attempt whose output to read, from 1. Absent: the latest (Job.attempt). Read only
-  // with a stream. This server reads only the latest attempt and ignores the field.
+  // with a stream. 0 is an invalid argument; one above the job's current attempt is
+  // OUT_OF_RANGE.
   optional uint32 attempt = 6;
 }
 

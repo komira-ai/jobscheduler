@@ -137,6 +137,7 @@ pub(crate) fn spec_of(needs: Needs, wall_limit_secs: u64) -> JobSpec {
         host_ports: Vec::new(),
         history_key: Default::default(),
         retry: None,
+        callback: None,
     }
 }
 

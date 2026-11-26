@@ -33,6 +33,9 @@ mod attempt_rows;
 mod attempt_sweep;
 mod attempts;
 mod boot;
+mod callback_claims;
+mod callback_rows;
+mod callbacks;
 mod claimed;
 mod clock;
 mod collect;
@@ -71,6 +74,9 @@ pub use attempt_rows::*;
 pub use attempt_sweep::*;
 pub use attempts::*;
 pub use boot::*;
+pub use callback_claims::*;
+pub use callback_rows::*;
+pub use callbacks::*;
 pub use claimed::*;
 pub use clock::*;
 pub use collect::*;
@@ -538,6 +544,20 @@ macro_rules! job_store_tests {
             the_sweep_deletes_orphan_attempt_rows,
             a_sweep_page_that_loses_to_a_change_of_its_job_deletes_nothing,
             a_sweep_transaction_holds_at_most_a_page_of_attempt_rows,
+            the_signing_key_is_held_in_the_callback_row_only,
+            a_resubmit_with_another_policy_or_callback_conflicts,
+            an_end_makes_its_callback_due_in_the_same_commit,
+            an_older_store_reader_leaves_callback_rows_intact,
+            a_lapsed_callback_claim_is_taken_again,
+            one_claim_per_callback_row,
+            a_claim_drops_the_entries_no_row_calls_for,
+            each_answer_is_recorded_by_the_claim_that_holds_the_row,
+            the_signing_key_is_erased_when_delivery_ends,
+            a_callback_past_its_deadline_expires,
+            a_deadline_is_cut_to_the_retention_end,
+            the_sweep_deletes_a_callback_with_its_job,
+            boot_raises_due_callback_deadlines,
+            the_boot_deletes_an_orphan_callback,
         );
     };
 }
@@ -695,7 +715,9 @@ pub(crate) fn digest(digit: char) -> String {
     format!("sha256:{}", digit.to_string().repeat(64))
 }
 
-/// A spec with every field set to something other than its default.
+/// A spec with every field but the callback set to something other than its default: a job
+/// with a callback writes a `callback/` row and mints its `webhook-id`, which the checks of
+/// rows and ids that use this spec do not count ([`callback_spec`] is this spec with one).
 pub(crate) fn full_spec() -> JobSpec {
     let caller = BTreeMap::from([("team".to_owned(), "infra".to_owned())]);
     JobSpec {
@@ -780,6 +802,7 @@ pub(crate) fn full_spec() -> JobSpec {
                 .expect("a size class"),
         ),
         retry: Some(policy(3)),
+        callback: None,
     }
 }
 
@@ -833,6 +856,27 @@ pub(crate) fn policy(max_attempts: u32) -> RetryPolicy {
         max_attempts,
         initial_backoff: Some(Duration::from_secs(5)),
         max_backoff: Some(Duration::from_secs(60)),
+    }
+}
+
+/// The URL of [`callback_spec`]'s callback: a reference of the receiver's in its path and query.
+pub(crate) const CALLBACK_URL: &str = "https://hooks.example/js-done/ref-1?token=t";
+
+/// The signing key of [`callback_spec`]'s callback.
+pub(crate) fn signing_key() -> js_types::SigningKey {
+    js_types::SigningKey::new(b"0123456789abcdef0123456789abcdef".to_vec()).expect("a key")
+}
+
+/// [`full_spec`] with a callback to [`CALLBACK_URL`], signed with [`signing_key`], tried for a
+/// minute after the job's end.
+pub(crate) fn callback_spec() -> JobSpec {
+    JobSpec {
+        callback: Some(crate::JobCallback {
+            url: CALLBACK_URL.to_owned(),
+            key: crate::CallbackKey::Key(signing_key()),
+            deadline_seconds: Some(60),
+        }),
+        ..full_spec()
     }
 }
 

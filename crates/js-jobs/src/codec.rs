@@ -1,4 +1,5 @@
-//! The bytes of the job, allocation, mark, taint, node and dispatch rows (most in `*_fields`).
+//! The bytes of the job, allocation, mark, taint, node, dispatch and callback rows (most in
+//! `*_fields`).
 //!
 //! A row is a format byte ([`FORMAT`]) and then fields, each a tag (two bytes, big-endian),
 //! a length (four bytes, big-endian) and that many bytes of value:
@@ -40,6 +41,7 @@ use crate::record::{
 };
 
 mod attempt_fields;
+pub(crate) mod callback_fields;
 pub(crate) mod dispatch_fields;
 mod file_fields;
 pub(crate) mod host_fields;
@@ -66,7 +68,8 @@ pub(crate) const FORMAT: u8 = 1;
 
 /// The tags of a job row (whole-host tags 45, 46, 59 and 63 are in `whole_fields`, isolation tag
 /// 47 in `host_fields`, queue tags 48 to 53 in `queue_fields`, 54 to 58 in `rootfs_fields`, the
-/// history key 66 in `key_fields`, the retry policy and the attempts 68 to 73 in `attempt_fields`).
+/// history key 66 in `key_fields`, the callback 68 in `callback_fields`, the retry policy 67 and
+/// the attempts 69 to 73 in `attempt_fields`).
 pub(crate) mod job_tag {
     /// The job's id (text).
     pub const ID: u16 = 1;
@@ -370,6 +373,7 @@ fn put_spec(row: &mut Writer, spec: &JobSpec) {
     rootfs_fields::put_spec(row, &spec.layers, &spec.mounts, &spec.host_ports);
     key_fields::put(row, &spec.labels, spec.history_key.as_ref());
     attempt_fields::put_retry(row, spec.retry.as_ref());
+    callback_fields::put_spec(row, spec.callback.as_ref());
 }
 
 /// The row of `job`.
@@ -847,9 +851,7 @@ fn take_spec(fields: &mut Fields) -> Result<JobSpec, DecodeError> {
     let network = fields.opt(t::NETWORK, network_of)?.unwrap_or_default();
     let ports = fields.opt(t::PORTS, ports_of)?.unwrap_or_default();
     let files = file_fields::take_files(fields)?;
-    let labels = fields
-        .opt(t::LABELS, key_fields::labels_of)?
-        .unwrap_or_default();
+    let labels = key_fields::take_labels(fields)?;
     let (layers, mounts, host_ports) = rootfs_fields::take_spec(fields)?;
     let history_key = key_fields::take_history_key(fields)?;
     let retry = attempt_fields::take_retry(fields)?;
@@ -870,6 +872,7 @@ fn take_spec(fields: &mut Fields) -> Result<JobSpec, DecodeError> {
         host_ports,
         history_key,
         retry,
+        callback: callback_fields::take_spec(fields)?,
     })
 }
 

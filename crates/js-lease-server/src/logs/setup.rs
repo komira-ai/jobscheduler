@@ -47,6 +47,7 @@ pub(crate) fn from_config(logs: &LogsConfig, clock: &SharedClock) -> Option<Arc<
 
 /// The grants of an object-store sink, minting with its `[logs]` keys.
 fn object_store(sink: &ObjectStoreLogs, clock: &SharedClock) -> LogGrants {
+    super::attempt::warn_when_later_attempts_lack_room(&sink.prefix);
     let store_clock = StoreClock(clock.clone());
     let minter: Arc<dyn Minter> = match &sink.minting {
         Minting::Sts {

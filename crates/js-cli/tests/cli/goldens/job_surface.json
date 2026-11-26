@@ -757,7 +757,7 @@
         "required": false
       },
       {
-        "doc": "The attempt whose output to read, from 1. Absent: the latest (Job.attempt). Read only with a stream. This server reads only the latest attempt and ignores the field.",
+        "doc": "The attempt whose output to read, from 1. Absent: the latest (Job.attempt). Read only with a stream. 0 is an invalid argument; one above the job's current attempt is OUT_OF_RANGE.",
         "field": [
           "attempt"
         ],

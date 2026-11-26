@@ -88,8 +88,15 @@
 //! newest [`MAX_ATTEMPT_HISTORY`], the rest counted), and every attempt that ran has a row of
 //! its own, written in the commit that ends or retries it. A retry is the one move of a job
 //! that ran back to queued, open only to a job whose retry policy ([`JobSpec::retry`]) leaves
-//! it an attempt after the current one. This release keeps no callback rows: no job has a
-//! callback, none is ever due, and an answer is stale.
+//! it an attempt after the current one.
+//!
+//! A job that asks for a callback ([`JobSpec::callback`], [`JobCallback`]) has its delivery in
+//! the row `callback/<job id>`, the one row that holds the callback's signing key: the job row
+//! holds the key's SHA-256 ([`CallbackKey::Digest`]), so a resubmit compares the callback by
+//! it. The row is written armed in the commit that records the job, made due in the commit
+//! that ends it (whichever operation ends it), claimed by one instance at a time, erases its key
+//! when the delivery is delivered, abandoned or expired, has its deadline raised at boot, and is
+//! deleted with the job's row at its retention end.
 //!
 //! # Results and retention
 //!
@@ -255,7 +262,9 @@ pub use attempt::{
     Attempt, AttemptOutcome, AttemptRecord, AttemptRow, AttemptTrail, MAX_ATTEMPT_HISTORY,
     RETRY_HOST_BAR,
 };
-pub use callback::{CallbackClaim, CallbackState, CallbackStatus};
+pub use callback::{
+    CallbackClaim, CallbackKey, CallbackState, CallbackStatus, JobCallback, KeyDigest,
+};
 pub use codec::DecodeError;
 pub use error::JobStoreError;
 pub use ids::{

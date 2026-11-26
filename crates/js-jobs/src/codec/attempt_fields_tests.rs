@@ -144,7 +144,7 @@ fn with(fields: &[Vec<u8>], tag: u16, value: &[u8]) -> Vec<Vec<u8>> {
 /// `row`'s job row with its history field set to the one entry `entry`.
 fn job_row_with_entry(entry: &[u8]) -> Vec<u8> {
     let row = encode_job(&bare_job()).expect("encodes");
-    set_field(&row, 69, &items(&[entry])).expect("a row")
+    set_field(&row, 70, &items(&[entry])).expect("a row")
 }
 
 /// The error of reading a job row whose history holds the one entry made of `fields`.
@@ -180,7 +180,7 @@ fn round_trip(job: &JobRecord) {
     assert_eq!(decode_job(&row).as_ref(), Ok(job));
 }
 
-/// A row with none of tags 68 to 73 reads as the first attempt with nothing ended and no
+/// A row with none of tags 67 and 69 to 73 reads as the first attempt with nothing ended and no
 /// policy, and a job at those defaults is written without them, so its bytes are what they
 /// were before the fields.
 ///
@@ -192,7 +192,7 @@ fn a_record_without_attempt_tags_reads_as_attempt_one() {
     let mut job = bare_job();
     job.spec.retry = None;
     let row = encode_job(&job).expect("encodes");
-    for tag in 68..=73 {
+    for tag in [67, 69, 70, 71, 72, 73] {
         assert_eq!(field_of(&row, tag), None, "{name}: tag {tag} is written");
     }
     let read = decode_job(&row).expect("reads");
@@ -206,7 +206,7 @@ fn a_record_without_attempt_tags_reads_as_attempt_one() {
     assert_eq!(encode_job(&read), Ok(row), "{name}: bytes");
 }
 
-/// A build that does not know tags 68 to 73 reads a row that holds them, keeps them as
+/// A build that does not know tags 67 and 69 to 73 reads a row that holds them, keeps them as
 /// fields it does not know, and writes them back byte for byte when it rewrites the job for a
 /// change of a field it does know; this build reads that row as the original attempts and
 /// policy.
@@ -218,17 +218,17 @@ fn a_build_without_the_new_tags_carries_them() {
     let name = "a_build_without_the_new_tags_carries_them";
     let job = attempted_job();
     let row = encode_job(&job).expect("encodes");
-    let stripped = rearranged(&row, &[68, 69, 70, 71, 72, 73]).expect("a row");
+    let stripped = rearranged(&row, &[67, 69, 70, 71, 72, 73]).expect("a row");
     let mut older = decode_job(&stripped).expect("reads without the tags");
     assert_eq!(older.attempt, AttemptTrail::default(), "{name}: not read");
     assert_eq!(older.spec.retry, None, "{name}: no policy read");
-    for tag in 68..=73 {
+    for tag in [67, 69, 70, 71, 72, 73] {
         let value = field_of(&row, tag).expect("the original writes it");
         older.carried.0.insert(tag, value);
     }
     older.cancel_requested = true;
     let rewritten = encode_job(&older).expect("encodes");
-    for tag in 68..=73 {
+    for tag in [67, 69, 70, 71, 72, 73] {
         assert_eq!(
             field_of(&rewritten, tag),
             field_of(&row, tag),
@@ -240,7 +240,7 @@ fn a_build_without_the_new_tags_carries_them() {
     assert_eq!(decode_job(&rewritten), Ok(expected), "{name}: read back");
 }
 
-/// A job row's tags 68 to 73 are these bytes, for a record on its third attempt with two
+/// A job row's tags 67 and 69 to 73 are these bytes, for a record on its third attempt with two
 /// ended attempts (one with every optional field, one with none), a not-before time, four
 /// dropped attempts, two hosts and a policy; they read back as the record.
 ///
@@ -275,12 +275,12 @@ fn the_attempt_fields_have_these_bytes() {
         fld(12, &[0]),
     ]);
     let expected = [
-        (68, vec![0, 0, 0, 3]),
-        (69, items(&[&first, &second])),
-        (70, tm(30, 9)),
-        (71, vec![0, 0, 0, 4]),
-        (72, items(&[b"host-a", b"host-b"])),
-        (73, three(&[0, 0, 0, 3], &tm(5, 0), &tm(60, 0))),
+        (69, vec![0, 0, 0, 3]),
+        (70, items(&[&first, &second])),
+        (71, tm(30, 9)),
+        (72, vec![0, 0, 0, 4]),
+        (73, items(&[b"host-a", b"host-b"])),
+        (67, three(&[0, 0, 0, 3], &tm(5, 0), &tm(60, 0))),
     ];
     for (tag, bytes) in expected {
         assert_eq!(field_of(&row, tag), Some(bytes), "{name}: tag {tag}");
@@ -387,7 +387,7 @@ fn every_outcome_failure_reason_and_policy_reads_back() {
         job.spec.retry = retry;
         round_trip(&job);
         let row = encode_job(&job).expect("encodes");
-        assert!(field_of(&row, 73).is_some(), "{name}: written");
+        assert!(field_of(&row, 67).is_some(), "{name}: written");
     }
 }
 
@@ -406,7 +406,7 @@ fn a_policy_without_waits_writes_them_empty() {
     });
     let row = encode_job(&job).expect("encodes");
     assert_eq!(
-        field_of(&row, 73),
+        field_of(&row, 67),
         Some(three(&[0, 0, 0, 5], &[], &tm(9, 0))),
         "{name}: bytes"
     );
@@ -428,7 +428,7 @@ fn an_attempt_keeps_a_tag_this_build_does_not_know() {
     let kept = Carried([(99, b"later".to_vec())].into());
     assert_eq!(job.attempt.history()[0].carried, kept, "{name}: carried");
     let again = encode_job(&job).expect("encodes");
-    assert_eq!(field_of(&again, 69), field_of(&row, 69), "{name}: bytes");
+    assert_eq!(field_of(&again, 70), field_of(&row, 70), "{name}: bytes");
 }
 
 /// An entry without the retried field reads as not retried.
@@ -442,7 +442,7 @@ fn an_attempt_without_the_retried_field_was_not_retried() {
 }
 
 /// A policy whose value is not three items, or whose items are not a count and two times,
-/// is a bad value or a bad length of tag 73.
+/// is a bad value or a bad length of tag 67.
 ///
 /// Catches a policy read leniently (two items, four items, a short count, a wait of another
 /// width or with nanoseconds past a second), which would give a job another policy than the
@@ -451,49 +451,49 @@ fn an_attempt_without_the_retried_field_was_not_retried() {
 fn a_bad_policy_value_is_refused() {
     let name = "a_bad_policy_value_is_refused";
     let count = [0, 0, 0, 3];
-    let bad = |value: &[u8]| job_error(73, value);
+    let bad = |value: &[u8]| job_error(67, value);
     let two_items = items(&[&count, &[]]);
     assert_eq!(
         bad(&two_items),
-        DecodeError::BadValue { tag: 73 },
+        DecodeError::BadValue { tag: 67 },
         "{name}: 2"
     );
     let four = items(&[&count, &[], &[], &[]]);
-    assert_eq!(bad(&four), DecodeError::BadValue { tag: 73 }, "{name}: 4");
+    assert_eq!(bad(&four), DecodeError::BadValue { tag: 67 }, "{name}: 4");
     assert_eq!(
         bad(&[0, 0, 0, 9, 1]),
-        DecodeError::BadValue { tag: 73 },
+        DecodeError::BadValue { tag: 67 },
         "{name}: cut"
     );
     let short = three(&[0, 0, 3], &[], &[]);
     assert_eq!(
         bad(&short),
-        DecodeError::BadLength { tag: 73 },
+        DecodeError::BadLength { tag: 67 },
         "{name}: count"
     );
     let width = three(&count, &[1; 11], &[]);
     assert_eq!(
         bad(&width),
-        DecodeError::BadLength { tag: 73 },
+        DecodeError::BadLength { tag: 67 },
         "{name}: initial"
     );
     let width = three(&count, &[], &[1; 13]);
     assert_eq!(
         bad(&width),
-        DecodeError::BadLength { tag: 73 },
+        DecodeError::BadLength { tag: 67 },
         "{name}: longest"
     );
     let nanos = tm(1, 1_000_000_000);
     let late = three(&count, &nanos, &[]);
     assert_eq!(
         bad(&late),
-        DecodeError::BadValue { tag: 73 },
+        DecodeError::BadValue { tag: 67 },
         "{name}: nanos"
     );
     let late = three(&count, &[], &nanos);
     assert_eq!(
         bad(&late),
-        DecodeError::BadValue { tag: 73 },
+        DecodeError::BadValue { tag: 67 },
         "{name}: longest nanos"
     );
 }
@@ -508,20 +508,20 @@ fn a_bad_policy_value_is_refused() {
 fn a_bad_job_attempt_field_is_refused() {
     let name = "a_bad_job_attempt_field_is_refused";
     let cases = [
-        (68, vec![0, 0, 0, 0], DecodeError::BadValue { tag: 68 }),
-        (68, vec![0, 0, 1], DecodeError::BadLength { tag: 68 }),
-        (70, vec![0; 11], DecodeError::BadLength { tag: 70 }),
-        (70, tm(0, 1_000_000_000), DecodeError::BadValue { tag: 70 }),
-        (71, vec![0; 8], DecodeError::BadLength { tag: 71 }),
+        (69, vec![0, 0, 0, 0], DecodeError::BadValue { tag: 69 }),
+        (69, vec![0, 0, 1], DecodeError::BadLength { tag: 69 }),
+        (71, vec![0; 11], DecodeError::BadLength { tag: 71 }),
+        (71, tm(0, 1_000_000_000), DecodeError::BadValue { tag: 71 }),
+        (72, vec![0; 8], DecodeError::BadLength { tag: 72 }),
         (
-            72,
+            73,
             items(&[b"host-a", b"host-b", b"host-a"]),
-            DecodeError::BadValue { tag: 72 },
+            DecodeError::BadValue { tag: 73 },
         ),
-        (72, items(&[b"host a"]), DecodeError::BadValue { tag: 72 }),
-        (72, items(&[&[0xff]]), DecodeError::NotUtf8 { tag: 72 }),
-        (72, vec![0, 0, 0, 9, 1], DecodeError::BadValue { tag: 72 }),
-        (69, vec![0, 0, 0, 9, 1], DecodeError::BadValue { tag: 69 }),
+        (73, items(&[b"host a"]), DecodeError::BadValue { tag: 73 }),
+        (73, items(&[&[0xff]]), DecodeError::NotUtf8 { tag: 73 }),
+        (73, vec![0, 0, 0, 9, 1], DecodeError::BadValue { tag: 73 }),
+        (70, vec![0, 0, 0, 9, 1], DecodeError::BadValue { tag: 70 }),
     ];
     for (tag, value, error) in cases {
         assert_eq!(job_error(tag, &value), error, "{name}: tag {tag}");
@@ -661,14 +661,14 @@ fn a_history_over_its_bound_is_bounded_and_counted() {
     let entries: Vec<Vec<u8>> = (1..=257).map(|n| row_of(&entry_fields(n))).collect();
     let refs: Vec<&[u8]> = entries.iter().map(Vec::as_slice).collect();
     let row = encode_job(&bare_job()).expect("encodes");
-    let row = set_field(&row, 69, &items(&refs)).expect("a row");
-    let row = set_field(&row, 71, &[0, 0, 0, 2]).expect("a row");
+    let row = set_field(&row, 70, &items(&refs)).expect("a row");
+    let row = set_field(&row, 72, &[0, 0, 0, 2]).expect("a row");
     let job = decode_job(&row).expect("reads");
     assert_eq!(job.attempt.history().len(), 256, "{name}: kept");
     assert_eq!(job.attempt.history()[0].number, 2, "{name}: oldest");
     assert_eq!(job.attempt.history()[255].number, 257, "{name}: newest");
     assert_eq!(job.attempt.dropped(), 3, "{name}: dropped");
-    let row = set_field(&row, 71, &u32::MAX.to_be_bytes()).expect("a row");
+    let row = set_field(&row, 72, &u32::MAX.to_be_bytes()).expect("a row");
     let job = decode_job(&row).expect("reads");
     assert_eq!(job.attempt.dropped(), u32::MAX, "{name}: saturated");
 }

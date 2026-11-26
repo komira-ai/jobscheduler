@@ -222,6 +222,7 @@ pub(crate) fn queue_job(scratch: &Scratch, id: &str) {
         host_ports: Vec::new(),
         history_key: Default::default(),
         retry: None,
+        callback: None,
     };
     let new = NewJob {
         id: Some(JobId::parse(id).unwrap()),

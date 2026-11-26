@@ -1,17 +1,20 @@
 //! A job's attempts and its completion callback: what a retry is refused for, what it writes
 //! when it is taken (the next attempt queued with its counts reset, its host barred, its files
 //! kept, its start stopped where the server decided the end), how a placement counts attempts,
-//! how a cancel and a second retry meet it, and that no job has a callback row yet.
+//! how a cancel and a second retry meet it; and the callback operations on jobs that ask for
+//! none: a job without a callback has no callback status and none is due, and an answer to a
+//! claim no row holds is stale, writing nothing.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
 
 use js_state::conformance::Backend;
-use js_state::{Store, StoreError, StoreTime, Version};
+use js_state::{Store, StoreError, StoreTime};
 use js_types::{CallbackAnswer, FailureClass, SigningKey};
 
 use super::whole::later;
 use super::{Rig, full_spec, host, job_id, policy, rig, share};
+use crate::callback::Held;
 use crate::interfere::INJECTED;
 use crate::{
     AllocationRecord, AttemptOutcome, AttemptRecord, CallbackClaim, DispatchKind, EndReason,
@@ -295,7 +298,10 @@ pub fn an_answer_to_a_claim_no_row_holds_is_stale<B: Backend>(backend: &B) {
         url: "https://hooks.example/js-done/ref-1".to_owned(),
         key: SigningKey::new(vec![b'k'; 32]).expect("a key"),
         webhook_id: "bXNnX2lk".to_owned(),
-        version: Version(1),
+        held: Held {
+            by: InstanceId::new("server-a"),
+            tries: 1,
+        },
     };
     let answers = [
         CallbackAnswer::Delivered,

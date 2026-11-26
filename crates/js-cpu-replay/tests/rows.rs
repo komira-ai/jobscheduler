@@ -60,6 +60,7 @@ fn spec(class: &str) -> JobSpec {
         host_ports: Vec::new(),
         history_key: Default::default(),
         retry: None,
+        callback: None,
     }
 }
 

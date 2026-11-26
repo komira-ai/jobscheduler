@@ -485,7 +485,7 @@ async fn a_sink_the_agent_would_refuse_is_left_out_of_the_start() {
     let odd = Endpoint::parse("https://odd_host.example", LOG_REGION, LOG_BUCKET, true).unwrap();
     let minter = Arc::clone(&logs.minter) as Arc<dyn js_logmint::Minter>;
     let grants = grants_over(odd, minter, &status_clock(&rig));
-    assert!(grants.sink_for("host-a", "job-a").is_some());
+    assert!(grants.sink_for("host-a", "job-a", 1).is_some());
     let (job, allocation) = placed(&rig.jobs, "job-a", "host-a", spec(), BOOKED);
     let host = HostId::new("host-a").unwrap();
     let context = BeatContext {

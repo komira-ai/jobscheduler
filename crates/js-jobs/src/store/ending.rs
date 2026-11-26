@@ -11,7 +11,7 @@
 //! `usage/ended` row written beside its free, which no retention here touches; a booked or
 //! releasing row is never deleted.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
 use std::sync::PoisonError;
 use std::time::Duration;
@@ -104,6 +104,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         let ended = ended(job, end, now, self.retention);
         let txn = put_job(Txn::new(), Some(&before), &ended, Cond::Version(version))?;
         let txn = self.released(txn, &before, stop, now)?;
+        let txn = self.due_callback(txn, &ended, now)?;
         Ok((txn, ended))
     }
 
@@ -260,6 +261,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             }
         }
         let txn = self.drop_messages(txn, &due)?;
+        let txn = self.drop_callbacks(txn, &due)?;
         let due: Vec<JobId> = due.into_iter().map(|job| job.id).collect();
         if let Some(first) = due.first() {
             self.commit(first, txn)?;
@@ -431,8 +433,10 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// it has one. Only an ended job has a retention end or contents to replace and only a
     /// waiting one gets a floor, so no row is put twice. Each mark's deadline is raised to at
     /// least `boot` plus [`BOOT_GRACE`](crate::BOOT_GRACE), so an outage longer than a hold
-    /// gives up no hold at the first round; its exclusions keep their ends. A row a later
-    /// build wrote is left as it is.
+    /// gives up no hold at the first round; its exclusions keep their ends. Each pending
+    /// callback's delivery deadline is raised the same way, and a callback row whose job row is
+    /// gone (which only an older build's sweep leaves) is deleted on that job row being absent
+    /// still. A row a later build wrote is left as it is.
     ///
     /// Each row is raised in a transaction of its own, at the version read, many rows to a
     /// store batch: every raise is a maximum of that row alone, and nothing ties one row's to
@@ -442,7 +446,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// raise holds or it needs none. Nothing starts over and nothing waits: the rows are read
     /// once, and a row is read again only as often as another writer changed it in between.
     /// When rows were read again it logs one line with their count. Returns how many rows
-    /// (jobs and marks) it wrote; with none it commits nothing.
+    /// (jobs, marks and callbacks) it wrote; with none it commits nothing.
     ///
     /// # Errors
     /// [`JobStoreError::Corrupt`] when a row does not parse; [`JobStoreError::TooLarge`];
@@ -457,6 +461,12 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         ];
         let mut rows = self.indexed_rows(&spans)?;
         rows.extend(self.store.scan_prefix(keys::MARK)?);
+        let jobs: BTreeSet<String> = rows
+            .iter()
+            .map(|(key, _)| key)
+            .filter(|key| key.starts_with(keys::JOB))
+            .cloned()
+            .collect();
         let mut due = Vec::new();
         for (key, row) in rows {
             due.extend(raised_row(key, &row, boot)?);
@@ -481,8 +491,9 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
                 }
             }
         }
-        raise_said_again(again);
-        Ok(written)
+        let (raised, read_again) = self.raise_callbacks_at_boot(boot, &jobs)?;
+        raise_said_again(again + read_again);
+        Ok(written + raised)
     }
 }
 

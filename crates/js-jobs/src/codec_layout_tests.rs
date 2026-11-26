@@ -94,7 +94,7 @@ fn the_layout_is_pinned_byte_for_byte() {
             b"root//crates/js-sched:js-sched rust_compile build".to_vec(),
         ),
         (
-            73,
+            67,
             framed(&[&3u32.to_be_bytes(), &seconds(5), &seconds(60)]),
         ),
     ]);

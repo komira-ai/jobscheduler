@@ -122,6 +122,7 @@
 //! | `FAILED_PRECONDITION`, message `no-live-logs` (the job ran without live logs) | 409 | `no-live-logs` |
 //! | `INVALID_ARGUMENT` (a message `field: <name>` gives `field`) | 400 | `invalid-argument` |
 //! | `OUT_OF_RANGE`, message `field: fromOffset` (a log offset past the end of the stream) | 400 | `out-of-range`, `field` `fromOffset` |
+//! | `OUT_OF_RANGE`, message `field: attempt` (a log read of an attempt above the job's current one) | 400 | `out-of-range`, `field` `attempt` |
 //! | `RESOURCE_EXHAUSTED`, message `too-many-follows` | 429 | `too-many-follows` |
 //! | `UNAVAILABLE`, message `log-store-unavailable` | 503 | `log-store-unavailable` |
 //! | `PERMISSION_DENIED`, message `operator-only` (a fleet call of a client that is no operator) | 403 | `operator-only` |

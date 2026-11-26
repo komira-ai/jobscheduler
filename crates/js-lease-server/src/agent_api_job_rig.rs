@@ -80,6 +80,7 @@ pub(crate) fn spec() -> JobSpec {
         host_ports: Vec::new(),
         history_key: Default::default(),
         retry: None,
+        callback: None,
     }
 }
 

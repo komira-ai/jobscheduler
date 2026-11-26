@@ -394,6 +394,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         )?;
         let txn = self.without_mark(with_rows(txn, beside(&freed)), id)?;
         let txn = self.queue_stop(txn, &job, Some(&allocation), true, now)?;
+        let txn = self.due_callback(txn, &after, now)?;
         self.commit(id, txn)?;
         Ok((after, freed))
     }

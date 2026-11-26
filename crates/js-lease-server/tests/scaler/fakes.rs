@@ -592,6 +592,7 @@ pub fn spec_of(needs: Needs) -> JobSpec {
         host_ports: Vec::new(),
         history_key: Default::default(),
         retry: None,
+        callback: None,
     }
 }
 

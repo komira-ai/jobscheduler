@@ -11,8 +11,8 @@
 //! ([`job_attempt_tag::ATTEMPT_HOSTS`], a list of text in order, written when it holds any).
 //! A row with none of them, which is every row of a job never placed and every row a build
 //! before them wrote, reads as the first attempt with nothing ended and no policy, and has the
-//! bytes it had before. Tag 67 is the callback's (the same design, section 5.2), which this
-//! build does not write.
+//! bytes it had before. Tag 68, between the policy and the attempts, is the callback's
+//! (`callback_fields`).
 //!
 //! The policy is a list of three items: the most attempts (a `u32`), then the initial and the
 //! longest wait, each a time's bytes (the seconds and the nanoseconds of a duration) or empty
@@ -48,17 +48,17 @@ use crate::record::{JobState, StartFailure};
 /// and the other `*_fields` modules.
 pub(crate) mod job_attempt_tag {
     /// The number of the job's current attempt (u32), when it is not the first.
-    pub const ATTEMPT: u16 = 68;
+    pub const ATTEMPT: u16 = 69;
     /// The attempts that ended, oldest first (a list of attempt rows).
-    pub const ATTEMPT_HISTORY: u16 = 69;
+    pub const ATTEMPT_HISTORY: u16 = 70;
     /// When the job's next attempt may be placed (time).
-    pub const RETRY_NOT_BEFORE: u16 = 70;
+    pub const RETRY_NOT_BEFORE: u16 = 71;
     /// How many ended attempts the history dropped (u32).
-    pub const DROPPED_ATTEMPTS: u16 = 71;
+    pub const DROPPED_ATTEMPTS: u16 = 72;
     /// Every host that held an ended attempt, in order (list of text).
-    pub const ATTEMPT_HOSTS: u16 = 72;
+    pub const ATTEMPT_HOSTS: u16 = 73;
     /// The retry policy (a list of three items), part of the spec.
-    pub const RETRY: u16 = 73;
+    pub const RETRY: u16 = 67;
 }
 
 /// The tags of one ended attempt, an item of [`job_attempt_tag::ATTEMPT_HISTORY`].
