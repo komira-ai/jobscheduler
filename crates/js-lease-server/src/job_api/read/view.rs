@@ -7,7 +7,9 @@
 //! - The record's command is a list and the message's a single program: the program is the
 //!   list's first item, and the rest of the list goes before the arguments, so a command of
 //!   one item (what a submit records) reads back as it was given.
-//! - A file's contents are secret: every file is named, with empty contents.
+//! - A file's contents are secret: every file is named, with empty contents. So is a callback's
+//!   signing key, which the record holds only as its digest: a callback shows its URL and its
+//!   deadline as given, and an empty key.
 //! - The record keeps the ISA level, the least operating-system version and the accelerator a submit was given among its
 //!   capabilities, under the keys a lease request uses (`validate.rs`): they are shown in
 //!   their fields. Any other capability has no field and is not shown.
@@ -31,8 +33,7 @@
 //!   `layered-rootfs` capability a submit records beside them has no field and is not shown.
 //! - The record keeps the agent's code of a start it refused: it is the job's
 //!   `start_failure_detail`, empty for every other job.
-//! - The record keeps a job's retry policy, which its spec shows as given; it keeps no
-//!   callback, so a job shows no `callback` and no `callback_status`.
+//! - The record keeps a job's retry policy, which its spec shows as given.
 //! - The record keeps a job's attempts (`docs/design/job-retry-and-completion-callback.md`,
 //!   section 3.7): the job and its result show its current attempt (from 1, also for a row
 //!   written before attempts were kept), the ended attempts its history keeps
@@ -40,14 +41,18 @@
 //!   retry, when its next attempt may be placed. The record keeps that time after the next
 //!   placement, which no longer waits for it: a job past the queue shows none. The hosts that
 //!   held an attempt have no field and are not shown.
+//! - Where a job's callback delivery stands (`callback_status`) is not in the record: it is
+//!   left absent here, and the read calls set it from the job's `callback/` row
+//!   ([`callback_status`] turns that row's status into the message).
 
 use std::time::Duration;
 
 use js_agent_wire::{HostPort, JobMount, Layer, MountMode, MountSource, PortProtocol, Propagation};
 use js_caps::XCODE;
 use js_jobs::{
-    Attempt, AttemptOutcome, Isolation, JobEvent, JobRecord, JobResult, JobSpec, JobState, Needs,
-    NetworkPolicy, ResourceUsage, ResultReason, StartFailure,
+    Attempt, AttemptOutcome, CallbackState, CallbackStatus, Isolation, JobCallback, JobEvent,
+    JobRecord, JobResult, JobSpec, JobState, Needs, NetworkPolicy, ResourceUsage, ResultReason,
+    StartFailure,
 };
 use js_proto::v1;
 use js_state::StoreTime;
@@ -348,7 +353,39 @@ fn spec(id: &str, spec: &JobSpec, priority: i32) -> v1::JobSpec {
             .as_ref()
             .map_or_else(String::new, |class| class.as_str().to_owned()),
         retry: spec.retry.as_ref().map(retry),
-        callback: None,
+        callback: spec.callback.as_ref().map(callback),
+    }
+}
+
+/// A job's callback as the job service shows it: its URL and deadline as given, and an empty
+/// key, whichever form the record holds it in.
+fn callback(callback: &JobCallback) -> v1::Callback {
+    v1::Callback {
+        url: callback.url.clone(),
+        signing_key: Vec::new(),
+        deadline_seconds: callback.deadline_seconds,
+    }
+}
+
+/// Where a job's callback delivery stands, as the job service shows it: each time in
+/// milliseconds since the store clock's origin, and the last failure's class by its word.
+pub(crate) fn callback_status(status: &CallbackStatus) -> v1::CallbackStatus {
+    let state = match status.state {
+        CallbackState::Armed => v1::CallbackState::Armed,
+        CallbackState::Pending => v1::CallbackState::Pending,
+        CallbackState::Delivered => v1::CallbackState::Delivered,
+        CallbackState::Expired => v1::CallbackState::Expired,
+        CallbackState::Abandoned => v1::CallbackState::Abandoned,
+    };
+    v1::CallbackStatus {
+        state: state.into(),
+        tries: status.tries,
+        last_try_at_ms: status.last_try_at.map(millis),
+        last_failure: status
+            .last_failure
+            .map_or_else(String::new, |class| class.as_str().to_owned()),
+        delivered_at_ms: status.delivered_at.map(millis),
+        deadline_at_ms: status.deadline_at.map(millis),
     }
 }
 

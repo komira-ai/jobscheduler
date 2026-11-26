@@ -37,7 +37,7 @@ async fn says(
     let agents = State(Arc::clone(&rig.agents));
     let body = Ok(Bytes::from(beat.to_string()));
     let who = Extension(rig.pool.clone());
-    let reply = super::super::heartbeat(agents, who, (None, None), body).await;
+    let reply = super::super::heartbeat(agents, who, (None, None), None, body).await;
     reply.map(|Json(reply)| reply)
 }
 

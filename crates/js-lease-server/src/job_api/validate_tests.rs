@@ -18,7 +18,7 @@ use crate::job_api::writes_rig::{CEILING, image, wire};
 
 /// `spec` checked against the rig's ceiling.
 fn checked(spec: &v1::JobSpec) -> Result<Valid, Fault> {
-    job(Some(spec), CEILING, Accepts::default())
+    job(Some(spec), CEILING, Accepts::default(), None)
 }
 
 /// The fault of `spec` changed by `change`.
@@ -297,6 +297,7 @@ fn the_wall_limit_is_present_positive_and_at_most_the_ceiling() {
         Some(&wire("job-1")),
         Duration::from_secs(599),
         Accepts::default(),
+        None,
     );
     assert_eq!(higher, Err(Fault::WallAboveCeiling));
 }
@@ -369,7 +370,7 @@ fn a_malformed_xcode_build_is_refused_naming_its_field() {
 #[test]
 fn each_fault_names_its_field() {
     assert_eq!(
-        job(None, CEILING, Accepts::default()),
+        job(None, CEILING, Accepts::default(), None),
         Err(Fault::Field("spec"))
     );
     let long = "a".repeat(64);

@@ -2,7 +2,7 @@
 //! (`v1::JobSpec`) becomes the job the tables record ([`js_jobs::JobSpec`]), its id and
 //! priority, and what admission asks of a host ([`Requirements`]), or the first field that
 //! is not valid. Every function here is pure: it reads the request and the ceiling, and
-//! nothing else.
+//! nothing else, and the address rule a callback's literal address is judged by.
 //!
 //! The fields are checked in the order the message declares them, and the first fault is
 //! the answer:
@@ -25,7 +25,7 @@
 //! | `spec.historyKey` | empty, or 1 to 512 bytes of printable ASCII (`0x20` to `0x7e`), kept as sent ([`HistoryKey`]) | `field: spec.historyKey: bad-length`, `field: spec.historyKey: not-printable-ascii` |
 //! | `spec.layers`, `spec.mounts` | the rules of `rootfs` | `field: spec.layers[i].<name>`, `spec.mounts[i].<name>` |
 //! | `spec.retry` | absent, until the release that accepts a policy: this release refuses one, whatever it says; once accepted ([`Accepts::retry`], which only tests set yet), a `maxBackoffSeconds` given below the effective initial wait (`initialBackoffSeconds`, 10 when absent, cut to 3600) is refused, and nothing else is: `maxAttempts` has no ceiling | `field: spec.retry: retry-not-enabled`, `field: spec.retry.maxBackoffSeconds` |
-//! | `spec.callback` | absent: this release calls no job back, so it refuses one that asks, whatever the callback says | `field: spec.callback: callback-not-enabled` |
+//! | `spec.callback` | absent while the server takes no callback (until the release that accepts one), whatever it says; else the rules of `callback_check` | `field: spec.callback: callback-not-enabled`; `field: spec.callback.url: <code>`, `spec.callback.signingKey: bad-length` |
 //!
 //! The cross-field rules (an empty image, its command, `exec`, `needs.wholeHost` and
 //! `isolation` beside the layers, mounts and host ports) are checked once those fields are, and
@@ -56,6 +56,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use js_agent_wire::{Layer, RunFile, check_env, is_xcode_build, validate_files};
+use js_callback::AddressRule;
 use js_caps::{FLAG_SET, LAYERED_ROOTFS, XCODE, mount_provider_key};
 use js_jobs::{
     Constraints, DeclaredPort, Isolation, JobFiles, JobId, JobSpec, Needs, NetworkPolicy,
@@ -71,7 +72,7 @@ use js_types::{
 // section 8.6, which only the files that launch or check through a mode may name.
 use js_types::JobNetwork as Reach;
 
-use super::rootfs;
+use super::{callback_check, rootfs};
 
 /// The capability key a job's least ISA level is recorded under: the key a lease request
 /// names it by.
@@ -107,7 +108,7 @@ pub(crate) enum Fault {
     Field(&'static str),
     /// The field, by its JSON name, breaks a rule whose code the answer carries: one of the
     /// wire's check of a start (`js_agent_wire::refusal`), or of this module's own (the
-    /// history key's, and `retry-not-enabled` and `callback-not-enabled`).
+    /// history key's, `retry-not-enabled`, and the callback's, `callback_check`).
     Wire(&'static str, &'static str),
     /// The field, by its JSON name, of the port at this index of `spec.ports`.
     Port(usize, &'static str),
@@ -125,7 +126,8 @@ pub(crate) enum Fault {
 }
 
 /// The job `spec` checked against `ceiling`, the most a wall limit may be, with the fields
-/// `accepts` takes.
+/// `accepts` takes, and its callback, if it asks for one, judged by `callbacks`: refused while
+/// it is `None`, which is the server that takes no callback.
 ///
 /// # Errors
 /// The [`Fault`] of the first field, in the message's order, that is not valid.
@@ -133,6 +135,7 @@ pub(crate) fn job(
     spec: Option<&v1::JobSpec>,
     ceiling: Duration,
     accepts: Accepts,
+    callbacks: Option<&AddressRule>,
 ) -> Result<Valid, Fault> {
     let spec = spec.ok_or(Fault::Field("spec"))?;
     let id = id(&spec.job_id)?;
@@ -156,6 +159,7 @@ pub(crate) fn job(
     let mounts = rootfs::mounts(&spec.mounts)?;
     not_enabled(spec, accepts)?;
     let retry = retry(spec.retry.as_ref())?;
+    let callback = callback_check::callback(spec.callback.as_ref(), callbacks)?;
     let accelerator = AcceleratorNeed::requested(&capabilities, resources.shape())
         .map_err(|_| Fault::Field("spec.constraints.accelerator"))?;
     imageless(image.as_ref(), &spec.command, &layers)?;
@@ -224,9 +228,7 @@ pub(crate) fn job(
         history_key,
         // Absent unless `accepts` takes a policy (`not_enabled`).
         retry,
-        // `SubmitJob` refuses a job with a callback before it gets here, until the release
-        // that accepts one.
-        callback: None,
+        callback,
     };
     Ok(Valid {
         id,
@@ -516,20 +518,16 @@ fn history_key(text: &str) -> Result<Option<HistoryKey>, Fault> {
         .map_err(|fault| Fault::Wire("spec.historyKey", fault.code()))
 }
 
-/// A job that carries a retry policy `accepts` does not take, or a callback, is refused, the
-/// policy first, whatever either holds (an empty policy or callback included): every instance
-/// over the store must be one that acts on them before any accepts them, or an older one would
-/// end the job without retrying it or calling it back while its client believed otherwise
-/// (`docs/design/job-retry-and-completion-callback.md`, section 7). The refusal repeats nothing
-/// of either, so neither a callback's URL nor its key is ever in an answer.
+/// A job that carries a retry policy `accepts` does not take is refused, whatever it holds (an
+/// empty policy included), before its callback is looked at: every instance over the store must
+/// be one that acts on a policy before any accepts one, or an older one would end the job
+/// without retrying it while its client believed otherwise
+/// (`docs/design/job-retry-and-completion-callback.md`, section 7).
 fn not_enabled(spec: &v1::JobSpec, accepts: Accepts) -> Result<(), Fault> {
-    if spec.retry.is_some() & !accepts.retry {
-        return Err(Fault::Wire("spec.retry", "retry-not-enabled"));
+    match spec.retry {
+        Some(_) if !accepts.retry => Err(Fault::Wire("spec.retry", "retry-not-enabled")),
+        _ => Ok(()),
     }
-    if spec.callback.is_some() {
-        return Err(Fault::Wire("spec.callback", "callback-not-enabled"));
-    }
-    Ok(())
 }
 
 /// The retry policy `policy` as the record keeps it, its waits in whole seconds, as given

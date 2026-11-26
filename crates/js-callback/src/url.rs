@@ -7,6 +7,9 @@
 //! reference, and a [`CallbackUrl`]'s `Debug` shows its host alone.
 
 use std::fmt;
+use std::net::IpAddr;
+
+use crate::address::literal;
 
 /// The longest a callback URL may be, in bytes.
 pub const MAX_URL_LEN: usize = 2048;
@@ -86,6 +89,16 @@ impl CallbackUrl {
     #[must_use]
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    /// The address the host names when it is a literal rather than a name, read as the sender
+    /// reads it (an IPv6 address in its brackets, or an IPv4 address in any form `inet_aton`
+    /// reads, `2130706433` and `0x7f.1` among them); `None` for a name, which only a lookup
+    /// turns into addresses. The submit judges such an address by the [`crate::AddressRule`]
+    /// at once, since no lookup can change it.
+    #[must_use]
+    pub fn literal(&self) -> Option<IpAddr> {
+        literal(&self.host)
     }
 }
 
@@ -173,6 +186,28 @@ fn port_of(text: &str) -> Result<u16, UrlError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Asserts the literal address of each URL whose host is one, read as the sender reads it:
+    /// a dotted IPv4 address, the numeric forms `2130706433` and `0x7f.1`, and an IPv6 address in
+    /// its brackets; and none for a name, even one that starts with digits. Catches a numeric
+    /// host taken for a name (so a submit would let a loopback address through until a try),
+    /// and brackets left on an IPv6 host.
+    #[test]
+    fn a_literal_host_gives_its_address_and_a_name_none() {
+        let cases = [
+            ("https://203.0.113.9/x", Some("203.0.113.9")),
+            ("https://2130706433/x", Some("127.0.0.1")),
+            ("https://0x7f.1:8443", Some("127.0.0.1")),
+            ("https://[fd00:ec2::254]/x", Some("fd00:ec2::254")),
+            ("https://hooks.example/x", None),
+            ("https://1hooks.example", None),
+        ];
+        for (text, address) in cases {
+            let url = check_url(text).expect(text);
+            let expected = address.map(|one| one.parse::<IpAddr>().expect(one));
+            assert_eq!(url.literal(), expected, "{text}");
+        }
+    }
 
     /// Asserts the host and port taken from each accepted form: a name with and without a
     /// path, query and port, the scheme in capitals, an IPv4 literal, an IPv6 literal with and

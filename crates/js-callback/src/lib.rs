@@ -13,7 +13,7 @@
 //!   failed call is tried again is the store's to decide (`js-jobs`).
 //!
 //! The key ([`SigningKey`]) and the answer words are defined in `js-types`, which the store
-//! shares, and re-exported here. The server still refuses a job that carries a callback.
+//! shares, and re-exported here.
 
 mod address;
 mod resolve;

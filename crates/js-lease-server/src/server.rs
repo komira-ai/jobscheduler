@@ -14,6 +14,7 @@ use tracing::{error, info, warn};
 use crate::admit::{Admit, Launching};
 use crate::agents::{Agents, assemble_in};
 use crate::api::{Shared, agent_router, router};
+use crate::callbacks::{self, Deliverers};
 use crate::catalogs::{Cached, Catalogs};
 use crate::checks::Checker;
 use crate::clock::SharedClock;
@@ -66,6 +67,9 @@ pub struct Running {
     /// start does not wait for; a stop ends its read at the next page and waits for it, unless
     /// it was taken to be awaited before.
     sizes: Option<JoinHandle<usize>>,
+    /// The threads that deliver jobs' completion callbacks ([`crate::callbacks`]), while the
+    /// server holds the job tables.
+    delivering: Option<Deliverers>,
 }
 
 /// A listener beside the one of `--listen`: the agent routes alone (`server.agent_listen`),
@@ -236,6 +240,7 @@ async fn start_held<T: Ticker, C: Ticker, R: Ticker>(
     };
     // The store before anything else (design 6.7, step 1): a SQLite file's lock is taken
     // before the store is read and before any listener but the readiness one.
+    let store_hosts = config.store.as_ref().map(StoreSetting::tcp_hosts);
     let store = match (config.store.take(), &ready) {
         (Some(setting), Some(_)) => Some(ServerStore::open_waiting(setting, retry).await?),
         (Some(setting), None) => Some(ServerStore::open(setting)?),
@@ -250,6 +255,7 @@ async fn start_held<T: Ticker, C: Ticker, R: Ticker>(
         false => Duration::ZERO,
     };
     let (prepared, listeners) = prepare(config, store, &clock)?;
+    let callbacks = listeners.callbacks();
     let tls = listeners
         .tls
         .as_ref()
@@ -284,7 +290,11 @@ async fn start_held<T: Ticker, C: Ticker, R: Ticker>(
     // The name this server claims dispatch messages by: where it serves agents, and its pid.
     let agents_at = agent_listener.as_ref().map_or(addr, |(_, agents)| *agents);
     let claimer = format!("{agents_at}/{}", std::process::id());
-    shared.agents().dispatching.set_claimer(claimer);
+    shared.agents().dispatching.set_claimer(claimer.clone());
+    let ports = [&agent_listener, &job_listener, &metrics_listener];
+    let bound = ports.into_iter().flatten().map(|(_, at)| *at);
+    let listening: Vec<SocketAddr> = std::iter::once(addr).chain(bound).collect();
+    let delivering = callbacks::start(shared.agents(), &listening, store_hosts, claimer).await;
     info!(
         %addr,
         hosts = listing(&shared).hosts.len(),
@@ -323,6 +333,7 @@ async fn start_held<T: Ticker, C: Ticker, R: Ticker>(
         .zip(job_api::from_server(
             &shared,
             listeners.max_job_wall,
+            callbacks,
             log_reads,
         ))
         .map(|((listener, addr), api)| {
@@ -385,6 +396,7 @@ async fn start_held<T: Ticker, C: Ticker, R: Ticker>(
         tls,
         drain_hold: limits.drain_hold,
         sizes: Some(sizes),
+        delivering,
     })
 }
 
@@ -417,6 +429,14 @@ pub(crate) struct Listeners {
     tls: Option<TlsFiles>,
     agent_client_ca: Option<PathBuf>,
     limits: Limits,
+}
+
+impl Listeners {
+    /// Whether the job service takes a job's completion callback: never while
+    /// [`JobListen::callback_refused`] holds, which it does until the release that accepts one.
+    pub(crate) fn callbacks(&self) -> bool {
+        self.job_listen.is_some_and(|job| !job.callback_refused)
+    }
 }
 
 /// What a start has built when its listeners are about to be bound: the agent side, the
@@ -954,6 +974,9 @@ impl Running {
         let Polling { stop, mut task } = self.polling;
         let _ = stop.send(());
         let _ = (&mut task.0).await;
+        // The delivery threads end after their tries in flight, each within its send limit.
+        let delivering = self.delivering.take();
+        blocking(move || delivering.into_iter().for_each(Deliverers::stop)).await;
         self.shared.agents().sizes.stop();
         if let Some(sizes) = self.sizes.take() {
             let _ = sizes.await;

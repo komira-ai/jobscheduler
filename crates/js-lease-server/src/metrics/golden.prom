@@ -12,6 +12,9 @@ js_jobs{state="failed-to-start"} 1
 # HELP js_queue_oldest_age_seconds How long the oldest queued job has waited since its submit; 0 with none queued.
 # TYPE js_queue_oldest_age_seconds gauge
 js_queue_oldest_age_seconds 90.064
+# HELP js_callback_pending Completion callbacks of ended jobs not yet delivered, abandoned or expired; one past its deadline counts until a try finds it expired.
+# TYPE js_callback_pending gauge
+js_callback_pending 0
 # HELP js_job_placements_total Queued jobs placed on a host.
 # TYPE js_job_placements_total counter
 js_job_placements_total 2
@@ -67,6 +70,12 @@ js_job_pass_duration_seconds_count 2
 js_job_tables_total{from="store"} 1
 js_job_tables_total{from="kept"} 2
 js_job_tables_total{from="submitted"} 3
+# HELP js_callback_deliveries_total Tries of jobs' completion callbacks whose answer was recorded, by result: delivered (a 2xx), abandoned (a 410), failed (any other status, a timeout, a refused connection, a redirect or a name that did not resolve) or refused-address (the address rule refused an address of the receiver, and nothing was sent).
+# TYPE js_callback_deliveries_total counter
+js_callback_deliveries_total{result="delivered"} 1
+js_callback_deliveries_total{result="abandoned"} 2
+js_callback_deliveries_total{result="failed"} 3
+js_callback_deliveries_total{result="refused-address"} 4
 # HELP js_placement_refusals_total Refusals of a host to a queued job by the placement, by host and by the predicate that refused: cpu (CPU slack), cpu-curve (the curve hosts' slot-by-slot CPU check), predicted-memory (the load predicate's memory side), booked-memory (the flat memory guard) or cold-cap. A job is counted once for each host that refused it, in each pass.
 # TYPE js_placement_refusals_total counter
 js_placement_refusals_total{host="host-a",reason="cpu"} 3
