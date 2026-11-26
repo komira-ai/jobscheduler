@@ -34,11 +34,16 @@ const CALLBACK_DEADLINE_SECONDS: u32 = 20;
 
 /// [`retrying`] with a completion callback: an https receiver and a 32-byte key.
 fn calling(id: &str, max_attempts: u32) -> JobSpec {
+    calling_until(id, max_attempts, None)
+}
+
+/// [`calling`] with the callback's own deadline, `deadline_seconds` (`None`: the default).
+fn calling_until(id: &str, max_attempts: u32, deadline_seconds: Option<u32>) -> JobSpec {
     JobSpec {
         callback: Some(v1::Callback {
             url: "https://receiver.example/conformance".to_string(),
             signing_key: vec![7; 32],
-            deadline_seconds: None,
+            deadline_seconds,
         }),
         ..retrying(id, max_attempts)
     }
@@ -507,10 +512,7 @@ pub(super) async fn callback_once<H: JobHarness>(harness: &mut H, notes: &mut No
         "the callback of a cancelled job is delivered once",
     );
 
-    let mut asked = calling("call-deadline", 1);
-    if let Some(callback) = asked.callback.as_mut() {
-        callback.deadline_seconds = Some(CALLBACK_DEADLINE_SECONDS);
-    }
+    let asked = calling_until("call-deadline", 1, Some(CALLBACK_DEADLINE_SECONDS));
     submitted(&mut client, notes, "SubmitJob", asked).await;
     drive(harness, notes, "call-deadline", &TO_RUNNING);
     drive(harness, notes, "call-deadline", &[Step::Exit(0)]);
