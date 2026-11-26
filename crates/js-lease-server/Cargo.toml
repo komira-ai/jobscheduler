@@ -9,6 +9,9 @@ publish.workspace = true
 
 [dependencies]
 js-alert = { path = "../js-alert" }
+# A job's completion callback: the submit's check of its URL and key, the address rule, and the
+# sender the delivery threads try each due callback with (src/callbacks.rs).
+js-callback = { path = "../js-callback" }
 js-agent-wire = { path = "../js-agent-wire" }
 js-api-gateway = { path = "../js-api-gateway" }
 # The capability keys a job asks of its host (`layered-rootfs`, src/job_api/validate.rs).

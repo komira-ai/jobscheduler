@@ -1,8 +1,8 @@
 //! The read calls: `GetJob`, `ListJobs`, `GetResult` and `GetLogs`, served from the job
 //! tables. The group's own state is [`Ctx`], set through [`JobApi::with_read`].
 //!
-//! Every call reads the tables through [`Reads`], which offers the two reads they need (one
-//! job, one page of jobs) and no write, so no read call changes any state. Each read runs on
+//! Every call reads the tables through [`Reads`], which offers the reads they need (one job,
+//! one page of jobs, the callback statuses of jobs) and no write, so no read call changes any state. Each read runs on
 //! the pool for blocking calls ([`JobApi::on_tables`]). None takes a lock:
 //! the service holds no handle on the registry. Time is read only to tell an ended job whose
 //! retention end has passed, and from the store's clock ([`js_jobs::JobStore::now`]), which
@@ -35,6 +35,13 @@
 //! the host is heard, for a job with no host or one that has ended, and without a source. It is
 //! read at each call and drops the moment the host is heard again. No clock turns silence into
 //! a change of the job's state.
+//!
+//! # Callback status
+//!
+//! `GetJob` and `ListJobs` show, for a job that asked for a completion callback, where its
+//! delivery stands (`callback_status`), read from its `callback/` row in the same call of the
+//! tables for every job of the answer ([`statuses`]); a job without one shows none. A job shows
+//! its callback's URL and deadline, and never its key: `signing_key` is empty.
 //!
 //! # `GetLogs` without a stream
 //!
@@ -85,10 +92,12 @@ use js_state::ResumeToken;
 use js_types::HostId;
 use tonic::{Request, Response, Status};
 
+use self::statuses::Statuses;
 use super::fleet::Handle;
 use super::roles::{Caller, hidden};
 use super::{JobApi, logs};
 
+pub(crate) mod statuses;
 pub(crate) mod view;
 
 /// The page size of a listing that asks for 0.
@@ -156,8 +165,8 @@ impl Ctx {
 }
 
 /// `job` as the read calls show it: its record, with the silence of its host when it has not
-/// ended and has one, as `ctx` reads it.
-fn shown(ctx: &Ctx, job: &JobRecord) -> v1::Job {
+/// ended and has one, as `ctx` reads it, and its callback's status among `statuses`.
+fn shown(ctx: &Ctx, job: &JobRecord, statuses: &Statuses) -> v1::Job {
     let holding = job.host.as_ref().filter(|_| !job.state.is_ended());
     let source = ctx.silence.as_ref();
     let silent = holding
@@ -165,6 +174,7 @@ fn shown(ctx: &Ctx, job: &JobRecord) -> v1::Job {
         .and_then(|(host, source)| source.0.silent_since(host));
     v1::Job {
         host_silent_since_ms: silent,
+        callback_status: statuses.get(&job.id).map(view::callback_status),
         ..view::job(job)
     }
 }
@@ -228,6 +238,19 @@ impl Reads<'_> {
         }
     }
 
+    /// The callback status of each job of `jobs` that asked for one, in one call of the
+    /// tables ([`statuses`]); nothing is read when none did.
+    pub(super) async fn statuses(&self, jobs: &[JobRecord]) -> Result<Statuses, Status> {
+        let asked = statuses::asking(jobs);
+        if asked.is_empty() {
+            return Ok(Statuses::new());
+        }
+        let read = self
+            .0
+            .on_tables(move |tables| statuses::read(tables, &asked));
+        read.await.map_err(|error| read_failed(&error))
+    }
+
     /// One window of the table: at most `window` rows after `resume`, keeping the jobs in
     /// `state` when one is given.
     async fn window(
@@ -267,8 +290,9 @@ pub(super) async fn get_job(
     request: Request<GetJobRequest>,
 ) -> Result<Response<GetJobResponse>, Status> {
     let job = Reads(api).job(&request.into_inner().job_id, caller).await?;
+    let statuses = Reads(api).statuses(std::slice::from_ref(&job)).await?;
     Ok(Response::new(GetJobResponse {
-        job: Some(shown(&api.read, &job)),
+        job: Some(shown(&api.read, &job, &statuses)),
     }))
 }
 
@@ -431,8 +455,12 @@ pub(super) async fn list_jobs(
         owner: caller.only_jobs_of().cloned(),
     };
     let (jobs, next) = list(&api.read, Reads(api), &filter, resume, size).await?;
+    let statuses = Reads(api).statuses(&jobs).await?;
     Ok(Response::new(ListJobsResponse {
-        jobs: jobs.iter().map(|job| shown(&api.read, job)).collect(),
+        jobs: jobs
+            .iter()
+            .map(|job| shown(&api.read, job, &statuses))
+            .collect(),
         next_page_token: next.map(|token| token.key().to_owned()).unwrap_or_default(),
     }))
 }

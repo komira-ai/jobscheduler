@@ -588,8 +588,30 @@ impl Rig {
     ) -> Result<HeartbeatReply, Refused> {
         let sent = self.heartbeat(agent, taint);
         let body = Bytes::from(serde_json::to_vec(&sent).unwrap());
+        self.beat_body(body, None).await
+    }
+
+    /// The heartbeat of `agent`'s host, come from `peer`, answered by the route.
+    pub(crate) async fn beat_from(
+        &self,
+        agent: &FakeAgent,
+        peer: std::net::SocketAddr,
+    ) -> Result<HeartbeatReply, Refused> {
+        let sent = self.heartbeat(agent, None);
+        let body = Bytes::from(serde_json::to_vec(&sent).unwrap());
+        let peer = Some(Extension(axum::extract::ConnectInfo(peer)));
+        self.beat_body(body, peer).await
+    }
+
+    /// The route's answer to a heartbeat of `body` from `peer`.
+    pub(crate) async fn beat_body(
+        &self,
+        body: Bytes,
+        peer: crate::api::Peer,
+    ) -> Result<HeartbeatReply, Refused> {
         let agents = State(Arc::clone(&self.agents));
-        let answer = super::heartbeat(agents, Extension(self.who.clone()), (None, None), Ok(body));
+        let who = Extension(self.who.clone());
+        let answer = super::heartbeat(agents, who, (None, None), peer, Ok(body));
         answer.await.map(|Json(reply)| reply)
     }
 

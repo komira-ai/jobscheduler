@@ -111,7 +111,7 @@ use axum::Json;
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::rejection::BytesRejection;
-use axum::extract::{DefaultBodyLimit, Extension, Request, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Extension, Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
@@ -127,7 +127,7 @@ use tracing::{info, warn};
 use self::host_cert::CertifiedHost;
 use crate::admit::{reports_dispatch_poll, reports_held_beat};
 use crate::agents::Agents;
-use crate::api::{BODY_LIMIT, bearer};
+use crate::api::{BODY_LIMIT, Peer, bearer};
 use crate::host_keys::Writes;
 use crate::job_loss;
 use crate::job_store::ServerJobs;
@@ -419,6 +419,7 @@ async fn heartbeat(
     State(agents): State<Arc<Agents>>,
     Extension(who): Extension<Credential>,
     (one_time, certified): (Option<Extension<OneTime>>, Option<Extension<CertifiedHost>>),
+    peer: Peer,
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Json<HeartbeatReply>, Refused> {
     let heartbeat: Heartbeat = decode(
@@ -453,6 +454,12 @@ async fn heartbeat(
     // the file is written after, and when it cannot be the reply does not acknowledge it.
     let mut reply = beat_durably(&agents, &heartbeat, &who).await?;
     let applied = rows::beat_row(&agents, &heartbeat).await?;
+    // The address a host's beat comes from is one of the cluster's own, which no job's
+    // completion callback may reach (`docs/design/job-retry-and-completion-callback.md`, section
+    // 5.3): kept in memory, by this server, from a beat the registry accepted.
+    if let Some(Extension(ConnectInfo(at))) = peer {
+        agents.cluster.add_cluster_address(at.ip());
+    }
     // A start refused as host-tainted taints the host too, with nothing to acknowledge
     // there: the file is made current and a failure is retried by the next tick.
     let refused = heartbeat
@@ -783,3 +790,7 @@ mod held_tests;
 #[cfg(test)]
 #[path = "agent_api_whole_restart_tests.rs"]
 mod whole_restart_tests;
+
+#[cfg(test)]
+#[path = "agent_api_cluster_tests.rs"]
+mod cluster_tests;

@@ -121,6 +121,7 @@ use crate::job_store::ServerJobs;
 use roles::{Caller, admitted, caller_of};
 
 mod auth;
+mod callback_check;
 pub(crate) mod cancel;
 pub(crate) mod fleet;
 pub(crate) mod logs;
@@ -141,6 +142,8 @@ mod access_pages_tests;
 mod access_tests;
 #[cfg(test)]
 mod blocking_tests;
+#[cfg(test)]
+mod callback_tests;
 #[cfg(test)]
 mod clients_tests;
 #[cfg(test)]

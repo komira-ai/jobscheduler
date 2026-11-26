@@ -260,7 +260,7 @@ pub(super) async fn post_beat(
     who: Credential,
     body: Bytes,
 ) -> Result<HeartbeatReply, Refused> {
-    let answer = heartbeat(State(agents), Extension(who), (None, None), Ok(body));
+    let answer = heartbeat(State(agents), Extension(who), (None, None), None, Ok(body));
     answer.await.map(|Json(reply)| reply)
 }
 

@@ -230,3 +230,50 @@ where
     left.sort();
     assert_eq!(due_entries(&rig), left, "{name}: the entries left");
 }
+
+/// The pending callbacks are counted from their due entries: none with no job, none for a job
+/// whose callback is only armed, one for each job that ended with a callback, a claimed one
+/// still counted until it is answered, and one no longer counted once it is delivered,
+/// abandoned or expired. A failed read of the entries is the store's error, and no count.
+/// Catches a count that takes in armed rows, or that drops a pending row while a claim holds it.
+pub fn the_pending_callbacks_are_counted<B: Backend>(backend: &B) {
+    let name = "the_pending_callbacks_are_counted";
+    let rig = rig(backend);
+    let pending = || rig.jobs.callbacks_pending().expect("counts");
+    assert_eq!(pending(), 0, "{name}: no job");
+    queue_callback(&rig, "pc-armed");
+    assert_eq!(pending(), 0, "{name}: an armed callback");
+    let delivered = due_callback(&rig, "pc-delivered");
+    let abandoned = due_callback(&rig, "pc-abandoned");
+    due_callback(&rig, "pc-expired");
+    assert_eq!(pending(), 3, "{name}: three ended jobs");
+    let by = InstanceId::new("server-a");
+    let claims = rig
+        .jobs
+        .claim_callbacks(&by, now(&rig), usize::MAX)
+        .expect("claims");
+    assert_eq!(pending(), 3, "{name}: claimed, not answered");
+    for claim in claims {
+        let answer = match &claim.job {
+            id if *id == delivered => CallbackAnswer::Delivered,
+            id if *id == abandoned => CallbackAnswer::Abandoned,
+            _ => continue,
+        };
+        rig.jobs
+            .answer_callback(claim, answer, now(&rig))
+            .expect("answers");
+    }
+    assert_eq!(pending(), 1, "{name}: one left unanswered");
+    rig.clock.advance(Duration::from_secs(3600));
+    let claimed = rig.jobs.claim_callbacks(&by, now(&rig), usize::MAX);
+    assert_eq!(claimed, Ok(Vec::new()), "{name}: expired, not claimed");
+    assert_eq!(pending(), 0, "{name}: the expired one");
+    rig.store.fail_read_after(0);
+    assert_eq!(
+        rig.jobs.callbacks_pending(),
+        Err(JobStoreError::Store(js_state::StoreError::Failed(
+            crate::interfere::INJECTED.to_owned()
+        ))),
+        "{name}: a failed read"
+    );
+}

@@ -35,8 +35,14 @@ impl Rig {
         });
         let agents = State(Arc::clone(&self.agents));
         let body = Ok(Bytes::from(beat.to_string()));
-        let reply =
-            super::super::heartbeat(agents, Extension(self.pool.clone()), (None, None), body).await;
+        let reply = super::super::heartbeat(
+            agents,
+            Extension(self.pool.clone()),
+            (None, None),
+            None,
+            body,
+        )
+        .await;
         reply.map(|Json(reply)| reply)
     }
 

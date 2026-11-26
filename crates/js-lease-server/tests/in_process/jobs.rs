@@ -173,3 +173,37 @@ async fn without_the_job_service_the_seam_has_no_job_router_and_no_tables() {
     assert!(server.job_router().is_none());
     assert!(server.jobs().is_none());
 }
+
+/// Asserts that a server started from its flags (`--job-listen` given) refuses a job that asks
+/// for a completion callback, `400` with exactly `spec.callback: callback-not-enabled`, and
+/// records nothing: this release takes no callback, whatever the callback holds, until the
+/// release that accepts them. It catches a start that turns the refusal off.
+#[tokio::test]
+async fn a_server_from_its_flags_refuses_a_callback() {
+    let scratch = Scratch::new("jobs-seam-callback");
+    let (_clock, shared) = clock();
+    let server = InProcess::start(job_config(&scratch, true), shared).unwrap();
+    let router = server.job_router().expect("the job service is on");
+    let spec = json!({
+        "spec": {
+            "jobId": "job-cb",
+            "image": IMAGE,
+            "needs": { "cpuMillis": "1000", "memoryBytes": "1073741824" },
+            "wallLimitSeconds": "60",
+            "callback": {
+                "url": "https://hooks.example/done",
+                "signingKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            },
+        }
+    });
+    let refused = routed(&router, "POST", "/v1/jobs", Some(TOKEN), Some(&spec)).await;
+    assert_eq!(refused.status, 400, "{:?}", refused.body);
+    assert_eq!(
+        refused.body["field"], "spec.callback: callback-not-enabled",
+        "{:?}",
+        refused.body
+    );
+    let jobs = server.jobs().expect("the job tables are open");
+    let id = JobId::parse("job-cb").unwrap();
+    assert_eq!(jobs.get_job(&id).unwrap(), None);
+}

@@ -71,6 +71,29 @@ fn the_urls_of_the_install_recipe_name_their_socket_role_and_database() {
     );
 }
 
+// Catches a store host the job service would not deny a completion callback: every host the
+// URL names by a name or an address is listed, in order, then each `hostaddr`, and a Unix socket
+// directory is not.
+#[test]
+fn the_tcp_hosts_are_the_urls_names_and_addresses_without_its_sockets() {
+    let cases: [(&str, &[&str]); 4] = [
+        (
+            "postgres://db.example/kbf?hostaddr=10.0.0.9",
+            &["db.example", "10.0.0.9"],
+        ),
+        ("postgres://db.example:5432/kbf", &["db.example"]),
+        (
+            "postgres://10.0.0.7,db-b.example/kbf",
+            &["10.0.0.7", "db-b.example"],
+        ),
+        ("postgres:///kbf?host=/run/postgresql", &[]),
+    ];
+    for (url, hosts) in cases {
+        let config = PostgresConfig::parse(url).expect("parses");
+        assert_eq!(config.tcp_hosts(), hosts, "{url}");
+    }
+}
+
 // Catches a URI with no host being accepted (it would connect to a default socket the
 // operator never chose).
 #[test]

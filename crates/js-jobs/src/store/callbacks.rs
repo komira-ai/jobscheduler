@@ -364,6 +364,23 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             .map(|(callback, _)| callback.status()))
     }
 
+    /// How many callbacks are pending: their jobs have ended, and no try has yet been
+    /// answered 2xx or 410 and no deadline has expired them. Counted from the due entries
+    /// alone (one per pending row, claimed or not), which are read by key and never by row, so
+    /// a count costs a key scan of the pending callbacks and nothing more. A row past its
+    /// deadline counts until the next claim expires it.
+    ///
+    /// # Errors
+    /// A store error when the entries cannot be read.
+    pub fn callbacks_pending(&self) -> Result<u64, JobStoreError> {
+        let due = Span {
+            prefix: keys::CALLBACK_DUE,
+            below: None,
+        };
+        let entries = self.entries(&due)?;
+        Ok(u64::try_from(entries.len()).unwrap_or(u64::MAX))
+    }
+
     /// `txn`, which deletes the rows of the jobs `jobs` past their retention end, with the
     /// callback row of each that has a callback deleted too, and its due entry. A row this build
     /// cannot read is deleted with its job all the same.

@@ -773,6 +773,7 @@ mod alerts;
 mod api;
 pub mod bootstrap;
 mod brake_api;
+mod callbacks;
 mod catalogs;
 mod checks;
 mod client_verifier;

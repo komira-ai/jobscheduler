@@ -87,7 +87,7 @@ fn the_job_store_is_one_handle_shared_by_the_service() {
     let (_, jobs) = tables();
     let state = state(&dir, Some(Arc::new(jobs)));
     let logs = logs::Ctx::default();
-    let api = from_server(&state, WALL, logs).expect("the server holds a job store");
+    let api = from_server(&state, WALL, false, logs).expect("the server holds a job store");
     let held = state.agents().jobs.as_ref().unwrap();
     assert!(Arc::ptr_eq(&api.jobs, held));
 
@@ -124,7 +124,7 @@ fn the_job_store_is_one_handle_shared_by_the_service() {
 #[test]
 fn without_a_job_store_the_server_builds_no_job_service() {
     let dir = scratch("no_store");
-    assert!(from_server(&state(&dir, None), WALL, logs::Ctx::default()).is_none());
+    assert!(from_server(&state(&dir, None), WALL, false, logs::Ctx::default()).is_none());
 }
 
 /// Asserts that the fleet group of the job service built from the server's state is served
@@ -141,8 +141,8 @@ async fn the_fleet_group_is_served_over_the_servers_own_handles() {
     let pools = Arc::new(Status::new(None, None, Vec::new(), clock));
     let given = bare_state(&dir, Some(Arc::new(jobs))).with_pools(Arc::clone(&pools));
     let served = Arc::new(given);
-    let api =
-        from_server(&served, WALL, logs::Ctx::default()).expect("the server holds a job store");
+    let api = from_server(&served, WALL, false, logs::Ctx::default())
+        .expect("the server holds a job store");
     let hosts: Arc<dyn fleet::Hosts> = served.clone();
     assert_eq!(api.fleet, fleet::Ctx::served(hosts, pools, None));
 
@@ -150,7 +150,8 @@ async fn the_fleet_group_is_served_over_the_servers_own_handles() {
     let (_, jobs) = tables();
     let bare = state(&other, Some(Arc::new(jobs)));
     assert!(bare.pools().is_none());
-    let api = from_server(&bare, WALL, logs::Ctx::default()).expect("the server holds a job store");
+    let api = from_server(&bare, WALL, false, logs::Ctx::default())
+        .expect("the server holds a job store");
     assert_ne!(api.fleet, fleet::Ctx::default());
     let listed = fleet::list_pools(&api, tonic::Request::new(ListPoolsRequest::default())).await;
     let listed = listed.expect("ListPools is served").into_inner();
@@ -170,7 +171,7 @@ async fn answer(
     let clients = crate::config::Clients::only(&token(), "--token-file");
     let clients = crate::config::LiveClients::new(clients);
     let router = port(
-        from_server(&state, WALL, logs::Ctx::default()).unwrap(),
+        from_server(&state, WALL, false, logs::Ctx::default()).unwrap(),
         clients,
     );
     let mut request = Request::get("/v1/jobs/job-1");
@@ -245,7 +246,7 @@ async fn the_served_calls_are_the_ones_the_server_serves() {
     let dir = scratch("served");
     let (_, jobs) = tables();
     let state = state(&dir, Some(Arc::new(jobs)));
-    let api = Arc::new(from_server(&state, WALL, logs::Ctx::default()).unwrap());
+    let api = Arc::new(from_server(&state, WALL, false, logs::Ctx::default()).unwrap());
     let clients = crate::config::Clients::only(&token(), "--token-file");
     let clients = crate::config::LiveClients::new(clients);
     let authorization = format!("Bearer {}", String::from_utf8(TOKEN.to_vec()).unwrap());
@@ -281,5 +282,52 @@ async fn the_served_calls_are_the_ones_the_server_serves() {
             "{}: {status}",
             route.template
         );
+    }
+}
+
+/// Asserts that the job service the server builds refuses a job's callback
+/// (`callback-not-enabled`) unless its start says it takes them, and that when it does it judges
+/// the callback by the server's own address rule: an address the agent side learned as the
+/// cluster's own is refused. It catches a service that takes callbacks the release does not, and
+/// one that judges them by a rule of its own, blind to the addresses the server learns.
+#[tokio::test]
+async fn the_service_takes_a_callback_only_when_its_start_says_so() {
+    use super::super::writes_rig::{to_json, wire};
+    use js_proto::v1::{Callback, JobSpec, SubmitJobRequest};
+    let dir = scratch("callbacks");
+    let (_, jobs) = tables();
+    let state = state(&dir, Some(Arc::new(jobs)));
+    state
+        .agents()
+        .cluster
+        .add_cluster_address([10, 9, 9, 9].into());
+    let spec = JobSpec {
+        callback: Some(Callback {
+            url: "https://10.9.9.9/done".to_owned(),
+            signing_key: vec![1; 32],
+            deadline_seconds: None,
+        }),
+        ..wire("wired-callback")
+    };
+    let request = SubmitJobRequest { spec: Some(spec) };
+    let body = to_json("SubmitJobRequest", &request).to_string();
+    for (callbacks, field) in [
+        (false, "spec.callback: callback-not-enabled"),
+        (true, "spec.callback.url: refused-address"),
+    ] {
+        let clients = crate::config::Clients::only(&token(), "--token-file");
+        let clients = crate::config::LiveClients::new(clients);
+        let api = from_server(&state, WALL, callbacks, logs::Ctx::default()).unwrap();
+        let bearer = format!("Bearer {}", String::from_utf8(TOKEN.to_vec()).unwrap());
+        let request = Request::post("/v1/jobs")
+            .header(header::AUTHORIZATION, bearer)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.clone()))
+            .unwrap();
+        let response = port(api, clients).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{callbacks}");
+        let body = to_bytes(response.into_body(), 1 << 16).await.unwrap();
+        let said: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(said["field"], field, "{callbacks}");
     }
 }

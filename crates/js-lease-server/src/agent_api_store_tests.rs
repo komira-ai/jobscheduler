@@ -204,7 +204,8 @@ impl Rig {
         let one_time = one_time.map(|presented| Extension(OneTime(presented)));
         let agents = State(Arc::clone(&self.agents));
         let body = Ok(Bytes::from(beat.to_string()));
-        let reply = super::heartbeat(agents, Extension(who.clone()), (one_time, None), body).await;
+        let reply =
+            super::heartbeat(agents, Extension(who.clone()), (one_time, None), None, body).await;
         reply.map(|Json(reply)| reply)
     }
 
@@ -226,8 +227,14 @@ impl Rig {
         });
         let agents = State(Arc::clone(&self.agents));
         let body = Ok(Bytes::from(beat.to_string()));
-        let reply =
-            super::heartbeat(agents, Extension(self.pool.clone()), (None, None), body).await;
+        let reply = super::heartbeat(
+            agents,
+            Extension(self.pool.clone()),
+            (None, None),
+            None,
+            body,
+        )
+        .await;
         reply.map(|Json(reply)| reply)
     }
 

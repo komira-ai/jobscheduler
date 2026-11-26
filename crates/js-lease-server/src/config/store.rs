@@ -78,6 +78,15 @@ pub(crate) struct StoreSetting {
 }
 
 impl StoreSetting {
+    /// The hosts the store's URL names by a name or an address, which the job service denies a
+    /// completion callback ([`crate::callbacks::store_addresses`]); none for a SQLite file.
+    pub(crate) fn tcp_hosts(&self) -> Vec<String> {
+        match &self.target {
+            WriterTarget::Postgres(config) => config.tcp_hosts(),
+            WriterTarget::Sqlite(_) => Vec::new(),
+        }
+    }
+
     /// Whether opening the store takes a file lock another process can hold (a SQLite file),
     /// which the start waits for under `--ready-listen`.
     pub(crate) fn is_locked(&self) -> bool {
@@ -215,6 +224,17 @@ mod tests {
             assert!(shown.starts_with("Postgres(PostgresConfig {"), "{text:?}");
             assert!(!format!("{setting:?}").contains("pw-0123"), "{text:?}");
         }
+    }
+
+    /// Asserts that a Postgres store's hosts are the names and addresses its URL names, which
+    /// the job service denies to callbacks, and that a SQLite store has none. Catches a store
+    /// host left open to a callback.
+    #[test]
+    fn a_stores_hosts_are_its_urls_and_a_sqlite_file_has_none() {
+        let setting = read("postgres://js@db.example.org,10.0.0.7:5433/js", false).unwrap();
+        assert_eq!(setting.tcp_hosts(), ["db.example.org", "10.0.0.7"]);
+        let file = read("sqlite:/var/lib/js/state.db", true).unwrap();
+        assert_eq!(file.tcp_hosts(), Vec::<String>::new());
     }
 
     /// Asserts that a store setting reads as using its own clock until a simulation injects
