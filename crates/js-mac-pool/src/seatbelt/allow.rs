@@ -121,7 +121,10 @@ pub struct NoBaseSet {
 
 impl NoBaseSet {
     fn new(version: &str) -> Self {
-        let known: Vec<String> = MacosMajor::ALL.iter().map(|m| m.major().to_string()).collect();
+        let known: Vec<String> = MacosMajor::ALL
+            .iter()
+            .map(|m| m.major().to_string())
+            .collect();
         Self {
             version: version.to_owned(),
             known: known.join(", "),

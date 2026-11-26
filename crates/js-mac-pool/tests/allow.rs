@@ -795,7 +795,8 @@ fn a_major_version_without_a_base_set_fails_closed() {
     for major in [0, 1, 10, 11, 12, 13, 16, 17, 24, 25, 28, u32::MAX] {
         assert_eq!(MacosMajor::from_major(major), None, "{major}");
         assert!(
-            MacosMajor::from_product_version(&format!("{major}.0.1")).is_err(),
+            MacosMajor::from_product_version(&format!("{major}.0.1"))
+                .is_err(),
             "{major}"
         );
     }
@@ -823,7 +824,8 @@ fn a_version_without_a_base_set_is_refused_with_the_version_named() {
     ];
     for (text, named) in table {
         assert_eq!(
-            MacosMajor::from_product_version(text).map_err(|refused| refused.to_string()),
+            MacosMajor::from_product_version(text)
+                .map_err(|refused| refused.to_string()),
             Err(refusal(named)),
             "{text:?}"
         );
