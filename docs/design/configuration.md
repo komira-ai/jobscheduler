@@ -218,6 +218,7 @@ port and counts nothing. Any other path, on that port, is answered as an unknown
 |---|---|---|---|
 | `js_jobs` | gauge | `state` | the jobs in the job tables, by state (`queued`, `placed`, `starting`, `running`, `succeeded`, `failed`, `cancelled`, `lost`, `failed-to-start`); only with the job service on |
 | `js_queue_oldest_age_seconds` | gauge | | how long the oldest queued job has waited since its submit, 0 with none queued; only with the job service on |
+| `js_callback_pending` | gauge | | the completion callbacks of ended jobs not yet delivered, abandoned or expired, claimed or not, read from the store's due entries; one past its deadline counts until a try finds it expired; only with the job service on |
 | `js_job_placements_total` | counter | | the queued jobs placed on a host |
 | `js_queue_wait_seconds` | histogram | | each placed job's wait from its submit to its placement |
 | `js_job_start_failures_total` | counter | `code` | the jobs that failed to start, by code (`no-capacity`, `start-timeout`, `exclusive-not-ready`, `agent-refused`, `input-unavailable`) |
@@ -225,6 +226,7 @@ port and counts nothing. Any other path, on that port, is answered as an unknown
 | `js_store_write_failures_total` | counter | | the passes over the job tables the server makes itself (the job pass, a placement, a heartbeat's job listing) that failed, so their write did not commit; a client's submit or cancel that fails is answered to the client |
 | `js_job_pass_duration_seconds` | histogram | | how long each job pass of the tick took |
 | `js_job_tables_total` | counter | `from` | the passes over the queued jobs, by where each took the job tables (the live allocations, the queued jobs, the marks and the cordons) from: `store` (read, as a write came since the last read), `kept` (no write since), `submitted` (no write since but the commits of this server's submits, whose jobs were added to the tables kept) |
+| `js_callback_deliveries_total` | counter | `result` | the tries of jobs' completion callbacks (docs/design/job-retry-and-completion-callback.md) whose answer this server recorded, by result: `delivered` (a 2xx), `abandoned` (a 410), `failed` (any other status, a timeout, a refused connection, a redirect, a name that did not resolve) or `refused-address` (the address rule refused an address of the receiver, and nothing was sent); a try whose claim lapsed before its answer, or whose answer the store did not take, is not counted |
 | `js_placement_refusals_total` | counter | `host`, `reason` | the refusals of a host to a queued job by the placement, by the predicate that refused: `cpu` (the CPU slack: what the host is charged plus the job's cores is above its cores times the slack), `predicted-memory` (the load predicate's memory side), `booked-memory` (the flat memory guard), `cpu-curve` (the curve hosts' slot-by-slot CPU check, under `placement_curves = "on"`) or `cold-cap` (the cold leases admitted this window reach the cap). A job is counted once for each host that refused it in each pass; a host refused for none of these (a lease cap, a job larger than the host) is not counted. The same refusals are logged: one info line per host per pass with the count of each reason and the figures of the latest, and one debug line for each, naming the job |
 | `js_curve_wait_expiries_total` | counter | | the queued jobs of a curve class that waited past `server.curve_max_wait_seconds` with no host fitting their curve, and were tested with their flat number from then on; written at 0 in every mode. A rise means curves book more than the hosts can give |
 | `js_agent_start_refusals_total` | counter | `host`, `code` | the job starts a host's agent refused, by the refusal code the agent listed (`no-capacity`, `input-not-allowed`, ...): the code itself when it is 1 to 64 characters of `a-z`, `0-9` and `-`, `other` otherwise, and `none` when the agent listed no code. A refusal is counted once, when the requeue or the end it brings is committed, whether the job then goes back to the queue (`host-held`, `no-capacity`, `bundle-pending`) or fails to start |
@@ -240,7 +242,8 @@ The counters count from the start of the process; a start failure or a loss is c
 still counts what it ended. The gauges are read at each scrape from the state `GET /v1/hosts` and the job service read, holding no lock
 of the server's while the text is written; a scrape whose read of the job tables fails is answered 503. The parts are read one after
 another, not in one transaction, so a job placed between two reads can show as queued while its booking already counts. The text
-names no job, lease, run or token: its labels are a state, a failure code, a host's id, a pool's name and a mark.
+names no job, lease, run, token or callback: its labels are a state, a failure code, a host's id, a pool's name, a mark and a callback's
+result.
 
 - **Address.** The route takes no token, so it is served only on a private address (the rule of `/status`: loopback, RFC 1918, the
   shared range a tailnet uses, link-local and IPv6 unique-local; a wildcard is accepted), and on each request only to a peer whose

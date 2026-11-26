@@ -62,6 +62,7 @@ pub const CRATES: &[&str] = &[
     "js-alert",
     "js-api-gateway",
     "js-bundle",
+    "js-callback",
     "js-caps",
     "js-client",
     "js-conformance",

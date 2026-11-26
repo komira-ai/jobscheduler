@@ -71,8 +71,9 @@ fn exited(code: i32) -> JobEnd {
 /// past its shape; a placed job booking the whole of `host-c`; two queued jobs, the older
 /// submitted 90 s before the scrape and 64 ms more of the store's own clock (2 ms for each of
 /// the 32 commits after it), the younger 5 s before it; `host-d` draining; and the recorder told of two placements, a start failure of
-/// each code, two losses, a failed write, two job passes and three launches of the pool `gpu`,
-/// one of them refused for capacity.
+/// each code, two losses, a failed write, two job passes, three launches of the pool `gpu`,
+/// one of them refused for capacity, and callback tries answered once delivered, twice
+/// abandoned, three times failed and four times refused by the address rule.
 async fn fixture(name: &str) -> Fixture {
     let rig = clocked_rig(name, true, JobLimits::default());
     let mut rig = rig;
@@ -150,6 +151,15 @@ async fn fixture(name: &str) -> Fixture {
     (0..2).for_each(|_| recorder.start_refused(&host_a, "no-capacity"));
     recorder.start_refused(&host_b, "input-not-allowed");
     (0..2).for_each(|_| recorder.curve_wait_expired());
+    let answers = [
+        CallbackAnswer::Delivered,
+        CallbackAnswer::Abandoned,
+        CallbackAnswer::Failed(FailureClass::Failed),
+        CallbackAnswer::Failed(FailureClass::RefusedAddress),
+    ];
+    for (answer, times) in answers.iter().zip(1..) {
+        (0..times).for_each(|_| recorder.callback_answered(answer));
+    }
     let capacity = Acquired::Refused(Refusal {
         code: RefusalCode::Capacity,
         reason: Reason::Api("no capacity in the zone".to_owned()),
@@ -206,6 +216,43 @@ async fn the_text_holds_no_job_id_or_token() {
     }
 }
 
+/// Asserts that the scrape counts the completion callbacks pending in the store: none for the
+/// fixture, whose jobs ask for none, one for a job that asks for one and ended, and none
+/// again for a job that asks for one and has not ended (armed, not pending). Catches a gauge
+/// read from somewhere else than the store, and one that counts armed callbacks.
+#[tokio::test]
+async fn the_scrape_counts_the_pending_callbacks() {
+    let fixture = fixture("pending").await;
+    assert!(
+        scraped(&fixture)
+            .await
+            .contains("\njs_callback_pending 0\n")
+    );
+    let jobs = &fixture.rig.jobs;
+    let callback = js_jobs::JobCallback {
+        url: "https://hooks.example/x".to_owned(),
+        key: js_jobs::CallbackKey::Key(js_types::SigningKey::new(vec![5; 32]).unwrap()),
+        deadline_seconds: None,
+    };
+    for (id, ended) in [("pending-ended", true), ("pending-armed", false)] {
+        let new = NewJob {
+            id: Some(JobId::parse(id).unwrap()),
+            spec: js_jobs::JobSpec {
+                callback: Some(callback.clone()),
+                ..spec()
+            },
+            priority: 0,
+            client: None,
+        };
+        let id = jobs.insert_queued(new).unwrap().record.id;
+        if ended {
+            jobs.request_cancel(&id).unwrap();
+        }
+    }
+    let text = scraped(&fixture).await;
+    assert!(text.contains("\njs_callback_pending 1\n"), "{text}");
+}
+
 /// Asserts that a server without the job tables writes no job family, whatever its hosts,
 /// and still writes the event families, at zero. It catches a scrape that fails, or writes
 /// zero jobs, when the job service is off.
@@ -219,6 +266,7 @@ async fn without_the_job_tables_no_job_family_is_written() {
     let text = render(&seen, &Recorder::default());
     assert!(!text.contains("js_jobs{"), "{text}");
     assert!(!text.contains("js_queue_oldest_age_seconds"), "{text}");
+    assert!(!text.contains("js_callback_pending"), "{text}");
     assert!(text.contains("\njs_job_placements_total 0\n"), "{text}");
     assert!(text.contains("\njs_jobs_lost_total 0\n"), "{text}");
 }

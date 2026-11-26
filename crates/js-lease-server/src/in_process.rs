@@ -99,8 +99,13 @@ impl InProcess {
             checker,
             schedule: Schedule::first(clock.now()),
         });
-        let job = job_api::from_server(&shared, listeners.max_job_wall, log_reads)
-            .map(|api| job_api::port(api, listeners.clients));
+        let job = job_api::from_server(
+            &shared,
+            listeners.max_job_wall,
+            listeners.callbacks(),
+            log_reads,
+        )
+        .map(|api| job_api::port(api, listeners.clients));
         Ok(Self {
             shared,
             scaler,

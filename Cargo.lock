@@ -1509,6 +1509,7 @@ dependencies = [
  "js-agent-wire",
  "js-alert",
  "js-api-gateway",
+ "js-callback",
  "js-caps",
  "js-cli",
  "js-conformance",

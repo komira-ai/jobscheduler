@@ -11,7 +11,7 @@ use js_registry::HostMark;
 use js_sched_placer::curves::CurveView;
 use js_types::HostId;
 
-use super::{FAILURE_CODES, Histogram, Recorder, TABLES_FROM};
+use super::{CALLBACK_RESULTS, FAILURE_CODES, Histogram, Recorder, TABLES_FROM};
 use crate::hosts::mark_text;
 
 /// The job states, in the order they are written. A job that failed to start is counted under
@@ -42,12 +42,14 @@ fn state_slot(state: JobState) -> usize {
     }
 }
 
-/// What a scrape read of the job tables: how many jobs are in each state, and how long the
-/// oldest queued job has waited (zero with none queued).
+/// What a scrape read of the job tables: how many jobs are in each state, how long the
+/// oldest queued job has waited (zero with none queued), and how many completion callbacks are
+/// pending.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct JobsSeen {
     by_state: [u64; 9],
     oldest_queued: Duration,
+    callbacks_pending: u64,
 }
 
 impl JobsSeen {
@@ -57,6 +59,11 @@ impl JobsSeen {
         if state == JobState::Queued {
             self.oldest_queued = self.oldest_queued.max(waited);
         }
+    }
+
+    /// Records that `pending` completion callbacks are pending.
+    pub(crate) fn callbacks_pending(&mut self, pending: u64) {
+        self.callbacks_pending = pending;
     }
 }
 
@@ -155,6 +162,10 @@ pub(crate) fn render(seen: &Snapshot, recorder: &Recorder) -> String {
             "How long the oldest queued job has waited since its submit; 0 with none queued.";
         family(&mut out, oldest, "gauge", help);
         let _ = writeln!(out, "{oldest} {}", seconds(jobs.oldest_queued));
+        let pending = "js_callback_pending";
+        let help = "Completion callbacks of ended jobs not yet delivered, abandoned or expired; one past its deadline counts until a try finds it expired.";
+        family(&mut out, pending, "gauge", help);
+        let _ = writeln!(out, "{pending} {}", jobs.callbacks_pending);
     }
     let placed = recorder.placed.load(Ordering::Relaxed);
     let help = "Queued jobs placed on a host.";
@@ -193,6 +204,7 @@ pub(crate) fn render(seen: &Snapshot, recorder: &Recorder) -> String {
         let count = count.load(Ordering::Relaxed);
         let _ = writeln!(out, "{name}{{from=\"{from}\"}} {count}");
     }
+    callbacks(&mut out, recorder);
     refusals(&mut out, recorder);
     let expired = recorder.curve_wait_expiries.load(Ordering::Relaxed);
     let help = "Queued jobs of a curve class that waited past the wait bound (server.curve_max_wait_seconds) with no host fitting their curve, and were tested with their flat number from then on. A rise means curves book more than the hosts can give.";
@@ -204,6 +216,16 @@ pub(crate) fn render(seen: &Snapshot, recorder: &Recorder) -> String {
         curves(&mut out, view);
     }
     out
+}
+
+fn callbacks(out: &mut String, recorder: &Recorder) {
+    let name = "js_callback_deliveries_total";
+    let help = "Tries of jobs' completion callbacks whose answer was recorded, by result: delivered (a 2xx), abandoned (a 410), failed (any other status, a timeout, a refused connection, a redirect or a name that did not resolve) or refused-address (the address rule refused an address of the receiver, and nothing was sent).";
+    family(out, name, "counter", help);
+    for (result, count) in CALLBACK_RESULTS.iter().zip(&recorder.callbacks) {
+        let count = count.load(Ordering::Relaxed);
+        let _ = writeln!(out, "{name}{{result=\"{result}\"}} {count}");
+    }
 }
 
 fn refusals(out: &mut String, recorder: &Recorder) {

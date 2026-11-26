@@ -148,8 +148,7 @@ pub(crate) struct Agents {
     /// How long such a reply is held when the beat lists a job as `starting`
     /// ([`held_beat::starting_hold`]).
     pub(crate) starting_hold: Duration,
-    /// The jobs each host's held beats list as `starting`, and since when
-    /// ([`held_beat::Starts`]).
+    /// The jobs each host's held beats list as `starting`, and since when ([`held_beat::Starts`]).
     pub(crate) starts: held_beat::Starts,
     /// The machine providers of the pool's Default platform, first to last, as the bindings of
     /// its hosts name them: the order the pass offers the hosts in
@@ -158,6 +157,8 @@ pub(crate) struct Agents {
     /// The live hosts the pass over the queued jobs has said it skips for their taint
     /// ([`TaintSkips`]), so that each taint is logged once.
     pub(crate) taint_skips: TaintSkips,
+    /// The cluster's own addresses, which no job's completion callback may reach.
+    pub(crate) cluster: js_callback::AddressRule,
 }
 
 /// Why a cordon or its lift was not done, or not saved.
@@ -369,6 +370,7 @@ fn placed_in(
         starts: held_beat::Starts::default(),
         providers,
         taint_skips: TaintSkips::default(),
+        cluster: js_callback::AddressRule::new([]),
     };
     Ok((Arc::new(agents), placer))
 }
@@ -446,6 +448,7 @@ impl Agents {
             starts: held_beat::Starts::default(),
             providers,
             taint_skips: TaintSkips::default(),
+            cluster: js_callback::AddressRule::new([]),
         }
     }
 

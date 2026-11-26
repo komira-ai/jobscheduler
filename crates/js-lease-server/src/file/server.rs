@@ -236,7 +236,11 @@ impl AgentKeys {
     /// Where the job service is served, when the file turns it on.
     pub(crate) fn job_listen(&self) -> Option<JobListen> {
         let flag = "server.job_listen";
-        self.job_listen.map(|addr| JobListen { addr, flag })
+        self.job_listen.map(|addr| JobListen {
+            addr,
+            flag,
+            callback_refused: true,
+        })
     }
 
     /// The job store's setup when the file turns the job service on: named by its key, and

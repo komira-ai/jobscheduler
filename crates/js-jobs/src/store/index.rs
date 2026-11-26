@@ -205,7 +205,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     }
 
     /// Every entry of `span`, in key order.
-    fn entries(&self, span: &Span<'_>) -> Result<Vec<String>, JobStoreError> {
+    pub(super) fn entries(&self, span: &Span<'_>) -> Result<Vec<String>, JobStoreError> {
         let mut all = Vec::new();
         let mut resume = None;
         loop {

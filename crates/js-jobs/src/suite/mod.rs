@@ -514,6 +514,7 @@ macro_rules! job_store_tests {
             the_sweep_deletes_a_callback_with_its_job,
             boot_raises_due_callback_deadlines,
             the_boot_deletes_an_orphan_callback,
+            the_pending_callbacks_are_counted,
         );
     };
 }

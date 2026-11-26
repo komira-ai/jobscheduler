@@ -1,7 +1,9 @@
 //! `SubmitJob` of a job that carries a retry policy (`spec.retry`) or a completion callback
-//! (`spec.callback`), over both transports through the mounted handler: this release acts on
+//! (`spec.callback`), over both transports through the mounted handler: this release takes
 //! neither, so it refuses both, before it looks the job's id up and before admission, and
-//! records nothing (`docs/design/job-retry-and-completion-callback.md`, section 7).
+//! records nothing (`docs/design/job-retry-and-completion-callback.md`, section 7). It delivers
+//! the callback of a job a later release took; its submit takes one only where a test turns
+//! the refusal off (`callback_tests.rs`).
 
 use super::*;
 
