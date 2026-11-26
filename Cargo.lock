@@ -1276,8 +1276,16 @@ dependencies = [
 name = "js-callback"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
+ "hmac",
  "js-types",
+ "rcgen",
+ "rustls",
+ "sha2",
  "thiserror",
+ "tracing",
+ "tracing-subscriber",
+ "ureq",
 ]
 
 [[package]]
