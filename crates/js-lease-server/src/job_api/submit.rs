@@ -74,6 +74,18 @@
 //! Every read and write of the job tables runs on the pool for blocking calls
 //! ([`JobApi::on_tables`]), so a slow store holds up this call and not the server's workers.
 //!
+//! # Phases timed
+//!
+//! When the service places jobs ([`Ctx::poking`]) the call times each phase it reaches, by the
+//! meter of the agent side ([`Agents::meter`]), whatever the phase's answer, and counts it in
+//! `js_submit_phase_seconds` ([`SubmitPhase`]): `validation` (step 1), `get` (step 2's read,
+//! its wait for a place on the blocking pool included, for a job with an id), `admission`
+//! (step 3, for a job not yet held), `insert-checkout` and `insert-transaction` (step 4's
+//! insert: the time it spent getting connections of the store's pool, and the rest; the read
+//! of a callback's status after it, and the wait for a place on the blocking pool before it,
+//! are in neither) and `note-inserted` (step 5's [`Agents::note_inserted`]). A context that does
+//! not poke times nothing.
+//!
 //! The call calls no provider.
 
 use std::sync::Arc;
@@ -93,6 +105,7 @@ use super::read::{statuses, view};
 use super::roles::Caller;
 use super::validate::{self, Accepts, Fault};
 use crate::agents::Agents;
+use crate::metrics::{Meter, SubmitPhase};
 use crate::util::blocking;
 
 /// The ceiling on a job's wall limit when `--max-job-wall` (or `server.max_job_wall`) is not
@@ -286,30 +299,38 @@ pub(super) async fn submit_job(
     };
     let client = Some(caller.name.clone());
     let request = request.into_inner();
+    let meter = match &served.poking {
+        Some(Handle(agents)) => agents.meter().clone(),
+        None => Meter::off().clone(),
+    };
     let callbacks = served.callbacks.as_ref().map(|rule| rule.0.as_ref());
-    let valid = validate::job(
-        request.spec.as_ref(),
-        served.ceiling,
-        served.accepts,
-        callbacks,
-    )
-    .map_err(refused)?;
+    let (valid, took) = meter.timed(|| {
+        validate::job(
+            request.spec.as_ref(),
+            served.ceiling,
+            served.accepts,
+            callbacks,
+        )
+    });
+    meter.sink().submit_phase(SubmitPhase::Validation, took);
+    let valid = valid.map_err(refused)?;
     let stored = match valid.id.clone() {
-        Some(id) => api
-            .on_tables(move |jobs| jobs.get_job(&id))
-            .await
-            .map_err(not_written())?,
+        Some(id) => {
+            let read = api.on_tables(move |jobs| jobs.get_job(&id));
+            let (found, took) = meter.timed_await(read).await;
+            meter.sink().submit_phase(SubmitPhase::Get, took);
+            found.map_err(not_written())?
+        }
         None => None,
     };
     let isolation = valid.spec.constraints.isolation;
-    if stored.is_none()
-        && !served
-            .admission
-            .0
-            .can_ever_serve(&valid.wanted, isolation)
-            .await
-    {
-        return Err(no_capable_host());
+    if stored.is_none() {
+        let asked = served.admission.0.can_ever_serve(&valid.wanted, isolation);
+        let (servable, took) = meter.timed_await(asked).await;
+        meter.sink().submit_phase(SubmitPhase::Admission, took);
+        if !servable {
+            return Err(no_capable_host());
+        }
     }
     let new = NewJob {
         id: valid.id,
@@ -317,9 +338,18 @@ pub(super) async fn submit_job(
         priority: valid.priority,
         client,
     };
+    let inserting = meter.clone();
     let (inserted, statuses) = api
         .on_tables(move |jobs| {
-            let inserted = jobs.insert_queued_after_get(new, stored)?;
+            let (inserted, took, checkout) =
+                inserting.timed_checkouts(|| jobs.insert_queued_after_get(new, stored));
+            let sink = inserting.sink();
+            sink.submit_phase(SubmitPhase::InsertCheckout, checkout);
+            sink.submit_phase(
+                SubmitPhase::InsertTransaction,
+                took.saturating_sub(checkout),
+            );
+            let inserted = inserted?;
             // The job is recorded: a status that cannot be read is left out of the answer.
             let asked = statuses::asking([&inserted.record]);
             let statuses = statuses::read(jobs, &asked).unwrap_or_default();
@@ -331,7 +361,7 @@ pub(super) async fn submit_job(
         return Err(id_conflict());
     }
     let record = match &served.poking {
-        Some(Handle(agents)) => poke(agents, inserted).await,
+        Some(Handle(agents)) => poke(agents, &meter, inserted).await,
         None => inserted.record,
     };
     let status = statuses.get(&record.id).map(view::callback_status);
@@ -345,13 +375,16 @@ pub(super) async fn submit_job(
 
 /// Tells the placer of `agents` of the job just recorded, `inserted`, so that the next pass
 /// does not read the job tables again for it ([`Agents::note_inserted`], which never waits for
-/// a pass that holds them), and pokes the
-/// placement poller ([`crate::poller::Poller::poke`]); the job's record as the commit recorded
-/// it. The poke comes after the commit, so the pass it brings reads the job.
-async fn poke(agents: &Arc<Agents>, inserted: Inserted) -> JobRecord {
-    let noting = Arc::clone(agents);
+/// a pass that holds them), timed by `meter`, and pokes the placement poller
+/// ([`crate::poller::Poller::poke`]); the job's record as the commit recorded it. The poke comes
+/// after the commit, so the pass it brings reads the job.
+async fn poke(agents: &Arc<Agents>, meter: &Meter, inserted: Inserted) -> JobRecord {
+    let (noting, meter) = (Arc::clone(agents), meter.clone());
     let record = blocking(move || {
-        noting.note_inserted(&inserted);
+        let ((), took) = meter.timed(|| {
+            noting.note_inserted(&inserted);
+        });
+        meter.sink().submit_phase(SubmitPhase::NoteInserted, took);
         inserted.record
     })
     .await;
@@ -374,3 +407,7 @@ mod rows_tests;
 #[cfg(test)]
 #[path = "submit_reads_tests.rs"]
 mod reads_tests;
+
+#[cfg(test)]
+#[path = "submit_phase_tests.rs"]
+mod phase_tests;
