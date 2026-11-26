@@ -673,7 +673,11 @@ fn macos_versions_are_read_from_a_product_version() {
         ("", None),
     ];
     for (text, expected) in table {
-        assert_eq!(MacosMajor::from_product_version(text), expected, "{text:?}");
+        assert_eq!(
+            MacosMajor::from_product_version(text).ok(),
+            expected,
+            "{text:?}"
+        );
     }
     assert_eq!(MacosMajor::from_major(14), Some(MacosMajor::Macos14));
     assert_eq!(MacosMajor::from_major(15), Some(MacosMajor::Macos15));
@@ -690,14 +694,40 @@ fn macos_versions_are_read_from_a_product_version() {
 fn a_major_version_without_a_base_set_fails_closed() {
     for major in [0, 1, 10, 11, 12, 13, 16, 17, 25, 26, 28, u32::MAX] {
         assert_eq!(MacosMajor::from_major(major), None, "{major}");
-        assert_eq!(
-            MacosMajor::from_product_version(&format!("{major}.0.1")),
-            None,
+        assert!(
+            MacosMajor::from_product_version(&format!("{major}.0.1")).is_err(),
             "{major}"
         );
     }
     let known: Vec<u32> = MacosMajor::ALL.iter().map(|m| m.major()).collect();
     assert_eq!(known, [14, 15, 27]);
+}
+
+/// A host on a version without a base set is refused with a reason that names the version
+/// it runs and the versions that have a set; text that is not a version is named as given.
+#[test]
+fn a_version_without_a_base_set_is_refused_with_the_version_named() {
+    let refusal = |version: &str| {
+        format!(
+            "macOS {version:?} has no Seatbelt base set (there are sets for macOS 14, 15, 26, \
+             27): the allow read model is refused on this host"
+        )
+    };
+    let table = [
+        ("28.0.1\n", "28.0.1"),
+        ("16.4", "16.4"),
+        ("13", "13"),
+        ("fourteen", "fourteen"),
+        (" ", ""),
+        ("", ""),
+    ];
+    for (text, named) in table {
+        assert_eq!(
+            MacosMajor::from_product_version(text).map_err(|refused| refused.to_string()),
+            Err(refusal(named)),
+            "{text:?}"
+        );
+    }
 }
 
 #[test]

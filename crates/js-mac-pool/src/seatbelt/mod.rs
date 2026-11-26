@@ -81,7 +81,7 @@ mod selftest;
 mod tool;
 mod trees;
 
-pub use allow::{BaseSet, MacosMajor};
+pub use allow::{BaseSet, MacosMajor, NoBaseSet};
 pub use apply::{InitError, SandboxInit};
 pub use grant::{Match, PinnedTree, ReadGrant, is_directory_wide, kind_rules};
 pub use net::{MAX_PORTS, Net, Ports, PortsError};

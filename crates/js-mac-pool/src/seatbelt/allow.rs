@@ -19,8 +19,8 @@ use super::scan::{PrivilegedScan, scan_privileged};
 /// A macOS major version that has a base set.
 ///
 /// The agent's duties around it: a host whose version has no value here refuses the allow
-/// model (`from_product_version` returns `None`; never default to the newest known
-/// version), and an [`Assurance`](super::Assurance) is made again at every start and after
+/// model (`from_product_version` returns [`NoBaseSet`], whose text is the refusal; never
+/// default to the newest known version), and an [`Assurance`](super::Assurance) is made again at every start and after
 /// every OS update, never kept across them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MacosMajor {
@@ -47,14 +47,22 @@ impl MacosMajor {
         }
     }
 
-    /// The version of a `sw_vers -productVersion` text (`14.5`, `15.8.2`, `27.0.1`), if it has a
-    /// base set.
-    #[must_use]
-    pub fn from_product_version(text: &str) -> Option<Self> {
-        let first = text.trim().split('.').next();
-        first
+    /// The version of a `sw_vers -productVersion` text (`14.5`, `15.8.2`, `27.0.1`).
+    ///
+    /// # Errors
+    ///
+    /// [`NoBaseSet`], naming the text, when its major version has no base set or the text
+    /// is not a version: the host refuses the allow model.
+    pub fn from_product_version(text: &str) -> Result<Self, NoBaseSet> {
+        let version = text.trim();
+        version
+            .split('.')
+            .next()
             .and_then(|major| major.parse().ok())
             .and_then(Self::from_major)
+            .ok_or_else(|| NoBaseSet {
+                version: version.to_owned(),
+            })
     }
 
     /// The major number.
@@ -92,6 +100,24 @@ impl MacosMajor {
             Self::Macos27 => &MACOS_27,
         }
     }
+}
+
+/// A host's macOS version has no base set, so the allow read model is refused on that host.
+///
+/// Its text names the version and the versions that have a set, for the host's refusal.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "macOS {version:?} has no Seatbelt base set (there are sets for macOS {}): \
+     the allow read model is refused on this host",
+    known()
+)]
+pub struct NoBaseSet {
+    version: String,
+}
+
+fn known() -> String {
+    let majors: Vec<String> = MacosMajor::ALL.iter().map(|m| m.major().to_string()).collect();
+    majors.join(", ")
 }
 
 /// What every run of the allow-list model may read, and the setuid files it may not.
