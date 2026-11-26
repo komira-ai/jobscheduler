@@ -225,12 +225,12 @@ async fn submit_takes_a_policy_at_the_boundary_and_keeps_it_as_sent() {
         for (n, via) in Via::BOTH.into_iter().enumerate() {
             let name = format!("ok-{index}-{n}");
             let spec = v1::JobSpec {
-                retry: Some(policy.clone()),
+                retry: Some(policy),
                 ..wire(&name)
             };
             let job = writes.submit(via, &spec).await.expect("the job is taken");
             let echoed = job.spec.expect("a spec").retry;
-            assert_eq!(echoed, Some(policy.clone()), "{name}");
+            assert_eq!(echoed, Some(policy), "{name}");
             let kept = writes.jobs.get_job(&id(&name)).unwrap().unwrap();
             assert_eq!(
                 kept.spec.retry,

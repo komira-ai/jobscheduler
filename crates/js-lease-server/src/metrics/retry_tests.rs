@@ -111,7 +111,7 @@ async fn wait(rig: &Rig, total: Duration, agents: &mut [&mut FakeAgent]) {
         rig.advance(step);
         rig.tick();
         for agent in agents.iter_mut() {
-            let reply = rig.beat(&**agent).await.unwrap();
+            let reply = rig.beat(agent).await.unwrap();
             agent.take(&reply);
         }
     }

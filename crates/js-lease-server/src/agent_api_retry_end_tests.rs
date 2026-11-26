@@ -465,7 +465,10 @@ async fn a_cancelled_attempt_never_retries() {
     let id = start_on(&rig, "job-c1", "host-a", 3);
     walk(&rig, &mut a, &id, true).await;
     rig.jobs.request_cancel(&id).unwrap();
-    assert_eq!(pass_reading_absent(&rig, "host-a"), [id.clone()]);
+    assert_eq!(
+        pass_reading_absent(&rig, "host-a"),
+        std::slice::from_ref(&id)
+    );
     assert_ended_once(&rig, &id, JobState::Lost, (HostLost, false));
     let freed = rig.allocation(&id);
     assert_eq!(
@@ -737,7 +740,7 @@ async fn each_attempt_has_its_history_entry_and_usage_record() {
     let done = rig.job(&id);
     let shown = view::job(&done);
     assert_eq!(shown.attempt, 3);
-    assert_eq!(shown.times.clone().unwrap().queued_at_ms, submitted);
+    assert_eq!(shown.times.unwrap().queued_at_ms, submitted);
     assert_eq!(shown.retry_not_before_ms, None);
     assert_eq!(shown.attempt_history.len(), 3);
     assert_eq!(view::result(&done).attempt, 3);
@@ -762,10 +765,7 @@ async fn each_attempt_has_its_history_entry_and_usage_record() {
         "each attempt ran on a host of its own: {hosts:?}"
     );
     assert_eq!(history[2].exit_code, Some(0));
-    let times: Vec<v1::JobTimes> = history
-        .iter()
-        .map(|entry| entry.times.clone().unwrap())
-        .collect();
+    let times: Vec<v1::JobTimes> = history.iter().map(|entry| entry.times.unwrap()).collect();
     let queued: Vec<u64> = times.iter().map(|times| times.queued_at_ms).collect();
     let (first_wait, second_wait) = (ended_ms(&history[0]), ended_ms(&history[1]));
     assert_eq!(

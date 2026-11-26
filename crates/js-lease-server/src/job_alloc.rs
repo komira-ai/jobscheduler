@@ -319,11 +319,13 @@ fn reason_of(job: &JobRecord) -> EndReason {
                 Some(ResultReason::Exit | ResultReason::InputFailed) | None => EndReason::Exited,
             }
         }
-        // Queued again: a retry ended the attempt the allocation held, as its history says.
+        // Queued again: a retry ended the attempt the allocation held, as its history's last
+        // entry, marked retried, says. Otherwise a cancel was asked for, as for the states below.
         JobState::Queued => job
             .attempt
             .history()
             .last()
+            .filter(|attempt| attempt.retried)
             .map_or(EndReason::Cancelled, |attempt| retried_reason(&attempt.end)),
         // Not ended, with a cancel asked for: the stop is what ends it.
         JobState::Placed | JobState::Starting | JobState::Running => EndReason::Cancelled,
