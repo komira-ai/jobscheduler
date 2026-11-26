@@ -67,7 +67,9 @@ of the jobs running on it after.
   service did not answer for it). A job can fail by itself; read its result before calling it
   the update's.
 - `FAIL: jobs of these hosts that ended lost, failed or failed to start since the check began`:
-  each is named, whether it ran before or started during the roll.
+  each is named, whether it ran before or started during the roll. "Since the check began" is
+  read against the clock of the machine running the check, so run it where the clock is synced
+  with the job service's.
 - `INCONCLUSIVE` (status 3): every host moved and lost nothing, but one ran no job before.
 - Status 2: the check refused to start and watched nothing; the reason is on stderr.
 

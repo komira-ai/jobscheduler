@@ -502,17 +502,23 @@ fn a_host_with_no_job_before_is_inconclusive() {
     rig.set("running-after.json", &jobs(&[running("j1", "n1", 1)], None));
     let ran = rig.run(&["n1", "n2"], &[]);
     assert_eq!(ran.status, 3, "{ran:?}");
+    let readings = format!(
+        "readings of the hosts: 1 (in {})",
+        rig.dir.join("out/timeline.tsv").display()
+    );
     assert_eq!(
         ran.lines(0),
         [
             "n1: agent 0.1.316; running before: j1",
             "n2: agent 0.1.316; running before: none",
+            readings.as_str(),
+            "n1: moved 0.1.316 -> 0.1.418",
+            "n1: running before: 1; kept: 1; ended succeeded or cancelled: 0; running after: j1",
+            "n2: moved 0.1.316 -> 0.1.418",
+            "n2: running before: 0; kept: 0; ended succeeded or cancelled: 0; running after: none",
+            "INCONCLUSIVE: every host moved and lost nothing, but a host ran no job before, so its hand-over of running jobs was not shown",
         ],
         "{ran:?}"
-    );
-    assert_eq!(
-        ran.stdout.lines().last().unwrap(),
-        "INCONCLUSIVE: every host moved and lost nothing, but a host ran no job before, so its hand-over of running jobs was not shown"
     );
 }
 
