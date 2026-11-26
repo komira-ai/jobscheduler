@@ -122,6 +122,7 @@ where
     a_retry_by_another_client_keeps_the_first(backend);
     the_same_job_is_found_by_value_not_by_bytes(backend);
     a_concurrent_insert_answers_from_the_job_it_made(backend);
+    a_read_handed_to_the_insert_is_not_made_again(backend);
     minted_ids_do_not_repeat_across_instances(backend);
     a_minted_id_collision_is_retried(backend);
     minting_stops_at_its_budget(backend);
@@ -346,6 +347,7 @@ macro_rules! job_store_tests {
             a_retry_by_another_client_keeps_the_first,
             the_same_job_is_found_by_value_not_by_bytes,
             a_concurrent_insert_answers_from_the_job_it_made,
+            a_read_handed_to_the_insert_is_not_made_again,
             minted_ids_do_not_repeat_across_instances,
             a_minted_id_collision_is_retried,
             minting_stops_at_its_budget,
