@@ -351,12 +351,14 @@ impl Summary {
         self.cpu_n > 0
     }
 
-    /// A success whose peak does not show what it needed contributes a held sample, a lower
-    /// bound of its need, which the estimate sizes with the usual margin: one that swapped
-    /// ([`Run::swap_peak_bytes`]) had its swap in use beside its peak, so it needed at least
-    /// their sum; one that reached its booking ([`Run::limit_hits`]) needed at least the
-    /// booking, so it contributes the larger of that and its booking, and its class books a step
-    /// above that booking next. A held sample is kept below the host. Any other success
+    /// A success whose peak does not show what it needed contributes a held sample, which the
+    /// estimate sizes with the usual margin: one that swapped ([`Run::swap_peak_bytes`]) had
+    /// part of what it held pushed out of memory, so its peak alone is short of its need; it
+    /// contributes its peak plus its swap peak (two high-water marks that need not fall at the
+    /// same moment, so the most it can have held at once, which errs toward booking more). One
+    /// that reached its booking ([`Run::limit_hits`]) needed at least the booking, so it
+    /// contributes the larger of that and its booking, and its class books a step above that
+    /// booking next. A held sample is kept below the host. Any other success
     /// contributes its peak as measured.
     fn record_success(&mut self, run: &Run, peak: u64, now: Day, host: u64) {
         let swapped = run.swap_peak_bytes > 0;

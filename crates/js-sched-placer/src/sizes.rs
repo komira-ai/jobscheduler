@@ -112,9 +112,9 @@
 //!   again while its runs keep reaching it, up to the whole host
 //!   ([`js_sizing::Run::limit_hits`]);
 //! - a success whose host pushed part of it into swap (its `usage` reports a swap peak above
-//!   0, `memory.swap.peak`) had more in use than its peak, which counts memory alone: the
-//!   estimator takes it as a held sample of its peak plus its swap peak, so its class books
-//!   that sum with the margin next ([`js_sizing::Run::swap_peak_bytes`]). A run whose host
+//!   0, `memory.swap.peak`) held more than its peak, which counts memory alone, shows: the
+//!   estimator takes it as a held sample of its peak plus its swap peak (two high-water marks,
+//!   so the most it can have held at once), and its class books that sum with the margin next ([`js_sizing::Run::swap_peak_bytes`]). A run whose host
 //!   reported no swap peak (an agent from before it, a kernel that does not count a group's
 //!   swap, and every run recorded before it) counts as having swapped nothing, as every run did
 //!   before;

@@ -182,9 +182,10 @@ the page cache that the non-file peak leaves out) held it there, so its peak doe
 having reached its booking (`Run::limit_hits`), and the estimator takes it as a held sample of the larger of its peak and its booking,
 sized with the same margin: its class books a step above the booking next (`1.2 x` the booking plus 128 MiB, rounded up to 256 MiB),
 steps again while its runs keep reaching it, and stays there once they fit. A held sample is kept below the host, so the step stops
-at the whole host (`over-cap`). A success that a host short of memory pushed into swap had its swap in use beside its peak: the
+at the whole host (`over-cap`). A success that a host short of memory pushed into swap held more than its peak shows: the
 agent reports the group's `memory.swap.peak` with the run's usage, the job record keeps it (`ResourceUsage::peak_swap_bytes`), and
-the estimator takes a run whose swap peak is above 0 as a held sample of its peak plus its swap peak (with its booking as a floor
+the estimator takes a run whose swap peak is above 0 as a held sample of its peak plus its swap peak (two high-water marks that need not fall at
+the same moment, so the most it can have held at once, which errs toward booking more; with its booking as a floor
 when it also reached its booking), kept below the host like any held sample (`js_sizing::Run::swap_peak_bytes`). A run with no
 swap peak reported (an agent from before the field, a kernel that does not count a group's swap, every run recorded before it)
 counts as having swapped nothing. A run under a second gives a memory sample (its series' peak when a poll sampled it, else the

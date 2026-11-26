@@ -1,5 +1,5 @@
-//! A success whose host pushed part of it into swap had its swap in use beside its peak: its
-//! class books its peak plus its swap peak (with the margin) next. The runs here go through the
+//! A success whose host pushed part of it into swap held more than its peak shows: its class
+//! books its peak plus its swap peak (with the margin) next. The runs here go through the
 //! job store, so the swap peak is read back from the stored row before it is taught. The host
 //! is 16 GiB.
 

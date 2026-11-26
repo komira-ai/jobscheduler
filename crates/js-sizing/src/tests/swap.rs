@@ -1,5 +1,5 @@
-//! The swap peak of a success: a run that swapped had its swap in use beside its peak, so it
-//! is a held sample of their sum, kept below the host.
+//! The swap peak of a success: a run that swapped is a held sample of its peak plus its swap
+//! peak (the most it can have held at once), kept below the host.
 
 use super::*;
 
@@ -47,7 +47,7 @@ fn a_success_that_swapped_books_its_peak_plus_its_swap() {
 /// Rule: a success that swapped and reached its booking needed at least the larger of its peak
 /// plus its swap and its booking. 3996 MiB at a 4 GiB booking with 2 GiB of swap is 6044 MiB
 /// (7424 MiB booked, not the 5 GiB of the booking alone); 7.8 GiB at an 8 GiB booking with
-/// 100 MiB of swap is below the booking, so the booking (10 GiB booked). Catches a run that
+/// 100 MiB of swap is below the booking, so the booking (9984 MiB booked). Catches a run that
 /// both swapped and reached its booking sized from one of them alone.
 #[test]
 fn a_success_that_swapped_at_its_booking_books_the_larger_of_the_two() {
@@ -62,7 +62,7 @@ fn a_success_that_swapped_at_its_booking_books_the_larger_of_the_two() {
     );
     assert_eq!(
         booked(&at(8 * GIB, 8 * GIB - 200 * MIB, 100 * MIB)).0,
-        Ok(10 * GIB)
+        Ok(9984 * MIB)
     );
 }
 
