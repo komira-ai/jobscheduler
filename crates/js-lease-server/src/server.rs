@@ -975,9 +975,8 @@ impl Running {
         let _ = stop.send(());
         let _ = (&mut task.0).await;
         // The delivery threads end after their tries in flight, each within its send limit.
-        if let Some(delivering) = self.delivering.take() {
-            blocking(move || delivering.stop()).await;
-        }
+        let delivering = self.delivering.take();
+        blocking(move || delivering.into_iter().for_each(Deliverers::stop)).await;
         self.shared.agents().sizes.stop();
         if let Some(sizes) = self.sizes.take() {
             let _ = sizes.await;
