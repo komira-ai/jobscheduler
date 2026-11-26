@@ -195,17 +195,19 @@ impl<C: Clock> ProcessRunner<C> {
         deadline: Duration,
         sink: &mut dyn FnMut(&[u8]),
     ) -> Streamed {
-        stream_with(&self.clock, &self.env, argv, deadline, sink)
+        stream_with(&self.clock, &self.env, argv, deadline, BATCH, sink)
     }
 }
 
 /// [`ProcessRunner::stream`] with the clock behind a reference, so that one copy of the
-/// code serves every clock type.
-fn stream_with(
+/// code serves every clock type. `batch` is the most reads handed to the sink per turn
+/// ([`BATCH`] in use; a test gives a small one so that a full batch needs no race).
+pub(crate) fn stream_with(
     clock: &dyn Clock,
     env: &[(String, String)],
     argv: &[String],
     deadline: Duration,
+    batch: usize,
     sink: &mut dyn FnMut(&[u8]),
 ) -> Streamed {
     let began = clock.now_ms();
@@ -249,10 +251,10 @@ fn stream_with(
     });
     let deadline_ms = u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX);
     let ended = loop {
-        // At most [`BATCH`] reads per turn, so that a command that writes faster than the
+        // At most `batch` reads per turn, so that a command that writes faster than the
         // sink counts still meets its deadline; a full batch lets the clock move.
         let mut taken = 0;
-        while taken < BATCH {
+        while taken < batch {
             let Ok(chunk) = rx.try_recv() else { break };
             sink(&chunk);
             taken += 1;
@@ -263,7 +265,7 @@ fn stream_with(
                 kill_group(&mut child);
                 break Ended::TimedOut;
             }
-            None if taken > 0 && taken < BATCH => {}
+            None if taken > 0 && taken < batch => {}
             None => clock.sleep(POLL),
         }
     };
