@@ -264,10 +264,11 @@ impl Records {
         }
     }
 
-    /// Reads the held results, as many of them that add a job as have entries that fit `room`
-    /// bytes of a heartbeat (`listing`), and the retired list. A result whose id is in
-    /// `taken` is a job already held: it is always read and does not count against `room`. A file that cannot be used, and every file past `room`, is
-    /// removed and reported; an unfinished write (`*.tmp`) of a dead process is removed
+    /// Reads the held results, as many of them that add a job as have entries that fit
+    /// `room` bytes of a heartbeat (`listing`), and the retired list. A result whose id is
+    /// in `taken` is a job already held: it is always read and does not count against
+    /// `room`. A file that cannot be used, and every file past `room`, is removed and
+    /// reported; an unfinished write (`*.tmp`) of a dead process is removed
     /// without a word.
     pub(super) fn load(
         &mut self,

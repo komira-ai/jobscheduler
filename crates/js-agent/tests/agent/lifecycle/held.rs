@@ -451,6 +451,7 @@ fn a_result_is_written_again_when_its_log_tail_is_cut() {
 /// lists: an entry at a five-byte id weighs 44 bytes, and 558 of them fit the 24,576 the
 /// entries may take.
 const LISTABLE: usize = 558;
+const _: () = assert!(LISTABLE < MAX_HELD);
 
 /// Asserts that no more than the agent can list are read back: of one file more than the
 /// entries a heartbeat body has room for (far fewer than the wire's count cap,
@@ -472,7 +473,6 @@ fn more_results_than_a_heartbeat_can_list_are_not_all_read_back() {
     let events = names(&h.restart().unwrap());
     assert_eq!(findings(&events, "held-record-unreadable"), 1, "{events:?}");
     assert_eq!(h.held().len(), LISTABLE);
-    assert!(LISTABLE < MAX_HELD);
     assert!(!last.exists());
     assert!(!h.life.results().is_empty(), "the oldest result goes out");
 }

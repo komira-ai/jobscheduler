@@ -369,6 +369,7 @@ fn adopted_bookings_are_checked_against_the_offer_and_each_other() {
 /// lists: an entry at a five-byte id weighs 44 bytes, and 558 of them fit the 24,576 the
 /// entries may take.
 const ADOPTABLE: usize = 558;
+const _: () = assert!(ADOPTABLE < MAX_HELD);
 
 /// Asserts that adoption stops at what a heartbeat can list: with two containers more than
 /// the entries a heartbeat body has room for (far fewer than the wire's count cap,
@@ -392,7 +393,6 @@ fn adoption_is_capped_at_what_a_heartbeat_can_list() {
     let findings = events.iter().filter(|e| e.starts_with("finding")).count();
     assert_eq!(findings, 2);
     assert_eq!(h.held().len(), ADOPTABLE);
-    assert!(ADOPTABLE < MAX_HELD);
     assert_eq!(h.fake.existing().len(), ADOPTABLE);
     assert_eq!(h.fake.stops().len(), 2);
 }
