@@ -24,6 +24,10 @@ const FEED_PAGE: usize = 512;
 /// row's (with its index entries), so a batch locks about this many rows for one round trip.
 pub(crate) const GROUP: usize = 100;
 
+/// What one write of the job store answers: its commit with the [`Step`] it made, or the
+/// conflict that kept it from committing.
+pub(super) type Stepped = Result<(Commit, Step), Conflict>;
+
 /// How many rows `txn` writes, each at a revision of its own, when every operation of it is a
 /// put; `None` otherwise ([`Step::rows`]).
 fn row_count(txn: &Txn) -> Option<u64> {
@@ -123,10 +127,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// A guarded view ([`JobStore::guarded`]) adds the check of its node row to `txn`, and a
     /// conflict on that row is [`JobStoreError::NodeMoved`]. A job store that is not guarded
     /// sends `txn` as it is.
-    pub(super) fn write_stepped(
-        &self,
-        txn: Txn,
-    ) -> Result<Result<(Commit, Step), Conflict>, JobStoreError> {
+    pub(super) fn write_stepped(&self, txn: Txn) -> Result<Stepped, JobStoreError> {
         let txn = self.guard_txn(txn);
         let rows = row_count(&txn);
         let answer = self.store.txn(txn);
@@ -144,7 +145,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     pub(super) fn write_stamped<T>(
         &self,
         build: &mut dyn FnMut(StoreTime) -> Result<(Txn, T), JobStoreError>,
-    ) -> Result<(T, Result<(Commit, Step), Conflict>), JobStoreError> {
+    ) -> Result<(T, Stepped), JobStoreError> {
         let (mut made, mut failed, mut rows) = (None, None, None);
         let answer = self.store.txn_stamped(&mut |now| {
             let (txn, value) = build(now).map_err(|error| failed = Some(error)).ok()?;
@@ -166,7 +167,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         answer: Result<Commit, Conflict>,
         writes: u64,
         rows: Option<u64>,
-    ) -> Result<Result<(Commit, Step), Conflict>, JobStoreError> {
+    ) -> Result<Stepped, JobStoreError> {
         match answer {
             Ok(commit) => {
                 let step = Step {
