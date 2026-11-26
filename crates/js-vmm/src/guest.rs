@@ -46,6 +46,7 @@ const BOOTSTRAP_OFFLINE: &str = "usr/local/libexec/kbf-guest";
 /// How many times the mount daemon tries the mount, and the pause between two tries. After
 /// the last try it logs the failure and exits non-zero, once (launchd does not restart it).
 pub const MOUNT_ATTEMPTS: u32 = 40;
+/// The pause between two mount tries, in milliseconds.
 pub const MOUNT_DELAY_MS: u64 = 3000;
 /// The most a result file may hold before the host refuses to read it.
 pub const MAX_RESULT_BYTES: u64 = 1 << 20;
@@ -56,7 +57,9 @@ pub const VSOCK_PORT: u32 = 5000;
 /// The console port name the host offers and the guest tries.
 pub const CONSOLE_NAME: &str = "kbf.probe";
 
+/// The name of the results directory inside the share.
 pub const RESULTS: &str = "results";
+/// The file name of the guest binary in the share (and of the copy at [`BOOTSTRAP`]).
 pub const GUEST_BIN: &str = "kbf-guest";
 /// Results written by the daemon that runs as root (the control arm).
 pub const ROOT_RESULT: &str = "guest-probe-root.json";
@@ -65,7 +68,9 @@ pub const USER_RESULT: &str = "guest-probe-user.json";
 /// Markers: a daemon ran (`system`), the login window exists (`login`), and, when the
 /// image has an auto-login user with the agent installed, the Aqua session (`aqua`).
 pub const READY_SYSTEM: &str = "ready-system";
+/// The marker written once the login window exists.
 pub const READY_LOGIN: &str = "ready-login";
+/// The marker written once the Aqua session exists.
 pub const READY_AQUA: &str = "ready-aqua";
 /// The label of the daemon that needs nothing else in the payload.
 pub const LOCAL_LABEL: &str = "com.kbf.probe.local";
@@ -85,6 +90,7 @@ pub const SHUTDOWN_LABEL: &str = "com.kbf.probe.shutdown";
 /// The guest vsock port that daemon listens on; the host connects to it to ask for a clean
 /// shutdown.
 pub const SHUTDOWN_PORT: u32 = js_guest::shutdown::PORT;
+/// The file on the guest's own disk that launchd writes the diagnostic daemon's JSON to.
 pub const DIAG_OUTPUT: &str = "/private/var/log/kbf-probe-diag";
 /// Where the daemons that run as `nobody` keep their logs: `nobody` cannot create a file
 /// in `/var/log`, and the second E1 run left no log of theirs there.
@@ -93,7 +99,9 @@ pub const USER_LOG_DIR: &str = "/private/var/tmp";
 /// The host side of the share for one VM.
 #[derive(Debug, Clone)]
 pub struct Share {
+    /// The host directory shared into the guest; it holds `kbf-guest` and `results`.
     pub dir: PathBuf,
+    /// The host directory of the empty share the probe mounts itself under [`TAG`].
     pub tagged: PathBuf,
     /// Where the frames the guest sends over vsock are written: on the host, outside every
     /// directory the guest can write to, and closed to other users (0700). Nothing in the
@@ -102,6 +110,7 @@ pub struct Share {
 }
 
 impl Share {
+    /// The results directory inside the share.
     #[must_use]
     pub fn results(&self) -> PathBuf {
         self.dir.join(RESULTS)

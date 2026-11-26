@@ -35,6 +35,7 @@ pub struct Timing {
 }
 
 impl Timing {
+    /// The waits of a real run.
     #[must_use]
     pub fn real() -> Self {
         Self {
@@ -49,6 +50,7 @@ impl Timing {
         }
     }
 
+    /// A few milliseconds for every wait, so that tests do not wait on real time.
     #[must_use]
     pub fn instant() -> Self {
         let z = Duration::from_millis(5);
@@ -83,6 +85,7 @@ pub enum StopKind {
 }
 
 impl StopKind {
+    /// The words the report uses for this way of stopping.
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
@@ -99,6 +102,7 @@ impl StopKind {
 
 /// What a probe runs against.
 pub struct Ctx<'a> {
+    /// The host operations (processes, files, clock) the probe goes through.
     pub sys: &'a dyn System,
     /// Where clones, shares and logs go.
     pub work: PathBuf,
@@ -117,13 +121,17 @@ pub struct Ctx<'a> {
     pub matrix: bool,
     /// Where the matrix makes its directories outside `work`; the host's own in a real run.
     pub(crate) matrix_roots: crate::matrix::Roots,
+    /// How long the probe waits for each thing.
     pub timing: Timing,
 }
 
 /// A started helper, with every event it has printed.
 pub struct Vm {
+    /// The name the VM goes by in reports and on disk.
     pub name: String,
+    /// The running helper process.
     pub proc: Box<dyn VmProcess>,
+    /// Every event the helper has printed, in order.
     pub events: Vec<Event>,
     /// When each of `events` arrived, in milliseconds after the spawn (same order).
     pub event_ms: Vec<u64>,
@@ -139,15 +147,20 @@ pub struct Vm {
 /// What one [`Vm::watch`] ended on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Step {
+    /// The helper reported an error or a stop, or ended; carries how the start went.
     Failed(Boot),
+    /// The helper printed its `started` event.
     Started,
+    /// No terminal event arrived within the start timeout.
     Timeout,
 }
 
 /// How a VM start went.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Boot {
+    /// Whether the VM started and stayed running for the hold time.
     pub booted: bool,
+    /// Milliseconds from the spawn to the `started` event, when it arrived.
     pub started_ms: Option<u64>,
     /// The failure, when it did not boot: the helper's error text or how it ended.
     pub failure: Option<String>,
@@ -156,6 +169,7 @@ pub struct Boot {
 }
 
 impl Boot {
+    /// The start as a JSON object for the report.
     #[must_use]
     pub fn json(&self) -> Value {
         json!({
@@ -463,6 +477,7 @@ impl Ctx<'_> {
 
 /// A start that was retried because of the two-guest limit.
 pub struct Retried {
+    /// The VM that started.
     pub vm: Vm,
     /// How many starts it took (1 means the first one worked).
     pub attempts: u32,

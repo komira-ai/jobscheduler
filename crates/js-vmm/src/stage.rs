@@ -87,11 +87,14 @@ pub const HEADROOM_BYTES: u64 = 4 << 30;
 /// The caps of the walk of a tree; tests lower them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
+    /// The most entries one tree may hold.
     pub max_entries: usize,
+    /// The deepest directory nesting one tree may have.
     pub max_depth: usize,
 }
 
 impl Limits {
+    /// The caps used outside tests: [`MAX_ENTRIES`] and [`MAX_DEPTH`].
     pub const DEFAULT: Self = Self {
         max_entries: MAX_ENTRIES,
         max_depth: MAX_DEPTH,
@@ -101,40 +104,55 @@ impl Limits {
 /// Why a plan could not be made or a stage could not be done.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum StageError {
+    /// The path is not an Xcode.app directory.
     #[error("{0} is not an Xcode.app directory (it needs Contents/Developer/usr/bin/xcodebuild)")]
     NotXcode(PathBuf),
+    /// The path is not an app bundle.
     #[error("{0} is not an app bundle (a directory named <name>.app with an Info.plist)")]
     NotApp(PathBuf),
+    /// The app's name is not a valid `<name>.app`.
     #[error(
         "{0}: an app must be named <name>.app, at most {MAX_RUNTIME_NAME_BYTES} bytes, with name made of letters, digits, '.', '_' or '-' (no '..')"
     )]
     BadAppName(PathBuf),
+    /// The path is a symbolic link, not the real path.
     #[error("{0} is a symbolic link; name the real path")]
     Symlink(PathBuf),
+    /// A symbolic link in the tree points outside it and external links were not allowed.
     #[error(
         "{path}: a symbolic link to {target}, which leaves the app (pass --allow-external-links to copy it as a link)"
     )]
     EscapingLink { path: PathBuf, target: PathBuf },
+    /// The path is a fifo, socket or device, which is not copied.
     #[error("{path}: a {kind}, which is not copied")]
     Special { path: PathBuf, kind: &'static str },
+    /// The tree holds more entries than the limit.
     #[error("{0}: more than {1} entries")]
     TooMany(PathBuf, usize),
+    /// The tree is nested deeper than the limit.
     #[error("{0}: nested deeper than {1} directories")]
     TooDeep(PathBuf, usize),
+    /// The path is not a regular file.
     #[error("{0} is not a regular file")]
     NotRegular(PathBuf),
+    /// The path is not a directory.
     #[error("{0} is not a directory (a <name>.exportedBundle is a directory)")]
     NotDirectory(PathBuf),
+    /// The runtime's name is not a valid `<name>.dmg` or `<name>.exportedBundle`.
     #[error(
         "{0}: a runtime must be named <name>.dmg (a file) or <name>.exportedBundle (a directory), at most {MAX_RUNTIME_NAME_BYTES} bytes, with name made of letters, digits, '.', '_' or '-' (no '..')"
     )]
     BadRuntimeName(PathBuf),
+    /// Two runtimes have the same file name.
     #[error("two runtimes are named {0}; each --sim-runtime needs its own file name")]
     DuplicateRuntime(String),
+    /// More runtimes were named than one setup stages.
     #[error("more than {MAX_RUNTIMES} --sim-runtime")]
     TooManyRuntimes,
+    /// The UI tests could not be planned or staged.
     #[error(transparent)]
     Tests(crate::stage_xctest::TestsError),
+    /// A file system operation failed; the text names the operation, the path and the cause.
     #[error("{0}")]
     Io(String),
 }
@@ -143,16 +161,19 @@ pub enum StageError {
 /// it holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Node {
+    /// A directory, with its mode.
     Dir {
         rel: PathBuf,
         mode: u32,
     },
+    /// A regular file copied from `src`, with its mode and size in bytes.
     File {
         rel: PathBuf,
         src: PathBuf,
         mode: u32,
         bytes: u64,
     },
+    /// A symbolic link to `target`.
     Link {
         rel: PathBuf,
         target: PathBuf,
@@ -170,7 +191,9 @@ impl Node {
 /// A directory tree (Xcode.app, or an app bundle) as it will be copied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TreePlan {
+    /// The tree's directory on the host.
     pub source: PathBuf,
+    /// What to create, in an order where a directory comes before what it holds.
     pub nodes: Vec<Node>,
     /// The sum of the file sizes.
     pub bytes: u64,
@@ -183,20 +206,25 @@ pub struct TreePlan {
 pub struct AppPlan {
     /// The bundle's directory name (`<name>.app`), also its name in the guest.
     pub name: String,
+    /// The app's tree.
     pub tree: TreePlan,
 }
 
 /// Everything one `image setup` stages.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Plan {
+    /// Xcode.app, when it is staged.
     pub xcode: Option<TreePlan>,
+    /// The simulator runtimes to stage.
     pub runtimes: Vec<RuntimePlan>,
+    /// The app bundle, when one is staged.
     pub app: Option<AppPlan>,
     /// The UI tests (`--sim-tests`).
     pub tests: Option<crate::stage_xctest::TestsPlan>,
 }
 
 impl Plan {
+    /// Whether the plan stages nothing.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.xcode.is_none()

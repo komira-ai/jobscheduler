@@ -28,14 +28,19 @@ const MAX_NAME_BYTES: usize = js_guest::sim::MAX_STAGED_NAME_BYTES;
 /// Why a tests tree was refused (beyond what the walk refuses).
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum TestsError {
+    /// The path given is not a directory.
     #[error("{0} is not a directory (--sim-tests takes the Build/Products directory)")]
     NotDirectory(PathBuf),
+    /// The directory holds no `*.xctestrun` file.
     #[error("{0} holds no *.xctestrun file (was it built with `xcodebuild build-for-testing`?)")]
     NoXctestrun(PathBuf),
+    /// The directory holds more than one `*.xctestrun` file.
     #[error("{dir} holds two *.xctestrun files ({a} and {b}); it must hold exactly one")]
     TwoXctestruns { dir: PathBuf, a: String, b: String },
+    /// The `.xctestrun` entry is not a regular file.
     #[error("{0} is not a regular file")]
     NotRegular(PathBuf),
+    /// The `.xctestrun` file name is not one the guest can carry.
     #[error(
         "{0}: the .xctestrun name must be made of letters, digits, '.', '_' or '-' (no '..'), end in .xctestrun and be at most {MAX_NAME_BYTES} bytes"
     )]
@@ -47,6 +52,7 @@ pub enum TestsError {
 pub struct TestsPlan {
     /// The `.xctestrun` file name, also its name in the guest.
     pub xctestrun: String,
+    /// The plan for copying the whole products tree.
     pub tree: TreePlan,
 }
 

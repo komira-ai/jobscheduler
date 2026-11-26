@@ -100,6 +100,7 @@ pub(crate) fn names(dir: &Path) -> Vec<String> {
 /// A screenshot frame's picture.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Picture {
+    /// The decoded image bytes.
     pub bytes: Vec<u8>,
     /// Starts with the JPEG signature.
     pub jpeg: bool,

@@ -16,7 +16,9 @@ use crate::system::System;
 /// Where a restore image comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
+    /// A restore image already on disk.
     Path(PathBuf),
+    /// A restore image to download from this URL.
     Url(String),
 }
 
@@ -33,14 +35,17 @@ pub fn parse_source(s: &str) -> Source {
 /// Why an image could not be built.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ImageError {
+    /// The pinned digest is not 64 hexadecimal digits.
     #[error("--sha256 must be 64 hexadecimal digits, got {0:?}")]
     BadDigest(String),
+    /// The restore image's SHA-256 differs from the pinned digest.
     #[error("refusing {path}: its SHA-256 is {actual}, not the {expected} that was pinned")]
     Mismatch {
         path: PathBuf,
         expected: String,
         actual: String,
     },
+    /// A file could not be read, written or fetched; carries the message.
     #[error("{0}")]
     Io(String),
 }
@@ -96,9 +101,13 @@ pub fn verify(path: &Path, expected: &str) -> Result<String, ImageError> {
 /// What `image base` was asked.
 #[derive(Debug, Clone)]
 pub struct BaseArgs {
+    /// The restore image: a path or an `https://` URL.
     pub ipsw: String,
+    /// The SHA-256 the restore image must have, as given on the command line.
     pub sha256: String,
+    /// The path of the base bundle to create.
     pub out: PathBuf,
+    /// The size of the guest's disk in GiB.
     pub disk_gib: u64,
     /// Guest CPUs; `None` keeps what the restore image needs.
     pub cpus: Option<u32>,

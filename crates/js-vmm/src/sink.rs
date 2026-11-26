@@ -367,6 +367,7 @@ pub struct Served {
     pub stored: u32,
     /// Frames refused (unsafe name, wrong kind, a write that failed).
     pub refused: u32,
+    /// Why the connection ended.
     pub end: End,
 }
 
@@ -520,6 +521,7 @@ impl Drop for Permit {
 }
 
 impl Limiter {
+    /// A limiter that allows at most `max` connections at once.
     #[must_use]
     pub fn new(max: usize) -> Self {
         Self {

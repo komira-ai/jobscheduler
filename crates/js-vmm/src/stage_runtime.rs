@@ -39,7 +39,9 @@ impl RuntimeKind {
 pub struct RuntimePlan {
     /// The file or directory name, which is also the name in the guest.
     pub name: String,
+    /// Whether this runtime is a disk image or an exported bundle.
     pub kind: RuntimeKind,
+    /// Where the runtime is read from on the host.
     pub src: PathBuf,
     /// The size of the image, or the sum of the file sizes of the bundle.
     pub bytes: u64,

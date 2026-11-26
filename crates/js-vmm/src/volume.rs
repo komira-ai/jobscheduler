@@ -17,6 +17,7 @@ pub const SETUP_DONE: &str = "private/var/db/.AppleSetupDone";
 /// What one mounted volume holds, as far as its role is concerned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Facts {
+    /// The directory the volume is mounted at.
     pub mount: PathBuf,
     /// A real directory `private/var/db` (not a link).
     pub var_db: bool,

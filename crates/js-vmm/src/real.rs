@@ -16,9 +16,11 @@ use crate::spec::{Event, SHUTDOWN_COMMAND, VmSpec};
 use crate::system::{Clock, OfflineFile, Poll, RealClock, Signature, System, VmProcess};
 use crate::{offline, signature, vz};
 
+/// The system that drives the real hypervisor helper, files and clock.
 pub struct RealSystem;
 
 impl RealSystem {
+    /// Makes the real system.
     #[must_use]
     pub fn new() -> Self {
         Self

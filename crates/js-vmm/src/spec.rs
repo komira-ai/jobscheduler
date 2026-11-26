@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 /// A directory shared into the guest with its own virtiofs tag.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaggedShare {
+    /// The virtiofs tag the guest mounts the share by.
     pub tag: String,
+    /// The host directory that is shared.
     pub path: PathBuf,
     /// When set, the share is a multiple-directory share that lists `path` under this name;
     /// otherwise a single-directory share.
@@ -39,7 +41,9 @@ pub struct ExecBridge {
 pub struct VmSpec {
     /// The bundle directory (a clone, never the prepared base).
     pub bundle: PathBuf,
+    /// The number of virtual CPUs.
     pub cpus: u32,
+    /// The guest's memory in MiB.
     pub memory_mib: u64,
     /// Whether the VM has a graphics device (a display with no host window).
     pub graphics: bool,

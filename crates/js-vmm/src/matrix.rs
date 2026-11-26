@@ -142,12 +142,19 @@ const VARIANTS: [Variant; 8] = [
 /// A matrix share as made for one VM.
 #[derive(Debug, Clone)]
 pub struct Prepared {
+    /// The variant's short name, also the leaf of its host directory.
     pub name: &'static str,
+    /// What differs from the baseline, in words, for the report.
     pub factor: &'static str,
+    /// The tag the guest mounts the share by.
     pub tag: String,
+    /// The host directory the share exposes.
     pub dir: PathBuf,
+    /// The Unix permission mode the host directory is made with.
     pub mode: u32,
+    /// Whether the share is a multiple-directory share, listing its directory under `m`.
     pub multiple: bool,
+    /// Whether the share is attached read-only.
     pub read_only: bool,
     /// Why the share was not made or not attached.
     pub skipped: Option<String>,
