@@ -148,8 +148,9 @@ jobs:
   # uid, looks for every item. It makes an account and changes the machine, so it runs on a
   # hosted Mac of its own, beside `macos` and not after it, where no other test has made users.
   # `cargo xtask mac-root-tests` (crates/xtask/src/mac_root.rs) refuses a Mac that has lease
-  # users, builds the test and the js-agent it starts as the runner's user, copies them into a
-  # root-owned work directory the test's account can run them from, runs the test as root with
+  # users, builds the test (and the js-agent it starts) as the runner's user, copies the test
+  # binary into a root-owned work directory the test's account can run it from (the supervisor
+  # is the js-agent cargo built, which root starts from the build tree), runs the test as root with
   # its root directory and uid (4310), deletes the account it made, and fails on a failed test,
   # on a verdict other than PASS (the test exits non-zero for each) and on an account left. The
   # work directory is below /private/var, outside every place the test searches for what run A

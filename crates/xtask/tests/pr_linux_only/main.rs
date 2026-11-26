@@ -142,9 +142,17 @@ fn a_beta_job_without_its_push_condition_is_refused() {
             .any(|j| j == "release.yml/beta-macos -> beta.yml/macos"),
         "{jobs:?}"
     );
+    assert!(
+        jobs.iter()
+            .any(|j| j == "release.yml/beta-macos -> beta.yml/isolation"),
+        "{jobs:?}"
+    );
     assert_eq!(
         problems,
-        ["release.yml/beta-macos -> beta.yml/macos: runs on macos-15, not Linux x86_64 (ubuntu-*)"]
+        [
+            "release.yml/beta-macos -> beta.yml/macos: runs on macos-15, not Linux x86_64 (ubuntu-*)",
+            "release.yml/beta-macos -> beta.yml/isolation: runs on macos-15, not Linux x86_64 (ubuntu-*)",
+        ]
     );
 }
 
