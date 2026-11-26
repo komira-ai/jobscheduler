@@ -238,6 +238,7 @@ fn a_roll_that_hands_every_job_over_passes() {
     );
     fake.running_after = jobs(
         &[
+            running("j1", "n2", 1),
             running("j1", "n1", 1),
             running("j2", "n2", 1),
             running("j5", "n2", 1),
@@ -275,7 +276,7 @@ fn a_roll_that_hands_every_job_over_passes() {
             "n1: moved 0.1.316 -> 0.1.418",
             "n1: running before: 1; kept: 1; ended succeeded or cancelled: 0; running after: j1",
             "n2: moved 0.1.316 -> 0.1.418",
-            "n2: running before: 3; kept: 1; ended succeeded or cancelled: 2; running after: j2 j5",
+            "n2: running before: 3; kept: 1; ended succeeded or cancelled: 2; running after: j1 j2 j5",
         ]
     );
     let flags = format!("{FLAGS} --ca-cert ca.pem");
@@ -617,10 +618,10 @@ fn what_cannot_be_judged_is_refused() {
             "the jobs running cannot be read: EOF while parsing an object at line 1 column 1",
         ),
         (
-            vec!["n4"],
+            vec!["n-4.x_y:z"],
             listed,
             none,
-            "host n4 is not listed by the job service",
+            "host n-4.x_y:z is not listed by the job service",
         ),
         (
             vec!["n1", "n2"],

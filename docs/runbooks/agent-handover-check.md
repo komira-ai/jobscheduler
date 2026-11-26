@@ -76,9 +76,9 @@ of the jobs running on it after.
 - `INCONCLUSIVE` (status 1, on stderr): every host moved and lost nothing, but one ran no job
   before.
 - Any other line on stderr (status 1): the check refused to start, or a reading after the roll
-  failed; the line says which. Status 2 is a usage error (a host id given twice, an out-dir that
-  is not a directory). A refused check watched nothing.
+  failed; the line says which. Status 2 is a usage error (a host id that is not 1 to 253 letters,
+  digits, `_`, `.`, `:` or `-`, a host id given twice, an out-dir that is not a directory). A refused check watched nothing.
 
-The out-dir keeps the evidence: `hosts-before.json`, `running-before.jsonl`, `timeline.tsv`
-(each reading of each host: version, cordon, mark, state, taint), `running-after.jsonl`,
-`outcomes.tsv` (each job that ran before, with its outcome) and `jobs-ended-badly.jsonl`.
+The out-dir keeps the evidence: `hosts-before.json` (the first reading of the hosts),
+`timeline.tsv` (each reading of each host: version, cordon, mark, state, taint), `outcomes.tsv`
+(each job that ran before, with its outcome) and `jobs-ended-badly.jsonl`.
