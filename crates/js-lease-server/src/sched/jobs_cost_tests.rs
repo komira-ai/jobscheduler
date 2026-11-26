@@ -327,8 +327,9 @@ async fn a_failed_placement_or_what_pass_2_told_brings_the_next_heartbeats_pass_
 /// takes all its cores.
 const FARM_HOSTS: usize = 4;
 
-/// How many jobs wait behind the farm's running ones.
-const FARM_QUEUED: usize = 5_000;
+/// How many jobs wait behind the farm's running ones: a long queue, kept short enough that the
+/// test's setup (a pass that writes every queued job's first status) stays quick.
+const FARM_QUEUED: usize = 1_000;
 
 /// How many rounds of heartbeats, each host beating once a round, the full farm is watched for.
 const FARM_ROUNDS: u64 = 3;
@@ -380,7 +381,7 @@ async fn beat_with_load(rig: &Rig, agent: &FakeAgent, seq: u64) -> (HeartbeatRep
 }
 
 /// Asserts the change itself, in the shape of a saturated farm: four hosts, each running a job
-/// that takes all its cores, and five thousand jobs queued behind them. Every round, each host
+/// that takes all its cores, and a thousand jobs queued behind them. Every round, each host
 /// beats with a load reading that differs from its last (a busy host's does), and the tick's
 /// job pass claims its duty, a commit that changes no row of the tables a pass reads. None of
 /// those heartbeats runs a pass over the queue: none reads a queued job's row or scans a job
