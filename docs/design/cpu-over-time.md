@@ -50,12 +50,12 @@ with no CPU limit). **MEASURED**, counted from the export or the farm's metrics,
     today's overload; the shape is the second question.
 - **Size of the prize, against the owner's 20%.** At steady load, jobs waited for a CPU 11 to 15% of the time
   (MEASURED). On the six hours replayed with jobs flat over their runs, a perfect per-job curve cuts mean time in
-  system (wait plus run) from 65.7 s to 60.1 s, 8.5% (REPLAY, recorded arrival speed). At saturation, the replay's
+  system (wait plus run) from 65.0 s to 59.9 s, 7.8% (REPLAY, recorded arrival speed). At saturation, the replay's
   sharing loses no CPU to overcommit, so there the rules that overcommit most finish soonest. The rest of the 20% can
   only come from what the model leaves out: cache and switching cost at 3x, and bursts the flat data hides. Step 1
   measures both (section 10).
 - **The replay assumes readings every 5 s** (section 10). The same rule without readings, as deployed before #1036,
-  spends 10.3% of host-time over the cores against 8.4% (REPLAY). The replay's bookings are learned from free runs,
+  spends 10.1% of host-time over the cores against 8.2% (REPLAY). The replay's bookings are learned from free runs,
   about four times the live ones, so the missing reading cost more live.
 - **The replay's own check is not yet met:** its waits with the recorded bookings are 2.3x shorter than recorded
   (575 s against 1,322 s after the first hour, REPLAY). Read differences between rules, not absolute waits.
@@ -125,7 +125,7 @@ Three designs were compared. All three start with the same recording; they diffe
 - **Direct curves** (laying each class's mean-by-age profile over the host's other jobs): closest to the owner's
   idea; conditioning on age is exact; with flat profiles it equals today's rule. This is the base of this document.
 - **Statistical bound** (expected level plus a spread term): it assumes jobs are independent, which jobs placed in
-  the same second are not. Deferred. REPLAY: 0.6% less total time than today's rule at the recorded speed, 6% more at
+  the same second are not. Deferred. REPLAY: 0.8% less total time than today's rule at the recorded speed, 5% more at
   4x.
 - **Minimal** (host pressure gate plus a 30-second start charge): its strongest point is that measured busy cores
   cannot show overload (line 3 above). That point is adopted: pressure is recorded from step 1.
@@ -217,8 +217,8 @@ Class and fallbacks are unchanged (READ: `sizes.rs` `key_under`: class, fallback
 - **Decay.** A run's samples are weighted 2^(-age / 6 h) by the run's end, with at most the last 64 runs.
   - 6 h, not Autopilot's 12 h, because a class here runs tens of times an hour and changes with a commit. Over a
     working day a run's weight falls to 1/4.
-  - REPLAY: as a whole-run booking, a decayed mean with a 1 h and with a 12 h half-life gave total times 2.0% apart
-    (65.1 s and 63.8 s), a quarter of what the perfect curve takes off, so the choice is not the deciding one.
+  - REPLAY: as a whole-run booking, a decayed mean with a 1 h and with a 12 h half-life gave total times 0.5% apart
+    (65.0 s and 64.7 s), under a tenth of what the perfect curve takes off, so the choice is not the deciding one.
 - **Kept per class:**
   - a histogram of all its samples, in 64 log-spaced buckets from 1/16 core to 88 cores;
   - for each 2 s slot of ages 0 to 128 s, the decayed mean and the decayed load-weighted 90th percentile;
@@ -227,11 +227,11 @@ Class and fallbacks are unchanged (READ: `sizes.rs` `key_under`: class, fallback
 **What placement takes from it, and for what:**
 - **The level:** the decayed mean of the samples (Autopilot's rule for batch CPU). It is the charge of a job beyond
   its first 128 s, and of a class with no shape. REPLAY: as a whole-run booking it is close to today's median in total
-  time (63.8 s against 65.7 s).
+  time (64.7 s against 65.0 s).
 - **The start:** for each 2 s slot of the first 128 s, the load-weighted 90th percentile. This is what a new job is
   checked against at admission, the only moment placement acts, and so the only place a high quantile pays.
-  REPLAY: used for a whole run, the load-weighted 90th percentile packs far less (2.1% slowdown, against 14.8%) but
-  adds 2.6% total time, so it is kept to the start.
+  REPLAY: used for a whole run, the load-weighted 90th percentile packs far less (2.2% slowdown, against 14.3%) but
+  adds 2.9% total time, so it is kept to the start.
 - **The tail:** the decayed mean after 128 s. A burst shorter than a point is averaged away, and the host reading
   (`B_h`) catches it.
 - **Today's median stays the flat ceiling** (decision 3, reversed by
@@ -245,7 +245,8 @@ teaches the class: a run slowed by contention may only raise it, as today.
 8 runs, it is flat.
 
 **Memory.** It starts from komira-ai/jobscheduler#1035:
-- **Today's rule.** From its first run, a class books its own largest peak over its last 256 to 288 runs: 1.2 x
+- **Today's rule.** From its first run, a class books its own largest peak over its last 256 to 288 runs (since replaced by the
+  95th percentile of its last 32 runs, `sizing.md` 7.7): 1.2 x
   + 128 MiB, rounded up to 256 MiB, at least 1 GiB, never below its kill floor. Only a class with no run books its
   kind's figure, else its client's, else the cold 4 GiB. There is no `memory.max` (#1027): a run above its booking
   raises the next at once. The only bound on a host is `memory_schedulable_percent`.
@@ -386,25 +387,25 @@ against 1,322 s recorded after the first hour (REPLAY). The time from placement 
 
 | rule | time in system 1x | 4x | slowdown 1x | 4x | jobs/h 4x |
 |---|---|---|---|---|---|
-| as deployed, no readings, 1.1 | 65.4 | 393.0 | 16.1% | 22.4% | 9,182 |
-| today: median, 1.1 | 65.7 | 411.9 | 14.8% | 20.1% | 9,199 |
-| heavy tail p90, 1.1 (`sizing.md`, 7.10) | 65.7 | 411.9 | 14.8% | 20.1% | 9,199 |
-| median, 1.0 | 66.3 | 578.8 | 6.7% | 2.4% | 9,053 |
-| median, 0.9 | 69.5 | 798.2 | 6.5% | 2.0% | 8,393 |
-| decayed mean (12 h), 1.1 | 63.8 | 414.9 | 9.5% | 17.6% | 9,192 |
-| decayed mean (1 h), 1.1 | 65.1 | 414.7 | 12.4% | 17.9% | 9,196 |
-| load-weighted p90 (1 h), 1.1 | 67.4 | 634.4 | 2.1% | 4.2% | 8,735 |
-| reserve z=2, 1.1 | 65.3 | 436.3 | 12.4% | 13.2% | 9,195 |
-| measured load only, 1.0 | 65.5 | 552.2 | 13.3% | 4.8% | 9,133 |
-| measured load only, 1.1 | 65.3 | 407.5 | 22.9% | 32.5% | 9,175 |
-| perfect curve, 1.0 | 60.1 | 461.3 | 0% | 0% | 9,211 |
-| perfect curve, 1.1 | 59.3 | 420.9 | 1.6% | 4.2% | 9,215 |
+| as deployed, no readings, 1.1 | 65.4 | 402.5 | 17.2% | 17.3% | 9,188 |
+| today: median, 1.1 | 65.0 | 407.0 | 14.3% | 20.0% | 9,192 |
+| heavy tail p90, 1.1 (`sizing.md`, 7.10) | 65.0 | 407.0 | 14.3% | 20.0% | 9,192 |
+| median, 1.0 | 66.5 | 572.3 | 7.2% | 2.5% | 9,073 |
+| median, 0.9 | 69.5 | 798.6 | 7.6% | 2.4% | 8,399 |
+| decayed mean (12 h), 1.1 | 64.7 | 411.5 | 12.0% | 17.9% | 9,193 |
+| decayed mean (1 h), 1.1 | 65.0 | 412.8 | 12.3% | 18.9% | 9,200 |
+| load-weighted p90 (1 h), 1.1 | 66.9 | 710.8 | 2.2% | 4.8% | 8,524 |
+| reserve z=2, 1.1 | 64.5 | 427.9 | 11.2% | 15.4% | 9,185 |
+| measured load only, 1.0 | 66.0 | 547.8 | 15.5% | 4.3% | 9,146 |
+| measured load only, 1.1 | 65.4 | 393.0 | 24.4% | 34.4% | 9,191 |
+| perfect curve, 1.0 | 59.9 | 452.5 | 0% | 0% | 9,213 |
+| perfect curve, 1.1 | 59.2 | 412.4 | 1.6% | 4.3% | 9,216 |
 
 What to read from the table:
 - **The heavy-tail row equals today's median:** the window's records carry no five-second peak, so no class has a tail
   to book. `farm.report.md` also gives, per row, the most CPU booked on a host at once, the Gini coefficient of the
   jobs placed per host and the core-seconds the hosts were asked for past their cores.
-- **At the recorded speed only the perfect curve clearly wins:** 8.5% less total time. Lower limits and higher
+- **At the recorded speed only the perfect curve clearly wins:** 7.8% less total time. Lower limits and higher
   quantiles cut slowdown but add more wait than they save.
 - **At saturation the model rewards overcommit:** its sharing loses no CPU, so the cost of overcommit beyond
   slowdown (cache, switching) is not in it.
@@ -438,7 +439,7 @@ negative and fades; each release reads the other's results.
   ratio are the profile's constants, not settings, and the readings residual is carried, not faded.
 
 ## 14. Considered and not chosen
-- **A reserve from the classes' spread:** 0.6% less total time than today's rule at the recorded speed, 6% more at 4x
+- **A reserve from the classes' spread:** 0.8% less total time than today's rule at the recorded speed, 5% more at 4x
   (REPLAY).
 - **Measured host load alone:** it lags and cannot read above the cores.
 - **A pressure gate and a start charge only:** the lightest design; it drops the owner's idea before there is data.

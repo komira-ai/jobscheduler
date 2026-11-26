@@ -208,35 +208,93 @@ fn target_runs(
         .collect()
 }
 
-/// Asserts that a memory kill of a target booked from its kind raises the target to at least
-/// twice the booking it died at, and teaches the kind the kill too: with a kind at 1.5 GiB, a
-/// target killed at 1.5 GiB books 3 GiB next (its floor, twice the booking it died at, over the
-/// kill's own sample of its 1.5 GiB limit, `1.2 x 1.5 GiB + 128 MiB`, 2 GiB), and so does a new
-/// target of the kind.
-/// Catches a kill floor lost because the size came from the kind, and a kill that teaches
-/// only the target (its siblings would die at the same size).
+/// Asserts that a memory kill raises the target that was killed and teaches its kind the kill,
+/// and that the kind books that floor for a new target only while its kills are frequent:
+/// with a kind at 1.5 GiB, a target killed at 1.5 GiB books 3 GiB next (its floor, twice the
+/// booking it died at), while a new target of the kind books the kind's median run, 1.5 GiB.
+/// Killed again at its 3 GiB, the target books 6 GiB; that second kill event of the kind within
+/// 256 runs makes its kills frequent, and a new target books the kind's floor, 6 GiB.
+/// Catches a kill floor lost because the size came from the kind, a kind's one kill that
+/// books every new target at its floor (3 GiB), and a kind whose kills keep coming that does
+/// not.
 #[test]
-fn a_kill_of_a_target_booked_from_its_kind_raises_the_target_and_the_kind() {
+fn a_kill_raises_its_target_and_the_kinds_floor_books_new_targets_only_while_kills_recur() {
     let tables = Tables::new();
     let mut jobs = five_targets(&tables, GIB, Duration::from_secs(10));
-    let killed = JobEnd::Memory {
+    let killed = |booked| JobEnd::Memory {
         exit_code: None,
-        output: output(6 * 256 * MIB, Duration::from_secs(5)),
+        output: output(booked, Duration::from_secs(5)),
     };
+    let spec = || of_kind("oom", KIND, needs(0, 0));
+    let first = 6 * 256 * MIB;
     let oom = ran(
         &tables,
         ("oom-run", None),
-        of_kind("oom", KIND, needs(0, 0)),
-        booked(1000, 6 * 256 * MIB),
-        killed,
+        spec(),
+        booked(1000, first),
+        killed(first),
     );
     let mut sizes = taught(&jobs, booked(2000, 4 * GIB));
-    assert!(sizes.observe(&oom, booked(1000, 6 * 256 * MIB)));
+    assert!(sizes.observe(&oom, booked(1000, first)));
     jobs.push(oom);
-    let raised = 12 * 256 * MIB;
-    assert_eq!(raised, 2 * 6 * 256 * MIB);
+    let raised = 2 * first;
     assert_eq!(size(&sizes, &step("oom-next", "oom")), (1000, raised));
-    assert_eq!(size(&sizes, &step("sibling", "sibling")), (1000, raised));
+    assert_eq!(
+        size(&sizes, &step("sibling", "sibling")),
+        (1000, first),
+        "one kill: the kind's median run"
+    );
+    let again = ran(
+        &tables,
+        ("oom-again", None),
+        spec(),
+        booked(1000, raised),
+        killed(raised),
+    );
+    assert!(sizes.observe(&again, booked(1000, raised)));
+    assert_eq!(size(&sizes, &step("oom-next", "oom")), (1000, 2 * raised));
+    assert_eq!(
+        size(&sizes, &step("sibling", "sibling")),
+        (1000, 2 * raised),
+        "two kill events in 256 runs: the kind's floor"
+    );
+}
+
+/// Asserts the farm's measured stand-in (`busybox_pin`): a kind one of whose targets was killed
+/// at the 4 GiB cold booking holds an 8 GiB floor, and the 32 runs of its other targets since
+/// peak at 215 MiB; a new target of the kind books 1 GiB (the kind's median run with the margin,
+/// `fallback`), not the kind's 8 GiB, while the killed target books its own 8 GiB floor
+/// (`class`). Catches a new target booked its kind's floor (8 GiB, on 607 runs in the window).
+#[test]
+fn a_new_target_books_its_kinds_median_not_the_floor_of_another_targets_kill() {
+    let tables = Tables::new();
+    let killed = JobEnd::Memory {
+        exit_code: None,
+        output: output(4 * GIB, Duration::from_secs(5)),
+    };
+    let oom = ran(
+        &tables,
+        ("pin-oom-run", None),
+        of_kind("pin-oom", KIND, needs(0, 0)),
+        booked(1000, 4 * GIB),
+        killed,
+    );
+    let names: Vec<String> = (0..32).map(|n| format!("pin{n}")).collect();
+    let targets: Vec<&str> = names.iter().map(String::as_str).collect();
+    let mut jobs = vec![oom];
+    jobs.extend(kind_runs(
+        &tables,
+        &targets,
+        KIND,
+        (215 * MIB, Duration::from_secs(1)),
+    ));
+    let sizes = taught(&jobs, booked(2000, 4 * GIB));
+    let fresh = step("pin-new", "pin-new");
+    assert_eq!(size(&sizes, &fresh).1, GIB);
+    assert_eq!(sizes.sized_from(&fresh, Day(0)), Some(SizedFrom::Fallback));
+    let own = step("pin-oom-next", "pin-oom");
+    assert_eq!(size(&sizes, &own).1, 8 * GIB);
+    assert_eq!(sizes.sized_from(&own, Day(0)), Some(SizedFrom::Class));
 }
 
 /// Asserts that a kind teaches a new target from even one run, and that one whose runs reach
@@ -550,8 +608,9 @@ fn finish(tables: &Tables, id: &str, peak: u64, cpu: Duration) {
 
 /// Asserts that a fallback class with an estimate but no CPU sample (its only run a memory
 /// kill) gives its memory and the server's cold CPU (half a core here), not the estimator's
-/// unlearned two cores. Catches a fallback that books more CPU than the job would have booked
-/// cold.
+/// unlearned two cores. Its memory is its one sample, the kill's 2 GiB booking, with the margin
+/// (2.75 GiB): the kill's 4 GiB floor stays with the target that was killed. Catches a fallback
+/// that books more CPU than the job would have booked cold.
 #[test]
 fn a_fallback_with_no_cpu_sample_gives_the_cold_cpu() {
     let tables = Tables::new();
@@ -576,7 +635,7 @@ fn a_fallback_with_no_cpu_sample_gives_the_cold_cpu() {
     let fresh = step("fresh", "fresh");
     let (cpu, memory) = size(&sizes, &fresh);
     assert_eq!(cpu, 500, "the cold CPU");
-    assert!(memory >= 4 * GIB, "at least the kill's floor");
+    assert_eq!(memory, 11 * 256 * MIB, "the kind's run, not its floor");
     assert_eq!(sizes.sized_from(&fresh, Day(0)), Some(SizedFrom::Fallback));
 }
 
