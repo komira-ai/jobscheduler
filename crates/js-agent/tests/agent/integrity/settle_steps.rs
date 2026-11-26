@@ -123,7 +123,12 @@ fn a_second_job_is_checked_after_the_check_that_waits() {
     h.clock.advance(WAIT_MS);
     assert_eq!(
         names(&h.life.step()),
-        ["checks passed r1", "freed r1", "checks passed r2", "freed r2"]
+        [
+            "checks passed r1",
+            "freed r1",
+            "checks passed r2",
+            "freed r2"
+        ]
     );
     assert_eq!(h.life.free().cpu_millis, 4000);
     assert!(!h.life.is_tainted());

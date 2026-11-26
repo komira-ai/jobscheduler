@@ -373,9 +373,7 @@ impl Integrity {
     /// verdict. A call for another run forgets what was kept and looks first.
     pub(super) fn poll_after(&mut self, job: &Finished<'_>) -> Checked {
         let looked = match self.pending.take() {
-            Some(again) if again.run_id == job.run_id => {
-                self.second_look(job, false, &again.seen)
-            }
+            Some(again) if again.run_id == job.run_id => self.second_look(job, false, &again.seen),
             _ => match self.first_look(job, false) {
                 Err(blind) => Err(blind),
                 Ok(First::Judged(looked)) => Ok(looked),

@@ -41,7 +41,10 @@ fn a_leftover_at_the_first_look_answers_the_wait_and_the_next_call_judges_what_i
     let mut checks = started(&host, vec![]).with_settle(WAIT);
     host.start_process(process(300, 100, JOB_UID, 900, LEFT));
     assert_eq!(polled(&mut checks, "r1"), Checked::Wait(WAIT));
-    assert!(host.settled().is_empty(), "the caller's thread did not wait");
+    assert!(
+        host.settled().is_empty(),
+        "the caller's thread did not wait"
+    );
     host.end_process(300);
     assert_eq!(polled(&mut checks, "r1"), Checked::Done(Ok(())));
     assert!(checks.notes().is_empty());
