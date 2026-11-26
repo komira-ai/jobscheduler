@@ -79,6 +79,9 @@ Neither runs at load. `KeepAlive` holds each while the flags file `/etc/js-agent
 exists, so the daemons start when the host has its flags, and launchd starts one again after
 every exit, at most once in 30 seconds (`ThrottleInterval`). A refusal is read from
 `/Library/Application Support/js-agent/log/js-agent.err.log`.
+Both start with 65536 open files, soft and hard (`SoftResourceLimits` and
+`HardResourceLimits`, `NumberOfFiles`), not with launchd's default soft limit of 256, and the
+jobs the helper starts inherit the limit.
 
 `js-agent.pf-pool` keeps the pool's pf anchor loaded, which the agent checks at its start and
 before every job with the network `on` (see Network). Its plist is fixed too

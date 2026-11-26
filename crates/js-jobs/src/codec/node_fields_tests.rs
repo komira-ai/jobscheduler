@@ -72,6 +72,7 @@ fn full_node() -> NodeRecord {
         shape: Some(booked()),
         labels: pairs(&[("os", "linux"), ("rack", "r1")]),
         agent_process: Some("proc-9".to_owned()),
+        agent_version: Some("2.0.1".to_owned()),
         state: NodeState {
             phase: Phase::Draining,
             load: Some(load()),
@@ -99,6 +100,7 @@ fn bare_node() -> NodeRecord {
         shape: None,
         labels: BTreeMap::new(),
         agent_process: None,
+        agent_version: None,
         state: NodeState {
             phase: Phase::Serving,
             load: None,
@@ -258,6 +260,7 @@ fn the_node_layout_is_pinned() {
             framed(&[b"job-1", &1u32.to_be_bytes(), b"job-2", &2u32.to_be_bytes()]),
         ),
         (13, b"proc-9".to_vec()),
+        (14, [number(3), b"2.0.1".to_vec()].concat()),
     ];
     fields.extend(shape_fields(20, 2000, 4096, 2, "a100", 9, &[b"zone", b"a"]));
     fields.extend(shape_fields(
@@ -308,8 +311,8 @@ fn the_optional_markers_are_written_only_when_set() {
 }
 
 // Catches a row holding only the required fields read as anything but the defaults: no
-// session, shape, labels, load, beat or missed container, the phase quarantined, the first
-// listing applied and the last listing clean.
+// session, shape, labels, load, beat, missed container, agent process or agent version, the
+// phase quarantined, the first listing applied and the last listing clean.
 #[test]
 fn a_row_with_only_the_required_fields_reads_as_the_defaults() {
     assert_eq!(
@@ -323,6 +326,7 @@ fn a_row_with_only_the_required_fields_reads_as_the_defaults() {
             shape: None,
             labels: BTreeMap::new(),
             agent_process: None,
+            agent_version: None,
             state: NodeState {
                 phase: Phase::Quarantined,
                 load: None,
@@ -530,4 +534,65 @@ fn the_agent_process_is_optional_and_additive() {
     assert_eq!(decode_node(&row), Ok(node));
     let bad = with(&row, 13, &[0xff, 0xfe]);
     assert!(decode_node(&bad).is_err(), "a text that is not UTF-8");
+}
+
+// Catches an agent version lost, invented or misread by the codec: a row written before the
+// field (the required fields only) reads with none, a record with none writes no tag 14, a
+// record with one writes the row's epoch and then the text and reads it back, an empty text
+// reads back empty, and a value too short to hold an epoch or whose text is not UTF-8 is
+// refused.
+#[test]
+fn the_agent_version_is_optional_and_additive() {
+    assert_eq!(
+        decode_node(&required_only()).map(|node| node.agent_version),
+        Ok(None),
+        "a row from before the field"
+    );
+    let mut node = bare_node();
+    assert_eq!(field_of(&node_row(&node), 14), None);
+    node.agent_version = Some("0.9.4".to_owned());
+    let row = node_row(&node);
+    assert_eq!(
+        field_of(&row, 14),
+        Some([number(1), b"0.9.4".to_vec()].concat())
+    );
+    assert_eq!(decode_node(&row), Ok(node.clone()));
+    node.agent_version = Some(String::new());
+    assert_eq!(decode_node(&node_row(&node)), Ok(node.clone()));
+
+    for short in [Vec::new(), vec![0; 7]] {
+        assert_eq!(
+            decode_node(&with(&row, 14, &short)),
+            Err(DecodeError::BadLength { tag: 14 }),
+            "{} bytes",
+            short.len()
+        );
+    }
+    let bad = [number(1), vec![0xff, 0xfe]].concat();
+    assert_eq!(
+        decode_node(&with(&row, 14, &bad)),
+        Err(DecodeError::NotUtf8 { tag: 14 })
+    );
+}
+
+// Catches the version of an earlier session read as that of the agent now in session. A build
+// that does not know tag 14 carries it, so a hello it takes moves the epoch on and leaves the
+// tag as the hello before wrote it: that row reads with no version, a rewrite of it drops the
+// tag, and a beat such a build applies (the epoch unchanged) leaves the version readable.
+#[test]
+fn a_version_another_epoch_wrote_reads_as_none() {
+    let mut node = full_node();
+    node.epoch = 4;
+    node.carried = Carried::default();
+    let ours = node_row(&node);
+    let earlier_hello = with(&ours, 2, &number(5));
+    let read = decode_node(&earlier_hello).expect("a row");
+    assert_eq!((read.epoch, read.agent_version.clone()), (5, None));
+    assert_eq!(field_of(&node_row(&read), 14), None, "the rewrite");
+
+    let earlier_beat = with(&ours, 11, &number(99));
+    assert_eq!(
+        decode_node(&earlier_beat).map(|node| node.agent_version),
+        Ok(Some("2.0.1".to_owned()))
+    );
 }
