@@ -143,3 +143,32 @@ async fn a_hello_whose_row_another_process_took_first_is_host_live() {
     assert_eq!(welcome.epoch, 2);
     assert_eq!(server.holds("host-a"), Some(2));
 }
+
+/// Asserts that `GetJob` and `ListJobs` of a job with a host answer `internal` when the read of
+/// the host's silence fails (the store's clock cannot be read), and answer again once it can.
+/// Catches a failed silence read answered as no silence, which shows a silent host as heard.
+#[tokio::test]
+async fn a_failed_silence_read_answers_internal() {
+    let world = World::new();
+    let server = world.server("rows_live_failed_read", Kind::JOBS);
+    server.join("host-a").await;
+    let (job, _) = placed(&world.jobs, "job-failed", "host-a", spec(), BOOKED);
+    let api = api_of(&world, &server);
+    world.store.fail_clock(true);
+    let asked = as_operator(Request::new(GetJobRequest {
+        job_id: job.id.to_string(),
+    }));
+    let refused = api.get_job(asked).await.err().expect("refused");
+    assert_eq!(
+        (refused.code(), refused.message()),
+        (tonic::Code::Internal, "internal")
+    );
+    let asked = as_operator(Request::new(ListJobsRequest::default()));
+    let refused = api.list_jobs(asked).await.err().expect("refused");
+    assert_eq!(
+        (refused.code(), refused.message()),
+        (tonic::Code::Internal, "internal")
+    );
+    world.store.fail_clock(false);
+    assert_eq!(shown(&api, &job.id).await, (None, None));
+}
