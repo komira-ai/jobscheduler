@@ -26,7 +26,8 @@ use tracing::subscriber::{DefaultGuard, NoSubscriber};
 /// Registers the keeper, once for the process: a dispatcher that is never dropped and no
 /// thread's default. It answers that it wants no callsite, so it changes no event's fate;
 /// being live, it keeps `tracing-core` from computing the shared interest from one thread's
-/// default. Called before any subscriber of a test is made: [`capture`], and the tests of
+/// default. It gives no level hint, so the shared maximum level stays at `TRACE` and each
+/// subscriber filters by its own level. Called before any subscriber of a test is made: [`capture`], and the tests of
 /// `crate::warnings`, which install the agent's own subscriber.
 pub(crate) fn keeper() {
     static KEEPER: OnceLock<Dispatch> = OnceLock::new();

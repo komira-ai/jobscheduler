@@ -108,7 +108,11 @@ fn up_or_ended(ready: &Path, lease: &Path) -> Option<String> {
             PollFd::new(&pipe, PollFlags::IN),
             PollFd::new(&watch, PollFlags::IN),
         ];
-        poll(&mut fds, None).expect("wait for the pipe or the lease directory");
+        // A signal that interrupts the wait only wakes the loop, which looks again.
+        match poll(&mut fds, None) {
+            Ok(_) | Err(rustix::io::Errno::INTR) => {}
+            Err(why) => panic!("wait for the pipe or the lease directory: {why}"),
+        }
         // The events only wake the loop, which looks again; they are read so the next poll
         // waits for new ones.
         let mut events = [0u8; 4096];
