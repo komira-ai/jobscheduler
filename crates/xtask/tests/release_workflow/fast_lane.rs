@@ -323,8 +323,9 @@ fn unit_tests_problems(text: &str) -> Vec<String> {
     {
         problems.push("unit-tests nextest is not fetched pinned".to_owned());
     }
-    // The only cache it writes is the nextest tarball; the Cargo cache (`target` among its paths)
-    // is restored read-only.
+    // The only cache it writes or reads is the nextest tarball; no Cargo cache (`target` among
+    // its paths) is restored, since `ci`'s `test` cache is built with other RUSTFLAGS and only
+    // fills the runner's disk.
     if body.contains("actions/cache@") {
         problems.push("unit-tests uses the saving cache action".to_owned());
     }
@@ -338,22 +339,26 @@ fn unit_tests_problems(text: &str) -> Vec<String> {
                 problems.push("unit-tests saves more than the nextest tarball".to_owned());
             }
         }
-        if line.contains("uses: actions/cache/restore@") && step.contains("            target\n") {
+        if line.contains("uses: actions/cache/restore@")
+            && ["            target\n", "~/.cargo/registry", "~/.cargo/git"]
+                .iter()
+                .any(|path| step.contains(path))
+        {
             restores_cargo = true;
         }
     }
     if saves != 1 {
         problems.push(format!("unit-tests has {saves} cache saves"));
     }
-    if !restores_cargo {
-        problems.push("unit-tests does not restore the cargo cache".to_owned());
+    if restores_cargo {
+        problems.push("unit-tests restores a cargo cache".to_owned());
     }
     problems
 }
 
 /// Asserts the shape of `unit-tests`: push to main only, `contents: read` alone, four nextest
-/// shards, a digest-pinned Postgres, the Cargo cache restored and never saved, and only the
-/// pinned nextest tarball saved.
+/// shards, a digest-pinned Postgres, no Cargo cache restored or saved, and only the pinned
+/// nextest tarball saved.
 #[test]
 fn unit_tests_run_four_nextest_shards_on_main_and_save_only_the_nextest_tarball() {
     let text = workflow();
@@ -374,14 +379,22 @@ fn unit_tests_run_four_nextest_shards_on_main_and_save_only_the_nextest_tarball(
     ] {
         refused(unit_tests_problems, &text, name, from, to);
     }
-    // The Cargo cache is not restored: its `target` path is gone.
-    refused(
-        unit_tests_problems,
-        &text,
-        name,
+    // A Cargo cache restored again: with `target`, or the registry or git checkouts alone.
+    for paths in [
         "            target\n",
-        "            other\n",
-    );
+        "            ~/.cargo/registry\n",
+        "            ~/.cargo/git\n",
+    ] {
+        refused(
+            unit_tests_problems,
+            &text,
+            name,
+            "      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0\n        id: nextest-cache\n",
+            &format!(
+                "      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0\n        with:\n          path: |\n{paths}          key: k\n      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0\n        id: nextest-cache\n"
+            ),
+        );
+    }
     // A second save.
     refused(
         unit_tests_problems,
