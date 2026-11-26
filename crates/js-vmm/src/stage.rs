@@ -162,10 +162,7 @@ pub enum StageError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Node {
     /// A directory, with its mode.
-    Dir {
-        rel: PathBuf,
-        mode: u32,
-    },
+    Dir { rel: PathBuf, mode: u32 },
     /// A regular file copied from `src`, with its mode and size in bytes.
     File {
         rel: PathBuf,
@@ -174,10 +171,7 @@ pub enum Node {
         bytes: u64,
     },
     /// A symbolic link to `target`.
-    Link {
-        rel: PathBuf,
-        target: PathBuf,
-    },
+    Link { rel: PathBuf, target: PathBuf },
 }
 
 impl Node {
