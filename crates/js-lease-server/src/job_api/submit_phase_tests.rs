@@ -183,8 +183,22 @@ async fn a_retry_of_a_held_job_is_timed_in_every_phase_but_admission() {
     let (_rig, api, recorder) = metered("phase_retry", true, true);
     let first = submit(&api, wire("job-retry")).await.unwrap();
     let again = submit(&api, wire("job-retry")).await.unwrap();
-    assert_eq!(again.job_id, first.job_id);
+    assert_eq!(again.id, first.id);
     let (one, two) = ("0.001", "0.002");
     let want = expected([2, 2, 1, 2, 2, 2], [two, two, one, "0", two, two]);
+    assert_eq!(phases(&recorder), want);
+}
+
+/// Asserts that a read of the id that fails is timed in `get`, after `validation`, and that
+/// the call goes no further: the answer is `state-write-failed`. It catches a `get` timed only
+/// when its read succeeds.
+#[tokio::test]
+async fn a_failed_read_of_the_id_is_timed_in_get_and_goes_no_further() {
+    let (rig, api, recorder) = metered("phase_unread", true, true);
+    rig.store.fail_read_after(0);
+    let failed = submit(&api, wire("job-unread")).await.unwrap_err();
+    assert_eq!(failed.code(), Code::Internal);
+    let ms = "0.001";
+    let want = expected([1, 1, 0, 0, 0, 0], [ms, ms, "0", "0", "0", "0"]);
     assert_eq!(phases(&recorder), want);
 }
