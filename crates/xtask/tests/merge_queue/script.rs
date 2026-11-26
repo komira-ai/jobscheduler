@@ -394,10 +394,13 @@ fn a_ruleset_already_as_documented_writes_the_settings_alone() {
     );
 }
 
+/// A refusal case: its name, what it sets up, and the exact error output.
+type Refusal<'a> = (&'a str, &'a dyn Fn(&Rig), &'a str);
+
 #[test]
 fn what_is_refused_before_any_write_even_with_apply() {
     let ci = read(".github/workflows/ci.yml");
-    let cases: [(&str, &dyn Fn(&Rig), &str); 5] = [
+    let cases: [Refusal; 5] = [
         (
             "logged-out",
             &|r: &Rig| r.set("logged-out", ""),
