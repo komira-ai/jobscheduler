@@ -18,6 +18,9 @@
 //!   those revisions, and commits, so revisions commit in the order they were taken. Bodies
 //!   run at once; tails queue on a table lock (`SHARE UPDATE EXCLUSIVE`, the one every
 //!   release takes) and hold it for a few statements and the commit's flush.
+//!   A transaction built from the clock it reads ([`Store::txn_stamped`]) takes the head at
+//!   its start instead, with the clock in the same round trip; one that only creates keys is
+//!   then one statement under it and the commit.
 //!   [`Store::changes`] reads the committed head, then the rows up to it, and returns the
 //!   head as its cursor: nothing at or below it can still commit. A bare sequence would not
 //!   do (a later number can commit first and a poller steps over the earlier one);
@@ -786,6 +789,33 @@ impl Store for PostgresStore {
             let (tx, results) = self.run_batch(&batch)?;
             self.commit(tx, applied(&results))?;
             Ok(results)
+        })
+    }
+
+    /// The transaction's first round trip takes the commit head and reads the clock (`BEGIN`,
+    /// `LOCK TABLE head` and the clock as one message), and `build` makes the transaction from
+    /// that reading. One that only creates keys none of which holds a row is then one statement
+    /// and the commit, three round trips in all ([`Tx::insert_only`]); any other runs as a body
+    /// and a tail under the head it holds. Taking the head before the keys, it waits for a key
+    /// only behind a writer that holds the key and does not hold the head yet, which can only be
+    /// one that will want the head for a write of the same new key: the server finds the
+    /// deadlock and the transaction is run again.
+    fn txn_stamped(
+        &self,
+        build: &mut dyn FnMut(StoreTime) -> Option<Txn>,
+    ) -> Result<Option<Result<Commit, Conflict>>, StoreError> {
+        self.retrying(|| {
+            let over = self.over();
+            let mut tx = self.twice(|session| Tx::begin_holding(session, over, self.flaw))?;
+            let Some(txn) = build(to_time(tx.now())) else {
+                return Ok(None);
+            };
+            let result = match tx.insert_only(&txn)? {
+                Some(commit) => Ok(commit),
+                None => tx.apply_alone(&txn)?,
+            };
+            self.commit(tx, usize::from(result.is_ok()))?;
+            Ok(Some(result))
         })
     }
 

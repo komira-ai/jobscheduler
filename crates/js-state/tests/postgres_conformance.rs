@@ -85,6 +85,13 @@ fn c8_a_range_scan_is_bounded_and_resumes() {
 }
 
 #[test]
+fn a_stamped_transaction_is_built_from_the_store_clock() {
+    js_state::conformance::a_stamped_txn_is_built_from_the_store_clock_and_applied_as_built(
+        &backend(Flaw::None),
+    );
+}
+
+#[test]
 fn a_batched_get_reads_each_live_key_once_in_key_order() {
     get_many_reads_each_live_key_once_in_key_order(&backend(Flaw::None));
 }

@@ -852,5 +852,9 @@ fn held(record: JobRecord, id: &JobId, spec: &JobSpec) -> Result<Inserted, JobSt
     })
 }
 
+#[cfg(all(test, feature = "postgres"))]
+#[path = "store/postgres_submit_tests.rs"]
+mod postgres_submit_tests;
+
 #[cfg(test)]
 mod tests;

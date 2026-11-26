@@ -1,5 +1,6 @@
-//! The conformance suite C1 to C8, with C5's trim clause ([`c5_feed_trim`]) and the batched
-//! read ([`get_many_reads_each_live_key_once_in_key_order`]), generic over a
+//! The conformance suite C1 to C8, with C5's trim clause ([`c5_feed_trim`]), the batched read
+//! ([`get_many_reads_each_live_key_once_in_key_order`]) and the stamped transaction
+//! ([`a_stamped_txn_is_built_from_the_store_clock_and_applied_as_built`]), generic over a
 //! [`Backend`] factory so the in-memory fake, SQLite and Postgres run the same clauses. A backend's own tests call
 //! [`run_all`] with their factory; the fake's tests also run each clause against a
 //! deliberately broken fake and require it to panic.
@@ -24,10 +25,12 @@ mod c5_trim;
 mod c8_range;
 mod c8_snapshot;
 mod get_many;
+mod stamped;
 
 pub use c5_trim::c5_feed_trim;
 pub use c8_snapshot::C8_SNAPSHOT_PREFIX;
 pub use get_many::get_many_reads_each_live_key_once_in_key_order;
+pub use stamped::a_stamped_txn_is_built_from_the_store_clock_and_applied_as_built;
 
 /// How many threads race one compare-and-set in C1.
 pub const C1_RACERS: usize = 8;
@@ -64,7 +67,7 @@ pub trait Backend {
     ) -> Result<(), Conflict>;
 }
 
-/// Runs C1 to C8 and the batched read against `backend`.
+/// Runs C1 to C8, the batched read and the stamped transaction against `backend`.
 pub fn run_all<B: Backend>(backend: &B) {
     c1_linearizable_cas(backend);
     c2_atomic_txn(backend);
@@ -76,6 +79,7 @@ pub fn run_all<B: Backend>(backend: &B) {
     c7_group_commit(backend);
     c8_bounded_range_scan(backend);
     get_many_reads_each_live_key_once_in_key_order(backend);
+    a_stamped_txn_is_built_from_the_store_clock_and_applied_as_built(backend);
 }
 
 fn run<S: Store>(store: &S, txn: Txn) -> Result<Commit, Conflict> {

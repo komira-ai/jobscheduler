@@ -19,8 +19,14 @@ use super::schema::{SchemaError, Supported, check_conn, require_durable};
 /// own `clock_timestamp()` (`now()` is the transaction's start time, which a long batch
 /// would judge expiry by).
 fn now_sql(n: u8) -> String {
+    clock_sql(&format!("${n}"))
+}
+
+/// The time of the store's clock as [`now_sql`] gives it, with `over` (an integer, a parameter
+/// or `NULL`) in place of the parameter.
+pub(super) fn clock_sql(over: &str) -> String {
     format!(
-        "COALESCE(${n}::bigint, floor(extract(epoch from clock_timestamp()) * 1000000)::bigint)"
+        "COALESCE({over}::bigint, floor(extract(epoch from clock_timestamp()) * 1000000)::bigint)"
     )
 }
 
@@ -57,6 +63,13 @@ pub(super) struct Statements {
     /// and values; `$5` to `$8` the rows' keys, values, versions and expiries; `$9` the keys
     /// whose rows (or placeholders) go.
     pub write: Statement,
+    /// A transaction that only creates keys, in one statement, run under `LOCK TABLE head`:
+    /// `$1` the keys, `$2` their values, in the order of the transaction's puts. When none of
+    /// the keys holds a row (live or expired), it moves the commit head past one revision per
+    /// key, writes each key's feed row (a put) and its row at the revision of its put, in that
+    /// order, and returns the new head, so the rows are those the body and tail of the
+    /// transaction write. When one does, it writes nothing and returns no row.
+    pub insert: Statement,
     /// `$1` counter: its new value.
     pub counter: Statement,
     /// `$1` how many: that many values of the revision sequence, in order (only the
@@ -133,6 +146,17 @@ impl Statements {
                  version = EXCLUDED.version, expires_us = EXCLUDED.expires_us), \
                  gone AS (DELETE FROM kv WHERE key = ANY($9::text[])) \
                  SELECT 1",
+            )?,
+            insert: client.prepare(
+                "WITH present AS (SELECT 1 FROM kv WHERE key = ANY($1::text[]) LIMIT 1), \
+                 moved AS (UPDATE head SET rev = rev + cardinality($1::text[]) \
+                 WHERE NOT EXISTS (SELECT 1 FROM present) RETURNING rev), \
+                 taken AS (SELECT u.k, u.v, m.rev - cardinality($1::text[]) + u.n AS rev \
+                 FROM moved AS m, unnest($1::text[], $2::bytea[]) WITH ORDINALITY AS u(k, v, n)), \
+                 fed AS (INSERT INTO feed (rev, key, kind, value) SELECT rev, k, 0, v FROM taken), \
+                 put AS (INSERT INTO kv (key, value, version, expires_us) \
+                 SELECT k, v, rev, NULL FROM taken) \
+                 SELECT rev FROM moved",
             )?,
             counter: client.prepare(
                 "INSERT INTO counters (name, value) VALUES ($1, 1) \
