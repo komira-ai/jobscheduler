@@ -35,13 +35,9 @@ fn row_count(txn: &Txn) -> Option<u64> {
     puts.then_some(txn.change_count())
 }
 
-/// The failure of a stamped write whose transaction the store did not apply although it was
-/// built, which a store that keeps [`Store::txn_stamped`]'s contract never answers.
-fn declined() -> JobStoreError {
-    JobStoreError::Store(StoreError::Failed(
-        "the store declined a transaction that was built".to_owned(),
-    ))
-}
+/// The text of the failure a stamped write answers when the store applied nothing although its
+/// transaction was built, which a store that keeps [`Store::txn_stamped`]'s contract never does.
+const DECLINED: &str = "the store declined a transaction that was built";
 
 /// The store's head as the last reading read it, and the head at the last commit that changed
 /// a job table as far as the readings since have told.
@@ -157,7 +153,8 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         let writes = self.writes.fetch_add(1, Ordering::SeqCst);
         failed.map_or(Ok(()), Err)?;
         // `build` answered, so the store applied what it built.
-        let (answer, value) = answer?.zip(made).ok_or_else(declined)?;
+        let declined = JobStoreError::Store(StoreError::Failed(DECLINED.to_owned()));
+        let (answer, value) = answer?.zip(made).ok_or(declined)?;
         Ok((value, self.stepped(answer, writes, rows)?))
     }
 
