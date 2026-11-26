@@ -65,7 +65,8 @@ pub struct Refusal {
     pub new: u64,
     /// The most the inequality allows.
     pub limit: u64,
-    /// The cores the host's newest windows measured, in millicores, for the CPU kind on a
+    /// The cores the host's newest windows measured demanded (busy and waiting for a CPU,
+    /// [`crate::LoadView::measured_cpu_millis`]), in millicores, for the CPU kind on a
     /// host charged by measurement; `None` for a host charged by prediction alone (it has no
     /// fresh reading: none yet, a dropped one, a stale one or a CPU-limited actions cgroup)
     /// and for the kinds other than CPU.

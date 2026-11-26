@@ -26,6 +26,7 @@ pub fn reading(seq: u64, at: u64, minutes: Vec<ClosedMinute>) -> Reading {
             mono_usec: at,
             cpu_usage_usec: 7_000,
             host_cpu_usec: 6_000,
+            host_cpu_pressure_some_usec: None,
             working_set_bytes: 8_000,
             host_nonfile_bytes: None,
             active_file_bytes: 9_000,
@@ -51,11 +52,14 @@ fn names(minutes: &[ClosedMinute]) -> Vec<(String, u16)> {
 /// Asserts the wire form of a reading field by field, with a different value in every
 /// field: the sample's counters and gauges, the covered leases, the clocks and the minutes
 /// in the order they were given. It catches two fields swapped (the working set and the
-/// active file cache), a dropped list and a renamed key.
+/// active file cache), a dropped list and a renamed key, and the host's CPU pressure left out
+/// of the beat.
 #[test]
 fn a_reading_is_sent_field_for_field() {
     let outbox = Outbox::new();
-    outbox.publish(reading(3, 5_000, vec![minute("1-1", 0, 900)]));
+    let mut sent = reading(3, 5_000, vec![minute("1-1", 0, 900)]);
+    sent.sample.host_cpu_pressure_some_usec = Some(5_500);
+    outbox.publish(sent);
     let load = outbox.take().expect("a reading was published");
     assert_eq!(
         serde_json::to_value(load).unwrap(),
@@ -64,6 +68,7 @@ fn a_reading_is_sent_field_for_field() {
             "mono_usec": 5_000,
             "cpu_usage_usec": 7_000,
             "host_cpu_usec": 6_000,
+            "host_cpu_pressure_some_usec": 5_500,
             "working_set_bytes": 8_000,
             "active_file_bytes": 9_000,
             "actions_cpu_limited": true,

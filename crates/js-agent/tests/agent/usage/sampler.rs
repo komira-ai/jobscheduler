@@ -85,6 +85,7 @@ fn a_sample_reads_every_field() {
             mono_usec: 777,
             cpu_usage_usec: 1000,
             host_cpu_usec: 1_500_000,
+            host_cpu_pressure_some_usec: None,
             working_set_bytes: 4300,
             host_nonfile_bytes: None,
             active_file_bytes: 300,
@@ -338,4 +339,28 @@ fn a_host_without_a_readable_proc_stat_gives_no_sample() {
         SampleError::HostCpuStat.to_string(),
         "the host /proc/stat cannot be read"
     );
+}
+
+/// Asserts that a sample carries the `some` total of the host's `/proc/pressure/cpu`, which
+/// admission reads to see demand above the host's cores, and that a host whose pressure file
+/// cannot be read, or holds no `some` line, gives a sample without it and with every other
+/// field as before. It catches a pressure invented as 0, a missing pressure failing the
+/// sample, and the `full` line read for `some`.
+#[test]
+fn a_sample_carries_the_hosts_cpu_pressure_when_it_can_be_read() {
+    let pressure = "some avg10=1.00 avg60=2.00 avg300=3.00 total=4321\n\
+                    full avg10=0.00 avg60=0.00 avg300=0.00 total=99\n";
+    let without = sample(node(1000, 5000, 700, 300, "max 100000\n"), &[]).unwrap();
+    assert_eq!(without.host_cpu_pressure_some_usec, None);
+    let files = node(1000, 5000, 700, 300, "max 100000\n").with("/proc/pressure/cpu", pressure);
+    let with = sample(files, &[]).unwrap();
+    assert_eq!(
+        with,
+        Sample {
+            host_cpu_pressure_some_usec: Some(4321),
+            ..without.clone()
+        }
+    );
+    let files = node(1000, 5000, 700, 300, "max 100000\n").with("/proc/pressure/cpu", "junk\n");
+    assert_eq!(sample(files, &[]).unwrap(), without);
 }

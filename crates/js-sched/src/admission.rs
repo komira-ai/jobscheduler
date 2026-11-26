@@ -552,8 +552,10 @@ impl Admission {
 pub struct LoadView {
     /// No usable measurement: every lease is charged its full predicted cost.
     pub fallback: bool,
-    /// Cores busy, in millicores, over the last two windows (the larger); `None` before
-    /// the first window.
+    /// Cores demanded, in millicores, over the last two windows (the larger): the busy cores
+    /// plus the busy cores times the share of the window in which some task of the host
+    /// waited for a CPU (`NodeLoad::demand_millicores_since`), so a saturated host reads above
+    /// its cores. `None` before the first window.
     pub measured_cpu_millis: Option<u32>,
     /// The newest reading's working set, as reported.
     pub working_set_bytes: Option<u64>,

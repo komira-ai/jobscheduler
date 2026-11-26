@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use js_jobs::{AllocationId, Booked, JobId, JobRecord};
+use js_jobs::{AllocationId, Booked, JobId, JobRecord, NewJob};
 use js_sched::{LoadConfig, RefusalKind};
 use js_sizing::{CURVE_SLOTS, TAIL_SLOT};
 use js_types::sched::usage::NodeLoad;
@@ -19,8 +19,8 @@ use crate::engine::rig::{Tables, at, host};
 use crate::engine::{Engine, Settings};
 use crate::sizes::Curves;
 use crate::sizes::curve_rig::{
-    burst_at, busy_until, capture_targets, queued_falling_back, queued_of, run_booking, teach,
-    without_series,
+    burst_at, busy_until, capture_targets, queued_falling_back, queued_of, run_booking,
+    spec_of_class, teach, without_series,
 };
 
 /// The farm time of the walks, in milliseconds.
@@ -556,6 +556,54 @@ fn a_reading_below_the_charges_adds_nothing() {
         figures,
         Some(("new-early".to_owned(), 82_000, 22_000, LIMIT))
     );
+}
+
+/// A host `a` holding 1000 m of one job, a window of 87 000 m busy (87 of its 88 cores) in which
+/// some task waited for a CPU `waited` microseconds of the 5 s, and a queued job that names
+/// 2000 m, so it books 2000 m at every slot.
+fn saturated(waited: u64, tables: &Tables) -> (Engine, JobRecord) {
+    let mut engine = engine_in(mode(Curves::On), CurveSettings::default(), &["a"]);
+    live(&mut engine, "a", ("held", 1_000), (None, None));
+    let pressed = |seq, used, pressure| NodeLoad {
+        cpu_pressure_some_total_usec: pressure,
+        ..reading(seq, used)
+    };
+    let since_boot = 7_000_000_000;
+    let (before, now) = (at(NOW_MS - 5_000), at(NOW_MS));
+    engine.heard(&host("a"), Some(&pressed(1, 0, since_boot)), before);
+    let last = pressed(2, 87_000, since_boot + waited);
+    engine.heard(&host("a"), Some(&last), now);
+    let new = NewJob {
+        id: Some(JobId::parse("named").unwrap()),
+        spec: spec_of_class("named", 2_000, GIB),
+        priority: 0,
+        client: None,
+    };
+    (engine, tables.jobs.insert_queued(new).unwrap().record)
+}
+
+/// Asserts that a curve host at 87 of 88 cores busy with a long run queue (some task waiting
+/// 950 thousandths of the window) is full: it demanded 87 000 m busy and 82 650 m waiting, its
+/// residual is the 168 650 m of that beyond its 1000 m of jobs, and a job of 2000 m is refused as
+/// `cpu-curve` with 169 650 m counted; the same host where nothing waited counts 87 000 m and
+/// places it (89 000 m of 96 800). Catches a residual read from busy cores, which cannot exceed
+/// the host's cores, so that only the flat sum could fill a saturated host.
+#[test]
+fn a_curve_host_at_87_of_88_busy_with_a_long_run_queue_is_full() {
+    let tables = Tables::new();
+    let (mut engine, job) = saturated(4_750_000, &tables);
+    let table = engine.table_of(&host("a"), at(NOW_MS));
+    assert_eq!((table.residual, table.charges[0]), (168_650, 1_000));
+    let (placed, _) = walk(&mut engine, &[job], (&["a"], NOW_MS));
+    assert_eq!(placed, BTreeMap::new());
+    let figures = refusal(&mut engine, "a", RefusalKind::CpuCurve);
+    assert_eq!(figures, Some(("named".to_owned(), 169_650, 2_000, LIMIT)));
+
+    let tables = Tables::new();
+    let (mut engine, job) = saturated(0, &tables);
+    assert_eq!(engine.table_of(&host("a"), at(NOW_MS)).residual, 86_000);
+    let (placed, _) = walk(&mut engine, std::slice::from_ref(&job), (&["a"], NOW_MS));
+    assert_eq!(placed, BTreeMap::from([(job.id, host("a"))]));
 }
 
 /// Asserts the limit of a table: the host's cores times the CPU slack, at the default 1.1 and at

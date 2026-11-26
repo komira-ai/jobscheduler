@@ -113,12 +113,13 @@ impl<F: FileReader> Sampler<F> {
     }
 
     /// Reads the node and then each of `leases`, with exactly one read of `clock`, taken
-    /// right after the two CPU counters (the actions cgroup's, then the host's).
+    /// right after the CPU counters (the actions cgroup's, then the host's busy time and CPU
+    /// pressure).
     ///
     /// A node file that cannot be read is an error, so that no zero is invented. The host's
-    /// `/proc/meminfo` is the exception: when it cannot be read the sample carries no host
-    /// memory, and the CPU it measured still counts. A lease that cannot be read is left out
-    /// and counted in `unreadable_leases`.
+    /// `/proc/meminfo` and `/proc/pressure/cpu` are the exceptions: when one cannot be read
+    /// the sample carries no host memory, or no CPU pressure, and the rest still counts. A
+    /// lease that cannot be read is left out and counted in `unreadable_leases`.
     pub fn sample(
         &self,
         clock: &dyn UsageClock,
@@ -128,9 +129,7 @@ impl<F: FileReader> Sampler<F> {
         let cpu = self
             .value(dir, "cpu.stat", parse_usage_usec)
             .ok_or(SampleError::NodeCpuStat)?;
-        let host = host_cpu(&self.files)
-            .map(|host| host.busy_usec)
-            .ok_or(SampleError::HostCpuStat)?;
+        let host = host_cpu(&self.files).ok_or(SampleError::HostCpuStat)?;
         let mono_usec = clock.now_usec();
         let current = self
             .value(dir, "memory.current", parse_single_u64)
@@ -152,7 +151,8 @@ impl<F: FileReader> Sampler<F> {
         Ok(Sample {
             mono_usec,
             cpu_usage_usec: cpu,
-            host_cpu_usec: host,
+            host_cpu_usec: host.busy_usec,
+            host_cpu_pressure_some_usec: host.pressure_some_usec,
             working_set_bytes: working_set(current, inactive),
             host_nonfile_bytes: host_nonfile(&self.files),
             active_file_bytes: active,

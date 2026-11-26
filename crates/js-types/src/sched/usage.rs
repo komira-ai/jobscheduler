@@ -99,8 +99,10 @@ pub struct NodeLoad {
     /// Cumulative time the actions cgroup was throttled, in microseconds. Telemetry only. A node whose agent
     /// does not send it (the lease server's wire load) reads 0: not measured.
     pub cpu_throttled_usec: u64,
-    /// Cumulative `some` total of the CPU pressure, in microseconds. Telemetry only. 0 when not
-    /// measured, as for `cpu_throttled_usec`.
+    /// Cumulative `some` total of the whole host's CPU pressure (`/proc/pressure/cpu`), in
+    /// microseconds: how long some task of the host waited for a CPU. Admission reads it in
+    /// [`NodeLoad::demand_millicores_since`]. 0 when not measured (an agent that does not
+    /// send it, a host without pressure accounting), which adds nothing.
     pub cpu_pressure_some_total_usec: u64,
     /// When each running lease started, on the agent's clock.
     pub lease_clocks: Vec<LeaseClock>,
@@ -124,6 +126,33 @@ impl NodeLoad {
         }
         let milli = u128::from(used) * 1000 / u128::from(window);
         Some(u32::try_from(milli).unwrap_or(u32::MAX))
+    }
+
+    /// The cores demanded between `earlier` and this reading, in millicores, given
+    /// `busy_millicores`, the busy cores [`NodeLoad::busy_millicores_since`] gave for the same
+    /// two readings: those busy cores plus the busy cores times the share of the window in
+    /// which some task waited for a CPU (`cpu_pressure_some_total_usec`, at most the whole
+    /// window). The kernel weighs each CPU's waiting time by the time it was not idle, so that
+    /// product is at most the mean number of tasks that waited: the figure is a lower bound on
+    /// the runnable tasks, and unlike busy cores it can exceed the host's cores. A window in
+    /// which either reading has no pressure counter (0) or the counter went back adds nothing:
+    /// it is `busy_millicores`. Saturates at `u32::MAX`.
+    #[must_use]
+    pub fn demand_millicores_since(&self, earlier: &Self, busy_millicores: u32) -> u32 {
+        let (now, then) = (
+            self.cpu_pressure_some_total_usec,
+            earlier.cpu_pressure_some_total_usec,
+        );
+        let waited = if now == 0 || then == 0 {
+            0
+        } else {
+            now.saturating_sub(then)
+        };
+        // A window `busy_millicores_since` gave is not empty; 1 keeps any other from dividing by 0.
+        let window = self.mono_usec.saturating_sub(earlier.mono_usec).max(1);
+        let busy = u128::from(busy_millicores);
+        let waiting = busy * u128::from(waited.min(window)) / u128::from(window);
+        u32::try_from(busy + waiting).unwrap_or(u32::MAX)
     }
 
     /// The working set admission counts: `memory_working_set_bytes` less the active file pages
@@ -419,6 +448,63 @@ mod tests {
         assert_eq!(
             later(load(1, 3)).busy_millicores_since(&load(0, 0)),
             Some(333)
+        );
+    }
+
+    fn pressed(cpu: u64, mono: u64, pressure: u64) -> NodeLoad {
+        NodeLoad {
+            cpu_pressure_some_total_usec: pressure,
+            ..load(cpu, mono)
+        }
+    }
+
+    /// The demand of the window from `earlier` to `now`, with the busy cores that pair gives.
+    fn demand(now: &NodeLoad, earlier: &NodeLoad) -> u32 {
+        let busy = now.busy_millicores_since(earlier).expect("a window");
+        now.demand_millicores_since(earlier, busy)
+    }
+
+    /// Asserts the demand of a window is the busy cores plus the busy cores times the share of
+    /// the window with a task waiting: 87 cores busy with a task waiting all the window is
+    /// 174 cores, more than an 88-core host has; half the window is 130.5; none is 87. Catches
+    /// a demand that stays at busy cores (which cannot see a host past its cores) and a share
+    /// taken over the wrong figure.
+    #[test]
+    fn the_demand_is_the_busy_cores_and_the_share_that_waited() {
+        let a = pressed(0, 10_000_000, 1_000);
+        let busy = |pressure| later(pressed(870_000_000, 20_000_000, pressure));
+        assert_eq!(busy(1_000).busy_millicores_since(&a), Some(87_000));
+        assert_eq!(demand(&busy(1_000), &a), 87_000);
+        assert_eq!(demand(&busy(5_001_000), &a), 130_500);
+        assert_eq!(demand(&busy(10_001_000), &a), 174_000);
+        // Rounds down: 3,333,333 of 10,000,000 us waited is 28,999.99 m; 1 m busy adds 0.
+        assert_eq!(demand(&busy(3_334_333), &a), 115_999);
+        assert_eq!(
+            demand(&later(pressed(10_000, 20_000_000, 10_000_000)), &a),
+            1
+        );
+    }
+
+    /// Asserts the boundary and failure cases of the share: a pressure counter that moved more
+    /// than the window counts the whole window and no more; one that is 0 in either reading
+    /// (not measured, though the other has the count since boot) or went back adds nothing;
+    /// the sum saturates; and an empty window divides by nothing. Catches a counter since
+    /// boot read as one window's pressure, a share above 1, and an overflow.
+    #[test]
+    fn a_pressure_not_measured_or_going_back_adds_nothing() {
+        let a = pressed(0, 10_000_000, 1_000);
+        let busy = |pressure| later(pressed(870_000_000, 20_000_000, pressure));
+        assert_eq!(demand(&busy(99_000_000), &a), 174_000);
+        assert_eq!(demand(&busy(0), &a), 87_000);
+        assert_eq!(demand(&busy(999), &a), 87_000);
+        let unmeasured = pressed(0, 10_000_000, 0);
+        assert_eq!(demand(&busy(9_000_000_000), &unmeasured), 87_000);
+        let most = later(pressed(u64::MAX, 10_000_001, u64::MAX));
+        assert_eq!(demand(&most, &a), u32::MAX);
+        assert_eq!(
+            a.demand_millicores_since(&a, 5),
+            5,
+            "an empty window adds nothing"
         );
     }
 
