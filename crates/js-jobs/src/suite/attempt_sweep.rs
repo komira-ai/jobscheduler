@@ -104,15 +104,6 @@ fn ran_and_ended<S: Store>(rig: &Rig<S>, text: &str, attempts: u32) -> JobId {
     id
 }
 
-/// Records the job `text` and cancels it while it is queued: it ends at once, with a
-/// retention end and no attempt row of its own.
-fn cancelled_queued<S: Store>(rig: &Rig<S>, text: &str) -> JobId {
-    let id = rig.queue(text);
-    rig.jobs.request_cancel(&id).expect("a queued job's cancel");
-    rig.tick();
-    id
-}
-
 /// A job that ran three attempts keeps its attempt rows through a tick before its retention
 /// end, and a tick after it deletes the job's row and every row of its attempts and nothing
 /// of another job that is not due; the sweep of exactly the job by `delete_swept` deletes its
@@ -174,7 +165,7 @@ where
 
     // (b) more rows than two pages: three commits, the last with the job.
     let rig = self::rig(backend);
-    let big = cancelled_queued(&rig, "sw-big");
+    let big = ran_and_ended(&rig, "sw-big", 1);
     let total = u32::try_from(SWEEP_BATCH.get() * 2 + 7).expect("fits");
     write_rows(&rig, &big, 1..=total);
     rig.clock.advance(PAST_A_WEEK);
@@ -197,7 +188,7 @@ where
 
     // (c) the second commit fails: the job stays, one page is gone, the next tick finishes.
     let rig = self::rig(backend);
-    let big = cancelled_queued(&rig, "sw-cut");
+    let big = ran_and_ended(&rig, "sw-cut", 1);
     write_rows(&rig, &big, 1..=total);
     rig.clock.advance(PAST_A_WEEK);
     rig.store.fail_after(1);
@@ -352,7 +343,7 @@ where
 {
     let name = "a_sweep_page_that_loses_to_a_change_of_its_job_deletes_nothing";
     let rig = rig(backend);
-    let id = cancelled_queued(&rig, "ls-job");
+    let id = ran_and_ended(&rig, "ls-job", 1);
     let total = u32::try_from(SWEEP_BATCH.get() + 7).expect("fits");
     write_rows(&rig, &id, 1..=total);
     rig.clock.advance(PAST_A_WEEK);
@@ -384,5 +375,45 @@ where
         (attempt_keys(&rig), rig.raw(&keys::job(&id)).is_none()),
         (Vec::<String>::new(), true),
         "{name}: everything is gone"
+    );
+}
+
+/// Two due jobs whose attempt rows each fit a page but together do not: the first job's rows
+/// go into the batch's transaction beside both jobs' deletes, and the second's, which would
+/// pass the page, are deleted first in a commit of their own that checks its job; the tick
+/// takes those two commits and leaves no row and neither job. Catches a batch transaction that
+/// gathers every due job's rows whatever their number, and a split that commits the job before
+/// its rows.
+pub fn a_sweep_transaction_holds_at_most_a_page_of_attempt_rows<B: Backend>(backend: &B)
+where
+    B::Store: 'static,
+{
+    let name = "a_sweep_transaction_holds_at_most_a_page_of_attempt_rows";
+    let rig = rig(backend);
+    let rows = u32::try_from(SWEEP_BATCH.get() / 2 + 50).expect("fits");
+    let first = ran_and_ended(&rig, "sp-first", 1);
+    let second = ran_and_ended(&rig, "sp-second", 1);
+    write_rows(&rig, &first, 1..=rows);
+    write_rows(&rig, &second, 1..=rows);
+    rig.clock.advance(PAST_A_WEEK);
+    let before = rig.store.commit_stats().txns;
+    assert_eq!(
+        rig.jobs.tick(),
+        Ok(vec![first.clone(), second.clone()]),
+        "{name}: both jobs are swept"
+    );
+    assert_eq!(
+        rig.store.commit_stats().txns - before,
+        2,
+        "{name}: the second job's rows in a commit of their own, then the batch"
+    );
+    assert_eq!(
+        (
+            attempt_keys(&rig),
+            rig.raw(&keys::job(&first)).is_none(),
+            rig.raw(&keys::job(&second)).is_none()
+        ),
+        (Vec::<String>::new(), true, true),
+        "{name}: every row and both jobs are gone"
     );
 }

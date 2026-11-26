@@ -13,12 +13,12 @@ use js_state::{Cond, Store, StoreTime, Txn};
 
 use super::index::put_job;
 use super::{JobStore, ensure};
-use crate::attempt::{AttemptRecord, AttemptRow, AttemptTrail, RETRY_HOST_BAR};
+use crate::attempt::{AttemptRecord, AttemptRow, AttemptTrail, RETRY_HOST_BAR, retry_barred};
 use crate::codec::decode_attempt_row;
 use crate::error::JobStoreError;
 use crate::ids::{IdSource, JobId};
 use crate::keys;
-use crate::record::{Exclusion, JobRecord, JobState};
+use crate::record::{JobRecord, JobState};
 
 impl<S: Store, I: IdSource> JobStore<S, I> {
     /// Ends the current attempt of the job `id` as `end` says and queues its next attempt,
@@ -31,7 +31,8 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// - the counts a requeue before a run keeps (the failed prepares, the held and the
     ///   capacity refusals) start again from none, so the next attempt has its own bounds, and
     ///   the attempt's host is kept off the job until the store's clock now plus
-    ///   [`RETRY_HOST_BAR`], in place of any bar it had;
+    ///   [`RETRY_HOST_BAR`], unless a bar it already has keeps it off at least as long
+    ///   ([`retry_barred`]);
     /// - the job is queued again with `not_before` as its
     ///   [`AttemptTrail::retry_not_before`], keeping its priority and its submit time, so its
     ///   place in the queue;
@@ -65,20 +66,19 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             .spec
             .retry
             .is_some_and(|policy| policy.max_attempts > number);
-        ensure(
-            live & left & !job.cancel_requested,
-            JobStoreError::IllegalTransition {
+        let retryable = live & left & !job.cancel_requested;
+        let Some(host) = job.host.as_ref().filter(|_| retryable) else {
+            return Err(JobStoreError::IllegalTransition {
                 id: id.clone(),
                 from: job.state,
                 to: JobState::Queued,
-            },
-        )?;
+            });
+        };
         let now = self.store.now()?;
         let stop = !end.told_by_host();
+        let until = now.saturating_add(RETRY_HOST_BAR);
+        let prepare_bars = retry_barred(job.prepare_bars.clone(), host, until);
         let attempt = AttemptTrail::closed(&job, end, now, true).waiting(not_before);
-        let bar = Exclusion::Until(now.saturating_add(RETRY_HOST_BAR));
-        let mut prepare_bars = job.prepare_bars.clone();
-        prepare_bars.extend(job.host.clone().map(|host| (host, bar)));
         let queued = JobRecord {
             state: JobState::Queued,
             host: None,

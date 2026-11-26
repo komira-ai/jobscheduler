@@ -20,14 +20,14 @@
 //! [`JobStore::retry_txn`]: crate::JobStore::retry_txn
 //! [`JobStore::attempt_row`]: crate::JobStore::attempt_row
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use js_state::StoreTime;
 use js_types::HostId;
 
 use crate::codec::Carried;
-use crate::record::{JobRecord, StartFailure};
+use crate::record::{Exclusion, JobRecord, JobState, StartFailure};
 use crate::result::{JobEnd, ResultReason};
 
 /// The most ended attempts a job's record keeps: appending past it drops the oldest, which
@@ -39,6 +39,25 @@ pub const MAX_ATTEMPT_HISTORY: usize = 256;
 /// retries, from the retry: a retry follows a fault of the host, so the next attempt tries
 /// another host first, and a pool with one capable host can still retry once the bar lapses.
 pub const RETRY_HOST_BAR: Duration = Duration::from_secs(15 * 60);
+
+/// `bars` with `host` kept off the job until `until`, the bar of a retry: a bar the host already
+/// has that keeps it off at least as long (for life, or until `until` or later) stays, and any
+/// other (a back-off, or an earlier end) gives way to it.
+pub(crate) fn retry_barred(
+    mut bars: BTreeMap<HostId, Exclusion>,
+    host: &HostId,
+    until: StoreTime,
+) -> BTreeMap<HostId, Exclusion> {
+    let longer = match bars.get(host) {
+        Some(Exclusion::ForLife) => true,
+        Some(Exclusion::Until(end)) => *end >= until,
+        Some(Exclusion::Backoff(_)) | None => false,
+    };
+    if !longer {
+        bars.insert(host.clone(), Exclusion::Until(until));
+    }
+    bars
+}
 
 /// How one attempt ended, as the job API's `AttemptOutcome` tells it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,10 +103,10 @@ impl AttemptRecord {
             JobEnd::Lost | JobEnd::FailedToStart(_) | JobEnd::Refused { .. } => (None, None),
         };
         let (outcome, start_failure) = match end.state() {
-            crate::JobState::Succeeded => (AttemptOutcome::Succeeded, None),
-            crate::JobState::Cancelled => (AttemptOutcome::Cancelled, None),
-            crate::JobState::Lost => (AttemptOutcome::HostLost, None),
-            crate::JobState::FailedToStart(failure) => (AttemptOutcome::StartFailed, Some(failure)),
+            JobState::Succeeded => (AttemptOutcome::Succeeded, None),
+            JobState::Cancelled => (AttemptOutcome::Cancelled, None),
+            JobState::Lost => (AttemptOutcome::HostLost, None),
+            JobState::FailedToStart(failure) => (AttemptOutcome::StartFailed, Some(failure)),
             _ => (AttemptOutcome::Failed, None),
         };
         let start_failure_detail = match end {
@@ -138,7 +157,9 @@ pub struct Attempt {
     pub ended_at: StoreTime,
     /// How it ended.
     pub end: AttemptRecord,
-    /// Whether another attempt was queued after it.
+    /// Whether another attempt was queued after it: true for an attempt
+    /// [`crate::JobStore::retry_txn`] ended, even when the job then ended (a cancel, its queue
+    /// wait) before that attempt was placed.
     pub retried: bool,
     /// Fields a later build wrote, kept for the next write of the job's row.
     pub(crate) carried: Carried,

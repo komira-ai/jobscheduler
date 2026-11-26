@@ -712,6 +712,11 @@ fn each_attempt_of_a_retried_job_writes_its_own_usage_row() {
         ..spec()
     };
     let (job, _) = placed(&jobs, "job-retry", "host-a", retrying, BOOKED);
+    time.advance(Duration::from_secs(1));
+    jobs.transition(&job.id, JobState::Placed, JobState::Starting)
+        .unwrap();
+    jobs.transition(&job.id, JobState::Starting, JobState::Running)
+        .unwrap();
     time.advance(Duration::from_secs(2));
     let lost = AttemptRecord {
         outcome: AttemptOutcome::HostLost,
@@ -720,17 +725,33 @@ fn each_attempt_of_a_retried_job_writes_its_own_usage_row() {
         start_failure: None,
         start_failure_detail: None,
     };
-    let queued = jobs.retry_txn(&job.id, lost, StoreTime::ZERO).unwrap();
+    let not_before = jobs.now().unwrap().saturating_add(Duration::from_secs(1));
+    let queued = jobs.retry_txn(&job.id, lost, not_before).unwrap();
     assert_eq!(queued.attempt.number(), 1, "{name}: number after retry");
     free_allocation(&jobs, &job.id, Freed::ProviderAbsent).unwrap();
     let first = history_rows(&store);
     assert_eq!(first.len(), 1, "{name}: one row after the first free");
     assert_eq!(first[0].attempt, None, "{name}: first attempt's row");
     assert_eq!(first[0].id.as_str(), "job-retry", "{name}: first id");
+    let entry = &queued.attempt.history()[0];
+    let ms = |from: StoreTime, to: StoreTime| u64::try_from(to.since(from).as_millis()).unwrap();
+    let started = entry.started_at.unwrap();
+    assert_eq!(
+        (first[0].queued_ms, first[0].run_ms),
+        (
+            Some(ms(entry.queued_at, entry.placed_at)),
+            Some(ms(started, entry.ended_at))
+        ),
+        "{name}: the first attempt's wait and run, from its history entry"
+    );
+    assert!(
+        first[0].run_ms >= Some(2000),
+        "{name}: the first attempt ran its two seconds"
+    );
 
     time.advance(Duration::from_secs(3));
     let host = HostId::new("host-a").unwrap();
-    jobs.place(&job.id, host, BOOKED).unwrap();
+    let (_, second) = jobs.place(&job.id, host, BOOKED).unwrap();
     assert_eq!(
         jobs.get_job(&job.id).unwrap().unwrap().attempt.number(),
         2,
@@ -744,4 +765,9 @@ fn each_attempt_of_a_retried_job_writes_its_own_usage_row() {
     assert_eq!(rows[0], first[0], "{name}: the first row is unchanged");
     assert_eq!(rows[1].attempt, Some(2), "{name}: second attempt's row");
     assert_eq!(rows[1].id.as_str(), "job-retry", "{name}: second id");
+    assert_eq!(
+        (rows[1].queued_ms, rows[1].run_ms),
+        (Some(ms(not_before, second.created_at)), Some(0)),
+        "{name}: the second attempt waited from its backoff's end and never started"
+    );
 }

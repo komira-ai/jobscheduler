@@ -299,12 +299,12 @@ where
     no_job_has_an_attempt_row_or_a_callback_yet(backend);
     an_answer_to_a_claim_no_row_holds_is_stale(backend);
     job_without_a_policy_ends_after_one_attempt(backend);
-    a_resubmit_with_another_policy_or_callback_conflicts(backend);
+    a_resubmit_with_another_policy_conflicts(backend);
     a_retry_queues_the_next_attempt_with_its_counts_reset_and_its_host_barred(backend);
-    a_retry_keeps_files_and_leaves_the_callback_armed(backend);
+    a_retry_keeps_files_and_sets_no_retention_end(backend);
     a_retry_stops_its_start_only_where_the_server_decided_its_end(backend);
     a_placement_after_a_retry_counts_the_next_attempt_and_a_requeue_does_not(backend);
-    cancel_in_backoff_ends_the_job_and_makes_its_callback_due(backend);
+    cancel_in_backoff_ends_the_job_at_once_without_a_new_attempt(backend);
     a_cancel_and_a_retry_on_one_version_make_one_change(backend);
     two_retry_decisions_on_one_version_make_one_attempt(backend);
     attempt_hosts_outlives_the_history_bound(backend);
@@ -314,6 +314,7 @@ where
     the_sweep_deletes_a_jobs_attempt_rows_first(backend);
     the_sweep_deletes_orphan_attempt_rows(backend);
     a_sweep_page_that_loses_to_a_change_of_its_job_deletes_nothing(backend);
+    a_sweep_transaction_holds_at_most_a_page_of_attempt_rows(backend);
 }
 
 /// One `#[test]` per check of the suite, named as the check is, each on a fresh backend from
@@ -521,12 +522,12 @@ macro_rules! job_store_tests {
             no_job_has_an_attempt_row_or_a_callback_yet,
             an_answer_to_a_claim_no_row_holds_is_stale,
             job_without_a_policy_ends_after_one_attempt,
-            a_resubmit_with_another_policy_or_callback_conflicts,
+            a_resubmit_with_another_policy_conflicts,
             a_retry_queues_the_next_attempt_with_its_counts_reset_and_its_host_barred,
-            a_retry_keeps_files_and_leaves_the_callback_armed,
+            a_retry_keeps_files_and_sets_no_retention_end,
             a_retry_stops_its_start_only_where_the_server_decided_its_end,
             a_placement_after_a_retry_counts_the_next_attempt_and_a_requeue_does_not,
-            cancel_in_backoff_ends_the_job_and_makes_its_callback_due,
+            cancel_in_backoff_ends_the_job_at_once_without_a_new_attempt,
             a_cancel_and_a_retry_on_one_version_make_one_change,
             two_retry_decisions_on_one_version_make_one_attempt,
             attempt_hosts_outlives_the_history_bound,
@@ -536,6 +537,7 @@ macro_rules! job_store_tests {
             the_sweep_deletes_a_jobs_attempt_rows_first,
             the_sweep_deletes_orphan_attempt_rows,
             a_sweep_page_that_loses_to_a_change_of_its_job_deletes_nothing,
+            a_sweep_transaction_holds_at_most_a_page_of_attempt_rows,
         );
     };
 }

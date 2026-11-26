@@ -543,3 +543,34 @@ fn dropped_saturates() {
     assert_eq!(trail.dropped(), u32::MAX, "{name}");
     assert_eq!(trail.history().len(), 256, "{name}: kept");
 }
+
+/// Asserts the bar a retry puts on its host against each bar the host may already have: none,
+/// a back-off and an earlier end give way to the retry's end; a bar for life, an end as late
+/// and a later end stay; other hosts' bars are kept. Catches a retry that shortens a bar the
+/// job already had on its host to the retry's 15 minutes.
+#[test]
+fn a_retry_bar_never_shortens_a_longer_one() {
+    let host = HostId::new("host-a").expect("a host");
+    let other = HostId::new("host-b").expect("a host");
+    let until = StoreTime::from_duration(Duration::from_secs(1000));
+    let earlier = StoreTime::from_duration(Duration::from_secs(999));
+    let later = StoreTime::from_duration(Duration::from_secs(1001));
+    let cases = [
+        (None, Exclusion::Until(until)),
+        (Some(Exclusion::Backoff(later)), Exclusion::Until(until)),
+        (Some(Exclusion::Until(earlier)), Exclusion::Until(until)),
+        (Some(Exclusion::Until(until)), Exclusion::Until(until)),
+        (Some(Exclusion::Until(later)), Exclusion::Until(later)),
+        (Some(Exclusion::ForLife), Exclusion::ForLife),
+    ];
+    for (had, want) in cases {
+        let mut bars = BTreeMap::from([(other.clone(), Exclusion::ForLife)]);
+        bars.extend(had.map(|bar| (host.clone(), bar)));
+        let barred = retry_barred(bars, &host, until);
+        assert_eq!(
+            barred,
+            BTreeMap::from([(other.clone(), Exclusion::ForLife), (host.clone(), want)]),
+            "{had:?}"
+        );
+    }
+}

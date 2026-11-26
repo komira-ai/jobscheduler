@@ -105,8 +105,8 @@ pub fn job_without_a_policy_ends_after_one_attempt<B: Backend>(backend: &B) {
 /// nothing, also once the job ended and its files are digests. The callback half of the
 /// comparison belongs to the callback task and is not checked here. Catches a spec comparison
 /// that leaves the policy out, or reads it as a priority is read.
-pub fn a_resubmit_with_another_policy_or_callback_conflicts<B: Backend>(backend: &B) {
-    let name = "a_resubmit_with_another_policy_or_callback_conflicts";
+pub fn a_resubmit_with_another_policy_conflicts<B: Backend>(backend: &B) {
+    let name = "a_resubmit_with_another_policy_conflicts";
     let rig = rig(backend);
     let id = job_id("rs-job");
     assert_eq!(submit(&rig, &id, full_spec()), Ok(true), "{name}: first");
@@ -207,12 +207,12 @@ pub fn a_resubmit_with_another_policy_or_callback_conflicts<B: Backend>(backend:
 /// A retry of a running whole-host job that was refused and requeued before (a failed prepare,
 /// a held and a capacity refusal) is one commit that answers, and stores, the job as queued
 /// with no host and no placement or start time, no result, its failed prepares and refusals
-/// none, its host barred until the store's clock plus the retry bar in place of the bar it
-/// had and its other bars kept, its next placement not before the time given, its attempt
+/// none, its host's bar of an hour kept (it outlasts the retry's own) and its other bars
+/// kept, its next placement not before the time given, its attempt
 /// number the same, the attempt in its history as retried and its row written, its place in the
 /// queue and every index right and its allocation releasing. Catches a retry that keeps the
-/// refusal counts of the attempt before, leaves the host open to the next attempt, drops
-/// another bar, or leaves the job out of the queue index.
+/// refusal counts of the attempt before, shortens or drops a bar, or leaves the job out of the
+/// queue index.
 pub fn a_retry_queues_the_next_attempt_with_its_counts_reset_and_its_host_barred<B: Backend>(
     backend: &B,
 ) {
@@ -291,10 +291,8 @@ pub fn a_retry_queues_the_next_attempt_with_its_counts_reset_and_its_host_barred
         start_failure_detail: None,
         failed_prepares: 0,
         prepare_bars: BTreeMap::from([
-            (
-                host("host-a"),
-                Exclusion::Until(now.saturating_add(RETRY_HOST_BAR)),
-            ),
+            // The capacity refusal's bar of an hour outlasts the retry's.
+            (host("host-a"), before.prepare_bars[&host("host-a")]),
             (host("host-x"), Exclusion::ForLife),
         ]),
         held_refusals: Vec::new(),
@@ -354,8 +352,8 @@ pub fn a_retry_queues_the_next_attempt_with_its_counts_reset_and_its_host_barred
 /// callback task, so only that none is reported is checked). When its next attempt ends the
 /// files become digests and the job is due. Catches a retry that digests the files the next
 /// attempt needs, or makes the job due for the sweep.
-pub fn a_retry_keeps_files_and_leaves_the_callback_armed<B: Backend>(backend: &B) {
-    let name = "a_retry_keeps_files_and_leaves_the_callback_armed";
+pub fn a_retry_keeps_files_and_sets_no_retention_end<B: Backend>(backend: &B) {
+    let name = "a_retry_keeps_files_and_sets_no_retention_end";
     let rig = rig(backend);
     let id = running_spec(&rig, "kf-job", full_spec());
     let files = job_of(&rig, &id).spec.files;
@@ -593,8 +591,8 @@ pub fn a_placement_after_a_retry_counts_the_next_attempt_and_a_requeue_does_not<
 /// written for the next number. The callback half belongs to the callback task, so only that
 /// none is reported is checked. Catches a cancel in backoff that counts or records an attempt
 /// that never ran, or that waits for a host that holds nothing.
-pub fn cancel_in_backoff_ends_the_job_and_makes_its_callback_due<B: Backend>(backend: &B) {
-    let name = "cancel_in_backoff_ends_the_job_and_makes_its_callback_due";
+pub fn cancel_in_backoff_ends_the_job_at_once_without_a_new_attempt<B: Backend>(backend: &B) {
+    let name = "cancel_in_backoff_ends_the_job_at_once_without_a_new_attempt";
     let rig = rig(backend);
     let id = running_spec(&rig, "cb-job", full_spec());
     let queued = rig
@@ -602,6 +600,15 @@ pub fn cancel_in_backoff_ends_the_job_and_makes_its_callback_due<B: Backend>(bac
         .retry_txn(&id, timed_out(), later(&rig, 30))
         .expect("the retry");
     rig.tick();
+    let retried_at = queued.attempt.history()[0].ended_at;
+    assert_eq!(
+        queued.prepare_bars,
+        BTreeMap::from([(
+            host("host-a"),
+            Exclusion::Until(retried_at.saturating_add(RETRY_HOST_BAR))
+        )]),
+        "{name}: a host with no bar is barred from the retry for the retry's bar"
+    );
     let now = now_of(&rig);
     let commits = rig.store.commit_stats().txns;
     let ended = rig.jobs.request_cancel(&id).expect("the cancel");

@@ -762,7 +762,7 @@ interfaces of task A.
 | --- | --- | --- | --- |
 | **A. Interfaces** | The proto additions of sections 3.1, 3.7, 3.8, 5.2 and 5.5, with `golden/fields.txt` rows and goldens. `SubmitJob` refuses `retry` and `callback`. The Rust signatures below, with bodies that never retry and never deliver. | none | js-proto, js-types, js-jobs, js-callback (new), js-lease-server |
 | **B. Retry decision** | The classing table, the job-fault refusal codes, the backoff and jitter. Pure (R4). | A | js-types |
-| **C. Attempt store** | Tags 66 and 68 to 72, `retry_txn`, the reset of the pre-run counters, the history bound, the `attempt/` rows and their sweep, `UsageRecord.attempt`, the shared store tests. | A | js-jobs, js-usage |
+| **C. Attempt store** | Tags 68 to 73, `retry_txn`, the reset of the pre-run counters, the history bound, the `attempt/` rows and their sweep, `UsageRecord.attempt`, the shared store tests. | A | js-jobs, js-usage |
 | **D. Callback store** | Tag 67 and the key's digest; the `callback/` row written at submit and made due in `end_txn`; claim, answer, expire and key erasure; the boot raise; the sweep. | A | js-jobs |
 | **E. Delivery** | The Standard Webhooks signer, the address rule with its resolver argument, the sender (`ureq`, no proxy, no redirects, no body read, a time limit), the answer classes. | A | js-callback |
 | **J. Attempt logs** | The attempt's log prefix and its length rule; `GetLogsRequest.attempt` and the reader of an earlier attempt, from `attempt_history` or its `attempt/` row (the row's read through the store interface task A fixes). | A | js-lease-server, js-agent-wire (test only) |

@@ -251,9 +251,10 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     ) -> Result<Vec<JobId>, JobStoreError> {
         let mut due = Vec::new();
         let mut txn = Txn::new();
+        let mut rows = 0;
         for (job, version) in read {
             if past_retention(&job, now) {
-                txn = self.without_attempts(txn, &job, version)?;
+                (txn, rows) = self.without_attempts((txn, rows), &job, version)?;
                 txn = delete_job(txn, &job, version);
                 due.push(job);
             }
@@ -266,22 +267,29 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         Ok(due)
     }
 
-    /// `txn` with a delete of every attempt row of `job`, read at `version`, each at the
-    /// version read: the rows that fit a page of [`SWEEP_BATCH`] in `txn`, beside the job's
-    /// own delete; before them, each full page deleted in a commit of its own that checks the
-    /// job's row still at `version`. The job's row goes last, so a sweep that stops between two
-    /// commits leaves no attempt row without its job, and the next tick, which finds the job
-    /// due again, deletes the rest.
+    /// `txn`, which already deletes `rows` attempt rows, with a delete of every attempt row of
+    /// `job`, read at `version`, each at the version read, and how many attempt rows it then
+    /// deletes. The rows go into `txn`, beside the job's own delete, while it then deletes no
+    /// more than [`SWEEP_BATCH`] of them; otherwise each page of them is first deleted in a
+    /// commit of its own that checks the job's row still at `version`, so no transaction holds
+    /// more than a page of attempt rows. The job's row goes last, so a sweep that stops between
+    /// two commits leaves no attempt row without its job, and the next tick, which finds the
+    /// job due again, deletes the rest. A job none of whose attempts ended (it never held a
+    /// host) wrote no row and is not searched: a row an earlier job of its id left behind is
+    /// the orphan search's ([`JobStore::tick`]).
     ///
     /// # Errors
     /// [`JobStoreError::Stale`] when the job's row changed before a page's commit (its retention
     /// end raised, say): that page is not deleted; [`JobStoreError::Store`].
     fn without_attempts(
         &self,
-        txn: Txn,
+        (txn, rows): (Txn, usize),
         job: &JobRecord,
         version: Version,
-    ) -> Result<Txn, JobStoreError> {
+    ) -> Result<(Txn, usize), JobStoreError> {
+        if job.attempt.ended() == 0 {
+            return Ok((txn, rows));
+        }
         let prefix = keys::attempt_prefix(&job.id);
         loop {
             let page = self
@@ -292,8 +300,9 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
                     txn.delete(key.as_str(), Cond::Version(row.version))
                 })
             };
-            if page.resume.is_none() {
-                return Ok(gone(txn));
+            let room = SWEEP_BATCH.get().saturating_sub(rows);
+            if page.resume.is_none() & (page.rows.len() <= room) {
+                return Ok((gone(txn), rows + page.rows.len()));
             }
             let first = gone(Txn::new()).check(keys::job(&job.id), Cond::Version(version));
             self.commit(&job.id, first)?;
