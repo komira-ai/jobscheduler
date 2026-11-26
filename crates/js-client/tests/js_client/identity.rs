@@ -2,7 +2,6 @@
 //! place of a bearer, and reloaded from its two files before each request.
 
 use std::fs;
-use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -16,7 +15,7 @@ use rustls::pki_types::CertificateDer;
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
 use serde_json::json;
 
-use crate::support::{Cert, Scratch, json_reply};
+use crate::support::{Cert, Scratch, exchange, json_reply};
 
 const LIMIT: Duration = Duration::from_secs(20);
 
@@ -66,8 +65,8 @@ impl Authority {
 struct Seen {
     /// The DER of each certificate the client presented.
     presented: Vec<Vec<u8>>,
-    /// The request head, empty when the handshake failed.
-    head: String,
+    /// The request, head and body, empty when the handshake failed.
+    request: String,
 }
 
 /// A TLS server on 127.0.0.1 that requires a client certificate and answers `connections`
@@ -88,26 +87,13 @@ impl Mutual {
                     tcp.set_read_timeout(Some(LIMIT)).unwrap();
                     let conn = ServerConnection::new(Arc::clone(&config)).unwrap();
                     let mut stream = StreamOwned::new(conn, tcp);
-                    let mut head = Vec::new();
-                    let mut byte = [0_u8; 1];
-                    while !head.ends_with(b"\r\n\r\n") {
-                        match stream.read(&mut byte) {
-                            Ok(1) => head.push(byte[0]),
-                            _ => break,
-                        }
-                    }
+                    let request = exchange(&mut stream, &json_reply(200, "{}"));
                     let presented = stream
                         .conn
                         .peer_certificates()
                         .map(|certs| certs.iter().map(|der| der.as_ref().to_vec()).collect())
                         .unwrap_or_default();
-                    let reply = json_reply(200, "{}");
-                    let _ = stream.write_all(&reply);
-                    let _ = stream.flush();
-                    Seen {
-                        presented,
-                        head: String::from_utf8_lossy(&head).into_owned(),
-                    }
+                    Seen { presented, request }
                 })
                 .collect()
         });
@@ -176,10 +162,16 @@ fn a_client_presents_the_identity_and_sends_no_bearer() {
 
     let seen = fake.seen();
     assert_eq!(seen.len(), 5);
-    for connection in &seen {
+    let bodies = ["", "{}", "{}", "", r#"{"id":1}"#];
+    for (connection, body) in seen.iter().zip(bodies) {
         assert_eq!(connection.presented, vec![minted.der.clone()]);
-        let head = connection.head.to_ascii_lowercase();
-        assert!(!head.contains("authorization"), "{head}");
+        let request = connection.request.to_ascii_lowercase();
+        assert!(!request.contains("authorization"), "{request}");
+        assert!(
+            connection.request.ends_with(&format!("\r\n\r\n{body}")),
+            "{}",
+            connection.request
+        );
     }
 }
 
@@ -303,7 +295,7 @@ fn a_certificate_of_another_authority_fails_the_handshake() {
     let client = Client::connect_with_identity(&fake.url(), &identity, Some(&ca), LIMIT).unwrap();
     let err = client.get("/a").err().unwrap();
     assert!(matches!(err, ClientError::Server(_)), "{err:?}");
-    assert_eq!(fake.seen()[0].head, "");
+    assert_eq!(fake.seen()[0].request, "");
 }
 
 /// Asserts that the identity files are refused at build, naming `--host-cert` or `--host-key`
@@ -599,7 +591,7 @@ fn an_identity_client_takes_no_bearer() {
     client.get("/a").unwrap();
     let seen = fake.seen();
     assert_eq!(seen[0].presented, vec![minted.der.clone()]);
-    assert!(!seen[0].head.to_ascii_lowercase().contains("authorization"));
+    assert!(!seen[0].request.to_ascii_lowercase().contains("authorization"));
 }
 
 /// A named pipe at `path`, which a blocking open would wait on forever. `mkfifo`, not rustix's

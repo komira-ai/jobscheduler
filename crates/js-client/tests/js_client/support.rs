@@ -197,13 +197,6 @@ pub fn hangup_url() -> String {
     format!("http://{addr}")
 }
 
-/// A stream the fake server speaks over.
-trait Duplex: Read + Write {}
-
-impl Duplex for TcpStream {}
-
-impl Duplex for StreamOwned<ServerConnection, TcpStream> {}
-
 fn serve_one(tcp: TcpStream, tls: Option<&Arc<ServerConfig>>, reply: &[u8]) -> String {
     match tls {
         None => exchange(&mut { tcp }, reply),
@@ -214,8 +207,12 @@ fn serve_one(tcp: TcpStream, tls: Option<&Arc<ServerConfig>>, reply: &[u8]) -> S
     }
 }
 
-/// Reads one request, sends `reply`, and returns the request as text.
-fn exchange(stream: &mut dyn Duplex, reply: &[u8]) -> String {
+/// Reads one request, head and the `content-length` bytes of body, sends `reply`, and
+/// returns the request as text, or "" when the head cannot be read. The body is read
+/// before the reply so that no request bytes are left unread when the connection closes:
+/// a socket closed with unread input is reset, and the reset can reach the client before
+/// it has read the reply.
+pub fn exchange(stream: &mut (impl Read + Write), reply: &[u8]) -> String {
     let mut head = Vec::new();
     let mut byte = [0_u8; 1];
     while !head.ends_with(b"\r\n\r\n") {
