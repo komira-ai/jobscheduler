@@ -120,9 +120,12 @@ impl AddressRule {
     /// The rule of section 5.3, with `cluster` as the cluster's own addresses: this instance's
     /// listen addresses, the store host's resolved addresses and the peer address each host's
     /// heartbeat arrives from.
+    /// An IPv4-mapped address among them is kept as the IPv4 address it maps.
     pub fn new(cluster: impl IntoIterator<Item = IpAddr>) -> AddressRule {
         AddressRule {
-            cluster: Arc::new(RwLock::new(cluster.into_iter().collect())),
+            cluster: Arc::new(RwLock::new(
+                cluster.into_iter().map(|one| one.to_canonical()).collect(),
+            )),
             loopback: false,
         }
     }
@@ -139,10 +142,11 @@ impl AddressRule {
     }
 
     /// Denies `address` from now on, as one of the cluster's own, in this rule and in every
-    /// clone of it.
+    /// clone of it. An IPv4-mapped address (a peer seen on a dual-stack listener) is kept as
+    /// the IPv4 address it maps, so either spelling is denied.
     pub fn add_cluster_address(&self, address: IpAddr) {
         let mut cluster = self.cluster.write().unwrap_or_else(PoisonError::into_inner);
-        cluster.insert(address);
+        cluster.insert(address.to_canonical());
     }
 
     /// Whether a callback may be sent to `address`.
@@ -228,10 +232,15 @@ pub(crate) fn literal(host: &str) -> Option<IpAddr> {
 fn numeric_v4(host: &str) -> Option<Ipv4Addr> {
     let parts: Option<Vec<u64>> = host.split('.').map(number).collect();
     let parts = parts.filter(|parts| parts.len() <= 4)?;
-    let (last, leading) = parts.split_last()?;
+    // `split` gives at least one part, so `last` is always there.
+    let last = parts.last().copied().unwrap_or_default();
+    let leading = &parts[..parts.len() - 1];
     let room = 8 * (4 - leading.len());
     let fits = leading.iter().all(|part| *part <= 0xff) && last >> room == 0;
-    let value = leading.iter().fold(0, |value, part| (value << 8) | part) << room | last;
+    let high = leading
+        .iter()
+        .fold(0_u64, |value, part| (value << 8) | *part);
+    let value = (high << room) | last;
     fits.then_some(Ipv4Addr::from(value as u32))
 }
 
@@ -278,7 +287,12 @@ mod tests {
     /// cluster address let through in another spelling.
     #[test]
     fn the_address_rule_refuses_each_denied_range() {
-        let rule = AddressRule::new([ip("10.0.0.5"), ip("2001:4860:4860::8844")]);
+        let cluster = [
+            ip("10.0.0.5"),
+            ip("::ffff:10.0.0.7"),
+            ip("2001:4860:4860::8844"),
+        ];
+        let rule = AddressRule::new(cluster);
         let denied = [
             "0.0.0.0",
             "0.255.255.255",
@@ -332,9 +346,11 @@ mod tests {
             "2001:0:7f00:1::f7f7:f7f7",
             // 127.0.0.0 at a 48-bit prefix, 8.8.8.8 at a 96-bit one.
             "64:ff9b:1:7f00:0:1:808:808",
-            // The cluster's own, written as given and as IPv4-mapped.
+            // The cluster's own, written as given and as IPv4-mapped, either way round.
             "10.0.0.5",
             "::ffff:10.0.0.5",
+            "10.0.0.7",
+            "::ffff:10.0.0.7",
             "2001:4860:4860::8844",
         ];
         assert_eq!(verdicts(&rule, &denied), denied.map(|text| (text, false)));
@@ -373,17 +389,19 @@ mod tests {
     }
 
     /// Asserts that an address added to the cluster after a rule was cloned is denied by the
-    /// clone, as the sender holds a clone of the server's rule. Catches a clone that copies the
-    /// set, which would let a host's newly learned address through.
+    /// clone, as the sender holds a clone of the server's rule, also when it was learned in its
+    /// IPv4-mapped form. Catches a clone that copies the set, which would let a host's newly
+    /// learned address through, and a mapped peer address that leaves its IPv4 form admitted.
     #[test]
     fn a_cluster_address_learned_later_is_denied_by_every_clone() {
         let rule = AddressRule::new([]);
         let held = rule.clone();
         assert_eq!(verdicts(&held, &["10.1.2.3"]), [("10.1.2.3", true)]);
         rule.add_cluster_address(ip("10.1.2.3"));
+        rule.add_cluster_address(ip("::ffff:10.1.2.5"));
         assert_eq!(
-            verdicts(&held, &["10.1.2.3", "10.1.2.4"]),
-            [("10.1.2.3", false), ("10.1.2.4", true)]
+            verdicts(&held, &["10.1.2.3", "10.1.2.4", "10.1.2.5"]),
+            [("10.1.2.3", false), ("10.1.2.4", true), ("10.1.2.5", false)]
         );
     }
 

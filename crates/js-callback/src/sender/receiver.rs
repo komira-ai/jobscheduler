@@ -62,7 +62,7 @@ pub(crate) struct Receiver {
     /// The port it listens on, on `127.0.0.1`.
     pub(crate) port: u16,
     /// The head of each request it read, in order: the request line and the headers, up to and
-    /// including the blank line.
+    /// including the blank line. A connection whose handshake failed counts for nothing.
     heads: mpsc::Receiver<String>,
     /// Every connection it answered, held open while the receiver lives.
     _held: mpsc::Receiver<Held>,
@@ -79,15 +79,22 @@ impl Receiver {
         let (head_to, heads) = mpsc::channel();
         let (held_to, held) = mpsc::channel();
         thread::spawn(move || {
-            for (index, stream) in listener.incoming().enumerate() {
+            let mut index = 0;
+            loop {
+                let (stream, _) = listener.accept().expect("accepts");
                 let session = ServerConnection::new(config.clone()).expect("a TLS session");
-                let mut tls = StreamOwned::new(session, stream.expect("accepts"));
+                let mut tls = StreamOwned::new(session, stream);
+                // A sender that gave up during the handshake sent no request.
+                let Some(head) = read_head(&mut tls) else {
+                    continue;
+                };
                 // The head goes out before the reply, so it is there when the sender returns.
-                head_to.send(read_head(&mut tls)).ok();
+                head_to.send(head).ok();
                 let reply = &replies[index.min(replies.len() - 1)];
                 tls.write_all(reply.as_bytes()).expect("answers");
                 tls.flush().expect("answers");
                 held_to.send(tls).ok();
+                index += 1;
             }
         });
         Receiver {
@@ -114,13 +121,14 @@ pub(crate) fn url_of(host: &str, port: u16, path: &str) -> CallbackUrl {
     check_url(&format!("https://{host}:{port}{path}")).expect("a callback URL")
 }
 
-/// The request head `stream` sends: every byte up to and including the first blank line.
-fn read_head(stream: &mut impl Read) -> String {
+/// The request head `stream` sends: every byte up to and including the first blank line, or
+/// `None` when the connection ends first (a sender that refused the certificate, say).
+fn read_head(stream: &mut impl Read) -> Option<String> {
     let mut head = Vec::new();
     let mut byte = [0_u8; 1];
     while !head.ends_with(b"\r\n\r\n") {
-        stream.read_exact(&mut byte).expect("reads the request");
+        stream.read_exact(&mut byte).ok()?;
         head.push(byte[0]);
     }
-    String::from_utf8(head).expect("an ASCII head")
+    Some(String::from_utf8(head).expect("an ASCII head"))
 }

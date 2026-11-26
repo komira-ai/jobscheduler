@@ -65,8 +65,10 @@ mod tests {
     use super::*;
 
     /// Asserts that the system resolver answers an IPv4 and an IPv6 literal with that address,
-    /// which the standard library reads without a lookup. Catches an answer that drops or
-    /// reorders what the lookup gave.
+    /// which the standard library reads without a lookup, and passes on as `Lookup` the error
+    /// of a name the standard library refuses (one holding a NUL byte) before any lookup.
+    /// Catches an answer that drops or reorders what the lookup gave, and a lookup error read
+    /// as an empty answer.
     #[test]
     fn the_system_resolver_gives_what_the_lookup_gives() {
         let within = Duration::from_secs(60);
@@ -80,6 +82,12 @@ mod tests {
                 vec!["::1".parse().expect("an address")]
             )
         );
+        // A NUL byte: the standard library refuses the name before any lookup.
+        let refused = resolver.resolve("a\0b", within);
+        assert!(
+            matches!(refused, Err(ResolveError::Lookup(ref error)) if error.kind() == io::ErrorKind::InvalidInput),
+            "{refused:?}"
+        );
     }
 
     /// Asserts that a lookup that never answers (it waits on a channel nothing ever sends on)
@@ -89,9 +97,7 @@ mod tests {
     #[test]
     fn a_lookup_ends_at_its_limit_or_with_its_error() {
         let (keep, never) = mpsc::channel::<Vec<IpAddr>>();
-        let hung = bounded(Duration::from_millis(50), move || {
-            Ok(never.recv().unwrap_or_default())
-        });
+        let hung = bounded(Duration::ZERO, move || Ok(never.recv().unwrap_or_default()));
         let failed = bounded(Duration::from_secs(60), || {
             Err(io::Error::new(io::ErrorKind::NotFound, "no such name"))
         });

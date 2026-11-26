@@ -19,28 +19,35 @@ const TS: u64 = 1_798_761_600;
 /// A fake resolver: answers each lookup with the next of its answers (the last one again once
 /// they run out), `None` being a failed lookup, and records every name it was asked.
 #[derive(Debug, Clone)]
-struct Names(Arc<Mutex<(Vec<Option<Vec<IpAddr>>>, Vec<String>)>>);
+struct Names(Arc<Mutex<Lookups>>);
+
+/// What a [`Names`] answers and what it was asked.
+#[derive(Debug)]
+struct Lookups {
+    /// The answers, in order; `None` is a failed lookup.
+    answers: Vec<Option<Vec<IpAddr>>>,
+    /// Every name asked, in order.
+    asked: Vec<String>,
+}
 
 impl Names {
     /// A resolver with `answers`, each a list of addresses ([`at`]) or `None`.
     fn new(answers: Vec<Option<Vec<IpAddr>>>) -> Names {
-        Names(Arc::new(Mutex::new((answers, Vec::new()))))
+        let asked = Vec::new();
+        Names(Arc::new(Mutex::new(Lookups { answers, asked })))
     }
 
     /// Every name asked so far, in order.
     fn asked(&self) -> Vec<String> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .1
-            .clone()
+        let held = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        held.asked.clone()
     }
 }
 
 impl Resolve for Names {
     fn resolve(&self, host: &str, _: Duration) -> Result<Vec<IpAddr>, ResolveError> {
         let mut held = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        let (answers, asked) = &mut *held;
+        let Lookups { answers, asked } = &mut *held;
         asked.push(host.to_owned());
         let answer = answers[(asked.len() - 1).min(answers.len() - 1)].clone();
         answer.ok_or_else(|| {
