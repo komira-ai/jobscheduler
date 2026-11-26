@@ -10,8 +10,8 @@ use std::time::Duration;
 use common::*;
 use js_elastic::{Acquired, HostStatus, Released};
 use js_scaler::{
-    AcquirePlan, AcquireResult, Action, Blocked, HostMark, HostState, Phase, Records, ReleaseResult,
-    Settings, State,
+    AcquirePlan, AcquireResult, Action, Blocked, HostMark, HostState, Phase, Records,
+    ReleaseResult, Settings, State,
 };
 
 /// Live settings with a `max_age` of an hour, a lease ceiling of 30 minutes and the
@@ -535,7 +535,10 @@ impl World {
                 }
             }
             Action::Undrain(name) => {
-                if let Some(m) = self.named(&name).filter(|m| m.mark == Some(HostMark::Draining)) {
+                if let Some(m) = self
+                    .named(&name)
+                    .filter(|m| m.mark == Some(HostMark::Draining))
+                {
                     m.mark = None;
                 }
             }

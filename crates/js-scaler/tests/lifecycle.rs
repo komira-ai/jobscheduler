@@ -6,7 +6,9 @@ mod common;
 
 use common::*;
 use js_elastic::{Claim, HostRef, HostStatus, Released};
-use js_scaler::{Action, Blocked, CooldownReason, Health, HostFacts, HostMark, Phase, ReleaseResult};
+use js_scaler::{
+    Action, Blocked, CooldownReason, Health, HostFacts, HostMark, Phase, ReleaseResult,
+};
 
 /// A rig as `registered` leaves it, driven on to the drain: the host has been quiet for
 /// `idle`, the scaler asked to drain it and the registry shows it `Draining`. Returns the

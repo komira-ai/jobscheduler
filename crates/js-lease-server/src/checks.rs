@@ -444,13 +444,27 @@ mod tests {
     #[test]
     fn for_scaler_maps_every_state_to_the_same_named_health() {
         let notes = vec!["catalog: no offers".to_owned()];
-        let checking = Health { notes: notes.clone(), ..Health::default() };
-        let available = Health { passes: 1, ..Health::default() };
-        let unavailable = Health { passes: 1, notes, ..Health::default() };
+        let checking = Health {
+            notes: notes.clone(),
+            ..Health::default()
+        };
+        let available = Health {
+            passes: 1,
+            ..Health::default()
+        };
+        let unavailable = Health {
+            passes: 1,
+            notes,
+            ..Health::default()
+        };
         let cases = [
             (checking, State::Checking, js_scaler::Health::Checking),
             (available, State::Available, js_scaler::Health::Available),
-            (unavailable, State::Unavailable, js_scaler::Health::Unavailable),
+            (
+                unavailable,
+                State::Unavailable,
+                js_scaler::Health::Unavailable,
+            ),
         ];
         for (health, state, scaler) in cases {
             assert_eq!(health.state(), state);
