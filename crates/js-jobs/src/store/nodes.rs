@@ -484,6 +484,7 @@ fn hello_record(
         shape: hello.shape.clone(),
         labels: hello.labels.clone(),
         agent_process: hello.agent_process.clone(),
+        agent_version: hello.agent_version.clone(),
         state: NodeState {
             phase: hello.phase,
             load: None,

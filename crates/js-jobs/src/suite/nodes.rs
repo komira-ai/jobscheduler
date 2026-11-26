@@ -38,11 +38,12 @@ fn hello() -> NodeHello {
         labels: BTreeMap::from([("rack".to_owned(), "r1".to_owned())]),
         phase: Phase::Serving,
         agent_process: Some("proc-a".to_owned()),
+        agent_version: Some("1.2.3".to_owned()),
     }
 }
 
 /// What a row holds of its hello: the host, the epoch, the session digest, the pool, the
-/// claimed and booked shapes and the labels.
+/// claimed and booked shapes, the labels and the agent version.
 type Announced = (
     HostId,
     u64,
@@ -51,6 +52,7 @@ type Announced = (
     Option<Shape>,
     Option<Shape>,
     BTreeMap<String, String>,
+    Option<String>,
 );
 
 /// What `row` holds of its hello.
@@ -64,6 +66,7 @@ fn announced(row: &NodeRow) -> Announced {
         record.claim.clone(),
         record.shape.clone(),
         record.labels.clone(),
+        record.agent_version.clone(),
     )
 }
 
@@ -473,8 +476,9 @@ pub fn a_beat_of_an_old_epoch_after_a_newer_hello_is_stale<B: Backend>(backend: 
 
 /// A host's row written through one server is what another reads: a hello and a beat applied
 /// through one are read by the other's `read_node` and `live_nodes` with the version the write
-/// answered, and the other's beat is then judged on it. Catches a server that answers a host's
-/// session from what it wrote itself rather than from the row.
+/// answered, and the other's beat is then judged on it; the hello's agent version is in the row
+/// and the beat keeps it. Catches a server that answers a host's session from what it wrote
+/// itself rather than from the row, and a beat that drops the agent version.
 pub fn a_beat_through_one_server_is_read_by_another<B: Backend>(backend: &B) {
     let name = "a_beat_through_one_server_is_read_by_another";
     let rig = rig(backend);
@@ -493,7 +497,8 @@ pub fn a_beat_through_one_server_is_read_by_another<B: Backend>(backend: &B) {
                 said.pool,
                 said.claim,
                 said.shape,
-                said.labels
+                said.labels,
+                said.agent_version
             ),
             said.phase
         ),
