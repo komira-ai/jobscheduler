@@ -191,10 +191,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
                 "freed allocations past their retention deleted"
             );
         }
-        let orphans = self.sweep_orphans()?;
-        if orphans > 0 {
-            tracing::info!(orphans, "attempt rows whose job's row is gone deleted");
-        }
+        orphans_said(self.sweep_orphans()?);
         Ok(deleted)
     }
 
@@ -494,6 +491,14 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         let (raised, read_again) = self.raise_callbacks_at_boot(boot, &jobs)?;
         raise_said_again(again + read_again);
         Ok(written + raised)
+    }
+}
+
+/// Logs, when the tick's search deleted `orphans` attempt rows whose job's row is gone, one line
+/// with their count.
+fn orphans_said(orphans: usize) {
+    if orphans > 0 {
+        tracing::info!(orphans, "attempt rows whose job's row is gone deleted");
     }
 }
 

@@ -88,12 +88,15 @@ pub(crate) fn put_job(
     let txn = txn.put(keys::job(&job.id), encode_job(job)?, cond);
     let known = before.map_or(0, |before| before.attempt.ended());
     let ended = job.attempt.history().iter();
-    let txn = ended
+    let rows: Result<Vec<_>, JobStoreError> = ended
         .filter(|attempt| u64::from(attempt.number) > known)
-        .try_fold(txn, |txn, attempt| {
-            let row = encode_attempt_row(&job.id, attempt)?;
-            Ok::<_, JobStoreError>(txn.put(keys::attempt(&job.id, attempt.number), row, Cond::Any))
-        })?;
+        .map(|attempt| {
+            let key = keys::attempt(&job.id, attempt.number);
+            encode_attempt_row(&job.id, attempt).map(|row| (key, row))
+        })
+        .collect();
+    let put = |txn: Txn, (key, row): (String, Vec<u8>)| txn.put(key, row, Cond::Any);
+    let txn = rows?.into_iter().fold(txn, put);
     let before = before.map(job_entries).unwrap_or_default();
     Ok(moved(txn, &before, &job_entries(job)))
 }
