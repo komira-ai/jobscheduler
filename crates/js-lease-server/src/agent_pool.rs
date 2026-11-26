@@ -88,7 +88,9 @@ impl RawPool {
 pub(crate) const MIXED_UNSERVED: &str =
     "a mixed pool (a class that books part of a host) is not served by this server yet";
 
-/// The `[shape]` table: what the pool promises and books for every host.
+/// The `[shape]` table: what the pool books for a host that has not reported its own
+/// capacity yet (every host that has is booked at what it reports), and the GPU class
+/// every host's GPUs are held to.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawShape {
@@ -97,9 +99,9 @@ struct RawShape {
     #[serde(default)]
     gpus: u64,
     gpu_class: Option<String>,
-    /// The most scratch disk the pool books for a host: a host is booked the smaller of this
-    /// and the disk it reports, and no hello is refused for reporting less. Zero or absent
-    /// books no disk. A pool that names `scratch-quota` in its
+    /// The scratch disk booked for a host that has not reported its own yet; a host that has
+    /// is booked the disk it reports, and no hello is refused for reporting less. Zero or
+    /// absent means the pool books no disk per job. A pool that names `scratch-quota` in its
     /// capabilities must set it above zero ([`PoolConfig::checked`]).
     #[serde(default)]
     disk_bytes: u64,

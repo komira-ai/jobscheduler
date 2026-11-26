@@ -1,7 +1,7 @@
-//! A host's capacity is what it reports: a hello is never refused for reporting less CPU,
-//! memory, disk or GPUs than the pool's `[shape]`, and the host is booked on each at the
-//! smaller of what it reports and what the shape says. Only its capabilities (and the class
-//! of the GPUs it is booked) are held to the pool's.
+//! A host's capacity is what it reports: a hello is never refused for reporting less or more
+//! CPU, memory, disk or GPUs than the pool's `[shape]`, and the host is booked on each at
+//! what it reports (GPUs only where the host can serve them). Only its capabilities (and
+//! the class of the GPUs it is booked) are held to the pool's.
 
 mod support;
 
@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use js_agent_wire::{Hello, Phase};
 use js_registry::{Adopted, Binding, NodeSession, Placer, PoolConfig, Refusal, ShapeFault};
-use js_types::{HostId, ProviderId, Resources, Shape};
+use js_types::{ExecMode, HostId, ProviderId, Resources, Shape};
 use support::*;
 
 const GIB: u64 = 1 << 30;
@@ -106,16 +106,16 @@ fn a_host_reporting_240_gib_in_a_250_gib_pool_is_admitted_and_booked_at_240() {
     assert_eq!(claim.resources().memory_bytes(), REPORTED_MEMORY);
 }
 
-/// Asserts that each of CPU, memory, GPUs and disk is booked at the smaller of what the host
-/// reports and what the pool's shape says, one dimension at a time and all at once, and that
-/// a host reporting more than the shape on every one is booked at the shape. It catches a
-/// cap applied to one dimension only, a booking that follows a larger claim, and a GPU
-/// class dropped while GPUs remain.
+/// Asserts that each of CPU, memory, GPUs and disk is booked at what the host reports, one
+/// dimension at a time and all at once, and that a host reporting more than the shape on
+/// every one is booked at its report. It catches a booking clamped to the pool's shape on
+/// one dimension only, a booking that ignores a larger claim, and a GPU class dropped while
+/// GPUs remain.
 #[test]
-fn each_count_is_booked_at_the_smaller_of_the_report_and_the_shape() {
+fn each_count_is_booked_at_what_the_host_reports() {
     let told = Arc::new(Told::default());
     let fx = with_placer(big_pool(), told.clone());
-    let full = (64_000, POOL_MEMORY, 4, 500 * GIB);
+    let more = (128_000, 1024 * GIB, 8, 2000 * GIB);
     let cases = [
         (
             "cpu",
@@ -133,7 +133,7 @@ fn each_count_is_booked_at_the_smaller_of_the_report_and_the_shape() {
             (64_000, POOL_MEMORY, 4, 100 * GIB),
         ),
         ("all", (8000, 16 * GIB, 1, GIB), (8000, 16 * GIB, 1, GIB)),
-        ("more", (128_000, 1024 * GIB, 8, 2000 * GIB), full),
+        ("more", more, more),
     ];
     for (name, (cpu, memory, gpus, disk), booked) in cases {
         fx.hello(&reporting(name, cpu, memory, gpus, disk), &cred("t"))
@@ -149,6 +149,60 @@ fn each_count_is_booked_at_the_smaller_of_the_report_and_the_shape() {
         assert_eq!(resources.gpu_class(), Some("nvidia-a100"), "{name}");
         assert_eq!(told.last(name), resources, "{name}");
     }
+}
+
+/// Asserts that a host reporting more than the pool's `[shape]` on every count (twice the
+/// cores, memory and disk, and more GPUs) is admitted and booked at its report: the listing,
+/// the memory headroom and the placer all show the larger numbers. It catches a pool shape
+/// kept as a ceiling on what a host is booked.
+#[test]
+fn a_host_reporting_more_than_the_shape_is_booked_at_its_report() {
+    let told = Arc::new(Told::default());
+    let fx = with_placer(big_pool(), told.clone());
+    let node = reporting("big", 128_000, 2 * POOL_MEMORY, 8, 1000 * GIB);
+    fx.hello(&node, &cred("t")).unwrap();
+    let resources = listed(&fx, "big");
+    assert_eq!(resources.cpu_millis(), 128_000);
+    assert_eq!(resources.memory_bytes(), 2 * POOL_MEMORY);
+    assert_eq!(resources.gpus(), 8);
+    assert_eq!(resources.gpu_class(), Some("nvidia-a100"));
+    assert_eq!(resources.disk_bytes(), 1000 * GIB);
+    assert_eq!(told.last("big"), resources);
+    let hosts = fx.registry.hosts();
+    assert_eq!(hosts[0].memory.configured_bytes(), 2 * POOL_MEMORY);
+    assert_eq!(hosts[0].memory.bookable_bytes(), 2 * POOL_MEMORY);
+}
+
+/// Asserts that in a pool with an execution mode (`container`) whose shape has no GPUs, a
+/// host reporting 2 GPUs of a class and `runtime=container` with no `gpu-toolkit` joins and
+/// is booked no GPUs and no class, while the same host reporting `gpu-toolkit=true` is
+/// booked its 2 GPUs of their class. It catches GPUs booked on a host whose containers
+/// cannot reach them, and GPUs dropped from a host that can serve them.
+#[test]
+fn a_container_host_is_booked_its_gpus_only_with_the_gpu_toolkit() {
+    let resources = Resources::new(64_000, POOL_MEMORY, 0, None).unwrap();
+    let shape = Shape::new(resources, map(&[("os", "macos"), ("arch", ARCH)]));
+    let name = ProviderId::new("builders").unwrap();
+    let pool = PoolConfig::new(name, class(), shape, 8).with_exec(ExecMode::Container);
+    let fx = fixture_of(pool);
+    let mut bare = reporting("bare", 64_000, POOL_MEMORY, 2, 0);
+    bare.capabilities
+        .insert("runtime".into(), "container".into());
+    fx.hello(&bare, &cred("t")).unwrap();
+    let resources = listed(&fx, "bare");
+    assert_eq!(resources.gpus(), 0);
+    assert_eq!(resources.gpu_class(), None);
+    let mut toolkit = reporting("toolkit", 64_000, POOL_MEMORY, 2, 0);
+    toolkit
+        .capabilities
+        .insert("runtime".into(), "container".into());
+    toolkit
+        .capabilities
+        .insert("gpu-toolkit".into(), "true".into());
+    fx.hello(&toolkit, &cred("t")).unwrap();
+    let resources = listed(&fx, "toolkit");
+    assert_eq!(resources.gpus(), 2);
+    assert_eq!(resources.gpu_class(), Some("nvidia-a100"));
 }
 
 /// Asserts that a host of a GPU pool reporting no GPU joins and is booked none (with no GPU
@@ -197,10 +251,11 @@ fn a_host_whose_report_shrinks_is_booked_at_the_new_report() {
 }
 
 /// Asserts that the shape a stored row is placed on ([`js_registry::Registry::placement_shape_in`])
-/// is capped by the row's claim, so a row written before this booking, at the pool's 250
-/// GiB, places a host that claimed 240 GiB at 240 GiB; a row with no claim keeps what it
-/// booked; and a pool the registry does not serve has none. It catches the row path still
-/// placing at the pool's numbers while the hello path books the claim.
+/// is the row's claim, so a row written before this booking, at the pool's 250 GiB, places
+/// a host that claimed 240 GiB at 240 GiB and one that claimed 500 GiB at 500 GiB; a row
+/// with no claim keeps what it booked; and a pool the registry does not serve has none. It
+/// catches the row path still placing at the pool's numbers while the hello path books the
+/// claim.
 #[test]
 fn a_row_booked_at_the_pool_shape_is_placed_at_its_claim() {
     let fx = fixture_of(big_pool());
@@ -213,15 +268,24 @@ fn a_row_booked_at_the_pool_shape_is_placed_at_its_claim() {
         .placement_shape_in("builders", &booked, Some(&claim))
         .unwrap();
     assert_eq!(placed.resources().memory_bytes(), REPORTED_MEMORY);
+    let larger = reporting("node-02", 96_000, 500 * GIB, 4, 500 * GIB)
+        .to_shape()
+        .unwrap();
+    let placed = fx
+        .registry
+        .placement_shape_in("builders", &booked, Some(&larger))
+        .unwrap();
+    assert_eq!(placed.resources().memory_bytes(), 500 * GIB);
+    assert_eq!(placed.resources().cpu_millis(), 96_000);
     let unclaimed = fx.registry.placement_shape_in("builders", &booked, None);
     assert_eq!(unclaimed.unwrap().resources(), booked.resources());
     assert_eq!(fx.registry.placement_shape_in("other", &booked, None), None);
 }
 
 /// Asserts that a session another server's hello wrote, adopted from its row, is booked at
-/// the claim the row keeps when that is below the pool's shape: the listing and the placer
-/// show 240 GiB, as a hello here would. A row that keeps no claim is booked at the pool's
-/// shape. It catches the adopt path booking the pool's numbers while the hello path books
+/// the claim the row keeps, below or above the pool's shape: the listing and the placer
+/// show 240 GiB (or 500 GiB for a larger claim), as a hello here would. A row that keeps no
+/// claim is booked at the pool's shape. It catches the adopt path booking the pool's numbers while the hello path books
 /// the claim.
 #[test]
 fn an_adopted_session_is_booked_at_the_claim_its_row_keeps() {
@@ -245,6 +309,13 @@ fn an_adopted_session_is_booked_at_the_claim_its_row_keeps() {
     assert_eq!(adopted, Adopted::Installed);
     assert_eq!(listed(&fx, "node-01").memory_bytes(), REPORTED_MEMORY);
     assert_eq!(told.last("node-01").memory_bytes(), REPORTED_MEMORY);
+    let larger = reporting("node-02", 96_000, 500 * GIB, 4, 500 * GIB)
+        .to_shape()
+        .unwrap();
+    let adopted = fx.registry.adopt(&host("node-02"), session(Some(larger)));
+    assert_eq!(adopted, Adopted::Installed);
+    assert_eq!(listed(&fx, "node-02").memory_bytes(), 500 * GIB);
+    assert_eq!(told.last("node-02").cpu_millis(), 96_000);
     let adopted = fx.registry.adopt(&host("unclaimed"), session(None));
     assert_eq!(adopted, Adopted::Installed);
     assert_eq!(listed(&fx, "unclaimed"), *big_pool().shape().resources());

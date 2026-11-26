@@ -92,7 +92,7 @@ os_version = "26"
 
 - The floor only admits. Each Mac is placed by the version its own hello reports, not by the pool's value (`placement_shape` in `crates/js-registry/src/config.rs`). So a job that asks for 27 is placed only on the two Macs on 27, and a job that asks for 26, or for no version, on all four.
 - One pool per version would add nothing to placement and would cost more:
-  - Every Mac is booked at what it reports, at most the pool's shape, so a second pool would not book Macs differently; the version is the only thing that would differ.
+  - Every Mac is booked at what it reports in either pool, so a second pool would not book Macs differently; the version is the only thing that would differ.
   - A version is matched as at least, and a pool has no ceiling, so a pool for 26 would still admit a Mac on 27. It could not hold its hosts to 26.
   - Each extra pool needs its own join tokens and the same `memory_schedulable_percent`.
   - A Mac names its pool in its flags, so each macOS update would also move the Mac to another pool.

@@ -149,7 +149,7 @@ pub const SHAPE_NOT_ACCEPTED: &str = "shape-not-accepted";
 pub const SHAPE_BELOW_FLOOR: &str = "below-floor";
 /// The `reason` of a `shape-not-accepted` refusal when the pool names `scratch-quota` and
 /// the host's scratch quota default is absent, does not count, or exceeds the disk the host
-/// is booked at (the smaller of the disk it reports and the pool's).
+/// reports, at which it is booked.
 pub const SHAPE_QUOTA_DEFAULT: &str = "quota-default-unfit";
 /// The `reason` of a `shape-not-accepted` refusal when the host enforces a scratch quota
 /// and is booked no disk (the pool books none, or the host reports none), in a pool that

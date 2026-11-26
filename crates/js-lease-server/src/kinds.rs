@@ -73,9 +73,9 @@ pub struct BuildCtx<'a> {
 }
 
 /// The least a host of an elastic pool brings, as far as the kind knows it offline:
-/// the fewest GPUs over the sizes the pool may launch, and their class. The registry books
-/// a host at most at it and refuses a hello whose GPUs are of another class; it refuses none
-/// for reporting fewer. Real capacity is what the agent reports.
+/// the fewest GPUs over the sizes the pool may launch, and their class. The registry books a
+/// host at what it reports and refuses a hello whose GPUs are of another class; it refuses
+/// none for reporting fewer. Real capacity is what the agent reports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Floor {
     /// The fewest GPUs of any size.

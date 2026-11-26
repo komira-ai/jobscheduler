@@ -34,15 +34,19 @@ fn wrong_shape_refused() {
     assert_eq!(listed[0].shape.resources().cpu_millis(), 3999);
 }
 
-/// Asserts that a host claiming more than the pool promises is listed with the pool's shape
-/// and its claim kept apart: the shape the registry books is the pool's, never the claim. A
-/// defect that booked the claim would let an agent inflate what a job may take.
+/// Asserts that a host claiming more than the pool's shape is booked at its claim, not at the
+/// pool's shape: the listed shape carries the claim's 8000 millicores and 16 GiB with the
+/// pool's capabilities. It catches a booking capped at the pool's numbers, which would leave
+/// a larger host's cores and memory unused.
 #[test]
-fn booked_shape_is_the_pool_shape_not_the_claim() {
+fn booked_shape_is_the_claim_not_the_pool_shape() {
     let fx = fixture(4);
     fx.join("big", "t");
     let listed = fx.registry.hosts();
-    assert_eq!(listed[0].shape, pool_shape());
+    let booked = listed[0].shape.resources();
+    assert_eq!(booked.cpu_millis(), 8000);
+    assert_eq!(booked.memory_bytes(), 16 << 30);
+    assert_eq!(listed[0].shape.capabilities(), pool_shape().capabilities());
     let claim = listed[0].claim.as_ref().unwrap();
     assert_eq!(claim.resources().cpu_millis(), 8000);
     assert_eq!(claim.resources().memory_bytes(), 16 << 30);

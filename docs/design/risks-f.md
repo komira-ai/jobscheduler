@@ -75,7 +75,7 @@ Moved from design.md section 16 to keep that file under its size limit; K1 to K1
   whose every option is interrupted pays boots and reruns until the market settles; the platform-fault budget bounds the reruns (8.1).
 - **K43. A shared host is a larger blast radius.** One host loss, reclaim, taint or kernel fault ends many jobs of many consumers at once,
   where a machine per job would lose one. Mitigated by the notice and drain of D59, the platform-fault budget for reruns, taint on any
-  finding, and the choice of a host size (a host is booked at what it reports, at most the pool's shape; an operator sizes hosts for the loss they accept). Not mitigated: an
+  finding, and the choice of a host size (a host is booked at what it reports; an operator sizes hosts for the loss they accept). Not mitigated: an
   unannounced loss of a full host.
 - **K44. A declared VM capability is wrong.** A launch option that says `virt = nested` and cannot run a VM would waste a boot per
   attempt. Mitigated by the agent's probe (D58: the host reports zero slots and an alert), by the failure being recorded per option so the

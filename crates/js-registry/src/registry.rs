@@ -60,14 +60,12 @@ pub struct HostView {
     /// Every lease booked on the host. Always empty: no lease is booked on a host any
     /// more.
     pub leases: Vec<LeaseId>,
-    /// What the host is booked at, with its memory cut to the pool's memory percent: on
-    /// each of CPU, memory, GPUs and disk the smaller of what its `claim` reports and the
-    /// pool's shape (the pool's shape for a host with no claim), and the pool's
-    /// capabilities. It is what may be booked on it, also for a pool whose placer keeps
+    /// What the host is booked at, with its memory cut to the pool's memory percent: the
+    /// CPU, memory, GPUs and disk its `claim` reports (the pool's shape for a host with no
+    /// claim), and the pool's capabilities. It is what may be booked on it, also for a pool whose placer keeps
     /// the percent ([`crate::PoolConfig::booking_whole_memory`]).
     pub shape: Shape,
-    /// The memory the host is booked at before the cut (the smaller of what it reports and
-    /// the pool's shape), the percent of it that may be booked and what that comes to (the
+    /// The memory the host reports (the pool's shape's for a host with no claim), the percent of it that may be booked and what that comes to (the
     /// memory of `shape`).
     pub memory: MemoryHeadroom,
     /// The shape the host announced at its last hello, whose capabilities the registry
@@ -380,7 +378,7 @@ impl Registry {
     /// contract ([`Refusal::HostContract`] and [`Refusal::ExecutionMismatch`] name the
     /// capability at fault); the shape claimed meets the pool's capabilities and GPU class
     /// (`shape-not-accepted`, `below-floor`; the CPU, memory, disk and GPUs it reports are
-    /// not compared with the pool's shape: the host is booked at what it reports, capped by
+    /// not compared with the pool's shape: the host is booked at what it reports, more or less than
     /// the pool's numbers), and a scratch-quota default fits the disk it is booked at; the pool has room for a host it
     /// does not know (its own hosts only; hosts forgotten after the lost-host retention do
     /// not count); a
@@ -410,7 +408,7 @@ impl Registry {
     ///
     /// A pool that names `scratch-quota` also refuses (`shape-not-accepted`) a host whose
     /// quota default does not count (see `quota_default`) or is more than the disk the host
-    /// is booked at (the smaller of the disk it reports and the pool's). A pool that does
+    /// reports. A pool that does
     /// not name `scratch-quota` refuses (also `shape-not-accepted`) a host booked no disk
     /// (the pool books none, or the host reports none) that reports a quota with a default
     /// that counts: the pool would book nothing for jobs the host books at its default.

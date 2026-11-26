@@ -230,8 +230,8 @@ pub(crate) fn provider_view(
 }
 
 /// A host of the registry as admission sees it, on the shape the registry places it on
-/// ([`RegistryView::placement_shape`]: what the host is booked at, what it reported capped
-/// by the pool's shape, with its validated accelerator facts). A taint, reported or announced, does not show: a tainted host is
+/// ([`RegistryView::placement_shape`]: what the host is booked at, what it reported,
+/// with its validated accelerator facts). A taint, reported or announced, does not show: a tainted host is
 /// capable, as its taint ends (the agent clears it, or an operator does) and placement alone
 /// skips it meanwhile. It is draining when it is being released ([`HostMark::Releasing`]:
 /// it is leaving the pool, and nothing ends the mark); lost when it is not live (silent

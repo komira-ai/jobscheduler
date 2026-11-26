@@ -7,7 +7,7 @@ hello in message metadata, never in a log line.
 
 - *Identity.* The hello carries a host id (chosen by the operator or derived from the machine), the pool name, labels, the shape it
   offers, and `agent_version`. The control stream is TLS and the agent pins the scheduler's identity before it sends proof. The pool and
-  the labels come from configuration; the capacity booked is what the host reports, at most the pool's shape on each dimension. Hello
+  the labels come from configuration; the capacity booked is what the host reports, less or more than the pool's shape. Hello
   labels are informational, and any `jobscheduler.dev/` key from an agent is refused.
 - *Admission.* The pool exists; the host id is not in the tainted set (5.12), checked before the credential; the host id is not held by a live stream (a second stream for the same id replaces the first only after
   the first has been silent past the grace of 4.1); the reported shape meets the pool's capabilities and GPU class (`Shape::satisfies` against what the host would be booked at, so the

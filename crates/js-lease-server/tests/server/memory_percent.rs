@@ -86,13 +86,14 @@ fn claiming(host: &str, memory_bytes: u64) -> Value {
     body
 }
 
-/// Asserts that an agent pool with 90 books exactly floor(16 GiB x 90 / 100) of its
-/// `[shape]` memory for a host, whatever the host claims: a host that claims 100 GiB is
-/// booked at the cut all the same (a job needing one byte more is refused `no-capable-host`,
-/// one needing exactly the cut is admitted), so an agent cannot inflate what it offers. It catches a booking that follows the
-/// claim and a cut that is not applied to the pool file's shape.
+/// Asserts that an agent pool with 90 books 90 percent of the memory a host claims, not of
+/// its `[shape]` memory: a host that claims 100 GiB is booked floor(100 GiB x 90 / 100), so
+/// a job needing one byte more is refused `no-capable-host`, one needing exactly that cut
+/// is admitted, and a job needing the pool's whole 16 GiB listing fits too. It catches a
+/// booking capped at the pool's `[shape]` memory and a cut applied to the pool file's shape
+/// instead of the claim.
 #[tokio::test]
-async fn the_agent_pool_percent_books_the_cut_whatever_the_claim() {
+async fn the_agent_pool_percent_cuts_the_claim_of_a_host_larger_than_the_pool() {
     let h = registering("mempct_agents_90", &ninety_pool()).await;
     let reply = post(
         &h,
@@ -102,15 +103,13 @@ async fn the_agent_pool_percent_books_the_cut_whatever_the_claim() {
     )
     .await;
     session(&reply, "big-1");
+    let cut = 100 * GIB * 90 / 100;
     assert_eq!(
-        ask(&h, "over-by-one", POOLED_NINETY + 1).await,
+        ask(&h, "over-by-one", cut + 1).await,
         (422, "no-capable-host".to_owned())
     );
-    assert_eq!(ask(&h, "whole-listing", POOLED).await.1, "no-capable-host");
-    assert_eq!(
-        ask(&h, "at-the-cut", POOLED_NINETY).await,
-        (201, "queued".to_owned())
-    );
+    assert_eq!(ask(&h, "whole-listing", POOLED).await.1, "queued");
+    assert_eq!(ask(&h, "at-the-cut", cut).await, (201, "queued".to_owned()));
 }
 
 /// Asserts that a hello is held to no memory and that a host is booked the cut of what it
@@ -209,12 +208,13 @@ async fn the_agent_pool_default_is_unchanged_and_bad_values_are_refused() {
     }
 }
 
-/// Asserts that `GET /v1/hosts` shows, for a registered host, the memory listed, the percent
-/// and the bookable memory, and that `shape.memory_bytes` is
-/// the bookable memory. It catches a listing that shows the unreduced figure as what is
-/// booked.
+/// Asserts that `GET /v1/hosts` shows, for a registered host claiming 100 GiB in a pool
+/// listing 16 GiB at 90 percent, the claimed memory as `configured_bytes`, the percent, and
+/// 90 percent of the claim as `bookable_bytes`, and that `shape.memory_bytes` is that
+/// bookable memory. It catches a listing that shows the pool's `[shape]` memory instead of
+/// the claim, and one that shows the unreduced figure as what is booked.
 #[tokio::test]
-async fn hosts_show_the_listed_memory_the_percent_and_the_bookable_memory() {
+async fn hosts_show_the_claimed_memory_the_percent_and_the_bookable_memory() {
     let h = registering("mempct_hosts_registered", &ninety_pool()).await;
     session(
         &post(
@@ -228,13 +228,14 @@ async fn hosts_show_the_listed_memory_the_percent_and_the_bookable_memory() {
     );
     let listing = hosts(&h).await;
     let shown = entry(&listing, "big-1");
-    assert_eq!(shown["shape"]["memory_bytes"], POOLED_NINETY);
+    let cut = 100 * GIB * 90 / 100;
+    assert_eq!(shown["shape"]["memory_bytes"], cut);
     assert_eq!(
         shown["memory"],
         json!({
-            "configured_bytes": POOLED,
+            "configured_bytes": 100 * GIB,
             "schedulable_percent": 90,
-            "bookable_bytes": POOLED_NINETY,
+            "bookable_bytes": cut,
         })
     );
 }

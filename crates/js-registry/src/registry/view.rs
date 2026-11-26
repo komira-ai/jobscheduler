@@ -11,15 +11,14 @@ use crate::config::placement_shape;
 
 impl HostView {
     /// The shape the registry places the host on: [`Self::shape`], what the host is booked
-    /// at (what it reports, capped by the pool's numbers), with the `accelerator.*`
+    /// at (what it reports), with the `accelerator.*`
     /// capabilities of the host's validated [`Self::claim`] in place of the pool's, so its
     /// real family, variant facts and measured memory are matched; with
     /// [`Self::by_hello`], also with the claim's other capabilities that [`Self::shape`]
     /// does not name. Admission reads a host's facts from it.
     #[must_use]
     pub fn placement_shape(&self) -> Shape {
-        let percent = self.memory.percent();
-        placement_shape(&self.shape, self.claim.as_ref(), self.by_hello, percent)
+        placement_shape(&self.shape, self.claim.as_ref(), self.by_hello)
     }
 }
 
@@ -47,8 +46,8 @@ impl Registry {
     }
 
     /// The listing's view of one host, given the parts of the state that it reads: the
-    /// shape and the memory are what the host reported capped by its pool's, and the timing
-    /// is its pool's.
+    /// shape and the memory are what the host reported (its pool's shape when it has reported
+    /// nothing since a restart), and the timing is its pool's.
     pub(super) fn viewer(&self, now: Timestamp) -> impl Fn(&HostId, &Record) -> HostView + '_ {
         move |id, record| {
             let pool = self.pool_of(record);

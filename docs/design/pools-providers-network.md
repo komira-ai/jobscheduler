@@ -278,8 +278,9 @@ books no disk and does not name `scratch-quota` refuses a host that enforces a q
 runs the host books at its default. A pool that names `scratch-quota` must book disk.
 
 A pool declares `exec = "container"` (default) or `"sandbox-exec"`. The pool's required
-capabilities (4.5) are `runtime` equal to the pool's `exec`, and for a host booked GPUs,
-`gpu-toolkit`.
+capabilities (4.5) are `runtime` equal to the pool's `exec`, and, for a host that reports GPUs in a
+pool whose shape has GPUs, `gpu-toolkit` (a host reporting GPUs without one in a pool whose shape has
+none joins with no GPU booked).
 Admission refuses with two new codes beside `SHAPE_NOT_ACCEPTED`
 (`crates/js-agent-wire/src/refusal.rs`): `host-contract` (runtime or toolkit missing) and
 `execution-mismatch` (reported mode differs from the pool's). Both name the field. A job that
@@ -297,8 +298,8 @@ the one amount a hello is held to, and only when the operator writes it as a cap
 
 Two limits, stated plainly:
 
-- Registry pools place jobs by the shape each host is booked at (what it reports, at most the
-  pool's `[shape]`) with the pool's capabilities. A host's reported `disk-gib` is only checked at
+- Registry pools place jobs by the shape each host is booked at (what it reports) with the pool's
+  capabilities. A host's reported `disk-gib` is only checked at
   admission against the pool's `disk-gib` capability, and never places a job by itself. A job with
   `disk-gib` on a pool whose `[capabilities]` omit `disk-gib` gets no fit.
 - Disk is read at hello and again at most every 30 s (`js_agent::disk`); the heartbeat carries
@@ -444,14 +445,15 @@ does not, so it is a catalog check (10.1), not a start refusal.
 ### 4.5 The pool floor
 
 The registry takes one `Shape` per pool. It is no admission floor on amounts: a host's capacity
-is what it reports, and a host is booked on each of CPU, memory, GPUs and disk at the smaller of
-what it reports and the pool's `Shape`. A hello is refused only when its capabilities do not meet
-the `Shape`'s capabilities, or its GPUs are of another class (`docs/design/registration.md`,
+is what it reports, and a host is booked at the CPU, memory, GPUs and disk it reports, less or
+more than the `Shape`, whose numbers are booked only for a host with no hello since a restart. A
+hello is refused only when its capabilities do not meet
+the `Shape`'s capabilities, or its GPUs are of another class than the `Shape`'s (`docs/design/registration.md`,
 Admission). An elastic pool has many sizes. Its `Shape` (still called its floor, the least a
 launched machine of it brings) is built offline from the config: cpu 1000 millis, memory 1 GiB,
 `gpus` = the least GPU count the provider crate's table gives the `types`, `gpu_class` = the one
 canonical model they share, and the required capabilities of 3.6 (`runtime` equal to `exec`,
-`gpu-toolkit` if the host is booked GPUs). Real capacity is whatever the agent reports; the
+`gpu-toolkit` if the `Shape` has GPUs and the host reports some). Real capacity is whatever the agent reports; the
 capabilities only keep a wrong machine out. PROPOSAL (requirements do not set the floor).
 
 ## 5. Provider plumbing (requirement 12)

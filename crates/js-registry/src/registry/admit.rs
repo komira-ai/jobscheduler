@@ -111,32 +111,36 @@ impl Registry {
         }
         let pool_shape = config.shape();
         let claim = hello.to_shape().ok();
-        // A host's capacity is what it reports: it is booked at what its claim says, capped
-        // by the pool's numbers, and never refused for reporting less CPU, memory, disk or
-        // GPUs than the pool's shape. A shape that cannot be read books nothing and is
-        // refused below.
-        let booked = claim
+        // A host's capacity is what it reports: it is booked at what its claim says, and
+        // never refused for reporting less (or more) CPU, memory, disk or GPUs than the
+        // pool's shape. What is compared with the pool is the pool's shape capped by the
+        // claim, which the host always holds, so only the kinds can fail: the GPU class
+        // (and the accelerator model it names) of GPUs both name, and the pool's
+        // capabilities. A shape that cannot be read is refused below.
+        let compared = claim
             .as_ref()
             .map(|claim| pool_shape.resources().capped_by(claim.resources()));
-        let booked_gpus = booked.as_ref().map_or(0, |booked| booked.gpus());
+        // The toolkit is required where the pool's shape has GPUs and the host reports some;
+        // a host that reports GPUs in a pool whose shape has none is booked them only with a
+        // toolkit (`PoolConfig::booked_from`), and is not refused for lacking one.
+        let gpus_both = compared.as_ref().map_or(0, |compared| compared.gpus());
         if let Some(exec) = config.exec() {
-            let contract = HostContract::new(exec, booked_gpus > 0);
+            let contract = HostContract::new(exec, gpus_both > 0);
             contract.check(&hello.capabilities)?;
         }
-        // What is compared is what the host would be booked at, which it always holds:
-        // only the kinds can fail, the GPU class (and the accelerator model it names) of
-        // the GPUs it is booked, and the pool's capabilities.
         let meets_pool = claim
             .as_ref()
-            .zip(booked.as_ref())
-            .is_some_and(|(claim, booked)| claim.satisfies(booked, pool_shape.capabilities()));
+            .zip(compared.as_ref())
+            .is_some_and(|(claim, compared)| claim.satisfies(compared, pool_shape.capabilities()));
         if !meets_pool {
             return Err(Refusal::ShapeNotAccepted(ShapeFault::BelowFloor));
         }
         // A pool that names `scratch-quota` books a default for every job without disk, so
         // a host must report one that counts and fits the disk it is booked at: otherwise
         // its jobs without disk would book nothing, or never fit.
-        let booked_disk = booked.as_ref().map_or(0, |booked| booked.disk_bytes());
+        let booked_disk = claim
+            .as_ref()
+            .map_or(0, |claim| claim.resources().disk_bytes());
         let quota_pool = pool_shape.capabilities().contains_key(SCRATCH_QUOTA);
         let default = quota_default(&hello.capabilities);
         let fits = default.is_some_and(|bytes| bytes <= booked_disk);
@@ -144,11 +148,12 @@ impl Registry {
             return Err(Refusal::ShapeNotAccepted(ShapeFault::QuotaDefaultUnfit));
         }
         // A host that enforces a quota books a default for every job without disk, so a
-        // host booked no disk (the pool books none, or the host reports none) in a pool
+        // host in a pool that books no disk per job (its shape's `disk_bytes` is zero), or
+        // one that reports no disk and so is booked none, in a pool
         // that does not name `scratch-quota` would count 0 for jobs the host counts at its
         // default, and the server would admit what the agent refuses. Such a host is
         // refused rather than booked wrongly.
-        let books_no_disk = booked_disk == 0;
+        let books_no_disk = [pool_shape.resources().disk_bytes(), booked_disk].contains(&0);
         if [!quota_pool, books_no_disk, default.is_some()]
             .into_iter()
             .all(|ok| ok)

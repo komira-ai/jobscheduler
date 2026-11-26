@@ -1,6 +1,6 @@
 //! Admission of Mac Studio hosts by a pool's one shape: a host's capacity is what it reports,
-//! and the pool's `[shape]` is the most the pool books of any host. A host offering more is
-//! booked at the shape; a host offering less joins and is booked at what it offers. Only the
+//! and the pool's `[shape]` is neither a floor nor a cap. A host offering more or less joins
+//! and is booked at what it offers. Only the
 //! capabilities are held to the pool's: a host reporting another `arch` or `os` is refused
 //! `shape-not-accepted` (`below-floor`). A Linux guest on the Macs, which reports its own
 //! cores and memory and another `os`, joins a pool of its own with a shape that fits the
@@ -79,16 +79,16 @@ fn a_mac_offering_exactly_the_pool_shape_joins() {
     assert_eq!(view.shape.resources().memory_bytes(), MAC_MEMORY);
 }
 
-/// Asserts that a 32-core Mac joins the pool shaped at 28 cores and is booked at 28: the
-/// pool's one shape is what it books, and the 4 further cores are kept only in the host's
-/// claim. A pool cannot book its Macs at different sizes.
+/// Asserts that a 32-core Mac joins the pool shaped at 28 cores and is booked at its 32: the
+/// pool's shape is no cap, so the 4 further cores are booked and match the host's claim. It
+/// catches a booking capped at the pool's numbers.
 #[test]
-fn a_32_core_mac_joins_and_is_booked_at_the_pool_shape() {
+fn a_32_core_mac_joins_the_28_core_pool_and_is_booked_at_32() {
     let fx = fixture_of(small_mac_pool());
     fx.hello(&mac_hello("mac-32", LARGE_MAC_CPU, MAC_MEMORY), &cred("t"))
         .unwrap();
     let view = &fx.registry.hosts()[0];
-    assert_eq!(view.shape.resources().cpu_millis(), SMALL_MAC_CPU);
+    assert_eq!(view.shape.resources().cpu_millis(), LARGE_MAC_CPU);
     assert_eq!(view.shape.resources().memory_bytes(), MAC_MEMORY);
     let claim = view.claim.as_ref().unwrap();
     assert_eq!(claim.resources().cpu_millis(), LARGE_MAC_CPU);
@@ -161,7 +161,8 @@ fn guest_hello(host: &str) -> Hello {
 
 /// Asserts that one 28-core Mac serves two pools when each has its own shape that fits it:
 /// its native agent joins the native pool (10 cores, 36 GiB) and its Linux guest joins the
-/// guest pool (14 cores, 40 GiB), each booked at its own pool's shape. The guest naming the native pool is refused
+/// guest pool (14 cores, 40 GiB), each booked at what it reports (the Mac's 28 cores and
+/// 96 GiB, the guest's 14 and 40 GiB), not at its pool's shape. The guest naming the native pool is refused
 /// `below-floor` although it offers more cores and memory than that pool's shape, because
 /// it reports `os` `linux` and the shape names `macos`: the two kinds of host cannot share
 /// one pool and one shape.
@@ -194,6 +195,6 @@ fn native_and_guest_pools_each_shaped_to_fit_a_28_core_mac_admit_both() {
         let resources = view.shape.resources();
         (resources.cpu_millis(), resources.memory_bytes())
     };
-    assert_eq!(booked("mac-28"), (NATIVE_CPU, NATIVE_MEMORY));
+    assert_eq!(booked("mac-28"), (SMALL_MAC_CPU, MAC_MEMORY));
     assert_eq!(booked("mac-28-guest"), (GUEST_CPU, GUEST_MEMORY));
 }

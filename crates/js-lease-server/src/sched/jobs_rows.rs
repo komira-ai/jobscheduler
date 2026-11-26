@@ -75,7 +75,7 @@ pub(crate) struct RowsRead {
 }
 
 /// What a host of `shape` can book under load admission: the shape it is booked at (what it
-/// reported, capped by the pool's shape), with
+/// reported), with
 /// the CPU slack the placement engine allows on its cores, which is the most the engine places
 /// on it. The capacity is the bound a placement is held to in its own transaction against the
 /// allocations the store holds, so it must not be tighter than what the engine allows. It is

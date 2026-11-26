@@ -1,6 +1,6 @@
-//! Disk as an admitted resource: what disk a host is booked at (the smaller of what it
-//! reports and the pool's `disk_bytes`; no floor), and which hosts the quota rules admit. Nothing here enforces a quota; the agent does, and these are
-//! the server's rules at admission.
+//! Disk as an admitted resource: a host is booked the disk it reports (no floor, no cap),
+//! and which hosts the quota rules admit. Nothing here enforces a quota; the agent does,
+//! and these are the server's rules at admission.
 
 mod support;
 
@@ -53,7 +53,8 @@ fn host_hello(disk: u64, quota: Option<&str>, default_gib: Option<&str>, held: &
 
 /// Asserts that disk is no floor: a host that offers less disk than the pool books (one
 /// byte under 25 GiB) joins and is booked at the disk it offers, a host that offers the
-/// pool's disk or more joins and is booked at the pool's, and the quota rules judge the
+/// pool's disk joins and is booked at it, a host that offers more (30 GiB) is booked at the 30
+/// GiB it offers, and the quota rules judge the
 /// disk the host is booked at: a 10 GiB default on a host offering 5 GiB, or none (a host
 /// from before the field), is `quota-default-unfit` though the pool books 25 GiB, and a pool
 /// with no disk keeps accepting hosts with none. It catches a floor that still refuses a
@@ -75,7 +76,7 @@ fn disk_is_booked_at_what_the_host_offers_and_the_quota_rules_judge_it() {
     let under = join(pool(25 * GIB, true), 25 * GIB - 1);
     assert_eq!(under, Ok(Some(25 * GIB - 1)));
     assert_eq!(join(pool(25 * GIB, true), 25 * GIB), Ok(Some(25 * GIB)));
-    assert_eq!(join(pool(25 * GIB, true), 30 * GIB), Ok(Some(25 * GIB)));
+    assert_eq!(join(pool(25 * GIB, true), 30 * GIB), Ok(Some(30 * GIB)));
     let unfit = Refusal::ShapeNotAccepted(ShapeFault::QuotaDefaultUnfit);
     assert_eq!(join(pool(25 * GIB, true), 5 * GIB), Err(unfit.clone()));
     let legacy = join(pool(25 * GIB, true), 0).unwrap_err();
@@ -188,9 +189,8 @@ fn each_shape_fault_names_its_condition() {
             ShapeFault::QuotaDefaultUnfit,
             "quota-default-unfit",
             "the pool names scratch-quota and the host's scratch default is absent, zero or \
-             more than the disk the host is booked at (the smaller of the disk it reports and \
-             the pool's disk_bytes): set the host's scratch-default-gib within that disk, or \
-             give the host more scratch disk",
+             more than the scratch disk the host reports: set the host's scratch-default-gib \
+             within that disk, or give the host more scratch disk",
         ),
         (
             ShapeFault::QuotaWithoutPoolDisk,

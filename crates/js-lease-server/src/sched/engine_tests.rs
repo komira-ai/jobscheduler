@@ -89,7 +89,8 @@ fn a_heartbeat_with_a_bad_load_still_counts_as_a_beat() {
 #[test]
 fn slack_1_1_lets_cpu_book_ten_percent_over() {
     let full = |name: &str, extra: &[&str]| {
-        let r = rig(name, &pool(1, 10_000, ""), &["h1"], extra);
+        let mut r = rig(name, &pool(1, 10_000, ""), &[], extra);
+        r.hello(&hello_of("h1", 10_000, 16 * GIB));
         for n in 1..=10 {
             assert_eq!(
                 r.place(&format!("job-{n}"), 1_000, GIB).as_deref(),
@@ -128,7 +129,8 @@ const NINETY: u64 = 16 * GIB / 100 * 90 + 16 * GIB % 100 * 90 / 100;
 #[test]
 fn memory_percent_cuts_bookable_memory_in_the_engine() {
     let percent = "memory_schedulable_percent = 90";
-    let r = rig("percent_engine", &pool(2, 8000, percent), &["h1"], &[]);
+    let mut r = rig("percent_engine", &pool(2, 8000, percent), &[], &[]);
+    r.hello(&hello_of("h1", 8000, 16 * GIB));
     assert_eq!(NINETY, 15_461_882_265);
     let third = NINETY - 10 * GIB;
     for (n, bytes) in [(1, 5 * GIB), (2, 5 * GIB), (3, third)] {
@@ -144,16 +146,18 @@ fn memory_percent_cuts_bookable_memory_in_the_engine() {
 }
 
 /// Asserts that a host whose hello claims far more memory than the pool lists (512 GiB) is
-/// still held to the pool's percent: a job one byte above 90% of the pool's 16 GiB fits no
-/// host, and the engine books what 90% allows on it and not a byte more. It catches a host
-/// booked by its claim.
+/// booked at its claim, cut by the pool's percent: a job one byte above 90% of the claimed
+/// 512 GiB fits no host, one of exactly 90% fits (which the pool's 16 GiB would refuse), and
+/// the engine books not a byte more. It catches a host booked at the pool's shape instead of
+/// its claim, and a claim that escapes the percent.
 #[test]
-fn an_agent_claim_never_raises_the_percent() {
+fn an_agent_claim_is_booked_as_claimed_under_the_percent() {
     let percent = "memory_schedulable_percent = 90";
     let mut r = rig("percent_claim", &pool(2, 8000, percent), &[], &[]);
     r.hello(&hello_of("big", 64_000, 512 * GIB));
-    assert_eq!(r.place("job-above", 1_000, NINETY + 1), None);
-    assert_eq!(r.place("job-fits", 1_000, NINETY).as_deref(), Some("big"));
+    let claimed = 512 * GIB / 100 * 90 + 512 * GIB % 100 * 90 / 100;
+    assert_eq!(r.place("job-above", 1_000, claimed + 1), None);
+    assert_eq!(r.place("job-fits", 1_000, claimed).as_deref(), Some("big"));
     assert_eq!(r.place("job-over", 1_000, 1), None);
 }
 

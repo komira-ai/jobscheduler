@@ -70,12 +70,11 @@ pub enum ShapeFault {
     /// The host's capabilities do not meet the pool's: a capability or label the pool names
     /// is missing or has another value, or the GPUs it reports are of another class than
     /// the pool's. The CPU, memory, disk and GPUs a host reports are never compared with the
-    /// pool's shape (a host is booked at what it reports, capped by the pool's numbers), so
+    /// pool's shape (a host is booked at what it reports), so
     /// this is no resource floor; its wire reason is `below-floor`, as before.
     BelowFloor,
     /// The pool names `scratch-quota` and the host's quota default is absent, does not
-    /// count, or is more than the disk the host is booked at (the smaller of the disk it
-    /// reports and the pool's `disk_bytes`).
+    /// count, or is more than the disk the host reports, at which it is booked.
     QuotaDefaultUnfit,
     /// The host enforces a scratch quota while it is booked no disk (the pool books none, or
     /// the host reports none) and the pool does not name `scratch-quota`.
@@ -102,9 +101,8 @@ impl std::fmt::Display for ShapeFault {
             }
             Self::QuotaDefaultUnfit => {
                 "the pool names scratch-quota and the host's scratch default is absent, zero \
-                 or more than the disk the host is booked at (the smaller of the disk it \
-                 reports and the pool's disk_bytes): set the host's scratch-default-gib within \
-                 that disk, or give the host more scratch disk"
+                 or more than the scratch disk the host reports: set the host's \
+                 scratch-default-gib within that disk, or give the host more scratch disk"
             }
             Self::QuotaWithoutPoolDisk => {
                 "the host enforces a scratch quota and is booked no disk (the pool books none, \
