@@ -39,9 +39,9 @@
 //! ([`Images::count_held`](super::pull::Images::count_held)), and which the first pull runs
 //! again (before its fetch) when that has not counted them yet: all used before anything
 //! since, in the order of their digests, except an image a start used while the store was
-//! being listed, which keeps that use. Until then a start's use of an image the store holds
-//! takes no turn either ([`Images::use_held`](super::pull::Images::use_held)), so no start
-//! waits for the listing, which walks every image's tree. What a
+//! being listed, which keeps that use. Until then a start's use of an image takes no turn
+//! either ([`Images::use_held`](super::pull::Images::use_held)), so no start waits for the
+//! listing, which walks every image's tree. What a
 //! budget does not see: the images another agent on the same store pulls are counted only
 //! once a pull of this one meets them, and the bytes an unpack under way takes before it is
 //! published.
@@ -64,10 +64,6 @@ pub(super) trait Store: Send + Sync {
 
     /// Every image the store holds, by digest (`sha256:<hex>`), with the bytes it takes.
     fn held(&self) -> io::Result<Vec<(String, u64)>>;
-
-    /// Whether `image` is in the store now, read without measuring it: what [`Store::held`]
-    /// would list.
-    fn present(&self, image: &PinnedImage) -> bool;
 
     /// Removes `image` from the store. Refused when a lease pins it.
     async fn remove(&self, image: &PinnedImage) -> io::Result<()>;
@@ -146,6 +142,16 @@ impl Book {
         } else if !self.loaded {
             self.early.insert(digest.to_owned(), now);
         }
+    }
+
+    /// `digest` is used now when the book is not loaded yet, and the use is kept for
+    /// [`load`]: whether it was so.
+    pub(super) fn early_use(&mut self, digest: &str) -> bool {
+        if self.loaded {
+            return false;
+        }
+        self.touch(digest);
+        true
     }
 
     /// The lease `name` holds the image `digest` until [`Book::release`].
