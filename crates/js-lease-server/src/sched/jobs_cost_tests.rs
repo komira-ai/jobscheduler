@@ -312,8 +312,9 @@ async fn a_failed_placement_or_what_pass_2_told_brings_the_next_heartbeats_pass_
     assert_eq!(after, before + 1, "the launch was not written");
 }
 
-/// How many hosts the full farm has: each runs one job that takes all its cores.
-const FARM_HOSTS: usize = 10;
+/// How many hosts the full farm has, as many as the rig's pool admits: each runs one job that
+/// takes all its cores.
+const FARM_HOSTS: usize = 4;
 
 /// How many jobs wait behind the farm's running ones.
 const FARM_QUEUED: usize = 5_000;
@@ -367,7 +368,7 @@ async fn beat_with_load(rig: &Rig, agent: &FakeAgent, seq: u64) -> (HeartbeatRep
     (reply, counted)
 }
 
-/// Asserts the change itself, in the shape of a saturated farm: ten hosts, each running a job
+/// Asserts the change itself, in the shape of a saturated farm: four hosts, each running a job
 /// that takes all its cores, and five thousand jobs queued behind them. Every round, each host
 /// beats with a load reading that differs from its last (a busy host's does), and the tick's
 /// job pass claims its duty, a commit that changes no row of the tables a pass reads. None of
