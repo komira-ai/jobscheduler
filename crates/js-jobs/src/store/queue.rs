@@ -66,3 +66,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         Ok(live)
     }
 }
+
+#[cfg(test)]
+#[path = "queue_reads_tests.rs"]
+mod reads_tests;

@@ -1,6 +1,7 @@
 //! The state store trait.
 
 use std::cmp::Ordering;
+use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::ops::Bound;
 
@@ -42,6 +43,24 @@ pub trait Store: Send + Sync {
     /// # Errors
     /// [`StoreError`] when the backend fails.
     fn get(&self, key: &str) -> Result<Option<Versioned>, StoreError>;
+
+    /// The live rows of `keys`, each once, in key order: what [`Store::get`] answers for each,
+    /// with the keys that have no live row left out. An empty `keys` reads nothing. The
+    /// provided implementation calls [`Store::get`] for each key; the Postgres backend reads
+    /// them in one statement, so its rows are one snapshot of committed state.
+    ///
+    /// # Errors
+    /// [`StoreError`] when the backend fails.
+    fn get_many(&self, keys: &[String]) -> Result<Vec<(String, Versioned)>, StoreError> {
+        let wanted: BTreeSet<&String> = keys.iter().collect();
+        let mut rows = Vec::with_capacity(wanted.len());
+        for key in wanted {
+            if let Some(row) = self.get(key)? {
+                rows.push((key.clone(), row));
+            }
+        }
+        Ok(rows)
+    }
 
     /// Every live key that starts with `prefix`, in key order.
     ///
@@ -262,6 +281,10 @@ impl Store for std::sync::Arc<dyn Store> {
         (**self).get(key)
     }
 
+    fn get_many(&self, keys: &[String]) -> Result<Vec<(String, Versioned)>, StoreError> {
+        (**self).get_many(keys)
+    }
+
     fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, Versioned)>, StoreError> {
         (**self).scan_prefix(prefix)
     }
@@ -444,6 +467,10 @@ mod tests {
 
         let got = <Arc<dyn Store> as Store>::get(&handle, "k/a").expect("store");
         assert_eq!(got, inner.get("k/a").expect("store"));
+        let wanted = ["k/b".to_owned(), "k/a".to_owned(), "k/none".to_owned()];
+        let many = <Arc<dyn Store> as Store>::get_many(&handle, &wanted).expect("store");
+        assert_eq!(many, inner.get_many(&wanted).expect("store"));
+        assert_eq!(many.len(), 2);
         assert_eq!(got.map(|row| row.value), Some(b"1".to_vec()));
         let keys = |rows: Vec<(String, crate::types::Versioned)>| {
             rows.into_iter().map(|(key, _)| key).collect::<Vec<_>>()

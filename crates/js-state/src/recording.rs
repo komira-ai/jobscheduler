@@ -43,6 +43,8 @@ pub struct Write {
 pub enum Read {
     /// A get of the key.
     Get(String),
+    /// A get of the keys at once ([`Store::get_many`]), as they were asked for.
+    GetMany(Vec<String>),
     /// A prefix scan under the prefix.
     ScanPrefix(String),
     /// A range scan (C8) under the prefix.
@@ -181,6 +183,11 @@ impl Store for RecordingStore {
     fn get(&self, key: &str) -> Result<Option<Versioned>, StoreError> {
         self.read(Read::Get(key.to_owned()));
         self.inner.get(key)
+    }
+
+    fn get_many(&self, keys: &[String]) -> Result<Vec<(String, Versioned)>, StoreError> {
+        self.read(Read::GetMany(keys.to_vec()));
+        self.inner.get_many(keys)
     }
 
     fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, Versioned)>, StoreError> {

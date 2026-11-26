@@ -29,6 +29,9 @@ fn now_sql(n: u8) -> String {
 pub(super) struct Statements {
     /// `$1` key, `$2` clock override: `value, version, expires_us` of a live key.
     pub get: Statement,
+    /// `$1` keys, `$2` clock override: `key, value, version, expires_us` of each of those keys
+    /// that is live, in key order.
+    pub get_many: Statement,
     /// `$1` prefix, `$2` clock override: `key, value, version, expires_us`, in key order.
     pub scan: Statement,
     /// C8, one statement per [`RangeShape`] at [`RangeShape::index`]: `$1` clock override,
@@ -98,6 +101,10 @@ impl Statements {
             get: client.prepare(&format!(
                 "SELECT value, version, expires_us FROM kv WHERE key = $1 \
                  AND (expires_us IS NULL OR expires_us > {now})"
+            ))?,
+            get_many: client.prepare(&format!(
+                "SELECT key, value, version, expires_us FROM kv WHERE key = ANY($1::text[]) \
+                 AND (expires_us IS NULL OR expires_us > {now}) ORDER BY key"
             ))?,
             scan: client.prepare(&format!(
                 "SELECT key, value, version, expires_us FROM kv \

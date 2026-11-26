@@ -14,6 +14,7 @@ use std::time::Duration;
 use js_state::conformance::{
     c1_linearizable_cas, c2_atomic_txn, c3_monotonic_counter, c4_store_clock_expiry, c5_feed_trim,
     c5_ordered_feed, c6_durable_ack, c7_group_commit, c8_bounded_range_scan,
+    get_many_reads_each_live_key_once_in_key_order,
 };
 use js_state::postgres::{
     ConfigError, Flaw, PostgresBackend, PostgresConfig, PostgresStore, TlsMode,
@@ -81,6 +82,11 @@ fn c7_a_burst_is_one_group() {
 #[test]
 fn c8_a_range_scan_is_bounded_and_resumes() {
     c8_bounded_range_scan(&backend(Flaw::None));
+}
+
+#[test]
+fn a_batched_get_reads_each_live_key_once_in_key_order() {
+    get_many_reads_each_live_key_once_in_key_order(&backend(Flaw::None));
 }
 
 // Catches revisions taken from a sequence: the later one commits first, the poller moves

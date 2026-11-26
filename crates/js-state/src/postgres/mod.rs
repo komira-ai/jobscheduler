@@ -797,6 +797,21 @@ impl Store for PostgresStore {
         })
     }
 
+    /// One statement for all of `keys`, so the rows are one snapshot of committed state.
+    fn get_many(&self, keys: &[String]) -> Result<Vec<(String, Versioned)>, StoreError> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let over = self.over();
+        self.read(|s| {
+            let rows = s.client.query(&s.st.get_many, &[&keys, &over])?;
+            Ok(rows
+                .iter()
+                .map(|row| (row.get(0), versioned(&Row::from_row(row, 1))))
+                .collect())
+        })
+    }
+
     fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, Versioned)>, StoreError> {
         let over = self.over();
         self.read(|s| {

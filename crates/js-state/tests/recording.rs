@@ -237,7 +237,7 @@ fn a_decided_transaction_is_recorded_as_it_committed_or_conflicted() {
     assert!(recording.head().unwrap().is_some());
 }
 
-/// Asserts that every get, prefix scan, range scan and clock read is recorded in the order it
+/// Asserts that every get, batched get, prefix scan, range scan and clock read is recorded in the order it
 /// was asked for, with its key or prefix, that the feed, the head, the counters and a write
 /// are not reads, and that `clear` forgets the reads too. It catches a recorder that misses a
 /// kind of read (a test that counts a component's round trips would then count too few) and
@@ -252,6 +252,10 @@ fn every_read_is_recorded_in_order_with_its_key_or_prefix() {
     assert_eq!(recording.reads(), Vec::new());
     recording.get("r/a").expect("get");
     recording.get("r/none").expect("get");
+    let many = recording
+        .get_many(&["r/a".to_owned(), "r/none".to_owned()])
+        .expect("get many");
+    assert_eq!(many.len(), 1);
     recording.scan_prefix("r/").expect("scan");
     recording
         .scan_range(ScanRange::new("s/", std::num::NonZeroUsize::MIN))
@@ -265,6 +269,7 @@ fn every_read_is_recorded_in_order_with_its_key_or_prefix() {
         [
             Read::Get("r/a".to_owned()),
             Read::Get("r/none".to_owned()),
+            Read::GetMany(vec!["r/a".to_owned(), "r/none".to_owned()]),
             Read::ScanPrefix("r/".to_owned()),
             Read::ScanRange("s/".to_owned()),
             Read::Now,
