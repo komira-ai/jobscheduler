@@ -13,7 +13,10 @@
 #     ./native_isolation --ignored --test-threads=1 --nocapture
 # (libtest flags come first.)
 #
-# Manual runs only. It publishes nothing: the binary is a workflow artifact for seven days.
+# Manual runs only, for an operator's own Mac: every release runs the test itself, on a hosted Mac,
+# in beta.yml's job `isolation` (through `cargo xtask mac-root-tests --only native_isolation`),
+# and a failure there holds back release.yml's `promote-macos`. It publishes nothing: the binary
+# is a workflow artifact for seven days.
 name: js-agent-native-isolation-test
 
 on:

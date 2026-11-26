@@ -25,7 +25,13 @@
 //!   pass). The table ([`render`]) is printed and written to
 //!   `target/mac-root-tests/table.tsv`, after the macOS version and build.
 //!
-//! Every target runs even when one before it failed; the verb fails if any row is `FAIL`.
+//! `--only <key>` (repeatable) runs just the targets of those [`Target::key`]s ([`select`]),
+//! in [`TARGETS`] order, and builds `js-mac-provision` only for its own target; a key that
+//! is no target's is refused first, on any system. The release's beta stage runs
+//! `--only native_isolation` on a hosted Mac of its own (`.github/workflows/beta.yml`).
+//!
+//! Every selected target runs even when one before it failed; the verb fails if any row is
+//! `FAIL`.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
@@ -555,6 +561,8 @@ pub struct MacRootTests<'a> {
     pub work: &'a Path,
     /// The uid of the user running the verb.
     pub owner_uid: u32,
+    /// The keys of the targets to run ([`select`]); empty runs every one.
+    pub only: &'a [String],
 }
 
 /// Fails unless `work` is an absolute path that does not exist, in a directory that does.
@@ -603,14 +611,41 @@ fn version(machine: &dyn Machine) -> Result<String, Error> {
     Ok(format!("{} ({})", product.trim(), build.trim()))
 }
 
-/// Builds every target and the `js-mac-provision` program: each target's binary, in
-/// [`TARGETS`] order, and the program.
-fn build_all(machine: &dyn Machine) -> Result<(Vec<Built>, PathBuf), Error> {
+/// The targets the verb runs, in [`TARGETS`] order: every one when `only` is empty, else
+/// those whose [`Target::key`] `only` names.
+///
+/// # Errors
+/// A name in `only` that is no target's key, naming the keys there are.
+pub fn select(only: &[String]) -> Result<Vec<&'static Target>, Error> {
+    let keys: Vec<&str> = TARGETS.iter().map(|t| t.key).collect();
+    if let Some(unknown) = only.iter().find(|name| !keys.contains(&name.as_str())) {
+        return Err(Error::Failed(format!(
+            "--only {unknown}: no such target; the targets are {}",
+            keys.join(", ")
+        )));
+    }
+    Ok(TARGETS
+        .iter()
+        .filter(|t| only.is_empty() || only.iter().any(|name| name == t.key))
+        .collect())
+}
+
+/// Whether `targets` hold the one that runs the `js-mac-provision` program.
+fn needs_program(targets: &[&Target]) -> bool {
+    targets.iter().any(|t| t.package == PROVISION)
+}
+
+/// Builds `targets` and, when they need it ([`needs_program`]), the `js-mac-provision`
+/// program: each target's binary, in the order of `targets`, and the program.
+fn build_all(
+    machine: &dyn Machine,
+    targets: &[&Target],
+) -> Result<(Vec<Built>, Option<PathBuf>), Error> {
     let mut built = Vec::new();
-    let mut packages: Vec<&str> = TARGETS.iter().map(|t| t.package).collect();
+    let mut packages: Vec<&str> = targets.iter().map(|t| t.package).collect();
     packages.dedup();
     for package in packages {
-        let tests: Vec<&str> = TARGETS
+        let tests: Vec<&str> = targets
             .iter()
             .filter(|t| t.package == package)
             .map(|t| t.test)
@@ -620,21 +655,28 @@ fn build_all(machine: &dyn Machine) -> Result<(Vec<Built>, PathBuf), Error> {
             built.push(test_build::find(&messages, test)?);
         }
     }
-    let program = test_build::find_bin(&machine.build_bin(PROVISION, PROVISION)?, PROVISION)?;
+    let program = match needs_program(targets) {
+        true => Some(test_build::find_bin(
+            &machine.build_bin(PROVISION, PROVISION)?,
+            PROVISION,
+        )?),
+        false => None,
+    };
     Ok((built, program))
 }
 
-/// Makes the work directory, its `bin` and every target's directories as root, and copies
-/// the binaries into `bin` with mode 0755.
+/// Makes the work directory, its `bin` and the directories of `targets` as root, and copies
+/// their binaries (and the program, when there is one) into `bin` with mode 0755.
 fn lay_out(
     machine: &dyn Machine,
     work: &Path,
+    targets: &[&Target],
     built: &[Built],
-    program: &Path,
+    program: Option<&Path>,
 ) -> Result<(), Error> {
     let bin = work.join("bin");
     let mut dirs = vec![work.to_path_buf(), bin.clone()];
-    for target in &TARGETS {
+    for target in targets {
         dirs.extend(dirs_for(target.key, work));
     }
     for dir in dirs {
@@ -643,12 +685,12 @@ fn lay_out(
             vec!["/bin/mkdir".into(), "-m".into(), "0755".into(), dir.into()],
         )?;
     }
-    let mut copies: Vec<(&Path, PathBuf)> = TARGETS
+    let mut copies: Vec<(&Path, PathBuf)> = targets
         .iter()
         .zip(built)
         .map(|(target, built)| (built.executable.as_path(), bin.join(target.key)))
         .collect();
-    copies.push((program, bin.join(PROVISION)));
+    copies.extend(program.map(|program| (program, bin.join(PROVISION))));
     for (from, to) in &copies {
         as_root(machine, vec!["/bin/cp".into(), from.into(), to.into()])?;
     }
@@ -714,14 +756,16 @@ fn run_target(p: &MacRootTests<'_>, target: &Target, built: &Built, logs: &Path)
     rows
 }
 
-/// Checks the Mac, builds every target, lays the work directory out as root and runs every
-/// target there as root: the line to print when no test failed. The table is printed and
+/// Checks the Mac, builds the selected targets ([`MacRootTests::only`]), lays the work
+/// directory out as root and runs each target there as root: the line to print when no test
+/// failed. The table is printed and
 /// written to `target/mac-root-tests/table.tsv` under the repository root.
 ///
 /// # Errors
-/// A step before the runs failed (the first one's error), or one or more rows are `FAIL`
-/// (one line each, after every target ran).
+/// A name of `only` is no target's, a step before the runs failed (the first one's error),
+/// or one or more rows are `FAIL` (one line each, after every selected target ran).
 pub fn run(p: &MacRootTests<'_>) -> Result<String, Error> {
+    let targets = select(p.only)?;
     if p.os != "macos" {
         return Err(Error::Failed(format!(
             "mac-root-tests runs on a Mac; this is {}",
@@ -731,13 +775,13 @@ pub fn run(p: &MacRootTests<'_>) -> Result<String, Error> {
     check_work(p.work)?;
     check_users(&users(p.machine)?)?;
     let version = version(p.machine)?;
-    let (built, program) = build_all(p.machine)?;
+    let (built, program) = build_all(p.machine, &targets)?;
     let logs = p.root.join("target/mac-root-tests");
     std::fs::create_dir_all(&logs)
         .map_err(|e| Error::Failed(format!("{}: {e}", logs.display())))?;
-    lay_out(p.machine, p.work, &built, &program)?;
+    lay_out(p.machine, p.work, &targets, &built, program.as_deref())?;
     let mut rows = Vec::new();
-    for (target, built) in TARGETS.iter().zip(&built) {
+    for (target, built) in targets.iter().zip(&built) {
         rows.extend(run_target(p, target, built, &logs));
     }
     println!("{}", render(&version, &rows));

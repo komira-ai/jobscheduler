@@ -84,9 +84,10 @@
 //!   each test target built as this user and run in a `Delegate=yes` system unit of its own;
 //!   with `--job-user`, the targets of a root daemon, run as root, which start every
 //!   container as that user.
-//! - `mac-root-tests --work <dir> [--sudo <path>] [--root <dir>]` ([`mac_root`]): on a Mac
-//!   with no lease users, the root tests of `js-mac-provision`, `js-treestore`, `js-mac-pool` and
-//!   `js-agent` (every one `#[ignore]`d under a plain `cargo test`), built as this user and run as
+//! - `mac-root-tests --work <dir> [--sudo <path>] [--root <dir>] [--only <target>]...`
+//!   ([`mac_root`]): on a Mac with no lease users, the root tests of `js-mac-provision`,
+//!   `js-treestore`, `js-mac-pool` and `js-agent` (every one `#[ignore]`d under a plain
+//!   `cargo test`; with `--only`, the named targets alone), built as this user and run as
 //!   root through `sudo -n` from the new directory `--work`, the users the `js-agent` ones make
 //!   deleted after each, and a table of every test's result printed and written to
 //!   `target/mac-root-tests/table.tsv`.
@@ -380,6 +381,10 @@ enum Verb {
         /// The repository root, where cargo builds the test targets.
         #[arg(long, default_value = ".")]
         root: PathBuf,
+        /// Run only the target of this key (repeatable, e.g. `native_isolation`); every
+        /// target when not given.
+        #[arg(long)]
+        only: Vec<String>,
     },
     /// Fail unless the system unit a step ran with `systemd-run --wait` (without
     /// `--collect`) exited 0, reading the unit's own result rather than `systemd-run`'s
@@ -605,7 +610,12 @@ fn run(cli: Cli) -> Result<String, Error> {
                 job_user: job_user.as_deref(),
             })?)
         }
-        Verb::MacRootTests { work, sudo, root } => {
+        Verb::MacRootTests {
+            work,
+            sudo,
+            root,
+            only,
+        } => {
             // `cargo xtask` runs this program under cargo, which sets `CARGO`.
             let cargo = std::env::var_os("CARGO").unwrap_or_default();
             let machine = mac_root::RealMachine {
@@ -619,6 +629,7 @@ fn run(cli: Cli) -> Result<String, Error> {
                 root: &root,
                 work: &work,
                 owner_uid: rustix::process::getuid().as_raw(),
+                only: &only,
             })?)
         }
         Verb::UnitResult {

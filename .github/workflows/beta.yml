@@ -1,10 +1,11 @@
 # The beta stage of the release for the platforms other than Linux x86_64: the workspace's tests
-# on Apple silicon (the job `macos`). release.yml calls this file (`workflow_call`) in a run of a
+# on Apple silicon (the job `macos`) and the two-run isolation test of the Mac slot accounts, as
+# root, on a hosted Mac of its own (the job `isolation`, at the end of this file). release.yml calls this file (`workflow_call`) in a run of a
 # push to main, in parallel with `artifacts`, and holds back only the promotion of the macOS
 # assets to the release (release.yml's `promote-macos`); nothing of Linux x86_64 waits for it.
 # No pull request runs it: a pull request's checks are Linux x86_64 alone
 # (crates/xtask/tests/pr_linux_only holds every workflow to that). A manual run, on any branch,
-# runs the same job (`gh workflow run beta.yml --ref <branch>`), so a change whose macOS tests
+# runs the same jobs (`gh workflow run beta.yml --ref <branch>`), so a change whose macOS tests
 # matter can be seen green here before it merges; only main's run saves the Cargo cache.
 # A pull request compiles what this job tests, though: ci.yml's `lint` job runs clippy for
 # aarch64-apple-darwin on Linux over the same crates and features (crates/xtask/tests/
@@ -140,3 +141,38 @@ jobs:
       - name: Run the sweep's root tests as root
         if: ${{ !cancelled() }}
         run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-agent --lib --locked -- --ignored --nocapture --test-threads=1 mac_sweep::macos::root_tests
+
+  # The two-run isolation test of the Mac slot accounts (crates/js-agent/tests/native_isolation,
+  # every test `#[ignore]`d, root only): run A leaves one item of each kind behind as its
+  # account, the run is removed as the agent removes it, and run B, a new account on the same
+  # uid, looks for every item. It makes an account and changes the machine, so it runs on a
+  # hosted Mac of its own, beside `macos` and not after it, where no other test has made users.
+  # `cargo xtask mac-root-tests` (crates/xtask/src/mac_root.rs) refuses a Mac that has lease
+  # users, builds the test and the js-agent it starts as the runner's user, copies them into a
+  # root-owned work directory the test's account can run them from, runs the test as root with
+  # its root directory and uid (4310), deletes the account it made, and fails on a failed test,
+  # on a verdict other than PASS (the test exits non-zero for each) and on an account left. The
+  # work directory is below /private/var, outside every place the test searches for what run A
+  # left (/private/var/folders, /private/tmp, /Users/Shared, /Library/Caches). A release run
+  # calls this file as `beta-macos`, so a failure here holds back `promote-macos`, as a failure
+  # of `macos` does. crates/xtask/tests/beta_isolation_job.rs pins this job.
+  isolation:
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      # The oldest macOS the binaries must run on, as in `macos`.
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Run the two-run isolation test as root
+        run: cargo xtask mac-root-tests --work /private/var/js-mac-root-tests --only native_isolation
+      # The test's own output (its tables of what was seeded and what survived, and its verdict)
+      # is in the log the verb wrote; it is printed whatever the step above ended with.
+      - name: Print the isolation test's output
+        if: ${{ !cancelled() }}
+        run: cat target/mac-root-tests/native_isolation.log

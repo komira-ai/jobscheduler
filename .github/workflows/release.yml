@@ -66,7 +66,8 @@
 # publish, then the apt repository, gamma, the control-plane deploy, pkg-upload and desired, and
 # last `deployed`, which marks the end of the run's publish and deploy jobs for `turn`. The beta stage, the platforms other than Linux
 # x86_64, runs beside publish and the jobs after it, not before them: after `artifacts`, the
-# jobs `beta-macos` (beta.yml: the workspace's tests on Apple silicon), `beta-macos-pkg`
+# jobs `beta-macos` (beta.yml: the workspace's tests on Apple silicon, and the two-run isolation
+# test of the Mac slot accounts as root on a hosted Mac of its own), `beta-macos-pkg`
 # (js-agent-macos-pkg.yml: the installer package of js-agent, built and signed),
 # `beta-macos-first-install` (js-agent-macos-first-install.yml: the first install of that
 # package through hostkeeper's installer and the update hook, as root, after `beta-macos-pkg`)
