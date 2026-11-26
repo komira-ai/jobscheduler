@@ -40,6 +40,11 @@ pub const MIXED_RATIO: u64 = 4;
 pub const TAIL_RATIO: u32 = 2;
 /// The percentile of the peaks a heavy-tail key books, in thousandths: the 90th.
 pub const TAIL_PERMILLE: usize = 900;
+/// The percentile of a key's last 32 memory samples its own booking follows
+/// ([`Summaries::peak_memory`](crate::Summaries::peak_memory)), in thousandths: the 95th,
+/// nearest-rank. Under 20 samples that is the largest; from 20 on, the second largest, so one
+/// outlier run no longer holds the key's booking up.
+pub(crate) const PEAK_PERMILLE: usize = 950;
 /// The fewest of a key's last 32 CPU samples that must carry a peak before its tail is
 /// judged: below it the key books the median of its means, whatever its peaks.
 pub const TAIL_MIN_PEAKS: usize = 5;
@@ -86,6 +91,14 @@ fn minutes_reached(run: &Run) -> u8 {
 
 fn round_up(value: u64, step: u64) -> u64 {
     value.div_ceil(step).saturating_mul(step)
+}
+
+/// A memory sample with the usual margin: `1.2 * sample + 128 MiB` in integer arithmetic
+/// (`sample + ceil(sample / 5)`), saturating; not yet rounded to a step.
+fn sized(sample: u64) -> u64 {
+    sample
+        .saturating_add(sample.div_ceil(5))
+        .saturating_add(SLACK)
 }
 
 /// What an own-limit kill does to a floor: the new floor, and whether the kill opens a
@@ -492,17 +505,24 @@ impl Summary {
     /// step: `round_up(1.2 * max(long_max, held) + 128 MiB)`.
     fn sized_memory(&self) -> u64 {
         let held = self.chunk_held.iter().copied().fold(0, u64::max);
-        let max = self.long_max().max(held);
-        let sized = max.saturating_add(max.div_ceil(5)).saturating_add(SLACK);
-        round_up(sized, MEMORY_STEP)
+        round_up(sized(self.long_max().max(held)), MEMORY_STEP)
     }
 
-    /// What the largest recent samples ask for whatever their number or dispersion:
-    /// `round_up(max(1.2 * max(long_max, held) + 128 MiB, floor))`, at least [`MIN_MEMORY`];
-    /// `None` when the summary holds no memory sample.
+    /// What the high end of the recent samples asks for whatever their number or dispersion:
+    /// `round_up(max(1.2 * max(p95, held) + 128 MiB, floor))`, at least [`MIN_MEMORY`], where
+    /// `p95` is the nearest-rank 95th percentile of the last 32 memory samples (kills and held
+    /// samples as recorded: the largest under 20 samples, the second largest from 20 on) and
+    /// `held` the largest held sample of the last 256 or more runs; `None` when the summary
+    /// holds no memory sample. One outlier among 20 or more runs, and any run older than the
+    /// last 32, does not hold it up; a held sample (a run that reached its booking) and a
+    /// kill's floor do.
     pub(crate) fn peak_memory(&self, bounds: &Bounds) -> Option<u64> {
-        (self.n_total > 0).then(|| {
-            self.sized_memory()
+        let held = self.chunk_held.iter().copied().fold(0, u64::max);
+        let samples = self.recent_samples();
+        // The rank is 0 only for no sample, where the empty list has nothing at 0 either.
+        let rank = (samples.len() * PEAK_PERMILLE).div_ceil(1000);
+        samples.get(rank.saturating_sub(1)).map(|high| {
+            round_up(sized((*high).max(held)), MEMORY_STEP)
                 .max(round_up(self.floor(bounds), MEMORY_STEP))
                 .max(MIN_MEMORY)
         })
@@ -510,21 +530,32 @@ impl Summary {
 
     /// What a typical recent sample asks for: the median of the last 32 memory samples (the
     /// middle one, the larger of the two middle ones for an even count; kills and held samples
-    /// as recorded) with the usual margin, and the floor:
-    /// `round_up(max(1.2 * median + 128 MiB, floor))`, at least [`MIN_MEMORY`]; `None` when the
-    /// summary holds no memory sample.
-    pub(crate) fn median_memory(&self, bounds: &Bounds) -> Option<u64> {
+    /// as recorded) with the usual margin: `round_up(1.2 * median + 128 MiB)`, at least
+    /// [`MIN_MEMORY`]; `None` when the summary holds no memory sample. The figure of a key that
+    /// stands in for others, so its floor counts only while its kills are frequent, while it is
+    /// raise-only on `now` (two own-limit kill events within [`KILL_WINDOW_RUNS`] runs, for
+    /// [`RAISE_ONLY_DAYS`] days): a kill raises the key that was killed, not every key it
+    /// stands in for.
+    pub(crate) fn median_memory(&self, bounds: &Bounds, now: Day) -> Option<u64> {
+        let floor = if self.raise_only(now) {
+            round_up(self.floor(bounds), MEMORY_STEP)
+        } else {
+            0
+        };
+        let samples = self.recent_samples();
+        samples.get(samples.len() / 2).map(|median| {
+            round_up(sized(*median), MEMORY_STEP)
+                .max(floor)
+                .max(MIN_MEMORY)
+        })
+    }
+
+    /// The last 32 memory samples (fewer while fewer were seen), smallest first.
+    fn recent_samples(&self) -> Vec<u64> {
         let kept = usize::try_from(self.n_total).map_or(RING, |n| n.min(RING));
         let mut samples = self.ring[..kept].to_vec();
         samples.sort_unstable();
-        samples.get(kept / 2).map(|median| {
-            let sized = median
-                .saturating_add(median.div_ceil(5))
-                .saturating_add(SLACK);
-            round_up(sized, MEMORY_STEP)
-                .max(round_up(self.floor(bounds), MEMORY_STEP))
-                .max(MIN_MEMORY)
-        })
+        samples
     }
 
     /// The CPU estimate in millicores: [`COLD_CPU_MILLIS`] while there is no CPU sample;
