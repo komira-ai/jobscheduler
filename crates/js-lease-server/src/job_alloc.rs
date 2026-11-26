@@ -23,7 +23,7 @@ use js_jobs::{
     AllocationRecord, AllocationStep, Booked, EndReason, IdSource, JobEnd, JobId, JobRecord,
     JobState, JobStore, JobStoreError, Output, ResultReason, Row, StartFailure,
 };
-use js_state::Store;
+use js_state::{Store, StoreTime};
 use js_types::{CpuSeries, HostId};
 use js_usage::{
     AllocationId, Booked as UsageBooked, DrainOutcome, EndedReason, EndedRow, ProfileKey, Used,
@@ -156,17 +156,21 @@ pub(crate) fn lose_on_absent<S: Store, I: IdSource>(
 /// The usage history rows of `freed`, the allocation of `job` (`None` for a job whose row
 /// was deleted at its retention end), as [`js_usage::ended_writes`] gives them: named by the
 /// job id (or, for a job id with a letter the history's ids do not take, by the allocation
-/// id), on its host, with what it booked; queued from the job's submit to this placement,
-/// run from its start to its end (zero for a job that never ran, unknown for a job whose
-/// row is gone), ended at the free, for the reason it was freed, with what it was measured to
+/// id), on its host, with what it booked; queued from when its attempt became placeable (the
+/// job's submit for the first) to this placement, run from the attempt's start to its end
+/// ([`attempt_times`]: zero for an attempt that never ran, unknown for a job whose row is
+/// gone), ended at the free, for the reason it was freed, with what it was measured to
 /// use ([`used_of`]) and its CPU series ([`series_of`]), with the name of its class as it is
-/// ([`js_sched_placer::sizes::class_name`]: a full build target's name kept byte for byte), and
-/// under that name as its profile when it is a profile key ([`profile_of`]).
+/// ([`js_sched_placer::sizes::class_name`]: a full build target's name kept byte for byte),
+/// under that name as its profile when it is a profile key ([`profile_of`]), and with the job's
+/// attempt when it is not the first: the allocation is the job's current attempt's, since the
+/// next attempt is placed only once it is freed.
 pub(crate) fn history(job: Option<&JobRecord>, freed: &AllocationRecord) -> Vec<Row> {
     let end = freed.freed_at.unwrap_or(freed.created_at);
     let ran = |job: &JobRecord| {
-        let ended = job.ended_at.unwrap_or(end);
-        millis(ended.since(job.started_at.unwrap_or(ended)))
+        let (started_at, ended_at, _) = attempt_times(job);
+        let ended = ended_at.unwrap_or(end);
+        millis(ended.since(started_at.unwrap_or(ended)))
     };
     let hex = freed.allocation_id.to_string();
     let named = AllocationId::parse(freed.job.as_str()).or_else(|_| AllocationId::parse(&hex));
@@ -175,7 +179,7 @@ pub(crate) fn history(job: Option<&JobRecord>, freed: &AllocationRecord) -> Vec<
         profile: job.and_then(profile_of),
         host: Some(freed.host.clone()),
         booked: Some(booked_of(freed.booked)),
-        queued_ms: job.map(|job| millis(freed.created_at.since(job.submitted_at))),
+        queued_ms: job.map(|job| millis(freed.created_at.since(attempt_times(job).2))),
         run_ms: job.map(ran),
         ended_reason: ended_reason(freed.end_reason),
         drain_outcome: DrainOutcome::None,
@@ -186,9 +190,30 @@ pub(crate) fn history(job: Option<&JobRecord>, freed: &AllocationRecord) -> Vec<
         used: job.and_then(used_of),
         cpu_series: job.and_then(series_of),
         class: job.map(js_sched_placer::sizes::class_name),
+        attempt: job
+            .map(|job| job.attempt.number())
+            .filter(|number| *number > 1),
     };
     let rows = named.map(|id| js_usage::ended_writes(&row(id)).to_vec());
     rows.unwrap_or_default()
+}
+
+/// When the current attempt of `job` (the one a freed allocation of it booked for) started,
+/// ended and became placeable: from its entry in the job's history once it has ended there,
+/// since a retry clears them from the job when it queues the next attempt; else the job's own
+/// start and end, and its submit for a first attempt or the end of the backoff for a later one.
+fn attempt_times(job: &JobRecord) -> (Option<StoreTime>, Option<StoreTime>, StoreTime) {
+    let number = job.attempt.number();
+    let closed = job.attempt.history().last();
+    let closed = closed.filter(|attempt| attempt.number == number);
+    let queued = job.attempt.retry_not_before().unwrap_or(job.submitted_at);
+    closed.map_or((job.started_at, job.ended_at, queued), |attempt| {
+        (
+            attempt.started_at,
+            Some(attempt.ended_at),
+            attempt.queued_at,
+        )
+    })
 }
 
 /// The history key of `job`'s row: the name of its class

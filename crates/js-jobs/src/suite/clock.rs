@@ -5,10 +5,10 @@
 use js_state::conformance::Backend;
 use js_state::{Store, StoreTime};
 
-use super::{Rig, host, rig, share, whole_host_spec};
+use super::{Rig, attempt_end, first_ended, host, rig, share, whole_host_spec};
 use crate::{
-    AllocationRecord, AllocationStep, Booked, EndReason, JobEnd, JobId, JobRecord, JobResult,
-    JobState, JobTiming, ResultReason, Retention, StartFailure,
+    AllocationRecord, AllocationStep, AttemptOutcome, Booked, EndReason, JobEnd, JobId, JobRecord,
+    JobResult, JobState, JobTiming, ResultReason, Retention, StartFailure,
 };
 
 /// The store's clock, moved on first so this step's time differs from the last one's.
@@ -135,6 +135,17 @@ pub fn every_time_is_the_store_clock_at_its_step<B: Backend>(backend: &B) {
         }),
         retention_ends: Some(at.saturating_add(Retention::DEFAULT.window())),
         spec: want.spec.clone().digested(),
+        attempt: first_ended(
+            &want,
+            at,
+            attempt_end(
+                AttemptOutcome::Cancelled,
+                None,
+                Some(ResultReason::Cancelled),
+                None,
+            ),
+            false,
+        ),
         ..want
     };
     assert_eq!(ended, want, "{name}: the end");
@@ -248,6 +259,17 @@ pub fn every_supported_end_is_stored_with_its_time_and_release<B: Backend>(backe
     ];
     for (n, (from, end, has_result)) in ends.into_iter().enumerate() {
         let to = end.state();
+        let outcome = match to {
+            JobState::Succeeded => AttemptOutcome::Succeeded,
+            JobState::Failed => AttemptOutcome::Failed,
+            JobState::Lost => AttemptOutcome::HostLost,
+            JobState::FailedToStart(_) => AttemptOutcome::StartFailed,
+            _ => AttemptOutcome::Cancelled,
+        };
+        let start_failure = match to {
+            JobState::FailedToStart(failure) => Some(failure),
+            _ => None,
+        };
         let text = format!("end-{n:02}");
         let id = match from {
             Queued => rig.queue(&text),
@@ -281,10 +303,21 @@ pub fn every_supported_end_is_stored_with_its_time_and_release<B: Backend>(backe
                 result: ended.result.clone(),
                 retention_ends: Some(at.saturating_add(Retention::DEFAULT.window())),
                 spec: before.spec.clone().digested(),
+                attempt: first_ended(
+                    &before,
+                    at,
+                    attempt_end(
+                        outcome,
+                        ended.result.as_ref().and_then(|result| result.exit_code),
+                        ended.result.as_ref().map(|result| result.reason),
+                        start_failure,
+                    ),
+                    false,
+                ),
                 ..before
             },
-            "{name}: {from:?} to {to:?} is not stored with its time, result, retention and \
-             digested files alone"
+            "{name}: {from:?} to {to:?} is not stored with its time, result, retention, digested \
+             files and the attempt it closed alone"
         );
         assert_eq!(stored_job(&rig, &id), ended, "{name}: {from:?} to {to:?}");
         assert_eq!(

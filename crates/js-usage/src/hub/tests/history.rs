@@ -22,6 +22,7 @@ fn ended_row(n: u64, end: u64) -> EndedRow {
         used: None,
         cpu_series: None,
         class: Default::default(),
+        attempt: None,
     }
 }
 

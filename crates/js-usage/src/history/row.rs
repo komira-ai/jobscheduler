@@ -9,11 +9,13 @@
 //! highest memory and the mean CPU as varints); then, only when the row has one, the CPU
 //! series: a byte 1, the granularity in seconds, the run length in microseconds (each a varint),
 //! the partial flag (a byte, 0 or 1), the number of points (a varint) and each point (a
-//! varint), written as a byte 0 when the row has none but has a class; then, only when the row
-//! has one, the class (a byte 1 and the text, any UTF-8, kept as it is). A row without a series
-//! or a class ends after `used`, the bytes it was before those fields; a reader that finds bytes
-//! after `used` reads a series, and a byte 0 there is an absent one, and one that finds bytes
-//! after the series reads a class.
+//! varint), written as a byte 0 when the row has none but has a later field; then, only when the
+//! row has one or has an attempt, the class (a byte 1 and the text, any UTF-8, kept as it is, or
+//! a byte 0 for none); then, only when the row has one, the attempt (a byte 1 and a varint). A
+//! row without a series, a class or an attempt ends after `used`, the bytes it was before those
+//! fields; a reader that finds bytes after `used` reads a series, and a byte 0 there is an absent
+//! one, one that finds bytes after the series reads a class, and one that finds bytes after the
+//! class reads an attempt.
 //!
 //! A text is a varint length and that many bytes of UTF-8. An optional field is a byte 0
 //! (absent) or 1 followed by the field. A varint is little-endian base 128, 7 bits a byte, high
@@ -106,7 +108,8 @@ pub(crate) fn encode(row: &EndedRow) -> Vec<u8> {
         .cpu_series
         .as_ref()
         .filter(|series| series.is_well_formed());
-    if series.is_some() || row.class.is_some() {
+    let attempt = row.attempt.map(u64::from);
+    if series.is_some() || row.class.is_some() || attempt.is_some() {
         put_opt(&mut out, series, |out, series| {
             put_varint(out, u64::from(series.granularity_secs));
             put_varint(out, series.run_usec);
@@ -117,8 +120,13 @@ pub(crate) fn encode(row: &EndedRow) -> Vec<u8> {
             }
         });
     }
-    if let Some(class) = &row.class {
-        put_opt(&mut out, Some(class), |out, class| put_text(out, class));
+    if row.class.is_some() || attempt.is_some() {
+        put_opt(&mut out, row.class.as_ref(), |out, class| {
+            put_text(out, class)
+        });
+    }
+    if attempt.is_some() {
+        put_opt(&mut out, attempt, put_varint);
     }
     out
 }
@@ -237,6 +245,14 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<EndedRow, EndedRowError> {
     } else {
         r.opt("class", |r| r.text("class").map(str::to_owned))?
     };
+    // A row from before the attempt ends here.
+    let attempt = if r.rest.is_empty() {
+        None
+    } else {
+        r.opt("attempt", |r| {
+            u32::try_from(r.varint()?).map_err(|_| EndedRowError::Range)
+        })?
+    };
     Ok(EndedRow {
         id,
         profile,
@@ -253,6 +269,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<EndedRow, EndedRowError> {
         used,
         cpu_series,
         class,
+        attempt,
     })
 }
 
