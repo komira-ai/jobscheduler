@@ -400,6 +400,65 @@ where
     );
 }
 
+/// A record the caller read of the id and handed to the insert
+/// ([`JobStore::insert_queued_after_get`]) is the answer, with no read of the id and no write:
+/// the same job at another priority is answered with the stored record, a different job is a
+/// conflict. With nothing handed, the job is recorded; and when a job was recorded under the id
+/// after the caller's read (nothing handed for an id that is taken), the insert's commit finds
+/// the row, which is read and answered as [`JobStore::insert_queued`] answers it.
+pub fn a_read_handed_to_the_insert_is_not_made_again<B: Backend>(backend: &B) {
+    let rig = rig(backend);
+    let id = job_id("h");
+    let made = rig
+        .jobs
+        .insert_queued_after_get(new_job(&id, full_spec(), 1), None)
+        .expect("a_read_handed_to_the_insert_is_not_made_again: the first insert");
+    assert!(
+        made.created,
+        "a_read_handed_to_the_insert_is_not_made_again: nothing handed, and nothing recorded"
+    );
+    let stored = rig.jobs.get_job(&id).expect("reads").expect("recorded");
+    let row = rig.raw("job/h");
+    let _ = rig.store.take_reads();
+    let again = rig
+        .jobs
+        .insert_queued_after_get(new_job(&id, full_spec(), 9), Some(stored.clone()))
+        .expect("a_read_handed_to_the_insert_is_not_made_again: the same job answers");
+    assert_eq!(
+        (again.created, &again.record),
+        (false, &stored),
+        "a_read_handed_to_the_insert_is_not_made_again: not the handed record"
+    );
+    let other = rig.jobs.insert_queued_after_get(
+        new_job(&id, super::whole_host_spec(), 0),
+        Some(stored.clone()),
+    );
+    assert_eq!(
+        other,
+        Err(JobStoreError::JobIdConflict { id: id.clone() }),
+        "a_read_handed_to_the_insert_is_not_made_again: a different job is not a conflict"
+    );
+    assert_eq!(
+        rig.store.take_reads(),
+        Vec::new(),
+        "a_read_handed_to_the_insert_is_not_made_again: the id was read again"
+    );
+    let late = rig
+        .jobs
+        .insert_queued_after_get(new_job(&id, full_spec(), 3), None)
+        .expect("a_read_handed_to_the_insert_is_not_made_again: a stale read answers");
+    assert_eq!(
+        (late.created, &late.record),
+        (false, &stored),
+        "a_read_handed_to_the_insert_is_not_made_again: a stale read is not the stored job"
+    );
+    assert_eq!(
+        rig.raw("job/h"),
+        row,
+        "a_read_handed_to_the_insert_is_not_made_again: an answer wrote the row"
+    );
+}
+
 /// Two job stores minting ids over one store, 2000 jobs each: 4000 distinct ids of 32
 /// lowercase hex digits, and 4000 rows.
 pub fn minted_ids_do_not_repeat_across_instances<B: Backend>(backend: &B) {

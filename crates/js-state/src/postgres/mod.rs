@@ -17,7 +17,8 @@
 //!   (`tx`): it locks the head, moves it past its writes, writes the rows and feed rows at
 //!   those revisions, and commits, so revisions commit in the order they were taken. Bodies
 //!   run at once; tails queue on a table lock (`SHARE UPDATE EXCLUSIVE`, the one every
-//!   release takes) and hold it for a few statements and the commit's flush.
+//!   release takes) and hold it for a few statements and the commit's flush. A body whose
+//!   keys all hold no row (the statement that reserves them says so) loads none.
 //!   [`Store::changes`] reads the committed head, then the rows up to it, and returns the
 //!   head as its cursor: nothing at or below it can still commit. A bare sequence would not
 //!   do (a later number can commit first and a poller steps over the earlier one);
@@ -287,6 +288,7 @@ impl PostgresConfig {
             pg: self.timeouts.network(self.pg.clone()),
             tls: self.tls.clone(),
             session: String::new(),
+            sent: Arc::default(),
         }
     }
 
@@ -639,6 +641,15 @@ impl PostgresStore {
         self.retries.load(Ordering::Relaxed)
     }
 
+    /// How many messages carrying statements this store's connections have sent to the server,
+    /// each a round trip: a read is one, and a transaction one for each of its statements, its
+    /// `BEGIN` and its `COMMIT` included (several statements sent as one text count once). A
+    /// new connection's own setup counts too; a statement's prepare does not.
+    #[must_use]
+    pub fn statements(&self) -> u64 {
+        self.pool.sent()
+    }
+
     /// The configuration this store was opened with.
     #[must_use]
     pub fn config(&self) -> &PostgresConfig {
@@ -794,11 +805,44 @@ impl Store for PostgresStore {
         })
     }
 
+    /// `build` makes the transaction from the clock reading its `BEGIN` takes, which every
+    /// transaction makes ([`Tx::begin`]), so no clock is read apart from it; the transaction then
+    /// runs as [`Store::txn`] runs one.
+    fn txn_stamped(
+        &self,
+        build: &mut dyn FnMut(StoreTime) -> Option<Txn>,
+    ) -> Result<Option<Result<Commit, Conflict>>, StoreError> {
+        self.retrying(|| {
+            let mut tx = self.start()?;
+            let Some(txn) = build(to_time(tx.now())) else {
+                return Ok(None);
+            };
+            let result = tx.apply_alone(&txn)?;
+            self.commit(tx, usize::from(result.is_ok()))?;
+            Ok(Some(result))
+        })
+    }
+
     fn get(&self, key: &str) -> Result<Option<Versioned>, StoreError> {
         let over = self.over();
         self.read(|s| {
             let row = s.client.query_opt(&s.st.get, &[&key, &over])?;
             Ok(row.map(|row| versioned(&Row::from_row(&row, 0))))
+        })
+    }
+
+    /// One statement for all of `keys`, so the rows are one snapshot of committed state.
+    fn get_many(&self, keys: &[String]) -> Result<Vec<(String, Versioned)>, StoreError> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let over = self.over();
+        self.read(|s| {
+            let rows = s.client.query(&s.st.get_many, &[&keys, &over])?;
+            Ok(rows
+                .iter()
+                .map(|row| (row.get(0), versioned(&Row::from_row(row, 1))))
+                .collect())
         })
     }
 
