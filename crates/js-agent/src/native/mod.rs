@@ -29,7 +29,9 @@
 //!    `--native-accounts` and the places only the privacy controls guard
 //!    (`native/fence.rs`) are denied reads (`native/profile.rs`), and so is everything
 //!    below the homes (`<homes>`: every other account's home) and below root's home,
-//!    whatever their modes; the account's own home stays readable.
+//!    whatever their modes; the account's own home stays readable. Hard links and clones
+//!    from every read-denied place and homes root are denied too (the account's own home
+//!    granted both back), since a read deny matches paths.
 //! 5. The agent starts `js-agent __supervise-native` ([`crate::mac_supervisor`]) with the
 //!    run's environment and nothing else, the working directory, and the job's three standard
 //!    streams as files in the run's scratch directory, which only the agent can enter: an
