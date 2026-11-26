@@ -27,9 +27,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use postgres::{Error, SimpleQueryMessage};
+use postgres::Error;
 
-use super::session::{Pooled, Session, clock_sql};
+use super::session::{Pooled, Session};
 use super::{Fail, Flaw};
 use crate::{Commit, Cond, Conflict, Op, Revision, Txn};
 
@@ -111,8 +111,8 @@ pub(super) struct Tx<'p> {
     reserved: BTreeSet<String>,
     /// The writes to make at the tail, in order.
     writes: Vec<Write>,
-    /// Something besides the recorded writes must be made durable: a counter moved, feed rows
-    /// were trimmed, or a statement wrote its rows itself ([`Tx::insert_only`]).
+    /// Something besides the writes must be made durable: a counter moved, or feed rows were
+    /// trimmed.
     kept: bool,
     open: bool,
 }
@@ -147,67 +147,9 @@ impl<'p> Tx<'p> {
         Ok(tx)
     }
 
-    /// Opens a transaction that takes the commit head at once and reads the store's time after
-    /// that wait, in one round trip (`BEGIN`, `LOCK TABLE head` and the clock as one message):
-    /// for a transaction built from the time it reads ([`super::PostgresStore`]'s
-    /// `txn_stamped`). Until it ends no other transaction's writes commit. `over` is an injected
-    /// clock reading, or `None` for the database's own clock.
-    pub(super) fn begin_holding(
-        session: Pooled<'p>,
-        over: Option<i64>,
-        flaw: Flaw,
-    ) -> Result<Tx<'p>, Fail> {
-        // Made first, so a failure past the `BEGIN` rolls the transaction back on drop.
-        let mut tx = Tx {
-            session,
-            over,
-            now: 0,
-            flaw,
-            cache: BTreeMap::new(),
-            reserved: BTreeSet::new(),
-            writes: Vec::new(),
-            kept: false,
-            open: true,
-        };
-        let clock = over.map_or_else(|| "NULL".to_owned(), |us| us.to_string());
-        let text = format!(
-            "BEGIN ISOLATION LEVEL READ COMMITTED; \
-             LOCK TABLE head IN SHARE UPDATE EXCLUSIVE MODE; SELECT {}",
-            clock_sql(&clock)
-        );
-        let s: &mut Session = &mut tx.session;
-        let answer = s.client.simple_query(&text);
-        let answer = answer.inspect_err(|err| s.note_failure(err))?;
-        tx.now = clock_of(&answer)?;
-        Ok(tx)
-    }
-
     /// The store's time as the transaction read it last.
     pub(super) fn now(&self) -> i64 {
         self.now
-    }
-
-    /// `txn` in one statement ([`super::session::Statements::insert`]), on a transaction that
-    /// holds the commit head ([`Tx::begin_holding`]) and has done nothing else, when `txn` only
-    /// creates keys ([`creates`]) and none of them holds a row: the commit, its revision the
-    /// new head. `None`, with nothing written, otherwise: the caller applies `txn` as any other
-    /// ([`Tx::apply_alone`]), which judges and writes it as a body and a tail do. The rows and
-    /// feed rows are the same either way.
-    pub(super) fn insert_only(&mut self, txn: &Txn) -> Result<Option<Commit>, Error> {
-        let sequence = self.flaw == Flaw::SequenceRevisions;
-        let Some((keys, values)) = creates(txn).filter(|_| !sequence) else {
-            return Ok(None);
-        };
-        let s: &mut Session = &mut self.session;
-        let Some(row) = s.client.query_opt(&s.st.insert, &[&keys, &values])? else {
-            return Ok(None);
-        };
-        self.kept = true;
-        let top: i64 = row.get(0);
-        Ok(Some(Commit {
-            revision: Revision(u64::try_from(top).unwrap_or(0)),
-            counters: Vec::new(),
-        }))
     }
 
     /// `txn` alone, its body and its tail: its keys locked, its preconditions judged and its
@@ -354,8 +296,19 @@ impl<'p> Tx<'p> {
                 .map(|row| row.get(0))
                 .collect();
             // Every key now has a row this transaction sees: its locked row or its own
-            // placeholder. The clock is read again, after any wait for those locks.
-            for row in s.client.query(&s.st.load, &[&wanted, &self.over])? {
+            // placeholder. A key it reserved holds no row, so when it reserved them all (a
+            // transaction that creates keys, as a submit's does) there is nothing to load and
+            // nothing for the clock to judge. Otherwise the rows are loaded, and the clock is
+            // read again, after any wait for those locks.
+            let all = reserved.len() == wanted.len();
+            let rows = match all {
+                true => Vec::new(),
+                false => s.client.query(&s.st.load, &[&wanted, &self.over])?,
+            };
+            for key in &wanted {
+                self.cache.insert((*key).to_owned(), None);
+            }
+            for row in rows {
                 let key: String = row.get(0);
                 self.now = self.now.max(row.get(4));
                 let loaded = (!reserved.contains(&key)).then(|| Row::from_row(&row, 1));
@@ -549,40 +502,6 @@ impl<'p> Tx<'p> {
     }
 }
 
-/// The keys and values of `txn`'s puts, in order, when it only creates keys: every operation a
-/// put with no time to live, on [`Cond::Absent`] or [`Cond::Any`], of a key no other operation
-/// names, and at least one. `None` for any other transaction.
-fn creates(txn: &Txn) -> Option<(Vec<&str>, Vec<&[u8]>)> {
-    let mut named = BTreeSet::new();
-    let mut puts = (Vec::new(), Vec::new());
-    for op in txn.ops() {
-        let Op::Put {
-            key,
-            value,
-            ttl: None,
-            cond: Cond::Absent | Cond::Any,
-        } = op
-        else {
-            return None;
-        };
-        named.insert(key.as_str()).then_some(())?;
-        puts.0.push(key.as_str());
-        puts.1.push(value.as_slice());
-    }
-    (!puts.0.is_empty()).then_some(puts)
-}
-
-/// The store's time a holding `BEGIN` read ([`Tx::begin_holding`]): its one row's one column.
-fn clock_of(answer: &[SimpleQueryMessage]) -> Result<i64, Fail> {
-    let row = answer.iter().find_map(|message| match message {
-        SimpleQueryMessage::Row(row) => Some(row),
-        _ => None,
-    });
-    let text = row.and_then(|row| row.get(0));
-    let read = text.and_then(|text| text.parse().ok());
-    read.ok_or_else(|| Fail::Refused("the server answered no clock reading".to_owned()))
-}
-
 /// The keys the operations of `batch` name, in the order they name them.
 pub(super) fn keys_of(batch: &[Txn]) -> Vec<&str> {
     batch
@@ -596,48 +515,6 @@ impl Drop for Tx<'_> {
     fn drop(&mut self) {
         if self.open && self.session.client.batch_execute("ROLLBACK").is_err() {
             self.session.broken = true;
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use super::creates;
-    use crate::{Cond, Txn, Version};
-
-    // Catches a transaction taken for one that only creates keys when it does more: a delete,
-    // a check, a counter, a put with a time to live or on a version, or two puts of one key
-    // would each be written as a plain insert, and an empty one would move the head.
-    #[test]
-    fn only_a_transaction_of_puts_that_create_distinct_keys_is_one_that_creates() {
-        let puts =
-            Txn::new()
-                .put("k/a", b"1".to_vec(), Cond::Absent)
-                .put("k/b", b"2".to_vec(), Cond::Any);
-        assert_eq!(
-            creates(&puts),
-            Some((vec!["k/a", "k/b"], vec![&b"1"[..], &b"2"[..]]))
-        );
-        let put = || Txn::new().put("k/a", b"1".to_vec(), Cond::Absent);
-        let others = [
-            ("an empty one", Txn::new()),
-            ("a delete", put().delete("k/b", Cond::Any)),
-            ("a check", put().check("k/b", Cond::Absent)),
-            ("a counter", put().next("c")),
-            (
-                "a time to live",
-                put().put_ttl("k/b", b"2".to_vec(), Duration::from_secs(1), Cond::Absent),
-            ),
-            (
-                "a version",
-                put().put("k/b", b"2".to_vec(), Cond::Version(Version(1))),
-            ),
-            ("a key twice", put().put("k/a", b"2".to_vec(), Cond::Any)),
-        ];
-        for (what, txn) in others {
-            assert_eq!(creates(&txn), None, "{what}");
         }
     }
 }

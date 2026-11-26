@@ -20,14 +20,15 @@ fn new_job(id: &str, spec: crate::JobSpec) -> NewJob {
     }
 }
 
-/// Asserts that recording a job of a new id sends four statements to Postgres: the get of its
-/// id, and its transaction's three (the `BEGIN` that takes the commit head and reads the clock,
-/// the one statement that writes the job's rows, the `COMMIT`). Before, it sent ten: the get, a
-/// clock read, and eight in the transaction. It also asserts that the conflict path still
+/// Asserts that recording a job of a new id sends eight statements to Postgres: the get of its
+/// id, and its transaction's seven (`BEGIN`, the clock the job is stamped with, the reservation
+/// of its keys, `LOCK TABLE head`, the head's move, the writes, `COMMIT`). Before, it sent ten:
+/// the get, a clock read of its own, and eight in the transaction, one of them a load of keys
+/// the reservation had found absent. It also asserts that the conflict path still
 /// answers `job-id-conflict`: a different job under an id taken after the caller's read finds
 /// the row in the transaction, which writes nothing, and the stored job is read and judged.
 #[test]
-fn a_new_job_is_four_statements_and_an_id_taken_since_the_read_is_still_a_conflict() {
+fn a_new_job_is_eight_statements_and_an_id_taken_since_the_read_is_still_a_conflict() {
     let backend = PostgresBackend::new(&js_testkit::database::server_url(), Flaw::None);
     let store = Arc::new(backend.open(Arc::new(ManualClock::default())));
     let jobs = JobStore::new(Arc::clone(&store), RandomIds).expect("the job store opens");
@@ -36,7 +37,7 @@ fn a_new_job_is_four_statements_and_an_id_taken_since_the_read_is_still_a_confli
         .insert_queued(new_job("pg-a", full_spec()))
         .expect("the job is recorded");
     assert!(made.created);
-    assert_eq!(store.statements() - before, 4);
+    assert_eq!(store.statements() - before, 8);
     let stored = jobs.get_job(&made.record.id).expect("reads");
     assert_eq!(stored.as_ref(), Some(&made.record));
 

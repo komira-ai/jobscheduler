@@ -23,7 +23,7 @@ use std::thread;
 
 use postgres::error::SqlState;
 use postgres::types::ToSql;
-use postgres::{Client, Config, Row, SimpleQueryMessage, Statement, ToStatement};
+use postgres::{Client, Config, Row, Statement, ToStatement};
 
 use super::tls::{Tls, TlsError};
 
@@ -102,9 +102,9 @@ pub struct Conn {
     // Present until `drop`.
     client: Option<Client>,
     /// The messages that carried statements to the server, each a round trip: one per call of
-    /// [`Conn::batch_execute`], [`Conn::execute`], the `query` calls and `simple_query`
-    /// (however many statements its text holds), counted with every other connection of the
-    /// same [`Dial`]. A prepare is not counted.
+    /// [`Conn::batch_execute`] (however many statements its text holds), [`Conn::execute`] and
+    /// the `query` calls, counted with every other connection of the same [`Dial`]. A prepare
+    /// is not counted.
     sent: Arc<AtomicU64>,
 }
 
@@ -164,19 +164,6 @@ impl Conn {
     pub fn batch_execute(&mut self, query: &str) -> Result<(), postgres::Error> {
         let client = self.sending();
         off_runtime(|| client.batch_execute(query))
-    }
-
-    /// Runs the statements of `query`, which take no parameters, in one message; what the
-    /// server answered to each, its rows as text.
-    ///
-    /// # Errors
-    /// The client's error.
-    pub(super) fn simple_query(
-        &mut self,
-        query: &str,
-    ) -> Result<Vec<SimpleQueryMessage>, postgres::Error> {
-        let client = self.sending();
-        off_runtime(|| client.simple_query(query))
     }
 
     /// Runs a statement; the number of rows it changed.
