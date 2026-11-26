@@ -63,7 +63,7 @@ pub enum LeaseKind {
     /// The whole machine: every core, byte and GPU of the worker, with no other lease
     /// beside it.
     WholeMachine,
-    /// A macOS guest VM. Planned: no front accepts it and no driver reports `vm` yet.
+    /// A macOS guest VM. Planned: no front accepts it. The agent's VM backend is built.
     Vm,
 }
 

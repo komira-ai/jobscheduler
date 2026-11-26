@@ -1,6 +1,6 @@
 # One agent program on a Mac
 
-Status: accepted, 2026-11-22 (the owner's answers are in section 10); the root probe of section 4.3 (step 1) has held in the system domain. On a Mac, `js-agent` does the work of the root helper `js-mac-session` itself, behind the agent's platform layer. Each native run gets a supervisor process of its own, built on the mechanism Linux already uses for a crun container. That supervisor keeps the run alive while the agent stops, restarts or updates. The package ships one program and one launchd job. Apart from the accounts of section 11, nothing here is built yet. The way there is in section 7, the questions for the owner are in section 8, and the case for keeping the helper is answered in section 9.
+Status: accepted, 2026-11-22 (the owner's answers are in section 10); the root probe of section 4.3 (step 1) has held in the system domain. On a Mac, `js-agent` does the work of the root helper `js-mac-session` itself, behind the agent's platform layer. Each native run gets a supervisor process of its own, built on the mechanism Linux already uses for a crun container. That supervisor keeps the run alive while the agent stops, restarts or updates. The package is to ship one program and one launchd job, apart from the pf job (`js-agent.pf-pool`), which stays (superseded, sections 6 and 7). Built: the slot accounts (section 11), the supervisor of one native job (section 12), native runs over the slot accounts with no helper program in their path (section 13) and a run's output committed to the put ingest (section 14). Not built: adoption of running jobs across an agent update, the hand-over, the folding of the pf job into the agent (superseded, sections 6 and 7) and the removal of the programs `js-mac-session` and `js-mac-provision` from the package. The way there is in section 7, the questions for the owner are in section 8, and the case for keeping the helper is answered in section 9.
 
 ## 1. What changes for an operator
 
@@ -182,6 +182,8 @@ In that domain a process group of its own is enough, and a supervisor already ge
 
 ## 5. Updates with one launchd job
 
+Every statement in sections 1, 5 and 6 that the agent loads the pf anchor, or that the package drops the `js-agent.pf-pool` job, its plist or the hook's `step/pf.rs`, is superseded (section 6: the pf job stays). The same holds for the pf cells of the table in section 1.
+
 **Cutover.**
 
 1. If the hook hands over (below), write the `handover` file in the state root.
@@ -211,7 +213,7 @@ The new agent applies the pf anchor itself (section 6). It adopts the runs, keep
 - **The plists.** `agent-plist`, `session-plist` and `pf-pool-plist`, used only by the package workflow (`.github/workflows/js-agent-macos-pkg.yml`), move to `cargo xtask pkg`.
 - **Operator verbs.** `check`, `remove`, `render` and `probe` have no automated caller. A check command on a host is what B14 rules out. The root test `crates/js-mac-provision/tests/pf_as_root.rs` runs the program, through `js-mac-provision-privileged-tests.yml`, so it moves to calling the library.
 
-**`js-agent.pf-pool`: folded in.** The job exists for three reasons (`crates/js-mac-provision/src/launchd.rs:1-6`, `crates/js-mac-provision/README.md`): pf rules are gone after a reboot, an OS update may reload `/etc/pf.conf`, and an install that runs before the system's own pf start fails once (`NotReferenced`) and succeeds on the next try. The agent covers all three:
+**`js-agent.pf-pool`: folded in. Superseded: not built.** komira-ai/jobscheduler#1010, the agent loading its pf anchor, was closed as superseded: a native job's network is limited by its Seatbelt profile, so the agent does not load a pf anchor. The agent only checks that the anchor is in force (`crates/js-agent/src/native/pf.rs`), and the package still ships the `js-agent.pf-pool` job and the hook its `step/pf.rs` (`crates/xtask/src/macpkg.rs:57`). What follows is the plan as it was written. The job exists for three reasons (`crates/js-mac-provision/src/launchd.rs:1-6`, `crates/js-mac-provision/README.md`): pf rules are gone after a reboot, an OS update may reload `/etc/pf.conf`, and an install that runs before the system's own pf start fails once (`NotReferenced`) and succeeds on the next try. The agent covers all three:
 
 - it loads the anchor at its start, and at boot it starts after the flags file exists;
 - it loads the anchor again every 30 s, the job's interval, on a thread of its own;
@@ -228,7 +230,7 @@ Each step is a pull request that leaves main shippable. Steps 2 and 3 depend on 
 - Run the root probe (section 4.3) and record its result in this document.
 - Add a probe to `js-mac-probe` that runs unprivileged on the beta stage's macOS runner. It starts a process group under a `launchd` job, boots the job out, and asserts that the group runs on with parent pid 1. It catches a macOS release that starts killing the descendants of a stopped job.
 
-**Step 2. The pf job folded into the agent.**
+**Step 2. The pf job folded into the agent.** Superseded and not built (komira-ai/jobscheduler#1010, closed): the agent does not load a pf anchor, and the `js-agent.pf-pool` job and the hook's `step/pf.rs` stay. The plan as it was written:
 
 - The agent applies the anchor at start and every 30 s.
 - The package drops `js-agent.pf-pool.plist`, and the hook drops `step/pf.rs` and `pf_unit`, retiring the loaded job as section 5 says.

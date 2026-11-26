@@ -499,7 +499,7 @@ impl Lifecycle {
     /// (keyed by job id) was placed by the job service, which packs a host by measured load
     /// within its CPU slack and books each job its peak: its CPU and memory are the job
     /// service's to judge, one rule for both, and the agent sums neither. Its CPU is not
-    /// limited, and its memory is held to its booking by its lease's `memory.max`.
+    /// limited, and its memory is a booking, not a limit: its lease has no `memory.max`.
     fn admit(
         &self,
         (spec, keyed): (&JobSpec, Keyed),
