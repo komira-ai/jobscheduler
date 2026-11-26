@@ -20,6 +20,7 @@ use tonic::Code;
 use crate::fake_jobs::{Answer, Fake, refusing};
 use crate::support::{Outcome, Scratch, TOKEN, run, services};
 
+mod callback;
 mod rootfs;
 
 /// A loopback origin over plain http; the in-memory dialer never dials it.
