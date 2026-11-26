@@ -391,8 +391,8 @@ fn child_run(
         Ok(Ran {
             id: id.clone(),
             lines: parse_lines(&stdout)?,
-            uid: look::parse_uid(&stdout),
-            pids: look::parse_pids(&stdout),
+            uid: look::parse_uid(&lines::own_text(&stdout)),
+            pids: look::parse_pids(&lines::own_text(&stdout)),
         })
     })
 }

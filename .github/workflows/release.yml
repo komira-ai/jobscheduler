@@ -552,8 +552,8 @@ jobs:
       contents: read
     uses: ./.github/workflows/js-agent-native-isolation.yml
 
-  # Adds the macOS archives to the release `publish` published, when the four beta jobs
-  # passed. They are the files artifacts.yml built, attested and verified, and `publish` checked
+  # Adds the macOS archives to the release `publish` published, when the four beta jobs it
+  # needs (all but `beta-macos-isolation`) passed. They are the files artifacts.yml built, attested and verified, and `publish` checked
   # against SHA256SUMS; nothing is rebuilt. An archive the release has already must equal this
   # run's, byte for byte, and is kept; a missing one is uploaded. Like `publish` it runs no
   # repository code, holds `contents: write` alone, and a release run's re-run of the failed

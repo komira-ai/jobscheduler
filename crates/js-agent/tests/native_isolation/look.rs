@@ -44,7 +44,7 @@
 use std::io::{self, Read as _};
 use std::path::Path;
 
-use super::lines::{Kind, Line, Verdict, own_output};
+use super::lines::{Kind, Line, Verdict};
 use super::token::Token;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -264,7 +264,6 @@ pub fn nul_paths(bytes: &[u8]) -> Vec<&[u8]> {
 /// The pids a run printed with `ISOPID <n>` lines.
 pub fn parse_pids(text: &str) -> Vec<u32> {
     text.lines()
-        .map(own_output)
         .filter_map(|line| line.strip_prefix("ISOPID ")?.trim().parse().ok())
         .collect()
 }
@@ -624,7 +623,6 @@ pub fn uid_line(uid: u32) -> String {
 /// The uid a run printed with [`uid_line`], if it printed one.
 pub fn parse_uid(text: &str) -> Option<u32> {
     text.lines()
-        .map(own_output)
         .find_map(|line| line.strip_prefix("ISOUID ")?.trim().parse().ok())
 }
 
