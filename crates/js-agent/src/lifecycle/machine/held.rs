@@ -50,8 +50,9 @@ use std::path::{Path, PathBuf};
 use js_agent_wire::RunResult;
 use serde::{Deserialize, Serialize};
 
+use super::Lifecycle;
 use super::job::{Job, Keyed, Retired};
-use super::{Lifecycle, MAX_JOBS};
+use super::listing::entry_len;
 use crate::lifecycle::taint::StateRoot;
 use crate::lifecycle::{Event, Finding, code};
 
@@ -187,12 +188,13 @@ fn read_result(path: &Path, name: &str) -> Result<Stored, String> {
     }
 }
 
-/// Whether the next file is read, `adds` saying that it would add a job beside those
-/// counted in `used`: only such a file counts against `room`, and a file for a job the
-/// agent already holds is always read.
-fn admit(adds: bool, used: &mut usize, room: usize) -> bool {
-    let read = !adds || *used < room;
-    *used += usize::from(adds && read);
+/// Whether the next file is read, `weight` being the bytes its job's entry would add to a
+/// heartbeat beside those counted in `used` (0 for a job the agent already holds): a file
+/// is read while its entry fits `room`, and a file for a job the agent already holds is
+/// always read.
+fn admit(weight: usize, used: &mut usize, room: usize) -> bool {
+    let read = weight == 0 || *used + weight <= room;
+    *used += weight * usize::from(read);
     read
 }
 
@@ -262,9 +264,9 @@ impl Records {
         }
     }
 
-    /// Reads the held results, at most `room` of them that add a job, and the retired list.
-    /// A result whose id is in `taken` is a job already held: it is always read and does not
-    /// count against `room`. A file that cannot be used, and every file past `room`, is
+    /// Reads the held results, as many of them that add a job as have entries that fit `room`
+    /// bytes of a heartbeat (`listing`), and the retired list. A result whose id is in
+    /// `taken` is a job already held: it is always read and does not count against `room`. A file that cannot be used, and every file past `room`, is
     /// removed and reported; an unfinished write (`*.tmp`) of a dead process is removed
     /// without a word.
     pub(super) fn load(
@@ -285,8 +287,11 @@ impl Records {
                         continue;
                     }
                     let id = name.strip_suffix(RESULT_SUFFIX).unwrap_or(&name);
-                    let adds = !taken.contains(id);
-                    let read = match admit(adds, &mut used, room) {
+                    let weight = match taken.contains(id) {
+                        true => 0,
+                        false => entry_len(id),
+                    };
+                    let read = match admit(weight, &mut used, room) {
                         true => read_result(&path, &name),
                         false => Err("the agent can hold no more runs".to_owned()),
                     };
@@ -570,7 +575,7 @@ impl Lifecycle {
     /// Reads the held results and the retired list back: a result of a job taken over is
     /// set on that job, any other makes a job that holds nothing and owes the result.
     pub(super) fn restore_held(&mut self, events: &mut Vec<Event>) {
-        let room = MAX_JOBS.saturating_sub(self.jobs.len());
+        let room = self.listing_room();
         let taken: BTreeSet<&str> = self.jobs.iter().map(|job| job.run_id.as_str()).collect();
         let (results, retired) = self.records.load(room, &taken, events);
         self.retired = retired;

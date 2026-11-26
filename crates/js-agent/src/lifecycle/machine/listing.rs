@@ -8,15 +8,22 @@
 //!
 //! - the envelope by [`ENVELOPE_MARGIN`] and the load by [`limits::MAX_LOAD_BYTES`],
 //!   reserved whether or not this agent sends a load;
-//! - the held entries at admission: a start is taken only while every held entry, at its
-//!   longest state, fits [`LISTED_BUDGET`] ([`Lifecycle::listable`]), so the entries
-//!   always leave room for the largest result without its log tail ([`RESULT_RESERVE`]);
-//! - the results, oldest first, as long as they fit what the entries leave; a result that
-//!   does not, and every one after it, waits for a later heartbeat. Its job is listed all
-//!   the same, without its result, so the server neither loses the job nor starts it
-//!   again, and only the job's end is reported later ([`Lifecycle::fit`]);
-//! - the retired job ids, oldest first, in what the results leave; the others wait too,
-//!   and the server sends their stops again until they are listed.
+//! - the held entries wherever a job is added: a start is taken, a container taken over and
+//!   a result read back at a restart only while every held entry, at its longest state,
+//!   fits [`LISTED_BUDGET`] ([`Lifecycle::listable`], [`Lifecycle::listing_room`]), so the
+//!   entries always leave room for the largest result without its log tail
+//!   ([`RESULT_RESERVE`]);
+//! - the retired job ids, oldest first, in what the entries leave (all of them, but for
+//!   a host whose entries are near their bound and whose server has not recorded many
+//!   stops); an id left out waits for a later heartbeat, and the server sends its stop
+//!   again meanwhile. They go before the results because the first heartbeat after a hello
+//!   loses a job that it neither lists nor names retired, where the server would have
+//!   ended it as stopped;
+//! - the results, oldest first, as long as they fit what is left; a result that does not,
+//!   and every one after it, waits for a later heartbeat. Its job is listed all the same,
+//!   without its result, so the server neither loses the job nor starts it again, and only
+//!   the job's end is reported later ([`Lifecycle::fit`]). With no retired id waiting for
+//!   the server, the oldest result always goes out.
 //!
 //! The results' log tails are cut before any result waits (`tails`). An entry is never
 //! left out: the first heartbeat after a hello loses a job it does not name.
@@ -88,19 +95,36 @@ impl Lifecycle {
         LIST_ROOM.saturating_sub(listed)
     }
 
-    /// Whether one more entry, held under `id`, still lets every entry fit
-    /// [`LISTED_BUDGET`]. A start that does not is skipped (`Skip::Full`), and the server
-    /// sends it again until results are acknowledged.
-    pub(super) fn listable(&self, id: &str) -> bool {
-        listed_len(&self.jobs) + entry_len(id) <= LISTED_BUDGET
+    /// The bytes the entries of jobs added from here may take: [`LISTED_BUDGET`] less the
+    /// entries held. A result read back at a restart is held to it.
+    pub(super) fn listing_room(&self) -> usize {
+        LISTED_BUDGET.saturating_sub(listed_len(&self.jobs))
     }
 
-    /// The results and retired job ids the next heartbeat carries: the results oldest first
-    /// up to the first that does not fit what the entries leave, then as many retired ids
-    /// as fit what is left. The results' tails were cut at the last step to leave room for
-    /// them all, so a result waits only when no tail is left to cut.
+    /// Whether one more entry, held under `id`, still lets every entry fit
+    /// [`LISTED_BUDGET`]. A start that does not is skipped (`Skip::Full`), and the server
+    /// sends it again until results are acknowledged; a container to take over that does
+    /// not is stopped and removed.
+    pub(super) fn listable(&self, id: &str) -> bool {
+        entry_len(id) <= self.listing_room()
+    }
+
+    /// The retired job ids and results the next heartbeat carries: as many retired ids,
+    /// oldest first, as fit what the entries leave, then the results oldest first up to the
+    /// first that does not fit what is left. The results' tails were cut at the last step to
+    /// leave room for them all, so a result waits only when no tail is left to cut.
     pub(super) fn fit(&self) -> Fit {
         let mut room = LIST_ROOM.saturating_sub(listed_len(&self.jobs));
+        let retired = self
+            .answered
+            .iter()
+            .take_while(|id| {
+                let weight = id.len() + 3;
+                let fits = weight <= room;
+                room = room.saturating_sub(weight);
+                fits
+            })
+            .count();
         let mut open = true;
         let carried = self
             .jobs
@@ -120,16 +144,6 @@ impl Lifecycle {
                 open
             })
             .collect();
-        let retired = self
-            .answered
-            .iter()
-            .take_while(|id| {
-                let weight = id.len() + 3;
-                let fits = weight <= room;
-                room = room.saturating_sub(weight);
-                fits
-            })
-            .count();
         Fit { carried, retired }
     }
 }

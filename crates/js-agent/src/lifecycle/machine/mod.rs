@@ -58,10 +58,10 @@ use crate::quota::QuotaError;
 /// server's to stop sending.
 pub const RETIRED_CAP: usize = limits::MAX_HELD;
 
-/// The most jobs the wire lets a heartbeat list, and so the most the agent takes over or
-/// reads back at a restart. A start is held to the bytes of the listing (`listing`), which
-/// allow fewer. A job carries at most one result, so the results stay within the wire limit
-/// as well.
+/// The most jobs the wire lets a heartbeat list. What the agent holds is bounded tighter,
+/// by the bytes of the listing (`listing`), wherever a job is added: a start, a container
+/// taken over, a result read back. A job carries at most one result, so the results stay
+/// within the wire limit as well.
 const MAX_JOBS: usize = limits::MAX_HELD;
 const _: () = assert!(limits::MAX_HELD <= limits::MAX_RESULTS);
 

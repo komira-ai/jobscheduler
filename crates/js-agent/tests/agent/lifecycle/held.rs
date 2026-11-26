@@ -447,25 +447,34 @@ fn a_result_is_written_again_when_its_log_tail_is_cut() {
     assert_eq!(h.life.results(), cut);
 }
 
-/// Asserts that no more than the agent can list are read back: of one file more than a
-/// heartbeat holds, the last by name is removed with a finding and the rest are held. It
-/// catches a directory that grows the held list past the wire's bound.
+/// The results `x0000`, `x0001`, ... read back before their entries reach what a heartbeat
+/// lists: an entry at a five-byte id weighs 44 bytes, and 558 of them fit the 24,576 the
+/// entries may take.
+const LISTABLE: usize = 558;
+
+/// Asserts that no more than the agent can list are read back: of one file more than the
+/// entries a heartbeat body has room for (far fewer than the wire's count cap,
+/// [`MAX_HELD`]), the last by name is removed with a finding and the rest are held. It
+/// catches a directory that grows the held list past the body the server reads, or that
+/// leaves a heartbeat no room for a result, so that none is ever acknowledged.
 #[test]
 fn more_results_than_a_heartbeat_can_list_are_not_all_read_back() {
     let mut h = Harness::new("held-cap");
     let dir = held_dir(&h);
     fs::create_dir(&dir).unwrap();
-    for n in 0..=MAX_HELD {
+    for n in 0..=LISTABLE {
         let id = format!("x{n:04}");
         let body = json!({ "keyed": "run", "result": {
             "run_id": id, "lease_id": "l", "outcome": "killed" } });
         fs::write(dir.join(format!("{id}.json")), body.to_string()).unwrap();
     }
-    let last = dir.join(format!("x{MAX_HELD:04}.json"));
+    let last = dir.join(format!("x{LISTABLE:04}.json"));
     let events = names(&h.restart().unwrap());
     assert_eq!(findings(&events, "held-record-unreadable"), 1, "{events:?}");
-    assert_eq!(h.held().len(), MAX_HELD);
+    assert_eq!(h.held().len(), LISTABLE);
+    assert!(LISTABLE < MAX_HELD);
     assert!(!last.exists());
+    assert!(!h.life.results().is_empty(), "the oldest result goes out");
 }
 
 /// Asserts that a result stored for a run that is not a run the agent holds is held by a
@@ -545,7 +554,9 @@ fn a_taken_over_jobs_file_does_not_use_up_room() {
     h.fake.fail("remove", u32::MAX);
     h.life.step();
     let dir = held_dir(&h);
-    for n in 0..MAX_HELD {
+    // `r1`'s entry (41 bytes) leaves 24,535 bytes: 557 entries of 44, one fewer than
+    // [`LISTABLE`].
+    for n in 0..LISTABLE {
         let id = format!("x{n:04}");
         let body = json!({ "keyed": "run", "result": {
             "run_id": id, "lease_id": "l", "outcome": "killed" } });
@@ -553,10 +564,10 @@ fn a_taken_over_jobs_file_does_not_use_up_room() {
     }
     let events = names(&h.restart().unwrap());
     assert_eq!(findings(&events, "held-record-unreadable"), 1, "{events:?}");
-    assert_eq!(h.held().len(), MAX_HELD);
+    assert_eq!(h.held().len(), LISTABLE);
     assert!(h.held().contains(&"r1".to_owned()));
     assert!(dir.join("r1.json").exists());
-    assert!(!dir.join(format!("x{:04}.json", MAX_HELD - 1)).exists());
+    assert!(!dir.join(format!("x{:04}.json", LISTABLE - 1)).exists());
 }
 
 /// The retired list's log.

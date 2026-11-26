@@ -154,18 +154,17 @@ holds what it lists to the body itself (`crates/js-agent/src/lifecycle/machine/l
 `MAX_LOAD_BYTES` and a 4 KiB envelope (`ENVELOPE_MARGIN`) leaves 32,768 bytes for the lists. Of these the held entries (`held`, and
 `jobs` without their results), each measured at its longest state, may take `LISTED_BUDGET` 24,576, which leaves `RESULT_RESERVE`
 8 KiB, more than the largest result without a log tail weighs (a test builds one). A start that would take the entries past that is
-skipped `Full` (`Lifecycle::listable`, in `may_start`) and the server sends it again; at 128-byte ids that is 147 entries. The
-results go out oldest first up to the first that does not fit what the entries leave; that one and the ones after it wait for a later
-beat, a job's entry listed without its result meanwhile (the server reads a listed job without a result as still running, so neither
-loses nor restarts it, and the first listing after a hello still names every job). The retired job ids, at most `RETIRED_LISTED` 96
-(`crates/js-agent/src/lifecycle/machine/per_job.rs`), go out oldest first in what the results leave (`Lifecycle::fit`). Before any
-result waits, the agent cuts log tails to fit all of them, by halving and then dropping them (`Lifecycle::fit_log_tails` in
+skipped `Full` (`Lifecycle::listable`, in `may_start`) and the server sends it again; at 128-byte ids that is 147 entries. The same
+bound holds a restart: a container to take over past it is stopped and removed, and a result file past it is removed, each with a
+finding. The retired job ids, at most `RETIRED_LISTED` 96 (`crates/js-agent/src/lifecycle/machine/per_job.rs`), go out first, oldest
+first, as far as the entries leave room (all 96 unless the entries are near their bound), because the first listing after a hello
+loses a job it neither lists nor names retired. The results go out after them, oldest first, up to the first that does not fit; that
+one and the ones after it wait for a later beat, a job's entry listed without its result meanwhile (the server leaves a listed job
+that has no result as it is, so neither loses nor restarts it, and the first listing after a hello still names every job)
+(`Lifecycle::fit`). With no retired id waiting for the server's record, the oldest result always fits. Before any result waits, the agent cuts log tails to fit all of them, by halving and then dropping them (`Lifecycle::fit_log_tails` in
 `crates/js-agent/src/lifecycle/machine/tails.rs`), and notes a `log-tail-cut` and a `log-tail-shed` finding, once each for a run,
-in its log. So a beat the agent builds stays within the body: a start's work is never listed past it, and the oldest result always
-fits. The lease server counts each hello and heartbeat it refuses 413 `body-too-large` under `js_agent_bodies_too_large_total`, by
-route (`crates/js-lease-server/src/metrics.rs`), since the agent ends at that answer and cannot report it. An agent restarted with
-more held work than the bound (results read back, containers taken over, up to `MAX_HELD`) lists all of it, as the first listing
-after a hello must, and takes no start until the entries are back under the bound.
+in its log. So a beat the agent builds stays within the body. The lease server counts each hello and heartbeat it refuses 413 `body-too-large` under `js_agent_bodies_too_large_total`, by
+route (`crates/js-lease-server/src/metrics.rs`), since the agent ends at that answer and cannot report it.
 
 **The rule for change** (`crates/js-agent-wire/src/protocol.rs` and the crate's "Compatibility rule"): servers upgrade before
 agents. Within a major, fields are only added; a receiver ignores fields it does not know; a field a sender may leave out has a

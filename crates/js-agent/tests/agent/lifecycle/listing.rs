@@ -127,14 +127,16 @@ fn run_starts_past_what_a_beat_lists_are_skipped_and_results_wait() {
 }
 
 /// Asserts that a server that sends job starts and acknowledges nothing makes the agent take
-/// [`LISTABLE`] of them and skip the next as `Full`; that every job is listed, each a job
-/// that ended, the oldest with their results and the rest without one until there is room;
-/// that the retired job ids of stops for jobs the agent does not hold go out only as far as
-/// the room left after the results, oldest first; and that the heartbeat stays within the
-/// body the server reads throughout. Once every result is acknowledged, all
-/// [`RETIRED_LISTED`] retired ids go out. It catches a job left out of the listing (the first
-/// heartbeat after a hello would lose it), a result carried after one that waits, and
-/// retired ids that push a beat over the limit.
+/// [`LISTABLE`] of them and skip the next as `Full`; that every job is listed in every
+/// heartbeat, each a job that ended; that the retired job ids of stops for jobs the agent does
+/// not hold go first, oldest first, as far as the entries leave room (62 of 96 at 128-byte
+/// ids), and the results after them, oldest first, each beat's carried results the oldest
+/// jobs' and the rest listed without one; and that as the server acknowledges what each beat
+/// carries, every retired id and every result goes out once, in order, while each heartbeat
+/// stays within the body the server reads. It catches a job left out of the listing (the
+/// first heartbeat after a hello would lose it), a retired id pushed out by results (the
+/// server would lose that job rather than end it as stopped), a result carried after one that
+/// waits, and a beat over the limit.
 #[test]
 fn job_starts_past_what_a_beat_lists_are_skipped_and_results_and_retired_ids_wait() {
     let mut h = Harness::new("listing-jobs");
@@ -152,11 +154,7 @@ fn job_starts_past_what_a_beat_lists_are_skipped_and_results_and_retired_ids_wai
     h.apply(commands.collect());
     h.life.step();
     let first = beat(&h);
-    assert!(
-        size(&first) <= HEARTBEAT_BODY_BUDGET,
-        "{} bytes",
-        size(&first)
-    );
+    assert!(size(&first) <= HEARTBEAT_BODY_BUDGET);
     assert_eq!(first.jobs.len(), LISTABLE, "every job is listed");
     assert!(
         first
@@ -164,29 +162,40 @@ fn job_starts_past_what_a_beat_lists_are_skipped_and_results_and_retired_ids_wai
             .iter()
             .all(|j| j.state == HeldState::ExitedUnacked)
     );
-    let with = first.jobs.iter().take_while(|j| j.result.is_some()).count();
-    assert!(with > 0 && with < LISTABLE, "{with}");
-    assert!(first.jobs[with..].iter().all(|j| j.result.is_none()));
-    assert!(first.retired_jobs.len() < RETIRED_LISTED);
-    assert_eq!(first.retired_jobs, stops[..first.retired_jobs.len()]);
+    // 147 entries of 167 bytes leave 8,219 of the 32,768: 62 retired ids of 131.
+    assert_eq!(first.retired_jobs, stops[..62]);
+    assert!(
+        first.jobs.iter().all(|j| j.result.is_none()),
+        "no room left"
+    );
+    let (mut acked, mut retired) = (Vec::new(), Vec::new());
     loop {
-        let jobs = h.life.held_jobs().into_iter();
-        let acks: Vec<_> = jobs
-            .filter(|j| j.result.is_some())
-            .map(|j| json!({ "job_id": j.job_id, "ack": "ACCEPTED" }))
-            .collect();
-        if acks.is_empty() {
+        let sent = beat(&h);
+        assert!(
+            size(&sent) <= HEARTBEAT_BODY_BUDGET,
+            "{} bytes",
+            size(&sent)
+        );
+        let left: Vec<String> = (acked.len()..LISTABLE).map(wide).collect();
+        let listed: Vec<String> = sent.jobs.iter().map(|j| j.job_id.clone()).collect();
+        assert_eq!(listed, left, "every job not yet acknowledged is listed");
+        let with = sent.jobs.iter().take_while(|j| j.result.is_some()).count();
+        assert!(sent.jobs[with..].iter().all(|j| j.result.is_none()));
+        let carried: Vec<String> = sent.jobs[..with].iter().map(|j| j.job_id.clone()).collect();
+        if carried.is_empty() && sent.retired_jobs.is_empty() {
             break;
         }
-        h.life.apply(&reply_json(&json!({ "job_acks": acks })));
+        let acks: Vec<_> = carried
+            .iter()
+            .map(|id| json!({ "job_id": id, "ack": "ACCEPTED" }))
+            .collect();
+        let reply = json!({ "job_acks": acks, "retired_acks": sent.retired_jobs });
+        h.life.apply(&reply_json(&reply));
         h.life.step();
-        let next = beat(&h);
-        assert!(
-            size(&next) <= HEARTBEAT_BODY_BUDGET,
-            "{} bytes",
-            size(&next)
-        );
+        acked.extend(carried);
+        retired.extend(sent.retired_jobs);
     }
-    assert!(h.life.held_jobs().is_empty());
-    assert_eq!(h.life.retired_jobs(), stops);
+    assert_eq!(acked, (0..LISTABLE).map(wide).collect::<Vec<_>>());
+    assert_eq!(retired, stops);
+    assert!(h.life.held_jobs().is_empty() && h.life.retired_jobs().is_empty());
 }

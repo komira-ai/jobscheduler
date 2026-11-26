@@ -205,8 +205,8 @@ impl Lifecycle {
 
     /// The job ids retired on a stop for a job the agent did not hold, for the
     /// `retired_jobs` of the next heartbeat, oldest first, until acknowledged: as many as
-    /// the heartbeat has room for beside its jobs and results (`listing`); the others are
-    /// listed by a later heartbeat.
+    /// the heartbeat has room for beside its jobs, ahead of the results (`listing`); the
+    /// others are listed by a later heartbeat.
     pub fn retired_jobs(&self) -> Vec<String> {
         let fit = self.fit();
         self.answered.iter().take(fit.retired).cloned().collect()
