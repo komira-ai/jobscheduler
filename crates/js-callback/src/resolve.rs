@@ -62,6 +62,8 @@ fn bounded(
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error as _;
+
     use super::*;
 
     /// Asserts that the system resolver answers an IPv4 and an IPv6 literal with that address,
@@ -89,8 +91,8 @@ mod tests {
     }
 
     /// Asserts that a lookup that never answers (it waits on a channel nothing ever sends on)
-    /// ends as `TimedOut` with its whole text, and that a lookup's error is passed on with
-    /// its whole text. Catches a try that waits on a hung name server past its limit, and a
+    /// ends as `TimedOut` with its whole text and no cause, and that a lookup's error is passed
+    /// on with its whole text and as its cause. Catches a try that waits on a hung name server past its limit, and a
     /// failed lookup read as an empty answer.
     #[test]
     fn a_lookup_ends_at_its_limit_or_with_its_error() {
@@ -104,13 +106,19 @@ mod tests {
         let failed = bounded(Duration::from_secs(60), || {
             Err(io::Error::new(io::ErrorKind::NotFound, "no such name"))
         });
+        let errors = [hung, failed].map(|result| result.expect_err("no answer"));
         assert_eq!(
-            [hung, failed].map(|result| result.expect_err("no answer").to_string()),
+            errors.each_ref().map(ToString::to_string),
             [
                 "the lookup did not answer within its limit",
                 "the lookup failed: no such name"
             ]
         );
+        // The failed lookup's own error is the cause a log can follow; a timeout has none.
+        let causes = errors
+            .each_ref()
+            .map(|error| error.source().map(ToString::to_string));
+        assert_eq!(causes, [None, Some("no such name".to_owned())]);
         // Released only now, so the limit was the only way out; then the lookup ends.
         drop(keep);
         ended.recv().ok();

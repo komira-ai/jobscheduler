@@ -84,10 +84,10 @@ mod tests {
             sign(&shortest, "msg_2KWPBgLlAfxdpx2AI54pPJ85f4W", 1_798_761_600),
             "v1,2YmkLa/YKkNC4uexQssZVwnzHzOjtQlyypa8SU0FrjI="
         );
-        let longest = SigningKey::new(vec![b'k'; 64]).expect("a key");
+        let longest = SigningKey::new(counting(64)).expect("a key");
         assert_eq!(
             sign(&longest, "AAECAwQFBgcICQoLDA0ODw", 4_102_444_800),
-            "v1,N2voOQa1jegQF0JNSnT9KHMPRN9p08Mc/063TxLavdk="
+            "v1,ug4avuwX87kotpVr757uFh4pnDXf8ideJ6MmAaEKWpI="
         );
     }
 
