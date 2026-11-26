@@ -583,7 +583,7 @@ async fn the_history_shows_the_newest_attempts_and_counts_the_dropped() {
 #[tokio::test]
 async fn the_spec_echoes_the_retry_policy_in_seconds() {
     let rig = rig().await;
-    let policy = |max_attempts, initial, max| JobSpec {
+    let policy = |max_attempts: u32, initial: Option<u64>, max: Option<u64>| JobSpec {
         retry: Some(RetryPolicy {
             max_attempts,
             initial_backoff: initial.map(Duration::from_secs),

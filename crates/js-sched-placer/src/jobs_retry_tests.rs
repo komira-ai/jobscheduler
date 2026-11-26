@@ -190,11 +190,16 @@ fn a_job_with_a_booked_allocation_is_held_back_and_another_jobs_allocation_holds
     let (_, booked) = tables.jobs.place(&id("j"), host("a"), booking()).unwrap();
     let open = open_plain(&["b"]);
     assert_eq!(
-        offered_of(&[job.clone()], std::slice::from_ref(&booked), &open, at(0)),
+        offered_of(
+            std::slice::from_ref(&job),
+            std::slice::from_ref(&booked),
+            &open,
+            at(0)
+        ),
         []
     );
     assert_eq!(
-        offered_of(&[other.clone()], &[booked], &open, at(0)),
+        offered_of(std::slice::from_ref(&other), &[booked], &open, at(0)),
         vec![other]
     );
 }
@@ -237,7 +242,7 @@ fn a_host_of_an_earlier_attempt_without_start_fence_is_barred_for_life() {
     let barred: BTreeMap<HostId, Exclusion> =
         [(host("a"), Exclusion::ForLife)].into_iter().collect();
     for open in [open_plain(&[]), open_plain(&["a"]), open_plain(&["a", "b"])] {
-        let offered = offered_of(&[job.clone()], &[], &open, at(0));
+        let offered = offered_of(std::slice::from_ref(&job), &[], &open, at(0));
         assert_eq!(offered.len(), 1);
         assert_eq!(offered[0].prepare_bars, barred, "open: {open:?}");
     }
@@ -255,7 +260,7 @@ fn a_host_of_an_earlier_attempt_with_start_fence_keeps_only_its_own_bar() {
     free(&tables, "r");
     let mut open = open_plain(&["a"]);
     open.get_mut(&host("a")).unwrap().start_fence = true;
-    let offered = offered_of(&[job.clone()], &[], &open, at(0));
+    let offered = offered_of(std::slice::from_ref(&job), &[], &open, at(0));
     assert_eq!(offered, vec![job]);
 }
 
@@ -276,7 +281,7 @@ fn bars_are_made_per_host_and_the_bars_of_other_hosts_are_kept() {
     job.prepare_bars.insert(host("z"), elsewhere);
     let mut open = open_plain(&["a", "b", "z"]);
     open.get_mut(&host("a")).unwrap().start_fence = true;
-    let offered = offered_of(&[job.clone()], &[], &open, at(0));
+    let offered = offered_of(std::slice::from_ref(&job), &[], &open, at(0));
     let mut want = job.prepare_bars.clone();
     want.insert(host("b"), Exclusion::ForLife);
     assert_eq!(offered[0].prepare_bars, want);
