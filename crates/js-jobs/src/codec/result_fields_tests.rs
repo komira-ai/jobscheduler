@@ -2,7 +2,8 @@
 //! under its own tag when the usage has it, a usage from before them reads with
 //! `None`, and the tags are read only beside tag 40; and the CPU series of a result (tag 64):
 //! its bytes, its size, a row from before it, and the values refused; and the memory series
-//! (tag 65), the same ways.
+//! (tag 65), the same ways; and the swap peak of a usage (tag 74): stored when reported, a row
+//! from before it, and a build from before it carrying it.
 
 use std::time::Duration;
 
@@ -120,6 +121,7 @@ fn a_usage_row_without_the_cpu_tags_reads_with_none() {
             cpu_throttle: None,
             cpu_pressure_some: None,
             cpu_peak: None,
+            peak_swap_bytes: None,
         })
     );
 
@@ -193,6 +195,98 @@ fn a_usage_row_without_tag_62_reads_with_no_cpu_peak() {
     let read = decode_job(&no_usage).expect("reads");
     assert_eq!(read.result.expect("a result").usage, None);
     assert_eq!(read.carried, Carried::default());
+}
+
+/// A job whose usage has the given swap peak.
+fn swapped(peak_swap_bytes: Option<u64>) -> JobRecord {
+    JobRecord {
+        result: Some(JobResult {
+            usage: Some(ResourceUsage {
+                peak_swap_bytes,
+                ..full_result().usage.expect("a usage")
+            }),
+            ..full_result()
+        }),
+        ..full_job()
+    }
+}
+
+// Asserts the swap peak of a usage is stored under tag 74 as a u64 big-endian, that a usage
+// without it writes no tag 74, that a swap peak of 0 (measured, none used) is stored and reads
+// back as `Some(0)`, not as no measure, that the largest value reads back exactly, and that tag
+// 40 keeps its 20 bytes either way. Catches a swap peak the store drops (every run then reads as
+// never having swapped), a value written under another tag, and a tag written for a `None`.
+#[test]
+fn the_swap_peak_of_a_usage_is_stored_under_tag_74_when_reported() {
+    for bytes in [512 << 20, 0, u64::MAX] {
+        let job = swapped(Some(bytes));
+        let row = job_row(&job);
+        assert_eq!(
+            field_of(&row, 74),
+            Some(bytes.to_be_bytes().to_vec()),
+            "{bytes}"
+        );
+        assert_eq!(
+            field_of(&row, job_tag::RESULT_USAGE).map(|v| v.len()),
+            Some(20),
+            "{bytes}"
+        );
+        assert_eq!(
+            decode_job(&row).expect("reads").result,
+            job.result,
+            "{bytes}"
+        );
+    }
+
+    let none = swapped(None);
+    let row = job_row(&none);
+    assert_eq!(field_of(&row, 74), None);
+    assert_eq!(decode_job(&row).expect("reads").result, none.result);
+}
+
+// Asserts a usage row without tag 74, as every row the release before wrote, reads with no swap
+// peak and keeps the rest of its usage, and that tag 74 without tag 40 reads with no usage and is
+// not carried. Catches a reader that refuses an older row and one that invents a usage from tag
+// 74 alone.
+#[test]
+fn a_usage_row_without_tag_74_reads_with_no_swap_peak() {
+    let job = swapped(Some(1 << 30));
+    let older = without(&job_row(&job), 74);
+    let read = decode_job(&older).expect("reads").result.expect("a result");
+    assert_eq!(read.usage, swapped(None).result.expect("a result").usage);
+
+    let no_usage = without(&job_row(&job), job_tag::RESULT_USAGE);
+    let read = decode_job(&no_usage).expect("reads");
+    assert_eq!(read.result.expect("a result").usage, None);
+    assert_eq!(read.carried, Carried::default());
+}
+
+// A build from before tag 74 reads a row that holds it, keeps it as a field it does not know,
+// and writes it back byte for byte when it rewrites the job for a change of a field it does
+// know; this build reads that row with the original swap peak. Catches a swap peak lost when a
+// server of the release before rewrites the row during a roll.
+#[test]
+fn a_build_without_tag_74_carries_the_swap_peak() {
+    let job = swapped(Some(3 << 28));
+    let row = job_row(&job);
+    let mut older = decode_job(&without(&row, 74)).expect("reads without the tag");
+    assert_eq!(
+        older
+            .result
+            .as_ref()
+            .and_then(|r| r.usage)
+            .map(|u| u.peak_swap_bytes),
+        Some(None),
+        "not read"
+    );
+    let value = field_of(&row, 74).expect("the original writes it");
+    older.carried.0.insert(74, value);
+    older.cancel_requested = true;
+    let rewritten = job_row(&older);
+    assert_eq!(field_of(&rewritten, 74), field_of(&row, 74));
+    let mut expected = job;
+    expected.cancel_requested = true;
+    assert_eq!(decode_job(&rewritten), Ok(expected));
 }
 
 /// A series of `points` at 2 s a point over a run of 5.5 s, partial as given.

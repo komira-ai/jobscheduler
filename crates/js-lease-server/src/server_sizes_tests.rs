@@ -112,6 +112,7 @@ fn ran(running: &Running, store_clock: &js_state::ManualClock, name: &str) {
         cpu_throttle: None,
         cpu_pressure_some: None,
         cpu_peak: None,
+        peak_swap_bytes: None,
     };
     let end = JobEnd::Exited {
         exit_code: 0,

@@ -411,6 +411,7 @@ fn used() -> ResourceUsage {
         cpu_throttle: None,
         cpu_pressure_some: None,
         cpu_peak: None,
+        peak_swap_bytes: None,
     }
 }
 
