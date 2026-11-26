@@ -33,11 +33,11 @@ Columns:
 | placement-profiles-live.md | 25 | 9 | 6 | 3 | komira-ai/jobscheduler#1143, komira-ai/jobscheduler#1144, komira-ai/jobscheduler#1193 |
 | start-latency.md | 14 | 2 | 2 | 4 | komira-ai/jobscheduler#1145, komira-ai/jobscheduler#1146, komira-ai/jobscheduler#1147 |
 | whole-node.md | 27 | 13 | 4 | 3 | komira-ai/jobscheduler#1148, komira-ai/jobscheduler#1149, komira-ai/jobscheduler#1150, komira-ai/jobscheduler#1193 |
-| lease-limits.md | 5 | 2 | 1 | 1 | komira-ai/jobscheduler#1151 |
+| lease-limits.md | 5 | 1 | 2 | 1 | komira-ai/jobscheduler#1151 |
 | held-beat.md | 0 | 0 | 0 | 0 | - |
 | rollout.md | 21 | 5 | 4 | 3 | - |
 | risks-f.md | 16 | 2 | 5 | 3 | komira-ai/jobscheduler#1150, komira-ai/jobscheduler#1152, komira-ai/jobscheduler#1172, komira-ai/jobscheduler#1174 |
-| merged-code.md | 34 | 16 | 4 | 3 | komira-ai/jobscheduler#1168, komira-ai/jobscheduler#1169, komira-ai/jobscheduler#1170, komira-ai/jobscheduler#1171 |
+| merged-code.md | 34 | 15 | 5 | 3 | komira-ai/jobscheduler#1168, komira-ai/jobscheduler#1169, komira-ai/jobscheduler#1170, komira-ai/jobscheduler#1171 |
 | jobscheduler-design.md | 82 | 38 | 20 | 7 | komira-ai/jobscheduler#1153, komira-ai/jobscheduler#1154, komira-ai/jobscheduler#1155, komira-ai/jobscheduler#1156, komira-ai/jobscheduler#1157, komira-ai/jobscheduler#1158, komira-ai/jobscheduler#1174 |
 | pools-providers-network.md | 30 | 6 | 8 | 10 | - |
 | job-rootfs.md | 17 | 3 | 2 | 9 | komira-ai/jobscheduler#1159 |
@@ -201,7 +201,7 @@ As read: No status header, no What-is-left list, no open questions or build step
 | 12.2 Usage record | The scheduler's usage record is the 'Accounting' record planned in docs/design/scheduler.md. | partly: `docs/design/scheduler.md`, `crates/js-lease-server/src/job_api/fleet.rs:768` | komira-ai/jobscheduler#1151 (new) |
 | 12.1 Reaper machine ownership (leaked instance) | The reaper releases a leaked instance: one that list returns, carries our tags, and no pool host or acquire record accounts for, after a grace of ticks. | no | - |
 | 12.1 Lease end | The lease table `js-lease` is deleted; the job service of js-lease-server ends a job at its wall. | `crates/js-lease`, `crates/js-jobs` | - |
-| 12.3 Labels, instance tags and sweep | Providers tag instances with jobscheduler.dev/pool, acquire and scheduler; destroying a Job definition or the environment sweeps billable leftovers by the instance label as part of the closed-world delete, with a test on the fake. | `crates/js-watch/src/lib.rs:11`, `crates/js-provider-gce/src/own.rs:109` | - |
+| 12.3 Labels, instance tags and sweep | Providers tag instances with jobscheduler.dev/pool, acquire and scheduler; destroying a Job definition or the environment sweeps billable leftovers by the instance label as part of the closed-world delete, with a test on the fake. | partly: instance tags and a report-only leftover sweep are built (`crates/js-provider-gce/src/own.rs:109`, `crates/js-watch/src/lib.rs:11`: leftovers are counted and reported, never released; `abort` acts only when told to apply). Not built: the cleanup on deleting a Job definition or environment, which has nothing to hang on, as jobscheduler has no Job definitions or environment delete (docs/design/ucdk.md is superseded) | - |
 
 ## held-beat.md
 
@@ -284,7 +284,7 @@ As read: Status: "a plan of the extraction steps, kept as history"; header alrea
 | Row 16 js-agent-wire Hello.facts, Heartbeat.facts_rev/facts, HeartbeatReply.facts_ack (step 37) | Typed facts fields added as optional wire fields | no | komira-ai/jobscheduler#1169 (new) |
 | Row 16b exclusive, exclusive_ready (step 46) | HeartbeatReply.exclusive and Heartbeat.exclusive_ready added as optional fields; Preparing/Restoring phases serve whole-node sequence | `crates/js-agent-wire/src/heartbeat.rs:253`, `crates/js-agent-wire/src/hello.rs:34-36` | - |
 | Row 16c JobSpec.runtime and vm (step 42) | JobSpec.runtime and vm added as optional fields | superseded: `crates/js-agent-wire/src/kind.rs:15` | komira-ai/jobscheduler#740 |
-| Row 17 js-types Capabilities / Shape::satisfies / Dim vms (steps 36, 44) | New js-caps holds typed model and constraint evaluator; Dim gains vms | `crates/js-types/src/sched/work.rs:109`, `crates/js-sched/tests/f3_fleet/check.rs:98` | - |
+| Row 17 js-types Capabilities / Shape::satisfies / Dim vms (steps 36, 44) | New js-caps holds typed model and constraint evaluator; Dim gains vms | partly: the scheduler's `sched::Resources` has a `vms` field, filled from vm.slots (`crates/js-types/src/sched/work.rs:109`). Not built: the named `Dim` has no `vms` (`crates/js-types/src/resources.rs:19`, and `dimension_names_round_trip_and_unknown_is_refused` refuses it), and the typed model and evaluator of js-caps are step 36 (komira-ai/jobscheduler#1168) | komira-ai/jobscheduler#1168 |
 | Row 18 js-registry/js-lease-server agent routes (steps 37, 39) | Hold newest facts snapshot per host, ack revisions, match needs at the grant, record matched revision and image in the lease | no | komira-ai/jobscheduler#1171 (new) |
 | Row 19 js-agent facts probes (step 38) | Gain os_version, xcode, sim.* and VM-store probes and --cap, reusing the bounded command runner | partly: `crates/js-agent-wire/src/caps.rs:60`, `crates/js-agent/src/xcode/` | komira-ai/jobscheduler#1170 (new) |
 | Row 20 js-agent lifecycle Sandbox seam (steps 41 to 43) | Lifecycle reaches Runtime through a Sandbox seam; VmRuntime is a second backend; HeldState gains nothing | superseded: `crates/js-agent/src` | komira-ai/jobscheduler#740 |
@@ -738,7 +738,7 @@ As read: No status header. A list of extraction steps 23 to 64 (Phases D to K), 
 | step 48 | /readyz beside /healthz: ready after load and first tick, not ready while draining | `crates/js-lease-server/src/ready.rs`, `crates/js-lease-server/src/config.rs:109` | komira-ai/jobscheduler#844; komira-ai/jobscheduler#876 |
 | step 49 | Restart grace: --boot-grace, no held lease ends before it | superseded: `docs/design/multi-instance.md` | komira-ai/jobscheduler#873; komira-ai/jobscheduler#878 |
 | step 50 | --verify-state and --term-floor for js-lease-server | superseded: git grep verify-state and term-floor find nothing in js-lease-server. State is one Postgres store, no lease or binding files, no writer lock (komira-ai/jobsched | komira-ai/jobscheduler#878 |
-| step 51 | deploy/kubernetes manifests with a manifest-asserting test, plus a container image of js-lease-server | partly: The image is built (komira-ai/jobscheduler#844, OCI image per Linux target). There is no deploy/ or kubernetes/ directory. The control plane deploys through docker-swarm-updater (komira-ai/jobscheduler#858). | komira-ai/jobscheduler#844; komira-ai/jobscheduler#858 |
+| step 51 | deploy/kubernetes manifests with a manifest-asserting test, plus a container image of js-lease-server | partly: the js-lease-server container image is built (komira-ai/jobscheduler#844, an OCI image per Linux target); there is no deploy/ or kubernetes/ directory and no manifest test | komira-ai/jobscheduler#844 |
 | step 52 | Client side: clients reach the service by TLS, retry an outage with back-off, re-read the lease on a new term, refuse plain HTTP that is not loopback | partly: `crates/js-client/src/server_url.rs:19` | - |
 | step 53 | First in-cluster deployment and the move from the single host | decision, no code | komira-ai/jobscheduler#858 |
 | step 54 | GPU machines register through js-agent; the operator-listed --pool-config pool is retired | `crates/js-lease-server/src/file/agentless.rs:22-23` | komira-ai/jobscheduler#840 |
@@ -789,7 +789,7 @@ As read: No status header and no Designed/Open/What-is-left sections. It describ
 
 ## deployment.md
 
-As read: Status header: none; the page marks parts as "merged" vs "design", and says "(not built)" only for step 50. Its Kubernetes target (replicas 1, Recreate, PVC, one volume) is overtaken by docs/design/multi-instance.md (N leaderless instances on Postgres) and by the Docker Swarm control-plane deploy in docs/release.md:110.
+As read: Status header: none; the page marks parts as "merged" vs "design", and says "(not built)" only for step 50. Its Kubernetes target (replicas 1, Recreate, PVC, one volume) is overtaken by docs/design/multi-instance.md (N leaderless instances on Postgres).
 
 | Section | Claim | On main | Tracking |
 |---|---|---|---|
