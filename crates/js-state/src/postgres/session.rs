@@ -346,8 +346,14 @@ impl Pool {
 
     /// A session: an idle one, or a new connection while there are fewer than `max`, or
     /// else the first to come back within `wait`. Past `wait` the call fails with
-    /// [`Fail::Busy`], which says the store is busy, not broken: a caller may try again.
+    /// [`Fail::Busy`], which says the store is busy, not broken: a caller may try again. The
+    /// time it took, whatever its answer, is added to the tally open on this thread
+    /// ([`super::checkout_waits`]).
     pub(super) fn checkout(&self) -> Result<Pooled<'_>, Fail> {
+        super::waits::timed(|| self.lend())
+    }
+
+    fn lend(&self) -> Result<Pooled<'_>, Fail> {
         let mut state = lock(&self.state);
         loop {
             if let Some(session) = state.idle.pop() {
@@ -456,7 +462,12 @@ impl Drop for Pooled<'_> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
+
     use super::{Pool, RangeShape};
+    use crate::clock::{Clock, StoreTime};
     use crate::postgres::PostgresConfig;
 
     // Catches an index that does not invert the order of the prepared statements, which
@@ -469,18 +480,15 @@ mod tests {
         }
     }
 
-    // Catches a checkout that hands out a session that is already broken or closed, and
-    // a pool that does not give a returned session out again: the one connection a pool of
-    // one holds is the same one for the second loan.
-    #[test]
-    fn a_loan_is_a_working_session_and_comes_back_to_the_pool() {
+    /// A pool of one connection over the schema `schema`, made afresh.
+    fn pool_of_one(schema: &str) -> Pool {
         let url = js_testkit::database::server_url();
         let config = PostgresConfig::parse(&url)
-            .and_then(|config| config.with_schema("kbf_unit_pool"))
+            .and_then(|config| config.with_schema(schema))
             .expect("a usable URL");
         postgres::Client::connect(&url, postgres::NoTls)
             .and_then(|mut client| {
-                client.batch_execute("DROP SCHEMA IF EXISTS kbf_unit_pool CASCADE")
+                client.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
             })
             .expect("a clean schema");
         crate::postgres::schema::apply(
@@ -489,13 +497,55 @@ mod tests {
             crate::postgres::schema::latest(),
         )
         .expect("the installer's step");
-        let pool = Pool::open(
+        Pool::open(
             config.dial(),
-            "kbf_unit_pool".to_owned(),
+            schema.to_owned(),
             (1, config.timeouts.checkout),
             config.supported,
         )
-        .expect("opens");
+        .expect("opens")
+    }
+
+    /// A clock that moves a millisecond on each reading.
+    #[derive(Default)]
+    struct Stepping(AtomicU64);
+
+    impl Clock for Stepping {
+        fn now(&self) -> StoreTime {
+            let millis = self.0.fetch_add(1, Ordering::Relaxed);
+            StoreTime::from_duration(Duration::from_millis(millis))
+        }
+    }
+
+    // Catches a checkout of the pool that is not told to the tally of the call that made it:
+    // two checkouts under a clock that moves a millisecond a reading took 2 ms, and the
+    // statement run between them is not counted.
+    #[test]
+    fn each_checkout_of_the_pool_is_told_to_the_tally_of_its_call() {
+        let pool = pool_of_one("kbf_unit_pool_waits");
+        let clock = Arc::new(Stepping::default());
+        let (pids, waited) = crate::postgres::checkout_waits(clock.clone(), || {
+            let pid = || -> i32 {
+                let mut pooled = pool.checkout().expect("a session");
+                pooled
+                    .client
+                    .query_one("SELECT pg_backend_pid()", &[])
+                    .expect("pid")
+                    .get(0)
+            };
+            (pid(), pid())
+        });
+        assert_eq!(pids.0, pids.1);
+        assert_eq!(waited, Duration::from_millis(2));
+        assert_eq!(clock.0.load(Ordering::Relaxed), 4);
+    }
+
+    // Catches a checkout that hands out a session that is already broken or closed, and
+    // a pool that does not give a returned session out again: the one connection a pool of
+    // one holds is the same one for the second loan.
+    #[test]
+    fn a_loan_is_a_working_session_and_comes_back_to_the_pool() {
+        let pool = pool_of_one("kbf_unit_pool");
         let pid = |pooled: &mut super::Pooled<'_>| -> i32 {
             pooled
                 .client
