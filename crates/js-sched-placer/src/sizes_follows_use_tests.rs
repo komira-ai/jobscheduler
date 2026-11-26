@@ -226,8 +226,10 @@ fn a_class_never_seen_still_books_the_cold_size() {
     );
 }
 
-/// Asserts that a run that used more than its booking raises the next booking at once and is
-/// taught as the success it was, with no floor: a class whose five runs peaked at 1 GB books
+/// Asserts that a run that used more than its booking raises the next booking at once while
+/// it is one of fewer than 20 runs of its class, and is taught as the success it was, with no floor (from
+/// 20 runs on, [`a_mature_target_is_raised_by_a_second_run_above_its_booking_not_the_first`]):
+/// a class whose five runs peaked at 1 GB books
 /// 1.25 GiB; one run of it that peaked at 6 GiB under that 1.25 GiB booking (the booking is no
 /// limit, so the run went on and ended with exit 0) books the next job 7.5 GiB, and a run at
 /// exactly its booking books its peak with the margin (1.75 GiB), not the booking. Catches a
@@ -265,4 +267,69 @@ fn a_job_that_used_more_than_its_booking_raises_the_next_booking_at_once() {
         |_| GIB + 256 * MIB,
     );
     assert_eq!(next(&farm_taught(&at), "full.build").1, 7 * 256 * MIB);
+}
+
+/// Asserts that a target books the high end of its own recent runs, not one outlier among its
+/// last 256: the farm's `sql` compile, whose runs peak at 2.2 to 4.34 GiB, booked 15 GiB in the
+/// window from one run at 12.39 GiB. One such run after 30 others books nothing (5.5 GiB,
+/// `1.2 x 4,444 MiB + 128 MiB`), nor after the 70 runs of the window; two among the last 32
+/// book it (15 GiB). Catches the largest peak of the last 256 runs (15 GiB from the outlier
+/// on).
+#[test]
+fn a_target_books_the_high_end_of_its_recent_runs_not_one_outlier() {
+    let tables = Tables::new();
+    let wall = Duration::from_secs(80);
+    let mib = [2250, 2560, 3070, 3480, 3990, 4444];
+    let usual = |run: usize| mib[run % mib.len()] * MIB;
+    let heavy = |_| 12_690 * MIB;
+    let sql = ("sql.build", 16 * GIB, wall);
+    let mut runs = target_runs(&tables, (sql.0, "a"), 30, (sql.1, sql.2), usual);
+    runs.extend(target_runs(&tables, (sql.0, "h"), 1, (sql.1, sql.2), heavy));
+    let books = |runs: &[(JobRecord, js_jobs::Booked)]| next(&farm_taught(runs), sql.0);
+    assert_eq!(books(&runs), (1000, 11 * GIB / 2, SizedFrom::Class));
+    runs.extend(target_runs(
+        &tables,
+        (sql.0, "b"),
+        70,
+        (sql.1, sql.2),
+        usual,
+    ));
+    assert_eq!(books(&runs).1, 11 * GIB / 2, "after the window's 70 runs");
+    runs.extend(target_runs(
+        &tables,
+        (sql.0, "hh"),
+        2,
+        (sql.1, sql.2),
+        heavy,
+    ));
+    assert_eq!(books(&runs).1, 15 * GIB, "two among the last 32");
+}
+
+/// Asserts the boundary of the high end: a target with 19 runs of its own is not raised by one
+/// run that used more than its booking (6 GiB under 1.25 GiB, the 20th sample: it still books
+/// 1.25 GiB), and is raised by a second (7.5 GiB). With 18 runs before it, the one run (the
+/// 19th sample) raises it at once. Catches a percentile that drops two outliers, or keeps one of 20.
+#[test]
+fn a_mature_target_is_raised_by_a_second_run_above_its_booking_not_the_first() {
+    let tables = Tables::new();
+    let wall = Duration::from_secs(60);
+    for (before, books) in [(18, 30 * 256 * MIB), (19, 5 * 256 * MIB)] {
+        let class = format!("mature{before}.build");
+        let mut runs = target_runs(&tables, (&class, "r"), before, (16 * GIB, wall), |_| {
+            1_000_000_000
+        });
+        let over = (5 * 256 * MIB, wall);
+        runs.extend(target_runs(&tables, (&class, "o"), 1, over, |_| 6 * GIB));
+        assert_eq!(
+            next(&farm_taught(&runs), &class).1,
+            books,
+            "{before} runs before"
+        );
+        runs.extend(target_runs(&tables, (&class, "p"), 1, over, |_| 6 * GIB));
+        assert_eq!(
+            next(&farm_taught(&runs), &class).1,
+            30 * 256 * MIB,
+            "a second one"
+        );
+    }
 }
