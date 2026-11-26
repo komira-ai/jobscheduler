@@ -22,6 +22,7 @@ pub(crate) fn spec(record_dir: &Path) -> SuperviseSpec {
         max_file_bytes: 1 << 30,
         max_processes: 256,
         record_dir: record_dir.display().to_string(),
+        parent: None,
     }
 }
 

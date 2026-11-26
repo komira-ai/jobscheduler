@@ -160,7 +160,20 @@ impl Pool {
             before_record: Mutex::new(None),
         };
         pool.sweep(adopted)?;
-        pool.refill()?;
+        match pool.refill() {
+            // The accounts of adopted jobs hold their uids until their jobs end, so a range
+            // they fill leaves none to make one ready with: the next retirement refills.
+            Err(AccountError::NoFreeUid { range, reasons }) if !adopted.is_empty() => {
+                tracing::warn!(
+                    "no account made ready at open: the jobs taken back hold the uids \
+                     ({range}: {})",
+                    reasons.join("; ")
+                );
+            }
+            done => {
+                done?;
+            }
+        }
         Ok(pool)
     }
 
@@ -318,6 +331,18 @@ impl Pool {
             .into_iter()
             .map(|(n, entry)| self.account(n, entry.uid))
             .collect()
+    }
+
+    /// The account lent to the job `job`, which is still lent: after the open, the account of
+    /// an adopted job that the sweep kept; `None` for a job no lent account belongs to.
+    #[must_use]
+    pub fn lent_to(&self, job: &str) -> Option<Account> {
+        let ledger = self.ledger();
+        let (n, entry) = ledger
+            .in_state(State::Lent)
+            .into_iter()
+            .find(|(n, _)| ledger.job(*n) == Some(job))?;
+        Some(self.account(n, entry.uid))
     }
 
     /// How many accounts are ready to be lent.

@@ -225,12 +225,12 @@ fn an_account_that_cannot_be_retired_is_held_and_said() {
     assert_eq!(live(&rig), Vec::<String>::new());
 }
 
-/// Asserts that after a restart (a new runtime over the same state, its pool opened with no
-/// adopted job) the earlier process's run is listed and ended, its account is retired by the
-/// open, its removal marks its lease done, and a later job gets an account of its own.
+/// Asserts that after a restart (a new runtime over the same state) the earlier process's run,
+/// whose supervisor ended without an exit record, is listed and ended, its account is retired
+/// by the open, its removal marks its lease done, and a later job gets an account of its own.
 ///
-/// Catches: a restart that adopts a run nobody can watch, or that leaves the earlier run's
-/// account lent.
+/// Catches: a restart that adopts a run nobody can tell the end of, or that leaves the earlier
+/// run's account lent.
 #[test]
 fn a_restart_ends_the_runs_of_the_earlier_process() {
     let mut rig = Rig::new("restart");
