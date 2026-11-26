@@ -10,8 +10,8 @@ no job of those hosts ends lost, failed or failed to start, or is started again.
 
 The check is read-only: it runs only `js host list`, `js job list` and `js job get`. It starts
 no roll and changes no host; the roll is started the usual way, apart from it. It is a held step
-only because it needs a client token of the job service, so the owner runs it, with the script
-`tools/held/agent-handover-check/agent_handover_check.sh`.
+only because it needs a client token of the job service, so the owner runs it, with the verb
+`cargo xtask agent-handover-check` from a checkout (`crates/xtask/src/handover.rs`).
 
 ## Before
 
@@ -26,20 +26,21 @@ only because it needs a client token of the job service, so the owner runs it, w
 - Jobs run on every host to watch (start a build large enough to run for the length of the
   roll). A host with no job before shows nothing about a hand-over, and the check ends
   inconclusive for it.
-- `js` and `jq` are on `PATH`, and a client token file of the job service is at hand.
+- `js` is on `PATH` (or given with `--js`), and a client token file of the job service is at
+  hand.
 
 ## Steps
 
 1. With the build running and before the roll starts, start the check, naming each host:
 
    ```sh
-   tools/held/agent-handover-check/agent_handover_check.sh --server https://<job service> \
+   cargo xtask agent-handover-check --server https://<job service> \
      --token-file <client token file> --out-dir <workspace scratch directory> \
      --host <host> --host <host> ...
    ```
 
    It prints each host's agent version and the ids of the jobs running on it, then reads the
-   hosts every `--interval` seconds (20), at most `--samples` times (360, two hours), until
+   hosts every `--interval-secs` seconds (20), at most `--samples` times (360, two hours), until
    every host lists a version other than the one it listed first.
 2. Let the roll start, the usual way. The check needs nothing from it.
 3. When every host has moved (or the readings are spent), the check reads the running jobs
@@ -53,7 +54,7 @@ the readings in which it was not heard as live (neither fails the check), the nu
 that ran on it before, how many it kept and how many ended succeeded or cancelled, and the ids
 of the jobs running on it after.
 
-- `PASS` (status 0): every host moved, none was seen cordoned or tainted, and every job that
+- `PASS` (status 0, on stdout): every host moved, none was seen cordoned or tainted, and every job that
   ran before runs still in the same attempt or ended succeeded or cancelled.
 - `<host>: FAIL: did not move from <version>`: the host was still on its version, or was not
   listed, when the readings were spent.
@@ -70,8 +71,13 @@ of the jobs running on it after.
   each is named, whether it ran before or started during the roll. "Since the check began" is
   read against the clock of the machine running the check, so run it where the clock is synced
   with the job service's.
-- `INCONCLUSIVE` (status 3): every host moved and lost nothing, but one ran no job before.
-- Status 2: the check refused to start and watched nothing; the reason is on stderr.
+- `FAIL: <n> finding(s), each named above` (status 1, on stderr): the verdict when any line
+  above says `FAIL`.
+- `INCONCLUSIVE` (status 1, on stderr): every host moved and lost nothing, but one ran no job
+  before.
+- Any other line on stderr (status 1): the check refused to start, or a reading after the roll
+  failed; the line says which. Status 2 is a usage error (a host id given twice, an out-dir that
+  is not a directory). A refused check watched nothing.
 
 The out-dir keeps the evidence: `hosts-before.json`, `running-before.jsonl`, `timeline.tsv`
 (each reading of each host: version, cordon, mark, state, taint), `running-after.jsonl`,

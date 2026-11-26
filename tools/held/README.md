@@ -8,7 +8,6 @@ given an explicit flag. Each one names the runbook that says when to run it and 
 |---|---|---|
 | `provider-live/provider_live.sh` | Runs the live conformance suite of one machine provider (EC2, Compute Engine or Lambda): a dry run prints the plan and its hash, `--spend --plan-hash H` launches. | `docs/runbooks/live-conformance.md` |
 | `live-update-drill/live_update_drill.sh` | Updates the js-server Swarm service (two replicas, start-first, one task at a time) with `docker service update --force` while a build runs, and checks that no job ended lost, failed or failed to start, every host takes jobs again, both tasks were replaced and the update `completed`: a dry run reads the hosts, running jobs, service spec and tasks, `--update` updates. | `docs/runbooks/live-update-drill.md` |
-| `agent-handover-check/agent_handover_check.sh` | Watches named hosts while a js-agent release rolls onto them, read-only (`js host list`, `js job list`, `js job get`), and checks that each moved to a new agent version without a cordon or taint and that every job running on it before runs on in the same attempt or ended succeeded or cancelled. It changes nothing; it is held because it needs a client token. | `docs/runbooks/agent-handover-check.md` |
 
 A new held script goes in a directory of its own here, with a row in this table, and is `bash -n` and
 shellcheck clean.
