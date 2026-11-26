@@ -30,6 +30,9 @@ mod beat;
 #[path = "agent_api_rows_binding_tests.rs"]
 mod binding;
 
+#[path = "agent_api_rows_version_tests.rs"]
+mod version;
+
 /// Session secrets that start at a number of the server's own, so that two servers never
 /// make the same secret and a secret a server checks is the one the row's digest holds.
 struct Secrets(AtomicU64);
@@ -390,6 +393,7 @@ async fn a_hello_takes_the_epoch_the_store_numbers() {
         labels: BTreeMap::new(),
         phase: js_agent_wire::Phase::Serving,
         agent_process: None,
+        agent_version: None,
     };
     world.jobs.hello_node(&id("host-a"), &hello).unwrap();
     world.jobs.hello_node(&id("host-a"), &hello).unwrap();
@@ -636,6 +640,7 @@ async fn each_judgement_of_a_beat_is_answered_as_the_row_says() {
         labels: BTreeMap::new(),
         phase: js_agent_wire::Phase::Serving,
         agent_process: None,
+        agent_version: None,
     };
     world.jobs.hello_node(&id("host-a"), &next).unwrap();
     let refused = server

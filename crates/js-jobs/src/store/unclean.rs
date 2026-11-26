@@ -150,6 +150,7 @@ mod tests {
             labels: std::collections::BTreeMap::new(),
             phase: js_agent_wire::Phase::Serving,
             agent_process: None,
+            agent_version: None,
         };
         let row = other.hello_node(host, &hello).expect("a hello");
         let state = NodeState {
