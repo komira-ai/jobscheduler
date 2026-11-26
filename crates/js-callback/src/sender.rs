@@ -17,7 +17,8 @@
 //!   status, a timeout, a refused connection, a redirect, a name that does not resolve, or an
 //!   address the rule refused, the last with its own class. The submitter sees only that
 //!   class; the detail goes to the operator's log, with the URL's host and never its path or
-//!   query ([`retry_wait`] says when a failed call is tried again).
+//!   query. The store (`js-jobs`, `JobStore::answer_callback`) decides when a failed call is
+//!   tried again.
 
 use std::io;
 use std::net::SocketAddr;
@@ -43,22 +44,6 @@ const MAX_ADDRESSES: usize = 16;
 
 /// The port of an https URL that names none.
 const HTTPS_PORT: u16 = 443;
-
-/// The wait before the first try again: 5 s.
-pub const FIRST_RETRY_WAIT: Duration = Duration::from_secs(5);
-
-/// The longest wait between two tries: 10 minutes.
-pub const LONGEST_RETRY_WAIT: Duration = Duration::from_secs(600);
-
-/// The wait before a callback is tried again after its `failed`-th failed try in a row: 5 s
-/// after the first, doubling to at most 10 minutes, the alert webhook's values. A `failed` of 0
-/// reads as 1.
-#[must_use]
-pub fn retry_wait(failed: u32) -> Duration {
-    // 5 s doubled 7 times is past the longest wait already.
-    let doublings = failed.saturating_sub(1).min(7);
-    (FIRST_RETRY_WAIT * (1 << doublings)).min(LONGEST_RETRY_WAIT)
-}
 
 /// The certificate authorities a callback's TLS certificate must chain to.
 #[derive(Debug, Clone)]

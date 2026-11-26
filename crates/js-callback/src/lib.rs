@@ -9,8 +9,8 @@
 //! - Where a call may go: the [`AddressRule`], which judges every address a try would connect
 //!   to, and the [`Resolve`] that names a host's addresses ([`SystemResolver`] in the server).
 //! - One try: the [`Sender`] (no proxy, no redirect, no body read, a time limit), trusting
-//!   [`TlsRoots`], and what its answer means ([`CallbackAnswer`], [`FailureClass`]); a failed
-//!   call is tried again after [`retry_wait`].
+//!   [`TlsRoots`], and what its answer means ([`CallbackAnswer`], [`FailureClass`]). When a
+//!   failed call is tried again is the store's to decide (`js-jobs`).
 //!
 //! The key ([`SigningKey`]) and the answer words are defined in `js-types`, which the store
 //! shares, and re-exported here. The server still refuses a job that carries a callback.
@@ -27,6 +27,6 @@ pub use js_types::{
     SigningKeyError,
 };
 pub use resolve::{Resolve, ResolveError, SystemResolver};
-pub use sender::{FIRST_RETRY_WAIT, LONGEST_RETRY_WAIT, Sender, TlsRoots, retry_wait};
+pub use sender::{Sender, TlsRoots};
 pub use sign::{WEBHOOK_ID_BYTES, mint_webhook_id, sign};
 pub use url::{CallbackUrl, MAX_URL_LEN, UrlError, check_url};

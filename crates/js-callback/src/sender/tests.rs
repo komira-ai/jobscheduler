@@ -189,9 +189,9 @@ fn a_410_abandons() {
 /// again: 500, 503, 404, 300, a 307 and a 302 redirect (whose target receives nothing), a
 /// time limit reached against a receiver that never answers, a refused connection, a
 /// certificate from another authority, a name that does not resolve and one with no
-/// address; and the wait before each next try: 5 s, doubling to 10 minutes. Catches a
-/// redirect followed, a failure read as delivered, a refused connection read as a refused
-/// address, and a wait that does not double, overflows, or passes its cap.
+/// address: every one is the class the store tries again, after its doubling wait
+/// (`js-jobs`, `answer_callback`). Catches a redirect followed, a failure read as delivered,
+/// and a refused connection read as a refused address.
 #[test]
 fn each_failure_is_retried_with_backoff() {
     let authority = Authority::new();
@@ -243,9 +243,6 @@ fn each_failure_is_retried_with_backoff() {
     ];
     assert_eq!(answers, [FAILED; 5]);
     assert_eq!(stranger.heads(), Vec::<String>::new());
-
-    let waits = [0, 1, 2, 3, 7, 8, 9, u32::MAX].map(|failed| retry_wait(failed).as_secs());
-    assert_eq!(waits, [5, 5, 10, 20, 320, 600, 600, 600]);
 }
 
 /// Asserts that a try goes to the address the resolver gave and the rule admitted (the name
