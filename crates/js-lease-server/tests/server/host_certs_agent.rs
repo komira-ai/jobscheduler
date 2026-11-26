@@ -113,7 +113,7 @@ async fn post(rig: &Rig, login: &Login, path: &'static str, body: Value) -> Answ
 
 /// The heartbeat of the session `welcome` opened for `host`.
 fn beat(host: &str, welcome: &Answer) -> Value {
-    assert_eq!(welcome.status, 200, "{welcome:?}");
+    assert_eq!(welcome.status, 200, "{:?}", refusal(welcome));
     json!({
         "host_id": host,
         "epoch": welcome.body["epoch"],
@@ -122,7 +122,8 @@ fn beat(host: &str, welcome: &Answer) -> Value {
     })
 }
 
-/// The status of `answer` and the code of its refusal (empty when it has none).
+/// The status of `answer` and the code of its refusal (empty when it has none): all a failed
+/// assert prints of an answer, since a welcome's body holds the session secret.
 fn refusal(answer: &Answer) -> (u16, &str) {
     (
         answer.status,
@@ -160,37 +161,48 @@ async fn a_token_host_moves_onto_its_certificate_while_another_stays_on_the_toke
                 .unwrap();
 
         let on_token = post(&rig, &token, HELLO, hello_body("mac-1")).await;
-        assert_eq!(on_token.status, 200, "{kept:?}: {on_token:?}");
+        assert_eq!(on_token.status, 200, "{kept:?}: {:?}", refusal(&on_token));
         let token_beat = post(&rig, &token, BEAT, beat("mac-1", &on_token)).await;
-        assert_eq!(token_beat.status, 200, "{kept:?}: {token_beat:?}");
+        assert_eq!(
+            token_beat.status,
+            200,
+            "{kept:?}: {:?}",
+            refusal(&token_beat)
+        );
         let other = post(&rig, &token, HELLO, hello_body("farm-9")).await;
-        assert_eq!(other.status, 200, "{kept:?}: {other:?}");
+        assert_eq!(other.status, 200, "{kept:?}: {:?}", refusal(&other));
 
         let live = post(&rig, &certificate, HELLO, hello_body("mac-1")).await;
-        assert_eq!(refusal(&live), (409, "host-live"), "{kept:?}: {live:?}");
+        assert_eq!(refusal(&live), (409, "host-live"), "{kept:?}");
 
         rig.h.clock.advance(Duration::from_secs(60));
         let moved = post(&rig, &certificate, HELLO, hello_body("mac-1")).await;
-        assert_eq!(moved.status, 200, "{kept:?}: {moved:?}");
-        assert_eq!(moved.body["epoch"], 2, "{kept:?}: {moved:?}");
+        assert_eq!(moved.status, 200, "{kept:?}: {:?}", refusal(&moved));
+        assert_eq!(moved.body["epoch"], 2, "{kept:?}: {:?}", refusal(&moved));
         assert!(
             moved.body.get("host_credential").is_none(),
-            "{kept:?}: {moved:?}"
+            "{kept:?}: {:?}",
+            refusal(&moved)
         );
         let cert_beat = post(&rig, &certificate, BEAT, beat("mac-1", &moved)).await;
-        assert_eq!(cert_beat.status, 200, "{kept:?}: {cert_beat:?}");
+        assert_eq!(cert_beat.status, 200, "{kept:?}: {:?}", refusal(&cert_beat));
         let certified = Credential::of_host_certificate(&HostId::new("mac-1").unwrap()).to_hex();
         let held = kept_bindings(&rig.h);
         assert!(held.contains(&certified), "{kept:?}: {held}");
 
         let taken = post(&rig, &token, HELLO, hello_body("mac-1")).await;
-        assert_eq!(refusal(&taken), (403, "host-bound"), "{kept:?}: {taken:?}");
+        assert_eq!(refusal(&taken), (403, "host-bound"), "{kept:?}");
 
         let stays = post(&rig, &token, HELLO, hello_body("farm-9")).await;
-        assert_eq!(stays.status, 200, "{kept:?}: {stays:?}");
-        assert_eq!(stays.body["epoch"], 2, "{kept:?}: {stays:?}");
+        assert_eq!(stays.status, 200, "{kept:?}: {:?}", refusal(&stays));
+        assert_eq!(stays.body["epoch"], 2, "{kept:?}: {:?}", refusal(&stays));
         let stays_beat = post(&rig, &token, BEAT, beat("farm-9", &stays)).await;
-        assert_eq!(stays_beat.status, 200, "{kept:?}: {stays_beat:?}");
+        assert_eq!(
+            stays_beat.status,
+            200,
+            "{kept:?}: {:?}",
+            refusal(&stays_beat)
+        );
 
         let listed = rig.listing().await;
         for host in ["mac-1", "farm-9"] {
