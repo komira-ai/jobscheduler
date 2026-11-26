@@ -10,6 +10,8 @@ publish.workspace = true
 
 [dependencies]
 serde.workspace = true
+# The retry decision's jitter: SHA-256 of the job id and the attempt.
+sha2.workspace = true
 # `sched::Version::parse` reads the report of `kbf --version --json`.
 serde_json.workspace = true
 thiserror.workspace = true

@@ -313,6 +313,155 @@ fn a_signal_the_unit_manager_refuses_leaves_the_request_and_the_rerun_signals_ag
     assert_eq!(rig.host().agent_version.as_deref(), Some("1.3.0"));
 }
 
+/// What a failed start after a refused signal that found no agent adds before the staged or
+/// previous release's note.
+fn no_agent_note() -> String {
+    format!(
+        "; {UNIT} was not active when it was signalled to hand its runs over in place (no agent was there to take the signal), so the unit was brought up instead"
+    )
+}
+
+/// Asserts that a signal the unit manager refuses, after which the unit reads down, stopping or
+/// restarting (its agent had ended: a `Restart=always` unit whose agent dies at its start reads
+/// `active` for a moment on each try), does not fail the cutover: the unit is brought up as a
+/// start is (started when down or stopping, waited for when restarting) and the cutover ends
+/// when it is active, with the new agent's hello then read by verify. Catches a cutover that
+/// fails `stop_failed` on a host whose agent is gone, which no rerun can pass, so the host stays
+/// with no agent.
+#[test]
+fn a_refused_signal_with_no_agent_left_brings_the_unit_up_instead_of_failing() {
+    let cases = [
+        ("inactive", "dead"),
+        ("failed", "failed"),
+        ("deactivating", "stop-sigterm"),
+    ];
+    for (n, (active, sub)) in cases.into_iter().enumerate() {
+        let rig = in_place(&format!("hook-in-place-refused-gone-{n}"));
+        let spy = Spy::new(&rig);
+        spy.fail("kill");
+        *spy.kill_refused_leaves.borrow_mut() = Some((active, sub));
+        let done = spy.cutover(&rig);
+        assert_eq!(done.outcome, Outcome::Success, "{active}: {done:?}");
+        assert_eq!(spy.act_names(), [REQUEST, &kill(), &start()], "{active}");
+        assert_eq!(rig.world.show(UNIT).unwrap().active, "active", "{active}");
+        let verified = Spy::new(&rig).verify(&rig);
+        assert_eq!(verified.outcome, Outcome::Success, "{active}: {verified:?}");
+        assert_eq!(
+            rig.host().agent_version.as_deref(),
+            Some("1.4.0"),
+            "{active}"
+        );
+    }
+
+    let rig = in_place("hook-in-place-refused-restarting");
+    let spy = Spy::new(&rig);
+    spy.fail("kill");
+    *spy.kill_refused_leaves.borrow_mut() = Some(("activating", "auto-restart"));
+    let base = rig.world.ticks();
+    spy.on_pause(move |spy, ticks| {
+        if ticks == base + 2 {
+            spy.world.seed_unit(UNIT, "active", "running");
+        }
+    });
+    let done = spy.cutover(&rig);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert_eq!(
+        spy.act_names(),
+        [REQUEST, &kill()],
+        "a restarting unit is not started again"
+    );
+}
+
+/// Asserts that after a refused signal that found no agent, a unit that does not come up ends
+/// the cutover as a start failure judged as any start is (the unit ran and died: class release),
+/// whose detail says in full that the unit was not active when it was signalled and what is
+/// installed; for a unit that crash-loops in `auto-restart` past the start wait and for one that
+/// fails its start. Catches a cutover that reports success over a unit that never comes up, and
+/// a report that hides that no agent was there to take the signal.
+#[test]
+fn a_refused_signal_with_no_agent_left_and_a_unit_that_stays_down_is_judged_as_a_start() {
+    let staged = "; the staged release 1.4.0 is installed and its agent is not running (systemd retries the unit: Restart=always)";
+    let rig = in_place("hook-in-place-refused-crash-loop");
+    let spy = Spy::new(&rig);
+    spy.fail("kill");
+    *spy.kill_refused_leaves.borrow_mut() = Some(("activating", "auto-restart"));
+    let done = spy.cutover(&rig);
+    assert_eq!(done.outcome, Outcome::Failure, "{done:?}");
+    assert_eq!(done.report.reason, Some(Reason::StartFailed));
+    assert_eq!(done.report.class, Class::Release, "the unit ran and died");
+    assert_eq!(
+        done.report.detail.as_deref(),
+        Some(
+            format!(
+                "{UNIT} is still activating after {START_WAIT_SECS} s{}{staged}",
+                no_agent_note()
+            )
+            .as_str()
+        )
+    );
+    assert!(!done.report.reversible);
+    assert_eq!(spy.act_names(), [REQUEST, &kill()]);
+
+    let rig = in_place("hook-in-place-refused-start-fails");
+    let spy = Spy::new(&rig);
+    spy.fail("kill");
+    *spy.kill_refused_leaves.borrow_mut() = Some(("inactive", "dead"));
+    *spy.start_leaves.borrow_mut() = Some(("failed", "failed"));
+    let done = spy.cutover(&rig);
+    assert_eq!(done.outcome, Outcome::Failure, "{done:?}");
+    assert_eq!(done.report.reason, Some(Reason::StartFailed));
+    assert_eq!(done.report.class, Class::Release);
+    assert_eq!(
+        done.report.detail.as_deref(),
+        Some(
+            format!(
+                "{UNIT} is failed after it was started{}{staged}",
+                no_agent_note()
+            )
+            .as_str()
+        )
+    );
+    assert_eq!(spy.act_names(), [REQUEST, &kill(), &start()]);
+}
+
+/// Asserts the same of an in-place rollback: a refused signal after which the unit is down
+/// starts the unit, and the rollback ends with the previous release's agent back and the record
+/// gone; one whose start then fails is a start failure whose detail says the unit was not
+/// active when it was signalled and that the previous release is installed again.
+/// Catches a rollback that leaves the host with no agent over a refusal no rerun can pass.
+#[test]
+fn a_rollback_whose_refused_signal_found_no_agent_brings_the_unit_up() {
+    let rig = cut_over("hook-in-place-rb-refused-gone");
+    let spy = Spy::new(&rig);
+    spy.fail("kill");
+    *spy.kill_refused_leaves.borrow_mut() = Some(("inactive", "dead"));
+    let done = spy.rollback(&rig);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert_eq!(spy.act_names(), [REQUEST, &kill(), &start()]);
+    assert!(rig.record().is_none());
+    assert_eq!(rig.host().agent_version.as_deref(), Some("1.3.0"));
+
+    let rig = cut_over("hook-in-place-rb-refused-start-fails");
+    let spy = Spy::new(&rig);
+    spy.fail("kill");
+    *spy.kill_refused_leaves.borrow_mut() = Some(("inactive", "dead"));
+    *spy.start_leaves.borrow_mut() = Some(("failed", "failed"));
+    let done = spy.rollback(&rig);
+    assert_eq!(done.outcome, Outcome::Failure, "{done:?}");
+    assert_eq!(done.report.reason, Some(Reason::StartFailed));
+    assert_eq!(done.report.class, Class::Release);
+    assert_eq!(
+        done.report.detail.as_deref(),
+        Some(
+            format!(
+                "{UNIT} is failed after it was started{}; the previous release 1.3.0 is installed again (the release link is on it) but its agent is not running, so the update is undone on disk but the host runs no agent until the unit starts",
+                no_agent_note()
+            )
+            .as_str()
+        )
+    );
+}
+
 /// Asserts that a request that cannot be looked at ends the wait as an environment failure that
 /// names it. Catches a wait that reads an unreadable state root as a taken request.
 #[test]
