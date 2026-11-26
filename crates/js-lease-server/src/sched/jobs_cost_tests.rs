@@ -1,10 +1,11 @@
 //! What the pass over the queued jobs costs a heartbeat ([`Agents::place_jobs_after_beat`]):
 //! the job table reads it makes and the placement rounds it runs, counted per heartbeat. A
 //! heartbeat that changes nothing the pass depends on reads no job table and runs no round;
-//! one that frees a host reads the queued rows and no other job's, and runs a round only for
-//! a job that has a host left to try; and each thing a pass depends on brings the next pass
-//! back: a job submitted or cancelled, a host that says hello or goes lost, a write of the
-//! last pass that failed, and what pass 2 told. The tick's pass always runs.
+//! one that frees a host takes the rows that changed from the store's feed, reading no queued
+//! job's row, and runs a round only for a job that has a host left to try; and each thing a
+//! pass depends on brings the next pass back: a job submitted or cancelled, a host that says
+//! hello or goes lost, a write of the last pass that failed, and what pass 2 told. The tick's
+//! pass always runs.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -174,13 +175,15 @@ async fn a_heartbeat_that_changes_nothing_reads_no_job_table_and_runs_no_round()
 }
 
 /// Asserts what the heartbeats that end and then free a host's job cost. The beat that reports
-/// the result ends the job, whose allocation still books the host: the pass reads the queued
-/// rows and not the row of the job running on the other host, and runs no round: the ended
-/// job's allocation still books its host, and no host has room for a queued job. The next beat,
-/// which no longer lists the job, frees it: the pass places the first queued job on the freed
-/// host in one round, and runs none for the next job, since the host is booked full again.
+/// the result ends the job, whose allocation moves to releasing and still books the host: the
+/// pass runs, reads neither the queued rows nor the row of the job running on the other host,
+/// and runs no round: the ended job's allocation still books its host, and no host has room for
+/// a queued job. The next beat, which no longer lists the job, frees it: the pass, which takes
+/// the free from the store's feed and reads no queued job's row, places the first queued job on
+/// the freed host in one round, and runs none for the next job, since the host is booked full
+/// again.
 #[tokio::test]
-async fn a_heartbeat_that_frees_a_host_reads_only_the_queued_rows_and_places_the_first_on_it() {
+async fn a_heartbeat_that_frees_a_host_reads_no_queued_row_and_places_the_first_on_it() {
     let mut settled = Settled::new("cost_free").await;
     let ending = settled.running_on("host-a");
     let other = settled.running_on("host-b");
@@ -206,8 +209,9 @@ async fn a_heartbeat_that_frees_a_host_reads_only_the_queued_rows_and_places_the
         "the other host's job was read: {freed:?}"
     );
     for id in &QUEUED[2..] {
-        assert!(freed.read_job(id), "{id} was not read: {freed:?}");
+        assert!(!freed.read_job(id), "{id} was read: {freed:?}");
     }
+    assert_eq!(freed.table_scans(), Vec::<&str>::new(), "{freed:?}");
     assert_eq!((freed.rounds, freed.skipped), (1, 0), "{freed:?}");
     assert_eq!(settled.state("d-fourth"), JobState::Queued);
 }
@@ -233,16 +237,21 @@ async fn the_tick_runs_its_pass_and_reads_no_table_that_did_not_change() {
 }
 
 /// Asserts that a job submitted, or a queued job cancelled, brings back the next heartbeat's
-/// pass: a submit of a job at a higher priority reads the queue again and walks it, the new
-/// job first; a cancel of it reads the queue again; then the next beat is quiet again.
+/// pass: a submit of a job at a higher priority is taken from the store's feed (no table is
+/// scanned, and no queued row read but the new job's own, to write its first queue status) and
+/// the queue walked, the new job first; a cancel of it brings the pass back the same way; then
+/// the next beat is quiet again.
 #[tokio::test]
 async fn a_submit_or_a_cancel_brings_the_next_heartbeats_pass_back() {
     let settled = Settled::new("cost_submit").await;
     let urgent = queue(&settled.rig, "urgent", 5);
     let (_, submitted) = settled.beat(&settled.a).await;
     assert_eq!(submitted.skipped, 0, "{submitted:?}");
-    assert!(submitted.table_scans().contains(&"idx/job/queued/"));
+    assert_eq!(submitted.table_scans(), Vec::<&str>::new(), "{submitted:?}");
     assert!(submitted.read_job("urgent"), "{submitted:?}");
+    for id in &QUEUED[2..] {
+        assert!(!submitted.read_job(id), "{id} was read: {submitted:?}");
+    }
     // The new job is first and waits for both hosts, which are booked full: no round runs.
     assert_eq!(submitted.rounds, 0, "{submitted:?}");
     settled.rig.jobs.request_cancel(&urgent).unwrap();
@@ -295,6 +304,8 @@ async fn a_failed_placement_or_what_pass_2_told_brings_the_next_heartbeats_pass_
     let (_, again) = settled.beat(&settled.b).await;
     assert_eq!(again.skipped, 0, "{again:?}");
     assert_eq!(settled.state("c-third"), JobState::Placed);
+    // The pass's own placement changed the tables it read (the job left the queue and booked a
+    // host), so the first beat's pass runs once more; the second is skipped.
     let (_, quiet) = settled.counted(settled.quiet_beats()).await;
     assert_eq!(
         quiet.skipped, 1,

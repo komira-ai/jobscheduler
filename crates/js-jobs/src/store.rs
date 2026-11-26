@@ -35,6 +35,7 @@ mod marks;
 mod nodes;
 mod queue;
 mod status;
+mod table_changes;
 mod taints;
 mod unclean;
 mod whole;
@@ -45,6 +46,7 @@ pub use held::{HeldRequeue, RequeuedFor};
 
 pub use index::Backfill;
 pub use queue::queue_order;
+pub use table_changes::{MOST_TABLE_CHANGES, TableChanges};
 
 pub use whole::{FailedPrepare, Placement};
 

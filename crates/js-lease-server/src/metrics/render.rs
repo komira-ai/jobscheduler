@@ -209,7 +209,7 @@ pub(crate) fn render(seen: &Snapshot, recorder: &Recorder) -> String {
         &recorder.job_pass,
     );
     let name = "js_job_tables_total";
-    let help = "Passes over the queued jobs, by where each took the job tables from: read from the store, kept from the last read with no write since, or kept with the jobs this server's submits recorded since added to them.";
+    let help = "Passes over the queued jobs, by where each took the job tables from: read from the store, kept from the last read with no write since, kept with the jobs this server's submits recorded since added to them, or brought up to date from the store's feed with the rows that changed since the last read.";
     family(&mut out, name, "counter", help);
     for (from, count) in TABLES_FROM.iter().zip(&recorder.job_tables) {
         let count = count.load(Ordering::Relaxed);

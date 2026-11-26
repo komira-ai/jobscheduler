@@ -358,7 +358,7 @@ const FAILURE_CODES: [&str; 5] = [
 
 /// Where a pass took the job tables from, in the order they are written, as the metric spells
 /// them.
-const TABLES_FROM: [&str; 3] = ["store", "kept", "submitted"];
+const TABLES_FROM: [&str; 4] = ["store", "kept", "submitted", "changed"];
 
 /// The results of a callback's try, in the order they are written: a 2xx, a 410, a failure,
 /// and an address the rule refused.
@@ -383,6 +383,7 @@ fn tables_slot(from: TablesFrom) -> usize {
         TablesFrom::Store => 0,
         TablesFrom::Kept => 1,
         TablesFrom::Submitted => 2,
+        TablesFrom::Changed => 3,
     }
 }
 
@@ -425,7 +426,7 @@ pub(crate) struct Recorder {
     lost: AtomicU64,
     store_write_failures: AtomicU64,
     job_pass: Histogram,
-    job_tables: [AtomicU64; 3],
+    job_tables: [AtomicU64; 4],
     acquires: Mutex<BTreeMap<String, Acquires>>,
     refusals: Mutex<BTreeMap<(String, &'static str), u64>>,
     start_refusals: Mutex<BTreeMap<(String, String), u64>>,

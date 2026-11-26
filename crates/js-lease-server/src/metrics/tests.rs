@@ -136,7 +136,12 @@ async fn fixture(name: &str) -> Fixture {
     recorder.store_write_failed();
     recorder.job_pass_took(Duration::from_millis(3));
     recorder.job_pass_took(Duration::from_millis(30));
-    let sources = [TablesFrom::Store, TablesFrom::Kept, TablesFrom::Submitted];
+    let sources = [
+        TablesFrom::Store,
+        TablesFrom::Kept,
+        TablesFrom::Submitted,
+        TablesFrom::Changed,
+    ];
     for (from, times) in sources.into_iter().zip(1..) {
         (0..times).for_each(|_| recorder.job_tables(from));
     }

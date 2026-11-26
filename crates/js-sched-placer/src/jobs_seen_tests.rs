@@ -125,6 +125,17 @@ impl Rig {
         );
     }
 
+    /// Cordons `name`, a host no pass is offered: a change of the cordons, which the next pass
+    /// reads again.
+    fn cordon(&self, name: &str) {
+        let lease = Duration::from_secs(600);
+        let by = js_types::cordon::Asker::Unnamed;
+        self.tables
+            .jobs
+            .cordon_host(&host(name), lease, &by)
+            .unwrap();
+    }
+
     /// Records the queued job `id` asking for every core of a host.
     fn queue_whole_cores(&self, id: &str) {
         let cores = js_types::Resources::new(8000, 1 << 30, 0, None).unwrap();
@@ -160,10 +171,10 @@ fn a_pass_with_nothing_changed_since_the_last_is_skipped_and_reads_nothing() {
 }
 
 /// Asserts that each input of a pass brings the next pass after a heartbeat back, and that
-/// with that input as it was again after it, the one after is skipped: a write of the job
-/// store, a load reading, the hosts open to jobs or what one of them offers, the hosts that
-/// said hello, the pool's whole-node settings, and what pass 2 told. A heartbeat with no
-/// reading changes nothing.
+/// with that input as it was again after it, the one after is skipped: a change of the job
+/// tables, the hosts open to jobs or what one of them offers, the hosts that said hello, the
+/// hosts a taint closes, the pool's whole-node settings, and what pass 2 told. A heartbeat with no reading changes
+/// nothing, and neither does one with a load reading alone.
 #[test]
 fn each_input_of_a_pass_brings_the_next_one_back() {
     let rig = Rig::new();
@@ -185,7 +196,6 @@ fn each_input_of_a_pass_brings_the_next_one_back() {
     rig.placer.heard(&host("a"), None);
     rig.skipped(&both);
     rig.placer.heard(&host("a"), Some(&reading(1)));
-    rig.ran(&both, &[]);
     rig.skipped(&both);
 
     let mut changed = both.clone();
@@ -216,6 +226,11 @@ fn each_input_of_a_pass_brings_the_next_one_back() {
     let mut hello = both.clone();
     hello.hello.remove(&host("a"));
     rig.ran(&hello, &[]);
+    let mut tainted = both.clone();
+    tainted.tainted.insert(host("c"));
+    rig.ran(&tainted, &[]);
+    rig.skipped(&tainted);
+    rig.ran(&both, &[]);
     let mut whole = both.clone();
     whole.whole = Some(settings());
     rig.ran(&whole, &[]);
@@ -234,7 +249,8 @@ fn each_input_of_a_pass_brings_the_next_one_back() {
 
 /// Asserts that a pass whose read of the tables failed, or whose placement did not commit, is
 /// not taken as what the next pass after a heartbeat may skip on: the next one runs, and
-/// places the job whose commit failed.
+/// places the job whose commit failed. The read that fails is of the cordons, which a cordon
+/// placed since brings.
 #[test]
 fn a_pass_that_failed_a_read_or_a_write_is_run_again() {
     let rig = Rig::new();
@@ -242,6 +258,7 @@ fn a_pass_that_failed_a_read_or_a_write_is_run_again() {
     rig.ran(&both, &[]);
     rig.skipped(&both);
     rig.queue_whole_cores("one");
+    rig.cordon("c");
     rig.tables.store.fail_read_after(0);
     assert!(rig.beat(&both).is_err(), "the read was to fail");
     rig.tables.store.fail_next();
@@ -257,9 +274,10 @@ fn a_pass_that_failed_a_read_or_a_write_is_run_again() {
 }
 
 /// Asserts that a pass whose read failed is not kept as what the next pass may skip on: a job
-/// is submitted, the pass that sees the write fails its read, and the next pass, which finds
-/// the job store, the engine and the hosts as the failed pass found them (a failed read writes
-/// nothing), runs and places the job. Were the failed pass kept, the next would be skipped.
+/// is submitted and a host cordoned, the pass that sees the writes fails its read of the
+/// cordons, and the next pass, which finds the job store, the engine and the hosts as the
+/// failed pass found them (a failed read writes nothing), runs and places the job. Were the
+/// failed pass kept, the next would be skipped.
 #[test]
 fn a_pass_whose_read_failed_is_run_again_with_nothing_else_changed() {
     let rig = Rig::new();
@@ -267,6 +285,7 @@ fn a_pass_whose_read_failed_is_run_again_with_nothing_else_changed() {
     rig.ran(&both, &[]);
     rig.skipped(&both);
     rig.queue_whole_cores("one");
+    rig.cordon("c");
     rig.tables.store.fail_read_after(0);
     let written = rig.tables.jobs.written().unwrap();
     assert!(rig.beat(&both).is_err(), "the read was to fail");
@@ -282,8 +301,9 @@ fn a_pass_whose_read_failed_is_run_again_with_nothing_else_changed() {
 
 /// Asserts that a pass reads the job tables again only after a write of the job store: a
 /// second pass with none between reads nothing, whether the tick's (which always runs) or one
-/// after a heartbeat with a reading; and that the rows read from one job store never stand
-/// for another's, though both stores are fresh and neither has written since it opened.
+/// after a heartbeat with a reading (skipped); and that the rows read from one job store never
+/// stand for another's, though both stores are fresh and neither has written since it opened:
+/// the other's are read in full, not followed from the first's feed.
 #[test]
 fn the_tables_are_read_again_only_after_a_write_and_never_for_another_job_store() {
     let rig = Rig::new();
@@ -305,7 +325,7 @@ fn the_tables_are_read_again_only_after_a_write_and_never_for_another_job_store(
     );
     assert_eq!(read(&rig.tables), (Vec::new(), Vec::new()));
     rig.placer.heard(&host("a"), Some(&reading(1)));
-    assert_eq!(rig.beat(&both), Ok(Some(Vec::new())));
+    assert_eq!(rig.beat(&both), Ok(None));
     assert_eq!(rig.tables.store.take_reads(), []);
     let other = Tables::new();
     other.submit_with("elsewhere", js_jobs::Needs::WholeHost, 600);
@@ -352,8 +372,8 @@ fn a_job_another_server_submitted_is_read_by_the_next_pass_and_placed() {
     assert_eq!(state("there"), JobState::Placed);
 }
 
-/// Asserts which calls of the registry count as changes of the engine: a hello, a reading and
-/// a removed host do; a heartbeat with no reading does not.
+/// Asserts which calls of the registry count as changes of the engine: a hello and a removed
+/// host do; a heartbeat with no reading, and one with a load reading alone, do not.
 #[test]
 fn only_a_call_that_changes_the_engine_counts() {
     let rig = Rig::new();
@@ -366,7 +386,7 @@ fn only_a_call_that_changes_the_engine_counts() {
     counted("a heartbeat with no reading", 0, &|| {
         rig.placer.heard(&host("a"), None);
     });
-    counted("a reading", 1, &|| {
+    counted("a reading", 0, &|| {
         rig.placer.heard(&host("a"), Some(&reading(1)));
     });
     counted("a hello", 1, &|| {

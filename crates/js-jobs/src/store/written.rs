@@ -68,6 +68,16 @@ pub struct Step {
     rows: Option<u64>,
 }
 
+impl Written {
+    /// Whether `other` was taken from the same job store as this reading: only then can a
+    /// reader that holds tables read from one follow them with that job store's changes
+    /// ([`JobStore::table_changes`]).
+    #[must_use]
+    pub fn same_job_store(&self, other: &Written) -> bool {
+        self.instance == other.instance
+    }
+}
+
 impl Step {
     /// What [`JobStore::written`] reads just after this step's commit, when `at` is the reading
     /// it follows: one of the same job store, with every write before this one counted and none
@@ -293,6 +303,19 @@ mod tests {
             assert_eq!(step.after(before), Some(after), "{id:?}");
             assert_eq!(step.after(after), None, "{id:?}");
         }
+    }
+
+    /// Asserts that two readings of one job store are of the same job store, before and after a
+    /// write, and that a reading of another job store over the same store is not. Catches a
+    /// reader that follows tables read from one job store with another's changes.
+    #[test]
+    fn readings_tell_whether_they_are_of_the_same_job_store() {
+        let (store, jobs) = opened();
+        let other = JobStore::new(Arc::clone(&store), RandomIds).expect("opens");
+        let before = reading(&jobs);
+        recorded(&jobs, job(Some("written")));
+        assert!(before.same_job_store(&reading(&jobs)));
+        assert!(!before.same_job_store(&reading(&other)));
     }
 
     /// Asserts that a step follows no reading with another commit between it and the step's:
