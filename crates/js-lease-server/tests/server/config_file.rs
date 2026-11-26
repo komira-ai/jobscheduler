@@ -114,7 +114,7 @@ fn a_pool_without_boot_timeout_gets_the_scalers_default() {
     assert_eq!(plan.boot_timeout, js_scaler::BOOT_TIMEOUT);
 }
 
-/// Asserts that `exec = "none"` asks for no host contract,`exec = "sandbox-exec"` asks
+/// Asserts that `exec = "none"` asks for no host contract, `exec = "sandbox-exec"` asks
 /// for that mode of a kind that can launch it, and `launch = "live"` and
 /// `network = { kind = "default" }` are accepted and read. It catches an opt-out that
 /// still requires a runtime, and `live` read as `plan`.
