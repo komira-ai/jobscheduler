@@ -343,9 +343,9 @@ restart the one that changed.
 
 | reason | meaning | fix |
 |---|---|---|
-| `below-floor` | the shape, labels or capabilities the host reports do not meet the pool's `[shape]` and `[capabilities]`: less CPU, memory, disk or GPUs than the pool books, another GPU class, or a capability the pool names that the host lacks or reports with another value (including `scratch-quota`) | make the pool file match what the host reports, or give the node the resources and flags the pool names |
-| `quota-default-unfit` | the pool names `scratch-quota` and the host's `scratch-default-gib` is absent, zero, above the wire maximum, or more than the pool's `disk_bytes` | set the host's `--scratch-default-gib` (default 2) to at most the pool's `disk_bytes`, or raise `disk_bytes` |
-| `quota-without-pool-disk` | the host runs with `--scratch-quota`, and the pool books no disk (`disk_bytes` zero or absent) and does not name `scratch-quota` | see below |
+| `below-floor` | the labels or capabilities the host reports do not meet the pool's `[capabilities]`: a capability the pool names that the host lacks or reports with another value (including `os`, `arch`, `isa_level`, `os_version`, `fuse-jobs` and `scratch-quota`), or GPUs of another class than the pool's `gpu_class`. It is never about amounts: a host that reports less (or more) CPU, memory, disk or GPUs than the pool's `[shape]` joins and is booked at what it reports | make the pool file's `[capabilities]` match what the host reports, or give the node the flags the pool names |
+| `quota-default-unfit` | the pool names `scratch-quota` and the host's `scratch-default-gib` is absent, zero, above the wire maximum, or more than the scratch disk the host reports, at which it is booked | set the host's `--scratch-default-gib` (default 2) to at most that disk, or give the node more scratch disk |
+| `quota-without-pool-disk` | the host runs with `--scratch-quota`, the pool does not name `scratch-quota`, and either the pool books no disk (`disk_bytes` zero or absent) or the host reports no scratch disk | see below |
 
 For `quota-without-pool-disk` on a farm node, remove `--scratch-quota` from the node's flags file
 and restart the agent: the farm allocates no disk per job, so its pools book no disk and its nodes

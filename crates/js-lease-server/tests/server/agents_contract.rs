@@ -77,7 +77,8 @@ async fn a_container_pool_names_what_the_host_lacks() {
 
 /// Asserts that a pool file without `exec` admits a host that reports none of the contract
 /// capabilities (an agent from before it) and a host that reports all of them, and sends no
-/// `field` in any answer. It catches a server upgrade that refuses every deployed agent.
+/// `field` in any answer, also not in the refusal of a host whose `arch` is not the pool's.
+/// It catches a server upgrade that refuses every deployed agent.
 #[tokio::test]
 async fn a_pool_without_exec_admits_old_and_new_agents() {
     let h = start_agents("agents_contract_none").await;
@@ -91,9 +92,9 @@ async fn a_pool_without_exec_admits_old_and_new_agents() {
     ];
     let new = post(&h, "/v1/agent/hello", Some(JOIN), &reporting("new", &whole)).await;
     session(&new, "new");
-    let mut small = hello_body("small");
-    small["shape"]["cpu_millis"] = json!(1);
-    let reply = post(&h, "/v1/agent/hello", Some(JOIN), &small).await;
+    let mut other_arch = hello_body("other-arch");
+    other_arch["capabilities"]["arch"] = json!("arm64");
+    let reply = post(&h, "/v1/agent/hello", Some(JOIN), &other_arch).await;
     assert_eq!(
         reply.json(),
         json!({ "error": "shape-not-accepted", "reason": "below-floor" })

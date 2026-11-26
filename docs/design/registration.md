@@ -6,11 +6,12 @@ Moved from design.md section 5.8. Section numbers refer to design.md.
 hello in message metadata, never in a log line.
 
 - *Identity.* The hello carries a host id (chosen by the operator or derived from the machine), the pool name, labels, the shape it
-  offers, and `agent_version`. The control stream is TLS and the agent pins the scheduler's identity before it sends proof. The pool, the
-  labels and the capacity booked come from configuration; hello labels are informational, and any `jobscheduler.dev/` key from an agent
-  is refused.
+  offers, and `agent_version`. The control stream is TLS and the agent pins the scheduler's identity before it sends proof. The pool and
+  the labels come from configuration; the capacity booked is what the host reports, less or more than the pool's shape. Hello
+  labels are informational, and any `jobscheduler.dev/` key from an agent is refused.
 - *Admission.* The pool exists; the host id is not in the tainted set (5.12), checked before the credential; the host id is not held by a live stream (a second stream for the same id replaces the first only after
-  the first has been silent past the grace of 4.1); the reported shape satisfies the pool's shape (`Shape::satisfies`); the pool holds
+  the first has been silent past the grace of 4.1); the reported shape meets the pool's capabilities and GPU class (`Shape::satisfies` against what the host would be booked at, so the
+  CPU, memory, disk and GPUs it reports are never compared with the pool's shape; a refusal is `shape-not-accepted`, `below-floor`); the pool holds
   fewer than `max_machines` hosts, not counting an in-flight instance this hello completes (a refusal is `pool-full`); and either (a) the pool
   has a `join_token_file`, the pool's hierarchy includes the `default` provider, and the hello carries the pool's join credential, or (b) an
   elastic provider of the pool launched the instance and the hello carries its signed identity, matching a pending acquire (below).

@@ -6,37 +6,47 @@ use js_agent_wire::{Phase, refusal};
 use js_registry::{Binding, Credential, HostState, Refusal, ShapeFault};
 use support::*;
 
-/// Asserts that a host claiming less than the pool promises is refused with its own
-/// code and that nothing is created: a pool that admitted a smaller machine would book
-/// it as the shape it does not offer. A host missing a capability the pool promises, or
-/// holding it with another value, is refused the same way.
+/// Asserts that a host missing a capability the pool promises, or holding it with another
+/// value, is refused with its own code and reason and that nothing is created for it, while
+/// a host claiming less CPU than the pool's shape (3999 of 4000 millicores) with the pool's
+/// capabilities joins and is listed at the 3999 it reports: a host's capacity is what it
+/// reports, and only its capabilities are held to the pool's.
 #[test]
 fn wrong_shape_refused() {
     let fx = fixture(4);
-    let mut small = hello("small");
-    small.shape.cpu_millis = 3999;
     let mut no_os = hello("no-os");
     no_os.capabilities.clear();
     let mut linux = hello("linux");
     linux.capabilities = map(&[("os", "linux")]);
-    for bad in [small, no_os, linux] {
+    for bad in [no_os, linux] {
         let refused = fx.registry.hello(&bad, &cred("t")).unwrap_err();
         assert_eq!(refused, Refusal::ShapeNotAccepted(ShapeFault::BelowFloor));
         assert_eq!(refused.code(), refusal::SHAPE_NOT_ACCEPTED);
         assert_eq!(refused.reason(), Some(refusal::SHAPE_BELOW_FLOOR));
     }
     assert!(fx.registry.hosts().is_empty());
+    let mut small = hello("small");
+    small.shape.cpu_millis = 3999;
+    fx.hello(&small, &cred("t")).unwrap();
+    let listed = fx.registry.hosts();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id.as_str(), "small");
+    assert_eq!(listed[0].shape.resources().cpu_millis(), 3999);
 }
 
-/// Asserts that a host claiming more than the pool promises is listed with the pool's shape
-/// and its claim kept apart: the shape the registry books is the pool's, never the claim. A
-/// defect that booked the claim would let an agent inflate what a job may take.
+/// Asserts that a host claiming more than the pool's shape is booked at its claim, not at the
+/// pool's shape: the listed shape carries the claim's 8000 millicores and 16 GiB with the
+/// pool's capabilities. It catches a booking capped at the pool's numbers, which would leave
+/// a larger host's cores and memory unused.
 #[test]
-fn booked_shape_is_the_pool_shape_not_the_claim() {
+fn booked_shape_is_the_claim_not_the_pool_shape() {
     let fx = fixture(4);
     fx.join("big", "t");
     let listed = fx.registry.hosts();
-    assert_eq!(listed[0].shape, pool_shape());
+    let booked = listed[0].shape.resources();
+    assert_eq!(booked.cpu_millis(), 8000);
+    assert_eq!(booked.memory_bytes(), 16 << 30);
+    assert_eq!(listed[0].shape.capabilities(), pool_shape().capabilities());
     let claim = listed[0].claim.as_ref().unwrap();
     assert_eq!(claim.resources().cpu_millis(), 8000);
     assert_eq!(claim.resources().memory_bytes(), 16 << 30);
@@ -325,10 +335,10 @@ fn every_refusal_has_a_fixed_text_without_peer_data() {
     let mut elsewhere = hello(id);
     elsewhere.pool = "other".into();
     refusals.push(fx.registry.hello(&elsewhere, &cred("t")).unwrap_err());
-    let mut small = hello(id);
-    small.shape.cpu_millis = 1;
+    let mut linux = hello(id);
+    linux.capabilities = map(&[("os", "linux")]);
     fx.pass_grace();
-    refusals.push(fx.registry.hello(&small, &cred("t")).unwrap_err());
+    refusals.push(fx.registry.hello(&linux, &cred("t")).unwrap_err());
     let texts: Vec<String> = refusals.iter().map(ToString::to_string).collect();
     assert_eq!(texts.len(), 7);
     for text in &texts {

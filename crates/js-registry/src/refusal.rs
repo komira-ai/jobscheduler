@@ -33,7 +33,7 @@ pub enum Refusal {
     #[error("{0}")]
     ShapeNotAccepted(ShapeFault),
     /// The pool declares an execution mode and the host lacks what that needs: no
-    /// `runtime`, or no `gpu-toolkit` in a pool with GPUs. `field` names the capability.
+    /// `runtime`, or no `gpu-toolkit` on a host booked GPUs. `field` names the capability.
     #[error("the host contract is not met: the capability {field} is missing")]
     HostContract {
         /// The capability at fault.
@@ -67,13 +67,17 @@ pub enum Refusal {
 /// [`js_agent_wire::refusal`] ([`ShapeFault::code`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShapeFault {
-    /// The shape the host claims does not offer what the pool's shape promises.
+    /// The host's capabilities do not meet the pool's: a capability or label the pool names
+    /// is missing or has another value, or the GPUs it reports are of another class than
+    /// the pool's. The CPU, memory, disk and GPUs a host reports are never compared with the
+    /// pool's shape (a host is booked at what it reports), so
+    /// this is no resource floor; its wire reason is `below-floor`, as before.
     BelowFloor,
     /// The pool names `scratch-quota` and the host's quota default is absent, does not
-    /// count, or is more than the pool's `disk_bytes`.
+    /// count, or is more than the disk the host reports, at which it is booked.
     QuotaDefaultUnfit,
-    /// The host enforces a scratch quota while the pool books no disk and does not name
-    /// `scratch-quota`.
+    /// The host enforces a scratch quota while it is booked no disk (the pool books none, or
+    /// the host reports none) and the pool does not name `scratch-quota`.
     QuotaWithoutPoolDisk,
 }
 
@@ -91,15 +95,19 @@ impl ShapeFault {
 impl std::fmt::Display for ShapeFault {
     fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let text = match self {
-            Self::BelowFloor => "the shape does not offer what the pool promises",
+            Self::BelowFloor => {
+                "the host's capabilities do not meet the pool's: a capability, label or GPU \
+                 class the pool names is missing or has another value"
+            }
             Self::QuotaDefaultUnfit => {
                 "the pool names scratch-quota and the host's scratch default is absent, zero \
-                 or more than the pool's disk_bytes: set the host's scratch-default-gib within \
-                 the pool's disk_bytes, or change the pool's disk_bytes"
+                 or more than the scratch disk the host reports: set the host's \
+                 scratch-default-gib within that disk, or give the host more scratch disk"
             }
             Self::QuotaWithoutPoolDisk => {
-                "the host enforces a scratch quota and the pool books no disk and does not \
-                 name scratch-quota: give the pool disk_bytes and scratch-quota, or run the \
+                "the host enforces a scratch quota and is booked no disk (the pool books none, \
+                 or the host reports none) in a pool that does not name scratch-quota: give \
+                 the pool disk_bytes and scratch-quota and the host scratch disk, or run the \
                  host without --scratch-quota"
             }
         };

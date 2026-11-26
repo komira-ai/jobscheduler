@@ -8,7 +8,7 @@ use std::time::Duration;
 use js_types::{HostId, Shape};
 
 use super::{HostState, Registry, State};
-use crate::config::{PoolConfig, placement_shape};
+use crate::config::PoolConfig;
 
 impl Registry {
     /// Every pool this registry serves, the first first.
@@ -69,17 +69,17 @@ impl Registry {
         true
     }
 
-    /// The shape a job is placed against on a host of the pool named `pool` that the pool
-    /// books as `booked` and whose hello claimed `claim`, as a host the registry holds is
-    /// ([`crate::HostView::placement_shape`]); `None` for a pool this registry does not serve.
+    /// The shape a job is placed against on a host of the pool named `pool` whose row books
+    /// it as `booked` and whose hello claimed `claim`, as a host the registry holds is
+    /// ([`crate::HostView::placement_shape`]): what the claim reports, or the row's numbers
+    /// when it keeps no claim; `None` for a pool this registry does not serve.
     pub fn placement_shape_in(
         &self,
         pool: &str,
         booked: &Shape,
         claim: Option<&Shape>,
     ) -> Option<Shape> {
-        let at = self.pool_named(pool)?;
-        let by_hello = self.pool_at(at).places_by_hello();
-        Some(placement_shape(booked, claim, by_hello))
+        let config = self.pool_at(self.pool_named(pool)?);
+        Some(config.row_shape(booked, claim))
     }
 }

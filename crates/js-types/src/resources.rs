@@ -184,6 +184,33 @@ impl Resources {
         }
     }
 
+    /// This vector with each count cut to at most `other`'s: on CPU, memory, GPUs and
+    /// disk, the smaller of the two. The GPU class is this vector's while GPUs remain, and
+    /// none once they are cut to zero (a class is named exactly when GPUs are counted).
+    /// Admission compares a host with its pool's shape capped by what the host reports, so
+    /// only the kinds (the GPU class) can differ.
+    #[must_use]
+    pub fn capped_by(&self, other: &Resources) -> Resources {
+        let gpus = self.gpus.min(other.gpus);
+        Resources {
+            cpu_millis: self.cpu_millis.min(other.cpu_millis),
+            memory_bytes: self.memory_bytes.min(other.memory_bytes),
+            gpus,
+            gpu_class: self.gpu_class.clone().filter(|_| gpus > 0),
+            disk_bytes: self.disk_bytes.min(other.disk_bytes),
+        }
+    }
+
+    /// This vector with no GPUs and no GPU class, every other dimension as it was.
+    #[must_use]
+    pub fn without_gpus(&self) -> Resources {
+        Resources {
+            gpus: 0,
+            gpu_class: None,
+            ..self.clone()
+        }
+    }
+
     /// Whether `offered` has at least this much of every dimension, and the same GPU
     /// class when this vector counts GPUs.
     pub fn fits_in(&self, offered: &Resources) -> bool {
@@ -253,6 +280,33 @@ mod tests {
         assert_eq!(
             Resources::new(1, 1, 0, Some("a100".into())),
             Err(TypeError::GpuClassMismatch)
+        );
+    }
+
+    /// Asserts that a cap takes the smaller count on each of CPU, memory, GPUs and disk,
+    /// keeps the capped vector's GPU class while GPUs remain and drops it at zero GPUs, and
+    /// that a larger cap changes nothing. It catches a cap that keeps one of the larger
+    /// counts, or names a class for zero GPUs.
+    #[test]
+    fn a_cap_takes_the_smaller_count_on_each_dimension() {
+        let pool = res(8000, 250, 4, Some("a100")).with_disk_bytes(100);
+        let host = res(6000, 240, 2, Some("h100")).with_disk_bytes(150);
+        let capped = pool.capped_by(&host);
+        assert_eq!(capped, res(6000, 240, 2, Some("a100")).with_disk_bytes(100));
+        let no_gpus = pool.capped_by(&res(9000, 300, 0, None).with_disk_bytes(50));
+        assert_eq!(no_gpus, res(8000, 250, 0, None).with_disk_bytes(50));
+        let larger = res(16_000, 500, 8, Some("a100")).with_disk_bytes(200);
+        assert_eq!(pool.capped_by(&larger), pool);
+    }
+
+    /// Asserts that dropping the GPUs drops their count and class and keeps CPU, memory and
+    /// disk. It catches a class left behind for zero GPUs.
+    #[test]
+    fn without_gpus_keeps_every_other_dimension() {
+        let host = res(6000, 240, 2, Some("h100")).with_disk_bytes(150);
+        assert_eq!(
+            host.without_gpus(),
+            res(6000, 240, 0, None).with_disk_bytes(150)
         );
     }
 

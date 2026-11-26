@@ -277,8 +277,10 @@ books no disk and does not name `scratch-quota` refuses a host that enforces a q
 `shape-not-accepted` and the reason `quota-without-pool-disk`, since it would book nothing for
 runs the host books at its default. A pool that names `scratch-quota` must book disk.
 
-A pool declares `exec = "container"` (default) or `"sandbox-exec"`. The pool floor (4.5)
-requires `runtime` to equal the pool's `exec`, and for a pool with gpus, `gpu-toolkit`.
+A pool declares `exec = "container"` (default) or `"sandbox-exec"`. The pool's required
+capabilities (4.5) are `runtime` equal to the pool's `exec`, and, for a host that reports GPUs in a
+pool whose shape has GPUs, `gpu-toolkit` (a host reporting GPUs without one in a pool whose shape has
+none joins with no GPU booked).
 Admission refuses with two new codes beside `SHAPE_NOT_ACCEPTED`
 (`crates/js-agent-wire/src/refusal.rs`): `host-contract` (runtime or toolkit missing) and
 `execution-mismatch` (reported mode differs from the pool's). Both name the field. A job that
@@ -290,12 +292,15 @@ declares `exec` books its hosts with that mode among their capabilities, so a jo
 and a job that requires one finds no host there unless the pool's `[capabilities]` name `exec`
 (the join then compares each host's reported value with it). `disk-gib` is a minimum everywhere
 (`Shape::satisfies`, `js_caps::Request`): a pool that lists `disk-gib` in its `[capabilities]`
-admits only hosts that report at least that much, and serves jobs that require up to it.
+admits only hosts that report at least that much, and serves jobs that require up to it. It is
+the one amount a hello is held to, and only when the operator writes it as a capability; the
+`[shape]` amounts are not (4.5).
 
 Two limits, stated plainly:
 
-- Registry pools place jobs by the pool's booked shape. A host's reported `disk-gib` is only an
-  admission floor against the pool's promise, and never places a job by itself. A job with
+- Registry pools place jobs by the shape each host is booked at (what it reports) with the pool's
+  capabilities. A host's reported `disk-gib` is only checked at
+  admission against the pool's `disk-gib` capability, and never places a job by itself. A job with
   `disk-gib` on a pool whose `[capabilities]` omit `disk-gib` gets no fit.
 - Disk is read at hello and again at most every 30 s (`js_agent::disk`); the heartbeat carries
   `disk_gib` when it differs from the last value the server took (absent: unchanged; an older
@@ -439,12 +444,17 @@ does not, so it is a catalog check (10.1), not a start refusal.
 
 ### 4.5 The pool floor
 
-The registry takes one `Shape` per pool and refuses a hello whose shape does not satisfy it
-(`docs/design/registration.md`, Admission). An elastic pool has many sizes. The floor is
-built offline from the config: cpu 1000 millis, memory 1 GiB, `gpus` = the least GPU count the
-provider crate's table gives the `types`, `gpu_class` = the one canonical model they share, and the required capabilities of 3.6 (`runtime` equal
-to `exec`, `gpu-toolkit` if gpus > 0). Real capacity is whatever the agent reports; the
-floor only keeps a wrong machine out. PROPOSAL (requirements do not set the floor).
+The registry takes one `Shape` per pool. It is no admission floor on amounts: a host's capacity
+is what it reports, and a host is booked at the CPU, memory, GPUs and disk it reports, less or
+more than the `Shape`, whose numbers are booked only for a host with no hello since a restart. A
+hello is refused only when its capabilities do not meet
+the `Shape`'s capabilities, or its GPUs are of another class than the `Shape`'s (`docs/design/registration.md`,
+Admission). An elastic pool has many sizes. Its `Shape` (still called its floor, the least a
+launched machine of it brings) is built offline from the config: cpu 1000 millis, memory 1 GiB,
+`gpus` = the least GPU count the provider crate's table gives the `types`, `gpu_class` = the one
+canonical model they share, and the required capabilities of 3.6 (`runtime` equal to `exec`,
+`gpu-toolkit` if the `Shape` has GPUs and the host reports some). Real capacity is whatever the agent reports; the
+capabilities only keep a wrong machine out. PROPOSAL (requirements do not set the floor).
 
 ## 5. Provider plumbing (requirement 12)
 
@@ -862,7 +872,7 @@ Rules, each tied to a requirement or to existing behaviour:
   call; dropping the record while it does would leave the machine to turn up as an orphan,
   which is never released (6.4).
 - Booting to Registered: the first hello whose `instance.instance_id` equals the name is
-  admitted by the registry (held to the pool's shape floor). At the scaler's next step the
+  admitted by the registry (its capabilities held to the pool's). At the scaler's next step the
   hello's shape is compared with the offer recorded for the acquire (`js_scaler::verify_hello`,
   design 5.6.1, step 6): accelerator model by canonical name after alias resolution,
   accelerator count at least the offer's, the same architecture, and CPU, memory and disk
@@ -1118,7 +1128,7 @@ released at `boot_timeout` (F22).
 4. The record becomes Booting. The instance boots, cloud-init runs the bootstrap, the host joins
    the tailnet and the agent says hello to `advertise_url` with the token and its instance line.
 5. The registry admits the hello (token unused, unexpired, instance equals the name, shape
-   satisfies the floor including `runtime`, pool below `max_machines`), answers `Welcome` with
+   meets the pool's capabilities including `runtime`, pool below `max_machines`), answers `Welcome` with
    the host credential (7.2) and the host registers with its real shape. The consumer's poll arrives and the registry places the lease.
 6. After `idle` of quiet: Draining, then Releasing (the registry sets the mark only if the host is
    still quiet, 6.2), then revoke the token, terminate, read back, delete the tailnet device.
