@@ -58,15 +58,14 @@ mod tests {
         (0..len).collect()
     }
 
-    /// Asserts three signatures against values a separate HMAC-SHA256 implementation (Python's
-    /// `hmac`) computed: the Standard Webhooks specification's own test vector, whose secret is
-    /// `whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw` and whose body is not empty; an empty body under
-    /// the shortest key; and an empty body under the longest key, which fills an HMAC block.
-    /// Catches a signed text that is not `id.timestamp.body` (a missing trailing dot for an
-    /// empty body, say), a key encoded before it is used, a URL-safe alphabet in place of the
-    /// standard one, a missing `v1,`, and a padding of the key that differs from HMAC's.
+    /// Asserts the Standard Webhooks specification's own test vector, whose secret is
+    /// `whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw` and whose body is not empty, against the value
+    /// the specification publishes. It runs here, beside the signer, because only the signer's
+    /// private form takes a body; the empty-body vectors are in `tests/sign.rs`. Catches a
+    /// signed text that is not `id.timestamp.body`, a key encoded before it is used, a
+    /// URL-safe alphabet in place of the standard one, and a missing `v1,`.
     #[test]
-    fn signature_matches_the_reference_for_an_empty_body() {
+    fn signature_matches_the_specifications_test_vector() {
         let spec_key = STANDARD
             .decode("MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw")
             .expect("the specification's secret");
@@ -78,16 +77,6 @@ mod tests {
                 br#"{"test": 2432232314}"#
             ),
             "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE="
-        );
-        let shortest = SigningKey::new(counting(32)).expect("a key");
-        assert_eq!(
-            sign(&shortest, "msg_2KWPBgLlAfxdpx2AI54pPJ85f4W", 1_798_761_600),
-            "v1,2YmkLa/YKkNC4uexQssZVwnzHzOjtQlyypa8SU0FrjI="
-        );
-        let longest = SigningKey::new(counting(64)).expect("a key");
-        assert_eq!(
-            sign(&longest, "AAECAwQFBgcICQoLDA0ODw", 4_102_444_800),
-            "v1,ug4avuwX87kotpVr757uFh4pnDXf8ideJ6MmAaEKWpI="
         );
     }
 
