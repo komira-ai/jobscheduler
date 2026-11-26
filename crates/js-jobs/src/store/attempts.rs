@@ -13,7 +13,9 @@ use js_state::{Cond, Store, StoreTime, Txn};
 
 use super::index::put_job;
 use super::{JobStore, ensure};
-use crate::attempt::{AttemptRecord, AttemptRow, AttemptTrail, RETRY_HOST_BAR, retry_barred};
+use crate::attempt::{
+    AttemptRecord, AttemptRow, AttemptTrail, RETRY_HOST_BAR, retry_barred, retry_note,
+};
 use crate::codec::decode_attempt_row;
 use crate::error::JobStoreError;
 use crate::ids::{IdSource, JobId};
@@ -35,7 +37,9 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     ///   ([`retry_barred`]);
     /// - the job is queued again with `not_before` as its
     ///   [`AttemptTrail::retry_not_before`], keeping its priority and its submit time, so its
-    ///   place in the queue;
+    ///   place in the queue, and its queue status says it waits for its retry
+    ///   (`WAITING_FOR_RETRY`), with a `RETRY_SCHEDULED` event that names the attempt's host and
+    ///   says how the attempt ended and how long the wait is (from now to `not_before`);
     /// - its allocation moves to releasing and its start leaves its host's dispatch queue, with
     ///   a stop queued where the start may have reached the host for an end the server decided
     ///   (a start that timed out, a host lost), exactly as [`JobStore::end_job`] does.
@@ -78,6 +82,9 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         let stop = !end.told_by_host();
         let until = now.saturating_add(RETRY_HOST_BAR);
         let prepare_bars = retry_barred(job.prepare_bars.clone(), host, until);
+        let note = retry_note(host, &end, number, not_before.since(now));
+        let mut queue = job.queue.clone();
+        queue.apply(&note, now);
         let attempt = AttemptTrail::closed(&job, end, now, true).waiting(not_before);
         let queued = JobRecord {
             state: JobState::Queued,
@@ -91,6 +98,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             held_refusals: Vec::new(),
             capacity_refusals: Vec::new(),
             attempt,
+            queue,
             ..job.clone()
         };
         let txn = put_job(Txn::new(), Some(&job), &queued, Cond::Version(version))?;

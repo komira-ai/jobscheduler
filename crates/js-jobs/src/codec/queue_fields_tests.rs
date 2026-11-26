@@ -116,6 +116,7 @@ fn every_code_and_kind_reads_back_and_an_unknown_byte_reads_as_unspecified() {
         QueueCode::FailingOver,
         QueueCode::Placed,
         QueueCode::WaitingForMachine,
+        QueueCode::WaitingForRetry,
     ];
     for code in codes {
         let job = JobRecord {
@@ -133,6 +134,7 @@ fn every_code_and_kind_reads_back_and_an_unknown_byte_reads_as_unspecified() {
         JobEventKind::Placed,
         JobEventKind::Requeued,
         JobEventKind::WaitingForMachine,
+        JobEventKind::RetryScheduled,
     ];
     for kind in kinds {
         let event = JobEvent {

@@ -206,6 +206,7 @@ fn each_input_of_a_pass_brings_the_next_one_back() {
             capacity: None,
             load_admission: false,
             quota_disk_bytes: None,
+            start_fence: false,
         },
     );
     rig.ran(&offered, &[]);

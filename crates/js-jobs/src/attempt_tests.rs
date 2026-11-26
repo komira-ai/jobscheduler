@@ -574,3 +574,61 @@ fn a_retry_bar_never_shortens_a_longer_one() {
         );
     }
 }
+
+/// Asserts the note a retry records, by exact equality: the job waits for its retry, with a
+/// retry event naming the attempt's host, and a detail that says how the attempt ended (a lost
+/// host, a failed start, or any other end in plain words) and the wait in whole seconds,
+/// rounded up so a wait of part of a second is never shown as none; a retry is no placement
+/// attempt. Catches a retry that leaves the job showing the status of its ended attempt, a
+/// detail that names the wrong attempt or rounds a short wait down to 0 s, and a retry counted
+/// among the placement attempts.
+#[test]
+fn a_retry_note_says_how_the_attempt_ended_and_how_long_it_waits() {
+    let host = host("host-a");
+    let cases = [
+        (
+            AttemptOutcome::HostLost,
+            1,
+            Duration::from_secs(10),
+            "attempt 1 on host host-a ended: its host was lost; attempt 2 may be placed in 10 s",
+        ),
+        (
+            AttemptOutcome::StartFailed,
+            7,
+            Duration::from_millis(1500),
+            "attempt 7 on host host-a ended: it failed to start; attempt 8 may be placed in 2 s",
+        ),
+        (
+            AttemptOutcome::Succeeded,
+            2,
+            Duration::ZERO,
+            "attempt 2 on host host-a ended: it ended; attempt 3 may be placed in 0 s",
+        ),
+        (
+            AttemptOutcome::Failed,
+            3,
+            Duration::from_nanos(1),
+            "attempt 3 on host host-a ended: it ended; attempt 4 may be placed in 1 s",
+        ),
+        (
+            AttemptOutcome::Cancelled,
+            u32::MAX,
+            Duration::from_secs(3600),
+            "attempt 4294967295 on host host-a ended: it ended; attempt 4294967295 may be placed in 3600 s",
+        ),
+    ];
+    for (outcome, number, wait, detail) in cases {
+        let end = record(outcome, None, None, None, None);
+        assert_eq!(
+            retry_note(&host, &end, number, wait),
+            QueueNote {
+                code: QueueCode::WaitingForRetry,
+                detail: detail.to_owned(),
+                event: Some(JobEventKind::RetryScheduled),
+                host: Some(host.clone()),
+                attempt: false,
+            },
+            "{outcome:?}"
+        );
+    }
+}

@@ -29,6 +29,9 @@ pub enum QueueCode {
     Placed,
     /// A machine was launched for the job, and the job waits for it to join.
     WaitingForMachine,
+    /// An attempt of the job ended in a way that retries, and the job waits out its backoff,
+    /// and for the ended attempt's allocation to be freed, before its next attempt is placed.
+    WaitingForRetry,
 }
 
 /// What one event of a job's history says happened. The values and their numbers are those of
@@ -54,6 +57,8 @@ pub enum JobEventKind {
     Requeued,
     /// A machine was launched for the job.
     WaitingForMachine,
+    /// An attempt of the job ended in a way that retries, and its next attempt was queued.
+    RetryScheduled,
 }
 
 /// What one outcome of a pass records on a job: the code it now shows and the detail for a

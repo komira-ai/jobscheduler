@@ -120,6 +120,7 @@ use js_types::sched::{FarmTime, LeaseId as SchedLeaseId, LeaseKind, OperationId,
 use js_types::{EXEC_KEY, HostId, JobNetwork, QueueCode, QueueNote, Resources};
 use tracing::warn;
 
+use super::jobs_retry::placeable;
 use super::jobs_walker::{Walker, walker};
 use super::whole_jobs::{WholeJobStep, WholeJobs};
 use super::{Engine, Placed, TablesFrom, recovered_as};
@@ -686,13 +687,14 @@ impl SchedPlacer {
         let (live, queued, marks) = (&tables.live, &tables.queued, &tables.marks);
         self.learn_freed(jobs, live);
         let now = self.now();
+        let ready = placeable(queued, live, hosts.open, now);
         let grace = hosts.whole.map_or(0, |whole| whole.regain_grace_ms);
         let open: BTreeSet<HostId> = hosts.open.keys().cloned().collect();
         // The whole-host engine marks and commits only contained jobs: it does not yet hold a
         // job to the hosts that run host jobs or report `layered-rootfs`, so a whole-host job
         // with host isolation, or with layers, mounts or host ports (which the job service
         // refuses at submit), stays queued rather than drain a host it could not start on.
-        let whole: Vec<JobRecord> = queued
+        let whole: Vec<JobRecord> = ready
             .iter()
             .filter(|job| {
                 let needs_whole = matches!(job.spec.needs, Needs::WholeHost);
@@ -748,10 +750,10 @@ impl SchedPlacer {
                 }
             }
         }
-        let (decided, waiting) = self.engine().walk_jobs(queued, hosts.open, now);
+        let (decided, waiting) = self.engine().walk_jobs(&ready, hosts.open, now);
         self.engine().take_refused().announce(metrics);
         self.tell_expiries(metrics);
-        for (job, host, booked, mut placement) in self.sized_from_of(queued, decided, now) {
+        for (job, host, booked, mut placement) in self.sized_from_of(&ready, decided, now) {
             placement.queue = noted.placed(&job, &host);
             let capacity = self.commit_capacity_of(hosts, &host);
             let booked = room::booked_on(hosts.open, &host, booked);
