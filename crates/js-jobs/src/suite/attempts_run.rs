@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use js_state::Store;
 use js_state::conformance::Backend;
-use js_types::RetryPolicy;
+use js_types::{JobEventKind, QueueCode, QueueNote, RetryPolicy};
 
 use super::{
     allocation_of, job_of, messages_of, now_of, place_and_run, refused_as, running_spec, submit,
@@ -298,6 +298,19 @@ pub fn a_retry_queues_the_next_attempt_with_its_counts_reset_and_its_host_barred
         held_refusals: Vec::new(),
         capacity_refusals: Vec::new(),
         attempt: first_ended(&before, now, end, true).waiting(not_before),
+        queue: {
+            let mut queue = before.queue.clone();
+            let note = QueueNote {
+                code: QueueCode::WaitingForRetry,
+                detail: "attempt 1 on host host-a ended: it ended; attempt 2 may be placed in 30 s"
+                    .to_owned(),
+                event: Some(JobEventKind::RetryScheduled),
+                host: Some(host("host-a")),
+                attempt: false,
+            };
+            queue.apply(&note, now);
+            queue
+        },
         ..before.clone()
     };
     assert_eq!(queued, expected, "{name}: the job answered");

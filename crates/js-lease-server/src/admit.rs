@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use js_agent_wire::{
     DISPATCH_CAPABILITY, HELD_BEAT_CAPABILITY, HOST_JOBS_CAPABILITY, LOAD_ADMISSION_CAPABILITY,
+    START_FENCE_CAPABILITY,
 };
 use js_caps::{FLAG_SET, LAYERED_ROOTFS, XCODE, is_mount_provider_key};
 use js_elastic::CapacityProvider;
@@ -167,6 +168,14 @@ pub(crate) fn reports_load_admission(capabilities: &BTreeMap<String, String>) ->
         .get(LOAD_ADMISSION_CAPABILITY)
         .map(String::as_str)
         == Some(FLAG_SET)
+}
+
+/// Whether `capabilities`, those a host's hello reported, say its agent tells two placements of
+/// one job apart by their allocations ([`START_FENCE_CAPABILITY`] is exactly [`FLAG_SET`]), so
+/// a later attempt of a job may be placed on it after an earlier one ran there
+/// (`docs/design/job-retry-and-completion-callback.md`, section 3.5).
+pub(crate) fn reports_start_fence(capabilities: &BTreeMap<String, String>) -> bool {
+    capabilities.get(START_FENCE_CAPABILITY).map(String::as_str) == Some(FLAG_SET)
 }
 
 /// Whether `capabilities`, those a host's hello reported, say its agent polls for its starts
@@ -347,6 +356,27 @@ mod tests {
         }
         let held = BTreeMap::from([(HELD_BEAT_CAPABILITY.to_owned(), "true".to_owned())]);
         assert!(!reports_dispatch_poll(&held));
+    }
+
+    /// Asserts that a hello reports `start-fence` only with the capability set to exactly
+    /// `true`: absent, `false`, another case or a padded value do not, and another capability
+    /// set to `true` does not stand for it. Catches a host whose agent may judge a start by its
+    /// job id alone offered a later attempt of a job it already ran.
+    #[test]
+    fn start_fence_is_reported_only_by_the_value_true() {
+        let said = |value: Option<&str>| {
+            let caps: BTreeMap<String, String> = value
+                .map(|value| (START_FENCE_CAPABILITY.to_owned(), value.to_owned()))
+                .into_iter()
+                .collect();
+            reports_start_fence(&caps)
+        };
+        assert!(said(Some("true")));
+        for other in [None, Some("false"), Some("TRUE"), Some("true ")] {
+            assert!(!said(other), "{other:?}");
+        }
+        let held = BTreeMap::from([(HELD_BEAT_CAPABILITY.to_owned(), "true".to_owned())]);
+        assert!(!reports_start_fence(&held));
     }
 
     /// Asserts that a hello reports layered rootfs only with the capability `layered-rootfs`

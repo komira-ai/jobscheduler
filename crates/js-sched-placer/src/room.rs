@@ -42,6 +42,11 @@ pub struct OpenHost {
     /// The disk the host's agent books for a job that names none: its scratch quota's default.
     /// `None`: the host has no such default, and such a job books no disk there.
     pub quota_disk_bytes: Option<u64>,
+    /// Whether the host's hello reported `start-fence`
+    /// ([`js_agent_wire::START_FENCE_CAPABILITY`]): its agent tells two placements of one job
+    /// apart, so it may take a later attempt of a job it held an earlier one of. `false`, the
+    /// default: such a job is kept off it ([`crate::engine`]'s `jobs_retry`).
+    pub start_fence: bool,
 }
 
 /// What a job of `booked` books on a host whose agent books `quota_disk_bytes` for a job that

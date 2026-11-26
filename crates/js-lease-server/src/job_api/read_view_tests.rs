@@ -153,9 +153,9 @@ fn full_shown() -> v1::JobSpec {
 /// command and the sandbox-exec mode on the open network; a job with no disk, GPU class,
 /// exec mode, network or isolation as absent or unspecified (a contained job reads back as
 /// unspecified, a host job as host); a placed job's host; a running job whose cancel was
-/// asked for; and no retry policy, callback, callback status or attempt history, with attempt
-/// 0, since no record holds them. Catches a field dropped or mapped to the wrong value, and a
-/// file's contents shown.
+/// asked for; and, for a job never retried, no retry policy, callback, callback status or
+/// attempt history, attempt 1 and nothing dropped. Catches a field dropped or mapped to the
+/// wrong value, and a file's contents shown.
 #[tokio::test]
 async fn get_job_shows_every_field_of_the_record() {
     let clock = clock();
@@ -183,7 +183,7 @@ async fn get_job_shows_every_field_of_the_record() {
         attempts: 0,
         events: Vec::new(),
         dropped_events: 0,
-        attempt: 0,
+        attempt: 1,
         attempt_history: Vec::new(),
         retry_not_before_ms: None,
         callback_status: None,
@@ -410,11 +410,13 @@ async fn every_way_a_job_ends_is_shown() {
                 truncated: false,
                 times: result.times,
                 usage: None,
+                attempt: 1,
                 ..v1::JobResult::default()
             },
             None => v1::JobResult {
                 state: state.into(),
                 times,
+                attempt: 1,
                 ..v1::JobResult::default()
             },
         };
@@ -836,6 +838,7 @@ async fn a_refused_start_shows_its_code_and_detail() {
         let expected = v1::JobResult {
             state: v1::JobState::FailedToStart.into(),
             times: shown.times,
+            attempt: 1,
             ..v1::JobResult::default()
         };
         assert_eq!(result, expected, "{text}");
@@ -905,6 +908,7 @@ async fn an_input_failure_shows_its_reason_and_code() {
             reason: reason.into(),
             times: result.times,
             input_failure: code.map(str::to_owned),
+            attempt: 1,
             ..v1::JobResult::default()
         };
         assert_eq!(result, expected, "{text}");

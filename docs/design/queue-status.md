@@ -39,6 +39,7 @@ set on the events that name a host: a placement and a requeue.
 | `FAILING_OVER` | 4 | An acquire for the job was refused for capacity: pass 2 asks the next zone, offer or provider. |
 | `PLACED` | 5 | The job was placed on a host. |
 | `WAITING_FOR_MACHINE` | 6 | A machine was launched for the job, and the job waits for it to join. |
+| `WAITING_FOR_RETRY` | 7 | An attempt of the job ended in a way that retries (`docs/design/job-retry-and-completion-callback.md`): the job waits out its backoff, and for the ended attempt's allocation to be freed, before its next attempt is placed. The detail says how the attempt ended and how long the wait is. |
 
 The server writes only these values. A later release may append values; it never renumbers or reuses one. A reader that meets a
 value it does not know reads it as `UNSPECIFIED`, and so does the store (section 5).
@@ -55,6 +56,7 @@ value it does not know reads it as `UNSPECIFIED`, and so does the store (section
 | `PLACED` | 5 | The job was placed; `host_id` names the host. |
 | `REQUEUED` | 6 | A failed whole-host prepare, or a start refused by a host held for maintenance, with no room for it or still fetching its bundle, sent the job back; `host_id` names the host. |
 | `WAITING_FOR_MACHINE` | 7 | The job began to wait for a machine launched for it. |
+| `RETRY_SCHEDULED` | 8 | An attempt of the job ended in a way that retries and its next attempt was queued; `host_id` names the attempt's host, and the detail says how it ended and the wait. |
 
 The same rule holds: values are appended, never renumbered, and an unknown one reads as `UNSPECIFIED`.
 
@@ -95,6 +97,7 @@ The outcomes (`js_sched::queue_status::Outcome`):
 | `HeldRequeued { host, whole_host }` | a host held for maintenance refused the job's start and sent it back | `WAITING_FOR_WHOLE_HOST` for a whole-host job, else `WAITING_FOR_CAPACITY` | `REQUEUED`, with the host | no |
 | `CapacityRequeued { host }` | a host refused the job's start for capacity (`no-capacity`) and sent it back | `WAITING_FOR_CAPACITY` | `REQUEUED`, with the host | no |
 | `BundlePendingRequeued { host, whole_host }` | a host still fetching the job's bundle refused the job's start (`bundle-pending`) and sent it back | `WAITING_FOR_WHOLE_HOST` for a whole-host job, else `WAITING_FOR_CAPACITY` | `REQUEUED`, with the host | no |
+| a retry (not an outcome of a pass) | the job store's retry of an attempt (`JobStore::retry_txn`), in its own commit | `WAITING_FOR_RETRY` | `RETRY_SCHEDULED`, with the attempt's host | no |
 
 Two rules join pass 1 and pass 2:
 

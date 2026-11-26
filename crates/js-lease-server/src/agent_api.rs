@@ -792,5 +792,13 @@ mod held_tests;
 mod whole_restart_tests;
 
 #[cfg(test)]
+#[path = "agent_api_retry_tests.rs"]
+mod retry_tests;
+
+#[cfg(test)]
+#[path = "agent_api_retry_end_tests.rs"]
+mod retry_end_tests;
+
+#[cfg(test)]
 #[path = "agent_api_cluster_tests.rs"]
 mod cluster_tests;
