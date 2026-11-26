@@ -154,6 +154,49 @@ fn a_put_mount_is_committed_once_before_the_retirement() {
     assert_eq!(rig.rt.outputs_report(&handle()), None, "answered once");
 }
 
+/// Asserts that a run's put target outlives a restart: the journal records it with the run,
+/// and the next process, which takes the run back by its supervisor's exit record (written
+/// here where the supervisor writes it), commits the job's pack at the removal and reports it
+/// once. Catches a run taken back that reports its exit and never commits the output its job
+/// wrote, which the build service would then wait for in vain.
+#[test]
+fn a_put_target_is_committed_by_the_process_that_takes_the_run_back() {
+    let (mut rig, root) = rig("put-adopt");
+    let exec = started(&mut rig, &root, Vec::new());
+    write_pack(&exec, b"packed before the restart");
+    assert!(matches!(rig.settle(&handle()), Status::Exited(_)));
+    let journal = js_agent::native::Journal::new(&rig.dir.path("native-leases"));
+    let record = journal.runs().unwrap().remove("7.0").unwrap();
+    let put = record.put.expect("the put target is journaled");
+    assert_eq!(put.dir, root.join("cas/b/b1/n1"));
+    assert_eq!(
+        (put.key_prefix.as_str(), put.output.as_str()),
+        ("cas/b/b1/n1", ".kbf-out/pack")
+    );
+    let exit = rig.launcher.last().record_dir.join("exit.json");
+    fs::write(
+        exit,
+        br#"{"ended":{"how":"exited","value":0},"job_pid":null,"asid":null}"#,
+    )
+    .unwrap();
+    let config = PutConfig {
+        root: root.clone(),
+        node: node(),
+    };
+    let mut next = rig.reopened().with_put(Some(config));
+    assert_eq!(next.list_labelled().unwrap().len(), 1);
+    assert!(matches!(next.poll(&handle()).unwrap(), Status::Exited(_)));
+    next.remove(&handle()).unwrap();
+    let pack = root.join("cas/b/b1/n1/pack");
+    assert_eq!(fs::read(&pack).unwrap(), b"packed before the restart");
+    let report = OutputsReport {
+        key: "cas/b/b1/n1/pack".to_owned(),
+        sha256: hex::encode(Sha256::digest(b"packed before the restart")),
+        bytes: 25,
+    };
+    assert_eq!(next.outputs_report(&handle()), Some(report));
+}
+
 /// Asserts that an agent with a trees root admits the build service's put mount before its
 /// directory exists: the put target is no tree and is never resolved against the trees root's
 /// rules, so its missing `<nonce>` folder is not `input-unavailable`. Catches every build

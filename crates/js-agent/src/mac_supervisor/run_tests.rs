@@ -37,6 +37,8 @@ pub(crate) struct Fake {
     pub(crate) applied: RefCell<Option<SandboxInit>>,
     /// A path that must be gone when the job starts, and whether it was.
     pub(crate) gone_at_spawn: RefCell<Option<(PathBuf, bool)>>,
+    /// The pid the host says is its parent.
+    pub(crate) parent: u32,
 }
 
 impl Fake {
@@ -49,6 +51,7 @@ impl Fake {
             job: 0,
             applied: RefCell::new(None),
             gone_at_spawn: RefCell::new(None),
+            parent: AGENT,
         }
     }
 
@@ -96,6 +99,11 @@ impl SuperviseHost for Fake {
         Ok(())
     }
 
+    fn parent(&self) -> u32 {
+        self.log.borrow_mut().push("parent".to_owned());
+        self.parent
+    }
+
     fn spawn(&self, _spec: &SuperviseSpec) -> io::Result<Box<dyn JobChild>> {
         let watched = self.gone_at_spawn.borrow().clone();
         if let Some((path, _)) = watched {
@@ -120,6 +128,10 @@ impl SuperviseHost for Fake {
         records.write_exit(record)
     }
 }
+
+/// The pid of the agent that started the fake host's supervisor: its parent unless a test
+/// says otherwise.
+const AGENT: u32 = 812;
 
 /// What the fake host's job reports it used when it is waited for.
 const USED: JobRusage = JobRusage {
@@ -295,6 +307,78 @@ fn a_failing_step_ends_the_start() {
     }
 }
 
+/// A spec that names the agent that started the supervisor has the parent checked after the
+/// profile and right before the job: with that agent still the parent the job starts and runs
+/// as before; with another parent (the agent died, and launchd took the supervisor) the start
+/// ends at the spawn step, before the job, with the status 125, one error line that names the
+/// agent and the parent, the exit record saying the same, and no ready record. Catches a job
+/// started by a supervisor whose run no journal names: the next agent ends the run's account
+/// and nothing would end that job.
+#[test]
+fn a_supervisor_whose_agent_is_gone_starts_no_job() {
+    let (_dir, records) = scratch("parent-kept");
+    let host = Fake::new();
+    let kept = SuperviseSpec {
+        parent: Some(AGENT),
+        ..spec(&records)
+    };
+    let (code, err, ready, _) = supervised(&host, &kept);
+    assert_eq!(
+        host.calls(),
+        [
+            "records",
+            "audit-session",
+            "drop",
+            "limits",
+            "profile",
+            "parent",
+            "spawn",
+            "ready",
+            "wait",
+            "exit"
+        ]
+    );
+    assert_eq!((code, err.as_str()), (0, ""));
+    assert_eq!(ready.map(|ready| ready.job_pid), Some(4321));
+
+    let (_dir, records) = scratch("parent-gone");
+    let host = Fake {
+        parent: 1,
+        ..Fake::new()
+    };
+    let gone = SuperviseSpec {
+        parent: Some(AGENT),
+        ..spec(&records)
+    };
+    let (code, err, ready, exit) = supervised(&host, &gone);
+    let why = "the agent (pid 812) that started it is gone: its parent is 1";
+    assert_eq!(
+        host.calls(),
+        [
+            "records",
+            "audit-session",
+            "drop",
+            "limits",
+            "profile",
+            "parent",
+            "exit"
+        ]
+    );
+    assert_eq!(code, status::SETUP_FAILED);
+    assert_eq!(err, format!("js-agent: __supervise-native: spawn: {why}\n"));
+    assert_eq!(ready, None);
+    let want = ExitRecord {
+        ended: Ended::SetupFailed {
+            step: Step::Spawn,
+            why: why.to_owned(),
+        },
+        job_pid: None,
+        asid: None,
+        usage: None,
+    };
+    assert_eq!(exit, Some(want));
+}
+
 /// Records that cannot be opened end the start with only the error line: nothing else is
 /// called, nothing is written. Catches a supervisor that starts a job it could never report.
 #[test]
@@ -443,6 +527,14 @@ fn the_system_host_starts_waits_for_and_kills_the_job() {
     };
     assert!(SystemHost.spawn(&absent).is_err());
     assert!(!SystemHost.is_root(), "the tests run as an ordinary user");
+}
+
+/// The real host's parent is this process's parent, as the standard library reads it: the
+/// pid the check of a spec's `parent` compares. Catches a parent read as this process's own
+/// pid, or its group's.
+#[test]
+fn the_system_host_names_this_process_s_parent() {
+    assert_eq!(SystemHost.parent(), std::os::unix::process::parent_id());
 }
 
 /// The real host's wait says what the job used, its descendants it waited for included: a job

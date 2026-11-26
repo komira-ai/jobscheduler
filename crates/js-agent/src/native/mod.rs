@@ -57,8 +57,12 @@
 //! the bundle's rules applied to the job's own (see `native/bundle.rs`). The pins end with
 //! the run.
 //!
-//! A restart of the agent ends every native run: the pool's open retires every account an
-//! earlier process lent, and the journal's runs are listed ended (`native/adopt.rs`).
+//! A run outlives a restart of the agent: its supervisor goes on waiting for the job and writes
+//! the exit record with no agent running. The next process takes back each run of the journal
+//! whose supervisor is still the process it recorded, or whose exit record is there: the
+//! pool's open keeps the run's account, and the run is polled, stopped and removed as one this
+//! process started. Every other account an earlier process lent is retired by the open, and
+//! the other runs are listed ended (`native/adopt.rs`).
 //!
 //! # Privacy grants (TCC)
 //!
@@ -164,7 +168,7 @@ use crate::lifecycle::{
 };
 use crate::logs::LiveLogs;
 use crate::mac_accounts::{Pool, Retired};
-use crate::mac_supervisor::Launcher;
+use crate::mac_supervisor::{Launcher, StartOf};
 use crate::mac_sweep::{MacTable, ProcessTable};
 use crate::mac_usage::macos::MacProcesses;
 use crate::mac_usage::{ProcessUsage, Series};
@@ -172,7 +176,7 @@ use crate::usage::{MonotonicClock, UsageClock as _};
 
 pub use accounts::Accounts;
 pub use files::HandOver;
-pub use journal::{Journal, RunRecord};
+pub use journal::{Journal, PutRecord, RunRecord};
 pub use mounts::{MountRoot, roots_of};
 pub use network::Ceiling;
 pub use pf::{Enforcer, PfFlags, PfPolicy, ProvisionError};
@@ -275,6 +279,9 @@ pub struct NativeRuntime {
     series: Series,
     /// The monotonic clock the samples are timed by, in microseconds.
     mono_us: Clock,
+    /// When a process started, by which a supervisor is known again after a restart
+    /// (`native/adopt.rs`).
+    start_of: StartOf,
 }
 
 /// Finds an account's own per-user temporary and cache folders (its uid's, below
@@ -305,8 +312,9 @@ impl NativeRuntime {
     /// A runtime whose runs start through `launcher`, over the account pool of
     /// `config.accounts` on this Mac, which it opens when `config.full_disk_access` is
     /// [`FullDiskAccess::Granted`] (and leaves closed otherwise: every start is then refused).
-    /// The pool is opened with no adopted job, so every account an earlier process lent is
-    /// retired. Its run ids are `term.0`, `term.1` and so on.
+    /// The pool keeps the accounts of the runs of the journal this process takes back
+    /// ([`NativeRuntime::adoptable`]) and retires every other account an earlier process
+    /// lent. Its run ids are `term.0`, `term.1` and so on.
     ///
     /// # Errors
     ///
@@ -317,7 +325,8 @@ impl NativeRuntime {
         term: u64,
     ) -> Result<Self, RuntimeError> {
         gate(&config)?;
-        let pool = accounts::open(&config.accounts, config.full_disk_access)?;
+        let adopted = Self::adoptable(&config.journal);
+        let pool = accounts::open(&config.accounts, config.full_disk_access, &adopted)?;
         let own: OwnFolders = Arc::new(crate::mac_accounts::own_folders);
         Ok(Self::open_ungated(pool, launcher, config, term)?.with_own_folders(own))
     }
@@ -379,6 +388,7 @@ impl NativeRuntime {
             processes: Arc::new(MacProcesses::new()),
             series: Series::default(),
             mono_us: system_mono_clock(),
+            start_of: Arc::new(crate::mac_supervisor::macos::start_of),
         })
     }
 
@@ -592,10 +602,10 @@ impl Runtime for NativeRuntime {
         self.drop_unstarted()
     }
 
-    /// Every run this runtime holds, the runs an earlier process left listed ended first
-    /// (`native/adopt.rs`).
+    /// Every run this runtime holds, the runs an earlier process left taken back or listed
+    /// ended first (`native/adopt.rs`).
     fn list_labelled(&mut self) -> Result<Vec<Found>, RuntimeError> {
-        self.list_ended()?;
+        self.take_back()?;
         Ok(self.found())
     }
 
@@ -624,8 +634,8 @@ impl Runtime for NativeRuntime {
     }
 
     /// What the run's processes used: from the samples of the polls and the supervisor's wait
-    /// of the job (`crate::mac_usage`); none for a run this process did not start, or one
-    /// with neither.
+    /// of the job (`crate::mac_usage`); none for a run an earlier process left that was not
+    /// taken back, or one with neither. A run taken back is sampled from its first poll here.
     fn usage(&mut self, id: &RunHandle) -> Option<JobUsage> {
         let job = self.runs.get(&id.0)?.job.as_ref()?;
         job.usage.usage(job.reaped)

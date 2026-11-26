@@ -113,13 +113,31 @@ pub fn pool_settings(dir: &Scratch, slots: u32) -> Settings {
 
 /// The pool of `settings` in `dir`'s `accounts` directory, over `host`, with no adopted job.
 pub fn open_pool(dir: &Scratch, settings: &Settings, host: &Arc<FakeAccounts>) -> Arc<Pool> {
+    open_pool_adopting(dir, settings, host, &BTreeSet::new())
+}
+
+/// The pool of `settings` in `dir`'s `accounts` directory, over `host`, keeping the accounts of
+/// the jobs `adopted`.
+pub fn open_pool_adopting(
+    dir: &Scratch,
+    settings: &Settings,
+    host: &Arc<FakeAccounts>,
+    adopted: &BTreeSet<String>,
+) -> Arc<Pool> {
     let pool = Pool::with_settings(
         &dir.path("accounts"),
         settings.clone(),
-        &BTreeSet::new(),
+        adopted,
         host.clone(),
     );
     Arc::new(pool.unwrap_or_else(|why| panic!("the pool: {why}")))
+}
+
+/// The pool of `settings` in `dir`'s `accounts` directory, over `host`, opened as an agent's
+/// next process opens it: keeping the accounts of the runs of `dir`'s journal it takes back.
+pub fn reopen_pool(dir: &Scratch, settings: &Settings, host: &Arc<FakeAccounts>) -> Arc<Pool> {
+    let adopted = NativeRuntime::adoptable(&dir.path("native-leases"));
+    open_pool_adopting(dir, settings, host, &adopted)
 }
 
 /// The configuration of the runtimes made here, in `dir`: a loopback cap, the tool roots
@@ -238,14 +256,21 @@ impl Rig {
     }
 
     /// A second runtime over the same state, as an agent's next process opens it: the pool
-    /// is opened again over the same host with no adopted job, the journal is the same.
+    /// is opened again over the same host keeping the accounts of the runs the journal's
+    /// supervisors let it take back ([`NativeRuntime::adoptable`]), the journal is the same.
     pub fn reopened(&self) -> NativeRuntime {
-        let pool = open_pool(&self.dir, &self.settings, &self.accounts);
+        self.reopened_with_pool().0
+    }
+
+    /// [`Rig::reopened`], with the pool the second runtime opened.
+    pub fn reopened_with_pool(&self) -> (NativeRuntime, Arc<Pool>) {
+        let pool = reopen_pool(&self.dir, &self.settings, &self.accounts);
         let config = config(&self.dir, &self.settings);
-        NativeRuntime::over(Some(pool), self.launcher.clone(), config, TERM + 1)
+        let rt = NativeRuntime::over(Some(pool.clone()), self.launcher.clone(), config, TERM + 1)
             .unwrap()
             .with_process_table(end::GroupTable::new(self.launcher.clone()))
-            .with_process_usage(Arc::new(usage::Fixed::none()))
+            .with_process_usage(Arc::new(usage::Fixed::none()));
+        (rt, pool)
     }
 
     /// A run of `native`, with its scratch directory made as the lifecycle makes it.
