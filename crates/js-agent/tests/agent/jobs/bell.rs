@@ -1,7 +1,7 @@
 //! The bell between the job worker and the session: the worker rings it for news, a worker
-//! with no room backs the session off (never past the interval), and the whole agent reports a start's `running` at once.
-//! Nothing here waits for a time: rings are counted, waits are recorded, and every wait on the
-//! worker is for an event with a hang guard.
+//! with no room backs the session off (never past the interval), and the whole agent reports a
+//! start's `running` at once. Nothing here waits for a time: rings are counted, waits are
+//! recorded, and every wait on the worker is for an event with a hang guard.
 
 use std::cell::RefCell;
 use std::sync::Arc;
