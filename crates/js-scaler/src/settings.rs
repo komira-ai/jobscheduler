@@ -72,7 +72,8 @@ pub struct Settings {
     /// least 1 (a smaller figure is read as 1).
     pub boot_fail_trip_after: u32,
     /// How long an unanswered or unseen acquire is waited for before it is given up on,
-    /// and the least gap between the two clean lists that settle it.
+    /// and the least gap between the two clean lists that settle it. The providers keep a
+    /// separate, shorter hold (600 seconds) for their own `max_machines` cap.
     pub unknown_hold: Duration,
     /// The most launches one step makes.
     pub max_step: usize,

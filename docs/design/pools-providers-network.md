@@ -851,7 +851,9 @@ Rules, each tied to a requirement or to existing behaviour:
   `max_instances`, `max_spend_per_hour` and the day total, until two successful lists, at
   least `unknown_hold` apart, both show no instance with this acquire id or name. Default
   `unknown_hold` is 30 minutes, longer than `boot_timeout` (PROPOSAL; it was 10 minutes in
-  `ElasticConfig`, and the setting stays configurable). If an instance with the record's
+  `ElasticConfig`, and the setting stays configurable). The providers' own cap-guard hold, which
+  counts a launch whose answer was lost toward their `max_machines`, stays at 10 minutes and is a
+  separate setting. If an instance with the record's
   name appears after Failed, it is adopted back into Booting (its token was revoked, so
   the scaler mints nothing and releases it: an adopted-after-Failed instance goes straight to
   Releasing) and counted throughout. This is the "never double-launch" rule, and a late

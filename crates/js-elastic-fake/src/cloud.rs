@@ -43,7 +43,7 @@ pub struct Knobs {
     /// gone.
     pub remove_lag: Duration,
     /// How long an acquire whose answer was lost stays unresolved, unless a list shows
-    /// its machine first.
+    /// its machine first. The default (30 minutes) equals js-scaler's `Settings` default.
     pub unknown_hold: Duration,
 }
 

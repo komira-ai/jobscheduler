@@ -133,8 +133,9 @@ instance list during the run, and that the CEO has given the go for this live la
 
 A launch the cloud refused leaves no record and no instance; the reason is in the log (a quota or capacity
 refusal is held back for the offer's cool-down, an authorisation refusal is not retried). If the launch call
-was lost and the scheduler cannot tell whether an instance exists, it holds the machine for `unknown_hold`
-(600 s by default) and finds it by its labels. **CI** (`acquire` and `list` tests of the fake).
+was lost and the scheduler cannot tell whether an instance exists, the provider holds the launch against
+its machine cap for its own `unknown_hold` (600 s by default) and finds it by its labels, while the
+scaler's `unknown_hold` (30 minutes by default) settles the pool's record of the acquire. **CI** (`acquire` and `list` tests of the fake).
 
 ## 4. Teardown
 
