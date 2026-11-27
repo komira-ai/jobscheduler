@@ -16,7 +16,7 @@
 //!   `--mount-root-ro=tierstore-fs=` (tierstore's mount);
 //! - `--cpu-series`, `--host-second-samples` and `--memory-series`.
 //!
-//! One line is the test's alone: `--image-allow=auth.docker.io/`. The jobs run busybox from Docker
+//! One line is the test's alone: `--image-allow=auth.docker.io/token`. The jobs run busybox from Docker
 //! Hub (`docker.io/library/`, a prefix the farm allows too), whose pull tokens come from
 //! `auth.docker.io`, and the agent asks a token host only when it is the registry's own or that
 //! of another allowed prefix; the farm's jobs pull from `ghcr.io/komira-ai/`, which issues its
@@ -64,7 +64,7 @@ pub fn write(server: &str, server_cert: &str, pool: &str, s3: SocketAddr) {
         "--image-allow=ghcr.io/komira-ai/".to_owned(),
         "--image-allow=docker.io/library/".to_owned(),
         // Not the farm's: the token host of the job image's registry (see the module's docs).
-        "--image-allow=auth.docker.io/".to_owned(),
+        "--image-allow=auth.docker.io/token".to_owned(),
         "--egress=allow-list".to_owned(),
         format!("--egress-allow={s3}"),
         format!("--mount-root-ro=trees={MOUNT}/trees"),
