@@ -152,6 +152,7 @@ fn the_release_passes_secrets_to_the_package_call_alone() {
     for file in [
         "artifacts.yml",
         "beta.yml",
+        "farm.yml",
         "js-agent-macos-first-install.yml",
         "js-agent-native-isolation.yml",
         "macos-probe.yml",

@@ -64,13 +64,31 @@ impl Tree {
     }
 
     fn run(&self, step: Step, own: Result<&str, &str>, units: &dyn Units) -> Done {
+        self.run_staged(step, None, own, units)
+    }
+
+    /// [`Tree::run`], with the staged release directory `artifact` (for `prepare`).
+    fn run_staged(
+        &self,
+        step: Step,
+        artifact: Option<&Path>,
+        own: Result<&str, &str>,
+        units: &dyn Units,
+    ) -> Done {
         let own_host_id = || own.map(str::to_owned).map_err(str::to_owned);
         let machine = Machine {
             stat: &as_root,
             own_host_id: &own_host_id,
             ..Machine::system()
         };
-        run_on(step, None, &self.params, &machine, units, &Ticks::default())
+        run_on(
+            step,
+            artifact,
+            &self.params,
+            &machine,
+            units,
+            &Ticks::default(),
+        )
     }
 }
 
@@ -392,5 +410,241 @@ fn on_launchd_cutover_restarts_a_service_launchd_loaded_before_the_bootstrap() {
         assert_eq!(kicked, kicks, "{calls:?}");
         assert!(record.unwrap().restarted, "{kicks}");
         assert_eq!(tool.loaded.borrow()[label].state, "running", "{kicks}");
+    }
+}
+
+/// The lease server's reading of the host `mac-1` live in the session that began at 5000.
+const LIVE_5000: &str = r#"{"id":"mac-1","state":"live","epoch":3,"session_started_ms":5000,"leases":0,"releasing":false,"agent_version":"1.4.0","runtime":"native"}"#;
+
+/// The same host live in the session that began at 6000: an agent that started again.
+const LIVE_6000: &str = r#"{"id":"mac-1","state":"live","epoch":4,"session_started_ms":6000,"leases":0,"releasing":false,"agent_version":"1.4.0","runtime":"native"}"#;
+
+/// How one config update on a Mac's unit manager ended, up to its `verify`.
+struct Update {
+    cutover: Done,
+    verify: Done,
+    record: Option<Record>,
+    /// The connections the lease server served.
+    served: usize,
+}
+
+/// One config update on a Mac's unit manager over `tool`, the fake `launchctl` the test set up
+/// for `label`, on the machine's root `/`: the flags file in place (the server, the pool `farm`,
+/// the host `mac-1`, mode 0600), the package staged with the same flags in the pool `pool`,
+/// `prepare`, the installer's activate (the file written beside its path and renamed over it),
+/// `cutover` and `verify`, the lease server answering its connections as `replies` says.
+fn launchd_update(
+    name: &str,
+    label: &str,
+    tool: &Launchctl,
+    pool: &str,
+    replies: &[Reply],
+) -> Update {
+    let stub = Stub::start(replies);
+    let tree = Tree::new(name, label);
+    let lines = |pool: &str| {
+        vec![
+            format!("--server={}", stub.url),
+            format!("--pool={pool}"),
+            "--host-id=mac-1".to_owned(),
+        ]
+    };
+    tree.flags(&lines("farm").iter().map(String::as_str).collect::<Vec<_>>());
+    fs::write(&tree.params.token_file, "tok-0123456789\n").unwrap();
+    fs::set_permissions(&tree.params.token_file, fs::Permissions::from_mode(0o600)).unwrap();
+    let flags = fs::canonicalize(&tree.params.flags_file).unwrap();
+    let placed = tree
+        .staged
+        .join("tree")
+        .join(flags.strip_prefix("/").unwrap());
+    fs::create_dir_all(placed.parent().unwrap()).unwrap();
+    fs::write(&placed, format!("{}\n", lines(pool).join("\n"))).unwrap();
+    fs::set_permissions(&placed, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let clock = Ticks::default();
+    let units = LaunchUnits::new(tool)
+        .with_clock(&clock)
+        .with_gate(Path::new(&tree.params.flags_file));
+    let own = Err("unused");
+    let done = tree.run_staged(Step::Prepare, Some(&tree.staged), own, &units);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    let installing = flags.with_file_name(".flags.installing");
+    fs::copy(&placed, &installing).unwrap();
+    fs::rename(&installing, &flags).unwrap();
+    let cutover = tree.run(Step::Cutover, own, &units);
+    let verify = tree.run(Step::Verify, own, &units);
+    Update {
+        cutover,
+        verify,
+        record: tree.record(),
+        served: stub.stop(),
+    }
+}
+
+/// Whether `calls` hold a command that stops or starts the service.
+fn restarts_any(calls: &[String]) -> bool {
+    calls.iter().any(|call| {
+        ["bootout", "bootstrap", "kickstart"]
+            .iter()
+            .any(|verb| call.contains(verb))
+    })
+}
+
+/// Asserts that on a Mac's unit manager a config package re-versioned with the same files is
+/// applied in one pass: `cutover` runs no `launchctl` command that stops or starts the agent and
+/// asks the lease server nothing, and `verify` succeeds at its first look, on the session the
+/// agent was already in.
+///
+/// Catches the update that failed on every Mac after five minutes with `no_hello` ("no new
+/// session of the host said hello in 285 s") while the agent ran on, unrestarted, and that held
+/// back every other update of the Mac for that time.
+#[test]
+fn on_launchd_unchanged_files_succeed_in_one_pass_with_no_restart() {
+    let label = "com.example.agent";
+    let tool = Launchctl::default();
+    tool.load(label, Service::running());
+    let update = launchd_update(
+        "config-machine-launchd-unchanged",
+        label,
+        &tool,
+        "farm",
+        &[Reply::Answer(200, LIVE_5000)],
+    );
+    assert_eq!(
+        update.cutover.outcome,
+        Outcome::Success,
+        "{:?}",
+        update.cutover
+    );
+    assert_eq!(
+        update.cutover.report.detail.as_deref(),
+        Some(
+            "the files the package placed are as they were before the update: nothing was restarted"
+        )
+    );
+    assert_eq!(
+        update.verify.outcome,
+        Outcome::Success,
+        "{:?}",
+        update.verify
+    );
+    assert_eq!(update.verify.report, Default::default());
+    let calls = tool.calls();
+    assert!(!restarts_any(&calls), "{calls:?}");
+    assert!(tool.launches.borrow().is_empty());
+    assert_eq!(tool.loaded.borrow()[label].runs, 1);
+    let record = update.record.unwrap();
+    assert_eq!(
+        (record.unchanged, record.restarted, record.verified),
+        (true, false, true)
+    );
+    assert_eq!(update.served, 1);
+}
+
+/// Asserts that on a Mac's unit manager a config package whose flags changed boots the agent
+/// out and bootstraps it, and that `verify` waits past the session the agent was in before for
+/// the new one.
+///
+/// Catches an update of changed flags that the comparison takes for unchanged, which would leave
+/// the agent on the flags it read at its start.
+#[test]
+fn on_launchd_changed_files_restart_and_wait_for_the_new_session() {
+    let label = "com.example.agent";
+    let tool = Launchctl::default();
+    tool.load(label, Service::running());
+    let update = launchd_update(
+        "config-machine-launchd-changed",
+        label,
+        &tool,
+        "farm-2",
+        &[
+            Reply::Answer(200, LIVE_5000),
+            Reply::Answer(200, LIVE_5000),
+            Reply::Answer(200, LIVE_6000),
+        ],
+    );
+    assert_eq!(
+        update.cutover.outcome,
+        Outcome::Success,
+        "{:?}",
+        update.cutover
+    );
+    assert_eq!(update.cutover.report, Default::default());
+    assert_eq!(
+        update.verify.outcome,
+        Outcome::Success,
+        "{:?}",
+        update.verify
+    );
+    let calls = tool.calls();
+    let at = |args: &str| calls.iter().position(|call| *call == line(args)).unwrap();
+    assert!(
+        at(&format!("bootout system/{label}"))
+            < at(&format!("bootstrap system {}", plist_of(label))),
+        "{calls:?}"
+    );
+    assert_eq!(tool.launches.borrow()[label], 1);
+    let record = update.record.unwrap();
+    assert_eq!(
+        (
+            record.unchanged,
+            record.restarted,
+            record.session_started_ms,
+            record.verified
+        ),
+        (false, true, Some(5000), true)
+    );
+    assert_eq!(update.served, 3);
+}
+
+/// Asserts that on a Mac's unit manager, with the files unchanged, an agent that is down (a
+/// daemon that died, or a label launchd does not hold) ends `verify` at once as `agent_down`,
+/// class environment, naming the agent's label, with nothing started and nothing asked of the
+/// lease server.
+///
+/// Catches a down agent reported as `no_hello` after a wait of the whole bound, a fault of the
+/// host told as one of the config.
+#[test]
+fn on_launchd_a_down_agent_with_unchanged_files_is_agent_down() {
+    let label = "com.example.agent";
+    let cases = [
+        (
+            Some(Service::new("not running", 1, Exit::Code(1))),
+            "failed (failed)",
+        ),
+        (None, "inactive (dead)"),
+    ];
+    for (service, shown) in cases {
+        let tool = Launchctl::default();
+        tool.plists.borrow_mut().insert(label.to_owned());
+        if let Some(service) = service {
+            tool.load(label, service);
+        }
+        let update = launchd_update(
+            "config-machine-launchd-down",
+            label,
+            &tool,
+            "farm",
+            &[Reply::Answer(200, LIVE_5000)],
+        );
+        assert_eq!(update.cutover.outcome, Outcome::Success, "{shown}");
+        assert_eq!(update.verify.outcome, Outcome::Failure, "{shown}");
+        assert_eq!(
+            update.verify.report.reason,
+            Some(Reason::AgentDown),
+            "{shown}"
+        );
+        assert_eq!(update.verify.report.class, Class::Environment, "{shown}");
+        assert_eq!(
+            update.verify.report.detail,
+            Some(format!(
+                "the agent's unit {label} is {shown}: the files did not change, so nothing was \
+                 restarted, and the agent is not running"
+            ))
+        );
+        let calls = tool.calls();
+        assert!(!restarts_any(&calls), "{shown}: {calls:?}");
+        assert!(!update.record.unwrap().verified, "{shown}");
+        assert_eq!(update.served, 0, "{shown}");
     }
 }

@@ -8,7 +8,9 @@
 //!   repository that sets no endpoint (a fork, or before the deploy front is set up) or no tailnet
 //!   tags skips both, and the call never asks the Tailscale join for a node without tags (which
 //!   it refuses). `cp-deploy-digest` needs `plan`,
-//!   `publish` and `deploy-tool`; `cp-deploy` needs `plan` and `cp-deploy-digest`.
+//!   `publish`, `deploy-tool` and `blackbox` (the gate before the farm: with no status function
+//!   in [`CP_IF`], a red black-box test deploys nothing); `cp-deploy` needs `plan` and
+//!   `cp-deploy-digest`.
 //! - **`cp-deploy-digest`** holds no permission (`permissions: {}`), names no environment and
 //!   runs on `ubuntu-24.04`. Its actions are exactly [`DOWNLOADS`] (the `xtask` that
 //!   `deploy-tool` built, and the release's files and bundles as `publish` uploaded them), its
@@ -169,7 +171,7 @@ fn gate_problems(name: &str, job: &Node, needs: &[&str]) -> Vec<String> {
 }
 
 fn digest_problems(job: &Node) -> Vec<String> {
-    let mut problems = gate_problems(DIGEST, job, &["deploy-tool", "plan", "publish"]);
+    let mut problems = gate_problems(DIGEST, job, &["blackbox", "deploy-tool", "plan", "publish"]);
     if !entry(job, "permissions").is_some_and(Node::is_empty_map) {
         problems.push(format!("{DIGEST}: permissions are not {{}}"));
     }
