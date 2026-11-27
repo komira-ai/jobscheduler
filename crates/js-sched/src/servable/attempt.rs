@@ -19,8 +19,9 @@ pub(crate) struct Attempt<'a> {
     /// The start time of each worker in `reserved` (farm milliseconds; `None`: not known):
     /// the request is placed there only as backfill that ends by it.
     pub(crate) starts: &'a BTreeMap<WorkerId, Option<u64>>,
-    /// How long the request counts for backfill ([`crate::Backfill`]); `None` never fits.
-    pub(crate) backfill: Option<u64>,
+    /// How long the request counts for backfill and the margin it keeps there
+    /// ([`crate::Backfill`]); a duration of `None` never fits.
+    pub(crate) backfill: backfill::Ask,
     /// Workers barred to it ([`crate::Bar`] other than a back-off): never granted to it.
     pub(crate) barred: &'a BTreeSet<WorkerId>,
     /// Workers its earlier runs ended on as the farm's fault.
@@ -52,19 +53,19 @@ impl Attempt<'_> {
 
     /// Whether the request may go on `worker` at `now`: one of the workers it is held to,
     /// if it is held to some, not barred to it, and either no one holds it or it fits
-    /// there as backfill ([`backfill::fits`]).
+    /// there as backfill ([`backfill::Ask::fits`]).
     pub(super) fn may_use(&self, worker: &WorkerId, now: FarmTime) -> bool {
         let allowed = self.only.is_none_or(|only| only.contains(worker));
         allowed && !self.barred.contains(worker) && self.may_share(worker, now)
     }
 
     /// Whether the request may go on `worker` at `now` as far as holds go: a worker no
-    /// one holds, or a held one where it fits as backfill ([`backfill::fits`]).
+    /// one holds, or a held one where it fits as backfill ([`backfill::Ask::fits`]).
     fn may_share(&self, worker: &WorkerId, now: FarmTime) -> bool {
         !self.reserved.contains(worker)
             || self
                 .starts
                 .get(worker)
-                .is_some_and(|start| backfill::fits(now.as_millis(), self.backfill, *start))
+                .is_some_and(|start| self.backfill.fits(now.as_millis(), *start))
     }
 }

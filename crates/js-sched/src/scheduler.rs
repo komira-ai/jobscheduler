@@ -663,7 +663,7 @@ impl Scheduler {
             // granted one barred to it.
             let (barred, backoff) = self.drain.kept_off(id, now);
             let avoid = whole::Drain::avoiding(&op.avoid, &backoff);
-            let backfill = self.backfill_duration(id);
+            let backfill = self.backfill_ask(id);
             // A whole-machine request is not placed on a worker another request's mark is on.
             let takes_whole = request.kind == LeaseKind::WholeMachine && request.pin.is_none();
             let unmarked = takes_whole.then(|| self.off_marks(&reserved, id)).flatten();

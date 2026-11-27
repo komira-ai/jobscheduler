@@ -39,8 +39,9 @@ pub struct DrainCost {
 /// The hosts ordered by drain cost, smallest first: the host's tail (see [`tail`]) minus
 /// `now`, then the fewest leases, then the lowest host id. A host with an unknown tail
 /// (a lease with neither an estimate nor a max-wall bound) ranks after every host with
-/// a known one; among those the order is the fewest leases, then the lowest host id.
-/// With no estimates given, a lease's end is its max-wall bound, so the order is that of
+/// a known one; among those the order is the fewest leases, then the lowest host id. (A
+/// caller that knows the longest a lease may run counts such a lease as bound there
+/// before it calls this, as `js-sched` does with bounds enforced.) With no estimates given, a lease's end is its max-wall bound, so the order is that of
 /// the latest end bound.
 ///
 /// Hosts of different machine providers that cost the same to drain are told apart by
@@ -68,8 +69,10 @@ pub fn drain_cost(hosts: &[HostLoad], now: u64) -> Vec<DrainCost> {
 }
 
 /// The default margin [`fits_in_tail`] keeps between backfilled work and the end of the
-/// tail: one minute. `js-sched`'s backfill gate keeps it, and reads a lease already past
-/// its end as ending this long from now.
+/// tail: one minute. It is the default of `js-sched`'s backfill setting, whose margin an
+/// operator may set (the lease server's `server.backfill_margin`); `js-sched` keeps that
+/// margin before a start and reads a lease already past its end as ending that long from
+/// now.
 pub const DEFAULT_BACKFILL_MARGIN_MS: u64 = 60_000;
 
 /// The end of one lease: its estimate cut to its max-wall bound when it has one, else the
