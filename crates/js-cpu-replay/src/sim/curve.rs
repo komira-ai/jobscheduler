@@ -52,7 +52,7 @@ const HOST_SHARE: u64 = 4;
 /// slowdown is under [`CPU_PRESSURE_MAX_PERMILLE`] of its run, as the job service takes a run
 /// on a node under that pressure, and as the replay's flat sizing takes one.
 pub(super) fn clean(slowed_ms: u64, ran_ms: u64) -> bool {
-    slowed_ms.saturating_mul(1000) / ran_ms.max(1) < CPU_PRESSURE_MAX_PERMILLE
+    slowed_ms.saturating_mul(1000) / ran_ms.max(1) < u64::from(CPU_PRESSURE_MAX_PERMILLE)
 }
 
 /// What the replay learns of one class: its profile, whether its runs' series were usable, and
