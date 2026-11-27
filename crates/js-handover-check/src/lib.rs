@@ -1,7 +1,10 @@
-//! `agent-handover-check` (docs/runbooks/agent-handover-check.md): watches named hosts through
+//! The agent hand-over check (docs/runbooks/agent-handover-check.md): watches named hosts through
 //! the job service while a js-agent release rolls onto them, and says whether each one handed
 //! its running jobs to the new agent instead of draining. It is read-only: it runs only
 //! `js host list`, `js job list` and `js job get`, and changes nothing.
+//!
+//! It runs as the program `js-handover-check` ([`main`]), which the build farm builds on its own,
+//! and as the verb `cargo xtask agent-handover-check` (xtask's `handover`, this crate).
 //!
 //! It reads the hosts and the jobs running on them once, then reads the hosts every
 //! `--interval-secs`, at most `--samples` times, until every named host lists an agent version
@@ -20,7 +23,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use clap::Args as ClapArgs;
+use std::process::ExitCode;
+
+use clap::{Args as ClapArgs, Parser};
 use serde::Deserialize;
 
 /// The flags of the verb.
@@ -50,6 +55,54 @@ pub struct Args {
     /// The `js` program.
     #[arg(long, default_value = "js")]
     pub js: PathBuf,
+}
+
+/// The program `js-handover-check`: the check's flags and nothing else.
+#[derive(Debug, Parser)]
+#[command(
+    name = "js-handover-check",
+    about = "Watch hosts, read-only, while a js-agent release rolls onto them, and fail one that did not hand its running jobs to the new agent"
+)]
+struct Cli {
+    #[command(flatten)]
+    args: Args,
+}
+
+/// The program `js-handover-check`: [`run`] with the flags given, its outcome reported by
+/// [`report`].
+#[must_use]
+pub fn main() -> ExitCode {
+    let cli = Cli::parse();
+    report(
+        &run(&cli.args),
+        &mut std::io::stdout().lock(),
+        &mut std::io::stderr().lock(),
+    )
+}
+
+/// Reports `result`: a pass is its line on `out` and status 0; a usage error its reason on `err`
+/// and status 2; any other end its reason on `err` and status 1. Each line on `err` begins with
+/// `js-handover-check: `.
+pub fn report(
+    result: &Result<String, Error>,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> ExitCode {
+    // A stream that cannot be written leaves the status to say how the check ended.
+    match result {
+        Ok(line) => {
+            let _ = writeln!(out, "{line}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            let _ = writeln!(err, "js-handover-check: {e}");
+            if matches!(e, Error::Usage(_)) {
+                ExitCode::from(2)
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+    }
 }
 
 /// Why the check did not pass.

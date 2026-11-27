@@ -10,18 +10,28 @@ no job of those hosts ends lost, failed or failed to start, or is started again.
 
 The check is read-only: it runs only `js host list`, `js job list` and `js job get`. It starts
 no roll and changes no host; the roll is started the usual way, apart from it. It is a held step
-only because it needs a client token of the job service, so the owner runs it, with the verb
-`cargo xtask agent-handover-check` from a checkout (`crates/xtask/src/handover.rs`).
+only because it needs a client token of the job service, so the owner runs it.
+
+It is one check (`crates/js-handover-check`) with two ways to run it, with the same flags,
+verdicts and exit statuses:
+
+- the program `js-handover-check`, which needs no Rust toolchain where it runs. The build farm
+  builds it (`buck2 build //crates/js-handover-check:release --show-full-output` prints where
+  buck2 put it; [farm.md](../farm.md) says how buck2 reaches the farm); copy it to the machine
+  that runs the check;
+- the verb `cargo xtask agent-handover-check`, from a checkout with cargo.
 
 ## Before
 
 - The hosts run a release that can hand over: `js-agent --version` prints `stops: drain
   handover` on each (the first update from a release without that line still drains, and the
   check then fails it by name, as it should).
-- The job service lists an agent version for every host to watch. A server that has restarted
-  since a host's hello lists none until the host says hello again, unless the server stores the
-  version in the host's row; the check refuses a host with no version, since it could not tell
-  whether that host moved.
+- The job service lists an agent version for every host to watch. The lease server keeps the
+  version a hello gave in the host's row, so a server that has restarted lists it again once a
+  heartbeat of that session reaches it, with no new hello. A host lists none when its row was
+  written by a lease server that did not keep the version (until the host says hello again), or
+  when a restarted server has had no heartbeat from it yet; the check refuses a host with no
+  version, since it could not tell whether that host moved. Wait a heartbeat and start it again.
 - No host to watch is cordoned: the check refuses one, since a drain could not be told from it.
 - Jobs run on every host to watch (start a build large enough to run for the length of the
   roll). A host with no job before shows nothing about a hand-over, and the check ends
@@ -34,10 +44,12 @@ only because it needs a client token of the job service, so the owner runs it, w
 1. With the build running and before the roll starts, start the check, naming each host:
 
    ```sh
-   cargo xtask agent-handover-check --server https://<job service> \
+   js-handover-check --server https://<job service> \
      --token-file <client token file> --out-dir <workspace scratch directory> \
      --host <host> --host <host> ...
    ```
+
+   (or `cargo xtask agent-handover-check` with the same flags).
 
    It prints each host's agent version and the ids of the jobs running on it, then reads the
    hosts every `--interval-secs` seconds (20), at most `--samples` times (360, two hours), until
