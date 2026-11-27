@@ -54,6 +54,9 @@ fn load_view(fallback: bool, measured: Option<u32>, working_set: Option<u64>) ->
         vm_cpu_millis: 0,
         vm_memory_bytes: 0,
         cold_this_window: 0,
+        implausible_lease_cpu: false,
+        implausible_idle: false,
+        unchecked_usec: 0,
     }
 }
 
