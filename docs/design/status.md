@@ -70,7 +70,7 @@ Columns:
 
 ## multi-instance.md
 
-As read: Status: design, living document. Most gaps are Built (G2, G4 mostly, G5 mostly, G7, G12, G15, G19 server and agent). Still Designed: G3 removal, G5 leftovers, G6, G9, G11, G16.
+As read: Status: design, living document. Most gaps are Built (G2, G4 mostly, G5 mostly, G7, G12, G15, G19 server and agent). Still Designed: G3 removal, G5 leftovers, G6, G9, G16. G11 Built by komira-ai/jobscheduler#1140.
 
 | Section | Claim | On main | Tracking |
 |---|---|---|---|
@@ -86,11 +86,11 @@ As read: Status: design, living document. Most gaps are Built (G2, G4 mostly, G5
 | G15 (s0 cost) measure the two forms | G15 chooses between node/ through the Store and a plain node table by measuring both at the deployment's host count; s4 says the write is measured in G15's PR | decision, no code | - |
 | G6 (s3.6, s5, s9, s12 order step 4) | Settlement by node rows: the claimed job pass loses a host's allocations by node/ heard_at and version; the local gone map and the claim bypass go | no | komira-ai/jobscheduler#1137 (new) |
 | G9 (s3.6, s3.5 brake, s9) | The scaler under the rule: one step per pool per period by duty claim; records at row version; each launch a row at Cond::Absent before the provider call; caps/budgets in the transaction; brake a row; release via hostmark; launched machine joins with a certificate | no | komira-ai/jobscheduler#1139 (new) |
-| G11 (s3.7, s3.1, s9) usage rows per instance | A host-minute flushed by two instances keeps both: per-instance minute rows beside the hour pack, reader sums | no | komira-ai/jobscheduler#1140 (new) |
-| G11 (s3.7) usage prune | Usage prune claimed by periodic/usage-prune | no | komira-ai/jobscheduler#1140 (new) |
-| G11 (s3.7) profile eviction | Profile curves eviction at the scanned version | no | komira-ai/jobscheduler#1140 (new) |
-| G11 (s3.1) import loser starts | The first-start import's loser reads the marker and starts instead of exiting 2 | no | komira-ai/jobscheduler#1140 (new) |
-| G11 (s9) stale doc | Fix the stale 'one writer' doc in js-usage/src/store.rs | no | komira-ai/jobscheduler#1140 (new) |
+| G11 (s3.7, s3.1, s9) usage rows per instance | A host-minute flushed by two instances keeps both: per-instance minute rows beside the hour pack, reader folds (each figure to the higher) | yes: `crates/js-usage/src/store.rs:156`, `:260` | komira-ai/jobscheduler#1140 |
+| G11 (s3.7) usage prune | Usage prune claimed by periodic/usage-prune | yes: `crates/js-lease-server/src/usage_js.rs:221` | komira-ai/jobscheduler#1140 |
+| G11 (s3.7) profile eviction | Profile curves eviction at the scanned version | yes: `crates/js-usage/src/profile_store.rs:241`, `:282` | komira-ai/jobscheduler#1140 |
+| G11 (s3.1) import loser starts | The first-start import's loser reads the marker and starts instead of exiting 2 | yes: `crates/js-lease-server/src/store/import.rs:107` | komira-ai/jobscheduler#1140 |
+| G11 (s9) stale doc | Fix the stale 'one writer' doc in js-usage/src/store.rs | yes: `crates/js-usage/src/store.rs:1-27`, `crates/js-usage/src/profile_store.rs:1-17` | komira-ai/jobscheduler#1140 |
 | G12 (s6, s9, s11) | Job-store cutover tools: a dry-run copy of `<state-file>.jobs` into the store with counts and checksum per prefix, and a Postgres-to-SQLite export of job and usage rows, round-trip test | `crates/js-lease-server/src/cutover.rs:161` (`js-lease-server job-store copy`, a dry run unless `--write`), `crates/js-lease-server/src/cutover.rs:191` (`job-store export`), `crates/js-lease-server/src/cutover/rows.rs:178` (counts and SHA-256 per prefix); round trip `crates/js-lease-server/src/cutover_tests.rs:496`, through Postgres `:526`; runbook `docs/runbooks/state-database.md` section 6 | komira-ai/jobscheduler#1141 |
 | G16 (s0, s3.3 held beats, s9, s12 order step 4) | LISTEN/NOTIFY wakes placement (queue channel) and the host's dispatch poll (host channel); relisten wakes every waiter once | no | komira-ai/jobscheduler#1142 (new) |
 | G19 (s0.2, s9) wake on NOTIFY | A held dispatch poll wakes on the host's NOTIFY from another instance | no | komira-ai/jobscheduler#1142 (new) |
