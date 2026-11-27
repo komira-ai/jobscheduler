@@ -144,12 +144,15 @@ fn agent_pool_file_errors_name_the_flag() {
     ] {
         let (flag, reason) = flag_of(put(name, &text));
         assert_eq!(flag, "--agent-pool-config", "{name}");
-        assert!(reason.contains(name), "{reason}");
+        assert!(reason.contains(name), "the refusal names {name}");
     }
     let missing = scratch.path("absent.toml");
     let (flag, reason) = flag_of(replace(args, "--agent-pool-config", missing));
     assert_eq!(flag, "--agent-pool-config");
-    assert!(reason.contains("absent.toml"), "{reason}");
+    assert!(
+        reason.contains("absent.toml"),
+        "the refusal names absent.toml"
+    );
 }
 
 /// The line a retired flag or key leaves at start.

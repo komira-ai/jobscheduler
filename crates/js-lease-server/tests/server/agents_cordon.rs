@@ -150,10 +150,13 @@ async fn a_host_certificate_serves_its_own_host_only() {
         assert_eq!(code(&foreign), "certificate-host-mismatch");
         let at = path("burst-1", verb);
         let client = without_certificate(&h, method, &at, Some(crate::support::TOKEN), None).await;
-        assert_eq!(client.status, 401, "{method} {verb:?}: {}", client.body);
+        assert_eq!(
+            client.status, 401,
+            "{method} {verb:?} with the client token"
+        );
         assert_eq!(code(&client), "host-certificate-required");
         let bare = without_certificate(&h, method, &at, None, None).await;
-        assert_eq!(bare.status, 401, "{method} {verb:?}: {}", bare.body);
+        assert_eq!(bare.status, 401, "{method} {verb:?} with no bearer");
         assert_eq!(code(&bare), "host-certificate-required");
     }
     let unnamed = own(&h, "GET", "UPPER", None, &one.host, None).await;
