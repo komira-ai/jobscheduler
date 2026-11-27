@@ -41,7 +41,7 @@ fn with_watch<R>(clock: &Hand, body: impl FnOnce(&mut Watch<'_>) -> R) -> R {
 }
 
 #[test]
-fn the_pass_conditions_are_the_plans_numbers() {
+fn the_pass_conditions_are_60_60_30_and_60_seconds() {
     assert_eq!(READY_WITHIN, Duration::from_secs(60));
     assert_eq!(SESSION_WITHIN, Duration::from_secs(60));
     assert_eq!(BACK_WITHIN, Duration::from_secs(30));

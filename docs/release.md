@@ -812,11 +812,11 @@ farm's flags is made to them in the same way.
 | Test | Passes when |
 |---|---|
 | J6, the released server image | `/readyz` answers 200 within 60 s of the container's start, and a job run through the released agent ends with exit code 0 |
-| J1, the released `.deb` with the farm's flags | the host is listed live and the agent's health route answers 200 within 60 s of the unit's start, and a job ends with exit code 0 |
-| The server restarted while a job runs | the job ends with exit code 0 in its first attempt, and no listing of the hosts after the restart shows the host lost |
-| The agent updated while a job runs | from the previous release in `testing` to this one (the package installed, the handover file written, the unit restarted): the host lists the new version within 60 s, the job is still running then (handed over, not drained), and it ends with exit code 0 in its first attempt |
+| J1, the released `.deb` with the farm's flags | the host is listed live and the agent's health route answers 200 within 60 s of the unit's start, and a job that mounts a tree from the fake mount provider ends with exit code 0 |
+| The server's name not found for 60 s after the first contact | the host is listed live and the agent's health route answers 200 at every probe of the 60 s, and a job submitted in it ends with exit code 0 |
 | The server unreachable for 60 s | the job keeps running, the agent is back in a session within 30 s of the server's return, and the job ends with exit code 0 |
-| The server's name not found for 60 s after the first contact | the host is listed live and the agent's health route answers 200 at every probe of the 60 s |
+| The server restarted while a job runs | at least one listing of the hosts is read after the restart and none shows the host lost, the job never shows its host silent or itself lost, and it ends with exit code 0 in its first attempt |
+| The agent updated while a job runs | from the previous release in `testing` to this one (the package installed with dpkg, the handover file written, the unit restarted): the host lists the new version within 60 s, the job is still running then (handed over, not drained), and it ends with exit code 0 in its first attempt |
 
 A manual run of `js-blackbox.yml` (`gh workflow run js-blackbox.yml --ref <branch> -f
 version=X.Y.Z`) runs a branch's test against a release that is in `testing`. Nothing waits for
