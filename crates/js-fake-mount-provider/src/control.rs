@@ -100,7 +100,7 @@ pub(crate) async fn control(
 ) -> io::Result<()> {
     loop {
         let accepted = listener.accept().await;
-        let (stream, _) = accepted.inspect_err(|_| drop(signal.send_replace(Signal::Quit)))?;
+        let (stream, _) = accepted.inspect_err(|_| _ = signal.send_replace(Signal::Quit))?;
         let _ = tokio::time::timeout(CLIENT_LIMIT, answer(stream, &shared, &signal)).await;
         if *signal.borrow() == Signal::Quit {
             return Ok(());
