@@ -766,7 +766,8 @@ mod tests {
     /// Asserts that each deprecated whole-node key a pool file sets loads and is named in
     /// one warning, by its exact text and in key order, whatever its value (zero too),
     /// that a file setting neither has no warning, and that through `read` such a file
-    /// loads as it parses, with the same warnings. It catches a deprecated key refused, a
+    /// loads as it parses, with the same warnings, and logs each as one WARN line naming the
+    /// file, in key order, and no other warning. It catches a deprecated key refused, a
     /// warning lost or given for a key the file leaves out, and `drain_after` read again.
     #[test]
     fn deprecated_whole_node_keys_load_with_one_warning_each() {
@@ -780,19 +781,30 @@ mod tests {
         assert_eq!(notes("max_reserve_attempts = 5"), [attempts]);
         let both = "drain_after = \"0\"\nmax_reserve_attempts = 1";
         assert_eq!(notes(both), [after, attempts]);
-        // A call with no subscriber skips evaluating its fields, so the warnings would go
-        // unrun; this one runs them and drops the lines.
+        crate::api::rig::process_sink();
+        let lines = crate::api::rig::Lines::default();
         let scope = tracing::subscriber::set_default(
             tracing_subscriber::fmt()
-                .with_writer(std::io::sink)
+                .with_writer(lines.clone())
+                .with_ansi(false)
                 .finish(),
         );
         let text = whole("drain_after = \"30s\"\nmax_reserve_attempts = 3");
         let file = TempFile::new("deprecated-keys", &text);
         let loaded = read(&file.0).unwrap();
+        drop(scope);
         assert_eq!(loaded.pool, parse(&text).unwrap());
         assert_eq!(loaded.deprecated, [after, attempts]);
-        drop(scope);
+        let logged = lines.take();
+        let path = file.0.display();
+        let warned: Vec<&str> = logged
+            .lines()
+            .filter(|line| line.contains(" WARN "))
+            .collect();
+        assert_eq!(warned.len(), 2, "{logged}");
+        for (line, note) in warned.iter().zip([after, attempts]) {
+            assert!(line.ends_with(&format!("{path}: {note}")), "{logged}");
+        }
     }
 
     /// A pool file written before the whole-node keys loads unchanged in every old field:
