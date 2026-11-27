@@ -362,6 +362,19 @@ fn egress_of(_cli: &Cli) -> bool {
     false
 }
 
+/// Whether the flags turn the VM backend on (`--vm-driver`): the agent never adopts a VM run, so
+/// an update on a Mac drains the host (see `prepare`).
+#[cfg(target_os = "macos")]
+fn vms_of(cli: &Cli) -> bool {
+    cli.os.vm_driver.is_some()
+}
+
+/// Off macOS there is no `--vm-driver`.
+#[cfg(not(target_os = "macos"))]
+fn vms_of(_cli: &Cli) -> bool {
+    false
+}
+
 /// The host's certificate and key when the flags name both. It does not depend on the host id:
 /// a host id that cannot be resolved leaves the files named.
 fn identity_of(cli: &Cli) -> Option<HostIdentity> {
@@ -590,6 +603,8 @@ pub fn run_step(invocation: &Invocation, params: &Params, machine: &Machine<'_>)
     // A flags file that cannot be read says nothing of the egress: it counts as one, and the
     // update hands over only between agents that both keep egress wiring.
     let egress = flags.as_ref().map_or(true, egress_of);
+    // Nor of the VM backend: it counts as on, and a Mac update drains.
+    let vms = flags.as_ref().map_or(true, vms_of);
     let connect =
         flags.and_then(|cli| connect_from(cli, &params.state_root, &params.token_file, machine));
     let lease = match &connect {
@@ -616,6 +631,7 @@ pub fn run_step(invocation: &Invocation, params: &Params, machine: &Machine<'_>)
         token: machine.token,
         host_identity: host_identity.as_ref(),
         egress,
+        vms,
         stat: machine.stat,
         look: machine.look,
         fstab_leftover: machine.fstab_leftover,
