@@ -81,8 +81,7 @@ fn the_full_file_of_the_design_parses() {
 }
 
 /// Asserts the defaults of a pool that says nothing about them: `launch` is `plan`,
-/// `exec` is `container`, there is no idle time, the network is `default`, and the pool
-/// has no join token file. It catches a pool that launches by default, and a default
+/// `exec` is `container`, there is no idle time, and the network is `default`. It catches a pool that launches by default, and a default
 /// that drifts from the design.
 #[test]
 fn a_pool_that_says_nothing_launches_nothing_and_requires_the_container_contract() {

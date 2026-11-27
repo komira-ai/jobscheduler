@@ -402,7 +402,7 @@ A full example (shapes, a `default` provider, an aws provider, pools with a hier
 kbf's own file that maps its classes to pool selectors are in [design/configuration.md](design/configuration.md). A consumer picks pools
 in its own configuration, never the scheduler's. A pool is `name`, `providers` (the ordered hierarchy; `provider` is shorthand, 5.8),
 `shape`, `class`, `labels`, `max_machines`, `provider_max_machines`, `max_step`, `idle_timeout`, `cooldown`, `boot_timeout`,
-`max_boot_failures`, `max_taints_in_a_row`, `regain_grace`, `swap_window`, `swap_drain_grace`, `scale_down_window`, `scale_down_util`, `max_evictions` (the swap at the cap and scale-down, 5.18), `allow_host_jobs` (default false) and, to admit registering hosts, `join_token_file`.
+`max_boot_failures`, `max_taints_in_a_row`, `regain_grace`, `swap_window`, `swap_drain_grace`, `scale_down_window`, `scale_down_util`, `max_evictions` (the swap at the cap and scale-down, 5.18), `allow_host_jobs` (default false) and, and, accepted but ignored since G3, `join_token_file`.
 
 Rules, enforced when the file loads and refused with the key and the line:
 
@@ -464,7 +464,7 @@ pool, each tick:
 is unservable (8.2). Cold start is paid by the queue (D38). Reuse, caps and taint: 5.10 to 5.12.
 
 **Registration.** Every host registers: a machine says hello, so that nothing needs listing in advance, and a machine an elastic provider
-launched registers itself the same way, with the cloud's signed identity instead of a join token. The rules (identity, admission with the
+launched registers itself the same way, with the cloud's signed identity instead of a certificate (the join token it once used is removed by G3). The rules (identity, admission with the
 tainted-set check, join credentials and the deny file, instance identity, lifecycle, and the `default` provider's source) are in
 [design/registration.md](design/registration.md). Proof of admission travels with the hello in message metadata, never in a log line.
 

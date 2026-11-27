@@ -1,4 +1,4 @@
-//! What the cell's server is: the pool file, the token files, the store file and the flags
+//! What the cell's server is: the pool file, the client token file, the store file and the flags
 //! of a server whose hosts register themselves and which serves the job service, read by
 //! the server's own [`Cli`] and [`Config`].
 
@@ -21,9 +21,6 @@ use crate::elastic::{self, Cloud, ElasticPool};
 
 /// The client token of every cell's server: the bearer of [`super::ServerNode::client_call`].
 pub const CLIENT_TOKEN: &str = "sim-cell-client-token-0123456789-abcdef";
-
-/// The join token every agent of a cell says hello with.
-pub const JOIN_TOKEN: &str = "sim-cell-join-token-0123456789-abcdefgh";
 
 /// The class of the cell's one pool.
 pub const POOL_CLASS: &str = "gpu-host";
@@ -96,10 +93,10 @@ impl Shape {
 /// A server with one pool of hosts that register themselves and the job service, placing as
 /// `js-sched`, as the cell runs it.
 ///
-/// The pool admits as many machines as the scenario registers (`max_machines`), and one
-/// join token is allowed as many hellos in a burst (`--agent-hello-burst`): every agent of
-/// the cell shares the token, and the server's default bucket (60, then one a second)
-/// would refuse a cell of more hosts at its start. The limiter is covered by the server's
+/// The pool admits as many machines as the scenario registers (`max_machines`), and each
+/// host is allowed as many hellos in a burst as the cell has hosts (`--agent-hello-burst`),
+/// so the server's default bucket (60, then one a second) never refuses a host of a cell of
+/// more hosts at its start. The limiter is covered by the server's
 /// own HTTP tests and is not what a scheduling scenario is about;
 /// [`ServerSpec::hello_burst`] sets the burst back for a scenario that is about it.
 ///
@@ -142,7 +139,7 @@ pub struct ServerSpec {
 
 impl ServerSpec {
     /// A server whose one pool, `pool_name`, books `shape` (given [`ARCH`] when it names no
-    /// architecture) for each of `hosts` hosts that register with [`JOIN_TOKEN`].
+    /// architecture) for each of `hosts` hosts that register by their certificate.
     #[must_use]
     pub fn registered_pool(pool_name: &str, mut shape: Shape, hosts: usize) -> Self {
         shape
@@ -193,8 +190,7 @@ impl ServerSpec {
 
     /// A server whose one pool, `pool_name`, of class `shared-host` (which books each job's share of a host; the server books every host of it at 1 core and 1 GiB), places over an
     /// ordered list of machine providers (design 4.2 and 5.6): first a `static` one, the
-    /// `hosts` hosts that register themselves with [`JOIN_TOKEN`] (the pool's shared join
-    /// token), then one machine provider that launches for each of `providers`, first to
+    /// `hosts` hosts that register themselves by their certificates, then one machine provider that launches for each of `providers`, first to
     /// last, each its own cloud ([`crate::Cloud::ordered`]), named by its pool's name, with
     /// that pool's `max_instances` as its share (`provider_limits` `max_machines`) and its
     /// `quota_backoff` and `acquire_retry` ([`ElasticPool::failover`]). The node reads the
@@ -224,7 +220,7 @@ impl ServerSpec {
     }
 
     /// A server whose one pool, `pool_name`, of class [`WHOLE_CLASS`], books `shape` for
-    /// each of `hosts` hosts that register with [`JOIN_TOKEN`]: a job that asks for a
+    /// each of `hosts` hosts that register by their certificates: a job that asks for a
     /// whole host is given one of its hosts whole.
     #[must_use]
     pub fn whole_node_pool(pool_name: &str, shape: Shape, hosts: usize) -> Self {
@@ -267,8 +263,8 @@ impl ServerSpec {
         self.store
     }
 
-    /// This server, allowing the join token `burst` hellos before it holds the token to
-    /// one a second.
+    /// This server, allowing `burst` hellos before it holds the hellos to one a
+    /// second.
     #[must_use]
     pub fn hello_burst(mut self, burst: usize) -> Self {
         self.hello_burst = burst;
@@ -338,9 +334,9 @@ impl ServerSpec {
         )
     }
 
-    /// Writes the pool file, the two token files and the store file into `dir` and returns
+    /// Writes the pool file, the client token file and the store file into `dir` and returns
     /// the server's command line: the state file in `dir`, a first boot (or a resumed one,
-    /// for a server started again), registration into the pool with [`JOIN_TOKEN`], the
+    /// for a server started again), registration into the pool by host certificate, the
     /// hello burst, the job service's address, the store
     /// (`--store`, a SQLite file in `dir` with `--allow-sqlite-store`), and usage off.
     ///
@@ -365,18 +361,11 @@ impl ServerSpec {
             "--agent-pool-config",
         )?;
         let token = write(dir, "token", CLIENT_TOKEN, "--token-file")?;
-        let joins = write(
-            dir,
-            "agent-tokens",
-            &format!("{JOIN_TOKEN}\n"),
-            "--agent-token-file",
-        )?;
         let store = write_store(dir, at, "--store")?;
         let flags: Vec<(&str, OsString)> = vec![
             ("--state-file", dir.join("leases.toml").into_os_string()),
             ("--boot", boot(self.resume).into()),
             ("--token-file", token),
-            ("--agent-token-file", joins),
             ("--agent-pool-config", pool),
             ("--agent-hello-burst", self.hello_burst.to_string().into()),
             ("--store", store),
@@ -447,7 +436,7 @@ impl ServerSpec {
     /// the store `at`: the client token file, the store file and the configuration file
     /// written into `dir` (for the one cloud of [`ServerSpec::elastic_pool`],
     /// [`elastic::config::text`]; for the clouds of [`ServerSpec::ordered`],
-    /// [`elastic::config::ordered_text`], with the file of the shared join token), read by
+    /// [`elastic::config::ordered_text`]), read by
     /// the server with the cell's `sim-cloud` kind over `clouds`, on `clock`, the metrics
     /// timed on `clock`, and the scaler drawing its acquire ids from `entropy`.
     ///
@@ -475,12 +464,9 @@ impl ServerSpec {
         let text = match one {
             Some(cloud) => elastic::config::text(cloud, &files),
             None => {
-                let line = format!("{JOIN_TOKEN}\n");
-                let joins = write(dir, "agent-tokens", &line, "join_token_file")?;
                 let ordered = elastic::config::Ordered {
                     pool: &self.pool,
                     hosts: self.hosts,
-                    joins: Path::new(&joins),
                 };
                 elastic::config::ordered_text(clouds, &files, &ordered)
             }

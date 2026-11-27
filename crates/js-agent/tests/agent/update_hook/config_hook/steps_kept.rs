@@ -21,8 +21,8 @@ const BEFORE: &str = "--server=https://before.example:7300\n";
 /// The flags the package places.
 const AFTER: &str = "--server=https://after.example:7300\n";
 
-/// What a rollback without the join token says of the hello.
-const NO_TOKEN: &str = "no join token file: not waiting for a hello";
+/// What a rollback of a host whose flags file names no host certificate says of the hello.
+const NO_HELLO: &str = "not waiting for a hello: flags_file: the flags file names no --host-cert and --host-key: a host is identified by its certificate";
 
 /// `path` as the hook names it: its directory's links resolved.
 fn named(path: &Path) -> PathBuf {
@@ -116,12 +116,13 @@ fn a_failed_first_install_over_a_hand_placed_flags_file_restarts_the_unit_on_the
     let done = rig.run(verify);
     assert_eq!(done.report.reason, Some(Reason::NoHello), "{done:?}");
 
+    rig.without_a_host_certificate();
     let done = rig.run(rollback);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
     assert_eq!(
         done.report.detail,
         Some(format!(
-            "put back as before the update: {}; the unit was restarted; {NO_TOKEN}{}",
+            "put back as before the update: {}; the unit was restarted; {NO_HELLO}{}",
             named(&rig.params.flags_file).display(),
             stays(&rig)
         ))
@@ -154,12 +155,13 @@ fn a_failed_first_install_over_a_hand_placed_flags_file_restarts_the_unit_on_the
 fn a_rollback_after_a_crash_between_cutover_and_verify_puts_the_files_back_before_the_restart() {
     let rig = cut_over(Rig::new("config-kept-crash"));
     let flags = named(&rig.params.flags_file);
+    rig.without_a_host_certificate();
     let done = rig.run(rollback);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
     assert_eq!(
         done.report.detail,
         Some(format!(
-            "put back as before the update: {}; the unit was restarted; {NO_TOKEN}{}",
+            "put back as before the update: {}; the unit was restarted; {NO_HELLO}{}",
             flags.display(),
             stays(&rig)
         ))
@@ -272,12 +274,13 @@ fn a_first_install_with_no_file_before_says_there_is_nothing_to_put_back() {
     install(&rig);
     rig.lease.say(&[Say::Host("live", Some(1000))]);
     assert_eq!(rig.run(cutover).outcome, Outcome::Success);
+    rig.without_a_host_certificate();
     let done = rig.run(rollback);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
     assert_eq!(
         done.report.detail,
         Some(format!(
-            "not there before the update, so nothing to put back: {}; the unit was restarted; {NO_TOKEN}",
+            "not there before the update, so nothing to put back: {}; the unit was restarted; {NO_HELLO}",
             named(&rig.params.flags_file).display()
         ))
     );
@@ -306,12 +309,13 @@ fn an_update_from_a_packaged_version_rolls_back_as_before_and_writes_nothing() {
     write(&previous.join("flags"), BEFORE, 0o644);
     place(&previous, &rig.root);
     let inode = fs::metadata(&rig.params.flags_file).unwrap().ino();
+    rig.without_a_host_certificate();
     let done = rig.run(rollback);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
     assert_eq!(
         done.report.detail,
         Some(format!(
-            "already as before the update: {}; the unit was restarted; {NO_TOKEN}",
+            "already as before the update: {}; the unit was restarted; {NO_HELLO}",
             named(&rig.params.flags_file).display()
         ))
     );
@@ -576,12 +580,13 @@ fn a_copy_a_rollback_cannot_remove_is_told_and_does_not_fail_it() {
     let rig = cut_over(Rig::update("config-kept-rollback-in-the-way"));
     let making = rig.params.state_dir.join("kept.making");
     fs::write(&making, "in the way").unwrap();
+    rig.without_a_host_certificate();
     let done = rig.run(rollback);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
     assert_eq!(
         done.report.detail,
         Some(format!(
-            "put back as before the update: {}; the unit was restarted; {NO_TOKEN}; the kept copy could not be removed: {}: Not a directory (os error 20)",
+            "put back as before the update: {}; the unit was restarted; {NO_HELLO}; the kept copy could not be removed: {}: Not a directory (os error 20)",
             named(&rig.params.flags_file).display(),
             making.display()
         ))

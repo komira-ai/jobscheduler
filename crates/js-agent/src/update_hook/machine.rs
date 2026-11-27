@@ -2,30 +2,30 @@
 //! link, lease server and agent state.
 //!
 //! What a step needs of the machine comes from three places: the params, which name the agent's
-//! state root and token file; the host's flags file (`flags_file`, the file `js-agent
-//! --flags-file` reads), which names the lease server, the certificate to trust, the host id and
-//! the host's own certificate and key ([`ConnectParams`]); and the machine itself (its id, how the state directory's owner and the
-//! token file are looked at). A [`Machine`] holds those seams, so a test can run the same steps
+//! state root; the host's flags file (`flags_file`, the file `js-agent --flags-file` reads),
+//! which names the lease server, the certificate to trust, the host id and the host's own
+//! certificate and key ([`ConnectParams`]); and the machine itself (its id, how the state
+//! directory's owner and the host certificate files are looked at). A [`Machine`] holds those seams, so a test can run the same steps
 //! against a real lease server in its own process and a state directory it owns.
 //!
 //! Nothing here is an environment variable. A lease that could not be made (a flags file that
-//! cannot be used, no credential, an id that is no id) is not an error of the hook as a whole: a
+//! cannot be used, no host certificate, an id that is no id) is not an error of the hook as a whole: a
 //! step that never asks the lease server (a first install) does not need it, and one that does
 //! ends with `lease_unreachable`, class environment, saying why.
 //! A first install reads the flags file only to see whether it names the host certificate and
-//! key, which stand in for the join token; a flags file that cannot be used names none, and the
-//! install goes by the token file as it always did.
+//! key, which a host cannot be installed without; a flags file that cannot be used names none,
+//! and the install defers.
 //!
 //! The agent's state root is looked at before any step runs. An update needs the state root of
 //! the agent that runs, so one that is not there ends every step `state_invalid`: an absent root
 //! would otherwise read as "no taint, nothing owed". A state root that is there and is not
 //! private (a link, a file, another owner, open to others) ends every step `state_invalid` too,
-//! a first install's included, and the join token is never used in its place. Only a first
-//! install may find none. Either error starts with the param's name, `state_root`. The check
-//! comes before the step's lock and changes nothing; a `cutover` or `rollback` whose record says
-//! it is past its commit still says `reversible: false` (the record is read without the lock).
-//! The state root is looked up once per step: the lease's credential and the step's taint and
-//! owed checks come from the same [`StateRoot`].
+//! a first install's included. Only a first install may find none. Either error starts with
+//! the param's name, `state_root`. The check comes before the step's lock and changes nothing;
+//! a `cutover` or `rollback` whose record says it is past its commit still says
+//! `reversible: false` (the record is read without the lock).
+//! The state root is looked up once per step: the step's taint and owed checks come from the
+//! same [`StateRoot`].
 //!
 //! `drain` and `resume` ([`run_maintain`]) hold the state root to the same rule, and find the
 //! hold file there: one that is not private ends either `state_invalid`. One that is not there
@@ -40,11 +40,12 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use js_agent_wire::Taint;
-use js_client::{ClientError, HostIdentity};
+use js_client::HostIdentity;
 use js_mac_provision::daemon::AGENT_EXIT_TIMEOUT_SECS;
 use js_types::HostId;
 use js_update_hook::peek;
 
+use crate::Login;
 use crate::cli::{Cli, parse_agent_flags, resolve_host_id};
 use crate::facts::{
     CommandRunner, FileReader, Platform, SystemCommands, SystemFiles, detect, host_id, machine_id,
@@ -54,14 +55,13 @@ use crate::lifecycle::StateRoot;
 use crate::own_host::{
     Cordoned, HostReading, HttpLease, Lease, LeaseError, RequestLimit, Uncordoned,
 };
-use crate::{CredentialFile, Login};
 
 use super::ports::{Facts, NoGate, Ports, StateView, SystemClock, SystemLink};
 use super::step::{self, Env, FSTAB_LEFTOVER, LookFn, MaintainEnv, PathFacts, TokenFacts, TokenFn};
 use super::{
     ConnectParams, DirStat, Done, DrainParams, FLAGS_FILE_KEY, Invocation, MaintainInvocation,
     MaintenanceStep, Manager, Outcome, Params, PlatformUnits, PortError, Reason, Report,
-    STATE_ROOT_KEY, Step, StopRunner, TOKEN_FILE_KEY, fd_stat,
+    STATE_ROOT_KEY, Step, StopRunner, fd_stat,
 };
 
 /// How a directory of the state directory's path is looked at (see [`fd_stat`]).
@@ -76,12 +76,12 @@ pub struct Machine<'a> {
     pub stat: &'a StatFn,
     /// The id this machine registers under, when the flags file names none.
     pub own_host_id: &'a dyn Fn() -> Result<String, String>,
-    /// How the join token file is looked at.
+    /// How the host certificate and key files are looked at.
     pub token: &'a TokenFn,
     /// How the flags file is read.
     pub flags: &'a FlagsFn,
     /// The user the hook runs as: who may own the flags file besides root, and who must own
-    /// the token file.
+    /// the host key.
     pub euid: u32,
     /// How the host setup of a Mac looks at the state root and the scratch root.
     pub look: &'a LookFn,
@@ -103,7 +103,7 @@ fn system_look(path: &Path) -> io::Result<PathFacts> {
     })
 }
 
-/// The token file as the system has it, a link followed (secret mounts are links).
+/// A secret file as the system has it, a link followed (secret mounts are links).
 fn system_token(path: &Path) -> io::Result<TokenFacts> {
     let meta = std::fs::metadata(path)?;
     Ok(TokenFacts {
@@ -150,62 +150,26 @@ impl Machine<'static> {
     }
 }
 
-/// How the lease connection proves who it is, with the params key that led to it: the host's
-/// certificate and key when the flags file names them (the agent presents them then), else the
-/// host credential of the state root when it holds one, which is what the agent sends once it
-/// has one, and otherwise the token file. A state root that is there and not private is an error
-/// of its own: it is not trusted with a credential, and the join token is not used in its place
-/// (the server would refuse it on the host's own routes, which says nothing of the cause). A
-/// credential file that is there and cannot be read, or holds no credential, is refused by the
-/// key `state_root`, and the token file is not used in its place either: the agent would not use
-/// it. `root` is what the hook found at `state_root`; a host certificate needs none.
-fn credential(
-    params: &ConnectParams,
-    root: Result<&Root, &RootError>,
-) -> Result<(Login, &'static str), String> {
-    if let Some(identity) = &params.host_identity {
-        return Ok((Login::HostCertificate(identity.clone()), FLAGS_FILE_KEY));
-    }
-    let kept = match root.map_err(RootError::to_string)? {
-        Root::Open(root) => {
-            let file = CredentialFile::in_dir(root.path());
-            let loaded = file
-                .load()
-                .map_err(|why| format!("{STATE_ROOT_KEY}: {why}"))?;
-            loaded.map(|_| (Login::Token(file.path()), STATE_ROOT_KEY))
-        }
-        Root::Absent => None,
-    };
-    kept.or_else(|| {
-        let file = params.token_file.clone();
-        file.map(|file| (Login::Token(file), TOKEN_FILE_KEY))
-    })
-    .ok_or_else(|| {
-        format!("{TOKEN_FILE_KEY}: required unless {STATE_ROOT_KEY} holds a host credential")
-    })
-}
-
-/// Why the client could not be built, as the client says it. The client's text begins with the
-/// command-line flag of the programs it serves (`--server: `, `--token-file: `, `--ca-cert: `,
-/// `--host-cert: `, `--host-key: `): the server, the certificate to trust and the host
-/// certificate and key are flags of the host's flags file, so their text is told as it is; the
-/// token flag is not one the hook has, only its params, and the credential may be the state
-/// root's rather than a token file's (`credential_key` says which).
-fn named(error: &ClientError, credential_key: &str) -> String {
-    let text = error.to_string();
-    match text.strip_prefix("--token-file: ") {
-        Some(why) => format!("{credential_key}: {why}"),
-        None => text,
-    }
+/// How the lease connection proves who it is: the host's certificate and key, which the flags
+/// file names (the agent presents them). A host has no other identity, so a flags file that
+/// names none is an error, told by the key `flags_file`.
+fn credential(params: &ConnectParams) -> Result<Login, String> {
+    params
+        .host_identity
+        .clone()
+        .map(Login::HostCertificate)
+        .ok_or_else(|| {
+            format!(
+                "{FLAGS_FILE_KEY}: the flags file names no --host-cert and --host-key: a host is \
+                 identified by its certificate"
+            )
+        })
 }
 
 /// The lease server's own-host routes for the host the params name; a connection that could not
 /// be made answers every call with the reason it could not.
 pub struct MachineLease {
     client: Result<HttpLease, String>,
-    /// The bearer is the token file's and not a host credential of the state root: the
-    /// server then refuses the own-host routes when the token is the pool's shared one.
-    token_file: bool,
 }
 
 impl MachineLease {
@@ -219,31 +183,16 @@ impl MachineLease {
         own_host_id: &dyn Fn() -> Result<String, String>,
         limit: RequestLimit,
     ) -> Self {
-        let root = find_root(params.state_root.as_deref());
-        Self::with_root(params, root.as_ref(), own_host_id, limit)
-    }
-
-    /// [`MachineLease::connect`] with the state root already looked up: `run_step` gives the
-    /// one its checks found, so the credential is read from the state root the step reads.
-    fn with_root(
-        params: &ConnectParams,
-        root: Result<&Root, &RootError>,
-        own_host_id: &dyn Fn() -> Result<String, String>,
-        limit: RequestLimit,
-    ) -> Self {
-        let (client, token_file) = match Self::open(params, root, own_host_id, limit) {
-            Ok((client, key)) => (Ok(client), key == TOKEN_FILE_KEY),
-            Err(why) => (Err(why), false),
-        };
-        Self { client, token_file }
+        Self {
+            client: Self::open(params, own_host_id, limit),
+        }
     }
 
     fn open(
         params: &ConnectParams,
-        root: Result<&Root, &RootError>,
         own_host_id: &dyn Fn() -> Result<String, String>,
         limit: RequestLimit,
-    ) -> Result<(HttpLease, &'static str), String> {
+    ) -> Result<HttpLease, String> {
         let server = params
             .server
             .as_deref()
@@ -253,18 +202,14 @@ impl MachineLease {
             None => own_host_id()?,
         };
         HostId::new(&id).map_err(|why| format!("--host-id: {why}"))?;
-        let (login, key) = credential(params, root)?;
+        let login = credential(params)?;
         HttpLease::connect(server, &login, params.ca_cert.as_deref(), &id, limit)
-            .map(|client| (client, key))
-            .map_err(|why| named(&why, key))
+            .map_err(|why| why.to_string())
     }
 
     /// A connection that could not be made, for the reason `why`.
     fn failed(why: String) -> Self {
-        Self {
-            client: Err(why),
-            token_file: false,
-        }
+        Self { client: Err(why) }
     }
 
     fn client(&self) -> Result<&HttpLease, LeaseError> {
@@ -272,44 +217,25 @@ impl MachineLease {
             .as_ref()
             .map_err(|why| LeaseError::Unreachable(why.clone()))
     }
-
-    /// `result`, with the refusal `host-credential-required` of a call made with the token file
-    /// (there is no host credential in the state root) told with its cause.
-    fn named<T>(&self, result: Result<T, LeaseError>) -> Result<T, LeaseError> {
-        match result {
-            Err(LeaseError::Refused(code))
-                if self.token_file && code == HOST_CREDENTIAL_REQUIRED =>
-            {
-                Err(LeaseError::Refused(format!("{code}: {NO_HOST_CREDENTIAL}")))
-            }
-            other => other,
-        }
-    }
 }
-
-/// The server's refusal of a call to the own-host routes made with the pool's shared token.
-const HOST_CREDENTIAL_REQUIRED: &str = "host-credential-required";
-
-/// What the hook adds to that refusal when it sent the token file for want of a host credential.
-const NO_HOST_CREDENTIAL: &str = "no host credential in the state root: this host enrolled with the shared pool token; re-enroll with a join token (docs/runbooks/farm-node-enroll.md)";
 
 impl Lease for MachineLease {
     fn cordon(&self, lease_secs: u64) -> Result<Cordoned, LeaseError> {
-        self.named(self.client()?.cordon(lease_secs))
+        self.client()?.cordon(lease_secs)
     }
 
     fn uncordon(&self) -> Result<Uncordoned, LeaseError> {
-        self.named(self.client()?.uncordon())
+        self.client()?.uncordon()
     }
 
     fn host(&self) -> Result<HostReading, LeaseError> {
-        self.named(self.client()?.host())
+        self.client()?.host()
     }
 }
 
 /// How to reach the lease server: the server, the certificate to trust, the host certificate and
 /// key, and the host id of the host's own agent flags (`flags_file`), read as `js-agent
-/// --flags-file` reads them, with the state root and the token file of the params.
+/// --flags-file` reads them.
 ///
 /// # Errors
 /// The flags file cannot be used (see [`flags_file::expand_with`]), its flags are not the
@@ -317,12 +243,10 @@ impl Lease for MachineLease {
 /// resolved. The text starts with the params key, `flags_file`.
 pub(super) fn connect_with(
     flags_file: &Path,
-    state_root: &Path,
-    token_file: &Path,
     machine: &Machine<'_>,
 ) -> Result<ConnectParams, String> {
     let cli = read_flags(flags_file, machine)?;
-    connect_from(cli, state_root, token_file, machine)
+    connect_from(cli, machine)
 }
 
 /// The agent's flags as the flags file names them.
@@ -376,19 +300,12 @@ fn identity_of(cli: &Cli) -> Option<HostIdentity> {
 /// # Errors
 /// The host id cannot be resolved (`--host-id-from-facts` names a facts file that cannot be
 /// used). The text starts with the params key, `flags_file`.
-fn connect_from(
-    cli: Cli,
-    state_root: &Path,
-    token_file: &Path,
-    machine: &Machine<'_>,
-) -> Result<ConnectParams, String> {
+fn connect_from(cli: Cli, machine: &Machine<'_>) -> Result<ConnectParams, String> {
     let host_id = resolve_host_id(&cli, machine.euid, machine.flags)
         .map_err(|why| format!("{FLAGS_FILE_KEY}: {why}"))?;
     let host_identity = identity_of(&cli);
     Ok(ConnectParams {
         server: Some(cli.server),
-        state_root: Some(state_root.to_owned()),
-        token_file: Some(token_file.to_owned()),
         ca_cert: cli.ca_cert,
         host_id,
         host_identity,
@@ -510,10 +427,6 @@ impl StateView for Root {
         self.open().map_or_else(|| Ok(Vec::new()), StateView::owed)
     }
 
-    fn has_credential(&self) -> bool {
-        self.open().is_some_and(StateView::has_credential)
-    }
-
     fn request_handover(&self) -> Result<(), PortError> {
         match self.open() {
             Some(root) => root.request_handover(),
@@ -530,7 +443,7 @@ impl StateView for Root {
     }
 }
 
-/// The unit manager of this platform: on a Mac, [`launch_units`], gated on `token_file`.
+/// The unit manager of this platform: on a Mac, [`launch_units`], gated on the flags file.
 #[cfg(target_os = "macos")]
 pub(super) fn platform_units<'a>(
     commands: &'a SystemCommands,
@@ -560,8 +473,7 @@ const MANAGER: Manager = if cfg!(target_os = "macos") {
 /// agent to exit, which its plist allows [`AGENT_EXIT_TIMEOUT_SECS`], so `stop` must wait
 /// longer: see [`StopRunner`]), and a kickstart held back while the host's flags file (the
 /// `flags_file` param, which the plist's `KeepAlive` also waits on) is absent. The gate is the
-/// flags file, not the join token: a Mac that joins by its host certificate has no token. Built for the
-/// tests on every platform, so that a test off a Mac checks the wiring the Mac's hook runs with.
+/// flags file. Built for the tests on every platform, so that a test off a Mac checks the wiring the Mac's hook runs with.
 #[cfg(any(target_os = "macos", test))]
 fn launch_units<'a>(
     commands: &'a dyn CommandRunner,
@@ -583,22 +495,16 @@ pub fn run_step(invocation: &Invocation, params: &Params, machine: &Machine<'_>)
     let commands = SystemCommands::default();
     let stop = StopRunner::new(Duration::from_secs(u64::from(AGENT_EXIT_TIMEOUT_SECS)));
     let units = platform_units(&commands, &stop, &params.flags_file);
-    // A flags file that cannot be read names no host certificate: a first install then goes by
-    // the join token as before, and a step that asks the lease server ends with the reason.
+    // A flags file that cannot be read names no host certificate: a first install then defers,
+    // and a step that asks the lease server ends with the reason.
     let flags = read_flags(&params.flags_file, machine);
     let host_identity = flags.as_ref().ok().and_then(identity_of);
     // A flags file that cannot be read says nothing of the egress: it counts as one, and the
     // update hands over only between agents that both keep egress wiring.
     let egress = flags.as_ref().map_or(true, egress_of);
-    let connect =
-        flags.and_then(|cli| connect_from(cli, &params.state_root, &params.token_file, machine));
+    let connect = flags.and_then(|cli| connect_from(cli, machine));
     let lease = match &connect {
-        Ok(connect) => MachineLease::with_root(
-            connect,
-            Ok(&state),
-            machine.own_host_id,
-            RequestLimit::DEFAULT,
-        ),
+        Ok(connect) => MachineLease::connect(connect, machine.own_host_id, RequestLimit::DEFAULT),
         Err(why) => MachineLease::failed(why.clone()),
     };
     let env = Env {
@@ -728,19 +634,9 @@ pub fn run_maintain(
     };
     let commands = SystemCommands::default();
     let stop = StopRunner::new(Duration::from_secs(u64::from(AGENT_EXIT_TIMEOUT_SECS)));
-    let units = platform_units(&commands, &stop, &params.token_file);
-    let lease = match connect_with(
-        &params.flags_file,
-        &params.state_root,
-        &params.token_file,
-        machine,
-    ) {
-        Ok(connect) => MachineLease::with_root(
-            &connect,
-            Ok(&state),
-            machine.own_host_id,
-            RequestLimit::DEFAULT,
-        ),
+    let units = platform_units(&commands, &stop, &params.flags_file);
+    let lease = match connect_with(&params.flags_file, machine) {
+        Ok(connect) => MachineLease::connect(&connect, machine.own_host_id, RequestLimit::DEFAULT),
         Err(why) => MachineLease::failed(why),
     };
     let facts = SystemFacts {
@@ -767,9 +663,7 @@ mod tests {
     use std::cell::RefCell;
     use std::path::Path;
 
-    use js_client::ClientError;
-
-    use super::{CommandRunner, Root, StateView, Taint, launch_units, named};
+    use super::{CommandRunner, Root, StateView, Taint, launch_units};
     use crate::update_hook::{LAUNCHCTL, Units};
 
     /// A `launchctl` that shows every service running, and notes each command it is given.
@@ -827,25 +721,6 @@ mod tests {
             other.run_in(LAUNCHCTL, &["list"], &[]),
             other.run(LAUNCHCTL, &["list"])
         );
-    }
-
-    /// Asserts that a client error the hook has no params key for keeps the client's own
-    /// text: an error that names no flag (today only a request gives one, never the building
-    /// of a client), and a flag other than the three the hook maps. It catches a mapping that
-    /// would blame the token file, or put any params key, in front of a text that is not about
-    /// it. The tests of the mapped keys are in `tests/agent/update_hook/lease_port.rs`.
-    #[test]
-    fn a_client_error_the_hook_has_no_key_for_is_told_as_it_is() {
-        let error = ClientError::Server("cannot talk to http://127.0.0.1:1".to_owned());
-        assert_eq!(
-            named(&error, "token_file"),
-            "cannot talk to http://127.0.0.1:1"
-        );
-        let error = ClientError::Flag {
-            flag: "--other",
-            why: "is wrong".to_owned(),
-        };
-        assert_eq!(named(&error, "token_file"), "--other: is wrong");
     }
 
     /// Asserts that a state root that is not there (a first install) holds no taint, re-checks

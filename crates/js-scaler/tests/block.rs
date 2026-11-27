@@ -141,9 +141,7 @@ fn a_condemned_host_in_a_block_is_still_released() {
     rig.input.hosts = vec![small];
     rig.pool().held = Some(vec![in_block(&plan, HostStatus::Active, HOUR)]);
     let actions = rig.tick(at(2 * SECOND));
-    assert_eq!(kinds(&actions), ["Save", "Revoke", "Release"]);
-    assert_eq!(actions[1], Action::Revoke(plan.name.clone()));
-    assert_eq!(rig.phase(0), Phase::Releasing);
+    assert_eq!(kinds(&actions), ["Save", "Release"]);
     assert!(rig.record(0).condemned);
 }
 
@@ -156,7 +154,7 @@ fn a_block_host_listed_preempted_at_its_end_is_released_without_a_strike() {
     let (mut rig, plan) = registered_in_block(settings("gpu"), HOUR);
     rig.pool().held = Some(vec![in_block(&plan, HostStatus::Preempted, HOUR)]);
     let actions = rig.tick(at(HOUR));
-    assert_eq!(kinds(&actions), ["Save", "Revoke", "Release"]);
+    assert_eq!(kinds(&actions), ["Save", "Release"]);
     assert_eq!(rig.phase(0), Phase::Releasing);
     assert_eq!(failures(&rig), 0);
     assert!(rig.state.records.cooldowns.is_empty());
@@ -165,7 +163,7 @@ fn a_block_host_listed_preempted_at_its_end_is_released_without_a_strike() {
     let (mut early, plan) = registered_in_block(settings("gpu"), HOUR);
     early.pool().held = Some(vec![in_block(&plan, HostStatus::Preempted, HOUR)]);
     let actions = early.tick(at(HOUR - 1));
-    assert_eq!(kinds(&actions), ["Save", "Revoke", "Release"]);
+    assert_eq!(kinds(&actions), ["Save", "Release"]);
     assert_eq!(failures(&early), 1);
     assert!(early.state.records.cooldowns.is_empty());
 }
@@ -178,7 +176,7 @@ fn a_booting_block_host_listed_terminated_at_its_end_starts_no_cooldown() {
     let (mut rig, plan) = booting_in_block(settings("gpu"), 10 * SECOND);
     rig.pool().held = Some(vec![in_block(&plan, HostStatus::Terminated, 10 * SECOND)]);
     let actions = rig.tick(at(10 * SECOND));
-    assert_eq!(kinds(&actions), ["Save", "Revoke", "Release"]);
+    assert_eq!(kinds(&actions), ["Save", "Release"]);
     assert_eq!(rig.phase(0), Phase::Releasing);
     assert_eq!(failures(&rig), 0);
     assert!(rig.state.records.cooldowns.is_empty());
@@ -197,7 +195,7 @@ fn a_reclaim_notice_for_a_block_host_at_its_end_is_not_a_loss() {
     let (mut rig, _) = registered_in_block(settings("gpu"), HOUR);
     rig.input.reclaimed = vec!["i-1".to_owned()];
     let actions = rig.tick(at(HOUR));
-    assert_eq!(kinds(&actions), ["Save", "Revoke", "Release"]);
+    assert_eq!(kinds(&actions), ["Save", "Release"]);
     assert_eq!(failures(&rig), 0);
 
     let (mut early, _) = registered_in_block(settings("gpu"), HOUR);

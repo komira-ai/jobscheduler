@@ -21,7 +21,7 @@ const PARAMS: &str = concat!(
     "drain_wait_secs = 3600\ndefer_retry_secs = 300\n",
     "unit = \"js-agent-crun.service\"\nstate_dir = \"/dev/null/js-agent-update\"\n",
     "release_link = \"/nowhere/current\"\nflags_file = \"/nowhere/flags\"\n",
-    "token_file = \"/nowhere/token\"\nstate_root = \"/nowhere/state\"\nruntime = \"crun\"\n",
+    "state_root = \"/nowhere/state\"\nruntime = \"crun\"\n",
     "prepare_timeout_secs = 3900\ncutover_timeout_secs = 4320\nverify_timeout_secs = 615\n",
     "rollback_timeout_secs = 8220\ncleanup_timeout_secs = 120\nverify_deadline_secs = 9000\n",
     "\"updater.artifact_digest\" = \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
@@ -457,7 +457,7 @@ fn maintain_text(state_root: &std::path::Path) -> String {
     format!(
         concat!(
             "unit = \"js-agent-crun.service\"\nflags_file = \"/nowhere/flags\"\n",
-            "token_file = \"/nowhere/token\"\nstate_root = \"{}\"\n",
+            "state_root = \"{}\"\n",
             "cordon_lease_secs = 300\ndefer_retry_secs = 120\n",
             "\"updater.service\" = \"js-agent\"\n\"updater.run_id\" = \"r1\"\n",
             "\"updater.drain_deadline_unix\" = 1893456000\n",

@@ -1,7 +1,7 @@
 //! What the configuration decided for the agents that register hosts: [`AgentSetup`], the
 //! clock and id source its job store is opened on ([`Config::with_job_sources`]).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,30 +13,25 @@ use js_types::ProviderId;
 
 use super::{
     Cli, ColdOn, Config, CurveSetting, DispatchTimes, LiveClients, LoadSetting, check_pool, listen,
+    retired,
 };
 use crate::agent_pool;
-use crate::agent_tokens::{AgentTokens, PoolTokens};
 use crate::error::StartupError;
 use crate::job_expiry::JobLimits;
 use crate::job_store::{JobSources, JobStoreSetup, ServerIds};
 use crate::rate::HelloLimit;
 
-/// What `--agent-pool-config`, `--agent-token-file` (when given) and the hello limit
-/// decided.
+/// What `--agent-pool-config` and the hello limit decided.
 pub(crate) struct AgentSetup {
-    /// The first pool's shared join tokens.
-    pub(crate) tokens: AgentTokens,
+    /// The clients of the job service in force, whose token files each tick reads again.
+    pub(crate) clients: LiveClients,
     /// The first pool: the one the registry is named for, whose whole-node settings and
     /// timing of restored hosts are the server's.
     pub(crate) pool: PoolConfig,
-    /// The pools after the first, each with its shared join tokens, in the order given:
-    /// a later `--agent-pool-config`, or a later joined `[[pool]]`.
+    /// The pools after the first, in the order given: a later `--agent-pool-config`, or a
+    /// later joined `[[pool]]`.
     pub(crate) more: Vec<MorePool>,
-    /// The providers the mint route accepts, when the configuration names them; empty, any.
-    pub(crate) mint_provider: BTreeSet<String>,
     pub(crate) hello_limit: HelloLimit,
-    /// `--require-host-credential`.
-    pub(crate) require_host_credential: bool,
     /// `--cpu-slack` and `--pack-limit`, each or the engine's default.
     pub(crate) load: LoadSetting,
     /// `--cold-cpu-millis` and `--cold-memory-bytes`, or `server.cold_cpu_millis` and
@@ -73,10 +68,9 @@ pub(crate) struct AgentSetup {
     pub(crate) dispatch: DispatchTimes,
 }
 
-/// A pool after the first: what registers into it and its shared join tokens.
+/// A pool after the first: what registers into it.
 pub(crate) struct MorePool {
     pub(crate) pool: PoolConfig,
-    pub(crate) tokens: PoolTokens,
 }
 
 /// Refuses `pool`, which `place` names, as a pool after `first` and `before`: its name is
@@ -131,46 +125,29 @@ impl Config {
 }
 
 /// The registering side the flags name: `--agent-pool-config` is required (a server serves
-/// the hosts that run `js-agent` and register), and the shared join token file needs it.
-/// Each further `--agent-pool-config` is one more pool, with the shared tokens its file's
-/// `join_token_file` names, or none.
-pub(super) fn agents(cli: &Cli, clients: &LiveClients) -> Result<Box<AgentSetup>, StartupError> {
+/// the hosts that run `js-agent` and register). Each further `--agent-pool-config` is one
+/// more pool. `--agent-token-file`, `--require-host-credential` and a pool file's
+/// `join_token_file` are accepted and not read: each given one leaves a line in `warnings`.
+pub(super) fn agents(
+    cli: &Cli,
+    clients: &LiveClients,
+    warnings: &mut Vec<String>,
+) -> Result<Box<AgentSetup>, StartupError> {
     let Some((first, later)) = cli.agent_pool_config.split_first() else {
-        return Err(match cli.agent_token_file {
-            None => StartupError::new(
-                "--agent-pool-config",
-                "required: a server serves the hosts that run js-agent and register",
-            ),
-            Some(_) => StartupError::new("--agent-pool-config", "required with --agent-token-file"),
-        });
+        return Err(StartupError::new(
+            "--agent-pool-config",
+            "required: a server serves the hosts that run js-agent and register",
+        ));
     };
-    let file = agent_pool::read(first)?;
     let place = |path: &Path| format!("--agent-pool-config {}", path.display());
-    check_pool(&file.pool, "--agent-pool-config")?;
-    let tokens = match (&cli.agent_token_file, &file.join_token_file) {
-        (Some(_), Some(_)) => {
-            let reason = "join_token_file and --agent-token-file both name the first pool's tokens: give one";
-            return Err(StartupError::at(place(first), reason));
-        }
-        (Some(path), None) => AgentTokens::open(path, clients)?,
-        (None, Some(path)) => pool_tokens(path, clients, &place(first))?,
-        (None, None) => AgentTokens::none(clients),
-    };
-    let pool = file.pool;
+    let pool = read_pool(first, warnings)?;
+    check_pool(&pool, "--agent-pool-config")?;
     let mut more = Vec::new();
     for path in later {
-        let file = agent_pool::read(path)?;
-        check_pool(&file.pool, &place(path))?;
-        check_more(&pool, &more, (&file.pool, &place(path)))?;
-        let tokens = match &file.join_token_file {
-            Some(tokens) => pool_tokens(tokens, clients, &place(path))?,
-            None => AgentTokens::none(clients),
-        };
-        let name = file.pool.name().to_string();
-        more.push(MorePool {
-            pool: file.pool,
-            tokens: PoolTokens { pool: name, tokens },
-        });
+        let next = read_pool(path, warnings)?;
+        check_pool(&next, &place(path))?;
+        check_more(&pool, &more, (&next, &place(path)))?;
+        more.push(MorePool { pool: next });
     }
     let load = LoadSetting {
         cpu_slack: cli.cpu_slack.unwrap_or_default(),
@@ -178,15 +155,13 @@ pub(super) fn agents(cli: &Cli, clients: &LiveClients) -> Result<Box<AgentSetup>
     };
     let cold_on = cold_on_of(cli)?;
     Ok(Box::new(AgentSetup {
-        tokens,
+        clients: clients.clone(),
         pool,
         more,
-        mint_provider: BTreeSet::new(),
         hello_limit: HelloLimit {
             burst: cli.agent_hello_burst,
             interval: cli.agent_hello_interval,
         },
-        require_host_credential: cli.require_host_credential,
         load,
         cold: ColdSize {
             cpu_millis: cli.cold_cpu_millis,
@@ -321,13 +296,44 @@ pub(crate) fn per_os(entries: &[(String, u64)]) -> Result<BTreeMap<String, u64>,
     Ok(on)
 }
 
-/// The shared join tokens of the file at `path`, which `place` names: a refusal names it,
-/// not `--agent-token-file`.
-fn pool_tokens(
-    path: &Path,
-    clients: &LiveClients,
-    place: &str,
-) -> Result<AgentTokens, StartupError> {
-    AgentTokens::open(path, clients)
-        .map_err(|err| StartupError::at(format!("{place}: join_token_file"), err.reason()))
+/// The pool the file at `path` describes. A file that names `join_token_file` is not asked for
+/// the file: it leaves a line in `warnings` instead.
+fn read_pool(path: &Path, warnings: &mut Vec<String>) -> Result<PoolConfig, StartupError> {
+    let file = agent_pool::read(path)?;
+    if file.names_join_token_file {
+        let item = format!("{}: join_token_file", path.display());
+        warnings.push(retired::ignored(&item));
+    }
+    Ok(file.pool)
+}
+
+#[cfg(test)]
+mod tests {
+    use js_testkit::dir::TestDir;
+
+    use super::*;
+
+    const POOL: &str = "name = \"mac\"\nclass = \"mac-host\"\nmax_machines = 4\n\
+                        [shape]\ncpu_millis = 4000\nmemory_bytes = 8589934592\n";
+
+    /// A pool file that names `join_token_file` is read whatever the path is (one that does
+    /// not exist still starts) and leaves exactly one line naming the file and the key; one that
+    /// does not name it leaves none. It catches a read of the retired key that refuses a start
+    /// for a missing file, one that says nothing, and one that says it twice.
+    #[test]
+    fn a_pool_file_naming_join_token_file_leaves_one_line_and_is_not_read() {
+        let dir = TestDir::under(std::env::temp_dir(), "agent_setup_pool_files");
+        let plain = dir.path().join("plain.toml");
+        let named = dir.path().join("named.toml");
+        std::fs::write(&plain, POOL).unwrap();
+        let text = format!("join_token_file = \"/nowhere/at/all\"\n{POOL}");
+        std::fs::write(&named, text).unwrap();
+        let mut warnings = Vec::new();
+        let plain_pool = read_pool(&plain, &mut warnings).unwrap();
+        assert_eq!(warnings, Vec::<String>::new());
+        let named_pool = read_pool(&named, &mut warnings).unwrap();
+        assert_eq!(named_pool, plain_pool);
+        let item = format!("{}: join_token_file", named.display());
+        assert_eq!(warnings, [retired::ignored(&item)]);
+    }
 }

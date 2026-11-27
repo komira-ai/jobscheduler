@@ -217,8 +217,6 @@ impl Rig {
         fs::write(binary, BINARY).unwrap();
         fs::create_dir_all(root.join("state")).unwrap();
         let runtime = if mac.is_some() { "native" } else { "crun" };
-        let token = root.join("token");
-        fs::write(&token, "tok-0123456789\n").unwrap();
         let mut helper_line = if helper {
             format!("helper_unit = \"{MAC_HELPER}\"\n")
         } else {
@@ -242,7 +240,7 @@ impl Rig {
                 "cordon_lease_secs = {lease}\ncordon_max_secs = {max}\n{release_link}",
                 "drain_wait_secs = {wait}\ndefer_retry_secs = {retry}\n",
                 "unit = \"{unit}\"\n{helper_line}state_dir = \"{root}/state\"\nruntime = \"{runtime}\"\n",
-                "flags_file = \"{root}/flags\"\ntoken_file = \"{token}\"\n",
+                "flags_file = \"{root}/flags\"\n",
                 "state_root = \"{root}/world/state\"\n",
                 "prepare_timeout_secs = 3900\ncutover_timeout_secs = 4320\n",
                 "verify_timeout_secs = 615\nrollback_timeout_secs = 8220\n",
@@ -263,7 +261,6 @@ impl Rig {
             helper_line = helper_line,
             root = root.display(),
             runtime = runtime,
-            token = token.display(),
         );
         let params = Params::parse(&params_text).unwrap();
         let kill = Rc::new(Kill::default());
@@ -458,16 +455,15 @@ pub struct Spy<'a> {
     pub stop_leaves: RefCell<Option<(&'static str, &'static str)>>,
     /// The unit state a start leaves behind instead of `active`.
     pub start_leaves: RefCell<Option<(&'static str, &'static str)>>,
-    /// What the join token file shows. A good one by default.
-    pub token: Rc<Cell<TokenFile>>,
     /// The host certificate and key the flags file names ([`HOST_CERT_PATH`] and
-    /// [`HOST_KEY_PATH`]); none by default, as when the flags file names neither.
+    /// [`HOST_KEY_PATH`]), as the hook reads them; a test whose flags file names neither sets
+    /// none.
     pub host_identity: Option<HostIdentity>,
     /// Whether the host's flags set an egress ceiling, as the hook reads them (`Env::egress`).
     pub egress: Cell<bool>,
-    /// What the host certificate file shows. Nothing is there by default.
+    /// What the host certificate file shows. A good one by default.
     pub identity_cert: Rc<Cell<TokenFile>>,
-    /// What the host key file shows. Nothing is there by default.
+    /// What the host key file shows. A good one by default.
     pub identity_key: Rc<Cell<TokenFile>>,
     token_fn: Box<TokenFn>,
     /// What `systemctl show --property=TasksCurrent` prints for the next calls, in order; once
@@ -496,7 +492,7 @@ pub const HOST_CERT_PATH: &str = "/run/hostkeeper/host.pem";
 /// The key file a flags file names in the tests that give the host an identity.
 pub const HOST_KEY_PATH: &str = "/run/hostkeeper/host.key";
 
-/// What looking at the join token file, or a file of the host identity, shows.
+/// What looking at a file of the host identity, the certificate or the key, shows.
 #[derive(Clone, Copy, Debug)]
 pub enum TokenFile {
     /// Nothing is there.
@@ -507,13 +503,13 @@ pub enum TokenFile {
     Facts(TokenFacts),
 }
 
-/// The user the tests run as: who owns the join token file the hook accepts.
+/// The user the tests run as: who owns the host key the hook accepts.
 pub fn euid() -> u32 {
     rustix::process::geteuid().as_raw()
 }
 
-/// A join token file as the operator places it: regular, mode 0600, the hook's user's.
-pub fn good_token() -> TokenFacts {
+/// A file of the host identity as hostkeeper places it: regular, mode 0600, the hook's user's.
+pub fn good_file() -> TokenFacts {
     TokenFacts {
         regular: true,
         mode: 0o600,
@@ -523,10 +519,8 @@ pub fn good_token() -> TokenFacts {
 
 impl<'a> Spy<'a> {
     pub fn new(rig: &'a Rig) -> Spy<'a> {
-        let token = Rc::new(Cell::new(TokenFile::Facts(good_token())));
-        let seen = Rc::clone(&token);
-        let identity_cert = Rc::new(Cell::new(TokenFile::Missing));
-        let identity_key = Rc::new(Cell::new(TokenFile::Missing));
+        let identity_cert = Rc::new(Cell::new(TokenFile::Facts(good_file())));
+        let identity_key = Rc::new(Cell::new(TokenFile::Facts(good_file())));
         let (seen_cert, seen_key) = (Rc::clone(&identity_cert), Rc::clone(&identity_key));
         let mac: Rc<RefCell<Option<Rc<FakeMac>>>> = Rc::new(RefCell::new(None));
         let seen_mac = Rc::clone(&mac);
@@ -543,8 +537,7 @@ impl<'a> Spy<'a> {
                 }
             }),
             fstab_leftover: rig.tmp.path().join("etc/fstab.js-agent"),
-            token,
-            host_identity: None,
+            host_identity: Some(HostIdentity::new(HOST_CERT_PATH, HOST_KEY_PATH)),
             egress: Cell::new(false),
             identity_cert,
             identity_key,
@@ -554,7 +547,7 @@ impl<'a> Spy<'a> {
                 } else if path == Path::new(HOST_KEY_PATH) {
                     seen_key.get()
                 } else {
-                    seen.get()
+                    TokenFile::Missing
                 };
                 match shown {
                     TokenFile::Missing => Err(io::Error::from(io::ErrorKind::NotFound)),
@@ -842,10 +835,6 @@ impl StateView for Spy<'_> {
             self.state.settle(run).unwrap();
         }
         StateView::owed(&self.state)
-    }
-
-    fn has_credential(&self) -> bool {
-        StateView::has_credential(&self.state)
     }
 
     fn request_handover(&self) -> Result<(), PortError> {

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::agents_support::{JOIN, Session, entry, hosts, post};
+use crate::agents_support::{Session, entry, hosts, post};
 use crate::job_hosts::{cpu_hello, placing_server, restarted_placing};
 use crate::jobs_support::{JobBody, commands, job_agent, job_state, submit_body};
 use crate::support::{Harness, Kept, Reply, TOKEN, kept_bindings, request};
@@ -19,7 +19,7 @@ async fn beat_with(h: &Harness, session: &Session, extra: Value) -> Value {
     for (key, value) in extra.as_object().unwrap() {
         body[key] = value.clone();
     }
-    let reply = post(h, "/v1/agent/heartbeat", Some(JOIN), &body).await;
+    let reply = post(h, "/v1/agent/heartbeat", None, &body).await;
     assert_eq!(reply.status, 200, "{}", reply.body);
     reply.json()
 }

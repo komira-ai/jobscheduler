@@ -13,7 +13,6 @@ use js_elastic::{
     AcquireId, AcquireRequest, Acquired, Artifact, BootStep, Capacity, CapacityProvider,
     CatalogFuture, Cooldowns, Held, Hello, HostName, HostRef, Instant, Observed, Offer, OfferKey,
     PriceUnit, ProviderCaps, ProviderError, Reason, Refusal, RefusalCode, Released, SchedulerId,
-    Secret,
 };
 use js_lease_server::network::{Contribution, LaunchCtx, NetworkError, NetworkMode};
 use js_lease_server::{
@@ -25,7 +24,6 @@ use js_types::{ExecMode, Model, ProviderId, accelerator_of};
 use serde_json::{Value, json};
 use tokio::sync::Notify;
 
-use crate::agents_support::JOIN;
 use crate::config_support::{PoolText, file, kinds, quote, quoted, server};
 use crate::jobs_support::{JobBody, submit_body};
 use crate::support::{Harness, LogCapture, Reply, Scratch};
@@ -400,7 +398,7 @@ async fn a_completed_fetch_is_counted_and_a_failed_one_is_not() {
 
     cloud.refuse(RefusalCode::Capacity);
     let launcher = launcher(&cloud, &catalogs);
-    let answer = launcher.acquire(&plan(), Secret::new("join-token".to_owned()));
+    let answer = launcher.acquire(&plan());
     assert!(matches!(answer, Acquired::Refused(_)));
     assert_eq!(catalogs.fetches(&id), 2);
     catalogs.refresh_due(after(t0(), HOUR_MS + 2)).await;
@@ -464,7 +462,6 @@ async fn started(name: &str) -> (Harness, Arc<Counting>) {
         .lock()
         .unwrap()
         .insert(key.display().to_string(), cloud.clone());
-    let joins = scratch.write("joins", &format!("{JOIN}\n"), 0o600);
     let provider = format!(
         "{{ kind = \"cache-cloud\", api_key_file = {} }}",
         quoted(&key)
@@ -473,8 +470,7 @@ async fn started(name: &str) -> (Harness, Arc<Counting>) {
         .set("name", &quote("burst"))
         .set("class", &quote("gpu-host"))
         .set("exec", &quote("none"))
-        .set("provider", &provider)
-        .set("join_token_file", &quoted(&joins));
+        .set("provider", &provider);
     let head = server(
         &scratch,
         "listen = \"127.0.0.1:0\"\nagent_listen = \"127.0.0.2:0\"\njob_listen = \"127.0.0.1:0\"",
@@ -573,7 +569,7 @@ async fn refusal_case(code: RefusalCode, invalidates: bool) {
 
     cloud.refuse(code);
     let launcher = launcher(&cloud, &catalogs);
-    let answer = launcher.acquire(&plan(), Secret::new("join-token".to_owned()));
+    let answer = launcher.acquire(&plan());
     let refusal = Refusal {
         code,
         reason: Reason::Api("refused".to_owned()),

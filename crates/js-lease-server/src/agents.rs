@@ -1,10 +1,10 @@
-//! The registering side of the server: the registry, the join tokens, the hello limit
-//! and the bindings, and how they are put together at start.
+//! The registering side of the server: the registry, the hello limit and the bindings, and
+//! how they are put together at start.
 //!
-//! Without a store setting the join tokens and the bindings are kept in files beside the
-//! state file; with one, in the state store ([`crate::host_keys`]), read at start, and one row
-//! at a time later where another server over the store may have written it (a binding at the
-//! hello of a host the registry does not know, a token at its first use here).
+//! Without a store setting the bindings are kept in a file beside the state file; with one,
+//! in the state store ([`crate::host_keys`]), read at start, and one row at a time later
+//! where another server over the store may have written it (a binding at the hello of a host
+//! the registry does not know).
 //! Every change of them that the server makes itself is written under one gate
 //! ([`Agents::host_writes`]), from its commit to the registry's taking it: a hello, the
 //! taint a heartbeat brings, a cordon or its lift, and the save of each tick. With the store
@@ -17,15 +17,14 @@
 //! back, so a crash between the two writes loses nothing; once the binding holds the taint
 //! the row is deleted, after a pass too.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use js_agent_wire::{Heartbeat, Hello, InstanceIdentity, Taint};
-use js_elastic::HostName;
+use js_agent_wire::{Heartbeat, Hello, Taint};
 use js_registry::{Binding, Credential, OsSessions, Registry};
 use js_state::Revision;
 use js_types::{HostId, ProviderId};
@@ -34,9 +33,8 @@ use tracing::{error, info, warn};
 pub(crate) use self::cordons::restore_cordons;
 use self::taints::restore_job_taints;
 use crate::agent_state::{self, BindingStore, Change};
-use crate::agent_tokens::{AgentTokens, PoolTokens};
 use crate::clock::SharedClock;
-use crate::config::{AgentSetup, CpuSlack, placer, split};
+use crate::config::{AgentSetup, CpuSlack, LiveClients, placer, read_private_reason, split};
 use crate::dispatch_state::DispatchState;
 use crate::drain::Drain;
 use crate::error::StartupError;
@@ -45,7 +43,6 @@ use crate::host_keys::Writes;
 use crate::job_expiry::JobLimits;
 use crate::job_sizes::Sizes;
 use crate::job_store::{self, FeedTrim, ServerJobs};
-use crate::join_tokens::{Admitted, JoinRefusal, JoinTokens, MintError, Minted, RevokeError};
 use crate::logs::{self, LogGrants};
 use crate::metrics::Meter;
 use crate::poller::Poller;
@@ -65,22 +62,16 @@ pub(crate) struct Agents {
     /// The hosts of every pool ([`Registry::with_pools`]): the first pool's and the later
     /// ones'.
     pub(crate) registry: Registry,
-    /// The first pool's shared join tokens.
-    pub(crate) tokens: AgentTokens,
-    /// The shared join tokens of each pool after the first, with its name; empty for a
-    /// server of one pool.
-    pub(crate) more_tokens: Vec<PoolTokens>,
-    /// The one-time tokens minted for launched instances.
-    pub(crate) joins: JoinTokens,
-    /// The providers the mint route accepts, or none for any.
-    pub(crate) mint_provider: BTreeSet<String>,
+    /// The clients of the job service in force, whose token files each tick reads again
+    /// ([`Agents::refresh`]).
+    pub(crate) clients: LiveClients,
     pub(crate) limiter: HelloLimiter,
     /// The server's clock, which bounds a run by the time its lease has left.
     pub(crate) clock: SharedClock,
     pub(crate) store: BindingStore,
-    /// The gate every change of the bindings and of the join tokens' uses goes through, held
-    /// from the change's commit until the registry has taken it: a
-    /// hello, the taint of a heartbeat, a cordon or its lift, and the save of each tick. So
+    /// The gate every change of the bindings goes through, held from the change's commit
+    /// until the registry has taken it: a hello, the taint of a heartbeat, a cordon or its
+    /// lift, and the save of each tick. So
     /// the server takes its hellos one at a time, and no save reads the registry between a
     /// commit and the change it commits. Held across the store's calls; no other lock is
     /// held while it is awaited.
@@ -203,8 +194,8 @@ pub(crate) fn assemble(
     assemble_in(agents, usage, clock, (state_file, None), logs)
 }
 
-/// [`assemble`], with the join tokens and the bindings kept in the state store `kept` when
-/// there is one, instead of the files beside the state file.
+/// [`assemble`], with the bindings kept in the state store `kept` when there is one, instead
+/// of the file beside the state file.
 pub(crate) fn assemble_in(
     agents: Box<AgentSetup>,
     usage: UsageSetup,
@@ -230,29 +221,22 @@ pub(crate) fn assemble_placed(
     Ok(placed)
 }
 
-/// The join tokens, the bindings read at start and their store: from the files beside the
-/// state file `state_file`, or from the state store `kept`, whose refusal names its
-/// setting when a value cannot be read as written.
+/// The bindings read at start and their store: from the file beside the state file
+/// `state_file`, or from the state store `kept`, whose refusal names its setting when a value
+/// cannot be read as written.
 fn open_hosts(
     clock: &SharedClock,
     (state_file, kept): (&Path, Option<&ServerStore>),
-) -> Result<(JoinTokens, BTreeMap<HostId, Binding>, BindingStore), StartupError> {
+) -> Result<(BTreeMap<HostId, Binding>, BindingStore), StartupError> {
     let Some(kept) = kept else {
         let path = state_path(state_file, ".agents");
-        let joins = JoinTokens::open(
-            state_path(state_file, ".joins"),
-            clock.clone(),
-            Box::new(OsSessions),
-        )?;
         let bindings = agent_state::load(&path)?;
         let store = BindingStore::new(path, bindings.clone());
-        return Ok((joins, bindings, store));
+        return Ok((bindings, store));
     };
     let refused = |reason: String| kept.refuse(reason);
-    let joins = JoinTokens::in_store(kept.store(), clock.clone(), Box::new(OsSessions));
-    let joins = joins.map_err(refused)?;
     let (store, bindings) = BindingStore::in_store(kept.store(), clock.clone()).map_err(refused)?;
-    Ok((joins, bindings, store))
+    Ok((bindings, store))
 }
 
 /// [`assemble_in`], with the placer the registry was given.
@@ -264,12 +248,10 @@ fn placed_in(
     logs: Option<Arc<LogGrants>>,
 ) -> Result<(Assembled, Arc<SchedPlacer>), StartupError> {
     let AgentSetup {
-        tokens,
+        clients,
         pool,
         more,
-        mint_provider,
         hello_limit,
-        require_host_credential,
         load,
         cold,
         cold_on,
@@ -281,8 +263,7 @@ fn placed_in(
         providers,
         dispatch,
     } = *agents;
-    let (joins, mut bindings, store) = open_hosts(clock, (state_file, kept))?;
-    let joins = joins.requiring_credential(require_host_credential);
+    let (mut bindings, store) = open_hosts(clock, (state_file, kept))?;
     // The usage limits hold the largest host of every pool.
     let shapes = std::iter::once(&pool).chain(more.iter().map(|more| &more.pool));
     let largest = shapes
@@ -296,10 +277,7 @@ fn placed_in(
     // registry books each host's whole booked memory.
     let (pool, memory) = split(pool);
     let placer = placer(max_lease_wall, load, (memory, cold, curves), cold_on, clock);
-    let (later, more_tokens): (Vec<_>, Vec<_>) = more
-        .into_iter()
-        .map(|more| (split(more.pool).0, more.tokens))
-        .unzip();
+    let later: Vec<_> = more.into_iter().map(|more| split(more.pool).0).collect();
     let pools = (pool, later);
     let registry = Registry::with_pools(pools, clock.clone(), OsSessions, placer.clone())
         .map_err(|err| StartupError::new("--agent-pool-config", err))?;
@@ -338,10 +316,7 @@ fn placed_in(
     }
     let agents = Agents {
         registry,
-        tokens,
-        more_tokens,
-        joins,
-        mint_provider,
+        clients,
         limiter: HelloLimiter::new(hello_limit, clock.clone()),
         clock: clock.clone(),
         store,
@@ -393,20 +368,10 @@ impl Agents {
     /// the routes without a socket.
     #[cfg(test)]
     pub(crate) fn over(registry: Registry, clock: &SharedClock, dir: &Path) -> Self {
-        use crate::config::{Clients, LiveClients, parse_token};
+        use crate::config::{Clients, parse_token};
         use crate::rate::HelloLimit;
         let client = Clients::only(&parse_token(&[b'c'; 40]).unwrap(), "--token-file");
         let client = LiveClients::new(client);
-        let tokens = dir.join("agent-tokens");
-        std::fs::write(&tokens, [b'j'; 40]).unwrap();
-        std::fs::set_permissions(&tokens, std::os::unix::fs::PermissionsExt::from_mode(0o600))
-            .unwrap();
-        let joins = JoinTokens::open(
-            dir.join("joins"),
-            clock.clone(),
-            Box::new(js_registry::SequentialSessions::new()),
-        )
-        .unwrap();
         let limit = HelloLimit {
             burst: 5,
             interval: std::time::Duration::from_secs(1),
@@ -416,10 +381,7 @@ impl Agents {
         let starting_hold = held_beat::starting_hold(registry.heartbeat_interval());
         Self {
             registry,
-            tokens: AgentTokens::open(&tokens, &client).unwrap(),
-            more_tokens: Vec::new(),
-            joins,
-            mint_provider: BTreeSet::new(),
+            clients: client,
             limiter: HelloLimiter::new(limit, clock.clone()),
             clock: clock.clone(),
             store: BindingStore::new(dir.join("bindings"), Default::default()),
@@ -452,15 +414,12 @@ impl Agents {
         }
     }
 
-    /// This agent side with its join tokens and bindings kept in `store` (empty when it is
-    /// read here), as a server with a store setting keeps them, for a test of their commits.
+    /// This agent side with its bindings kept in `store` (empty when it is read here), as a
+    /// server with a store setting keeps them, for a test of their commits.
     #[cfg(test)]
     pub(crate) fn kept_in(self, store: Arc<dyn js_state::Store>) -> Self {
-        let random = Box::new(js_registry::SequentialSessions::new());
-        let joins = JoinTokens::in_store(Arc::clone(&store), self.clock.clone(), random);
         let (bound, _) = BindingStore::in_store(store, self.clock.clone()).unwrap();
         Self {
-            joins: joins.unwrap(),
             store: bound,
             ..self
         }
@@ -526,29 +485,6 @@ impl Agents {
         row.is_ok_and(|row| row.is_none_or(|row| row.record.state.last_listing_clean))
     }
 
-    /// Lets the hello of `host` register with the one-time token or host credential `who`
-    /// (the digest of what the request carried), consuming the token on its first use, and
-    /// commits `binding` (the host's binding, with the store) with the use in one
-    /// transaction. With `issue`, that first use also retires the token for a new host
-    /// credential (see [`JoinTokens::admit_writing`]). The check and the write run on the
-    /// pool for blocking calls. The revision of the commit comes with the answer: the version of
-    /// the binding it wrote ([`JoinTokens::admit_writing`]).
-    pub(crate) async fn admit_join(
-        self: &Arc<Self>,
-        who: Credential,
-        (host, instance): (String, Option<InstanceIdentity>),
-        issue: bool,
-        binding: Writes,
-    ) -> Result<(Admitted, Option<Revision>), JoinRefusal> {
-        let this = Arc::clone(self);
-        blocking(move || {
-            let instance = instance.as_ref();
-            this.joins
-                .admit_writing(&who, &host, instance, issue, binding)
-        })
-        .await
-    }
-
     /// Reads the binding row of `host` before its hello is judged (or its binding is written),
     /// holds it with its version as what the store holds ([`BindingStore::stored`]), and puts
     /// what it holds into the registry ([`taints::take_in`]): the taint or cordon of a host the
@@ -579,9 +515,9 @@ impl Agents {
     }
 
     /// The change of the binding of `host` that the registry makes when it admits `hello`
-    /// with `credential`; `certified` says the hello presented a host certificate. It is the
-    /// binding the registry holds for the host, which it keeps, or a new one to `credential`
-    /// and the hello's instance. Its writes are empty in file mode, and when the store holds
+    /// with `credential`, the one of the host's certificate. It is the binding the registry
+    /// holds for the host, which it keeps, or a new one to `credential` and the hello's
+    /// instance. Its writes are empty in file mode, and when the store holds
     /// that binding already, as for a host the registry knows (unless the stored binding still
     /// holds a cordon that lapsed since the last tick); otherwise the write is conditional on
     /// the version of the row [`Agents::restore_stored`] read: the hello is judged on that row,
@@ -590,12 +526,12 @@ impl Agents {
         &self,
         host: &HostId,
         hello: &Hello,
-        (credential, certified): (&Credential, bool),
+        credential: &Credential,
     ) -> Change {
         let held = self.registry.bindings().remove(host);
         let fresh = || Binding::new(credential.clone(), hello.instance.clone());
-        // A hello with a host certificate moves a host from the credential it was bound to
-        // onto the certificate's, keeping its taint and cordon (the registry decides the same,
+        // A hello moves a host from the credential it was bound to onto the certificate's,
+        // keeping its taint and cordon (the registry decides the same,
         // [`Registry::hello_as_certified_host`], and has judged this hello before the change
         // is made: a live host that is not the same process is refused there, so a hello that
         // gets here moves the binding the registry moves).
@@ -606,7 +542,7 @@ impl Agents {
                 .with_cordon(bound.cordon_until_ms())
         };
         let bound = match held {
-            Some(bound) if certified && bound.credential() != credential => moved(&bound),
+            Some(bound) if bound.credential() != credential => moved(&bound),
             Some(bound) => bound,
             None => fresh(),
         };
@@ -771,91 +707,8 @@ impl Agents {
         }
     }
 
-    /// Whether the one-time token `who` may heartbeat for `host`; a heartbeat it serves
-    /// renews the token's credential. Runs on the pool for blocking calls, since a renewal
-    /// writes the file (with the store it is left for the tick).
-    pub(crate) async fn serve_join(
-        self: &Arc<Self>,
-        who: Credential,
-        host: String,
-    ) -> Result<(), JoinRefusal> {
-        let this = Arc::clone(self);
-        blocking(move || this.joins.serves(&who, &host)).await
-    }
-
-    /// Mints the one-time join token for the host `name` of the pool `pool`: the in-process
-    /// form of `POST /v1/agent/join-tokens`, for the scaler that launches the machine. The
-    /// token is bound to the instance `<pool>:<name>`, which is the line the launched
-    /// agent's `--instance-file` holds, and lasts `ttl` from now (at most
-    /// [`crate::join_tokens::MAX_TTL`]; a longer one is the caller's mistake, the route
-    /// refuses it). A second mint for the same pool and name replaces the first unused
-    /// token, so a caller mints once per launch and never again for a machine that may
-    /// have booted. A blocking call, as it writes the token file or the store: run it on the
-    /// pool for blocking calls.
-    ///
-    /// # Errors
-    ///
-    /// [`MintError`] as for the route.
-    pub(crate) fn mint_for(
-        &self,
-        pool: &ProviderId,
-        name: &HostName,
-        ttl: Duration,
-    ) -> Result<Minted, MintError> {
-        self.joins.mint(Self::instance_of(pool, name), ttl)
-    }
-
-    /// Revokes every token and host credential bound to `<pool>:<name>`, used or not:
-    /// the in-process form of `DELETE /v1/agent/join-tokens`. Returns how many rows were
-    /// dropped; a name with none drops none and succeeds, so a repeat is a no-op. A blocking
-    /// call, as [`Agents::mint_for`].
-    ///
-    /// # Errors
-    ///
-    /// [`RevokeError::Unsaved`] when the file or the store could not be written; nothing was
-    /// dropped.
-    pub(crate) fn revoke_for(
-        &self,
-        pool: &ProviderId,
-        name: &HostName,
-    ) -> Result<usize, RevokeError> {
-        self.joins.revoke(&Self::instance_of(pool, name))
-    }
-
-    /// The instance a launched host names in its hello: the pool as the provider and the
-    /// host's name as the instance id.
-    fn instance_of(pool: &ProviderId, name: &HostName) -> InstanceIdentity {
-        InstanceIdentity {
-            provider: pool.to_string(),
-            instance_id: name.to_string(),
-        }
-    }
-
-    /// The shared join tokens of every pool, the first pool's first.
-    fn every_tokens(&self) -> impl Iterator<Item = &AgentTokens> {
-        let more = self.more_tokens.iter().map(|more| &more.tokens);
-        std::iter::once(&self.tokens).chain(more)
-    }
-
-    /// The pool a shared join token `given` belongs to, with the credential a host admitted
-    /// with it is bound to: the first pool's name for one of its tokens, a later pool's for
-    /// one of that pool's.
-    pub(crate) fn identify_pooled(&self, given: &str) -> Option<(Credential, String)> {
-        let first = self.tokens.identify(given);
-        let first = first.map(|credential| (credential, self.registry.pool_id().to_string()));
-        let later = || {
-            self.more_tokens.iter().find_map(|more| {
-                let credential = more.tokens.identify(given)?;
-                Some((credential, more.pool.clone()))
-            })
-        };
-        first.or_else(later)
-    }
-
-    /// How many times the agent side could not read or write one of its files since the
-    /// server started: the join token file that could not be read again, the file of
-    /// bindings (or the store) that could not be written, and the credential times the tick
-    /// could not commit.
+    /// How many times the agent side could not write its file of bindings (or the store)
+    /// since the server started.
     pub(crate) fn errors(&self) -> u64 {
         self.errors.load(Ordering::SeqCst)
     }
@@ -871,36 +724,21 @@ impl Agents {
         self.meter.get().unwrap_or(Meter::off())
     }
 
-    /// What every tick does for the agent side: read the join tokens again and drop the
-    /// hello limits of those that left the file once they are refilled (a limit that is still
-    /// spent stays, whoever it is of, so a certificate host's is not reset), then read the job service's client token
-    /// files again ([`AgentTokens::reload_clients`]), put the job store's cordons on the
+    /// What every tick does for the agent side: drop the hello limits that have refilled (a
+    /// limit that is still spent stays, so a host's is not reset), read the job service's
+    /// client token files again ([`LiveClients::reload`]), put the job store's cordons on the
     /// registry ([`Agents::mirror_cordons`]) and its scale-down marks
     /// ([`Agents::mirror_host_marks`]), and make the file of bindings current
     /// (a write that failed earlier is tried again here; so is the removal of a host the
-    /// registry has forgotten). A token file that cannot be read keeps the tokens in
-    /// force, and their limits; a client token file that cannot be read, or holds no valid
+    /// registry has forgotten). A client token file that cannot be read, or holds no valid
     /// token, keeps every client's token in force, with one warning line per tick. The usage
     /// side, when there is one, is ticked next, and the host credentials of live logs last
     /// ([`LogGrants::tick`]: the departed hosts' are forgotten, the renewals and the retries
     /// queued and started, off this task).
     pub(crate) async fn refresh(self: &Arc<Self>) {
+        self.limiter.retain();
         let this = Arc::clone(self);
-        let read = blocking(move || this.every_tokens().map(AgentTokens::reload).collect()).await;
-        let read: Vec<Result<(), StartupError>> = read;
-        for err in read.iter().filter_map(|read| read.as_ref().err()) {
-            self.errors.fetch_add(1, Ordering::SeqCst);
-            warn!(error = %err, "cannot read the agent token file again; the tokens in force stay");
-        }
-        // A set that could not be read keeps its tokens, and their limits.
-        let credentials = self.every_tokens().flat_map(AgentTokens::credentials);
-        self.limiter.retain(&credentials.collect::<Vec<_>>());
-        let this = Arc::clone(self);
-        let reload = move || {
-            let beside: Vec<&AgentTokens> =
-                this.more_tokens.iter().map(|more| &more.tokens).collect();
-            this.tokens.reload_clients(&beside)
-        };
+        let reload = move || this.clients.reload(&read_private_reason);
         match blocking(reload).await {
             Ok(true) => info!("the client tokens changed: the new tokens are in force"),
             Ok(false) => {}
@@ -911,11 +749,6 @@ impl Agents {
         self.mirror_cordons().await;
         self.mirror_host_marks().await;
         self.save_bindings().await;
-        // A due time that cannot be committed (only a store's commit fails here) is counted
-        // with no arm of its own, so every test binary runs the same code of the tick.
-        let this = Arc::clone(self);
-        let flushed = blocking(move || this.joins.flush()).await;
-        self.errors.fetch_add(u64::from(!flushed), Ordering::SeqCst);
         if let Some(usage) = &self.usage {
             usage.tick().await;
         }
@@ -985,10 +818,6 @@ pub(crate) mod taints;
 
 #[path = "agents_retire.rs"]
 pub(crate) mod retire;
-
-#[cfg(test)]
-#[path = "agents_mint_tests.rs"]
-mod mint_tests;
 
 #[cfg(test)]
 #[path = "agents_estimate_tests.rs"]

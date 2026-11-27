@@ -2,19 +2,14 @@
 //! through the loaders that read them: the old pool is refused with the migration, and
 //! each of the two replacement routes loads.
 
-use std::ffi::OsString;
 use std::fs;
 use std::path::Path;
 
-use crate::agents_support::JOIN;
 use crate::config_support::{load, refusal, server, server_with_agents};
 use crate::support::{Scratch, base_args, config};
 
 /// Why the old agentless hosts-file pool is refused, as the server words it.
 const MIGRATION: &str = "the agentless hosts-file pool was removed: run js-agent on each listed host and use --agent-pool-config, or a [[pool]] of kind = \"joined\" (with its shape and max_machines)";
-
-/// The token path the documented pool writes, which the tests swap for a scratch file.
-const DOC_TOKEN_PATH: &str = "/run/credentials/js/join-token";
 
 /// The `index`th (from 0) `toml` block under the heading `### <heading>` of the
 /// configuration document, as it is written there; the section ends at the next heading.
@@ -51,9 +46,8 @@ fn the_documented_old_pool_is_refused_with_the_migration() {
 }
 
 /// Asserts that route 1 of the document holds: its `[server]` fragment sets
-/// `agent_listen`, and its `[[pool]]` of `kind = "joined"` (with the documented token path
-/// pointed at an owner-only scratch file holding a join token) loads under a server table
-/// with agent listening, with no warning. It catches a route-1 example that a file cannot
+/// `agent_listen`, and its `[[pool]]` of `kind = "joined"` loads under a server table with
+/// agent listening, with no warning. It catches a route-1 example that a file cannot
 /// load, and a fragment that lost `agent_listen`.
 #[test]
 fn the_config_file_route_loads() {
@@ -67,30 +61,22 @@ fn the_config_file_route_loads() {
             .unwrap()
             .contains_key("agent_listen")
     );
-    let token = scratch.write("pool-token", &format!("{JOIN}\n"), 0o600);
     let pool = migration_block("Route 1: a pool in the `--config` file", 1);
-    assert!(pool.contains(DOC_TOKEN_PATH));
-    let pool = pool.replace(DOC_TOKEN_PATH, &token.display().to_string());
     let text = format!("{}\n{pool}", server_with_agents(&scratch));
     let loaded = load(&scratch, &text).unwrap();
     assert!(loaded.warnings().is_empty(), "{:?}", loaded.warnings());
 }
 
-/// Asserts that route 2 of the document holds: its agent pool file, with
-/// `--agent-token-file` over an owner-only scratch file holding a join token and no host
-/// list, builds a server configuration. It catches an example in a shape the agent pool
-/// loader refuses, such as a `[[pool]]` table, a `kind` or a `join_token_file` key.
+/// Asserts that route 2 of the document holds: its agent pool file, with no host list,
+/// builds a server configuration with no warning. It catches an example in a shape the agent
+/// pool loader refuses, such as a `[[pool]]` table or a `kind`, and one that names a key that
+/// is no longer read.
 #[test]
 fn the_agent_pool_flags_route_loads() {
     let scratch = Scratch::new("migration_flags_route");
-    let pool = migration_block(
-        "Route 2: the flags `--agent-pool-config` and `--agent-token-file`",
-        0,
-    );
-    let mut args = base_args(&scratch);
+    let pool = migration_block("Route 2: the flag `--agent-pool-config`", 0);
+    let args = base_args(&scratch);
     scratch.write("agent-pool.toml", &pool, 0o644);
-    let tokens = scratch.write("agent-tokens", &format!("{JOIN}\n"), 0o600);
-    args.push(OsString::from("--agent-token-file"));
-    args.push(tokens.into_os_string());
-    config(args).unwrap();
+    let built = config(args).unwrap();
+    assert!(built.warnings().is_empty(), "{:?}", built.warnings());
 }

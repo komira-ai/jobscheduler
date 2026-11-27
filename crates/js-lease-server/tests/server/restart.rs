@@ -14,14 +14,12 @@ use js_state::sqlite::{Options, SqliteStore};
 use js_state::{ManualClock as StoreClock, SystemClock};
 use serde_json::json;
 
-use crate::agents_support::{JOB_POOL, JOIN, Session, agent_args, entry, hosts, join, listed};
+use crate::agents_support::{JOB_POOL, Session, agent_args, entry, hosts, join, listed};
 use crate::jobs_support::{
     beat_with, commands, job_agent as shared_agent, job_of, left_the_queue, one_start, running,
     submit_body,
 };
-use crate::support::{
-    Harness, Scratch, T0, TOKEN, base_args, config, lease_file, replace, request,
-};
+use crate::support::{Harness, Scratch, T0, TOKEN, config, lease_file, replace, request};
 
 /// A lease file the previous release could have left: a held lease on `gpu-01`, a releasing
 /// one on `gpu-02` and a pending one with no host.
@@ -107,13 +105,9 @@ const IMAGE: &str =
 /// The flags of a server with agent registration over [`JOB_POOL`], the job service on the
 /// loopback, `js-sched` placing and `boot` as its boot.
 fn job_args(scratch: &Scratch, boot: &str) -> Vec<OsString> {
-    let mut args = replace(base_args(scratch), "--boot", boot);
-    let tokens = scratch.write("agent-tokens", &format!("{JOIN}\n"), 0o600);
+    let mut args = replace(agent_args(scratch), "--boot", boot);
     scratch.write("agent-pool.toml", JOB_POOL, 0o644);
-    let flags = [
-        ("--agent-token-file", tokens.into_os_string()),
-        ("--job-listen", "127.0.0.1:0".into()),
-    ];
+    let flags = [("--job-listen", "127.0.0.1:0".into())];
     for (flag, value) in flags {
         args.push(flag.into());
         args.push(value);

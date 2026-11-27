@@ -2,7 +2,7 @@
 
 use serde_json::json;
 
-use crate::agents_support::{JOIN, post};
+use crate::agents_support::post;
 use crate::jobs_support::{
     beat_with, cancel, commands, job_agent, job_of, job_server, left_the_queue, per_job_hello,
     submit,
@@ -113,7 +113,7 @@ async fn one_token_is_one_trust_domain() {
     );
     let mut retired = agent.beat();
     retired["retired_jobs"] = json!(["job-1"]);
-    let acked = post(&h, "/v1/agent/heartbeat", Some(JOIN), &retired).await;
+    let acked = post(&h, "/v1/agent/heartbeat", None, &retired).await;
     assert_eq!(
         acked.json()["retired_acks"],
         json!(["job-1"]),

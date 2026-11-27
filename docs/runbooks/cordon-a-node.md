@@ -49,8 +49,7 @@ sudo js-agent cordon --flags-file /etc/js-agent/flags --state-root /var/lib/js-a
 the verb takes from it the lease server (`--server`), the certificate to trust (`--ca-cert`), the
 host id (`--host-id` or `--host-id-from-facts`) and the host's certificate and key (`--host-cert`
 and `--host-key`). It therefore cordons the host the agent registers, with what the agent
-presents. `--state-root` and `--token-file` are given beside it, as the agent's unit gives them
-beside the file; a flag the file names may not be given again, and `--server`, `--ca-cert`,
+presents. `--state-root` is given beside it, as the agent's unit gives it beside the file; a flag the file names may not be given again, and `--server`, `--ca-cert`,
 `--host-id`, `--host-id-from-facts`, `--host-cert` and `--host-key` may not be given with
 `--flags-file` at all.
 
@@ -66,11 +65,10 @@ cordoned with the same `--host-id <id>`, and one whose agent takes its id from h
 file (`--host-id-from-facts`) is cordoned with
 `--host-id-from-facts /var/lib/hostkeeper/facts.json`.
 
-1. It cordons the host with the host's own credential, chosen as the agent chooses it: the host
-   certificate that hostkeeper keeps (`--host-cert` and `--host-key`; the key must be readable by
-   the user running the verb, so that user is root or belongs to the key's group), or the one the
-   agent keeps in its state root, or `--token-file` for a host that has not swapped its one-time
-   token yet. The pool's shared join token is refused by the server on these routes.
+1. It cordons the host with the host's own certificate that hostkeeper keeps (`--host-cert` and
+   `--host-key`; the key must be readable by the user running the verb, so that user is root or
+   belongs to the key's group). A request without a verified host certificate is refused by the
+   server.
 2. It renews the cordon every third of `--lease-secs` (default 300, at most 3600) until `--for` has
    passed. The cordon is a lease the verb renews: a server that is not asked again lets it lapse.
 3. It lifts the cordon at the end, or at once on SIGTERM, SIGINT or SIGHUP (the end of an ssh
@@ -82,25 +80,12 @@ which the `cordoned` line prints). The server therefore says whose a cordon is, 
 guesses it from a clock. It needs a lease server of this release: an earlier server refuses the
 holder field with `invalid-cordon`.
 
-### When the server refuses the credential
+### When the server refuses the certificate
 
-A host whose agent presents its host certificate reads no `host-credential` file, so a file left in
-its state root by an earlier registration is not what the agent uses. Given that state root and no
-host certificate, the verb sends that file, and the server refuses it: `join-token-not-admitted`
-when the earlier registration used another host id than the one asked for; `join-token-expired`
-once the credential has gone unused for its bound (24 hours with no hello or heartbeat), and
-`http-401` once a later mint of a join token has dropped that lapsed credential. `join-token-not-admitted` also
-comes when the verb is told another host id than the one the agent registered with (a
-`--host-id-from-facts` on a host whose agent registered with `--host-id`). Standard error then
-says what was sent and for which host:
-
-```text
-js-agent cordon: credential error: cannot cordon the host: the server refused the credential (join-token-not-admitted)
-js-agent cordon: it sent the host credential in /var/lib/js-agent/state/host-credential for host <id>; to cordon with what the agent on this host presents, give the agent's flags file with --flags-file (such as /etc/js-agent/flags)
-```
-
-Run it again with `--flags-file` as above: the verb then takes the host id and the credential from
-the agent's own flags, so it asks for the host the agent registers, with what the agent presents.
+Given neither `--flags-file` nor `--host-cert` and `--host-key`, the verb has no certificate to
+send and the server refuses it. Run it again with `--flags-file` as above: the verb then takes the
+host id and the certificate from the agent's own flags, so it asks for the host the agent registers,
+with what the agent presents.
 
 It extends and lifts only its own cordon:
 

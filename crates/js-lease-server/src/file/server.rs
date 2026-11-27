@@ -158,6 +158,7 @@ pub(crate) struct UsageKeys {
 pub(crate) struct AgentKeys {
     burst: Option<u32>,
     interval: Option<Duration>,
+    /// Accepted and not read: a host is admitted by its certificate only.
     require_host_credential: Option<bool>,
     placement: Option<Placement>,
     estimate_feed: Option<bool>,
@@ -180,10 +181,10 @@ impl AgentKeys {
         }
     }
 
-    /// Whether a one-time join token's first hello must say the agent keeps a host
-    /// credential; off unless the file says so.
-    pub(crate) fn require_host_credential(&self) -> bool {
-        self.require_host_credential.unwrap_or(false)
+    /// Whether the file names the retired `require_host_credential`, whatever its value: it
+    /// is not read, and the start says so.
+    pub(crate) fn names_require_host_credential(&self) -> bool {
+        self.require_host_credential.is_some()
     }
 
     /// The deprecated `placement` key, as the file gave it.

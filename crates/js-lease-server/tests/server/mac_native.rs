@@ -11,7 +11,7 @@
 
 use serde_json::{Value, json};
 
-use crate::agents_support::{JOIN, Session, job_hello, post, session};
+use crate::agents_support::{Session, job_hello, post, session};
 use crate::jobs_support::{JobBody, job_agent, job_args, job_of, submit_body};
 use crate::support::{Harness, Scratch};
 
@@ -30,17 +30,13 @@ os = "linux"
 arch = "x86_64"
 "#;
 
-/// The Macs' shared join token, in their pool's `join_token_file`.
-const MAC_JOIN: &str = "mac-join-token-0123456789-abcdefghijklm";
-
-/// The Macs' pool, its tokens in `mac-tokens`: up to two Macs of 24 cores and 64 GiB, macOS on
+/// The Macs' pool: up to two Macs of 24 cores and 64 GiB, macOS on
 /// arm64, run natively under `sandbox-exec`.
 const MAC_POOL: &str = r#"
 name = "mac-build"
 class = "mac-host"
 max_machines = 2
 exec = "sandbox-exec"
-join_token_file = "mac-tokens"
 
 [shape]
 cpu_millis = 24000
@@ -81,28 +77,26 @@ async fn two_pools(name: &str) -> Harness {
     let scratch = Scratch::new(name);
     let mut args = job_args(&scratch, "127.0.0.1:0");
     scratch.write("agent-pool.toml", LINUX_POOL, 0o644);
-    let tokens = scratch.write("mac-tokens", &format!("{MAC_JOIN}\n"), 0o600);
-    let pool = MAC_POOL.replace("\"mac-tokens\"", &format!("{tokens:?}"));
-    let mac = scratch.write("mac-pool.toml", &pool, 0o644);
+    let mac = scratch.write("mac-pool.toml", MAC_POOL, 0o644);
     args.extend(["--agent-pool-config".into(), mac.into_os_string()]);
     Harness::with(scratch, args).await
 }
 
-/// The Linux host's per-job agent, registered in `burst` with [`JOIN`].
+/// The Linux host's per-job agent, registered in `burst`.
 async fn linux_agent(h: &Harness) -> Agent {
     let mut hello = job_hello(LINUX);
     hello["capabilities"]["os"] = json!("linux");
-    Agent(job_agent(h, &hello).await, JOIN)
+    Agent(job_agent(h, &hello).await)
 }
 
-/// The Mac's per-job agent, registered in `mac-build` with [`MAC_JOIN`].
+/// The Mac's per-job agent, registered in `mac-build`.
 async fn mac_agent(h: &Harness) -> Agent {
-    let reply = post(h, "/v1/agent/hello", Some(MAC_JOIN), &mac_hello(MAC)).await;
-    Agent(session(&reply, MAC), MAC_JOIN)
+    let reply = post(h, "/v1/agent/hello", None, &mac_hello(MAC)).await;
+    Agent(session(&reply, MAC))
 }
 
-/// A registered agent: its session and the join token of its pool.
-struct Agent(Session, &'static str);
+/// A registered agent: its session.
+struct Agent(Session);
 
 /// The body of the job `id` of the bundle `team/kbf-task` with no command and the arguments of
 /// a build task, 1 core and 1 GiB, with `constraints`.
@@ -134,8 +128,8 @@ async fn placed(h: &Harness, id: &str, body: &Value) -> String {
 
 /// The job starts the heartbeat reply of `agent` carries, as the wire has them.
 async fn starts(h: &Harness, agent: &Agent) -> Vec<Value> {
-    let Agent(session, token) = agent;
-    let reply = post(h, "/v1/agent/heartbeat", Some(token), &session.beat()).await;
+    let Agent(session) = agent;
+    let reply = post(h, "/v1/agent/heartbeat", None, &session.beat()).await;
     assert_eq!(reply.status, 200, "{}", reply.body);
     let commands = reply.json()["commands"].as_array().cloned();
     let starts = commands.into_iter().flatten();

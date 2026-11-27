@@ -645,7 +645,7 @@ fn answers_print_as_lines_or_proto3_json() {
 }
 
 /// Asserts that the global flags may follow a job command, and that without `--server` or
-/// `--token-file` a job command is exit 2 naming the flag, as for `join-token`.
+/// `--token-file` a job command is exit 2 naming the flag.
 #[test]
 fn the_global_flags_may_follow_a_job_command() {
     let scratch = Scratch::new("jobs_globals");

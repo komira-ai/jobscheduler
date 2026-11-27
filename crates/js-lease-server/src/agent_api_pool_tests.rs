@@ -4,18 +4,14 @@
 //! hello with an error the agent retries. Two servers share one store and one manual clock;
 //! nothing sleeps.
 
-use js_agent_wire::{InstanceIdentity, Welcome};
-use js_registry::{Credential, WholeNodeConfig};
+use js_agent_wire::Welcome;
+use js_registry::WholeNodeConfig;
 use js_types::HostId;
 use serde_json::json;
 
 use super::job_rig::{Rig, START_MS, whole_over, whole_rig};
 use super::{Bytes, Refused, serve_hello};
 use crate::api::rig::{Lines, process_sink};
-use crate::join_tokens::JoinRefusal;
-
-/// The ttl of a one-time token.
-const TTL: std::time::Duration = std::time::Duration::from_secs(600);
 
 fn rules() -> WholeNodeConfig {
     WholeNodeConfig::dedicated(2)
@@ -37,26 +33,11 @@ pub(crate) fn two_servers(name: &str) -> (Rig, Rig) {
     (first, second)
 }
 
-/// The hello of `name` through the route of `rig`'s server, as an agent of the pool; with
-/// `token`, a one-time token for the instance `i-1`, which the hello names.
-pub(crate) async fn hello(
-    rig: &Rig,
-    name: &str,
-    token: Option<&Credential>,
-) -> Result<Welcome, Refused> {
+/// The hello of `name` through the route of `rig`'s server, as an agent of the pool with the
+/// certificate of `name`.
+pub(crate) async fn hello(rig: &Rig, name: &str) -> Result<Welcome, Refused> {
     let capabilities = json!({ "per-job": "true", "arch": "x86_64" });
-    hello_with(rig, name, token, capabilities).await
-}
-
-/// [`hello`] reporting `capabilities`.
-async fn hello_with(
-    rig: &Rig,
-    name: &str,
-    token: Option<&Credential>,
-    capabilities: serde_json::Value,
-) -> Result<Welcome, Refused> {
-    let who = rig.agents.tokens.identify(&"j".repeat(40)).unwrap();
-    let mut said = json!({
+    let said = json!({
         "host_id": name,
         "pool": "burst",
         "agent_version": "0.1.0",
@@ -64,12 +45,8 @@ async fn hello_with(
         "capabilities": capabilities,
         "phase": "serving",
     });
-    if token.is_some() {
-        said["instance"] = json!({ "provider": "burst", "instance_id": "i-1" });
-    }
     let body = Ok(Bytes::from(said.to_string()));
-    let who = token.cloned().unwrap_or(who);
-    let sent = serve_hello(&rig.agents, who, token.cloned(), body, &|| ());
+    let sent = serve_hello(&rig.agents, name, body, &|| ());
     sent.await.map(|axum::Json(welcome)| welcome)
 }
 
@@ -79,38 +56,24 @@ pub(crate) fn refusal(answer: Result<Welcome, Refused>) -> (u16, &'static str) {
     (refused.status.as_u16(), refused.error)
 }
 
-/// A one-time token for the instance `i-1` of `rig`'s server, as the credential it presents.
-fn token(rig: &Rig) -> Credential {
-    let instance = InstanceIdentity {
-        provider: "burst".to_owned(),
-        instance_id: "i-1".to_owned(),
-    };
-    let minted = rig.agents.joins.mint(instance, TTL).unwrap();
-    Credential::of_token(&minted.token)
-}
-
 /// Asserts that a first hello into a pool already full over the rows of both servers is
 /// refused 403 `pool-full` by a server whose registry holds no host, before anything of the
-/// hello is written: the registry holds no host of that name, no row is written, the one-time
-/// token is not used (it serves no host), and the pool's four rows stand. It catches a cap
-/// counted over this server's own hosts, a refusal that leaves the registry's admission
-/// behind, and one that has used the token.
+/// hello is written: the registry holds no host of that name, no row is written, and the pool's
+/// four rows stand. It catches a cap counted over this server's own hosts, and a refusal that
+/// leaves the registry's admission behind.
 #[tokio::test]
 async fn a_first_hello_into_a_pool_full_over_the_rows_is_refused_before_anything_is_written() {
     let (mut first, second) = two_servers("rows_full");
     for name in ["host-1", "host-2", "host-3", "host-4"] {
         first.join(name, false).await;
     }
-    let who = token(&second);
     let commits = second.commits();
-    let refused = hello(&second, "host-5", Some(&who)).await;
+    let refused = hello(&second, "host-5").await;
     assert_eq!(refusal(refused), (403, "pool-full"));
     assert!(second.agents.registry.own_host(&host("host-5")).is_none());
     assert_eq!(second.jobs.read_node(&host("host-5")).unwrap(), None);
     assert_eq!(second.jobs.nodes().unwrap().1.len(), 4);
     assert_eq!(second.commits(), commits, "nothing was written");
-    let unused = second.agents.joins.serves(&who, "host-5");
-    assert_eq!(unused, Err(JoinRefusal::NotAdmitted));
 }
 
 /// Asserts that a host that has a row is not counted against the cap: with the pool full, the
@@ -124,7 +87,7 @@ async fn a_known_hosts_hello_is_not_capped() {
         first.join(name, false).await;
     }
     first.advance(first.agents.registry.longest_grace() * 2);
-    let again = hello(&first, "host-1", None).await.unwrap();
+    let again = hello(&first, "host-1").await.unwrap();
     assert_eq!(again.epoch, 2);
     let row = first.jobs.read_node(&host("host-1")).unwrap().unwrap();
     assert_eq!(row.record.epoch, 2);
@@ -149,7 +112,7 @@ async fn a_pool_whose_rows_cannot_be_read_refuses_the_hello_until_they_can() {
     let mut found = false;
     for reads in 0..32 {
         first.store.fail_read_after(reads);
-        let answer = hello(&first, "host-1", None).await;
+        let answer = hello(&first, "host-1").await;
         first.store.fail_read_after(usize::MAX);
         if !lines.take().contains("its pool's rows could not be read") {
             continue;
@@ -161,6 +124,6 @@ async fn a_pool_whose_rows_cannot_be_read_refuses_the_hello_until_they_can() {
         break;
     }
     assert!(found, "no read of the hello was the pool's count");
-    let admitted = hello(&first, "host-1", None).await.unwrap();
+    let admitted = hello(&first, "host-1").await.unwrap();
     assert_eq!(admitted.epoch, 1);
 }

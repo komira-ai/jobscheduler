@@ -38,7 +38,7 @@ fn restart(rig: &Rig) -> Rig {
     fresh
 }
 
-/// Asserts that the step to `at` revokes and releases nothing and starts no cooldown.
+/// Asserts that the step to `at` releases nothing and starts no cooldown.
 fn assert_kept(rig: &mut Rig, now: u64) {
     let actions = rig.tick(at(now));
     assert!(actions.is_empty(), "{:?}", kinds(&actions));
@@ -56,7 +56,7 @@ fn a_booting_machine_is_not_given_up_on_at_the_first_view_after_a_restart() {
     assert_kept(&mut rig, 20 * MINUTE);
     assert_kept(&mut rig, 20 * MINUTE + BOOT_HOLD - 1);
     let actions = rig.tick(at(20 * MINUTE + BOOT_HOLD));
-    assert_eq!(kinds(&actions), ["Save", "Revoke", "Release"]);
+    assert_eq!(kinds(&actions), ["Save", "Release"]);
     assert_eq!(rig.phase(0), Phase::Releasing);
     assert_eq!(rig.state.blocked["gpu"], Blocked::BootFailed);
     assert_eq!(
@@ -66,14 +66,14 @@ fn a_booting_machine_is_not_given_up_on_at_the_first_view_after_a_restart() {
 }
 
 /// Asserts that a hello inside the hold keeps the machine: it is registered, nothing is
-/// revoked or released, and the pool does not cool off.
+/// released, and the pool does not cool off.
 #[test]
 fn a_hello_inside_the_boot_hold_keeps_the_machine() {
     let mut rig = restarted_booting();
     assert_kept(&mut rig, 20 * MINUTE);
     rig.input.hosts = vec![host(BOOTER, "gpu")];
     let actions = rig.tick(at(20 * MINUTE + 2 * MINUTE));
-    assert_eq!(count(&actions, "Revoke") + count(&actions, "Release"), 0);
+    assert_eq!(count(&actions, "Release"), 0);
     assert_eq!(rig.phase(0), Phase::Registered);
     assert!(rig.state.records.cooldowns.is_empty());
 
@@ -115,7 +115,7 @@ fn lost_mid_job(state: HostState, lease_given_up: bool) -> (Rig, String) {
 
 /// Asserts that a silent host that shows runs but whose lease the registry gave up is
 /// released like an idle one, once silent for `unknown_hold`, to the millisecond: drained
-/// and marked, then revoked and released when the mark is read back. The runs it lists are
+/// and marked, then released when the mark is read back. The runs it lists are
 /// those of a job that can no longer report.
 #[test]
 fn a_silent_host_with_stale_runs_is_released_once_its_lease_is_given_up() {
@@ -129,7 +129,7 @@ fn a_silent_host_with_stale_runs_is_released_once_its_lease_is_given_up() {
 
         rig.input.hosts[0].mark = Some(Mark::Releasing);
         let actions = rig.tick(at(3 * SECOND + 31 * MINUTE));
-        assert_eq!(kinds(&actions), ["Save", "Revoke", "Release"]);
+        assert_eq!(kinds(&actions), ["Save", "Release"]);
         assert_eq!(rig.state.silent_released, vec![name]);
     }
 }
@@ -336,7 +336,7 @@ fn a_missing_host_is_released_when_the_time_seen_before_and_after_a_restart_adds
     let last = back + 30 * MINUTE - seen;
     assert_eq!(count(&second.tick(at(last - 1)), "Release"), 0);
     let actions = second.tick(at(last));
-    assert_eq!(kinds(&actions), ["Save", "Revoke", "Release"]);
+    assert_eq!(kinds(&actions), ["Save", "Release"]);
     assert_eq!(second.phase(0), Phase::Releasing);
 }
 

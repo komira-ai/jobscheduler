@@ -41,7 +41,7 @@ fn an_acquire_whose_answer_is_lost_but_landed_launches_one_machine() {
 
 /// Proves the other half of section 7's "Scaler double launch": a lost answer that did not
 /// land is given up once the unknown hold passes and the launch is made once more, one
-/// machine after it and never two. The token of the second launch is design section 8
+/// machine after it and never two. The identity of the second launch is design section 8
 /// row 34 (Suspected) and is not asserted. Witness `acquire_lost`. Red for a scaler that
 /// launches again before the hold (two machines' worth of acquires) or never.
 #[test]

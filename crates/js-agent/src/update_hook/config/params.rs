@@ -3,13 +3,13 @@
 //! The package manifest's `[params]` table is a flat table of scalars; the updater adds keys of
 //! the namespace `updater.`, of which this hook reads `updater.previous_version` (absent on a
 //! first install) and ignores the rest. Every key of [`KEYS`] is required and any other key is
-//! refused:
+//! refused, except the retired `token_file`, which a config package issued before hosts were
+//! identified by their certificate alone still carries and which is ignored:
 //!
 //! - `unit`: the systemd unit (a launchd label on a Mac) of the agent the hook restarts;
 //! - `flags_file`: the host's agent flags, the file `js-agent --flags-file` reads, where the
 //!   hook finds the lease server, the certificate to trust and the host id;
-//! - `token_file` and `state_root`: the agent's `--token-file` and `--state-root`, where the
-//!   bearer for the lease server's own-host routes is;
+//! - `state_root`: the agent's `--state-root`, where its taint marker and hold files are;
 //! - `state_dir`: the hook's own lock and record, root 0700;
 //! - `cutover_timeout_secs`, `verify_timeout_secs` and `rollback_timeout_secs`: the updater's
 //!   bound on each step, which the waits of the step are built from.
@@ -36,10 +36,9 @@ const RESERVED_PREFIX: &str = "updater.";
 pub const HELLO_WAIT_SECS: u64 = 60;
 
 /// Every key the hook reads from the package manifest's `[params]` table, and requires.
-pub const KEYS: [&str; 8] = [
+pub const KEYS: [&str; 7] = [
     UNIT_KEY,
     FLAGS_FILE_KEY,
-    TOKEN_FILE_KEY,
     STATE_ROOT_KEY,
     STATE_DIR_KEY,
     CUTOVER_TIMEOUT_KEY,
@@ -93,8 +92,6 @@ pub struct Params {
     pub unit: String,
     /// The host's agent flags (`flags_file`).
     pub flags_file: PathBuf,
-    /// The join token file (`token_file`).
-    pub token_file: PathBuf,
     /// The agent's state root (`state_root`).
     pub state_root: PathBuf,
     /// The hook's lock and record (`state_dir`).
@@ -132,10 +129,7 @@ impl Params {
         if let Some((key, _)) = table.iter().find(|(_, value)| !is_scalar(value)) {
             return Err(TableError::NotScalar(key.clone()).into());
         }
-        if let Some(key) = table
-            .keys()
-            .find(|key| !KEYS.contains(&key.as_str()) && !key.starts_with(RESERVED_PREFIX))
-        {
+        if let Some(key) = table.keys().find(|key| !is_known(key)) {
             return Err(ParamsError::Unknown(key.clone()));
         }
         let unit = string_of(&table, UNIT_KEY)?.ok_or(TableError::Missing(UNIT_KEY))?;
@@ -145,7 +139,6 @@ impl Params {
         Ok(Params {
             unit,
             flags_file: plain(&table, FLAGS_FILE_KEY)?,
-            token_file: plain(&table, TOKEN_FILE_KEY)?,
             state_root: plain(&table, STATE_ROOT_KEY)?,
             state_dir: plain(&table, STATE_DIR_KEY)?,
             cutover_secs: bound(&table, CUTOVER_TIMEOUT_KEY, CUTOVER_MIN_SECS)?,
@@ -154,6 +147,12 @@ impl Params {
             previous_version: string_of(&table, PREVIOUS_VERSION_KEY)?,
         })
     }
+}
+
+/// Whether the hook may be given `key`: one of [`KEYS`], the retired `token_file` (ignored),
+/// or a key of the updater's namespace.
+fn is_known(key: &str) -> bool {
+    KEYS.contains(&key) || key == TOKEN_FILE_KEY || key.starts_with(RESERVED_PREFIX)
 }
 
 /// A required key that is an absolute, plain path.

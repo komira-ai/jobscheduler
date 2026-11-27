@@ -2,7 +2,7 @@
 //! before the agent's unit exists.
 //!
 //! A process that reaches the metadata address can read the machine's user data, which
-//! holds the join token and, under the tailscale mode, the Tailscale key. The host runs
+//! holds, under the tailscale mode, the Tailscale key. The host runs
 //! jobs in containers, so the script drops traffic to that address from every container
 //! network and from every user but root, with `nftables` (`nft` is part of the Ubuntu 24.04
 //! server image; the script fails at `test -x` if it is not there, and the agent never

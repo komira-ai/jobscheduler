@@ -330,13 +330,13 @@ fn a_refused_first_read_fails_the_drain_before_the_hold() {
     probe.fail_lease(
         "lease.host",
         1,
-        LeaseError::Refused("host-credential-required".to_owned()),
+        LeaseError::Refused("host-certificate-required".to_owned()),
     );
     assert_eq!(
         probe.drain(&rig.params),
         environment_failure(
             Reason::LeaseUnreachable,
-            "refused: host-credential-required"
+            "refused: host-certificate-required"
         )
     );
     assert_eq!(rig.hold_text(), None);

@@ -47,7 +47,7 @@ async fn silent_hosts_rows_are_forgotten_and_the_pool_has_room_again() {
     for name in ["host-1", "host-2", "host-3", "host-4"] {
         first.join(name, false).await;
     }
-    let full = hello(&second, "host-5", None).await;
+    let full = hello(&second, "host-5").await;
     assert_eq!(refusal(full), (403, "pool-full"));
 
     first.advance(past_forgetting(&first));
@@ -60,7 +60,7 @@ async fn silent_hosts_rows_are_forgotten_and_the_pool_has_room_again() {
         "{text}"
     );
     assert!(text.contains("host-1") & text.contains("host-4"), "{text}");
-    let admitted = hello(&second, "host-5", None).await.unwrap();
+    let admitted = hello(&second, "host-5").await.unwrap();
     assert_eq!(admitted.epoch, 1);
 }
 

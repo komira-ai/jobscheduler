@@ -1,5 +1,5 @@
 //! The cordon of a held host: when the keeper asks the lease server, what it says, and how it
-//! credentials itself. The server is a fake that records each request with the time of a
+//! connects. The server is a fake that records each request with the time of a
 //! clock the test moves by hand; the state root and the hold file are real files in a
 //! scratch directory. No thread runs and no time passes.
 
@@ -7,29 +7,26 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 
+use js_agent::Login;
 use js_agent::hold_cordon::{
-    Connect, HOLD_LEASE_SECS, HOLD_RENEW, HOLD_RETRY, Keeper, Seams, connect_http, login,
+    Connect, HOLD_LEASE_SECS, HOLD_RENEW, HOLD_RETRY, Keeper, Seams, connect_http,
 };
 use js_agent::lifecycle::hold::{self, HOLD_FILE};
 use js_agent::lifecycle::{Clock, StateRoot};
 use js_agent::own_host::{
     CordonView, Cordoned, HostReading, HttpLease, Lease, LeaseError, RequestLimit, Uncordoned,
 };
-use js_agent::{CREDENTIAL_FILE, CredentialFile, CredentialStore, Login};
-use js_agent_wire::HostCredential;
 use js_client::HostIdentity;
 
+use crate::host_certs::self_signed;
 use crate::jobs::private;
 use crate::support::Scratch;
 
 /// The host the keeper cordons.
 const HOST: &str = "h1";
-
-/// A valid host credential.
-const CREDENTIAL: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 /// What the keeper says when a hold file in the right form begins.
 const HELD: &str =
@@ -187,8 +184,8 @@ struct Rig {
     owner: u32,
     clock: ManualClock,
     server: Server,
-    /// The state-root path of each connect, in order.
-    connects: Rc<RefCell<Vec<PathBuf>>>,
+    /// How many times the keeper connected.
+    connects: Rc<Cell<usize>>,
     /// Connecting fails while this is set.
     down: Rc<Cell<bool>>,
     connect: Box<Connect<'static>>,
@@ -202,12 +199,12 @@ impl Rig {
         let owner = fs::metadata(&dir).unwrap().uid();
         let cell = Rc::new(Cell::new(0));
         let server = Server::new(&cell);
-        let connects = Rc::new(RefCell::new(Vec::new()));
+        let connects = Rc::new(Cell::new(0));
         let down = Rc::new(Cell::new(false));
         let connect: Box<Connect<'static>> = {
             let (server, connects, down) = (server.clone(), Rc::clone(&connects), Rc::clone(&down));
-            Box::new(move |path: &Path| {
-                connects.borrow_mut().push(path.to_path_buf());
+            Box::new(move || {
+                connects.set(connects.get() + 1);
                 if down.get() {
                     return Err("cannot connect".to_owned());
                 }
@@ -246,14 +243,14 @@ impl Rig {
     }
 
     fn connected(&self) -> usize {
-        self.connects.borrow().len()
+        self.connects.get()
     }
 }
 
 /// The ask is made as soon as a hello has been accepted, never before: with the host held and
 /// time moving, steps that follow no hello connect to nothing and ask nothing and say only
 /// that the hold began, once; the step of the first hello asks once, for the hour, and says
-/// the cordon is placed with its remaining time, over a connection to the state root. It
+/// the cordon is placed with its remaining time, over one connection. It
 /// catches a keeper that asks while the server cannot know the host, one that asks twice at a
 /// hello, and one that says nothing of the hold.
 #[test]
@@ -272,7 +269,7 @@ fn nothing_is_asked_before_the_first_hello_and_the_cordon_is_placed_at_it() {
     rig.clock.set(7_300_000);
     assert_eq!(keeper.step(true), vec![CORDONED.to_owned()]);
     assert_eq!(rig.server.asks(), vec![(7_300_000, 3600)]);
-    assert_eq!(*rig.connects.borrow(), vec![rig.root.path().to_path_buf()]);
+    assert_eq!(rig.connected(), 1);
 }
 
 /// The constants the lease and its renewals are asked with are the hour, a third of it, and
@@ -507,95 +504,37 @@ fn a_refused_hold_file_still_cordons_and_the_line_says_why() {
     assert_eq!(rig.server.times(), vec![0]);
 }
 
-/// A host certificate is kept as it is, whatever the state root holds. It catches a login that
-/// replaces the certificate with the credential file.
-#[test]
-fn a_host_certificate_login_is_kept_as_it_is() {
-    let scratch = Scratch::new("hold-cordon-login-cert");
-    let dir = private(&scratch, "state");
-    CredentialFile::in_dir(&dir)
-        .save(&HostCredential::parse(CREDENTIAL).unwrap())
-        .unwrap();
-    let registered = Login::HostCertificate(HostIdentity::new(
-        Path::new("/host/cert.pem"),
-        Path::new("/host/key.pem"),
-    ));
-    assert_eq!(login(&registered, &dir), registered);
-}
-
-/// A token login becomes the credential file of the state root when it holds a host
-/// credential. It catches a keeper that presents the shared pool token, which the own-host
-/// routes refuse.
-#[test]
-fn a_token_login_becomes_the_host_credential_the_state_root_holds() {
-    let scratch = Scratch::new("hold-cordon-login-credential");
-    let dir = private(&scratch, "state");
-    CredentialFile::in_dir(&dir)
-        .save(&HostCredential::parse(CREDENTIAL).unwrap())
-        .unwrap();
-    let registered = Login::Token(scratch.path("pool-token"));
-    assert_eq!(
-        login(&registered, &dir),
-        Login::Token(dir.join(CREDENTIAL_FILE))
-    );
-}
-
-/// A token login stays the token file when the state root holds no credential, one with
-/// content that is not a credential, or something that is not a file it can read. It catches a
-/// login that points at a credential file that is not there or cannot be used.
-#[test]
-fn a_token_login_stays_the_token_file_without_a_usable_credential() {
-    let scratch = Scratch::new("hold-cordon-login-none");
-    let registered = Login::Token(scratch.path("pool-token"));
-
-    let empty = private(&scratch, "empty");
-    assert_eq!(login(&registered, &empty), registered);
-
-    let bad = private(&scratch, "bad");
-    fs::write(bad.join(CREDENTIAL_FILE), "two words\n").unwrap();
-    assert_eq!(login(&registered, &bad), registered);
-
-    let unreadable = private(&scratch, "unreadable");
-    fs::create_dir(unreadable.join(CREDENTIAL_FILE)).unwrap();
-    assert_eq!(login(&registered, &unreadable), registered);
-}
-
 /// The server the connect tests name: a loopback address with port 0, which a connect never
 /// reaches (no request is sent).
-const NO_SERVER: &str = "http://127.0.0.1:0";
+const NO_SERVER: &str = "https://127.0.0.1:0";
 
-/// The daemon's connect fails with the client's own text, unchanged, when the credential it
-/// would present cannot be used: here a token file that is not there and a state root that
-/// holds no host credential. It catches a connect that hides why it failed, or that turns a
-/// credential it cannot read into a connection.
+/// The daemon's connect fails with the client's own text, unchanged, when the certificate it
+/// would present cannot be used: here files that are not there. It catches a connect that
+/// hides why it failed, or that turns a certificate it cannot read into a connection.
 #[test]
 fn the_daemons_connect_says_what_the_client_could_not_use() {
     let scratch = Scratch::new("hold-cordon-connect-fails");
-    let root = private(&scratch, "state");
-    let registered = Login::Token(scratch.path("absent-token"));
+    let registered = Login::HostCertificate(HostIdentity::new(
+        scratch.path("absent.crt"),
+        scratch.path("absent.key"),
+    ));
     let expected =
         match HttpLease::connect(NO_SERVER, &registered, None, "h1", RequestLimit::DEFAULT) {
-            Ok(_) => panic!("a token file that is not there connects"),
+            Ok(_) => panic!("a certificate that is not there connects"),
             Err(why) => why.to_string(),
         };
-    match connect_http(NO_SERVER, &registered, None, "h1", &root) {
-        Ok(_) => panic!("the daemon's connect took a token file that is not there"),
+    match connect_http(NO_SERVER, &registered, None, "h1") {
+        Ok(_) => panic!("the daemon's connect took a certificate that is not there"),
         Err(why) => assert_eq!(why, expected),
     }
 }
 
-/// The daemon's connect makes a connection when the credential can be used: the host
-/// credential the state root holds, chosen over a token file that is not there. Nothing is
-/// sent. It catches a connect that presents the token file when the state root holds a
-/// credential.
+/// The daemon's connect makes a connection when the host certificate can be used, and presents
+/// the login the agent registered with as it is. Nothing is sent. It catches a connect that
+/// refuses a usable certificate.
 #[test]
-fn the_daemons_connect_uses_the_state_roots_credential() {
+fn the_daemons_connect_uses_the_certificate_the_agent_registered_with() {
     let scratch = Scratch::new("hold-cordon-connect-works");
-    let root = private(&scratch, "state");
-    let credential = HostCredential::parse(CREDENTIAL).expect("a host credential");
-    CredentialFile::in_dir(&root)
-        .save(&credential)
-        .expect("save the credential");
-    let registered = Login::Token(scratch.path("absent-token"));
-    assert!(connect_http(NO_SERVER, &registered, None, "h1", &root).is_ok());
+    let registered = Login::HostCertificate(self_signed(&scratch, "h1"));
+    assert!(connect_http(NO_SERVER, &registered, None, "h1").is_ok());
 }

@@ -87,12 +87,11 @@ pub const fn maintain_timeout_secs(step: MaintenanceStep) -> u64 {
 /// The manifest's own `[params]` (the harness adds the `updater.*` keys). The state directory
 /// is a placeholder: the binary runs the steps over the harness's record directory, which only
 /// the binary's flag or variable names.
-pub const PARAMS: [(&str, ParamValue); 17] = [
+pub const PARAMS: [(&str, ParamValue); 16] = [
     ("unit", ParamValue::Text(UNIT)),
     ("state_dir", ParamValue::Text("/var/lib/js-agent-update")),
     ("release_link", ParamValue::Text(RELEASE_LINK)),
     ("flags_file", ParamValue::Text("/etc/js-agent/flags")),
-    ("token_file", ParamValue::Text("/etc/js-agent/token")),
     ("state_root", ParamValue::Text("/var/lib/js-agent/state")),
     ("runtime", ParamValue::Text("crun")),
     ("cordon_lease_secs", ParamValue::Integer(300)),
@@ -270,7 +269,7 @@ pub enum Fault {
     /// of a first install, which asks the lease server nothing).
     Fail,
     /// The host is busy (75): it holds a lease that never goes (`prepare`, `cutover`), or, on a
-    /// first install, the join token file is not as the agent needs it (`prepare`).
+    /// first install, the host's key file is not as the agent needs it (`prepare`).
     Defer,
     /// No version can repair the host (76): the agent's state root holds a taint (`prepare`,
     /// `cutover`, `verify`, `rollback`).
@@ -306,7 +305,7 @@ impl Fault {
         }
     }
 
-    /// [`Fault::reachable`] on a first install: only `prepare` defers (the join token file is
+    /// [`Fault::reachable`] on a first install: only `prepare` defers (the host's key file is
     /// not right), since there is no host to drain and no lease to wait out.
     #[must_use]
     pub const fn reachable_on_first_install(self, step: Step) -> bool {

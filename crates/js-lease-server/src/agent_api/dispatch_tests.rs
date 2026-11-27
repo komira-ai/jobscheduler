@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use js_agent_wire::{HeldState, InstanceIdentity};
+use js_agent_wire::HeldState;
 use js_jobs::{AllocationId, JobId, JobState};
 use js_state::Store as _;
 use serde_json::json;
@@ -20,6 +20,7 @@ use crate::agent_api::job_rig::{
 };
 use crate::agent_api::serve_hello;
 use crate::agent_api::whole_tests::{queue_share, rules};
+use crate::host_cert::CertHost;
 use crate::job_expiry::JobLimits;
 
 #[path = "dispatch_unbuilt_tests.rs"]
@@ -76,14 +77,12 @@ fn body(rig: &Rig, host: &str, acks: Vec<DispatchAck>) -> Bytes {
     Bytes::from(serde_json::to_vec(&sent).unwrap())
 }
 
-/// `body` through the route as the pool's token, with the marks of the request.
-async fn sent(
-    rig: &Rig,
-    body: Bytes,
-    marks: (Option<Extension<OneTime>>, Option<Extension<CertifiedHost>>),
-) -> Result<DispatchReply, Refused> {
+/// `body` through the route as the host `certificate`'s certificate presents it.
+async fn sent(rig: &Rig, body: Bytes, certificate: &str) -> Result<DispatchReply, Refused> {
     let agents = State(Arc::clone(&rig.agents));
-    let answer = poll(agents, Extension(rig.who.clone()), marks, Ok(body)).await;
+    let id = HostId::new(certificate).unwrap();
+    let who = Extension(Credential::of_host_certificate(&id));
+    let answer = poll(agents, who, Extension(CertifiedHost(id)), Ok(body)).await;
     answer.map(|Json(reply)| reply)
 }
 
@@ -93,7 +92,7 @@ async fn polled_by(
     host: &str,
     acks: Vec<DispatchAck>,
 ) -> Result<DispatchReply, Refused> {
-    sent(rig, body(rig, host, acks), (None, None)).await
+    sent(rig, body(rig, host, acks), host).await
 }
 
 /// The poll of `host-a` carrying `acks`.
@@ -649,7 +648,7 @@ async fn the_beat_of_a_polling_host_leaves_out_what_the_queue_carries_and_no_oth
 }
 
 /// The hello body of `host` in the pool of `rig`, reporting `capabilities`, naming the launched
-/// instance `instance` when given (a one-time token's hello does).
+/// instance `instance` when given (a launched machine's hello does).
 fn hello_of(
     rig: &Rig,
     host: &str,
@@ -682,36 +681,23 @@ fn poll_in(host: &str, welcome: &js_agent_wire::Welcome) -> DispatchPoll {
 
 /// Catches a welcome that says `dispatch_poll` to an agent that does not report the capability
 /// or from a server that does not serve the poll to it. A server with the job tables says it to a
-/// host whose hello reports `dispatch-poll`, also through a one-time token (and the poll then
-/// works under that token), and not to a host that reports `per-job` alone.
+/// host whose hello reports `dispatch-poll` (and the poll then works), and not to a host that
+/// reports `per-job` alone.
 #[tokio::test]
 async fn a_server_with_the_tables_says_dispatch_poll_to_a_host_that_reports_it() {
     let rig = clocked_rig("dispatch_welcome", false, JobLimits::default());
     let rig = timed(rig, Duration::ZERO, NEVER);
-    let instance = InstanceIdentity {
-        provider: "lambdalabs".to_owned(),
-        instance_id: "i-1".to_owned(),
-    };
-    let ttl = Duration::from_secs(600);
-    let minted = rig.agents.joins.mint(instance, ttl).unwrap();
-    let token = Credential::of_token(&minted.token);
     let body = hello_of(&rig, "host-a", &polling(), Some("i-1"));
-    let hello = serve_hello(
-        &rig.agents,
-        token.clone(),
-        Some(token.clone()),
-        Ok(body),
-        &|| (),
-    );
+    let hello = serve_hello(&rig.agents, "host-a", Ok(body), &|| ());
     let Json(welcome) = hello.await.unwrap();
     assert!(welcome.dispatch_poll);
     let poll = poll_in("host-a", &welcome);
-    let served = sent_as(&rig, &poll, token.clone(), Some(token)).await;
+    let served = sent_as(&rig, &poll, "host-a").await;
     assert_eq!(served.unwrap(), DispatchReply::default());
 
     let plain = json!({ "per-job": "true", "arch": "x86_64" });
     let body = hello_of(&rig, "host-b", &plain, None);
-    let hello = serve_hello(&rig.agents, rig.who.clone(), None, Ok(body), &|| ());
+    let hello = serve_hello(&rig.agents, "host-b", Ok(body), &|| ());
     let Json(welcome) = hello.await.unwrap();
     assert!(!welcome.dispatch_poll);
 }
@@ -724,41 +710,33 @@ async fn a_server_with_the_tables_says_dispatch_poll_to_a_host_that_reports_it()
 async fn a_server_without_the_tables_never_says_dispatch_poll_and_refuses_the_poll() {
     let rig = untabled("dispatch_welcome_none", false);
     let body = hello_of(&rig, "host-c", &polling(), None);
-    let hello = serve_hello(&rig.agents, rig.who.clone(), None, Ok(body), &|| ());
+    let hello = serve_hello(&rig.agents, "host-c", Ok(body), &|| ());
     let Json(welcome) = hello.await.unwrap();
     assert!(!welcome.dispatch_poll);
     let poll = poll_in("host-c", &welcome);
-    let refused = sent_as(&rig, &poll, rig.who.clone(), None)
-        .await
-        .unwrap_err();
+    let refused = sent_as(&rig, &poll, "host-c").await.unwrap_err();
     assert_eq!(
         (refused.status.as_u16(), refused.error),
         (409, "dispatch-not-served")
     );
 }
 
-/// The poll `sent` as the credential `who`, with the one-time token `one_time` when given.
+/// The poll `sent` as the host `certificate`'s certificate presents it.
 async fn sent_as(
     rig: &Rig,
     sent: &DispatchPoll,
-    who: Credential,
-    one_time: Option<Credential>,
+    certificate: &str,
 ) -> Result<DispatchReply, Refused> {
-    let agents = State(Arc::clone(&rig.agents));
-    let marks = (
-        one_time.map(|presented| Extension(OneTime(presented))),
-        None,
-    );
     let body = Bytes::from(serde_json::to_vec(sent).unwrap());
-    let answer = poll(agents, Extension(who), marks, Ok(body)).await;
-    answer.map(|Json(reply)| reply)
+    self::sent(rig, body, certificate).await
 }
 
 /// Catches a poll route that is not mounted at the wire's path or not behind the agent routes'
 /// authentication, and a reply the agent would refuse. Through the router: the poll at
-/// `/v1/agent/dispatch` with the pool's token is answered 200 with a reply whose start passes the
-/// check the agent makes of every message ([`Dispatched::validate`]) and names the job and the
-/// allocation the store holds; the same poll without a token is 401; a `GET` is not routed.
+/// `/v1/agent/dispatch` with the host's certificate is answered 200 with a reply whose start
+/// passes the check the agent makes of every message ([`Dispatched::validate`]) and names the
+/// job and the allocation the store holds; the same poll without a certificate is 401
+/// `host-certificate-required`, also with a bearer; a `GET` is not routed.
 #[tokio::test]
 async fn the_route_is_mounted_behind_the_agent_authentication_and_its_reply_passes_the_agents_check()
  {
@@ -767,23 +745,20 @@ async fn the_route_is_mounted_behind_the_agent_authentication_and_its_reply_pass
     let rig = server("dispatch_router", "server-a");
     let job = rig.place("job-1", "host-a");
     let app = crate::agent_api::router(Arc::clone(&rig.agents));
-    let request = |token: Option<String>, method: &str| {
-        let mut request = axum::http::Request::builder()
+    let request = |certified: bool, method: &str| {
+        let request = axum::http::Request::builder()
             .method(method)
             .uri(js_agent_wire::DISPATCH_PATH)
+            .header("authorization", format!("Bearer {}", "j".repeat(40)))
             .header("content-type", "application/json");
-        if let Some(token) = token {
-            request = request.header("authorization", format!("Bearer {token}"));
-        }
         let sent = axum::body::Body::from(body(&rig, "host-a", Vec::new()));
-        request.body(sent).unwrap()
+        let mut request = request.body(sent).unwrap();
+        if certified {
+            request.extensions_mut().insert(CertHost(host()));
+        }
+        request
     };
-    let token = "j".repeat(40);
-    let answer = app
-        .clone()
-        .oneshot(request(Some(token.clone()), "POST"))
-        .await
-        .unwrap();
+    let answer = app.clone().oneshot(request(true, "POST")).await.unwrap();
     assert_eq!(answer.status(), StatusCode::OK);
     let text = axum::body::to_bytes(answer.into_body(), 1 << 20)
         .await
@@ -798,15 +773,18 @@ async fn the_route_is_mounted_behind_the_agent_authentication_and_its_reply_pass
         spec.allocation_id,
         rig.allocation(&job).allocation_id.to_string()
     );
-    let anonymous = app.clone().oneshot(request(None, "POST")).await.unwrap();
+    let anonymous = app.clone().oneshot(request(false, "POST")).await.unwrap();
     assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
-    let read = app.oneshot(request(Some(token), "GET")).await.unwrap();
+    let said = axum::body::to_bytes(anonymous.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    assert_eq!(said, r#"{"error":"host-certificate-required"}"#);
+    let read = app.oneshot(request(true, "GET")).await.unwrap();
     assert_eq!(read.status(), StatusCode::METHOD_NOT_ALLOWED);
 }
 
 /// Catches a poll that is served with a body that is not one, a wrong session, a stale epoch, a
-/// certificate of another host, a one-time token that did not register the host and a host that
-/// does not poll. Each is refused with its status and code, and nothing is claimed.
+/// certificate of another host and a host that does not poll. Each is refused with its status and code, and nothing is claimed.
 #[tokio::test]
 async fn a_poll_that_is_not_the_hosts_own_is_refused() {
     let mut rig = server("dispatch_refused", "server-a");
@@ -817,7 +795,7 @@ async fn a_poll_that_is_not_the_hosts_own_is_refused() {
         (refused.status.as_u16(), refused.error)
     };
     assert_eq!(
-        refusal(sent(&rig, Bytes::from_static(b"{"), (None, None)).await),
+        refusal(sent(&rig, Bytes::from_static(b"{"), "host-a").await),
         (400, "invalid-dispatch")
     );
     let unnamed = DispatchPoll {
@@ -826,7 +804,7 @@ async fn a_poll_that_is_not_the_hosts_own_is_refused() {
         session: String::new(),
         acks: Vec::new(),
     };
-    let unnamed = sent_as(&rig, &unnamed, rig.who.clone(), None).await;
+    let unnamed = sent_as(&rig, &unnamed, "host-a").await;
     assert_eq!(refusal(unnamed), (400, "invalid-dispatch"));
 
     let (epoch, session) = rig.sessions["host-a"].clone();
@@ -836,30 +814,19 @@ async fn a_poll_that_is_not_the_hosts_own_is_refused() {
         session: session.to_owned(),
         acks: Vec::new(),
     };
-    let wrong = sent_as(
-        &rig,
-        &poll_of(epoch, "other-session"),
-        rig.who.clone(),
-        None,
-    )
-    .await;
+    let wrong = sent_as(&rig, &poll_of(epoch, "other-session"), "host-a").await;
     assert_eq!(refusal(wrong), (403, "session-mismatch"));
-    let stale = sent_as(&rig, &poll_of(epoch + 1, &session), rig.who.clone(), None).await;
+    let stale = sent_as(&rig, &poll_of(epoch + 1, &session), "host-a").await;
     assert_eq!(refusal(stale), (409, "stale-epoch"));
     let stranger = DispatchPoll {
         host_id: "host-z".to_owned(),
         ..poll_of(epoch, &session)
     };
-    let stranger = sent_as(&rig, &stranger, rig.who.clone(), None).await;
+    let stranger = sent_as(&rig, &stranger, "host-z").await;
     assert_eq!(refusal(stranger), (409, "unknown-host"));
 
-    let certified = Some(Extension(CertifiedHost(HostId::new("host-b").unwrap())));
-    let mismatch = sent(&rig, body(&rig, "host-a", Vec::new()), (None, certified)).await;
+    let mismatch = sent(&rig, body(&rig, "host-a", Vec::new()), "host-b").await;
     assert_eq!(refusal(mismatch), (403, "certificate-host-mismatch"));
-    let token = Credential::of_token(&"t".repeat(40));
-    let unregistered = poll_of(epoch, &session);
-    let one_time = sent_as(&rig, &unregistered, rig.who.clone(), Some(token)).await;
-    assert_eq!(refusal(one_time), (403, "join-token-not-admitted"));
     assert_eq!(
         refusal(polled_by(&rig, "host-b", Vec::new()).await),
         (409, "dispatch-not-served"),
@@ -885,7 +852,7 @@ async fn a_poll_that_reaches_another_server_than_the_hello_is_served() {
     let other = timed(other, Duration::ZERO, NEVER);
     other.agents.dispatching.set_claimer("second".to_owned());
     let job = first.place("job-a", "host-a");
-    let reply = sent(&other, body(&first, "host-a", Vec::new()), (None, None)).await;
+    let reply = sent(&other, body(&first, "host-a", Vec::new()), "host-a").await;
     assert_eq!(names(&reply.unwrap()), vec![start(job.as_str())]);
     let session = other
         .agents
@@ -907,7 +874,7 @@ async fn a_poll_that_reaches_another_server_than_the_hello_is_served() {
     );
     let third = timed(third, Duration::ZERO, NEVER);
     first.store.fail_read_after(0);
-    let refused = sent(&third, body(&first, "host-a", Vec::new()), (None, None)).await;
+    let refused = sent(&third, body(&first, "host-a", Vec::new()), "host-a").await;
     let refused = refused.unwrap_err();
     assert_eq!(
         (refused.status.as_u16(), refused.error),

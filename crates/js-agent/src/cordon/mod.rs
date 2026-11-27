@@ -1,25 +1,24 @@
 //! `js-agent cordon`: keeps leases off this host for a window, then lets them back.
 //!
 //! ```text
-//! js-agent cordon --flags-file <file> [--state-root <dir>] [--token-file <file>]
-//!     --for <duration> [--lease-secs <n>] [--holder <name>] [--take-over]
-//! js-agent cordon --server <url> (--host-cert <file> --host-key <file> | --state-root <dir> |
-//!     --token-file <file>) --for <duration> [--lease-secs <n>] [--holder <name>] [--take-over]
+//! js-agent cordon --flags-file <file> --for <duration> [--lease-secs <n>] [--holder <name>]
+//!     [--take-over]
+//! js-agent cordon --server <url> --host-cert <file> --host-key <file> --for <duration>
+//!     [--lease-secs <n>] [--holder <name>] [--take-over]
 //!     [--host-id <id> | --host-id-from-facts <file>] [--ca-cert <file>]
 //! ```
 //!
 //! On a host the agent runs on, `--flags-file` names the agent's own flags file and the verb
 //! takes the server, the certificate to trust, the host id and the host's certificate and key
 //! from it, read as the agent reads them: it cordons the host the agent registers and presents
-//! what the agent presents. The credential is then chosen as the agent chooses it: the host
-//! certificate when the flags name one (the agent reads no `host-credential` file then, so one
-//! left in the state root by an earlier registration is not sent), otherwise the state root's
-//! host credential, otherwise the token file. When the server refuses the credential, standard
-//! error says what was sent and for which host.
+//! what the agent presents: the host certificate and key, the only identity a host has. The verb
+//! without them ends with status 2. `--state-root` and `--token-file` are still accepted and
+//! ignored, so a command line written for an earlier release runs. When the server refuses the
+//! certificate, standard error says what was sent and for which host.
 //!
 //! An operator's measurement needs a node that no lease lands on for an hour or two. The
 //! lease server lets a host cordon itself (`POST /v1/hosts/{id}:cordon`), with the host's own
-//! credential: a cordon is a lease the caller renews, cut to an hour a request, and one that
+//! certificate: a cordon is a lease the caller renews, cut to an hour a request, and one that
 //! is not renewed lapses. The daemon calls that route only to keep a held host cordoned (see
 //! [`crate::hold_cordon`]), so for an operator's window this verb does: it cordons, renews
 //! every third of `--lease-secs` until `--for` has passed or SIGTERM, SIGINT or SIGHUP (the end
@@ -74,10 +73,9 @@
 //!
 //! # Secrets
 //!
-//! The credential is read from its file by `js-client` and sent in the `Authorization` header
-//! only. The host certificate of `--host-cert` and `--host-key` is presented in the TLS
-//! handshake instead and no `Authorization` header is sent. Neither is in argv, in a line of
-//! output or in an error.
+//! The host certificate of `--host-cert` and `--host-key` is presented in the TLS handshake
+//! and no `Authorization` header is sent. The key is read from its file by `js-client`; it is
+//! not in argv, in a line of output or in an error.
 
 mod args;
 mod hold;
@@ -154,7 +152,7 @@ impl Pace for SystemPace {
 pub struct Connection<'a> {
     /// `--server`.
     pub server: &'a str,
-    /// How the client proves who it is: the credential file or the host certificate.
+    /// How the client proves who it is: the host certificate.
     pub login: &'a Login,
     /// `--ca-cert`.
     pub ca_cert: Option<&'a Path>,

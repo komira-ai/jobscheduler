@@ -2,8 +2,6 @@
 
 use std::path::Path;
 
-use js_agent_wire::HostCredential;
-
 use super::{Cell, Next, Poller, ROOM_WAIT};
 use crate::backoff::Jitter;
 use crate::login::Login;
@@ -24,21 +22,15 @@ pub struct Dial<'a> {
 }
 
 impl Dial<'_> {
-    /// A transport that authenticates with `credential` when the host holds one.
+    /// A transport that authenticates as the session's does.
     ///
     /// # Errors
     ///
-    /// The connector refused the flags, or the transport would not take the credential;
-    /// the text never holds a secret.
-    pub fn open(&self, credential: Option<&HostCredential>) -> Result<Box<dyn Transport>, String> {
-        let connected = self
-            .connector
-            .connect(self.server, self.login, self.ca_cert);
-        let mut transport = connected.map_err(|why| why.to_string())?;
-        credential
-            .iter()
-            .try_for_each(|credential| transport.adopt_credential(credential.expose()))?;
-        Ok(transport)
+    /// The connector refused the flags; the text never holds a secret.
+    pub fn open(&self) -> Result<Box<dyn Transport>, String> {
+        self.connector
+            .connect(self.server, self.login, self.ca_cert)
+            .map_err(|why| why.to_string())
     }
 }
 
@@ -50,13 +42,10 @@ impl Dial<'_> {
 pub fn serve(cell: &Cell, dial: &Dial<'_>, worker: &Worker, jitter: Box<dyn Jitter>) {
     let mut poller = Poller::new(worker, jitter);
     while let Some((generation, route)) = cell.wait_route() {
-        let next =
-            poller
-                .hand_over()
-                .unwrap_or_else(|| match dial.open(route.credential.as_ref()) {
-                    Ok(mut transport) => poller.poll(&mut *transport, &route),
-                    Err(_) => poller.failed(None),
-                });
+        let next = poller.hand_over().unwrap_or_else(|| match dial.open() {
+            Ok(mut transport) => poller.poll(&mut *transport, &route),
+            Err(_) => poller.failed(None),
+        });
         cell.note(poller.take_lines());
         match next {
             Next::Again => {}

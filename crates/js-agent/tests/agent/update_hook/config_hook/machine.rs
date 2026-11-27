@@ -6,16 +6,15 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-use js_agent::own_host::{HttpLease, Lease as _, RequestLimit};
+use js_agent::own_host::Lease as _;
 use js_agent::update_hook::config::{Done, Params, Reason, Record, run_on, run_step};
 use js_agent::update_hook::{Class, LaunchUnits, Machine, Outcome, Step, Units};
-use js_agent::{CredentialFile, Login};
 
-use super::super::lease_stub::{Reply, Stub};
 use super::super::step_rig::as_root;
 use super::super::unit_conformance::{Exit, Launchctl, Service, plist_of};
 use super::rig::{Ticks, UNIT, UnitScript, text};
-use crate::cordon::http::enrol;
+use crate::cordon::http::{enrol, lease_of};
+use crate::server::Server;
 use crate::support::Scratch;
 
 /// A tree of one test: the params of a package over a scratch directory, and a flags file the
@@ -29,22 +28,11 @@ struct Tree {
 
 impl Tree {
     fn new(name: &str, unit: &str) -> Tree {
-        Tree::with_state_root(name, unit, None)
-    }
-
-    /// The tree, with the agent's state root at `state_root` instead of the tree's own.
-    fn with_state_root(name: &str, unit: &str, state_root: Option<&Path>) -> Tree {
         let files = Scratch::new(name);
         let root = files.path("tree");
         fs::create_dir_all(&root).unwrap();
         let root = root.display().to_string();
-        let mut params = text(&root, 600, 300, 600).replace(UNIT, unit);
-        if let Some(state_root) = state_root {
-            params = params.replace(
-                &format!("state_root = \"{root}/state-root\""),
-                &format!("state_root = \"{}\"", state_root.display()),
-            );
-        }
+        let params = text(&root, 600, 300, 600).replace(UNIT, unit);
         Tree {
             staged: files.path("staged"),
             _files: files,
@@ -136,32 +124,21 @@ fn a_flags_file_the_agent_cannot_start_with_ends_cutover_as_bad_config_on_the_ma
     }
 }
 
-/// Asserts, over a real lease server and the host's own credential, that `cutover` records the
+/// Asserts, over a real lease server and the host's own certificate, that `cutover` records the
 /// session the server shows for the host, whether the host's id is the flags file's or the
 /// machine's own, and that `verify` finds no hello while the server still shows that session.
 ///
-/// Catches a lease built for another host than the agent's, one without the host credential, and
-/// a session compared as an order rather than by equality.
+/// Catches a lease built for another host than the agent's, one without the host certificate,
+/// and a session compared as an order rather than by equality.
 #[test]
 fn over_a_real_server_cutover_records_the_session_and_verify_waits_for_another() {
     let enrolled = enrol("config_hook_machine_real");
-    let credential = CredentialFile::in_dir(&enrolled.state).path();
-    let seen = HttpLease::connect(
-        &enrolled.server.url(),
-        &Login::Token(credential),
-        None,
-        "mac-1",
-        RequestLimit::DEFAULT,
-    )
-    .unwrap()
-    .host()
-    .unwrap();
+    let seen = lease_of(&enrolled.server).host().unwrap();
     let session = seen.session_started_ms;
     assert!(session.is_some());
-    let url = enrolled.server.url();
     for (named, own) in [(true, Err("unused")), (false, Ok("mac-1"))] {
-        let tree = Tree::with_state_root("config-machine-real", UNIT, Some(&enrolled.state));
-        let mut flags = vec![format!("--server={url}"), "--pool=farm".to_owned()];
+        let tree = Tree::new("config-machine-real", UNIT);
+        let mut flags = served_by(&enrolled.server);
         if named {
             flags.push("--host-id=mac-1".to_owned());
         }
@@ -286,26 +263,35 @@ fn on_the_machine_a_rollback_with_nothing_restarted_leaves_the_unit_alone() {
 }
 
 /// One config-hook `cutover` on a Mac's unit manager over `tool`, the fake `launchctl` the test
-/// set up for `label`: the flags file in place (the gate the kickstart waits on), a token, and a
-/// lease server that has not heard the host yet, so there is no session to note. Returns what
-/// the step ended with and the tree's record.
+/// set up for `label`: the flags file in place (the gate the kickstart waits on), and a lease
+/// server that has not heard the host yet, so there is no session to note. Returns what the step
+/// ended with and the tree's record.
 fn launchd_cutover(name: &str, label: &str, tool: &Launchctl) -> (Done, Option<Record>) {
-    let stub = Stub::start(&[Reply::Answer(409, r#"{"error":"unknown-host"}"#)]);
+    let server = Server::start(name, &[]);
     let tree = Tree::new(name, label);
-    tree.flags(&[
-        &format!("--server={}", stub.url),
-        "--pool=farm",
-        "--host-id=mac-1",
-    ]);
-    fs::write(&tree.params.token_file, "tok-0123456789\n").unwrap();
-    fs::set_permissions(&tree.params.token_file, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut flags = served_by(&server);
+    flags.push("--host-id=mac-1".to_owned());
+    tree.flags(&flags.iter().map(String::as_str).collect::<Vec<_>>());
     let clock = Ticks::default();
     let units = LaunchUnits::new(tool)
         .with_clock(&clock)
         .with_gate(Path::new(&tree.params.flags_file));
     let done = tree.run(Step::Cutover, Err("unused"), &units);
-    assert_eq!(stub.stop(), 1);
     (done, tree.record())
+}
+
+/// The flags lines that make a host of `server`: its address, the pool, and the certificate and
+/// key of `mac-1` and the server certificate they trust.
+fn served_by(server: &Server) -> Vec<String> {
+    let identities = server.identities();
+    let identity = identities.of("mac-1");
+    vec![
+        format!("--server={}", server.url()),
+        "--pool=farm".to_owned(),
+        format!("--host-cert={}", identity.cert_path().display()),
+        format!("--host-key={}", identity.key_path().display()),
+        format!("--ca-cert={}", identities.server_cert().display()),
+    ]
 }
 
 /// The command line `launchctl <verb> ...` the fake ran.

@@ -148,8 +148,8 @@ fn what_cannot_be_read_is_refused_by_name() {
 }
 
 /// Asserts the refusals of commands that cannot be: a name without a noun, a command on the
-/// words `js` keeps for itself (`join-token`, `lease`), two calls on one command, a field whose flag is one of `js`'s
-/// own, and two fields with one flag.
+/// words `js` keeps for itself (the removed `join-token` and `lease` groups), two calls on one
+/// command, a field whose flag is one of `js`'s own, and two fields with one flag.
 #[test]
 fn a_command_that_cannot_be_is_refused_by_name() {
     assert_eq!(

@@ -1,7 +1,7 @@
 //! `js-agent cordon --flags-file`: the verb reads the agent's own flags file and cordons the
-//! host the agent registers, with what the agent presents; and a refused credential is told
+//! host the agent registers, with what the agent presents; and a refused certificate is told
 //! with what was sent and for which host. Over the counted fake lease server, and over a real
-//! lease server in the test process for the refusal a host credential of another host gets.
+//! lease server in the test process for the refusal a certificate of another host gets.
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
@@ -14,8 +14,7 @@ use js_client::HostIdentity;
 use super::fakes::{Call, Effect, FakeLease, FakePace, Kind};
 use super::http::{enrol, real};
 use super::verb::{Ran, Seen, drive_with};
-use crate::jobs::private;
-use crate::support::{Host, Scratch, code, linux_host};
+use crate::support::{Host, code, linux_host};
 
 /// Where the agent's package keeps its flags file.
 const FLAGS: &str = "/etc/js-agent/flags";
@@ -62,13 +61,6 @@ fn certified_flags() -> String {
     )
 }
 
-/// A state root holding a host credential, as a host enrolled with a one-time token keeps it.
-fn kept_credential(files: &Scratch, name: &str) -> PathBuf {
-    let dir = private(files, name);
-    files.write(&format!("{name}/host-credential"), &"c".repeat(64), 0o600);
-    dir
-}
-
 /// Runs the verb on `flags` over `host` against `lease`.
 fn drive(flags: &[&str], host: &Host, lease: &FakeLease) -> Ran {
     let lease = lease.clone();
@@ -86,15 +78,11 @@ fn text(path: &Path) -> String {
 
 /// Asserts that with `--flags-file` the verb connects to the file's server, trusts the file's
 /// certificate, cordons the host of the file's `--host-id-from-facts` and presents the file's
-/// host certificate and key, even with `--state-root` given beside it holding a host
-/// credential; and that the window then runs as always: one cordon, the lift, the lines. It
-/// catches a verb that sends a credential left in the state root of a host whose agent presents
-/// its certificate, which the server takes as another host's (`join-token-not-admitted`).
+/// host certificate and key, with `--state-root` and `--token-file` given beside it and
+/// ignored; and that the window then runs as always: one cordon, the lift, the lines. It
+/// catches a verb that takes another identity than the certificate the file names.
 #[test]
 fn the_agents_flags_file_names_the_server_the_host_and_the_host_certificate() {
-    let files = Scratch::new("cordon_flags_file_certified");
-    let root = kept_credential(&files, "state");
-    let root_flag = text(&root);
     let host = host_with(&certified_flags(), 0o644);
     let lease = FakeLease::new();
     lease.set(|state| state.id = "web-04".to_owned());
@@ -102,7 +90,9 @@ fn the_agents_flags_file_names_the_server_the_host_and_the_host_certificate() {
         "--flags-file",
         FLAGS,
         "--state-root",
-        &root_flag,
+        "/elsewhere",
+        "--token-file",
+        "/token",
         "--for",
         "1m",
     ];
@@ -125,72 +115,61 @@ fn the_agents_flags_file_names_the_server_the_host_and_the_host_certificate() {
     assert!(ran.err.is_empty(), "{}", ran.err);
 }
 
-/// Asserts the credential a flags file without a host certificate leads to, as the agent
-/// chooses it: the host credential of the `--state-root` given beside the file; the
-/// `--token-file` given beside it when the state root holds none; the `--token-file` the file
-/// itself names; and, with neither, status 2 naming `--token-file` and no connection. Every run
-/// cordons the file's `--host-id`. It catches a verb that drops the agent's own credential
-/// order when it reads the file.
+/// Asserts that a verb with no host certificate and key ends with status 2 naming both flags
+/// and connects to nothing, whether the flags file names none, or the verb's own flags do, and
+/// whatever `--state-root` and `--token-file` are given beside: they identify no host. It
+/// catches a verb that cordons with some other identity.
 #[test]
-fn without_a_host_certificate_the_flags_file_takes_the_state_roots_credential_or_the_token() {
-    let files = Scratch::new("cordon_flags_file_token");
-    let kept = kept_credential(&files, "kept");
-    let empty = private(&files, "empty");
-    let (kept_flag, empty_flag) = (text(&kept), text(&empty));
+fn without_a_host_certificate_the_verb_ends_with_status_2_naming_both_flags() {
     let plain = "--server=https://leases.example:7300\n--pool=farm\n--host-id=node-5\n";
-    let naming_token = format!("{plain}--token-file=/etc/js-agent/token\n");
-    let cases: [(&str, Vec<&str>, Login); 3] = [
-        (
-            plain,
-            vec!["--state-root", &kept_flag, "--token-file", "/token"],
-            Login::Token(kept.join("host-credential")),
-        ),
-        (
-            plain,
-            vec!["--state-root", &empty_flag, "--token-file", "/token"],
-            Login::Token(PathBuf::from("/token")),
-        ),
-        (
-            &naming_token,
-            vec!["--state-root", &empty_flag],
-            Login::Token(PathBuf::from("/etc/js-agent/token")),
-        ),
-    ];
-    for (file, beside, login) in cases {
-        let host = host_with(file, 0o600);
-        let mut flags = vec!["--flags-file", FLAGS, "--for", "1m"];
-        flags.extend(beside);
-        let lease = FakeLease::new();
-        lease.set(|state| state.id = "node-5".to_owned());
-        let ran = drive(&flags, &host, &lease);
-        assert_eq!(ran.status, code(0), "{flags:?}: {}", ran.err);
-        assert_eq!(ran.seen.len(), 1, "{flags:?}");
-        assert_eq!(ran.seen[0].login, login, "{flags:?}");
-        assert_eq!(ran.seen[0].host, "node-5");
-        assert_eq!(ran.seen[0].ca_cert, None);
-    }
     let host = host_with(plain, 0o644);
-    let flags = ["--flags-file", FLAGS, "--for", "1m"];
-    let ran = drive(&flags, &host, &FakeLease::new());
-    assert_eq!(ran.status, code(2));
-    assert_eq!(
-        ran.err,
-        "js-agent cordon: --token-file: required unless --state-root holds a host credential\n"
-    );
+    let said = "js-agent cordon: --host-cert and --host-key: required, here or in the \
+                --flags-file that names them\n";
+    let cases: [&[&str]; 2] = [
+        &["--flags-file", FLAGS, "--for", "1m"],
+        &[
+            "--flags-file",
+            FLAGS,
+            "--state-root",
+            "/state",
+            "--token-file",
+            "/token",
+            "--for",
+            "1m",
+        ],
+    ];
+    for flags in cases {
+        let ran = drive(flags, &host, &FakeLease::new());
+        assert_eq!(ran.status, code(2), "{flags:?}: {}", ran.err);
+        assert_eq!(ran.err, said, "{flags:?}");
+        assert!(ran.seen.is_empty(), "{flags:?}");
+    }
+    let own = [
+        "--server",
+        "https://leases.example:7300",
+        "--host-id",
+        "node-5",
+        "--state-root",
+        "/state",
+        "--for",
+        "1m",
+    ];
+    let ran = drive(&own, &host, &FakeLease::new());
+    assert_eq!(ran.status, code(2), "{}", ran.err);
+    assert_eq!(ran.err, said);
     assert!(ran.seen.is_empty());
 }
 
 /// Asserts that a flags file the agent would refuse, and a flag the verb may not take beside
 /// it, end the verb with status 2 and the reason on standard error, and connect to nothing: a
 /// file group or others can write; a file that is not there; a file without the agent's
-/// required `--pool`; a file naming one of the host flags without the other; a `--state-root`
-/// in the file and on the command line; `--server` beside `--flags-file`; and neither
-/// `--flags-file` nor `--server`. It catches a verb that trusts a file the agent would not,
+/// required `--pool`; a file naming one of the host flags without the other; `--server` beside
+/// `--flags-file`; and neither `--flags-file` nor `--server`. It catches a verb that trusts a file the agent would not,
 /// and one where a second value silently wins.
 #[test]
 fn a_flags_file_the_agent_would_refuse_or_a_second_value_is_a_usage_error() {
     let good = "--server=https://leases.example:7300\n--pool=farm\n--host-id=node-5\n";
-    let cases: [(String, u32, Vec<&str>, &str); 7] = [
+    let cases: [(String, u32, Vec<&str>, &str); 6] = [
         (
             good.to_owned(),
             0o664,
@@ -213,13 +192,6 @@ fn a_flags_file_the_agent_would_refuse_or_a_second_value_is_a_usage_error() {
              --host-key <PATH>\n",
         ),
         (
-            format!("{good}--state-root=/var/lib/js-agent/state\n"),
-            0o644,
-            vec!["--state-root", "/elsewhere"],
-            "js-agent cordon: error: the argument '--state-root <PATH>' cannot be used multiple \
-             times\n",
-        ),
-        (
             good.to_owned(),
             0o644,
             vec!["--server", "https://other:7300"],
@@ -240,14 +212,7 @@ fn a_flags_file_the_agent_would_refuse_or_a_second_value_is_a_usage_error() {
     ];
     for (file, mode, beside, said) in cases {
         let host = host_with(&file, mode);
-        let mut flags = vec![
-            "--flags-file",
-            FLAGS,
-            "--token-file",
-            "/token",
-            "--for",
-            "1m",
-        ];
+        let mut flags = vec!["--flags-file", FLAGS, "--for", "1m"];
         flags.extend(beside);
         let ran = drive(&flags, &host, &FakeLease::new());
         assert_eq!(ran.status, code(2), "{flags:?}: {}", ran.err);
@@ -269,7 +234,7 @@ fn a_flags_file_the_agent_would_refuse_or_a_second_value_is_a_usage_error() {
         ran.err
     );
     assert!(ran.seen.is_empty());
-    let neither = ["--token-file", "/token", "--host-id", "h-1", "--for", "1m"];
+    let neither = ["--host-id", "h-1", "--for", "1m"];
     let ran = drive(&neither, &host, &FakeLease::new());
     assert_eq!(ran.status, code(2));
     assert!(
@@ -281,17 +246,13 @@ fn a_flags_file_the_agent_would_refuse_or_a_second_value_is_a_usage_error() {
     assert!(ran.seen.is_empty());
 }
 
-/// Asserts what standard error says when the server refuses the credential: the refusal, then
-/// what was sent and for which host. Without `--flags-file` it adds how to send what the agent
-/// sends; with it, it does not. A refusal that is not of the credential (`invalid-cordon`) gets
-/// no such line. Each run makes the one cordon call that was refused and lifts nothing. It
-/// catches a refusal that leaves an operator guessing which of the host's credentials the verb
-/// read.
+/// Asserts what standard error says when the server refuses the host certificate: the refusal,
+/// then what was sent and for which host. Without `--flags-file` it adds how to send what the
+/// agent sends; with it, it does not. A refusal that is not of the certificate (`invalid-cordon`)
+/// gets no such line. Each run makes the one cordon call that was refused and lifts nothing. It
+/// catches a refusal that leaves an operator guessing which identity the verb read.
 #[test]
-fn a_refused_credential_is_told_with_what_was_sent_and_for_which_host() {
-    let files = Scratch::new("cordon_flags_file_refused");
-    let root = kept_credential(&files, "state");
-    let root_flag = text(&root);
+fn a_refused_certificate_is_told_with_what_was_sent_and_for_which_host() {
     let host = host_with(&certified_flags(), 0o644);
     let refused = |code: &str| {
         let lease = FakeLease::new();
@@ -302,38 +263,47 @@ fn a_refused_credential_is_told_with_what_was_sent_and_for_which_host() {
     let own = [
         "--server",
         "https://leases.example:7300",
-        "--state-root",
-        &root_flag,
+        "--host-cert",
+        CERT,
+        "--host-key",
+        KEY,
         "--host-id-from-facts",
         FACTS,
         "--for",
         "15m",
     ];
-    let from_file = [
-        "--flags-file",
-        FLAGS,
-        "--state-root",
-        &root_flag,
-        "--for",
-        "15m",
-    ];
-    let refusal = "js-agent cordon: credential error: cannot cordon the host: the server refused \
-                   the credential (join-token-not-admitted)\n";
+    let from_file = ["--flags-file", FLAGS, "--for", "15m"];
+    let refusal = |code: &str| {
+        format!(
+            "js-agent cordon: credential error: cannot cordon the host: the server refused \
+             the host certificate ({code})\n"
+        )
+    };
+    let how = "; to cordon with what the agent on this host presents, give the agent's flags \
+               file with --flags-file (such as /etc/js-agent/flags)";
     let cases = [
         (
             &own[..],
-            "join-token-not-admitted",
+            "certificate-host-mismatch",
             format!(
-                "{refusal}js-agent cordon: it sent the host credential in {root_flag}/host-credential \
-                 for host web-04; to cordon with what the agent on this host presents, give the \
-                 agent's flags file with --flags-file (such as /etc/js-agent/flags)\n"
+                "{}js-agent cordon: it sent the host certificate {CERT} for host web-04{how}\n",
+                refusal("certificate-host-mismatch")
+            ),
+        ),
+        (
+            &own[..],
+            "http-401",
+            format!(
+                "{}js-agent cordon: it sent the host certificate {CERT} for host web-04{how}\n",
+                refusal("http-401")
             ),
         ),
         (
             &from_file[..],
-            "join-token-not-admitted",
+            "host-certificate-required",
             format!(
-                "{refusal}js-agent cordon: it sent the host certificate {CERT} for host web-04\n"
+                "{}js-agent cordon: it sent the host certificate {CERT} for host web-04\n",
+                refusal("host-certificate-required")
             ),
         ),
         (
@@ -351,34 +321,40 @@ fn a_refused_credential_is_told_with_what_was_sent_and_for_which_host() {
         assert_eq!(ran.err, said, "{flags:?}");
         assert!(ran.out.is_empty(), "{flags:?}: {}", ran.out);
         assert_eq!(lease.calls(), [Call::Cordon(300)], "{flags:?}");
-        assert!(
-            !ran.err.contains(&"c".repeat(64)),
-            "the credential is never printed"
-        );
     }
 }
 
-/// Asserts both answers of a real lease server to a host enrolled as `mac-1` with a one-time
-/// token, whose host credential is in its state root: the verb told the host by a facts file
-/// that names another id (`web-04`) sends that credential and is refused 403
-/// `join-token-not-admitted`, exits 1 naming the credential file and the host, and places no
-/// cordon; the verb given the agent's flags file (which names `--host-id=mac-1`) beside the same
-/// state root cordons `mac-1`, holds the cordon on the server through the window and lifts it.
-/// It catches a refusal said without its cause, and a flags file whose host or credential is
-/// not the one the server registered.
+/// Asserts both answers of a real lease server to a host enrolled as `mac-1` with its host
+/// certificate: the verb told the host by a facts file that names another id (`web-04`) sends
+/// the certificate of `mac-1` and is refused 403 `certificate-host-mismatch`, exits 1 naming the
+/// certificate file and the host, and places no cordon; the verb given the agent's flags file
+/// (which names `--host-id=mac-1`) cordons `mac-1`, holds the cordon on the server through the
+/// window and lifts it. It catches a refusal said without its cause, and a flags file whose host
+/// or certificate is not the one the server registered.
 #[test]
 fn on_a_real_server_the_agents_flags_file_cordons_the_host_another_host_id_cannot() {
     let enrolled = enrol("cordon_flags_file_real");
     let server = &enrolled.server;
-    let (url, state) = (server.url(), enrolled.state_flag());
-    let agent_flags = format!("--server={url}\n--pool=default\n--host-id=mac-1\n");
+    let identities = server.identities();
+    let identity = identities.of("mac-1");
+    let (cert, key) = (text(identity.cert_path()), text(identity.key_path()));
+    let ca = text(identities.server_cert());
+    let url = server.url();
+    let agent_flags = format!(
+        "--server={url}\n--pool=default\n--host-id=mac-1\n--host-cert={cert}\n--host-key={key}\n\
+         --ca-cert={ca}\n"
+    );
     let host = host_with(&agent_flags, 0o644);
 
     let other_id = [
         "--server",
         &url,
-        "--state-root",
-        &state,
+        "--host-cert",
+        &cert,
+        "--host-key",
+        &key,
+        "--ca-cert",
+        &ca,
         "--host-id-from-facts",
         FACTS,
         "--for",
@@ -390,9 +366,9 @@ fn on_a_real_server_the_agents_flags_file_cordons_the_host_another_host_id_canno
         ran.err,
         format!(
             "js-agent cordon: credential error: cannot cordon the host: the server refused the \
-             credential (join-token-not-admitted)\njs-agent cordon: it sent the host credential \
-             in {state}/host-credential for host web-04; to cordon with what the agent on this \
-             host presents, give the agent's flags file with --flags-file (such as \
+             host certificate (certificate-host-mismatch)\njs-agent cordon: it sent the host \
+             certificate {cert} for host web-04; to cordon with what the agent on this host \
+             presents, give the agent's flags file with --flags-file (such as \
              /etc/js-agent/flags)\n"
         )
     );
@@ -404,14 +380,7 @@ fn on_a_real_server_the_agents_flags_file_cordons_the_host_another_host_id_canno
         assert!(server.host("mac-1")["cordon"]["expires_at_ms"].is_u64());
         renewals.set(renewals.get() + 1);
     });
-    let from_file = [
-        "--flags-file",
-        FLAGS,
-        "--state-root",
-        &state,
-        "--for",
-        "15m",
-    ];
+    let from_file = ["--flags-file", FLAGS, "--for", "15m"];
     let ran = drive_with(&from_file, &host, &real, &mut pace);
     assert_eq!(ran.status, code(0), "{}", ran.err);
     assert_eq!(

@@ -204,22 +204,15 @@ impl<'a> Pass<'a> {
         moved
     }
 
-    /// Starts the release of a machine: its join token is revoked, and from now on every
-    /// step asks the provider to release it. Each machine enters `Releasing` once. A
-    /// `Failed` record was already revoked by `clean_up` when it failed, so it is revoked
-    /// again on entering `Releasing`: that is harmless, for revoking a name that has no
-    /// token is a no-op that succeeds, and it keeps a restart from losing the first revoke.
+    /// Starts the release of a machine: from now on every step asks the provider to release
+    /// it. Each machine enters `Releasing` once.
     fn start_release(&mut self, i: usize) -> bool {
-        let moved = self.go(i, Phase::Releasing);
-        let name = self.records.instances[i].name.clone();
-        self.actions.extend(moved.then_some(Action::Revoke(name)));
-        moved
+        self.go(i, Phase::Releasing)
     }
 
-    /// Revokes the token and forgets the network key of a machine that never was.
+    /// Forgets the network key of a machine that never was.
     pub(crate) fn clean_up(&mut self, i: usize) {
         let name = self.records.instances[i].name.clone();
-        self.actions.push(Action::Revoke(name.clone()));
         self.actions.push(Action::ForgetNetwork(name));
     }
 
@@ -285,7 +278,7 @@ impl<'a> Pass<'a> {
             }
             // A deferral answers one call. One for an earlier attempt than the record's is
             // a replay of an answer already acted on: planning the launch again would send
-            // a second token for a call that may have gone out.
+            // a second launch for a call that may have gone out.
             Acquired::Deferred { wait } if result.attempt == self.records.instances[i].attempt => {
                 if self.go(i, Phase::Planned) {
                     self.records.instances[i].retry_at = Some(self.now.plus(*wait));
@@ -612,7 +605,7 @@ impl<'a> Pass<'a> {
     }
 
     /// A hello that did not match its offer in the dimensions `failed`, in one step: the
-    /// record is condemned and its release started (the token is revoked now; the shell marks
+    /// record is condemned and its release started (the shell marks
     /// the host ending once the records are saved, so the registry books nothing more on it;
     /// the provider is told to terminate the machine at every step until it is gone, and the
     /// shell holds that call while the host still holds work); the offer is cooled down for
@@ -650,7 +643,7 @@ impl<'a> Pass<'a> {
     }
 
     /// A machine that has not said hello is given up on `boot_timeout` after its launch,
-    /// the instant its join token was minted from, and only once its host has also been
+    /// the instant its launch was recorded, and only once its host has also been
     /// unheard from on complete registry views for the pool's boot hold
     /// ([`Settings::boot_hold`]). A hello shows the host and ends the count. The hold is
     /// what keeps a machine launched before a restart, whose agent is waiting to retry
@@ -680,7 +673,7 @@ impl<'a> Pass<'a> {
     ///
     /// * A live host: its mark is read back ([`Pass::on_mark`]).
     /// * A host the provider says it no longer has (`not_found`) and the registry does not
-    ///   hear from: revoked, forgotten and removed, and gone.
+    ///   hear from: forgotten and removed, and gone.
     /// * A host the registry no longer shows: it forgot it (`forget_lost`), so it holds no
     ///   lease, and the machine is still billed and still counted; it is released.
     /// * A host the registry shows but does not hear from: held and counted while the

@@ -7,7 +7,8 @@
 //! is compared item by item and must hold as many items: one more command, acknowledgement or
 //! held job is a change of what the conversation says, not an added field, and fails too.
 //! `agent_version` must be there and a string, but its value is the build's and is not
-//! compared ([`UNCOMPARED`]).
+//! compared ([`UNCOMPARED`]). A field this release retired on purpose ([`RETIRED`]) may be
+//! missing: the previous release reads its absence as it always did.
 //!
 //! Some values are drawn afresh in every conversation (the session secret, a job's id, an
 //! allocation's id): under a key of [`MINTED`] two conversations differ by design. With a
@@ -19,6 +20,12 @@ use serde_json::{Map, Value};
 /// The keys whose values must be there, as strings, but are the build's own: the version an
 /// agent reports in its hello.
 pub const UNCOMPARED: [&str; 1] = ["agent_version"];
+
+/// The keys of the previous release's frames that this release no longer sends, by design: a
+/// hello's `accepts_host_credential`, which asked a server to issue a host credential. A
+/// receiver of the previous release reads the field as absent when it is not there (`false`),
+/// so a frame without it still serves it. Every other key is held to the rule of [`uncovered`].
+pub const RETIRED: [&str; 2] = ["accepts_host_credential", "host_credential"];
 
 /// The keys whose values the server draws afresh in every conversation: the session
 /// secret, the ids of a job and of its allocation, and the job id of a transcript's
@@ -100,6 +107,7 @@ fn walk(
                 let at = format!("{path}.{name}");
                 match new.get(name) {
                     Some(peer) => walk(&at, Some(name), item, peer, minted.as_deref_mut(), found),
+                    None if RETIRED.contains(&name.as_str()) => {}
                     None => found.push(format!("{at}: missing")),
                 }
             }
@@ -264,6 +272,20 @@ fn a_removed_renamed_or_changed_field_is_reported_and_an_added_one_is_not() {
         uncovered(&built, &serde_json::json!({}), None),
         ["$.agent_version: missing"]
     );
+}
+
+/// Asserts that a field this release retired on purpose may be missing from a frame, and
+/// another field of the same frame may not: the previous release's hello says
+/// `accepts_host_credential`, which this release's hello no longer carries, and the frame is
+/// covered; but the field beside it, once missing, is named. It catches a comparison that
+/// fails on a field removed by design, and one that lets the exception widen to any field.
+#[test]
+fn a_retired_field_may_be_missing_and_another_may_not() {
+    let then = serde_json::json!({ "accepts_host_credential": true, "phase": "serving" });
+    let without = serde_json::json!({ "phase": "serving" });
+    assert_eq!(uncovered(&then, &without, None), Vec::<String>::new());
+    let lost = serde_json::json!({});
+    assert_eq!(uncovered(&then, &lost, None), ["$.phase: missing"]);
 }
 
 /// Asserts that a minted value is paired the first time it is met and compared after, that

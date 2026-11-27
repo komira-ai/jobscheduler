@@ -24,7 +24,6 @@ use js_types::{ManualClock, Timestamp};
 use serde_json::Value;
 use tokio_rustls::TlsConnector;
 
-use crate::agents_support::JOIN;
 use crate::config_support::{
     API_KEY, OAUTH_SECRET, PoolText, clock, file, oauth_file, quote, quoted, server,
 };
@@ -42,7 +41,7 @@ pub const ADVERTISE: &str = "https://js.example:7301";
 
 /// Every secret the tests plant: the key file, the OAuth client, the client token, the join
 /// token and the fake network key.
-pub const SECRETS: [&str; 5] = [API_KEY, OAUTH_SECRET, TOKEN, JOIN, NET_SECRET];
+pub const SECRETS: [&str; 4] = [API_KEY, OAUTH_SECRET, TOKEN, NET_SECRET];
 
 /// The secrets of [`SECRETS`] that `text` holds.
 pub fn leaked(text: &str) -> Vec<&'static str> {
@@ -419,15 +418,13 @@ impl Rig {
             .unwrap_or_default();
         let server = server(&scratch, &format!("{extra}{advertise}"));
         let key = scratch.path("api-key");
-        let joins = scratch.write("joins", &format!("{JOIN}\n"), 0o600);
         let provider = format!(
             "{{ kind = \"fake-cloud\", api_key_file = {} }}",
             quoted(&key)
         );
         let pool = PoolText::elastic(&scratch)
             .set("exec", &quote(options.exec))
-            .set("provider", &provider)
-            .set("join_token_file", &quoted(&joins));
+            .set("provider", &provider);
         let pool = match options.live {
             true => pool.set("launch", &quote("live")),
             false => pool,

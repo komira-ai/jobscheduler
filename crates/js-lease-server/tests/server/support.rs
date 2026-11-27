@@ -1,6 +1,7 @@
 //! What the tests share: scratch directories, flags, a running server and a small
 //! HTTP/1.1 client.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -19,6 +20,8 @@ use serde_json::Value;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
+
+use crate::host_certs_support::{Client, Identity, Spec, shared_ca};
 
 use crate::agents_support::POOL;
 use crate::store_support::{sqlite_line, store_file};
@@ -268,6 +271,7 @@ impl Harness {
         let running = start_with_checks(config, shared, ticker, check_ticker)
             .await
             .unwrap();
+        trust_server_of(&scratch, &running);
         Self {
             running,
             clock,
@@ -281,11 +285,111 @@ impl Harness {
         self.running.addr()
     }
 
+    /// A TLS client of the server's listener that presents `identity`, or no certificate. The
+    /// server must have been started with the agent TLS flags
+    /// ([`crate::agents_support::agent_tls_flags`]).
+    pub fn client(&self, identity: Option<Identity>) -> Client {
+        client_at(self.addr(), identity)
+    }
+
     /// An authenticated request.
     pub async fn call(&self, method: &str, path: &str, body: Option<&Value>) -> Reply {
         let body = body.map(|body| body.to_string().into_bytes());
         request(self.addr(), method, path, Some(TOKEN), body.as_deref()).await
     }
+}
+
+/// The certificate each TLS server of the tests presents, by the address it listens on: what
+/// a client of that address trusts. A server started with the agent flags
+/// ([`crate::agents_support::agent_tls_flags`]) is on TLS, so [`request`] reaches it over TLS.
+static TRUSTED: std::sync::Mutex<BTreeMap<std::net::SocketAddr, String>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
+/// Records the server certificate of `running` for every address it serves, when the files
+/// `scratch` holds say that the server was started with the agent TLS flags.
+fn trust_server_of(scratch: &Scratch, running: &Running) {
+    let Ok(cert) = fs::read_to_string(scratch.path("test-only-cert.pem")) else {
+        return;
+    };
+    if !scratch.path("hostkeeper-ca.pem").exists() {
+        return;
+    }
+    let addrs = [
+        Some(running.addr()),
+        running.agent_addr(),
+        running.job_addr(),
+    ];
+    let mut trusted = TRUSTED.lock().unwrap();
+    for addr in addrs.into_iter().flatten() {
+        trusted.insert(addr, cert.clone());
+    }
+}
+
+/// The server certificate a client of `addr` trusts, when `addr` is a TLS server of the tests.
+pub fn trusted(addr: std::net::SocketAddr) -> Option<String> {
+    TRUSTED.lock().unwrap().get(&addr).cloned()
+}
+
+/// A TLS client of the server at `addr` that presents `identity`, or no certificate. The server
+/// must have been started with the agent TLS flags
+/// ([`crate::agents_support::agent_tls_flags`]).
+pub fn client_at(addr: std::net::SocketAddr, identity: Option<Identity>) -> Client {
+    let trusted = trusted(addr).expect("the server was started with the agent TLS flags");
+    Client {
+        addr,
+        trusted,
+        identity,
+        tls12: false,
+    }
+}
+
+/// A TLS client of the server at `addr` that presents the host certificate of `host`.
+pub fn host_client_at(addr: std::net::SocketAddr, host: &str) -> Client {
+    client_at(addr, Some(shared_ca().issue(&Spec::host(host))))
+}
+
+/// The host an agent-API call is for: the host of `/v1/hosts/<host>`, or the `host_id` of
+/// the body of a message to `/v1/agent/`. A name that is no host id, and a body that names
+/// none, give the host `unnamed-host`, whose certificate the call presents, so that the server
+/// refuses the message itself and not the handshake. `None` for every other call (a client's).
+pub fn host_of_call(path: &str, body: Option<&[u8]>) -> Option<String> {
+    let named = if let Some(rest) = path.strip_prefix("/v1/hosts/") {
+        rest.split(['/', '?', ':']).next().map(str::to_owned)
+    } else if path.starts_with("/v1/agent/") {
+        let body = body.and_then(|body| serde_json::from_slice::<Value>(body).ok());
+        body.and_then(|body| body["host_id"].as_str().map(str::to_owned))
+    } else {
+        return None;
+    };
+    let valid = named.filter(|host| js_types::HostId::new(host).is_ok());
+    Some(valid.unwrap_or_else(|| "unnamed-host".to_owned()))
+}
+
+/// Both halves of a connection the tests read and write, plain or TLS.
+pub trait Duplex: AsyncRead + AsyncWrite + Unpin + Send {}
+
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> Duplex for T {}
+
+/// A new connection to `addr` for the call `method path` with `body`: over TLS presenting the
+/// host certificate of the host an agent-API call is for when `addr` is a TLS server of the
+/// tests, otherwise a plain one.
+pub async fn connect_for(
+    addr: std::net::SocketAddr,
+    path: &str,
+    body: Option<&[u8]>,
+) -> Box<dyn Duplex> {
+    let Some(trusted) = trusted(addr) else {
+        return Box::new(TcpStream::connect(addr).await.unwrap());
+    };
+    let identity = host_of_call(path, body).map(|host| shared_ca().issue(&Spec::host(&host)));
+    let client = Client {
+        addr,
+        trusted,
+        identity,
+        tls12: false,
+    };
+    let stream = client.open(&client.connector()).await;
+    Box::new(stream.unwrap_or_else(|error| panic!("{path}: {error}")))
 }
 
 /// What a request got back.
@@ -303,8 +407,9 @@ impl Reply {
     }
 }
 
-/// Sends one HTTP/1.1 request over a new plain connection and reads the reply to the
-/// end of the connection.
+/// Sends one HTTP/1.1 request over a new connection ([`connect_for`]) and reads the reply to
+/// the end of the connection. `token` is the bearer of the call, or none; the agent routes
+/// read no bearer, a host is known by the certificate the call presents.
 pub async fn request(
     addr: std::net::SocketAddr,
     method: &str,
@@ -312,7 +417,7 @@ pub async fn request(
     token: Option<&str>,
     body: Option<&[u8]>,
 ) -> Reply {
-    let stream = TcpStream::connect(addr).await.unwrap();
+    let stream = connect_for(addr, path, body).await;
     exchange(stream, method, path, token, body).await
 }
 
@@ -524,7 +629,7 @@ fn scratch_directories_of_one_name_differ() {
     assert!(!second.path("mine").exists());
 }
 
-/// Where a server keeps its host bindings and join tokens: in the files beside the lease
+/// Where a server keeps its host bindings: in the files beside the lease
 /// file, or in a SQLite state store with the dev flag (`--store`, `--allow-sqlite-store`).
 /// A restart test that touches them runs in both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -584,12 +689,6 @@ impl Kept {
 /// line. A test reads it for a host id, a digest or a field.
 pub fn kept_bindings(h: &Harness) -> String {
     kept(h, ".agents", "hosts/binding/")
-}
-
-/// What `h` keeps of its join tokens, as [`kept_bindings`] reads the bindings: the file
-/// `<state file>.joins`, or the keys under `hosts/join/` and their values.
-pub fn kept_joins(h: &Harness) -> String {
-    kept(h, ".joins", "hosts/join/")
 }
 
 fn kept(h: &Harness, suffix: &str, prefix: &str) -> String {

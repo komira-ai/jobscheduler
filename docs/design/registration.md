@@ -12,79 +12,36 @@ hello in message metadata, never in a log line.
 - *Admission.* The pool exists; the host id is not in the tainted set (5.12), checked before the credential; the host id is not held by a live stream (a second stream for the same id replaces the first only after
   the first has been silent past the grace of 4.1); the reported shape meets the pool's capabilities and GPU class (`Shape::satisfies` against what the host would be booked at, so the
   CPU, memory, disk and GPUs it reports are never compared with the pool's shape; a refusal is `shape-not-accepted`, `below-floor`); the pool holds
-  fewer than `max_machines` hosts, not counting an in-flight instance this hello completes (a refusal is `pool-full`); and either (a) the pool
-  has a `join_token_file`, the pool's hierarchy includes the `default` provider, and the hello carries the pool's join credential, or (b) an
-  elastic provider of the pool launched the instance and the hello carries its signed identity, matching a pending acquire (below).
-  The first path admits a `default` host, the second an elastic one; after admission both are ordinary hosts of the pool. A host id is bound at first admission to the credential or instance id it first presented; a
+  fewer than `max_machines` hosts, not counting an in-flight instance this hello completes (a refusal is `pool-full`); and the request
+  carries a verified host certificate (below). An elastic provider's instance also says its signed identity in the hello, matching a pending acquire
+  (below); after admission every host is an ordinary host of the pool. A host id is bound at first admission to the credential (the host certificate) and instance id it first presented; a
   later hello with another binding is refused. A refusal is a `Welcome` with a constant code and no host is created.
-- *Join credential.* One `join_token_file` per registering pool (D18), possibly holding several tokens so that rotation overlaps,
-  compared in constant time and re-read every tick. A token admits to one pool. A host id in the provider's `deny_hosts_file`, or a
-  removed token, closes any live stream of the host at the next tick: its lease token is revoked, it is quarantined, and its leases are
-  given up under 5.6. Cordon and drain is for orderly removal, not revocation. A client certificate per pool is the alternative (D18).
+- *Host certificate (G3).* A host is known by its host certificate alone: the agent presents it in the TLS handshake, the server's
+  `--agent-client-ca` names the CA that signs it, and the host id is the certificate's one DNS name. A request without a verified host
+  certificate is refused `401` with the body `{"error":"host-certificate-required"}` by the one middleware of the agent API
+  (`crates/js-lease-server/src/agent_api.rs`, `authenticate`); a bearer is not read there. The earlier join credentials are gone: the pool's
+  `join_token_file`, the one-time join token with its mint and revoke routes (`POST` and `DELETE /v1/agent/join-tokens`), the host credential a
+  welcome carried (`Welcome.host_credential`, `Hello.accepts_host_credential`, both names retired and not to be reused) and the agent's
+  `--token-file`, `--instance-file` and credential flags. The server's `--agent-token-file`, a pool's `join_token_file` and
+  `--require-host-credential`, and the agent's flags, are accepted and ignored with one warning at start, because deployed units and manifests still pass them. A host id in the provider's
+  `deny_hosts_file`, or a removed host, closes any live stream of the host at the next tick: its lease token is revoked, it is quarantined, and its leases are
+  given up under 5.6. Cordon and drain is for orderly removal, not revocation.
 - *Launched instances (elastic providers).* The machine's own `js-agent` registers it, so the provider's job ends at boot plus
   registration. The launch template holds no secret (K6) and requires IMDSv2 with hop limit 1. For aws the host presents the signed instance
   identity document in place of the token; the provider's `verify_instance` checks signature, account, region and instance id, matches it
   to an acquire record of this pool still `registering`, and accepts it once. Another elastic kind supplies its own proof of the same
   shape, or it cannot be elastic. A second hello for that instance needs the live-stream rule.
-- *One-time join token (an elastic kind with no signed identity).* A provider that cannot sign an instance identity (a GPU cloud that
-  gives the instance nothing signed) proves it another way: the operator's tooling mints a token for the instance it launched
-  (`POST /v1/agent/join-tokens`, behind the client token, with the provider and instance id and a short lifetime, 30 minutes unless asked,
-  at most a day) and delivers it to that instance, never in an argument or a commit. A kind that has no channel to a new instance other
-  than its launch (Lambda) delivers it in the launch payload (user data), as pools-providers-network.md (7.2) designs it: the service mints
-  it just before the launch with a lifetime of the pool's `boot_timeout` plus a margin, it crosses TLS to the provider and is never logged, and the host credential below retires it
-  at the host's first hello (pools-providers-network.md, 7.2; K6 of design.md). The server keeps only its digest, in
-  `<state file>.joins`, so a restart keeps an unused token valid and a used one used. The first hello that presents the token, names that
-  instance in `instance`, and arrives before the expiry registers the host and consumes the token: it is then tied to that host id. It
-  carries that host's later hellos and heartbeats and nothing else; a hello for another host id is refused `join-token-used`, an unused token
-  past its time `join-token-expired`, a hello that names another instance or none `join-token-instance`, and a heartbeat for a host the
-  token did not register `join-token-not-admitted`. A second token for an instance replaces its unused one. The agent reads the token with
-  `--token-file` (owner-only, as always) and names its instance with `--instance-file`. A token is also the host's credential, so the
-  agent keeps the file; the host is revoked by `deny_hosts_file` or the operator's removal, as any host is. A used token is a credential
-  only while its host keeps using it: its first use sets a bound 24 hours out (the registry's default retention of a lost host), every
-  hello and heartbeat it serves moves the bound to 24 hours from then (written to the file when it gains an hour), and past the bound hello
-  and heartbeat are refused `join-token-expired` and the next mint drops the entry. A host silent for longer than the bound needs a new
-  token. The server is not told when the registry forgets a host, so the bound is what ends the token of a host that is gone, except for
-  an instance the scheduler terminates itself: its terminate path revokes the instance's tokens with `DELETE /v1/agent/join-tokens`
-  (client token only, body `{provider, instance_id}`), which drops every token bound to that instance, used or not, in one write of the
-  file. A revoked token is unknown, so its hello and heartbeat get the 401 of a token that never existed. The call answers 204 also for an
-  instance with no token (nothing is written then), so a retried terminate needs no care; an unused token past its expiry stays until the next
-  mint drops it, so revoking one is a write, and also a 204. The registry's binding of the host id to the revoked token's digest persists, so
-  a hello for that host id with a new token is refused `host-bound`: a fresh launch uses a fresh instance and host id; a file that cannot be written is a 503 `state-write-failed` and the tokens
-  stay. This closes the window of a used token for the instances the scheduler terminates; an instance that dies without that call falls
-  back to the bound. The 201 of the mint carries `Cache-Control: no-store`. A hello the
-  registry refuses (the host id is bound to another credential, the pool is full, the shape is not accepted) gives the use back: the token
-  stays unused for its instance. If the file cannot be written for that, the token stays tied to the host that named it and the operator
-  mints another. The instance a hello names is the hello's own claim: the binding guards against mix-ups (a token delivered to the wrong
-  machine, a host id reused by another instance), not against the holder of a token, who can name the instance too; and the client token can
-  mint a token for any instance id. One server owns the state file at a time (the lock beside the state file refuses a second one), and
-  the file of tokens is written whole through a new temporary file, so a file a crash left under that name never decides its mode.
-- *Host credential (replaces a one-time token at the first hello).* A hello says `accepts_host_credential: true` when the agent has a
-  state root (`--state-root`) to keep one in. The first hello of a host that registers with an unused one-time token and says so is
-  answered with a `Welcome` that carries `host_credential`, 256 random bits as 64 hex digits, and in the same write the token is
-  retired: its row is replaced by a row for the credential, bound to the same instance and host, with the same 24 hour silence bound
-  renewed by the same hellos and heartbeats, so the token's copy in a launch request's user data authenticates nothing from then on (its
-  hello and heartbeat get the 401 of an unknown token). Only digests are kept, in the same owner-only whole-file state as the tokens
-  (`<state file>.joins`), a row naming the digest of the token it replaced (`replaces`), which is what the registry still knows the host
-  by. `DELETE /v1/agent/join-tokens` revokes the credential with the rest of the instance's rows. The agent writes the credential to
-  `host-credential` in its state root (mode 0600, through a temporary file, synced and renamed) before it uses it, sends it as the
-  bearer of every later call, and reads the file again at start. A hello that does not say it keeps a credential (an older agent, or one
-  with no state root) is answered as before and its token stays good, and so does a host that joins with the pool's shared token. A
-  server from before the field sends none, and the agent then goes on with its token. Of two first hellos for one token one is admitted
-  and gets the credential; the other finds the token gone. If the registry refuses the hello that issued the credential the credential
-  goes back and the token is unused again. If the welcome is lost on the wire after the token was retired, the host holds nothing that
-  authenticates: its next hello is refused (401), the agent ends, and the host stays until whoever launched it releases it when its boot
-  time is up; it does not register a second time. If the agent cannot write the file it uses the credential for that process and logs
-  that a restart cannot register the host again.
+- *No token for a launched machine (G3).* A provider that cannot sign an instance identity used to deliver a one-time join token in the
+  launch payload. That token and the scaler's mint and revoke of it are deleted, and nothing replaces them until G9, when a launched machine joins
+  with a certificate. The scaler is off on the deployment meanwhile.
 - *Lifecycle.* A host that stops heartbeating is Unknown, its leases stay and the agent self-fences. Past the grace its self-fence
   leases are given up, since the agent has fenced itself (5.4); a run-on lease is given up only when the host is proven stopped
   (operator removal or a provider Absent), and stays booked with an alert until then. The host stays listed as lost for a retention
   window. A restarted agent registers again with the same id and re-announces its leases; the announcement is reconciled against the
   table, and a lease id not committed to this host id is answered `Cancel` and never adopted.
 - *Configuration.* With `--config` the registration settings are keys of the file and no flag may be given beside it. The rate limit on
-  hellos is `server.agent_hello_burst` (60) and `server.agent_hello_interval` (`1s`): one join credential may say a burst of hellos and then
-  one more per interval, counted per credential, refusals included. `server.require_host_credential` (false) refuses the first hello of a
-  one-time token that does not say the agent keeps a host credential. The pool that registers hosts is a `[[pool]]` table, its shared
-  tokens the pool's `join_token_file`, and the three server keys are refused when no pool registers agents. They have the flags'
+  hellos is `server.agent_hello_burst` (60) and `server.agent_hello_interval` (`1s`): one host certificate may say a burst of hellos and then
+  one more per interval, counted per credential, refusals included. `server.require_host_credential` is accepted and ignored. The pool that registers hosts is a `[[pool]]` table (its `join_token_file`, if given, is ignored), and the three server keys are refused when no pool registers agents. They have the flags'
   names and defaults (`--agent-hello-burst`, `--agent-hello-interval`, `--require-host-credential`; `--placement` and `server.placement` are deprecated and do nothing: `js-sched` places every job, `js-sched` is accepted with a warning and `registry` is refused at start), and the flags work as before when
   `--config` is absent.
 - *Source.* The `DefaultProvider` (providers.md) was served by a `RegisteredAgentSource` of `CapacitySource` (5.9), which answered from admitted agents. `CapacitySource` and the lease

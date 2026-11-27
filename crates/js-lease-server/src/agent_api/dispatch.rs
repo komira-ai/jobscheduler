@@ -10,9 +10,10 @@
 //! heartbeat's reply ([`crate::per_job::commands_now`]). Any other poll is a 409
 //! [`NOT_SERVED`]: the agent backs off and polls again, as after any refusal, and the next
 //! welcome that does not say `dispatch_poll` ends its polls. The route is behind the same
-//! authentication as the heartbeat (a host certificate, a one-time token or host credential,
-//! or a pool's token), the body is held to [`js_agent_wire::DispatchPoll::validate`] (400
-//! `invalid-dispatch`), and a one-time token or host credential is held to its host.
+//! authentication as the heartbeat (a host certificate, which a request without is refused
+//! 401 `host-certificate-required`), the body is held to
+//! [`js_agent_wire::DispatchPoll::validate`] (400 `invalid-dispatch`), and the poll's host
+//! must be the certificate's.
 //!
 //! The session is checked as a heartbeat's is, by [`js_registry::Registry::check_heartbeat`],
 //! which records nothing: a poll is not a beat, so it neither keeps the host alive nor moves
@@ -81,9 +82,7 @@ use js_types::HostId;
 use tracing::warn;
 
 use super::held::{HostFacts, Inputs};
-use super::{
-    CertifiedHost, OneTime, Refused, STATE_WRITE_FAILED, decode, host_cert, read, uploading,
-};
+use super::{CertifiedHost, Refused, STATE_WRITE_FAILED, decode, host_cert, read, uploading};
 use crate::admit::reports_dispatch_poll;
 use crate::agents::Agents;
 use crate::held_beat::Watch;
@@ -102,7 +101,7 @@ pub(super) const NOT_SERVED: &str = "dispatch-not-served";
 pub(super) async fn poll(
     State(agents): State<Arc<Agents>>,
     Extension(who): Extension<Credential>,
-    (one_time, certified): (Option<Extension<OneTime>>, Option<Extension<CertifiedHost>>),
+    Extension(certified): Extension<CertifiedHost>,
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Json<DispatchReply>, Refused> {
     let poll: DispatchPoll = decode(
@@ -111,12 +110,7 @@ pub(super) async fn poll(
     )?;
     poll.validate()
         .map_err(|err| Refused::of(&Refusal::Invalid(err)))?;
-    let certified = certified.map(|Extension(certified)| certified);
-    host_cert::check(certified.as_ref(), &poll.host_id)?;
-    if let Some(Extension(OneTime(presented))) = one_time {
-        let served = agents.serve_join(presented, poll.host_id.clone()).await;
-        served.map_err(Refused::join)?;
-    }
+    host_cert::check(&certified, &poll.host_id)?;
     // The session is judged as a beat's is and nothing is recorded: a poll is not a beat. A
     // poll of an epoch this server's registry does not hold may be of a session another
     // server's hello began: the registry takes it from the host's row first, as for a beat.

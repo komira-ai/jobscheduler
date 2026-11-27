@@ -66,10 +66,10 @@
 //! A 409 `unknown-host`, the answer of a server that has forgotten the host, counts in
 //! [`Counter::UnknownHost`].
 //!
-//! Every call carries the join token of [`AgentSpec::join_token`] as its bearer. The hello
-//! does not ask for a host credential (`accepts_host_credential` is false) unless the node's
-//! [`AgentProfile`] is the previous release's, which does; the agent keeps none either way
-//! and a credential in a welcome is ignored.
+//! Every call presents the host certificate of [`AgentSpec::certificate`], as the server's
+//! TLS listener hands a verified host to the agent API. A node whose profile is the previous
+//! release's ([`AgentProfile`]) still sends the `accepts_host_credential` field its hello
+//! carried, which this server ignores.
 //!
 //! A start names the heartbeat the server had taken when it queued it
 //! ([`js_agent_wire::JobSpec::heartbeat_seq`]); the agent numbers its heartbeats of a
@@ -187,18 +187,17 @@ pub enum AgentKind {
     Real(PathBuf),
 }
 
-/// What an agent node is: its host and what the host offers, the pool it joins with the
-/// token it presents, and which agent it runs.
-///
-/// It has no `Debug`: it holds the join token.
+/// What an agent node is: its host and what the host offers, the pool it joins, the host
+/// certificate it presents, and which agent it runs.
 #[derive(Clone)]
 pub struct AgentSpec {
     /// The host's id, sent in every hello and heartbeat.
     pub host: HostId,
     /// The pool the hello asks to join.
     pub pool: String,
-    /// The join token: the bearer of every call.
-    pub join_token: String,
+    /// The host the node's certificate names: presented with every call. `None` is a node
+    /// without a certificate, whose every call the server refuses.
+    pub certificate: Option<HostId>,
     /// What the host offers: the hello's shape, and the capacity of its ground truth.
     pub capacity: Resources,
     /// The hello's capabilities.
@@ -210,9 +209,8 @@ pub struct AgentSpec {
     pub hello_interval: Duration,
     /// The agent: a fake (correct, or lacking one behaviour) or the real one.
     pub kind: AgentKind,
-    /// The instance a launched machine's hello names (its pool and its name), which its
-    /// one-time join token is bound to; `None` for a host that joins with the pool's
-    /// shared token.
+    /// The instance a launched machine's hello names (its pool and its name); `None` for a
+    /// host of the pool's own.
     pub instance: Option<InstanceIdentity>,
     /// How long the agent's worker takes to act on a reply it read. The real agent hands
     /// each reply to a worker thread through a queue and does not wait for it: a worker held
@@ -267,7 +265,7 @@ impl AgentNode {
         &self.spec.host
     }
 
-    /// What the node is: its host, its pool, its join token and its hello.
+    /// What the node is: its host, its pool, its certificate and its hello.
     #[must_use]
     pub fn spec(&self) -> &AgentSpec {
         &self.spec
@@ -452,13 +450,13 @@ struct Io {
 
 impl Io {
     /// Sends a call on `route` to the server, and returns its number.
-    fn call(&mut self, route: Route, bearer: &str, body: String) -> CallId {
+    fn call(&mut self, route: Route, certificate: Option<HostId>, body: String) -> CallId {
         let id = CallId(self.next_call);
         self.next_call += 1;
         let msg = Msg::Request {
             id,
             route,
-            bearer: bearer.to_owned(),
+            certificate,
             body,
         };
         self.out.push(Output::Send {

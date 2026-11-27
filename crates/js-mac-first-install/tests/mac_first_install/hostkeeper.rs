@@ -154,7 +154,6 @@ scratch_root          = "/var/db/js-agent/scratch/runs"
 state_dir             = "/Library/Application Support/js-agent/update"
 release_link          = "/var/lib/hostkeeper/packages/js-agent/current"
 flags_file            = "/etc/js-agent/flags"
-token_file            = "/etc/js-agent/token"
 state_root            = "/var/db/js-agent/state"
 runtime               = "native"
 cordon_lease_secs     = 300
@@ -181,7 +180,9 @@ const CONFIG_BOUNDS: Bounds = Bounds {
     cleanup_retries: 3,
 };
 
-/// The config package's `params`, as packaging/js-agent-macos/README.md gives them.
+/// The config package's `params`, as packaging/js-agent-macos/README.md gives them, with the
+/// retired `token_file` that a config package issued before hosts were identified by their
+/// certificate alone still names: the hook accepts it and ignores it.
 const CONFIG_PARAMS: &str = r#"unit                  = "js-agent"
 flags_file            = "/etc/js-agent/flags"
 token_file            = "/etc/js-agent/token"

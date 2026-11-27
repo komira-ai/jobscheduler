@@ -91,7 +91,7 @@ pub fn lost_but_landed() -> Scenario {
 /// the fake's and the scaler's 30 minutes, covering the run, so nothing is launched before
 /// then (none at 1,500 s); then the scaler gives the acquire up and launches again, once.
 /// Two acquires in all, the first unanswered and the second answered with the one machine,
-/// which joins, and the run succeeds. Which acquire id or token the second uses is not
+/// which joins, and the run succeeds. Which acquire id the second uses is not
 /// asserted (design section 8 row 34).
 pub fn lost_and_not_landed() -> Scenario {
     on(

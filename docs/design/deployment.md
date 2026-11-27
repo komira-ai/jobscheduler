@@ -25,7 +25,7 @@ jobscheduler runs as **one service** in a Kubernetes cluster: one process, one w
 - **Clients.** The kbf frontend is a client of the service. Its frontend asked for capacity (the lease API, 9.1, now deleted) and placed work inside what
   it was granted; it moves to submitting jobs (step 11). `js-cli` is another client. Neither runs inside the service.
 - **Agents.** The generic half of every kbf daemon is `js-agent`, on every machine that runs work. It registers with the service (5.8) with
-  the join token of its pool and then heartbeats. Agents only dial out (D22), so a machine outside the cluster needs only a route to the
+  its host certificate and then heartbeats. Agents only dial out (D22), so a machine outside the cluster needs only a route to the
   service's address.
 - **One process.** The service is the merged `js-lease-server`, which already holds the job tables, the tick, the registry of
   agents and both APIs (the job API on its `--job-listen` port, `/v1/agent/hello`, `/v1/agent/heartbeat`) behind one lock. The capacity providers, the pool scaler
@@ -43,9 +43,9 @@ All values are placeholders for the operator; no object names a host, an address
 | `Deployment` | `replicas: 1`, `strategy: Recreate` | one writer (state store, below); a rolling update would start a second pod beside the first |
 | `PersistentVolumeClaim` | `ReadWriteOncePod` where the cluster has it, else `ReadWriteOnce`; a block-backed volume; reclaim policy `Retain`; mounted at the directory of `--state-file` | the volume is the state; `Retain` so that deleting the claim by mistake does not delete the leases |
 | `Service` (cluster) | `ClusterIP`, port 7300 | in-cluster clients: the kbf frontend, `js-cli` jobs |
-| `Service` (external) | `LoadBalancer`, or the cluster's own L4 entry, passing TCP through | agents outside the cluster; **TLS is not terminated before the pod**, so a bearer token and a join token never cross in clear and the agent pins the server's certificate (5.8) |
+| `Service` (external) | `LoadBalancer`, or the cluster's own L4 entry, passing TCP through | agents outside the cluster; **TLS is not terminated before the pod**, so a bearer token never crosses in clear and the agent pins the server's certificate (5.8) |
 | TLS `Secret` | certificate and key, mounted as files; its subject names the address agents and clients use | `--tls-cert`, `--tls-key`; a change is a restart |
-| token `Secret` | the bearer token and the join tokens, mounted as files | `--token-file`, `--agent-token-file`; never in `env`, never in an argument (R4) |
+| token `Secret` | the bearer token, mounted as a file | `--token-file`; never in `env`, never in an argument (R4) |
 | `ConfigMap` | the agent-pool file, mounted as a file | `--agent-pool-config`; no reload in the first slice (D20), so a change is a restart |
 | `PodDisruptionBudget` | `minAvailable: 1` | see below |
 
@@ -56,21 +56,21 @@ All values are placeholders for the operator; no object names a host, an address
 args: ["--listen", "<pod-address>:7300", "--boot", "resume",
        "--state-file", "/var/lib/jobscheduler/leases.toml",
        "--token-file", "/run/secrets/js/token",
-       "--agent-token-file", "/run/secrets/js/join-tokens",
        "--agent-pool-config", "/etc/jobscheduler/agent-pool.toml",
        "--tls-cert", "/run/secrets/js/tls.crt", "--tls-key", "/run/secrets/js/tls.key"]
 ```
+
+Agents are admitted by their host certificate alone, so the server also needs `--agent-client-ca` (the CA of the hosts' certificates). A manifest written before G3 that still passes `--agent-token-file` starts: the flag is accepted, not read, and warned about once at start.
 
 - **`--boot resume`, always.** The first deployment of an empty volume starts once with `--boot initialise`, by an operator and not by
   the manifest; every later start is `resume`, which refuses a missing file (merged). A volume that came back empty therefore stops the
   pod instead of starting a table at term 1 that would reissue old lease ids.
 - **Secrets as files.** The merged server reads a secret only from a regular file owned by its own user, mode `0400` or `0600`
-  (it follows the symbolic links Secret volumes use), and reads the join-token file again at every tick. A Secret volume's files are owned
+  (it follows the symbolic links Secret volumes use), and the server's own files are read again as its tick says. A Secret volume's files are owned
   by root, so the container's user is root with `capabilities: drop: [ALL]`, `allowPrivilegeEscalation: false`, a read-only root
   filesystem, the runtime default seccomp profile and, where the cluster has user namespaces, `hostUsers: false`, so root in the container
   is unprivileged on the node. Secret volumes use `defaultMode: 0400`. The alternative, copying the secrets to a memory volume owned by a
-  non-root user, needs a shell or a helper in the image, and would stop the live reading of the join-token file: a join token is then
-  rotated by overlap (the file may hold several tokens) with no restart. The service account token is not mounted
+  non-root user, needs a shell or a helper in the image, and would stop the live reading of the client token files. The service account token is not mounted
   (`automountServiceAccountToken: false`): the service never calls the Kubernetes API.
 - **Probes.** Liveness is the merged `/healthz`: open, `200` while the tick loop runs, `503` once it has stopped (a server that no longer
   ticks expires nothing, so the pod should be restarted). It also answers `503 store unreachable` (merged) while the tick's store paths
@@ -128,7 +128,7 @@ job tables and the bindings in a database, with conditional writes (the `js-stat
 - **Restart.** A restart reads both files and takes a new term; nothing is rebuilt from elsewhere. Soft state is rebuilt by the agents:
   the facts of each host (5.13) come back at the next hello.
 - **The state database.** The Postgres store a server is given (`--store`, `server.store`: a file holding the connection URL)
-  holds the writer lock and the writer generation, the host bindings and join-token digests, and the scaler's records and hosts to
+  holds the writer lock and the writer generation, the host bindings, and the scaler's records and hosts to
   remove. The server takes the lock before it reads anything else and holds it for its life, and its
   first start over an empty store imports the files that kept that state, once. The role, the
   URL file, backups, restores and the checks after a restore are in the
@@ -139,7 +139,7 @@ job tables and the bindings in a database, with conditional writes (the `js-stat
   restore issues none of them again.
 - **There is no term to lower.** The lease file took a new term at every boot, and a restore of an old one had to be raised by hand. The server issues no `(term, sequence)` id any more (job and allocation ids are random), so a restore needs nothing of the kind; a lease file in a restored directory is ignored.
 - **The binding file and the job store are part of the state.** Without the binding file the first hello for a host id after a restart
-  would take the host's lease from anyone holding a join token (K10). The binding file and the job store are always
+  would take the host's lease from anyone who presents that host id (K10). The binding file and the job store are always
   copied and restored together, with the server stopped.
 
 Superseded for a Postgres store: any number of servers serve one store with no leader, no election and no fence, every decision a row
@@ -203,8 +203,8 @@ delay today (K28 names the risk).
 Today's `js-lease-server` on one host is the stepping stone. The move needs no new format and is bounded by the smaller of the lease's remaining wall time
 and the agents' fence (above). Each step is reversible until the last.
 
-1. Prepare the objects with the pod at zero replicas: the volume, the Secrets (the **same** bearer token and join tokens, so no client
-   or agent is reissued a credential), the ConfigMap from the existing pool files, and **the same certificate and private key** the old
+1. Prepare the objects with the pod at zero replicas: the volume, the Secrets (the **same** bearer token, so no client
+   is reissued a credential), the ConfigMap from the existing pool files, and **the same certificate and private key** the old
    server serves, copied into the TLS Secret. Agents pin the server's certificate (5.8), so a newly issued one would fail the pin on every
    agent at step 5 and the move could not be reversed without restarting the old server. A new key or certificate is a separate change made
    before the move, with the agents' pins overlapping (old and new accepted), and is not part of it.

@@ -24,9 +24,8 @@ const FARM_TMPFILES: &str = "packaging/js-agent/tmpfiles-crun.conf";
 const PROGRAM: &str = "/usr/bin/js-agent";
 /// The farm unit's program, through the setup script's release link.
 const FARM_PROGRAM: &str = "/opt/js-agent/link/current/js-agent";
-/// The operator's flags file and token file.
+/// The operator's flags file.
 const FLAGS: &str = "/etc/js-agent/flags";
-const TOKEN: &str = "/etc/js-agent/token";
 /// The route's address the unit gives `--health-listen`: the release manifest's `healthUrl` names it.
 const HEALTH: &str = "127.0.0.1:7311";
 /// Where the package installs the unit.
@@ -34,7 +33,7 @@ const INSTALLED_UNIT: &str = "/usr/lib/systemd/system/js-agent-crun.service";
 /// The cutover bound of the hook manifest (`cargo xtask release desired`, `timeoutSecs.cutover`).
 const CUTOVER_SECS: u64 = 4320;
 /// The flags file of a host, as an operator writes it.
-const SAMPLE_FLAGS: &str = "# this host's own flags\n--server=https://js.example.com:8443\n--pool=farm\n--instance-file=/etc/js-agent/instance\n--host-id=node-5\n";
+const SAMPLE_FLAGS: &str = "# this host's own flags\n--server=https://js.example.com:8443\n--pool=farm\n--host-cert=/var/lib/hostkeeper/identity/host.crt\n--host-key=/var/lib/hostkeeper/identity/host.key\n--host-id=node-5\n";
 
 fn read(path: &str) -> String {
     let root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
@@ -160,7 +159,7 @@ fn the_unit_expands_with_a_flags_file_to_a_command_line_the_agent_parses() {
     assert_eq!(cli.server, "https://js.example.com:8443");
     assert_eq!(cli.pool, "farm");
     assert_eq!(cli.flags_file, None);
-    assert_eq!(cli.token_file.as_deref(), Some(Path::new(TOKEN)));
+    assert!(cli.token_file.is_none() && cli.instance_file.is_none());
     assert_eq!(
         cli.state_root.as_deref(),
         Some(Path::new("/var/lib/js-agent/state"))
@@ -176,8 +175,12 @@ fn the_unit_expands_with_a_flags_file_to_a_command_line_the_agent_parses() {
     assert_eq!(cli.drain_wait, Some(3600));
     assert_eq!(cli.stop_grace, Some(120));
     assert_eq!(
-        cli.instance_file.as_deref(),
-        Some(Path::new("/etc/js-agent/instance"))
+        cli.host_cert.as_deref(),
+        Some(Path::new("/var/lib/hostkeeper/identity/host.crt"))
+    );
+    assert_eq!(
+        cli.host_key.as_deref(),
+        Some(Path::new("/var/lib/hostkeeper/identity/host.key"))
     );
     assert_eq!(cli.host.host_id.as_deref(), Some("node-5"));
     assert!(js_agent::crun_host::flags(&cli).is_ok());
@@ -188,9 +191,8 @@ fn the_unit_expands_with_a_flags_file_to_a_command_line_the_agent_parses() {
     );
 }
 
-/// No file of the package sets the environment or holds token text: outside comments, the
-/// token's path, the flag that names it and nothing else mention a token, so a package never
-/// carries one.
+/// No file of the package sets the environment or holds token text: outside comments nothing
+/// mentions a token, so a package never carries one and names no token file.
 ///
 /// Catches an `Environment=` or `EnvironmentFile=` in a unit (configuration is flags) and a
 /// token written into the package.
@@ -204,11 +206,7 @@ fn no_file_of_the_package_sets_the_environment_or_holds_token_text() {
                 "{path}: {line}"
             );
         }
-        let left = code(&body)
-            .join("\n")
-            .replace(TOKEN, "")
-            .replace("--token-file", "")
-            .to_lowercase();
+        let left = code(&body).join("\n").to_lowercase();
         assert!(!left.contains("token"), "{path} mentions a token");
     }
 }

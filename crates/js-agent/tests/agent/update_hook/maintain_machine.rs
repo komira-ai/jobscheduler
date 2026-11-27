@@ -12,17 +12,16 @@ use std::path::{Path, PathBuf};
 
 use js_agent::lifecycle::StateRoot;
 use js_agent::lifecycle::hold::{HOLD_FILE, HOLD_RESUME_FILE, HOLD_TEXT, write_text};
-use js_agent::own_host::{HttpLease, Lease, RequestLimit};
+use js_agent::own_host::Lease;
 use js_agent::update_hook::{
     Class, Done, DrainParams, Facts, Machine, MaintainInvocation, MaintenanceStep, Outcome, Reason,
     SystemFacts, host_facts, run_maintain,
 };
-use js_agent::{CREDENTIAL_FILE, Login};
 
 use super::machine::{Tree, reaching};
 use super::machine_root::open_state_root;
 use super::step_rig::as_root;
-use crate::cordon::http::enrol;
+use crate::cordon::http::{enrol, lease_of};
 use crate::jobs::private;
 use crate::server::T0;
 use crate::support::{
@@ -39,12 +38,11 @@ const NOT_DIR: &str = "not a directory (a link is not accepted)";
 /// What the report of a step that says nothing is, as the updater reads it.
 const EMPTY_REPORT: &str = r#"{"class":"release","promotion_pending":false,"reversible":true}"#;
 
-/// The params of `drain` and `resume` for `tree`'s flags file and token, over `state_root`.
+/// The params of `drain` and `resume` for `tree`'s flags file, over `state_root`.
 fn params(tree: &Tree, state_root: &Path) -> DrainParams {
     DrainParams {
         unit: UNIT.to_owned(),
         flags_file: tree.flags(),
-        token_file: tree.root.join("token"),
         state_root: state_root.to_owned(),
         cordon_lease_secs: 300,
         defer_retry_secs: 300,
@@ -118,7 +116,7 @@ fn a_state_root_that_is_there_and_not_usable_ends_drain_and_resume_state_invalid
         }
     }
     assert_eq!(names(&target), before);
-    assert_eq!(names(&tree.files.path("open-state")), [CREDENTIAL_FILE]);
+    assert_eq!(names(&tree.files.path("open-state")), Vec::<String>::new());
 }
 
 /// Asserts that a state root where nothing is ends `drain` `state_invalid`, with the text that
@@ -290,14 +288,7 @@ fn resume_leaves_a_cordon_that_was_in_force_before_the_drain() {
     let tree = Tree::new("hook-maintain-cordoned-before");
     let _ = tree.params(true, &reaching(&enrolled));
     let params = params(&tree, &enrolled.state);
-    let operator = HttpLease::connect(
-        &enrolled.server.url(),
-        &Login::Token(enrolled.state.join(CREDENTIAL_FILE)),
-        None,
-        "mac-1",
-        RequestLimit::DEFAULT,
-    )
-    .unwrap();
+    let operator = lease_of(&enrolled.server);
     operator.cordon(100).unwrap();
     assert_eq!(
         enrolled.server.host("mac-1")["cordon"]["expires_at_ms"],

@@ -1,6 +1,6 @@
-//! The host's flags file and join token file as the hook on a machine looks at them: the flags
-//! file is where the server, the certificate and the host id come from, and the token file is
-//! looked at through links with its mode and owner.
+//! The host's flags file and the files it names as the hook on a machine looks at them: the flags
+//! file is where the server, the certificate and the host id come from, and the certificate and
+//! key files are looked at through links with their mode and owner.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -80,34 +80,45 @@ fn a_flags_file_that_cannot_be_used_ends_an_update_as_a_lease_failure_naming_it(
     }
 }
 
-/// A first install asks the lease server nothing, and reads the flags file only to see whether
-/// it names the host's certificate and key: a flags file that is not there names none, so a host
-/// whose flags the operator has not placed yet installs by its join token, and its agent waits
-/// for them.
+/// A first install asks the lease server nothing, and reads the flags file to find the host's
+/// certificate and key: a flags file that is not there names none, so the install defers
+/// (`join_token_missing`, a shipped reason name) until the operator has placed it, naming the
+/// flags file and the two flags.
 ///
-/// Catches a first install held up by a file the agent itself would wait for.
+/// Catches a first install that goes on for a host whose agent would not start for want of an
+/// identity.
 #[test]
-fn a_first_install_goes_on_when_the_flags_file_is_not_placed_yet() {
+fn a_first_install_defers_when_the_flags_file_is_not_placed_yet() {
     let tree = Tree::new("hook-machine-first-no-flags");
     let params = tree.params(false, "");
     fs::remove_file(tree.flags()).unwrap();
     let done = tree.run(Step::Prepare, &params, Err("unused"));
-    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert_eq!(done.outcome, Outcome::Deferred, "{done:?}");
+    assert_eq!(done.report.reason, Some(Reason::JoinTokenMissing));
+    assert_eq!(
+        done.report.detail,
+        Some(format!(
+            "the flags file {} names no --host-cert and --host-key: a host is identified by \
+             its certificate; name them to install the agent",
+            params.flags_file.display()
+        ))
+    );
+    assert!(!tree.record().exists());
 }
 
-/// The machine looks at the join token file as the system has it: through a link (secret
+/// The machine looks at the host's key file as the system has it: through a link (secret
 /// mounts are links), with its permission bits and owner, and a directory is not a regular file.
 ///
-/// Catches a look at the link and not at the file, which would take a good token for a link.
+/// Catches a look at the link and not at the file, which would take a good key for a link.
 #[test]
-fn the_machine_looks_at_the_token_file_through_links_with_its_mode_and_owner() {
-    let files = Scratch::new("hook-machine-token-facts");
-    let token = files.write("token", "tok-0123456789\n", 0o640);
-    let link = files.path("token-link");
-    std::os::unix::fs::symlink(&token, &link).unwrap();
+fn the_machine_looks_at_a_host_file_through_links_with_its_mode_and_owner() {
+    let files = Scratch::new("hook-machine-key-facts");
+    let key = files.write("host.key", "a key\n", 0o640);
+    let link = files.path("key-link");
+    std::os::unix::fs::symlink(&key, &link).unwrap();
     let dir = private(&files, "a-directory");
     let machine = Machine::system();
-    for path in [&token, &link] {
+    for path in [&key, &link] {
         let facts = (machine.token)(path).unwrap();
         assert_eq!(
             (facts.regular, facts.mode, facts.uid),
@@ -134,29 +145,4 @@ fn the_machine_runs_as_its_user_and_reads_the_flags_file_as_the_agent_does() {
         (facts.regular, facts.mode, facts.uid, facts.bytes.as_slice()),
         (true, 0o600, machine.euid, "--pool=farm\n".as_bytes())
     );
-}
-
-/// On the machine a first install finds no join token file in place, and the agent's state root
-/// holds the host credential the agent sends instead: the install goes on. Without the
-/// credential the same install is deferred for the token. The state root is looked up as the
-/// agent's own is, so one that is not private is refused before any of this (machine_root.rs).
-///
-/// Catches a machine whose state root cannot say it holds a credential, which would hold up a
-/// host that has joined for a token it no longer needs.
-#[test]
-fn a_first_install_on_the_machine_goes_on_with_a_host_credential_and_no_token_file() {
-    let tree = Tree::new("hook-machine-first-credential");
-    let state = private(&tree.files, "agent-state");
-    let params = tree.params(false, &format!("state_root = \"{}\"\n", state.display()));
-    fs::remove_file(&params.token_file).unwrap();
-    let done = tree.run(Step::Prepare, &params, Err("unused"));
-    assert_eq!(done.outcome, Outcome::Deferred, "{done:?}");
-    assert_eq!(done.report.reason, Some(Reason::JoinTokenMissing));
-    assert!(!tree.record().exists());
-    let credential = state.join("host-credential");
-    fs::write(&credential, "cred-0123456789abcdefghij").unwrap();
-    fs::set_permissions(&credential, fs::Permissions::from_mode(0o600)).unwrap();
-    let done = tree.run(Step::Prepare, &params, Err("unused"));
-    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
-    assert!(tree.record().exists());
 }

@@ -107,7 +107,7 @@ fn the_faults_a_step_can_end_with_and_the_words_that_name_faults_and_defects() {
         .copied()
         .filter(|(step, fault)| fault.reachable_on_first_install(*step))
         .collect();
-    // Nothing defers on a first install but `prepare`, when the join token file is not right.
+    // Nothing defers on a first install but `prepare`, when the host's key file is not right.
     let without_defer: Vec<(S, F)> = reachable
         .iter()
         .copied()

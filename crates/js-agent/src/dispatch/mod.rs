@@ -12,12 +12,12 @@
 //!   this host) leaves the agent as it was: no poll is ever sent, and every start and stop
 //!   arrives in a heartbeat's reply.
 //! - A welcome with it makes the [`Session`] publish a [`Route`] (the host, the epoch, the
-//!   session secret, the host credential in use) in the [`Cell`] it was given
+//!   session secret) in the [`Cell`] it was given
 //!   ([`Session::with_dispatch`]). A later welcome replaces the route, and one without the
 //!   flag withdraws it.
 //! - The poller ([`serve`]) runs on a thread of its own beside the heartbeat loop, and
 //!   makes a transport for each poll through the same connector, server, login and CA the
-//!   session's was made with, with the host credential the session adopted ([`Dial`]). The
+//!   session's was made with ([`Dial`]). The
 //!   poll carries the session secret as a heartbeat does; the [`Route`] has no `Debug` text
 //!   for it.
 //!

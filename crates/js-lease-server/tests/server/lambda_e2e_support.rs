@@ -10,15 +10,12 @@ use js_elastic_fake::ElasticFake;
 use js_lease_server::{REGISTRY_FLOOR, REGISTRY_QUIET, RecordsFile};
 use js_provider_lambdalabs::{FakeLambda, TerminateEffect};
 use js_scaler::{Phase, State};
-use serde_json::json;
 
-use crate::agents_support::{Session, hosts};
 use crate::config_support::{API_KEY, OAUTH_SECRET, oauth_file};
 use crate::scaler_support::{
-    account, beat, cancel, elastic_cloud, hello_body_of, lagging, quiet, records_path, start,
-    submit, text_with, token_in,
+    account, cancel, elastic_cloud, lagging, quiet, records_path, start, submit, text_with,
 };
-use crate::support::{Harness, Reply, Scratch, TOKEN, request};
+use crate::support::{Harness, Scratch, TOKEN, request};
 use crate::tailnet::{AUTH_KEY, Fake, Reply as Canned, TOKEN as TAILNET_TOKEN};
 
 /// The route the access token is asked at.
@@ -276,21 +273,18 @@ impl Rig {
         }
     }
 
-    /// Ticks, `STEP` of the test's clock apart and every host of `heard` beating before each
-    /// tick, until the scaler vouches for the registry's view. The view is complete only
-    /// after [`REGISTRY_FLOOR`] of uptime (the server counts at most twice its tick interval
-    /// per tick) with every host of the roster heard, or after [`REGISTRY_QUIET`]; the bound
-    /// below is a multiple of the latter, so a view that never completes fails the test.
-    pub async fn complete_view(&self, heard: &[(&str, &Session)]) {
+    /// Ticks, `STEP` of the test's clock apart, until the scaler vouches for the registry's
+    /// view. The view is complete only after [`REGISTRY_FLOOR`] of uptime (the server counts
+    /// at most twice its tick interval per tick) with every host of the roster heard, or
+    /// after [`REGISTRY_QUIET`]; the bound below is a multiple of the latter, so a view that
+    /// never completes fails the test.
+    pub async fn complete_view(&self) {
         let scaler = self.h.running.scaler().unwrap();
         let bound = 2 * REGISTRY_QUIET.as_secs() / STEP;
         let mut ticks = 0;
         while !scaler.registry_complete() {
             assert!(ticks < bound, "the registry view never completed");
             self.advance(STEP);
-            for (bearer, me) in heard {
-                assert_eq!(self.beat(bearer, me).await.status, 200);
-            }
             self.tick().await;
             ticks += 1;
         }
@@ -302,9 +296,8 @@ impl Rig {
 
     /// The first half of the sequence: the scaler is told what the pool offers, a job
     /// waits, the next tick launches a machine and the one after sees it booting. Returns
-    /// the machine's name and the join token in its user data, and has the fake Tailscale
-    /// API list the machine's device.
-    pub async fn launch(&self) -> (String, String) {
+    /// the machine's name, and has the fake Tailscale API list the machine's device.
+    pub async fn launch(&self) -> String {
         self.tick().await;
         self.wait().await;
         self.tick().await;
@@ -313,7 +306,7 @@ impl Rig {
         self.show_device(&name);
         self.tick().await;
         assert_eq!(self.phase(), Phase::Booting);
-        (name, self.token(0))
+        name
     }
 
     /// Submits the job and asserts that it is queued: the first submit is created (201), a
@@ -342,65 +335,9 @@ impl Rig {
         }
     }
 
-    /// The join token in the user data of the `n`th launch.
-    pub fn token(&self, n: usize) -> String {
-        token_in(&self.script(n))
-    }
-
     /// Makes the fake Tailscale API list the device of `host`.
     pub fn show_device(&self, host: &str) {
         self.tailnet.set(DEVICES, devices_of(host));
-    }
-
-    /// A hello of `host` on `instance` with `token`, from an agent that keeps a host
-    /// credential, on the agent port.
-    pub async fn hello(&self, token: &str, host: &str, instance: &str) -> Reply {
-        let mut body = hello_body_of(host);
-        body["instance"] = json!({ "provider": "burst", "instance_id": instance });
-        body["accepts_host_credential"] = json!(true);
-        let bytes = body.to_string().into_bytes();
-        let addr = self.h.running.agent_addr().unwrap();
-        request(addr, "POST", "/v1/agent/hello", Some(token), Some(&bytes)).await
-    }
-
-    /// The hello the agent the `n`th launch booted would send, derived from the rendered
-    /// unit and nothing else: the host id is the one the unit's `ExecStart` gives with
-    /// `--host-id`, the capabilities are the ones the agent reports for the flags it is
-    /// given (a runtime and a mode with `--container-bin`, the GPU toolkit only with
-    /// `--gpu-toolkit-hook`).
-    pub fn agent_hello(&self, n: usize, name: &str) -> serde_json::Value {
-        self.hello_from(&self.script(n), name)
-    }
-
-    /// [`Rig::agent_hello`] for the unit of `script`, which may be edited.
-    pub fn hello_from(&self, script: &str, name: &str) -> serde_json::Value {
-        let line = agent_exec_start(script);
-        let line = line.expect("the unit has an ExecStart for the agent");
-        let words: Vec<&str> = line.split_whitespace().collect();
-        let flag = |wanted: &str| {
-            let at = words.iter().position(|word| *word == wanted);
-            at.map(|at| words.get(at + 1).copied().unwrap_or_default())
-        };
-        // Without `--host-id` the agent would register under a name of its own, which the
-        // scaler never sees, so a unit without it fails every test that boots a host.
-        let host = flag("--host-id")
-            .map(|host| host.trim_matches('"'))
-            .expect("the unit gives the agent `--host-id`");
-        let mut body = hello_body_of(host);
-        body["instance"] = json!({ "provider": "burst", "instance_id": name });
-        body["accepts_host_credential"] = json!(true);
-        // One agent process per host: after a server restart over the same store, whose row
-        // holds the live session, its hello replaces that session instead of being refused
-        // `host-live`.
-        body["agent_process"] = json!(format!("process-of-{host}"));
-        if flag("--container-bin").is_some() {
-            body["capabilities"]["runtime"] = json!("container");
-            body["capabilities"]["exec"] = json!("container");
-        }
-        if flag("--gpu-toolkit-hook").is_some() {
-            body["capabilities"]["gpu-toolkit"] = json!("true");
-        }
-        body
     }
 
     /// The `--host-id` the `n`th launch's unit gives the agent, if it gives one.
@@ -412,37 +349,6 @@ impl Rig {
         words
             .get(at + 1)
             .map(|host| host.trim_matches('"').to_owned())
-    }
-
-    /// A hello of the first launch's agent with `token`.
-    pub async fn agent_says_hello(&self, token: &str, name: &str) -> Reply {
-        let bytes = self.agent_hello(0, name).to_string().into_bytes();
-        let addr = self.h.running.agent_addr().unwrap();
-        request(addr, "POST", "/v1/agent/hello", Some(token), Some(&bytes)).await
-    }
-
-    /// A hello that must be admitted: the session it opened and the host credential it
-    /// carried.
-    pub async fn join(&self, token: &str, host: &str) -> (Session, String) {
-        let reply = self.agent_says_hello(token, host).await;
-        let session = crate::agents_support::session(&reply, host);
-        let credential = reply.json()["host_credential"]
-            .as_str()
-            .expect("the welcome carries a host credential")
-            .to_owned();
-        assert_eq!(credential.len(), 64, "{credential}");
-        (session, credential)
-    }
-
-    /// A heartbeat of `me` with `bearer`.
-    pub async fn beat(&self, bearer: &str, me: &Session) -> Reply {
-        beat(&self.h, bearer, me).await
-    }
-
-    /// The `mark` the registry lists for `host`.
-    pub async fn mark(&self, host: &str) -> serde_json::Value {
-        let listing = hosts(&self.h).await;
-        crate::agents_support::entry(&listing, host)["mark"].clone()
     }
 
     /// Asserts that neither status route shows one of `secrets` nor any planted secret.
@@ -461,13 +367,6 @@ impl Rig {
     pub fn asked(&self, route: &str) -> usize {
         self.tailnet.count(route)
     }
-}
-
-/// The number of join tokens the file of `h` holds.
-pub fn joins_held(h: &Harness) -> usize {
-    let mut joins = h.scratch.state().into_os_string();
-    joins.push(".joins");
-    std::fs::read_to_string(joins).map_or(0, |text| text.matches("[[join]]").count())
 }
 
 /// The `ExecStart` line of `script` that starts the agent. The unit has others (the

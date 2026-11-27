@@ -149,7 +149,7 @@ impl Client {
     }
 
     /// Makes `secret` the bearer of every later request, in place of the token the client
-    /// was built with. The agent calls it once it holds the credential a welcome carried.
+    /// was built with, for a credential the program holds in memory.
     /// The client keeps the old bearer when `secret` is refused.
     ///
     /// # Errors

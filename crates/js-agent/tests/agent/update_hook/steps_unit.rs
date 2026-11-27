@@ -1,18 +1,18 @@
 //! What `prepare` makes of the unit the staged release carries and `cutover` does about it: a
 //! unit identical to the installed one changes nothing; a different one is recorded by the keys
 //! that differ, and `cutover` on systemd waits, after the stop, for the unit's cgroup to hold no
-//! process before it starts the agent. And the join token a first install needs.
+//! process before it starts the agent. And the host certificate a first install needs.
 
 use std::fs;
 
-use js_agent::update_hook::step::TokenFacts;
 use js_agent::update_hook::{
-    Class, INSTALLED_MISSING, Outcome, Reason, Record, StateView, UnitRestart, Units,
+    Class, INSTALLED_MISSING, Outcome, Reason, Record, UnitRestart, Units,
 };
+use js_client::HostIdentity;
 use serde_json::json;
 
 use super::step_rig::{
-    DRAINS_NO_HANDOVER, RETRY_AFTER_SECS, Rig, Spy, TokenFile, UNIT, end_state, euid, good_token,
+    DRAINS_NO_HANDOVER, HOST_CERT_PATH, HOST_KEY_PATH, RETRY_AFTER_SECS, Rig, Spy, UNIT, end_state,
     killable, line, marks, running,
 };
 
@@ -392,145 +392,60 @@ fn on_a_mac_a_changed_plist_is_recorded_and_reported_and_cutover_reads_no_cgroup
     assert!(spy.log().iter().all(|call| !call.contains("systemctl")));
 }
 
-// The join token a first install needs.
+// The host certificate a first install needs.
 
-/// Asserts that a first install whose token file shows `file` defers and changes nothing.
-#[track_caller]
-fn deferred_for_the_token(name: &str, file: TokenFile, said: &str) {
-    let rig = Rig::first_install(name);
-    let spy = Spy::new(&rig);
-    spy.token.set(file);
+/// A first install whose flags file names no host certificate and key defers (75,
+/// `join_token_missing`, a reason name kept as a shipped wire value, retry in
+/// `defer_retry_secs`) and changes nothing: it says the flags file and what it must name, and
+/// the install goes on once the flags file names them.
+///
+/// Catches an install that goes on without an identity (the agent would not start), and a
+/// deferral that writes anything.
+#[test]
+fn a_first_install_whose_flags_file_names_no_host_certificate_defers_and_changes_nothing() {
+    let rig = Rig::first_install("hook-identity-missing");
+    let mut spy = Spy::new(&rig);
+    spy.host_identity = None;
     let done = spy.prepare(&rig);
-    assert_eq!(done.outcome, Outcome::Deferred, "{name}: {done:?}");
+    assert_eq!(done.outcome, Outcome::Deferred, "{done:?}");
     assert_eq!(done.outcome.code(), 75);
-    assert_eq!(done.report.reason, Some(Reason::JoinTokenMissing), "{name}");
-    assert_eq!(done.report.class, Class::Environment, "{name}");
-    assert_eq!(
-        done.report.retry_after_secs,
-        Some(RETRY_AFTER_SECS),
-        "{name}"
-    );
-    assert!(done.report.reversible, "{name}");
+    assert_eq!(done.report.reason, Some(Reason::JoinTokenMissing));
+    assert_eq!(done.report.class, Class::Environment);
+    assert_eq!(done.report.retry_after_secs, Some(RETRY_AFTER_SECS));
+    assert!(done.report.reversible);
     assert_eq!(
         done.report.detail,
         Some(format!(
-            "the join token file {} {said}; place it, root-owned and mode 0600, to install the agent",
-            rig.params.token_file.display()
-        )),
-        "{name}"
+            "the flags file {} names no --host-cert and --host-key: a host is identified by \
+             its certificate; name them to install the agent",
+            rig.params.flags_file.display()
+        ))
     );
-    assert_eq!(rig.record_bytes(), None, "{name}: nothing is written");
-    assert_eq!(rig.world.ticks(), 0, "{name}");
-    assert_eq!(rig.cordon_expiry(), None, "{name}");
+    assert_eq!(rig.record_bytes(), None, "nothing is written");
+    assert_eq!(rig.world.ticks(), 0);
+    assert_eq!(rig.cordon_expiry(), None);
     assert!(
         spy.log().iter().all(|call| call.starts_with("run(")),
-        "{name}: nothing is asked of the host"
+        "nothing is asked of the host"
     );
-}
-
-/// A first install defers (75, `join_token_missing`, retry in `defer_retry_secs`) until the
-/// token file is there, a regular file, mode 0600 or 0400, the hook's user's; it changes nothing
-/// meanwhile, and says which of the four is wrong, with the file's name and never its content.
-///
-/// Catches an install that goes on without a token (the agent would start and be refused), one
-/// that takes a world-readable token for a token, and a deferral that writes anything.
-#[test]
-fn a_first_install_without_a_good_token_file_defers_and_changes_nothing() {
-    deferred_for_the_token("hook-token-missing", TokenFile::Missing, "is not there");
-    deferred_for_the_token(
-        "hook-token-denied",
-        TokenFile::Unreadable,
-        "cannot be read: permission denied",
-    );
-    for mode in [0o644, 0o640, 0o660, 0o700, 0o4600, 0o000] {
-        deferred_for_the_token(
-            &format!("hook-token-mode-{mode:o}"),
-            TokenFile::Facts(TokenFacts {
-                mode,
-                ..good_token()
-            }),
-            &format!("must be mode 0600 or 0400, not {mode:04o}"),
-        );
-    }
-    deferred_for_the_token(
-        "hook-token-owner",
-        TokenFile::Facts(TokenFacts {
-            uid: euid() + 1,
-            ..good_token()
-        }),
-        &format!("must be owned by uid {}, not {}", euid(), euid() + 1),
-    );
-    deferred_for_the_token(
-        "hook-token-not-regular",
-        TokenFile::Facts(TokenFacts {
-            regular: false,
-            ..good_token()
-        }),
-        "is not a regular file",
-    );
-}
-
-/// A token file of mode 0600 or 0400 owned by the hook's user is the token; once it is there the
-/// install goes on.
-///
-/// Catches a check that refuses the 0400 file a secret mount gives, or that never lets an
-/// install through.
-#[test]
-fn a_first_install_with_a_good_token_file_goes_on() {
-    for mode in [0o600, 0o400] {
-        let rig = Rig::first_install(&format!("hook-token-good-{mode:o}"));
-        let spy = Spy::new(&rig);
-        spy.token.set(TokenFile::Facts(TokenFacts {
-            mode,
-            ..good_token()
-        }));
-        let done = spy.prepare(&rig);
-        assert_eq!(done.outcome, Outcome::Success, "{mode:o}: {done:?}");
-        assert!(rig.record().is_some());
-    }
-    // The operator places the file after a deferral: the next prepare goes on.
-    let rig = Rig::first_install("hook-token-placed-later");
-    let spy = Spy::new(&rig);
-    spy.token.set(TokenFile::Missing);
-    assert_eq!(spy.prepare(&rig).outcome, Outcome::Deferred);
-    spy.token.set(TokenFile::Facts(good_token()));
-    assert_eq!(spy.prepare(&rig).outcome, Outcome::Success);
-}
-
-/// A host credential in the state root is what the agent sends: a first install on a host that
-/// has one needs no token file. A credential file that holds no credential is none.
-///
-/// Catches a host that joined once being held up for a token it no longer needs, and a damaged
-/// credential file taken for a credential.
-#[test]
-fn a_host_credential_in_the_state_root_stands_in_for_the_token_file() {
-    let rig = Rig::first_install("hook-token-credential");
-    let root = rig.tmp.path().join("world/state");
-    let spy = Spy::new(&rig);
-    spy.token.set(TokenFile::Missing);
-    rig.state_root();
-    assert!(!StateView::has_credential(&rig.state_root()));
-    fs::write(root.join("host-credential"), "not a credential, has spaces").unwrap();
-    assert!(!StateView::has_credential(&rig.state_root()));
-    assert_eq!(spy.prepare(&rig).outcome, Outcome::Deferred);
-    fs::write(root.join("host-credential"), "cred-0123456789abcdefghij").unwrap();
-    assert!(StateView::has_credential(&rig.state_root()));
+    // The flags file names them after a deferral: the next prepare goes on.
+    spy.host_identity = Some(HostIdentity::new(HOST_CERT_PATH, HOST_KEY_PATH));
     let done = spy.prepare(&rig);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
     assert!(rig.record().is_some());
 }
 
-/// Only a first install needs the token: an update's host has an agent that runs, and the token
-/// file is the agent's business.
+/// Only a first install needs the host certificate: an update's host has an agent that runs,
+/// and its identity is the agent's business.
 ///
-/// Catches the token check applied to an update, which would hold every update on a host whose
-/// agent holds a host credential.
+/// Catches the check applied to an update, which would hold every update on a host whose flags
+/// file cannot be read.
 #[test]
-fn an_update_does_not_look_at_the_token_file() {
-    let rig = Rig::new("hook-token-update");
+fn an_update_does_not_look_for_the_host_certificate() {
+    let rig = Rig::new("hook-identity-update");
     rig.world.seed_unit(UNIT, "active", "running");
-    let spy = Spy::new(&rig);
-    spy.token.set(TokenFile::Missing);
+    let mut spy = Spy::new(&rig);
+    spy.host_identity = None;
     assert_eq!(spy.prepare(&rig).outcome, Outcome::Success);
     // The stop is the one thing nothing here reads: the unit is untouched.
     assert_eq!(

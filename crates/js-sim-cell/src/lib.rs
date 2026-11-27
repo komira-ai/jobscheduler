@@ -85,8 +85,8 @@
 //! - [`elastic`]: an elastic pool ([`ElasticPool`]): its cloud ([`Cloud`]), the elastic
 //!   fake on the cell's clock behind a recording wrapper the server's scaler is handed,
 //!   which writes down each acquire, release and list with its arguments, its answer and
-//!   its virtual time ([`CloudCall`]); the launch payload a machine's agent reads its join
-//!   token and host id from ([`Payload`]); the seed's entropy the scaler names machines
+//!   its virtual time ([`CloudCall`]); the launch payload a machine's agent reads its
+//!   host id from ([`Payload`]); the seed's entropy the scaler names machines
 //!   with ([`SeededEntropy`]); and what the invariants read of the cloud ([`CloudFacts`]).
 //!   A machine the scaler launches boots into a fake agent the pool's boot time later,
 //!   and one the cloud stops running has its agent killed in the same step. A server of

@@ -5,10 +5,9 @@ use std::time::Duration;
 
 use js_agent_wire::RefusalReason;
 
-use super::{CredentialState, Reason};
+use super::Reason;
 
-/// Something the operator may want to read in the log. None of them holds a token or a
-/// session secret.
+/// Something the operator may want to read in the log. None of them holds a session secret.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Note {
     /// The server welcomed the host.
@@ -17,8 +16,6 @@ pub enum Note {
         epoch: u64,
         /// How often the host heartbeats.
         interval: Duration,
-        /// What became of the host credential the welcome carried, if it carried one.
-        credential: CredentialState,
     },
     /// The server no longer holds the session; the agent says hello again.
     Lost {
@@ -63,13 +60,9 @@ pub enum Note {
 impl fmt::Display for Note {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Registered {
-                epoch,
-                interval,
-                credential,
-            } => write!(
+            Self::Registered { epoch, interval } => write!(
                 f,
-                "registered, epoch {epoch}, heartbeat every {}ms{credential}",
+                "registered, epoch {epoch}, heartbeat every {}ms",
                 interval.as_millis()
             ),
             Self::Lost { code } => write!(f, "the server lost the session ({code})"),

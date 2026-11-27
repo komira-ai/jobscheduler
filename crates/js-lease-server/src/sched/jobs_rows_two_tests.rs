@@ -90,15 +90,11 @@ pub(super) fn say_hello(
         "phase": "serving",
     });
     let body = Bytes::from(serde_json::to_vec(&hello).expect("serializes"));
-    let who = agents
-        .tokens
-        .identify(&"j".repeat(40))
-        .expect("the rig's token");
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("a runtime");
-    let answer = runtime.block_on(serve_hello(agents, who, None, Ok(body), &|| ()));
+    let answer = runtime.block_on(serve_hello(agents, host, Ok(body), &|| ()));
     match answer {
         Ok(Json(welcome)) => Ok(welcome),
         Err(refused) => Err(serde_json::to_value(&refused).expect("serializes")),

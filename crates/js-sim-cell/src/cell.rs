@@ -31,12 +31,12 @@
 //! The cell writes a trace of its own, family `js-sim-cell`, beside the kernel's: what
 //! the kernel does not see (a process killed, killed for good or replaced, the server
 //! restarted or its restart refused, the server stopped and what a read of its store then
-//! found, a second server started or refused on its store, a host joined with a minted
-//! token (module `store`), the bus's faults changed, a client call and its status, an item submitted or cancelled and each event the client
+//! found, a second server started or refused on its store, a host that presents another host's
+//! certificate (module `store`), the bus's faults changed, a client call and its status, an item submitted or cancelled and each event the client
 //! heard, with the item's number and never the ids it learned), what the server's listing says of each host when it
 //! changes, each launch in the ledger, what the cloud of an elastic pool did to each
 //! machine by its number (module `elastic`), and the violation that stopped the run. A line
-//! names hosts, statuses and counts; it never holds a token, a bearer, a session secret,
+//! names hosts, statuses and counts; it never holds a token, a session secret,
 //! a body or an id the server generated. The hash of a run ([`Cell::trace_hash`]) is the
 //! hash of the cell's trace closed by the kernel's hash, so it covers both. With trace
 //! lines kept ([`Setup::with_trace_lines`]), [`Cell::trace_lines`] gives both traces as
@@ -48,7 +48,7 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, Response};
-use js_agent_wire::{InstanceIdentity, PER_JOB_CAPABILITY};
+use js_agent_wire::PER_JOB_CAPABILITY;
 use js_conformance::agent::Defect;
 use js_lease_server::StartupError;
 use js_sim::{Chance, Faults, NodeId, Partition, Sim, SimRng, Trace, TraceHash};
@@ -67,7 +67,7 @@ use crate::jobs::read::Reader;
 use crate::ledger::Ledger;
 use crate::node::{Applied, CellNode};
 use crate::observe::{ClientEvent, Heard, ItemId, ItemRecord, Killed, Observations};
-use crate::server::{JOIN_TOKEN, ServerNode, ServerSpec};
+use crate::server::{ServerNode, ServerSpec};
 use crate::text;
 use crate::usage::UsageReadFault;
 use crate::work::Work;
@@ -208,7 +208,7 @@ pub struct Cell {
     tables: Reader,
     /// What the cell knows of the machines of its elastic pool's cloud.
     machines: elastic::Machines,
-    /// The join tokens the cell minted, and what it saw of the server's store.
+    /// What the cell saw of the server's store.
     kept: store::Kept,
     /// The defect the cell applies to the usage rows it reads at the end.
     usage_fault: UsageReadFault,
@@ -330,16 +330,12 @@ impl Cell {
     }
 
     fn add(&mut self, kind: AgentKind) -> Result<HostId, IdError> {
-        self.add_as(kind, JOIN_TOKEN.to_owned(), None)
+        self.add_as(kind, None)
     }
 
-    /// Adds the next agent, of `kind`, saying hello with `join_token` and naming `instance`.
-    fn add_as(
-        &mut self,
-        kind: AgentKind,
-        join_token: String,
-        instance: Option<InstanceIdentity>,
-    ) -> Result<HostId, IdError> {
+    /// Adds the next agent, of `kind`, presenting the host certificate of `presenting`, or of
+    /// its own host when that is `None`.
+    fn add_as(&mut self, kind: AgentKind, presenting: Option<HostId>) -> Result<HostId, IdError> {
         let name = agent_name(self.agents);
         let host = HostId::new(name.as_str())?;
         let mut capabilities = self.spec.shape().capabilities.clone();
@@ -354,14 +350,14 @@ impl Cell {
         let spec = AgentSpec {
             host: host.clone(),
             pool: self.spec.pool().to_owned(),
-            join_token,
+            certificate: Some(presenting.unwrap_or_else(|| host.clone())),
             capacity: self.capacity.clone(),
             capabilities,
             labels: BTreeMap::new(),
             hello_interval: HELLO_INTERVAL,
             worker_lag: self.worker_lag,
             kind,
-            instance,
+            instance: None,
         };
         let mut agent = AgentNode::new(spec, self.ledger.clone());
         agent.report_to(self.applied.clone());

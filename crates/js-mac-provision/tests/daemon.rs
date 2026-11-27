@@ -3,7 +3,7 @@
 
 use js_mac_provision::daemon::{
     AGENT_LABEL, BIN_DIR, Daemon, FLAGS_FILE, GATE, LOG_DIR, PF_POOL_INTERVAL_SECS, PF_POOL_LABEL,
-    SESSION_LABEL, THROTTLE_SECS, TOKEN_FILE, pf_pool_plist,
+    SESSION_LABEL, THROTTLE_SECS, pf_pool_plist,
 };
 
 const AGENT_GOLDEN: &str = include_str!("golden/agent.plist");
@@ -103,25 +103,21 @@ fn a_daemon_runs_only_while_the_gate_exists_and_not_at_load() {
     }
 }
 
-/// The daemons wait for the host's flags file, which every host has, and not for the join token,
-/// which a Mac that joins by hostkeeper's host certificate does not have; the agent is still
-/// told where a token would be. Catches a plist that holds a certificate-joined Mac's agent and
-/// helper back for good.
+/// The daemons wait for the host's flags file, which every host has, and for nothing else, and
+/// the agent's plist names no token file (a host is identified by its certificate, which the
+/// flags file names). Catches a plist that holds a Mac's agent and helper back for a file it no
+/// longer has, or one that still hands the agent a token file.
 #[test]
-fn the_gate_is_the_flags_file_not_the_join_token() {
+fn the_gate_is_the_flags_file_and_the_agent_plist_names_no_token_file() {
     assert_eq!(GATE, "/etc/js-agent/flags");
     assert_eq!(GATE, FLAGS_FILE);
-    assert_eq!(TOKEN_FILE, "/etc/js-agent/token");
     for daemon in [agent(), session()] {
         let text = daemon.render();
-        assert!(
-            !text.contains(&format!("<key>{TOKEN_FILE}</key>")),
-            "{text}"
-        );
+        assert!(!text.contains("<key>/etc/js-agent/token</key>"), "{text}");
     }
-    assert!(agent().render().contains(&format!(
-        "<string>--token-file</string>\n\t\t<string>{TOKEN_FILE}</string>"
-    )));
+    let text = agent().render();
+    assert!(!text.contains("--token-file"), "{text}");
+    assert!(!text.contains("/etc/js-agent/token"), "{text}");
 }
 
 #[test]

@@ -21,8 +21,8 @@
 //!   host; restarts the unit;
 //! - `verify` waits for the unit to be active and the host to be `live` in another session, and
 //!   then removes the kept copy;
-//! - `rollback` puts the kept files back, restarts the unit onto them and, with the join token in
-//!   place, waits for the hello without failing on it;
+//! - `rollback` puts the kept files back, restarts the unit onto them and, when the lease server
+//!   can be reached as the host, waits for the hello without failing on it;
 //! - `cleanup` deletes the record (and a kept copy `verify` could not remove), once `verify` has
 //!   succeeded;
 //! - `uninstall` does nothing to the service: the files go with the package, and the agent keeps

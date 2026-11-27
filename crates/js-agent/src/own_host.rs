@@ -3,10 +3,10 @@
 //!
 //! A host cordons itself with `POST /v1/hosts/{id}:cordon`, lifts its own cordon with
 //! `POST /v1/hosts/{id}:uncordon` and reads itself with `GET /v1/hosts/{id}`, all with the
-//! credential it was admitted with; the shared pool token is refused. [`Lease`] is the port
-//! (the update hook's steps and `js-agent cordon` take it), [`HttpLease`] is the client over
-//! `js-client`. Nothing here prints or keeps the credential: it is read from its file by
-//! `js-client`, held there, and sent in the `Authorization` header only.
+//! host certificate it was admitted with. [`Lease`] is the port (the update hook's steps and
+//! `js-agent cordon` take it), [`HttpLease`] is the client over `js-client`. Nothing here
+//! prints or keeps the key: it is read from its file by `js-client` and presented in the TLS
+//! handshake only.
 
 use std::path::Path;
 use std::time::Duration;
@@ -149,7 +149,7 @@ pub enum LeaseError {
         "unknown host (409 unknown-host): the lease server has not heard this host say hello since it started"
     )]
     UnknownHost,
-    /// The server refused the request (`invalid-cordon`, `join-token-not-admitted`, ...), by
+    /// The server refused the request (`invalid-cordon`, `host-certificate-required`, ...), by
     /// its code, or by `http-<status>` when it sent none.
     #[error("refused: {0}")]
     Refused(String),
@@ -208,22 +208,21 @@ pub trait HeldLease: Lease {
 
 /// [`Lease`] over HTTP/1.1, through the pinned-root client of `js-client`, for one host.
 ///
-/// It has no `Debug`: it holds the credential.
+/// It has no `Debug`: it holds the key of the host certificate.
 pub struct HttpLease {
     client: Client,
     host: String,
 }
 
 impl HttpLease {
-    /// Connects to `server` as `host`, with the credential in the owner-only file of `login`
-    /// or the host certificate it names, trusting `ca_cert` for `https://` (or the bundled
+    /// Connects to `server` as `host`, with the host certificate `login` names, trusting `ca_cert` for `https://` (or the bundled
     /// public roots without it). `host` is a valid host id: it has no colon and nothing to escape. Every call
     /// ends within `limit`, connect and TLS included: a server that does not answer in time
     /// is [`LeaseError::Unreachable`], and the same client may be called again after it.
     ///
     /// # Errors
     ///
-    /// [`ClientError::Flag`] naming `--server`, `--token-file`, `--host-cert`, `--host-key` or
+    /// [`ClientError::Flag`] naming `--server`, `--host-cert`, `--host-key` or
     /// `--ca-cert` when that flag, or the file it names, is unusable.
     pub fn connect(
         server: &str,
@@ -234,10 +233,18 @@ impl HttpLease {
     ) -> Result<Self, ClientError> {
         login
             .connect(server, ca_cert, limit.get())
-            .map(|client| Self {
-                client,
-                host: host.to_owned(),
-            })
+            .map(|client| Self::over(client, host))
+    }
+
+    /// The own-host routes of `host` over `client`, which the caller connected: for a caller
+    /// that builds its client itself, such as a test of the client's requests and of the
+    /// answers it reads, against a server of its own. `host` is a valid host id.
+    #[must_use]
+    pub fn over(client: Client, host: &str) -> Self {
+        Self {
+            client,
+            host: host.to_owned(),
+        }
     }
 
     /// The path of the route: `verb` is `cordon` or `uncordon`, or none for the read.
@@ -255,7 +262,7 @@ fn code(body: &Value) -> Option<&str> {
 }
 
 /// The body of a 200 answer, and the error of any other: `unknown-host` for the 409 of that
-/// code, else the server's code, else `http-<status>` (a 401 has no body).
+/// code, else the server's code, else `http-<status>` (an answer with no code in its body).
 fn answer(reply: Result<Reply, ClientError>) -> Result<Value, LeaseError> {
     let reply = reply.map_err(|err| LeaseError::Unreachable(err.to_string()))?;
     match (reply.status, code(&reply.body)) {

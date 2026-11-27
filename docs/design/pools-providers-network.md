@@ -12,8 +12,7 @@ pool (a static file of hosts (`--pool-config`, `crates/js-pool-static`) was anot
 `crates/js-lease-server/src/agent_pool.rs`). A Lambda provider exists
 (`crates/js-provider-lambdalabs`) that can launch and terminate instances, but nothing
 calls it: its docs say "The provider is not wired to a scheduler"
-(`crates/js-provider-lambdalabs/src/lib.rs`). One-time join tokens can be minted and
-revoked (`crates/js-lease-server/src/join_tokens.rs`, `join_api.rs`). There is no scaler,
+(`crates/js-provider-lambdalabs/src/lib.rs`). (When this was written, one-time join tokens could be minted and revoked; G3 deleted them.) There is no scaler,
 no network layer, no pool config file, and no status page.
 
 The design adds, in this order:
@@ -428,7 +427,7 @@ message naming pool and field:
 | type name not 1 to 64 lower case letters, digits or `_`; a type twice; a type the provider crate's table does not know (the pool would have no floor); types of two gpu models in one pool | `pool "gpu": provider.types[1].name: ...` |
 | elastic pool with accelerators (a floor of one GPU or more) without `idle`, `max_age` or `min_host_lifetime`, or under a `[server]` without `max_lease_wall`; `max_age` not longer than `boot_timeout`; `min_host_lifetime` longer than `max_age` | `pool "gpu": max_age: required of a pool with accelerators: ...` |
 | elastic pool without `max_instances`, `max_spend_per_hour` and `max_spend_per_day`; a spend value not a decimal with at most two places, or zero; a day cap below the hour cap | `pool "gpu": max_spend_per_day: required` |
-| `max_instances` of 256 or more (the join-token table holds 256 waiting tokens, `MAX_WAITING` in `join_tokens.rs`) | `pool "gpu": max_instances: 300 exceeds 255` |
+| `max_instances` of 256 or more (the limit `MAX_INSTANCES` of 255 in `file.rs`: it was sized to the table of waiting join tokens, which G3 deleted, and it stays as a plain bound on a pool's machines) | `pool "gpu": max_instances: 300 exceeds 255` |
 | `launch = "live"` on a pool whose provider cannot be built | `pool "gpu": launch: ...` |
 | two pools with one name; a class that books part of a host (first slice) | `pool "b": name: also the name of an earlier pool` |
 | two elastic pools, or an elastic pool beside a joined one: the file is valid, and the server does not start on it | `pool "b": several elastic pools are parsed; this version runs one, as the server keeps one registry of agents`; `pool "b": an elastic pool is served alone; this version runs several pools only when every one is joined` |
@@ -1136,6 +1135,8 @@ released at `boot_timeout` (F22).
 
 ### 7.2 The join token binding and the host credential (requirement 8)
 
+> **Removed by G3** ([multi-instance.md](multi-instance.md), section 9). The one-time join tokens, the pool tokens and the host credential this section designs are deleted: a host is admitted by its host certificate alone (`crates/js-lease-server/src/agent_api.rs`, `authenticate`), the scaler mints and revokes nothing, and nothing replaces the launch token until G9 launches machines with certificates. The text below is the design as it was and names code that no longer exists (`join_tokens.rs`, `join_api.rs`).
+
 Today `JoinTokens::mint` binds a token to an `InstanceIdentity { provider, instance_id }`
 (`crates/js-lease-server/src/join_tokens.rs`), and the first hello presenting it must name
 the same pair (`JoinRefusal::WrongInstance`). Lambda's instance id is unknown until the
@@ -1215,8 +1216,8 @@ launch, not as an option:
 In code: `Agents` gains `mint_for(pool, name, ttl)` and `revoke_for(pool, name)`, in-process
 wrappers over `joins.mint` and `joins.revoke`; the HTTP routes stay for tooling. Docs in
 `join_tokens.rs` and `join_api.rs` that say "the provider's instance id" are reworded to "an id
-the minting side chose". `MintError::Full` (256 waiting, `MAX_WAITING`) blocks a launch and shows
-in status; the loader rule on `max_instances` (4.4) keeps it from occurring.
+the minting side chose". `MintError::Full` (256 waiting, `MAX_WAITING`; removed by G3) blocked a launch and showed
+in status; the loader rule on `max_instances` (4.4) kept it from occurring.
 
 ### 7.3 The bootstrap (Lambda: stock image plus a built-in template)
 
@@ -1535,7 +1536,7 @@ and `launch_name`.
 | F12b | a job on the host reads user data from the metadata address | bootstrap blocks container access; token retired at first hello; live check | 7.2, 7.3, 13.4 |
 | F13 | user_data larger than the API accepts | `Shape` refusal before the call | 5.3 |
 | F14 | Tailscale key expires before boot | boot fails, `boot_timeout`, `boot_fail_cooldown` | 8.5 |
-| F15 | token table full (256) | loader rule on `max_instances` | 4.4, 7.2 |
+| F15 | token table full (256; the table is removed by G3) | loader rule on `max_instances` | 4.4, 7.2 |
 | F16 | a second scheduler on the same cloud account | ownership marks include the scheduler id; foreign instances are not counted or touched | 5.2 |
 | F17 | work starts on a host between the quiet check and terminate | `drain` and `release_host` check "no lease, run or stream" and set the mark under the booking lock; direct run start reads it; `js-sim` interleavings | 6.2, 6.3, 13.2 |
 | F18 | a burst of demand | `max_step` per tick, launch interval, caps, concurrency test | 6.2, 13.2 |

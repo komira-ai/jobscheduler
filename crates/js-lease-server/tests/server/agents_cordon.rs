@@ -1,5 +1,5 @@
 //! The own-host routes: a host cordons itself, lifts its own cordon and reads its own
-//! state with the credential it was admitted with (`POST /v1/hosts/{id}:cordon`,
+//! state with the certificate it was admitted with (`POST /v1/hosts/{id}:cordon`,
 //! `POST /v1/hosts/{id}:uncordon`, `GET /v1/hosts/{id}`). A cordon is a hold that the
 //! requester sets and renews, that the server caps and lets lapse, and that a restart keeps;
 //! a cordoned host is handed no new job.
@@ -12,12 +12,11 @@ use js_lease_server::BODY_LIMIT;
 use serde_json::{Value, json};
 
 use crate::agents_support::{
-    JOIN, Session, entry, hello_body, hosts, job_hello, listed, post, restarted,
-    restarted_job_hosts, session, start_agents_in, start_job_hosts_in,
+    Session, beat, code, entry, hello_body, hosts, job_hello, listed, post, restarted,
+    restarted_job_hosts, session, start_agents_in, start_job_hosts_in, without_certificate,
 };
 use crate::jobs_support::{JobBody, commands, exited, job_state, one_start, running, submit_body};
-use crate::joins::{beat_with, code, minted};
-use crate::support::{Harness, Kept, Reply, T0, kept_bindings, request};
+use crate::support::{Harness, Kept, Reply, T0, host_client_at, kept_bindings, request};
 
 /// The default length of a cordon asked for with no length, and the longest one a request
 /// can ask for, in seconds.
@@ -26,29 +25,22 @@ const MAX_SECS: u64 = 3600;
 
 /// A host and what it holds after its hello.
 struct Host {
-    credential: String,
+    host: String,
     session: Session,
 }
 
-/// The hello of `host` on `instance` that asks for a host credential and reports a runtime.
-fn asking(host: &str, instance: &str) -> Value {
+/// The hello of `host` that reports a runtime.
+fn asking(host: &str) -> Value {
     let mut body = job_hello(host);
-    body["instance"] = json!({ "provider": "lambdalabs", "instance_id": instance });
-    body["accepts_host_credential"] = json!(true);
     body["capabilities"]["runtime"] = json!("container");
     body
 }
 
-/// A host admitted with a one-time token that it swapped for a host credential.
-async fn enrolled(h: &Harness, host: &str, instance: &str) -> Host {
-    let token = minted(h, instance).await;
-    let welcome = post(h, "/v1/agent/hello", Some(&token), &asking(host, instance)).await;
-    let credential = welcome.json()["host_credential"]
-        .as_str()
-        .unwrap()
-        .to_string();
+/// A host admitted by its certificate.
+async fn enrolled(h: &Harness, host: &str) -> Host {
+    let welcome = post(h, "/v1/agent/hello", None, &asking(host)).await;
     Host {
-        credential,
+        host: host.to_owned(),
         session: session(&welcome, host),
     }
 }
@@ -68,42 +60,39 @@ fn agents_file(h: &Harness) -> PathBuf {
     PathBuf::from(file)
 }
 
-/// A call of an own-host route with `secret` as the bearer.
+/// A call of an own-host route of `host` presenting the certificate of `as_host`.
 async fn own(
     h: &Harness,
     method: &str,
     host: &str,
     verb: Option<&str>,
-    secret: &str,
+    as_host: &str,
     body: Option<&Value>,
 ) -> Reply {
     let bytes = body.map(|body| body.to_string().into_bytes());
-    request(
-        h.addr(),
-        method,
-        &path(host, verb),
-        Some(secret),
-        bytes.as_deref(),
-    )
-    .await
+    let client = host_client_at(h.addr(), as_host);
+    let sent = client
+        .send_bytes(method, &path(host, verb), None, bytes.as_deref())
+        .await;
+    sent.unwrap_or_else(|error| panic!("{method} {}: {error}", path(host, verb)))
 }
 
 /// `host` cordons itself for `secs` seconds.
 async fn cordon(h: &Harness, host: &str, me: &Host, secs: u64) -> Reply {
     let body = json!({ "lease_secs": secs });
-    own(h, "POST", host, Some("cordon"), &me.credential, Some(&body)).await
+    own(h, "POST", host, Some("cordon"), &me.host, Some(&body)).await
 }
 
 /// `host` reads its own state.
 async fn show(h: &Harness, host: &str, me: &Host) -> Value {
-    let reply = own(h, "GET", host, None, &me.credential, None).await;
+    let reply = own(h, "GET", host, None, &me.host, None).await;
     assert_eq!(reply.status, 200, "{}", reply.body);
     reply.json()
 }
 
 /// `host` lifts its own cordon.
 async fn uncordon(h: &Harness, host: &str, me: &Host) -> Reply {
-    own(h, "POST", host, Some("uncordon"), &me.credential, None).await
+    own(h, "POST", host, Some("uncordon"), &me.host, None).await
 }
 
 /// Lets `secs` seconds pass in steps of one heartbeat interval, the host heartbeating at
@@ -111,7 +100,7 @@ async fn uncordon(h: &Harness, host: &str, me: &Host) -> Reply {
 async fn live_for(h: &Harness, me: &Host, secs: u64) {
     for _ in 0..secs / 5 {
         h.clock.advance(Duration::from_secs(5));
-        let beat = beat_with(h, &me.credential, &me.session).await;
+        let beat = beat(h, &me.session).await;
         assert_eq!(beat.status, 200, "{}", beat.body);
     }
 }
@@ -128,48 +117,46 @@ async fn ask(h: &Harness, id: &str) {
 async fn beat_listing(h: &Harness, me: &Host, jobs: &[Value]) -> Value {
     let mut body = me.session.beat();
     body["jobs"] = json!(jobs);
-    let reply = post(h, "/v1/agent/heartbeat", Some(&me.credential), &body).await;
+    let reply = post(h, "/v1/agent/heartbeat", None, &body).await;
     assert_eq!(reply.status, 200, "{}", reply.body);
     reply.json()
 }
 
 /// The jobs the reply to a heartbeat of `me` tells it to start.
 async fn starts(h: &Harness, me: &Host) -> Vec<String> {
-    let reply = beat_with(h, &me.credential, &me.session).await;
+    let reply = beat(h, &me.session).await;
     assert_eq!(reply.status, 200, "{}", reply.body);
     let (starts, _stops) = commands(&reply.json());
     starts.into_iter().map(|(job, _allocation)| job).collect()
 }
 
-/// Asserts that the routes serve the host of the credential and no other: the credential
-/// of one host is refused 403 `join-token-not-admitted` on another host's read, cordon and
-/// uncordon, a pool join token is refused 403 `host-credential-required` on its own host's
-/// (it names no host), the client token and no token are 401, and the host that was reached
-/// for is neither cordoned nor kept from a job. It catches a route that trusts the host
-/// id in the path, one that lets the shared pool token act for any host, and one that opens
-/// to the client token.
+/// Asserts that the routes serve the host of the certificate and no other: the certificate of
+/// one host is refused 403 `certificate-host-mismatch` on another host's read, cordon and
+/// uncordon, the client token and no certificate are 401 `host-certificate-required`, and the
+/// host that was reached for is neither cordoned nor kept from a job. It catches a route that
+/// trusts the host id in the path, and one that opens to the client token.
 #[tokio::test]
-async fn a_host_credential_serves_its_own_host_only() {
+async fn a_host_certificate_serves_its_own_host_only() {
     let h = start_job_hosts_in("cordon_foreign", Kept::Files).await;
-    let one = enrolled(&h, "burst-1", "i-1").await;
-    let two = enrolled(&h, "burst-2", "i-2").await;
+    let one = enrolled(&h, "burst-1").await;
+    let two = enrolled(&h, "burst-2").await;
     for (method, verb) in [
         ("GET", None),
         ("POST", Some("cordon")),
         ("POST", Some("uncordon")),
     ] {
-        let foreign = own(&h, method, "burst-2", verb, &one.credential, None).await;
+        let foreign = own(&h, method, "burst-2", verb, &one.host, None).await;
         assert_eq!(foreign.status, 403, "{method} {verb:?}: {}", foreign.body);
-        assert_eq!(code(&foreign), "join-token-not-admitted");
-        let pooled = own(&h, method, "burst-1", verb, JOIN, None).await;
-        assert_eq!(pooled.status, 403, "{method} {verb:?}: {}", pooled.body);
-        assert_eq!(code(&pooled), "host-credential-required");
-        let client = own(&h, method, "burst-1", verb, crate::support::TOKEN, None).await;
+        assert_eq!(code(&foreign), "certificate-host-mismatch");
+        let at = path("burst-1", verb);
+        let client = without_certificate(&h, method, &at, Some(crate::support::TOKEN), None).await;
         assert_eq!(client.status, 401, "{method} {verb:?}: {}", client.body);
-        let bare = request(h.addr(), method, &path("burst-1", verb), None, None).await;
+        assert_eq!(code(&client), "host-certificate-required");
+        let bare = without_certificate(&h, method, &at, None, None).await;
         assert_eq!(bare.status, 401, "{method} {verb:?}: {}", bare.body);
+        assert_eq!(code(&bare), "host-certificate-required");
     }
-    let unnamed = own(&h, "GET", "UPPER", None, &one.credential, None).await;
+    let unnamed = own(&h, "GET", "UPPER", None, &one.host, None).await;
     assert_eq!(unnamed.status, 403, "{}", unnamed.body);
 
     assert!(show(&h, "burst-2", &two).await.get("cordon").is_none());
@@ -186,7 +173,7 @@ async fn a_host_credential_serves_its_own_host_only() {
 #[tokio::test]
 async fn a_cordoned_host_takes_no_new_job_until_it_is_uncordoned() {
     let h = start_job_hosts_in("cordon_placement", Kept::Files).await;
-    let me = enrolled(&h, "burst-1", "i-1").await;
+    let me = enrolled(&h, "burst-1").await;
     let placed = cordon(&h, "burst-1", &me, 60).await;
     assert_eq!(placed.status, 200, "{}", placed.body);
     let body = placed.json();
@@ -211,7 +198,7 @@ async fn a_cordoned_host_takes_no_new_job_until_it_is_uncordoned() {
 #[tokio::test]
 async fn a_job_running_before_the_cordon_runs_on_and_its_end_leaves_the_host_cordoned() {
     let h = start_job_hosts_in("cordon_held", Kept::Files).await;
-    let me = enrolled(&h, "burst-1", "i-1").await;
+    let me = enrolled(&h, "burst-1").await;
     ask(&h, "job-1").await;
     let started = beat_listing(&h, &me, &[]).await;
     let (job, allocation) = one_start(&started);
@@ -244,8 +231,8 @@ async fn a_job_running_before_the_cordon_runs_on_and_its_end_leaves_the_host_cor
 #[tokio::test]
 async fn a_renew_extends_the_cordon_and_the_server_caps_it() {
     let h = start_job_hosts_in("cordon_renew", Kept::Files).await;
-    let me = enrolled(&h, "burst-1", "i-1").await;
-    let first = own(&h, "POST", "burst-1", Some("cordon"), &me.credential, None).await;
+    let me = enrolled(&h, "burst-1").await;
+    let first = own(&h, "POST", "burst-1", Some("cordon"), &me.host, None).await;
     assert_eq!(first.status, 200, "{}", first.body);
     assert_eq!(
         first.json()["cordon"]["expires_at_ms"],
@@ -274,21 +261,22 @@ async fn a_renew_extends_the_cordon_and_the_server_caps_it() {
             "POST",
             "burst-1",
             Some("cordon"),
-            &me.credential,
+            &me.host,
             bad.as_ref(),
         )
         .await;
         assert_eq!(refused.status, 400, "{}", refused.body);
         assert_eq!(code(&refused), "invalid-cordon");
     }
-    let unread = request(
-        h.addr(),
-        "POST",
-        &path("burst-1", Some("cordon")),
-        Some(&me.credential),
-        Some(b"not json"),
-    )
-    .await;
+    let unread = host_client_at(h.addr(), "burst-1")
+        .send_bytes(
+            "POST",
+            &path("burst-1", Some("cordon")),
+            None,
+            Some(b"not json"),
+        )
+        .await
+        .unwrap();
     assert_eq!(
         (unread.status, code(&unread)),
         (400, "invalid-cordon".into())
@@ -304,7 +292,7 @@ async fn a_renew_extends_the_cordon_and_the_server_caps_it() {
 #[tokio::test]
 async fn a_cordon_that_is_not_renewed_lifts_by_itself() {
     let h = start_job_hosts_in("cordon_expiry", Kept::Files).await;
-    let me = enrolled(&h, "burst-1", "i-1").await;
+    let me = enrolled(&h, "burst-1").await;
     assert_eq!(cordon(&h, "burst-1", &me, 60).await.status, 200);
     live_for(&h, &me, 55).await;
     ask(&h, "job-1").await;
@@ -325,7 +313,7 @@ async fn a_cordon_that_is_not_renewed_lifts_by_itself() {
 #[tokio::test]
 async fn an_uncordon_is_idempotent() {
     let h = start_job_hosts_in("cordon_uncordon", Kept::Files).await;
-    let me = enrolled(&h, "burst-1", "i-1").await;
+    let me = enrolled(&h, "burst-1").await;
     let none = uncordon(&h, "burst-1", &me).await;
     assert_eq!(
         (none.status, none.json()["lifted"].clone()),
@@ -347,7 +335,7 @@ async fn an_uncordon_is_idempotent() {
 
 /// `host` calls `verb` (`cordon` or `uncordon`) with the body `body`.
 async fn acting(h: &Harness, host: &str, me: &Host, verb: &str, body: Value) -> Reply {
-    own(h, "POST", host, Some(verb), &me.credential, Some(&body)).await
+    own(h, "POST", host, Some(verb), &me.host, Some(&body)).await
 }
 
 /// Asserts the holder of a cordon on the host's route, with the job service on: a named
@@ -361,7 +349,7 @@ async fn acting(h: &Harness, host: &str, me: &Host, verb: &str, body: Value) -> 
 #[tokio::test]
 async fn a_cordon_is_renewed_and_lifted_only_by_its_holder() {
     let h = start_job_hosts_in("cordon_holder", Kept::Files).await;
-    let me = enrolled(&h, "burst-1", "i-1").await;
+    let me = enrolled(&h, "burst-1").await;
     let named = |holder: &str, secs: u64| json!({ "lease_secs": secs, "holder": holder });
     let placed = acting(&h, "burst-1", &me, "cordon", named("run-1", 60)).await;
     let placed = placed.json();
@@ -450,7 +438,7 @@ async fn a_cordon_is_renewed_and_lifted_only_by_its_holder() {
 #[tokio::test]
 async fn the_read_of_a_host_has_what_the_update_hook_waits_on() {
     let h = start_job_hosts_in("cordon_read", Kept::Files).await;
-    let me = enrolled(&h, "burst-1", "i-1").await;
+    let me = enrolled(&h, "burst-1").await;
     let clean = show(&h, "burst-1", &me).await;
     assert_eq!(
         clean,
@@ -469,7 +457,7 @@ async fn the_read_of_a_host_has_what_the_update_hook_waits_on() {
     assert_eq!(cordon(&h, "burst-1", &me, 120).await.status, 200);
     let mut beat = me.session.beat();
     beat["taint"] = json!({ "reason": "residue", "run_id": "run-1-1", "check": "tmp" });
-    let reported = post(&h, "/v1/agent/heartbeat", Some(&me.credential), &beat).await;
+    let reported = post(&h, "/v1/agent/heartbeat", None, &beat).await;
     assert_eq!(reported.status, 200, "{}", reported.body);
     let full = show(&h, "burst-1", &me).await;
     assert_eq!(
@@ -495,7 +483,7 @@ async fn the_read_of_a_host_has_what_the_update_hook_waits_on() {
 #[tokio::test]
 async fn a_path_that_names_no_action_is_not_found() {
     let h = start_job_hosts_in("cordon_paths", Kept::Files).await;
-    let me = enrolled(&h, "burst-1", "i-1").await;
+    let me = enrolled(&h, "burst-1").await;
     let calls = [
         ("POST", Some("drain")),
         ("POST", None),
@@ -503,7 +491,7 @@ async fn a_path_that_names_no_action_is_not_found() {
         ("GET", Some("drain")),
     ];
     for (method, verb) in calls {
-        let reply = own(&h, method, "burst-1", verb, &me.credential, None).await;
+        let reply = own(&h, method, "burst-1", verb, &me.host, None).await;
         assert_eq!(reply.status, 404, "{method} {verb:?}: {}", reply.body);
         assert_eq!(code(&reply), "not-found");
     }
@@ -525,7 +513,7 @@ async fn a_cordon_survives_a_restart() {
 
 async fn a_cordon_survives_a_restart_in(kept: Kept) {
     let first = start_job_hosts_in("cordon_restart", kept).await;
-    let me = enrolled(&first, "burst-1", "i-1").await;
+    let me = enrolled(&first, "burst-1").await;
     assert_eq!(cordon(&first, "burst-1", &me, 120).await.status, 200);
     let text = kept_bindings(&first);
     match kept {
@@ -541,13 +529,7 @@ async fn a_cordon_survives_a_restart_in(kept: Kept) {
     let read = show(&h, "burst-1", &me).await;
     assert_eq!(read["state"], "awaiting");
     assert_eq!(read["cordon"]["expires_at_ms"], T0 + 120_000);
-    let back = post(
-        &h,
-        "/v1/agent/hello",
-        Some(&me.credential),
-        &asking("burst-1", "i-1"),
-    )
-    .await;
+    let back = post(&h, "/v1/agent/hello", None, &asking("burst-1")).await;
     let me = Host {
         session: session(&back, "burst-1"),
         ..me
@@ -582,7 +564,7 @@ async fn a_cordoned_host_that_never_returns_is_forgotten_with_its_binding() {
 
 async fn a_cordoned_host_that_never_returns_is_forgotten_with_its_binding_in(kept: Kept) {
     let first = start_job_hosts_in("cordon_awaiting_forgotten", kept).await;
-    let me = enrolled(&first, "burst-1", "i-1").await;
+    let me = enrolled(&first, "burst-1").await;
     assert_eq!(cordon(&first, "burst-1", &me, MAX_SECS).await.status, 200);
     let h = restarted_job_hosts(first).await;
     assert_eq!(entry(&hosts(&h).await, "burst-1")["state"], "awaiting");
@@ -599,8 +581,8 @@ async fn a_cordoned_host_that_never_returns_is_forgotten_with_its_binding_in(kep
     if kept == Kept::Store {
         assert!(!agents_file(&h).exists());
     }
-    enrolled(&h, "burst-2", "i-2").await;
-    enrolled(&h, "burst-3", "i-3").await;
+    enrolled(&h, "burst-2").await;
+    enrolled(&h, "burst-3").await;
 }
 
 /// Asserts that a lifted cordon is not brought back by a restart, and that a host the
@@ -619,7 +601,7 @@ async fn a_lifted_cordon_stays_lifted_and_a_host_in_the_rows_is_served() {
 
 async fn a_lifted_cordon_stays_lifted_in(kept: Kept) {
     let first = start_job_hosts_in("cordon_lifted_restart", kept).await;
-    let me = enrolled(&first, "burst-1", "i-1").await;
+    let me = enrolled(&first, "burst-1").await;
     assert_eq!(cordon(&first, "burst-1", &me, 120).await.status, 200);
     assert_eq!(uncordon(&first, "burst-1", &me).await.status, 200);
     let text = kept_bindings(&first);
@@ -628,7 +610,7 @@ async fn a_lifted_cordon_stays_lifted_in(kept: Kept) {
         assert!(!agents_file(&first).exists());
     }
     let h = restarted_job_hosts(first).await;
-    let read = own(&h, "GET", "burst-1", None, &me.credential, None).await;
+    let read = own(&h, "GET", "burst-1", None, &me.host, None).await;
     assert_eq!(read.status, 200, "{}", read.body);
     // The host's row says it is there: the cordon is placed afresh (the lifted one did not come
     // back) and lifted again.
@@ -647,14 +629,9 @@ async fn a_lifted_cordon_stays_lifted_in(kept: Kept) {
 async fn a_host_a_restarted_server_without_job_tables_does_not_hold_is_unknown() {
     for kept in Kept::BOTH {
         let first = start_agents_in("cordon_plain_restart", kept).await;
-        let token = minted(&first, "i-1").await;
-        let mut body = hello_body("burst-1");
-        body["instance"] = json!({ "provider": "lambdalabs", "instance_id": "i-1" });
-        body["accepts_host_credential"] = json!(true);
-        let welcome = post(&first, "/v1/agent/hello", Some(&token), &body).await;
-        let credential = welcome.json()["host_credential"].clone();
+        let welcome = post(&first, "/v1/agent/hello", None, &hello_body("burst-1")).await;
         let me = Host {
-            credential: credential.as_str().unwrap().to_owned(),
+            host: "burst-1".to_owned(),
             session: session(&welcome, "burst-1"),
         };
         let h = restarted(first).await;
@@ -677,7 +654,7 @@ async fn a_host_a_restarted_server_without_job_tables_does_not_hold_is_unknown()
 #[tokio::test]
 async fn a_cordon_that_cannot_be_written_is_not_acknowledged() {
     let h = start_job_hosts_in("cordon_unsaved", Kept::Files).await;
-    let me = enrolled(&h, "burst-1", "i-1").await;
+    let me = enrolled(&h, "burst-1").await;
     let blocker = h.scratch.path("leases.toml.agents.tmp");
     fs::create_dir(&blocker).unwrap();
     let errors = h.running.agent_errors();
@@ -717,13 +694,13 @@ async fn a_cordon_that_cannot_be_written_is_not_acknowledged() {
 #[tokio::test]
 async fn an_oversized_body_is_refused_and_cordons_nothing() {
     let h = start_job_hosts_in("cordon_oversized", Kept::Files).await;
-    let me = enrolled(&h, "burst-1", "i-1").await;
+    let me = enrolled(&h, "burst-1").await;
     let big = vec![b' '; BODY_LIMIT + 1];
     let over = request(
         h.addr(),
         "POST",
         &path("burst-1", Some("cordon")),
-        Some(&me.credential),
+        None,
         Some(&big),
     )
     .await;
@@ -739,20 +716,14 @@ async fn an_oversized_body_is_refused_and_cordons_nothing() {
 #[tokio::test]
 async fn a_lost_host_keeps_its_cordon_and_reads_lost() {
     let h = start_job_hosts_in("cordon_lost", Kept::Files).await;
-    let me = enrolled(&h, "burst-1", "i-1").await;
+    let me = enrolled(&h, "burst-1").await;
     assert_eq!(cordon(&h, "burst-1", &me, 600).await.status, 200);
     h.clock.advance(Duration::from_secs(30));
     let lost = show(&h, "burst-1", &me).await;
     assert_eq!(lost["state"], "lost");
     assert_eq!(lost["cordon"]["expires_in_ms"], 570_000);
 
-    let back = post(
-        &h,
-        "/v1/agent/hello",
-        Some(&me.credential),
-        &asking("burst-1", "i-1"),
-    )
-    .await;
+    let back = post(&h, "/v1/agent/hello", None, &asking("burst-1")).await;
     assert_eq!(back.status, 200, "{}", back.body);
     let shown = show(&h, "burst-1", &me).await;
     assert_eq!(shown["state"], "live");
@@ -773,7 +744,7 @@ async fn a_lost_host_keeps_its_cordon_and_reads_lost() {
 #[tokio::test]
 async fn a_new_hello_moves_the_session_marker_and_a_silent_agent_does_not() {
     let h = start_job_hosts_in("cordon_session", Kept::Files).await;
-    let me = enrolled(&h, "burst-1", "i-1").await;
+    let me = enrolled(&h, "burst-1").await;
     live_for(&h, &me, 10).await;
     let before = show(&h, "burst-1", &me).await;
     assert_eq!(
@@ -795,13 +766,7 @@ async fn a_new_hello_moves_the_session_marker_and_a_silent_agent_does_not() {
         (json!(1), json!(T0))
     );
 
-    let back = post(
-        &h,
-        "/v1/agent/hello",
-        Some(&me.credential),
-        &asking("burst-1", "i-1"),
-    )
-    .await;
+    let back = post(&h, "/v1/agent/hello", None, &asking("burst-1")).await;
     assert_eq!(back.status, 200, "{}", back.body);
     let fresh = show(&h, "burst-1", &me).await;
     assert_eq!(fresh["state"], "live");
@@ -817,7 +782,7 @@ const FORMS: [(&str, &str); 3] = [("GET", ""), ("POST", ":cordon"), ("POST", ":u
 /// What a call answers: the status, and the code of its error (empty for none).
 type Expect = (u16, &'static str);
 
-const NOT_ADMITTED: Expect = (403, "join-token-not-admitted");
+const NOT_ADMITTED: Expect = (403, "certificate-host-mismatch");
 const NOT_FOUND: Expect = (404, "not-found");
 const UNROUTED: Expect = (401, "");
 
@@ -830,19 +795,19 @@ fn code_of(reply: &Reply) -> String {
 }
 
 /// Asserts the answer of every shape of path an own-host route can be asked for, with the
-/// credential of `burst-1` and for each of the three calls: a foreign credential on a host
-/// that does not exist is the 403 of any other host (the credential is checked before the
+/// certificate of `burst-1` and for each of the three calls: a foreign certificate on a host
+/// that does not exist is the 403 of any other host (the certificate is checked before the
 /// host is looked up, so it tells nothing of which hosts exist); an id with an encoded
 /// slash, a doubly encoded colon, an empty id, or a colon in it that makes it another host
-/// is not the credential's host (403); an encoded colon is the colon, so a verb that is
+/// is not the certificate's host (403); an encoded colon is the colon, so a verb that is
 /// empty, repeated, or in capitals is no action (404); a trailing slash is no route (the
 /// 401 of the client routes). It catches a path that reaches the host of another by
 /// encoding, one that is looked up before it is checked, and a verb matched loosely.
 #[tokio::test]
 async fn the_auth_matrix_of_the_paths() {
     let h = start_job_hosts_in("cordon_matrix", Kept::Files).await;
-    let one = enrolled(&h, "burst-1", "i-1").await;
-    let _two = enrolled(&h, "burst-2", "i-2").await;
+    let one = enrolled(&h, "burst-1").await;
+    let _two = enrolled(&h, "burst-2").await;
     // (path with `{S}` for the verb of the form, the form's answer for a read and for a post)
     let rows: [(&str, Expect, Expect); 11] = [
         ("burst-9{S}", NOT_ADMITTED, NOT_ADMITTED),
@@ -864,7 +829,10 @@ async fn the_auth_matrix_of_the_paths() {
                 _ => post,
             };
             let at = format!("/v1/hosts/{}", template.replace("{S}", verb));
-            let reply = request(h.addr(), method, &at, Some(&one.credential), None).await;
+            let reply = host_client_at(h.addr(), &one.host)
+                .send_bytes(method, &at, None, None)
+                .await
+                .unwrap();
             assert_eq!(
                 (reply.status, code_of(&reply)),
                 (expect.0, expect.1.to_string()),
@@ -876,51 +844,6 @@ async fn the_auth_matrix_of_the_paths() {
     assert!(show(&h, "burst-1", &one).await.get("cordon").is_none());
 }
 
-/// Asserts what a one-time join token is on these routes: while it is the credential of the
-/// host it registered (the hello did not swap it) it serves that host, for the three calls,
-/// and no other; a token minted and not yet used registers no host, so it is refused 403
-/// like a foreign one; and a token a host credential replaced is no credential at all (401).
-/// It catches a token that serves before it has a host, and one that outlives its swap.
-#[tokio::test]
-async fn a_one_time_token_serves_its_host_while_it_is_the_credential() {
-    let h = start_job_hosts_in("cordon_tokens", Kept::Files).await;
-    let registered = minted(&h, "i-1").await;
-    let mut said = job_hello("burst-1");
-    said["instance"] = json!({ "provider": "lambdalabs", "instance_id": "i-1" });
-    let welcome = post(&h, "/v1/agent/hello", Some(&registered), &said).await;
-    assert_eq!(welcome.status, 200, "{}", welcome.body);
-    let unregistered = minted(&h, "i-2").await;
-    let swapped = minted(&h, "i-3").await;
-    let asked = post(
-        &h,
-        "/v1/agent/hello",
-        Some(&swapped),
-        &asking("burst-3", "i-3"),
-    )
-    .await;
-    assert_eq!(asked.status, 200, "{}", asked.body);
-
-    for (method, verb) in FORMS {
-        let at = |host: &str| format!("/v1/hosts/{host}{verb}");
-        let own = request(h.addr(), method, &at("burst-1"), Some(&registered), None).await;
-        assert_eq!(own.status, 200, "{method} {verb}: {}", own.body);
-        let other = request(h.addr(), method, &at("burst-2"), Some(&registered), None).await;
-        assert_eq!(
-            (other.status, code(&other)),
-            (403, "join-token-not-admitted".into())
-        );
-        for host in ["burst-2", "burst-1"] {
-            let idle = request(h.addr(), method, &at(host), Some(&unregistered), None).await;
-            assert_eq!(
-                (idle.status, code(&idle)),
-                (403, "join-token-not-admitted".into())
-            );
-        }
-        let retired = request(h.addr(), method, &at("burst-3"), Some(&swapped), None).await;
-        assert_eq!(retired.status, 401, "{method} {verb}: {}", retired.body);
-    }
-}
-
 /// Asserts that the listing of hosts shows a cordon, and only the cordon of the reading: a
 /// cordoned registered host has `cordon {expires_at_ms}` and none of the epoch, runtime or
 /// session start the host's own reading has, the entry of a host that is not cordoned has
@@ -930,8 +853,8 @@ async fn a_one_time_token_serves_its_host_while_it_is_the_credential() {
 #[tokio::test]
 async fn the_listing_shows_a_cordon_and_only_the_cordon() {
     let h = start_job_hosts_in("cordon_listing", Kept::Files).await;
-    let one = enrolled(&h, "burst-1", "i-1").await;
-    let _two = enrolled(&h, "burst-2", "i-2").await;
+    let one = enrolled(&h, "burst-1").await;
+    let _two = enrolled(&h, "burst-2").await;
     assert!(entry(&hosts(&h).await, "burst-1").get("cordon").is_none());
 
     assert_eq!(cordon(&h, "burst-1", &one, 60).await.status, 200);
@@ -955,12 +878,12 @@ async fn the_listing_shows_a_cordon_and_only_the_cordon() {
 #[tokio::test]
 async fn a_host_that_is_set_aside_reads_the_mark_the_listing_shows() {
     let h = start_job_hosts_in("cordon_mark", Kept::Files).await;
-    let other = enrolled(&h, "burst-2", "i-2").await;
+    let other = enrolled(&h, "burst-2").await;
     let plain = show(&h, "burst-2", &other).await;
     assert!(plain.get("mark").is_none(), "{plain}");
     assert!(entry(&hosts(&h).await, "burst-2").get("mark").is_none());
 
-    let me = enrolled(&h, "burst-1", "i-1").await;
+    let me = enrolled(&h, "burst-1").await;
     let registry = h.running.registry().unwrap();
     registry
         .drain(&js_types::HostId::new("burst-1").unwrap())

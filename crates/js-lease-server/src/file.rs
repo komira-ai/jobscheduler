@@ -26,9 +26,8 @@ use js_types::{
 };
 
 use crate::agent_pool::shipped_class;
-use crate::agent_tokens::AgentTokens;
 use crate::clock::SharedClock;
-use crate::config::{LiveClients, Token, checked};
+use crate::config::{LiveClients, Token, checked, retired};
 use crate::error::StartupError;
 use crate::file_checks::{check_listeners, check_live};
 use crate::job_expiry::JobLimits;
@@ -65,7 +64,7 @@ use section::Section;
 pub(crate) use server::{AlertKeys, Server, UsageKeys};
 use server::{read_client_token, read_server};
 
-/// The most instances one pool may allow: the join-token table holds 256 waiting tokens.
+/// The most instances one pool may allow.
 const MAX_INSTANCES: u64 = 255;
 
 /// The cpu a host of an elastic pool must report at least: one core.
@@ -267,16 +266,11 @@ impl fmt::Debug for ElasticPlan {
     }
 }
 
-/// The registering pool: the plan, what the registry is built from, and the join tokens.
+/// The registering pool: the plan and what the registry is built from.
 pub(crate) struct Registering {
     /// The launching side; `None` for a pool of hand-joined agents.
     pub(crate) plan: Option<ElasticPlan>,
     pub(crate) pool: PoolConfig,
-    pub(crate) tokens: AgentTokens,
-    /// The `provider` the mint route accepts, when the pool is the only thing that admits
-    /// hosts by hand: a joined pool's name. Empty takes any provider, as an elastic pool's
-    /// launches are minted for under the provider kind's name.
-    pub(crate) mint_provider: BTreeSet<String>,
     /// The pool's `max_queue_wait` and `start_timeout`: an elastic pool's settings, and the
     /// defaults for a joined pool, which has no keys for them.
     pub(crate) job_limits: JobLimits,
@@ -350,6 +344,7 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
     let logs = logs::read_logs(logs, ld.files)?;
     let mut resolved = platform::declared(machine_providers, platforms, ld.kinds)?;
     let mut registering = Vec::new();
+    let mut ignored = Vec::new();
     let mut names = BTreeSet::new();
     for (index, table) in pools.into_iter().enumerate() {
         let ceiling = server.max_lease_wall;
@@ -357,9 +352,10 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
             table,
             index + 1,
             ld,
-            (&clients, &server.scheduler, ceiling, &budgets),
+            (&server.scheduler, ceiling, &budgets),
             &mut resolved,
         )?;
+        ignored.extend(read.ignored);
         let pool = format!("pool {:?}", read.name);
         if !names.insert(read.name.clone()) {
             let reason = "also the name of an earlier pool";
@@ -388,6 +384,7 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
     let more = registering.collect();
     let registering = first;
     let mut warnings = check_listeners(&server)?;
+    warnings.extend(ignored);
     let now = Millis::new(ld.clock.now().millis());
     warnings.extend(budget::notes(&registering, &budgets, now));
     Ok(Loaded {
@@ -428,6 +425,8 @@ const SEVERAL_REGISTERING: &str = "an elastic pool is served alone; this version
 struct Read {
     name: String,
     pool: Pool,
+    /// What the start says of the keys the pool names that are accepted and not read.
+    ignored: Vec<String>,
 }
 
 enum Pool {
@@ -453,6 +452,7 @@ struct ElasticKeys {
     live_until: Option<Millis>,
     boot_timeout: Option<Duration>,
     brake: brake::Given,
+    /// Accepted and not read: a host is admitted by its certificate only.
     join_token_file: Option<PathBuf>,
     network: Option<toml::Table>,
     agent: Option<toml::Table>,
@@ -462,16 +462,11 @@ fn read_pool(
     table: toml::Table,
     number: usize,
     ld: &Load<'_>,
-    (client, scheduler, max_lease_wall, budgets): (
-        &LiveClients,
-        &SchedulerId,
-        Option<Duration>,
-        &Budgets,
-    ),
+    (scheduler, max_lease_wall, budgets): (&SchedulerId, Option<Duration>, &Budgets),
     resolved: &mut Resolved,
 ) -> Result<Read, StartupError> {
     if table.contains_key("kind") {
-        return joined::read(table, client);
+        return joined::read(table);
     }
     // The name, when it is one, so that every refusal below names the pool; otherwise the
     // pool is its number, and the value is not repeated.
@@ -495,6 +490,7 @@ fn read_pool(
             return Ok(Read {
                 name,
                 pool: Pool::Hostless,
+                ignored: Vec::new(),
             });
         }
         reach => reach,
@@ -587,6 +583,10 @@ fn read_pool(
         builts.push((kind, built, p));
     }
     let limits = keys.provider_limits.take();
+    // `join_token_file` is accepted and not read: the start says so.
+    let given = keys.join_token_file.iter();
+    let ignored = given.map(|_| retired::ignored(&format!("{}join_token_file", s.head)));
+    let ignored = ignored.collect();
     let elastic = Elastic {
         s: &s,
         name: &name,
@@ -605,7 +605,7 @@ fn read_pool(
         .first()
         .map(|(kind, _, p)| (kind.clone(), p.map.clone()));
     let built = builts.into_iter().map(|(kind, built, _)| (kind, built));
-    let mut registering = elastic.finish(built.collect(), client)?;
+    let mut registering = elastic.finish(built.collect())?;
     registering.job_limits = JobLimits::of(&settings);
     let reach = match (reach, table) {
         (Some(reach), _) => reach,
@@ -625,7 +625,11 @@ fn read_pool(
         provider_limits,
     });
     let pool = Pool::Elastic(Box::new(registering));
-    Ok(Read { name, pool })
+    Ok(Read {
+        name,
+        pool,
+        ignored,
+    })
 }
 
 /// The pool's cap on machines: `max_machines`, or `max_instances`, the same number by its
@@ -663,11 +667,7 @@ struct Elastic<'a> {
 impl Elastic<'_> {
     /// The registering pool of the providers `built`, each with its kind, in the order the
     /// pool walks them; never empty.
-    fn finish(
-        self,
-        built: Vec<(String, ElasticBuilt)>,
-        client: &LiveClients,
-    ) -> Result<Registering, StartupError> {
+    fn finish(self, built: Vec<(String, ElasticBuilt)>) -> Result<Registering, StartupError> {
         let Self {
             s,
             name,
@@ -743,13 +743,6 @@ impl Elastic<'_> {
         if live & agent.is_empty() {
             return Err(s.fail("agent", LIVE_NEEDS));
         }
-        let tokens = match &keys.join_token_file {
-            Some(path) => match AgentTokens::open(path, client) {
-                Ok(tokens) => tokens,
-                Err(err) => return Err(s.fail("join_token_file", err.reason())),
-            },
-            None => AgentTokens::none(client),
-        };
         let gpu_class = floor.gpu_class.as_ref().map(ToString::to_string);
         let resources =
             match Resources::new(FLOOR_CPU_MILLIS, FLOOR_MEMORY_BYTES, floor.gpus, gpu_class) {
@@ -814,8 +807,6 @@ impl Elastic<'_> {
         Ok(Registering {
             plan: Some(plan),
             pool,
-            tokens,
-            mint_provider: BTreeSet::new(),
             job_limits: JobLimits::default(),
         })
     }

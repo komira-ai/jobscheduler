@@ -14,8 +14,8 @@ named beside it.
 
 **Routes and authentication.** The lease server's agent router (`crates/js-lease-server/src/agent_api.rs`, `router`) serves
 `POST /v1/agent/hello`, `POST /v1/agent/heartbeat`, `POST /v1/agent/dispatch` (the dispatch poll, below), and `GET` and `POST /v1/hosts/{target}` (the routes a host calls about
-itself: cordon, uncordon, show). Every request carries a bearer in `Authorization`. `authenticate` accepts one of the pool's join
-tokens, a one-time join token or a host credential, and answers anything else with a bare 401. The hello is held to a per-credential
+itself: cordon, uncordon, show). Every request carries a verified host certificate. `authenticate` (the outermost layer of the router) admits only
+a request whose connection carries one, and answers anything else 401 with the body `{"error":"host-certificate-required"}`; a bearer is not read. The hello is held to a per-credential
 rate limit before its body is read (`limit_hello`: 429 `rate-limited` with `Retry-After`; `DEFAULT_HELLO_BURST` 60,
 `DEFAULT_HELLO_INTERVAL` 1 s in `crates/js-agent-wire/src/lib.rs`). The session itself is proven in the body, not in a header:
 a `Heartbeat` carries the `epoch` and the `session` secret the `Welcome` gave, and `Registry::heartbeat`
@@ -33,11 +33,12 @@ server's TLS offers only `http/1.1` in ALPN (`crates/js-lease-server/src/tls.rs`
 **Messages** (`crates/js-agent-wire`, protocol name `jobscheduler.agent.v1`, `PROTOCOL_MAJOR` 1):
 
 - `Hello`: `protocol` (a `ProtocolRange` of majors), `host_id`, `pool`, `agent_version`, `instance`, `shape` (`WireShape`),
-  `capabilities`, `gpu_devices`, `labels`, `phase`, `held` (the runs held), `accepts_host_credential`, `identity` (the cloud's
+  `capabilities`, `gpu_devices`, `labels`, `phase`, `held` (the runs held), `identity` (the cloud's
   signed identity of the machine, `{"document", "signature"}` as its metadata service served them, `js_elastic::SignedIdentity`;
   sent only by an agent started with `--identity-source aws` or `gce`, absent otherwise; no server reads it yet), and `agent_process` (the id of the agent process: 32 lowercase hex characters the agent draws once per process and sends in every hello of it, in the id grammar; a server that holds the host live in a session whose hello named the same process takes the hello at once instead of refusing `host-live`; absent from an older agent, ignored by an older server).
-- `Welcome`: `protocol`, `epoch`, `heartbeat_interval_ms`, `grace_ms`, `pool`, `session`, `host_credential`, `dispatch_poll` (the server serves the dispatch poll to this host). Over HTTP the welcome is
+- `Welcome`: `protocol`, `epoch`, `heartbeat_interval_ms`, `grace_ms`, `pool`, `session`, `dispatch_poll` (the server serves the dispatch poll to this host). Over HTTP the welcome is
   bare (200) and a refusal is the API's `{"error", "supported", "field"}` body; `HelloReply` is the transport-neutral form.
+  The names `Welcome.host_credential` and `Hello.accepts_host_credential` are retired (G3) and must not be reused: an old agent's extra field is ignored by a server of this release, and an older server reads their absence as false and none.
 - `Heartbeat`: `host_id`, `epoch`, `session`, `phase`, `held` (`HeldRun`), `results` (`RunResult`), `taint`, `taint_cleared` (the taint the agent
   cleared itself, until `taint_ack`; `docs/design/taint-self-clearing.md`), `tainted` (whether the agent holds a taint as it sends the beat;
   absent from an agent that predates it and from a session that runs no jobs), `exclusive_ready`,
@@ -470,7 +471,7 @@ stay counted from the last application message heard, so `grace_covers_heartbeat
 `unknown-host`) and say hello again, so the hellos of a fleet are spread over one interval by the phase of each agent's beat. With
 streams every stream would break at the same moment, and a client that reconnects without jitter would say hello at once; the
 backoff's jitter (`Backoff::next`) spreads only retries after a failure, not the first reconnect. The hello rate limit admits a burst
-of 60 per credential and then one a second, answering the rest 429, so hosts that share a pool join token would be admitted over
+of 60 per credential and then one a second, answering the rest 429, so hosts that shared a pool join token (removed by G3) would have been admitted over
 minutes (196 hosts past the burst at one a second, derived from 256 − 60), while hosts with their own credentials would all arrive at
 once. The seating of hosts as `awaiting` until their hello (6.7, step 4) would be unchanged.
 

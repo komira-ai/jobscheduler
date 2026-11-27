@@ -65,7 +65,6 @@ const DECLARED_PARAMS: &str = r#"unit                  = "js-agent-crun.service"
 state_dir             = "/var/lib/js-agent-update"
 release_link          = "/var/lib/hostkeeper/packages/js-agent/current"
 flags_file            = "/etc/js-agent/flags"
-token_file            = "/etc/js-agent/token"
 state_root            = "/var/lib/js-agent/state"
 runtime               = "crun"
 cordon_lease_secs     = 300
@@ -327,7 +326,6 @@ rollback_timeout_secs = 8220
 runtime = "crun"
 state_dir = "/var/lib/js-agent-update"
 state_root = "/var/lib/js-agent/state"
-token_file = "/etc/js-agent/token"
 unit = "js-agent-crun.service"
 "updater.artifact_digest" = "sha256:4a5b6c7d8e9f00112233445566778899aabbccddeeff00112233445566778899"
 "updater.promotion_ceiling_secs" = 9223372036854775807

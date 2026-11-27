@@ -6,7 +6,6 @@ use std::net::IpAddr;
 use js_lease_server::is_private_address;
 use serde_json::json;
 
-use crate::agents_support::JOIN;
 use crate::config_support::{PoolText, file, load, quoted, server};
 use crate::pools_support::{Options, Rig, a10};
 use crate::support::{Harness, Scratch, request};
@@ -26,7 +25,7 @@ async fn the_status_routes_are_on_the_listen_port_only_and_need_no_token() {
         let reply = rig.get(path).await;
         assert_eq!(reply.status, 200, "{path}");
         let agent = rig.running.agent_addr().unwrap();
-        let reply = request(agent, "GET", path, Some(JOIN), None).await;
+        let reply = request(agent, "GET", path, None, None).await;
         assert_eq!(reply.status, 404, "{path}");
     }
     rig.assert_clean();

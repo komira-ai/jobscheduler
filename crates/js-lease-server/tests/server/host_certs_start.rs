@@ -5,12 +5,12 @@
 use js_lease_server::{SharedClock, channel_ticker, start};
 use serde_json::json;
 
-use crate::agents_support::{agent_args, hello_body};
+use crate::agents_support::hello_body;
 use crate::config_support::{PoolText, file, load, quoted, refusal, server};
 use crate::host_certs_support::{
     Ca, Client, Options, Rig, START_OF_2030_MS, Spec, args as rig_args,
 };
-use crate::support::{Harness, Scratch, config};
+use crate::support::{Harness, Scratch, base_args, config};
 use crate::tls::test_identity;
 
 /// The refusal of a start over `args`, which must pass the checks of the flags: its flag and
@@ -31,7 +31,7 @@ async fn start_refused(args: Vec<std::ffi::OsString>) -> (&'static str, String) 
 async fn a_client_ca_without_tls_is_refused() {
     let scratch = Scratch::new("host_cert_no_tls");
     let ca = scratch.write("hostkeeper-ca.pem", &Ca::new().pem(), 0o644);
-    let mut args = agent_args(&scratch);
+    let mut args = base_args(&scratch);
     args.push("--agent-client-ca".into());
     args.push(ca.clone().into_os_string());
     let err = config(args).err().unwrap();
@@ -61,10 +61,11 @@ async fn an_unusable_ca_file_stops_the_start() {
     ] {
         let scratch = Scratch::new("host_cert_bad_ca");
         let ca_file = scratch.path("hostkeeper-ca.pem");
-        if let Some(text) = ca {
-            scratch.write("hostkeeper-ca.pem", text, 0o644);
+        let args = rig_args(&scratch, Options::FILES, &Ca::new());
+        match ca {
+            Some(text) => drop(scratch.write("hostkeeper-ca.pem", text, 0o644)),
+            None => std::fs::remove_file(&ca_file).unwrap(),
         }
-        let args = rig_args(&scratch, Options::FILES, &ca_file);
         let (got, said) = start_refused(args).await;
         assert_eq!(got, flag);
         assert!(

@@ -115,7 +115,7 @@ fn tmpfiles() -> Vec<Vec<String>> {
 
 /// The agent is started again after every exit, the status 0 of a stop request and the status
 /// 2 of a refusal included (the reason is in the unit's comments and in the agent's docs), and
-/// not faster than every 30 seconds, so that a refusal that cannot change (a retired token, an
+/// not faster than every 30 seconds, so that a refusal that cannot change (a refused certificate, an
 /// unknown pool) does not send the server a hello every few seconds. `RestartSteps=` and
 /// `RestartMaxDelaySec=` need systemd 254, which Debian 12 (252) does not have.
 #[test]
@@ -135,8 +135,8 @@ fn the_unit_restarts_the_agent_after_every_exit_and_not_in_a_tight_loop() {
 
 /// The unit runs the binary the package installs, with its settings as flags that the agent's
 /// own command line parser accepts: the agent reads no environment variable and no file of
-/// settings, and the join token is never on the command line (argv is world-readable; the agent
-/// has no flag for it), only the path of its file.
+/// settings, and the unit names no token or instance file and no certificate path: a host sets
+/// `--host-cert` and `--host-key` as it sets `--server`.
 #[cfg(target_os = "linux")]
 #[test]
 fn the_unit_runs_the_installed_binary_with_flags_the_agent_accepts() {
@@ -144,12 +144,10 @@ fn the_unit_runs_the_installed_binary_with_flags_the_agent_accepts() {
     assert_eq!(words[0], "/usr/bin/js-agent", "{words:?}");
     let cli = agent_cli();
     assert_eq!(cli.pool, "default");
-    assert_eq!(
-        cli.token_file.as_deref(),
-        Some(Path::new("/etc/js-agent/token"))
-    );
-    // The bundled roots serve https, and a host of the package joins with the pool's token.
-    assert!(cli.ca_cert.is_none() && cli.instance_file.is_none());
+    assert!(cli.token_file.is_none() && cli.instance_file.is_none());
+    assert!(cli.host_cert.is_none() && cli.host_key.is_none());
+    // The bundled roots serve https.
+    assert!(cli.ca_cert.is_none());
     assert_eq!(unit_value("WantedBy"), "multi-user.target");
 }
 
@@ -210,8 +208,6 @@ fn the_unit_is_ordered_after_the_engine_and_does_not_pull_it_in() {
 
 /// The unit's paths are the ones the elastic boot payload gives its agent for the engine, the
 /// state root and the scratch root, and the unit waits for the scratch disk by the same path.
-/// (The token is not among them: the payload keeps a one-time token and an instance file in
-/// `/etc/jobscheduler`, a host of the package an operator's pool token in `/etc/js-agent`.)
 #[cfg(target_os = "linux")]
 #[test]
 fn the_unit_uses_the_paths_of_the_elastic_agent() {
@@ -322,23 +318,21 @@ fn the_unit_sets_only_the_settings_listed_here() {
     assert_eq!(found, want);
 }
 
-/// The state root (the taint marker, and the host credential the agent writes at mode 0600 once
-/// the server admits the host), the scratch root and the directory of the join token are made,
-/// each root's with mode 0700 and no cleaning age: a credential in a directory a user other
-/// than root can enter or list is exposed, and an age on a `d` line would let
-/// `systemd-tmpfiles --clean` delete the credential. No other directory is made.
+/// The state root (the taint marker and the hold files the agent writes), the scratch root and
+/// the directory of the host's flags file are made, each with mode 0700 and no cleaning age: a
+/// state directory a user other than root can enter or list is exposed, and an age on a `d`
+/// line would let `systemd-tmpfiles --clean` delete what the agent keeps there. No other
+/// directory is made.
 #[cfg(target_os = "linux")]
 #[test]
 fn the_directories_are_roots_mode_0700_and_never_cleaned() {
     let cli = agent_cli();
-    let token = cli.token_file.expect("a token file");
-    let token_dir = token.parent().expect("a directory");
-    assert_eq!(token_dir, Path::new("/etc/js-agent"));
+    let config_dir = Path::new("/etc/js-agent");
     let state = cli.state_root.expect("a state root");
     let scratch = cli.scratch_root.expect("a scratch root");
     // The state root and the scratch root lie in a directory that is also made.
     let mut want: Vec<&Path> = vec![
-        token_dir,
+        config_dir,
         state.parent().expect("a directory"),
         &state,
         &scratch,

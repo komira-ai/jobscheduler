@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use js_elastic::{
     AcquireId, AcquireRequest, Acquired, BootStep, CapacityProvider, CatalogFuture, Claim, Extra,
-    Held, HostRef, HostStatus, Instant, Observed, Offer, ProviderError, Released, Secret,
+    Held, HostRef, HostStatus, Instant, Observed, Offer, ProviderError, Released,
 };
 use js_scaler::{AcquirePlan, Millis};
 use js_types::ProviderId;
@@ -238,7 +238,7 @@ async fn a_launch_goes_to_the_provider_its_plan_names() {
         offer: offer(),
         lifetime: None,
     };
-    let answer = live.acquire(&plan, Secret::new("token".to_owned()));
+    let answer = live.acquire(&plan);
     assert!(matches!(answer, Acquired::Accepted { .. }), "{answer:?}");
     let launched = HostRef("i-b".to_owned());
     assert_eq!(

@@ -1,6 +1,5 @@
 //! What the shell tells an operator: the things the scaler counts and never releases on its
-//! own, the one it released-or-should-have and did not, and a machine it cannot terminate
-//! because its token cannot be revoked.
+//! own, and the one it released-or-should-have and did not.
 //!
 //! Each alert has a key that holds while the thing it names holds, so the shell says it
 //! once and says it again only if it clears and comes back.
@@ -21,9 +20,6 @@ use std::collections::{BTreeMap, BTreeSet};
 /// - A record that has been `Releasing` for longer than `boot_timeout` and `unknown_hold`
 ///   together: the provider does not confirm the machine gone (it refuses the release, or
 ///   gives no answer), and the machine costs money until it does.
-/// - A host in `unrevoked`: its join token could not be revoked, so its machine is not
-///   terminated (never while the token may work), and the revoke is tried again every
-///   tick. Until it goes through the machine runs and is paid for.
 /// - A pool in `brake` that is tripped: too many boots failed in a row, the pool is in plan,
 ///   and it stays there until an operator resets it (`POST /v1/pools/{pool}/brake/reset`).
 /// - A host in `unremoved`: the registry still holds the host of a machine that is gone
@@ -36,7 +32,7 @@ pub(super) fn alerts(
     (state, input): (&State, &Input),
     now: Millis,
     settings: &Settings,
-    (unrevoked, unremoved): (&BTreeSet<String>, &BTreeSet<String>),
+    unremoved: &BTreeSet<String>,
 ) -> BTreeMap<String, String> {
     let hold = settings.unknown_hold;
     let known: BTreeSet<&str> = input
@@ -72,14 +68,6 @@ pub(super) fn alerts(
                 ),
             )
         });
-    let unrevoked = unrevoked.iter().map(|name| {
-        (
-            format!("revoke:{name}"),
-            format!(
-                "the join token of host {name} cannot be revoked, so its machine is not terminated and keeps running; the revoke is tried again every tick, so check the join token file"
-            ),
-        )
-    });
     let unremoved = unremoved.iter().map(|name| {
         (
             format!("remove:{name}"),
@@ -132,7 +120,6 @@ pub(super) fn alerts(
     orphans
         .chain(strays)
         .chain(stuck)
-        .chain(unrevoked)
         .chain(unremoved)
         .chain(releasing)
         .chain(tripped)

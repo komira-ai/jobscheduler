@@ -15,6 +15,7 @@ use js_lease_server::{
 use js_types::{ExecMode, Model};
 use js_types::{ManualClock, Timestamp};
 
+use crate::agents_support::agent_tls_keys;
 use crate::support::{Scratch, T0, TOKEN};
 
 /// A secret that must never be printed: the content of the key and OAuth files.
@@ -197,13 +198,19 @@ pub fn quoted(path: &Path) -> String {
 
 /// A `[server]` table with the required keys, and `extra` lines after them. Unless `extra`
 /// names `agent_listen`, the agent routes get a loopback port of their own
-/// (`agent_listen = "127.0.0.2:0"`), which a pool whose hosts register needs.
+/// (`agent_listen = "127.0.0.2:0"`), which a pool whose hosts register needs; and unless
+/// `extra` names `tls_cert` or `agent_client_ca`, the server is on TLS and admits hosts by the certificates of the
+/// CA of the tests ([`agent_tls_keys`]), which is how a host is admitted.
 pub fn server(scratch: &Scratch, extra: &str) -> String {
     let agents = match extra.contains("agent_listen") {
         true => "",
         false => "agent_listen = \"127.0.0.2:0\"\n",
     };
-    bare_server(scratch, &format!("{agents}{extra}"))
+    let tls = match extra.contains("tls_cert") || extra.contains("agent_client_ca") {
+        true => String::new(),
+        false => agent_tls_keys(scratch),
+    };
+    bare_server(scratch, &format!("{agents}{tls}{extra}"))
 }
 
 /// A `[server]` table with the required keys and `extra` lines after them, and nothing

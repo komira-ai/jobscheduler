@@ -496,7 +496,7 @@ fn a_host_name_of_another_scheduler_is_refused() {
 /// action and no run duration; that a Spot instance is deleted when the cloud ends it; and
 /// that a lifetime becomes a run duration in whole seconds rounded up (3600.4 s is 3601 s,
 /// 3600 s stays) with the same deletion for an on-demand instance. It catches an instance
-/// that restarts with a spent join token, and one that lingers terminated.
+/// that restarts, and one that lingers terminated.
 #[test]
 fn every_instance_is_created_without_restart_and_a_spot_one_deletes_on_termination() {
     let lab = rig(live(6));

@@ -36,13 +36,15 @@ use tonic::metadata::{Ascii, MetadataValue};
 use tonic::transport::{Channel, Endpoint};
 use tonic::{Code, Status};
 
-use crate::agents_support::{JOIN, POOL, hello_body, session, start_agents};
-use crate::config_support::{PoolText, clock, file, kinds, quote, quoted, server};
+use crate::agents_support::{POOL, hello_body, session, start_agents};
+use crate::config_support::{PoolText, clock, file, kinds, quote, server};
 use crate::jobs_support::{
     JobBody, beat_with, cancel, commands, exited, job_agent, job_args, job_server, job_state,
     left_the_queue, one_start, per_job_hello, running, submit_body,
 };
-use crate::support::{Harness, Reply, Scratch, TOKEN, guard, request, unanswered};
+use crate::support::{
+    Harness, Reply, Scratch, TOKEN, connect_for, guard, request, trusted, unanswered,
+};
 use crate::tls::{connector, test_identity, tls_request};
 
 /// The gateway's answer to `GetJob` of a job the store does not hold.
@@ -54,8 +56,13 @@ const WRONG_TOKEN: &str = "wrong-token-0123456789-abcdefghijklmnop";
 /// A gateway route of the job service: `GetJob` of `job-1`, which no test submits.
 const GET_JOB: &str = "/v1/jobs/job-1";
 
-/// A gRPC client of the job service at `addr`, over plain HTTP/2.
+/// A gRPC client of the job service at `addr`: over TLS trusting the server's certificate when
+/// the server was started with the agent flags, which put its listeners on TLS, and over plain
+/// HTTP/2 otherwise.
 async fn client(addr: SocketAddr) -> JobServiceClient<Channel> {
+    if let Some(trusted) = trusted(addr) {
+        return tls_client(addr, &trusted).await;
+    }
     let channel = Endpoint::from_shared(format!("http://{addr}"))
         .unwrap()
         .connect()
@@ -212,7 +219,7 @@ async fn job_listen_off_by_default_leaves_the_server_as_it_was() {
 async fn the_listener_stops_with_the_server() {
     let h = job_server("job_port_stop").await;
     let job = h.running.job_addr().unwrap();
-    let mut open = TcpStream::connect(job).await.unwrap();
+    let mut open = connect_for(job, GET_JOB, None).await;
     let head =
         format!("GET {GET_JOB} HTTP/1.1\r\nHost: test\r\nAuthorization: Bearer {TOKEN}\r\n\r\n");
     open.write_all(head.as_bytes()).await.unwrap();
@@ -330,13 +337,11 @@ async fn a_job_holds_its_host_until_its_agent_reports_it_ended() {
 async fn the_job_port_speaks_tls_over_the_reloaded_pair() {
     let scratch = Scratch::new("job_port_tls");
     let (cert, key) = test_identity();
-    let cert_file = scratch.write("test-only-cert.pem", &cert, 0o644);
-    let key_file = scratch.write("test-only-key.pem", &key, 0o600);
-    let mut args = job_args(&scratch, "127.0.0.1:0");
-    args.push("--tls-cert".into());
-    args.push(cert_file.into_os_string());
-    args.push("--tls-key".into());
-    args.push(key_file.into_os_string());
+    let args = job_args(&scratch, "127.0.0.1:0");
+    // The agent flags of `job_args` name these two files: the pair the test made takes the
+    // place of the one they hold.
+    scratch.write("test-only-cert.pem", &cert, 0o644);
+    scratch.write("test-only-key.pem", &key, 0o600);
     let h = Harness::with(scratch, args).await;
     // A time inside the test certificates' validity, which a reload checks.
     h.clock.set(Timestamp::from_millis(1_893_456_000_000));
@@ -449,13 +454,10 @@ fn ended_row() -> EndedRow {
 }
 
 /// A server with the job service on a loopback port, one elastic pool `gpu` (hosts join it
-/// with [`JOIN`]) and `usage` as its usage sink.
+/// by certificate) and `usage` as its usage sink.
 async fn fleet_server(name: &str, usage: Arc<dyn UsageSink>) -> Harness {
     let scratch = Scratch::new(name);
-    let joins = scratch.write("joins", &format!("{JOIN}\n"), 0o600);
-    let pool = PoolText::elastic(&scratch)
-        .set("exec", &quote("none"))
-        .set("join_token_file", &quoted(&joins));
+    let pool = PoolText::elastic(&scratch).set("exec", &quote("none"));
     let listeners = "listen = \"127.0.0.1:0\"\nagent_listen = \"127.0.0.2:0\"\n\
                      job_listen = \"127.0.0.1:0\"";
     let text = file(&server(&scratch, listeners), &[&pool]);
@@ -474,11 +476,11 @@ async fn join_gpu_host(h: &Harness, host: &str) {
     hello["shape"]["gpu_class"] = json!("nvidia-a10");
     let hello = hello.to_string().into_bytes();
     let agent = h.running.agent_addr().unwrap();
-    let reply = request(agent, "POST", "/v1/agent/hello", Some(JOIN), Some(&hello)).await;
+    let reply = request(agent, "POST", "/v1/agent/hello", None, Some(&hello)).await;
     let joined = session(&reply, host);
     let beat = joined.beat().to_string().into_bytes();
     let path = "/v1/agent/heartbeat";
-    let reply = request(agent, "POST", path, Some(JOIN), Some(&beat)).await;
+    let reply = request(agent, "POST", path, None, Some(&beat)).await;
     assert_eq!(reply.status, 200, "{}", reply.body);
 }
 

@@ -28,12 +28,12 @@ fn release_answer(plan: &js_scaler::AcquirePlan, answer: Released) -> Vec<Releas
 
 /// Asserts the whole way down, in order, across steps: a host quiet for exactly `idle` is
 /// drained (a millisecond short is not); while the registry shows it draining the scaler
-/// asks for the release every step; once the registry shows it releasing the token is
-/// revoked and the machine released, and released again every step whatever the read-back
+/// asks for the release every step; once the registry shows it releasing the machine is
+/// released, and released again every step whatever the read-back
 /// says (terminating, unknown, refused); only `Gone` removes the host and forgets its
-/// network key, and the token was revoked once.
+/// network key.
 #[test]
-fn a_quiet_host_is_drained_marked_revoked_and_released_until_gone() {
+fn a_quiet_host_is_drained_marked_and_released_until_gone() {
     let (mut rig, plan) = registered(settings("gpu"), "i-1", 2 * SECOND);
     let quiet = 2 * SECOND;
     let mut all: Vec<Action> = Vec::new();
@@ -52,7 +52,7 @@ fn a_quiet_host_is_drained_marked_revoked_and_released_until_gone() {
     rig.input.hosts[0].mark = Some(Mark::Releasing);
     let actions = rig.tick(at(after + 2 * SECOND));
     assert_eq!(
-        actions[2],
+        actions[1],
         Action::Release {
             host: plan.name.clone(),
             id: HostRef("i-1".to_owned())
@@ -86,7 +86,6 @@ fn a_quiet_host_is_drained_marked_revoked_and_released_until_gone() {
             "ReleaseHost",
             "ReleaseHost",
             "Save",
-            "Revoke",
             "Release",
             "Release",
             "Release",
@@ -183,7 +182,7 @@ fn short(change: fn(&mut HostFacts)) -> (Rig, js_scaler::AcquirePlan) {
 
 /// Asserts that a hello below the offer in cpu or memory past the size tolerance (10 percent
 /// by default), in accelerator count or accelerator model (or with no accelerator) condemns
-/// the host and releases its machine in that step (the token revoked, the release asked),
+/// the host and releases its machine in that step (the release asked),
 /// the pool waits out `boot_fail_cooldown`, and a hello that meets the offer, exceeds it, or
 /// is short of it by less than the tolerance does neither. Catches a short host left
 /// registered, and a measured size a little under the nominal one read as short.
@@ -242,9 +241,9 @@ fn a_condemned_host_is_never_taken_back_for_a_request() {
     assert_eq!(rig.phase(0), Phase::Releasing);
 }
 
-/// Asserts the boot timeout at its edge, counted from the launch as the join token is: a
+/// Asserts the boot timeout at its edge, counted from the launch as the boot clock is: a
 /// machine with no hello is left alone a millisecond before `boot_timeout` and at it is
-/// revoked and released and the pool waits out the cooldown; a hello that arrives at that
+/// released and the pool waits out the cooldown; a hello that arrives at that
 /// very step wins.
 #[test]
 fn a_boot_that_does_not_finish_is_released_and_starts_the_cooldown() {
@@ -254,7 +253,7 @@ fn a_boot_that_does_not_finish_is_released_and_starts_the_cooldown() {
     assert!(rig.state.records.cooldowns.is_empty());
 
     let actions = rig.tick(at(15 * MINUTE));
-    assert_eq!(kinds(&actions), ["Save", "Revoke", "Release"]);
+    assert_eq!(kinds(&actions), ["Save", "Release"]);
     assert_eq!(rig.phase(0), Phase::Releasing);
     assert_eq!(rig.state.blocked["gpu"], Blocked::BootFailed);
 
@@ -272,15 +271,14 @@ fn a_boot_that_does_not_finish_is_released_and_starts_the_cooldown() {
     assert!(late.state.records.cooldowns.is_empty());
 }
 
-/// Asserts that a machine the provider lists as terminated or preempted is revoked and
-/// released whichever way it was going, that only a boot that did not finish starts the
+/// Asserts that a machine the provider lists as terminated or preempted is released whichever way it was going, that only a boot that did not finish starts the
 /// cooldown, and that the read-back `Gone` then removes the host.
 #[test]
 fn a_machine_the_provider_lost_is_released_and_removed() {
     let (mut booting_rig, plan, booted) = booting(settings("gpu"), "i-1");
     booting_rig.pool().held = Some(vec![listed(&plan, "i-1", HostStatus::Terminated)]);
     let actions = booting_rig.tick(at(booted + SECOND));
-    assert_eq!(kinds(&actions), ["Save", "Revoke", "Release"]);
+    assert_eq!(kinds(&actions), ["Save", "Release"]);
     assert_eq!(booting_rig.state.blocked["gpu"], Blocked::BootFailed);
     booting_rig.input.released = release_answer(&plan, Released::Gone);
     let actions = booting_rig.tick(at(booted + 2 * SECOND));
@@ -290,7 +288,7 @@ fn a_machine_the_provider_lost_is_released_and_removed() {
     let (mut registered_rig, plan) = registered(settings("gpu"), "i-1", 2 * SECOND);
     registered_rig.pool().held = Some(vec![listed(&plan, "i-1", HostStatus::Preempted)]);
     let actions = registered_rig.tick(at(3 * SECOND));
-    assert_eq!(kinds(&actions), ["Save", "Revoke", "Release"]);
+    assert_eq!(kinds(&actions), ["Save", "Release"]);
     assert_eq!(registered_rig.phase(0), Phase::Releasing);
     assert!(registered_rig.state.records.cooldowns.is_empty());
     assert!(registered_rig.state.blocked.is_empty());
@@ -298,7 +296,7 @@ fn a_machine_the_provider_lost_is_released_and_removed() {
     let (mut draining_rig, plan, now) = draining();
     draining_rig.pool().held = Some(vec![listed(&plan, "i-1", HostStatus::Terminated)]);
     let actions = draining_rig.tick(at(now + SECOND));
-    assert_eq!(kinds(&actions), ["Save", "Revoke", "Release"]);
+    assert_eq!(kinds(&actions), ["Save", "Release"]);
     assert_eq!(draining_rig.phase(0), Phase::Releasing);
 }
 
@@ -311,7 +309,7 @@ fn failing_health_stops_launches_but_not_release() {
     rig.input.hosts[0].mark = Some(Mark::Releasing);
     rig.input.waiting = vec![request("r2")];
     let actions = rig.tick(at(now + SECOND));
-    assert_eq!(kinds(&actions), ["Save", "Revoke", "Release"]);
+    assert_eq!(kinds(&actions), ["Save", "Release"]);
     assert_eq!(rig.state.blocked["gpu"], Blocked::Unavailable);
 
     let (mut checking, _) = registered(settings("gpu"), "i-1", 2 * SECOND);

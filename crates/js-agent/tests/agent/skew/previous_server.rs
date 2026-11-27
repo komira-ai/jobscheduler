@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 
 use super::compare::uncovered;
 use super::record::{Act, play, spawn};
+use crate::host_certs::Identities;
 use crate::support::{Ran, Scratch, code};
 
 /// The `--server` of an agent that meets a transcript: never dialed, the connector answers.
@@ -89,10 +90,6 @@ impl Transport for Answering {
             retry_after: server["retry_after_s"].as_u64().map(Duration::from_secs),
         })
     }
-
-    fn adopt_credential(&mut self, _secret: &str) -> Result<(), String> {
-        Ok(())
-    }
 }
 
 /// What came of a conversation of this release's agent with the previous server.
@@ -111,13 +108,13 @@ pub struct Met {
 
 /// Runs the conversation of this release's agent against `server`.
 pub fn meet(name: &str, server: PreviousServer, job: &str) -> Met {
-    let token = Scratch::new(&format!("{name}-token"));
-    let token = token.write(
-        "join-token",
-        "join-token-unused-0123456789-abcdefghij",
-        0o600,
+    let files = Scratch::new(&format!("{name}-identities"));
+    let running = spawn(
+        name,
+        UNDIALED.to_owned(),
+        Identities::new(&files),
+        server.clone(),
     );
-    let running = spawn(name, UNDIALED.to_owned(), &token, server.clone());
     let machine = running.machine.clone();
     let (waits, ran) = play(running, |_: Act| {});
     let job_calls = machine
@@ -175,13 +172,13 @@ fn the_previous_server_refuses_an_unknown_major_and_this_agent_stops() {
     let transcript = super::previous();
     let refusal = [transcript["refusal"].clone()];
     let server = PreviousServer::of(&refusal).met_by(json!({ "min": 2, "max": 3 }));
-    let token = Scratch::new("skew-refused-token");
-    let token = token.write(
-        "join-token",
-        "join-token-unused-0123456789-abcdefghij",
-        0o600,
+    let files = Scratch::new("skew-refused-identities");
+    let running = spawn(
+        "skew-refused",
+        UNDIALED.to_owned(),
+        Identities::new(&files),
+        server.clone(),
     );
-    let running = spawn("skew-refused", UNDIALED.to_owned(), &token, server.clone());
     let ran = running.agent.finish();
     assert_eq!(*server.problems.lock().unwrap(), Vec::<String>::new());
     assert_eq!(server.exchanges.lock().unwrap().len(), 0);

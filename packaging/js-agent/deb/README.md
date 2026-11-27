@@ -94,14 +94,12 @@ reads that directory for the `ExecStart=` it extends (`--dropin-dir`).
 ## What the operator places
 
 A package is public and the same on every host, so it can place neither a secret nor a host's
-own settings. These three files are the operator's (or the machine image's), root's, in
+own settings. The flags file is the operator's (or the machine image's), root's, in
 `/etc/js-agent`, which the package's tmpfiles file makes mode 0700:
 
 | file | holds | mode |
 |---|---|---|
-| `/etc/js-agent/token` | the join token, one line: the pool's token, or the one-time token minted for this instance (`js join-token mint`). Not needed on a host whose flags file names `--host-cert` and `--host-key` (below) | root:root 0600 |
 | `/etc/js-agent/flags` | the host's own agent flags, one per line (below) | root-owned, not writable by group or others |
-| `/etc/js-agent/instance` | `PROVIDER:INSTANCE_ID`, the instance a one-time token is bound to (not secret) | root-owned |
 
 The flags file is read by `js-agent --flags-file /etc/js-agent/flags`, which the unit passes, and
 by the update hook. One argument word per line; empty lines and lines that start with `#` are
@@ -110,12 +108,16 @@ skipped:
 ```
 --server=https://js.example.com:8443
 --pool=farm
---instance-file=/etc/js-agent/instance
 --host-id=node-5
+--host-cert=/var/lib/hostkeeper/identity/host.crt
+--host-key=/var/lib/hostkeeper/identity/host.key
 --ca-cert=/etc/js-agent/ca.pem
 ```
 
-`--server` and `--pool` are required; the others are optional. The agent refuses a flags file
+`--server`, `--pool`, `--host-cert` and `--host-key` are required; the others are optional. The
+paths of the two certificate flags above are the ones hostkeeper keeps on a host it manages. A
+unit or flags file written for an earlier release may still carry `--token-file` or
+`--instance-file`: the agent accepts them, warns once for each and never reads the files. The agent refuses a flags file
 that is not a regular file owned by root (or the user running the agent), is writable by group or
 others, or holds a line that is not a flag.
 
@@ -128,21 +130,19 @@ not writable by group or others, at most 64 KiB, JSON with `"schema":1` and a `h
 accepts; a file that is missing or refused stops the agent (it never falls back to the machine
 id).
 
-The first install of a host defers (the hook reports `join_token_missing` and hostkeeper retries)
-until the host has a way to authenticate to the lease server. On a host that hostkeeper manages
-that is the host's own certificate and key: hostkeeper keeps them at fixed paths, renews both in place before
-the certificate expires, and the host group's config package names them in `/etc/js-agent/flags`
-with `--host-cert PATH` and `--host-key PATH` (both or neither). The key is mode 0640, owned by root, in a group that the agent's account
-belongs to; after following links it must be a regular file owned by root or by the user running
-the agent, with no access for others and not writable by its group (0600, 0400, 0640 and 0440
-pass). When the flags file names both, the hook does not look at the token file: it goes on when
-the certificate file is there and the key passes that rule, and the agent presents the certificate
-to the lease server (which needs `--agent-client-ca`) and sends no token (it neither reads
-`--token-file` nor keeps a `host-credential`). Otherwise the install defers and the detail names the
-file. A host whose flags file names neither flag, or cannot be read, or a node launched with a
-one-time token, has no certificate: the install defers until `/etc/js-agent/token` is a regular
-file, owned by root, mode 0600 or 0400. Place the files first, then let hostkeeper install
-`js-agent`.
+The first install of a host defers (the hook reports `join_token_missing`, a reason name kept
+from the time a host joined with a token, and hostkeeper retries) until the host has its
+certificate and key, which are its only identity. hostkeeper keeps them at fixed paths
+(`/var/lib/hostkeeper/identity/host.crt` and `host.key`), renews both in place before the
+certificate expires, and the host group's config package names them in `/etc/js-agent/flags`
+with `--host-cert PATH` and `--host-key PATH` (both are required). The key is mode 0640, owned by
+root, in a group that the agent's account belongs to; after following links it must be a regular
+file owned by root or by the user running the agent, with no access for others and not writable
+by its group (0600, 0400, 0640 and 0440 pass). The hook goes on when the certificate file is
+there and the key passes that rule, and the agent presents the certificate to the lease server
+(which needs `--agent-client-ca`) and sends no bearer. Otherwise the install defers and the detail
+names the file; a flags file that names neither flag, or cannot be read, defers it too. Place the
+files first, then let hostkeeper install `js-agent`.
 
 ## The hook manifest
 
@@ -214,7 +214,7 @@ the package: `cargo xtask release desired` writes it into the `targets` that
 - There is no `uninstall` bound: hostkeeper refuses an uninstall order for this package.
 - `params` is what the hook reads, as the `--params` file hostkeeper writes: the unit it
   restarts (`js-agent-crun.service`), its state directory, hostkeeper's `current` link, the flags
-  file and token file, the agent's state root and runtime (`crun`), the cordon and drain bounds
+  file, the agent's state root and runtime (`crun`), the cordon and drain bounds
   and the step bounds above. The keys are `js_agent::update_hook::params::KEYS`;
   the tests of `cargo xtask release desired` check that the manifest carries exactly those.
 
@@ -268,21 +268,22 @@ those files itself (the kept copy, below) and puts them back in `rollback`.
   previous version, which the installer put back) is not written; one where nothing was is left to
   the installer. Its detail says which were put back, which were already as before and where
   nothing was. A copy it cannot put back fails it (`restore_failed`, class environment) before the
-  unit is touched. Then it restarts the unit onto those files. With `/etc/js-agent/token` in place
-  it also waits up to 60 s for the agent's hello, and tells in its detail when none came: a missing
-  hello never fails a rollback. A `cutover` that restarted nothing leaves the unit alone.
+  unit is touched. Then it restarts the unit onto those files. When the flags file names the host's certificate
+  and key it also waits up to 60 s for the agent's hello, and tells in its detail when none came:
+  a missing hello never fails a rollback. A `cutover` that restarted nothing leaves the unit alone.
 - `cleanup` deletes the kept copy, if `verify` left one, and the hook's record once `verify`
   succeeded (`not_verified`, reversible, before).
 - `uninstall` does nothing to the service: the files go with the package, and the agent keeps
   running on what it read.
 
 `params` is a flat table of exactly these keys (the updater's `updater.*` keys are ignored, any
-other key is refused; paths are absolute and plain):
+other key is refused, except the retired `token_file`, which a manifest issued before hosts were
+identified by their certificate alone still carries and which is ignored; paths are absolute and
+plain):
 
 ```
 unit = "js-agent-crun.service"
 flags_file = "/etc/js-agent/flags"
-token_file = "/etc/js-agent/token"
 state_root = "/var/lib/js-agent/state"
 state_dir = "/var/lib/js-agent-config"
 cutover_timeout_secs = 420

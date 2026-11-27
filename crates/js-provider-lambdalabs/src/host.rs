@@ -1,8 +1,7 @@
 //! What a machine on Lambda's stock image needs before the agent starts, as boot steps.
 //!
 //! The steps are data: each is one program and its arguments, with no shell line in them,
-//! and the service's renderer runs them first, before the join token is written and before
-//! the agent's unit exists. A step that fails ends the script (it runs with `set -e`), so
+//! and the service's renderer runs them first, before the agent's unit exists. A step that fails ends the script (it runs with `set -e`), so
 //! the agent never starts on a machine these steps did not finish: the machine says no
 //! hello and the scheduler releases it at the boot timeout.
 //!

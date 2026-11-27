@@ -285,7 +285,7 @@ fn the_tailscale_mode_needs_a_private_client_file_and_a_tag() {
 
 /// Asserts the limits and the spend caps of an elastic pool, each with its message: a
 /// missing `max_instances`, `max_spend_per_hour` or `max_spend_per_day`; an instance
-/// count of zero, of 256 and of 300 (the join-token table holds 255 waiting tokens);
+/// count of zero, of 256 and of 300;
 /// spend values that are not a decimal with at most two places, or are zero; a day cap
 /// below the hour cap; a value of the wrong type. 255 and a day cap equal to the hour cap
 /// are accepted.
@@ -352,10 +352,10 @@ fn an_elastic_pool_has_bounded_instances_and_spend() {
     assert_eq!(plan.max_spend_per_day_cents, 1250);
 }
 
-/// Asserts the `exec`, `launch`, `idle`, `boot_timeout` and `join_token_file` keys of an
+/// Asserts the `exec`, `launch`, `idle` and `boot_timeout` keys of an
 /// elastic pool: an unknown mode names the three choices, a mode the provider kind cannot
 /// launch is refused naming the kind, `launch` is `plan` or `live`, a duration that is not
-/// one is refused, and a join token file is read owner-only. It catches a macOS pool on a
+/// one is refused. It catches a macOS pool on a
 /// provider that cannot launch one.
 #[test]
 fn exec_launch_and_timing_keys_are_checked() {
@@ -388,25 +388,24 @@ fn exec_launch_and_timing_keys_are_checked() {
         case("boot_timeout", "\"0s\""),
         format!("pool \"gpu\": boot_timeout: {duration}")
     );
+}
+
+/// Asserts that a `join_token_file` in an elastic pool, which a deployed file may still
+/// carry, is not read: a path that does not exist loads, and the file leaves exactly one
+/// warning that names the key and says it is ignored. It catches a key that is still read
+/// (a missing file would be refused) and one dropped without a line.
+#[test]
+fn a_join_token_file_is_ignored_with_one_warning() {
+    let scratch = Scratch::new("pool_join_token_file");
     let absent = scratch.path("absent-join");
-    let said = case("join_token_file", &quoted(&absent));
+    let pool = PoolText::elastic(&scratch).set("join_token_file", &quoted(&absent));
+    let loaded = load(&scratch, &file(&server_with_agents(&scratch), &[&pool])).unwrap();
     assert_eq!(
-        said,
-        format!(
-            "pool \"gpu\": join_token_file: {}: No such file or directory (os error 2)",
-            absent.display()
-        )
+        loaded.warnings(),
+        [
+            "pool \"gpu\": join_token_file is ignored: agents are admitted by host certificate only (drop it)"
+        ]
     );
-    let same = scratch.write("same-token", crate::support::TOKEN, 0o600);
-    let said = case("join_token_file", &quoted(&same));
-    assert!(
-        said.starts_with("pool \"gpu\": join_token_file: "),
-        "{said}"
-    );
-    assert!(said.ends_with("the two must differ"), "{said}");
-    let joins = scratch.write("joins", "join-token-A-0123456789-abcdefghijklmnop\n", 0o600);
-    let pool = PoolText::elastic(&scratch).set("join_token_file", &quoted(&joins));
-    assert!(load(&scratch, &file(&server_with_agents(&scratch), &[&pool])).is_ok());
 }
 
 /// Asserts that a kind's floor that no pool can have (GPUs and no class of them) is

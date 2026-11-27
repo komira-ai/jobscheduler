@@ -563,10 +563,6 @@ mod s3_compat {
                 retry_after: None,
             })
         }
-
-        fn adopt_credential(&mut self, _secret: &str) -> Result<(), String> {
-            Ok(())
-        }
     }
 
     /// The `log_grant_state` of a heartbeat: `stale`, and the expiry of the credential held.

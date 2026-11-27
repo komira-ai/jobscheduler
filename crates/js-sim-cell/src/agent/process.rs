@@ -480,13 +480,12 @@ impl Process {
             labels: spec.labels.clone(),
             phase: self.exclusive.phase(),
             held: self.list(),
-            accepts_host_credential: false,
             identity: None,
         };
         let hello = io.profile.shape(hello);
         // A wire type always encodes; were it not to, the empty body would be refused.
-        let body = serde_json::to_string(&hello).unwrap_or_default();
-        let id = io.call(Route::Hello, &spec.join_token, body);
+        let body = io.profile.encode(&hello).unwrap_or_default();
+        let id = io.call(Route::Hello, spec.certificate.clone(), body);
         self.hellos.insert(id, io.now);
     }
 
@@ -547,7 +546,7 @@ impl Process {
         }
         // A wire type always encodes; were it not to, the empty body would be refused.
         let body = serde_json::to_string(&beat).unwrap_or_default();
-        let id = io.call(Route::Heartbeat, &spec.join_token, body);
+        let id = io.call(Route::Heartbeat, spec.certificate.clone(), body);
         session.in_flight = Some(id);
         if let Some(jobs) = self.jobs.as_mut() {
             jobs.sent(id, listing.clone(), io);

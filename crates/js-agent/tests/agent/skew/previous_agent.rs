@@ -26,8 +26,13 @@ use super::record::Cell;
 /// `step path: what`.
 pub fn replay(name: &str, transcript: &Value) -> Vec<String> {
     let cell = Cell::start(name);
+    let identities = cell.identities();
     let mut transport = Dialer
-        .connect(&cell.url(), &Login::Token(cell.join_file()), None)
+        .connect(
+            &cell.url(),
+            &Login::HostCertificate(identities.of("h1")),
+            Some(identities.server_cert()),
+        )
         .unwrap();
     let mut minted = Minted::default();
     let mut problems = Vec::new();

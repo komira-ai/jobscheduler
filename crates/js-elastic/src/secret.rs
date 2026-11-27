@@ -27,7 +27,7 @@ impl fmt::Debug for Secret {
 
 /// What a machine is given to boot with, rendered by the service and opaque to the
 /// provider, which delivers it as it is in whatever field its cloud has. It holds
-/// secrets (a join token, a network key), so it is a [`Secret`].
+/// secrets (a network key), so it is a [`Secret`].
 #[derive(Debug)]
 pub struct BootPayload(Secret);
 

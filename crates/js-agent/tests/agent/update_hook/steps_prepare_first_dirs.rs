@@ -1,7 +1,6 @@
 //! `prepare` of a first install on a Mac that never had the agent: the state directory the
 //! params name (`/Library/Application Support/js-agent/update`) and the directories above it
-//! are not there, the host has no join token, and its flags file names hostkeeper's host
-//! certificate and key.
+//! are not there, and its flags file names hostkeeper's host certificate and key.
 
 use std::fs;
 use std::io;
@@ -13,7 +12,7 @@ use js_agent::update_hook::step::{self, TokenFacts};
 use js_agent::update_hook::{DirProblem, DirStat, Outcome, Reason};
 use js_client::HostIdentity;
 
-use super::step_rig::{HOST_CERT_PATH, HOST_KEY_PATH, Rig, Spy, TokenFile, as_root, good_token};
+use super::step_rig::{HOST_CERT_PATH, HOST_KEY_PATH, Rig, Spy, TokenFile, as_root, good_file};
 
 /// What the staged Mac agent prints on `--version`.
 const MAC_VERSION: &str = "js-agent 1.4.0\nruntimes: native\n";
@@ -30,22 +29,21 @@ fn mac_first_install(name: &str) -> (Rig, PathBuf) {
     (rig, state_dir)
 }
 
-/// A spy over `rig` for a Mac with no join token whose flags file names the host certificate
-/// and key as hostkeeper keeps them (the key root's, mode 0640).
+/// A spy over `rig` for a Mac whose flags file names the host certificate and key as
+/// hostkeeper keeps them (the key root's, mode 0640).
 fn joining_by_host_certificate(rig: &Rig) -> Spy<'_> {
     let mut spy = Spy::new(rig);
     *spy.version.borrow_mut() = Ok(MAC_VERSION.to_owned());
     spy.host_identity = Some(HostIdentity::new(HOST_CERT_PATH, HOST_KEY_PATH));
-    spy.token.set(TokenFile::Missing);
     spy.identity_cert.set(TokenFile::Facts(TokenFacts {
         mode: 0o644,
         uid: 0,
-        ..good_token()
+        ..good_file()
     }));
     spy.identity_key.set(TokenFile::Facts(TokenFacts {
         mode: 0o640,
         uid: 0,
-        ..good_token()
+        ..good_file()
     }));
     spy
 }
@@ -58,7 +56,7 @@ fn mode(path: &Path) -> u32 {
 }
 
 /// Asserts that the first `prepare` on a Mac where no directory of the state directory's path
-/// is there, with no join token and the host certificate named, succeeds: it makes
+/// is there, with the host certificate named, succeeds: it makes
 /// `js-agent` and `js-agent/update` (0755 and 0700) and writes its record in the one it made.
 /// Catches the first install that halted `state_invalid` on `/Library/Application
 /// Support/js-agent: No such file or directory`.

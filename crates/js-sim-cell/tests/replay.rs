@@ -73,8 +73,8 @@
 //!
 //! And one store scenario, family `store`: the restart over the store, over SQLite
 //! (`cell/store.rs`, nine hosts, about 600 agent requests a seed) over two seeds, so a
-//! change to what the server keeps in its store across a restart, to how the cell mints
-//! tokens and joins hosts with them, or a store that reaches the trace, moves a hash.
+//! change to what the server keeps in its store across a restart, to how the cell joins
+//! hosts with certificates, or a store that reaches the trace, moves a hash.
 //! `tests/store.rs` holds the same seeds over Postgres to these lines.
 
 #[path = "cell/elastic.rs"]
@@ -725,9 +725,9 @@ fn store_runs() -> Vec<(String, TraceHash)> {
 
 /// Asserts that the hashes of the pinned seeds of the restart over a SQLite store equal the
 /// golden file's (family `store`). Catches any change to what the server keeps in its
-/// store and reads back at a restart, to how the cell mints join tokens and joins hosts
-/// with them, or to the trace text, and a run over the store that differs between
-/// processes (a store file, a token or a digest that reaches the trace).
+/// store and reads back at a restart, to how the cell joins hosts with their
+/// certificates, or to the trace text, and a run over the store that differs between
+/// processes (a store file or a digest that reaches the trace).
 #[test]
 fn the_store_scenario_matches_the_golden_file() {
     golden_of(store::FAMILY).assert_matches(&store_runs());

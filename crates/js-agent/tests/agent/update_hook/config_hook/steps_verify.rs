@@ -98,12 +98,12 @@ fn a_server_that_cannot_be_asked_is_the_environments_failure_only_at_the_last_lo
     );
 
     let rig = restarted("config-verify-refused");
-    rig.lease.say(&[Say::Refused("host-credential-required")]);
+    rig.lease.say(&[Say::Refused("host-certificate-required")]);
     let done = rig.run(verify);
     assert_eq!(done.report.reason, Some(Reason::LeaseUnreachable));
     assert_eq!(
         done.report.detail.as_deref(),
-        Some("refused: host-credential-required")
+        Some("refused: host-certificate-required")
     );
 
     let rig = restarted("config-verify-answered-last");

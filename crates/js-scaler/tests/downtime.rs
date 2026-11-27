@@ -30,7 +30,7 @@ fn a_missing_host_is_not_released_at_the_first_view_after_a_long_downtime() {
     let mut again = restart(&rig);
     let back = 40 * MINUTE;
     let actions = again.tick(at(back));
-    assert_eq!(count(&actions, "Revoke") + count(&actions, "Release"), 0);
+    assert_eq!(count(&actions, "Release"), 0);
     assert_eq!(again.phase(0), Phase::Registered);
 
     let almost = again.tick(at(back + 30 * MINUTE - 1));

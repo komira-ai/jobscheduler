@@ -19,7 +19,6 @@ Columns:
 
 ## Gaps not filed here
 
-- Multi-instance G3 (host identity is the host certificate; join tokens, pool tokens and host credentials go) is in progress: komira-ai/jobscheduler#1118 is its first step.
 - Job retry and callback task I (SubmitJob takes a retry policy and a callback, js-client reports a dropped policy, the docs) is planned as the task after task H (komira-ai/jobscheduler#1120).
 - The whole-node start-order tests still missing (W2 and W10: work ahead of a reserved request, a lower-QoS request behind a stream): komira-ai/jobscheduler#1133. The heartbeat's disk_gib: komira-ai/jobscheduler#328. The Seatbelt fence for TCC-only places: komira-ai/jobscheduler#1025, komira-ai/jobscheduler#1020 and komira-ai/jobscheduler#1117. Linux jobs on a Mac: komira-ai/jobscheduler#1066.
 - The per-consumer whole-node cap is not a gap: `docs/design/jobscheduler-design.md` says there is no per-consumer cap in the single-token service, and `whole-node.md` section 6 is stale (komira-ai/jobscheduler#1193).
@@ -70,16 +69,16 @@ Columns:
 
 ## multi-instance.md
 
-As read: Status: design, living document. Most gaps are Built (G2, G4 mostly, G5 mostly, G7, G15, G19 server and agent). Still Designed: G3 removal, G5 leftovers, G6, G9, G11, G12, G16.
+As read: Status: design, living document. Most gaps are Built (G2, G3, G4 mostly, G5 mostly, G7, G15, G19 server and agent). Still Designed: G5 leftovers, G6, G9, G11, G12, G16.
 
 | Section | Claim | On main | Tracking |
 |---|---|---|---|
-| G3 (s9, s3.2, s3.6, s6, s7, s12) | Host identity is the host certificate: delete join tokens, pool tokens (--agent-token-file), host credentials and the scaler's token mint/revoke; refuse a request with no certificate; agent token and credential flags go | partly: `crates/js-lease-server/src/host_cert.rs:86`, `crates/js-lease-server/src/join_tokens.rs` | G3 is in progress; komira-ai/jobscheduler#1118 is its first step |
-| G3 (s3.6 token times) | Join-token and credential expiry times use the process clock; G3 removes them | no | goes with G3 |
+| G3 (s9, s3.2, s3.6, s6, s7, s12) | Host identity is the host certificate: delete join tokens, pool tokens (--agent-token-file), host credentials and the scaler's token mint/revoke; refuse a request with no certificate; agent token and credential flags go | yes: `crates/js-lease-server/src/agent_api.rs:179` (`authenticate`), `crates/js-lease-server/src/agent_api/host_cert.rs:25` (`HOST_CERTIFICATE_REQUIRED`), `crates/js-lease-server/src/in_process.rs` (`as_host`), `crates/js-lease-server/src/host_cert.rs:86` | komira-ai/jobscheduler#1118 was its first step |
+| G3 (s3.6 token times) | Join-token and credential expiry times use the process clock; G3 removes them | yes: the times are gone with the tokens | komira-ai/jobscheduler#1118 |
 | G2 (s9, s4) | One clock: store's now() for every shared deadline; Store::now fallible | `crates/js-state/src/store.rs:121`, `crates/js-lease-server/src/job_pass.rs:200` | komira-ai/jobscheduler#938 |
 | G7 (s4, s9) mark claim_by | The whole-host mark's claim_by becomes a stored deadline on the store clock (new optional field in `mark/<job>`) | no | komira-ai/jobscheduler#1138 (new) |
 | G4/G7 (s3.3 whole-host start taint) | The whole-host start reads the host's taint from rows, not from this instance's registry | no | komira-ai/jobscheduler#1138 (new) |
-| G4 (s9, s3.2) after-G3 clean-up | After G3: HostBound, the binding's credential and its cordon copy go; the row keeps only the taint; save_bindings goes | no | goes with G3 |
+| G4 (s9, s3.2) after-G3 clean-up | After G3: HostBound, the binding's credential and its cordon copy go; the row keeps only the taint; save_bindings goes | no | the G4 clean-up after G3, not yet |
 | G5 (s3.5, s5, s9) host_silent_since_ms | A job's host_silent_since_ms reads the node/ rows, not this instance's registry | no | komira-ai/jobscheduler#1136 (new) |
 | G5 (s3.3, s5) HostLive in the row's transaction | HostLive is judged in the node row's own transaction, not only on the registry refreshed before the hello | no | komira-ai/jobscheduler#1136 (new) |
 | G15 (s6 row 4, s0) | Same agent process takes the host over at once via an optional hello field | `crates/js-agent-wire/src/hello.rs:349` | komira-ai/jobscheduler#942; komira-ai/jobscheduler#948 |
@@ -98,10 +97,10 @@ As read: Status: design, living document. Most gaps are Built (G2, G4 mostly, G5
 | G19 (s0.2, s9, s0.1) rest of G19 | Dispatch queue, route, claim, ack, drain, hello capability, agent poller | yes: js-jobs/src/store/dispatch.rs:183,242; js-lease-server/src/agent_api/dispatch.rs:97,157,248; agent_api.rs:341; js-agent/src/dispatch/ (poller.rs, serve.rs), js-agent/src/contract.rs; js-agent/src/lifecycle/mod.rs:12-25. | komira-ai/jobscheduler#944; komira-ai/jobscheduler#949; komira-ai/jobscheduler#1067; komira-ai/jobscheduler#1080 |
 | s0.1 version-skew tests | Tests: the release before hands out a message the new placer wrote, and the agent starts it; a job placed by the release before reaches a polling agent through the beat's reply | partly: `crates/js-lease-server/src/per_job.rs:181`, `crates/js-agent/tests/agent/skew/record.rs` | - |
 | s12 hazard table (live hazards) | Hazards: admission before hellos, binding save, taint beside host job, taint clear, host on two instances, token 401, pool cap, ListHosts, lost whole-host start, minute of usage, drain | partly: Closed ones: pool cap nodes.rs pool_admits, ListHosts hosts.rs:352, taint placement host_rows.rs:80, drain drain.rs:28 | komira-ai/jobscheduler#1136 (new); komira-ai/jobscheduler#1137 (new); komira-ai/jobscheduler#1138 (new); komira-ai/jobscheduler#1139 (new); komira-ai/jobscheduler#1140 (new); komira-ai/jobscheduler#1141 (new); komira-ai/jobscheduler#1142 (new) |
-| s9 pull request list: order of safety (s12) | Order: G2, G3 before G15; G15, G4, G5, G7, G19, G11 minute fold close the live hazards; then G6, G9, G16, rest of G11, G12 | partly: Done: G2, G15 (komira-ai/jobscheduler#942, komira-ai/jobscheduler#948), G7 (komira-ai/jobscheduler#946), G5 mostly, G19 (komira-ai/jobscheduler#944, komira-ai/jobscheduler#949), G4 mostly | komira-ai/jobscheduler#1136 (new); komira-ai/jobscheduler#1137 (new); komira-ai/jobscheduler#1138 (new); komira-ai/jobscheduler#1139 (new); komira-ai/jobscheduler#1140 (new); komira-ai/jobscheduler#1141 (new); komira-ai/jobscheduler#1142 (new) |
+| s9 pull request list: order of safety (s12) | Order: G2, G3 before G15; G15, G4, G5, G7, G19, G11 minute fold close the live hazards; then G6, G9, G16, rest of G11, G12 | partly: Done: G2, G3, G15 (komira-ai/jobscheduler#942, komira-ai/jobscheduler#948), G7 (komira-ai/jobscheduler#946), G5 mostly, G19 (komira-ai/jobscheduler#944, komira-ai/jobscheduler#949), G4 mostly | komira-ai/jobscheduler#1136 (new); komira-ai/jobscheduler#1137 (new); komira-ai/jobscheduler#1138 (new); komira-ai/jobscheduler#1139 (new); komira-ai/jobscheduler#1140 (new); komira-ai/jobscheduler#1141 (new); komira-ai/jobscheduler#1142 (new) |
 | s9 G1, G8, G10, G13, G14, G17, G18 | Gaps shrunk into G15 or deleted | superseded: The page itself strikes these out in s9 (lines 515-521). | komira-ai/jobscheduler#883 |
 | s10 supersession pointers | deployment.md gets a pointer here; jobscheduler-design.md s10.1 amended by G15; configuration.md 'What it keeps' changed by G3 and G4 | partly: `docs/design/deployment.md:146`, `docs/design/configuration.md:15` | - |
-| s11 decisions | G12 stays Designed; G3 removes tokens instead of making them N-safe; settlement needs heard_at; PoolFull takes a pool row lock | partly: heard_at: js-jobs/src/store/nodes.rs:267-284 (forget_silent_nodes uses it); PoolFull: nodes.rs pool_admits and keys.rs:38-42 pool/. G3 and G12 not built (see rows above). | - |
+| s11 decisions | G12 stays Designed; G3 removed tokens instead of making them N-safe; settlement needs heard_at; PoolFull takes a pool row lock | partly: heard_at: js-jobs/src/store/nodes.rs:267-284 (forget_silent_nodes uses it); PoolFull: nodes.rs pool_admits and keys.rs:38-42 pool/. G12 not built (see rows above). | - |
 | Page header 'Status: design' and s2/s3 tag claims | The page is a living doc: each PR turns Designed to Built and names code | yes: Most rows carry Built with paths; spot checks matched (dispatch.rs:97, nodes.rs, keys.rs:36, forget_silent_nodes). | - |
 
 ## placement-profiles-live.md
@@ -307,7 +306,7 @@ As read: Current entry-point design doc (target plus as-built notes); not supers
 
 | Section | Claim | On main | Tracking |
 |---|---|---|---|
-| intro / 3.1 table: generated CLI and library | Generated js job/host/pool/provider/usage commands and JobClient exist; three hand-written loop commands and js join-token stay by design | `crates/js-client/src/jobs/`, `crates/js-cli/src/jobs/` | - |
+| intro / 3.1 table: generated CLI and library | Generated js job/host/pool/provider/usage commands and JobClient exist; three hand-written loop commands stay by design | `crates/js-client/src/jobs/`, `crates/js-cli/src/jobs/` | - |
 | 3.1 Jobs and allocations; 4.1 store; 3.1 Postgres store | Job/allocation tables on Postgres (not only SQLite file beside the lease file) | `crates/js-lease-server/src/job_store.rs:1-30` | komira-ai/jobscheduler#874; komira-ai/jobscheduler#878 |
 | 3.1 Host table | Host book (hosts, sessions, credentials) as scheduler state in Postgres, with no js-registry component | partly: `crates/js-lease-server/src/node_rows.rs:1`, `crates/js-registry` | komira-ai/jobscheduler#873 |
 | 3.1 Queue and tail marks | Whole-node lease wait list/ledger leave the engine memory with the lease API | `crates/js-lease-server/src/job_whole.rs` | komira-ai/jobscheduler#831 |
@@ -415,7 +414,7 @@ As read: Header says "draft for review", written against 73132d5f7. It has no pe
 | Q1 / PR 10 | Server flags move into [server]; other flags refused beside --config. | `crates/js-lease-server/src/flags.rs:1-90` | - |
 | PR 10 / Q17 | Amend providers.md K6, registration.md and configuration.md, and fix the stale --ca-cert comment in js-agent/cli.rs. | yes: cli.rs:83-88 now says platform roots are not used and bundled roots are. registration.md:33,65 describes user data delivery. providers.md:94. configuration.md:9. | komira-ai/jobscheduler#344; komira-ai/jobscheduler#1126 |
 | Q3 | The service creates an ssh key `js-<scheduler>` from a throwaway key when the account has none. | `crates/js-provider-lambdalabs/src/provider.rs:306-335` | - |
-| Q4 / PR 7b | Host credential after first hello; join token retired. | `crates/js-agent-wire/src/credential.rs:33`, `crates/js-lease-server/src/host_cert.rs` | - |
+| Q4 / PR 7b | Host credential after first hello; join token retired. | superseded by G3: the host credential and the join token are removed; a host is known by its certificate, `crates/js-lease-server/src/host_cert.rs`, `crates/js-lease-server/src/agent_api/host_cert.rs` | - |
 | Q23 / PR 4 | Required agent_listen, serving only agent routes. | `crates/js-lease-server/src/file/server.rs:32` | - |
 | Q22 / 8.3 | A policy-read warning in check(): warn when the Tailscale policy does not limit the tag to the agent port. | no | - |
 | Q9 | A lifetime total per pool, beyond the day window. | partly: max_spend_per_day is required | - |
@@ -912,7 +911,7 @@ As read: No status header. Decision list D1 to D66; says "None is final until th
 | D34 | Leases across a restart: --boot-grace, off by default, no lease ends before it passes after a boot | partly: `crates/js-jobs/src/result.rs:33`, `crates/js-lease-server/src/job_expiry_tests.rs:126` | - |
 | D44 | Compatibility rules and the version-pair check, step 55 | superseded: decisions.md:187-192 supersession note | - |
 | D17 | No look-ahead in scaling demand until a trace shows a need | `crates/js-scaler/src/settings.rs` | - |
-| D18 | Self-registration auth: join token now, a client certificate per pool added later without a wire change | `crates/js-lease-server/src/agent_api.rs`, `crates/js-agent-wire/src/credential.rs` | komira-ai/jobscheduler#1118 |
+| D18 | Self-registration auth: host certificate (the join token it started with is removed) | `crates/js-lease-server/src/agent_api.rs`, `crates/js-lease-server/src/agent_api/host_cert.rs` | komira-ai/jobscheduler#1118 |
 | D59 | Spot reclaim notice: taint 'reclaim', host_leaving and leaves_at flag on the host list, let work finish to the deadline, requeue unstarted, rerun at the deadline | partly: `crates/js-lease-server/src/scaler/effects.rs:45` | komira-ai/jobscheduler#1174 (new) |
 | D60 | Price and capacity as sort keys among options and providers, never limits | partly: `crates/js-scaler/src/lib.rs`, `crates/js-elastic/src/cache.rs` | - |
 | D61 | A tier groups equal providers in the one ordered hierarchy; a tier is passed over only when none of its members can satisfy | no | komira-ai/jobscheduler#1175 (new) |
@@ -1142,8 +1141,8 @@ As read: Pages with no open status wording (all built / descriptive), listed wit
 | generalising: Phases | The generic phase set is the wire's. An unknown phase reads as quarantined (fail closed). A host takes new leases only in serving. | `crates/js-agent-wire/src/hello.rs:25-56` | - |
 | generalising: Failure taxonomy and Usage | The failure classes map at one point to the wire (InputUnavailable named generically, OutOfMemory, BusyNode); usage carries a basis and censoring signals (limit hit, swap peak, OOM kill count, node pressure at start) and is reported on failure too. | partly: `crates/js-types/src/retry.rs:77`, `crates/js-agent-wire/src/heartbeat.rs:58-61` | - |
 | providers: Kinds at a glance | Later elastic kinds (azure, k8s, vsphere, proxmox) are named only and are not built. | no | - |
-| providers: Elastic providers step 2 / registration (b) | A registered elastic host is admitted by verify_instance on the cloud's signed instance identity; today the server does not call verify_instance, so the signed identity does not replace the join token. | partly: `crates/js-agent-wire/src/hello.rs:330`, `crates/js-provider-ec2` | komira-ai/jobscheduler#1191 (new) |
-| registration: Join credential | A client certificate per pool is the alternative to a shared join token (D18). | superseded: `crates/js-lease-server/src/agent_api/host_cert` | komira-ai/jobscheduler#936; komira-ai/jobscheduler#1118 |
+| providers: Elastic providers step 2 / registration (b) | A registered elastic host is admitted by verify_instance on the cloud's signed instance identity; today the server does not call verify_instance, so the signed identity does not replace the host certificate. | partly: `crates/js-agent-wire/src/hello.rs:330`, `crates/js-provider-ec2` | komira-ai/jobscheduler#1191 (new) |
+| registration: Join credential | A client certificate per host replaced the shared join token (D18; G3 removed the token). | superseded: `crates/js-lease-server/src/agent_api/host_cert` | komira-ai/jobscheduler#936; komira-ai/jobscheduler#1118 |
 | mac-hostkeeper-package: Where things stand / Release | The signed macOS package, pkg-upload, release desired --pkg-url and hostkeeper-desired set-desired-mac steps. | `.github/workflows/js-agent-macos-pkg.yml`, `.github/workflows/hostkeeper-desired.yml:150` | komira-ai/jobscheduler#913 |
 | mac-hostkeeper-package: Order step 5 | Step 5 of Order: kbf asks for os=macos (kbf's executor still asks every job for os=linux; macOS is out of scope in kbf). | no | komira-ai/jobscheduler#888 |
 | mac-hostkeeper-package: The pool's users stay for good | Deleting an account per job in the agent is 'the next step' (mac-account-per-job.md); the helper still cannot delete a pre-pool lease user. | `crates/js-agent/src/native/accounts.rs:1-20`, `crates/js-agent/src/mac_accounts/` | komira-ai/jobscheduler#1014; komira-ai/jobscheduler#1023; komira-ai/jobscheduler#1121 |

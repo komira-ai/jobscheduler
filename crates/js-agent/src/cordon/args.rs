@@ -1,8 +1,8 @@
 //! The command line of the verb: `js-agent cordon --server URL ... --for 2h`.
 //!
 //! Flags only: no value comes from the environment. The connection is named by the verb's own
-//! flags or by the agent's flags file ([`settings`]), and the credential rules are the agent's
-//! (see [`login`]).
+//! flags or by the agent's flags file ([`settings`]), and the verb is identified as the agent is, by the host's
+//! certificate and key (see [`login`]).
 
 use std::ffi::OsString;
 use std::io;
@@ -13,10 +13,10 @@ use clap::Parser;
 use js_client::HostIdentity;
 use js_types::CordonHolder;
 
+use crate::Login;
 use crate::cli::parse_agent_flags;
 use crate::flags_file::{self, FileFacts};
 use crate::own_host::MAX_CORDON_SECS;
-use crate::{CredentialFile, Login};
 
 /// What `--help` says after the flags.
 const AFTER_HELP: &str = "\
@@ -44,10 +44,9 @@ verb's own. A cordon found is not extended: one whose holder died lapses within 
 lift it with `js host uncordon --host-id <id>`. The verb needs a lease server of this release \
 (an earlier one refuses the holder with invalid-cordon).
 
-On a host the agent runs on, give the agent's own flags file and state root (--flags-file \
-/etc/js-agent/flags --state-root /var/lib/js-agent/state): the server, the host id and the \
-credential are then the agent's. When the server refuses the credential, standard error says \
-what was sent and for which host.
+On a host the agent runs on, give the agent's own flags file (--flags-file \
+/etc/js-agent/flags): the server, the host id and the host certificate are then the agent's. \
+When the server refuses the certificate, standard error says what was sent and for which host.
 
 SIGTERM, SIGINT and SIGHUP (the end of an ssh session) end the window early and lift the cordon. A process that is killed with \
 SIGKILL (or loses the machine) lifts nothing: the cordon is a lease that is renewed, and it \
@@ -67,9 +66,8 @@ pub struct Args {
     /// The agent's own flags file (the file `js-agent --flags-file` reads, such as
     /// `/etc/js-agent/flags`): the lease server, the certificate to trust, the host id and the
     /// host's certificate and key are taken from it, so the verb cordons the host the agent
-    /// registers and presents what the agent presents. `--state-root` and `--token-file` may be
-    /// given beside it, as the agent's unit gives them beside the file; the flags the file
-    /// names may not.
+    /// registers and presents what the agent presents. The flags the file names may not be
+    /// given beside it.
     #[arg(
         long,
         value_name = "PATH",
@@ -87,19 +85,17 @@ pub struct Args {
     /// for a loopback host only. Required unless `--flags-file` names it.
     #[arg(long, value_name = "URL", required_unless_present = "flags_file")]
     pub server: Option<String>,
-    /// The agent's state root: the host credential kept there is used. The cordon routes
-    /// serve the host of the credential only, so the pool's join token is refused. Not used
-    /// when `--host-cert` and `--host-key` are given, here or in `--flags-file`.
-    #[arg(long, value_name = "DIR")]
+    /// Accepted and ignored, so a command line written for an earlier release still runs:
+    /// the verb is identified by the host's certificate and key alone.
+    #[arg(long, value_name = "DIR", hide = true)]
     pub state_root: Option<PathBuf>,
-    /// A file holding the host's one-time token, in a regular file owned by the user running
-    /// the verb, mode 0600 or 0400. Used when there is no `--host-cert` and `--state-root`
-    /// holds no credential; they win, as they do for the agent.
-    #[arg(long, value_name = "PATH")]
+    /// Accepted and ignored, as `--state-root` is.
+    #[arg(long, value_name = "PATH", hide = true)]
     pub token_file: Option<PathBuf>,
     /// The host's own certificate, the file `--host-cert` of the agent's flags file names.
-    /// With `--host-key` it is presented to the lease server in place of any credential, as
-    /// the agent presents it, and no token is sent. Both flags or neither.
+    /// With `--host-key` it is presented to the lease server, as the agent presents it: it is
+    /// the only identity the verb has, so it is required here or in `--flags-file`. Both flags
+    /// or neither.
     #[arg(long, value_name = "PATH", requires = "host_key")]
     pub host_cert: Option<PathBuf>,
     /// The key of `--host-cert`, which must pass the agent's rule for it: owned by root or by
@@ -203,16 +199,10 @@ pub(super) struct Settings {
     pub(super) host_cert: Option<PathBuf>,
     /// `--host-key`.
     pub(super) host_key: Option<PathBuf>,
-    /// `--state-root`.
-    pub(super) state_root: Option<PathBuf>,
-    /// `--token-file`.
-    pub(super) token_file: Option<PathBuf>,
 }
 
 /// The settings `args` name. With `--flags-file` the file is read as the agent reads it (by
-/// the user `euid`, with the facts of a file from `read`), followed by the verb's
-/// `--state-root` and `--token-file`, so a flag the file names too is refused as the agent
-/// refuses it.
+/// the user `euid`, with the facts of a file from `read`).
 ///
 /// # Errors
 ///
@@ -232,24 +222,13 @@ pub(super) fn settings(
             host_id_from_facts: args.host_id_from_facts.clone(),
             host_cert: args.host_cert.clone(),
             host_key: args.host_key.clone(),
-            state_root: args.state_root.clone(),
-            token_file: args.token_file.clone(),
         });
     };
-    let mut words: Vec<OsString> = vec![
+    let words: Vec<OsString> = vec![
         "js-agent".into(),
         flags_file::FLAG.into(),
         file.as_os_str().to_owned(),
     ];
-    let beside = [
-        ("--state-root", &args.state_root),
-        ("--token-file", &args.token_file),
-    ];
-    for (flag, value) in beside {
-        if let Some(value) = value {
-            words.extend([flag.into(), value.as_os_str().to_owned()]);
-        }
-    }
     let cli = parse_agent_flags(words, euid, read)?;
     Ok(Settings {
         server: cli.server,
@@ -258,8 +237,6 @@ pub(super) fn settings(
         host_id_from_facts: cli.host.host_id_from_facts,
         host_cert: cli.host_cert,
         host_key: cli.host_key,
-        state_root: cli.state_root,
-        token_file: cli.token_file,
     })
 }
 
@@ -268,49 +245,26 @@ pub(super) fn settings(
 pub(super) struct Chosen {
     /// The login.
     pub(super) login: Login,
-    /// What it sends, such as `the host credential in /var/lib/js-agent/state/host-credential`:
+    /// What it sends, such as `the host certificate /var/lib/hostkeeper/identity/host.crt`:
     /// a path and never a byte of a file.
     pub(super) said: String,
 }
 
-/// How the verb proves who it is: the host's certificate and key when `--host-cert` and
-/// `--host-key` are given, which is what the agent presents then; otherwise the host
-/// credential of `--state-root` when it holds one, which is what the agent sends once it has
-/// one; otherwise `--token-file`.
+/// How the verb proves who it is: the host's certificate and key, which is what the agent
+/// presents.
 ///
 /// # Errors
 ///
-/// The credential file is there and cannot be used (the text names the file and never holds a
-/// byte of its content), or there is no host certificate, no credential and no token file.
+/// There is no host certificate and key, here or in `--flags-file`.
 pub(super) fn login(settings: &Settings) -> Result<Chosen, String> {
-    if let (Some(cert), Some(key)) = (&settings.host_cert, &settings.host_key) {
-        return Ok(Chosen {
+    match (&settings.host_cert, &settings.host_key) {
+        (Some(cert), Some(key)) => Ok(Chosen {
             login: Login::HostCertificate(HostIdentity::new(cert, key)),
             said: format!("the host certificate {}", cert.display()),
-        });
+        }),
+        _ => Err(
+            "--host-cert and --host-key: required, here or in the --flags-file that names them"
+                .to_owned(),
+        ),
     }
-    let kept = match &settings.state_root {
-        Some(root) => {
-            let file = CredentialFile::in_dir(root);
-            file.load()?.map(|_| file.path())
-        }
-        None => None,
-    };
-    let said = |what: &str, path: &Path| format!("{what} {}", path.display());
-    let chosen = match (kept, &settings.token_file) {
-        (Some(path), _) => Chosen {
-            said: said("the host credential in", &path),
-            login: Login::Token(path),
-        },
-        (None, Some(path)) => Chosen {
-            said: said("the token file", path),
-            login: Login::Token(path.clone()),
-        },
-        (None, None) => {
-            return Err(
-                "--token-file: required unless --state-root holds a host credential".to_owned(),
-            );
-        }
-    };
-    Ok(chosen)
 }

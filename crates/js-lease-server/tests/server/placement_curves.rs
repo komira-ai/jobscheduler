@@ -11,9 +11,9 @@ use js_sched_placer::curves::{CurveHosts, CurveSettings};
 use js_sched_placer::sizes::Curves;
 use js_types::HostId;
 
-use crate::agents_support::JOIN;
+use crate::agents_support::agent_args;
 use crate::config_support::{PoolText, file, load, refusal, server};
-use crate::support::{Scratch, base_args, config};
+use crate::support::{Scratch, config};
 
 /// A pool of up to two machines whose capabilities name an `arch`, as the scheduler needs.
 const POOL: &str = r#"
@@ -31,11 +31,8 @@ arch = "x86_64"
 
 /// The flags of a server with agent registration over [`POOL`], and `extra` after them.
 fn args(scratch: &Scratch, extra: &[&str]) -> Vec<OsString> {
-    let mut args = base_args(scratch);
-    let tokens = scratch.write("agent-tokens", &format!("{JOIN}\n"), 0o600);
+    let mut args = agent_args(scratch);
     scratch.write("agent-pool.toml", POOL, 0o644);
-    args.push("--agent-token-file".into());
-    args.push(tokens.into_os_string());
     args.extend(extra.iter().map(OsString::from));
     args
 }

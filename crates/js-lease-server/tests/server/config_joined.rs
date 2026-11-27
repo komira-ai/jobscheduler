@@ -5,12 +5,10 @@ use std::net::SocketAddr;
 
 use serde_json::{Value, json};
 
-use crate::agents_support::{JOIN, Session, hello_body, session};
-use crate::config_support::{
-    PoolText, file, load, quote, quoted, refusal, server, server_with_agents,
-};
+use crate::agents_support::{Session, hello_body, session};
+use crate::config_support::{PoolText, file, load, quote, refusal, server, server_with_agents};
 use crate::jobs_support::{JobBody, one_start, submit_body};
-use crate::support::{Harness, Reply, Scratch, TOKEN, request};
+use crate::support::{Harness, Reply, Scratch, request};
 
 /// A joined pool `burst`, six nodes at most, that books 8 cores and 16 GiB and asks the hosts
 /// for no contract. The text is the `[[pool]]` table.
@@ -36,123 +34,41 @@ async fn serving_with(name: &str, extra: &str, pool: impl FnOnce(&Scratch) -> Po
 }
 
 /// The hello of the build node `host`: no GPU, the shape of the pool, naming the instance
-/// `<pool>:<instance>` and asking for a host credential.
+/// `<pool>:<instance>`.
 fn hello(host: &str, instance: Option<&str>) -> Value {
     let mut body = hello_body(host);
     body["shape"] = json!({ "cpu_millis": 8000, "memory_bytes": 17179869184u64, "gpus": 0 });
     if let Some(instance) = instance {
         body["instance"] = json!({ "provider": "burst", "instance_id": instance });
-        body["accepts_host_credential"] = json!(true);
     }
     body
 }
 
-async fn agent_call(h: &Harness, path: &str, token: &str, body: &Value) -> Reply {
+/// A call to the agent port, presenting the certificate of the host `body` names.
+async fn agent_call(h: &Harness, path: &str, body: &Value) -> Reply {
     let addr: SocketAddr = h.running.agent_addr().unwrap();
     let bytes = body.to_string().into_bytes();
-    request(addr, "POST", path, Some(token), Some(&bytes)).await
+    request(addr, "POST", path, None, Some(&bytes)).await
 }
 
-/// A one-time token for `<pool>:<instance>` from the client-token route.
-async fn mint(h: &Harness, instance: &str) -> String {
-    let body = json!({ "provider": "burst", "instance_id": instance });
-    let reply = h.call("POST", "/v1/agent/join-tokens", Some(&body)).await;
-    assert_eq!(reply.status, 201, "{}", reply.body);
-    reply.json()["token"].as_str().unwrap().to_owned()
-}
-
-/// Asserts the whole path of a hand-joined node against a real server: a one-time token is
-/// minted for `burst:node-1`; the hello that names that instance registers the host and is
-/// given a 64-digit host credential; the token then gets 401 on a heartbeat and on a second
-/// hello; the credential carries the heartbeat; the host is listed. It catches a joined pool that does not register agents, one
-/// that cannot admit one-time tokens, and a credential that is not issued.
+/// Asserts the whole path of a hand-joined node against a real server: the hello of
+/// `node-1`, presented with its host certificate on the agent port, registers the host and is
+/// welcomed with a session and no host credential; the heartbeat of the session is answered;
+/// the host is listed. It catches a joined pool that does not register agents.
 #[tokio::test]
-async fn a_node_joins_with_a_one_time_token_and_heartbeats_with_its_credential() {
+async fn a_node_joins_with_its_certificate_and_heartbeats() {
     let h = serving("joined_e2e", |_| joined()).await;
-    let token = mint(&h, "node-1").await;
-    let welcome = agent_call(
-        &h,
-        "/v1/agent/hello",
-        &token,
-        &hello("node-1", Some("node-1")),
-    )
-    .await;
+    let welcome = agent_call(&h, "/v1/agent/hello", &hello("node-1", Some("node-1"))).await;
     let held: Session = session(&welcome, "node-1");
-    let credential = welcome.json()["host_credential"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    assert_eq!(credential.len(), 64, "{credential}");
-    assert_ne!(credential, token);
-    let again = agent_call(
-        &h,
-        "/v1/agent/hello",
-        &token,
-        &hello("node-1", Some("node-1")),
-    )
-    .await;
-    assert_eq!(again.status, 401, "{}", again.body);
-    let spent = agent_call(&h, "/v1/agent/heartbeat", &token, &held.beat()).await;
-    assert_eq!(spent.status, 401, "{}", spent.body);
-    let beat = agent_call(&h, "/v1/agent/heartbeat", &credential, &held.beat()).await;
+    assert!(
+        welcome.json().get("host_credential").is_none(),
+        "{}",
+        welcome.body
+    );
+    let beat = agent_call(&h, "/v1/agent/heartbeat", &held.beat()).await;
     assert_eq!(beat.status, 200, "{}", beat.body);
     let hosts = h.call("GET", "/v1/hosts", None).await;
     assert_eq!(hosts.json()["hosts"][0]["id"], "node-1");
-}
-
-/// Asserts that a hello naming another host than the token's is refused 403
-/// `join-token-instance`, and that the token still admits its own host afterwards. It
-/// catches a token that admits any host of the pool.
-#[tokio::test]
-async fn a_hello_naming_another_host_is_refused() {
-    let h = serving("joined_other", |_| joined()).await;
-    let token = mint(&h, "node-1").await;
-    let other = agent_call(
-        &h,
-        "/v1/agent/hello",
-        &token,
-        &hello("node-2", Some("node-2")),
-    )
-    .await;
-    assert_eq!(other.status, 403, "{}", other.body);
-    assert_eq!(other.json()["error"], "join-token-instance");
-    let bare = agent_call(&h, "/v1/agent/hello", &token, &hello("node-1", None)).await;
-    assert_eq!(bare.json()["error"], "join-token-instance");
-    let own = agent_call(
-        &h,
-        "/v1/agent/hello",
-        &token,
-        &hello("node-1", Some("node-1")),
-    )
-    .await;
-    session(&own, "node-1");
-}
-
-/// Asserts that the shared pool token of `join_token_file` admits hosts of a joined pool
-/// beside one-time tokens, and that the client token is not a join token. It catches a
-/// joined pool that drops the file, or one that admits the lease token.
-#[tokio::test]
-async fn the_shared_pool_token_still_admits_hosts() {
-    let h = serving("joined_shared", |scratch| {
-        let joins = scratch.write("pool-token", &format!("{JOIN}\n"), 0o600);
-        joined().set("join_token_file", &quoted(&joins))
-    })
-    .await;
-    let shared = agent_call(&h, "/v1/agent/hello", JOIN, &hello("node-3", None)).await;
-    let held = session(&shared, "node-3");
-    let beat = agent_call(&h, "/v1/agent/heartbeat", JOIN, &held.beat()).await;
-    assert_eq!(beat.status, 200, "{}", beat.body);
-    let token = mint(&h, "node-1").await;
-    let one = agent_call(
-        &h,
-        "/v1/agent/hello",
-        &token,
-        &hello("node-1", Some("node-1")),
-    )
-    .await;
-    session(&one, "node-1");
-    let client = agent_call(&h, "/v1/agent/hello", TOKEN, &hello("node-4", None)).await;
-    assert_eq!(client.status, 401, "{}", client.body);
 }
 
 /// Asserts that joined pools register agents together: a second joined pool that is not
@@ -182,7 +98,7 @@ fn joined_pools_load_together_and_an_elastic_pool_beside_one_is_refused() {
 }
 
 /// Asserts that each key of a pool that launches is refused on a joined pool, naming the
-/// pool and the key, that a bad `join_token_file` is refused naming it, and that an elastic
+/// pool and the key, and that an elastic
 /// pool giving the joined pool's `max_machines` beside `max_instances` is refused naming
 /// both (on an elastic pool the two are one cap). It catches a joined pool that takes a
 /// spend cap or a network it cannot use.
@@ -211,15 +127,6 @@ fn a_joined_pool_refuses_the_keys_of_a_launching_pool() {
             "{said}"
         );
     }
-    let missing = quoted(&scratch.path("absent-token"));
-    let said = refusal(
-        &scratch,
-        &file(&server, &[&joined().set("join_token_file", &missing)]),
-    );
-    assert!(
-        said.starts_with("pool \"burst\": join_token_file: "),
-        "{said}"
-    );
     let said = refusal(&scratch, &file(&server, &[&joined().without("shape")]));
     assert_eq!(said, "pool \"burst\": shape: required");
     let said = refusal(
@@ -280,22 +187,17 @@ fn needing(id: &str, os: &str) -> Value {
 #[tokio::test]
 async fn a_job_that_requires_a_capability_is_placed_on_a_joined_host() {
     let h = serving_with("joined_caps", "placement = \"js-sched\"", |_| linux()).await;
-    let token = mint(&h, "node-1").await;
     let mut said = linux_hello("node-1");
     said["capabilities"]["per-job"] = json!("true");
-    let welcome = agent_call(&h, "/v1/agent/hello", &token, &said).await;
+    let welcome = agent_call(&h, "/v1/agent/hello", &said).await;
     let held = session(&welcome, "node-1");
-    let credential = welcome.json()["host_credential"]
-        .as_str()
-        .unwrap()
-        .to_owned();
     let other = submit_body(&h, &needing("job-mac", "macos")).await;
     assert_eq!(other.status, 422, "{}", other.body);
     assert_eq!(other.json(), json!({ "error": "no-capable-host" }));
     let asked = submit_body(&h, &needing("job-linux", "linux")).await;
     assert_eq!(asked.status, 201, "{}", asked.body);
     h.ticks.step().await;
-    let beat = agent_call(&h, "/v1/agent/heartbeat", &credential, &held.beat()).await;
+    let beat = agent_call(&h, "/v1/agent/heartbeat", &held.beat()).await;
     assert_eq!(beat.status, 200, "{}", beat.body);
     let (job, _allocation) = one_start(&beat.json());
     assert_eq!(job, "job-linux");
@@ -309,18 +211,16 @@ async fn a_job_that_requires_a_capability_is_placed_on_a_joined_host() {
 #[tokio::test]
 async fn capabilities_decide_both_the_fit_and_the_admission() {
     let bare = serving("joined_bare", |_| joined()).await;
-    let token = mint(&bare, "node-1").await;
-    let welcome = agent_call(&bare, "/v1/agent/hello", &token, &linux_hello("node-1")).await;
+    let welcome = agent_call(&bare, "/v1/agent/hello", &linux_hello("node-1")).await;
     session(&welcome, "node-1");
     let asked = submit_body(&bare, &needing("job-linux", "linux")).await;
     assert_eq!(asked.status, 422, "{}", asked.body);
     assert_eq!(asked.json(), json!({ "error": "no-capable-host" }));
 
     let h = serving("joined_caps_admit", |_| linux()).await;
-    let token = mint(&h, "node-1").await;
     let mut body = linux_hello("node-1");
     body["capabilities"] = json!({ "os": "linux" });
-    let refused = agent_call(&h, "/v1/agent/hello", &token, &body).await;
+    let refused = agent_call(&h, "/v1/agent/hello", &body).await;
     assert_eq!(refused.status, 403, "{}", refused.body);
     assert_eq!(
         refused.json(),
@@ -348,27 +248,6 @@ fn a_bad_capabilities_table_is_refused() {
     assert!(said.starts_with("pool \"burst\": capabilities: "), "{said}");
 }
 
-/// Asserts that a joined pool mints only for its own name: a mint whose `provider` is
-/// another name is a 400 naming `provider`, and writes no token, so the same instance can
-/// still be minted for under the pool's name. It catches a token minted for a provider
-/// that no hello of the pool can ever name.
-#[tokio::test]
-async fn a_mint_for_another_provider_is_refused() {
-    let h = serving("joined_mint_provider", |_| joined()).await;
-    let body = json!({ "provider": "elsewhere", "instance_id": "node-1" });
-    let reply = h.call("POST", "/v1/agent/join-tokens", Some(&body)).await;
-    assert_eq!(reply.status, 400, "{}", reply.body);
-    assert!(
-        reply.json()["reason"]
-            .as_str()
-            .unwrap()
-            .contains("provider"),
-        "{}",
-        reply.body
-    );
-    mint(&h, "node-1").await;
-}
-
 /// A job for `memory_bytes` and one core, with no constraint.
 fn wanting(id: &str, memory_bytes: u64) -> Value {
     JobBody::new(id).needs(1000, memory_bytes).json()
@@ -388,9 +267,8 @@ async fn a_joined_pool_books_the_memory_percent_it_is_given() {
         joined().set("memory_schedulable_percent", "90")
     })
     .await;
-    let token = mint(&cut, "node-1").await;
     let said = hello("node-1", Some("node-1"));
-    let welcome = agent_call(&cut, "/v1/agent/hello", &token, &said).await;
+    let welcome = agent_call(&cut, "/v1/agent/hello", &said).await;
     session(&welcome, "node-1");
     let listing = cut.call("GET", "/v1/hosts", None).await.json();
     let shown = &listing["hosts"][0];
@@ -412,9 +290,8 @@ async fn a_joined_pool_books_the_memory_percent_it_is_given() {
     assert_eq!(exact.status, 201, "{}", exact.body);
 
     let full = serving("joined_mempct_default", |_| joined()).await;
-    let token = mint(&full, "node-1").await;
     let said = hello("node-1", Some("node-1"));
-    let welcome = agent_call(&full, "/v1/agent/hello", &token, &said).await;
+    let welcome = agent_call(&full, "/v1/agent/hello", &said).await;
     session(&welcome, "node-1");
     let ask = wanting("over", LISTED + 1);
     let over = submit_body(&full, &ask).await;

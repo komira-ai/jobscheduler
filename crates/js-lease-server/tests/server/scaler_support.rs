@@ -1,6 +1,5 @@
 //! What the tests of a server with a launching pool share: a provider kind over an
-//! account in memory (never a network), the text of a file for it, and the messages of a
-//! launched agent.
+//! account in memory (never a network), and the text of a file for it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
@@ -24,9 +23,8 @@ use js_provider_lambdalabs::{
 use js_state::sqlite::{Options, SqliteStore};
 use js_state::{Cond, Store, SystemClock, Txn};
 use js_types::{ExecMode, Model};
-use serde_json::{Value, json};
+use serde_json::json;
 
-use crate::agents_support::{Session, hello_body, session};
 use crate::config_support::{PoolText, file, kinds, quote, quoted, server};
 use crate::store_support::sqlite_db;
 use crate::support::{Harness, Kept, Reply, Scratch, TOKEN, request};
@@ -571,16 +569,6 @@ pub async fn cancel(h: &Harness, id: &str) -> Reply {
     request(job, "POST", &path, Some(TOKEN), Some(b"{}")).await
 }
 
-/// The join token the user data of a launch writes for the agent.
-pub fn token_in(script: &str) -> String {
-    let head = "printf '%s' '";
-    let line = script
-        .lines()
-        .find(|line| line.starts_with(head) && line.ends_with("/etc/jobscheduler/token"))
-        .expect("the script writes the token");
-    line[head.len()..].split("' > ").next().unwrap().to_owned()
-}
-
 /// The id the agent of a launch registers under, as the unit in the user data names it
 /// (`--host-id "<id>"`).
 pub fn host_id_in(script: &str) -> String {
@@ -594,50 +582,6 @@ pub fn name_of(scheduler: &str, acquire: &str) -> String {
     let scheduler = js_elastic::SchedulerId::new(scheduler).unwrap();
     let acquire = js_elastic::AcquireId::new(acquire).unwrap();
     HostName::derive(&scheduler, &acquire).to_string()
-}
-
-/// The hello of the launched machine `name`, which names the instance it runs on and
-/// announces the size of the offer it was launched from (8 cores, 64 GiB, one a100).
-pub fn hello_body_of(name: &str) -> Value {
-    let mut body = hello_body(name);
-    body["instance"] = json!({ "provider": "burst", "instance_id": name });
-    body["shape"]["memory_bytes"] = json!(64u64 << 30);
-    // The class the agent of a `gpu_1x_a100` machine reads from `nvidia-smi`: the 40 GB
-    // PCIe variant the provider's catalog table offers for that type.
-    body["shape"]["gpu_class"] = json!("nvidia-a100-pcie-40gb");
-    // These tests are about the machine's life, and the job queued for it is the demand that
-    // launched it: a host that names no `arch` is one the scheduler places no job on, so the
-    // job stays queued and the host's only holder is the test's own doing.
-    if let Some(capabilities) = body["capabilities"].as_object_mut() {
-        capabilities.remove("arch");
-    }
-    body
-}
-
-/// A hello of `name` with `token`, on the agent port.
-pub async fn hello(h: &Harness, token: &str, name: &str) -> Reply {
-    let bytes = hello_body_of(name).to_string().into_bytes();
-    let addr = h.running.agent_addr().unwrap();
-    request(addr, "POST", "/v1/agent/hello", Some(token), Some(&bytes)).await
-}
-
-/// A hello of `name` that must be admitted: the session it opened.
-pub async fn join(h: &Harness, token: &str, name: &str) -> Session {
-    session(&hello(h, token, name).await, name)
-}
-
-/// A heartbeat of `session` with `token`, on the agent port.
-pub async fn beat(h: &Harness, token: &str, session: &Session) -> Reply {
-    let bytes = session.beat().to_string().into_bytes();
-    let addr = h.running.agent_addr().unwrap();
-    request(
-        addr,
-        "POST",
-        "/v1/agent/heartbeat",
-        Some(token),
-        Some(&bytes),
-    )
-    .await
 }
 
 /// The path of the scaler's records beside the state file of `scratch`.

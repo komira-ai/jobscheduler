@@ -7,11 +7,12 @@ use js_lease_server::BODY_LIMIT;
 use serde_json::{Value, json};
 
 use crate::agents_support::{
-    JOIN, JOIN_B, Session, beat, entry, hello_body, hello_with, hosts, join, listed, post,
-    post_raw, session, start_agents,
+    Session, agent_args, beat, entry, hello_as, hello_body, hosts, join, listed, post, post_raw,
+    session, start_agents, without_certificate,
 };
+use crate::host_certs_support::{Spec, shared_ca};
 use crate::jobs_support::{JobBody, job_server};
-use crate::support::{Harness, LogCapture, TOKEN, guard_tasks, request};
+use crate::support::{Harness, LogCapture, Scratch, TOKEN, guard_tasks, request};
 
 fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
@@ -44,15 +45,17 @@ async fn a_registered_host_is_welcomed_heard_and_listed() {
     assert!(host.get("lease").is_none());
 }
 
-/// Asserts that the join token opens no client route and no listing: every route of the
-/// client API, and the paths of the removed lease API, answer 401 with an empty body to
-/// it, whatever the method. It catches the two secrets being one.
+/// Asserts that a host certificate opens no client route and no listing: every route of the
+/// client API, and the paths of the removed lease API, answer 401 with an empty body to a
+/// connection that presents one and no client token, whatever the method. It catches the
+/// two kinds of caller being one.
 #[tokio::test]
-async fn join_token_does_not_open_client_routes() {
-    let h = start_agents("agents_join_on_client_routes").await;
+async fn a_host_certificate_opens_no_client_route() {
+    let h = start_agents("agents_cert_on_client_routes").await;
+    let identity = shared_ca().issue(&Spec::host("burst-1"));
+    let client = h.client(Some(identity));
     let routes = [
         ("GET", "/v1/hosts"),
-        ("POST", "/v1/agent/join-tokens"),
         ("GET", "/v1/usage/nodes/gpu-01"),
         ("GET", "/v1/leases"),
         ("POST", "/v1/leases"),
@@ -60,90 +63,99 @@ async fn join_token_does_not_open_client_routes() {
         ("GET", "/v1/unknown"),
     ];
     for (method, path) in routes {
-        let reply = request(h.addr(), method, path, Some(JOIN), Some(b"{}")).await;
+        let reply = client
+            .send(method, path, None, Some(&json!({})))
+            .await
+            .unwrap();
         assert_eq!(reply.status, 401, "{method} {path}");
         assert_eq!(reply.body, "", "{method} {path}");
     }
 }
 
-/// Asserts that the client token opens no agent route: both routes answer it 401 with an
-/// empty body, and a hello made with it admits no host. It catches a client that can
-/// register hosts, and a join token that is checked against the wrong secret.
+/// Asserts that the client token opens no agent route: both routes answer it 401
+/// `host-certificate-required` when it comes with no certificate, and a hello made so admits no
+/// host. It catches a client that can register hosts.
 #[tokio::test]
 async fn client_token_does_not_open_agent_routes() {
     let h = start_agents("agents_client_on_agent_routes").await;
-    let hello = post(&h, "/v1/agent/hello", Some(TOKEN), &hello_body("burst-1")).await;
-    assert_eq!((hello.status, hello.body.as_str()), (401, ""));
+    let hello = hello_body("burst-1");
+    let hello = without_certificate(&h, "POST", "/v1/agent/hello", Some(TOKEN), Some(&hello)).await;
+    assert_eq!((hello.status, hello.json()), (401, REQUIRED.clone()));
     let beat = json!({ "host_id": "burst-1", "epoch": 1, "session": "x", "phase": "serving" });
-    let heard = post(&h, "/v1/agent/heartbeat", Some(TOKEN), &beat).await;
-    assert_eq!((heard.status, heard.body.as_str()), (401, ""));
+    let heard =
+        without_certificate(&h, "POST", "/v1/agent/heartbeat", Some(TOKEN), Some(&beat)).await;
+    assert_eq!((heard.status, heard.json()), (401, REQUIRED.clone()));
     assert!(listed(&hosts(&h).await).is_empty());
 }
 
-/// Asserts that a request to an agent route without a token, with an empty or wrong one,
-/// with a token of another length, under another scheme, or in another header is 401 with
-/// an empty body, for both routes; and that the right token passes the check.
+/// Asserts that a request to an agent route (hello, heartbeat, the dispatch poll, and a host's
+/// own route) that presents no client certificate is 401 with exactly
+/// `{"error":"host-certificate-required"}`, whether it carries no bearer, an empty or a wrong
+/// one, the client token, a token of the old pool-token kind, or another scheme; and that the
+/// same call with the certificate of its host passes the check. It catches an agent route that
+/// admits a caller by a bearer.
 #[tokio::test]
-async fn no_token_401_empty_body() {
-    let h = start_agents("agents_no_token").await;
-    let wrong = JOIN.replace('A', "Z");
-    for path in ["/v1/agent/hello", "/v1/agent/heartbeat"] {
-        for token in [None, Some(""), Some("nope"), Some(wrong.as_str())] {
-            let reply = request(h.addr(), "POST", path, token, Some(b"{}")).await;
+async fn no_host_certificate_is_401_host_certificate_required() {
+    let h = start_agents("agents_no_certificate").await;
+    let routes = [
+        ("POST", "/v1/agent/hello"),
+        ("POST", "/v1/agent/heartbeat"),
+        ("POST", js_agent_wire::DISPATCH_PATH),
+        ("GET", "/v1/hosts/burst-1"),
+    ];
+    let old_pool_token = "join-token-A-0123456789-abcdefghijklmnop";
+    for (method, path) in routes {
+        for bearer in [
+            None,
+            Some(""),
+            Some("nope"),
+            Some(old_pool_token),
+            Some(TOKEN),
+        ] {
+            let reply = without_certificate(&h, method, path, bearer, Some(&json!({}))).await;
+            assert_eq!(reply.status, 401, "{method} {path} {bearer:?}");
+            assert_eq!(reply.json(), REQUIRED.clone(), "{method} {path} {bearer:?}");
             assert_eq!(
-                (reply.status, reply.body.as_str()),
-                (401, ""),
-                "{path} {token:?}"
+                reply.body, r#"{"error":"host-certificate-required"}"#,
+                "{method} {path} {bearer:?}"
             );
         }
-        let basic = format!("Basic {JOIN}");
-        let stream = tokio::net::TcpStream::connect(h.addr()).await.unwrap();
-        let reply =
-            crate::support::exchange_authorized(stream, "POST", path, Some(&basic), Some(b"{}"))
-                .await;
-        assert_eq!(
-            (reply.status, reply.body.as_str()),
-            (401, ""),
-            "{path} basic"
-        );
-        let passed = request(h.addr(), "POST", path, Some(JOIN), Some(b"{}")).await;
-        assert_eq!(passed.status, 400, "{path}: {}", passed.body);
     }
+    let passed = request(h.addr(), "POST", "/v1/agent/hello", None, Some(b"{}")).await;
+    assert_eq!(passed.status, 400, "{}", passed.body);
 }
 
-/// Asserts that a method the agent routes do not take is a 405 for a caller with a join
-/// token and a 401 for one without, and that an unknown path under the agent prefix is
+/// The body of a refusal for want of a host certificate.
+static REQUIRED: std::sync::LazyLock<Value> =
+    std::sync::LazyLock::new(|| json!({ "error": "host-certificate-required" }));
+
+/// Asserts that a method the agent routes do not take is a 405 for a caller with a host
+/// certificate and a 401 for one without, and that an unknown path under the agent prefix is
 /// a 404 for the client token.
 #[tokio::test]
 async fn agent_routes_take_post_only() {
     let h = start_agents("agents_methods").await;
     for path in ["/v1/agent/hello", "/v1/agent/heartbeat"] {
-        let refused = request(h.addr(), "GET", path, Some(JOIN), None).await;
+        let body = hello_body("burst-1").to_string().into_bytes();
+        let refused = request(h.addr(), "GET", path, None, Some(&body)).await;
         assert_eq!(refused.status, 405, "{path}");
-        let unauthenticated = request(h.addr(), "GET", path, None, None).await;
+        let unauthenticated = without_certificate(&h, "GET", path, None, None).await;
         assert_eq!(unauthenticated.status, 401, "{path}");
     }
     let unknown = h.call("GET", "/v1/agent/elsewhere", None).await;
     assert_eq!(unknown.status, 404);
 }
 
-/// Asserts that a server on the base flags (no shared join token file) lists no host until
-/// one says hello, keeps no agent file beside the state file after a tick with nothing to
-/// write, and counts no agent error; a hello with the client token is refused 401 with an
-/// empty body. It catches a server that lists a host no agent registered (the removed
+/// Asserts that a server on the agent flags lists no host until one says hello, keeps no
+/// agent file beside the state file after a tick with nothing to write, and counts no agent
+/// error; a hello with the client token and no certificate is refused 401. It catches a server that lists a host no agent registered (the removed
 /// removed agentless pool's hosts), and one that writes the agent file with nothing in it.
 #[tokio::test]
 async fn a_server_lists_no_host_until_one_says_hello() {
-    let h = Harness::new("agents_none_yet").await;
-    let hello = request(
-        h.addr(),
-        "POST",
-        "/v1/agent/hello",
-        Some(TOKEN),
-        Some(hello_body("burst-1").to_string().as_bytes()),
-    )
-    .await;
-    assert_eq!((hello.status, hello.body.as_str()), (401, ""));
+    let h = start_agents("agents_none_yet").await;
+    let hello = hello_body("burst-1");
+    let hello = without_certificate(&h, "POST", "/v1/agent/hello", Some(TOKEN), Some(&hello)).await;
+    assert_eq!((hello.status, hello.json()), (401, REQUIRED.clone()));
     assert!(listed(&hosts(&h).await).is_empty());
     h.ticks.step().await;
     let mut agent_file = h.scratch.state().into_os_string();
@@ -176,12 +188,12 @@ async fn malformed_and_oversized_bodies_get_fixed_codes() {
             format!("{{\"host_id\":\"{marker}\",\"epoch\":\"{marker}\",\"phase\":7}}"),
         ];
         for body in bodies {
-            let reply = request(h.addr(), "POST", path, Some(JOIN), Some(body.as_bytes())).await;
+            let reply = request(h.addr(), "POST", path, None, Some(body.as_bytes())).await;
             assert_eq!(reply.status, 400, "{path} {body}: {}", reply.body);
             assert_eq!(reply.json(), json!({ "error": code }), "{path} {body}");
             assert!(!reply.body.contains(marker));
         }
-        let cut = post_raw(&h, path, JOIN, b"{\"host_id\"", Some(500)).await;
+        let cut = post_raw(&h, path, b"{\"host_id\"", Some(500)).await;
         assert_eq!(cut.status, 400, "{path}: {}", cut.body);
         assert_eq!(
             serde_json::from_str::<Value>(&cut.body).unwrap(),
@@ -189,7 +201,7 @@ async fn malformed_and_oversized_bodies_get_fixed_codes() {
         );
 
         let big = vec![b' '; BODY_LIMIT + 1];
-        let over = request(h.addr(), "POST", path, Some(JOIN), Some(&big)).await;
+        let over = request(h.addr(), "POST", path, None, Some(&big)).await;
         assert_eq!(over.status, 413, "{path}");
         assert_eq!(over.json(), json!({ "error": "body-too-large" }));
     }
@@ -221,7 +233,7 @@ async fn every_decoded_message_is_validated_before_use() {
         (protocol, 400, "unsupported-protocol"),
     ];
     for (body, status, code) in cases {
-        let reply = post(&h, "/v1/agent/hello", Some(JOIN), &body).await;
+        let reply = post(&h, "/v1/agent/hello", None, &body).await;
         assert_eq!(reply.status, status, "{code}: {}", reply.body);
         assert_eq!(reply.json()["error"], code);
         assert!(!reply.body.contains(marker), "{}", reply.body);
@@ -236,7 +248,7 @@ async fn every_decoded_message_is_validated_before_use() {
         json!({ "host_id": "burst-1", "epoch": 1, "session": format!("bad {marker}"), "phase": "serving" }),
     ];
     for body in beats {
-        let reply = post(&h, "/v1/agent/heartbeat", Some(JOIN), &body).await;
+        let reply = post(&h, "/v1/agent/heartbeat", None, &body).await;
         assert_eq!(reply.status, 400, "{}", reply.body);
         assert_eq!(reply.json(), json!({ "error": "invalid-heartbeat" }));
     }
@@ -276,12 +288,12 @@ async fn refusals_have_their_status_and_code() {
         ),
     ];
     for (body, status, expected) in hellos {
-        let reply = post(&h, "/v1/agent/hello", Some(JOIN), &body).await;
+        let reply = post(&h, "/v1/agent/hello", None, &body).await;
         assert_eq!(reply.status, status, "{expected}: {}", reply.body);
         assert_eq!(reply.json(), expected);
     }
     join(&h, "burst-2").await;
-    let full = hello_with(&h, JOIN, "burst-3").await;
+    let full = hello_as(&h, "burst-3").await;
     assert_eq!(
         (full.status, full.json()),
         (403, json!({ "error": "pool-full" }))
@@ -376,7 +388,7 @@ async fn heartbeats_hammered_during_job_calls_complete() {
             tokio::spawn(async move {
                 for _ in 0..40 {
                     let path = "/v1/agent/heartbeat";
-                    let reply = request(addr, "POST", path, Some(JOIN), Some(&body)).await;
+                    let reply = request(addr, "POST", path, None, Some(&body)).await;
                     assert_eq!(reply.status, 200, "{}", reply.body);
                 }
             }),
@@ -410,27 +422,26 @@ async fn heartbeats_hammered_during_job_calls_complete() {
     guard_tasks(tasks).await;
 }
 
-/// Asserts the hello rate limit at the transport, per credential, on the injected clock:
-/// a token that spends its burst gets 429 `rate-limited` with a `Retry-After` in whole
-/// seconds (refusals count, so a loop of bad hellos is held too), the same token's
-/// heartbeats and another token's hellos are not held, and moving the clock by the
+/// Asserts the hello rate limit at the transport, per host certificate, on the injected clock:
+/// a host that spends its burst gets 429 `rate-limited` with a `Retry-After` in whole
+/// seconds (refusals count, so a loop of bad hellos is held too), the same host's
+/// heartbeats and another host's hellos are not held, and moving the clock by the
 /// interval lets one hello through again. It catches a limiter that never limits, one
 /// shared by all tokens, one that also holds heartbeats (hosts would be lost), and one
 /// on the system clock.
 #[tokio::test]
 async fn hello_rate_limit_holds_a_credential_not_the_others() {
-    let scratch = crate::support::Scratch::new("agents_rate");
-    let mut args = crate::agents_support::agent_args(&scratch);
+    let scratch = Scratch::new("agents_rate");
+    let mut args = agent_args(&scratch);
     args.extend(["--agent-hello-burst", "2", "--agent-hello-interval", "10s"].map(Into::into));
     let h = Harness::with(scratch, args).await;
 
     let a = join(&h, "burst-1").await;
-    let live = hello_with(&h, JOIN, "burst-1").await;
+    let live = hello_as(&h, "burst-1").await;
     assert_eq!(live.status, 409);
     let held = post_raw(
         &h,
         "/v1/agent/hello",
-        JOIN,
         hello_body("burst-1").to_string().as_bytes(),
         None,
     )
@@ -443,48 +454,92 @@ async fn hello_rate_limit_holds_a_credential_not_the_others() {
     assert!(held.head.contains("retry-after: 10"), "{}", held.head);
 
     assert_eq!(beat(&h, &a).await.status, 200);
-    let other = hello_with(&h, JOIN_B, "burst-2").await;
+    let other = hello_as(&h, "burst-2").await;
     assert_eq!(other.status, 200, "{}", other.body);
 
     h.clock.advance(secs(10));
-    let once = hello_with(&h, JOIN, "burst-1").await;
+    let once = hello_as(&h, "burst-1").await;
     assert_eq!(once.status, 409);
-    let again = hello_with(&h, JOIN, "burst-1").await;
+    let again = hello_as(&h, "burst-1").await;
     assert_eq!(again.status, 429);
     h.clock.advance(secs(3));
-    let still = post_raw(&h, "/v1/agent/hello", JOIN, b"{}", None).await;
+    let still = post_raw(
+        &h,
+        "/v1/agent/hello",
+        hello_body("burst-1").to_string().as_bytes(),
+        None,
+    )
+    .await;
     assert!(still.head.contains("retry-after: 7"), "{}", still.head);
     assert_eq!(session(&other, "burst-2").epoch, 1);
 }
 
-/// Asserts that a token holder who keeps saying hello past its limit gets a 429 each
+/// Asserts that a host that keeps saying hello past its limit gets a 429 each
 /// time but is logged once per interval, not once per request: many refusals in one
 /// interval leave one line, and the first refusal of the next interval leaves another.
-/// It catches a warning per refusal, which lets a holder of a join token fill the log at
+/// It catches a warning per refusal, which lets a host fill the log at
 /// the speed of its requests, and a limiter that never says so.
 #[tokio::test]
 async fn refusals_for_the_hello_limit_are_logged_once_per_interval() {
     let logs = LogCapture::start();
-    let scratch = crate::support::Scratch::new("agents_rate_log");
-    let mut args = crate::agents_support::agent_args(&scratch);
+    let scratch = Scratch::new("agents_rate_log");
+    let mut args = agent_args(&scratch);
     args.extend(["--agent-hello-burst", "1", "--agent-hello-interval", "10s"].map(Into::into));
     let h = Harness::with(scratch, args).await;
     let held = "held to the rate limit";
-    assert_eq!(hello_with(&h, JOIN, "burst-1").await.status, 200);
+    assert_eq!(hello_as(&h, "burst-1").await.status, 200);
     for _ in 0..5 {
-        assert_eq!(hello_with(&h, JOIN, "burst-1").await.status, 429);
+        assert_eq!(hello_as(&h, "burst-1").await.status, 429);
     }
     assert_eq!(logs.text().matches(held).count(), 1, "{}", logs.text());
-    assert_eq!(hello_with(&h, JOIN_B, "burst-2").await.status, 200);
+    assert_eq!(hello_as(&h, "burst-2").await.status, 200);
     for _ in 0..3 {
-        assert_eq!(hello_with(&h, JOIN_B, "burst-2").await.status, 429);
+        assert_eq!(hello_as(&h, "burst-2").await.status, 429);
     }
     assert_eq!(logs.text().matches(held).count(), 2, "{}", logs.text());
 
     h.clock.advance(secs(10));
-    assert_eq!(hello_with(&h, JOIN, "burst-1").await.status, 409);
+    assert_eq!(hello_as(&h, "burst-1").await.status, 409);
     for _ in 0..3 {
-        assert_eq!(hello_with(&h, JOIN, "burst-1").await.status, 429);
+        assert_eq!(hello_as(&h, "burst-1").await.status, 429);
     }
     assert_eq!(logs.text().matches(held).count(), 3, "{}", logs.text());
+}
+
+/// Asserts that every welcome says `Cache-Control: no-store` and `Pragma: no-cache`: a welcome
+/// carries the session secret, which no cache may keep. It catches a welcome that a cache may
+/// store.
+#[tokio::test]
+async fn a_welcome_is_not_cacheable() {
+    let h = start_agents("agents_welcome_no_store").await;
+    for host in ["burst-1", "burst-2"] {
+        let welcome = hello_as(&h, host).await;
+        assert_eq!(welcome.status, 200, "{}", welcome.body);
+        assert!(
+            welcome.head.contains("cache-control: no-store"),
+            "{}",
+            welcome.head
+        );
+        assert!(
+            welcome.head.contains("pragma: no-cache"),
+            "{}",
+            welcome.head
+        );
+    }
+}
+
+/// Asserts that a second server over the state files of a running one is refused at start,
+/// naming `--usage-db` (the usage file is locked by the first). It catches a start that
+/// serves while another process owns the files.
+#[tokio::test]
+async fn a_second_server_over_the_same_state_is_refused() {
+    let h = start_agents("agents_second_server").await;
+    assert_eq!(hello_as(&h, "burst-1").await.status, 200);
+    let args = crate::support::replace(agent_args(&h.scratch), "--boot", "resume");
+    let (_, ticker) = js_lease_server::channel_ticker();
+    let clock = js_lease_server::SharedClock::new(js_types::ManualClock::default());
+    let started = crate::support::start(crate::support::config(args).unwrap(), clock, ticker).await;
+    let refusal = started.err().expect("the second start should be refused");
+    assert_eq!(refusal.flag(), "--usage-db");
+    assert!(refusal.reason().contains("lock"), "{}", refusal.reason());
 }

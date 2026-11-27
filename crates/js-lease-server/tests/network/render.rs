@@ -4,15 +4,13 @@
 
 use js_elastic::{BootPlan, BootStep, Secret, SlotName};
 use js_lease_server::bootstrap::{
-    BootSecrets, CLOUD_INIT_TRACES, Fill, JOIN_TOKEN_SLOT, MASK, RenderError, TOKEN_PATH, payload,
-    render,
+    BootSecrets, CLOUD_INIT_TRACES, Fill, MASK, RenderError, payload, render,
 };
 use js_lease_server::network::{AUTH_KEY_PATH, AUTH_KEY_SLOT, NetworkMode};
 
 use crate::fake::Fake;
 use crate::support::{TEN_MINUTES, clock, ctx, host, mode, plan};
 
-const JOIN: &str = "join-token-MARK-5e1c";
 const KEY: &str = "tskey-auth-MARK-9f3a";
 
 fn tailscale_plan() -> BootPlan {
@@ -25,13 +23,10 @@ fn tailscale_plan() -> BootPlan {
 }
 
 fn secrets() -> BootSecrets {
-    BootSecrets::new(
-        Secret::new(JOIN.to_owned()),
-        vec![(
-            SlotName(AUTH_KEY_SLOT.to_owned()),
-            Secret::new(KEY.to_owned()),
-        )],
-    )
+    BootSecrets::new(vec![(
+        SlotName(AUTH_KEY_SLOT.to_owned()),
+        Secret::new(KEY.to_owned()),
+    )])
     .unwrap()
 }
 
@@ -45,15 +40,14 @@ fn masked_and_real_differ_only_at_the_secret_bytes() {
     let secrets = secrets();
     let real = render(&plan, Fill::Real(&secrets)).unwrap();
     assert_ne!(masked, real);
-    assert_eq!(real.matches(JOIN).count(), 1);
     assert_eq!(real.matches(KEY).count(), 1);
-    assert!(!masked.contains(JOIN) && !masked.contains(KEY));
-    assert_eq!(masked.matches(MASK).count(), 2);
-    assert_eq!(real.replace(JOIN, MASK).replace(KEY, MASK), masked);
+    assert!(!masked.contains(KEY));
+    assert_eq!(masked.matches(MASK).count(), 1);
+    assert_eq!(real.replace(KEY, MASK), masked);
 }
 
 /// Asserts that a masked render needs no secret (it is what plan mode shows, where
-/// nothing is minted), and that the real payload is the real render, delivered as it is.
+/// nothing is launched), and that the real payload is the real render, delivered as it is.
 #[test]
 fn only_the_real_render_holds_secrets_and_it_becomes_the_payload() {
     let plan = tailscale_plan();
@@ -63,29 +57,26 @@ fn only_the_real_render_holds_secrets_and_it_becomes_the_payload() {
     let body = payload(&plan, &secrets, usize::MAX).unwrap();
     assert_eq!(body.expose(), real);
     assert_eq!(body.len(), real.len());
-    assert!(!format!("{body:?}").contains(JOIN));
+    assert!(!format!("{body:?}").contains(KEY));
 }
 
 /// Asserts that a slot a step names and nothing fills is refused naming the slot, that a
-/// secret for a slot no step names is refused, and that two secrets for one slot (the
-/// join token's included) are refused.
+/// secret for a slot no step names is refused, and that two secrets for one slot are
+/// refused.
 #[test]
 fn a_missing_unused_or_duplicate_slot_is_refused() {
     let plan = tailscale_plan();
-    let no_key = BootSecrets::new(Secret::new(JOIN.to_owned()), Vec::new()).unwrap();
+    let no_key = BootSecrets::new(Vec::new()).unwrap();
     assert_eq!(
         render(&plan, Fill::Real(&no_key)).unwrap_err(),
         RenderError::MissingSlot(AUTH_KEY_SLOT.to_owned())
     );
 
     let plain = plan_without_network();
-    let extra = BootSecrets::new(
-        Secret::new(JOIN.to_owned()),
-        vec![(
-            SlotName("network.extra".to_owned()),
-            Secret::new(KEY.to_owned()),
-        )],
-    )
+    let extra = BootSecrets::new(vec![(
+        SlotName("network.extra".to_owned()),
+        Secret::new(KEY.to_owned()),
+    )])
     .unwrap();
     assert_eq!(
         render(&plain, Fill::Real(&extra)).unwrap_err(),
@@ -93,30 +84,15 @@ fn a_missing_unused_or_duplicate_slot_is_refused() {
     );
 
     let twice = |slot: &str| {
-        BootSecrets::new(
-            Secret::new(JOIN.to_owned()),
-            vec![
-                (SlotName(slot.to_owned()), Secret::new("a".to_owned())),
-                (SlotName(slot.to_owned()), Secret::new("b".to_owned())),
-            ],
-        )
+        BootSecrets::new(vec![
+            (SlotName(slot.to_owned()), Secret::new("a".to_owned())),
+            (SlotName(slot.to_owned()), Secret::new("b".to_owned())),
+        ])
         .unwrap_err()
     };
     assert_eq!(
         twice("network.k"),
         RenderError::DuplicateSlot("network.k".to_owned())
-    );
-    let join_again = BootSecrets::new(
-        Secret::new(JOIN.to_owned()),
-        vec![(
-            SlotName(JOIN_TOKEN_SLOT.to_owned()),
-            Secret::new("b".to_owned()),
-        )],
-    )
-    .unwrap_err();
-    assert_eq!(
-        join_again,
-        RenderError::DuplicateSlot(JOIN_TOKEN_SLOT.to_owned())
     );
 }
 
@@ -127,8 +103,8 @@ fn plan_without_network() -> BootPlan {
 /// Asserts the hardening list of the script: the cleanup trap is the first command and
 /// the cleanup removes every secret file a step writes and every cloud-init trace; no
 /// `set -x`; no `echo`; each secret file is made 0600 right after it is written; each
-/// download is followed by a check of its hash and goes over https only; the join token
-/// file stays for the agent.
+/// download is followed by a check of its hash and goes over https only; the script writes
+/// no token or instance file for the agent.
 #[test]
 fn the_script_is_hardened() {
     let plan = tailscale_plan();
@@ -150,8 +126,8 @@ fn the_script_is_hardened() {
         assert!(cleanup.contains(trace), "{trace} is not removed");
     }
     assert!(
-        !cleanup.contains(TOKEN_PATH),
-        "the agent reads the join token file"
+        !text.contains("/etc/jobscheduler"),
+        "the script writes no identity file for the agent"
     );
 
     assert!(!text.contains("set -x"));
@@ -210,27 +186,34 @@ fn nothing_in_a_step_or_a_secret_adds_shell_syntax() {
         "{masked}"
     );
 
-    let tricky = BootSecrets::new(Secret::new("it's $HOME; `x`".to_owned()), Vec::new()).unwrap();
+    plan.host_prep.push(BootStep::SecretFile {
+        path: "/etc/net.key".to_owned(),
+        slot: SlotName("k".to_owned()),
+    });
+    let tricky = BootSecrets::new(vec![(
+        SlotName("k".to_owned()),
+        Secret::new("it's $HOME; `x`".to_owned()),
+    )])
+    .unwrap();
     let real = render(&plan, Fill::Real(&tricky)).unwrap();
-    assert!(real.contains("printf '%s' 'it'\\''s $HOME; `x`' > /etc/jobscheduler/token\n"));
+    assert!(real.contains("printf '%s' 'it'\\''s $HOME; `x`' > /etc/net.key\n"));
 }
 
 /// Asserts that the unit's command line is escaped for systemd (a `%` and a `$` are
 /// doubled, a `"` and a `\` are escaped), so a scheduler URL cannot add an argument or
-/// be expanded, and that the instance line is `<pool>:<name>`.
+/// be expanded, and that the unit names no token or instance file.
 #[test]
-fn the_unit_and_the_instance_line_carry_the_plan_values() {
+fn the_unit_carries_the_plan_values_and_no_identity_file() {
     let mut plan = plan_without_network();
     plan.scheduler_url = r#"https://h.example:7301/%h"$x\y"#.to_owned();
     let text = render(&plan, Fill::Mask).unwrap();
     assert!(
-        text.contains(r#"--server "https://h.example:7301/%%h\"$$x\\y" --token-file"#),
+        text.contains(r#"--server "https://h.example:7301/%%h\"$$x\\y" --pool"#),
         "{text}"
     );
-    assert!(text.contains(&format!(
-        "printf '%s\\n' 'gpu:{}' > /etc/jobscheduler/instance",
-        plan.host
-    )));
+    for retired in ["--token-file", "--instance-file"] {
+        assert!(!text.contains(retired), "{retired} is in the unit");
+    }
 }
 
 /// Asserts that no refusal quotes a secret: every error of a render with unusable and
@@ -240,23 +223,20 @@ fn the_unit_and_the_instance_line_carry_the_plan_values() {
 fn render_errors_and_secrets_never_print_a_secret() {
     let plan = tailscale_plan();
     let mut shown = String::new();
-    let bad = BootSecrets::new(
-        Secret::new(JOIN.to_owned()),
-        vec![(
-            SlotName(AUTH_KEY_SLOT.to_owned()),
-            Secret::new(format!("{KEY}\0")),
-        )],
-    )
+    let bad = BootSecrets::new(vec![(
+        SlotName(AUTH_KEY_SLOT.to_owned()),
+        Secret::new(format!("{KEY}\0")),
+    )])
     .unwrap();
     shown.push_str(&format!("{bad:?}\n"));
     let err = render(&plan, Fill::Real(&bad)).unwrap_err();
     shown.push_str(&format!("{err} {err:?}\n"));
-    let missing = BootSecrets::new(Secret::new(JOIN.to_owned()), Vec::new()).unwrap();
+    let missing = BootSecrets::new(Vec::new()).unwrap();
     let err = render(&plan, Fill::Real(&missing)).unwrap_err();
     shown.push_str(&format!("{err} {err:?} {:?}\n", Fill::Real(&missing)));
     let err = payload(&plan, &secrets(), 10).unwrap_err();
     shown.push_str(&format!("{err} {err:?}\n"));
-    assert!(!shown.contains(JOIN) && !shown.contains(KEY), "{shown}");
+    assert!(!shown.contains(KEY), "{shown}");
     assert!(shown.contains("***"));
 }
 

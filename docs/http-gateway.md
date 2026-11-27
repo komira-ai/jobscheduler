@@ -225,16 +225,14 @@ operator's console or admin tooling, for example) must be given `role = "operato
 deployment's configuration. Clients that only submit and follow their own jobs (CI, a build
 farm) keep the default. The client `default`, whose token is the one in `--token-file`
 (`server.client_token_file`), is always an `operator`. That token already opens the host
-routes, the join-token routes and the brake reset, so a narrower role on the job service would
+routes and the brake reset, so a narrower role on the job service would
 restrict nothing its holder cannot already do.
 
-**Reload.** At every tick the server reads each named client's token file again (the same
-tick that reads the agent join tokens again). The bearer layer reads the set in force on every
+**Reload.** At every tick the server reads each named client's token file again. The bearer layer reads the set in force on every
 request. So when a token file is rewritten with a new token, the old token is refused (401,
 `UNAUTHENTICATED`) from the first request after the next tick, and the new one is accepted.
 This is how a leaked token is revoked without a restart. A reload is all or nothing. If any
-file cannot be read, holds no valid token, holds another client's token, or holds a join token
-of the agent side, the whole set in force is kept and one warning line names the entry (never
+file cannot be read, holds no valid token, or holds another client's token, the whole set in force is kept and one warning line names the entry (never
 the token). A good set is never replaced by an empty or partial one. A reload that changes a
 token logs one info line. Names, roles and paths come from the configuration and are read once
 at start, like every other key: adding or removing a client, or changing its role, takes a

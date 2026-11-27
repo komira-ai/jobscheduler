@@ -54,8 +54,9 @@ pub enum Reason {
     /// `rollback` of a first install stops the agent and succeeds. It stays in the vocabulary
     /// that earlier releases reported, which only grows.
     NoPreviousRelease,
-    /// A first install, and the join token file is not there as the agent needs it and the
-    /// state root holds no host credential (exit 75).
+    /// A first install, and the flags file names no host certificate and key, or the files it
+    /// names are not there as the agent needs them (exit 75). The name is kept as a shipped
+    /// wire value from the time the host's way in was a join token.
     JoinTokenMissing,
     /// The unit changes, and its cgroup still holds a process after the stop.
     UnitNotEmpty,

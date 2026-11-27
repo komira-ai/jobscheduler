@@ -2,7 +2,7 @@
 
 use serde_json::{Value, json};
 
-use crate::agents_support::{JOIN, Session, beat, entry, hosts, join, post, start_agents};
+use crate::agents_support::{Session, beat, entry, hosts, join, post, start_agents};
 use crate::support::{Harness, guard};
 
 fn load(seq: u64) -> Value {
@@ -30,7 +30,7 @@ async fn beat_load(h: &Harness, session: &Session, load: Option<Value>) {
     if let Some(load) = load {
         body["load"] = load;
     }
-    let reply = post(h, "/v1/agent/heartbeat", Some(JOIN), &body).await;
+    let reply = post(h, "/v1/agent/heartbeat", None, &body).await;
     assert_eq!(reply.status, 200, "{}", reply.body);
 }
 

@@ -1,5 +1,7 @@
 # Linux build jobs on a Mac the way Docker does it: one long-running Linux VM, our crun inside it
 
+> Historical: this experiment registered with a join token and `--agent-token-file`; G3 removed both, and a host is admitted by its host certificate alone.
+
 Status: experiment record. It states what was run, what was measured and what did and did not work. It decides nothing. The open questions it raises are listed in section 9 and left open.
 
 ## What was asked and the short answer

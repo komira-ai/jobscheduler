@@ -8,21 +8,15 @@ use std::ffi::OsString;
 
 use js_lease_server::{Cli, Config};
 
-use crate::agents_support::{JOIN, POOL};
+use crate::agents_support::{POOL, agent_args};
 use crate::config_support::{PoolText, file, load, refusal, server};
-use crate::support::{Scratch, base_args, config};
+use crate::support::{Scratch, config};
 
 /// The flags of a server with agent registration over the agents' test pool, and `extra`
 /// after them.
 fn args(scratch: &Scratch, extra: &[&str]) -> Vec<OsString> {
-    let mut args = base_args(scratch);
-    let tokens = scratch.write("agent-tokens", &format!("{JOIN}\n"), 0o600);
+    let mut args = agent_args(scratch);
     scratch.write("agent-pool.toml", POOL, 0o644);
-    let flags = [("--agent-token-file", tokens.into_os_string())];
-    for (flag, value) in flags {
-        args.push(flag.into());
-        args.push(value);
-    }
     args.extend(extra.iter().map(OsString::from));
     args
 }

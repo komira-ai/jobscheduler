@@ -1,6 +1,6 @@
-//! The params table of the config hook: the eight keys it requires, the paths and bounds it
+//! The params table of the config hook: the seven keys it requires, the paths and bounds it
 //! refuses, the updater's previous version it reads, the other keys of the updater it ignores
-//! and any other key it refuses.
+//! and any other key it refuses, the retired `token_file` excepted.
 
 use js_agent::update_hook::config::{
     CUTOVER_MIN_SECS, KEYS, Params, ParamsError, ROLLBACK_MIN_SECS, VERIFY_MIN_SECS,
@@ -27,20 +27,16 @@ fn refusal(text: &str) -> String {
     Params::parse(text).unwrap_err().to_string()
 }
 
-/// Asserts that a table with the eight keys reads as its values say, from a file as from text.
+/// Asserts that a table with the seven keys reads as its values say, from a file as from text.
 ///
 /// Catches a key read into the wrong field.
 #[test]
-fn a_table_with_the_eight_keys_is_read() {
+fn a_table_with_the_seven_keys_is_read() {
     let params = Params::parse(&good()).unwrap();
     assert_eq!(params.unit, "js-agent.service");
     assert_eq!(
         params.flags_file.to_str(),
         Some("/var/lib/js-agent-config-test/flags")
-    );
-    assert_eq!(
-        params.token_file.to_str(),
-        Some("/var/lib/js-agent-config-test/token")
     );
     assert_eq!(
         params.state_root.to_str(),
@@ -59,7 +55,7 @@ fn a_table_with_the_eight_keys_is_read() {
         (600, 300, 600)
     );
     assert_eq!(params.previous_version, None);
-    assert_eq!(KEYS.len(), 8);
+    assert_eq!(KEYS.len(), 7);
     let files = Scratch::new("config-hook-params-file");
     let file = files.write("params.toml", &good(), 0o600);
     assert_eq!(Params::read(&file).unwrap(), params);
@@ -101,7 +97,7 @@ fn a_value_of_the_wrong_kind_or_spelling_is_refused_by_name() {
         refusal(&set("flags_file", "\"flags\"")),
         "params key \"flags_file\" must be an absolute path"
     );
-    for key in ["flags_file", "token_file", "state_root", "state_dir"] {
+    for key in ["flags_file", "state_root", "state_dir"] {
         assert_eq!(
             refusal(&set(key, "\"/a/../b\"")),
             format!("params key {key:?} must be an absolute path of plain components"),
@@ -156,6 +152,31 @@ fn a_bound_shorter_than_its_waits_is_refused_and_the_least_is_read() {
         (CUTOVER_MIN_SECS, VERIFY_MIN_SECS, ROLLBACK_MIN_SECS),
         (181, 16, 241)
     );
+}
+
+/// Asserts that a manifest that still names the retired `token_file`, as a config package issued
+/// before hosts were identified by their certificate alone does, is read as one that does not:
+/// the key is ignored whatever its value, and no other key is let through by it.
+///
+/// Catches a config package already in the field that every step of the hook would refuse for
+/// carrying the key.
+#[test]
+fn a_manifest_that_still_names_token_file_is_accepted_and_the_key_ignored() {
+    let named = format!("{}token_file = \"/etc/js-agent/token\"\n", good());
+    assert_eq!(
+        Params::parse(&named).unwrap(),
+        Params::parse(&good()).unwrap()
+    );
+    let relative = format!("{}token_file = \"token\"\n", good());
+    assert_eq!(
+        Params::parse(&relative).unwrap(),
+        Params::parse(&good()).unwrap()
+    );
+    let other = format!("{named}cutover_timeout = 5\n");
+    assert!(matches!(
+        Params::parse(&other).unwrap_err(),
+        ParamsError::Unknown(key) if key == "cutover_timeout"
+    ));
 }
 
 /// Asserts that the updater's keys (`updater.*`) are ignored but for the previous version, which

@@ -312,7 +312,7 @@ fn a_record_of_another_target_that_breaks_a_rule_of_its_own_is_refused_as_before
 }
 
 /// A record of another target is set aside only when the new record is about to be written:
-/// a taint, a staged agent of the wrong version, a missing join token and a lease server that
+/// a taint, a staged agent of the wrong version, a missing host certificate and a lease server that
 /// does not answer each end the step with the record where it was and no other file.
 #[test]
 fn a_record_of_another_target_is_kept_when_prepare_ends_before_it_writes() {
@@ -334,11 +334,11 @@ fn a_record_of_another_target_is_kept_when_prepare_ends_before_it_writes() {
     assert_eq!(rig.record_bytes(), before);
     assert_eq!(state_files(&rig), ["record.json"]);
 
-    let rig = Rig::first_install("hook-supersede-order-token");
+    let rig = Rig::first_install("hook-supersede-order-identity");
     rig.put_record(&left_record(&rig));
     let before = rig.record_bytes();
-    let spy = Spy::new(&rig);
-    spy.token.set(super::step_rig::TokenFile::Missing);
+    let mut spy = Spy::new(&rig);
+    spy.host_identity = None;
     let done = spy.prepare(&rig);
     assert_eq!(done.report.reason, Some(Reason::JoinTokenMissing));
     assert_eq!(rig.record_bytes(), before);

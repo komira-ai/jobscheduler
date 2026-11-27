@@ -25,17 +25,17 @@ fn said(lines: &Lines, message: &str) -> Vec<String> {
 #[tokio::test]
 async fn a_heartbeat_taint_is_logged_when_it_is_committed() {
     let rig = rig("taint_log_stored");
-    let welcome = rig.pooled("host-a", "burst").await.unwrap();
+    let welcome = rig.hello("host-a", "burst").await.unwrap();
     let taint = residue("tmp-files", "r1");
     rig.store.fail_next();
     let lines = Lines::default();
     let capture = capture(&lines);
-    let failed = rig.beat((&rig.pool, None), "host-a", &welcome, taint.clone());
+    let failed = rig.beat("host-a", &welcome, taint.clone());
     assert!(failed.await.is_err());
     let message = "a host's taint is stored from its heartbeat";
     let none = said(&lines, message);
     assert!(none.is_empty(), "{none:?}");
-    let reply = rig.beat((&rig.pool, None), "host-a", &welcome, taint).await;
+    let reply = rig.beat("host-a", &welcome, taint).await;
     assert!(reply.unwrap().taint_ack);
     drop(capture);
     let stored = said(&lines, message);
@@ -50,9 +50,9 @@ async fn a_heartbeat_taint_is_logged_when_it_is_committed() {
 #[tokio::test]
 async fn a_taint_the_agent_clears_is_logged_with_its_reason() {
     let rig = rig("taint_log_agent_clear");
-    let welcome = rig.pooled("host-a", "burst").await.unwrap();
+    let welcome = rig.hello("host-a", "burst").await.unwrap();
     let taint = residue("tmp-files", "r1");
-    let reply = rig.beat((&rig.pool, None), "host-a", &welcome, taint.clone());
+    let reply = rig.beat("host-a", &welcome, taint.clone());
     assert!(reply.await.unwrap().taint_ack);
     let lines = Lines::default();
     let capture = capture(&lines);
@@ -70,9 +70,9 @@ async fn a_taint_the_agent_clears_is_logged_with_its_reason() {
 #[tokio::test]
 async fn a_taint_the_operator_clears_is_logged_with_its_reason() {
     let rig = rig("taint_log_operator_clear");
-    let welcome = rig.pooled("host-a", "burst").await.unwrap();
+    let welcome = rig.hello("host-a", "burst").await.unwrap();
     let taint = residue("tmp-files", "r1");
-    let reply = rig.beat((&rig.pool, None), "host-a", &welcome, taint);
+    let reply = rig.beat("host-a", &welcome, taint);
     assert!(reply.await.unwrap().taint_ack);
     let host = HostId::new("host-a").unwrap();
     let lines = Lines::default();
@@ -92,21 +92,21 @@ async fn a_taint_the_operator_clears_is_logged_with_its_reason() {
 #[tokio::test]
 async fn a_taint_put_back_at_a_hello_is_logged() {
     let first = rig("taint_log_hello_first");
-    let welcome = first.pooled("host-a", "burst").await.unwrap();
+    let welcome = first.hello("host-a", "burst").await.unwrap();
     let taint = residue("tmp-files", "r1");
-    let reply = first.beat((&first.pool, None), "host-a", &welcome, taint);
+    let reply = first.beat("host-a", &welcome, taint);
     assert!(reply.await.unwrap().taint_ack);
     let host = HostId::new("host-a").unwrap();
     let lease = Duration::from_secs(3600);
     let cordoned = first.agents.cordon(&host, lease, Asker::Unnamed).await;
     cordoned.unwrap();
-    first.pooled("host-b", "burst").await.unwrap();
+    first.hello("host-b", "burst").await.unwrap();
 
     let second = Rig::second(&first, "taint_log_hello_second");
     let lines = Lines::default();
     let capture = capture(&lines);
-    second.pooled("host-a", "burst").await.unwrap();
-    second.pooled("host-b", "burst").await.unwrap();
+    second.hello("host-a", "burst").await.unwrap();
+    second.hello("host-b", "burst").await.unwrap();
     drop(capture);
     let until = second.held("host-a").unwrap().cordon_until_ms().unwrap();
     let put = said(&lines, "a host's stored taint or cordon is put back");

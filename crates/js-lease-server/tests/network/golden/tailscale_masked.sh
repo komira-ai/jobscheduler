@@ -75,11 +75,6 @@ useradd --system --no-create-home --shell /usr/sbin/nologin js-jobs
 printf '%s\n' js-jobs:2000000000:65536 >> /etc/subuid
 printf '%s\n' js-jobs:2000000000:65536 >> /etc/subgid
 systemctl restart docker.service
-# identity
-mkdir -p /etc/jobscheduler
-printf '%s' '***' > /etc/jobscheduler/token
-chmod 0600 -- /etc/jobscheduler/token
-printf '%s\n' 'gpu:<HOST>' > /etc/jobscheduler/instance
 # network
 curl --fail --silent --show-error --location --proto =https --output /usr/local/lib/tailscale.tgz --url https://pkgs.example.org/tailscale_static_amd64.tgz
 printf '%s  %s\n' 5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a /usr/local/lib/tailscale.tgz | sha256sum --check --status -
@@ -114,7 +109,7 @@ ConditionPathIsMountPoint=/var/lib/js-agent/scratch
 
 [Service]
 TimeoutStopSec=120
-ExecStart=/usr/local/bin/js-agent --server "https://sched.example.org:7301" --token-file /etc/jobscheduler/token --instance-file /etc/jobscheduler/instance --pool "gpu" --host-id "<HOST>" --allow-container-engine --container-bin /usr/bin/docker --container-subuid js-jobs --container-pull missing --gpu-toolkit-hook /usr/local/lib/js-agent/gpu-toolkit-hook --state-root /var/lib/js-agent/state --scratch-root /var/lib/js-agent/scratch
+ExecStart=/usr/local/bin/js-agent --server "https://sched.example.org:7301" --pool "gpu" --host-id "<HOST>" --allow-container-engine --container-bin /usr/bin/docker --container-subuid js-jobs --container-pull missing --gpu-toolkit-hook /usr/local/lib/js-agent/gpu-toolkit-hook --state-root /var/lib/js-agent/state --scratch-root /var/lib/js-agent/scratch
 Restart=always
 RestartSec=30
 

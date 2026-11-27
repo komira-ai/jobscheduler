@@ -9,7 +9,7 @@ use std::time::Duration;
 use js_lease_server::{Cli, DropReason, NodeRow, UsageCounters};
 use serde_json::json;
 
-use crate::agents_support::{JOIN, JOIN_B, Session, agent_args, join, post};
+use crate::agents_support::{Session, agent_args, join, post};
 use crate::job_hosts::{cpu_hello, placing_args};
 use crate::jobs_support::{
     JobBody, beat_with, exited, job_agent, job_state, one_start, running, submit_body,
@@ -63,7 +63,7 @@ async fn a_beat_with_a_bad_load_still_delivers_its_results() {
     let mut bad = load(1, 1000, &[0]);
     bad["working_set_bytes"] = json!(1u64 << 46);
     body["load"] = bad;
-    let reply = post(&h, "/v1/agent/heartbeat", Some(JOIN), &body).await;
+    let reply = post(&h, "/v1/agent/heartbeat", None, &body).await;
     assert_eq!(reply.status, 200, "{}", reply.body);
     assert_eq!(
         reply.json()["job_acks"],
@@ -399,19 +399,18 @@ async fn rows_come_in_pages_and_the_default_is_the_last_hour() {
     );
 }
 
-/// Asserts the access rule of both routes: no token, a wrong token and either join token
+/// Asserts the access rule of both routes: no token and a wrong token
 /// get a 401 with an empty body; the client token gets the data (an empty list for a node
 /// with no rows, 404 `unknown-key` for a key never seen, and the profile for one that was);
 /// another method is a 405; an unknown path under `/v1/usage` is a 404 for the client
-/// token and a 401 without it. It catches a join token that may read what clients may
-/// read, a route left open, and a wrong method or path answered as if it were a read.
+/// token and a 401 without it. It catches a route left open, and a wrong method or path answered as if it were a read.
 #[tokio::test]
 async fn the_read_routes_are_for_the_client_token_only() {
     let fake = Arc::new(Fake::default());
     let h = start_usage("usage_auth", &fake).await;
     let paths = ["/v1/usage/nodes/burst-1", "/v1/usage/keys/act.build"];
     for path in paths {
-        for token in [None, Some(JOIN), Some(JOIN_B), Some("nope")] {
+        for token in [None, Some(""), Some("nope")] {
             let reply = request(h.addr(), "GET", path, token, None).await;
             assert_eq!(reply.status, 401, "{path} {token:?}");
             assert_eq!(reply.body, "");
@@ -573,7 +572,7 @@ async fn a_sink_that_panics_on_a_reading_costs_the_beat_nothing() {
     let mut body = me.beat();
     body["jobs"] = json!([exited("panics", &allocation)]);
     body["load"] = load(1, 1000, &[0]);
-    let reply = post(&h, "/v1/agent/heartbeat", Some(JOIN), &body).await;
+    let reply = post(&h, "/v1/agent/heartbeat", None, &body).await;
     assert_eq!(reply.status, 200, "{}", reply.body);
     assert_eq!(
         reply.json()["job_acks"],

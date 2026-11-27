@@ -23,7 +23,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError, RwLock};
 
 use js_jobs::ClientName;
-use js_registry::Credential;
 use sha2::{Digest as _, Sha256};
 use subtle::ConstantTimeEq;
 
@@ -40,17 +39,6 @@ impl Token {
     /// of a token is not a secret).
     pub(crate) fn matches(&self, given: &[u8]) -> bool {
         self.0.ct_eq(given).into()
-    }
-
-    /// Whether `other` is the same token, compared as [`Token::matches`] does.
-    pub(crate) fn same_as(&self, other: &Token) -> bool {
-        self.matches(&other.0)
-    }
-
-    /// The credential a host admitted with this token is bound to. A token is printable
-    /// ASCII, so its text is exact.
-    pub(crate) fn credential(&self) -> Credential {
-        Credential::of_token(&String::from_utf8_lossy(&self.0))
     }
 }
 
@@ -187,13 +175,11 @@ impl Clients {
 
     /// The same clients, each named client's token read again from its file by `read`:
     /// `default` and every name, role and order kept. Refused, naming the client's entry and
-    /// never the token, when a file cannot be read or holds no valid token, when two clients
-    /// would hold one token, or when `taken` says a token is not a client's to hold (it
-    /// gives the reason); nothing is replaced then.
+    /// never the token, when a file cannot be read or holds no valid token, or when two clients
+    /// would hold one token; nothing is replaced then.
     pub(crate) fn reread(
         &self,
         read: &dyn Fn(&Path) -> Result<Vec<u8>, String>,
-        taken: &dyn Fn(&Token) -> Option<String>,
     ) -> Result<Clients, String> {
         let mut again = Clients {
             each: Vec::with_capacity(self.each.len()),
@@ -205,9 +191,6 @@ impl Clients {
             };
             let place = &client.place;
             let token = token_at(file, read).map_err(|reason| format!("{place}: {reason}"))?;
-            if let Some(reason) = taken(&token) {
-                return Err(format!("{place}: {reason}"));
-            }
             let entry = Entry {
                 name: client.name.clone(),
                 role: client.role,
@@ -233,11 +216,6 @@ impl Clients {
                 .collect()
         };
         digests(self) == digests(other)
-    }
-
-    /// The entry of the client whose token is `token`, if one's is.
-    pub(crate) fn holder_of(&self, token: &Token) -> Option<&str> {
-        self.holder(&digest(&token.0))
     }
 
     /// The entry of the client whose token has `digest`, if one's has.
@@ -347,16 +325,15 @@ impl LiveClients {
         Arc::clone(&self.0.read().unwrap_or_else(PoisonError::into_inner))
     }
 
-    /// Reads every named client's token file again by `read` ([`Clients::reread`], with
-    /// `taken` the tokens no client may hold) and, when every file is valid, puts the new
-    /// set in force; whether its tokens differ from the set it replaced. A refusal keeps the
-    /// set in force, whole, and says why, naming the entry and never the token.
+    /// Reads every named client's token file again by `read` ([`Clients::reread`]) and, when
+    /// every file is valid, puts the new set in force; whether its tokens differ from the set
+    /// it replaced. A refusal keeps the set in force, whole, and says why, naming the entry
+    /// and never the token.
     pub(crate) fn reload(
         &self,
         read: &dyn Fn(&Path) -> Result<Vec<u8>, String>,
-        taken: &dyn Fn(&Token) -> Option<String>,
     ) -> Result<bool, String> {
-        let again = self.now().reread(read, taken)?;
+        let again = self.now().reread(read)?;
         let mut held = self.0.write().unwrap_or_else(PoisonError::into_inner);
         let changed = !held.same_as(&again);
         *held = Arc::new(again);

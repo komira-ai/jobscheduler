@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use js_agent_wire::{HeldJob, InstanceIdentity};
+use js_agent_wire::HeldJob;
 use js_jobs::interfere::{INJECTED, Interfere};
 use js_jobs::{JobId, JobStore, NodeHello, NodeRow, Retention};
 use js_registry::{PoolConfig, Registry, SessionSource};
@@ -102,10 +102,9 @@ fn tables_over(store: &std::sync::Arc<Interfere<Fake>>) -> ServerJobs {
     jobs.with_retention(Retention::DEFAULT)
 }
 
-/// A server of a [`World`]: its agent side and the credential its pool's hosts use.
+/// A server of a [`World`]: its agent side. Each host of its pool presents its own certificate.
 pub(super) struct Server {
     pub(super) agents: Arc<Agents>,
-    pub(super) who: Credential,
     _dir: TestDir,
 }
 
@@ -161,10 +160,8 @@ impl World {
         if kind.placing {
             agents = agents.with_placer(placer);
         }
-        let who = agents.tokens.identify(&"j".repeat(40)).unwrap();
         Server {
             agents: Arc::new(agents),
-            who,
             _dir: dir,
         }
     }
@@ -257,13 +254,25 @@ pub(super) fn beat_body(
     Bytes::from(beat.to_string())
 }
 
-/// The route's answer to the heartbeat `body`, for `agents` and `who`.
+/// The credential the registry knows the host `host` by: the one its certificate gives.
+pub(super) fn who_of(host: &str) -> Credential {
+    Credential::of_host_certificate(&id(host))
+}
+
+/// The route's answer to the heartbeat `body` of `host`, presented with the host's certificate.
 pub(super) async fn post_beat(
     agents: Arc<Agents>,
-    who: Credential,
+    host: &str,
     body: Bytes,
 ) -> Result<HeartbeatReply, Refused> {
-    let answer = heartbeat(State(agents), Extension(who), (None, None), None, Ok(body));
+    let certified = Extension(CertifiedHost(id(host)));
+    let answer = heartbeat(
+        State(agents),
+        Extension(who_of(host)),
+        certified,
+        None,
+        Ok(body),
+    );
     answer.await.map(|Json(reply)| reply)
 }
 
@@ -273,10 +282,10 @@ pub(super) fn said(refused: &Refused) -> (u16, &'static str) {
 }
 
 impl Server {
-    /// The hello of `host` through the route, with the pool's join token.
+    /// The hello of `host` through the route, with the host's certificate.
     pub(super) async fn hello(&self, host: &str) -> Result<Welcome, Refused> {
         let body = Ok(hello_body(host));
-        let welcome = serve_hello(&self.agents, self.who.clone(), None, body, &|| ());
+        let welcome = serve_hello(&self.agents, host, body, &|| ());
         welcome.await.map(|Json(welcome)| welcome)
     }
 
@@ -309,7 +318,7 @@ impl Server {
         extra: Value,
     ) -> Result<HeartbeatReply, Refused> {
         let body = beat_body(session, seq, jobs, extra);
-        post_beat(Arc::clone(&self.agents), self.who.clone(), body).await
+        post_beat(Arc::clone(&self.agents), &session.host, body).await
     }
 
     /// The epoch of the session this server's registry holds of `host`.
@@ -340,14 +349,6 @@ fn hello_of(host: &str) -> Hello {
     serde_json::from_slice(&hello_body(host)).unwrap()
 }
 
-/// The instance a one-time token is minted for.
-fn instance() -> InstanceIdentity {
-    InstanceIdentity {
-        provider: "lambdalabs".to_owned(),
-        instance_id: "i-1".to_owned(),
-    }
-}
-
 /// Asserts that every call of the module does nothing when the server holds no job tables: the
 /// registry's session is the host's session, nothing is written, a beat is applied to no row,
 /// and a host's listing is clean. Catches a server without the job tables that reads or
@@ -363,7 +364,11 @@ async fn without_the_job_tables_no_call_reads_or_writes_a_row() {
         .await
         .unwrap();
     let hello = hello_of("host-a");
-    let mut welcome = server.agents.registry.hello(&hello, &server.who).unwrap();
+    let mut welcome = server
+        .agents
+        .registry
+        .hello(&hello, &who_of("host-a"))
+        .unwrap();
     let epoch = welcome.epoch;
     record_hello(&server.agents, &host, &hello, &mut welcome).unwrap();
     hello_row(&server.agents, &host, &hello, &mut welcome)
@@ -414,29 +419,16 @@ async fn a_hello_takes_the_epoch_the_store_numbers() {
 
 /// Asserts that a hello whose row cannot be written is refused 503 `state-write-failed`, that
 /// the registry gives its session up (the retried hello is admitted, not refused `host-live`),
-/// that the one-time token stays the host's (the same token admits the retry), and that no
-/// row is left by the failure. Catches a refused hello that leaves the registry holding a
-/// session no row backs, which makes the agent's retry `host-live` for as long as it beats
-/// nothing, and a retry the token refuses after the failed hello used it.
+/// and that no row is left by the failure. Catches a refused hello that leaves the registry
+/// holding a session no row backs, which makes the agent's retry `host-live` for as long as it
+/// beats nothing.
 #[tokio::test]
 async fn a_hello_whose_row_cannot_be_written_leaves_nothing_held() {
     let world = World::new();
     let server = world.server("rows_hello_fails", Kind::JOBS);
-    let minted = server
-        .agents
-        .joins
-        .mint(instance(), Duration::from_secs(600))
-        .unwrap();
-    let token = Credential::of_token(&minted.token);
     let hello = || {
         let body = Ok(hello_body("host-a"));
-        let welcome = serve_hello(
-            &server.agents,
-            token.clone(),
-            Some(token.clone()),
-            body,
-            &|| (),
-        );
+        let welcome = serve_hello(&server.agents, "host-a", body, &|| ());
         async move { welcome.await.map(|Json(welcome)| welcome) }
     };
 
@@ -445,9 +437,7 @@ async fn a_hello_whose_row_cannot_be_written_leaves_nothing_held() {
     assert_eq!(said(&refused), (503, "state-write-failed"));
     assert_eq!(world.jobs.read_node(&id("host-a")).unwrap(), None);
 
-    let welcome = hello()
-        .await
-        .expect("not host-live, and the token is not spent");
+    let welcome = hello().await.expect("not host-live");
     assert_eq!(welcome.epoch, 1);
     assert_eq!(server.holds("host-a"), Some(1));
 }
@@ -723,7 +713,11 @@ fn settle_writes_the_flags_at_the_version_the_beat_wrote() {
     let host = id("host-a");
     let welcome = {
         let hello = hello_of("host-a");
-        let mut welcome = server.agents.registry.hello(&hello, &server.who).unwrap();
+        let mut welcome = server
+            .agents
+            .registry
+            .hello(&hello, &who_of("host-a"))
+            .unwrap();
         record_hello(&server.agents, &host, &hello, &mut welcome).unwrap();
         welcome
     };

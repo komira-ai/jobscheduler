@@ -38,9 +38,6 @@ use standin::{BeatAnswer, Cell, POOL, SESSION_PREFIX, Script, agent, agent_mut, 
 /// The heartbeat interval the stand-in's welcome names, and the agent's hello interval.
 const INTERVAL: Duration = Duration::from_millis(1_000);
 
-/// The join token of every agent here.
-const JOIN: &str = "join-token-sim-0123456789-abcdefghij";
-
 /// How long a run that should outlast the test runs.
 const LONG_RUN_MS: u64 = 60_000;
 
@@ -64,7 +61,7 @@ fn spec(root: &TestDir) -> AgentSpec {
     AgentSpec {
         host: HostId::new("h000").expect("host id"),
         pool: POOL.to_owned(),
-        join_token: JOIN.to_owned(),
+        certificate: Some(HostId::new("h000").expect("host id")),
         capacity: Resources::new(8_000, 16 * GIB, 1, Some("nvidia-a100".to_owned()))
             .expect("capacity"),
         capabilities: BTreeMap::from([("isa".to_owned(), "x86-64-v3".to_owned())]),
@@ -184,7 +181,8 @@ fn a_real_agent_registers_heartbeats_and_runs_a_start() {
     assert_eq!(hello.pool, POOL);
     assert_eq!(hello.shape.cpu_millis, 8_000);
     assert_eq!(hello.shape.gpus, 1);
-    assert!(server.received.iter().all(|call| call.bearer == JOIN));
+    let own = HostId::new("h000").ok();
+    assert!(server.received.iter().all(|call| call.certificate == own));
     assert_eq!(server.beat_times(), [1_015, 2_025, 3_035, 4_045, 5_055]);
     let none = runs(&[]);
     let r1 = runs(&["r1"]);

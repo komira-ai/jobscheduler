@@ -30,16 +30,13 @@
 //! and goes to the same server. Time is read from the clock it is given, so a test moves it
 //! by hand. Every line it has to say is returned to the loop, which logs it.
 //!
-//! The credential is the one the agent registered with: its host certificate, otherwise the
-//! host credential in the state root (the own-host routes refuse the shared pool token),
-//! otherwise the token file ([`login`]).
+//! The credential is the one the agent registered with: its host certificate.
 //!
 //! [`RequestLimit::DEFAULT`]: crate::own_host::RequestLimit::DEFAULT
 
 use std::path::Path;
 use std::time::Duration;
 
-use crate::credential::CredentialFile;
 use crate::lifecycle::Clock;
 use crate::lifecycle::hold;
 use crate::lifecycle::taint::StateRoot;
@@ -65,9 +62,9 @@ const RENEW_MS: u64 = HOLD_LEASE_SECS * 1000 / 3;
 /// [`HOLD_RETRY`] in milliseconds.
 const RETRY_MS: u64 = RETRY_SECS * 1000;
 
-/// Connects to the lease server's own-host routes as this host, with the state root at the
-/// path given; the error is the text a person is told.
-pub type Connect<'a> = dyn Fn(&Path) -> Result<Box<dyn Lease>, String> + 'a;
+/// Connects to the lease server's own-host routes as this host; the error is the text a
+/// person is told.
+pub type Connect<'a> = dyn Fn() -> Result<Box<dyn Lease>, String> + 'a;
 
 /// What the keeper reads and asks.
 pub struct Seams<'a> {
@@ -88,8 +85,7 @@ pub struct Seams<'a> {
 pub struct Keeper<'a> {
     seams: Seams<'a>,
     /// The connection, once made; dropped after a request that failed for another reason
-    /// than an unknown host, so the next one connects again (with the credential the state
-    /// root holds by then).
+    /// than an unknown host, so the next one connects again.
     lease: Option<Box<dyn Lease>>,
     /// A hello of this process has been accepted: the server knows the host.
     heard: bool,
@@ -189,7 +185,7 @@ impl<'a> Keeper<'a> {
     fn cordon(&mut self) -> Result<Cordoned, String> {
         let lease = match self.lease.take() {
             Some(lease) => lease,
-            None => (self.seams.connect)(self.seams.state.path())?,
+            None => (self.seams.connect)()?,
         };
         let answer = lease.cordon(HOLD_LEASE_SECS);
         let named = answer.and_then(|cordoned| match cordoned.host.id == self.seams.host {
@@ -206,41 +202,21 @@ impl<'a> Keeper<'a> {
     }
 }
 
-/// The credential the keeper presents, chosen from what the agent registered with
-/// (`registered`): the host certificate when the agent presents one; otherwise the host
-/// credential the state root at `root` holds, when it holds one that can be read; otherwise
-/// what the agent registered with (its token file).
-#[must_use]
-pub fn login(registered: &Login, root: &Path) -> Login {
-    if matches!(registered, Login::HostCertificate(_)) {
-        return registered.clone();
-    }
-    let file = CredentialFile::in_dir(root);
-    match file.load() {
-        Ok(Some(_)) => Login::Token(file.path()),
-        _ => registered.clone(),
-    }
-}
-
 /// The daemon's [`Connect`]: the own-host routes of `server` (trusting `ca_cert`) as `host`,
-/// with the credential [`login`] chooses from what the agent registered with
-/// (`registered`) and the state root at `root`, each call bounded by
+/// with the login the agent registered with (`registered`), each call bounded by
 /// [`RequestLimit::DEFAULT`]. The error is what `js-client` says of the flag or file it
 /// could not use.
 ///
 /// # Errors
 ///
-/// The text of the client's error: an unusable server address, credential file or
-/// certificate.
+/// The text of the client's error: an unusable server address or certificate.
 pub fn connect_http(
     server: &str,
     registered: &Login,
     ca_cert: Option<&Path>,
     host: &str,
-    root: &Path,
 ) -> Result<Box<dyn Lease>, String> {
-    let chosen = login(registered, root);
-    HttpLease::connect(server, &chosen, ca_cert, host, RequestLimit::DEFAULT)
+    HttpLease::connect(server, registered, ca_cert, host, RequestLimit::DEFAULT)
         .map(|lease| Box::new(lease) as Box<dyn Lease>)
         .map_err(|why| why.to_string())
 }

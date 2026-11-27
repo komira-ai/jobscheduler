@@ -8,15 +8,15 @@ so.
 
 | Store | What it holds | Opened when |
 |---|---|---|
-| The Postgres store (`--store <file>` or `server.store`; schema `kbf_state`) | No lock and no generation: any number of servers write it at once. (The table `writer_generation` from schema version 2 stays in the schema and is not read or written.) With agent registration, the host bindings (`hosts/binding/<host id>`, with each host's taint and cordon) and the digests of the join tokens and host credentials (`hosts/join/<digest>`); with an elastic pool, the scaler's records (`acquires/scaler/records`) and the hosts to remove (`acquires/scaler/unremoved`); and the marker of the first start's import (`meta/server-state-imported`); with the job service on, every job, allocation, mark, taint and the change feed (`job/`, `alloc/`, `mark/`, `taint/`, `idx/` and the feed rows; schema marker `meta/jobs/schema`), and the delivery of each job's completion callback (`callback/`, which holds the callback's signing key until its delivery ends); with usage on, the usage rows (`usage/`); all in the `kv` table. | The setting is given. The server opens it before it reads anything else and before it binds a listener. |
+| The Postgres store (`--store <file>` or `server.store`; schema `kbf_state`) | No lock and no generation: any number of servers write it at once. (The table `writer_generation` from schema version 2 stays in the schema and is not read or written.) With agent registration, the host bindings (`hosts/binding/<host id>`, with each host's taint and cordon) (the old rows `hosts/join/<digest>` of join tokens and host credentials are no longer read or written, and stay where they are); with an elastic pool, the scaler's records (`acquires/scaler/records`) and the hosts to remove (`acquires/scaler/unremoved`); and the marker of the first start's import (`meta/server-state-imported`); with the job service on, every job, allocation, mark, taint and the change feed (`job/`, `alloc/`, `mark/`, `taint/`, `idx/` and the feed rows; schema marker `meta/jobs/schema`), and the delivery of each job's completion callback (`callback/`, which holds the callback's signing key until its delivery ends); with usage on, the usage rows (`usage/`); all in the `kv` table. | The setting is given. The server opens it before it reads anything else and before it binds a listener. |
 | The job store, `<state file>.jobs` (SQLite, owner-only), only without a store setting | Every job and every allocation. With a store setting the file is not made, opened or read; one an earlier start left stays where it was, as a backup. | The job service is on (`--job-listen`, `server.job_listen`) and there is no store setting. |
-| The binding file (`<state file>.agents`) | Which credential and instance each registered host was admitted with. There is no lease file: the server never opens one, and a lease file left by an earlier release stays as it was. | Always (the binding file, and `<state file>.joins`, with agent registration and no store setting). |
+| The binding file (`<state file>.agents`) | Which credential and instance each registered host was admitted with. There is no lease file: the server never opens one, and a lease file left by an earlier release stays as it was. | Always (the binding file, with agent registration and no store setting). `<state file>.joins` is no longer read or written; one an earlier release left stays where it was. |
 
 Two limits of the code as built shape everything below:
 
 - **The store holds the server's host state.** With agent registration or an elastic pool, the server keeps its host
-  bindings, join tokens, scaler records and hosts to remove in the store. Its first start over an empty store imports
-  `<state file>.agents`, `.joins`, `.scaler` and `.scaler.unremoved` once (`docs/design/configuration.md`, "The first start"), and
+  bindings, scaler records and hosts to remove in the store. Its first start over an empty store imports
+  `<state file>.agents`, `.scaler` and `.scaler.unremoved` once (`docs/design/configuration.md`, "The first start"), and
   leaves them in place; they are stale from then on. The job store and the usage rows are in the store too, from their first start over it, with no jobs: nothing in `<state file>.jobs` or `usage.db` is copied (cutover: drain the farm, deploy, start; the files stay as a backup).
 - **The server creates no schema.** The schema is created and migrated by the installer, which is not in this repository. A database
   without the schema is refused at start: `--store: the store could not be opened: ...`, with the reason.
@@ -102,7 +102,7 @@ while the server runs: the library has an online backup (`js_state::sqlite::back
 A file taken while the server runs, by any tool other than SQLite's own backup, is not a backup.
 
 **The binding file**, with the server stopped, together with the job store: the two are one state and are
-restored together. With a store setting there is no binding file (nor join token, scaler records or unremoved file): their state is
+restored together. With a store setting there is no binding file (nor scaler records or unremoved file): their state is
 in the Postgres store, and its backup goes with the job store. The files the first start imported are left beside
 the job store, stale; restoring them does not restore the store.
 

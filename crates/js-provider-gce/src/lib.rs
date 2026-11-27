@@ -49,8 +49,8 @@
 //! logged.
 //!
 //! **Scheduling.** Every instance is created with `onHostMaintenance` `TERMINATE` and
-//! `automaticRestart` false: a restarted machine would boot the agent again with a spent
-//! join token. A Spot instance is deleted when the cloud preempts it
+//! `automaticRestart` false: a restarted machine would boot the agent a second
+//! time. A Spot instance is deleted when the cloud preempts it
 //! (`instanceTerminationAction` `DELETE`), so a reclaimed machine does not linger as
 //! `TERMINATED`; a pool that bounds a machine's lifetime has it set as the instance's
 //! `maxRunDuration`, with the same deletion, so billing stops even if the scheduler is
@@ -69,7 +69,7 @@
 //! signs. [`GoogleIdentityVerifier`] checks its signature against the keys the crate pins;
 //! the provider then accepts the hello only when the token names the configured project and
 //! the zone, id and name of the instance launched under that name. A hello with no identity
-//! is matched by name and instance id, and the one-time join token stays the credential.
+//! is matched by name and instance id, and the host certificate stays the credential.
 //!
 //! **GPU jobs.** A machine type with accelerators is offered with them, but jobs on these
 //! machines run on the fallback runtime until GPU passthrough for `crun` exists; this crate

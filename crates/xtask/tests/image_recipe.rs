@@ -175,7 +175,7 @@ fn image_recipe_rejects_secret_material() {
     let text = std::fs::read_to_string(&pins).expect("pins");
     let changed = text.replacen(
         "[linux-arm64]\n",
-        "[linux-arm64]\njoin_token = \"t0k3n\"\n",
+        "[linux-arm64]\napi_token = \"t0k3n\"\n",
         1,
     );
     assert_ne!(changed, text);
@@ -185,7 +185,7 @@ fn image_recipe_rejects_secret_material() {
     assert_eq!(
         refused.to_string(),
         format!(
-            "{}: linux-arm64.join_token: the key \"join_token\" {tail}",
+            "{}: linux-arm64.api_token: the key \"api_token\" {tail}",
             pins.display()
         )
     );

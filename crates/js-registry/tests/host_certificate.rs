@@ -1,5 +1,5 @@
-//! The credential of a host certificate, and the hello that moves a host bound to a join
-//! token over to it.
+//! The credential of a host certificate, and the hello that moves a host bound to another
+//! credential over to it.
 
 mod support;
 
@@ -23,7 +23,7 @@ fn hello_certified(fx: &Fixture, name: &str) -> Result<js_agent_wire::Welcome, R
 
 /// Asserts what makes the credential of a certificate a credential of a host: the same host
 /// gives the same credential whatever the certificate's key, another host gives another, no
-/// join token (not even the host id taken as one) is it, and it survives the hex form the
+/// other credential (not even the host id taken as one) is it, and it survives the hex form the
 /// bindings are stored in.
 #[test]
 fn a_host_certificate_credential_belongs_to_its_host_alone() {
@@ -49,9 +49,9 @@ fn a_certificate_hello_binds_a_new_host_to_the_certificate_credential() {
     assert_eq!(hello_certified(&fx, "a").unwrap().epoch, 2);
 }
 
-/// Asserts that a host bound to a join token that is not live is bound to its certificate
+/// Asserts that a host bound to another credential that is not live is bound to its certificate
 /// credential by the certificate's first hello, with the taint and the cordon it had kept
-/// and the epoch carried on; and that the join token is then refused as host-bound.
+/// and the epoch carried on; and that the old credential is then refused as host-bound.
 #[test]
 fn a_certificate_hello_rebinds_a_lost_token_host_keeping_its_taint_and_cordon() {
     let fx = fixture(2);
@@ -78,7 +78,7 @@ fn a_certificate_hello_rebinds_a_lost_token_host_keeping_its_taint_and_cordon() 
     assert_eq!(token, Refusal::HostBound);
 }
 
-/// Asserts that a host bound to a join token that is live keeps its binding against a
+/// Asserts that a host bound to another credential that is live keeps its binding against a
 /// certificate hello, which is refused as host-live.
 #[test]
 fn a_certificate_hello_does_not_take_a_live_token_host() {
@@ -90,9 +90,9 @@ fn a_certificate_hello_does_not_take_a_live_token_host() {
     assert_eq!(fx.registry.hosts()[0].state, HostState::Live);
 }
 
-/// Asserts that a host bound to a certificate is never taken by a join token, live or lost.
+/// Asserts that a host bound to a certificate is never taken by another credential, live or lost.
 #[test]
-fn a_join_token_does_not_take_a_certificate_host() {
+fn a_non_certificate_credential_does_not_take_a_certificate_host() {
     let fx = fixture(2);
     hello_certified(&fx, "a").unwrap();
     assert_eq!(
@@ -106,7 +106,7 @@ fn a_join_token_does_not_take_a_certificate_host() {
     );
 }
 
-/// Asserts that the instance of a token binding is replaced by the certificate hello's
+/// Asserts that the instance of an earlier binding is replaced by the certificate hello's
 /// (here none), and that a certificate host whose binding names an instance holds a later
 /// hello of the same certificate to it, as any binding does.
 #[test]

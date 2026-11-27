@@ -9,7 +9,7 @@
 //! After enough failed boots in a row (`boot_fail_trip_after`) the scaler puts a pool in
 //! `plan`, raises the alert `brake:<pool>` and keeps it there until a person asks for this.
 //! Time does not clear it. The route is behind the client token, like the lease routes and
-//! the join-token routes: the server has no operator credential of its own, and whoever may
+//! the other routes: the server has no operator credential of its own, and whoever may
 //! admit machines may re-enable the pool that launches them. A pool that is neither the
 //! server's own nor one the records still hold a brake for is a 404; a pool taken out of the
 //! file keeps its trip and its alert until it is reset here.

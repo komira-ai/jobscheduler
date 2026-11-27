@@ -1,11 +1,11 @@
 //! Host certificates over a real TLS listener on 127.0.0.1: which certificates
-//! the handshake accepts, what a certificate is the credential for, and that token agents and
-//! lease clients are served on the same listener with the CA configured.
+//! the handshake accepts, what a certificate is the credential for, and that lease clients are
+//! served on the same listener with the CA configured while an agent with no certificate is not.
 
 use rcgen::ExtendedKeyUsagePurpose as Usage;
 use serde_json::{Value, json};
 
-use crate::agents_support::{JOIN, hello_body};
+use crate::agents_support::hello_body;
 use crate::host_certs_support::{AGENT_ROLE_URI, Ca, Options, Rig, Spec, beat_of};
 use crate::support::TOKEN;
 
@@ -19,9 +19,9 @@ fn code(reply: &crate::support::Reply) -> String {
 
 /// Asserts that the host certificate of a host, from the CA the server was given,
 /// is the whole credential: with no bearer it opens a session by hello, beats it, reads the
-/// host's own state and cordons it, and the welcome carries no host credential. A bearer that
-/// is not a token of the pool beside the certificate changes nothing: the certificate is the
-/// credential and the bearer is not consulted.
+/// host's own state and cordons it, and the welcome carries no host credential. A bearer beside
+/// the certificate changes nothing: the certificate is the credential and the bearer is not
+/// consulted.
 #[tokio::test]
 async fn a_host_certificate_is_the_whole_credential_of_its_host() {
     let rig = Rig::start("host_cert_whole", Options::FILES).await;
@@ -181,24 +181,17 @@ async fn a_request_about_another_host_than_the_certificates_is_refused() {
     assert!(!listed.to_string().contains("farm-2"), "{listed}");
 }
 
-/// Asserts that with the CA configured the server serves, on the same listener, a token agent
-/// (hello and heartbeat with the pool's join token and no certificate), a lease client (the
-/// host list with the client token) and the health route, none presenting a certificate; and
-/// that the pool's token is not an own-host credential, as before.
+/// Asserts that with the CA configured the server serves, on the same listener, a lease client
+/// (the host list with the client token) and the health route, neither presenting a
+/// certificate; and that a hello and an own-host read that present none are refused 401
+/// `host-certificate-required`, with no bearer and with the client token, and admit nothing.
 #[tokio::test]
-async fn token_agents_and_lease_clients_need_no_certificate() {
+async fn lease_clients_need_no_certificate_and_an_agent_without_one_is_refused() {
     let rig = Rig::start("host_cert_tokens", Options::FILES).await;
-    let client = rig.client(None);
-    let hello = client
-        .hello(Some(JOIN), &hello_body("farm-9"))
-        .await
-        .unwrap();
+    let certified = rig.client(Some(&rig.ca.issue(&Spec::host("farm-9"))));
+    let hello = certified.hello(None, &hello_body("farm-9")).await.unwrap();
     assert_eq!(hello.status, 200, "{}", hello.body);
-    let beat = client
-        .beat(Some(JOIN), &beat_of(&hello, "farm-9"))
-        .await
-        .unwrap();
-    assert_eq!(beat.status, 200, "{}", beat.body);
+    let client = rig.client(None);
     let hosts = client
         .send("GET", "/v1/hosts", Some(TOKEN), None)
         .await
@@ -207,10 +200,15 @@ async fn token_agents_and_lease_clients_need_no_certificate() {
     assert!(hosts.body.contains("farm-9"), "{}", hosts.body);
     let health = client.send("GET", "/healthz", None, None).await.unwrap();
     assert_eq!((health.status, health.body.as_str()), (200, "ok"));
-    let own = client.host(Some(JOIN), "farm-9").await.unwrap();
-    assert_eq!(code(&own), "host-credential-required");
-    let bare = client.hello(None, &hello_body("farm-9")).await.unwrap();
-    assert_eq!(bare.status, 401);
+    for bearer in [None, Some(TOKEN)] {
+        let own = client.host(bearer, "farm-9").await.unwrap();
+        assert_eq!(own.status, 401, "{}", own.body);
+        assert_eq!(code(&own), "host-certificate-required");
+        let bare = client.hello(bearer, &hello_body("farm-8")).await.unwrap();
+        assert_eq!(bare.status, 401, "{}", bare.body);
+        assert_eq!(code(&bare), "host-certificate-required");
+    }
+    assert!(!rig.listing().await.to_string().contains("farm-8"));
 }
 
 /// Asserts that the CA's certificates are trusted whichever of the two a leaf was issued from:

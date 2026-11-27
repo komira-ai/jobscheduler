@@ -25,6 +25,7 @@ use js_agent::{
 use js_agent_wire::HeldState;
 
 use crate::node::{JOB_USER, Node};
+use crate::server::HostFiles;
 
 /// How long a side waits for the other before the test fails: a guard against a hang, never
 /// an expectation. A healthy agent answers within milliseconds, and the cases assert on what
@@ -209,11 +210,17 @@ pub struct Agent {
 }
 
 impl Agent {
-    /// Starts the agent of `node` with the join token in `token`, against the lease port
+    /// Starts the agent of `node` with the host files `host`, against the lease port
     /// `server`, as the host `host_id`, with `extra` flags after its own; returns once it has
     /// said hello and waits for its first heartbeat.
-    pub fn start(node: &Node, server: &str, token: &Path, host_id: &str, extra: &[&str]) -> Self {
-        Self::spawn(node, Self::args(node, server, token, host_id, extra)).unwrap_or_else(|ran| {
+    pub fn start(
+        node: &Node,
+        server: &str,
+        host: &HostFiles,
+        host_id: &str,
+        extra: &[&str],
+    ) -> Self {
+        Self::spawn(node, Self::args(node, server, host, host_id, extra)).unwrap_or_else(|ran| {
             panic!(
                 "the agent ended before its worker started ({}):\n{}",
                 ran.status, ran.err
@@ -223,8 +230,8 @@ impl Agent {
 
     /// [`Agent::start`] with no extra flags: the runtime of a Linux build, `crun`, is the only one
     /// a start with none of `--no-jobs` and `--allow-container-engine` has.
-    pub fn start_defaulted(node: &Node, server: &str, token: &Path, host_id: &str) -> Self {
-        Self::spawn(node, Self::args(node, server, token, host_id, &[])).unwrap_or_else(|ran| {
+    pub fn start_defaulted(node: &Node, server: &str, host: &HostFiles, host_id: &str) -> Self {
+        Self::spawn(node, Self::args(node, server, host, host_id, &[])).unwrap_or_else(|ran| {
             panic!(
                 "the agent ended before its worker started ({}):\n{}",
                 ran.status, ran.err
@@ -233,8 +240,14 @@ impl Agent {
     }
 
     /// An agent that is expected to end before its worker starts: how it ended.
-    pub fn refused(node: &Node, server: &str, token: &Path, host_id: &str, extra: &[&str]) -> Ran {
-        match Self::spawn(node, Self::args(node, server, token, host_id, extra)) {
+    pub fn refused(
+        node: &Node,
+        server: &str,
+        host: &HostFiles,
+        host_id: &str,
+        extra: &[&str],
+    ) -> Ran {
+        match Self::spawn(node, Self::args(node, server, host, host_id, extra)) {
             Ok(agent) => panic!("the agent started: {}", agent.stop().err),
             Err(ran) => ran,
         }
@@ -244,7 +257,7 @@ impl Agent {
     fn args(
         node: &Node,
         server: &str,
-        token: &Path,
+        host: &HostFiles,
         host_id: &str,
         extra: &[&str],
     ) -> Vec<OsString> {
@@ -263,7 +276,9 @@ impl Agent {
             .map(OsString::from)
             .chain(
                 [
-                    ("--token-file", token),
+                    ("--host-cert", host.cert.as_path()),
+                    ("--host-key", host.key.as_path()),
+                    ("--ca-cert", host.trust.as_path()),
                     ("--crun-bin", node.crun.as_path()),
                     ("--state-root", node.state.as_path()),
                     ("--scratch-root", node.scratch.as_path()),

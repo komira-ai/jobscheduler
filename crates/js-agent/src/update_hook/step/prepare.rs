@@ -26,14 +26,13 @@
 //! 3. the staged release's agent (`bin/js-agent`, or `tree/usr/bin/js-agent` in a native package
 //!    release, see [`agent_in`]) `--version` names the target version (1), and the staged release
 //!    carries the unit the hook manages (`bad_artifact` otherwise);
-//! 4. a first install needs a way to authenticate: when the host's flags file names the host's
+//! 4. a first install needs a way to authenticate: the host's flags file names the host's
 //!    certificate and key (`--host-cert` and `--host-key`), both files must be there and the
 //!    key must pass the rule the agent holds it to (a regular file owned by root or the hook's
-//!    user, no access for others, not writable by its group), and the token file is not looked
-//!    at; when it names neither, or cannot be read, the state root holds a host credential, or
-//!    the token file is a regular file of the hook's user, mode 0600 or 0400. Otherwise the
-//!    step defers (75, `join_token_missing`, a reason that is a shipped wire value) and the
-//!    detail names the file to fix;
+//!    user, no access for others, not writable by its group). Otherwise (the flags file names
+//!    neither, or cannot be read) the step defers (75, `join_token_missing`, a reason name
+//!    that is a shipped wire value and is kept though no token exists) and the detail names
+//!    what to fix;
 //! 5. on a Mac whose params ask for it, first install or update, the host setup (see
 //!    [`host_setup`](super::host_setup)): the helper's socket group, the agent's state root and
 //!    a scratch root on a volume of its own are made when they are not there. A part that cannot
@@ -98,7 +97,7 @@ use crate::update_hook::{
 
 use super::host_setup::set_up;
 use super::supersede::{judge, noted, set_aside};
-use super::{Env, TokenFacts, check, failure, lease_failure, open_unchecked, save, success};
+use super::{Env, check, failure, lease_failure, open_unchecked, save, success};
 
 /// The agent's name, the first word of its `--version`.
 const AGENT_NAME: &str = "js-agent";
@@ -174,7 +173,7 @@ fn run(env: &Env<'_>, params: &Params, superseded: &mut Option<String>) -> Resul
         owed(env)?;
     }
     if params.previous_version.is_none() {
-        join_token(env, params)?;
+        host_certificate(env, params)?;
     }
     set_up(env, params)?;
     // The record of another target goes aside only now, when the new one is about to be
@@ -396,49 +395,34 @@ fn unit_note(restart: &UnitRestart) -> String {
     )
 }
 
-/// A first install needs a way to authenticate to the lease server. When the host's flags file
-/// names its certificate and key (`--host-cert` and `--host-key`), that is the way: the agent
-/// presents them and reads no token, so the token file is not looked at and nothing defers for
-/// it, and the step checks only that the certificate file is there and that the key file is a
-/// regular file the agent may use (see [`js_client::host_key_problem`]); otherwise it defers
-/// with the file to fix. When the flags file names neither, or cannot be read, the host
-/// credential of the state root does, and so does the join token, which the operator (or the
-/// machine image) places, in a regular file of the hook's user, mode 0600 or 0400. The step
-/// defers, with nothing changed, until it is right.
-fn join_token(env: &Env<'_>, params: &Params) -> Result<(), Done> {
-    if let Some(identity) = env.host_identity {
-        return match host_files_problem(env, identity) {
-            Some(problem) => Err(deferred(
-                params,
-                Reason::JoinTokenMissing,
-                format!(
-                    "the host certificate and key named in {}: {problem}; fix it to install the agent",
-                    params.flags_file.display()
-                ),
-            )),
-            None => Ok(()),
-        };
-    }
-    if env.ports.state.has_credential() {
-        return Ok(());
-    }
-    let file = &params.token_file;
-    let problem = match (env.token)(file) {
-        Err(why) if why.kind() == std::io::ErrorKind::NotFound => "is not there".to_owned(),
-        Err(why) => format!("cannot be read: {why}"),
-        Ok(facts) => match owner_only_problem(&facts, env.euid) {
-            Some(problem) => problem,
-            None => return Ok(()),
-        },
+/// A first install needs a way to authenticate to the lease server, and a host has one: its
+/// certificate and key. The host's flags file must name them (`--host-cert` and `--host-key`);
+/// the step checks that the certificate file is there and that the key file is a regular file
+/// the agent may use (see [`js_client::host_key_problem`]). Otherwise it defers, with nothing
+/// changed, naming what to fix, until it is right.
+fn host_certificate(env: &Env<'_>, params: &Params) -> Result<(), Done> {
+    let Some(identity) = env.host_identity else {
+        return Err(deferred(
+            params,
+            Reason::JoinTokenMissing,
+            format!(
+                "the flags file {} names no --host-cert and --host-key: a host is identified by \
+                 its certificate; name them to install the agent",
+                params.flags_file.display()
+            ),
+        ));
     };
-    Err(deferred(
-        params,
-        Reason::JoinTokenMissing,
-        format!(
-            "the join token file {} {problem}; place it, root-owned and mode 0600, to install the agent",
-            file.display()
-        ),
-    ))
+    match host_files_problem(env, identity) {
+        Some(problem) => Err(deferred(
+            params,
+            Reason::JoinTokenMissing,
+            format!(
+                "the host certificate and key named in {}: {problem}; fix it to install the agent",
+                params.flags_file.display()
+            ),
+        )),
+        None => Ok(()),
+    }
 }
 
 /// What is wrong with the host certificate and key files, named by path, or `None` when the
@@ -466,20 +450,8 @@ fn host_files_problem(env: &Env<'_>, identity: &HostIdentity) -> Option<String> 
     key_problem.map(|problem| format!("{} {problem}", key.display()))
 }
 
-/// Why a join token file is not one the agent will use: not a regular file, not mode 0600 or
-/// 0400, or not owned by the hook's user (`euid`).
-fn owner_only_problem(facts: &TokenFacts, euid: u32) -> Option<String> {
-    if !facts.regular {
-        return Some("is not a regular file".to_owned());
-    }
-    if !matches!(facts.mode, 0o600 | 0o400) {
-        return Some(format!("must be mode 0600 or 0400, not {:04o}", facts.mode));
-    }
-    (facts.uid != euid).then(|| format!("must be owned by uid {euid}, not {}", facts.uid))
-}
-
 /// The deferral of a host that cannot take the release yet, for `reason`: a first install that
-/// cannot authenticate (`join_token_missing`, with nothing changed), or a Mac whose host setup is
+/// cannot authenticate (`join_token_missing`, a shipped wire value, with nothing changed), or a Mac whose host setup is
 /// not complete (`host_setup_missing`). The coordinator retries after `defer_retry_secs`.
 pub(super) fn deferred(params: &Params, reason: Reason, detail: String) -> Done {
     Done {

@@ -96,8 +96,8 @@ pub struct Sim {
     pub window_at_acquire: Vec<u64>,
     /// The names of the machines released, in the order the calls were made.
     pub released: Vec<String>,
-    /// Whether the agent of a machine that only an orphan record knows never says hello: its
-    /// token was minted by a scaler whose records are lost.
+    /// Whether the agent of a machine that only an orphan record knows never says hello: it was
+    /// launched by a scaler whose records are lost.
     pub silent_orphans: bool,
     /// Every answer the cloud gave an acquire, in order.
     pub answers: Vec<Acquired>,
@@ -201,7 +201,7 @@ impl Sim {
             offer: plan.offer.clone(),
             lifetime: plan.lifetime,
             labels: Vec::new(),
-            payload: BootPayload::new(format!("token-of-{}", plan.name)),
+            payload: BootPayload::new(format!("payload-of-{}", plan.name)),
         });
         if answer == Acquired::Unknown {
             let landed = self.fake.launched() > before;
@@ -308,7 +308,7 @@ impl Sim {
                 Action::RemoveHost(name) => {
                     self.marks.remove(&name);
                 }
-                Action::Mint { .. } | Action::Revoke(_) | Action::ForgetNetwork(_) => {}
+                Action::ForgetNetwork(_) => {}
             }
         }
         self.clock.advance(TICK);

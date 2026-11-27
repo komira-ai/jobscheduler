@@ -17,6 +17,7 @@ use js_types::{ManualClock, Timestamp};
 use serde_json::{Value, json};
 use tokio::runtime::Runtime;
 
+use crate::host_certs::{Identities, server_flags};
 use crate::jobs::fake::FakeMachine;
 use crate::support::{Host, Lowest, Ran, Scratch, run_on, run_on_defaulted, run_on_polling};
 
@@ -47,9 +48,6 @@ macro_rules! host_arch {
         "x86_64"
     };
 }
-
-/// The pool's join token.
-pub const JOIN: &str = "join-token-A-0123456789-abcdefghijklmnop";
 
 /// The pool agents join: a class of its own that asks nothing but a CPU and a little
 /// memory, and the capabilities `os=macos` and `arch=arm64` (the Macs of these tests, and
@@ -99,10 +97,10 @@ arch = ""#,
     "\"\n"
 );
 
-/// The flags of a server with agents and the job service on, over `scratch`.
+/// The flags of a server with agents and the job service on, over `scratch`, serving TLS with
+/// a pair of its own and trusting the authority of the tests for the agents' host certificates.
 fn args(scratch: &Scratch, boot: &str, extra: &[String], pool_text: &str) -> Vec<String> {
     let client = scratch.write("client-token", CLIENT_TOKEN, 0o600);
-    let join = scratch.write("join-token", JOIN, 0o600);
     let pool = scratch.write("agent-pool.toml", pool_text, 0o644);
     let path = |p: &Path| p.to_str().unwrap().to_owned();
     let mut all: Vec<String> = [
@@ -115,8 +113,6 @@ fn args(scratch: &Scratch, boot: &str, extra: &[String], pool_text: &str) -> Vec
         &path(&scratch.path("leases.toml")),
         "--token-file",
         &path(&client),
-        "--agent-token-file",
-        &path(&join),
         "--agent-pool-config",
         &path(&pool),
         "--job-listen",
@@ -124,6 +120,7 @@ fn args(scratch: &Scratch, boot: &str, extra: &[String], pool_text: &str) -> Vec
     ]
     .map(str::to_owned)
     .into();
+    all.extend(server_flags(scratch));
     all.extend_from_slice(extra);
     all
 }
@@ -239,30 +236,45 @@ impl Server {
 
     /// The server's address as `--server` takes it.
     pub fn url(&self) -> String {
-        format!("http://{}", self.running.addr())
+        format!("https://{}", self.running.addr())
     }
 
-    /// The file holding the join token.
-    pub fn join_file(&self) -> PathBuf {
-        self.scratch.path("join-token")
+    /// Where the agents of this server find their host certificates, and the server's
+    /// certificate they trust.
+    pub fn identities(&self) -> Identities {
+        Identities::new(&self.scratch)
     }
 
     fn client(&self) -> Client {
         let file = self.scratch.path("client-token");
-        Client::connect(&self.url(), &file, None, Duration::from_secs(10)).unwrap()
+        let ca = self.identities();
+        Client::connect(
+            &self.url(),
+            &file,
+            Some(ca.server_cert()),
+            Duration::from_secs(10),
+        )
+        .unwrap()
     }
 
     /// The job service's address as `--server` takes it.
     #[cfg(target_os = "linux")]
     pub fn job_url(&self) -> String {
         let addr = self.running.job_addr().expect("the job service is on");
-        format!("http://{addr}")
+        format!("https://{addr}")
     }
 
     #[cfg(target_os = "linux")]
     fn job_client(&self) -> Client {
         let file = self.scratch.path("client-token");
-        Client::connect(&self.job_url(), &file, None, Duration::from_secs(10)).unwrap()
+        let ca = self.identities();
+        Client::connect(
+            &self.job_url(),
+            &file,
+            Some(ca.server_cert()),
+            Duration::from_secs(10),
+        )
+        .unwrap()
     }
 
     /// `POST /v1/jobs` of a job that runs `busybox` and needs `cpu` thousandths of a core,
@@ -442,30 +454,30 @@ pub struct Agent {
 }
 
 impl Agent {
-    /// Runs the agent of `host` against `url`, with the join token in `token`, and `extra`
-    /// flags. It uses the real transport, through `connector`, and a machine whose runtime
-    /// is in memory.
+    /// Runs the agent of `host` against `url`, as the host `--host-id` in `extra` names, with
+    /// the certificate and key `identities` issues it, and `extra` flags. It uses the real
+    /// transport, through `connector`, and a machine whose runtime is in memory.
     pub fn spawn(
         url: String,
-        token: PathBuf,
+        identities: Identities,
         extra: &[&str],
         host: fn() -> Host,
         connector: impl Connector + Send + 'static,
     ) -> Self {
         let machine = Arc::new(FakeMachine::new());
-        Self::spawn_on(url, token, extra, host, connector, machine)
+        Self::spawn_on(url, identities, extra, host, connector, machine)
     }
 
     /// [`Agent::spawn`] over `machine`, which the test keeps a handle to.
     pub fn spawn_on(
         url: String,
-        token: PathBuf,
+        identities: Identities,
         extra: &[&str],
         host: fn() -> Host,
         connector: impl Connector + Send + 'static,
         machine: Arc<FakeMachine>,
     ) -> Self {
-        Self::launch(url, Some(token), extra, host, connector, machine, false)
+        Self::launch(url, identities, extra, host, connector, machine, false)
     }
 
     /// [`Agent::spawn_on`] over any machine, with `extra` exactly as given: a start that names
@@ -474,46 +486,27 @@ impl Agent {
     #[cfg(target_os = "linux")]
     pub fn spawn_machine_defaulted(
         url: String,
-        token: PathBuf,
+        identities: Identities,
         extra: &[&str],
         host: fn() -> Host,
         connector: impl Connector + Send + 'static,
         machine: Arc<dyn Machine>,
     ) -> Self {
-        Self::launch(url, Some(token), extra, host, connector, machine, true)
+        Self::launch(url, identities, extra, host, connector, machine, true)
     }
 
-    /// [`Agent::spawn`] with no `--token-file`: the agent finds its credential in the state
-    /// root `extra` names.
-    pub fn spawn_tokenless(
-        url: String,
-        extra: &[&str],
-        host: fn() -> Host,
-        connector: impl Connector + Send + 'static,
-    ) -> Self {
-        let machine = Arc::new(FakeMachine::new());
-        Self::launch(url, None, extra, host, connector, machine, false)
-    }
-
-    /// An agent whose command line is exactly `--flags-file FILE`, plus `--token-file
-    /// TOKEN` when a token file is given: the server, the pool and the rest come from the
-    /// flags file, as a hostkeeper-packaged unit starts the agent.
+    /// An agent whose command line is exactly `--flags-file FILE`: the server, the pool, the
+    /// host's certificate and the rest come from the flags file, as a hostkeeper-packaged unit
+    /// starts the agent.
     pub fn spawn_flags_file(
         flags: &Path,
-        token: Option<&Path>,
         host: fn() -> Host,
         connector: impl Connector + Send + 'static,
     ) -> Self {
-        let mut args = vec![
+        let args = vec![
             "--flags-file".to_owned(),
             flags.to_str().unwrap().to_owned(),
         ];
-        if let Some(token) = token {
-            args.extend([
-                "--token-file".to_owned(),
-                token.to_str().unwrap().to_owned(),
-            ]);
-        }
         let machine = Arc::new(FakeMachine::new());
         Self::run_args(args, host, (connector, None), machine, false)
     }
@@ -523,7 +516,7 @@ impl Agent {
     #[cfg(target_os = "linux")]
     pub fn spawn_polling(
         url: String,
-        token: PathBuf,
+        identities: Identities,
         extra: &[&str],
         host: fn() -> Host,
         connectors: (
@@ -533,38 +526,63 @@ impl Agent {
         machine: Arc<FakeMachine>,
     ) -> Self {
         let (connector, dispatch) = connectors;
-        let mut args = vec![
-            "--server".to_owned(),
-            url,
-            "--token-file".to_owned(),
-            token.to_str().unwrap().to_owned(),
-            "--pool".to_owned(),
-            "macs".to_owned(),
-        ];
-        args.extend(extra.iter().map(|flag| (*flag).to_owned()));
+        let args = Self::flags(url, &identities, extra);
         Self::run_args(args, host, (connector, Some(dispatch)), machine, false)
+    }
+
+    /// [`Agent::spawn`] with the certificate of the host `certified` and not of the host
+    /// `--host-id` names, as an agent that holds another host's pair would say hello.
+    pub fn spawn_certified_as(
+        certified: &str,
+        url: String,
+        identities: Identities,
+        extra: &[&str],
+        host: fn() -> Host,
+        connector: impl Connector + Send + 'static,
+    ) -> Self {
+        let args = Self::flags_of(certified, url, &identities, extra);
+        let machine = Arc::new(FakeMachine::new());
+        Self::run_args(args, host, (connector, None), machine, false)
+    }
+
+    /// The command line of an agent of `url`: the server, the pool (`macs` unless `extra`
+    /// names one), the certificate, key and trusted server certificate of the host that
+    /// `--host-id` in `extra` names, and `extra`.
+    fn flags(url: String, identities: &Identities, extra: &[&str]) -> Vec<String> {
+        let host = extra
+            .iter()
+            .position(|flag| *flag == "--host-id")
+            .and_then(|at| extra.get(at + 1))
+            .expect("an agent of a real server names its host with --host-id");
+        Self::flags_of(host, url, identities, extra)
+    }
+
+    /// [`Agent::flags`] with the pair of the host `certified`.
+    fn flags_of(
+        certified: &str,
+        url: String,
+        identities: &Identities,
+        extra: &[&str],
+    ) -> Vec<String> {
+        let mut args: Vec<String> = vec!["--server".into(), url];
+        args.extend(identities.flags(certified));
+        if !extra.contains(&"--pool") {
+            args.extend(["--pool".to_owned(), "macs".to_owned()]);
+        }
+        args.extend(extra.iter().map(|flag| (*flag).to_owned()));
+        args
     }
 
     fn launch(
         url: String,
-        token: Option<PathBuf>,
+        identities: Identities,
         extra: &[&str],
         host: fn() -> Host,
         connector: impl Connector + Send + 'static,
         machine: Arc<dyn Machine>,
         defaulted: bool,
     ) -> Self {
-        let mut args: Vec<String> = vec!["--server".into(), url];
-        if let Some(token) = token {
-            args.extend([
-                "--token-file".to_owned(),
-                token.to_str().unwrap().to_owned(),
-            ]);
-        }
-        if !extra.contains(&"--pool") {
-            args.extend(["--pool".to_owned(), "macs".to_owned()]);
-        }
-        args.extend(extra.iter().map(|flag| (*flag).to_owned()));
+        let args = Self::flags(url, &identities, extra);
         Self::run_args(args, host, (connector, None), machine, defaulted)
     }
 
@@ -579,8 +597,6 @@ impl Agent {
         let (tell, worker) = channel();
         let (slept, waits) = channel();
         let (go, gate) = channel();
-        // The token is a file's content: only the file's path is an argument.
-        assert!(!args.concat().contains(JOIN));
         let handle = thread::spawn(move || {
             let args: Vec<&str> = args.iter().map(String::as_str).collect();
             let mut sleeper = Gate { slept, go: gate };
@@ -684,7 +700,7 @@ pub struct Redirect(pub Arc<Mutex<String>>);
 struct Redirected {
     to: Arc<Mutex<String>>,
     login: Login,
-    credential: Option<String>,
+    ca_cert: Option<PathBuf>,
 }
 
 impl Connector for Redirect {
@@ -692,12 +708,12 @@ impl Connector for Redirect {
         &self,
         _server: &str,
         login: &Login,
-        _ca_cert: Option<&Path>,
+        ca_cert: Option<&Path>,
     ) -> Result<Box<dyn Transport>, ClientError> {
         Ok(Box::new(Redirected {
             to: self.0.clone(),
             login: login.clone(),
-            credential: None,
+            ca_cert: ca_cert.map(Path::to_owned),
         }))
     }
 }
@@ -706,19 +722,9 @@ impl Transport for Redirected {
     fn post(&mut self, path: &str, body: &Value) -> Result<Answer, String> {
         let url = self.to.lock().unwrap().clone();
         Dialer
-            .connect(&url, &self.login, None)
+            .connect(&url, &self.login, self.ca_cert.as_deref())
             .map_err(|err| err.to_string())
-            .and_then(|mut transport| {
-                if let Some(credential) = &self.credential {
-                    transport.adopt_credential(credential)?;
-                }
-                transport.post(path, body)
-            })
-    }
-
-    fn adopt_credential(&mut self, secret: &str) -> Result<(), String> {
-        self.credential = Some(secret.to_owned());
-        Ok(())
+            .and_then(|mut transport| transport.post(path, body))
     }
 }
 
@@ -751,10 +757,6 @@ impl Transport for Rewriting {
         let mut body = body.clone();
         body["protocol"] = json!({ "min": self.majors.min, "max": self.majors.max });
         self.inner.post(path, &body)
-    }
-
-    fn adopt_credential(&mut self, secret: &str) -> Result<(), String> {
-        self.inner.adopt_credential(secret)
     }
 }
 
@@ -793,10 +795,6 @@ impl Transport for Counted {
             .fetch_add(beat, std::sync::atomic::Ordering::SeqCst);
         self.inner.post(path, body)
     }
-
-    fn adopt_credential(&mut self, secret: &str) -> Result<(), String> {
-        self.inner.adopt_credential(secret)
-    }
 }
 
 /// Records the body of every answer, so a test can look for what must not be printed.
@@ -830,10 +828,6 @@ impl Transport for Spying {
             self.seen.lock().unwrap().push(answer.body.clone());
         }
         answer
-    }
-
-    fn adopt_credential(&mut self, secret: &str) -> Result<(), String> {
-        self.inner.adopt_credential(secret)
     }
 }
 
@@ -871,10 +865,6 @@ impl Transport for Recording {
             self.posted.lock().unwrap().push(body.clone());
         }
         self.inner.post(path, body)
-    }
-
-    fn adopt_credential(&mut self, secret: &str) -> Result<(), String> {
-        self.inner.adopt_credential(secret)
     }
 }
 

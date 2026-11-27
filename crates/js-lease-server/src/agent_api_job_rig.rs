@@ -149,7 +149,6 @@ pub(crate) struct Rig {
     pub(crate) jobs: Arc<ServerJobs>,
     /// The store under the job tables, which fails the commit it is told to.
     pub(crate) store: Arc<Interfere<Fake>>,
-    pub(crate) who: Credential,
     /// The epoch and session each host was given.
     pub(crate) sessions: BTreeMap<String, (u64, String)>,
     /// The sequence of the rig's last heartbeat: each one the rig sends carries the next, unless
@@ -376,19 +375,27 @@ pub(crate) fn rig_on(
         Some(logs) => agents.with_logs(logs),
         None => agents,
     };
-    let who = agents.tokens.identify(&"j".repeat(40)).unwrap();
     Rig {
         agents: Arc::new(agents),
         clock,
         shared,
         jobs,
         store,
-        who,
         sessions: BTreeMap::new(),
         seq: Some(std::sync::atomic::AtomicU64::new(0)),
         gpus,
         _dir: dir,
     }
+}
+
+/// The host `host`, or `host-a` when `host` is no host id.
+fn host_or_a(host: &str) -> HostId {
+    HostId::new(host).unwrap_or_else(|_| HostId::new("host-a").expect("a valid host id"))
+}
+
+/// The credential the registry knows the host `host` by: the one its certificate gives.
+pub(crate) fn who_of(host: &str) -> Credential {
+    Credential::of_host_certificate(&host_or_a(host))
 }
 
 impl Rig {
@@ -399,7 +406,7 @@ impl Rig {
         self
     }
 
-    /// This rig's server keeping its join tokens and host bindings in `store`, as a server with
+    /// This rig's server keeping its host bindings in `store`, as a server with
     /// a store setting does.
     pub(crate) fn with_kept(mut self, store: Arc<dyn Store>) -> Rig {
         let agents = Arc::try_unwrap(self.agents).ok().unwrap();
@@ -468,7 +475,7 @@ impl Rig {
             "phase": "serving",
         });
         let body = Bytes::from(serde_json::to_vec(&hello).unwrap());
-        let welcome = serve_hello(&self.agents, self.who.clone(), None, Ok(body), &|| ()).await;
+        let welcome = serve_hello(&self.agents, host, Ok(body), &|| ()).await;
         let Json(welcome) = welcome.unwrap();
         self.sessions
             .insert(host.to_owned(), (welcome.epoch, welcome.session));
@@ -553,7 +560,7 @@ impl Rig {
             "phase": "serving",
         }))
         .unwrap();
-        let mut welcome = self.agents.registry.hello(&hello, &self.who).unwrap();
+        let mut welcome = self.agents.registry.hello(&hello, &who_of(host)).unwrap();
         let host_id = HostId::new(host).unwrap();
         super::rows::record_hello(&self.agents, &host_id, &hello, &mut welcome).unwrap();
         self.sessions
@@ -610,8 +617,14 @@ impl Rig {
         peer: crate::api::Peer,
     ) -> Result<HeartbeatReply, Refused> {
         let agents = State(Arc::clone(&self.agents));
-        let who = Extension(self.who.clone());
-        let answer = super::heartbeat(agents, who, (None, None), peer, Ok(body));
+        // The certificate presented is the one of the host the body names (a body that names
+        // none is sent as `host-a`, and is refused before the certificate is looked at).
+        let named: Option<serde_json::Value> = serde_json::from_slice(&body).ok();
+        let named = named.as_ref().and_then(|beat| beat["host_id"].as_str());
+        let host = named.unwrap_or("host-a");
+        let who = Extension(who_of(host));
+        let certified = Extension(CertifiedHost(host_or_a(host)));
+        let answer = super::heartbeat(agents, who, certified, peer, Ok(body));
         answer.await.map(|Json(reply)| reply)
     }
 

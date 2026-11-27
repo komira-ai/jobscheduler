@@ -17,7 +17,6 @@ use std::time::Duration;
 use js_sim::{Event, Faults, Node, NodeInput, Output};
 use js_sim_cell::actions::{agents, partition_agents};
 use js_sim_cell::bus::{CallId, Route, agent_name};
-use js_sim_cell::server::JOIN_TOKEN;
 use js_sim_cell::{
     Action, AgentNode, Cell, CellNode, Counter, Expect, Msg, Scenario, ScenarioFailure, ServerNode,
     ServerSpec, ServerView, Setup, Shape, Verdict, Work,
@@ -110,7 +109,7 @@ fn a_server_whose_restart_is_refused_is_down_until_a_restart_succeeds() {
     let hello = Msg::Request {
         id: CallId(0),
         route: Route::Hello,
-        bearer: JOIN_TOKEN.to_owned(),
+        certificate: None,
         body: "{}".to_owned(),
     };
     let from = agent_name(0);

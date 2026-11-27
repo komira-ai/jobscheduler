@@ -38,7 +38,7 @@ fn spec(kind: AgentKind, per_job: Option<&str>) -> AgentSpec {
     AgentSpec {
         host: host(),
         pool: "burst".to_owned(),
-        join_token: "join".to_owned(),
+        certificate: Some(host()),
         capacity: capacity(),
         capabilities: capabilities.into_iter().collect(),
         labels: BTreeMap::new(),

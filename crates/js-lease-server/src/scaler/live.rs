@@ -1,4 +1,4 @@
-//! The real [`Effects`]: the server's registry, job tables and join tokens, the pool's
+//! The real [`Effects`]: the server's registry, job tables, the pool's
 //! providers and network mode, and where the scaler's records are kept (the files, or the
 //! state store).
 //!
@@ -11,11 +11,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
 
 use js_elastic::{
     AcquireId, Acquired, CapacityProvider, Claim, Demand, EventStream, Held, HostName, HostRef,
-    Instant, Offer, ProviderError, Released, SchedulerId, Secret,
+    Instant, Offer, ProviderError, Released, SchedulerId,
 };
 use js_jobs::{JobId, JobStoreError};
 use js_registry::{Busy, HostView};
@@ -34,7 +33,6 @@ use crate::cordon::DEFAULT_CORDON;
 /// The pool's side of the server, as the shell uses it.
 pub(crate) struct Live {
     agents: Arc<Agents>,
-    pool: ProviderId,
     scheduler: SchedulerId,
     /// The pool's providers, first to last; never empty.
     providers: Vec<Arc<dyn CapacityProvider>>,
@@ -49,13 +47,13 @@ pub(crate) struct Live {
 }
 
 impl Live {
-    /// The effects for the pool `pool` of `scheduler`: its machines are launched and
-    /// released through `providers` (first to last, never empty) and `launcher`, its tokens, hosts and job tables are
+    /// The effects for a pool of `scheduler`: its machines are launched and
+    /// released through `providers` (first to last, never empty) and `launcher`, its hosts and job tables are
     /// `agents`', its records and the hosts the registry would not remove are kept by `kept`,
     /// its health and offers are what its `checks` found, and a job that books
     /// the whole host asks for `whole_host`, the pool's floor.
     pub(crate) fn new(
-        (agents, pool, scheduler): (Arc<Agents>, ProviderId, SchedulerId),
+        (agents, scheduler): (Arc<Agents>, SchedulerId),
         providers: Vec<Arc<dyn CapacityProvider>>,
         launcher: Launcher,
         (kept, checks): (ScalerKeeper, Arc<Mutex<Checks>>),
@@ -63,7 +61,6 @@ impl Live {
     ) -> Self {
         Self {
             agents,
-            pool,
             scheduler,
             providers,
             located: Mutex::new(BTreeMap::new()),
@@ -206,21 +203,10 @@ impl Effects for Live {
         }
     }
 
-    fn mint(&self, host: &str, valid_for: Duration) -> Option<Secret> {
-        let name = self.name(host)?;
-        match self.agents.mint_for(&self.pool, &name, valid_for) {
-            Ok(minted) => Some(Secret::new(minted.token)),
-            Err(err) => {
-                warn!(%host, ?err, "cannot mint a join token");
-                None
-            }
-        }
-    }
-
     /// Launches through the launcher, noting the provider the plan named as the one that
     /// holds every machine its answer names.
-    fn acquire(&self, plan: &AcquirePlan, token: Secret) -> Acquired {
-        let answer = self.launcher.acquire(plan, token);
+    fn acquire(&self, plan: &AcquirePlan) -> Acquired {
+        let answer = self.launcher.acquire(plan);
         if let Acquired::Accepted { held, extras } = &answer {
             let at = self
                 .providers
@@ -247,19 +233,6 @@ impl Effects for Live {
             }
         }
         answer
-    }
-
-    fn revoke(&self, host: &str) -> bool {
-        let Some(name) = self.name(host) else {
-            return true;
-        };
-        match self.agents.revoke_for(&self.pool, &name) {
-            Ok(_) => true,
-            Err(err) => {
-                warn!(%host, ?err, "cannot revoke the join token of a host");
-                false
-            }
-        }
     }
 
     fn forget(&self, host: &str) {
@@ -468,7 +441,7 @@ mod tests {
             BTreeMap::from([("arch".to_string(), "x86_64".to_string())]),
         );
         let pool = ProviderId::new("burst").unwrap();
-        let config = PoolConfig::new(pool.clone(), ResourceClass::gpu_host(), shape, 4);
+        let config = PoolConfig::new(pool, ResourceClass::gpu_host(), shape, 4);
         let registry = Registry::with_sessions(
             config,
             clock,
@@ -504,7 +477,7 @@ mod tests {
         };
         let checks = Arc::new(Mutex::new(Checks::default()));
         let live = Live::new(
-            (agents, pool, scheduler()),
+            (agents, scheduler()),
             providers,
             launcher,
             (kept, checks),
@@ -566,8 +539,7 @@ mod tests {
             offer: offer(),
             lifetime: None,
         };
-        let token = Secret::new("token".to_owned());
-        assert_eq!(live.acquire(&plan, token), Acquired::Unknown);
+        assert_eq!(live.acquire(&plan), Acquired::Unknown);
         assert!(live.hosts().is_empty());
         assert_eq!(live.jobs(), Ok(JobTables::default()));
         assert_eq!(live.whole_host(), floor());
@@ -684,31 +656,6 @@ mod tests {
             unremoved: UnremovedFile::new(dir.join("absent").join("unremoved")),
         };
         (live, dir)
-    }
-
-    /// Asserts the join token calls: a token is minted for a name this scheduler derived and
-    /// not for any other text; a revoke drops it, and a second revoke, one for a name that
-    /// is not ours and one for a host that never had a token all succeed; and when the token
-    /// file cannot be written a mint makes nothing and a revoke says it did not revoke. It
-    /// catches a mint for a made-up name, and a failed revoke read as done, which would let
-    /// the shell terminate a machine whose token still works.
-    #[test]
-    fn tokens_are_minted_and_revoked_and_failures_are_reported() {
-        let (live, dir) = live("tokens");
-        let launched = name("a1");
-        let ttl = Duration::from_secs(600);
-        let secret = live.mint(&launched, ttl).unwrap();
-        assert!(!secret.expose().is_empty());
-        assert!(live.mint("not-a-name", ttl).is_none());
-        assert!(live.revoke(&launched));
-        assert!(live.revoke(&launched));
-        assert!(live.revoke("not-a-name"));
-        assert!(live.mint(&launched, ttl).is_some());
-        let joins = dir.join("joins");
-        std::fs::remove_file(&joins).unwrap();
-        std::fs::create_dir(&joins).unwrap();
-        assert!(live.mint(&name("a2"), ttl).is_none());
-        assert!(!live.revoke(&launched));
     }
 
     /// Asserts that forgetting a host's network device calls the network mode for a name

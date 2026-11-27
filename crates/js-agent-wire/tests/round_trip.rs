@@ -126,16 +126,10 @@ fn hello_frame() -> impl Strategy<Value = Hello> {
         ident(),
         text(),
         (1..=MAX_CPU_MILLIS, 1..=MAX_MEMORY_BYTES),
-        (words(), words(), phase(), held(), any::<bool>()),
+        (words(), words(), phase(), held()),
     )
         .prop_map(
-            |(
-                host_id,
-                pool,
-                agent_version,
-                (cpu, memory),
-                (capabilities, labels, phase, held, creds),
-            )| {
+            |(host_id, pool, agent_version, (cpu, memory), (capabilities, labels, phase, held))| {
                 let mut frame = hello();
                 frame.host_id = host_id;
                 frame.pool = pool;
@@ -146,7 +140,6 @@ fn hello_frame() -> impl Strategy<Value = Hello> {
                 frame.labels = labels;
                 frame.phase = phase;
                 frame.held = held;
-                frame.accepts_host_credential = creds;
                 frame
             },
         )

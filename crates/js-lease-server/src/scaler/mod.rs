@@ -19,9 +19,6 @@
 //!
 //! - the provider's answers to the acquires and releases it ran, which the next step reads
 //!   as its input;
-//! - the hosts whose join token it could not revoke. A revoke that failed is tried again
-//!   at the start of every tick, and the host's `Release` is not sent until the revoke has
-//!   gone through, so a machine is never terminated while its token still works;
 //! - the alerts it has raised, so that each is said once while it holds;
 //! - the queued jobs set aside for the machines launched for them (the `jobs` module), in
 //!   memory only;
@@ -55,14 +52,12 @@
 //!
 //! - The records are written first. If they cannot be written the tick does nothing else
 //!   and the step's result is dropped, so the next tick decides again from the same state.
-//!   No mint, launch, drain, release or revoke runs before the file holds the records they
+//!   No launch, drain or release runs before the file holds the records they
 //!   depend on.
 //! - A machine is not released while its host holds work, read again just before the release
 //!   ([`Effects::holds_work`]): a live job allocation. The registry's own marks look at its
 //!   leases and runs only, so a job placed between the
 //!   tick's read and a mark is caught here, and the release waits until the job is done.
-//! - A join token that could not be minted sends no launch: the shell answers the step's
-//!   acquire with a deferral, and the step plans it again, minting again.
 //! - A machine whose record is `Releasing` is marked ending in the registry before the
 //!   step's other calls and before the server admits any hello after a restart
 //!   ([`Scaler::new`]), so a host whose release was under way and that says hello again
@@ -106,7 +101,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 use js_alert::{AlertSink, Notifier};
-use js_elastic::{Acquired, HostRef, Released, SchedulerId, Secret};
+use js_elastic::{HostRef, Released, SchedulerId};
 use js_jobs::JobId;
 use js_registry::{HostState, HostView, SessionSource};
 use js_scaler::{
@@ -148,7 +143,6 @@ struct Memory {
     state: State,
     acquired: Vec<AcquireResult>,
     released: Vec<ReleaseResult>,
-    unrevoked: BTreeSet<String>,
     /// The hosts of machines that are confirmed gone and that the registry still holds
     /// (it refused to remove them); removed again at the start of every tick.
     unremoved: BTreeSet<String>,
@@ -230,8 +224,7 @@ impl Scaler {
     /// each acquire id. `exec` is the mode the pool's hosts run jobs in.
     ///
     /// Before it returns, every machine the records show as being released is marked
-    /// ending in the registry through `effects` and queued for another revoke of its
-    /// token. The server calls this before it serves anything, so no hello is admitted
+    /// ending in the registry through `effects`. The server calls this before it serves anything, so no hello is admitted
     /// for such a machine unmarked.
     pub fn new(
         effects: Box<dyn Effects>,
@@ -255,16 +248,13 @@ impl Scaler {
         (settings, budgets): (Settings, Budgets),
         records: Records,
     ) -> Self {
-        let mut unrevoked = BTreeSet::new();
         for name in releasing(&records) {
             effects.call(Call::MarkEnding, name);
-            unrevoked.insert(name.to_owned());
         }
         let memory = Memory {
             state: State::new(records),
             acquired: Vec::new(),
             released: Vec::new(),
-            unrevoked,
             unremoved: BTreeSet::new(),
             unremoved_dirty: false,
             unremoved_failed: false,
@@ -462,7 +452,6 @@ impl Core {
         let now = Millis::new(self.clock.now().millis());
         let mut work = self.memory().clone();
         work.unremoved_failed = false;
-        self.retry_revokes(&mut work);
         self.retry_removes(&mut work);
         let fetches = self.effects.catalog_fetches();
         let refreshed = fetches != work.catalog_fetches;
@@ -514,16 +503,6 @@ impl Core {
         *self.memory() = work;
         let seen = Snapshot { input, now };
         *self.last.lock().unwrap_or_else(PoisonError::into_inner) = Some(seen);
-    }
-
-    /// Tries again the revokes that failed.
-    fn retry_revokes(&self, memory: &mut Memory) {
-        let pending: Vec<String> = memory.unrevoked.iter().cloned().collect();
-        for host in pending {
-            if self.effects.revoke(&host) {
-                memory.unrevoked.remove(&host);
-            }
-        }
     }
 
     /// Tries again the removals of hosts from the registry that it refused. The file is
@@ -599,8 +578,7 @@ impl Core {
         for name in &next.unverified {
             warn!(host = %name, "no offer record was found for the machine; its hello was checked against the pool's capabilities only");
         }
-        let pending = (&memory.unrevoked, &memory.unremoved);
-        let found = alert::alerts((next, input), now, &self.settings, pending);
+        let found = alert::alerts((next, input), now, &self.settings, &memory.unremoved);
         for (key, message) in &found {
             if !memory.alerts.contains_key(key) {
                 warn!("{message}");
@@ -734,7 +712,6 @@ impl Core {
     /// which is the first action of a step that changed them: nothing else is run.
     fn run(&self, memory: &mut Memory, actions: Vec<Action>) -> Option<Answers> {
         let mut answers = Answers::default();
-        let mut tokens: BTreeMap<String, Secret> = BTreeMap::new();
         for action in actions {
             match action {
                 Action::Save(records) => {
@@ -747,23 +724,13 @@ impl Core {
                         self.effects.call(Call::MarkEnding, name);
                     }
                 }
-                Action::Mint { host, valid_for } => {
-                    let minted = self.effects.mint(&host, valid_for);
-                    tokens.extend(minted.map(|token| (host, token)));
-                }
                 Action::Acquire(plan) => {
-                    let answer = match tokens.remove(&plan.name) {
-                        Some(token) => {
-                            let since = Millis::new(self.clock.now().millis());
-                            let landing = self.in_flight.begin(&plan, since);
-                            let answer = self.effects.acquire(&plan, token);
-                            drop(landing);
-                            let meter = self.meter.get().unwrap_or(Meter::off());
-                            meter.sink().acquire_answered(&plan.pool, &answer);
-                            answer
-                        }
-                        None => Acquired::Deferred { wait: RETRY_AFTER },
-                    };
+                    let since = Millis::new(self.clock.now().millis());
+                    let landing = self.in_flight.begin(&plan, since);
+                    let answer = self.effects.acquire(&plan);
+                    drop(landing);
+                    let meter = self.meter.get().unwrap_or(Meter::off());
+                    meter.sink().acquire_answered(&plan.pool, &answer);
                     answers.acquired.push(AcquireResult {
                         acquire: plan.acquire,
                         attempt: plan.attempt,
@@ -774,11 +741,8 @@ impl Core {
                 Action::Retire(host) => self.effects.call(Call::Retire, &host),
                 Action::Undrain(host) => self.effects.call(Call::Undrain, &host),
                 Action::ReleaseHost(host) => self.effects.call(Call::ReleaseHost, &host),
-                Action::Revoke(host) => self.revoke(memory, host),
                 Action::Release { host, id } => {
-                    if memory.unrevoked.contains(&host) {
-                        debug!(%host, "the token is not revoked yet; the machine is not released");
-                    } else if self.effects.holds_work(&host) {
+                    if self.effects.holds_work(&host) {
                         warn!(%host, "the host holds a job allocation; the machine is not released until it ends");
                     } else {
                         let answer = self.effects.release(&id);
@@ -791,12 +755,6 @@ impl Core {
             }
         }
         Some(answers)
-    }
-
-    fn revoke(&self, memory: &mut Memory, host: String) {
-        if !self.effects.revoke(&host) {
-            memory.unrevoked.insert(host);
-        }
     }
 }
 

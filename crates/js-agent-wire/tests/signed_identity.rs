@@ -60,8 +60,6 @@ mod previous {
         pub phase: Phase,
         #[serde(default)]
         pub held: Vec<HeldRun>,
-        #[serde(default)]
-        pub accepts_host_credential: bool,
     }
 }
 

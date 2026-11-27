@@ -13,12 +13,13 @@
 //! A message carries its body as the JSON text the HTTP route carries, built from and
 //! read into the types of `js-agent-wire`, so the agent and the server read exactly the
 //! bytes a real peer would send. Its trace line ([`trace_msg`]) holds the route, the
-//! call id and the status only: never the body or the bearer, so no join token, session
+//! call id and the status only: never the body, so no session
 //! secret or random id reaches a trace.
 
 use std::time::Duration;
 
 use js_sim::NodeId;
+use js_types::HostId;
 
 /// The name of the cell's server node.
 pub const SERVER: &str = "server";
@@ -60,7 +61,7 @@ impl Route {
 
 /// A message between an agent and the server.
 ///
-/// It has no `Debug`: the bearer and the body hold secrets. [`trace_msg`] is how a
+/// It has no `Debug`: the body holds secrets. [`trace_msg`] is how a
 /// message is written.
 #[derive(Clone, PartialEq, Eq)]
 pub enum Msg {
@@ -70,8 +71,9 @@ pub enum Msg {
         id: CallId,
         /// The route called.
         route: Route,
-        /// The bearer token of the `Authorization` header.
-        bearer: String,
+        /// The host the agent's host certificate names, which the server's listener would have
+        /// verified; `None` for a call that carries no certificate, which the server refuses.
+        certificate: Option<HostId>,
         /// The JSON body.
         body: String,
     },
@@ -91,7 +93,7 @@ pub enum Msg {
 }
 
 /// `msg` as a trace line spells it: `call #<id> <path>` or `answer #<id> <status>`. The
-/// bearer, the body and the `Retry-After` value are left out.
+/// certificate, the body and the `Retry-After` value are left out.
 #[must_use]
 pub fn trace_msg(msg: &Msg) -> String {
     match msg {

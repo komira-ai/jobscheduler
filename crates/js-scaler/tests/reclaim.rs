@@ -14,7 +14,7 @@ fn failures(rig: &Rig) -> u32 {
 }
 
 /// Asserts that a registered machine named by a notice while the list still shows it
-/// running is revoked and released on that step, strikes the brake once and starts no
+/// running is released on that step, strikes the brake once and starts no
 /// cooldown; and that a later step, whose list now shows it preempted and which carries
 /// the notice again, only repeats the release and does not strike again. It catches a
 /// notice the step ignores (the machine would stay registered until the list caught up),
@@ -25,7 +25,7 @@ fn a_reclaimed_registered_machine_is_released_at_once_and_counted_once() {
     rig.pool().held = Some(vec![listed(&plan, "i-1", HostStatus::Active)]);
     rig.input.reclaimed = vec!["i-1".to_owned()];
     let actions = rig.tick(at(3 * SECOND));
-    assert_eq!(kinds(&actions), ["Save", "Revoke", "Release"]);
+    assert_eq!(kinds(&actions), ["Save", "Release"]);
     assert_eq!(rig.phase(0), Phase::Releasing);
     assert_eq!(failures(&rig), 1);
     assert!(rig.state.records.cooldowns.is_empty());
@@ -46,7 +46,7 @@ fn a_notice_is_acted_on_when_the_list_failed() {
     rig.pool().held = None;
     rig.input.reclaimed = vec!["i-1".to_owned()];
     let actions = rig.tick(at(3 * SECOND));
-    assert_eq!(kinds(&actions), ["Save", "Revoke", "Release"]);
+    assert_eq!(kinds(&actions), ["Save", "Release"]);
     assert_eq!(rig.phase(0), Phase::Releasing);
     assert_eq!(failures(&rig), 1);
 }
@@ -61,7 +61,7 @@ fn a_reclaimed_booting_or_draining_machine_takes_the_list_route() {
     booting_rig.pool().held = Some(vec![listed(&plan, "i-1", HostStatus::Booting)]);
     booting_rig.input.reclaimed = vec!["i-1".to_owned()];
     let actions = booting_rig.tick(at(booted + SECOND));
-    assert_eq!(kinds(&actions), ["Save", "Revoke", "Release"]);
+    assert_eq!(kinds(&actions), ["Save", "Release"]);
     assert_eq!(booting_rig.phase(0), Phase::Releasing);
     assert_eq!(booting_rig.state.blocked["gpu"], Blocked::BootFailed);
 
@@ -73,13 +73,13 @@ fn a_reclaimed_booting_or_draining_machine_takes_the_list_route() {
     assert_eq!(rig.phase(0), Phase::Draining);
     rig.input.reclaimed = vec!["i-1".to_owned()];
     let actions = rig.tick(at(now + 2 * SECOND));
-    assert_eq!(count(&actions, "Revoke"), 1);
+    assert_eq!(count(&actions, "Release"), 1);
     assert_eq!(rig.phase(0), Phase::Releasing);
     assert_eq!(failures(&rig), 1);
 }
 
 /// Asserts that a notice naming no machine of the records, and one naming a machine that
-/// is not held (a release already under way), change nothing: no revoke, no release that
+/// is not held (a release already under way), change nothing: no release that
 /// was not already due, no strike. It catches a notice that acts on the wrong record or
 /// strikes for a machine already being released.
 #[test]
@@ -88,7 +88,6 @@ fn a_notice_for_an_unknown_or_ending_machine_changes_nothing() {
     rig.pool().held = Some(vec![listed(&plan, "i-1", HostStatus::Active)]);
     rig.input.reclaimed = vec!["i-9".to_owned()];
     let actions = rig.tick(at(3 * SECOND));
-    assert_eq!(count(&actions, "Revoke"), 0);
     assert_eq!(count(&actions, "Release"), 0);
     assert_eq!(rig.phase(0), Phase::Registered);
     assert_eq!(failures(&rig), 0);
@@ -103,14 +102,14 @@ fn a_notice_for_an_unknown_or_ending_machine_changes_nothing() {
 }
 
 /// Asserts that a machine named twice in one step, and named by a notice in the step whose
-/// list shows it preempted, is revoked once and counted once. It catches a duplicate notice
-/// that strikes or revokes twice.
+/// list shows it preempted, is counted once. It catches a duplicate notice
+/// that strikes twice.
 #[test]
 fn a_machine_named_twice_in_one_step_is_released_once() {
     let (mut rig, plan) = registered(settings("gpu"), "i-1", 2 * SECOND);
     rig.pool().held = Some(vec![listed(&plan, "i-1", HostStatus::Preempted)]);
     rig.input.reclaimed = vec!["i-1".to_owned(), "i-1".to_owned()];
     let actions = rig.tick(at(3 * SECOND));
-    assert_eq!(kinds(&actions), ["Save", "Revoke", "Release"]);
+    assert_eq!(kinds(&actions), ["Save", "Release"]);
     assert_eq!(failures(&rig), 1);
 }

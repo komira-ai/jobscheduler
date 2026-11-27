@@ -5,8 +5,7 @@
 use std::time::Duration;
 
 use js_agent::{
-    Answer, CredentialState, Fatal, HEARTBEAT_PATH, HELLO_PATH, Jitter, Note, RETRY_AFTER_CAP,
-    Reason, Session, Step,
+    Answer, Fatal, HEARTBEAT_PATH, HELLO_PATH, Jitter, Note, RETRY_AFTER_CAP, Reason, Session, Step,
 };
 use js_agent_wire::ProtocolRange;
 use serde_json::{Value, json};
@@ -65,7 +64,6 @@ fn the_session_secret_is_sent_in_every_heartbeat_and_nowhere_else() {
     let registered = Note::Registered {
         epoch: 7,
         interval: Duration::from_secs(5),
-        credential: CredentialState::None,
     };
     assert_eq!(note(&steps[0]), Some(registered));
     assert_eq!(wait(&steps[0]), Duration::from_secs(5));
@@ -493,7 +491,7 @@ fn a_full_pool_is_waited_out_and_asked_again() {
 
 /// Asserts that the admission refusals that do not change by asking again stay fatal
 /// while `pool-full` is not: each of them ends the agent after one request. A server that
-/// no longer lists the pool, a join token bound to another host, a shape the pool does not
+/// no longer lists the pool, a certificate of another host, a shape the pool does not
 /// accept and a host id the operator lists will refuse the same hello tomorrow.
 #[test]
 fn only_the_admission_refusals_that_cannot_change_are_fatal() {
@@ -734,33 +732,8 @@ fn notes_read_as_plain_sentences() {
             Note::Registered {
                 epoch: 3,
                 interval: Duration::from_secs(5),
-                credential: CredentialState::None,
             },
             "registered, epoch 3, heartbeat every 5000ms",
-        ),
-        (
-            Note::Registered {
-                epoch: 3,
-                interval: Duration::from_secs(5),
-                credential: CredentialState::Saved,
-            },
-            "registered, epoch 3, heartbeat every 5000ms; the host credential is saved",
-        ),
-        (
-            Note::Registered {
-                epoch: 3,
-                interval: Duration::from_secs(5),
-                credential: CredentialState::Unsaved,
-            },
-            "registered, epoch 3, heartbeat every 5000ms; the host credential could not be saved: a restart cannot register this host again",
-        ),
-        (
-            Note::Registered {
-                epoch: 3,
-                interval: Duration::from_secs(5),
-                credential: CredentialState::Refused,
-            },
-            "registered, epoch 3, heartbeat every 5000ms; the transport refused the host credential: this host can no longer authenticate",
         ),
         (
             Note::Lost {

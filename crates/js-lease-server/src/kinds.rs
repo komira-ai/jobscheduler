@@ -151,7 +151,7 @@ impl PlatformKind {
     }
 
     /// Whether the platform's jobs run on hosts of ours, so that the keys of a pool that
-    /// describe hosts (`max_machines`, `join_token_file`, the queue settings, ...) apply.
+    /// describe hosts (`max_machines`, the queue settings, ...) apply.
     pub fn has_hosts(self) -> bool {
         self.hosts
     }

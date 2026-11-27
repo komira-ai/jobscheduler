@@ -17,9 +17,6 @@ use crate::kinds::{Kinds, OwnerOnlyFiles};
 /// The token of `--token-file` (`server.client_token_file`): the client `default`.
 pub(crate) const DEFAULT_TOKEN: &str = "default-token-0123456789-abcdefghijklm";
 
-/// The pool's shared join token.
-pub(crate) const JOIN: &str = "join-token-0123456789-abcdefghijklmnopqr";
-
 /// The pool that turns agent registration on for the flags, so `--job-listen` is allowed:
 /// whole hosts of one shape.
 const POOL: &str = r#"
@@ -81,10 +78,10 @@ impl ClientsRig {
         self.write(&format!("{name}-{number}.token"), token, 0o600)
     }
 
-    /// The flags of a server with agent registration and the job service on, the client
-    /// token [`DEFAULT_TOKEN`] and the join token [`JOIN`], followed by `extra`.
+    /// The flags of a server with agent registration and the job service on and the client
+    /// token [`DEFAULT_TOKEN`], followed by `extra`.
     pub(crate) fn flags(&self, extra: &[OsString]) -> Vec<OsString> {
-        let pairs: [(&str, OsString); 7] = [
+        let pairs: [(&str, OsString); 6] = [
             ("--listen", "127.0.0.1:0".into()),
             ("--job-listen", "127.0.0.1:0".into()),
             ("--state-file", self.path("leases.toml").into()),
@@ -92,10 +89,6 @@ impl ClientsRig {
             (
                 "--token-file",
                 self.token_file("default", DEFAULT_TOKEN).into(),
-            ),
-            (
-                "--agent-token-file",
-                self.write("joins", &format!("{JOIN}\n"), 0o600).into(),
             ),
             (
                 "--agent-pool-config",
@@ -130,17 +123,15 @@ impl ClientsRig {
     }
 
     /// A configuration file with the job service on, the client token [`DEFAULT_TOKEN`], a
-    /// joined pool whose join token is [`JOIN`], `server` more lines in `[server]` and the
-    /// `tables` after it.
+    /// joined pool, `server` more lines in `[server]` and the `tables` after it.
     pub(crate) fn file(&self, server: &str, tables: &str) -> String {
         let quoted = |path: PathBuf| format!("{:?}", path.display().to_string());
         format!(
             "[server]\nstate_file = {}\nboot = \"initialise\"\nclient_token_file = {}\n\
              listen = \"127.0.0.1:0\"\nagent_listen = \"127.0.0.2:0\"\n{server}\n\n\
-             {tables}\n{JOINED}join_token_file = {}\n",
+             {tables}\n{JOINED}",
             quoted(self.path("leases.toml")),
             quoted(self.token_file("default", DEFAULT_TOKEN)),
-            quoted(self.write("joins", &format!("{JOIN}\n"), 0o600)),
         )
     }
 

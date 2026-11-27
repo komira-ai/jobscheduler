@@ -14,7 +14,6 @@ use js_types::Monotonic;
 use js_registry::{OsSessions, SessionSource};
 use js_sched_placer::sizes::{Curves, DEFAULT_COLD_CPU_MILLIS, DEFAULT_COLD_MEMORY_BYTES};
 
-use crate::agent_tokens::PoolTokens;
 use crate::alerts::{DEFAULT_ALERT_REPEAT, alert_sink};
 use crate::clock::SharedClock;
 use crate::error::StartupError;
@@ -41,6 +40,7 @@ mod placement_curves;
 mod private;
 mod resolve;
 mod retention;
+pub(crate) mod retired;
 mod store;
 mod tokens;
 pub(crate) use agent_setup::AgentSetup;
@@ -114,7 +114,7 @@ pub struct Cli {
     /// address that is not a loopback one is refused.
     #[arg(long)]
     pub ready_listen: Option<SocketAddr>,
-    /// The base path of the server's state files (`.agents`, `.joins`, `.scaler`, `.jobs`,
+    /// The base path of the server's state files (`.agents`, `.scaler`, `.jobs`,
     /// and `usage.db` beside it). A lease file of an earlier release at this path is left
     /// as it is.
     #[arg(long, required_unless_present = "config")]
@@ -140,21 +140,17 @@ pub struct Cli {
     /// checked as `--token-file` is. Repeatable. Needs `--job-listen`.
     #[arg(long, value_name = "NAME=PATH")]
     pub client_token: Vec<String>,
-    /// The pool's shared join tokens: a file holding the tokens agents present, one per
-    /// line (several while one is being replaced), each at least 32 bytes and the file
-    /// owner-only like `--token-file`. Read again at every tick. Needs
-    /// `--agent-pool-config`. Without it the pool admits only hosts whose one-time join
-    /// token verifies (`POST /v1/agent/join-tokens`).
-    #[arg(long)]
+    /// Accepted and ignored, with a warning at start: agents are admitted by host
+    /// certificate only. The file is not read.
+    #[arg(long, hide = true)]
     pub agent_token_file: Option<PathBuf>,
     /// Turns agent registration on: the TOML file describing the pool that registering
     /// hosts join (its name, class, machine limit, shape, capabilities and timing).
     /// Repeatable: each further file is one more pool, such as the Macs beside the Linux
-    /// nodes, which a hello joins by naming it. `--agent-token-file` is the first pool's
-    /// shared tokens; a later pool's are its file's `join_token_file`, or none.
+    /// nodes, which a hello joins by naming it.
     #[arg(long)]
     pub agent_pool_config: Vec<PathBuf>,
-    /// The hellos one join token may say in a burst before it is held to one per
+    /// The hellos one host may say in a burst before it is held to one per
     /// `--agent-hello-interval`. Needs `--agent-pool-config`. The scaler's wait to hear from
     /// the hosts after a restart assumes the default burst and interval; a smaller burst or
     /// a longer interval is bounded by its ten minute quiet period only.
@@ -164,7 +160,7 @@ pub struct Cli {
         value_parser = clap::value_parser!(u32).range(1..)
     )]
     pub agent_hello_burst: u32,
-    /// How often a join token that spent its burst is allowed one more hello. Needs
+    /// How often a host that spent its burst is allowed one more hello. Needs
     /// `--agent-pool-config`. See `--agent-hello-burst` for what the scaler assumes of it.
     #[arg(
         long,
@@ -172,12 +168,9 @@ pub struct Cli {
         value_parser = parse_duration
     )]
     pub agent_hello_interval: Duration,
-    /// Refuses the first hello of a one-time join token that does not say the agent keeps
-    /// a host credential, so every launched host's token is dead after its first hello.
-    /// Turn it on once every agent is new: an agent that predates the host credential
-    /// cannot say so and is refused with `join-token-credential-required`. Off by default;
-    /// pool join tokens are not affected. Needs `--agent-pool-config`.
-    #[arg(long)]
+    /// Accepted and ignored, with a warning at start: agents are admitted by host
+    /// certificate only. Needs `--agent-pool-config`.
+    #[arg(long, hide = true)]
     pub require_host_credential: bool,
     /// Deprecated, and does nothing: `js-sched` places every lease on a host that
     /// registered itself, choosing among the hosts with room. `js-sched` is accepted with a
@@ -255,8 +248,8 @@ pub struct Cli {
     #[arg(long)]
     pub tls_key: Option<PathBuf>,
     /// The PEM file of the CA certificates (hostkeeper's) that sign the host certificates
-    /// of the hosts' agents, which an agent may present on the agent routes instead of a
-    /// join token: it names the host, and the host's agent is admitted with no token.
+    /// of the hosts' agents, which an agent presents on the agent routes: it names the host,
+    /// and a request without one is refused 401 `host-certificate-required`.
     /// Needs `--tls-cert` and `--tls-key`. SIGHUP reads it again with the pair.
     #[arg(long)]
     pub agent_client_ca: Option<PathBuf>,
@@ -531,7 +524,7 @@ pub struct Config {
     /// `server.agent_client_ca`); only with `tls`.
     pub(crate) agent_client_ca: Option<PathBuf>,
     pub(crate) limits: Limits,
-    /// The registering side: the pool the hosts that run `js-agent` join, and its tokens.
+    /// The registering side: the pool the hosts that run `js-agent` join.
     pub(crate) agents: Box<AgentSetup>,
     pub(crate) usage: UsageSetup,
     pub(crate) monotonic: Arc<dyn Monotonic>,
@@ -582,6 +575,12 @@ impl Config {
         // The deprecated `--placement` first: a removed `registry` is refused before the
         // pool is read, naming the flag to drop.
         let mut warnings = Vec::from_iter(Placement::given(cli.placement, "--placement")?);
+        if cli.agent_token_file.is_some() {
+            warnings.push(retired::ignored("--agent-token-file"));
+        }
+        if cli.require_host_credential {
+            warnings.push(retired::ignored("--require-host-credential"));
+        }
         warnings.extend(estimate_feed::deprecated(
             cli.estimate_feed,
             "--estimate-feed",
@@ -592,7 +591,7 @@ impl Config {
         let token = read_token(token_file)?;
         let clients = LiveClients::new(tokens::from_flags(&token, &cli)?);
         let limits = Limits::from(&cli);
-        let agents = agents(&cli, &clients)?;
+        let agents = agents(&cli, &clients, &mut warnings)?;
         let state_file = required(cli.state_file.clone(), "--state-file")?;
         let keys = UsageKeys {
             db: cli.usage_db.clone(),
@@ -678,26 +677,20 @@ impl Config {
         let Registering {
             plan,
             pool,
-            tokens,
-            mut mint_provider,
             job_limits,
         } = *registering;
         let mut more = Vec::new();
         for (head, registering) in later {
             check_more(&pool, &more, (&registering.pool, &head))?;
-            mint_provider.extend(registering.mint_provider);
-            let name = registering.pool.name().to_string();
-            let tokens = PoolTokens {
-                pool: name,
-                tokens: registering.tokens,
-            };
             more.push(MorePool {
                 pool: registering.pool,
-                tokens,
             });
         }
         let placed = Placement::given(server.agents.placement(), "server.placement")?;
         warnings.extend(placed);
+        if server.agents.names_require_host_credential() {
+            warnings.push(retired::ignored("server.require_host_credential"));
+        }
         warnings.extend(estimate_feed::deprecated(
             server.agents.estimate_feed(),
             "server.estimate_feed",
@@ -713,12 +706,10 @@ impl Config {
             .as_ref()
             .and_then(|plan| rank::order_of(&resolved, &plan.id));
         let agents = Box::new(AgentSetup {
-            tokens,
+            clients: clients.clone(),
             pool,
             more,
-            mint_provider,
             hello_limit: server.agents.hello_limit(),
-            require_host_credential: server.agents.require_host_credential(),
             load,
             cold: server.agents.cold(),
             cold_on: ColdOn {
@@ -905,7 +896,7 @@ impl Config {
     /// answer the same bytes in the same order name the same machines. The source is shared:
     /// a server started again with the same `Arc` goes on with the next bytes rather than
     /// repeating the first ones. Only the scaler reads it; the registry's session secrets
-    /// and the join tokens still come from the operating system.
+    /// still come from the operating system.
     pub fn with_entropy(mut self, entropy: Arc<dyn SessionSource>) -> Self {
         self.entropy = entropy;
         self

@@ -87,9 +87,6 @@ pub const CRUN_TMPFILES: &str = "/usr/share/js-agent/tmpfiles-crun.conf";
 /// The drop-in of the agent's unit that the user data writes.
 pub const USER_DATA_DROP_IN: &str = "/etc/systemd/system/js-agent-crun.service.d/50-user-data.conf";
 
-/// The join token the user data writes.
-pub const USER_DATA_TOKEN: &str = "/etc/js-agent/token";
-
 /// hostkeeper's config, which the user data may write.
 pub const USER_DATA_HOSTKEEPER: &str = "/etc/hostkeeper/hostkeeper.toml";
 
@@ -234,19 +231,13 @@ pub struct UserDataPath {
 }
 
 /// The paths the provider's user data fills, each with `write_files` of a cloud-config.
-pub const USER_DATA_PATHS: [UserDataPath; 3] = [
+pub const USER_DATA_PATHS: [UserDataPath; 2] = [
     UserDataPath {
         path: USER_DATA_DROP_IN,
         mode: "0644",
         required: true,
         what: "the agent's command line: `[Service]`, `ExecStart=` cleared, and `ExecStart=` set \
                again with this host's --server and --pool",
-    },
-    UserDataPath {
-        path: USER_DATA_TOKEN,
-        mode: "0600",
-        required: true,
-        what: "the join token the agent reads with --token-file",
     },
     UserDataPath {
         path: USER_DATA_HOSTKEEPER,

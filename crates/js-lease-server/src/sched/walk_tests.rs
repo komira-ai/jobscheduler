@@ -1,5 +1,5 @@
 //! The server's pass over the queued jobs walks the Default platform's machine providers in
-//! order (design section 5.6, pass 1): a host that joined with the pool's join token is of the
+//! order (design section 5.6, pass 1): a host whose binding names no instance is of the
 //! `static` provider, one whose hello named an instance of the pool's launching provider, and
 //! a free host of the first provider in order takes a job before any other. Everything runs in
 //! process on a manual clock; no listener is bound.

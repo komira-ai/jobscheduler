@@ -303,7 +303,8 @@ pub struct Record {
     /// When it was launched (found, for an orphan). The day window and the billed time
     /// count from here.
     pub launched_at: Millis,
-    /// When the join token minted for it expires. It holds no secret.
+    /// No longer set: it was when the launch's join token expired. Kept so records written
+    /// by an earlier release still read; a launch now leaves it unset.
     pub token_expires: Option<Millis>,
     /// The provider's id for it, once known.
     pub cloud_id: Option<String>,

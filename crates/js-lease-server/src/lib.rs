@@ -1,6 +1,6 @@
 //! The job scheduler's server: the hosts that register with it, the pools that launch
 //! more, the job service that places work on them, and the routes that list the hosts and
-//! pools, answer the agents, mint join tokens, reset a pool's brake and read usage. The
+//! pools, answer the agents, reset a pool's brake and read usage. The
 //! lease file of an earlier release, at the path `--state-file` names, is never opened,
 //! locked, read, written or deleted: a rollback to that release reads it as it was left.
 //!
@@ -37,16 +37,16 @@
 //! | `--job-listen <addr>` | off unless given: serves the job service on this address, gRPC and its HTTP/JSON gateway on one port (see "The job service" below); off the loopback it needs both TLS flags, and with them the port speaks TLS over the same reloaded pair. Turning it on opens the job store, `<state file>.jobs`, which the heartbeats of agents that report the `per-job` capability then read and update; an address in use, or a store file that cannot be made owner-only and opened, is refused at start naming the flag. Needs `--agent-pool-config` |
 //! | `--metrics-listen <addr>` | off unless given: serves `GET /metrics`, the operator's metrics in the Prometheus text format (the jobs by state, the oldest queued job's age, the queue wait, the placements, the start failures by code, the lost jobs, the failed writes of the job tables, the job pass's duration, the launches and failovers by pool, and each host's CPU and memory booked and free and its whole-host mark), on a listener of its own, plain HTTP with no token, to private peers only. It names no job, lease or token. An address that is not a private one, or one in use, is refused at start naming the flag |
 //! | `--ready-listen <addr>` | off unless given: serves `GET /readyz` (see "The readiness route" below) on a listener of its own, plain HTTP with no token, on a loopback address only; and, with a SQLite store, a held file lock is waited for instead of refusing the start (see "The store" below). The listener is bound before the lock is tried. An address that is not a loopback one, or one in use, is refused at start naming the flag |
-//! | `--state-file <path>` | the base path of the server's state files: `<path>.agents`, `<path>.joins`, `<path>.scaler`, `<path>.jobs` and the default place of `usage.db`; a lease file of an earlier release at the path is left as it is |
+//! | `--state-file <path>` | the base path of the server's state files: `<path>.agents`, `<path>.scaler`, `<path>.jobs` and the default place of `usage.db`; a lease file of an earlier release at the path is left as it is |
 //! | `--store <path>` | none unless given: an owner-only file (as `--token-file`'s is) holding the store's connection on one line, `postgres://...` or `postgresql://...`, or `sqlite:<absolute path>`; a SQLite store's file lock is taken before anything else (see "The store" below). Its content is never printed |
 //! | `--allow-sqlite-store` | off by default: accepts a `sqlite:` store, which is for tests and single-node development; without it such a store is refused at start naming this flag. No effect with a Postgres store. Needs `--store` |
 //! | `--store-unreachable-after <duration>` | `60s`: how long the store paths of the tick (the job pass over the job tables) may fail tick after tick before `/healthz` answers 503 `store unreachable` and the alert `store:unreachable` holds; the first tick whose store work succeeds clears both. Zero or an unparsable value is refused at start naming the flag |
 //! | `--boot initialise\|resume` | required: `initialise` is the first start (a live elastic pool may have no records yet), `resume` a later one (its records must exist); the server reads no lease file at either, so `resume` without one starts |
 //! | `--pool-config <path>` | removed, and hidden from `--help`: the agentless hosts-file pool is not served. A start that gives it is refused naming it, with the migration (run `js-agent` on each listed host and use `--agent-pool-config`, or a `[[pool]]` of `kind = "joined"`; see "Migrating an agentless pool" in `docs/design/configuration.md`). `--agent-pool-config` is required |
-//! | `--agent-token-file <path>` | the pool's shared join tokens (the first pool's, on a server of several), one per line, each as strong as `--token-file`'s, in an owner-only file; read again at every tick. Optional: without it the pool admits only hosts whose one-time join token verifies, unless its file names `join_token_file`. Naming both is refused, naming the file. Needs `--agent-pool-config` |
-//! | `--agent-pool-config <path>` | the pool agents join, as TOML: `name`, `class`, `max_machines`, `[shape]` (`cpu_millis`, `memory_bytes`, `gpus?`, `gpu_class?`, `disk_bytes?`: the scratch disk booked for a host that has not said hello since a restart; zero or absent books none and means the pool books no disk per job; no amount of `[shape]` is a floor or a ceiling: a host is booked at the CPU, memory, GPUs and disk it reports, less or more than `[shape]`, whose numbers are booked only for a host that has reported none yet; required above zero when `[capabilities]` names `scratch-quota`, or the file is refused; a pool that names `scratch-quota` refuses a host whose `scratch-quota` is not `project` (reason `below-floor`), or whose `scratch-default-gib` is absent, zero or above the wire maximum, or whose default is more than the disk the host reports (reason `quota-default-unfit`), with `shape-not-accepted`; a pool that does not name `scratch-quota` refuses with `shape-not-accepted` (reason `quota-without-pool-disk`) a host that runs with `--scratch-quota` when the pool books no disk or the host reports none), `[capabilities]`, `heartbeat_interval`, `grace`, `lost_retention`, `memory_schedulable_percent` (1 to 100, default 100: the share of the memory each host reports that the pool books, rounded down; a hello is held to no memory; write it before `[shape]`), `exec` (`container` or `sandbox-exec`: the hosts must report a `runtime` of that mode, and `gpu-toolkit` when the shape has GPUs and the host reports some, or are refused `host-contract` or `execution-mismatch`; absent, nothing is required). Turns agent registration on; `share_class?`: a class that books part of a host, served beside `class` so that its work shares a host with room (it may not name `class`); a joined pool of the file takes the same key; `join_token_file?`: the pool's shared join tokens, read as `--agent-token-file` is. Repeatable: each further file is one more pool beside the first, which a hello joins by naming it (Linux nodes and Macs, say). One registry holds the hosts of every pool, each held to its own pool's capabilities, `exec`, `max_machines` and timing, and a host id is in one pool at a time (a hello for it in another is refused `host-listed`). A shared token of one pool is refused `unknown-pool` on a hello that names another, and on a server of several pools a one-time token's hello must name the pool of its instance's provider. A later file is refused, naming it, when its name is an earlier pool's, its `memory_schedulable_percent` is not the first pool's (the scheduler books one share of every host), or it has whole-node settings (its class is `whole-node`: the server's whole-node settings, and the timing of a host put back after a restart before its hello, are the first pool's) |
-//! | `--agent-hello-burst`, `--agent-hello-interval` | the hellos one join token may say in a burst (`60`) and how often one more is allowed after (`1s`) |
-//! | `--require-host-credential` | off by default: turn it on once every agent is new. The first hello of a one-time join token must then say the agent keeps a host credential, or it is refused `join-token-credential-required` (403) and the token stays unused; so the token of every launched host is dead after its first hello. Pool join tokens are not affected. Needs `--agent-pool-config` |
+//! | `--agent-token-file <path>` | accepted, hidden from `--help` and not read: a host is admitted by its certificate only (see `--agent-client-ca`), so a start that gives it prints a warning saying it is ignored |
+//! | `--agent-pool-config <path>` | the pool agents join, as TOML: `name`, `class`, `max_machines`, `[shape]` (`cpu_millis`, `memory_bytes`, `gpus?`, `gpu_class?`, `disk_bytes?`: the scratch disk booked for a host that has not said hello since a restart; zero or absent books none and means the pool books no disk per job; no amount of `[shape]` is a floor or a ceiling: a host is booked at the CPU, memory, GPUs and disk it reports, less or more than `[shape]`, whose numbers are booked only for a host that has reported none yet; required above zero when `[capabilities]` names `scratch-quota`, or the file is refused; a pool that names `scratch-quota` refuses a host whose `scratch-quota` is not `project` (reason `below-floor`), or whose `scratch-default-gib` is absent, zero or above the wire maximum, or whose default is more than the disk the host reports (reason `quota-default-unfit`), with `shape-not-accepted`; a pool that does not name `scratch-quota` refuses with `shape-not-accepted` (reason `quota-without-pool-disk`) a host that runs with `--scratch-quota` when the pool books no disk or the host reports none), `[capabilities]`, `heartbeat_interval`, `grace`, `lost_retention`, `memory_schedulable_percent` (1 to 100, default 100: the share of the memory each host reports that the pool books, rounded down; a hello is held to no memory; write it before `[shape]`), `exec` (`container` or `sandbox-exec`: the hosts must report a `runtime` of that mode, and `gpu-toolkit` when the shape has GPUs and the host reports some, or are refused `host-contract` or `execution-mismatch`; absent, nothing is required). Turns agent registration on; `share_class?`: a class that books part of a host, served beside `class` so that its work shares a host with room (it may not name `class`); a joined pool of the file takes the same key; `join_token_file?`: accepted and not read, as `--agent-token-file` is (the start says it is ignored). Repeatable: each further file is one more pool beside the first, which a hello joins by naming it (Linux nodes and Macs, say). One registry holds the hosts of every pool, each held to its own pool's capabilities, `exec`, `max_machines` and timing, and a host id is in one pool at a time (a hello for it in another is refused `host-listed`). A hello that names a pool the server does not hold is refused `unknown-pool`. A later file is refused, naming it, when its name is an earlier pool's, its `memory_schedulable_percent` is not the first pool's (the scheduler books one share of every host), or it has whole-node settings (its class is `whole-node`: the server's whole-node settings, and the timing of a host put back after a restart before its hello, are the first pool's) |
+//! | `--agent-hello-burst`, `--agent-hello-interval` | the hellos one host may say in a burst (`60`) and how often one more is allowed after (`1s`) |
+//! | `--require-host-credential` | accepted, hidden from `--help` and not read, as `--agent-token-file` is: a start that gives it prints a warning saying it is ignored. Needs `--agent-pool-config` |
 //! | `--placement js-sched` | deprecated, and does nothing: `js-sched` is the only placement. The flag is accepted with the warning `--placement is deprecated and does nothing: js-sched is the only placement (drop the flag)`; `--placement registry`, the removed first-free placement, is refused at start, `the registry placement mode was removed; js-sched is the only placement (drop the flag)`. The server keeps one `js-sched` scheduler for the life of the server, built once and told of every hello, accepted heartbeat (with its load reading) and stop as the registry takes them, and of every host the registry forgets; it places the jobs on the hosts that registered themselves, and the scheduler is built again only when its picture of those hosts and the registry's books disagree, keeping each host's last three readings, and the start is counted. The pool's `memory_schedulable_percent` is the scheduler's rule: the registry books each host's whole reported memory and the scheduler books no more than the percent of it; `GET /v1/hosts` shows the cut memory as `shape.memory_bytes`, beside the percent. A host a whole-node request has set aside takes work of the pool's `share_class` only as backfill, by the end of the host's tail as the mark took it; a wall time above `server.max_lease_wall` never does. An agent pool (`--agent-pool-config`, or a joined pool of the file) whose capabilities name no `arch` is refused at start, naming the pool; an elastic pool is not: each of its machines is placed by what it reports and the capabilities its agent reported at hello, `arch` among them. Needs `--agent-pool-config` |
 //! | `--cpu-slack <multiplier>` | how far above a host's cores the scheduler may charge it, from `1.0` to `2.0` with at most three decimals, such as `1.1`; the scheduler's own default (1.1) unless given. A job is placed on a host whose agent does not report `load-admission` only where the summed bookings of its jobs stay within what its hello offers, with no slack. Needs `--agent-pool-config` |
 //! | `--pack-limit <fraction>` | how full the scheduler packs a host before it places on the least full one, as a fraction of the host's capacity (the larger of its CPU and memory share, bookings with the new lease added) from `0.0` to `1.0` with at most three decimals, such as `0.5`; the scheduler's own default (0.5) unless given. Within the limit the fullest host that fits is chosen; past it, the least full. Needs `--agent-pool-config` |
@@ -55,10 +55,10 @@
 //! | `--cold-memory-bytes-on <os>=<n>` | the memory a queued job whose `os` constraint is `<os>` (as the job gives it, such as `macos`) books in place of `--cold-memory-bytes`, while neither its class, its fallback class nor its client has a run: bytes from `1073741824` (1 GiB), and above the most a registered host has, that most. A job of any other `os`, or of none, books `--cold-memory-bytes`. Repeatable, each `<os>` once; a value that is not `<os>=<n>`, an empty `<os>` and one given twice are refused at start. Needs `--agent-pool-config` |
 //! | `--cold-cpu-millis-on <os>=<n>` | the CPU a queued job whose `os` constraint is `<os>` (as the job gives it, such as `macos`) books in place of `--cold-cpu-millis`, while neither its class, its fallback class nor its client has a run with a CPU sample: millicores from `250` to `4294967295`, and above a quarter of the most cores a registered host has, that quarter. A job of any other `os`, or of none, books `--cold-cpu-millis`. Repeatable, each `<os>` once; a value that is not `<os>=<n>`, an empty `<os>` and one given twice are refused at start. Needs `--agent-pool-config` |
 //! | `--estimate-feed` | deprecated, and does nothing: no lease is costed by an estimate any more. The flag is accepted with the warning `--estimate-feed is deprecated and does nothing: no lease is costed by an estimate any more (drop the flag)`, and is still refused beside `--usage-off` and without `--agent-pool-config` |
-//! | `--token-file <path>`, `--client-token <NAME>=<PATH>` | `--token-file`: required: a regular file owned by the server's user, mode 0600 or 0400, holding one token of printable ASCII of at least 32 bytes ([`MIN_TOKEN_BYTES`]; trailing whitespace is dropped). A shorter token is refused at start. The token of `GET /v1/hosts` and the join, brake and usage routes, and on the job service the token of the client named `default`. `--client-token`: repeatable, none by default: one more client of the job service (see `docs/design/configuration.md`), `NAME=PATH` or `NAME:ROLE=PATH`: its name (1 to 40 bytes of letters, digits, `.`, `_` and `-`, each name once, not `default`), its role (`client`, the default, or `operator`; the client `default` is an operator) and the file of its own token, checked as `--token-file`'s is and read again at every tick. A bad entry is refused by its position without repeating it; a short token, a file others can read, a name or a token another client has, and a token the join token file holds are refused naming the entry, never the token. Needs `--job-listen` |
+//! | `--token-file <path>`, `--client-token <NAME>=<PATH>` | `--token-file`: required: a regular file owned by the server's user, mode 0600 or 0400, holding one token of printable ASCII of at least 32 bytes ([`MIN_TOKEN_BYTES`]; trailing whitespace is dropped). A shorter token is refused at start. The token of `GET /v1/hosts` and the brake and usage routes, and on the job service the token of the client named `default`. `--client-token`: repeatable, none by default: one more client of the job service (see `docs/design/configuration.md`), `NAME=PATH` or `NAME:ROLE=PATH`: its name (1 to 40 bytes of letters, digits, `.`, `_` and `-`, each name once, not `default`), its role (`client`, the default, or `operator`; the client `default` is an operator) and the file of its own token, checked as `--token-file`'s is and read again at every tick. A bad entry is refused by its position without repeating it; a short token, a file others can read, a name or a token another client has are refused naming the entry, never the token. Needs `--job-listen` |
 //! | `--tick` | how often the job pass runs and, with agent registration on, the agent registry is advanced (reservation drain and prepare deadlines), `5s` unless given |
 //! | `--tls-cert`, `--tls-key` | PEM files; both or neither. The key file must be owner-only like the token file; a symbolic link (as secret mounts are) is followed and the file it leads to is checked, so a link to a 0600 key is accepted and a link to a group-readable one is refused. Both are read at start and again on SIGHUP: a renewed pair is served from the next handshake, with no restart (connections already open keep theirs). The pair is checked whole first (key owner-only, key matches the certificate, certificate valid now by the server's clock); one that fails is refused with a logged error and the old pair stays |
-//! | `--agent-client-ca <path>` | a PEM file of the CA certificates (hostkeeper's; two while one is replaced) that sign the hosts' certificates. Needs `--tls-cert` and `--tls-key` (refused naming the flag otherwise). The lease and agent listeners then ask a client for a certificate and do not insist on one; the job listener asks for none. A certificate that is presented must chain to the file and be an end-entity certificate with exactly one DNS SAN that is a host id (the host) and the extended key usage `clientAuth` and nothing else; URI SANs and the subject CN are not read, so no service name is needed; otherwise the handshake fails. On the agent routes (`/v1/agent/hello`, `/v1/agent/heartbeat`, `/v1/hosts/{id}`) the certificate is the credential: a bearer beside it is not read, no one-time token is used and no host credential is issued, the hello's `pool` is taken as declared, and the host the request is about (the body's `host_id`, the path's id) must be the certificate's, or 403 `certificate-host-mismatch`. The registry binds the host to a credential derived from the host id alone, so a renewed certificate (new key and serial) carries on the same session. A host bound to a join token that is not live is re-bound to its certificate by the certificate's first hello (taint and cordon kept, the binding committed first with the store); a live one is refused `host-live`; a host bound to a certificate is never taken by a token (`host-bound`). The file is read at start (an unreadable file, or one with no certificate, refuses the start) and again, with the TLS pair, on SIGHUP: a reload that fails keeps the CA and the pair in force. Token agents and lease clients present no certificate and are served as before. Join tokens and the mint route stay for the scaler path (a launched host's user data) and for hosts not managed by hostkeeper |
+//! | `--agent-client-ca <path>` | a PEM file of the CA certificates (hostkeeper's; two while one is replaced) that sign the hosts' certificates. Needs `--tls-cert` and `--tls-key` (refused naming the flag otherwise). The lease and agent listeners then ask a client for a certificate and do not insist on one; the job listener asks for none. A certificate that is presented must chain to the file and be an end-entity certificate with exactly one DNS SAN that is a host id (the host) and the extended key usage `clientAuth` and nothing else; URI SANs and the subject CN are not read, so no service name is needed; otherwise the handshake fails. On the agent routes (`/v1/agent/hello`, `/v1/agent/heartbeat`, `/v1/hosts/{id}`) the certificate is the only credential: a request that carries none is refused 401 `host-certificate-required` (on the dispatch poll too), and a bearer is not read; the hello's `pool` is taken as declared, and the host the request is about (the body's `host_id`, the path's id) must be the certificate's, or 403 `certificate-host-mismatch`. The registry binds the host to a credential derived from the host id alone, so a renewed certificate (new key and serial) carries on the same session. A host whose stored binding is to another credential that is not live is re-bound to its certificate by the certificate's first hello (taint and cordon kept, the binding committed first with the store); a live one is refused `host-live`. The file is read at start (an unreadable file, or one with no certificate, refuses the start) and again, with the TLS pair, on SIGHUP: a reload that fails keeps the CA and the pair in force. Lease clients present no certificate and are served as before; so a server that registers agents needs this flag and the TLS pair, or it admits no host |
 //! | `--max-connections` | connections open at once, `256` unless given; at the cap the server stops accepting |
 //! | `--handshake-timeout` | a TLS client's time to finish its handshake, `10s` |
 //! | `--header-timeout` | a client's time to send a request head, from the connection's start and after each response (so also how long a keep-alive connection may idle), `10s` |
@@ -75,7 +75,7 @@
 //! | `--max-job-wall <duration>` | the most a submitted job's wall limit may be, `30d` (the job service's `DEFAULT_MAX_JOB_WALL`, the longest `server.max_lease_wall` accepts): a whole count of days (`30d`) or a duration (`12h`, `90m`), at least one second; zero, a negative or unparsable value, or less than a second is refused at start naming the flag. A job asking for more is refused `wall-time-above-ceiling`. Read once at start; it does not read `server.max_lease_wall`. Without `--job-listen` it is checked and kept, and nothing reads it |
 //!
 //! A start that is refused prints the flag at fault and exits with status 2. The
-//! hello limit flags, `--require-host-credential`, `--placement`, `--estimate-feed`,
+//! hello limit flags, `--require-host-credential` (ignored), `--placement`, `--estimate-feed`,
 //! `--cpu-slack`, `--pack-limit`, `--placement-curves`, `--cold-cpu-millis`, `--cold-memory-bytes`,
 //! `--cold-memory-bytes-on`, `--cold-cpu-millis-on` and `--job-listen` need
 //! `--agent-pool-config`, and are refused without it.
@@ -86,8 +86,8 @@
 //! above, and no flag may be given beside it: the first one on the command line is refused,
 //! such as `--listen: not allowed with --config; set server.listen`, before the file is read
 //! and with exit status 2. `--token-file` is `server.client_token_file`,
-//! `--agent-pool-config` is a `[[pool]]` table, `--agent-token-file` is a pool's
-//! `join_token_file`, a `--client-token` a `[[client]]` table, and every other flag is the `[server]` key of its name with `_` for `-`. Every table refuses a field it does not know, and the file holds no secret: a
+//! `--agent-pool-config` is a `[[pool]]` table, `--agent-token-file` has no key (it is
+//! ignored), a `--client-token` a `[[client]]` table, and every other flag is the `[server]` key of its name with `_` for `-`. Every table refuses a field it does not know, and the file holds no secret: a
 //! secret is the path of a file that only its owner can use. A refusal names where it is,
 //! `server.listen: ...` or `pool "gpu": provider.api_key_file: ...`, and never repeats a
 //! value of the file; a syntax error says the line. Nothing is checked over the network
@@ -115,7 +115,7 @@
 //! # host's queue again
 //! # tick, handshake_timeout, header_timeout, read_timeout,
 //! # write_timeout, drain_timeout, drain_hold, max_connections, max_requests: the flags' names and defaults
-//! # agent_hello_burst (60), agent_hello_interval ("1s"), require_host_credential (false):
+//! # agent_hello_burst (60), agent_hello_interval ("1s"):
 //! # the flags' names and defaults; refused unless a pool registers agents (an elastic pool)
 //! # max_lease_wall: the ceiling on the wall time of the work a host takes; none by default,
 //! # and required by a pool with accelerators (a floor of one GPU or more); the scaler's
@@ -173,7 +173,7 @@
 //! A pool whose provider launches machines (an elastic pool) also has `max_instances`
 //! (1 to 255), `max_spend_per_hour` and `max_spend_per_day` (strings: a decimal with at
 //! most two places, above zero, the day cap not below the hour cap), and optionally `idle`,
-//! `max_age`, `min_host_lifetime`, `boot_timeout` (`15m`), `boot_fail_cooldown_max`, `boot_fail_trip_after`, `boot_fail_reset_after`, `launch`, `exec`, `join_token_file`, `agent` and `network`.
+//! `max_age`, `min_host_lifetime`, `boot_timeout` (`15m`), `boot_fail_cooldown_max`, `boot_fail_trip_after`, `boot_fail_reset_after`, `launch`, `exec`, `agent` and `network`; `join_token_file` is accepted and not read (the start says it is ignored).
 //! Every pool, joined or elastic, may set `memory_schedulable_percent`, a whole number from
 //! 1 to 100 (default 100): the share of each host's memory that is booked, rounded down. A
 //! registered host is booked that share of the memory it reports (of its pool's shape, a
@@ -256,8 +256,8 @@
 //! `gpu-toolkit` when the pool has GPUs. `network` is `{ kind = "default" }`, which is
 //! what a pool without it gets, or `{ kind = "tailscale", oauth_client_file = ..., tag
 //! = ... }`. Any number of elastic and joined pools may be declared, each with its own
-//! `join_token_file`. The server starts on several joined pools, which share its one registry
-//! of agents (each host in the pool its hello names, with that pool's shared tokens only, see
+//! settings. The server starts on several joined pools, which share its one registry
+//! of agents (each host in the pool its hello names, see
 //! `--agent-pool-config`), and on one elastic pool alone: beside another pool that registers
 //! agents an elastic pool is refused at start, naming the second, `several elastic pools are
 //! parsed; this version runs one, as the server keeps one registry of agents` or `an elastic
@@ -361,13 +361,12 @@
 //! them fits no request that requires a capability), `exec` (as above, but absent is
 //! `none`), `heartbeat_interval`, `grace`, `lost_retention`, `prepare_timeout` (class
 //! `whole-node` only, refused on any other: how long a whole-node lease may take to become
-//! ready, ten minutes unless set) and `join_token_file` (the shared pool token). It launches
+//! ready, ten minutes unless set) and `join_token_file` (accepted and not read: the start says it is ignored). It launches
 //! nothing: `launch`, `network`, `provider`,
 //! `max_instances`, `max_spend_per_hour`, `max_spend_per_day`, `idle`, `max_age`, `min_host_lifetime` and `boot_timeout`
 //! are each refused naming the key. It registers agents, so the server starts only when it
-//! is the one pool that does, and `server.agent_listen` is required. One-time tokens for its nodes
-//! come from `POST /v1/agent/join-tokens` with `provider` the pool's name and
-//! `instance_id` the node's; a mint naming another provider is refused 400. An embedder
+//! is the one pool that does, and `server.agent_listen` is required. Its nodes are admitted by
+//! their host certificates, like every other host. An embedder
 //! builds the pool from its own settings with [`JoinedPool`] and [`JoinedPool::validate`].
 //!
 //! # API
@@ -444,13 +443,14 @@
 //! failed) still refuses the start, exit 2, with or without the flag. A SIGTERM or ctrl-c
 //! while it waits (or starts) ends the process with status 0, the lock not taken.
 //!
-//! With the setting, the host bindings (with their taints and cordons), the join tokens'
-//! digests, the scaler's records and its hosts to remove are kept in the store, under
-//! `hosts/binding/<host id>`, `hosts/join/<digest>`, `acquires/scaler/records` and
-//! `acquires/scaler/unremoved`, instead of `<state file>.agents`, `.joins`, `.scaler` and
-//! `.scaler.unremoved`. Each change is committed before it is held in memory (the scaler's
+//! With the setting, the host bindings (with their taints and cordons), the scaler's
+//! records and its hosts to remove are kept in the store, under
+//! `hosts/binding/<host id>`, `acquires/scaler/records` and
+//! `acquires/scaler/unremoved`, instead of `<state file>.agents`, `.scaler` and
+//! `.scaler.unremoved`. Rows under `hosts/join/` that an earlier release wrote are neither
+//! read nor written nor deleted. Each change is committed before it is held in memory (the scaler's
 //! before the call it records); a heartbeat with no new taint, a known host's hello and the
-//! host book use no store. The first start over an empty store imports the four files once,
+//! host book use no store. The first start over an empty store imports the three files once,
 //! in one transaction with the marker `meta/server-state-imported`, and never changes them.
 //! The job store and the usage file are kept as without the setting.
 //!
@@ -522,26 +522,24 @@
 //!
 //! # Agents
 //!
-//! With `--agent-pool-config` (and, for hosts that join with a token shared by the pool,
-//! `--agent-token-file`) a machine can register itself as
-//! a host of the pool the pool file describes. The machine's agent calls two routes with a
-//! join token, on the same listener, body cap, timeouts and connection cap as everything
-//! else. A server always has the pool file (or a registering `[[pool]]` of `--config`).
+//! With `--agent-pool-config` a machine can register itself as
+//! a host of the pool the pool file describes. The machine's agent calls its routes with its
+//! host certificate, on the same listener, body cap, timeouts and connection cap as everything
+//! else (see `--agent-client-ca`); a request without a verified certificate is refused 401
+//! `host-certificate-required`. A server always has the pool file (or a registering `[[pool]]` of `--config`).
 //!
 //! | request | answers |
 //! |---|---|
 //! | `POST /v1/agent/hello` | 200 the welcome (protocol, epoch, heartbeat interval, grace, pool, session secret); 400 `invalid-hello`, a wire code, or `unsupported-protocol` with the majors served; 403 `unknown-pool`, `host-bound`, `host-listed`, `shape-not-accepted` (with `"reason"`: `below-floor`, the host's labels or capabilities, or the class of its GPUs, do not meet the pool's (never the CPU, memory, disk or GPUs it reports, at which it is booked); `quota-default-unfit`, the pool names `scratch-quota` and the host's scratch default is absent, zero or above the disk it is booked at; or `quota-without-pool-disk`, the host enforces a scratch quota, is booked no disk, and the pool does not name `scratch-quota`; a server logs the refusal with the host id, the code and the reason), `host-contract` and `execution-mismatch` (with `"field"`, the capability at fault; only a pool that declares an execution mode sends them), `pool-full`; 409 `host-live`; 413 `body-too-large`; 429 `rate-limited` with `Retry-After`; 503 `session-unavailable`, or `state-write-failed` when, with a store setting, the host's binding could not be committed |
 //! | `POST /v1/agent/heartbeat` | 200 `{commands, result_acks, taint_ack, taint_cleared_ack?, beat_now?}` (see "Taint"; to an agent that reported `held-beat`, a reply with nothing to send is held open until a job is placed on the host, for the heartbeat interval at most 5 s, and says `beat_now`; for a host that polls dispatch a placement ends the hold, and a beat that lists a job `starting` is answered at once or within 200 ms of the host's last such answer, these without `beat_now`: `docs/design/held-beat.md`); 400 `invalid-heartbeat`; 403 `host-bound`, `session-mismatch`; 409 `stale-epoch`, `unknown-host` (the agent says hello again); 413; 503 `state-write-failed` when, with a store setting, the taint it brings could not be committed (nothing is recorded, and the agent reports it again) |
 //! | `POST /v1/agent/dispatch` | the dispatch poll of an agent whose hello reported `dispatch-poll` (the welcome said `dispatch_poll`): 200 `{messages}`, the host's due starts and stops from the dispatch queue (claimed for `server.dispatch_lease_secs`, held up to 5 s when none is due, answered empty at once when the server drains), after deleting the messages the request acknowledges; 400 `invalid-dispatch`; 403 `host-bound`, `session-mismatch`; 409 `stale-epoch`, `unknown-host`, `dispatch-not-served` (the host did not report the capability, or this server holds no job tables: the agent backs off and polls again until a welcome without `dispatch_poll` ends its polls); 413; 500 `state-write-failed`. Nothing is recorded of the host: a poll is not a beat |
-//! | `POST /v1/hosts/{id}:cordon` | with a host credential, for that host only: 200 the host as `GET /v1/hosts/{id}` reads it, plus `already_cordoned`; plus `held_by_other` (the cordon in force is another holder's and was left as it was); body optional, `{"lease_secs": n, "holder": "<id>", "take_over": true}` (default 300, cut to 3600; a request of another holder than the cordon's leaves it; `take_over`, with a holder only, makes it the caller's); 400 `invalid-cordon` (also a holder that is not an id, or `take_over` with no holder); 403 `host-credential-required`, or the code of a credential that is not the host's (`join-token-not-admitted`, `join-token-expired`); 409 `unknown-host`; 413; 503 `cordon-unsaved` |
+//! | `POST /v1/hosts/{id}:cordon` | with the host's certificate, for that host only: 200 the host as `GET /v1/hosts/{id}` reads it, plus `already_cordoned`; plus `held_by_other` (the cordon in force is another holder's and was left as it was); body optional, `{"lease_secs": n, "holder": "<id>", "take_over": true}` (default 300, cut to 3600; a request of another holder than the cordon's leaves it; `take_over`, with a holder only, makes it the caller's); 400 `invalid-cordon` (also a holder that is not an id, or `take_over` with no holder); 401 `host-certificate-required`; 403 `certificate-host-mismatch` (the certificate is another host's); 409 `unknown-host`; 413; 503 `cordon-unsaved` |
 //! | `POST /v1/hosts/{id}:uncordon` | as the cordon, body optional, `{"holder": "<id>"}`: 200 the host, plus `lifted` and `held_by_other`; 200 also when it was not cordoned; with a holder, only that holder's cordon is lifted, and another's is left (`held_by_other: true`) |
 //! | `GET /v1/hosts/{id}` | as the cordon: 200 `{id, state, epoch, session_started_ms?, leases, lease?, releasing, mark?, cordon? {expires_at_ms, expires_in_ms}, taint?, agent_version?, runtime?}`; `mark` is `reserved`, `held`, `draining` or `releasing` as in the `mark` of `GET /v1/hosts`, and absent for a host that is not set aside (a host is idle when `lease` is absent, `leases` is 0, `releasing` is false and `mark` is absent) |
 //!
 //! **Cordon.** A host takes itself out of placement with `POST /v1/hosts/{id}:cordon`, so
 //! that an update of its agent, or an operator's measurement, can wait for the work it holds to
-//! end without new work arriving. The routes serve the host of the credential and no other: the
-//! credential is the host credential (or the one-time token) that registered the host, and the
-//! shared pool token names no host and is refused. A cordon on this route is a lease the
+//! end without new work arriving. The routes serve the host of the certificate and no other. A cordon on this route is a lease the
 //! requester sets and renews: a repeat extends it from the time of the repeat and never shortens
 //! it, the server cuts a request to an hour, and a cordon that is not renewed lifts by itself.
 //! A request may name its holder (`holder`): a request of another holder leaves the cordon as it
@@ -562,34 +560,19 @@
 //! is live (heard within the grace period) and serving. A host that goes silent reads
 //! `Unknown` until it is heard again.
 //!
-//! **Tokens.** The join tokens and the client tokens are different secrets: each is a 401
-//! with an empty body on the other's routes, and a join-token file that holds the token of
-//! any client is refused. A file may hold several tokens, so that a new one can be added
-//! before an old one is removed; the file is read again at every tick, and a read that
-//! fails (a half-saved edit, a mode that is no longer private) keeps the tokens in force,
-//! is logged and is counted in [`Running::agent_errors`]. A host id is bound to the
-//! credential (the SHA-256 of the token) of the first hello that admitted it, so
-//! removing a token also removes the ability of the hosts bound to it to heartbeat or say
-//! hello again: that is revocation. Moving such a host to a new token means the registry
-//! forgetting it first (it is forgotten after it has been lost for `lost_retention`, if
-//! no lease holds it), and a host that holds a lease is never forgotten.
-//!
-//! **What a join token can and cannot do.** Every host of a pool shares the join tokens.
-//! A session secret issued in the welcome and carried in every heartbeat keeps one
-//! token holder from keeping another's host alive, and a binding to the first credential
-//! (and to the instance, when the hello names one) keeps it from taking over a live host.
-//! A holder of a token can still say hello for an id that is not instance-bound once the
-//! host is lost, and can fill `max_machines` with made-up ids; hellos are limited per
-//! token (`--agent-hello-burst`, `--agent-hello-interval`) to slow that, not to stop it.
-//! Per-host credentials close it and are not built. The limit is one bucket for each join
-//! token, shared by every agent of the pool that uses it, so a holder of the token can
-//! spend the bucket and make the pool's other agents get 429 `rate-limited` on their
-//! hellos until it refills: that is the per-host credential gap (design D18) again, not
-//! something the limit prevents. A refusal is logged once per token per interval, and
-//! the bucket of a token that has left the token file is dropped at the next tick that
-//! reads the file. The registered hosts of a pool are
-//! as trusted as the holders of its join tokens: a lease is a whole machine that the
-//! pool's holders run.
+//! **Host identity.** A host is its certificate, and the client tokens (`--token-file`,
+//! `--client-token`) are another secret that the agent routes never read: a request to them
+//! that carries no verified certificate is refused 401 `host-certificate-required`, whatever
+//! bearer it holds. A host id is bound to the credential derived from the host id of the
+//! certificate that admitted it, which a renewed certificate keeps, so a certificate of
+//! another host never says hello for it (403 `certificate-host-mismatch`). A session secret
+//! issued in the welcome and carried in every heartbeat keeps the wrong process of one host
+//! from keeping the host alive. Hellos are limited per host (`--agent-hello-burst`,
+//! `--agent-hello-interval`); a refusal is logged once per host per interval, and the bucket
+//! of a host that has refilled is dropped at the next tick. A host whose binding row still
+//! holds the credential of a token an earlier release admitted it with is re-bound to its
+//! certificate at the certificate's first hello. Hosts a pool admits are as trusted as the
+//! holders of the CA's certificates: a lease is a whole machine that they run.
 //!
 //! **Taint.** The first taint a heartbeat reports is kept for the host (`taint` in `GET /v1/hosts`)
 //! and acknowledged with `taint_ack: true`, but only once it is in the state file, so an agent that
@@ -678,7 +661,7 @@
 //! the lease file of an earlier release, so a start with `--boot resume` and no lease file
 //! at the state file's path starts, and a lease file left there is ignored. A rollback to
 //! that release finds the file as this one left it. `--state-file` is the base path of the
-//! state files beside it (`.agents`, `.joins`, `.scaler`, `.jobs`), and `--boot` decides
+//! state files beside it (`.agents`, `.scaler`, `.jobs`), and `--boot` decides
 //! only whether a live elastic pool's records may be missing (`initialise`) or must exist
 //! (`resume`).
 //!
@@ -694,13 +677,13 @@
 //! Without them, or for a host the rows do not hold, the heartbeat is answered 409
 //! `unknown-host` and the agent says hello.
 //!
-//! What lets a host keep its id against any join-token holder after a restart is the
+//! What lets a host keep its id against any other host's certificate after a restart is the
 //! binding of the host id to the credential and instance it was admitted with. The server
 //! keeps the bindings (in the store with a store setting, see "The store") in a file of its
 //! own beside the state file, `<state file>.agents` (TOML, mode 0600, replaced whole, keys
 //! it does not know ignored), written when a hello admits a host and again at a tick when it
-//! differs, and reads it at start. It holds SHA-256 digests of join tokens, not tokens, and
-//! the taint of each host that reported one. A file that is present and unreadable, or not
+//! differs, and reads it at start. It holds the digest of the credential of each host, not
+//! a secret, and the taint of each host that reported one. A file that is present and unreadable, or not
 //! private, is a refused start naming `--state-file`. A missing file means no bindings: the
 //! first hello binds the id. If the file cannot be written (the failure is logged and
 //! counted) a binding made meanwhile does not survive a restart until a later tick writes it.
@@ -740,7 +723,7 @@
 //! | `GET /v1/usage/nodes/{id}?from=<minute>&to=<minute>` | 200 `{host, from, to, rows: [{minute, cpu_millis, ws_bytes, leases}], next}`; minutes are wall minutes since the Unix epoch, default the last 60 minutes up to now, at most 1,440 rows, and `next` is the minute to ask from for the rest (else `null`); a node with no rows is 200 with none, so an unknown node and a quiet one look alike; 400 for an id that is not exactly an id (capitals, escapes, slashes, dot-only segments, over 63 bytes), a query that is not `from` and `to` once each in digits, or `to` before `from`; 503 `usage-unavailable` |
 //! | `GET /v1/usage/keys/{key}` | 200 `{key, runs, curve, last_used_day, stale}`, `curve` being `null` until there are enough runs, else `[{minute, cores_milli, ws_bytes}]` (`cores_milli` is `null` when the fit did not learn cores: too few runs outside node pressure, a memory-only curve); 404 `unknown-key`; 400 for a key that is not 1 to 128 characters of `[0-9a-z._-]` starting with a letter or digit; 503 `usage-unavailable` |
 //!
-//! Both are behind the client token (a join token is a 401), exist only when usage is on,
+//! Both are behind the client token (a host certificate is not one), exist only when usage is on,
 //! and never echo the request in an answer or a log line.
 //!
 //! # Ticks
@@ -769,7 +752,6 @@ mod admit;
 mod agent_api;
 mod agent_pool;
 mod agent_state;
-mod agent_tokens;
 mod agents;
 mod alerts;
 mod api;
@@ -815,8 +797,6 @@ mod job_sizes;
 mod job_start;
 mod job_store;
 mod job_whole;
-mod join_api;
-mod join_tokens;
 mod kinds;
 mod listener;
 mod logs;

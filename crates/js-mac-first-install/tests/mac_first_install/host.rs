@@ -76,9 +76,6 @@ const HOST_ROLE_URI: &str = "urn:hostkeeper:host-role:host";
 /// The client token the test reads the host list with.
 const CLIENT_TOKEN: &str = "client-token-0123456789-abcdefghijkl";
 
-/// The pool's join token, which an agent with a host certificate neither reads nor sends.
-const JOIN: &str = "join-token-A-0123456789-abcdefghijklmnop";
-
 /// The pool the Studios join.
 const POOL_TOML: &str = r#"
 name = "mac-build"
@@ -169,7 +166,6 @@ impl LeaseServer {
         let server_key = write("server-key.pem", &made.signing_key.serialize_pem(), 0o600);
         let ca = write("agent-ca.pem", agent_ca, 0o644);
         let client_token = write("client-token", CLIENT_TOKEN, 0o600);
-        let join = write("join-token", JOIN, 0o600);
         let pool = write("agent-pool.toml", POOL_TOML, 0o644);
         let text = |path: &Path| path.to_str().expect("a UTF-8 path").to_owned();
         let argv = [
@@ -182,8 +178,6 @@ impl LeaseServer {
             text(&dir.join("leases.toml")),
             "--token-file".to_owned(),
             text(&client_token),
-            "--agent-token-file".to_owned(),
-            text(&join),
             "--agent-pool-config".to_owned(),
             text(&pool),
             "--tls-cert".to_owned(),

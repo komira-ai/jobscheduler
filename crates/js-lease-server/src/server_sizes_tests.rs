@@ -37,11 +37,6 @@ fn config(dir: &TestDir, store_clock: &Arc<js_state::ManualClock>) -> Config {
     };
     let pool = "name = \"build\"\nclass = \"build-host\"\nmax_machines = 2\n[shape]\ncpu_millis = 8000\nmemory_bytes = 17179869184\n[capabilities]\narch = \"x86_64\"\n";
     let token = write("token", "test-token-0123456789-abcdefghijkl", 0o600);
-    let joins = write(
-        "agent-tokens",
-        "join-token-A-0123456789-abcdefghijklmnop\n",
-        0o600,
-    );
     let pool = write("agent-pool.toml", pool, 0o644);
     let args = [
         "js-lease-server",
@@ -58,7 +53,6 @@ fn config(dir: &TestDir, store_clock: &Arc<js_state::ManualClock>) -> Config {
         [
             ("--state-file", dir.path().join("state")),
             ("--token-file", token),
-            ("--agent-token-file", joins),
             ("--agent-pool-config", pool),
         ]
         .into_iter()

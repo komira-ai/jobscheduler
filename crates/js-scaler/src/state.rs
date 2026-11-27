@@ -12,7 +12,7 @@ use crate::settings::Blocked;
 use crate::time::Millis;
 
 /// One acquire to make: everything but the boot payload, which the caller renders from
-/// its network mode and the join token it mints.
+/// its network mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcquirePlan {
     /// The acquire's id. Asking again with it launches nothing new.
@@ -44,14 +44,6 @@ pub enum Action {
     /// the step changed them; it carries everything the scaler keeps (the machines and the
     /// cooldowns), so a caller cannot write part of it.
     Save(Box<Records>),
-    /// Mint a join token for the host, valid for `valid_for`. Sent for a new acquire id
-    /// and for the retry of a deferred one, never for a record found after a restart.
-    Mint {
-        /// The host's name.
-        host: String,
-        /// How long the token lives.
-        valid_for: Duration,
-    },
     /// Call `acquire`; its answer comes back in the next step's input.
     Acquire(Box<AcquirePlan>),
     /// `Registry::drain` the host.
@@ -65,8 +57,6 @@ pub enum Action {
     Undrain(String),
     /// `Registry::release_host` the host: it marks it only while it is still quiet.
     ReleaseHost(String),
-    /// Revoke the host's join token. Sent once per machine.
-    Revoke(String),
     /// Call `release` on the machine; its answer is read back in the next step's input.
     /// Sent every step until the answer is `Gone`.
     Release {

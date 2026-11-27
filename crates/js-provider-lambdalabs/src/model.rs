@@ -150,7 +150,7 @@ pub struct Instance {
 
 /// What one launch asks for. The ssh key is one name: Lambda takes exactly one.
 ///
-/// The user data is a [`Secret`]: it holds the machine's join token, so the request has no
+/// The user data is a [`Secret`]: it can hold the network's secrets, so the request has no
 /// `Clone` or `PartialEq`, and its `Debug` prints `***` for the data.
 #[derive(Debug)]
 pub struct LaunchRequest {

@@ -199,7 +199,7 @@ pub struct Input {
     pub released: Vec<ReleaseResult>,
     /// Host names of machines a read by id found the provider no longer has
     /// (`get_instance` answered not found). Read with a host the registry does not hear
-    /// from, it settles the machine: revoked, forgotten and removed.
+    /// from, it settles the machine: forgotten and removed.
     pub not_found: Vec<String>,
     /// Random bytes for the acquire ids of this step's launches, one value for each
     /// launch the step may make (the sum of the pools' `max_step`). The step has no

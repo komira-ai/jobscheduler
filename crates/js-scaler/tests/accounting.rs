@@ -55,7 +55,6 @@ fn a_planned_retry_is_not_sent_in_plan_mode() {
     rig.pool().settings.launch = LaunchMode::Plan;
     let actions = rig.tick(at(20 * SECOND));
     assert_eq!(acquires(&actions).len(), 0);
-    assert_eq!(count(&actions, "Mint"), 0);
     assert_eq!(rig.phase(0), Phase::Planned);
 }
 
@@ -179,7 +178,7 @@ fn a_running_machine_counts_only_its_last_24_hours() {
 }
 
 /// Asserts that a launch the provider told to wait is forgotten when no request waits for it
-/// any more, in a live pool and in a pool that only plans: its token is revoked, nothing is
+/// any more, in a live pool and in a pool that only plans: nothing is
 /// retried when its time comes, and it no longer counts against the pool.
 #[test]
 fn a_planned_launch_no_request_waits_for_is_forgotten() {
@@ -192,7 +191,7 @@ fn a_planned_launch_no_request_waits_for_is_forgotten() {
 
         rig.input.waiting = Vec::new();
         let actions = rig.tick(at(2 * SECOND));
-        assert_eq!(kinds(&actions), ["Save", "Revoke", "ForgetNetwork"]);
+        assert_eq!(kinds(&actions), ["Save", "ForgetNetwork"]);
         assert!(rig.state.records.instances.is_empty());
 
         assert!(rig.tick(at(20 * SECOND)).is_empty());
@@ -201,7 +200,7 @@ fn a_planned_launch_no_request_waits_for_is_forgotten() {
 
 /// Asserts that a launch the provider told to wait is kept, with no request waiting, while
 /// the provider holds an unresolved call for its acquire id (an earlier call of it may have
-/// landed): nothing is revoked or forgotten, it still counts, and its retry goes out with
+/// landed): nothing is forgotten, it still counts, and its retry goes out with
 /// the same acquire id when its time comes. A call for another acquire id keeps nothing.
 #[test]
 fn a_planned_launch_with_an_unresolved_call_is_kept_and_retried() {
@@ -232,7 +231,7 @@ fn a_planned_launch_is_forgotten_when_the_unresolved_call_is_another_acquire() {
     rig.pool().unresolved = vec![js_elastic::AcquireId::new("another-1").unwrap()];
 
     let actions = rig.tick(at(2 * SECOND));
-    assert_eq!(kinds(&actions), ["Save", "Revoke", "ForgetNetwork"]);
+    assert_eq!(kinds(&actions), ["Save", "ForgetNetwork"]);
     assert!(rig.state.records.instances.is_empty());
 }
 
@@ -248,7 +247,7 @@ fn a_planned_launch_is_kept_for_the_request_that_waits_for_it() {
 
     rig.input.hosts = vec![host("h1", "gpu")];
     let actions = rig.tick(at(3 * SECOND));
-    assert_eq!(kinds(&actions), ["Save", "Revoke", "ForgetNetwork"]);
+    assert_eq!(kinds(&actions), ["Save", "ForgetNetwork"]);
     assert!(rig.state.records.instances.is_empty());
 }
 
@@ -298,7 +297,6 @@ fn a_planned_retry_is_checked_against_the_caps_again() {
         rig.input.waiting = vec![request("r1")];
         let actions = rig.tick(at(now));
         assert_eq!(acquires(&actions).len(), 0, "{expected:?}");
-        assert_eq!(count(&actions, "Mint"), 0, "{expected:?}");
         assert_eq!(rig.phase(0), Phase::Planned, "{expected:?}");
         assert_eq!(rig.state.blocked["gpu"], expected);
 
@@ -311,7 +309,7 @@ fn a_planned_retry_is_checked_against_the_caps_again() {
 
 /// Asserts that an answer replayed for an earlier attempt of an acquire does nothing: a
 /// `Deferred` for the first call, arriving after the retry went out, does not plan the
-/// launch again or mint a second token, and a `Deferred` for the retry itself does.
+/// launch again, and a `Deferred` for the retry itself does.
 #[test]
 fn a_replayed_deferral_for_an_earlier_attempt_is_ignored() {
     let (mut rig, plan) = launched(settings("gpu"));

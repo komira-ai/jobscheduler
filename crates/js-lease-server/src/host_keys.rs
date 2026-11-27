@@ -1,11 +1,11 @@
 //! The keys the server keeps its hosts under in the state store (`--store`, `server.store`):
-//! one key per host binding, `hosts/binding/<host id>` ([`crate::agent_state`]), and one per
-//! join token or host credential, `hosts/join/<digest>` ([`crate::join_tokens`]). The scaler's
-//! two keys (`crate::scaler::kept`) and the first start's import commit through here too.
+//! one key per host binding, `hosts/binding/<host id>` ([`crate::agent_state`]). The scaler's
+//! two keys (`crate::scaler::kept`) and the first start's import commit through here too. The
+//! rows an earlier release kept under `hosts/join/` are neither read nor written here.
 //!
 //! A value is a JSON object with a `version` field. A reader takes any version, as the files
 //! are read, and keeps the fields it does not know; the next write of the key writes them
-//! back. Only digests are stored, never a token or a host credential. Every change is one
+//! back. Only digests are stored, never a secret. Every change is one
 //! [`Store::txn`], committed before the server holds it in memory.
 
 use std::collections::BTreeMap;
@@ -18,9 +18,6 @@ use serde_json::{Map, Value};
 /// The prefix of the host bindings.
 pub(crate) const BINDINGS: &str = "hosts/binding/";
 
-/// The prefix of the join tokens and host credentials, each under its digest.
-pub(crate) const JOINS: &str = "hosts/join/";
-
 /// The version this build writes.
 const VERSION: u32 = 1;
 
@@ -30,8 +27,8 @@ pub(crate) type Extra = BTreeMap<String, Value>;
 /// One write of a commit: the key, the value to put or `None` to delete it, and the
 /// condition the key must meet. A binding's write is conditional on the version of the row
 /// this server read or wrote last ([`crate::agent_state::BindingStore`]), as other servers
-/// over the store write the same rows; the join tokens' rows, which one server's lock orders,
-/// are written at [`Cond::Any`].
+/// over the store write the same rows; the scaler's rows and the import's are written at
+/// [`Cond::Any`].
 pub(crate) type KeyWrite = (String, Option<Vec<u8>>, Cond);
 
 /// Writes to commit together.
@@ -194,14 +191,14 @@ mod tests {
     fn a_refused_write_is_an_error_naming_its_key() {
         let conflict = Conflict {
             index: 0,
-            key: "hosts/join/k".to_owned(),
+            key: "hosts/binding/k".to_owned(),
         };
         let refused = committed(Ok(Err(conflict))).unwrap_err();
         assert_eq!(
             refused.to_string(),
-            "the store refused the write of hosts/join/k"
+            "the store refused the write of hosts/binding/k"
         );
-        assert_eq!(refused_key(&refused), Some("hosts/join/k"));
+        assert_eq!(refused_key(&refused), Some("hosts/binding/k"));
         assert_eq!(refused_key(&io::Error::other("the store failed")), None);
         let commit = js_state::Commit {
             revision: Revision(1),
@@ -235,10 +232,10 @@ mod tests {
         let known: Known = decode("k", &bytes).unwrap();
         assert_eq!((known.version, known.a.as_str()), (1, "new"));
         assert_eq!(known.extra.get("later"), Some(&json!({"x": 1})));
-        let refused = decode::<Known>("hosts/join/k", b"{\"a\": \"secret\"}").err();
+        let refused = decode::<Known>("hosts/binding/k", b"{\"a\": \"secret\"}").err();
         assert_eq!(
             refused.as_deref(),
-            Some("hosts/join/k does not hold this key's fields")
+            Some("hosts/binding/k does not hold this key's fields")
         );
     }
 
@@ -247,15 +244,19 @@ mod tests {
     fn a_scan_names_keys_after_the_prefix() {
         let store = store();
         let writes = vec![
-            ("hosts/join/d1".to_owned(), Some(b"x".to_vec()), Cond::Any),
+            (
+                "hosts/binding/d1".to_owned(),
+                Some(b"x".to_vec()),
+                Cond::Any,
+            ),
             ("hosts/other".to_owned(), Some(b"y".to_vec()), Cond::Any),
         ];
         commit(&store, writes).unwrap();
-        let rows = scan(&store, JOINS).unwrap();
-        let version = store.get("hosts/join/d1").unwrap().unwrap().version;
+        let rows = scan(&store, BINDINGS).unwrap();
+        let version = store.get("hosts/binding/d1").unwrap().unwrap().version;
         assert_eq!(rows, vec![("d1".to_owned(), b"x".to_vec(), version)]);
         store.fail_read_after(0);
-        let failed = scan(&store, JOINS).unwrap_err();
+        let failed = scan(&store, BINDINGS).unwrap_err();
         assert!(failed.contains(INJECTED), "{failed}");
     }
 }

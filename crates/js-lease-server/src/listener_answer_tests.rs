@@ -164,9 +164,9 @@ async fn a_refusal_before_the_body_reaches_a_client_that_half_closed() {
     }
 }
 
-/// The agent routes over a pool of four hosts, with their files under `dir`: the pool's
-/// join token is forty `j`s, and a credential may say five hellos in a burst.
-fn agent_routes(dir: &std::path::Path) -> Router {
+/// The agent side of a server over a pool of four hosts, with its files under `dir`: a
+/// credential may say five hellos in a burst.
+fn agents_over(dir: &std::path::Path) -> Arc<crate::agents::Agents> {
     use js_registry::{PoolConfig, Registry, SequentialSessions};
     use js_types::{ManualClock, Timestamp};
     use js_types::{ProviderId, ResourceClass, Resources, Shape};
@@ -184,13 +184,28 @@ fn agent_routes(dir: &std::path::Path) -> Router {
     );
     let placer = Arc::new(js_sched_placer::place::SchedPlacer::default());
     let registry = Registry::with_sessions(pool, clock, SequentialSessions::new(), placer);
-    let agents = crate::agents::Agents::over(registry, &shared, dir);
-    crate::agent_api::router(Arc::new(agents))
+    Arc::new(crate::agents::Agents::over(registry, &shared, dir))
+}
+
+/// The agent routes over [`agents_over`], on connections that carry the verified certificate
+/// of the host `half-1` (the layer in front of the routes puts it on each request, as the TLS
+/// listener does).
+fn agent_routes(dir: &std::path::Path) -> Router {
+    let presenting = axum::middleware::from_fn(
+        |mut request: axum::http::Request<Body>, next: axum::middleware::Next| async move {
+            let host = js_types::HostId::new("half-1").unwrap();
+            request
+                .extensions_mut()
+                .insert(crate::host_cert::CertHost(host));
+            next.run(request).await
+        },
+    );
+    crate::agent_api::router(agents_over(dir)).layer(presenting)
 }
 
 /// Asserts that a hello refused at its rate limit, with its body, reaches a client that
 /// sent its whole request and shut its sending side, through the agent routes: once the
-/// pool token has spent its burst of five, the client reads the 429 `rate-limited` with
+/// host's credential has spent its burst of five, the client reads the 429 `rate-limited` with
 /// its `Retry-After`. Catches the close with no answer that a test of the hello limit read
 /// as status 0.
 #[tokio::test]
@@ -198,9 +213,8 @@ async fn a_hello_over_its_rate_limit_reaches_a_client_that_half_closed() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/listener_unit");
     let dir = js_testkit::dir::TestDir::under(root, "hello_half_close");
     let app = agent_routes(dir.path());
-    let token = format!("Authorization: Bearer {}\r\n", "j".repeat(40));
     let hello = br#"{"protocol":1,"host_id":"half-1"}"#;
-    let message = request("/v1/agent/hello", hello, hello.len(), &token, true);
+    let message = request("/v1/agent/hello", hello, hello.len(), "", true);
     for _ in 0..5 {
         let (client, server) = sent(&message, false).await;
         let spent = answers(Speech::Http1, client, server, app.clone()).await;
@@ -381,4 +395,55 @@ async fn an_http2_request_refused_before_its_body_is_answered_while_it_sends() {
     drop(grpc);
     stop.send(()).unwrap();
     served.await.unwrap();
+}
+
+/// Asserts that each agent route (the hello, the heartbeat, the dispatch poll and a host's own
+/// page) refuses a request that carries no verified host certificate with a 401 whose body is
+/// exactly `{"error":"host-certificate-required"}`, whether it carries a bearer header or none;
+/// and that the same request with the certificate extension of a host is past that refusal.
+/// Catches a route outside the certificate layer, and a bearer taken for an identity.
+#[tokio::test]
+async fn an_agent_route_without_a_host_certificate_is_refused_401() {
+    use tower::ServiceExt;
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/listener_unit");
+    let dir = js_testkit::dir::TestDir::under(root, "no_certificate");
+    let routes = crate::agent_api::router(agents_over(dir.path()));
+    let asks = [
+        ("POST", "/v1/agent/hello"),
+        ("POST", "/v1/agent/heartbeat"),
+        ("POST", js_agent_wire::DISPATCH_PATH),
+        ("GET", "/v1/hosts/half-1"),
+    ];
+    for (method, path) in asks {
+        let build = |bearer: Option<&str>| {
+            let mut request = axum::http::Request::builder().method(method).uri(path);
+            if let Some(token) = bearer {
+                request = request.header("authorization", format!("Bearer {token}"));
+            }
+            request.body(Body::from("{}")).unwrap()
+        };
+        for bearer in [None, Some("j".repeat(40))] {
+            let answer = routes
+                .clone()
+                .oneshot(build(bearer.as_deref()))
+                .await
+                .unwrap();
+            assert_eq!(answer.status(), StatusCode::UNAUTHORIZED, "{method} {path}");
+            let body = axum::body::to_bytes(answer.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert_eq!(
+                body, r#"{"error":"host-certificate-required"}"#,
+                "{method} {path} {bearer:?}"
+            );
+        }
+        let mut certified = build(None);
+        let host = js_types::HostId::new("half-1").unwrap();
+        certified
+            .extensions_mut()
+            .insert(crate::host_cert::CertHost(host));
+        let answer = routes.clone().oneshot(certified).await.unwrap();
+        assert_ne!(answer.status(), StatusCode::UNAUTHORIZED, "{method} {path}");
+    }
 }

@@ -15,8 +15,7 @@
 //! blocks the metadata address (`metadata`: no container on a bridge network and no user
 //! but root reaches it, and the agent's unit requires the block), makes the user the
 //! jobs' ids are mapped onto and starts the container daemon under that remap (`userns`),
-//! writes the join token and the instance
-//! line, runs the network mode's steps, fetches the agent and checks its SHA-256 before it can start, and installs and starts the
+//! runs the network mode's steps, fetches the agent and checks its SHA-256 before it can start, and installs and starts the
 //! agent's unit. The first command is a `trap` on `EXIT` that removes the secret files
 //! the steps wrote and the traces cloud-init leaves of the script.
 //!
@@ -66,20 +65,11 @@ pub use userns::{DAEMON_JSON, SUBID_COUNT, SUBID_START, SUBID_USER};
 /// What a secret prints as in a masked render.
 pub const MASK: &str = "***";
 
-/// The slot of the join token, which every plan has.
-pub const JOIN_TOKEN_SLOT: &str = "join_token";
-
 /// The most steps a plan may hold, the provider's and the network mode's together.
 pub const MAX_STEPS: usize = 64;
 
 /// The most bytes one secret may have.
 pub const MAX_SECRET_BYTES: usize = 4096;
-
-/// Where the join token is written. The agent reads it with `--token-file`.
-pub const TOKEN_PATH: &str = "/etc/jobscheduler/token";
-
-/// Where the instance line (`<pool>:<name>`, not secret) is written.
-pub const INSTANCE_PATH: &str = "/etc/jobscheduler/instance";
 
 /// Where the agent is installed.
 pub const AGENT_PATH: &str = "/usr/local/bin/js-agent";
@@ -139,18 +129,13 @@ pub struct BootSecrets {
 }
 
 impl BootSecrets {
-    /// The join token and the secrets the network mode contributed.
+    /// The secrets the network mode contributed.
     ///
     /// # Errors
     ///
-    /// [`RenderError::DuplicateSlot`] when two secrets, the join token included, fill
-    /// one slot.
-    pub fn new(
-        join_token: Secret,
-        contributed: Vec<(SlotName, Secret)>,
-    ) -> Result<Self, RenderError> {
+    /// [`RenderError::DuplicateSlot`] when two secrets fill one slot.
+    pub fn new(contributed: Vec<(SlotName, Secret)>) -> Result<Self, RenderError> {
         let mut slots = BTreeMap::new();
-        slots.insert(SlotName(JOIN_TOKEN_SLOT.to_owned()), join_token);
         for (slot, secret) in contributed {
             if slots.contains_key(&slot) {
                 return Err(RenderError::DuplicateSlot(slot.0));
@@ -262,7 +247,6 @@ pub fn render(plan: &BootPlan, fill: Fill<'_>) -> Result<String, RenderError> {
     }
     plain_value("scheduler url", &plan.scheduler_url)?;
     plain_value("pool", &plan.pool)?;
-    let join_slot = SlotName(JOIN_TOKEN_SLOT.to_owned());
     let mut w = Writer {
         out: String::new(),
         fill,
@@ -295,13 +279,6 @@ pub fn render(plan: &BootPlan, fill: Fill<'_>) -> Result<String, RenderError> {
     }
     metadata::write(&mut w);
     userns::write(&mut w);
-    w.line("# identity");
-    w.line("mkdir -p /etc/jobscheduler");
-    w.secret_file(TOKEN_PATH, &join_slot)?;
-    w.line(&format!(
-        "printf '%s\\n' {} > {INSTANCE_PATH}",
-        single_quoted(&plan.instance())
-    ));
     w.line("# network");
     for step in &plan.network {
         w.step(step)?;
@@ -336,7 +313,7 @@ pub fn render(plan: &BootPlan, fill: Fill<'_>) -> Result<String, RenderError> {
     w.line("TimeoutStopSec=120");
     let _ = writeln!(
         w.out,
-        "ExecStart={AGENT_PATH} --server {} --token-file {TOKEN_PATH} --instance-file {INSTANCE_PATH} --pool {} --host-id {} {ENGINE_OPT_IN} --container-bin {CONTAINER_BIN} --container-subuid {SUBID_USER} --container-pull missing --gpu-toolkit-hook {GPU_TOOLKIT_HOOK_PATH} --state-root {STATE_ROOT} --scratch-root {SCRATCH_ROOT}",
+        "ExecStart={AGENT_PATH} --server {} --pool {} --host-id {} {ENGINE_OPT_IN} --container-bin {CONTAINER_BIN} --container-subuid {SUBID_USER} --container-pull missing --gpu-toolkit-hook {GPU_TOOLKIT_HOOK_PATH} --state-root {STATE_ROOT} --scratch-root {SCRATCH_ROOT}",
         unit_quoted(&plan.scheduler_url),
         unit_quoted(&plan.pool),
         unit_quoted(plan.host.as_str())

@@ -58,7 +58,7 @@ marked settled. The ids run D1 to D66 with no gaps. D26 is open. Superseded deci
   traits that differ by a prefix would be misread.
 - **D17. Scaling policy.** Demand is the leases in `acquiring`, or that plus a look-ahead. `max_step`, `cooldown`, `idle_timeout` and `boot_timeout` are
   per-pool configuration, unset meaning none (`max_step` defaults to 2). Recommend the simple form of 5.8 and no look-ahead until a trace shows a need.
-- **D18. Self-registration auth.** (a) A per-pool join token; (b) a client certificate per pool, reusing the identity path of
+- **D18. Self-registration auth.** (a) A per-pool join token (removed by G3); (b) a client certificate (built: each host's own certificate), reusing the identity path of
   `crates/kbf-auth` and `crates/kbf-oidc`; (c) both, chosen per provider. Recommend (a) now, (b) added later without a wire change
   (R3). For a launched machine, the cloud's signed instance identity (aws), never a secret in the launch template.
 - **D19. Acquire and the table lock.** The merged server calls the provider with the table lock held, so a slow call stalls every

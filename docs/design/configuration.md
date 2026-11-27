@@ -12,11 +12,11 @@ status 2 and before the file is read: `--listen: not allowed with --config; set 
 
 | flag | in the file |
 |---|---|
-| `--agent-client-ca` | `server.agent_client_ca`: the CA file of the hosts' certificates (needs `server.tls_cert` and `server.tls_key`, refused at start naming the key otherwise; read again with the TLS pair on SIGHUP). A host certificate (exactly one DNS SAN, the host id; end entity; `clientAuth` only; URIs and CN ignored) is the credential of its host on the agent routes; join tokens and the mint route stay for the scaler path; see the flag table in the server's crate documentation |
-| `--listen`, `--state-file` (the base path of the server's files: `.jobs`, `.agents`, `.joins`, `.scaler`; there is no lease file), `--boot` (`initialise` or `resume`; it governs the first start and whether the records files are required), `--tick`, `--tls-cert`, `--tls-key` | `server.<name>`, the flag's name with `_` for `-` |
+| `--agent-client-ca` | `server.agent_client_ca`: the CA file of the hosts' certificates (needs `server.tls_cert` and `server.tls_key`, refused at start naming the key otherwise; read again with the TLS pair on SIGHUP). A host certificate (exactly one DNS SAN, the host id; end entity; `clientAuth` only; URIs and CN ignored) is the only credential of its host on the agent routes: a request without a verified host certificate is refused `401` `host-certificate-required`; there are no join tokens and no mint route; see the flag table in the server's crate documentation |
+| `--listen`, `--state-file` (the base path of the server's files: `.jobs`, `.agents`, `.scaler`; a `.joins` file an earlier release left is no longer read or written; there is no lease file), `--boot` (`initialise` or `resume`; it governs the first start and whether the records files are required), `--tick`, `--tls-cert`, `--tls-key` | `server.<name>`, the flag's name with `_` for `-` |
 | `--default-ttl`, `--max-ttl` | removed: a lease has no time to live (it ends when released or at its maximum wall time). Either flag, and the keys `server.default_ttl` and `server.max_ttl`, are refused at start naming the flag or the key |
 | `--max-connections`, `--handshake-timeout`, `--header-timeout`, `--read-timeout`, `--write-timeout`, `--max-requests`, `--drain-timeout`, `--drain-hold` | `server.<name>`, same defaults |
-| `--agent-hello-burst`, `--agent-hello-interval`, `--require-host-credential`, `--placement`, `--estimate-feed`, `--cpu-slack`, `--pack-limit`, `--placement-curves` | `server.agent_hello_burst`, `server.agent_hello_interval`, `server.require_host_credential`, `server.placement`, `server.estimate_feed`, `server.cpu_slack`, `server.pack_limit`, `server.placement_curves`, same defaults (`placement` is deprecated and does nothing: js-sched is the only placement, `"js-sched"` is accepted with a warning and `"registry"` is refused at start; a joined pool whose capabilities name no `arch` is refused, as with the flag, and an elastic pool, whose floor names none, is not: each of its machines is placed by the floor's numbers and the capabilities its agent reported at hello, `arch` among them; `estimate_feed` is `false`, and `true` is refused beside `usage_off = true`, as the flags conflict; `cpu_slack` is a number from `1.0` to `2.0`, js-sched's default `1.1` when absent; `pack_limit` is a number from `0.0` to `1.0`, with at most three decimals, js-sched's default `0.5` when absent: a host is packed (the fullest that fits is chosen) while its larger share of CPU or memory, with the new lease booked, stays within it, and past it the least full host is chosen; `placement_curves` is `"off"`, `"shadow"` or `"on"`, `"off"` when absent, any other value refused as `placement_curves must be off, shadow or on; got "<value>"`: `"shadow"` learns a CPU and a memory profile for each job class from the recorded series and logs one line per run, and placement is the same in `"off"` and `"shadow"`; `"on"` learns and logs as `"shadow"` does and books a class that passes its four checks by its CPU curve ([placement-profiles-live.md](placement-profiles-live.md)); the two keys below have no flags); refused unless a pool registers agents |
+| `--agent-hello-burst`, `--agent-hello-interval`, `--require-host-credential` (accepted, hidden from help and ignored: see `--agent-token-file`), `--placement`, `--estimate-feed`, `--cpu-slack`, `--pack-limit`, `--placement-curves` | `server.agent_hello_burst`, `server.agent_hello_interval`, `server.require_host_credential` (ignored), `server.placement`, `server.estimate_feed`, `server.cpu_slack`, `server.pack_limit`, `server.placement_curves`, same defaults (`placement` is deprecated and does nothing: js-sched is the only placement, `"js-sched"` is accepted with a warning and `"registry"` is refused at start; a joined pool whose capabilities name no `arch` is refused, as with the flag, and an elastic pool, whose floor names none, is not: each of its machines is placed by the floor's numbers and the capabilities its agent reported at hello, `arch` among them; `estimate_feed` is `false`, and `true` is refused beside `usage_off = true`, as the flags conflict; `cpu_slack` is a number from `1.0` to `2.0`, js-sched's default `1.1` when absent; `pack_limit` is a number from `0.0` to `1.0`, with at most three decimals, js-sched's default `0.5` when absent: a host is packed (the fullest that fits is chosen) while its larger share of CPU or memory, with the new lease booked, stays within it, and past it the least full host is chosen; `placement_curves` is `"off"`, `"shadow"` or `"on"`, `"off"` when absent, any other value refused as `placement_curves must be off, shadow or on; got "<value>"`: `"shadow"` learns a CPU and a memory profile for each job class from the recorded series and logs one line per run, and placement is the same in `"off"` and `"shadow"`; `"on"` learns and logs as `"shadow"` does and books a class that passes its four checks by its CPU curve ([placement-profiles-live.md](placement-profiles-live.md)); the two keys below have no flags); refused unless a pool registers agents |
 | none (the file only) | `server.curve_hosts` and `server.curve_max_wait_seconds`, read in every mode and acting only under `server.placement_curves = "on"`. `curve_hosts` is an array of host ids (1 to 63 characters of `a-z`, `0-9`, `.`, `_` and `-`): curves are booked only for jobs placed on the hosts it names, and every job on any other host is booked flat; absent, curves are booked on every host. An empty array, an empty name, a name twice, a value that is not an array of strings and a name that is not a host id are refused at start naming the key. `curve_max_wait_seconds` is a whole number from `0` to `300`, `30` when absent: how long a job of a curve class waits with no host fitting its curve before it is tested with its flat number (at `0` a curve never delays a job); another value is refused as `server.curve_max_wait_seconds: must be from 0 to 300`. Both are read once at start, and a change is a restart |
 | `--usage-db`, `--usage-off`, `--profile-store-bytes`, `--history-retention-days` | `server.usage_db`, `server.usage_off`, `server.profile_store_bytes`, `server.history_retention_days`, same defaults and rules (with `--store` the usage rows are in the store and `usage_db` is not used; `usage_db` is refused beside `usage_off = true`, as the flags conflict; the budget is at least 1; the retention is a whole number of days, `90` by default, at least 1) |
 | `--job-retention` | `server.job_retention`, same default (`"7d"`) and rules: how long an ended job's record and result (exit code, reason, log tails, timing, usage) are kept after the job ends, as a whole count of days or a duration such as `36h` or `90m`, at least one minute; zero, a negative or unparsable value, or less than a minute is refused at start naming the flag or the key. It is read once at start and is the window the job store (`js-jobs`) applies when a job ends, so a changed window affects only the jobs that end after the restart. The job store of `--job-listen` is opened with it; without `--job-listen` the setting is checked and kept, and nothing reads it. Allocation history is not part of it |
@@ -37,7 +37,7 @@ status 2 and before the file is read: `--listen: not allowed with --config; set 
 | `--client-token NAME=PATH` or `NAME:ROLE=PATH` (repeatable) | a `[[client]]` table with `name`, `token_file` and, optionally, `role` (`"client"`, the default, or `"operator"`): one more client of the job service (see "The job service's port" below); refused without `--job-listen` (`server.job_listen`) |
 | `--pool-config` | removed: refused at start with the migration of [Migrating an agentless pool](#migrating-an-agentless-pool); a `[[pool]]` with `provider = { kind = "static", hosts_file = ... }` is refused the same way |
 | `--agent-pool-config` | a `[[pool]]` with `kind = "joined"` for machines started by hand (the pool's shape and timing are its keys), or with an elastic provider for machines the server launches |
-| `--agent-token-file` | `join_token_file` of that pool |
+| `--agent-token-file` | `join_token_file` of that pool: both are accepted, hidden from help and not read (a path that does not exist still starts), and each one given prints one warning at start naming it and saying it is ignored because agents are admitted by host certificate only (the way `placement` is accepted and ignored). They stay because the deployed stack passes `--agent-token-file` and a release deploys automatically. `--require-host-credential` and `server.require_host_credential` are treated the same way |
 
 ### The job service's port
 
@@ -59,8 +59,7 @@ role       = "client"                         # optional: "client" (the default)
 ```
 
 A start is refused, naming the entry and never the token, for two clients of one name, a client named `default`, a name that is not
-one, a short token, a token file others can read, the same token in two entries, and a client token that the join token file of the
-pool also holds. The server keeps each named client's token only as its SHA-256 digest, compares a presented token with every
+one, a short token, a token file others can read, and the same token in two entries. The server keeps each named client's token only as its SHA-256 digest, compares a presented token with every
 client's, records the client's name on each job it submits (`Job.client`, and the `client` filter of `ListJobs`), and logs the
 client, its role, the target and the outcome on each call's line. A `client` reads, lists and cancels only its own jobs and makes no
 fleet call; an `operator`, and `default` always, may call everything on every job. An entry with no role is a `client`, so an entry
@@ -92,8 +91,7 @@ changing its role, takes a restart (a restart ends no job); `default`'s token is
 A pool of hand-joined agents is one `[[pool]]` of kind `joined`. It launches nothing, so it has no `provider`, `network`, `launch`,
 `max_instances`, `idle`, `boot_timeout` or spend key, and each of those is refused by name. It registers agents;
 `server.agent_listen` is required as for an elastic pool. A file may declare any number of joined and elastic pools, each with its own
-`join_token_file`. The server starts on several joined pools, whose hosts share its one registry (each host in the pool its hello names,
-with that pool's shared tokens only), and on an elastic pool alone: beside another registering pool an elastic one is refused naming the
+`join_token_file` (accepted and ignored with a warning; see above). The server starts on several joined pools, whose hosts share its one registry (each host in the pool its hello names), and on an elastic pool alone: beside another registering pool an elastic one is refused naming the
 second (`several elastic pools are parsed; this version runs one, as the server keeps one registry of agents`, or `an elastic pool is
 served alone; this version runs several pools only when every one is joined`). A joined pool after the first must not have the first's
 name, must have its `memory_schedulable_percent` and must not be of class `whole-node`; the flags say the same with a repeated
@@ -102,20 +100,19 @@ name, must have its `memory_schedulable_percent` and must not be of class `whole
 ```toml
 [[pool]]
 kind  = "joined"
-name  = "nodes"                       # the `pool` of a hello, and the `provider` of a one-time token
+name  = "nodes"                       # the `pool` of a hello
 class = "whole-node"
 exec  = "container"                   # optional; absent or "none": no host contract
 shape = { cpu_millis = 16000, memory_bytes = 68719476736 }   # optional keys: gpus, gpu_class
 capabilities = { os = "linux", arch = "x86_64" }               # optional; as the agent pool file's [capabilities]
 max_machines    = 6                   # required; from 1 to 262144, as in the agent pool file
 memory_schedulable_percent = 90          # optional; from 1 to 100, default 100: the share of the shape's memory the pool books
-join_token_file = "/run/credentials/js/join-token"           # optional shared pool token
+join_token_file = "/run/credentials/js/join-token"           # accepted and ignored, with a warning
 heartbeat_interval = "10s"            # optional; as are grace ("1m") and lost_retention ("24h")
 prepare_timeout = "20m"               # optional; class whole-node only (refused on any other); default 10m: how long a whole-node lease may take to become ready
 ```
 
-A node joins with a one-time token (the mint refuses any other `provider` than the pool's name with a 400): `POST /v1/agent/join-tokens` with the client token and `{"provider": "nodes", "instance_id": "node-1"}`
-mints it, and the node's `--instance-file` holds `nodes:node-1`. The first hello swaps the token for a host credential. What the old
+A node joins with its host certificate (`--host-cert` and `--host-key`; the server needs `--agent-client-ca`). There are no join tokens and no mint route. What the old
 `--agent-pool-config` file had and this kind lacks: the whole-node keys other than `prepare_timeout` (`max_whole_node`, `drain_after`, ...).
 
 **Memory headroom.** One key, `memory_schedulable_percent`, a whole number from 1 to 100 (default 100), sets how much of the memory an
@@ -150,7 +147,7 @@ engine's rule instead: the registry's book takes each host's whole booked memory
 
 `--store <path>` (`server.store`) is the `store` setting of the design ([jobscheduler-design.md](jobscheduler-design.md), section 4.1:
 "The Postgres connection, as a path to a file that holds it. SQLite is accepted only for tests and single-node development."). It is
-optional for now. With it the host bindings and the join tokens' digests are kept in the store (see "What it keeps" below); the lease
+optional for now. With it the host bindings are kept in the store (see "What it keeps" below); the lease
 file, the job store and the usage file are kept as without it.
 
 - **The file.** One line: `postgres://...` or `postgresql://...` for Postgres, or `sqlite:<absolute path>` for SQLite. Blank lines and
@@ -174,30 +171,25 @@ file, the job store and the usage file are kept as without it.
   listener (see "The readiness port"). Without `--ready-listen`, a second server on the same file exits 2 with one line, `--store: another
   process holds the store's writer lock`, having bound nothing and opened neither the store nor any file of the state file's family.
 - **What it keeps.** The host bindings (with each host's taint and cordon; with the job service on, the job store's `cordon/<host>` rows
-  are the cordons' record, which every server places by) and the digests of the join tokens and host credentials:
-  `hosts/binding/<host id>` and `hosts/join/<digest>`, each a JSON object with a `version`, whose unknown fields are kept and written
+  are the cordons' record, which every server places by) :
+  `hosts/binding/<host id>`, a JSON object with a `version`, whose unknown fields are kept and written
   back; and the scaler's records and the hosts the registry refused to remove: `acquires/scaler/records` (the records file's own
   format, written whole) and `acquires/scaler/unremoved` (`{"version":1,"hosts":[...]}`). They are read at start, after the lock;
-  `<state file>.agents`, `.joins`, `.scaler` and `.scaler.unremoved` are then not written. Over a store another server shares (an
-  update that runs two for a while), two rows are also read by key later: a host's binding at the hello of a host this server's
-  registry does not know, so it keeps the taint or cordon another server stored after this one started, and the row of a one-time
-  token or host credential this server does not hold, at its first use, so a host another server admitted meanwhile is not refused
-  401 here (a read that fails answers 503 `state-write-failed`). The tick deletes the binding only of a host this server's registry
+  `<state file>.agents`, `.scaler` and `.scaler.unremoved` are then not written. The prefix `hosts/join/` and the file `<state file>.joins` of an earlier release are neither read nor written, and none of their rows or text is deleted. Over a store another server shares (an
+  update that runs two for a while), one row is also read by key later: a host's binding at the hello of a host this server's
+  registry does not know, so it keeps the taint or cordon another server stored after this one started (a read that fails answers 503 `state-write-failed`). The tick deletes the binding only of a host this server's registry
   held and then forgot, never of one it never held, which another server may be serving; so a binding
   of a host that no server holds again stays in the store, as inert as before (a binding is enforced only
   for a host a registry holds). Each change is committed before the server
-  holds it: a hello that uses a token commits the use and the host's binding in one transaction, and a refused hello gives both back in
-  one more; a taint, a cordon or its lift, a mint and a revoke each commit first; the scaler commits its records before the first
+  holds it: a hello commits the host's binding, and a refused hello gives it back; a taint, a cordon or its lift each commit first; the scaler commits its records before the first
   provider call of a step, and a commit that fails stops the step as a failed file write does. A failed commit changes nothing and is
-  answered as the failed file write of the same change is, or with 503 `state-write-failed` where no file write is checked (a hello
-  with a pool token, a heartbeat's taint). A heartbeat that brings no new taint, a known host's hello and the host book make no store
-  call (a known host's hello commits only when its stored binding still holds a cordon that lapsed since the last tick); a host
-  credential's renewed time is committed by the tick. A live pool that is not at its first start does not start without the records
+  answered as the failed file write of the same change is, or with 503 `state-write-failed` where no file write is checked (a heartbeat's taint). A heartbeat that brings no new taint, a known host's hello and the host book make no store
+  call (a known host's hello commits only when its stored binding still holds a cordon that lapsed since the last tick). A live pool that is not at its first start does not start without the records
   key, as it does not without the file. The job store and the usage database stay where they are.
 - **The first start.** Right after the lock, a start over a store with no `meta/server-state-imported` marker and nothing under
-  `hosts/` or `acquires/` imports the four files once: it reads them with the readers a server without the setting uses (a missing
+  `hosts/` or `acquires/` imports the three files (`.agents`, `.scaler` and `.scaler.unremoved`) once: it reads them with the readers a server without the setting uses (a missing
   file is empty; a file of a bad version, a damaged file or one others can use is refused at start, naming it, and nothing is
-  written) and writes their bindings, join-token rows, records text and hosts with the marker in one transaction. The marker is written
+  written) and writes their bindings, records text and hosts with the marker in one transaction. The marker is written
   even when there are no files. A start that finds the marker reads none of the files and names each one still there once at info
   level. A store that holds server state without the marker gets the marker only. The server never deletes or changes the files: they
   hold what it held at the cutover and go stale from its first write after it, so a rollback to a build without the setting finds
@@ -411,7 +403,7 @@ the old pool and the hosts file, and restart the server. The two routes are not 
 ### Route 1: a pool in the `--config` file
 
 A registering pool needs `agent_listen` in `[server]`, which the agentless pool did not (`listen` stays as it was). The pool is a `[[pool]]`
-with `kind = "joined"`; its shared token, if any, is `join_token_file` of the pool.
+with `kind = "joined"`; its `join_token_file`, if any, is accepted and ignored (see above).
 
 ```toml
 [server]
@@ -427,14 +419,13 @@ class        = "whole-node"
 max_machines = 2
 shape        = { cpu_millis = 64000, memory_bytes = 549755813888, gpus = 8, gpu_class = "nvidia-a100" }
 capabilities = { os = "linux", arch = "x86_64" }          # optional
-join_token_file = "/run/credentials/js/join-token"        # optional shared pool token
+join_token_file = "/run/credentials/js/join-token"        # accepted and ignored, with a warning
 ```
 
-### Route 2: the flags `--agent-pool-config` and `--agent-token-file`
+### Route 2: the flag `--agent-pool-config`
 
 The agent pool file is one pool at its root, with the shape and the capabilities as tables of their own; it has no `[[pool]]` and no
-`kind`. The shared token is not in this file: it is the file that `--agent-token-file` names (optional: without it the pool admits only
-hosts whose one-time join token verifies). The pool file is what turns agent registration on.
+`kind`. Hosts are admitted by their host certificates alone (`--agent-token-file` is accepted and ignored). The pool file is what turns agent registration on.
 
 ```toml
 name         = "gpu"
@@ -452,7 +443,7 @@ os = "linux"
 arch = "x86_64"
 ```
 
-The server is then started with `--agent-pool-config <that file> --agent-token-file <the token file>` beside its other flags; the agents register on
+The server is then started with `--agent-pool-config <that file>` beside its other flags; the agents register on
 the server's own `--listen` address.
 
 The flag `--pool-config` is refused the same way, with the same migration in its message, and beside `--config` it is refused as every flag is.
@@ -554,7 +545,7 @@ class = "whole-node"                        # a dedicated whole-node pool; the m
 max_whole_node_per_consumer = 2             # default 1; max_whole_node defaults to max_machines here, and max_draining to 1 (whole-node.md)
 max_machines = 8                            # never exceeded, in-flight and tainted hosts counted (5.11)
 regain_grace = "5m"                         # a queued request waits this long after its last capable host left (D41); default 5m
-join_token_file = "<path-to-token-file>"    # one file per pool that admits registering hosts; may hold several tokens, so rotation overlaps
+join_token_file = "<path-to-token-file>"    # accepted and ignored: hosts are admitted by certificate
 labels = { tier = "gpu" }
 
 [[pool]]
@@ -564,7 +555,7 @@ shape = "linux-x86-16"
 class = "action"
 max_machines = 24                           # the pool's total over every provider, registered hosts included (5.11)
 provider_max_machines = { cloud = 4 }       # at most 4 of the 24 are aws machines; the provider never exceeds it
-join_token_file = "<path-to-token-file>"    # the registered hosts of this pool (a machine aws launches presents its instance identity instead)
+join_token_file = "<path-to-token-file>"    # accepted and ignored: hosts are admitted by certificate
 max_step = 2                                # most machines acquired in one tick; default 2
 idle_timeout = "10m"                        # a host idle this long is released (5.10); the one idle delay
 cooldown = "2m"                             # no re-acquire after a refusal, a boot failure or a release

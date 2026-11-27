@@ -1,27 +1,27 @@
-//! The routing codes of the routes that remain: health, the host listing, the join tokens.
+//! The routing codes of the routes that remain: health and the host listing; and that the
+//! routes of the join tokens are gone.
 
 use serde_json::json;
 
-use crate::agents_support::start_agents;
-use crate::support::{Harness, TOKEN, request};
+use crate::agents_support::{listed, start_agents};
+use crate::support::{Harness, request};
 
-/// Asserts that a body over the cap is refused with a 413 on a route that takes a body
-/// (the join-token mint, behind the client token), and that the refusal mints nothing.
+/// Asserts that the join-token routes are gone: `POST` and `DELETE` of `/v1/agent/join-tokens`
+/// with the client token are answered 404 `not-found`, as any path the server does not have
+/// is, and the host listing is unchanged. It catches a route of the removed tokens that is
+/// still served.
 #[tokio::test]
-async fn oversized_bodies_are_refused() {
-    let h = start_agents("oversized").await;
-    let big = vec![b' '; js_lease_server::BODY_LIMIT + 1];
-    let reply = request(
-        h.addr(),
-        "POST",
-        "/v1/agent/join-tokens",
-        Some(TOKEN),
-        Some(&big),
-    )
-    .await;
-    assert_eq!(reply.status, 413, "{}", reply.body);
+async fn the_join_token_routes_are_not_routes() {
+    let h = start_agents("join_token_routes_gone").await;
+    let body = json!({ "provider": "lambdalabs", "instance_id": "i-1" });
+    for method in ["POST", "DELETE"] {
+        let reply = h.call(method, "/v1/agent/join-tokens", Some(&body)).await;
+        assert_eq!(reply.status, 404, "{method}: {}", reply.body);
+        assert_eq!(reply.json(), json!({ "error": "not-found" }), "{method}");
+    }
     let listing = h.call("GET", "/v1/hosts", None).await;
     assert_eq!(listing.status, 200);
+    assert!(listed(&listing.json()).is_empty());
 }
 
 /// Asserts that health needs no token, an unknown route is a 404 and a known route with

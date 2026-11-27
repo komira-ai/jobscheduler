@@ -75,8 +75,7 @@
 //!   name after alias resolution, accelerator count at least the offer's, the same
 //!   architecture, and CPU, memory and disk each at least the offer's less
 //!   [`Settings::size_tolerance_percent`]. A match registers the machine. A mismatch, in
-//!   the one step that judged it, condemns the record and starts its release (the token is
-//!   revoked, the shell marks the host ending after the save, and the provider is told to
+//!   the one step that judged it, condemns the record and starts its release (the shell marks the host ending after the save, and the provider is told to
 //!   terminate it every step until it is gone), cools the offer down for
 //!   [`Settings::offer_cooldown`] keyed by (provider, instance type, zone)
 //!   ([`Records::cooled_offers`], saved with the release, so a restart keeps it), and
@@ -117,8 +116,8 @@
 //!   time it was down is not counted.
 //!   One the provider says it no longer has ([`Input::not_found`]) is settled.
 //! * Scale down. A registered host quiet for `idle` is drained; a drained host that is
-//!   still quiet is marked for release; once the registry shows the mark the token is
-//!   revoked and the machine released, every step, until a read by id says gone. There is
+//!   still quiet is marked for release; once the registry shows the mark the
+//!   machine is released, every step, until a read by id says gone. There is
 //!   no deadline on any of this, and nothing is released that the registry did not
 //!   mark while quiet, except a machine the registry has forgotten, which holds no work.
 //!   `idle` drains a host only once it has lived `min_host_lifetime`, so a short `idle`

@@ -87,7 +87,7 @@ fn start(
     let address = Arc::new(Mutex::new(server.url()));
     let agent = Agent::spawn(
         server.url(),
-        server.join_file(),
+        server.identities(),
         &all,
         host,
         Redirect(address),

@@ -1,39 +1,23 @@
-//! The run loop's side of the server's store: one-time join tokens minted through the
-//! operator route and the hosts that say hello with them, the server stopped between two
-//! inputs with a read of the store's keys while it is down, and a second server started on
-//! the same store.
+//! The run loop's side of the server's store: hosts that say hello with a certificate (one
+//! of them another host's), the server stopped between two inputs with a read of the
+//! store's keys while it is down, and a second server started on the same store.
 //!
-//! The trace says `join h<n> token <k>` when a host joins with the `k`-th token the cell
-//! minted (the mint itself is the line of its client call, `client POST 201`), `stop server`
-//! and then `store joins=<n> used=<n> bindings=<n>` (or `store unread`) when the server is
-//! stopped, and `second server started` or `second server refused <flag>`. No line holds a
-//! token, a digest or a connection string.
+//! The trace says `join h<n> certificate h<k>` when a host joins presenting the
+//! certificate of host `h<k>`, `stop server` and then `store seated=<n> bindings=<n>` (or
+//! `store unread`) when the server is stopped, and `second server started` or `second
+//! server refused <flag>`. No line holds a digest or a connection string.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use axum::body::Body;
-use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
-use axum::http::{Method, Request};
-use js_agent_wire::InstanceIdentity;
 use js_testkit::dir::TestDir;
 use js_types::HostId;
 use js_types::sched::FarmTime;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use super::Cell;
 use crate::agent::AgentKind;
+use crate::bus::{Route, agent_name};
 use crate::invariant::Touched;
-use crate::server::CLIENT_TOKEN;
-
-/// The operator route that mints a one-time join token.
-pub const JOIN_TOKENS_PATH: &str = "/v1/agent/join-tokens";
-
-/// The provider every minted token's instance names; the instance ids are `i-0`, `i-1`,
-/// ..., in the order the cell minted them.
-pub const TOKEN_PROVIDER: &str = "sim";
-
-/// The keys the server keeps a join token under, by its digest (`hosts/join/<digest>`).
-pub const JOINS: &str = "hosts/join/";
 
 /// The keys the server keeps a host's binding under (`hosts/binding/<host id>`).
 pub const BINDINGS: &str = "hosts/binding/";
@@ -41,20 +25,10 @@ pub const BINDINGS: &str = "hosts/binding/";
 /// What the cell keeps of the store side of a run.
 #[derive(Default)]
 pub(super) struct Kept {
-    /// Every token minted, in order.
-    minted: Vec<Minted>,
     /// Every start of a second server, in order.
     seconds: Vec<SecondServer>,
     /// Every read of the store at a stop of the server, in order.
     reads: Vec<Result<StoreRead, String>>,
-}
-
-/// One minted token and the instance it is bound to. An empty token is one the server did
-/// not mint: a hello with it is refused.
-#[derive(Clone)]
-struct Minted {
-    instance: InstanceIdentity,
-    token: String,
 }
 
 /// One start of a second server on the store ([`Cell::start_second_server`]).
@@ -66,68 +40,55 @@ pub struct SecondServer {
     pub refused: Option<String>,
 }
 
-/// What the store held of the join tokens and the host bindings when the cell read it, with
-/// the server down ([`Cell::stop_server`]).
+/// What the store held of the host bindings when the cell read it, with the server down
+/// ([`Cell::stop_server`]), and which hosts the server had welcomed by then.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StoreRead {
     /// When it was read.
     pub at: FarmTime,
-    /// Each join token by its digest, with the host that used it, `None` while it is unused.
-    pub joins: BTreeMap<String, Option<String>>,
+    /// The hosts whose hello the server had answered 200 by then.
+    pub seated: BTreeSet<String>,
     /// Each bound host, with the digest of the credential it is bound to.
     pub bindings: BTreeMap<String, String>,
 }
 
 impl StoreRead {
-    /// The read of the rows under [`JOINS`] and [`BINDINGS`], at `at`. A value that does
-    /// not hold the field the server writes reads as unused, or as bound to nothing.
+    /// The read of the rows under [`BINDINGS`] at `at`, with the hosts `seated`. A value that
+    /// does not hold the field the server writes reads as bound to nothing.
     #[must_use]
     pub fn from_rows(
         at: FarmTime,
-        joins: Vec<(String, Vec<u8>)>,
+        seated: BTreeSet<String>,
         bindings: Vec<(String, Vec<u8>)>,
     ) -> Self {
-        let joins = joins.into_iter();
-        let joins = joins.map(|(key, value)| (after(&key, JOINS), field(&value, "used_by")));
         let bindings = bindings.into_iter().map(|(key, value)| {
             let credential = field(&value, "credential").unwrap_or_default();
             (after(&key, BINDINGS), credential)
         });
         Self {
             at,
-            joins: joins.collect(),
+            seated,
             bindings: bindings.collect(),
         }
     }
 
-    /// Every way a token's use and a host's binding fail to go together: a token used by a
-    /// host that has no binding to it, and a host bound to a token that it did not use. A
-    /// host bound to a credential that is no token (the pool's shared join token) is no
-    /// pair. Empty when every use has its binding and every binding to a token its use.
+    /// Every host the server welcomed whose binding is not in the store: a welcome commits
+    /// the binding with it, so the store holds one for every host that was seated. Empty when
+    /// every seated host is bound.
     #[must_use]
-    pub fn unpaired(&self) -> Vec<String> {
-        let used = self.joins.iter();
-        let used = used.filter_map(|(digest, host)| Some((digest, host.as_ref()?)));
-        let unbound = used.filter(|(digest, host)| self.bindings.get(*host) != Some(*digest));
-        let mut found: Vec<String> = unbound
-            .map(|(_, host)| format!("a token used by {host}, which has no binding to it"))
-            .collect();
-        let to_tokens = self.bindings.iter();
-        let to_tokens = to_tokens.filter(|(_, credential)| self.joins.contains_key(*credential));
-        let unused = to_tokens.filter(|(host, credential)| {
-            self.joins.get(*credential) != Some(&Some((*host).clone()))
-        });
-        found.extend(unused.map(|(host, _)| format!("{host} is bound to a token it did not use")));
-        found
+    pub fn unbound(&self) -> Vec<String> {
+        let missing = self.seated.iter();
+        let missing = missing.filter(|host| !self.bindings.contains_key(*host));
+        missing
+            .map(|host| format!("{host} was welcomed and has no binding in the store"))
+            .collect()
     }
 
-    /// The trace line of the read: how many tokens, how many of them used, and how many
-    /// bindings.
+    /// The trace line of the read: how many hosts were welcomed and how many bindings.
     fn line(&self) -> String {
-        let used = self.joins.values().filter(|host| host.is_some()).count();
         format!(
-            "store joins={} used={used} bindings={}",
-            self.joins.len(),
+            "store seated={} bindings={}",
+            self.seated.len(),
             self.bindings.len()
         )
     }
@@ -144,73 +105,36 @@ fn field(value: &[u8], name: &str) -> Option<String> {
     value.get(name)?.as_str().map(str::to_owned)
 }
 
-/// The token of a mint's answer.
-fn token_of(body: &str) -> Option<String> {
-    let value: Value = serde_json::from_str(body).ok()?;
-    value.get("token")?.as_str().map(str::to_owned)
-}
-
 impl Cell {
-    /// Mints one one-time join token through the operator route (`POST
-    /// /v1/agent/join-tokens`, with the client token, through [`Cell::client_call`]), bound
-    /// to the instance [`TOKEN_PROVIDER`] `i-<n>`, `n` counting the tokens the cell minted.
-    /// The cell keeps the token for [`Cell::join`]; it is in no trace line.
-    pub fn mint_join_token(&mut self) {
-        let instance = InstanceIdentity {
-            provider: TOKEN_PROVIDER.to_owned(),
-            instance_id: format!("i-{}", self.kept.minted.len()),
-        };
-        let body = json!({
-            "provider": instance.provider,
-            "instance_id": instance.instance_id,
-        });
-        let request = Request::builder()
-            .method(Method::POST)
-            .uri(JOIN_TOKENS_PATH)
-            .header(AUTHORIZATION, format!("Bearer {CLIENT_TOKEN}"))
-            .header(CONTENT_TYPE, "application/json")
-            .body(Body::from(body.to_string()))
-            .unwrap_or_default();
-        let answer = self.client_call(request);
-        let token = answer.and_then(|answer| token_of(answer.body()));
-        let token = token.unwrap_or_default();
-        self.kept.minted.push(Minted { instance, token });
-    }
-
-    /// How many join tokens the cell has minted.
-    #[must_use]
-    pub fn minted(&self) -> usize {
-        self.kept.minted.len()
-    }
-
-    /// Adds the next agent, a correct fake, saying hello with the `token`-th join token the
-    /// cell minted and naming its instance: a host of its own token. `None` for a token the
-    /// cell did not mint.
-    pub fn join(&mut self, token: usize) -> Option<HostId> {
-        let minted = self.kept.minted.get(token).cloned()?;
-        let kind = AgentKind::Fake(None);
-        let host = self
-            .add_as(kind, minted.token, Some(minted.instance))
-            .ok()?;
-        self.record(format!("join {host} token {token}"));
+    /// Adds the next agent, a correct fake, presenting the host certificate of agent
+    /// `of` (by its index) instead of its own: a host the server refuses, its hello naming
+    /// another host than the certificate does. `None` when the cell has no such agent.
+    pub fn join_presenting(&mut self, of: usize) -> Option<HostId> {
+        let certificate = (of < self.agents).then(|| agent_name(of))?;
+        let presenting = HostId::new(certificate.as_str()).ok()?;
+        let host = self.add_as(AgentKind::Fake(None), Some(presenting)).ok()?;
+        self.record(format!("join {host} certificate {certificate}"));
         Some(host)
     }
 
     /// Stops the server between two inputs, as a process is killed
-    /// ([`crate::ServerNode::stop`]), and reads the store's join tokens and host bindings
+    /// ([`crate::ServerNode::stop`]), and reads the store's host bindings
     /// while it is down ([`Cell::store_reads`]); then reads the listing again and checks.
     /// [`Cell::restart_server`] starts it again.
     pub fn stop_server(&mut self) {
         let at = self.sim.now();
+        let agents = self.agents;
         let server = self
             .sim
             .nodes_mut()
             .find_map(|(_, node)| node.as_server_mut());
         let read: Option<Result<StoreRead, String>> = server.map(|server| {
             server.stop();
-            let joins = server.stored(JOINS)?;
+            let welcomed = |index: usize| server.answered(&agent_name(index), Route::Hello, 200);
+            let seated = (0..agents).filter(|index| welcomed(*index) > 0);
+            let seated = seated.map(|index| agent_name(index).to_string()).collect();
             let bindings = server.stored(BINDINGS)?;
-            Ok(StoreRead::from_rows(at, joins, bindings))
+            Ok(StoreRead::from_rows(at, seated, bindings))
         });
         let unread = |_: &String| "store unread".to_owned();
         let line = read

@@ -138,7 +138,7 @@ One `js-lease-server` on the node, with the job service on the loopback:
 ```text
 js-lease-server --listen 127.0.0.1:7300 --job-listen 127.0.0.1:7302 --boot initialise \
   --state-file <work>/server/state --token-file <work>/client.token \
-  --agent-token-file <work>/join.token --agent-pool-config <work>/pool.toml
+  --agent-pool-config <work>/pool.toml
 ```
 
 `<work>/pool.toml` is one pool of one machine, whose shape is at most the node's:
@@ -157,9 +157,9 @@ arch = "x86_64"
 ```
 
 The agent's flags file, `/etc/js-agent/flags` ([farm-node-enroll.md](farm-node-enroll.md) says its rules), with the
-join token in `/etc/js-agent/token`. Only the packaged unit (the deb's `js-agent-crun.service`, which passes
+host certificate and key named by `--host-cert` and `--host-key`. Only the packaged unit (the deb's `js-agent-crun.service`, which passes
 `--flags-file /etc/js-agent/flags`) reads it; the unit `crun_host_setup.sh` installs names its own `--server` and
-`--pool` and no flags file, and farm-node-enroll.md (section 4) says how to remove it first:
+`--pool` and no flags file, and farm-node-enroll.md (section 3) says how to remove it first:
 
 ```text
 --server=http://127.0.0.1:7300

@@ -35,6 +35,7 @@ use js_types::{ManualClock, Timestamp};
 use serde_json::{Value, json};
 use tokio::runtime::{Builder, Runtime};
 
+use crate::host_certs::{Identities, server_flags};
 #[cfg(target_os = "linux")]
 use crate::jobs::fake::{FakeMachine, HANG_GUARD};
 #[cfg(target_os = "linux")]
@@ -76,10 +77,8 @@ arch = "x86_64"
 /// The heartbeat interval of [`QUICK_POOL`], in milliseconds, as its welcome carries it.
 pub const QUICK_INTERVAL_MS: u64 = 250;
 
-/// The pool's join token (a test value: the server reads it from a file of the scratch).
-const JOIN: &str = "join-token-S-0123456789-abcdefghijklmnop";
-
-/// The job service's client token (a test value, like [`JOIN`]).
+/// The job service's client token (a test value: the server reads it from a file of the
+/// scratch).
 const CLIENT: &str = "client-token-S-0123456789-abcdefghijk";
 
 /// The stand-in the transcript holds for the session secret the server drew: the secret
@@ -157,7 +156,7 @@ pub const SCENARIO: [Act; 10] = [
     Act::Beat,
 ];
 
-/// The agent's flags beside `--server`, `--token-file` and `--pool`: a host id, and the
+/// The agent's flags beside `--server`, the host's certificate and `--pool`: a host id, and the
 /// container runtime of the job worker over files under `files`.
 #[cfg(target_os = "linux")]
 pub fn agent_flags(files: &Scratch) -> Vec<String> {
@@ -199,7 +198,7 @@ pub struct Spawned {
 pub fn spawn(
     name: &str,
     url: String,
-    token: &Path,
+    identities: Identities,
     connector: impl Connector + Send + 'static,
 ) -> Spawned {
     let files = Scratch::new(&format!("{name}-files"));
@@ -208,7 +207,7 @@ pub fn spawn(
     let machine = Arc::new(FakeMachine::new());
     let agent = Agent::spawn_on(
         url,
-        token.to_path_buf(),
+        identities,
         &flags,
         linux_host,
         connector,
@@ -229,7 +228,7 @@ pub fn spawn(
 pub fn spawn_polling(
     name: &str,
     url: String,
-    token: &Path,
+    identities: Identities,
     connectors: (impl Connector + Send + 'static, Listening),
 ) -> Spawned {
     let files = Scratch::new(&format!("{name}-files"));
@@ -239,7 +238,7 @@ pub fn spawn_polling(
     let (connector, dispatch) = connectors;
     let agent = Agent::spawn_polling(
         url,
-        token.to_path_buf(),
+        identities,
         &flags,
         linux_host,
         (connector, Arc::new(dispatch)),
@@ -309,7 +308,6 @@ impl Cell {
     fn start_over(name: &str, pool: &str) -> Self {
         let scratch = Scratch::new(name);
         let client = scratch.write("client-token", CLIENT, 0o600);
-        let join = scratch.write("join-token", JOIN, 0o600);
         let pool = scratch.write("agent-pool.toml", pool, 0o644);
         let path = |p: &Path| p.to_str().unwrap().to_owned();
         let argv = [
@@ -322,13 +320,13 @@ impl Cell {
             &path(&scratch.path("leases.toml")),
             "--token-file",
             &path(&client),
-            "--agent-token-file",
-            &path(&join),
             "--agent-pool-config",
             &path(&pool),
             "--job-listen",
             "127.0.0.1:0",
         ];
+        let mut argv: Vec<String> = argv.map(str::to_owned).into();
+        argv.extend(server_flags(&scratch));
         let config = Config::from_cli(Cli::try_parse_from(argv).unwrap()).unwrap();
         let clock = ManualClock::new(Timestamp::from_millis(T0));
         let (ticks, ticker) = channel_ticker();
@@ -357,21 +355,23 @@ impl Cell {
 
     /// The agent API's address as `--server` takes it.
     pub fn url(&self) -> String {
-        format!("http://{}", self.running().addr())
+        format!("https://{}", self.running().addr())
     }
 
-    /// The file holding the join token.
-    pub fn join_file(&self) -> std::path::PathBuf {
-        self.scratch.path("join-token")
+    /// Where the agents of this server find their host certificates, and the server's
+    /// certificate they trust.
+    pub fn identities(&self) -> Identities {
+        Identities::new(&self.scratch)
     }
 
     fn jobs(&self) -> Client {
         let addr = self.running().job_addr().expect("the job service is on");
         let token = self.scratch.path("client-token");
+        let identities = self.identities();
         Client::connect(
-            &format!("http://{addr}"),
+            &format!("https://{addr}"),
             &token,
-            None,
+            Some(identities.server_cert()),
             Duration::from_secs(10),
         )
         .unwrap()
@@ -463,10 +463,6 @@ impl Transport for Taping {
         };
         self.flow.lock().unwrap().push(entry);
         answer
-    }
-
-    fn adopt_credential(&mut self, secret: &str) -> Result<(), String> {
-        self.inner.adopt_credential(secret)
     }
 }
 
@@ -640,10 +636,6 @@ impl Transport for Listened {
         }
         Ok(answer)
     }
-
-    fn adopt_credential(&mut self, secret: &str) -> Result<(), String> {
-        self.inner.adopt_credential(secret)
-    }
 }
 
 /// Replaces every string equal to `from` in `value` with `to`.
@@ -671,7 +663,7 @@ pub fn record(name: &str) -> Value {
     let tape = Tape::default();
     let flow = tape.0.clone();
     let (listening, polls) = Polls::new();
-    let running = spawn_polling(name, cell.url(), &cell.join_file(), (tape, listening));
+    let running = spawn_polling(name, cell.url(), cell.identities(), (tape, listening));
     let mut job = None;
     let (waits, ran) = play(running, |act| {
         let id = job.get_or_insert_with(|| cell.submit()).clone();
@@ -718,8 +710,13 @@ pub fn record(name: &str) -> Value {
 
     let mut future = flow[0]["agent"]["body"].clone();
     future["protocol"] = json!({ "min": 2, "max": 3 });
+    let identities = cell.identities();
     let mut transport = Dialer
-        .connect(&cell.url(), &Login::Token(cell.join_file()), None)
+        .connect(
+            &cell.url(),
+            &Login::HostCertificate(identities.of("h1")),
+            Some(identities.server_cert()),
+        )
         .unwrap();
     let answer = transport.post(js_agent::HELLO_PATH, &future).unwrap();
     assert_eq!(answer.status, 400, "{}", answer.body);

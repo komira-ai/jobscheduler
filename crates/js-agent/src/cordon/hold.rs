@@ -23,13 +23,14 @@ use js_types::CordonHolder;
 /// interval is.
 pub const IDLE_POLL: Duration = Duration::from_secs(5);
 
-/// Codes that mean the server did not accept the credential, as opposed to the request. The
-/// update hook's first-install `rollback` reads them too: a host whose credential the server
+/// Codes that mean the server did not accept the host certificate as the host's, as opposed to
+/// the request: `host-certificate-required` (none was presented), `certificate-host-mismatch`
+/// (the certificate names another host), and the bare `http-401` of an answer with no code. The
+/// update hook's first-install `rollback` reads them too: a host whose certificate the server
 /// does not take as the host's is given no work.
-pub(crate) const CREDENTIAL_CODES: [&str; 4] = [
-    "host-credential-required",
-    "join-token-not-admitted",
-    "join-token-expired",
+pub(crate) const CREDENTIAL_CODES: [&str; 3] = [
+    "host-certificate-required",
+    "certificate-host-mismatch",
     "http-401",
 ];
 
@@ -100,7 +101,7 @@ fn explain(what: &str, why: &LeaseError) -> String {
             "server error: {what}: the server holds no such host (it has not said hello since the server started)"
         ),
         LeaseError::Refused(code) if CREDENTIAL_CODES.contains(&code.as_str()) => {
-            format!("{CREDENTIAL_ERROR}{what}: the server refused the credential ({code})")
+            format!("{CREDENTIAL_ERROR}{what}: the server refused the host certificate ({code})")
         }
         LeaseError::Refused(code) => format!("server error: {what}: the server refused ({code})"),
         LeaseError::Unreachable(text) => format!("server error: {what}: {text}"),

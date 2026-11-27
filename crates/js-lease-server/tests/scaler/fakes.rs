@@ -12,7 +12,7 @@ use js_agent_wire::Phase as WirePhase;
 use js_elastic::AcquireId;
 use js_elastic::{
     Acquired, Demand, EventStream, Held, HostRef, HostStatus, Offer, PriceUnit, ProviderError,
-    Released, SchedulerId, Secret,
+    Released, SchedulerId,
 };
 use js_jobs::{
     AllocationRecord, Booked, Constraints, JobId, JobRecord, JobSpec, JobStore, JobStoreError,
@@ -66,8 +66,6 @@ pub struct World {
     /// Whether a write of the unremoved hosts succeeds.
     pub save_unremoved_ok: bool,
     pub save_ok: bool,
-    pub mint_ok: bool,
-    pub revoke_ok: bool,
     pub remove_ok: bool,
     /// The registry does not mark a host draining or releasing, whatever it is asked.
     pub marks_refused: bool,
@@ -244,18 +242,9 @@ impl Effects for Handle {
         }
     }
 
-    fn mint(&self, host: &str, _valid_for: Duration) -> Option<Secret> {
+    fn acquire(&self, plan: &AcquirePlan) -> Acquired {
         let mut world = self.world();
-        world.log.push(format!("mint:{host}"));
-        world
-            .mint_ok
-            .then(|| Secret::new(format!("token-of-{host}")))
-    }
-
-    fn acquire(&self, plan: &AcquirePlan, token: Secret) -> Acquired {
-        let mut world = self.world();
-        let entry = format!("acquire:{}:{}", plan.name, token.expose());
-        world.log.push(entry);
+        world.log.push(format!("acquire:{}", plan.name));
         world.lifetimes.push(plan.lifetime);
         if let Some(answer) = world.acquire_answers.pop_front() {
             return answer;
@@ -312,12 +301,6 @@ impl Effects for Handle {
                 Released::Terminating(HostStatus::Terminating)
             }
         }
-    }
-
-    fn revoke(&self, host: &str) -> bool {
-        let mut world = self.world();
-        world.log.push(format!("revoke:{host}"));
-        world.revoke_ok
     }
 
     fn forget(&self, host: &str) {
@@ -395,7 +378,7 @@ impl Rig {
 
 /// Whether every entry of `log` is a `save`, none else: the tick wrote the records and did
 /// nothing to a machine or a host, as a tick does while a silent or missing time is pending
-/// and a while has passed. Unlike an empty log it fails on any drain, release or revoke.
+/// and a while has passed. Unlike an empty log it fails on any drain or release.
 pub fn only_saves(log: &[String]) -> bool {
     log.iter().all(|entry| entry == "save")
 }
@@ -437,8 +420,6 @@ pub fn new_world() -> Arc<Mutex<World>> {
         unremoved_writes: Vec::new(),
         save_unremoved_ok: true,
         save_ok: true,
-        mint_ok: true,
-        revoke_ok: true,
         remove_ok: true,
         marks_refused: false,
         after_save: None,

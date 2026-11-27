@@ -1,16 +1,15 @@
-//! The machines and ids the scaler keeps: demand across pools, acquire ids and join
-//! tokens, orphans, the extras of an accepted launch, what a step saves, and the instant
+//! The machines and ids the scaler keeps: demand across pools, acquire ids,
+//! orphans, the extras of an accepted launch, what a step saves, and the instant
 //! type.
 
 mod common;
-
-use std::time::Duration;
 
 use common::*;
 use js_elastic::{
     Acquired, Extra, Held, HostRef, HostStatus, Offer, Reason, Refusal, RefusalCode, Released,
 };
 use js_scaler::{Action, Blocked, Millis, Phase, Settings, State, step};
+use std::time::Duration;
 
 fn launched(limits: Settings) -> (Rig, js_scaler::AcquirePlan) {
     let mut rig = Rig::new(limits);
@@ -100,26 +99,6 @@ fn an_acquire_id_is_the_pool_and_the_random_bits_given() {
     let (state, actions) = step(State::default(), &repeated.input, at(0));
     assert!(actions.is_empty());
     assert_eq!(state.blocked["gpu"], Blocked::Entropy);
-}
-
-/// Asserts that a join token lives `boot_timeout` plus the margin, 20 minutes by
-/// default, in the mint and in the record, and that the margin is a setting.
-#[test]
-fn a_join_token_lives_the_boot_timeout_plus_its_margin() {
-    for (margin, lives) in [(None, 20), (Some(7), 22)] {
-        let mut limits = settings("gpu");
-        if let Some(minutes_more) = margin {
-            limits.token_margin = minutes(minutes_more);
-        }
-        let mut rig = Rig::new(limits);
-        rig.input.waiting = vec![request("r1")];
-        let actions = rig.tick(at(0));
-        assert!(actions.iter().any(|action| matches!(
-            action,
-            Action::Mint { valid_for, .. } if *valid_for == minutes(lives)
-        )));
-        assert_eq!(rig.record(0).token_expires, Some(at(lives * MINUTE)));
-    }
 }
 
 /// Asserts that an orphan missing from a list is still counted: it is gone after two

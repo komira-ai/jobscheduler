@@ -124,10 +124,7 @@ fn the_unit_runs_the_agent_with_the_crun_runtime_and_flags_the_agent_accepts() {
         cli.scratch_root.as_deref(),
         Some(Path::new(&format!("{}/runs", js_elastic::SCRATCH_ROOT)))
     );
-    assert_eq!(
-        cli.token_file.as_deref(),
-        Some(Path::new("/etc/js-agent/token"))
-    );
+    assert!(cli.token_file.is_none() && cli.instance_file.is_none());
     assert!(js_agent::crun_host::flags(&cli).is_ok());
     assert_eq!(js_agent::crun_host::DISTRO_CRUN, "/usr/bin/crun");
 }
@@ -313,7 +310,7 @@ fn the_unit_recovers_a_refused_start_with_a_command_line_the_agent_accepts() {
 /// The modes of the directories are the ones the agent and the job's ids need: the scratch root is
 /// what the agent's `Searchable` layout accepts (`0711`), the directory above it is the unit's
 /// `StateDirectoryMode`, so the two files agree and a start does not change the other's work, and
-/// the state root and the token directory stay private. The release layout of the crun unit
+/// the state root and the directory of the flags file stay private. The release layout of the crun unit
 /// (`/opt/js-agent`, its releases and the link's directory) is root's and closed to writes by
 /// others. No other directory is made.
 #[test]

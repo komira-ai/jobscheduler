@@ -5,8 +5,7 @@ use std::path::Path;
 
 use js_agent_wire::limits::{MAX_DISK_BYTES, XCODE_CAPABILITY};
 use js_agent_wire::{
-    EGRESS_CAPABILITY, EGRESS_PORTS_CAPABILITY, Hello, InstanceIdentity, Phase, ProtocolRange,
-    WireShape,
+    EGRESS_CAPABILITY, EGRESS_PORTS_CAPABILITY, Hello, Phase, ProtocolRange, WireShape,
 };
 
 use js_agent_wire::{
@@ -184,26 +183,6 @@ fn id(
     }
 }
 
-/// The instance the host runs on, from `--instance-file`; none without the flag.
-fn instance(cli: &Cli, files: &dyn FileReader) -> Result<Option<InstanceIdentity>, String> {
-    let Some(path) = &cli.instance_file else {
-        return Ok(None);
-    };
-    let text = files
-        .read(&path.to_string_lossy())
-        .map_err(|why| format!("--instance-file: {why}"))?;
-    let (provider, instance_id) = text.trim().split_once(':').ok_or_else(|| {
-        format!(
-            "--instance-file: {} must hold PROVIDER:INSTANCE_ID",
-            path.display()
-        )
-    })?;
-    Ok(Some(InstanceIdentity {
-        provider: provider.to_owned(),
-        instance_id: instance_id.to_owned(),
-    }))
-}
-
 /// The bundle store a hello speaks for: its settings, and the host that reads it.
 #[derive(Clone, Copy)]
 pub struct StoreView<'a> {
@@ -279,7 +258,6 @@ pub fn offer(
             .flat_map(|found| hello_capabilities(&found.caps, long_values)),
     );
     let host_id = id(cli, platform, runner, files)?;
-    let instance = instance(cli, files)?;
     // Read once, and last of the facts: a configured source that fails stops the agent
     // here, before any hello, never sending one without the identity.
     let identity = identity::source(&cli.identity)?
@@ -299,7 +277,7 @@ pub fn offer(
             host_id,
             pool: cli.pool.clone(),
             agent_version: agent_version.to_owned(),
-            instance,
+            instance: None,
             shape: WireShape {
                 cpu_millis,
                 memory_bytes,
@@ -314,8 +292,6 @@ pub fn offer(
             labels: cli.labels.iter().cloned().collect(),
             phase: Phase::Serving,
             held: Vec::new(),
-            // The credential has a home only under a state root.
-            accepts_host_credential: cli.state_root.is_some(),
             identity,
         },
         warnings: detected

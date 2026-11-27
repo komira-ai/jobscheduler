@@ -48,11 +48,6 @@ async fn started_with(
     };
     let pool = "name = \"burst\"\nclass = \"gpu-host\"\nmax_machines = 2\n[shape]\ncpu_millis = 8000\nmemory_bytes = 17179869184\ngpus = 1\ngpu_class = \"nvidia-a100\"\n[capabilities]\narch = \"x86_64\"\nisa = \"x86-64-v3\"\n";
     let token = write("token", "test-token-0123456789-abcdefghijkl", 0o600);
-    let joins = write(
-        "agent-tokens",
-        "join-token-A-0123456789-abcdefghijklmnop\n",
-        0o600,
-    );
     let pool = write("agent-pool.toml", pool, 0o644);
     let state = dir.path().join("state");
     let args = [
@@ -70,7 +65,6 @@ async fn started_with(
         [
             ("--state-file", state),
             ("--token-file", token),
-            ("--agent-token-file", joins),
             ("--agent-pool-config", pool),
         ]
         .into_iter()
@@ -204,42 +198,45 @@ async fn a_hold_that_runs_out_is_followed_by_a_clean_stop() {
     assert!(tokio::net::TcpStream::connect(agents).await.is_err());
 }
 
-/// POSTs `body` (JSON) to `path` of the server at `addr` with `token` as the bearer, on a
-/// connection of its own, and answers the status and the body.
-async fn post_json(
-    addr: std::net::SocketAddr,
+/// POSTs `body` (JSON) to `path` of the agent routes of `agents` as the host `host`, whose
+/// certificate the TLS listener would have verified, and answers the status and the body.
+async fn post_as(
+    agents: &Arc<crate::agents::Agents>,
+    host: &str,
     path: &str,
-    token: &str,
     body: &str,
 ) -> (u16, String) {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tower::ServiceExt;
 
-    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
-    let head = format!(
-        "POST {path} HTTP/1.1\r\nHost: t\r\nConnection: close\r\nAuthorization: Bearer {token}\r\n\
-         Content-Type: application/json\r\nContent-Length: {}\r\n\r\n",
-        body.len()
-    );
-    stream.write_all(head.as_bytes()).await.unwrap();
-    stream.write_all(body.as_bytes()).await.unwrap();
-    let mut raw = String::new();
-    stream.read_to_string(&mut raw).await.unwrap();
-    let (head, body) = raw.split_once("\r\n\r\n").unwrap();
-    let status = head.split_whitespace().nth(1).unwrap().parse().unwrap();
-    (status, body.to_owned())
+    let mut request = axum::http::Request::post(path)
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(body.to_owned()))
+        .unwrap();
+    let host = js_types::HostId::new(host).unwrap();
+    request
+        .extensions_mut()
+        .insert(crate::host_cert::CertHost(host));
+    let answer = crate::agent_api::router(Arc::clone(agents))
+        .oneshot(request)
+        .await
+        .unwrap();
+    let status = answer.status().as_u16();
+    let body = axum::body::to_bytes(answer.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, String::from_utf8(body.to_vec()).unwrap())
 }
 
 /// Catches a stop that leaves an agent's held dispatch poll open on a server that stops (the
 /// agent would learn to move only at the bound), one that cuts it without an answer, and a stop
-/// that does not return once the poll is answered. Over HTTP: a host says hello with the
-/// `dispatch-poll` capability and is told to poll; its poll is held (the server counts the
+/// that does not return once the poll is answered. Through the agent routes, as the host its
+/// certificate names: a host says hello with the `dispatch-poll` capability and is told to poll; its poll is held (the server counts the
 /// wait, so nothing is timed); the stop on a termination signal answers the poll at once, empty,
 /// and the shutdown that follows returns.
 #[tokio::test]
 async fn a_held_poll_is_answered_empty_at_the_signal_and_the_shutdown_returns() {
     let (running, _jobs, _id, _dir) = started_with("hold_poll", true).await;
-    let agents = running.agent_addr().unwrap();
-    let token = "join-token-A-0123456789-abcdefghijklmnop";
+    let agents = Arc::clone(running.shared.agents());
     let hello = serde_json::json!({
         "host_id": "burst-1",
         "pool": "burst",
@@ -248,7 +245,7 @@ async fn a_held_poll_is_answered_empty_at_the_signal_and_the_shutdown_returns() 
         "capabilities": { "per-job": "true", "dispatch-poll": "true", "arch": "x86_64", "isa": "x86-64-v3" },
         "phase": "serving",
     });
-    let (status, body) = post_json(agents, "/v1/agent/hello", token, &hello.to_string()).await;
+    let (status, body) = post_as(&agents, "burst-1", "/v1/agent/hello", &hello.to_string()).await;
     assert_eq!(status, 200, "{body}");
     let welcome: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(welcome["dispatch_poll"], true);
@@ -258,7 +255,7 @@ async fn a_held_poll_is_answered_empty_at_the_signal_and_the_shutdown_returns() 
         "session": welcome["session"],
     });
     let sent = poll.to_string();
-    let held = post_json(agents, js_agent_wire::DISPATCH_PATH, token, &sent);
+    let held = post_as(&agents, "burst-1", js_agent_wire::DISPATCH_PATH, &sent);
     let signal = async {
         let mut waits = running.shared.agents().dispatching.wakes.waits();
         waits.wait_for(|waits| *waits >= 1).await.unwrap();

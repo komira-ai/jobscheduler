@@ -1,7 +1,7 @@
 //! The agent's state root as the hook on a machine finds it, before any step runs: an update
 //! whose state root is not there, a state root that is there and not usable on a first install and on an update,
-//! the record's commit kept in the refusal, a refusal that needs no lock and takes none, and the
-//! lease's credential from an unusable state root. No socket is opened: the params name a lease
+//! the record's commit kept in the refusal, and a refusal that needs no lock and takes none. No
+//! socket is opened: the params name a lease
 //! server ([`NO_SERVER`]) the client refuses to be made for, by its text alone, so a step that
 //! asked the lease anything would end with that refusal, which the exact details here rule out
 //! (`the_lease_server_of_these_tests_is_refused_before_any_socket` shows it). The owner and
@@ -20,6 +20,7 @@ use js_agent::update_hook::{
 use super::lease_port::{all_unreachable, lease, reach};
 use super::machine::Tree;
 use super::step_rig::as_root;
+use crate::host_certs::self_signed;
 use crate::jobs::private;
 use crate::support::Scratch;
 
@@ -35,21 +36,16 @@ fn unusable(path: &Path, why: &str) -> String {
     format!("state_root: {}: {why}", path.display())
 }
 
-/// A state root that others can read, with a credential in it: not usable.
+/// A state root that others can read: not usable.
 pub(super) fn open_state_root(files: &Scratch) -> PathBuf {
     let open = files.path("open-state");
     fs::create_dir_all(&open).unwrap();
-    fs::write(
-        open.join(js_agent::CREDENTIAL_FILE),
-        "cred-0123456789abcdefghij",
-    )
-    .unwrap();
     fs::set_permissions(&open, fs::Permissions::from_mode(0o755)).unwrap();
     open
 }
 
 /// Every shape of a state root that is there and not usable, with the hook's exact refusal of
-/// it: open to others (with a credential in it), a link to a private directory, a link to
+/// it: open to others, a link to a private directory, a link to
 /// nothing, a file, and a path below a file (which cannot be looked at).
 fn unusable_roots(files: &Scratch) -> Vec<(PathBuf, String)> {
     let open = open_state_root(files);
@@ -84,13 +80,9 @@ const NO_SERVER: &str = "http://lease.invalid";
 const NO_SERVER_SAID: &str = "--server: \"http://lease.invalid\" is plain http to a host off the \
                               loopback: a bearer token never crosses a network in clear, use https://";
 
-/// The params lines that name [`NO_SERVER`] as `mac-1`, with a token file.
-fn lease_lines(files: &Scratch) -> String {
-    let token = files.write("token", "token-0123456789abcdef", 0o600);
-    format!(
-        "server = \"{NO_SERVER}\"\ntoken_file = \"{}\"\nhost_id = \"mac-1\"\n",
-        token.display()
-    )
+/// The params lines that name [`NO_SERVER`] as `mac-1`.
+fn lease_lines() -> String {
+    format!("server = \"{NO_SERVER}\"\nhost_id = \"mac-1\"\n")
 }
 
 /// Every file of the hook's state directory, by name, with its bytes.
@@ -124,7 +116,7 @@ fn assert_refused(done: &Done, said: &str, reversible: bool, what: &str) {
 #[test]
 fn an_update_whose_state_root_is_not_there_fails_every_step_before_the_lock() {
     let tree = Tree::new("hook-root-update-none");
-    let server = lease_lines(&tree.files);
+    let server = lease_lines();
     let absent = tree.root.join("no-such-state");
     let said = format!(
         "state_root: {} is not there, and an update needs the state root of the agent that runs",
@@ -143,14 +135,14 @@ fn an_update_whose_state_root_is_not_there_fails_every_step_before_the_lock() {
     assert!(state_files(&tree).is_empty());
 }
 
-/// Asserts that a first install, whose params name a lease server and a token file and a state
-/// root where nothing is, runs `prepare` to success and writes its
+/// Asserts that a first install, whose params name a lease server and a state root where
+/// nothing is, runs `prepare` to success and writes its
 /// record, and that it asks the lease nothing. It catches the update's rule
 /// applied to a first install.
 #[test]
 fn a_first_install_with_a_lease_server_and_no_state_root_still_runs() {
     let tree = Tree::new("hook-root-first-none");
-    let server = lease_lines(&tree.files);
+    let server = lease_lines();
     let absent = tree.root.join("no-such-state");
     for extra in [
         server.clone(),
@@ -172,7 +164,7 @@ fn a_first_install_with_a_lease_server_and_no_state_root_still_runs() {
 #[test]
 fn a_state_root_that_is_there_and_unusable_fails_every_step_of_a_first_install_or_an_update() {
     let tree = Tree::new("hook-root-unusable");
-    let server = lease_lines(&tree.files);
+    let server = lease_lines();
     for (root, said) in unusable_roots(&tree.files) {
         for previous in [false, true] {
             let line = format!("{server}state_root = \"{}\"\n", root.display());
@@ -217,7 +209,7 @@ fn record_with(tree: &Tree, first_install: bool, marks: &[&str]) -> Record {
 #[test]
 fn a_refused_step_whose_record_is_past_its_commit_says_it_cannot_be_undone() {
     let tree = Tree::new("hook-root-committed");
-    let server = lease_lines(&tree.files);
+    let server = lease_lines();
     let open = open_state_root(&tree.files);
     let open_said = unusable(&open, OPEN);
     let none_said = format!(
@@ -296,7 +288,7 @@ fn a_refused_step_whose_record_is_past_its_commit_says_it_cannot_be_undone() {
 #[test]
 fn a_refusal_of_the_state_root_needs_no_lock_and_changes_nothing() {
     let tree = Tree::new("hook-root-locked");
-    let server = lease_lines(&tree.files);
+    let server = lease_lines();
     let held = Held::open(&tree.root.join("state"), &as_root).unwrap();
     held.save(&record_with(&tree, false, &["stop_begun"]))
         .unwrap();
@@ -336,26 +328,6 @@ fn a_refusal_of_the_state_root_needs_no_lock_and_changes_nothing() {
     assert_eq!(state_files(&tree), before);
 }
 
-/// Asserts that a lease made from params whose state root is there and not usable answers
-/// `host`, `cordon` and `uncordon` with exactly the hook's refusal of that state root, for
-/// every shape of one, with a token file and without one: never a demand for `token_file`,
-/// never the server's refusal of a join token, never the refusal of the server's address. It catches the
-/// join token used in place of an unusable state root, which would reach the server under the
-/// pool's identity instead of the host's.
-#[test]
-fn an_unusable_state_root_is_the_leases_error_with_or_without_a_token_and_nothing_is_sent() {
-    let files = Scratch::new("hook-root-lease");
-    let token = files.write("token", "token-0123456789abcdef", 0o600);
-    for (root, said) in unusable_roots(&files) {
-        for token in [Some(token.clone()), None] {
-            let params: ConnectParams = reach(NO_SERVER, Some(root.clone()), token.clone());
-            for text in all_unreachable(&lease(&params, RequestLimit::DEFAULT)) {
-                assert_eq!(text, said, "{}, token {token:?}", root.display());
-            }
-        }
-    }
-}
-
 /// Asserts the control of every test above: with a usable state root, an update's `prepare`
 /// does ask the lease, and ends `lease_unreachable` with exactly the client's refusal of
 /// [`NO_SERVER`], made from its text alone. So a step that asked the lease would show that
@@ -363,16 +335,12 @@ fn an_unusable_state_root_is_the_leases_error_with_or_without_a_token_and_nothin
 #[test]
 fn the_lease_server_of_these_tests_is_refused_before_any_socket() {
     let tree = Tree::new("hook-root-no-server");
-    let line = format!("{}{}", lease_lines(&tree.files), tree.state_line());
+    let line = format!("{}{}", lease_lines(), tree.state_line());
     let done = tree.run(Step::Prepare, &tree.params(true, &line), Err("unused"));
     assert_eq!(done.outcome, Outcome::Failure, "{done:?}");
     assert_eq!(done.report.reason, Some(Reason::LeaseUnreachable));
     assert_eq!(done.report.detail.as_deref(), Some(NO_SERVER_SAID));
-    let params = reach(
-        NO_SERVER,
-        None,
-        Some(tree.files.write("t", "token-0123456789abcdef", 0o600)),
-    );
+    let params = reach(NO_SERVER, Some(self_signed(&tree.files, "mac-1")), None);
     for text in all_unreachable(&lease(&params, RequestLimit::DEFAULT)) {
         assert_eq!(text, NO_SERVER_SAID);
     }

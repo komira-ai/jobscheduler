@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use js_agent::dispatch::{Cell, Next, Poller, Route};
 use js_agent::lifecycle::Quiet;
-use js_agent::{CredentialState, Delivery, Quiesce, WorkerHost};
+use js_agent::{Delivery, Quiesce, WorkerHost};
 use js_agent_wire::limits::MAX_COMMANDS;
 use js_agent_wire::{
     BookedResources, DISPATCH_PATH, DispatchReply, Dispatched, JobStartSpec, Welcome,
@@ -85,19 +85,12 @@ fn route(epoch: u64) -> Route {
         host_id: "h1".to_owned(),
         epoch,
         session: SECRET.to_owned(),
-        credential: None,
     }
 }
 
-/// A welcome of `epoch` and `session`, which says `dispatch_poll` when `polling`, and carries
-/// `credential` when one is given.
-pub(super) fn welcomed(
-    epoch: u64,
-    session: &str,
-    polling: bool,
-    credential: Option<&str>,
-) -> Welcome {
-    let mut body = json!({
+/// A welcome of `epoch` and `session`, which says `dispatch_poll` when `polling`.
+pub(super) fn welcomed(epoch: u64, session: &str, polling: bool) -> Welcome {
+    let body = json!({
         "epoch": epoch,
         "heartbeat_interval_ms": 5000,
         "grace_ms": 15000,
@@ -105,9 +98,6 @@ pub(super) fn welcomed(
         "session": session,
         "dispatch_poll": polling,
     });
-    if let Some(credential) = credential {
-        body["host_credential"] = json!(credential);
-    }
     serde_json::from_value(body).unwrap()
 }
 
@@ -489,7 +479,7 @@ fn an_answer_of_invalid_messages_hands_the_worker_nothing_and_acknowledges_nothi
 /// without bound while nobody takes them, and dropped lines nobody hears of.
 #[test]
 fn the_cell_keeps_the_poller_lines_up_to_its_cap_and_counts_the_rest() {
-    let cell = Cell::new(None);
+    let cell = Cell::new();
     assert_eq!(cell.take_lines(), Vec::<String>::new());
     cell.note(vec!["one".to_owned(), "two".to_owned()]);
     assert_eq!(cell.take_lines(), ["one", "two"]);
@@ -511,18 +501,14 @@ fn the_cell_keeps_the_poller_lines_up_to_its_cap_and_counts_the_rest() {
     assert_eq!(cell.wait_lines(GUARD), Vec::<String>::new());
 }
 
-/// Asserts that a route prints without its secrets, and a poll does not carry a credential.
-/// Catches a `Debug` of the route that leaks the session secret into a log line or a panic.
+/// Asserts that a route prints without its secret. Catches a `Debug` of the route that leaks
+/// the session secret into a log line or a panic.
 #[test]
 fn a_route_prints_without_its_secrets() {
-    let mut route = route(3);
-    route.credential = Some(js_agent_wire::HostCredential::parse("cred-secret-1").unwrap());
+    let route = route(3);
     let text = format!("{route:?}");
     assert!(text.contains("h1") && text.contains("3"), "{text}");
-    assert!(
-        !text.contains(SECRET) && !text.contains("cred-secret-1"),
-        "{text}"
-    );
+    assert!(!text.contains(SECRET), "{text}");
 }
 
 /// Asserts what the cell holds after welcomes: no route before one; the route of a welcome
@@ -532,72 +518,25 @@ fn a_route_prints_without_its_secrets() {
 /// that polls a welcome without the flag.
 #[test]
 fn the_cell_holds_the_route_of_the_latest_welcome_that_says_dispatch_poll() {
-    let cell = Cell::new(None);
+    let cell = Cell::new();
     assert!(cell.try_route().is_none());
-    cell.publish(
-        "h1",
-        &welcomed(1, "one", false, None),
-        CredentialState::None,
-    );
+    cell.publish("h1", &welcomed(1, "one", false));
     assert!(cell.try_route().is_none(), "no flag, no route");
-    cell.publish("h1", &welcomed(2, "two", true, None), CredentialState::None);
+    cell.publish("h1", &welcomed(2, "two", true));
     let (generation, route) = cell.try_route().unwrap();
     assert_eq!(
         (generation, route.epoch, route.session.as_str()),
         (2, 2, "two")
     );
     assert_eq!(route.host_id, "h1");
-    cell.publish(
-        "h1",
-        &welcomed(3, "three", true, None),
-        CredentialState::None,
-    );
+    cell.publish("h1", &welcomed(3, "three", true));
     assert_eq!(cell.try_route().unwrap().1.epoch, 3);
-    cell.publish(
-        "h1",
-        &welcomed(4, "four", false, None),
-        CredentialState::None,
-    );
+    cell.publish("h1", &welcomed(4, "four", false));
     assert!(cell.try_route().is_none(), "the flag was withdrawn");
-    cell.publish(
-        "h1",
-        &welcomed(5, "five", true, None),
-        CredentialState::None,
-    );
+    cell.publish("h1", &welcomed(5, "five", true));
     cell.close();
     assert!(cell.try_route().is_none());
     assert!(cell.wait_route().is_none());
-}
-
-/// Asserts which credential the route carries: the one found in the state root at start; the
-/// one a welcome carried when the session saved it, or could not save it but uses it; and not
-/// one the transport refused, nor one a session with no store ignored. A welcome with none
-/// keeps the credential held. Catches a poll that authenticates with a dead token after the
-/// host's credential replaced it, and one that adopts a credential the session did not.
-#[test]
-fn the_route_carries_the_credential_the_session_adopted() {
-    let found = js_agent_wire::HostCredential::parse("found-credential").unwrap();
-    let cell = Cell::new(Some(found));
-    let held = |cell: &Cell| {
-        let route = cell.try_route().unwrap().1;
-        route.credential.map(|c| c.expose().to_owned())
-    };
-    let publish = |epoch: u64, credential: Option<&str>, kept: CredentialState| {
-        cell.publish("h1", &welcomed(epoch, "s", true, credential), kept);
-    };
-    publish(1, None, CredentialState::None);
-    assert_eq!(held(&cell).as_deref(), Some("found-credential"));
-    publish(2, Some("saved-credential"), CredentialState::Saved);
-    assert_eq!(held(&cell).as_deref(), Some("saved-credential"));
-    publish(3, Some("ignored"), CredentialState::None);
-    assert_eq!(held(&cell).as_deref(), Some("saved-credential"));
-    publish(4, Some("refused"), CredentialState::Refused);
-    assert_eq!(held(&cell).as_deref(), Some("saved-credential"));
-    publish(5, Some("unsaved-credential"), CredentialState::Unsaved);
-    assert_eq!(held(&cell).as_deref(), Some("unsaved-credential"));
-    let bare = Cell::new(None);
-    bare.publish("h1", &welcomed(1, "s", true, None), CredentialState::None);
-    assert_eq!(held(&bare), None);
 }
 
 /// Asserts that a pause is cut short, without waiting, for a generation the cell has left and
@@ -606,9 +545,9 @@ fn the_route_carries_the_credential_the_session_adopted() {
 /// the end of the agent, and one that is cut short with nothing to cut it.
 #[test]
 fn a_pause_ends_at_the_close_and_at_a_later_welcome() {
-    let cell = Cell::new(None);
-    cell.publish("h1", &welcomed(1, "s", true, None), CredentialState::None);
-    cell.publish("h1", &welcomed(2, "s", true, None), CredentialState::None);
+    let cell = Cell::new();
+    cell.publish("h1", &welcomed(1, "s", true));
+    cell.publish("h1", &welcomed(2, "s", true));
     assert!(
         cell.pause(Duration::from_secs(3600), 1),
         "a later welcome cuts the pause"

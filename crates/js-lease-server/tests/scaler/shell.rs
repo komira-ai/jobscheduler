@@ -8,11 +8,10 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use js_elastic::HostStatus;
-use js_lease_server::RETRY_AFTER;
 use js_registry::{HostMark, HostState};
 use js_scaler::{Blocked, CooldownReason, Health, LaunchMode, Phase, Records, Settings, State};
 
-use crate::fakes::{Gate, allocation, job, live, logged, only_saves, record, records, rig, view};
+use crate::fakes::{Gate, allocation, job, live, only_saves, record, records, rig, view};
 
 fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
@@ -27,23 +26,17 @@ fn first_name(state: &State) -> String {
     state.records.instances[0].name.clone()
 }
 
-/// Asserts the order of a launch: the records are written, then the join token is minted,
-/// then the acquire is made with that token, and the next ticks, with the request still
-/// waiting, make no call for it except to write the record that the answer moved on. It
-/// catches a call made before its record is on disk, a launch that mints after it
-/// acquires, and a second launch for a request that already has a machine coming.
+/// Asserts the order of a launch: the records are written, then the acquire is made, and
+/// the next ticks, with the request still waiting, make no call for it except to write the
+/// record that the answer moved on. It catches a call made before its record is on disk,
+/// and a second launch for a request that already has a machine coming.
 #[tokio::test]
 async fn a_waiting_request_is_launched_once_with_its_records_written_first() {
     let rig = rig(Records::default(), live());
     rig.world().queued = vec![job("r1")];
     rig.scaler.tick().await;
     let name = first_name(&rig.scaler.state());
-    let token = format!("token-of-{name}");
-    let expected = [
-        "save".to_owned(),
-        format!("mint:{name}"),
-        format!("acquire:{name}:{token}"),
-    ];
+    let expected = ["save".to_owned(), format!("acquire:{name}")];
     assert_eq!(rig.log(), expected);
     assert_eq!(
         rig.scaler.state().records.instances[0].phase,
@@ -80,44 +73,9 @@ async fn records_that_cannot_be_written_stop_the_tick() {
 
     rig.world().save_ok = true;
     rig.scaler.tick().await;
-    assert_eq!(rig.log().len(), 4);
+    assert_eq!(rig.log().len(), 3);
     assert_eq!(rig.scaler.save_errors(), 1);
     assert_eq!(rig.scaler.state().records.instances.len(), 1);
-}
-
-/// Asserts that a join token that could not be minted sends no launch: the acquire is
-/// answered with a deferral, the record waits as planned for the time the shell names,
-/// and when that time comes a new token is minted and the machine is launched. It catches
-/// a launch with no token, and a launch that is never tried again.
-#[tokio::test]
-async fn a_token_that_cannot_be_minted_defers_the_launch() {
-    let rig = rig(Records::default(), live());
-    rig.world().queued = vec![job("r1")];
-    rig.world().mint_ok = false;
-    rig.scaler.tick().await;
-    let name = first_name(&rig.scaler.state());
-    assert_eq!(rig.log(), ["save".to_owned(), format!("mint:{name}")]);
-
-    rig.advance(secs(1));
-    rig.scaler.tick().await;
-    assert_eq!(
-        rig.scaler.state().records.instances[0].phase,
-        Phase::Planned
-    );
-    rig.world().mint_ok = true;
-    rig.advance(RETRY_AFTER);
-    rig.scaler.tick().await;
-    let log = rig.log();
-    let acquires = log
-        .iter()
-        .filter(|entry| entry.starts_with("acquire:"))
-        .count();
-    assert_eq!(acquires, 1);
-    let mints = log
-        .iter()
-        .filter(|entry| entry.starts_with("mint:"))
-        .count();
-    assert_eq!(mints, 2);
 }
 
 /// A rig whose one machine, `js-booting`, was launched at the start of the clock and has
@@ -133,59 +91,11 @@ async fn timed_out() -> crate::fakes::Rig {
     rig
 }
 
-/// Asserts that a machine is never terminated while its token may still work: a revoke
-/// that fails holds the release back, the revoke is tried again on every tick, and the
-/// release is made on the tick after the revoke has gone through, after it in the log. It
-/// catches a release sent in the same step as a revoke that failed, and a failed revoke
-/// that nobody tries again.
-#[tokio::test]
-async fn a_revoke_that_fails_holds_the_release_back() {
-    let rig = timed_out().await;
-    rig.world().revoke_ok = false;
-    rig.scaler.tick().await;
-    assert_eq!(
-        rig.log(),
-        ["save", "MarkEnding:js-booting", "revoke:js-booting"]
-    );
-    assert_eq!(
-        rig.scaler.state().records.instances[0].phase,
-        Phase::Releasing
-    );
-
-    rig.advance(secs(5));
-    rig.scaler.tick().await;
-    assert_eq!(
-        rig.log(),
-        [
-            "save",
-            "MarkEnding:js-booting",
-            "revoke:js-booting",
-            "revoke:js-booting"
-        ]
-    );
-
-    rig.world().revoke_ok = true;
-    rig.advance(secs(5));
-    rig.scaler.tick().await;
-    assert_eq!(
-        rig.log(),
-        [
-            "save",
-            "MarkEnding:js-booting",
-            "revoke:js-booting",
-            "revoke:js-booting",
-            "revoke:js-booting",
-            "release:"
-        ]
-    );
-}
-
 /// Asserts the fix for a release that was under way at a restart. The records name a
 /// machine being released, one registered and one gone; before any tick, and so before the
 /// server admits a hello, the machine being released is marked ending in the registry and
-/// the others are not. The first tick then revokes its token again before it releases it.
-/// It catches a restart that leaves such a host to say hello unmarked, and a release that
-/// trusts a revoke made by an earlier process.
+/// the others are not. The first tick then releases it. It catches a restart that leaves
+/// such a host to say hello unmarked.
 #[tokio::test]
 async fn a_restart_marks_what_was_being_released_before_anything_else() {
     let each = vec![
@@ -199,7 +109,7 @@ async fn a_restart_marks_what_was_being_released_before_anything_else() {
     rig.world().hosts = vec![view("js-leaving"), view("js-staying")];
     rig.scaler.tick().await;
     let log = rig.log();
-    assert_eq!(&log[1..3], ["revoke:js-leaving", "release:"]);
+    assert_eq!(log[1], "release:");
     assert!(!log.iter().any(|entry| entry.contains("UNSAFE")), "{log:?}");
 }
 
@@ -231,11 +141,11 @@ async fn a_pool_whose_checks_or_list_fail_launches_nothing() {
 
     rig.world().list_fails = false;
     rig.scaler.tick().await;
-    assert_eq!(rig.log().len(), 3);
+    assert_eq!(rig.log().len(), 2);
 }
 
 /// Asserts that a pool in `plan` mode calls nothing and writes nothing however long it
-/// runs and however much waits: no token, no acquire, no record. It shows what it would
+/// runs and however much waits: no acquire, no record. It shows what it would
 /// launch, and that it is in plan. It catches a launch from a plan pool in the shell, as
 /// the provider's own lock would in the pool itself.
 #[tokio::test]
@@ -261,11 +171,10 @@ async fn a_plan_pool_launches_nothing() {
 
 /// Asserts a machine's whole life through the shell, over a registry that marks the way
 /// the real one does: launched, booted, registered, idle for `idle`, drained, marked
-/// releasing, revoked, terminated, read back terminating and then gone, removed from the
+/// releasing, terminated, read back terminating and then gone, removed from the
 /// registry and forgotten. No release is made of a host that is not marked releasing and
-/// quiet, the revoke is before the first release, the removal after the last, and no tick
-/// after that calls anything. It catches an order of calls that could cut work or leave a
-/// token alive.
+/// quiet, the removal is after the last release, and no tick after that calls anything. It
+/// catches an order of calls that could cut work.
 #[tokio::test]
 async fn a_machine_is_launched_registered_idle_drained_released_and_removed() {
     let rig = rig(Records::default(), live());
@@ -298,10 +207,9 @@ async fn a_machine_is_launched_registered_idle_drained_released_and_removed() {
     let at = |entry: String| log.iter().position(|each| *each == entry);
     let drain = at(format!("Drain:{name}")).unwrap();
     let release_host = at(format!("ReleaseHost:{name}")).unwrap();
-    let revoke = at(format!("revoke:{name}")).unwrap();
     let release = at(format!("release:{name}")).unwrap();
     let remove = at(format!("remove:{name}")).unwrap();
-    assert!(drain < release_host && release_host < revoke && revoke < release);
+    assert!(drain < release_host && release_host < release);
     assert!(release < remove);
     assert!(at(format!("forget:{name}")).is_some());
     let released = log
@@ -345,7 +253,7 @@ async fn a_busy_host_is_kept_and_a_drained_host_is_taken_back_for_a_request() {
     let log = rig.log();
     assert_eq!(log.last().unwrap(), "Undrain:js-held");
     assert!(
-        !log.iter().any(|entry| entry.starts_with("mint:")),
+        !log.iter().any(|entry| entry.starts_with("acquire:")),
         "{log:?}"
     );
     assert_eq!(rig.world().hosts[0].mark, None);
@@ -381,7 +289,11 @@ async fn the_providers_list_reaches_the_step() {
     let state = rig.scaler.state();
     let phases: Vec<Phase> = state.records.instances.iter().map(|r| r.phase).collect();
     assert_eq!(phases, [Phase::Releasing, Phase::Orphan]);
-    assert!(rig.log().contains(&"revoke:js-lost".to_owned()));
+    assert!(
+        rig.log().contains(&"release:js-lost".to_owned()),
+        "{:?}",
+        rig.log()
+    );
 }
 
 /// Asserts that hosts the scaler must leave alone are left alone, whatever the registry
@@ -424,32 +336,6 @@ async fn silent_hosts_that_hold_jobs_and_hosts_it_did_not_launch_are_left_alone(
             .instances
             .iter()
             .all(|r| r.phase == Phase::Registered)
-    );
-}
-
-/// Asserts that a host whose token cannot be revoked is said once, however many ticks it
-/// holds for, and that its machine is not terminated meanwhile. It catches a stuck revoke
-/// that only a debug line mentions, and one that is said on every tick.
-#[tokio::test]
-async fn a_revoke_that_keeps_failing_is_said_once() {
-    let rig = rig(
-        records(vec![record("js-revoke-alert", Phase::Booting)]),
-        live(),
-    );
-    rig.advance(mins(16));
-    rig.scaler.tick().await;
-    rig.advance(mins(5));
-    rig.world().revoke_ok = false;
-    for _ in 0..4 {
-        rig.scaler.tick().await;
-        rig.advance(secs(5));
-    }
-    let said = "the join token of host js-revoke-alert cannot be revoked";
-    assert_eq!(logged().matches(said).count(), 1, "{}", logged());
-    assert!(
-        !rig.log().iter().any(|call| call.starts_with("release:")),
-        "{:?}",
-        rig.log()
     );
 }
 
@@ -512,10 +398,9 @@ async fn an_unannounced_host_reaches_the_step_with_no_shape() {
     silent.world().queued = vec![job("r1")];
     silent.scaler.tick().await;
     let log = silent.log();
-    assert_eq!(log.len(), 3, "{log:?}");
+    assert_eq!(log.len(), 2, "{log:?}");
     assert_eq!(log[0], "save");
-    assert!(log[1].starts_with("mint:"), "{log:?}");
-    assert!(log[2].starts_with("acquire:"), "{log:?}");
+    assert!(log[1].starts_with("acquire:"), "{log:?}");
 }
 
 /// A rig whose machine was launched at the start of the clock, said hello and has not been

@@ -1,5 +1,5 @@
-//! What the tests share: a server in this process, the CLI entry with captured streams,
-//! and servers that answer canned replies.
+//! What the tests share: the CLI entry with captured streams, scratch directories, and
+//! servers that answer canned replies.
 
 use std::ffi::OsString;
 use std::fs;
@@ -10,16 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use js_cli::Services;
-use js_lease_server::{
-    Cli as ServerCli, Config, Running, SharedClock, TickHandle, channel_ticker, start,
-};
 use js_testkit::dir::TestDir;
-use js_types::{ManualClock, Timestamp};
 use serde_json::Value;
-use tokio::runtime::Runtime;
-
-/// The wall time every test clock starts at.
-pub const T0: u64 = 1_000_000;
 
 /// The bearer token of the test servers.
 pub const TOKEN: &str = "cli-test-token-0123456789abcdefghijklmn";
@@ -82,13 +74,6 @@ pub struct Outcome {
     pub err: String,
 }
 
-impl Outcome {
-    /// The stdout of a run that printed one JSON value.
-    pub fn json(&self) -> Value {
-        serde_json::from_str(&self.out).unwrap()
-    }
-}
-
 /// How to reach a test server: enough to run the CLI against it from any thread.
 #[derive(Clone)]
 pub struct Js {
@@ -112,15 +97,6 @@ impl Js {
         run(self.args(extra), services)
     }
 
-    /// Runs `extra` with the global flags after the subcommand.
-    pub fn go_last(&self, extra: &[&str]) -> Outcome {
-        let mut args: Vec<OsString> = vec!["js".into()];
-        args.extend(extra.iter().map(OsString::from));
-        args.extend(["--server".into(), self.server.clone().into()]);
-        args.extend(["--token-file".into(), self.token_file.clone().into()]);
-        run(args, services())
-    }
-
     /// Runs `extra` with services that report no signals.
     pub fn go(&self, extra: &[&str]) -> Outcome {
         self.with(extra, services())
@@ -140,132 +116,6 @@ pub fn run(args: Vec<OsString>, services: Services) -> Outcome {
 /// Services over a signal source that reports nothing.
 pub fn services() -> Services {
     Services::new(Box::new(|_| Ok(())))
-}
-
-/// The words of a revoke for `lambdalabs:i-1`: the cheapest authenticated call, answered 204
-/// whether or not the instance has a token.
-pub const REVOKE: [&str; 6] = [
-    "join-token",
-    "revoke",
-    "--provider",
-    "lambdalabs",
-    "--instance-id",
-    "i-1",
-];
-
-/// A pool that asks nothing of a host but an `arch` (the scheduler describes a host by
-/// it), for the server's `--agent-pool-config`. No host says hello here.
-const POOL: &str = r#"
-name = "macs"
-class = "mac"
-max_machines = 4
-
-[shape]
-cpu_millis = 1
-memory_bytes = 1
-
-[capabilities]
-arch = "x86_64"
-"#;
-
-/// A server in this process, on a runtime of its own so the CLI can block the test's
-/// thread.
-pub struct Harness {
-    /// The runtime the server runs on.
-    _rt: Runtime,
-    /// The server, kept running until the harness is dropped.
-    _running: Running,
-    /// The server's ticker handle, kept so the ticker stays open.
-    _ticks: TickHandle,
-    pub scratch: Scratch,
-    pub js: Js,
-}
-
-impl Harness {
-    /// A plain-http server whose agents register hosts into [`POOL`], so the join-token
-    /// route exists. No host has said hello.
-    pub fn new(name: &str) -> Self {
-        Self::build_in(Scratch::new(name), &[])
-    }
-
-    /// A server over TLS with a certificate made for the test, admitting agents; the
-    /// certificate is in the file `cert.pem` of the scratch directory, for `--ca-cert`.
-    pub fn tls(name: &str) -> Self {
-        let scratch = Scratch::new(name);
-        let made = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_owned()]).unwrap();
-        let cert = scratch.write("cert.pem", &made.cert.pem(), 0o644);
-        let key = scratch.write("key.pem", &made.signing_key.serialize_pem(), 0o600);
-        let (cert, key) = (cert.to_str().unwrap(), key.to_str().unwrap());
-        Self::build_in(scratch, &["--tls-cert", cert, "--tls-key", key])
-    }
-
-    /// A server in `scratch` over the agent pool [`POOL`], with these extra server flags.
-    fn build_in(scratch: Scratch, extra: &[&str]) -> Self {
-        let pool = scratch.write("agent-pool.toml", POOL, 0o644);
-        let token_file = scratch.write("token", TOKEN, 0o600);
-        let state = scratch.path("leases.toml");
-        let mut args: Vec<OsString> = vec![
-            "js-lease-server".into(),
-            "--listen".into(),
-            "127.0.0.1:0".into(),
-            "--state-file".into(),
-            state.into(),
-            "--boot".into(),
-            "initialise".into(),
-            "--agent-pool-config".into(),
-            pool.into(),
-            "--token-file".into(),
-            token_file.clone().into(),
-        ];
-        args.extend(extra.iter().map(OsString::from));
-        let config = Config::from_cli(ServerCli::try_parse_from(args).unwrap()).unwrap();
-        let rt = Runtime::new().unwrap();
-        let clock = ManualClock::new(Timestamp::from_millis(T0));
-        let (ticks, ticker) = channel_ticker();
-        let shared = SharedClock::new(clock);
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let config = config.with_listener(listener);
-        let running = rt.block_on(start(config, shared, ticker)).unwrap();
-        let scheme = if extra.contains(&"--tls-cert") {
-            "https"
-        } else {
-            "http"
-        };
-        let server = format!("{scheme}://{}", running.addr());
-        Self {
-            _rt: rt,
-            _running: running,
-            _ticks: ticks,
-            scratch,
-            js: Js { server, token_file },
-        }
-    }
-}
-
-/// A server that answers every request with `reply`, verbatim, and closes: for answers
-/// the real server never gives. Returns its URL.
-pub fn canned(reply: &str) -> String {
-    let reply = reply.to_owned();
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let mut stream = stream.unwrap();
-            let mut seen = Vec::new();
-            let mut byte = [0u8; 1];
-            while !seen.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap_or(0) == 1 {
-                seen.push(byte[0]);
-            }
-            let _ = stream.write_all(reply.as_bytes());
-            // End the reply with a FIN, then read what the client still sends (a request
-            // body) until it hangs up: closing with that unread would reset the
-            // connection, which macOS reports to the client as EINVAL on its next call.
-            let _ = stream.shutdown(std::net::Shutdown::Write);
-            let mut rest = [0u8; 1024];
-            while stream.read(&mut rest).unwrap_or(0) > 0 {}
-        }
-    });
-    format!("http://{addr}")
 }
 
 /// A port that every loopback name the tests use answers on and then hangs up: the

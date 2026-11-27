@@ -45,10 +45,10 @@ fn times_on(host: &str, needle: &str) -> usize {
 }
 
 /// Asserts that a failed save carries out no later action, whatever the action is: a
-/// machine past its boot timeout would be marked ending, revoked and released, and with
-/// the disk full none of it is, not the mark, not the revoke, not the release. The failure
+/// machine past its boot timeout would be marked ending and released, and with
+/// the disk full none of it is, not the mark, not the release. The failure
 /// is counted and the state does not move; when the disk works the same tick's decision is
-/// made again and the save comes first. It catches a release or a revoke that runs ahead
+/// made again and the save comes first. It catches a release that runs ahead
 /// of the record that says it was decided, which a crash would leave as a machine the
 /// scaler does not know it was releasing.
 #[tokio::test]
@@ -77,7 +77,7 @@ async fn a_failed_save_carries_out_no_later_action() {
         ["save", "save", "MarkEnding:js-save-fail"],
         "{log:?}"
     );
-    assert!(log.contains(&"revoke:js-save-fail".to_owned()), "{log:?}");
+    assert!(log.contains(&"release:".to_owned()), "{log:?}");
 }
 
 /// A source of randomness that has run dry.
@@ -112,8 +112,12 @@ async fn a_step_gets_one_fresh_value_for_each_launch_it_may_make() {
     assert_eq!(names.len(), 3);
     let distinct: BTreeSet<&String> = names.iter().collect();
     assert_eq!(distinct.len(), 3);
-    let mints = rig.log().iter().filter(|e| e.starts_with("mint:")).count();
-    assert_eq!(mints, 3);
+    let acquires = rig
+        .log()
+        .iter()
+        .filter(|e| e.starts_with("acquire:"))
+        .count();
+    assert_eq!(acquires, 3);
 
     let dry = rig_with(Records::default(), settings, Box::new(Dry));
     dry.world().queued = vec![job("r1")];
@@ -148,7 +152,7 @@ async fn a_machine_missing_from_the_registry_is_released_only_on_a_view_the_shel
     rig.scaler.tick().await;
     rig.scaler.tick().await;
     let log = rig.log();
-    assert!(log.contains(&"revoke:js-missing".to_owned()), "{log:?}");
+    assert!(log.contains(&"forget:js-missing".to_owned()), "{log:?}");
     assert!(!rig.world().gone_asked.is_empty());
     assert!(rig.world().gone_asked.iter().all(|id| id == "i-m"));
 }
@@ -194,7 +198,7 @@ async fn a_silent_host_that_books_nothing_is_released_and_one_that_holds_a_job_i
     assert!(logged().contains("released a machine whose host was silent"));
     assert!(times("host=js-silent-free") >= 1);
     let log = rig.log();
-    assert!(log.contains(&"revoke:js-silent-free".to_owned()), "{log:?}");
+    assert!(log.contains(&"release:".to_owned()), "{log:?}");
     assert!(
         !log.iter().any(|entry| entry.contains("js-silent-working")),
         "{log:?}"
@@ -203,7 +207,7 @@ async fn a_silent_host_that_books_nothing_is_released_and_one_that_holds_a_job_i
 
 /// Asserts that a read by id settles a machine only where the registry cannot: the
 /// provider is asked about a registered machine whose host is lost, and when it says gone
-/// the machine's token is revoked, its network device forgotten and its host removed; it is
+/// its network device is forgotten and its host removed; it is
 /// not asked about a machine whose host is live. It catches a settle on a live host's say,
 /// which the step would not believe, and a read by id that is never made.
 #[tokio::test]
@@ -221,7 +225,7 @@ async fn a_machine_the_provider_no_longer_has_is_settled_when_its_host_is_silent
     rig.scaler.tick().await;
     assert_eq!(rig.world().gone_asked, ["i-gone"]);
     let log = rig.log();
-    for call in ["revoke:", "forget:", "remove:"] {
+    for call in ["forget:", "remove:"] {
         let wanted = format!("{call}js-gone-lost");
         assert!(log.contains(&wanted), "{wanted} in {log:?}");
     }
@@ -232,8 +236,7 @@ async fn a_machine_the_provider_no_longer_has_is_settled_when_its_host_is_silent
 }
 
 /// Asserts that the shell tells the step which acquire ids the provider holds a call for.
-/// A launch told to wait that no request waits for any more is forgotten, as its token
-/// is revoked; the same launch is kept, untouched, while the provider holds an unresolved
+/// A launch told to wait that no request waits for any more is forgotten; the same launch is kept, untouched, while the provider holds an unresolved
 /// call for its acquire id. It catches a launch dropped while its machine may exist, which
 /// would show up later as an orphan nobody releases.
 #[tokio::test]
@@ -252,7 +255,7 @@ async fn a_planned_launch_is_kept_while_the_provider_holds_a_call_for_it() {
     dropped.scaler.tick().await;
     assert!(dropped.scaler.state().records.instances.is_empty());
     assert!(
-        dropped.log().contains(&"revoke:js-planned".to_owned()),
+        dropped.log().contains(&"forget:js-planned".to_owned()),
         "{:?}",
         dropped.log()
     );

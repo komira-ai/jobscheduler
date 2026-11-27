@@ -36,9 +36,9 @@ use super::words::{camel_words, kebab, lower_words, short_names, singular, snake
 /// The flags `js` itself has, and clap's own: no request field may take one.
 pub const RESERVED: [&str; 6] = ["server", "token-file", "ca-cert", "json", "help", "version"];
 
-/// The first words `js` keeps for itself: `join-token`, the command it writes by hand;
-/// `lease`, the removed command group, so that a script still typing it gets a usage error
-/// and never reaches a generated command; and clap's own `help`.
+/// The first words `js` keeps for itself: `join-token` and `lease`, the removed command
+/// groups, so that a script still typing one gets a usage error and never reaches a generated
+/// command; and clap's own `help`.
 pub const TAKEN: [&str; 3] = ["join-token", "lease", "help"];
 
 /// One command of the table.

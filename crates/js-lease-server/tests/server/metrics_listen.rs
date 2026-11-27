@@ -20,7 +20,7 @@ fn static_file(scratch: &Scratch, extra: &str) -> String {
     file(&server(scratch, extra), &[&hosts])
 }
 
-/// The agent flags (the shared join token among them) with the metrics on `listen`.
+/// The agent flags with the metrics on `listen`.
 fn metrics_args(scratch: &Scratch, listen: &str) -> Vec<OsString> {
     let mut args = crate::agents_support::agent_args(scratch);
     args.extend(["--metrics-listen", listen].map(OsString::from));

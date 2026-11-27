@@ -10,9 +10,9 @@ use std::ffi::OsString;
 
 use js_lease_server::{Cli, Config};
 
-use crate::agents_support::JOIN;
-use crate::config_support::{PoolText, file, load, quote, quoted, refusal, server};
-use crate::support::{Scratch, base_args, config};
+use crate::agents_support::agent_args;
+use crate::config_support::{PoolText, file, load, quote, refusal, server};
+use crate::support::{Scratch, config};
 
 /// A pool of up to two machines with a node report: the scheduler describes a host by
 /// its `arch`.
@@ -38,14 +38,8 @@ const KEY_WARNING: &str = "server.placement is deprecated and does nothing: js-s
 
 /// The flags of a server with agent registration over `pool`, and `extra` after them.
 fn args_over(scratch: &Scratch, pool: &str, extra: &[&str]) -> Vec<OsString> {
-    let mut args = base_args(scratch);
-    let tokens = scratch.write("agent-tokens", &format!("{JOIN}\n"), 0o600);
+    let mut args = agent_args(scratch);
     scratch.write("agent-pool.toml", pool, 0o644);
-    let flags = [("--agent-token-file", tokens.into_os_string())];
-    for (flag, value) in flags {
-        args.push(flag.into());
-        args.push(value);
-    }
     args.extend(extra.iter().map(OsString::from));
     args
 }
@@ -57,12 +51,10 @@ fn args(scratch: &Scratch, extra: &[&str]) -> Vec<OsString> {
 
 /// An elastic pool whose hosts register agents; its floor names no capability.
 fn elastic_pool(scratch: &Scratch) -> PoolText {
-    let joins = scratch.write("joins", &format!("{JOIN}\n"), 0o600);
     PoolText::elastic(scratch)
         .set("name", &quote("burst"))
         .set("class", &quote("gpu-host"))
         .set("exec", &quote("none"))
-        .set("join_token_file", &quoted(&joins))
 }
 
 fn parsed(args: Vec<OsString>) -> Result<Config, String> {

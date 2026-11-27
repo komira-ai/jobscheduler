@@ -90,7 +90,7 @@ fn restoring_a_host_ignores_the_limit_but_counts_toward_it() {
 
 /// Asserts that a second hello for a live host id is refused and changes nothing: the
 /// first session keeps its epoch and keeps heartbeating. Without the rule an id could
-/// be taken over by anyone holding the pool's token.
+/// be taken over by anyone holding the credential.
 #[test]
 fn second_hello_while_live_refused() {
     let fx = fixture(4);

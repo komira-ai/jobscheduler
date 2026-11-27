@@ -95,7 +95,7 @@ async fn a_hello_just_before_the_floor_registers_a_machine_past_its_boot_timeout
     assert!(scaler.state().records.cooldowns.is_empty());
     let log = rig.log();
     assert!(
-        !log.iter().any(|entry| entry.starts_with("revoke:")),
+        !log.iter().any(|entry| entry.starts_with("release:")),
         "{log:?}"
     );
 }

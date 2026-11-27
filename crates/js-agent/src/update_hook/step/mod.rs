@@ -54,8 +54,8 @@ pub use resume::{RESTART_HELLO_SECS, RESTART_STOP_SECS, resume};
 pub use rollback::rollback;
 pub use verify::verify;
 
-/// What the hook finds when it looks at a secret file: the join token file, or a file of the
-/// host's certificate and key.
+/// What the hook finds when it looks at a secret file: a file of the host's certificate and
+/// key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TokenFacts {
     /// Whether it is a regular file after following links.
@@ -66,8 +66,7 @@ pub struct TokenFacts {
     pub uid: u32,
 }
 
-/// How the token file and the host certificate and key files are looked at (see
-/// [`TokenFacts`]).
+/// How the host certificate and key files are looked at (see [`TokenFacts`]).
 pub type TokenFn = dyn Fn(&Path) -> io::Result<TokenFacts>;
 
 /// What the host setup of a Mac finds when it looks at a root it made (a link followed).
@@ -93,13 +92,13 @@ pub struct Env<'a> {
     pub runner: &'a dyn CommandRunner,
     /// Which unit manager runs the agent, and so which unit file a release carries.
     pub manager: Manager,
-    /// The user the hook runs as: the owner the join token file must have.
+    /// The user the hook runs as: the owner the host key may have besides root.
     pub euid: u32,
-    /// How the join token file and the host certificate and key files are looked at.
+    /// How the host certificate and key files are looked at.
     pub token: &'a TokenFn,
     /// The host certificate and key the host's flags file (`flags_file`) names, when it names
-    /// both; `None` when it names neither or cannot be read. A first install that has them
-    /// needs no join token (see `prepare`).
+    /// both; `None` when it names neither or cannot be read. A first install without them
+    /// defers (see `prepare`).
     pub host_identity: Option<&'a HostIdentity>,
     /// The host's flags file sets an egress ceiling (`--egress allow-list` or `open`), or
     /// cannot be read: the runs have network wiring, so an update hands them over only between

@@ -4,10 +4,9 @@
 //! through a server.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::Duration;
 
 use js_elastic::{
-    AcquireId, Acquired, Demand, EventStream, Held, HostRef, Offer, ProviderError, Released, Secret,
+    AcquireId, Acquired, Demand, EventStream, Held, HostRef, Offer, ProviderError, Released,
 };
 use js_jobs::{AllocationRecord, JobId, JobRecord, JobStoreError};
 use js_registry::{Busy, HostView};
@@ -46,7 +45,7 @@ pub enum Call {
     Cordon,
 }
 
-/// The shell's whole interface to the registry, the join tokens, the provider, the network
+/// The shell's whole interface to the registry, the provider, the network
 /// and the disk. Every method blocks and none holds a lock another part of the server
 /// waits on across a provider call.
 pub trait Effects: Send + Sync {
@@ -125,20 +124,11 @@ pub trait Effects: Send + Sync {
     /// Why the file could not be written.
     fn save(&self, records: &Records) -> Result<(), String>;
 
-    /// Mints the one-time join token of the host `host`, valid for `valid_for`; `None`
-    /// when it could not be made.
-    fn mint(&self, host: &str, valid_for: Duration) -> Option<Secret>;
-
-    /// Launches the machine `plan` describes with the join token `token`, through the
-    /// provider it names.
-    fn acquire(&self, plan: &AcquirePlan, token: Secret) -> Acquired;
+    /// Launches the machine `plan` describes, through the provider it names.
+    fn acquire(&self, plan: &AcquirePlan) -> Acquired;
 
     /// Terminates the machine `id` and reads it back.
     fn release(&self, id: &HostRef) -> Released;
-
-    /// Revokes every join token and credential of the host `host`; whether it did. A
-    /// host with none is revoked.
-    fn revoke(&self, host: &str) -> bool;
 
     /// Writes the hosts the registry refused to remove, all of them, so that they survive
     /// a restart.

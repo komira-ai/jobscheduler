@@ -33,17 +33,7 @@ impl Rig {
             "phase": "serving",
             "tainted": tainted,
         });
-        let agents = State(Arc::clone(&self.agents));
-        let body = Ok(Bytes::from(beat.to_string()));
-        let reply = super::super::heartbeat(
-            agents,
-            Extension(self.pool.clone()),
-            (None, None),
-            None,
-            body,
-        )
-        .await;
-        reply.map(|Json(reply)| reply)
+        beat_as(&self.agents, host, Bytes::from(beat.to_string())).await
     }
 
     /// The taint the registry's listing shows for `host`.
@@ -65,13 +55,13 @@ impl Rig {
 #[tokio::test]
 async fn an_agent_that_holds_no_taint_ends_the_taint_stored_from_its_earlier_session() {
     let first = rig("stale_taint_first");
-    let welcome = first.pooled("host-a", "burst").await.unwrap();
-    let reply = first.beat((&first.pool, None), "host-a", &welcome, residue());
+    let welcome = first.hello("host-a", "burst").await.unwrap();
+    let reply = first.beat("host-a", &welcome, residue());
     assert!(reply.await.unwrap().taint_ack);
     assert_eq!(first.binding("host-a")["taint_reason"], "residue");
 
     let second = Rig::second(&first, "stale_taint_second");
-    let hello = second.pooled("host-a", "burst").await.unwrap();
+    let hello = second.hello("host-a", "burst").await.unwrap();
     assert_eq!(second.listed_taint("host-a").unwrap().reason, "residue");
     let held = second.beat_saying("host-a", &hello, true).await.unwrap();
     assert_eq!(
@@ -82,7 +72,7 @@ async fn an_agent_that_holds_no_taint_ends_the_taint_stored_from_its_earlier_ses
 
     // The agent restarts: its last session goes silent past the grace, so the hello is taken.
     second.clock.advance(Duration::from_secs(60));
-    let again = second.pooled("host-a", "burst").await.unwrap();
+    let again = second.hello("host-a", "burst").await.unwrap();
     assert_ne!(again.epoch, hello.epoch);
     let lines = Lines::default();
     let capture = capture(&lines);
@@ -110,12 +100,12 @@ async fn an_agent_that_holds_no_taint_ends_the_taint_stored_from_its_earlier_ses
 #[tokio::test]
 async fn a_new_hello_keeps_the_taint_and_the_first_clean_beat_ends_it() {
     let rig = rig("stale_taint_hello");
-    let welcome = rig.pooled("host-a", "burst").await.unwrap();
-    let reply = rig.beat((&rig.pool, None), "host-a", &welcome, residue());
+    let welcome = rig.hello("host-a", "burst").await.unwrap();
+    let reply = rig.beat("host-a", &welcome, residue());
     assert!(reply.await.unwrap().taint_ack);
 
     rig.clock.advance(Duration::from_secs(60));
-    let again = rig.pooled("host-a", "burst").await.unwrap();
+    let again = rig.hello("host-a", "burst").await.unwrap();
     assert_ne!(again.epoch, welcome.epoch);
     assert_eq!(rig.listed_taint("host-a").unwrap().reason, "residue");
     let lines = Lines::default();
@@ -146,8 +136,8 @@ async fn a_new_hello_keeps_the_taint_and_the_first_clean_beat_ends_it() {
 #[tokio::test]
 async fn a_failed_commit_keeps_the_taint_an_agent_that_holds_none_would_end() {
     let rig = rig("stale_taint_fails");
-    let welcome = rig.pooled("host-a", "burst").await.unwrap();
-    let reply = rig.beat((&rig.pool, None), "host-a", &welcome, residue());
+    let welcome = rig.hello("host-a", "burst").await.unwrap();
+    let reply = rig.beat("host-a", &welcome, residue());
     assert!(reply.await.unwrap().taint_ack);
 
     let lines = Lines::default();

@@ -326,7 +326,14 @@ fn the_agent_takes_server_and_pool_from_the_file() {
     let (script, sent) = Script::new(vec![welcome(1)]);
     let mut sleeper = CountingSleeper::stopping_at(1);
     let ran = run(
-        &["--flags-file", path, "--token-file", "/nonexistent/token"],
+        &[
+            "--flags-file",
+            path,
+            "--host-cert",
+            "/nonexistent/host.crt",
+            "--host-key",
+            "/nonexistent/host.key",
+        ],
         &linux_host(),
         &ScriptConnector::of(script),
         &mut sleeper,

@@ -3,7 +3,7 @@
 //!
 //! The previous release's agent is a profile of the cell's agent ([`AgentProfile`]): the
 //! wire has not changed since v0.1.208, so what differs is the hello it sends (its agent
-//! version, its asking for a host credential and its capability set), which a test here
+//! version, its still naming the retired `accepts_host_credential` field and its capability set), which a test here
 //! holds to the recording of that release (`crates/js-agent/tests/agent/skew/v0.1.213.json`).
 //! The scenarios show the server taking both releases' agents at once and through an
 //! upgrade of each, host by host, while jobs run; one shows that a hello the server cannot
@@ -82,7 +82,7 @@ fn node(profile: AgentProfile) -> AgentNode {
     let spec = AgentSpec {
         host: HostId::new("h1").expect("host id"),
         pool: "macs".to_owned(),
-        join_token: "join-token-sim-0123456789-abcdefghij".to_owned(),
+        certificate: Some(HostId::new("h1").expect("host id")),
         capacity: Resources::new(8_000, 32 << 30, 0, None).expect("capacity"),
         capabilities: BTreeMap::from([("per-job".to_owned(), "true".to_owned())]),
         labels: BTreeMap::new(),
@@ -133,7 +133,7 @@ fn names(value: &Value) -> Vec<String> {
 /// v0.1.213 holds, field by field (the host's id, pool, shape and GPUs are the host's, and
 /// the recorded host has two), that the first heartbeat of its session has the recorded
 /// heartbeat's fields, and that the current profile's hello differs from it in the agent
-/// version, the credential flag, the capabilities and the agent process the previous release
+/// version, the retired credential flag, the capabilities and the agent process the previous release
 /// does not send. Catches a profile that drifts from
 /// the recording (a version, a capability or the credential flag changed), and a profile
 /// that changes nothing.

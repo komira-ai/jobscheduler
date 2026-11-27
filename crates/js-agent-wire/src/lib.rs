@@ -176,7 +176,6 @@
 mod caps;
 mod check;
 mod command;
-mod credential;
 pub mod dispatch;
 mod env;
 mod error;
@@ -202,7 +201,6 @@ pub use caps::{
     Caps, LOG_UPLOAD_CAPABILITY, ONE_JOB_CAPABILITY, ReadModel, bundle_capability, is_xcode_build,
 };
 pub use command::{Command, Isolation, JobSpec, Limits, Mount};
-pub use credential::HostCredential;
 pub use dispatch::{
     DISPATCH_CAPABILITY, DISPATCH_PATH, DispatchAck, DispatchKind, DispatchPoll, DispatchReply,
     Dispatched,

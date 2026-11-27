@@ -92,10 +92,6 @@ impl Transport for Watched {
         }
         Ok(answer)
     }
-
-    fn adopt_credential(&mut self, secret: &str) -> Result<(), String> {
-        self.inner.adopt_credential(secret)
-    }
 }
 
 /// The test's end of the poller's transports.
@@ -214,7 +210,7 @@ fn a_placed_job_reaches_a_polling_agent_through_the_route_and_runs_to_its_end() 
     let machine = Arc::new(FakeMachine::new());
     let agent = Agent::spawn_polling(
         server.url(),
-        server.join_file(),
+        server.identities(),
         &flags,
         linux_host,
         (heartbeats, Arc::new(Watching(shared))),

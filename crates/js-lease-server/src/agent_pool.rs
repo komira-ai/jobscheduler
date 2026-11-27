@@ -58,8 +58,8 @@ struct RawPool {
     regain_grace: Option<String>,
     // A class that books part of a host, served beside `class`.
     share_class: Option<String>,
-    // The pool's shared join tokens, as `--agent-token-file` holds them; absent, none (or
-    // the first pool's `--agent-token-file`).
+    // Accepted and not read: a host is admitted by its certificate only. A file that still
+    // names it starts, and the start says the key is ignored.
     join_token_file: Option<PathBuf>,
 }
 
@@ -107,12 +107,13 @@ struct RawShape {
     disk_bytes: u64,
 }
 
-/// A pool file as read: the pool, and the file of its shared join tokens when it names one.
+/// A pool file as read: the pool, and whether the file names `join_token_file`, a key that is
+/// accepted and not read.
 #[derive(Debug)]
 pub(crate) struct PoolFile {
     pub(crate) pool: PoolConfig,
-    /// The file's `join_token_file`.
-    pub(crate) join_token_file: Option<PathBuf>,
+    /// Whether the file names `join_token_file`.
+    pub(crate) names_join_token_file: bool,
 }
 
 /// Reads the pool file at `path`.
@@ -153,17 +154,18 @@ fn parse_with(
     parse_file(text, classes).map(|file| file.pool)
 }
 
-/// The pool and the token file a file's text describes, the class names read by `classes`.
+/// The pool a file's text describes, and whether it names `join_token_file`, the class names
+/// read by `classes`.
 fn parse_file(
     text: &str,
     classes: fn(&str) -> Result<ResourceClass, String>,
 ) -> Result<PoolFile, String> {
     let raw: RawPool = toml::from_str(text).map_err(|err| err.to_string())?;
-    let join_token_file = raw.join_token_file.clone();
+    let names_join_token_file = raw.join_token_file.is_some();
     let pool = pool_of(raw, classes)?;
     Ok(PoolFile {
         pool,
-        join_token_file,
+        names_join_token_file,
     })
 }
 
@@ -753,6 +755,20 @@ mod tests {
         let keyed = parse(&format!("max_whole_node = 2\n{old}")).unwrap_err();
         assert!(keyed.contains("whole-node class"), "{keyed}");
         assert_eq!(parse(MINIMAL).unwrap().whole_node(), None);
+    }
+
+    /// A pool file that names `join_token_file` still loads, whatever the path is (a path that
+    /// does not exist, or that nothing could read, is not looked at), and says that it named
+    /// it; a file that does not name it says so too. It catches a read of the retired key that
+    /// refuses a file for a path it no longer uses, and one that loses the note for the start.
+    #[test]
+    fn a_retired_join_token_file_key_loads_unread_and_is_noted() {
+        let named = with("join_token_file = \"/nowhere/at/all\"");
+        let plain = parse_file(MINIMAL, class).unwrap();
+        let kept = parse_file(&named, class).unwrap();
+        assert!(!plain.names_join_token_file);
+        assert!(kept.names_join_token_file);
+        assert_eq!(kept.pool, plain.pool);
     }
 
     /// A dedicated pool that allows fewer whole hosts than machines loads, and the

@@ -375,8 +375,9 @@ fn drop_kept(params: &Params) -> Done {
 /// that held nothing is left to the installer. A copy that cannot be put back fails the step
 /// (`restore_failed`, class environment) before the unit is touched, the copy and the record left
 /// for a rerun. Then the unit is restarted onto the files, and the agent's hello is waited for
-/// when the join token file (`token_file`) exists. A missing hello never fails the rollback (a
-/// host must not be wedged by it): it is told in the detail.
+/// when the lease server can be reached as the host (the flags file names its certificate and
+/// key). A missing hello never fails the rollback (a host must not be wedged by it): it is told
+/// in the detail.
 ///
 /// A `cutover` that never began the restart (a flags file refused, a step that never ran) left
 /// the unit on the config it has: the files are put back, and the unit is not touched. The
@@ -425,20 +426,17 @@ fn rollback_run(env: &Env<'_>, params: &Params) -> Result<Done, Done> {
         )));
     }
     let lease = (env.lease)(params);
-    let waiting = params.token_file.exists();
     let before = lease
         .as_ref()
         .ok()
-        .filter(|_| waiting)
         .and_then(|lease| session_of(lease.as_ref()));
     let stop_secs = params
         .rollback_secs
         .saturating_sub(START_WAIT_SECS + HELLO_WAIT_SECS + ROLLBACK_MARGIN_SECS);
     restart(env, &params.unit, stop_secs)?;
-    let hello = match (waiting, lease) {
-        (false, _) => "no join token file: not waiting for a hello".to_owned(),
-        (true, Err(why)) => format!("not waiting for a hello: {why}"),
-        (true, Ok(lease)) => hello_after(env, lease.as_ref(), before),
+    let hello = match lease {
+        Err(why) => format!("not waiting for a hello: {why}"),
+        Ok(lease) => hello_after(env, lease.as_ref(), before),
     };
     let stays = finish_rollback(&held, params, put.as_ref())?;
     Ok(success_with(format!(

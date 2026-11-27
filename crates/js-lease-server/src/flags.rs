@@ -80,7 +80,9 @@ pub(crate) fn beside_config(flag: &str) -> StartupError {
     let instead = match flag {
         "--token-file" => "set server.client_token_file".to_owned(),
         "--agent-pool-config" => "add a [[pool]] with an elastic provider".to_owned(),
-        "--agent-token-file" => "set join_token_file of the [[pool]]".to_owned(),
+        "--agent-token-file" | "--require-host-credential" => {
+            "drop it, as it does nothing: agents are admitted by host certificate only".to_owned()
+        }
         "--client-token" => "add a [[client]] table".to_owned(),
         other => format!(
             "set server.{}",

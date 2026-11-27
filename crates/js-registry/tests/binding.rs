@@ -58,7 +58,7 @@ fn lost_for_retention(fx: &Fixture) {
 }
 
 /// Asserts that a host id first admitted with an instance identity refuses a hello with
-/// the same token and another instance, or none: a holder of the pool's token cannot take
+/// the same token and another instance, or none: a holder of the credential cannot take
 /// over the id of a lost host that was bound to its machine. The same instance gets back
 /// in. Without the instance part of the binding the first two hellos are admitted.
 #[test]
@@ -82,7 +82,7 @@ fn instance_bound_host_refuses_another_instance_with_the_same_token() {
 }
 
 /// Asserts the stated limit of the binding, so a change to it is a decision: a host id
-/// first admitted without an instance identity is bound to the pool credential only, and
+/// first admitted without an instance identity is bound to the credential only, and
 /// a hello for it with the same token takes it over once it is lost, whatever instance it
 /// names. The binding is not upgraded by that hello: the first
 /// holder of the token without an instance still gets back in.
@@ -104,7 +104,7 @@ fn host_without_instance_is_bound_to_the_pool_credential_only() {
 /// Asserts that a host put back with a binding is held for that binding: the awaiting host
 /// refuses a hello from another credential, and from another instance with the right
 /// credential, and stays awaiting; the bound hello takes it. Without the binding on the
-/// awaiting record any holder of the pool's token takes the id.
+/// awaiting record any holder of the credential takes the id.
 #[test]
 fn a_restored_host_refuses_a_hello_that_does_not_match_its_binding() {
     let fx = fixture(4);
@@ -275,7 +275,7 @@ fn lost_retention_is_validated() {
     assert!(fx.registry.hosts().is_empty());
 }
 
-/// Asserts that a peer holding the same pool token, and knowing the host id and the
+/// Asserts that a peer holding the same credential, and knowing the host id and the
 /// epoch (both guessable), cannot heartbeat for an instance-bound host: with no session
 /// secret, an empty one or a guessed one it is refused as `session-mismatch`, and the
 /// host's state, phase, epoch and last-heard time are exactly as before, so the dead

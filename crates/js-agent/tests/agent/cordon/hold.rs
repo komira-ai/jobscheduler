@@ -302,7 +302,7 @@ fn a_reply_that_names_another_host_lifts_nothing() {
 
 /// Asserts how a failing server is told: the failed call names itself and whose fault it is
 /// (`server error` for an unreachable server, a refusal and an unknown host; `credential
-/// error` for the codes that mean the credential was not accepted), a failure after the
+/// error` for the codes that mean the host certificate was not accepted), a failure after the
 /// cordon was placed still tries to lift it, and a failure of the first cordon sends nothing
 /// more. It catches an error that blames the server for a bad credential, one that hides the
 /// call, and a failure that leaves the cordon we placed in force without an attempt to lift
@@ -349,18 +349,17 @@ fn a_server_error_ends_the_window_and_says_which_call_and_whose_fault() {
     assert_eq!(outcome, Outcome::Failed(text.to_owned()));
     assert_eq!(lines.all(), [CORDONED, IDLE]);
 
-    // The server does not accept the credential.
+    // The server does not accept the host certificate.
     for code in [
-        "host-credential-required",
-        "join-token-not-admitted",
-        "join-token-expired",
+        "host-certificate-required",
+        "certificate-host-mismatch",
         "http-401",
     ] {
         let (lease, lines) = (FakeLease::new(), Lines::default());
         lease.on(Kind::Cordon, 0, Effect::Fail(refused(code)));
         let outcome = run(&lease, &mut FakePace::new(), &plan(300, 600), &lines);
         let text = format!(
-            "credential error: cannot cordon the host: the server refused the credential ({code})"
+            "credential error: cannot cordon the host: the server refused the host certificate ({code})"
         );
         assert_eq!(outcome, Outcome::Failed(text));
     }

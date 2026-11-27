@@ -50,7 +50,7 @@
 //! A launch carries, besides the type, the region, the name and the ownership tags:
 //!
 //! - the boot payload the service rendered, as `user_data`, delivered as it is and never
-//!   printed (it holds the machine's join token): a [`js_elastic::Secret`] in the request,
+//!   printed (it can hold the network's secrets): a [`js_elastic::Secret`] in the request,
 //!   with no `Clone` or `PartialEq`, left out of every `Debug`, log line and error;
 //!   [`PAYLOAD_LIMIT`] is the size the provider accepts, and a larger payload is refused
 //!   before any call;

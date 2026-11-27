@@ -31,7 +31,7 @@ fn start(owned: &[String]) -> (String, String, usize) {
 /// Asserts that a files root equal to, inside or holding the state root, the scratch root
 /// or a mount root is refused with status 2, naming `--run-files-root` and the root, and
 /// that nothing is sent. It catches a sweep of the files root that would delete the taint
-/// marker and the host credential (state root), collide with a run's scratch directory
+/// marker (state root), collide with a run's scratch directory
 /// (scratch root), or a read-write mount that shows every run's secrets to a job.
 #[test]
 fn a_files_root_that_overlaps_another_root_is_refused() {

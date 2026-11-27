@@ -9,7 +9,7 @@ use js_lease_server::RecordsFile;
 use js_scaler::{HelloDimension, Millis, OfferCooldown, Phase, Record, Records, StoredOffer};
 use serde_json::{Value, json};
 
-use crate::scaler_support::{account, records_path, start, submit, text, text_with, token_in};
+use crate::scaler_support::{account, records_path, start, submit, text, text_with};
 use crate::support::{Harness, Scratch, T0};
 
 /// The one pool of `GET /v1/pools`.
@@ -50,10 +50,10 @@ fn record(pool: &str, (name, cloud): (&str, Option<&str>), phase: Phase, at: u64
 /// Asserts the status of a pool that has launched a machine: before it, no machine, no
 /// spend and no last launch; after it, the machine in `booting` with its offer, zone and
 /// price, the figures that count it, and the launch as accepted, at the time the record
-/// names; and no join token anywhere in the reply. It catches a status that is not wired
-/// to the scaler, and one that shows the token of the launch.
+/// names; and none of the launch's user data in the reply. It catches a status that is not
+/// wired to the scaler, and one that shows the payload of the launch.
 #[tokio::test]
-async fn a_launched_machine_is_in_the_status_and_its_token_is_not() {
+async fn a_launched_machine_is_in_the_status_and_its_user_data_is_not() {
     let scratch = Scratch::new("scaler_status_launch");
     let account = account(&scratch);
     let source = text(&scratch, "live", "initialise");
@@ -86,8 +86,10 @@ async fn a_launched_machine_is_in_the_status_and_its_token_is_not() {
         "at_ms": held.launched_at.as_millis(), "outcome": "accepted", "host": held.name
     });
     assert_eq!(after["last_launch"], launch);
-    let token = token_in(account.launches()[0].user_data().unwrap());
-    assert!(!body.contains(&token), "{body}");
+    let launches = account.launches();
+    let user_data = launches[0].user_data().unwrap();
+    assert!(!user_data.contains("--token-file"), "{user_data}");
+    assert!(!body.contains(user_data), "{body}");
 }
 
 /// Asserts what the status takes from the records of a restarted server: the machines that

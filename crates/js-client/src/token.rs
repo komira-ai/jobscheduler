@@ -54,8 +54,8 @@ pub(crate) fn owner_only(path: &Path, max: u64) -> Result<Vec<u8>, String> {
     }
 }
 
-/// The `Authorization` header value for `secret`, a credential the caller holds in memory
-/// (the host credential a welcome carried). It must be one run of printable ASCII, as the
+/// The `Authorization` header value for `secret`, a credential the caller holds in memory.
+/// It must be one run of printable ASCII, as the
 /// content of a token file must.
 ///
 /// # Errors

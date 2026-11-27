@@ -34,9 +34,6 @@ use standin::{
 /// The heartbeat interval the stand-in's welcome names, and the agent's hello interval.
 const INTERVAL: Duration = Duration::from_millis(1_000);
 
-/// The join token of every agent here.
-const JOIN: &str = "join-token-sim-0123456789-abcdefghij";
-
 /// How long a run that should outlast the test runs.
 const LONG_RUN_MS: u64 = 60_000;
 
@@ -61,7 +58,7 @@ fn spec() -> AgentSpec {
     AgentSpec {
         host: HostId::new("h000").expect("host id"),
         pool: POOL.to_owned(),
-        join_token: JOIN.to_owned(),
+        certificate: Some(HostId::new("h000").expect("host id")),
         capacity: Resources::new(8_000, 16 * GIB, 1, Some("nvidia-a100".to_owned()))
             .expect("capacity"),
         capabilities: BTreeMap::from([("isa".to_owned(), "x86-64-v3".to_owned())]),
@@ -153,9 +150,9 @@ fn runs(names: &[&str]) -> Vec<String> {
 
 /// The stand-in drops the first two hellos; the third, an interval after the second, is
 /// welcomed, and the heartbeats follow one interval apart from the welcome. Every call
-/// carries the join token, though the welcome offered a host credential. Catches an agent
-/// that gives up after a lost hello, hellos off the interval, beats off the interval, or
-/// keeps a credential it did not ask for.
+/// presents the certificate of host `h000`, though the welcome carries a host credential of
+/// a server before this release. Catches an agent that gives up after a lost hello, hellos
+/// off the interval, beats off the interval, or a call that presents no certificate.
 #[test]
 fn a_hello_is_resent_until_welcomed_and_heartbeats_follow_on_the_interval() {
     let script = Script::plain()
@@ -166,10 +163,9 @@ fn a_hello_is_resent_until_welcomed_and_heartbeats_follow_on_the_interval() {
     assert_eq!(server.hello_times(), [5, 1_005, 2_005]);
     assert_eq!(server.beat_times(), [3_015, 4_025, 5_035, 6_045]);
     for received in &server.received {
-        assert_eq!(received.bearer, JOIN);
+        assert_eq!(received.certificate, HostId::new("h000").ok());
     }
     for hello in server.hellos() {
-        assert!(!hello.accepts_host_credential);
         assert_eq!(hello.host_id, "h000");
         assert_eq!(hello.pool, POOL);
     }
@@ -706,7 +702,7 @@ fn a_call_addressed_to_the_agent_is_ignored() {
     let call = Msg::Request {
         id: CallId(0),
         route: Route::Hello,
-        bearer: JOIN.to_owned(),
+        certificate: None,
         body: String::new(),
     };
     let from = NodeId::new(SERVER);
@@ -738,7 +734,7 @@ fn a_started_run_is_unlisted_until_a_heartbeat_lists_it() {
 }
 
 /// The same script twice gives the same trace hash; the trace names every call and
-/// answer by route, number and status, and no line holds the join token or the session
+/// answer by route, number and status, and no line holds the session
 /// secret. Catches a trace that leaks a secret, or a node whose run depends on anything
 /// but the seed and the script.
 #[test]
@@ -768,7 +764,6 @@ fn the_trace_of_an_agent_run_replays_and_holds_no_secret() {
             .any(|line| line.contains("/v1/agent/heartbeat"))
     );
     for line in lines {
-        assert!(!line.contains(JOIN), "{line}");
         assert!(!line.contains(SESSION_PREFIX), "{line}");
         assert!(!line.contains("credential"), "{line}");
     }

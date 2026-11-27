@@ -98,7 +98,7 @@ struct Agent {
 }
 
 fn credential() -> Credential {
-    Credential::of_token("join-token")
+    Credential::of_token("test-credential")
 }
 
 impl Agent {

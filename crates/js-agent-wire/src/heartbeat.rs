@@ -211,7 +211,7 @@ pub struct Heartbeat {
     pub epoch: u64,
     /// The session secret from [`crate::Welcome::session`], the one issued at the hello
     /// that began this epoch. The server refuses a heartbeat without it, or with another,
-    /// as `session-mismatch` and changes nothing; the pool's join token is not proof of
+    /// as `session-mismatch` and changes nothing; the host's certificate is not proof of
     /// a session. A heartbeat body with no `session` decodes as an empty text so the rest
     /// of it can be read, and the server refuses it; [`Heartbeat::validate`] accepts an
     /// empty text for that reason and holds a present one to
