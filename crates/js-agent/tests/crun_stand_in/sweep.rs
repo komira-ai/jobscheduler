@@ -383,6 +383,41 @@ fn a_malformed_sidecar_is_left_alone_and_reported() {
     assert!(junk.is_file() && moved.is_file());
 }
 
+/// Proves a lease of this agent whose sidecar a later agent rewrote in a form this one does not
+/// read is left whole (directory, cgroup and sidecar) and given to the lifecycle as a lease
+/// left alone, with the version the file says, beside a good lease that is swept, and that a
+/// lease of another agent's name is not. Catches a lease left alone whose job's provider
+/// sources the lifecycle would release, not knowing it is there.
+#[test]
+fn a_lease_whose_sidecar_is_of_a_later_form_is_left_alone_and_named_to_the_lifecycle() {
+    let node = Node::new("sweep-later");
+    let mut dead = node.open();
+    let later = staged(&node, &mut dead, "r1-exit");
+    let gone = staged(&node, &mut dead, "r2-exit");
+    let text = std::fs::read_to_string(sidecar(&node, &later.0)).expect("read");
+    let rewritten = text.replace("\"version\":2", "\"version\":3,\"added\":true");
+    std::fs::write(sidecar(&node, &later.0), rewritten).expect("write");
+    std::fs::write(sidecar(&node, "js-0000000000000001-junk"), "not json").expect("write");
+
+    let second = node.open();
+    let swept = second.swept();
+    assert_eq!(swept.removed.len(), 1, "{swept:?}");
+    assert!(left_of(&node, &gone.0).is_empty());
+    assert_eq!(left_of(&node, &later.0), ["directory", "cgroup", "sidecar"]);
+    let unread = second.unread_leases();
+    assert_eq!(unread.len(), 1, "{unread:?}");
+    assert_eq!(unread[0].run_id, "r1-exit");
+    assert_eq!(unread[0].lease, later.0);
+    assert_eq!(unread[0].version, Some(3));
+    assert!(
+        unread[0]
+            .why
+            .starts_with("it is not a sidecar: unknown field `added`"),
+        "{}",
+        unread[0].why
+    );
+}
+
 /// Proves a run that cannot be recorded is refused and makes nothing: with the sidecar of
 /// its name there already (a lease of another process of the agent), the start fails naming
 /// the labels, and neither a directory nor a cgroup is made for it. Catches two leases of

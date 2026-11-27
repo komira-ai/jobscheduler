@@ -1,5 +1,5 @@
 //! The black-box tests of the released agent and server (`.github/workflows/js-blackbox.yml`)
-//! and their call from the release (`release.yml`'s job `blackbox`), read as they are in the
+//! and their call from the release (`release.yml`'s job `blackbox-linux`), read as they are in the
 //! repository.
 //!
 //! The workflow is called by the release and run by hand, never started by another event; it has
@@ -203,7 +203,7 @@ fn job_of<'a>(text: &'a str, name: &str) -> Vec<&'a str> {
 /// One line per way the release's call is not the call after `check-apt` that nothing waits
 /// for.
 fn call_problems(release: &str) -> Vec<String> {
-    let job = code_lines(&job_of(release, "blackbox"));
+    let job = code_lines(&job_of(release, "blackbox-linux"));
     let mut found = Vec::new();
     let mut want = |ok: bool, what: &str| {
         if !ok {
@@ -212,35 +212,42 @@ fn call_problems(release: &str) -> Vec<String> {
     };
     want(
         job.contains(&"    uses: ./.github/workflows/js-blackbox.yml"),
-        "blackbox does not call js-blackbox.yml",
+        "blackbox-linux does not call js-blackbox.yml",
     );
     want(
         job.contains(&"    needs: [plan, check-apt]"),
-        "blackbox does not need exactly plan and check-apt",
+        "blackbox-linux does not need exactly plan and check-apt",
     );
     want(
         job.contains(
             &"    if: ${{ !cancelled() && !failure() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' && needs.check-apt.result == 'success' }}",
         ),
-        "blackbox does not run only for a push to main that released, after check-apt passed",
+        "blackbox-linux does not run only for a push to main that released, after check-apt passed",
     );
     want(
         block(&job, "    permissions:") == ["contents: read"],
-        "blackbox's permissions are not contents: read",
+        "blackbox-linux's permissions are not contents: read",
     );
     want(
         block(&job, "    with:") == ["version: ${{ needs.plan.outputs.version }}"],
-        "blackbox is not given the plan's version alone",
+        "blackbox-linux is not given the plan's version alone",
     );
     want(
         !job.iter().any(|l| l.trim_start().starts_with("secrets:")),
-        "blackbox passes secrets",
+        "blackbox-linux passes secrets",
     );
     let waiting: Vec<&str> = release
         .lines()
-        .filter(|l| l.trim_start().starts_with("needs:") && l.contains("blackbox"))
+        .filter(|l| {
+            l.trim_start().starts_with("needs:")
+                && l.split([' ', '[', ']', ','])
+                    .any(|name| name == "blackbox-linux")
+        })
         .collect();
-    want(waiting.is_empty(), "a job of the release needs blackbox");
+    want(
+        waiting.is_empty(),
+        "a job of the release needs blackbox-linux",
+    );
     found
 }
 
@@ -402,8 +409,8 @@ fn each_way_of_leaving_the_calls_shape_is_named() {
             "does not call js-blackbox.yml",
         ),
         (
-            "  blackbox:\n    needs: [plan, check-apt]\n",
-            "  blackbox:\n    needs: [plan, publish]\n",
+            "  blackbox-linux:\n    needs: [plan, check-apt]\n",
+            "  blackbox-linux:\n    needs: [plan, publish]\n",
             "does not need exactly plan and check-apt",
         ),
         (
@@ -428,8 +435,8 @@ fn each_way_of_leaving_the_calls_shape_is_named() {
         ),
         (
             "  deployed:\n    needs: [turn, ",
-            "  deployed:\n    needs: [blackbox, turn, ",
-            "a job of the release needs blackbox",
+            "  deployed:\n    needs: [blackbox-linux, turn, ",
+            "a job of the release needs blackbox-linux",
         ),
     ];
     for (old, new, said) in table {

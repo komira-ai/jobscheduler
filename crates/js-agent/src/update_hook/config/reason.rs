@@ -27,6 +27,12 @@ pub enum Reason {
     NoHello,
     /// The lease server could not be asked, or refused to answer.
     LeaseUnreachable,
+    /// `verify` of an update whose files did not change, so that `cutover` restarted nothing:
+    /// the agent's unit is not running.
+    AgentDown,
+    /// `verify` of an update whose files did not change: the agent's unit runs, and the lease
+    /// server did not show the host `live` within the bound.
+    AgentNotLive,
     /// `cleanup` before a `verify` succeeded.
     NotVerified,
     /// The copy of the files the package replaces could not be made, or a copy could not be
@@ -38,7 +44,7 @@ pub enum Reason {
 
 impl Reason {
     /// Every reason.
-    pub const ALL: [Reason; 12] = [
+    pub const ALL: [Reason; 14] = [
         Reason::BadArgs,
         Reason::BadParams,
         Reason::Locked,
@@ -48,6 +54,8 @@ impl Reason {
         Reason::StartFailed,
         Reason::NoHello,
         Reason::LeaseUnreachable,
+        Reason::AgentDown,
+        Reason::AgentNotLive,
         Reason::NotVerified,
         Reason::KeepFailed,
         Reason::RestoreFailed,
@@ -66,6 +74,8 @@ impl Reason {
             Reason::StartFailed => "start_failed",
             Reason::NoHello => "no_hello",
             Reason::LeaseUnreachable => "lease_unreachable",
+            Reason::AgentDown => "agent_down",
+            Reason::AgentNotLive => "agent_not_live",
             Reason::NotVerified => "not_verified",
             Reason::KeepFailed => "keep_failed",
             Reason::RestoreFailed => "restore_failed",
