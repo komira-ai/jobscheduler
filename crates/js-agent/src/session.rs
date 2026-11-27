@@ -29,17 +29,38 @@
 //!
 //! - 200: the work went through. A welcome or a heartbeat reply that does not decode or
 //!   validate is treated as a failed exchange, not trusted.
-//! - Fatal: 401, every 4xx but 408, 409 and 429, and every 403 but `session-mismatch` and
-//!   `pool-full`. The same message will be refused again however long the agent waits,
-//!   so the session ends with the status and the server's code ([`Fatal`]) and the
-//!   program exits 2. These are the refusals that name something only the operator can
-//!   change: the token (401), the pool (`unknown-pool`), the shape the pool accepts
-//!   (`shape-not-accepted`; the refusal names the condition under `reason`, and the
-//!   agent prints it), the host contract of an execution mode (`host-contract`,
-//!   `execution-mismatch`; the refusal names the capability at fault), the credential the host id was admitted with (`host-bound`),
-//!   the pool's static host list (`host-listed`), and a message the server cannot read or
-//!   serve (`invalid-hello`, `invalid-heartbeat`, `unsupported-protocol`,
-//!   `body-too-large`). The operator fixes the cause and restarts the agent.
+//! - Fatal: only the answers that name something an operator must change. The same message
+//!   will be refused again however long the agent waits, so the session ends with the
+//!   status and the server's code ([`Fatal`]) and the program exits 2. They are, each from
+//!   the server's refusals of a hello or a heartbeat:
+//!   - 401, with any code: the server holds no such bearer (a revoked or mistyped token, a
+//!     credential it never issued). A server that could not read its store of bearers
+//!     answers 503, which is retried, so a 401 is the server's word that the token is wrong.
+//!   - 403 `unknown-pool` (the server serves no such pool), `host-bound` (the host id was
+//!     admitted with another credential), `host-listed` (the operator lists the id in a
+//!     static pool), `shape-not-accepted` (the pool does not take the host's shape; the
+//!     refusal names the condition under `reason`, and the agent prints it),
+//!     `host-contract` and `execution-mismatch` (the host lacks what the pool's execution
+//!     mode requires; the refusal names the capability at fault): the pool's settings or the
+//!     host's flags must change.
+//!   - 403 `join-token-expired`, `join-token-used`, `join-token-instance`,
+//!     `join-token-not-admitted` and `join-token-credential-required`: the one-time token
+//!     cannot admit this host (past its time, spent on another host, bound to another
+//!     instance, not the token that registered the host, or the server requires a kept
+//!     credential and the agent has no state root to keep one in); a new token or a state
+//!     root is the operator's to give.
+//!   - 400 `unsupported-protocol`: the server speaks no protocol major the agent does; one
+//!     of the two must be updated.
+//!
+//!   The operator fixes the cause and the agent's supervisor starts it again. An agent that
+//!   runs jobs leaves them running for its next process to adopt (see [`crate::drive`]).
+//! - Every other 4xx is retried like a 5xx (below), and the session is kept: 404, 413
+//!   `body-too-large`, 422, a 400 `invalid-hello` or `invalid-heartbeat`, a 403 with any other
+//!   code. A server that was rolled back, a request routed to the wrong service, or a release
+//!   that is deployed to some instances and not yet to others answers them for a while and
+//!   then stops; the agent checks every message against the wire's rules before it sends it,
+//!   so a server that refuses a checked message as unreadable disagrees with the agent about
+//!   the wire, which a deploy settles, not the operator of the host.
 //! - 409 to a heartbeat (`stale-epoch`, `unknown-host`, `host-lost`), and 403
 //!   `session-mismatch` to one: the server no longer holds this session. A server of this
 //!   release serves any beat on any instance from its store, so these come only from an older
@@ -47,11 +68,11 @@
 //!   accepted: a heartbeat refused straight after a hello backs off like any failure, so
 //!   a server that welcomes and then refuses is not asked in a loop.
 //! - 403 `pool-full` to a hello, 409 to a hello (`host-live`: the old session of this
-//!   host id is still within its grace), 408, 429, 5xx, anything unexpected, and a server
-//!   that cannot be reached: wait ([`Backoff`]: doubling, capped, jittered, at least the
-//!   `Retry-After` the server gave, up to a bound) and try the same message again. A pool
-//!   is full until a host leaves it, so a full pool is a condition that passes, and the
-//!   agent joins when it does.
+//!   host id is still within its grace), 408, 429, 5xx, every 4xx that is not fatal, anything
+//!   unexpected, and a server that cannot be reached: wait ([`Backoff`]: doubling, capped,
+//!   jittered, at least the `Retry-After` the server gave, up to a bound) and try the same
+//!   message again. A pool is full until a host leaves it, so a full pool is a condition that
+//!   passes, and the agent joins when it does.
 //!
 //! The run of failures ends with an accepted heartbeat, and with a welcome, so the first
 //! heartbeat that fails after a long outage of the hello waits the shortest time and not
@@ -168,10 +189,10 @@
 //! A session given an [`Outbox`] ([`Session::with_usage`]) tells it the heartbeat interval
 //! when it registers (the window the worker samples at) and puts what it holds in the next
 //! heartbeat as `load`. It never reads a cgroup file. The outbox is told how the beat went:
-//! 2xx is delivered; a transport error, a conflict, 408, 429, 5xx and a message that was
-//! never sent are failed (the minutes ride on a later beat, once); any other 4xx, which the
-//! session also ends on, is refused (the minutes are dropped: the same bytes would be refused
-//! again for ever). A transport error is also what a beat the server processed but whose
+//! 2xx is delivered; a transport error, a conflict, every answer the session retries and a
+//! message that was never sent are failed (the minutes ride on a later beat, once); a fatal
+//! answer, which the session ends on, is refused (the minutes are dropped: no later beat of
+//! this process carries them). A transport error is also what a beat the server processed but whose
 //! reply was lost looks like, so delivery is at least once: the minutes are sent again and
 //! the server dedupes by (lease, minute). The draining beat of [`Session::drain`] carries the load too, so the last
 //! minutes of leases that just ended are not left behind.
@@ -204,9 +225,11 @@ use crate::worker::{Delivery, Parked, Snapshot, Worker};
 mod fatal;
 mod note;
 mod reason;
+mod verdict;
 pub use fatal::Fatal;
 pub use note::Note;
 pub use reason::{CredentialState, Reason};
+use verdict::{Verdict, verdict};
 
 /// The route of the hello.
 pub const HELLO_PATH: &str = "/v1/agent/hello";
@@ -259,29 +282,6 @@ pub struct Drain {
 struct Jobs<'a> {
     worker: &'a Worker,
     drain: Drain,
-}
-
-/// How an answer's status and code read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Verdict {
-    /// The message went through.
-    Done,
-    /// The server and the agent disagree about the session.
-    Conflict,
-    /// Try again later.
-    Retry,
-    /// Do not try again.
-    Fatal,
-}
-
-fn verdict(status: u16, code: &str) -> Verdict {
-    match (status, code) {
-        (200, _) => Verdict::Done,
-        (403, refusal::SESSION_MISMATCH) | (409, _) => Verdict::Conflict,
-        (403, refusal::POOL_FULL) | (408 | 429, _) => Verdict::Retry,
-        (400..=499, _) => Verdict::Fatal,
-        _ => Verdict::Retry,
-    }
 }
 
 /// Tells the outbox how the heartbeat that carried its load went (see the module
@@ -411,6 +411,12 @@ impl<'a> Session<'a> {
         let owner = rustix::process::geteuid().as_raw();
         let read = |root: &&Path| handover::read(root, owner);
         self.handover.as_ref().map_or(Handover::Absent, read)
+    }
+
+    /// Whether the next process of the agent can adopt the runs of this session: it was given
+    /// the state root to hand over in ([`Session::with_handover`]).
+    pub(crate) fn adoptable(&self) -> bool {
+        self.handover.is_some()
     }
 
     /// Asks the worker to park for a handover, waiting at most `wait` ([`Worker::park`]);
@@ -603,9 +609,10 @@ impl<'a> Session<'a> {
         self.jobs.iter().for_each(|jobs| jobs.worker.stop_all());
     }
 
-    /// The end after a refusal for good: stops the runs through the worker, and what it
-    /// cannot stop without it, bounded (see [`Worker::wind_down`]). The lines say what
-    /// could not be stopped; none for a session with no worker.
+    /// The end after a refusal for good of a session whose jobs no next process can adopt
+    /// (one given no state root, [`Session::with_handover`]): stops the runs through the
+    /// worker, and what it cannot stop without it, bounded (see [`Worker::wind_down`]). The
+    /// lines say what could not be stopped; none for a session with no worker.
     pub fn wind_down_jobs(&self) -> Vec<String> {
         let down = self.jobs.iter().flat_map(|jobs| jobs.worker.wind_down());
         down.collect()

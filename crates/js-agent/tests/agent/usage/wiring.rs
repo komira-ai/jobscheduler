@@ -89,11 +89,11 @@ fn a_load_rides_on_one_beat_only() {
 
 /// Asserts what each answer to a beat does to the minutes it carried. A 2xx delivers them
 /// (they are not given back). A transport error, a conflict (409, 403 `session-mismatch`),
-/// 408, 429 and 5xx keep them to ride on a later beat. Any other 4xx, `invalid-heartbeat`
-/// among them, which also ends the session, drops them and counts them: the same bytes
-/// would be refused again, so a refusal for another fault must not requeue for ever. It
-/// catches `delivered` forgotten on a 2xx (minutes resent for ever), `failed` called on a
-/// refusal (minutes requeued for ever), and minutes lost on an answer that asks for a retry.
+/// 408, 429, 5xx and every 4xx the session retries (400 `invalid-heartbeat`, 404, 413) keep
+/// them to ride on a later beat. A refusal that ends the session (401, 403 `host-bound`)
+/// drops them and counts them: no later beat of the process carries them. It catches
+/// `delivered` forgotten on a 2xx (minutes resent for ever), `failed` called on a refusal
+/// that ends the agent, and minutes lost on an answer the session retries.
 #[test]
 fn each_answer_settles_the_minutes_it_carried() {
     let down: Reply = Err("the server is down".to_owned());
@@ -114,10 +114,13 @@ fn each_answer_settles_the_minutes_it_carried() {
         (
             "400 invalid-heartbeat",
             refused(400, "invalid-heartbeat"),
-            0,
             1,
+            0,
         ),
+        ("404", refused(404, "not-found"), 1, 0),
+        ("413", refused(413, "body-too-large"), 1, 0),
         ("401", refused(401, "unauthorized"), 0, 1),
+        ("403 host-bound", refused(403, "host-bound"), 0, 1),
     ];
     for (name, answer, kept, dropped) in cases {
         let outbox = Arc::new(Outbox::new());

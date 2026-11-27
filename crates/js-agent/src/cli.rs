@@ -322,8 +322,10 @@ pub struct Cli {
     pub stop_grace: Option<u64>,
     /// How many seconds SIGTERM and SIGINT let the running jobs finish before the agent
     /// stops them. The agent announces that it drains at once, takes no new job, and sends
-    /// the results of the jobs as they end. By default the stop grace; at most 3600. Not with
-    /// `--no-jobs`.
+    /// the results of the jobs as they end. Also the longest a hand-over (a stop the update
+    /// hook asked for, or a refusal for good) waits for a start, stop or check under way before
+    /// it leaves the runs to the next process. By default the stop grace; at most 3600. Not
+    /// with `--no-jobs`.
     #[arg(long, value_name = "SECONDS")]
     pub drain_wait: Option<u64>,
     /// How many seconds the agent goes on running its jobs when it hears nothing from the

@@ -321,10 +321,11 @@ fn a_reply_that_finds_the_queue_gone_during_the_drain_ends_it_as_failed() {
     assert_eq!(phases(&sent), ["serving", "draining"]);
 }
 
-/// Asserts that a server that refuses the host for good while it drains ends the drain
-/// with the refusal and has the running job stopped before the agent leaves: the stop
-/// request comes with a job running, the first drain heartbeat is refused, and the job is
-/// stopped through the worker. It catches a drain that leaves a container running when the
+/// Asserts that a server that refuses the host for good while a session given no state root
+/// to hand over in drains ends the drain with the refusal and has the running job stopped
+/// before the agent leaves (no next process could adopt it): the stop request comes with a
+/// job running, the first drain heartbeat is refused, and the job is stopped through the
+/// worker. It catches a drain that leaves a container nobody can adopt running when the
 /// token is revoked during it.
 #[test]
 fn a_refusal_during_the_drain_stops_the_runs_and_keeps_its_status() {
