@@ -133,6 +133,7 @@ use crate::job_loss;
 use crate::job_store::ServerJobs;
 use crate::job_whole;
 use crate::logs::{self, LogGrants};
+use crate::metrics::AgentRoute;
 use crate::per_job::{self, JobReply};
 use crate::util::blocking;
 
@@ -291,7 +292,8 @@ async fn serve_hello_in(
     between: &(dyn Fn() + Sync),
 ) -> Result<Json<Welcome>, Refused> {
     let (who, one_time, pool, certified) = given;
-    let hello: Hello = decode(&read(body, refusal::INVALID_HELLO)?, refusal::INVALID_HELLO)?;
+    let body = read_counted(agents, AgentRoute::Hello, body, refusal::INVALID_HELLO)?;
+    let hello: Hello = decode(&body, refusal::INVALID_HELLO)?;
     // The host id is the first thing checked, as every later step names the host by it.
     let host = HostId::new(&hello.host_id).map_err(Refusal::BadHostId)?;
     hello
@@ -422,10 +424,13 @@ async fn heartbeat(
     peer: Peer,
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Json<HeartbeatReply>, Refused> {
-    let heartbeat: Heartbeat = decode(
-        &read(body, refusal::INVALID_HEARTBEAT)?,
+    let body = read_counted(
+        &agents,
+        AgentRoute::Heartbeat,
+        body,
         refusal::INVALID_HEARTBEAT,
     )?;
+    let heartbeat: Heartbeat = decode(&body, refusal::INVALID_HEARTBEAT)?;
     heartbeat
         .validate()
         .map_err(|err| Refused::of(&Refusal::Invalid(err)))?;
@@ -733,6 +738,22 @@ fn read(body: Result<Bytes, BytesRejection>, malformed: &'static str) -> Result<
         }
         _ => Refused::new(StatusCode::BAD_REQUEST, malformed),
     })
+}
+
+/// [`read`] for a hello or a heartbeat, a body over the cap counted under `route`
+/// (`js_agent_bodies_too_large_total`): the agent ends at that answer, so the server is where
+/// such bodies can be seen.
+fn read_counted(
+    agents: &Agents,
+    route: AgentRoute,
+    body: Result<Bytes, BytesRejection>,
+    malformed: &'static str,
+) -> Result<Bytes, Refused> {
+    let over = |rejection: &BytesRejection| rejection.status() == StatusCode::PAYLOAD_TOO_LARGE;
+    if body.as_ref().is_err_and(over) {
+        agents.meter().sink().agent_body_too_large(route);
+    }
+    read(body, malformed)
 }
 
 /// A message from JSON. A body that is not the message is a 400 with `malformed` and

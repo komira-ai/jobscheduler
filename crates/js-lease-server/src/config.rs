@@ -29,6 +29,7 @@ use crate::usage::UsageSink;
 use crate::usage_setup::{UsageSetup, usage_setup};
 
 mod agent_setup;
+pub(crate) mod backfill;
 mod cpu_slack;
 mod dispatch;
 mod estimate_feed;
@@ -203,6 +204,9 @@ pub struct Cli {
     /// placement engine's scoring settings.
     #[command(flatten)]
     pub tunings: Tunings,
+    /// The placement engine's backfill (`--backfill-bounds-enforced`, `--backfill-margin`).
+    #[command(flatten)]
+    pub backfill: backfill::BackfillFlags,
     /// Whether the placement engine learns a CPU and a memory profile for each job class from
     /// its runs' series: `off` (the default) learns nothing; `shadow` learns and logs a line per
     /// run it checks and a line per job the curve rule of `on` would place elsewhere, placing as
@@ -732,7 +736,7 @@ impl Config {
                 cpu: server.agents.cold_cpu_on(),
             },
             curves,
-            max_lease_wall: server.max_lease_wall,
+            backfill: server.backfill(),
             job_limits,
             jobs: server.agents.job_store(server.job_store_windows()),
             job_sources: JobSources::default(),
