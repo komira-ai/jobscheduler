@@ -24,6 +24,8 @@ mod cp_deploy_tests;
 mod desired;
 mod desired_tests;
 mod farm;
+mod farm_steps;
+mod farm_steps_tests;
 mod farm_tests;
 mod pkg_upload;
 mod pkg_upload_tests;

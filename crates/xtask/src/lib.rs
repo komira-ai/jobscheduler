@@ -6,13 +6,15 @@
 //!   HTTPS (or taken from the file the actions cache restored at `--cache`) and refused unless
 //!   its SHA-256 matches, before anything is unpacked or written; `--extract zst` is one
 //!   zstd-compressed file (buck2's release form), decompressed whole.
-//! - `farm-build --buck2 <path> --target <label> --patch <path> --summary <path> --repo
-//!   <owner/name> --run-id <id>` ([`farm`]): the build of the farm lane
-//!   (`.github/workflows/farm.yml`): refused unless buck2 has a worker property set; refused when
-//!   the generated build table is stale, with what `buildrules sync` changed written as a patch to
-//!   `--patch` and the command that applies it to the job summary `--summary`; then
-//!   `buck2 build <label>` with its progress in the log, failed unless its summary says `local: 0`
-//!   (every action ran on the build farm or came from its cache), and buck2's daemon stopped after.
+//! - `farm-workers --buck2 <path>` ([`farm::workers`]): the farm lane's first check
+//!   (`.github/workflows/farm.yml`): refused unless buck2 gives buildrules the farm's worker
+//!   property set.
+//! - `farm-table --buck2 <path> --buildrules <path> --patch <path> --summary <path> --repo
+//!   <owner/name> --run-id <id>` ([`farm::table`]): the farm lane's check of the generated build
+//!   table with the `buildrules` command line the lane built: refused when it is stale, with what
+//!   `buildrules sync` changed written as a patch to `--patch` and the command that applies it to
+//!   the job summary `--summary`. The lane's buck2 builds on the farm run through komira's
+//!   buck2-farm action, not through xtask.
 //! - `mac-farm --address <grpc://host:port> --properties <k=v,...> --scratch <dir> [--output
 //!   <path>]... [--env NAME=VALUE]... -- <cargo arguments>` ([`mac_farm`]): one Cargo command of
 //!   this checkout run on a Mac of the build farm as one REAPI action, with the checkout, the
@@ -228,7 +230,7 @@ pub enum Error {
     /// The determinism lint failed, or could not read the tree.
     #[error(transparent)]
     Determinism(#[from] determinism::Error),
-    /// The farm lane's build failed.
+    /// A check of the farm lane failed.
     #[error(transparent)]
     Farm(#[from] farm::Error),
     /// A Cargo command on a build farm Mac failed, or its outputs could not be fetched.
@@ -330,15 +332,22 @@ enum Verb {
         #[arg(long)]
         cache: Option<PathBuf>,
     },
-    /// Build a target with buck2 on the build farm, failing unless the generated build table is
-    /// fresh and every action ran there or came from its cache (the `farm` workflow's build step).
-    FarmBuild {
+    /// Fail unless buck2 gives buildrules the build farm's worker property set (the `farm`
+    /// workflow's first check, before any build).
+    FarmWorkers {
         /// The buck2 program.
         #[arg(long)]
         buck2: PathBuf,
-        /// The label to build, `//:ci` for the lane.
+    },
+    /// Fail unless the generated build table is fresh, handing over a stale table's fix as a
+    /// patch (the `farm` workflow's step between its two builds on the farm).
+    FarmTable {
+        /// The buck2 program, which `buildrules sync` is given.
         #[arg(long)]
-        target: String,
+        buck2: PathBuf,
+        /// The `buildrules` command line, built from the pinned buildrules cell.
+        #[arg(long)]
+        buildrules: PathBuf,
         /// Where a stale table's patch (what `buildrules sync` changed) is written.
         #[arg(long)]
         patch: PathBuf,
@@ -590,9 +599,10 @@ fn run(cli: Cli) -> Result<String, Error> {
                 )),
             }
         }
-        Verb::FarmBuild {
+        Verb::FarmWorkers { buck2 } => Ok(farm::workers(&buck2)?),
+        Verb::FarmTable {
             buck2,
-            target,
+            buildrules,
             patch,
             summary,
             repo,
@@ -604,9 +614,9 @@ fn run(cli: Cli) -> Result<String, Error> {
                 repo,
                 run_id,
             };
-            Ok(farm::build(
+            Ok(farm::table::ensure_fresh(
+                &buildrules,
                 &buck2,
-                &target,
                 &handoff,
                 &mut std::io::stderr(),
             )?)

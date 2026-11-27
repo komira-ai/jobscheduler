@@ -33,7 +33,7 @@ use lint::{Site, jobs, lint};
 use std::path::Path;
 
 /// Every pinned tool fetch of the repository: `<file>/<job>` and its `--cache` path.
-const EXPECTED: [(&str, &str, &str); 10] = [
+const EXPECTED: [(&str, &str, &str); 12] = [
     ("ci.yml", "lint", "$RUNNER_TEMP/pinned/zig.tar.xz"),
     (
         "ci.yml",
@@ -63,6 +63,8 @@ const EXPECTED: [(&str, &str, &str); 10] = [
         "$RUNNER_TEMP/pinned/cargo-nextest.tar.gz",
     ),
     ("farm.yml", "build", "$RUNNER_TEMP/pinned/buck2.zst"),
+    ("farm.yml", "build", "$RUNNER_TEMP/pinned/zig.tar.xz"),
+    ("farm.yml", "build", "$RUNNER_TEMP/pinned/komira.tar.gz"),
     (
         "release.yml",
         "unit-tests",

@@ -242,6 +242,20 @@ impl Harness {
         Self::over_at(scratch, config, clock, tls).await
     }
 
+    /// A server on `args` whose job store mints its ids from `ids`, over a store whose notices
+    /// from other servers it does not listen to ([`Config::without_notices`]): what it finds of
+    /// their writes, it finds at its own ticks, rechecks and heartbeats.
+    pub async fn deaf_with_ids(
+        scratch: Scratch,
+        args: Vec<OsString>,
+        ids: Arc<dyn js_jobs::IdSource>,
+    ) -> Self {
+        let clock = ManualClock::new(Timestamp::from_millis(T0));
+        let reads = Arc::new(StoreReads(clock.clone()));
+        let config = config(args).unwrap().with_job_sources(reads, ids);
+        Self::over_at(scratch, config.without_notices(), clock).await
+    }
+
     /// A server on the base flags with these connection limits.
     pub async fn limited(name: &str, limits: Limits) -> Self {
         let scratch = Scratch::new(name);

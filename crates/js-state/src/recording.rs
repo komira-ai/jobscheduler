@@ -1,7 +1,8 @@
-//! A [`Store`] that forwards to another and remembers every write it was asked for, and every
-//! read that names keys or the clock, so a test can assert which keys a component touched (and
-//! with what kind of operation) and what it read, after the fact. Test support: it lives here and not in `js-testkit` because that
-//! crate depends on no kbf crate, and a store wrapper needs this one.
+//! A [`Store`] that forwards to another and remembers every write it was asked for, every
+//! read that names keys or the clock and every notice it was asked to send, so a test can
+//! assert which keys a component touched (and with what kind of operation), what it read and
+//! what it told, after the fact. Test support: it lives here and not in `js-testkit` because
+//! that crate depends on no kbf crate, and a store wrapper needs this one.
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -9,8 +10,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use crate::clock::StoreTime;
 use crate::store::{Claim, Store, TxnRead};
 use crate::types::{
-    Changes, Commit, CommitStats, Conflict, Op, Revision, ScanPage, ScanRange, StoreError, Txn,
-    Versioned,
+    Changes, Commit, CommitStats, Conflict, Notice, Op, Revision, ScanPage, ScanRange, StoreError,
+    Txn, Versioned,
 };
 
 /// What a recorded write did to its key.
@@ -58,6 +59,7 @@ struct Log {
     writes: Vec<Write>,
     reads: Vec<Read>,
     reaps: usize,
+    notices: Vec<Notice>,
 }
 
 /// Forwards every call to the store underneath and records the writes and the reads ([`Read`]).
@@ -107,7 +109,13 @@ impl RecordingStore {
         self.log().reaps
     }
 
-    /// Forgets what was recorded so far: the writes, the reads and the reaps.
+    /// Every notice sent through this store ([`Store::notify`]), in the order sent.
+    #[must_use]
+    pub fn notices(&self) -> Vec<Notice> {
+        self.log().notices.clone()
+    }
+
+    /// Forgets what was recorded so far: the writes, the reads, the reaps and the notices.
     pub fn clear(&self) {
         *self.log() = Log::default();
     }
@@ -220,5 +228,10 @@ impl Store for RecordingStore {
     fn now(&self) -> Result<StoreTime, StoreError> {
         self.read(Read::Now);
         self.inner.now()
+    }
+
+    fn notify(&self, notices: &[Notice]) {
+        self.log().notices.extend_from_slice(notices);
+        self.inner.notify(notices);
     }
 }

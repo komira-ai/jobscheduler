@@ -6,15 +6,17 @@
 //! again. A host's node row (`node/<host>`) is not a job table: every heartbeat writes its
 //! host's row, and those writes alone leave a reading as it was.
 
+use std::collections::BTreeSet;
 use std::sync::PoisonError;
 use std::sync::atomic::Ordering;
 
-use js_state::{Commit, Conflict, Op, Revision, Store, StoreError, StoreTime, Txn};
+use js_state::{Commit, Conflict, Notice, Op, Revision, Store, StoreError, StoreTime, Txn};
 
 use super::JobStore;
 use crate::error::JobStoreError;
 use crate::ids::{IdSource, JobId};
 use crate::keys;
+use crate::wake::{Wake, wakes_of};
 
 /// How many rows of the store's feed one reading looks at past the head it last read: more
 /// than that since then counts as a change of the tables.
@@ -128,7 +130,8 @@ impl Step {
 impl<S: Store, I: IdSource> JobStore<S, I> {
     /// Sends `txn` to the store and counts it ([`JobStore::written`]): the one way this job
     /// store writes the job tables once it is made, but for [`JobStore::place_claimed`]. A commit
-    /// comes with the [`Step`] it made.
+    /// comes with the [`Step`] it made, and is told of ([`JobStore::tell`]) when it asks for a
+    /// wake.
     ///
     /// A guarded view ([`JobStore::guarded`]) adds the check of its node row to `txn`, and a
     /// conflict on that row is [`JobStoreError::NodeMoved`]. A job store that is not guarded
@@ -136,9 +139,21 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     pub(super) fn write_stepped(&self, txn: Txn) -> Result<Stepped, JobStoreError> {
         let txn = self.guard_txn(txn);
         let rows = row_count(&txn);
+        let wakes = wakes_of(&txn);
         let answer = self.store.txn(txn);
         let writes = self.writes.fetch_add(1, Ordering::SeqCst);
+        self.tell(matches!(answer, Ok(Ok(_))), &wakes);
         self.stepped(answer?, writes, rows)
+    }
+
+    /// Tells the other servers of the store what a commit asks them to look at again
+    /// (`wakes`, [`crate::Wake`]), when it `committed` and asks for anything: the notices go
+    /// out after the commit ([`Store::notify`]), best effort.
+    pub(super) fn tell(&self, committed: bool, wakes: &BTreeSet<Wake>) {
+        if committed && !wakes.is_empty() {
+            let notices: Vec<Notice> = wakes.iter().map(Wake::notice).collect();
+            self.store.notify(&notices);
+        }
     }
 
     /// [`JobStore::write_stepped`] of the transaction `build` makes from the store's clock as
@@ -153,14 +168,17 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         build: &mut dyn FnMut(StoreTime) -> Result<(Txn, T), JobStoreError>,
     ) -> Result<(T, Stepped), JobStoreError> {
         let (mut made, mut failed, mut rows) = (None, None, None);
+        let mut wakes = BTreeSet::new();
         let answer = self.store.txn_stamped(&mut |now| {
             let (txn, value) = build(now).map_err(|error| failed = Some(error)).ok()?;
             let txn = self.guard_txn(txn);
             rows = row_count(&txn);
+            wakes = wakes_of(&txn);
             made = Some(value);
             Some(txn)
         });
         let writes = self.writes.fetch_add(1, Ordering::SeqCst);
+        self.tell(matches!(answer, Ok(Some(Ok(_)))), &wakes);
         failed.map_or(Ok(()), Err)?;
         // `build` answered, so the store applied what it built.
         let declined = JobStoreError::Store(StoreError::Failed(DECLINED.to_owned()));
@@ -204,9 +222,17 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         while txns.peek().is_some() {
             let batch: Vec<Txn> = txns.by_ref().take(GROUP).collect();
             let sent = u64::try_from(batch.len()).unwrap_or(u64::MAX);
+            let wakes: Vec<BTreeSet<Wake>> = batch.iter().map(wakes_of).collect();
             let answers = self.store.apply_batch(batch);
             self.writes.fetch_add(sent, Ordering::SeqCst);
-            for answer in answers? {
+            let answers = answers?;
+            // Only the transactions that committed are told of.
+            let committed = answers
+                .iter()
+                .zip(wakes)
+                .filter(|(answer, _)| answer.is_ok());
+            self.tell(true, &committed.flat_map(|(_, told)| told).collect());
+            for answer in answers {
                 held.push(match answer {
                     Ok(_) => true,
                     Err(conflict) => self.refuse_moved(conflict).map(|_| false)?,

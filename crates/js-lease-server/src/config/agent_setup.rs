@@ -124,6 +124,19 @@ impl Config {
         self.agents.job_sources.ids = ServerIds::new(ids);
         self
     }
+
+    /// The same configuration with a store that does not listen to the other servers' notices
+    /// (`docs/design/multi-instance.md`, G16): the server finds what another server wrote at
+    /// its own ticks, rechecks and heartbeats alone, as a server of the release before does. For
+    /// a test whose barriers stand in one server's way and must not be raced by another's wake.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn without_notices(mut self) -> Self {
+        self.store
+            .iter_mut()
+            .for_each(|store| store.notices = false);
+        self
+    }
 }
 
 /// The registering side the flags name: `--agent-pool-config` is required (a server serves

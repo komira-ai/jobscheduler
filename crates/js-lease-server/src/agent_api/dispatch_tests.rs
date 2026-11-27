@@ -26,6 +26,9 @@ use crate::job_expiry::JobLimits;
 #[path = "dispatch_unbuilt_tests.rs"]
 mod unbuilt;
 
+#[path = "dispatch_notice_tests.rs"]
+mod notice;
+
 /// A bound no test reaches: a hold or a recheck a test does not end returns at it.
 const LONG: Duration = Duration::from_secs(60);
 

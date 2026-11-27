@@ -32,7 +32,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::sync::Arc;
 
-use js_state::postgres::{PostgresConfig, PostgresStore, reach};
+use js_state::postgres::{Listener, PostgresConfig, PostgresStore, reach};
 use js_state::sqlite::{Options, SqliteStore};
 use js_state::{Clock, LockRefused, Store, SystemClock, WriterLock, WriterTarget};
 use tracing::info;
@@ -53,6 +53,9 @@ pub(crate) struct ServerStore {
     names: StoreNames,
     /// Whether the store holds a file lock (SQLite) for as long as it is open.
     locked: bool,
+    /// The database of a store other servers share (Postgres), which this server listens to for
+    /// their notices ([`ServerStore::listener`]).
+    shared: Option<PostgresConfig>,
 }
 
 impl ServerStore {
@@ -68,13 +71,14 @@ impl ServerStore {
             clock,
             target,
             names,
+            notices,
         } = setting;
         match target {
             WriterTarget::Sqlite(file) => {
                 let lock = WriterLock::acquire(&file).map_err(|refused| names.refuse(refused))?;
                 Self::sqlite(&file, lock, clock, names)
             }
-            WriterTarget::Postgres(config) => Self::postgres(&config, clock, names),
+            WriterTarget::Postgres(config) => Self::postgres(&config, (clock, notices), names),
         }
     }
 
@@ -95,6 +99,7 @@ impl ServerStore {
             clock,
             target,
             names,
+            notices,
         } = setting;
         match target {
             WriterTarget::Sqlite(file) => {
@@ -102,7 +107,7 @@ impl ServerStore {
                 blocking(move || Self::sqlite(&file, lock, clock, names)).await
             }
             WriterTarget::Postgres(config) => {
-                blocking(move || Self::postgres(&config, clock, names)).await
+                blocking(move || Self::postgres(&config, (clock, notices), names)).await
             }
         }
     }
@@ -120,13 +125,15 @@ impl ServerStore {
             store: Arc::new(store),
             names,
             locked: true,
+            shared: None,
         })
     }
 
-    /// The Postgres database `config` names.
+    /// The Postgres database `config` names, listened to for the other servers' notices when
+    /// `notices`.
     fn postgres(
         config: &PostgresConfig,
-        clock: StoreClock,
+        (clock, notices): (StoreClock, bool),
         names: StoreNames,
     ) -> Result<Self, StartupError> {
         // The login first: a refusal of it is told by what to do about it, since the server's
@@ -142,6 +149,7 @@ impl ServerStore {
             store: Arc::new(store),
             names,
             locked: false,
+            shared: notices.then(|| config.clone()),
         })
     }
 
@@ -178,6 +186,14 @@ impl ServerStore {
     /// The store, shared.
     pub(crate) fn store(&self) -> Arc<dyn Store> {
         Arc::clone(&self.store)
+    }
+
+    /// A listener of the notices the servers of a shared store (Postgres) send on the job
+    /// store's channels ([`js_jobs::CHANNELS`]); `None` for a store this process alone writes,
+    /// which no other server tells anything.
+    pub(crate) fn listener(&self) -> Option<Listener> {
+        let config = self.shared.as_ref()?;
+        Some(Listener::new(config, &js_jobs::CHANNELS))
     }
 }
 
