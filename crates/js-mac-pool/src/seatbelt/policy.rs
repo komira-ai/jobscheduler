@@ -6,7 +6,7 @@ use js_bundle::ReadGrantKind;
 
 use super::allow::MacosMajor;
 use super::grant::{PinnedTree, ReadGrant};
-use super::net::Net;
+use super::net::{Net, Ports};
 use super::path::AbsPath;
 use super::selftest::Assurance;
 use super::trees::MountTrees;
@@ -118,6 +118,7 @@ pub struct Policy {
     mounts: BTreeSet<MountGrant>,
     trees: Option<MountTrees>,
     net: Net,
+    host_ports: Option<Ports>,
     read_model: ReadModel,
     allow: Option<AllowGrants>,
 }
@@ -196,6 +197,7 @@ impl Policy {
             mounts: layout.mounts.into_iter().collect(),
             trees: layout.trees,
             net: caps.net,
+            host_ports: None,
             read_model: caps.read_model,
             allow: None,
         };
@@ -269,6 +271,20 @@ impl Policy {
         self.homes.extend(narrowing.deny_homes);
         self.check()?;
         Ok(self)
+    }
+
+    /// This policy with `ports` of the host's loopback reachable by the run whatever its
+    /// network level: a job's host ports, which the agent's `--host-port` bounds, not its
+    /// network ceiling. The level stays as it is (narrowing never widens, so no level could
+    /// carry them at a ceiling of [`Net::Off`]); the profile adds
+    /// `(allow network* (remote ip "localhost:PORT"))` for each port under [`Net::Off`] and
+    /// [`Net::Ports`], and nothing at [`Net::Loopback`] and above, where loopback is not
+    /// filtered. A [`Narrowing`] applied after lowers the level and leaves these ports. Given
+    /// again, the ports are the ones given last.
+    #[must_use]
+    pub fn with_host_ports(mut self, ports: Ports) -> Self {
+        self.host_ports = Some(ports);
+        self
     }
 
     /// The network level.
@@ -361,6 +377,12 @@ impl Policy {
     pub(super) fn trees(&self) -> Option<&MountTrees> {
         self.trees.as_ref()
     }
+
+    /// The ports of the host's loopback the run reaches whatever its level
+    /// ([`Policy::with_host_ports`]), if any.
+    pub(super) fn host_ports(&self) -> Option<&Ports> {
+        self.host_ports.as_ref()
+    }
 }
 
 fn bounded(len: usize, what: &'static str) -> Result<(), PolicyError> {
@@ -374,7 +396,8 @@ fn bounded(len: usize, what: &'static str) -> Result<(), PolicyError> {
 /// deny: a level is met with the policy's level (the lower wins), the user-folder grant
 /// can be dropped, and paths can be added to the denies. There is no field
 /// that adds a grant or raises a level (the own home's read grant that follows the homes'
-/// denies gives back only what they took).
+/// denies gives back only what they took); a job's host ports are the one network grant
+/// outside the level, given by [`Policy::with_host_ports`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Narrowing {
     /// A level to meet with the policy's.

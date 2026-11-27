@@ -4,9 +4,13 @@
 //! - [`report`]: the machine-readable report; only a probe with an expected outcome can
 //!   fail, a probe whose answer is unknown reports what it saw.
 //! - [`child`]: the programs the probe runs inside a profile and, as the control, outside.
+//! - [`launchd`]: the plain parts of the launchd probe (the job's plist, the reader of `ps`,
+//!   the verdict).
 //! - `macos`: the probes (macOS only): `sandbox-exec`, deny profiles, network under the
-//!   off policy, `clonefile`, volumes, `proc_pid_rusage`, and the toolchain under a
-//!   profile built the design's way, each against a no-sandbox control.
+//!   off policy, `clonefile`, volumes, `proc_pid_rusage`, the resource limits, and the
+//!   toolchain under a profile built the design's way, each against a no-sandbox control;
+//!   and last, that a process group under a launchd job runs on with parent pid 1 after the
+//!   job's bootout.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -14,6 +18,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 pub mod child;
+pub mod launchd;
 #[cfg(target_os = "macos")]
 mod macos;
 pub mod parse;

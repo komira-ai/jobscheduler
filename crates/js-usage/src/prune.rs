@@ -19,18 +19,18 @@ const PAGE: NonZeroUsize = NonZeroUsize::MIN.saturating_add(255);
 pub struct PruneStats {
     /// Node rows looked at.
     pub scanned: u64,
-    /// Hour rows deleted.
+    /// Rows deleted: hours' packs and instance rows.
     pub deleted: u64,
     /// Rows left because they were rewritten between the scan and the delete.
     pub rewritten: u64,
-    /// Keys under the prefix that are not hour rows; left alone.
+    /// Keys under the prefix that are neither an hour's pack nor an instance row; left alone.
     pub unrecognized: u64,
 }
 
 impl NodeSeries<'_> {
-    /// Deletes every hour row whose last minute is before `now_wall_minute` less
-    /// [`NODE_RETENTION_MINUTES`]: the hour that holds the cutoff stays until it is
-    /// entirely older. Run it from the server's tick, about once a day; it does not rely
+    /// Deletes every row of an hour (its pack and its instance rows) whose last minute is
+    /// before `now_wall_minute` less [`NODE_RETENTION_MINUTES`]: the hour that holds the
+    /// cutoff stays until it is entirely older. Run it from the server's tick, about once a day; it does not rely
     /// on key expiry.
     ///
     /// # Errors

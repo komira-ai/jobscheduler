@@ -607,7 +607,8 @@ fn read_tunings(s: &mut Section) -> Result<Tunings, StartupError> {
 /// the flag reads its text; absent, `off`. With it `curve_hosts`, an array of host ids (absent:
 /// every host), and `curve_max_wait_seconds`, a whole number from 0 to 300 (absent: 30), the
 /// keys of `--curve-hosts` and `--curve-max-wait-seconds`, read and refused by the code the flags
-/// take ([`curve_hosts`] and [`curve_max_wait`]) in every mode, acting only under `on`.
+/// take ([`curve_hosts`] and [`curve_max_wait`]) in every mode, booking only under `on`
+/// (`shadow` judges the hosts `curve_hosts` names by curve, for its log line alone).
 fn read_curves(s: &mut Section) -> Result<CurveSetting, StartupError> {
     let text = s.string("placement_curves")?;
     let read = text.as_deref().map(parse_curves).transpose();

@@ -279,8 +279,7 @@ fn a_stored_mark_waits_for_its_hello_until_the_server_start_plus_the_grace() {
     let k = heard.tables.whole("k");
     let held = mark(&k, "a", (5_000, 65_000), None);
     let kept = heard.tables.jobs.put_mark(held).unwrap();
-    // Past `drain_after` from the submit (the fake store's clock moves with each commit), and
-    // before `claim_by`.
+    // Before `claim_by`, with `a` said hello: the stored mark is taken back as it is stored.
     heard.at(12_000);
     heard.pass(Some(&whole), &["a"], &recorder).unwrap();
     assert_eq!(heard.tables.jobs.get_mark(&k.id).unwrap(), Some(kept));
@@ -567,19 +566,25 @@ fn a_job_no_open_host_can_run_says_so() {
 
 /// Catches: a whole-host job told it waits for room, a detail that does not name the host
 /// being emptied, and a change of detail that moves the time or appends an event. On busy
-/// hosts `w` waits for a whole host from 1 s with none being emptied; at 20 s it marks `a`:
-/// the detail names `a`, the time stays 1 s and there is still one event.
+/// hosts `w` waits for a whole host from 1 s with none being emptied, a cap of no whole host
+/// stopping a mark; once the pool allows one, at 20 s it marks `a`: the detail names `a`,
+/// the time stays 1 s and there is still one event.
 #[test]
 fn a_whole_host_job_waits_for_a_whole_host_and_then_names_its_mark() {
     let rig = Rig::busy();
     let w = rig.tables.whole("w");
     let recorder = Recorder::default();
+    let capped = WholeNodeConfig {
+        max_whole_node: 0,
+        ..settings()
+    };
     rig.at(1_000);
-    rig.go(&recorder);
+    rig.pass(Some(&capped), &["a", "b"], &recorder).unwrap();
     let job = read(&rig, &w.id);
     assert_eq!(job.queue.code(), QueueCode::WaitingForWholeHost);
     assert_eq!(job.queue.detail(), "no whole host is free");
     assert_eq!(job.queue.since(), Some(store(1_000)));
+    assert_eq!(rig.tables.jobs.get_mark(&w.id).unwrap(), None);
     rig.at(20_000);
     rig.go(&recorder);
     let job = read(&rig, &w.id);

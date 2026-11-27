@@ -3,14 +3,19 @@
 //! from the ports a job declares (`ports`, forwarded from the host into the job).
 //!
 //! - The operator lists the host ports a job may name with `--host-port PORT` or `LO-HI`,
-//!   repeatable, at most [`MAX_ENTRIES`] entries ([`allowed`]); only the `crun` runtime takes
-//!   the flag. The job's own port is not bounded: it is in the job's network alone.
+//!   repeatable, at most [`MAX_ENTRIES`] entries ([`allowed`], [`HostPortFlags`]); the `crun`
+//!   runtime and the macOS build's native runtime take the flag. The job's own port is not
+//!   bounded on Linux: it is in the job's network alone.
 //! - The admission refuses a start that names a host port the runtime does not allow
 //!   (`input-not-allowed`, [`admit`]), with no I/O, before anything is made.
 //! - On Linux the `crun` runtime offers each one with a listener inside the job's network
 //!   namespace and a connection out of the agent's own ([`Forwarder`], with the namespace step
 //!   behind [`Listen`] and [`Kernel`] the one an agent runs). The job's init waits until each
 //!   job port listens before it starts the job's program (`js-init --wait-listen`).
+//! - On macOS a native job shares the host's loopback, so it reaches a host port at the host
+//!   port's own number (a remapped one is refused `host-port-remap-unsupported-here`), and
+//!   the run's Seatbelt profile allows a connect to each port it names
+//!   (`js_mac_pool::seatbelt::Policy::with_host_ports`); nothing listens for it.
 
 #[cfg(target_os = "linux")]
 mod forward;
@@ -38,6 +43,39 @@ pub enum FlagError {
     /// More than [`MAX_ENTRIES`] entries.
     #[error("--host-port: at most {MAX_ENTRIES} entries")]
     Many,
+}
+
+/// The `--host-port` flag, which both builds take: a Linux agent with the crun runtime and a
+/// macOS agent with the native runtime.
+#[derive(Debug, Clone, Default, clap::Args)]
+pub struct HostPortFlags {
+    /// A port of the host's loopback a job may reach (`host_ports`), `PORT` or `LO-HI`, each
+    /// from 1 to 65535; repeatable, at most 16. A job that names a host port not listed is
+    /// refused `input-not-allowed`, as is every job that names one when none is given. On
+    /// Linux a job reaches each host port it names at a port of its own loopback, whatever
+    /// its network level, through a listener the agent holds in the job's network namespace;
+    /// it needs the crun runtime. On macOS a native job reaches it at its own number on the
+    /// host's loopback, which its profile opens to that port alone, whatever its network level.
+    #[arg(long = "host-port", value_name = "PORT|LO-HI")]
+    pub host_port: Vec<String>,
+}
+
+impl HostPortFlags {
+    /// The flag with whether it was given: an agent that runs no job refuses it, and so does
+    /// a Linux agent that runs the container engine.
+    #[must_use]
+    pub fn given(&self) -> [(&'static str, bool); 1] {
+        [("--host-port", !self.host_port.is_empty())]
+    }
+
+    /// The host ports the entries allow ([`allowed`]).
+    ///
+    /// # Errors
+    ///
+    /// The [`FlagError`] of the entries.
+    pub fn allowed(&self) -> Result<Vec<PortRange>, FlagError> {
+        allowed(&self.host_port)
+    }
 }
 
 /// The host ports the `--host-port` entries `given` allow, each `PORT` or `LO-HI`, sorted and
@@ -135,6 +173,25 @@ mod flag_tests {
             FlagError::Entry("0".to_owned()).to_string(),
             "--host-port: not <PORT> or <LO-HI>, each from 1 to 65535, LO not above HI: \"0\""
         );
+    }
+
+    /// Proves the flag says it was given only with an entry, and reads its entries as
+    /// [`allowed`] does, its refusal included. Catches a `--no-jobs` agent or a container
+    /// engine that takes the flag unseen, and a flag read apart from its checks.
+    #[test]
+    fn the_flag_is_given_with_an_entry_and_read_as_its_entries() {
+        let none = HostPortFlags::default();
+        assert_eq!(none.given(), [("--host-port", false)]);
+        assert_eq!(none.allowed(), Ok(Vec::new()));
+        let two = HostPortFlags {
+            host_port: given(&["9000-9010", "80"]),
+        };
+        assert_eq!(two.given(), [("--host-port", true)]);
+        assert_eq!(two.allowed(), allowed(&given(&["80", "9000-9010"])));
+        let wrong = HostPortFlags {
+            host_port: given(&["0"]),
+        };
+        assert_eq!(wrong.allowed(), Err(FlagError::Entry("0".to_owned())));
     }
 
     /// Proves a start is admitted when every host port it names is in one of the ranges

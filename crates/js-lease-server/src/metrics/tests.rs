@@ -14,7 +14,7 @@ use axum::extract::ConnectInfo;
 use axum::http::{Request as HttpRequest, StatusCode};
 use js_elastic::{Acquired, Reason, Refusal, RefusalCode};
 use js_jobs::{Booked, JobEnd, JobId, JobState, NewJob, Output, StartFailure};
-use js_sched_placer::curves::CurveView;
+use js_sched_placer::curves::{CurveView, HostMemoryShadow, MemoryShadowView};
 use js_types::HostId;
 use tower::ServiceExt;
 
@@ -273,6 +273,7 @@ async fn without_the_job_tables_no_job_family_is_written() {
         jobs: None,
         hosts: Vec::new(),
         curves: None,
+        memory: None,
     };
     let text = render(&seen, &Recorder::default());
     assert!(!text.contains("js_jobs{"), "{text}");
@@ -302,6 +303,7 @@ async fn a_scrape_without_the_job_tables_reads_the_hosts_alone() {
         jobs: None,
         hosts: vec![host],
         curves: None,
+        memory: None,
     };
     assert_eq!(seen, expected);
 }
@@ -391,6 +393,7 @@ fn a_refusal_is_written_with_its_host_and_reason_labels() {
         jobs: None,
         hosts: Vec::new(),
         curves: None,
+        memory: None,
     };
     let text = render(&seen, &recorder);
     let line = "\njs_placement_refusals_total{host=\"h\",reason=\"cpu\"} 1\n";
@@ -409,6 +412,7 @@ fn the_pass_sink_counts_each_curve_wait_expiry_and_zero_is_written() {
         jobs: None,
         hosts: Vec::new(),
         curves: None,
+        memory: None,
     };
     let zero = "# TYPE js_curve_wait_expiries_total counter\njs_curve_wait_expiries_total 0\n";
     assert!(render(&seen, &recorder).contains(zero));
@@ -437,6 +441,7 @@ fn a_curve_view_is_written_as_its_classes_and_each_hosts_peak() {
         jobs: None,
         hosts: Vec::new(),
         curves: Some(view),
+        memory: None,
     };
     let text = render(&seen, &Recorder::default());
     let classes = "# TYPE js_curve_classes gauge\n\
@@ -462,6 +467,7 @@ fn the_curve_families_are_written_only_when_there_is_a_view() {
         jobs: None,
         hosts: Vec::new(),
         curves: None,
+        memory: None,
     };
     let text = render(&none, &Recorder::default());
     assert!(!text.contains("js_curve_classes"), "{text}");
@@ -471,6 +477,7 @@ fn the_curve_families_are_written_only_when_there_is_a_view() {
     );
     let empty = super::render::Snapshot {
         curves: Some(CurveView::default()),
+        memory: None,
         ..none
     };
     let text = render(&empty, &Recorder::default());
@@ -485,6 +492,98 @@ fn the_curve_families_are_written_only_when_there_is_a_view() {
         !text.contains("js_host_cpu_booked_peak_millicores{"),
         "{text}"
     );
+}
+
+/// Asserts the memory shadow's families of a scrape that read its view: the placements by
+/// verdict (2, 3 and 1, so a swap shows), the milliseconds the sooner ones would have gained,
+/// and for each host in host order its projected memory, its last reading (left out for a host
+/// with none), its comparisons, and those too low and by how much; and that a scrape with no view writes none of them. Catches a verdict given another's count, a
+/// reading written for a host that has none, and a family written while the shadow is off.
+#[test]
+fn a_memory_shadow_view_is_written_as_its_verdicts_and_each_hosts_projection() {
+    let seen = HostMemoryShadow {
+        projected_bytes: 3 << 30,
+        measured_bytes: Some(5 << 30),
+        checks: 4,
+        too_low: 1,
+        short_bytes: 1 << 30,
+    };
+    let view = MemoryShadowView {
+        same: 2,
+        sooner: 3,
+        later: 1,
+        sooner_ms: 45_000,
+        hosts: BTreeMap::from([
+            (HostId::new("host-b").unwrap(), HostMemoryShadow::default()),
+            (HostId::new("host-a").unwrap(), seen),
+        ]),
+    };
+    let none = super::render::Snapshot {
+        jobs: None,
+        hosts: Vec::new(),
+        curves: None,
+        memory: None,
+    };
+    let text = render(&none, &Recorder::default());
+    assert!(!text.contains("js_memory_curve"), "{text}");
+    assert!(!text.contains("js_host_memory_projected_bytes"), "{text}");
+    let seen = super::render::Snapshot {
+        memory: Some(view),
+        ..none
+    };
+    let text = render(&seen, &Recorder::default());
+    let wanted = [
+        "# TYPE js_memory_curve_placements_total counter\n\
+            js_memory_curve_placements_total{verdict=\"same\"} 2\n\
+            js_memory_curve_placements_total{verdict=\"sooner\"} 3\n\
+            js_memory_curve_placements_total{verdict=\"later\"} 1\n",
+        "# TYPE js_memory_curve_sooner_milliseconds_total counter\n\
+            js_memory_curve_sooner_milliseconds_total 45000\n",
+        "# TYPE js_host_memory_projected_bytes gauge\n\
+            js_host_memory_projected_bytes{host=\"host-a\"} 3221225472\n\
+            js_host_memory_projected_bytes{host=\"host-b\"} 0\n",
+        "# TYPE js_host_memory_measured_bytes gauge\n\
+            js_host_memory_measured_bytes{host=\"host-a\"} 5368709120\n# HELP",
+        "# TYPE js_host_memory_projection_checks_total counter\n\
+            js_host_memory_projection_checks_total{host=\"host-a\"} 4\n\
+            js_host_memory_projection_checks_total{host=\"host-b\"} 0\n",
+        "# TYPE js_host_memory_projection_low_total counter\n\
+            js_host_memory_projection_low_total{host=\"host-a\"} 1\n\
+            js_host_memory_projection_low_total{host=\"host-b\"} 0\n",
+        "# TYPE js_host_memory_projection_short_bytes_total counter\n\
+            js_host_memory_projection_short_bytes_total{host=\"host-a\"} 1073741824\n\
+            js_host_memory_projection_short_bytes_total{host=\"host-b\"} 0\n",
+    ];
+    for part in wanted {
+        assert!(text.contains(part), "{part}\n{text}");
+    }
+}
+
+/// Asserts that a scrape reads the placer's memory shadow view: over a server whose placer is at
+/// `shadow` the snapshot carries the view the placer gives (empty: nothing was walked), and over
+/// the fixture's placer, at `off`, none. Catches a scrape that never asks the placer for it.
+#[tokio::test]
+async fn a_scrape_reads_the_memory_shadow_view_of_a_placer_in_shadow() {
+    use js_sched_placer::engine::Settings;
+    use js_sched_placer::place::SchedPlacer;
+    use js_sched_placer::sizes::Curves;
+    let mut rig = crate::agent_api::job_rig::rig("metrics_memory_view", false);
+    rig.register("host-a", true);
+    let shared = shared_over(&rig);
+    let seen = snapshot(&shared, NonZeroUsize::MIN).await.unwrap();
+    assert_eq!(seen.memory, None);
+    let settings = Settings {
+        curves: Curves::Shadow,
+        ..Settings::default()
+    };
+    let placer = SchedPlacer::new(settings, rig.shared.clone());
+    drop(shared);
+    let agents = Arc::try_unwrap(rig.agents).ok().unwrap();
+    let agents = Arc::new(agents.with_placer(Arc::new(placer)));
+    let shared = Arc::new(Shared::new(parse_token(&TOKEN).unwrap(), agents));
+    let seen = snapshot(&shared, NonZeroUsize::MIN).await.unwrap();
+    assert_eq!(seen.memory, Some(MemoryShadowView::default()));
+    assert_eq!(seen.curves, None);
 }
 
 /// Asserts that a scrape reads the placer's curve view: over a server whose placer is at `on`
@@ -540,7 +639,10 @@ async fn get_metrics_at_on_answers_the_curve_classes_and_each_curve_hosts_peak()
         .unwrap();
     let placer = rig.agents.placer.clone().unwrap();
     // The run reports no usage, so it teaches no memory sample (0), but its class's profile.
-    assert_eq!(crate::job_sizes::begin(&placer, jobs).teach(), 0);
+    assert_eq!(
+        crate::job_sizes::begin(&placer, jobs).teach(),
+        crate::job_sizes::Taught::Read { classes: 0 }
+    );
     rig.place("new-live", "host-a");
     let agent = crate::agent_api::job_rig::FakeAgent::new("host-a");
     rig.beat(&agent).await.unwrap();
@@ -584,6 +686,7 @@ fn a_refusal_code_outside_the_label_rule_is_counted_as_other() {
         jobs: None,
         hosts: Vec::new(),
         curves: None,
+        memory: None,
     };
     let recorder = Recorder::default();
     let empty = render(&seen, &recorder);
@@ -626,6 +729,7 @@ fn a_pool_name_is_written_escaped() {
         jobs: None,
         hosts: Vec::new(),
         curves: None,
+        memory: None,
     };
     let text = render(&seen, &recorder);
     let line = "\njs_acquires_total{pool=\"a\\\"b\\nc\"} 1\n";

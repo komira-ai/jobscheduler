@@ -1,9 +1,8 @@
 //! The drain cost of a worker, for the worker a blocked whole-machine request holds, and
-//! the wait before it holds one and the deadline of the hold
-//! ([`Scheduler::with_whole_node`]); and the caps that keep whole-machine requests from
-//! taking a pool (`max_whole_node`, `max_draining`, `keep_for_ordinary`, the last
-//! capable worker of an older ordinary request), with the ceiling that falls when
-//! workers do.
+//! the deadline of the hold ([`Scheduler::with_whole_node`]); and the caps that keep
+//! whole-machine requests from taking a pool (`max_whole_node`, `max_draining`,
+//! `keep_for_ordinary`, the last capable worker of an older ordinary request), with the
+//! ceiling that falls when workers do.
 //!
 //! The pool the caps count is every registered worker that serves whole-machine leases:
 //! the scheduler has no pools of its own, so one ceiling covers them all.
@@ -64,8 +63,7 @@ use crate::backfill;
 use crate::servable::{Placed, Servable, serves};
 use tie::kept_first;
 
-/// Why a whole-machine request that fits nowhere holds no worker though it has waited
-/// out `drain_after` ([`Scheduler::whole_wait`]).
+/// Why a whole-machine request that fits nowhere holds no worker ([`Scheduler::whole_wait`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WholeWait {
     /// A cap of the pool stops a new mark.
@@ -200,24 +198,16 @@ impl Drain {
         }
     }
 
-    /// Whether `operation`, queued since `queued_at`, may hold a worker this round, and
-    /// the mark it had. `None` before `drain_after` has passed. A hold is never given up:
-    /// a mark past its deadline is kept as any other is, so a drain never ends while the
-    /// worker's work runs (whole-node.md section 4).
-    pub(super) fn turn(
-        &mut self,
-        operation: OperationId,
-        queued_at: FarmTime,
-        now: FarmTime,
-        cfg: &WholeNodeConfig,
-    ) -> Option<Turn> {
-        if now.as_millis() < queued_at.as_millis().saturating_add(cfg.drain_after_ms) {
-            return None;
-        }
-        Some(Turn {
+    /// What `operation` may hold this round: the mark it had and the workers barred to it
+    /// at `now`. Every round is its turn, however long it has been queued: the deprecated
+    /// `drain_after` is not read, so nothing waits before it holds a worker. A hold is
+    /// never given up either: a mark past its deadline is kept as any other is, so a drain
+    /// never ends while the worker's work runs (whole-node.md section 4).
+    pub(super) fn turn(&mut self, operation: OperationId, now: FarmTime) -> Turn {
+        Turn {
             kept: self.marks.remove(&operation),
             barred: self.barred(operation, now),
-        })
+        }
     }
 
     /// The mark on `worker` at `now`: the one kept, when it is on the same worker, else a
@@ -330,11 +320,10 @@ impl Scheduler {
         self.drain.marks.get(&operation)
     }
 
-    /// Why queued whole-machine `operation` holds no worker although it has waited out
-    /// `drain_after`, with whole-node settings on: the cap that stops it, or that every
-    /// worker it could hold is the last one of an older ordinary request. `None` when it
-    /// holds a worker, is placed, or has not yet reached its turn; as of the last
-    /// placement round.
+    /// Why queued whole-machine `operation` holds no worker, with whole-node settings on:
+    /// the cap that stops it, or that every worker it could hold is the last one of an
+    /// older ordinary request. `None` when it holds a worker, is placed, or no placement
+    /// round has seen it; as of the last placement round.
     #[must_use]
     pub fn whole_wait(&self, operation: OperationId) -> Option<WholeWait> {
         self.drain.waits.get(&operation).copied()
@@ -828,7 +817,6 @@ mod tests {
     /// the mark comes back whole, and the request is barred from nothing.
     #[test]
     fn a_turn_past_the_deadline_keeps_the_mark_and_bars_nothing() {
-        let cfg = WholeNodeConfig::dedicated(4);
         let op = OperationId(1);
         let mark = WholeMark {
             worker: WorkerId::new("a"),
@@ -838,14 +826,7 @@ mod tests {
         };
         let mut drain = Drain::default();
         drain.marks.insert(op, mark.clone());
-        let turn = drain
-            .turn(
-                op,
-                FarmTime::from_millis(0),
-                FarmTime::from_millis(1_000),
-                &cfg,
-            )
-            .unwrap();
+        let turn = drain.turn(op, FarmTime::from_millis(1_000));
         assert_eq!(turn.kept, Some(mark));
         assert!(turn.barred.is_empty());
         assert!(drain.bars.is_empty());
@@ -917,6 +898,7 @@ mod tests {
                 retry: false,
                 key_hash: 0,
             },
+            placement: crate::scheduler::Placement::default(),
         };
         let ends = s.lease_ends(&[(op, placed)]);
         let expected = BTreeMap::from([(LeaseId::new(1, 0), Some(105_000))]);

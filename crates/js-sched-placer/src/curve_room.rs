@@ -13,7 +13,9 @@
 //! number at every slot. This replaces the CPU axis of the store's capacity check and the
 //! scheduler's CPU test on that host; memory, disk, GPUs and the rest stay as they are. A host
 //! the settings do not book, and every host under [`Curves::Off`] and [`Curves::Shadow`], is
-//! judged as ever.
+//! judged as ever. Under [`Curves::Shadow`] the engine keeps the same live jobs and tables, and
+//! judges each flat placement round by them only to log the jobs the curve rule would place
+//! differently ([`shadow`]); nothing it places, books, commits or refuses reads them.
 //!
 //! A job allocated and not yet started is age 0. The engine learns each live job's class and
 //! start from the job table once a pass ([`SchedPlacer::read_live_curves`]); a job whose record
@@ -44,29 +46,34 @@ use crate::map;
 use crate::place::SchedPlacer;
 use crate::sizes::{Curves, JobSizes, class_name, millis};
 
-/// A live allocation on a host, as the host's table charges it.
+/// A live allocation on a host, as the host's table charges it, and as the memory shadow
+/// projects it.
 #[derive(Debug, Clone)]
 pub(super) struct LiveJob {
     /// The allocation, so a job placed again is read again.
-    allocation: AllocationId,
+    pub(super) allocation: AllocationId,
     /// Its host.
-    host: HostId,
+    pub(super) host: HostId,
     /// What its allocation books, in millicores: its flat number.
-    flat_millis: u64,
+    pub(super) flat_millis: u64,
+    /// What its allocation books of memory, in bytes: its flat memory booking.
+    pub(super) memory_bytes: u64,
     /// Its class, once its record is read, when it books by its class's curve: it left its CPU
     /// at 0 ([`leaves_cpu`]). A job that named its CPU is charged its flat number, as it was
     /// booked.
-    key: Option<Key>,
+    pub(super) key: Option<Key>,
+    /// Its class, once its record is read, when it left its memory at 0 ([`leaves_memory`]):
+    /// the memory shadow projects it by its class's memory curve. A job that named its memory is
+    /// projected at its flat memory booking.
+    pub(super) memory_key: Option<Key>,
     /// When it started, in milliseconds since the epoch, once it has.
-    started_ms: Option<u64>,
+    pub(super) started_ms: Option<u64>,
 }
 
 /// The CPU booking of a queued job that books by its class's curve.
 pub(super) struct Shaped {
     /// What it books at each slot.
     pub(super) curve: Curve,
-    /// Its class's name, for the line a wait bound that ran out logs.
-    pub(super) class: String,
 }
 
 /// What the live curve mode keeps beside the scheduler.
@@ -74,7 +81,7 @@ pub(super) struct Shaped {
 pub(super) struct CurveBook {
     /// The live allocations of the job table on hosts, as of the last pass, with what the
     /// engine read of their jobs.
-    live: BTreeMap<JobId, LiveJob>,
+    pub(super) live: BTreeMap<JobId, LiveJob>,
     /// Each queued job whose curve found no host, with the walk time of the first such round.
     waits: BTreeMap<JobId, FarmTime>,
     /// The queued jobs whose wait bound ran out: tested with their flat number from then on.
@@ -85,6 +92,10 @@ pub(super) struct CurveBook {
     tables: BTreeMap<HostId, HostTable>,
     /// The fullest booked slot of each curve host as the last walk ended.
     peaks: BTreeMap<HostId, u64>,
+    /// Under [`Curves::Shadow`], the queued jobs logged as placed by their curve while the flat
+    /// placement placed them nowhere: logged once while they wait, until placed or gone from the
+    /// queue ([`shadow`]).
+    shadowed: BTreeSet<JobId>,
 }
 
 /// A curve host's booked CPU at each slot.
@@ -105,16 +116,19 @@ impl HostTable {
         charged.saturating_add(self.residual)
     }
 
+    /// The first slot at which a job booking `booking` does not fit.
+    fn first_slot_over(&self, booking: &[u64]) -> Option<usize> {
+        let over =
+            |(slot, new): &(usize, &u64)| self.load(*slot).saturating_add(**new) > self.limit;
+        booking.iter().enumerate().find(over).map(|(slot, _)| slot)
+    }
+
     /// The first slot at which a job booking `booking` does not fit, as a refusal.
     fn first_over(&self, booking: &[u64]) -> Option<Refusal> {
-        let over = booking.iter().enumerate().find_map(|(slot, new)| {
-            let counted = self.load(slot);
-            (counted.saturating_add(*new) > self.limit).then_some((counted, *new))
-        });
-        over.map(|(counted, new)| Refusal {
+        self.first_slot_over(booking).map(|slot| Refusal {
             kind: RefusalKind::CpuCurve,
-            counted,
-            new,
+            counted: self.load(slot),
+            new: booking.get(slot).copied().unwrap_or(0),
             limit: self.limit,
             measured_cpu_millis: None,
         })
@@ -186,6 +200,15 @@ pub(super) fn leaves_cpu(job: &JobRecord) -> bool {
     }
 }
 
+/// Whether the queued `job` leaves its memory at 0, to be sized from its class's history: a job
+/// that names its memory is projected at it, and one that books the whole host is not projected.
+pub(super) fn leaves_memory(job: &JobRecord) -> bool {
+    match &job.spec.needs {
+        Needs::Shape(resources) => resources.memory_bytes() == 0,
+        Needs::WholeHost => false,
+    }
+}
+
 /// The hosts of a round that the curve rule leaves, and the booked CPU the pack limit reads
 /// on each curve host among them.
 pub(super) struct Curved<'a> {
@@ -207,10 +230,16 @@ impl Engine {
         (self.curves == Curves::On) & self.curve.hosts.books(host)
     }
 
+    /// Whether `host` has a table in a walk: the mode is on or shadow and the settings name it.
+    /// Under shadow the table is only judged by ([`shadow`]), never placed by.
+    fn judges_by_curve(&self, host: &HostId) -> bool {
+        (self.curves != Curves::Off) & self.curve.hosts.books(host)
+    }
+
     /// Whether `host` has room for `booked` but for its CPU, which the curve judges, when it is
-    /// a curve host of the walk; as the ledger says otherwise.
+    /// a curve host of the walk under [`Curves::On`]; as the ledger says otherwise.
     pub(super) fn room_fits(&self, host: &HostId, booked: Booked) -> bool {
-        if self.book.tables.contains_key(host) {
+        if (self.curves == Curves::On) & self.book.tables.contains_key(host) {
             self.room.fits_without_cpu(host, booked)
         } else {
             self.room.fits(host, booked)
@@ -256,29 +285,32 @@ impl Engine {
     /// Brings the live curve jobs to `live`, the live allocations of the job table: an entry
     /// whose allocation is gone (or placed again) is dropped, each share allocation not held is
     /// taken up, and the jobs whose start is not known are answered, to be read. Nothing under
-    /// [`Curves::Off`] and [`Curves::Shadow`].
+    /// [`Curves::Off`]; under [`Curves::Shadow`] the memory shadow projects them and the shadow of
+    /// the CPU curve judges by them, and only [`Curves::On`] charges their CPU.
     pub(super) fn sync_live_curves(&mut self, live: &[AllocationRecord]) -> Vec<JobId> {
-        if self.curves != Curves::On {
+        if self.curves == Curves::Off {
             return Vec::new();
         }
         let shares = live
             .iter()
             .filter(|allocation| allocation.step != AllocationStep::Freed);
-        let shares: BTreeMap<&JobId, (&AllocationRecord, u64)> = shares
+        let shares: BTreeMap<&JobId, (&AllocationRecord, u64, u64)> = shares
             .filter_map(|allocation| match allocation.booked {
-                Booked::Shape { cpu_millis, .. } => {
-                    Some((&allocation.job, (allocation, cpu_millis)))
-                }
+                Booked::Shape {
+                    cpu_millis,
+                    memory_bytes,
+                    ..
+                } => Some((&allocation.job, (allocation, cpu_millis, memory_bytes))),
                 Booked::WholeHost => None,
             })
             .collect();
         self.book.live.retain(|job, held| {
-            let same = |(allocation, _): &(&AllocationRecord, u64)| {
+            let same = |(allocation, _, _): &(&AllocationRecord, u64, u64)| {
                 allocation.allocation_id == held.allocation
             };
             shares.get(job).is_some_and(same)
         });
-        for (job, (allocation, flat_millis)) in shares {
+        for (job, (allocation, flat_millis, memory_bytes)) in shares {
             self.book
                 .live
                 .entry(job.clone())
@@ -286,7 +318,9 @@ impl Engine {
                     allocation: allocation.allocation_id,
                     host: allocation.host.clone(),
                     flat_millis,
+                    memory_bytes,
                     key: None,
+                    memory_key: None,
                     started_ms: None,
                 });
         }
@@ -301,42 +335,54 @@ impl Engine {
     /// Records what the record of a live job says: its class and when it started.
     fn read_live_curve(&mut self, job: &JobRecord) {
         let started = job.started_at.map(|at| millis(at.as_duration()));
+        let key = JobSizes::key_of(job);
         let held = self.book.live.get_mut(&job.id);
         held.into_iter().for_each(|held| {
-            held.key = leaves_cpu(job).then(|| JobSizes::key_of(job));
+            held.key = leaves_cpu(job).then(|| key.clone());
+            held.memory_key = leaves_memory(job).then(|| key.clone());
             held.started_ms = started;
         });
     }
 
     /// Builds the table of each of `hosts` that books by curve, as the walk at `now` finds it,
-    /// and forgets the table of every other host. The jobs the queue no longer holds leave the
-    /// wait bound's books.
+    /// and forgets the table of every other host; under [`Curves::Shadow`] the tables of the hosts
+    /// `on` would book by curve, to judge by. The jobs the queue no longer holds leave the wait
+    /// bound's books and the shadow's. The memory shadow begins its walk over the same hosts.
     pub(super) fn begin_curve_walk<'a>(
         &mut self,
         hosts: impl Iterator<Item = &'a HostId>,
         queued: &[JobRecord],
         now: FarmTime,
     ) {
+        let hosts: Vec<&HostId> = hosts.collect();
+        self.begin_memory_walk(&hosts, queued, now);
         let ids: BTreeSet<&JobId> = queued.iter().map(|job| &job.id).collect();
         self.book.waits.retain(|job, _| ids.contains(job));
         self.book.expired.retain(|job| ids.contains(job));
-        let curved = hosts.filter(|host| self.books_by_curve(host));
+        self.book.shadowed.retain(|job| ids.contains(job));
+        let curved = hosts.into_iter().filter(|host| self.judges_by_curve(host));
         let tables = curved.map(|host| (host.clone(), self.table_of(host, now)));
         self.book.tables = tables.collect();
+    }
+
+    /// The most `worker` may be booked: its cores times the CPU slack (0 for a worker the
+    /// scheduler does not know).
+    fn limit_of(&self, worker: &WorkerId) -> u64 {
+        let slack = u64::from(self.cpu_slack_permille);
+        let cores = self
+            .sched
+            .capacity(worker)
+            .map_or(0, |capacity| capacity.cpu_millis);
+        scale(cores, 1000 + slack, 1000)
     }
 
     /// The table of `host` as the walk at `now` finds it.
     fn table_of(&self, host: &HostId, now: FarmTime) -> HostTable {
         let worker = map::worker(host);
-        let slack = u64::from(self.cpu_slack_permille);
-        let cores = self
-            .sched
-            .capacity(&worker)
-            .map_or(0, |capacity| capacity.cpu_millis);
         let mut table = HostTable {
             charges: vec![0; CURVE_SLOTS],
             residual: 0,
-            limit: scale(cores, 1000 + slack, 1000),
+            limit: self.limit_of(&worker),
         };
         let mut flat_sum = 0u64;
         for held in self.book.live.values().filter(|held| held.host == *host) {
@@ -356,22 +402,26 @@ impl Engine {
     }
 
     /// `walker` with the curve its class books, when it books one: its job left its CPU at 0 (it
-    /// is `job`'s sized form), the mode is on, the class passes its four checks and the job's
-    /// wait bound has not run out.
+    /// is `job`'s sized form), the mode is on (or shadow, which only judges by it), the class
+    /// passes its four checks and the job's wait bound has not run out; and with its class's name
+    /// unless the mode is off.
     pub(super) fn shaped(&self, walker: Walker, job: &JobRecord, now: FarmTime) -> Walker {
         let own = leaves_cpu(job) & !self.book.expired.contains(&walker.job);
         let flat = walker.request.resources.cpu_millis;
         let key = JobSizes::key_of(job);
         let curve = own.then(|| self.sizes.curve_of(&key, flat, now)).flatten();
-        let curve = curve.map(|curve| Shaped {
+        let curve = curve.map(|curve| Shaped { curve });
+        let class = (self.curves != Curves::Off).then(|| class_name(job));
+        Walker {
             curve,
-            class: class_name(job),
-        });
-        Walker { curve, ..walker }
+            class,
+            ..walker
+        }
     }
 
-    /// The hosts of `free` the curve rule leaves `walker`: those that are no curve host of the
-    /// walk, and the curve hosts it fits at every slot. A curve host it does not fit is refused as
+    /// The hosts of `free` the curve rule leaves `walker` under [`Curves::On`] (every host of
+    /// `free` otherwise): those that are no curve host of the walk, and the curve hosts it fits
+    /// at every slot. A curve host it does not fit is refused as
     /// `cpu-curve`, with the first slot over the cap. A walker with a curve that fits none of
     /// the curve hosts starts its wait, and past the wait bound is tested again with its flat
     /// number at every slot, from then on ([`crate::curves::CurveSettings::max_wait`]).
@@ -381,9 +431,10 @@ impl Engine {
         free: Vec<&'a HostId>,
         now: FarmTime,
     ) -> Curved<'a> {
+        let on = self.curves == Curves::On;
         let (curved, mut hosts): (Vec<&HostId>, Vec<&HostId>) = free
             .into_iter()
-            .partition(|host| self.book.tables.contains_key(*host));
+            .partition(|host| on & self.book.tables.contains_key(*host));
         if curved.is_empty() {
             return Curved {
                 hosts,
@@ -398,9 +449,7 @@ impl Engine {
         if own.is_some() & !fitted.hosts.is_empty() {
             self.book.waits.remove(&walker.job);
         }
-        if let Some(own) = own.filter(|_| fitted.hosts.is_empty())
-            && self.wait_over(walker, own, now)
-        {
+        if own.is_some() & fitted.hosts.is_empty() && self.wait_over(walker, now) {
             fitted = self.fit_tables(&curved, &booking_of(None, flat));
         }
         for (host, refusal) in fitted.refused {
@@ -439,7 +488,7 @@ impl Engine {
     /// Notes that `walker`'s curve found no curve host at `now`, and whether it has found none
     /// for the wait bound: then the job is tested with its flat number from now on, counted once
     /// and logged once.
-    fn wait_over(&mut self, walker: &Walker, own: &Shaped, now: FarmTime) -> bool {
+    fn wait_over(&mut self, walker: &Walker, now: FarmTime) -> bool {
         let since = *self.book.waits.entry(walker.job.clone()).or_insert(now);
         let waited = now.as_millis().saturating_sub(since.as_millis());
         let over = u128::from(waited) >= self.curve.max_wait.as_millis();
@@ -449,7 +498,7 @@ impl Engine {
             info!(
                 target: "js_sched_placer::sizes::profile",
                 job = %walker.job,
-                class = %own.class,
+                class = %walker.class.as_deref().unwrap_or_default(),
                 waited_ms = waited,
                 "a job's curve found no host within the wait bound; it is tested with its flat number"
             );
@@ -469,10 +518,13 @@ impl Engine {
         }
     }
 
-    /// Adds `walker`, placed on `host`, to its table, charged at age 0, and forgets its wait.
+    /// Adds `walker`, placed on `host`, to its table, charged at age 0 (under [`Curves::Shadow`]
+    /// too, where the table follows the flat placements), and forgets its wait and whether the
+    /// shadow logged it while it waited.
     pub(super) fn placed_by_curve(&mut self, walker: &Walker, host: &HostId) {
         self.book.waits.remove(&walker.job);
         self.book.expired.remove(&walker.job);
+        self.book.shadowed.remove(&walker.job);
         let flat = walker.request.resources.cpu_millis;
         let curve = walker.curve.as_ref().map(|own| &own.curve);
         let charges = charges_of(curve, 0, flat);
@@ -483,8 +535,10 @@ impl Engine {
             .for_each(|table| table.add(&charges));
     }
 
-    /// Keeps the fullest booked slot of each curve host as the walk ended, for `/metrics`.
-    pub(super) fn end_curve_walk(&mut self) {
+    /// Keeps the fullest booked slot of each curve host as the walk ended, for `/metrics`, and
+    /// ends the memory shadow's walk at `now`.
+    pub(super) fn end_curve_walk(&mut self, now: FarmTime) {
+        self.end_memory_walk(now);
         let peaks = self.book.tables.iter();
         self.book.peaks = peaks
             .map(|(host, table)| (host.clone(), table.peak()))
@@ -544,6 +598,9 @@ impl SchedPlacer {
         self.engine().commit_capacity(host, capacity)
     }
 }
+
+#[path = "curve_shadow.rs"]
+pub(super) mod shadow;
 
 #[cfg(test)]
 #[path = "curve_room_tests.rs"]

@@ -54,14 +54,14 @@ fn a_class_that_passes_its_four_checks_books_its_curve_on_the_slots_of_its_burst
     assert_eq!(curve.peak(), 22_000);
 }
 
-/// Asserts when a class books no curve: under [`Curves::Off`] (it keeps no profile) and
-/// [`Curves::Shadow`] (it keeps them and books by none), before any host is known, for a class
-/// with no profile, for one with fewer than the 16 scored runs (23 runs score 15), and for one
-/// whose curve predicts no better than its level (check 2); the same class with 24 runs books a
-/// curve under [`Curves::On`] alone. Catches a curve booked outside the live mode, with no
-/// bounds, or while a check fails.
+/// Asserts when a class has no curve: under [`Curves::Off`] (it keeps no profile), before any
+/// host is known, for a class with no profile, for one with fewer than the 16 scored runs (23
+/// runs score 15), and for one whose curve predicts no better than its level (check 2); the same
+/// class with 24 runs has its curve under [`Curves::Shadow`], which only judges by it, and
+/// [`Curves::On`], which books it. Catches a curve kept with no profiles, with no bounds, or while
+/// a check fails, and a shadow that cannot judge by the curve `on` would book.
 #[test]
-fn a_curve_is_booked_only_under_on_for_a_class_that_passes_and_with_bounds_known() {
+fn a_curve_is_known_outside_off_for_a_class_that_passes_and_with_bounds_known() {
     let tables = Tables::new();
     let job = queued_of(&tables, "next", "burst");
     let key = JobSizes::key_of(&job);
@@ -71,7 +71,7 @@ fn a_curve_is_booked_only_under_on_for_a_class_that_passes_and_with_bounds_known
         teach(&mut sizes, &Tables::new(), ("burst", 24), &bursting());
         booked.push(sizes.curve_of(&key, 750, now()).is_some());
     }
-    assert_eq!(booked, [false, false, true]);
+    assert_eq!(booked, [false, true, true]);
 
     let mut unbounded = JobSizes::new().with_curves(Curves::On);
     teach(&mut unbounded, &Tables::new(), ("burst", 24), &bursting());

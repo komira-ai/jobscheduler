@@ -68,10 +68,11 @@ host:
 
 1. **A quiet host first.** If an available eligible host is already quiet (no lease, no placed run, no running job), the request takes it
    at once, subject to the caps (section 6). Choosing the host and placing nothing else on it commit under the table lock; the first
-   commit wins (5.10). This needs no wait and is never delayed by `drain_after`.
+   commit wins (5.10). This needs no wait.
 2. **An elastic machine second**, if the pool's hierarchy has an entry that can launch one now (section 7).
-3. **Otherwise a reservation**, once the request has waited `drain_after` (default zero: reserve at once, as kbf's whole-machine request
-   does today; a pool where whole-node requests are rare may set a delay so a host that would empty by itself is not drained).
+3. **Otherwise a reservation**, at once, in the first tick that sees the request, as kbf's whole-machine request does. Nothing delays it:
+   `drain_after`, the delay a pool could once set here, is deprecated. A pool file may still set it, and it is parsed and checked as
+   before, but the lease server warns at start that it does nothing and `js-sched` does not read it.
 
 **One request reserves exactly one host.** A reservation is a mark on a host in the scheduler's table: `reserved` for request R. A request
 holds at most one reservation and a host carries at most one. The host is chosen by the **drain cost**, smallest first:
@@ -93,7 +94,7 @@ request is then the pending lease the acquire made, the server presents it to th
 place and commits the host set aside for it), and `DELETE /v1/leases/{id}` of that pending lease is the cancel. A request without one is
 not queued: it is refused `no-capacity` while no host is quiet. Those lease routes are removed; a whole-host request is now a job whose needs name the whole host.*
 
-**Reservations survive a restart (D55).** *The lease server has no reservation ledger and no lease file: both are deleted, and a lease file left by an earlier release is neither read nor written. The marks of whole-host jobs are rows of the job store, as the paragraph below says; the state machine of `js-sched` (`scheduler/whole.rs`) keeps its state in memory, and the engine of `js-sched-placer` runs it from the job tables. A caller that keeps that state outside it puts it back with `restore_whole` (the queue time, the bars and the mark with its deadline and tail end; a give-up count passed in is ignored) and sets a hard bar from outside with `bar_whole` (`Bar::Until` or `Bar::ForLife`: the worker is neither marked for nor granted to that request, quiet or not; a failed prepare's `Bar::Backoff` stays the soft bar it was). `cancel_whole` ends an operation in any state, dropping its mark in the same call, `unplace_keeping_queued_at` puts a lease back without restarting `drain_after`, and `whole_marked_worker`, `whole_holder` and `whole_room` read the marks, holders and quiet workers. These are methods, not events.* In the design, a reservation is persisted in the lease file (5.16, [deployment.md](deployment.md)), in the same
+**Reservations survive a restart (D55).** *The lease server has no reservation ledger and no lease file: both are deleted, and a lease file left by an earlier release is neither read nor written. The marks of whole-host jobs are rows of the job store, as the paragraph below says; the state machine of `js-sched` (`scheduler/whole.rs`) keeps its state in memory, and the engine of `js-sched-placer` runs it from the job tables. A caller that keeps that state outside it puts it back with `restore_whole` (the queue time, the bars and the mark with its deadline and tail end; a give-up count passed in is ignored) and sets a hard bar from outside with `bar_whole` (`Bar::Until` or `Bar::ForLife`: the worker is neither marked for nor granted to that request, quiet or not; a failed prepare's `Bar::Backoff` stays the soft bar it was). `cancel_whole` ends an operation in any state, dropping its mark in the same call, `unplace_keeping_queued_at` puts a lease back keeping the request's queue time, and `whole_marked_worker`, `whole_holder` and `whole_room` read the marks, holders and quiet workers. These are methods, not events.* In the design, a reservation is persisted in the lease file (5.16, [deployment.md](deployment.md)), in the same
 atomic write as the leases and under the same single-writer, fsync and lock rules, before the scheduler acts on it (commit before act). A
 *reservation record* holds: the request id, the host, the time reserved, the deadline, the request's prepare-failure counter (`max_replace`; the older `give_ups` field is still in the record, written 0 and ignored when read) and its host exclusions with their end times; in the registry's ledger it also holds the request's place on the wait list and the instant it was first presented, and whether the host was quiet when it was set aside (an assigned mark drains nothing). The record outlives the reservation only
 while the request lives (it carries the counters of a request between reservations) and is deleted when the request is granted, refused,
@@ -140,6 +141,16 @@ it still moves to a quiet host if one turns up first. Whole-node placement reser
 tail), so the wait is the shortest the leases on the hosts allow. Stopping other tenants' work was considered and rejected (D48): a deadline that
 kills is a silent loss for a tenant who did nothing wrong, and it would let one consumer's request destroy another's results.
 
+**What a reservation is recorded as.** `js-sched` reports how each large request's reservation went, when asked
+(`Scheduler::recording_reservations`, drained by `Scheduler::take_reservations`; off by default, in memory only, never in a log record, row or
+wire message). A large request is a whole-machine request or an owner-worker action that fits no worker, or a blocked head that holds a worker.
+When it leaves the queue (started, cancelled, refused, ended by an earlier run's result, or taken by another scheduler of the store) it gets one
+record: the round it was first blocked in, the round it was first reserved in and the start the pick then expected, the start expected in the
+last round it held a worker, how many times its hold went to another worker (a move adds to the count and emits nothing), the core-seconds of
+backfill placed on the worker it held (booked cores from each lease's grant to its end, or to the record), and when and how it left the queue
+(for a start, its actual start: the round of its grant). Every lease that ends reports its placement estimate (its backfill duration, above) and
+whether it was placed as backfill. A request queued again after its lease was given up is a new reservation with a record of its own.
+
 **The host is quiet** when the scheduler's table shows no lease and no placed run on it. The scheduler then commits the whole-node lease
 (state `pending`), the host mark becomes `held`, and the lease follows section 5.
 
@@ -184,8 +195,8 @@ kills is a silent loss for a tenant who did nothing wrong, and it would let one 
    terminal start once and keeps the request's record until a lease of it is ready, the terminal start is refused, the request is
    cancelled while it waits, or it has gone the registry's idle horizon without a start. The registry keeps the host's state (committed,
    ready, restoring), checks the deadline only at its tick (so a ready report sent before that tick wins), reads the row of the cause and
-   hands the failure to the engine. A request whose prepare failed is queued again from when it was first queued, so it does not wait out
-   `drain_after` again. A start without a request id, and a booking put back after a restart,
+   hands the failure to the engine. A request whose prepare failed is queued again from when it was first queued, so it keeps its age in
+   the queue. A start without a request id, and a booking put back after a restart,
    stay the registry's. The registry writes these counts and bars into the reservation ledger (D55) from
    the engine, and a restart puts them back into it.*
 5. **Environment measurement is the consumer's, and runs inside `preparing`.** Whether the host is *quiet in the scheduler's sense* (no
@@ -237,8 +248,8 @@ held. A request waiting unreserved counts toward nothing.
 | `max_whole_node_per_consumer` | most hosts one authenticated consumer has whole at once in the pool (K7: the caller's identity, not a request field) | 1 for a mixed pool whose lease API authenticates per-consumer identities; `max_whole_node` (no limit) in a dedicated pool, and wherever the API has no per-consumer identity (the merged single-token service: every client is one consumer). An operator may set 1 explicitly; the single-token service does not enforce it (below). |
 | `keep_for_ordinary` | fewest hosts of a mixed pool that are neither reserved nor held, so ordinary work always has them | 1 for a mixed pool, 0 for a dedicated one |
 | `allow_last_capable` | whether a reservation may start on the last unreserved capable host of an ordinary request queued ahead of it | false |
-| `drain_after`, `drain_deadline`, `reserve_backoff`, `prepare_timeout`, `max_replace` | times and the retry cap of sections 3 to 5; `reserve_backoff` sizes only the failed-prepare exclusion; `drain_deadline` is when the host is expected drained, with no default of its own (the request's wall limit) and no effect on reaching it | see there |
-| `max_reserve_attempts` | deprecated: parsed and validated (zero is refused), ignored | none |
+| `drain_deadline`, `reserve_backoff`, `prepare_timeout`, `max_replace` | times and the retry cap of sections 3 to 5; `reserve_backoff` sizes only the failed-prepare exclusion; `drain_deadline` is when the host is expected drained, with no default of its own (the request's wall limit) and no effect on reaching it | see there |
+| `drain_after`, `max_reserve_attempts` | deprecated: parsed and validated (a bad duration, and zero attempts, are refused), named in a warning at start, ignored: nothing waits before a reservation (section 3) and nothing counts attempts (section 4) | none |
 
 **The effective ceiling** is `min(max_whole_node, capable_hosts - keep_for_ordinary)`, where `capable_hosts` are the pool's hosts that are
 capable for its ordinary class (tainted, denied and releasing hosts excluded; lost ones counted). A reservation starts only while whole
@@ -266,12 +277,13 @@ server nor the registry applies it, and there is no per-consumer cap in the sing
 rule does not read it as taking a host from the request that holds it.*
 
 *The view of the waiting (`js-sched`).* `whole_state(op)` is one value for a queued whole-machine request when the settings are on (`None`
-otherwise, and for a request that is not a queued whole-machine one): `Early` (before `drain_after`, with the time it may hold), `Holding` (the
+otherwise, and for a request that is not a queued whole-machine one). `Early` is never returned: it named a request still waiting out
+`drain_after`, that wait is removed, and the name (with `WholeReason::Early`) is kept so callers that match on it still build. The values: `Holding` (the
 worker, when the hold was made, its deadline, which is kept once passed, and whether the
 worker still has leases), `Barred` (some workers are barred to it, by a failed prepare's back-off or by `bar_whole`, and no other worker could be held: each barred worker and when its bar ends, the end of time for a bar for life),
-`Stopped` (the cap or the last-capable rule of `whole_wait`), `Queued` (past `drain_after`, nothing recorded: the workers it could hold are
-held by requests ahead, or no round has run since it became due or its bar ended; a status page may label it "Waiting") and `Unservable` (no live worker could ever run it, with `waiting`'s reason as text, to show, and as an `Unservable` value in `cause`, to match on, count or group by; also before `drain_after`). It reads what
-the last placement round recorded, except two things read at the time now: whether the request is before `drain_after`, and which bars have not ended (one that ended since the last round shows `Queued`, not `Barred`). `whole_summary()` gives the numbers the caps read between rounds:
+`Stopped` (the cap or the last-capable rule of `whole_wait`), `Queued` (nothing recorded: the workers it could hold are
+held by requests ahead, or no round has run since it was queued or its bar ended; a status page may label it "Waiting") and `Unservable` (no live worker could ever run it, with `waiting`'s reason as text, to show, and as an `Unservable` value in `cause`, to match on, count or group by). It reads what
+the last placement round recorded, except one thing read at the time now: which bars have not ended (one that ended since the last round shows `Queued`, not `Barred`). `whole_summary()` gives the numbers the caps read between rounds:
 workers held by whole leases, marks, those marks on a busy worker (what `max_draining` bounds), `whole` (their sum), the ceiling and its inputs
 (`max_whole_node`, capable hosts, `keep_for_ordinary`, `max_draining`), and how many queued whole-machine requests wait for each reason
 (`WholeReason`, ordered). It counts with the code admission uses, so it cannot show a number the caps do not enforce.

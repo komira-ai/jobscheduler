@@ -4,11 +4,10 @@
 //! value against its pool.
 //!
 //! A pool file's values are loaded into this type and put on the registry's pool. The
-//! registry reads the caps, `drain_after` and `drain_deadline` of its reservations
-//! (`whole::reserve`), `reserve_backoff`, `prepare_timeout` and
-//! `max_replace` (the prepare failure handling, and how long a request's record is
-//! kept) and the dedicated defaults for a pool that has none; the lease server also
-//! hands `prepare_timeout` to its job pass.
+//! registry reads the caps and `drain_deadline` of its reservations (`whole::reserve`),
+//! `reserve_backoff`, `prepare_timeout` and `max_replace` (the prepare failure handling,
+//! and how long a request's record is kept) and the dedicated defaults for a pool that has
+//! none; the lease server also hands `prepare_timeout` to its job pass.
 
 /// How long a host stays excluded for a request after a failed prepare: five minutes.
 pub const DEFAULT_RESERVE_BACKOFF_MS: u64 = 300_000;
@@ -37,7 +36,8 @@ pub struct WholeNodeConfig {
     /// Whether a reservation may start on the last capable host of an older ordinary
     /// request.
     pub allow_last_capable: bool,
-    /// How long a request waits before it reserves; zero reserves at once.
+    /// Deprecated and ignored: a request reserves a host at once, with no wait before it.
+    /// Still parsed and checked so that existing pool files load unchanged.
     pub drain_after_ms: u64,
     /// When a reservation's host is expected to be drained at the latest, counted from
     /// the reservation; `None` is the request's wall limit at use time. Reaching it

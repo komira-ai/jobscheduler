@@ -182,6 +182,16 @@ impl Ranker {
         model: &ScoreModel,
         candidates: &'a [WorkerId],
     ) -> Option<&'a WorkerId> {
+        self.place_explained(model, candidates)
+            .map(|(chosen, _)| chosen)
+    }
+
+    /// [`Ranker::place`], with the rule that decided the placement.
+    pub fn place_explained<'a>(
+        &mut self,
+        model: &ScoreModel,
+        candidates: &'a [WorkerId],
+    ) -> Option<(&'a WorkerId, DecidedBy)> {
         let (chosen, by) = self.scorer.choose_explained(model, candidates)?;
         self.attempts += 1;
         self.decisions.record(by);
@@ -199,7 +209,7 @@ impl Ranker {
         }
         self.placements
             .push((model.lease().lease.seq, chosen.clone()));
-        Some(chosen)
+        Some((chosen, by))
     }
 
     /// Calls with at least one candidate: the placements.
