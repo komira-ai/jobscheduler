@@ -33,7 +33,9 @@
 //! following a link, every real directory on the way held to the rules above, and checked
 //! through the descriptor it was opened as. The lock, the
 //! record and the temporary file are opened, renamed and synced relative to that descriptor,
-//! never by path again, so a path swapped for a link after the open redirects nothing.
+//! never by path again, so a path swapped for a link after the open redirects nothing. A hook
+//! that keeps files of its own in the directory reaches them the same way, through
+//! [`Held::dir_fd`].
 //!
 //! A save writes a temporary file in the directory, syncs it, renames it over the record and
 //! syncs the directory, so the record is the old one or the new one and never a part of
@@ -558,6 +560,15 @@ impl<D: Document> Held<D> {
             lock,
             record: PhantomData,
         })
+    }
+
+    /// The state directory as it was opened and checked, for a hook's own files in it: what is
+    /// made, read, renamed or removed relative to this descriptor (`openat`, `renameat`,
+    /// `unlinkat`) is in that directory, whatever its path names now. It is borrowed, so it is
+    /// used only while the lock is held.
+    #[must_use]
+    pub fn dir_fd(&self) -> BorrowedFd<'_> {
+        self.fd.as_fd()
     }
 
     /// The record's path.

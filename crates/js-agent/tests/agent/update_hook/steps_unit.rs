@@ -376,10 +376,7 @@ fn on_a_mac_a_changed_plist_is_recorded_and_reported_and_cutover_reads_no_cgroup
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
     assert_eq!(
         done.report.detail.as_deref(),
-        Some(
-            "the unit changes (js-agent.plist): cutover starts the agent on the new unit; \
-             the cutover drains the host first: the host does not run the agent under systemd"
-        )
+        Some("the unit changes (js-agent.plist): cutover starts the agent on the new unit")
     );
     assert_eq!(
         changed(rig.record().unwrap().unit_restart),

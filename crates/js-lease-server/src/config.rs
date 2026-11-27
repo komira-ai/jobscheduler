@@ -37,7 +37,7 @@ mod job_wall;
 mod listen;
 mod pack_limit;
 mod placement;
-mod placement_curves;
+pub(crate) mod placement_curves;
 mod private;
 mod resolve;
 mod retention;
@@ -63,6 +63,7 @@ pub use pack_limit::{PackLimit, PackLimitError};
 pub use placement::Placement;
 use placement::check_pool;
 pub(crate) use placement::{ColdOn, LoadSetting, checked, placer, split};
+pub use placement_curves::CurveFlags;
 pub(crate) use placement_curves::{CurveSetting, parse as parse_curves};
 pub(crate) use private::{read_private, read_private_reason};
 pub(crate) use retention::{
@@ -203,15 +204,14 @@ pub struct Cli {
     #[command(flatten)]
     pub tunings: Tunings,
     /// Whether the placement engine learns a CPU and a memory profile for each job class from
-    /// the series its runs recorded: `off` (the default) learns nothing; `shadow` learns and
-    /// logs one line per run it checks, placing as `off` does; `on` learns as `shadow` does
-    /// and books a class passing its checks by its CPU curve. Needs `--agent-pool-config`.
-    #[arg(
-        long,
-        default_value = "off",
-        value_parser = placement_curves::parse
-    )]
+    /// its runs' series: `off` (the default) learns nothing; `shadow` learns and logs a line per
+    /// run it checks, placing as `off` does; `on` also books a class passing its checks by its
+    /// CPU curve, on every host unless `--curve-hosts` names some. Needs `--agent-pool-config`.
+    #[arg(long, default_value = "off", value_parser = placement_curves::parse)]
     pub placement_curves: Curves,
+    /// `--curve-hosts` and `--curve-max-wait-seconds`, which act only under `on`.
+    #[command(flatten)]
+    pub curve: CurveFlags,
     /// The CPU, in millicores from 250, a queued job that names no CPU books while neither its
     /// class, its fallback class nor its client has a run with a CPU sample, by default 22000 (22
     /// cores); above a quarter of the most cores a registered host has, that quarter. Needs `--agent-pool-config`.

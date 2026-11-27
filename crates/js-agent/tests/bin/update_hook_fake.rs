@@ -192,6 +192,7 @@ fn fake_step(setup: &Setup, invocation: &Invocation, params: &Params) -> Done {
         euid: rustix::process::geteuid().as_raw(),
         host_identity: None,
         egress: false,
+        vms: false,
         token: &token(
             step_now == Step::Prepare
                 && fault == Some(Fault::Defer)
