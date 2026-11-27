@@ -28,7 +28,7 @@ use std::process::ExitCode;
 use clap::{Args as ClapArgs, Parser};
 use serde::Deserialize;
 
-/// The flags of the verb.
+/// The flags of the check, the same for the program and the verb.
 #[derive(Debug, ClapArgs)]
 pub struct Args {
     /// The job service's address, as `js --server` takes it.
@@ -292,6 +292,9 @@ impl Seen {
     }
 }
 
+/// The most calls of `js` for one page of a job listing: the first and two more.
+const PAGE_TRIES: u32 = 3;
+
 /// `text` or `-` when it is empty.
 fn or_dash(text: &str) -> &str {
     if text.is_empty() { "-" } else { text }
@@ -319,8 +322,16 @@ impl Reader<'_, '_> {
         Ok((text, hosts))
     }
 
-    /// Every job in one of `states` on a named host, every page.
-    fn jobs_in(&mut self, states: &[&str]) -> Result<Vec<Job>, Error> {
+    /// Every job in one of `states` on a named host, every page. A page whose `js` call fails is
+    /// asked for again, after `sleep(pause)`, up to [`PAGE_TRIES`] calls in all: a listing of
+    /// the jobs that ended badly reads the service's whole history, page by page, and one
+    /// dropped connection among its pages would otherwise end the check with no verdict.
+    fn jobs_in(
+        &mut self,
+        states: &[&str],
+        sleep: &mut dyn FnMut(Duration),
+        pause: Duration,
+    ) -> Result<Vec<Job>, Error> {
         let what = format!("the jobs {}", states.join(", "));
         let mut found = Vec::new();
         let mut token = String::new();
@@ -337,7 +348,17 @@ impl Reader<'_, '_> {
                 what: what.clone(),
                 why,
             };
-            let text = self.call(&verb).map_err(read)?;
+            let mut tries = 1;
+            let text = loop {
+                match self.call(&verb) {
+                    Ok(text) => break text,
+                    Err(_) if tries < PAGE_TRIES => {
+                        tries += 1;
+                        sleep(pause);
+                    }
+                    Err(why) => return Err(read(why)),
+                }
+            };
             let page: Jobs = serde_json::from_str(&text).map_err(|e| read(e.to_string()))?;
             found.extend(
                 page.jobs
@@ -449,6 +470,7 @@ pub fn check(
     if let Some(ca) = &args.ca_cert {
         flags.extend(["--ca-cert".to_owned(), ca.display().to_string()]);
     }
+    let pause = Duration::from_secs(args.interval_secs);
     let mut reader = Reader {
         js,
         flags,
@@ -461,7 +483,7 @@ pub fn check(
         why,
     })?;
     put(dir, "hosts-before.json", &text)?;
-    let before = reader.jobs_in(&["running"])?;
+    let before = reader.jobs_in(&["running"], sleep, pause)?;
     let mut seen = Vec::new();
     for name in &args.hosts {
         let host = listed
@@ -540,7 +562,7 @@ pub fn check(
             }
         }
         if reading < args.samples {
-            sleep(Duration::from_secs(args.interval_secs));
+            sleep(pause);
         }
     }
     put(dir, "timeline.tsv", &timeline)?;
@@ -552,7 +574,7 @@ pub fn check(
         ),
     )?;
 
-    let after = reader.jobs_in(&["running"])?;
+    let after = reader.jobs_in(&["running"], sleep, pause)?;
     let mut outcomes = Vec::new();
     for job in &before {
         let kept = after
@@ -571,7 +593,7 @@ pub fn check(
         .collect();
     put(dir, "outcomes.tsv", &tsv)?;
     let badly: Vec<Job> = reader
-        .jobs_in(&["lost", "failed", "failed-to-start"])?
+        .jobs_in(&["lost", "failed", "failed-to-start"], sleep, pause)?
         .into_iter()
         .filter(|j| j.ended_ms() >= now_ms)
         .collect();

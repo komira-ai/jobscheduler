@@ -88,7 +88,10 @@ of the jobs running on it after.
 - `INCONCLUSIVE` (status 1, on stderr): every host moved and lost nothing, but one ran no job
   before.
 - Any other line on stderr (status 1): the check refused to start, or a reading after the roll
-  failed; the line says which. Status 2 is a usage error (a host id that is not 1 to 253 letters,
+  failed; the line says which. A page of a job listing whose `js` call fails is asked for again,
+  `--interval-secs` later, up to three calls in all, before the reading counts as failed: the
+  listing of the jobs that ended badly reads the service's whole history of those states, page
+  by page, so it is the longest reading and the one a dropped connection is likeliest to hit. Status 2 is a usage error (a host id that is not 1 to 253 letters,
   digits, `_`, `.`, `:` or `-`, a host id given twice, an out-dir that is not a directory). A refused check watched nothing.
 
 The out-dir keeps the evidence: `hosts-before.json` (the first reading of the hosts),

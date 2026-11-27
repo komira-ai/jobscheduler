@@ -81,6 +81,8 @@ struct Fake {
     running_before_p2: String,
     running_after: String,
     ended: String,
+    /// How many calls of the ended jobs' listing fail before it answers `ended`.
+    ended_fails: usize,
     /// `job get` by id.
     jobs: BTreeMap<String, String>,
     /// Each call, its arguments joined by spaces.
@@ -132,6 +134,9 @@ impl Fake {
                 .get(id)
                 .cloned()
                 .unwrap_or_else(|| FAIL.to_owned())
+        } else if self.ended_fails > 0 {
+            self.ended_fails -= 1;
+            FAIL.to_owned()
         } else {
             self.ended.clone()
         };
@@ -694,6 +699,46 @@ fn a_reading_after_the_roll_that_fails_ends_the_check() {
         ran.result.unwrap_err().to_string(),
         "the jobs lost, failed, failed-to-start cannot be read: refused"
     );
+}
+
+/// Asserts that a page of a job listing whose `js` call fails is asked for again, one
+/// `--interval-secs` pause before each call after the first, up to three calls: two failed calls
+/// of the listing of the jobs that ended badly and an answer to the third still give the
+/// verdict, and three failed calls end the check with the reason of the last. It catches a
+/// check that loses its verdict, after the roll, to one dropped connection among the many
+/// pages that listing reads, or that asks without end.
+#[test]
+fn a_page_whose_read_fails_is_asked_for_again_up_to_three_times() {
+    let dir = scratch("again");
+    let listing = format!(
+        "{FLAGS} job list --states lost --states failed --states failed-to-start --page-size 500"
+    );
+    let one = jobs(&[running("j1", "n1", 1), running("j2", "n2", 1)], None);
+
+    let mut fake = Fake::new(&old_pair(), &new_pair());
+    fake.running_before = one.clone();
+    fake.running_after = one.clone();
+    fake.ended_fails = 2;
+    let ran = run(&args(dir.path(), &["n1", "n2"]), &mut fake);
+    assert_eq!(
+        ran.result,
+        Ok("PASS: every host moved and handed its running jobs over: none cordoned, tainted, lost, failed or started again".to_owned())
+    );
+    assert_eq!(ran.js.iter().filter(|c| **c == listing).count(), 3);
+    assert_eq!(ran.js.last(), Some(&listing));
+    assert_eq!(ran.sleeps, [Duration::from_secs(20); 2]);
+
+    let mut fake = Fake::new(&old_pair(), &new_pair());
+    fake.running_before = one.clone();
+    fake.running_after = one;
+    fake.ended_fails = 3;
+    let ran = run(&args(dir.path(), &["n1", "n2"]), &mut fake);
+    assert_eq!(
+        ran.result.unwrap_err().to_string(),
+        "the jobs lost, failed, failed-to-start cannot be read: refused"
+    );
+    assert_eq!(ran.js.iter().filter(|c| **c == listing).count(), 3);
+    assert_eq!(ran.sleeps, [Duration::from_secs(20); 2]);
 }
 
 /// Asserts that a file of the out-dir that cannot be written, and a stdout that cannot be
