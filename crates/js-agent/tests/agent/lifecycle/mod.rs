@@ -27,6 +27,7 @@ mod hold;
 mod host_ports;
 mod layout;
 mod lease_dir;
+mod listing;
 mod live_logs;
 mod logs;
 mod memory_series;

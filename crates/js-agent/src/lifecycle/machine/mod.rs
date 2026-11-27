@@ -3,8 +3,8 @@
 //!
 //! The jobs and what they book are in `job`, a restart in `adopt`, the end of a job
 //! (watching its container and the cleanup in order) in `cleanup`, the stop after a
-//! silence of the server in `silence`, and the mount providers a start waits on and a run
-//! releases in `providing` and `provided`.
+//! silence of the server in `silence`, the mount providers a start waits on and a run
+//! releases in `providing` and `provided`, and what a heartbeat carries in `listing`.
 
 mod adopt;
 mod cleanup;
@@ -13,6 +13,7 @@ mod exclusive;
 mod handover;
 mod held;
 mod job;
+mod listing;
 mod owed;
 mod pace;
 mod per_job;
@@ -58,8 +59,10 @@ use crate::quota::QuotaError;
 /// server's to stop sending.
 pub const RETIRED_CAP: usize = limits::MAX_HELD;
 
-/// The most jobs the agent holds, each listed in the held runs of a heartbeat. A job
-/// carries at most one result, so the results stay within the wire limit as well.
+/// The most jobs the wire lets a heartbeat list. What the agent holds is bounded tighter,
+/// by the bytes of the listing (`listing`), wherever a job is added: a start, a container
+/// taken over, a result read back. A job carries at most one result, so the results stay
+/// within the wire limit as well.
 const MAX_JOBS: usize = limits::MAX_HELD;
 const _: () = assert!(limits::MAX_HELD <= limits::MAX_RESULTS);
 
@@ -384,11 +387,17 @@ impl Lifecycle {
         lines
     }
 
-    /// The results of runs the server has not acknowledged, for the next heartbeat. The
-    /// result of a job a job start began is in its listing ([`Lifecycle::held_jobs`]).
+    /// The results of runs the server has not acknowledged that the next heartbeat carries:
+    /// oldest first, as many as fit the body beside what else it lists (`listing`); the
+    /// others wait for a later heartbeat. The result of a job a job start began is in its
+    /// listing ([`Lifecycle::held_jobs`]).
     pub fn results(&self) -> Vec<RunResult> {
-        self.keyed(Keyed::Run)
-            .filter_map(|job| job.result.clone())
+        let fit = self.fit();
+        self.jobs
+            .iter()
+            .zip(fit.carried)
+            .filter(|(job, carried)| job.keyed == Keyed::Run && *carried)
+            .filter_map(|(job, _)| job.result.clone())
             .collect()
     }
 
@@ -902,7 +911,7 @@ impl Lifecycle {
             });
             return false;
         }
-        if self.jobs.len() >= MAX_JOBS {
+        if !self.listable(run_id) {
             events.push(Event::Skipped {
                 run_id: run_id.clone(),
                 why: Skip::Full,
