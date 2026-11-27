@@ -5,8 +5,8 @@
 //!   fail, a probe whose answer is unknown reports what it saw.
 //! - [`child`]: the programs the probe runs inside a profile and, as the control, outside.
 //! - `macos`: the probes (macOS only): `sandbox-exec`, deny profiles, network under the
-//!   off policy, `clonefile`, volumes, `proc_pid_rusage`, and the toolchain under a
-//!   profile built the design's way, each against a no-sandbox control.
+//!   off policy, `clonefile`, volumes, `proc_pid_rusage`, the resource limits, and the
+//!   toolchain under a profile built the design's way, each against a no-sandbox control.
 
 use std::path::PathBuf;
 use std::process::ExitCode;

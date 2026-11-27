@@ -1626,6 +1626,7 @@ dependencies = [
  "clap",
  "js-testkit",
  "libc",
+ "rustix",
  "serde",
  "serde_json",
 ]

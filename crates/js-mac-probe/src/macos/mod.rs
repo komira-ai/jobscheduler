@@ -12,6 +12,7 @@ mod clone;
 mod dyld;
 mod exec;
 mod image;
+mod limits;
 mod net;
 mod relocate;
 mod sandbox;
@@ -35,7 +36,8 @@ pub fn collect(work: &Path, home: &Path, trace_out: Option<&Path>) -> Report {
             sandbox::probes(&scratch, &mut report);
             net::probes(&scratch, &mut report);
             clone::probes(&scratch, &mut report);
-            usage::probes(&mut report);
+            usage::probes(&scratch.places.exe, &mut report);
+            limits::probes(&scratch, &mut report);
             toolchain::probes(&scratch, &mut report);
             dyld::probes(&scratch, &mut report);
             let trees = relocate::probes(&scratch, &mut report);
@@ -48,6 +50,11 @@ pub fn collect(work: &Path, home: &Path, trace_out: Option<&Path>) -> Report {
         Err(err) => report.push(Probe::asserted("setup", false).fact("error", err)),
     }
     report
+}
+
+/// The `rusage` child mode's text for process `pid` (see [`crate::child::Child::Rusage`]).
+pub fn pid_usage_text(pid: i32) -> io::Result<String> {
+    usage::reading(pid)
 }
 
 /// The directories one run uses, all canonical.
