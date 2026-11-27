@@ -4,19 +4,22 @@
 //! retention keeps. Each pass teaches the jobs it sees freed.
 //!
 //! The start does not wait for it. It begins the teaching ([`begin`]), which reads the live
-//! allocations alone, so what it reads is set by the jobs running, not by the history the store
-//! keeps; the server then listens and answers ready. The ended jobs are read after that, a page
-//! at a time, off the runtime's threads ([`Sizes::teach`]): meanwhile a job that books nothing
-//! books what the history taught so far (its fallback's or the cold size, at a start), and the
-//! runs the passes free are held, so that once taught the history is the one a server that read
-//! everything before its first pass would hold. A stop of the server ([`Sizes::stop`]) ends the
-//! read at the next page.
+//! allocations and the runs of the newest freed allocations, at most [`BRIDGE_PAGES`] pages of
+//! them, so what it reads is set by the jobs running and that bound, not by the history the
+//! store keeps; the server then listens and answers ready. The ended jobs are read after that,
+//! a page at a time, off the runtime's threads ([`Sizes::teach`]): meanwhile a job that books
+//! nothing is sized from those newest runs and the runs the passes freed since the start (the
+//! cold size only for a class, a fallback and a client with none), and the freed runs are
+//! held, so that once taught the history is the one a server that read everything before its
+//! first pass would hold. A stop of the server ([`Sizes::stop`]) ends the read at the next
+//! page. The line that says the history is taught names the ended jobs taught, the pages read,
+//! the newest runs the start read (`bridged`) and the seconds since the start (`took_secs`).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use js_sched_placer::place::SchedPlacer;
-use js_sched_placer::sizes::Teaching;
+use js_sched_placer::sizes::{BRIDGE_PAGES, Teaching};
 use tracing::{info, warn};
 
 use crate::job_store::ServerJobs;
@@ -40,12 +43,14 @@ struct Begun {
 }
 
 /// Begins the teaching of the ended jobs of `jobs` to `placer`
-/// ([`SchedPlacer::begin_teaching`]): reads the live allocations alone. A read that fails is
+/// ([`SchedPlacer::begin_teaching`]): reads the live allocations, and the runs of the newest
+/// [`BRIDGE_PAGES`] pages of freed allocations at most, which the jobs placed before the
+/// ended jobs are taught are sized from. A read of the live allocations that fails is
 /// logged, and the server starts with no history: every class books its cold size until its
 /// jobs run again, which is what a server with an empty store does, so the start is not
 /// refused for it.
 pub(crate) fn begin(placer: &Arc<SchedPlacer>, jobs: &Arc<ServerJobs>) -> Sizes {
-    match placer.begin_teaching(jobs.as_ref()) {
+    match placer.begin_teaching(jobs.as_ref(), BRIDGE_PAGES) {
         Ok(teaching) => Sizes {
             begun: Mutex::new(Some(Begun {
                 teaching,
@@ -95,12 +100,18 @@ impl Sizes {
             }
         };
         let pages = teaching.pages();
+        let bridged = teaching.bridged();
+        let begun_at = teaching.begun_at();
         let taught = placer.teach(teaching);
+        let took_secs = placer.now().saturating_duration_since(begun_at).as_secs();
         match read {
             Ok(()) => {
                 info!(
                     taught,
-                    pages, "the job sizes were taught the runs of the ended jobs"
+                    pages,
+                    bridged,
+                    took_secs,
+                    "the job sizes were taught the runs of the ended jobs"
                 );
                 taught
             }

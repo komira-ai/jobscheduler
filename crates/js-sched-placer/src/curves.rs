@@ -1,7 +1,8 @@
 //! The settings and the view of the live curve mode, `--placement-curves on`
 //! (`docs/design/placement-profiles-live.md`): which hosts book by curve
 //! (`server.curve_hosts`), how long a job waits for its curve to fit before it is tested with
-//! its flat number (`server.curve_max_wait_seconds`), and what `/metrics` reads of it.
+//! its flat number (`server.curve_max_wait_seconds`), and what `/metrics` reads of it and of the
+//! memory shadow, which runs under `shadow` and `on` and books nothing.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -64,4 +65,44 @@ pub struct CurveView {
     /// The fullest slot of each curve host's booked curve, in millicores, as the last walk
     /// found it.
     pub host_peaks: BTreeMap<HostId, u64>,
+}
+
+/// What `/metrics` reads of the memory shadow under `--placement-curves shadow` and `on`
+/// (`docs/design/placement-profiles-live.md`, "Memory over time, in shadow"): how each placement
+/// compared with what a booking that follows the classes' memory curves would have done, and
+/// how each host's projected memory compared with what its readings then showed. Every count is
+/// since the server started; nothing in it places a job.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MemoryShadowView {
+    /// Placements the memory curve would have made at the same walk: it fitted the host the flat
+    /// booking chose, and fitted no host the flat memory booking refused at an earlier walk.
+    pub same: u64,
+    /// Placements the memory curve would have made sooner: at an earlier walk it fitted a host
+    /// the flat memory booking refused, while the job was placed nowhere.
+    pub sooner: u64,
+    /// Placements the memory curve would not have made: its projection of the host the flat
+    /// booking chose, with the job's curve added, was over the host's memory at some slot.
+    pub later: u64,
+    /// The sum, over the placements counted in [`MemoryShadowView::sooner`], of the time from
+    /// the first walk the memory curve fitted a host to the placement, in milliseconds.
+    pub sooner_ms: u64,
+    /// Each host's projection and its comparisons with its readings.
+    pub hosts: BTreeMap<HostId, HostMemoryShadow>,
+}
+
+/// One host's memory projection and how it compared with what the host then used.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HostMemoryShadow {
+    /// What the host's live jobs are projected to hold now, by their classes' memory curves
+    /// (their flat memory booking where a class has none), in bytes, as the last walk found it.
+    pub projected_bytes: u64,
+    /// The memory the host's last reading showed in use, in bytes; `None` before its first.
+    pub measured_bytes: Option<u64>,
+    /// Readings compared with the projection the walk before them made of their moment.
+    pub checks: u64,
+    /// The comparisons in which the reading showed more than that projection.
+    pub too_low: u64,
+    /// The sum, over the comparisons counted in [`HostMemoryShadow::too_low`], of what the reading
+    /// showed beyond the projection, in bytes.
+    pub short_bytes: u64,
 }

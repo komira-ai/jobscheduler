@@ -172,3 +172,31 @@ fn spawn_of_a_missing_program_is_refused_with_enoent() {
     assert_eq!(out.status.code(), Some(1), "{out:?}");
     assert!(stderr(&out).starts_with("errno=2 "), "{out:?}");
 }
+
+#[test]
+fn the_launchd_job_child_starts_hold_writes_both_pids_and_ends_with_it() {
+    let scratch = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "binary-launchd-job");
+    let ready = scratch.join("ready");
+    let child = probe()
+        .args(["child", "launchd-job", "--secs", "0", "--tag", "t", "--out"])
+        .arg(&ready)
+        .spawn()
+        .unwrap();
+    let job = child.id();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let text = std::fs::read_to_string(&ready).unwrap();
+    let (written_job, hold) = js_mac_probe::launchd::ready(&text).unwrap();
+    assert_eq!(written_job, job);
+    assert_ne!(hold, job);
+}
+
+#[test]
+fn the_hold_child_prints_its_tag() {
+    let out = probe()
+        .args(["child", "hold", "--secs", "0", "--tag", "js-mac-probe.7"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(out.stdout, b"js-mac-probe.7\n");
+}

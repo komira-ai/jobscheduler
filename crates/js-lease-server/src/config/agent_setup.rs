@@ -7,7 +7,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_registry::PoolConfig;
-use js_sched_placer::curves::CurveSettings;
 use js_sched_placer::sizes::{ColdCpuOn, ColdMemoryOn, ColdSize};
 use js_types::ProviderId;
 
@@ -37,7 +36,8 @@ pub(crate) struct AgentSetup {
     pub(crate) hello_limit: HelloLimit,
     /// `--require-host-credential`.
     pub(crate) require_host_credential: bool,
-    /// `--cpu-slack` and `--pack-limit`, each or the engine's default.
+    /// `--cpu-slack`, `--pack-limit` and the three flags of [`super::Tunings`], each or the
+    /// engine's default.
     pub(crate) load: LoadSetting,
     /// `--cold-cpu-millis` and `--cold-memory-bytes`, or `server.cold_cpu_millis` and
     /// `server.cold_memory_bytes`: what a job that books nothing books while neither its class,
@@ -49,8 +49,8 @@ pub(crate) struct AgentSetup {
     /// operating system they name, in place of `cold`'s.
     pub(crate) cold_on: ColdOn,
     /// `--placement-curves`, or `server.placement_curves`: whether the engine learns profiles
-    /// and books by them, with `server.curve_hosts` and `server.curve_max_wait_seconds`
-    /// (no flags) for the mode `on`.
+    /// and books by them, with `--curve-hosts` and `--curve-max-wait-seconds` (or
+    /// `server.curve_hosts` and `server.curve_max_wait_seconds`) for the mode `on`.
     pub(crate) curves: CurveSetting,
     /// `server.max_lease_wall`: the one up to which the placement engine trusts a wall time
     /// for backfill.
@@ -175,6 +175,7 @@ pub(super) fn agents(cli: &Cli, clients: &LiveClients) -> Result<Box<AgentSetup>
     let load = LoadSetting {
         cpu_slack: cli.cpu_slack.unwrap_or_default(),
         pack_limit: cli.pack_limit.unwrap_or_default(),
+        tunings: cli.tunings,
     };
     let cold_on = cold_on_of(cli)?;
     Ok(Box::new(AgentSetup {
@@ -193,10 +194,7 @@ pub(super) fn agents(cli: &Cli, clients: &LiveClients) -> Result<Box<AgentSetup>
             memory_bytes: cli.cold_memory_bytes,
         },
         cold_on,
-        curves: CurveSetting {
-            mode: cli.placement_curves,
-            settings: CurveSettings::default(),
-        },
+        curves: super::placement_curves::of_flags(cli)?,
         max_lease_wall: None,
         job_limits: JobLimits::default(),
         jobs: listen::job_store(cli),

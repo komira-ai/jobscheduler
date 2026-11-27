@@ -237,7 +237,7 @@ impl Ctx {
     }
 
     /// The same context, learning a job's attempts from `attempts` and reading an attempt's
-    /// row with `rows`: a job of several attempts, which this release's record cannot hold.
+    /// row with `rows`: a job of several attempts, set up without running each.
     #[cfg(test)]
     #[must_use]
     pub(crate) fn with_attempts(self, attempts: AttemptsOf, rows: RowOf) -> Ctx {

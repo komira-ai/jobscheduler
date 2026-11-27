@@ -1,5 +1,5 @@
 //! Retry and completion callbacks in the cell, on the real server and its job service: the
-//! cell's server accepts a retry policy and a callback, a job whose attempt is lost is
+//! cell's server takes a retry policy and a callback as a shipped one does, a job whose attempt is lost is
 //! tried again while its item keeps waiting, the cell's receiver gets the callback once
 //! after the job's last attempt, and its actions (a receiver that is down, a second
 //! instance that claims callbacks and vanishes) do what they say.

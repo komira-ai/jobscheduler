@@ -12,6 +12,7 @@ mod clone;
 mod dyld;
 mod exec;
 mod image;
+mod launchd;
 mod limits;
 mod net;
 mod relocate;
@@ -45,6 +46,7 @@ pub fn collect(work: &Path, home: &Path, trace_out: Option<&Path>) -> Report {
             volume::probes(&scratch, &mut report);
             image::probes(&scratch, &mut report);
             allow::probes(&scratch, trace_out, &mut report);
+            launchd::probes(&scratch, &mut report);
             scratch.remove();
         }
         Err(err) => report.push(Probe::asserted("setup", false).fact("error", err)),

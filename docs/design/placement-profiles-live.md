@@ -1,9 +1,10 @@
 # Booking from the learned profiles: the live mode after `--placement-curves shadow`
 
 Status: built behind `--placement-curves on`, off by default: the four checks, the curve booking, the packing rule
-on the curve hosts, the pack limit's fullest slot, the wait bound, `server.curve_hosts`,
-`server.curve_max_wait_seconds`, the metrics of section 5, the `shadow` table's three columns and a curve arm of the
-replay (on synthesised lives: the trace still carries no series). Not built: the decide-in-shadow line of section 4.
+on the curve hosts, the pack limit's fullest slot, the wait bound, `server.curve_hosts` and
+`server.curve_max_wait_seconds` with their flags `--curve-hosts` and `--curve-max-wait-seconds`, the metrics of section 5, the `shadow` table's three columns and a curve arm of the
+replay (on synthesised lives: the trace still carries no series), and under `shadow` and `on` the memory shadow of
+section 2 ("Memory over time, in shadow"). Not built: the decide-in-shadow line of section 4 for CPU.
 The code references below are to the commit the design was written at. It follows [cpu-over-time.md](cpu-over-time.md), whose steps 1
 (record) and 2 (learn in shadow, komira-ai/jobscheduler#1057) are built, and fixes what its steps 3 (decide in
 shadow) and 4 (enforce) book, gate and roll out. Companions: [sizing.md](sizing.md) (how a class is booked today)
@@ -98,7 +99,7 @@ what it books until then, and how the mode is turned on and back off.
 | `js-sizing` | The profile already answers `slot_p90`, `slot_runs`, `tail`, `level`. It gains, beside its window of 16 scores, a ring of the last 16 scored runs' peak-overrun flags (check 3) and a ring of the last 16 runs' CPU series status (check 4), and pure functions reading them. It answers how many kept runs went past 128 s (`tail_runs`, from each kept run's tail seconds). |
 | `js-sched-placer` | `Curves` gains `On`. `JobSizes` answers, per job, flat or curve with the figures. A per-host table of 65 slots (64 of 2 s, then one from 128 s on). The packing test in `try_job`, in place of the CPU axis of `Room::fits` on a curve host. A first-waited time per queued job, in memory. One log line. |
 | `js-sched` | The pack limit's CPU share can read a per-host figure the placer gives (the largest booked slot) in place of the summed bookings. One read-only accessor for a host's slot-0 CPU charge (`cpu_left`, `crates/js-sched/src/admission/horizon.rs:57`). The minute horizon used for leases is unchanged. |
-| `js-lease-server` | The `on` value, `server.curve_hosts`, `server.curve_max_wait_seconds`, metrics (section 5). |
+| `js-lease-server` | The `on` value, `server.curve_hosts`, `server.curve_max_wait_seconds` and their flags `--curve-hosts` and `--curve-max-wait-seconds`, metrics (section 5). |
 | `js-cpu-replay` | `shadow` prints the four checks per class. The trace carries series, so the replay can run the curve mode (section 4). |
 | Agent, wire, store | Nothing. A job's stored booking and its `cpu.weight` are its flat number (section 2). |
 
@@ -200,7 +201,61 @@ clamp(x) = min( max(x, 250m), host_share )      host_share = a quarter of the ho
 - The memory profile, which keeps 64 runs with a 6 h half-life, stays in shadow.
 - **Memory over time is not booked either.** Freeing a running job's memory as its curve falls is the memory half
   of the curve idea. For jobs of which 92.5% end within 128 s (MEASURED, `cpu-over-time.md` section 3) it frees
-  little, and a wrong figure costs a kill. Question 4.
+  little, and a wrong figure costs a kill. Question 4. The owner has since asked for placement by memory curves too;
+  the next subsection is the shadow half of that, which books nothing and measures what enforcing would give and
+  risk.
+
+### Memory over time, in shadow
+Built under `shadow` and `on` (`crates/js-sched-placer/src/memory_shadow.rs`, `crates/js-sizing/src/memory_curve.rs`).
+Beside the flat memory booking, which still places every job, the job service computes what a booking that follows
+each class's memory profile would allow. Nothing it computes reaches a placement, a refusal, a commit or an agent:
+no job is placed, moved, throttled or killed by it, and the start path is unchanged.
+- **A class's memory curve** (`MemoryCurve::of`): for each 2 s slot of the first 128 s, the load-weighted 90th
+  percentile of the slot's largest second over the class's kept runs, and from 128 s on the 90th percentile of the
+  runs' peaks after 128 s (`Profile::tail_p90`; the tail mean is no bound on what a run holds at once). Each slot
+  takes the flat booking's margin (`1.2 x p90 + 128 MiB`) and is held to at most the class's flat memory booking. A
+  slot fewer than 4 kept runs reached books the flat booking. **A class with too little history books flat:** until
+  its memory profile has scored 16 runs (24 kept), it has no curve.
+- **A host's projection:** 65 slots (64 of 2 s, then from 128 s on), `P(k) = sum_j M_j(k) + R`. A running job is
+  projected to hold its class's booking at the slot it will be in, unweighted by survival (memory a job may still
+  hold is held in full); nothing at a slot no kept run reached (every run of its class had ended by then); and its
+  flat booking throughout once it has outlived its class's recorded runs, when its class has no curve, or when it
+  named its memory. `R` is what the host's last reading (at most 15 s old) showed beyond `sum_j M_j(0)`, carried to
+  every slot: a job above its profile, or anything else on the host, counts against every slot.
+- **The fit rule, with its margin:** a queued job fits a host by curve when `P(k) + B(k)` is within the memory the
+  room holds the host to at every slot, `B` being its own curve's booking (unweighted, its whole curve), and the
+  room has space for it on every other axis. The scheduler's load test is not run for it.
+- **Per decision:** a job placed nowhere while its curve fitted a host the flat memory booking refused starts a
+  time; its placement then counts `sooner`, and logs `placement curves: a job's memory curve would have placed it
+  sooner` with `job`, `class`, `host`, `sooner_ms`. A placement whose curve does not fit the chosen host counts
+  `later` and logs `... would not have placed it on its host` with the first `slot` over. Every other placement on a
+  host with a memory capacity counts `same`. Lines go to the target `js_sched_placer::sizes::profile`.
+- **Per host:** each reading is compared with the projection the last walk made of its moment, and one above it
+  counts too low, by how much, and logs `placement curves: a host held more memory than its jobs' memory curves
+  projected` with `host`, `projected_mib`, `measured_mib`, `ahead_ms`. The measure is the host's non-file memory,
+  so it includes what is not a job.
+- **Operator read:** `/metrics` writes `js_memory_curve_placements_total{verdict}`,
+  `js_memory_curve_sooner_milliseconds_total`, and per host `js_host_memory_projected_bytes`,
+  `js_host_memory_measured_bytes`, `js_host_memory_projection_checks_total`, `js_host_memory_projection_low_total`
+  and `js_host_memory_projection_short_bytes_total`, all only under `shadow` and `on`.
+- **Not gated on overruns, unlike CPU's check 3.** The profile's overrun flag compares a run's peak with its start
+  slots' 90th percentile only, so every long run whose peak comes after 128 s counts as one. The shadow's
+  too-low counts measure calibration instead; an enforcing step chooses its gate from them.
+- **What the recorded data says (MEASURED, one hour of usage records: 10,191 runs with a peak, no memory series).**
+  The usage records carry each run's peak but not its memory series, which only the job store holds, so this
+  bounds the tail and cannot measure the shape:
+  - Runs past 128 s: 602, holding 76.6% of the booked memory-time (2,729,122 of 3,562,174 GiB-s); their part past
+    128 s is 2,119,554 GiB-s.
+  - The most a tail booking from peaks can give back, each long run booking its own peak with the margin past
+    128 s: 189,517 GiB-s, 8.9% of the long runs' tails and 5.3% of all booked memory-time.
+  - With the classes approximated by their booking (cpu, memory) pair, the record holding no class: 83 long runs
+    had a class with 24 earlier runs, 4 of them past 128 s, within the hour. Their tail booking gives back 16,883
+    GiB-s (4.5% of their tails), and it was too low for 43 of them (51.8%), short by 1,381 MiB at the median and
+    4,131 MiB at the 90th percentile. Leaving out a class with more than 3 of its last 16 runs over 1.25x the
+    projection: 49 judged, 8,785 GiB-s given back, 9 too low (18.4%), short by 2,418 MiB at the median.
+  - So a memory curve that is only a tail peak gives back little, and its projection is too low often. What the
+    shape inside a run would give back, and how often the projection of a whole host is too low, is what the
+    shadow's counts measure on the farm.
 
 ## 3. The packing rule, and current use
 
@@ -387,15 +442,19 @@ The live mode books today's memory figure, so its fallback is today's:
   - `on` needs `--agent-pool-config`, as `shadow` does, and learns, logs and checks exactly as `shadow`.
   - The refusal text becomes `placement_curves must be off, shadow or on`. This is the value
     `cpu-over-time.md` section 12 reserved.
-- **Canary:** `server.curve_hosts`, a list of host ids.
-  - Non-empty: curves are booked only for jobs placed on the hosts it names. On every other host, every job is
+- **Canary:** `server.curve_hosts` (flag `--curve-hosts`, host ids separated by commas), a list of host ids.
+  - Given: curves are booked only for jobs placed on the hosts it names. On every other host, every job is
     booked flat.
-  - Empty: curves are booked on every host.
+  - Absent: curves are booked on every host. An empty list is refused at start, as are an empty name, a name twice
+    and a name that is not a host id, each refusal naming the key or the flag and quoting the name. The flag and
+    the key are read by the same code (`crates/js-lease-server/src/config/placement_curves.rs`), so a server
+    configured by flags alone, as the live one is, can run the canary.
   - Per pool was considered. One engine places every pool, and pools must already share one memory percent
     (`crates/js-lease-server/src/config/agent_setup.rs:79-98`). A host list needs no setting per pool.
   - Per class is automatic (section 4). An operator list of classes was not chosen: there were 5,335 classes in 4 h,
     most named by a hash.
-- **Wait bound:** `server.curve_max_wait_seconds`, default 30, from 0 to 300. At 0 a curve never delays a job.
+- **Wait bound:** `server.curve_max_wait_seconds` (flag `--curve-max-wait-seconds`), default 30, from 0 to 300. At 0
+  a curve never delays a job.
 - **All three are read once at start**, like every placement setting. A change is a restart through the server's
   update hook (`docs/lease-server-update.md`).
 
@@ -417,6 +476,11 @@ The live mode books today's memory figure, so its fallback is today's:
   a label name the metrics already use (`js_jobs{state}`); its values here are new.
 - **`js_host_cpu_booked_peak_millicores{host}`:** the fullest slot of each host's booked curve. It sits beside the
   existing `js_host_cpu_booked_millicores`, which stays the sum of flat numbers.
+- **Memory shadow, under `shadow` and `on` only** (section 2, "Memory over time, in shadow"):
+  `js_memory_curve_placements_total{verdict}` (`same`, `sooner`, `later`), `js_memory_curve_sooner_milliseconds_total`,
+  and per host `js_host_memory_projected_bytes`, `js_host_memory_measured_bytes`,
+  `js_host_memory_projection_checks_total`, `js_host_memory_projection_low_total`,
+  `js_host_memory_projection_short_bytes_total`. Nothing is booked from them.
 - **Watched alongside, already present:**
   - `js_queue_wait_seconds`;
   - `js_host_cpu_booked_millicores` against the hosts' busy cores (the gap that started this);
@@ -454,9 +518,12 @@ against them, not built in this one.
   runs, 80% and 80.1%, 3 and 4 overruns, 11 and 12 usable lines.
 - **The wait bound.** A job waiting exactly 30 s on the injected farm clock is tested flat; at 29.999 s it is not.
 - **The pack share.** With curves, it equals the fullest booked slot. With every class flat, it equals today's.
-- **Canary.** With `curve_hosts` naming host `a`, only jobs on `a` are booked by curve.
+- **Canary.** With `curve_hosts` naming host `a`, only jobs on `a` are booked by curve. Through the flags, a server
+  started with `--placement-curves on --curve-hosts a` books a job on `a` by its curve and places a job that fits
+  flat on another host flat there; without `--curve-hosts` it books by curve on every host.
 - **Settings.** `on` is accepted and `On` is refused. `curve_max_wait_seconds` of 301 is refused. `on` without
-  `--agent-pool-config` is refused.
+  `--agent-pool-config` is refused. `--curve-hosts` and `--curve-max-wait-seconds` give what the keys give and
+  refuse what they refuse, and each is refused without `--agent-pool-config` and beside `--config`.
 - **The shadow table.** It prints the new columns from the current release's lines, and reads a log of the release
   before without error.
 
@@ -496,7 +563,9 @@ against them, not built in this one.
      working week;
    - there is a host-OOM signal;
    - the memory gate of section 4 passes.
-   A memory under-prediction kills jobs that are not its own and teaches no class.
+   A memory under-prediction kills jobs that are not its own and teaches no class. The memory shadow (section 2)
+   gives the first condition's evidence in its own terms, how much sooner the curves would place and how often a
+   host's projection is too low; the host-OOM signal is still missing.
 5. **Are the four checks and their thresholds right?** They are 16 runs, 80%, 3 of 16 more than 25% over, and 12 of
    16 usable.
    **Recommend: yes, as starting values to set from the decide-in-shadow days.** Checks 1 and 2 are the profile's
@@ -529,5 +598,6 @@ against them, not built in this one.
 - **A curve slot at the mean, or at the maximum** (question 3).
 - **A per-class operator allow-list.** There are thousands of classes, named by hash, and it duplicates the
   automatic checks.
-- **Memory curves (remaining maximum)** (question 4).
+- **Memory curves (remaining maximum)** (question 4). In shadow the projection is per slot, not the remaining
+  maximum: a job is projected to hold each slot's 90th percentile, and the margin and the residual carry the risk.
 - **Throttling or killing on a wrong estimate.** Ruled out by the owner (`cpu-over-time.md` section 7).

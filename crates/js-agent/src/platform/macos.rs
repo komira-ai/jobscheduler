@@ -11,7 +11,7 @@
 //!
 //! | flag | meaning |
 //! |---|---|
-//! | `--native-accounts <dir>` | the state directory of the agent's pool of slot accounts (its ledger; a directory root owns that no one else may write in, made mode 0700 when missing): with it the macOS build runs native jobs, each as a fresh account of the pool lent for the run, started by the agent's supervisor (`js-agent __supervise-native`) under a Seatbelt profile, and reports `runtime` and `exec` as `sandbox-exec`, the wire's name of a Seatbelt-confined program (no `sandbox-exec` program runs; see [`native`]); required unless `--no-jobs`; needs `--native-account-range`, `--scratch-root` and `--state-root`; the agent must run as root; its path is a read deny of every run. The pool is opened only when the agent holds Full Disk Access (which a privacy profile grants it, `packaging/js-agent-macos/mdm/`): at start the agent lists the privacy database's directory to learn whether it does, reports the answer as the capability `full-disk-access` (`granted`, `not-granted` or `undetermined`), and refuses every native job, `no-full-disk-access`, unless it is `granted`. With the grant, the agent runs `/usr/bin/true` once through a lent account and its retirement before it says hello, and does not start when that fails. Native runs are stopped when the agent stops, and an agent's start ends every account a run of an earlier process held (the run is reported ended) |
+//! | `--native-accounts <dir>` | the state directory of the agent's pool of slot accounts (its ledger; a directory root owns that no one else may write in, made mode 0700 when missing): with it the macOS build runs native jobs, each as a fresh account of the pool lent for the run, started by the agent's supervisor (`js-agent __supervise-native`) under a Seatbelt profile, and reports `runtime` and `exec` as `sandbox-exec`, the wire's name of a Seatbelt-confined program (no `sandbox-exec` program runs; see [`native`]); required unless `--no-jobs`; needs `--native-account-range`, `--scratch-root` and `--state-root`; the agent must run as root; its path is a read deny of every run. The pool is opened only when the agent holds Full Disk Access (which a privacy profile grants it, `packaging/js-agent-macos/mdm/`): at start the agent lists the privacy database's directory to learn whether it does, reports the answer as the capability `full-disk-access` (`granted`, `not-granted` or `undetermined`), and refuses every native job, `no-full-disk-access`, unless it is `granted`. With the grant, the agent runs `/usr/bin/true` once through a lent account and its retirement before it says hello, and does not start when that fails. A stop of the agent drains its native runs, unless it finds the handover file in the state root (`--state-root`), which the update hook writes for an update between two agents that list `native-handover`: then it leaves each run under its supervisor. An agent's start takes back the runs whose supervisors outlived the agent that started them and ends every other account a run of an earlier process held (the run is reported ended) |
 //! | `--native-account-range <first>-<last>` | the uids of the pool's slots, both included (`700-799` is 100 slots); no default; from 501 to 60000; nothing else on the Mac may use them; needs `--native-accounts` |
 //! | `--native-account-ready <n>` | how many accounts the pool keeps made and ready to lend; by default 1; at most the number of slots; needs `--native-accounts` |
 //! | `--native-homes <path>` | (macOS build only) the directory the accounts' homes are in; the pool makes them in `/Users`, so the only value is `/Users`, the default; needs `--native-accounts` |
@@ -40,15 +40,13 @@ use crate::bundle::Settings as BundleSettings;
 use crate::cli::Cli;
 use crate::cli_runtime::Settings;
 use crate::contract;
-use crate::lifecycle::CheckHook;
-use crate::lifecycle::NoChecks;
+use crate::lifecycle::{CheckHook, NoChecks};
 use crate::lifecycle::{
     Local, MountProviders, NATIVE_JOURNAL, Runtime, StateRoot, UserNames, scratch_volume,
 };
 use crate::mac_supervisor::{Launcher, SystemLauncher};
 use crate::mac_usage::Series;
-use crate::native::Ceiling;
-use crate::native::{self, NativeFlags, NativeRuntime, NativeSettings, PfFlags, PutFlags};
+use crate::native::{self, Ceiling, NativeFlags, NativeRuntime, NativeSettings, PfFlags, PutFlags};
 use crate::registry_credentials::RegistryCredentials;
 use crate::system::{Machine, RuntimeBuild, System};
 use crate::usage::{HostSampler, NodeSampler, macos::MacHost};
@@ -58,9 +56,11 @@ use js_caps::{EXEC, FLAG_SET, RUNTIME};
 use js_mac_session::full_disk_access::FullDiskAccess;
 use js_types::ExecMode;
 
-/// What `--version` prints after the version: the runtime this build runs jobs with, on a
-/// line a script can read (`js-agent --version | grep -x 'runtimes: native'`).
-pub const LONG_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "\nruntimes: native");
+/// The lines `--version` prints after the version: the runtime, and the ways a stop can go.
+pub const LONG_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    "\nruntimes: native\nstops: drain native-handover"
+);
 
 /// The refusal of a flag that only a Linux build has (`name` is a flag of
 /// [`super::LINUX_ONLY`], without its `--`): it is refused by name, before clap would call it
@@ -621,7 +621,7 @@ pub(crate) fn complete(
     local.backend = match backend {
         Some(Backend::Native(native)) => {
             let native = match &start.bundles {
-                Some(store) => native.with_bundles(Arc::clone(store))?,
+                Some(store) => native.with_store(Arc::clone(store), cli.read_model.as_deref())?,
                 None => native,
             };
             // The agent asks itself once, here: the state its listing of the privacy
@@ -738,7 +738,7 @@ pub(crate) fn runtime(
         .with_live_logs(native.logs().live())
         .with_put(native.put().cloned())
         .with_series(native.series());
-    self_tested(runtime)
+    self_tested(runtime.with_host_read_allow(native.xcodes())?)
 }
 
 /// `runtime` after its self-test, which runs before the agent says hello: a failed self-test

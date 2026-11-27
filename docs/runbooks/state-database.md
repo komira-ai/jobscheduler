@@ -9,7 +9,7 @@ so.
 | Store | What it holds | Opened when |
 |---|---|---|
 | The Postgres store (`--store <file>` or `server.store`; schema `kbf_state`) | No lock and no generation: any number of servers write it at once. (The table `writer_generation` from schema version 2 stays in the schema and is not read or written.) With agent registration, the host bindings (`hosts/binding/<host id>`, with each host's taint and cordon) and the digests of the join tokens and host credentials (`hosts/join/<digest>`); with an elastic pool, the scaler's records (`acquires/scaler/records`) and the hosts to remove (`acquires/scaler/unremoved`); and the marker of the first start's import (`meta/server-state-imported`); with the job service on, every job, allocation, mark, taint and the change feed (`job/`, `alloc/`, `mark/`, `taint/`, `idx/` and the feed rows; schema marker `meta/jobs/schema`), and the delivery of each job's completion callback (`callback/`, which holds the callback's signing key until its delivery ends); with usage on, the usage rows (`usage/`); all in the `kv` table. | The setting is given. The server opens it before it reads anything else and before it binds a listener. |
-| The job store, `<state file>.jobs` (SQLite, owner-only), only without a store setting | Every job and every allocation. With a store setting the file is not made, opened or read; one an earlier start left stays where it was, as a backup. | The job service is on (`--job-listen`, `server.job_listen`) and there is no store setting. |
+| The job store, `<state file>.jobs` (SQLite, owner-only), only without a store setting | Every job and every allocation. With a store setting the server does not make, open or read the file; one an earlier start left stays where it was, as a backup. `js-lease-server job-store copy` copies it into the store, and `job-store export` makes one from the store (section 6). | The job service is on (`--job-listen`, `server.job_listen`) and there is no store setting. |
 | The binding file (`<state file>.agents`) | Which credential and instance each registered host was admitted with. There is no lease file: the server never opens one, and a lease file left by an earlier release stays as it was. | Always (the binding file, and `<state file>.joins`, with agent registration and no store setting). |
 
 Two limits of the code as built shape everything below:
@@ -17,7 +17,7 @@ Two limits of the code as built shape everything below:
 - **The store holds the server's host state.** With agent registration or an elastic pool, the server keeps its host
   bindings, join tokens, scaler records and hosts to remove in the store. Its first start over an empty store imports
   `<state file>.agents`, `.joins`, `.scaler` and `.scaler.unremoved` once (`docs/design/configuration.md`, "The first start"), and
-  leaves them in place; they are stale from then on. The job store and the usage rows are in the store too, from their first start over it, with no jobs: nothing in `<state file>.jobs` or `usage.db` is copied (cutover: drain the farm, deploy, start; the files stay as a backup).
+  leaves them in place; they are stale from then on. The job store and the usage rows are in the store too, from their first start over it: the server's start copies nothing from `<state file>.jobs` or `usage.db`, and the files stay as a backup. Section 6 copies a job store's file into the store before that first start, and exports the store's job and usage rows back to files for a rollback.
 - **The server creates no schema.** The schema is created and migrated by the installer, which is not in this repository. A database
   without the schema is refused at start: `--store: the store could not be opened: ...`, with the reason.
 
@@ -94,7 +94,7 @@ meanwhile:
 pg_dump --format=custom --schema=kbf_state --file=<backup dir>/state-<n>.dump '<owner URL>'
 ```
 
-**The job store, with a store setting,** is in the Postgres dump above; there is no file to copy.
+**The job store, with a store setting,** is in the Postgres dump above; there is no file to copy. To have it as the SQLite files a server without the setting runs on, export it (section 6).
 
 **The job store, without a store setting.** Stop the server cleanly (`SIGTERM`), then copy `<state file>.jobs` while no process holds it. A clean stop leaves
 no `<state file>.jobs-wal` beside it; if one is there (the server was killed), start and stop the server once before copying. No command in this repository copies it
@@ -152,6 +152,56 @@ What the server does by itself, and what to check:
 
 The test that restores an older job store under live agents and asserts the stop, the bookings and the ids is
 `restart::a_restored_older_job_store_stops_unknown_jobs_and_reissues_no_id` in `crates/js-lease-server/tests/server/restart.rs`.
+
+## 6. Moving the job store between its file and the store
+
+`js-lease-server job-store` moves the job store's rows across, with no server running on either side: the cutover is a short pause.
+Its `--store` is a file holding the store's one line, as the server's `--store` (owner-only). It binds no listener, and it opens a SQLite
+file under the file's lock, so a file a running server holds is refused. Exit status 0 when it did what it says, 1 when it refused or
+failed (the line on standard error says why), 2 for a usage error.
+
+**Into the store (before the first start over it).**
+
+1. Stop the server that runs on the file (`SIGTERM`).
+2. Run the dry run, and keep what it prints:
+
+   ```sh
+   js-lease-server job-store copy --from <state file>.jobs --store <store file>
+   ```
+
+   It prints, for the file, one line per key prefix with its row count and a SHA-256 of its rows (keys and values in key order; a
+   row's time to live is not in it), then how many rows the store does not hold, holds with the same value and holds with another, and
+   writes nothing.
+3. If it names rows the store holds with another value (`different: <key>`), the store already holds a job store (a server started
+   over it). The copy refuses them, with or without `--write`, and writes nothing: decide which job store to keep before going on.
+4. Write: the same command with `--write`. It writes the rows the store does not hold, a page of 512 per transaction, each only if
+   its key is still absent; a cordon is written with what is left of its time. A copy stopped part way is run again: it leaves the rows
+   it wrote.
+5. Run the dry run again. It must report `0 rows to write` and every row `already there with the same value`, with the same per
+   prefix lines as step 2.
+6. Start the server with the store setting. The usage file (`usage.db`) is not copied: node minutes and learned profiles start
+   empty in the store.
+
+**Back to files (a rollback to a server without the setting).**
+
+1. Stop every server on the store.
+2. Export to two new files (neither may exist; both are made owner-only):
+
+   ```sh
+   js-lease-server job-store export --store <store file> --jobs-to <dir>/jobs.new --usage-to <dir>/usage.new
+   ```
+
+   The jobs file gets the job store's rows (jobs, allocations, marks, taints, cordons, their indexes, the dispatch
+   messages, the callbacks, the presence rows and the `usage/ended` history the job store writes beside each free); the usage file
+   gets the node minutes, profiles and tails. It prints each file's per prefix lines and how many rows it wrote. The host bindings, join
+   tokens and scaler records are not exported: a server without the setting reads them from the files the store's first start
+   imported, as they were then.
+3. Move the old `<state file>.jobs` (with any `-wal` and `-shm` beside it) and the old usage file aside, move the two new files into
+   their places (`<state file>.jobs`, and `usage.db` or what `--usage-db` names), and start the server without the store setting.
+
+The tests: `a_job_store_copied_into_the_store_and_exported_back_serves_its_jobs` (a job store the server wrote, copied and exported
+back, gives the same rows and a file a server without the setting serves the job from) and
+`a_round_trip_through_postgres_keeps_every_row` in `crates/js-lease-server/src/cutover_tests.rs`.
 
 ## Not built yet
 

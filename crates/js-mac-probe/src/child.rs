@@ -9,6 +9,7 @@
 
 use std::io::{self, Read as _};
 use std::net::{SocketAddr, ToSocketAddrs as _};
+use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::Duration;
@@ -51,6 +52,28 @@ pub enum Child {
     Write {
         /// The path.
         path: PathBuf,
+    },
+    /// Sleep, then print the tag. The tag is only there to be seen on the command line.
+    Hold {
+        /// How long to sleep, in seconds.
+        #[arg(long)]
+        secs: u64,
+        /// Marks the process as the probe's in `ps`.
+        #[arg(long)]
+        tag: String,
+    },
+    /// What the launchd probe's job runs: start `hold` in a process group of its own, write
+    /// `job=<pid> hold=<pid>` to `out` whole, and wait for it.
+    LaunchdJob {
+        /// Where to write the two pids.
+        #[arg(long)]
+        out: PathBuf,
+        /// Passed to `hold`.
+        #[arg(long)]
+        secs: u64,
+        /// Passed to `hold`.
+        #[arg(long)]
+        tag: String,
     },
     /// A mode that sets a resource limit on itself and then acts past it.
     #[command(flatten)]
@@ -168,6 +191,12 @@ pub fn run(child: &Child) -> ExitCode {
         Child::Write { path } => std::fs::write(path, b"probe\n").map(|()| String::new()),
         Child::Limited(mode) => set_limits(&mode.limits()).and_then(|()| mode.act()),
         Child::Rusage { pid } => pid_usage_text(*pid),
+        Child::Hold { secs, tag } => {
+            std::thread::sleep(Duration::from_secs(*secs));
+            Ok(format!("{tag}\n"))
+        }
+        Child::LaunchdJob { out, secs, tag } => std::env::current_exe()
+            .and_then(|exe| launchd_job(&mut hold_command(&exe, *secs, tag), out)),
     };
     match outcome {
         Ok(out) => {
@@ -179,6 +208,34 @@ pub fn run(child: &Child) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// `exe child hold --secs <secs> --tag <tag>`.
+fn hold_command(exe: &Path, secs: u64, tag: &str) -> Command {
+    let mut cmd = Command::new(exe);
+    cmd.args(["child", "hold", "--secs", &secs.to_string(), "--tag", tag]);
+    cmd
+}
+
+/// Starts `hold` in a process group of its own, writes both pids to `out` (to a `.part`
+/// file first, renamed, so a reader never sees half a line), then waits for `hold`. If the
+/// pids cannot be written, `hold` is ended: nothing would know to end it.
+fn launchd_job(hold: &mut Command, out: &Path) -> std::io::Result<String> {
+    let mut child = hold
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let line = crate::launchd::ready_line(std::process::id(), child.id());
+    let part = out.with_extension("part");
+    let written = std::fs::write(&part, line).and_then(|()| std::fs::rename(&part, out));
+    if let Err(err) = written {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(err);
+    }
+    child.wait().map(|_| String::new())
 }
 
 fn read_text(path: &std::path::Path) -> std::io::Result<String> {
@@ -461,6 +518,63 @@ mod tests {
         let err = pid_usage_text(1).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::Unsupported);
         assert_eq!(run(&Child::Rusage { pid: 1 }), ExitCode::FAILURE);
+    }
+
+    #[test]
+    fn hold_sleeps_then_succeeds() {
+        let hold = Child::Hold {
+            secs: 0,
+            tag: "t".into(),
+        };
+        assert_eq!(run(&hold), ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn the_hold_command_names_the_mode_and_passes_secs_and_tag() {
+        let cmd = hold_command(Path::new("/p/probe"), 300, "js-mac-probe.7");
+        assert_eq!(cmd.get_program(), "/p/probe");
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(
+            args,
+            ["child", "hold", "--secs", "300", "--tag", "js-mac-probe.7"]
+        );
+    }
+
+    /// The test binary listing its tests stands in for `hold`: a child that exits at once.
+    fn quick_child() -> Command {
+        let mut cmd = Command::new(std::env::current_exe().unwrap());
+        cmd.arg("--list");
+        cmd
+    }
+
+    #[test]
+    fn the_launchd_job_writes_its_own_pid_and_its_childs_whole_and_waits() {
+        let out = scratch("launchd-ready");
+        assert_eq!(launchd_job(&mut quick_child(), &out).unwrap(), "");
+        let text = std::fs::read_to_string(&out).unwrap();
+        std::fs::remove_file(&out).unwrap();
+        let (job, hold) = crate::launchd::ready(&text).unwrap();
+        assert_eq!(job, std::process::id());
+        assert_ne!(hold, job);
+        assert!(!out.with_extension("part").exists());
+    }
+
+    #[test]
+    fn a_launchd_job_that_cannot_write_its_pids_fails() {
+        let out = scratch("launchd-missing-dir").join("ready");
+        assert!(launchd_job(&mut quick_child(), &out).is_err());
+        let job = Child::LaunchdJob {
+            out,
+            secs: 0,
+            tag: "t".into(),
+        };
+        assert_eq!(run(&job), ExitCode::FAILURE);
+    }
+
+    #[test]
+    fn a_launchd_job_whose_child_cannot_start_fails() {
+        let mut missing = Command::new(scratch("no-such-program"));
+        assert!(launchd_job(&mut missing, &scratch("launchd-unused")).is_err());
     }
 
     #[test]
