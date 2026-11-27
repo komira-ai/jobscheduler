@@ -21,7 +21,9 @@ use crate::job_api::read::silence::Silence;
 use crate::job_api::roles::as_operator;
 use crate::job_expiry::{DEFAULT_SILENCE_LIMIT, JobLimits};
 
-const SECOND: Duration = Duration::from_secs(1);
+/// The margin each boundary is checked by: every commit of the rig's fake store moves its clock
+/// on a little, so a check a second from the limit could fall on the wrong side of it.
+const MARGIN: Duration = Duration::from_secs(10);
 const MINUTE: Duration = Duration::from_secs(60);
 const YEAR: Duration = Duration::from_secs(365 * 24 * 3600);
 
@@ -61,7 +63,7 @@ async fn started(rig: &Rig, agent: &mut FakeAgent, id: &str, spec: JobSpec, run:
     job.id
 }
 
-// The brief's first and second cases. Catches a silent host's job left running for ever (its
+// Catches a silent host's job left running for ever (its
 // client waiting with no deadline), one ended before the limit, one retried or placed again
 // under its retry policy, an allocation freed on silence (a returning host would then run a job
 // nobody counts), a job of a host heard meanwhile ended, a cause GetJob does not show, a
@@ -98,7 +100,7 @@ async fn a_host_silent_past_the_limit_has_its_jobs_lost_and_told_to_stop_on_its_
         heard.take(&rig.beat(&heard).await.unwrap());
         rig.tick();
     }
-    rig.advance(MINUTE - SECOND);
+    rig.advance(MINUTE - MARGIN);
     rig.tick();
     let booked = [
         (&running, JobState::Running),
@@ -107,10 +109,10 @@ async fn a_host_silent_past_the_limit_has_its_jobs_lost_and_told_to_stop_on_its_
     ];
     for (id, state) in booked {
         let held = (state, AllocationStep::Booked);
-        assert_eq!(rig.states(id), held, "{id} a second before the limit");
+        assert_eq!(rig.states(id), held, "{id} just before the limit");
     }
 
-    rig.advance(2 * SECOND);
+    rig.advance(2 * MARGIN);
     rig.tick();
     for id in [&running, &starting, &unsent] {
         let job = rig.job(id);
@@ -158,8 +160,8 @@ async fn a_host_silent_past_the_limit_has_its_jobs_lost_and_told_to_stop_on_its_
     }
 }
 
-// The brief's third case. Catches a silence counted across beats (three silences of a second
-// short of the limit add up to an hour and a half), a host heard within the limit whose job is
+// Catches a silence counted across beats (three silences just short
+// of the limit add up to an hour and a half), a host heard within the limit whose job is
 // ended, and a limit that never ends anything.
 #[tokio::test]
 async fn a_host_heard_within_the_limit_keeps_its_jobs_and_each_beat_restarts_the_count() {
@@ -170,13 +172,13 @@ async fn a_host_heard_within_the_limit_keeps_its_jobs_and_each_beat_restarts_the
     rig.tick();
     agent.take(&rig.beat(&agent).await.unwrap());
     for round in 0..3 {
-        rig.advance(DEFAULT_SILENCE_LIMIT - SECOND);
+        rig.advance(DEFAULT_SILENCE_LIMIT - MARGIN);
         rig.tick();
         let booked = (JobState::Running, AllocationStep::Booked);
         assert_eq!(rig.states(&running), booked, "round {round}");
         agent.take(&rig.beat(&agent).await.unwrap());
     }
-    rig.advance(DEFAULT_SILENCE_LIMIT + SECOND);
+    rig.advance(DEFAULT_SILENCE_LIMIT + MARGIN);
     rig.tick();
     let lost = (JobState::Lost, AllocationStep::Releasing);
     assert_eq!(rig.states(&running), lost);
@@ -202,27 +204,23 @@ async fn silence_counts_from_the_first_pass_after_a_boot_and_after_a_failed_pass
         booked,
         "the first pass after the boot"
     );
-    rig.advance(DEFAULT_SILENCE_LIMIT - SECOND);
+    rig.advance(DEFAULT_SILENCE_LIMIT - MARGIN);
     rig.tick();
-    assert_eq!(rig.states(&running), booked, "a second before the limit");
+    assert_eq!(rig.states(&running), booked, "just before the limit");
 
     rig.store.fail_read_after(0);
     rig.agents.job_pass();
-    rig.advance(2 * SECOND);
+    rig.advance(2 * MARGIN);
     rig.tick();
     assert_eq!(
         rig.states(&running),
         booked,
         "the pass after the failed one"
     );
-    rig.advance(DEFAULT_SILENCE_LIMIT - SECOND);
+    rig.advance(DEFAULT_SILENCE_LIMIT - MARGIN);
     rig.tick();
-    assert_eq!(
-        rig.states(&running),
-        booked,
-        "a second before the limit again"
-    );
-    rig.advance(SECOND);
+    assert_eq!(rig.states(&running), booked, "just before the limit again");
+    rig.advance(MARGIN);
     rig.tick();
     let lost = (JobState::Lost, AllocationStep::Releasing);
     assert_eq!(rig.states(&running), lost);

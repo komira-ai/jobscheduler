@@ -138,11 +138,12 @@ impl Observe for Provider {
 
 /// One pass over the rig's tables at its clock, under `limits`, reading hosts from `provider`.
 fn pass(rig: &Rig, limits: JobLimits, provider: &Provider) -> Passed {
+    let now = store_time(now_ms(rig));
     run(
         &rig.jobs,
         (limits, &WholeNodeConfig::dedicated(1)),
         (provider, &NoMetrics),
-        store_time(now_ms(rig)),
+        (now, now),
     )
     .unwrap()
 }

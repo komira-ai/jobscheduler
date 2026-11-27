@@ -422,7 +422,11 @@ fn job() -> impl Strategy<Value = JobRecord> {
             proptest::collection::vec(host_id(), 0..4),
             proptest::collection::vec(host_id(), 0..4),
         ),
-        (queue_trail(), attempt_trail()),
+        (
+            queue_trail(),
+            attempt_trail(),
+            proptest::option::of(Just(crate::result::LostCause::HostSilent)),
+        ),
     )
         .prop_map(
             |(
@@ -430,7 +434,7 @@ fn job() -> impl Strategy<Value = JobRecord> {
                 (placed_at, started_at, ended_at, host, cancel_requested, cancel_requested_at),
                 (result, retention_ends, deadline_floor, client, start_failure_detail),
                 (failed_prepares, prepare_bars, held_refusals, capacity_refusals),
-                (queue, attempt),
+                (queue, attempt, lost_cause),
             )| JobRecord {
                 id: JobId::parse(&id).expect("an id"),
                 spec,
@@ -454,6 +458,7 @@ fn job() -> impl Strategy<Value = JobRecord> {
                 queue,
                 carried: Carried::default(),
                 start_failure_detail,
+                lost_cause,
                 attempt,
             },
         )

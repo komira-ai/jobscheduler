@@ -69,7 +69,9 @@
 //! host whose row is live is refused unless it names the row's agent process
 //! ([`JobStore::hello_node_in_pool`]), and a row silent long enough that holds nothing is
 //! deleted ([`JobStore::forget_silent_nodes`]), or sooner, when the operator retires the host,
-//! once it is silent past the grace and holds nothing ([`JobStore::retire_node`]).
+//! once it is silent past the grace and holds no work, taint, cordon or mark
+//! ([`JobStore::retire_node`]): a releasing allocation whose job has ended is not work, and the
+//! caller frees it once the row is gone.
 //!
 //! The **dispatch queue** holds what a host's agent is to do, one [`DispatchMessage`] per row
 //! (`dispatch/<host>/<seq>`): a start, queued by the transaction that books the host (by the
@@ -196,7 +198,7 @@
 //! | [`JobStore::hello_node_in_pool`] | for a host that has a row: nothing when the row was heard within the grace and names another agent process than the hello's (or either names none), else put `node/<host>` at the version read, with the next epoch, a lost race reading the row again and judging it again; for one that has none, put `node/<host>` if absent and `pool/<pool>` if absent or at the version read, when the pool's rows are fewer than its cap; nothing otherwise |
 //! | [`JobStore::forget_node`] | delete `node/<host>` at the version given; nothing when the row is not at it |
 //! | [`JobStore::forget_silent_nodes`] | per silent host, claim `node/<host>` and delete it at the version read when the host holds no live allocation, taint, cordon or mark; nothing otherwise |
-//! | [`JobStore::retire_node`] | when the host's row is silent past the grace, claim `node/<host>` and delete it at the version read when the host holds no live allocation, taint, cordon or mark; nothing otherwise; a row that moved or went first is read again |
+//! | [`JobStore::retire_node`] | when the host's row is silent past the grace, claim `node/<host>` and delete it at the version read when the host holds no work (no booked allocation, none releasing under a job that has not ended), taint, cordon or mark; nothing otherwise; a row that moved or went first is read again |
 //! | [`JobStore::mark_host`] | put `hostmark/<host>` if absent or at the version read |
 //! | [`JobStore::unmark_host`] | delete `hostmark/<host>` at the version given |
 //! | [`JobStore::drop_taints`] | delete each `taint/<host>` it is given at the version read, while it names the job given, in one transaction; nothing when none is left |

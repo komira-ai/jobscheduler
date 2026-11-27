@@ -27,7 +27,7 @@
 use std::fmt::Display;
 use std::sync::Arc;
 
-use js_jobs::{AllocationStep, JobStoreError, Kept, Retire};
+use js_jobs::{AllocationStep, JobId, JobStoreError, Kept, Retire};
 use js_registry::{HostState, OwnHost};
 use js_types::HostId;
 use tracing::{error, info};
@@ -123,18 +123,23 @@ fn held_by(own: &OwnHost) -> Option<Kept> {
 /// The first [`JobStoreError`] of a read or a free; what was freed before it stays, and the
 /// same retirement again frees the rest.
 fn free_given_up(jobs: &ServerJobs, host: &HostId) -> Result<usize, JobStoreError> {
-    let mut freed = 0;
-    for (allocation, job) in jobs.live_on(host)? {
-        let ended = job.as_ref().is_none_or(|job| job.state.is_ended());
-        if (allocation.step == AllocationStep::Releasing) & ended {
-            job_alloc::free_allocation(jobs, &allocation.job, Freed::Retired)?;
-            freed += 1;
-        }
+    let given_up: Vec<JobId> = jobs
+        .live_on(host)?
+        .into_iter()
+        .filter(|(allocation, job)| {
+            let ended = job.as_ref().is_none_or(|job| job.state.is_ended());
+            (allocation.step == AllocationStep::Releasing) & ended
+        })
+        .map(|(allocation, _)| allocation.job)
+        .collect();
+    for id in &given_up {
+        job_alloc::free_allocation(jobs, id, Freed::Retired)?;
     }
-    if freed > 0 {
+    if !given_up.is_empty() {
+        let freed = given_up.len();
         info!(%host, freed, "a retired host's unconfirmed stops were given up");
     }
-    Ok(freed)
+    Ok(given_up.len())
 }
 
 /// The fault of a retirement whose store failed, logged as an error naming the failure.

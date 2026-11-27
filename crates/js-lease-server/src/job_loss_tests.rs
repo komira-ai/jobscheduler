@@ -247,19 +247,29 @@ fn a_host_silent_for_the_limit_has_its_live_jobs_lost_and_its_allocations_releas
     hello(&jobs, "host-b");
     let heard = at(&jobs, "job-heard", "host-b", JobState::Running);
 
-    clock.advance(LIMIT / 2 - Duration::from_millis(1));
+    // The boundary is measured from host-a's row: every commit of the fake moves its clock on.
+    let row = jobs.read_node(&host("host-a")).unwrap().unwrap();
+    let limit_at = row.record.heard_at.saturating_add(LIMIT);
+    let pass_at =
+        |now: StoreTime, floor: StoreTime| lose_silent(&jobs, (LIMIT, floor), now, &NoMetrics);
+    let before = row
+        .record
+        .heard_at
+        .saturating_add(LIMIT - Duration::from_millis(1));
+    let zero = StoreTime::ZERO;
     assert_eq!(
-        silent_pass(&jobs),
+        pass_at(before, zero),
         Ok(Vec::new()),
         "a moment before the limit"
     );
-    let floor = jobs.now().unwrap().saturating_add(Duration::from_secs(1));
-    clock.advance(Duration::from_millis(1));
-    let now = jobs.now().unwrap();
-    let floored = lose_silent(&jobs, (LIMIT, floor), now, &NoMetrics);
-    assert_eq!(floored, Ok(Vec::new()), "a floor inside the limit");
+    let floor = row.record.heard_at.saturating_add(Duration::from_secs(1));
+    assert_eq!(
+        pass_at(limit_at, floor),
+        Ok(Vec::new()),
+        "a floor inside the limit"
+    );
 
-    let lost = silent_pass(&jobs).unwrap();
+    let lost = pass_at(limit_at, zero).unwrap();
     // In job id order.
     assert_eq!(
         lost,
@@ -288,7 +298,7 @@ fn a_host_silent_for_the_limit_has_its_live_jobs_lost_and_its_allocations_releas
         let booked = (JobState::Running, None, AllocationStep::Booked);
         assert_eq!(silenced(&jobs, id), booked, "{id}");
     }
-    assert_eq!(silent_pass(&jobs), Ok(Vec::new()), "a second pass");
+    assert_eq!(pass_at(limit_at, zero), Ok(Vec::new()), "a second pass");
 }
 
 // Catches a pass that goes on ending a host's jobs after a beat of the host landed between its
