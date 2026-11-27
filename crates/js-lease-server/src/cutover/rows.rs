@@ -13,6 +13,9 @@ use std::num::NonZeroUsize;
 use js_state::{Cond, ResumeToken, ScanRange, Store, StoreError, StoreTime, Txn, Versioned};
 use sha2::{Digest as _, Sha256};
 
+/// A row as a scan returns it: its key and its value.
+type Row = (String, Versioned);
+
 /// How many rows one read of a scan returns and one write commits.
 pub(crate) const PAGE: NonZeroUsize = NonZeroUsize::MIN.saturating_add(511);
 
@@ -196,7 +199,7 @@ pub(crate) fn write(source: &dyn Store, target: &dyn Store) -> Result<u64, RowsE
     let mut wrote = 0;
     pages(source, "", &mut |rows| {
         let held = held(target, rows)?;
-        let missing: Vec<&(String, Versioned)> = rows
+        let missing: Vec<&Row> = rows
             .iter()
             .filter(|(key, _)| !held.contains_key(key))
             .collect();
@@ -232,10 +235,7 @@ pub(crate) fn export(
 }
 
 /// The rows of `rows` that `target` holds, by key.
-fn held(
-    target: &dyn Store,
-    rows: &[(String, Versioned)],
-) -> Result<BTreeMap<String, Versioned>, StoreError> {
+fn held(target: &dyn Store, rows: &[Row]) -> Result<BTreeMap<String, Versioned>, StoreError> {
     let keys: Vec<String> = rows.iter().map(|(key, _)| key.clone()).collect();
     Ok(target.get_many(&keys)?.into_iter().collect())
 }
@@ -245,7 +245,7 @@ fn held(
 /// a time of the clock of the store it was read from.
 fn put_all<'a>(
     (read, target): (&dyn Store, &dyn Store),
-    rows: impl Iterator<Item = &'a (String, Versioned)>,
+    rows: impl Iterator<Item = &'a Row>,
 ) -> Result<(), RowsError> {
     let now = read.now()?;
     let txn = rows.fold(Txn::new(), |txn, (key, row)| put(txn, key, row, now));
@@ -270,7 +270,7 @@ fn put(txn: Txn, key: &str, row: &Versioned, now: StoreTime) -> Txn {
 fn pages(
     store: &dyn Store,
     prefix: &str,
-    each: &mut dyn FnMut(&[(String, Versioned)]) -> Result<(), RowsError>,
+    each: &mut dyn FnMut(&[Row]) -> Result<(), RowsError>,
 ) -> Result<(), RowsError> {
     let mut after: Option<ResumeToken> = None;
     loop {

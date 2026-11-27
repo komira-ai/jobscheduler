@@ -82,7 +82,7 @@ fn verb(words: &[&dyn AsRef<std::ffi::OsStr>]) -> (String, String, String) {
         word.to_os_string()
     }));
     let (mut out, mut err) = (Vec::new(), Vec::new());
-    let code = crate::run(args, &mut out, &mut err);
+    let code = super::run(&args, &mut out, &mut err);
     (
         format!("{code:?}"),
         String::from_utf8(out).unwrap(),
