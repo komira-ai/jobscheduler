@@ -50,6 +50,7 @@ use super::engine::jobs::Decided;
 use super::engine::jobs_seen::{Kept, Seen};
 use super::engine::{Engine, Settings};
 use super::sizes::{ColdCpuOn, ColdMemoryOn, day_of};
+use super::telemetry::Telemetry;
 
 /// The placer the registry is given: it keeps the engine, the scheduler that places the
 /// queued jobs, and follows the registry's hosts.
@@ -159,11 +160,18 @@ impl SchedPlacer {
         }
     }
 
-    /// What `/metrics` reads of the curve mode ([`Engine::curve_view`]); `None` unless it is
-    /// [`crate::sizes::Curves::On`].
+    /// What `/metrics` reads of the curve mode ([`Engine::curve_view`]): the class counts
+    /// under [`crate::sizes::Curves::Shadow`] and [`crate::sizes::Curves::On`], the hosts'
+    /// peaks under `On` alone; `None` under [`crate::sizes::Curves::Off`].
     #[must_use]
     pub fn curve_view(&self) -> Option<CurveView> {
         self.engine().curve_view()
+    }
+
+    /// What `/metrics` reads of the placement ([`Engine::telemetry`]).
+    #[must_use]
+    pub fn telemetry(&self) -> Telemetry {
+        self.engine().telemetry()
     }
 
     /// `decided` with each placement's [`Placement::sized_from`](js_jobs::Placement::sized_from):

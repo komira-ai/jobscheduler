@@ -235,11 +235,11 @@ mod tests {
     }
 
     /// Asserts that the placer the server builds reports a curve view (as `/metrics` reads
-    /// it) exactly when its mode is `on`, with the hosts and the wait bound given, and none
-    /// under `off` and `shadow`, whatever hosts and wait bound are given. Catches a mode that
+    /// it) exactly when its mode is `shadow` or `on`, with the hosts and the wait bound given,
+    /// and none under `off`, whatever hosts and wait bound are given. Catches a mode that
     /// does not reach the placer and curve settings that turn the mode on by themselves.
     #[test]
-    fn the_placer_reports_a_curve_view_only_at_on() {
+    fn the_placer_reports_a_curve_view_only_at_shadow_and_on() {
         let clock = SharedClock::new(js_types::ManualClock::new(
             js_types::Timestamp::from_millis(0),
         ));
@@ -252,7 +252,7 @@ mod tests {
         };
         for (mode, viewed) in [
             (Curves::Off, false),
-            (Curves::Shadow, false),
+            (Curves::Shadow, true),
             (Curves::On, true),
         ] {
             let curves = CurveSetting {

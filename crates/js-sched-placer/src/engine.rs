@@ -45,6 +45,7 @@ use crate::curves::{CurveSettings, CurveView};
 use crate::map;
 use crate::room::Room;
 use crate::sizes::{ColdCpuOn, ColdMemoryOn, ColdSize, Curves, JobSizes};
+use crate::telemetry::{HostLoad, Telemetry};
 
 #[path = "curve_room.rs"]
 mod curve_room;
@@ -197,10 +198,38 @@ impl Engine {
         self
     }
 
-    /// What `/metrics` reads of the curve mode; `None` unless it is [`Curves::On`].
+    /// What `/metrics` reads of the curve mode: the class counts under [`Curves::Shadow`] and
+    /// [`Curves::On`] (with no host peak under shadow, which books nothing by curve); `None`
+    /// under [`Curves::Off`].
     #[must_use]
     pub fn curve_view(&self) -> Option<CurveView> {
         self.curve_view_of()
+    }
+
+    /// What `/metrics` reads of the placement: the scheduler's admission counters, how it
+    /// charges each host that is its worker, and the fit and the checks of the runs freed while
+    /// serving ([`Telemetry`]).
+    #[must_use]
+    pub fn telemetry(&self) -> Telemetry {
+        let charged = |host: &HostId| {
+            let worker = map::worker(host);
+            let (capacity, load) = self
+                .sched
+                .capacity(&worker)
+                .zip(self.sched.load_view(&worker))?;
+            let host_load = HostLoad {
+                cpu_capacity_millis: capacity.cpu_millis,
+                memory_capacity_bytes: capacity.memory_bytes,
+                load,
+            };
+            Some((host.clone(), host_load))
+        };
+        Telemetry {
+            counters: self.sched.load_counters(),
+            hosts: self.hosts.keys().filter_map(charged).collect(),
+            fit: self.sizes.fit().clone(),
+            checks: self.sizes.curve_checks(),
+        }
     }
 
     /// The same engine, a job of an operating system `on` names booking that cold memory while

@@ -214,3 +214,138 @@ js_host_memory_free_bytes{host="host-d"} 17179869184
 # HELP js_host_whole_mark 1 for each host set aside whole, by its mark: reserved, held, draining or releasing.
 # TYPE js_host_whole_mark gauge
 js_host_whole_mark{host="host-d",state="draining"} 1
+# HELP js_placement_admissions_total Leases the load predicate admitted.
+# TYPE js_placement_admissions_total counter
+js_placement_admissions_total 7
+# HELP js_placement_admissions_fallback_total Of the admissions, those on a host charged by prediction alone.
+# TYPE js_placement_admissions_fallback_total counter
+js_placement_admissions_fallback_total 3
+# HELP js_placement_admissions_cold_total Of the admissions, the cold ones.
+# TYPE js_placement_admissions_cold_total counter
+js_placement_admissions_cold_total 2
+# HELP js_placement_scored_total Placements chosen by the score among two or more hosts.
+# TYPE js_placement_scored_total counter
+js_placement_scored_total 5
+# HELP js_placement_decided_total Of the scored placements, by the key that chose them: slack (key 1: a host predicted above its capacity, so the slack zone was used), distrusted (key 3: a distrusted host), concentrated (key 4: a host concentrated on the lease's key) or tie-break (the best two were equal in keys 1 to 5 and a tie-break decided). One placement can count under more than one key.
+# TYPE js_placement_decided_total counter
+js_placement_decided_total{key="slack"} 1
+js_placement_decided_total{key="distrusted"} 2
+js_placement_decided_total{key="concentrated"} 3
+js_placement_decided_total{key="tie-break"} 4
+# HELP js_placement_score_evaluations_total Slot-resource evaluations of the score: 64 for each host scored for each request. None for a host the predicate refused or that was excluded before it, and for a request with one host left.
+# TYPE js_placement_score_evaluations_total counter
+js_placement_score_evaluations_total 640
+# HELP js_load_readings_total Load readings of the hosts, by result: accepted, or dropped (out of order, a counter or the clock going back, or implausible).
+# TYPE js_load_readings_total counter
+js_load_readings_total{result="accepted"} 20
+js_load_readings_total{result="dropped"} 2
+# HELP js_load_floor_windows_total Accepted readings that gave a window: the windows in which the floor may bind.
+# TYPE js_load_floor_windows_total counter
+js_load_floor_windows_total 18
+# HELP js_load_floor_binds_total Of those windows, those in which the floor on the demand was above the measurement.
+# TYPE js_load_floor_binds_total counter
+js_load_floor_binds_total 6
+# HELP js_host_cpu_capacity_millicores The CPU the scheduler books on each host it has a worker for, in thousandths of a core.
+# TYPE js_host_cpu_capacity_millicores gauge
+js_host_cpu_capacity_millicores{host="host-a"} 8000
+js_host_cpu_capacity_millicores{host="host-b"} 8000
+# HELP js_host_memory_capacity_bytes The memory the scheduler books on each host it has a worker for: the host's memory cut to the share it may book (memory_schedulable_percent).
+# TYPE js_host_memory_capacity_bytes gauge
+js_host_memory_capacity_bytes{host="host-a"} 17179869184
+js_host_memory_capacity_bytes{host="host-b"} 17179869184
+# HELP js_host_cpu_measured_millicores The cores demanded on each host over the last two windows (the larger), in thousandths of a core: its busy cores plus those times the share of the window in which a task waited for a CPU. No series before the host's first window.
+# TYPE js_host_cpu_measured_millicores gauge
+js_host_cpu_measured_millicores{host="host-a"} 2500
+# HELP js_host_memory_working_set_bytes The working set of each host's newest reading, as the agent reported it. No series for a host with no reading.
+# TYPE js_host_memory_working_set_bytes gauge
+js_host_memory_working_set_bytes{host="host-a"} 4294967296
+# HELP js_host_cpu_predicted_millicores The CPU predicted for the action leases of each host, in thousandths of a core.
+# TYPE js_host_cpu_predicted_millicores gauge
+js_host_cpu_predicted_millicores{host="host-a"} 3000
+js_host_cpu_predicted_millicores{host="host-b"} 0
+# HELP js_host_cpu_uncovered_millicores Of the CPU predicted on each host, what no reading has covered yet, in thousandths of a core.
+# TYPE js_host_cpu_uncovered_millicores gauge
+js_host_cpu_uncovered_millicores{host="host-a"} 500
+js_host_cpu_uncovered_millicores{host="host-b"} 0
+# HELP js_host_memory_predicted_bytes The memory predicted for the action leases of each host.
+# TYPE js_host_memory_predicted_bytes gauge
+js_host_memory_predicted_bytes{host="host-a"} 6442450944
+js_host_memory_predicted_bytes{host="host-b"} 0
+# HELP js_host_memory_uncovered_bytes Of the memory predicted on each host, what no reading has covered yet.
+# TYPE js_host_memory_uncovered_bytes gauge
+js_host_memory_uncovered_bytes{host="host-a"} 1073741824
+js_host_memory_uncovered_bytes{host="host-b"} 0
+# HELP js_host_load_fallback 1 for a host charged by prediction alone, with no usable measurement, and 0 for a host charged by its measurement.
+# TYPE js_host_load_fallback gauge
+js_host_load_fallback{host="host-a"} 0
+js_host_load_fallback{host="host-b"} 1
+# HELP js_host_cpu_pressure_some_seconds_total The time some task of each host waited for a CPU, from the host's /proc/pressure/cpu, in seconds, counted since the host booted. 0 when the agent does not measure it. No series for a host with no load reported.
+# TYPE js_host_cpu_pressure_some_seconds_total counter
+# HELP js_host_actions_oom_events_total How many times the OOM killer ran for the limit of each host's actions control group, as of its newest reading (a kill at a lease's own limit is not counted). No series for a host that reported none.
+# TYPE js_host_actions_oom_events_total counter
+# HELP js_hosts_kept_empty Live hosts with no mark that have nothing booked (no CPU and no memory) at the scrape: the hosts the packing keeps empty. A lost host and one waiting to say hello again are not counted.
+# TYPE js_hosts_kept_empty gauge
+js_hosts_kept_empty 0
+# HELP js_run_cpu_mean_over_booked A successful run's mean CPU over its booked CPU: its CPU time over its wall time, over the cores it booked, for runs freed while the server was serving. Every such run counts by what it booked, cold and explicit bookings and runs held at a ceiling included. A run under a second, one that used no CPU time and one that booked none have none.
+# TYPE js_run_cpu_mean_over_booked histogram
+js_run_cpu_mean_over_booked_bucket{le="0.25"} 0
+js_run_cpu_mean_over_booked_bucket{le="0.5"} 1
+js_run_cpu_mean_over_booked_bucket{le="0.75"} 1
+js_run_cpu_mean_over_booked_bucket{le="1"} 3
+js_run_cpu_mean_over_booked_bucket{le="1.25"} 3
+js_run_cpu_mean_over_booked_bucket{le="1.5"} 3
+js_run_cpu_mean_over_booked_bucket{le="2"} 3
+js_run_cpu_mean_over_booked_bucket{le="3"} 3
+js_run_cpu_mean_over_booked_bucket{le="5"} 3
+js_run_cpu_mean_over_booked_bucket{le="+Inf"} 4
+js_run_cpu_mean_over_booked_sum 8.4
+js_run_cpu_mean_over_booked_count 4
+# HELP js_run_cpu_peak_over_mean A successful run's CPU peak over its mean CPU: the most cores its group used over the agent's peak window (five seconds), over its mean. A run shorter than the window reports its mean as its peak, so it reads 1. A run with no reported peak or no mean has none.
+# TYPE js_run_cpu_peak_over_mean histogram
+js_run_cpu_peak_over_mean_bucket{le="0.25"} 0
+js_run_cpu_peak_over_mean_bucket{le="0.5"} 0
+js_run_cpu_peak_over_mean_bucket{le="0.75"} 0
+js_run_cpu_peak_over_mean_bucket{le="1"} 0
+js_run_cpu_peak_over_mean_bucket{le="1.25"} 0
+js_run_cpu_peak_over_mean_bucket{le="1.5"} 0
+js_run_cpu_peak_over_mean_bucket{le="2"} 1
+js_run_cpu_peak_over_mean_bucket{le="3"} 1
+js_run_cpu_peak_over_mean_bucket{le="5"} 1
+js_run_cpu_peak_over_mean_bucket{le="+Inf"} 1
+js_run_cpu_peak_over_mean_sum 1.75
+js_run_cpu_peak_over_mean_count 1
+# HELP js_run_memory_peak_over_booked A successful run's peak memory over its booked memory: the peak of its non-file memory series when its host recorded a whole one, else its group's memory.peak (which counts page cache). A run with no measured peak or no booked memory has none.
+# TYPE js_run_memory_peak_over_booked histogram
+js_run_memory_peak_over_booked_bucket{le="0.25"} 0
+js_run_memory_peak_over_booked_bucket{le="0.5"} 0
+js_run_memory_peak_over_booked_bucket{le="0.75"} 0
+js_run_memory_peak_over_booked_bucket{le="1"} 0
+js_run_memory_peak_over_booked_bucket{le="1.25"} 0
+js_run_memory_peak_over_booked_bucket{le="1.5"} 0
+js_run_memory_peak_over_booked_bucket{le="2"} 0
+js_run_memory_peak_over_booked_bucket{le="3"} 0
+js_run_memory_peak_over_booked_bucket{le="5"} 0
+js_run_memory_peak_over_booked_bucket{le="+Inf"} 0
+js_run_memory_peak_over_booked_sum 0
+js_run_memory_peak_over_booked_count 0
+# HELP js_run_memory_kills_total Runs freed while the server was serving that ended killed at their own memory limit.
+# TYPE js_run_memory_kills_total counter
+js_run_memory_kills_total 2
+# HELP js_curve_checks_total Runs freed while the server was serving, by the resource of the profile that checked them and the status of the check: learned, not-learned (the profile chose not to learn the run), no-series (the host recorded no series of the resource), partial (the series misses the start of the run), disagrees (the CPU series disagrees with the run's CPU time) or not-a-success (the run was no success, which the profile never checks).
+# TYPE js_curve_checks_total counter
+js_curve_checks_total{resource="cpu",status="learned"} 5
+js_curve_checks_total{resource="cpu",status="not-learned"} 1
+js_curve_checks_total{resource="cpu",status="no-series"} 2
+js_curve_checks_total{resource="cpu",status="partial"} 0
+js_curve_checks_total{resource="cpu",status="disagrees"} 3
+js_curve_checks_total{resource="cpu",status="not-a-success"} 4
+js_curve_checks_total{resource="memory",status="learned"} 6
+js_curve_checks_total{resource="memory",status="not-learned"} 0
+js_curve_checks_total{resource="memory",status="no-series"} 0
+js_curve_checks_total{resource="memory",status="partial"} 1
+js_curve_checks_total{resource="memory",status="disagrees"} 0
+js_curve_checks_total{resource="memory",status="not-a-success"} 4
+# HELP js_curve_overruns_total Of the checked runs, those that overran the peak their class's profile predicted: the profile held enough runs to score a prediction and the run's peak was more than a quarter above it. Counted besides the run's status.
+# TYPE js_curve_overruns_total counter
+js_curve_overruns_total{resource="cpu"} 2
+js_curve_overruns_total{resource="memory"} 1

@@ -17,6 +17,7 @@ fn full() -> Wire {
         cpu_usage_usec: 125_000_456,
         host_cpu_usec: None,
         host_cpu_pressure_some_usec: None,
+        actions_oom_events: None,
         working_set_bytes: 7_000_000_789,
         active_file_bytes: 250_001,
         host_nonfile_bytes: None,
@@ -64,6 +65,7 @@ fn back(load: &NodeLoad) -> Wire {
         cpu_usage_usec: load.cpu_usage_usec,
         host_cpu_usec: None,
         host_cpu_pressure_some_usec: None,
+        actions_oom_events: None,
         working_set_bytes: load.memory_working_set_bytes,
         active_file_bytes: load.memory_active_file_bytes,
         host_nonfile_bytes: None,
@@ -167,6 +169,7 @@ fn the_round_trip_holds_at_the_extremes_and_when_empty() {
         cpu_usage_usec: u64::MAX,
         host_cpu_usec: None,
         host_cpu_pressure_some_usec: None,
+        actions_oom_events: None,
         working_set_bytes: MAX_MEMORY_BYTES,
         active_file_bytes: MAX_MEMORY_BYTES,
         host_nonfile_bytes: None,
@@ -391,6 +394,7 @@ fn the_schedulers_cpu_is_the_whole_hosts_when_the_agent_sends_it() {
         cpu_usage_usec: seq * 5_000_000,
         host_cpu_usec: host.map(|cores| seq * 5_000_000 * cores),
         host_cpu_pressure_some_usec: None,
+        actions_oom_events: None,
         ..full()
     };
     let busy = |host: Option<u64>| {

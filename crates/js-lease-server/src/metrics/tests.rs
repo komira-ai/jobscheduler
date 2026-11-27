@@ -195,6 +195,18 @@ async fn fixture(name: &str) -> Fixture {
 /// crosses pages.
 async fn scraped(fixture: &Fixture) -> String {
     let page = NonZeroUsize::new(2).unwrap();
+    let mut seen = snapshot(&fixture.shared, page).await.unwrap();
+    // The placer's own figures are asserted in `telemetry_tests`; here they are fixed, so the
+    // text of the placement families is known whatever the rig's scheduler has heard.
+    assert!(seen.telemetry.is_some());
+    seen.telemetry = Some(super::telemetry_tests::known());
+    render(&seen, &fixture.recorder)
+}
+
+/// The text a scrape of `fixture` renders with every figure as read, the placer's included:
+/// what the route serves.
+async fn scraped_as_served(fixture: &Fixture) -> String {
+    let page = NonZeroUsize::new(2).unwrap();
     let seen = snapshot(&fixture.shared, page).await.unwrap();
     render(&seen, &fixture.recorder)
 }
@@ -205,7 +217,9 @@ async fn scraped(fixture: &Fixture) -> String {
 /// CPU and memory booked and free (`host-a` with its six allocations, booked past its shape for
 /// CPU, so none free; `host-c` booked whole by a job; `host-b` and `host-d` free), `host-d`'s `draining`
 /// mark, and
-/// every event the recorder was told, histograms cumulative. It catches a family that is
+/// every event the recorder was told, histograms cumulative, and the placement families of a
+/// fixed telemetry (the hosts told no load, so no pressure and no OOM series, and `host-b`
+/// the one host kept empty). It catches a family that is
 /// missing, renamed or out of order, a count read from the wrong place, a booking left out,
 /// and a free figure that is not the shape less what is booked.
 #[tokio::test]
@@ -273,6 +287,7 @@ async fn without_the_job_tables_no_job_family_is_written() {
         jobs: None,
         hosts: Vec::new(),
         curves: None,
+        telemetry: None,
     };
     let text = render(&seen, &Recorder::default());
     assert!(!text.contains("js_jobs{"), "{text}");
@@ -297,11 +312,15 @@ async fn a_scrape_without_the_job_tables_reads_the_hosts_alone() {
         cpu: free(8000),
         memory: free(17_179_869_184),
         mark: None,
+        live: true,
+        cpu_pressure_some_usec: None,
+        actions_oom_events: None,
     };
     let expected = super::render::Snapshot {
         jobs: None,
         hosts: vec![host],
         curves: None,
+        telemetry: None,
     };
     assert_eq!(seen, expected);
 }
@@ -391,6 +410,7 @@ fn a_refusal_is_written_with_its_host_and_reason_labels() {
         jobs: None,
         hosts: Vec::new(),
         curves: None,
+        telemetry: None,
     };
     let text = render(&seen, &recorder);
     let line = "\njs_placement_refusals_total{host=\"h\",reason=\"cpu\"} 1\n";
@@ -409,6 +429,7 @@ fn the_pass_sink_counts_each_curve_wait_expiry_and_zero_is_written() {
         jobs: None,
         hosts: Vec::new(),
         curves: None,
+        telemetry: None,
     };
     let zero = "# TYPE js_curve_wait_expiries_total counter\njs_curve_wait_expiries_total 0\n";
     assert!(render(&seen, &recorder).contains(zero));
@@ -437,6 +458,7 @@ fn a_curve_view_is_written_as_its_classes_and_each_hosts_peak() {
         jobs: None,
         hosts: Vec::new(),
         curves: Some(view),
+        telemetry: None,
     };
     let text = render(&seen, &Recorder::default());
     let classes = "# TYPE js_curve_classes gauge\n\
@@ -453,15 +475,16 @@ fn a_curve_view_is_written_as_its_classes_and_each_hosts_peak() {
     );
 }
 
-/// Asserts that a scrape with no curve view (the placer is not at `on`) writes neither curve
-/// family, and one with an empty view writes both families with their zero lines and no host
-/// line. Catches a family written when the mode is not `on`, and one dropped for an empty view.
+/// Asserts that a scrape with no curve view (no placer, or a placer at `off`) writes neither
+/// curve family, and one with an empty view writes both families with their zero lines and no
+/// host line. Catches a family written with no view, and one dropped for an empty view.
 #[test]
 fn the_curve_families_are_written_only_when_there_is_a_view() {
     let none = super::render::Snapshot {
         jobs: None,
         hosts: Vec::new(),
         curves: None,
+        telemetry: None,
     };
     let text = render(&none, &Recorder::default());
     assert!(!text.contains("js_curve_classes"), "{text}");
@@ -488,9 +511,9 @@ fn the_curve_families_are_written_only_when_there_is_a_view() {
 }
 
 /// Asserts that a scrape reads the placer's curve view: over a server whose placer is at `on`
-/// the snapshot carries the view the placer gives, and over one whose placer is `off` (as the
-/// fixture's) it carries none, so a server not at `on` writes no curve family. Catches a scrape
-/// that never reads the placer and one that shows a view for a placer that gives none.
+/// the snapshot carries the view the placer gives, and over a rig with no placer it carries
+/// none, so such a server writes no curve family. Catches a scrape that never reads the placer
+/// and one that shows a view where there is none.
 #[tokio::test]
 async fn a_scrape_reads_the_curve_view_of_a_placer_at_on_and_none_otherwise() {
     use js_sched_placer::engine::Settings;
@@ -584,6 +607,7 @@ fn a_refusal_code_outside_the_label_rule_is_counted_as_other() {
         jobs: None,
         hosts: Vec::new(),
         curves: None,
+        telemetry: None,
     };
     let recorder = Recorder::default();
     let empty = render(&seen, &recorder);
@@ -626,6 +650,7 @@ fn a_pool_name_is_written_escaped() {
         jobs: None,
         hosts: Vec::new(),
         curves: None,
+        telemetry: None,
     };
     let text = render(&seen, &recorder);
     let line = "\njs_acquires_total{pool=\"a\\\"b\\nc\"} 1\n";
@@ -699,7 +724,7 @@ async fn only_a_private_peer_is_answered_and_only_on_metrics() {
             (StatusCode::OK, TEXT_FORMAT),
             "{peer}"
         );
-        assert_eq!(body, scraped(&fixture).await);
+        assert_eq!(body, scraped_as_served(&fixture).await);
     }
     let unknown = crate::api::not_found();
     let unknown = to_bytes(unknown.into_body(), 1 << 20).await.unwrap();

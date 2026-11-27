@@ -831,7 +831,7 @@ fn a_job_leaves_its_cpu_at_0_unless_it_names_it_or_books_the_whole_host() {
 
 /// Asserts the view: the classes that pass their four checks and those that book flat (`early`,
 /// `late` and a class of 3 runs), and the fullest booked slot of each curve host as the last walk
-/// ended; and that it is `None` under `off` and `shadow`. Catches a count that reads the wrong
+/// ended; and that it is `None` under `off`. Catches a count that reads the wrong
 /// side of the checks and a peak that includes the residual.
 #[test]
 fn the_view_counts_the_classes_and_names_the_peak_of_each_curve_host() {
@@ -857,10 +857,33 @@ fn the_view_counts_the_classes_and_names_the_peak_of_each_curve_host() {
         view.host_peaks.values().copied().collect::<Vec<_>>(),
         [82_000, 82_000]
     );
-    for curves in [Curves::Off, Curves::Shadow] {
-        let engine = engine_in(mode(curves), CurveSettings::default(), &["a"]);
-        assert_eq!(engine.curve_view(), None);
-    }
+    let off = engine_in(mode(Curves::Off), CurveSettings::default(), &["a"]);
+    assert_eq!(off.curve_view(), None);
+}
+
+/// Asserts the view under `shadow`: the same class counts as under `on` for the same history
+/// (`early` and `late` pass their checks, a class of 3 runs does not), and no host peak, as
+/// nothing is booked by curve. Catches a view that is
+/// withheld under shadow, and a peak invented for a host that books flat.
+#[test]
+fn the_view_under_shadow_counts_the_classes_and_names_no_host_peak() {
+    let tables = Tables::new();
+    let mut engine = bursts(
+        mode(Curves::Shadow),
+        CurveSettings::default(),
+        &["a", "b"],
+        &tables,
+    );
+    teach(
+        engine.sizes(),
+        &tables,
+        ("young", 3),
+        &burst_at(20, 352, 140),
+    );
+    walk(&mut engine, &[], (&["a", "b"], NOW_MS));
+    let view = engine.curve_view().unwrap();
+    assert_eq!((view.curve_classes, view.flat_classes), (2, 1));
+    assert!(view.host_peaks.is_empty());
 }
 
 /// Asserts that the pack limit reads the fullest booked slot of a curve host: with the limit at

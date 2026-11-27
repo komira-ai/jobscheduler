@@ -53,7 +53,7 @@ Columns:
 | configuration.md | 4 | 0 | 0 | 3 | komira-ai/jobscheduler#1153 |
 | deployment.md | 13 | 5 | 3 | 3 | - |
 | hosts.md | 41 | 2 | 12 | 17 | komira-ai/jobscheduler#1150, komira-ai/jobscheduler#1173, komira-ai/jobscheduler#1174, komira-ai/jobscheduler#1175, komira-ai/jobscheduler#1176 |
-| placement-by-load.md | 25 | 6 | 6 | 4 | komira-ai/jobscheduler#1178, komira-ai/jobscheduler#1179, komira-ai/jobscheduler#1180, komira-ai/jobscheduler#1181, komira-ai/jobscheduler#1182 |
+| placement-by-load.md | 25 | 6 | 5 | 5 | komira-ai/jobscheduler#1178, komira-ai/jobscheduler#1180, komira-ai/jobscheduler#1181, komira-ai/jobscheduler#1182, komira-ai/jobscheduler#1240 |
 | mac-lease-teardown.md | 5 | 1 | 1 | 1 | - |
 | decisions.md | 22 | 6 | 4 | 7 | komira-ai/jobscheduler#1150, komira-ai/jobscheduler#1174, komira-ai/jobscheduler#1175 |
 | amendments.md | 9 | 6 | 1 | 1 | - |
@@ -857,7 +857,7 @@ As read: No status header. Page is a design text for D56 to D65, steps 59 to 64 
 
 ## placement-by-load.md
 
-As read: No status header. Mostly built; it marks "does not yet persist" (L56), "Planned" telemetry (L379), "no flag yet" flags (L451), "once the profile admission layer supplies it" (L338), x2 and tuning "later" items, and "has not been confirmed" (L141, L445). Several of these are stale or superseded by placement-profiles-live.md and the sizing changes (komira-ai/jobscheduler#998, komira-ai/jobscheduler#1026).
+As read: No status header. Mostly built; it marks "does not yet persist" (L56), "Planned" telemetry (L387; the rest of the telemetry is exported, komira-ai/jobscheduler#1179), "no flag yet" flags (L451), "once the profile admission layer supplies it" (L338), x2 and tuning "later" items, and "has not been confirmed" (L141, L445). Several of these are stale or superseded by placement-profiles-live.md and the sizing changes (komira-ai/jobscheduler#998, komira-ai/jobscheduler#1026).
 
 | Section | Claim | On main | Tracking |
 |---|---|---|---|
@@ -872,9 +872,9 @@ As read: No status header. Mostly built; it marks "does not yet persist" (L56), 
 | Where the code differs (L451): --profile-store-bytes | --profile-store-bytes has no flag. | `crates/js-lease-server/src/lib.rs:72` | - |
 | What goes away in kbf / Plumbing kbf rows (L58-65, L310-313, L318-319) | kbf-node writes no cpu.max, Welcome.placement_load, kbf protobuf NodeLoad, node_load.rs, supervisor cpu.weight, --actions-cpu-max. | superseded: The repo has no kbf crates (ls crates). AGENTS.md R5 says jobscheduler never depends on kbf. The js-agent equivalent is in the js-agent-wire and js-agent crates | komira-ai/jobscheduler#999 |
 | Plumbing, Who produces NodeLoad (L309) | A host whose agent does not yet produce NodeLoad is in the fallback. | `crates/js-agent-wire/src/load.rs`, `crates/js-agent/src/usage/wire.rs` | komira-ai/jobscheduler#1036; komira-ai/jobscheduler#1056 |
-| Telemetry, What exists now (L377) | Refusals carry kind and figures and /metrics exports js_placement_refusals_total. | `crates/js-sched/src/admission.rs:102-140`, `crates/js-sched-placer/src/refusals.rs:60` | - |
-| Telemetry, Planned (L379-383) | Per-worker measured/capacity, uncovered cost, k, r and k_m histograms, floor-binds share, k_c, q, shape_guard_demotions, minutes_dropped, profile_dilation_missed, keys 1/3/4 shares, hosts kept empty, p99 working set and OOM events. | partly: In-crate counters exist (admission.rs:102-160: misfit_*, demotions_*, floor_windows/binds, score_evaluations, chose_slack, readings_dropped) | komira-ai/jobscheduler#1179 (new) |
-| Utilization (L18, L24) / Decided CPU percentile (L449) | The CPU percentile is tuned later from the measured per-run k distribution once the k histogram exists. | superseded: The k histogram does not exist (see Telemetry, Planned). The estimator books the median of the runs' means (summary.rs:37-41), so the P90-of-means premise is go | komira-ai/jobscheduler#1026 |
+| Telemetry, What exists now (L377, L379-385) | Refusals carry kind and figures and /metrics exports js_placement_refusals_total; admission counters, each host's capacity, measured load, prediction and fallback, the hosts' CPU pressure and OOM events, hosts kept empty, the k, r and k_m histograms with memory kills, and the profile checks are exported too. | `crates/js-sched/src/admission.rs:102-140`, `crates/js-sched-placer/src/refusals.rs:60`, `crates/js-sched-placer/src/telemetry.rs`, `crates/js-lease-server/src/metrics/placement.rs` | komira-ai/jobscheduler#1179 |
+| Telemetry, Planned (L387) | Throttled time and non-action CPU (not on the wire); k_c, q, minutes_dropped, profile_dilation_missed, memory_misfit and shape_guard_demotions (the job path's scheduler is fed no lease minutes and no per-minute profile, so each would read zero); per-key cost and sample count (keys are customer-derived and never a label on the unauthenticated port); cold and unsampled keys. | no | komira-ai/jobscheduler#1240 (new) |
+| Utilization (L18, L24) / Decided CPU percentile (L449) | The CPU percentile is tuned later from the measured per-run k distribution once the k histogram exists. | superseded: The k histogram now exists (`js_run_cpu_mean_over_booked`, see Telemetry, What exists now), and it only measures; the percentile premise is still replaced: The estimator books the median of the runs' means (summary.rs:37-41), so the P90-of-means premise is go | komira-ai/jobscheduler#1026 |
 | Utilization (L25-26) | A feedback correction scaling predictions by observed mean k was considered and not proposed. | no | - |
 | Admission, Memory guard (L141) and Decided (L445) | The flat-sum memory guard with d = 0 is the memory admission limit. The page says it has not been confirmed. | decision, no code | komira-ai/jobscheduler#127 |
 | Starvation (L282) | A refinement was considered and not implemented: reserve the worker where the head first passes the predicate over the horizon (smallest tau). | no | komira-ai/jobscheduler#582 |

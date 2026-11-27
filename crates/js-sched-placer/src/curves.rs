@@ -53,15 +53,19 @@ impl Default for CurveSettings {
     }
 }
 
-/// What `/metrics` reads of the curve mode: how many classes book their curve and how many
-/// book flat, and the fullest booked slot of each curve host at the last walk.
+/// What `/metrics` reads of the curve mode: how many classes pass their checks and how many do
+/// not, and the fullest booked slot of each curve host at the last walk. Under
+/// [`crate::sizes::Curves::Shadow`] the classes are counted and no host has a peak, as nothing
+/// is booked by curve; none is read under [`crate::sizes::Curves::Off`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CurveView {
-    /// Classes passing all four checks, which book their curve.
+    /// Classes passing all four checks, which book their curve under
+    /// [`crate::sizes::Curves::On`].
     pub curve_classes: u64,
-    /// Classes with a profile that fail a check, which book their flat number.
+    /// Classes with a profile that fail a check, which book their flat number under
+    /// [`crate::sizes::Curves::On`].
     pub flat_classes: u64,
     /// The fullest slot of each curve host's booked curve, in millicores, as the last walk
-    /// found it.
+    /// found it; empty under [`crate::sizes::Curves::Shadow`].
     pub host_peaks: BTreeMap<HostId, u64>,
 }

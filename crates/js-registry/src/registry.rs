@@ -125,6 +125,10 @@ pub struct HostView {
     /// The per-second lists of the same load, for the hosts listing only: empty exactly when
     /// `load` is `None` or the agent sent none.
     pub load_seconds: crate::load::LoadSeconds,
+    /// How many times the OOM killer ran for the actions cgroup's own limit, as of the same
+    /// reading as `load` (a kill at a lease's own limit is not counted): `None` exactly when
+    /// `load` is `None` or the agent sent none.
+    pub actions_oom_events: Option<u64>,
 }
 
 /// How a host is set aside: for whole-node use, or to be scaled away. The registry sets
