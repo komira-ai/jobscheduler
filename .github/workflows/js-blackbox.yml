@@ -1,4 +1,5 @@
-# The black-box tests of the released js-agent and js-server (J1 and J6 of the black-box plan),
+# The black-box tests of the released js-agent and js-server (J1 and J6: the agent's session and
+# the server's readiness, each with a job),
 # on a GitHub-hosted Linux x86_64 runner, a whole machine with root: the integration test
 # `released` of crates/js-blackbox (`#[ignore]`d, run as root) installs the js-agent .deb of the
 # release from the apt suite `testing` and starts it under systemd with flags of the farm's shape,

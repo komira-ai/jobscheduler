@@ -105,8 +105,8 @@ pub fn start_postgres(watch: &mut js_blackbox::Watch<'_>) -> String {
     watch
         .until(
             js_blackbox::READY_WITHIN,
-            || match js_state::postgres::schema::apply(&config, &set, upto) {
-                Ok(_) => js_blackbox::Seen::Yes(()),
+            &mut || match js_state::postgres::schema::apply(&config, &set, upto) {
+                Ok(_) => js_blackbox::Seen::Yes,
                 Err(e) => js_blackbox::Seen::No(e.to_string()),
             },
         )

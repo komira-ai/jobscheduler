@@ -1,5 +1,5 @@
-//! The black-box tests of the released js-agent and js-server (J1 and J6 of the black-box plan,
-//! and the failures that belong to the same rig).
+//! The black-box tests of the released js-agent and js-server (J1, the agent's session and a job;
+//! J6, the server's readiness and a job), and the failures that belong to the same rig.
 //!
 //! The released artifacts, taken as the farm takes them and driven only from outside:
 //!
@@ -112,13 +112,27 @@ struct Rig {
     session: Result<Duration, String>,
 }
 
-static RIG: OnceLock<Mutex<Rig>> = OnceLock::new();
+/// The rig, or why it did not start: a start that failed is not tried again, so every later
+/// test fails with the first failure instead of a second install over the first.
+static RIG: OnceLock<Result<Mutex<Rig>, String>> = OnceLock::new();
 
 /// The rig, started by the first test that asks.
 fn rig() -> MutexGuard<'static, Rig> {
-    RIG.get_or_init(|| Mutex::new(Rig::start()))
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
+    let started = RIG.get_or_init(|| {
+        std::panic::catch_unwind(Rig::start)
+            .map(Mutex::new)
+            .map_err(|panic| {
+                panic
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| panic.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+                    .unwrap_or_else(|| "a panic with no message".to_owned())
+            })
+    });
+    match started {
+        Ok(rig) => rig.lock().unwrap_or_else(PoisonError::into_inner),
+        Err(first) => panic!("the rig did not start: {first}"),
+    }
 }
 
 impl Rig {
@@ -154,13 +168,12 @@ impl Rig {
         let server =
             server::start_server(&dir, &image, &store, &ca.pem(), (&server_cert, &server_key));
         let ready = watch(|w| {
-            w.until(READY_WITHIN, || match server.ready() {
-                Ok(()) => Seen::Yes(()),
+            w.until(READY_WITHIN, &mut || match server.ready() {
+                Ok(()) => Seen::Yes,
                 Err(e) => Seen::No(e),
             })
         })
         .within("/readyz answers 200", READY_WITHIN)
-        .map(|(after, ())| after)
         .map_err(|e| format!("{e}\n{}", Server::logs()));
         if let Err(e) = &ready {
             panic!("J6: {e}");
@@ -214,13 +227,12 @@ impl Rig {
     fn in_session(&self, limit: Duration, version: Version) -> Result<Duration, String> {
         let want = version.to_string();
         watch(|w| {
-            w.until(limit, || match (self.host(), agent::healthy()) {
-                (Ok(h), Ok(())) if h.state == LIVE && h.agent_version == want => Seen::Yes(()),
+            w.until(limit, &mut || match (self.host(), agent::healthy()) {
+                (Ok(h), Ok(())) if h.state == LIVE && h.agent_version == want => Seen::Yes,
                 (h, health) => Seen::No(format!("host {h:?}, health {health:?}")),
             })
         })
         .within(&format!("in a session with js-agent {want}"), limit)
-        .map(|(after, ())| after)
         .map_err(|e| format!("{e}\n{}", agent::journal()))
     }
 
@@ -267,22 +279,30 @@ impl Rig {
 
     /// Waits for the job to run on the host.
     fn running(&self, id: &str) -> js_blackbox::JobSeen {
+        let mut seen = None;
         watch(|w| {
-            w.until(JOB_LIMIT, || match self.job(id) {
-                Ok(j) if j.state == RUNNING && j.host_id == HOST_ID => Seen::Yes(j),
+            w.until(JOB_LIMIT, &mut || match self.job(id) {
+                Ok(j) if j.state == RUNNING && j.host_id == HOST_ID => {
+                    seen = Some(j);
+                    Seen::Yes
+                }
                 other => Seen::No(format!("{other:?}")),
             })
         })
         .within(&format!("job {id} runs on {HOST_ID}"), JOB_LIMIT)
-        .map(|(_, j)| j)
-        .unwrap_or_else(|e| panic!("{e}\n{}", agent::journal()))
+        .unwrap_or_else(|e| panic!("{e}\n{}", agent::journal()));
+        seen.expect("the job seen running")
     }
 
     /// Waits for the job to end, then holds its result to exit code 0 in its first attempt.
     fn ends_zero(&self, id: &str) {
-        let ended = watch(|w| {
-            w.until(JOB_LIMIT, || match self.job(id) {
-                Ok(j) if j.ended() => Seen::Yes(j),
+        let mut ended = None;
+        watch(|w| {
+            w.until(JOB_LIMIT, &mut || match self.job(id) {
+                Ok(j) if j.ended() => {
+                    ended = Some(j);
+                    Seen::Yes
+                }
                 other => Seen::No(format!("{other:?}")),
             })
         })
@@ -296,7 +316,7 @@ impl Rig {
         assert!(
             result.state == SUCCEEDED && result.exit_code == Some(0) && result.attempt == 1,
             "job {id} did not end with exit code 0 in its first attempt: {result:?} (job {:?})\n{}",
-            ended.1,
+            ended,
             agent::journal()
         );
     }
@@ -442,7 +462,7 @@ fn a_server_restart_while_a_job_runs_ends_the_job_0_and_never_shows_the_host_los
     // (still starting) shows nothing and passes.
     let mut seen = 0u32;
     let held = watch(|w| {
-        w.hold_until(JOB_LIMIT, || -> Result<bool, String> {
+        w.hold_until(JOB_LIMIT, &mut || -> Result<bool, String> {
             if let Ok(h) = rig.host() {
                 seen += 1;
                 if h.state == LOST {
@@ -509,7 +529,7 @@ fn the_server_unreachable_for_60_s_keeps_the_job_and_the_agent_is_back_within_30
     {
         let _cut = Cut::new(rig.server.ports.agent);
         let held = watch(|w| {
-            w.hold(OUTAGE, || match rig.job(&id) {
+            w.hold(OUTAGE, &mut || match rig.job(&id) {
                 Ok(j) if j.ended() => Err(format!("the job ended in the outage: {j:?}")),
                 Ok(_) => Ok(()),
                 Err(e) => Err(e),
@@ -544,7 +564,7 @@ fn a_name_lookup_failing_for_60_s_after_the_first_contact_keeps_the_session() {
     );
     let id = rig.submit("name-lookup", 30);
     let held = watch(|w| {
-        w.hold(OUTAGE, || -> Result<(), String> {
+        w.hold(OUTAGE, &mut || -> Result<(), String> {
             let h = rig.host()?;
             if h.state != LIVE {
                 return Err(format!("the host is listed {}", h.state));

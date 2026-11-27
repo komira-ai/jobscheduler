@@ -49,30 +49,37 @@ fn the_pass_conditions_are_the_plans_numbers() {
     assert_eq!(PROBE_EVERY, Duration::from_secs(1));
 }
 
-#[test]
-fn a_wait_is_met_by_the_first_probe_that_sees_it_within_the_limit() {
+/// A wait with a 1 s pace whose probe `n` (from 1) first moves the clock by `late(n)`, then
+/// says yes when `yes(n)`, and no ("probe n") otherwise.
+fn wait(limit: Duration, late: fn(u32) -> Duration, yes: fn(u32) -> bool) -> Waited {
     let clock = Hand::default();
-    let mut probes = 0;
-    let waited = with_watch(&clock, |w| {
-        w.until(Duration::from_secs(60), || {
-            probes += 1;
-            if probes == 3 {
-                Seen::Yes("live")
+    let moved = clock.clone();
+    let mut n = 0;
+    with_watch(&clock, |w| {
+        w.until(limit, &mut || {
+            n += 1;
+            moved.advance(late(n));
+            if yes(n) {
+                Seen::Yes
             } else {
-                Seen::No(format!("probe {probes}"))
+                Seen::No(format!("probe {n}"))
             }
         })
-    });
+    })
+}
+
+#[test]
+fn a_wait_is_met_by_the_first_probe_that_sees_it_within_the_limit() {
+    let waited = wait(Duration::from_secs(60), |_| Duration::ZERO, |n| n == 3);
     assert_eq!(
         waited,
         Waited::Met {
-            after: Duration::from_secs(2),
-            value: "live"
+            after: Duration::from_secs(2)
         }
     );
     assert_eq!(
         waited.within("the session", SESSION_WITHIN),
-        Ok((Duration::from_secs(2), "live"))
+        Ok(Duration::from_secs(2))
     );
 }
 
@@ -80,14 +87,7 @@ fn a_wait_is_met_by_the_first_probe_that_sees_it_within_the_limit() {
 fn a_wait_that_never_sees_it_misses_at_the_limit_with_what_it_saw_last() {
     // Catches a wait that gives up early, or never: the last probe is the one that ends at the
     // limit.
-    let clock = Hand::default();
-    let mut probes = 0;
-    let waited = with_watch(&clock, |w| {
-        w.until(Duration::from_secs(30), || {
-            probes += 1;
-            Seen::<()>::No(format!("probe {probes}"))
-        })
-    });
+    let waited = wait(Duration::from_secs(30), |_| Duration::ZERO, |_| false);
     assert_eq!(
         waited,
         Waited::Missed {
@@ -108,14 +108,11 @@ fn a_wait_that_never_sees_it_misses_at_the_limit_with_what_it_saw_last() {
 fn a_probe_that_sees_it_only_after_the_limit_is_a_miss() {
     // Catches a wait that counts a late success: a session first seen at 61 s fails the 60 s
     // condition even though the probe said yes.
-    let clock = Hand::default();
-    let late = clock.clone();
-    let waited = with_watch(&clock, |w| {
-        w.until(Duration::from_secs(60), || {
-            late.advance(Duration::from_secs(61));
-            Seen::Yes(())
-        })
-    });
+    let waited = wait(
+        Duration::from_secs(60),
+        |_| Duration::from_secs(61),
+        |_| true,
+    );
     assert_eq!(
         waited,
         Waited::Missed {
@@ -124,42 +121,57 @@ fn a_probe_that_sees_it_only_after_the_limit_is_a_miss() {
         }
     );
     // Exactly at the limit is within it.
-    let clock = Hand::default();
-    let on_time = clock.clone();
-    let waited = with_watch(&clock, |w| {
-        w.until(Duration::from_secs(60), || {
-            on_time.advance(Duration::from_secs(60));
-            Seen::Yes(7)
-        })
-    });
+    let waited = wait(
+        Duration::from_secs(60),
+        |_| Duration::from_secs(60),
+        |_| true,
+    );
     assert_eq!(
         waited,
         Waited::Met {
-            after: Duration::from_secs(60),
-            value: 7
+            after: Duration::from_secs(60)
         }
     );
 }
 
+/// A hold (`until_done` false) or a hold until done (true) of `span` with a 1 s pace, whose
+/// probe `n` (from 1) answers `answer(n)`.
+fn hold(
+    span: Duration,
+    until_done: bool,
+    answer: fn(u32) -> Result<bool, String>,
+) -> (Held, Duration) {
+    let clock = Hand::default();
+    let mut n = 0;
+    let held = with_watch(&clock, |w| {
+        if until_done {
+            w.hold_until(span, &mut || {
+                n += 1;
+                answer(n)
+            })
+        } else {
+            w.hold(span, &mut || {
+                n += 1;
+                answer(n).map(|_| ())
+            })
+        }
+    });
+    (held, clock.reading())
+}
+
 #[test]
 fn a_hold_probes_the_whole_span_and_breaks_at_the_first_failure() {
-    let clock = Hand::default();
-    let held = with_watch(&clock, |w| w.hold(OUTAGE, || Ok::<(), String>(())));
+    let (held, _) = hold(OUTAGE, false, |_| Ok(false));
     // The first probe at 0 s, the last at 60 s.
     assert_eq!(held, Held::Kept { probes: 61 });
     assert_eq!(held.kept("the session"), Ok(61));
 
-    let clock = Hand::default();
-    let mut probes = 0;
-    let held = with_watch(&clock, |w| {
-        w.hold(OUTAGE, || {
-            probes += 1;
-            if probes == 11 {
-                Err(format!("{} at probe {probes}", js_blackbox::LOST))
-            } else {
-                Ok(())
-            }
-        })
+    let (held, _) = hold(OUTAGE, false, |n| {
+        if n == 11 {
+            Err(format!("{} at probe {n}", js_blackbox::LOST))
+        } else {
+            Ok(false)
+        }
     });
     assert_eq!(
         held,
@@ -181,21 +193,11 @@ fn a_hold_probes_the_whole_span_and_breaks_at_the_first_failure() {
 fn a_hold_until_done_ends_at_the_probe_that_is_done_and_breaks_when_none_is() {
     // Catches a hold that runs on after the job it watches ended, or that passes a watch that
     // never saw the end.
-    let clock = Hand::default();
-    let mut probes = 0;
-    let held = with_watch(&clock, |w| {
-        w.hold_until(Duration::from_secs(600), || {
-            probes += 1;
-            Ok::<bool, String>(probes == 5)
-        })
-    });
+    let (held, at) = hold(Duration::from_secs(600), true, |n| Ok(n == 5));
     assert_eq!(held, Held::Kept { probes: 5 });
-    assert_eq!(clock.reading(), Duration::from_secs(4));
+    assert_eq!(at, Duration::from_secs(4));
 
-    let clock = Hand::default();
-    let held = with_watch(&clock, |w| {
-        w.hold_until(Duration::from_secs(3), || Ok::<bool, String>(false))
-    });
+    let (held, _) = hold(Duration::from_secs(3), true, |_| Ok(false));
     assert_eq!(
         held,
         Held::Broken {
@@ -204,9 +206,8 @@ fn a_hold_until_done_ends_at_the_probe_that_is_done_and_breaks_when_none_is() {
         }
     );
 
-    let clock = Hand::default();
-    let held = with_watch(&clock, |w| {
-        w.hold_until(Duration::from_secs(3), || Err::<bool, &str>("listed lost"))
+    let (held, _) = hold(Duration::from_secs(3), true, |_| {
+        Err("listed lost".to_owned())
     });
     assert_eq!(
         held,

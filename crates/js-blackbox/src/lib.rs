@@ -8,7 +8,8 @@
 //! from outside: the job service's API, the agent's health route, the files the package installs,
 //! the jobs the agent runs. This crate is the part of them that decides: the pass conditions as
 //! numbers (the constants below), the wait that measures them on an injected clock
-//! ([`Watch`]), the readers of the job service's answers ([`host`], [`job`], [`result`]) and of
+//! ([`Watch`]: the black-box test's is the system's, and it waits for real; the judge's tests move
+//! a clock of their own), the readers of the job service's answers ([`host`], [`job`], [`result`]) and of
 //! the programs the tests run ([`loaded_image`], [`previous_version`]), and the farm's shapes with
 //! the values a test fills in ([`render`]).
 //!
