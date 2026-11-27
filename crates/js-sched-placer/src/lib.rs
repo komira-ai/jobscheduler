@@ -9,6 +9,8 @@
 //! host included ([`engine::whole_jobs`]: it queues, marks and commits them from the job
 //! tables).
 //!
+//! [`telemetry`] is what `/metrics` reads of the placement at each scrape.
+//!
 //! With the `test-support` feature, the placer and the engine also answer what a test reads
 //! of them: what the scheduler books and charges on a host, and the scheduler itself.
 
@@ -18,3 +20,4 @@ pub mod map;
 pub mod place;
 pub mod room;
 pub mod sizes;
+pub mod telemetry;

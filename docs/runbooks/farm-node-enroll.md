@@ -107,6 +107,40 @@ chown root:root /etc/js-agent/flags
 chmod 644 /etc/js-agent/flags
 ```
 
+The server's name and its address. Once a connection to the server has completed its TLS
+handshake, the agent sends its heartbeats, dispatch polls and job reports to the address that
+handshake completed on. It sends there without looking the name up, so a node whose resolver
+cannot answer for a while (the name is in a public zone and the site's uplink is down) stays
+registered. The agent looks the name up again in the background, about once a minute, and moves
+to a new address only after a handshake with it completes. The certificate is always checked
+against the name in `--server`. The agent's journal shows one line when lookups start failing
+(`cannot look up NAME: ...; requests go to ADDRESS ...`), one when they answer again
+(`NAME is looked up again: [...]`), and one when it moves (`NAME moved from OLD to NEW ...`).
+
+What the agent remembers is lost when it restarts. To let a node start, or restart, while the name
+cannot be looked up, give the address beside the name:
+
+```
+--server=https://js.example.com:8443
+--server-address=192.0.2.10
+```
+
+`--server-address` takes an IP address, uses the port of `--server`, and only goes with an
+`https://` server.
+
+When the server moves to a new address:
+
+1. Change the record of the name first. Running agents follow it on their own once the new
+   address completes a handshake.
+2. Then change `--server-address` in the flags file on each node. The agent reads the file only
+   when it starts, so the new value takes effect at the node's next restart.
+
+A node that starts with a stale `--server-address` tries the old address and then looks the name
+up. If the old address refuses connections, the first request goes on to the new address. If it
+drops what is sent to it, the first request uses up its limit and fails; the next one looks the
+name up first. A stale value stops a node only if the name cannot be looked up at that moment
+either.
+
 ## 3A. A node that hostkeeper manages needs no join token
 
 An enrolled, approved node is trusted. hostkeeper keeps the host's own certificate and private key

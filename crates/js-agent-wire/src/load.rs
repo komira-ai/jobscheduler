@@ -54,6 +54,13 @@ pub struct NodeLoad {
     /// pressure accounting (a Mac, a kernel without it) or whose read of the file failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_cpu_pressure_some_usec: Option<u64>,
+    /// How many times the kernel's OOM killer ran for the actions cgroup's own limit since the
+    /// group was made: the `oom` count of its `memory.events.local`, a counter that only grows.
+    /// A kill at a lease's own limit is not counted. Optional: an agent of an earlier release
+    /// does not send it, nor one on a host with no control groups (a Mac) or whose read of the
+    /// file failed; a server from before it ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actions_oom_events: Option<u64>,
     /// Memory in use by the actions, in bytes (`memory.current - inactive_file`),
     /// required. At most [`limits::MAX_MEMORY_BYTES`]. A Mac, which has no actions group,
     /// sends the whole host's non-file memory here as in `host_nonfile_bytes`.
@@ -228,7 +235,7 @@ impl NodeLoad {
     /// Fails only for a scalar out of range (`working_set_bytes`, `active_file_bytes`,
     /// `host_nonfile_bytes`);
     /// the receiver then discards the load and keeps the heartbeat. Counters (`seq`,
-    /// `mono_usec`, `cpu_usage_usec`, `host_cpu_usec`, `host_cpu_pressure_some_usec`) are
+    /// `mono_usec`, `cpu_usage_usec`, `host_cpu_usec`, `host_cpu_pressure_some_usec`, `actions_oom_events`) are
     /// unbounded here: whether one goes
     /// backwards is
     /// the receiver's state to judge. Calling it twice changes nothing the second time.
@@ -379,6 +386,7 @@ impl NodeLoad {
             cpu_usage_usec,
             host_cpu_usec: number(object, "host_cpu_usec"),
             host_cpu_pressure_some_usec: number(object, "host_cpu_pressure_some_usec"),
+            actions_oom_events: number(object, "actions_oom_events"),
             working_set_bytes,
             active_file_bytes: number(object, "active_file_bytes").unwrap_or_default(),
             host_nonfile_bytes: number(object, "host_nonfile_bytes"),

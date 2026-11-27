@@ -808,6 +808,20 @@ pub const ALLOWED: &[Allowed] = &[
         reason: "the agent's usage clock behind UsageClock; the cell's agents record no usage with it",
     },
     Allowed {
+        file: "crates/js-client/src/address.rs",
+        item: "Book::learn",
+        token: Token::InstantNow,
+        sites: 1,
+        reason: "when the HTTP client's background lookup of the server's name ended, which paces the next one; the cell's agents talk to their servers through its in-memory transports, never the HTTP client",
+    },
+    Allowed {
+        file: "crates/js-client/src/address.rs",
+        item: "Remember::connect",
+        token: Token::InstantNow,
+        sites: 1,
+        reason: "when the HTTP client's new connection began, which bounds each address's attempt within the request's limit; the cell's agents talk to their servers through its in-memory transports, never the HTTP client",
+    },
+    Allowed {
         file: "crates/js-contain/src/oci/crun.rs",
         item: "wait_exited",
         token: Token::InstantNow,
