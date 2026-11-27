@@ -584,7 +584,16 @@ generated paragraph above.
   second by second with its result: `granularity_secs` (the seconds each point covers: 1, 2, 4,
   and so on), `points` (the mean CPU of each span in sixteenths of a core, at most 128), `run_usec`
   (the run as the agent measured it) and `partial` (the series misses the start of the run), kept
-  as reported; it is absent for a job whose agent reported none, and for a lease's record. A page holds
+  as reported; it is absent for a job whose agent reported none, and for a lease's record. It
+  carries `memory_series` (`memorySeries`) the same way when the agent reported the job's
+  non-file memory second by second (an agent started with `--memory-series`): the same four
+  fields and the same bounds, each point the most the job held over its span in MiB rounded up.
+  Non-file memory is what the job's control group held that the kernel cannot drop: its
+  anonymous and kernel memory, its shared memory and tmpfs pages, and none of the page cache of
+  the files it read (on a Mac, the physical footprint of its processes). On Linux
+  `used.peak_memory_bytes` is the group's `memory.peak`, which counts that page cache too, so
+  it can be the larger. A client from
+  before the field skips it. A page holds
   `page_size` records (100 when 0, at most 1000); the filters apply before the page is cut.
   `next_page_token` names the page's last record, its key and which store it came from: the
   next page starts right after it, so no record is read twice or skipped while records are
