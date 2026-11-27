@@ -16,7 +16,8 @@
 //!    working directory made, and its bundle's writable trees cloned into `exec/.trees`.
 //! 6. `profile-built`: the account's own per-user temporary and cache folders are found (asked
 //!    of the system as the account), and the Seatbelt profile of the run is built
-//!    (`native/profile.rs`), granting writes to the run directory and to those two folders.
+//!    (`native/profile.rs`), granting writes to the run directory and to those two folders,
+//!    and a connect to each host port the start names.
 //! 7. `supervisor-started`: `js-agent __supervise-native` is started through the
 //!    [`Launcher`], with the run's environment (and nothing else), its working directory,
 //!    and its three log files in the scratch directory as standard input, output and error.
@@ -277,6 +278,7 @@ impl NativeRuntime {
             &home,
             (&read_only, &grants),
             (trees, reads),
+            &spec.host_ports,
         )?;
         self.mark(marks, STEPS[5]);
         // The job start's environment over the agent's (its values win), then the account's

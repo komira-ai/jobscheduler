@@ -40,7 +40,7 @@ Columns:
 | merged-code.md | 34 | 15 | 5 | 3 | komira-ai/jobscheduler#1168, komira-ai/jobscheduler#1169, komira-ai/jobscheduler#1170, komira-ai/jobscheduler#1171 |
 | jobscheduler-design.md | 83 | 40 | 19 | 7 | komira-ai/jobscheduler#1153, komira-ai/jobscheduler#1154, komira-ai/jobscheduler#1155, komira-ai/jobscheduler#1156, komira-ai/jobscheduler#1157, komira-ai/jobscheduler#1158, komira-ai/jobscheduler#1174 |
 | pools-providers-network.md | 30 | 6 | 8 | 10 | - |
-| job-rootfs.md | 17 | 3 | 2 | 9 | komira-ai/jobscheduler#1159 |
+| job-rootfs.md | 17 | 4 | 2 | 8 | komira-ai/jobscheduler#1159 |
 | job-retry-and-completion-callback.md | 17 | 12 | 0 | 1 | komira-ai/jobscheduler#1150, komira-ai/jobscheduler#1193 |
 | cpu-over-time.md | 24 | 10 | 5 | 6 | komira-ai/jobscheduler#1143, komira-ai/jobscheduler#1144 |
 | live-logs.md | 11 | 5 | 0 | 4 | - |
@@ -438,7 +438,7 @@ As read: Status: design for the owner's review; items 2-6 built (header). Stale:
 | Status line | Header lists only items 2-6 as built; 1, 7 and 8 are not named | `crates/js-agent/src/native/mod.rs:100`, `crates/js-agent-wire/src/refusal.rs:193-206` | - |
 | 11 item 1 | Retire the tree wire | `crates/js-agent-wire/src/refusal.rs:193-206` | - |
 | 11 item 7 | macOS: links and profile built for READ_ONLY/READ_WRITE; native runtime prepare and chosen 5.3 candidate wait | partly: `crates/js-agent/src/native/mounts.rs` | komira-ai/jobscheduler#888 |
-| 5 intro / 5.1 | macOS host_ports (job port equal to host port): not built, refused input-not-allowed | no | komira-ai/jobscheduler#1159 (new) |
+| 5 intro / 5.1 | macOS host_ports (job port equal to host port): `--host-port` offered by the native runtime, each port allowed in the Seatbelt profile | `crates/js-agent/src/native/mod.rs` (`host_ports`), `crates/js-mac-pool/src/seatbelt/policy.rs` (`Policy::with_host_ports`), `crates/js-agent/src/host_ports/mod.rs` (`HostPortFlags`) | komira-ai/jobscheduler#1159 |
 | 5 intro / 5.1 | macOS native runtime's prepare for lookups | no | - |
 | 5.3 / LR10 / Q1 | Copy-on-write mount on macOS: three candidates, none chosen | decision, no code | - |
 | 5.4 / 5.1 | Host sockets on macOS (designed) | no | - |

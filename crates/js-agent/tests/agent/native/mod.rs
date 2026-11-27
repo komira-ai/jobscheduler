@@ -158,6 +158,7 @@ pub fn config(dir: &Scratch, settings: &Settings) -> NativeConfig {
         tool_roots: vec![PathBuf::from("/usr/bin"), PathBuf::from("/bin")],
         read_denies: vec![AbsPath::parse("/srv/js-state").unwrap()],
         mount_roots: Vec::new(),
+        host_ports: Vec::new(),
         read_model: ReadModel::Open,
         journal: dir.path("native-leases"),
         max_file_bytes: 1 << 30,
