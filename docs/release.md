@@ -609,9 +609,10 @@ package `js-agent-X.Y.Z-macos-arm64.pkg` (identifier `com.komira.js-agent`, buil
 `.github/workflows/js-agent-macos-pkg.yml`, not notarized). The release publishes it in two steps,
 and `release desired` adds it to the targets only when both happened.
 
-**Publishing.** Once `publish` and `beta-macos-pkg` passed (a package job that failed uploads
-nothing, and its first install, which `blackbox` needs, does not run, so the farm is told nothing; a
-package that was built but not signed is simply not uploaded), the job `pkg-upload` of
+**Publishing.** Once `publish` and `beta-macos-pkg` passed (it waits for no test of the beta stage,
+the first install included; a package job that failed uploads nothing, and its first install, which
+`blackbox` needs, does not run, so the farm is told nothing; a package that was built but not
+signed is simply not uploaded), the job `pkg-upload` of
 `release.yml` runs `cargo xtask channels pkg upload --dir <dir> --version X.Y.Z --bucket <b> --work
 <dir>`. It holds the `SHA256SUMS` in `--dir` to list exactly the package, at the digest of the file,
 and refuses before any call otherwise. It then puts the package and, after it, the `SHA256SUMS` to
