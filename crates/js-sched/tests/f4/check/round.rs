@@ -54,7 +54,7 @@ impl Checker {
         let mut room_short = false;
         let mut placer = self.load.then(|| {
             let hosts = live.iter().map(|n| self.host(n)).collect();
-            Placer::new(hosts, TERM, self.next_seq, self.holds.clone())
+            Placer::new(hosts, TERM, self.next_seq)
         });
         for &(_, id) in &self.queue {
             let op = &self.ops[usize::try_from(id.0).expect("ids fit")];
@@ -258,10 +258,6 @@ impl Checker {
                 "I11",
                 format!("placement differs from the reference\n  expected {grants:?}\n  got      {got:?}"),
             );
-        }
-
-        if let Some(placer) = placer {
-            self.holds = placer.holds().clone();
         }
 
         // Verdicts: who is told what, and who is refused.

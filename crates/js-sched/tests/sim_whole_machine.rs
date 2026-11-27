@@ -43,7 +43,9 @@ const ACTIVE_UNTIL: u64 = 1_200;
 const END: u64 = 2_400;
 /// The longest a CI whole-machine lease may wait while actions keep arriving: the
 /// reserved worker's longest action (60 s), behind at most the whole-machine leases
-/// queued before it (each up to 90 s on one of the two workers), with room to spare.
+/// queued before it (each up to 90 s on one of the two workers; only the first request
+/// of the pool holds a worker at a time, the next holds once it has started), with room
+/// to spare.
 const CI_BOUND: u64 = 400;
 
 fn digest(n: u64) -> Digest {
