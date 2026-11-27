@@ -39,7 +39,7 @@ use crate::test_build::{self, Built, Error};
 /// `--uid-range`): a user with one is a lease user of a farm Mac.
 pub const PRODUCTION_UIDS: RangeInclusive<i64> = 600..=699;
 /// Every uid the tests use: the account pool of `native_privileged` ([`NATIVE_PRIVILEGED_UIDS`]),
-/// the accounts of `native_isolation` and `native_inbound_pf`, and the unprivileged uid of
+/// the accounts of `native_isolation`, `native_inbound_pf` and `native_fence`, and the unprivileged uid of
 /// `js-mac-pool` and `js-treestore` ([`PLAIN_UID`]).
 pub const TEST_UIDS: RangeInclusive<i64> = 4300..=4320;
 /// The slots of `native_privileged`'s account pool.
@@ -48,8 +48,10 @@ pub const NATIVE_PRIVILEGED_UIDS: RangeInclusive<i64> = 4300..=4309;
 pub const ISOLATION_UID: u32 = 4310;
 /// The one slot of the account pool `native_inbound_pf` opens.
 pub const INBOUND_UID: u32 = 4311;
+/// The one slot of the account pool `native_fence` opens.
+pub const FENCE_UID: u32 = 4312;
 /// The uids of the accounts the `js-agent` targets make, which the verb deletes after them.
-pub const MADE_UIDS: RangeInclusive<i64> = 4300..=4311;
+pub const MADE_UIDS: RangeInclusive<i64> = 4300..=4312;
 /// The unprivileged uid and gid of `js-mac-pool` and `js-treestore`: no account is needed.
 pub const PLAIN_UID: u32 = 4320;
 /// The prefix of the accounts the `js-agent` targets' account pools make.
@@ -84,7 +86,7 @@ pub struct Target {
 }
 
 /// Every target, in the order they run.
-pub const TARGETS: [Target; 7] = [
+pub const TARGETS: [Target; 8] = [
     Target {
         key: "pf_as_root",
         package: PROVISION,
@@ -125,6 +127,12 @@ pub const TARGETS: [Target; 7] = [
         key: "native_inbound_pf",
         package: "js-agent",
         test: "native_inbound_pf",
+        makes_users: true,
+    },
+    Target {
+        key: "native_fence",
+        package: "js-agent",
+        test: "native_fence",
         makes_users: true,
     },
 ];
@@ -320,6 +328,7 @@ pub fn dirs_for(key: &str, work: &Path) -> Vec<PathBuf> {
         "native_privileged" => &["native-privileged"],
         "native_isolation" => &["native-isolation"],
         "native_inbound_pf" => &["native-inbound-pf"],
+        "native_fence" => &["native-fence"],
         _ => &[],
     };
     names.iter().map(|name| work.join(name)).collect()
@@ -365,6 +374,11 @@ pub fn env_for(key: &str, work: &Path, owner_uid: u32) -> Vec<OsString> {
         "native_inbound_pf" => vec![
             var("JS_NATIVE_INBOUND_ROOT", under(work, "native-inbound-pf")),
             var("JS_NATIVE_INBOUND_UID", INBOUND_UID.to_string()),
+        ],
+        "native_fence" => vec![
+            var("JS_NATIVE_FENCE_ROOT", under(work, "native-fence")),
+            var("JS_NATIVE_FENCE_UID", FENCE_UID.to_string()),
+            var("JS_NATIVE_FENCE_OWNER_UID", owner_uid.to_string()),
         ],
         _ => Vec::new(),
     }

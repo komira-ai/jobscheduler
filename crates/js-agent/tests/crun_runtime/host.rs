@@ -6,16 +6,22 @@
 //! A host job's root is the host's `/`, so its program is the host's `/bin/sh`, and it writes
 //! what it sees to the run's directory of the test (`sync`) at its host path, then opens the
 //! ready pipe there: the test reads the files once the pipe says the job is up. Nothing waits
-//! for a clock.
+//! for a clock: the wait for the pipe also ends when the run does (its exit record appears),
+//! and a job that ends before it is up fails the test with how it ended.
 
 use std::collections::BTreeSet;
 use std::fs;
+use std::io::Read as _;
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::Path;
 use std::time::Duration;
 
 use js_agent::crun::CrunRuntime;
 use js_agent::lifecycle::{Body, Exit, RunHandle, RunSpec, Runtime, Status};
 use js_agent_wire::Isolation;
+use js_contain::oci::exit_record_path;
+use rustix::event::{PollFd, PollFlags, poll};
+use rustix::fs::{OFlags, inotify};
 
 use crate::runtime_suite::{Program, Subject, spec_of};
 use crate::subject::{CrunSubject, crun_subject};
@@ -41,12 +47,85 @@ fn host_spec(s: &mut CrunSubject, run_id: &str, script: &str) -> RunSpec {
     spec
 }
 
-/// Starts `spec` on `runtime` and waits for the job to open the ready pipe of `sync`.
-fn start_and_wait(runtime: &mut CrunRuntime, spec: &RunSpec, sync: &Path) -> RunHandle {
+/// Starts `spec` on `runtime` and waits until the job says `up` in the ready pipe of `sync`,
+/// or its run ends first, which fails the test with how it ended and what it wrote to stderr.
+fn start_and_wait(
+    s: &CrunSubject,
+    runtime: &mut CrunRuntime,
+    spec: &RunSpec,
+    sync: &Path,
+) -> RunHandle {
     let id = runtime.create_and_start(spec).expect("create and start");
-    let said = fs::read_to_string(sync.join("ready")).expect("read the pipe");
-    assert_eq!(said.trim(), "up");
+    let Some(said) = up_or_ended(&sync.join("ready"), &s.lease_dir(&id.0)) else {
+        let status = runtime.poll(&id);
+        let tail = runtime.log_tail(&id).ok().flatten().unwrap_or_default();
+        panic!(
+            "the host job ended before it was up: {status:?}, stderr {:?}",
+            tail.stderr
+        );
+    };
+    assert_eq!(said, "up");
     id
+}
+
+/// The first line the job writes to the pipe `ready`, trimmed, or `None` once the exit record
+/// of the run whose lease directory is `lease` is there and the job wrote no line. Waits for
+/// one of the two events, with no clock: `create_and_start` returns before `crun run` has
+/// started, so a run that fails or ends before its job opens the pipe is seen only by its
+/// record, which the supervisor writes once `crun run` has returned.
+fn up_or_ended(ready: &Path, lease: &Path) -> Option<String> {
+    // Read and write: the open does not wait for the job, and the pipe never reads as ended
+    // while this end is open. Not blocking: a read takes what is there.
+    let mut pipe = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(OFlags::NONBLOCK.bits().cast_signed())
+        .open(ready)
+        .expect("the ready pipe");
+    // Watched before the record is looked for, so it cannot appear unseen in between.
+    let watch = inotify::init(inotify::CreateFlags::CLOEXEC | inotify::CreateFlags::NONBLOCK)
+        .expect("an inotify");
+    inotify::add_watch(
+        &watch,
+        lease,
+        inotify::WatchFlags::CREATE | inotify::WatchFlags::MOVED_TO,
+    )
+    .expect("watch the lease directory");
+    let record = exit_record_path(lease);
+    let mut said = Vec::new();
+    loop {
+        // Looked for before the pipe is read: a job writes its line before it ends, and the
+        // record is written after that, so a run seen ended has its line in the pipe already.
+        let ended = record.exists();
+        take_what_is_there(&mut pipe, &mut said);
+        if let Some(end) = said.iter().position(|&byte| byte == b'\n') {
+            return Some(String::from_utf8_lossy(&said[..end]).trim().to_owned());
+        }
+        if ended {
+            return None;
+        }
+        let mut fds = [
+            PollFd::new(&pipe, PollFlags::IN),
+            PollFd::new(&watch, PollFlags::IN),
+        ];
+        // A signal that interrupts the wait only wakes the loop, which looks again.
+        match poll(&mut fds, None) {
+            Ok(_) | Err(rustix::io::Errno::INTR) => {}
+            Err(why) => panic!("wait for the pipe or the lease directory: {why}"),
+        }
+        // The events only wake the loop, which looks again; they are read so the next poll
+        // waits for new ones.
+        let mut events = [0u8; 4096];
+        while rustix::io::read(&watch, &mut events).is_ok() {}
+    }
+}
+
+/// Appends to `said` what the non-blocking `pipe` holds now.
+fn take_what_is_there(pipe: &mut fs::File, said: &mut Vec<u8>) {
+    let mut chunk = [0u8; 64];
+    while let Ok(read @ 1..) = pipe.read(&mut chunk) {
+        said.extend_from_slice(&chunk[..read]);
+    }
 }
 
 /// What the file `name` the job wrote in `sync` says, trimmed.
@@ -93,7 +172,7 @@ fn a_host_job_shares_the_hosts_namespaces_and_network() {
         dir = sync.display()
     );
     let spec = host_spec(&mut s, "h1", &script);
-    let id = start_and_wait(&mut runtime, &spec, &sync);
+    let id = start_and_wait(&s, &mut runtime, &spec, &sync);
     // Every namespace at once, so a failure names all that differ.
     let seen: Vec<(&str, String, String)> = SHARED
         .iter()
@@ -138,7 +217,7 @@ fn a_host_job_is_accounted_in_its_leases_cgroup() {
         dir = sync.display()
     );
     let spec = host_spec(&mut s, "h2", &script);
-    let id = start_and_wait(&mut runtime, &spec, &sync);
+    let id = start_and_wait(&s, &mut runtime, &spec, &sync);
     let ctr = runtime.cgroup(&id).expect("the container's cgroup");
     let lease = ctr.parent().expect("the lease's cgroup").to_owned();
     assert_eq!(lease, s.lease_cgroup(&id.0));
@@ -181,7 +260,7 @@ fn a_stop_and_a_cancel_end_a_host_job_whole() {
             dir = sync.display()
         );
         let spec = host_spec(&mut s, run, &script);
-        let id = start_and_wait(&mut runtime, &spec, &sync);
+        let id = start_and_wait(&s, &mut runtime, &spec, &sync);
         let child = wrote(&sync, "child");
         let lease = s.lease_cgroup(&id.0);
         if let Some(grace) = grace {
@@ -230,7 +309,7 @@ fn a_contained_job_beside_host_jobs_keeps_its_own_namespaces() {
         image: s.image(),
         args: vec!["/bin/sh".to_owned(), "-c".to_owned(), script],
     };
-    let id = start_and_wait(&mut runtime, &spec, &sync);
+    let id = start_and_wait(&s, &mut runtime, &spec, &sync);
     for ns in ["pid", "net"] {
         assert_ne!(wrote(&sync, ns), own_namespace(ns), "the {ns} namespace");
     }
@@ -272,4 +351,22 @@ fn a_runtime_without_host_jobs_refuses_a_host_job() {
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .collect();
     assert_eq!(cgroups, ["helpers"]);
+}
+
+/// Proves a host job that ends before it says it is up fails its start with how it ended
+/// and what it wrote to stderr, instead of leaving the test waiting for ever on a ready pipe
+/// that nothing will open: the job writes a line to stderr and exits 3 without opening it.
+/// Catches a start that waits only for the pipe.
+#[test]
+#[ignore = "real crun: run through cargo xtask crun-tests"]
+#[should_panic(
+    expected = "the host job ended before it was up: Ok(Exited(Exit { code: 3, oom_killed: false })), stderr \"gone\\n\""
+)]
+fn a_host_job_that_ends_before_it_is_up_fails_its_start() {
+    let mut s = crun_subject("host_job_ends_early");
+    s.prepared();
+    let mut runtime = s.open_allowing_host_jobs("crun-host-early");
+    let sync = s.sync_dir("e1");
+    let spec = host_spec(&mut s, "e1", "echo gone >&2; exit 3");
+    start_and_wait(&s, &mut runtime, &spec, &sync);
 }

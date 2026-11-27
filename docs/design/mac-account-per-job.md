@@ -1,14 +1,14 @@
 # A new account per native job on a Mac
 
-Status: steps 1 and 3 are built (the release signs the macOS programs, a privacy profile grants `js-agent` Full Disk Access, the agent reports whether it holds the grant and refuses native jobs without it). Step 2, a new account for every native job that is deleted afterwards, is designed here and lands in its own change once the grant has been seen in force on a Mac and step 4's measurements are in.
+Status: steps 1 and 3 are built (the release signs the macOS programs, a privacy profile grants `js-agent` Full Disk Access, the agent reports whether it holds the grant and refuses native jobs without it). Step 2, a new account for every native job that is deleted afterwards, is built in another shape than the one designed here: slot accounts in `crates/js-agent/src/mac_accounts`, with the native runtime running each job as one of them (`mac-one-program.md`, sections 11 and 13).
 
-Today a native job runs as one of a fixed pool of hidden accounts (`kbf-lease-pool-<slot>`), which the root helper `js-mac-session` resets in place after the job and lends again (`mac-lease-teardown.md`). The pool exists because macOS 27 refuses root, without the privacy grant Full Disk Access, the deletion of an account record, of an account's home and of the per-user folders the system placed for it, so nothing of an account could be removed. A reset in place empties what it can and keeps the rest: an empty `~/Library/Preferences` that the system guards, the `/var/folders/<xx>/<hash>` entry with its `0`, `C` and `T`, the record itself and every attribute of it root may not write. A job leaves behind whatever the reset does not reach, and the next job of the same slot inherits it.
+Before step 2, a native job ran as one of a fixed pool of hidden accounts (`kbf-lease-pool-<slot>`), which the root helper `js-mac-session` resets in place after the job and lends again (`mac-lease-teardown.md`). The pool's helper is still in the package until the not-built items of `mac-one-program.md`, section 13, land. The pool exists because macOS 27 refuses root, without the privacy grant Full Disk Access, the deletion of an account record, of an account's home and of the per-user folders the system placed for it, so nothing of an account could be removed. A reset in place empties what it can and keeps the rest: an empty `~/Library/Preferences` that the system guards, the `/var/folders/<xx>/<hash>` entry with its `0`, `C` and `T`, the record itself and every attribute of it root may not write. A job leaves behind whatever the reset does not reach, and the next job of the same slot inherits it.
 
 The aim is that no job inherits anything of an account: each job gets an account that did not exist before it, and the account, its home and its per-user folders are gone, and shown gone, before its uid can be given to anyone again.
 
 ## What changes for an operator
 
-| | Before | After this change (steps 1 and 3) | After step 2 |
+| | Before | After this change (steps 1 and 3) | After step 2 (as designed here; built in another shape, see the status) |
 |---|---|---|---|
 | Signature of `js-agent`, `js-mac-session`, `js-mac-provision` | the linker's ad hoc signature, an identifier that changes with every build | Developer ID Application, team `U7RTX4XD3X`, fixed identifiers, hardened runtime, trusted timestamp | same |
 | Full Disk Access | held by nothing | granted to `js-agent` alone by a profile the owner installs through device management | same |

@@ -293,7 +293,9 @@ impl Lifecycle {
     /// running is watched in that step. The container's removal and the removal of the
     /// run's directories are asked of the runtime's and the lifecycle's threads when they
     /// have them, and the step takes their answer once they rang the wake: the step does not
-    /// wait for them. Call it on every tick.
+    /// wait for them. Nor does it wait for the post-job checks' settle wait: a job whose
+    /// checks wait is checked again by the first step after the wait has passed (the
+    /// worker steps at least once each step interval). Call it on every tick.
     pub fn step(&mut self) -> Vec<Event> {
         let mut events = Vec::new();
         // A marker that could not be written is tried again; the failure was noted when it
@@ -508,7 +510,7 @@ impl Lifecycle {
     /// (keyed by job id) was placed by the job service, which packs a host by measured load
     /// within its CPU slack and books each job its peak: its CPU and memory are the job
     /// service's to judge, one rule for both, and the agent sums neither. Its CPU is not
-    /// limited, and its memory is held to its booking by its lease's `memory.max`.
+    /// limited, and its memory is a booking, not a limit: its lease has no `memory.max`.
     fn admit(
         &self,
         (spec, keyed): (&JobSpec, Keyed),

@@ -27,8 +27,7 @@ in proportion to their bookings over time, hosts.md section 3), wall phases, que
 the agent reports for the lease. Per-run usage (CPU-seconds, GB-seconds, GPU-seconds, peak memory with basis, and whether it ran, was
 cached or was joined) is the consumer's: it arrives from the agent on the work session, and kbf feeds its own sizing history (7, level
 2). The scheduler writes per-run records only for classes whose runs it places itself (ucdk). Stored in the state store and queryable,
-for sizing and for the run record (8.3), not for charging anyone. This is the "Accounting" record planned in
-`docs/design/scheduler.md`. Attempts charged to the platform-fault budget (8.1) are recorded and flagged.
+for sizing and for the run record (8.3), not for charging anyone. Attempts charged to the platform-fault budget (8.1) are recorded and flagged.
 
 ## 12.3 Labels (always on)
 Every request carries labels. jobscheduler owns a small label schema and imports no ucdk type: a reserved prefix `jobscheduler.dev/` with

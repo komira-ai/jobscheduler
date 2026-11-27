@@ -38,6 +38,7 @@ pub(super) fn full_result() -> JobResult {
             cpu_throttle: None,
             cpu_pressure_some: None,
             cpu_peak: None,
+            peak_swap_bytes: None,
         }),
         logs: Some(LogLengths {
             stdout_bytes: 2_621_440,
@@ -855,6 +856,20 @@ fn a_value_that_is_not_valid_for_its_field_is_refused_by_tag() {
             vec![0; 17],
             BadLength {
                 tag: job_result_tag::RESULT_CPU_PEAK,
+            },
+        ),
+        (
+            job_result_tag::RESULT_SWAP_PEAK,
+            vec![0; 7],
+            BadLength {
+                tag: job_result_tag::RESULT_SWAP_PEAK,
+            },
+        ),
+        (
+            job_result_tag::RESULT_SWAP_PEAK,
+            vec![0; 9],
+            BadLength {
+                tag: job_result_tag::RESULT_SWAP_PEAK,
             },
         ),
         (

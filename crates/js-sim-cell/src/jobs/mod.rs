@@ -9,7 +9,7 @@
 //!
 //! # What is observed
 //!
-//! Four sources, each kept apart as [`crate::observe`] keeps its own:
+//! Six sources, each kept apart as [`crate::observe`] keeps its own:
 //!
 //! - the server's tables, read through the in-process handle
 //!   (`InProcess::jobs`) each time the cell reads the server's listing: every change of a
@@ -29,6 +29,7 @@
 use std::collections::BTreeSet;
 
 use js_jobs::{AllocationId, AllocationStep, Booked, EndReason, JobId, JobState};
+use js_types::CallbackAnswer;
 use js_types::HostId;
 use js_types::sched::FarmTime;
 
@@ -140,9 +141,42 @@ pub struct ResultMade {
     pub job: JobId,
     /// When.
     pub at: FarmTime,
-    /// Whether it is a start the agent refused because its host is held (the code
-    /// `host-held`): the agent made nothing of the job.
+    /// Whether it is a start the agent refused (its host is held, code `host-held`, or the
+    /// start refusal of the cell is on): the agent launched nothing of the job.
     pub held: bool,
+}
+
+/// A job's attempt number as one read of the server's job table showed it, when it differed
+/// from the read before (or the job was not read before).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AttemptRead {
+    /// The job.
+    pub job: JobId,
+    /// When the table was read.
+    pub at: FarmTime,
+    /// The job's current attempt, from 1.
+    pub number: u32,
+    /// The most attempts the job asked for: 1 for a job with no retry policy or one that
+    /// asks for 0 or 1.
+    pub max_attempts: u32,
+}
+
+/// One call the cell's callback receiver got: a server claimed a due callback and sent it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CallbackCall {
+    /// The job the callback is for.
+    pub job: JobId,
+    /// The call's `webhook-id`.
+    pub webhook_id: String,
+    /// When the call was made, on the cell's virtual clock.
+    pub at: FarmTime,
+    /// What the receiver answered.
+    pub answer: CallbackAnswer,
+    /// Whether the job's row had ended when the call was made, read from the store then.
+    pub ended: bool,
+    /// The state of the job's row when the call was made; `None` when the store held no
+    /// such row.
+    pub state: Option<JobState>,
 }
 
 impl Observations {
@@ -161,6 +195,33 @@ impl Observations {
     pub fn with_allocation_read(mut self, row: AllocationRow, at: FarmTime) -> Self {
         self.allocation_reads.push(AllocationRead { row, at });
         self.tables_at = Some(self.tables_at.map_or(at, |was| was.max(at)));
+        self
+    }
+
+    /// These observations with the attempt table read showing `job` at attempt `number` of
+    /// at most `max_attempts`, at `at`, after the reads before.
+    #[must_use]
+    pub fn with_attempt_read(
+        mut self,
+        job: JobId,
+        number: u32,
+        max_attempts: u32,
+        at: FarmTime,
+    ) -> Self {
+        self.attempt_reads.push(AttemptRead {
+            job,
+            at,
+            number,
+            max_attempts,
+        });
+        self
+    }
+
+    /// These observations with `call` made to the callback receiver, after the calls
+    /// before.
+    #[must_use]
+    pub fn with_callback_call(mut self, call: CallbackCall) -> Self {
+        self.callback_calls.push(call);
         self
     }
 
@@ -257,5 +318,34 @@ mod tests {
         ] {
             assert_eq!(allocation_id(bad), None, "{bad:?}");
         }
+    }
+
+    /// Catches: an attempt read or a receiver call that the builder does not append to its
+    /// own list, or appends to the other's, or reorders.
+    #[test]
+    fn the_attempt_and_callback_builders_append_in_order() {
+        let job = JobId::parse("sim-job-0").expect("a job id");
+        let call = |at: u64| CallbackCall {
+            job: job.clone(),
+            webhook_id: "w".to_owned(),
+            at: FarmTime::from_millis(at),
+            answer: CallbackAnswer::Delivered,
+            ended: false,
+            state: None,
+        };
+        let seen = Observations::quiet()
+            .with_attempt_read(job.clone(), 1, 2, FarmTime::from_millis(1))
+            .with_attempt_read(job.clone(), 2, 2, FarmTime::from_millis(2))
+            .with_callback_call(call(3))
+            .with_callback_call(call(4));
+        let numbers: Vec<u32> = seen.attempt_reads.iter().map(|read| read.number).collect();
+        assert_eq!(numbers, [1, 2]);
+        assert_eq!(seen.attempt_reads[1].max_attempts, 2);
+        let times: Vec<u64> = seen
+            .callback_calls
+            .iter()
+            .map(|c| c.at.as_millis())
+            .collect();
+        assert_eq!(times, [3, 4]);
     }
 }

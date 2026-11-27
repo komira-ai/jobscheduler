@@ -85,6 +85,7 @@ fn spec(
         max_file_bytes: 1 << 40,
         max_processes: processes,
         record_dir: folders.records.display().to_string(),
+        parent: None,
     }
 }
 

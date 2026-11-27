@@ -1,8 +1,8 @@
 # Live logs: a job's output in an object store
 
-Status: **Planned, partly built.** Built so far: the wire fields of section 7 (`js-agent-wire`, with the per-run capture file cap
-in `js-contain`); the object-store client (`js-logstore`); the `[logs]` table of section 6, which the server reads and checks at
-start; the mint of section 4 (`js-logmint`) and its second kind for a store with no STS, the prefix grant of section 4.1
+Status: **Built for `crun` and macOS native jobs; later work is open (section 10).** Built: the wire fields of section 7 (`js-agent-wire`,
+with the per-run capture file cap in `js-contain`); the object-store client (`js-logstore`); the `[logs]` table of section 6, which the
+server reads and checks at start; the mint of section 4 (`js-logmint`) and its second kind for a store with no STS, the prefix grant of section 4.1
 (`js-logmint` and its signer in `js-logstore`); the server's side of sections 3.1, 4 and 5 (`js-lease-server`'s `logs` module: one
 credential per uploading host, minted, delivered and renewed in heartbeat replies, a sink in each start, and the stream lengths
 stored with the result); the agent's uploader (`js-agent/src/logs`, with the progress record of 3.5) of a `crun` job and of a
@@ -530,14 +530,12 @@ The capture files are on the host's disk, in the lease directories: at the defau
 
 ## 10. Where it is built, and what is later or open
 
-**Crates (Planned, step 31 of design section 12.1).** `js-logstore`, the object-store client (put, delete, list, ranged get, Signature Version
+**Crates (Built, step 31 of design section 12.1).** `js-logstore`, the object-store client (put, delete, list, ranged get, Signature Version
 4, `MAX_PUT_BYTES`); `js-logmint`, the `AssumeRole` call and the session policy; the log fields in `js-agent-wire` and `GetLogs`'s in
 `js-proto` (with its comment rewritten to the answers of section 8); the
 agent's `logs` module (the uploader, the progress record, the end); the server's `job_api/logs` (the reader, the long poll) and its host
-credential table. Each new crate is added to `layers.toml` in the change that adds it. Built so far: `js-logstore`, `js-logmint`, the log
-fields in `js-agent-wire`, the agent's `logs` module (the uploader, the progress record, the end) for `crun` and the native
-runtime (3.7), the server's host credential table, and `GetLogs`'s fields in `js-proto` with the server's `job_api/logs` (the reader
-and the long poll). Besides the fakes, CI's `test` job runs the whole path with STS minting against an S3-compatible store with STS
+credential table. Each new crate is added to `layers.toml` in the change that adds it. All of these are built, for `crun` and the native runtime (3.7).
+Besides the fakes, CI's `test` job runs the whole path with STS minting against an S3-compatible store with STS
 (MinIO, in a service container pinned by digest; `js_testkit::s3`): the client and the minter, the agent's uploader (a renewal through
 the heartbeat, a failed request, a restart from the progress record) and `GetLogs` over what the uploader put.
 

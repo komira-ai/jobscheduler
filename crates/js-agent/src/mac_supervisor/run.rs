@@ -51,6 +51,10 @@ pub trait SuperviseHost {
     /// The profile was refused (the library's own message).
     fn apply_profile(&self, init: &SandboxInit) -> io::Result<()>;
 
+    /// The pid of this process's parent now: the agent that started it, or launchd's 1 once
+    /// that agent is gone.
+    fn parent(&self) -> u32;
+
     /// Starts the job's program with its arguments, in a process group of its own, with this
     /// process's environment, working directory and standard streams.
     ///
@@ -100,8 +104,11 @@ pub trait JobChild {
 
 /// Runs the start of `spec` over `host`, in this order: opens the records; with
 /// `new_session`, opens an audit session; as root, drops to the slot user; sets the limits;
-/// applies the profile; starts the job; writes the ready record; waits for the job; writes the
-/// exit record. Returns the supervisor's exit status ([`status_of`]).
+/// applies the profile; with `parent`, checks that the agent that started it is still its
+/// parent (a supervisor whose agent died before it journaled the run starts no job: the
+/// next agent ends the run's account, and nothing would end a job started after that);
+/// starts the job; writes the ready record; waits for the job; writes the exit record.
+/// Returns the supervisor's exit status ([`status_of`]).
 ///
 /// A step that fails ends the start there: the job is never started, the exit record says
 /// [`Ended::SetupFailed`] with the step and why, one line `js-agent: __supervise-native:
@@ -160,6 +167,14 @@ fn start(host: &dyn SuperviseHost, spec: &SuperviseSpec) -> Result<Started, Fail
         .map_err(io::Error::other)
         .and_then(|init| host.apply_profile(&init))
         .map_err(at(Step::Profile))?;
+    if let Some(agent) = spec.parent {
+        let parent = host.parent();
+        if parent != agent {
+            let why =
+                format!("the agent (pid {agent}) that started it is gone: its parent is {parent}");
+            return Err((Step::Spawn, io::Error::other(why)));
+        }
+    }
     let child = host.spawn(spec).map_err(at(Step::Spawn))?;
     Ok((child, asid))
 }
@@ -251,6 +266,10 @@ impl SuperviseHost for SystemHost {
 
     fn apply_profile(&self, init: &SandboxInit) -> io::Result<()> {
         platform::apply_profile(init)
+    }
+
+    fn parent(&self) -> u32 {
+        rustix::process::getppid().map_or(0, |pid| pid.as_raw_nonzero().get().unsigned_abs())
     }
 
     /// Starts the program keeping the responsibility ([`Kept::Job`]), so the job answers to the

@@ -145,7 +145,9 @@ pub fn writes(who: &Who) -> Vec<Target> {
 
 /// The reads every read probe tries for the account `who`: the host's sudoers file
 /// (root:wheel 0440), and the privacy database's folder, the database, and Time Machine's
-/// preferences, which only the privacy controls and the profile's read denies keep from a job;
+/// preferences, each under both its `/Library` spelling and its `/System/Volumes/Data` one (the
+/// profile denies both, as which one Seatbelt matches was not measured), which only the privacy
+/// controls and the profile's read denies keep from a job;
 /// and, when the account's own home is known, that home, which a job may read (it holds the
 /// run directory) where it may read no other user's.
 #[must_use]
@@ -164,6 +166,18 @@ pub fn reads(who: &Who) -> Vec<Named> {
         (
             "timemachine-prefs",
             "/Library/Preferences/com.apple.TimeMachine.plist",
+        ),
+        (
+            "tcc-dir-data",
+            "/System/Volumes/Data/Library/Application Support/com.apple.TCC",
+        ),
+        (
+            "tcc-db-data",
+            "/System/Volumes/Data/Library/Application Support/com.apple.TCC/TCC.db",
+        ),
+        (
+            "timemachine-prefs-data",
+            "/System/Volumes/Data/Library/Preferences/com.apple.TimeMachine.plist",
         ),
     ]
     .into_iter()
@@ -351,13 +365,39 @@ mod tests {
                 "tcc-dir",
                 "tcc-db",
                 "timemachine-prefs",
+                "tcc-dir-data",
+                "tcc-db-data",
+                "timemachine-prefs-data",
                 "account-home"
             ]
         );
-        assert_eq!(reads[4].value, "/Users/a1");
+        assert_eq!(reads[7].value, "/Users/a1");
+        assert_eq!(
+            reads[4].value,
+            "/System/Volumes/Data/Library/Application Support/com.apple.TCC"
+        );
+        assert_eq!(
+            reads[5].value,
+            "/System/Volumes/Data/Library/Application Support/com.apple.TCC/TCC.db"
+        );
+        assert_eq!(
+            reads[6].value,
+            "/System/Volumes/Data/Library/Preferences/com.apple.TimeMachine.plist"
+        );
         who.account_home = None;
         let names: Vec<String> = super::reads(&who).into_iter().map(|n| n.name).collect();
-        assert_eq!(names, ["sudoers", "tcc-dir", "tcc-db", "timemachine-prefs"]);
+        assert_eq!(
+            names,
+            [
+                "sudoers",
+                "tcc-dir",
+                "tcc-db",
+                "timemachine-prefs",
+                "tcc-dir-data",
+                "tcc-db-data",
+                "timemachine-prefs-data"
+            ]
+        );
     }
 
     #[test]

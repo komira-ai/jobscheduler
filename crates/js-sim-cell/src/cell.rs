@@ -72,6 +72,7 @@ use crate::text;
 use crate::usage::UsageReadFault;
 use crate::work::Work;
 
+mod callbacks;
 mod cloud_faults;
 mod cordon;
 mod elastic;
@@ -566,6 +567,15 @@ impl Cell {
         }
     }
 
+    /// Makes agent `index` refuse every job start with `code` (`Some`) or take them again
+    /// (`None`), from now on ([`AgentNode::set_start_refusal`]); an index that names no
+    /// agent changes nothing.
+    pub fn set_start_refusal(&mut self, index: usize, code: Option<String>) {
+        if let Some(agent) = self.agent_mut(index) {
+            agent.set_start_refusal(code);
+        }
+    }
+
     /// Makes agent `index` an agent of the current release and starts a new process on its
     /// host, as [`Cell::replace`] does: the upgrade of a host, which loses what its
     /// process held.
@@ -907,6 +917,7 @@ impl Cell {
         self.observations.job_beats.extend(beats);
         self.observations.job_replies.extend(replies);
         self.observations.results_made.extend(made);
+        self.read_callbacks();
         self.checks += 1;
         let found = self
             .checker

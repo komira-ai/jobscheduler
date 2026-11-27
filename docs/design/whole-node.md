@@ -225,7 +225,7 @@ held. A request waiting unreserved counts toward nothing.
 |---|---|---|
 | `max_whole_node` | most hosts of the pool that are whole at once (reserved plus held) | dedicated pool: `max_machines`; mixed pool: none (class not offered) |
 | `max_draining` | most hosts reserved and not yet held at once | 1 |
-| `max_whole_node_per_consumer` | most hosts one authenticated consumer has whole at once in the pool (K7: the caller's identity, not a request field) | 1 for a mixed pool whose lease API authenticates per-consumer identities; `max_whole_node` (no limit) in a dedicated pool, and wherever the API has no per-consumer identity (the merged single-token service: every client is one consumer). An operator may set 1 explicitly. |
+| `max_whole_node_per_consumer` | most hosts one authenticated consumer has whole at once in the pool (K7: the caller's identity, not a request field) | 1 for a mixed pool whose lease API authenticates per-consumer identities; `max_whole_node` (no limit) in a dedicated pool, and wherever the API has no per-consumer identity (the merged single-token service: every client is one consumer). An operator may set 1 explicitly; the single-token service does not enforce it (below). |
 | `keep_for_ordinary` | fewest hosts of a mixed pool that are neither reserved nor held, so ordinary work always has them | 1 for a mixed pool, 0 for a dedicated one |
 | `allow_last_capable` | whether a reservation may start on the last unreserved capable host of an ordinary request queued ahead of it | false |
 | `drain_after`, `drain_deadline`, `reserve_backoff`, `prepare_timeout`, `max_replace` | times and the retry cap of sections 3 to 5; `reserve_backoff` sizes only the failed-prepare exclusion; `drain_deadline` is when the host is expected drained, with no default of its own (the request's wall limit) and no effect on reaching it | see there |
@@ -252,8 +252,8 @@ counts one pool: every worker that serves whole-machine leases, of every platfor
 `max_draining` does not; a request that already holds a mark takes a quiet host whatever the caps, since its mark is already counted. The
 last-capable rule is applied to marks only: an ordinary request queued ahead that a quiet host could run is placed on it before the
 whole-node request is reached (narrow caveat: an older ordinary request that is capable by facts but blocked by admission, or left over by the round's placement limit, is not placed first, so a quiet take can take its last capable host). A request a cap stops stays queued and `whole_wait` names the cap. `js-sched` has no notion of a consumer,
-so `max_whole_node_per_consumer` is not enforced there; the setting is read and ignored. It is enforced where the caller's identity exists
-(K7): the lease server or the registry. A head hold of placement by load is not a reservation: no cap counts it, and the last-capable
+so `max_whole_node_per_consumer` is not enforced there; the setting is read and ignored. Nothing else enforces it either: neither the lease
+server nor the registry applies it, and there is no per-consumer cap in the single-token service (jobscheduler-design.md, section 6.4). A head hold of placement by load is not a reservation: no cap counts it, and the last-capable
 rule does not read it as taking a host from the request that holds it.*
 
 *The view of the waiting (`js-sched`).* `whole_state(op)` is one value for a queued whole-machine request when the settings are on (`None`
@@ -271,7 +271,7 @@ workers held by whole leases, marks, those marks on a busy worker (what `max_dra
 limit is at least 1 where it is a maximum; a file that breaks this is refused (D20). A dedicated pool may set `max_whole_node` below
 `max_machines`; the surplus hosts then serve nothing, which validation reports.
 
-**Why these and not others.** One cap (`max_whole_node`) alone does not stop one consumer taking every slot; the per-consumer limit does.
+**Why these and not others.** One cap (`max_whole_node`) alone does not stop one consumer taking every slot; the per-consumer limit would, where a per-consumer identity exists (the single-token service does not enforce it).
 A fraction alone does not protect a two-host pool; a count and a floor do. `max_draining` bounds idle capacity during drains (a draining
 host does no work), and the ceiling bounds the capacity held by granted leases. No reservation ever starts below the ordinary floor of
 `keep_for_ordinary` hosts, and the unreserved remainder of the pool is never touched by this class.
@@ -416,7 +416,7 @@ unclaimed record is dropped after `regain_grace`; a lease lost mid-run is report
 and lease files from the merged service load as the retained `gpu-host` alias (id, `min_gpus` 1 and error text unchanged) and its tests
 pass unchanged, including two hosts taken with the one bearer token because the per-consumer default is no limit there; a GPU request
 under class `action` is refused `no-matching-pool`; with an explicit per-consumer limit of 1 on a GPU pool of two hosts and per-consumer
-identities, a consumer's second request waits while another consumer's first is granted; a `drain_deadline` shorter than the max wall time
+identities, a consumer's second request waits while another consumer's first is granted (planned, not built: the single-token service has no per-consumer identity and does not enforce the limit); a `drain_deadline` shorter than the max wall time
 is passed with the mark kept, and the host is committed when it empties.
 
 ## 12. Extraction steps

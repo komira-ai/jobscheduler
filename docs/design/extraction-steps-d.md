@@ -6,7 +6,7 @@ numbers refer to design.md.
 
 **Phase D. New capability.**
 
-23. Change `js-provider`: rename `Provider` to `Pool` and `ProviderId` to `PoolId`, delete `Flavour`, rename `capacity()` to `hosts()`, add
+23. (Status: the `Pool` port this step renames to was deleted by komira-ai/jobscheduler#831; `CapacityProvider` now lives in `js-elastic`.) Change `js-provider`: rename `Provider` to `Pool` and `ProviderId` to `PoolId`, delete `Flavour`, rename `capacity()` to `hosts()`, add
     `CapacityProvider` with `list`, `AcquireAck`, `ReleaseAck` and `Instance` beside them (5.9), and model the fence and no-retries rules in
     `StartSpec`. Add the new `Stop` effect and its retained-intent row (5.1, 5.2). *Proves:* the merged tests pass unchanged apart from the
     names, so the GPU-host service is unchanged; a stop of a held lease is resent until the lease leaves the heartbeat.
@@ -26,7 +26,7 @@ numbers refer to design.md.
     layering test: no crate below the binary names a provider kind.
 28. The fake capacity provider (13.1) and the capacity suite with its broken providers (13.2); `js-conformance` re-keyed. *Proves:* the
     suite is green on `default`, the test `static` and the fake aws, and red on each broken provider.
-29. The lease table: the `acquiring` state, the acquire record committed before the call, acquire off the table lock (D19), the pool
+29. (Status: the lease table, the lease file and the lease API were deleted by komira-ai/jobscheduler#804 and komira-ai/jobscheduler#831; this step is history.) The lease table: the `acquiring` state, the acquire record committed before the call, acquire off the table lock (D19), the pool
     name in the lease file, and share leases under `Book` admission. *Proves:* a crash between the record and the call resolves by `list`;
     a lease file written before the change loads; the GPU-host tests pass unchanged.
 30. Agent registration in `js-agent` and the server: hello with identity and shape, admission, join credentials, deny file,

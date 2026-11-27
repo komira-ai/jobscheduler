@@ -6,8 +6,9 @@
 //! feed, and a per-minute row would add feed rows at write and again at expiry; a pack
 //! rewritten every few minutes grows the feed by about a dozen rows per node-hour. The
 //! write is a read-modify-write under the row's version, so a second writer fails loudly
-//! with [`UsageError::Conflict`] rather than silently losing minutes (the server runs one
-//! writer). Host ids are validated [`HostId`]s, never raw request text.
+//! with [`UsageError::Conflict`] rather than silently losing minutes: several instances may
+//! share the store, and the one that loses the race keeps its rows buffered for its next
+//! flush. Host ids are validated [`HostId`]s, never raw request text.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::num::NonZeroUsize;

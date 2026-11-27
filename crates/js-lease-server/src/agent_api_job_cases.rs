@@ -674,9 +674,10 @@ async fn results_that_report_usage_size_the_next_job_of_the_class_from_history()
 /// booking to nothing, so that it uses 1.5 GiB and part of the host's swap, and reports it
 /// succeeded with that peak and a swap peak. The server takes both results from the same
 /// heartbeats, as each agent sent it: the deployed agent's job fails for memory with its 1 GiB
-/// peak, this release's succeeds with its whole 1.5 GiB peak, above its booking. It catches a
-/// result of either release that the server refuses or leaves unanswered, a swap peak the server
-/// cannot take, and a peak above the booking the server does not record as sent.
+/// peak and no swap peak, this release's succeeds with its whole 1.5 GiB peak, above its booking,
+/// and its 256 MiB swap peak. It catches a result of either release that the server refuses or
+/// leaves unanswered, a swap peak the server cannot take or does not store, and a peak above the
+/// booking the server does not record as sent.
 #[tokio::test]
 async fn a_deployed_agent_and_this_one_report_their_jobs_to_one_server_as_each_measured() {
     let mut rig = rig("deployed_and_new_agents", true);
@@ -713,14 +714,16 @@ async fn a_deployed_agent_and_this_one_report_their_jobs_to_one_server_as_each_m
         let job = rig.job(id);
         let result = job.result.expect("a result");
         let peak = result.usage.map(|usage| usage.peak_memory_bytes);
-        (job.state, result.reason, peak)
+        let swap = result.usage.and_then(|usage| usage.peak_swap_bytes);
+        (job.state, result.reason, peak, swap)
     };
     assert_eq!(
         ended(&held),
         (
             JobState::Failed,
             js_jobs::ResultReason::Memory,
-            Some(1 << 30)
+            Some(1 << 30),
+            None
         )
     );
     assert_eq!(
@@ -728,7 +731,8 @@ async fn a_deployed_agent_and_this_one_report_their_jobs_to_one_server_as_each_m
         (
             JobState::Succeeded,
             js_jobs::ResultReason::Exit,
-            Some(3 << 29)
+            Some(3 << 29),
+            Some(256 << 20)
         )
     );
 }
