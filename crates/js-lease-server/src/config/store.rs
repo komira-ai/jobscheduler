@@ -76,8 +76,8 @@ pub(crate) struct StoreSetting {
     /// `--store` or `server.store`.
     pub(crate) names: StoreNames,
     /// Whether the server listens to the notices of the other servers of a shared store
-    /// ([`crate::listening`]); always, but for a test that turns it off
-    /// ([`crate::Config::without_notices`]).
+    /// ([`crate::listening`]): a server always, but in a test that turns it off
+    /// ([`crate::Config::without_notices`]); never the job-store cutover, which serves nothing.
     pub(crate) notices: bool,
 }
 
