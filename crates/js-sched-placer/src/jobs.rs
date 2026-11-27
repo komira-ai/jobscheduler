@@ -300,6 +300,16 @@ impl Engine {
         self.sched.leases_on(&worker).contains(&hold.placed.lease)
     }
 
+    /// Tells the scheduler the CPU time the allocation of `job` used, `cpu_usage_usec`
+    /// microseconds as its result reported it, for the plausibility check of its host's load
+    /// readings ([`js_sched::Scheduler::lease_cpu_used`]). A job the engine does not hold
+    /// changes nothing.
+    pub(crate) fn job_cpu_used(&mut self, job: &JobId, cpu_usage_usec: u64) {
+        if let Some(hold) = self.jobs.get(job) {
+            self.sched.lease_cpu_used(hold.placed.lease, cpu_usage_usec);
+        }
+    }
+
     /// Lets go of the allocation of `job`: its placement was not committed, or the table no
     /// longer holds it live. Its booking is free again. A job the engine does not hold
     /// changes nothing.

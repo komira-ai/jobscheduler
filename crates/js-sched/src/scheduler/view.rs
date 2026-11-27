@@ -210,17 +210,34 @@ impl Scheduler {
         Some(held.cost)
     }
 
+    /// Feeds the CPU time `lease`'s run used, `cpu_usage_usec` microseconds, as its result
+    /// reported it (the job's `cpu.stat` `usage_usec`), at the scheduler's time now: the
+    /// plausibility check of its worker's signal compares it with the node's CPU counter
+    /// (the placement-by-load design, "Lying or stuck node"). It may come before or after
+    /// the lease's result is committed; while the lease is held, a later report replaces an
+    /// earlier one. Only a lease placement admitted counts (not a recovered one, nor a VM).
+    /// A lease the scheduler neither holds nor waits for (its CPU time already counted, or it
+    /// was admitted before the oldest reading the check keeps) is ignored.
+    pub fn lease_cpu_used(&mut self, lease: LeaseId, cpu_usage_usec: u64) {
+        let now = self.now;
+        let _ = self
+            .workers
+            .values_mut()
+            .any(|w| w.load_state.lease_cpu(lease, cpu_usage_usec, now));
+    }
+
     /// What admission has done since the scheduler was built.
     #[must_use]
     pub fn load_counters(&self) -> LoadCounters {
         let mut counters = self.admission.counters;
         if self.admission.by_load() {
-            let limited = self
-                .workers
-                .values()
-                .filter(|w| w.alive(self.now) && w.load_state.cpu_limited())
-                .count();
+            let live = || self.workers.values().filter(|w| w.alive(self.now));
+            let limited = live().filter(|w| w.load_state.cpu_limited()).count();
             counters.fallback_cpu_limited = u64::try_from(limited).unwrap_or(u64::MAX);
+            let marked = live()
+                .filter(|w| w.load_state.check().implausible())
+                .count();
+            counters.fallback_implausible = u64::try_from(marked).unwrap_or(u64::MAX);
         }
         counters
     }

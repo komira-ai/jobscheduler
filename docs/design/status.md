@@ -53,7 +53,7 @@ Columns:
 | configuration.md | 4 | 0 | 0 | 3 | komira-ai/jobscheduler#1153 |
 | deployment.md | 13 | 5 | 3 | 3 | - |
 | hosts.md | 41 | 2 | 12 | 17 | komira-ai/jobscheduler#1150, komira-ai/jobscheduler#1173, komira-ai/jobscheduler#1174, komira-ai/jobscheduler#1175, komira-ai/jobscheduler#1176 |
-| placement-by-load.md | 25 | 6 | 6 | 4 | komira-ai/jobscheduler#1178, komira-ai/jobscheduler#1179, komira-ai/jobscheduler#1180, komira-ai/jobscheduler#1181, komira-ai/jobscheduler#1182 |
+| placement-by-load.md | 25 | 7 | 6 | 3 | komira-ai/jobscheduler#1178, komira-ai/jobscheduler#1179, komira-ai/jobscheduler#1180, komira-ai/jobscheduler#1181, komira-ai/jobscheduler#1182 |
 | mac-lease-teardown.md | 5 | 1 | 1 | 1 | - |
 | decisions.md | 22 | 6 | 4 | 7 | komira-ai/jobscheduler#1150, komira-ai/jobscheduler#1174, komira-ai/jobscheduler#1175 |
 | amendments.md | 9 | 6 | 1 | 1 | - |
@@ -878,9 +878,9 @@ As read: No status header. Mostly built; it marks "does not yet persist" (L56), 
 | Utilization (L25-26) | A feedback correction scaling predictions by observed mean k was considered and not proposed. | no | - |
 | Admission, Memory guard (L141) and Decided (L445) | The flat-sum memory guard with d = 0 is the memory admission limit. The page says it has not been confirmed. | decision, no code | komira-ai/jobscheduler#127 |
 | Starvation (L282) | A refinement was considered and not implemented: reserve the worker where the head first passes the predicate over the horizon (smallest tau). | no | komira-ai/jobscheduler#582 |
-| Lying or stuck node (L294-301) | A plausibility check compares leases' summed cpu_usage_us over a span with the counter's growth, and flags an idle node reporting over half of C for 3 windows. It is tested by sim k. | partly: `crates/js-sched/src/admission/ledger.rs:20` | komira-ai/jobscheduler#1180 (new) |
+| Lying or stuck node (L294-301) | A plausibility check compares leases' summed cpu_usage_us over a span with the counter's growth, and flags an idle node reporting over half of C for 3 windows. It is tested by sim k. | `crates/js-sched/src/admission/plausible.rs`, `crates/js-sched/src/scheduler/view.rs` (`Scheduler::lease_cpu_used`), `crates/js-sched-placer/src/sizes.rs` (`learn_freed` feeds each freed job's CPU time), `crates/js-sched/tests/sim_k_stuck_signal.rs` | komira-ai/jobscheduler#1180 (new) |
 | Simulation tests (L404-439) | Sims a-j, l-w, x, y, z, aa, ab, ad, af and ag. | `crates/js-sched/tests/load_sims_cpu.rs` | - |
-| Simulation tests, sims ac, ae, ah, k | ac (same-key fan-out concentration, key 4 with key-share control), ae (head liveness under best fit), ah (utilization lever, lognormal), k (stuck-low signal). | no | komira-ai/jobscheduler#1181 (new) |
+| Simulation tests, sims ac, ae, ah, k | ac (same-key fan-out concentration, key 4 with key-share control), ae (head liveness under best fit), ah (utilization lever, lognormal), k (stuck-low signal). | partly: k is `crates/js-sched/tests/sim_k_stuck_signal.rs` (komira-ai/jobscheduler#1180); ac, ae and ah are not built | komira-ai/jobscheduler#1181 (new) |
 | Scoring, Unmeasured (L370) and sim x2 (L429) | Replay on the real series after 14 days of collection, to set w, b, tol and the key share from the measured gain from curves. | partly: `crates/js-sched/examples/sim_x2.rs` | komira-ai/jobscheduler#1182 (new) |
 | Time profiles 3 / bound with profiles (L230, L273, L372, L132) | Lowering g, lowering f below 1, reducing delta for short keys are later decisions from the histograms. | decision, no code | - |
 | Scoring, Level (L325) | Level-1 scoring is behind a flag that defaults off, 'with js-lease-server --placement js-sched'. | superseded: `crates/js-sched-placer/src/engine.rs` | komira-ai/jobscheduler#800 |
