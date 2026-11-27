@@ -199,3 +199,25 @@ fn a_lease_placed_in_the_round_with_no_end_known_counts_as_the_ceiling() {
     assert_eq!(f.held_for(whole), Some(&w("a")));
     assert_eq!(tail_end(&f, whole), None);
 }
+
+/// Catches: a mark on a worker whose end is counted at the ceiling moved on a tie, because
+/// its tail is unknown for backfill while the other's is known. At 0 `a` runs leases of
+/// 900 s and 600 s and `b` one with no end known (600 s with a ceiling of 600 s), so `b`
+/// is marked. At 100 s `a`'s 900 s lease ends and its tail is 600 s, the same as `b`'s:
+/// the mark stays on `b`.
+#[test]
+fn a_mark_counted_at_the_ceiling_stays_on_a_tie() {
+    let mut f = farm(Some(Backfill::enforced(secs(600))));
+    f.worker("a");
+    let long = f.lease_on("a", secs(900));
+    f.lease_on("a", secs(600));
+    f.worker("b");
+    f.place_on("b", None);
+    let whole = f.whole();
+    assert_eq!(f.held_for(whole), Some(&w("b")));
+    f.at(100_000);
+    f.finish(&long);
+    f.beat();
+    assert!(f.grants().is_empty());
+    assert_eq!(f.held_for(whole), Some(&w("b")));
+}

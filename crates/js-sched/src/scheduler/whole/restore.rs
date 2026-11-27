@@ -92,8 +92,8 @@ impl Scheduler {
     /// and a standing mark keeps its deadline and its tail end: the next round's backfill
     /// start on the worker is the restored tail end (or the tail now, if that ends
     /// sooner), never the start the mark it replaces held by. The next placement round
-    /// reads them as it reads its own: the mark is counted by the caps and kept while its
-    /// worker could hold the request, past its deadline too.
+    /// reads them as it reads its own: the mark is counted by the caps and picked again by
+    /// the least tail, past its deadline too, staying on its worker on a tie.
     ///
     /// Refused, changing nothing, without whole-node settings ([`WholeError::Off`]), for
     /// an operation it does not hold or that is not a whole-machine request, and for a mark

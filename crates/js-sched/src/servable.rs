@@ -700,11 +700,11 @@ impl Servable {
         })
     }
 
-    /// The worker to hold for a request that fits nowhere now: `kept` (the worker a
-    /// whole-machine mark is on) while it still could run it, else the first of `drain`
-    /// (the workers by drain cost, the least tail first) that could. A
-    /// kept worker is never traded for one that has become cheaper to drain: a mark stays
-    /// on its worker until its request is placed, cancelled or gives it up. Never one in
+    /// The worker to hold for a request that fits nowhere now: `kept` while it still could
+    /// run it, else the first of `drain` (the workers by drain cost, the least tail first)
+    /// that could. A whole-machine mark passes `kept` only when the caps refuse it a move,
+    /// so that it stays on its worker; otherwise it is picked again by the least tail every
+    /// round ([`crate::Scheduler`]'s `hold_whole`). Never one in
     /// `reserved`, nor one in `avoid` while [`Servable::fit`] skips it. Only a
     /// whole-machine lease or an action that owns its worker ([`Request::owns_worker`])
     /// holds a worker (the caller asks only for one; an action, and a whole-machine
