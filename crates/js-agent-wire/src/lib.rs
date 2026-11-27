@@ -75,9 +75,10 @@
 //! without), so an agent that can write them reports the capability `run-files` in its
 //! hello, and the server queues and sends a start with files only to a host that did.
 //! `JobSpec::run` is another (an older agent would run the image's own command instead):
-//! a server sends it, with `os` and `arch`, only to a host that reported `one-job`
-//! ([`ONE_JOB_CAPABILITY`]), and writes the start in the legacy forms for any other
-//! ([`JobSpec::downgrade_for`]).
+//! a per-run start carries it, with `os` and `arch`, only to a host that reported `one-job`
+//! ([`ONE_JOB_CAPABILITY`]), and is written in the legacy forms for any other
+//! ([`JobSpec::downgrade_for`]). The server sends no per-run start: its job start
+//! ([`JobStartSpec`]) carries the image and `run` and has no legacy form.
 //! `JobSpec::network` and `JobSpec::ports` are two more: an agent reports its network ceiling
 //! in its hello ([`NetworkCeiling`]: an absent one is `none` with no port), and the server
 //! sends a start that asks for more than `none`, or declares a port, only to a host whose
