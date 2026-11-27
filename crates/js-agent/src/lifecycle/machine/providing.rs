@@ -15,7 +15,10 @@
 //!   (`provided`). A start whose record cannot be written fails, and its cleanup releases
 //!   what was asked.
 //! - **At every step** each source that has no directory yet is asked again: `Prepare`
-//!   until the provider has taken it, then `Mount` until it answers the directory. A
+//!   until the provider has taken it, then `Mount` until it answers the directory. The
+//!   provider client sends a source's first `Mount` itself as soon as its `Prepare` succeeds
+//!   ([`crate::lifecycle::Providers::ask`]), so the step that takes the `Prepare`'s answer
+//!   usually finds the `Mount` out or answered. A
 //!   provider that is unavailable is asked again; one that refuses the ref fails the start
 //!   (`provider-refused`); a directory that is not an absolute path in normal form beneath a
 //!   mount root of the agent's (a root it may write, for a read-write mount) fails it

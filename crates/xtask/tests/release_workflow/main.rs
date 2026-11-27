@@ -194,6 +194,7 @@ fn a_push_to_main_is_the_only_releasing_trigger() {
         "beta-macos-pkg",
         "beta-macos-first-install",
         "beta-macos-probe",
+        "beta-macos-isolation",
         "promote-macos",
         "pkg-upload",
         "smoke-bundle-pack",

@@ -46,6 +46,7 @@ mod duties;
 mod failures;
 mod guarded;
 mod held;
+mod host_live;
 mod host_rows;
 mod hosts;
 mod idempotency;
@@ -87,6 +88,7 @@ pub use duties::*;
 pub use failures::*;
 pub use guarded::*;
 pub use held::*;
+pub use host_live::*;
 pub use host_rows::*;
 pub use hosts::*;
 pub use idempotency::*;
@@ -286,6 +288,8 @@ where
     an_admission_that_loses_the_pool_row_counts_again(backend);
     pool_admits_judges_as_the_admission_does_and_writes_nothing(backend);
     two_servers_admitting_hosts_one_slot_from_the_cap_admit_exactly_one(backend);
+    a_hello_of_a_live_host_is_refused_unless_it_names_the_rows_process(backend);
+    a_hello_that_loses_the_row_to_another_process_is_refused(backend);
     live_nodes_reusing_takes_only_rows_at_the_stored_version(backend);
     nodes_lists_every_readable_row_heard_or_not(backend);
     forget_silent_nodes_deletes_only_the_rows_that_hold_nothing(backend);
@@ -511,6 +515,8 @@ macro_rules! job_store_tests {
             an_admission_that_loses_the_pool_row_counts_again,
             pool_admits_judges_as_the_admission_does_and_writes_nothing,
             two_servers_admitting_hosts_one_slot_from_the_cap_admit_exactly_one,
+            a_hello_of_a_live_host_is_refused_unless_it_names_the_rows_process,
+            a_hello_that_loses_the_row_to_another_process_is_refused,
             live_nodes_reusing_takes_only_rows_at_the_stored_version,
             nodes_lists_every_readable_row_heard_or_not,
             forget_silent_nodes_deletes_only_the_rows_that_hold_nothing,

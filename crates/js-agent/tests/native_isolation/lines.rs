@@ -205,6 +205,24 @@ pub fn parse_lines(text: &str) -> Result<Vec<Line>, String> {
     Ok(lines)
 }
 
+/// `text`, the child's stdout, with each line read by [`own_output`]: what the child printed,
+/// one line each, for the parsers of its uid and pids.
+pub fn own_text(text: &str) -> String {
+    text.lines().map(own_output).collect::<Vec<_>>().join("\n")
+}
+
+/// `line` without the `test <name> ... ` that libtest prints before a test's own output. The
+/// child runs with `--nocapture`, so the first line it prints follows that on the same line.
+pub fn own_output(line: &str) -> &str {
+    match line
+        .strip_prefix("test ")
+        .and_then(|rest| rest.split_once(" ... "))
+    {
+        Some((_, after)) => after,
+        None => line,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,5 +317,33 @@ mod tests {
             assert!(parse_lines(bad).is_err(), "{bad:?} was accepted");
         }
         assert!(parse_lines("").unwrap().is_empty());
+    }
+
+    /// Asserts that the child's first line is read when libtest's `test <name> ... ` comes
+    /// before it on its line, as a hosted Mac printed it, for the uid and the pids, and that
+    /// nothing else is taken for the child's output.
+    ///
+    /// Catches a uid line that is never read, so that every run "did not print the uid it ran
+    /// as" and the test can reach no verdict.
+    #[test]
+    fn the_child_s_first_line_is_read_after_libtest_s_prefix() {
+        use crate::look::{parse_pids, parse_uid};
+        let glued = "\nrunning 1 test\ntest child_of_the_runs ... ISOUID 4310\nISOPID 16440\nISO seeded x\nok\n";
+        assert_eq!(parse_uid(&own_text(glued)), Some(4310));
+        assert_eq!(parse_uid(glued), None, "the parser alone reads whole lines");
+        assert_eq!(
+            parse_pids(&own_text("test child_of_the_runs ... ISOPID 7\nISOPID 8")),
+            [7, 8]
+        );
+        assert_eq!(
+            parse_uid(&own_text(
+                "test child_of_the_runs ... ok\ntest x ... ISOUID"
+            )),
+            None
+        );
+        assert_eq!(own_output("test a ... b ... c"), "b ... c");
+        assert_eq!(own_output("tests a ... ISOUID 1"), "tests a ... ISOUID 1");
+        assert_eq!(own_output("test a"), "test a");
+        assert_eq!(own_output("ISOUID 1"), "ISOUID 1");
     }
 }
