@@ -445,5 +445,6 @@ negative and fades; each release reads the other's results.
 - **A pressure gate and a start charge only:** the lightest design; it drops the owner's idea before there is data.
   Its gate is designed in shadow (step 3, not built).
 - **Others:** sampled recording (starves rare classes); `js-sched`'s minute slots (unused by jobs); a one-second
-  heartbeat (more passes); CPU quotas or cpusets and memory curves (against the owner's rulings).
+  heartbeat (more passes); CPU quotas or cpusets and memory curves (against the owner's rulings; the owner has
+  since asked for memory curves in placement, designed in [memory-over-time.md](memory-over-time.md)).
 - **Killing, throttling or moving a running job on a wrong estimate:** ruled out by the owner.

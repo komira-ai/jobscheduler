@@ -31,6 +31,7 @@ Columns:
 |---|---|---|---|---|---|
 | multi-instance.md | 29 | 2 | 6 | 17 | komira-ai/jobscheduler#1136, komira-ai/jobscheduler#1137, komira-ai/jobscheduler#1138, komira-ai/jobscheduler#1139, komira-ai/jobscheduler#1140, komira-ai/jobscheduler#1141, komira-ai/jobscheduler#1142 |
 | placement-profiles-live.md | 25 | 9 | 6 | 3 | komira-ai/jobscheduler#1143, komira-ai/jobscheduler#1144, komira-ai/jobscheduler#1193 |
+| memory-over-time.md | 11 | 0 | 1 | 8 | - |
 | start-latency.md | 14 | 2 | 2 | 4 | komira-ai/jobscheduler#1145, komira-ai/jobscheduler#1146, komira-ai/jobscheduler#1147 |
 | whole-node.md | 27 | 13 | 4 | 3 | komira-ai/jobscheduler#1148, komira-ai/jobscheduler#1149, komira-ai/jobscheduler#1150, komira-ai/jobscheduler#1193 |
 | lease-limits.md | 5 | 1 | 2 | 1 | komira-ai/jobscheduler#1151 |
@@ -115,10 +116,10 @@ As read: Status: built behind --placement-curves on (off by default); header say
 | §4 'shadow gains three columns' | js-cpu-replay shadow prints CPU peak over %, CPU series usable %, CPU curve. | `crates/js-cpu-replay/src/shadow.rs:322-323` | komira-ai/jobscheduler#1087 |
 | §4 Farm-wide step 1: a day of check lines | At least 24 h of check lines from every server task before on; the one measured window was 4 h 10 min. | decision, no code | - |
 | §4 Farm-wide step 3: the replay on held-out days | The replay must show no loss against the flat step, throughput within 2%, and fewer core-seconds past cores. The trace must carry each job's series; today it has only mean and peak and the replay synthesises shapes. | partly: `crates/js-cpu-replay/src/sim/curve.rs:1-8`, `crates/js-cpu-replay/src/trace.rs:52-86` | komira-ai/jobscheduler#1144 (new) |
-| §4 Memory: for a later memory step (question 4) | Booking memory below today's figure needs a per-class 64-run check and a host-OOM signal on /metrics. | no | - |
+| §4 Memory: for a later memory step (question 4) | Booking memory below today's figure needs a per-class 64-run check and a host-OOM signal on /metrics. | superseded: `docs/design/memory-over-time.md` | - |
 | §5 Switch: placement_curves gains on; server.curve_hosts; server.curve_max_wait_seconds (0-300, default 30); refusal text | The on value, the curve_hosts canary and the wait bound are read once at start. | `crates/js-lease-server/src/config/placement_curves.rs:55-56`, `crates/js-lease-server/src/file/server.rs:64` | komira-ai/jobscheduler#1087 |
 | §5 Stages 1 to 4 (flat step; checks and decide-in-shadow; replay; on with curve_hosts one host, half, all) | Staged rollout: flat step, checks and decide-in-shadow, replay, then on by canary. | partly: Flat step: komira-ai/jobscheduler#1085 merged (mergedprs.tsv) | komira-ai/jobscheduler#1085; komira-ai/jobscheduler#1087 |
-| §5 Stages 5 / §8 Q4: memory is a separate decision | Memory booking from the profile is not part of these stages. | decision, no code | - |
+| §5 Stages 5 / §8 Q4: memory is a separate decision | Memory booking from the profile is not part of these stages. | superseded: `docs/design/memory-over-time.md` | - |
 | §5 Metrics | cpu-curve reason on js_placement_refusals_total, js_curve_wait_expiries_total, js_curve_classes{state}, js_host_cpu_booked_peak_millicores{host}. | `crates/js-lease-server/src/metrics/render.rs:201` | komira-ai/jobscheduler#1087 |
 | §6 What the build pull requests test | The listed minimum tests (flat equals flat step, bursts apart, clamp, survival, tail, residual, past the flat sum, each check boundary, wait bound 30 s, pack share, canary, settings, shadow table). | partly: `crates/js-sched-placer/src/curve_room_tests.rs:333`, `crates/js-lease-server/src/config/placement_curves.rs:55-56` | komira-ai/jobscheduler#1087 |
 | §7 Stale agent doc | crates/js-agent/src/lifecycle/machine/mod.rs:500-502 still says memory is held by the lease's memory.max, which contradicts the code since komira-ai/jobscheduler#1027. Needs a one-line doc fix. | no | komira-ai/jobscheduler#1193 (new) |
@@ -127,7 +128,7 @@ As read: Status: built behind --placement-curves on (off by default); header say
 | §8 Q1 margin per job on flat number | Recommend none. | decision, no code | komira-ai/jobscheduler#1087 |
 | §8 Q2 rule 1 replaces the flat CPU sum on a curve host | On a curve host the slot check replaces the summed flat CPU check; past the flat sum is allowed. | `crates/js-sched-placer/src/curve_room_tests.rs:333` | komira-ai/jobscheduler#1087 |
 | §8 Q3 slot books the 90th percentile at that age, held to a quarter of the host | The curve slot is the p90 clamped to a quarter of the host. | `crates/js-sched-placer/src/curve_room.rs` | komira-ai/jobscheduler#1087 |
-| §8 Q4 memory from the profile | Not now; revisit only if three conditions hold. | decision, no code | - |
+| §8 Q4 memory from the profile | Not now; revisit only if three conditions hold. | superseded: `docs/design/memory-over-time.md` | - |
 | §8 Q5 four checks and thresholds | 16 runs, 80%, 3 of 16, 12 of 16 are starting values to be set from the decide-in-shadow days. | partly: `crates/js-cpu-replay/src/shadow.rs` | - |
 | §8 Q6 canary by named hosts | server.curve_hosts, a list of host ids. | `crates/js-lease-server/src/file/server.rs:566-579`, `crates/js-sched-placer/src/curves.rs:3` | komira-ai/jobscheduler#1087 |
 | §8 Q7 wait bound 30 s then flat | A curve-class job that waited 30 s is tested flat. | `crates/js-sched-placer/src/curve_room.rs:445`, `crates/js-lease-server/src/file/server.rs:579` | komira-ai/jobscheduler#1087 |
@@ -135,6 +136,24 @@ As read: Status: built behind --placement-curves on (off by default); header say
 | §8 Q9 gate on on no loss against the flat step, not 10% against today | The gate is the replay against the flat step on held-out days with series. | partly: `crates/js-cpu-replay/src/sim/curve.rs` | - |
 | §8 Q10 raise MAX_PROFILES | Not now; raise only if evicted classes with 16 runs show up. | decision, no code | - |
 | Header: cpu-over-time.md steps 3 and 4 | Steps 3 (decide in shadow) and 4 (enforce) are fixed by this page. | partly: `docs/design/cpu-over-time.md:3` | komira-ai/jobscheduler#1087 |
+
+## memory-over-time.md
+
+As read: Status: design for review; nothing built. Nothing is filed for it until the design is approved, which is why every row's Tracking is `-`.
+
+| Section | Claim | On main | Tracking |
+|---|---|---|---|
+| §1 Build step 1: signals | The agent reports the host's swap size in its facts and its swap in use in each heartbeat; a job killed for host memory ends with its own outcome, which the server maps to `Failure::NodeMemoryPressure` (requeued with the same booking, another host preferred, the farm rerun bound) and counts per host. | partly: `crates/js-contain/src/cgroup.rs:413-428` tells the kills apart, `crates/js-sched/src/scheduler/memory.rs:798-799` requeues; nothing connects them | - |
+| §1 Build step 2: the memory shadow | The projection of each host's memory from its jobs' profiles, the log of where a memory booking would place a job differently, and the per-host projected-against-measured record. | no | - |
+| §2 The remaining maximum | A running job is charged the largest, over its age and every later age, of the nearest-rank 95th percentile of what the kept runs that lasted that long used from then on, sized x1.2 + 128 MiB and never above flat; a queued job books flat; no survival weighting. | no | - |
+| §2 Profile additions | Each kept run keeps its tail's largest value; a 16-run window of whole memory series; a 16-run window of the held-out check. | no | - |
+| §3 Measured floor | `H = max(sum of charges, non-file memory + swap in use)`; a job fits when `H` plus its flat booking is at most the schedulable memory. | no | - |
+| §3 Stop level | `memory_schedulable_percent` 95 on the Linux pool before the first named host. | decision, no code | - |
+| §3 Swap cushion | 32 GiB of swap per named host, encrypted with a key made at boot, zswap in front; set up outside this repository. | decision, no code | - |
+| §4 Fallback to flat | Five checks: 16 scored, shaped, no held-out overrun in 16, 12 of 16 whole series, peaks' p95 at most twice their median. | no | - |
+| §5 The store keeps its memory check | On a named host the store is handed a flat memory capacity equal to the curve test, so a commit by another instance only makes it stricter; the pass judges memory and skips js-sched's minute-0 memory check there. | no | - |
+| §5 `server.memory_curve_hosts` | A list of host ids read once at start, acting only under `on`; a host outside a non-empty `server.curve_hosts` is refused at start; absent means no host; deleting the line is the off switch. | no | - |
+| §6 Metrics | Kills for host memory, swap in use and the memory charge per host, a `memory-curve` refusal reason, memory-curve classes against flat. | no | - |
 
 ## start-latency.md
 

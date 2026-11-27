@@ -497,6 +497,8 @@ against them, not built in this one.
    - there is a host-OOM signal;
    - the memory gate of section 4 passes.
    A memory under-prediction kills jobs that are not its own and teaches no class.
+   The owner has since asked for memory placement by profile. [memory-over-time.md](memory-over-time.md) designs
+   it, gated on the memory shadow and a signal for host kills, as this answer asked.
 5. **Are the four checks and their thresholds right?** They are 16 runs, 80%, 3 of 16 more than 25% over, and 12 of
    16 usable.
    **Recommend: yes, as starting values to set from the decide-in-shadow days.** Checks 1 and 2 are the profile's
@@ -529,5 +531,5 @@ against them, not built in this one.
 - **A curve slot at the mean, or at the maximum** (question 3).
 - **A per-class operator allow-list.** There are thousands of classes, named by hash, and it duplicates the
   automatic checks.
-- **Memory curves (remaining maximum)** (question 4).
+- **Memory curves (remaining maximum)** (question 4). Now designed in [memory-over-time.md](memory-over-time.md).
 - **Throttling or killing on a wrong estimate.** Ruled out by the owner (`cpu-over-time.md` section 7).
