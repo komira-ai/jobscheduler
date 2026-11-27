@@ -106,8 +106,11 @@ fn the_store_url_is_never_in_an_error_or_a_log_line() {
         ended.stderr
     );
     let printed = format!("{}{}", ended.stdout, ended.stderr);
-    for secret in [url.as_str(), PASSWORD, ROLE] {
-        assert!(!printed.contains(secret), "{secret} in {printed}");
+    for (at, secret) in [url.as_str(), PASSWORD, ROLE].into_iter().enumerate() {
+        assert!(
+            !printed.contains(secret),
+            "secret {at} (the URL, the password, the role) is printed"
+        );
     }
 }
 

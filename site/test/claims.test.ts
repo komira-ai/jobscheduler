@@ -464,6 +464,16 @@ test('every statement of a page is still what its source says', () => {
   assert.deepEqual(unheld(ROWS, source, page), []);
 });
 
+/** `html` without its comments, removed again until none is left: a removal can join two halves into a new one. */
+function withoutComments(html: string): string {
+  let text = html;
+  for (let last = ''; last !== text; ) {
+    last = text;
+    text = text.replace(/<!--[\s\S]*?-->/g, '');
+  }
+  return text;
+}
+
 /**
  * The units of a page that can carry a claim: each heading, each sentence of a paragraph or list item, each row of a
  * table (its cells with their <td> markup, so one phrase can hold a row: the thing and its state), and the page's title and description. Left out: code blocks (<pre>, held by the
@@ -471,8 +481,7 @@ test('every statement of a page is still what its source says', () => {
  * table of contents (links to headings, checked by the link test). Markup stays in, because the rows quote it.
  */
 export function claimUnits(html: string): string[] {
-  const text = html
-    .replace(/<!--[\s\S]*?-->/g, '')
+  const text = withoutComments(html)
     .replace(/<pre\b[\s\S]*?<\/pre>/g, '')
     .replace(/<p class="(?:source-note|toc)">[\s\S]*?<\/p>/g, '')
     .replace(/<thead>[\s\S]*?<\/thead>/g, '');
@@ -704,8 +713,9 @@ test('the install page names every archive the release document lists, and count
 test('an archive left off the install page, or a wrong count, is reported (the check can fail)', () => {
   const release = source('docs/release.md');
   const name = 'js-mdm-X.Y.Z-x86_64-unknown-linux-musl.tar.gz';
-  const dropped = page('install').replace(new RegExp(`<tr><td><code>${name.replace(/\./g, '\\.')}</code>.*?</tr>`), '');
-  assert.match(archiveGaps(release, dropped).join('\n'), new RegExp(`does not name ${name.replace(/\./g, '\\.')}`));
+  const literal = name.replace(/\W/g, '\\$&');
+  const dropped = page('install').replace(new RegExp(`<tr><td><code>${literal}</code>.*?</tr>`), '');
+  assert.match(archiveGaps(release, dropped).join('\n'), new RegExp(`does not name ${literal}`));
   const added = release.replace('| `SHA256SUMS` |', '| `js-new-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | a new tool |\n| `SHA256SUMS` |');
   assert.match(archiveGaps(added, page('install')).join('\n'), /does not name js-new-X\.Y\.Z/);
   assert.match(archiveGaps(added, page('install')).join('\n'), /docs\/release\.md lists 16/);

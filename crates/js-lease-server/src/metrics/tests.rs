@@ -238,8 +238,11 @@ async fn the_text_holds_no_job_id_or_token() {
     let fixture = fixture("no_secrets").await;
     let text = scraped(&fixture).await;
     let tokens = [String::from_utf8(TOKEN.to_vec()).unwrap()];
-    for secret in fixture.ids.iter().chain(&tokens) {
-        assert!(!text.contains(secret.as_str()), "{secret} is in:\n{text}");
+    for (at, secret) in fixture.ids.iter().chain(&tokens).enumerate() {
+        assert!(
+            !text.contains(secret.as_str()),
+            "secret {at} (the job ids, then the token) is in the scrape"
+        );
     }
 }
 

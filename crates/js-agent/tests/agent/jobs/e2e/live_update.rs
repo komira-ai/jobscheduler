@@ -208,7 +208,7 @@ fn next_process(
     let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
     let agent = Agent::spawn_polling(
         server.url(),
-        server.join_file(),
+        server.identities(),
         &flags,
         linux_host,
         (Redirect(address.clone()), Arc::new(dispatch)),
