@@ -538,6 +538,7 @@ mod answers {
                 estimated_run_ms: Some(55_000),
                 cpu_series: None,
                 attempt: Some(2),
+                memory_series: None,
             }],
             next_page_token: "usage-page-3".to_owned(),
         }
