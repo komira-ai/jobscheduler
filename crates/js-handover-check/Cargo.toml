@@ -1,0 +1,27 @@
+[package]
+name = "js-handover-check"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# The program the operator runs (docs/runbooks/agent-handover-check.md); `cargo xtask
+# agent-handover-check` runs the same check through the library.
+[[bin]]
+name = "js-handover-check"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# The scratch directories and the stand-in `js` programs of the tests.
+js-testkit = { path = "../js-testkit" }
+
+[lints]
+workspace = true

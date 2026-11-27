@@ -68,6 +68,21 @@ fn a_pools_cap_is_its_machine_count_and_a_pool_not_served_has_none() {
     assert_eq!(fx.registry.pool_cap("elsewhere"), None);
 }
 
+/// Asserts that a pool's grace is its own, per pool, and that a pool the registry does not
+/// serve has none. It catches a hello or a silence judged on a row by another pool's grace
+/// (the longest one's, say), and a grace invented for a pool that is not served.
+#[test]
+fn a_pools_grace_is_its_own_and_a_pool_not_served_has_none() {
+    let fx = two_pools();
+    let builders = Duration::from_millis(DEFAULT_GRACE_MS);
+    assert_eq!(fx.registry.pool_grace("builders"), Some(builders));
+    assert_eq!(
+        fx.registry.pool_grace("farm"),
+        Some(Duration::from_secs(10))
+    );
+    assert_eq!(fx.registry.pool_grace("elsewhere"), None);
+}
+
 /// Asserts the shape a job is placed against on a host of a pool: a pool that places by hello
 /// adds the capabilities the host claimed beyond the pool's own, a pool that does not keeps its
 /// own, and a pool not served has no shape. It catches a claim that is ignored in a pool that

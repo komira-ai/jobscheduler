@@ -66,9 +66,9 @@ anyway. Steps 3 and 4 wait on the shadow's numbers.
 | 2 | The margin, and how it is learned | Today's x1.2 + 128 MiB on the class's own runs, not tuned per class. A class learns whether it may use its curve, from a held-out check (sections 2, 4) |
 | 3 | What protects a host when real memory passes the projection | No per-job limit (as today). A measured floor. `memory_schedulable_percent` 95 as the level where the host stops taking jobs. 32 GiB of encrypted swap with zswap as the cushion. The scheduler never kills, throttles or moves a job (section 3) |
 | 4 | Fallback to flat | Five checks. Any failure books flat at the next pass (section 4) |
-| 5 | Canary | `server.memory_curve_hosts`, named hosts, a subset of the CPU curve hosts (section 5) |
+| 5 | Canary | `--memory-curve-hosts` (file key `server.memory_curve_hosts`), named hosts, a subset of the CPU curve hosts (section 5) |
 | 6 | What the lead reads | One table of go and stop numbers (section 6) |
-| 7 | Off | Delete the `server.memory_curve_hosts` line and restart (section 5) |
+| 7 | Off | Drop `--memory-curve-hosts` (or delete its file key) and restart (section 5) |
 
 ### Build steps, each its own pull request and each useful alone
 1. **Signals.**
@@ -216,8 +216,10 @@ The stored booking is the flat number in every mode, as for CPU. It is what the 
   gains no state, no message and no wait.
 
 ### The canary
-- **`server.memory_curve_hosts`,** a list of host ids, read once at start. It takes the checks of
-  `server.curve_hosts` (`crates/js-lease-server/src/file/server.rs:566-580`): valid ids, no repeats, at least one.
+- **`--memory-curve-hosts`, or the file key `server.memory_curve_hosts`,** a list of host ids, read once at
+  start. It mirrors `--curve-hosts` and `server.curve_hosts` (komira-ai/jobscheduler#1250), and the job service runs
+  on flags. It takes the same checks (`crates/js-lease-server/src/config/placement_curves.rs:73-95`): valid ids, no
+  repeats, at least one.
 - **It acts only under `on`.** The server refuses at start a named host outside a non-empty `server.curve_hosts`, so
   memory goes on only where CPU curves have already run.
 - **An absent key means no host,** unlike `server.curve_hosts`. Widening to all means naming all six.
@@ -230,9 +232,9 @@ The stored booking is the flat number in every mode, as for CPU. It is what the 
   - The build pull request names the test that runs the previous release against the new data, and the reverse.
 
 ### The off line
-- **Delete the `server.memory_curve_hosts` line and restart** through the update hook. Every class books memory
-  flat at the next pass. CPU curves and the profiles are untouched. Setting `server.placement_curves = "shadow"`
-  turns both off.
+- **Drop `--memory-curve-hosts` from the service's arguments, or delete its file key, and restart** through the
+  update hook. Every class books memory
+  flat at the next pass. CPU curves and the profiles are untouched. `--placement-curves shadow` turns both off.
 - **Nothing stored needs undoing,** because bookings are stored flat.
 - **A host may stay full for a while.** A host packed by memory curves may hold more flat bookings than its
   schedulable memory. The flat check refuses it new jobs until enough of them end, which can take as long as its
