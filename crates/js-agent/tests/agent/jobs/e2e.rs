@@ -681,9 +681,11 @@ fn sigterm_lets_the_job_finish_and_reports_it_before_the_agent_leaves() {
 }
 
 /// Asserts that a job still running when the drain's wait is over is stopped and its killed
-/// result reaches the server before the agent ends (`--drain-wait 0`: no wait). It catches a
-/// drain that leaves a job running when the agent exits, and one that exits before the
-/// result of the job it stopped is acknowledged.
+/// result reaches the server before the agent ends (`--drain-wait 0`: no wait), and that the
+/// server ends the job lost (the result says `host-stop`: the agent's own stop, which a
+/// retry policy retries on another host), not failed. It catches a drain that leaves a job
+/// running when the agent exits, one that exits before the result of the job it stopped is
+/// acknowledged, and a drain's stop ended as the job's own failure.
 #[test]
 fn sigterm_with_no_wait_stops_the_job_and_reports_it_killed() {
     let rig = rig("jobs_e2e_term_now", &["--drain-wait", "0"]);
@@ -695,7 +697,7 @@ fn sigterm_with_no_wait_stops_the_job_and_reports_it_killed() {
     assert!(rig.worker.settle());
     rig.agent.elapse();
     assert_eq!(rig.agent.next_wait(), INTERVAL, "the killed result goes up");
-    assert_eq!(rig.view(&run).0, "JOB_STATE_FAILED");
+    assert_eq!(rig.view(&run).0, "JOB_STATE_LOST");
     assert!(rig.worker.settle());
     rig.agent.elapse();
 
