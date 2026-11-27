@@ -561,9 +561,11 @@ fn b_a_blocked_head_starts_within_the_bound_and_pools_do_not_meet() {
 /// Sim for the whole-node mark. Catches: a worker being emptied for a whole-machine lease
 /// taking small work because its measured load falls as it drains (it would rank first, and
 /// refill): two 8-core workers under a stream of one-core actions of 6 ticks; a
-/// whole-machine request at tick 10 holds the one with fewer leases, no small action is
-/// placed there from its submission to its start, and it starts within the longest lease
-/// plus a round.
+/// whole-machine request at tick 10 (no whole-node settings, so it holds the first worker
+/// of the drain order, picked again every round: no lease here has an end, so the tails are
+/// all unknown and the one with fewer leases comes first, and the held worker only drains
+/// while the other fills) holds that worker, no small action is placed there from its
+/// submission to its start, and it starts within the longest lease plus a round.
 #[test]
 fn a_worker_marked_for_a_whole_machine_lease_is_emptied_not_refilled() {
     let mut w = World::new(LoadConfig::default());
