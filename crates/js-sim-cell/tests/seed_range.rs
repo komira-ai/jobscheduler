@@ -563,3 +563,11 @@ fn help_alone_prints_the_usage() {
     }
     assert!(seeds.ran().is_empty());
 }
+
+/// Fails on purpose, to show that one failing test in one shard turns the required check
+/// `all-passed` red. The next commit removes it.
+#[test]
+fn one_failing_test_turns_the_required_check_red() {
+    let two = 1 + 1;
+    assert_eq!(two, 3, "this test fails on purpose");
+}
