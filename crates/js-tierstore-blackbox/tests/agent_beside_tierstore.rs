@@ -15,8 +15,12 @@
 //! The pass conditions are numbers, the plan's:
 //!
 //! - [`twenty_starts_at_two_placements_with_the_upstream_stalled`]: in no 30 s of the run do more
-//!   than 20 Prepare calls reach tierstore; every job ends, after the Releases; and no job ends
-//!   as its own fault (an end other than success, or a start that failed for the host's input).
+//!   than 20 Prepare calls reach tierstore, nor more than 20 Mount calls; every job ends, after
+//!   the Releases; and no job ends as its own fault (an end other than success, or a start that
+//!   failed for the host's input). The plan counts Prepare, where tierstore refused a start at
+//!   its placement cap when the plan was written; tierstore now answers Prepare at once and
+//!   refuses at Mount (`too many placements`, or `not ready` while it cannot read the store), so
+//!   a storm shows in either, and each is held to the plan's number.
 //! - [`tierstore_restarted_while_starts_wait`]: after the restart every waiting start is
 //!   prepared again (at least one Prepare per job reaches the new process) and every job
 //!   succeeds.
@@ -60,11 +64,12 @@ use std::time::{Duration, Instant};
 
 use rig::{End, Rig};
 
-/// The window the plan counts Prepare calls in.
+/// The window the plan counts calls in.
 const WINDOW: Duration = Duration::from_secs(30);
 
-/// The most Prepare calls that may reach tierstore in any [`WINDOW`]: one per job of the burst.
-const MOST_PREPARES_IN_WINDOW: usize = 20;
+/// The most Prepare calls, and the most Mount calls, that may reach tierstore in any
+/// [`WINDOW`]: one of each per job of the burst.
+const MOST_CALLS_IN_WINDOW: usize = 20;
 
 /// The burst of the first test.
 const BURST: usize = 20;
@@ -75,11 +80,11 @@ const WAITING: usize = 6;
 /// How long tierstore answers unavailable in the outage test.
 const OUTAGE: Duration = Duration::from_secs(60);
 
-/// Catches an agent that sends Prepare again at once when tierstore cannot serve a start (the
-/// retry storm of a provider whose placements are full, about 1,000 calls a second): 20 starts
-/// wait on a tierstore whose upstream is stalled for 30 s and that then holds only two
-/// placements at a time, and the most Prepare calls in any 30 s is counted at the provider's
-/// socket. It also catches a store refusal that fails a start as the job's own fault, and a job
+/// Catches an agent that asks again at once when tierstore cannot serve a start (the retry storm
+/// of a provider whose placements are full, about 1,000 calls a second): 20 starts wait on a
+/// tierstore whose upstream is stalled for 30 s and that then holds only two placements at a
+/// time, and the most Prepare calls, and the most Mount calls, in any 30 s are counted at the
+/// provider's socket. It also catches a store refusal that fails a start as the job's own fault, and a job
 /// left waiting when the Releases free the placements.
 #[test]
 #[ignore = "needs root on a disposable Linux runner, the apt channel and the released lease server: run by js-agent-blackbox-tierstore.yml"]
@@ -93,18 +98,19 @@ fn twenty_starts_at_two_placements_with_the_upstream_stalled() {
     let ends = rig.wait_for_ends(&jobs);
     let releases = rig.provider.wait_for_calls("Release", BURST);
 
-    let prepares = rig.provider.reached("Prepare");
-    let busiest = rig::busiest_window(&prepares, WINDOW);
     let mut wrong = Vec::new();
-    if busiest.count > MOST_PREPARES_IN_WINDOW {
-        wrong.push(format!(
-            "{} Prepare calls reached tierstore in the 30 s from {:.1} s, more than {MOST_PREPARES_IN_WINDOW}",
-            busiest.count,
-            busiest.from.as_secs_f64()
-        ));
+    for method in ["Prepare", "Mount"] {
+        let busiest = rig::busiest_window(&rig.provider.reached(method), WINDOW);
+        if busiest.count > MOST_CALLS_IN_WINDOW {
+            wrong.push(format!(
+                "{} {method} calls reached tierstore in the 30 s from {:.1} s after the first, more than {MOST_CALLS_IN_WINDOW}",
+                busiest.count,
+                busiest.from.as_secs_f64()
+            ));
+        }
     }
     wrong.extend(own_faults(&ends));
-    let report = rig.report(&ends, &prepares, releases);
+    let report = rig.report(&ends, releases);
     assert!(wrong.is_empty(), "{}\n\n{report}", wrong.join("\n"));
     println!("{report}");
 }
@@ -135,7 +141,7 @@ fn tierstore_restarted_while_starts_wait() {
         ));
     }
     wrong.extend(not_succeeded(&ends));
-    let report = rig.report(&ends, &prepares, releases);
+    let report = rig.report(&ends, releases);
     assert!(wrong.is_empty(), "{}\n\n{report}", wrong.join("\n"));
     println!("{report}");
 }
@@ -157,7 +163,6 @@ fn tierstore_unavailable_for_60_s() {
     let ends = rig.wait_for_ends(&jobs);
     let releases = rig.provider.wait_for_calls("Release", WAITING);
 
-    let prepares = rig.provider.reached("Prepare");
     let mut wrong = Vec::new();
     if during == 0 {
         wrong.push(
@@ -166,7 +171,7 @@ fn tierstore_unavailable_for_60_s() {
         );
     }
     wrong.extend(not_succeeded(&ends));
-    let report = rig.report(&ends, &prepares, releases);
+    let report = rig.report(&ends, releases);
     assert!(
         wrong.is_empty(),
         "{}\n\n{during} unavailable answers in the outage\n{report}",

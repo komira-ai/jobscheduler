@@ -220,8 +220,9 @@ impl Rig {
     }
 
     /// What the test saw, for its output: the versions, how the jobs ended, the provider calls
-    /// by method, and the Prepare calls that reached tierstore second by second.
-    pub fn report(&self, ends: &[End], prepares: &[Instant], first_release: Instant) -> String {
+    /// by method, and the Prepare and Mount calls that reached tierstore second by second, with
+    /// the busiest 30 s of each.
+    pub fn report(&self, ends: &[End], first_release: Instant) -> String {
         let mut text = format!(
             "js-agent {}, tierstore {}, trees.max_placements = {MAX_PLACEMENTS}\n",
             self.installed.agent, self.installed.tierstore
@@ -247,29 +248,33 @@ impl Rig {
         let since = |at: Instant| at.saturating_duration_since(self.started).as_secs();
         let _ = writeln!(
             text,
-            "first Release at {} s; Prepare calls that reached tierstore per second (second: count):",
+            "seconds below count from the agent's start; first Release at {} s",
             since(first_release)
         );
-        let mut seconds: Vec<(u64, usize)> = Vec::new();
-        for at in prepares {
-            let second = since(*at);
-            match seconds.last_mut() {
-                Some((last, count)) if *last == second => *count += 1,
-                _ => seconds.push((second, 1)),
+        for method in ["Prepare", "Mount"] {
+            let times = self.provider.reached(method);
+            let mut seconds: Vec<(u64, usize)> = Vec::new();
+            for at in &times {
+                let second = since(*at);
+                match seconds.last_mut() {
+                    Some((last, count)) if *last == second => *count += 1,
+                    _ => seconds.push((second, 1)),
+                }
             }
+            let line: Vec<String> = seconds
+                .iter()
+                .map(|(second, count)| format!("{second}:{count}"))
+                .collect();
+            let busiest = busiest_window(&times, crate::WINDOW);
+            let _ = writeln!(
+                text,
+                "{method} calls that reached tierstore per second (second:count): {}\n\
+                 busiest 30 s: {} {method} calls, from {:.1} s after the first",
+                line.join(" "),
+                busiest.count,
+                busiest.from.as_secs_f64()
+            );
         }
-        let line: Vec<String> = seconds
-            .iter()
-            .map(|(second, count)| format!("{second}:{count}"))
-            .collect();
-        let _ = writeln!(text, "{}", line.join(" "));
-        let busiest = busiest_window(prepares, crate::WINDOW);
-        let _ = writeln!(
-            text,
-            "busiest 30 s: {} Prepare calls, from {:.1} s after the first",
-            busiest.count,
-            busiest.from.as_secs_f64()
-        );
         text
     }
 }
