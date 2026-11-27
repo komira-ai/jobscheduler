@@ -83,7 +83,7 @@ const TERM: u64 = 1;
 /// How the engine is built: the settings of the server's configuration.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Settings {
-    /// Whether a job may backfill a host set aside, and up to which wall time.
+    /// Whether a job may backfill a host set aside, up to which wall time, and the margin.
     pub backfill: Backfill,
     /// The load settings, CPU slack included (`--cpu-slack`).
     pub load: LoadConfig,

@@ -656,7 +656,10 @@ one worker step between the two calls, with the provider idle meanwhile.
 - No wire, record or configuration format changes. The provider receives the same calls in the same
   order: `Mount` after `Prepare` was answered, now sooner.
 - A provider that fails the `Mount` the client sent gets it again from the lifecycle's next ask, as a
-  `Mount` the lifecycle sent would.
+  `Mount` the lifecycle sent would. (Later, komira-ai/jobscheduler#1274: after a `Mount` answered
+  unavailable, the source's next ask, once its wait is over, sends its `Prepare` again and the
+  `Mount` only once that is taken, so a provider that restarted and lost the source is asked from
+  the start; `lifecycle/machine/providing.rs`.)
 
 ### What is left
 

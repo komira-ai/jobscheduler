@@ -23,7 +23,12 @@
 //!   provider that is unavailable (or answers a `Mount` with no directory) is asked again
 //!   after a wait that grows with each failure in a row, per source, and a provider that
 //!   fails `Prepare`s is sent one `Prepare` at a time until one succeeds (`pace`); each step
-//!   in which a start's calls failed gives one `provider-backoff` line for it. One that
+//!   in which a start's calls failed gives one `provider-backoff` line for it. A `Mount`
+//!   answered unavailable is asked again from the start: after its wait the source's
+//!   `Prepare` is sent again, and the `Mount` follows it once it is taken, because a provider
+//!   that restarted has lost what it was asked before and answers a source it does not know
+//!   so (tierstore: "the source is not prepared here"). That `Prepare`'s success does not end
+//!   the failures in a row, so the waits still grow while the `Mount` fails. One that
 //!   refuses the request as wrong in itself (`INVALID_ARGUMENT`) fails the start
 //!   `provider-refused`, the job's own fault; one that cannot serve it in its present state
 //!   (`FAILED_PRECONDITION`) fails it `provider-failed`, the host's, so the server places the
@@ -114,6 +119,9 @@ struct Wanted {
     why: String,
     /// The pace of its calls.
     pace: Pace,
+    /// The `Prepare` is sent again because the provider answered the `Mount` unavailable
+    /// after it had taken the ref: its success keeps the failures in a row.
+    again: bool,
 }
 
 impl Wanted {
@@ -127,6 +135,7 @@ impl Wanted {
             path: None,
             why: "no answer".to_owned(),
             pace: Pace::default(),
+            again: false,
         }
     }
 
@@ -211,8 +220,9 @@ impl Wanted {
     }
 
     /// Asks the provider for what this source still lacks, at `now_ms`: `Prepare` until it
-    /// is taken, then `Mount` until the directory is answered. A provider that has not
-    /// answered its sweep is not asked; nor is a source whose pace has it wait, nor (for a
+    /// is taken, then `Mount` until the directory is answered; a `Mount` answered unavailable
+    /// has the next ask send the `Prepare` again first, as the provider may have restarted
+    /// and lost the source. A provider that has not answered its sweep is not asked; nor is a source whose pace has it wait, nor (for a
     /// `Prepare` not out yet) one whose provider's gate is shut. A call that failed and now
     /// waits is given back, for the start's backoff line.
     fn ask(
@@ -246,6 +256,7 @@ impl Wanted {
                 reference: self.reference.clone(),
                 mode: self.mode,
             };
+            let failures = self.pace.failures();
             let (answer, step) = attached.paced(
                 (self.provider.as_str(), &call),
                 &mut self.pace,
@@ -253,7 +264,12 @@ impl Wanted {
                 &seed,
             );
             match answer {
-                ProviderAnswer::Done(_) => self.prepared = true,
+                ProviderAnswer::Done(_) => {
+                    self.prepared = true;
+                    if std::mem::take(&mut self.again) {
+                        self.pace.resume(failures);
+                    }
+                }
                 other => {
                     self.settle(other)?;
                     return Ok(step.map(|step| self.backed("Prepare", step)));
@@ -277,6 +293,10 @@ impl Wanted {
                 Ok(step.map(|step| self.backed("Mount", step)))
             }
             other => {
+                if matches!(other, ProviderAnswer::Unavailable(_)) {
+                    self.prepared = false;
+                    self.again = true;
+                }
                 self.settle(other)?;
                 Ok(step.map(|step| self.backed("Mount", step)))
             }

@@ -73,6 +73,9 @@ pub(super) struct Pace {
     sent_ms: Option<u64>,
     /// When the next call may be sent.
     again_ms: u64,
+    /// The failures were kept through a success that did not end them ([`Pace::resume`]):
+    /// the next call is not one sent again, until an answer to it.
+    resumed: bool,
 }
 
 impl Pace {
@@ -85,6 +88,21 @@ impl Pace {
     /// Whether an ask now sends a call: none is out.
     pub(super) fn idle(&self) -> bool {
         self.sent_ms.is_none()
+    }
+
+    /// Whether a call sent now is sent again after a failure of the source's last call: there
+    /// were failures, and no success since ([`Pace::resume`] is not one that ends them).
+    pub(super) fn retrying(&self) -> bool {
+        self.failures > 0 && !self.resumed
+    }
+
+    /// Keeps `failures` failures in a row through the success just answered: a `Prepare`
+    /// sent again after a `Mount` that failed was taken, and the `Mount` after it is still in
+    /// that run of failures, so its own failure waits longer and not the first wait again. The
+    /// `Mount` follows a success, so it is not counted as sent again ([`Pace::retrying`]).
+    pub(super) fn resume(&mut self, failures: u32) {
+        self.failures = failures;
+        self.resumed = failures > 0;
     }
 
     /// The failed answers in a row so far.
@@ -122,6 +140,7 @@ impl Pace {
             | ProviderAnswer::Failed(_)
             | ProviderAnswer::Unavailable(_) => {
                 let sent = self.sent_ms.take().unwrap_or(now_ms);
+                self.resumed = false;
                 let wait = wait_ms(self.failures, seed);
                 self.failures = self.failures.saturating_add(1);
                 self.again_ms = sent.saturating_add(wait);
@@ -213,6 +232,38 @@ mod tests {
         let apart = (0..8).filter(|n| wait_ms(*n, "tier/r1#0") != wait_ms(*n, "tier/r2#0"));
         assert!(apart.count() > 0, "two sources share every wait");
         assert_eq!(wait_ms(3, "tier/r1#0"), wait_ms(3, "tier/r1#0"));
+    }
+
+    /// Asserts that a pace resumed through a success keeps its failures, so the next failure
+    /// waits the next wait and counts on from them, that the call after it is not one sent
+    /// again, and that the next failure makes the call after that one sent again; and that
+    /// resuming no failures leaves a fresh pace. Catches a `Prepare` sent again after a failed
+    /// `Mount` whose success starts the waits over, and a `Mount` after a success counted as
+    /// a retry.
+    #[test]
+    fn a_resumed_pace_keeps_its_failures_and_is_not_a_retry() {
+        let mut pace = Pace::default();
+        pace.asked(0);
+        pace.answered(&down(), 0, "s");
+        pace.asked(5_000);
+        pace.answered(&ProviderAnswer::Done(None), 5_000, "s");
+        assert!(!pace.retrying());
+        pace.resume(1);
+        assert_eq!(pace.failures(), 1);
+        assert!(!pace.retrying(), "the call after a success");
+        pace.asked(5_000);
+        let step = pace.answered(&down(), 5_000, "s").expect("a step");
+        assert_eq!(
+            step,
+            Step {
+                failures: 2,
+                wait_ms: wait_ms(1, "s")
+            }
+        );
+        assert!(pace.retrying(), "sent again after that failure");
+        let mut fresh = Pace::default();
+        fresh.resume(0);
+        assert_eq!(fresh, Pace::default());
     }
 
     /// Asserts that a source's pace is due while a call is out and once its wait has passed

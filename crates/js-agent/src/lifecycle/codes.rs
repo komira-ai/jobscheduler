@@ -38,6 +38,9 @@ pub mod code {
     /// The log tails of the held results did not fit the heartbeat even cut down; the tail
     /// of this run was left out of its result.
     pub const LOG_TAIL_SHED: &str = "log-tail-shed";
+    /// The log tails of the held results did not fit the heartbeat whole; the tail of this
+    /// run was cut down, its end kept and `truncated` set.
+    pub const LOG_TAIL_CUT: &str = "log-tail-cut";
     /// The runtime could not read the log of a job that exited; its result goes without a
     /// tail.
     pub const LOGS_FAILED: &str = "logs-failed";

@@ -5,9 +5,13 @@
 //! The fake keeps the contract of [`Providers::ask`]: a call is sent (and logged) the first
 //! time it is asked, a `Pending` answer keeps it out (asking it again sends nothing), and any
 //! other answer is handed over once, after which asking it sends the call again.
+//!
+//! A test may have the providers keep the sources they took, as a real one does in memory
+//! ([`FakeProviders::keep_sources`]), and then restart them ([`FakeProviders::restart`]):
+//! a `Mount` of a source taken by no `Prepare` since is then answered as tierstore answers it.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -41,6 +45,9 @@ struct State {
     scripts: BTreeMap<Key, Script>,
     /// Where the agent's provider records are: a `Prepare` notes whether its run's is there.
     records: Option<PathBuf>,
+    /// The sources the providers hold, by provider, run and index, when the test has them kept
+    /// ([`FakeProviders::keep_sources`]): a `Prepare` that succeeds adds its source.
+    held: Option<BTreeSet<(String, String, u32)>>,
 }
 
 /// The providers of a test: the names the agent was given, and what each call is answered.
@@ -103,6 +110,7 @@ impl FakeProviders {
             names: names.iter().map(|name| (*name).to_owned()).collect(),
             scripts: BTreeMap::new(),
             records: None,
+            held: None,
         };
         Self {
             state: Rc::new(RefCell::new(state)),
@@ -114,6 +122,21 @@ impl FakeProviders {
     /// in `dir` (the agent's `providers` directory) at that moment.
     pub fn watch_records(&self, dir: PathBuf) {
         self.state.borrow_mut().records = Some(dir);
+    }
+
+    /// The providers keep the sources they take from now on, as a provider does in memory: a
+    /// `Prepare` that succeeds holds its source, and a `Mount` of a source not held is answered
+    /// [`not_prepared`], whatever is scripted for it, which stays for a later ask.
+    pub fn keep_sources(&self) {
+        self.state.borrow_mut().held = Some(BTreeSet::new());
+    }
+
+    /// The providers restart, as a release of the provider restarts it: every source they
+    /// held is lost (with [`FakeProviders::keep_sources`]).
+    pub fn restart(&self) {
+        if let Some(held) = self.state.borrow_mut().held.as_mut() {
+            held.clear();
+        }
     }
 
     /// The next ask of `call` of `provider` is answered `answer` (after those scripted
@@ -202,15 +225,36 @@ impl Providers for FakeProviders {
             self.log.borrow_mut().push(line);
         }
         let mut state = self.state.borrow_mut();
+        let (_, _, run, index) = key_of(provider, call);
+        let source = (provider.to_owned(), run, index);
+        let lost = matches!(call, ProviderCall::Mount { .. })
+            && state
+                .held
+                .as_ref()
+                .is_some_and(|held| !held.contains(&source));
         let script = state.scripts.entry(key_of(provider, call)).or_default();
-        let answer = script
-            .then
-            .pop_front()
-            .or_else(|| script.always.clone())
-            .unwrap_or_else(|| default_answer(call));
+        let answer = match lost {
+            true => not_prepared(),
+            false => script
+                .then
+                .pop_front()
+                .or_else(|| script.always.clone())
+                .unwrap_or_else(|| default_answer(call)),
+        };
         script.out = answer == ProviderAnswer::Pending;
+        let prepared = matches!(call, ProviderCall::Prepare { .. })
+            && matches!(answer, ProviderAnswer::Done(_));
+        if let Some(held) = state.held.as_mut().filter(|_| prepared) {
+            held.insert(source);
+        }
         answer
     }
+}
+
+/// What tierstore answers a `Mount` of a source it does not hold (never prepared, or lost
+/// when it restarted): `UNAVAILABLE`, which the agent's client hands over as unavailable.
+pub fn not_prepared() -> ProviderAnswer {
+    ProviderAnswer::Unavailable("the source is not prepared here".to_owned())
 }
 
 /// The image of the job starts of these tests.
