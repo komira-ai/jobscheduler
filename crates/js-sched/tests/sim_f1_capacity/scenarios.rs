@@ -546,8 +546,8 @@ impl Scenario for QosOrder {
 /// back); it runs once they stop (L1). Under the load rule the first request blocked for
 /// the load of its pool holds the worker with the most headroom, so no small one is placed
 /// there and the worker empties: the large request runs within the longest run of its
-/// holder's leases after it is held (the hold may move to a worker that is much emptier,
-/// and the bound starts again there).
+/// holder's leases after it is held (the hold is picked again every round, so it may move
+/// to any worker that has become emptier, and the bound starts again there).
 #[derive(Debug, Default)]
 pub struct LargeBehindSmall {
     workers: u64,
