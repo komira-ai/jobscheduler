@@ -5,9 +5,11 @@ Moved from design.md section 13.2. Section numbers refer to design.md.
 ## What exists now
 
 The suite is the `agent` module of `js-conformance`, beside the provider suite. It is wire-neutral: the scenarios speak only to the
-`AgentHarness` trait (deliver a Start with its validity bound, deliver a fenced Start naming a job and its allocation, deliver a
-Cancel, acknowledge a result, end a job, answer a heartbeat,
-drop and restore the connection, advance an injected clock, read what the agent reported). One harness per transport implements the
+`AgentHarness` trait (deliver a Start with its validity bound, a fenced Start naming a job and its allocation, a Start breaking one
+rule of the start contract, a host Start and a Start under a whole-node lease; deliver a Cancel; answer a result with a verdict;
+end a job on its own or with a failure; acknowledge a taint; make the runtime fail a removal or the post-job check find something;
+give the operator's consent to host jobs; restart the agent; hold the host whole and ask whether it is ready; answer a heartbeat;
+drop and restore the connection; advance an injected clock; read what the agent reported). One harness per transport implements the
 trait; the scenarios do not change. Time is injected, so no scenario sleeps or asserts how long anything took. `FakeAgent` is the
 correct in-process agent; each `Defect` is the same agent missing one behaviour, and the tests assert that each scenario fails on its
 broken agent and that no other scenario does.
@@ -59,8 +61,8 @@ The js-agent adapter (`crates/js-conformance/tests/js_agent_suite.rs`) drives th
 memory (`js_conformance::agent::memory`) and a clock the suite moves, stamping the agent's contact where its session would (a
 delivered message is an accepted reply), and passes every scenario. It does not go through the session or the transport: those are
 covered by the agent's own tests (`crates/js-agent/tests/agent/jobs/silence.rs`). The fake cancels without producing a result and
-does not model grace periods or a cap on retired ids; it refuses a run start on a tainted host or one held whole, and models no
-taint on a fenced, host or whole-node start.
+does not model grace periods or a cap on retired ids; it refuses a run start on a tainted host or on one held whole, and no
+fenced, host or whole-node start for either reason.
 
 ## Outside the agent suite
 
@@ -107,6 +109,7 @@ agent's own tests cover them:
   (komira-ai/jobscheduler#1155, komira-ai/jobscheduler#1187), an image whose digest differs from the pinned one is
   `image-unavailable` (komira-ai/jobscheduler#1189), and the VM store check finding an unaccounted directory
   (komira-ai/jobscheduler#1188);
-- one VM per run and VMs counted in `vms` and in the offer in the order of 5.15 (the agent's half; the scheduler books them,
-  komira-ai/jobscheduler#129);
+- one VM per run (no VM id serves two runs) and VMs counted in `vms` and in the offer in the order of 5.15, as the agent's
+  half of the accounting the scheduler does (`crates/js-sched/src/admission/horizon.rs`); these need the fake VM runtime of
+  vm-backend.md's tests in the suite's adapter;
 - at `preparing` of a whole-node lease, no VM running (one found is a finding and is destroyed) (komira-ai/jobscheduler#1188).

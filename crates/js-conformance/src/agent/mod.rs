@@ -291,7 +291,8 @@ pub trait AgentHarness {
     fn hold_whole(&mut self, lease: &str) -> Delivery;
 
     /// Whether the agent reports its host ready for the whole-node lease it is held for:
-    /// nothing is held on it. Asked while no lease holds it, the answer is `false`.
+    /// nothing is held on it. A ready answer is kept for the lease, as the lease may then
+    /// start runs. Asked while no lease holds it, the answer is `false`.
     fn whole_ready(&mut self) -> bool;
 
     /// Delivers a start for `lease` under the whole-node lease the host is held for, with
