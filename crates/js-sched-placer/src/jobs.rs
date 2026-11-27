@@ -11,9 +11,11 @@
 //! `jobs_seen`). A pass ([`SchedPlacer::place_jobs_with`]):
 //!
 //! 1. **Reads the tables as they stand**: every live (booked or releasing) allocation, every
-//!    queued job in queue order and every mark; read again only when the job store wrote since
-//!    the last pass read them, and otherwise the rows that pass read, which are the rows the
-//!    store holds ([`js_jobs::JobStore::written`]). The engine holds no list of its own that a
+//!    queued job in queue order and every mark; taken again only when the job store wrote since
+//!    the last pass read them ([`js_jobs::JobStore::written`]), and then brought up to date from
+//!    the store's feed with the rows that changed ([`js_jobs::JobStore::table_changes`]), or read
+//!    in full where the feed cannot tell; otherwise the rows that pass read, which are the rows
+//!    the store holds. The engine holds no list of its own that a
 //!    job must stay on, so no timer can drop a queued job and none is ever presented again (row
 //!    12).
 //! 2. **Brings the engine's bookings to the allocation table** ([`Engine::sync_jobs`]): the
@@ -214,7 +216,7 @@ impl Engine {
 
     /// Whether the engine holds a job allocation on `host` that holds one of the host ports
     /// `ports`.
-    fn port_held_on(&self, host: &HostId, ports: &[u16]) -> bool {
+    pub(super) fn port_held_on(&self, host: &HostId, ports: &[u16]) -> bool {
         let mut here = self.jobs.values().filter(|hold| hold.host == *host);
         here.any(|hold| hold.host_ports.iter().any(|port| ports.contains(port)))
     }
@@ -413,13 +415,13 @@ impl Engine {
             |at, room| {
                 let walker = &walkers[*at];
                 let room: BTreeSet<HostId> = room.difference(&tainted).cloned().collect();
-                let host = self.try_job(walker, (&room, &usable[*at]), now, &mut settled);
+                let host = self.shadowed_try(walker, (&room, &usable[*at]), now, &mut settled);
                 tainted.extend(host.clone().filter(|_| walker.host_isolation));
                 host
             },
         );
         self.sched.drop_matches();
-        self.end_curve_walk();
+        self.end_curve_walk(now);
         let decided = walkers.into_iter().zip(placed).zip(&usable);
         let mut placements = Vec::new();
         let mut waiting = Vec::new();
@@ -445,7 +447,7 @@ impl Engine {
     /// operation after it is numbered as if the round had run; and the scheduler is ticked
     /// only when it was not ticked at `now` since the last change the walk made (`settled`),
     /// since a second tick at the same time with nothing changed in between does nothing.
-    fn try_job(
+    pub(super) fn try_job(
         &mut self,
         walker: &Walker,
         (room, capable): (&BTreeSet<HostId>, &BTreeSet<&HostId>),
@@ -646,10 +648,11 @@ impl SchedPlacer {
     /// whole host is committed with the pool's `prepare_timeout` as its allocation's prepare
     /// deadline.
     ///
-    /// The tables are read again only when the job store wrote since the last pass read them
-    /// ([`js_jobs::JobStore::written`]); otherwise the rows that pass read are the rows the
-    /// store holds, and are used again. What the pass found is kept for the next
-    /// [`SchedPlacer::place_jobs_if_changed`] (`jobs_seen`).
+    /// The tables are taken again only when the job store wrote since the last pass read them
+    /// ([`js_jobs::JobStore::written`]), and then brought up to date from the store's feed with
+    /// the rows that changed, or read in full where the feed cannot tell; otherwise the rows
+    /// that pass read are the rows the store holds, and are used again. What the pass found is
+    /// kept for the next [`SchedPlacer::place_jobs_if_changed`] (`jobs_seen`).
     ///
     /// # Errors
     /// The [`JobStoreError`] of a failed read of the tables: nothing is placed. A failed write
@@ -661,18 +664,19 @@ impl SchedPlacer {
         sinks: (&dyn JobStarts, &dyn PassMetrics),
     ) -> Result<Vec<JobId>, JobStoreError> {
         let _pass = self.pass();
-        let now = self.seen_now(jobs, hosts)?;
-        self.pass_seen(jobs, hosts, sinks, now)
+        let taken = self.taken(jobs, hosts, sinks.1)?;
+        self.pass_seen(jobs, hosts, sinks, taken)
     }
 
-    /// The steps of a pass ([`SchedPlacer::place_jobs_with`]), under the pass's lock.
+    /// The steps of a pass ([`SchedPlacer::place_jobs_with`]) on `tables`, the job tables it
+    /// took, under the pass's lock.
     pub(super) fn place_queued<S: js_state::Store, I: IdSource>(
         &self,
         jobs: &JobStore<S, I>,
         hosts: &JobHosts<'_>,
         (starts, metrics): (&dyn JobStarts, &dyn PassMetrics),
-    ) -> Result<Vec<JobId>, JobStoreError> {
-        let tables = self.tables(jobs, metrics)?;
+        tables: &super::jobs_seen::Tables,
+    ) -> Vec<JobId> {
         // A host whose cordon the job store holds takes no new job, whichever server placed the
         // cordon (the registry knows another server's only from its tick). Each cordon lapses
         // by the clock, so it is judged at this pass.
@@ -795,7 +799,7 @@ impl SchedPlacer {
                 failed_write(metrics);
             }
         }
-        Ok(placed)
+        placed
     }
 
     /// Writes `step`, one decision of the engine for a whole-host job: the job a commit placed,

@@ -1,25 +1,25 @@
 //! The `[server]` table of the configuration file: its keys and the client token file.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::ops::RangeInclusive;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use js_elastic::SchedulerId;
 use js_jobs::Retention;
-use js_sched_placer::curves::{
-    CurveHosts, CurveSettings, DEFAULT_CURVE_MAX_WAIT, MAX_CURVE_MAX_WAIT_SECS,
-};
+use js_sched_placer::curves::CurveSettings;
 use js_sched_placer::sizes::{ColdCpuOn, ColdMemoryOn, ColdSize};
-use js_types::HostId;
 
 use super::{Load, Section};
+use crate::config::placement_curves::{hosts as curve_hosts, max_wait as curve_max_wait};
 use crate::config::{
-    BootMode, CpuSlack, CurveSetting, DEFAULT_LEASE_SECS, DEFAULT_RECHECK_MS, DispatchTimes,
-    FeedRetention, JOB_FEED_RETENTION_MUST, JOB_RETENTION_MUST, JobListen, Limits,
-    MAX_JOB_WALL_MUST, MOST_LEASE_SECS, MOST_RECHECK_MS, MetricsListen, PackLimit, Placement,
-    ReadyListen, TlsFiles, Token, cold_cpu_entry, cold_entry, not_loopback, not_private,
-    parse_curves, parse_job_feed_retention, parse_job_retention, parse_max_job_wall, parse_token,
+    BALANCE, BootMode, CpuSlack, CurveSetting, DEFAULT_LEASE_SECS, DEFAULT_RECHECK_MS,
+    DispatchTimes, FeedRetention, JOB_FEED_RETENTION_MUST, JOB_RETENTION_MUST, JobListen,
+    KEY_SHARE_PERCENT, Limits, MAX_JOB_WALL_MUST, MOST_LEASE_SECS, MOST_RECHECK_MS, MetricsListen,
+    PackLimit, Placement, ReadyListen, SLACK_TOLERANCE_PPM, TlsFiles, Token, Tunings,
+    cold_cpu_entry, cold_entry, not_loopback, not_private, parse_curves, parse_job_feed_retention,
+    parse_job_retention, parse_max_job_wall, parse_token,
 };
 use crate::error::StartupError;
 use crate::job_store::JobStoreSetup;
@@ -55,6 +55,9 @@ const SERVER_KEYS: &[&str] = &[
     "estimate_feed",
     "cpu_slack",
     "pack_limit",
+    "score_balance",
+    "score_slack_tolerance_ppm",
+    "key_share_percent",
     "cold_cpu_millis",
     "cold_memory_bytes",
     "cold_memory_bytes_on",
@@ -163,6 +166,7 @@ pub(crate) struct AgentKeys {
     estimate_feed: Option<bool>,
     cpu_slack: Option<CpuSlack>,
     pack_limit: Option<PackLimit>,
+    tunings: Tunings,
     cold: ColdSize,
     cold_on: ColdMemoryOn,
     cold_cpu_on: ColdCpuOn,
@@ -206,6 +210,11 @@ impl AgentKeys {
         self.pack_limit
     }
 
+    /// The scoring settings the file gives, each absent one `None`.
+    pub(crate) fn tunings(&self) -> Tunings {
+        self.tunings
+    }
+
     /// What a job that books nothing books while neither its class, its fallback class nor its
     /// client has a run:
     /// `cold_cpu_millis` and `cold_memory_bytes` as the file gives them, each absent one its
@@ -236,12 +245,7 @@ impl AgentKeys {
     /// Where the job service is served, when the file turns it on.
     pub(crate) fn job_listen(&self) -> Option<JobListen> {
         let flag = "server.job_listen";
-        self.job_listen.map(|addr| JobListen {
-            addr,
-            flag,
-            callback_refused: true,
-            retry_refused: true,
-        })
+        self.job_listen.map(|addr| JobListen { addr, flag })
     }
 
     /// The job store's setup when the file turns the job service on: named by its key, and
@@ -316,6 +320,7 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
         estimate_feed: s.boolean("estimate_feed")?,
         cpu_slack: read_cpu_slack(&mut s)?,
         pack_limit: read_pack_limit(&mut s)?,
+        tunings: read_tunings(&mut s)?,
         cold: read_cold(&mut s)?,
         cold_on: ColdMemoryOn::new(read_per_os(&mut s, &COLD_MEMORY_ON)?),
         cold_cpu_on: ColdCpuOn::new(read_per_os(&mut s, &COLD_CPU_ON)?),
@@ -562,29 +567,60 @@ fn read_pack_limit(s: &mut Section) -> Result<Option<PackLimit>, StartupError> {
     Ok(Some(limit))
 }
 
+/// `score_balance`, `score_slack_tolerance_ppm` and `key_share_percent`, the keys of the three
+/// flags of [`Tunings`]: whole numbers in the flags' ranges, each refused outside its range
+/// rather than clamped.
+fn read_tunings(s: &mut Section) -> Result<Tunings, StartupError> {
+    let mut whole = |key: &str, range: RangeInclusive<u32>| {
+        let (low, high) = (u64::from(*range.start()), u64::from(*range.end()));
+        let given = s.bounded_given(key, low, high)?;
+        Ok::<_, StartupError>(given.map(|n| u32::try_from(n).unwrap_or(u32::MAX)))
+    };
+    Ok(Tunings {
+        score_balance: whole("score_balance", BALANCE)?,
+        score_slack_tolerance_ppm: whole("score_slack_tolerance_ppm", SLACK_TOLERANCE_PPM)?,
+        key_share_percent: whole("key_share_percent", KEY_SHARE_PERCENT)?,
+    })
+}
+
 /// `placement_curves`, the key of `--placement-curves`: `"off"`, `"shadow"` or `"on"`, read as
 /// the flag reads its text; absent, `off`. With it `curve_hosts`, an array of host ids (absent:
-/// every host), and `curve_max_wait_seconds`, a whole number from 0 to 300 (absent: 30), which
-/// have no flags, are read in every mode and act only under `on`.
+/// every host), and `curve_max_wait_seconds`, a whole number from 0 to 300 (absent: 30), the
+/// keys of `--curve-hosts` and `--curve-max-wait-seconds`, read and refused by the code the flags
+/// take ([`curve_hosts`] and [`curve_max_wait`]) in every mode, acting only under `on`.
 fn read_curves(s: &mut Section) -> Result<CurveSetting, StartupError> {
     let text = s.string("placement_curves")?;
     let read = text.as_deref().map(parse_curves).transpose();
     let mode = read.map_err(|said| s.fail("placement_curves", &said))?;
-    let mut named = BTreeSet::new();
-    for name in s.names("curve_hosts")?.unwrap_or_default() {
-        let id = HostId::new(&name).map_err(|err| s.fail("curve_hosts", &err.to_string()))?;
-        named.insert(id);
-    }
-    let most = MAX_CURVE_MAX_WAIT_SECS;
-    let default = DEFAULT_CURVE_MAX_WAIT.as_secs();
-    let wait = s.bounded("curve_max_wait_seconds", 0, most, default)?;
+    let names = read_strings(s, "curve_hosts")?;
+    let hosts = curve_hosts(names.as_deref()).map_err(|said| s.fail("curve_hosts", &said))?;
+    let wait = s.integer("curve_max_wait_seconds")?;
+    let max_wait = curve_max_wait(wait).map_err(|said| s.fail("curve_max_wait_seconds", &said))?;
     Ok(CurveSetting {
         mode: mode.unwrap_or_default(),
-        settings: CurveSettings {
-            hosts: CurveHosts::new(named),
-            max_wait: Duration::from_secs(wait),
-        },
+        settings: CurveSettings { hosts, max_wait },
     })
+}
+
+/// The array of strings `key` gives, unchecked but for its type; `None` when absent.
+fn read_strings(s: &mut Section, key: &str) -> Result<Option<Vec<String>>, StartupError> {
+    let Some(value) = s.map.remove(key) else {
+        return Ok(None);
+    };
+    let strings = match value {
+        toml::Value::Array(items) => items
+            .into_iter()
+            .map(|item| match item {
+                toml::Value::String(text) => Some(text),
+                _ => None,
+            })
+            .collect(),
+        _ => None,
+    };
+    match strings {
+        Some(strings) => Ok(Some(strings)),
+        None => Err(s.fail(key, "must be an array of strings")),
+    }
 }
 
 /// The least `cold_cpu_millis`: a quarter core, the least CPU the estimator books.

@@ -65,11 +65,12 @@ js_job_pass_duration_seconds_bucket{le="5"} 2
 js_job_pass_duration_seconds_bucket{le="+Inf"} 2
 js_job_pass_duration_seconds_sum 0.033
 js_job_pass_duration_seconds_count 2
-# HELP js_job_tables_total Passes over the queued jobs, by where each took the job tables from: read from the store, kept from the last read with no write since, or kept with the jobs this server's submits recorded since added to them.
+# HELP js_job_tables_total Passes over the queued jobs, by where each took the job tables from: read from the store, kept from the last read with no write since, kept with the jobs this server's submits recorded since added to them, or brought up to date from the store's feed with the rows that changed since the last read.
 # TYPE js_job_tables_total counter
 js_job_tables_total{from="store"} 1
 js_job_tables_total{from="kept"} 2
 js_job_tables_total{from="submitted"} 3
+js_job_tables_total{from="changed"} 4
 # HELP js_submit_phase_seconds How long each phase of each SubmitJob call took, by phase: validation (the checks of the job), get (the read of its id, for a job with one), admission (for a job not yet held), insert-checkout (of the insert, getting connections of the store's pool), insert-transaction (the rest of the insert) or note-inserted (the placer told of the job, never waiting for a pass). A call is timed in each phase it reaches, whatever the answer.
 # TYPE js_submit_phase_seconds histogram
 js_submit_phase_seconds_bucket{phase="validation",le="0.0001"} 1

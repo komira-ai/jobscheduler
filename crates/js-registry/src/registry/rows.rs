@@ -1,6 +1,6 @@
 //! What a server needs of the registry to keep and read the hosts' `node/` rows in the job
 //! store (design `multi-instance.md`, G5 and G7): the times that judge a row live and forget
-//! it, a pool's machine cap and booking rule, and the forgetting of a host whose row the
+//! it, a pool's grace and machine cap and booking rule, and the forgetting of a host whose row the
 //! operator retired.
 
 use std::time::Duration;
@@ -31,6 +31,14 @@ impl Registry {
         let ms = retention.unwrap_or(0);
         self.longest_grace()
             .saturating_add(Duration::from_millis(ms))
+    }
+
+    /// The grace of the pool named `pool` (a host of it not heard for longer is lost), or `None`
+    /// for a pool this registry does not serve: the grace a hello and a host's silence are
+    /// judged by on its row.
+    pub fn pool_grace(&self, pool: &str) -> Option<Duration> {
+        let at = self.pool_named(pool)?;
+        Some(Duration::from_millis(self.pool_at(at).grace_ms()))
     }
 
     /// The machine cap of the pool named `pool`, or `None` for a pool this registry does not

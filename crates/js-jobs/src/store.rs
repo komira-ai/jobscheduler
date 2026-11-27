@@ -26,6 +26,7 @@ mod cordons;
 mod dispatch;
 mod duties;
 mod ending;
+mod freed;
 mod guard;
 mod held;
 mod host_rows;
@@ -35,16 +36,19 @@ mod marks;
 mod nodes;
 mod queue;
 mod status;
+mod table_changes;
 mod taints;
 mod unclean;
 mod whole;
 mod written;
 
 pub use cordons::{CordonWrite, UncordonWrite};
+pub use freed::FreedPage;
 pub use held::{HeldRequeue, RequeuedFor};
 
 pub use index::Backfill;
 pub use queue::queue_order;
+pub use table_changes::{MOST_TABLE_CHANGES, TableChanges};
 
 pub use whole::{FailedPrepare, Placement};
 

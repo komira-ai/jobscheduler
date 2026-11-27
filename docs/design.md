@@ -133,7 +133,7 @@ Non-goals:
   action is a job whose payload references CAS digests. A ucdk Job is a job whose payload is a container image and arguments.
 - **Request.** One submission of a job, with a request id. It enters the queue and ends in one outcome. In kbf it is
   `kbf_sched::input::Request` (`crates/kbf-sched/src/input.rs`) and the scheduler calls it an operation.
-- **Attempt.** One try at a request on one host. Retries and reruns create attempts. Exactly one attempt's result is accepted.
+- **Attempt.** One try at a request on one host. Retries and reruns create attempts. Exactly one attempt's result is accepted. For a job, an attempt is one placement (`Job.attempt`, `Job.attempt_history`; [design/job-retry-and-completion-callback.md](design/job-retry-and-completion-callback.md), section 3.2).
 - **Lease.** Two levels (9.1). A *machine lease* is the scheduler's grant of a host, or a share of one, to a consumer until it is released or its max wall time ends
   (the lease table that held it was deleted; the job service replaced it). A *placement* is a consumer's grant of resources inside its lease to one attempt, identified by (term, sequence)
   (`LeaseId`, `crates/kbf-types/src/lease.rs`). Per R1, a machine lease covers a node or half a node. A lease is recorded durably before
@@ -611,10 +611,12 @@ any request. See [design/placement.md](design/placement.md).
 When the server holds the job and allocation tables (the job service, off by default; no default
 behaviour changes), the lease server's engine also places queued jobs (`crates/js-sched-placer/src/jobs.rs`). On each tick, and
 after a heartbeat of a host that speaks the per-job messages when something the pass depends on changed since the last pass (the
-job tables, the engine's picture of the hosts, the hosts offered, the hellos or what pass 2 told;
-`crates/js-sched-placer/src/jobs_seen.rs`), it reads the live allocations and the queued jobs (higher priority first, then earlier
-submit, then job id) from the tables as they stand, again only when the job store wrote since the last read, so no queued job has
-to be presented again. It walks the
+job tables' content, the engine's bookings of the hosts, the hosts offered and tainted, the hellos or what pass 2 told; a load
+reading alone, and a commit that changes no row of those tables, are not such changes; `crates/js-sched-placer/src/jobs_seen.rs`),
+it reads the live allocations and the queued jobs (higher priority first, then earlier submit, then job id) from the tables as they
+stand: after a write of the job store it brings the tables it kept up to date from the store's change feed, taking only the rows that
+changed (`JobStore::table_changes`), and reads them in full only where the feed cannot tell, so no queued job has to be presented
+again. It walks the
 queue in that order and the order is binding (`js_sched::walk_in_order`): a job that fits no host now closes to every job behind it
 each host it could use, so when a host frees the front job that fits it gets it. Each placement is one store transaction (the job
 placed, its allocation booked) before the host is told; a failed commit books nothing and the job stays queued. The engine counts
@@ -648,6 +650,12 @@ leasing it is level 2 (9.1). In short:
 ## 8. Retries, loss and run records
 
 ### 8.1 Retry policy
+The job API's retry is `JobSpec.retry`, which is not the policy below. It is opt-in: absent means one attempt. The service retries a
+job only after a start failure or a lost host, never after a job's own failure, a cancel, `NO_CAPACITY` or `EXCLUSIVE_NOT_READY`, and a
+job with a `callback` is called once after its final end. It is specified in
+[design/job-retry-and-completion-callback.md](design/job-retry-and-completion-callback.md), which supersedes this section for jobs. The
+rest of this section is the generic scheduling core's policy from the lease design; none of it is in the job API.
+
 `RetryPolicy` has the four axes of 4.1 by name (own-limit, platform fault, not started, loss) and adds *task failure*; instance reclaim
 spends the platform-fault budget. The portable `max_retries` of a ucdk Job (UJ1) counts every failed attempt on three axes together. The
 account is in [design/retries-and-runs.md](design/retries-and-runs.md).
@@ -868,11 +876,14 @@ in and never skips it silently) and runs two suites, each over every implementat
 `acquire` and terminates nothing on `release`. The admission and hierarchy cases (refusal when no host could ever serve, queueing when a
 busy host could, fall-through, the booting machine kept) are in [design/invariants.md](design/invariants.md).
 
-*Agent suite:* the cases are in [design/agent-suite.md](design/agent-suite.md): start idempotency, cancel resend, stale and duplicate
-results, graded absence, validity bound and `NeverStarted`, unknown phase, usage on failure, each start-contract rule, the reuse and
-taint cases (container and scratch gone before the slot frees, the three consents for a host job, each post-job check that taints and each that is only noted, sticky and
-resent taint, no `Start` on a tainted host), the per-session rules, and the VM cases (no VM serves two runs, destroy before the slot frees,
-one VM per run, the whole-node sequence; listed in [design/agent-suite.md](design/agent-suite.md)). A third suite, the
+*Agent suite:* the cases are in [design/agent-suite.md](design/agent-suite.md). Those an agent's lifecycle shows are scenarios of
+the suite: start idempotency, cancel resend, the validity bound and `NeverStarted`, the self-fence, resent results and the verdicts that
+end them, retired fences, usage on failure and on kill, each start-contract rule and the GPU rule, the reuse and taint cases (container
+and scratch gone before the slot frees, the operator's consent to a host job, a host job tainting whatever its end, each post-job check
+that taints, sticky and resent taint, no `Start` on a tainted host), the first heartbeat after a restart, and the whole-node wait. The
+page also names where the rest is tested: the scheduler's half (stale and duplicate verdicts, graded absence, the pool's and the
+consumer's consents), the agent's session, worker and VM runtime, and the VM cases not built yet (no VM serves two runs, one VM per
+run, the VM part of the whole-node sequence). A third suite, the
 **constraint suite** of [design/capabilities.md](design/capabilities.md), runs the evaluator over every op, kind and refusal code and the
 ordering properties of versions; the server and the kbf table both pass its worked example.
 The hooks **read the real state**: for the fakes, their internal tables; for aws, an independent `DescribeInstances` made apart from the

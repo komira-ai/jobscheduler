@@ -45,7 +45,7 @@ use js_types::Shape;
 use js_types::sched::FarmTime;
 use js_types::sched::usage::NodeLoad;
 
-use super::curves::{CurveSettings, CurveView};
+use super::curves::{CurveSettings, CurveView, MemoryShadowView};
 use super::engine::jobs::Decided;
 use super::engine::jobs_seen::{Kept, Seen};
 use super::engine::{Engine, Settings};
@@ -76,7 +76,7 @@ pub struct SchedPlacer {
     /// came ([`SchedPlacer::note_outcomes`]); the pass takes them all. Its lock is a leaf.
     pub(crate) outcomes: Mutex<BTreeMap<JobId, Vec<Outcome>>>,
     /// How many times the registry changed the engine: the calls the passes over the queued
-    /// jobs depend on, and every call kept while the engine was held
+    /// jobs depend on, a call kept while the engine was held counted when it is told
     /// ([`SchedPlacer::engine_changes`]).
     changes: AtomicU64,
     /// What the last pass over the queued jobs that ran found, while it failed nothing
@@ -85,6 +85,10 @@ pub struct SchedPlacer {
     /// The job tables the last pass read ([`SchedPlacer::tables`]). Its lock is a leaf, held
     /// while the tables are read.
     pub(crate) tables: Mutex<Option<Kept>>,
+    /// How many changes of what the job tables hold were counted: each read of them in full,
+    /// each job a submit added, and each bringing up to date from the store's feed that changed
+    /// a row they hold ([`SchedPlacer::tables`]).
+    pub(crate) tables_changed: AtomicU64,
     /// How many passes over the queued jobs were skipped, counted for the tests.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) skipped: AtomicU64,
@@ -107,6 +111,7 @@ impl SchedPlacer {
             changes: AtomicU64::new(0),
             seen: Mutex::default(),
             tables: Mutex::default(),
+            tables_changed: AtomicU64::new(0),
             #[cfg(any(test, feature = "test-support"))]
             skipped: AtomicU64::new(0),
         }
@@ -159,6 +164,13 @@ impl SchedPlacer {
     #[must_use]
     pub fn curve_view(&self) -> Option<CurveView> {
         self.engine().curve_view()
+    }
+
+    /// What `/metrics` reads of the memory shadow ([`Engine::memory_shadow_view`]); `None` under
+    /// [`crate::sizes::Curves::Off`].
+    #[must_use]
+    pub fn memory_shadow_view(&self) -> Option<MemoryShadowView> {
+        self.engine().memory_shadow_view()
     }
 
     /// `decided` with each placement's [`Placement::sized_from`](js_jobs::Placement::sized_from):
@@ -214,23 +226,30 @@ impl SchedPlacer {
         Some(self.caught_up(engine))
     }
 
-    /// `engine` told of the calls kept for it, in the order they came. They were counted
-    /// when they were kept ([`SchedPlacer::tell`]).
+    /// `engine` told of the calls kept for it, in the order they came, each counted as it
+    /// is told when it answers that it changed something ([`SchedPlacer::engine_changes`]).
+    /// A pass reads the count after the engine is caught up ([`SchedPlacer::seen_now`]), so a
+    /// kept call is counted before it or after it, never missed.
     fn caught_up<'a>(&self, mut engine: MutexGuard<'a, Engine>) -> MutexGuard<'a, Engine> {
         let kept = std::mem::take(&mut *self.kept.lock().unwrap_or_else(PoisonError::into_inner));
         for tell in kept {
-            let _ = tell.apply(&mut engine);
+            if tell.apply(&mut engine) {
+                self.changes.fetch_add(1, Ordering::SeqCst);
+            }
         }
         engine
     }
 
     /// Tells the engine `tell` now when it is free, counting the change when it answers one;
-    /// keeps it for the engine's next taker when a pass holds the engine, counting it as a
-    /// change, so the next pass is not skipped for one it has not seen
-    /// ([`SchedPlacer::engine_changes`]).
+    /// keeps it for the engine's next taker when a pass holds the engine, which counts it when
+    /// it is told ([`SchedPlacer::caught_up`]).
     fn tell(&self, tell: Tell) {
-        let changed = match self.free_engine() {
-            Some(mut engine) => tell.apply(&mut engine),
+        match self.free_engine() {
+            Some(mut engine) => {
+                if tell.apply(&mut engine) {
+                    self.changes.fetch_add(1, Ordering::SeqCst);
+                }
+            }
             None => {
                 self.kept
                     .lock()
@@ -239,11 +258,7 @@ impl SchedPlacer {
                 // The holder may have let go between the try and the push: an engine free now
                 // is told of the kept calls here rather than at its next taker.
                 drop(self.free_engine());
-                true
             }
-        };
-        if changed {
-            self.changes.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -262,10 +277,11 @@ impl SchedPlacer {
     }
 
     /// How many times the registry changed the engine, through the [`Placer`] calls that can
-    /// change what a pass over the queued jobs reads of it: every call that changes the
-    /// engine counts, except a heartbeat with no load reading that gives no allocation up. A
-    /// call kept while a pass held the engine counts when it is kept, whatever it changes. The
-    /// passes' own changes are not counted (`engine::jobs_seen`).
+    /// change what a pass over the queued jobs reads of it: a hello, a host forgotten and a
+    /// heartbeat that gives an allocation up count; a heartbeat that gives none up does not,
+    /// whatever load reading it brings ([`Engine::heard_changed`]). A call kept while a pass held
+    /// the engine counts when it is told, by what it changes. The passes' own changes are not
+    /// counted (`engine::jobs_seen`).
     pub fn engine_changes(&self) -> u64 {
         self.changes.load(Ordering::SeqCst)
     }

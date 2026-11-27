@@ -10,12 +10,16 @@
 //! series: a byte 1, the granularity in seconds, the run length in microseconds (each a varint),
 //! the partial flag (a byte, 0 or 1), the number of points (a varint) and each point (a
 //! varint), written as a byte 0 when the row has none but has a later field; then, only when the
-//! row has one or has an attempt, the class (a byte 1 and the text, any UTF-8, kept as it is, or
-//! a byte 0 for none); then, only when the row has one, the attempt (a byte 1 and a varint). A
-//! row without a series, a class or an attempt ends after `used`, the bytes it was before those
-//! fields; a reader that finds bytes after `used` reads a series, and a byte 0 there is an absent
-//! one, one that finds bytes after the series reads a class, and one that finds bytes after the
-//! class reads an attempt.
+//! row has one or has a later field, the class (a byte 1 and the text, any UTF-8, kept as it is,
+//! or a byte 0 for none); then, only when the row has one or has a memory series, the attempt (a
+//! byte 1 and a varint, or a byte 0 for none); then, only when the row has one, the memory
+//! series, laid out as the CPU series is (a byte 1, the granularity, the run length, the partial
+//! flag, the number of points and each point, a point being MiB as a varint). Each field before
+//! the last one present is written, as a byte 0 when absent. A row without a series, a class, an
+//! attempt or a memory series ends after `used`, the bytes it was before those fields; a reader
+//! that finds bytes after `used` reads a series, and a byte 0 there is an absent one, one that
+//! finds bytes after the series reads a class, one that finds bytes after the class reads an
+//! attempt, and one that finds bytes after the attempt reads a memory series.
 //!
 //! A text is a varint length and that many bytes of UTF-8. An optional field is a byte 0
 //! (absent) or 1 followed by the field. A varint is little-endian base 128, 7 bits a byte, high
@@ -26,7 +30,7 @@
 //! field already written changes meaning, and a row of a version this build does not read is
 //! refused with [`EndedRowError::Version`].
 
-use js_types::{CpuSeries, HostId};
+use js_types::{CpuSeries, HostId, MemorySeries};
 
 use super::{AllocationId, Booked, DrainOutcome, EndedReason, EndedRow, Used};
 use crate::codec::put_varint;
@@ -109,26 +113,64 @@ pub(crate) fn encode(row: &EndedRow) -> Vec<u8> {
         .as_ref()
         .filter(|series| series.is_well_formed());
     let attempt = row.attempt.map(u64::from);
-    if series.is_some() || row.class.is_some() || attempt.is_some() {
+    let memory = row
+        .memory_series
+        .as_ref()
+        .filter(|series| series.is_well_formed());
+    let memory_on = memory.is_some();
+    let attempt_on = attempt.is_some() || memory_on;
+    let class_on = row.class.is_some() || attempt_on;
+    if series.is_some() || class_on {
         put_opt(&mut out, series, |out, series| {
-            put_varint(out, u64::from(series.granularity_secs));
-            put_varint(out, series.run_usec);
-            out.push(u8::from(series.partial));
-            put_varint(out, series.points.len() as u64);
-            for point in &series.points {
-                put_varint(out, u64::from(*point));
-            }
+            let points = series.points.iter().map(|point| u64::from(*point));
+            put_series(
+                out,
+                series.granularity_secs,
+                series.run_usec,
+                series.partial,
+                points,
+            );
         });
     }
-    if row.class.is_some() || attempt.is_some() {
+    if class_on {
         put_opt(&mut out, row.class.as_ref(), |out, class| {
             put_text(out, class)
         });
     }
-    if attempt.is_some() {
+    if attempt_on {
         put_opt(&mut out, attempt, put_varint);
     }
+    if memory_on {
+        put_opt(&mut out, memory, |out, series| {
+            let points = series.points.iter().map(|point| u64::from(*point));
+            put_series(
+                out,
+                series.granularity_secs,
+                series.run_usec,
+                series.partial,
+                points,
+            );
+        });
+    }
     out
+}
+
+/// A series after its presence byte: the granularity, the run length (each a varint), the
+/// partial flag (a byte, 0 or 1), the number of points and each point (each a varint).
+fn put_series(
+    out: &mut Vec<u8>,
+    granularity_secs: u32,
+    run_usec: u64,
+    partial: bool,
+    points: impl ExactSizeIterator<Item = u64>,
+) {
+    put_varint(out, u64::from(granularity_secs));
+    put_varint(out, run_usec);
+    out.push(u8::from(partial));
+    put_varint(out, points.len() as u64);
+    for point in points {
+        put_varint(out, point);
+    }
 }
 
 struct Reader<'a> {
@@ -253,6 +295,12 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<EndedRow, EndedRowError> {
             u32::try_from(r.varint()?).map_err(|_| EndedRowError::Range)
         })?
     };
+    // A row from before the memory series ends here.
+    let memory_series = if r.rest.is_empty() {
+        None
+    } else {
+        r.opt("memory_series", memory_series)?
+    };
     Ok(EndedRow {
         id,
         profile,
@@ -270,21 +318,39 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<EndedRow, EndedRowError> {
         cpu_series,
         class,
         attempt,
+        memory_series,
     })
 }
 
-/// The series at the reader: granularity, run length, partial flag, then the points.
-fn series(r: &mut Reader) -> Result<CpuSeries, EndedRowError> {
+/// A series at the reader as its parts: granularity, run length, partial flag, then the
+/// points, each read into `P`; `field` names it in a refusal of its flag.
+fn series_parts<P: TryFrom<u64>>(
+    r: &mut Reader,
+    field: &'static str,
+) -> Result<(u32, u64, bool, Vec<P>), EndedRowError> {
     let granularity = u32::try_from(r.varint()?).map_err(|_| EndedRowError::Range)?;
     let run_usec = r.varint()?;
     let partial = match r.byte()? {
         0 => false,
         1 => true,
-        _ => return Err(EndedRowError::Field("cpu_series")),
+        _ => return Err(EndedRowError::Field(field)),
     };
     let count = r.varint()?;
     let points = (0..count)
-        .map(|_| u16::try_from(r.varint()?).map_err(|_| EndedRowError::Range))
+        .map(|_| P::try_from(r.varint()?).map_err(|_| EndedRowError::Range))
         .collect::<Result<Vec<_>, _>>()?;
+    Ok((granularity, run_usec, partial, points))
+}
+
+/// The CPU series at the reader, its points in sixteenths of a core (16 bits each).
+fn series(r: &mut Reader) -> Result<CpuSeries, EndedRowError> {
+    let (granularity, run_usec, partial, points) = series_parts(r, "cpu_series")?;
     CpuSeries::new(granularity, points, run_usec, partial).ok_or(EndedRowError::Field("cpu_series"))
+}
+
+/// The memory series at the reader, its points in MiB (32 bits each).
+fn memory_series(r: &mut Reader) -> Result<MemorySeries, EndedRowError> {
+    let field = "memory_series";
+    let (granularity, run_usec, partial, points) = series_parts(r, field)?;
+    MemorySeries::new(granularity, points, run_usec, partial).ok_or(EndedRowError::Field(field))
 }

@@ -2,6 +2,12 @@
 
 Companion to [docs/design.md](../design.md), sections 8.1 and 8.3. Section numbers refer to design.md.
 
+The job API's retry policy (`JobSpec.retry`) is specified in [job-retry-and-completion-callback.md](job-retry-and-completion-callback.md),
+which supersedes section 8.1 for jobs (that page, section 2.1). It is opt-in, retries only a start failure or a lost host, and keeps an
+attempt history and each attempt's logs. The text of 8.1 below is the generic core's `RetryPolicy` from the lease design. None of its
+budgets is in the job API. Only two axes have a counterpart there: not started is a start failure, and loss is a lost host. Task
+failure and the own-limit ladder stay with the client. Eviction is not built.
+
 ## 8.1 Retry policy
 Four budgets exist (4.1). The generic core gets `RetryPolicy` with those four axes by name: *own-limit* (sizing ladder, spends nothing
 shared), *platform fault* (shared budget, which also takes instance reclaim, that is preempted capacity), *not started*, and *loss*. It adds a fifth,
@@ -20,7 +26,8 @@ A submit returns only after a durable run record exists. kbf's store retention i
 Jobs need a configurable floor, with a default of days, and the state store holds it. Record fields: request id, definition reference,
 phase, tenant, labels, the resolved fence, attempts (provider, lease, start, end, outcome, usage), final
 outcome, log cursor. Log text itself is not in the record; the record holds a cursor and a `complete` flag. The record is written with
-additive fields (step 6).
+additive fields (step 6). A job's attempts are `Job.attempt_history`, one `attempt/<job id>/<n>` row each and
+`UsageRecord.attempt` ([job-retry-and-completion-callback.md](job-retry-and-completion-callback.md), section 3.7).
 
 ## Log tail of a contained run
 A contained run that exited returns the end of what it wrote: the agent reads the last 8 KiB of the job's standard output and of its standard

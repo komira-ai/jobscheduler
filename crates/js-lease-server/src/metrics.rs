@@ -34,7 +34,11 @@
 //!   callbacks still pending, and for each host
 //!   the CPU and memory booked and free and its whole-host mark, and under
 //!   `--placement-curves on` the classes booking by curve and flat and each curve host's fullest
-//!   booked slot, read from the placer ([`js_sched_placer::place::SchedPlacer::curve_view`]).
+//!   booked slot, read from the placer ([`js_sched_placer::place::SchedPlacer::curve_view`]),
+//!   and under `shadow` and `on` the memory shadow: the placements by how a booking that follows
+//!   the classes' memory curves would have placed them, and each host's projected memory, its
+//!   last reading and how often a reading showed more than the projection
+//!   ([`js_sched_placer::place::SchedPlacer::memory_shadow_view`]); nothing in it is booked.
 //!   A scrape holds no lock of the
 //!   server's while it renders: the registry's is taken and dropped as `GET /v1/hosts`
 //!   takes it, and the job tables are read on the pool for blocking
@@ -517,7 +521,7 @@ const FAILURE_CODES: [&str; 5] = [
 
 /// Where a pass took the job tables from, in the order they are written, as the metric spells
 /// them.
-const TABLES_FROM: [&str; 3] = ["store", "kept", "submitted"];
+const TABLES_FROM: [&str; 4] = ["store", "kept", "submitted", "changed"];
 
 /// The results of a callback's try, in the order they are written: a 2xx, a 410, a failure,
 /// and an address the rule refused.
@@ -542,6 +546,7 @@ fn tables_slot(from: TablesFrom) -> usize {
         TablesFrom::Store => 0,
         TablesFrom::Kept => 1,
         TablesFrom::Submitted => 2,
+        TablesFrom::Changed => 3,
     }
 }
 
@@ -584,7 +589,7 @@ pub(crate) struct Recorder {
     lost: AtomicU64,
     store_write_failures: AtomicU64,
     job_pass: Histogram,
-    job_tables: [AtomicU64; 3],
+    job_tables: [AtomicU64; 4],
     acquires: Mutex<BTreeMap<String, Acquires>>,
     refusals: Mutex<BTreeMap<(String, &'static str), u64>>,
     start_refusals: Mutex<BTreeMap<(String, String), u64>>,
@@ -703,6 +708,7 @@ pub(crate) fn rendered(recorder: &Recorder) -> String {
         jobs: None,
         hosts: Vec::new(),
         curves: None,
+        memory: None,
     };
     render::render(&seen, recorder)
 }
