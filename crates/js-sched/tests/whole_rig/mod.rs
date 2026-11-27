@@ -13,6 +13,8 @@ use js_types::sched::{
 
 pub const GIB: u64 = 1 << 30;
 pub const CAPACITY: Resources = Resources::new(8_000, 16 * GIB);
+/// What an action of [`request`] asks for.
+pub const ACTION: Resources = Resources::new(1_000, GIB);
 
 pub fn request(n: u8, kind: LeaseKind) -> Request {
     Request {
@@ -22,7 +24,7 @@ pub fn request(n: u8, kind: LeaseKind) -> Request {
         ),
         qos: Qos::Ci,
         kind,
-        resources: Resources::new(1_000, GIB),
+        resources: ACTION,
         hermetic: true,
         do_not_cache: false,
         whole_worker: false,
@@ -141,6 +143,16 @@ impl Farm {
     /// `name` and started now. The other workers are cordoned for the round and uncordoned
     /// after it, which places nothing.
     pub fn place_on(&mut self, name: &str, wall: Option<Duration>) -> LeaseGrant {
+        self.place_sized_on(name, wall, ACTION)
+    }
+
+    /// As [`Farm::place_on`], the action asking for `resources`.
+    pub fn place_sized_on(
+        &mut self,
+        name: &str,
+        wall: Option<Duration>,
+        resources: Resources,
+    ) -> LeaseGrant {
         let others: Vec<WorkerId> = self
             .workers
             .iter()
@@ -156,7 +168,10 @@ impl Farm {
         if let Some(wall) = wall {
             self.s.set_max_wall(operation, wall);
         }
-        self.submit(request(self.next_n, LeaseKind::Action));
+        self.submit(Request {
+            resources,
+            ..request(self.next_n, LeaseKind::Action)
+        });
         let grant = self.grants().pop().expect("the action is placed");
         assert_eq!(grant.operation, operation);
         assert_eq!(grant.worker, w(name), "the lease is placed on {name}");
