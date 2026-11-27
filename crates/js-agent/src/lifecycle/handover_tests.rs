@@ -6,7 +6,10 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 
 use js_testkit::dir::TestDir;
 
-use super::{HANDOVER_FILE, HANDOVER_TEMP_FILE, HANDOVER_TEXT, Handover, read, remove, write};
+use super::{
+    HANDOVER_FILE, HANDOVER_TEMP_FILE, HANDOVER_TEXT, Handover, Left, PROCESS_FILE,
+    PROCESS_TEMP_FILE, leave_process, read, remove, take_process, write,
+};
 
 fn scratch(name: &str) -> TestDir {
     TestDir::under(std::env::temp_dir(), name)
@@ -103,4 +106,107 @@ fn a_root_that_cannot_be_looked_in_is_no_request_and_a_removal_there_fails() {
     assert!(why.starts_with("it cannot be looked at: "));
     assert!(remove(&root).is_err());
     assert!(write(&root).is_err());
+}
+
+const ID: &str = "0123456789abcdef0123456789abcdef";
+
+/// Proves the process id a hand-over leaves is written private, through the temporary file,
+/// as the id and a newline, and that the next process takes it once: read, removed, and gone
+/// for a later start. Catches a file left world-readable or half written, and one read twice.
+#[test]
+fn a_left_process_id_is_taken_once() {
+    let dir = scratch("handover-process");
+    let root = dir.path();
+    assert_eq!(take_process(root, me()), Left::Absent);
+    leave_process(root, ID).unwrap();
+    let file = root.join(PROCESS_FILE);
+    assert_eq!(fs::read_to_string(&file).unwrap(), format!("{ID}\n"));
+    assert_eq!(
+        fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert!(!root.join(PROCESS_TEMP_FILE).exists());
+    // Left again by a later hand-over, it is the later id.
+    leave_process(root, &ID.replace('0', "f")).unwrap();
+    assert_eq!(take_process(root, me()), Left::Kept(ID.replace('0', "f")));
+    assert!(!file.exists());
+    assert_eq!(take_process(root, me()), Left::Absent);
+    // The handover file is another file: the process file does not stand for it.
+    leave_process(root, ID).unwrap();
+    assert_eq!(read(root, me()), Handover::Absent);
+}
+
+/// Proves a process file that breaks the handover file's form is not used, says why, and is
+/// removed all the same (a link itself, not what it names), so a later start does not meet it.
+/// Catches an id taken from a file another user, or a link, put there.
+#[test]
+fn a_process_file_that_breaks_the_form_is_not_used_and_is_removed() {
+    let dir = scratch("handover-process-form");
+    let root = dir.path();
+    let file = root.join(PROCESS_FILE);
+
+    leave_process(root, ID).unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(
+        take_process(root, me()),
+        Left::Refused("group or others have permission on it (mode 0644)".to_owned())
+    );
+    assert!(!file.exists());
+
+    leave_process(root, ID).unwrap();
+    let other = me().wrapping_add(1);
+    assert_eq!(
+        take_process(root, other),
+        Left::Refused(format!(
+            "it is owned by user {}, not by the user running the agent ({other})",
+            me()
+        ))
+    );
+    assert!(!file.exists());
+
+    let target = root.join("elsewhere");
+    fs::write(&target, format!("{ID}\n")).unwrap();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+    symlink(&target, &file).unwrap();
+    assert_eq!(
+        take_process(root, me()),
+        Left::Refused("it is not a regular file (a link is not accepted)".to_owned())
+    );
+    assert!(fs::symlink_metadata(&file).is_err(), "the link is removed");
+    assert!(target.exists(), "what the link named is left");
+}
+
+/// Proves a process file whose text cannot be read, one that cannot be removed, and one in a
+/// root that cannot be looked in are not used, each saying why. Catches an id used from a file
+/// that would be met again by every later start.
+#[test]
+fn a_process_file_that_cannot_be_read_or_removed_is_not_used() {
+    let dir = scratch("handover-process-fail");
+    let root = dir.path();
+    let file = root.join(PROCESS_FILE);
+
+    fs::write(&file, [0xff_u8, 0xfe]).unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+    let Left::Refused(why) = take_process(root, me()) else {
+        panic!("a file that is not text is used");
+    };
+    assert!(why.starts_with("it cannot be read: "), "{why}");
+    assert!(!file.exists());
+
+    // A directory under the name: not of the form, and no file removal removes it.
+    fs::create_dir(&file).unwrap();
+    let Left::Refused(why) = take_process(root, me()) else {
+        panic!("a directory is used");
+    };
+    assert!(why.starts_with("it cannot be removed: "), "{why}");
+    fs::remove_dir(&file).unwrap();
+
+    // A file where the directory should be: the look, the removal and the write fail.
+    let not_dir = root.join("not-a-dir");
+    fs::write(&not_dir, "x").unwrap();
+    let Left::Refused(why) = take_process(&not_dir, me()) else {
+        panic!("a root that is a file is read as an id or as none");
+    };
+    assert!(why.starts_with("it cannot be removed: "), "{why}");
+    assert!(leave_process(&not_dir, ID).is_err());
 }

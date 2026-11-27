@@ -20,10 +20,12 @@
 //! than the newest it applied. The session reads no clock for it; it is a counter.
 //!
 //! Every hello carries `agent_process` when the session was given one
-//! ([`Session::with_agent_process`]): an id the agent draws once per process
-//! ([`agent_process`](crate::agent_process)) and sends in every hello of that process, the
-//! first and each one after a lost session. A server that knows the field takes the hello of
-//! the process that holds the host live over at once, instead of refusing it `host-live`.
+//! ([`Session::with_agent_process`]): an id the agent draws when the process starts, or takes
+//! over from the process that handed its runs to it ([`agent_process`](crate::agent_process)),
+//! and sends in every hello of that process, the first and each one after a lost session. A
+//! server that knows the field takes the hello of the process that holds the host live over at
+//! once, instead of refusing it `host-live`. A hand-over leaves the id in the state root for the
+//! next process (`Session::leave_process`).
 //!
 //! # What an answer does
 //!
@@ -411,6 +413,18 @@ impl<'a> Session<'a> {
         let owner = rustix::process::geteuid().as_raw();
         let read = |root: &&Path| handover::read(root, owner);
         self.handover.as_ref().map_or(Handover::Absent, read)
+    }
+
+    /// Leaves this session's agent process id in the state root it looks in for a handover, for
+    /// the next process to say hello as (see [`crate::lifecycle::handover`]); nothing for a
+    /// session given no state root or no id.
+    ///
+    /// # Errors
+    ///
+    /// The process file cannot be written.
+    pub(crate) fn leave_process(&self) -> std::io::Result<()> {
+        let left = self.handover.zip(self.hello.agent_process.as_deref());
+        left.map_or(Ok(()), |(root, id)| handover::leave_process(root, id))
     }
 
     /// Asks the worker to park for a handover, waiting at most `wait` ([`Worker::park`]);

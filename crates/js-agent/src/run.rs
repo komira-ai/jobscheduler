@@ -33,7 +33,10 @@
 //! waited for. When [`Drain::wait`] passes before the worker parks, or at a second stop
 //! request, the loop ends all the same and says so: what was under way is then the next
 //! process's, as after a crash. A file that is there but not of its form is not a request:
-//! the stop drains, and the log says why.
+//! the stop drains, and the log says why. However the handover ended, the session's agent
+//! process id is then left in the state root, and the next process says hello as it, so the
+//! server takes that hello at once instead of refusing it `host-live` until the grace of this
+//! session runs out (see [`crate::lifecycle::handover`]).
 //!
 //! # The handover in place
 //!
@@ -325,11 +328,33 @@ fn drain_jobs(
     }
 }
 
-/// The handover of a session with jobs, see the module documentation; it ends with `ends`,
-/// except that a stop request during it ends it with [`Exit::Stopped`]. Time passes only in
-/// `sleeper`, and is counted as the waits asked for; a replace request during it is ignored
-/// and ends the wait it came in, so the next heartbeat is sent at once.
+/// The handover of a session with jobs, see the module documentation, and then the session's
+/// agent process id left in the state root for the next process, which says hello as it: the
+/// process ends after a handover however it ended. A process file that cannot be written is
+/// named in a warning, and the next process waits out the server's grace as it would without.
 fn hand_over(
+    session: &mut Session<'_>,
+    plan: Drain,
+    sleeper: &mut dyn Sleeper,
+    log: &mut dyn Write,
+    ends: Ends,
+) -> Exit {
+    let exit = hand_runs_over(session, plan, sleeper, log, ends);
+    if let Err(why) = session.leave_process() {
+        let _ = writeln!(
+            log,
+            "js-agent: warning: the agent process id cannot be left to the next process ({why}): \
+             its hello waits out the server's grace for this session"
+        );
+    }
+    exit
+}
+
+/// The handover of the runs, see the module documentation; it ends with `ends`, except that a
+/// stop request during it ends it with [`Exit::Stopped`]. Time passes only in `sleeper`, and is
+/// counted as the waits asked for; a replace request during it is ignored and ends the wait it
+/// came in, so the next heartbeat is sent at once.
+fn hand_runs_over(
     session: &mut Session<'_>,
     plan: Drain,
     sleeper: &mut dyn Sleeper,
