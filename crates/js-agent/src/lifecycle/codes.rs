@@ -25,8 +25,12 @@ pub mod detail {
     /// was not started.
     pub const TAINT_FAILED: &str = "taint-failed";
     /// The detail of a `killed` result when the agent stopped the job because it had not
-    /// heard from the server for its silence bound (`--silence-stop`).
-    pub const SILENCE_STOP: &str = "silence-stop";
+    /// heard from the server for its silence bound (`--silence-stop`):
+    /// [`js_agent_wire::refusal::SILENCE_STOP`].
+    pub const SILENCE_STOP: &str = js_agent_wire::refusal::SILENCE_STOP;
+    /// The detail of a `killed` result when the agent stopped the job for its own end (a
+    /// drain past its wait, a wind-down): [`js_agent_wire::refusal::HOST_STOP`].
+    pub const HOST_STOP: &str = js_agent_wire::refusal::HOST_STOP;
 }
 
 /// The codes of a [`Finding`](super::Finding).
@@ -127,6 +131,10 @@ pub mod code {
     /// The agent had not heard from the server for its silence bound and stopped the job
     /// (its result says [`detail::SILENCE_STOP`](super::detail::SILENCE_STOP)).
     pub const SILENCE_STOP: &str = "silence-stop";
+    /// The agent stopped the job for its own end and not because the server asked: a drain
+    /// past its wait, or a wind-down (its result says
+    /// [`detail::HOST_STOP`](super::detail::HOST_STOP)).
+    pub const HOST_STOP: &str = "host-stop";
     /// A run the agent adopted after a restart could not be offered its host ports again,
     /// and the agent stopped it (its result's `input_failure` says
     /// [`refusal::HOST_PORT_LOST`](js_agent_wire::refusal::HOST_PORT_LOST)).

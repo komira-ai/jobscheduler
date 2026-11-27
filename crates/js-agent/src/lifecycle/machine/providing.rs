@@ -19,8 +19,10 @@
 //!   provider client sends a source's first `Mount` itself as soon as its `Prepare` succeeds
 //!   ([`crate::lifecycle::Providers::ask`]), so the step that takes the `Prepare`'s answer
 //!   usually finds the `Mount` out or answered. A
-//!   provider that is unavailable is asked again; one that refuses the ref fails the start
-//!   (`provider-refused`); a directory that is not an absolute path in normal form beneath a
+//!   provider that is unavailable is asked again; one that refuses the request as wrong in
+//!   itself (`INVALID_ARGUMENT`) fails the start `provider-refused`, the job's own fault; one
+//!   that cannot serve it in its present state (`FAILED_PRECONDITION`) fails it
+//!   `provider-failed`, the host's, so the server places the job again elsewhere; a directory that is not an absolute path in normal form beneath a
 //!   mount root of the agent's (a root it may write, for a read-write mount) fails it
 //!   (`input-not-allowed`). A provider whose sweep at start is not answered yet is not asked.
 //! - **From the admission to `--mount-provider-wait`** a start may wait; past it the start
@@ -131,13 +133,28 @@ impl Wanted {
         )
     }
 
+    /// The failure of a start whose source the provider cannot serve in its present state:
+    /// the host's, not the job's.
+    fn failed(&self, why: &str) -> Failure {
+        (
+            refusal::PROVIDER_FAILED,
+            code::START_FAILED,
+            format!(
+                "the provider {} cannot serve source {} now: {why}",
+                self.provider, self.index
+            ),
+            false,
+        )
+    }
+
     /// What an answer that is not a success makes of the source: nothing yet (the call is
     /// out, or the provider is not available and is asked again), or the failure of the
-    /// start (the provider refused).
+    /// start (the provider refused the request, or cannot serve it here).
     fn settle(&mut self, answer: ProviderAnswer) -> Result<(), Failure> {
         match answer {
             ProviderAnswer::Pending | ProviderAnswer::Done(_) => Ok(()),
             ProviderAnswer::Refused(why) => Err(self.refused(&why)),
+            ProviderAnswer::Failed(why) => Err(self.failed(&why)),
             ProviderAnswer::Unavailable(why) => {
                 self.why = why;
                 Ok(())

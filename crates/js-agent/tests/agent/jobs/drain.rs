@@ -137,11 +137,12 @@ fn a_job_that_ends_during_the_drain_is_reported_before_the_agent_leaves() {
     assert!(!log.contains("a run or a result is left"), "{log}");
 }
 
-/// Asserts that a job still running when the wait is over is stopped, its result (killed) is
-/// sent and acknowledged, and the agent then ends: the first two heartbeats of the drain
-/// list the run running and the third, after the stop, carries the result. It catches a
-/// drain that waits for ever for a job that does not end, and one that stops a job before
-/// its wait is over.
+/// Asserts that a job still running when the wait is over is stopped, its result (killed,
+/// with the detail `host-stop`: the agent's own stop, which the server retries) is sent and
+/// acknowledged, and the agent then ends: the first two heartbeats of the drain list the run
+/// running and the third, after the stop, carries the result. It catches a drain that waits
+/// for ever for a job that does not end, one that stops a job before its wait is over, and
+/// a drain's stop sent as one the server asked for.
 #[test]
 fn a_job_still_running_after_the_wait_is_stopped_and_reported() {
     let dir = Scratch::new("jobs-drain-stop");
@@ -167,6 +168,7 @@ fn a_job_still_running_after_the_wait_is_stopped_and_reported() {
     assert_eq!(exit, Exit::Stopped);
     assert_eq!(sent[1].1["held"][0]["state"], "running");
     assert_eq!(sent[3].1["results"][0]["outcome"], "killed");
+    assert_eq!(sent[3].1["results"][0]["detail"], "host-stop");
     assert_eq!(sent[4].1["held"], json!([]));
     assert_eq!(
         *before_stop.borrow(),

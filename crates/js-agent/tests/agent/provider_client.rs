@@ -415,10 +415,12 @@ fn calls_with_different_keys_are_answered_apart() {
 
 /// Asserts that a ref the provider refuses (`INVALID_ARGUMENT`) is answered `Refused` with the
 /// provider's own reason, and that a source prepared with one ref and prepared again with
-/// another (`FAILED_PRECONDITION`) is refused with that reason too. It catches a refusal
-/// that is read as a try-again-later, and a reason that is replaced by a generic text.
+/// another (`FAILED_PRECONDITION`, the provider's own state) is answered `Failed` with that
+/// reason, not `Refused`. It catches a refusal that is read as a try-again-later, a
+/// provider's state read as the request's fault (which ends the job as its own), and a
+/// reason that is replaced by a generic text.
 #[test]
-fn a_refusal_of_the_provider_is_refused_with_its_reason() {
+fn a_refusal_of_the_provider_is_refused_and_its_state_failed_with_its_reason() {
     let mut rig = rig("pc-refuse");
     rig.fake.refuse("bad");
     assert_eq!(
@@ -444,21 +446,22 @@ fn a_refusal_of_the_provider_is_refused_with_its_reason() {
             NAME,
             &prepare("r1", 0, "b", MountMode::ReadOnly)
         ),
-        ProviderAnswer::Refused("the source is prepared with the ref a".to_owned())
+        ProviderAnswer::Failed("the source is prepared with the ref a".to_owned())
     );
 }
 
-/// Asserts that a mount of a source the provider never prepared is refused, with the
-/// provider's reason (`FAILED_PRECONDITION`: a tree that will not be ready), and that a
-/// release of a source the provider does not know succeeds. It catches a mount of an
-/// unknown source answered as a directory, and a release that fails when there is nothing to
-/// give up.
+/// Asserts that a mount of a source the provider never prepared (as after a restart of the
+/// provider) is answered `Failed`, with the provider's reason (`FAILED_PRECONDITION`: the
+/// provider's state, which another host's provider may not share), and that a release of a
+/// source the provider does not know succeeds. It catches a mount of an unknown source
+/// answered as a directory or as the job's fault, and a release that fails when there is
+/// nothing to give up.
 #[test]
-fn a_mount_of_an_unprepared_source_is_refused_and_a_release_of_one_succeeds() {
+fn a_mount_of_an_unprepared_source_fails_and_a_release_of_one_succeeds() {
     let mut rig = rig("pc-unknown");
     assert_eq!(
         settle(&mut rig.client, NAME, &mount("r1", 0)),
-        ProviderAnswer::Refused("the source was not prepared".to_owned())
+        ProviderAnswer::Failed("the source was not prepared".to_owned())
     );
     assert_eq!(
         settle(&mut rig.client, NAME, &release("r1", 0)),

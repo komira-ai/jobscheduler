@@ -232,7 +232,8 @@
 //! SIGTERM and SIGINT make the agent send a heartbeat with the phase `draining` and exit
 //! 0, so the server leases the host no more. With jobs the agent first drains (see
 //! [`drive`] for the whole of it): it takes no new job, announces `draining` at once, lets
-//! the running jobs finish for `--drain-wait`, then stops them, and goes on heartbeating
+//! the running jobs finish for `--drain-wait`, then stops them (each reported `killed` with
+//! the detail `host-stop`, which the server ends as lost and retries), and goes on heartbeating
 //! until the server has acknowledged every result and the host holds no run, or `--stop-grace`
 //! and [`DRAIN_SETTLE`] more have passed. A second signal ends it at once. A result that
 //! is not acknowledged is never dropped: its run stays listed, and a container that is

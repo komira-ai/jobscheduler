@@ -23,8 +23,9 @@
 //!   after the pause [`CallBounds::retry`], so a retry does not wait for the worker's next
 //!   step and a provider that fails at once is asked at most once per pause. A `Prepare` that
 //!   is followed by its `Mount` rings nothing of its own; the `Mount`'s answer rings.
-//! - A reply of `INVALID_ARGUMENT` or `FAILED_PRECONDITION` is a refusal; every other failure
-//!   is `Unavailable`.
+//! - A reply of `INVALID_ARGUMENT` is a refusal (`Refused`: the request is wrong in itself),
+//!   one of `FAILED_PRECONDITION` a failure of the provider's state on this host (`Failed`);
+//!   every other failure is `Unavailable`.
 //!
 //! - The messages are the agent's own declarations of the protocol's ([`wire`]), so the
 //!   agent does not link `js-proto`.

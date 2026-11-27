@@ -268,3 +268,46 @@ fn the_fences_of_a_silence_are_on_disk_before_the_results() {
     })));
     assert!(h.life.results().is_empty() && h.life.held_jobs().is_empty());
 }
+
+/// Asserts that the agent's stop for its own end (`Lifecycle::stop_for_host`, then the
+/// `Stop` of each job, as the worker's stop of every job makes them) ends a running job and
+/// a job still waiting for its image `killed` with the detail `host-stop`, a `host-stop`
+/// finding naming each, that a job the server already asked to stop keeps the server's
+/// reason (no detail), and that a job that exited first keeps its own end. It catches a
+/// drain or wind-down stop reported as a stop the server asked for, which the server ends as
+/// the job's own failure, and one that rewrites the reason of a stop the server asked for.
+#[test]
+fn the_agents_own_stop_says_host_stop_and_keeps_a_stop_already_asked() {
+    let mut h = Harness::new("host-stop-kinds");
+    let mut waiting = long_run("r1");
+    waiting.image = "registry.example/slow:1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned();
+    h.fake.pull_pending(&waiting.image);
+    h.start(waiting);
+    h.start(long_run("r2"));
+    h.start(long_run("r3"));
+    h.start(long_run("r4"));
+    h.life.step();
+    h.fake.exit("r4", 0);
+    h.life.step();
+    // The server's stop of r3 is taken, and made at the next step.
+    h.stop("r3");
+    let events = names(&h.life.stop_for_host());
+    assert_eq!(
+        events,
+        ["finding r1 host-stop", "finding r2 host-stop"],
+        "a job already asked to stop keeps its cause"
+    );
+    for id in ["r1", "r2", "r3"] {
+        h.stop(id);
+    }
+    h.life.step();
+    let stopped = (Outcome::Killed, Some(detail::HOST_STOP.to_owned()));
+    assert_eq!(result_of(&h, "r1"), stopped);
+    assert_eq!(result_of(&h, "r2"), stopped);
+    assert_eq!(result_of(&h, "r3"), (Outcome::Killed, None));
+    assert_eq!(
+        result_of(&h, "r4"),
+        (Outcome::Succeeded, None),
+        "past its exit"
+    );
+}

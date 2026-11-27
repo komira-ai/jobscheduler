@@ -202,7 +202,9 @@ impl Attached {
             match providers.ask(name, &call) {
                 ProviderAnswer::Done(_) => false,
                 ProviderAnswer::Pending => true,
-                ProviderAnswer::Refused(why) | ProviderAnswer::Unavailable(why) => {
+                ProviderAnswer::Refused(why)
+                | ProviderAnswer::Failed(why)
+                | ProviderAnswer::Unavailable(why) => {
                     sweep.again_ms = now_ms.saturating_add(SWEEP_AGAIN_MS);
                     if !sweep.told {
                         sweep.told = true;

@@ -5,6 +5,12 @@
 //! [`detail::SILENCE_STOP`](crate::lifecycle::detail::SILENCE_STOP). The silence counts
 //! from the last [`Contact`] the session stamped, or from the moment the watch began when
 //! there has been none; it is stopped once for each silence, and a contact ends it.
+//!
+//! The agent's stop of every job for its own end (a drain past its wait, a wind-down after
+//! a refusal for good) is here too ([`Lifecycle::stop_for_host`]): its results say `killed`
+//! with the detail [`detail::HOST_STOP`](crate::lifecycle::detail::HOST_STOP), so the server
+//! tells them from a stop it asked for. Both ends are the host's, not the job's: the server
+//! ends such a job as lost, which its retry policy retries on another host.
 
 use std::time::Duration;
 
@@ -69,5 +75,25 @@ impl Lifecycle {
                 job.note(code::SILENCE_STOP, message, events);
             }
         }
+    }
+
+    /// Marks every job that runs or waits to start as stopped for the agent's own end, and
+    /// notes a finding for each, before the agent stops them all as a `Stop` does: their
+    /// results then say `killed` with the detail
+    /// [`detail::HOST_STOP`](crate::lifecycle::detail::HOST_STOP). A job already asked to
+    /// stop keeps that cause and gets no finding; a job past its exit keeps its own end. The
+    /// stop itself, and the retired fences, are the `Stop`'s.
+    pub fn stop_for_host(&mut self) -> Vec<Event> {
+        let mut events = Vec::new();
+        for job in &mut self.jobs {
+            let asked = job.cause.is_some();
+            if job.request_stop_for(Cause::Withdrawn, false) && !asked {
+                let message = "the agent is ending (a drain past its wait, or a wind-down): \
+                               the job is stopped"
+                    .to_owned();
+                job.note(code::HOST_STOP, message, &mut events);
+            }
+        }
+        events
     }
 }

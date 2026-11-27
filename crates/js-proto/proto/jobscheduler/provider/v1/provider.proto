@@ -23,6 +23,16 @@
 // - Mount answers once the tree can be opened (its files may still be filling: an open of
 //   one waits for it), or within 30 seconds UNAVAILABLE, and the agent asks again; a tree
 //   that will never be ready is refused FAILED_PRECONDITION.
+// - What the agent makes of a failure of Prepare or Mount: INVALID_ARGUMENT says the
+//   request is wrong in itself (a ref no provider can read, a message it cannot parse) and
+//   fails the start as the job's own fault, never retried (provider-refused);
+//   FAILED_PRECONDITION says the provider cannot serve it in its present state (a source
+//   it does not hold as prepared, one prepared with another ref, a tree it will not make
+//   here) and fails the start as the host's, so the job is placed again on another host
+//   (provider-failed); every other code, and no answer within the call's bound, is asked
+//   again until the agent's wait for the provider ends (input-unavailable, also the
+//   host's). A provider answers INVALID_ARGUMENT only when every provider would refuse the
+//   same request.
 // - Release of a source the provider does not know succeeds, and so does one that arrives
 //   while the source's Prepare is still being answered: the provider ends what the Prepare
 //   began. It answers within 5 seconds.

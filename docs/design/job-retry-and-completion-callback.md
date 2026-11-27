@@ -200,6 +200,7 @@ function. A row marked "retries" starts the next attempt when one is left. Every
 | stopped for memory | `FAILED`, reason `MEMORY` | no |
 | a host path or host port failed while it ran | `FAILED`, reason `INPUT_FAILED` | no: the job ran |
 | lost: the host was read absent, or did not list the job after a hello | `LOST` (placed, starting or running) | **retries** (host lost) |
+| the agent stopped it for its host's sake: its silence bound (`killed`, `silence-stop`) or its own end, a drain past its wait or a wind-down (`killed`, `host-stop`) | `LOST` | **retries** (host lost) |
 | the start timed out | `FAILED_TO_START`, `START_TIMEOUT` | **retries** (start failure) |
 | an input could not be read on the host | `FAILED_TO_START`, `INPUT_UNAVAILABLE` | **retries** (start failure) |
 | the agent refused it with a code of the host | `FAILED_TO_START`, `AGENT_REFUSED` | **retries** (start failure) |
@@ -212,6 +213,15 @@ function. A row marked "retries" starts the next attempt when one is left. Every
   `crates/js-agent-wire/src/refusal.rs` that a bad job gets (such as `invalid-job`, `invalid-file`, `invalid-image` and
   `image-not-allowed`), and `bundle-not-allowed`. Every other code is the host's, including a code this server does not know. A retry is
   bounded by `max_attempts`, and kbf reads an unknown code the same way today (infrastructure, rerun).
+- **Mount providers.** A node-local provider's `INVALID_ARGUMENT` to `Prepare` or `Mount` is the request wrong in itself, a ref no
+  provider can read: the agent fails the start `provider-refused`, a code of the job. Its `FAILED_PRECONDITION` is the provider's own
+  state (a source it does not hold as prepared, as after its restart; one prepared with another ref; a tree it will not make here):
+  `provider-failed`, a code of the host, retried on another host. Every other answer, and none within the call's bound, is asked
+  again until the agent's `--mount-provider-wait` and then fails `input-unavailable`, also the host's. An agent from before
+  `provider-failed` sends `provider-refused` for both, which this server still ends as the job's.
+- **A stop the agent made.** A `killed` result whose detail is `silence-stop` or `host-stop` is the agent's own stop for its host's
+  sake, not one the server asked for: the job ends `LOST` (its output is not kept) and retries. Any other `killed` result without
+  a cancel asked for is still `FAILED` with exit code -1, and a cancel asked for still wins.
 - **A drained host.** In merged code a drain never cuts work (section 6.4 of the design). A host that is updated or restarted without a
   handover loses its starting and running jobs through `lose_unlisted`, so "drained" arrives as `LOST` and retries.
 - **A cancel wins.** A job with a cancel requested never starts another attempt. A cancel during a backoff ends the job `CANCELLED` at
@@ -706,7 +716,8 @@ The tests follow the repository's rules:
 | The next attempt waits for the previous allocation, also when its host is silent | `js-lease-server` `the_next_attempt_waits_for_the_previous_allocation`, `a_silent_hosts_attempt_holds_its_retry_until_the_queue_wait` | F |
 | A result resent after `retry_txn` is `Ack::Stale` | `js-lease-server` `a_result_resent_after_a_retry_is_stale` | F |
 | A host that holds a later attempt's live allocation gets no stop for the job; a host that lists an earlier one does | `js-lease-server` `a_stop_for_an_earlier_attempt_never_retires_a_later_one` | F |
-| Each start failure (`START_TIMEOUT`, `INPUT_UNAVAILABLE`, a host-code `AGENT_REFUSED`) and both loss paths (`lose_absent`, `lose_unlisted`) make a second attempt through the server | `js-lease-server` `each_retrying_outcome_makes_a_second_attempt` | F |
+| Each start failure (`START_TIMEOUT`, `INPUT_UNAVAILABLE`, a host-code `AGENT_REFUSED`, `provider-failed`), a `silence-stop` or `host-stop` kill, and both loss paths (`lose_absent`, `lose_unlisted`) make a second attempt through the server | `js-lease-server` `each_retrying_outcome_makes_a_second_attempt` | F |
+| A `killed` result with `silence-stop` or `host-stop` ends as lost; with no detail or another one, as a failure with exit code -1 | `js-lease-server` `per_job::tests::a_kill_the_agent_made_for_its_host_ends_the_job_lost` | F |
 | The `start-fence` rule holds past the history bound | `js-jobs` `attempt_hosts_outlives_the_history_bound` | C |
 | `retry_txn` keeps files, sets no retention end and leaves the callback armed | `js-jobs` `a_retry_keeps_files_and_leaves_the_callback_armed` | C, D |
 | One `Attempt` and one `UsageRecord` per attempt; `queued_at_ms` stays the first submit | `js-lease-server` `each_attempt_has_its_history_entry_and_usage_record` | F |

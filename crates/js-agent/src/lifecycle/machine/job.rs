@@ -203,6 +203,9 @@ pub(super) enum Cause {
     TimedOut,
     /// The server was not heard for the silence bound (see `silence`).
     Silenced,
+    /// The agent stopped every job for its own end, not because the server asked: a drain
+    /// past its wait, a wind-down (see `silence`).
+    Withdrawn,
     /// A run adopted after a restart could not be offered its host ports again
     /// (`Runtime::host_port_lost`): its result's `input_failure` says `host-port-lost`.
     HostPortLost,
@@ -232,9 +235,13 @@ pub(super) fn input_failure(
 }
 
 /// The detail of the result of a job that `cause` ended: [`detail::SILENCE_STOP`] for a
-/// silence, none otherwise.
+/// silence, [`detail::HOST_STOP`] for the agent's own end, none otherwise.
 pub(super) fn cause_detail(cause: Option<Cause>) -> Option<&'static str> {
-    (cause == Some(Cause::Silenced)).then_some(detail::SILENCE_STOP)
+    match cause? {
+        Cause::Silenced => Some(detail::SILENCE_STOP),
+        Cause::Withdrawn => Some(detail::HOST_STOP),
+        Cause::Stopped | Cause::TimedOut | Cause::HostPortLost => None,
+    }
 }
 
 /// What a job is keyed by on the wire, which decides where it is listed: a run (the lease
@@ -549,7 +556,7 @@ impl Job {
 pub(super) fn outcome(cause: Option<Cause>, exit: Option<Exit>) -> (Outcome, Option<i32>) {
     match (cause, exit) {
         (Some(Cause::TimedOut), _) => (Outcome::TimedOut, None),
-        (Some(Cause::Stopped | Cause::Silenced | Cause::HostPortLost), _) => {
+        (Some(Cause::Stopped | Cause::Silenced | Cause::Withdrawn | Cause::HostPortLost), _) => {
             (Outcome::Killed, None)
         }
         (

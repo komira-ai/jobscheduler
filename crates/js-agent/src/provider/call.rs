@@ -119,16 +119,16 @@ async fn transact(channel: Channel, agent: &str, call: ProviderCall) -> Provider
     answer(result)
 }
 
-/// What a provider's reply is to the lifecycle: `INVALID_ARGUMENT` and `FAILED_PRECONDITION`
-/// are the provider refusing the ref for good; every other failure (`UNAVAILABLE`, a
-/// connection that could not be made, any other code) is a try again later.
+/// What a provider's reply is to the lifecycle: `INVALID_ARGUMENT` is the request wrong in
+/// itself, refused on every host; `FAILED_PRECONDITION` is the provider's own state, which
+/// fails the call on this host only; every other failure (`UNAVAILABLE`, a connection that
+/// could not be made, any other code) is a try again later.
 fn answer(result: Result<Option<String>, Status>) -> ProviderAnswer {
     match result {
         Ok(done) => ProviderAnswer::Done(done),
         Err(status) => match status.code() {
-            Code::InvalidArgument | Code::FailedPrecondition => {
-                ProviderAnswer::Refused(status.message().to_owned())
-            }
+            Code::InvalidArgument => ProviderAnswer::Refused(status.message().to_owned()),
+            Code::FailedPrecondition => ProviderAnswer::Failed(status.message().to_owned()),
             _ => ProviderAnswer::Unavailable(why(&status)),
         },
     }
