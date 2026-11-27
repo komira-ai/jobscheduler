@@ -245,7 +245,7 @@ fn a_teaching_taught_after_the_passes_leaves_the_history_of_one_taught_first() {
     assert_eq!(pages, 2);
     assert_eq!(later_placed[2..], first_placed[2..], "after it: the same");
     assert_eq!(first_placed[0], (3000, 11 * 256 * MIB), "from the history");
-    assert_eq!(later_placed[0], (2000, 4 * GIB), "during it, none freed: cold");
+    assert_eq!(later_placed[0], (2000, 4 * GIB), "none freed yet: cold");
 }
 
 /// Asserts that a job placed while a teaching is read books from the runs the passes freed since
