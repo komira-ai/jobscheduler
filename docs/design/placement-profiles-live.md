@@ -5,8 +5,9 @@ on the curve hosts, the pack limit's fullest slot, the wait bound, `server.curve
 `server.curve_max_wait_seconds` with their flags `--curve-hosts` and `--curve-max-wait-seconds`, the metrics of section 5,
 the `shadow` table's three columns, a curve arm of the replay that learns from the series the trace carries, the replay
 on held-out days (`js-cpu-replay run --learn-days`), and under `shadow` and `on` the memory shadow of section 2
-("Memory over time, in shadow"). Not built: the decide-in-shadow line of section 4 for CPU. Not yet run: the replay on
-the farm's recorded days.
+("Memory over time, in shadow"). The decide-in-shadow line of section 4 for CPU is built under
+`--placement-curves shadow` (`crates/js-sched-placer/src/curve_shadow.rs`). Not yet run: the replay on the farm's
+recorded days.
 The code references below are to the commit the design was written at. It follows [cpu-over-time.md](cpu-over-time.md), whose steps 1
 (record) and 2 (learn in shadow, komira-ai/jobscheduler#1057) are built, and fixes what its steps 3 (decide in
 shadow) and 4 (enforce) book, gate and roll out. Companions: [sizing.md](sizing.md) (how a class is booked today)
@@ -397,6 +398,17 @@ A class books its curve only while all four hold. While any fails, the class is 
    `a job's curve booking would place it differently`, with `job`, `class`, `flat_host`, `curve_host` (absent when no
    host fits) and `slot` (the first slot over the cap).
    - This says how many jobs the curves move or delay, and which classes, before any job is placed by a curve.
+   - Built (`crates/js-sched-placer/src/curve_shadow.rs`, READ). The tables are the ones `on` would build, on the
+     hosts `server.curve_hosts` names, and they follow the flat placements. The flat host is kept, and no line is
+     logged, when the job's curve fits it at every slot. Otherwise `curve_host` is the least full host, at its fullest
+     booked slot, of the round's other open hosts that the curve fits, that have room but for CPU and that the
+     scheduler refused for nothing but its `cpu` test; when the flat placement placed the job, a host the settings do
+     not name, which the round offered and the scheduler did not refuse, may be it too. `slot` is 0 to 63 for the 2 s slots and 64 for the slot from
+     128 s on, and it is absent when `flat_host` is. A job the flat placement leaves waiting is logged once while it
+     waits, until it is placed or leaves the queue.
+   - The line is a bound, not a replay (INFERRED). It does not model the scheduler's ranking among hosts both rules
+     admit, refusals that carry no kind, or the wait bound. A line with no `curve_host` is a delay of at most
+     `server.curve_max_wait_seconds` under `on`.
 3. **The replay.** On recorded days held out from the learning days, the curve mode against the flat step must
    show three things:
    - total time (wait plus run) no worse, by more than the spread between two recorded days;
@@ -443,7 +455,7 @@ The live mode books today's memory figure, so its fallback is today's:
 ### The switch
 - **Farm-wide:** `server.placement_curves` (flag `--placement-curves`) gains `on`.
   - `off` and `shadow` keep booking every class flat, and the existing test keeps asserting it.
-  - `on` needs `--agent-pool-config`, as `shadow` does, and learns, logs and checks exactly as `shadow`.
+  - `on` needs `--agent-pool-config`, as `shadow` does, and learns and checks exactly as `shadow`, which alone logs the decide-in-shadow line.
   - The refusal text becomes `placement_curves must be off, shadow or on`. This is the value
     `cpu-over-time.md` section 12 reserved.
 - **Canary:** `server.curve_hosts` (flag `--curve-hosts`, host ids separated by commas), a list of host ids.

@@ -219,6 +219,7 @@ impl Scheduler {
                     start_sent: Some(sent),
                     granted_at: self.now,
                     started_at: None,
+                    placement: super::reservation_log::Placement::default(),
                 };
                 // A worker that registered already is not adopted again: the lease is
                 // booked on it now, or its end would release a booking it never made.
