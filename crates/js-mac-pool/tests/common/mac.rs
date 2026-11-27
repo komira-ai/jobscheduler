@@ -26,8 +26,7 @@ pub fn host_major() -> MacosMajor {
         .output()
         .expect("sw_vers");
     let version = String::from_utf8(out.stdout).expect("utf8");
-    MacosMajor::from_product_version(&version)
-        .unwrap_or_else(|| panic!("macOS {version} has no base set"))
+    MacosMajor::from_product_version(&version).unwrap_or_else(|refused| panic!("{refused}"))
 }
 
 pub struct Mac {

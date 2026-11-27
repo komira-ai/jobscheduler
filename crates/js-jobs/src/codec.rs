@@ -69,7 +69,8 @@ pub(crate) const FORMAT: u8 = 1;
 /// The tags of a job row (whole-host tags 45, 46, 59 and 63 are in `whole_fields`, isolation tag
 /// 47 in `host_fields`, queue tags 48 to 53 in `queue_fields`, 54 to 58 in `rootfs_fields`, the
 /// history key 66 in `key_fields`, the callback 68 in `callback_fields`, the retry policy 67 and
-/// the attempts 69 to 73 in `attempt_fields`).
+/// the attempts 69 to 73 in `attempt_fields`, the usage's CPU tags 60 to 62, the series 64 and 65
+/// and the usage's swap peak 74 in `result_fields`).
 pub(crate) mod job_tag {
     /// The job's id (text).
     pub const ID: u16 = 1;

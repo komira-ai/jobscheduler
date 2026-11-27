@@ -1,12 +1,12 @@
 //! Which worker a request that waits for a worker to empty holds. With whole-node
-//! settings the pick is the least tail: an action that owns its worker takes one hold per
-//! pool, picked again every round, and a whole-machine mark stays on the worker it was
-//! made on until its request is placed, cancelled or gives it up, however cheap another
-//! worker becomes, and no other request's hold, mark or whole-machine placement takes
-//! that worker (ordinary work is still placed there).
-//! Without settings nothing is changed: the worker with the fewest leases, kept while it
-//! could run the request, and no limit on how many requests hold a worker. Every time is
-//! farm time fed to the scheduler.
+//! settings the pick is the least tail, made again every round: an action that owns its
+//! worker takes one hold per pool, and a whole-machine mark moves to a worker whose tail
+//! has become shorter, keeping when it was made, stays where it is on a tie, and is never
+//! taken by another request's hold, mark or whole-machine placement (ordinary work is
+//! still placed on its worker).
+//! Without settings a whole-machine request holds as an action that owns its worker does:
+//! the least tail, picked again every round, one hold per pool. Every time is farm time
+//! fed to the scheduler.
 
 #[macro_use]
 #[path = "booked/mod.rs"]
@@ -21,7 +21,7 @@ mod whole_rig;
 
 use crate::whole_rig::{Farm, request, secs, w};
 use js_sched::{Request, Scheduler};
-use js_types::sched::{LeaseGrant, LeaseKind, OperationId, Qos};
+use js_types::sched::{FarmTime, LeaseGrant, LeaseKind, OperationId, Qos};
 use js_whole::WholeNodeConfig;
 
 fn plain() -> Farm {
@@ -63,17 +63,18 @@ fn one_long_two_short(f: &mut Farm) {
     f.lease_on("b", secs(3_600));
 }
 
-/// Catches (off is main): the pick without settings changed from the fewest leases: `b`
-/// has one lease that runs an hour, `a` two that end within a minute, and `b` is held.
+/// Catches: the pick without settings by the fewest leases: `b` has one lease that runs
+/// an hour, `a` two that end within a minute, and `a`, which empties first, is held.
 #[test]
-fn without_settings_the_fewest_leases_worker_is_held() {
+fn without_settings_the_worker_that_empties_first_is_held() {
     let mut f = plain();
     one_long_two_short(&mut f);
     let whole = f.whole();
-    assert_eq!(f.held_for(whole), Some(&w("b")));
+    assert_eq!(f.held_for(whole), Some(&w("a")));
 }
 
-/// Catches (off is main): the fewest-leases fallback lost when no lease has a wall time.
+/// Catches: the fewest-leases order lost when no lease has a wall time: no worker's tail
+/// is known, so the one with the fewest leases is held.
 #[test]
 fn with_no_wall_times_known_the_fewest_leases_is_held() {
     let mut f = plain();
@@ -86,38 +87,38 @@ fn with_no_wall_times_known_the_fewest_leases_is_held() {
     assert_eq!(f.held_for(whole), Some(&w("b")));
 }
 
-/// Catches (off is main): an action that owns its worker picked by tail without settings:
-/// it holds the worker with the fewest leases, `b`.
+/// Catches: an action that owns its worker picked by the fewest leases without settings:
+/// it holds the worker that empties first, `a`.
 #[test]
-fn without_settings_an_owner_action_holds_the_fewest_leases_worker() {
+fn without_settings_an_owner_action_holds_the_worker_that_empties_first() {
     let mut f = plain();
     one_long_two_short(&mut f);
     let op = owner(&mut f);
-    assert_eq!(f.held_for(op), Some(&w("b")));
+    assert_eq!(f.held_for(op), Some(&w("a")));
 }
 
-/// Catches (off is main): a hold that moves without settings: `b` is held for having the
-/// fewest leases; when `a` is down to one lease too, `b` is still held (kept), though `a`
-/// would now empty first.
+/// Catches: a hold kept on its worker without settings: `a` holds a lease of a minute and
+/// one of an hour, `b` one of ten minutes, so `b` is held; when the hour-long lease ends,
+/// `a` empties first and the hold moves there.
 #[test]
-fn without_settings_the_hold_is_kept() {
+fn without_settings_the_hold_moves_to_the_worker_that_empties_first() {
     let mut f = plain();
     f.worker("a");
-    let first = f.lease_on("a", secs(60));
     f.lease_on("a", secs(60));
+    let long = f.lease_on("a", secs(3_600));
     f.worker("b");
     f.lease_on("b", secs(600));
     let whole = f.whole();
     assert_eq!(f.held_for(whole), Some(&w("b")));
-    f.finish(&first);
+    f.finish(&long);
     assert!(f.grants().is_empty());
-    assert_eq!(f.held_for(whole), Some(&w("b")));
+    assert_eq!(f.held_for(whole), Some(&w("a")));
 }
 
-/// Catches (off is main): a limit of one hold per pool without settings: four owner
-/// actions in one pool each hold a worker.
+/// Catches: no limit on holds per pool without settings: of four owner actions in one
+/// pool only the first in queue order holds a worker.
 #[test]
-fn without_settings_four_owner_actions_each_hold_a_worker() {
+fn without_settings_four_owner_actions_in_one_pool_hold_one_worker() {
     let mut f = plain();
     for name in ["a", "b", "c", "d"] {
         f.worker(name);
@@ -125,21 +126,27 @@ fn without_settings_four_owner_actions_each_hold_a_worker() {
     }
     let ops: Vec<OperationId> = (0..4).map(|_| owner(&mut f)).collect();
     let held: Vec<bool> = ops.iter().map(|op| f.held_for(*op).is_some()).collect();
-    assert_eq!(held, [true, true, true, true]);
+    assert_eq!(held, [true, false, false, false]);
 }
 
-/// Catches (off is main): a limit of one hold per pool without settings: a second
-/// whole-machine request holds the next worker.
+/// Catches: no limit on holds per pool without settings: of two whole-machine requests
+/// the first holds `a` and the second holds nothing; once the first is placed, the second
+/// holds the worker left.
 #[test]
-fn without_settings_two_whole_machine_requests_each_hold_a_worker() {
+fn without_settings_two_whole_machine_requests_in_one_pool_hold_one_worker() {
     let mut f = plain();
-    for name in ["a", "b"] {
-        f.worker(name);
-        f.lease_on(name, secs(600));
-    }
+    f.worker("a");
+    let short = f.lease_on("a", secs(300));
+    f.worker("b");
+    f.lease_on("b", secs(600));
     let first = f.whole();
     let second = f.whole();
     assert_eq!(f.held_for(first), Some(&w("a")));
+    assert_eq!(f.held_for(second), None);
+    f.finish(&short);
+    let grants = f.grants();
+    let granted: Vec<_> = grants.iter().map(|g| (g.operation, &g.worker)).collect();
+    assert_eq!(granted, [(first, &w("a"))]);
     assert_eq!(f.held_for(second), Some(&w("b")));
 }
 
@@ -182,30 +189,125 @@ fn with_settings_four_owner_actions_in_one_pool_hold_one_worker() {
     assert_eq!(held, [true, false, false, false]);
 }
 
-/// Catches: a mark picked again when another worker becomes cheaper: `a` holds two leases
-/// of a minute, `b` an hour-long one and a lease of 30 s; the request marks `a`, and when
-/// the hour-long lease ends `b` is the cheaper to drain, yet the mark stays on `a` exactly
-/// as it was made (its time, its deadline and its tail end).
+/// Catches: an action that owns its worker counted by the whole-node caps or dropped as
+/// a mark over the ceiling: at `max_whole_node = 1` a whole-machine request marks `a`,
+/// and an owner action after it still holds `b`, round after round, while the mark stays
+/// as it was made.
 #[test]
-fn the_mark_stays_on_its_worker_when_another_becomes_cheaper() {
-    let mut f = with_settings(1);
+fn an_owner_action_is_outside_the_whole_node_caps() {
+    let mut f = Farm::new(
+        Scheduler::new(1)
+            .with_load_config(booked::booked())
+            .with_whole_node(WholeNodeConfig::dedicated(1)),
+    );
+    for name in ["a", "b"] {
+        f.worker(name);
+        f.lease_on(name, secs(600));
+    }
+    let whole = f.whole();
+    let made = f.s.whole_mark(whole).cloned().expect("marked");
+    assert_eq!(made.worker, w("a"));
+    let op = owner(&mut f);
+    for ms in [10_000, 20_000, 30_000] {
+        f.at(ms);
+        f.beat();
+        assert!(f.grants().is_empty());
+        assert_eq!(f.held_for(op), Some(&w("b")));
+        assert_eq!(f.s.whole_mark(whole), Some(&made));
+    }
+}
+
+/// `a` holds two leases of a minute, `b` an hour-long one and one of 30 s, all from farm
+/// time zero: the long lease, which makes `b` the dearer to drain until it ends.
+fn crossing(f: &mut Farm) -> LeaseGrant {
     f.worker("a");
     f.lease_on("a", secs(60));
     f.lease_on("a", secs(60));
     f.worker("b");
     let long = f.lease_on("b", secs(3_600));
     f.lease_on("b", secs(30));
+    long
+}
+
+/// Catches: a mark kept on its worker when another worker's tail becomes shorter, or a
+/// moved mark that restarts its age or keeps the tail end of the worker it left. The
+/// request marks `a` (tail 60 s) at 5 s; at 10 s `b`'s hour-long lease has ended and what
+/// is left on it ends at 30 s, so the mark moves to `b`, keeps the time it was made and
+/// takes `b`'s tail end.
+#[test]
+fn a_mark_moves_to_the_worker_whose_tail_becomes_shorter_and_keeps_made() {
+    let mut f = with_settings(4);
+    let long = crossing(&mut f);
     f.at(5_000);
     f.beat();
     let whole = f.whole();
     let made = f.s.whole_mark(whole).cloned().expect("marked");
-    assert_eq!(made.worker, w("a"));
+    assert_eq!(
+        (made.worker.clone(), made.made, made.tail_end),
+        (
+            w("a"),
+            FarmTime::from_millis(5_000),
+            Some(FarmTime::from_millis(60_000))
+        )
+    );
     f.finish(&long);
     f.at(10_000);
     f.beat();
     assert!(f.grants().is_empty());
+    assert_eq!(f.held_for(whole), Some(&w("b")));
+    let moved = f.s.whole_mark(whole).cloned().expect("still marked");
+    assert_eq!(
+        (moved.worker, moved.made, moved.tail_end),
+        (w("b"), made.made, Some(FarmTime::from_millis(30_000)))
+    );
+}
+
+/// Catches: a mark that moves on a tie, to a worker with fewer leases or a lower name. `a`
+/// holds leases of 600 s and 300 s, `b` two of 300 s: the request marks `b`, whose tail is
+/// the shorter. When `a`'s 600 s lease ends both tails end at 300 s and `a` has the fewer
+/// leases and the lower name, yet the mark stays on `b` exactly as it was made.
+#[test]
+fn on_a_tie_the_mark_stays_where_it_is() {
+    let mut f = with_settings(4);
+    f.worker("a");
+    let long = f.lease_on("a", secs(600));
+    f.lease_on("a", secs(300));
+    f.worker("b");
+    f.lease_on("b", secs(300));
+    f.lease_on("b", secs(300));
+    let whole = f.whole();
+    let made = f.s.whole_mark(whole).cloned().expect("marked");
+    assert_eq!(made.worker, w("b"));
+    f.finish(&long);
+    for ms in [10_000, 20_000, 30_000] {
+        f.at(ms);
+        f.beat();
+        assert!(f.grants().is_empty());
+        assert_eq!(f.held_for(whole), Some(&w("b")));
+        assert_eq!(f.s.whole_mark(whole), Some(&made));
+    }
+}
+
+/// Catches: a mark dropped at `max_draining` when it moves, as though its own mark were
+/// counted against the move. At `max_draining = 1` the request marks `a`; when the tails
+/// cross the mark moves to `b`, and in every later round it is still there, with no wait
+/// named for the request.
+#[test]
+fn at_max_draining_one_a_mark_moves_when_the_tails_cross_and_is_never_dropped() {
+    let mut f = with_settings(1);
+    let long = crossing(&mut f);
+    let whole = f.whole();
     assert_eq!(f.held_for(whole), Some(&w("a")));
-    assert_eq!(f.s.whole_mark(whole), Some(&made));
+    f.finish(&long);
+    for ms in [10_000, 15_000, 20_000, 25_000] {
+        f.at(ms);
+        f.beat();
+        assert!(f.grants().is_empty());
+        assert_eq!(f.held_for(whole), Some(&w("b")));
+        let mark = f.s.whole_mark(whole).expect("still marked");
+        assert_eq!(mark.worker, w("b"));
+        assert_eq!(f.s.whole_wait(whole), None);
+    }
 }
 
 /// Submits a whole-machine request at `qos`, ahead of every `Ci` request in queue order,

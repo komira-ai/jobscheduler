@@ -61,6 +61,7 @@ fn fresh_io() -> Io {
         counters: Counters::default(),
         ledger: Ledger::new(),
         prepare: Prepare::default(),
+        refusal: None,
         profile: crate::AgentProfile::default(),
     }
 }
@@ -467,4 +468,92 @@ fn an_ack_list_that_fails_the_wires_check_is_ignored() {
     assert_eq!(retired, [OTHER]);
     let replies = io.ledger.jobs_after([0; 3]).1;
     assert!(replies.iter().all(|reply| reply.acks.is_empty()));
+}
+
+/// Asserts that with the start refusal on, a start launches nothing (no ledger launch, no job
+/// in the agent's truth or the fake) and its result, `failed_to_start` with the code as
+/// detail and no exit code, is made once (held) and listed in every heartbeat until an
+/// answer acknowledges it (resent, counted); that a stop of the job and a second start of it
+/// change nothing (the second counts as a repeat); that the acknowledgement drops the
+/// result; and that once the refusal is off a start of the job launches it. Catches a refused
+/// start that launches, a refusal result that is not kept until acknowledged, and a refusal
+/// that outlives its acknowledgement.
+#[test]
+fn a_refused_start_launches_nothing_and_its_result_rides_until_acked() {
+    let mut agent = agent(None);
+    let mut io = fresh_io();
+    io.refusal = Some("host-tainted".to_owned());
+    answer(&mut agent, &mut io, vec![start(JOB)], &[], &[]);
+    assert!(launches(&io).is_empty());
+    assert!(agent.truth().is_empty());
+    assert!(!agent.runs_unlisted());
+    let unacked = [(
+        JOB.to_owned(),
+        HeldState::ExitedUnacked,
+        Some(Outcome::FailedToStart),
+    )];
+    let listing = agent.listing();
+    let result = listing.held[0].result.clone().expect("a result");
+    assert_eq!(result.detail.as_deref(), Some("host-tainted"));
+    assert_eq!(result.exit_code, None);
+    assert_eq!(result.allocation_id, allocation());
+    assert_eq!(beat(&mut agent, &mut io).0, unacked);
+    answer(&mut agent, &mut io, vec![start(JOB), stop(JOB)], &[], &[]);
+    assert_eq!(io.counters.get(Counter::StartRepeated), 1);
+    assert_eq!(beat(&mut agent, &mut io).0, unacked);
+    assert!(agent.listing().retired.is_empty());
+    assert_eq!(io.counters.get(Counter::ResultResent), 1);
+    answer(
+        &mut agent,
+        &mut io,
+        Vec::new(),
+        &[(JOB, Ack::Accepted)],
+        &[],
+    );
+    assert!(beat(&mut agent, &mut io).0.is_empty());
+    let (_, replies, made) = io.ledger.jobs_after([0; 3]);
+    assert_eq!(made.len(), 1);
+    assert!(made[0].held);
+    let starts: Vec<_> = replies
+        .iter()
+        .flat_map(|reply| reply.starts.clone())
+        .collect();
+    assert!(starts.iter().all(|start| !start.refused));
+    io.refusal = None;
+    answer(&mut agent, &mut io, vec![start(OTHER)], &[], &[]);
+    assert_eq!(launches(&io), [format!("{OTHER}/{}", allocation())]);
+}
+
+/// Asserts that a start of a job a stop already named is refused as before whether or not the
+/// start refusal is on: the stop retires the id, nothing launches and no result is made.
+/// Catches a refusal that makes a result for a job the agent never held.
+#[test]
+fn a_start_after_a_stop_is_not_answered_by_the_start_refusal() {
+    let mut agent = agent(None);
+    let mut io = fresh_io();
+    io.refusal = Some("host-tainted".to_owned());
+    answer(&mut agent, &mut io, vec![stop(JOB), start(JOB)], &[], &[]);
+    assert!(launches(&io).is_empty());
+    assert_eq!(io.counters.get(Counter::StartAfterStop), 1);
+    let (_, retired) = beat(&mut agent, &mut io);
+    assert_eq!(retired, [JOB.to_owned()]);
+    assert!(io.ledger.jobs_after([0; 3]).2.is_empty());
+}
+
+/// Asserts that a start of a job the agent already runs, arriving while the start refusal is
+/// on, is a repeat as before: counted, no result made, the job still listed running. Catches a
+/// refusal that turns a job the agent holds into a refused one.
+#[test]
+fn a_repeated_start_of_a_running_job_is_not_refused() {
+    let mut agent = agent(None);
+    let mut io = fresh_io();
+    answer(&mut agent, &mut io, vec![start(JOB)], &[], &[]);
+    io.refusal = Some("host-tainted".to_owned());
+    answer(&mut agent, &mut io, vec![start(JOB)], &[], &[]);
+    assert_eq!(io.counters.get(Counter::StartRepeated), 1);
+    assert_eq!(
+        beat(&mut agent, &mut io).0,
+        [(JOB.to_owned(), HeldState::Running, None)]
+    );
+    assert!(io.ledger.jobs_after([0; 3]).2.is_empty());
 }

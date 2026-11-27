@@ -25,7 +25,14 @@
 //!   pass). The table ([`render`]) is printed and written to
 //!   `target/mac-root-tests/table.tsv`, after the macOS version and build.
 //!
-//! Every target runs even when one before it failed; the verb fails if any row is `FAIL`.
+//! `--only <key>` (repeatable) runs just the targets of those [`Target::key`]s ([`select`]),
+//! in [`TARGETS`] order, and builds `js-mac-provision` only for its own target; a key that
+//! is no target's is refused first, on any system. The release's beta stage runs
+//! `--only native_isolation` on a hosted Mac of its own
+//! (`.github/workflows/js-agent-native-isolation.yml`).
+//!
+//! Every selected target runs even when one before it failed; the verb fails if any row is
+//! `FAIL`.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
@@ -39,7 +46,7 @@ use crate::test_build::{self, Built, Error};
 /// `--uid-range`): a user with one is a lease user of a farm Mac.
 pub const PRODUCTION_UIDS: RangeInclusive<i64> = 600..=699;
 /// Every uid the tests use: the account pool of `native_privileged` ([`NATIVE_PRIVILEGED_UIDS`]),
-/// the accounts of `native_isolation` and `native_inbound_pf`, and the unprivileged uid of
+/// the accounts of `native_isolation`, `native_inbound_pf` and `native_fence`, and the unprivileged uid of
 /// `js-mac-pool` and `js-treestore` ([`PLAIN_UID`]).
 pub const TEST_UIDS: RangeInclusive<i64> = 4300..=4320;
 /// The slots of `native_privileged`'s account pool.
@@ -48,8 +55,10 @@ pub const NATIVE_PRIVILEGED_UIDS: RangeInclusive<i64> = 4300..=4309;
 pub const ISOLATION_UID: u32 = 4310;
 /// The one slot of the account pool `native_inbound_pf` opens.
 pub const INBOUND_UID: u32 = 4311;
+/// The one slot of the account pool `native_fence` opens.
+pub const FENCE_UID: u32 = 4312;
 /// The uids of the accounts the `js-agent` targets make, which the verb deletes after them.
-pub const MADE_UIDS: RangeInclusive<i64> = 4300..=4311;
+pub const MADE_UIDS: RangeInclusive<i64> = 4300..=4312;
 /// The unprivileged uid and gid of `js-mac-pool` and `js-treestore`: no account is needed.
 pub const PLAIN_UID: u32 = 4320;
 /// The prefix of the accounts the `js-agent` targets' account pools make.
@@ -84,7 +93,7 @@ pub struct Target {
 }
 
 /// Every target, in the order they run.
-pub const TARGETS: [Target; 7] = [
+pub const TARGETS: [Target; 8] = [
     Target {
         key: "pf_as_root",
         package: PROVISION,
@@ -125,6 +134,12 @@ pub const TARGETS: [Target; 7] = [
         key: "native_inbound_pf",
         package: "js-agent",
         test: "native_inbound_pf",
+        makes_users: true,
+    },
+    Target {
+        key: "native_fence",
+        package: "js-agent",
+        test: "native_fence",
         makes_users: true,
     },
 ];
@@ -320,6 +335,7 @@ pub fn dirs_for(key: &str, work: &Path) -> Vec<PathBuf> {
         "native_privileged" => &["native-privileged"],
         "native_isolation" => &["native-isolation"],
         "native_inbound_pf" => &["native-inbound-pf"],
+        "native_fence" => &["native-fence"],
         _ => &[],
     };
     names.iter().map(|name| work.join(name)).collect()
@@ -365,6 +381,11 @@ pub fn env_for(key: &str, work: &Path, owner_uid: u32) -> Vec<OsString> {
         "native_inbound_pf" => vec![
             var("JS_NATIVE_INBOUND_ROOT", under(work, "native-inbound-pf")),
             var("JS_NATIVE_INBOUND_UID", INBOUND_UID.to_string()),
+        ],
+        "native_fence" => vec![
+            var("JS_NATIVE_FENCE_ROOT", under(work, "native-fence")),
+            var("JS_NATIVE_FENCE_UID", FENCE_UID.to_string()),
+            var("JS_NATIVE_FENCE_OWNER_UID", owner_uid.to_string()),
         ],
         _ => Vec::new(),
     }
@@ -555,6 +576,8 @@ pub struct MacRootTests<'a> {
     pub work: &'a Path,
     /// The uid of the user running the verb.
     pub owner_uid: u32,
+    /// The keys of the targets to run ([`select`]); empty runs every one.
+    pub only: &'a [String],
 }
 
 /// Fails unless `work` is an absolute path that does not exist, in a directory that does.
@@ -603,14 +626,41 @@ fn version(machine: &dyn Machine) -> Result<String, Error> {
     Ok(format!("{} ({})", product.trim(), build.trim()))
 }
 
-/// Builds every target and the `js-mac-provision` program: each target's binary, in
-/// [`TARGETS`] order, and the program.
-fn build_all(machine: &dyn Machine) -> Result<(Vec<Built>, PathBuf), Error> {
+/// The targets the verb runs, in [`TARGETS`] order: every one when `only` is empty, else
+/// those whose [`Target::key`] `only` names.
+///
+/// # Errors
+/// A name in `only` that is no target's key, naming the keys there are.
+pub fn select(only: &[String]) -> Result<Vec<&'static Target>, Error> {
+    let keys: Vec<&str> = TARGETS.iter().map(|t| t.key).collect();
+    if let Some(unknown) = only.iter().find(|name| !keys.contains(&name.as_str())) {
+        return Err(Error::Failed(format!(
+            "--only {unknown}: no such target; the targets are {}",
+            keys.join(", ")
+        )));
+    }
+    Ok(TARGETS
+        .iter()
+        .filter(|t| only.is_empty() || only.iter().any(|name| name == t.key))
+        .collect())
+}
+
+/// Whether `targets` hold the one that runs the `js-mac-provision` program.
+fn needs_program(targets: &[&Target]) -> bool {
+    targets.iter().any(|t| t.package == PROVISION)
+}
+
+/// Builds `targets` and, when they need it ([`needs_program`]), the `js-mac-provision`
+/// program: each target's binary, in the order of `targets`, and the program.
+fn build_all(
+    machine: &dyn Machine,
+    targets: &[&Target],
+) -> Result<(Vec<Built>, Option<PathBuf>), Error> {
     let mut built = Vec::new();
-    let mut packages: Vec<&str> = TARGETS.iter().map(|t| t.package).collect();
+    let mut packages: Vec<&str> = targets.iter().map(|t| t.package).collect();
     packages.dedup();
     for package in packages {
-        let tests: Vec<&str> = TARGETS
+        let tests: Vec<&str> = targets
             .iter()
             .filter(|t| t.package == package)
             .map(|t| t.test)
@@ -620,21 +670,28 @@ fn build_all(machine: &dyn Machine) -> Result<(Vec<Built>, PathBuf), Error> {
             built.push(test_build::find(&messages, test)?);
         }
     }
-    let program = test_build::find_bin(&machine.build_bin(PROVISION, PROVISION)?, PROVISION)?;
+    let program = match needs_program(targets) {
+        true => Some(test_build::find_bin(
+            &machine.build_bin(PROVISION, PROVISION)?,
+            PROVISION,
+        )?),
+        false => None,
+    };
     Ok((built, program))
 }
 
-/// Makes the work directory, its `bin` and every target's directories as root, and copies
-/// the binaries into `bin` with mode 0755.
+/// Makes the work directory, its `bin` and the directories of `targets` as root, and copies
+/// their binaries (and the program, when there is one) into `bin` with mode 0755.
 fn lay_out(
     machine: &dyn Machine,
     work: &Path,
+    targets: &[&Target],
     built: &[Built],
-    program: &Path,
+    program: Option<&Path>,
 ) -> Result<(), Error> {
     let bin = work.join("bin");
     let mut dirs = vec![work.to_path_buf(), bin.clone()];
-    for target in &TARGETS {
+    for target in targets {
         dirs.extend(dirs_for(target.key, work));
     }
     for dir in dirs {
@@ -643,12 +700,12 @@ fn lay_out(
             vec!["/bin/mkdir".into(), "-m".into(), "0755".into(), dir.into()],
         )?;
     }
-    let mut copies: Vec<(&Path, PathBuf)> = TARGETS
+    let mut copies: Vec<(&Path, PathBuf)> = targets
         .iter()
         .zip(built)
         .map(|(target, built)| (built.executable.as_path(), bin.join(target.key)))
         .collect();
-    copies.push((program, bin.join(PROVISION)));
+    copies.extend(program.map(|program| (program, bin.join(PROVISION))));
     for (from, to) in &copies {
         as_root(machine, vec!["/bin/cp".into(), from.into(), to.into()])?;
     }
@@ -714,14 +771,16 @@ fn run_target(p: &MacRootTests<'_>, target: &Target, built: &Built, logs: &Path)
     rows
 }
 
-/// Checks the Mac, builds every target, lays the work directory out as root and runs every
-/// target there as root: the line to print when no test failed. The table is printed and
+/// Checks the Mac, builds the selected targets ([`MacRootTests::only`]), lays the work
+/// directory out as root and runs each target there as root: the line to print when no test
+/// failed. The table is printed and
 /// written to `target/mac-root-tests/table.tsv` under the repository root.
 ///
 /// # Errors
-/// A step before the runs failed (the first one's error), or one or more rows are `FAIL`
-/// (one line each, after every target ran).
+/// A name of `only` is no target's, a step before the runs failed (the first one's error),
+/// or one or more rows are `FAIL` (one line each, after every selected target ran).
 pub fn run(p: &MacRootTests<'_>) -> Result<String, Error> {
+    let targets = select(p.only)?;
     if p.os != "macos" {
         return Err(Error::Failed(format!(
             "mac-root-tests runs on a Mac; this is {}",
@@ -731,13 +790,13 @@ pub fn run(p: &MacRootTests<'_>) -> Result<String, Error> {
     check_work(p.work)?;
     check_users(&users(p.machine)?)?;
     let version = version(p.machine)?;
-    let (built, program) = build_all(p.machine)?;
+    let (built, program) = build_all(p.machine, &targets)?;
     let logs = p.root.join("target/mac-root-tests");
     std::fs::create_dir_all(&logs)
         .map_err(|e| Error::Failed(format!("{}: {e}", logs.display())))?;
-    lay_out(p.machine, p.work, &built, &program)?;
+    lay_out(p.machine, p.work, &targets, &built, program.as_deref())?;
     let mut rows = Vec::new();
-    for (target, built) in TARGETS.iter().zip(&built) {
+    for (target, built) in targets.iter().zip(&built) {
         rows.extend(run_target(p, target, built, &logs));
     }
     println!("{}", render(&version, &rows));

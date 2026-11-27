@@ -16,6 +16,7 @@ use super::{Running, start_held};
 use crate::agent_api::job_rig::spec;
 use crate::clock::SharedClock;
 use crate::config::{Cli, Config};
+use crate::job_sizes::Taught;
 use crate::ready::Phase;
 use crate::ticker::channel_ticker;
 
@@ -112,6 +113,7 @@ fn ran(running: &Running, store_clock: &js_state::ManualClock, name: &str) {
         cpu_throttle: None,
         cpu_pressure_some: None,
         cpu_peak: None,
+        peak_swap_bytes: None,
     };
     let end = JobEnd::Exited {
         exit_code: 0,
@@ -124,11 +126,15 @@ fn ran(running: &Running, store_clock: &js_state::ManualClock, name: &str) {
 }
 
 /// Asserts that a server over a job store that holds two measured ended jobs answers ready
-/// while its teaching of the job sizes has not run (it is held), that the teaching runs once it
-/// is let go and teaches both runs, and that the server then stops in order. The first start,
-/// over an empty store, teaches none without being held. Catches a start that reads the ended
-/// jobs before it answers ready, which held a server's start for the minutes its reads of a
-/// long history took, and a teaching that never runs after the start.
+/// while its teaching of the job sizes has not run (it is held), and that its gate says the
+/// sizes still teach (what `/readyz/sizes` answers); that the teaching runs once it is let go
+/// and teaches both runs, and the gate then says how it ended; and that the server then stops
+/// in order. The first start, over an empty store, teaches none without being held, and its
+/// gate says it is taught too. Catches a start that reads the ended jobs before it answers
+/// ready, which held a server's start for the minutes its reads of a long history took, a
+/// teaching that never runs after the start, and a server whose readiness route never says
+/// its sizes are taught, or says so before they are, which lets a deploy replace a server
+/// still reading its history.
 #[tokio::test]
 async fn a_server_answers_ready_before_its_sizes_are_taught_and_teaches_them_after() {
     let dir = scratch("ready_before_taught");
@@ -136,6 +142,7 @@ async fn a_server_answers_ready_before_its_sizes_are_taught_and_teaches_them_aft
     let mut first = started(config(&dir, &store_clock), None).await;
     let taught = first.sizes.take().unwrap().await.unwrap();
     assert_eq!(taught, 0, "an empty store");
+    assert_eq!(first.gate.sizes(), Some(Taught::Read { classes: 0 }));
     ran(&first, &store_clock, "one");
     ran(&first, &store_clock, "two");
     first.shutdown().await.unwrap();
@@ -144,7 +151,9 @@ async fn a_server_answers_ready_before_its_sizes_are_taught_and_teaches_them_aft
     assert_eq!(running.gate.phase(), Phase::Ready);
     let sizes = running.sizes.take().unwrap();
     assert!(!sizes.is_finished(), "ready with the sizes untaught");
+    assert_eq!(running.gate.sizes(), None, "the sizes still teach");
     hold.send(()).unwrap();
     assert_eq!(sizes.await.unwrap(), 2);
+    assert_eq!(running.gate.sizes(), Some(Taught::Read { classes: 2 }));
     running.shutdown().await.unwrap();
 }

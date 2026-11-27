@@ -323,8 +323,6 @@ pub struct Placer {
     reserved: BTreeSet<usize>,
     /// The pools that have a head holding a worker this round.
     held_pools: BTreeSet<usize>,
-    /// The worker each head held last round.
-    kept: BTreeMap<OperationId, WorkerId>,
     /// The worker each head holds this round.
     holds: BTreeMap<OperationId, WorkerId>,
     /// The pack limit in thousandths: [`PACK_LIMIT_PERMILLE`] unless a test that is about
@@ -334,13 +332,9 @@ pub struct Placer {
 
 impl Placer {
     /// A round over `hosts`, which must be in name order, handing out lease numbers from
-    /// `next_seq` of `term`; `kept` is what [`Placer::holds`] gave the round before.
-    pub fn new(
-        mut hosts: Vec<Host>,
-        term: u64,
-        next_seq: u64,
-        kept: BTreeMap<OperationId, WorkerId>,
-    ) -> Self {
+    /// `next_seq` of `term`. Nothing is carried from the round before: a hold is picked
+    /// again every round.
+    pub fn new(mut hosts: Vec<Host>, term: u64, next_seq: u64) -> Self {
         assert!(
             hosts.windows(2).all(|w| w[0].name < w[1].name),
             "hosts are in name order"
@@ -352,7 +346,6 @@ impl Placer {
             next_seq,
             reserved: BTreeSet::new(),
             held_pools: BTreeSet::new(),
-            kept,
             holds: BTreeMap::new(),
             pack_limit_permille: PACK_LIMIT_PERMILLE,
         }
@@ -472,8 +465,11 @@ impl Placer {
 
     /// A blocked head holds, of the workers it could run on but for the load that no
     /// head holds and that it would not own whole, the one it would leave the least full
-    /// (its binding ratio, the cores charged with its own over the worker's cores), keeping
-    /// the worker it held last round while that is within a tenth of the best.
+    /// (its binding ratio, the cores charged with its own over the worker's cores), the
+    /// first by name among equals. Nothing is kept from the last round: the pick is made
+    /// again every round. (The scheduler ranks by the time the head could start first;
+    /// no lease of the simulated worlds has an end, so no worker has a start time and
+    /// the binding ratio decides alone.)
     fn hold(&mut self, ask: &Ask<'_>) {
         let candidates: Vec<(usize, (u64, u64))> = self
             .roomy(ask)
@@ -490,26 +486,13 @@ impl Placer {
             .collect();
         // The ratio of a worker with no cores is 0, as is the memory side's.
         let ratio = |r: (u64, u64)| if r.1 == 0 { (0, 1) } else { r };
-        let Some(best) = candidates
+        // `min_by` keeps the first of equals, and the candidates are in name order.
+        let Some(&(pick, _)) = candidates
             .iter()
             .min_by(|a, b| share_cmp(ratio(a.1), ratio(b.1)))
         else {
             return;
         };
-        let kept = self.kept.get(&ask.operation).and_then(|name| {
-            candidates
-                .iter()
-                .find(|(i, _)| self.hosts[*i].name == *name)
-        });
-        // `r` is within a tenth of `b` when `r.0 / r.1 <= b.0 / b.1 + 1 / 10`.
-        let within_a_tenth = |r: (u64, u64), b: (u64, u64)| {
-            u128::from(r.0) * u128::from(b.1) * 10
-                <= (u128::from(b.0) * 10 + u128::from(b.1)) * u128::from(r.1)
-        };
-        let pick = kept
-            .filter(|k| within_a_tenth(ratio(k.1), ratio(best.1)))
-            .unwrap_or(best)
-            .0;
         self.reserved.insert(pick);
         self.held_pools.insert(ask.pool);
         self.holds

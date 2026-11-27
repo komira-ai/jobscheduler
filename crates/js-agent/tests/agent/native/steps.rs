@@ -100,15 +100,17 @@ fn a_start_that_fails_after_the_account_is_lent_leaves_nothing() {
     assert!(why.0.starts_with("the files: "), "{}", why.0);
     nothing_left(&rig, &lent, 0);
 
-    // The profile: a read model the runtime builds no grants for.
+    // The profile: a policy over the builder's bounds (more read denies than it takes).
     let mut rig = Rig::with("fail-profile", |config| {
-        config.read_model = js_mac_pool::seatbelt::ReadModel::Allow;
+        config.read_denies = (0..65)
+            .map(|n| js_mac_pool::seatbelt::AbsPath::parse(&format!("/srv/deny{n}")).unwrap())
+            .collect();
     });
     let lent = ready_account(&rig);
     let why = rig
         .rt
         .create_and_start(&rig.spec("profile", native("/usr/bin/true", &[])));
-    assert!(why.unwrap_err().0.starts_with("the profile: "));
+    assert!(why.unwrap_err().0.starts_with("the policy: "));
     nothing_left(&rig, &lent, 0);
 
     // The supervisor cannot be started.
@@ -225,12 +227,12 @@ fn an_account_that_cannot_be_retired_is_held_and_said() {
     assert_eq!(live(&rig), Vec::<String>::new());
 }
 
-/// Asserts that after a restart (a new runtime over the same state, its pool opened with no
-/// adopted job) the earlier process's run is listed and ended, its account is retired by the
-/// open, its removal marks its lease done, and a later job gets an account of its own.
+/// Asserts that after a restart (a new runtime over the same state) the earlier process's run,
+/// whose supervisor ended without an exit record, is listed and ended, its account is retired
+/// by the open, its removal marks its lease done, and a later job gets an account of its own.
 ///
-/// Catches: a restart that adopts a run nobody can watch, or that leaves the earlier run's
-/// account lent.
+/// Catches: a restart that adopts a run nobody can tell the end of, or that leaves the earlier
+/// run's account lent.
 #[test]
 fn a_restart_ends_the_runs_of_the_earlier_process() {
     let mut rig = Rig::new("restart");

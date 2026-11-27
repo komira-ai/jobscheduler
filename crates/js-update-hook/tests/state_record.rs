@@ -544,3 +544,58 @@ fn peek_refuses_a_record_as_load_does() {
         "the record is not readable: not a regular file"
     );
 }
+
+/// Asserts that a step whose state directory is moved away after it opened, and a link to
+/// another directory put at its path, still saves, loads, sets aside and deletes in the
+/// directory it opened: nothing is written through the link, and the other directory stays
+/// empty. It catches a save, a rename or a sync that reopens the directory by its path, which
+/// whoever can write the parent could redirect between the check and the write.
+#[test]
+fn a_state_directory_swapped_for_a_link_after_the_open_redirects_nothing() {
+    let tmp = cell("record-swapped");
+    let state = tmp.path().join("state");
+    fs::create_dir(&state).unwrap();
+    let held = open(&state).unwrap();
+    let moved = tmp.path().join("moved");
+    fs::rename(&state, &moved).unwrap();
+    let elsewhere = tmp.path().join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    symlink(&elsewhere, &state).unwrap();
+
+    held.save(&Note::new("kept")).unwrap();
+    assert_eq!(held.load().unwrap(), Some(Note::new("kept")));
+    assert_eq!(
+        record_text(&moved),
+        "{\n  \"schema\": 3,\n  \"name\": \"kept\"\n}\n"
+    );
+    assert!(!moved.join(TEMP_FILE).exists());
+    let aside = held.set_aside("record.old").unwrap();
+    assert_eq!(aside, state.join("record.old"));
+    assert!(moved.join("record.old").is_file());
+    held.save(&Note::new("again")).unwrap();
+    held.delete().unwrap();
+    assert!(!moved.join(RECORD_FILE).exists());
+    assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+}
+
+/// Asserts that a directory a hook makes through [`Held::dir_fd`] after the state directory was
+/// swapped for a link is in the directory that was opened and checked, and that nothing is made
+/// at the link's target.
+///
+/// Catches a descriptor of the hook's own files that reaches the path again after the check.
+#[test]
+fn what_a_hook_makes_through_the_held_descriptor_is_in_the_directory_opened() {
+    let tmp = cell("record-dir-fd");
+    let state = tmp.path().join("state");
+    fs::create_dir(&state).unwrap();
+    let held = open(&state).unwrap();
+    let moved = tmp.path().join("moved");
+    fs::rename(&state, &moved).unwrap();
+    let elsewhere = tmp.path().join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    symlink(&elsewhere, &state).unwrap();
+
+    rustix::fs::mkdirat(held.dir_fd(), "own", rustix::fs::Mode::RWXU).unwrap();
+    assert!(moved.join("own").is_dir());
+    assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+}

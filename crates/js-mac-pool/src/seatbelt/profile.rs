@@ -1,5 +1,6 @@
 //! The profile text and the `sandbox-exec` argument vector.
 
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 
 use super::allow;
@@ -80,6 +81,14 @@ const FLOOR: [&str; 9] = [
     "(deny network-outbound (literal \"/private/var/run/usbmuxd\"))",
 ];
 
+/// The two operations that give a file a second name or a copy without reading it through
+/// its own path: a hard link (`link`, `linkat`) and an APFS clone (`clonefile`). A read deny
+/// matches paths, so a run that could link or clone a denied file into its run directory
+/// would read it there under a path no deny names; every read-denied place (a read deny, a
+/// homes root) therefore also denies these two. A link or a clone cannot cross volumes, so
+/// the trees' mount, a volume of its own, needs no such rule.
+const LINK_OPS: &str = "file-link file-clone";
+
 /// Why a policy has no profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum BuildError {
@@ -109,13 +118,17 @@ impl Profile {
     /// run's own home stays readable and a path walk reaches it); the
     /// trees on a mount (an exec deny, an executable-mapping
     /// deny and a read deny of the mount's root, then for each tree a read grant and a
-    /// metadata grant on the tree and its ancestors, so a path walk reaches it); the read
-    /// denies, each with a write deny of the same
-    /// path (a read-denied path inside a granted directory is not writable either); the
+    /// metadata grant on the tree and its ancestors, so a path walk reaches it); when the
+    /// policy has homes roots, a deny of hard links and clones (`file-link file-clone`) from
+    /// each root and a grant of both in the run's own home; the read denies, each with a
+    /// write deny and a hard-link and clone deny of the same path (a read-denied path inside
+    /// a granted directory is not writable either, and a run cannot give a denied file a
+    /// name or a copy no deny matches); the
     /// write protection of inputs; the mount grants (for each mount a read grant of its
-    /// path, a metadata grant on the path and its ancestors, and for a read-write mount
-    /// a write grant), then the exec denies of the mounts that are `no_exec`, after every
-    /// grant so no grant reopens them; the network; a deny of unix-socket connect and bind
+    /// path, a metadata grant on the path and its ancestors, for a read-write mount
+    /// a write grant, and a hard-link and clone grant), then the exec denies of the mounts that are `no_exec`, after every
+    /// grant so no grant reopens them; the network (with the run's host ports at `Off` and
+    /// `Ports`, [`Policy::with_host_ports`]); a deny of unix-socket connect and bind
     /// under each read-denied path (after the network rules, so no network allow
     /// reaches the agent's sockets); process info; the floor.
     ///
@@ -124,7 +137,7 @@ impl Profile {
     /// Under [`ReadModel::Allow`] the reads are an allow-list: after the write grants (and
     /// the homes' rules) come the default read deny, the names of the ancestors of every granted place, the base
     /// set of the macOS version, the run's places, the pinned trees, the Xcode and the
-    /// kinds, then a deny of each setuid file; the read denies and everything after
+    /// kinds, then a deny of each setuid file; the homes' link and clone rules, the read denies and everything after
     /// them are as in the open model.
     ///
     /// # Errors
@@ -157,10 +170,12 @@ impl Profile {
             allow::reads(allow, policy.uid_entry(), &mut lines, &mut params);
         }
         tree_rules(policy, &mut lines, &mut params);
+        home_link_rules(policy, &mut lines);
 
         for (i, path) in policy.read_denies().iter().enumerate() {
             lines.push(format!("(deny file-read* (subpath (param \"RD_{i}\")))"));
             lines.push(format!("(deny file-write* (subpath (param \"RD_{i}\")))"));
+            lines.push(format!("(deny {LINK_OPS} (subpath (param \"RD_{i}\")))"));
             params.push((format!("RD_{i}"), path.as_str().to_owned()));
         }
         for (i, path) in policy.inputs().iter().enumerate() {
@@ -249,6 +264,20 @@ fn home_rules(policy: &Policy, lines: &mut Vec<String>, params: &mut Vec<(String
     lines.push("(allow file-read-metadata (path-ancestors (param \"OWN\")))".to_owned());
 }
 
+/// The homes' link and clone denies, then the own home's grant of both (so a run still links
+/// and clones within its own run directory): see [`LINK_OPS`]. Nothing for a policy without
+/// homes roots. They follow every read rule of the homes and the trees and precede the read
+/// denies, whose own link and clone denies close a denied place inside the own home again.
+fn home_link_rules(policy: &Policy, lines: &mut Vec<String>) {
+    if policy.homes().is_empty() {
+        return;
+    }
+    for i in 0..policy.homes().len() {
+        lines.push(format!("(deny {LINK_OPS} (subpath (param \"HM_{i}\")))"));
+    }
+    lines.push(format!("(allow {LINK_OPS} (subpath (param \"OWN\")))"));
+}
+
 /// The trees on the shared mount: nothing below the root is run or mapped executable (a
 /// tree is read, never executed: the read grants below would otherwise let a run execute
 /// what it reads, since the profile allows by default), no read below the root, then each
@@ -273,7 +302,10 @@ fn tree_rules(policy: &Policy, lines: &mut Vec<String>, params: &mut Vec<(String
 
 /// The grants of the run's mounts, then the exec denies of the `no_exec` ones. The metadata
 /// grant names the path and every ancestor (a denied mount root above it stays unreadable
-/// and unlistable, but `realpath` and `getcwd` can walk through it).
+/// and unlistable, but `realpath` and `getcwd` can walk through it). Each mount also gets
+/// hard links and clones back ([`LINK_OPS`]): a mount below a read-denied root (the runtime
+/// denies the mount roots) would otherwise lose them, and a grant reopens only what it
+/// already lets the run read.
 fn mount_rules(policy: &Policy, lines: &mut Vec<String>, params: &mut Vec<(String, String)>) {
     for (i, mount) in policy.mounts().iter().enumerate() {
         params.push((format!("GR_{i}"), mount.path.as_str().to_owned()));
@@ -284,6 +316,7 @@ fn mount_rules(policy: &Policy, lines: &mut Vec<String>, params: &mut Vec<(Strin
         if mount.write {
             lines.push(format!("(allow file-write* (subpath (param \"GR_{i}\")))"));
         }
+        lines.push(format!("(allow {LINK_OPS} (subpath (param \"GR_{i}\")))"));
     }
     for (i, mount) in policy.mounts().iter().enumerate() {
         if mount.no_exec {
@@ -295,15 +328,23 @@ fn mount_rules(policy: &Policy, lines: &mut Vec<String>, params: &mut Vec<(Strin
     }
 }
 
+/// The network rules of the policy's level, with its host ports ([`Policy::with_host_ports`])
+/// where the level filters loopback (`Off` and `Ports`): a single loopback port each, the
+/// level's and the host ports together, lowest first and each once.
 fn net_rules(policy: &Policy, lines: &mut Vec<String>) {
+    let host_ports = policy
+        .host_ports()
+        .into_iter()
+        .flat_map(|ports| ports.iter());
     match policy.net() {
         Net::On => {}
-        Net::Off => push_all(lines, &OFF_RULES),
+        Net::Off => {
+            push_all(lines, &OFF_RULES);
+            loopback_ports(host_ports, lines);
+        }
         Net::Ports(ports) => {
             push_all(lines, &OFF_RULES);
-            for port in ports.iter() {
-                lines.push(format!("(allow network* (remote ip \"localhost:{port}\"))"));
-            }
+            loopback_ports(ports.iter().chain(host_ports), lines);
         }
         Net::Loopback => {
             push_all(lines, &OFF_RULES);
@@ -319,5 +360,12 @@ fn net_rules(policy: &Policy, lines: &mut Vec<String>) {
             }
             lines.push(RESOLVER.to_owned());
         }
+    }
+}
+
+/// One rule per loopback port of `ports`, lowest first and each once.
+fn loopback_ports(ports: impl Iterator<Item = u16>, lines: &mut Vec<String>) {
+    for port in ports.collect::<BTreeSet<u16>>() {
+        lines.push(format!("(allow network* (remote ip \"localhost:{port}\"))"));
     }
 }

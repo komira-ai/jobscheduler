@@ -132,6 +132,7 @@ fn a_jobs_row_says_its_classes_times_end_and_usage() {
             millicores: 8000,
             window_usec: 5_000_000,
         }),
+        peak_swap_bytes: None,
     };
     let end = JobEnd::Exited {
         exit_code: 0,

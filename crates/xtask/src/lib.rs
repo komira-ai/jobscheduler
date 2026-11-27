@@ -69,6 +69,11 @@
 //! - `merge-profiles --dir <dir> --out <file> [--rustc <program>]` ([`merge_profiles`]): one
 //!   indexed coverage profile from the raw ones a coverage shard wrote at the top of `--dir`,
 //!   merged by the toolchain's llvm-profdata from a list file.
+//! - `coverage-shard --plan <file> --shard <k> --of <n> -- <program> <args>...`
+//!   ([`coverage_shard`]): one coverage shard of `ci.yml`: the program run once for the named
+//!   long tests the plan (`.config/coverage-shards.toml`) gives shard `k`, and once for each
+//!   light slice it gives it, with the filterset and partition of the run appended to its
+//!   arguments; every run is started even when an earlier one failed.
 //! - `postgres-for-tests --bin-dir <dir> --data-dir <dir> --socket-dir <dir> --github-env <file>`
 //!   ([`postgres_for_tests`]): a Postgres server for the tests that need one, on a runner with
 //!   no service container (the macOS job), and its URL for the later steps.
@@ -76,6 +81,11 @@
 //!   <sha> --summary <file> --github-env <file>` ([`mac_test_artifact`]): a Mac root test binary
 //!   and the `js-agent` it starts, staged for an operator with their SHA-256 sums.
 //!
+//! - `agent-handover-check --server <url> --token-file <file> --out-dir <dir> --host <id>...
+//!   [--ca-cert <file>] [--samples <n>] [--interval-secs <s>] [--js <program>]` ([`handover`]):
+//!   read-only, through `js`, while a js-agent release rolls onto the hosts: fails a host that
+//!   did not move to a new agent version, was seen cordoned (it drained) or tainted, or lost,
+//!   failed or started again a job that ran on it before (docs/runbooks/agent-handover-check.md).
 //! - `deploy --service NAME... --version X.Y.Z --url <coordinator>` ([`deploy`]): the gamma
 //!   step of a release, setting the version of each service on the update coordinator in
 //!   order and waiting for it to converge (docs/release.md).
@@ -84,9 +94,10 @@
 //!   each test target built as this user and run in a `Delegate=yes` system unit of its own;
 //!   with `--job-user`, the targets of a root daemon, run as root, which start every
 //!   container as that user.
-//! - `mac-root-tests --work <dir> [--sudo <path>] [--root <dir>]` ([`mac_root`]): on a Mac
-//!   with no lease users, the root tests of `js-mac-provision`, `js-treestore`, `js-mac-pool` and
-//!   `js-agent` (every one `#[ignore]`d under a plain `cargo test`), built as this user and run as
+//! - `mac-root-tests --work <dir> [--sudo <path>] [--root <dir>] [--only <target>]...`
+//!   ([`mac_root`]): on a Mac with no lease users, the root tests of `js-mac-provision`,
+//!   `js-treestore`, `js-mac-pool` and `js-agent` (every one `#[ignore]`d under a plain
+//!   `cargo test`; with `--only`, the named targets alone), built as this user and run as
 //!   root through `sudo -n` from the new directory `--work`, the users the `js-agent` ones make
 //!   deleted after each, and a table of every test's result printed and written to
 //!   `target/mac-root-tests/table.tsv`.
@@ -157,8 +168,13 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+/// `agent-handover-check`: the check lives in its own crate, so the build farm can build its
+/// program (`js-handover-check`) without this one.
+pub use js_handover_check as handover;
+
 pub mod channels;
 pub mod count_run;
+pub mod coverage_shard;
 pub mod crun_tests;
 pub mod debs;
 pub mod deploy;
@@ -203,6 +219,9 @@ pub enum Error {
     /// `release smoke-bundle` failed.
     #[error(transparent)]
     SmokeBundle(#[from] release::smoke_bundle::Error),
+    /// The agent hand-over check did not pass. A usage error of it is [`Error::Usage`].
+    #[error(transparent)]
+    Handover(handover::Error),
     /// The deploy verb failed.
     #[error(transparent)]
     Deploy(#[from] deploy::Error),
@@ -246,6 +265,10 @@ pub enum Error {
     /// A Mac root test binary could not be staged.
     #[error("mac-test-artifact: {0}")]
     MacTestArtifact(#[from] mac_test_artifact::Error),
+    /// A coverage shard could not be run, or a run of it failed. A usage error of it is
+    /// [`Error::Usage`].
+    #[error("coverage-shard: {0}")]
+    CoverageShard(coverage_shard::Error),
     /// A coverage shard's raw profiles could not be merged.
     #[error("merge-profiles: {0}")]
     MergeProfiles(#[from] merge_profiles::Error),
@@ -344,6 +367,9 @@ enum Verb {
     },
     /// Set the release's version for services on the update coordinator and wait for them.
     Deploy(deploy::Args),
+    /// Watch hosts, read-only, while a js-agent release rolls onto them, and fail one that did
+    /// not hand its running jobs to the new agent.
+    AgentHandoverCheck(handover::Args),
     /// Fail unless every clock and random-source site in the crates the simulation cell
     /// links is on the lint's allow-list, and every entry of the list matches a site.
     Determinism {
@@ -380,6 +406,10 @@ enum Verb {
         /// The repository root, where cargo builds the test targets.
         #[arg(long, default_value = ".")]
         root: PathBuf,
+        /// Run only the target of this key (repeatable, e.g. `native_isolation`); every
+        /// target when not given.
+        #[arg(long)]
+        only: Vec<String>,
     },
     /// Fail unless the system unit a step ran with `systemd-run --wait` (without
     /// `--collect`) exited 0, reading the unit's own result rather than `systemd-run`'s
@@ -406,6 +436,9 @@ enum Verb {
         #[arg(last = true)]
         command: Vec<std::ffi::OsString>,
     },
+    /// Run one coverage shard: the command once for the long tests the plan gives the shard,
+    /// and once for each light slice it gives it, each with its own filterset appended.
+    CoverageShard(coverage_shard::Args),
     /// Record the demonstration on the landing page of jobscheduler.dev (a build of the server and
     /// the client, a server on 127.0.0.1 with the job service on, a job submitted and the jobs listed).
     SiteDemo {
@@ -590,6 +623,10 @@ fn run(cli: Cli) -> Result<String, Error> {
             )?)
         }
         Verb::Deploy(args) => Ok(deploy::run(&args)?),
+        Verb::AgentHandoverCheck(args) => handover::run(&args).map_err(|e| match e {
+            handover::Error::Usage(why) => Error::Usage(why),
+            other => Error::Handover(other),
+        }),
         Verb::Determinism { root } => Ok(determinism::run(&root)?),
         Verb::CrunTests {
             sudo,
@@ -605,7 +642,12 @@ fn run(cli: Cli) -> Result<String, Error> {
                 job_user: job_user.as_deref(),
             })?)
         }
-        Verb::MacRootTests { work, sudo, root } => {
+        Verb::MacRootTests {
+            work,
+            sudo,
+            root,
+            only,
+        } => {
             // `cargo xtask` runs this program under cargo, which sets `CARGO`.
             let cargo = std::env::var_os("CARGO").unwrap_or_default();
             let machine = mac_root::RealMachine {
@@ -619,6 +661,7 @@ fn run(cli: Cli) -> Result<String, Error> {
                 root: &root,
                 work: &work,
                 owner_uid: rustix::process::getuid().as_raw(),
+                only: &only,
             })?)
         }
         Verb::UnitResult {
@@ -634,6 +677,10 @@ fn run(cli: Cli) -> Result<String, Error> {
             count_file,
             command,
         } => count_run::run(&count_file, &command),
+        Verb::CoverageShard(args) => coverage_shard::run(&args).map_err(|e| match e {
+            coverage_shard::Error::Usage(why) => Error::Usage(why),
+            other => Error::CoverageShard(other),
+        }),
         Verb::SiteDemo {
             root,
             out,

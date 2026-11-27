@@ -108,6 +108,7 @@ fn ended(
             millicores,
             window_usec: 5_000_000,
         }),
+        peak_swap_bytes: None,
     })
 }
 
@@ -518,6 +519,7 @@ fn a_compile_that_peaks_at_20_cores_books_its_mean_and_a_host_with_measured_room
             millicores: 20_000,
             window_usec: 5_000_000,
         }),
+        peak_swap_bytes: None,
     });
     let cold = booked(22_000, 4 * GIB);
     let run = ran_for(

@@ -15,6 +15,7 @@
 //! heartbeat_interval = "10s"             # optional
 //! grace              = "1m"              # optional
 //! lost_retention     = "24h"             # optional
+//! prepare_timeout    = "20m"             # optional; class whole-node only; default 10m
 //! shape = { cpu_millis = 16000, memory_bytes = 68719476736 }
 //! capabilities = { os = "linux", arch = "x86_64" }   # optional; what every host offers
 //! ```
@@ -23,6 +24,20 @@
 //! registry books every host as that shape), and a host is admitted only if its hello
 //! reports every capability of the pool with the same value. A request that requires
 //! `os=linux` therefore finds a place on a joined pool only if the pool names `os`.
+//!
+//! Without `exec` (or with `exec = "none"`) the pool holds its hosts to no host contract: a
+//! hello is admitted whatever runtime it reports, or none, and the hosts are booked with the
+//! shape as it is given. A request that requires `exec` then finds no host in the pool,
+//! unless `capabilities` names `exec`, which every hello must then report with that value.
+//! With `exec` set, each hello must report a runtime of that mode (and the GPU toolkit when
+//! the shape and the host both have GPUs), and the hosts are booked with `exec` among their
+//! capabilities.
+//!
+//! `prepare_timeout` is how long a whole-node lease of the pool may take to become ready,
+//! counted from its commit: the registry's `WholeNodeConfig::prepare_timeout_ms`, ten
+//! minutes unless set. Only a pool of class `whole-node` prepares a host, so a pool of any
+//! other class refuses the key. The pool's other whole-node settings are the dedicated
+//! defaults and have no keys here.
 //!
 //! # Building one without the server's configuration file
 //!
@@ -42,7 +57,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use js_agent_wire::{DEFAULT_GRACE_MS, DEFAULT_HEARTBEAT_INTERVAL_MS, limits};
-use js_registry::{DEFAULT_LOST_RETENTION_MS, PoolConfig};
+use js_registry::{DEFAULT_LOST_RETENTION_MS, PoolConfig, WholeNodeConfig};
 use js_types::{
     ClassId, ExecMode, MEMORY_PERCENT_KEY, MemoryPercent, ProviderId, Resources, Shape,
 };
@@ -68,6 +83,7 @@ const KEYS: &[&str] = &[
     "lost_retention",
     "join_token_file",
     "share_class",
+    "prepare_timeout",
 ];
 
 const SHAPE_KEYS: &[&str] = &["cpu_millis", "memory_bytes", "gpus", "gpu_class"];
@@ -93,6 +109,9 @@ const LAUNCHES_NOTHING: &str =
     "a joined pool launches nothing: its machines are started by hand and join with js-agent";
 
 const ID_RULE: &str = "must be 1 to 63 characters of [a-z0-9._-]";
+
+const PREPARES_NOTHING: &str =
+    "needs class whole-node: a pool of any other class prepares no host for a lease";
 
 /// A pool of hand-joined agents, as the configuration describes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,6 +150,10 @@ pub struct JoinedPool {
     /// A class that books part of a host, served beside `class` so that its leases share a
     /// host with room, when the pool has one.
     pub share_class: Option<String>,
+    /// How long a whole-node lease may take to become ready, counted from its commit, when
+    /// the pool sets it; `None` is the registry's default of ten minutes. Only a pool of
+    /// class `whole-node` takes it.
+    pub prepare_timeout: Option<Duration>,
 }
 
 impl JoinedPool {
@@ -208,14 +231,15 @@ impl JoinedPool {
             )?,
             join_token_file: s.path("join_token_file")?,
             share_class: s.string("share_class")?,
+            prepare_timeout: s.duration("prepare_timeout")?,
         };
         pool.validate()?;
         Ok(pool)
     }
 
     /// Checks every field and builds the registry's pool: the booked shape, the host
-    /// contract, the timing, and the dedicated settings of a whole-node class. Nothing is
-    /// read from disk.
+    /// contract, the timing, and the dedicated settings of a whole-node class with the
+    /// pool's `prepare_timeout`. Nothing is read from disk.
     ///
     /// # Errors
     ///
@@ -274,6 +298,11 @@ impl JoinedPool {
             None => Ok(pool),
         };
         let pool = pool.map_err(|reason| place.fail("share_class", &reason))?;
+        let pool = match self.prepare_timeout {
+            Some(timeout) => with_prepare_timeout(pool, timeout)
+                .map_err(|reason| place.fail("prepare_timeout", &reason))?,
+            None => pool,
+        };
         let pool = match pool.with_timing(millis(self.heartbeat_interval), millis(self.grace)) {
             Ok(pool) => pool,
             Err(err) => return Err(place.fail("grace", &format!("with heartbeat_interval: {err}"))),
@@ -287,6 +316,19 @@ impl JoinedPool {
 
 fn millis(span: Duration) -> u64 {
     u64::try_from(span.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// `pool` with its whole-node settings' prepare timeout set to `timeout`, which needs a
+/// pool that has whole-node settings and a timeout of at least a millisecond.
+fn with_prepare_timeout(pool: PoolConfig, timeout: Duration) -> Result<PoolConfig, String> {
+    let Some(whole) = pool.whole_node().cloned() else {
+        return Err(PREPARES_NOTHING.to_owned());
+    };
+    let whole = WholeNodeConfig {
+        prepare_timeout_ms: millis(timeout),
+        ..whole
+    };
+    pool.with_whole_node(whole).map_err(|err| err.to_string())
 }
 
 /// The `capabilities` table: text values, as the agent pool file's `[capabilities]`.
@@ -400,6 +442,106 @@ mod tests {
         assert_ne!(full.validate().unwrap(), small.validate().unwrap());
         let none = JoinedPool::from_table(with("exec = \"none\"")).unwrap();
         assert_eq!(none.exec, None);
+    }
+
+    /// The registry's pool that [`MINIMAL`] builds, as `PoolConfig`'s own builders make it:
+    /// the shape, the whole-node class with the dedicated settings and the platform's path
+    /// grace, the wire's timing and the default retention.
+    fn minimal_registry_pool(whole: WholeNodeConfig) -> PoolConfig {
+        let booked = Resources::new(4000, 8_589_934_592, 0, None).unwrap();
+        let id = ProviderId::new("nodes").unwrap();
+        let class = js_types::ResourceClass::whole_node();
+        PoolConfig::new(id, class, Shape::new(booked, BTreeMap::new()), 3)
+            .with_memory_percent(MemoryPercent::FULL)
+            .with_whole_node(whole)
+            .unwrap()
+            .with_timing(DEFAULT_HEARTBEAT_INTERVAL_MS, DEFAULT_GRACE_MS)
+            .unwrap()
+            .with_lost_retention(DEFAULT_LOST_RETENTION_MS)
+            .unwrap()
+    }
+
+    /// The whole-node settings [`MINIMAL`]'s pool gets unless it sets `prepare_timeout`.
+    fn dedicated() -> WholeNodeConfig {
+        WholeNodeConfig {
+            regain_grace_ms: millis(PATH_GRACE),
+            ..WholeNodeConfig::dedicated(3)
+        }
+    }
+
+    /// Asserts the whole registry pool `validate()` builds for a joined whole-node pool, by
+    /// equality: its whole-node settings (every host may be whole, none kept for ordinary
+    /// work, the path grace, the ten-minute prepare timeout) and its timing (the wire's
+    /// heartbeat and grace, the default retention). It catches a field of the registry's
+    /// pool that drifts from what the table says while `validate()` still succeeds.
+    #[test]
+    fn validate_builds_the_whole_registry_pool_of_a_joined_pool() {
+        let pool = JoinedPool::from_table(with("")).unwrap();
+        assert_eq!(pool.prepare_timeout, None);
+        let built = pool.validate().unwrap();
+        assert_eq!(built, minimal_registry_pool(dedicated()));
+        let whole = built.whole_node().unwrap();
+        assert_eq!(whole.max_whole_node, 3);
+        assert_eq!(whole.keep_for_ordinary, 0);
+        assert_eq!(whole.prepare_timeout_ms, 600_000);
+        assert_eq!(whole.regain_grace_ms, millis(PATH_GRACE));
+        let timed = JoinedPool::from_table(with(
+            "heartbeat_interval = \"10s\"\ngrace = \"1m\"\nlost_retention = \"2h\"",
+        ))
+        .unwrap();
+        let expected = minimal_registry_pool(dedicated())
+            .with_timing(10_000, 60_000)
+            .unwrap()
+            .with_lost_retention(7_200_000)
+            .unwrap();
+        assert_eq!(timed.validate().unwrap(), expected);
+    }
+
+    /// Asserts that `prepare_timeout` on a whole-node joined pool reaches the registry's
+    /// whole-node settings and changes nothing else, by equality with the pool built by
+    /// hand. It catches the key refused as unknown, read and dropped, or the ten minutes
+    /// kept whatever the pool says.
+    #[test]
+    fn the_prepare_timeout_reaches_the_whole_node_settings() {
+        let pool = JoinedPool::from_table(with("prepare_timeout = \"20m\"")).unwrap();
+        assert_eq!(pool.prepare_timeout, Some(Duration::from_secs(1200)));
+        let expected = minimal_registry_pool(WholeNodeConfig {
+            prepare_timeout_ms: 1_200_000,
+            ..dedicated()
+        });
+        assert_eq!(pool.validate().unwrap(), expected);
+    }
+
+    /// Asserts the refusals of `prepare_timeout`, each naming the pool and the key: on a
+    /// class that prepares no host (`gpu-host`, and a class of the operator's own), a zero
+    /// or a word in the table, and a timeout under a millisecond in a pool built by hand.
+    /// It catches a key a pool takes but never uses, and a timeout that rounds to zero and
+    /// so ends every prepare at once.
+    #[test]
+    fn a_prepare_timeout_is_refused_off_a_whole_node_class_or_below_a_millisecond() {
+        for class in ["gpu-host", "box"] {
+            let text = toml::to_string(&with("prepare_timeout = \"20m\""))
+                .unwrap()
+                .replace("whole-node", class);
+            assert_eq!(
+                refused(table(&text)),
+                format!("pool \"nodes\": prepare_timeout: {PREPARES_NOTHING}"),
+                "{class}"
+            );
+        }
+        for value in ["\"0\"", "\"soon\""] {
+            assert_eq!(
+                refused(with(&format!("prepare_timeout = {value}"))),
+                "pool \"nodes\": prepare_timeout: must be a positive duration such as 600s, 10m or 1h",
+                "{value}"
+            );
+        }
+        let mut pool = JoinedPool::from_table(with("")).unwrap();
+        pool.prepare_timeout = Some(Duration::from_micros(999));
+        assert_eq!(
+            pool.validate().unwrap_err().to_string(),
+            "pool \"nodes\": prepare_timeout: prepare_timeout must be at least 1"
+        );
     }
 
     /// `memory_schedulable_percent` on a joined pool is read into `memory_percent` (all of

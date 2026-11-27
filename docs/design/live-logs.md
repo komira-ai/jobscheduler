@@ -1,8 +1,8 @@
 # Live logs: a job's output in an object store
 
-Status: **Planned, partly built.** Built so far: the wire fields of section 7 (`js-agent-wire`, with the per-run capture file cap
-in `js-contain`); the object-store client (`js-logstore`); the `[logs]` table of section 6, which the server reads and checks at
-start; the mint of section 4 (`js-logmint`) and its second kind for a store with no STS, the prefix grant of section 4.1
+Status: **Built for `crun` and macOS native jobs; later work is open (section 10).** Built: the wire fields of section 7 (`js-agent-wire`,
+with the per-run capture file cap in `js-contain`); the object-store client (`js-logstore`); the `[logs]` table of section 6, which the
+server reads and checks at start; the mint of section 4 (`js-logmint`) and its second kind for a store with no STS, the prefix grant of section 4.1
 (`js-logmint` and its signer in `js-logstore`); the server's side of sections 3.1, 4 and 5 (`js-lease-server`'s `logs` module: one
 credential per uploading host, minted, delivered and renewed in heartbeat replies, a sink in each start, and the stream lengths
 stored with the result); the agent's uploader (`js-agent/src/logs`, with the progress record of 3.5) of a `crun` job and of a
@@ -62,12 +62,27 @@ it.
 **The host's prefix.** Let `H` be the host segment: `js-` and the first 32 hex digits of the SHA-256 of the host's agent id (an agent
 id may be longer than a key segment should be, or hold characters a key refuses; `H` never does). The host's prefix is `prefix/H/`, or
 just `H/` when the prefix is empty. Two hosts' prefixes have the same length and differ, so neither is a prefix of the other. The
-configured prefix is at most 476 bytes, so that `prefix/H` fits the 512 bytes below; a longer one is refused at start. Both minting
+configured prefix is at most 476 bytes, so that `prefix/H` fits the 512 bytes below; a longer one is refused at start. A job's later
+attempts (below) add a segment of 65 bytes with its `/`: a prefix of at most 411 bytes leaves room for every attempt. Both minting
 kinds scope a host's credential to exactly the host's prefix (section 4), so a host can write only its own jobs' logs.
 
 **The job's prefix.** Let `P = prefix/H/job_id/`, or just `H/job_id/` when the prefix is empty, where `H` is the segment of the host
-the job's start is sent to. The job record keeps that host (`host`) after the job ends, so the reader builds `P` from the record; a
-job put back in the queue loses its host and gets a new one, and so a new `P`, with its next start. The job id is the service's (`js-jobs`
+the job's start is sent to. This is the prefix of a job's first attempt, so a job without a retry policy, and every log written before
+attempts, reads as it did. The job record keeps that host (`host`) after the job ends, so the reader builds `P` from the record; a
+job put back in the queue before a run loses its host and gets a new one, and so a new `P`, with its next start.
+
+**A later attempt's prefix.** A job with a retry policy runs again as a new attempt
+([job-retry-and-completion-callback.md](job-retry-and-completion-callback.md), section 3.8). Attempt `n ≥ 2` gets
+`P = prefix/H/S/job_id/` (`H/S/job_id/` when the prefix is empty), where `H` is that attempt's host and `S` is the 64 lower-case hex
+digits of the SHA-256 of `job_id "/" n`. A job id is at most 63 bytes, so `S` is never a job id: no job's attempt-1 prefix holds another
+job's later attempt, and two later attempts differ in `S`. The last segment is still the job id, which the agent requires, and the key
+stays under the host's prefix, which the host's credential covers, so no agent changes. The reader builds an earlier attempt's `P` from
+its host and number, taken from `Job.attempt_history` or, once the history dropped it, from the attempt's own row.
+
+**The length of a later attempt's prefix.** The base the layout takes (`prefix/H` for attempt 1, `prefix/H/S` for a later one) is at
+most 512 bytes. For a configured prefix of 412 to 476 bytes, an attempt after the first runs without live logs, as a job whose id is
+too long does: its start carries no `log_sink`, and the reader answers `no-live-logs` for it. The server logs a warning at start for
+such a prefix and refuses nothing. The job id is the service's (`js-jobs`
 `JobId`: 1 to 63 bytes of `[A-Za-z0-9._-]`). The agent wire checks an id more loosely (up to 128 bytes, `MAX_ID_LEN`) but requires a
 leading letter or digit, so a job's prefix is built only for an id of 1 to 63 bytes of that alphabet whose first byte is a letter or a
 digit. Such an id never holds `/` and is never `.` or `..`. A job whose id does not qualify runs without live logs (its start carries
@@ -477,6 +492,7 @@ without them means what it meant before.
 | `from_offset` | u64 | 0 | The offset of the first byte wanted. |
 | `max_bytes` | optional u32 | 262,144 (256 KiB) | At most 1,048,576 (1 MiB): a larger value is cut to it; 0 is refused. |
 | `follow` | bool | `false` | Wait for new bytes, up to `MAX_FOLLOW_WAIT`, when none are there yet. |
+| `attempt` | optional u32 | the job's current attempt (`Job.attempt`) | The attempt whose output to read, from 1; read only with a stream. 0 is refused. |
 
 **Response** (`GetLogsResponse`, beside `state` and the tails):
 
@@ -496,11 +512,17 @@ without them means what it meant before.
   running job's output asks for a stream.
 - **With a stream** the server reads the object store as 3.6 says and answers one page. With `follow` and no new bytes, it waits,
   listing the stream again every `FOLLOW_POLL` (1 s), until new bytes appear, the job ends, or `MAX_FOLLOW_WAIT` (20 s) passes, and then
-  answers (an empty `data` at the cap). A job that has ended answers at once. A queued job answers an empty page with `eof` false.
+  answers (an empty `data` at the cap). A job that has ended answers at once. A queued job answers an empty page with `eof` false, when the attempt asked for is the current
+  one and has not run.
+- **An attempt.** The current attempt is read as above. An earlier attempt, and the current one while the job waits for its next attempt
+  or after it ended in that wait, is read as a job that ended without a result: it is ended for that read, so no follow waits for it,
+  and its length is where its stored bytes end. Each attempt's output is kept apart, so an attempt reads only its own bytes. Without
+  `attempt` the current attempt is chosen once, so a follow keeps reading it.
 - **Refusals:** an unknown job, or one whose record was swept, is `NOT_FOUND` `unknown-job` whatever the store still holds (D4); a
   server with `sink = "none"` is `FAILED_PRECONDITION` `no-log-sink`; a job whose start carried no sink (the server had none when it was
   placed, its host did not report `log-upload`, or its id does not qualify) is `FAILED_PRECONDITION` `no-live-logs`, and its tails are
-  in `GetResult`; `max_bytes` 0 is `INVALID_ARGUMENT`; a `from_offset` past the length of an ended job's stream is `OUT_OF_RANGE`; more
+  in `GetResult`; `max_bytes` 0 is `INVALID_ARGUMENT`; a `from_offset` past the length of an ended job's stream, or an `attempt` above the job's current one, is `OUT_OF_RANGE` (`field: fromOffset` or
+  `field: attempt`); an `attempt` of 0 is `INVALID_ARGUMENT` `field: attempt`; more
   than `max_follow` calls already waiting is `RESOURCE_EXHAUSTED` `too-many-follows`, which a client retries after a backoff; a store the
   server cannot read is `UNAVAILABLE` `log-store-unavailable`.
 
@@ -530,14 +552,12 @@ The capture files are on the host's disk, in the lease directories: at the defau
 
 ## 10. Where it is built, and what is later or open
 
-**Crates (Planned, step 31 of design section 12.1).** `js-logstore`, the object-store client (put, delete, list, ranged get, Signature Version
+**Crates (Built, step 31 of design section 12.1).** `js-logstore`, the object-store client (put, delete, list, ranged get, Signature Version
 4, `MAX_PUT_BYTES`); `js-logmint`, the `AssumeRole` call and the session policy; the log fields in `js-agent-wire` and `GetLogs`'s in
 `js-proto` (with its comment rewritten to the answers of section 8); the
 agent's `logs` module (the uploader, the progress record, the end); the server's `job_api/logs` (the reader, the long poll) and its host
-credential table. Each new crate is added to `layers.toml` in the change that adds it. Built so far: `js-logstore`, `js-logmint`, the log
-fields in `js-agent-wire`, the agent's `logs` module (the uploader, the progress record, the end) for `crun` and the native
-runtime (3.7), the server's host credential table, and `GetLogs`'s fields in `js-proto` with the server's `job_api/logs` (the reader
-and the long poll). Besides the fakes, CI's `test` job runs the whole path with STS minting against an S3-compatible store with STS
+credential table. Each new crate is added to `layers.toml` in the change that adds it. All of these are built, for `crun` and the native runtime (3.7).
+Besides the fakes, CI's `test` job runs the whole path with STS minting against an S3-compatible store with STS
 (MinIO, in a service container pinned by digest; `js_testkit::s3`): the client and the minter, the agent's uploader (a renewal through
 the heartbeat, a failed request, a restart from the progress record) and `GetLogs` over what the uploader put.
 
@@ -554,7 +574,8 @@ same host prefix. Checking grants in tierstore, and testing against the real tie
   only in a job start (`JobStartSpec.log_sink`), which the server sends only to a host that reports `per-job`, and a native agent does
   not report it yet: until it does, a native agent holds the host's credential and its runs (lease starts) carry no sink.
 - **Who deletes old logs (D4).** The scheduler never deletes log objects: retention of finals, and of the chunks of streams that had no
-  final, is the operator's bucket lifecycle rule on the prefix, which must be at least `--job-retention`. A job whose record was swept
+  final, is the operator's bucket lifecycle rule on the prefix, which must be at least `--job-retention`. Every attempt's objects sit under the
+  same configured prefix, so the one rule covers them. A job whose record was swept
   answers `unknown-job`. Whether the scheduler should delete instead is design section 13, question 26.
 - **Live log coverage.** A stream is uploaded live only up to the local cap; bytes past it are a gap. The alternatives are a larger
   default, or a capture that frees what was uploaded so the cap bounds the backlog rather than the stream. Design section 13, question 27.

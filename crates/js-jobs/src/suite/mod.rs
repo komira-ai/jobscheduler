@@ -46,6 +46,7 @@ mod duties;
 mod failures;
 mod guarded;
 mod held;
+mod host_live;
 mod host_rows;
 mod hosts;
 mod idempotency;
@@ -87,6 +88,7 @@ pub use duties::*;
 pub use failures::*;
 pub use guarded::*;
 pub use held::*;
+pub use host_live::*;
 pub use host_rows::*;
 pub use hosts::*;
 pub use idempotency::*;
@@ -122,6 +124,7 @@ where
     a_retry_by_another_client_keeps_the_first(backend);
     the_same_job_is_found_by_value_not_by_bytes(backend);
     a_concurrent_insert_answers_from_the_job_it_made(backend);
+    a_read_handed_to_the_insert_is_not_made_again(backend);
     minted_ids_do_not_repeat_across_instances(backend);
     a_minted_id_collision_is_retried(backend);
     minting_stops_at_its_budget(backend);
@@ -147,6 +150,7 @@ where
     the_unclean_hosts_follow_the_rows_between_calls(backend);
     a_beat_of_an_old_epoch_after_a_newer_hello_is_stale(backend);
     a_beat_through_one_server_is_read_by_another(backend);
+    each_hello_writes_its_own_agent_version(backend);
     heard_at_is_the_store_clock_and_judges_live_nodes(backend);
     a_node_row_without_the_optional_fields_reads_and_keeps_a_later_builds_field(backend);
     forget_node_deletes_only_the_row_it_read_and_a_failed_write_changes_nothing(backend);
@@ -284,6 +288,8 @@ where
     an_admission_that_loses_the_pool_row_counts_again(backend);
     pool_admits_judges_as_the_admission_does_and_writes_nothing(backend);
     two_servers_admitting_hosts_one_slot_from_the_cap_admit_exactly_one(backend);
+    a_hello_of_a_live_host_is_refused_unless_it_names_the_rows_process(backend);
+    a_hello_that_loses_the_row_to_another_process_is_refused(backend);
     live_nodes_reusing_takes_only_rows_at_the_stored_version(backend);
     nodes_lists_every_readable_row_heard_or_not(backend);
     forget_silent_nodes_deletes_only_the_rows_that_hold_nothing(backend);
@@ -345,6 +351,7 @@ macro_rules! job_store_tests {
             a_retry_by_another_client_keeps_the_first,
             the_same_job_is_found_by_value_not_by_bytes,
             a_concurrent_insert_answers_from_the_job_it_made,
+            a_read_handed_to_the_insert_is_not_made_again,
             minted_ids_do_not_repeat_across_instances,
             a_minted_id_collision_is_retried,
             minting_stops_at_its_budget,
@@ -370,6 +377,7 @@ macro_rules! job_store_tests {
             the_unclean_hosts_follow_the_rows_between_calls,
             a_beat_of_an_old_epoch_after_a_newer_hello_is_stale,
             a_beat_through_one_server_is_read_by_another,
+            each_hello_writes_its_own_agent_version,
             heard_at_is_the_store_clock_and_judges_live_nodes,
             a_node_row_without_the_optional_fields_reads_and_keeps_a_later_builds_field,
             forget_node_deletes_only_the_row_it_read_and_a_failed_write_changes_nothing,
@@ -507,6 +515,8 @@ macro_rules! job_store_tests {
             an_admission_that_loses_the_pool_row_counts_again,
             pool_admits_judges_as_the_admission_does_and_writes_nothing,
             two_servers_admitting_hosts_one_slot_from_the_cap_admit_exactly_one,
+            a_hello_of_a_live_host_is_refused_unless_it_names_the_rows_process,
+            a_hello_that_loses_the_row_to_another_process_is_refused,
             live_nodes_reusing_takes_only_rows_at_the_stored_version,
             nodes_lists_every_readable_row_heard_or_not,
             forget_silent_nodes_deletes_only_the_rows_that_hold_nothing,
@@ -914,6 +924,7 @@ pub(crate) fn output() -> Output {
             cpu_throttle: None,
             cpu_pressure_some: None,
             cpu_peak: None,
+            peak_swap_bytes: None,
         }),
         logs: None,
         cpu_series: Some(series()),

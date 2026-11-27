@@ -43,6 +43,8 @@ struct State {
     removed: Vec<String>,
     /// Each removal that has begun, by digest, in order, done or still held.
     removing: Vec<String>,
+    /// How many times the store was listed.
+    listed: usize,
 }
 
 /// A store in memory. An image fetched takes [`SIZE`] bytes, or what `sizes` says.
@@ -60,6 +62,8 @@ struct Fake {
     unmeasured: bool,
     /// When set, a removal waits for a permit before it is done.
     hold: Option<Arc<tokio::sync::Semaphore>>,
+    /// When set, an ensure waits for a permit before it is done.
+    ensure_hold: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 impl Fake {
@@ -84,6 +88,10 @@ impl Fake {
     fn removing(&self) -> Vec<String> {
         self.state.lock().unwrap().removing.clone()
     }
+
+    fn listed(&self) -> usize {
+        self.state.lock().unwrap().listed
+    }
 }
 
 #[async_trait]
@@ -91,6 +99,9 @@ impl Store for Fake {
     async fn ensure(&self, image: &PinnedImage) -> Result<(), String> {
         if self.unfetchable.contains(&image.digest) {
             return Err(format!("no registry for {image}"));
+        }
+        if let Some(hold) = &self.ensure_hold {
+            hold.acquire().await.unwrap().forget();
         }
         let mut state = self.state.lock().unwrap();
         if !state.held.contains_key(&image.digest) {
@@ -110,10 +121,11 @@ impl Store for Fake {
     }
 
     fn held(&self) -> io::Result<Vec<(String, u64)>> {
+        let mut state = self.state.lock().unwrap();
+        state.listed += 1;
         if self.unlisted {
             return Err(io::Error::other("unlistable"));
         }
-        let state = self.state.lock().unwrap();
         Ok(state.held.iter().map(|(d, n)| (d.clone(), *n)).collect())
     }
 
@@ -578,28 +590,123 @@ fn the_use_of_an_image_the_book_lacks_waits_for_the_turn() {
     assert!(fake.held().contains(&digest('x')));
 }
 
-/// Proves a start's use of an image before the budget has listed the store takes the full
-/// path: the store is listed and the image counted. Without a budget it is the store's
-/// own ensure: the image is fetched and nothing is counted.
+/// Proves a start's use of an image before the budget has listed the store takes no turn
+/// and does not list the store, and that its use is kept: with A and B in the store and
+/// room for two, the use of A completes at its first poll, the store is not listed and
+/// nothing is counted; the listing that follows counts both, and the pull of C evicts B,
+/// not A (A, used during the listing, is newer than B, which was only there). A lease of
+/// an image the book does not count once it is loaded counts nothing. Without a budget the
+/// use is the store's own ensure: the image is fetched and nothing is counted.
 #[test]
-fn the_use_of_an_image_before_the_book_is_loaded_loads_it_and_without_a_budget_only_ensures() {
-    let fake = Arc::new(Fake::with_held(&[('a', SIZE)]));
-    let images = Arc::new(images(&fake, 3 * SIZE, &[]).0);
+fn the_use_of_an_image_before_the_store_is_listed_takes_no_turn_and_keeps_its_use() {
+    let fake = Arc::new(Fake::with_held(&[('a', SIZE), ('b', SIZE)]));
+    let (images, told) = images(&fake, 2 * SIZE, &[]);
+    let images = Arc::new(images);
     assert_eq!(
         poll_once(&mut using_held(&images, 'a')),
         Poll::Ready(Ok(()))
     );
-    assert_eq!(images.counted(), SIZE);
-    assert!(fake.fetched().is_empty());
+    assert_eq!(fake.listed(), 0);
+    assert_eq!(images.counted(), 0);
+    count_held(&images);
+    assert_eq!(fake.listed(), 1);
+    assert_eq!(images.counted(), 2 * SIZE);
+    images.lease("js-host-other", &digest('z'));
+    assert_eq!(images.counted(), 2 * SIZE);
+    pull(&images, 'c').unwrap();
+    assert_eq!(*told.lock().unwrap(), [digest('b')]);
+    assert_eq!(fake.held(), [digest('a'), digest('c')]);
+    assert_eq!(fake.listed(), 1, "the pull does not list the store again");
 
     let open = Arc::new(Images::new(
         Arc::clone(&fake) as Arc<dyn Store>,
         None,
         BTreeSet::new(),
     ));
-    assert_eq!(poll_once(&mut using_held(&open, 'b')), Poll::Ready(Ok(())));
-    assert_eq!(fake.fetched(), [digest('b')]);
+    assert_eq!(poll_once(&mut using_held(&open, 'd')), Poll::Ready(Ok(())));
+    assert_eq!(fake.fetched(), [digest('c'), digest('d')]);
     assert_eq!(open.counted(), 0);
+}
+
+/// Proves a start's use, before the listing, of an image the store lacks fetches it and
+/// leaves its count to the listing: the store is empty, the use of X fetches it without a
+/// listing, and the listing then counts X.
+#[test]
+fn the_use_of_an_image_the_store_lacks_before_the_listing_fetches_it_for_the_listing() {
+    let fake = Arc::new(Fake::default());
+    let images = Arc::new(images(&fake, 2 * SIZE, &[]).0);
+    assert_eq!(
+        poll_once(&mut using_held(&images, 'x')),
+        Poll::Ready(Ok(()))
+    );
+    assert_eq!(fake.fetched(), [digest('x')]);
+    assert_eq!(fake.listed(), 0);
+    count_held(&images);
+    assert_eq!(images.counted(), SIZE);
+}
+
+/// Proves a start's use whose listing ended while the store fetched the image is counted
+/// as a pull counts it: the use of X waits in its fetch, the listing (of a store without
+/// X) ends meanwhile, and once the fetch is let go the use completes and X is counted
+/// beside A, though the listing did not see it.
+#[test]
+fn the_use_of_an_image_whose_listing_ended_during_its_fetch_is_counted_as_a_pull() {
+    let hold = Arc::new(tokio::sync::Semaphore::new(0));
+    let mut fake = Fake::with_held(&[('a', SIZE)]);
+    fake.ensure_hold = Some(Arc::clone(&hold));
+    let fake = Arc::new(fake);
+    let images = Arc::new(images(&fake, 3 * SIZE, &[]).0);
+    let mut using = using_held(&images, 'x');
+    assert!(poll_once(&mut using).is_pending());
+    count_held(&images);
+    assert_eq!(images.counted(), SIZE);
+    hold.add_permits(1);
+    assert_eq!(poll_once(&mut using), Poll::Ready(Ok(())));
+    assert_eq!(fake.fetched(), [digest('x')]);
+    assert_eq!(images.counted(), 2 * SIZE);
+    assert_eq!(fake.listed(), 1);
+}
+
+/// Proves the count when the runtime starts: without a budget it lists nothing; a store
+/// that cannot be listed counts nothing and leaves the book unloaded, so a start's use
+/// still takes no turn, and the first pull lists the store again (and fails with it).
+#[test]
+fn the_count_at_the_start_lists_nothing_without_a_budget_and_a_failed_one_is_tried_again() {
+    let fake = Arc::new(Fake::with_held(&[('a', SIZE)]));
+    let open = Arc::new(Images::new(
+        Arc::clone(&fake) as Arc<dyn Store>,
+        None,
+        BTreeSet::new(),
+    ));
+    count_held(&open);
+    assert_eq!(fake.listed(), 0);
+
+    let mut unlisted = Fake::with_held(&[('a', SIZE)]);
+    unlisted.unlisted = true;
+    let unlisted = Arc::new(unlisted);
+    let images = Arc::new(images(&unlisted, 3 * SIZE, &[]).0);
+    count_held(&images);
+    assert_eq!(unlisted.listed(), 1);
+    assert_eq!(images.counted(), 0);
+    assert_eq!(
+        poll_once(&mut using_held(&images, 'a')),
+        Poll::Ready(Ok(()))
+    );
+    assert_eq!(unlisted.listed(), 1);
+    assert_eq!(
+        pull(&images, 'b'),
+        Err("the image budget: reading the image store: unlistable".to_owned())
+    );
+    assert_eq!(unlisted.listed(), 2);
+}
+
+/// The count of the images the store holds that the runtime runs when it starts, run to
+/// its end on a runtime of the test's.
+fn count_held(images: &Arc<Images>) {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    rt.block_on(images.count_held(&rt)).unwrap();
 }
 
 /// Proves a held image the store cannot ensure fails the use with the store's words: B is

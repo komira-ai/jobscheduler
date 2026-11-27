@@ -14,10 +14,10 @@
 //!    both `INVALID_ARGUMENT` with the `Refusal` detail (400, `field`
 //!    `spec.wallLimitSeconds`). Every check runs before the job's id is looked up, so a
 //!    retry of a job the ceiling now refuses is refused, not answered from the job. A job
-//!    that asks for a completion callback is refused `callback-not-enabled` unless the context
-//!    takes callbacks ([`Ctx::accepting_callbacks`], which only a test sets until the release
-//!    that accepts one); one that does has its URL's form, an address literal in its URL
-//!    against the address rule, and its key's length checked, and the key is never repeated.
+//!    that asks for a completion callback has its URL's form, an address literal in its URL
+//!    against the context's address rule ([`Ctx::judging_callbacks_by`]; the server gives the
+//!    cluster's), and its key's length checked, and the key is never repeated. A retry policy
+//!    has its backoff cap checked against its initial wait.
 //! 2. **Idempotency.** For a job with an id, the tables are read first. An existing job with
 //!    the same id and the same job (every field but the priority, compared on the decoded
 //!    job [`js_jobs::JobSpec`]; for an ended job, whose files hold only their SHA-256, each
@@ -41,10 +41,13 @@
 //!    refusal `no-capable-host` (`FAILED_PRECONDITION`, 422) and nothing is recorded: no row,
 //!    no id.
 //! 4. **Commit before the answer.** The job is inserted as queued in one transaction of the
-//!    store ([`js_jobs::JobStore::insert_queued`]), with the name of the client the bearer
-//!    layer named (never a value of the request); only after it returns is the answer
-//!    built, from the record it returns, with its callback's status when it has one (read in
-//!    the same call of the tables; a status that cannot be read is left out). A store that fails is `INTERNAL` with the message
+//!    store ([`js_jobs::JobStore::insert_queued_after_get`], handed what step 2 read, so the
+//!    id is read once), with the name of the client the bearer layer named (never a value of
+//!    the request) and the store's clock as that transaction reads it as its submit time;
+//!    only after it returns is the answer built, from the record it returns, with its
+//!    callback's status when it has one (read in the same call of the tables; a status that
+//!    cannot be read is left out). A job step 2 found is answered from what step 2 read. A
+//!    store that fails is `INTERNAL` with the message
 //!    `state-write-failed` (500 `state-write-failed`), and a store too busy to take the call
 //!    ([`js_state::StoreError::Unavailable`]: no connection came free, or a statement waited
 //!    past its limit) is `UNAVAILABLE` with the same message (503 `state-write-failed`), which
@@ -55,7 +58,9 @@
 //! 5. **Poke the poller, answer queued.** When the service places jobs ([`Ctx::poking`]), the
 //!    call tells the placer of the job the commit recorded ([`Agents::note_inserted`]: when the
 //!    commit is the only write of the job store since the placer last read the job tables, the
-//!    next pass takes the job added to those tables rather than reading all four again), pokes
+//!    next pass takes the job added to those tables rather than reading all four again; while a
+//!    pass holds those tables, reading them again, the call does not wait for it and tells the
+//!    placer nothing, and that pass or the next reads the job from the store), pokes
 //!    the placement poller ([`crate::poller::Poller::poke`]) and answers. It never places the
 //!    job itself: the answer for a new job is the job as the commit recorded it, `queued` with
 //!    no host, always. The poller's pass, the tick's or a heartbeat's places it
@@ -68,6 +73,18 @@
 //!
 //! Every read and write of the job tables runs on the pool for blocking calls
 //! ([`JobApi::on_tables`]), so a slow store holds up this call and not the server's workers.
+//!
+//! # Phases timed
+//!
+//! When the service places jobs ([`Ctx::poking`]) the call times each phase it reaches, by the
+//! meter of the agent side ([`Agents::meter`]), whatever the phase's answer, and counts it in
+//! `js_submit_phase_seconds` ([`SubmitPhase`]): `validation` (step 1), `get` (step 2's read,
+//! its wait for a place on the blocking pool included, for a job with an id), `admission`
+//! (step 3, for a job not yet held), `insert-checkout` and `insert-transaction` (step 4's
+//! insert: the time it spent getting connections of the store's pool, and the rest; the read
+//! of a callback's status after it, and the wait for a place on the blocking pool before it,
+//! are in neither) and `note-inserted` (step 5's [`Agents::note_inserted`]). A context that does
+//! not poke times nothing.
 //!
 //! The call calls no provider.
 
@@ -86,8 +103,9 @@ use super::JobApi;
 use super::fleet::Handle;
 use super::read::{statuses, view};
 use super::roles::Caller;
-use super::validate::{self, Accepts, Fault};
+use super::validate::{self, Fault};
 use crate::agents::Agents;
+use crate::metrics::{Meter, SubmitPhase};
 use crate::util::blocking;
 
 /// The ceiling on a job's wall limit when `--max-job-wall` (or `server.max_job_wall`) is not
@@ -128,16 +146,14 @@ struct Served {
     /// The agent side whose placement poller each recorded job pokes (step 5); `None`: the call
     /// only commits, and the tick's pass finds the queued row.
     poking: Option<Handle<Agents>>,
-    /// The fields this release refuses until it accepts them, of which it takes these: none,
-    /// but in tests (`Ctx::accepting_retry`).
-    accepts: Accepts,
-    /// The address rule a job's callback is judged by (step 1); `None`: the call refuses a job
-    /// that asks for a callback (`callback-not-enabled`), until the release that accepts one.
-    callbacks: Option<Handle<AddressRule>>,
+    /// The address rule an address literal in a job's callback URL is judged by (step 1).
+    callbacks: Handle<AddressRule>,
 }
 
 impl Ctx {
-    /// The context of a served submit: jobs up to `ceiling`, admitted by `admission`.
+    /// The context of a served submit: jobs up to `ceiling`, admitted by `admission`, a
+    /// callback's address judged by the rule that knows no cluster address
+    /// ([`Ctx::judging_callbacks_by`] gives another).
     #[must_use]
     pub(crate) fn served(ceiling: Duration, admission: Arc<dyn Admission>) -> Ctx {
         Ctx {
@@ -147,8 +163,7 @@ impl Ctx {
                 ceiling,
                 admission: Handle(admission),
                 poking: None,
-                accepts: Accepts::default(),
-                callbacks: None,
+                callbacks: Handle(Arc::new(AddressRule::new([]))),
             }),
         }
     }
@@ -166,13 +181,12 @@ impl Ctx {
 }
 
 impl Ctx {
-    /// This context, taking a job's completion callback and judging its address by `rule` (step
-    /// 1 of the module docs), where it refused every one. Nothing for a context that is not
-    /// served.
+    /// This context, judging the address of a job's completion callback by `rule` (step 1 of
+    /// the module docs). Nothing for a context that is not served.
     #[must_use]
-    pub(crate) fn accepting_callbacks(mut self, rule: AddressRule) -> Ctx {
+    pub(crate) fn judging_callbacks_by(mut self, rule: AddressRule) -> Ctx {
         self.served = self.served.map(|served| Served {
-            callbacks: Some(Handle(Arc::new(rule))),
+            callbacks: Handle(Arc::new(rule)),
             ..served
         });
         self
@@ -184,17 +198,6 @@ impl Ctx {
     #[cfg(test)]
     pub(super) fn marked(mark: u32) -> Ctx {
         Ctx { mark, served: None }
-    }
-
-    /// This context, taking a job's retry policy: what the release that accepts a policy will
-    /// do, which tests do now. Nothing for a context that is not served.
-    #[cfg(test)]
-    pub(super) fn accepting_retry(mut self) -> Ctx {
-        self.served = self.served.map(|served| Served {
-            accepts: Accepts { retry: true },
-            ..served
-        });
-        self
     }
 
     /// The ceiling of a served context; `None` when the call is not served.
@@ -281,31 +284,31 @@ pub(super) async fn submit_job(
     };
     let client = Some(caller.name.clone());
     let request = request.into_inner();
-    let callbacks = served.callbacks.as_ref().map(|rule| rule.0.as_ref());
-    let valid = validate::job(
-        request.spec.as_ref(),
-        served.ceiling,
-        served.accepts,
-        callbacks,
-    )
-    .map_err(refused)?;
-    let held = match valid.id.clone() {
-        Some(id) => api
-            .on_tables(move |jobs| jobs.get_job(&id))
-            .await
-            .map_err(not_written())?
-            .is_some(),
-        None => false,
+    let meter = match &served.poking {
+        Some(Handle(agents)) => agents.meter().clone(),
+        None => Meter::off().clone(),
+    };
+    let rule = served.callbacks.0.as_ref();
+    let (valid, took) = meter.timed(|| validate::job(request.spec.as_ref(), served.ceiling, rule));
+    meter.sink().submit_phase(SubmitPhase::Validation, took);
+    let valid = valid.map_err(refused)?;
+    let stored = match valid.id.clone() {
+        Some(id) => {
+            let read = api.on_tables(move |jobs| jobs.get_job(&id));
+            let (found, took) = meter.timed_await(read).await;
+            meter.sink().submit_phase(SubmitPhase::Get, took);
+            found.map_err(not_written())?
+        }
+        None => None,
     };
     let isolation = valid.spec.constraints.isolation;
-    if !held
-        && !served
-            .admission
-            .0
-            .can_ever_serve(&valid.wanted, isolation)
-            .await
-    {
-        return Err(no_capable_host());
+    if stored.is_none() {
+        let asked = served.admission.0.can_ever_serve(&valid.wanted, isolation);
+        let (servable, took) = meter.timed_await(asked).await;
+        meter.sink().submit_phase(SubmitPhase::Admission, took);
+        if !servable {
+            return Err(no_capable_host());
+        }
     }
     let new = NewJob {
         id: valid.id,
@@ -313,9 +316,18 @@ pub(super) async fn submit_job(
         priority: valid.priority,
         client,
     };
+    let inserting = meter.clone();
     let (inserted, statuses) = api
         .on_tables(move |jobs| {
-            let inserted = jobs.insert_queued(new)?;
+            let (inserted, took, checkout) =
+                inserting.timed_checkouts(|| jobs.insert_queued_after_get(new, stored));
+            let sink = inserting.sink();
+            sink.submit_phase(SubmitPhase::InsertCheckout, checkout);
+            sink.submit_phase(
+                SubmitPhase::InsertTransaction,
+                took.saturating_sub(checkout),
+            );
+            let inserted = inserted?;
             // The job is recorded: a status that cannot be read is left out of the answer.
             let asked = statuses::asking([&inserted.record]);
             let statuses = statuses::read(jobs, &asked).unwrap_or_default();
@@ -327,7 +339,7 @@ pub(super) async fn submit_job(
         return Err(id_conflict());
     }
     let record = match &served.poking {
-        Some(Handle(agents)) => poke(agents, inserted).await,
+        Some(Handle(agents)) => poke(agents, &meter, inserted).await,
         None => inserted.record,
     };
     let status = statuses.get(&record.id).map(view::callback_status);
@@ -340,13 +352,17 @@ pub(super) async fn submit_job(
 }
 
 /// Tells the placer of `agents` of the job just recorded, `inserted`, so that the next pass
-/// does not read the job tables again for it ([`Agents::note_inserted`]), and pokes the
-/// placement poller ([`crate::poller::Poller::poke`]); the job's record as the commit recorded
-/// it. The poke comes after the commit, so the pass it brings reads the job.
-async fn poke(agents: &Arc<Agents>, inserted: Inserted) -> JobRecord {
-    let noting = Arc::clone(agents);
+/// does not read the job tables again for it ([`Agents::note_inserted`], which never waits for
+/// a pass that holds them), timed by `meter`, and pokes the placement poller
+/// ([`crate::poller::Poller::poke`]); the job's record as the commit recorded it. The poke comes
+/// after the commit, so the pass it brings reads the job.
+async fn poke(agents: &Arc<Agents>, meter: &Meter, inserted: Inserted) -> JobRecord {
+    let (noting, meter) = (Arc::clone(agents), meter.clone());
     let record = blocking(move || {
-        noting.note_inserted(&inserted);
+        let ((), took) = meter.timed(|| {
+            noting.note_inserted(&inserted);
+        });
+        meter.sink().submit_phase(SubmitPhase::NoteInserted, took);
         inserted.record
     })
     .await;
@@ -365,3 +381,11 @@ mod poke_tests;
 #[cfg(test)]
 #[path = "submit_rows_tests.rs"]
 mod rows_tests;
+
+#[cfg(test)]
+#[path = "submit_reads_tests.rs"]
+mod reads_tests;
+
+#[cfg(test)]
+#[path = "submit_phase_tests.rs"]
+mod phase_tests;

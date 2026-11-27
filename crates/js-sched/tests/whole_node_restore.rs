@@ -217,9 +217,10 @@ fn restored_deadlines_and_marks_meet_the_caps() {
 /// Catches: `unplace_keeping_queued_at` undoing what it should refuse, or losing a
 /// restored history. A lease the scheduler does not hold, a running one and one already
 /// undone are refused with nothing changed. A request restored as queued at 20 s with a
-/// bar, granted `b` and undone at 110 s, keeps both: it marks the busy
-/// `a` at once (110 s is past 20 s plus `drain_after`, 30 s), its bar stands,
-/// `b`'s booking is released, and the grant fed back late starts nothing.
+/// bar, granted `b` and undone at 110 s, keeps both: it marks the busy `a` in the round
+/// at 110 s (a `drain_after` of 30 s, deprecated, is not read), its bar stands, its queue
+/// time is still 20 s (the queue's oldest age is 90 s), `b`'s booking is released, and the
+/// grant fed back late starts nothing.
 #[test]
 fn a_requeue_keeps_the_restored_history_and_refuses_what_unplace_refuses() {
     let mut f = farm(cfg(30_000, 2));
@@ -262,6 +263,7 @@ fn a_requeue_keeps_the_restored_history_and_refuses_what_unplace_refuses() {
     let mark = f.s.whole_mark(op).expect("marked");
     assert_eq!((&mark.worker, mark.made), (&w("a"), t(110_000)));
     assert_eq!(f.s.whole_barred(op, t(110_000)), bars);
+    assert_eq!(f.s.queue_snapshot().oldest_age, Some(secs(90)));
 }
 
 /// Catches: a bar that a pinned probe walks past, a bar on a held operation that ends its
@@ -385,4 +387,43 @@ fn a_restored_mark_bounds_backfill_by_its_own_tail() {
     assert_eq!(job(&mut f, secs(300)), Some(w("a")));
     let kept = f.s.whole_mark(whole).map(|m| m.tail_end);
     assert_eq!(kept, Some(Some(t(400_000))));
+}
+
+/// Catches: a mark dropped because the caps refuse it a move. Two marks are restored, on
+/// `a` and `b` (both busy until 600 s), at `max_draining = 1`, as after a restart with a
+/// lower cap: each counts the other against the cap, so neither may move. `c`'s tail
+/// (60 s) is the shortest, yet both marks stay where they were restored, and neither
+/// request waits on the cap.
+#[test]
+fn a_mark_the_caps_refuse_a_move_stays_on_its_worker() {
+    let mut f = farm(WholeNodeConfig {
+        max_draining: 1,
+        ..cfg(0, 2)
+    });
+    for (name, wall) in [("a", MAX_WALL), ("b", MAX_WALL), ("c", 60)] {
+        f.worker(name);
+        f.lease_on(name, secs(wall));
+    }
+    let first = f.submit_whole(Some(secs(MAX_WALL)));
+    let second = f.submit_whole(Some(secs(MAX_WALL)));
+    assert_eq!(
+        f.s.restore_whole(restored(first, Some(mark_on("a")))),
+        Ok(())
+    );
+    assert_eq!(
+        f.s.restore_whole(restored(second, Some(mark_on("b")))),
+        Ok(())
+    );
+    for ms in [0, 10_000] {
+        f.at(ms);
+        f.beat();
+        assert!(f.grants().is_empty());
+        let on = |op| f.s.whole_mark(op).map(|m| (m.worker.clone(), m.made));
+        assert_eq!(on(first), Some((w("a"), t(0))));
+        assert_eq!(on(second), Some((w("b"), t(0))));
+        assert_eq!(
+            (f.s.whole_wait(first), f.s.whole_wait(second)),
+            (None, None)
+        );
+    }
 }

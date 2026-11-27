@@ -28,11 +28,6 @@ pub(crate) struct JobListen {
     pub(crate) addr: SocketAddr,
     /// `--job-listen`, or `server.job_listen` when the configuration file gave it.
     pub(crate) flag: &'static str,
-    /// Whether `SubmitJob` refuses a job that asks for a completion callback
-    /// (`callback-not-enabled`): always, from the flags and the file alike, until the release
-    /// that accepts one (`docs/design/job-retry-and-completion-callback.md`, section 7). No flag
-    /// or key sets it; a test of the job service builds it off.
-    pub(crate) callback_refused: bool,
 }
 
 /// The address the metrics are served on (`--metrics-listen`, `server.metrics_listen`), and
@@ -118,11 +113,7 @@ pub(crate) fn clear_text(addr: SocketAddr, tls: bool, pair: &str) -> Option<Stri
 /// Where `--job-listen` serves the job service, named by the flag; `None` when it is off.
 pub(super) fn job_listen(cli: &Cli) -> Option<JobListen> {
     let flag = "--job-listen";
-    cli.job_listen.map(|addr| JobListen {
-        addr,
-        flag,
-        callback_refused: true,
-    })
+    cli.job_listen.map(|addr| JobListen { addr, flag })
 }
 
 /// The job store's setup when `--job-listen` turns the job service on: named by the flag,

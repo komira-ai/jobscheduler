@@ -182,8 +182,13 @@ the page cache that the non-file peak leaves out) held it there, so its peak doe
 having reached its booking (`Run::limit_hits`), and the estimator takes it as a held sample of the larger of its peak and its booking,
 sized with the same margin: its class books a step above the booking next (`1.2 x` the booking plus 128 MiB, rounded up to 256 MiB),
 steps again while its runs keep reaching it, and stays there once they fit. A held sample is kept below the host, so the step stops
-at the whole host (`over-cap`). A run's swap peak, which the agent reports, is not in the job record, so a run that a host short of
-memory squeezed into swap is not yet counted. A run under a second gives a memory sample (its series' peak when a poll sampled it, else the
+at the whole host (`over-cap`). A success that a host short of memory pushed into swap held more than its peak shows: the
+agent reports the group's `memory.swap.peak` with the run's usage, the job record keeps it (`ResourceUsage::peak_swap_bytes`), and
+the estimator takes a run whose swap peak is above 0 as a held sample of its peak plus its swap peak (two high-water marks that need not fall at
+the same moment, so the most it can have held at once, which errs toward booking more; with its booking as a floor
+when it also reached its booking), kept below the host like any held sample (`js_sizing::Run::swap_peak_bytes`). A run with no
+swap peak reported (an agent from before the field, a kernel that does not count a group's swap, every run recorded before it)
+counts as having swapped nothing. A run under a second gives a memory sample (its series' peak when a poll sampled it, else the
 group's `memory.peak`, exact whatever the run's length) and no CPU sample: the placer hands the estimator a one-second wall and no CPU time for it. A run's CPU sample is its mean: its CPU time over its wall time, which every run
 reports. The most cores its group used over any five seconds of the run, which the agent measures from the group's `cpu.stat` every
 second and reports beside the CPU time (`cpu_peak`), is reported with the run's usage and is not the sample: the placer does not teach it to the estimator, so it books no class (7.11). A run's sample is a measurement only when its own contention is low and nothing held it: its
@@ -199,11 +204,20 @@ runs that used less.
 
 **Where the history lives.** Nowhere new: after its start the server teaches the estimator every ended job its job store still holds
 (seven days by default), in the order they ended, with what each allocation booked; then each pass teaches the jobs it sees freed.
-The start does not wait for it: it reads the live allocations alone, so what it reads does not grow with the history, and the server
-answers ready; the ended jobs are read a page at a time while it serves. Until they are taught, a job that books nothing is sized from
-what is taught so far (at a start, its fallback's or the cold size), and the runs the passes free are held and taught after the ended
-jobs, so the history once taught is the one a server that read everything before its first pass holds. A failed read is logged and
-every class starts cold, the held runs still taught. Each job's usage history row now carries what its host reported
+The start does not wait for it: it reads the live allocations and the runs of the newest freed allocations (at most ten pages of a
+thousand, newest free first, by the index of the frees), so what it reads does not grow with the history, and the server answers ready;
+the ended jobs are read after that, a page of the freed allocations at a time while it serves, each page one scan of the index and
+batched reads of its allocation and job rows (before, one read per job). The runs the passes free meanwhile are held and taught after
+the ended jobs, which are taught in the order they ended, so the history once taught is the one a server that read everything before
+its first pass holds. Until then a job that books nothing is sized from an interim history: the history as the read began (nothing, at
+a start), taught the newest runs the start read, in the order they ended, and each run as a pass frees it (a run learned before any
+host is known once one is), and dropped once the ended jobs are taught. So from the first pass after a start a job books its class's
+recent runs, else its fallback's, else its client's, and the cold size only for a class, a fallback and a client with no run among
+them, not for the minutes a read of seven days of jobs takes. The history itself is still taught only once its whole read ends:
+a server stopped before that (released again minutes later) starts from the newest runs again, never from the history it read.
+Teaching the history page by page as the read goes, and a snapshot of the learned sizes in the state store loaded at the start, are
+not built. A failed read of the newest runs is logged and the interim history keeps those read before it; a failed read of the
+ended jobs is logged and the history is taught the held runs alone. Each job's usage history row now carries what its host reported
 (`used`: the peak memory, and the CPU per second of its run as both the highest and the mean), so `GetUsage` can set what a host
 used beside what it booked, and carries the name of the job's class as it is as its `class` (the history key, else the `size-class`
 label, else `run-` and the 16 hex digits of the class's shape), and that name as its `profile` too when it is a profile key (1 to

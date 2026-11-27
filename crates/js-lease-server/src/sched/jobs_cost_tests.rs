@@ -1,10 +1,11 @@
 //! What the pass over the queued jobs costs a heartbeat ([`Agents::place_jobs_after_beat`]):
 //! the job table reads it makes and the placement rounds it runs, counted per heartbeat. A
 //! heartbeat that changes nothing the pass depends on reads no job table and runs no round;
-//! one that frees a host reads the queued rows and no other job's, and runs a round only for
-//! a job that has a host left to try; and each thing a pass depends on brings the next pass
-//! back: a job submitted or cancelled, a host that says hello or goes lost, a write of the
-//! last pass that failed, and what pass 2 told. The tick's pass always runs.
+//! one that frees a host takes the rows that changed from the store's feed, reading no queued
+//! job's row, and runs a round only for a job that has a host left to try; and each thing a
+//! pass depends on brings the next pass back: a job submitted or cancelled, a host that says
+//! hello or goes lost, a write of the last pass that failed, and what pass 2 told. The tick's
+//! pass always runs.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -174,13 +175,15 @@ async fn a_heartbeat_that_changes_nothing_reads_no_job_table_and_runs_no_round()
 }
 
 /// Asserts what the heartbeats that end and then free a host's job cost. The beat that reports
-/// the result ends the job, whose allocation still books the host: the pass reads the queued
-/// rows and not the row of the job running on the other host, and runs no round: the ended
-/// job's allocation still books its host, and no host has room for a queued job. The next beat,
-/// which no longer lists the job, frees it: the pass places the first queued job on the freed
-/// host in one round, and runs none for the next job, since the host is booked full again.
+/// the result ends the job, whose allocation moves to releasing and still books the host: the
+/// pass runs, reads neither the queued rows nor the row of the job running on the other host,
+/// and runs no round: the ended job's allocation still books its host, and no host has room for
+/// a queued job. The next beat, which no longer lists the job, frees it: the pass, which takes
+/// the free from the store's feed and reads no queued job's row, places the first queued job on
+/// the freed host in one round, and runs none for the next job, since the host is booked full
+/// again.
 #[tokio::test]
-async fn a_heartbeat_that_frees_a_host_reads_only_the_queued_rows_and_places_the_first_on_it() {
+async fn a_heartbeat_that_frees_a_host_reads_no_queued_row_and_places_the_first_on_it() {
     let mut settled = Settled::new("cost_free").await;
     let ending = settled.running_on("host-a");
     let other = settled.running_on("host-b");
@@ -206,8 +209,9 @@ async fn a_heartbeat_that_frees_a_host_reads_only_the_queued_rows_and_places_the
         "the other host's job was read: {freed:?}"
     );
     for id in &QUEUED[2..] {
-        assert!(freed.read_job(id), "{id} was not read: {freed:?}");
+        assert!(!freed.read_job(id), "{id} was read: {freed:?}");
     }
+    assert_eq!(freed.table_scans(), Vec::<&str>::new(), "{freed:?}");
     assert_eq!((freed.rounds, freed.skipped), (1, 0), "{freed:?}");
     assert_eq!(settled.state("d-fourth"), JobState::Queued);
 }
@@ -233,16 +237,21 @@ async fn the_tick_runs_its_pass_and_reads_no_table_that_did_not_change() {
 }
 
 /// Asserts that a job submitted, or a queued job cancelled, brings back the next heartbeat's
-/// pass: a submit of a job at a higher priority reads the queue again and walks it, the new
-/// job first; a cancel of it reads the queue again; then the next beat is quiet again.
+/// pass: a submit of a job at a higher priority is taken from the store's feed (no table is
+/// scanned, and no queued row read but the new job's own, to write its first queue status) and
+/// the queue walked, the new job first; a cancel of it brings the pass back the same way; then
+/// the next beat is quiet again.
 #[tokio::test]
 async fn a_submit_or_a_cancel_brings_the_next_heartbeats_pass_back() {
     let settled = Settled::new("cost_submit").await;
     let urgent = queue(&settled.rig, "urgent", 5);
     let (_, submitted) = settled.beat(&settled.a).await;
     assert_eq!(submitted.skipped, 0, "{submitted:?}");
-    assert!(submitted.table_scans().contains(&"idx/job/queued/"));
+    assert_eq!(submitted.table_scans(), Vec::<&str>::new(), "{submitted:?}");
     assert!(submitted.read_job("urgent"), "{submitted:?}");
+    for id in &QUEUED[2..] {
+        assert!(!submitted.read_job(id), "{id} was read: {submitted:?}");
+    }
     // The new job is first and waits for both hosts, which are booked full: no round runs.
     assert_eq!(submitted.rounds, 0, "{submitted:?}");
     settled.rig.jobs.request_cancel(&urgent).unwrap();
@@ -295,6 +304,8 @@ async fn a_failed_placement_or_what_pass_2_told_brings_the_next_heartbeats_pass_
     let (_, again) = settled.beat(&settled.b).await;
     assert_eq!(again.skipped, 0, "{again:?}");
     assert_eq!(settled.state("c-third"), JobState::Placed);
+    // The pass's own placement changed the tables it read (the job left the queue and booked a
+    // host), so the first beat's pass runs once more; the second is skipped.
     let (_, quiet) = settled.counted(settled.quiet_beats()).await;
     assert_eq!(
         quiet.skipped, 1,
@@ -310,4 +321,143 @@ async fn a_failed_placement_or_what_pass_2_told_brings_the_next_heartbeats_pass_
     assert_eq!(told.skipped, 0, "{told:?}");
     let after = settled.rig.job(&fourth).queue.events().len();
     assert_eq!(after, before + 1, "the launch was not written");
+}
+
+/// How many hosts the full farm has, as many as the rig's pool admits: each runs one job that
+/// takes all its cores.
+const FARM_HOSTS: usize = 4;
+
+/// How many jobs wait behind the farm's running ones: a long queue, kept short enough that the
+/// test's setup (a pass that writes every queued job's first status) stays quick.
+const FARM_QUEUED: usize = 1_000;
+
+/// How many rounds of heartbeats, each host beating once a round, the full farm is watched for.
+const FARM_ROUNDS: u64 = 3;
+
+/// The id of the `n`-th job of the full farm: the first [`FARM_HOSTS`] run, the rest wait.
+fn farm_job(n: usize) -> String {
+    format!("job-{n:05}")
+}
+
+/// The load reading the agent of a full host sends with its `seq`-th heartbeat: every core
+/// busy over the five seconds since the last one, so it moves with every beat.
+fn full_host_load(seq: u64) -> js_agent_wire::NodeLoad {
+    js_agent_wire::NodeLoad {
+        seq,
+        mono_usec: seq * 5_000_000,
+        cpu_usage_usec: seq * 40_000_000 + seq % 7,
+        host_cpu_usec: None,
+        host_cpu_pressure_some_usec: None,
+        working_set_bytes: (6 << 30) + seq * 4096,
+        active_file_bytes: 0,
+        host_nonfile_bytes: None,
+        actions_cpu_limited: true,
+        covered: Vec::new(),
+        clocks: Vec::new(),
+        minutes: Vec::new(),
+        second_cpu_millis: Vec::new(),
+        second_cpu_pressure_some_permille: Vec::new(),
+        dropped: Default::default(),
+    }
+}
+
+/// The reply to a heartbeat of `agent`'s host that carries the load reading `seq`, and what it
+/// cost with the turn of the placement poller it pokes, as [`Settled::beat`] counts it.
+async fn beat_with_load(rig: &Rig, agent: &FakeAgent, seq: u64) -> (HeartbeatReply, Counted) {
+    let placer = rig.agents.placer.as_ref().unwrap();
+    let (rounds, skipped) = (placer.job_rounds(), placer.passes_skipped());
+    let _ = rig.store.take_reads();
+    let mut sent = rig.heartbeat(agent, None);
+    sent.load = Some(full_host_load(seq));
+    let body = axum::body::Bytes::from(serde_json::to_vec(&sent).unwrap());
+    let reply = rig.beat_body(body, None).await.unwrap();
+    crate::poller::poked_pass(&rig.agents).await;
+    let counted = Counted {
+        reads: rig.store.take_reads(),
+        rounds: placer.job_rounds() - rounds,
+        skipped: placer.passes_skipped() - skipped,
+    };
+    (reply, counted)
+}
+
+/// Asserts the change itself, in the shape of a saturated farm: four hosts, each running a job
+/// that takes all its cores, and a thousand jobs queued behind them. Every round, each host
+/// beats with a load reading that differs from its last (a busy host's does), and the tick's
+/// job pass claims its duty, a commit that changes no row of the tables a pass reads. None of
+/// those heartbeats runs a pass over the queue: none reads a queued job's row or scans a job
+/// table, and none runs a placement round. Then a host's job ends and its allocation is freed,
+/// which is what can place a queued job: the beat that frees it runs the pass, which places the
+/// first queued job there in one round and still reads no queued job's row. It catches a pass
+/// over the whole queue for every heartbeat of a full farm (each reading or each unrelated
+/// commit bringing it back) and a pass that reads every queued row again after each commit.
+#[tokio::test]
+async fn a_full_farm_with_a_long_queue_runs_no_pass_until_a_host_frees() {
+    let mut rig = clocked_rig("cost_full_farm", true, JobLimits::default());
+    let hosts: Vec<String> = (0..FARM_HOSTS).map(|n| format!("host-{n:02}")).collect();
+    for host in &hosts {
+        rig.register(host, true);
+    }
+    for n in 0..FARM_HOSTS + FARM_QUEUED {
+        queue(&rig, &farm_job(n), 0);
+    }
+    rig.tick();
+    let mut agents: Vec<FakeAgent> = hosts.iter().map(|host| FakeAgent::new(host)).collect();
+    for agent in &mut agents {
+        agent.take(&rig.beat(agent).await.unwrap());
+        let held: Vec<String> = agent.listing().into_iter().map(|j| j.job_id).collect();
+        assert_eq!(held.len(), 1, "each host was started one job: {held:?}");
+        agent.run(&held[0]);
+        agent.take(&rig.beat(agent).await.unwrap());
+    }
+    for agent in &agents {
+        rig.beat(agent).await.unwrap();
+    }
+    let queued: Vec<String> = (FARM_HOSTS..FARM_HOSTS + FARM_QUEUED)
+        .map(|n| format!("job/{}", farm_job(n)))
+        .collect();
+    let queued_rows = |counted: &Counted| {
+        let read = |read: &&Read| matches!(read, Read::Get(key) if queued.contains(key));
+        counted.reads.iter().filter(read).count()
+    };
+
+    let mut beats = Vec::new();
+    for round in 1..=FARM_ROUNDS {
+        rig.advance(Duration::from_secs(5));
+        rig.agents.job_pass();
+        for agent in &agents {
+            beats.push(beat_with_load(&rig, agent, round).await.1);
+        }
+    }
+    let passes = beats.iter().filter(|beat| beat.skipped == 0).count();
+    let rows: usize = beats.iter().map(queued_rows).sum();
+    let scans: usize = beats.iter().map(|beat| beat.table_scans().len()).sum();
+    let rounds: u64 = beats.iter().map(|beat| beat.rounds).sum();
+    assert_eq!(
+        (passes, rows, scans, rounds),
+        (0, 0, 0, 0),
+        "of {} heartbeats with a load reading on a full farm with {FARM_QUEUED} jobs queued, \
+         {passes} ran a pass over the queue, reading {rows} queued rows and scanning {scans} \
+         job tables, and running {rounds} placement rounds",
+        beats.len()
+    );
+
+    let ending = farm_job(0);
+    let first = agents
+        .iter()
+        .position(|agent| agent.holds(&ending))
+        .unwrap();
+    agents[first].end(&ending, Outcome::Succeeded, Some(0));
+    let (reply, ended) = beat_with_load(&rig, &agents[first], FARM_ROUNDS + 1).await;
+    assert_eq!(ended.skipped, 0, "the end moves the allocation: {ended:?}");
+    agents[first].take(&reply);
+    let (_, freed) = beat_with_load(&rig, &agents[first], FARM_ROUNDS + 2).await;
+    let head = JobId::parse(&farm_job(FARM_HOSTS)).unwrap();
+    assert_eq!(rig.job(&head).state, JobState::Placed, "{freed:?}");
+    assert_eq!(
+        (freed.skipped, freed.rounds, queued_rows(&freed)),
+        (0, 1, 0),
+        "the free ran the pass, which placed the first queued job reading no queued row"
+    );
+    let behind = JobId::parse(&farm_job(FARM_HOSTS + 1)).unwrap();
+    assert_eq!(rig.job(&behind).state, JobState::Queued);
 }

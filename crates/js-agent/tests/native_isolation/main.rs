@@ -72,7 +72,10 @@
 //! own accounts use), that nothing uses, with `--ignored --test-threads=1 --nocapture`. The
 //! supervisor is the `js-agent` binary next to the test binary when there is one, else the
 //! one cargo built for it (`CARGO_BIN_EXE_js-agent`). See the `js-agent-native-isolation-test`
-//! workflow. Never run it on a production host.
+//! workflow. `cargo xtask mac-root-tests --only native_isolation` sets all of that up and runs it;
+//! the release's beta stage runs it that way on a hosted Mac of its own
+//! (`.github/workflows/js-agent-native-isolation.yml`) and reports the verdict. Never run it on a
+//! production host.
 //!
 //! One difference from production: the runtime here has the directory of this test binary as
 //! an extra tool root (the runs execute the binary), a read/exec allowance the agent
@@ -246,6 +249,7 @@ fn runtime(fixture: &Fixture, exe: &Path) -> NativeRuntime {
             denied(&fixture.root.join("scratch")),
         ],
         mount_roots: Vec::new(),
+        host_ports: Vec::new(),
         read_model: ReadModel::Open,
         journal: fixture.root.join("native-leases"),
         max_file_bytes: 1 << 30,
@@ -388,8 +392,8 @@ fn child_run(
         Ok(Ran {
             id: id.clone(),
             lines: parse_lines(&stdout)?,
-            uid: look::parse_uid(&stdout),
-            pids: look::parse_pids(&stdout),
+            uid: look::parse_uid(&lines::own_text(&stdout)),
+            pids: look::parse_pids(&lines::own_text(&stdout)),
         })
     })
 }

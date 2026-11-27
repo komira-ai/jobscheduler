@@ -24,9 +24,13 @@
 //!   `all-passed`.
 //!
 //! [`cases`] applies one edit at a time to the real files and asserts the exact lines refused.
+//! [`script`] runs the held script that turns the queue on,
+//! `tools/held/merge-queue/merge_queue.sh`, against a stand-in `gh`: the ruleset it writes is
+//! the one of `docs/ci.md`.
 
 mod cases;
 mod check;
+mod script;
 #[allow(
     dead_code,
     reason = "shared with tests/apt_workflow; this target reads only part of it"

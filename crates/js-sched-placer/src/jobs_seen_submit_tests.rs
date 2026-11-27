@@ -7,18 +7,25 @@
 //! [`SchedPlacer::note_inserted`]: crate::place::SchedPlacer::note_inserted
 //! [`Interfere::take_reads`]: js_jobs::interfere::Interfere::take_reads
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread;
 use std::time::Duration;
 
 use js_jobs::interfere::{Interfere, Read};
-use js_jobs::{Inserted, JobId, JobStore, Needs, NewJob, RandomIds};
+use js_jobs::{Booked, Inserted, JobId, JobState, JobStore, MarkRecord, Needs, NewJob, RandomIds};
 use js_state::fake::Fake;
+use js_state::{Cond, Store, Txn};
 use js_types::HostId;
+use js_types::cordon::Asker;
 
 use super::super::super::jobs::{JobStarts, PassMetrics};
 use super::super::super::rig::spec_of;
 use super::super::{Kept, Tables, TablesFrom};
 use super::{Offered, Rig};
+
+/// A bound a note that does not wait never meets: only a note that waits for the pass's read
+/// reaches it, and the test then fails instead of hanging on the pass it holds.
+const LONG: Duration = Duration::from_secs(60);
 
 /// The prefix of the one scan of each job table a pass takes: the queued jobs, the live
 /// allocations, the marks and the cordons.
@@ -99,7 +106,7 @@ impl Rig {
 
     /// The job tables of a read now, as the placer keeps them (no pass runs).
     fn kept(&self, told: &Told) -> Arc<Tables> {
-        self.placer.tables(&self.tables.jobs, told).unwrap()
+        self.placer.tables(&self.tables.jobs, told).unwrap().0
     }
 
     /// The reads of the job tables since the last call.
@@ -112,7 +119,8 @@ impl Rig {
 /// Asserts the change itself: a pass has read the tables with an empty queue and written
 /// nothing; a submit records a job, which is added to the tables kept; the next pass places
 /// it and reads none of the four tables, telling its metrics it took them as kept with a
-/// submit's job added. A pass after the placement, the pass's own write, reads them again.
+/// submit's job added. A pass after the placement, the pass's own write, brings them up to
+/// date from the store's feed.
 /// It catches a submit whose job is not added (the pass reads all four tables again) and a
 /// pass that misses the job added (it places nothing).
 #[test]
@@ -131,9 +139,10 @@ fn a_submit_into_an_empty_queue_is_placed_with_no_read_of_the_tables() {
     assert_eq!(rig.tick(&both, &told), Vec::<JobId>::new());
     assert_eq!(
         told.take(),
-        [TablesFrom::Store],
+        [TablesFrom::Changed],
         "after the placement's write"
     );
+    assert_eq!(rig.table_reads(), [], "the feed told the placement");
     assert_eq!(rig.tick(&both, &told), Vec::<JobId>::new());
     assert_eq!(told.take(), [TablesFrom::Kept], "with no write since");
 }
@@ -164,9 +173,10 @@ fn the_tables_with_a_job_added_are_those_a_read_gives() {
 
 /// Asserts that a write of the job store between the read of the tables and a submit's commit
 /// keeps the job from being added, whether it is a write of this server (another job queued)
-/// or of another server over the same store: the next pass reads the four tables again and
-/// places both jobs. It catches tables kept past a write that is not the submit's, which would
-/// leave the other job out of the pass (and, for a placement, its booking).
+/// or of another server over the same store: the next pass brings the tables up to date from
+/// the store's feed, reading none of the four, and places both jobs. It catches tables kept
+/// past a write that is not the submit's, which would leave the other job out of the pass
+/// (and, for a placement, its booking).
 #[test]
 fn a_write_between_the_read_and_the_submit_brings_the_read_back() {
     for elsewhere in [false, true] {
@@ -181,15 +191,16 @@ fn a_write_between_the_read_and_the_submit_brings_the_read_back() {
         assert!(!rig.placer.note_inserted(&fresh), "elsewhere: {elsewhere}");
         let _ = rig.table_reads();
         assert_eq!(rig.tick(&both, &told), [id("between"), id("fresh")]);
-        assert_eq!(rig.table_reads().len(), TABLE_SCANS.len(), "{elsewhere}");
-        assert_eq!(told.take(), [TablesFrom::Store, TablesFrom::Store]);
+        assert_eq!(rig.table_reads(), [], "{elsewhere}");
+        assert_eq!(told.take(), [TablesFrom::Store, TablesFrom::Changed]);
     }
 }
 
-/// Asserts that a write after a submit's job was added brings the read back too: the kept
-/// tables, at the reading just after the submit's commit, no longer match, so the pass reads
-/// the four tables and places both jobs. It catches kept tables that stop judging later writes
-/// once a job was added to them.
+/// Asserts that a write after a submit's job was added brings the tables up to date too: the
+/// kept tables, at the reading just after the submit's commit, no longer match, so the pass
+/// follows the store's feed (which tells the added job again, and the later one) and places
+/// both jobs, each once. It catches kept tables that stop judging later writes once a job was
+/// added to them.
 #[test]
 fn a_write_after_a_job_was_added_brings_the_read_back() {
     let rig = Rig::new();
@@ -201,8 +212,8 @@ fn a_write_after_a_job_was_added_brings_the_read_back() {
     rig.submit("later", 1000, 0);
     let _ = rig.table_reads();
     assert_eq!(rig.tick(&both, &told), [id("fresh"), id("later")]);
-    assert_eq!(rig.table_reads().len(), TABLE_SCANS.len());
-    assert_eq!(told.take(), [TablesFrom::Store, TablesFrom::Store]);
+    assert_eq!(rig.table_reads(), []);
+    assert_eq!(told.take(), [TablesFrom::Store, TablesFrom::Changed]);
 }
 
 /// Asserts that two submits in a row are both added, the second to the tables the first left,
@@ -249,7 +260,8 @@ fn a_submit_before_any_read_or_a_retry_adds_nothing() {
 /// Asserts that a job the tables already hold is held once: the pass read where the writes
 /// stood before the submit's commit and the tables after it (the reads are not one snapshot),
 /// so the job is in them when the submit adds it. It catches a job added twice, which a pass
-/// would try to place twice.
+/// would try to place twice. Tables kept with no head of the store to follow are read in full
+/// after the next write.
 #[test]
 fn a_job_the_read_already_holds_is_held_once() {
     let rig = Rig::new();
@@ -262,6 +274,7 @@ fn a_job_the_read_already_holds_is_held_once() {
     };
     let kept = Kept {
         at,
+        head: None,
         tables: Arc::new(tables),
         added: false,
     };
@@ -270,4 +283,266 @@ fn a_job_the_read_already_holds_is_held_once() {
     let added = rig.kept(&told);
     assert_eq!(added.queued, rig.tables.jobs.queued().unwrap());
     assert_eq!(added.queued.len(), 1);
+    // Those tables follow no head of the store: after the next write they are read in full.
+    rig.submit("unfollowed", 64_000, 0);
+    let read = rig.kept(&told);
+    assert_eq!(read.queued, rig.tables.jobs.queued().unwrap());
+    assert_eq!(told.take(), [TablesFrom::Submitted, TablesFrom::Store]);
+}
+
+/// A share of one core of a host, as a placement books it.
+fn one_core() -> Booked {
+    Booked::Shape {
+        cpu_millis: 1000,
+        memory_bytes: 1 << 30,
+        disk_bytes: 0,
+        accelerators: 0,
+    }
+}
+
+fn host(name: &str) -> HostId {
+    HostId::new(name).unwrap()
+}
+
+impl Rig {
+    /// The job tables taken now, with the count of the changes of what they hold.
+    fn taken(&self, told: &Told) -> (Arc<Tables>, u64) {
+        self.placer.tables(&self.tables.jobs, told).unwrap()
+    }
+
+    /// Asserts that `tables` hold what a read of the four tables gives now: the queued jobs,
+    /// the live allocations and the marks as read, and a cordon for each host the store holds
+    /// one for.
+    #[track_caller]
+    fn holds_what_a_read_gives(&self, tables: &Tables) {
+        let jobs = &self.tables.jobs;
+        assert_eq!(tables.queued, jobs.queued().unwrap(), "the queued jobs");
+        assert_eq!(
+            tables.live,
+            jobs.live_allocations().unwrap(),
+            "the live allocations"
+        );
+        assert_eq!(tables.marks, jobs.marks().unwrap(), "the marks");
+        let cordoned: Vec<HostId> = jobs.cordons().unwrap().into_keys().collect();
+        let held: Vec<HostId> = tables.cordons.keys().cloned().collect();
+        assert_eq!(held, cordoned, "the cordons");
+    }
+}
+
+/// Asserts the change itself: tables read once and then brought up to date from the store's
+/// feed, through submits at three priorities, a placement and the free of another, a cancel, a
+/// whole-host job's mark and a cordon, hold what a read of the four tables gives, and only the
+/// marks and the cordons were read again, once each, after a mark or a cordon changed. It
+/// catches tables followed from the feed that miss a job that entered or left the queue, keep a
+/// freed allocation's room, or keep a mark or a cordon past its change.
+#[test]
+fn the_tables_followed_from_the_feed_are_those_a_read_gives() {
+    let rig = Rig::new();
+    let told = Told::default();
+    let never = 64_000;
+    rig.submit("placed", never, 0);
+    rig.submit("freed", never, 0);
+    rig.tables
+        .jobs
+        .place(&id("freed"), host("a"), one_core())
+        .unwrap();
+    let _ = rig.taken(&told);
+    assert_eq!(told.take(), [TablesFrom::Store]);
+    let _ = rig.table_reads();
+
+    rig.submit("low", never, -1);
+    rig.submit("high", never, 2);
+    rig.submit("cancelled", never, 0);
+    rig.tables.jobs.request_cancel(&id("cancelled")).unwrap();
+    rig.tables
+        .jobs
+        .place(&id("placed"), host("b"), one_core())
+        .unwrap();
+    rig.tables
+        .jobs
+        .free(&id("freed"), js_jobs::EndReason::Exited)
+        .unwrap();
+    let (followed, _) = rig.taken(&told);
+    assert_eq!(told.take(), [TablesFrom::Changed]);
+    assert_eq!(rig.table_reads(), [], "no table was read again");
+    rig.holds_what_a_read_gives(&followed);
+    let order: Vec<String> = followed
+        .queued
+        .iter()
+        .map(|job| job.id.to_string())
+        .collect();
+    assert_eq!(order, ["high", "low"]);
+
+    let whole = rig.tables.submit_with("whole", Needs::WholeHost, 600);
+    let at = rig.tables.jobs.now().unwrap();
+    let mark = MarkRecord::new(whole.id, host("a"), at, at);
+    rig.tables.jobs.put_mark(mark).unwrap();
+    let lease = Duration::from_secs(600);
+    rig.tables
+        .jobs
+        .cordon_host(&host("b"), lease, &Asker::Unnamed)
+        .unwrap();
+    let _ = rig.table_reads();
+    let (followed, _) = rig.taken(&told);
+    assert_eq!(told.take(), [TablesFrom::Changed]);
+    let reads = rig.table_reads();
+    let scans = [
+        Read::Scan("mark/".to_owned()),
+        Read::Scan("cordon/".to_owned()),
+    ];
+    assert_eq!(reads, scans, "the marks and the cordons, read again");
+    rig.holds_what_a_read_gives(&followed);
+}
+
+/// Asserts what counts as a change of the tables, which brings back a pass after a heartbeat:
+/// a commit that changes no row the tables hold (a host's node row, a duty's row, a placed
+/// job's move to starting) is followed from the feed and counts none, and a queued job's write
+/// counts one; the tables kept with no commit since count none either. It catches a pass after
+/// every heartbeat of a busy farm, whose running jobs' rows change all the time, and a pass
+/// skipped after a queued job changed.
+#[test]
+fn a_commit_that_changes_no_row_the_tables_hold_counts_no_change() {
+    let rig = Rig::new();
+    let told = Told::default();
+    rig.submit("running", 64_000, 0);
+    let jobs = &rig.tables.jobs;
+    jobs.place(&id("running"), host("a"), one_core()).unwrap();
+    let (_, read) = rig.taken(&told);
+    let node = Txn::new().put("node/a", b"row".to_vec(), Cond::Any);
+    rig.tables.store.txn(node).unwrap().unwrap();
+    jobs.claim_duty("job-pass", Duration::from_secs(5)).unwrap();
+    jobs.transition(&id("running"), JobState::Placed, JobState::Starting)
+        .unwrap();
+    let (_, quiet) = rig.taken(&told);
+    assert_eq!(quiet, read, "no row the tables hold changed");
+    let (_, kept) = rig.taken(&told);
+    assert_eq!(kept, read, "nothing was written");
+    assert_eq!(
+        told.take(),
+        [TablesFrom::Store, TablesFrom::Changed, TablesFrom::Kept]
+    );
+    rig.submit("queued", 64_000, 0);
+    let (_, changed) = rig.taken(&told);
+    assert_eq!(changed, read + 1, "a queued job's write");
+}
+
+/// Asserts that where the store's feed cannot tell what changed (it was trimmed past the head
+/// the tables follow), the four tables are read in full, and hold the job submitted since. It
+/// catches tables followed over a gap in the feed, which would miss what the gap held.
+#[test]
+fn where_the_feed_cannot_tell_the_tables_are_read_in_full() {
+    let rig = Rig::new();
+    let both = Offered::both();
+    let told = Told::default();
+    assert_eq!(rig.tick(&both, &told), Vec::<JobId>::new());
+    rig.submit("after-the-gap", 1000, 0);
+    let head = rig.tables.jobs.feed_head().unwrap().unwrap();
+    rig.tables.store.trim_feed(head).unwrap();
+    let _ = rig.table_reads();
+    assert_eq!(rig.tick(&both, &told), [id("after-the-gap")]);
+    assert_eq!(rig.table_reads().len(), TABLE_SCANS.len());
+    assert_eq!(told.take(), [TablesFrom::Store, TablesFrom::Store]);
+}
+
+/// Asserts that a pass whose follow of the store's feed fails a read (of the cordons, after a
+/// cordon changed) keeps nothing: the error is answered, and the next take reads the four
+/// tables in full. It catches tables kept half brought up to date.
+#[test]
+fn a_failed_read_while_following_the_feed_keeps_nothing() {
+    let rig = Rig::new();
+    let told = Told::default();
+    let _ = rig.taken(&told);
+    let lease = Duration::from_secs(600);
+    rig.tables
+        .jobs
+        .cordon_host(&host("c"), lease, &Asker::Unnamed)
+        .unwrap();
+    rig.tables.store.fail_read_after(0);
+    assert!(rig.placer.tables(&rig.tables.jobs, &told).is_err());
+    assert!(rig.placer.tables.lock().unwrap().is_none(), "kept nothing");
+    let _ = rig.table_reads();
+    let _ = rig.taken(&told);
+    assert_eq!(rig.table_reads().len(), TABLE_SCANS.len());
+    assert_eq!(told.take(), [TablesFrom::Store, TablesFrom::Store]);
+}
+
+/// Asserts that tables kept while only the hosts' node rows are written follow the store's head
+/// as it moves: after more node rows than one bringing up to date may read, taken a few hundred
+/// at a time with the tables taken between (as heartbeats come between passes), a submit is
+/// still taken from the feed, not by reading the tables in full. It catches kept tables whose
+/// head stays where they were read, which after a quiet spell of heartbeats read the whole
+/// queue again for the next change.
+#[test]
+fn kept_tables_follow_the_head_past_the_hosts_node_rows() {
+    let rig = Rig::new();
+    let told = Told::default();
+    let _ = rig.taken(&told);
+    let batches = js_jobs::MOST_TABLE_CHANGES / 400 + 1;
+    for batch in 0..batches {
+        let txn = (0..400).fold(Txn::new(), |txn, n| {
+            txn.put(format!("node/host-{batch}-{n}"), b"row".to_vec(), Cond::Any)
+        });
+        rig.tables.store.txn(txn).unwrap().unwrap();
+        let _ = rig.taken(&told);
+    }
+    rig.submit("after-the-beats", 1000, 0);
+    let _ = rig.table_reads();
+    let (followed, _) = rig.taken(&told);
+    assert_eq!(rig.table_reads(), [], "the tables were read in full");
+    assert_eq!(followed.queued.len(), 1);
+    let mut from = vec![TablesFrom::Store];
+    from.extend((0..batches).map(|_| TablesFrom::Kept));
+    from.push(TablesFrom::Changed);
+    assert_eq!(told.take(), from);
+}
+
+/// Asserts that a submit's note made while a pass reads the four tables again (the pass held
+/// on a gate the store holds its scan of the queued jobs, or of the cordons, at) answers `false`
+/// at once, before the gate opens, and adds nothing; the job is placed all the same, by the
+/// held pass when its read of the queue came after the commit, else by the next pass, which
+/// reads the tables from the store as the submit's write makes it. Before, the note waited on
+/// the pass for the whole read, and the submit that made it answered only then. It catches a
+/// note that waits for a pass, and a job left out once its note was skipped.
+#[test]
+fn a_note_made_while_a_pass_reads_the_tables_is_skipped_at_once_and_the_job_is_placed() {
+    for (gate, held_places) in [("idx/job/queued/", true), ("cordon/", false)] {
+        let rig = Rig::new();
+        let both = Offered::both();
+        let told = Told::default();
+        assert_eq!(rig.tick(&both, &told), Vec::<JobId>::new());
+        // A write since that read, so the next pass reads the tables again; it never fits.
+        rig.submit("never", 64_000, 0);
+        // The feed trimmed past that write, so the next pass reads the four tables in full
+        // rather than taking the write from the feed.
+        let head = rig.tables.jobs.feed_head().unwrap().unwrap();
+        rig.tables.store.trim_feed(head).unwrap();
+        let (entered_tx, entered) = mpsc::channel();
+        let (open, opened) = mpsc::channel::<()>();
+        rig.tables.store.before_next_scan(gate, move || {
+            entered_tx.send(()).unwrap();
+            // Until the test opens the gate, or drops it.
+            let _ = opened.recv();
+        });
+        let rig = &rig;
+        let (held, noted) = thread::scope(|scope| {
+            let pass = scope.spawn(|| rig.tick(&both, &told));
+            entered.recv().unwrap();
+            let fresh = rig.submit("fresh", 1000, 0);
+            let (noted_tx, noted) = mpsc::channel();
+            scope.spawn(move || noted_tx.send(rig.placer.note_inserted(&fresh)));
+            let noted = noted.recv_timeout(LONG);
+            drop(open);
+            (pass.join().unwrap(), noted)
+        });
+        assert_eq!(noted, Ok(false), "{gate}: the note waited for the pass");
+        let placed_by_held = held == [id("fresh")];
+        assert_eq!(placed_by_held, held_places, "{gate}: {held:?}");
+        let next = rig.tick(&both, &told);
+        let placed_by_next = next == [id("fresh")];
+        assert_eq!(placed_by_next, !held_places, "{gate}: {next:?}");
+        let from = told.take();
+        let read = [TablesFrom::Store, TablesFrom::Store, TablesFrom::Changed];
+        assert_eq!(from, read, "{gate}: nothing was added");
+        assert_eq!(rig.tables.jobs.queued().unwrap().len(), 1, "{gate}");
+    }
 }

@@ -1,5 +1,5 @@
 //! The HTTP client: one agent per command, bound to one server and one token or one
-//! host identity.
+//! host identity, which keeps its connection to the server between requests.
 
 use std::fmt;
 use std::path::Path;
@@ -21,6 +21,19 @@ use crate::token;
 
 /// The longest a request may take from first byte to last, connect and TLS included.
 pub const REQUEST_LIMIT: Duration = Duration::from_secs(30);
+
+/// The longest a connection is kept idle for the next request. It is above the agent's
+/// heartbeat interval ([`js_agent_wire::DEFAULT_HEARTBEAT_INTERVAL_MS`], 5 s), so the beats of
+/// a host ride one connection, and below the time the lease server keeps an idle connection
+/// open (its `header_timeout`, 10 s by default), so the client lets a connection go before
+/// the server closes it under a request sent on it.
+const IDLE_LIMIT: Duration = Duration::from_secs(8);
+
+// The beats of a host at the default interval find their connection still kept.
+const _: () = assert!(
+    Duration::from_millis(js_agent_wire::DEFAULT_HEARTBEAT_INTERVAL_MS).as_nanos()
+        < IDLE_LIMIT.as_nanos()
+);
 
 /// The largest reply read: the wire's bound on a reply body,
 /// [`js_agent_wire::limits::REPLY_BODY_BUDGET`] (1 MiB). The server's answers are small.
@@ -85,7 +98,7 @@ impl Client {
         let server = ServerUrl::parse(server)?;
         let bearer = token::bearer(token_file)?;
         let roots = roots(server.https, ca_cert)?;
-        let agent = build_agent(server.https, limit, &roots, None);
+        let agent = build_agent(server.https, limit, IDLE_LIMIT, &roots, None);
         Ok(Self {
             auth: Auth::Bearer { agent, bearer },
             server,
@@ -126,7 +139,7 @@ impl Client {
         let roots = roots(server.https, ca_cert)?;
         let https = server.https;
         let live = Live::open(identity.clone(), move |cert| {
-            build_agent(https, limit, &roots, Some(cert))
+            build_agent(https, limit, IDLE_LIMIT, &roots, Some(cert))
         })?;
         Ok(Self {
             auth: Auth::Identity(live),
@@ -261,9 +274,17 @@ fn authorized<B>(request: RequestBuilder<B>, bearer: Option<&str>) -> RequestBui
     }
 }
 
-/// The HTTP agent for one server: no proxy, no redirect, one connection per request, and
-/// TLS with `roots` and, when given, a client certificate.
-fn build_agent(https: bool, limit: Duration, roots: &RootCerts, cert: Option<ClientCert>) -> Agent {
+/// The HTTP agent for one server: no proxy, no redirect, at most one idle connection kept
+/// for less than `idle` (the clients pass [`IDLE_LIMIT`]), and TLS with `roots` and, when
+/// given, a client certificate. The clones of a [`Client`] share the agent and so the
+/// connection.
+fn build_agent(
+    https: bool,
+    limit: Duration,
+    idle: Duration,
+    roots: &RootCerts,
+    cert: Option<ClientCert>,
+) -> Agent {
     let tls = TlsConfig::builder()
         .provider(TlsProvider::Rustls)
         .root_certs(roots.clone())
@@ -276,10 +297,16 @@ fn build_agent(https: bool, limit: Duration, roots: &RootCerts, cert: Option<Cli
         .http_status_as_error(false)
         .https_only(https)
         .timeout_global(Some(limit))
-        // A connection that sat idle between two requests may have been closed by the
-        // other side, and a request sent on a dead one fails; every request opens its
-        // own.
-        .max_idle_connections(0)
+        // One idle connection is kept for the next request, so a host's heartbeats ride one
+        // TCP connection and one TLS handshake. It is let go after `idle`, before the
+        // server closes it. One the server said it would close (`Connection: close`, as on
+        // the answer to its `max_requests`th request) is not kept, and one it closed sooner
+        // (a drain, a restart) is found closed when it is taken from the pool and a new one
+        // is opened instead. Nothing is sent twice: a request that meets the server's close
+        // on the way fails as a request to an unreachable server does.
+        .max_idle_connections(1)
+        .max_idle_connections_per_host(1)
+        .max_idle_age(idle)
         .tls_config(tls)
         .build()
         .into()
@@ -319,7 +346,70 @@ pub(crate) fn pem_roots(path: &Path) -> Result<Vec<CertificateDer<'static>>, Cli
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread::{self, JoinHandle};
+
     use super::*;
+
+    /// A plain http server on 127.0.0.1 that takes `connections` connections one after the
+    /// other and answers every request on each with an empty 200, keeping the connection
+    /// open until the client closes it. It returns how many requests each connection
+    /// carried.
+    fn keep_alive(connections: usize) -> (String, JoinHandle<Vec<usize>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let served = thread::spawn(move || {
+            (0..connections)
+                .map(|_| {
+                    let (mut tcp, _) = listener.accept().unwrap();
+                    let (mut requests, mut head, mut byte) = (0, Vec::new(), [0_u8; 1]);
+                    while tcp.read(&mut byte).unwrap() == 1 {
+                        head.push(byte[0]);
+                        if head.ends_with(b"\r\n\r\n") {
+                            head.clear();
+                            requests += 1;
+                            tcp.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
+                                .unwrap();
+                        }
+                    }
+                    requests
+                })
+                .collect()
+        });
+        (url, served)
+    }
+
+    /// Two requests in a row on an agent built with `idle`; returns the requests each
+    /// connection the server took carried, once the agent is gone.
+    fn two_requests(idle: Duration, connections: usize) -> Vec<usize> {
+        let (url, served) = keep_alive(connections);
+        let agent = build_agent(
+            false,
+            REQUEST_LIMIT,
+            idle,
+            &roots(false, None).unwrap(),
+            None,
+        );
+        for path in ["/a", "/b"] {
+            let reply = agent.get(format!("{url}{path}")).call().unwrap();
+            assert_eq!(reply.status().as_u16(), 200);
+        }
+        drop(agent);
+        served.join().unwrap()
+    }
+
+    /// Asserts that the idle limit is what decides whether the kept connection is used
+    /// again, while the server keeps it open: with [`IDLE_LIMIT`] the second request rides
+    /// the first one's connection, and with a limit of zero, which every kept connection
+    /// has already reached when the next request is made (the clock without a wait), it
+    /// opens a new one. It catches an agent that ignores the limit it is given and keeps a
+    /// connection past it, which the server may have closed by then.
+    #[test]
+    fn a_connection_idle_past_the_limit_is_not_used_again() {
+        assert_eq!(two_requests(IDLE_LIMIT, 1), vec![2]);
+        assert_eq!(two_requests(Duration::ZERO, 2), vec![1, 1]);
+    }
 
     /// Asserts that without `--ca-cert` an `https://` server is checked against the
     /// bundled `webpki-roots` set, not a file and not the platform's store, and that plain

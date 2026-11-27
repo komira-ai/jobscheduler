@@ -7,6 +7,7 @@ mod curve;
 mod life;
 mod median;
 mod memory;
+mod memory_curve;
 mod profile;
 mod profile_check;
 mod recent_peak;
@@ -14,6 +15,7 @@ mod reference;
 mod safety;
 mod stand_in;
 mod storage;
+mod swap;
 mod tail;
 
 use crate::*;

@@ -26,6 +26,7 @@ use crate::error::StartupError;
 use crate::file::Launch;
 use crate::hosts::listing;
 use crate::job_api;
+use crate::job_sizes;
 use crate::listener::{Slots, serve, serve_both};
 use crate::metrics::{self, Meter, Recorder};
 use crate::pool::{Pool, Setup};
@@ -255,7 +256,6 @@ async fn start_held<T: Ticker, C: Ticker, R: Ticker>(
         false => Duration::ZERO,
     };
     let (prepared, listeners) = prepare(config, store, &clock)?;
-    let callbacks = listeners.callbacks();
     let tls = listeners
         .tls
         .as_ref()
@@ -285,7 +285,7 @@ async fn start_held<T: Ticker, C: Ticker, R: Ticker>(
         cached,
     } = open(prepared, &clock)?;
     // The ended jobs are read and taught while the server serves; nothing waits for them.
-    let sizes = teach_sizes(&shared, hold);
+    let sizes = job_sizes::spawn(&shared, &gate, hold);
     shared.agents().set_duty_period(duty_period);
     // The name this server claims dispatch messages by: where it serves agents, and its pid.
     let agents_at = agent_listener.as_ref().map_or(addr, |(_, agents)| *agents);
@@ -333,7 +333,6 @@ async fn start_held<T: Ticker, C: Ticker, R: Ticker>(
         .zip(job_api::from_server(
             &shared,
             listeners.max_job_wall,
-            callbacks,
             log_reads,
         ))
         .map(|((listener, addr), api)| {
@@ -400,19 +399,6 @@ async fn start_held<T: Ticker, C: Ticker, R: Ticker>(
     })
 }
 
-/// Teaches the job sizes the ended jobs the start began to teach ([`crate::job_sizes`]), off
-/// the runtime's threads, once `hold` is sent or dropped (`None`: at once); the task answers
-/// how many taught a class a memory sample.
-fn teach_sizes(shared: &Arc<Shared>, hold: Option<oneshot::Receiver<()>>) -> JoinHandle<usize> {
-    let shared = shared.clone();
-    tokio::spawn(async move {
-        if let Some(hold) = hold {
-            let _ = hold.await;
-        }
-        blocking(move || shared.agents().sizes.teach()).await
-    })
-}
-
 /// What only the listeners of a start read of its configuration.
 pub(crate) struct Listeners {
     listen: SocketAddr,
@@ -429,14 +415,6 @@ pub(crate) struct Listeners {
     tls: Option<TlsFiles>,
     agent_client_ca: Option<PathBuf>,
     limits: Limits,
-}
-
-impl Listeners {
-    /// Whether the job service takes a job's completion callback: never while
-    /// [`JobListen::callback_refused`] holds, which it does until the release that accepts one.
-    pub(crate) fn callbacks(&self) -> bool {
-        self.job_listen.is_some_and(|job| !job.callback_refused)
-    }
 }
 
 /// What a start has built when its listeners are about to be bound: the agent side, the

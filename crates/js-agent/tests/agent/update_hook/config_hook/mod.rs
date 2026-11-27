@@ -9,6 +9,7 @@ mod rig;
 mod steps_cleanup;
 mod steps_cutover;
 mod steps_kept;
+mod steps_kept_descriptor;
 mod steps_rollback;
 mod steps_verify;
 mod verb;

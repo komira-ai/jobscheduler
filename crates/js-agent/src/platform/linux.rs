@@ -265,14 +265,6 @@ pub struct Flags {
     /// `--egress allow-list` or `open`.
     #[arg(long, value_name = "PORT|LO-HI")]
     pub egress_forward_port: Vec<String>,
-    /// A port of the host's loopback a job may reach (`host_ports`), `PORT` or `LO-HI`, each
-    /// from 1 to 65535; repeatable, at most 16. A job reaches each host port it names at a port
-    /// of its own loopback, whatever its network level, through a listener the agent holds
-    /// in the job's network namespace; a job that names a host port not listed is refused
-    /// `input-not-allowed`, as is every job that names one when none is given. Needs
-    /// the crun runtime.
-    #[arg(long, value_name = "PORT|LO-HI")]
-    pub host_port: Vec<String>,
     /// The IPv4 network the jobs' addresses are taken from, one /30 each, `<addr>/16` to
     /// `<addr>/24`; by default `198.18.0.0/16`. Needs `--egress allow-list` or `open`.
     #[arg(long, value_name = "CIDR")]
@@ -350,11 +342,12 @@ impl Flags {
         ]
     }
 
-    /// The flags only the crun runtime takes, with whether each was given: an agent that runs
-    /// the container engine refuses them all (`--allow-host-jobs` and `--egress` above none
-    /// are refused where the jobs are made, [`HOST_JOBS_NEED_CRUN`]).
+    /// The flags of this set only the crun runtime takes, with whether each was given: an agent
+    /// that runs the container engine refuses them all, and `--host-port` beside them (a flag
+    /// both builds take, [`crate::host_ports::HostPortFlags`]); `--allow-host-jobs` and
+    /// `--egress` above none are refused where the jobs are made ([`HOST_JOBS_NEED_CRUN`]).
     #[must_use]
-    pub fn crun_flags(&self) -> [(&'static str, bool); 8] {
+    pub fn crun_flags(&self) -> [(&'static str, bool); 7] {
         let [device, mount, env] = self.gpu_flags();
         [
             ("--crun-bin", self.crun_bin.is_some()),
@@ -363,7 +356,6 @@ impl Flags {
             device,
             mount,
             env,
-            ("--host-port", !self.host_port.is_empty()),
             (
                 "--image-allow-loopback",
                 !self.image_allow_loopback.is_empty(),
@@ -552,6 +544,7 @@ pub(crate) fn check(
     if cli.no_jobs {
         // An agent that runs no job takes no flag of a runtime that would run them.
         let given = os.given().into_iter().chain(cli.providers.given());
+        let given = given.chain(cli.host_ports.given());
         return match first(given.chain(cli.samples.given())) {
             Some(flag) => Err(usage(format!(
                 "{flag}: not with --no-jobs (an agent that runs no job)"
@@ -570,7 +563,8 @@ pub(crate) fn check(
         }
         // Only crun gives a job GPU nodes (the engine takes its own from the toolkit), host
         // ports, a network, a host job or an image store of its own.
-        if let Some(flag) = first(os.crun_flags().into_iter().chain(cli.providers.given())) {
+        let crun_only = os.crun_flags().into_iter().chain(cli.host_ports.given());
+        if let Some(flag) = first(crun_only.chain(cli.providers.given())) {
             return Err(usage(format!(
                 "{flag}: not with --allow-container-engine (a flag of the crun runtime)"
             )));

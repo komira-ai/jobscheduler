@@ -1,4 +1,5 @@
-//! Seeds past the first few: `Scenario::run_seed_range` over a range of seeds, and the sweep
+//! Seeds past the first few: `Scenario::run_seed_range` over a range of seeds, the same range
+//! on several threads (`run_seed_range_on_threads`), and the sweep
 //! (`js_sim_cell::sweep`) that runs a family over one shard of a range, each shown to fail
 //! when it should: the seeds a range runs, a failing seed and its report in the panic, the
 //! shards of a sweep, flags that do not fit together, a run that is not a sweep, and each
@@ -12,13 +13,15 @@ use std::ffi::OsString;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::process::ExitCode;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use js_sim::{Chance, Faults};
 use js_sim_cell::actions::set_bus_faults;
 use js_sim_cell::sweep::{self, COMMAND};
 use js_sim_cell::{
-    Action, Cell, Counter, Expect, HowEnded, Scenario, ScenarioFailure, ServerSpec, Shape, Work,
+    Action, Cell, Counter, Expect, HowEnded, Passed, Scenario, ScenarioFailure, ServerSpec, Shape,
+    Work, run_seed_range_on_threads, try_run_seed_range_on_threads,
 };
 
 /// One host and one run of 10 s, settled 120 s after its last action, under `name`.
@@ -153,6 +156,133 @@ fn run_seed_range_fails_its_test_with_the_failing_seed_and_its_report() {
     assert!(text.starts_with(&heading), "{text}");
     assert!(text.contains("settles-when-quiet"), "{text}");
     assert!(text.contains("\nlast 40 trace lines:\n"), "{text}");
+}
+
+/// Each run of `passed` as text: its seed, hash, counts and outcomes.
+fn keyed(passed: &Passed) -> Vec<String> {
+    let each = passed.runs.iter();
+    each.map(|run| {
+        format!(
+            "{} {} {:?} {:?}",
+            run.seed, run.hash, run.counters, run.outcomes
+        )
+    })
+    .collect()
+}
+
+/// `small(name)` failing in the seeds `first` and `second`.
+fn failing_in_two(name: &str, first: u64, second: u64) -> Scenario {
+    small(name)
+        .at(Duration::from_secs(2), LossyIn(first))
+        .at(Duration::from_secs(2), LossyIn(second))
+}
+
+/// Asserts that, for each of 0, 1, 2, 3 and 8 threads (a count of none is one thread, one
+/// is the sequential path, and more than the seeds is as many as the seeds), the seeds
+/// 3..8 run on threads answer the runs the sequential run answers, in seed order, with
+/// the same trace hashes, counts and outcomes; that a witness over the range is judged
+/// over all its seeds; and that an empty range and a range of one seed run as the
+/// sequential run runs them. Catches a thread count that changes the runs, a result out of
+/// seed order, a seed run twice or not at all, and a clamp that fails on zero.
+#[test]
+fn seeds_on_threads_run_the_seeds_the_sequential_run_runs() {
+    let build = || {
+        small("seeds_on_threads_match").witness("quiet", |c| c.get(Counter::StartRepeated) < 1_000)
+    };
+    let sequential = build().try_run_seed_range(3..8).expect("passes");
+    assert_eq!(sequential.runs.len(), 5);
+    for threads in [0, 1, 2, 3, 8] {
+        let passed = try_run_seed_range_on_threads(build, 3..8, threads).expect("passes");
+        assert_eq!(keyed(&passed), keyed(&sequential), "{threads} threads");
+    }
+    let unwitnessed = || small("seeds_on_threads_empty");
+    let none = try_run_seed_range_on_threads(unwitnessed, 5..5, 4).expect("passes");
+    assert!(none.runs.is_empty());
+    let one = try_run_seed_range_on_threads(build, 6..7, 4).expect("passes");
+    let seeds: Vec<u64> = one.runs.iter().map(|run| run.seed).collect();
+    assert_eq!(seeds, [6]);
+}
+
+/// Asserts that a scenario that fails in seeds 4 and 6, run over 2..9 on three threads,
+/// fails with the failure the sequential run reports, the lowest failing seed's (seed 4,
+/// a violation) as the same text, whichever thread finished first. Catches a failure from
+/// a higher seed, or from whichever thread failed first.
+#[test]
+fn seeds_on_threads_fail_with_the_lowest_failing_seed() {
+    let build = || failing_in_two("seeds_on_threads_fail_low", 4, 6);
+    let sequential = build().try_run_seed_range(2..9).expect_err("fails");
+    for _ in 0..3 {
+        let failure = try_run_seed_range_on_threads(build, 2..9, 3).expect_err("fails");
+        let ScenarioFailure::Violated(report) = &failure else {
+            panic!("not a violation: {failure}");
+        };
+        assert_eq!(report.seed, 4);
+        assert_eq!(failure.to_string(), sequential.to_string());
+    }
+}
+
+/// Asserts that a witness no seed of the range satisfies fails the range on threads with
+/// the failure the sequential run reports (the scenario, the witness, the number of seeds
+/// of the whole range and the counts added over all of them), and that a witness the runs
+/// satisfy passes. Catches a witness judged over one thread's seeds only.
+#[test]
+fn seeds_on_threads_judge_witnesses_over_every_seed() {
+    let never = |c: &js_sim_cell::Counters| c.get(Counter::StartAfterStop) >= 1_000;
+    let unwitnessed = || small("seeds_on_threads_unwitnessed").witness("never", never);
+    let sequential = unwitnessed()
+        .try_run_seed_range(0..6)
+        .expect_err("unwitnessed");
+    let failure = try_run_seed_range_on_threads(unwitnessed, 0..6, 3).expect_err("unwitnessed");
+    assert!(matches!(
+        failure,
+        ScenarioFailure::Unwitnessed { seeds: 6, .. }
+    ));
+    assert_eq!(failure.to_string(), sequential.to_string());
+    let always = |c: &js_sim_cell::Counters| c.get(Counter::StartAfterStop) < 1_000;
+    let witnessed = || small("seeds_on_threads_witnessed").witness("always", always);
+    let passed = try_run_seed_range_on_threads(witnessed, 0..6, 3).expect("witnessed");
+    assert_eq!(passed.runs.len(), 6);
+}
+
+/// Asserts that a builder that panics when a spawned thread calls it (the first call, the
+/// calling thread's, answers a scenario) makes the run panic with that panic's own message.
+/// Catches a panic on a worker thread that is swallowed, or turned into a pass.
+#[test]
+fn a_panic_on_a_spawned_thread_is_raised_to_the_caller() {
+    let calls = AtomicUsize::new(0);
+    let build = || {
+        assert!(
+            calls.fetch_add(1, Ordering::SeqCst) == 0,
+            "the builder refuses a second scenario"
+        );
+        small("a_panicking_worker")
+    };
+    let panicked = catch_unwind(AssertUnwindSafe(|| {
+        try_run_seed_range_on_threads(build, 0..4, 2)
+    }));
+    let panic = panicked.expect_err("the worker panics");
+    let text = message(&*panic);
+    assert!(
+        text.contains("the builder refuses a second scenario"),
+        "{text}"
+    );
+}
+
+/// Asserts that `run_seed_range_on_threads` returns the passed runs of a scenario that
+/// passes, and panics with the failure as text, equal to the sequential failure's, when a
+/// seed fails. Catches a wrapper that swallows a failure or loses its text.
+#[test]
+fn run_seed_range_on_threads_fails_its_test_with_the_failure_text() {
+    let green = || small("on_threads_green");
+    let passed = run_seed_range_on_threads(green, 0..4, 2);
+    assert_eq!(passed.runs.len(), 4);
+    let build = || failing_in_two("on_threads_red", 1, 3);
+    let sequential = build().try_run_seed_range(0..4).expect_err("fails");
+    let panicked = catch_unwind(AssertUnwindSafe(|| {
+        run_seed_range_on_threads(build, 0..4, 2)
+    }));
+    let panic = panicked.expect_err("seed 1 fails");
+    assert_eq!(message(&*panic), sequential.to_string());
 }
 
 /// The sweep's exit status, what it wrote to stdout and what it wrote to stderr, for the

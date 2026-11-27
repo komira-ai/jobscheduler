@@ -516,13 +516,17 @@ fn per_consumer_is_not_enforced() {
 }
 
 both_rules! {
-/// Catches: the caps applied without whole-node settings: three requests hold a worker
-/// each, with no mark and no reason, as before the settings existed.
-fn without_settings_no_cap_applies() {
+/// Catches: the caps applied without whole-node settings, or the pool's one hold given to
+/// every request: of three requests the first holds a worker, with no mark and no reason,
+/// and the others hold nothing, with no mark and no cap named.
+fn without_settings_no_cap_applies_and_one_request_holds_per_pool() {
     let (mut f, _) = busy(None, &["a", "b", "c"]);
     let asked: Vec<OperationId> = (0..3).map(|_| ask(&mut f)).collect();
-    for op in asked {
-        assert!(f.held_for(op).is_some());
+    assert!(f.held_for(asked[0]).is_some());
+    for (i, op) in asked.into_iter().enumerate() {
+        if i > 0 {
+            assert_eq!(f.held_for(op), None);
+        }
         assert_eq!(mark(&f, op), None);
         assert_eq!(wait(&f, op), None);
     }

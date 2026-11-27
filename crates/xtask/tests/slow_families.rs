@@ -19,6 +19,9 @@ const GATED: [&str; 4] = ["faults", "smoke", "replay", "whole_host_prepare"];
 /// The flag that builds the gated binaries over the workspace.
 const FLAG: &str = "--features js-sim-cell/slow-families";
 
+/// The start of the `test` job's run of the workspace's tests, up to the partition.
+const TEST_RUN: &str = "      - run: cargo nextest run --workspace --locked --no-fail-fast --cargo-profile dev --partition";
+
 /// The text of job `name` in `workflow`: its key line and every line under it, up to the
 /// next job (a line indented two spaces) or the end of the file.
 fn job<'a>(workflow: &'a str, name: &str) -> Option<&'a str> {
@@ -199,11 +202,12 @@ fn the_repository_runs_the_slow_families_everywhere_but_the_test_job() {
 #[test]
 fn the_test_job_turning_the_feature_on_is_refused() {
     let mut f = Files::load();
-    let run = "      - run: cargo nextest run --workspace --locked --no-fail-fast\n";
-    assert!(f.ci.contains(run));
+    assert_eq!(f.ci.matches(TEST_RUN).count(), 1);
     f.ci = f.ci.replacen(
-        run,
-        &format!("      - run: cargo nextest run --workspace --locked --no-fail-fast {FLAG}\n"),
+        TEST_RUN,
+        &format!(
+            "      - run: cargo nextest run --workspace --locked --no-fail-fast {FLAG} --cargo-profile dev --partition"
+        ),
         1,
     );
     assert_eq!(
@@ -217,9 +221,12 @@ fn the_test_job_turning_the_feature_on_is_refused() {
 #[test]
 fn a_test_job_that_runs_no_workspace_tests_is_refused() {
     let mut f = Files::load();
-    let run = "      - run: cargo nextest run --workspace --locked --no-fail-fast\n";
-    f.ci =
-        f.ci.replacen(run, "      - run: cargo test -p js-state --locked\n", 1);
+    assert_eq!(f.ci.matches(TEST_RUN).count(), 1);
+    f.ci = f.ci.replacen(
+        TEST_RUN,
+        "      - run: cargo test -p js-state --locked #",
+        1,
+    );
     assert_eq!(
         f.errors(),
         vec!["ci.yml's test job no longer runs the workspace's tests".to_owned()]

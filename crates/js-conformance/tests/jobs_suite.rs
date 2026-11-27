@@ -70,7 +70,8 @@ fn a_nonzero_exit_that_succeeds_fails_the_state_and_result_scenarios() {
         failed_by(Defect::ExitCodeIgnored),
         [
             Scenario::StatesMoveInOrder,
-            Scenario::ResultIsTheRecordedOne
+            Scenario::ResultIsTheRecordedOne,
+            Scenario::NoRetryOnNonzeroExit
         ]
     );
 }
@@ -79,7 +80,11 @@ fn a_nonzero_exit_that_succeeds_fails_the_state_and_result_scenarios() {
 fn a_state_machine_that_takes_any_step_fails_illegal_moves_are_refused() {
     assert_eq!(
         failed_by(Defect::AnyStepIsTaken),
-        [Scenario::IllegalMovesAreRefused]
+        [
+            Scenario::IllegalMovesAreRefused,
+            Scenario::RetryOnHostLoss,
+            Scenario::CallbackOnceAfterRetries
+        ]
     );
 }
 
@@ -87,7 +92,7 @@ fn a_state_machine_that_takes_any_step_fails_illegal_moves_are_refused() {
 fn a_cancel_that_ends_a_running_job_fails_cancel_follows_the_state() {
     assert_eq!(
         failed_by(Defect::CancelEndsRunning),
-        [Scenario::CancelFollowsTheState]
+        [Scenario::CancelFollowsTheState, Scenario::NoRetryOnCancel]
     );
 }
 
@@ -103,7 +108,7 @@ fn a_cancel_mark_kept_after_the_end_fails_cancel_follows_the_state() {
 fn an_empty_result_before_the_end_fails_result_waits_for_the_end() {
     assert_eq!(
         failed_by(Defect::ResultBeforeEnd),
-        [Scenario::ResultWaitsForTheEnd]
+        [Scenario::ResultWaitsForTheEnd, Scenario::RetryOnHostLoss]
     );
 }
 
@@ -111,7 +116,10 @@ fn an_empty_result_before_the_end_fails_result_waits_for_the_end() {
 fn a_result_without_its_exit_code_fails_result_is_the_recorded_one() {
     assert_eq!(
         failed_by(Defect::ResultLosesExitCode),
-        [Scenario::ResultIsTheRecordedOne]
+        [
+            Scenario::ResultIsTheRecordedOne,
+            Scenario::NoRetryOnNonzeroExit
+        ]
     );
 }
 
@@ -155,6 +163,52 @@ fn an_unknown_job_answered_as_invalid_fails_the_error_and_retention_scenarios() 
             Scenario::RetentionHoldsUntilItsBound,
             Scenario::ErrorsHaveStableCodes
         ]
+    );
+}
+
+/// A job whose host is lost with attempts left, but whose service never retries it, ends
+/// lost. The callback scenario retries by a lost host too, so it fails with the retry
+/// scenario.
+#[test]
+fn a_host_loss_that_never_retries_fails_the_retry_and_callback_scenarios() {
+    assert_eq!(
+        failed_by(Defect::NoRetryOnHostLoss),
+        [
+            Scenario::RetryOnHostLoss,
+            Scenario::CallbackOnceAfterRetries
+        ]
+    );
+}
+
+#[test]
+fn a_start_failure_that_never_retries_fails_retry_on_start_failure() {
+    assert_eq!(
+        failed_by(Defect::NoRetryOnStartFailure),
+        [Scenario::RetryOnStartFailure]
+    );
+}
+
+#[test]
+fn a_nonzero_exit_that_retries_fails_no_retry_on_nonzero_exit() {
+    assert_eq!(
+        failed_by(Defect::ExitRetries),
+        [Scenario::NoRetryOnNonzeroExit]
+    );
+}
+
+#[test]
+fn a_host_loss_that_retries_over_a_cancel_fails_no_retry_on_cancel() {
+    assert_eq!(
+        failed_by(Defect::CancelRetries),
+        [Scenario::NoRetryOnCancel]
+    );
+}
+
+#[test]
+fn a_callback_made_due_at_each_retry_fails_callback_once_after_retries() {
+    assert_eq!(
+        failed_by(Defect::CallbackPerAttempt),
+        [Scenario::CallbackOnceAfterRetries]
     );
 }
 

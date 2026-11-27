@@ -49,14 +49,17 @@
 //! - whole-machine leases: one goes only to a worker that holds no lease, and books
 //!   all of it, so nothing is placed beside it; one that fits nowhere holds a worker
 //!   that could run it, in queue (QoS) order, and less urgent work is not placed there
-//!   until it has emptied (with [`Scheduler::with_whole_node`] the worker is the one
-//!   cheapest to drain: the latest end bound of its leases, then the fewest leases), save
-//!   work that ends before the request starts there ([`Scheduler::with_backfill`]). An
-//!   action asking for a whole worker ([`Request::whole_worker`]) is placed only on a
-//!   worker with no lease, books all of its CPUs, memory, GPUs and VM slots (its
-//!   `Start` carries them), fits a worker of any size, and holds a worker while it
-//!   waits, as a whole-machine lease does without a whole-node pool (the worker with the
-//!   fewest leases that could run it; no later request is placed there). Its memory
+//!   until it has emptied (the worker cheapest to drain: the least tail, the latest end of
+//!   its leases, then the fewest leases), save work that ends before the request starts
+//!   there ([`Scheduler::with_backfill`]). The worker is picked again every round: with
+//!   [`Scheduler::with_whole_node`] a whole-machine mark stays on its worker on a tie of
+//!   the tail; without them one such request per pool holds a worker in a round, the
+//!   first in queue order. An action asking for a whole worker
+//!   ([`Request::whole_worker`]) is placed only on a worker with no lease, books all of
+//!   its CPUs, memory, GPUs and VM slots (its `Start` carries them), fits a worker of any
+//!   size, and holds a worker while it waits, as a whole-machine lease does without a
+//!   whole-node pool (the worker cheapest to drain that could run it, one per pool,
+//!   shared with the pool's blocked head; no later request is placed there). Its memory
 //!   limit is the worker's, so a kill at its own limit has nowhere to climb and
 //!   finishes `OutOfMemory`. An action at the whole memory of a worker (the last step of
 //!   the memory ladder) holds
@@ -118,14 +121,20 @@
 //!   ([`Scheduler::set_provider_rank`], [`ProviderRank`]): of the workers that could take a
 //!   request now, those of the first provider in its platform's order, and the score or the
 //!   spread decides among them alone; a whole-machine request's quiet worker is one of the
-//!   first provider, and the provider breaks a tie of its mark's drain cost, before the
-//!   name. A worker told no provider ranks after every one that was.
+//!   first provider, and the provider breaks a tie of a new mark's drain cost, before the
+//!   name (a standing mark keeps its worker on a tie of the tail). A worker told no provider
+//!   ranks after every one that was.
 //! - the choice of the machine provider and offer to acquire from when nothing can serve a
 //!   job now ([`acquire::pick`], pass 2 of design 5.6): providers in order, the pool's
 //!   limits and each provider's share, then price, fewest accelerators, least spare,
 //!   purchase order and offer id. Nothing calls it yet.
 //! - what a pass records of why a queued job waits ([`queue_status::note`]): the queue code
 //!   and event an outcome of pass 1 or pass 2 gives a job.
+//! - how each large request's reservation went, when asked
+//!   ([`Scheduler::recording_reservations`]): one [`ReservationRecord`] when it leaves the
+//!   queue (blocked-at, the start estimated when reserved and the last one, its actual
+//!   start, its moves, the backfilled core-seconds) and one [`LeaseRelease`] per lease that
+//!   ends (its placement estimate, whether it was backfilled).
 //!
 //! Not yet: a reservation for
 //! a large `action` request (an action asking for most of a worker's cores waits, because spreading leaves no worker with the cores), reclaimed room and preemption, a budget for the
@@ -165,6 +174,7 @@ pub use provider_rank::ProviderRank;
 pub use queue::walk_in_order;
 pub use refusal::{HostRefusal, MAX_KEPT as MAX_KEPT_REFUSALS, Refusal, RefusalKind, Refusals};
 mod requeue;
+mod reservation;
 mod scheduler;
 mod servable;
 mod unservable;
@@ -181,6 +191,7 @@ pub use headroom::{MEMORY_SCHEDULABLE_PERCENT, MemoryPercent, PercentError};
 pub use input::{DaemonInstance, Event, Input, Request};
 pub use js_types::sched::NodePhase;
 pub use requeue::{Gib, Requeue, RequeueReason};
+pub use reservation::{LeaseRelease, ReservationEnd, ReservationEvent, ReservationRecord};
 pub use scheduler::loss::LOSS_REQUEUES;
 pub use scheduler::memory::{
     FARM_RERUNS, Floor, FloorChange, KeyFloor, LadderError, MEMORY_FLOORS, MemoryLadder,

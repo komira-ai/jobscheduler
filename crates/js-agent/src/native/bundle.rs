@@ -19,9 +19,10 @@
 //! or the run ends. The clones are inside the account's home, which the account's retirement
 //! deletes.
 //!
-//! The profile of a run that pins a bundle is the same as any native run's: reads are open
-//! (`ReadModel::Open`, the only model with a profile builder), so the store's trees need no
-//! grant. The network is the lower of what the start asks and what the bundle's tools need
+//! The profile of a run that pins a bundle is any native run's: under `--read-model open` reads
+//! are open (`ReadModel::Open`), so the store's trees need no grant; under `--read-model allow`
+//! it reads only what its grants name, the bundle's trees among them (`native/allow.rs`). The
+//! network is the lower of what the start asks and what the bundle's tools need
 //! (`seatbelt.network_max`): a bundle of `off` takes from a run even the loopback a job of the
 //! level `none` gets. That is not the agent's ceiling (`--native-network`): a start
 //! above the ceiling was refused before its user was made, and is never lowered to it; the

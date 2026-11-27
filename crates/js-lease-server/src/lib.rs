@@ -35,8 +35,8 @@
 //! |---|---|
 //! | `--listen <addr>` | default `127.0.0.1:7300`; off the loopback it needs both TLS flags |
 //! | `--job-listen <addr>` | off unless given: serves the job service on this address, gRPC and its HTTP/JSON gateway on one port (see "The job service" below); off the loopback it needs both TLS flags, and with them the port speaks TLS over the same reloaded pair. Turning it on opens the job store, `<state file>.jobs`, which the heartbeats of agents that report the `per-job` capability then read and update; an address in use, or a store file that cannot be made owner-only and opened, is refused at start naming the flag. Needs `--agent-pool-config` |
-//! | `--metrics-listen <addr>` | off unless given: serves `GET /metrics`, the operator's metrics in the Prometheus text format (the jobs by state, the oldest queued job's age, the queue wait, the placements, the start failures by code, the lost jobs, the failed writes of the job tables, the job pass's duration, the launches and failovers by pool, and each host's CPU and memory booked and free and its whole-host mark), on a listener of its own, plain HTTP with no token, to private peers only. It names no job, lease or token. An address that is not a private one, or one in use, is refused at start naming the flag |
-//! | `--ready-listen <addr>` | off unless given: serves `GET /readyz` (see "The readiness route" below) on a listener of its own, plain HTTP with no token, on a loopback address only; and, with a SQLite store, a held file lock is waited for instead of refusing the start (see "The store" below). The listener is bound before the lock is tried. An address that is not a loopback one, or one in use, is refused at start naming the flag |
+//! | `--metrics-listen <addr>` | off unless given: serves `GET /metrics`, the operator's metrics in the Prometheus text format (the jobs by state, the oldest queued job's age, the queue wait, the placements, the start failures by code, the lost jobs, the failed writes of the job tables, the job pass's duration, the launches and failovers by pool, and each host's CPU and memory booked and free and its whole-host mark, and under `--placement-curves shadow` and `on` the memory shadow's placements by verdict and each host's projected memory against its readings), on a listener of its own, plain HTTP with no token, to private peers only. It names no job, lease or token. An address that is not a private one, or one in use, is refused at start naming the flag |
+//! | `--ready-listen <addr>` | off unless given: serves `GET /readyz` and `GET /readyz/sizes` (see "The readiness route" below) on a listener of its own, plain HTTP with no token, on a loopback address only; and, with a SQLite store, a held file lock is waited for instead of refusing the start (see "The store" below). The listener is bound before the lock is tried. An address that is not a loopback one, or one in use, is refused at start naming the flag |
 //! | `--state-file <path>` | the base path of the server's state files: `<path>.agents`, `<path>.joins`, `<path>.scaler`, `<path>.jobs` and the default place of `usage.db`; a lease file of an earlier release at the path is left as it is |
 //! | `--store <path>` | none unless given: an owner-only file (as `--token-file`'s is) holding the store's connection on one line, `postgres://...` or `postgresql://...`, or `sqlite:<absolute path>`; a SQLite store's file lock is taken before anything else (see "The store" below). Its content is never printed |
 //! | `--allow-sqlite-store` | off by default: accepts a `sqlite:` store, which is for tests and single-node development; without it such a store is refused at start naming this flag. No effect with a Postgres store. Needs `--store` |
@@ -50,7 +50,9 @@
 //! | `--placement js-sched` | deprecated, and does nothing: `js-sched` is the only placement. The flag is accepted with the warning `--placement is deprecated and does nothing: js-sched is the only placement (drop the flag)`; `--placement registry`, the removed first-free placement, is refused at start, `the registry placement mode was removed; js-sched is the only placement (drop the flag)`. The server keeps one `js-sched` scheduler for the life of the server, built once and told of every hello, accepted heartbeat (with its load reading) and stop as the registry takes them, and of every host the registry forgets; it places the jobs on the hosts that registered themselves, and the scheduler is built again only when its picture of those hosts and the registry's books disagree, keeping each host's last three readings, and the start is counted. The pool's `memory_schedulable_percent` is the scheduler's rule: the registry books each host's whole reported memory and the scheduler books no more than the percent of it; `GET /v1/hosts` shows the cut memory as `shape.memory_bytes`, beside the percent. A host a whole-node request has set aside takes work of the pool's `share_class` only as backfill, by the end of the host's tail as the mark took it; a wall time above `server.max_lease_wall` never does. An agent pool (`--agent-pool-config`, or a joined pool of the file) whose capabilities name no `arch` is refused at start, naming the pool; an elastic pool is not: each of its machines is placed by what it reports and the capabilities its agent reported at hello, `arch` among them. Needs `--agent-pool-config` |
 //! | `--cpu-slack <multiplier>` | how far above a host's cores the scheduler may charge it, from `1.0` to `2.0` with at most three decimals, such as `1.1`; the scheduler's own default (1.1) unless given. A job is placed on a host whose agent does not report `load-admission` only where the summed bookings of its jobs stay within what its hello offers, with no slack. Needs `--agent-pool-config` |
 //! | `--pack-limit <fraction>` | how full the scheduler packs a host before it places on the least full one, as a fraction of the host's capacity (the larger of its CPU and memory share, bookings with the new lease added) from `0.0` to `1.0` with at most three decimals, such as `0.5`; the scheduler's own default (0.5) unless given. Within the limit the fullest host that fits is chosen; past it, the least full. Needs `--agent-pool-config` |
-//! | `--placement-curves <off\|shadow\|on>` | `off` unless given. `on` learns and logs as `shadow` does and books a class that passes its four checks by its CPU curve on the hosts `server.curve_hosts` names (every host when it is absent), a job waiting at most `server.curve_max_wait_seconds` (30) for its curve to fit before it is tested with its flat number; those two keys have no flags and act only under `on`. `shadow` learns a CPU profile and a memory profile for each job class from the series its runs recorded, and logs one line per run it checks, naming the run's mean and peak against what the class's profile predicted, under the log target `js_sched_placer::sizes::profile`. The profiles are built again from the job records after a restart, and the checks start only once the start has read and taught the ended jobs (on a store of about 570,000 of them, some 5 to 7 minutes): that target first logs `placement curves: the shadow checks start, the profiles learned from the ended jobs` with `classes`, `ended_jobs` and `took_secs`, then a check for each run that ended meanwhile. Placement is the same under `off` and `shadow`: nothing is booked, moved, throttled or killed by a profile. Any other value is refused, `placement_curves must be off, shadow or on; got "On"`. Needs `--agent-pool-config` |
+//! | `--score-balance <n>`, `--score-slack-tolerance-ppm <n>`, `--key-share-percent <n>` | the scheduler's scoring settings, which rank the hosts a job fits on and admit nothing, each a whole number refused outside its range (never clamped), and each the scheduler's own default unless given. `--score-balance` (0 to 4, default 1): how much of the other resource's leftover the score's fit counts beside the binding one. `--score-slack-tolerance-ppm` (0 to 1000000, default 10000, 1%): how far above its capacity a host may be charged, in millionths of it, before the score counts the excess against it. `--key-share-percent` (0 to 100, default 25): the share of a host's CPU the leases of one action key may take before the score prefers another host; each job is its own key (its request is named by its job id), so for jobs it is the share one job may take. Needs `--agent-pool-config` |
+//! | `--placement-curves <off\|shadow\|on>` | `off` unless given. `on` learns and logs as `shadow` does and books a class that passes its four checks by its CPU curve on the hosts `--curve-hosts` names (every host when it is absent), a job waiting at most `--curve-max-wait-seconds` (30) for its curve to fit before it is tested with its flat number; those two flags book only under `on`. `shadow` learns a CPU profile and a memory profile for each job class from the series its runs recorded, and logs one line per run it checks, naming the run's mean and peak against what the class's profile predicted, under the log target `js_sched_placer::sizes::profile`. The profiles are built again from the job records after a restart, and the checks start only once the start has read and taught the ended jobs (on a store of about 570,000 of them, some 5 to 7 minutes): that target first logs `placement curves: the shadow checks start, the profiles learned from the ended jobs` with `classes`, `ended_jobs` and `took_secs`, then a check for each run that ended meanwhile. `shadow` (and `on`) also projects each host's memory over the next 128 s from its jobs' memory profiles and, beside the flat memory booking, logs under that target each placement a booking that followed them would have made sooner (`placement curves: a job's memory curve would have placed it sooner`, with `job`, `class`, `host`, `sooner_ms`) or not at all on its host (`placement curves: a job's memory curve would not have placed it on its host`, with `slot`), and each reading that showed more than the projection (`placement curves: a host held more memory than its jobs' memory curves projected`, with `host`, `projected_mib`, `measured_mib`, `ahead_ms`); `/metrics` totals them. Beside each placement it makes, `shadow` also judges the job by the curve packing rule `on` would use on the hosts `--curve-hosts` names (reading each live job's record for its class and start, until its start is known), and logs under the same target `a job's curve booking would place it differently` with `job`, `class`, `flat_host` (absent when the flat placement placed it nowhere), `curve_host` (absent when its curve fits no host) and `slot` (the first 2 s slot over the cap on `flat_host`, 64 for the slot from 128 s on), a job left waiting once while it waits, until it is placed or leaves the queue. Placement is the same under `off` and `shadow`: nothing is booked, moved, throttled or killed by a profile. Any other value is refused, `placement_curves must be off, shadow or on; got "On"`. Needs `--agent-pool-config` |
+//! | `--curve-hosts <host,...>`, `--curve-max-wait-seconds <n>` | the canary and the wait bound of `--placement-curves on`, the flags of `server.curve_hosts` and `server.curve_max_wait_seconds`, read and refused by the same code as the keys and read in every mode. `--curve-hosts` names the hosts that book by curve, host ids separated by commas (or the flag given again): a job placed on any other host is booked flat, and without the flag `on` books by curve on every host. An empty name, a name twice and a name that is not a host id (1 to 63 characters of `a-z`, `0-9`, `.`, `_` and `-`) are refused at start naming it, such as `--curve-hosts: names "mac-1" twice`. `--curve-max-wait-seconds` is how long a job of a curve class waits with no host fitting its curve before it is tested with its flat number: whole seconds from `0` to `300`, `30` unless given, `0` meaning a curve never delays a job; above `300` it is refused, `--curve-max-wait-seconds: must be from 0 to 300`. Needs `--agent-pool-config` |
 //! | `--cold-cpu-millis <n>`, `--cold-memory-bytes <n>` | what a queued job that names no CPU or no memory books, for that dimension, while neither its class, its fallback class nor its client has a run (`docs/design/sizing.md`, section 7.7): millicores from `250`, bytes from `1073741824` (1 GiB). Each left out is its default, `22000` (22 cores) and `4294967296` (4 GiB); a CPU above a quarter of the most cores a registered host has books that quarter, and a memory above the most a registered host has books that most. Needs `--agent-pool-config` |
 //! | `--cold-memory-bytes-on <os>=<n>` | the memory a queued job whose `os` constraint is `<os>` (as the job gives it, such as `macos`) books in place of `--cold-memory-bytes`, while neither its class, its fallback class nor its client has a run: bytes from `1073741824` (1 GiB), and above the most a registered host has, that most. A job of any other `os`, or of none, books `--cold-memory-bytes`. Repeatable, each `<os>` once; a value that is not `<os>=<n>`, an empty `<os>` and one given twice are refused at start. Needs `--agent-pool-config` |
 //! | `--cold-cpu-millis-on <os>=<n>` | the CPU a queued job whose `os` constraint is `<os>` (as the job gives it, such as `macos`) books in place of `--cold-cpu-millis`, while neither its class, its fallback class nor its client has a run with a CPU sample: millicores from `250` to `4294967295`, and above a quarter of the most cores a registered host has, that quarter. A job of any other `os`, or of none, books `--cold-cpu-millis`. Repeatable, each `<os>` once; a value that is not `<os>=<n>`, an empty `<os>` and one given twice are refused at start. Needs `--agent-pool-config` |
@@ -76,9 +78,10 @@
 //!
 //! A start that is refused prints the flag at fault and exits with status 2. The
 //! hello limit flags, `--require-host-credential`, `--placement`, `--estimate-feed`,
-//! `--cpu-slack`, `--pack-limit`, `--placement-curves`, `--cold-cpu-millis`, `--cold-memory-bytes`,
-//! `--cold-memory-bytes-on`, `--cold-cpu-millis-on` and `--job-listen` need
-//! `--agent-pool-config`, and are refused without it.
+//! `--cpu-slack`, `--pack-limit`, `--score-balance`, `--score-slack-tolerance-ppm`,
+//! `--key-share-percent`, `--placement-curves`, `--curve-hosts`, `--curve-max-wait-seconds`,
+//! `--cold-cpu-millis`, `--cold-memory-bytes`, `--cold-memory-bytes-on`, `--cold-cpu-millis-on`
+//! and `--job-listen` need `--agent-pool-config`, and are refused without it.
 //!
 //! # The configuration file
 //!
@@ -126,11 +129,14 @@
 //! # registers agents
 //! # pack_limit (0.5, a number): the flag's name, default and range; refused unless a pool
 //! # registers agents
+//! # score_balance (1), score_slack_tolerance_ppm (10000), key_share_percent (25): whole
+//! # numbers, the flags' names, defaults and ranges; refused unless a pool registers agents
 //! # placement_curves ("off", a string): the flag's name, default and values ("off", "shadow" or
 //! # "on"); refused unless a pool registers agents
 //! # curve_hosts (an array of host ids; every host), curve_max_wait_seconds (0 to 300; 30): the
-//! # hosts that book by curve and how long a job waits for its curve to fit; no flags; read in
-//! # every mode, acting only under placement_curves = "on"
+//! # hosts that book by curve and how long a job waits for its curve to fit; the flags' names
+//! # (--curve-hosts, --curve-max-wait-seconds) and rules; read in every mode, booking only under
+//! # placement_curves = "on" ("shadow" judges the hosts named by curve for its log line alone)
 //! # cold_cpu_millis (250 or more), cold_memory_bytes (1073741824 or more): what a queued job
 //! # that names no CPU or memory books while neither its class, its fallback class nor its
 //! # client has a run; each left out is its default (22000, 4294967296: 22 cores and 4 GiB);
@@ -359,8 +365,10 @@
 //! agent pool file's `[capabilities]`: a lease request is matched against them, and a
 //! host is admitted only if its hello reports each with the same value; a pool without
 //! them fits no request that requires a capability), `exec` (as above, but absent is
-//! `none`), `heartbeat_interval`, `grace`, `lost_retention` and `join_token_file` (the
-//! shared pool token). It launches nothing: `launch`, `network`, `provider`,
+//! `none`), `heartbeat_interval`, `grace`, `lost_retention`, `prepare_timeout` (class
+//! `whole-node` only, refused on any other: how long a whole-node lease may take to become
+//! ready, ten minutes unless set) and `join_token_file` (the shared pool token). It launches
+//! nothing: `launch`, `network`, `provider`,
 //! `max_instances`, `max_spend_per_hour`, `max_spend_per_day`, `idle`, `max_age`, `min_host_lifetime` and `boot_timeout`
 //! are each refused naming the key. It registers agents, so the server starts only when it
 //! is the one pool that does, and `server.agent_listen` is required. One-time tokens for its nodes
@@ -397,8 +405,8 @@
 //! and `/v1/pools` are other routes than the server's of those names, so the two cannot
 //! share a port while both exist.
 //!
-//! The job store is in the state store when `--store` is given (the first start over it
-//! begins with no jobs, and a `.jobs` file of an earlier start is left unread); without
+//! The job store is in the state store when `--store` is given (the server leaves a `.jobs`
+//! file of an earlier start unread; `js-lease-server job-store copy` copies it in); without
 //! it, a SQLite file beside the state file, `<state file>.jobs`, owner-only: the
 //! single-node development backend. The server opens it once and holds that one handle: the job service and the
 //! per-job heartbeat both read it. The open (its index backfill, the boot's raise of
@@ -450,7 +458,8 @@
 //! before the call it records); a heartbeat with no new taint, a known host's hello and the
 //! host book use no store. The first start over an empty store imports the four files once,
 //! in one transaction with the marker `meta/server-state-imported`, and never changes them.
-//! The job store and the usage file are kept as without the setting.
+//! The job store and the usage rows are rows of the store too; `js-lease-server job-store`
+//! copies a job store's file into it, and exports them back to files for a rollback.
 //!
 //! # Who may do what
 //!
@@ -463,6 +472,7 @@
 //! |---|---|
 //! | `GET /v1/hosts` | 200 `{hosts: [{id, source, shape {cpu_millis, memory_bytes, gpus, gpu_class?, disk_bytes?}, memory {configured_bytes, schedulable_percent, bookable_bytes}, capabilities, labels, state?, lost?, phase?, agent_version?, releasing?, taint?}]}`; `source` is `registered` (every listed host said hello; the value `static` of the removed agentless pool is not written any more), `capabilities` are those of the shape the pool books the host on and, for a host this server's registry holds, the `full-disk-access` its agent's last hello reported where that shape does not name it, and `state` (`live`, `lost`, `awaiting`), `lost`, `phase`, `agent_version`, `releasing` (work still to finish) and `taint` (`{reason, run_id?, check?}`, once the host reported one), `mark` (`reserved` for a waiting request, `held` while a whole-node lease is committed, `draining` and `releasing` while the host is being scaled away), `reserved_for` (the request id) and `drain_deadline_ms` (when the host a reservation is draining is expected to be drained at the latest; reaching it gives nothing up, and the mark stays) are those of a registered host; so is `cordon {expires_at_ms, holder?}`, present while the host is cordoned, with its holder when a holder placed or took it (see "Cordon" below: a host's own cordon left by a dead requester lapses within its last `lease_secs`, at most 3600 s after its last extension, and is not extended by another holder's request meanwhile; an operator's lasts the length it was set for, at most seven days; the host's own `:uncordon` or the operator's `UncordonHost` lifts it) |
 //! | `GET /readyz` | only on the listener of `--ready-listen`, plain HTTP, no token (see "The readiness route"): 200 `ready` while the server serves; else 503 `waiting for the store's writer lock` (a SQLite store's file lock), `starting` or `draining` |
+//! | `GET /readyz/sizes` | only on the listener of `--ready-listen`, same rules: 503 `teaching` until the server has read the ended jobs its start teaches the job sizes from; then 200 `taught`, `nothing to teach` (no job tables), or `not taught: ` and why (the live allocations or the ended jobs were not read, or the server stopped first) |
 //! | `GET /healthz` | 200 `ok`, no token; 503 `tick loop stopped` once the tick loop has stopped; else 503 `store unreachable` while the tick's store paths have failed for `--store-unreachable-after` (until a tick's store work succeeds) |
 //! | `GET /v1/pools` | 200 `{pools: [{name, kind, network, exec, launch, memory {configured_bytes, schedulable_percent, bookable_bytes}, state, reasons, credentials, network_check, instances, blocked, no_offer, last_launch, machines {host, state, offer, zone, price_cents_per_hour, provider_id}, orphans, last_tick_ms, scaler, next_launch}], warnings, store}`; `store` is `{consecutive_failures, failing_since_ms, last_error, last_ok_ms, latency_ms, lock, unreachable_after_ms, unreachable, alerts}`, the health of the tick's store paths, `last_error` a kind (`disconnected`, `failed`, `stale_cursor`) and never an error's text, `lock` `none`, or `held` for a SQLite store's file lock, `alerts` by key; `state` is `checking` (no pass yet), `available` or `unavailable`; `provider_checks` is the provider's own checks of the last pass, each `{name, ok, reason, note, checked_at_ms}`; `next_launch` holds the launch plan with every secret printed as `***`; no token, on `server.listen` only, and not served (404) when that is not a private address, nor to a peer that is not a private address (an IPv4-mapped IPv6 peer counts as its IPv4 form) |
 //! | `POST /v1/pools/{pool}/brake/reset` | 202 `{pool, reset: "requested"}`; 401; 404 for another pool |
@@ -476,7 +486,7 @@
 //!
 //! `--ready-listen <addr>` (`server.ready_listen`) serves `GET /readyz` on a listener of its
 //! own, on a loopback address only, plain HTTP whatever the other ports speak, with no
-//! token; any other path is a 404. It is bound and answering before a SQLite store's file lock
+//! token, and `GET /readyz/sizes` (below); any other path is a 404. It is bound and answering before a SQLite store's file lock
 //! is tried, and it is the last listener closed when the server stops, so a supervisor
 //! can tell the phases of the process apart from outside. At start the program prints
 //! `ready on <addr>` (the bound address) at once, and `listening on <addr>` when the start
@@ -493,6 +503,15 @@
 //! arrives while the server waits for the lock or starts ends the process with status 0
 //! at once, without a drain. `/healthz` is another question, served on the `--listen`
 //! address: whether the tick loop and the store paths work.
+//!
+//! `GET /readyz/sizes` says whether the job sizes are taught: the server answers `ready`
+//! before it reads the ended jobs its start teaches them from, and until that read ends a job
+//! that books nothing is sized from the newest runs the start read alone. It answers 503
+//! `teaching` until then,
+//! whatever the phase, and 200 once the read has ended however it ended: `taught`, `nothing
+//! to teach` (no job tables), `not taught: the live allocations were not read`, `not taught:
+//! the ended jobs were not read` or `not taught: the server stopped before the ended jobs were
+//! read`. A deploy can wait for its 200 before it replaces the server.
 //!
 //! # Admission
 //!
@@ -729,7 +748,9 @@
 //! earlier release wrote are read as they were written.
 //!
 //! Every tick acts by the wall clock of the server: the sink is flushed every five
-//! minutes and once more at shutdown, and pruned at the first tick and once a day. A
+//! minutes and once more at shutdown, and pruned at the first tick and once a day; with the
+//! usage rows in the store of the job service, the prune's deletes are run by the one server
+//! that claims the `usage-prune` duty in a period. A
 //! flush logs one `node minute` line for each node minute it closed and a warning for
 //! each node and minute that had readings dropped.
 //!
@@ -780,6 +801,7 @@ mod client_verifier;
 mod clock;
 mod config;
 mod cordon;
+mod cutover;
 mod dispatch_state;
 mod drain;
 mod error;
@@ -854,8 +876,8 @@ pub use api::BODY_LIMIT;
 pub use catalogs::Catalogs;
 pub use clock::SharedClock;
 pub use config::{
-    BootMode, Cli, Config, CpuSlack, CpuSlackError, Limits, MIN_TOKEN_BYTES, PackLimit,
-    PackLimitError, Placement, TlsFiles, Token, is_private_address, parse_duration,
+    BootMode, Cli, Config, CpuSlack, CpuSlackError, CurveFlags, Limits, MIN_TOKEN_BYTES, PackLimit,
+    PackLimitError, Placement, TlsFiles, Token, Tunings, is_private_address, parse_duration,
 };
 pub use error::StartupError;
 pub use file::{
@@ -901,8 +923,9 @@ pub fn main() -> ExitCode {
 /// `err`.
 ///
 /// Exit status: 0 after an orderly stop (and for `--help`), 2 for a usage error or a
-/// start that was refused (the message names the flag), 1 for any other failure. The verb
-/// `update-hook` is answered first, before any flag is read ([`update_hook`]).
+/// start that was refused (the message names the flag), 1 for any other failure. The verbs
+/// `update-hook` ([`update_hook`]) and `job-store` (the job store's cutover between its SQLite
+/// file and the store) are answered first, before any flag is read.
 pub fn run(
     args: impl IntoIterator<Item = OsString>,
     out: &mut dyn Write,
@@ -915,6 +938,9 @@ pub fn run(
 fn run_words(args: Vec<OsString>, out: &mut dyn Write, err: &mut dyn Write) -> ExitCode {
     if update_hook::is_verb(&args) {
         return update_hook::run(&args, out, err, &update_hook::Host::system());
+    }
+    if cutover::is_verb(&args) {
+        return cutover::run(&args, out, err);
     }
     let parsed = Cli::try_parse_from(args);
     let cli = match parsed {

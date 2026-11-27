@@ -120,8 +120,13 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         }
     }
 
-    /// [`JobStore::hello_node`] for a host of a pool that holds at most `cap` hosts. A host that
-    /// has a row is not new to the pool and is written as there. For a host that has none, the
+    /// [`JobStore::hello_node`] for a host of a pool that holds at most `cap` hosts, judged on the
+    /// row it writes over (design `multi-instance.md`, sections 3.3 and 5, G5). A host that has a
+    /// row is not new to the pool; its hello is refused when the row was heard within `grace` by
+    /// the store's clock (its `heard_at` at most `grace` before the store's time now) unless the
+    /// hello names the agent process the row names, which takes the host over at once; otherwise
+    /// it is written as [`JobStore::hello_node`] writes it, at the version read. For a host that
+    /// has none, the
     /// pool's admission row `pool/<pool>` is read first, then the pool's rows are counted (every
     /// row this build can read that names the pool, heard lately or not: a row is gone only
     /// once [`JobStore::forget_node`] or [`JobStore::forget_silent_nodes`] deleted it); when
@@ -129,21 +134,35 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// absence and the admission row at the version read, in one transaction. Two hellos of new
     /// hosts of one pool thus write one row at one version: the second's commit conflicts, and
     /// it counts again with the first's row there, so a pool one host from its cap admits one.
+    /// Every write is conditional on what was read, so a hello whose write loses to another
+    /// server's reads the row again and is judged on it: of two hellos of one host by two agent
+    /// processes, on two servers at once, one is written and the other refused, the row being
+    /// heard by the first.
     ///
     /// # Errors
-    /// [`JobStoreError::PoolFull`] when the pool holds `cap` hosts or more; as
-    /// [`JobStore::hello_node`]. Nothing is written.
+    /// [`JobStoreError::HostLive`] when the row was heard within `grace` and the hello names
+    /// another agent process, or none; [`JobStoreError::PoolFull`] when the pool holds `cap`
+    /// hosts or more; as [`JobStore::hello_node`]. Nothing is written.
     pub fn hello_node_in_pool(
         &self,
         host: &HostId,
         hello: &NodeHello,
         cap: usize,
+        grace: Duration,
     ) -> Result<NodeRow, JobStoreError> {
         let pool_key = keys::pool(&hello.pool);
         loop {
-            let read = self.read_node(host)?;
-            if read.is_some() {
-                return self.hello_node(host, hello);
+            if let Some(read) = self.read_node(host)? {
+                let now = self.store.now()?;
+                if live_elsewhere(&read.record, hello, grace, now) {
+                    return Err(JobStoreError::HostLive { host: host.clone() });
+                }
+                let record = hello_record(host, hello, Some(&read), now);
+                match self.put_node(record, Some(&read))? {
+                    Some(row) => return Ok(row),
+                    // The row moved since it was read: it is read and judged again.
+                    None => continue,
+                }
             }
             // The admission row before the count: a hello that commits after this read moves
             // the row, and one that committed before it is counted.
@@ -318,7 +337,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// read or written at: the way a beat, after the writes of its listing (made through
     /// [`JobStore::guarded`] at that version), records in its own write that the first listing
     /// is applied, whether the listing was clean, and the missing counts. The epoch, session,
-    /// the hello's fields (the agent process included), the last beat, `heard_at` and the
+    /// the hello's fields (the agent process and version included), the last beat, `heard_at` and the
     /// fields a later build wrote are kept. Returns the row as written, with its new version,
     /// or `None` when the row is not at that version any more (another beat or hello was
     /// applied, or the row was forgotten) and nothing was written.
@@ -484,6 +503,7 @@ fn hello_record(
         shape: hello.shape.clone(),
         labels: hello.labels.clone(),
         agent_process: hello.agent_process.clone(),
+        agent_version: hello.agent_version.clone(),
         state: NodeState {
             phase: hello.phase,
             load: None,
@@ -534,6 +554,16 @@ fn kept_by(read: &mut dyn TxnRead, host: &HostId) -> Result<Option<Kept>, JobSto
     Ok(reasons
         .into_iter()
         .find_map(|(holds, kept)| holds.then_some(kept)))
+}
+
+/// Whether `record`, as read at the store's time `now`, holds a live session of another agent
+/// process than `hello`'s: it was heard within `grace`, and `hello` names no agent process or
+/// another one than the row's. The process the row names says hello again when it lost its
+/// session, so its hello takes the host over at once, as the registry judges it.
+fn live_elsewhere(record: &NodeRecord, hello: &NodeHello, grace: Duration, now: StoreTime) -> bool {
+    let same_process =
+        hello.agent_process.is_some() & (hello.agent_process == record.agent_process);
+    heard_within(record.heard_at, grace, now) & !same_process
 }
 
 /// Whether a row heard at `heard_at` is heard within `grace` of `now`.

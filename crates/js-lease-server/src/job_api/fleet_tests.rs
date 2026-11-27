@@ -613,6 +613,7 @@ fn ended(id: &str, end: u64) -> EndedRow {
         cpu_series: None,
         class: Default::default(),
         attempt: None,
+        memory_series: None,
     }
 }
 

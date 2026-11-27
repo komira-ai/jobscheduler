@@ -11,7 +11,7 @@ use js_jobs::{
 };
 use js_state::fake::{Fake, Flaw};
 use js_state::{Cond, ManualClock, Store, StoreTime, Txn};
-use js_types::{CpuSeries, HostId};
+use js_types::{CpuSeries, HostId, MemorySeries};
 use js_usage::{
     AllocationId, Booked as UsageBooked, DrainOutcome, EndedHistory, EndedReason, EndedRow,
     ProfileKey, Used,
@@ -327,6 +327,7 @@ fn a_freed_job_allocation_writes_one_usage_row() {
             cpu_series: None,
             class: Some(js_sched_placer::sizes::class_name(&job)),
             attempt: None,
+            memory_series: None,
         };
         assert_eq!(history_rows(&store), [row], "{freed:?}");
         assert_eq!(usage_keys(), 2, "{freed:?}: the row and its index entry");
@@ -426,6 +427,7 @@ fn a_job_row_holds_the_peak_and_the_cpu_its_host_reported() {
         cpu_throttle: None,
         cpu_pressure_some: None,
         cpu_peak: None,
+        peak_swap_bytes: None,
     };
     let output = Output {
         usage: Some(usage),
@@ -513,6 +515,7 @@ fn a_repeat_run_of_one_build_writes_its_row_under_the_same_name() {
             cpu_throttle: None,
             cpu_pressure_some: None,
             cpu_peak: None,
+            peak_swap_bytes: None,
         };
         let output = Output {
             usage: Some(usage),
@@ -653,6 +656,7 @@ fn the_history_row_of_a_free_carries_the_jobs_cpu_series() {
         cpu_throttle: None,
         cpu_pressure_some: None,
         cpu_peak: None,
+        peak_swap_bytes: None,
     };
     let cases = [
         ("with-usage", Some(usage), Some(series.clone())),
@@ -691,6 +695,68 @@ fn the_history_row_of_a_free_carries_the_jobs_cpu_series() {
     assert_eq!(by_name("no-usage").used, None);
     assert_eq!(by_name("no-series").cpu_series, None);
     assert_eq!(by_name("lost").cpu_series, None);
+}
+
+/// Asserts that the history row of a freed job carries the memory series its result holds, as
+/// stored (points above 16 bits kept whole) and whatever else the result reports: with a usage
+/// whose peak differs from the series' peak, without a usage, and beside a CPU series, which
+/// stays as it is; and that a job whose result holds no memory series, and one that was lost
+/// and has no result at all, are recorded with none. It catches a memory series lost between
+/// the job's result and its usage row, one dropped for lack of a usage, one swapped with the
+/// CPU series, and one made up for a job without.
+#[test]
+fn the_history_row_of_a_free_carries_the_jobs_memory_series() {
+    let memory = MemorySeries::new(4, vec![1, 70_000, u32::MAX], 9_500_000, false).unwrap();
+    let cpu = CpuSeries::new(4, vec![16, 32], 9_500_000, false).unwrap();
+    let usage = ResourceUsage {
+        cpu_time: Duration::from_secs(10),
+        peak_memory_bytes: 3 << 30,
+        cpu_throttle: None,
+        cpu_pressure_some: None,
+        cpu_peak: None,
+        peak_swap_bytes: None,
+    };
+    let cases = [
+        ("with-usage", Some(usage), None, Some(memory.clone())),
+        ("no-usage", None, None, Some(memory.clone())),
+        ("with-cpu", None, Some(cpu.clone()), Some(memory.clone())),
+        ("no-memory", Some(usage), Some(cpu.clone()), None),
+    ];
+    let (time, store, jobs) = timed();
+    for (name, usage, cpu_series, memory_series) in cases {
+        let (job, _) = placed(&jobs, name, "host-a", spec(), BOOKED);
+        jobs.transition(&job.id, JobState::Placed, JobState::Starting)
+            .unwrap();
+        jobs.transition(&job.id, JobState::Starting, JobState::Running)
+            .unwrap();
+        time.advance(Duration::from_secs(5));
+        let output = Output {
+            usage,
+            cpu_series,
+            memory_series,
+            ..Output::default()
+        };
+        let exited = JobEnd::Exited {
+            exit_code: 0,
+            output,
+        };
+        jobs.end_job(&job.id, exited).unwrap();
+        free_allocation(&jobs, &job.id, Freed::HostConfirmed).unwrap();
+    }
+    let (lost, _) = placed(&jobs, "lost", "host-a", spec(), BOOKED);
+    jobs.end_job(&lost.id, JobEnd::Lost).unwrap();
+    free_allocation(&jobs, &lost.id, Freed::ProviderAbsent).unwrap();
+
+    let rows = history_rows(&store);
+    let of = |name: &str| {
+        let row = rows.iter().find(|row| row.id.as_str() == name).unwrap();
+        (row.memory_series.clone(), row.cpu_series.clone())
+    };
+    assert_eq!(of("with-usage"), (Some(memory.clone()), None));
+    assert_eq!(of("no-usage"), (Some(memory.clone()), None));
+    assert_eq!(of("with-cpu"), (Some(memory), Some(cpu.clone())));
+    assert_eq!(of("no-memory"), (None, Some(cpu)));
+    assert_eq!(of("lost"), (None, None));
 }
 
 /// Asserts that a job on its first attempt writes a usage row with no attempt, that after one

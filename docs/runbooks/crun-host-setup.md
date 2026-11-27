@@ -258,8 +258,9 @@ its steps treat the record so:
   returns the host to the previous release this update names, the release link is on that
   release, the unit is active, the record does not say the agent that runs is the one the
   failed update started, and the lease server shows the previous agent's live session (a
-  session it shows with no version, as a server that did not take the hello does, counts by the
-  session; one that names a version must name the previous one). It moves
+  session it shows with no version, as it does for a hello a release that does not keep the
+  version in the host's row took, counts by the session; one that names a version must name
+  the previous one). It moves
   the record aside as `record.rolled-back-<target>-<ms>.json` in the same directory, says so in
   its detail, and goes on. Otherwise it fails `state_invalid` with the record kept, and the
   detail names the first thing left (`... its rollback is not complete: <what>; the rollback step

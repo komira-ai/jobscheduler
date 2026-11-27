@@ -8,10 +8,13 @@ use std::time::Duration;
 
 use js_jobs::JobState;
 use js_registry::HostMark;
-use js_sched_placer::curves::CurveView;
+use js_sched_placer::curves::{CurveView, HostMemoryShadow, MemoryShadowView};
 use js_types::HostId;
 
-use super::{CALLBACK_RESULTS, FAILURE_CODES, Histogram, RETRY_OUTCOMES, Recorder, TABLES_FROM};
+use super::{
+    CALLBACK_RESULTS, FAILURE_CODES, Histogram, RETRY_OUTCOMES, Recorder, SUBMIT_PHASES,
+    TABLES_FROM,
+};
 use crate::hosts::mark_text;
 
 /// The job states, in the order they are written. A job that failed to start is counted under
@@ -95,13 +98,15 @@ pub(crate) struct HostSeen {
     pub(crate) mark: Option<HostMark>,
 }
 
-/// What a scrape read: the job tables (`None` without the job service), the hosts, and the
-/// curve view of the placer (`None` unless it books by curve).
+/// What a scrape read: the job tables (`None` without the job service), the hosts, the curve
+/// view of the placer (`None` unless it books by curve) and its memory shadow (`None` unless
+/// it runs, under `shadow` and `on`).
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Snapshot {
     pub(crate) jobs: Option<JobsSeen>,
     pub(crate) hosts: Vec<HostSeen>,
     pub(crate) curves: Option<CurveView>,
+    pub(crate) memory: Option<MemoryShadowView>,
 }
 
 /// `value` as a label value: a backslash, a double quote and a line feed escaped.
@@ -137,6 +142,30 @@ fn histogram(out: &mut String, name: &str, help: &str, histogram: &Histogram) {
     let _ = writeln!(out, "{name}_bucket{{le=\"+Inf\"}} {count}");
     let _ = writeln!(out, "{name}_sum {}", seconds(sum));
     let _ = writeln!(out, "{name}_count {count}");
+}
+
+/// The series of `histogram` under the label `phase="{phase}"`, with no family lines.
+fn phase_series(out: &mut String, name: &str, phase: &str, histogram: &Histogram) {
+    let (below, count, sum_micros) = histogram.read();
+    for (le, seen) in below {
+        let _ = writeln!(out, "{name}_bucket{{phase=\"{phase}\",le=\"{le}\"}} {seen}");
+    }
+    let sum = Duration::from_micros(sum_micros);
+    let _ = writeln!(
+        out,
+        "{name}_bucket{{phase=\"{phase}\",le=\"+Inf\"}} {count}"
+    );
+    let _ = writeln!(out, "{name}_sum{{phase=\"{phase}\"}} {}", seconds(sum));
+    let _ = writeln!(out, "{name}_count{{phase=\"{phase}\"}} {count}");
+}
+
+fn submit_phases(out: &mut String, recorder: &Recorder) {
+    let name = "js_submit_phase_seconds";
+    let help = "How long each phase of each SubmitJob call took, by phase: validation (the checks of the job), get (the read of its id, for a job with one), admission (for a job not yet held), insert-checkout (of the insert, getting connections of the store's pool), insert-transaction (the rest of the insert) or note-inserted (the placer told of the job, never waiting for a pass). A call is timed in each phase it reaches, whatever the answer.";
+    family(out, name, "histogram", help);
+    for (phase, histogram) in SUBMIT_PHASES.iter().zip(&recorder.submit_phases) {
+        phase_series(out, name, phase, histogram);
+    }
 }
 
 fn counter(out: &mut String, name: &str, help: &str, value: u64) {
@@ -209,12 +238,13 @@ pub(crate) fn render(seen: &Snapshot, recorder: &Recorder) -> String {
         &recorder.job_pass,
     );
     let name = "js_job_tables_total";
-    let help = "Passes over the queued jobs, by where each took the job tables from: read from the store, kept from the last read with no write since, or kept with the jobs this server's submits recorded since added to them.";
+    let help = "Passes over the queued jobs, by where each took the job tables from: read from the store, kept from the last read with no write since, kept with the jobs this server's submits recorded since added to them, or brought up to date from the store's feed with the rows that changed since the last read.";
     family(&mut out, name, "counter", help);
     for (from, count) in TABLES_FROM.iter().zip(&recorder.job_tables) {
         let count = count.load(Ordering::Relaxed);
         let _ = writeln!(out, "{name}{{from=\"{from}\"}} {count}");
     }
+    submit_phases(&mut out, recorder);
     callbacks(&mut out, recorder);
     refusals(&mut out, recorder);
     let expired = recorder.curve_wait_expiries.load(Ordering::Relaxed);
@@ -225,6 +255,9 @@ pub(crate) fn render(seen: &Snapshot, recorder: &Recorder) -> String {
     hosts(&mut out, seen);
     if let Some(view) = &seen.curves {
         curves(&mut out, view);
+    }
+    if let Some(view) = &seen.memory {
+        memory_shadow(&mut out, view);
     }
     out
 }
@@ -330,6 +363,71 @@ fn hosts(out: &mut String, seen: &Snapshot) {
     for (host, mark) in marked {
         let (host, state) = (label(host.host.as_str()), mark_text(mark));
         let _ = writeln!(out, "{name}{{host=\"{host}\",state=\"{state}\"}} 1");
+    }
+}
+
+/// The families of the memory shadow, written only while it runs (`--placement-curves shadow`
+/// and `on`): how each placement compared with a booking that follows the classes' memory
+/// curves, and each host's projected memory against its readings. Nothing in them is booked.
+fn memory_shadow(out: &mut String, view: &MemoryShadowView) {
+    let name = "js_memory_curve_placements_total";
+    let help = "Placements of queued jobs by how a booking that follows the classes' memory curves would have placed them (shadow only, nothing is booked by it): same, sooner (an earlier walk fitted a host the flat memory booking refused) or later (the curve would not have fitted the host the flat booking chose).";
+    family(out, name, "counter", help);
+    let verdicts = [
+        ("same", view.same),
+        ("sooner", view.sooner),
+        ("later", view.later),
+    ];
+    for (verdict, count) in verdicts {
+        let _ = writeln!(out, "{name}{{verdict=\"{verdict}\"}} {count}");
+    }
+    let help = "The time, summed over the placements counted sooner, from the first walk at which the memory curve fitted a host the flat memory booking refused to the placement, in milliseconds.";
+    counter(
+        out,
+        "js_memory_curve_sooner_milliseconds_total",
+        help,
+        view.sooner_ms,
+    );
+    type Of = fn(&HostMemoryShadow) -> Option<u64>;
+    let per_host: [(&str, &str, &str, Of); 5] = [
+        (
+            "js_host_memory_projected_bytes",
+            "gauge",
+            "What each host's live jobs are projected to hold now by their classes' memory curves (their flat memory booking where a class has none), as the last placement walk found it, in bytes.",
+            |seen| Some(seen.projected_bytes),
+        ),
+        (
+            "js_host_memory_measured_bytes",
+            "gauge",
+            "The memory each host's last reading showed in use (the whole host's non-file memory when its agent reports it), in bytes.",
+            |seen| seen.measured_bytes,
+        ),
+        (
+            "js_host_memory_projection_checks_total",
+            "counter",
+            "Readings of each host compared with the memory projection the walk before them made of their moment.",
+            |seen| Some(seen.checks),
+        ),
+        (
+            "js_host_memory_projection_low_total",
+            "counter",
+            "Readings of each host that showed more memory in use than the projection the walk before them made of their moment.",
+            |seen| Some(seen.too_low),
+        ),
+        (
+            "js_host_memory_projection_short_bytes_total",
+            "counter",
+            "What each host's readings showed beyond the projection, summed over the readings counted in js_host_memory_projection_low_total, in bytes.",
+            |seen| Some(seen.short_bytes),
+        ),
+    ];
+    for (name, kind, help, of) in per_host {
+        family(out, name, kind, help);
+        for (host, seen) in &view.hosts {
+            if let Some(value) = of(seen) {
+                let _ = writeln!(out, "{name}{{host=\"{}\"}} {value}", label(host.as_str()));
+            }
+        }
     }
 }
 

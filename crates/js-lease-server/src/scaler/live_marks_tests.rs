@@ -4,6 +4,7 @@
 //! Every clock is manual; nothing sleeps.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use js_jobs::interfere::Interfere;
 use js_jobs::{JobState, ScaleMark};
@@ -19,6 +20,9 @@ use crate::agents::Agents;
 use crate::job_store::{ServerIds, ServerJobs};
 use crate::scaler::{Call, Effects};
 use crate::sched::cordon_tests::{h1, jobs_of, queue, server, state, store_on};
+
+/// The grace a hello is judged with: the hosts here are new, so no row is live.
+const GRACE: Duration = Duration::from_secs(10);
 
 /// Two servers over one store, with the scaler's effects over the first one's agents.
 fn two(name: &str) -> Rig {
@@ -120,6 +124,7 @@ fn hello_row() -> js_jobs::NodeHello {
         labels: std::collections::BTreeMap::new(),
         phase: js_agent_wire::Phase::Serving,
         agent_process: None,
+        agent_version: None,
     }
 }
 
@@ -134,14 +139,17 @@ fn a_removed_host_leaves_no_row_to_fill_its_pool() {
     jobs.hello_node(&h1(), &hello_row()).unwrap();
     let next = HostId::new("h2").unwrap();
     assert!(matches!(
-        jobs.hello_node_in_pool(&next, &hello_row(), 1),
+        jobs.hello_node_in_pool(&next, &hello_row(), 1, GRACE),
         Err(js_jobs::JobStoreError::PoolFull { .. })
     ));
     effects.call(Call::ReleaseHost, "h1");
     assert_eq!(effects.remove("h1"), Ok(()));
     assert_eq!(jobs.read_node(&h1()).unwrap(), None);
     assert_eq!(row(&a), None);
-    assert!(jobs.hello_node_in_pool(&next, &hello_row(), 1).is_ok());
+    assert!(
+        jobs.hello_node_in_pool(&next, &hello_row(), 1, GRACE)
+            .is_ok()
+    );
 }
 
 /// Asserts that a removed host's row that a beat moves between the read and the delete is

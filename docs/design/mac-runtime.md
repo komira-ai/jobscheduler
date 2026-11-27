@@ -33,7 +33,7 @@ No crate needs to merge or split.
 
 macOS has no namespaces and no cgroups. Each part of a job maps to the primitive below.
 - **"Enforced today"** means the native runtime uses the primitive now.
-- **"Check"** names what checks the claim. It is either an asserted `js-mac-probe` probe, which runs on the beta stage's macOS runner ("new" marks one that section 4 adds), or a root test that an operator runs on a provisioned Mac.
+- **"Check"** names what checks the claim. It is either an asserted `js-mac-probe` probe, which runs on the beta stage's macOS runner (the `limits/*` probes and the asserted `proc/rusage-other-processes` are section 4's step 1), or a root test that an operator runs on a provisioned Mac.
 
 These facts were not re-checked on current macOS releases beyond those checks.
 
@@ -44,10 +44,10 @@ These facts were not re-checked on current macOS releases beyond those checks.
 | `root`, layers | No overlay or bind mounts. The options are `clonefile` (same APFS volume, copy-on-write) and a per-run disk image. Layers are refused (`rootfs-unsupported-here`, `docs/design/job-rootfs.md` 5.1). | refused | `fs/clonefile-*` |
 | `mounts` | Copies into the run's `exec/`, write-denied by the profile (`files.rs`). A job start's `READ_ONLY` and `READ_WRITE` mounts of host paths below `/work` are links in `exec/` with a Seatbelt grant of the canonical path, an exec deny when `no_exec`, and every mount root a read deny of every run (`job-rootfs.md` 5.2 and 5.4, built in `native/mounts.rs`); copy-on-write mounts are refused. | yes, read-only and read-write; copy-on-write refused | `sandbox/control-write-input`; the links, grants and read denies: `native::mounts` in `tests/agent/native/mounts.rs` |
 | network | pf rules matching the pool's uids (TCP and UDP only; DNS through `mDNSResponder` is outside pf), plus Seatbelt for `off` and `loopback` (a `none` job gets loopback under every ceiling but `off`). Loopback is shared by every user of the host, its services included. | yes | `net/off-refuses-loopback`, `net/loopback-allows-loopback`; a `none` job on loopback: `js-agent/tests/native_privileged/loopback.rs`; pf by root test `pf_as_root` |
-| `rlimits`: `RLIMIT_NPROC` | Counted per uid, so per run | yes (`--native-max-processes`, agent-wide) | new: `limits/nproc-per-uid` |
-| `rlimits`: `RLIMIT_FSIZE` | Per process | yes (`--native-max-file-mib`, agent-wide) | new: `limits/fsize` |
-| memory (`resources.memory`) | No cgroup. `setrlimit` accepts `RLIMIT_AS`, `RLIMIT_RSS` and `RLIMIT_DATA` but macOS does not enforce them. Jetsam limits are a private interface. What remains is reading each process's footprint (`proc_pid_rusage`, `ri_phys_footprint`) and killing the uid. | **no** | `proc/rusage-own-child` today; new: `limits/as-not-enforced`; `proc/rusage-other-processes`, an info probe today, becomes asserted and reads a process of another uid |
-| CPU (`resources.cpu`) | No quota. `taskpolicy`, `setpriority` and the QoS classes change priority only. `RLIMIT_CPU` ends one process after a number of CPU seconds; it is not a rate. | **no** | new: `limits/cpu-seconds` |
+| `rlimits`: `RLIMIT_NPROC` | Counted per uid, so per run | yes (`--native-max-processes`, agent-wide) | `limits/nproc-per-uid` |
+| `rlimits`: `RLIMIT_FSIZE` | Per process | yes (`--native-max-file-mib`, agent-wide) | `limits/fsize` |
+| memory (`resources.memory`) | No cgroup. `setrlimit` accepts `RLIMIT_AS`, `RLIMIT_RSS` and `RLIMIT_DATA` but macOS does not enforce them. Jetsam limits are a private interface. What remains is reading each process's footprint (`proc_pid_rusage`, `ri_phys_footprint`) and killing the uid. | **no** | `proc/rusage-own-child`; `limits/as-not-enforced`; `proc/rusage-other-processes`, root (through `sudo -n`, as the agent is root) reading a process of the runner's uid |
+| CPU (`resources.cpu`) | No quota. `taskpolicy`, `setpriority` and the QoS classes change priority only. `RLIMIT_CPU` ends one process after a number of CPU seconds; it is not a rate. | **no** | `limits/cpu-seconds` |
 | disk | No per-user quota on an APFS volume. A per-run disk image of fixed size would cap a run. Disk caps are not required here. | no | none |
 | VMs | Virtualization.framework, with at most 2 macOS guests per host under Apple's licence (the VM path, `js-vmm`). Apple's Containerization runs Linux containers, each in a small VM, on macOS 26: Linux guests only, so it does not run macOS jobs. | the VM path | none |
 
@@ -71,7 +71,7 @@ These facts were not re-checked on current macOS releases beyond those checks.
 - Memory and CPU go into the heartbeat as a Linux run's usage does. Rightsizing from history then works on Macs as on Linux.
 
 **Steps, each shippable:**
-1. The new asserted probes of section 3, in `js-mac-probe`.
+1. The asserted probes of section 3, in `js-mac-probe` (done: `crates/js-mac-probe/src/macos/limits.rs` and `usage.rs`).
 2. Usage (done, as **Today** above says): the agent's sample of the run's processes at each poll and the supervisor's `wait4`, the job's usage and series from them, and the heartbeat's load from the host's counters.
 3. The memory cap: `memory_cap_bytes`, the kill, and the `oom_killed` report.
 

@@ -18,6 +18,8 @@ mod outage;
 mod phase;
 mod rank;
 mod recover;
+mod reservation_log;
+pub(crate) use reservation_log::Placement;
 mod snapshot;
 mod state;
 mod view;
@@ -55,6 +57,7 @@ use crate::fence::HANDOVER_GRACE;
 use crate::headroom::MemoryPercent;
 use crate::input::Request;
 use crate::requeue::{Requeue, RequeueReason};
+use crate::reservation::ReservationEnd;
 use crate::servable::{Attempt, Matches, Placed, Servable, Verdict};
 use crate::unservable::Unservable;
 use memory::{MemoryLadder, MemoryState};
@@ -164,6 +167,8 @@ struct Held {
     /// When the grant was made (proposed), and when the worker reported it started.
     granted_at: FarmTime,
     started_at: Option<FarmTime>,
+    /// What its placement expected of it, for its release record.
+    placement: reservation_log::Placement,
 }
 
 /// When a `Start` was emitted, and the worker session and daemon process it was sent to.
@@ -265,10 +270,11 @@ pub struct Scheduler {
     /// ([`Scheduler::with_memory_percent`]).
     memory_percent: MemoryPercent,
     /// The worker each blocked head of the queue holds (see [`Scheduler::place`]); the
-    /// last round's, kept so the hold does not wander.
+    /// last round's, read only to count a hold that changed worker.
     head_holds: BTreeMap<OperationId, WorkerId>,
     /// The whole-node settings ([`Scheduler::with_whole_node`]); `None` holds a worker for
-    /// a blocked whole-machine request by leases and booking alone.
+    /// a blocked whole-machine request as for an action that owns its worker: by the
+    /// least tail, one per pool, with no mark and no cap.
     whole_node: Option<WholeNodeConfig>,
     /// The longest each operation the caller named one for may run
     /// ([`Scheduler::set_max_wall`]), until the operation is retired. Not in the request,
@@ -342,24 +348,26 @@ impl Scheduler {
 
     /// This scheduler, holding the worker for a blocked whole-machine request that is the
     /// cheapest to drain ([`js_whole::cost::drain_cost`]: the latest end bound of its
-    /// leases, then the fewest leases, then the first by name) instead of the one with the
-    /// fewest leases and the least booked. An end bound is a lease's start plus the longest
-    /// it may run ([`Scheduler::set_max_wall`]). Without this a scheduler holds by leases
-    /// and booking alone.
+    /// leases, then the fewest leases, then the first by name) under a mark, held to the
+    /// caps below. An end bound is a lease's start plus the longest it may run
+    /// ([`Scheduler::set_max_wall`]). Without this a scheduler holds the worker cheapest
+    /// to drain as for an action that owns its worker: picked again every round, for the
+    /// first whole-machine request of a pool in queue order, with no mark and no cap.
     ///
     /// A worker that fits (one with no lease) is taken at once while the ceiling and the
     /// floor kept for ordinary work allow one more whole worker (`max_draining` does not
     /// apply: the take drains nothing, and the last-capable rule is not read: an older
     /// ordinary request a quiet worker could run is placed on it first). A request that
     /// holds a mark takes it whatever the caps, as its mark is already counted; any other
-    /// that a cap stops stays queued and [`Scheduler::whole_wait`] says which. A request that fits
-    /// nowhere holds a worker only after it has waited `drain_after` since it was queued,
-    /// and marks it ([`Scheduler::whole_mark`]) with a deadline of `drain_deadline`, or the
-    /// longest it may run when none is set (the one given with
-    /// [`Scheduler::set_max_wall`]; with neither, the end of time). The deadline is when
+    /// that a cap stops stays queued and [`Scheduler::whole_wait`] says which. A request that
+    /// fits nowhere holds a worker in the first round that sees it, and marks it
+    /// ([`Scheduler::whole_mark`]) with a deadline of `drain_deadline`, or the longest it
+    /// may run when none is set (the one given with [`Scheduler::set_max_wall`]; with
+    /// neither, the end of time). The deadline is when
     /// the worker is expected to be drained at the latest: reaching it does not give the
     /// hold up, so the mark stays until the request is placed or cancelled, and nothing
-    /// running is stopped. `max_reserve_attempts` and `reserve_backoff` are not read. The
+    /// running is stopped. `drain_after`, `max_reserve_attempts` and `reserve_backoff` are
+    /// not read: nothing waits before it holds, and nothing counts its attempts. The
     /// marks and bars are in memory only; a recovered scheduler has none until
     /// [`Scheduler::restore_whole`] puts them back.
     ///
@@ -495,6 +503,7 @@ impl Scheduler {
     /// Releases `operation`'s holding (booking and lease), if it has one. `end` is how its
     /// run ended, for the shape guard ([`Admission::run_ended`]).
     fn release(&mut self, id: OperationId, end: RunEnd) {
+        self.record_release(id);
         let op = self.ops.get_mut(&id).expect("released operations exist");
         if let Some((lease, worker)) = op.state.holding() {
             let held = self.held.remove(&lease);
@@ -563,22 +572,26 @@ impl Scheduler {
     /// the load predicate admits it (see [`crate::LoadConfig`]), and workers are ranked by
     /// what they are charged, measured and predicted, instead of by what is booked. An
     /// action that has a worker with room but for the predicate is blocked; the first
-    /// such action of a pool in queue order (the head) holds the worker of the pool with
-    /// the smallest binding ratio, `max((L_cpu + p) / C_cpu, (L_mem + m) / C_mem)`, and
-    /// keeps it while its ratio is within a tenth of the best: no operation after it in
-    /// queue order is placed there but as backfill ([`Scheduler::with_backfill`]), so the
-    /// worker empties as its leases end. At most one
-    /// worker is held per pool, work before the head is never held back, and the head
-    /// of a pool blocked only by the cold cap holds nothing. A worker held for a
-    /// whole-machine operation or for a head, a draining, cordoned or whole-machine worker
-    /// is out before the predicate is read.
+    /// such action of a pool in queue order (the head) holds the worker of the pool where
+    /// it could start first (its start time; among equals the smallest binding ratio,
+    /// `max((L_cpu + p) / C_cpu, (L_mem + m) / C_mem)`, then the first by name), picked
+    /// again every round: no operation after it in queue order is placed there but as
+    /// backfill ([`Scheduler::with_backfill`]), so the worker empties as its leases end.
+    /// At most one worker is held per pool, by the head or by an action that owns its
+    /// worker (below), the first in queue order; work before the head is never held back,
+    /// and the head of a pool blocked only by the cold cap holds nothing. A worker held
+    /// for a whole-machine operation or for a head, a draining, cordoned or whole-machine
+    /// worker is out before the predicate is read.
     ///
-    /// A whole-machine operation that fits nowhere holds one worker that could run it
-    /// (the one it held last round while that still could, else the one with fewest
-    /// leases): no operation after it in queue order (less urgent, or as urgent and
-    /// younger) is placed there but as backfill, so the worker empties as its leases end. Work before
-    /// it in queue order still is, so a reservation never holds back more urgent work.
-    /// It lasts while the operation is queued and the worker could run it. No other
+    /// A whole-machine operation that fits nowhere, and an action that owns its worker,
+    /// holds one worker that could run it (the one cheapest to drain, picked again every
+    /// round; with whole-node settings a whole-machine operation marks it instead, as
+    /// above): no operation after it in queue order (less urgent, or as urgent and
+    /// younger) is placed there but as backfill, so the worker empties as its leases end.
+    /// Work before it in queue order still is, so a reservation never holds back more
+    /// urgent work. Such a hold, but a whole-machine mark, takes its pool's one hold of the
+    /// round (a whole-machine request's pool holds whole-machine requests alone). It
+    /// lasts while the operation is queued and the worker could run it. No other
     /// operation holds a worker: an action at a worker's whole memory (the last step of
     /// the memory ladder) waits until some worker has no lease, and under sustained
     /// spread load that wait can be long, since nothing reserves a worker for it.
@@ -687,7 +700,7 @@ impl Scheduler {
                             if whole_kind {
                                 whole.placed_whole();
                             }
-                            placed.push((id, p));
+                            placed.push((id, p.noted(&attempt, &holds)));
                         }
                     }
                     Ok(()) => {}
@@ -702,7 +715,8 @@ impl Scheduler {
                 && {
                     let fit = servable.fit(&mut self.workers, &mut self.admission, &attempt);
                     blocked = fit.blocked;
-                    fit.placed.map(|p| placed.push((id, p))).is_some()
+                    let noted = fit.placed.map(|p| p.noted(&attempt, &holds));
+                    noted.map(|p| placed.push((id, p))).is_some()
                 };
             let verdict = if fitted {
                 Verdict::Servable
@@ -727,66 +741,56 @@ impl Scheduler {
                 && verdict == Verdict::Servable
                 && self.backfill.only(id).is_none()
             {
+                self.backfill.blocked(id, now);
                 let held = match &self.whole_node {
-                    Some(cfg) if request.kind == LeaseKind::WholeMachine => {
-                        let turn = self.drain.turn(id, op.queued_at, now, cfg);
-                        turn.and_then(|turn| {
-                            match self.hold_whole(
-                                &mut servable,
-                                &whole,
-                                (id, position),
-                                &reserved,
-                                &placed,
-                                turn,
-                            ) {
-                                Ok(held) => held.map(|(name, mark, tail)| {
-                                    whole.marks.insert(id, mark);
-                                    (name, tail)
-                                }),
-                                Err(wait) => {
-                                    whole.waits.insert(id, wait);
-                                    None
-                                }
-                            }
-                        })
-                    }
-                    // Without whole-node settings: as it always was, the worker with the
-                    // fewest leases, kept while it could run the request, and no limit
-                    // on how many requests hold a worker.
-                    None => servable
-                        .reserve_by_leases(
-                            &self.workers,
-                            request,
+                    Some(_) if request.kind == LeaseKind::WholeMachine => {
+                        let turn = self.drain.turn(id, now);
+                        match self.hold_whole(
+                            &mut servable,
+                            &whole,
+                            (id, position),
                             &reserved,
-                            &op.avoid,
-                            self.reservations.get(&id),
-                        )
-                        .map(|name| (name, None)),
-                    // With settings, an action that owns its worker holds one worker per
-                    // pool, by the least tail, the first request in queue order taking it
-                    // (a blocked head shares the pool's slot below).
-                    Some(_) => {
+                            &placed,
+                            turn,
+                        ) {
+                            Ok(held) => held.map(|(name, mark, tail)| {
+                                whole.marks.insert(id, mark);
+                                (name, tail)
+                            }),
+                            Err(wait) => {
+                                whole.waits.insert(id, wait);
+                                None
+                            }
+                        }
+                    }
+                    // An action that owns its worker, and a whole-machine request without
+                    // whole-node settings: one worker per pool, by the least tail, picked
+                    // again every round, the first request in queue order taking it (an
+                    // owner action shares its pool's slot with a blocked head below; a
+                    // whole-machine request's pool holds only whole-machine requests).
+                    // The drain order is read only while the pool's slot is open.
+                    _ => {
                         let pool = servable.pool(&self.workers, request);
-                        let drain = self.drain_order(&placed);
-                        let open = !held_pools.contains(&pool);
-                        let name = open
+                        let held = (!held_pools.contains(&pool))
                             .then(|| {
+                                let drain = self.drain_order(&placed);
                                 let unmarked = self.off_marks(&reserved, id);
-                                servable.reserve(
+                                let name = servable.reserve(
                                     &self.workers,
                                     request,
                                     unmarked.as_ref().unwrap_or(&reserved),
                                     &op.avoid,
                                     None,
                                     &drain,
-                                )
+                                )?;
+                                let tail = gate::tail_of(&drain, &name);
+                                Some((name, tail))
                             })
                             .flatten();
-                        if name.is_some() {
+                        if held.is_some() {
                             held_pools.insert(pool);
                         }
-                        let tail = name.as_ref().and_then(|name| gate::tail_of(&drain, name));
-                        name.map(|name| (name, tail))
+                        held
                     }
                 };
                 if let Some((name, start)) = held {
@@ -823,22 +827,14 @@ impl Scheduler {
                     fit_minutes,
                 };
                 let kept = self.head_holds.get(&id);
-                // Without whole-node settings the hold is what it always was, by the
-                // binding ratio; with them, by the start time.
-                let held = match &self.whole_node {
-                    None => servable
-                        .hold_for_head(&self.workers, &self.admission, &attempt, kept)
-                        .map(|name| (name, None)),
-                    Some(_) => {
-                        let ends = self.lease_ends(&placed);
-                        servable.hold_for_head_by_start(
-                            &self.workers,
-                            &self.admission,
-                            &attempt,
-                            &ends,
-                        )
-                    }
-                };
+                // By the start time, whether or not whole-node settings are on.
+                let ends = self.lease_ends(&placed);
+                let held = servable.hold_for_head_by_start(
+                    &self.workers,
+                    &self.admission,
+                    &attempt,
+                    &ends,
+                );
                 if let Some((name, start)) = held {
                     self.admission.counters.reservations += u64::from(kept != Some(&name));
                     self.backfill.hold(&mut holds, id, &name, start);
@@ -868,7 +864,7 @@ impl Scheduler {
         self.drain.marks = whole.marks;
         self.drain.waits = whole.waits;
         self.head_holds = head_holds;
-        self.backfill.end_round(holds);
+        self.backfill.end_round(holds, now);
         for (id, verdict) in verdicts {
             // A size a key floor gave it and no live worker can hold is lowered, not
             // waited on: the next round judges the smaller request.
@@ -883,7 +879,11 @@ impl Scheduler {
                 booked,
                 device,
                 cost,
+                placement,
             } = placed;
+            self.reservation_ended(id, || ReservationEnd::Started {
+                worker: worker.clone(),
+            });
             let lease = LeaseId::new(self.term, self.next_seq);
             self.next_seq += 1;
             let op = self.ops.get_mut(&id).expect("queued operations exist");
@@ -903,6 +903,7 @@ impl Scheduler {
                     start_sent: None,
                     granted_at: self.now,
                     started_at: None,
+                    placement,
                 },
             );
             self.cap_wall(id, &worker);

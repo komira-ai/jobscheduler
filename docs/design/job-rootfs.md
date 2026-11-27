@@ -1,8 +1,8 @@
 # A job's file system: layers, mounts and host ports
 
-Status: **design for the owner's review; of its build items (section 11), item 2, the agent wire, item 3, the
-public API and the server, item 4, the mounts in `js-contain`, item 5, the `crun` agent's file system, and item 6, host
-ports on `crun`, are built.** It replaces `docs/design/tree-inputs.md` and its build
+Status: **design for the owner's review; of its build items (section 11), items 1 to 6 and 8 are built, and item 7 (macOS) is built for read-only and
+read-write mounts and for host ports at their own number (the links, the profile items and the refusals) and not for
+copy-on-write mounts, host sockets or the native runtime's `prepare`.** It replaces `docs/design/tree-inputs.md` and its build
 items: jobscheduler does not know that a node-local cache exists, let alone which one. What tree-inputs.md asked of
 jobscheduler is met here by things any container runtime offers (layers, mounts, and access to a host port or socket),
 and the pieces of its wire that already merged (komira-ai/jobscheduler#842) are retired additively (section 6).
@@ -789,7 +789,7 @@ kept off the lifecycle worker, and what the bound means.
 
 ## 5. The agent on macOS
 
-Built for `READ_ONLY` and `READ_WRITE` mounts (`crates/js-agent/src/native/mounts.rs`, the `MountGrant` of `crates/js-mac-pool/src/seatbelt`): the links of 5.2, the profile items of 5.4, the refusals of 5.1, and the hello's `per-job`, `start-fence`, `held-beat` and `layered-rootfs`. Not built: copy-on-write mounts, host sockets and the native runtime's `prepare` (the lookups here are metadata calls answered at once). How a Mac gives a job a writable tree over a lazy one is **not chosen here**; a `COPY_ON_WRITE` mount is refused `rootfs-unsupported-here` until it is.
+Built for `READ_ONLY` and `READ_WRITE` mounts (`crates/js-agent/src/native/mounts.rs`, the `MountGrant` of `crates/js-mac-pool/src/seatbelt`): the links of 5.2, the profile items of 5.4, the refusals of 5.1, and the hello's `per-job`, `start-fence`, `held-beat` and `layered-rootfs`. Built for host ports at their own number: `--host-port` on the macOS build (`crates/js-agent/src/host_ports/mod.rs`, `HostPortFlags`), the native runtime's `host_ports` (`crates/js-agent/src/native/mod.rs`) and the profile item of 5.4 (`Policy::with_host_ports`, `crates/js-mac-pool/src/seatbelt/policy.rs`). Not built: copy-on-write mounts, host sockets and the native runtime's `prepare` (the lookups here are metadata calls answered at once). How a Mac gives a job a writable tree over a lazy one is **not chosen here**; a `COPY_ON_WRITE` mount is refused `rootfs-unsupported-here` until it is.
 That choice waits for measurements of a lazy provider's real macOS mount (13, Q1). This section fixes everything that does not
 depend on it: what the Mac agent does with each field of the same `JobStartSpec`, the Seatbelt view, and the
 three candidate mechanisms with the tests that will decide between them. The wire and the server of sections 2 and 3 do
@@ -808,7 +808,7 @@ not change whichever wins, because all three realise the same thing: a `COPY_ON_
 | `mounts[i].sub_path` | resolved beneath the host path as on Linux; the link of 5.2 points at the result |
 | `mounts[i].no_exec` | a Seatbelt deny of `process-exec*` and `file-map-executable` for the mount's path (5.4) |
 | `mounts[i].propagation` | private is what a link gives: nothing mounted on the host later appears through it unless it is mounted below the linked path itself, which the provider controls |
-| `host_ports`, job port equal to the host port | allowed in the Seatbelt profile (5.4); not built: the native runtime offers no host port, so the lifecycle's host-port admission refuses it `input-not-allowed` |
+| `host_ports`, job port equal to the host port | allowed in the Seatbelt profile (5.4); built: the native runtime offers the ports `--host-port` lists, and a start that names another is refused `input-not-allowed` by the lifecycle's host-port admission, as on Linux |
 | `host_ports`, job port different from the host port | refused `host-port-remap-unsupported-here`: a native job shares the host's loopback, so it reaches a host port only at its own number; placement never sends one (2.6) |
 | `host_sockets` (designed) | a link at the target in `exec/`, which must be below `/work` as a mount's is, and a Seatbelt grant to connect to the socket (5.4) |
 
@@ -899,10 +899,11 @@ The profile of a run with mounts (reads stay open, `ReadModel::Open`), whichever
 - **Host sockets (designed).** `(allow network-outbound (remote unix-socket (path-literal (param "HS_i"))))` per socket,
   after the narrowing as host ports are, and a read grant of the socket's path; the operator's `--host-socket` bounds
   them.
-- **Host ports.** The profile's network rules come from the run's level narrowed to the agent's ceiling
+- Built. **Host ports.** The profile's network rules come from the run's level narrowed to the agent's ceiling
   (`Net::narrow`), and narrowing never widens: at a ceiling of `off` it cannot yield `Net::Ports`. So host ports are not
   a level. A separate policy item, applied after the narrowing, adds `(allow network* (remote ip "localhost:<port>"))`
-  per port when the narrowed level is `Off` (which `Net::Ports` renders today as the `off` rules plus those lines);
+  per port when the narrowed level is `Off` (which `Net::Ports` renders today as the `off` rules plus those lines;
+  `Policy::with_host_ports`, and at `Ports` the host ports join the level's own, each port listed once);
   at `Loopback`, `On` and `Open` loopback is not filtered (pf passes loopback, `crates/js-mac-provision/src/render.rs`),
   so the port is reachable already. The operator's `--host-port`, not the ceiling, bounds the ports. Loopback is shared
   by every user of a Mac, as `seatbelt/net.rs` already says.
@@ -1285,7 +1286,9 @@ One subject per pull request, in this order; each names its tests from section 1
    adoption. The listener binds the job port and the forwarder connects to the host port, which differ only in the
    number each uses.
 7. **macOS** (`js-agent`, `js-mac-pool`): the links, the profile items of 5.4 and the refusals are built for `READ_ONLY`
-   and `READ_WRITE` mounts; the native runtime's `prepare` and the chosen candidate of 5.3 wait until it is chosen.
+   and `READ_WRITE` mounts and for host ports at their own number (`--host-port` on the macOS build, the native
+   runtime's `host_ports`, `Policy::with_host_ports`); the native runtime's `prepare` and the chosen candidate of 5.3
+   wait until it is chosen.
 8. **An end-to-end run on one Linux node** with a FUSE file system as a layer's and a mount's source, a registry on
    `127.0.0.1`, and a service on a host port: the job reads lazily, writes copy up, the upload reaches the service, the
    run directory is removed, the integrity check passes, and a restart of the FUSE file system's service while no job

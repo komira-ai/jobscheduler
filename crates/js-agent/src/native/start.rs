@@ -16,14 +16,17 @@
 //!    working directory made, and its bundle's writable trees cloned into `exec/.trees`.
 //! 6. `profile-built`: the account's own per-user temporary and cache folders are found (asked
 //!    of the system as the account), and the Seatbelt profile of the run is built
-//!    (`native/profile.rs`), granting writes to the run directory and to those two folders.
+//!    (`native/profile.rs`), granting writes to the run directory and to those two folders,
+//!    and a connect to each host port the start names.
 //! 7. `supervisor-started`: `js-agent __supervise-native` is started through the
 //!    [`Launcher`], with the run's environment (and nothing else), its working directory,
 //!    and its three log files in the scratch directory as standard input, output and error.
 //!    It drops to the account, sets the run's limits, applies the profile and starts the
 //!    program, keeping the agent's responsibility.
 //! 8. `job-ready`: the supervisor said the job started: its pid (and process group) and its
-//!    audit session are kept with the run, and the journal records the run.
+//!    audit session are kept with the run, and the journal records the run, with the
+//!    supervisor's identity (its pid and start time) and the put target, by which a later
+//!    process takes the run back (`native/adopt.rs`).
 //!
 //! A failure at any step after the account is lent retires the account and marks the lease
 //! done, so nothing of the run is left; an account whose retirement fails is held by the pool,
@@ -35,9 +38,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use js_agent_wire::{BUNDLE_PROGRAM_PREFIX, Isolation, NativeSpec, NetworkLevel};
-use js_mac_pool::seatbelt::{AbsPath, MountGrant};
+use js_mac_pool::seatbelt::{AbsPath, MountGrant, ReadModel};
 
-use super::journal::RunRecord;
+use super::journal::{PutRecord, RunRecord};
 use super::run::{Job, Run};
 use super::{
     NativeRuntime, accounts, bundle, cwd, env, fail, files, logs, make_dir, mounts, profile, put,
@@ -46,7 +49,7 @@ use super::{
 use crate::bundle::Pinned;
 use crate::lifecycle::{Body, RunHandle, RunSpec, Runtime, RuntimeError, Status, check_run_env};
 use crate::mac_accounts::{Account, Pool};
-use crate::mac_supervisor::{LaunchRequest, SuperviseSpec};
+use crate::mac_supervisor::{LaunchRequest, SuperviseSpec, SupervisorId};
 use crate::mac_usage::RunUsage;
 
 /// The names of the steps of a start, in the order they are done.
@@ -62,16 +65,16 @@ pub const STEPS: [&str; 8] = [
 ];
 
 /// The directory of a run's scratch directory the supervisor writes its records in.
-const RECORDS_DIR: &str = "supervisor";
+pub(super) const RECORDS_DIR: &str = "supervisor";
 
 /// The directory below `--native-accounts` the self-test's run keeps its scratch in.
 const SELF_TEST_DIR: &str = "self-test";
 
 /// The most polls the self-test makes for its run to end, a pause apart.
-const SELF_TEST_POLLS: u32 = 3000;
+pub(super) const SELF_TEST_POLLS: u32 = 3000;
 
 /// The pause between two polls of the self-test.
-const SELF_TEST_PAUSE: Duration = Duration::from_millis(10);
+pub(super) const SELF_TEST_PAUSE: Duration = Duration::from_millis(10);
 
 /// What the steps after the account is lent are given.
 struct Lent<'a> {
@@ -82,6 +85,8 @@ struct Lent<'a> {
     pinned: Option<Pinned>,
     developer_dir: Option<PathBuf>,
     plans: Vec<mounts::MountPlan>,
+    /// The run's put target, as the journal keeps it.
+    put: Option<PutRecord>,
 }
 
 impl NativeRuntime {
@@ -136,6 +141,11 @@ impl NativeRuntime {
             pinned,
             developer_dir,
             plans,
+            put: put.as_ref().map(|(target, output)| PutRecord {
+                dir: target.dir.clone(),
+                key_prefix: target.key_prefix.clone(),
+                output: output.clone(),
+            }),
         };
         match self.launch(lent, &mut marks) {
             Ok(mut run) => {
@@ -175,6 +185,7 @@ impl NativeRuntime {
             pinned,
             developer_dir,
             plans,
+            put,
         } = lent;
         let uid = account.uid;
         let home = self.config.homes.join(&account.name);
@@ -249,8 +260,26 @@ impl NativeRuntime {
             .map(|rules| rules.mount_trees())
             .transpose()
             .map_err(|why| fail(&"the trees", &why))?;
+        let reads = self.reads_of(pinned.as_ref(), spec.xcode.as_deref())?;
+        // Under the allow model a run reads nothing outside its run directory that no grant
+        // names: its files, which the profile keeps unwritable, are granted for reading.
+        if let (profile::Reads::Allow(..), Some(dir)) = (&reads, files) {
+            let path = AbsPath::new(dir).map_err(|why| fail(&dir.display(), &why))?;
+            grants.push(MountGrant {
+                path,
+                write: false,
+                no_exec: false,
+            });
+        }
         let net = profile::level(&self.config, native.network, bundle_net);
-        let built = profile::build(&self.config, &net, &home, (&read_only, &grants), trees)?;
+        let built = profile::build(
+            &self.config,
+            &net,
+            &home,
+            (&read_only, &grants),
+            (trees, reads),
+            &spec.host_ports,
+        )?;
         self.mark(marks, STEPS[5]);
         // The job start's environment over the agent's (its values win), then the account's
         // names, which no job may set.
@@ -277,6 +306,7 @@ impl NativeRuntime {
                 // account's processes.
                 max_processes: self.config.max_processes.saturating_add(1),
                 record_dir: records.display().to_string(),
+                parent: Some(std::process::id()),
             },
             env: &env,
             cwd: &cwd,
@@ -286,6 +316,10 @@ impl NativeRuntime {
             .launcher
             .launch(request)
             .map_err(|why| fail(&"the supervisor", &why))?;
+        // Read while the supervisor surely waits for its job: a later process takes the run
+        // back by it (`native/adopt.rs`). A supervisor already gone has none, and its run is
+        // not taken back.
+        let supervisor = SupervisorId::of(supervised.pid(), &*self.start_of);
         self.mark(marks, STEPS[6]);
         let ready = supervised.wait_ready().map_err(|ended| {
             fail(
@@ -305,9 +339,11 @@ impl NativeRuntime {
             bundle: spec.bundle.clone(),
             account: Some(account.name.clone()),
             uid: Some(uid),
+            supervisor,
+            put,
         };
-        // A record that cannot be written costs nothing a restart needs: the pool's open
-        // retires the account whatever the journal says.
+        // A record that cannot be written costs only the run's adoption after a restart: the
+        // next process does not know the run, and the pool's open retires its account.
         if let Err(why) = self.journal.started(lease, &record) {
             tracing::warn!("native {lease}: the run is not recorded: {why}");
         }
@@ -360,15 +396,27 @@ impl NativeRuntime {
     /// Runs `/usr/bin/true` through every step of a start, its end and its removal, so an
     /// agent whose supervisor, profile or account pool cannot run a job never says hello. A
     /// runtime with no pool (the agent does not hold Full Disk Access) runs nothing: it
-    /// refuses every native job anyway. The run's scratch directory is `self-test` below
-    /// `--native-accounts`, which no run may read.
+    /// refuses every native job anyway; nor does one with no account ready while runs taken
+    /// back from an earlier process hold accounts (`native/adopt.rs`). The run's scratch directory is `self-test` below
+    /// `--native-accounts`, which no run may read. Under `--read-model allow` the allow read
+    /// model's self-test follows (`native/allow.rs`); a runtime that skipped the run of
+    /// `/usr/bin/true` skips it too, and then runs no bundle under that model.
     ///
     /// # Errors
     ///
     /// A step failed, the program did not exit 0, or it did not end in time (it is stopped
-    /// and removed).
+    /// and removed); or the allow read model's self-test failed.
     pub fn self_test(&mut self) -> Result<(), RuntimeError> {
-        if self.pool.is_none() {
+        let Some(pool) = &self.pool else {
+            return Ok(());
+        };
+        // The runs taken back after a restart hold their accounts' uids until they end: with
+        // none ready, the self-test's account may have no uid to take, and an agent that
+        // cannot start would leave those runs with no one to report them.
+        if pool.ready_count() == 0 && self.holds_adopted() {
+            tracing::warn!(
+                "native: no self-test: no account is ready, and runs taken back hold uids"
+            );
             return Ok(());
         }
         let scratch = self.config.accounts.state.join(SELF_TEST_DIR);
@@ -388,17 +436,23 @@ impl NativeRuntime {
         }
         self.remove(&id)?;
         match status {
-            Status::Exited(exit) if exit.code == 0 => Ok(()),
-            Status::Running => Err(RuntimeError::new("/usr/bin/true did not end")),
-            other => Err(RuntimeError::new(format!(
-                "/usr/bin/true ended as {other:?}"
-            ))),
+            Status::Exited(exit) if exit.code == 0 => {}
+            Status::Running => return Err(RuntimeError::new("/usr/bin/true did not end")),
+            other => {
+                return Err(RuntimeError::new(format!(
+                    "/usr/bin/true ended as {other:?}"
+                )));
+            }
+        }
+        match self.config.read_model {
+            ReadModel::Allow => self.allow_self_test(),
+            ReadModel::Open => Ok(()),
         }
     }
 }
 
 /// Makes `dir` empty and private to the agent: what an earlier self-test left is removed.
-fn fresh_dir(dir: &Path) -> std::io::Result<()> {
+pub(super) fn fresh_dir(dir: &Path) -> std::io::Result<()> {
     match fs::remove_dir_all(dir) {
         Err(why) if why.kind() != std::io::ErrorKind::NotFound => return Err(why),
         _ => {}

@@ -26,7 +26,9 @@
 //!   booking ([`Run::limit_hits`] above zero: the caller judges it) needed at least the
 //!   booking: it is a held sample of `max(peak, booked)`, so its key books a step above the
 //!   booking next, and steps again while its runs keep reaching it. A success that swapped
-//!   is a held sample of its peak. Held samples are sized with the same margin as measured
+//!   ([`Run::swap_peak_bytes`] above zero) had part of what it held pushed out of memory: it
+//!   is a held sample of its peak plus its swap peak (the most it can have held at once) (and, when it also reached its booking, of at least
+//!   the booking). Held samples are sized with the same margin as measured
 //!   ones, and a held sample is kept below the host, so its step never passes the host
 //!   (one that reaches it is [`Fallback::OverCap`], below). Every other success's peak is a
 //!   measurement whatever its booking. CPU samples are successful runs with CPU time that started below
@@ -150,6 +152,12 @@
 //! mean is above the level, so it can only raise its class. [`series_agrees`] says
 //! whether a recorded CPU series matches the run's exact CPU time within 5%.
 //!
+//! [`Profile::tail_p90`] is the 90th percentile of the runs' peaks after 128 s, which a
+//! memory profile needs: its tail mean is no bound on what a run holds at once. A
+//! [`MemoryCurve`] reads a memory profile into what a job of the class would hold at each slot
+//! of its age, with the margin of the flat memory booking and never above it, once the profile
+//! has scored [`CHECK_RUNS`] runs; nothing books it, and the job service reads it in shadow.
+//!
 //! A kept run is its slots (4 bytes each, at most 64), a few counters and its end time:
 //! about 330 bytes. A profile of 64 runs is about 21 KiB, and the self-check
 //! window adds 16 pairs of counters.
@@ -160,6 +168,7 @@
 mod codec;
 mod curve;
 mod key;
+mod memory_curve;
 mod profile;
 mod run;
 mod store;
@@ -172,6 +181,7 @@ pub use curve::{
     age_slot,
 };
 pub use key::{Basis, Cfg, Day, Instance, Key, Level, PlatformClass, Shape};
+pub use memory_curve::MemoryCurve;
 pub use profile::{
     BUCKETS, CHECK_RUNS, CPU_UNIT, Checked, Combine, FIT_PERMILLE, HALF_LIFE_MS, MAX_RUNS,
     MEMORY_UNIT, MIN_RUNS, MIN_SLOT_RUNS, OVERRUN_PERMILLE, Profile, RunSeries, SLOT_SECS,

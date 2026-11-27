@@ -29,7 +29,9 @@
 //!    `--native-accounts` and the places only the privacy controls guard
 //!    (`native/fence.rs`) are denied reads (`native/profile.rs`), and so is everything
 //!    below the homes (`<homes>`: every other account's home) and below root's home,
-//!    whatever their modes; the account's own home stays readable.
+//!    whatever their modes; the account's own home stays readable. Hard links and clones
+//!    from every read-denied place and homes root are denied too (the account's own home
+//!    granted both back), since a read deny matches paths.
 //! 5. The agent starts `js-agent __supervise-native` ([`crate::mac_supervisor`]) with the
 //!    run's environment and nothing else, the working directory, and the job's three standard
 //!    streams as files in the run's scratch directory, which only the agent can enter: an
@@ -55,10 +57,18 @@
 //! own `.trees` directory (below `exec/`), and `@bundle/<entrypoint>` resolved to the file in
 //! the store (or the clone) that the bundle's config names; the environment and arguments are
 //! the bundle's rules applied to the job's own (see `native/bundle.rs`). The pins end with
-//! the run.
+//! the run. Under `--read-model allow` its profile is an allow-list: it reads the base set of
+//! the host's macOS version, its run directory, its run files and mounts, the bundle's trees,
+//! the kinds the bundle declares and the Xcode the start names, and nothing else; the runtime
+//! builds one only after the model's self-test passed at start (`native/allow.rs`), and a run
+//! that pins no bundle keeps the open model.
 //!
-//! A restart of the agent ends every native run: the pool's open retires every account an
-//! earlier process lent, and the journal's runs are listed ended (`native/adopt.rs`).
+//! A run outlives a restart of the agent: its supervisor goes on waiting for the job and writes
+//! the exit record with no agent running. The next process takes back each run of the journal
+//! whose supervisor is still the process it recorded, or whose exit record is there: the
+//! pool's open keeps the run's account, and the run is polled, stopped and removed as one this
+//! process started. Every other account an earlier process lent is retired by the open, and
+//! the other runs are listed ended (`native/adopt.rs`).
 //!
 //! # Privacy grants (TCC)
 //!
@@ -108,9 +118,11 @@
 //! all (`native/profile.rs`, `level`). A Mac has one loopback for every user, so a job can
 //! reach the host's own services on loopback and the listeners of the other jobs of the Mac.
 //!
-//! What this runtime does not do yet: stage a `stage` input (this agent keeps no stage
-//! trees: a start that names one is refused `native-unsupported`), forward a declared port (a
-//! start that declares any is refused `ports-not-supported`, see `native/network.rs`).
+//! A `stage` input is refused `native-unsupported`: this agent keeps no stage trees, and a
+//! job's inputs are mounts of host paths (`docs/design/job-rootfs.md`, D66).
+//!
+//! What this runtime does not do yet: forward a declared port (a start that declares any is
+//! refused `ports-not-supported`, see `native/network.rs`).
 //! Toolchains get their temporary files from `TMPDIR` (inside the run directory) and may also
 //! write the account's own per-user temporary and cache folders.
 //!
@@ -119,6 +131,7 @@
 
 mod accounts;
 mod adopt;
+mod allow;
 mod bundle;
 mod cwd;
 mod end;
@@ -151,9 +164,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use js_agent_wire::{
     BUNDLE_PROGRAM_PREFIX, CpuSeries, HostPort, InputRef, JobUsage, LogReport, LogTail,
-    MemorySeries, NativeSpec, refusal,
+    MemorySeries, NativeSpec, PortRange, refusal,
 };
-use js_mac_pool::seatbelt::{AbsPath, ReadModel};
+use js_mac_pool::seatbelt::{AbsPath, Assurance, ReadModel};
 use js_mac_session::full_disk_access::FullDiskAccess;
 
 use crate::bundle::Placer;
@@ -164,15 +177,16 @@ use crate::lifecycle::{
 };
 use crate::logs::LiveLogs;
 use crate::mac_accounts::{Pool, Retired};
-use crate::mac_supervisor::Launcher;
+use crate::mac_supervisor::{Launcher, StartOf};
 use crate::mac_sweep::{MacTable, ProcessTable};
 use crate::mac_usage::macos::MacProcesses;
 use crate::mac_usage::{ProcessUsage, Series};
 use crate::usage::{MonotonicClock, UsageClock as _};
 
 pub use accounts::Accounts;
+pub use allow::{ReadAllow, read_model_named};
 pub use files::HandOver;
-pub use journal::{Journal, RunRecord};
+pub use journal::{Journal, PutRecord, RunRecord};
 pub use mounts::{MountRoot, roots_of};
 pub use network::Ceiling;
 pub use pf::{Enforcer, PfFlags, PfPolicy, ProvisionError};
@@ -204,8 +218,14 @@ pub struct NativeConfig {
     /// The roots a job's mounts must lie beneath once their links are followed
     /// (`--mount-root`, `--mount-root-ro`), canonical; also in `read_denies`.
     pub mount_roots: Vec<MountRoot>,
-    /// Which reads the profile permits. The runtime builds no grants, so only
-    /// [`ReadModel::Open`] gives a profile; with the other every start fails.
+    /// The ports of the host's loopback a job may reach (`--host-port`): a start that names
+    /// another is refused `input-not-allowed`, and the profile of a start that names one
+    /// allows a connect to it whatever the run's level.
+    pub host_ports: Vec<PortRange>,
+    /// Which reads the profile of a run that pins a bundle permits (`--read-model`): under
+    /// [`ReadModel::Allow`] such a run reads only what its grants name (`native/allow.rs`),
+    /// which needs the runtime's [`ReadAllow`] and the assurance of its start-up self-test.
+    /// A run that pins no bundle keeps [`ReadModel::Open`] under either.
     pub read_model: ReadModel,
     /// The file the lease journal is kept in (in the state root).
     pub journal: PathBuf,
@@ -269,12 +289,21 @@ pub struct NativeRuntime {
     /// How many polls the self-test makes for its run to end; none is the default
     /// ([`NativeRuntime::with_self_test_polls`] sets it for tests).
     self_test_polls: Option<u32>,
+    /// What the allow read model needs of the host, under `--read-model allow`
+    /// ([`NativeRuntime::with_read_allow`]).
+    read_allow: Option<ReadAllow>,
+    /// The proof that the allow read model's self-test passed in this process: only with it
+    /// does a run that pins a bundle get a profile under that model.
+    assurance: Option<Assurance>,
     /// What a run's processes are sampled from at each poll ([`crate::mac_usage`]).
     processes: Arc<dyn ProcessUsage>,
     /// The series each run records (`--cpu-series`, `--memory-series`).
     series: Series,
     /// The monotonic clock the samples are timed by, in microseconds.
     mono_us: Clock,
+    /// When a process started, by which a supervisor is known again after a restart
+    /// (`native/adopt.rs`).
+    start_of: StartOf,
 }
 
 /// Finds an account's own per-user temporary and cache folders (its uid's, below
@@ -305,8 +334,9 @@ impl NativeRuntime {
     /// A runtime whose runs start through `launcher`, over the account pool of
     /// `config.accounts` on this Mac, which it opens when `config.full_disk_access` is
     /// [`FullDiskAccess::Granted`] (and leaves closed otherwise: every start is then refused).
-    /// The pool is opened with no adopted job, so every account an earlier process lent is
-    /// retired. Its run ids are `term.0`, `term.1` and so on.
+    /// The pool keeps the accounts of the runs of the journal this process takes back
+    /// ([`NativeRuntime::adoptable`]) and retires every other account an earlier process
+    /// lent. Its run ids are `term.0`, `term.1` and so on.
     ///
     /// # Errors
     ///
@@ -317,7 +347,8 @@ impl NativeRuntime {
         term: u64,
     ) -> Result<Self, RuntimeError> {
         gate(&config)?;
-        let pool = accounts::open(&config.accounts, config.full_disk_access)?;
+        let adopted = Self::adoptable(&config.journal);
+        let pool = accounts::open(&config.accounts, config.full_disk_access, &adopted)?;
         let own: OwnFolders = Arc::new(crate::mac_accounts::own_folders);
         Ok(Self::open_ungated(pool, launcher, config, term)?.with_own_folders(own))
     }
@@ -376,9 +407,12 @@ impl NativeRuntime {
             committed: BTreeMap::new(),
             own_folders: None,
             self_test_polls: None,
+            read_allow: None,
+            assurance: None,
             processes: Arc::new(MacProcesses::new()),
             series: Series::default(),
             mono_us: system_mono_clock(),
+            start_of: Arc::new(crate::mac_supervisor::macos::start_of),
         })
     }
 
@@ -592,10 +626,10 @@ impl Runtime for NativeRuntime {
         self.drop_unstarted()
     }
 
-    /// Every run this runtime holds, the runs an earlier process left listed ended first
-    /// (`native/adopt.rs`).
+    /// Every run this runtime holds, the runs an earlier process left taken back or listed
+    /// ended first (`native/adopt.rs`).
     fn list_labelled(&mut self) -> Result<Vec<Found>, RuntimeError> {
-        self.list_ended()?;
+        self.take_back()?;
         Ok(self.found())
     }
 
@@ -624,8 +658,8 @@ impl Runtime for NativeRuntime {
     }
 
     /// What the run's processes used: from the samples of the polls and the supervisor's wait
-    /// of the job (`crate::mac_usage`); none for a run this process did not start, or one
-    /// with neither.
+    /// of the job (`crate::mac_usage`); none for a run an earlier process left that was not
+    /// taken back, or one with neither. A run taken back is sampled from its first poll here.
     fn usage(&mut self, id: &RunHandle) -> Option<JobUsage> {
         let job = self.runs.get(&id.0)?.job.as_ref()?;
         job.usage.usage(job.reaped)
@@ -682,6 +716,14 @@ impl Runtime for NativeRuntime {
             code: refusal::IMAGE_UNSUPPORTED_HERE,
             why: "this agent runs an image only as a bundle, with a run".to_owned(),
         })
+    }
+
+    /// The host ports `--host-port` allows: a native job reaches each it names at its own
+    /// number on the host's loopback, which its profile opens to that port whatever its level
+    /// (`native/profile.rs`). A run taken back after a restart keeps the profile it started
+    /// with, so it loses none ([`Runtime::host_port_lost`] keeps its default).
+    fn host_ports(&self) -> Vec<PortRange> {
+        self.config.host_ports.clone()
     }
 
     /// Mounts of host paths, as links in `exec/` (`native/mounts.rs`); layers are refused.

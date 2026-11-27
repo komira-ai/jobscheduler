@@ -5,6 +5,7 @@
 
 use std::sync::Barrier;
 use std::thread;
+use std::time::Duration;
 
 use js_agent_wire::Phase;
 use js_state::StoreError;
@@ -15,7 +16,11 @@ use crate::codec::{FORMAT, LATER_FORMAT};
 use crate::interfere::INJECTED;
 use crate::{JobStoreError, NodeHello};
 
-/// The hello of a host of the pool `pool`.
+/// The grace the hellos of this module are judged with: a host that says hello again here
+/// names the agent process its row names, so it is admitted within it.
+const GRACE: Duration = Duration::from_secs(10);
+
+/// The hello of a host of the pool `pool`, by the agent process `proc-1`.
 pub(super) fn hello_in(pool: &str) -> NodeHello {
     NodeHello {
         session: None,
@@ -24,7 +29,8 @@ pub(super) fn hello_in(pool: &str) -> NodeHello {
         shape: None,
         labels: std::collections::BTreeMap::new(),
         phase: Phase::Serving,
-        agent_process: None,
+        agent_process: Some("proc-1".to_owned()),
+        agent_version: None,
     }
 }
 
@@ -52,7 +58,7 @@ where
     let hello = hello_in("pool-a");
     let first = rig
         .jobs
-        .hello_node_in_pool(&host("host-1"), &hello, 2)
+        .hello_node_in_pool(&host("host-1"), &hello, 2, GRACE)
         .expect("below the cap");
     assert_eq!(
         (first.record.epoch, first.record.pool.as_str()),
@@ -65,13 +71,13 @@ where
         "{name}: the row written is the row returned"
     );
     rig.jobs
-        .hello_node_in_pool(&host("host-2"), &hello, 2)
+        .hello_node_in_pool(&host("host-2"), &hello, 2, GRACE)
         .expect("one below the cap");
 
     let before = rig.snapshot().0;
     assert_eq!(
         rig.jobs
-            .hello_node_in_pool(&host("host-3"), &hello, 2)
+            .hello_node_in_pool(&host("host-3"), &hello, 2, GRACE)
             .map(drop),
         Err(full("host-3", "pool-a")),
         "{name}: at the cap"
@@ -80,28 +86,28 @@ where
 
     let again = rig
         .jobs
-        .hello_node_in_pool(&host("host-1"), &hello, 2)
+        .hello_node_in_pool(&host("host-1"), &hello, 2, GRACE)
         .expect("a host with a row is admitted at the cap");
     assert_eq!(again.record.epoch, 2, "{name}: the known host's epoch");
     let again = rig
         .jobs
-        .hello_node_in_pool(&host("host-2"), &hello, 0)
+        .hello_node_in_pool(&host("host-2"), &hello, 0, GRACE)
         .expect("a host with a row is admitted whatever the cap");
     assert_eq!(again.record.epoch, 2, "{name}: the known host, cap 0");
 
     assert_eq!(
         rig.jobs
-            .hello_node_in_pool(&host("host-4"), &hello_in("pool-empty"), 0)
+            .hello_node_in_pool(&host("host-4"), &hello_in("pool-empty"), 0, GRACE)
             .map(drop),
         Err(full("host-4", "pool-empty")),
         "{name}: a cap of 0"
     );
     rig.jobs
-        .hello_node_in_pool(&host("host-5"), &hello_in("pool-b"), 1)
+        .hello_node_in_pool(&host("host-5"), &hello_in("pool-b"), 1, GRACE)
         .expect("another pool's rows are not counted");
     assert_eq!(
         rig.jobs
-            .hello_node_in_pool(&host("host-6"), &hello_in("pool-b"), 1)
+            .hello_node_in_pool(&host("host-6"), &hello_in("pool-b"), 1, GRACE)
             .map(drop),
         Err(full("host-6", "pool-b")),
         "{name}: the other pool at its cap"
@@ -110,14 +116,14 @@ where
     rig.put_raw("node/host-later", vec![LATER_FORMAT]);
     rig.put_raw("node/host-junk", vec![FORMAT]);
     rig.jobs
-        .hello_node_in_pool(&host("host-7"), &hello_in("pool-c"), 1)
+        .hello_node_in_pool(&host("host-7"), &hello_in("pool-c"), 1, GRACE)
         .expect("rows that cannot be read are not counted");
 
     let before = rig.snapshot().0;
     rig.store.fail_next();
     assert_eq!(
         rig.jobs
-            .hello_node_in_pool(&host("host-8"), &hello_in("pool-d"), 5)
+            .hello_node_in_pool(&host("host-8"), &hello_in("pool-d"), 5, GRACE)
             .map(drop),
         Err(JobStoreError::Store(StoreError::Failed(
             INJECTED.to_owned()
@@ -140,18 +146,18 @@ where
     let rig = rig(backend);
     let hello = hello_in("pool-a");
     rig.jobs
-        .hello_node_in_pool(&host("host-1"), &hello, 3)
+        .hello_node_in_pool(&host("host-1"), &hello, 3, GRACE)
         .expect("admitted");
 
     let other = rig.other();
     let theirs = hello.clone();
     rig.store.before_next(move || {
         other
-            .hello_node_in_pool(&host("host-2"), &theirs, 3)
+            .hello_node_in_pool(&host("host-2"), &theirs, 3, GRACE)
             .expect("the other server admits first");
     });
     rig.jobs
-        .hello_node_in_pool(&host("host-3"), &hello, 3)
+        .hello_node_in_pool(&host("host-3"), &hello, 3, GRACE)
         .expect("room is left after the other's admission");
     assert_eq!(
         rig.jobs.nodes().map(|(_, rows)| rows.len()),
@@ -163,13 +169,13 @@ where
     let theirs = hello.clone();
     rig.store.before_next(move || {
         other
-            .hello_node_in_pool(&host("host-4"), &theirs, 4)
+            .hello_node_in_pool(&host("host-4"), &theirs, 4, GRACE)
             .expect("the other server admits first");
     });
     let before = rig.jobs.nodes().expect("reads").1;
     assert_eq!(
         rig.jobs
-            .hello_node_in_pool(&host("host-5"), &hello, 4)
+            .hello_node_in_pool(&host("host-5"), &hello, 4, GRACE)
             .map(drop),
         Err(full("host-5", "pool-a")),
         "{name}: the pool filled while the hello committed"
@@ -197,7 +203,7 @@ pub fn two_servers_admitting_hosts_one_slot_from_the_cap_admit_exactly_one<B: Ba
         let hello = hello_in(&pool);
         for member in 0..2 {
             rig.jobs
-                .hello_node_in_pool(&host(&format!("m-{round}-{member}")), &hello, 3)
+                .hello_node_in_pool(&host(&format!("m-{round}-{member}")), &hello, 3, GRACE)
                 .expect("below the cap");
         }
         let (one, two) = (host(&format!("n-{round}-1")), host(&format!("n-{round}-2")));
@@ -205,11 +211,13 @@ pub fn two_servers_admitting_hosts_one_slot_from_the_cap_admit_exactly_one<B: Ba
         let answers: Vec<Result<(), JobStoreError>> = thread::scope(|scope| {
             let first = scope.spawn(|| {
                 barrier.wait();
-                rig.jobs.hello_node_in_pool(&one, &hello, 3).map(drop)
+                rig.jobs
+                    .hello_node_in_pool(&one, &hello, 3, GRACE)
+                    .map(drop)
             });
             let second = scope.spawn(|| {
                 barrier.wait();
-                other.hello_node_in_pool(&two, &hello, 3).map(drop)
+                other.hello_node_in_pool(&two, &hello, 3, GRACE).map(drop)
             });
             [first, second]
                 .into_iter()
@@ -256,10 +264,10 @@ where
     assert_eq!(admits("host-1", 1), Ok(true), "{name}: an empty pool");
     assert_eq!(admits("host-1", 0), Ok(false), "{name}: a cap of 0");
     rig.jobs
-        .hello_node_in_pool(&host("host-1"), &hello, 1)
+        .hello_node_in_pool(&host("host-1"), &hello, 1, GRACE)
         .expect("below the cap");
     rig.jobs
-        .hello_node_in_pool(&host("elsewhere-1"), &hello_in("pool-b"), 9)
+        .hello_node_in_pool(&host("elsewhere-1"), &hello_in("pool-b"), 9, GRACE)
         .expect("another pool");
     let before = rig.snapshot();
     assert_eq!(admits("host-2", 1), Ok(false), "{name}: at the cap");

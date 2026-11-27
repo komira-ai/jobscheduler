@@ -9,6 +9,12 @@
 //!   row cannot be written is refused 503 `state-write-failed`, and the registry gives up the
 //!   session it admitted, so the agent's next hello is not refused `host-live` by a session
 //!   nobody holds.
+//! - **A live host** is judged on its row twice: the registry judges the hello on the row the
+//!   refresh read ([`refresh`]), and the row's write judges it again on the row as it stands
+//!   ([`js_jobs::JobStore::hello_node_in_pool`]): a row heard within the pool's grace whose
+//!   agent process is not the hello's refuses it 409 `host-live`, so of two hellos of one host
+//!   by two agent processes on two servers at once one is admitted. As for the cap below, the
+//!   token's use and the binding the refused hello committed before the row stand.
 //! - **The pool's cap** counts every server's rows. A hello of a host that has no row is judged
 //!   against it before anything of the hello is written ([`room_in_pool`]): a full pool refuses
 //!   it 403 `pool-full`, with no token used and no binding written. The row's write decides it
@@ -93,6 +99,7 @@ pub(crate) async fn refresh(agents: &Arc<Agents>, host: &HostId) -> io::Result<(
             labels: record.labels,
             phase: record.state.phase,
             agent_process: record.agent_process,
+            agent_version: record.agent_version,
             silent_for: now.since(record.heard_at),
             binding: binding.map(|binding| binding.with_taint(None).with_cordon(None)),
         };
@@ -164,8 +171,9 @@ pub(super) async fn room_in_pool(
 ///
 /// # Errors
 ///
-/// The row could not be written: 503 `state-write-failed`, and the registry has given up the
-/// session it admitted.
+/// `409 host-live` when the row, read again in the write, holds a live session of another agent
+/// process; otherwise the row could not be written: 503 `state-write-failed`. Either way the
+/// registry has given up the session it admitted.
 pub(super) async fn hello_row(
     agents: &Arc<Agents>,
     host: &HostId,
@@ -187,6 +195,9 @@ pub(super) async fn hello_row(
             *welcome = answer;
             Ok(())
         }
+        // Another agent process's hello was written to the row since the registry judged this
+        // one on it: the host is live, as the registry would have answered on that row.
+        Err(JobStoreError::HostLive { .. }) => Err(super::refused_hello(hello, &Refusal::HostLive)),
         Err(error) => {
             warn!(%error, %host, "agent hello refused: its session could not be written");
             Err(Refused::new(
@@ -198,15 +209,18 @@ pub(super) async fn hello_row(
 }
 
 /// Writes the hello the registry admitted as `welcome` into the row of `host`
-/// ([`js_jobs::JobStore::hello_node_in_pool`], under the pool's cap when it has one): the digest
-/// of the welcome's secret, what the hello announced, and the shape the registry books. The
+/// ([`js_jobs::JobStore::hello_node_in_pool`], under the pool's cap when it has one, and judged
+/// live on the row by the pool's grace): the digest
+/// of the welcome's secret, what the hello announced (its agent version included), and the
+/// shape the registry books. The
 /// store numbers the epoch, and the registry and `welcome` take that number. Nothing without
 /// the job tables. It blocks on the store.
 ///
 /// # Errors
 ///
-/// The row could not be written, or the pool filled since [`room_in_pool`] read it
-/// ([`JobStoreError::PoolFull`]): the registry has given up the session it admitted
+/// The row could not be written, the pool filled since [`room_in_pool`] read it
+/// ([`JobStoreError::PoolFull`]), or the row holds a live session of another agent process
+/// ([`JobStoreError::HostLive`]: another server wrote its hello since the refresh): the registry has given up the session it admitted
 /// ([`js_registry::Registry::abandon`]), so no beat of it is taken and the next hello is not
 /// refused `host-live` for it. The token's use and the binding the hello committed before the
 /// row stand.
@@ -228,9 +242,12 @@ pub(crate) fn record_hello(
         labels: hello.labels.clone(),
         phase: hello.phase,
         agent_process: hello.agent_process.clone(),
+        agent_version: Some(hello.agent_version.clone()),
     };
     let cap = agents.registry.pool_cap(&hello.pool).unwrap_or(usize::MAX);
-    match jobs.hello_node_in_pool(host, &row, cap) {
+    // The registry admitted the hello into its pool, so it serves the pool and has its grace.
+    let grace = agents.registry.pool_grace(&hello.pool).unwrap_or_default();
+    match jobs.hello_node_in_pool(host, &row, cap, grace) {
         Ok(row) => {
             agents
                 .registry

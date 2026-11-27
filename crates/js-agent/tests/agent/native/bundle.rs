@@ -15,6 +15,7 @@ use js_agent::lifecycle::{Body, RunHandle, RunSpec, Runtime, Status};
 use js_agent::native::{Ceiling, Journal, NativeConfig};
 use js_agent_wire::{NetworkLevel, Outcome, refusal};
 use js_bundle::DottedVersion;
+use js_mac_pool::seatbelt::ReadModel;
 use serde_json::json;
 
 use super::grant::{Over, job};
@@ -481,17 +482,20 @@ fn a_job_that_sets_tmpdir_is_refused_before_an_account_is_lent() {
     assert!(s.unpinned("7.0"));
 }
 
-/// Asserts that after a restart (a new runtime over the same state and the same store) the
-/// earlier run is listed and ended, and its bundle is not pinned again for it: the pins ended
-/// with the earlier process, and a run that is only ended holds no trees the store could not
-/// evict. It catches a restart that adopts a run it cannot watch, and one that keeps pins for
-/// it that nothing would ever release.
+/// Asserts that after a restart (a new runtime over the same state and the same store) an
+/// earlier run whose supervisor ended without a record is listed and ended, and its bundle is
+/// not pinned again for it: the pins ended with the earlier process, and a run that is only
+/// ended holds no trees the store could not evict. It catches a restart that keeps pins for an
+/// ended run that nothing would ever release.
 #[test]
 fn a_restarted_agent_pins_nothing_for_the_earlier_run() {
     let mut s = Stored::new("restart");
     let spec = s.spec("r1", "@bundle/tool", &[]);
     let old = s.rig.rt.create_and_start(&spec).unwrap();
     assert!(!s.unpinned(&old.0), "held while the process lives");
+    // The fake supervisor writes no exit record: once its job is reaped, nothing can tell how
+    // the run ended, and it is not taken back.
+    s.rig.settle(&old);
     let next = s.rig.reopened().with_bundles(Arc::clone(&s.store));
     drop(std::mem::replace(&mut s.rig.rt, next));
     assert!(s.unpinned(&old.0), "the pins end with the process");
@@ -560,6 +564,105 @@ fn a_bundle_rule_for_an_account_name_loses_to_the_accounts_value() {
         "{:?}",
         launched.env
     );
+    s.rig.settle(&id);
+    s.rig.rt.remove(&id).unwrap();
+}
+
+/// Asserts that under the allow read model a run that pins a bundle, on a runtime whose
+/// self-test has not passed, fails its start by saying so, retires its account and releases
+/// its pins, and starts no supervisor.
+///
+/// Catches: a bundle run under `--read-model allow` started under the open model, or under an
+/// allow profile no self-test on this host vouched for.
+#[test]
+fn a_bundle_run_under_the_allow_model_needs_the_self_tests_assurance() {
+    let mut s = Stored::built("allow-unassured", Spec::standard(), |config| {
+        config.read_model = ReadModel::Allow;
+    });
+    let lent = s.rig.accounts.records().remove(0);
+    let why = s
+        .rig
+        .rt
+        .create_and_start(&s.spec("r1", "@bundle/tool", &[]))
+        .unwrap_err();
+    assert_eq!(
+        why.0,
+        "the allow read model: its self-test has not passed in this process"
+    );
+    let records = s.rig.accounts.records();
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_ne!(records[0], lent, "the account is retired");
+    assert!(s.rig.pool.held().is_empty());
+    assert_eq!(live(&s.rig), Vec::<String>::new());
+    assert!(s.rig.launcher.launched().is_empty());
+    assert!(s.unpinned("7.0"));
+}
+
+/// Asserts that under the allow read model, with the self-test's assurance, a run that pins a
+/// bundle gets an allow-list profile: the default read deny, a read grant of each of the
+/// bundle's trees in the store, and a read grant of its run files' directory, which stays
+/// unwritable.
+///
+/// Catches: a bundle run whose profile reads everything, one that cannot read its own trees
+/// or its run files, and one that may write its run files.
+#[test]
+fn a_bundle_run_under_the_allow_model_reads_its_trees_and_its_files() {
+    let mut s = Stored::built("allow-assured", Spec::standard(), |config| {
+        config.read_model = ReadModel::Allow;
+    });
+    s.rig.rt = s.rig.rt.with_assurance(super::read_allow::assured());
+    let files = s.rig.dir.path("files-r1");
+    fs::create_dir(&files).unwrap();
+    fs::write(files.join("input"), "x").unwrap();
+    let mut spec = s.spec("r1", "@bundle/tool", &[]);
+    spec.files = Some(files.clone());
+    let id = s.rig.rt.create_and_start(&spec).unwrap();
+    let launched = s.rig.launcher.last();
+    assert!(
+        launched
+            .profile
+            .lines()
+            .any(|line| line == "(deny file-read*)"),
+        "{}",
+        launched.profile
+    );
+    let values: Vec<&str> = launched
+        .params
+        .iter()
+        .map(|(_, value)| value.as_str())
+        .collect();
+    for layer in &s.bundle.config.layers {
+        let tree = s.tree(layer.tree.as_str());
+        let tree = text(&tree);
+        let named: Vec<&String> = launched
+            .params
+            .iter()
+            .filter(|(name, value)| name.starts_with("TREE_") && *value == tree)
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(named.len(), 1, "{tree}: {:?}", launched.params);
+    }
+    let files_text = text(&files);
+    let granted: Vec<&String> = launched
+        .params
+        .iter()
+        .filter(|(name, value)| name.starts_with("GR_") && *value == files_text)
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(granted.len(), 1, "{values:?}");
+    assert!(
+        launched.profile.contains(&format!(
+            "(allow file-read* (subpath (param \"{}\")))",
+            granted[0]
+        )),
+        "{}",
+        launched.profile
+    );
+    let protected = launched
+        .params
+        .iter()
+        .any(|(name, value)| name.starts_with("IN_") && *value == files_text);
+    assert!(protected, "the files stay unwritable: {values:?}");
     s.rig.settle(&id);
     s.rig.rt.remove(&id).unwrap();
 }

@@ -194,11 +194,12 @@ async fn a_submit_after_a_quiet_pass_reads_no_table_and_its_pass_reads_none_agai
 }
 
 /// Asserts that a commit of another server over the same store, between the pass's read and
-/// the submit, makes the poked pass read the four tables again and place the job: the
-/// submit's commit is not the only write since. It catches tables kept past another server's
-/// write, which leave its job out of the pass.
+/// the submit, makes the poked pass take that commit too: the submit's commit is not the only
+/// write since, so the pass brings its tables up to date from the store's feed, scanning none
+/// of the four, places the job and judges the other server's job, writing its queue status. It
+/// catches tables kept past another server's write, which leave its job out of the pass.
 #[tokio::test]
-async fn a_submit_after_another_servers_write_has_its_pass_read_the_tables_again() {
+async fn a_submit_after_another_servers_write_has_its_pass_take_that_write_too() {
     let rig = placing_rig("submit_other_write");
     let api = api(&rig, true);
     rig.agents.place_jobs();
@@ -213,7 +214,62 @@ async fn a_submit_after_another_servers_write_has_its_pass_read_the_tables_again
     let _ = table_scans(&rig);
     submit(&api, wire("job-s")).await;
     poller::pass(&rig.agents).await;
-    let read_again = ["idx/alloc/host/", "idx/job/queued/", "mark/", "cordon/"];
-    assert_eq!(table_scans(&rig), read_again);
+    assert_eq!(table_scans(&rig), Vec::<String>::new());
     assert_eq!(rig.job(&id("job-s")).state, JobState::Placed);
+    let other = rig.job(&id("job-o")).queue.code();
+    assert_ne!(
+        other,
+        js_types::QueueCode::Unspecified,
+        "job-o was left out"
+    );
+}
+
+/// Asserts that a submit made while a pass reads the job tables again (the pass held on a gate
+/// the store holds its scan of the queued jobs at) is answered before the gate opens: the
+/// call records the job and answers `queued` without waiting for the pass, which holds the
+/// tables the call would add the job to. The held pass then reads the queue, with the job, and
+/// places it on the host. Before, the call waited for the whole read to tell the placer of its job, so it
+/// answered only once the gate opened (here, the test's bound). It catches a submit whose
+/// answer waits on a pass, and a job that is not placed once the call skipped telling the
+/// placer.
+#[tokio::test]
+async fn a_submit_during_a_pass_s_read_of_the_tables_answers_before_the_read_ends() {
+    let rig = placing_rig("submit_during_read");
+    let api = api(&rig, true);
+    rig.agents.place_jobs();
+    // A write since that read, so the next pass reads the tables again: a job that never
+    // fits, behind any other.
+    let other = JobStore::new(Arc::clone(&rig.store), RandomIds).unwrap();
+    let never = NewJob {
+        id: Some(id("job-never")),
+        spec: js_jobs::JobSpec {
+            needs: js_jobs::Needs::Shape(
+                js_types::Resources::new(64_000, 1 << 30, 0, None).unwrap(),
+            ),
+            ..spec()
+        },
+        priority: -1,
+        client: None,
+    };
+    other.insert_queued(never).unwrap();
+    // The feed trimmed past that write, so the next pass reads the four tables in full rather
+    // than taking the write from the feed.
+    let head = rig.jobs.feed_head().unwrap().unwrap();
+    js_state::Store::trim_feed(&*rig.store, head).unwrap();
+    let (entered_tx, entered) = std::sync::mpsc::channel();
+    let (open, opened) = std::sync::mpsc::channel::<()>();
+    rig.store.before_next_scan("idx/job/queued/", move || {
+        entered_tx.send(()).unwrap();
+        // Until the test opens the gate, or drops it.
+        let _ = opened.recv();
+    });
+    let agents = Arc::clone(&rig.agents);
+    let pass = std::thread::spawn(move || agents.place_jobs());
+    entered.recv().unwrap();
+    let waited = tokio::time::timeout(LONG, submit(&api, wire("job-g"))).await;
+    drop(open);
+    pass.join().unwrap();
+    let job = waited.expect("the submit waited for the pass's read");
+    assert_eq!(answered(&job), (v1::JobState::Queued, ""));
+    assert_eq!(rig.job(&id("job-g")).state, JobState::Placed);
 }

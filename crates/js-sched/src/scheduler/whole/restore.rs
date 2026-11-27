@@ -19,7 +19,7 @@ pub struct RestoredWhole {
     /// The operation: a whole-machine request the scheduler holds (recovered or
     /// submitted).
     pub operation: OperationId,
-    /// When it entered the queue: `drain_after` counts from it.
+    /// When it entered the queue: [`Scheduler::queue_snapshot`] ages it from then.
     pub queued_at: FarmTime,
     /// The workers barred to it, and how ([`Scheduler::whole_barred`]).
     pub bars: BTreeMap<WorkerId, Bar>,
@@ -88,12 +88,12 @@ impl Scheduler {
     /// Puts back the whole-node state `state` names for an operation this scheduler holds
     /// (one taken up with [`Scheduler::recover`] or [`Scheduler::take_in`], or submitted):
     /// its queue time, its bars and its mark, each replacing what the scheduler has for
-    /// it. A restart then neither restarts `drain_after` nor lifts a back-off or a bar,
+    /// it. A restart then neither resets the operation's age nor lifts a back-off or a bar,
     /// and a standing mark keeps its deadline and its tail end: the next round's backfill
     /// start on the worker is the restored tail end (or the tail now, if that ends
     /// sooner), never the start the mark it replaces held by. The next placement round
-    /// reads them as it reads its own: the mark is counted by the caps and kept while its
-    /// worker could hold the request, past its deadline too.
+    /// reads them as it reads its own: the mark is counted by the caps and picked again by
+    /// the least tail, past its deadline too, staying on its worker on a tie.
     ///
     /// Refused, changing nothing, without whole-node settings ([`WholeError::Off`]), for
     /// an operation it does not hold or that is not a whole-machine request, and for a mark

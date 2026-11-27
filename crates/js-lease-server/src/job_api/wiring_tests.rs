@@ -87,7 +87,7 @@ fn the_job_store_is_one_handle_shared_by_the_service() {
     let (_, jobs) = tables();
     let state = state(&dir, Some(Arc::new(jobs)));
     let logs = logs::Ctx::default();
-    let api = from_server(&state, WALL, false, logs).expect("the server holds a job store");
+    let api = from_server(&state, WALL, logs).expect("the server holds a job store");
     let held = state.agents().jobs.as_ref().unwrap();
     assert!(Arc::ptr_eq(&api.jobs, held));
 
@@ -124,7 +124,7 @@ fn the_job_store_is_one_handle_shared_by_the_service() {
 #[test]
 fn without_a_job_store_the_server_builds_no_job_service() {
     let dir = scratch("no_store");
-    assert!(from_server(&state(&dir, None), WALL, false, logs::Ctx::default()).is_none());
+    assert!(from_server(&state(&dir, None), WALL, logs::Ctx::default()).is_none());
 }
 
 /// Asserts that the fleet group of the job service built from the server's state is served
@@ -141,8 +141,8 @@ async fn the_fleet_group_is_served_over_the_servers_own_handles() {
     let pools = Arc::new(Status::new(None, None, Vec::new(), clock));
     let given = bare_state(&dir, Some(Arc::new(jobs))).with_pools(Arc::clone(&pools));
     let served = Arc::new(given);
-    let api = from_server(&served, WALL, false, logs::Ctx::default())
-        .expect("the server holds a job store");
+    let api =
+        from_server(&served, WALL, logs::Ctx::default()).expect("the server holds a job store");
     let hosts: Arc<dyn fleet::Hosts> = served.clone();
     assert_eq!(api.fleet, fleet::Ctx::served(hosts, pools, None));
 
@@ -150,8 +150,7 @@ async fn the_fleet_group_is_served_over_the_servers_own_handles() {
     let (_, jobs) = tables();
     let bare = state(&other, Some(Arc::new(jobs)));
     assert!(bare.pools().is_none());
-    let api = from_server(&bare, WALL, false, logs::Ctx::default())
-        .expect("the server holds a job store");
+    let api = from_server(&bare, WALL, logs::Ctx::default()).expect("the server holds a job store");
     assert_ne!(api.fleet, fleet::Ctx::default());
     let listed = fleet::list_pools(&api, tonic::Request::new(ListPoolsRequest::default())).await;
     let listed = listed.expect("ListPools is served").into_inner();
@@ -171,7 +170,7 @@ async fn answer(
     let clients = crate::config::Clients::only(&token(), "--token-file");
     let clients = crate::config::LiveClients::new(clients);
     let router = port(
-        from_server(&state, WALL, false, logs::Ctx::default()).unwrap(),
+        from_server(&state, WALL, logs::Ctx::default()).unwrap(),
         clients,
     );
     let mut request = Request::get("/v1/jobs/job-1");
@@ -246,7 +245,7 @@ async fn the_served_calls_are_the_ones_the_server_serves() {
     let dir = scratch("served");
     let (_, jobs) = tables();
     let state = state(&dir, Some(Arc::new(jobs)));
-    let api = Arc::new(from_server(&state, WALL, false, logs::Ctx::default()).unwrap());
+    let api = Arc::new(from_server(&state, WALL, logs::Ctx::default()).unwrap());
     let clients = crate::config::Clients::only(&token(), "--token-file");
     let clients = crate::config::LiveClients::new(clients);
     let authorization = format!("Bearer {}", String::from_utf8(TOKEN.to_vec()).unwrap());
@@ -285,13 +284,31 @@ async fn the_served_calls_are_the_ones_the_server_serves() {
     }
 }
 
-/// Asserts that the job service the server builds refuses a job's callback
-/// (`callback-not-enabled`) unless its start says it takes them, and that when it does it judges
-/// the callback by the server's own address rule: an address the agent side learned as the
-/// cluster's own is refused. It catches a service that takes callbacks the release does not, and
-/// one that judges them by a rule of its own, blind to the addresses the server learns.
+/// The 400 body the gateway answers for a refused `field`.
+fn invalid(field: &str) -> serde_json::Value {
+    serde_json::json!({
+        "error": "invalid-argument",
+        "field": field,
+        "reason": "the service refused an argument of the request",
+    })
+}
+
+/// The 422 body of a job no host and no catalog could ever serve: what a job that passed every
+/// check meets in a state with no host, so its check is shown passed.
+fn no_capable_host() -> (StatusCode, serde_json::Value) {
+    let body = serde_json::json!({ "error": "no-capable-host" });
+    (StatusCode::UNPROCESSABLE_ENTITY, body)
+}
+
+/// Asserts that the job service the server builds takes a job's callback over the gateway and
+/// judges it by the server's own address rule: a URL naming an address the agent side learned
+/// as the cluster's own is refused `spec.callback.url: refused-address`, and one naming another
+/// private address, which the rule admits, passes every check and reaches admission (which,
+/// with no host in this state, answers `no-capable-host`). It catches a service that refuses
+/// every callback, and one that judges them by a rule of its own, blind to the addresses the
+/// server learns.
 #[tokio::test]
-async fn the_service_takes_a_callback_only_when_its_start_says_so() {
+async fn the_service_judges_a_callback_by_the_clusters_address_rule() {
     use super::super::writes_rig::{to_json, wire};
     use js_proto::v1::{Callback, JobSpec, SubmitJobRequest};
     let dir = scratch("callbacks");
@@ -301,33 +318,77 @@ async fn the_service_takes_a_callback_only_when_its_start_says_so() {
         .agents()
         .cluster
         .add_cluster_address([10, 9, 9, 9].into());
-    let spec = JobSpec {
-        callback: Some(Callback {
-            url: "https://10.9.9.9/done".to_owned(),
-            signing_key: vec![1; 32],
-            deadline_seconds: None,
-        }),
-        ..wire("wired-callback")
-    };
-    let request = SubmitJobRequest { spec: Some(spec) };
-    let body = to_json("SubmitJobRequest", &request).to_string();
-    for (callbacks, field) in [
-        (false, "spec.callback: callback-not-enabled"),
-        (true, "spec.callback.url: refused-address"),
-    ] {
-        let clients = crate::config::Clients::only(&token(), "--token-file");
-        let clients = crate::config::LiveClients::new(clients);
-        let api = from_server(&state, WALL, callbacks, logs::Ctx::default()).unwrap();
-        let bearer = format!("Bearer {}", String::from_utf8(TOKEN.to_vec()).unwrap());
-        let request = Request::post("/v1/jobs")
-            .header(header::AUTHORIZATION, bearer)
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(body.clone()))
-            .unwrap();
-        let response = port(api, clients).oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{callbacks}");
-        let body = to_bytes(response.into_body(), 1 << 16).await.unwrap();
-        let said: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(said["field"], field, "{callbacks}");
+    let refused = (
+        StatusCode::BAD_REQUEST,
+        invalid("spec.callback.url: refused-address"),
+    );
+    let cases = [
+        ("https://10.9.9.9/done", refused),
+        ("https://10.0.0.5/done", no_capable_host()),
+    ];
+    for (index, (url, answer)) in cases.into_iter().enumerate() {
+        let spec = JobSpec {
+            callback: Some(Callback {
+                url: url.to_owned(),
+                signing_key: vec![1; 32],
+                deadline_seconds: None,
+            }),
+            ..wire(&format!("wired-callback-{index}"))
+        };
+        let request = SubmitJobRequest { spec: Some(spec) };
+        let said = posted(&state, &to_json("SubmitJobRequest", &request).to_string()).await;
+        assert_eq!(said, answer, "{url}");
     }
+}
+
+/// Asserts that the job service the server builds takes a job's retry policy over the gateway
+/// and reads it: one whose longest wait is below its first wait is refused at that field
+/// (`spec.retry.maxBackoffSeconds`), and one whose waits fit passes every check and reaches
+/// admission (`no-capable-host` in this state with no host). It catches a service that refuses
+/// every policy, and one that takes a policy without reading it.
+#[tokio::test]
+async fn the_service_takes_and_reads_a_retry_policy() {
+    use super::super::writes_rig::{to_json, wire};
+    use js_proto::v1::{JobSpec, RetryPolicy, SubmitJobRequest};
+    let dir = scratch("retry");
+    let (_, jobs) = tables();
+    let state = state(&dir, Some(Arc::new(jobs)));
+    let refused = (
+        StatusCode::BAD_REQUEST,
+        invalid("spec.retry.maxBackoffSeconds"),
+    );
+    for (index, (max, answer)) in [(1, refused), (5, no_capable_host())]
+        .into_iter()
+        .enumerate()
+    {
+        let spec = JobSpec {
+            retry: Some(RetryPolicy {
+                max_attempts: 3,
+                initial_backoff_seconds: Some(5),
+                max_backoff_seconds: Some(max),
+            }),
+            ..wire(&format!("wired-retry-{index}"))
+        };
+        let request = SubmitJobRequest { spec: Some(spec) };
+        let said = posted(&state, &to_json("SubmitJobRequest", &request).to_string()).await;
+        assert_eq!(said, answer, "{max}");
+    }
+}
+
+/// `body` posted to `/v1/jobs` of the job service the server builds over `state`, with the
+/// client token: the answer's status and its JSON body.
+async fn posted(state: &Arc<Shared>, body: &str) -> (StatusCode, serde_json::Value) {
+    let clients = crate::config::Clients::only(&token(), "--token-file");
+    let clients = crate::config::LiveClients::new(clients);
+    let api = from_server(state, WALL, logs::Ctx::default()).unwrap();
+    let bearer = format!("Bearer {}", String::from_utf8(TOKEN.to_vec()).unwrap());
+    let request = Request::post("/v1/jobs")
+        .header(header::AUTHORIZATION, bearer)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_owned()))
+        .unwrap();
+    let response = port(api, clients).oneshot(request).await.unwrap();
+    let status = response.status();
+    let body = to_bytes(response.into_body(), 1 << 16).await.unwrap();
+    (status, serde_json::from_slice(&body).unwrap())
 }

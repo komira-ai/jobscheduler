@@ -26,6 +26,7 @@ mod cordons;
 mod dispatch;
 mod duties;
 mod ending;
+mod freed;
 mod guard;
 mod held;
 mod host_rows;
@@ -35,16 +36,19 @@ mod marks;
 mod nodes;
 mod queue;
 mod status;
+mod table_changes;
 mod taints;
 mod unclean;
 mod whole;
 mod written;
 
 pub use cordons::{CordonWrite, UncordonWrite};
+pub use freed::FreedPage;
 pub use held::{HeldRequeue, RequeuedFor};
 
 pub use index::Backfill;
 pub use queue::queue_order;
+pub use table_changes::{MOST_TABLE_CHANGES, TableChanges};
 
 pub use whole::{FailedPrepare, Placement};
 
@@ -349,6 +353,9 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// Without an id: an id is minted, and minted again if taken, at most [`MINT_TRIES`]
     /// times.
     ///
+    /// The job's `submitted_at` is the store's clock as the transaction that records it reads
+    /// it ([`Store::txn_stamped`]): no clock is read before.
+    ///
     /// A job that asks for a callback ([`JobSpec::callback`]) gives its key
     /// ([`crate::CallbackKey::Key`]): the commit that records the job writes the job row with
     /// the key's digest in its place and the armed row `callback/<id>` with the key and a
@@ -362,6 +369,27 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// callback's key by its digest, [`JobStoreError::UnknownRow`] when the id's row is one a
     /// later build wrote, [`JobStoreError::Store`] or [`JobStoreError::Mint`].
     pub fn insert_queued(&self, job: NewJob) -> Result<Inserted, JobStoreError> {
+        let stored = match &job.id {
+            Some(id) => self.get_job(id)?,
+            None => None,
+        };
+        self.insert_queued_after_get(job, stored)
+    }
+
+    /// [`JobStore::insert_queued`] for a caller that has just read the job's id: `stored` is
+    /// what [`JobStore::get_job`] answered for `job.id`, so the id is not read again. A stored
+    /// job is the answer as `insert_queued` gives it, from that record; with none, the job is
+    /// recorded, and a job another writer recorded under the id since the caller's read is
+    /// read and answered as `insert_queued` answers it. A job without an id is minted one, and
+    /// `stored` is not looked at.
+    ///
+    /// # Errors
+    /// As [`JobStore::insert_queued`].
+    pub fn insert_queued_after_get(
+        &self,
+        job: NewJob,
+        stored: Option<JobRecord>,
+    ) -> Result<Inserted, JobStoreError> {
         let NewJob {
             id,
             spec,
@@ -369,59 +397,16 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             client,
         } = job;
         match id {
-            Some(id) => self.insert_with_id(id, spec, priority, client),
+            Some(id) => self.insert_with_id(id, spec, priority, client, stored),
             None => self.insert_minted(&spec, priority, client.as_ref()),
         }
     }
 
-    fn queued_record(
-        &self,
-        id: JobId,
-        spec: JobSpec,
-        priority: i32,
-        client: Option<ClientName>,
-    ) -> Result<JobRecord, JobStoreError> {
-        Ok(JobRecord {
-            id,
-            spec,
-            priority,
-            state: JobState::Queued,
-            submitted_at: self.store.now()?,
-            placed_at: None,
-            started_at: None,
-            ended_at: None,
-            host: None,
-            cancel_requested: false,
-            cancel_requested_at: None,
-            result: None,
-            retention_ends: None,
-            deadline_floor: None,
-            client,
-            failed_prepares: 0,
-            prepare_bars: BTreeMap::new(),
-            held_refusals: Vec::new(),
-            capacity_refusals: Vec::new(),
-            queue: QueueTrail::default(),
-            attempt: AttemptTrail::default(),
-            carried: Carried::default(),
-            start_failure_detail: None,
-        })
-    }
-
     /// The stored job `id` when it is the same job as `spec`, `None` when there is none.
     fn same_job(&self, id: &JobId, spec: &JobSpec) -> Result<Option<Inserted>, JobStoreError> {
-        let Some((record, _)) = self.read_job(id)? else {
-            return Ok(None);
-        };
-        ensure(
-            record.spec.same_job_as(spec),
-            JobStoreError::JobIdConflict { id: id.clone() },
-        )?;
-        Ok(Some(Inserted {
-            record,
-            created: false,
-            step: None,
-        }))
+        self.get_job(id)?
+            .map(|record| held(record, id, spec))
+            .transpose()
     }
 
     fn insert_with_id(
@@ -430,13 +415,16 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         spec: JobSpec,
         priority: i32,
         client: Option<ClientName>,
+        stored: Option<JobRecord>,
     ) -> Result<Inserted, JobStoreError> {
-        if let Some(found) = self.same_job(&id, &spec)? {
-            return Ok(found);
+        if let Some(record) = stored {
+            return held(record, &id, &spec);
         }
-        let record = self.queued_record(id, spec, priority, client)?;
-        let (txn, record) = self.recorded(record)?;
-        match self.write_stepped(txn)? {
+        let (record, written) = self.write_stamped(&mut |now| {
+            let record = queued_record(id.clone(), spec.clone(), priority, client.clone(), now);
+            self.recorded(record)
+        })?;
+        match written {
             Ok((_, step)) => Ok(Inserted {
                 record,
                 created: true,
@@ -459,9 +447,12 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     ) -> Result<Inserted, JobStoreError> {
         for _ in 0..MINT_TRIES {
             let id = JobId::minted(self.ids.mint()?);
-            let record = self.queued_record(id, spec.clone(), priority, client.cloned())?;
-            let (txn, record) = self.recorded(record)?;
-            if let Ok((_, step)) = self.write_stepped(txn)? {
+            let (record, written) = self.write_stamped(&mut |now| {
+                let record =
+                    queued_record(id.clone(), spec.clone(), priority, client.cloned(), now);
+                self.recorded(record)
+            })?;
+            if let Ok((_, step)) = written {
                 return Ok(Inserted {
                     record,
                     created: true,
@@ -829,6 +820,59 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             .ok_or(JobStoreError::NoAllocation { id: id.clone() })
     }
 }
+
+/// The record of the job `id` as it is queued, submitted at `submitted_at`.
+fn queued_record(
+    id: JobId,
+    spec: JobSpec,
+    priority: i32,
+    client: Option<ClientName>,
+    submitted_at: StoreTime,
+) -> JobRecord {
+    JobRecord {
+        id,
+        spec,
+        priority,
+        state: JobState::Queued,
+        submitted_at,
+        placed_at: None,
+        started_at: None,
+        ended_at: None,
+        host: None,
+        cancel_requested: false,
+        cancel_requested_at: None,
+        result: None,
+        retention_ends: None,
+        deadline_floor: None,
+        client,
+        failed_prepares: 0,
+        prepare_bars: BTreeMap::new(),
+        held_refusals: Vec::new(),
+        capacity_refusals: Vec::new(),
+        queue: QueueTrail::default(),
+        attempt: AttemptTrail::default(),
+        carried: Carried::default(),
+        start_failure_detail: None,
+    }
+}
+
+/// The answer to a submit of `spec` under `id` that the stored job `record` holds: the record,
+/// recording nothing, when it is the same job, else [`JobStoreError::JobIdConflict`].
+fn held(record: JobRecord, id: &JobId, spec: &JobSpec) -> Result<Inserted, JobStoreError> {
+    ensure(
+        record.spec.same_job_as(spec),
+        JobStoreError::JobIdConflict { id: id.clone() },
+    )?;
+    Ok(Inserted {
+        record,
+        created: false,
+        step: None,
+    })
+}
+
+#[cfg(all(test, feature = "postgres"))]
+#[path = "store/postgres_submit_tests.rs"]
+mod postgres_submit_tests;
 
 #[cfg(test)]
 mod tests;

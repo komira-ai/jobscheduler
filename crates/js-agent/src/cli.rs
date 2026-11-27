@@ -137,6 +137,9 @@ pub struct Cli {
     /// `--mount-provider-wait`), which both builds take.
     #[command(flatten)]
     pub providers: crate::lifecycle::ProviderFlags,
+    /// The host ports a job may reach (`--host-port`), which both builds take.
+    #[command(flatten)]
+    pub host_ports: crate::host_ports::HostPortFlags,
     /// What the agent records beyond each job's usage (`--cpu-series`, `--memory-series`,
     /// `--host-second-samples`), which both builds take.
     #[command(flatten)]
@@ -406,8 +409,9 @@ pub struct Cli {
     /// refused `bundle-not-allowed`.
     #[arg(long, value_name = "PATH")]
     pub bundle_allow_file: Option<PathBuf>,
-    /// The read model of a run's profile: `open` (the default) or `allow`. `allow` is not
-    /// available yet: the agent refuses it at start.
+    /// The read model of the profile of a run that pins a bundle: `open` (the default) or
+    /// `allow` (an allow-list, checked by a self-test at every start; a run that pins no
+    /// bundle keeps `open`).
     #[arg(long, value_name = "open|allow")]
     pub read_model: Option<String>,
 }
@@ -552,6 +556,33 @@ mod tests {
             .iter()
             .find(|(removed, _)| *removed == name)
             .map(|&(_, refusal)| refusal)
+    }
+
+    /// Asserts that `--ca-cert` is optional and that its help, as `js-agent --help` prints
+    /// it, says what the client does without it: verify against the public roots bundled in
+    /// the agent, never the platform's store. It catches help that calls the flag required
+    /// for `https://` or says no roots are read without it, which the packaged unit (it
+    /// passes no `--ca-cert`) contradicts.
+    #[test]
+    fn the_ca_cert_help_says_it_is_optional_and_names_the_bundled_roots() {
+        use clap::CommandFactory as _;
+        let command = super::Cli::command();
+        let flag = command
+            .get_arguments()
+            .find(|arg| arg.get_long() == Some("ca-cert"))
+            .expect("--ca-cert is a flag");
+        assert!(!flag.is_required_set());
+        assert!(flag.get_long_help().is_none());
+        let help = flag.get_help().map(ToString::to_string);
+        assert_eq!(
+            help.as_deref(),
+            Some(
+                "A PEM file with the certificate to trust for `https://` (the server's, or the \
+                 authority that issued it); only those certificates are trusted then. Optional: \
+                 without it an `https://` server is verified against the public roots bundled \
+                 in the agent (a Mozilla set), never the platform's store"
+            )
+        );
     }
 
     /// Catches a scan that misreads a word: a removed flag is found in both spellings, with no

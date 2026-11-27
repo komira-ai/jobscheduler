@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use js_agent_wire::PortRange;
 use js_mac_pool::seatbelt::{AbsPath, ReadModel};
 use js_mac_session::full_disk_access::FullDiskAccess;
 
@@ -209,6 +210,7 @@ impl NativeSettings {
                 tool_roots,
                 read_denies,
                 mount_roots: Vec::new(),
+                host_ports: Vec::new(),
                 read_model: ReadModel::Open,
                 journal: journal.to_path_buf(),
                 max_file_bytes,
@@ -277,6 +279,14 @@ impl NativeSettings {
         Ok(self)
     }
 
+    /// The same settings with `allowed` (`--host-port`, checked by
+    /// [`crate::host_ports::allowed`]) as the ports of the host's loopback a job may reach.
+    #[must_use]
+    pub fn with_host_ports(mut self, allowed: Vec<PortRange>) -> Self {
+        self.config.host_ports = allowed;
+        self
+    }
+
     /// The same settings with `put` (`--native-put-root`, `--native-put-user`, checked by
     /// [`super::put_of`]) as the put ingest of the runtime they make.
     #[must_use]
@@ -342,6 +352,20 @@ impl NativeSettings {
     #[must_use]
     pub fn bundles(&self) -> Option<&Arc<Placer>> {
         self.bundles.as_ref()
+    }
+
+    /// The same settings with `placer` as the bundle store ([`NativeSettings::with_bundles`])
+    /// and the read model `read_model` names (`--read-model`, checked with the bundle flags,
+    /// which need `--bundle-store`: with no store open no run pins a bundle, and the open model
+    /// is all there is) as that of the profile of a run that pins a bundle.
+    ///
+    /// # Errors
+    ///
+    /// As [`NativeSettings::with_bundles`].
+    pub fn with_store(self, placer: Arc<Placer>, read_model: Option<&str>) -> Result<Self, String> {
+        let mut settings = self.with_bundles(placer)?;
+        settings.config.read_model = super::read_model_named(read_model);
+        Ok(settings)
     }
 
     /// The same settings with `enforcer` as the check of the pf anchor: a seam for tests.

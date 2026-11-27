@@ -1,6 +1,7 @@
 //! The state store trait.
 
 use std::cmp::Ordering;
+use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::ops::Bound;
 
@@ -42,6 +43,24 @@ pub trait Store: Send + Sync {
     /// # Errors
     /// [`StoreError`] when the backend fails.
     fn get(&self, key: &str) -> Result<Option<Versioned>, StoreError>;
+
+    /// The live rows of `keys`, each once, in key order: what [`Store::get`] answers for each,
+    /// with the keys that have no live row left out. An empty `keys` reads nothing. The
+    /// provided implementation calls [`Store::get`] for each key; the Postgres backend reads
+    /// them in one statement, so its rows are one snapshot of committed state.
+    ///
+    /// # Errors
+    /// [`StoreError`] when the backend fails.
+    fn get_many(&self, keys: &[String]) -> Result<Vec<(String, Versioned)>, StoreError> {
+        let wanted: BTreeSet<&String> = keys.iter().collect();
+        let mut rows = Vec::with_capacity(wanted.len());
+        for key in wanted {
+            if let Some(row) = self.get(key)? {
+                rows.push((key.clone(), row));
+            }
+        }
+        Ok(rows)
+    }
 
     /// Every live key that starts with `prefix`, in key order.
     ///
@@ -127,6 +146,27 @@ pub trait Store: Send + Sync {
     fn txn(&self, txn: Txn) -> Result<Result<Commit, Conflict>, StoreError> {
         // A backend returns one result per transaction; an empty answer is its bug.
         Ok(self.apply_batch(vec![txn])?.swap_remove(0))
+    }
+
+    /// Applies one transaction that `build` makes from the store's clock as read for this
+    /// transaction: a caller that stamps the time into the rows it writes (when a record was
+    /// made) takes the store's own reading this way, with no [`Store::now`] of its own before
+    /// the transaction. `build` returns `None` to decline: nothing is written then, and the
+    /// answer is `None`. It may be called again, with the reading of the new run, when the
+    /// backend runs the transaction again after a deadlock.
+    ///
+    /// The provided implementation reads [`Store::now`] and applies the transaction with
+    /// [`Store::txn`]. The Postgres backend reads its clock in the transaction's first round
+    /// trip instead.
+    ///
+    /// # Errors
+    /// [`StoreError`] when the backend fails, its clock included: nothing is written then.
+    fn txn_stamped(
+        &self,
+        build: &mut dyn FnMut(StoreTime) -> Option<Txn>,
+    ) -> Result<Option<Result<Commit, Conflict>>, StoreError> {
+        let now = self.now()?;
+        build(now).map(|txn| self.txn(txn)).transpose()
     }
 
     /// The committed head revision: every revision at or below it has committed. `None` for a
@@ -241,6 +281,10 @@ impl Store for std::sync::Arc<dyn Store> {
         (**self).get(key)
     }
 
+    fn get_many(&self, keys: &[String]) -> Result<Vec<(String, Versioned)>, StoreError> {
+        (**self).get_many(keys)
+    }
+
     fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, Versioned)>, StoreError> {
         (**self).scan_prefix(prefix)
     }
@@ -271,6 +315,13 @@ impl Store for std::sync::Arc<dyn Store> {
 
     fn txn(&self, txn: Txn) -> Result<Result<Commit, Conflict>, StoreError> {
         (**self).txn(txn)
+    }
+
+    fn txn_stamped(
+        &self,
+        build: &mut dyn FnMut(StoreTime) -> Option<Txn>,
+    ) -> Result<Option<Result<Commit, Conflict>>, StoreError> {
+        (**self).txn_stamped(build)
     }
 
     fn head(&self) -> Result<Option<Revision>, StoreError> {
@@ -416,6 +467,10 @@ mod tests {
 
         let got = <Arc<dyn Store> as Store>::get(&handle, "k/a").expect("store");
         assert_eq!(got, inner.get("k/a").expect("store"));
+        let wanted = ["k/b".to_owned(), "k/a".to_owned(), "k/none".to_owned()];
+        let many = <Arc<dyn Store> as Store>::get_many(&handle, &wanted).expect("store");
+        assert_eq!(many, inner.get_many(&wanted).expect("store"));
+        assert_eq!(many.len(), 2);
         assert_eq!(got.map(|row| row.value), Some(b"1".to_vec()));
         let keys = |rows: Vec<(String, crate::types::Versioned)>| {
             rows.into_iter().map(|(key, _)| key).collect::<Vec<_>>()
@@ -440,14 +495,26 @@ mod tests {
         assert_eq!(<Arc<dyn Store> as Store>::reap_expired(&handle), Ok(1));
         assert_eq!(inner.get("k/c").expect("store"), None);
 
-        // The feed holds four rows now (three puts and the expiry); a trim through the
+        // A stamped transaction through the handle is built from the store's clock and
+        // committed to the store underneath.
+        let stamped = <Arc<dyn Store> as Store>::txn_stamped(&handle, &mut |now| {
+            assert_eq!(now, clock.now());
+            Some(Txn::new().put("s/a", b"4".to_vec(), Cond::Absent))
+        });
+        assert!(matches!(stamped, Ok(Some(Ok(_)))), "{stamped:?}");
+        assert_eq!(
+            inner.get("s/a").expect("store").map(|row| row.value),
+            Some(b"4".to_vec())
+        );
+
+        // The feed holds five rows now (four puts and the expiry); a trim through the
         // handle removes the first two from the store underneath.
         assert_eq!(
             <Arc<dyn Store> as Store>::trim_feed(&handle, Revision(2)),
             Ok(2)
         );
         let left = inner.changes(Revision(2), 10).expect("store");
-        assert_eq!(left.rows.len(), 2);
+        assert_eq!(left.rows.len(), 3);
     }
 
     // Catches a successor that steps into the surrogate gap (no char there, so the

@@ -17,7 +17,10 @@
 //! The scheduler is given no learned curves: each allocation is charged what it books (its flat
 //! number, in every mode), and each host by its load readings when it has fresh ones. Under
 //! `--placement-curves on` the engine itself tests a job against a curve host slot by slot
-//! (`curve_room`) and the scheduler makes no CPU test of that host.
+//! (`curve_room`) and the scheduler makes no CPU test of that host. Under `shadow` and `on` the
+//! engine also projects each host's memory by its jobs' memory curves and records where a
+//! booking that followed them would have placed a job differently (`memory_shadow`); that
+//! projection places nothing.
 //!
 //! The leases a reading covers are the engine's own: the job allocations it held on the host at
 //! the previous reading the scheduler accepted and holds still, which ran through the whole
@@ -41,7 +44,7 @@ use js_types::sched::{
 };
 use js_types::{HostId, Shape};
 
-use crate::curves::{CurveSettings, CurveView};
+use crate::curves::{CurveSettings, CurveView, MemoryShadowView};
 use crate::map;
 use crate::room::Room;
 use crate::sizes::{ColdCpuOn, ColdMemoryOn, ColdSize, Curves, JobSizes};
@@ -56,6 +59,8 @@ mod jobs_retry;
 pub(crate) mod jobs_seen;
 #[path = "jobs_walker.rs"]
 mod jobs_walker;
+#[path = "memory_shadow.rs"]
+mod memory_shadow;
 pub use jobs_seen::TablesFrom;
 #[path = "refusals.rs"]
 pub mod refusals;
@@ -152,6 +157,9 @@ pub struct Engine {
     /// What the curve mode keeps beside the scheduler: the live jobs it charges, the waits of
     /// the jobs whose curve fits no host and the tables of the curve hosts ([`curve_room`]).
     book: curve_room::CurveBook,
+    /// What the memory shadow keeps under `shadow` and `on`: each host's projected memory, the
+    /// queued jobs its curve fitted sooner and its counts (`memory_shadow`).
+    memory: memory_shadow::MemoryShadow,
     /// How many placement rounds the walks over the queued jobs ran, for the tests that
     /// count them ([`jobs`]).
     #[cfg(any(test, feature = "test-support"))]
@@ -184,6 +192,7 @@ impl Engine {
             curve: CurveSettings::default(),
             cpu_slack_permille: settings.load.normalised().s_cpu_permille,
             book: curve_room::CurveBook::default(),
+            memory: memory_shadow::MemoryShadow::default(),
             #[cfg(any(test, feature = "test-support"))]
             job_rounds: 0,
         }
@@ -201,6 +210,12 @@ impl Engine {
     #[must_use]
     pub fn curve_view(&self) -> Option<CurveView> {
         self.curve_view_of()
+    }
+
+    /// What `/metrics` reads of the memory shadow; `None` under [`Curves::Off`].
+    #[must_use]
+    pub fn memory_shadow_view(&self) -> Option<MemoryShadowView> {
+        self.memory_shadow_view_of()
     }
 
     /// The same engine, a job of an operating system `on` names booking that cold memory while
@@ -305,17 +320,19 @@ impl Engine {
         let _ = self.heard_changed(host, load, now);
     }
 
-    /// [`Engine::heard`], answering whether the heartbeat changed what a pass over the queued
-    /// jobs reads of the engine: it brought a load reading, or the scheduler gave an
-    /// allocation up for it (moved it back to its queue, or answered with an effect). A
-    /// heartbeat that does neither only says the host is alive, which every pass says again
-    /// of the hosts it offers.
+    /// [`Engine::heard`], answering whether the heartbeat changed the bookings a pass over
+    /// the queued jobs reads of the engine: the scheduler gave an allocation up for it (moved
+    /// it back to its queue, or answered with an effect). A load reading alone is not such a
+    /// change: a busy host's load moves with every beat, so counting each would bring back a
+    /// pass over the whole queue for every beat of every host; the room a lower reading leaves
+    /// is taken by the next pass that runs, at the latest the tick's (`jobs_seen`).
     pub(crate) fn heard_changed(
         &mut self,
         host: &HostId,
         load: Option<&NodeLoad>,
         now: FarmTime,
     ) -> bool {
+        self.memory_heard(host, load, now);
         let before = (self.sched.leases_held(), self.sched.queued_len());
         let jobs: BTreeSet<SchedLeaseId> = self.job_leases_on(host).collect();
         let running = jobs
@@ -347,7 +364,7 @@ impl Engine {
                 self.at_reading.remove(host);
             }
         }
-        load.is_some() | !effects.is_empty() | (before != after)
+        !effects.is_empty() | (before != after)
     }
 
     /// Lets go of what `placed` holds in the scheduler: its booking and its operation.
@@ -543,7 +560,8 @@ mod tests {
     }
 
     /// A reading's per-lease parts name leases the engine holds none of, so they are dropped
-    /// from the scheduler's reading: the host's load is charged with no lease covered.
+    /// from the scheduler's reading: the host's load is charged with no lease covered. The
+    /// readings give no booking up, so neither counts as a change.
     #[test]
     fn a_reading_keeps_no_lease_parts() {
         let mut engine = Engine::build(Settings::default(), at(0));
@@ -552,7 +570,7 @@ mod tests {
         let named = [SchedLeaseId::new(1, 2)];
         for seq in 1..=2 {
             let changed = engine.heard_changed(&b, Some(&reading(seq, &named)), at(seq * 5_000));
-            assert!(changed);
+            assert!(!changed, "reading {seq}");
         }
         let view = engine.sched.load_view(&WorkerId::new("b")).unwrap();
         assert_eq!(view.uncovered_cpu_millis, 0);
@@ -560,14 +578,17 @@ mod tests {
         assert_eq!(engine.hosts_kept(), 0);
     }
 
-    /// A heartbeat with no reading that gives nothing up changes nothing the passes read.
+    /// A heartbeat that gives nothing up changes nothing the passes read, with a load reading
+    /// or without one: a busy host's load moves with every beat, and a change for each would
+    /// bring back a pass over the whole queue each time.
     #[test]
-    fn a_beat_without_a_reading_is_no_change() {
+    fn a_beat_that_gives_nothing_up_is_no_change_with_or_without_a_reading() {
         let mut engine = Engine::build(Settings::default(), at(0));
         let b = host("b");
         engine.host_up(&b, &shape(true), at(0));
-        assert!(engine.heard_changed(&b, Some(&reading(1, &[])), at(5_000)));
-        assert!(!engine.heard_changed(&b, None, at(6_000)));
+        assert!(!engine.heard_changed(&b, Some(&reading(1, &[])), at(5_000)));
+        assert!(!engine.heard_changed(&b, Some(&reading(2, &[])), at(10_000)));
+        assert!(!engine.heard_changed(&b, None, at(11_000)));
     }
 
     const MIB: u64 = 1 << 20;

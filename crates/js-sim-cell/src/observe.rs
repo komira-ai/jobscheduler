@@ -40,7 +40,9 @@ use js_types::{HostId, LeaseId, Resources};
 
 use crate::cordon::{Cordon, Uncordon};
 use crate::elastic::CloudFacts;
-use crate::jobs::{AllocationRead, JobBeat, JobRead, JobReply, ResultMade};
+use crate::jobs::{
+    AllocationRead, AttemptRead, CallbackCall, JobBeat, JobRead, JobReply, ResultMade,
+};
 use crate::ledger::{Acked, Completion};
 use crate::usage::UsageRow;
 
@@ -457,6 +459,11 @@ pub struct Observations {
     pub job_replies: Vec<JobReply>,
     /// Every result a per-job agent made, oldest first; only ever appended.
     pub results_made: Vec<ResultMade>,
+    /// Each change of a job's attempt number the server's job table showed, in the order
+    /// read; only ever appended.
+    pub attempt_reads: Vec<AttemptRead>,
+    /// Every call the cell's callback receiver got, oldest first; only ever appended.
+    pub callback_calls: Vec<CallbackCall>,
     /// The clouds of the server's elastic pool, first to last: one for a server of
     /// [`crate::ServerSpec::elastic_pool`], one for each launching machine provider of a
     /// server of [`crate::ServerSpec::ordered`], none for a server without one.

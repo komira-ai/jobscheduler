@@ -37,12 +37,12 @@ fn placer_with_host() -> SchedPlacer {
     placer
 }
 
-/// Asserts that a heartbeat the registry tells while a pass holds the engine returns, counts
-/// as a change (so the next pass is not skipped for it), and reaches the engine once the pass
-/// lets go: the engine then charges the host exactly as a placer told the same beat while its
-/// engine was free. Catches a heartbeat that waits for the pass, which holds the registry's
-/// lock, and with it every read call and heartbeat of the server, for as long as the pass
-/// decides; and a kept beat that is lost or not counted.
+/// Asserts that a heartbeat the registry tells while a pass holds the engine returns, and
+/// reaches the engine once the pass lets go: the engine then charges the host exactly as a
+/// placer told the same beat while its engine was free. A load reading that gives nothing up
+/// is counted as no change either way. Catches a heartbeat that waits for the pass, which holds
+/// the registry's lock, and with it every read call and heartbeat of the server, for as long as
+/// the pass decides; and a kept beat that is lost.
 #[test]
 fn a_heartbeat_told_while_a_pass_holds_the_engine_returns_and_reaches_it_after() {
     let held = placer_with_host();
@@ -50,12 +50,13 @@ fn a_heartbeat_told_while_a_pass_holds_the_engine_returns_and_reaches_it_after()
     let before = held.engine_changes();
     let pass = held.engine();
     held.heard(&host("h1"), Some(&reading(1)));
-    assert_eq!(held.engine_changes(), before + 1);
     drop(pass);
     free.heard(&host("h1"), Some(&reading(1)));
     let charged = held.load_of("h1");
     assert!(charged.is_some());
     assert_eq!(charged, free.load_of("h1"));
+    assert_eq!(held.engine_changes(), before, "a reading alone");
+    assert_eq!(free.engine_changes(), before, "a reading alone");
 }
 
 /// Asserts that the calls kept while a pass holds the engine reach it in the order the
@@ -94,21 +95,35 @@ fn while_a_pass_holds_the_engine_the_placer_holds_work_on_every_host() {
     assert!(!placer.holds_work_on(&host("unknown")));
 }
 
-/// Asserts how beats with nothing new count: told to a free engine, a beat with no reading
-/// changes nothing a pass reads and is not counted (the pass after it may be skipped, as
-/// before); kept while a pass holds the engine it is counted, since what it changes is not
-/// known until the engine is told. Catches a free engine counting every beat (a pass after
-/// every heartbeat) and a kept beat left uncounted.
+/// Asserts how the calls kept while a pass holds the engine count: each is counted when the
+/// engine is next taken and told of it, by what it changes. A beat with nothing new, told to a
+/// free engine or kept, changes nothing a pass reads and is not counted; a hello kept while the
+/// engine is held is not counted while it waits, and is counted once the engine is taken again.
+/// Catches a beat with nothing new counted (a pass after every heartbeat that found the engine
+/// held), and a kept call that changes the engine left uncounted (a pass skipped for a host it
+/// has not seen).
 #[test]
-fn a_beat_with_nothing_new_counts_only_when_it_is_kept() {
+fn a_kept_call_counts_when_it_is_told_by_what_it_changes() {
     let placer = placer_with_host();
     let before = placer.engine_changes();
     placer.heard(&host("h1"), None);
-    assert_eq!(placer.engine_changes(), before);
+    assert_eq!(placer.engine_changes(), before, "told to a free engine");
     let pass = placer.engine();
     placer.heard(&host("h1"), None);
     drop(pass);
-    assert_eq!(placer.engine_changes(), before + 1);
+    drop(placer.engine());
+    assert_eq!(placer.engine_changes(), before, "kept, then told");
+    let pass = placer.engine();
+    placer.host_up(&host("h2"), &shape());
+    assert_eq!(placer.engine_changes(), before, "kept, not yet told");
+    drop(pass);
+    drop(placer.engine());
+    assert_eq!(
+        placer.engine_changes(),
+        before + 1,
+        "told when the engine was taken"
+    );
+    assert_eq!(placer.hosts_kept(), 2);
 }
 
 /// Asserts that a call finds an engine whose lock a panicking pass poisoned free, as the
@@ -124,9 +139,7 @@ fn a_call_after_a_pass_panicked_tells_the_engine_at_once() {
     })
     .join();
     assert!(ended.is_err());
-    let before = placer.engine_changes();
     placer.heard(&host("h1"), Some(&reading(1)));
-    assert_eq!(placer.engine_changes(), before + 1);
     assert!(placer.kept.lock().unwrap().is_empty());
     assert!(placer.load_of("h1").is_some());
 }

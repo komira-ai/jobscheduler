@@ -9,7 +9,7 @@
 use std::sync::PoisonError;
 use std::sync::atomic::Ordering;
 
-use js_state::{Commit, Conflict, Op, Revision, Store, Txn};
+use js_state::{Commit, Conflict, Op, Revision, Store, StoreError, StoreTime, Txn};
 
 use super::JobStore;
 use crate::error::JobStoreError;
@@ -23,6 +23,21 @@ const FEED_PAGE: usize = 512;
 /// How many transactions one store batch of [`JobStore::write_each`] carries. Each is one
 /// row's (with its index entries), so a batch locks about this many rows for one round trip.
 pub(crate) const GROUP: usize = 100;
+
+/// What one write of the job store answers: its commit with the [`Step`] it made, or the
+/// conflict that kept it from committing.
+pub(super) type Stepped = Result<(Commit, Step), Conflict>;
+
+/// How many rows `txn` writes, each at a revision of its own, when every operation of it is a
+/// put; `None` otherwise ([`Step::rows`]).
+fn row_count(txn: &Txn) -> Option<u64> {
+    let puts = txn.ops().iter().all(|op| matches!(op, Op::Put { .. }));
+    puts.then_some(txn.change_count())
+}
+
+/// The text of the failure a stamped write answers when the store applied nothing although its
+/// transaction was built, which a store that keeps [`Store::txn_stamped`]'s contract never does.
+const DECLINED: &str = "the store declined a transaction that was built";
 
 /// The store's head as the last reading read it, and the head at the last commit that changed
 /// a job table as far as the readings since have told.
@@ -68,6 +83,16 @@ pub struct Step {
     rows: Option<u64>,
 }
 
+impl Written {
+    /// Whether `other` was taken from the same job store as this reading: only then can a
+    /// reader that holds tables read from one follow them with that job store's changes
+    /// ([`JobStore::table_changes`]).
+    #[must_use]
+    pub fn same_job_store(&self, other: &Written) -> bool {
+        self.instance == other.instance
+    }
+}
+
 impl Step {
     /// What [`JobStore::written`] reads just after this step's commit, when `at` is the reading
     /// it follows: one of the same job store, with every write before this one counted and none
@@ -108,27 +133,58 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// A guarded view ([`JobStore::guarded`]) adds the check of its node row to `txn`, and a
     /// conflict on that row is [`JobStoreError::NodeMoved`]. A job store that is not guarded
     /// sends `txn` as it is.
-    pub(super) fn write_stepped(
-        &self,
-        txn: Txn,
-    ) -> Result<Result<(Commit, Step), Conflict>, JobStoreError> {
+    pub(super) fn write_stepped(&self, txn: Txn) -> Result<Stepped, JobStoreError> {
         let txn = self.guard_txn(txn);
-        let puts = txn.ops().iter().all(|op| matches!(op, Op::Put { .. }));
-        let rows = puts.then_some(txn.change_count());
+        let rows = row_count(&txn);
         let answer = self.store.txn(txn);
         let writes = self.writes.fetch_add(1, Ordering::SeqCst);
-        let step = |commit: Commit| {
-            let revision = commit.revision;
-            let step = Step {
-                instance: self.instance,
-                writes,
-                revision,
-                rows,
-            };
-            (commit, step)
-        };
-        match answer? {
-            Ok(commit) => Ok(Ok(step(commit))),
+        self.stepped(answer?, writes, rows)
+    }
+
+    /// [`JobStore::write_stepped`] of the transaction `build` makes from the store's clock as
+    /// the transaction reads it ([`Store::txn_stamped`]), with what `build` made beside it (the
+    /// record the transaction writes, stamped with that reading). When the store runs the
+    /// transaction again, `build` is called again and its last answer is the one given.
+    ///
+    /// # Errors
+    /// What `build` failed with, and nothing is written; as for [`JobStore::write_stepped`].
+    pub(super) fn write_stamped<T>(
+        &self,
+        build: &mut dyn FnMut(StoreTime) -> Result<(Txn, T), JobStoreError>,
+    ) -> Result<(T, Stepped), JobStoreError> {
+        let (mut made, mut failed, mut rows) = (None, None, None);
+        let answer = self.store.txn_stamped(&mut |now| {
+            let (txn, value) = build(now).map_err(|error| failed = Some(error)).ok()?;
+            let txn = self.guard_txn(txn);
+            rows = row_count(&txn);
+            made = Some(value);
+            Some(txn)
+        });
+        let writes = self.writes.fetch_add(1, Ordering::SeqCst);
+        failed.map_or(Ok(()), Err)?;
+        // `build` answered, so the store applied what it built.
+        let declined = JobStoreError::Store(StoreError::Failed(DECLINED.to_owned()));
+        let (answer, value) = answer?.zip(made).ok_or(declined)?;
+        Ok((value, self.stepped(answer, writes, rows)?))
+    }
+
+    /// The answer of a write that `writes` writes came before, of a transaction of `rows` rows.
+    fn stepped(
+        &self,
+        answer: Result<Commit, Conflict>,
+        writes: u64,
+        rows: Option<u64>,
+    ) -> Result<Stepped, JobStoreError> {
+        match answer {
+            Ok(commit) => {
+                let step = Step {
+                    instance: self.instance,
+                    writes,
+                    revision: commit.revision,
+                    rows,
+                };
+                Ok(Ok((commit, step)))
+            }
             Err(conflict) => self.refuse_moved(conflict).map(Err),
         }
     }
@@ -295,6 +351,19 @@ mod tests {
         }
     }
 
+    /// Asserts that two readings of one job store are of the same job store, before and after a
+    /// write, and that a reading of another job store over the same store is not. Catches a
+    /// reader that follows tables read from one job store with another's changes.
+    #[test]
+    fn readings_tell_whether_they_are_of_the_same_job_store() {
+        let (store, jobs) = opened();
+        let other = JobStore::new(Arc::clone(&store), RandomIds).expect("opens");
+        let before = reading(&jobs);
+        recorded(&jobs, job(Some("written")));
+        assert!(before.same_job_store(&reading(&jobs)));
+        assert!(!before.same_job_store(&reading(&other)));
+    }
+
     /// Asserts that a step follows no reading with another commit between it and the step's:
     /// one of another job store over the same store (another server), or one of the same job
     /// store (another call of this server). Catches a step judged by the write count alone,
@@ -426,6 +495,7 @@ mod tests {
             labels: std::collections::BTreeMap::new(),
             phase: js_agent_wire::Phase::Serving,
             agent_process: None,
+            agent_version: None,
         };
         jobs.hello_node(&host, &hello).expect("a hello");
         assert_eq!(

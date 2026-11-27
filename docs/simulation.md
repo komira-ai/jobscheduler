@@ -93,7 +93,28 @@ What is simulated:
   never dropped, delayed or reordered. A `JobFront` made with a `LostAnswer` switch
   (`JobFront::losing_answers`) loses the answer to its next submit once the action
   `lose_submit_answer` throws the switch, and submits again under the same job id: a lost
-  answer is the client's own fault, not the bus's.
+  answer is the client's own fault, not the bus's. A `Work` that asks for `.retry(n)` (or
+  `.retry_with_backoff(n, initial, longest)`) submits `spec.retry`, and one that asks for
+  `.callback()` (or `.callback_for(deadline)`) submits `spec.callback` with the URL
+  `https://receiver.example/sim/<job id>` and a fixed 32-byte key; a work with neither is
+  submitted as it always was. The cell's server takes both, as a shipped
+  server does, and a job
+  waiting for its next attempt reads `queued`, so the item keeps polling and ends only at the
+  job's final state.
+- the callback receiver: the cell's own, not a server. After each tick the server node has the
+  server deliver every due callback to it (`InProcess::deliver_callback`, as the instance
+  `sim-server`; no thread and no socket), and it answers 2xx unless the action
+  `callback_receiver_down(lasting)` switched it down, when it answers a failed try until
+  `lasting` has passed. It belongs to the node, so a restart of the server does not lose it.
+  Each call is kept as an observation (`CallbackCall`: the job, the webhook id, when, the
+  answer, whether the job's row had ended and the state it was in, read from the store at the
+  call) and written into the trace as `callback <job> <answer> ended=<bool>`. The action
+  `claim_callbacks_and_vanish()` has a second instance (`sim-server-2`) claim every due callback
+  and never answer, as an instance that dies holding its claims: the claims lapse after 30 s and
+  the cell's server delivers them then. Each job's attempt number is read with its state
+  (`AttemptRead`: the job, when, the attempt and the most the job asked for, 1 without a
+  policy), and written into the trace as `attempt <job> <n>` only for a job that asked for more
+  than one.
 - the per-job agents: each fake agent reports the per-job capability in its hello and speaks the per-job messages with a second `FakeAgent`, keyed
   by job id, as their engine: a start of a job it holds is a repeat, a stop of a job it
   does not hold retires the id, each result rides in every heartbeat until an answer
@@ -118,12 +139,14 @@ length; the kernel itself is described in the crate doc of `js-sim`, and
 ## Run one
 
 CI runs every test binary of the cell on each pull request, under coverage in the
-`coverage-shard` jobs, every store scenario over SQLite. The `test` job
-(`cargo nextest run --workspace --locked --no-fail-fast`) leaves out the four longest binaries
+`coverage-shard` jobs, every store scenario over SQLite. The `test` job, in five shards
+(`cargo nextest run --workspace --locked --no-fail-fast --cargo-profile dev --partition slice:<k>/5`),
+leaves out the four longest binaries
 (`faults`, `smoke`, `replay` and `whole_host_prepare`), which
 `required-features = ["slow-families"]` in the crate's `Cargo.toml` gates; the runs that start
-after a merge to main (the release's `unit-tests`, and the beta stage) and the coverage jobs
-build them with `--features js-sim-cell/slow-families`, so a red result there fails the
+after a merge to main (the release's `unit-tests`, and the beta stage), the `coverage-shard`
+jobs and the `coverage` job (which rebuilds the instrumented test binaries for its
+report) build them with `--features js-sim-cell/slow-families`, so a red result there fails the
 release run and `release-red` reports it. The Postgres cases are built only with the crate's `postgres`
 feature, and the `state-postgres` job runs them against its Postgres service
 (`cargo test -p js-sim-cell --features js-sim-cell/postgres --locked --test store --test server`);
@@ -146,6 +169,20 @@ same command on the same code fails at the same seed with the same trace hash. T
 request tests run a few seeds of each scenario; [Sweep many seeds](#sweep-many-seeds) runs
 the smoke family over thousands more.
 
+The largest scenarios run their seeds on several threads of the test's own:
+`run_seed_range_on_threads(build, seeds, threads)` takes a function that builds the
+scenario (a scenario holds `Rc`s, so it is built and run on one thread, and each thread
+calls `build` for itself) and answers what `build().run_seed_range(seeds)` answers: the
+runs in seed order, the failure of the lowest failing seed, and the witnesses judged over
+every seed of the range, not over a thread's share. The threads take seeds from one
+counter, lowest first, so one slow seed does not hold up a thread's share; a thread count
+of none is one, more than the seeds is as many as the seeds, and one thread runs the seeds
+on the calling thread. Unlike the sequential run, it does not stop at the first failure:
+every seed of the range runs. `try_run_seed_range_on_threads` returns the failure instead
+of panicking. A test that runs its seeds this way is named in `.config/nextest.toml`
+with `threads-required = 4`, so that nextest gives it four of a shard's slots and starts no
+other test beside it that would crowd them out.
+
 Each file directly under `crates/js-sim-cell/tests/` is one test binary. Files in the
 subdirectories (`cell/`, `agent/`, `invariants/`) are shared code that a binary includes
 with `#[path = ...]`; they are not binaries of their own.
@@ -157,6 +194,8 @@ with `#[path = ...]`; they are not binaries of their own.
 | `seed_range` | `tests/seed_range.rs` | `Scenario::run_seed_range` and the sweep, each shown to fail when it should: the seeds a range runs, a failing seed and its report in the panic, the shards of a sweep, flags that do not fit together, a run that is not a sweep, and each kind of failure printed with the command that replays it. |
 | `job_front` | `tests/job_front.rs` | The job front, driven through a scripted client port: each answer of the job service mapped to its event, the submit's body (a whole host, or the work's own cpu and memory and wall limit), and what a cancel and a give-up do at each stage. |
 | `jobs` | `tests/jobs.rs` | The job scenario family, each over sixteen seeds over the job front: a submit whose answer the client lost, sent again under the same job id (row 1); a host silent before it lists a job's start, which the start timeout ends (rows 35 and 43); a job cancelled before its host lists the start (row 38); the headline over jobs (twenty hosts, forty jobs, four agents cut off and two killed mid-job and replaced: the two-hundred-host headline at a tenth of its size, since every pull request runs it); and a restart of the server with jobs in flight (rows 3 and 36). The headline is in `tests/cell/jobs_headline.rs`. |
+| `job_retry` | `tests/job_retry.rs` | Retry and completion callbacks in the cell, on the real server: a job whose first attempt is lost is retried with its item still waiting and succeeds, its callback made once after the last attempt; a job whose attempts run out ends lost; a job without a policy is lost at its first attempt; a start the agent refuses with a code of the host's is retried on another host, one refused on every attempt ends failed to start after its last, and one refused with a code of the job's (`invalid-job`) ends at its first; a receiver switched down is tried again with one webhook id until it answers, across a restart of the server; and a second instance that claims the due callbacks and vanishes, after which the cell's server delivers them once the claims lapse. |
+| `retry` | `tests/retry.rs` | The retry family, each over eight seeds over the job front, on the real server: a crash between an attempt's end and its retry (`restart_between_attempts`: the server stopped while an agent holds the result of a refused start, one retry after the restart, witness `result_resent`); a whole-host attempt lost while it runs and tried again with its failed prepares counted again from zero (`whole_host_retry`); a retried job's callback once, after its last attempt, at each final state (`one_callback_after_retries_are_exhausted`); callbacks due while the server is down, delivered after it restarts (`restart_with_due_callbacks`); a cancel racing a retry (`a_cancel_racing_a_retry_starts_no_attempt_after_it`); a late result of an earlier attempt, answered stale (`a_late_result_of_an_earlier_attempt_is_stale`); and a callback claimed by a second instance that vanished, delivered once the claim lapsed (`a_lapsed_callback_claim_is_delivered_by_another_instance`). Two negative cases: agents that forget an unacknowledged result fail the restart between attempts, and the run of a retried job, changed in one place, is flagged by each of `attempts-bounded`, `one-attempt-at-a-time` and `callback-after-the-final-end`. The scenarios are in `tests/cell/retry.rs`. |
 | `job_actions` | `tests/job_actions.rs` | The machinery the job scenario family added, on the real server: the job front's lost-answer switch and the action that throws it, and the action that kills agents running listed jobs and replaces them. |
 | `broken_agent` | `tests/broken_agent.rs` | The negative cases of the harness: agents that lack a behaviour the server relies on must fail a named invariant, and correct agents must pass with the witness held. |
 | `faults` | `tests/faults.rs` | The fault family: agents that die and return, agents killed for good, a 30 s partition that heals, a lossy wire, a silent host holding a job it never listed, a start after its stop, a restart of the server, and a forgotten host seated again, each over sixteen seeds; three negative cases with defective agents. |
@@ -205,8 +244,8 @@ The flags, all the binary's own (it has no harness, so libtest never reads them)
 
 This is the one way to run a scenario over seeds other than the first few; there is no
 environment variable. A run with none of these flags runs no seed and passes, saying so
-on stderr: that is how the `test` job's `cargo nextest run --workspace` runs the binary on
-every pull request, so the pull request tests keep their few seeds. Flags that do not fit together (no shard, a
+on stderr: that is how the `test` job's `cargo nextest run --workspace` runs the binary in
+every shard of every pull request, so the pull request tests keep their few seeds. Flags that do not fit together (no shard, a
 shard past the last, fewer seeds than shards, a range past the last seed, a scenario the
 family does not have) are refused with exit status 2.
 
@@ -329,13 +368,14 @@ ended at 900 s by an action, and then what the scenario expects: every item term
 at least one seed in which some agent sent a result again (the witness). `settle_within`
 is how long the cell runs after the last action before the end check.
 
-The smoke family runs it over eight seeds:
+The smoke family runs it over eight seeds, on four threads:
 
 ```rust
 // Copied from crates/js-sim-cell/tests/smoke.rs
 #[test]
 fn a_lossy_agent_wire_settles_every_run() {
-    lossy_wire::a_lossy_agent_wire_settles_every_run().run_seeds(LOSSY_SEEDS);
+    let build = lossy_wire::a_lossy_agent_wire_settles_every_run;
+    run_seed_range_on_threads(build, 0..LOSSY_SEEDS, THREADS);
 }
 // End of the copy.
 ```
@@ -361,12 +401,17 @@ What a scenario can say, all of it in `crates/js-sim-cell/src/scenario/`,
   `submit_work`, `cancel_work(items(range))`, `kill_agents`, `replace_agents`, `upgrade_agents`,
   for the whole-host prepare `agent_silent_on_prepare(agents)`,
   `agent_refuses_prepare(agents, reason)` (each of `REFUSAL_REASONS`),
-  `agent_prepare_delay(agents, delay)` and `cancel_when_preparing(item, within)`, for a host's
+  `agent_prepare_delay(agents, delay)` and `cancel_when_preparing(item, within)`, for a
+  job's start `agent_refuses_starts(agents, code)` (the fake per-job agent launches nothing and
+  keeps a `failed_to_start` result with the code, resent until acknowledged; `HOST_REFUSAL`,
+  `host-tainted`, is a code of the host's, which a retry policy retries on another host) and
+  `agent_takes_starts(agents)` (back to taking them), for a host's
   cordon `cordon_host(agent, secs)` and `uncordon_host(agent)` (through
   `POST /v1/hosts/{id}:cordon` and `:uncordon`), `set_usage_fault(fault)` (a
   `UsageReadFault` applied to the usage rows the cell reads at the end),
   `kill_agents_for_good` (a host gone, not a fault), `partition_agents(agents, lasting)`,
-  `set_bus_faults(faults)` and `restart_server()` (the server started again over its
+  `callback_receiver_down(lasting)` and `claim_callbacks_and_vanish()` (see the callback
+  receiver above), `set_bus_faults(faults)` and `restart_server()` (the server started again over its
   files and store with `--boot resume`); for the store, `stop_server()` (the server
   stopped between two inputs, its store read while it is down, until a `restart_server`),
   `start_second_server()` (a second server on the store, stopped again at once if it
@@ -399,7 +444,9 @@ What a scenario can say, all of it in `crates/js-sim-cell/src/scenario/`,
   launched on its host had made its result), and for the prepare handshake
   `Expect::jobs_placed_again(n)`, `Expect::kept_off_a_failed_host(span)`,
   `Expect::no_job_launched()` and `Expect::marks_held(n)` (the engine's marks in the job
-  store, when judged), and for an elastic pool
+  store, when judged), and for retry and callbacks `Expect::attempts_of(item, n)` (the last
+  attempt number the cell read), `Expect::callbacks_delivered(item, n)` (calls the receiver
+  answered 2xx) and `Expect::callback_calls(item, n)` (calls made, whatever the answer), and for an elastic pool
   `Expect::pool_tripped(pool, tripped)` (the scaler's brake, when judged) and
   `Expect::machines_launched(pool, n)` (the machines the fake launched for the
   scheduler, foreign ones left out), and for a named cloud `Expect::acquires(pool, n)`,
@@ -420,7 +467,8 @@ What a scenario can say, all of it in `crates/js-sim-cell/src/scenario/`,
 - `.run_seeds(n)`: run seeds `0..n`, and fail the test with the failure as text;
   `.run_seed_range(a..b)` does the same for the seeds of any range (`run_seeds(n)` is
   `run_seed_range(0..n)`), and `.try_run_seeds(n)` and `.try_run_seed_range(a..b)` return
-  the failure instead.
+  the failure instead; `run_seed_range_on_threads(build, a..b, threads)` runs the seeds of a
+  range on several threads, as [Run one](#run-one) says.
 
 The rules:
 
@@ -495,6 +543,9 @@ from its `placed` to its `released`, as the job front hears them.
 | `no-second-launch-for-one-acquire` | No acquire id has two machines over every cloud of the pool, as the cell read the clouds themselves; and an acquire id a cloud answered with no answer or a deferral is never presented to another cloud. | `no-second-launch-for-one-acquire at 300: the acquire id burst-1 has 2 machines: m000 of provider ec2, m001 of provider ec2` | every step |
 | `quota-pass-over-honoured` | After a cloud refused an acquire of an offer in a zone for `quota`, no acquire of that offer in that zone (a zone is its own region, as the server reads them) is made of it within its `quota_backoff`, from the step after the answer. | `quota-pass-over-honoured at 300: an acquire of offer sim_small in zone zone-a at 200, inside the 600s quota backoff of provider ec2 after its quota refusal at 100` | every step |
 | `free-host-beats-acquire` | No acquire is made at an instant when a registered host was open to a new job, as the wrapper read the server's registry inside the input that made the call (live, serving, heard since its hello, not tainted, cordoned or set aside), and held no job, as the job tables, once read past that instant, say. | `free-host-beats-acquire at 300: an acquire of offer sim_small in zone zone-a at 200 from provider ec2, while 1 registered hosts were open and held no job, host-2 first` | every step |
+| `attempts-bounded` | No job is launched under more allocations than its retry policy allows, and no attempt number the cell read of its row exceeds it. A launch is the ledger's run `<job>/<allocation>`, counted by allocation, so a requeue before any launch is not an attempt; a job whose row was read with no policy (or 0 or 1 attempts) allows one. A job whose row was never read has no known limit and is not judged. | `attempts-bounded at 1000: job sim-job-0 was launched under 3 allocations, the last at 300, its policy allows 2`, or `job sim-job-0 read attempt 3 at 500, its policy allows 2` | every step |
+| `one-attempt-at-a-time` | No two attempts of a job hold an allocation at once: no agent reads the start of a job under an allocation (one it did not refuse as coming after a stop) while an agent, the same or another, still holds the job under another allocation, by the agents' own truth. Two hosts holding the job with no start read are `one-allocation-per-job`'s. | `one-attempt-at-a-time at 1000: host h002 read a start of job sim-job-0 under allocation 0202... at 500 while host h001 still holds the job under allocation 0101...` | every step |
+| `callback-after-the-final-end` | Every call the cell's callback receiver got for a job was made after the job's row ended, as the store read it at the call (never while the job waits for or runs another attempt, or when it holds no row), and every call of one job carries one webhook id, so a retry of a failed try is the same delivery. | `callback-after-the-final-end at 1000: the callback of job sim-job-0 was called at 500 while its row read queued, not ended`, or `the callback of job sim-job-0 was called at 600 with webhook id w-2, after webhook id w-1 at 500` | every step |
 
 The step invariants are checked after every kernel step, every poll of the client and
 every client call; the end invariants once, after the scenario has been quiet (no partition, no
@@ -780,7 +831,7 @@ rendered again after a change here.
 | 43 | `a_silent_host_never_requeues_a_placed_job_and_start_timeout_ends_it` | `tests/jobs.rs` | The start never completes because the host is silent, not because an image fetch sticks: after the start timeout the job fails to start, `start-timeout`; its allocation is kept, releasing, while the host is silent, and freed once the host confirms the container gone. |
 The job scenario family (`tests/jobs.rs`) runs every invariant of `Invariant::ALL`, the
 five job invariants among them, and states the rest with the job `Expect`s
-(`Expect::jobs_read` and the ten after it), which read the server's job and allocation
+(`Expect::jobs_read` and the thirteen after it), which read the server's job and allocation
 tables as the cell read them and the cell's launch ledger. Beside rows 1, 3, 35, 36, 38
 and 43 above it runs the headline over jobs (`the_headline_over_jobs`, no row: twenty
 hosts, forty jobs, four agents cut off for 30 s and two killed mid-job and replaced, a
@@ -790,6 +841,19 @@ closes have no scenario: row 37 needs a host the provider read absent that comes
 still running its job, which the cell cannot bring about (see [What the cell does not
 model](#what-the-cell-does-not-model)), and row 42 (a cancel, then the provider reads the
 host absent) is not run.
+
+The retry family (`tests/retry.rs`, its scenarios in `tests/cell/retry.rs`) runs every
+invariant of `Invariant::ALL`, the three of retry and the callback among them, over the
+cell's server, which takes retry and callbacks as a shipped server does,
+and its callback receiver. It covers no row of section 8 of the jobscheduler design: its
+rows are those of section 8 of `docs/design/job-retry-and-completion-callback.md`. A job
+that is refused or lost waits its first backoff (10 s and the job's own jitter) and then
+needs another host, since the host that failed it is out of its next placement for 15
+minutes and the cell's agents do not report `start-fence`; every scenario is built so that
+a host is left. `a_cancel_racing_a_retry_starts_no_attempt_after_it` states the server as built: a job
+whose cancel is asked while it runs on a host that is then read lost ends lost (a job with
+a cancel intent is lost, not cancelled, and is not tried again), and a cancel that meets
+the queued retry ends the job cancelled at once.
 
 The partition scenario of `tests/cell/partition.rs` cuts agents off while they run, but asserts only
 what the server as built and the design both promise (the invariants and every item

@@ -311,8 +311,8 @@ impl HostEntry {
     /// from when it was last heard (live, or lost past the longest grace), the phase it
     /// announced, the shape it is placed on, the capabilities of its claim (the booked shape's
     /// without one), its labels, the mark of its `hostmark/<host>` row and the taint of its
-    /// `taint/<host>` row. Its session, cordon, load and version are the registry's of the
-    /// server that took its hello, and are not listed.
+    /// `taint/<host>` row, and the agent version its hello gave. Its session, cordon and load
+    /// are the registry's of the server that took its hello, and are not listed.
     fn by_row(seen: Seen) -> Self {
         let record = seen.row.record;
         let state = match seen.lost {
@@ -335,7 +335,7 @@ impl HostEntry {
             memory: MemoryView::of(memory),
             capabilities: claimed.capabilities().clone(),
             labels: record.labels,
-            agent_version: None,
+            agent_version: record.agent_version,
             releasing: Some(mark == Some(HostMark::Releasing)),
             taint: seen.taint.map(|taint| Taint {
                 reason: HOST_JOB_TAINT.to_owned(),

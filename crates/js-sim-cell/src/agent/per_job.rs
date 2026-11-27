@@ -9,8 +9,9 @@
 //! | what arrives or happens | what the agent does |
 //! |---|---|
 //! | `JobStart` | [`AgentHarness::start`]`(job)`: launched once; a start for a job id it has started is a repeat ([`Counter::StartRepeated`]), one for a job id a stop named is refused ([`Counter::StartAfterStop`]) |
+//! | `JobStart` while the host's start refusal is on ([`AgentNode::set_start_refusal`]) | nothing is launched (no ledger launch, no end timer, nothing running; the fake takes the start and ends the job at once): the result `failed_to_start`, its detail the refusal's code, is made at once ([`ResultMade`], `held`) and rides in every heartbeat until acknowledged, like any result; a start of a job that holds such a result is a repeat ([`Counter::StartRepeated`]) |
 //! | `JobStop` of a job it runs | the job ends; its result, `killed`, rides in every heartbeat until acknowledged |
-//! | `JobStop` of a job whose result is not yet acknowledged | nothing: the result rides on |
+//! | `JobStop` of a job whose result (a refused start's included) is not yet acknowledged | nothing: the result rides on |
 //! | `JobStop` of a job it does not hold | [`AgentHarness::cancel`]`(job)`: the id is retired (the first stop of a job no answer handed it a start of counts in [`Counter::StopBeforeStart`]), listed in `retired_jobs` until an answer's `retired_acks` names it, and a later start of it is refused |
 //! | a job of [`SIM_RUN_IMAGE`] runs out its time (its first argument, in milliseconds) | [`AgentHarness::complete`]`(job)`: its result, `succeeded`, rides in every heartbeat until acknowledged |
 //! | `job_acks` names a job with a verdict this version reads | [`AgentHarness::ack`]`(job)`: the result is dropped |
@@ -263,6 +264,10 @@ pub(super) struct PerJob {
     killed: BTreeSet<JobId>,
     /// The ids retired by a stop of a job not held, until an answer acknowledges them.
     retired: BTreeSet<JobId>,
+    /// The jobs whose start the agent refused, with the code each was refused with, until
+    /// their result is acknowledged. Each is also in `jobs` (and ended in the fake), so its
+    /// result is listed, resent and acknowledged as any result is.
+    refused: BTreeMap<JobId, String>,
     beats: Beats,
 }
 
@@ -283,6 +288,7 @@ impl PerJob {
             handed: BTreeSet::new(),
             killed: BTreeSet::new(),
             retired: BTreeSet::new(),
+            refused: BTreeMap::new(),
             beats: Beats::default(),
         })
     }
@@ -329,20 +335,21 @@ impl PerJob {
         listing
     }
 
-    /// The result of `job`: `killed` when a stop ended it, else `succeeded`.
+    /// The result of `job`: `failed_to_start` with its code when the agent refused the start,
+    /// `killed` when a stop ended it, else `succeeded`.
     fn result(&self, job: &JobId, placed: &Placed) -> JobResult {
-        let killed = self.killed.contains(job);
-        let outcome = if killed {
-            Outcome::Killed
-        } else {
-            Outcome::Succeeded
+        let refusal = self.refused.get(job);
+        let (outcome, exit_code) = match (refusal, self.killed.contains(job)) {
+            (Some(_), _) => (Outcome::FailedToStart, None),
+            (None, true) => (Outcome::Killed, None),
+            (None, false) => (Outcome::Succeeded, Some(0)),
         };
         JobResult {
             job_id: job.to_string(),
             allocation_id: placed.allocation.to_string(),
             outcome,
-            exit_code: (!killed).then_some(0),
-            detail: None,
+            exit_code,
+            detail: refusal.cloned(),
             log_tail: None,
             logs: None,
             input_failure: None,
@@ -402,6 +409,7 @@ impl PerJob {
         }
         for (job, verdict) in verdicts(acks) {
             self.fake.ack(job.as_str());
+            self.refused.remove(&job);
             read.acks.push((job, verdict));
         }
         let acked = acks.retired_acks;
@@ -434,8 +442,33 @@ impl PerJob {
         self.fake.start(job.as_str(), 0, 0);
         let after = self.fake.observed();
         if after.launches.get(job.as_str()) != before.launches.get(job.as_str()) {
-            intent.launched(&mut self.jobs, &mut self.timers, io);
+            match io.refusal.clone() {
+                Some(code) => self.refuse(intent, code, io),
+                None => intent.launched(&mut self.jobs, &mut self.timers, io),
+            }
         }
+    }
+
+    /// The start `intent` was taken by the fake, and the agent refuses it with `code`: the
+    /// job is held and ended at once, with a result `failed_to_start` that is kept until
+    /// acknowledged. Nothing is launched: no ledger launch, no end timer, nothing running.
+    fn refuse(&mut self, intent: Intent, code: String, io: &mut Io) {
+        let Intent {
+            job,
+            allocation,
+            resources,
+            ..
+        } = intent;
+        self.fake.complete(job.as_str());
+        self.refused.insert(job.clone(), code);
+        self.jobs.insert(
+            job.clone(),
+            Placed {
+                allocation,
+                resources,
+            },
+        );
+        made(job, true, io);
     }
 
     /// A stop of the job `text` names.
@@ -470,7 +503,6 @@ impl PerJob {
     }
 }
 
-/// Writes into the ledger that the agent made the result of `job`, now.
 /// Writes into the ledger that the agent made the result of `job` now; `held`: it is a start
 /// the agent refused because its host is held.
 pub(super) fn made(job: JobId, held: bool, io: &mut Io) {

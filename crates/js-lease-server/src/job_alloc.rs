@@ -25,7 +25,7 @@ use js_jobs::{
     StartFailure,
 };
 use js_state::{Store, StoreTime};
-use js_types::{CpuSeries, HostId};
+use js_types::{CpuSeries, HostId, MemorySeries};
 use js_usage::{
     AllocationId, Booked as UsageBooked, DrainOutcome, EndedReason, EndedRow, ProfileKey, Used,
 };
@@ -166,7 +166,8 @@ pub(crate) fn lose_on_absent<S: Store, I: IdSource>(
 /// job's submit for the first) to this placement, run from the attempt's start to its end
 /// ([`attempt_times`]: zero for an attempt that never ran, unknown for a job whose row is
 /// gone), ended at the free, for the reason it was freed, with what it was measured to
-/// use ([`used_of`]) and its CPU series ([`series_of`]), with the name of its class as it is
+/// use ([`used_of`]), its CPU series ([`series_of`]) and its memory series
+/// ([`memory_series_of`]), with the name of its class as it is
 /// ([`js_sched_placer::sizes::class_name`]: a full build target's name kept byte for byte),
 /// under that name as its profile when it is a profile key ([`profile_of`]), and with the job's
 /// attempt when it is not the first: the allocation is the job's current attempt's, since the
@@ -199,6 +200,7 @@ pub(crate) fn history(job: Option<&JobRecord>, freed: &AllocationRecord) -> Vec<
         attempt: job
             .map(|job| job.attempt.number())
             .filter(|number| *number > 1),
+        memory_series: job.and_then(memory_series_of),
     };
     let rows = named.map(|id| js_usage::ended_writes(&row(id)).to_vec());
     rows.unwrap_or_default()
@@ -257,6 +259,13 @@ fn used_of(job: &JobRecord) -> Option<Used> {
 /// whether or not the host also reported a usage and whatever total CPU it comes to.
 fn series_of(job: &JobRecord) -> Option<CpuSeries> {
     job.result.as_ref()?.cpu_series.clone()
+}
+
+/// The memory series `job`'s host reported with its result, as the usage history keeps it;
+/// `None` for a job with no result and for one whose host reported none. It is kept as
+/// reported, as the CPU series is, whatever peak memory the usage gives.
+fn memory_series_of(job: &JobRecord) -> Option<MemorySeries> {
+    job.result.as_ref()?.memory_series.clone()
 }
 
 /// What `booked` comes to in the usage history.
