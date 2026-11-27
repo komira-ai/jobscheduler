@@ -388,3 +388,42 @@ fn a_restored_mark_bounds_backfill_by_its_own_tail() {
     let kept = f.s.whole_mark(whole).map(|m| m.tail_end);
     assert_eq!(kept, Some(Some(t(400_000))));
 }
+
+/// Catches: a mark dropped because the caps refuse it a move. Two marks are restored, on
+/// `a` and `b` (both busy until 600 s), at `max_draining = 1`, as after a restart with a
+/// lower cap: each counts the other against the cap, so neither may move. `c`'s tail
+/// (60 s) is the shortest, yet both marks stay where they were restored, and neither
+/// request waits on the cap.
+#[test]
+fn a_mark_the_caps_refuse_a_move_stays_on_its_worker() {
+    let mut f = farm(WholeNodeConfig {
+        max_draining: 1,
+        ..cfg(0, 2)
+    });
+    for (name, wall) in [("a", MAX_WALL), ("b", MAX_WALL), ("c", 60)] {
+        f.worker(name);
+        f.lease_on(name, secs(wall));
+    }
+    let first = f.submit_whole(Some(secs(MAX_WALL)));
+    let second = f.submit_whole(Some(secs(MAX_WALL)));
+    assert_eq!(
+        f.s.restore_whole(restored(first, Some(mark_on("a")))),
+        Ok(())
+    );
+    assert_eq!(
+        f.s.restore_whole(restored(second, Some(mark_on("b")))),
+        Ok(())
+    );
+    for ms in [0, 10_000] {
+        f.at(ms);
+        f.beat();
+        assert!(f.grants().is_empty());
+        let on = |op| f.s.whole_mark(op).map(|m| (m.worker.clone(), m.made));
+        assert_eq!(on(first), Some((w("a"), t(0))));
+        assert_eq!(on(second), Some((w("b"), t(0))));
+        assert_eq!(
+            (f.s.whole_wait(first), f.s.whole_wait(second)),
+            (None, None)
+        );
+    }
+}
