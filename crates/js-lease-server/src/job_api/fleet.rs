@@ -258,14 +258,6 @@ impl JobApi {
     }
 }
 
-/// The registry's silence of a host, for the read calls ([`super::read::Silence`]): it takes
-/// and drops the registry's lock, after the read calls have read the store.
-impl super::read::Silence for js_registry::Registry {
-    fn silent_since(&self, host: &js_types::HostId) -> Option<u64> {
-        js_registry::Registry::silent_since(self, host).map(|at| at.millis())
-    }
-}
-
 /// What the group is served over, or `UNIMPLEMENTED` before it is.
 fn served(api: &JobApi) -> Result<&Served, Status> {
     let served = api.fleet.served.as_ref();
@@ -807,6 +799,12 @@ fn record(row: EndedRow) -> wire::UsageRecord {
             partial: series.partial,
         }),
         attempt: row.attempt,
+        memory_series: row.memory_series.map(|series| wire::MemorySeries {
+            granularity_secs: series.granularity_secs,
+            points: series.points,
+            run_usec: series.run_usec,
+            partial: series.partial,
+        }),
     }
 }
 
