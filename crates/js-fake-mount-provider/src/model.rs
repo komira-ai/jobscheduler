@@ -9,9 +9,9 @@
 //!   it answers `UNAVAILABLE` with tierstore's reason ("the tree was not made: too many
 //!   placements: N are alive"); a source it does not hold (after a restart) is `UNAVAILABLE`
 //!   "the source is not prepared here", as tierstore answers.
-//! - With [`RefuseAt::Prepare`] the limit is met at `Prepare` instead: a new source while the
-//!   limit's placements are alive is `UNAVAILABLE`, as tierstore answered at the time of the
-//!   agent's retry storm.
+//! - With [`RefuseAt::Prepare`] the tree is placed at `Prepare`, and the limit is met there: a new
+//!   source while the limit's placements are alive is `UNAVAILABLE` with the same reason, as
+//!   tierstore answered when the agent's retry storm was seen; its `Mount` answers the path.
 //! - `Release` frees the source and its placement; a source it does not know is a success.
 //!   `Sweep` releases an agent's sources whose run is not kept.
 //! - [`Mode::Stalled`] is a store that stopped answering: `Mount` waits (the service holds it
@@ -130,9 +130,11 @@ impl Store {
         *self = Store::new(limit, refuse_at);
     }
 
-    /// Forgets every source, as a provider that restarted; the calls stay.
-    pub(crate) fn restart(&mut self) {
+    /// Forgets every source, as a provider that restarted at `at_ms`; the calls stay, and the
+    /// restart is listed among them (`<at_ms> Restart ok`).
+    pub(crate) fn restart(&mut self, at_ms: u64) {
         self.sources.clear();
+        let _ = self.record(at_ms, "Restart", Ok(()));
     }
 
     /// Answers in `mode` from now on.
@@ -195,7 +197,7 @@ impl Store {
         } else {
             let held = Held {
                 reference: reference.to_owned(),
-                placed: false,
+                placed: self.refuse_at == RefuseAt::Prepare,
             };
             self.sources.insert(key, held);
             Ok(())
@@ -333,13 +335,16 @@ mod tests {
         assert_eq!(store.mount(3, &key("js.a", 2), false), placed("js.a", 2));
     }
 
-    /// Asserts the limit met at Prepare: a new source while the limit's placements are alive is
-    /// refused, a source already held is not, and a Release lets the new one in.
+    /// Asserts the limit met at Prepare: the tree is placed at Prepare (its Mount answers the
+    /// path even while the store stalls), a new source while the limit's placements are alive
+    /// is refused, a source already held is not, and a Release lets the new one in.
     #[test]
     fn the_limit_is_met_at_prepare() {
         let mut store = Store::new(1, RefuseAt::Prepare);
         assert_eq!(store.prepare(0, key("js.a", 0), "cas/l/1"), Ok(()));
+        store.set_mode(Mode::Stalled);
         assert_eq!(store.mount(0, &key("js.a", 0), false), placed("js.a", 0));
+        store.set_mode(Mode::Serving);
         assert_eq!(
             store.prepare(1, key("js.b", 0), "cas/l/1"),
             unavailable("the tree was not made: too many placements: 1 are alive")
@@ -408,14 +413,14 @@ mod tests {
             ))
         );
         assert_eq!(store.prepare(0, key("js.a", 0), "cas/l/1"), Ok(()));
-        store.restart();
+        store.restart(1);
         assert_eq!(
-            store.mount(1, &key("js.a", 0), false).map(|_| ()),
+            store.mount(2, &key("js.a", 0), false).map(|_| ()),
             unavailable("the source is not prepared here")
         );
         assert_eq!(
             store.calls(),
-            "0 Prepare invalid\n0 Prepare ok\n1 Mount unavailable\n"
+            "0 Prepare invalid\n0 Prepare ok\n1 Restart ok\n2 Mount unavailable\n"
         );
         store.reset(3, RefuseAt::Prepare);
         assert_eq!(store.calls(), "");

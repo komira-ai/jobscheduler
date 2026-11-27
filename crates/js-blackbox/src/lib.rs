@@ -23,13 +23,23 @@
 //! | the agent updated while a job runs | the agent of the previous release is updated to the released one: the job is handed over (it ends with exit code 0 in its first attempt) and the host lists the new version within [`SESSION_WITHIN`] |
 //! | the server unreachable for [`OUTAGE`] | the job keeps running through the outage, the agent is back in a session within [`BACK_WITHIN`] of the server's return, and the job ends with exit code 0 |
 //! | the server's name not found for [`OUTAGE`] after the first contact | the host is listed live and its health route answers 200 at every probe of the outage |
+//! | J5, [`BURST`] starts at [`MAX_PLACEMENTS`] placements, the mount provider's store stalled for [`STALL`] | in no [`CALL_WINDOW`] do more than [`MOST_CALLS_IN_WINDOW`] Prepare calls, nor more than as many Mount calls, reach the provider; one Release per job reaches it; every job ends, none as its own fault ([`own_fault`]) |
+//! | J5, the same burst with the limit met at Prepare (the provider places at Prepare) | the same |
+//! | J5, the mount provider restarted while [`WAITING`] starts wait | at least [`WAITING`] Prepare calls reach the provider after its restart, and every job ends with exit code 0 |
+//! | J5, the mount provider answering unavailable for [`PROVIDER_OUTAGE`] while [`WAITING`] starts wait | every job ends with exit code 0 |
+//! | J5, a ref the mount provider refuses | the start fails `provider-refused` (the job's own fault), after one Prepare |
 
+mod provider;
 mod read;
 mod render;
 mod watch;
 
 use std::time::Duration;
 
+pub use provider::{
+    Busiest, FAILED_TO_START, INPUT_UNAVAILABLE, PROVIDER_REFUSED, ProviderCall, busiest,
+    own_fault, per_second, provider_calls,
+};
 pub use read::{
     HostSeen, JobSeen, ResultSeen, Version, host, job, loaded_image, previous_version, result,
 };
@@ -48,6 +58,29 @@ pub const BACK_WITHIN: Duration = Duration::from_secs(30);
 
 /// How long the server is unreachable, and how long its name is not found.
 pub const OUTAGE: Duration = Duration::from_secs(60);
+
+/// J5: the job starts of the burst.
+pub const BURST: usize = 20;
+
+/// J5: the placements the mount provider holds at once.
+pub const MAX_PLACEMENTS: usize = 2;
+
+/// J5: how long the mount provider's store stalls at the start of the burst.
+pub const STALL: Duration = Duration::from_secs(30);
+
+/// J5: the window the provider's calls are counted in.
+pub const CALL_WINDOW: Duration = Duration::from_secs(30);
+
+/// J5: the most calls of one kind (Prepare, Mount) that may reach the provider in a
+/// [`CALL_WINDOW`]: one per start of the burst.
+pub const MOST_CALLS_IN_WINDOW: usize = 20;
+
+/// J5: the starts that wait through the provider's restart and through its outage, three times
+/// the placements it holds.
+pub const WAITING: usize = 6;
+
+/// J5: how long the mount provider answers every call unavailable.
+pub const PROVIDER_OUTAGE: Duration = Duration::from_secs(60);
 
 /// How often a wait or a hold probes.
 pub const PROBE_EVERY: Duration = Duration::from_secs(1);

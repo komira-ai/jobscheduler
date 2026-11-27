@@ -40,9 +40,6 @@ js-system-clock = { path = "../js-system-clock" }
 clap.workspace = true
 # The job service's client (the HTTP gateway and the host list), over the server's TLS.
 js-client = { path = "../js-client" }
-# The fake mount provider: the protocol's service, served over a Unix socket.
-js-proto = { path = "../js-proto" }
-tonic = { workspace = true, features = ["transport"] }
 # The scratch directory, and the registry the job image is pulled from, on the loopback.
 js-testkit = { path = "../js-testkit", features = ["oci-registry"] }
 # The job image's layer, a gzipped tar.

@@ -1250,7 +1250,6 @@ dependencies = [
  "flate2",
  "hex",
  "js-client",
- "js-proto",
  "js-system-clock",
  "js-testkit",
  "js-types",
@@ -1260,7 +1259,6 @@ dependencies = [
  "sha2",
  "tar",
  "tokio",
- "tonic",
 ]
 
 [[package]]

@@ -4,12 +4,15 @@
 # wrapper, `released rig`, as root: it installs the js-agent .deb of the release from the apt
 # suite `testing`, loads the js-server image of the release (from the GitHub release, checked
 # against its SHA256SUMS) into Docker, starts the fakes of their neighbours (a registry on the
-# loopback with the job image, a mount provider on tierstore's socket; the server's store is its
-# own SQLite store), and runs the test itself, `released scenarios`, which starts the server as
+# loopback with the job image, and a mount provider on tierstore's socket: the program
+# js-fake-mount-provider of this repository, built here; the server's store is its own SQLite
+# store), and runs the test itself, `released scenarios`, which starts the server as
 # the control host starts it and the agent under systemd with flags of the farm's shape, and runs
 # jobs through them: the agent's session and a job (J1), the server's readiness and a job (J6),
 # the server's name not found for 60 s, the server unreachable for 60 s, the server restarted and
-# the agent updated from the previous release while a job runs. It takes the published bytes and
+# the agent updated from the previous release while a job runs; and J5, the agent beside a mount
+# provider at a placement limit of 2 that stalls, restarts and answers unavailable, with 20 starts
+# at once (the provider's calls counted, the jobs' ends judged). It takes the published bytes and
 # nothing from the project's own hosts, and installs no other service's package.
 #
 # The release is the one input, given to the wrapper as its --version.
@@ -51,7 +54,7 @@ jobs:
   blackbox:
     name: js-blackbox
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     permissions:
       contents: read
     steps:
@@ -61,7 +64,9 @@ jobs:
       - run: rustup toolchain install
       - name: Build the test as the runner's user
         run: cargo test --locked -p js-blackbox --test released --no-run
+      - name: Build the fake mount provider as the runner's user
+        run: cargo build --locked -p js-fake-mount-provider
       - name: Install, start and drive the released agent and server, as root
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo
-        run: cargo test --locked -p js-blackbox --test released -- rig --version "$VERSION"
+        run: cargo test --locked -p js-blackbox --test released -- rig --version "$VERSION" --fake-provider "$GITHUB_WORKSPACE/target/debug/js-fake-mount-provider"

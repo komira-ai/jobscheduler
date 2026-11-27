@@ -170,6 +170,22 @@ fn problems(text: &str) -> Vec<String> {
         }),
         "the run is not the released test's wrapper given the release's version",
     );
+    let fake = position("-p js-fake-mount-provider");
+    want(
+        matches!((fake, run), (Some(f), Some(r)) if f < r)
+            && fake.is_some_and(|f| {
+                step_text(f).contains("cargo build --locked -p js-fake-mount-provider")
+            }),
+        "the fake mount provider is not built before the wrapper runs",
+    );
+    want(
+        run.is_some_and(|r| {
+            step_text(r).contains(
+                "--fake-provider \"$GITHUB_WORKSPACE/target/debug/js-fake-mount-provider\"",
+            )
+        }),
+        "the wrapper is not given the fake mount provider that was built",
+    );
     want(
         joined.matches("sudo").count() == 1
             && joined.contains("CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo\n"),
@@ -290,7 +306,7 @@ fn the_workflow_takes_the_version_as_its_one_required_input() {
 #[test]
 fn each_way_of_leaving_the_workflows_shape_is_named() {
     let text = read(WORKFLOW);
-    let table: [(&str, &str, &str); 16] = [
+    let table: [(&str, &str, &str); 18] = [
         (
             "on:\n  workflow_call:\n",
             "on:\n  pull_request:\n  workflow_call:\n",
@@ -327,8 +343,8 @@ fn each_way_of_leaving_the_workflows_shape_is_named() {
             "permissions are not contents: read",
         ),
         (
-            "    timeout-minutes: 60\n",
-            "    timeout-minutes: 60\n    environment: apt-publish\n",
+            "    timeout-minutes: 90\n",
+            "    timeout-minutes: 90\n    environment: apt-publish\n",
             "runs in an environment",
         ),
         (
@@ -365,6 +381,16 @@ fn each_way_of_leaving_the_workflows_shape_is_named() {
             "-- rig --version \"$VERSION\"",
             "-- rig --version 0.1.0",
             "given the release's version",
+        ),
+        (
+            "      - name: Build the fake mount provider as the runner's user\n        run: cargo build --locked -p js-fake-mount-provider\n",
+            "",
+            "the fake mount provider is not built before the wrapper runs",
+        ),
+        (
+            "--fake-provider \"$GITHUB_WORKSPACE/target/debug/js-fake-mount-provider\"",
+            "--fake-provider /usr/local/bin/js-fake-mount-provider",
+            "not given the fake mount provider that was built",
         ),
         (
             "          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo\n        run: cargo test",

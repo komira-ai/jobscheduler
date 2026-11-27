@@ -99,6 +99,9 @@ pub struct Flags {
     /// The fake mount provider's name, as the agent's flags name it.
     #[arg(long)]
     pub provider: String,
+    /// The fake mount provider's control socket, which J5 sets it through.
+    #[arg(long)]
+    pub provider_control: PathBuf,
     /// Run only these scenarios (besides j6 and j1); repeatable.
     #[arg(long)]
     pub only: Vec<String>,
@@ -112,14 +115,22 @@ fn parse_version(text: &str) -> Result<Version, String> {
 type Scenario = fn(&Rig) -> Result<(), String>;
 
 /// The scenarios, in the order they run.
-const SCENARIOS: [(&str, Scenario); 6] = [
+const SCENARIOS: [(&str, Scenario); 11] = [
     ("j6", j6),
     ("j1", j1),
     ("name-lookup", name_lookup),
     ("server-unreachable", server_unreachable),
     ("server-restart", server_restart),
     ("agent-update", agent_update),
+    ("j5-burst", j5::burst),
+    ("j5-burst-at-prepare", j5::burst_at_prepare),
+    ("j5-restart", j5::restart),
+    ("j5-outage", j5::outage),
+    ("j5-refused", j5::refused),
 ];
+
+#[path = "j5.rs"]
+mod j5;
 
 /// Runs the scenarios and says how each ended.
 pub fn run_all(flags: Flags) -> ExitCode {
@@ -263,6 +274,18 @@ impl Rig {
 
     /// Submits a job that sleeps `seconds` and ends 0, with `mounts` (gateway JSON): its id.
     fn submit(&self, name: &str, seconds: u32, mounts: serde_json::Value) -> String {
+        self.submit_sized(name, seconds, mounts, ("250", "134217728"))
+    }
+
+    /// Submits a job that sleeps `seconds` and ends 0, with `mounts` (gateway JSON), booking
+    /// `needs` (CPU millis, memory bytes): its id.
+    fn submit_sized(
+        &self,
+        name: &str,
+        seconds: u32,
+        mounts: serde_json::Value,
+        needs: (&str, &str),
+    ) -> String {
         static NEXT: AtomicU32 = AtomicU32::new(0);
         let id = format!("{name}-{}", NEXT.fetch_add(1, Ordering::SeqCst));
         let body = json!({"spec": {
@@ -271,7 +294,7 @@ impl Rig {
             "command": "/bin/sleep",
             "args": [seconds.to_string()],
             "wallLimitSeconds": "900",
-            "needs": {"cpuMillis": "250", "memoryBytes": "134217728"},
+            "needs": {"cpuMillis": needs.0, "memoryBytes": needs.1},
             "mounts": mounts
         }});
         let reply = self

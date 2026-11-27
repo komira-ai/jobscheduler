@@ -215,7 +215,8 @@ pub(crate) async fn serve(
             return Ok(());
         }
         tokio::time::sleep(pause).await;
-        shared.store().restart();
+        let at = shared.now_ms();
+        shared.store().restart(at);
         listener = bind(&socket)?;
     }
 }

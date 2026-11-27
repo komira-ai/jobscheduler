@@ -23,13 +23,15 @@
 //!
 //! This binary has no libtest harness. Its first argument is a mode:
 //!
-//! - `rig --version X.Y.Z`: the wrapper (wrapper.rs) installs the release, starts the fakes and
+//! - `rig --version X.Y.Z --fake-provider PATH`: the wrapper (wrapper.rs) installs the release, starts the fakes and
 //!   runs `scenarios` with flags that name them; as root on a disposable host only
 //!   (.github/workflows/js-blackbox.yml);
 //! - `scenarios ...`: the test itself (scenarios.rs), given what was installed and where each
 //!   fake listens; it says PASS, FAIL or NOT RUN for each scenario and exits 1 when any did not
 //!   pass;
-//! - `fake-registry ...` and `fake-provider ...`: the fakes (image.rs, fake_provider.rs).
+//! - `fake-registry ...`: the fake registry (image.rs). The fake mount provider is a program of
+//!   its own, `js-fake-mount-provider` (crates/js-fake-mount-provider), which the wrapper is
+//!   given.
 //!
 //! Run with no mode, or with libtest's arguments (as `cargo test` and cargo-nextest run every
 //! test binary of the workspace), it holds no test: it lists none and says so, and exits 0.
@@ -39,9 +41,6 @@ use std::process::ExitCode;
 #[cfg(target_os = "linux")]
 #[path = "released/agent.rs"]
 mod agent;
-#[cfg(target_os = "linux")]
-#[path = "released/fake_provider.rs"]
-mod fake_provider;
 #[cfg(target_os = "linux")]
 #[path = "released/host.rs"]
 mod host;
@@ -59,7 +58,7 @@ mod server;
 mod wrapper;
 
 /// The modes, the first argument of each.
-const MODES: [&str; 4] = ["rig", "scenarios", "fake-registry", "fake-provider"];
+const MODES: [&str; 3] = ["rig", "scenarios", "fake-registry"];
 
 /// What a run without a mode says.
 const NO_MODE: &str = "released: no tests here; the black-box test runs as `released rig --version X.Y.Z`, as root on a disposable host (.github/workflows/js-blackbox.yml)";
@@ -101,8 +100,6 @@ fn run_mode() -> ExitCode {
         Scenarios(Box<scenarios::Flags>),
         /// Serve the job image on the loopback.
         FakeRegistry(image::Flags),
-        /// Serve the mount provider protocol on a Unix socket.
-        FakeProvider(fake_provider::Flags),
     }
 
     match Cli::parse().mode {
@@ -110,10 +107,6 @@ fn run_mode() -> ExitCode {
         Mode::Scenarios(flags) => scenarios::run_all(*flags),
         Mode::FakeRegistry(flags) => {
             image::serve(&flags);
-            ExitCode::SUCCESS
-        }
-        Mode::FakeProvider(flags) => {
-            fake_provider::serve(&flags);
             ExitCode::SUCCESS
         }
     }
