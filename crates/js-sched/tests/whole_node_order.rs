@@ -115,10 +115,10 @@ fn a_lease_with_no_wall_time_drains_last() {
 }
 
 both_rules! {
-/// Catches: a mark picked again when another worker becomes cheaper: `b`'s hour-long
-/// lease ends and what is left on it ends in 30 s, cheaper to drain than the held `a`
-/// (60 s), and the mark stays on `a`.
-fn the_held_worker_is_kept_while_another_becomes_cheaper() {
+/// Catches: a mark kept on its worker when another becomes cheaper to drain: `b`'s
+/// hour-long lease ends and what is left on it ends in 30 s, cheaper to drain than the
+/// held `a` (60 s), and in the next round the mark moves to `b`.
+fn the_held_worker_moves_when_another_becomes_cheaper() {
     let mut f = Farm::new(
         Scheduler::new(1)
             .with_load_config(booked::current())
@@ -135,7 +135,7 @@ fn the_held_worker_is_kept_while_another_becomes_cheaper() {
     assert_eq!(f.held_for(whole), Some(&w("a")));
     f.finish(&long);
     assert!(f.grants().is_empty());
-    assert_eq!(f.held_for(whole), Some(&w("a")));
+    assert_eq!(f.held_for(whole), Some(&w("b")));
 }
 }
 

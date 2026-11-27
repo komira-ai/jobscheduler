@@ -152,6 +152,12 @@
 //! mean is above the level, so it can only raise its class. [`series_agrees`] says
 //! whether a recorded CPU series matches the run's exact CPU time within 5%.
 //!
+//! [`Profile::tail_p90`] is the 90th percentile of the runs' peaks after 128 s, which a
+//! memory profile needs: its tail mean is no bound on what a run holds at once. A
+//! [`MemoryCurve`] reads a memory profile into what a job of the class would hold at each slot
+//! of its age, with the margin of the flat memory booking and never above it, once the profile
+//! has scored [`CHECK_RUNS`] runs; nothing books it, and the job service reads it in shadow.
+//!
 //! A kept run is its slots (4 bytes each, at most 64), a few counters and its end time:
 //! about 330 bytes. A profile of 64 runs is about 21 KiB, and the self-check
 //! window adds 16 pairs of counters.
@@ -162,6 +168,7 @@
 mod codec;
 mod curve;
 mod key;
+mod memory_curve;
 mod profile;
 mod run;
 mod store;
@@ -174,6 +181,7 @@ pub use curve::{
     age_slot,
 };
 pub use key::{Basis, Cfg, Day, Instance, Key, Level, PlatformClass, Shape};
+pub use memory_curve::MemoryCurve;
 pub use profile::{
     BUCKETS, CHECK_RUNS, CPU_UNIT, Checked, Combine, FIT_PERMILLE, HALF_LIFE_MS, MAX_RUNS,
     MEMORY_UNIT, MIN_RUNS, MIN_SLOT_RUNS, OVERRUN_PERMILLE, Profile, RunSeries, SLOT_SECS,

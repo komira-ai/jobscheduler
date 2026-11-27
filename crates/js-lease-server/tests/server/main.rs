@@ -108,5 +108,6 @@ mod tailnet;
 mod ticks;
 mod tls;
 mod tls_reload;
+mod tunings;
 mod usage;
 mod usage_support;
