@@ -497,8 +497,7 @@ fn the_curve_families_are_written_only_when_there_is_a_view() {
 /// Asserts the memory shadow's families of a scrape that read its view: the placements by
 /// verdict (2, 3 and 1, so a swap shows), the milliseconds the sooner ones would have gained,
 /// and for each host in host order its projected memory, its last reading (left out for a host
-/// with none), its comparisons, those too low and by how much, with a host id written escaped;
-/// and that a scrape with no view writes none of them. Catches a verdict given another's count, a
+/// with none), its comparisons, and those too low and by how much; and that a scrape with no view writes none of them. Catches a verdict given another's count, a
 /// reading written for a host that has none, and a family written while the shadow is off.
 #[test]
 fn a_memory_shadow_view_is_written_as_its_verdicts_and_each_hosts_projection() {

@@ -411,6 +411,7 @@ fn off_reads_no_live_job() {
     placer.read_live_curves(&tables.jobs, &[row]);
     assert_eq!(tables.store.take_reads(), Vec::new());
     assert!(placer.engine().book.live.is_empty());
+    assert_eq!(placer.memory_shadow_view(), None);
 }
 
 /// Asserts what `shadow` keeps of a live job, for the memory shadow to project: its record is
@@ -431,6 +432,8 @@ fn shadow_keeps_each_live_jobs_memory_class_and_start() {
     assert_eq!((held.flat_millis, held.memory_bytes), (1_000, 64 * MIB));
     assert!(held.memory_key.is_none() & held.key.is_some());
     assert!(held.started_ms.is_some());
+    drop(engine);
+    assert!(placer.memory_shadow_view().is_some());
 }
 
 /// Asserts what a job whose record cannot be read is charged: a read of the store that fails is

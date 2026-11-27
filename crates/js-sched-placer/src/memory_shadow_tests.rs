@@ -308,14 +308,17 @@ fn a_placement_the_curve_would_not_have_made_is_counted_later_with_its_slot() {
 }
 
 /// Asserts what a host with no capacity is: the room does not hold it to a memory figure, so the
-/// shadow has no table of it, and a job placed there is counted in no verdict. Catches a host
-/// projected against a capacity it does not have.
+/// shadow has no table of it, a job placed there is counted in no verdict, and a reading of it
+/// heard before the walk leaves the view once the walk has no table of it. Catches a host
+/// projected against a capacity it does not have, and a forgotten host kept in the view.
 #[test]
 fn a_host_with_no_capacity_is_not_judged() {
     let tables = Tables::new();
     let mut engine = engine_in(Curves::Shadow);
     taught(&mut engine, &tables, 24);
     let link = queued_of(&tables, "link-new", "link");
+    engine.heard(&host("a"), Some(&reading(1, GIB)), at(NOW_MS - 1_000));
+    assert!(!engine.memory_shadow_view().unwrap().hosts.is_empty());
     let placed = walk(&mut engine, &[link], (false, &[]), NOW_MS);
     assert_eq!(placed.len(), 1);
     assert_eq!(

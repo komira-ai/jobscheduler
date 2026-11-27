@@ -214,9 +214,10 @@ impl Engine {
         now: FarmTime,
         settled: &mut bool,
     ) -> Option<HostId> {
-        let judged = self
-            .shadows_memory()
-            .then(|| self.judge_memory(walker, (room, capable), now));
+        // A walk with no host held to a memory capacity judges nothing: the queue's rounds cost
+        // the shadow nothing then.
+        let judging = self.shadows_memory() && !self.memory.tables.is_empty();
+        let judged = judging.then(|| self.judge_memory(walker, (room, capable), now));
         let host = self.try_job(walker, (room, capable), now, settled);
         if let Some(judged) = judged {
             self.memory_decided(walker, judged, host.as_ref(), now);
@@ -314,8 +315,17 @@ impl Engine {
     }
 
     /// Ends the memory shadow's walk at `now`: keeps each host's projection, for the readings
-    /// that follow, and what its jobs are projected to hold now, for `/metrics`.
+    /// that follow, and what its jobs are projected to hold now, for `/metrics`. A host the walk
+    /// has no table of leaves the view and its readings.
     pub(super) fn end_memory_walk(&mut self, now: FarmTime) {
+        let tables = &self.memory.tables;
+        self.memory
+            .view
+            .hosts
+            .retain(|host, _| tables.contains_key(host));
+        self.memory
+            .readings
+            .retain(|host, _| tables.contains_key(host));
         let tables = self.memory.tables.iter();
         let projections = tables.map(|(host, table)| (host.clone(), (now, table.projected())));
         self.memory.projections = projections.collect();
