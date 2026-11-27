@@ -28,8 +28,9 @@ pub const POOL: &str = "blackbox";
 /// What the wrapper wrote for the server, and where it listens: what the scenarios start it
 /// with.
 pub struct Files {
-    /// The directory mounted at `/run/secrets`.
-    pub secrets: PathBuf,
+    /// The directory of the server's private files (its tokens, key and store file), mounted at
+    /// `/run/secrets`.
+    pub private_files: PathBuf,
     /// The directory mounted at `/etc/js-lease-server`.
     pub etc: PathBuf,
     /// The directory mounted at `/var/lib/js-lease-server`.
@@ -44,8 +45,8 @@ pub struct Files {
     pub ready_port: u16,
     /// The client token the test calls the job service with (owned by root, 0600).
     pub client_token: PathBuf,
-    /// The server's certificate, which the test and the agent trust.
-    pub cert: PathBuf,
+    /// The server's certificate (public, PEM), which the test and the agent trust.
+    pub pem: PathBuf,
 }
 
 /// The image of the release `version` for this runner, fetched from the GitHub release named
@@ -98,23 +99,23 @@ pub fn load_image(dir: &Path, version: Version) -> String {
 
 /// Writes the server's files under `dir`: its secrets, its configuration (the pool files and
 /// the CA the hosts' certificates chain to, `agent_ca`), its state directory and its command
-/// line, with `cert` and `key` its own pair. The ports are picked here.
-pub fn write_files(dir: &Path, agent_ca: &str, (cert, key): (&str, &str)) -> Files {
+/// line, with `pem` and `key_pem` its own certificate and key. The ports are picked here.
+pub fn write_files(dir: &Path, agent_ca: &str, (pem, key_pem): (&str, &str)) -> Files {
     let (agent_port, job_port, ready_port, metrics_port) = (
         crate::free_port(),
         crate::free_port(),
         crate::free_port(),
         crate::free_port(),
     );
-    let secrets = dir.join("server-secrets");
+    let private_files = dir.join("server-private");
     let etc = dir.join("server-etc");
     let state = dir.join("server-state");
-    directory(&secrets, 0o755, (0, 0));
+    directory(&private_files, 0o755, (0, 0));
     directory(&etc, 0o755, (0, 0));
     directory(&state, 0o700, SERVER_USER);
     let token = crate::secret();
     for (name, contents) in [
-        ("tls.key", key.to_owned()),
+        ("tls.key", key_pem.to_owned()),
         ("token", token.clone()),
         ("join-tokens", format!("{}\n", crate::secret())),
         (
@@ -123,14 +124,14 @@ pub fn write_files(dir: &Path, agent_ca: &str, (cert, key): (&str, &str)) -> Fil
         ),
         ("kbf-client-token", crate::secret()),
     ] {
-        put(&secrets.join(name), contents, 0o400, SERVER_USER);
+        put(&private_files.join(name), contents, 0o400, SERVER_USER);
     }
     let pool = |shape: &str, name: &str| {
         render(shape, &BTreeMap::from([("pool", name.to_owned())]))
             .unwrap_or_else(|e| panic!("a pool file: {e}"))
     };
     for (name, contents) in [
-        ("tls.pem", cert.to_owned()),
+        ("tls.pem", pem.to_owned()),
         ("pool.toml", pool(FARM_POOL, POOL)),
         ("pool-mac-build.toml", pool(MAC_POOL, "blackbox-mac")),
         ("agent-client-ca.pem", agent_ca.to_owned()),
@@ -139,8 +140,8 @@ pub fn write_files(dir: &Path, agent_ca: &str, (cert, key): (&str, &str)) -> Fil
     }
     let client_token = dir.join("client-token");
     put(&client_token, token, 0o600, (0, 0));
-    let server_cert = dir.join("server-cert.pem");
-    put(&server_cert, cert, 0o644, (0, 0));
+    let server_pem = dir.join("server.pem");
+    put(&server_pem, pem, 0o644, (0, 0));
     let args = render(
         SERVER_ARGS,
         &BTreeMap::from([
@@ -154,7 +155,7 @@ pub fn write_files(dir: &Path, agent_ca: &str, (cert, key): (&str, &str)) -> Fil
     let args_file = dir.join("server.args");
     put(&args_file, arguments(&args).join("\n"), 0o644, (0, 0));
     Files {
-        secrets,
+        private_files,
         etc,
         state,
         args: args_file,
@@ -162,14 +163,14 @@ pub fn write_files(dir: &Path, agent_ca: &str, (cert, key): (&str, &str)) -> Fil
         job_port,
         ready_port,
         client_token,
-        cert: server_cert,
+        pem: server_pem,
     }
 }
 
 /// Starts the server's container from `image`: its user, a read-only root, no capability, a
 /// tmpfs at /tmp, the secrets, the configuration and the state mounted, Docker's host network,
 /// and the command line of `args` (one argument a line).
-pub fn start(image: &str, secrets: &Path, etc: &Path, state: &Path, args: &Path) {
+pub fn start(image: &str, private_files: &Path, etc: &Path, state: &Path, args: &Path) {
     let mount = |from: &Path, to: &str, ro: bool| {
         format!(
             "type=bind,source={},target={to}{}",
@@ -178,7 +179,7 @@ pub fn start(image: &str, secrets: &Path, etc: &Path, state: &Path, args: &Path)
         )
     };
     let mounts = [
-        mount(secrets, "/run/secrets", true),
+        mount(private_files, "/run/secrets", true),
         mount(etc, "/etc/js-lease-server", true),
         mount(state, "/var/lib/js-lease-server", false),
     ];
