@@ -98,19 +98,12 @@ pub fn download(version: Version, dir: &Path) -> PathBuf {
     path
 }
 
-/// Installs the package file `deb` (an older one too), as the update does, and checks the
-/// installed program says `version`.
+/// Installs the package file `deb` (an older one too) with dpkg, as the update does, and checks
+/// the installed program says `version`. dpkg runs no apt hook: on Ubuntu apt's hooks include
+/// needrestart, which restarts a service whose program changed, and so would stop the agent
+/// before the update writes its handover file (a stop that drains).
 pub fn install_file(deb: &Path, version: Version) {
-    run(
-        "apt-get",
-        &[
-            "install",
-            "--yes",
-            "--no-install-recommends",
-            "--allow-downgrades",
-            deb.to_str().expect("a UTF-8 path"),
-        ],
-    );
+    run("dpkg", &["--install", deb.to_str().expect("a UTF-8 path")]);
     check_version(version);
 }
 
