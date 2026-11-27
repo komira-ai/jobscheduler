@@ -114,13 +114,15 @@ fn a_job_ending_before_the_heads_start_backfills_and_one_ending_after_does_not()
     assert_eq!(r.s.head_hold(head), Some(&w("b")));
 }
 
-/// Catches: a head's hold given a start time without whole-node settings: it is held by
-/// the binding ratio, with no start time, and nothing backfills there.
+/// Catches: a head's hold given no start time without whole-node settings. It is held by
+/// the same start time (100 s), so a job of 30 s backfills on `b` and one of 40 s does
+/// not.
 #[test]
-fn without_whole_node_settings_a_heads_hold_takes_no_backfill() {
+fn without_whole_node_settings_a_heads_hold_takes_backfill_by_its_start() {
     let mut r = backfilling(Rig::on(), false);
     let (head, _) = head_on_b(&mut r, true);
-    assert_eq!(small(&mut r, 30), None);
+    assert_eq!(small(&mut r, 40), None);
+    assert_eq!(small(&mut r, 30).as_deref(), Some("b"));
     assert_eq!(r.s.head_hold(head), Some(&w("b")));
 }
 

@@ -49,14 +49,16 @@
 //! - whole-machine leases: one goes only to a worker that holds no lease, and books
 //!   all of it, so nothing is placed beside it; one that fits nowhere holds a worker
 //!   that could run it, in queue (QoS) order, and less urgent work is not placed there
-//!   until it has emptied (with [`Scheduler::with_whole_node`] the worker is the one
-//!   cheapest to drain: the latest end bound of its leases, then the fewest leases), save
-//!   work that ends before the request starts there ([`Scheduler::with_backfill`]). An
-//!   action asking for a whole worker ([`Request::whole_worker`]) is placed only on a
-//!   worker with no lease, books all of its CPUs, memory, GPUs and VM slots (its
-//!   `Start` carries them), fits a worker of any size, and holds a worker while it
-//!   waits, as a whole-machine lease does without a whole-node pool (the worker with the
-//!   fewest leases that could run it; no later request is placed there). Its memory
+//!   until it has emptied (the worker cheapest to drain: the least tail, the latest end of
+//!   its leases, then the fewest leases), save work that ends before the request starts
+//!   there ([`Scheduler::with_backfill`]). Without [`Scheduler::with_whole_node`] the
+//!   worker is picked again every round, and one such request per pool holds a worker
+//!   in a round, the first in queue order. An action asking for a whole worker
+//!   ([`Request::whole_worker`]) is placed only on a worker with no lease, books all of
+//!   its CPUs, memory, GPUs and VM slots (its `Start` carries them), fits a worker of any
+//!   size, and holds a worker while it waits, as a whole-machine lease does without a
+//!   whole-node pool (the worker cheapest to drain that could run it, one per pool,
+//!   shared with the pool's blocked head; no later request is placed there). Its memory
 //!   limit is the worker's, so a kill at its own limit has nowhere to climb and
 //!   finishes `OutOfMemory`. An action at the whole memory of a worker (the last step of
 //!   the memory ladder) holds
