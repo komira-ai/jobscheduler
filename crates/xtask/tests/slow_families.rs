@@ -4,8 +4,8 @@
 //! `crates/js-sim-cell/Cargo.toml` gates four test binaries behind the feature
 //! `slow-families` (`required-features`). Cargo builds none of them unless the feature is
 //! on, so the `test` job of `ci.yml`, which does not turn it on, leaves them out. The runs
-//! that must still hold them turn it on: the coverage shards and the coverage build in
-//! `ci.yml` (every pull request), the release's `unit-tests` (every push to main,
+//! that must still hold them turn it on: the coverage shards and the coverage report's
+//! build in `ci.yml` (every pull request), the release's `unit-tests` (every push to main,
 //! whose red `release-red` reports) and the beta stage's workspace tests. A run that
 //! dropped the feature would lose those binaries without a failure, so this reads the
 //! four files as text and refuses each such change.
@@ -125,9 +125,9 @@ fn check(
         "llvm-cov nextest --workspace",
     );
     need(
-        "ci.yml's coverage-build job",
-        job(ci, "coverage-build"),
-        "llvm-cov nextest-archive --workspace",
+        "ci.yml's coverage job",
+        job(ci, "coverage"),
+        "llvm-cov nextest --workspace",
     );
     need(
         "release.yml's unit-tests job",
@@ -250,8 +250,8 @@ fn a_clippy_run_without_the_feature_is_refused() {
     );
 }
 
-/// Asserts that a coverage shard, the coverage build, the release's `unit-tests` and the
-/// beta stage that drop the feature are each refused by name.
+/// Asserts that a coverage shard, the coverage report's build, the release's `unit-tests`
+/// and the beta stage that drop the feature are each refused by name.
 #[test]
 fn a_run_that_drops_the_feature_is_refused() {
     let cases = [
@@ -260,8 +260,8 @@ fn a_run_that_drops_the_feature_is_refused() {
             "ci.yml's coverage-shard job runs `llvm-cov nextest --workspace` without",
         ),
         (
-            "ci-build",
-            "ci.yml's coverage-build job runs `llvm-cov nextest-archive --workspace` without",
+            "ci-report",
+            "ci.yml's coverage job runs `llvm-cov nextest --workspace` without",
         ),
         (
             "release",
@@ -281,8 +281,8 @@ fn a_run_that_drops_the_feature_is_refused() {
                 let from = f.ci.find("\n  coverage-shard:\n").expect("shard");
                 f.ci = flagged(&f.ci, from);
             }
-            "ci-build" => {
-                let from = f.ci.find("\n  coverage-build:\n").expect("build");
+            "ci-report" => {
+                let from = f.ci.find("\n  coverage:\n").expect("coverage");
                 f.ci = flagged(&f.ci, from);
             }
             "release" => {

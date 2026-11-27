@@ -54,7 +54,7 @@ MANIFEST_SHA256 = {
     "crates/js-scaler/Cargo.toml": "8bc6f10b4645e28849148b3f72266d33b8b19f916b2e052ec59cabaaa70ff66e",
     "crates/js-sched-placer/Cargo.toml": "5e16ce36ccb86d93dcb70dfd699d20018285e47a82481fee30e83a691716c587",
     "crates/js-sched/Cargo.toml": "b7c660570ed597d93347d7a3798d8f52dfa45075be882966bdc525f6d7d2f229",
-    "crates/js-sim-cell/Cargo.toml": "7eaaec03aea178e39c682661990b1556493868cfd0902dada569704256c05a53",
+    "crates/js-sim-cell/Cargo.toml": "bc95e22d268be558d5030fa37f2d15a45285030b3fe6647bf5794121ba2e8b02",
     "crates/js-sim/Cargo.toml": "e27f6a7e4ef3e6d36390cac4a00a1e5bc1122e0ec7385fc63b259364f81c223a",
     "crates/js-sizing/Cargo.toml": "f8da27f2479fccb1e7e76bff7884e69e5fed3a402d0ec6a1d9445407fb0216ae",
     "crates/js-state/Cargo.toml": "a3889ca3887e0352462ea601227339fc364d5fee5d7278524c3740d4e236e925",

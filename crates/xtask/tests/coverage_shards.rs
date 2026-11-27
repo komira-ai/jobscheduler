@@ -1,15 +1,12 @@
-//! ci.yml's coverage shards, the job that builds the instrumented test binaries and the job
-//! that reports over them, read as text.
+//! ci.yml's coverage shards and the job that reports over them, read as text.
 //!
 //! `coverage-shard` runs the workspace's tests in parts, one per entry of its `shard`
 //! matrix, through `cargo xtask coverage-shard` and the plan in
 //! `.config/coverage-shards.toml`, whose `shards` is the number of parts; each part uploads
-//! its profile as `coverage-profile-<shard>`. `coverage-build` builds the instrumented test
-//! binaries once and uploads them as the archive `coverage-tests`. `coverage` needs both,
-//! downloads each profile by name and the archive, and reports with the archive. A shard
-//! whose profile the report did not read would drop its tests' lines and branches from the
-//! report, so the two lists must be the same: every shard is downloaded once, and nothing
-//! else is.
+//! its profile as `coverage-profile-<shard>`. `coverage` needs it and downloads each
+//! profile by that name. A shard whose profile the report did not read would drop its
+//! tests' lines and branches from the report, so the two lists must be the same: every
+//! shard is downloaded once, and nothing else is.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -41,18 +38,12 @@ fn value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
 /// The one line of the `coverage-shard` matrix, as ci.yml spells it.
 const MATRIX: &str = "shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]";
 
-/// The path of the archive `coverage-build` writes and `coverage` reads.
-const ARCHIVE: &str = "target/coverage-tests.tar.zst";
-
 /// What is wrong with the coverage jobs of `workflow`, whose plan has `plan_shards` shards;
 /// empty when they agree.
 fn check(workflow: &str, plan_shards: usize) -> Vec<String> {
     let mut errors = Vec::new();
     let Some(shard) = job(workflow, "coverage-shard") else {
         return vec!["no coverage-shard job".to_owned()];
-    };
-    let Some(build) = job(workflow, "coverage-build") else {
-        return vec!["no coverage-build job".to_owned()];
     };
     let Some(report) = job(workflow, "coverage") else {
         return vec!["no coverage job".to_owned()];
@@ -92,28 +83,10 @@ fn check(workflow: &str, plan_shards: usize) -> Vec<String> {
     if !(shard.contains(merged) && shard.contains(uploaded)) {
         errors.push("the shard does not upload the profile it merged".to_owned());
     }
-    // The archive the build job writes is the file it uploads.
-    let archived = format!(
-        "llvm-cov nextest-archive --workspace --locked --features js-sim-cell/slow-families --cargo-profile coverage --branch --archive-file {ARCHIVE}"
-    );
-    let archive_upload = format!("name: coverage-tests\n          path: {ARCHIVE}\n");
-    if !(build.contains(&archived) && build.contains(&archive_upload)) {
-        errors.push(
-            "coverage-build does not upload the archive it wrote as coverage-tests".to_owned(),
-        );
-    }
-    if value(report, "needs") != Some("[coverage-shard, coverage-build]") {
-        errors.push("coverage does not need coverage-shard and coverage-build".to_owned());
-    }
-    if !report.contains(&format!(
-        "llvm-cov report --nextest-archive-file {ARCHIVE} "
-    )) {
-        errors.push(format!(
-            "coverage does not report with --nextest-archive-file {ARCHIVE}"
-        ));
+    if value(report, "needs") != Some("coverage-shard") {
+        errors.push("coverage does not need coverage-shard".to_owned());
     }
     let mut downloaded = Vec::new();
-    let mut archive_downloaded = false;
     let lines: Vec<&str> = report.lines().collect();
     for (at, line) in lines.iter().enumerate() {
         if !line.contains("uses: actions/download-artifact@") {
@@ -123,21 +96,11 @@ fn check(workflow: &str, plan_shards: usize) -> Vec<String> {
         let name = lines[at + 1..]
             .iter()
             .take_while(|l| !l.trim_start().starts_with("- "))
-            .find_map(|l| l.trim().strip_prefix("name: "));
+            .find_map(|l| l.trim().strip_prefix("name: coverage-profile-"));
         match name {
-            Some("coverage-tests") => archive_downloaded = true,
-            Some(name) => match name.strip_prefix("coverage-profile-") {
-                Some(k) => downloaded.push(k.to_owned()),
-                None => errors.push(
-                    "a download in coverage names neither a coverage profile nor coverage-tests"
-                        .to_owned(),
-                ),
-            },
-            None => errors.push("a download in coverage names no artifact".to_owned()),
+            Some(name) => downloaded.push(name.to_owned()),
+            None => errors.push("a download in coverage names no coverage profile".to_owned()),
         }
-    }
-    if !archive_downloaded {
-        errors.push("coverage does not download coverage-tests".to_owned());
     }
     let unique: BTreeSet<String> = downloaded.iter().cloned().collect();
     if unique.len() != downloaded.len() {
@@ -182,8 +145,7 @@ fn set(numbers: impl IntoIterator<Item = usize>) -> String {
 }
 
 /// Asserts that ci.yml's report job reads the profile of every shard its matrix runs, and
-/// of no other, that the matrix is as long as the plan, and that the report reads the
-/// archive the build job wrote.
+/// of no other, and that the matrix is as long as the plan.
 #[test]
 fn the_report_reads_every_shard_of_ci_yml() {
     assert_eq!(check(&ci(), plan_shards()), Vec::<String>::new());
@@ -274,8 +236,7 @@ fn a_profile_downloaded_twice_is_refused() {
 
 /// Asserts that a run that skips the plan or the shard verb, a shard number or count
 /// written by hand, a renamed upload, an upload of another file than the merged profile,
-/// an archive that is not the one uploaded, a report that does not read the archive, and a
-/// report job that does not wait for the shards and the build are each refused.
+/// and a report job that does not wait for the shards are each refused.
 #[test]
 fn each_broken_link_between_the_jobs_is_refused() {
     let ci = ci();
@@ -322,30 +283,15 @@ fn each_broken_link_between_the_jobs_is_refused() {
         "the shard does not upload the profile it merged",
     );
     one(
-        "--archive-file target/coverage-tests.tar.zst",
-        "--archive-file target/other.tar.zst",
-        "coverage-build does not upload the archive it wrote as coverage-tests",
-    );
-    one(
-        "path: target/coverage-tests.tar.zst\n",
-        "path: target/other.tar.zst\n",
-        "coverage-build does not upload the archive it wrote as coverage-tests",
-    );
-    one(
-        "needs: [coverage-shard, coverage-build]\n",
         "needs: coverage-shard\n",
-        "coverage does not need coverage-shard and coverage-build",
-    );
-    one(
-        "llvm-cov report --nextest-archive-file target/coverage-tests.tar.zst ",
-        "llvm-cov report ",
-        "coverage does not report with --nextest-archive-file target/coverage-tests.tar.zst",
+        "needs: lint\n",
+        "coverage does not need coverage-shard",
     );
     let renamed = ci.replacen("name: coverage-profile-1\n", "name: something-else\n", 1);
     assert_eq!(
         check(&renamed, 12),
         vec![
-            "a download in coverage names neither a coverage profile nor coverage-tests".to_owned(),
+            "a download in coverage names no coverage profile".to_owned(),
             format!(
                 "coverage downloads the profiles of shards {}, the matrix runs {}",
                 set(2..=12),
@@ -355,34 +301,7 @@ fn each_broken_link_between_the_jobs_is_refused() {
     );
 }
 
-/// Asserts that a report job that does not download the archive, or downloads an artifact
-/// with no name, is refused.
-#[test]
-fn a_report_that_does_not_download_the_archive_is_refused() {
-    let ci = ci();
-    let from = "name: coverage-tests\n          path: target\n";
-    assert_eq!(ci.matches(from).count(), 1);
-    assert_eq!(
-        check(
-            &ci.replacen(from, "name: other\n          path: target\n", 1),
-            12
-        ),
-        vec![
-            "a download in coverage names neither a coverage profile nor coverage-tests".to_owned(),
-            "coverage does not download coverage-tests".to_owned(),
-        ]
-    );
-    assert_eq!(
-        check(&ci.replacen(from, "path: target\n", 1), 12),
-        vec![
-            "a download in coverage names no artifact".to_owned(),
-            "coverage does not download coverage-tests".to_owned(),
-        ]
-    );
-}
-
-/// Asserts that a workflow without any of the three jobs, or without the matrix, is refused
-/// by name.
+/// Asserts that a workflow without either job, or without the matrix, is refused by name.
 #[test]
 fn a_missing_job_or_matrix_is_refused() {
     let ci = ci();
@@ -392,13 +311,6 @@ fn a_missing_job_or_matrix_is_refused() {
             12
         ),
         vec!["no coverage-shard job".to_owned()]
-    );
-    assert_eq!(
-        check(
-            &ci.replacen("\n  coverage-build:\n", "\n  archive:\n", 1),
-            12
-        ),
-        vec!["no coverage-build job".to_owned()]
     );
     assert_eq!(
         check(&ci.replacen("\n  coverage:\n", "\n  report:\n", 1), 12),

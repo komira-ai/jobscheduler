@@ -145,8 +145,8 @@ leaves out the four longest binaries
 (`faults`, `smoke`, `replay` and `whole_host_prepare`), which
 `required-features = ["slow-families"]` in the crate's `Cargo.toml` gates; the runs that start
 after a merge to main (the release's `unit-tests`, and the beta stage), the `coverage-shard`
-jobs and the `coverage-build` job (which builds the instrumented test binaries once for the
-`coverage` report) build them with `--features js-sim-cell/slow-families`, so a red result there fails the
+jobs and the `coverage` job (which rebuilds the instrumented test binaries for its
+report) build them with `--features js-sim-cell/slow-families`, so a red result there fails the
 release run and `release-red` reports it. The Postgres cases are built only with the crate's `postgres`
 feature, and the `state-postgres` job runs them against its Postgres service
 (`cargo test -p js-sim-cell --features js-sim-cell/postgres --locked --test store --test server`);

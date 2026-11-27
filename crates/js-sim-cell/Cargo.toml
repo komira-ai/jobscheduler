@@ -51,9 +51,8 @@ harness = false
 
 # The four longest families of the cell. Each is built only with the feature `slow-families`:
 # a pull request's `test` job leaves them out, and the
-# runs after the merge and the coverage jobs (the `coverage-shard` jobs, which run them, and
-# `coverage-build`, which builds them once for the report) turn the feature on, so every one
-# of them still runs on every pull request under coverage and on every push to main
+# runs after the merge and the coverage jobs turn the feature on, so every one of them
+# still runs on every pull request under coverage and on every push to main
 # (crates/xtask/tests/slow_families.rs holds the workflows to this).
 [[test]]
 name = "faults"

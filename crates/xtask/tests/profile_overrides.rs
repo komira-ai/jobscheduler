@@ -175,20 +175,18 @@ fn the_coverage_profile_is_dev_and_the_coverage_job_builds_with_it() {
     assert!(coverage.get("opt-level").is_none());
     let ci = std::fs::read_to_string(repo().join(".github/workflows/ci.yml")).expect("ci.yml");
     // The coverage jobs build under cargo-nextest, where `--profile` names a nextest
-    // profile; the cargo profile is `--cargo-profile`. The shards' run (which builds what
-    // it runs) and the build job's archive must both use it, or the report reads binaries
-    // the shards never ran.
+    // profile; the cargo profile is `--cargo-profile`. The shards' build and the report
+    // job's rebuild must both use it, or the report reads binaries the shards never ran.
     let runs: Vec<&str> = ci
         .lines()
         .filter(|l| l.contains("llvm-cov nextest --workspace"))
         .collect();
-    assert_eq!(runs.len(), 1, "the shards' run: {runs:?}");
-    let archives: Vec<&str> = ci
-        .lines()
-        .filter(|l| l.contains("llvm-cov nextest-archive --workspace"))
-        .collect();
-    assert_eq!(archives.len(), 1, "the build job's archive: {archives:?}");
-    for run in runs.into_iter().chain(archives) {
+    assert_eq!(
+        runs.len(),
+        2,
+        "the shards' run and the report job's build: {runs:?}"
+    );
+    for run in runs {
         assert!(run.contains("--cargo-profile coverage"), "{run}");
     }
     // The report reads the same profile's output.
