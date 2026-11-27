@@ -139,13 +139,9 @@ fn below_with_no_earlier_package_names_what_it_asked() {
 #[test]
 fn below_asks_at_most_the_newest_candidates() {
     let dir = scratch("candidates");
-    let tags = dir.path().join("tags");
+    let a = args(dir.path(), None, Some("0.3.0"));
     let lines: String = (1..=30).map(|patch| format!("v0.2.{patch}\n")).collect();
-    std::fs::write(&tags, lines).unwrap();
-    let a = MacosPkgArgs {
-        tags: Some(tags),
-        ..args(dir.path(), None, Some("0.3.0"))
-    };
+    std::fs::write(a.tags.as_ref().unwrap(), lines).unwrap();
     let asked = std::cell::RefCell::new(Vec::new());
     let get = |url: &str| {
         asked.borrow_mut().push(url.to_owned());

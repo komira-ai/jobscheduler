@@ -95,7 +95,7 @@ fn earlier(
         .filter_map(|line| Version::parse_tag(line.trim()))
         .filter(|version| *version < below)
         .collect();
-    versions.sort_unstable_by(|a, b| b.cmp(a));
+    versions.sort_unstable_by_key(|version| std::cmp::Reverse(*version));
     versions.dedup();
     let mut tried = Vec::new();
     for version in versions.into_iter().take(CANDIDATES) {

@@ -484,33 +484,9 @@ pub(crate) fn jobs(
     })
 }
 
-/// The checks of the agent's start that read what the host's neighbours provide, on the flags
-/// `cli`: the mount roots (`--mount-root`, `--mount-root-ro`), the directory and the user of each
-/// `--mount-provider`, the trees root (`--native-trees-root`), and the put root and its user
-/// (`--native-put-root`, `--native-put-user`): tierstore's mount, socket, put directory and
-/// account on a Mac of the farm. They are the start's own checks ([`jobs`],
-/// [`crate::lifecycle::MountRoots::with_read_only`], [`native::put_of`]), which read and change
-/// nothing; the update hook's `prepare` runs them on the host's flags file, so that an update
-/// whose agent would refuse to start is refused before anything is stopped.
-///
-/// # Errors
-///
-/// The first refusal, as the start words it (the text names the flag).
-pub(crate) fn neighbours(cli: &Cli) -> Result<(), String> {
-    let mounts =
-        crate::lifecycle::MountRoots::with_read_only(&cli.mount_roots, &cli.mount_roots_ro)?;
-    jobs(cli, None, &mounts)?;
-    let put = PutFlags {
-        native_put_root: cli.os.native_put_root.clone(),
-        native_put_user: cli.os.native_put_user.clone(),
-    };
-    native::put_of(&put, &node_of_name)?;
-    Ok(())
-}
-
 /// The uid and the primary group of the user `name` in the directory service, as
 /// [`uid_of_name`] looks it up: the put ingest's node (`--native-put-user`).
-fn node_of_name(name: &str) -> std::io::Result<Option<crate::mac_put::Node>> {
+pub(super) fn node_of_name(name: &str) -> std::io::Result<Option<crate::mac_put::Node>> {
     use js_mac_session::helper::Host as _;
     let account = js_mac_session::macos::MacHost.account(name)?;
     Ok(account.map(|account| crate::mac_put::Node {

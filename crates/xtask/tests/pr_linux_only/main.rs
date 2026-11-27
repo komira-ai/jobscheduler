@@ -6,8 +6,9 @@
 //! pipeline (`release.yml` on a push to main, which calls `beta.yml` and the other workflows
 //! the stage runs). So no job a pull request starts may name another runner. On a push to main
 //! the stage holds back the macOS archives (`promote-macos` needs all four jobs) and nothing of
-//! the deploy path: only `pkg-upload` (the package job, passed or not) and the two reports
-//! (`release-red`, `release-green`) need a beta job besides.
+//! the deploy path: only `pkg-upload` (the package job, passed or not), `blackbox-macos` (the
+//! black-box tests of the package it published) and the two reports (`release-red`,
+//! `release-green`) need a beta job besides.
 //!
 //! A job is one a pull request starts when
 //!   - its workflow starts on `pull_request`, `pull_request_target` or `merge_group` (the merge
@@ -250,8 +251,9 @@ fn the_beta_stage_workflows_are_called_not_started_by_a_pull_request() {
     );
 }
 
-/// The jobs of release.yml that need a beta job but are not one of the five that may (the
-/// first install is a beta job that needs `beta-macos-pkg`), and the jobs of the deploy path that
+/// The jobs of release.yml that need a beta job but are not one of the six that may (the
+/// first install is a beta job that needs `beta-macos-pkg`, and `blackbox-macos` tests the
+/// package it signed once `pkg-upload` has published it), and the jobs of the deploy path that
 /// need one; what `promote-macos` needs, what `pkg-upload` needs
 /// and that `pkg-upload` runs even when its package job failed.
 fn beta_need_problems(text: &str) -> Vec<String> {
@@ -286,6 +288,7 @@ fn beta_need_problems(text: &str) -> Vec<String> {
             "beta-macos-first-install",
             "promote-macos",
             "pkg-upload",
+            "blackbox-macos",
             "release-red",
             "release-green",
         ]
@@ -306,7 +309,8 @@ fn beta_need_problems(text: &str) -> Vec<String> {
 
 #[test]
 fn the_beta_stage_runs_after_the_build_and_holds_back_only_the_macos_archives() {
-    // The jobs that need a beta job are `promote-macos`, `pkg-upload`, and the two reports;
+    // The jobs that need a beta job are `promote-macos`, `pkg-upload`, `blackbox-macos` and the
+    // two reports;
     // the deploy path never does.
     let text = read("release.yml");
     let w = Workflow::parse("release.yml", &text);

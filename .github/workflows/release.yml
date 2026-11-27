@@ -671,11 +671,12 @@ jobs:
   # The black-box tests of the signed js-agent package of macOS (js-agent-macos-blackbox.yml): its
   # first install (J2), and its update from the release before it with tierstore's mount missing
   # (J4: refused at prepare, before any restart) and then served (J3), on hosted Macs, against the
-  # package `pkg-upload` put in the package repository. Nothing waits for it yet: a failure is
-  # this run's red job.
+  # package `pkg-upload` put in the package repository; it runs only when `beta-macos-pkg` built
+  # and signed one and `pkg-upload` passed. Nothing waits for it yet: a failure is this run's
+  # red job.
   blackbox-macos:
-    needs: [plan, pkg-upload]
-    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' && needs.pkg-upload.result == 'success' }}
+    needs: [plan, beta-macos-pkg, pkg-upload]
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' && needs.beta-macos-pkg.result == 'success' && needs.pkg-upload.result == 'success' }}
     permissions:
       contents: read
       actions: read
