@@ -12,7 +12,9 @@ use std::sync::Arc;
 
 use js_jobs::{Booked, JobId, JobStore, NewJob, RandomIds};
 use js_state::Store;
-use js_state::postgres::{PostgresConfig, PostgresStore, TestDatabase, test_database};
+use js_state::postgres::{
+    ExtensionPool, PostgresConfig, PostgresStore, TestDatabase, test_database,
+};
 use js_testkit::dir::TestDir;
 use js_types::ManualClock;
 use serde_json::{Value, json};
@@ -87,6 +89,28 @@ fn other_server(url: &str, store_clock: Arc<js_state::ManualClock>) -> ServerJob
             .with_clock(store_clock),
     );
     JobStore::new(Arc::new(store), ServerIds::random()).unwrap()
+}
+
+/// Waits until the database of `url` holds the server's listening connection: one whose last
+/// statement is its `LISTEN`, which it runs again after each quiet wait. A notice sent after it
+/// reaches the server, and the wake its connection made brings has come and gone, so only the
+/// notice can answer what the test holds open.
+fn listening_on(url: &str) {
+    let pool = ExtensionPool::open(&PostgresConfig::parse(url).unwrap()).unwrap();
+    let mut loan = pool.checkout().unwrap();
+    let listening = |conn: &mut js_state::postgres::Conn| -> i64 {
+        let row = conn
+            .query_one(
+                "SELECT count(*) FROM pg_stat_activity \
+                 WHERE datname = current_database() AND query LIKE 'LISTEN %'",
+                &[],
+            )
+            .unwrap();
+        row.get(0)
+    };
+    while listening(loan.conn()) == 0 {
+        std::thread::yield_now();
+    }
 }
 
 /// `body` POSTed to `path` of `addr` with the join token; the status and the body's JSON.
@@ -181,6 +205,10 @@ fn a_job_another_server_queued_is_placed_and_started_on_a_beat_held_here() {
     let other = Arc::new(other_server(&url, Arc::clone(&store_clock)));
     Runtime::new().unwrap().block_on(async {
         let (running, _dir) = server("listen_queue", &url, store_clock).await;
+        let at = url.clone();
+        tokio::task::spawn_blocking(move || listening_on(&at))
+            .await
+            .unwrap();
         let id = JobId::parse("job-q").unwrap();
         let queueing = async {
             let (other, job) = (Arc::clone(&other), queued(&id, 1500));
@@ -205,6 +233,10 @@ fn a_start_another_server_wrote_ends_a_beat_held_here() {
     let other = Arc::new(other_server(&url, Arc::clone(&store_clock)));
     Runtime::new().unwrap().block_on(async {
         let (running, _dir) = server("listen_host", &url, store_clock).await;
+        let at = url.clone();
+        tokio::task::spawn_blocking(move || listening_on(&at))
+            .await
+            .unwrap();
         let id = JobId::parse("job-h").unwrap();
         let placing = async {
             let (other, job, id) = (Arc::clone(&other), queued(&id, 16_000), id.clone());

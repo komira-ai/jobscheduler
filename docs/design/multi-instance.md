@@ -58,12 +58,12 @@ the queue (two rules) and how a placement reaches its host (a dispatch queue the
   live allocation's entry deleted, a new `dispatch/<host>/` row; a cancel adds the queue's, `js-jobs/src/store.rs:621`) and
   sends them once the commit is made (`js-jobs/src/store/written.rs:152`, and the claimed placement,
   `js-jobs/src/store/whole.rs:168`), through `Store::notify` (`js-state/src/store.rs:237`), which the Postgres store sends with
-  `pg_notify` on a session of its pool, a failure logged and dropped (`js-state/src/postgres/listen.rs:31`). The channels are
+  `pg_notify` on a session of its pool, a failure logged and dropped (`js-state/src/postgres/listen.rs:28`). The channels are
   `js_jobs_queue` (no payload) and `js_jobs_host` (the host's id). Each server listens on a connection of its own
-  (`js-state/src/postgres/listen.rs:63`, made again 5 s after it is lost) on a thread of its own
-  (`js-lease-server/src/listening.rs:61`, started at `js-lease-server/src/server.rs:297`); the queue pokes the placement poller,
+  (`js-state/src/postgres/listen.rs:60`, made again 5 s after it is lost) on a thread of its own
+  (`js-lease-server/src/listening.rs:80`, started at `js-lease-server/src/server.rs:297`); the queue pokes the placement poller,
   a host wakes its held beat and its held dispatch poll, and the connection made wakes every held beat and poll once and pokes
-  the poller (`js-lease-server/src/listening.rs:77`).
+  the poller (`js-lease-server/src/listening.rs:100`).
 - **Deadlines are the database's `now()`** (G2). Every time that one instance writes and another compares (`heard_at`, queue and
   start deadlines, retention, a cordon's end, a duty's due time) is the database's clock.
 - **Periodic work is claimed by its due time** (Built, #881). Settling silent hosts, expiry, retention and the feed trim run once a
@@ -177,7 +177,7 @@ The scheduling logic decides a placement and writes what the host must do as a m
   session is judged as a beat's is and nothing is recorded (`Registry::check_heartbeat`). A held poll wakes on a placement this
   instance commits (`js-lease-server/src/sched/jobs_pass.rs:62`, its own wake beside the held beat's:
   `js-lease-server/src/dispatch_state.rs:20`), on another instance's notice for the host (G16,
-  `js-lease-server/src/listening.rs:77`), and reads the queue again every `server.dispatch_recheck_ms` (500 ms), which finds a
+  `js-lease-server/src/listening.rs:100`), and reads the queue again every `server.dispatch_recheck_ms` (500 ms), which finds a
   message whose notice was lost; a drain answers it empty at once and a claim after the drain began is never made.
 - **Acks by allocation id.** The agent acks each message it has acted on, by its allocation id, in its next dispatch request, on
   any instance. The ack deletes the message, and an ack of a message already gone changes nothing. A message not acked by
@@ -333,7 +333,7 @@ and decides nothing shared). Paths are under `crates/`.
 | The whole-host start's taint and the clock it judges deadlines by | `js-lease-server/src/agent_api/held.rs:65` (`own.host.taint`), `js-lease-server/src/job_whole.rs:143` (`serve`) | the registry's taint; the clock is the store's, read only for a step that stamps a time (#938) | Built (the clock); Designed (G4, G7: the taint) |
 | A job's start command, repeated by two instances | `js-lease-server/src/per_job.rs:166`, `js-lease-server/src/job_start.rs:120` | a pure function of the rows; the placement that creates it is claimed | Built |
 | Listing-clean (a host whose last listing was not clean takes no job) | `js-lease-server/src/agent_api/rows.rs:312` (`settle`: `last_listing_clean` written by the beat that applied the listing), `js-lease-server/src/sched/jobs_rows.rs:174` (`unclean_nodes`, read before each pass), `:250` (an unclean host is not offered), `js-jobs/src/store/unclean.rs` (`unclean_nodes`: read whole once, then the rows the feed names since; a pass that cannot read them places nothing) | the row's flag, so every instance's placement sees it | Built (G15) |
-| Held beats and their wakes | `js-lease-server/src/held_beat.rs:36` | the process's own wakes, and another instance's notice for the host wakes them as its own placement does (G16, `js-lease-server/src/listening.rs:77`); only a lost notice leaves a placement by another instance to the host's next beat, at most its hold later; a draining instance ends every hold at once and begins none (#935, `js-lease-server/src/agent_api/held.rs:95-113`) | Per instance, a held dispatch poll's wake beside it (`js-lease-server/src/dispatch_state.rs:20`, rechecked every `server.dispatch_recheck_ms`); Built (G16: woken across instances by the host's notice, and all at once when the listening connection is made again, `js-lease-server/src/held_beat.rs:187`) |
+| Held beats and their wakes | `js-lease-server/src/held_beat.rs:36` | the process's own wakes, and another instance's notice for the host wakes them as its own placement does (G16, `js-lease-server/src/listening.rs:100`); only a lost notice leaves a placement by another instance to the host's next beat, at most its hold later; a draining instance ends every hold at once and begins none (#935, `js-lease-server/src/agent_api/held.rs:95-113`) | Per instance, a held dispatch poll's wake beside it (`js-lease-server/src/dispatch_state.rs:20`, rechecked every `server.dispatch_recheck_ms`); Built (G16: woken across instances by the host's notice, and all at once when the listening connection is made again, `js-lease-server/src/held_beat.rs:187`) |
 | Log upload credentials per host | `js-lease-server/src/logs/mod.rs:155-307` | stateless provider credentials; several valid at once; a flip costs a mint | Per instance |
 
 ### 3.4 Placement and the queue

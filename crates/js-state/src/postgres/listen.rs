@@ -23,9 +23,6 @@ use crate::{Notice, StoreError};
 /// The statement that sends notices: one `pg_notify` for each channel and payload, in order.
 const SEND: &str = "SELECT pg_notify(c, p) FROM unnest($1::text[], $2::text[]) AS n(c, p)";
 
-/// The text of the error a connection the server closed while it waited is lost with.
-const CLOSED: &str = "the server closed the listening connection";
-
 impl PostgresStore {
     /// Sends `notices` on a session of the pool, in one statement; a failure is logged.
     pub(super) fn send(&self, notices: &[Notice]) {
@@ -88,19 +85,19 @@ impl Listener {
     /// The next thing heard, waiting at most `wait` for a notice. With no connection, it is made
     /// and listens ([`Heard::Listening`], waiting for nothing), or could not be
     /// ([`Heard::Lost`]). With one, the next notice of a channel listened on, a notice already
-    /// received first ([`Heard::Notice`]); nothing within `wait` ([`Heard::Quiet`]); or the
-    /// connection was lost ([`Heard::Lost`]), and the next call makes it again.
+    /// received first ([`Heard::Notice`]); nothing within `wait` ([`Heard::Quiet`]), after the
+    /// connection answered its `LISTEN` again (so a connection that closed while it waited, which
+    /// a wait alone does not tell apart from a quiet one, is found); or the connection was lost
+    /// ([`Heard::Lost`]), and the next call makes it again.
     pub fn next(&mut self, wait: Duration) -> Heard {
         let Some(conn) = self.conn.as_mut() else {
             return self.connect();
         };
-        match conn.notice(wait) {
-            Ok(Some(notice)) => Heard::Notice(notice),
-            Ok(None) if !conn.is_closed() => Heard::Quiet,
-            lost => {
+        match heard(conn, wait, &self.listen) {
+            Ok(heard) => heard,
+            Err(error) => {
                 self.conn = None;
-                let closed = StoreError::Disconnected(CLOSED.to_owned());
-                Heard::Lost(lost.err().map(Fail::Pg).map_or(closed, Fail::into_store))
+                Heard::Lost(Fail::Pg(error).into_store())
             }
         }
     }
@@ -121,5 +118,14 @@ impl Listener {
             }
             Err(fail) => Heard::Lost(fail.into_store()),
         }
+    }
+}
+
+/// What `conn` hears within `wait`: a notice, or, when none came, quiet once the connection has
+/// answered `listen` (a connection gone answers with an error).
+fn heard(conn: &mut Conn, wait: Duration, listen: &str) -> Result<Heard, postgres::Error> {
+    match conn.notice(wait)? {
+        Some(notice) => Ok(Heard::Notice(notice)),
+        None => conn.batch_execute(listen).map(|()| Heard::Quiet),
     }
 }

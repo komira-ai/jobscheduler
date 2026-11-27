@@ -49,8 +49,8 @@ fn a_queued_job_a_free_and_a_new_message_ask_for_their_wakes() {
 
 /// What changes no queue and writes no new message asks for nothing: a placement's own entries
 /// (the queued entry deleted, an on-host entry put), a claim's rewrite of a message at its
-/// version, an ack's delete, a new row outside the dispatch queue, a check, and a message key
-/// whose host is not a host id. It catches wakes for every write (each claim would wake the
+/// version, an ack's delete, a new row outside the dispatch queue, a check, a message key whose
+/// host is not a host id, and a key under the queue that names no message. It catches wakes for every write (each claim would wake the
 /// poll that made it) and a host wake for a key that names no host.
 #[test]
 fn what_queues_frees_and_dispatches_nothing_asks_for_nothing() {
@@ -74,6 +74,11 @@ fn what_queues_frees_and_dispatches_nothing_asks_for_nothing() {
         )
         .put(
             format!("{}not a host/1-ab-stop", keys::DISPATCH),
+            b"m".to_vec(),
+            Cond::Absent,
+        )
+        .put(
+            format!("{}host-a", keys::DISPATCH),
             b"m".to_vec(),
             Cond::Absent,
         )

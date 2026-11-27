@@ -87,8 +87,11 @@ fn a_notice_through_postgres_ends_a_poll_held_on_another_server() {
             store.notify(&[Wake::Host(host()).notice()]);
             listening
         };
-        let (reply, _listening) = tokio::join!(polled(&a, Vec::new()), writing);
+        let (reply, listening) = tokio::join!(polled(&a, Vec::new()), writing);
         assert_eq!(names(&reply.unwrap()), [start("job-1")]);
+        tokio::task::spawn_blocking(move || listening.join())
+            .await
+            .unwrap();
     });
 }
 
@@ -114,7 +117,10 @@ fn a_listening_connection_made_again_wakes_a_held_poll_to_what_it_missed() {
                 .unwrap();
             listening
         };
-        let (reply, _listening) = tokio::join!(polled(&a, Vec::new()), writing);
+        let (reply, listening) = tokio::join!(polled(&a, Vec::new()), writing);
         assert_eq!(names(&reply.unwrap()), [start("job-1")]);
+        tokio::task::spawn_blocking(move || listening.join())
+            .await
+            .unwrap();
     });
 }

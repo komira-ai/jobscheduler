@@ -1,7 +1,8 @@
 //! A [`Store`] that forwards to another and remembers every write it was asked for, every
-//! read that names keys or the clock and every notice it was asked to send, so a test can assert which keys a component touched (and
-//! with what kind of operation) and what it read, after the fact. Test support: it lives here and not in `js-testkit` because that
-//! crate depends on no kbf crate, and a store wrapper needs this one.
+//! read that names keys or the clock and every notice it was asked to send, so a test can
+//! assert which keys a component touched (and with what kind of operation), what it read and
+//! what it told, after the fact. Test support: it lives here and not in `js-testkit` because
+//! that crate depends on no kbf crate, and a store wrapper needs this one.
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};

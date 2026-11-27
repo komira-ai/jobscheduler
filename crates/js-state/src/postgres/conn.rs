@@ -153,7 +153,7 @@ impl Conn {
 
     /// Waits at most `wait` for the next notice of a channel this connection listens on (a
     /// notice already received first): `None` when none came, or when the connection is gone
-    /// ([`Conn::is_closed`] tells which). Nothing is sent, so nothing is counted.
+    /// (a statement sent next tells which). Nothing is sent, so nothing is counted.
     ///
     /// # Errors
     /// The client's error: the connection failed while it waited.
