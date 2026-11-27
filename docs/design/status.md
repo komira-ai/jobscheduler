@@ -20,7 +20,6 @@ Columns:
 ## Gaps not filed here
 
 - Multi-instance G3 (host identity is the host certificate; join tokens, pool tokens and host credentials go) is in progress: komira-ai/jobscheduler#1118 is its first step.
-- Job retry and callback task I (SubmitJob takes a retry policy and a callback, js-client reports a dropped policy, the docs) is planned as the task after task H (komira-ai/jobscheduler#1120).
 - The whole-node start-order tests still missing (W2 and W10: work ahead of a reserved request, a lower-QoS request behind a stream): komira-ai/jobscheduler#1133. The heartbeat's disk_gib: komira-ai/jobscheduler#328. The Seatbelt fence for TCC-only places: komira-ai/jobscheduler#1025, komira-ai/jobscheduler#1020 and komira-ai/jobscheduler#1117. Linux jobs on a Mac: komira-ai/jobscheduler#1066.
 - The per-consumer whole-node cap is not a gap: `docs/design/jobscheduler-design.md` says there is no per-consumer cap in the single-token service, and `whole-node.md` section 6 is stale (komira-ai/jobscheduler#1193).
 - Stale status lines and comments found on the way: komira-ai/jobscheduler#1193.
@@ -41,7 +40,7 @@ Columns:
 | jobscheduler-design.md | 82 | 38 | 20 | 7 | komira-ai/jobscheduler#1153, komira-ai/jobscheduler#1154, komira-ai/jobscheduler#1155, komira-ai/jobscheduler#1156, komira-ai/jobscheduler#1157, komira-ai/jobscheduler#1158, komira-ai/jobscheduler#1174 |
 | pools-providers-network.md | 30 | 6 | 8 | 10 | - |
 | job-rootfs.md | 17 | 3 | 2 | 9 | komira-ai/jobscheduler#1159 |
-| job-retry-and-completion-callback.md | 17 | 8 | 2 | 5 | komira-ai/jobscheduler#1150, komira-ai/jobscheduler#1193 |
+| job-retry-and-completion-callback.md | 17 | 12 | 0 | 1 | komira-ai/jobscheduler#1150, komira-ai/jobscheduler#1193 |
 | cpu-over-time.md | 24 | 9 | 5 | 7 | komira-ai/jobscheduler#1143, komira-ai/jobscheduler#1144 |
 | live-logs.md | 11 | 5 | 0 | 4 | - |
 | mac-account-per-job.md | 17 | 6 | 6 | 1 | komira-ai/jobscheduler#1163 |
@@ -453,11 +452,11 @@ As read: Status: design for the owner's review; items 2-6 built (header). Stale:
 
 ## job-retry-and-completion-callback.md
 
-As read: Header line 4-5 says "Status: decided, not built ... Nothing here is built yet." That is stale: tasks A to G and J are merged on main, H is in open PR komira-ai/jobscheduler#1120, and only I and kbf are not built. The page has no "Open question" section and no "What is left" section; its open items are the task table in section 10, plus one "not built" aside in section 2.1 (eviction) and "Decisions this page makes" (owner may reverse).
+As read: Header line 4-5 says "Status: decided, not built ... Nothing here is built yet." That is stale: tasks A to G and J are merged on main, H is in open PR komira-ai/jobscheduler#1120, and only I and kbf are not built. Since then task H merged (komira-ai/jobscheduler#1120) and task I is built (komira-ai/jobscheduler#1217), which also updates the header; only the kbf row is left. The page has no "Open question" section and no "What is left" section; its open items are the task table in section 10, plus one "not built" aside in section 2.1 (eviction) and "Decisions this page makes" (owner may reverse).
 
 | Section | Claim | On main | Tracking |
 |---|---|---|---|
-| header (lines 4-5) | Whole page is 'decided, not built; nothing here is built yet'. | partly: `crates/js-types/src/retry.rs:170`, `crates/js-jobs/src/store/attempts.rs:57` | komira-ai/jobscheduler#1193 (new); komira-ai/jobscheduler#1120 |
+| header (lines 4-5) | Whole page is 'decided, not built; nothing here is built yet'. | not a gap: the header says built (komira-ai/jobscheduler#1217) | - |
 | 10 task A. Interfaces | Proto fields, agreed Rust signatures, SubmitJob refuses retry and callback; js-callback added to layers.toml. | `crates/js-types/src/retry.rs:170`, `crates/js-jobs/src/store/` | komira-ai/jobscheduler#1089 |
 | 10 task B. Retry decision | Pure classing table, job-fault refusal codes, backoff and jitter in js-types. | `crates/js-types/src/retry.rs:170` | komira-ai/jobscheduler#1093 |
 | 10 task C. Attempt store | Tags 67 and 69-73, retry_txn, pre-run counter reset, history bound, attempt/ rows and sweep, UsageRecord.attempt. | `crates/js-jobs/src/store/attempts.rs:57` | komira-ai/jobscheduler#1097 |
@@ -466,10 +465,10 @@ As read: Header line 4-5 says "Status: decided, not built ... Nothing here is bu
 | 10 task J. Attempt logs | Attempt log prefix and length rule; GetLogsRequest.attempt; reader of an earlier attempt from attempt_history or attempt/ row. | `crates/js-lease-server/src/job_api/logs_attempt_tests.rs` | komira-ai/jobscheduler#1094 |
 | 10 task F. Server retry (act) | end_of and the loss paths ask decide; placement honours retry_not_before, the 15-minute bar, start-fence, the freed previous allocation; queue wait counts from backoff end; API mapping; metrics. | `crates/js-lease-server/src/job_retry.rs:98`, `crates/js-lease-server/src/metrics/golden.prom:45` | komira-ai/jobscheduler#1104 |
 | 10 task G. Server callback (act) | Submit checks, delivery threads, callback_status, key redaction, metrics; also the heartbeat peer address kept in memory for the address rule (section 5.3). | `crates/js-lease-server/src/job_api/callback_check.rs`, `crates/js-lease-server/src/callbacks.rs:140` | komira-ai/jobscheduler#1103 |
-| 10 task H. Simulation and conformance | Section 9 invariants and scenarios in js-sim-cell; reference service and scenarios (retry_on_host_loss, retry_on_start_failure, no_retry_on_nonzero_exit, no_retry_on_cancel, callback_once_after_retries) in js-conformance. | no | komira-ai/jobscheduler#1120 |
-| 10 task I. Accept (part 1: turn the gates on) | A release after F, G and J removes the two refusals (retry-not-enabled, callback-not-enabled) so SubmitJob takes a retry policy and a callback. | no | planned after task H (komira-ai/jobscheduler#1120) |
-| 10 task I. Accept (part 2: js-client reports a dropped policy) | js-client reports that the server dropped a retry policy or callback (test a_dropped_policy_is_reported; section 6, line 625). | no | planned after task H (komira-ai/jobscheduler#1120) |
-| 10 task I. Accept (part 3: doc updates) | Update design.md 8.1, retries-and-runs.md, queue-status.md, live-logs.md (attempt segment), http-gateway.md and jobscheduler-design.md (3.2, 5.3). | partly: `docs/design.md:650`, `docs/design/live-logs.md` | planned after task H (komira-ai/jobscheduler#1120) |
+| 10 task H. Simulation and conformance | Section 9 invariants and scenarios in js-sim-cell; reference service and scenarios (retry_on_host_loss, retry_on_start_failure, no_retry_on_nonzero_exit, no_retry_on_cancel, callback_once_after_retries) in js-conformance. | `crates/js-sim-cell/tests/job_retry.rs`, `crates/js-conformance/src/jobs/retry.rs` | komira-ai/jobscheduler#1120 |
+| 10 task I. Accept (part 1: turn the gates on) | A release after F, G and J removes the two refusals (retry-not-enabled, callback-not-enabled) so SubmitJob takes a retry policy and a callback. | `crates/js-lease-server/src/job_api/validate.rs`, `crates/js-lease-server/src/job_api/callback_tests.rs` | komira-ai/jobscheduler#1217 |
+| 10 task I. Accept (part 2: js-client reports a dropped policy) | js-client reports that the server dropped a retry policy or callback (test a_dropped_policy_is_reported; section 6, line 625). | `crates/js-client/src/jobs/dropped.rs` | komira-ai/jobscheduler#1217 |
+| 10 task I. Accept (part 3: doc updates) | Update design.md 8.1, retries-and-runs.md, queue-status.md, live-logs.md (attempt segment), http-gateway.md and jobscheduler-design.md (3.2, 5.3). | `docs/design.md`, `docs/design/live-logs.md`, `docs/http-gateway.md`, `docs/design/jobscheduler-design.md` | komira-ai/jobscheduler#1217 |
 | 10 kbf row (komira-ai/kbf) | kbf-job-client reads the new fields and goldens; kbf takes the callback with its own key to wake the executor; kbf sets no retry policy. | not a gap: The kbf row is work in komira-ai/kbf (kbf-job-client, kbf-server) | - |
 | 2.1 Older RetryPolicy: eviction | Eviction (an evicted attempt requeued without charging max_attempts, with its own outcome value) is not built; D63. | no | komira-ai/jobscheduler#1150 (new) |
 | Decisions this page makes (owner may reverse any) | The choices listed (attempt is a placement; the retry keeps the job id; one allocation at a time; 15-minute bar; history of 256; hash segment; jitter from job id; key only in the callback row; private addresses allowed) are provisional. | decision, no code | - |
