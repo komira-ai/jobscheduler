@@ -36,6 +36,7 @@ use crate::load::{Charge, HostFacts, LeaseFacts, Load, SLOTS, SlotHost, SlotLoad
 use crate::probe::{ProbeHost, ProbeRefusal, admit_probe};
 use crate::provider_rank::of_first_provider;
 use crate::refusal::RefusalKind;
+use crate::scheduler::Placement;
 use crate::scheduler::Worker;
 use crate::unservable::Unservable;
 
@@ -79,6 +80,8 @@ pub(crate) struct Placed {
     pub(crate) device: Option<String>,
     /// What the lease is charged.
     pub(crate) cost: LeaseCost,
+    /// What placement expected of the lease, for its release record.
+    pub(crate) placement: Placement,
 }
 
 /// A worker a blocked head could hold ([`Servable::head_candidates`]).
@@ -318,11 +321,9 @@ impl Servable {
         worker.booked = worker.booked.saturating_add(booked);
         worker.leases += 1;
         match request.kind {
-            LeaseKind::Action => worker
-                .load_state
-                .insert(attempt.lease, cost, false, profile),
+            LeaseKind::Action => worker.load_state.admit(attempt.lease, cost, profile, now),
             LeaseKind::Vm => worker.load_state.insert(attempt.lease, cost, true, None),
-            LeaseKind::WholeMachine => {}
+            LeaseKind::WholeMachine => worker.load_state.note_lease(),
         }
         let device = worker.free_device(&request.needs).map(str::to_owned);
         worker.devices.extend(device.clone());
@@ -332,6 +333,7 @@ impl Servable {
                 booked,
                 device,
                 cost,
+                placement: Placement::default(),
             }),
             blocked: None,
         }

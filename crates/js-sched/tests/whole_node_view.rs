@@ -104,32 +104,42 @@ fn counts(of: &[(WholeReason, usize)]) -> BTreeMap<WholeReason, usize> {
     of.iter().copied().collect()
 }
 
-/// Catches: the wait before `drain_after` shown as a hold, or its end misread: the
-/// request is early with the time it may first hold, a millisecond before it still is,
-/// and at it holds the only worker.
+/// Catches: the deprecated `drain_after_ms` still delaying the first hold: with 30 s set,
+/// a request that fits nowhere marks the busy worker in the very first round, the mark
+/// made at the submit time with its deadline a drain deadline later; the view shows the
+/// hold at once and never `Early`, it is unchanged after `drain_after` has passed, and
+/// the summary counts one hold and no early wait.
 #[test]
-fn before_drain_after_a_request_holds_nothing_and_then_holds() {
+fn a_request_holds_in_its_first_round_whatever_drain_after_is() {
     let (mut f, _) = busy(cfg(30_000, 2), &[("a", 600)]);
     let op = f.submit_whole(Some(secs(600)));
     assert!(f.grants().is_empty());
+    assert_eq!(state(&f, op), holding(("a", 600_000), 0, 60_000));
+    let mark =
+        f.s.whole_mark(op)
+            .cloned()
+            .expect("marked in the first round");
     assert_eq!(
-        state(&f, op),
-        WholeState::Early {
-            may_hold_at: t(30_000)
-        }
+        (mark.worker, mark.made, mark.deadline),
+        (w("a"), t(0), t(60_000))
     );
-    assert_eq!(f.s.whole_mark(op), None);
-    tick_at(&mut f, 29_999);
-    assert_eq!(
-        state(&f, op),
-        WholeState::Early {
-            may_hold_at: t(30_000)
-        }
-    );
-    assert_eq!(summary(&f).waiting, counts(&[(WholeReason::Early, 1)]));
-    tick_at(&mut f, 30_000);
-    assert_eq!(state(&f, op), holding(("a", 600_000), 30_000, 90_000));
     assert_eq!(summary(&f).waiting, counts(&[(WholeReason::Holding, 1)]));
+    tick_at(&mut f, 30_000);
+    assert_eq!(state(&f, op), holding(("a", 600_000), 0, 60_000));
+    assert_eq!(summary(&f).waiting, counts(&[(WholeReason::Holding, 1)]));
+}
+
+/// Asserts that the kept public name `WholeState::Early` still maps to
+/// `WholeReason::Early`, though no request is shown as early any more.
+#[test]
+fn an_early_state_still_maps_to_the_early_reason() {
+    assert_eq!(
+        WholeState::Early {
+            may_hold_at: t(30_000)
+        }
+        .reason(),
+        WholeReason::Early
+    );
 }
 
 /// Catches: the hold's fields wrong: the worker, when it was made, the and the
@@ -571,8 +581,8 @@ fn a_request_both_barred_and_stopped_shows_the_stop() {
     assert_eq!(state(&f, op), WholeState::Stopped(WholeWait::LastCapable));
 }
 
-/// Catches: `Unservable` checked after `Early`: a request no worker could run is unservable
-/// at once, though it is before `drain_after`.
+/// Catches: a request no worker could run shown as held or waiting: it is unservable at
+/// once, whatever `drain_after` is set to.
 #[test]
 fn an_unservable_request_is_not_shown_as_early() {
     let (mut f, _) = busy(cfg(30_000, 2), &[("a", 600)]);

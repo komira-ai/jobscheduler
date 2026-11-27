@@ -22,8 +22,8 @@ use crate::config::{Cli, Config};
 use crate::error::StartupError;
 
 /// The curve mode of the placement engine: its `mode` (`--placement-curves`, or
-/// `server.placement_curves`) and the `settings` that act only under `on`
-/// (`--curve-hosts` and `--curve-max-wait-seconds`, or `server.curve_hosts` and
+/// `server.placement_curves`) and the `settings` that book under `on` and that `shadow` judges
+/// by (`--curve-hosts` and `--curve-max-wait-seconds`, or `server.curve_hosts` and
 /// `server.curve_max_wait_seconds`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct CurveSetting {
@@ -34,8 +34,9 @@ pub(crate) struct CurveSetting {
 }
 
 /// The flags of the live curve mode's canary and wait bound, the flags of `server.curve_hosts`
-/// and `server.curve_max_wait_seconds`. Both are read in every mode and act only under
-/// `--placement-curves on`; both need `--agent-pool-config`.
+/// and `server.curve_max_wait_seconds`. Both are read in every mode and book only under
+/// `--placement-curves on` (under `shadow`, `--curve-hosts` names the hosts its log line judges
+/// by curve); both need `--agent-pool-config`.
 #[derive(Debug, Clone, Default, Args)]
 pub struct CurveFlags {
     /// The hosts that book by curve under `--placement-curves on`, as host ids separated by
@@ -56,8 +57,9 @@ pub struct CurveFlags {
 impl Config {
     /// The hosts that book by curve and the wait bound (`--curve-hosts` and
     /// `--curve-max-wait-seconds`, or `server.curve_hosts` and `server.curve_max_wait_seconds`):
-    /// every host and 30 s unless the flags or the file name others. They act only when
-    /// [`Config::placement_curves`] is `on`.
+    /// every host and 30 s unless the flags or the file name others. They book only when
+    /// [`Config::placement_curves`] is `on`; under `shadow` the hosts are the ones its log line
+    /// judges by curve.
     #[must_use]
     pub fn curve_settings(&self) -> CurveSettings {
         self.agents.curves.settings.clone()

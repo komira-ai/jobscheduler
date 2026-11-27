@@ -16,9 +16,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use js_agent::lifecycle::{Exit, RunHandle, RunSpec, Runtime, Status};
 use js_agent::mac_accounts::Settings;
 use js_agent::mac_supervisor::SystemLauncher;
-use js_agent::native::{Ceiling, NativeConfig, NativeRuntime};
+use js_agent::native::{Ceiling, NativeConfig, NativeRuntime, ReadAllow};
 use js_agent_wire::NativeSpec;
-use js_mac_pool::seatbelt::AbsPath;
+use js_mac_pool::seatbelt::{AbsPath, ReadModel};
 
 use super::{
     FakeAccounts, Scratch, TERM, config, native, open_pool, pool_settings, reopen_pool, settle,
@@ -646,4 +646,33 @@ fn a_job_taken_back_is_stopped_and_its_end_is_its_supervisors() {
         .unwrap();
     assert_eq!(rig.settle(&id), exited(128 + 15));
     rig.rt.remove(&id).unwrap();
+}
+
+/// Asserts that under the allow read model the start-up self-test passes on this Mac with the
+/// real supervisor and the real profile: every step runs as the lent account, each denied place
+/// is refused under the profile and read without it, the pinned tree is read and `true` runs,
+/// so the runtime holds the assurance; and it leaves no canary in the shared places and no live
+/// lease. The canaries in `/Users/Shared` and `/private/var/tmp` are named for the rig's term
+/// and removed by the self-test itself.
+///
+/// Catches: a base set or a rule order that does not hold on this macOS build (a canary read
+/// under the profile, or the toolchain blocked), and steps that are never run as the account
+/// through the supervisor.
+#[test]
+fn the_allow_read_models_self_test_passes_under_the_real_supervisor_and_profile() {
+    let mut rig = MacRig::with("allow", |config, _| config.read_model = ReadModel::Allow);
+    let allow = ReadAllow::of_host(&js_agent::SystemCommands::default(), &[]).unwrap();
+    rig.rt = rig.rt.with_read_allow(allow);
+    rig.rt.self_test().unwrap();
+    assert!(rig.rt.read_allow_assured());
+    for left in [
+        format!("/Users/Shared/js-agent-self-test-{TERM}"),
+        format!("/private/var/tmp/js-agent-self-test-{TERM}"),
+    ] {
+        assert!(!std::path::Path::new(&left).exists(), "{left}");
+    }
+    let live = js_agent::native::Journal::new(&rig.dir.path("native-leases"))
+        .live()
+        .unwrap();
+    assert_eq!(live, Vec::<String>::new());
 }

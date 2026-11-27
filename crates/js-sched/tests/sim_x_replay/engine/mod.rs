@@ -16,9 +16,11 @@
 //! | `adapter` | the scorer's `PredictedLoad` seam over the replay's host figures, and ranker 5 through `Scorer::choose`; imports nothing above it | present |
 //! | `rankers` | the score rankers 3, 4, 5 and FW5 over one scorer, the decided-key shares, the decides-differently counters and the placement-sequence hash; imports `adapter` only | present |
 //! | `rules` | the compared placement rules (the previous rule and a random one) | present |
+//! | `score_rule` | the score rankers of `rankers` as rules of the replay loop, over the scorer's model of the replay's hosts | present |
 //! | `replay` | the loop: arrivals, rounds, truth, kills and the metrics | present |
 //! | `export` | a directory of exported per-minute series read into rows and beliefs, for the x2 example | present |
-//! | `report`, `control` | the report and the control | planned |
+//! | `x2` | the x2 run: an export's real series as the truth, through every compared ranker, and its report | present |
+//! | `control` | the shuffled-shape control run through the rankers | planned |
 //!
 //! A module takes its input as `fixture::Row` values (or a `fixture::Fixture`), never as
 //! bytes, so a hand-made trace in a test and the committed one go through the same code.
@@ -38,6 +40,8 @@ pub mod permute;
 pub mod predicate;
 pub mod replay;
 pub mod rules;
+pub mod score_rule;
+pub mod x2;
 
 pub mod fixture;
 pub mod predictor;

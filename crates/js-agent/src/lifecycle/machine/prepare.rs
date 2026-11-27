@@ -109,7 +109,7 @@ impl Lifecycle {
         // The providers are asked first, before the images: a provider fetches while the
         // image is pulled and the container made.
         let now = self.clock.now_ms();
-        let providing = match self.provide(&spec.run_id, &given.fs, now) {
+        let providing = match self.provide(&spec.run_id, &given.fs, now, events) {
             Ok(providing) => providing,
             Err(failure) => {
                 self.settle((spec, keyed), Err(failure), (slot, booked), at, events);
@@ -319,7 +319,7 @@ impl Lifecycle {
         let next = match stopping {
             _ if creating => created(runtime.poll_create(&waiting.spec.run_id)),
             true => ending(runtime.as_mut(), waiting, now),
-            false => match follow(waiting, (providers, &config.mounts), now) {
+            false => match follow(waiting, (providers, &config.mounts), now, events) {
                 Follow::Go => step(runtime.as_mut(), waiting, now),
                 Follow::Bound => {
                     mark_at(starting, &waiting.spec.run_id, "provided", now);

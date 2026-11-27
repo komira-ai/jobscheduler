@@ -205,11 +205,13 @@ pub struct Cli {
     pub tunings: Tunings,
     /// Whether the placement engine learns a CPU and a memory profile for each job class from
     /// its runs' series: `off` (the default) learns nothing; `shadow` learns and logs a line per
-    /// run it checks, placing as `off` does; `on` also books a class passing its checks by its
-    /// CPU curve, on every host unless `--curve-hosts` names some. Needs `--agent-pool-config`.
+    /// run it checks and a line per job the curve rule of `on` would place elsewhere, placing as
+    /// `off` does; `on` also books a class passing its checks by its CPU curve, on every host
+    /// unless `--curve-hosts` names some. Needs `--agent-pool-config`.
     #[arg(long, default_value = "off", value_parser = placement_curves::parse)]
     pub placement_curves: Curves,
-    /// `--curve-hosts` and `--curve-max-wait-seconds`, which act only under `on`.
+    /// `--curve-hosts` and `--curve-max-wait-seconds`, which book only under `on` (`shadow`
+    /// judges the hosts named by curve for its log line alone).
     #[command(flatten)]
     pub curve: CurveFlags,
     /// The CPU, in millicores from 250, a queued job that names no CPU books while neither its

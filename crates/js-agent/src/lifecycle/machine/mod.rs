@@ -14,6 +14,7 @@ mod handover;
 mod held;
 mod job;
 mod owed;
+mod pace;
 mod per_job;
 mod prepare;
 mod provided;

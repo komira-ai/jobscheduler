@@ -8,7 +8,7 @@ use std::time::Duration;
 use js_agent_wire::RefusalReason;
 use js_jobs::{Exclusion, JobId, JobRecord, MarkRecord};
 use js_registry::WholeNodeConfig;
-use js_sched::{Bar, Event, OpState, WholeState};
+use js_sched::{Bar, Event, OpState, WholeReason, WholeState};
 use js_state::StoreTime;
 use js_types::sched::{LeaseKind, WorkKey};
 
@@ -116,10 +116,13 @@ fn a_stored_mark_of_a_job_that_is_not_a_queued_whole_host_job_is_deleted() {
 }
 
 /// Catches: a queued whole-host job queued as another kind of request, with another name,
-/// from the time the pass found it instead of the time it was submitted (it would wait out
-/// `drain_after` afresh at every restart), without its wall limit, or queued again at each
-/// pass. `j`, submitted at 3 s, is a whole-machine request named for the job, may first hold
-/// a host at 13 s, may run ten minutes, and has one operation however many passes see it.
+/// from the time the pass found it instead of the time it was submitted (its age in the
+/// queue would start again at every restart), without its wall limit, queued again at each
+/// pass, or kept from a host until some time after its submit. `j`, submitted at 3 s, is a
+/// whole-machine request named for the job; the pass at 5 s, the first to see it, marks `a`
+/// at once, and the view shows it holding `a` from 5 s, never early; it may run ten minutes;
+/// a pass that is given the mark writes nothing and has one operation however many passes
+/// see it; and at 6 s its age in the queue is three seconds, the time since its submit.
 #[test]
 fn a_queued_whole_host_job_is_queued_once_from_its_submit_time() {
     let tables = Tables::new();
@@ -127,20 +130,72 @@ fn a_queued_whole_host_job_is_queued_once_from_its_submit_time() {
     let j = tables.whole("j");
     let mut e = engine(&[("a", &[1]), ("b", &[2])]);
     let queue = [j.clone()];
-    assert!(run(&mut e, (&queue, &[]), 5_000).is_empty());
+    let steps = run(&mut e, (&queue, &[]), 5_000);
+    assert_eq!(steps.len(), 1);
+    let first = written(&steps[0]).clone();
+    assert_eq!(first.host, host("a"));
+    assert_eq!(first.made, store(5_000));
     let operation = e.whole_jobs[&j.id];
     let request = e.sched.request(operation).unwrap();
     assert_eq!(request.kind, LeaseKind::WholeMachine);
     assert_eq!(request.key, WorkKey::new("job", "j"));
-    let early = WholeState::Early {
-        may_hold_at: at(13_000),
+    let state = e.sched.whole_state(operation);
+    let Some(WholeState::Holding {
+        worker,
+        made,
+        deadline,
+        draining,
+        ..
+    }) = state
+    else {
+        panic!("not holding: {state:?}");
     };
-    assert_eq!(e.sched.whole_state(operation), Some(early));
+    assert_eq!(worker, map::worker(&host("a")));
+    assert_eq!((made, deadline, draining), (at(5_000), at(65_000), true));
     let wall = Duration::from_secs(600);
     assert_eq!(e.sched.max_wall(operation), Some(wall));
-    assert!(run(&mut e, (&queue, &[]), 6_000).is_empty());
+    let stored = [first];
+    assert!(run(&mut e, (&queue, &stored), 6_000).is_empty());
     assert_eq!(e.whole_jobs[&j.id], operation);
     assert_eq!(e.sched.queued_len(), 1);
+    let age = e.sched.queue_snapshot().oldest_age;
+    assert_eq!(age, Some(Duration::from_secs(3)));
+}
+
+/// Asserts that a whole-host job that fits nowhere marks a busy host in the first pass that
+/// sees it, whatever the deprecated `drain_after` is set to (none, 30 s, an hour): `j`,
+/// submitted at 10 s and passed at 10 s itself, has a mark written on `a` made at 10 s with
+/// its deadline a minute on, is shown holding `a` from then, and the summary counts it as
+/// holding with nothing waiting early. Catches: a request kept from a host until its
+/// `drain_after` has passed since its submit.
+#[test]
+fn a_whole_host_job_marks_a_busy_host_in_the_first_pass_whatever_drain_after_is() {
+    for after in [0, 30_000, 3_600_000] {
+        let tables = Tables::new();
+        tables.set_ms(10_000);
+        let j = tables.whole("j");
+        let mut e = engine(&[("a", &[1]), ("b", &[2])]);
+        let cfg = WholeNodeConfig {
+            drain_after_ms: after,
+            ..settings()
+        };
+        let queue = [j.clone()];
+        let steps = pass(&mut e, (&queue, &[]), Some(&cfg), 10_000);
+        assert_eq!(steps.len(), 1, "{after}");
+        let marked = written(&steps[0]);
+        assert_eq!(marked.host, host("a"), "{after}");
+        assert_eq!(marked.made, store(10_000), "{after}");
+        assert_eq!(marked.deadline, store(70_000), "{after}");
+        let state = e.sched.whole_state(e.whole_jobs[&j.id]);
+        let Some(WholeState::Holding { made, deadline, .. }) = state else {
+            panic!("{after}: not holding: {state:?}");
+        };
+        assert_eq!((made, deadline), (at(10_000), at(70_000)), "{after}");
+        let summary = e.sched.whole_summary().unwrap();
+        assert_eq!(summary.marks, 1, "{after}");
+        let waiting = BTreeMap::from([(WholeReason::Holding, 1)]);
+        assert_eq!(summary.waiting, waiting, "{after}");
+    }
 }
 
 /// Catches: a mark made and never written, a written mark that is written again at every
@@ -220,7 +275,8 @@ fn a_stored_mark_whose_host_never_says_hello_is_dropped_at_claim_by() {
 /// holds no mark (the table would show a host held for it that holds nothing), or a job
 /// that is left unmarked for good. With the mark on `z`, which said hello and is no worker:
 /// a job that may already hold a host is marked on one the engine knows, and the stored mark
-/// is replaced; a job that must still wait has the stored mark deleted.
+/// is replaced; a job barred from every host it could hold, which marks none, has the stored
+/// mark deleted.
 #[test]
 fn a_stored_mark_the_scheduler_cannot_hold_is_replaced_or_deleted() {
     let tables = Tables::new();
@@ -233,9 +289,10 @@ fn a_stored_mark_the_scheduler_cannot_hold_is_replaced_or_deleted() {
     let steps = run_with(&mut e, (&queue, &stored), (&known, &open), 20_000);
     assert_eq!(steps.len(), 1);
     assert_eq!(written(&steps[0]).host, host("a"));
-    let later = Tables::new();
-    later.set_ms(15_000);
-    let waiting = later.whole("w");
+    let mut waiting = tables.whole("w");
+    for name in ["a", "b"] {
+        waiting.prepare_bars.insert(host(name), Exclusion::ForLife);
+    }
     let queue = [waiting.clone()];
     let stored = [mark(&waiting, "z", (5_000, 65_000), None)];
     let mut e = engine(&[("a", &[1]), ("b", &[2])]);

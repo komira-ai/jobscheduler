@@ -146,7 +146,9 @@
 //! weighs. Under [`Curves::On`] the placer reads a class's profile once the class passes its
 //! four checks ([`JobSizes::curve_of`]) and tests a job that leaves its CPU at 0 against the
 //! hosts by the class's CPU over the job's age, not by its sized number alone
-//! (`docs/design/placement-profiles-live.md`); a job that names its CPU books it flat.
+//! (`docs/design/placement-profiles-live.md`); a job that names its CPU books it flat. Under
+//! [`Curves::Shadow`] the placer reads the same curve only to log where it would have placed
+//! the job (`Engine::judge_in_shadow`), and places by the sized number.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -317,11 +319,9 @@ pub struct JobSizes {
     /// otherwise, when a freed job is taught at once.
     held: Option<Held>,
     /// The CPU and memory profiles learned in shadow and on, a pair for each class; `None` with
-    /// [`Curves::Off`]. Nothing the sizes book reads them; [`JobSizes::curve_of`] reads them
-    /// under [`Curves::On`].
+    /// [`Curves::Off`]. Nothing the sizes book reads them; [`JobSizes::curve_of`] reads them,
+    /// for the placer to book by under [`Curves::On`] and to judge by under [`Curves::Shadow`].
     profiles: Option<profile::Profiles>,
-    /// The mode the profiles are kept for: what [`JobSizes::curve_of`] answers by.
-    curves: Curves,
 }
 
 /// The freed jobs a teaching of the ended jobs holds until it is taught ([`Teaching`]).
@@ -413,7 +413,6 @@ impl JobSizes {
     #[must_use]
     pub fn with_curves(mut self, curves: Curves) -> Self {
         self.profiles = (curves != Curves::Off).then(profile::Profiles::default);
-        self.curves = curves;
         self
     }
 
@@ -935,6 +934,9 @@ impl SchedPlacer {
     /// ran ([`JobSizes::observe`]), or held until the teaching of the ended jobs begun is taught
     /// ([`Teaching`]). A job the store no longer holds teaches nothing; a read that
     /// fails is logged and the job's run is let go (the history is a guide, not a record).
+    /// The CPU time a freed job's result reports is also handed to the scheduler for the
+    /// plausibility check of its host's readings ([`crate::engine::Engine::job_cpu_used`]),
+    /// before the pass lets the allocation go.
     pub(crate) fn learn_freed<S: js_state::Store, I: IdSource>(
         &self,
         jobs: &JobStore<S, I>,
@@ -945,8 +947,13 @@ impl SchedPlacer {
             match jobs.get_job(&id) {
                 Ok(job) => {
                     let mut engine = self.engine();
-                    job.into_iter()
-                        .for_each(|job| engine.sizes().freed_run(job, booked));
+                    if let Some(job) = job {
+                        let used = job.result.as_ref().and_then(|result| result.usage);
+                        if let Some(usage) = used {
+                            engine.job_cpu_used(&id, micros(usage.cpu_time));
+                        }
+                        engine.sizes().freed_run(job, booked);
+                    }
                 }
                 Err(error) => {
                     warn!(job = %id, %error, "a freed job was not read; its run teaches no size")

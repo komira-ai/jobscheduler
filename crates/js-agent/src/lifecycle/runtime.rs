@@ -739,8 +739,8 @@ pub trait Runtime {
     /// The ports of the host's loopback a job of this runtime may reach (`--host-port`,
     /// [`RunSpec::host_ports`]): a start that names any other is refused `input-not-allowed`
     /// before anything is made, and never run without it. The default is none: only the
-    /// `crun` runtime offers host ports, and a start through any other that names one is
-    /// refused, never run without the ports it named.
+    /// `crun` runtime and the macOS native one offer host ports, and a start through any other
+    /// that names one is refused, never run without the ports it named.
     fn host_ports(&self) -> Vec<PortRange> {
         Vec::new()
     }

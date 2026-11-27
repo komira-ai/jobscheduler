@@ -8,7 +8,9 @@
 //! the node's true demand and true memory. Every fifth tick (the window `W`) each node's
 //! agent sends a reading as a heartbeat: cumulative CPU, the working set, and the
 //! leases that ran the whole window. Bounds are checked against the true demand, never
-//! against the scheduler's figures.
+//! against the scheduler's figures. With [`World::lease_cpu`] each finished lease's result
+//! also reports the CPU time it used, as a job's `cpu.stat` does, and a node's counter can
+//! be stuck or count CPU no lease used (a broken reader), for the plausibility check.
 
 #![allow(dead_code, reason = "each test binary uses some of the world")]
 
@@ -118,6 +120,13 @@ pub struct Node {
     pub cache: u64,
     seq: u64,
     cpu_usec: u64,
+    /// The CPU counter the agent reports: `cpu_usec` while the reader works.
+    reported_cpu_usec: u64,
+    /// The reported counter is stuck: it does not move however busy the node is.
+    pub counter_stuck: bool,
+    /// Millicores the reported counter adds every tick that no process used (a reader of
+    /// the wrong group); 0 for a healthy reader.
+    pub counter_extra_millis: u64,
     /// Most true demand in a tick, in millicores.
     pub peak_demand: u64,
     pub peak_memory: u64,
@@ -167,6 +176,9 @@ pub struct World {
     pub starts: Vec<(u64, &'static str, String, OperationId, LeaseId)>,
     next_waiter: u64,
     curves: Option<Arc<dyn CurveSource + Send + Sync>>,
+    /// Each finished lease's CPU time is fed to the scheduler as its result reports it
+    /// ([`Scheduler::lease_cpu_used`]).
+    pub lease_cpu: bool,
 }
 
 fn w(name: &str) -> WorkerId {
@@ -192,6 +204,7 @@ impl World {
             starts: Vec::new(),
             next_waiter: 0,
             curves: None,
+            lease_cpu: false,
         }
     }
 
@@ -215,6 +228,9 @@ impl World {
                 cache: 0,
                 seq: 0,
                 cpu_usec: 0,
+                reported_cpu_usec: 0,
+                counter_stuck: false,
+                counter_extra_millis: 0,
                 peak_demand: 0,
                 peak_memory: 0,
                 peak_running: 0,
@@ -249,7 +265,7 @@ impl World {
         let baseline = NodeLoad {
             seq: node.seq,
             mono_usec: self.tick * 1_000_000,
-            cpu_usage_usec: node.cpu_usec,
+            cpu_usage_usec: node.reported_cpu_usec,
             ..NodeLoad::default()
         };
         let held = self.s.leases_on(&w(name));
@@ -504,6 +520,10 @@ impl World {
             node.peak_running = node.peak_running.max(here.len());
             let grants = fair(&demands, node.capacity.cpu_millis);
             node.cpu_usec += grants.iter().sum::<u64>() * 1000;
+            if !node.counter_stuck {
+                node.reported_cpu_usec +=
+                    (grants.iter().sum::<u64>() + node.counter_extra_millis) * 1000;
+            }
             for (((lease, demand), grant), ws) in here.iter().zip(&demands).zip(grants).zip(used) {
                 let r = self.running.get_mut(lease).expect("running");
                 r.cpu_milli_ticks += grant;
@@ -596,6 +616,10 @@ impl World {
                     outcome,
                 },
             );
+            if self.lease_cpu {
+                // A millicore for a tick of one second is a millisecond of CPU time.
+                self.s.lease_cpu_used(lease, r.cpu_milli_ticks * 1000);
+            }
         }
     }
 
@@ -620,7 +644,7 @@ impl World {
                 NodeLoad {
                     seq: node.seq,
                     mono_usec: (t + 1) * 1_000_000,
-                    cpu_usage_usec: node.cpu_usec,
+                    cpu_usage_usec: node.reported_cpu_usec,
                     memory_working_set_bytes: 0,
                     covered: Vec::new(),
                     ..NodeLoad::default()
