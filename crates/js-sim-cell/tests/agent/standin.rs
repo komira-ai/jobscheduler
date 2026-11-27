@@ -96,8 +96,8 @@ impl Script {
 pub enum Call {
     /// A hello.
     Hello(Hello),
-    /// A heartbeat.
-    Beat(Heartbeat),
+    /// A heartbeat, boxed: a heartbeat is far larger than a hello.
+    Beat(Box<Heartbeat>),
 }
 
 /// One call, when it arrived, and the bearer it carried.
@@ -157,7 +157,7 @@ impl StandIn {
     /// Every heartbeat, with when it arrived, in order.
     pub fn beats(&self) -> Vec<(u64, &Heartbeat)> {
         let beats = self.received.iter().filter_map(|r| match &r.call {
-            Call::Beat(beat) => Some((r.at.as_millis(), beat)),
+            Call::Beat(beat) => Some((r.at.as_millis(), beat.as_ref())),
             Call::Hello(_) => None,
         });
         beats.collect()
@@ -302,7 +302,7 @@ impl StandIn {
                 beat.validate()
                     .expect("the agent's heartbeat passes validation");
                 self.on_beat(from, id);
-                Call::Beat(beat)
+                Call::Beat(Box::new(beat))
             }
         };
         self.received.push(Received {

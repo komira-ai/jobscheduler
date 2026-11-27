@@ -35,18 +35,46 @@ fn ended(tables: &Tables, id: &str, booked: Booked, end: JobEnd) -> JobRecord {
 }
 
 /// An exit with code 0 that used 2 GiB of memory and ten seconds of CPU time (a mean of one
-/// core over its ten seconds), whose group's CPU peaked at 3000 millicores.
+/// core over its ten seconds), whose group's CPU peaked at 2500 millicores.
 fn exit_with_peak(tweak: impl FnOnce(&mut js_jobs::ResourceUsage)) -> JobEnd {
     let JobEnd::Exited { mut output, .. } = exited(0, 2 * GIB, Duration::from_secs(10)) else {
         panic!("an exit");
     };
     let usage = output.usage.as_mut().unwrap();
-    usage.cpu_peak.as_mut().unwrap().millicores = 3000;
+    usage.cpu_peak.as_mut().unwrap().millicores = u64::try_from(PEAK_MILLIS).unwrap();
     tweak(usage);
     JobEnd::Exited {
         exit_code: 0,
         output,
     }
+}
+
+/// The CPU peak of [`exit_with_peak`], in millicores.
+const PEAK_MILLIS: u128 = 2500;
+
+/// The CPU time of every success of this module, in microseconds: ten seconds.
+const CPU_US: u128 = 10_000_000;
+
+/// The wall time of `job`'s run as its record holds it, in microseconds. The rig's clock moves
+/// as the job is started and ended, so it is a little over the ten seconds the run was given:
+/// the ratios below are taken over it, and each value stays well inside its bucket.
+fn wall_us(job: &JobRecord) -> u128 {
+    let timing = &job.result.as_ref().unwrap().timing;
+    timing
+        .ended_at
+        .since(timing.started_at.unwrap())
+        .as_micros()
+}
+
+/// The mean CPU over the booked two cores of a success of `job`, in thousandths.
+fn k_of(job: &JobRecord) -> u64 {
+    u64::try_from(CPU_US * 1_000_000 / (wall_us(job) * 2000)).unwrap()
+}
+
+/// The CPU peak over the mean CPU of a success of `job`, in thousandths.
+fn r_of(job: &JobRecord) -> u64 {
+    let mean_millis = CPU_US * 1000 / wall_us(job);
+    u64::try_from(PEAK_MILLIS * 1000 / mean_millis).unwrap()
 }
 
 /// Frees `job`, booked as `booked`, into `sizes`, as a pass serving does.
@@ -55,9 +83,10 @@ fn freed(sizes: &mut JobSizes, job: &JobRecord, booked: Booked) {
 }
 
 /// Behaviour: a success that booked two cores and 4 GiB, ran ten seconds on ten seconds of CPU
-/// time (a mean of one core), peaked at three cores for five seconds and held 2 GiB, is one
-/// sample of each ratio: its mean over its booking is 500 thousandths, its peak over its mean
-/// 3000, its memory over its booking 500, each in the bucket at most its value; the sums are the
+/// time (a mean of about one core over its recorded wall), peaked at two and a half cores for
+/// five seconds and held 2 GiB, is one sample of each ratio: its mean over its booking about 500
+/// thousandths, its peak over its mean about 2500, its memory over its booking 500, each in the
+/// bucket at most its value; the sums are the
 /// values. Catches a ratio read in the wrong unit and a sample in the wrong bucket.
 #[test]
 fn a_success_freed_while_serving_gives_its_cpu_mean_its_cpu_peak_and_its_memory_ratios() {
@@ -66,8 +95,10 @@ fn a_success_freed_while_serving_gives_its_cpu_mean_its_cpu_peak_and_its_memory_
     let mut sizes = JobSizes::new();
     freed(&mut sizes, &job, bk());
     let fit = sizes.fit();
-    assert_eq!(fit.cpu_mean_over_booked, held(&[1], 500));
-    assert_eq!(fit.cpu_peak_over_mean, held(&[7], 3000));
+    assert!((490..=500).contains(&k_of(&job)), "{}", k_of(&job));
+    assert!((2500..=2550).contains(&r_of(&job)), "{}", r_of(&job));
+    assert_eq!(fit.cpu_mean_over_booked, held(&[1], k_of(&job)));
+    assert_eq!(fit.cpu_peak_over_mean, held(&[7], r_of(&job)));
     assert_eq!(fit.memory_peak_over_booked, held(&[1], 500));
     assert_eq!(fit.memory_kills, 0);
 }
@@ -165,7 +196,7 @@ fn a_success_that_booked_nothing_gives_no_ratio_over_its_booking() {
     freed(&mut sizes, &job, nothing);
     let fit = sizes.fit();
     assert_eq!(fit.cpu_mean_over_booked.count(), 0);
-    assert_eq!(fit.cpu_peak_over_mean, held(&[7], 3000));
+    assert_eq!(fit.cpu_peak_over_mean, held(&[7], r_of(&job)));
     assert_eq!(fit.memory_peak_over_booked.count(), 0);
 }
 
@@ -389,9 +420,10 @@ fn the_placer_telemetry_carries_the_fit_and_the_checks_of_the_runs_freed() {
     };
     let placer = SchedPlacer::new(settings, ManualClock::new(Timestamp::from_millis(0)));
     assert_eq!(placer.telemetry().fit.memory_kills, 0);
+    let k = k_of(&job);
     placer.engine().sizes().freed_run(job, bk());
     let telemetry = placer.telemetry();
-    assert_eq!(telemetry.fit.cpu_mean_over_booked, held(&[1], 500));
+    assert_eq!(telemetry.fit.cpu_mean_over_booked, held(&[1], k));
     assert_eq!(telemetry.checks.cpu.learned, 1);
     assert_eq!(telemetry.checks.memory.learned, 1);
 }
