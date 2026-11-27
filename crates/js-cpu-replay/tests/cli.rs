@@ -82,8 +82,9 @@ fn an_export_converts_to_a_trace_that_replays_compressed_or_not() {
     ];
     assert_eq!(
         said(&convert).unwrap(),
-        "1 records: 1 jobs in the trace (0 with a store row, 1 with a result line); 0 did not \
-         run, 0 ran on a host of under a hundredth of them, 0 started before the cut\n"
+        "1 records: 1 jobs in the trace (0 with a store row, 1 with a result line, 0 with a CPU \
+         series); 0 did not run, 0 ran on a host of under a hundredth of them, 0 started before \
+         the cut\n"
     );
     let report = said(&["run", packed.as_str()]).unwrap();
     assert!(
@@ -110,6 +111,56 @@ fn an_export_converts_to_a_trace_that_replays_compressed_or_not() {
     );
 }
 
+/// [`RECORD`] with the series its host recorded: five points of 2 s at 2 cores.
+const RECORD_WITH_SERIES: &str = "{\"booked\":{\"cpuMillis\":\"1000\",\"memoryBytes\":\"4294967296\"},\
+    \"endedAtMs\":\"20000\",\"hostId\":\"node-1\",\"jobId\":\"a\",\"queueWaitMs\":\"0\",\
+    \"runMs\":\"10000\",\"used\":{\"cpuUsec\":\"20000000\",\"peakMemoryBytes\":\"1073741824\"},\
+    \"cpuSeries\":{\"granularitySecs\":2,\"points\":[32,32,32,32,32],\"runUsec\":\"10000000\"}}\n";
+
+/// Asserts that a record's CPU series is counted and written into the trace under the second
+/// header, that `run --learn-days 2` adds the gate's section after the report (here saying that
+/// nothing is held out, as the one job arrives on the first day), that without the flag the
+/// report has no gate, and that fewer than two learning days are refused. Catches a series the
+/// command line drops, a gate printed when not asked for, and a gate taken on one learning day.
+#[test]
+fn a_series_reaches_the_trace_and_the_gate_is_asked_for_by_learning_days() {
+    let scratch = Scratch::new("series");
+    let records = scratch.put("records.jsonl", RECORD_WITH_SERIES.as_bytes());
+    let out = scratch.path("trace.txt");
+    let convert = [
+        "convert",
+        "--records",
+        records.as_str(),
+        "--since-ms",
+        "0",
+        "--out",
+        out.as_str(),
+    ];
+    assert!(said(&convert).unwrap().contains("1 with a CPU series"));
+    assert_eq!(
+        std::fs::read_to_string(out.as_str()).unwrap(),
+        "# js-cpu-replay trace 2\n0\t0\t0\t10000\t20000\t-\t-\t1024\t1000\t4096\t0\tok\t1\t-\t0\t\
+         2:10000000:whole:32,32,32,32,32\n"
+    );
+    let gated = said(&["run", out.as_str(), "--learn-days", "2"]).unwrap();
+    assert!(
+        gated.ends_with(
+            "## The gate on held-out days\n\n\
+             No job arrived after the trace's first 2 days: nothing is held out.\n"
+        ),
+        "{gated}"
+    );
+    let plain = said(&["run", out.as_str()]).unwrap();
+    assert!(!plain.contains("## The gate"), "{plain}");
+    assert!(gated.starts_with(&plain));
+    for days in ["1", "0", "x"] {
+        assert!(
+            Cli::try_parse_from(["js-cpu-replay", "run", "t", "--learn-days", days]).is_err(),
+            "{days}"
+        );
+    }
+}
+
 #[test]
 fn store_rows_are_read_through_a_scratch_store() {
     let scratch = Scratch::new("rows");
@@ -134,7 +185,7 @@ fn store_rows_are_read_through_a_scratch_store() {
     assert!(
         said(&convert)
             .unwrap()
-            .contains("(0 with a store row, 0 with a result line)")
+            .contains("(0 with a store row, 0 with a result line, 0 with a CPU series)")
     );
     assert_eq!(std::fs::read_to_string(out.as_str()).unwrap(), TRACE);
     // A line that is not a row.
@@ -189,7 +240,8 @@ fn each_failure_names_its_file_or_line() {
     let error = said(&["run", headless.as_str()]).unwrap_err();
     assert_eq!(
         error.to_string(),
-        "the trace: the first line is not \"# js-cpu-replay trace 1\""
+        "the trace: the first line is not \"# js-cpu-replay trace 1\" or \
+         \"# js-cpu-replay trace 2\""
     );
     // Records that are not JSON.
     let bad = scratch.put("bad.jsonl", b"nope\n");

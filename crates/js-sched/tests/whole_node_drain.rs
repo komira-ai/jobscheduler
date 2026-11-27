@@ -1,7 +1,8 @@
 //! When a blocked whole-machine request holds a worker, and that it never lets go
-//! ([`Scheduler::with_whole_node`]): not before `drain_after`, a quiet worker at once, a
-//! deadline on each hold that is `drain_deadline` or the request's wall limit, and a hold
-//! kept past that deadline until the worker empties, with no worker barred and
+//! ([`Scheduler::with_whole_node`]): in the first round that sees the request, whatever
+//! the deprecated `drain_after` is, a quiet worker at once, a deadline on each hold that
+//! is `drain_deadline` or the request's wall limit, and a hold kept past that deadline
+//! until the worker empties, with no worker barred and `drain_after` and
 //! `max_reserve_attempts` read nowhere. Every time is farm time fed to the scheduler;
 //! nothing waits.
 
@@ -15,7 +16,7 @@ mod digest;
 #[path = "whole_rig/mod.rs"]
 mod whole_rig;
 
-use js_sched::{Bar, Event, Scheduler, WholeMark};
+use js_sched::{Bar, Event, Scheduler, WholeMark, WholeReason, WholeState};
 use js_types::sched::{FarmTime, OperationId};
 use js_whole::WholeNodeConfig;
 
@@ -28,7 +29,7 @@ fn t(ms: u64) -> FarmTime {
 }
 
 /// Whole-node settings: a drain deadline of a minute, a back-off of ten seconds, and
-/// `drain_after_ms` and the deprecated `attempts` as given.
+/// the deprecated `drain_after_ms` and `attempts` as given.
 fn cfg(drain_after_ms: u64, attempts: u32) -> WholeNodeConfig {
     WholeNodeConfig {
         drain_after_ms,
@@ -85,40 +86,60 @@ fn without_settings_a_blocked_request_holds_at_once_and_has_no_mark() {
 }
 
 both_rules! {
-/// Catches: the hold taken before `drain_after` has passed, or one tick late: nothing is
-/// held a millisecond before it, the worker is held at it, and the mark carries the time.
-fn a_busy_worker_is_held_only_after_drain_after() {
+/// Catches: the deprecated `drain_after` still delaying the first hold: with 30 s set, a
+/// request that fits nowhere marks the busy worker in the very first round, the mark made
+/// at the submit time with its deadline a drain deadline later; the view shows the hold at
+/// once and never `Early`, the mark is the same after `drain_after` has passed, and no
+/// early wait is counted.
+fn a_busy_worker_is_held_in_the_first_round_whatever_drain_after() {
     let mut f = busy(Some(cfg(30_000, 2)));
     f.advance(1_000);
     let op = ask(&mut f);
-    tick_at(&mut f, 30_999);
-    assert_eq!(f.held_for(op), None);
-    assert_eq!(mark(&f, op), None);
-    tick_at(&mut f, 31_000);
     assert_eq!(f.held_for(op), Some(&w("a")));
     let m = mark(&f, op).expect("marked");
-    assert_eq!((m.worker, m.made), (w("a"), t(31_000)));
+    assert_eq!(
+        (m.worker.clone(), m.made, m.deadline),
+        (w("a"), t(1_000), t(61_000))
+    );
+    let holding = Some(WholeState::Holding {
+        worker: w("a"),
+        made: t(1_000),
+        deadline: t(61_000),
+        draining: true,
+        tail_end: Some(t(600_000)),
+    });
+    assert_eq!(f.s.whole_state(op), holding);
+    let waiting = f.s.whole_summary().expect("settings on").waiting;
+    assert_eq!(waiting.get(&WholeReason::Holding), Some(&1));
+    assert!(!waiting.contains_key(&WholeReason::Early), "{waiting:?}");
+    tick_at(&mut f, 30_999);
+    tick_at(&mut f, 31_000);
+    assert_eq!(mark(&f, op), Some(m));
+    assert_eq!(f.s.whole_state(op), holding);
 }
 }
 
 both_rules! {
-/// Catches: work that holds nothing before `drain_after` blocked behind the request: an
-/// action submitted after it still has the worker's room.
-fn before_drain_after_the_request_holds_back_no_one() {
+/// Catches: a request that holds nothing for `drain_after` and so lets work through: with
+/// 30 s set, an action submitted after the request, with no estimate, is not placed on
+/// the worker the request holds from the first round, and the request still holds it.
+fn a_later_action_is_held_back_from_the_worker_a_request_holds_from_the_start() {
     let mut f = busy(Some(cfg(30_000, 2)));
     let op = ask(&mut f);
+    assert_eq!(f.held_for(op), Some(&w("a")));
     f.next_n += 1;
     f.submit(crate::whole_rig::request(
         f.next_n,
         js_types::sched::LeaseKind::Action,
     ));
-    assert_eq!(f.grants().len(), 1);
-    assert_eq!(f.held_for(op), None);
+    assert!(f.grants().is_empty());
+    assert_eq!(f.held_for(op), Some(&w("a")));
 }
 }
 
 both_rules! {
-/// Catches: `drain_after` applied to a quiet worker: one that fits is taken at once.
+/// Catches: `drain_after` applied to a quiet worker, or a mark made though one fits: with
+/// 30 s set, a worker with no lease is taken at once, with no mark.
 fn a_quiet_worker_is_taken_at_once_whatever_drain_after() {
     let mut f = busy(Some(cfg(30_000, 2)));
     f.worker("b");
@@ -216,6 +237,56 @@ fn deprecated_max_reserve_attempts_does_nothing() {
     assert_eq!(one.1, one.0);
     assert_eq!(one.2, Some(w("a")));
     assert_eq!(run(5), one);
+}
+}
+
+both_rules! {
+/// Catches: `drain_after` still read: with 0, 30 s or the longest value the mark (made at
+/// 5 s, its deadline, its tail end), the worker held, the rounds' grants before the lease
+/// ends and the grant after it are the same, and are those of a request that holds at its
+/// first round.
+fn deprecated_drain_after_does_nothing() {
+    let run = |drain_after_ms| {
+        let mut f = Farm::new(
+            Scheduler::new(1)
+                .with_load_config(booked::current())
+                .with_whole_node(cfg(drain_after_ms, 2)),
+        );
+        f.worker("a");
+        let lease = f.lease(secs(MAX_WALL));
+        f.advance(5_000);
+        let op = ask(&mut f);
+        let made = mark(&f, op);
+        let mut seen = Vec::new();
+        for at in [6_000, 34_999, 35_000, 65_000, 500_000] {
+            tick_at(&mut f, at);
+            seen.push((mark(&f, op), f.held_for(op).cloned()));
+        }
+        f.finish(&lease);
+        let grants = f.advance(500_001);
+        let granted: Vec<_> = grants
+            .iter()
+            .map(|g| (g.operation == op, g.worker.clone()))
+            .collect();
+        (made, seen, granted, mark(&f, op))
+    };
+    let zero = run(0);
+    let expected = WholeMark {
+        worker: w("a"),
+        made: t(5_000),
+        deadline: t(65_000),
+        tail_end: Some(t(600_000)),
+    };
+    assert_eq!(zero.0, Some(expected.clone()));
+    assert_eq!(zero.1.len(), 5);
+    for (seen_mark, held) in &zero.1 {
+        assert_eq!(seen_mark, &Some(expected.clone()));
+        assert_eq!(held, &Some(w("a")));
+    }
+    assert_eq!(zero.2, vec![(true, w("a"))]);
+    assert_eq!(zero.3, None);
+    assert_eq!(run(30_000), zero);
+    assert_eq!(run(u64::MAX), zero);
 }
 }
 

@@ -57,11 +57,9 @@ impl Scheduler {
     }
 
     /// As [`Scheduler::unplace`], but the operation's queue time is left as it was instead
-    /// of being set to the scheduler's time now. `drain_after` of a whole-machine request
-    /// ([`Scheduler::with_whole_node`]) counts from that time, so a request put back after
-    /// its prepare failed on the worker does not wait it out again, and its age in
-    /// [`Scheduler::queue_snapshot`] runs on. Its whole-node give-ups and bars are kept, as
-    /// [`Scheduler::unplace`] keeps them.
+    /// of being set to the scheduler's time now, so a request put back after its prepare
+    /// failed on the worker keeps its age in [`Scheduler::queue_snapshot`]. Its whole-node
+    /// bars are kept, as [`Scheduler::unplace`] keeps them.
     pub fn unplace_keeping_queued_at(&mut self, lease: LeaseId) -> Option<OperationId> {
         self.unplace_as(lease, true)
     }
