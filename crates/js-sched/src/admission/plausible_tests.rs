@@ -348,3 +348,15 @@ fn a_new_session_starts_the_spans_again_and_keeps_the_mark() {
     assert_eq!(r.check.idle_high, 0);
     assert!(r.check.implausible());
 }
+
+/// Catches: a worker with no accepted reading (one that sends none, or whose readings are
+/// all dropped) keeping every lease that ends on it, which nothing would ever let go.
+#[test]
+fn a_worker_with_no_reading_keeps_no_lease() {
+    let mut check = Check::default();
+    check.ended(lease(1), Some(between(0)), Some(60 * CORE_SEC), between(1));
+    check.ended(lease(2), Some(between(0)), None, between(1));
+    assert!(check.runs.is_empty());
+    assert!(check.awaiting.is_empty());
+    assert!(!check.late_cpu(lease(2), 60 * CORE_SEC, between(2)));
+}

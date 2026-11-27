@@ -220,10 +220,12 @@ impl Scheduler {
     /// was admitted before the oldest reading the check keeps) is ignored.
     pub fn lease_cpu_used(&mut self, lease: LeaseId, cpu_usage_usec: u64) {
         let now = self.now;
-        let _ = self
-            .workers
-            .values_mut()
-            .any(|w| w.load_state.lease_cpu(lease, cpu_usage_usec, now));
+        // At most one worker holds or waits for a lease: stop at it.
+        for w in self.workers.values_mut() {
+            if w.load_state.lease_cpu(lease, cpu_usage_usec, now) {
+                break;
+            }
+        }
     }
 
     /// What admission has done since the scheduler was built.

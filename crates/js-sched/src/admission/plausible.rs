@@ -138,7 +138,8 @@ impl Check {
 
     /// `lease` left the ledger at `now`. Only an action lease admitted by placement (not one
     /// recovered, whose start is not known) can be counted: `admitted` is `None` for the
-    /// others, and they are not kept. `cpu_usec` is its CPU time if it arrived already.
+    /// others, and they are not kept; nor is any lease while the worker has no accepted
+    /// reading (a worker that sends none would otherwise keep every lease for good). `cpu_usec` is its CPU time if it arrived already.
     pub(crate) fn ended(
         &mut self,
         lease: LeaseId,
@@ -146,7 +147,8 @@ impl Check {
         cpu_usec: Option<u64>,
         now: FarmTime,
     ) {
-        let Some(admitted) = admitted else {
+        // With no mark yet, no span can hold the lease: its run began before any reading.
+        let Some(admitted) = admitted.filter(|_| !self.marks.is_empty()) else {
             return;
         };
         match cpu_usec {
@@ -267,8 +269,8 @@ impl Check {
         self.awaiting.retain(|_, a| a.admitted > oldest);
     }
 
-    /// Compares, at `newest`, the newest mark (the last of the marks), the CPU time of the leases admitted after an earlier mark
-    /// and ended before the newest arrived with the counter's growth since that earlier
+    /// Compares the CPU time of the leases admitted after an earlier mark and ended before
+    /// `newest` (the last of the marks) arrived with the counter's growth since that earlier
     /// mark, taking the nearest earlier mark whose span holds [`SPAN_CPU_USEC`].
     ///
     /// A lease admitted at the very time a reading arrived, or ended at the very time the

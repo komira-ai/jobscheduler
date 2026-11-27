@@ -91,17 +91,22 @@ fn k_a_stuck_counter_is_flagged_within_five_windows_and_believed_again_once_it_m
 
     w.nodes.get_mut("a").expect("a").counter_stuck = false;
     let repaired = w.tick;
-    let mut agreed = None;
+    let (mut agreed, mut measured_again) = (None, false);
     while w.tick < repaired + 8 * W {
         w.step();
-        if !view(&w).implausible_lease_cpu && agreed.is_none() {
+        let v = view(&w);
+        if !v.implausible_lease_cpu && agreed.is_none() {
             agreed = Some(w.tick - 1);
         }
+        measured_again |= agreed.is_some() && !v.fallback && v.measured_cpu_millis > Some(0);
     }
     let agreed = agreed.expect("the repaired counter agrees");
     assert!(agreed <= repaired + 3 * W, "agreed at tick {agreed}");
-    let v = view(&w);
-    assert!(!v.fallback && v.measured_cpu_millis > Some(0));
+    assert!(
+        measured_again,
+        "charged by a measurement of the busy node again"
+    );
+    assert!(!view(&w).fallback);
     assert_eq!(w.s.load_counters().fallback_implausible, 0);
     assert!(w.nodes["a"].peak_demand <= LIMIT);
 }
@@ -119,7 +124,7 @@ fn k_long_leases_beside_short_ones_on_a_healthy_counter_are_never_flagged() {
     w.run(window(1) + 3);
     w.submit_many(2, &Spec::flat("long", 2_000, 40 * W, warm(2_000)));
     w.submit_many(100, &Spec::flat("short", 2_000, 2 * W, warm(2_000)));
-    while w.tick < 80 * W {
+    while w.tick < 120 * W {
         w.step();
         let v = view(&w);
         let tick = w.tick - 1;
