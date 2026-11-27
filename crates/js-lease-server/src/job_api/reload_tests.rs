@@ -175,7 +175,7 @@ async fn a_bad_token_file_keeps_every_client_token_in_force() {
     let uid = std::os::unix::fs::MetadataExt::uid(&std::fs::metadata(&s.file).expect("meta"));
     let ci = "--client-token ci";
     let own = "each client needs its own token";
-    let edits: [(&str, Edit, String); 7] = [
+    let edits: [(&str, Edit, String); 6] = [
         (
             "too short",
             Box::new(|path| rewrite(path, "short")),
