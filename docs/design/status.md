@@ -21,7 +21,7 @@ Columns:
 
 - Multi-instance G3 (host identity is the host certificate; join tokens, pool tokens and host credentials go) is in progress: komira-ai/jobscheduler#1118 is its first step.
 - Job retry and callback task I (SubmitJob takes a retry policy and a callback, js-client reports a dropped policy, the docs) is planned as the task after task H (komira-ai/jobscheduler#1120).
-- The whole-node start-order tests still missing (W2 and W10: work ahead of a reserved request, a lower-QoS request behind a stream): komira-ai/jobscheduler#1133. The heartbeat's disk_gib: komira-ai/jobscheduler#328. The Seatbelt fence for TCC-only places: komira-ai/jobscheduler#1025, komira-ai/jobscheduler#1020 and komira-ai/jobscheduler#1117. Linux jobs on a Mac: komira-ai/jobscheduler#1066.
+- The heartbeat's disk_gib: komira-ai/jobscheduler#328. The Seatbelt fence for TCC-only places: komira-ai/jobscheduler#1025, komira-ai/jobscheduler#1020 and komira-ai/jobscheduler#1117. Linux jobs on a Mac: komira-ai/jobscheduler#1066.
 - The per-consumer whole-node cap is not a gap: `docs/design/jobscheduler-design.md` says there is no per-consumer cap in the single-token service, and `whole-node.md` section 6 is stale (komira-ai/jobscheduler#1193).
 - Stale status lines and comments found on the way: komira-ai/jobscheduler#1193.
 
@@ -32,7 +32,7 @@ Columns:
 | multi-instance.md | 29 | 2 | 6 | 17 | komira-ai/jobscheduler#1136, komira-ai/jobscheduler#1137, komira-ai/jobscheduler#1138, komira-ai/jobscheduler#1139, komira-ai/jobscheduler#1140, komira-ai/jobscheduler#1141, komira-ai/jobscheduler#1142 |
 | placement-profiles-live.md | 25 | 9 | 6 | 3 | komira-ai/jobscheduler#1143, komira-ai/jobscheduler#1144, komira-ai/jobscheduler#1193 |
 | start-latency.md | 14 | 2 | 2 | 4 | komira-ai/jobscheduler#1145, komira-ai/jobscheduler#1146, komira-ai/jobscheduler#1147 |
-| whole-node.md | 27 | 13 | 4 | 3 | komira-ai/jobscheduler#1148, komira-ai/jobscheduler#1149, komira-ai/jobscheduler#1150, komira-ai/jobscheduler#1193 |
+| whole-node.md | 27 | 14 | 3 | 3 | komira-ai/jobscheduler#1148, komira-ai/jobscheduler#1149, komira-ai/jobscheduler#1150, komira-ai/jobscheduler#1193 |
 | lease-limits.md | 5 | 1 | 2 | 1 | komira-ai/jobscheduler#1151 |
 | held-beat.md | 0 | 0 | 0 | 0 | - |
 | rollout.md | 21 | 5 | 4 | 3 | - |
@@ -183,7 +183,7 @@ As read: No status header and no "Designed / not yet / Open question" tags. Read
 | §8 End | The host is bookable only after the agent restores; a tainted host is never bookable. | `crates/js-sched-placer/src/whole_jobs.rs:63-80`, `crates/js-jobs/src/store/whole.rs` | komira-ai/jobscheduler#1071 |
 | §9 kbf's use | kbf consumer config maps whole_machine to whole-node; kbf rungs and max_leased_machines; ladder rung 'whole host' as a whole-node request. | superseded: The lease API this speaks to is deleted (PR komira-ai/jobscheduler#831). On main a whole-host request is a job whose needs name the whole host (page §3 note). | komira-ai/jobscheduler#571 |
 | §10 Wire | HeartbeatReply.exclusive, Heartbeat.exclusive_ready and exclusive_refused fields are additive. | `crates/js-agent-wire/src/heartbeat.rs:189-198` | - |
-| §11 Tests and invariants W1-W14 | Invariants checked over seeded runs of the fake agent and simulation. | partly: `crates/js-sched/tests/whole_node_caps.rs` | komira-ai/jobscheduler#1133 |
+| §11 Tests and invariants W1-W14 | Invariants checked over seeded runs of the fake agent and simulation. | `crates/js-sched/tests/whole_node_caps.rs`; W2's work ahead of a reserved request and W10's lower-QoS request behind a stream: `crates/js-sched/tests/backfill.rs` | komira-ai/jobscheduler#1133 |
 | §12 step 46 | The Whole admission, commit at quiet, readiness gate, end. | `crates/js-agent/src/exclusive.rs`, `crates/js-sched-placer/src/whole_jobs.rs` | - |
 | §12 step 54 | GPU machines register into a whole-node pool. | partly: Mechanism built (js-agent join, class whole-node). The deployment is not repo code. | - |
 | §12 step 56 | Reservation and drain. | `crates/js-sched/src/scheduler/whole.rs`, `crates/js-whole/src/cost.rs` | komira-ai/jobscheduler#582; komira-ai/jobscheduler#1127; komira-ai/jobscheduler#1129; komira-ai/jobscheduler#1131; komira-ai/jobscheduler#1133 |
