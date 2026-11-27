@@ -29,19 +29,28 @@ const JOIN: &str = "join-token-A-0123456789-abcdefghijklmnop";
 /// The pool the farm's Linux nodes join.
 pub const POOL: &str = "farm";
 
-/// The pool: one host's shape the agent's offer covers on a hosted runner, and the
-/// architecture placement needs.
+/// The pool, in the shape of the farm server's pool file for its Linux nodes: a heartbeat of
+/// 1 s, `exec = "container"`, and the capabilities every farm agent's hello must meet and the
+/// job service places by (`os`, `arch`, `layered-rootfs`, `egress` and tierstore's provider,
+/// without which a job that mounts a tree from tierstore has no capable host). The shape is one
+/// a hosted runner's agent covers.
 const POOL_TOML: &str = r#"
+heartbeat_interval = "1s"
 name = "farm"
 class = "whole-node"
-max_machines = 1
+max_machines = 6
+exec = "container"
 
 [shape]
 cpu_millis = 2000
 memory_bytes = 4294967296
 
 [capabilities]
+os = "linux"
 arch = "x86_64"
+"layered-rootfs" = "true"
+egress = "allow-list"
+"mount-provider.tierstore" = "true"
 "#;
 
 /// A running server.
