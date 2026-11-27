@@ -349,7 +349,7 @@ pub(crate) fn open(
     let usage = |text: String| Failure::Usage(text);
     let given = os.given().into_iter().chain(cli.providers.given());
     let given = given.chain(cli.host_ports.given());
-    let given = given.chain(cli.samples.given());
+    let mut given = given.chain(cli.samples.given());
     let given = given.find_map(|(flag, given)| given.then_some(flag));
     if cli.no_jobs {
         return match given {
