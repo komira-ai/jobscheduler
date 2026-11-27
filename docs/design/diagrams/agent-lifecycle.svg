@@ -78,7 +78,7 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="1225" y="340" class="t-m lbl" text-anchor="start">or drain-wait elapsed,</text>
 <text x="1225" y="354" class="t-m lbl" text-anchor="start">then stop jobs</text>
 <path d="M435,283 L435,470 L1215,470 L1215,436" class="ln-r" marker-end="url(#agent-lifecycle-ar)"/>
-<text x="800" y="464" class="t-r lbl" text-anchor="middle">any other 4xx, 401: fatal, exit 2</text>
+<text x="800" y="464" class="t-r lbl" text-anchor="middle">refusal an operator must resolve: exit 2, jobs left to the next process</text>
 <rect x="10" y="500" width="1400" height="190" rx="5" class="box-p"/>
 <text x="20" y="520" class="b" text-anchor="start">Server view</text>
 <rect x="250" y="555" width="170" height="60" rx="5" class="box-b"/>

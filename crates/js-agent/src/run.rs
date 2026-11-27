@@ -67,7 +67,11 @@
 //!   it is with every result not yet acknowledged kept in the state root. The supervisor
 //!   starts the agent again (`Restart=always`); the next process adopts the runs as after an
 //!   update, lists them in its first hello and sends their results once the server takes
-//!   it again. This is the end of every agent that runs jobs, since jobs need a state root.
+//!   it again. The worker takes a step before it answers each park, so a run past its wall
+//!   limit is stopped first: a refusal that lasts, which restarts the agent again and again
+//!   and has each process park at once, still ends every run at its wall limit, give or take
+//!   the supervisor's restart delay. This is the end of every agent that runs jobs, since
+//!   jobs need a state root.
 //!   A session given no state root to hand over in ([`Session::with_handover`] with `None`)
 //!   cannot leave its runs to anybody, so it stops them instead: the worker is closed, asked to
 //!   stop every run, and waited for until none runs or the worker has ended, for the stop

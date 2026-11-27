@@ -326,3 +326,26 @@ fn unknown_and_unreadable_4xx_leave_the_running_job_running() {
     assert_eq!(hellos, 1, "{sent:?}");
     assert_eq!(sent.len(), 6, "{sent:?}");
 }
+
+/// Asserts that a process refused at its first hello, holding a run past its wall limit (as a
+/// process that adopted it after an earlier refusal does), stops that run before it hands
+/// over: the worker takes a step before it answers the park, the run's container is given its
+/// stop, once, and the agent still ends with the refusal. Catches a refusal that lasts leaving a run
+/// running past its wall limit for ever, because each restarted process parks before its
+/// worker has stepped once.
+#[test]
+fn a_run_past_its_wall_limit_is_stopped_before_a_refusal_hands_over() {
+    let dir = Scratch::new("jobs-refused-overdue");
+    let machine = FakeMachine::new();
+    let worker = running(&dir, &machine, &["r1"]);
+    // `job` gives every run a minute.
+    machine.clock.advance(61_000);
+    let replies = vec![refused(403, "unknown-pool")];
+    let (exit, log, _) = driven(&dir, &worker, replies, LONG, |_| Wake::Elapsed);
+
+    let Exit::Fatal(fatal) = exit else {
+        panic!("the server refused the agent for good: {exit:?}");
+    };
+    assert_eq!(fatal.status, 403);
+    assert_eq!(stops(&machine), ["stop r1"], "{log}");
+}

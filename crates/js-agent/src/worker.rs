@@ -924,6 +924,10 @@ fn work(
             }
             Ok(Order::Settle(done)) => settle = Some(done),
             Ok(Order::Park(done)) => {
+                // A park follows a step: a process that adopted runs and is refused at its
+                // first hello parks within the first wait, and its step stops a run past its
+                // wall limit, which then holds the park until it is stopped.
+                lines.extend(describe(&life.step()));
                 if park::park(&life, shared, &done, inbox) {
                     return;
                 }
