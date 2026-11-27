@@ -1,15 +1,18 @@
 //! `--score-balance`, `--score-slack-tolerance-ppm` and `--key-share-percent`, and their keys
-//! of `[server]`: the placement engine's scoring settings. These tests read the flags and the keys and their refusals; that
-//! the values reach the settings the engine is built with is tested in process, in
-//! `src/config/placement.rs`, and what each does to a placement in js-sched.
+//! of `[server]`: the placement engine's scoring settings. These tests read the flags and the
+//! keys and their refusals, and run the program with the flags; that the values reach the
+//! settings the engine is built with is tested in process, in `src/config/placement.rs`, and
+//! what each does to a placement in js-sched.
 
 use std::ffi::OsString;
+use std::process::{ExitCode, Stdio};
 
 use js_lease_server::{Cli, Config, Tunings};
+use rustix::process::{Pid, Signal, kill_process};
 
 use crate::agents_support::JOIN;
 use crate::config_support::{PoolText, file, load, refusal, server};
-use crate::support::{Scratch, base_args, config};
+use crate::support::{Scratch, TOKEN, base_args, config, request};
 
 /// A pool of up to two machines whose capabilities name an `arch`, as the scheduler needs.
 const POOL: &str = r#"
@@ -212,4 +215,81 @@ fn the_cpu_floor_has_no_flag_and_no_key() {
         refused.starts_with("server.cpu_floor_permille: unknown field; known: "),
         "{refused}"
     );
+}
+
+/// `args` run through the program's entry point, as `main` runs it: its exit status and what
+/// it printed on standard output and on standard error.
+fn run(args: Vec<OsString>) -> (ExitCode, String, String) {
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let code = js_lease_server::run(args, &mut out, &mut err);
+    let text = |bytes: Vec<u8>| String::from_utf8(bytes).unwrap();
+    (code, text(out), text(err))
+}
+
+/// Behaviour: the program's entry point refuses a start with exit status 2, printing nothing
+/// on standard output and the refusal on standard error, for a value outside its flag's range
+/// (clap's usage error, naming the flag, the value and the range) and for each flag without
+/// `--agent-pool-config` (naming the flag). Catches a refusal that the entry point turns into
+/// another status, or raises only after the server has started.
+#[test]
+fn the_program_refuses_a_value_out_of_range_and_a_flag_without_a_pool_with_status_2() {
+    let scratch = Scratch::new("tunings_program_refused");
+    for (flag, value, range) in [
+        ("--score-balance", "5", "0..=4"),
+        ("--score-slack-tolerance-ppm", "1000001", "0..=1000000"),
+        ("--key-share-percent", "101", "0..=100"),
+    ] {
+        let (code, out, err) = run(args(&scratch, &[flag, value]));
+        assert!(code == ExitCode::from(2), "{flag}={value}: {err}");
+        assert_eq!(out, "", "{flag}={value}");
+        let name = flag
+            .trim_start_matches("--")
+            .replace('-', "_")
+            .to_uppercase();
+        let head = format!(
+            "error: invalid value '{value}' for '{flag} <{name}>': {value} is not in {range}"
+        );
+        assert!(err.starts_with(&head), "{flag}={value}: {err}");
+    }
+    for (flag, value) in [
+        ("--score-balance", "2"),
+        ("--score-slack-tolerance-ppm", "5000"),
+        ("--key-share-percent", "40"),
+    ] {
+        let mut bare = crate::support::without_agent_pool(&scratch);
+        bare.extend([flag, value].map(OsString::from));
+        let (code, out, err) = run(bare);
+        assert!(code == ExitCode::from(2), "{flag}: {err}");
+        assert_eq!(out, "", "{flag}");
+        assert_eq!(
+            err,
+            format!("js-lease-server: {flag}: requires --agent-pool-config\n")
+        );
+    }
+}
+
+/// Behaviour: the real program, started with all three flags at values inside their ranges
+/// beside an agent pool, starts, prints the address it listens on, answers `/healthz` and
+/// `/v1/hosts`, and on SIGTERM stops with status 0. Catches a flag that the program refuses or
+/// that stops the start after the configuration is read (building the placement engine with
+/// the values included).
+#[tokio::test]
+async fn the_program_starts_and_serves_with_the_three_flags() {
+    let scratch = Scratch::new("tunings_program_serves");
+    let given = [
+        "--score-balance",
+        "2",
+        "--score-slack-tolerance-ppm",
+        "5000",
+        "--key-share-percent",
+        "40",
+    ];
+    let (mut child, addr) = crate::binary::launch(&args(&scratch, &given), Stdio::null());
+    let health = request(addr, "GET", "/healthz", None, None).await;
+    assert_eq!(health.status, 200);
+    let hosts = request(addr, "GET", "/v1/hosts", Some(TOKEN), None).await;
+    assert_eq!(hosts.status, 200, "{}", hosts.body);
+    kill_process(Pid::from_child(&child.0), Signal::TERM).unwrap();
+    let status = child.0.wait().unwrap();
+    assert!(status.success(), "{status:?}");
 }
