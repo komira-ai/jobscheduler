@@ -16,8 +16,9 @@ pub(crate) const DEFAULT_LEASE_SECS: u64 = 10;
 pub(crate) const MOST_LEASE_SECS: u64 = 3600;
 
 /// `dispatch_recheck_ms` unless the file gives it: how often a held poll reads its host's
-/// queue again whatever woke it, so a message another server wrote (or a stop a cancel wrote)
-/// reaches the poll this server holds within it.
+/// queue again whatever woke it, so a message another server wrote whose notice did not reach
+/// this server ([`crate::listening`]: a notice is best effort) reaches the poll it holds within
+/// it.
 pub(crate) const DEFAULT_RECHECK_MS: u64 = 500;
 
 /// The most `dispatch_recheck_ms` the file may give: below the hold ([`MAX_HOLD`], 5000 ms),

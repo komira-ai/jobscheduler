@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use js_state::{
-    Changes, Claim, Commit, CommitStats, Conflict, Revision, ScanPage, ScanRange, Store,
+    Changes, Claim, Commit, CommitStats, Conflict, Notice, Revision, ScanPage, ScanRange, Store,
     StoreError, StoreTime, Txn, TxnRead, Versioned,
 };
 
@@ -371,6 +371,11 @@ impl<S: Store> Store for Interfere<S> {
             return Err(lock(&self.error).clone());
         }
         self.inner.now()
+    }
+
+    fn notify(&self, notices: &[Notice]) {
+        self.called("notify");
+        self.inner.notify(notices);
     }
 }
 

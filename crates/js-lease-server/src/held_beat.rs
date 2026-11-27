@@ -18,10 +18,13 @@
 //! at once after a quiet spell, and no more often than once per [`starting_hold`] while such
 //! beats follow each other closely.
 //!
-//! The wakes are this process's: a placement made by another server is not seen here, and
-//! its start goes out on the host's next heartbeat, at most one hold later. (A host that polls
-//! dispatch has a held poll as well, watched by the wakes of [`crate::dispatch_state`]; the
-//! pass wakes both, and the poll rechecks the queue on a timer for what it does not wake.)
+//! The wakes are this process's, and a placement made by another server over a store they share
+//! reaches them by that server's notice ([`crate::listening`]): a dispatch message written for
+//! the host wakes its watch here as the pass's own placement does. A notice lost (the store one
+//! process writes has none, and a listening connection that was down misses them) leaves the
+//! start to the host's next heartbeat, at most one hold later. (A host that polls dispatch has a
+//! held poll as well, watched by the wakes of [`crate::dispatch_state`]; the pass and a notice
+//! wake both, and the poll rechecks the queue on a timer for what neither wakes.)
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -177,6 +180,12 @@ impl Wakes {
         if let Some(wake) = self.watched().get(host) {
             wake.notify_one();
         }
+    }
+
+    /// Wakes every watched heartbeat once, as [`Wakes::wake`] wakes one: for when a wake may
+    /// have been missed (the connection that hears other servers' notices was made again).
+    pub(crate) fn wake_all(&self) {
+        self.watched().values().for_each(|wake| wake.notify_one());
     }
 
     /// Counts that a held reply begins to wait for a wake: when its hold begins, and again
