@@ -142,7 +142,7 @@ fn current() -> Option<PathBuf> {
 /// A job of the smoke bundle's entrypoint that ends 0, with the line it prints.
 fn smoke_job(what: &str, server: &LeaseServer) -> Duration {
     let began = Instant::now();
-    let id = jobs::submit(server, &[], &[what]);
+    let id = jobs::submit(server, None, &[what]);
     let out = jobs::assert_ends_zero(server, &id, JOB_BOUND);
     assert!(
         out.starts_with("js-smoke host=") && out.contains(&format!("args={what}")),
@@ -262,7 +262,7 @@ fn missing_mount(
     (staged, installed): (&Staged, &Staged),
     previous: &Package,
 ) {
-    let job = jobs::submit(server, &["/bin/sleep", LONG_JOB_SECS], &[]);
+    let job = jobs::submit(server, Some("/bin/sleep"), &[LONG_JOB_SECS]);
     let found = jobs::wait_for(server, &job, jobs::RUNNING, JOB_BOUND);
     assert_eq!(found, jobs::RUNNING, "J4: the job runs before the update");
     let pid = launchd_pid(AGENT_LABEL);

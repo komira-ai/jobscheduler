@@ -33,9 +33,6 @@
 name: js-agent-macos-blackbox
 
 on:
-  # Temporary, for the branch's own runs before merge; removed before review.
-  push:
-    branches: [task/js-blackbox-mac-package]
   workflow_call:
     inputs:
       version:
@@ -64,7 +61,7 @@ permissions: {}
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  VERSION: ${{ inputs.version || '0.1.484' }}
+  VERSION: ${{ inputs.version }}
   PACKAGE_RUN: ${{ inputs.package-run || '' }}
 
 jobs:

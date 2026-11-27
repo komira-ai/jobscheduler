@@ -45,9 +45,10 @@ pub fn smoke_image() -> String {
     )
 }
 
-/// Submits a job of the smoke bundle that runs `command` (the bundle's entrypoint when it is
-/// empty) with the arguments `args`; returns its id.
-pub fn submit(server: &LeaseServer, command: &[&str], args: &[&str]) -> String {
+/// Submits a job of the smoke bundle that runs the program `command` (the bundle's entrypoint
+/// when it is `None`) with the arguments `args`; returns its id. The job service's `command` is
+/// the one program, and the arguments follow it.
+pub fn submit(server: &LeaseServer, command: Option<&str>, args: &[&str]) -> String {
     let mut spec = json!({
         "image": smoke_image(),
         "args": args,
@@ -55,8 +56,8 @@ pub fn submit(server: &LeaseServer, command: &[&str], args: &[&str]) -> String {
         "wallLimitSeconds": "1800",
         "constraints": { "os": "macos", "arch": "arm64" },
     });
-    if !command.is_empty() {
-        spec["command"] = json!(command);
+    if let Some(program) = command {
+        spec["command"] = json!(program);
     }
     let reply = server
         .jobs()
