@@ -57,7 +57,7 @@ pub struct Teaching {
     read: bool,
     /// The placer's farm time when the teaching was begun.
     begun_at: FarmTime,
-    /// How many runs of the newest freed allocations the begin taught the interim history.
+    /// How many runs of the newest freed allocations the begin read for the interim history.
     bridged: usize,
 }
 
@@ -90,8 +90,9 @@ impl Teaching {
         self.pages
     }
 
-    /// How many runs of the newest freed allocations the begin taught the interim history
-    /// ([`SchedPlacer::begin_teaching`]).
+    /// How many runs of the newest freed allocations the begin read for the interim history
+    /// ([`SchedPlacer::begin_teaching`]), those that teach it nothing (a job cancelled before it
+    /// started) included.
     #[must_use]
     pub fn bridged(&self) -> usize {
         self.bridged
@@ -160,9 +161,11 @@ impl SchedPlacer {
         jobs: &JobStore<S, I>,
         bridge: usize,
     ) -> Result<Teaching, JobStoreError> {
-        let live = jobs.live_allocations()?;
+        // The newest runs before the live allocations: a job freed between the two reads is
+        // then not live, so no pass names it freed and teaches the interim history it twice.
         let mut newest = newest_runs(jobs, bridge);
         newest.sort_by(end_order);
+        let live = jobs.live_allocations()?;
         let mut engine = self.engine();
         let sizes = engine.sizes();
         let _ = sizes.freed(&live);

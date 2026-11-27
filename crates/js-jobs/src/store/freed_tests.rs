@@ -18,7 +18,7 @@ use crate::{EndReason, JobId, JobStore, JobStoreError, MAX_PAGE, NewJob, RandomI
 
 /// A job store over a recording store over the fake, and the fake's clock.
 type Rig = (
-    JobStore<Arc<RecordingStore>, RandomIds>,
+    JobStore<RecordingStore, RandomIds>,
     Arc<RecordingStore>,
     Arc<ManualClock>,
 );

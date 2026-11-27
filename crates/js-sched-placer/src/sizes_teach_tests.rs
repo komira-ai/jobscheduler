@@ -191,7 +191,7 @@ fn farm(first: bool) -> (String, Vec<(u64, u64)>, usize) {
     (held_history(&placer), placed.collect(), pages)
 }
 
-/// Asserts that a start that begins a teaching reads the live allocations alone: the same
+/// Asserts that a begin of no page of the newest runs reads the live allocations alone: the same
 /// reads, key for key, over a store of 8 ended jobs and over one of 1008, and none of a job's
 /// row or of the job table, and that it teaches nothing (a job sized then books the cold size).
 /// Catches a start whose reads grow with the history the store keeps, which is what held a
@@ -523,10 +523,8 @@ fn a_begin_whose_read_of_the_newest_runs_fails_begins_with_none_of_them() {
     let tables = Tables::new();
     let build = || exited(0, 2 * GIB, Duration::from_secs(30));
     runs(&tables, "build", 4, "build", booked(2000, 4 * GIB), build);
-    tables.store.take_reads();
-    let _probe = placer().begin_teaching(&tables.jobs, 0).unwrap();
-    let begun = tables.store.take_reads().len();
-    tables.store.fail_read_after(begun);
+    // The begin reads the newest runs first: its first read is the scan of them.
+    tables.store.fail_read_after(0);
     let placer = placer();
     let teaching = placer.begin_teaching(&tables.jobs, BRIDGE_PAGES).unwrap();
     assert_eq!(teaching.bridged(), 0);

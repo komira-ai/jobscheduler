@@ -213,8 +213,11 @@ its first pass holds. Until then a job that books nothing is sized from an inter
 a start), taught the newest runs the start read, in the order they ended, and each run as a pass frees it (a run learned before any
 host is known once one is), and dropped once the ended jobs are taught. So from the first pass after a start a job books its class's
 recent runs, else its fallback's, else its client's, and the cold size only for a class, a fallback and a client with no run among
-them, not for the minutes a read of seven days of jobs takes. A failed read is logged and every class starts cold,
-the held runs still taught. Each job's usage history row now carries what its host reported
+them, not for the minutes a read of seven days of jobs takes. The history itself is still taught only once its whole read ends:
+a server stopped before that (released again minutes later) starts from the newest runs again, never from the history it read.
+Teaching the history page by page as the read goes, and a snapshot of the learned sizes in the state store loaded at the start, are
+not built. A failed read of the newest runs is logged and the interim history keeps those read before it; a failed read of the
+ended jobs is logged and the history is taught the held runs alone. Each job's usage history row now carries what its host reported
 (`used`: the peak memory, and the CPU per second of its run as both the highest and the mean), so `GetUsage` can set what a host
 used beside what it booked, and carries the name of the job's class as it is as its `class` (the history key, else the `size-class`
 label, else `run-` and the 16 hex digits of the class's shape), and that name as its `profile` too when it is a profile key (1 to

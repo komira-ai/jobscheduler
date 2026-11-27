@@ -9,10 +9,11 @@ use js_jobs::interfere::Read;
 use js_jobs::{
     Booked, EndReason, JobEnd, JobId, JobState, Needs, NewJob, Output, ResourceUsage, Retention,
 };
+use js_registry::Placer as _;
+use js_sched_placer::engine::Settings;
 use js_sched_placer::engine::jobs::{NoStarts, OpenHost};
 use js_sched_placer::place::SchedPlacer;
-use js_sched_placer::sizes::BRIDGE_PAGES;
-use js_types::{HostId, Resources, Shape};
+use js_types::{HostId, Resources, Shape, Timestamp};
 
 use js_state::ManualClock;
 
@@ -113,16 +114,27 @@ fn a_teaching_counts_the_ended_jobs_and_a_failed_read_teaches_none() {
     let sizes = begin(&Arc::default(), &jobs);
     assert_eq!(sizes.teach(), 0);
     ran(&clock, &jobs, "measured", Some(MEASURED));
-    let sizes = begin(&Arc::default(), &jobs);
+    let placer_clock = js_types::ManualClock::new(Timestamp::from_millis(0));
+    let placer = SchedPlacer::new(Settings::default(), placer_clock.clone());
+    let sizes = begin(&Arc::new(placer), &jobs);
+    placer_clock.advance(Duration::from_secs(7));
     lines.take();
     assert_eq!(sizes.teach(), 1);
     assert_eq!(
         said(&lines.take(), "were taught"),
         " INFO the job sizes were taught the runs of the ended jobs taught=1 pages=1 bridged=2 \
-         took_secs=0"
+         took_secs=7"
     );
     assert_eq!(sizes.teach(), 0, "taught: nothing more");
-    store.fail_read_after(0);
+    // A begin reads the newest runs and then the live allocations: fail the first read of these.
+    store.take_reads();
+    let _probe = begin(&Arc::default(), &jobs);
+    let live = |read: &Read| match read {
+        Read::Scan(prefix) => prefix.starts_with("idx/alloc/host/"),
+        Read::Get(_) => false,
+    };
+    let newest = store.take_reads().iter().position(live).unwrap();
+    store.fail_read_after(newest);
     let sizes = begin(&Arc::default(), &jobs);
     assert_eq!(sizes.teach(), 0, "no live allocations read: none begun");
     let sizes = begin(&Arc::default(), &jobs);
@@ -143,9 +155,10 @@ fn a_teaching_counts_the_ended_jobs_and_a_failed_read_teaches_none() {
 
 /// Asserts that a start reads the newest runs and not the job table: 1001 ended jobs that
 /// teach nothing and one measured run are two pages of freed allocations, read newest first
-/// (at most [`BRIDGE_PAGES`]), with no scan of the job table; and that the read after it pages
-/// through every freed allocation, two pages, and teaches the run. Catches a start that reads
-/// the whole history before it listens, and a read that stops at its first page.
+/// (at most [`js_sched_placer::sizes::BRIDGE_PAGES`]), with no scan of the job table; and that
+/// the read after it pages through every freed allocation, two pages, and teaches the run.
+/// Catches a start that reads the whole history before it listens, and a read that stops at
+/// its first page.
 #[test]
 fn a_start_reads_the_newest_runs_alone_and_the_teaching_reads_every_page() {
     let (clock, store, jobs, placer) = tables();
