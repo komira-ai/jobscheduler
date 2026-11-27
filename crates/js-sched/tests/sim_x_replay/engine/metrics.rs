@@ -86,6 +86,8 @@ pub enum Decided {
     Only,
     /// Key 1 to 5 of the score.
     Key(u8),
+    /// The pack limit, between keys 2 and 3.
+    PackLimit,
     /// Tie-break 1 to 4.
     TieBreak(u8),
 }
