@@ -50,7 +50,8 @@
 //!   all of it, so nothing is placed beside it; one that fits nowhere holds a worker
 //!   that could run it, in queue (QoS) order, and less urgent work is not placed there
 //!   until it has emptied (with [`Scheduler::with_whole_node`] the worker is the one
-//!   cheapest to drain: the latest end bound of its leases, then the fewest leases), save
+//!   cheapest to drain: the latest end bound of its leases, then the fewest leases, picked
+//!   again every round and kept on a tie of the tail), save
 //!   work that ends before the request starts there ([`Scheduler::with_backfill`]). An
 //!   action asking for a whole worker ([`Request::whole_worker`]) is placed only on a
 //!   worker with no lease, books all of its CPUs, memory, GPUs and VM slots (its
@@ -118,8 +119,8 @@
 //!   ([`Scheduler::set_provider_rank`], [`ProviderRank`]): of the workers that could take a
 //!   request now, those of the first provider in its platform's order, and the score or the
 //!   spread decides among them alone; a whole-machine request's quiet worker is one of the
-//!   first provider, and the provider breaks a tie of its mark's drain cost, before the
-//!   name. A worker told no provider ranks after every one that was.
+//!   first provider, and the provider breaks a tie of a new mark's drain cost, before the
+//!   name (a standing mark keeps its worker on a tie of the tail). A worker told no provider ranks after every one that was.
 //! - the choice of the machine provider and offer to acquire from when nothing can serve a
 //!   job now ([`acquire::pick`], pass 2 of design 5.6): providers in order, the pool's
 //!   limits and each provider's share, then price, fewest accelerators, least spare,
