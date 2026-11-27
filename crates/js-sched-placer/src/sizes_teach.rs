@@ -3,13 +3,18 @@
 //!
 //! A teaching is begun ([`SchedPlacer::begin_teaching`]) when the server starts: that reads the
 //! live allocations alone, takes them as those of the last pass, and from then on holds every
-//! run a pass frees instead of teaching it. Its reads of the
-//! ended jobs come later, a page at a time ([`Teaching::read_page`]), outside the engine's lock,
-//! while the passes place: a class sized meanwhile books what the history taught so far
-//! (nothing at a start: its fallback's or the cold size). [`SchedPlacer::teach`] then teaches,
-//! under the lock, every ended job that was read, in the order the jobs ended, and after them
-//! the runs the passes held, in the order the passes freed them: the order a server that read
-//! everything before its first pass teaches them in, so the history once taught is the same.
+//! run a pass frees instead of teaching it to the history. Its reads of the ended jobs come
+//! later, a page at a time ([`Teaching::read_page`]), outside the engine's lock, while the
+//! passes place. A job sized meanwhile is sized from an interim history: the history as it stood
+//! when the teaching began (nothing, at a start), taught each run a pass frees as the pass frees
+//! it (once bounds are known). So after a start a job books the cold size only until a run of its
+//! class, its fallback or its client ends and teaches a size, not for as long as the read takes:
+//! from then on the runs freed since the start size it, its class's, else its fallback's, else
+//! its client's. [`SchedPlacer::teach`] drops the interim history and teaches
+//! the history, under the lock, every ended job that was read, in the order the jobs ended, and
+//! after them the runs the passes held, in the order the passes freed them: the order a server
+//! that read everything before its first pass teaches them in, so the history once taught is the
+//! same.
 //!
 //! A job the passes still follow when the runs are taught (its allocation is live at the last
 //! pass, or a pass named it freed since the teaching began, its run held or still being read)
@@ -103,7 +108,10 @@ impl SchedPlacer {
         let mut engine = self.engine();
         let sizes = engine.sizes();
         let _ = sizes.freed(&live);
-        sizes.held = Some(Held::default());
+        sizes.held = Some(Held {
+            interim: sizes.summaries.clone(),
+            ..Held::default()
+        });
         Ok(Teaching {
             ended: Vec::new(),
             resume: None,

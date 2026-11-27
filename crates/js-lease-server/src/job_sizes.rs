@@ -7,10 +7,10 @@
 //! allocations alone, so what it reads is set by the jobs running, not by the history the store
 //! keeps; the server then listens and answers ready. The ended jobs are read after that, a page
 //! at a time, off the runtime's threads ([`Sizes::teach`]): meanwhile a job that books nothing
-//! books what the history taught so far (its fallback's or the cold size, at a start), and the
-//! runs the passes free are held, so that once taught the history is the one a server that read
-//! everything before its first pass would hold. A stop of the server ([`Sizes::stop`]) ends the
-//! read at the next page.
+//! is sized from the runs the passes freed since the start (the cold size only until a run of
+//! its class, its fallback or its client ends), and those runs are held, so that once taught
+//! the history is the one a server that read everything before its first pass would hold. A
+//! stop of the server ([`Sizes::stop`]) ends the read at the next page.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};

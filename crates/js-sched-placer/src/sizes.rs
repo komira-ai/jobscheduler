@@ -83,9 +83,11 @@
 //! booked. After a server's start, [`JobSizes::observe`] is fed every ended job the job store
 //! still holds, in the order they ended, and then the runs the passes freed meanwhile, which
 //! were held for it ([`Teaching`]): the job records are the history, and nothing else is
-//! stored. A run is taught to the job's class
-//! and, when the job names one, to its fallback class (once, when the two are one class), and,
-//! unless it is a memory kill, to its client's whole history on its platform
+//! stored. Until then a job is sized from the runs the passes freed since the start (the cold
+//! size only until a run of its class, its fallback or its client teaches a size), which the
+//! teaching then drops. A run is taught to the job's class and, when the job names one, to its
+//! fallback class (once, when the two are one class), and, unless it is a memory kill, to its
+//! client's whole history on its platform
 //! ([`JobSizes::client_key_of`]).
 //!
 //! A run is one sample of [`js_sizing::Run`]:
@@ -331,6 +333,27 @@ struct Held {
     /// Every job [`JobSizes::freed`] named since the teaching began, its run held or not yet:
     /// the passes teach them, so the teaching leaves them out of the ended jobs it read.
     named: BTreeSet<JobId>,
+    /// What the passes size from until the teaching is taught: the history as it stood when the
+    /// teaching began, taught each held run as a pass frees it. Dropped once the teaching is
+    /// taught, which teaches the held runs again after the ended jobs, so it never changes the
+    /// history that is kept.
+    interim: Summaries,
+}
+
+impl Held {
+    /// Holds the run of `job`, freed booked as `booked`, and teaches it to the interim history
+    /// at once, against `bounds`: to the keys [`JobSizes::observe`] teaches it to, in the same
+    /// order. A job that teaches nothing, and any run while no bounds are known (no host to
+    /// judge its peak against, and no job is sized then), is held and teaches the interim
+    /// history nothing.
+    fn hold(&mut self, job: JobRecord, booked: Booked, bounds: Option<Bounds>) {
+        if let (Some((run, day)), Some(bounds)) = (run_of(&job, booked), bounds) {
+            for key in keys_of_run(&job, &run) {
+                let _ = self.interim.observe(&key, &run, day, &bounds);
+            }
+        }
+        self.runs.push((job, booked));
+    }
 }
 
 impl JobSizes {
@@ -470,8 +493,9 @@ impl JobSizes {
     fn size_of(&self, job: &JobRecord, day: Day, bounds: &Bounds) -> (u64, u64, SizedFrom) {
         let key = Self::key_of(job);
         let cpu = self.cpu_of(job, day, bounds);
-        let floor = self.summaries.key_floor(&key, bounds);
-        if let Some(own) = self.summaries.peak_memory(&key, day, bounds) {
+        let summaries = self.sizing();
+        let floor = summaries.key_floor(&key, bounds);
+        if let Some(own) = summaries.peak_memory(&key, day, bounds) {
             return if own >= bounds.host_memory {
                 (cpu, bounds.host_memory, SizedFrom::OverCap)
             } else {
@@ -481,7 +505,7 @@ impl JobSizes {
         // A stand-in books its typical run, not its heaviest: one large target of a kind
         // must not size every new target of it.
         let typical = |key: &Key| {
-            let typical = self.summaries.median_memory(key, day, bounds);
+            let typical = summaries.median_memory(key, day, bounds);
             typical.filter(|memory| *memory < bounds.host_memory)
         };
         let fallback = Self::fallback_key_of(job)
@@ -521,7 +545,7 @@ impl JobSizes {
         let learned = keys
             .iter()
             .flatten()
-            .find_map(|key| self.summaries.cpu(key, day, bounds));
+            .find_map(|key| self.sizing().cpu(key, day, bounds));
         learned.map_or_else(
             || self.cold_cpu(job, bounds),
             |cpu| held_cpu(u64::from(cpu), bounds),
@@ -581,15 +605,9 @@ impl JobSizes {
         };
         self.profile_run(job, &run, log);
         let taught = self.teaches(job, &run, day);
-        // A kill raises the floor of the class and of its fallback, never of every class of
-        // the client.
-        if run.outcome != Outcome::OwnLimitKill {
-            self.pending.push((Self::client_key_of(job), run, day));
-        }
-        if let Some(fallback) = Self::fallback_key_of(job) {
-            self.pending.push((fallback, run, day));
-        }
-        self.pending.push((Self::key_of(job), run, day));
+        let keys = keys_of_run(job, &run);
+        self.pending
+            .extend(keys.into_iter().map(|key| (key, run, day)));
         self.set_bounds(self.bounds);
         taught
     }
@@ -598,7 +616,7 @@ impl JobSizes {
     /// while a teaching of the ended jobs is begun and not taught ([`Teaching`]).
     fn freed_run(&mut self, job: JobRecord, booked: Booked) {
         match &mut self.held {
-            Some(held) => held.runs.push((job, booked)),
+            Some(held) => held.hold(job, booked, self.bounds),
             None => {
                 let _ = self.observe_logged(&job, booked, true);
             }
@@ -617,6 +635,31 @@ impl JobSizes {
         let mut trial = Summary::new(Self::key_of(job).basis(), day);
         trial.observe(run, day, &bounds).memory.is_ok()
     }
+
+    /// The history a job is sized from: while a teaching of the ended jobs is begun and not
+    /// taught, the interim history of the runs freed since it began ([`Held::interim`]); else
+    /// the history.
+    fn sizing(&self) -> &Summaries {
+        self.held
+            .as_ref()
+            .map_or(&self.summaries, |held| &held.interim)
+    }
+}
+
+/// The keys a run of `job` is taught to, in order: its client's whole history on its platform
+/// unless the run is a memory kill (a kill raises the floor of its class and of its fallback,
+/// never of every class of the client), its fallback class when it names one, and its class.
+fn keys_of_run(job: &JobRecord, run: &Run) -> Vec<Key> {
+    let killed = run.outcome == Outcome::OwnLimitKill;
+    let client = (!killed).then(|| JobSizes::client_key_of(job));
+    [
+        client,
+        JobSizes::fallback_key_of(job),
+        Some(JobSizes::key_of(job)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 /// The memory a run of `result` teaches its class: the peak of its non-file memory series (the

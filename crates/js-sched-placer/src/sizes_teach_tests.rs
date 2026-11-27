@@ -8,7 +8,7 @@ use std::time::Duration;
 use std::collections::BTreeMap;
 
 use js_jobs::interfere::Read;
-use js_jobs::{Booked, EndReason, JobEnd, JobId, JobRecord, NewJob, Output};
+use js_jobs::{Booked, EndReason, JobEnd, JobId, JobRecord, NewJob, Output, SizedFrom};
 use js_types::Labels;
 
 use super::super::tests::{
@@ -231,11 +231,12 @@ fn a_begun_teaching_reads_the_live_allocations_alone_whatever_the_history() {
 /// start which taught every ended job before its first pass leaves (the same summaries, the
 /// same live allocations, nothing held), and books the jobs placed after it the same; that its
 /// read pages through every job (two pages for 1000 fillers and the rest); and that a job
-/// placed while it is read books its cold size, where the other start booked it from the
-/// history. The live job at its start, a job placed and freed during it, and one freed after
-/// the last pass before it is taught are each taught once, after the ended jobs. Catches a run
-/// taught twice (by the read and by a pass), one lost between the read and the passes, and
-/// held runs taught before the ended jobs, each of which changes the history.
+/// placed while it is read, before any run was freed, books its cold size, where the other
+/// start booked it from the history. The live job at its start, a job placed and freed during
+/// it, and one freed after the last pass before it is taught are each taught once, after the
+/// ended jobs. Catches a run taught twice (by the read and by a pass), one lost between the
+/// read and the passes, and held runs taught before the ended jobs, each of which changes the
+/// history.
 #[test]
 fn a_teaching_taught_after_the_passes_leaves_the_history_of_one_taught_first() {
     let (first_history, first_placed, _) = farm(true);
@@ -244,7 +245,92 @@ fn a_teaching_taught_after_the_passes_leaves_the_history_of_one_taught_first() {
     assert_eq!(pages, 2);
     assert_eq!(later_placed[2..], first_placed[2..], "after it: the same");
     assert_eq!(first_placed[0], (3000, 11 * 256 * MIB), "from the history");
-    assert_eq!(later_placed[0], (2000, 4 * GIB), "during it: cold");
+    assert_eq!(later_placed[0], (2000, 4 * GIB), "during it, none freed: cold");
+}
+
+/// Asserts that a job placed while a teaching is read books from the runs the passes freed since
+/// it began, not the cold size: a job of `build` books the one 3 GiB run of its class freed
+/// meanwhile (three cores and 3.75 GiB), a job of `test`, a class with no run, books that run as
+/// its client's typical run, and a job cancelled before it started, freed meanwhile, teaches
+/// nothing (the job placed after it alone still books cold). The four 2 GiB runs of `build` the
+/// store holds are not read yet and size nothing. Once taught, the history is the one a placer
+/// taught the four ended runs and then that run holds. Catches a start whose jobs book the cold
+/// size for as long as its read of the ended jobs takes, which on a farm keeping seven days of
+/// jobs is every job placed in the minutes after each start.
+#[test]
+fn a_job_placed_while_a_teaching_is_read_books_from_the_runs_freed_since_it_began() {
+    let tables = Tables::new();
+    let build = || exited(0, 2 * GIB, Duration::from_secs(30));
+    let built = runs(&tables, "build", 4, "build", booked(2000, 4 * GIB), build);
+    let placer = placer();
+    let mut teaching = placer.begin_teaching(&tables.jobs).unwrap();
+    submit(&tables, "cancelled", "build");
+    assert_eq!(pass(&placer, &tables).len(), 1);
+    let end = JobEnd::Cancelled {
+        exit_code: None,
+        output: Output::default(),
+    };
+    let cancelled = JobId::parse("cancelled").unwrap();
+    tables
+        .jobs
+        .end_and_free(&cancelled, end, EndReason::Cancelled)
+        .unwrap();
+    submit(&tables, "first", "build");
+    assert_eq!(pass(&placer, &tables).len(), 1, "frees the cancelled job");
+    assert_eq!(allocation(&tables, "first"), booked(2000, 4 * GIB), "cold");
+    finish_at(&tables, "first", 3 * GIB);
+    pass(&placer, &tables);
+    submit(&tables, "again", "build");
+    submit(&tables, "other", "test");
+    assert_eq!(pass(&placer, &tables).len(), 2);
+    let learned = booked(3000, 15 * 256 * MIB);
+    assert_eq!(allocation(&tables, "again"), learned, "its class's run");
+    assert_eq!(allocation(&tables, "other"), learned, "its client's run");
+    let day = super::super::day_of(placer.now());
+    let from = ["again", "other"].map(|id| {
+        let id = JobId::parse(id).unwrap();
+        let job = tables.jobs.get_job(&id).unwrap().unwrap();
+        placer.engine().sizes().sized_from(&job, day)
+    });
+    assert_eq!(from, [Some(SizedFrom::Class), Some(SizedFrom::Fallback)]);
+    read_through(&mut teaching, &tables);
+    assert_eq!(placer.teach(teaching), 4);
+    let first = JobId::parse("first").unwrap();
+    let first = tables.jobs.get_job(&first).unwrap().unwrap();
+    let reference = super::super::tests::placer();
+    let bounds = placer.engine().sizes().bounds;
+    let mut engine = reference.engine();
+    let sizes = engine.sizes();
+    sizes.set_bounds(bounds);
+    for job in built.iter().chain([&first]) {
+        let _ = sizes.observe(job, booked(2000, 4 * GIB));
+    }
+    let taught = format!("{:?}", placer.engine().sizes().summaries);
+    assert_eq!(taught, format!("{:?}", sizes.summaries));
+}
+
+/// Asserts that a run freed while a teaching is read and before any host is known teaches the
+/// interim history nothing: a 20 GiB peak of `build`, above the 16 GiB host the first pass
+/// learns of, would book the class the whole host; the next job of `build` books its cold size
+/// instead. Catches a run judged against no host at all, which the history itself holds until
+/// a host is known and then discards as at or above the host's memory.
+#[test]
+fn a_run_freed_before_any_host_is_known_teaches_the_interim_history_nothing() {
+    let tables = Tables::new();
+    let placer = placer();
+    let _teaching = placer.begin_teaching(&tables.jobs).unwrap();
+    live(&tables, "first", "build");
+    finish_at(&tables, "first", 20 * GIB);
+    let first = JobId::parse("first").unwrap();
+    let first = tables.jobs.get_job(&first).unwrap().unwrap();
+    assert_eq!(placer.engine().sizes().bounds, None, "no pass yet");
+    placer
+        .engine()
+        .sizes()
+        .freed_run(first, booked(2000, 4 * GIB));
+    submit(&tables, "next", "build");
+    assert_eq!(pass(&placer, &tables).len(), 1);
+    assert_eq!(allocation(&tables, "next"), booked(2000, 4 * GIB), "cold");
 }
 
 /// Asserts that a teaching whose read fails teaches none of the ended jobs it read and still
