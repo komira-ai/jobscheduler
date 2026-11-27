@@ -39,6 +39,7 @@ pub(crate) fn row(end: u64) -> EndedRow {
         cpu_series: None,
         class: Default::default(),
         attempt: None,
+        memory_series: None,
     }
 }
 
@@ -61,6 +62,7 @@ fn bare(end: u64, id: &str) -> EndedRow {
         cpu_series: None,
         class: Default::default(),
         attempt: None,
+        memory_series: None,
     }
 }
 
@@ -218,30 +220,37 @@ fn the_bytes_of_a_row_are_pinned() {
 
 /// Catches: a reader that refuses a row a later build wrote with a field added at the end,
 /// which would make every added field cost the older build its history. The bytes come after
-/// the last field this build knows, the attempt, on rows with and without a CPU series and a
-/// class.
+/// the last field this build knows, the memory series, on rows with and without a CPU series, a
+/// class and a memory series.
 #[test]
 fn bytes_after_the_known_fields_are_a_later_builds_fields_and_are_ignored() {
     let series = CpuSeries::new(4, vec![8, 16, 24], 9_000_000, false);
+    let memory = MemorySeries::new(4, vec![512, 70_000], 9_000_000, false);
     for cpu_series in [None, series] {
         for class in [None, Some("cell//pkg:name build".to_owned())] {
-            let known = EndedRow {
-                cpu_series: cpu_series.clone(),
-                class,
-                ..row(9)
-            };
-            let mut later = encode(&known);
-            // A byte 0 stands for each absent field, so what follows them is the later build's.
-            if known.cpu_series.is_none() && known.class.is_none() {
-                later.push(0);
+            for memory_series in [None, memory.clone()] {
+                let known = EndedRow {
+                    cpu_series: cpu_series.clone(),
+                    class: class.clone(),
+                    memory_series,
+                    ..row(9)
+                };
+                let mut later = encode(&known);
+                // A byte 0 stands for each absent field, so what follows them is the later
+                // build's; a row with a memory series has every slot before it written.
+                if known.memory_series.is_none() {
+                    if known.cpu_series.is_none() && known.class.is_none() {
+                        later.push(0);
+                    }
+                    if known.class.is_none() {
+                        later.push(0);
+                    }
+                    // The attempt and the memory series, absent on these rows.
+                    later.extend_from_slice(&[0, 0]);
+                }
+                later.extend_from_slice(&[1, 0x81, 0x01, 7]);
+                assert_eq!(decode(&later), Ok(known));
             }
-            if known.class.is_none() {
-                later.push(0);
-            }
-            // The attempt, absent on these rows.
-            later.push(0);
-            later.extend_from_slice(&[1, 0x81, 0x01, 7]);
-            assert_eq!(decode(&later), Ok(known));
         }
     }
 }

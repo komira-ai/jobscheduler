@@ -365,7 +365,8 @@ fn a_retry_of_zero_defers_with_retry_after_zero() {
     assert_eq!(line(&done)["retry_after_secs"], 0);
 }
 
-/// What a Mac build's `--version` prints (the second line is `platform::LONG_VERSION`'s).
+/// What a Mac build's `--version` printed before its `stops:` line (the runtime line is
+/// `platform::LONG_VERSION`'s second line).
 const MAC_VERSION: &str = "js-agent 1.4.0\nruntimes: native\n";
 
 #[test]

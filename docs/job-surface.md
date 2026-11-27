@@ -15,7 +15,8 @@ Both are rendered by `cargo xtask gen-job-surface` (`crates/xtask/src/job_surfac
 descriptor set js-proto builds, and both are checked in: a build needs no protobuf compiler,
 and the generated code is reviewed with the change that makes it. The hand-written parts are
 the connection and the classification of failures in js-client (`jobs/mod.rs`, `jobs/wire.rs`,
-`jobs/error.rs`) and the interpreter in js-cli (`jobs/mod.rs`, `jobs/text.rs`), which builds
+`jobs/error.rs`), its reading of a submit's answer for a retry policy or callback the server
+dropped (`jobs/dropped.rs`: `dropped_policies`), and the interpreter in js-cli (`jobs/mod.rs`, `jobs/text.rs`), which builds
 the commands from the table and names no call.
 
 Three commands are written by hand because each is a loop over several calls, not one call:

@@ -22,6 +22,7 @@ use crate::support::{Outcome, Scratch, TOKEN, run, services};
 
 mod callback;
 mod rootfs;
+mod usage;
 
 /// A loopback origin over plain http; the in-memory dialer never dials it.
 const PLAIN: &str = "http://localhost:7070";

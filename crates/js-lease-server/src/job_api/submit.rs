@@ -14,10 +14,10 @@
 //!    both `INVALID_ARGUMENT` with the `Refusal` detail (400, `field`
 //!    `spec.wallLimitSeconds`). Every check runs before the job's id is looked up, so a
 //!    retry of a job the ceiling now refuses is refused, not answered from the job. A job
-//!    that asks for a completion callback is refused `callback-not-enabled` unless the context
-//!    takes callbacks ([`Ctx::accepting_callbacks`], which only a test sets until the release
-//!    that accepts one); one that does has its URL's form, an address literal in its URL
-//!    against the address rule, and its key's length checked, and the key is never repeated.
+//!    that asks for a completion callback has its URL's form, an address literal in its URL
+//!    against the context's address rule ([`Ctx::judging_callbacks_by`]; the server gives the
+//!    cluster's), and its key's length checked, and the key is never repeated. A retry policy
+//!    has its backoff cap checked against its initial wait.
 //! 2. **Idempotency.** For a job with an id, the tables are read first. An existing job with
 //!    the same id and the same job (every field but the priority, compared on the decoded
 //!    job [`js_jobs::JobSpec`]; for an ended job, whose files hold only their SHA-256, each
@@ -103,7 +103,7 @@ use super::JobApi;
 use super::fleet::Handle;
 use super::read::{statuses, view};
 use super::roles::Caller;
-use super::validate::{self, Accepts, Fault};
+use super::validate::{self, Fault};
 use crate::agents::Agents;
 use crate::metrics::{Meter, SubmitPhase};
 use crate::util::blocking;
@@ -146,16 +146,14 @@ struct Served {
     /// The agent side whose placement poller each recorded job pokes (step 5); `None`: the call
     /// only commits, and the tick's pass finds the queued row.
     poking: Option<Handle<Agents>>,
-    /// The fields this release refuses until it accepts them, of which it takes these: none,
-    /// but in tests and simulations (`Ctx::accepting_retry`).
-    accepts: Accepts,
-    /// The address rule a job's callback is judged by (step 1); `None`: the call refuses a job
-    /// that asks for a callback (`callback-not-enabled`), until the release that accepts one.
-    callbacks: Option<Handle<AddressRule>>,
+    /// The address rule an address literal in a job's callback URL is judged by (step 1).
+    callbacks: Handle<AddressRule>,
 }
 
 impl Ctx {
-    /// The context of a served submit: jobs up to `ceiling`, admitted by `admission`.
+    /// The context of a served submit: jobs up to `ceiling`, admitted by `admission`, a
+    /// callback's address judged by the rule that knows no cluster address
+    /// ([`Ctx::judging_callbacks_by`] gives another).
     #[must_use]
     pub(crate) fn served(ceiling: Duration, admission: Arc<dyn Admission>) -> Ctx {
         Ctx {
@@ -165,8 +163,7 @@ impl Ctx {
                 ceiling,
                 admission: Handle(admission),
                 poking: None,
-                accepts: Accepts::default(),
-                callbacks: None,
+                callbacks: Handle(Arc::new(AddressRule::new([]))),
             }),
         }
     }
@@ -184,13 +181,12 @@ impl Ctx {
 }
 
 impl Ctx {
-    /// This context, taking a job's completion callback and judging its address by `rule` (step
-    /// 1 of the module docs), where it refused every one. Nothing for a context that is not
-    /// served.
+    /// This context, judging the address of a job's completion callback by `rule` (step 1 of
+    /// the module docs). Nothing for a context that is not served.
     #[must_use]
-    pub(crate) fn accepting_callbacks(mut self, rule: AddressRule) -> Ctx {
+    pub(crate) fn judging_callbacks_by(mut self, rule: AddressRule) -> Ctx {
         self.served = self.served.map(|served| Served {
-            callbacks: Some(Handle(Arc::new(rule))),
+            callbacks: Handle(Arc::new(rule)),
             ..served
         });
         self
@@ -202,16 +198,6 @@ impl Ctx {
     #[cfg(test)]
     pub(super) fn marked(mark: u32) -> Ctx {
         Ctx { mark, served: None }
-    }
-
-    /// This context, taking a job's retry policy: what the release that accepts a policy will
-    /// do, which a test or a simulation does now. Nothing for a context that is not served.
-    pub(crate) fn accepting_retry(mut self) -> Ctx {
-        self.served = self.served.map(|served| Served {
-            accepts: Accepts { retry: true },
-            ..served
-        });
-        self
     }
 
     /// The ceiling of a served context; `None` when the call is not served.
@@ -302,15 +288,8 @@ pub(super) async fn submit_job(
         Some(Handle(agents)) => agents.meter().clone(),
         None => Meter::off().clone(),
     };
-    let callbacks = served.callbacks.as_ref().map(|rule| rule.0.as_ref());
-    let (valid, took) = meter.timed(|| {
-        validate::job(
-            request.spec.as_ref(),
-            served.ceiling,
-            served.accepts,
-            callbacks,
-        )
-    });
+    let rule = served.callbacks.0.as_ref();
+    let (valid, took) = meter.timed(|| validate::job(request.spec.as_ref(), served.ceiling, rule));
     meter.sink().submit_phase(SubmitPhase::Validation, took);
     let valid = valid.map_err(refused)?;
     let stored = match valid.id.clone() {

@@ -69,12 +69,17 @@
 # jobs `beta-macos` (beta.yml: the workspace's tests on Apple silicon), `beta-macos-pkg`
 # (js-agent-macos-pkg.yml: the installer package of js-agent, built and signed),
 # `beta-macos-first-install` (js-agent-macos-first-install.yml: the first install of that
-# package through hostkeeper's installer and the update hook, as root, after `beta-macos-pkg`)
-# and `beta-macos-probe` (macos-probe.yml) run on the hosted macOS runners (the build of the Apple
+# package through hostkeeper's installer and the update hook, as root, after `beta-macos-pkg`),
+# `beta-macos-probe` (macos-probe.yml) and `beta-macos-isolation`
+# (js-agent-native-isolation.yml: the two-run isolation test of the Mac slot accounts, as root, on
+# a hosted Mac of its own) run on the hosted macOS runners (the build of the Apple
 # silicon archives in `artifacts` and of the package in `beta-macos-pkg` runs on the build farm's
 # Macs instead when the repository variable MACOS_ON_FARM is `true`, docs/mac-farm.md), and
 # `promote-macos` adds the macOS archives (`*-aarch64-apple-darwin.tar.gz`) to the published release
-# when all four and `publish` succeeded. `pkg-upload` puts the signed package in the package
+# when the first four and `publish` succeeded. `beta-macos-isolation` holds nothing back yet: its
+# failure makes the run red and `release-red` reports it, but the macOS archives are added
+# without it, since on a hosted runner the test reaches no verdict (the header of
+# js-agent-native-isolation.yml says why). `pkg-upload` puts the signed package in the package
 # repository (`pkg/jobscheduler/<version>/`) and maps `js-agent` to `pkg/jobscheduler` in the
 # repository's descriptor (`hostkeeper-repository.json`, which a coordinator reads to find the
 # package), where hostkeeper-desired.yml finds it, as soon as `beta-macos-pkg` has ended and
@@ -537,8 +542,18 @@ jobs:
       contents: read
     uses: ./.github/workflows/macos-probe.yml
 
-  # Adds the macOS archives to the release `publish` published, when the four beta jobs
-  # passed. They are the files artifacts.yml built, attested and verified, and `publish` checked
+  # The two-run isolation test of the Mac slot accounts. `promote-macos` does not need it:
+  # until the test can pass where it runs, its verdict is reported (`release-red` and
+  # `release-green` count it) and holds no archive back.
+  beta-macos-isolation:
+    needs: [plan, artifacts]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/js-agent-native-isolation.yml
+
+  # Adds the macOS archives to the release `publish` published, when the four beta jobs it
+  # needs (all but `beta-macos-isolation`) passed. They are the files artifacts.yml built, attested and verified, and `publish` checked
   # against SHA256SUMS; nothing is rebuilt. An archive the release has already must equal this
   # run's, byte for byte, and is kept; a missing one is uploaded. Like `publish` it runs no
   # repository code, holds `contents: write` alone, and a release run's re-run of the failed
@@ -2156,7 +2171,7 @@ jobs:
   # or comments the same lines on the RELEASE-RED issue that is open. It holds `issues: write`
   # and `actions: read` and runs `gh` only.
   release-red:
-    needs: [unit-tests, deployed, beta-macos, beta-macos-first-install, beta-macos-probe, promote-macos, smoke-bundle-check]
+    needs: [unit-tests, deployed, beta-macos, beta-macos-first-install, beta-macos-probe, beta-macos-isolation, promote-macos, smoke-bundle-check]
     if: ${{ failure() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -2195,7 +2210,7 @@ jobs:
   # moved on, a newer run may have opened them, so nothing is closed (the newer run's own green
   # closes them). Same permissions as `release-red`, `gh` only.
   release-green:
-    needs: [plan, unit-tests, deployed, beta-macos, beta-macos-first-install, beta-macos-probe, promote-macos, smoke-bundle-check]
+    needs: [plan, unit-tests, deployed, beta-macos, beta-macos-first-install, beta-macos-probe, beta-macos-isolation, promote-macos, smoke-bundle-check]
     if: ${{ !cancelled() && !failure() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10

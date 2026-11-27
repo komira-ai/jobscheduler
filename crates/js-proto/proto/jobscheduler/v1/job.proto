@@ -196,12 +196,12 @@ message JobSpec {
   // Trees at paths in the job's file system: at most 64. Empty: none.
   repeated Mount mounts = 61;
   // Another attempt after a start failure or a lost host. Absent: one attempt, as before. It
-  // is part of the job a same-id resubmit is compared on. This server refuses a job that sets
-  // it (INVALID_ARGUMENT, retry-not-enabled) until a later release acts on it.
+  // is part of the job a same-id resubmit is compared on. A server released before this field
+  // skips it and runs the job once; its answer's spec then has no retry.
   RetryPolicy retry = 70;
   // The call the server makes once the job reaches its final state. Absent: none. It is part
-  // of the job a same-id resubmit is compared on, its key by digest. This server refuses a job
-  // that sets it (INVALID_ARGUMENT, callback-not-enabled) until a later release acts on it.
+  // of the job a same-id resubmit is compared on, its key by digest. A server released before
+  // this field skips it and calls nothing back; its answer's spec then has no callback.
   Callback callback = 71;
 }
 
