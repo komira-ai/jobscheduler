@@ -7,8 +7,9 @@
 //! `buildrules` command line, so the job, which builds it from the pinned buildrules cell anyway,
 //! makes the fix itself:
 //!
-//! 1. `buck2 build buildrules//cli:buildrules --show-full-output` builds the command line on the
-//!    farm (it is a target of the cell `.buckconfig` pins) and names the file it was written to.
+//! 1. The job's step before this one builds the command line on the farm (`buck2 build
+//!    buildrules//cli:buildrules --out <path>`, [`TOOL`], a target of the cell `.buckconfig`
+//!    pins, through komira's buck2-farm action); `--buildrules` names that file.
 //! 2. `buildrules check`: status 0 is a fresh table, and the build goes on. Status 1 is a table
 //!    that is stale or missing a generated file (its problems are what check printed); any other
 //!    status (a usage error) is the error, with what check printed.
@@ -93,20 +94,6 @@ impl Handoff {
 /// Why the table is not fresh, or why that could not be settled.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
-    /// The build of the `buildrules` command line failed.
-    #[error("`buck2 build {TOOL}` failed ({status}): {stderr}")]
-    Tool {
-        /// How it ended.
-        status: String,
-        /// What buck2 printed on its standard error, trimmed.
-        stderr: String,
-    },
-    /// The build of the command line named no file for it.
-    #[error("`buck2 build {TOOL} --show-full-output` named no output of {TOOL}: {stdout:?}")]
-    NoTool {
-        /// What buck2 printed on its standard output.
-        stdout: String,
-    },
     /// `buildrules check` could not judge the table (a status other than 0 and 1).
     #[error("`buildrules check` could not judge the table ({status}): {stderr}")]
     Check {
@@ -208,15 +195,6 @@ pub fn summary_markdown(inputs: &[String], files: &[String], apply: &str) -> Str
     )
 }
 
-/// The file `buck2 build <TOOL> --show-full-output` printed for [`TOOL`], when it printed one.
-pub fn tool_path(stdout: &str) -> Option<PathBuf> {
-    stdout.lines().find_map(|line| {
-        let (label, path) = line.split_once(' ')?;
-        let path = path.trim();
-        (label == TOOL && path.starts_with('/')).then(|| PathBuf::from(path))
-    })
-}
-
 /// The problems the lines of `buildrules check` (its standard error) name, without the
 /// `buildrules:` and `STALE:` marks and the fix each ends with.
 pub fn stale_inputs(stderr: &str) -> Vec<String> {
@@ -228,28 +206,25 @@ pub fn stale_inputs(stderr: &str) -> Vec<String> {
         .collect()
 }
 
-/// Fails unless the generated build table is fresh, leaving its fix where `handoff` says when
-/// it is stale.
-pub(super) fn ensure_fresh(
+/// What `farm-table` prints when the table is fresh.
+pub const FRESH: &str = "the generated build table is fresh";
+
+/// Fails unless the generated build table is fresh, judged by the `buildrules` command line at
+/// `tool`: [`FRESH`] when it is. When it is stale, `buildrules sync` runs with the buck2 at
+/// `buck2`, what it prints written to `log`, and its fix is left where `handoff` says.
+///
+/// # Errors
+/// The command line cannot be started, cannot judge the table, the table is stale (its fix
+/// handed over), sync fails or leaves it stale, or the patch or the summary cannot be made.
+pub fn ensure_fresh(
+    tool: &Path,
     buck2: &Path,
     handoff: &Handoff,
     log: &mut dyn Write,
-) -> Result<(), FarmError> {
-    let built = output(buck2, &["build", TOOL, "--show-full-output"])?;
-    if !built.status.success() {
-        return Err(Error::Tool {
-            status: built.status.to_string(),
-            stderr: trimmed(&built.stderr),
-        }
-        .into());
-    }
-    let stdout = String::from_utf8_lossy(&built.stdout);
-    let tool = tool_path(&stdout).ok_or_else(|| Error::NoTool {
-        stdout: stdout.into_owned(),
-    })?;
-    let checked = output(&tool, &["check"])?;
+) -> Result<String, FarmError> {
+    let checked = output(tool, &["check"])?;
     if checked.status.success() {
-        return Ok(());
+        return Ok(FRESH.to_owned());
     }
     let stderr = trimmed(&checked.stderr);
     if checked.status.code() != Some(1) {
@@ -260,8 +235,8 @@ pub(super) fn ensure_fresh(
         .into());
     }
     let inputs = stale_inputs(&stderr);
-    sync(&tool, buck2, log)?;
-    let again = output(&tool, &["check"])?;
+    sync(tool, buck2, log)?;
+    let again = output(tool, &["check"])?;
     if !again.status.success() {
         return Err(Error::StillFails {
             status: again.status.to_string(),

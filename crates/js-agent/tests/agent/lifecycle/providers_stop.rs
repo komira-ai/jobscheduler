@@ -92,7 +92,7 @@ fn a_start_right_after_a_restart_is_prepared_only_after_the_sweep() {
     run_one(&mut h, &providers, "j1");
     h.restart().expect("the runtime lists its containers");
     let keep = js_agent::lifecycle::ProviderCall::Sweep {
-        keep: vec!["j1".to_owned()],
+        keep: vec![("j1".to_owned(), 1)],
     };
     providers.then("tier", &keep, ProviderAnswer::Pending);
     h.life

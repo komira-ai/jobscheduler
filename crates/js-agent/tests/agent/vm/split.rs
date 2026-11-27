@@ -17,6 +17,7 @@ use js_vm_lease::{ExecEnd, Step};
 
 use super::super::lifecycle::deferring::{Deferring, lease};
 use super::super::lifecycle::fake::{FakeRuntime, Log, ManualClock};
+use super::super::lifecycle::providers_unread::{Unread, unread};
 use super::{ended, spec, vm};
 
 /// A grace far above what a fake guest takes to end its command once killed.
@@ -28,6 +29,20 @@ fn split(driver: &Arc<FakeDriver>) -> (WithVms, FakeRuntime) {
     let fake = FakeRuntime::new(&Log::default(), &ManualClock::default());
     let with = WithVms::new(VmRuntime::new(driver.clone()), Box::new(fake.clone()));
     (with, fake)
+}
+
+/// Asserts that the leases the agent's runtime left alone, its ledger files unreadable, are
+/// the router's: the lifecycle keeps their provider sources. Catches a router that answers
+/// with the trait's default (none) and so has the lifecycle release the sources of a job
+/// that may still run.
+#[test]
+fn the_leases_left_alone_are_the_other_runtimes() {
+    let driver = Arc::new(FakeDriver::new());
+    let fake = FakeRuntime::new(&Log::default(), &ManualClock::default());
+    let leases = vec![unread("j1", Some(3))];
+    let other = Unread::around(fake, leases.clone());
+    let with = WithVms::new(VmRuntime::new(driver), Box::new(other));
+    assert_eq!(with.unread_leases(), leases);
 }
 
 /// Asserts that a run with the VM kind is made by the VM runtime and one without it by the

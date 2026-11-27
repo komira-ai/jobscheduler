@@ -12,7 +12,8 @@ use js_agent_wire::{
 use super::VmRuntime;
 use crate::lifecycle::{
     Created, Found, FsPrepared, JobFs, LookupStamps, NativeRefusal, OutputsReport, Prepared,
-    Removal, RunHandle, RunSpec, Runtime, RuntimeError, Status, Ticket, Wake, Whereabouts, label,
+    Removal, RunHandle, RunSpec, Runtime, RuntimeError, Status, Ticket, UnreadLease, Wake,
+    Whereabouts, label,
 };
 
 /// The agent's runtime and its VM runtime; see the [module](self).
@@ -247,5 +248,9 @@ impl Runtime for WithVms {
 
     fn whereabouts(&mut self, id: &RunHandle) -> Whereabouts {
         self.owner(id).whereabouts(id)
+    }
+
+    fn unread_leases(&self) -> Vec<UnreadLease> {
+        self.other.unread_leases()
     }
 }

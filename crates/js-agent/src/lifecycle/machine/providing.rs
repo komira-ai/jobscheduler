@@ -5,9 +5,9 @@
 //! as a host path, the step `provided` is marked, and the lookups of those paths are
 //! followed with the rest.
 //!
-//! - **At admission**, once the start has its slot, the sources are remembered for the
-//!   release at the run's end, each provider is asked to `Prepare` its source, and then the
-//!   record of the sources is written ([`provider_record`], so a restart can release what
+//! - **At admission**, once the start has its slot, the start is given its attempt and its
+//!   sources are remembered for the release at the run's end (`provided`), each provider is
+//!   asked to `Prepare` its source, and then the record of the sources is written ([`provider_record`], so a restart can release what
 //!   may exist). The asks go before the start's images are asked for, so the provider
 //!   fetches while the image is pulled and the container made, and before the record, so
 //!   the record's syncs overlap the provider's first work. A crash between a `Prepare` and
@@ -210,7 +210,7 @@ impl Wanted {
     /// waits is given back, for the start's backoff line.
     fn ask(
         &mut self,
-        run_id: &str,
+        (run_id, attempt): (&str, u64),
         attached: &mut Attached,
         roots: &MountRoots,
         now_ms: u64,
@@ -235,6 +235,7 @@ impl Wanted {
             }
             let call = ProviderCall::Prepare {
                 run_id: run_id.to_owned(),
+                attempt,
                 index: self.index,
                 reference: self.reference.clone(),
                 mode: self.mode,
@@ -261,6 +262,7 @@ impl Wanted {
         }
         let call = ProviderCall::Mount {
             run_id: run_id.to_owned(),
+            attempt,
             index: self.index,
         };
         let (answer, step) = attached.paced(
@@ -301,6 +303,8 @@ impl Wanted {
 /// What a start waits for from its providers: each source, and the moment the wait ends.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Providing {
+    /// The start's attempt, named in every call of its sources.
+    attempt: u64,
     /// When the start has waited as long as `--mount-provider-wait` allows, on the clock.
     deadline_ms: u64,
     sources: Vec<Wanted>,
@@ -326,7 +330,7 @@ impl Providing {
             .iter_mut()
             .filter(|source| source.path.is_none())
         {
-            match source.ask(run_id, attached, roots, now_ms) {
+            match source.ask((run_id, self.attempt), attached, roots, now_ms) {
                 Ok(waits) => backed.extend(waits),
                 Err(failure) => {
                     events.extend(attached.backoff(run_id, &backed));
@@ -419,7 +423,9 @@ pub(super) fn follow(
 
 impl Lifecycle {
     /// Begins the providers' part of a start admitted at `now_ms` whose file system `fs`
-    /// holds sources a provider makes: remembers them for the release, asks each provider
+    /// holds sources a provider makes: gives the start its attempt and remembers the sources
+    /// for the release (dropping a release still owed for an earlier attempt of the run,
+    /// [`Attached::begin`]), asks each provider
     /// for what its source lacks, and then writes the record of them. `None` for a start
     /// with no such source.
     ///
@@ -455,15 +461,18 @@ impl Lifecycle {
                 index: source.index,
             })
             .collect();
-        self.providers.keep(run_id, sources.clone());
+        let attempt = self
+            .providers
+            .begin(run_id, sources.clone(), now_ms, events);
         let deadline_ms = now_ms.saturating_add(self.providers.wait_ms());
         let mut providing = Providing {
+            attempt,
             deadline_ms,
             sources: provided.iter().map(Wanted::of).collect(),
         };
         let at = (&self.config.mounts, now_ms);
         providing.poll(run_id, &mut self.providers, at, events)?;
-        provider_record::write(&self.config.state, run_id, &sources).map_err(|why| {
+        provider_record::write(&self.config.state, (run_id, attempt), &sources).map_err(|why| {
             (
                 refusal::INPUT_UNAVAILABLE,
                 code::PROVIDER_RECORD_FAILED,

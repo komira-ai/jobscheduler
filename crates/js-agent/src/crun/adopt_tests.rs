@@ -9,10 +9,12 @@ use std::path::{Path, PathBuf};
 
 use js_testkit::dir::TestDir;
 
-use super::adopt::{agree, fields_of, in_cgroup, is_dir, named_in, report_lines, scratch_fits};
+use super::adopt::{
+    agree, fields_of, in_cgroup, is_dir, named_in, report_lines, scratch_fits, unread_leases,
+};
 use super::ledger::{Booked, Entry, Failed, Left, Reason, Removed, Supervisor, SweepReport};
 use crate::cli_runtime::container_name;
-use crate::lifecycle::label;
+use crate::lifecycle::{UnreadLease, label};
 
 /// The sidecar of a run of `agent-a` that runs, with every field present and the labels a
 /// job start writes.
@@ -259,4 +261,65 @@ fn a_scratch_directory_is_the_runs_own_by_name_and_by_place() {
     assert!(scratch_fits(Path::new("/runs/r1"), "r1", Some(runs)));
     assert!(!scratch_fits(Path::new("/elsewhere/r1"), "r1", Some(runs)));
     assert!(!scratch_fits(Path::new("/runs/r2"), "r1", Some(runs)));
+}
+
+/// Asserts which files left alone are leases of this agent whose sidecars it cannot read: a
+/// sidecar named for a lease of this agent's, with the version its file says (none when it
+/// says none), and not another agent's lease, another agent's sidecar, a file whose name is
+/// not text, has no name, is not a sidecar's (`.json`), or names no run this agent could
+/// have made a lease for. Catches a lease of this agent's left out (its job's provider
+/// sources would be released) and a file of another agent's taken for one of this agent's
+/// (its run's sources would be kept for ever).
+#[test]
+fn the_unread_leases_are_this_agents_sidecars_that_cannot_be_read() {
+    use std::os::unix::ffi::OsStrExt as _;
+    let dir = TestDir::under(std::env::temp_dir(), "adopt-unread");
+    let mine = container_name("agent-a", "r1").expect("a lease name");
+    let blank = container_name("agent-a", "r2").expect("a lease name");
+    let theirs = container_name("agent-b", "r3").expect("a lease name");
+    fs::write(
+        dir.path().join(format!("{mine}.json")),
+        r#"{"version":3,"new":1}"#,
+    )
+    .unwrap();
+    fs::write(dir.path().join(format!("{blank}.json")), "not json").unwrap();
+    let malformed = |name: &Path| Left::Malformed {
+        path: name.to_owned(),
+        why: "its form is version 3".to_owned(),
+    };
+    let prefix = mine.strip_suffix("r1").expect("the prefix").to_owned();
+    let left = [
+        malformed(&dir.path().join(format!("{mine}.json"))),
+        malformed(&dir.path().join(format!("{blank}.json"))),
+        malformed(&dir.path().join(format!("{theirs}.json"))),
+        malformed(&dir.path().join(format!("{mine}.txt"))),
+        malformed(&dir.path().join(format!("{prefix}a b.json"))),
+        malformed(Path::new("/")),
+        malformed(
+            &dir.path()
+                .join(std::ffi::OsStr::from_bytes(b"js-\xff.json")),
+        ),
+        Left::Foreign {
+            path: dir.path().join(format!("{mine}.json")),
+            agent: "agent-b".to_owned(),
+        },
+    ];
+    assert_eq!(
+        unread_leases(&left, "agent-a"),
+        [
+            UnreadLease {
+                run_id: "r1".to_owned(),
+                lease: mine.clone(),
+                version: Some(3),
+                why: "its form is version 3".to_owned(),
+            },
+            UnreadLease {
+                run_id: "r2".to_owned(),
+                lease: blank,
+                version: None,
+                why: "its form is version 3".to_owned(),
+            },
+        ]
+    );
+    assert!(unread_leases(&left, "agent-c").is_empty());
 }

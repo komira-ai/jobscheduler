@@ -36,6 +36,9 @@ pub struct Source {
     /// The source's place in the job: its layers first, then its mounts, from 0.
     #[prost(uint32, tag = "3")]
     pub index: u32,
+    /// The run's attempt on this agent; 0 is not given, and is not written.
+    #[prost(uint64, tag = "4")]
+    pub attempt: u64,
 }
 
 /// `PrepareRequest`: begin making a source's tree.
@@ -93,6 +96,21 @@ pub struct SweepRequest {
     /// The runs whose sources are kept, as [`Source::run`].
     #[prost(string, repeated, tag = "2")]
     pub keep: Vec<String>,
+    /// The runs of `keep` kept only from an attempt on: a source of an earlier attempt is
+    /// released.
+    #[prost(message, repeated, tag = "3")]
+    pub keep_attempts: Vec<KeptAttempt>,
+}
+
+/// `KeptAttempt`: a run kept from an attempt on, in [`SweepRequest::keep_attempts`].
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct KeptAttempt {
+    /// The run, as [`Source::run`].
+    #[prost(string, tag = "1")]
+    pub run: String,
+    /// The earliest attempt of the run kept, as [`Source::attempt`].
+    #[prost(uint64, tag = "2")]
+    pub attempt: u64,
 }
 
 /// `SweepResponse`: how many sources were released.

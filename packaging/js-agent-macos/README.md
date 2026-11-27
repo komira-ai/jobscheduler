@@ -241,7 +241,10 @@ first. When `bootstrap` or `kickstart -k` fails, the start reads `launchctl prin
 makes the other command once if launchd now calls for it (a `bootstrap` refused with exit 5
 because the label was loaded meanwhile becomes a `kickstart -k` of an idle service, or nothing
 for a running one), as the update hook's start does (`crates/js-update-hook/src/launch_units.rs`,
-"When launchd refuses the start"). The unit port has run against a fake of `launchctl` only.
+"When launchd refuses the start"). A config package re-versioned with the same files restarts
+nothing: `cutover` finds every file as it was before the update, and `verify` checks that the
+agent's daemon runs and the lease server shows the host `live` (the Linux package's section). The
+unit port has run against a fake of `launchctl` only.
 
 ## Privacy grants (TCC)
 
