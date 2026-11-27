@@ -1,8 +1,8 @@
 # Design status: what main builds
 
 Every page under `docs/design` that says Designed, not yet, Planned, Partly built, Open, or lists a build step, with each such claim checked
-against the code on `main` as of komira-ai/jobscheduler#1106. Each claim was read against the crate that would hold it, not matched by keyword.
-The page records state; it builds nothing. A pull request that builds a row, or turns a page's tag from Designed to Built, updates the row.
+against the code on `main` as of komira-ai/jobscheduler#1106, with the rows of the pull requests merged after it applied up to main at komira-ai/jobscheduler#1251. Each claim was read against the crate that would hold it, not matched by keyword.
+The page records state; it builds nothing. A pull request that builds a row, or turns a page's tag from Designed to Built, does not edit this page: it writes the change in its body under a line `Status rows:` (the section, the claim, and the new On main and Tracking cells), and a sweep pull request applies the rows of the pull requests merged since the page was last checked (`AGENTS.md`, rule P6-status).
 
 Columns:
 
@@ -19,20 +19,21 @@ Columns:
 
 ## Gaps not filed here
 
-- The heartbeat's disk_gib: komira-ai/jobscheduler#328. The Seatbelt fence for TCC-only places: komira-ai/jobscheduler#1025, komira-ai/jobscheduler#1020 and komira-ai/jobscheduler#1117. Linux jobs on a Mac: komira-ai/jobscheduler#1066.
-- The per-consumer whole-node cap is not a gap: `docs/design/jobscheduler-design.md` says there is no per-consumer cap in the single-token service, and `whole-node.md` section 6 is stale (komira-ai/jobscheduler#1193).
-- Stale status lines and comments found on the way: komira-ai/jobscheduler#1193.
+- Multi-instance G3 (host identity is the host certificate; join tokens, pool tokens and host credentials go) is in progress: komira-ai/jobscheduler#1118 (merged) was its first step, the runbook `docs/runbooks/mac-host-certificate.md` and the test `a_token_host_moves_onto_its_certificate_while_another_stays_on_the_token` for the Macs' move; the removal of tokens, pool tokens and credentials is not started.
+- The heartbeat's disk_gib: komira-ai/jobscheduler#328. The Seatbelt fence for TCC-only places is built by komira-ai/jobscheduler#1117 (link and clone denies); what is left is the per-release walk of the system volume: komira-ai/jobscheduler#1025 and komira-ai/jobscheduler#1020. Linux jobs on a Mac: komira-ai/jobscheduler#1066.
+- The per-consumer whole-node cap is not a gap: `docs/design/jobscheduler-design.md` says there is no per-consumer cap in the single-token service, and `whole-node.md` section 6 now says it is not enforced (fixed by komira-ai/jobscheduler#1200).
+- Stale status lines and comments found on the way (komira-ai/jobscheduler#1193) are fixed on main by komira-ai/jobscheduler#1200: design page status lines and five code comments; the rows that cited it are updated.
 - One start time for every large request (komira-ai/jobscheduler#1129) is not a gap: a whole-machine request and an action that owns its worker run only on a worker that holds no lease (`crates/js-sched/src/scheduler/worker.rs:108-110`, `:165`, `:189`), so their start time on a worker is its latest lease end, which the drain order's tail already is (`crates/js-whole/src/cost.rs:93-99`, `crates/js-sched/src/scheduler/whole.rs:386`). The release walk (`crates/js-sched/src/admission/head.rs:82`) is for a blocked head's partial demand, and a request that needs a worker to itself (an owner-worker action, or one at the host's whole memory) never takes that path (`crates/js-sched/src/servable.rs:605`). `crates/js-sched/tests/owner_start_time.rs` holds both: a worker with the cores free but a long lease against one that empties first.
 
 ## Pages
 
 | Page | Rows | Built | Partly | Not built | New issues |
 |---|---|---|---|---|---|
-| multi-instance.md | 29 | 3 | 6 | 16 | komira-ai/jobscheduler#1136, komira-ai/jobscheduler#1137, komira-ai/jobscheduler#1138, komira-ai/jobscheduler#1139, komira-ai/jobscheduler#1140, komira-ai/jobscheduler#1141, komira-ai/jobscheduler#1142 |
-| placement-profiles-live.md | 26 | 14 | 3 | 2 | komira-ai/jobscheduler#1143, komira-ai/jobscheduler#1144, komira-ai/jobscheduler#1193 |
-| start-latency.md | 14 | 2 | 2 | 4 | komira-ai/jobscheduler#1145, komira-ai/jobscheduler#1146, komira-ai/jobscheduler#1147 |
+| multi-instance.md | 29 | 10 | 6 | 9 | komira-ai/jobscheduler#1136, komira-ai/jobscheduler#1137, komira-ai/jobscheduler#1138, komira-ai/jobscheduler#1139, komira-ai/jobscheduler#1140, komira-ai/jobscheduler#1141, komira-ai/jobscheduler#1142 |
+| placement-profiles-live.md | 26 | 15 | 3 | 1 | komira-ai/jobscheduler#1143, komira-ai/jobscheduler#1144, komira-ai/jobscheduler#1193 |
+| start-latency.md | 14 | 5 | 2 | 1 | komira-ai/jobscheduler#1145, komira-ai/jobscheduler#1146, komira-ai/jobscheduler#1147 |
 | whole-node.md | 27 | 14 | 3 | 3 | komira-ai/jobscheduler#1148, komira-ai/jobscheduler#1149, komira-ai/jobscheduler#1150, komira-ai/jobscheduler#1193 |
-| lease-limits.md | 5 | 1 | 2 | 1 | komira-ai/jobscheduler#1151 |
+| lease-limits.md | 5 | 1 | 1 | 1 | komira-ai/jobscheduler#1151 |
 | held-beat.md | 0 | 0 | 0 | 0 | - |
 | rollout.md | 21 | 5 | 4 | 3 | - |
 | risks-f.md | 16 | 2 | 5 | 3 | komira-ai/jobscheduler#1150, komira-ai/jobscheduler#1152, komira-ai/jobscheduler#1172, komira-ai/jobscheduler#1174 |
@@ -44,12 +45,12 @@ Columns:
 | cpu-over-time.md | 24 | 12 | 3 | 6 | komira-ai/jobscheduler#1143, komira-ai/jobscheduler#1144 |
 | live-logs.md | 11 | 5 | 0 | 4 | - |
 | mac-account-per-job.md | 17 | 6 | 6 | 1 | komira-ai/jobscheduler#1163 |
-| mac-one-program.md | 45 | 6 | 6 | 20 | komira-ai/jobscheduler#1160, komira-ai/jobscheduler#1161, komira-ai/jobscheduler#1162, komira-ai/jobscheduler#1163, komira-ai/jobscheduler#1164, komira-ai/jobscheduler#1165, komira-ai/jobscheduler#1166, komira-ai/jobscheduler#1193 |
+| mac-one-program.md | 45 | 8 | 13 | 11 | komira-ai/jobscheduler#1160, komira-ai/jobscheduler#1161, komira-ai/jobscheduler#1162, komira-ai/jobscheduler#1163, komira-ai/jobscheduler#1164, komira-ai/jobscheduler#1165, komira-ai/jobscheduler#1166, komira-ai/jobscheduler#1193 |
 | kbf-on-js-agent.md | 51 | 16 | 14 | 10 | - |
 | extraction-steps.md | 32 | 10 | 12 | 0 | - |
 | extraction-steps-d.md | 49 | 17 | 11 | 5 | komira-ai/jobscheduler#1150, komira-ai/jobscheduler#1167, komira-ai/jobscheduler#1168, komira-ai/jobscheduler#1169, komira-ai/jobscheduler#1170, komira-ai/jobscheduler#1172, komira-ai/jobscheduler#1173, komira-ai/jobscheduler#1174, komira-ai/jobscheduler#1175 |
-| agent-wire.md | 16 | 3 | 2 | 5 | komira-ai/jobscheduler#1146, komira-ai/jobscheduler#1156, komira-ai/jobscheduler#1177, komira-ai/jobscheduler#1193 |
-| configuration.md | 4 | 0 | 0 | 3 | komira-ai/jobscheduler#1153 |
+| agent-wire.md | 16 | 5 | 1 | 4 | komira-ai/jobscheduler#1146, komira-ai/jobscheduler#1156, komira-ai/jobscheduler#1177, komira-ai/jobscheduler#1193 |
+| configuration.md | 4 | 0 | 1 | 2 | komira-ai/jobscheduler#1153 |
 | deployment.md | 13 | 5 | 3 | 3 | - |
 | hosts.md | 41 | 2 | 12 | 17 | komira-ai/jobscheduler#1150, komira-ai/jobscheduler#1173, komira-ai/jobscheduler#1174, komira-ai/jobscheduler#1175, komira-ai/jobscheduler#1176 |
 | placement-by-load.md | 26 | 10 | 3 | 2 | komira-ai/jobscheduler#1178, komira-ai/jobscheduler#1179, komira-ai/jobscheduler#1180, komira-ai/jobscheduler#1181, komira-ai/jobscheduler#1182 |
@@ -60,7 +61,7 @@ Columns:
 | kbf-today.md | 15 | 4 | 1 | 3 | - |
 | machines.md | 1 | 0 | 0 | 1 | - |
 | mac-runtime.md | 18 | 10 | 3 | 3 | komira-ai/jobscheduler#1183 |
-| sizing.md | 13 | 0 | 2 | 3 | komira-ai/jobscheduler#1184 |
+| sizing.md | 13 | 1 | 2 | 2 | komira-ai/jobscheduler#1184 |
 | retries-and-runs.md | 5 | 2 | 1 | 1 | komira-ai/jobscheduler#1150 |
 | vm-backend.md | 17 | 2 | 4 | 8 | komira-ai/jobscheduler#1155, komira-ai/jobscheduler#1185, komira-ai/jobscheduler#1186, komira-ai/jobscheduler#1187, komira-ai/jobscheduler#1188, komira-ai/jobscheduler#1189 |
 | placement.md | 7 | 3 | 1 | 1 | - |
@@ -69,18 +70,18 @@ Columns:
 
 ## multi-instance.md
 
-As read: Status: design, living document. Most gaps are Built (G2, G3, G4 mostly, G5 mostly, G7, G12, G15, G19 server and agent). Still Designed: G5 leftovers, G6, G9, G16. G11 Built by komira-ai/jobscheduler#1140.
+As read: Status: design, living document. Most gaps are Built (G2, G4 mostly, G5, G7, G12, G15, G19 server and agent). Still Designed: G3 removal, G6, G9, G16. G11 Built by komira-ai/jobscheduler#1140.
 
 | Section | Claim | On main | Tracking |
 |---|---|---|---|
-| G3 (s9, s3.2, s3.6, s6, s7, s12) | Host identity is the host certificate: delete join tokens, pool tokens (--agent-token-file), host credentials and the scaler's token mint/revoke; refuse a request with no certificate; agent token and credential flags go | yes: `crates/js-lease-server/src/agent_api.rs:179` (`authenticate`), `crates/js-lease-server/src/agent_api/host_cert.rs:25` (`HOST_CERTIFICATE_REQUIRED`), `crates/js-lease-server/src/in_process.rs` (`as_host`), `crates/js-lease-server/src/host_cert.rs:86` | komira-ai/jobscheduler#1118 was its first step |
-| G3 (s3.6 token times) | Join-token and credential expiry times use the process clock; G3 removes them | yes: the times are gone with the tokens | komira-ai/jobscheduler#1118 |
+| G3 (s9, s3.2, s3.6, s6, s7, s12) | Host identity is the host certificate: delete join tokens, pool tokens (--agent-token-file), host credentials and the scaler's token mint/revoke; refuse a request with no certificate; agent token and credential flags go | partly: `crates/js-lease-server/src/host_cert.rs:86`, `crates/js-lease-server/src/join_tokens.rs`; the move of a Mac from its token to its certificate: `docs/runbooks/mac-host-certificate.md`, `crates/js-lease-server/tests/server/host_certs_agent.rs:144`; no token, pool token or credential path is deleted yet | G3 is in progress; komira-ai/jobscheduler#1118 (merged) was its first step |
+| G3 (s3.6 token times) | Join-token and credential expiry times use the process clock; G3 removes them | no | goes with G3 |
 | G2 (s9, s4) | One clock: store's now() for every shared deadline; Store::now fallible | `crates/js-state/src/store.rs:121`, `crates/js-lease-server/src/job_pass.rs:200` | komira-ai/jobscheduler#938 |
 | G7 (s4, s9) mark claim_by | The whole-host mark's claim_by becomes a stored deadline on the store clock (new optional field in `mark/<job>`) | no | komira-ai/jobscheduler#1138 (new) |
 | G4/G7 (s3.3 whole-host start taint) | The whole-host start reads the host's taint from rows, not from this instance's registry | no | komira-ai/jobscheduler#1138 (new) |
-| G4 (s9, s3.2) after-G3 clean-up | After G3: HostBound, the binding's credential and its cordon copy go; the row keeps only the taint; save_bindings goes | no | the G4 clean-up after G3, not yet |
-| G5 (s3.5, s5, s9) host_silent_since_ms | A job's host_silent_since_ms reads the node/ rows, not this instance's registry | no | komira-ai/jobscheduler#1136 (new) |
-| G5 (s3.3, s5) HostLive in the row's transaction | HostLive is judged in the node row's own transaction, not only on the registry refreshed before the hello | no | komira-ai/jobscheduler#1136 (new) |
+| G4 (s9, s3.2) after-G3 clean-up | After G3: HostBound, the binding's credential and its cordon copy go; the row keeps only the taint; save_bindings goes | no | goes with G3 |
+| G5 (s3.5, s5, s9) host_silent_since_ms | A job's host_silent_since_ms reads the node/ rows, not this instance's registry | `crates/js-lease-server/src/job_api/read/silence.rs:45`, `crates/js-lease-server/src/job_api/wiring.rs:82` | komira-ai/jobscheduler#1136 (new); komira-ai/jobscheduler#1206 |
+| G5 (s3.3, s5) HostLive in the row's transaction | HostLive is judged in the node row's own transaction, not only on the registry refreshed before the hello | `crates/js-jobs/src/store/nodes.rs:146`, `crates/js-lease-server/src/agent_api/rows.rs:250` | komira-ai/jobscheduler#1136 (new); komira-ai/jobscheduler#1206 |
 | G15 (s6 row 4, s0) | Same agent process takes the host over at once via an optional hello field | `crates/js-agent-wire/src/hello.rs:349` | komira-ai/jobscheduler#942; komira-ai/jobscheduler#948 |
 | G15 (s0 cost) measure the two forms | G15 chooses between node/ through the Store and a plain node table by measuring both at the deployment's host count; s4 says the write is measured in G15's PR | decision, no code | - |
 | G6 (s3.6, s5, s9, s12 order step 4) | Settlement by node rows: the claimed job pass loses a host's allocations by node/ heard_at and version; the local gone map and the claim bypass go | no | komira-ai/jobscheduler#1137 (new) |
@@ -97,10 +98,10 @@ As read: Status: design, living document. Most gaps are Built (G2, G3, G4 mostly
 | G19 (s0.2, s9, s0.1) rest of G19 | Dispatch queue, route, claim, ack, drain, hello capability, agent poller | yes: js-jobs/src/store/dispatch.rs:183,242; js-lease-server/src/agent_api/dispatch.rs:97,157,248; agent_api.rs:341; js-agent/src/dispatch/ (poller.rs, serve.rs), js-agent/src/contract.rs; js-agent/src/lifecycle/mod.rs:12-25. | komira-ai/jobscheduler#944; komira-ai/jobscheduler#949; komira-ai/jobscheduler#1067; komira-ai/jobscheduler#1080 |
 | s0.1 version-skew tests | Tests: the release before hands out a message the new placer wrote, and the agent starts it; a job placed by the release before reaches a polling agent through the beat's reply | partly: `crates/js-lease-server/src/per_job.rs:181`, `crates/js-agent/tests/agent/skew/record.rs` | - |
 | s12 hazard table (live hazards) | Hazards: admission before hellos, binding save, taint beside host job, taint clear, host on two instances, token 401, pool cap, ListHosts, lost whole-host start, minute of usage, drain | partly: Closed ones: pool cap nodes.rs pool_admits, ListHosts hosts.rs:352, taint placement host_rows.rs:80, drain drain.rs:28 | komira-ai/jobscheduler#1136 (new); komira-ai/jobscheduler#1137 (new); komira-ai/jobscheduler#1138 (new); komira-ai/jobscheduler#1139 (new); komira-ai/jobscheduler#1140 (new); komira-ai/jobscheduler#1141 (new); komira-ai/jobscheduler#1142 (new) |
-| s9 pull request list: order of safety (s12) | Order: G2, G3 before G15; G15, G4, G5, G7, G19, G11 minute fold close the live hazards; then G6, G9, G16, rest of G11 (G12 built) | partly: Done: G2, G3, G15 (komira-ai/jobscheduler#942, komira-ai/jobscheduler#948), G7 (komira-ai/jobscheduler#946), G5 mostly, G19 (komira-ai/jobscheduler#944, komira-ai/jobscheduler#949), G4 mostly, G12 (komira-ai/jobscheduler#1141) | komira-ai/jobscheduler#1136 (new); komira-ai/jobscheduler#1137 (new); komira-ai/jobscheduler#1138 (new); komira-ai/jobscheduler#1139 (new); komira-ai/jobscheduler#1140 (new); komira-ai/jobscheduler#1141 (new); komira-ai/jobscheduler#1142 (new) |
+| s9 pull request list: order of safety (s12) | Order: G2, G3 before G15; G15, G4, G5, G7, G19, G11 minute fold close the live hazards; then G6, G9, G16, rest of G11 (G12 built) | partly: Done: G2, G15 (komira-ai/jobscheduler#942, komira-ai/jobscheduler#948), G7 (komira-ai/jobscheduler#946), G5 (komira-ai/jobscheduler#1206), G19 (komira-ai/jobscheduler#944, komira-ai/jobscheduler#949), G4 mostly, G12 (komira-ai/jobscheduler#1141) | komira-ai/jobscheduler#1136 (new); komira-ai/jobscheduler#1137 (new); komira-ai/jobscheduler#1138 (new); komira-ai/jobscheduler#1139 (new); komira-ai/jobscheduler#1140 (new); komira-ai/jobscheduler#1141 (new); komira-ai/jobscheduler#1142 (new) |
 | s9 G1, G8, G10, G13, G14, G17, G18 | Gaps shrunk into G15 or deleted | superseded: The page itself strikes these out in s9 (lines 515-521). | komira-ai/jobscheduler#883 |
 | s10 supersession pointers | deployment.md gets a pointer here; jobscheduler-design.md s10.1 amended by G15; configuration.md 'What it keeps' changed by G3 and G4 | partly: `docs/design/deployment.md:146`, `docs/design/configuration.md:15` | - |
-| s11 decisions | G12 is built; G3 removed tokens instead of making them N-safe; settlement needs heard_at; PoolFull takes a pool row lock | partly: heard_at: js-jobs/src/store/nodes.rs:267-284 (forget_silent_nodes uses it); PoolFull: nodes.rs pool_admits and keys.rs:38-42 pool/. G3 and G12 built (see their rows). | - |
+| s11 decisions | G12 is built; G3 removes tokens instead of making them N-safe; settlement needs heard_at; PoolFull takes a pool row lock | partly: heard_at: js-jobs/src/store/nodes.rs:267-284 (forget_silent_nodes uses it); PoolFull: nodes.rs pool_admits and keys.rs:38-42 pool/. G3 not built (see rows above); G12 built (see its row). | - |
 | Page header 'Status: design' and s2/s3 tag claims | The page is a living doc: each PR turns Designed to Built and names code | yes: Most rows carry Built with paths; spot checks matched (dispatch.rs:97, nodes.rs, keys.rs:36, forget_silent_nodes). | - |
 
 ## placement-profiles-live.md
@@ -121,7 +122,7 @@ As read: Status: built behind --placement-curves on (off by default); header now
 | §5 Stages 5 / §8 Q4: memory is a separate decision | Memory booking from the profile is not part of these stages. | decision, no code | - |
 | §5 Metrics | cpu-curve reason on js_placement_refusals_total, js_curve_wait_expiries_total, js_curve_classes{state}, js_host_cpu_booked_peak_millicores{host}; under shadow and on, js_memory_curve_placements_total{verdict}, js_memory_curve_sooner_milliseconds_total and the js_host_memory_projected/measured/projection_* families. | `crates/js-lease-server/src/metrics/render.rs:201` | komira-ai/jobscheduler#1087 |
 | §6 What the build pull requests test | The listed minimum tests (flat equals flat step, bursts apart, clamp, survival, tail, residual, past the flat sum, each check boundary, wait bound 30 s, pack share, canary, settings, shadow table). | partly: `crates/js-sched-placer/src/curve_room_tests.rs:333`, `crates/js-lease-server/src/config/placement_curves.rs:163`, the canary through the flags `crates/js-lease-server/src/config/placement_curves_canary_tests.rs:160` | komira-ai/jobscheduler#1087 |
-| §7 Stale agent doc | crates/js-agent/src/lifecycle/machine/mod.rs:500-502 still says memory is held by the lease's memory.max, which contradicts the code since komira-ai/jobscheduler#1027. Needs a one-line doc fix. | no | komira-ai/jobscheduler#1193 (new) |
+| §7 Stale agent doc | crates/js-agent/src/lifecycle/machine/mod.rs:500-502 still says memory is held by the lease's memory.max, which contradicts the code since komira-ai/jobscheduler#1027. Needs a one-line doc fix. | `crates/js-agent/src/lifecycle/machine/mod.rs:504` | komira-ai/jobscheduler#1200 |
 | §7 Pack-limit default conflict (komira-ai/jobscheduler#1076 message says 0.8) | The commit message differs from the code (0.5); the doc uses 0.5. | decision, no code | - |
 | §7 MAX_PROFILES (and §8 Q10) | MAX_PROFILES is 2048 against 5,335 classes in 4 h; eviction may keep the wrong classes (INFERRED). Question 10 says do not raise it now. | decision, no code | - |
 | §8 Q1 margin per job on flat number | Recommend none. | decision, no code | komira-ai/jobscheduler#1087 |
@@ -149,9 +150,9 @@ As read: Six-part note; each part's code changes are built on main; each part en
 | Part 1 Decisions: Prepare then Mount stays two calls | Prepare then Mount stays two calls (decision, not a gap). | `crates/js-agent/src/lifecycle/machine/providing.rs:198-218` | - |
 | Part 2 Still to measure | The farm table after the second-part agent ships (p50/p90 per segment on the slow node and a fast one). | decision, no code | - |
 | Part 3 What is left #1 | The farm table after the agent and server ship, on a busy node and a normal-load node. | decision, no code | komira-ai/jobscheduler#941 |
-| Part 3 What is left #2 | Mount sent by the provider client as soon as Prepare is answered, saving one worker step per source. | no | komira-ai/jobscheduler#1145 (new) |
-| Part 3 What is left #3 | The connection of each heartbeat: a new TCP and TLS handshake every beat (js-client). | no | komira-ai/jobscheduler#1146 (new) |
-| Part 3 What is left #4 | The p99: the integrity check's settle wait (1 s, on the worker, after a job that left a process or mount behind) and the image budget's first walk after a restart, both on threads a start waits behind. | no | komira-ai/jobscheduler#1147 (new) |
+| Part 3 What is left #2 | Mount sent by the provider client as soon as Prepare is answered, saving one worker step per source. | `crates/js-agent/src/provider/mod.rs:204` (then), `crates/js-agent/src/provider/mod.rs:234` (Carrier::carry), `crates/js-agent/src/provider/flight.rs:115` (finish), `crates/js-agent/src/provider/flight.rs:138` (forget); `docs/design/start-latency.md:618` | komira-ai/jobscheduler#1145 (new); komira-ai/jobscheduler#1201 |
+| Part 3 What is left #3 | The connection of each heartbeat: a new TCP and TLS handshake every beat (js-client). | `crates/js-client/src/client.rs:30`, `crates/js-client/src/client.rs:307-309` | komira-ai/jobscheduler#1146 (new); komira-ai/jobscheduler#1203 |
+| Part 3 What is left #4 | The p99: the integrity check's settle wait (1 s, on the worker, after a job that left a process or mount behind) and the image budget's first walk after a restart, both on threads a start waits behind. | `crates/js-agent/src/lifecycle/machine/cleanup.rs:417-430`, `crates/js-agent/src/crun/pull.rs:152` | komira-ai/jobscheduler#1147 (new); komira-ai/jobscheduler#1207 |
 | Part 4 What is left #1 | The farm measurement after this agent ships: received->taken p50 in a same-size burst, 'job worker is busy' counts, Cleaned lines' worker_ms against steps. | decision, no code | - |
 | Part 4 What is left #2 | The post-job checks and the owed record's syncs still run on the worker, once for each job. | not a gap: Part 4 (docs/design/start-latency.md, lines 375-377) records a decision: "The owed record, the checks and the quota stay on the worker" | - |
 | Part 5 What is left | The farm measurement after this server ships: time from container running to server job state running, from job store records against Started lines. | decision, no code | komira-ai/jobscheduler#1067 |
@@ -175,7 +176,7 @@ As read: No status header and no "Designed / not yet / Open question" tags. Read
 | §5 items 1-5 | Preparing, ready, exclusive_ready, typed exclusive_refused, readiness hook, prepare_timeout, max_replace, exclusive-not-ready. | `crates/js-agent/src/exclusive.rs:57`, `crates/js-agent/src/readiness.rs:93` | komira-ai/jobscheduler#834; komira-ai/jobscheduler#1071 |
 | §5 item 6 | The wall-time clock starts at the token, not at the commit (D52). | superseded: On the job path the job's own wall limit applies; the allocation records the wall limit (page §5 item 7). No lease token exists after the lease API was deleted  | - |
 | §6 Caps | max_whole_node, max_draining, keep_for_ordinary, allow_last_capable and the effective ceiling are enforced; validation at load. | `crates/js-whole/src/caps.rs`, `crates/js-sched/src/scheduler/whole.rs:56` | komira-ai/jobscheduler#1193 (new) |
-| §6 Caps (per consumer) | max_whole_node_per_consumer is enforced 'where the caller's identity exists: the lease server or the registry'. | superseded: `docs/design/jobscheduler-design.md:817` | komira-ai/jobscheduler#1193 (new) |
+| §6 Caps (per consumer) | max_whole_node_per_consumer is enforced 'where the caller's identity exists: the lease server or the registry'. | superseded: `docs/design/jobscheduler-design.md:818`; `docs/design/whole-node.md` section 6 now says the single-token service does not enforce it | komira-ai/jobscheduler#1200 |
 | §1 / §6 Mixed pools | A mixed pool (class action or vm) offers whole-node when max_whole_node is set, protected by keep_for_ordinary and last-capable. | no | komira-ai/jobscheduler#1149 (new) |
 | §7 Elastic providers (step 58) | A whole-node request acquires a fresh machine instead of draining; the acquire carries the request id and the machine is committed to it at registration ('reserved at birth'); a launch counts toward the ceiling from the acquire; a quiet host that appears first takes the request and the machine is released by idle rule. | `crates/js-lease-server/src/scaler/jobs.rs:1-35`, `crates/js-scaler/src/pass.rs:39` | - |
 | §7 Elastic pool at machine cap (D62-65, step 64) | At max_machines with a growing queue, drain, evict and swap up one elastic machine; never a host with a whole-node lease or mark. | no | komira-ai/jobscheduler#1150 (new) |
@@ -187,18 +188,18 @@ As read: No status header and no "Designed / not yet / Open question" tags. Read
 | §12 step 46 | The Whole admission, commit at quiet, readiness gate, end. | `crates/js-agent/src/exclusive.rs`, `crates/js-sched-placer/src/whole_jobs.rs` | - |
 | §12 step 54 | GPU machines register into a whole-node pool. | partly: Mechanism built (js-agent join, class whole-node). The deployment is not repo code. | - |
 | §12 step 56 | Reservation and drain. | `crates/js-sched/src/scheduler/whole.rs`, `crates/js-whole/src/cost.rs`; the record of each large request's reservation and each lease's release: `crates/js-sched/src/scheduler/reservation_log.rs` | komira-ai/jobscheduler#582; komira-ai/jobscheduler#1133 |
-| §12 step 57 | Caps and the host-job rule. | partly: `crates/js-whole/src/caps.rs` | dropped by design: jobscheduler-design.md says there is no per-consumer cap in the single-token service; whole-node.md is stale |
+| §12 step 57 | Caps and the host-job rule. | partly: `crates/js-whole/src/caps.rs` | dropped by design: jobscheduler-design.md says there is no per-consumer cap in the single-token service; whole-node.md section 6 now says so (komira-ai/jobscheduler#1200) |
 | §12 step 58 | Elastic machines for whole-node requests. | `crates/js-lease-server/src/scaler/jobs.rs:14` | komira-ai/jobscheduler#582 |
 | §12 step 59 (via §1) | Packing and demand, with ucdk classes admitted Book. | superseded: `crates/js-sched-placer` | komira-ai/jobscheduler#833; komira-ai/jobscheduler#906 |
 
 ## lease-limits.md
 
-As read: No status header, no What-is-left list, no open questions or build steps. The page is written as current design ("always on"). Its only explicit status markers are one "planned ... dropped" note and one "planned in scheduler.md" pointer.
+As read: No status header, no What-is-left list, no open questions or build steps. The page is written as current design ("always on"). Its only explicit status markers are one "planned ... dropped" note and one "planned in scheduler.md" pointer (removed by komira-ai/jobscheduler#1200).
 
 | Section | Claim | On main | Tracking |
 |---|---|---|---|
 | 12.3 Labels, ucdk adapter | A ucdk adapter that carried the label set into ucdk's Stamp.extra was planned, then dropped. | superseded: `docs/design/decisions.md:39` | komira-ai/jobscheduler#28 |
-| 12.2 Usage record | The scheduler's usage record is the 'Accounting' record planned in docs/design/scheduler.md. | partly: `docs/design/scheduler.md`, `crates/js-lease-server/src/job_api/fleet.rs:768` | komira-ai/jobscheduler#1151 (new) |
+| 12.2 Usage record | The scheduler's usage record is the 'Accounting' record planned in docs/design/scheduler.md. | superseded: the sentence naming `docs/design/scheduler.md` (not on main) is gone from `docs/design/lease-limits.md`; the usage record is `crates/js-lease-server/src/job_api/fleet.rs:768` | komira-ai/jobscheduler#1151 (new); komira-ai/jobscheduler#1200 |
 | 12.1 Reaper machine ownership (leaked instance) | The reaper releases a leaked instance: one that list returns, carries our tags, and no pool host or acquire record accounts for, after a grace of ticks. | no | - |
 | 12.1 Lease end | The lease table `js-lease` is deleted; the job service of js-lease-server ends a job at its wall. | `crates/js-lease`, `crates/js-jobs` | - |
 | 12.3 Labels, instance tags and sweep | Providers tag instances with jobscheduler.dev/pool, acquire and scheduler; destroying a Job definition or the environment sweeps billable leftovers by the instance label as part of the closed-world delete, with a test on the fake. | partly: instance tags and a report-only leftover sweep are built (`crates/js-provider-gce/src/own.rs:109`, `crates/js-watch/src/lib.rs:11`: leftovers are counted and reported, never released; `abort` acts only when told to apply). Not built: the cleanup on deleting a Job definition or environment, which has nothing to hang on, as jobscheduler has no Job definitions or environment delete (docs/design/ucdk.md is superseded) | - |
@@ -307,7 +308,7 @@ As read: Current entry-point design doc (target plus as-built notes); not supers
 
 | Section | Claim | On main | Tracking |
 |---|---|---|---|
-| intro / 3.1 table: generated CLI and library | Generated js job/host/pool/provider/usage commands and JobClient exist; three hand-written loop commands stay by design | `crates/js-client/src/jobs/`, `crates/js-cli/src/jobs/` | - |
+| intro / 3.1 table: generated CLI and library | Generated js job/host/pool/provider/usage commands and JobClient exist; three hand-written loop commands and js join-token stay by design | `crates/js-client/src/jobs/`, `crates/js-cli/src/jobs/` | - |
 | 3.1 Jobs and allocations; 4.1 store; 3.1 Postgres store | Job/allocation tables on Postgres (not only SQLite file beside the lease file) | `crates/js-lease-server/src/job_store.rs:1-30` | komira-ai/jobscheduler#874; komira-ai/jobscheduler#878 |
 | 3.1 Host table | Host book (hosts, sessions, credentials) as scheduler state in Postgres, with no js-registry component | partly: `crates/js-lease-server/src/node_rows.rs:1`, `crates/js-registry` | komira-ai/jobscheduler#873 |
 | 3.1 Queue and tail marks | Whole-node lease wait list/ledger leave the engine memory with the lease API | `crates/js-lease-server/src/job_whole.rs` | komira-ai/jobscheduler#831 |
@@ -360,7 +361,7 @@ As read: Current entry-point design doc (target plus as-built notes); not supers
 | 12.1 step 16 | Retire Podman firewall | `crates/js-agent/src/cli.rs:421-433` | - |
 | 12.1 step 18 | Measure launch time and publish the number | partly: `docs/design/agent-egress.md:251-285`, `.github/workflows/js-launch-measure.yml` | komira-ai/jobscheduler#668 |
 | 12.1 step 19 | EC2 and GCE providers; arm64 archive | `crates/js-provider-ec2`, `crates/js-provider-gce` | komira-ai/jobscheduler#757; komira-ai/jobscheduler#767 |
-| 12.1 step 20; Q: agent wire | Decide whether hello/heartbeat leave JSON polling | decision, no code | komira-ai/jobscheduler#670 |
+| 12.1 step 20; Q: agent wire | Decide whether hello/heartbeat leave JSON polling | decision, no code: decided (stay on JSON polling), recorded at `docs/design/jobscheduler-design.md:1052` | komira-ai/jobscheduler#670; komira-ai/jobscheduler#1200 |
 | 12.1 step 21 | Self-fence on silence, fencing token, per-client tokens, update hook, host-job taint | `crates/js-agent/src/cli.rs:334` | - |
 | 12.1 step 22 | crun is the Linux runtime | `crates/js-agent/src/platform` | komira-ai/jobscheduler#890 |
 | 12.1 step 23 | GPUs for crun | `crates/js-agent/src/crun/gpu.rs:1` | - |
@@ -370,7 +371,7 @@ As read: Current entry-point design doc (target plus as-built notes); not supers
 | 12.1 steps 29, 30 | Remove renewal; delete lease API | yes: PR komira-ai/jobscheduler#831; no renew/lease-ttl code in js-lease-server; js-lease crate gone | komira-ai/jobscheduler#831 |
 | 12.1 step 31 | Live logs | `crates/js-logstore`, `crates/js-logmint` | - |
 | 12.2 Macs: read model allow | `--read-model allow`: a bundle run's profile is the allow-list of the host's macOS base set and its grants, after a start-up self-test as a lent account through the supervisor | `crates/js-agent/src/native/allow.rs`, `crates/js-agent/src/mac_allow.rs` | komira-ai/jobscheduler#1157 |
-| 12.2 Macs remaining | notarized binaries; automated isolation test per release; VM runtime with network path | partly: `xtask/tests/macos_pkg_workflow/main.rs:561` | komira-ai/jobscheduler#1158 (new) |
+| 12.2 Macs remaining | notarized binaries; automated isolation test per release; VM runtime with network path | partly: `xtask/tests/macos_pkg_workflow/main.rs:561`; the isolation test runs in every release as the beta job `beta-macos-isolation` (`.github/workflows/js-agent-native-isolation.yml:51`, `.github/workflows/release.yml:548`) and gates nothing yet | komira-ai/jobscheduler#1158 (new); komira-ai/jobscheduler#1202 |
 | 12.2 Cross-cutting | Supervisor definition, deny list of hosts, spot reclaim handling, safe restore verb | no | komira-ai/jobscheduler#1174 (new) |
 | 13 Q1 one writer or HA | Active writer vs hot standby vs several active | superseded: `crates/js-lease-server/src/lib.rs:422` | komira-ai/jobscheduler#873; komira-ai/jobscheduler#878 |
 | 13 Q2 HTTP/JSON gateway | B: generated gateway under /v1/jobs | `crates/js-api-gateway/src/annotation.rs` | - |
@@ -414,9 +415,9 @@ As read: Header says "draft for review", written against 73132d5f7. It has no pe
 | 7.3 step 6 | A pool-level setting for the image pull policy (instead of the fixed --container-pull missing). | no | - |
 | 13.3 end | Pool status lists machines. | `crates/js-lease-server/src/status.rs:104` | - |
 | Q1 / PR 10 | Server flags move into [server]; other flags refused beside --config. | `crates/js-lease-server/src/flags.rs:1-90` | - |
-| PR 10 / Q17 | Amend providers.md K6, registration.md and configuration.md, and fix the stale --ca-cert comment in js-agent/cli.rs. | yes: cli.rs:83-88 now says platform roots are not used and bundled roots are. registration.md:33,65 describes user data delivery. providers.md:94. configuration.md:9. | komira-ai/jobscheduler#344; komira-ai/jobscheduler#1126 |
+| PR 10 / Q17 | Amend providers.md K6, registration.md and configuration.md, and fix the stale --ca-cert comment in js-agent/cli.rs. | yes: cli.rs:83-88 now says platform roots are not used and bundled roots are, and `the_ca_cert_help_says_it_is_optional_and_names_the_bundled_roots` (`crates/js-agent/src/cli.rs:563`) pins the help text. registration.md:33,65 describes user data delivery. providers.md:94. configuration.md:9. | komira-ai/jobscheduler#344; komira-ai/jobscheduler#1126 |
 | Q3 | The service creates an ssh key `js-<scheduler>` from a throwaway key when the account has none. | `crates/js-provider-lambdalabs/src/provider.rs:306-335` | - |
-| Q4 / PR 7b | Host credential after first hello; join token retired. | superseded by G3: the host credential and the join token are removed; a host is known by its certificate, `crates/js-lease-server/src/host_cert.rs`, `crates/js-lease-server/src/agent_api/host_cert.rs` | - |
+| Q4 / PR 7b | Host credential after first hello; join token retired. | `crates/js-agent-wire/src/credential.rs:33`, `crates/js-lease-server/src/host_cert.rs` | - |
 | Q23 / PR 4 | Required agent_listen, serving only agent routes. | `crates/js-lease-server/src/file/server.rs:32` | - |
 | Q22 / 8.3 | A policy-read warning in check(): warn when the Tailscale policy does not limit the tag to the agent port. | no | - |
 | Q9 | A lifetime total per pool, beyond the day window. | partly: max_spend_per_day is required | - |
@@ -430,7 +431,7 @@ As read: Header says "draft for review", written against 73132d5f7. It has no pe
 
 ## job-rootfs.md
 
-As read: Status: design for the owner's review; items 2-6 built (header). Stale: items 1, 7 (read-only/read-write part) and 8 (runbook) are also built; items 9-14 and the macOS copy-on-write/prepare remain unbuilt.
+As read: Status: design for the owner's review; items 2-6 built (header). The header now names items 1 to 6 and 8 as built and item 7 as built for read-only and read-write mounts; items 9-14 and the macOS copy-on-write/prepare remain unbuilt.
 
 | Section | Claim | On main | Tracking |
 |---|---|---|---|
@@ -478,7 +479,7 @@ As read: Header line 4-5 says "Status: decided, not built ... Nothing here is bu
 
 ## cpu-over-time.md
 
-As read: Status: design for review; header says replay, step 1 and step 2 built, steps 3 and 4 built as placement-profiles-live.md revised them behind --placement-curves on (the header now says the decide-in-shadow part of step 3 is built for CPU, komira-ai/jobscheduler#1143, and its memory half, the memory shadow, too).
+As read: Status: design for review; header says replay, step 1 and step 2 built, step 4 and the checks of step 3 built as placement-profiles-live.md revised them behind --placement-curves on (header corrected by komira-ai/jobscheduler#1200); the header now also says the decide-in-shadow part of step 3 is built for CPU (komira-ai/jobscheduler#1143), and its memory half, the memory shadow, too.
 
 | Section | Claim | On main | Tracking |
 |---|---|---|---|
@@ -509,13 +510,13 @@ As read: Status: design for review; header says replay, step 1 and step 2 built,
 
 ## live-logs.md
 
-As read: Status: "Planned, partly built." Body shows the parts of sections 3 to 8 built on main; design section 12.1 step 31 still says "Status: Planned" (stale). Only deferred or open items remain, and no live-logs work is tracked.
+As read: Status: "Planned, partly built." Body shows the parts of sections 3 to 8 built on main; design section 12.1 step 31 now says Built (komira-ai/jobscheduler#1200), and the page header now reads "Built for `crun` and macOS native jobs". Only deferred or open items remain, and no live-logs work is tracked.
 
 | Section | Claim | On main | Tracking |
 |---|---|---|---|
-| Status header | Whole feature is 'Planned, partly built'; lists wire fields, js-logstore, [logs] table, js-logmint (STS and prefix grant), server logs module, agent uploader for crun and macOS native, and GetLogs reader as built. | `crates/js-logstore/src/presigned.rs:241`, `crates/js-logmint` | - |
+| Status header | Whole feature is 'Built for `crun` and macOS native jobs; later work is open (section 10)'; lists wire fields, js-logstore, [logs] table, js-logmint (STS and prefix grant), server logs module, agent uploader for crun and macOS native, and GetLogs reader as built. | `crates/js-logstore/src/presigned.rs:241`, `crates/js-logmint` | komira-ai/jobscheduler#1200 |
 | §10 Crates (step 31 of design 12.1) | Crates and fields to build: js-logstore, js-logmint, js-agent-wire log fields, GetLogs fields in js-proto with comment rewritten, agent logs module, server job_api/logs and host credential table; each new crate in layers.toml. | `.github/workflows/ci.yml:244`, `crates/js-testkit/src/s3.rs` | - |
-| design section 12.1 step 31 (cited by this page) | jobscheduler-design.md still says 'Status: Planned' for step 31 Live logs. | `docs/design/jobscheduler-design.md:1063` | - |
+| design section 12.1 step 31 (cited by this page) | jobscheduler-design.md says 'Status: Built' for step 31 Live logs, with live logs for the container-engine runtime and a native agent's sink not built. | `docs/design/jobscheduler-design.md:1064` | komira-ai/jobscheduler#1200 |
 | §10 Later and open: Other runtimes (D6) - container-engine fallback | The container-engine fallback does not report log-upload, ignores a sink and sends no logs report; live logs for it are later work. | no | - |
 | §10 Later and open: Other runtimes - native agent does not report per-job so native runs carry no sink | A native agent does not yet report per-job, so its job starts carry no log_sink until it does. | `crates/js-agent/src/contract.rs:150-156` | - |
 | §10 Later and open: Who deletes old logs (D4) | Scheduler never deletes log objects; retention is the operator's bucket lifecycle rule. Whether the scheduler should delete is design question 26. | decision, no code | - |
@@ -527,12 +528,12 @@ As read: Status: "Planned, partly built." Body shows the parts of sections 3 to 
 
 ## mac-account-per-job.md
 
-As read: Status line says steps 1 and 3 built, step 2 designed and not yet landed. Stale: step 2 was built in a different shape by komira-ai/jobscheduler#1023 (slot accounts, fresh account per job) after komira-ai/jobscheduler#1014 was closed. The helper's pool (step 5) is still on main.
+As read: Status line says steps 1 and 3 built, step 2 built in a different shape (the status line, corrected by komira-ai/jobscheduler#1200, now says so): slot accounts, fresh account per job, by komira-ai/jobscheduler#1023 after komira-ai/jobscheduler#1014 was closed. The helper's pool (step 5) is still on main.
 
 | Section | Claim | On main | Tracking |
 |---|---|---|---|
 | Status line, steps 1 and 3 | Signing, the Full Disk Access profile, the agent's own grant check and refusal of native jobs without it are built. | `crates/js-agent/src/native/grant.rs:1-60`, `crates/js-agent-wire/src/refusal.rs:349` | komira-ai/jobscheduler#1004; komira-ai/jobscheduler#1016 |
-| Status line / Step 2 (whole) | A new account for every native job, deleted afterwards, lands in its own change once the grant is seen in force and step 4 is measured. | partly: `crates/js-agent/src/mac_accounts/mod.rs:1-120`, `crates/js-agent/src/native/accounts.rs:44-75` | komira-ai/jobscheduler#1014; komira-ai/jobscheduler#1023; komira-ai/jobscheduler#1032; komira-ai/jobscheduler#1034 |
+| Status line / Step 2 (whole) | A new account for every native job, deleted afterwards, lands in its own change once the grant is seen in force and step 4 is measured. | partly: `crates/js-agent/src/mac_accounts/mod.rs:1-120`, `crates/js-agent/src/native/accounts.rs:44-75` | komira-ai/jobscheduler#1014; komira-ai/jobscheduler#1023; komira-ai/jobscheduler#1032; komira-ai/jobscheduler#1034; komira-ai/jobscheduler#1200 |
 | Step 2: The account | The account is hidden, has shell /usr/bin/false, no password and is never an administrator. Its primary group is the lease group and its home is made mode 0700. Its name is `kbf-lease-<term>-<seq>` and it is made and deleted by the helper's user-create and user-delete verbs. | partly: `crates/js-agent/src/mac_accounts/mod.rs:42-50`, `crates/js-agent/src/mac_accounts/make.rs` | komira-ai/jobscheduler#1023 |
 | Step 2: Choosing a uid | The uid is the next free one after the last given, wrapping within the range. A uid is free only when no live lease, record, process or owned file remains. | `crates/js-agent/src/mac_accounts/uid.rs:5-24`, `crates/js-agent/src/mac_accounts/mod.rs:52-70` | komira-ai/jobscheduler#1023 |
 | Step 2: After the job, steps 1-6 | After a job, kill-uid, IPC removal and the shared-place sweep run. Then the record and home are deleted and the proof shows them gone. Only then is the lease marked gone and the uid free. | partly: `crates/js-agent/src/mac_accounts/teardown.rs:175-200`, `crates/js-agent/src/mac_accounts/proof.rs` | komira-ai/jobscheduler#1023; komira-ai/jobscheduler#1106 |
@@ -551,13 +552,13 @@ As read: Status line says steps 1 and 3 built, step 2 designed and not yet lande
 
 ## mac-one-program.md
 
-As read: Status: accepted 2026-11-22; header says "apart from the accounts of section 11, nothing here is built yet". Stale: sections 11-14 are built (accounts, supervisor, native runtime over accounts, put ingest). Sections 3-7 are partly superseded by 12-13 (D5 is marked superseded; adoption, hand-over and helper removal remain unbuilt).
+As read: Status: accepted 2026-11-22; header (corrected by komira-ai/jobscheduler#1200) lists sections 11-14 as built (accounts, supervisor, native runtime over accounts, put ingest), komira-ai/jobscheduler#1209 built the adoption of runs across an agent restart and komira-ai/jobscheduler#1215 the hand-over on an update (section 13 says so; the header still lists both as not built). Sections 3-7 are partly superseded by 12-13 (D5 is marked superseded; helper removal remains unbuilt).
 
 | Section | Claim | On main | Tracking |
 |---|---|---|---|
-| Status header | Apart from section 11, nothing here is built yet. | no | komira-ai/jobscheduler#1193 (new) |
+| Status header | The header lists what is built (slot accounts, supervisor, native runs over the accounts, put ingest: sections 11 to 14) and what is not (adoption across an update, hand-over, pf job folded in (superseded), removal of js-mac-session and js-mac-provision from the package). | partly: `crates/js-agent/src/mac_accounts/`, `crates/js-agent/src/mac_supervisor/` | komira-ai/jobscheduler#1200 |
 | 1 / header | The package ships one program (js-agent) and one launchd job. | no | komira-ai/jobscheduler#1162 (new) |
-| 1 / 5 / 7 step 6 | An agent update with jobs running hands over on a Mac; the new agent adopts the runs. | no | komira-ai/jobscheduler#1161 (new) |
+| 1 / 5 / 7 step 6 | An agent update with jobs running hands over on a Mac; the new agent adopts the runs. | `crates/js-agent/src/update_hook/step/prepare.rs:371`, `crates/js-agent/src/native/adopt.rs:55`, `crates/js-agent/tests/agent/update_hook/steps_handover_native.rs:92` | komira-ai/jobscheduler#1161 (new); komira-ai/jobscheduler#1209; komira-ai/jobscheduler#1215 |
 | 1 / 7 step 5 / 3 | Update hook on a Mac only stops and starts the agent (helper.rs and pf.rs steps, helper_unit, pf_unit, socket_group deleted). | no | komira-ai/jobscheduler#1162 (new) |
 | 1 / 7 step 5 | Agent plist has no --native-helper-socket; native jobs are switched on by --native-accounts in the flags file. | `packaging/js-agent-macos/README.md:41` | komira-ai/jobscheduler#1023; komira-ai/jobscheduler#1032 |
 | 1 (per-job accounts box) | If accounts are made and deleted per job: supervisor never makes accounts, remove ends supervisor then kills uid then deletes account, ledger created/deleted records, reset at start keeps adopted accounts. | `crates/js-agent/src/mac_accounts/` | komira-ai/jobscheduler#1014; komira-ai/jobscheduler#1023 |
@@ -570,10 +571,10 @@ As read: Status: accepted 2026-11-22; header says "apart from the accounts of se
 | 3 | Pool users are permanent: reset empties in place, replace becomes attribute reset (a change to the old pool that lands on its own). | superseded: `crates/js-agent/src/mac_accounts/teardown.rs` | komira-ai/jobscheduler#1023 |
 | 3 / 4.1 / 7 step 3 | js-supervise crate (layer runtime) takes the platform-free core out of oci/supervise.rs; layers.toml updated; macOS SupervisorId from proc_pidinfo. | `crates/js-supervise/src/`, `crates/js-contain/src/oci/supervise.rs` | komira-ai/jobscheduler#996 |
 | 4.2 / 7 step 4 | macOS supervise arm: js-agent __supervise-native `<state-dir>` `<lease>` `<uid>` ... -- `<argv>`, root supervisor, own process group, holds the deadline with no agent, per-lease lock file, agent-written supervisor file, tested against FakeHost. | superseded: `crates/js-agent/src/mac_supervisor/` | komira-ai/jobscheduler#1030 |
-| 4.2 Agent's side | Agent adopts running supervisors after a restart (journal supervisor {pid,start}, adopt on live supervisor or exit record, reset at start skips adopted leases, supervisor file for an unjournaled supervisor). | no | komira-ai/jobscheduler#1160 (new) |
+| 4.2 Agent's side | Agent adopts running supervisors after a restart (journal supervisor {pid,start}, adopt on live supervisor or exit record, reset at start skips adopted leases, supervisor file for an unjournaled supervisor). | partly: journal `crates/js-agent/src/native/journal.rs:69`, identity and test `crates/js-agent/src/mac_supervisor/adopt.rs:43`, `crates/js-agent/src/mac_supervisor/adopt.rs:67`, runtime `crates/js-agent/src/native/adopt.rs:55`, pool keeps adopted accounts `crates/js-agent/src/native/accounts.rs:56`. The supervisor file for an unjournaled supervisor is replaced by a parent check: a supervisor whose agent is gone starts no job (`crates/js-agent/src/mac_supervisor/run.rs:170`, section 13) | komira-ai/jobscheduler#1160 (new); komira-ai/jobscheduler#1209 |
 | 4.2 One process at a time (D3) | Agent holds an exclusive flock on ledger.lock for its whole life; a second agent fails to start. | no | - |
 | 4.2 Privacy attribution | Agent holds Full Disk Access; agent, supervisor and job all keep responsibility (Kept::Supervisor / Kept::Job); spawn_sites KEEPERS holds this to two files. | `crates/xtask/src/spawn_sites.rs:94`, `packaging/js-agent-macos/mdm/js-agent-full-disk-access.mobileconfig` | komira-ai/jobscheduler#1016; komira-ai/jobscheduler#1021 |
-| 4.2 Not decided | How to close the Seatbelt fence gap (job holding the agent's FDA reads TCC-only places). | partly: `crates/js-agent/src/native/fence.rs` | komira-ai/jobscheduler#1025 |
+| 4.2 Not decided | How to close the Seatbelt fence gap (job holding the agent's FDA reads TCC-only places). | partly: decided and built as option (a): the profile read-denies the places and denies link and clone from them (`crates/js-mac-pool/src/seatbelt/profile.rs:89`, `crates/js-mac-pool/src/seatbelt/profile.rs:176`, `crates/js-agent/src/native/fence.rs:24`). Not built: the per-release walk of the system volume | komira-ai/jobscheduler#1025; komira-ai/jobscheduler#1020; komira-ai/jobscheduler#1117 |
 | 4.2 Not decided | VM launcher (js-vmm) stays disclaimed or keeps responsibility. | decision, no code | - |
 | 4.2 Not decided | GUI-session path (launchctl asuser, disclaim::exec) stays disclaimed; not measured. | decision, no code | - |
 | 4.2 Not measured | What macOS does with the responsible process when the agent that started a supervisor exits. | decision, no code | - |
@@ -581,23 +582,23 @@ As read: Status: accepted 2026-11-22; header says "apart from the accounts of se
 | 7 step 1 | Add a probe to js-mac-probe that runs on the beta macOS runner: a process group under a launchd job survives bootout with parent pid 1. | yes: `crates/js-mac-probe/src/macos/launchd.rs`, `crates/js-mac-probe/src/launchd.rs`; run by `js-mac-probe report` in `.github/workflows/macos-probe.yml` | komira-ai/jobscheduler#1166 |
 | 5 / 7 step 5 | Cutover with one launchd job: write handover file, boot out js-agent, start staged agent; rollback same three steps swapped; agent applies pf anchor itself. | no | komira-ai/jobscheduler#1162 (new) |
 | 5 | The switch release's package drops js-agent.session.plist and js-agent.pf-pool.plist; cutover boots both out and removes their plists; rollback to a two-daemon release bootstraps them back. | no | komira-ai/jobscheduler#1162 (new) |
-| 5 / 7 step 6 | hands_over gains a launchd-plus-native case gated by a native-handover word on both agents' stops: line; steps_handover.rs launchd cases. | no | komira-ai/jobscheduler#1161 (new) |
-| 6 / 7 step 2 | pf anchor applied by the agent at start (install --flags-file call), reloaded every 30 s on a thread, first NotReferenced failure retried, jobs refused until in force; pf enable token kept in `<state-dir>/pf-token.` | superseded: PR komira-ai/jobscheduler#1010 closure comment (2026-11-22): a native job's network is limited by its Seatbelt profile, so the agent does not load a pf anchor | komira-ai/jobscheduler#1193 (new) |
+| 5 / 7 step 6 | hands_over gains a launchd-plus-native case gated by a native-handover word on both agents' stops: line; steps_handover.rs launchd cases. | `crates/js-agent/src/update_hook/step/prepare.rs:371`; the launchd cases are in `crates/js-agent/tests/agent/update_hook/steps_handover_native.rs:92` and `:169` | komira-ai/jobscheduler#1161 (new); komira-ai/jobscheduler#1215 |
+| 6 / 7 step 2 | pf anchor applied by the agent at start (install --flags-file call), reloaded every 30 s on a thread, first NotReferenced failure retried, jobs refused until in force; pf enable token kept in `<state-dir>/pf-token.` | superseded: PR komira-ai/jobscheduler#1010 closure comment (2026-11-22): a native job's network is limited by its Seatbelt profile, so the agent does not load a pf anchor; the page marks sections 6 and 7 step 2 superseded | komira-ai/jobscheduler#1200 |
 | 6 | Operator verbs check/remove/render/probe of js-mac-provision dropped; pf_as_root.rs and the privileged-tests workflow call the library. | superseded: PR komira-ai/jobscheduler#1010 closed as superseded (agent does not load a pf anchor; Seatbelt profile limits network); step 5 of the design still pending, with | - |
 | 7 step 5 | Switch: NativeRuntime calls the pool in-process and starts every run through a supervisor. | yes: native/start.rs start_steps (account-lent, supervisor-started, job-ready) per s13; mac_supervisor/launch.rs SystemLauncher; no --native-helper-socket. | komira-ai/jobscheduler#1023; komira-ai/jobscheduler#1030; komira-ai/jobscheduler#1032 |
-| 7 step 5 | Adoption reads exit records; boot_reset gains the adopted list; agent locks the ledger. | no | komira-ai/jobscheduler#1160 (new) |
+| 7 step 5 | Adoption reads exit records; boot_reset gains the adopted list; agent locks the ledger. | partly: adoption reads exit records (`crates/js-agent/src/mac_supervisor/adopt.rs:67`) and the pool's open (the native path's boot reset) takes the adopted list (`crates/js-agent/src/native/accounts.rs:56`, `crates/js-agent/src/mac_accounts/pool.rs:339` lent_to). Not built: the agent's lock on the ledger | komira-ai/jobscheduler#1160 (new); komira-ai/jobscheduler#1209 |
 | 7 step 5 | Package drops js-mac-session and the helper's plist; socket, protocol, client and caller check deleted; workflows js-agent-macos-pkg.yml, js-agent-native-privileged-tests.yml, js-mac-provision-privileged-tests.yml change; docs mac-runtime.md, spawn-disclaim.md, mac-lease-teardown.md, mac-hostkeeper-package.md, design.md, packaging README updated. | no | komira-ai/jobscheduler#1163 (new) |
-| 7 step 5 tests | fake_helper.rs (772 lines) removed; runtime tests run over a pool with a fake host; kept tests renamed (adopt.rs, bound.rs, journal.rs); new tests (restart keeps adopted users, lost journal lease reset, supervisor without = line ended, second agent fails, journal-reader and exit-record cross-version). | partly: `crates/js-agent/tests/agent/native/fake_accounts.rs` | komira-ai/jobscheduler#1160 (new) |
-| 7 step 5 | Real-macOS restart test on the beta stage: install the package, start a long native job, boot out and bootstrap js-agent, assert the job ran on, the new agent lists the run, exit reported once; holds back promote-macos. | no | komira-ai/jobscheduler#1160 (new) |
-| 7 step 6 | Hand-over on a Mac: stops: native-handover in macOS --version; launchd cases in steps_handover.rs; second real-macOS case for an update with hand-over. | no | komira-ai/jobscheduler#1161 (new) |
+| 7 step 5 tests | fake_helper.rs (772 lines) removed; runtime tests run over a pool with a fake host; kept tests renamed (adopt.rs, bound.rs, journal.rs); new tests (restart keeps adopted users, lost journal lease reset, supervisor without = line ended, second agent fails, journal-reader and exit-record cross-version). | partly: `crates/js-agent/tests/agent/native/fake_accounts.rs`; restart keeps adopted users `crates/js-agent/tests/agent/native/adopt.rs:290`, supervisor gone with no record `crates/js-agent/src/mac_supervisor/run_tests.rs:318`, journal both directions `crates/js-agent/tests/agent/native/journal.rs:180`, `crates/js-agent/tests/agent/native/journal.rs:251`. Not built: second agent fails (no ledger lock) | komira-ai/jobscheduler#1160 (new); komira-ai/jobscheduler#1209 |
+| 7 step 5 | Real-macOS restart test on the beta stage: install the package, start a long native job, boot out and bootstrap js-agent, assert the job ran on, the new agent lists the run, exit reported once; holds back promote-macos. | partly: restart tests at runtime and lifecycle level run in the beta stage's workspace tests, which hold back promote-macos (`crates/js-agent/tests/agent/native/lifecycle.rs:330`, with the real supervisor `crates/js-agent/tests/agent/native/mac.rs:613`, `crates/js-agent/tests/agent/native/mac.rs:638`). Not built: the launchd bootout/bootstrap test (a hosted runner's agent holds no Full Disk Access) | komira-ai/jobscheduler#1160 (new); komira-ai/jobscheduler#1209 |
+| 7 step 6 | Hand-over on a Mac: stops: native-handover in macOS --version; launchd cases in steps_handover.rs; second real-macOS case for an update with hand-over. | partly: `crates/js-agent/src/platform/macos.rs:62`, `crates/js-agent/tests/agent/update_hook/steps_handover_native.rs:92`. Not built: the second real-macOS case | komira-ai/jobscheduler#1161 (new); komira-ai/jobscheduler#1215 |
 | 7 step 7 | If owner agrees (Q2, Q3): delete uncalled verbs and node-admin, each its own PR. | partly: node-admin deleted (`crates/js-mac-session/src/main.rs:7`); the uncalled verbs not | komira-ai/jobscheduler#1164 (new); komira-ai/jobscheduler#1165 |
 | 7 (end) | The fixes of komira-ai/jobscheduler#988 (open) must be released before step 5 reaches them. | yes: komira-ai/jobscheduler#988 is MERGED ('js-agent on a Mac: the update hook compares the release link by real path ... first-install test'). | komira-ai/jobscheduler#988 |
-| 8 Q1 | One program on a Mac with a root supervisor per run keeping runs alive across restarts. | partly: Single program in the run path (native runtime, supervisor verb), but the helper still ships and runs is not kept across restarts (native/adopt.rs:1-12). | komira-ai/jobscheduler#1160 (new) |
+| 8 Q1 | One program on a Mac with a root supervisor per run keeping runs alive across restarts. | partly: Single program in the run path (native runtime, supervisor verb), and runs are kept across an agent restart (`crates/js-agent/src/native/adopt.rs:1-25`, `crates/js-agent/src/native/adopt.rs:80`); the helper still ships and runs. | komira-ai/jobscheduler#1160 (new); komira-ai/jobscheduler#1209 |
 | 8 Q4 | A Mac run's deadline is held by its supervisor while no agent runs. | superseded: s12: supervisor 'holds no deadline: the lifecycle's wall limit stops the job'; s13 'no other process holds a deadline'. | - |
 | 8 Q5 | The switch release and a rollback across it drain each Mac once; hand-over starts the release after. | decision, no code | - |
-| 9 item 4 | The real-macOS restart test holds back promote-macos. | no | komira-ai/jobscheduler#1160 (new) |
+| 9 item 4 | The real-macOS restart test holds back promote-macos. | partly: the restart tests run in the beta stage's workspace tests, which hold back promote-macos (`crates/js-agent/tests/agent/native/lifecycle.rs:330`, `crates/js-agent/tests/agent/native/mac.rs:613`); the launchd-level test is not built | komira-ai/jobscheduler#1160 (new); komira-ai/jobscheduler#1209 |
 | 11 | Slot accounts (Pool, ledger, DELETE_ROUNDS) are built; __account-cycle goes once the native runtime proves the cycle itself. | partly: `crates/js-agent/src/mac_accounts/cycle.rs:72` | komira-ai/jobscheduler#1106; komira-ai/jobscheduler#1121 |
-| 13 | Not built yet: adoption across an agent update, the retirement of js-mac-session's pool and the helper program. | no | komira-ai/jobscheduler#1160 (new) |
+| 13 | Not built yet: adoption across an agent update, the retirement of js-mac-session's pool and the helper program. | partly: adoption across an agent restart is built (`crates/js-agent/src/native/adopt.rs:55`, `crates/js-agent/src/native/adopt.rs:80`) and across an update by the hand-over (`crates/js-agent/src/update_hook/step/prepare.rs:371`); section 13 says so. Not built: the retirement of the pool and helper | komira-ai/jobscheduler#1160 (new); komira-ai/jobscheduler#1161 (new); komira-ai/jobscheduler#1163 (new); komira-ai/jobscheduler#1209; komira-ai/jobscheduler#1215 |
 | 13 Checks | A Mac agent runs no post-job leak scan (NoChecks) because the helper's baseline is not recorded. | no | - |
 | 14 | The run's result carries no put key; a result field comes with the build service's change for declared outputs. | no | - |
 
@@ -631,7 +632,7 @@ As read: Header (line 3): "Status: design only, DRAFT for the owner. Nothing her
 | s12: js-agent --version --json | Updater needs `--version --json` from js-agent. | no | - |
 | s12 One js-agent host / s11 Drain / R10 / s13 W2: cordon, wait for zero runs, Quiesce | Update waits for zero runs; agent has no Quiesce so benchmark nodes stay on daemon. | `crates/js-agent/src/worker/quiesce.rs:26`, `crates/js-agent/src/exclusive.rs` | komira-ai/jobscheduler#947; komira-ai/jobscheduler#972 |
 | s12 skew rules S2, S3, S4, S7, S8: tests and image capability in Hello | Skew test newest agent vs pinned server; capability gating; image capability in Hello (S4 NEW); N-1 adoption test (S7 NEW). | partly: `crates/js-agent-wire/tests/one_job_previous_release.rs`, `crates/js-agent-wire/src/caps.rs` | - |
-| s12 Signer trust D4 / K36 | O2 (kbf republishes agent under its own signer) required before production install; jobscheduler needs rulesets/branch protection. | partly: `docs/release.md:721`, `docs/ci.md:24` | komira-ai/jobscheduler#1115 |
+| s12 Signer trust D4 / K36 | O2 (kbf republishes agent under its own signer) required before production install; jobscheduler needs rulesets/branch protection. | partly: `docs/release.md:721`, `docs/ci.md:24`; the held script `tools/held/merge-queue/merge_queue.sh` turns on the merge queue ruleset of main when an admin runs it | komira-ai/jobscheduler#1115; komira-ai/jobscheduler#1197 |
 | s17 'Done in the same PR': docs rewrites | rollout.md rewritten; decisions.md/design.md D42-D45 and 5.4/9.2-9.4, extraction steps 21a/34, risks K35/K36 marked superseded; kbf-today.md corrections. | `docs/design/decisions.md:187`, `docs/design.md:698` | komira-ai/jobscheduler#338 |
 | s17 'Still to do': docs/release.md gamma step | release.md gamma step sets js-server then js-agent; asset names must match helper convention. | superseded: `docs/release.md:107-108` | - |
 | s17 'Still to do': Mac design rev 2, object-store rev 7 App A, storage design, wire spec section 6, Mac packaging design | Companion docs (not in this repo) to be updated by their authors. | decision, no code | - |
@@ -756,12 +757,12 @@ As read: No status header. A list of extraction steps 23 to 64 (Phases D to K), 
 
 ## agent-wire.md
 
-As read: Decision paper (step 20), recommends staying on JSON polling (A); no overall status header. Decision is followed in code, but the design doc's step 20 and section 3.6 still do not record it.
+As read: Decision paper (step 20), recommends staying on JSON polling (A); no overall status header. Decision is followed in code, and the design doc's step 20 and section 3.6 now record it (komira-ai/jobscheduler#1200).
 
 | Section | Claim | On main | Tracking |
 |---|---|---|---|
 | §2 live-log fields, line 335 | The agent's results_budget is to count the per-result logs fields and the beat's log_grant_state before it fits log tails | `crates/js-agent/src/lifecycle/machine/tails.rs:28-30`, `crates/js-agent/src/session.rs:694` | komira-ai/jobscheduler#691 |
-| §4 follow-up (A) 1 | Record the decision (stay on JSON polling) in section 3.6 and step 20 of jobscheduler-design.md | partly: `docs/design/jobscheduler-design.md:301` | komira-ai/jobscheduler#1193 (new) |
+| §4 follow-up (A) 1 | Record the decision (stay on JSON polling) in section 3.6 and step 20 of jobscheduler-design.md | `docs/design/jobscheduler-design.md:302`, `docs/design/jobscheduler-design.md:1052`, `docs/design/jobscheduler-design.md:1061` | komira-ai/jobscheduler#1200 |
 | §4 follow-up (A) 2 | Build the server side of the per-job set (step 28): job_start/job_stop/acks, and answer an older agent's heartbeat as a responder (cancel per held run, unknown-lease ack per result) without refusing a hello lacking per-job, with a test against the previous release's heartbeat fixture | `crates/js-lease-server/src/agent_api.rs`, `crates/js-registry/src/registry/beat.rs` | komira-ai/jobscheduler#664; komira-ai/jobscheduler#804 |
 | §4 follow-up (A) 2 / §5 point 3 | Decide how and when the run messages (Command::Start/Stop/Cancel, RunResult, ResultAck) leave major 1 / the wire (steps 28, 30) | no | komira-ai/jobscheduler#1156 (new) |
 | §4 follow-up (A) 3 / §5 point 7 | Move the previous-release fixtures to the first release whose agent sends the per-job lists, so both-direction tests cover per-job bodies | `crates/js-agent-wire/tests/fixtures/v0.1.208/`, `crates/js-agent-wire/tests/previous_release_v0_1_208.rs` | - |
@@ -775,7 +776,7 @@ As read: Decision paper (step 20), recommends staying on JSON polling (A); no ov
 | §5 point 8 | Whether a server rollback across a protobuf release is supported and the agent resets encoding per hello | superseded: Only matters under (B); no protobuf release | - |
 | §3 (B) Live update, line 424 | The design does not decide server rollback behaviour across a protobuf release | superseded: Same as point 8 | - |
 | §3 (C) Latency, line 457 | The design states no goal for start/stop delivery latency | superseded: `docs/design/held-beat.md` | komira-ai/jobscheduler#903 |
-| §4 'When the recommendation changes' (handshake cost) | If a per-exchange handshake cost is measured, add connection reuse in js-client for the agent | no | komira-ai/jobscheduler#1146 (new) |
+| §4 'When the recommendation changes' (handshake cost) | If a per-exchange handshake cost is measured, add connection reuse in js-client for the agent | `crates/js-client/src/client.rs:30`, `crates/js-client/src/client.rs:307-309` | komira-ai/jobscheduler#1146 (new); komira-ai/jobscheduler#1203 |
 
 ## configuration.md
 
@@ -786,7 +787,7 @@ As read: No status header and no Designed/Open/What-is-left sections. It describ
 | Machine providers, platforms and pool settings | Platform kinds kubernetes, cloud_run and ecs are refused as not built; only kind = default works. | no | - |
 | A pool of hand-joined agents / pool kinds | Several elastic pools, or an elastic pool beside a joined one, are parsed but the server refuses to start on them: one elastic pool alone, or any number of joined pools. | no | komira-ai/jobscheduler#1153 (new) |
 | Test provider | The operator-listed test pool (provider kind static with [[host]] tables) is not built and a file that declares it is refused. | superseded: `crates/js-lease-server/src/file/agentless.rs:3` | - |
-| Joined pool keys | A joined pool lacks the whole-node keys that the old agent pool file had (max_whole_node, drain_after and others). | no | - |
+| Joined pool keys | A joined pool lacks the whole-node keys that the old agent pool file had (max_whole_node, drain_after and others). | partly: `prepare_timeout` is a joined-pool key (`crates/js-lease-server/src/file/joined.rs:86`, `JoinedPool::prepare_timeout` at :156, applied in `validate()` at :301-303); max_whole_node, drain_after and the other whole-node keys are not | komira-ai/jobscheduler#1126 |
 
 ## deployment.md
 
@@ -914,7 +915,7 @@ As read: No status header. Decision list D1 to D66; says "None is final until th
 | D34 | Leases across a restart: --boot-grace, off by default, no lease ends before it passes after a boot | partly: `crates/js-jobs/src/result.rs:33`, `crates/js-lease-server/src/job_expiry_tests.rs:126` | - |
 | D44 | Compatibility rules and the version-pair check, step 55 | superseded: decisions.md:187-192 supersession note | - |
 | D17 | No look-ahead in scaling demand until a trace shows a need | `crates/js-scaler/src/settings.rs` | - |
-| D18 | Self-registration auth: host certificate (the join token it started with is removed) | `crates/js-lease-server/src/agent_api.rs`, `crates/js-lease-server/src/agent_api/host_cert.rs` | komira-ai/jobscheduler#1118 |
+| D18 | Self-registration auth: join token now, a client certificate per pool added later without a wire change | `crates/js-lease-server/src/agent_api.rs`, `crates/js-agent-wire/src/credential.rs` | komira-ai/jobscheduler#1118 |
 | D59 | Spot reclaim notice: taint 'reclaim', host_leaving and leaves_at flag on the host list, let work finish to the deadline, requeue unstarted, rerun at the deadline | partly: `crates/js-lease-server/src/scaler/effects.rs:45` | komira-ai/jobscheduler#1174 (new) |
 | D60 | Price and capacity as sort keys among options and providers, never limits | partly: `crates/js-scaler/src/lib.rs`, `crates/js-elastic/src/cache.rs` | - |
 | D61 | A tier groups equal providers in the one ordered hierarchy; a tier is passed over only when none of its members can satisfy | no | komira-ai/jobscheduler#1175 (new) |
@@ -985,7 +986,7 @@ As read: A description of kbf at kbf 45e420656 and 89af8f2ef, not a build plan. 
 
 | Section | Claim | On main | Tracking |
 |---|---|---|---|
-| 4.1 Admission by kind | LeaseKind::Vm is marked planned: no front accepts it, no driver reports it, and has_room needs the full request to fit. | `crates/js-types/src/sched/lease.rs:67` | komira-ai/jobscheduler#129; komira-ai/jobscheduler#740 |
+| 4.1 Admission by kind | LeaseKind::Vm is marked planned: no front accepts it (the agent's VM backend is built), and has_room needs the full request to fit. | `crates/js-types/src/sched/lease.rs:66` | komira-ai/jobscheduler#129; komira-ai/jobscheduler#740; komira-ai/jobscheduler#1200 |
 | 4.1 Queue | No quota, per-tenant fairness, aging or queue-length cap exists in the scheduler, front or server. | no | - |
 | 4.1 Retries and loss | The scheduler's loss requeue is off by default and the server turns it on with with_loss_requeues. | superseded: `docs/design/retries-and-runs.md` | komira-ai/jobscheduler#1096; komira-ai/jobscheduler#1097; komira-ai/jobscheduler#1103; komira-ai/jobscheduler#1104 |
 | 4.2 Server and durable record | lib.rs and scheduler.md say queue persistence is not done, while durable.rs writes queue rows. The page says the docs are fixed in step 2. | superseded: `docs/design/extraction-steps.md` | - |
@@ -1051,7 +1052,7 @@ As read: No status header. Sections 7.1-7.6 are an extraction design written in 
 | 7.5 Lowering a booking | Lowering a booking stays off until a replay on recorded data supports it (shadow mode first, then shadow_diff for parity). | superseded: `crates/js-sizing/src/store.rs:298` | komira-ai/jobscheduler#1026; komira-ai/jobscheduler#1035; komira-ai/jobscheduler#1090 |
 | 7.6 SizeLearner | Learned::stage then requeued/finish becomes a SizeLearner with kbf types removed, learning only after the scheduler committed. | superseded: `crates/js-sched-placer/src/sizes.rs` | - |
 | 7.6 SizeStore | Persistence becomes a SizeStore trait (get_all, put_batch, delete, scan), written outside the scheduler transaction, best-effort after kills and write-behind otherwise. | superseded: `crates/js-sizing/src/codec.rs` | - |
-| 7.7 swap peak | A run's swap peak, which the agent reports, is not in the job record, so a run that a host short of memory squeezed into swap is not yet counted. | no | komira-ai/jobscheduler#1184 (new) |
+| 7.7 swap peak | A run's swap peak, which the agent reports, is not in the job record, so a run that a host short of memory squeezed into swap is not yet counted. | `crates/js-jobs/src/result.rs:109` (peak_swap_bytes), `crates/js-jobs/src/codec/result_fields.rs:81` (tag 74), `crates/js-lease-server/src/per_job.rs:482`, `crates/js-sched-placer/src/sizes.rs:686`, `crates/js-sizing/src/summary.rs:364`; `docs/design/sizing.md` 7.7 now describes it | komira-ai/jobscheduler#1184 (new); komira-ai/jobscheduler#1204 |
 | 7.9 / 7.7 history from before | Runs taken under a cpu.max stay what they were: held runs only raise their class and need no conversion. | yes: The page describes shipped behaviour (komira-ai/jobscheduler#1026). Listed only because it looks like a migration step; it is not an open item. | komira-ai/jobscheduler#1026 |
 
 ## retries-and-runs.md
@@ -1144,12 +1145,12 @@ As read: Pages with no open status wording (all built / descriptive), listed wit
 | generalising: Phases | The generic phase set is the wire's. An unknown phase reads as quarantined (fail closed). A host takes new leases only in serving. | `crates/js-agent-wire/src/hello.rs:25-56` | - |
 | generalising: Failure taxonomy and Usage | The failure classes map at one point to the wire (InputUnavailable named generically, OutOfMemory, BusyNode); usage carries a basis and censoring signals (limit hit, swap peak, OOM kill count, node pressure at start) and is reported on failure too. | partly: `crates/js-types/src/retry.rs:77`, `crates/js-agent-wire/src/heartbeat.rs:58-61` | - |
 | providers: Kinds at a glance | Later elastic kinds (azure, k8s, vsphere, proxmox) are named only and are not built. | no | - |
-| providers: Elastic providers step 2 / registration (b) | A registered elastic host is admitted by verify_instance on the cloud's signed instance identity; today the server does not call verify_instance, so the signed identity does not replace the host certificate. | partly: `crates/js-agent-wire/src/hello.rs:330`, `crates/js-provider-ec2` | komira-ai/jobscheduler#1191 (new) |
-| registration: Join credential | A client certificate per host replaced the shared join token (D18; G3 removed the token). | superseded: `crates/js-lease-server/src/agent_api/host_cert` | komira-ai/jobscheduler#936; komira-ai/jobscheduler#1118 |
+| providers: Elastic providers step 2 / registration (b) | A registered elastic host is admitted by verify_instance on the cloud's signed instance identity; today the server does not call verify_instance, so the signed identity does not replace the join token. | partly: `crates/js-agent-wire/src/hello.rs:330`, `crates/js-provider-ec2` | komira-ai/jobscheduler#1191 (new) |
+| registration: Join credential | A client certificate per pool is the alternative to a shared join token (D18). | superseded: `crates/js-lease-server/src/agent_api/host_cert` | komira-ai/jobscheduler#936; komira-ai/jobscheduler#1118 |
 | mac-hostkeeper-package: Where things stand / Release | The signed macOS package, pkg-upload, release desired --pkg-url and hostkeeper-desired set-desired-mac steps. | `.github/workflows/js-agent-macos-pkg.yml`, `.github/workflows/hostkeeper-desired.yml:150` | komira-ai/jobscheduler#913 |
 | mac-hostkeeper-package: Order step 5 | Step 5 of Order: kbf asks for os=macos (kbf's executor still asks every job for os=linux; macOS is out of scope in kbf). | no | komira-ai/jobscheduler#888 |
 | mac-hostkeeper-package: The pool's users stay for good | Deleting an account per job in the agent is 'the next step' (mac-account-per-job.md); the helper still cannot delete a pre-pool lease user. | `crates/js-agent/src/native/accounts.rs:1-20`, `crates/js-agent/src/mac_accounts/` | komira-ai/jobscheduler#1014; komira-ai/jobscheduler#1023; komira-ai/jobscheduler#1121 |
-| spawn-disclaim: The fence, measured / Options | Which way the three TCC-only places (TCC dir, TCC.db, TimeMachine plist) are closed to a job holding js-agent's Full Disk Access is 'not decided' (options a, b, c); option (a) also wants a walker that lists every path read in one start and refused in the other, run per macOS release, with the list committed beside the profile and a check that fails on a place the profile does not deny. | partly: `crates/js-agent/src/native/fence.rs:19-27`, `crates/js-agent/src/native/settings.rs:12` | tracked: komira-ai/jobscheduler#1025 and komira-ai/jobscheduler#1020 |
+| spawn-disclaim: The fence, measured / Options | Which way the three TCC-only places (TCC dir, TCC.db, TimeMachine plist) are closed to a job holding js-agent's Full Disk Access is 'not decided' (options a, b, c); option (a) also wants a walker that lists every path read in one start and refused in the other, run per macOS release, with the list committed beside the profile and a check that fails on a place the profile does not deny. | partly: option (a) is chosen and built (`crates/js-agent/src/native/fence.rs:19-27`, `crates/js-agent/src/native/settings.rs:12`, link and clone denies `crates/js-mac-pool/src/seatbelt/profile.rs:89`; page section 'The fence, as built', `docs/design/spawn-disclaim.md:56`). Not built: the per-release walker and its committed list (`docs/design/spawn-disclaim.md:65`) | tracked: komira-ai/jobscheduler#1025 and komira-ai/jobscheduler#1020; komira-ai/jobscheduler#1117 |
 | spawn-disclaim: Which program keeps its responsibility (VM launcher, GUI-session path) | For the VM launcher (vm/helper.rs) and the GUI-session path (macos/gui.rs, launchctl asuser then disclaim::exec) whether to keep the responsibility is 'not decided'; both stay disclaimed. | decision, no code | - |
 | spawn-disclaim: table row (sandbox-exec self-test) and 'Not measured' | The sandbox-exec self-test (native/profile.rs) goes away with the helper path. What macOS does with the responsible process when the agent exits while a supervisor runs is not measured. | no | komira-ai/jobscheduler#991 |
 | agent-privilege: top status / section 6 Hardening path | Option A (a non-root agent plus a root helper) is kept as the hardening path for later; buy it by moving the five duties behind helper interfaces one at a time, with traits that both forms implement. | no | - |
