@@ -55,13 +55,17 @@ pub struct Refused {
 }
 
 impl Engine {
-    /// Takes the refusals of the round just run for `job`, logs each and adds it to the book.
-    pub(super) fn book_refusals(&mut self, job: &JobId) {
+    /// Takes the refusals of the round just run for `job`, logs each and adds it to the book:
+    /// the host and kind of each, for the shadow of the curve mode to judge the round by.
+    pub(super) fn book_refusals(&mut self, job: &JobId) -> Vec<(WorkerId, RefusalKind)> {
         let taken = self.sched.take_refusals();
         self.refused.dropped = self.refused.dropped.saturating_add(taken.dropped);
+        let mut kinds = Vec::with_capacity(taken.kept.len());
         for HostRefusal { worker, refusal } in taken.kept {
+            kinds.push((worker.clone(), refusal.kind));
             self.book_refusal(job, worker, refusal);
         }
+        kinds
     }
 
     /// Logs that `worker` refused `job` for `refusal` and adds it to the book.
