@@ -81,8 +81,9 @@ and the repository's squash message settings are `squash_merge_commit_title: PR_
   push. `min_entries_to_merge: 1` means a pull request never waits for others to make a
   group, so the five minutes of `min_entries_to_merge_wait_minutes` never apply.
 - **The check timeout is 360 minutes, the most GitHub allows.** The longest chain of
-  `ci.yml`'s jobs is `coverage-shard`, `coverage` and `all-passed`, 95 minutes of
-  `timeout-minutes` (the test holds the chain under this timeout). A job's timeout counts from
+  `ci.yml`'s jobs is `coverage-shard` (60 minutes, in twelve shards at once), `coverage` (30,
+  which also needs `coverage-build`, 30 minutes beside the shards) and `all-passed` (5), 95
+  minutes of `timeout-minutes` (the test holds the chain under this timeout). A job's timeout counts from
   when a runner takes it, not the wait for one, and five groups run five copies of the
   workflow beside the pull requests' own runs, so the wait for runners can be long. A job that
   hangs still ends red at its own timeout, so the queue sees a failure, not a silence.

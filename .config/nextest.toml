@@ -1,6 +1,8 @@
-# cargo-nextest's configuration. CI's `test` job (`cargo nextest run`) and coverage jobs
-# (`cargo llvm-cov nextest`), .github/workflows/ci.yml, and release.yml's `unit-tests` run the
-# tests under nextest; the other jobs run `cargo test`, which does not read this file.
+# cargo-nextest's configuration. CI's `test` job (`cargo nextest run`, in shards, built with the
+# `dev` profile) and the `coverage-shard` jobs (`cargo xtask coverage-shard`, which runs
+# `cargo llvm-cov nextest` once per group of tests), .github/workflows/ci.yml, and release.yml's
+# `unit-tests` run the tests under nextest; the other jobs run `cargo test`, which does not read
+# this file.
 
 # js-sim-cell's simulator scenarios are most of the test and coverage runs' time, and the
 # longest of its tests take far longer than any other crate's. Run them before the rest, so
@@ -9,3 +11,33 @@
 [[profile.default.overrides]]
 filter = 'package(js-sim-cell)'
 priority = 10
+
+# The scenarios below run their seeds on four threads of their own
+# (`js_sim_cell::run_seed_range_on_threads`, with `THREADS` or `HEADLINE_THREADS` four in the
+# test's file). `threads-required = 4` gives each four of a run's test slots, so a shard
+# runs at most four seeds at once and starts no other test beside such a test that would
+# crowd them out. Which tests run, and what they assert, does not change. A test that
+# runs its seeds on threads is named here, and a test named here runs its seeds on threads.
+[[profile.default.overrides]]
+filter = """\
+    package(js-sim-cell) & ( \
+    test(=ten_of_two_hundred_agents_die_mid_run_seeds_0_to_3) | \
+    test(=ten_of_two_hundred_agents_die_mid_run_seeds_4_to_7) | \
+    test(=ten_of_two_hundred_agents_die_mid_run_seeds_8_to_11) | \
+    test(=ten_of_two_hundred_agents_die_mid_run_seeds_12_to_15) | \
+    test(=a_thirty_second_partition_of_twenty_agents_loses_no_result) | \
+    test(=a_lossy_wire_launches_every_run_once) | \
+    test(=agents_killed_for_good_leave_no_booking_once_clients_release) | \
+    test(=a_restart_of_the_server_with_runs_in_flight_double_books_nothing) | \
+    test(=a_lossy_agent_wire_settles_every_run) | \
+    test(=a_hundred_hosts_settle_four_hundred_runs) | \
+    test(=a_partition_of_ten_agents_that_heals_settles_every_run) | \
+    test(=fifty_whole_host_requests_over_twenty_hosts_are_each_held_once_and_released) | \
+    test(=a_job_is_terminal_after_max_replace_silent_prepares_among_fifty_hosts) | \
+    test(=a_silent_host_among_fifty_fails_the_prepare_and_the_job_goes_to_another_host) | \
+    test(=two_hundred_hosts_three_providers_kill_ten_agents_and_partition_thirty_seconds) | \
+    test(=an_ec2_like_pool_scales_up_to_demand_and_back_to_zero) | \
+    test(=a_lambda_like_pool_bills_whole_minutes_and_releases_idle_machines) | \
+    test(=the_headline_over_jobs) )\
+"""
+threads-required = 4

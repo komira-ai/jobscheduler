@@ -4,8 +4,8 @@
 //! `crates/js-sim-cell/Cargo.toml` gates four test binaries behind the feature
 //! `slow-families` (`required-features`). Cargo builds none of them unless the feature is
 //! on, so the `test` job of `ci.yml`, which does not turn it on, leaves them out. The runs
-//! that must still hold them turn it on: the coverage shards and the coverage report's
-//! build in `ci.yml` (every pull request), the release's `unit-tests` (every push to main,
+//! that must still hold them turn it on: the coverage shards and the coverage build in
+//! `ci.yml` (every pull request), the release's `unit-tests` (every push to main,
 //! whose red `release-red` reports) and the beta stage's workspace tests. A run that
 //! dropped the feature would lose those binaries without a failure, so this reads the
 //! four files as text and refuses each such change.
@@ -18,6 +18,9 @@ const GATED: [&str; 4] = ["faults", "smoke", "replay", "whole_host_prepare"];
 
 /// The flag that builds the gated binaries over the workspace.
 const FLAG: &str = "--features js-sim-cell/slow-families";
+
+/// The start of the `test` job's run of the workspace's tests, up to the partition.
+const TEST_RUN: &str = "      - run: cargo nextest run --workspace --locked --no-fail-fast --cargo-profile dev --partition";
 
 /// The text of job `name` in `workflow`: its key line and every line under it, up to the
 /// next job (a line indented two spaces) or the end of the file.
@@ -122,9 +125,9 @@ fn check(
         "llvm-cov nextest --workspace",
     );
     need(
-        "ci.yml's coverage job",
-        job(ci, "coverage"),
-        "llvm-cov nextest --workspace",
+        "ci.yml's coverage-build job",
+        job(ci, "coverage-build"),
+        "llvm-cov nextest-archive --workspace",
     );
     need(
         "release.yml's unit-tests job",
@@ -199,11 +202,12 @@ fn the_repository_runs_the_slow_families_everywhere_but_the_test_job() {
 #[test]
 fn the_test_job_turning_the_feature_on_is_refused() {
     let mut f = Files::load();
-    let run = "      - run: cargo nextest run --workspace --locked --no-fail-fast\n";
-    assert!(f.ci.contains(run));
+    assert_eq!(f.ci.matches(TEST_RUN).count(), 1);
     f.ci = f.ci.replacen(
-        run,
-        &format!("      - run: cargo nextest run --workspace --locked --no-fail-fast {FLAG}\n"),
+        TEST_RUN,
+        &format!(
+            "      - run: cargo nextest run --workspace --locked --no-fail-fast {FLAG} --cargo-profile dev --partition"
+        ),
         1,
     );
     assert_eq!(
@@ -217,9 +221,12 @@ fn the_test_job_turning_the_feature_on_is_refused() {
 #[test]
 fn a_test_job_that_runs_no_workspace_tests_is_refused() {
     let mut f = Files::load();
-    let run = "      - run: cargo nextest run --workspace --locked --no-fail-fast\n";
-    f.ci =
-        f.ci.replacen(run, "      - run: cargo test -p js-state --locked\n", 1);
+    assert_eq!(f.ci.matches(TEST_RUN).count(), 1);
+    f.ci = f.ci.replacen(
+        TEST_RUN,
+        "      - run: cargo test -p js-state --locked #",
+        1,
+    );
     assert_eq!(
         f.errors(),
         vec!["ci.yml's test job no longer runs the workspace's tests".to_owned()]
@@ -243,8 +250,8 @@ fn a_clippy_run_without_the_feature_is_refused() {
     );
 }
 
-/// Asserts that a coverage shard, the coverage report's build, the release's `unit-tests`
-/// and the beta stage that drop the feature are each refused by name.
+/// Asserts that a coverage shard, the coverage build, the release's `unit-tests` and the
+/// beta stage that drop the feature are each refused by name.
 #[test]
 fn a_run_that_drops_the_feature_is_refused() {
     let cases = [
@@ -253,8 +260,8 @@ fn a_run_that_drops_the_feature_is_refused() {
             "ci.yml's coverage-shard job runs `llvm-cov nextest --workspace` without",
         ),
         (
-            "ci-report",
-            "ci.yml's coverage job runs `llvm-cov nextest --workspace` without",
+            "ci-build",
+            "ci.yml's coverage-build job runs `llvm-cov nextest-archive --workspace` without",
         ),
         (
             "release",
@@ -274,8 +281,8 @@ fn a_run_that_drops_the_feature_is_refused() {
                 let from = f.ci.find("\n  coverage-shard:\n").expect("shard");
                 f.ci = flagged(&f.ci, from);
             }
-            "ci-report" => {
-                let from = f.ci.find("\n  coverage:\n").expect("coverage");
+            "ci-build" => {
+                let from = f.ci.find("\n  coverage-build:\n").expect("build");
                 f.ci = flagged(&f.ci, from);
             }
             "release" => {

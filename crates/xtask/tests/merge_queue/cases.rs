@@ -128,7 +128,7 @@ fn a_concurrency_key_a_merge_group_shares_or_a_cancelled_group_is_refused() {
 }
 
 /// The `needs:` line of the aggregate.
-const NEEDS: &str = "    needs: [lint, test, state-postgres, live-podman, agent-privilege, crun-rootless, crun-root, agent-egress, deny, coverage-shard, coverage]\n";
+const NEEDS: &str = "    needs: [lint, test, state-postgres, live-podman, agent-privilege, crun-rootless, crun-root, agent-egress, deny, coverage-shard, coverage-build, coverage]\n";
 
 #[test]
 fn an_aggregate_that_may_pass_without_every_job_is_refused() {
@@ -149,6 +149,14 @@ fn an_aggregate_that_may_pass_without_every_job_is_refused() {
             NEEDS,
             &NEEDS.replace("deny, ", ""),
             &["all-passed: does not need deny, so the queue would merge whatever deny did"],
+        ),
+        (
+            File::Ci,
+            NEEDS,
+            &NEEDS.replace("coverage-build, ", ""),
+            &[
+                "all-passed: does not need coverage-build, so the queue would merge whatever coverage-build did",
+            ],
         ),
         (
             File::Ci,
@@ -193,7 +201,7 @@ fn an_aggregate_that_may_pass_without_every_job_is_refused() {
 
 #[test]
 fn a_condition_that_keeps_a_job_or_a_deciding_step_off_a_merge_group_is_refused() {
-    let doctests = "- name: Doctests\n        if: ${{ !cancelled() }}\n";
+    let doctests = "- name: Doctests\n        if: ${{ !cancelled() && matrix.shard == 1 }}\n";
     let compare_if =
         "if: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}";
     refused(&[

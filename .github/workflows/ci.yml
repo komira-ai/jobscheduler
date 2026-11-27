@@ -10,16 +10,17 @@
 # the concurrency key and the bases read here to that.
 #
 # The Cargo cache (registry, git checkouts and target) is keyed on the runner, the job,
-# Cargo.lock and rust-toolchain.toml. Every job restores it except `deny` and the two
-# coverage jobs (they build from nothing; see `coverage-shard`); only a push to main saves
-# it, and only when the exact key missed, so a pull request never writes the Cargo cache.
+# Cargo.lock and rust-toolchain.toml. Every job restores it except `deny`, `test` and the
+# coverage jobs (they build from nothing; see `test` and `coverage-shard`); only a push to
+# main saves it, and only when the exact key missed, so a pull request never writes the
+# Cargo cache.
 #
-# The release tools the `test`, `deny`, `coverage-shard` and `coverage` jobs install
-# (cargo-nextest, cargo-deny, cargo-llvm-cov), and zig and cargo-zigbuild in `lint`, are pinned
-# by version and SHA-256, and each has a cache entry of its own, keyed by both. The step before
-# `cargo xtask fetch` restores it; fetch uses the restored archive when there is one and
-# downloads it only when there is not, checks the SHA-256 of whichever it uses, and keeps a
-# download that passed for the step after it to save. On a miss it tries each `--url` in turn
+# The release tools the `test`, `deny`, `coverage-shard`, `coverage-build` and `coverage`
+# jobs install (cargo-nextest, cargo-deny, cargo-llvm-cov), and zig and cargo-zigbuild in
+# `lint`, are pinned by version and SHA-256, and each has a cache entry of its own, keyed by
+# both. The step before `cargo xtask fetch` restores it; fetch uses the restored archive when
+# there is one and downloads it only when there is not, checks the SHA-256 of whichever it
+# uses, and keeps a download that passed for the step after it to save. On a miss it tries each `--url` in turn
 # (zig's are two of Zig's community mirrors, then ziglang.org), in three rounds 0 s, 10 s and
 # 30 s apart, each attempt given up after 5 minutes, and takes the first download whose SHA-256
 # is the pin. So a download outage stops only a job whose tool is not cached and that no URL
@@ -231,6 +232,11 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: read
+    strategy:
+      # Every shard runs to the end, so one failing test does not hide the others'.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5]
     services:
       postgres:
         image: postgres@sha256:2a0d0fe14825b0939f78a8cad5cd4e6aa68bf94d0e5dd96e24b6d23af4315545
@@ -260,15 +266,6 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        id: cargo-cache
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: nextest-cache
         with:
           path: ${{ runner.temp }}/pinned/cargo-nextest.tar.gz
@@ -292,18 +289,29 @@ jobs:
       # built here. A pull request still runs them, in the `coverage-shard` jobs, and every push
       # to main runs them in the release's `unit-tests`, whose red `release-red` reports
       # (crates/xtask/tests/slow_families.rs holds each of these to it).
-      - run: cargo nextest run --workspace --locked --no-fail-fast
+      # Five shards (nextest's `--partition slice:<k>/<n>`: the k-th of every n tests in
+      # nextest's order, over all binaries), so every test runs in exactly one shard. The
+      # build is the `dev` profile (`--cargo-profile dev`, whatever the `test` profile of
+      # Cargo.toml says): that profile's opt-level overrides for the simulator and the
+      # server crates cost 8 of the 13 minutes this job spent compiling, and save about a
+      # third of the test time (measured in run 45933829163: the tests the `test` profile
+      # ran in 3701 s took 5262 s unoptimised and instrumented). The coverage shards already
+      # run every test unoptimised, and release.yml's `unit-tests` still run the `test`
+      # profile. This job uses no Cargo cache: every shard builds from nothing.
+      # The three steps after it run on the first shard alone: they run the whole workspace's
+      # doctests, the live-log tests and one test binary, not a slice of anything.
+      - run: cargo nextest run --workspace --locked --no-fail-fast --cargo-profile dev --partition "slice:${{ matrix.shard }}/${{ strategy.job-total }}"
       - name: Doctests
-        if: ${{ !cancelled() }}
-        run: cargo test --workspace --locked --doc
+        if: ${{ !cancelled() && matrix.shard == 1 }}
+        run: cargo test --workspace --locked --doc --profile dev
       # `--tests` builds what the run above built, so nothing is compiled again; the filters
       # pick the live-log tests against the store out of every test binary.
       - name: Live logs against the S3-compatible store
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.shard == 1 }}
         env:
           JS_TEST_S3_URL: http://jsciroot:js-ci-throwaway@127.0.0.1:${{ job.services.s3.ports['9000'] }}/js-live-logs
           JS_TEST_S3_REGION: js-test-1
-        run: 'cargo test --workspace --locked --no-fail-fast --tests -- --ignored s3_compat:: logs_round_trip::'
+        run: 'cargo test --workspace --locked --no-fail-fast --tests --profile dev -- --ignored s3_compat:: logs_round_trip::'
       # The v1 job path over the real server binary, an agent and `js` on loopback, on a
       # SQLite and a Postgres store (js-lease-server's v1_acceptance). The workspace run
       # above runs it too; this step names it, so a break of the path between the binaries
@@ -311,16 +319,8 @@ jobs:
       # nothing is compiled again (`cargo test -p js-lease-server` resolves the features of
       # that one package and rebuilt 38 crates).
       - name: v1 acceptance over the server binary, an agent and js
-        if: ${{ !cancelled() }}
-        run: cargo nextest run --workspace --locked --no-fail-fast -E 'binary_id(js-lease-server::v1_acceptance)'
-      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+        if: ${{ !cancelled() && matrix.shard == 1 }}
+        run: cargo nextest run --workspace --locked --no-fail-fast --cargo-profile dev -E 'binary_id(js-lease-server::v1_acceptance)'
 
   # js-state's Postgres backend against a real server: its conformance suite, the schema
   # and boot tests, js-jobs's job store suite on it (tests/postgres_jobs.rs), js-usage's
@@ -744,15 +744,25 @@ jobs:
   # of its own, as many at once as the runner has CPUs, whatever binary each is in. They
   # are more work than one four-CPU runner does in the hour (most of it js-sim-cell's
   # simulator scenarios, unoptimised and instrumented), so `coverage-shard` runs them in
-  # three parts on three runners, and `coverage` reads what the three parts measured.
+  # twelve parts on twelve runners, and `coverage` reads what the twelve parts measured.
   #
-  # Each shard builds the instrumented test binaries and runs its slice of the tests
-  # (nextest's `--partition slice:<k>/<n>`: the k-th of every n tests in nextest's order,
-  # over all binaries), so every test runs in exactly one shard. Every test process
-  # writes a raw profile (`*.profraw`); a shard's raw profiles come to gigabytes, so the
-  # shard merges them with llvm-profdata into one indexed profile and uploads only that.
-  # .config/nextest.toml starts js-sim-cell's tests first, so the longest tests do not
-  # start last.
+  # Which tests a shard runs is the plan in .config/coverage-shards.toml, read by
+  # `cargo xtask coverage-shard`: the heaviest tests, each with the seconds it took under
+  # coverage, are dealt out longest first to the shard with the least load so far, and the
+  # rest are cut into equal slices (nextest's `--partition slice:<j>/<n>`: the j-th of
+  # every n tests in nextest's order, over all binaries) that are dealt out the same way,
+  # so every test runs in exactly one shard. A shard therefore runs the coverage command
+  # several times, once for its heavy tests and once for each of its slices; the raw
+  # profiles of the runs accumulate, because `--no-report` implies `--no-clean`. Every
+  # test process writes a raw profile (`*.profraw`); a shard's raw profiles come to
+  # gigabytes, so the shard merges them with llvm-profdata into one indexed profile and
+  # uploads only that. .config/nextest.toml gives the simulator's heaviest tests four
+  # threads each (`threads-required`), which they use to run their seeds side by side.
+  #
+  # `coverage-build` builds the instrumented test binaries once more and archives them,
+  # and `coverage` reports with that archive instead of building them a third time. Each
+  # shard builds them for itself to run them, from the same source, toolchain, flags and
+  # path, so its profiles match the archive function for function.
   #
   # Nothing here uses the Cargo cache. Measured on main's runs before the split (the job
   # logs): a build from nothing took about six minutes, as long as restoring the job's
@@ -767,7 +777,7 @@ jobs:
       # Every shard runs to the end, so one failing test does not hide the others'.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     services:
       postgres:
         image: postgres@sha256:2a0d0fe14825b0939f78a8cad5cd4e6aa68bf94d0e5dd96e24b6d23af4315545
@@ -831,14 +841,18 @@ jobs:
       # fails on any package override outside `test`).
       # cargo-llvm-cov names and places the raw profiles itself: one per test process,
       # `<workspace>-%p-%<n>m.profraw` at the top of target/llvm-cov-target.
+      # Everything after `--` is the command `xtask coverage-shard` runs once for each group
+      # of tests the plan gives this shard, with that group's `-E` filterset (and, for a
+      # slice, `--partition`) appended. It starts every run even when an earlier one failed,
+      # and fails the step when any did.
       - name: Run this shard's tests under coverage
-        run: cargo "+$COVERAGE_TOOLCHAIN" llvm-cov nextest --workspace --locked --no-fail-fast --features js-sim-cell/slow-families --cargo-profile coverage --branch --no-report --partition "slice:${{ matrix.shard }}/${{ strategy.job-total }}"
+        run: cargo "+$COVERAGE_TOOLCHAIN" xtask coverage-shard --plan .config/coverage-shards.toml --shard ${{ matrix.shard }} --of ${{ strategy.job-total }} -- cargo "+$COVERAGE_TOOLCHAIN" llvm-cov nextest --workspace --locked --no-fail-fast --features js-sim-cell/slow-families --cargo-profile coverage --branch --no-report
       # One indexed profile from every raw one, merged by the toolchain's llvm-profdata as
       # `llvm-cov report` merges them (`cargo xtask merge-profiles`, crates/xtask/src/
       # merge_profiles.rs: the inputs go in a list file, so thousands of names never go on
-      # a command line). The profile carries the shard's number, so the three never meet
+      # a command line). The profile carries the shard's number, so the twelve never meet
       # under one name, and keeps the `.profraw` ending so that `coverage` can hand it to
-      # `cargo llvm-cov report` beside its own raw profiles: llvm-profdata, which merges
+      # `cargo llvm-cov report` beside the other shards' profiles: llvm-profdata, which merges
       # them there, reads raw and indexed profiles alike, by their content. It is written
       # even when a test failed, so the report still shows what ran.
       - name: Merge this shard's profiles into one
@@ -853,15 +867,12 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # The report and the ratchet over all three shards. It runs when a shard failed too
-  # (a failing test fails its shard, not its profile), so the lcov is written and
-  # uploaded whatever the tests did. It builds the same instrumented binaries the shards
-  # ran (the same source, toolchain, flags and path, so the same coverage records), puts
-  # the shards' profiles beside them, and reports as one run of every test would.
-  # A shard whose profile is missing fails its download step by name.
-  coverage:
-    needs: coverage-shard
-    if: ${{ !cancelled() }}
+  # The instrumented test binaries the report reads, built once for the whole run (the
+  # shards each build their own, to run them). `cargo llvm-cov nextest-archive` builds what
+  # the shards' command builds, with the same source, toolchain, flags, features and path,
+  # and packs the test binaries into one archive, which `coverage` unpacks to read the
+  # functions and regions the shards' profiles refer to.
+  coverage-build:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -877,9 +888,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # Every branch's history, so a pull request can read the base branch's
-          # coverage-baseline with git (origin/<base>).
-          fetch-depth: 0
       - run: rustup toolchain install "$COVERAGE_TOOLCHAIN" --profile minimal --component llvm-tools-preview
       # xtask builds with the coverage nightly, the one toolchain this job installs.
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -908,10 +916,70 @@ jobs:
           path: ${{ runner.temp }}/pinned/cargo-nextest.tar.gz
           key: ${{ steps.nextest-cache.outputs.cache-primary-key }}
       - run: cargo "+$COVERAGE_TOOLCHAIN" nextest --version
-      # The shards' build command, running no test (`none()`): the same binaries, built
-      # the same way, so the shards' profiles match them function for function.
-      - name: Build the instrumented test binaries the shards ran
-        run: cargo "+$COVERAGE_TOOLCHAIN" llvm-cov nextest --workspace --locked --features js-sim-cell/slow-families --cargo-profile coverage --branch --no-report --filterset 'none()' --no-tests=pass
+      # Every package Cargo.lock names, for every platform, as in the shards.
+      - run: cargo "+$COVERAGE_TOOLCHAIN" fetch --locked
+      - name: Build and archive the instrumented test binaries
+        run: cargo "+$COVERAGE_TOOLCHAIN" llvm-cov nextest-archive --workspace --locked --features js-sim-cell/slow-families --cargo-profile coverage --branch --archive-file target/coverage-tests.tar.zst
+      # Kept a day: `coverage`, later in this run, is its only reader. The archive is
+      # zstd already, so the upload does not compress it again.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-tests
+          path: target/coverage-tests.tar.zst
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  # The report and the ratchet over all twelve shards. It runs when a shard failed too
+  # (a failing test fails its shard, not its profile), so the lcov is written and
+  # uploaded whatever the tests did. It reads the instrumented test binaries `coverage-build`
+  # archived (built from the same source, toolchain, flags and path the shards ran, so the
+  # same coverage records), puts the shards' profiles beside them, and reports as one run of
+  # every test would. A shard whose profile is missing fails its download step by name.
+  coverage:
+    needs: [coverage-shard, coverage-build]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      RUSTFLAGS: ""
+      COVERAGE_TOOLCHAIN: nightly-2026-10-01
+      LLVM_COV_VERSION: 0.9.1
+      LLVM_COV_SHA256: b3f68e625481fed9b16444174f3fa5ebcdbde4a1878803a35eabe2dcefcdc41a
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # Every branch's history, so a pull request can read the base branch's
+          # coverage-baseline with git (origin/<base>).
+          fetch-depth: 0
+      - run: rustup toolchain install "$COVERAGE_TOOLCHAIN" --profile minimal --component llvm-tools-preview
+      # xtask builds with the coverage nightly, the one toolchain this job installs.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: llvm-cov-cache
+        with:
+          path: ${{ runner.temp }}/pinned/cargo-llvm-cov.tar.gz
+          key: pinned-cargo-llvm-cov-${{ env.LLVM_COV_VERSION }}-${{ env.LLVM_COV_SHA256 }}
+      - name: Install cargo-llvm-cov (pinned version and checksum)
+        run: cargo "+$COVERAGE_TOOLCHAIN" xtask fetch --url "https://github.com/taiki-e/cargo-llvm-cov/releases/download/v$LLVM_COV_VERSION/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz" --sha256 "$LLVM_COV_SHA256" --cache "$RUNNER_TEMP/pinned/cargo-llvm-cov.tar.gz" --out "$HOME/.cargo/bin/cargo-llvm-cov" --extract tar.gz --member cargo-llvm-cov
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: steps.llvm-cov-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.temp }}/pinned/cargo-llvm-cov.tar.gz
+          key: ${{ steps.llvm-cov-cache.outputs.cache-primary-key }}
+      - run: cargo "+$COVERAGE_TOOLCHAIN" llvm-cov --version
+      # The archive `coverage-build` made, unpacked where `cargo llvm-cov report
+      # --nextest-archive-file` reads its binaries from: its paths start with `target/`, and
+      # the report looks for them under `<llvm-cov target dir>/target/<output dir>`.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: coverage-tests
+          path: target
+      - run: mkdir -p target/llvm-cov-target
+      - name: Unpack the instrumented test binaries the shards ran
+        run: tar --zstd -xf target/coverage-tests.tar.zst -C target/llvm-cov-target
       # One step per shard of `coverage-shard`'s matrix (crates/xtask/tests/coverage_shards.rs
       # holds the two to each other), each into the directory `llvm-cov report` reads
       # profiles from.
@@ -927,6 +995,42 @@ jobs:
         with:
           name: coverage-profile-3
           path: target/llvm-cov-target
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: coverage-profile-4
+          path: target/llvm-cov-target
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: coverage-profile-5
+          path: target/llvm-cov-target
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: coverage-profile-6
+          path: target/llvm-cov-target
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: coverage-profile-7
+          path: target/llvm-cov-target
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: coverage-profile-8
+          path: target/llvm-cov-target
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: coverage-profile-9
+          path: target/llvm-cov-target
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: coverage-profile-10
+          path: target/llvm-cov-target
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: coverage-profile-11
+          path: target/llvm-cov-target
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: coverage-profile-12
+          path: target/llvm-cov-target
       - run: mkdir -p target/coverage
       # `-skip-functions` leaves the per-function records (FN, FNDA) out of the lcov
       # export. With branch coverage on, llvm-cov's lcov exporter can segfault while
@@ -935,7 +1039,7 @@ jobs:
       - name: Write the lcov report
         env:
           LLVM_COV_FLAGS: -skip-functions
-        run: cargo "+$COVERAGE_TOOLCHAIN" llvm-cov report --profile coverage --branch --lcov --output-path target/coverage/lcov.info
+        run: cargo "+$COVERAGE_TOOLCHAIN" llvm-cov report --nextest-archive-file target/coverage-tests.tar.zst --profile coverage --branch --lcov --output-path target/coverage/lcov.info
       # For each crate that misses more than its line in coverage-baseline, the step
       # prints (and puts in the job summary) the file:line of each uncovered line and
       # branch, up to 50 of each. When every failure is coverage that improved, it
@@ -982,7 +1086,7 @@ jobs:
   # never a missing one, and a skipped job cannot count as a passed required check. It checks
   # out nothing and runs no repository code.
   all-passed:
-    needs: [lint, test, state-postgres, live-podman, agent-privilege, crun-rootless, crun-root, agent-egress, deny, coverage-shard, coverage]
+    needs: [lint, test, state-postgres, live-podman, agent-privilege, crun-rootless, crun-root, agent-egress, deny, coverage-shard, coverage-build, coverage]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5

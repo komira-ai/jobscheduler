@@ -33,7 +33,7 @@ use lint::{Site, jobs, lint};
 use std::path::Path;
 
 /// Every pinned tool fetch of the repository: `<file>/<job>` and its `--cache` path.
-const EXPECTED: [(&str, &str, &str); 10] = [
+const EXPECTED: [(&str, &str, &str); 11] = [
     ("ci.yml", "lint", "$RUNNER_TEMP/pinned/zig.tar.xz"),
     (
         "ci.yml",
@@ -54,13 +54,18 @@ const EXPECTED: [(&str, &str, &str); 10] = [
     ),
     (
         "ci.yml",
-        "coverage",
+        "coverage-build",
         "$RUNNER_TEMP/pinned/cargo-llvm-cov.tar.gz",
     ),
     (
         "ci.yml",
-        "coverage",
+        "coverage-build",
         "$RUNNER_TEMP/pinned/cargo-nextest.tar.gz",
+    ),
+    (
+        "ci.yml",
+        "coverage",
+        "$RUNNER_TEMP/pinned/cargo-llvm-cov.tar.gz",
     ),
     ("farm.yml", "build", "$RUNNER_TEMP/pinned/buck2.zst"),
     (
@@ -468,8 +473,9 @@ fn a_download_outside_fetch_and_a_shared_cache_path_are_refused() {
 }
 
 /// Asserts that the repository's own workflows are refused with one line changed: the `test`
-/// job or either coverage job of ci.yml (`coverage-shard`, `coverage`) without the restore
-/// before cargo-nextest, either coverage job with its llvm-cov key missing the pin, or the deny job saving
+/// job, `coverage-shard` or `coverage-build` of ci.yml without the restore before
+/// cargo-nextest, any of the three coverage jobs (`coverage-shard`, `coverage-build`,
+/// `coverage`) with its llvm-cov key missing the pin, or the deny job saving
 /// cargo-deny's archive on every outcome. A line that occurs in several jobs is changed in
 /// each of them in turn, and each change alone is refused.
 #[test]
@@ -496,7 +502,7 @@ fn the_repository_workflows_with_one_line_changed_are_refused() {
         &ci,
         "key: pinned-cargo-llvm-cov-${{ env.LLVM_COV_VERSION }}-${{ env.LLVM_COV_SHA256 }}",
         "key: pinned-cargo-llvm-cov-${{ env.LLVM_COV_VERSION }}",
-        2,
+        3,
     );
     each(
         &ci,

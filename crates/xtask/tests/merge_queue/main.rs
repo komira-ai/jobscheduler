@@ -73,7 +73,14 @@ fn the_real_ci_workflow_runs_every_required_job_on_a_merge_group() {
     let root = yaml::load(&read(".github/workflows/ci.yml")).expect("ci.yml");
     let jobs = get(&root, "jobs").expect("jobs");
     let needs = strs(get(get(jobs, AGGREGATE).expect("the aggregate"), "needs"));
-    for job in ["lint", "test", "deny", "coverage-shard", "coverage"] {
+    for job in [
+        "lint",
+        "test",
+        "deny",
+        "coverage-shard",
+        "coverage-build",
+        "coverage",
+    ] {
         assert!(needs.iter().any(|n| n == job), "{job} in {needs:?}");
     }
 }
