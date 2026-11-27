@@ -492,7 +492,7 @@ With no allow-list, the server must still never be turned against itself or its 
    they name.
 
    **The cluster's own addresses** are this instance's listen addresses, the store host's resolved addresses, and the peer address each
-   host's heartbeat arrives from. The server does not record the last of these today. Task G adds it, in memory, per instance.
+   host's heartbeat arrives from. The server records the last of these in memory, per instance, from each heartbeat it accepts (task G).
 4. **No redirect is followed, no proxy is used, and the answer's body is not read.** A redirect counts as a failure.
 5. **A small oracle, stated.** A submitter sees `callback_status`: the state, the tries, the time of the last try, and
    `last_failure`, which holds only the class `refused-address` or `failed`. So of a URL it named, the submitter learns three things:

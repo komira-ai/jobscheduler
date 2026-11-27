@@ -477,6 +477,9 @@ impl CrunRuntime {
         let pulls = Prefetcher::new(settings.pull_threads, move |image| pulling.pull(image))?;
         let forgetter = pulls.forgetter();
         images.on_evict(Box::new(move |digest| forgetter.forget_digest(digest)));
+        // The images the store holds are counted against the budget now, off every thread a
+        // start or a pull runs on, which no longer waits for that walk of the store.
+        drop(images.count_held(&rt));
         let mut runtime = Self {
             oci,
             images,

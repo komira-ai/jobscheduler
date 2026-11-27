@@ -36,7 +36,8 @@ pub(super) enum Stage {
     Removing(RunHandle),
     /// The scratch directory is to be removed.
     Scratch,
-    /// The post-job checks are to run.
+    /// The post-job checks are to run, or wait for the host to settle before they look
+    /// again (`Job::checks_due`).
     Checks,
     /// A check found something: the slot stays booked.
     Blocked,
@@ -414,6 +415,10 @@ pub(super) struct Job {
     /// When the project of the finished run first read usage after its tree was removed,
     /// and when that was last reported (on the agent's clock).
     pub(super) usage_held: Option<(u64, u64)>,
+    /// When the post-job checks may look at the host again (on the agent's clock): their
+    /// first look answered a wait ([`Checked::Wait`](crate::lifecycle::Checked::Wait)), and
+    /// the job waits in [`Stage::Checks`] until then. One job's checks wait at a time.
+    pub(super) checks_due: Option<u64>,
     /// The agent gave up waiting for the usage: the slot is parked, not released, when the
     /// cleanup passes.
     pub(super) slot_parked: bool,
@@ -665,6 +670,7 @@ impl Job {
             blind_since: None,
             adopted: false,
             usage_held: None,
+            checks_due: None,
             slot_parked: false,
             cleaning: Cleaning::default(),
         }
@@ -707,6 +713,7 @@ impl Job {
             blind_since: None,
             adopted: false,
             usage_held: None,
+            checks_due: None,
             slot_parked: false,
             cleaning: Cleaning::default(),
         }
@@ -751,6 +758,7 @@ impl Job {
             blind_since: None,
             adopted: true,
             usage_held: None,
+            checks_due: None,
             slot_parked: false,
             cleaning: Cleaning::default(),
         })
