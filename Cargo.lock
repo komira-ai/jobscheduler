@@ -1457,6 +1457,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-handover-check"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "js-testkit",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "js-host-step"
 version = "0.1.0"
 dependencies = [
@@ -4216,6 +4227,7 @@ dependencies = [
  "js-cli",
  "js-client",
  "js-elastic",
+ "js-handover-check",
  "js-lease-server",
  "js-mac-provision",
  "js-oci",

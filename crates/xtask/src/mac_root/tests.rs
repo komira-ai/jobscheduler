@@ -44,6 +44,9 @@ struct Fake {
     roots: RefCell<Vec<Vec<OsString>>>,
     /// Every binary run: its arguments, directory and log.
     logged: RefCell<Vec<(Vec<OsString>, PathBuf, PathBuf)>>,
+    /// Every build, in order: `<package> <test>...` for tests, `<package> bin <bin>` for a
+    /// program.
+    builds: RefCell<Vec<String>>,
 }
 
 impl Fake {
@@ -57,6 +60,7 @@ impl Fake {
             ran: BTreeMap::new(),
             roots: RefCell::new(Vec::new()),
             logged: RefCell::new(Vec::new()),
+            builds: RefCell::new(Vec::new()),
         }
     }
 
@@ -85,6 +89,9 @@ fn exe(package: &str, test: &str) -> String {
 
 impl Machine for Fake {
     fn build(&self, package: &str, tests: &[&str]) -> Result<String, Error> {
+        self.builds
+            .borrow_mut()
+            .push(format!("{package} {}", tests.join(" ")));
         if self.build_fails == Some(package) {
             return Err(Error::Failed(format!("{package} did not build")));
         }
@@ -100,6 +107,9 @@ impl Machine for Fake {
     }
 
     fn build_example(&self, package: &str, example: &str) -> Result<String, Error> {
+        self.builds
+            .borrow_mut()
+            .push(format!("{package} example {example}"));
         if self.no_program {
             return Ok(String::new());
         }
@@ -196,12 +206,18 @@ impl Place {
     }
 
     fn run_on(&self, os: &str, fake: &Fake, work: &Path) -> Result<String, Error> {
+        self.run_only(os, fake, work, &[])
+    }
+
+    fn run_only(&self, os: &str, fake: &Fake, work: &Path, only: &[&str]) -> Result<String, Error> {
+        let only: Vec<String> = only.iter().map(|k| (*k).to_owned()).collect();
         run(&MacRootTests {
             os,
             machine: fake,
             root: &self.root(),
             work,
             owner_uid: 501,
+            only: &only,
         })
     }
 
@@ -288,6 +304,168 @@ fn a_clean_mac_runs_every_target_from_the_work_directory_and_passes() {
         }
     }
     assert_eq!(table, want);
+}
+
+/// Catches `--only native_isolation`, the beta stage's run, doing more or less than that
+/// target: it builds only its test (no other target, no `pf_probe`), makes the work
+/// directory, `bin` and that target's directory alone, copies and runs only its binary with
+/// its own variables, still deletes the users it made, and the table holds its rows alone.
+#[test]
+fn only_native_isolation_builds_lays_out_and_runs_that_target_alone() {
+    let place = Place::new("only-isolation");
+    let made = "adi 501\nkbf-acct-0 4310\nkbf-acct-9 4321\n";
+    let fake = Fake::new().listing(&[CLEAN, made]);
+    let ok = place
+        .run_only("macos", &fake, &place.work(), &["native_isolation"])
+        .expect("its tests passed");
+    let table_path = place.root().join("target/mac-root-tests/table.tsv");
+    assert_eq!(
+        ok,
+        format!(
+            "ok: 2 Mac root tests passed on macOS 27.0.1 (26A434); the table is {}",
+            table_path.display()
+        )
+    );
+    assert_eq!(*fake.builds.borrow(), ["js-agent native_isolation"]);
+    let w = place.work();
+    let w = w.display();
+    assert_eq!(
+        fake.roots(),
+        [
+            format!("/bin/mkdir -m 0755 {w}"),
+            format!("/bin/mkdir -m 0755 {w}/bin"),
+            format!("/bin/mkdir -m 0755 {w}/native-isolation"),
+            format!(
+                "/bin/cp {} {w}/bin/native_isolation",
+                exe("js-agent", "native_isolation")
+            ),
+            format!("/bin/chmod 0755 {w}/bin/native_isolation"),
+            "/usr/bin/dscl . -delete /Users/kbf-acct-0".to_owned(),
+        ]
+    );
+    let logged = fake.logged.borrow();
+    let logs = place.root().join("target/mac-root-tests");
+    assert_eq!(
+        *logged,
+        [(
+            run_args("native_isolation", &place.work(), 501),
+            PathBuf::from("/w/crates/js-agent"),
+            logs.join("native_isolation.log"),
+        )]
+    );
+    assert_eq!(
+        run_args("native_isolation", &place.work(), 501),
+        args_of(&format!(
+            "/usr/bin/env JS_NATIVE_ISO_ROOT={w}/native-isolation JS_NATIVE_ISO_UID=4310 {w}/bin/native_isolation --ignored --test-threads=1"
+        ))
+    );
+    assert_eq!(
+        place.table(),
+        "# macOS 27.0.1 (26A434)\ntarget\ttest\tresult\treason\nnative_isolation\ta\tpass\t\nnative_isolation\tb\tpass\t\n"
+    );
+}
+
+/// Catches a selected target whose failure passes for a pass: the isolation binary's failed
+/// test and a user it left are `FAIL` rows and the verb fails with both.
+#[test]
+fn a_failed_isolation_run_alone_fails_the_verb() {
+    let place = Place::new("only-isolation-fails");
+    let left = "kbf-acct-0 4310\n";
+    let mut fake = Fake::new().listing(&[CLEAN, left, left]);
+    let failed = "running 1 test\ntest two_runs ... FAILED\n\nfailures:\n\n---- two_runs stdout ----\n\nthread 'two_runs' panicked at tests/native_isolation/main.rs:1:2:\nFAIL: a file survived\n\nfailures:\n    two_runs\n";
+    fake.ran
+        .insert("native_isolation", Ran::Out(101, failed.to_owned()));
+    let errors = match place.run_only("macos", &fake, &place.work(), &["native_isolation"]) {
+        Err(Error::Refused(lines)) => lines,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(
+        errors,
+        [
+            "native_isolation two_runs: FAIL: a file survived".to_owned(),
+            "cleanup kbf-acct-0: the user is left after native_isolation".to_owned(),
+        ]
+    );
+    assert_eq!(fake.logged.borrow().len(), 1);
+}
+
+/// Catches `--only` read wrongly: no name selects every target; names select their targets
+/// once each, in the table's order whatever order they were given in; `pf_as_root` alone
+/// builds the `pf_probe` example and lays it out; a name that is no target's (a misspelling, or
+/// the wrong case) is refused, first and on any system, with nothing read, built or run.
+#[test]
+fn only_selects_named_targets_in_order_and_refuses_an_unknown_name() {
+    let keys = |only: &[&str]| -> Result<Vec<&str>, String> {
+        let only: Vec<String> = only.iter().map(|k| (*k).to_owned()).collect();
+        select(&only)
+            .map(|targets| targets.into_iter().map(|t| t.key).collect())
+            .map_err(|e| e.to_string())
+    };
+    let all: Vec<&str> = TARGETS.iter().map(|t| t.key).collect();
+    assert_eq!(keys(&[]), Ok(all));
+    assert_eq!(
+        keys(&[
+            "native_inbound_pf",
+            "native_privileged",
+            "native_inbound_pf"
+        ]),
+        Ok(vec!["native_privileged", "native_inbound_pf"])
+    );
+    let known = "pf_as_root, treestore, mac_pool, mac_pool_trace, native_privileged, native_isolation, native_inbound_pf, native_fence";
+    for name in ["native-isolation", "Native_isolation", ""] {
+        assert_eq!(
+            keys(&["native_isolation", name]),
+            Err(format!(
+                "--only {name}: no such target; the targets are {known}"
+            ))
+        );
+    }
+
+    let place = Place::new("only-unknown");
+    let fake = Fake::new().listing(&["!"]);
+    assert_eq!(
+        place
+            .run_only("linux", &fake, Path::new("rel"), &["nope"])
+            .map_err(|e| e.to_string()),
+        Err(format!(
+            "--only nope: no such target; the targets are {known}"
+        ))
+    );
+    assert!(fake.roots().is_empty() && fake.builds.borrow().is_empty());
+    assert_eq!(*fake.listings.borrow(), ["!"], "the user list was not read");
+
+    let place = Place::new("only-pf");
+    let fake = Fake::new();
+    place
+        .run_only("macos", &fake, &place.work(), &["pf_as_root"])
+        .expect("its tests passed");
+    assert_eq!(
+        *fake.builds.borrow(),
+        [
+            "js-mac-provision pf_as_root",
+            "js-mac-provision example pf_probe"
+        ]
+    );
+    let w = place.work();
+    let w = w.display();
+    assert_eq!(
+        fake.roots(),
+        [
+            format!("/bin/mkdir -m 0755 {w}"),
+            format!("/bin/mkdir -m 0755 {w}/bin"),
+            format!(
+                "/bin/cp {} {w}/bin/pf_as_root",
+                exe("js-mac-provision", "pf_as_root")
+            ),
+            format!("/bin/cp /w/target/debug/examples/pf_probe {w}/bin/pf_probe"),
+            format!("/bin/chmod 0755 {w}/bin/pf_as_root {w}/bin/pf_probe"),
+        ]
+    );
+}
+
+/// The words of `line` as arguments.
+fn args_of(line: &str) -> Vec<OsString> {
+    line.split(' ').map(OsString::from).collect()
 }
 
 /// Asserts the account the `native_fence` target made (uid 4312, the last of the made range)

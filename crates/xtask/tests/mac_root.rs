@@ -233,3 +233,57 @@ fn the_verb_refuses_before_it_builds_or_runs_anything() {
         .expect("run xtask");
     assert_eq!(usage.status.code(), Some(2));
 }
+
+/// Catches `--only` not reaching the verb, or a misspelt target run as "every target": the
+/// real program refuses a name that is no target's, on any system, naming the targets, with
+/// nothing built and nothing run as root; a known name parses and goes on to the next check.
+#[test]
+fn the_verb_refuses_an_unknown_only_name_first() {
+    let place = Place::new("verb-only");
+    let work = place.dir.join("missing/work");
+    let run = |only: &str| {
+        Command::new(XTASK)
+            .arg("mac-root-tests")
+            .arg("--work")
+            .arg(&work)
+            .arg("--root")
+            .arg(place.root())
+            .arg("--sudo")
+            .arg(place.bin("sudo"))
+            .arg("--only")
+            .arg(only)
+            .env("CARGO", place.bin("cargo"))
+            .output()
+            .expect("run xtask")
+    };
+    let out = run("native-isolation");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "xtask: --only native-isolation: no such target; the targets are pf_as_root, \
+         treestore, mac_pool, mac_pool_trace, native_privileged, native_isolation, \
+         native_inbound_pf, native_fence\n"
+    );
+    assert_eq!(out.status.code(), Some(1));
+
+    let out = run("native_isolation");
+    let next = match cfg!(target_os = "macos") {
+        true => format!(
+            "xtask: --work {}: its parent is not a directory\n",
+            work.display()
+        ),
+        false => format!(
+            "xtask: mac-root-tests runs on a Mac; this is {}\n",
+            std::env::consts::OS
+        ),
+    };
+    assert_eq!(String::from_utf8_lossy(&out.stderr), next);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        !Path::new(&place.bin("sudo-args")).exists(),
+        "nothing ran as root"
+    );
+    assert!(
+        !place.root().join("target/debug/cargo-args").exists(),
+        "nothing was built"
+    );
+}
