@@ -801,7 +801,8 @@ mod tests {
         assert!(!view.implausible_lease_cpu);
         engine.heard(&b, Some(&measured(2, 0, 0)), at(10_000));
         let view = engine.load_of("b").unwrap();
-        assert!(view.implausible_lease_cpu && view.fallback);
+        assert!(view.implausible_lease_cpu);
+        assert!(view.fallback);
         assert_eq!(engine.sched.load_counters().signal_implausible_lease_cpu, 1);
     }
 
