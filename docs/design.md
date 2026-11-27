@@ -876,11 +876,14 @@ in and never skips it silently) and runs two suites, each over every implementat
 `acquire` and terminates nothing on `release`. The admission and hierarchy cases (refusal when no host could ever serve, queueing when a
 busy host could, fall-through, the booting machine kept) are in [design/invariants.md](design/invariants.md).
 
-*Agent suite:* the cases are in [design/agent-suite.md](design/agent-suite.md): start idempotency, cancel resend, stale and duplicate
-results, graded absence, validity bound and `NeverStarted`, unknown phase, usage on failure, each start-contract rule, the reuse and
-taint cases (container and scratch gone before the slot frees, the three consents for a host job, each post-job check that taints and each that is only noted, sticky and
-resent taint, no `Start` on a tainted host), the per-session rules, and the VM cases (no VM serves two runs, destroy before the slot frees,
-one VM per run, the whole-node sequence; listed in [design/agent-suite.md](design/agent-suite.md)). A third suite, the
+*Agent suite:* the cases are in [design/agent-suite.md](design/agent-suite.md). Those an agent's lifecycle shows are scenarios of
+the suite: start idempotency, cancel resend, the validity bound and `NeverStarted`, the self-fence, resent results and the verdicts that
+end them, retired fences, usage on failure and on kill, each start-contract rule and the GPU rule, the reuse and taint cases (container
+and scratch gone before the slot frees, the operator's consent to a host job, a host job tainting whatever its end, each post-job check
+that taints, sticky and resent taint, no `Start` on a tainted host), the first heartbeat after a restart, and the whole-node wait. The
+page also names where the rest is tested: the scheduler's half (stale and duplicate verdicts, graded absence, the pool's and the
+consumer's consents), the agent's session, worker and VM runtime, and the VM cases not built yet (no VM serves two runs, one VM per
+run, the VM part of the whole-node sequence). A third suite, the
 **constraint suite** of [design/capabilities.md](design/capabilities.md), runs the evaluator over every op, kind and refusal code and the
 ordering properties of versions; the server and the kbf table both pass its worked example.
 The hooks **read the real state**: for the fakes, their internal tables; for aws, an independent `DescribeInstances` made apart from the
