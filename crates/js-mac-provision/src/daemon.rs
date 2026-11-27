@@ -1,29 +1,29 @@
-//! The LaunchDaemons of the js-agent package: the agent, the root helper it dials, and the
-//! daemon that keeps the pool's pf anchor loaded ([`pf_pool_plist`]).
+//! The LaunchDaemons of the js-agent package: the agent ([`Daemon::agent`]) and the daemon
+//! that keeps the pool's pf anchor loaded ([`pf_pool_plist`]).
 //!
-//! The agent and the helper are described by flags and nothing else: no environment variable;
-//! the agent's plist names a flags file ([`FLAGS_FILE`]), which holds only more flags. Neither of
-//! the two runs at load. `KeepAlive` holds each of them while [`GATE`], the host's flags file, exists, which is
-//! launchd's form of the unit's `ConditionPathExists`. The gate is the flags file and not the
-//! join token ([`TOKEN_FILE`]): a Mac joins by hostkeeper's host certificate, which the flags
-//! file names, and has no token; every host has its flags, which name its server and pool. The
-//! package runs no install script: the update hook bootstraps the plists, and a daemon starts
-//! once the host has its flags. launchd then starts a daemon again after every exit, a clean
-//! one included (the agent exits 0 after it has drained), at most once in
-//! [`THROTTLE_SECS`]. The programs are the package's own files under [`BIN_DIR`]; the
-//! agent's host-specific flags (server, pool, network mode) are read from [`FLAGS_FILE`],
-//! which a per-group configuration package installs.
+//! The agent is described by flags and nothing else: no environment variable; its plist names a
+//! flags file ([`FLAGS_FILE`]), which holds only more flags. It does not run at load.
+//! `KeepAlive` holds it while [`GATE`], the host's flags file, exists, which is launchd's form
+//! of the unit's `ConditionPathExists`. The gate is the flags file and not the join token
+//! ([`TOKEN_FILE`]): a Mac joins by hostkeeper's host certificate, which the flags file names,
+//! and has no token; every host has its flags, which name its server and pool. The package
+//! runs no install script: the update hook bootstraps the plists, and the agent starts once
+//! the host has its flags. launchd then starts it again after every exit, a clean one included
+//! (the agent exits 0 after it has drained), at most once in [`THROTTLE_SECS`]. The program is
+//! the package's own file under [`BIN_DIR`]; the agent's host-specific flags (server, pool,
+//! network mode) are read from [`FLAGS_FILE`], which a per-group configuration package installs.
 //!
-//! Both start with 65536 open files, soft and hard (`SoftResourceLimits` and
-//! `HardResourceLimits`, `NumberOfFiles`), not with launchd's default soft limit of 256: the agent
-//! serves many runs at once, each with pipes, log streams, lease files and connections, and the
-//! jobs the helper starts inherit its limit. The kernel holds the limit to its own per-process
-//! cap (`kern.maxfilesperproc`) where that is lower.
+//! It starts with 65536 open files, soft and hard (`SoftResourceLimits` and
+//! `HardResourceLimits`, `NumberOfFiles`), not with launchd's default soft limit of 256: the
+//! agent serves many runs at once, each with pipes, log streams, lease files and connections.
+//! The kernel holds the limit to its own per-process cap (`kern.maxfilesperproc`) where that is
+//! lower.
 //!
 //! The pf daemon is of another kind: it runs at load and every [`PF_POOL_INTERVAL_SECS`]
-//! seconds, and each run is `js-mac-provision install --flags-file` [`FLAGS_FILE`], which loads
-//! the anchor the agent's own flags name unless it is in force already, and does nothing while
-//! the file is absent or sets no `--native-network=on` (see [`crate::agent_flags`]).
+//! seconds, as root, and each run is `js-agent` [`PF_ANCHOR_VERB`] `--flags-file`
+//! [`FLAGS_FILE`], which loads the anchor the agent's own flags name unless it is in force
+//! already, and does nothing while the file is absent or sets no `--native-network=on` (see
+//! [`crate::apply()`] and [`crate::agent_flags`]).
 
 use std::fmt::Write as _;
 
@@ -31,8 +31,6 @@ use crate::launchd::{LABEL, escape, render_plist};
 
 /// The label of the agent's daemon, and the name of its plist without `.plist`.
 pub const AGENT_LABEL: &str = "js-agent";
-/// The label of the root helper's daemon.
-pub const SESSION_LABEL: &str = "js-agent.session";
 /// Everything the package installs, apart from the plists, lies under this directory.
 pub const PREFIX: &str = "/Library/Application Support/js-agent";
 /// The directory of the package's programs.
@@ -55,30 +53,25 @@ pub const TOKEN_FILE: &str = "/etc/js-agent/token";
 /// for the engine calls. `launchctl bootout` returns when the agent has exited, so whatever stops
 /// it must wait at least this long.
 pub const AGENT_EXIT_TIMEOUT_SECS: u32 = 120;
-/// The open-files limit, soft and hard, of the agent and the helper.
+/// The open-files limit, soft and hard, of the agent.
 const OPEN_FILES: u32 = 65536;
 /// Seconds launchd waits between two starts of a daemon.
 pub const THROTTLE_SECS: u32 = 30;
-/// The helper's socket, which the agent dials.
-pub const SESSION_SOCKET: &str = "/var/run/js-mac-session/socket";
-/// The group that may reach the helper's socket.
-pub const SOCKET_GROUP: &str = "_jsagent";
 /// The label of the daemon that keeps the pool's pf anchor loaded.
 pub const PF_POOL_LABEL: &str = LABEL;
 /// Seconds between two runs of the pf daemon, after the one at load.
 pub const PF_POOL_INTERVAL_SECS: u32 = 30;
 
-/// The property list of the pf daemon: `js-mac-provision install --flags-file` with the agent's
+/// The verb of the agent's program that loads the anchor, which the pf daemon runs.
+pub const PF_ANCHOR_VERB: &str = "__pf-anchor";
+
+/// The property list of the pf daemon: `js-agent __pf-anchor --flags-file` with the agent's
 /// flags file, at load and every [`PF_POOL_INTERVAL_SECS`] seconds, as root. Fixed, like the
 /// agent's: the policy is read from the flags file at each run, never written into the plist.
 #[must_use]
 pub fn pf_pool_plist() -> String {
-    let args = ["install", "--flags-file", FLAGS_FILE].map(str::to_owned);
-    render_plist(
-        &format!("{BIN_DIR}/js-mac-provision"),
-        &args,
-        PF_POOL_INTERVAL_SECS,
-    )
+    let args = [PF_ANCHOR_VERB, "--flags-file", FLAGS_FILE].map(str::to_owned);
+    render_plist(&format!("{BIN_DIR}/js-agent"), &args, PF_POOL_INTERVAL_SECS)
 }
 
 /// A LaunchDaemon.
@@ -117,33 +110,6 @@ impl Daemon {
             args: words.iter().map(|w| (*w).to_owned()).collect(),
             exit_timeout_secs: AGENT_EXIT_TIMEOUT_SECS,
             log_stem: "js-agent".to_owned(),
-        }
-    }
-
-    /// The root helper's daemon, holding its caller to `daemon_requirement`: its own socket, state directory and uid range, never the
-    /// defaults of another helper on the Mac.
-    #[must_use]
-    pub fn session(daemon_requirement: &str) -> Daemon {
-        let words = [
-            "--socket",
-            SESSION_SOCKET,
-            "--socket-group",
-            SOCKET_GROUP,
-            "--state-dir",
-            "/var/db/js-mac-session",
-            "--uid-range",
-            "600-699",
-            "--homes",
-            "/Users",
-            "--daemon-requirement",
-            daemon_requirement,
-        ];
-        Daemon {
-            label: SESSION_LABEL.to_owned(),
-            program: format!("{BIN_DIR}/js-mac-session"),
-            args: words.iter().map(|w| (*w).to_owned()).collect(),
-            exit_timeout_secs: 20,
-            log_stem: "js-mac-session".to_owned(),
         }
     }
 

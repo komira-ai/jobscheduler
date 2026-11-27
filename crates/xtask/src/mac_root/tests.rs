@@ -34,7 +34,7 @@ struct Fake {
     sw_vers_fails: bool,
     /// The package whose build fails.
     build_fails: Option<&'static str>,
-    /// Whether the `js-mac-provision` build names no program.
+    /// Whether the `pf_probe` build names no program.
     no_program: bool,
     /// A root command with this argument exits 1.
     root_fails_on: Option<&'static str>,
@@ -99,12 +99,12 @@ impl Machine for Fake {
         Ok(out)
     }
 
-    fn build_bin(&self, package: &str, bin: &str) -> Result<String, Error> {
+    fn build_example(&self, package: &str, example: &str) -> Result<String, Error> {
         if self.no_program {
             return Ok(String::new());
         }
         Ok(format!(
-            r#"{{"reason":"compiler-artifact","target":{{"kind":["bin"],"name":"{bin}"}},"profile":{{"test":false}},"executable":"/w/target/debug/{bin}","manifest_path":"/w/crates/{package}/Cargo.toml"}}"#
+            r#"{{"reason":"compiler-artifact","target":{{"kind":["example"],"name":"{example}"}},"profile":{{"test":false}},"executable":"/w/target/debug/examples/{example}","manifest_path":"/w/crates/{package}/Cargo.toml"}}"#
         ))
     }
 
@@ -255,13 +255,13 @@ fn a_clean_mac_runs_every_target_from_the_work_directory_and_passes() {
         ));
     }
     expected.push(format!(
-        "/bin/cp /w/target/debug/js-mac-provision {w}/bin/js-mac-provision"
+        "/bin/cp /w/target/debug/examples/pf_probe {w}/bin/pf_probe"
     ));
     let mut chmod = "/bin/chmod 0755".to_owned();
     for target in &TARGETS {
         chmod.push_str(&format!(" {w}/bin/{}", target.key));
     }
-    chmod.push_str(&format!(" {w}/bin/js-mac-provision"));
+    chmod.push_str(&format!(" {w}/bin/pf_probe"));
     expected.push(chmod);
     // Only the users the native_privileged run made: in range and named as the pool's.
     expected.push("/usr/bin/dscl . -delete /Users/kbf-acct-0".to_owned());
@@ -427,7 +427,7 @@ fn each_refusal_before_the_runs_stops_the_verb_with_its_reason() {
     };
     assert_eq!(
         say(&fake, "macos", &work),
-        Err("cargo built 0 programs for the bin target `js-mac-provision`, not 1".to_owned())
+        Err("cargo built 0 programs for the example `pf_probe`, not 1".to_owned())
     );
     for fake in [
         &Fake::new().listing(&["!"]),
@@ -574,7 +574,7 @@ fn each_target_gets_its_own_variables_directories_and_arguments() {
     };
     assert_eq!(
         line("pf_as_root"),
-        "/usr/bin/env JS_MAC_PROVISION_BIN=/S/w/bin/js-mac-provision /S/w/bin/pf_as_root --ignored --test-threads=1"
+        "/usr/bin/env JS_PF_PROBE_BIN=/S/w/bin/pf_probe /S/w/bin/pf_as_root --ignored --test-threads=1"
     );
     assert_eq!(
         line("treestore"),

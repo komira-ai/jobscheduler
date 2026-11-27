@@ -15,9 +15,9 @@
 //! | `--native-account-range <first>-<last>` | the uids of the pool's slots, both included (`700-799` is 100 slots); no default; from 501 to 60000; nothing else on the Mac may use them; needs `--native-accounts` |
 //! | `--native-account-ready <n>` | how many accounts the pool keeps made and ready to lend; by default 1; at most the number of slots; needs `--native-accounts` |
 //! | `--native-homes <path>` | (macOS build only) the directory the accounts' homes are in; the pool makes them in `/Users`, so the only value is `/Users`, the default; needs `--native-accounts` |
-//! | `--native-network <level>` | (macOS build only) the most network a native job may ask for: `off` (the default), `loopback`, `on` or `open`; a job that asks for more is refused at start (`network-above-ceiling`), never run with less; a job's level maps onto these values (`none` is `off`, `allow-list` is `on`, `open` is `open`), and a job of the level `none`, like a native body that asks for `loopback`, gets loopback under every value but `off`, which gives it no network at all; loopback is shared by every run of the Mac and by the host's own services on it; `on` needs the pf anchor of `js-mac-provision` (the `--native-pf-*` flags below): the agent does not start with `on` unless the anchor is enforced, and before every `allow-list` job it checks again and refuses the job (`egress-unchecked`) if it is not; `open` allows the network with no filter and needs no anchor: the scheduler, the cloud metadata address and the rest of the network are reachable from the job, and a `--native-pf-*` flag beside it stops the agent at start; a start that declares ports is refused (`ports-not-supported`); the hello reports the value as `egress` (`none` for `off` and `loopback`); needs `--native-accounts` |
+//! | `--native-network <level>` | (macOS build only) the most network a native job may ask for: `off` (the default), `loopback`, `on` or `open`; a job that asks for more is refused at start (`network-above-ceiling`), never run with less; a job's level maps onto these values (`none` is `off`, `allow-list` is `on`, `open` is `open`), and a job of the level `none`, like a native body that asks for `loopback`, gets loopback under every value but `off`, which gives it no network at all; loopback is shared by every run of the Mac and by the host's own services on it; `on` needs the pf anchor the pf job `js-agent __pf-anchor` loads from this flags file (the `--native-pf-*` flags below): the agent does not start with `on` unless the anchor is enforced, and before every `allow-list` job it checks again and refuses the job (`egress-unchecked`) if it is not; `open` allows the network with no filter and needs no anchor: the scheduler, the cloud metadata address and the rest of the network are reachable from the job, and a `--native-pf-*` flag beside it stops the agent at start; a start that declares ports is refused (`ports-not-supported`); the hello reports the value as `egress` (`none` for `off` and `loopback`); needs `--native-accounts` |
 //! | `--native-pf-uid-start <uid>`, `--native-pf-uid-count <n>` | (macOS build only) the uids whose egress the anchor limits; both required with `--native-network on`, refused otherwise (with `open` the agent does not start) |
-//! | `--native-pf-endpoint <ip:port>` | (macOS build only) an endpoint the pool may reach, as given to `js-mac-provision install --endpoint`; repeatable; needs `--native-network on` |
+//! | `--native-pf-endpoint <ip:port>` | (macOS build only) an endpoint the pool may reach, which the pf job (`js-agent __pf-anchor`) reads from this flags file and loads; repeatable; needs `--native-network on` |
 //! | `--native-pf-anchor <name>`, `--native-pf-state-dir <path>`, `--native-pfctl <path>` | (macOS build only) the anchor (default `com.apple/com.komira.js.pool`), the provisioner's state directory (default `/var/db/com.komira.js-pf`) and the `pfctl` (default `/sbin/pfctl`); absolute paths; need `--native-network on` |
 //! | `--native-trees-root <path>` | (macOS build only) the mount point under which the `--mount-provider` serves every job's trees (tierstore's one NFS mount of the Mac); must be a `--mount-root-ro` that no `--mount-root` names, with no other mount root above or below it, and needs `--mount-provider`; it is the one mount root that is not a read deny of every run: a run's profile denies reads below it and grants back the run's own trees; a job's mount below it must be read-only and `no_exec` (`input-not-allowed`) |
 //! | `--native-put-root <path>` | (macOS build only) the put ingest's directory (tierstore's put root): a read-write mount of `<this>/cas/b/<build>/<nonce>` at `/work/<rest>` is a run's put target, never linked into its folder nor granted in its profile; after the run the agent commits the run's `<rest>/pack` there as it is (`pack.part`, `pack.sha256-<hex>.part`, `pack`) and notes the key, digest and size as the finding `outputs-committed`; any other mount beneath it is refused (`input-not-allowed`); it is no `--mount-root` and every run's profile denies reads below it; needs `--native-put-user` and `--native-accounts` |
@@ -109,7 +109,7 @@ pub struct Flags {
     /// never run with less. A job's level maps onto these values: `none` is `off`,
     /// `allow-list` is `on`, `open` is `open`; a job of the level `none` gets loopback under
     /// every value but `off`, which gives it no network at all. Loopback is shared by every
-    /// run of the Mac and by the host's own services on it. `on` is limited by the pf anchor of `js-mac-provision` (see
+    /// run of the Mac and by the host's own services on it. `on` is limited by the pf anchor the pf job loads (see
     /// `--native-pf-uid-start`): the agent does not start with `on` unless the anchor is in
     /// force, and refuses each `allow-list` job (`egress-unchecked`) while it is not. `open`
     /// allows the network with no filter and needs no anchor: it leaves the scheduler, the
@@ -140,7 +140,7 @@ pub struct Flags {
     pub native_tool_roots: Vec<PathBuf>,
     /// The first uid whose egress the pf anchor limits. With `--native-network on` the agent refuses to start, and
     /// refuses every job that asks for the network (`egress-unchecked`), unless the anchor
-    /// `js-mac-provision` installed is in force (pf enabled, the main ruleset reaches the
+    /// the pf job installed is in force (pf enabled, the main ruleset reaches the
     /// anchor, the loaded rules are the ones these flags render); required then, and
     /// refused otherwise (with `--native-network open` the agent does not start). Needs
     /// `--native-network on`.
@@ -150,17 +150,17 @@ pub struct Flags {
     /// `--native-network on`; see `--native-pf-uid-start`.
     #[arg(long, value_name = "N")]
     pub native_pf_uid_count: Option<u32>,
-    /// An endpoint the pool may reach over TCP, as `192.0.2.10:443`; repeatable. These must
-    /// be the `--endpoint` flags `js-mac-provision install` was given, or the anchor reads
-    /// back as different and every job is refused. Needs `--native-network on`.
+    /// An endpoint the pool may reach over TCP, as `192.0.2.10:443`; repeatable. The pf job reads
+    /// these from the same flags file, so the anchor it loads holds them; an anchor loaded with
+    /// others reads back as different and every job is refused. Needs `--native-network on`.
     #[arg(long = "native-pf-endpoint", value_name = "IPV4:PORT")]
     pub native_pf_endpoints: Vec<String>,
-    /// The pf anchor the rules are loaded under (the `--anchor` of `js-mac-provision`); by
+    /// The pf anchor the rules are loaded under (the pf job reads it from the flags file); by
     /// default `com.apple/com.komira.js.pool`. Needs `--native-network on`.
     #[arg(long, value_name = "NAME")]
     pub native_pf_anchor: Option<String>,
-    /// The state directory of `js-mac-provision` (its `--state-dir`); by default
-    /// `/var/db/com.komira.js-pf`. Needs `--native-network on`.
+    /// The pf anchor's state directory (its rules file and pf enable token, read by the pf job
+    /// from the flags file); by default `/var/db/com.komira.js-pf`. Needs `--native-network on`.
     #[arg(long, value_name = "PATH")]
     pub native_pf_state_dir: Option<PathBuf>,
     /// The `pfctl` program to ask (by default `/sbin/pfctl`). Needs `--native-network on`.

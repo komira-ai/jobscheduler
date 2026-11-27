@@ -7,21 +7,14 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-# The host step that limits the egress of a Mac pool's users with a pf anchor. The rules
-# and the logic around `pfctl` build and are tested everywhere; only `pfctl` itself needs
-# a Mac and root.
-[[bin]]
-name = "js-mac-provision"
-path = "src/main.rs"
+# The library that limits the egress of a Mac pool's users with a pf anchor. The rules and
+# the logic around `pfctl` build and are tested everywhere; only `pfctl` itself needs a Mac
+# and root. The js-agent program runs it (`js-agent __pf-anchor`).
 
 [dependencies]
-clap.workspace = true
 # The one way the agent's code starts a program (`disclaim::Program`): `pfctl`
 # is started with its privacy (TCC) responsibility disclaimed on macOS.
 js-mac-session = { path = "../js-mac-session" }
-# `geteuid`: `install --flags-file` trusts a flags file of root or of the user running it, as the
-# agent does.
-rustix.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

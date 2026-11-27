@@ -18,7 +18,7 @@
 //!   registry under its tag, and pulled back by digest and compared with the tree.
 //!
 //! What ships is computed, not listed: the workspace crates the shipped binaries
-//! (`js-lease-server`, `js` from `js-cli`, `js-agent`, `js-bundle` from `js-bundle-cli`, `js-mac-session`, `js-mac-provision`, `js-mdm`) depend on, through normal and build
+//! (`js-lease-server`, `js` from `js-cli`, `js-agent`, `js-bundle` from `js-bundle-cli`, `js-mac-session`, `js-mdm`) depend on, through normal and build
 //! dependencies (`cargo metadata`). Every file of such a crate ships (`src/**`, manifest,
 //! `build.rs`, an `include_str!`'d sample configuration) except its `tests/`, `benches/`,
 //! `examples/`, markdown and `Cargo.lock`; so do the root `Cargo.toml`, `Cargo.lock`,

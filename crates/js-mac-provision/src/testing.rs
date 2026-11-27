@@ -1,4 +1,4 @@
-//! A fake `pfctl` for the tests of the provisioner and the verbs.
+//! A fake `pfctl` for the tests of the provisioner and of `apply`.
 
 use std::cell::{Cell, RefCell};
 use std::fs;

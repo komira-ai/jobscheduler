@@ -5,23 +5,17 @@ uid range. Under `Net::On` a Seatbelt profile cannot name the hosts a process ma
 so the control sits outside the sandbox: a pool user may connect over TCP to the endpoints
 the policy names, to IPv4 loopback, and to nothing else.
 
-```text
-js-mac-provision render  --uid-start 600 --uid-count 100 --endpoint 192.0.2.10:443 --endpoint 198.51.100.7:8443
-js-mac-provision install --uid-start 600 --uid-count 100 --endpoint ...   # root
-js-mac-provision install --flags-file /etc/js-agent/flags                 # root; the agent's own policy
-js-mac-provision check   --uid-start 600 --uid-count 100 --endpoint ...   # exits 1 on drift
-js-mac-provision remove                                                   # root
-js-mac-provision pf-pool-plist                                            # the js-agent package's daemon
-js-mac-provision launchd-plist --program /usr/local/bin/js-mac-provision --uid-start ... > /Library/LaunchDaemons/js-agent.pf-pool.plist
-sudo -u <pool user> js-mac-provision probe 169.254.169.254:80             # "refused"
-```
-
-Flags shared by the verbs: `--anchor` (default `com.apple/com.komira.js.pool`),
-`--state-dir` (default `/var/db/com.komira.js-pf`) and `--pfctl` (default `/sbin/pfctl`).
+This is a library, and there is no program of its own. The macOS agent (`js-agent`) uses it in
+two ways: it checks the anchor with `enforced` at its start and before each job that asks for
+the filtered network, and the LaunchDaemon `js-agent.pf-pool` runs its hidden verb
+`js-agent __pf-anchor --flags-file /etc/js-agent/flags` as root, which calls `apply` to load the
+anchor the agent's own flags name. The anchor defaults are `com.apple/com.komira.js.pool`
+(`agent_flags::DEFAULT_ANCHOR`), the state directory `/var/db/com.komira.js-pf`
+(`agent_flags::DEFAULT_STATE_DIR`) and `/sbin/pfctl`.
 
 ## The rules
 
-`render` is a pure function of the uid range, the endpoints and the anchor name: the same
+`render()` is a pure function of the uid range, the endpoints and the anchor name: the same
 input gives the same bytes, endpoints sorted by address then port, repeats once. For the
 pool `600-602` and one endpoint it is:
 
@@ -57,6 +51,8 @@ block return out quick proto { tcp, udp } from any to any user { 600, 601, 602 }
 
 ## install, check, remove (root)
 
+These are the operations of `Provisioner`, which `apply` runs for the agent's flags file; `remove` is for a test; no program of the package runs it.
+
 - **install** writes the rules to `<state-dir>/pool.pf` (0600, the directory 0700; every
   state file goes through a temporary file and a rename), loads them with
   `pfctl -a <anchor> -f <file>`, takes a pf enable reference if it holds none, stores what
@@ -67,22 +63,22 @@ block return out quick proto { tcp, udp } from any to any user { 600, 601, 602 }
   `-sr`), and `check` refuses such a stored one.
   It replaces the anchor's rules whole, so it is safe to run again. A reload does not touch
   pf's state table: a connection to an endpoint the new rules refuse stays open until it ends.
-- **install --flags-file PATH** takes the policy from the macOS agent's flags file
-  (`/etc/js-agent/flags`) instead of the flags above, so that the anchor loaded is the one the
-  agent checks: its `--native-network`, `--native-pf-uid-start`, `--native-pf-uid-count`,
-  `--native-pf-endpoint`, `--native-pf-anchor`, `--native-pf-state-dir` and `--native-pfctl`
-  lines, read as the agent reads them (`src/agent_flags.rs`: a regular file of root's or of the
-  user running it, not writable by group or others, at most 64 KiB of UTF-8, one `--flag=value`
-  per line; every other line is the agent's and is skipped). It runs `check` first and loads
-  nothing when the anchor is in force already, so a run every 30 seconds does not reload the rules
-  (and delete the readback) under the agent's own checks; a changed policy fails the check and is
-  loaded. A file that is not there, or that sets a network ceiling other than `on`, loads nothing
-  and exits 0, as the daemon runs before the host's configuration package arrives. A pf flag
-  beside a ceiling other than `on`, a ceiling of `on` without the pool's uids, a value the agent
-  would refuse, a flag given twice (`--native-pf-endpoint` aside) and an untrusted file are
-  refused. The anchor, the state directory and the `pfctl` are the file's (the agent's defaults
-  when it names none), not this run's `--anchor`, `--state-dir` and `--pfctl`: they are the ones
-  the agent checks with.
+- **apply** (`js_mac_provision::apply`, run by `js-agent __pf-anchor --flags-file PATH`) takes
+  the policy from the macOS agent's flags file (`/etc/js-agent/flags`), so that the anchor
+  loaded is the one the agent checks: its `--native-network`, `--native-pf-uid-start`,
+  `--native-pf-uid-count`, `--native-pf-endpoint`, `--native-pf-anchor`, `--native-pf-state-dir`
+  and `--native-pfctl` lines, read as the agent reads them (`src/agent_flags.rs`: a regular file
+  of root's or of the user running it, not writable by group or others, at most 64 KiB of UTF-8,
+  one `--flag=value` per line; every other line is the agent's and is skipped). It runs `check`
+  first and loads nothing when the anchor is in force already, so a run every 30 seconds does not
+  reload the rules (and delete the readback) under the agent's own checks; a changed policy fails
+  the check and is loaded. A file that is not there, or that sets a network ceiling other than
+  `on`, loads nothing and exits 0, as the daemon runs before the host's configuration package
+  arrives. A pf flag beside a ceiling other than `on`, a ceiling of `on` without the pool's uids,
+  a value the agent would refuse, a flag given twice (`--native-pf-endpoint` aside) and an
+  untrusted file are refused (exit 1). The anchor, the state directory and the `pfctl` are the
+  file's (the agent's defaults when it names none). The verb prints one line: `no flags file`,
+  `--native-network=<n>: the agent checks no anchor`, `in force` or `installed`.
 - **check** is the enforcement question (below, `enforced`) and **changes nothing**: pf is
   enabled (`pfctl -s info` says `Status: Enabled`), the main ruleset (`pfctl -sr`) evaluates
   the anchor, the rules `install` stored equal what the policy renders now (so a changed
@@ -127,7 +123,7 @@ That placement has two weaknesses, and the gate, not the interval, is what close
 
 - A `pfctl -f /etc/pf.conf` by anything (MDM, an OS update, a system service) can drop the
   reference or the rules. Egress is then open until the next LaunchDaemon tick. The
-  daemon runs `install` every 30 seconds by default, which only shortens the window.
+  daemon runs the install every 30 seconds, which only shortens the window.
   `enforced` before each job closes it for the jobs.
 - A wildcard anchor evaluates its children in name order, so an Apple anchor with a
   numbered name (such as `250.ApplicationFirewall`) is evaluated before
@@ -145,37 +141,37 @@ is decided the default stays under `com.apple/`.
 
 The rules live in the kernel and are gone at reboot, and an OS update may reload
 `/etc/pf.conf`. Rather than a file under `/etc/pf.anchors` plus an include in the main
-ruleset (an edit of an OS file), a LaunchDaemon runs `install` at boot and every
-`interval` seconds (default 30), with the label `js-agent.pf-pool` (a label of the js-agent
-service, as hostkeeper requires of every label a package runs). Running `install` repeatedly is
-the design: it puts the anchor back whatever removed it, and an install that ran before the
-system's own pf start-up fails (`NotReferenced`) and succeeds on the next run.
+ruleset (an edit of an OS file), a LaunchDaemon runs the install at boot and every 30 seconds,
+with the label `js-agent.pf-pool` (a label of the js-agent service, as hostkeeper requires of
+every label a package runs). Running it repeatedly is the design: it puts the anchor back
+whatever removed it, and an install that ran before the system's own pf start-up fails
+(`NotReferenced`) and succeeds on the next run.
 
-The js-agent package for macOS ships the daemon: `pf-pool-plist` prints its fixed plist,
-`/Library/LaunchDaemons/js-agent.pf-pool.plist`, which runs
-`/Library/Application Support/js-agent/bin/js-mac-provision install --flags-file
+The js-agent package for macOS ships the daemon, one of its two LaunchDaemons (the other is the
+agent's). `daemon::pf_pool_plist()` renders its fixed plist, `cargo xtask pkg stage-macos` writes
+it as `/Library/LaunchDaemons/js-agent.pf-pool.plist`, and it runs
+`/Library/Application Support/js-agent/bin/js-agent __pf-anchor --flags-file
 /etc/js-agent/flags` at load and every 30 seconds as root (the golden file is
-`tests/golden/pf-pool.plist`). The policy is read from the agent's flags file at every run, so the
-configuration package that writes the flags file changes the anchor too, within 30 seconds, and
-the plist holds no policy. hostkeeper lists the label in the package's `run` labels and enables it,
-and the update hook bootstraps it at `cutover`, after it has run the same `install --flags-file`
-itself from the staged release, before the agent starts (the hook's `pf_unit` param). After a reboot launchd loads it from `/Library/LaunchDaemons`.
-
-`launchd-plist` prints the daemon for a policy given as flags, with the whole policy as
-arguments, for a host without the package; put the plist in `/Library/LaunchDaemons` (owner
-root:wheel, mode 0644) and `launchctl bootstrap system <plist>`. To take either down,
-`launchctl bootout system/js-agent.pf-pool`, then `remove`.
+`tests/golden/pf-pool.plist`; its error output goes to `/var/log/js-agent.pf-pool.log`). The
+program is the package's one program: the pf job is a separate job only because the agent loads
+no pf anchor itself (`docs/design/mac-one-program.md`, section 6). The policy is read from the
+agent's flags file at every run, so the configuration package that writes the flags file changes
+the anchor too, within 30 seconds, and the plist holds no policy. hostkeeper lists the label in
+the package's `run` labels and enables it, and the update hook bootstraps it at `cutover`, after
+it has run the same `__pf-anchor` verb itself from the staged release, before the agent starts
+(the hook's `pf_unit` param). After a reboot launchd loads it from `/Library/LaunchDaemons`.
+To take it down, `launchctl bootout system/js-agent.pf-pool`, then `pfctl -a <anchor> -F rules`.
 
 ### The pf enable token
 
 pf is enabled with `pfctl -E`, which takes a reference on it and prints a token; `pfctl -X
 <token>` gives the reference back, and pf turns off only when the last reference is gone,
-so this program never turns off a pf something else enabled. `install` takes a reference
+so nothing here turns off a pf something else enabled. The install takes a reference
 only when pf is off, or on with neither a stored token (`<state-dir>/pf-token`) nor the
 record `pf-token.none` ("`-E` printed no token while pf was on"), so the 30-second daemon
 takes nothing. It writes the marker `pf-token.pending` before `-E` and removes it once the
-token (or the record) is stored. If the next `install` finds the marker, a run died in
-between: a reference may be held that no file names, only a reboot clears it, and `install`
+token (or the record) is stored. If the next install finds the marker, a run died in
+between: a reference may be held that no file names, only a reboot clears it, and it
 says so on standard error and removes the marker. If the token cannot be stored, it is
 released at once. A stored token from before a reboot is replaced (pf is off then) and
 releasing the old one is ignored. A `-E` that prints no `Token :` line while pf is
@@ -217,8 +213,9 @@ pf by uid is a control on the packets a pool user's sockets send, and it has lim
 ## The root test
 
 `tests/pf_as_root.rs`, `#[ignore]`d (root, loads pf rules under its own anchor
-`com.apple/js-mac-provision-test`). As pool uids it connects, through the program's `probe`
-verb, to a listed endpoint (this Mac's own address and a port of a listener the test
+`com.apple/js-mac-provision-test`). As pool uids it connects, through the `pf_probe` example
+(`examples/pf_probe.rs`: `pf_probe <addr> [--timeout-ms N]` prints the outcome and exits 0 only
+when connected), to a listed endpoint (this Mac's own address and a port of a listener the test
 opens): connected; to loopback: connected. To another port of this Mac's own address, to
 `169.254.169.254:80` and to a documentation address it must be blocked: the packet counter
 of the blocking rule (`pfctl -a <anchor> -s rules -vv`, read before and after) rises and the

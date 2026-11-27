@@ -6,8 +6,8 @@
 	<string>js-agent.pf-pool</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/Library/Application Support/js-agent/bin/js-mac-provision</string>
-		<string>install</string>
+		<string>/Library/Application Support/js-agent/bin/js-agent</string>
+		<string>__pf-anchor</string>
 		<string>--flags-file</string>
 		<string>/etc/js-agent/flags</string>
 	</array>
@@ -16,6 +16,6 @@
 	<key>StartInterval</key>
 	<integer>30</integer>
 	<key>StandardErrorPath</key>
-	<string>/var/log/js-mac-provision.log</string>
+	<string>/var/log/js-agent.pf-pool.log</string>
 </dict>
 </plist>

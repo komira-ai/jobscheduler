@@ -323,10 +323,11 @@ fn gamma_is_off_by_variable_and_sets_the_lease_server_alone() {
     assert!(tool.contains("cargo build -p xtask --locked --release"));
 }
 
-/// The five binaries of the Apple silicon build, as `package:binary`, in the order the builds
-/// list them: `js`, `js-agent`, `js-bundle` and the two Mac host tools only, the lease server
+/// The four binaries of the Apple silicon build, as `package:binary`, in the order the builds
+/// list them: `js`, `js-agent`, `js-bundle` and the Mac host tool only, the lease server
 /// and js-mdm being Linux-only.
-const MACOS_BUILDS: &str = "js-cli:js js-agent:js-agent js-bundle-cli:js-bundle js-mac-session:js-mac-session js-mac-provision:js-mac-provision";
+const MACOS_BUILDS: &str =
+    "js-cli:js js-agent:js-agent js-bundle-cli:js-bundle js-mac-session:js-mac-session";
 
 /// Asserts that the Apple-silicon archives are built by the job `build-macos` (a `macos-15`
 /// runner building [`MACOS_BUILDS`] only, with `cargo xtask release macos-leg`) and no longer by
@@ -396,10 +397,12 @@ fn the_js_bundle_archive_is_built_and_expected_for_both_targets() {
         let asset = format!("js-bundle-$VERSION-{target}.tar.gz");
         assert!(sums.contains(&asset), "{asset} is not expected: {sums}");
     }
-    for tool in ["js-mac-provision", "js-mac-session"] {
-        let asset = format!("{tool}-$VERSION-aarch64-apple-darwin.tar.gz");
-        assert!(sums.contains(&asset), "{asset} is not expected: {sums}");
-    }
+    let asset = "js-mac-session-$VERSION-aarch64-apple-darwin.tar.gz";
+    assert!(sums.contains(asset), "{asset} is not expected: {sums}");
+    assert!(
+        !sums.contains("js-mac-provision"),
+        "the provision program's archive is no longer released: {sums}"
+    );
     let build = job(&jobs, "build").join("\n");
     assert_eq!(
         build.matches("js-bundle-cli:js-bundle").count(),
@@ -598,13 +601,7 @@ fn the_sums_job_expects_every_linux_binary_for_both_architectures_and_the_list_i
             wanted.push(format!("{bin}-$VERSION-{target}.tar.gz"));
         }
     }
-    for bin in [
-        "js",
-        "js-agent",
-        "js-bundle",
-        "js-mac-session",
-        "js-mac-provision",
-    ] {
+    for bin in ["js", "js-agent", "js-bundle", "js-mac-session"] {
         wanted.push(format!("{bin}-$VERSION-aarch64-apple-darwin.tar.gz"));
     }
     let archives = wanted.clone();
@@ -617,7 +614,7 @@ fn the_sums_job_expects_every_linux_binary_for_both_architectures_and_the_list_i
     for target in ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"] {
         wanted.push(format!("js-lease-server-$VERSION-{target}.oci.tar"));
     }
-    assert_eq!(expected.len(), 19, "{expected:?}");
+    assert_eq!(expected.len(), 18, "{expected:?}");
     let mut have = expected.clone();
     have.sort();
     wanted.sort();

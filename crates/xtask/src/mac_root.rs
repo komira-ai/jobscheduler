@@ -7,8 +7,9 @@
 //!   pool range [`PRODUCTION_UIDS`] or of the tests' own [`TEST_UIDS`], and no name that
 //!   starts `kbf-lease-`. The tests make and delete accounts named `kbf-acct-<n>` with uids of
 //!   their own, so they run only on a Mac whose agent has not made its pool there;
-//! - every target ([`TARGETS`]) and the `js-mac-provision` program are built as this user
-//!   ([`test_build::build`], [`test_build::build_bin`]), before anything runs as root;
+//! - every target ([`TARGETS`]) and the `pf_probe` example of `js-mac-provision` are built as
+//!   this user ([`test_build::build`], [`test_build::build_example`]), before anything runs as
+//!   root;
 //! - through `sudo -n`: the work directory `--work` (which must not exist) and a directory
 //!   of each target's are made root-owned, mode 0755, and the binaries are copied into
 //!   `<work>/bin`, mode 0755. The tests' pool users run the test binary itself, and the
@@ -62,8 +63,10 @@ pub const LEASE_USER_PREFIX: &str = "kbf-lease-";
 pub const DSCL: &str = "/usr/bin/dscl";
 /// The tool the macOS version is read with.
 pub const SW_VERS: &str = "/usr/bin/sw_vers";
-/// The package of the pf root test, and of the program it loads its anchor with.
+/// The package of the pf root test, and of the example it starts its probes with.
 pub const PROVISION: &str = "js-mac-provision";
+/// The example of [`PROVISION`] the pf root test starts as other uids.
+pub const PF_PROBE: &str = "pf_probe";
 /// The test filtered out of `native_privileged`, and why: the table says so.
 pub const VM_TEST: (&str, &str) = (
     "vm::a_command_runs_in_a_fresh_vm_and_the_vm_is_destroyed",
@@ -146,11 +149,11 @@ pub trait Machine {
     /// Cargo could not be started, or the build failed.
     fn build(&self, package: &str, tests: &[&str]) -> Result<String, Error>;
 
-    /// Builds the binary target `bin` of `package` as this user: cargo's JSON messages.
+    /// Builds the example `example` of `package` as this user: cargo's JSON messages.
     ///
     /// # Errors
     /// Cargo could not be started, or the build failed.
-    fn build_bin(&self, package: &str, bin: &str) -> Result<String, Error>;
+    fn build_example(&self, package: &str, example: &str) -> Result<String, Error>;
 
     /// Runs `program args` as this user: what it printed on stdout.
     ///
@@ -192,8 +195,8 @@ impl Machine for RealMachine<'_> {
         test_build::build(self.cargo, self.root, package, tests)
     }
 
-    fn build_bin(&self, package: &str, bin: &str) -> Result<String, Error> {
-        test_build::build_bin(self.cargo, self.root, package, bin)
+    fn build_example(&self, package: &str, example: &str) -> Result<String, Error> {
+        test_build::build_example(self.cargo, self.root, package, example)
     }
 
     fn read(&self, program: &str, args: &[&str]) -> Result<String, Error> {
@@ -352,10 +355,7 @@ pub fn env_for(key: &str, work: &Path, owner_uid: u32) -> Vec<OsString> {
         env
     };
     match key {
-        "pf_as_root" => vec![var(
-            "JS_MAC_PROVISION_BIN",
-            work.join("bin").join(PROVISION),
-        )],
+        "pf_as_root" => vec![var("JS_PF_PROBE_BIN", work.join("bin").join(PF_PROBE))],
         "treestore" => {
             let mut env = vec![
                 var("JS_TREESTORE_PRIV_PARENT", under(work, "treestore")),
@@ -617,8 +617,8 @@ fn version(machine: &dyn Machine) -> Result<String, Error> {
     Ok(format!("{} ({})", product.trim(), build.trim()))
 }
 
-/// Builds every target and the `js-mac-provision` program: each target's binary, in
-/// [`TARGETS`] order, and the program.
+/// Builds every target and the `pf_probe` example: each target's binary, in [`TARGETS`] order,
+/// and the example's program.
 fn build_all(machine: &dyn Machine) -> Result<(Vec<Built>, PathBuf), Error> {
     let mut built = Vec::new();
     let mut packages: Vec<&str> = TARGETS.iter().map(|t| t.package).collect();
@@ -634,7 +634,7 @@ fn build_all(machine: &dyn Machine) -> Result<(Vec<Built>, PathBuf), Error> {
             built.push(test_build::find(&messages, test)?);
         }
     }
-    let program = test_build::find_bin(&machine.build_bin(PROVISION, PROVISION)?, PROVISION)?;
+    let program = test_build::find_example(&machine.build_example(PROVISION, PF_PROBE)?, PF_PROBE)?;
     Ok((built, program))
 }
 
@@ -662,7 +662,7 @@ fn lay_out(
         .zip(built)
         .map(|(target, built)| (built.executable.as_path(), bin.join(target.key)))
         .collect();
-    copies.push((program, bin.join(PROVISION)));
+    copies.push((program, bin.join(PF_PROBE)));
     for (from, to) in &copies {
         as_root(machine, vec!["/bin/cp".into(), from.into(), to.into()])?;
     }

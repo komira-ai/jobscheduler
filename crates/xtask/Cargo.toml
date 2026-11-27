@@ -40,6 +40,8 @@ js-bundle = { path = "../js-bundle" }
 js-bundle-cli = { path = "../js-bundle-cli" }
 js-oci = { path = "../js-oci" }
 js-lease-server = { path = "../js-lease-server" }
+# `pkg stage-macos` renders the package's two plists from the daemons this crate describes.
+js-mac-provision = { path = "../js-mac-provision" }
 # `gen-job-surface` reads the job service's descriptor set: the one js-proto builds, decoded
 # with prost into prost-types' descriptor messages.
 js-proto = { path = "../js-proto" }
@@ -99,9 +101,6 @@ js-cli = { path = "../js-cli" }
 js-elastic = { path = "../js-elastic" }
 # The hook's step bounds, which the lease server's declaration must keep (tests/js_lease_server_declaration.rs).
 js-update-hook = { path = "../js-update-hook" }
-# The plists the package carries must be flags the programs accept (tests/macos_pkg.rs).
-js-mac-provision = { path = "../js-mac-provision" }
-js-mac-session = { path = "../js-mac-session" }
 # The test definition of tests/job_surface.rs, compiled as js-proto's build script compiles
 # the job service.
 protox.workspace = true

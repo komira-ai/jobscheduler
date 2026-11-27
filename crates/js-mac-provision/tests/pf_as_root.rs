@@ -6,21 +6,23 @@
 //! (under its own anchor, `com.apple/js-mac-provision-test`, which it flushes at the
 //! end, and holds a pf enable reference for its duration). No pull request job runs it. The
 //! manual workflow `js-mac-provision-privileged-tests` builds it for Apple silicon, with
-//! the program it starts, and uploads both without running them. On a Mac,
+//! the example it starts (`pf_probe`), and uploads both without running them. On a Mac,
 //! `cargo xtask mac-root-tests` builds and runs it with the other Mac root tests; by hand:
 //!
 //! ```text
-//! cargo test -p js-mac-provision --test pf_as_root --no-run     # as an ordinary user
-//! sudo -n env JS_MAC_PROVISION_BIN=<the js-mac-provision built beside it> \
+//! cargo build -p js-mac-provision --example pf_probe             # as an ordinary user
+//! cargo test -p js-mac-provision --test pf_as_root --no-run
+//! sudo -n env JS_PF_PROBE_BIN=<the pf_probe built beside it> \
 //!     <that test binary> --ignored --test-threads=1 --nocapture
 //! ```
 //!
-//! `JS_MAC_PROVISION_BIN` is needed when the test binary runs on another machine than the
-//! one that built it: the path cargo knew at build time is not there.
+//! The test finds the example next to its own binary (`target/<profile>/examples/pf_probe`).
+//! `JS_PF_PROBE_BIN` names it when the test binary runs on another machine than the one that
+//! built it, or from another place.
 //!
 //! The pool is the uids 4100 to 4109 and the control is uid 4200, outside it. None needs
-//! to be an account: pf matches the uid of the socket. The probes are the program's own
-//! `probe` verb, started as those uids from a world-readable copy of the program. The
+//! to be an account: pf matches the uid of the socket. The probes are the
+//! `pf_probe` example, started as those uids from a world-readable copy of it. The
 //! endpoint the policy allows is a listener of the test on this Mac's own primary IPv4
 //! address, so no outside host is needed; a second listener on the same address, on
 //! another port, is the address "not on the list". The metadata address and a
@@ -66,7 +68,6 @@ use js_mac_provision::pfctl::SystemPfctl;
 use js_mac_provision::provision::Provisioner;
 use js_mac_provision::{AnchorName, Endpoint, UidRange};
 
-const BUILT_BIN: &str = env!("CARGO_BIN_EXE_js-mac-provision");
 /// The tests' own directory, where every user may search.
 const SCRATCH: &str = "/private/tmp/js-mac-provision-pf-as-root";
 const ANCHOR: &str = "com.apple/js-mac-provision-test";
@@ -76,10 +77,18 @@ const CONTROL_UID: u32 = 4200;
 const METADATA: &str = "169.254.169.254:80";
 const DOCUMENTATION: &str = "198.51.100.1:80";
 
-/// The program the probes run: the one cargo built, or the one `JS_MAC_PROVISION_BIN` names.
+/// The program the probes run: the one `JS_PF_PROBE_BIN` names, or the `pf_probe` example, which
+/// cargo builds in `examples` beside the directory of the test binary (`deps`).
 fn program_to_copy() -> PathBuf {
-    let named = std::env::var_os("JS_MAC_PROVISION_BIN");
-    named.map_or_else(|| PathBuf::from(BUILT_BIN), PathBuf::from)
+    if let Some(named) = std::env::var_os("JS_PF_PROBE_BIN") {
+        return PathBuf::from(named);
+    }
+    let test = std::env::current_exe().expect("this test's path");
+    let profile = test
+        .parent()
+        .and_then(Path::parent)
+        .expect("the profile directory");
+    profile.join("examples").join("pf_probe")
 }
 
 /// Removes the anchor whatever happens to the test.
@@ -110,15 +119,15 @@ fn own_address() -> Ipv4Addr {
     }
 }
 
-/// What `probe` printed running as `uid`.
+/// What `pf_probe` printed running as `uid`.
 ///
 /// The 2000 ms connect bound is how a drop is observed as an outcome (a connect nobody
 /// answers ends in "timed out"); it is a bound, not a measurement, and nothing here
-/// asserts how long a probe took. The `probe` verb prints "timed out" for both
+/// asserts how long a probe took. `pf_probe` prints "timed out" for both
 /// `ErrorKind::TimedOut` and `ErrorKind::WouldBlock`.
 fn probe_as(program: &Path, uid: u32, addr: &str) -> String {
     let out = Command::new(program)
-        .args(["probe", addr, "--timeout-ms", "2000"])
+        .args([addr, "--timeout-ms", "2000"])
         .uid(uid)
         .gid(uid)
         .output()
@@ -289,7 +298,7 @@ fn pool_uids_reach_only_the_listed_endpoint_and_other_uids_are_not_affected() {
     let scratch = PathBuf::from(SCRATCH);
     fs::create_dir_all(&scratch).expect("scratch dir");
     fs::set_permissions(&scratch, fs::Permissions::from_mode(0o755)).expect("scratch mode");
-    let program = scratch.join("js-mac-provision");
+    let program = scratch.join("pf_probe");
     fs::copy(program_to_copy(), &program).expect("copy the program");
     fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).expect("program mode");
 

@@ -1,8 +1,8 @@
 //! `cargo xtask pkg build-macos`, run as the built binary in a scratch checkout (a `LICENSE` and
 //! the stand-in programs, small shell scripts in the scratch directory). Every stand-in appends
 //! its name and arguments to `commands.log` in the checkout, so a test reads the commands in the
-//! order they ran. The stand-in `cargo` copies the stand-in programs to `target/release`; the
-//! stand-in `codesign` prints the cdhash lines the test chooses; the stand-in `pkgbuild` and
+//! order they ran. The stand-in `cargo` copies the stand-in program to `target/release`; the
+//! stand-in `pkgbuild` and
 //! `productbuild` write their last argument; the stand-in `pkgutil` and `lsbom` make and list
 //! the expanded package the test chooses. Nothing is built and the real tools are never started.
 
@@ -12,11 +12,11 @@ use std::process::Command;
 
 use js_testkit::dir::TestDir;
 use js_testkit::spawn::install_script;
-use xtask::macpkg::{Kind, entries};
+use sha2::{Digest, Sha256};
+use xtask::macpkg::{Kind, entries, plists};
 
 const VERSION: &str = "1.2.3";
 const PKG: &str = "js-agent-1.2.3-macos-arm64.pkg";
-const HASH: &str = "0123456789abcdef0123456789abcdef01234567";
 const STAGED_AGENT: &str = "stage/root/Library/Application Support/js-agent/bin/js-agent";
 
 /// What one run printed.
@@ -31,20 +31,12 @@ struct Rig {
     dir: TestDir,
     /// The stand-in that fails (exits 3 with `boom` on its standard error), by name.
     fail: &'static str,
-    /// The first `--version` line of `js-mac-session`.
-    session_line: String,
-    /// What the stand-in `codesign` writes for the built `js-agent`.
-    built_out: String,
-    /// What it writes for the staged `js-agent`.
-    staged_out: String,
+    /// The first `--version` line of `js-agent`.
+    agent_line: String,
     /// The shell commands of the stand-in `pkgutil` after it is asked to expand into `$3`.
     expand: String,
     /// The shell commands of the stand-in `lsbom`.
     list: String,
-}
-
-fn codesign_out(hash: &str) -> String {
-    format!("Executable=/x/js-agent\nIdentifier=js-agent\nCDHash={hash}\n")
 }
 
 /// The listing `lsbom` prints for the package's entries, as the package check reads it.
@@ -72,9 +64,7 @@ impl Rig {
         Rig {
             dir,
             fail: "",
-            session_line: format!("js-mac-session {VERSION}"),
-            built_out: codesign_out(HASH),
-            staged_out: codesign_out(HASH),
+            agent_line: format!("js-agent {VERSION}"),
             expand: "mkdir -p \"$3\"\ncp pkginfo.txt \"$3/PackageInfo\"\n: > \"$3/Bom\"\n"
                 .to_owned(),
             list: "cat bom.txt\n".to_owned(),
@@ -122,32 +112,14 @@ impl Rig {
 
     /// Runs the verb with `more` flags after the stand-ins, in the scratch checkout.
     fn run_with(&self, more: &[&str]) -> Ran {
-        self.program("js-agent", "printf 'js-agent 1.2.3\\nsecond line\\n'\n");
         self.program(
-            "js-mac-session",
-            &format!("printf '%s\\n' '{}'\n", self.session_line),
-        );
-        self.program(
-            "js-mac-provision",
-            "case \"$1\" in\n\
-               --version) echo 'js-mac-provision 1.2.3';;\n\
-               agent-plist) echo agent-plist-body;;\n\
-               session-plist) echo session-plist-body;;\n\
-               pf-pool-plist) echo pf-pool-plist-body;;\n\
-             esac\n",
+            "js-agent",
+            &format!("printf '%s\\nsecond line\\n' '{}'\n", self.agent_line),
         );
         let cargo = self.stand_in(
             "cargo",
             "$*",
             "for b; do :; done\nmkdir -p target/release\ncp \"fixtures/$b\" \"target/release/$b\"\n",
-        );
-        let codesign = self.stand_in(
-            "codesign",
-            "$*",
-            &format!(
-                "case \"$*\" in\n*stage/root*) printf '%s' '{}' >&2;;\n*) printf '%s' '{}' >&2;;\nesac\n",
-                self.staged_out, self.built_out
-            ),
         );
         let plutil = self.stand_in("plutil", "$*", "");
         let last = "for last; do :; done\n";
@@ -169,7 +141,6 @@ impl Rig {
             .current_dir(self.dir.path());
         for (flag, program) in [
             ("--cargo", &cargo),
-            ("--codesign", &codesign),
             ("--plutil", &plutil),
             ("--pkgbuild", &pkgbuild),
             ("--productbuild", &productbuild),
@@ -226,17 +197,8 @@ fn read(path: &Path) -> String {
 fn commands(through: usize) -> Vec<String> {
     let all = [
         "cargo|build --locked --release -p js-agent --bin js-agent",
-        "cargo|build --locked --release -p js-mac-session --bin js-mac-session",
-        "cargo|build --locked --release -p js-mac-provision --bin js-mac-provision",
         "js-agent|--version",
-        "js-mac-session|--version",
-        "js-mac-provision|--version",
-        "codesign|--display --verbose=4 target/release/js-agent",
-        "js-mac-provision|agent-plist",
-        "js-mac-provision|session-plist --daemon-requirement cdhash H\"0123456789abcdef0123456789abcdef01234567\"",
-        "js-mac-provision|pf-pool-plist",
-        "plutil|-lint inputs/agent.plist inputs/session.plist inputs/pf-pool.plist",
-        "codesign|--display --verbose=4 stage/root/Library/Application Support/js-agent/bin/js-agent",
+        "plutil|-lint stage/root/Library/LaunchDaemons/js-agent.plist stage/root/Library/LaunchDaemons/js-agent.pf-pool.plist",
         "pkgbuild|--root stage/root --identifier com.komira.js-agent --version 1.2.3 --install-location / --ownership recommended stage/component.pkg",
         "productbuild|--package stage/component.pkg --version 1.2.3 dist/js-agent-1.2.3-macos-arm64.pkg",
         "pkgutil|--expand-full dist/js-agent-1.2.3-macos-arm64.pkg",
@@ -250,46 +212,42 @@ fn the_package_is_built_checked_and_summed_with_the_commands_of_the_action_in_or
     let rig = Rig::new("build-passes");
     let ran = rig.run();
     assert_eq!((ran.status, ran.stderr.as_str()), (0, ""), "{}", ran.stdout);
-    assert_eq!(rig.log(), commands(16));
+    assert_eq!(rig.log(), commands(7));
     assert_eq!(
         ran.stdout.lines().collect::<Vec<_>>(),
         [
             "js-agent built",
-            "js-mac-session built",
-            "js-mac-provision built",
             "js-agent prints \"js-agent 1.2.3\"",
-            "js-mac-session prints \"js-mac-session 1.2.3\"",
-            "js-mac-provision prints \"js-mac-provision 1.2.3\"",
-            "staged js-agent 1.2.3 with 7 files and 7 directories in stage",
-            "dist/js-agent-1.2.3-macos-arm64.pkg: js-agent 1.2.3 with 14 entries",
-            "summed js-agent-1.2.3-macos-arm64.pkg and js-agent, js-mac-session, js-mac-provision",
+            "staged js-agent 1.2.3 with 4 files and 7 directories in stage",
+            "dist/js-agent-1.2.3-macos-arm64.pkg: js-agent 1.2.3 with 11 entries",
+            "summed js-agent-1.2.3-macos-arm64.pkg and js-agent",
         ]
     );
-    assert_eq!(read(&rig.path("inputs/agent.plist")), "agent-plist-body\n");
-    assert_eq!(
-        read(&rig.path("inputs/session.plist")),
-        "session-plist-body\n"
+    assert!(
+        !rig.path("inputs").exists(),
+        "no plist is written outside the stage"
     );
-    assert_eq!(
-        read(&rig.path("inputs/pf-pool.plist")),
-        "pf-pool-plist-body\n"
-    );
+    for (path, text) in plists() {
+        assert_eq!(
+            read(&rig.path(&format!("stage/root/{path}"))),
+            text,
+            "{path}"
+        );
+    }
     assert_eq!(read(&rig.path("stage/component.pkg")), "component");
     assert_eq!(read(&rig.path(&format!("dist/{PKG}"))), "package bytes");
     assert_eq!(
         read(&rig.path("dist/SHA256SUMS")),
         format!("2e547448dcd0f2fcd9dbc386d33f1553369883451898177559bcf3e3b1083d16  {PKG}\n")
     );
+    let built = fs::read(rig.path("target/release/js-agent")).unwrap();
     assert_eq!(
         read(&rig.path("target/release/PROGRAMS.SHA256SUMS")),
-        "ced37c426b001ac38c56ce85c94eb005819cda357d4ce59e32e5a3f340c5f9a8  js-agent\n\
-         ccb35897821efd737f03f59af9d8ac045bb1552d4fac4c08e85175e9e9d08895  js-mac-session\n\
-         a95022ac9002c15653b7209405220db46563c37c2ff58369381faa112bf79230  js-mac-provision\n"
+        format!("{}  js-agent\n", hex::encode(Sha256::digest(&built)))
     );
-    let staged = rig.path(STAGED_AGENT);
     assert_eq!(
-        read(&staged),
-        read(&rig.path("target/release/js-agent")),
+        fs::read(rig.path(STAGED_AGENT)).unwrap(),
+        built,
         "the staged js-agent is the built one"
     );
 }
@@ -302,7 +260,7 @@ fn a_package_expanded_with_its_component_in_a_directory_of_its_own_passes() {
             .to_owned();
     let ran = rig.run();
     assert_eq!((ran.status, ran.stderr.as_str()), (0, ""), "{}", ran.stdout);
-    assert_eq!(rig.log(), commands(16));
+    assert_eq!(rig.log(), commands(7));
 }
 
 #[test]
@@ -335,136 +293,64 @@ fn a_cargo_that_does_not_start_is_named() {
 #[test]
 fn a_program_that_prints_another_version_ends_the_run() {
     let mut rig = Rig::new("build-wrong-version");
-    rig.session_line = "js-mac-session 1.2.4".to_owned();
-    assert_eq!(
-        rig.failed(),
-        "js-mac-session prints 'js-mac-session 1.2.4', not 1.2.3"
-    );
-    assert_eq!(rig.log(), commands(5));
+    rig.agent_line = "js-agent 1.2.4".to_owned();
+    assert_eq!(rig.failed(), "js-agent prints 'js-agent 1.2.4', not 1.2.3");
+    assert_eq!(rig.log(), commands(2));
+    assert!(!rig.path("stage").exists());
 }
 
 #[test]
 fn a_program_that_prints_nothing_is_not_the_version() {
     let mut rig = Rig::new("build-no-version-line");
-    rig.session_line = String::new();
-    assert_eq!(rig.failed(), "js-mac-session prints '', not 1.2.3");
+    rig.agent_line = String::new();
+    assert_eq!(rig.failed(), "js-agent prints '', not 1.2.3");
 }
 
 #[test]
-fn a_codesign_that_fails_ends_the_run() {
-    let mut rig = Rig::new("build-codesign-fails");
-    rig.fail = "codesign";
-    assert_eq!(
-        rig.failed(),
-        format!(
-            "`{} --display --verbose=4 target/release/js-agent` ended with exit status: 3: boom",
-            rig.stand_in_path("codesign")
-        )
-    );
-    assert_eq!(rig.log(), commands(7));
-}
-
-#[test]
-fn a_cdhash_that_is_not_forty_lower_case_hex_digits_ends_the_run() {
-    for (name, out, found) in [
-        ("none", "Identifier=js-agent\n".to_owned(), ""),
-        ("short", codesign_out("abc"), "abc"),
-        (
-            "upper",
-            codesign_out("0123456789ABCDEF0123456789abcdef01234567"),
-            "0123456789ABCDEF0123456789abcdef01234567",
-        ),
-        (
-            "not hex",
-            codesign_out("0123456789abcdefg123456789abcdef01234567"),
-            "0123456789abcdefg123456789abcdef01234567",
-        ),
-        (
-            "two lines",
-            format!("{}CDHash=ff\n", codesign_out("aa")),
-            "aa\nff",
-        ),
-    ] {
-        let mut rig = Rig::new(&format!("build-cdhash-{}", name.replace(' ', "-")));
-        rig.built_out = out;
-        assert_eq!(
-            rig.failed(),
-            format!("the cdhash of js-agent is '{found}', not 40 hex digits"),
-            "{name}"
-        );
-        assert_eq!(rig.log(), commands(7), "{name}");
-        assert!(!rig.path("inputs").exists(), "{name}");
-    }
-}
-
-#[test]
-fn an_inputs_directory_that_exists_ends_the_run_before_the_plists() {
-    let rig = Rig::new("build-inputs-exists");
-    fs::create_dir(rig.path("inputs")).unwrap();
-    let message = rig.failed();
-    assert_eq!(message, "inputs: File exists (os error 17)");
-    assert_eq!(rig.log(), commands(7));
-}
-
-#[test]
-fn a_plutil_that_fails_ends_the_run_before_the_stage() {
-    let mut rig = Rig::new("build-plutil-fails");
-    rig.fail = "plutil";
-    assert_eq!(
-        rig.failed(),
-        format!(
-            "`{} -lint inputs/agent.plist inputs/session.plist inputs/pf-pool.plist` ended with exit status: 3: boom",
-            rig.stand_in_path("plutil")
-        )
-    );
-    assert_eq!(rig.log(), commands(11));
-    assert!(!rig.path("stage").exists());
-}
-
-#[test]
-fn a_stage_directory_that_exists_ends_the_run() {
+fn a_stage_directory_that_exists_ends_the_run_before_the_plists_are_linted() {
     let rig = Rig::new("build-stage-exists");
     fs::create_dir(rig.path("stage")).unwrap();
     assert_eq!(
         rig.failed(),
         "stage: exists; stage into a directory that is not there"
     );
-    assert_eq!(rig.log(), commands(11));
+    assert_eq!(rig.log(), commands(2));
 }
 
 #[test]
-fn a_staged_agent_with_another_cdhash_ends_the_run_before_the_package_is_built() {
-    let mut rig = Rig::new("build-staged-cdhash");
-    rig.staged_out = codesign_out("ffffffffffffffffffffffffffffffffffffffff");
+fn a_plutil_that_fails_ends_the_run_before_the_package_is_built() {
+    let mut rig = Rig::new("build-plutil-fails");
+    rig.fail = "plutil";
     assert_eq!(
         rig.failed(),
         format!(
-            "the staged js-agent has the cdhash 'ffffffffffffffffffffffffffffffffffffffff', not '{HASH}'"
+            "`{} -lint stage/root/Library/LaunchDaemons/js-agent.plist stage/root/Library/LaunchDaemons/js-agent.pf-pool.plist` ended with exit status: 3: boom",
+            rig.stand_in_path("plutil")
         )
     );
-    assert_eq!(rig.log(), commands(12));
+    assert_eq!(rig.log(), commands(3));
     assert!(!rig.path("dist").exists());
 }
 
-/// Catches a run refused because `dist` is there before it starts: a farm Mac's runner makes the
-/// parent directory of every output the action declares, `dist` among them.
+/// A farm Mac's runner makes the parent directory of every output the action declares, `dist`
+/// among them, before the run starts, and the run must not refuse that.
 #[test]
 fn a_dist_directory_made_before_the_run_holds_the_package() {
     let rig = Rig::new("build-dist-made");
     fs::create_dir(rig.path("dist")).unwrap();
     let ran = rig.run();
     assert_eq!((ran.status, ran.stderr.as_str()), (0, ""), "{}", ran.stdout);
-    assert_eq!(rig.log(), commands(16));
+    assert_eq!(rig.log(), commands(7));
     assert!(rig.path(&format!("dist/{PKG}")).is_file());
 }
 
-/// Catches a `dist` that is a file taken as the directory: the run ends before `pkgbuild`.
+/// A `dist` that is a file is not taken as the directory: the run ends before `pkgbuild`.
 #[test]
 fn a_dist_that_is_a_file_ends_the_run_before_pkgbuild() {
     let rig = Rig::new("build-dist-file");
     fs::write(rig.path("dist"), "").unwrap();
     assert_eq!(rig.failed(), "dist: File exists (os error 17)");
-    assert_eq!(rig.log(), commands(12));
+    assert_eq!(rig.log(), commands(3));
 }
 
 #[test]
@@ -478,7 +364,7 @@ fn a_pkgbuild_that_fails_ends_the_run_before_productbuild() {
         ),
         "{message}"
     );
-    assert_eq!(rig.log(), commands(13));
+    assert_eq!(rig.log(), commands(4));
 }
 
 #[test]
@@ -490,7 +376,7 @@ fn a_productbuild_that_fails_ends_the_run_before_the_package_is_read() {
         message.ends_with(&format!("dist/{PKG}` ended with exit status: 3: boom")),
         "{message}"
     );
-    assert_eq!(rig.log(), commands(14));
+    assert_eq!(rig.log(), commands(5));
     assert!(!rig.path("dist/SHA256SUMS").exists());
 }
 
@@ -628,15 +514,12 @@ fn the_cargo_builds_and_the_package_commands_are_the_composite_actions() {
     };
     for (program, prefix) in [
         ("cargo", "cargo build "),
+        ("plutil", "plutil "),
         ("pkgbuild", "pkgbuild "),
         ("productbuild", "productbuild "),
     ] {
         let wanted = action_lines(&action, prefix);
-        assert_eq!(
-            wanted.len(),
-            if program == "cargo" { 3 } else { 1 },
-            "{program}: {wanted:?}"
-        );
+        assert_eq!(wanted.len(), 1, "{program}: {wanted:?}");
         assert_eq!(logged(program), wanted, "{program}");
     }
 }

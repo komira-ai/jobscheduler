@@ -1,8 +1,8 @@
 //! js-agent on a Mac, installed and then kept up, end to end, as the Mac Studios get it: the
 //! package the release builds, staged, sealed, installed and switched by hostkeeper's own code,
 //! then the update hook's `prepare`, `cutover`, `verify` and `cleanup` (and `rollback`) run by
-//! hostkeeper's step runner as transient launchd jobs, with launchd loading the agent, its root
-//! helper and the pf anchor's job from the installed plists, and the agent joining a lease server
+//! hostkeeper's step runner as transient launchd jobs, with launchd loading the agent
+//! and the pf anchor's job from the installed plists, and the agent joining a lease server
 //! by its host certificate. On the host that install leaves, the host group's config package is
 //! rolled over the running agent (the config hook restarts it onto the new flags) and then the
 //! agent itself is updated to the next version. The host the lease server lists carries the
@@ -17,7 +17,7 @@
 //! install test carries.) What of hostkeeper's daemon is reproduced, and
 //! what of a Studio, is said in `mac_first_install/hostkeeper.rs` and `mac_first_install/host.rs`.
 //!
-//! It changes the machine it runs on for good (a group, an APFS volume, packages installed,
+//! It changes the machine it runs on for good (an APFS volume, packages installed,
 //! launchd jobs, files under `/etc`, `/var/lib/hostkeeper`, `/var/db` and `/Library`), so it runs
 //! only on a disposable Mac, as root, and never on a host anyone uses: in CI, a hosted macOS
 //! runner of the release's beta stage (.github/workflows/js-agent-macos-first-install.yml). Every
@@ -151,15 +151,28 @@ fn assert_succeeded(done: &hostkeeper_steps::Finished) {
     assert_eq!(done.reason, None, "{done:?}");
 }
 
-/// The agent and its helper run under launchd.
+/// The root helper's job of an earlier release.
+const RETIRED_HELPER: &str = "js-agent.session";
+
+/// Where that job's plist was installed.
+const RETIRED_HELPER_PLIST: &str = "/Library/LaunchDaemons/js-agent.session.plist";
+
+/// The agent runs under launchd, and no job of the retired root helper is loaded or left behind.
 fn assert_agent_runs() {
-    for label in ["js-agent", "js-agent.session"] {
-        assert_eq!(
-            launchd_state(label).as_deref(),
-            Some("running"),
-            "{label} runs under launchd"
-        );
-    }
+    assert_eq!(
+        launchd_state("js-agent").as_deref(),
+        Some("running"),
+        "js-agent runs under launchd"
+    );
+    assert_eq!(
+        launchd_state(RETIRED_HELPER),
+        None,
+        "{RETIRED_HELPER} is not loaded"
+    );
+    assert!(
+        !Path::new(RETIRED_HELPER_PLIST).exists(),
+        "{RETIRED_HELPER_PLIST} is not installed"
+    );
 }
 
 /// The first install as the Studios had it: hostkeeper stages and seals the package, the hook's
@@ -168,7 +181,7 @@ fn assert_agent_runs() {
 /// `/private/var/...`, and the hook read the link's `/var/...` as another place; here because
 /// the switch leaves `current` unmade). The update fails `link_failed`, the hook's `rollback`
 /// and the daemon's `back` take the package away, and the host is left as the four Studios are:
-/// the group and the scratch volume `prepare` made, the staged version and its seal, no
+/// the scratch volume `prepare` made, the staged version and its seal, no
 /// `current`, no receipt, no job loaded. Returns the release staged then.
 fn failed_first_install(daemon: &Arc<Daemon>, version: &str) -> Staged {
     let (staged, fresh) = daemon.stage();
@@ -195,10 +208,6 @@ fn failed_first_install(daemon: &Arc<Daemon>, version: &str) -> Staged {
     assert_eq!(failed.reason.as_deref(), Some("link_failed"), "{failed:?}");
 
     // What it leaves: the four Studios' state.
-    assert!(
-        succeeds("/usr/bin/dscl", &[".", "-read", "/Groups/_jsagent"]),
-        "the group prepare made is there"
-    );
     let volumes = look::output("/usr/sbin/diskutil", &["apfs", "list"]);
     assert!(
         volumes.contains("js-agent-scratch"),
@@ -352,10 +361,10 @@ fn agent_update(daemon: &Arc<Daemon>, server: &LeaseServer, installed: &Staged, 
 /// because each runs on the host the one before leaves, and libtest runs tests in no order.
 ///
 /// The first install is as the Studios had it: the update fails `link_failed` and is taken away,
-/// leaving the group, the scratch volume, the staged version and its seal, and no `current`, no
+/// leaving the scratch volume, the staged version and its seal, and no `current`, no
 /// receipt, no job loaded. The next order installs from that host with the daemon's real switch,
-/// to `Succeeded`: the agent, its helper and the pf job running under launchd, and the lease
-/// server showing the host live with the agent of this version on the native runtime.
+/// to `Succeeded`: the agent and the pf job running under launchd, no job of the retired root
+/// helper loaded, and the lease server showing the host live with the agent of this version on the native runtime.
 ///
 /// The config package (`/etc/js-agent/flags`, built with `pkgbuild` and `productbuild`) is staged,
 /// sealed and installed over the running agent, and its hook's steps run as root from launchd
@@ -364,8 +373,8 @@ fn agent_update(daemon: &Arc<Daemon>, server: &LeaseServer, installed: &Staged, 
 /// the host live in a new session.
 ///
 /// The update orders the second package over the first: `Succeeded` with no reason, `current`
-/// naming the next version and `previous` the first, the agent and its helper running, and the
-/// lease server showing the host live with the agent of the next version.
+/// naming the next version and `previous` the first, the agent running and no job of the retired
+/// root helper loaded, and the lease server showing the host live with the agent of the next version.
 ///
 /// Catches a hook that holds `/var/lib/hostkeeper/packages/js-agent/current -> <version>` to be
 /// off the staged release `/private/var/lib/hostkeeper/packages/js-agent/<version>`, and every

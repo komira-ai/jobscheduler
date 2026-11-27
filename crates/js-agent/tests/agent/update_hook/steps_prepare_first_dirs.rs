@@ -21,7 +21,7 @@ const MAC_VERSION: &str = "js-agent 1.4.0\nruntimes: native\n";
 /// A first install on a Mac whose state directory is `state_dir` under the rig's scratch tree,
 /// none of whose directories below the tree is there.
 fn mac_first_install(name: &str) -> (Rig, PathBuf) {
-    let mut rig = Rig::mac_first_install_with_helper(name);
+    let mut rig = Rig::mac_first_install_with_tree(name);
     let state_dir = rig
         .tmp
         .path()

@@ -35,8 +35,8 @@
 //!    step defers (75, `join_token_missing`, a reason that is a shipped wire value) and the
 //!    detail names the file to fix;
 //! 5. on a Mac whose params ask for it, first install or update, the host setup (see
-//!    [`host_setup`](super::host_setup)): the helper's socket group, the agent's state root and
-//!    a scratch root on a volume of its own are made when they are not there. A part that cannot
+//!    [`host_setup`](super::host_setup)): the agent's state root and a
+//!    scratch root on a volume of its own are made when they are not there. A part that cannot
 //!    be read or made defers (75, `host_setup_missing`), naming it, before the record is
 //!    written or the host cordoned: the agent cannot start without it, so the step defers here
 //!    rather than letting `cutover` fail after its commit. A system call the system refuses

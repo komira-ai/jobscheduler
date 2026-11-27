@@ -39,19 +39,12 @@ pub struct Settings {
     /// The unit that runs the agent (a systemd unit name or a launchd label); a record's unit
     /// must be this one.
     pub unit: String,
-    /// The launchd job of the agent's root helper (`js-agent.session` on a Mac), when the package
-    /// has one. `cutover` and `rollback` boot it out after the agent is stopped and bootstrap
-    /// it from the release being started, before the agent is. Only a launchd host has one.
-    pub helper_unit: Option<String>,
     /// The launchd job that keeps the pool's pf anchor loaded (`js-agent.pf-pool` on a Mac), when
     /// the package has one. `cutover` boots it out, loads the anchor of the host's flags file with
-    /// the staged release's `js-mac-provision`, and bootstraps it from the staged release, before
-    /// the agent starts. Only a launchd host has one.
+    /// the staged release's `js-agent __pf-anchor`, and bootstraps it from the staged release,
+    /// before the agent starts; `rollback` boots it out and bootstraps the previous release's.
+    /// Only a launchd host has one.
     pub pf_unit: Option<String>,
-    /// The group the root helper gives its socket (`js-mac-session --socket-group`, `_jsagent`
-    /// on a Mac), when the params name it: `prepare` makes it when the host has none. Only a
-    /// launchd host is set up so.
-    pub socket_group: Option<String>,
     /// The runtime the unit's agent must have (`crun`, `docker` or `native`): the staged agent
     /// must list it, and the agent that says hello after the cutover runs jobs the way it
     /// does.

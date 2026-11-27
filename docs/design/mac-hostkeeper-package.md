@@ -8,7 +8,7 @@ package holds, what hostkeeper requires, how a release reaches the Macs, and whi
 ## Where things stand
 
 - `.github/workflows/js-agent-macos-pkg.yml` builds `js-agent-<version>-macos-arm64.pkg` on a hosted Apple silicon
-  runner and signs it. Its `build` job stages the payload, reads the cdhash of the `js-agent` binary, builds the
+  runner and signs it. Its `build` job stages the payload, builds the
   component with `pkgbuild` (no scripts) and checks it with `cargo xtask pkg check-macos`. Its `sign` job runs in the
   release's call (`sign: true`) and in a signing run (by hand, `sign: true`, on a branch of this repository), in the environment `pkg-signing`; without that environment's secrets
   it skips with a notice.
@@ -41,7 +41,7 @@ and `crates/hostkeeper-install/src/macos_pkg/`):
    the manifest's `package`, `version` equal to the version ordered, `install-location` `/`, and no `bundle`.
 3. The `Bom` lists exactly the payload; every entry is owned by root, of group wheel or admin, not writable by group or
    others, with no setuid, setgid or sticky bit.
-4. Each `run` label is the service's name or the name, a dot and more (`js-agent`, `js-agent.session`), and has a
+4. Each `run` label is the service's name or the name, a dot and more (`js-agent`, `js-agent.pf-pool`), and has a
    plist in the payload whose `Label` is that label and whose program is a file of the payload. The observer hashes
    the program of the first `run` label.
 5. The design places a service's payload under `/Library/Application Support/<service>/` and one
@@ -71,27 +71,24 @@ group wheel; directories are 0755 unless noted.
 | path | mode | |
 |---|---|---|
 | `/Library/Application Support/js-agent/bin/js-agent` | 0755 | the agent |
-| `/Library/Application Support/js-agent/bin/js-mac-session` | 0755 | the root helper |
-| `/Library/Application Support/js-agent/bin/js-mac-provision` | 0755 | the plist generator and the pf anchor's loader |
 | `/Library/Application Support/js-agent/LICENSE` | 0644 | |
 | `/Library/Application Support/js-agent/log/` | dir | empty; the daemons' logs |
 | `/Library/Application Support/js-agent/update/` | dir 0700 | empty; the update hook's `state_dir` |
 | `/Library/LaunchDaemons/js-agent.plist` | 0644 | label `js-agent`: the agent |
-| `/Library/LaunchDaemons/js-agent.session.plist` | 0644 | label `js-agent.session`: the root helper |
-| `/Library/LaunchDaemons/js-agent.pf-pool.plist` | 0644 | label `js-agent.pf-pool`: keeps the pool's pf anchor loaded |
+| `/Library/LaunchDaemons/js-agent.pf-pool.plist` | 0644 | label `js-agent.pf-pool`: keeps the pool's pf anchor loaded, by running the agent's `__pf-anchor` verb |
 
 The parent directories `Library`, `Library/Application Support`, `Library/LaunchDaemons`,
 `Library/Application Support/js-agent` and its `bin` are entries of the payload too. `cargo xtask pkg stage-macos
---version V --bin-dir D --license L --agent-plist A --session-plist S --pf-pool-plist P --out O` writes `O/root/...` and no
+--version V --bin-dir D --license L --out O` (it renders the two plists itself, from `js-mac-provision`'s `daemon` module) writes `O/root/...` and no
 `O/scripts`; `cargo xtask pkg check-macos --pkg P --version V` refuses anything but exactly this payload (modes, root
 as owner), any script, and another identifier or version.
 
-- The labels are `js-agent`, `js-agent.session` and `js-agent.pf-pool` (`crates/js-mac-provision/src/daemon.rs`:
-  `AGENT_LABEL`, `SESSION_LABEL`, `PF_POOL_LABEL`; the plist goldens; the update hook's launchd tests). The three `js-mac-provision` verbs
-  of this package are `agent-plist`, which takes no flag and prints the fixed agent plist,
-  `session-plist --daemon-requirement <REQ>`, and `pf-pool-plist`, which takes no flag and prints the fixed pf job's
-  plist; of its pf anchor verbs, `install` also takes `--flags-file`.
-  Its `postinstall` verb is gone, with its link and its tests.
+- The labels are `js-agent` and `js-agent.pf-pool` (`crates/js-mac-provision/src/daemon.rs`:
+  `AGENT_LABEL`, `PF_POOL_LABEL`; the plist goldens; the update hook's launchd tests). The package holds no
+  program but `js-agent`, and no root helper: `cargo xtask pkg stage-macos` renders the agent's plist and the pf
+  job's from `Daemon::agent()` and `pf_pool_plist()`, so no program of the package prints them, and
+  `cargo xtask pkg check-macos` refuses a package that still carries `bin/js-mac-session`, `bin/js-mac-provision` or
+  `js-agent.session.plist`. `js-mac-provision` is a library of the agent now: it has no program and no archive.
 - The agent plist is fixed text, checked for drift, never edited on a host. Its program arguments are
   `/Library/Application Support/js-agent/bin/js-agent --flags-file /etc/js-agent/flags --token-file
   /etc/js-agent/token --state-root /var/db/js-agent/state --scratch-root /var/db/js-agent/scratch/runs`
@@ -106,42 +103,40 @@ as owner), any script, and another identifier or version.
   `js-agent-config-all-in-one` installs `/etc/js-agent/{flags,ca.pem}` on the Linux nodes, so no operator edits them on
   a host. js-agent reads `--flags-file` already (`crates/js-agent/src/flags_file.rs`: a regular file, root's or the
   agent's, not writable by group or others, one word per line).
-- The helper's plist is fixed text too, except for one value that the workflow bakes in when it builds: its program
-  arguments are `/Library/Application Support/js-agent/bin/js-mac-session --socket /var/run/js-mac-session/socket
-  --socket-group _jsagent --state-dir /var/db/js-mac-session --uid-range 600-699 --homes /Users --daemon-requirement
-  <REQ>`, with `ExitTimeOut` 20, the agent's 65536 open files soft and hard, and its logs in `.../js-agent/log/js-mac-session.log` and `js-mac-session.err.log`.
-  `<REQ>` is `cdhash H"<40 hex>"`, the cdhash of the `js-agent` binary of this same package, which the workflow reads on
-  the macOS runner with `codesign --display --verbose=4` (the linker signs an arm64 binary ad hoc, so every binary has
-  one) and checks again on the staged file. The helper therefore needs no flags file, and `js-mac-session` is unchanged:
-  it takes no `--flags-file`.
 - The package's version directory is hostkeeper's, so the package has no versioned directories and no `current` link of
   its own.
-- The pf job's plist is fixed text (`js-mac-provision pf-pool-plist`): as root, at load and every 30 seconds, it runs
-  `/Library/Application Support/js-agent/bin/js-mac-provision install --flags-file /etc/js-agent/flags`, which loads the
-  anchor the agent's own `--native-network` and `--native-pf-*` flags name unless it is in force already, and does
-  nothing while the flags file is absent or sets no `--native-network=on` (`crates/js-mac-provision/README.md`). Its
-  label is a label of the service (`js-agent.` and more), as hostkeeper requires of a `run` label.
-- The manifest: `package` `com.komira.js-agent`, `run: ["js-agent", "js-agent.session", "js-agent.pf-pool"]` (the
+- The pf job's plist is fixed text (`pf_pool_plist()`): as root, at load and every 30 seconds, it runs
+  `/Library/Application Support/js-agent/bin/js-agent __pf-anchor --flags-file /etc/js-agent/flags`, a hidden verb of the agent
+  (`crates/js-agent/src/pf_anchor.rs`), which loads the anchor the agent's own `--native-network` and `--native-pf-*`
+  flags name unless it is in force already, and does nothing while the flags file is absent or sets no
+  `--native-network=on` (`crates/js-mac-provision/README.md`). Its log is `/var/log/js-agent.pf-pool.log`. Its
+  label is a label of the service (`js-agent.` and more), as hostkeeper requires of a `run` label. The agent loads no
+  anchor itself: the job is the only thing that does.
+- The manifest: `package` `com.komira.js-agent`, `run: ["js-agent", "js-agent.pf-pool"]` (the
   agent first, so the observer reports the agent's version), the hook command `["/Library/Application Support/js-agent/bin/js-agent",
   "update-hook"]`, `hook.drain` `drain` and `hook.resume` `resume`, the same `minHostkeeper` and `installerBounds` as the
   Linux entry, and no `healthUrl` (the Linux entry's names the agent's `--health-listen` route; the Mac agent is started
   without it). The hook's `params` are
-  `unit` `js-agent`, `helper_unit` `js-agent.session`, `pf_unit` `js-agent.pf-pool`, `state_dir`
+  `unit` `js-agent`, `pf_unit` `js-agent.pf-pool`, `state_dir`
   `/Library/Application Support/js-agent/update`,
   `release_link` `/var/lib/hostkeeper/packages/js-agent/current`, `flags_file` `/etc/js-agent/flags`, `token_file`
-  `/etc/js-agent/token`, `state_root` `/var/db/js-agent/state`, `socket_group` `_jsagent`, `scratch_root`
+  `/etc/js-agent/token`, `state_root` `/var/db/js-agent/state`, `scratch_root`
   `/var/db/js-agent/scratch/runs`, `runtime` `native`, and the cordon, drain and step bounds of the Linux manifest.
-  `socket_group` and `scratch_root` are the helper plist's `--socket-group` and the agent plist's `--scratch-root`
-  (a test of xtask holds them equal); they name the host setup the hook makes (below).
-- `helper_unit` is a launchd-only parameter of the hook (`crates/js-agent`, the update hook). When it is present the
-  launchd cutover, and the rollback, boot out and bootstrap the helper's plist from the release tree as well as the
-  agent's, the helper before the agent, while the agent is stopped. When it is absent the hook does what it did before.
-  `prepare` drains the agent before hostkeeper swaps the files, as on Linux.
-- `pf_unit` is a launchd-only parameter of the hook too. When it is present the launchd cutover, after the helper and
-  before the agent starts, boots the pf job out, runs the staged release's `js-mac-provision install --flags-file
-  <flags_file>` to its end, and bootstraps the job's plist from the staged release's tree: the agent checks the anchor
-  at its start, and the job's own first run would race that check. The rollback leaves the pf job as it is. An older
-  hook ignores the key.
+  `scratch_root` is the agent plist's `--scratch-root` (a test of xtask holds them equal); it names the host setup the
+  hook makes (below). A params file that still names `helper_unit` or `socket_group` parses: the hook ignores both keys.
+- On a launchd host the hook retires the root helper of an earlier package. Every launchd cutover, before the pf job,
+  stops the launchd job `js-agent.session` (nothing happens when it is not loaded) and removes
+  `/Library/LaunchDaemons/js-agent.session.plist` (a plist that is not there is fine). It leaves
+  `bin/js-mac-session` and `bin/js-mac-provision` where they are, because the previous release's plists name them. A
+  rollback to a release whose tree carries `js-agent.session.plist` puts the plist back and bootstraps the helper
+  before the previous agent starts. `prepare` drains the agent before hostkeeper swaps the files, as on Linux.
+- `pf_unit` is a launchd-only parameter of the hook too. When it is present the launchd cutover, before the agent
+  starts, boots the pf job out, runs the staged release's `js-agent __pf-anchor --flags-file <flags_file>` to its end,
+  and bootstraps the job's plist from the staged release's tree: the agent checks the anchor at its start, and the
+  job's own first run would race that check. The rollback boots the pf job out and bootstraps the previous release's
+  plist when the previous tree carries one, and installs no anchor: the anchor in force stays loaded through a boot-out,
+  and the previous release's own program runs at load. Without that, a job whose program is the agent's hidden verb
+  would stay loaded under a previous agent that has no such verb. An older hook ignores the key.
 
 ## Release and desired version
 
@@ -200,9 +195,6 @@ host certificate and key (`/var/lib/hostkeeper/identity/host.crt` and `host.key`
 update hook's `prepare`, which hostkeeper runs as root, before it writes its record or cordons the host, on a first
 install and on every update (`crates/js-agent/src/update_hook/step/host_setup.rs`):
 
-- the helper's socket group (`socket_group`, `_jsagent`): made with `dseditgroup -o create` when the local directory
-  does not list it, under the gid macOS picks; a group with staff's gid (20, the lease users' group the helper's
-  plist leaves at its default) is refused, as the helper refuses it;
 - the agent's state root (`state_root`) and scratch root (`scratch_root`, `/var/db/js-agent/scratch/runs`), mode 0700,
   root's, with `/var/db/js-agent` 0755;
 - a file system of its own for the scratch root (the agent refuses a state root on the scratch root's device): while
@@ -248,9 +240,9 @@ to the host, not to a release.
 
 Not made by the hook:
 
-- the pool's users, which `js-mac-session` makes in the uid range of its plist (600-699) when it starts;
+- the pool's users, which the agent makes in the slot range of its flags file (`--native-account-range`);
 - for `--native-network on`, the pool's pf anchor, which the package's daemon `js-agent.pf-pool` loads at boot and
-  every 30 seconds (`js-mac-provision install --flags-file /etc/js-agent/flags`).
+  every 30 seconds (`js-agent __pf-anchor --flags-file /etc/js-agent/flags`).
 
 What a restart or a macOS update of a Mac needs, and how to check a Mac after one, is
 [docs/runbooks/mac-restart-and-update.md](../runbooks/mac-restart-and-update.md).
@@ -271,7 +263,7 @@ Macs' pool names `os_version = "26"` (`docs/design/mac-runtime.md`, section 5). 
 
 ## The pool's users stay for good
 
-The helper (`js-mac-session`) makes the pool's users (`kbf-lease-pool-<n>`) once and never deletes one, nor a home, nor a
+The agent makes the pool's users (`kbf-lease-pool-<n>`) once and never deletes one, nor a home, nor a
 per-user folder the system placed: measured on macOS 27.0.1 with System Integrity Protection on, root (from a launchd
 daemon and from an ssh root shell) may not delete a local user record, may not remove an existing account's home, and
 may not remove `/private/var/folders/<xx>/<hash>`, though everything can be emptied. A lease's end resets its user in
@@ -279,10 +271,9 @@ place, and a first install on a Mac that already has the pool's users (an earlie
 that are the pool's own, so a package can be installed again and again. Uninstalling the package therefore leaves the
 users: a Mac that must lose them is reset by its administrator.
 
-The release signs the programs, and a management profile in the repository (a privacy-policy payload for the agent's
+The release signs `js-agent`, and a management profile in the repository (a privacy-policy payload for the agent's
 installed path and its designated requirement, which needs device management) grants `js-agent` Full Disk Access, for
-deleting an account per job in the agent. The helper holds no grant, so the one deletion that is left to it, of a lease
-user from before the pool, still fails on macOS 27. The agent learns at start whether it holds the grant (it lists the
+deleting an account per job in the agent. The agent learns at start whether it holds the grant (it lists the
 privacy database's directory, which only a process with the grant may list) and reports the answer as its capability
 `full-disk-access`. The pool's reset described here is unchanged by the grant; deleting an account per job is the next
 step (`mac-account-per-job.md`).
@@ -295,7 +286,7 @@ job's `constraints.os_version` (`26`: macOS 26 or newer) is compared with it as 
 ## Order
 
 1. This document.
-2. The package relayout, the new labels, the cdhash in the helper's plist, `helper_unit` in the update hook, the
+2. The package relayout, the new labels, the update hook's steps, the
    workflow and its lints, `packaging/js-agent-macos/README.md`, `docs/release.md` and the goldens.
 3. The signing environment and the upload role (operator), then the release jobs and the `macos-arm64` entry.
 4. `host-groups put` and the group's config package (operator), then the first `set-desired` for `mac-build`; the
@@ -309,18 +300,14 @@ job's `constraints.os_version` (`26`: macOS 26 or newer) is compared with it as 
 - A `Bom` that does not match the payload, an entry not root's or with a setuid bit, a `run` label without its plist,
   or a `PackageInfo` that does not match: `stage` refuses it. `pkg check-macos` refuses the same shapes in CI, before
   the release.
-- A `js-agent` whose cdhash is not the one in the helper's plist (a binary changed after the build): the helper refuses
-  the agent, and `build` refuses the package first, because it compares the cdhash of the staged binary with the one in
-  the plist.
 - No flags file on the Mac, or one that names no host certificate on a Mac with no token: a first install's `prepare`
   defers `join_token_missing` (exit 75) having installed nothing, and hostkeeper runs the hook's `rollback` and retries
   later. A later order installs it once the host setup is done.
-- A part of the host setup the hook cannot make (the socket group, a root, the scratch volume or its mount):
+- A part of the host setup the hook cannot make (a root, the scratch volume or its mount):
   `prepare` defers `host_setup_missing` (exit 75) naming it, with no record written and no cordon placed, and
   hostkeeper runs the hook's `rollback` (a first install) and retries later. A system call of the setup that macOS
   refuses (`EPERM`) fails `prepare` instead (`host_setup_refused`, exit 1), naming the path and the error, and is not
-  retried as if it could pass. `cutover` never starts an agent whose roots share a device or a helper whose socket
-  group is missing.
+  retried as if it could pass. `cutover` never starts an agent whose roots share a device.
 - The agent cannot mount the scratch volume at a start (no `js-agent-scratch` in the Data volume's container, or
   `diskutil` fails): the agent exits naming `--scratch-root` and the cause, and launchd starts it again after its
   throttle interval; during an update `verify` sees no hello and the release is rolled back.

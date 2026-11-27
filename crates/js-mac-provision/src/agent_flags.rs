@@ -1,4 +1,4 @@
-//! The pf policy that the macOS agent's flags file gives: what `install --flags-file` loads.
+//! The pf policy that the macOS agent's flags file gives: what [`crate::apply()`] loads.
 //!
 //! A Mac's agent reads its host's own flags from a file (`js-agent --flags-file
 //! /etc/js-agent/flags`, one argument per line, such as `--native-pf-uid-start=600`). Its
@@ -30,9 +30,14 @@ use std::io::{self, Read as _};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-use crate::cli::{DEFAULT_ANCHOR, DEFAULT_STATE_DIR};
 use crate::pfctl::SYSTEM_PFCTL;
 use crate::policy::{AnchorName, Endpoint, PolicyError, UidRange};
+
+/// The anchor when none is named: a child of `com.apple`, which the stock `/etc/pf.conf`
+/// evaluates with `anchor "com.apple/*"`, so no edit of the main ruleset is needed.
+pub const DEFAULT_ANCHOR: &str = "com.apple/com.komira.js.pool";
+/// The state directory when none is named.
+pub const DEFAULT_STATE_DIR: &str = "/var/db/com.komira.js-pf";
 
 /// The most bytes a flags file may hold, as the agent allows.
 pub const MAX_BYTES: u64 = 64 * 1024;

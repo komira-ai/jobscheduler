@@ -1,40 +1,43 @@
 # js-agent on a Mac
 
 A signed installer package (`js-agent-<version>-macos-arm64.pkg`, identifier
-`com.komira.js-agent`) that lays down the agent, its root helper and the pf tool
-(`js-mac-provision`), and the plists of the three LaunchDaemons that run them. It is a hostkeeper `macos-pkg`
+`com.komira.js-agent`) that lays down one program, `js-agent`, and the plists of the two
+LaunchDaemons that run it (`js-agent` and `js-agent.pf-pool`). It is a hostkeeper `macos-pkg`
 service: hostkeeper downloads it from the release's desired state, checks its digest, and
 installs it. The package runs no script (no preinstall, no postinstall), so installing it
 changes nothing but its files.
 
 It is built by `.github/workflows/js-agent-macos-pkg.yml` and read back by
 `cargo xtask pkg check-macos`; `cargo xtask pkg stage-macos` is the one place that lists
-what the package holds (`crates/xtask/src/macpkg.rs`).
+what the package holds (`crates/xtask/src/macpkg.rs`), and it renders the two plists itself from
+`js_mac_provision::daemon`. `check-macos` refuses any entry that list does not name, so a
+package that still carries `bin/js-mac-session`, `bin/js-mac-provision` or
+`js-agent.session.plist` is refused.
 
 ## What is installed
 
 | path | mode |
 |---|---|
-| `/Library/Application Support/js-agent/bin/{js-agent,js-mac-session,js-mac-provision}` | 0755, signed (see Signing) |
+| `/Library/Application Support/js-agent/bin/js-agent` | 0755, signed (see Signing) |
 | `/Library/Application Support/js-agent/LICENSE` | 0644 |
 | `/Library/Application Support/js-agent/log/` | 0755, empty; launchd writes the daemons' logs here |
 | `/Library/Application Support/js-agent/update/` | 0700, empty; the update hook's state directory |
 | `/Library/LaunchDaemons/js-agent.plist` | 0644 |
-| `/Library/LaunchDaemons/js-agent.session.plist` | 0644 |
 | `/Library/LaunchDaemons/js-agent.pf-pool.plist` | 0644 |
 
-Everything is owned by root:wheel. The programs are the package's own files; there is no
+Everything is owned by root:wheel. The program is the package's own file; there is no
 release directory and no link of the package's own. The release that hostkeeper keeps is
 the package's tree under `/var/lib/hostkeeper/packages/js-agent/current`, which is what
 the update hook's `release_link` names.
 
 ## The daemons
 
-`js-agent.session` (the root helper) and `js-agent` are described by flags only
-(`js-mac-provision agent-plist`, `js-mac-provision session-plist --daemon-requirement <req>`;
-the goldens are in `crates/js-mac-provision/tests/golden`). Both plists are complete as
-shipped: nothing in them is a placeholder. The third daemon, `js-agent.pf-pool`
-(`js-mac-provision pf-pool-plist`), is described below.
+`js-agent` is described by flags only (`Daemon::agent()` in `crates/js-mac-provision/src/daemon.rs`;
+the goldens are in `crates/js-mac-provision/tests/golden`). Its plist is complete as shipped:
+nothing in it is a placeholder. The second daemon, `js-agent.pf-pool` (`pf_pool_plist()`), is
+described below. An earlier package also laid down a root helper (`js-mac-session`, the job
+`js-agent.session`) and a provisioning program (`js-mac-provision`); neither is in the package
+any more, and the update hook retires the helper's job (see "What hostkeeper does").
 
 - The agent's plist names `--flags-file /etc/js-agent/flags` and `--token-file
   /etc/js-agent/token`, and the fixed state root and scratch root. The host's
@@ -42,12 +45,6 @@ shipped: nothing in them is a placeholder. The third daemon, `js-agent.pf-pool`
   `--native-account-range`, `--native-account-ready` and the `--native-pf-*` flags) are in
   `/etc/js-agent/flags`, which a per-group configuration package installs. The plist carries
   no server and no pool.
-- The helper's plist holds its caller to `cdhash H"<40 hex>"`, the code directory hash of
-  the `js-agent` binary of the same package. The workflow reads the hash from the signed
-  binary that goes into the package (`sign-code` signed it with the Developer ID Application
-  identity; a build that no job signs, such as the first-install test's, reads the hash the
-  linker's ad hoc signature gives) and gives it to `session-plist --daemon-requirement`. The helper needs no flags file, and its socket group
-  is `_jsagent`.
 
 The flags file is one argument per line (`--flags-file` in `crates/js-agent/src/flags_file.rs`).
 It gives the server, the pool and the native runtime, and is what a config package for a host
@@ -75,24 +72,24 @@ The file must be a regular file owned by root, not writable by group or others.
 `--host-id-from-facts` makes the host's id the `host_id` of hostkeeper's facts file, the name the
 coordinator enrolled the Mac under, so one file serves every Mac of the group.
 
-Neither runs at load. `KeepAlive` holds each while the flags file `/etc/js-agent/flags`
-exists, so the daemons start when the host has its flags, and launchd starts one again after
-every exit, at most once in 30 seconds (`ThrottleInterval`). A refusal is read from
+The agent's daemon does not run at load. `KeepAlive` holds it while the flags file
+`/etc/js-agent/flags` exists, so it starts when the host has its flags, and launchd starts it
+again after every exit, at most once in 30 seconds (`ThrottleInterval`). A refusal is read from
 `/Library/Application Support/js-agent/log/js-agent.err.log`.
-Both start with 65536 open files, soft and hard (`SoftResourceLimits` and
-`HardResourceLimits`, `NumberOfFiles`), not with launchd's default soft limit of 256, and the
-jobs the helper starts inherit the limit.
+It starts with 65536 open files, soft and hard (`SoftResourceLimits` and
+`HardResourceLimits`, `NumberOfFiles`), not with launchd's default soft limit of 256.
 
 `js-agent.pf-pool` keeps the pool's pf anchor loaded, which the agent checks at its start and
 before every job with the network `on` (see Network). Its plist is fixed too
-(`js-mac-provision pf-pool-plist`, golden `crates/js-mac-provision/tests/golden/pf-pool.plist`):
-as root, at load and every 30 seconds (`RunAtLoad`, `StartInterval`), it runs
-`js-mac-provision install --flags-file /etc/js-agent/flags`, which reads the anchor from the
+(`pf_pool_plist()`, golden `crates/js-mac-provision/tests/golden/pf-pool.plist`): as root, at
+load and every 30 seconds (`RunAtLoad`, `StartInterval`), it runs the agent's hidden verb
+`js-agent __pf-anchor --flags-file /etc/js-agent/flags` (the agent loads no pf anchor itself,
+`docs/design/mac-one-program.md`), which reads the anchor from the
 agent's own `--native-network` and `--native-pf-*` flags, loads it unless it is in force already,
 and does nothing while the flags file is absent or sets no `--native-network=on`. So the anchor
 comes back within 30 seconds of anything that drops it (a reboot, an OS update that reloads
 `/etc/pf.conf`), and a config package that changes the pf flags changes the anchor with them. Its
-errors go to `/var/log/js-mac-provision.log`.
+errors go to `/var/log/js-agent.pf-pool.log`.
 
 ## What hostkeeper does
 
@@ -101,53 +98,43 @@ update hook's `prepare` from the staged package tree, then installs the package 
 installer and points its `current` link at the release, then runs the hook's `cutover`, `verify`
 and `cleanup` (`/Library/Application Support/js-agent/bin/js-agent update-hook`), with the
 params of the manifest: the unit
-`js-agent`, the helper unit `js-agent.session`, the pf job `js-agent.pf-pool`, the state directory above, the release link
-under `/var/lib/hostkeeper/packages/js-agent`, the flags and token files, the state root, the
-helper's socket group and the scratch root (the last two name the host setup `prepare` makes,
-see "Not done yet").
+`js-agent`, the pf job `js-agent.pf-pool`, the state directory above, the release link
+under `/var/lib/hostkeeper/packages/js-agent`, the flags and token files, the state root and the
+scratch root (the last two name the host setup `prepare` makes, see "Not done yet").
 On a first install `prepare` finds no state directory and none of the directories above it
 (the package is not installed yet), and makes them: `js-agent` mode 0755 and `update` mode 0700,
 root's. A Mac joins by hostkeeper's host certificate: the flags file names it (`--host-cert`,
 `--host-key`, hostkeeper's copy under `/var/lib/hostkeeper/identity`), and then no token file is
 needed. The hook cordons and drains the agent; on a Mac the cutover, and the rollback, then replace
-the helper's daemon and the agent's from the release tree with `launchctl` while the agent
-is stopped, the helper before the agent. Between the two, the cutover boots the pf job out, runs
-the staged release's `js-mac-provision install --flags-file /etc/js-agent/flags` to its end (so
-the anchor is in force before the agent's start checks it, rather than racing the job's first
-run), and bootstraps the pf job from the staged release; the rollback leaves the pf job as it is.
-hostkeeper lists the three labels in the manifest's `run` and enables them, and launchd loads
+the agent's daemon from the release tree with `launchctl` while the agent is stopped. Every
+cutover first retires the job of an earlier release's root helper: it boots `js-agent.session`
+out (nothing happens when it is not loaded) and removes `/Library/LaunchDaemons/js-agent.session.plist`;
+it leaves the stale `bin/js-mac-session` and `bin/js-mac-provision` files in place, since a rollback's
+previous plists name them. Then the cutover boots the pf job out, runs the staged release's
+`js-agent __pf-anchor --flags-file /etc/js-agent/flags` to its end (so the anchor is in force
+before the agent's start checks it, rather than racing the job's first run), and bootstraps the
+pf job from the staged release. A rollback puts the previous release's helper job back when that
+release's tree carries its plist, and replaces the pf job from the previous tree (booting it out
+and bootstrapping the previous plist, with no anchor install: the anchor in force stays loaded
+through a bootout, and the previous release's own program runs at load), since a pf job that
+runs the agent's hidden verb must not stay loaded under a previous release's `js-agent` that has
+no such verb.
+hostkeeper lists the two labels in the manifest's `run` and enables them, and launchd loads
 them at every boot. A rollback restores the previous release if the agent does not
 come back. Nothing in the package does any of this at install time.
-
-The helper's pool users (`kbf-lease-pool-<n>`, hidden) are made once, by the helper's boot reset,
-and stay for good: the system refuses root the deletion of a local user record, of an existing
-home and of the per-user folders it placed (all can be emptied), so the helper never deletes one
-and resets a user in place when a lease ends. A first install on a Mac that already has them (an
-earlier install left them, even with `/var/db/js-mac-session` gone) adopts each that is the pool's
-own (its name, uid, hidden flag and home `/Users/kbf-lease-pool-<n>` match), resets it and
-makes the slot free; a record on a pool uid that is not the pool's is refused and the slot is
-left unmade, which the helper's log and `pool-status` name. Removing the package leaves the users.
 
 A job writes only in its run directory, `<home>/exec`: the profile grants nothing else in the
 account's home, and the job's `HOME` and `CFFIXED_USER_HOME` are `<home>/exec/.home` and its `TMPDIR`
 is `<home>/exec/.tmp`, so a tool that keeps preferences or caches writes there and the account's
-real home stays empty (no `~/Library` is made in it). The helper sets `HOME` to the account's home
-whatever the agent asks, so the agent runs the program as `/usr/bin/env HOME=<run home> <program>`
-inside the profile. This matters because macOS guards `~/Library/Preferences` of an account's real
-home even against root without Full Disk Access (the profile below grants it to the agent, not the helper, and the pool reset of this release does not rely on it):
-a folder a job made there could not be removed by the reset. A reset keeps an empty folder the
-system refuses root the removal of (reported in the sweep's `kept`) and does not fail the slot over
-it; a folder that is refused and not empty still fails the reset, naming it. Such an empty
-`~/Library/Preferences` is what a job of an agent before this change left in a slot's home. Only a
-process with Full Disk Access (a person at a Terminal that was granted it, as an act on that Mac)
-could remove it, or nothing; the pool tolerates it as it is, and a job can no longer make one.
+real home stays empty (no `~/Library` is made in it). The pool users an earlier release's helper
+made (`kbf-lease-pool-<n>`, hidden) stay on the Mac; removing the package leaves them.
 
 ## Signing
 
 The workflow has four jobs. `build` runs in the beta stage of the release (`release.yml` calls
 the workflow on a push to main) and by hand, never on a pull request; it builds the package
 unsigned (the steps are the local action `.github/actions/js-agent-macos-pkg`), checks it and
-uploads it with the three programs it built, and names no secret: no code of a branch can see a
+uploads it with the program it built, and names no secret: no code of a branch can see a
 signing key. `build-update` runs
 beside it and builds a second package with the same action, of the next patch version
 (`.github/actions/js-agent-next-version`), as the artifact `js-agent-macos-pkg-update-unsigned`
@@ -164,17 +151,16 @@ sign=true`): it signs and checks the programs and the package exactly as the rel
 publishes nothing (the signed files stay artifacts of the run), so a change to the signing is
 proved before it merges. On a tag or in a fork's copy it fails by name at the first step of
 `build`. A manual run without `sign` signs nothing.
-`sign-code` runs in the environment `pkg-signing`: it takes the three programs from `build`,
-checks them against `build`'s sums, imports the application certificate into a temporary
+`sign-code` runs in the environment `pkg-signing`: it takes the program from `build`,
+checks it against `build`'s sums, imports the application certificate into a temporary
 keychain for `/usr/bin/codesign` alone, imports Apple's Developer ID G2 intermediate (fetched
 over HTTPS and held to its SHA-256; a hosted runner that holds it already makes `security import`
 answer `The specified item already exists in the keychain.`, and that answer alone, exactly,
 passes), finds the identity `Developer ID Application: Komira AI, Inc. (U7RTX4XD3X)` among the
 keychain's valid code-signing identities (`find-identity -v` lists it only when its chain builds
-to Apple's root), fails when it expires within 30 days, and signs each program with
+to Apple's root), fails when it expires within 30 days, and signs it with
 `codesign --options runtime --timestamp` under the identifier of the table in
-`crates/xtask/src/release/mac_programs.rs` (`com.komira.js-agent`, `com.komira.js-agent.session`,
-`com.komira.js-agent.provision`). It runs nothing built from the repository, and it fails,
+`crates/xtask/src/release/mac_programs.rs` (`com.komira.js-agent`, the table's only entry). It runs nothing built from the repository, and it fails,
 naming the secret, when one is not set. `package` has no secret: it makes the package with the
 local action from the signed programs instead of building them, checking each staged program
 first with `cargo xtask release check-code-signature <binary> --program <name>`, which runs
@@ -252,8 +238,7 @@ device management (see `mdm/README.md`): one entry, for the path
 updates replace it in place) and the program's designated requirement, which names the identifier
 `com.komira.js-agent`, Apple's Developer ID chain and the team and no hash, so every release of
 the program meets it. That is why the release signs the programs (see Signing), and `cargo test -p
-xtask` holds the profile to the table the signing uses. The root helper `js-mac-session` and
-`js-mac-provision` need no grant. A native job and its supervisor are started without the
+xtask` holds the profile to the table the signing uses. The package carries no other program, so nothing else needs a grant. A native job and its supervisor are started without the
 disclaim: they keep the responsibility, so they answer for `js-agent` and hold what `js-agent`
 holds, Full Disk Access included. macOS lets a process use the grants of its *responsible*
 process, which is whoever started it, unless the starter disclaims that responsibility as it
@@ -359,7 +344,7 @@ Known limits:
   package's own sealed tree only; the manifest above names the installed agent instead. `kickstart -k` runs a daemon whatever its `KeepAlive`
   condition says, so the port refuses it while `/etc/js-agent/flags` is absent.
 - The package is not notarized.
-- The pf job and the cutover's `js-mac-provision install --flags-file` have run against a fake
+- The pf job and the cutover's `js-agent __pf-anchor --flags-file` have run against a fake
   `pfctl` and a fake `launchctl` in their unit tests; the first-install run is the only run of
   them on a Mac.
 - The config hook (`js-agent config-hook`) restarts the agent without loading the anchor first:
@@ -368,8 +353,7 @@ Known limits:
   start (`--native-network: on needs the pf anchor of the pool in force`) until launchd starts it
   again.
 - The package carries no host setup. The update hook's `prepare` makes it on the Mac, as
-  root, from its params (`socket_group`, `scratch_root`): the helper's socket group
-  `_jsagent`, the agent's state root `/var/db/js-agent/state` and a scratch root
+  root, from its params (`scratch_root`): the agent's state root `/var/db/js-agent/state` and a scratch root
   `/var/db/js-agent/scratch/runs` on an APFS volume of its own (`js-agent-scratch`), as the agent
   requires. The volume is mounted on `/var/db/js-agent/scratch` (root's, 0711), the scratch root's
   parent, so that the bundle store `/var/db/js-agent/scratch/bundles` (made by the agent at its
@@ -378,7 +362,7 @@ Known limits:
   Disk Access write: the agent mounts the volume on that directory at each start
   (`diskutil mount nobrowse -mountPoint`), so a reboot needs nothing more. `/etc/js-agent/flags`
   comes from the group's config package. The setup and the agent's mount have run against
-  fakes of `dscl`, `dseditgroup` and `diskutil` only.
+  a fake of `diskutil` only.
 - No Mac with the package installed has been restarted yet. What a restart or a macOS update
   needs, and the drill that proves a restart on one Mac, are in
   [docs/runbooks/mac-restart-and-update.md](../../docs/runbooks/mac-restart-and-update.md).

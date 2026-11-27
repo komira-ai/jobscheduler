@@ -74,21 +74,21 @@ fn the_real_machine_builds_with_cargo_in_the_root() {
         Ok(messages.to_owned())
     );
     assert_eq!(
-        machine.build_bin("js-mac-provision", "js-mac-provision"),
+        machine.build_example("js-mac-provision", "pf_probe"),
         Ok(messages.to_owned())
     );
     assert_eq!(
         place.read(root.join("target/debug/cargo-args")),
         "test --locked --no-run --message-format=json -p js-agent --test a --test b\n\
-         build --locked --message-format=json -p js-mac-provision --bin js-mac-provision\n"
+         build --locked --message-format=json -p js-mac-provision --example pf_probe\n"
     );
     place.defect("build-fails");
     assert_eq!(
         machine
-            .build_bin("js-mac-provision", "js-mac-provision")
+            .build_example("js-mac-provision", "pf_probe")
             .map_err(|e| e.to_string()),
         Err(
-            "cargo build -p js-mac-provision --bin js-mac-provision failed: exit status: 101"
+            "cargo build -p js-mac-provision --example pf_probe failed: exit status: 101"
                 .to_owned()
         )
     );
@@ -98,7 +98,7 @@ fn the_real_machine_builds_with_cargo_in_the_root() {
         ..machine
     };
     let e = machine
-        .build_bin("p", "p")
+        .build_example("p", "p")
         .expect_err("no cargo")
         .to_string();
     assert!(e.starts_with("cargo: "), "{e}");

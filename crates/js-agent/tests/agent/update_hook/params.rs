@@ -94,9 +94,7 @@ fn the_manifest_keys_and_the_reserved_release_keys_are_read() {
             settings: Settings {
                 state_dir: PathBuf::from("/var/lib/js-agent-update"),
                 unit: "js-agent-crun.service".to_owned(),
-                helper_unit: None,
                 pf_unit: None,
-                socket_group: None,
                 runtime: "crun".to_owned(),
                 timeouts: Timeouts {
                     prepare: 3900,
@@ -595,54 +593,40 @@ fn the_verify_deadline_covers_the_verify_bound_and_the_rollback_bound() {
     );
 }
 
+/// A table of an older manifest, which still names the helper job and its socket group, reads as
+/// one that does not, and its two keys are ignored like any other scalar key (a Mac's hook that
+/// rolls back across the change reads such a table of the previous release).
 #[test]
-fn the_helper_unit_is_optional_and_read_as_given() {
-    let with_helper = good_but(
+fn a_table_that_still_names_helper_unit_and_socket_group_reads_and_ignores_them() {
+    let older = good_but(
         "unit",
-        "unit = \"js-agent\"\nhelper_unit = \"js-agent.session\"",
+        "unit = \"js-agent\"\nhelper_unit = \"js-agent.session\"\nsocket_group = \"_jsagent\"",
     );
-    let params = Params::parse(&with_helper).unwrap();
-    assert_eq!(params.settings.unit, "js-agent");
-    assert_eq!(
-        params.settings.helper_unit.as_deref(),
-        Some("js-agent.session")
+    let params = Params::parse(&older).unwrap();
+    let plain = good_but("unit", "unit = \"js-agent\"");
+    assert_eq!(params, Params::parse(&plain).unwrap());
+    // Whatever the two keys hold, they are not read: a value that was no file name or no text
+    // is no error.
+    let odd = good_but(
+        "unit",
+        "unit = \"js-agent\"\nhelper_unit = \"a/b\"\nsocket_group = 7",
     );
-    assert_eq!(Params::parse(&good()).unwrap().settings.helper_unit, None);
-}
-
-#[test]
-fn a_helper_unit_that_is_not_a_plain_file_name_or_not_text_is_refused() {
-    for name in ["", ".", "..", "a/b", "/js-agent.session", "../js-agent"] {
-        let text = good_but(
-            "unit",
-            &format!("unit = \"js-agent\"\nhelper_unit = \"{name}\""),
-        );
-        assert!(
-            matches!(refused(&text), ParamsError::NotFileName(key) if key == "helper_unit"),
-            "{name:?}"
-        );
-    }
-    let text = good_but("unit", "unit = \"js-agent\"\nhelper_unit = 7");
-    assert!(matches!(refused(&text), ParamsError::NotText(key) if key == "helper_unit"));
+    assert_eq!(Params::parse(&odd).unwrap(), params);
 }
 
 #[test]
 fn the_pf_unit_is_optional_and_read_as_given() {
     let with_pf = good_but(
         "unit",
-        "unit = \"js-agent\"\nhelper_unit = \"js-agent.session\"\npf_unit = \"js-agent.pf-pool\"",
+        "unit = \"js-agent\"\npf_unit = \"js-agent.pf-pool\"",
     );
     let params = Params::parse(&with_pf).unwrap();
     assert_eq!(params.settings.pf_unit.as_deref(), Some("js-agent.pf-pool"));
-    assert_eq!(
-        params.settings.helper_unit.as_deref(),
-        Some("js-agent.session")
-    );
     assert_eq!(Params::parse(&good()).unwrap().settings.pf_unit, None);
 }
 
 /// Catches a pf job's label that would put its plist outside the release tree's
-/// `Library/LaunchDaemons`: the rule is `helper_unit`'s.
+/// `Library/LaunchDaemons`: the rule is a plain file name.
 #[test]
 fn a_pf_unit_that_is_not_a_plain_file_name_or_not_text_is_refused() {
     for name in ["", ".", "..", "a/b", "/js-agent.pf-pool", "../js-agent"] {
@@ -664,40 +648,18 @@ fn with_setup(extra: &str) -> String {
     format!("{}{extra}\n", good())
 }
 
-/// Asserts that `socket_group` and `scratch_root` are optional, absent from `good()`, and read
-/// as given when a Mac's manifest names them.
+/// Asserts that `scratch_root` is optional, absent from `good()`, and read as given when a Mac's
+/// manifest names it.
 #[test]
-fn the_host_setup_keys_are_optional_and_read_as_given() {
+fn the_scratch_root_is_optional_and_read_as_given() {
     let plain = Params::parse(&good()).unwrap();
-    assert_eq!(plain.settings.socket_group, None);
     assert_eq!(plain.scratch_root, None);
-    let params = Params::parse(&with_setup(
-        "socket_group = \"_jsagent\"\nscratch_root = \"/var/lib/js-agent/scratch\"",
-    ))
-    .unwrap();
-    assert_eq!(params.settings.socket_group.as_deref(), Some("_jsagent"));
+    let params =
+        Params::parse(&with_setup("scratch_root = \"/var/lib/js-agent/scratch\"")).unwrap();
     assert_eq!(
         params.scratch_root,
         Some(PathBuf::from("/var/lib/js-agent/scratch"))
     );
-}
-
-/// Asserts that a `socket_group` that is not a group name (empty, white space, a slash, a colon)
-/// or not text is refused, naming the key, and that one of each allowed kind of character is
-/// read.
-#[test]
-fn a_socket_group_that_is_not_a_group_name_or_not_text_is_refused() {
-    for name in ["", "js agent", "a/b", "js:agent"] {
-        let text = with_setup(&format!("socket_group = \"{name}\""));
-        assert!(
-            matches!(refused(&text), ParamsError::NotGroupName(key) if key == "socket_group"),
-            "{name:?}"
-        );
-    }
-    let text = with_setup("socket_group = 7");
-    assert!(matches!(refused(&text), ParamsError::NotText(key) if key == "socket_group"));
-    let params = Params::parse(&with_setup("socket_group = \"_js-Agent.2\"")).unwrap();
-    assert_eq!(params.settings.socket_group.as_deref(), Some("_js-Agent.2"));
 }
 
 /// Asserts that a `scratch_root` that is not a plain mount path (not plain, with white

@@ -1,9 +1,9 @@
 //! The LaunchDaemon that keeps the anchor loaded: the property list in
-//! `/Library/LaunchDaemons`. It runs `install` at boot and again every `interval`
+//! `/Library/LaunchDaemons`. It runs its program at boot and again every `interval`
 //! seconds, so a rule set that something reloaded (an OS update replaces `/etc/pf.conf`),
-//! or an install that ran before the system's own pf start-up, is put back. `install` is
-//! safe to repeat. The js-agent package ships one with fixed arguments
-//! ([`crate::daemon::pf_pool_plist`]); `launchd-plist` prints one for any policy.
+//! or an install that ran before the system's own pf start-up, is put back; [`crate::apply()`]
+//! is safe to repeat. The js-agent package ships one with fixed arguments
+//! ([`crate::daemon::pf_pool_plist`]).
 
 use std::fmt::Write as _;
 
@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 /// runs.
 pub const LABEL: &str = "js-agent.pf-pool";
 /// Where the daemon's output goes.
-pub const LOG_PATH: &str = "/var/log/js-mac-provision.log";
+pub const LOG_PATH: &str = "/var/log/js-agent.pf-pool.log";
 
 /// The property list of the daemon that runs `program` with `args` at boot and every
 /// `interval_secs` seconds.
@@ -53,7 +53,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_plist_runs_install_at_boot_and_every_interval() {
+    fn the_plist_runs_its_program_at_boot_and_every_interval() {
         let args: Vec<String> = ["install", "--uid-start", "600", "--uid-count", "100"]
             .iter()
             .map(ToString::to_string)
@@ -79,7 +79,7 @@ mod tests {
 \t<key>StartInterval</key>
 \t<integer>300</integer>
 \t<key>StandardErrorPath</key>
-\t<string>/var/log/js-mac-provision.log</string>
+\t<string>/var/log/js-agent.pf-pool.log</string>
 </dict>
 </plist>
 ";

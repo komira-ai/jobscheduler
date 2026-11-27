@@ -56,9 +56,9 @@
 //! 6. stop (`rb.stop_begun` first, then, on a handover, the handover file as `cutover` writes
 //!    it, the stop and a wait for the unit to be down, and the file removed), the mark
 //!    that the link is on the previous release (`rb.link_restored`, first), the start
-//!    (`rb.start_issued` first, and before it, with a `helper_unit` in the params, the helper
-//!    booted out and bootstrapped from the previous release's tree and started, as `cutover`
-//!    does for the staged one) and the wait for the previous agent's hello, and then
+//!    (`rb.start_issued` first, and before it, on a launchd host, the root helper job of a
+//!    previous release that shipped one put back and started, and the pf job replaced by the
+//!    previous release's, see `retired` and `pf`) and the wait for the previous agent's hello, and then
 //!    `rb.hello_ok`, after it;
 //!    An update that hands the runs over in place (the record's `in_place`, see `prepare`)
 //!    does not stop the new agent when it runs: the record gets `rb.stop_begun` and
@@ -152,7 +152,7 @@ use super::cutover::{
 use super::prepare::{place, refuse_host, refuse_host_in, refuse_taint, renew};
 use super::supersede::{for_rollback, noted};
 use super::{Env, failure, lease_failure, open_unchecked, save, state_failure, success};
-use super::{helper, in_place};
+use super::{in_place, pf, retired};
 use crate::cordon::CREDENTIAL_CODES;
 
 /// Runs `rollback`.
@@ -340,10 +340,12 @@ fn restore(
         mark_act(env, params, held, record, set_link_restored)?;
     }
     refuse_host_in(env, record.handover)?;
-    // The helper of the previous release runs before its agent starts; a rerun that finds the
-    // start issued has done this already.
+    // The helper and the pf job of the previous release run before its agent starts, which
+    // dials the one and finds the anchor of the other; a rerun that finds the start issued has
+    // done this already.
     if !record.rb.start_issued {
-        helper::replace(env, held, record, params, previous)?;
+        retired::restore(env, held, record, params, previous)?;
+        pf::restore(env, params, previous)?;
     }
     refuse_host_in(env, record.handover)?;
     if !record.rb.start_issued {

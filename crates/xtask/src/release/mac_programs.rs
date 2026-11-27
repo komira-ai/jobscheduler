@@ -1,5 +1,5 @@
-//! The signing table of the macOS programs of js-agent: the three programs the installer
-//! package lays down, the identifier each is signed under, the identity and team that sign
+//! The signing table of the macOS programs of js-agent: the one program the installer
+//! package lays down, the identifier it is signed under, the identity and team that sign
 //! them, and the designated requirement each then has.
 //!
 //! The release signs each program with the Developer ID Application identity of the team
@@ -38,7 +38,7 @@ pub const INSTALL_DIR: &str = "/Library/Application Support/js-agent/bin";
 /// is started with the responsibility disclaimed (`js_mac_session::disclaim`).
 pub const FULL_DISK_ACCESS_PROGRAM: &str = "js-agent";
 
-/// One program of the package and the identifier it is signed under.
+/// A program of the package and the identifier it is signed under.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Program {
     /// The program's file name.
@@ -47,21 +47,11 @@ pub struct Program {
     pub identifier: &'static str,
 }
 
-/// The programs of the package, in the order the workflow signs them.
-pub const PROGRAMS: [Program; 3] = [
-    Program {
-        name: "js-agent",
-        identifier: "com.komira.js-agent",
-    },
-    Program {
-        name: "js-mac-session",
-        identifier: "com.komira.js-agent.session",
-    },
-    Program {
-        name: "js-mac-provision",
-        identifier: "com.komira.js-agent.provision",
-    },
-];
+/// The programs of the package: `js-agent`, which also runs the pf anchor job's verb.
+pub const PROGRAMS: [Program; 1] = [Program {
+    name: "js-agent",
+    identifier: "com.komira.js-agent",
+}];
 
 /// The program called `name`, if the package has one.
 #[must_use]
