@@ -148,7 +148,9 @@ fn observe(scratch: &Scratch, job: &Job, probe: Probe, hold: &mut Option<u32>) -
         pause();
     }
     let after = seen(&ps(hold_pid), hold_pid, &job.label);
-    let held = under_job(&before, job_pid) && bootout.ok && job_gone && survived(&after);
+    // Judged on what is left, not on bootout's exit status (recorded above): bootout can exit
+    // non-zero while it tears the job down.
+    let held = under_job(&before, job_pid) && job_gone && survived(&after);
     let mut probe = probe
         .fact("job_gone", job_gone)
         .fact("after", crate::launchd::describe(&after));
