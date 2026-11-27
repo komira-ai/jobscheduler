@@ -1433,6 +1433,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-fake-mount-provider"
+version = "0.1.0"
+dependencies = [
+ "hyper-util",
+ "js-proto",
+ "js-testkit",
+ "tokio",
+ "tonic",
+]
+
+[[package]]
 name = "js-guest"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,29 @@
+[package]
+name = "js-fake-mount-provider"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# A node-local mount provider for black-box tests of the released js-agent, run as a program of
+# its own beside it (crates/js-tierstore-blackbox): it serves the provider service tierstore
+# serves, on a Unix socket, and a control socket sets how it answers.
+[[bin]]
+name = "js-fake-mount-provider"
+path = "src/main.rs"
+
+[dependencies]
+# The provider service, its messages and its server.
+js-proto = { path = "../js-proto" }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+tonic = { workspace = true, features = ["transport"] }
+
+[dev-dependencies]
+# The client end of the provider socket in the tests.
+hyper-util = { workspace = true, features = ["tokio"] }
+js-testkit = { path = "../js-testkit" }
+
+[lints]
+workspace = true
