@@ -98,9 +98,9 @@ pub struct WholeMark {
     /// expected to start there (`None`: not known). Taken when the mark is made or moves
     /// to another worker, and kept while the mark stays on that worker; work after the
     /// request is placed there only as backfill that ends by it, or by the tail now if that
-    /// ends sooner ([`Scheduler::with_backfill`]). It stays the bound when the tail now is not known,
-    /// as a hold made again on the same worker keeps its earlier start; a mark made with
-    /// none admits no backfill until it moves.
+    /// ends sooner ([`Scheduler::with_backfill`]). It stays the bound when the tail now is
+    /// not known, as a hold made again on the same worker keeps its earlier start; a mark
+    /// made with none admits no backfill until it moves.
     pub tail_end: Option<FarmTime>,
 }
 
