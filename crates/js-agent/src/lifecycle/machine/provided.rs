@@ -6,10 +6,15 @@
 //! - **A run's sources** are remembered when its start is admitted (`providing`) and taken
 //!   off the map at `Stage::Scratch`, once its file system is taken apart, into the
 //!   releases that are owed.
-//! - **A release** is asked of the provider at every step until it answers, for a minute
-//!   after the run ended. Then the sources left are named in a `provider-release-failed`
-//!   finding and left to the provider's own collection. It never taints the host, and it
-//!   holds no slot: the run's cleanup does not wait for it.
+//! - **A release** is asked of the provider until it answers, for a minute after the run
+//!   ended, each source paced as a start's calls are (`pace`): after a failure it waits 1 s,
+//!   then 2, 4, 8 and 16 s, with one `provider-backoff` line for the run at each such wait.
+//!   Then the sources left are named in a `provider-release-failed` finding and left to the
+//!   provider's own collection. It never taints the host, and it holds no slot: the run's
+//!   cleanup does not wait for it.
+//! - **The calls that failed** are counted for the whole agent: the `Prepare`s a provider did
+//!   not serve and the calls sent again after a failure, both named in every
+//!   `provider-backoff` line.
 //! - **The sweep** (`Sweep(agent, keep)` with the runs the agent adopted) is asked of each
 //!   provider when the agent has started, and again every ten seconds until answered, with
 //!   one `provider-sweep-failed` finding for each provider that fails it. A start that names
@@ -23,6 +28,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::Lifecycle;
 use super::job::Stage;
+use super::pace::{Gate, Pace, Step};
 use super::provider_record::{self, Source};
 use crate::lifecycle::taint::StateRoot;
 use crate::lifecycle::{Event, Finding, ProviderAnswer, ProviderCall, Providers, code};
@@ -62,13 +68,39 @@ struct Sweep {
     told: bool,
 }
 
+/// A source whose release is owed, with the pace of its tries.
+struct Owed {
+    source: Source,
+    pace: Pace,
+}
+
 /// The sources of a run that ended, whose release is owed.
 struct Leaving {
     run_id: String,
     /// When the run's scratch was removed.
     since_ms: u64,
     /// The sources not yet released.
-    left: Vec<Source>,
+    left: Vec<Owed>,
+}
+
+/// A call to a provider that failed and now waits ([`Attached::backoff`]): which source, which
+/// call, what the pace made of it, and the provider's reason.
+pub(super) struct Backed {
+    /// The source's provider.
+    pub(super) provider: String,
+    /// The source's place.
+    pub(super) index: u32,
+    /// The call that failed: `Prepare`, `Mount` or `Release`.
+    pub(super) call: &'static str,
+    /// The failures in a row and the wait.
+    pub(super) step: Step,
+    /// What the provider (or the transport) said.
+    pub(super) why: String,
+}
+
+/// What tells a source apart for the jitter of its pace.
+pub(super) fn seed(provider: &str, run_id: &str, index: u32) -> String {
+    format!("{provider}/{run_id}#{index}")
 }
 
 /// The providers the lifecycle was given and what it holds for them.
@@ -82,6 +114,15 @@ pub(super) struct Attached {
     runs: BTreeMap<String, Vec<Source>>,
     /// The releases that are owed.
     leaving: Vec<Leaving>,
+    /// The pace of the `Prepare`s of each provider that failed one, by name, with its last
+    /// reason; a provider that serves them has none.
+    gates: BTreeMap<String, (Gate, String)>,
+    /// The `Prepare`s a provider did not serve (unavailable or refused), since the agent
+    /// started.
+    turned_away: u64,
+    /// The calls sent again after a failure of the same source's call, since the agent
+    /// started.
+    retries: u64,
 }
 
 impl Attached {
@@ -97,6 +138,9 @@ impl Attached {
             sweeps: BTreeMap::new(),
             runs: BTreeMap::new(),
             leaving: Vec::new(),
+            gates: BTreeMap::new(),
+            turned_away: 0,
+            retries: 0,
         }
     }
 
@@ -120,6 +164,95 @@ impl Attached {
         self.providers.ask(provider, call)
     }
 
+    /// The reason the provider `name` gave for the last `Prepare` it failed, while it fails
+    /// them and its gate is shut at `now_ms`: a `Prepare` that is not out yet is not sent.
+    pub(super) fn gate_shut(&self, name: &str, now_ms: u64) -> Option<&str> {
+        self.gates
+            .get(name)
+            .filter(|(gate, _)| !gate.open(now_ms))
+            .map(|(_, why)| why.as_str())
+    }
+
+    /// Asks the provider `provider` for the call `call` of a source whose pace is `pace`
+    /// (`seed` names the source, [`seed`]), at `now_ms`, and keeps the count: a call sent
+    /// after the source's last call failed is a retry; a `Prepare` moves the provider's gate
+    /// and, unless it succeeds or is still out, counts as one turned away. A `Mount` answered
+    /// with no directory counts as a failure for the pace, so it is not asked at every step.
+    /// The step is the pace's, when the answer was a failure.
+    pub(super) fn paced(
+        &mut self,
+        (provider, call): (&str, &ProviderCall),
+        pace: &mut Pace,
+        now_ms: u64,
+        seed: &str,
+    ) -> (ProviderAnswer, Option<Step>) {
+        let prepare = matches!(call, ProviderCall::Prepare { .. });
+        if pace.idle() {
+            if pace.failures() > 0 {
+                self.retries = self.retries.saturating_add(1);
+            }
+            if prepare && let Some((gate, _)) = self.gates.get_mut(provider) {
+                gate.sent(now_ms, provider);
+            }
+        }
+        pace.asked(now_ms);
+        let sent_ms = pace.sent_at().unwrap_or(now_ms);
+        let answer = self.providers.ask(provider, call);
+        if prepare {
+            match &answer {
+                ProviderAnswer::Done(_) => {
+                    self.gates.remove(provider);
+                }
+                ProviderAnswer::Unavailable(said) => {
+                    let (gate, why) = self.gates.entry(provider.to_owned()).or_default();
+                    gate.failed(sent_ms, provider);
+                    said.clone_into(why);
+                    self.turned_away = self.turned_away.saturating_add(1);
+                }
+                ProviderAnswer::Refused(_) => {
+                    self.turned_away = self.turned_away.saturating_add(1);
+                }
+                ProviderAnswer::Pending => {}
+            }
+        }
+        let empty = ProviderAnswer::Unavailable("the provider answered no directory".to_owned());
+        let paced = match (call, &answer) {
+            (ProviderCall::Mount { .. }, ProviderAnswer::Done(None)) => &empty,
+            _ => &answer,
+        };
+        let step = pace.answered(paced, now_ms, seed);
+        (answer, step)
+    }
+
+    /// The one `provider-backoff` line of the run `run_id` for the calls of it that failed in
+    /// one step and now wait (`backed`, at least one): the first, how many more wait with it,
+    /// and the agent's counts.
+    pub(super) fn backoff(&self, run_id: &str, backed: &[Backed]) -> Option<Event> {
+        let first = backed.first()?;
+        let more = match backed.len() - 1 {
+            0 => String::new(),
+            1 => "; 1 more source waits too".to_owned(),
+            n => format!("; {n} more sources wait too"),
+        };
+        let message = format!(
+            "the provider {} did not serve the {} of source {} ({} in a row): {}; asked again in \
+             {} ms{more}; this agent: {} Prepares not served, {} calls sent again",
+            first.provider,
+            first.call,
+            first.index,
+            first.step.failures,
+            first.why,
+            first.step.wait_ms,
+            self.turned_away,
+            self.retries,
+        );
+        Some(Event::Finding(Finding {
+            run_id: Some(run_id.to_owned()),
+            code: code::PROVIDER_BACKOFF,
+            message,
+        }))
+    }
+
     /// Remembers `sources` as the ones the run `run_id` holds.
     pub(super) fn keep(&mut self, run_id: &str, sources: Vec<Source>) {
         self.runs.insert(run_id.to_owned(), sources);
@@ -130,6 +263,13 @@ impl Attached {
     /// the same step again owes nothing twice.
     pub(super) fn leave(&mut self, run_id: &str, now_ms: u64) {
         if let Some(left) = self.runs.remove(run_id) {
+            let left = left
+                .into_iter()
+                .map(|source| Owed {
+                    source,
+                    pace: Pace::default(),
+                })
+                .collect();
             self.leaving.push(Leaving {
                 run_id: run_id.to_owned(),
                 since_ms: now_ms,
@@ -138,39 +278,59 @@ impl Attached {
         }
     }
 
-    /// Asks again for every release that is owed. A run whose sources are all released has
-    /// its record removed; one that is not, a minute after it ended, is reported with the
-    /// sources left, its record removed, and dropped.
+    /// Asks again for every release that is owed and whose pace allows it. A run whose
+    /// sources are all released has its record removed; one that is not, a minute after it
+    /// ended, is reported with the sources left, its record removed, and dropped. A run with
+    /// a release that failed in this step has one `provider-backoff` line.
     fn release(&mut self, state: &StateRoot, now_ms: u64, events: &mut Vec<Event>) {
-        let Self {
-            providers, leaving, ..
-        } = self;
+        let mut leaving = std::mem::take(&mut self.leaving);
         leaving.retain_mut(|leave| {
-            let run_id = leave.run_id.as_str();
-            leave.left.retain(|source| {
+            let run_id = leave.run_id.clone();
+            let mut backed = Vec::new();
+            leave.left.retain_mut(|owed| {
+                if !owed.pace.due(now_ms) {
+                    return true;
+                }
+                let index = owed.source.index;
                 let call = ProviderCall::Release {
-                    run_id: run_id.to_owned(),
-                    index: source.index,
+                    run_id: run_id.clone(),
+                    index,
                 };
-                !matches!(
-                    providers.ask(&source.provider, &call),
-                    ProviderAnswer::Done(_)
-                )
+                let provider = owed.source.provider.as_str();
+                let seed = seed(provider, &run_id, index);
+                let (answer, step) = self.paced((provider, &call), &mut owed.pace, now_ms, &seed);
+                if let (
+                    Some(step),
+                    ProviderAnswer::Refused(why) | ProviderAnswer::Unavailable(why),
+                ) = (step, &answer)
+                {
+                    backed.push(Backed {
+                        provider: provider.to_owned(),
+                        index,
+                        call: "Release",
+                        step,
+                        why: why.clone(),
+                    });
+                }
+                !matches!(answer, ProviderAnswer::Done(_))
             });
+            events.extend(self.backoff(&run_id, &backed));
             let late = now_ms.saturating_sub(leave.since_ms) >= RELEASE_GIVE_UP_MS;
             match (leave.left.is_empty(), late) {
                 (true, _) => {
-                    provider_record::remove(state, run_id);
+                    provider_record::remove(state, &run_id);
                     false
                 }
                 (false, true) => {
                     let left: Vec<String> = leave
                         .left
                         .iter()
-                        .map(|source| format!("{} source {}", source.provider, source.index))
+                        .map(|owed| {
+                            format!("{} source {}", owed.source.provider, owed.source.index)
+                        })
                         .collect();
                     events.push(Event::Finding(Finding {
-                        run_id: Some(run_id.to_owned()),
+                        run_id: Some(run_id.clone()),
                         code: code::PROVIDER_RELEASE_FAILED,
                         message: format!(
                             "not released within a minute: {}; left to the providers' own \
@@ -178,12 +338,13 @@ impl Attached {
                             left.join(", ")
                         ),
                     }));
-                    provider_record::remove(state, run_id);
+                    provider_record::remove(state, &run_id);
                     false
                 }
                 (false, false) => true,
             }
         });
+        self.leaving = leaving;
     }
 
     /// Asks every sweep that is not answered and is due; one that failed is asked again
