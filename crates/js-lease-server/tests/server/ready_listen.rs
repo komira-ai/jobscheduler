@@ -53,6 +53,12 @@ async fn readyz(addr: SocketAddr) -> (u16, String) {
     (reply.status, reply.body)
 }
 
+/// The status and body `/readyz/sizes` answers.
+async fn sizes(addr: SocketAddr) -> (u16, String) {
+    let reply = request(addr, "GET", "/readyz/sizes", None, None).await;
+    (reply.status, reply.body)
+}
+
 /// What the refusal of a start says: its flag and its message.
 fn refused<T>(result: Result<T, StartupError>) -> (&'static str, String) {
     let err = result.err().expect("the start should be refused");
@@ -264,9 +270,11 @@ async fn a_route_over_a_free_store_lock_serves_at_once_and_holds_the_lock() {
 /// Asserts a server that waits: while another holder has the store's writer lock the route
 /// answers 503 with the waiting body, the store is not opened, the state file not made and
 /// the wait is logged once however many tries it takes; when the holder lets go and the
-/// server tries again, it serves and the route answers 200 `ready`. It catches a start that
-/// refuses a held lock when the route is on, a wait that logs on every try, one that opens
-/// the store before the lock, and a route that does not follow the start.
+/// server tries again, it serves and the route answers 200 `ready`. Meanwhile `/readyz/sizes`
+/// answers 503 `teaching` on the same listener: nothing is taught before the store is read. It
+/// catches a start that refuses a held lock when the route is on, a wait that logs on every
+/// try, one that opens the store before the lock, a route that does not follow the start, and
+/// a listener that does not serve the sizes' route or says taught before any read.
 #[tokio::test]
 async fn a_server_waits_for_a_held_lock_and_serves_when_it_is_released() {
     let scratch = Scratch::new("ready_listen_wait");
@@ -282,6 +290,7 @@ async fn a_server_waits_for_a_held_lock_and_serves_when_it_is_released() {
     let starting = start_waiting(config, clock, ticker, check_ticker, retries);
     let watching = async {
         assert_eq!(readyz(ready).await, (503, WAITING.to_owned()));
+        assert_eq!(sizes(ready).await, (503, "teaching".to_owned()));
         retry.step().await;
         assert_eq!(readyz(ready).await, (503, WAITING.to_owned()));
         assert!(!sqlite_db(&scratch).exists(), "the store was not opened");
