@@ -125,7 +125,9 @@ fn a_usage_error_names_the_flag() {
 #[test]
 fn a_usage_error_and_a_socket_not_bound_end_the_program() {
     assert_eq!(main(args(&["--root"])), ExitCode::from(2));
-    let dir = TestDir::under(std::env::temp_dir(), "jsfmp-exit");
+    // Under /tmp, not the system's temporary directory: a socket's path is at most 107 bytes, which
+    // a sandbox's deep TMPDIR (the build farm's) passes. The directory is the test's own.
+    let dir = TestDir::under("/tmp", "jsfmp-exit");
     let missing = dir.join("absent");
     let root = dir.path().display().to_string();
     let control = dir.join("c.sock").display().to_string();

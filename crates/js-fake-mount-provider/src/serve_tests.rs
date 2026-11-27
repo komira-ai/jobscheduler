@@ -70,7 +70,10 @@ impl Running {
     /// Starts the program over a new scratch directory with `extra` flags, and returns once it
     /// answers on its control socket.
     fn start(name: &str, extra: &[&str]) -> Running {
-        let dir = TestDir::under(std::env::temp_dir(), name);
+        // Under /tmp, not the system's temporary directory: a socket's path is at most 107
+        // bytes, which a sandbox's deep TMPDIR (the build farm's) passes. The directory is the
+        // test's own.
+        let dir = TestDir::under("/tmp", name);
         let socket = dir.join("p.sock");
         let control = dir.join("c.sock");
         let mut words: Vec<OsString> = vec![

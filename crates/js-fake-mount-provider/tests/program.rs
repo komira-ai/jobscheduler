@@ -28,7 +28,9 @@ fn a_usage_error_ends_with_status_2() {
 /// and ends with status 0 after `quit`.
 #[test]
 fn the_program_serves_until_quit() {
-    let dir = TestDir::under(std::env::temp_dir(), "jsfmp-program");
+    // Under /tmp, not the system's temporary directory: a socket's path is at most 107 bytes, which
+    // a sandbox's deep TMPDIR (the build farm's) passes. The directory is the test's own.
+    let dir = TestDir::under("/tmp", "jsfmp-program");
     let socket = dir.join("p.sock");
     let control = dir.join("c.sock");
     let mut child = Command::new(PROGRAM)
