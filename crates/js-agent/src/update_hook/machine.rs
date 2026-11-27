@@ -360,15 +360,12 @@ enum RootError {
 /// The prefix of [`StateRoot::open`]'s errors: the agent's flag, which the hook does not have.
 const AGENT_FLAG: &str = "--state-root: ";
 
-/// The state root at `path`: [`Root::Absent`] when `path` is `None` or nothing is at it.
+/// The state root at `path`: [`Root::Absent`] when nothing is at it.
 ///
 /// # Errors
 /// [`RootError::Unusable`]: something is at `path` and it is not usable, or the path cannot be
 /// looked at. Nothing can be said of a taint in it.
-fn find_root(path: Option<&Path>) -> Result<Root, RootError> {
-    let Some(path) = path else {
-        return Ok(Root::Absent);
-    };
+fn find_root(path: &Path) -> Result<Root, RootError> {
     // The path itself, not what a link at it points to: a link is refused by the open.
     match std::fs::symlink_metadata(path) {
         Err(why) if why.kind() == io::ErrorKind::NotFound => Ok(Root::Absent),
@@ -387,7 +384,7 @@ fn find_root(path: Option<&Path>) -> Result<Root, RootError> {
 /// # Errors
 /// What [`find_root`] says; for an update, [`RootError::NotThere`] when it finds none.
 fn agent_state(params: &Params) -> Result<Root, RootError> {
-    let root = find_root(Some(&params.state_root))?;
+    let root = find_root(&params.state_root)?;
     if !matches!(root, Root::Absent) || params.previous_version.is_none() {
         return Ok(root);
     }
@@ -631,7 +628,7 @@ pub fn run_maintain(
     params: &DrainParams,
     machine: &Machine<'_>,
 ) -> Done {
-    let state = match find_root(Some(&params.state_root)) {
+    let state = match find_root(&params.state_root) {
         Ok(state) => state,
         Err(why) => return invalid_root(why.to_string()),
     };

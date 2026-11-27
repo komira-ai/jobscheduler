@@ -308,7 +308,8 @@ pub(super) struct Process {
     id: String,
     agent: Behind,
     session: Option<Session>,
-    /// The hellos not yet answered, with when each was sent.
+    /// The hello not yet answered, with when it was sent: the agent has one call in flight
+    /// at a time, so there is at most one. An answer to a hello no longer here is dropped.
     hellos: BTreeMap<CallId, FarmTime>,
     /// When each heartbeat of the session was sent, by number; 0 is the hello the
     /// session's welcome answered.
@@ -404,8 +405,16 @@ impl Process {
     /// next tick is due.
     pub(super) fn tick(&mut self, spec: &AgentSpec, io: &mut Io) -> Duration {
         let Some(mut session) = self.session.take() else {
-            self.hello(spec, io);
-            return spec.hello_interval;
+            // Not welcomed. A tick with the hello still in flight is the end of its time:
+            // the exchange failed, its answer, should it come, is dropped, and the next
+            // hello follows after the shortest wait of the agent's backoff. Otherwise the
+            // agent says hello and waits for the answer or the end of its time.
+            if self.hellos.is_empty() {
+                self.hello(spec, io);
+                return REQUEST_LIMIT;
+            }
+            self.hellos.clear();
+            return BACKOFF;
         };
         // A tick with the heartbeat still in flight is the end of its time: the exchange
         // failed, and its answer, should it come, is dropped. The next heartbeat follows
@@ -595,24 +604,24 @@ impl Process {
 
     fn hello_answered(&mut self, sent: FarmTime, answer: Answer, spec: &AgentSpec, io: &mut Io) {
         match answer.status {
-            200 => self.welcomed(sent, &answer.body, io),
+            200 => self.welcomed(sent, &answer.body, spec.hello_interval, io),
             429 => {
                 let wait = answer.retry_after.unwrap_or(spec.hello_interval);
                 io.arm_tick(wait.min(RETRY_AFTER_CAP));
             }
-            _ => {}
+            _ => io.arm_tick(spec.hello_interval),
         }
     }
 
-    fn welcomed(&mut self, sent: FarmTime, body: &str, io: &mut Io) {
+    fn welcomed(&mut self, sent: FarmTime, body: &str, hello_interval: Duration, io: &mut Io) {
         let welcome = serde_json::from_str::<Welcome>(body)
             .ok()
             .filter(|welcome| welcome.validate().is_ok());
         let Some(welcome) = welcome else {
-            return io.bump(Counter::ReplyInvalid);
+            io.bump(Counter::ReplyInvalid);
+            return io.arm_tick(hello_interval);
         };
         let interval = Duration::from_millis(welcome.heartbeat_interval_ms);
-        self.hellos.clear();
         self.beats_sent = BTreeMap::from([(0, sent)]);
         self.session = Some(Session {
             epoch: welcome.epoch,
@@ -645,8 +654,10 @@ impl Process {
         let accepted = self.session.take().is_some_and(|session| session.accepted);
         if accepted {
             self.hello(spec, io);
+            io.arm_tick(REQUEST_LIMIT);
+        } else {
+            io.arm_tick(spec.hello_interval);
         }
-        io.arm_tick(spec.hello_interval);
     }
 
     /// Hands a 200 reply to the worker: it acts on it now when it has no lag, else once it

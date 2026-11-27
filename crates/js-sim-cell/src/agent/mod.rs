@@ -49,9 +49,13 @@
 //!
 //! # The session
 //!
-//! A process says hello at once and then every [`AgentSpec::hello_interval`] until it is
-//! welcomed. A 429 answer is followed by a hello after the `Retry-After` it names (at most
-//! [`RETRY_AFTER_CAP`]); any other refusal by the next one an interval later. Once
+//! A process says hello at once and has that one hello in flight, as the real agent has
+//! one call in flight at a time: it sends the next only after the answer or the end of the
+//! hello's time. A 429 answer is followed by a hello after the `Retry-After` it names (at
+//! most [`RETRY_AFTER_CAP`]); any other refusal, and a welcome that does not validate, by
+//! the next one an [`AgentSpec::hello_interval`] later. A hello with no answer in
+//! [`js_agent::REQUEST_LIMIT`] has failed: its answer, should it come, is dropped unread, and
+//! the next hello follows the shortest backoff ([`js_agent::BASE`]) later. Once
 //! welcomed it has one heartbeat in flight at a time, as the real agent has: it sends the
 //! next an interval after the answer to the last, and gives a call [`js_agent::REQUEST_LIMIT`]
 //! (10 s). A call with no answer by then has failed: the agent is told its connection
@@ -79,11 +83,8 @@
 //! while no heartbeat is lost on the way; after a lost one the agent's number names a later
 //! send and `waited` reads short.
 //!
-//! A hello is sent every interval while none is welcomed, without waiting for the answer to
-//! the last. The first welcome closes every open hello: when answers are delayed past an
-//! interval, a welcome to a later hello is then ignored, the agent keeps the earlier
-//! session, and the server's refusal of its next heartbeat makes it say hello again. The
-//! real agent has one call in flight at a time and never meets that case.
+//! Only one hello is in flight, so a server never holds two hellos of one process at once
+//! and a late welcome of a hello given up on is ignored.
 //!
 //! # Runs
 //!

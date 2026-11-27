@@ -406,14 +406,14 @@ pub(crate) fn rig_on(
     }
 }
 
-/// The host `host`, or `host-a` when `host` is no host id.
-fn host_or_a(host: &str) -> HostId {
-    HostId::new(host).unwrap_or_else(|_| HostId::new("host-a").expect("a valid host id"))
+/// The host `host`, which a test names by a valid host id.
+fn host_of(host: &str) -> HostId {
+    HostId::new(host).expect("a test names a valid host id")
 }
 
 /// The credential the registry knows the host `host` by: the one its certificate gives.
 pub(crate) fn who_of(host: &str) -> Credential {
-    Credential::of_host_certificate(&host_or_a(host))
+    Credential::of_host_certificate(&host_of(host))
 }
 
 impl Rig {
@@ -643,7 +643,7 @@ impl Rig {
         let named = named.as_ref().and_then(|beat| beat["host_id"].as_str());
         let host = named.unwrap_or("host-a");
         let who = Extension(who_of(host));
-        let certified = Extension(CertifiedHost(host_or_a(host)));
+        let certified = Extension(CertifiedHost(host_of(host)));
         let answer = super::heartbeat(agents, who, certified, peer, Ok(body));
         answer.await.map(|Json(reply)| reply)
     }

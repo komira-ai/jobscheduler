@@ -148,20 +148,24 @@ fn runs(names: &[&str]) -> Vec<String> {
     names.iter().map(|name| (*name).to_owned()).collect()
 }
 
-/// The stand-in drops the first two hellos; the third, an interval after the second, is
-/// welcomed, and the heartbeats follow one interval apart from the welcome. Every call
-/// presents the certificate of host `h000`, though the welcome carries a host credential of
-/// a server before this release. Catches an agent that gives up after a lost hello, hellos
-/// off the interval, beats off the interval, or a call that presents no certificate.
+/// The agent keeps one hello in flight, as the real agent does: the stand-in drops the
+/// first two hellos, and the agent gives each the request limit (10 s) before it counts it
+/// failed and sends the next one backoff (1 s) later, never a second hello while one is
+/// open. The third is welcomed, and the heartbeats follow one interval apart from the
+/// welcome. Every call presents the certificate of host `h000`, though the welcome carries a
+/// host credential of a server before this release. Catches an agent that gives up after a
+/// lost hello, one that says hello again while an earlier hello is unanswered (each of which
+/// a server keyed per certificate admits and takes a session from), hellos off the request
+/// limit and backoff, beats off the interval, or a call that presents no certificate.
 #[test]
 fn a_hello_is_resent_until_welcomed_and_heartbeats_follow_on_the_interval() {
     let script = Script::plain()
         .hello(1, HelloAnswer::Silent)
         .hello(2, HelloAnswer::Silent);
-    let (sim, _) = run(spec(), script, 6_500);
+    let (sim, _) = run(spec(), script, 26_500);
     let server = stand_in(&sim);
-    assert_eq!(server.hello_times(), [5, 1_005, 2_005]);
-    assert_eq!(server.beat_times(), [3_015, 4_025, 5_035, 6_045]);
+    assert_eq!(server.hello_times(), [5, 11_005, 22_005]);
+    assert_eq!(server.beat_times(), [23_015, 24_025, 25_035, 26_045]);
     for received in &server.received {
         assert_eq!(received.certificate, HostId::new("h000").ok());
     }
@@ -204,7 +208,8 @@ fn a_refused_hello_is_retried_after_the_wait_it_names() {
 }
 
 /// A refusal other than 429 (here 403 `pool-full`), and a 429 that names no wait, are
-/// followed by the next hello one interval later. Catches an agent that gives up on a
+/// followed by the next hello one interval after the answer was read (the agent waits for
+/// the answer before it sends another hello). Catches an agent that gives up on a
 /// refusal it does not read as final, or retries at once.
 #[test]
 fn a_hello_refused_without_a_wait_is_retried_on_the_interval() {
@@ -227,20 +232,20 @@ fn a_hello_refused_without_a_wait_is_retried_on_the_interval() {
         );
     let (sim, _) = run(spec(), script, 3_500);
     let server = stand_in(&sim);
-    assert_eq!(server.hello_times(), [5, 1_005, 2_015]);
-    assert_eq!(server.beat_times(), [3_025]);
+    assert_eq!(server.hello_times(), [5, 1_015, 2_025]);
+    assert_eq!(server.beat_times(), [3_035]);
 }
 
 /// A welcome with a zero heartbeat interval fails the wire's check: the agent ignores it,
-/// counts it, and says hello again an interval later. Catches an agent that trusts a
+/// counts it, and says hello again an interval after it read the answer. Catches an agent that trusts a
 /// welcome it did not validate.
 #[test]
 fn a_welcome_that_fails_validation_is_ignored_and_counted() {
     let script = Script::plain().hello(1, HelloAnswer::Invalid);
     let (sim, _) = run(spec(), script, 2_500);
     let server = stand_in(&sim);
-    assert_eq!(server.hello_times(), [5, 1_005]);
-    assert_eq!(server.beat_times(), [2_015]);
+    assert_eq!(server.hello_times(), [5, 1_015]);
+    assert_eq!(server.beat_times(), [2_025]);
     assert_eq!(count(&sim, Counter::ReplyInvalid), 1);
 }
 

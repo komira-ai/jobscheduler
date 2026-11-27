@@ -99,3 +99,67 @@ async fn a_host_a_restarted_server_does_not_hold_is_unknown_to_the_cordon_route(
         (409, "unknown-host")
     );
 }
+
+/// Asserts that a hello the wire's checks refuse is answered 400 with the wire's code before
+/// anything is judged or written: a protocol range this server does not serve is
+/// `unsupported-protocol`, a body that is not a hello at all is `invalid-hello`; neither commits
+/// a binding or holds the host, and the same host's well-formed hello is admitted after them.
+/// Catches a hello that reaches the registry or the store unchecked.
+#[tokio::test]
+async fn a_hello_the_wire_refuses_writes_and_holds_nothing() {
+    let rig = rig("judged_invalid_hello");
+    let mut unserved: Value = serde_json::from_slice(&body("host-a", "burst")).unwrap();
+    unserved["protocol"] = json!({ "min": 2, "max": 3 });
+    let before = rig.commits();
+    let cases = [
+        (Bytes::from(unserved.to_string()), "unsupported-protocol"),
+        (Bytes::from_static(b"{"), "invalid-hello"),
+    ];
+    for (sent, code) in cases {
+        let refused = serve_hello(&rig.agents, "host-a", Ok(sent), &|| ())
+            .await
+            .map(drop)
+            .unwrap_err();
+        assert_eq!((refused.status.as_u16(), refused.error), (400, code));
+        assert_eq!(rig.commits(), before, "{code}: nothing was committed");
+        assert_eq!(rig.binding("host-a"), Value::Null, "{code}");
+        assert!(rig.held("host-a").is_none(), "{code}");
+    }
+    rig.hello("host-a", "burst").await.expect("admitted");
+}
+
+/// Asserts that a heartbeat the wire's checks refuse is answered 400 `invalid-heartbeat` and
+/// changes nothing: a session that is not a session and a host id that is no host id, each
+/// from an admitted host's certificate, leave the host held as the hello left it, with no
+/// commit; the host's well-formed beat is answered after them. Catches a heartbeat that reaches
+/// the registry unchecked.
+#[tokio::test]
+async fn a_heartbeat_the_wire_refuses_changes_nothing() {
+    let rig = rig("judged_invalid_beat");
+    let welcome = rig.hello("host-a", "burst").await.unwrap();
+    let before = rig.commits();
+    let beat = |host: &str, session: &str| {
+        let beat = json!({
+            "host_id": host,
+            "epoch": welcome.epoch,
+            "session": session,
+            "phase": "serving",
+        });
+        Bytes::from(beat.to_string())
+    };
+    let bad = [
+        beat("host-a", "not a session"),
+        beat("UPPER host", &welcome.session),
+    ];
+    for sent in bad {
+        let refused = beat_as(&rig.agents, "host-a", sent).await.unwrap_err();
+        assert_eq!(
+            (refused.status.as_u16(), refused.error),
+            (400, "invalid-heartbeat")
+        );
+        assert_eq!(rig.commits(), before, "nothing was committed");
+        assert!(rig.held("host-a").is_some());
+    }
+    let sent = beat("host-a", &welcome.session);
+    beat_as(&rig.agents, "host-a", sent).await.expect("a beat");
+}

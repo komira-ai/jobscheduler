@@ -717,7 +717,10 @@ model:
   server never sends: its agent does not report `held-beat`), gives a call `REQUEST_LIMIT` (10 s), and drops the answer
   to a call it gave up. The cell's agent does the same (`agent/process.rs`): after a call
   with no answer in 10 s it waits the shortest backoff (1 s) and sends the next, and an
-  answer that comes later is ignored. A heartbeat is therefore never sent before the reply
+  answer that comes later is ignored. A hello is sent the same way: one in flight, the next
+  after the answer (an interval after it, or the `Retry-After` of a 429) or, with no answer in
+  10 s, after the shortest backoff; a server keyed per host certificate therefore never
+  holds two hellos of one process at once. A heartbeat is therefore never sent before the reply
   to the last was read. What the cell leaves out is a heartbeat request that the server
   processes after a newer one, which needs a request delayed past the limit; the server's
   step 3 of the per-job heartbeat would take such a stale omission as the host's word (an
