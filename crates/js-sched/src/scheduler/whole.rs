@@ -12,11 +12,12 @@
 //! a consumer, so there is nothing to count; the lease server or the registry, where the
 //! caller's identity exists, enforces it ([`Scheduler::with_whole_node`]).
 //!
-//! A mark belongs to its request: it stays on the worker it was made on until the request
-//! is placed or is cancelled, whatever its deadline, and is never traded for a
-//! worker that has become cheaper to drain, nor taken by another request's hold or mark
-//! ([`Scheduler::hold_whole`]). It moves only when its worker can no longer hold the
-//! request (gone, cordoned, barred to it). A worker a whole-machine lease holds is never
+//! A mark belongs to its request until the request is placed or is cancelled, whatever
+//! its deadline, and is never taken by another request's hold or mark. Its worker is
+//! picked again every round by the least tail ([`Scheduler::hold_whole`]): the mark moves,
+//! keeping when it was made, to a worker whose tail has become shorter than its own
+//! worker's, or when its worker can no longer hold the request (gone, cordoned, barred to
+//! it); on a tie it stays where it is. A worker a whole-machine lease holds is never
 //! marked: no request waits behind another one's whole-machine lease. Nor is a worker a
 //! whole holder holds: an operation of another kind the caller names as holding its worker
 //! whole ([`Scheduler::set_whole_holder`]), as a whole-node lease placed as an action that
@@ -40,6 +41,7 @@
 mod bar;
 mod restore;
 mod room;
+mod tie;
 
 pub use bar::Bar;
 pub use restore::{RestoredMark, RestoredWhole, WholeError};
@@ -60,6 +62,14 @@ use js_whole::cost::{DrainCost, HostLoad, drain_cost, tail};
 use super::{Scheduler, Worker};
 use crate::backfill;
 use crate::servable::{Placed, Servable, serves};
+use tie::kept_first;
+
+/// How long a lease already at or past its end is taken to hold its worker from now: the
+/// time for whatever ends it (its executor's wall limit, the next tick of the service that
+/// enforces it) to do so. The same minute backfill keeps spare before a start
+/// ([`js_whole::cost::DEFAULT_BACKFILL_MARGIN_MS`]), so a worker whose only lease is late
+/// takes no backfill.
+const OVERDUE_MARGIN_MS: u64 = js_whole::cost::DEFAULT_BACKFILL_MARGIN_MS;
 
 /// Why a whole-machine request that fits nowhere holds no worker though it has waited
 /// out `drain_after` ([`Scheduler::whole_wait`]).
@@ -82,15 +92,15 @@ pub struct WholeMark {
     pub made: FarmTime,
     /// When the worker is expected to be drained at the latest: `drain_deadline`, else the
     /// request's wall limit, after the mark was made. Reaching it changes nothing: the
-    /// mark stays on its worker, and nothing running there is stopped.
+    /// mark is kept, and nothing running on its worker is stopped.
     pub deadline: FarmTime,
     /// The end of the worker's tail when the mark was made on it: when the request is
-    /// expected to start there (`None`: not known). Taken once, when the mark is made,
-    /// and kept while the mark stays on that worker; work after the request is placed
-    /// there only as backfill that ends by it, or by the tail now if that ends sooner
-    /// ([`Scheduler::with_backfill`]). It stays the bound when the tail now is not known,
-    /// as a hold made again on the same worker keeps its earlier start; a mark made with
-    /// none admits no backfill until it moves.
+    /// expected to start there (`None`: not known). Taken when the mark is made or moves
+    /// to another worker, and kept while the mark stays on that worker; work after the
+    /// request is placed there only as backfill that ends by it, or by the tail now if that
+    /// ends sooner ([`Scheduler::with_backfill`]). It stays the bound when the tail now is
+    /// not known, as a hold made again on the same worker keeps its earlier start; a mark
+    /// made with none admits no backfill until it moves.
     pub tail_end: Option<FarmTime>,
 }
 
@@ -221,8 +231,8 @@ impl Drain {
     /// new one on `worker` whose deadline is `drain_deadline`, or the request's wall
     /// limit `max_wall` when none is set ([`WholeNodeConfig::drain_deadline_ms`]), after
     /// now, whose tail end is `tail` (the end of the worker's tail now) and whose time of
-    /// making is the kept mark's: a mark moved off a worker that can no longer hold its
-    /// request keeps its age.
+    /// making is the kept mark's: a mark that moves, to a worker with a shorter tail or off
+    /// one that can no longer hold its request, keeps its age.
     pub(super) fn mark(
         (worker, tail): (&WorkerId, Option<u64>),
         kept: Option<WholeMark>,
@@ -413,6 +423,13 @@ impl Scheduler {
     /// The end bound (start plus max wall time, the latest time there is for a lease with
     /// none) and the estimated end (start plus the P90 of the wall minutes of its key, raw;
     /// unknown when the key has none) of a lease of `operation` started at `start`.
+    ///
+    /// A lease whose end (its estimate cut to its bound, else its bound) is now or already
+    /// past still holds its worker until something ends it, so it is read as ending
+    /// [`OVERDUE_MARGIN_MS`] from now: the bound is that time and the estimate is dropped.
+    /// It never reads as ending now, so a worker whose leases are late never looks cheaper
+    /// to drain than one whose leases end within the margin. A lease that ends after now
+    /// keeps its own times, however soon.
     fn end_times(
         &self,
         operation: OperationId,
@@ -427,12 +444,17 @@ impl Scheduler {
             .admission
             .wall_minutes_p90(key)
             .map(|minutes| start.saturating_add(u64::from(minutes).saturating_mul(60_000)));
+        let now = self.now.as_millis();
+        if estimate.map_or(bound, |estimate| estimate.min(bound)) <= now {
+            return (now.saturating_add(OVERDUE_MARGIN_MS), None);
+        }
         (bound, estimate)
     }
 
     /// The end of each lease held or placed this round, as farm milliseconds: its estimate
-    /// cut to its bound, else its bound; `None` for a lease with neither. A lease placed
-    /// this round starts now.
+    /// cut to its bound, else its bound, and a margin from now for a lease at or past that
+    /// end ([`OVERDUE_MARGIN_MS`]); `None` for a lease with neither. A lease placed this
+    /// round starts now.
     pub(super) fn lease_ends(
         &self,
         placed: &[(OperationId, Placed)],
@@ -558,16 +580,20 @@ impl Scheduler {
 
     /// The worker whole-machine `id`, at queue `position`, holds this round, its mark and
     /// the start time of the hold for backfill, when it holds one. A mark belongs to its
-    /// request until the request is placed or cancelled, past its deadline too: `kept`
-    /// stays on its worker, without a check (that mark is already
-    /// counted), for as long as that worker could still hold the request, however cheap
-    /// another worker becomes to drain, and no other request's hold or mark takes the
-    /// worker ([`Scheduler::off_marks`]). Only a worker that can no longer hold it (gone,
-    /// cordoned, barred to it) moves the mark, keeping its age.
-    /// A new mark is made only if the caps allow it ([`may_reserve`]) and the worker is
-    /// not the last capable one of an older ordinary request, in which case the next
-    /// worker by drain cost is tried. `Err` is the reason it holds none. `Ok(None)` is no
-    /// worker that could.
+    /// request until the request is placed or cancelled, past its deadline too, and no
+    /// other request's hold or mark takes its worker ([`Scheduler::off_marks`]). The
+    /// worker is picked again every round by the least tail: the mark moves to a worker
+    /// whose tail has become shorter than its own worker's, keeping its age (`made`) and
+    /// taking the new worker's tail end and a deadline counted from the move. On a tie
+    /// (the same tail) it stays where it is ([`kept_first`]), and it moves too when its
+    /// worker can no longer hold the request (gone, cordoned, barred to it).
+    /// Staying on the kept worker needs no check: that mark is already counted. A move
+    /// or a new mark is made only if the caps allow it ([`may_reserve`]; the request's own
+    /// mark is not counted, as [`Drain::turn`] took it out) and the worker is not the last
+    /// capable one of an older ordinary request, in which case the next worker by drain
+    /// cost is tried. A move the caps refuse leaves the mark on its worker while that
+    /// worker can still hold the request, so a mark is never dropped at a cap it was
+    /// made under. `Err` is the reason it holds none. `Ok(None)` is no worker that could.
     ///
     /// The start time is when the request is expected to start there (`None`: not known):
     /// the mark's tail end, or the worker's tail now if that ends sooner
@@ -608,20 +634,24 @@ impl Scheduler {
         out.extend(whole_placed.map(|(_, at)| at.worker.clone()));
         let avoid = Drain::avoiding(&op.avoid, &turn.barred);
         let kept = turn.kept.as_ref().map(|m| &m.worker);
-        let drain = self.drain_order(placed);
+        let drain = kept_first(self.drain_order(placed), kept);
         let max_wall = self.max_walls.get(&id).copied();
+        // The counts do not change while this request is picked: its own mark is out of
+        // them, and no other mark is made or moved until it has its worker.
+        let cap = may_reserve(self.whole_counts(round), round.limits).map_err(WholeWait::Cap);
+        // The pick is the least tail every round; only when the caps refuse a move does
+        // the mark stay on its worker whatever the tails, while that worker could still
+        // hold the request.
+        let stay = kept.filter(|_| cap.is_err());
         let mut wait = None;
         loop {
-            // A mark stays on its worker while that worker could still hold the request:
-            // it is not picked again when another worker becomes cheaper to drain. Its cap
-            // check was made when it was made.
             let Some(name) =
-                servable.reserve(&self.workers, &op.request, &out, &avoid, kept, &drain)
+                servable.reserve(&self.workers, &op.request, &out, &avoid, stay, &drain)
             else {
                 return wait.map_or(Ok(None), Err);
             };
             if kept != Some(&name) {
-                may_reserve(self.whole_counts(round), round.limits).map_err(WholeWait::Cap)?;
+                cap?;
                 if self.last_capable(servable, round, &name, position, cfg) {
                     wait = Some(WholeWait::LastCapable);
                     out.insert(name);

@@ -62,7 +62,7 @@ pub use platform::{
     PoolSettings, Resolved, ResolvedMachineProvider, ResolvedPlatform, ResolvedPool,
 };
 use section::Section;
-pub(crate) use server::{AlertKeys, Server, UsageKeys};
+pub(crate) use server::{AgentKeys, AlertKeys, Server, UsageKeys};
 use server::{read_client_token, read_server};
 
 /// The most instances one pool may allow: the join-token table holds 256 waiting tokens.
