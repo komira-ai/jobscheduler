@@ -795,6 +795,33 @@ mod tests {
         assert!(engine.at_reading.is_empty());
     }
 
+    /// A job's CPU time, handed over as its result reports it, reaches the scheduler's
+    /// plausibility check: a host whose counter does not move while a job placed after a
+    /// reading used 60 core-seconds is charged by its jobs' predictions from the next
+    /// reading. The CPU time of a job the engine does not hold changes nothing. Catches the
+    /// job's CPU time never handed to the scheduler, which would believe a stuck reader.
+    #[test]
+    fn a_freed_jobs_cpu_time_reaches_the_plausibility_check() {
+        let mut engine = Engine::build(Settings::default(), at(0));
+        let b = host("b");
+        engine.host_up(&b, &shape(true), at(0));
+        engine.heard(&b, Some(&measured(1, 0, 0)), at(5_000));
+        engine.heard(&b, None, at(6_000));
+        assert!(place(&mut engine, &b, "busy", (4_000, 64 * MIB)));
+        let busy = js_jobs::JobId::parse("busy").unwrap();
+        let stranger = js_jobs::JobId::parse("stranger").unwrap();
+        engine.job_cpu_used(&stranger, 600_000_000);
+        engine.job_cpu_used(&busy, 60_000_000);
+        engine.job_failed(&busy);
+        let view = engine.load_of("b").unwrap();
+        assert!(!view.implausible_lease_cpu);
+        engine.heard(&b, Some(&measured(2, 0, 0)), at(10_000));
+        let view = engine.load_of("b").unwrap();
+        assert!(view.implausible_lease_cpu);
+        assert!(view.fallback);
+        assert_eq!(engine.sched.load_counters().signal_implausible_lease_cpu, 1);
+    }
+
     /// Memory is filled to the bookings and not past them (the flat sum of the bookings is
     /// the limit), and a working set above the covered jobs' bookings (residue, kernel
     /// memory) still counts whole, so the memory it holds is not offered again.
