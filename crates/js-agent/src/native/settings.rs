@@ -344,6 +344,14 @@ impl NativeSettings {
         self.bundles.as_ref()
     }
 
+    /// The same settings with `read_model` (`--read-model`) as the read model of the profile
+    /// of a run that pins a bundle.
+    #[must_use]
+    pub fn with_read_model(mut self, read_model: ReadModel) -> Self {
+        self.config.read_model = read_model;
+        self
+    }
+
     /// The same settings with `enforcer` as the check of the pf anchor: a seam for tests.
     #[must_use]
     pub fn with_enforcer(mut self, enforcer: Arc<dyn Enforcer>) -> Self {

@@ -57,7 +57,11 @@
 //! own `.trees` directory (below `exec/`), and `@bundle/<entrypoint>` resolved to the file in
 //! the store (or the clone) that the bundle's config names; the environment and arguments are
 //! the bundle's rules applied to the job's own (see `native/bundle.rs`). The pins end with
-//! the run.
+//! the run. Under `--read-model allow` its profile is an allow-list: it reads the base set of
+//! the host's macOS version, its run directory, its run files and mounts, the bundle's trees,
+//! the kinds the bundle declares and the Xcode the start names, and nothing else; the runtime
+//! builds one only after the model's self-test passed at start (`native/allow.rs`), and a run
+//! that pins no bundle keeps the open model.
 //!
 //! A run outlives a restart of the agent: its supervisor goes on waiting for the job and writes
 //! the exit record with no agent running. The next process takes back each run of the journal
@@ -125,6 +129,7 @@
 
 mod accounts;
 mod adopt;
+mod allow;
 mod bundle;
 mod cwd;
 mod end;
@@ -159,7 +164,7 @@ use js_agent_wire::{
     BUNDLE_PROGRAM_PREFIX, CpuSeries, HostPort, InputRef, JobUsage, LogReport, LogTail,
     MemorySeries, NativeSpec, refusal,
 };
-use js_mac_pool::seatbelt::{AbsPath, ReadModel};
+use js_mac_pool::seatbelt::{AbsPath, Assurance, ReadModel};
 use js_mac_session::full_disk_access::FullDiskAccess;
 
 use crate::bundle::Placer;
@@ -177,6 +182,7 @@ use crate::mac_usage::{ProcessUsage, Series};
 use crate::usage::{MonotonicClock, UsageClock as _};
 
 pub use accounts::Accounts;
+pub use allow::ReadAllow;
 pub use files::HandOver;
 pub use journal::{Journal, PutRecord, RunRecord};
 pub use mounts::{MountRoot, roots_of};
@@ -210,8 +216,10 @@ pub struct NativeConfig {
     /// The roots a job's mounts must lie beneath once their links are followed
     /// (`--mount-root`, `--mount-root-ro`), canonical; also in `read_denies`.
     pub mount_roots: Vec<MountRoot>,
-    /// Which reads the profile permits. The runtime builds no grants, so only
-    /// [`ReadModel::Open`] gives a profile; with the other every start fails.
+    /// Which reads the profile of a run that pins a bundle permits (`--read-model`): under
+    /// [`ReadModel::Allow`] such a run reads only what its grants name (`native/allow.rs`),
+    /// which needs the runtime's [`ReadAllow`] and the assurance of its start-up self-test.
+    /// A run that pins no bundle keeps [`ReadModel::Open`] under either.
     pub read_model: ReadModel,
     /// The file the lease journal is kept in (in the state root).
     pub journal: PathBuf,
@@ -275,6 +283,12 @@ pub struct NativeRuntime {
     /// How many polls the self-test makes for its run to end; none is the default
     /// ([`NativeRuntime::with_self_test_polls`] sets it for tests).
     self_test_polls: Option<u32>,
+    /// What the allow read model needs of the host, under `--read-model allow`
+    /// ([`NativeRuntime::with_read_allow`]).
+    read_allow: Option<ReadAllow>,
+    /// The proof that the allow read model's self-test passed in this process: only with it
+    /// does a run that pins a bundle get a profile under that model.
+    assurance: Option<Assurance>,
     /// What a run's processes are sampled from at each poll ([`crate::mac_usage`]).
     processes: Arc<dyn ProcessUsage>,
     /// The series each run records (`--cpu-series`, `--memory-series`).
@@ -387,6 +401,8 @@ impl NativeRuntime {
             committed: BTreeMap::new(),
             own_folders: None,
             self_test_polls: None,
+            read_allow: None,
+            assurance: None,
             processes: Arc::new(MacProcesses::new()),
             series: Series::default(),
             mono_us: system_mono_clock(),

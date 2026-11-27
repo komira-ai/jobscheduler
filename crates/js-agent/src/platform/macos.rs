@@ -40,6 +40,7 @@ use crate::bundle::Settings as BundleSettings;
 use crate::cli::Cli;
 use crate::cli_runtime::Settings;
 use crate::contract;
+use crate::facts::SystemCommands;
 use crate::lifecycle::CheckHook;
 use crate::lifecycle::NoChecks;
 use crate::lifecycle::{
@@ -48,13 +49,16 @@ use crate::lifecycle::{
 use crate::mac_supervisor::{Launcher, SystemLauncher};
 use crate::mac_usage::Series;
 use crate::native::Ceiling;
-use crate::native::{self, NativeFlags, NativeRuntime, NativeSettings, PfFlags, PutFlags};
+use crate::native::{
+    self, NativeFlags, NativeRuntime, NativeSettings, PfFlags, PutFlags, ReadAllow,
+};
 use crate::registry_credentials::RegistryCredentials;
 use crate::system::{Machine, RuntimeBuild, System};
 use crate::usage::{HostSampler, NodeSampler, macos::MacHost};
 use crate::{Failure, Services};
 use js_agent_wire::LOG_UPLOAD_CAPABILITY;
 use js_caps::{EXEC, FLAG_SET, RUNTIME};
+use js_mac_pool::seatbelt::ReadModel;
 use js_mac_session::full_disk_access::FullDiskAccess;
 use js_types::ExecMode;
 
@@ -620,8 +624,12 @@ pub(crate) fn complete(
     let backend = local.backend.take();
     local.backend = match backend {
         Some(Backend::Native(native)) => {
+            // `--read-model` was checked with the bundle flags, and needs `--bundle-store`;
+            // with no store open no run pins a bundle, and the open model is all there is.
             let native = match &start.bundles {
-                Some(store) => native.with_bundles(Arc::clone(store))?,
+                Some(store) => native
+                    .with_bundles(Arc::clone(store))?
+                    .with_read_model(read_model_of(cli)),
                 None => native,
             };
             // The agent asks itself once, here: the state its listing of the privacy
@@ -638,6 +646,14 @@ pub(crate) fn complete(
     };
     local.vm = start.vm.clone();
     Ok(())
+}
+
+/// The read model `--read-model` names: `allow`, or the open model.
+fn read_model_of(cli: &Cli) -> ReadModel {
+    match cli.read_model.as_deref() {
+        Some("allow") => ReadModel::Allow,
+        _ => ReadModel::Open,
+    }
 }
 
 /// A macOS agent takes no claims: its account range is its own.
@@ -732,6 +748,16 @@ pub(crate) fn runtime(
     let runtime = match native.bundles() {
         Some(store) => runtime.with_bundles(Arc::clone(store)),
         None => runtime,
+    };
+    // Under `--read-model allow` the runtime reads the host's version, its ready Xcodes and its
+    // privileged files now: a version with no base set ends the start.
+    let runtime = match native.config().read_model {
+        ReadModel::Allow => {
+            let allow = ReadAllow::of_host(&SystemCommands::default(), native.xcodes())
+                .map_err(|why| format!("--read-model allow: {why}"))?;
+            runtime.with_read_allow(allow)
+        }
+        ReadModel::Open => runtime,
     };
     let runtime = runtime
         .with_xcodes(native.xcodes().to_vec())
