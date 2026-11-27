@@ -36,7 +36,7 @@
 //! | `--listen <addr>` | default `127.0.0.1:7300`; off the loopback it needs both TLS flags |
 //! | `--job-listen <addr>` | off unless given: serves the job service on this address, gRPC and its HTTP/JSON gateway on one port (see "The job service" below); off the loopback it needs both TLS flags, and with them the port speaks TLS over the same reloaded pair. Turning it on opens the job store, `<state file>.jobs`, which the heartbeats of agents that report the `per-job` capability then read and update; an address in use, or a store file that cannot be made owner-only and opened, is refused at start naming the flag. Needs `--agent-pool-config` |
 //! | `--metrics-listen <addr>` | off unless given: serves `GET /metrics`, the operator's metrics in the Prometheus text format (the jobs by state, the oldest queued job's age, the queue wait, the placements, the start failures by code, the lost jobs, the failed writes of the job tables, the job pass's duration, the launches and failovers by pool, and each host's CPU and memory booked and free and its whole-host mark), on a listener of its own, plain HTTP with no token, to private peers only. It names no job, lease or token. An address that is not a private one, or one in use, is refused at start naming the flag |
-//! | `--ready-listen <addr>` | off unless given: serves `GET /readyz` (see "The readiness route" below) on a listener of its own, plain HTTP with no token, on a loopback address only; and, with a SQLite store, a held file lock is waited for instead of refusing the start (see "The store" below). The listener is bound before the lock is tried. An address that is not a loopback one, or one in use, is refused at start naming the flag |
+//! | `--ready-listen <addr>` | off unless given: serves `GET /readyz` and `GET /readyz/sizes` (see "The readiness route" below) on a listener of its own, plain HTTP with no token, on a loopback address only; and, with a SQLite store, a held file lock is waited for instead of refusing the start (see "The store" below). The listener is bound before the lock is tried. An address that is not a loopback one, or one in use, is refused at start naming the flag |
 //! | `--state-file <path>` | the base path of the server's state files: `<path>.agents`, `<path>.joins`, `<path>.scaler`, `<path>.jobs` and the default place of `usage.db`; a lease file of an earlier release at the path is left as it is |
 //! | `--store <path>` | none unless given: an owner-only file (as `--token-file`'s is) holding the store's connection on one line, `postgres://...` or `postgresql://...`, or `sqlite:<absolute path>`; a SQLite store's file lock is taken before anything else (see "The store" below). Its content is never printed |
 //! | `--allow-sqlite-store` | off by default: accepts a `sqlite:` store, which is for tests and single-node development; without it such a store is refused at start naming this flag. No effect with a Postgres store. Needs `--store` |
@@ -503,7 +503,7 @@
 //! whatever the phase, and 200 once the read has ended however it ended: `taught`, `nothing
 //! to teach` (no job tables), `not taught: the live allocations were not read`, `not taught:
 //! the ended jobs were not read` or `not taught: the server stopped before the ended jobs were
-//! read`. A deploy waits for its 200 before it replaces the server.
+//! read`. A deploy can wait for its 200 before it replaces the server.
 //!
 //! # Admission
 //!

@@ -128,9 +128,10 @@ impl Sizes {
             jobs,
         }) = begun
         else {
-            return match self.unread {
-                true => Taught::AllocationsUnread,
-                false => Taught::Nothing,
+            return if self.unread {
+                Taught::AllocationsUnread
+            } else {
+                Taught::Nothing
             };
         };
         let read = loop {

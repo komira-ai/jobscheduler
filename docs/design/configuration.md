@@ -272,7 +272,7 @@ holds (a Postgres store has none). Any other path, on that port, than `/readyz` 
 `GET /readyz/sizes` on the same port answers whether the job sizes are taught: 503 `teaching` until the server has read the ended jobs
 its start rebuilds the sizes from (after it answers `/readyz` 200), then 200 `taught`; 200 `nothing to teach` for a server with no job
 tables, and 200 `not taught: the live allocations were not read`, `not taught: the ended jobs were not read` or `not taught: the server
-stopped before the ended jobs were read` when the read failed or was stopped. A deploy waits for its 200 before it replaces the server.
+stopped before the ended jobs were read` when the read failed or was stopped. A deploy can wait for its 200 before it replaces the server.
 
 - **Address.** A loopback address only, since the route takes no token; any other address is refused at start naming the flag or the
   key. An address in use is refused at start naming the flag or the key.

@@ -384,7 +384,7 @@ everything after the image in `docker run` is the server's flags: either the fla
   and until it ends a job that books nothing books its class's cold size), then 200 `taught`, or
   200 `nothing to teach` or `not taught: ...` when there was nothing to read or the read failed or
   was stopped. Replacing a server that answers `teaching` starts that read over in the new one, so
-  a deploy waits for a 200 here, with a bound, before it replaces the running server. Do not use
+  a deploy can wait for a 200 here, with a bound, before it replaces the running server. Do not use
   it as the health check: a server that teaches serves.
 
 **Stopping.** The stop signal is `SIGTERM` (ctrl-c's `SIGINT` does the same). The server answers
@@ -882,34 +882,26 @@ docker-swarm-updater (its `docs/design.md`) checks the token's claims and the im
 the signer, then updates the service by digest; nothing in this repository enforces that side. The job passes when the deploy
 is reported converged and fails otherwise, or when 90 minutes pass first (the deploy then goes on).
 
-**It does not replace a server that is still learning its job sizes.** At each start the server
-reads every ended job its store holds to rebuild the history its job sizes come from, after it
-answers `/readyz` 200; on a long history that takes minutes (7 to 21 on about 900,000 ended jobs),
-and until it ends a job that books nothing books its class's cold size. Each replacement starts
-that read over, so releases a few minutes apart once kept the farm booking cold for half an hour.
-The running server says where its read is on `GET /readyz/sizes` (its readiness listener, loopback
-only): 503 `teaching` during the read, 200 once there is nothing left to learn. docker-swarm-updater,
-the one part of the deploy that can reach the running task, runs its probe on that route inside the
-task before it asks Swarm to update the service (the service entry's `before_update`: the probe,
-a bound of 30 minutes, a round every 15 seconds), and updates once it passes; after the bound it
-updates anyway and the deploy record and the updater's log say so. A probe that cannot run (no
-running task, the binary absent, exec refused) holds nothing: the update goes ahead at once with a
-note. The hold is not part of the updater's converge timeout (40 minutes), so `wait-minutes` is 90:
-the hold, the converge timeout and the fetch and push before them.
+**Holding the update while the running server learns its job sizes (planned).** At each start the
+server reads every ended job its store holds to rebuild the history its job sizes come from, after
+it answers `/readyz` 200; until that read ends a job that books nothing books its class's cold
+size, and each replacement starts the read over. The running server says where its read is on
+`GET /readyz/sizes` (its readiness listener, loopback only): 503 `teaching` during the read, 200
+once there is nothing left to learn. Only docker-swarm-updater, on the control plane, can reach
+the running task, so the hold is planned there: a service entry's `before_update` would name a
+probe of that route, run inside the running task before Swarm is asked to update the service, a
+bound (30 minutes for `js-server`) and a round (15 seconds); the update would go ahead once the
+probe passes, or at the bound with the deploy record and the updater's log saying so, or at once
+when the probe cannot run. Today docker-swarm-updater has no such key and the deploy replaces the
+running server at once.
 
-While a deploy waits, an operator sees in `cp-deploy`'s log the line `deploy <id>: running, phase
-before_update`, then `phase updating` when the hold ends (the pinned client prints a line for each
-change of phase, not for each round); the deploy's record (`GET /v1/deploys/<id>` on the deploy
-front) carries the round's note, `before-update check: attempt N, ... waited S of 1800 s`, and at the
-bound `the before-update check did not pass within 1800 s ...; updating anyway`; and
-`/readyz/sizes` inside the running task answers `teaching`. Several releases do not stack up behind
-the hold: a run holds its turn until its `deployed` has ended, and of the runs waiting at `turn`
-meanwhile only the newest publishes and deploys (above, "Several merges at once"), so the instance
-that serves is replaced at most once per hold, by the newest release.
-
-Until docker-swarm-updater has a release with `before_update` and the control plane's updater
-config sets it for `js-server`, the update is not held: the deploy replaces the running server at
-once, as before, and the raised `wait-minutes` changes nothing.
+What this repository already does for it: `wait-minutes` is 90, so that the hold (30 minutes) and
+the updater's converge timeout (40 minutes), which the hold would not count in, fit in the job's
+wait with the fetch and push before them; and releases do not stack up behind a long deploy: a run
+holds its turn until its `deployed` has ended, and of the runs waiting at `turn` meanwhile only the
+newest publishes and deploys ("Several merges at once", above). With the hold in place, the pinned
+client of `cp-deploy` prints `deploy <id>: running, phase before_update` when the hold starts and
+the next phase when it ends; the per-round note is in the deploy's record on the deploy front.
 
 The project owner sets up the environment `controlplane` with deployments from `main` only and no
 required reviewer; this repository does not check that it is so.
