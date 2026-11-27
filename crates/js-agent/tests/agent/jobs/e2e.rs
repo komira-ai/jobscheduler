@@ -575,11 +575,13 @@ fn a_taint_is_reported_acknowledged_and_new_jobs_are_not_placed() {
 /// Asserts that the heartbeats go on while the container runtime does not answer: with the
 /// runtime held inside the start of a job, twenty more heartbeats are posted and answered,
 /// counted at the transport and not timed, and the start (sent again each time, since the
-/// agent does not list the job) is dropped with a note once the worker's queue is full;
-/// from then on each heartbeat waits a backoff longer than the last instead of the interval;
+/// agent does not list the job) is dropped with a note once the worker's queue is full; every
+/// one of the twenty heartbeats, those after a dropped reply included, waits exactly the
+/// interval (the busy backoff starts at 500 ms and is capped at the pool's 250 ms interval);
 /// when the runtime answers the job is created once and listed. It catches a session that
 /// calls the runtime itself, so that a slow engine would stop the heartbeats and the server
-/// would give the host up, and one that asks a full worker again at once.
+/// would give the host up, one that asks a full worker again at once, and one whose waits
+/// after a dropped reply grow past the interval toward the grace.
 #[test]
 fn the_heartbeats_go_on_while_the_runtime_is_slow() {
     let server = Server::start_pool("jobs_e2e_slow", &[], POOL_RUNS_QUICK_TOML);
@@ -608,17 +610,7 @@ fn the_heartbeats_go_on_while_the_runtime_is_slow() {
         })
         .collect();
     assert_eq!(counted.load(Ordering::SeqCst) - before, 20);
-    let full = waits.iter().position(|wait| *wait != INTERVAL);
-    let full = full.expect("the worker's queue filled");
-    assert!(
-        waits[..full].iter().all(|wait| *wait == INTERVAL),
-        "{waits:?}"
-    );
-    assert!(
-        waits[full..].windows(2).all(|pair| pair[0] < pair[1]),
-        "{waits:?}"
-    );
-    assert!(waits[full] > Duration::ZERO, "{waits:?}");
+    assert_eq!(waits, [INTERVAL; 20], "a full worker waits the interval");
     assert!(
         rig.machine.world.created().is_empty(),
         "the runtime has not answered"
