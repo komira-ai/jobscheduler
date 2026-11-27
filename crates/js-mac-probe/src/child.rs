@@ -52,6 +52,22 @@ pub enum Child {
         /// The path.
         path: PathBuf,
     },
+    /// A mode that sets a resource limit on itself and then acts past it.
+    #[command(flatten)]
+    Limited(Limited),
+    /// Print the reader's effective uid and `proc_pid_rusage` of process `pid`:
+    /// `reader_uid=<uid> user_time=<ticks> system_time=<ticks> resident=<bytes>
+    /// footprint=<bytes>`. macOS only; elsewhere it fails as unsupported.
+    Rusage {
+        /// The process.
+        pid: i32,
+    },
+}
+
+/// The limit modes: each sets its limits on itself ([`Limited::limits`]), then acts
+/// ([`Limited::act`]).
+#[derive(Debug, Clone, Subcommand)]
+pub enum Limited {
     /// Set `RLIMIT_AS` and `RLIMIT_DATA` (soft and hard) to `--limit` bytes, then allocate
     /// `--bytes` and write every byte; print `allocated=<bytes>`. (On macOS `RLIMIT_RSS` is
     /// `RLIMIT_AS`.)
@@ -97,13 +113,46 @@ pub enum Child {
         /// Its arguments.
         args: Vec<String>,
     },
-    /// Print the reader's effective uid and `proc_pid_rusage` of process `pid`:
-    /// `reader_uid=<uid> user_time=<ticks> system_time=<ticks> resident=<bytes>
-    /// footprint=<bytes>`. macOS only; elsewhere it fails as unsupported.
-    Rusage {
-        /// The process.
-        pid: i32,
-    },
+}
+
+impl Limited {
+    /// The limits the mode sets on itself, in order.
+    #[must_use]
+    pub fn limits(&self) -> Vec<(Resource, Rlimit)> {
+        match self {
+            Self::Allocate { limit, .. } => {
+                vec![(Resource::As, both(*limit)), (Resource::Data, both(*limit))]
+            }
+            Self::WriteBytes { limit, .. } => {
+                vec![(Resource::Fsize, both(*limit)), (Resource::Core, both(0))]
+            }
+            Self::Burn { seconds, .. } => {
+                let cpu = Rlimit {
+                    current: Some(*seconds),
+                    maximum: rustix::process::getrlimit(Resource::Cpu).maximum,
+                };
+                vec![(Resource::Cpu, cpu), (Resource::Core, both(0))]
+            }
+            Self::Spawn { max_processes, .. } => max_processes
+                .map(|n| (Resource::Nproc, both(n)))
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    /// What the mode does once its limits are set; its output.
+    ///
+    /// # Errors
+    /// The action's failure: an allocation that cannot be reserved, a file that cannot be
+    /// created, a program that cannot be started.
+    pub fn act(&self) -> io::Result<String> {
+        match self {
+            Self::Allocate { bytes, .. } => allocate(*bytes),
+            Self::WriteBytes { bytes, path, .. } => write_bytes(path, *bytes),
+            Self::Burn { rounds, .. } => Ok(format!("burned={}\n", burn(*rounds))),
+            Self::Spawn { program, args, .. } => spawn(program, args),
+        }
+    }
 }
 
 /// Runs a child mode.
@@ -117,34 +166,7 @@ pub fn run(child: &Child) -> ExitCode {
         Child::Read { path } => read_text(path),
         Child::Env { name } => Ok(env_text(name)),
         Child::Write { path } => std::fs::write(path, b"probe\n").map(|()| String::new()),
-        Child::Allocate { limit, bytes } => {
-            set_limits(&[(Resource::As, both(*limit)), (Resource::Data, both(*limit))])
-                .and_then(|()| allocate(*bytes))
-        }
-        Child::WriteBytes { limit, bytes, path } => {
-            set_limits(&[(Resource::Fsize, both(*limit)), (Resource::Core, both(0))])
-                .and_then(|()| write_bytes(path, *bytes))
-        }
-        Child::Burn { seconds, rounds } => {
-            let hard = rustix::process::getrlimit(Resource::Cpu).maximum;
-            let cpu = Rlimit {
-                current: Some(*seconds),
-                maximum: hard,
-            };
-            set_limits(&[(Resource::Cpu, cpu), (Resource::Core, both(0))])
-                .map(|()| format!("burned={}\n", burn(*rounds)))
-        }
-        Child::Spawn {
-            max_processes,
-            program,
-            args,
-        } => {
-            let limits: Vec<_> = max_processes
-                .map(|n| (Resource::Nproc, both(n)))
-                .into_iter()
-                .collect();
-            set_limits(&limits).and_then(|()| spawn(program, args))
-        }
+        Child::Limited(mode) => set_limits(&mode.limits()).and_then(|()| mode.act()),
         Child::Rusage { pid } => pid_usage_text(*pid),
     };
     match outcome {
@@ -317,6 +339,98 @@ mod tests {
         let err = set_limits(&[(Resource::Core, refused)]).unwrap_err();
         assert_eq!(err.raw_os_error(), Some(libc::EINVAL));
         assert!(set_limits(&[]).is_ok());
+    }
+
+    /// Each limit mode's limits, in the order it sets them. Catches a mode that limits the
+    /// wrong resource, sets a soft limit without the hard one (or the CPU hard limit, which
+    /// Linux answers with `SIGKILL` instead of `SIGXCPU`), or leaves core files possible.
+    #[test]
+    fn each_limit_mode_sets_its_own_limits() {
+        let allocate = Limited::Allocate { limit: 7, bytes: 1 };
+        assert_eq!(
+            allocate.limits(),
+            [(Resource::As, both(7)), (Resource::Data, both(7))]
+        );
+        let write = Limited::WriteBytes {
+            limit: 9,
+            bytes: 1,
+            path: scratch("unused"),
+        };
+        assert_eq!(
+            write.limits(),
+            [(Resource::Fsize, both(9)), (Resource::Core, both(0))]
+        );
+        let hard = rustix::process::getrlimit(Resource::Cpu).maximum;
+        let burn = Limited::Burn {
+            seconds: 3,
+            rounds: 1,
+        };
+        let cpu = Rlimit {
+            current: Some(3),
+            maximum: hard,
+        };
+        assert_eq!(
+            burn.limits(),
+            [(Resource::Cpu, cpu), (Resource::Core, both(0))]
+        );
+        let spawn = |max_processes| Limited::Spawn {
+            max_processes,
+            program: scratch("unused"),
+            args: Vec::new(),
+        };
+        assert_eq!(spawn(Some(2)).limits(), [(Resource::Nproc, both(2))]);
+        assert!(spawn(None).limits().is_empty());
+    }
+
+    /// Each limit mode's action, run here without its limits: what it prints on success and
+    /// the error a failed action returns.
+    #[test]
+    fn each_limit_mode_acts_and_reports_what_it_did() {
+        let allocate = Limited::Allocate {
+            limit: 0,
+            bytes: 16,
+        };
+        assert_eq!(allocate.act().unwrap(), "allocated=16\n");
+        let path = scratch("act-write");
+        let write = Limited::WriteBytes {
+            limit: 0,
+            bytes: 10,
+            path: path.clone(),
+        };
+        assert_eq!(write.act().unwrap(), "wrote=10\n");
+        assert_eq!(std::fs::read(&path).unwrap(), [0u8; 10]);
+        std::fs::remove_file(&path).unwrap();
+        let burn = Limited::Burn {
+            seconds: 0,
+            rounds: 1,
+        };
+        assert_eq!(burn.act().unwrap(), "burned=1\n");
+        // This test binary lists its tests and exits 0.
+        let me = std::env::current_exe().unwrap();
+        let spawn = Limited::Spawn {
+            max_processes: None,
+            program: me,
+            args: vec!["--list".to_owned()],
+        };
+        assert_eq!(spawn.act().unwrap(), "spawned exit status: 0\n");
+        let missing = Limited::Spawn {
+            max_processes: None,
+            program: scratch("no-such-program"),
+            args: Vec::new(),
+        };
+        assert_eq!(missing.act().unwrap_err().kind(), io::ErrorKind::NotFound);
+    }
+
+    /// A limit mode whose action fails exits 1. A spawn with no limit sets nothing on this
+    /// process, so it runs here.
+    #[test]
+    fn a_limit_mode_whose_action_fails_exits_one() {
+        let missing = Child::Limited(Limited::Spawn {
+            max_processes: None,
+            program: scratch("no-such-program"),
+            args: Vec::new(),
+        });
+        assert_eq!(run(&missing), ExitCode::FAILURE);
     }
 
     #[test]
