@@ -134,9 +134,10 @@ fn a_provider_that_never_mounts_fails_the_start_input_unavailable() {
 }
 
 /// Asserts that a provider that refuses a ref (at `Prepare`) or a tree (at `Mount`) fails the
-/// start `provider-refused` at once, with the provider's reason, naming the provider and the
-/// source, and that the source is released all the same. Catches a refusal that is waited
-/// out as if the provider were down, and a refusal reported as the host's.
+/// start `provider-refused` at once, the provider's reason after the code in the result's
+/// detail and in the finding, which names the provider and the source, and that the source
+/// is released all the same. Catches a refusal that is waited out as if the provider were
+/// down, a refusal reported as the host's, and a reason kept on the host only.
 #[test]
 fn a_refused_ref_fails_the_start_provider_refused() {
     for (n, at_mount) in [false, true].into_iter().enumerate() {
@@ -156,7 +157,7 @@ fn a_refused_ref_fails_the_start_provider_refused() {
         assert_eq!(result.outcome, Outcome::FailedToStart, "{n}");
         assert_eq!(
             result.detail.as_deref(),
-            Some(refusal::PROVIDER_REFUSED),
+            Some("provider-refused: no such tree"),
             "{n}"
         );
         assert_eq!(
@@ -170,6 +171,67 @@ fn a_refused_ref_fails_the_start_provider_refused() {
             "{n}"
         );
         assert!(h.fake.created().is_empty(), "{n}");
+    }
+}
+
+/// The detail of the `failed_to_start` result of `j1`, started with a provider layer whose
+/// provider refuses its `Mount` with `reason`, and the message of its finding.
+fn refused_with(name: &str, reason: &str) -> (Option<String>, String) {
+    let (mut h, providers) = rig(name, |_| {});
+    let refused = ProviderAnswer::Refused(reason.to_owned());
+    providers.always("tier", &mount("j1", 0), refused);
+    h.apply(vec![job_start(with_layer("j1"))]);
+    h.life.step();
+    let result = listing(&h, "j1").result.expect("a result");
+    assert_eq!(result.outcome, Outcome::FailedToStart);
+    (result.detail, finding(&h, "j1", "start-failed"))
+}
+
+/// Asserts that the reason tierstore's provider gives for a tree list it cannot mount reaches
+/// the result's detail after the code, as the provider wrote it, so a client that matches
+/// `tree list not supported: ` can take its other way to the tree. Catches the detail
+/// `provider-refused` alone, which tells the client only that the host refused the job.
+#[test]
+fn a_refusal_carries_the_providers_reason_after_the_code() {
+    let (detail, _) = refused_with("prov-reason", "tree list not supported: missing_sidecar");
+    assert_eq!(
+        detail.as_deref(),
+        Some("provider-refused: tree list not supported: missing_sidecar")
+    );
+}
+
+/// Asserts that a reason over several lines, with a path on the host and longer than the
+/// bound, is one line in the detail, its path replaced, cut at a space and marked, while the
+/// finding on the host keeps the provider's text as it was. Catches a line break in a detail,
+/// which the wire refuses, a host path given to the client, and a detail as long as the
+/// provider's text.
+#[test]
+fn a_long_multi_line_reason_is_cut_to_one_line() {
+    let reason = format!(
+        "tree list not supported: missing_sidecar\nread /srv/tier/l2/k1: gone\n{}",
+        ["ab"; 200].join(" ")
+    );
+    let (detail, message) = refused_with("prov-reason-long", &reason);
+    let head = "tree list not supported: missing_sidecar read <path>: gone";
+    let kept = format!("{head} {}", ["ab"; 65].join(" "));
+    assert_eq!(
+        detail.as_deref(),
+        Some(format!("provider-refused: {kept}\u{2026}").as_str())
+    );
+    assert_eq!(
+        message,
+        format!("the provider tier refused source 0: {reason}")
+    );
+}
+
+/// Asserts that a provider that refuses with no reason, or with white space only, fails the
+/// start with the detail `provider-refused` alone, as before the reason was carried. Catches
+/// a detail of the code and an empty reason, which no client reads as the plain code.
+#[test]
+fn a_refusal_without_a_reason_keeps_the_code_alone() {
+    for (n, reason) in ["", " \n\t "].into_iter().enumerate() {
+        let (detail, _) = refused_with(&format!("prov-reason-none-{n}"), reason);
+        assert_eq!(detail.as_deref(), Some(refusal::PROVIDER_REFUSED), "{n}");
     }
 }
 

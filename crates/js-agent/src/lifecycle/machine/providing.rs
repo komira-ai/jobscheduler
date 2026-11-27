@@ -20,14 +20,16 @@
 //!   ([`crate::lifecycle::Providers::ask`]), so the step that takes the `Prepare`'s answer
 //!   usually finds the `Mount` out or answered. A
 //!   provider that is unavailable is asked again; one that refuses the ref fails the start
-//!   (`provider-refused`); a directory that is not an absolute path in normal form beneath a
-//!   mount root of the agent's (a root it may write, for a read-write mount) fails it
-//!   (`input-not-allowed`). A provider whose sweep at start is not answered yet is not asked.
+//!   (`provider-refused`, followed by the provider's reason as `reason` gives it); a
+//!   directory that is not an absolute path in normal form beneath a mount root of the
+//!   agent's (a root it may write, for a read-write mount) fails it (`input-not-allowed`).
+//!   A provider whose sweep at start is not answered yet is not asked.
 //! - **From the admission to `--mount-provider-wait`** a start may wait; past it the start
 //!   fails `input-unavailable` naming the first source without a directory.
 //! - **A stop** while providing ends the start at once, whatever a call in flight does: its
 //!   sources are released at its cleanup like any run's (`provided`).
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use js_agent_wire::{Layer, MountMode, MountSource, refusal};
@@ -35,7 +37,7 @@ use js_agent_wire::{Layer, MountMode, MountSource, refusal};
 use super::job::{Phase, Waiting};
 use super::provided::Attached;
 use super::provider_record::{self, Source};
-use super::{Failure, Lifecycle};
+use super::{Failure, Lifecycle, reason};
 use crate::lifecycle::runtime::JobFs;
 use crate::lifecycle::{MountRoots, ProviderAnswer, ProviderCall, code};
 
@@ -118,10 +120,12 @@ impl Wanted {
         }
     }
 
-    /// The failure of a start whose source the provider refused.
+    /// The failure of a start whose source the provider refused: `provider-refused` and the
+    /// provider's reason on the wire, the reason as a client may see it (`reason`), and the
+    /// reason as the provider gave it in the finding.
     fn refused(&self, why: &str) -> Failure {
         (
-            refusal::PROVIDER_REFUSED,
+            Cow::Owned(reason::detail(refusal::PROVIDER_REFUSED, why)),
             code::START_FAILED,
             format!(
                 "the provider {} refused source {}: {why}",
@@ -152,7 +156,7 @@ impl Wanted {
     fn accept(&mut self, path: String, roots: &MountRoots) -> Result<(), Failure> {
         let not_allowed = |why: String| -> Failure {
             (
-                refusal::INPUT_NOT_ALLOWED,
+                Cow::Borrowed(refusal::INPUT_NOT_ALLOWED),
                 code::START_FAILED,
                 format!(
                     "the provider {} gave source {} the directory {path:?}, which {why}",
@@ -258,7 +262,7 @@ impl Providing {
         match self.sources.iter().find(|source| source.path.is_none()) {
             None => Ok(true),
             Some(late) if now_ms >= self.deadline_ms => Err((
-                refusal::INPUT_UNAVAILABLE,
+                Cow::Borrowed(refusal::INPUT_UNAVAILABLE),
                 code::START_FAILED,
                 format!(
                     "the provider {} did not mount source {} within {} s: {}",
@@ -382,7 +386,7 @@ impl Lifecycle {
         providing.poll(run_id, &mut self.providers, &self.config.mounts, now_ms)?;
         provider_record::write(&self.config.state, run_id, &sources).map_err(|why| {
             (
-                refusal::INPUT_UNAVAILABLE,
+                Cow::Borrowed(refusal::INPUT_UNAVAILABLE),
                 code::PROVIDER_RECORD_FAILED,
                 format!("the record of the run's provider sources cannot be written: {why}"),
                 false,

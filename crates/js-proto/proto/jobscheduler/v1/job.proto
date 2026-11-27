@@ -382,7 +382,11 @@ message Job {
   JobState state = 3;
   // Why the job failed to start, when its state is failed to start; unspecified otherwise.
   StartFailureCode start_failure = 4;
-  // The agent's own code or text for a start failure, when it gave one. Empty otherwise.
+  // The agent's own code or text for a start failure, when it gave one. Empty otherwise. It
+  // begins with the code; text after the code follows a colon, and a reader of the code
+  // takes the part before the first one. A start whose mount provider refused its tree reads
+  // `provider-refused: ` and the provider's reason, on one line, each path on the host in it
+  // replaced with `<path>`, at most 256 bytes of it.
   string start_failure_detail = 5;
   // The host the job is placed on, once it is placed. Empty before.
   string host_id = 10;

@@ -521,8 +521,10 @@ fn an_input_failed_result_fails_the_job_with_the_reason_and_the_code() {
 /// A start the agent refused with `input-unavailable` ends the job as failed to start with
 /// the start failure input unavailable, stores the agent's code as the start failure detail
 /// and counts the start failure once; a refusal with another code is counted as the agent's
-/// and keeps its code, and one with no code stores no detail. It catches a refusal of the
-/// host's input counted or shown as the agent's, and a code that is not stored.
+/// and keeps its code, one with a provider's reason after its code keeps the whole detail as
+/// the agent sent it, and one with no code stores no detail. It catches a refusal of the
+/// host's input counted or shown as the agent's, a code that is not stored, and a reason the
+/// client is not shown.
 #[test]
 fn a_refused_start_is_stored_with_its_code_and_counted() {
     let cases = [
@@ -535,6 +537,11 @@ fn a_refused_start_is_stored_with_its_code_and_counted() {
             Some("input-not-allowed"),
             StartFailure::AgentRefused,
             Some("input-not-allowed"),
+        ),
+        (
+            Some("provider-refused: tree list not supported: missing_sidecar"),
+            StartFailure::AgentRefused,
+            Some("provider-refused: tree list not supported: missing_sidecar"),
         ),
         (None, StartFailure::AgentRefused, None),
     ];

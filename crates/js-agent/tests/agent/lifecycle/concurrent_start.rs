@@ -210,7 +210,7 @@ fn a_lookup_refused_at_the_admission_fails_the_start_before_its_directories() {
 }
 
 /// Asserts that a provider that refuses its source after the directories were made fails the
-/// start `provider-refused`, and that the cleanup removes the directories and releases the
+/// start `provider-refused` with the provider's reason, and that the cleanup removes the directories and releases the
 /// source. Catches directories left behind by a start that failed while it waited.
 #[test]
 fn a_provider_refusal_after_the_directories_were_made_removes_them() {
@@ -224,7 +224,7 @@ fn a_provider_refusal_after_the_directories_were_made_removes_them() {
     h.life.step();
     assert_eq!(
         failed_with(&h, "j1").as_deref(),
-        Some(refusal::PROVIDER_REFUSED)
+        Some("provider-refused: no such tree")
     );
     for _ in 0..3 {
         h.life.step();

@@ -240,6 +240,14 @@ pub const INPUT_UNAVAILABLE: &str = "input-unavailable";
 /// mount refused its ref (it answered `INVALID_ARGUMENT` or `FAILED_PRECONDITION` to
 /// `Prepare` or `Mount`), so the tree will never be made from it. The client's to fix:
 /// another host's provider reads the same ref.
+///
+/// The detail is the code, then `: ` and the reason the provider gave
+/// (`provider-refused: tree list not supported: missing_sidecar`), so a client that knows
+/// the provider can act on what it said; a reader of the code takes the part before the
+/// first `:`. The agent puts the reason on one line (each run of white space, control and
+/// format characters is one space), replaces each path on the host in it with `<path>`, and
+/// cuts it to at most 256 bytes, at a space, ending in `…` (U+2026). A provider that
+/// gave no reason gives the code alone, as every agent did before the reason was carried.
 pub const PROVIDER_REFUSED: &str = "provider-refused";
 /// As the detail of a `failed_to_start` result: a start with `layers` on an agent whose
 /// runtime has no root to replace (the macOS native runtime). Nothing was created.
