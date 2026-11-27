@@ -6,7 +6,7 @@
 //! the sources they take and lose them when the test restarts them (`fake_providers`); the
 //! agent's own restart is `providers_restart`'s.
 
-use js_agent::lifecycle::ProviderAnswer;
+use js_agent::lifecycle::{Event, ProviderAnswer};
 use js_agent_wire::{HeldState, Layer, MountMode, Outcome, refusal};
 
 use super::fake_providers::{FakeProviders, WAIT_MS, mount, prepare, rig, tree, with_layer};
@@ -69,16 +69,25 @@ const MOUNT: &str = "provider mount tier j1#0";
 /// `with_layer`, admitted at 0 on the test's clock) with its first `Mount` still out, and
 /// then restarts: it has lost the source, and answers the directory `t1` of the root `ro`
 /// once the source is taken again. The first step is taken: the `Mount` is answered "the
-/// source is not prepared here".
-fn restarted(name: &str) -> (Harness, FakeProviders) {
+/// source is not prepared here", and the message of the `provider-backoff` line that step
+/// gave is returned too.
+fn restarted(name: &str) -> (Harness, FakeProviders, String) {
     let (mut h, providers) = rig(name, FakeProviders::keep_sources);
     providers.then("tier", &mount("j1", 0), ProviderAnswer::Pending);
     providers.mounts_at("tier", "j1", 0, &tree(&h, "ro", "t1"));
     h.apply(vec![job_start(with_layer("j1"))]);
     assert_eq!(asked(&h), [PREPARE, MOUNT]);
     providers.restart();
-    assert_eq!(names(&h.life.step()), ["finding j1 provider-backoff"]);
-    (h, providers)
+    let events = h.life.step();
+    assert_eq!(names(&events), ["finding j1 provider-backoff"]);
+    let line = events
+        .into_iter()
+        .find_map(|event| match event {
+            Event::Finding(found) => Some(found.message),
+            _ => None,
+        })
+        .expect("the backoff line");
+    (h, providers, line)
 }
 
 /// Asserts that a start whose provider restarted between the source's `Prepare` and its
@@ -90,8 +99,7 @@ fn restarted(name: &str) -> (Harness, FakeProviders) {
 /// `input-unavailable` asking only `Mount`.
 #[test]
 fn a_provider_that_restarted_between_prepare_and_mount_is_asked_to_prepare_again() {
-    let (mut h, _providers) = restarted("lost-mid");
-    let line = finding(&h, "j1", "provider-backoff");
+    let (mut h, _providers, line) = restarted("lost-mid");
     assert!(
         line.starts_with(
             "the provider tier did not serve the Mount of source 0 (1 in a row): the source is \
@@ -126,7 +134,7 @@ fn a_provider_that_restarted_between_prepare_and_mount_is_asked_to_prepare_again
 /// and a source given up after a `Prepare` sent again failed.
 #[test]
 fn a_provider_still_down_after_its_restart_is_asked_to_prepare_until_it_takes_the_source() {
-    let (mut h, providers) = restarted("lost-down");
+    let (mut h, providers, _) = restarted("lost-down");
     providers.then("tier", &prepare_j1(), down());
     providers.then("tier", &prepare_j1(), down());
     tick_for(&mut h, 3_000);
@@ -151,7 +159,7 @@ fn a_provider_still_down_after_its_restart_is_asked_to_prepare_until_it_takes_th
 /// and a failure that names the old `Mount` answer and not why the source is not taken.
 #[test]
 fn a_provider_that_never_takes_the_source_back_fails_the_start_at_the_wait() {
-    let (mut h, providers) = restarted("lost-never");
+    let (mut h, providers, _) = restarted("lost-never");
     providers.always("tier", &prepare_j1(), down());
     tick_for(&mut h, WAIT_MS - TICK_MS);
     assert_eq!(listing(&h, "j1").state, HeldState::Starting);
@@ -177,7 +185,7 @@ fn a_provider_that_never_takes_the_source_back_fails_the_start_at_the_wait() {
 /// provider were down.
 #[test]
 fn a_prepare_refused_after_the_restart_fails_the_start_provider_refused() {
-    let (mut h, providers) = restarted("lost-refused");
+    let (mut h, providers, _) = restarted("lost-refused");
     let refused = ProviderAnswer::Refused("no such tree".to_owned());
     providers.always("tier", &prepare_j1(), refused);
     h.clock.advance(1_000);

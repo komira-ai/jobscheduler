@@ -164,6 +164,11 @@ fn many_starts_waiting_on_a_failing_provider_send_it_one_prepare_at_a_time() {
 fn a_new_start_waits_its_turn_behind_a_failed_prepare() {
     let (mut h, providers) = rig("backoff-turn", |_| {});
     providers.then("tier", &prepare_of("j1"), full());
+    // Each `Mount` answers its directory: one answered unavailable would have its source's
+    // `Prepare` sent again, and this test counts the `Prepare`s of the gate alone.
+    for job in ["j1", "j2"] {
+        providers.mounts_at("tier", job, 0, &tree(&h, "ro", job));
+    }
     h.apply(vec![job_start(with_layer("j1"))]);
     h.apply(vec![job_start(with_layer("j2"))]);
     tick_for(&mut h, 400);
