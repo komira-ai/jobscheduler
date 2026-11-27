@@ -42,9 +42,9 @@ pub struct Flags {
     /// The released js-server image, loaded into Docker (its id).
     #[arg(long)]
     pub server_image: String,
-    /// The server's secrets, mounted at /run/secrets.
+    /// The directory of the server's private files (tokens, key, store file), mounted at /run/secrets.
     #[arg(long)]
-    pub server_secrets: PathBuf,
+    pub server_private_files: PathBuf,
     /// The server's configuration files, mounted at /etc/js-lease-server.
     #[arg(long)]
     pub server_etc: PathBuf,
@@ -188,7 +188,7 @@ impl Rig {
     fn start(flags: Flags) -> Rig {
         server::start(
             &flags.server_image,
-            &flags.server_secrets,
+            &flags.server_private_files,
             &flags.server_etc,
             &flags.server_state,
             &flags.server_args,

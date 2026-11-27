@@ -6,11 +6,9 @@
 //! The job is an apt job in everything but the verb: it holds the role of the environment
 //! `apt-publish` (assumed by one step, through OIDC) and `id-token: write`, no signing key and no
 //! secret, and runs the `xtask` that `deploy-tool` built, so it compiles nothing.
-//! - It needs `plan`, `deploy-tool`, `publish` and `beta-macos-pkg`: it runs once the package job
-//!   has ended, passed or failed (`!cancelled()`), and only when `publish` and `deploy-tool`
-//!   succeeded, so it waits for no test of the beta stage and a failed package does not stop it.
-//!   It runs only for a push to main on the plan's release ([`PKG_IF`]), and holds
-//!   `contents: read` and `id-token: write`.
+//! - It needs `plan`, `deploy-tool`, `publish` and `beta-macos-pkg`, and runs only when the last
+//!   three succeeded: a package job that failed uploads nothing. It runs only for a push to main on
+//!   the plan's release ([`PKG_IF`]), and holds `contents: read` and `id-token: write`.
 //! - Its first steps download the tool and make it executable; the gate follows, with the two
 //!   settings the upload needs (the role and the bucket), and every step after it runs only when
 //!   the gate said `enabled=true`.
@@ -32,12 +30,12 @@ use super::yaml::Node;
 pub const PKG_JOB: &str = "pkg-upload";
 
 /// The jobs it waits for: the plan, the tool, `publish`, and the job that builds and signs the
-/// macOS package (whatever its result).
+/// macOS package.
 pub const NEEDS: [&str; 4] = ["beta-macos-pkg", "deploy-tool", "plan", "publish"];
 
-/// The `if:` of the job: it runs after the package job ended, passed or not, for a push to main
-/// on the plan's release, once `publish` and `deploy-tool` succeeded.
-pub const PKG_IF: &str = "${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' && needs.publish.result == 'success' && needs.deploy-tool.result == 'success' }}";
+/// The `if:` of the job: for a push to main on the plan's release, once `publish`, `deploy-tool`
+/// and the package job succeeded.
+pub const PKG_IF: &str = "${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' && needs.publish.result == 'success' && needs.deploy-tool.result == 'success' && needs.beta-macos-pkg.result == 'success' }}";
 
 /// The `if:` of the steps that need the signed package.
 pub const SIGNED_IF: &str =

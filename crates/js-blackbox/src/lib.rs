@@ -18,11 +18,11 @@
 //! | test | passes when |
 //! |---|---|
 //! | J6, the released server image | `/readyz` answers 200 within [`READY_WITHIN`] of the container's start, and a job run through the released agent ends with exit code 0 |
-//! | J1, the released `.deb` with the farm's flags | the host is in a session (listed live by the server, its health route 200) within [`SESSION_WITHIN`] of the unit's start, and a job ends with exit code 0 |
-//! | the server restarted while a job runs | the job ends with exit code 0 in its first attempt, and no listing of the hosts read after the restart shows the host lost |
-//! | the agent updated while a job runs | the agent of the previous release is updated to the released one: the job is handed over (it ends with exit code 0 in its first attempt) and the host lists the new version within [`SESSION_WITHIN`] |
+//! | J1, the released `.deb` with the farm's flags | the host is in a session (listed live by the server, its health route 200) within [`SESSION_WITHIN`] of the unit's start, and a job that mounts a tree from the mount provider ends with exit code 0 |
+//! | the server's name not found for [`OUTAGE`] after the first contact | the host is listed live and its health route answers 200 at every probe of the outage, and a job submitted in it ends with exit code 0 |
 //! | the server unreachable for [`OUTAGE`] | the job keeps running through the outage, the agent is back in a session within [`BACK_WITHIN`] of the server's return, and the job ends with exit code 0 |
-//! | the server's name not found for [`OUTAGE`] after the first contact | the host is listed live and its health route answers 200 at every probe of the outage |
+//! | the server restarted while a job runs | at least one listing of the hosts is read after the restart and none shows the host lost, the job never shows its host silent or itself lost, and it ends with exit code 0 in its first attempt |
+//! | the agent updated while a job runs | the agent of the previous release is updated to the released one: the host lists the new version within [`SESSION_WITHIN`], the job is still running then, on its host and in its attempt (handed over, not drained), and it ends with exit code 0 in its first attempt |
 //! | J5, [`BURST`] starts at [`MAX_PLACEMENTS`] placements, the mount provider's store stalled for [`STALL`] | in no [`CALL_WINDOW`] do more than [`MOST_CALLS_IN_WINDOW`] Prepare calls, nor more than as many Mount calls, reach the provider; as many Releases as jobs reach it; every job ends, none as its own fault ([`own_fault`]) |
 //! | J5, the same burst with the limit met at Prepare (the provider places at Prepare) | the same |
 //! | J5, the mount provider restarted while [`WAITING`] starts wait | at least [`WAITING`] Prepare calls reach the provider after its restart, and every job succeeds |

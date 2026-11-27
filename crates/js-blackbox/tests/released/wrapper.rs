@@ -81,7 +81,7 @@ pub fn run_rig(flags: &Flags) -> ExitCode {
         "127.0.0.1".to_owned(),
     ])
     .expect("the server's certificate");
-    let (server_cert, server_key) = (made.cert.pem(), made.signing_key.serialize_pem());
+    let (server_pem, server_key_pem) = (made.cert.pem(), made.signing_key.serialize_pem());
 
     let registry_file = dir.join("registry");
     start_fake(
@@ -101,7 +101,7 @@ pub fn run_rig(flags: &Flags) -> ExitCode {
         .to_owned();
 
     let server_image = server::load_image(&dir, version);
-    let files = server::write_files(&dir, &ca.pem(), (&server_cert, &server_key));
+    let files = server::write_files(&dir, &ca.pem(), (&server_pem, &server_key_pem));
 
     agent::add_repository("amd64");
     agent::install(version);
@@ -110,7 +110,7 @@ pub fn run_rig(flags: &Flags) -> ExitCode {
     let previous_deb = agent::download(previous, &dir);
     agent::prepare_host(
         &dir,
-        &server_cert,
+        &server_pem,
         (&identity.0, &identity.1),
         files.agent_port,
         registry_port,
@@ -142,8 +142,8 @@ pub fn run_rig(flags: &Flags) -> ExitCode {
             "scenarios",
             "--server-image",
             &server_image,
-            "--server-secrets",
-            path(&files.secrets),
+            "--server-private-files",
+            path(&files.private_files),
             "--server-etc",
             path(&files.etc),
             "--server-state",
@@ -161,7 +161,7 @@ pub fn run_rig(flags: &Flags) -> ExitCode {
             "--client-token",
             path(&files.client_token),
             "--ca-cert",
-            path(&files.cert),
+            path(&files.pem),
             "--agent-unit",
             agent::UNIT,
             "--agent-health",

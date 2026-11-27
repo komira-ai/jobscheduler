@@ -34,7 +34,7 @@
 //!   given.
 //!
 //! Run with no mode, or with libtest's arguments (as `cargo test` and cargo-nextest run every
-//! test binary of the workspace), it holds no test: it lists none and says so, and exits 0.
+//! test binary of the workspace), it holds no test: it lists none, says so unless asked to `--list`, and exits 0.
 
 use std::process::ExitCode;
 

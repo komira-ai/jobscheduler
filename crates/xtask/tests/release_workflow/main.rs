@@ -6,13 +6,14 @@
 //! and no concurrency group, `id-token: write` and `contents: write`
 //! only where they are meant, every attestation signed by artifacts.yml, the apt jobs'
 //! permissions, and the gamma step's shape. The fast lane's jobs (`unit-tests`, `turn`,
-//! `desired`, `deployed`, `release-red`, `release-green`) are held by `fast_lane`; the shape of
-//! each apt job by `tests/apt_workflow`.
+//! `desired`, `deployed`, `release-red`, `release-green`) are held by `fast_lane`; the gate
+//! before the farm (`blackbox`) by `blackbox`; the shape of each apt job by `tests/apt_workflow`.
 
 use std::path::Path;
 
 mod apt;
 mod artifacts;
+mod blackbox;
 mod calls;
 mod debs;
 mod fast_lane;
@@ -197,10 +198,11 @@ fn a_push_to_main_is_the_only_releasing_trigger() {
         "beta-macos-isolation",
         "promote-macos",
         "pkg-upload",
+        "blackbox",
         "smoke-bundle-pack",
         "smoke-bundle-push",
         "smoke-bundle-check",
-        "blackbox",
+        "blackbox-linux",
     ]
     .map(str::to_owned)
     .to_vec();

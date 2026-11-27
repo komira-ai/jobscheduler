@@ -40,9 +40,16 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "cp-deploy-digest",
+        "needs: [plan, publish, deploy-tool, blackbox]",
+        "needs: [plan, deploy-tool, blackbox]",
+        "cp-deploy-digest: needs are not [\"blackbox\", \"deploy-tool\", \"plan\", \"publish\"]",
+    ),
+    // It deploys without the black-box tests' verdict.
+    (
+        "cp-deploy-digest",
+        "needs: [plan, publish, deploy-tool, blackbox]",
         "needs: [plan, publish, deploy-tool]",
-        "needs: [plan, deploy-tool]",
-        "cp-deploy-digest: needs are not [\"deploy-tool\", \"plan\", \"publish\"]",
+        "cp-deploy-digest: needs are not [\"blackbox\", \"deploy-tool\", \"plan\", \"publish\"]",
     ),
     (
         "cp-deploy-digest",

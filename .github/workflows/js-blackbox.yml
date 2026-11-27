@@ -67,6 +67,7 @@ jobs:
       - name: Build the fake mount provider as the runner's user
         run: cargo build --locked -p js-fake-mount-provider
       - name: Install, start and drive the released agent and server, as root
+        # cargo's own runner setting: the built test binary runs under sudo; nothing the program reads.
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo
         run: cargo test --locked -p js-blackbox --test released -- rig --version "$VERSION" --fake-provider "$GITHUB_WORKSPACE/target/debug/js-fake-mount-provider"
