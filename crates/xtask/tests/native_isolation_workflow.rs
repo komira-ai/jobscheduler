@@ -76,6 +76,16 @@ fn check_job(workflow: &str, isolation_src: &str) -> Vec<String> {
         return vec![format!("{WORKFLOW} has no job `{JOB}`")];
     };
     let mut found = Vec::new();
+    // Configuration is not passed through the environment (S2): no `env:` at the top, in the
+    // job or in a step.
+    let envs = workflow
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .filter(|l| l.trim_start().trim_start_matches("- ").starts_with("env:"))
+        .count();
+    if envs > 0 {
+        found.push(format!("{WORKFLOW} sets {envs} env: blocks, not none"));
+    }
     if !job.iter().any(|l| {
         l.strip_prefix("runs-on: ")
             .is_some_and(|r| r.starts_with("macos-"))
@@ -183,7 +193,8 @@ fn the_release_runs_the_isolation_test_and_reports_it() {
 }
 
 /// Asserts that each way the job stops being the isolation test's run is refused with its own
-/// line: the job gone, run elsewhere than a Mac, its failure passed over, the run gone or
+/// line: the job gone, an `env:` block at the top, in the job or in a step, run elsewhere than
+/// a Mac, its failure passed over, the run gone or
 /// doubled, another or a second target selected, the work directory relative, missing or
 /// below a directory the test searches, and a test source without its list of searched
 /// directories.
@@ -216,6 +227,32 @@ fn a_job_that_breaks_the_isolation_run_is_refused() {
             &src
         ),
         ["the job passes over its failure (continue-on-error)"]
+    );
+    let job_env = format!("{runner}    env:\n      CARGO_INCREMENTAL: 0\n");
+    for (from, to) in [
+        (
+            "permissions: {}\n\njobs:\n",
+            "permissions: {}\n\nenv:\n  CARGO_TERM_COLOR: always\n\njobs:\n",
+        ),
+        (runner, job_env.as_str()),
+        (
+            "      - name: Run the two-run isolation test as root\n",
+            "      - name: Run the two-run isolation test as root\n        env:\n          MACOSX_DEPLOYMENT_TARGET: \"11.0\"\n",
+        ),
+    ] {
+        assert_eq!(
+            check_job(&edit(from, to), &src),
+            [format!("{WORKFLOW} sets 1 env: blocks, not none")],
+            "{to}"
+        );
+    }
+    // A comment naming `env:` is not one.
+    assert_eq!(
+        check_job(
+            &edit("permissions: {}\n", "permissions: {}\n# env: none\n"),
+            &src
+        ),
+        Vec::<String>::new()
     );
     assert_eq!(
         check_job(&with_run("true"), &src),

@@ -24,7 +24,9 @@
 # accounts; see docs/design/jobscheduler-design.md, section 12.2. A manual run (`gh workflow run
 # js-agent-native-isolation.yml --ref <branch>`) runs the same job on a branch.
 # js-agent-native-isolation-test.yml builds the binary for an operator's own Mac instead.
-# crates/xtask/tests/native_isolation_workflow.rs pins this file and its call.
+# It sets no environment variable: the test binaries are not shipped, so no deployment target
+# applies, and the build takes cargo's defaults. crates/xtask/tests/native_isolation_workflow.rs
+# pins this file and its call.
 name: js-agent-native-isolation
 
 on:
@@ -32,12 +34,6 @@ on:
   workflow_dispatch:
 
 permissions: {}
-
-env:
-  CARGO_TERM_COLOR: always
-  CARGO_INCREMENTAL: 0
-  # The oldest macOS the binaries must run on, as in the release build.
-  MACOSX_DEPLOYMENT_TARGET: "11.0"
 
 jobs:
   isolation:
