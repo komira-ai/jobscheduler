@@ -799,6 +799,12 @@ fn record(row: EndedRow) -> wire::UsageRecord {
             partial: series.partial,
         }),
         attempt: row.attempt,
+        memory_series: row.memory_series.map(|series| wire::MemorySeries {
+            granularity_secs: series.granularity_secs,
+            points: series.points,
+            run_usec: series.run_usec,
+            partial: series.partial,
+        }),
     }
 }
 

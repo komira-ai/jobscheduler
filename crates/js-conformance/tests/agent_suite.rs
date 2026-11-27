@@ -2,7 +2,8 @@
 
 use js_conformance::Verdict;
 use js_conformance::agent::{
-    self, AgentHarness, Defect, Delivery, FENCE_WINDOW, FakeAgent, Scenario,
+    self, AgentHarness, Answer, Defect, Delivery, FENCE_WINDOW, FakeAgent, Flaw, HostCheck,
+    Scenario,
 };
 
 #[test]
@@ -103,6 +104,13 @@ fn messages_on_a_dropped_connection_are_lost_and_change_nothing() {
     assert_eq!(agent.ack("a"), Delivery::Lost);
     assert_eq!(agent.start_fenced("a", "first"), Delivery::Lost);
     assert_eq!(agent.cancel("a"), Delivery::Lost);
+    assert_eq!(agent.answer("a", Answer::Stale), Delivery::Lost);
+    assert_eq!(agent.start_flawed("a", Flaw::NoWallTime), Delivery::Lost);
+    assert_eq!(agent.start_host("a"), Delivery::Lost);
+    assert_eq!(agent.ack_taint(), Delivery::Lost);
+    assert_eq!(agent.hold_whole("w"), Delivery::Lost);
+    assert_eq!(agent.start_whole("a"), Delivery::Lost);
+    assert!(!agent.whole_ready(), "no lease holds the host");
     assert_eq!(agent.observed(), Default::default());
 }
 
@@ -116,4 +124,214 @@ fn a_result_finished_while_disconnected_is_sent_on_reconnect() {
     agent.reconnect();
     assert_eq!(agent.observed().results_sent, ["a"]);
     assert_eq!(agent.now(), 0);
+}
+
+/// Asserts that a host no lease holds whole is never reported ready, quiet as it is, and
+/// that a restart reconnects the agent, whose first heartbeat repeats what it holds. It
+/// catches a readiness answer given without a hold, and a restart that stays offline.
+#[test]
+fn readiness_needs_a_hold_and_a_restart_reconnects() {
+    let mut agent = FakeAgent::new();
+    assert!(!agent.whole_ready());
+    agent.start("a", 0, 0);
+    agent.complete("a");
+    agent.disconnect();
+    agent.restart();
+    assert_eq!(agent.observed().results_sent, ["a", "a"]);
+    assert_eq!(agent.hold_whole("w"), Delivery::Delivered);
+}
+
+#[test]
+fn keeping_a_result_answered_stale_fails_answered_result_is_dropped() {
+    only_fails(
+        Defect::KeepsRefusedResult,
+        Scenario::AnsweredResultIsDropped,
+    );
+}
+
+#[test]
+fn dropping_a_result_on_an_unknown_verdict_fails_answered_result_is_dropped() {
+    only_fails(
+        Defect::DropsUnrecognisedAnswer,
+        Scenario::AnsweredResultIsDropped,
+    );
+}
+
+#[test]
+fn no_usage_on_failure_fails_usage_is_reported_on_every_end() {
+    only_fails(
+        Defect::DropsUsageOnFailure,
+        Scenario::UsageIsReportedOnEveryEnd,
+    );
+}
+
+#[test]
+fn no_usage_on_kill_fails_usage_is_reported_on_every_end() {
+    only_fails(
+        Defect::DropsUsageOnKill,
+        Scenario::UsageIsReportedOnEveryEnd,
+    );
+}
+
+/// Each rule of the start contract on its own: an agent that launches a start breaking that
+/// one rule fails `FlawedStartIsRefused`, and its verdict names the flaw.
+#[test]
+fn running_a_flawed_start_fails_flawed_start_is_refused_for_each_flaw() {
+    for flaw in Flaw::ALL {
+        let report = agent::run(|| FakeAgent::broken(Defect::RunsFlawedStart(flaw)));
+        assert_eq!(
+            report.failed(),
+            vec![Scenario::FlawedStartIsRefused],
+            "{flaw:?}"
+        );
+        let text = failure_of(&report, Scenario::FlawedStartIsRefused);
+        let named = format!("a start with {flaw:?} launches nothing");
+        assert!(text.contains(&named), "{flaw:?}: {text}");
+    }
+}
+
+#[test]
+fn freeing_the_slot_first_fails_cleanup_frees_the_slot_last() {
+    only_fails(
+        Defect::FreesSlotBeforeCleanup,
+        Scenario::CleanupFreesTheSlotLast,
+    );
+}
+
+#[test]
+fn freeing_the_slot_of_a_stuck_container_fails_cleanup_frees_the_slot_last() {
+    only_fails(
+        Defect::FreesSlotOnFailedRemoval,
+        Scenario::CleanupFreesTheSlotLast,
+    );
+}
+
+#[test]
+fn a_failed_removal_that_taints_nothing_fails_cleanup_frees_the_slot_last() {
+    only_fails(
+        Defect::FailedRemovalTaintsNothing,
+        Scenario::CleanupFreesTheSlotLast,
+    );
+}
+
+#[test]
+fn running_a_host_job_without_consent_fails_host_job_needs_consent() {
+    only_fails(
+        Defect::RunsHostWithoutConsent,
+        Scenario::HostJobNeedsConsent,
+    );
+}
+
+/// The host job taints whatever its end: the verdict of an agent that taints only after a
+/// job that passed names the failed and the cancelled ends, and not the one that passed.
+#[test]
+fn tainting_only_on_success_fails_host_job_taints_whatever_its_end() {
+    only_fails(
+        Defect::HostJobTaintsOnlyOnSuccess,
+        Scenario::HostJobTaintsWhateverItsEnd,
+    );
+    let report = agent::run(|| FakeAgent::broken(Defect::HostJobTaintsOnlyOnSuccess));
+    let text = failure_of(&report, Scenario::HostJobTaintsWhateverItsEnd);
+    assert_eq!(
+        text,
+        "a host job that Fails leaves the host tainted; \
+         a host job that IsCancelled leaves the host tainted"
+    );
+}
+
+#[test]
+fn a_leftover_process_that_taints_nothing_fails_tainting_check_taints_on_its_own() {
+    only_fails(
+        Defect::LeftoverProcessTaintsNothing,
+        Scenario::TaintingCheckTaintsOnItsOwn,
+    );
+}
+
+#[test]
+fn a_check_that_could_not_run_passing_fails_tainting_check_taints_on_its_own() {
+    only_fails(
+        Defect::UnrunCheckPasses,
+        Scenario::TaintingCheckTaintsOnItsOwn,
+    );
+}
+
+#[test]
+fn forgetting_an_unacked_taint_fails_taint_is_kept() {
+    only_fails(Defect::ForgetsUnackedTaint, Scenario::TaintIsKept);
+}
+
+#[test]
+fn a_taint_cleared_by_its_ack_fails_taint_is_kept() {
+    only_fails(Defect::AckClearsTaint, Scenario::TaintIsKept);
+}
+
+#[test]
+fn forgetting_the_taint_at_a_restart_fails_taint_is_kept() {
+    only_fails(Defect::ForgetsTaintAtRestart, Scenario::TaintIsKept);
+}
+
+#[test]
+fn starting_on_a_tainted_host_fails_taint_is_kept() {
+    only_fails(Defect::StartsOnTaintedHost, Scenario::TaintIsKept);
+}
+
+#[test]
+fn forgetting_runs_at_a_restart_fails_restart_keeps_what_it_holds() {
+    only_fails(
+        Defect::ForgetsRunsAtRestart,
+        Scenario::RestartKeepsWhatItHolds,
+    );
+}
+
+#[test]
+fn forgetting_results_at_a_restart_fails_restart_keeps_what_it_holds() {
+    only_fails(
+        Defect::ForgetsResultsAtRestart,
+        Scenario::RestartKeepsWhatItHolds,
+    );
+}
+
+#[test]
+fn ready_while_busy_fails_whole_node_waits_for_quiet() {
+    only_fails(Defect::ReadyWhileBusy, Scenario::WholeNodeWaitsForQuiet);
+}
+
+#[test]
+fn running_beside_a_whole_node_lease_fails_whole_node_waits_for_quiet() {
+    only_fails(
+        Defect::RunsBesideWholeLease,
+        Scenario::WholeNodeWaitsForQuiet,
+    );
+}
+
+/// Asserts the check findings the fake reads: a run with no finding frees its slot, and a
+/// check that finds a leftover process keeps it and records the finding for the run. It
+/// catches a fake that reads the finding of another run.
+#[test]
+fn a_check_finding_holds_only_its_own_run() {
+    let mut agent = FakeAgent::new();
+    agent.start("clean", 0, 0);
+    agent.start("dirty", 0, 0);
+    agent.check_finds("dirty", HostCheck::LeftoverProcess);
+    agent.complete("clean");
+    agent.complete("dirty");
+    let seen = agent.observed();
+    assert_eq!(seen.findings.into_iter().collect::<Vec<_>>(), ["dirty"]);
+    assert!(seen.tainted);
+    let freed: Vec<&str> = seen
+        .cleanup
+        .iter()
+        .filter(|(_, step)| *step == agent::Cleanup::SlotFreed)
+        .map(|(run, _)| run.as_str())
+        .collect();
+    assert_eq!(freed, ["clean"]);
+}
+
+/// The text of the failed verdict of `scenario` in `report`.
+fn failure_of(report: &agent::AgentReport, scenario: Scenario) -> String {
+    let verdict = report.results.iter().find(|(s, _)| *s == scenario);
+    match verdict {
+        Some((_, Verdict::Failed(text))) => text.clone(),
+        other => panic!("{scenario:?} did not fail: {other:?}"),
+    }
 }

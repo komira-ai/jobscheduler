@@ -38,7 +38,7 @@ use std::num::NonZeroUsize;
 use std::ops::Bound;
 
 use js_state::{Cond, ResumeToken, ScanRange, Store, Txn, Versioned};
-use js_types::{CpuSeries, HostId, LeaseId};
+use js_types::{CpuSeries, HostId, LeaseId, MemorySeries};
 
 use crate::error::UsageError;
 use crate::key::ProfileKey;
@@ -285,6 +285,12 @@ pub struct EndedRow {
     /// attempt and for an allocation of no job. Stored after the class and written only when
     /// present, so the row of a first attempt is the bytes it was before the field.
     pub attempt: Option<u32>,
+    /// The job's non-file memory second by second over its run (what its control group held
+    /// that the kernel cannot drop: anonymous, kernel, shared memory and tmpfs pages, and no
+    /// page cache), as its host reported it, when it did and the series is well formed
+    /// ([`MemorySeries::is_well_formed`]); `None` otherwise. Stored after the attempt and
+    /// written only when present, so a row without one is the bytes it was before the field.
+    pub memory_series: Option<MemorySeries>,
 }
 
 /// The key of the row of allocation `id`, which ended at `ended_at_ms`.
@@ -464,6 +470,8 @@ impl<'a> EndedHistory<'a> {
 mod attempt_tests;
 #[cfg(test)]
 mod class_tests;
+#[cfg(test)]
+mod memory_series_tests;
 #[cfg(test)]
 mod series_tests;
 #[cfg(test)]
