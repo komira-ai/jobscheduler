@@ -182,8 +182,9 @@ update hook's steps; on a crun node they go like this:
    agent leaves its process id in the state root, the file `handover-process`, and the new one
    takes it at its start), so the server takes that hello at once: the node stays live in
    `js host list` through the update and is placed work again from the new agent's first
-   heartbeat. Only when no id could be left or taken (an old agent from before the file, or a
-   file the new agent refuses, which it names in a warning) does its first hello wait until the
+   heartbeat. Only when no id could be left or taken (an old agent from before the file, a file
+   the new agent refuses, which it names in a warning, or one left longer ago than the old
+   session's grace) does its first hello wait until the
    server stops counting the old session as live (the pool's grace, 15 s by default), so that
    the node takes no new job for that long; the jobs that run are not touched by it either way.
 4. `verify` waits for the new agent's hello, and `cleanup` ends the update. A `rollback` hands

@@ -3,10 +3,16 @@
 //! hand the runs over, and the next process of the agent starts over the same flags, machine
 //! and state root. In place, the program runs again over the same process (the exec, which the
 //! harness cannot do in a test process); here the old run ends and the next one is started by
-//! the test, which is the same start of the program. The server's grace is the default 15 s,
-//! and the server's clock moves only by hand: by the seconds the exec and the next start take,
-//! and by every wait the next process asks for before its hello is taken, as the farm's would.
-//! The host is read from the server at each of those points.
+//! the test, which is the same start of the program. The server's clock moves only by hand: by
+//! the seconds the exec and the next start take, and by every wait the next process asks for
+//! before its hello is taken, as the farm's would. The host is read from the server at each of
+//! those points.
+//!
+//! The next process takes the id only when the process file was written no longer ago, by the
+//! host's real clock, than the grace of the session that left it. So that no test races that
+//! real time, the tests whose next process must take the id run on a pool whose grace is an hour
+//! ([`POOL_GRACE_1H_TOML`]); the bound of the grace itself is asserted on the default 15 s
+//! ([`POOL_GRACE_15S_TOML`]), where no next process starts.
 
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
@@ -16,7 +22,7 @@ use js_agent::Handle;
 use js_agent::lifecycle::handover;
 use serde_json::Value;
 
-use super::{Announcing, INTERVAL, Poll, RUNNING, Rig, rig_over};
+use super::{Announcing, HELD, INTERVAL, Poll, RUNNING, Rig, rig_over};
 use crate::jobs::fake::FakeMachine;
 use crate::server::{Agent, Redirect, Server};
 use crate::support::{Scratch, code, linux_host};
@@ -26,6 +32,24 @@ use crate::support::{Scratch, code, linux_host};
 const POOL_GRACE_15S_TOML: &str = r#"
 heartbeat_interval = "250ms"
 grace = "15s"
+name = "macs"
+class = "mac"
+max_machines = 4
+
+[shape]
+cpu_millis = 4000
+memory_bytes = 4294967296
+
+[capabilities]
+os = "linux"
+arch = "x86_64"
+"#;
+
+/// [`POOL_GRACE_15S_TOML`] with a grace of an hour: the real time a test takes between an agent's
+/// end and the next one's start never passes it.
+const POOL_GRACE_1H_TOML: &str = r#"
+heartbeat_interval = "250ms"
+grace = "1h"
 name = "macs"
 class = "mac"
 max_machines = 4
@@ -65,12 +89,28 @@ fn read(server: &Server) -> (Value, Value) {
     (host["state"].clone(), host["phase"].clone())
 }
 
-/// A server with the farm's grace and one agent that runs containers on the pool's 4 cores
-/// (the flag lowers what is detected), said hello.
-fn busy_rig(name: &str) -> Rig {
-    let server = Server::start_pool(name, &[], POOL_GRACE_15S_TOML);
+/// A server over the pool file `pool` and one agent that runs containers on the pool's 4 cores
+/// (the flag lowers what is detected), with `extra` flags, said hello.
+fn busy_rig(name: &str, pool: &'static str, extra: &[&str]) -> Rig {
+    let server = Server::start_pool(name, &[], pool);
     let address = Arc::new(Mutex::new(server.url()));
-    rig_over(server, address, name, &["--cpu-millis", "4000"], Redirect)
+    let mut flags = vec!["--cpu-millis", "4000"];
+    flags.extend_from_slice(extra);
+    rig_over(server, address, name, &flags, Redirect)
+}
+
+/// Ends every job of `jobs` on the host, has the results acknowledged and stops the agent,
+/// which drains nothing.
+fn finish(rig: Rig, jobs: &[&String]) {
+    for job in jobs {
+        rig.machine.world.exit(job, 0);
+    }
+    assert!(rig.worker.settle());
+    rig.tick();
+    rig.tick();
+    assert!(rig.worker.snapshot().results.is_empty(), "acknowledged");
+    let ran = rig.agent.stop();
+    assert_eq!(ran.status(), code(0), "{}", ran.err);
 }
 
 /// Fills the host: three jobs of a core run, and one of two cores waits for room. Returns the
@@ -208,7 +248,7 @@ fn an_update_under_load_keeps_the_host_live_in_every_read_and_ends_no_job() {
         ("jobs_e2e_live_stop", Way::StopStart),
         ("jobs_e2e_live_place", Way::InPlace),
     ] {
-        let rig = busy_rig(name);
+        let rig = busy_rig(name, POOL_GRACE_1H_TOML, &[]);
         let (running, waiting) = load(&rig);
         let Handed {
             server,
@@ -270,18 +310,8 @@ fn an_update_under_load_keeps_the_host_live_in_every_read_and_ends_no_job() {
         all.push(&waiting);
         assert_eq!(rig.machine.world.created(), all, "{way:?}: nothing twice");
 
-        for job in running.iter().skip(1).chain([&waiting]) {
-            rig.machine.world.exit(job, 0);
-        }
-        assert!(rig.worker.settle());
-        rig.tick();
-        rig.tick();
-        assert!(
-            rig.worker.snapshot().results.is_empty(),
-            "{way:?}: acknowledged"
-        );
-        let ran = rig.agent.stop();
-        assert_eq!(ran.status(), code(0), "{way:?}: {}", ran.err);
+        let rest: Vec<&String> = running.iter().skip(1).chain([&waiting]).collect();
+        finish(rig, &rest);
     }
 }
 
@@ -291,7 +321,7 @@ fn an_update_under_load_keeps_the_host_live_in_every_read_and_ends_no_job() {
 /// hand-over that holds a dead host live past the grace.
 #[test]
 fn a_host_whose_next_process_never_comes_reads_lost_once_the_grace_has_passed() {
-    let rig = busy_rig("jobs_e2e_live_never");
+    let rig = busy_rig("jobs_e2e_live_never", POOL_GRACE_15S_TOML, &[]);
     let job = rig.queued(1000);
     rig.until_running(&job);
     let Handed { server, .. } = hand_over(rig, Way::InPlace);
@@ -300,4 +330,132 @@ fn a_host_whose_next_process_never_comes_reads_lost_once_the_grace_has_passed() 
     server.clock.advance(Duration::from_millis(1));
     assert_eq!(read(&server).0, "lost", "the grace has passed");
     assert_eq!(server.job_state(&job), RUNNING, "silence ends no job");
+}
+
+/// The seconds a restart of the unit for a new flags file leaves the host unheard on the farm:
+/// from the drained agent's end to the next process's first hello, at most 8.5 s on five hosts
+/// (the config hook polls the stopped unit every 10 s before it starts it again).
+const RESTART_GAP: Duration = Duration::from_secs(9);
+
+/// The seconds the farm's agents could not reach the server while it was redeployed (their
+/// heartbeats failed for about 8 s): the test lets the server's clock pass them while the
+/// server restarts, the agent waiting meanwhile.
+const SERVER_OUTAGE: Duration = Duration::from_secs(8);
+
+/// Asserts that a restart of the agent's unit for a new flags file (a stop with no handover
+/// file, so the agent drains, and a start of the unit after the gap the config hook leaves)
+/// leaves the host live in every read: live and draining while the drain lets its job end and
+/// reports it, live through the gap, and the next process's first hello is taken (none refused
+/// `host-live`), after which the host serves and the job that waited during the drain is placed
+/// on it. Catches a drained agent whose next process says hello as another agent process, which
+/// the server refuses until the drained session's grace has run out.
+#[test]
+fn a_restart_for_new_flags_keeps_the_host_live_and_its_first_hello_is_taken() {
+    let rig = busy_rig(
+        "jobs_e2e_live_flags",
+        POOL_GRACE_1H_TOML,
+        &["--drain-wait", "3600"],
+    );
+    let job = rig.queued(2000);
+    rig.until_running(&job);
+
+    rig.agent.signal();
+    assert_eq!(
+        rig.agent.next_wait(),
+        INTERVAL,
+        "the first draining heartbeat"
+    );
+    assert_eq!(read(&rig.server), ("live".into(), "draining".into()));
+    let waiting = rig.queued(1000);
+    assert_eq!(rig.view(&waiting).0, "JOB_STATE_QUEUED", "a draining host");
+    rig.machine.world.exit(&job, 0);
+    assert!(rig.worker.settle());
+    rig.agent.elapse();
+    assert_eq!(rig.agent.next_wait(), INTERVAL, "the result goes up");
+    assert!(rig.worker.settle());
+    rig.agent.elapse();
+    let Rig {
+        server,
+        agent,
+        machine,
+        address,
+        flags,
+        files,
+        ..
+    } = rig;
+    let ran = agent.finish();
+    assert_eq!(ran.status(), code(0), "{}", ran.err);
+    assert!(!ran.err.contains("handing over"), "a drain: {}", ran.err);
+
+    server.clock.advance(RESTART_GAP);
+    assert_eq!(read(&server).0, "live");
+    let (agent, worker, polls, refused) = next_process(&server, &address, &flags, &machine);
+    assert_eq!(refused, 0, "hellos refused before the next one was taken");
+    let rig = Rig {
+        polls,
+        server,
+        agent,
+        worker,
+        machine,
+        address,
+        flags,
+        files,
+    };
+    assert_eq!(read(&rig.server), ("live".into(), "serving".into()));
+    rig.until_running(&waiting);
+    assert_eq!(read(&rig.server).0, "live");
+    finish(rig, &[&waiting]);
+}
+
+/// Asserts that a restart of the server under load, over its files, with the host unheard for as
+/// long as the farm's redeploy of the server took, on the farm's 15 s grace, leaves the host live
+/// in every read and sends no hello (the farm's agents, too, kept their sessions through it):
+/// the host reads live once the server is back, the agent's next two heartbeats are served in
+/// the session it had (each a held reply, not a refused beat and a hello), every job runs on in
+/// its first attempt, and the job that waited is placed on the host once a running one ends.
+/// Catches a restarted server that holds the host lost or refuses the session its rows hold,
+/// which costs a hello, a `host-live` wait and a re-adoption of every job.
+#[test]
+fn a_server_restart_under_load_keeps_the_host_live_and_no_hello_is_sent() {
+    let rig = busy_rig("jobs_e2e_live_server", POOL_GRACE_15S_TOML, &[]);
+    let (running, waiting) = load(&rig);
+    let Rig {
+        polls,
+        server,
+        agent,
+        worker,
+        machine,
+        address,
+        flags,
+        files,
+    } = rig;
+    let server = server.restart();
+    *address.lock().unwrap() = server.url();
+    server.clock.advance(SERVER_OUTAGE);
+    assert_eq!(read(&server).0, "live", "the restarted server");
+    let rig = Rig {
+        polls,
+        server,
+        agent,
+        worker,
+        machine,
+        address,
+        flags,
+        files,
+    };
+    rig.beat(HELD);
+    assert_eq!(read(&rig.server), ("live".into(), "serving".into()));
+    rig.beat(HELD);
+    assert_eq!(read(&rig.server).0, "live", "no hello followed");
+    for job in &running {
+        assert_eq!(rig.view(job), (RUNNING.to_owned(), None), "{job}");
+        assert_eq!(rig.server.job(job)["attempt"], 1, "{job}");
+    }
+    rig.machine.world.exit(&running[0], 0);
+    assert!(rig.worker.settle());
+    rig.tick();
+    rig.until_running(&waiting);
+    assert_eq!(read(&rig.server).0, "live");
+    let rest: Vec<&String> = running.iter().skip(1).chain([&waiting]).collect();
+    finish(rig, &rest);
 }

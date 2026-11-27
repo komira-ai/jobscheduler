@@ -3,6 +3,7 @@
 
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
+use std::time::Duration;
 
 use js_testkit::dir::TestDir;
 
@@ -110,29 +111,41 @@ fn a_root_that_cannot_be_looked_in_is_no_request_and_a_removal_there_fails() {
 
 const ID: &str = "0123456789abcdef0123456789abcdef";
 
-/// Proves the process id a hand-over leaves is written private, through the temporary file,
-/// as the id and a newline, and that the next process takes it once: read, removed, and gone
-/// for a later start. Catches a file left world-readable or half written, and one read twice.
+/// The grace the tests' sessions were welcomed with.
+const GRACE: Duration = Duration::from_secs(15);
+
+/// Proves the process id a stop leaves is written private, through the temporary file, as the
+/// id and the session's grace in milliseconds on lines of their own, and that the next process
+/// takes it once, with the time it was written: read, removed, and gone for a later start.
+/// Catches a file left world-readable or half written, and one read twice.
 #[test]
 fn a_left_process_id_is_taken_once() {
     let dir = scratch("handover-process");
     let root = dir.path();
     assert_eq!(take_process(root, me()), Left::Absent);
-    leave_process(root, ID).unwrap();
+    leave_process(root, ID, GRACE).unwrap();
     let file = root.join(PROCESS_FILE);
-    assert_eq!(fs::read_to_string(&file).unwrap(), format!("{ID}\n"));
+    assert_eq!(fs::read_to_string(&file).unwrap(), format!("{ID}\n15000\n"));
     assert_eq!(
         fs::metadata(&file).unwrap().permissions().mode() & 0o777,
         0o600
     );
     assert!(!root.join(PROCESS_TEMP_FILE).exists());
     // Left again by a later hand-over, it is the later id.
-    leave_process(root, &ID.replace('0', "f")).unwrap();
-    assert_eq!(take_process(root, me()), Left::Kept(ID.replace('0', "f")));
+    leave_process(root, &ID.replace('0', "f"), Duration::from_secs(60)).unwrap();
+    let written = fs::metadata(&file).unwrap().modified().ok();
+    assert!(written.is_some());
+    assert_eq!(
+        take_process(root, me()),
+        Left::Kept {
+            text: format!("{}\n60000", ID.replace('0', "f")),
+            written,
+        }
+    );
     assert!(!file.exists());
     assert_eq!(take_process(root, me()), Left::Absent);
     // The handover file is another file: the process file does not stand for it.
-    leave_process(root, ID).unwrap();
+    leave_process(root, ID, GRACE).unwrap();
     assert_eq!(read(root, me()), Handover::Absent);
 }
 
@@ -145,7 +158,7 @@ fn a_process_file_that_breaks_the_form_is_not_used_and_is_removed() {
     let root = dir.path();
     let file = root.join(PROCESS_FILE);
 
-    leave_process(root, ID).unwrap();
+    leave_process(root, ID, GRACE).unwrap();
     fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
     assert_eq!(
         take_process(root, me()),
@@ -153,7 +166,7 @@ fn a_process_file_that_breaks_the_form_is_not_used_and_is_removed() {
     );
     assert!(!file.exists());
 
-    leave_process(root, ID).unwrap();
+    leave_process(root, ID, GRACE).unwrap();
     let other = me().wrapping_add(1);
     assert_eq!(
         take_process(root, other),
@@ -190,7 +203,7 @@ fn a_process_file_that_cannot_be_read_or_removed_is_not_used() {
     let Left::Refused(why) = take_process(root, me()) else {
         panic!("a file that is not text is used");
     };
-    assert!(why.starts_with("it cannot be read: "), "{why}");
+    assert!(why.starts_with("it cannot be read: "));
     assert!(!file.exists());
 
     // A directory under the name: not of the form, and no file removal removes it.
@@ -198,7 +211,7 @@ fn a_process_file_that_cannot_be_read_or_removed_is_not_used() {
     let Left::Refused(why) = take_process(root, me()) else {
         panic!("a directory is used");
     };
-    assert!(why.starts_with("it cannot be removed: "), "{why}");
+    assert!(why.starts_with("it cannot be removed: "));
     fs::remove_dir(&file).unwrap();
 
     // A file where the directory should be: the look, the removal and the write fail.
@@ -207,6 +220,6 @@ fn a_process_file_that_cannot_be_read_or_removed_is_not_used() {
     let Left::Refused(why) = take_process(&not_dir, me()) else {
         panic!("a root that is a file is read as an id or as none");
     };
-    assert!(why.starts_with("it cannot be removed: "), "{why}");
-    assert!(leave_process(&not_dir, ID).is_err());
+    assert!(why.starts_with("it cannot be removed: "));
+    assert!(leave_process(&not_dir, ID, GRACE).is_err());
 }

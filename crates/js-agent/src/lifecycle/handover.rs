@@ -44,27 +44,31 @@
 //!
 //! # The process id it leaves
 //!
-//! A process that hands its runs over leaves its agent process id (the one every hello of it
-//! names, `js_agent_wire::Hello::agent_process`) in `PROCESS_FILE` (`handover-process`) beside
-//! the handover file (`leave_process`), and the next process takes it at its start
-//! (`take_process`: read once and removed) and says hello as that process. The server holds the host live in the session
-//! of that id until its grace runs out, and takes a hello naming the same process at once
-//! instead of refusing it `host-live`; so the host is not seen lost while the agent hands over
-//! when the next process says hello within the grace of the last heartbeat (a hand-over in place
-//! takes seconds). Nothing else is held: the server hears the host only from the heartbeats and
-//! hellos it is sent, and a host whose next process never says hello is lost once the grace after
-//! the last heartbeat has passed, as any silent host is.
+//! A process with jobs that ends at a stop request, by a hand-over or a drain, leaves its agent
+//! process id (the one every hello of it names, `js_agent_wire::Hello::agent_process`) and the
+//! grace of its session in `PROCESS_FILE` (`handover-process`) beside the handover file
+//! (`leave_process`). The next process takes the file at its start (`take_process`: read once
+//! and removed) and, when it was left no longer ago than that grace, says hello as that process.
+//! The server holds the host live in the session of that id until its grace runs out, and takes
+//! a hello naming the same process at once instead of refusing it `host-live`; so a host whose
+//! agent is restarted (an update, a new flags file) is not seen lost when the next process says
+//! hello within the grace of the last heartbeat. Nothing else is held: the server hears the host
+//! only from the heartbeats and hellos it is sent, and a host whose next process never says hello
+//! is lost once the grace after the last heartbeat has passed, as any silent host is. A file
+//! older than the grace is of no use (the server holds no live session of the id by then) and is
+//! not used, so a state root copied or kept for longer never takes a live host over.
 //!
 //! The file is written as the handover file is (through `PROCESS_TEMP_FILE`, mode 0600) and
-//! holds the id and a newline. Its form is the handover file's: a file that is a link, of
-//! another user or open to group or others, or one that cannot be read or removed, is not used,
-//! and the next process draws an id of its own and waits out the grace as before. An agent from
-//! before the file neither writes nor reads it.
+//! holds the id and the grace in milliseconds, each on a line of its own. Its form is the
+//! handover file's: a file that is a link, of another user or open to group or others, or one
+//! that cannot be read or removed, is not used, and the next process draws an id of its own and
+//! waits out the grace as before. An agent from before the file neither writes nor reads it.
 
 use std::fs::{self, File, OpenOptions, Permissions};
 use std::io::{self, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
+use std::time::{Duration, SystemTime};
 
 /// The name of the handover file in the state root.
 pub const HANDOVER_FILE: &str = "handover";
@@ -144,14 +148,16 @@ pub fn write(root: &Path) -> io::Result<()> {
     write_through(root, (HANDOVER_TEMP_FILE, HANDOVER_FILE), HANDOVER_TEXT)
 }
 
-/// Leaves the agent process id `id` in the process file of `root` for the next process (see
-/// the module documentation), written as [`write`] writes the handover file.
+/// Leaves the agent process id `id` and the grace of its session in the process file of `root`
+/// for the next process (see the module documentation), written as [`write`] writes the
+/// handover file.
 ///
 /// # Errors
 ///
 /// Any step failed. The file is then what it was before, or the new one: never a part of it.
-pub(crate) fn leave_process(root: &Path, id: &str) -> io::Result<()> {
-    write_through(root, (PROCESS_TEMP_FILE, PROCESS_FILE), &format!("{id}\n"))
+pub(crate) fn leave_process(root: &Path, id: &str, grace: Duration) -> io::Result<()> {
+    let text = format!("{id}\n{}\n", grace.as_millis());
+    write_through(root, (PROCESS_TEMP_FILE, PROCESS_FILE), &text)
 }
 
 /// What the state root holds of an agent process id the last hand-over left.
@@ -159,9 +165,14 @@ pub(crate) fn leave_process(root: &Path, id: &str) -> io::Result<()> {
 pub(crate) enum Left {
     /// There is no process file.
     Absent,
-    /// The process file was of its form and read, and is removed: its text, the newline
-    /// that ends it taken off.
-    Kept(String),
+    /// The process file was of its form and read, and is removed.
+    Kept {
+        /// Its text, the newline that ends it taken off.
+        text: String,
+        /// When it was last written, as its modification time says; `None` when that cannot
+        /// be read.
+        written: Option<SystemTime>,
+    },
     /// A file was there under the name and is not used; the text says why.
     Refused(String),
 }
@@ -177,15 +188,19 @@ pub(crate) fn take_process(root: &Path, owner: u32) -> Left {
     };
     let judged = found
         .map_err(|why| format!("it cannot be looked at: {why}"))
-        .and_then(|meta| of_form(&meta, owner))
-        .and_then(|()| {
-            fs::read_to_string(&path).map_err(|why| format!("it cannot be read: {why}"))
+        .and_then(|meta| of_form(&meta, owner).map(|()| meta.modified().ok()))
+        .and_then(|written| {
+            let read = fs::read_to_string(&path).map(|text| (text, written));
+            read.map_err(|why| format!("it cannot be read: {why}"))
         });
     let removed = fs::remove_file(&path).and_then(|()| sync(root));
     match (judged, removed) {
         (_, Err(why)) => Left::Refused(format!("it cannot be removed: {why}")),
         (Err(why), Ok(())) => Left::Refused(why),
-        (Ok(text), Ok(())) => Left::Kept(text.trim_end_matches('\n').to_owned()),
+        (Ok((text, written)), Ok(())) => Left::Kept {
+            text: text.trim_end_matches('\n').to_owned(),
+            written,
+        },
     }
 }
 
