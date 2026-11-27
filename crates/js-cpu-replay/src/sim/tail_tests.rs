@@ -37,6 +37,7 @@ fn replayed(bookings: Bookings) -> Outcome {
         farm: Farm::OURS,
         shape: Shape::Burst,
         speed: 1,
+        held_out_ms: None,
     };
     replay(&trace(), arm, setup)
 }

@@ -51,6 +51,7 @@ fn build(tree: &Path) -> Result<(), Outcome> {
     if let Err(err) = wrote {
         return Err(Outcome {
             code: None,
+            signal: None,
             ok: false,
             stdout: String::new(),
             stderr: format!("cannot write the sources: {err}"),
