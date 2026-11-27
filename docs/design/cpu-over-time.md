@@ -424,7 +424,8 @@ What to read from the table:
 **Next:** an export of three days with step 1's series (`convert`, then `run --learn-days 2`): curves learned on two
 days and replayed on a held-out third. The code for it is built; the run on the farm's days is not yet made.
 
-**Pass mark** (decision 2): on held-out recorded days the curve rule takes 10% or more off total time against today's
+**Pass mark** (decision 2, replaced): `placement-profiles-live.md` section 4 step 3 replaces it with no loss against
+the flat step, which is what `run --learn-days` checks. As first written: on held-out recorded days the curve rule takes 10% or more off total time against today's
 rule, by more than the spread between two days, with throughput within 2%; and the perfect curve does better still.
 
 **Kept Rust tests** (injected clock, no sleeps), for the curve rule when built: flat profiles equal the flat rule; a

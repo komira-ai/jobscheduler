@@ -11,7 +11,8 @@
 //! held-out jobs, the curve mode passes when:
 //! - its mean total time (each job's wait plus run, from its arrival to its end) is at most the
 //!   flat step's plus the spread between two recorded days: how far the flat step's mean total
-//!   time on the last learning day is from its mean on the day before;
+//!   time on the last learning day is from its mean on the day before (0 when either had no
+//!   job);
 //! - its throughput (the held-out jobs over the time from the part's start to the last one's
 //!   end) is at least 98% of the flat step's;
 //! - it asks the hosts for fewer core-seconds past their cores than the flat step, from the
@@ -50,15 +51,25 @@ struct Held {
 }
 
 /// The mean total time (from arrival to end, in milliseconds) of the jobs of `jobs` that
-/// arrived in `arrived`, as `outcome` ended them; 0 when none did.
-fn mean_total(jobs: &[Job], outcome: &Outcome, arrived: &Range<u64>) -> u64 {
+/// arrived in `arrived`, as `outcome` ended them; `None` when none did.
+fn mean_total(jobs: &[Job], outcome: &Outcome, arrived: &Range<u64>) -> Option<u64> {
     let totals: Vec<u64> = jobs
         .iter()
         .zip(&outcome.ended)
         .filter(|(job, _)| arrived.contains(&job.arrive_ms))
         .map(|(job, end)| end.saturating_sub(job.arrive_ms))
         .collect();
-    totals.iter().sum::<u64>() / (totals.len() as u64).max(1)
+    let count = u64::try_from(totals.len())
+        .ok()
+        .filter(|count| *count > 0)?;
+    Some(totals.iter().sum::<u64>() / count)
+}
+
+/// The spread between two days' mean total times: how far apart they are, and 0 when either day
+/// had no job (no spread is measured, so the curve mode is held to the flat step's own time).
+fn spread(day: Option<u64>, before: Option<u64>) -> u64 {
+    day.zip(before)
+        .map_or(0, |(day, before)| day.abs_diff(before))
 }
 
 /// What `outcome` did with the jobs of `jobs` that arrived at or after `from`.
@@ -69,7 +80,7 @@ fn held(jobs: &[Job], outcome: &Outcome, from: u64) -> Held {
         .filter(|(job, _)| job.arrive_ms >= from);
     let last = part.clone().map(|(_, (end, _))| *end).max().unwrap_or(from);
     Held {
-        mean_ms: mean_total(jobs, outcome, &(from..u64::MAX)),
+        mean_ms: mean_total(jobs, outcome, &(from..u64::MAX)).unwrap_or(0),
         span_ms: last.saturating_sub(from).max(1),
         over: outcome.held_over_excess,
         curved: part.filter(|(_, (_, curved))| **curved).count(),
@@ -121,7 +132,7 @@ pub fn gate(jobs: &[Job], farm: Farm, learn_days: u32) -> String {
         replay(jobs, CURVE_MODE, setup),
     );
     let day = |day: u64| mean_total(jobs, &flat, &(day * DAY_MS..(day + 1) * DAY_MS));
-    let spread = day(days - 1).abs_diff(day(days - 2));
+    let spread = spread(day(days - 1), day(days - 2));
     let (flat, curve) = (held(jobs, &flat, from), held(jobs, &curve, from));
     let recorded = part
         .iter()

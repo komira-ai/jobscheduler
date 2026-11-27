@@ -7,8 +7,9 @@
 //! ([`crate::trace::Job::cpu_series`]) teaches the class's `js_sizing::Profile` when it is
 //! usable ([`crate::shape::usable`]: whole, and agreeing with the run's CPU time), and the
 //! class's [`SeriesWindow`] records whether it was; a run with no series, or one that is no
-//! success, of a class that exists records an unusable one. A run is clean when the replay did
-//! not slow it. Nothing is taught from a job of the held-out part ([`super::Setup`]). A job of
+//! success, of a class that exists records an unusable one. A run is clean when the replay
+//! slowed it by less than a tenth of its run ([`clean`]), the bound the job service puts on its
+//! node's CPU pressure. Nothing is taught from a job of the held-out part ([`super::Setup`]). A job of
 //! a class that passes [`Checks`] books [`Curve::of`] the profile, with the flat step (the
 //! `Learned` booking) where a slot has too few runs; every other job books flat.
 //!
@@ -24,8 +25,8 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use js_sizing::{
-    CPU_UNIT, CURVE_SLOTS, Checks, Clamp, Curve, Profile, RunSeries, SLOT_SECS, SeriesWindow,
-    TAIL_SLOT,
+    CPU_PRESSURE_MAX_PERMILLE, CPU_UNIT, CURVE_SLOTS, Checks, Clamp, Curve, Profile, RunSeries,
+    SLOT_SECS, SeriesWindow, TAIL_SLOT,
 };
 use js_types::CpuSeries;
 
@@ -46,6 +47,13 @@ const LEAST_MILLI: u64 = 250;
 
 /// A slot books at most this part of a host's cores: a quarter, rounded down to a quarter core.
 const HOST_SHARE: u64 = 4;
+
+/// Whether a run that ran `ran_ms` from its start and was slowed `slowed_ms` of it is clean: its
+/// slowdown is under [`CPU_PRESSURE_MAX_PERMILLE`] of its run, as the job service takes a run
+/// on a node under that pressure, and as the replay's flat sizing takes one.
+pub(super) fn clean(slowed_ms: u64, ran_ms: u64) -> bool {
+    slowed_ms.saturating_mul(1000) / ran_ms.max(1) < CPU_PRESSURE_MAX_PERMILLE
+}
 
 /// What the replay learns of one class: its profile, whether its runs' series were usable, and
 /// the curve it last booked.
@@ -257,7 +265,13 @@ impl World<'_> {
             return;
         }
         let learning = classes.entry(job.class).or_insert_with(Learning::new);
-        learning.teach(job.cpu_series.as_ref(), job.cpu_ms, end, slowed_ms == 0);
+        let ran = end.saturating_sub(run.start).saturating_sub(job.start_ms);
+        learning.teach(
+            job.cpu_series.as_ref(),
+            job.cpu_ms,
+            end,
+            clean(slowed_ms, ran),
+        );
     }
 }
 

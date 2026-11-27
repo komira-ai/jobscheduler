@@ -157,6 +157,17 @@ fn each_of_the_four_holds_up_to_its_boundary_and_not_past_it() {
     assert_eq!((yes(true), yes(false)), ("yes", "no"));
 }
 
+/// Asserts the spread between two days: the distance of their means either way, and 0 when
+/// either day had no job. Catches an empty learning day read as a mean of 0, which would make
+/// the spread the other day's whole mean and let any total time pass.
+#[test]
+fn the_spread_is_measured_only_between_two_days_with_jobs() {
+    assert_eq!(spread(Some(120_000), Some(100_000)), 20_000);
+    assert_eq!(spread(Some(100_000), Some(120_000)), 20_000);
+    assert_eq!(spread(None, Some(120_000)), 0);
+    assert_eq!(spread(Some(120_000), None), 0);
+}
+
 /// Asserts what an arm did with the held-out part: the mean of its jobs' times from arrival to
 /// end, its span from the part's start (at least a millisecond), its CPU past cores, and its
 /// jobs booked by curve, the learning days' jobs left out of each; and that the mean of a part
@@ -179,7 +190,8 @@ fn the_held_out_part_is_measured_on_its_own_jobs() {
             curved: 1,
         }
     );
-    assert_eq!(mean_total(&jobs, &outcome, &(100..200)), 0);
+    assert_eq!(mean_total(&jobs, &outcome, &(100..200)), None);
+    assert_eq!(mean_total(&jobs, &outcome, &(0..10)), Some(5000));
     let instant = Outcome {
         ended: vec![0, 10, 10],
         ..outcome

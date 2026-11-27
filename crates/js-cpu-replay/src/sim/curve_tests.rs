@@ -1,5 +1,5 @@
 use super::*;
-use crate::shape::Shape;
+use crate::shape::{Phase, Shape};
 use crate::sim::{Arm, Farm, Rule, Setup};
 use crate::sizing::Booking;
 use crate::trace::tests::job;
@@ -529,6 +529,18 @@ fn a_job_of_the_held_out_part_teaches_its_class_nothing() {
     assert_eq!(class.profile.runs(), 10);
     assert_eq!((class.series.runs(), class.series.usable()), (10, 10));
     assert!(world.outcome.ended.iter().all(|end| *end > 0));
+}
+
+/// Asserts the bound a run's slowdown is clean under: 9.9% of its run is clean, 10% is not, and a
+/// run of no time is read as one of a millisecond. Catches a curve arm that takes every slowed
+/// run as unclean (the job service keeps a run slowed by a few percent) or every run as clean.
+#[test]
+fn a_run_slowed_by_under_a_tenth_is_clean() {
+    assert!(clean(0, 10_000));
+    assert!(clean(999, 10_000));
+    assert!(!clean(1000, 10_000));
+    assert!(!clean(1, 0));
+    assert!(clean(0, 0));
 }
 
 /// Asserts a run that contention slowed is taught as a series and counts as usable but only
