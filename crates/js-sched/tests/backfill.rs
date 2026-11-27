@@ -584,34 +584,10 @@ fn backfill_that_outlives_its_p90_admits_no_more_and_the_request_waits_for_it() 
 }
 
 /// An action of 7.5 of the worker's 8 cores that may run `wall`, placed on `name` and
-/// started now, the other workers cordoned for the round: no job of a core fits beside it.
+/// started now: no job of a core fits beside it.
 fn full_on(f: &mut Farm, name: &str, wall: Duration) -> LeaseGrant {
-    let others: Vec<WorkerId> = f
-        .workers
-        .iter()
-        .filter(|o| **o != w(name))
-        .cloned()
-        .collect();
-    for worker in &others {
-        f.feed(js_sched::Event::Cordon {
-            worker: worker.clone(),
-        });
-    }
-    f.next_n += 1;
-    let operation = f.s.next_operation();
-    f.s.set_max_wall(operation, wall);
-    f.submit(Request {
-        resources: js_types::sched::Resources::new(7_500, whole_rig::GIB),
-        ..request(f.next_n, LeaseKind::Action)
-    });
-    let grant = f.grants().pop().expect("the action is placed");
-    assert_eq!(grant.operation, operation);
-    assert_eq!(grant.worker, w(name));
-    f.start(&grant);
-    for worker in others {
-        f.feed(js_sched::Event::Uncordon { worker });
-    }
-    grant
+    let resources = js_types::sched::Resources::new(7_500, whole_rig::GIB);
+    f.place_sized_on(name, Some(wall), resources)
 }
 
 /// Catches: a held worker closed to work ahead of its request in queue order, the request
