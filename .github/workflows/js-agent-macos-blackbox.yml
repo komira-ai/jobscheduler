@@ -92,13 +92,13 @@ jobs:
         working-directory: dist
         run: /usr/bin/shasum -a 256 --check SHA256SUMS
       - name: Build the program as the runner's user
-        run: cargo build --locked -p js-mac-first-install --bin js-mac-package-blackbox
+        run: cargo build --locked -p js-mac-first-install --example js-mac-package-blackbox
       - name: "J2: the first install, as root"
         if: ${{ env.PACKAGE_RUN == '' }}
-        run: sudo target/debug/js-mac-package-blackbox first-install --scratch "$RUNNER_TEMP/blackbox" --pkg "$PWD/dist/js-agent-$VERSION-macos-arm64.pkg" --version "$VERSION"
+        run: sudo target/debug/examples/js-mac-package-blackbox first-install --scratch "$RUNNER_TEMP/blackbox" --pkg "$PWD/dist/js-agent-$VERSION-macos-arm64.pkg" --version "$VERSION"
       - name: "J2: the first install of the run's unsigned package, as root"
         if: ${{ env.PACKAGE_RUN != '' }}
-        run: sudo target/debug/js-mac-package-blackbox first-install --scratch "$RUNNER_TEMP/blackbox" --pkg "$PWD/dist/js-agent-$VERSION-macos-arm64.pkg" --version "$VERSION" --unsigned
+        run: sudo target/debug/examples/js-mac-package-blackbox first-install --scratch "$RUNNER_TEMP/blackbox" --pkg "$PWD/dist/js-agent-$VERSION-macos-arm64.pkg" --version "$VERSION" --unsigned
 
   update:
     name: js-agent-macos-blackbox-update
@@ -134,14 +134,14 @@ jobs:
         id: previous
         run: cargo xtask release macos-pkg --below "$VERSION" --tags "$RUNNER_TEMP/tags" --out previous --output "$GITHUB_OUTPUT"
       - name: Build the program as the runner's user
-        run: cargo build --locked -p js-mac-first-install --bin js-mac-package-blackbox
+        run: cargo build --locked -p js-mac-first-install --example js-mac-package-blackbox
       - name: "J4 then J3: the update with tierstore's mount missing, then served, as root"
         if: ${{ env.PACKAGE_RUN == '' }}
         env:
           PREVIOUS: ${{ steps.previous.outputs.version }}
-        run: sudo target/debug/js-mac-package-blackbox update --scratch "$RUNNER_TEMP/blackbox" --pkg "$PWD/dist/js-agent-$VERSION-macos-arm64.pkg" --version "$VERSION" --previous-pkg "$PWD/previous/js-agent-$PREVIOUS-macos-arm64.pkg" --previous-version "$PREVIOUS"
+        run: sudo target/debug/examples/js-mac-package-blackbox update --scratch "$RUNNER_TEMP/blackbox" --pkg "$PWD/dist/js-agent-$VERSION-macos-arm64.pkg" --version "$VERSION" --previous-pkg "$PWD/previous/js-agent-$PREVIOUS-macos-arm64.pkg" --previous-version "$PREVIOUS"
       - name: "J4 then J3: the update to the run's unsigned package, as root"
         if: ${{ env.PACKAGE_RUN != '' }}
         env:
           PREVIOUS: ${{ steps.previous.outputs.version }}
-        run: sudo target/debug/js-mac-package-blackbox update --scratch "$RUNNER_TEMP/blackbox" --pkg "$PWD/dist/js-agent-$VERSION-macos-arm64.pkg" --version "$VERSION" --unsigned --previous-pkg "$PWD/previous/js-agent-$PREVIOUS-macos-arm64.pkg" --previous-version "$PREVIOUS"
+        run: sudo target/debug/examples/js-mac-package-blackbox update --scratch "$RUNNER_TEMP/blackbox" --pkg "$PWD/dist/js-agent-$VERSION-macos-arm64.pkg" --version "$VERSION" --unsigned --previous-pkg "$PWD/previous/js-agent-$PREVIOUS-macos-arm64.pkg" --previous-version "$PREVIOUS"

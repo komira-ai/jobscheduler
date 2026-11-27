@@ -58,7 +58,13 @@ fn an_update_on_a_host_whose_mount_root_is_missing_waits_with_nothing_changed() 
     let tree = Tree::new("hook-machine-neighbour-root");
     let trees = tree.files.path("tierstore-fs");
     for previous in [true, false] {
-        let params = tree.params(previous, "");
+        // An update needs the state root of the agent that runs, a first install none.
+        let lines = if previous {
+            tree.state_line()
+        } else {
+            String::new()
+        };
+        let params = tree.params(previous, &lines);
         flags(
             &tree,
             &[format!("--mount-root-ro=trees={}", trees.display())],
@@ -116,7 +122,7 @@ fn a_missing_mount_root_or_provider_directory_defers_the_prepare() {
         ),
     ];
     for (lines, problem) in cases {
-        let params = tree.params(true, "");
+        let params = tree.params(true, &tree.state_line());
         flags(&tree, &lines);
         let done = tree.run(Step::Prepare, &params, Err("unused"));
         assert_waits_for(&done, &tree, &problem);

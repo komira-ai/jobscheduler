@@ -17,15 +17,17 @@ publish.workspace = true
 # dev-dependency cannot be optional. The lint job's macOS clippy and beta.yml's workspace build
 # and tests exclude this crate; the two workflows build it on a Mac.
 
-# The black-box tests: one program, given the packages as flags. Off a Mac it says it runs on
-# macOS only and exits 2.
-[[bin]]
+# The black-box tests: one program, given the packages as flags. It is an example, not a
+# binary, so that it builds with the dev-dependencies below, which are no edge of the crate's
+# layer (`cargo test -p xtask --test layering`). Off a Mac it says it runs on macOS only and
+# exits 2.
+[[example]]
 name = "js-mac-package-blackbox"
 path = "tests/bin/mac_package_blackbox.rs"
 
-# Everything the test and the program use is a dependency for macOS alone (a dependency, not a
-# dev-dependency, since the program is a binary); none of it is built for Linux.
-[target.'cfg(target_os = "macos")'.dependencies]
+# Everything the test and the program use is a dev-dependency for macOS alone; none of it is
+# built for Linux.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
 # A service's name and a version, and a package's SHA-256, as hostkeeper's installer takes them.
 hostkeeper-config.workspace = true
 # The hook contract: the verdicts and parameters of the update hook the step runner runs.
