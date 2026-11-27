@@ -26,6 +26,7 @@ fn flat(farm: Farm) -> Setup {
         farm,
         shape: Shape::Flat,
         speed: 1,
+        held_out_ms: None,
     }
 }
 
