@@ -252,8 +252,9 @@ impl Harness {
     ) -> Self {
         let clock = ManualClock::new(Timestamp::from_millis(T0));
         let reads = Arc::new(StoreReads(clock.clone()));
+        let tls = names_tls(&args);
         let config = config(args).unwrap().with_job_sources(reads, ids);
-        Self::over_at(scratch, config.without_notices(), clock).await
+        Self::over_at(scratch, config.without_notices(), clock, tls).await
     }
 
     /// A server on the base flags with these connection limits.

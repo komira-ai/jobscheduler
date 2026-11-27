@@ -27,8 +27,6 @@ use crate::config::{Cli, Config};
 use crate::job_store::{ServerIds, ServerJobs};
 use crate::ticker::channel_ticker;
 
-const JOIN: &str = "join-token-A-0123456789-abcdefghijklmnop";
-
 /// A server over the database of `url` whose agent routes are on a port of their own, with its
 /// directory named `name`; its job store and the other server's read `store_clock`.
 async fn server(
@@ -58,10 +56,6 @@ async fn server(
         (
             "--token-file",
             write("token", "test-token-0123456789-abcdefghijkl", 0o600),
-        ),
-        (
-            "--agent-token-file",
-            write("agent-tokens", &format!("{JOIN}\n"), 0o600),
         ),
         ("--agent-pool-config", write("agent-pool.toml", pool, 0o644)),
         ("--store", write("store", &format!("{url}\n"), 0o600)),
@@ -113,24 +107,32 @@ fn listening_on(url: &str) {
     }
 }
 
-/// `body` POSTed to `path` of `addr` with the join token; the status and the body's JSON.
-async fn post(addr: std::net::SocketAddr, path: &str, body: &Value) -> (u16, Value) {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+/// `body` POSTed to `path` of the agent routes of `running` as `burst-1`, whose host
+/// certificate the TLS listener has verified (the extension it puts on the request); the
+/// status and the body's JSON.
+async fn post(running: &Running, path: &str, body: &Value) -> (u16, Value) {
+    use tower::ServiceExt;
 
-    let body = body.to_string();
-    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
-    let head = format!(
-        "POST {path} HTTP/1.1\r\nHost: t\r\nConnection: close\r\nAuthorization: Bearer {JOIN}\r\n\
-         Content-Type: application/json\r\nContent-Length: {}\r\n\r\n",
-        body.len()
-    );
-    stream.write_all(head.as_bytes()).await.unwrap();
-    stream.write_all(body.as_bytes()).await.unwrap();
-    let mut raw = String::new();
-    stream.read_to_string(&mut raw).await.unwrap();
-    let (head, body) = raw.split_once("\r\n\r\n").unwrap();
-    let status = head.split_whitespace().nth(1).unwrap().parse().unwrap();
-    (status, serde_json::from_str(body).unwrap_or(Value::Null))
+    let routes = crate::api::agent_router(&running.shared);
+    let mut request = axum::http::Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(body.to_string()))
+        .unwrap();
+    let host = js_types::HostId::new("burst-1").unwrap();
+    request
+        .extensions_mut()
+        .insert(crate::host_cert::CertHost(host));
+    let answer = routes.oneshot(request).await.unwrap();
+    let status = answer.status().as_u16();
+    let bytes = axum::body::to_bytes(answer.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
 }
 
 /// The job ids the heartbeat reply `reply` starts.
@@ -146,7 +148,6 @@ fn started(reply: &Value) -> Vec<String> {
 /// with nothing listed; the reply once the server answers it, after `meanwhile` ran with the
 /// beat held.
 async fn held_beat(running: &Running, meanwhile: impl std::future::Future<Output = ()>) -> Value {
-    let agents = running.agent_addr().unwrap();
     let hello = json!({
         "host_id": "burst-1",
         "pool": "burst",
@@ -155,7 +156,7 @@ async fn held_beat(running: &Running, meanwhile: impl std::future::Future<Output
         "capabilities": { "per-job": "true", "held-beat": "true", "arch": "x86_64", "isa": "x86-64-v3" },
         "phase": "serving",
     });
-    let (status, welcome) = post(agents, "/v1/agent/hello", &hello).await;
+    let (status, welcome) = post(running, "/v1/agent/hello", &hello).await;
     assert_eq!(status, 200, "{welcome}");
     let beat = json!({
         "host_id": "burst-1",
@@ -164,7 +165,7 @@ async fn held_beat(running: &Running, meanwhile: impl std::future::Future<Output
         "phase": "serving",
         "seq": 1,
     });
-    let held = post(agents, "/v1/agent/heartbeat", &beat);
+    let held = post(running, "/v1/agent/heartbeat", &beat);
     let other = async {
         let mut waits = running.shared.agents().wakes.waits();
         waits.wait_for(|waits| *waits >= 1).await.unwrap();
