@@ -6,9 +6,11 @@
 //! learned, and a run freed while serving (not one read from the history at the start) logs one
 //! line with what the profiles predicted and what the run did. The sizes a job books
 //! ([`JobSizes::sized`]) are the same in every mode, and no profile is read by anything that
-//! places a job under [`Curves::Off`] and [`Curves::Shadow`]. Under [`Curves::On`] the placer reads a class's CPU
-//! profile when the class passes its four checks ([`JobSizes::curve_of`]), to book the job's CPU
-//! by curve on the curve hosts (`docs/design/placement-profiles-live.md`); the checks' state,
+//! books or places under [`Curves::Off`] and [`Curves::Shadow`]. Under [`Curves::On`] the placer
+//! reads a class's CPU profile when the class passes its four checks ([`JobSizes::curve_of`]), to
+//! book the job's CPU by curve on the curve hosts (`docs/design/placement-profiles-live.md`);
+//! under [`Curves::Shadow`] it reads the same curve only to log each job the curve would place
+//! differently from the flat placement it makes; the checks' state,
 //! the window of whether each run carried a usable CPU series (check 4), is kept here beside
 //! the profile and rebuilt with it. Under [`Curves::Shadow`] and [`Curves::On`] the memory
 //! shadow reads a class's memory profile ([`JobSizes::memory_curve_of`]) to project each host's
@@ -51,8 +53,9 @@ pub enum Curves {
     Off,
     /// Learns a CPU and a memory profile for each class and logs one line for each run it
     /// checks while serving; projects each host's memory by its jobs' memory curves and records
-    /// where a booking that followed them would have placed a job differently, placing nothing
-    /// differently itself.
+    /// where a booking that followed them would have placed a job differently; and logs one line
+    /// for each queued job that [`Curves::On`] would place on another host, or on none, than the
+    /// flat placement it makes, placing nothing differently itself.
     Shadow,
     /// Learns and logs as [`Curves::Shadow`] does, and books a class that passes its four
     /// checks by its CPU curve on the curve hosts (`docs/design/placement-profiles-live.md`).
@@ -361,17 +364,15 @@ impl Profiles {
 }
 
 impl JobSizes {
-    /// The CPU curve `key`'s class books for a job whose flat CPU is `flat_millis`, at `now`:
-    /// `Some` only under [`Curves::On`], for a class with a profile that passes all four checks
-    /// ([`Checks`]) while the bounds of the hosts are known, held to a quarter core and to a
-    /// quarter of the largest host's cores. `key` is the job's own class, never its fallback
-    /// or its client's.
+    /// The CPU curve `key`'s class books under [`Curves::On`] for a job whose flat CPU is
+    /// `flat_millis`, at `now`: `Some` for a class with a profile (so under [`Curves::Shadow`]
+    /// and [`Curves::On`]) that passes all four checks ([`Checks`]) while the bounds of the hosts
+    /// are known, held to a quarter core and to a quarter of the largest host's cores. Under
+    /// `shadow` the placer only judges by it and books the flat number. `key` is the job's own
+    /// class, never its fallback or its client's.
     pub(crate) fn curve_of(&self, key: &Key, flat_millis: u64, now: FarmTime) -> Option<Curve> {
         let (profiles, bounds) = (self.profiles.as_ref()?, self.bounds.as_ref()?);
-        let class = profiles
-            .classes
-            .get(key)
-            .filter(|_| self.curves == Curves::On)?;
+        let class = profiles.classes.get(key)?;
         let clamp = Clamp {
             least_millis: CPU_STEP,
             most_millis: host_share(bounds),

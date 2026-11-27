@@ -8,6 +8,7 @@ use js_types::sched::usage::RunEnd;
 use js_types::sched::{LeaseId, OperationId, WaiterId, WorkerId};
 
 use super::Scheduler;
+use crate::reservation::ReservationEnd;
 
 /// What [`Scheduler::cancel_whole`] did.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,6 +61,7 @@ impl Scheduler {
             .holding()
             .map(|(lease, worker)| (lease, worker.clone()));
         let mark = self.drain.marks.get(&operation).map(|m| m.worker.clone());
+        self.reservation_ended(operation, || ReservationEnd::Cancelled);
         self.release(operation, RunEnd::Cancelled);
         let waiters = self.drop_operation(operation);
         match holding {
