@@ -31,7 +31,15 @@ use std::time::Duration;
 use js_conformance::agent::Defect;
 use js_sim::{Chance, Faults};
 use js_sim_cell::actions::set_bus_faults;
-use js_sim_cell::{Counter, Expect, Invariant, Scenario, ScenarioFailure, ServerSpec, Shape, Work};
+use js_sim_cell::{
+    Counter, Expect, Invariant, Scenario, ScenarioFailure, ServerSpec, Shape, Work,
+    run_seed_range_on_threads,
+};
+
+/// The threads a scenario of this file that is large runs its seeds on
+/// ([`run_seed_range_on_threads`]); `.config/nextest.toml` reserves this many slots for
+/// each of those tests.
+const THREADS: usize = 4;
 
 /// The hundred hosts' seeds.
 const BURST_SEEDS: u64 = 4;
@@ -67,7 +75,8 @@ const REPEAT_SEEDS: u64 = 2;
 /// successes).
 #[test]
 fn a_hundred_hosts_settle_four_hundred_runs() {
-    burst::a_hundred_hosts_settle_four_hundred_runs().run_seeds(BURST_SEEDS);
+    let build = burst::a_hundred_hosts_settle_four_hundred_runs;
+    run_seed_range_on_threads(build, 0..BURST_SEEDS, THREADS);
 }
 
 /// Proves that the client's work settles while one message in ten between the agents and
@@ -81,7 +90,8 @@ fn a_hundred_hosts_settle_four_hundred_runs() {
 /// (`bookings-match-agents`). The scenario is in `cell/lossy_wire.rs`.
 #[test]
 fn a_lossy_agent_wire_settles_every_run() {
-    lossy_wire::a_lossy_agent_wire_settles_every_run().run_seeds(LOSSY_SEEDS);
+    let build = lossy_wire::a_lossy_agent_wire_settles_every_run;
+    run_seed_range_on_threads(build, 0..LOSSY_SEEDS, THREADS);
 }
 
 /// Proves that work settles across a partition: ten agents drawn from the seed are cut
@@ -96,7 +106,8 @@ fn a_lossy_agent_wire_settles_every_run() {
 /// (`bookings-match-agents`, `settles-when-quiet`).
 #[test]
 fn a_partition_of_ten_agents_that_heals_settles_every_run() {
-    partition::a_partition_of_ten_agents_that_heals_settles_every_run().run_seeds(CUT_SEEDS);
+    let build = partition::a_partition_of_ten_agents_that_heals_settles_every_run;
+    run_seed_range_on_threads(build, 0..CUT_SEEDS, THREADS);
 }
 
 /// The broken-agent family's smoke shape: agents lacking `defect`, or
