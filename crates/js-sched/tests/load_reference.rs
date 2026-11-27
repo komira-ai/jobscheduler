@@ -28,8 +28,6 @@
 #[path = "load_reference/mod.rs"]
 mod load_reference;
 
-use std::collections::BTreeMap;
-
 use js_types::sched::{OperationId, Resources, WorkKey, WorkerId};
 use load_reference::{Ask, Host, Placer, fnv1a, tie_hash};
 
@@ -63,7 +61,7 @@ fn cores(millis: u64) -> Resources {
 }
 
 fn placer(hosts: Vec<Host>, next_seq: u64) -> Placer {
-    Placer::new(hosts, 1, next_seq, BTreeMap::new())
+    Placer::new(hosts, 1, next_seq)
 }
 
 /// A round whose pack limit is out of the way: every share a test reaches is within it. For
@@ -324,25 +322,46 @@ fn a_blocked_head_holds_the_worker_it_would_leave_least_full() {
     assert_eq!(p.holds().get(&OperationId(4)), Some(&WorkerId::new("b")));
 }
 
-/// Catches: a hold that moves for any wobble (the kept worker is dropped as soon as another
-/// is better), one that never moves, and a band that is not exactly a tenth: the kept
-/// worker stays while its binding ratio is at most the best's plus 0.1.
+/// Catches: a hold that stays on the worker held last round while another is better (the
+/// old within-a-tenth stickiness), a pick that ignores the binding ratio, and a tie that
+/// does not go to the first name. The hold is picked again every round: the least full
+/// worker, whichever worker was held before.
 #[test]
-fn the_held_worker_is_kept_while_within_a_tenth_of_the_best() {
+fn the_held_worker_is_picked_again_every_round_by_the_least_ratio() {
     // 10-core workers; a request for 6.5 cores. `b` is the best, at 11.2 / 10 = 1.12
-    // (refused: above 1.1). The kept `a` at 5.7 cores is 12.2 / 10 = 1.22, exactly 0.1 over.
-    let kept = BTreeMap::from([(OperationId(1), WorkerId::new("a"))]);
-    let held = |a_charged: u64| {
-        let hosts = vec![host("a", 10, 32, &[a_charged]), host("b", 10, 32, &[4_700])];
-        let mut p = Placer::new(hosts, 1, 0, kept.clone());
+    // (refused: above 1.1). `a` at 5.7 cores is 12.2 / 10 = 1.22, exactly 0.1 over, where
+    // the old rule kept the worker held before.
+    let held = |a_charged: u64, b_charged: u64| {
+        let hosts = vec![
+            host("a", 10, 32, &[a_charged]),
+            host("b", 10, 32, &[b_charged]),
+        ];
+        let mut p = Placer::new(hosts, 1, 0);
         assert_eq!(place(&mut p, 1, &key(1), cores(6_500), 0, &[0, 1]), None);
         p.holds().get(&OperationId(1)).cloned().unwrap()
     };
-    assert_eq!(held(5_700), WorkerId::new("a"), "exactly a tenth: kept");
-    assert_eq!(held(5_701), WorkerId::new("b"), "past a tenth: it moves");
-    // A kept worker that is not a candidate is not held.
+    assert_eq!(
+        held(5_700, 4_700),
+        WorkerId::new("b"),
+        "exactly a tenth: it moves"
+    );
+    assert_eq!(
+        held(5_701, 4_700),
+        WorkerId::new("b"),
+        "past a tenth: it moves"
+    );
+    assert_eq!(
+        held(5_000, 4_700),
+        WorkerId::new("b"),
+        "a little worse: it moves"
+    );
+    // The worker held before still wins when it is the least full, and a tie goes to the
+    // first by name.
+    assert_eq!(held(4_600, 4_700), WorkerId::new("a"));
+    assert_eq!(held(4_700, 4_700), WorkerId::new("a"));
+    // A worker the head cannot run on is not held.
     let hosts = vec![host("a", 10, 32, &[5_700]), host("b", 10, 32, &[4_700])];
-    let mut p = Placer::new(hosts, 1, 0, kept);
+    let mut p = Placer::new(hosts, 1, 0);
     assert_eq!(place(&mut p, 1, &key(1), cores(6_500), 0, &[1]), None);
     assert_eq!(p.holds().get(&OperationId(1)), Some(&WorkerId::new("b")));
 }

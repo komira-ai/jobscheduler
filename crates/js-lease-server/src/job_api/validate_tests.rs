@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use js_agent_wire::{HostPort, JobMount, Layer, MountMode, MountSource, PortProtocol, Propagation};
+use js_callback::AddressRule;
 use js_caps::{FLAG_SET, LAYERED_ROOTFS};
 use js_jobs::{Constraints, DeclaredPort, Isolation, JobId, JobSpec, Needs, NetworkPolicy};
 use js_proto::v1;
@@ -13,12 +14,13 @@ use js_types::{
     AcceleratorNeed, ExecMode, ImageDigestRef, IsaLevel, Labels, Requirements, Resources,
 };
 
-use super::{Accepts, Fault, ISA_LEVEL_KEY, Valid, job};
+use super::{Fault, ISA_LEVEL_KEY, Valid, job};
 use crate::job_api::writes_rig::{CEILING, image, wire};
 
-/// `spec` checked against the rig's ceiling.
+/// `spec` checked against the rig's ceiling, a callback's address by the rule that knows no
+/// cluster address.
 fn checked(spec: &v1::JobSpec) -> Result<Valid, Fault> {
-    job(Some(spec), CEILING, Accepts::default(), None)
+    job(Some(spec), CEILING, &AddressRule::new([]))
 }
 
 /// The fault of `spec` changed by `change`.
@@ -296,8 +298,7 @@ fn the_wall_limit_is_present_positive_and_at_most_the_ceiling() {
     let higher = job(
         Some(&wire("job-1")),
         Duration::from_secs(599),
-        Accepts::default(),
-        None,
+        &AddressRule::new([]),
     );
     assert_eq!(higher, Err(Fault::WallAboveCeiling));
 }
@@ -370,7 +371,7 @@ fn a_malformed_xcode_build_is_refused_naming_its_field() {
 #[test]
 fn each_fault_names_its_field() {
     assert_eq!(
-        job(None, CEILING, Accepts::default(), None),
+        job(None, CEILING, &AddressRule::new([])),
         Err(Fault::Field("spec"))
     );
     let long = "a".repeat(64);

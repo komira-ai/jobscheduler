@@ -50,7 +50,9 @@
 //! | `--placement js-sched` | deprecated, and does nothing: `js-sched` is the only placement. The flag is accepted with the warning `--placement is deprecated and does nothing: js-sched is the only placement (drop the flag)`; `--placement registry`, the removed first-free placement, is refused at start, `the registry placement mode was removed; js-sched is the only placement (drop the flag)`. The server keeps one `js-sched` scheduler for the life of the server, built once and told of every hello, accepted heartbeat (with its load reading) and stop as the registry takes them, and of every host the registry forgets; it places the jobs on the hosts that registered themselves, and the scheduler is built again only when its picture of those hosts and the registry's books disagree, keeping each host's last three readings, and the start is counted. The pool's `memory_schedulable_percent` is the scheduler's rule: the registry books each host's whole reported memory and the scheduler books no more than the percent of it; `GET /v1/hosts` shows the cut memory as `shape.memory_bytes`, beside the percent. A host a whole-node request has set aside takes work of the pool's `share_class` only as backfill, by the end of the host's tail as the mark took it; a wall time above `server.max_lease_wall` never does. An agent pool (`--agent-pool-config`, or a joined pool of the file) whose capabilities name no `arch` is refused at start, naming the pool; an elastic pool is not: each of its machines is placed by what it reports and the capabilities its agent reported at hello, `arch` among them. Needs `--agent-pool-config` |
 //! | `--cpu-slack <multiplier>` | how far above a host's cores the scheduler may charge it, from `1.0` to `2.0` with at most three decimals, such as `1.1`; the scheduler's own default (1.1) unless given. A job is placed on a host whose agent does not report `load-admission` only where the summed bookings of its jobs stay within what its hello offers, with no slack. Needs `--agent-pool-config` |
 //! | `--pack-limit <fraction>` | how full the scheduler packs a host before it places on the least full one, as a fraction of the host's capacity (the larger of its CPU and memory share, bookings with the new lease added) from `0.0` to `1.0` with at most three decimals, such as `0.5`; the scheduler's own default (0.5) unless given. Within the limit the fullest host that fits is chosen; past it, the least full. Needs `--agent-pool-config` |
-//! | `--placement-curves <off\|shadow\|on>` | `off` unless given. `on` learns and logs as `shadow` does and books a class that passes its four checks by its CPU curve on the hosts `server.curve_hosts` names (every host when it is absent), a job waiting at most `server.curve_max_wait_seconds` (30) for its curve to fit before it is tested with its flat number; those two keys have no flags and act only under `on`. `shadow` learns a CPU profile and a memory profile for each job class from the series its runs recorded, and logs one line per run it checks, naming the run's mean and peak against what the class's profile predicted, under the log target `js_sched_placer::sizes::profile`. The profiles are built again from the job records after a restart, and the checks start only once the start has read and taught the ended jobs (on a store of about 570,000 of them, some 5 to 7 minutes): that target first logs `placement curves: the shadow checks start, the profiles learned from the ended jobs` with `classes`, `ended_jobs` and `took_secs`, then a check for each run that ended meanwhile. Placement is the same under `off` and `shadow`: nothing is booked, moved, throttled or killed by a profile. Any other value is refused, `placement_curves must be off, shadow or on; got "On"`. Needs `--agent-pool-config` |
+//! | `--score-balance <n>`, `--score-slack-tolerance-ppm <n>`, `--key-share-percent <n>` | the scheduler's scoring settings, which rank the hosts a job fits on and admit nothing, each a whole number refused outside its range (never clamped), and each the scheduler's own default unless given. `--score-balance` (0 to 4, default 1): how much of the other resource's leftover the score's fit counts beside the binding one. `--score-slack-tolerance-ppm` (0 to 1000000, default 10000, 1%): how far above its capacity a host may be charged, in millionths of it, before the score counts the excess against it. `--key-share-percent` (0 to 100, default 25): the share of a host's CPU the leases of one action key may take before the score prefers another host; each job is its own key (its request is named by its job id), so for jobs it is the share one job may take. Needs `--agent-pool-config` |
+//! | `--placement-curves <off\|shadow\|on>` | `off` unless given. `on` learns and logs as `shadow` does and books a class that passes its four checks by its CPU curve on the hosts `--curve-hosts` names (every host when it is absent), a job waiting at most `--curve-max-wait-seconds` (30) for its curve to fit before it is tested with its flat number; those two flags act only under `on`. `shadow` learns a CPU profile and a memory profile for each job class from the series its runs recorded, and logs one line per run it checks, naming the run's mean and peak against what the class's profile predicted, under the log target `js_sched_placer::sizes::profile`. The profiles are built again from the job records after a restart, and the checks start only once the start has read and taught the ended jobs (on a store of about 570,000 of them, some 5 to 7 minutes): that target first logs `placement curves: the shadow checks start, the profiles learned from the ended jobs` with `classes`, `ended_jobs` and `took_secs`, then a check for each run that ended meanwhile. Placement is the same under `off` and `shadow`: nothing is booked, moved, throttled or killed by a profile. Any other value is refused, `placement_curves must be off, shadow or on; got "On"`. Needs `--agent-pool-config` |
+//! | `--curve-hosts <host,...>`, `--curve-max-wait-seconds <n>` | the canary and the wait bound of `--placement-curves on`, the flags of `server.curve_hosts` and `server.curve_max_wait_seconds`, read and refused by the same code as the keys and read in every mode. `--curve-hosts` names the hosts that book by curve, host ids separated by commas (or the flag given again): a job placed on any other host is booked flat, and without the flag `on` books by curve on every host. An empty name, a name twice and a name that is not a host id (1 to 63 characters of `a-z`, `0-9`, `.`, `_` and `-`) are refused at start naming it, such as `--curve-hosts: names "mac-1" twice`. `--curve-max-wait-seconds` is how long a job of a curve class waits with no host fitting its curve before it is tested with its flat number: whole seconds from `0` to `300`, `30` unless given, `0` meaning a curve never delays a job; above `300` it is refused, `--curve-max-wait-seconds: must be from 0 to 300`. Needs `--agent-pool-config` |
 //! | `--cold-cpu-millis <n>`, `--cold-memory-bytes <n>` | what a queued job that names no CPU or no memory books, for that dimension, while neither its class, its fallback class nor its client has a run (`docs/design/sizing.md`, section 7.7): millicores from `250`, bytes from `1073741824` (1 GiB). Each left out is its default, `22000` (22 cores) and `4294967296` (4 GiB); a CPU above a quarter of the most cores a registered host has books that quarter, and a memory above the most a registered host has books that most. Needs `--agent-pool-config` |
 //! | `--cold-memory-bytes-on <os>=<n>` | the memory a queued job whose `os` constraint is `<os>` (as the job gives it, such as `macos`) books in place of `--cold-memory-bytes`, while neither its class, its fallback class nor its client has a run: bytes from `1073741824` (1 GiB), and above the most a registered host has, that most. A job of any other `os`, or of none, books `--cold-memory-bytes`. Repeatable, each `<os>` once; a value that is not `<os>=<n>`, an empty `<os>` and one given twice are refused at start. Needs `--agent-pool-config` |
 //! | `--cold-cpu-millis-on <os>=<n>` | the CPU a queued job whose `os` constraint is `<os>` (as the job gives it, such as `macos`) books in place of `--cold-cpu-millis`, while neither its class, its fallback class nor its client has a run with a CPU sample: millicores from `250` to `4294967295`, and above a quarter of the most cores a registered host has, that quarter. A job of any other `os`, or of none, books `--cold-cpu-millis`. Repeatable, each `<os>` once; a value that is not `<os>=<n>`, an empty `<os>` and one given twice are refused at start. Needs `--agent-pool-config` |
@@ -76,9 +78,10 @@
 //!
 //! A start that is refused prints the flag at fault and exits with status 2. The
 //! hello limit flags, `--require-host-credential`, `--placement`, `--estimate-feed`,
-//! `--cpu-slack`, `--pack-limit`, `--placement-curves`, `--cold-cpu-millis`, `--cold-memory-bytes`,
-//! `--cold-memory-bytes-on`, `--cold-cpu-millis-on` and `--job-listen` need
-//! `--agent-pool-config`, and are refused without it.
+//! `--cpu-slack`, `--pack-limit`, `--score-balance`, `--score-slack-tolerance-ppm`,
+//! `--key-share-percent`, `--placement-curves`, `--curve-hosts`, `--curve-max-wait-seconds`,
+//! `--cold-cpu-millis`, `--cold-memory-bytes`, `--cold-memory-bytes-on`, `--cold-cpu-millis-on`
+//! and `--job-listen` need `--agent-pool-config`, and are refused without it.
 //!
 //! # The configuration file
 //!
@@ -126,11 +129,14 @@
 //! # registers agents
 //! # pack_limit (0.5, a number): the flag's name, default and range; refused unless a pool
 //! # registers agents
+//! # score_balance (1), score_slack_tolerance_ppm (10000), key_share_percent (25): whole
+//! # numbers, the flags' names, defaults and ranges; refused unless a pool registers agents
 //! # placement_curves ("off", a string): the flag's name, default and values ("off", "shadow" or
 //! # "on"); refused unless a pool registers agents
 //! # curve_hosts (an array of host ids; every host), curve_max_wait_seconds (0 to 300; 30): the
-//! # hosts that book by curve and how long a job waits for its curve to fit; no flags; read in
-//! # every mode, acting only under placement_curves = "on"
+//! # hosts that book by curve and how long a job waits for its curve to fit; the flags' names
+//! # (--curve-hosts, --curve-max-wait-seconds) and rules; read in every mode, acting only under
+//! # placement_curves = "on"
 //! # cold_cpu_millis (250 or more), cold_memory_bytes (1073741824 or more): what a queued job
 //! # that names no CPU or memory books while neither its class, its fallback class nor its
 //! # client has a run; each left out is its default (22000, 4294967296: 22 cores and 4 GiB);
@@ -399,8 +405,8 @@
 //! and `/v1/pools` are other routes than the server's of those names, so the two cannot
 //! share a port while both exist.
 //!
-//! The job store is in the state store when `--store` is given (the first start over it
-//! begins with no jobs, and a `.jobs` file of an earlier start is left unread); without
+//! The job store is in the state store when `--store` is given (the server leaves a `.jobs`
+//! file of an earlier start unread; `js-lease-server job-store copy` copies it in); without
 //! it, a SQLite file beside the state file, `<state file>.jobs`, owner-only: the
 //! single-node development backend. The server opens it once and holds that one handle: the job service and the
 //! per-job heartbeat both read it. The open (its index backfill, the boot's raise of
@@ -452,7 +458,8 @@
 //! before the call it records); a heartbeat with no new taint, a known host's hello and the
 //! host book use no store. The first start over an empty store imports the four files once,
 //! in one transaction with the marker `meta/server-state-imported`, and never changes them.
-//! The job store and the usage file are kept as without the setting.
+//! The job store and the usage rows are rows of the store too; `js-lease-server job-store`
+//! copies a job store's file into it, and exports them back to files for a rollback.
 //!
 //! # Who may do what
 //!
@@ -782,6 +789,7 @@ mod client_verifier;
 mod clock;
 mod config;
 mod cordon;
+mod cutover;
 mod dispatch_state;
 mod drain;
 mod error;
@@ -856,8 +864,8 @@ pub use api::BODY_LIMIT;
 pub use catalogs::Catalogs;
 pub use clock::SharedClock;
 pub use config::{
-    BootMode, Cli, Config, CpuSlack, CpuSlackError, Limits, MIN_TOKEN_BYTES, PackLimit,
-    PackLimitError, Placement, TlsFiles, Token, is_private_address, parse_duration,
+    BootMode, Cli, Config, CpuSlack, CpuSlackError, CurveFlags, Limits, MIN_TOKEN_BYTES, PackLimit,
+    PackLimitError, Placement, TlsFiles, Token, Tunings, is_private_address, parse_duration,
 };
 pub use error::StartupError;
 pub use file::{
@@ -903,8 +911,9 @@ pub fn main() -> ExitCode {
 /// `err`.
 ///
 /// Exit status: 0 after an orderly stop (and for `--help`), 2 for a usage error or a
-/// start that was refused (the message names the flag), 1 for any other failure. The verb
-/// `update-hook` is answered first, before any flag is read ([`update_hook`]).
+/// start that was refused (the message names the flag), 1 for any other failure. The verbs
+/// `update-hook` ([`update_hook`]) and `job-store` (the job store's cutover between its SQLite
+/// file and the store) are answered first, before any flag is read.
 pub fn run(
     args: impl IntoIterator<Item = OsString>,
     out: &mut dyn Write,
@@ -917,6 +926,9 @@ pub fn run(
 fn run_words(args: Vec<OsString>, out: &mut dyn Write, err: &mut dyn Write) -> ExitCode {
     if update_hook::is_verb(&args) {
         return update_hook::run(&args, out, err, &update_hook::Host::system());
+    }
+    if cutover::is_verb(&args) {
+        return cutover::run(&args, out, err);
     }
     let parsed = Cli::try_parse_from(args);
     let cli = match parsed {

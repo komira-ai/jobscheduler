@@ -118,9 +118,11 @@
 //! all (`native/profile.rs`, `level`). A Mac has one loopback for every user, so a job can
 //! reach the host's own services on loopback and the listeners of the other jobs of the Mac.
 //!
-//! What this runtime does not do yet: stage a `stage` input (this agent keeps no stage
-//! trees: a start that names one is refused `native-unsupported`), forward a declared port (a
-//! start that declares any is refused `ports-not-supported`, see `native/network.rs`).
+//! A `stage` input is refused `native-unsupported`: this agent keeps no stage trees, and a
+//! job's inputs are mounts of host paths (`docs/design/job-rootfs.md`, D66).
+//!
+//! What this runtime does not do yet: forward a declared port (a start that declares any is
+//! refused `ports-not-supported`, see `native/network.rs`).
 //! Toolchains get their temporary files from `TMPDIR` (inside the run directory) and may also
 //! write the account's own per-user temporary and cache folders.
 //!
