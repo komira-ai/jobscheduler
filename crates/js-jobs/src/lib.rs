@@ -287,7 +287,7 @@ pub use result::{
     ResourceUsage, ResultReason, Retention, RetentionError, SWEEP_BATCH, sweep,
 };
 pub use store::{
-    Backfill, Beside, CordonWrite, FailedPrepare, HeldRequeue, Inserted, JobPage, JobStore,
-    MAX_PAGE, MINT_TRIES, MOST_TABLE_CHANGES, NewJob, Placement, RequeuedFor, Row, SCHEMA_VERSION,
-    Step, TableChanges, UncordonWrite, Written, queue_order,
+    Backfill, Beside, CordonWrite, FailedPrepare, FreedPage, HeldRequeue, Inserted, JobPage,
+    JobStore, MAX_PAGE, MINT_TRIES, MOST_TABLE_CHANGES, NewJob, Placement, RequeuedFor, Row,
+    SCHEMA_VERSION, Step, TableChanges, UncordonWrite, Written, queue_order,
 };
