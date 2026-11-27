@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::ops::RangeInclusive;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -13,11 +14,12 @@ use js_sched_placer::sizes::{ColdCpuOn, ColdMemoryOn, ColdSize};
 use super::{Load, Section};
 use crate::config::placement_curves::{hosts as curve_hosts, max_wait as curve_max_wait};
 use crate::config::{
-    BootMode, CpuSlack, CurveSetting, DEFAULT_LEASE_SECS, DEFAULT_RECHECK_MS, DispatchTimes,
-    FeedRetention, JOB_FEED_RETENTION_MUST, JOB_RETENTION_MUST, JobListen, Limits,
-    MAX_JOB_WALL_MUST, MOST_LEASE_SECS, MOST_RECHECK_MS, MetricsListen, PackLimit, Placement,
-    ReadyListen, TlsFiles, Token, cold_cpu_entry, cold_entry, not_loopback, not_private,
-    parse_curves, parse_job_feed_retention, parse_job_retention, parse_max_job_wall, parse_token,
+    BALANCE, BootMode, CpuSlack, CurveSetting, DEFAULT_LEASE_SECS, DEFAULT_RECHECK_MS,
+    DispatchTimes, FeedRetention, JOB_FEED_RETENTION_MUST, JOB_RETENTION_MUST, JobListen,
+    KEY_SHARE_PERCENT, Limits, MAX_JOB_WALL_MUST, MOST_LEASE_SECS, MOST_RECHECK_MS, MetricsListen,
+    PackLimit, Placement, ReadyListen, SLACK_TOLERANCE_PPM, TlsFiles, Token, Tunings,
+    cold_cpu_entry, cold_entry, not_loopback, not_private, parse_curves, parse_job_feed_retention,
+    parse_job_retention, parse_max_job_wall, parse_token,
 };
 use crate::error::StartupError;
 use crate::job_store::JobStoreSetup;
@@ -53,6 +55,9 @@ const SERVER_KEYS: &[&str] = &[
     "estimate_feed",
     "cpu_slack",
     "pack_limit",
+    "score_balance",
+    "score_slack_tolerance_ppm",
+    "key_share_percent",
     "cold_cpu_millis",
     "cold_memory_bytes",
     "cold_memory_bytes_on",
@@ -161,6 +166,7 @@ pub(crate) struct AgentKeys {
     estimate_feed: Option<bool>,
     cpu_slack: Option<CpuSlack>,
     pack_limit: Option<PackLimit>,
+    tunings: Tunings,
     cold: ColdSize,
     cold_on: ColdMemoryOn,
     cold_cpu_on: ColdCpuOn,
@@ -202,6 +208,11 @@ impl AgentKeys {
     /// The pack limit the file gives, if it gives one; absent, the engine's default.
     pub(crate) fn pack_limit(&self) -> Option<PackLimit> {
         self.pack_limit
+    }
+
+    /// The scoring settings the file gives, each absent one `None`.
+    pub(crate) fn tunings(&self) -> Tunings {
+        self.tunings
     }
 
     /// What a job that books nothing books while neither its class, its fallback class nor its
@@ -309,6 +320,7 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
         estimate_feed: s.boolean("estimate_feed")?,
         cpu_slack: read_cpu_slack(&mut s)?,
         pack_limit: read_pack_limit(&mut s)?,
+        tunings: read_tunings(&mut s)?,
         cold: read_cold(&mut s)?,
         cold_on: ColdMemoryOn::new(read_per_os(&mut s, &COLD_MEMORY_ON)?),
         cold_cpu_on: ColdCpuOn::new(read_per_os(&mut s, &COLD_CPU_ON)?),
@@ -553,6 +565,22 @@ fn read_pack_limit(s: &mut Section) -> Result<Option<PackLimit>, StartupError> {
     };
     let limit = PackLimit::parse(&text).map_err(|err| s.fail("pack_limit", &err.to_string()))?;
     Ok(Some(limit))
+}
+
+/// `score_balance`, `score_slack_tolerance_ppm` and `key_share_percent`, the keys of the three
+/// flags of [`Tunings`]: whole numbers in the flags' ranges, each refused outside its range
+/// rather than clamped.
+fn read_tunings(s: &mut Section) -> Result<Tunings, StartupError> {
+    let mut whole = |key: &str, range: RangeInclusive<u32>| {
+        let (low, high) = (u64::from(*range.start()), u64::from(*range.end()));
+        let given = s.bounded_given(key, low, high)?;
+        Ok::<_, StartupError>(given.map(|n| u32::try_from(n).unwrap_or(u32::MAX)))
+    };
+    Ok(Tunings {
+        score_balance: whole("score_balance", BALANCE)?,
+        score_slack_tolerance_ppm: whole("score_slack_tolerance_ppm", SLACK_TOLERANCE_PPM)?,
+        key_share_percent: whole("key_share_percent", KEY_SHARE_PERCENT)?,
+    })
 }
 
 /// `placement_curves`, the key of `--placement-curves`: `"off"`, `"shadow"` or `"on"`, read as
