@@ -15,12 +15,21 @@ use js_agent_wire::MountMode;
 
 /// One call of the provider contract, as the lifecycle names it. The client fills in what
 /// every call carries besides (the agent's id, and `js.` before a run id).
+///
+/// A source is named by its run, the run's attempt and its index. The attempt tells two
+/// starts of one run on this agent apart (the same job given to it again): each has its
+/// own, larger than every earlier one, kept in every call of that start, so a provider
+/// that reads it never lets a late `Release` of an earlier start touch a later one's tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderCall {
     /// Begin making the tree of a source of a run, with the ref the job named.
     Prepare {
         /// The run (the job's id).
         run_id: String,
+        /// The run's attempt on this agent: 1 or more, the same in every call of one start;
+        /// 0 for a run whose record an agent wrote before it counted attempts, which a
+        /// provider takes for the source as it was named then.
+        attempt: u64,
         /// The source's place among the run's layers, then its mounts, from 0.
         index: u32,
         /// What the job named, untouched.
@@ -33,6 +42,8 @@ pub enum ProviderCall {
     Mount {
         /// The run.
         run_id: String,
+        /// The run's attempt, as in [`ProviderCall::Prepare`].
+        attempt: u64,
         /// The source's place, as in [`ProviderCall::Prepare`].
         index: u32,
     },
@@ -40,26 +51,43 @@ pub enum ProviderCall {
     Release {
         /// The run.
         run_id: String,
+        /// The run's attempt, as in [`ProviderCall::Prepare`].
+        attempt: u64,
         /// The source's place, as in [`ProviderCall::Prepare`].
         index: u32,
     },
     /// Release every source of this agent except those of the runs in `keep`.
     Sweep {
-        /// The runs (job ids) whose sources are kept.
-        keep: Vec<String>,
+        /// The runs (job ids) whose sources are kept, each with the earliest attempt kept:
+        /// a source of an earlier attempt of the run is released. 0 keeps every attempt of
+        /// the run (one whose attempt is not known).
+        keep: Vec<(String, u64)>,
     },
 }
 
 impl ProviderCall {
-    /// What tells two calls apart for a provider: the kind, the run and the index. A call
-    /// asked while one with the same key is out is not sent twice.
+    /// What tells two calls apart for a provider: the kind, the run, the attempt and the
+    /// index. A call asked while one with the same key is out is not sent twice.
     #[must_use]
-    pub fn key(&self) -> (u8, &str, u32) {
+    pub fn key(&self) -> (u8, &str, u64, u32) {
         match self {
-            Self::Prepare { run_id, index, .. } => (0, run_id.as_str(), *index),
-            Self::Mount { run_id, index } => (1, run_id.as_str(), *index),
-            Self::Release { run_id, index } => (2, run_id.as_str(), *index),
-            Self::Sweep { .. } => (3, "", 0),
+            Self::Prepare {
+                run_id,
+                attempt,
+                index,
+                ..
+            } => (0, run_id.as_str(), *attempt, *index),
+            Self::Mount {
+                run_id,
+                attempt,
+                index,
+            } => (1, run_id.as_str(), *attempt, *index),
+            Self::Release {
+                run_id,
+                attempt,
+                index,
+            } => (2, run_id.as_str(), *attempt, *index),
+            Self::Sweep { .. } => (3, "", 0, 0),
         }
     }
 }
