@@ -188,8 +188,7 @@ pub trait Host: Send + Sync {
     fn restore_user(&self, user: &NewUser) -> io::Result<()>;
     /// How `launchctl print <domain>` ended: its exit code and its standard output
     /// and error. The teardown reads any exit status but 0, and an exit 0 that printed a
-    /// domain holding nothing, as a domain that is gone; the readiness checks take only launchd's not-found answer as
-    /// absence.
+    /// domain holding nothing, as a domain that is gone.
     ///
     /// # Errors
     /// `launchctl` could not be run.

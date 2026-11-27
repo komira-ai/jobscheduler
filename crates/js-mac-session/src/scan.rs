@@ -25,7 +25,7 @@
 //! An item that cannot be read is an error, never an empty class: a scan with an
 //! error is not clean.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::io::{self, Read as _};

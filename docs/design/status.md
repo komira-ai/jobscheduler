@@ -550,7 +550,7 @@ As read: Status line says steps 1 and 3 built, step 2 designed and not yet lande
 
 ## mac-one-program.md
 
-As read: Status: accepted 2026-11-22; header says "apart from the accounts of section 11, nothing here is built yet". Stale: sections 11-14 are built (accounts, supervisor, native runtime over accounts, put ingest). Sections 3-7 are partly superseded by 12-13 (D5 is marked superseded; adoption, hand-over and helper removal remain unbuilt).
+As read: Status: accepted 2026-11-22; header says "apart from the accounts of section 11, nothing here is built yet". Stale: sections 11-15 are built (accounts, supervisor, native runtime over accounts, put ingest, the helper's uncalled verbs deleted). Sections 3-7 are partly superseded by 12-13 (D5 is marked superseded; adoption, hand-over and helper removal remain unbuilt).
 
 | Section | Claim | On main | Tracking |
 |---|---|---|---|

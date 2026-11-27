@@ -282,6 +282,7 @@ mod tests {
         }
     }
 
+    /// Catches: a name that drops a field or keeps the dot.
     #[test]
     fn the_user_name_carries_both_fields() {
         assert_eq!(user_name(LeaseId::new(3, 41)), "kbf-lease-3-41");

@@ -10,6 +10,7 @@ use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::AnyObject;
 use objc2_foundation::{NSError, NSString};
 use objc2_open_directory::{ODNode, ODRecord, ODSession, kODNodeTypeLocalNodes};
+use security_framework::random::SecRandom;
 
 use crate::autologin::{self, CommandOutput};
 use crate::disclaim::Program;
@@ -286,6 +287,26 @@ impl Host for MacHost {
     fn pause(&self) {
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// Sets a fresh password of 32 random bytes, in hex, on `record`, and returns it.
+fn random_password(record: &ODRecord) -> io::Result<String> {
+    let mut bytes = [0u8; 32];
+    SecRandom::default().copy_bytes(&mut bytes)?;
+    let password = hex::encode(bytes);
+    let mut error = None;
+    // SAFETY: a record of the local node and an NSString; no old password, as root on
+    // the local node.
+    if !unsafe {
+        record.changePassword_toPassword_error(
+            None,
+            Some(&NSString::from_str(&password)),
+            Some(&mut error),
+        )
+    } {
+        return Err(od_error("setting the password", error));
+    }
+    Ok(password)
 }
 
 /// The local directory node (`/Local/Default`).

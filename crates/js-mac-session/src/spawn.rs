@@ -768,7 +768,7 @@ mod tests {
         let here = std::fs::File::open(".").unwrap();
         let (uid, gid) = me();
         let ids = Ids::new(uid, gid, vec![gid]);
-        child_steps(Some(ids.clone()), here.as_raw_fd(), None)().unwrap();
+        child_steps(ids.clone(), here.as_raw_fd(), None)().unwrap();
         let file = std::fs::File::open("/dev/null").unwrap();
         assert_eq!(
             run_steps(&mut Os, &ids, file.as_raw_fd(), None)

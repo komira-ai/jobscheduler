@@ -99,8 +99,8 @@ fn a_session_less_uid_is_never_asked_about_its_gui_domain_whatever_print_answers
 }
 
 /// Catches a GUI login session left behind, or a session looked for after the kill
-/// ended its login window: a uid that owns a `loginwindow` process (a whole-machine
-/// lease's user, the VM user) has `gui/<uid>` and then `user/<uid>` booted out in every
+/// ended its login window: a uid that owns a `loginwindow` process (a lease's user that
+/// logged in at the console) has `gui/<uid>` and then `user/<uid>` booted out in every
 /// attempt, and both judged gone even when `launchctl print` answers 125 for them.
 #[test]
 fn a_uid_with_a_gui_session_gets_both_domains_booted_out() {
