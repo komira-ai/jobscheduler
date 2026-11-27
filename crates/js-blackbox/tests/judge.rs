@@ -549,6 +549,17 @@ fn the_busiest_window_counts_one_method() {
         }
     );
     assert_eq!(per_second(&calls, "Prepare"), "0:1 29:1 30:1 31:1 59:1");
+    // A Mount held 25 s is listed after one that came later and was answered at once.
+    let held =
+        provider_calls("5000 Mount ok\n0 Mount unavailable\n31000 Mount ok\n").expect("calls");
+    assert_eq!(
+        busiest(&held, "Mount", CALL_WINDOW),
+        Busiest {
+            count: 2,
+            from: Duration::ZERO
+        }
+    );
+    assert_eq!(per_second(&held, "Mount"), "0:1 5:1 31:1");
     let same = provider_calls("100 Mount ok\n900 Mount ok\n1000 Mount ok\n").expect("calls");
     assert_eq!(per_second(&same, "Mount"), "0:2 1:1");
     assert_eq!(per_second(&same, "Prepare"), "");

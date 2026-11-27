@@ -127,10 +127,17 @@ async fn run(config: Config) -> io::Result<()> {
         return served.await.map_err(io::Error::other)?;
     }
     println!("serving {}", config.socket.display());
-    let controlled = control::control(listener, shared, signal).await;
-    let served = served.await.map_err(io::Error::other)?;
+    let mut served = served;
+    let ended = tokio::select! {
+        controlled = control::control(listener, shared, signal) => {
+            let served = (&mut served).await.map_err(io::Error::other)?;
+            served.and(controlled)
+        }
+        // The provider socket could not be bound again after a restart.
+        served = &mut served => served.map_err(io::Error::other)?,
+    };
     let _ = std::fs::remove_file(&config.control);
-    served.and(controlled)
+    ended
 }
 
 /// The program: serves the flags `args` (the arguments after the program's name) give, and

@@ -54,15 +54,17 @@ pub struct Busiest {
     pub from: Duration,
 }
 
-/// The window of `window` that holds the most calls of `method` in `calls` (in the order they
-/// came): a call at `t` and one at `t + window` are in different windows.
+/// The window of `window` that holds the most calls of `method` in `calls`, counted by the time
+/// each came (the fake lists a call when it answers it, so a held one is listed late): a call
+/// at `t` and one at `t + window` are in different windows.
 #[must_use]
 pub fn busiest(calls: &[ProviderCall], method: &str, window: Duration) -> Busiest {
-    let times: Vec<Duration> = calls
+    let mut times: Vec<Duration> = calls
         .iter()
         .filter(|call| call.method == method)
         .map(|call| call.at)
         .collect();
+    times.sort();
     let mut best = Busiest {
         count: 0,
         from: Duration::ZERO,
@@ -85,13 +87,18 @@ pub fn busiest(calls: &[ProviderCall], method: &str, window: Duration) -> Busies
     best
 }
 
-/// The calls of `method` per second, from the fake's start, as `second:count` pairs, for a
-/// failure's report.
+/// The calls of `method` per second, from the fake's start, as `second:count` pairs in the
+/// order of the seconds, for a failure's report.
 #[must_use]
 pub fn per_second(calls: &[ProviderCall], method: &str) -> String {
+    let mut came: Vec<u64> = calls
+        .iter()
+        .filter(|call| call.method == method)
+        .map(|call| call.at.as_secs())
+        .collect();
+    came.sort_unstable();
     let mut seconds: Vec<(u64, usize)> = Vec::new();
-    for call in calls.iter().filter(|call| call.method == method) {
-        let second = call.at.as_secs();
+    for second in came {
         match seconds.last_mut() {
             Some((last, count)) if *last == second => *count += 1,
             _ => seconds.push((second, 1)),

@@ -23,9 +23,9 @@
 //!
 //! This binary has no libtest harness. Its first argument is a mode:
 //!
-//! - `rig --version X.Y.Z --fake-provider PATH`: the wrapper (wrapper.rs) installs the release, starts the fakes and
-//!   runs `scenarios` with flags that name them; as root on a disposable host only
-//!   (.github/workflows/js-blackbox.yml);
+//! - `rig --version X.Y.Z --fake-provider PATH`: the wrapper (wrapper.rs) installs the release,
+//!   starts the fakes and runs `scenarios` with flags that name them; as root on a disposable
+//!   host only (.github/workflows/js-blackbox.yml);
 //! - `scenarios ...`: the test itself (scenarios.rs), given what was installed and where each
 //!   fake listens; it says PASS, FAIL or NOT RUN for each scenario and exits 1 when any did not
 //!   pass;

@@ -4,14 +4,15 @@
 //! A placed tree is a directory `<root>/<agent>/<run>/<index>` holding one empty file,
 //! [`READY_FILE`], so a job that mounts it can check that it sees the tree. A `Mount` that
 //! the store makes wait is held until the test changes the mode or the wait ends, and then
-//! asked again. A restart closes the socket, waits the restart pause, forgets every source
-//! and binds the socket again, as a provider that restarts.
+//! asked again. A restart answers the `Mount` calls held `UNAVAILABLE` at once, closes the
+//! socket, waits the restart pause, forgets every source and binds the socket again, as a
+//! provider that restarts; a quit answers them so too, and ends.
 
 use std::fs;
 use std::io;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -45,6 +46,7 @@ pub(crate) struct Shared {
     store: Mutex<Store>,
     changed: Notify,
     waiting: AtomicUsize,
+    cuts: AtomicU64,
     started: Instant,
     root: PathBuf,
     wait: Duration,
@@ -57,6 +59,7 @@ impl Shared {
             store: Mutex::new(store),
             changed: Notify::new(),
             waiting: AtomicUsize::new(0),
+            cuts: AtomicU64::new(0),
             started: Instant::now(),
             root,
             wait,
@@ -73,6 +76,12 @@ impl Shared {
         self.changed.notify_waiters();
     }
 
+    /// Answers every `Mount` held now `UNAVAILABLE`, as a provider that stops does.
+    pub(crate) fn cut(&self) {
+        self.cuts.fetch_add(1, Ordering::SeqCst);
+        self.changed();
+    }
+
     /// The `Mount` calls the store makes wait now.
     pub(crate) fn waiting(&self) -> usize {
         self.waiting.load(Ordering::SeqCst)
@@ -81,6 +90,22 @@ impl Shared {
     /// Milliseconds since the fake started.
     fn now_ms(&self) -> u64 {
         u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+}
+
+/// Counts a held `Mount` among the waiting while it lives.
+struct Waiting<'a>(&'a AtomicUsize);
+
+impl<'a> Waiting<'a> {
+    fn new(count: &'a AtomicUsize) -> Waiting<'a> {
+        count.fetch_add(1, Ordering::SeqCst);
+        Waiting(count)
+    }
+}
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -139,17 +164,20 @@ impl MountProvider for Service {
         let key = key(request.into_inner().source);
         let at = self.0.now_ms();
         let deadline = tokio::time::Instant::now() + self.0.wait;
+        let cuts = self.0.cuts.load(Ordering::SeqCst);
         loop {
             // Made before the store is asked, so a change between the two wakes the wait.
             let changed = self.0.changed.notified();
             let waited = tokio::time::Instant::now() >= deadline;
+            if self.0.cuts.load(Ordering::SeqCst) != cuts {
+                return Err(status(self.0.store().cut_mount(at)));
+            }
             let answer = self.0.store().mount(at, &key, waited);
             match answer.map_err(status)? {
                 Mounted::Placed(relative) => return place(&self.0.root, &relative),
                 Mounted::Wait => {
-                    self.0.waiting.fetch_add(1, Ordering::SeqCst);
+                    let _waiting = Waiting::new(&self.0.waiting);
                     let _ = tokio::time::timeout_at(deadline, changed).await;
-                    self.0.waiting.fetch_sub(1, Ordering::SeqCst);
                 }
             }
         }

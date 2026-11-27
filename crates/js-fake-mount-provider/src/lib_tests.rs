@@ -87,6 +87,14 @@ fn a_usage_error_names_the_flag() {
         Err("--max-placements: \"two\" is not a count".to_owned())
     );
     assert_eq!(
+        with(&["--mount-wait-ms", "-1"]),
+        Err("--mount-wait-ms: \"-1\" is not a count".to_owned())
+    );
+    assert_eq!(
+        with(&["--restart-pause-ms", "soon"]),
+        Err("--restart-pause-ms: \"soon\" is not a count".to_owned())
+    );
+    assert_eq!(
         with(&["--refuse-at", "release"]),
         Err("--refuse-at: \"release\" is not mount or prepare".to_owned())
     );

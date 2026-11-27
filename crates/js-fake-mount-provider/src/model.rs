@@ -233,6 +233,14 @@ impl Store {
         self.record(at_ms, "Mount", answer)
     }
 
+    /// The answer to a `Mount` that came at `at_ms` and was waiting when the provider stopped:
+    /// `UNAVAILABLE`, recorded.
+    pub(crate) fn cut_mount(&mut self, at_ms: u64) -> Refusal {
+        let cut = Refusal::Unavailable("the provider is restarting".to_owned());
+        let recorded = self.record::<()>(at_ms, "Mount", Err(cut));
+        recorded.err().unwrap_or_else(Store::down)
+    }
+
     /// `Release` of `key`, which came at `at_ms`.
     pub(crate) fn release(&mut self, at_ms: u64, key: &Key) -> Result<(), Refusal> {
         let answer = match self.mode {
@@ -372,8 +380,12 @@ mod tests {
         store.set_mode(Mode::Serving);
         assert_eq!(store.mount(3, &key("js.a", 0), false), placed("js.a", 0));
         assert_eq!(
+            store.cut_mount(4),
+            Refusal::Unavailable("the provider is restarting".to_owned())
+        );
+        assert_eq!(
             store.calls(),
-            "0 Prepare ok\n0 Prepare ok\n0 Mount ok\n1 Mount unavailable\n2 Mount ok\n3 Mount ok\n"
+            "0 Prepare ok\n0 Prepare ok\n0 Mount ok\n1 Mount unavailable\n2 Mount ok\n3 Mount ok\n4 Mount unavailable\n"
         );
     }
 

@@ -820,10 +820,10 @@ farm's flags is made to them in the same way.
 | The agent updated while a job runs | from the previous release in `testing` to this one (the package installed, the handover file written, the unit restarted): the host lists the new version within 60 s, the job is still running then (handed over, not drained), and it ends with exit code 0 in its first attempt |
 | The server unreachable for 60 s | the job keeps running, the agent is back in a session within 30 s of the server's return, and the job ends with exit code 0 |
 | The server's name not found for 60 s after the first contact | the host is listed live and the agent's health route answers 200 at every probe of the 60 s |
-| J5, 20 starts at a placement limit of 2, the provider's store stalled for the first 30 s (refused at `Mount`, as tierstore answers) | in no 30 s do more than 20 Prepare calls, nor more than 20 Mount calls, reach the provider; one Release per job reaches it; every job ends, none as its own fault (all but a success and a start failed `INPUT_UNAVAILABLE`) |
+| J5, 20 starts at a placement limit of 2, the provider's store stalled for the first 30 s (refused at `Mount`, as tierstore answers) | in no 30 s do more than 20 Prepare calls, nor more than 20 Mount calls, reach the provider; as many Releases as jobs reach it; every job ends, none as its own fault (all but a success and a start failed `INPUT_UNAVAILABLE`) |
 | J5, the same burst with the limit met at `Prepare` (as tierstore answered when the agent's retry storm was seen) | the same |
-| J5, the provider restarted while 6 starts wait | at least 6 Prepare calls reach it after the restart, and every job ends with exit code 0 |
-| J5, the provider answering every call unavailable for 60 s while 6 starts wait | every job ends with exit code 0 |
+| J5, the provider restarted while 6 starts wait | at least 6 Prepare calls reach it after the restart, and every job succeeds |
+| J5, the provider answering every call unavailable for 60 s while 6 starts wait | every job succeeds |
 | J5, a ref the provider refuses | the start fails `provider-refused` (the job's own fault), after one Prepare |
 
 A manual run of `js-blackbox.yml` (`gh workflow run js-blackbox.yml --ref <branch> -f

@@ -21,10 +21,12 @@
 //! - `j5-refused`: one start whose ref the provider refuses.
 //!
 //! Each leaves the provider serving with no limit to speak of, as the rig's other scenarios
-//! need it.
+//! need it, whatever it came to; one that did not pass also cancels the jobs it left
+//! ([`guarded`]).
 
 use std::io::{Read as _, Write as _};
 use std::os::unix::net::UnixStream;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 use std::time::Duration;
 
@@ -44,6 +46,9 @@ const SERVING_LIMIT: usize = 1024;
 /// The ref of a tree the provider refuses (the fake refuses every ref with this beginning).
 const REFUSED_REF: &str = "refused/blackbox-tree";
 
+/// How long the fake provider has to answer a command on its control socket.
+const CONTROL_LIMIT: Duration = Duration::from_secs(60);
+
 /// The fake provider's control socket.
 struct Provider<'a>(&'a Path);
 
@@ -52,6 +57,10 @@ impl Provider<'_> {
     fn tell(&self, line: &str) -> Result<String, String> {
         let mut stream = UnixStream::connect(self.0)
             .map_err(|e| format!("the provider's control socket {}: {e}", self.0.display()))?;
+        stream
+            .set_read_timeout(Some(CONTROL_LIMIT))
+            .and_then(|()| stream.set_write_timeout(Some(CONTROL_LIMIT)))
+            .map_err(|e| format!("the provider's control socket: {e}"))?;
         stream
             .write_all(format!("{line}\n").as_bytes())
             .map_err(|e| format!("tell the provider {line:?}: {e}"))?;
@@ -143,6 +152,29 @@ impl Rig {
     }
 }
 
+/// Runs the scenario `body`, which gathers the jobs it submits, and then, whatever it came to
+/// (a panic included): leaves the provider serving, and when the scenario did not pass, cancels
+/// the jobs it left and waits for them to end, so that none of them calls the provider in the
+/// next scenario.
+fn guarded(
+    rig: &Rig,
+    body: fn(&Rig, &mut Vec<String>) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut jobs = Vec::new();
+    let outcome = catch_unwind(AssertUnwindSafe(|| body(rig, &mut jobs)))
+        .unwrap_or_else(|_| Err("the scenario panicked (its message is above)".to_owned()));
+    let left = rig.provider().leave();
+    if outcome.is_err() {
+        for id in &jobs {
+            let _ = rig
+                .client()
+                .post(&format!("/v1/jobs/{id}:cancel"), &json!({}));
+        }
+        let _ = rig.all_ended(&jobs);
+    }
+    outcome.and(left)
+}
+
 /// How the jobs ended, one line each, for a failure's report.
 fn ends(ended: &[(String, JobSeen)]) -> String {
     let lines: Vec<String> = ended
@@ -218,19 +250,19 @@ fn verdict(
 /// (the retry storm of a provider at its placement limit, about 1,000 calls a second), a store
 /// refusal that fails a start as the job's own fault, and a start left waiting when the
 /// Releases free placements.
-pub(super) fn burst(rig: &Rig) -> Result<(), String> {
+fn burst_body(rig: &Rig, jobs: &mut Vec<String>) -> Result<(), String> {
     rig.steady()?;
     let provider = rig.provider();
     provider.set(&format!("reset {MAX_PLACEMENTS} mount"))?;
     provider.set("stall")?;
     let ids = rig.submit_burst("j5-burst", BURST, "blackbox-tree");
+    jobs.extend(ids.iter().cloned());
     provider.wait_calls("Prepare", BURST)?;
     watch(|w| w.hold(STALL, &mut || Ok(()))).kept("the store's stall")?;
     let held = provider.calls()?;
     provider.set("serve")?;
     let ended = rig.all_ended(&ids)?;
     let calls = provider.wait_calls("Release", BURST)?;
-    provider.leave()?;
     let mut wrong = judge_burst(&calls, &ended);
     if !held
         .iter()
@@ -246,14 +278,14 @@ pub(super) fn burst(rig: &Rig) -> Result<(), String> {
 
 /// `j5-burst-at-prepare`: the same burst against a provider that places at Prepare and refuses a
 /// new source there at its limit; catches the retry storm on Prepare.
-pub(super) fn burst_at_prepare(rig: &Rig) -> Result<(), String> {
+fn burst_at_prepare_body(rig: &Rig, jobs: &mut Vec<String>) -> Result<(), String> {
     rig.steady()?;
     let provider = rig.provider();
     provider.set(&format!("reset {MAX_PLACEMENTS} prepare"))?;
     let ids = rig.submit_burst("j5-prepare", BURST, "blackbox-tree");
+    jobs.extend(ids.iter().cloned());
     let ended = rig.all_ended(&ids)?;
     let calls = provider.wait_calls("Release", BURST)?;
-    provider.leave()?;
     let mut wrong = judge_burst(&calls, &ended);
     if !calls
         .iter()
@@ -266,19 +298,19 @@ pub(super) fn burst_at_prepare(rig: &Rig) -> Result<(), String> {
 
 /// `j5-restart`: catches an agent that, when the provider restarts and forgets the starts it
 /// was preparing, keeps asking it to Mount them instead of sending Prepare again.
-pub(super) fn restart(rig: &Rig) -> Result<(), String> {
+fn restart_body(rig: &Rig, jobs: &mut Vec<String>) -> Result<(), String> {
     rig.steady()?;
     let provider = rig.provider();
     provider.set(&format!("reset {MAX_PLACEMENTS} mount"))?;
     provider.set("stall")?;
     let ids = rig.submit_burst("j5-restart", WAITING, "blackbox-tree");
+    jobs.extend(ids.iter().cloned());
     provider.wait_calls("Prepare", WAITING)?;
     provider.set("restart")?;
     provider.wait_calls("Restart", 1)?;
     provider.set("serve")?;
     let ended = rig.all_ended(&ids)?;
     let calls = provider.wait_calls("Release", WAITING)?;
-    provider.leave()?;
     let restarted = calls
         .iter()
         .position(|c| c.method == "Restart")
@@ -306,18 +338,18 @@ pub(super) fn restart(rig: &Rig) -> Result<(), String> {
 }
 
 /// `j5-outage`: catches a start that fails while the provider answers unavailable for a minute.
-pub(super) fn outage(rig: &Rig) -> Result<(), String> {
+fn outage_body(rig: &Rig, jobs: &mut Vec<String>) -> Result<(), String> {
     rig.steady()?;
     let provider = rig.provider();
     provider.set(&format!("reset {MAX_PLACEMENTS} mount"))?;
     provider.set("unavailable")?;
     let ids = rig.submit_burst("j5-outage", WAITING, "blackbox-tree");
+    jobs.extend(ids.iter().cloned());
     provider.wait_calls("Prepare", 1)?;
     watch(|w| w.hold(PROVIDER_OUTAGE, &mut || Ok(()))).kept("the provider's outage")?;
     provider.set("serve")?;
     let ended = rig.all_ended(&ids)?;
     let calls = provider.wait_calls("Release", WAITING)?;
-    provider.leave()?;
     let wrong: Vec<String> = ended
         .iter()
         .filter(|(_, j)| j.state != js_blackbox::SUCCEEDED)
@@ -333,16 +365,16 @@ pub(super) fn outage(rig: &Rig) -> Result<(), String> {
 
 /// `j5-refused`: the boundary of "not the job's fault": a ref the provider refuses fails the
 /// start as the job's own fault (`provider-refused`), and the agent asks once.
-pub(super) fn refused(rig: &Rig) -> Result<(), String> {
+fn refused_body(rig: &Rig, jobs: &mut Vec<String>) -> Result<(), String> {
     rig.steady()?;
     let provider = rig.provider();
     provider.set(&format!("reset {MAX_PLACEMENTS} mount"))?;
     let ids = rig.submit_burst("j5-refused", 1, REFUSED_REF);
+    jobs.extend(ids.iter().cloned());
     let ended = rig.all_ended(&ids)?;
     // Long enough for an agent that asks again to have asked (its first wait is about a second).
     watch(|w| w.hold(Duration::from_secs(10), &mut || Ok(()))).kept("the wait for a second ask")?;
     let calls = provider.calls()?;
-    provider.leave()?;
     let asked = calls.iter().filter(|c| c.method == "Prepare").count();
     let mut wrong: Vec<String> = ended
         .iter()
@@ -362,4 +394,29 @@ pub(super) fn refused(rig: &Rig) -> Result<(), String> {
         ));
     }
     verdict(&wrong, &calls, &ended)
+}
+
+/// `j5-burst`: see [`burst_body`].
+pub(super) fn burst(rig: &Rig) -> Result<(), String> {
+    guarded(rig, burst_body)
+}
+
+/// `j5-burst-at-prepare`: see [`burst_at_prepare_body`].
+pub(super) fn burst_at_prepare(rig: &Rig) -> Result<(), String> {
+    guarded(rig, burst_at_prepare_body)
+}
+
+/// `j5-restart`: see [`restart_body`].
+pub(super) fn restart(rig: &Rig) -> Result<(), String> {
+    guarded(rig, restart_body)
+}
+
+/// `j5-outage`: see [`outage_body`].
+pub(super) fn outage(rig: &Rig) -> Result<(), String> {
+    guarded(rig, outage_body)
+}
+
+/// `j5-refused`: see [`refused_body`].
+pub(super) fn refused(rig: &Rig) -> Result<(), String> {
+    guarded(rig, refused_body)
 }

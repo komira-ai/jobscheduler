@@ -253,7 +253,8 @@ async fn the_provider_answers_on_its_socket() {
 /// call; and a Mount whose tree cannot be made is `INTERNAL`.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stall_holds_mount_and_unavailable_refuses_every_call() {
-    let fake = Running::start("jsfmp-stall", &[]);
+    // A wait long enough that the held Mount is still held when the test serves again.
+    let fake = Running::start("jsfmp-stall", &["--mount-wait-ms", "3000"]);
     let mut client = fake.client().await;
     client
         .prepare(prepare("js.a", "cas/l/1"))
@@ -305,13 +306,30 @@ async fn a_stall_holds_mount_and_unavailable_refuses_every_call() {
 /// after a reset.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_restart_forgets_the_sources_and_a_reset_moves_the_limit() {
-    let fake = Running::start("jsfmp-restart", &["--restart-pause-ms", "500"]);
+    let fake = Running::start(
+        "jsfmp-restart",
+        &["--restart-pause-ms", "500", "--mount-wait-ms", "60000"],
+    );
     let mut client = fake.client().await;
     client
         .prepare(prepare("js.a", "cas/l/1"))
         .await
         .expect("prepared");
+    // A Mount held by a stall is answered at once by the restart, not after its wait.
+    assert_eq!(fake.tell("stall"), "ok\n");
+    let mut waiting = client.clone();
+    let held = tokio::spawn(async move { waiting.mount(mount("js.a")).await });
+    tokio::task::block_in_place(|| fake.wait_waiting(1));
     assert_eq!(fake.tell("restart"), "ok\n");
+    let cut = held
+        .await
+        .expect("the task")
+        .expect_err("cut by the restart");
+    assert_eq!(
+        (cut.code(), cut.message()),
+        (Code::Unavailable, "the provider is restarting")
+    );
+    tokio::task::block_in_place(|| fake.wait_waiting(0));
     // The socket is gone for the pause and then bound again.
     tokio::task::block_in_place(|| {
         assert!(
@@ -339,6 +357,24 @@ async fn a_restart_forgets_the_sources_and_a_reset_moves_the_limit() {
     assert_eq!(calls.lines().count(), 1, "{calls}");
     assert!(calls.ends_with(" Prepare unavailable\n"), "{calls}");
     assert_eq!(fake.quit(), ExitCode::SUCCESS);
+}
+
+/// Asserts that a provider socket that cannot be bound again after a restart ends the program
+/// with status 1.
+#[test]
+fn a_socket_not_bound_again_after_a_restart_ends_the_program() {
+    let mut fake = Running::start("jsfmp-rebind", &["--restart-pause-ms", "500"]);
+    assert_eq!(fake.tell("restart"), "ok\n");
+    assert!(
+        eventually(|| !fake.socket.exists()),
+        "the provider socket closed"
+    );
+    std::fs::create_dir(&fake.socket).expect("a directory where the socket goes");
+    let ended = fake.ended.take().expect("running");
+    assert_eq!(
+        ended.join().expect("the program's thread"),
+        ExitCode::from(1)
+    );
 }
 
 /// Asserts the control socket's refusals, by their full text, and that a client that sends
