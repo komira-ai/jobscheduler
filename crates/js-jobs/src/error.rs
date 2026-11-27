@@ -116,6 +116,14 @@ pub enum JobStoreError {
         /// The pool.
         pool: String,
     },
+    /// The host's row was heard within the grace and names another agent process than the
+    /// hello's (or the hello names none), so the hello of a second agent process on a live
+    /// host is refused ([`crate::JobStore::hello_node_in_pool`]).
+    #[error("host {host} is live, so another agent process is not admitted on it")]
+    HostLive {
+        /// The host.
+        host: HostId,
+    },
     /// The host's cordon row changed between the read and the commit of a cordon, a lift or a
     /// restore; the caller reads it again and retries.
     #[error("the cordon of host {host} changed while the operation ran")]
@@ -298,6 +306,10 @@ mod tests {
                     pool: "burst".to_owned(),
                 },
                 "pool burst is full, so host h is not admitted",
+            ),
+            (
+                JobStoreError::HostLive { host: host.clone() },
+                "host h is live, so another agent process is not admitted on it",
             ),
             (
                 JobStoreError::CordonConflict { host: host.clone() },

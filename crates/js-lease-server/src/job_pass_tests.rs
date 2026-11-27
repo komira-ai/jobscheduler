@@ -28,7 +28,8 @@ use crate::agent_api::job_rig::{
 use crate::api::rig::{Lines, process_sink};
 use crate::config::FeedRetention;
 use crate::job_api::JobApi;
-use crate::job_api::read::{Ctx, Silence};
+use crate::job_api::read::Ctx;
+use crate::job_api::read::silence::Silence;
 use crate::job_api::roles::as_operator;
 use crate::job_expiry::JobLimits;
 use crate::job_loss::{Observe, Seen};
@@ -50,9 +51,10 @@ const NEVER: JobLimits = JobLimits {
     ..JobLimits::DEFAULT
 };
 
-/// The job service over the rig's tables and clock, reading host silence from its registry.
+/// The job service over the rig's tables and clock, reading host silence from the hosts' rows
+/// by its registry's graces.
 fn api(rig: &Rig) -> JobApi {
-    let silence: Arc<dyn Silence> = Arc::new(rig.agents.registry.clone());
+    let silence = Silence::of(rig.agents.registry.clone());
     let read = Ctx::default().with_silence(silence);
     JobApi::new(Arc::clone(&rig.jobs), rig.shared.clone()).with_read(read)
 }

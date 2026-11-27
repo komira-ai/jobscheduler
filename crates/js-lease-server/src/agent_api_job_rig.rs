@@ -101,6 +101,14 @@ pub(crate) fn tables_on(
     (store, jobs.with_retention(retention))
 }
 
+/// The agent process every hello of `host` through a rig names: a host of a rig has one agent
+/// process, so a hello of a host whose row is live (a server rebuilt on the store, a host the
+/// registry removed and that says hello again) takes the host over at once, as the same agent
+/// saying hello again does.
+fn agent_process(host: &str) -> String {
+    format!("proc-{host}")
+}
+
 /// When a rig's clock starts: the registry's reading, in milliseconds.
 pub(crate) const START_MS: u64 = 5_000_000;
 
@@ -463,6 +471,7 @@ impl Rig {
             "host_id": host,
             "pool": "burst",
             "agent_version": "0.1.0",
+            "agent_process": agent_process(host),
             "shape": self.shape(),
             "capabilities": capabilities,
             "phase": "serving",
@@ -548,6 +557,7 @@ impl Rig {
             "host_id": host,
             "pool": "burst",
             "agent_version": "0.1.0",
+            "agent_process": agent_process(host),
             "shape": self.shape(),
             "capabilities": capabilities,
             "phase": "serving",
