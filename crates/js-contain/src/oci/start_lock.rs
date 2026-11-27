@@ -71,22 +71,26 @@ struct Held {
 /// lease in `lease`. For a host lease ([`host_start`]) `lock` is held from before `crun`
 /// starts until its pid file is there or it has ended ([`Held::across`]), and `crun` is
 /// given the pid file; any other lease's run, and every run without a `lock`, takes none.
-/// The result is `crun run`'s.
+/// The result is `crun run`'s. The lock is waited for on the caller's thread: a run has its
+/// runtime to itself (the supervisor's, or its own thread's), and nothing it drives has
+/// started yet.
 ///
 /// # Errors
-/// The lock of a host lease could not be taken ([`take`]): `crun` is not started.
+/// The lock of a host lease could not be taken ([`take`]): `crun` is not started, and the
+/// error is a [`FileSystemError`](runc::error::Error::FileSystemError) saying why.
 pub(crate) async fn run(
     client: &Runc,
     (lease, lock): (&Path, Option<&Path>),
     (id, bundle): (&str, &Path),
     opts: CreateOpts,
-) -> Result<runc::Result<()>, String> {
-    match host_start(lease, lock).await? {
-        Some(held) => {
+) -> runc::Result<()> {
+    match host_start(lease, lock) {
+        Ok(Some(held)) => {
             let opts = opts.pid_file(pid_file(lease));
-            Ok(held.across(client.run(id, bundle, Some(&opts))).await)
+            held.across(client.run(id, bundle, Some(&opts))).await
         }
-        None => Ok(client.run(id, bundle, Some(&opts)).await),
+        Ok(None) => client.run(id, bundle, Some(&opts)).await,
+        Err(why) => Err(runc::error::Error::FileSystemError(why)),
     }
 }
 
@@ -96,7 +100,7 @@ pub(crate) async fn run(
 ///
 /// # Errors
 /// The lock could not be taken ([`take`]).
-async fn host_start(lease: &Path, lock: Option<&Path>) -> Result<Option<Held>, String> {
+fn host_start(lease: &Path, lock: Option<&Path>) -> std::io::Result<Option<Held>> {
     let Some(lock) = lock else {
         return Ok(None);
     };
@@ -104,7 +108,7 @@ async fn host_start(lease: &Path, lock: Option<&Path>) -> Result<Option<Held>, S
     if !marker.is_ok_and(|meta| meta.is_file()) {
         return Ok(None);
     }
-    take(lease, lock).await.map(Some)
+    take(lease, lock).map(Some)
 }
 
 /// Takes the lock `lock` (made with mode `0600` if it is not there, never through a link),
@@ -114,13 +118,11 @@ async fn host_start(lease: &Path, lock: Option<&Path>) -> Result<Option<Held>, S
 ///
 /// # Errors
 /// The lock could not be opened or taken, or the old pid file could not be removed.
-async fn take(lease: &Path, lock: &Path) -> Result<Held, String> {
-    let lock = lock.to_owned();
-    let taken = tokio::task::spawn_blocking(move || lock_file(&lock)).await;
-    let lock = taken.map_err(|e| format!("the host start lock: {e}"))??;
+fn take(lease: &Path, lock: &Path) -> std::io::Result<Held> {
+    let lock = lock_file(lock)?;
     let pid_file = pid_file(lease);
     if pid_file.symlink_metadata().is_ok() {
-        std::fs::remove_file(&pid_file).map_err(|e| format!("{}: {e}", pid_file.display()))?;
+        std::fs::remove_file(&pid_file).map_err(|e| said(&pid_file.display(), &e))?;
     }
     Ok(Held {
         _lock: lock,
@@ -130,19 +132,23 @@ async fn take(lease: &Path, lock: &Path) -> Result<Held, String> {
 
 /// Opens `path` (made with mode `0600` if it is not there, never through a link) and takes
 /// an exclusive `flock` on it, waiting for whoever holds it.
-fn lock_file(path: &Path) -> Result<File, String> {
-    let file = OpenOptions::new()
+fn lock_file(path: &Path) -> std::io::Result<File> {
+    let opened = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
-        .map_err(|e| format!("the host start lock {}: {e}", path.display()))?;
-    file.lock()
-        .map_err(|e| format!("the host start lock {}: {e}", path.display()))?;
-    Ok(file)
+        .open(path);
+    let locked = opened.and_then(|file| file.lock().map(|()| file));
+    let what = format!("the host start lock {}", path.display());
+    locked.map_err(|e| said(&what, &e))
+}
+
+/// `error`, of its kind, said of `what`: `<what>: <error>`.
+fn said(what: &dyn std::fmt::Display, error: &std::io::Error) -> std::io::Error {
+    std::io::Error::new(error.kind(), format!("{what}: {error}"))
 }
 
 impl Held {

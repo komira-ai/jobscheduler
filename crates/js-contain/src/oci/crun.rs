@@ -345,10 +345,9 @@ impl Crun {
         let lock = self.start_lock.as_deref();
         let ran = super::start_lock::run(&client, (lease, lock), (id, bundle), opts);
         match ran.await {
-            Err(why) => RunEnd::Failed(why),
-            Ok(Ok(())) => RunEnd::Exited(0),
-            Ok(Err(Error::CommandFailed { status, .. })) => RunEnd::Exited(code_of(status)),
-            Ok(Err(e)) => RunEnd::Failed(format!("crun run: {e}")),
+            Ok(()) => RunEnd::Exited(0),
+            Err(Error::CommandFailed { status, .. }) => RunEnd::Exited(code_of(status)),
+            Err(e) => RunEnd::Failed(format!("crun run: {e}")),
         }
     }
 

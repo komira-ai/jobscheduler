@@ -216,11 +216,36 @@ fn a_host_start_fails_without_starting_crun_when_its_lock_cannot_be_opened() {
     assert_eq!(
         running.join().expect("the run"),
         RunEnd::Failed(format!(
-            "the host start lock {}: No such file or directory (os error 2)",
+            "crun run: Error occurs with fs: the host start lock {}: No such file or directory \
+             (os error 2)",
             s.lock.display()
         ))
     );
     assert_eq!(s.pid_arg(), None, "crun was started");
+}
+
+/// Proves a host start whose old pid file cannot be removed (a directory with an entry in it
+/// stands at its path) fails, naming the path and why, lets the lock go, and never starts
+/// `crun`. Catches a start that runs `crun` with a pid file already there, which would let the
+/// lock go before `crun` has passed its `/dev` step.
+#[test]
+fn a_host_start_fails_without_starting_crun_when_the_old_pid_file_cannot_be_removed() {
+    let s = stage("stuck-pid", true);
+    let pid_file = s.lease.join("crun.pid");
+    std::fs::create_dir_all(pid_file.join("entry")).expect("a directory at the pid file");
+    let running = s.start(s.crun("exit 0"));
+    assert_eq!(
+        running.join().expect("the run"),
+        RunEnd::Failed(format!(
+            "crun run: Error occurs with fs: {}: Is a directory (os error 21)",
+            pid_file.display()
+        ))
+    );
+    assert_eq!(s.pid_arg(), None, "crun was started");
+    assert!(
+        s.probe().try_lock().is_ok(),
+        "the lock is kept after the failed start"
+    );
 }
 
 /// Proves a daemon that is not root runs a host lease's `crun` with no lock and no pid file:
