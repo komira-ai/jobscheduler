@@ -28,7 +28,7 @@ Columns:
 
 | Page | Rows | Built | Partly | Not built | New issues |
 |---|---|---|---|---|---|
-| multi-instance.md | 29 | 2 | 6 | 17 | komira-ai/jobscheduler#1136, komira-ai/jobscheduler#1137, komira-ai/jobscheduler#1138, komira-ai/jobscheduler#1139, komira-ai/jobscheduler#1140, komira-ai/jobscheduler#1141, komira-ai/jobscheduler#1142 |
+| multi-instance.md | 29 | 3 | 6 | 16 | komira-ai/jobscheduler#1136, komira-ai/jobscheduler#1137, komira-ai/jobscheduler#1138, komira-ai/jobscheduler#1139, komira-ai/jobscheduler#1140, komira-ai/jobscheduler#1141, komira-ai/jobscheduler#1142 |
 | placement-profiles-live.md | 25 | 9 | 6 | 3 | komira-ai/jobscheduler#1143, komira-ai/jobscheduler#1144, komira-ai/jobscheduler#1193 |
 | start-latency.md | 14 | 2 | 2 | 4 | komira-ai/jobscheduler#1145, komira-ai/jobscheduler#1146, komira-ai/jobscheduler#1147 |
 | whole-node.md | 27 | 13 | 4 | 3 | komira-ai/jobscheduler#1148, komira-ai/jobscheduler#1149, komira-ai/jobscheduler#1150, komira-ai/jobscheduler#1193 |
@@ -69,7 +69,7 @@ Columns:
 
 ## multi-instance.md
 
-As read: Status: design, living document. Most gaps are Built (G2, G4 mostly, G5 mostly, G7, G15, G19 server and agent). Still Designed: G3 removal, G5 leftovers, G6, G9, G11, G12, G16.
+As read: Status: design, living document. Most gaps are Built (G2, G4 mostly, G5 mostly, G7, G12, G15, G19 server and agent). Still Designed: G3 removal, G5 leftovers, G6, G9, G11, G16.
 
 | Section | Claim | On main | Tracking |
 |---|---|---|---|
@@ -90,17 +90,17 @@ As read: Status: design, living document. Most gaps are Built (G2, G4 mostly, G5
 | G11 (s3.7) profile eviction | Profile curves eviction at the scanned version | no | komira-ai/jobscheduler#1140 (new) |
 | G11 (s3.1) import loser starts | The first-start import's loser reads the marker and starts instead of exiting 2 | no | komira-ai/jobscheduler#1140 (new) |
 | G11 (s9) stale doc | Fix the stale 'one writer' doc in js-usage/src/store.rs | no | komira-ai/jobscheduler#1140 (new) |
-| G12 (s6, s9, s11) | Job-store cutover tools: a dry-run copy of `<state-file>.jobs` into the store with counts and checksum per prefix, and a Postgres-to-SQLite export of job and usage rows, round-trip test | no | komira-ai/jobscheduler#1141 (new) |
+| G12 (s6, s9, s11) | Job-store cutover tools: a dry-run copy of `<state-file>.jobs` into the store with counts and checksum per prefix, and a Postgres-to-SQLite export of job and usage rows, round-trip test | `crates/js-lease-server/src/cutover.rs:161` (`js-lease-server job-store copy`, a dry run unless `--write`), `crates/js-lease-server/src/cutover.rs:191` (`job-store export`), `crates/js-lease-server/src/cutover/rows.rs:178` (counts and SHA-256 per prefix); round trip `crates/js-lease-server/src/cutover_tests.rs:496`, through Postgres `:526`; runbook `docs/runbooks/state-database.md` section 6 | komira-ai/jobscheduler#1141 |
 | G16 (s0, s3.3 held beats, s9, s12 order step 4) | LISTEN/NOTIFY wakes placement (queue channel) and the host's dispatch poll (host channel); relisten wakes every waiter once | no | komira-ai/jobscheduler#1142 (new) |
 | G19 (s0.2, s9) wake on NOTIFY | A held dispatch poll wakes on the host's NOTIFY from another instance | no | komira-ai/jobscheduler#1142 (new) |
 | G19 (s0.2, s9) latency measurement | Measure start latency placement-to-ack, p50 and p90, with and without the poll, on the deployment, and report both in the PR | no | - |
 | G19 (s0.2, s9, s0.1) rest of G19 | Dispatch queue, route, claim, ack, drain, hello capability, agent poller | yes: js-jobs/src/store/dispatch.rs:183,242; js-lease-server/src/agent_api/dispatch.rs:97,157,248; agent_api.rs:341; js-agent/src/dispatch/ (poller.rs, serve.rs), js-agent/src/contract.rs; js-agent/src/lifecycle/mod.rs:12-25. | komira-ai/jobscheduler#944; komira-ai/jobscheduler#949; komira-ai/jobscheduler#1067; komira-ai/jobscheduler#1080 |
 | s0.1 version-skew tests | Tests: the release before hands out a message the new placer wrote, and the agent starts it; a job placed by the release before reaches a polling agent through the beat's reply | partly: `crates/js-lease-server/src/per_job.rs:181`, `crates/js-agent/tests/agent/skew/record.rs` | - |
 | s12 hazard table (live hazards) | Hazards: admission before hellos, binding save, taint beside host job, taint clear, host on two instances, token 401, pool cap, ListHosts, lost whole-host start, minute of usage, drain | partly: Closed ones: pool cap nodes.rs pool_admits, ListHosts hosts.rs:352, taint placement host_rows.rs:80, drain drain.rs:28 | komira-ai/jobscheduler#1136 (new); komira-ai/jobscheduler#1137 (new); komira-ai/jobscheduler#1138 (new); komira-ai/jobscheduler#1139 (new); komira-ai/jobscheduler#1140 (new); komira-ai/jobscheduler#1141 (new); komira-ai/jobscheduler#1142 (new) |
-| s9 pull request list: order of safety (s12) | Order: G2, G3 before G15; G15, G4, G5, G7, G19, G11 minute fold close the live hazards; then G6, G9, G16, rest of G11, G12 | partly: Done: G2, G15 (komira-ai/jobscheduler#942, komira-ai/jobscheduler#948), G7 (komira-ai/jobscheduler#946), G5 mostly, G19 (komira-ai/jobscheduler#944, komira-ai/jobscheduler#949), G4 mostly | komira-ai/jobscheduler#1136 (new); komira-ai/jobscheduler#1137 (new); komira-ai/jobscheduler#1138 (new); komira-ai/jobscheduler#1139 (new); komira-ai/jobscheduler#1140 (new); komira-ai/jobscheduler#1141 (new); komira-ai/jobscheduler#1142 (new) |
+| s9 pull request list: order of safety (s12) | Order: G2, G3 before G15; G15, G4, G5, G7, G19, G11 minute fold close the live hazards; then G6, G9, G16, rest of G11 (G12 built) | partly: Done: G2, G15 (komira-ai/jobscheduler#942, komira-ai/jobscheduler#948), G7 (komira-ai/jobscheduler#946), G5 mostly, G19 (komira-ai/jobscheduler#944, komira-ai/jobscheduler#949), G4 mostly, G12 (komira-ai/jobscheduler#1141) | komira-ai/jobscheduler#1136 (new); komira-ai/jobscheduler#1137 (new); komira-ai/jobscheduler#1138 (new); komira-ai/jobscheduler#1139 (new); komira-ai/jobscheduler#1140 (new); komira-ai/jobscheduler#1141 (new); komira-ai/jobscheduler#1142 (new) |
 | s9 G1, G8, G10, G13, G14, G17, G18 | Gaps shrunk into G15 or deleted | superseded: The page itself strikes these out in s9 (lines 515-521). | komira-ai/jobscheduler#883 |
 | s10 supersession pointers | deployment.md gets a pointer here; jobscheduler-design.md s10.1 amended by G15; configuration.md 'What it keeps' changed by G3 and G4 | partly: `docs/design/deployment.md:146`, `docs/design/configuration.md:15` | - |
-| s11 decisions | G12 stays Designed; G3 removes tokens instead of making them N-safe; settlement needs heard_at; PoolFull takes a pool row lock | partly: heard_at: js-jobs/src/store/nodes.rs:267-284 (forget_silent_nodes uses it); PoolFull: nodes.rs pool_admits and keys.rs:38-42 pool/. G3 and G12 not built (see rows above). | - |
+| s11 decisions | G12 is built; G3 removes tokens instead of making them N-safe; settlement needs heard_at; PoolFull takes a pool row lock | partly: heard_at: js-jobs/src/store/nodes.rs:267-284 (forget_silent_nodes uses it); PoolFull: nodes.rs pool_admits and keys.rs:38-42 pool/. G3 not built (see rows above); G12 built (see its row). | - |
 | Page header 'Status: design' and s2/s3 tag claims | The page is a living doc: each PR turns Designed to Built and names code | yes: Most rows carry Built with paths; spot checks matched (dispatch.rs:97, nodes.rs, keys.rs:36, forget_silent_nodes). | - |
 
 ## placement-profiles-live.md
