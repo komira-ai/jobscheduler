@@ -2,12 +2,16 @@
 //! a class that passes the four checks book it (`docs/design/placement-profiles-live.md`
 //! sections 2 to 4).
 //!
-//! The trace has each job's mean and five-second peak, not its series, so the replay teaches
-//! on what it synthesised: at each successful run's end the class's `js_sizing::Profile` is
-//! taught the run's own phases ([`crate::shape`]) as a series of 2 s means, in sixteenths of a
-//! core, and its [`SeriesWindow`] that the series was usable (every synthesised series is). A
-//! job of a class that passes [`Checks`] books [`Curve::of`] the profile, with the flat step
-//! (the `Learned` booking) where a slot has too few runs; every other job books flat.
+//! Each class learns as the job service's history does (`sizes_profile.rs` in
+//! `js-sched-placer`): at each successful run's end, the series its host recorded
+//! ([`crate::trace::Job::cpu_series`]) teaches the class's `js_sizing::Profile` when it is
+//! usable ([`crate::shape::usable`]: whole, and agreeing with the run's CPU time), and the
+//! class's [`SeriesWindow`] records whether it was; a run with no series, or one that is no
+//! success, of a class that exists records an unusable one. A run is clean when the replay
+//! slowed it by less than a tenth of its run ([`clean`]), the bound the job service puts on its
+//! node's CPU pressure. Nothing is taught from a job of the held-out part ([`super::Setup`]). A job of
+//! a class that passes [`Checks`] books [`Curve::of`] the profile, with the flat step (the
+//! `Learned` booking) where a slot has too few runs; every other job books flat.
 //!
 //! [`Rule::Packed`](super::Rule::Packed) places by the curves: a host takes a job when, at
 //! every slot ahead, what its jobs are charged ([`Curve::charge`], their flat booking when
@@ -21,12 +25,14 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use js_sizing::{
-    CPU_UNIT, CURVE_SLOTS, Checks, Clamp, Curve, Profile, RunSeries, SLOT_SECS, SeriesWindow,
-    TAIL_SLOT,
+    CPU_PRESSURE_MAX_PERMILLE, CPU_UNIT, CURVE_SLOTS, Checks, Clamp, Curve, Profile, RunSeries,
+    SLOT_SECS, SeriesWindow, TAIL_SLOT,
 };
+use js_types::CpuSeries;
 
 use super::{Bookings, Host, Running, World};
-use crate::shape::Phase;
+use crate::shape;
+use crate::trace::End;
 
 /// How long a job of a curve class waits at the head of the queue with no host fitting its
 /// curve before it is tested with its flat booking, in milliseconds
@@ -41,6 +47,13 @@ const LEAST_MILLI: u64 = 250;
 
 /// A slot books at most this part of a host's cores: a quarter, rounded down to a quarter core.
 const HOST_SHARE: u64 = 4;
+
+/// Whether a run that ran `ran_ms` from its start and was slowed `slowed_ms` of it is clean: its
+/// slowdown is under [`CPU_PRESSURE_MAX_PERMILLE`] of its run, as the job service takes a run
+/// on a node under that pressure, and as the replay's flat sizing takes one.
+pub(super) fn clean(slowed_ms: u64, ran_ms: u64) -> bool {
+    slowed_ms.saturating_mul(1000) / ran_ms.max(1) < u64::from(CPU_PRESSURE_MAX_PERMILLE)
+}
 
 /// What the replay learns of one class: its profile, whether its runs' series were usable, and
 /// the curve it last booked.
@@ -64,17 +77,32 @@ impl Learning {
         }
     }
 
-    /// Teaches a usable run that ended at `ended_ms` and lasted `run_ms`, whose 2 s means were
-    /// `points`; `clean` when it was not slowed.
-    pub(super) fn teach(&mut self, points: &[u32], run_ms: u64, ended_ms: u64, clean: bool) {
-        let run = RunSeries {
-            granularity_secs: SLOT_SECS,
-            points,
-            run_usec: run_ms.saturating_mul(1000),
-        };
-        self.profile.check_and_learn(run, ended_ms, clean);
-        self.series.push(true);
-        self.booked = None;
+    /// Teaches a successful run that ended at `ended_ms` and used `cpu_ms` of CPU, whose host
+    /// recorded `series`; `clean` when it was not slowed. The profile learns the series when it
+    /// is [`shape::usable`], and the window records whether it was.
+    pub(super) fn teach(
+        &mut self,
+        series: Option<&CpuSeries>,
+        cpu_ms: u64,
+        ended_ms: u64,
+        clean: bool,
+    ) {
+        let usable = series.filter(|series| shape::usable(series, cpu_ms));
+        if let Some(series) = usable {
+            let points: Vec<u32> = series
+                .points
+                .iter()
+                .map(|point| u32::from(*point))
+                .collect();
+            let run = RunSeries {
+                granularity_secs: series.granularity_secs,
+                points: &points,
+                run_usec: series.run_usec,
+            };
+            self.profile.check_and_learn(run, ended_ms, clean);
+            self.booked = None;
+        }
+        self.series.push(usable.is_some());
     }
 
     /// Whether the class passes all four checks.
@@ -111,35 +139,6 @@ impl Curves {
     pub(super) fn placed(&mut self) {
         self.stalled = None;
     }
-}
-
-/// The 2 s means of the demand of `phases` over the `run_ms` that follow their first `from_ms`
-/// (the start of a job holds its booking and asks for nothing, and is no part of its series),
-/// in sixteenths of a core, rounded half up; the last point is the mean of what remains.
-pub(super) fn series(phases: &[Phase], from_ms: u64, run_ms: u64) -> Vec<u32> {
-    let points = run_ms.div_ceil(SLOT_MS);
-    let mut sums = vec![0u128; usize::try_from(points).unwrap_or(0)];
-    let end = from_ms + run_ms;
-    let mut at = 0;
-    for phase in phases {
-        let (from, to) = (at.max(from_ms), (at + phase.ms).min(end));
-        at += phase.ms;
-        for point in (from.saturating_sub(from_ms) / SLOT_MS)..points {
-            let lo = (from_ms + point * SLOT_MS).max(from);
-            let hi = (from_ms + (point + 1) * SLOT_MS).min(to);
-            if hi <= lo {
-                break;
-            }
-            sums[point as usize] += u128::from(hi - lo) * u128::from(phase.milli);
-        }
-    }
-    sums.iter()
-        .enumerate()
-        .map(|(point, sum)| {
-            let len = u128::from(SLOT_MS.min(run_ms - point as u64 * SLOT_MS));
-            u32::try_from((sum * 16 + len * 500) / (len * 1000)).unwrap_or(u32::MAX)
-        })
-        .collect()
 }
 
 impl Running {
@@ -246,20 +245,33 @@ impl World<'_> {
         }
     }
 
-    /// Teaches the class of `run`, a successful run that ended at `end`, its series.
+    /// Teaches the class of `run`, which ended at `end` slowed by `slowed_ms`, what its host
+    /// recorded, when the arm books curves and its job arrived before the held-out part: a
+    /// successful run its series, and one that is no success an unusable series, for a class
+    /// that exists (it starts none).
     pub(super) fn teach_curve(&mut self, run: &Running, end: u64, slowed_ms: u64) {
-        if self.arm.bookings != Bookings::Curve {
+        let jobs = self.jobs;
+        let job = &jobs[run.job];
+        let arrived = job.arrive_ms / self.setup.speed.max(1);
+        let held = self.setup.held_out_ms.is_some_and(|from| arrived >= from);
+        if self.arm.bookings != Bookings::Curve || held {
             return;
         }
-        let from = run.own.saturating_sub(run.run);
-        let points = series(&run.phases, from, run.run);
-        let class = self.jobs[run.job].class;
-        let learning = self
-            .curves
-            .classes
-            .entry(class)
-            .or_insert_with(Learning::new);
-        learning.teach(&points, run.run, end, slowed_ms == 0);
+        let classes = &mut self.curves.classes;
+        if job.end != End::Ok {
+            if let Some(learning) = classes.get_mut(&job.class) {
+                learning.series.push(false);
+            }
+            return;
+        }
+        let learning = classes.entry(job.class).or_insert_with(Learning::new);
+        let ran = end.saturating_sub(run.start).saturating_sub(job.start_ms);
+        learning.teach(
+            job.cpu_series.as_ref(),
+            job.cpu_ms,
+            end,
+            clean(slowed_ms, ran),
+        );
     }
 }
 

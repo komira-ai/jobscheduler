@@ -217,9 +217,10 @@ fn restored_deadlines_and_marks_meet_the_caps() {
 /// Catches: `unplace_keeping_queued_at` undoing what it should refuse, or losing a
 /// restored history. A lease the scheduler does not hold, a running one and one already
 /// undone are refused with nothing changed. A request restored as queued at 20 s with a
-/// bar, granted `b` and undone at 110 s, keeps both: it marks the busy
-/// `a` at once (110 s is past 20 s plus `drain_after`, 30 s), its bar stands,
-/// `b`'s booking is released, and the grant fed back late starts nothing.
+/// bar, granted `b` and undone at 110 s, keeps both: it marks the busy `a` in the round
+/// at 110 s (a `drain_after` of 30 s, deprecated, is not read), its bar stands, its queue
+/// time is still 20 s (the queue's oldest age is 90 s), `b`'s booking is released, and the
+/// grant fed back late starts nothing.
 #[test]
 fn a_requeue_keeps_the_restored_history_and_refuses_what_unplace_refuses() {
     let mut f = farm(cfg(30_000, 2));
@@ -262,6 +263,7 @@ fn a_requeue_keeps_the_restored_history_and_refuses_what_unplace_refuses() {
     let mark = f.s.whole_mark(op).expect("marked");
     assert_eq!((&mark.worker, mark.made), (&w("a"), t(110_000)));
     assert_eq!(f.s.whole_barred(op, t(110_000)), bars);
+    assert_eq!(f.s.queue_snapshot().oldest_age, Some(secs(90)));
 }
 
 /// Catches: a bar that a pinned probe walks past, a bar on a held operation that ends its

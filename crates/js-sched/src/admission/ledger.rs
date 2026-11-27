@@ -11,6 +11,7 @@ use js_types::sched::usage::{LeaseCost, LeaseMinute, NodeLoad};
 use js_types::sched::{FarmTime, LeaseId, Resources};
 
 use super::horizon;
+use super::plausible::{Check, Mark};
 use super::profile::{Lanes, Profile};
 use super::{LoadConfig, LoadCounters, charge};
 use crate::refusal::{Refusal, RefusalKind};
@@ -60,6 +61,12 @@ pub(super) struct Entry {
     /// Some minute of it misfit its CPU curve / memory curve.
     cpu_misfit: bool,
     mem_misfit: bool,
+    /// When placement admitted it; `None` for a lease taken in otherwise (recovered), whose
+    /// start the plausibility check cannot place in a span.
+    admitted: Option<FarmTime>,
+    /// The CPU time its result reported, in microseconds, when it arrived before the lease
+    /// left the ledger.
+    cpu_used: Option<u64>,
 }
 
 impl Entry {
@@ -77,6 +84,8 @@ impl Entry {
             seen_minute: None,
             cpu_misfit: false,
             mem_misfit: false,
+            admitted: None,
+            cpu_used: None,
         }
     }
 
@@ -284,6 +293,8 @@ pub(crate) struct WorkerLoad {
     /// An accepted reading has arrived at some time: the worker measures, even if its
     /// signal is gone for now.
     measured_once: bool,
+    /// Whether its signal is believed ([`super::plausible`]).
+    check: Check,
 }
 
 impl WorkerLoad {
@@ -296,8 +307,28 @@ impl WorkerLoad {
         vm: bool,
         profile: Option<Arc<Profile>>,
     ) {
-        let entry = Entry::new(cost, vm, profile);
+        self.put(lease, Entry::new(cost, vm, profile));
+    }
+
+    /// [`WorkerLoad::insert`] for an action lease placement admits at `now`: the
+    /// plausibility check can count its CPU time once it ends.
+    pub(crate) fn admit(
+        &mut self,
+        lease: LeaseId,
+        cost: LeaseCost,
+        profile: Option<Arc<Profile>>,
+        now: FarmTime,
+    ) {
+        let entry = Entry {
+            admitted: Some(now),
+            ..Entry::new(cost, false, profile)
+        };
+        self.put(lease, entry);
+    }
+
+    fn put(&mut self, lease: LeaseId, entry: Entry) {
         self.totals.shift(&entry, true);
+        self.check.lease_present();
         // A lease booked twice is charged once.
         if let Some(old) = self.ledger.insert(lease, entry) {
             self.totals.shift(&old, false);
@@ -313,6 +344,17 @@ impl WorkerLoad {
             cpu_misfit: entry.cpu_misfit,
             mem_misfit: entry.mem_misfit,
         })
+    }
+
+    /// [`WorkerLoad::remove`] of a lease whose run ended at `now`: an action lease placement
+    /// admitted is kept for the plausibility check.
+    pub(crate) fn end(&mut self, lease: LeaseId, now: FarmTime) -> Option<Ended> {
+        if let Some(entry) = self.ledger.get(&lease)
+            && !entry.vm
+        {
+            self.check.ended(lease, entry.admitted, entry.cpu_used, now);
+        }
+        self.remove(lease)
     }
 
     pub(crate) const fn totals(&self) -> &Totals {
@@ -332,11 +374,39 @@ impl WorkerLoad {
             .collect()
     }
 
+    /// The CPU time `lease`'s result reported, `cpu_usec` microseconds, arrived at `now`, for
+    /// the plausibility check: kept with the lease until it leaves the ledger, or counted at
+    /// once if it has left. Answers whether this worker holds or held `lease`; a VM lease,
+    /// whose CPU the check does not count, is not taken.
+    pub(crate) fn lease_cpu(&mut self, lease: LeaseId, cpu_usec: u64, now: FarmTime) -> bool {
+        match self.ledger.get_mut(&lease) {
+            Some(entry) => {
+                if !entry.vm {
+                    entry.cpu_used = Some(cpu_usec);
+                }
+                true
+            }
+            None => self.check.late_cpu(lease, cpu_usec, now),
+        }
+    }
+
+    /// The worker holds a lease the ledger does not charge (a whole-machine lease): the window
+    /// under way is not idle for the plausibility check.
+    pub(crate) const fn note_lease(&mut self) {
+        self.check.lease_present();
+    }
+
+    /// What the plausibility check holds of the signal ([`super::plausible`]).
+    pub(crate) const fn check(&self) -> &Check {
+        &self.check
+    }
+
     /// A new session: readings of the old one say nothing about the new. The leases
     /// stay charged, uncovered, and what the old session said of their working sets is
     /// forgotten.
     pub(crate) fn new_session(&mut self) {
         self.readings = None;
+        self.check.new_session();
         for entry in self.ledger.values_mut() {
             entry.ws_over = 0;
         }
@@ -396,7 +466,8 @@ impl WorkerLoad {
         }
     }
 
-    /// Takes a heartbeat's reading in, or drops it.
+    /// Takes a heartbeat's reading in, or drops it. `held` is whether the worker holds a
+    /// lease of any kind now, the whole-machine leases the ledger does not charge included.
     ///
     /// The first reading of a session is a baseline and gives no window. After that a reading
     /// is accepted when [`NodeLoad::busy_millicores_since`] gives the window (`seq` above the
@@ -407,12 +478,13 @@ impl WorkerLoad {
     /// whole machine, so the share admission books does not make a legitimate reading
     /// implausible. The window kept is the cores demanded. A dropped reading forgets the
     /// baseline too, so the worker is charged by prediction until two in a row are accepted.
+    /// Each accepted reading is handed to the plausibility check ([`super::plausible`]),
+    /// which can mark the signal, and then the worker is charged by prediction too.
     pub(crate) fn accept(
         &mut self,
         load: NodeLoad,
         now: FarmTime,
-        capacity: &Resources,
-        raw_memory_bytes: u64,
+        (capacity, raw_memory_bytes, held): (&Resources, u64, bool),
         cfg: &LoadConfig,
         counters: &mut LoadCounters,
     ) {
@@ -434,6 +506,14 @@ impl WorkerLoad {
         }
         counters.readings_accepted += 1;
         self.measured_once = true;
+        let mark = Mark::new(now, load.mono_usec, load.cpu_usage_usec);
+        match window {
+            None => self.check.baseline(mark, held),
+            Some((cores, _)) => {
+                self.check
+                    .window(mark, (cores, capacity.cpu_millis), held, counters);
+            }
+        }
         let older = self.readings.as_ref().and_then(|r| r.windows[0]);
         let covered: BTreeSet<LeaseId> = load.covered.iter().copied().collect();
         self.take_clocks(&load, counters);
@@ -497,11 +577,12 @@ impl WorkerLoad {
     }
 
     /// The newest reading when the worker is charged by measurement: it has a window, the
-    /// reading is not older than [`js_types::sched::usage::STALE_WINDOWS`] windows at `now`
-    /// and the actions cgroup has no CPU limit.
+    /// reading is not older than [`js_types::sched::usage::STALE_WINDOWS`] windows at `now`,
+    /// the actions cgroup has no CPU limit and the plausibility check has not marked the
+    /// signal.
     fn fresh_reading(&self, now: FarmTime, cfg: &LoadConfig) -> Option<&NodeLoad> {
         let r = self.readings.as_ref()?;
-        if r.windows[0].is_none() || r.last.actions_cpu_limited {
+        if r.windows[0].is_none() || r.last.actions_cpu_limited || self.check.implausible() {
             return None;
         }
         // The age is read on the scheduler's clock and carried over to the agent's, so
@@ -719,298 +800,5 @@ pub(crate) fn clamped(cost: LeaseCost, capacity: &Resources) -> LeaseCost {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const GIB: u64 = 1 << 30;
-
-    fn cost(cpu: u64, mem: u64) -> LeaseCost {
-        LeaseCost {
-            cpu_millis: cpu,
-            memory_bytes: mem,
-            limit_bytes: mem,
-            cold: false,
-            retry: false,
-            key_hash: 0,
-        }
-    }
-
-    fn lease(n: u64) -> LeaseId {
-        LeaseId::new(1, n)
-    }
-
-    /// Catches: a lease booked twice charged twice (a recovered lease adopted again would
-    /// double the worker's sums for good), and removing a lease that is not charged
-    /// changing the sums.
-    #[test]
-    fn a_lease_is_charged_once_and_removing_a_stranger_changes_nothing() {
-        let mut load = WorkerLoad::default();
-        load.insert(lease(1), cost(500, GIB), false, None);
-        load.insert(lease(1), cost(700, 2 * GIB), false, None);
-        assert_eq!(load.totals().cpu_uncovered, 700);
-        assert_eq!(load.totals().mem_uncovered, 2 * GIB);
-        assert_eq!(load.totals().actions, 1);
-        load.remove(lease(9));
-        assert_eq!(load.totals().cpu_uncovered, 700);
-        load.remove(lease(1));
-        assert_eq!(*load.totals(), Totals::default());
-    }
-
-    fn curve(points: &[(u32, u64)]) -> js_types::sched::usage::Curve {
-        let points = points
-            .iter()
-            .map(
-                |&(cores_milli, working_set_bytes)| js_types::sched::usage::MinutePoint {
-                    cores_milli,
-                    working_set_bytes,
-                },
-            )
-            .collect();
-        js_types::sched::usage::Curve::new(points, 5).expect("a short curve")
-    }
-
-    /// A profile of a lease of `cost(20_000, 2 GiB)`: the curve of cores 10 then 60 and
-    /// working set 4 GiB then 1 GiB, by curve in CPU and in memory as asked, or none and
-    /// a life of three minutes.
-    fn profile(by_curve: bool, cpu: bool, mem: bool, life: Option<u32>) -> Arc<Profile> {
-        use super::super::profile::Choice;
-        Arc::new(Profile::new(
-            Choice {
-                curve: by_curve.then(|| curve(&[(10_000, 4 * GIB), (60_000, GIB)])),
-                cpu,
-                mem,
-                demoted_cpu: false,
-                demoted_mem: false,
-                life,
-                floor_permille: 750,
-                guard_key: 1,
-            },
-            &cost(20_000, 2 * GIB),
-        ))
-    }
-
-    /// Catches: the per-slot lanes missing a kind of lease, or counting a lease in the
-    /// wrong lane or twice, or not giving it back: six leases (charged by curve in both
-    /// resources, covered and not; flat to a life; by curve in CPU only; by curve in
-    /// memory only; covered with no clock, which is flat) are summed slot by slot and taken
-    /// off to nothing.
-    #[test]
-    fn the_lanes_sum_each_kind_of_lease_by_slot_and_empty_when_they_are_removed() {
-        use js_types::sched::usage::LeaseClock;
-        let mut load = WorkerLoad::default();
-        let kinds = [
-            (profile(true, true, true, None), false),
-            (profile(true, true, true, None), true),
-            (profile(false, true, true, Some(3)), true),
-            (profile(true, true, false, None), false),
-            (profile(true, true, true, None), true),
-            (profile(true, false, true, None), false),
-        ];
-        for (i, (p, _)) in kinds.iter().enumerate() {
-            load.insert(
-                lease(i as u64),
-                cost(20_000, 2 * GIB),
-                false,
-                Some(p.clone()),
-            );
-        }
-        // A floor below 1, so that the sum of the flat covered leases shows the floor.
-        let cfg = LoadConfig {
-            cpu_floor_permille: 750,
-            ..LoadConfig::default()
-        };
-        let capacity = Resources::new(100_000, 64 * GIB);
-        let mut counters = LoadCounters::default();
-        let read = |seq: u64, covered: Vec<LeaseId>, clocks: Vec<LeaseClock>| NodeLoad {
-            seq,
-            mono_usec: 3_600_000_000 + seq * 5_000_000,
-            covered,
-            lease_clocks: clocks,
-            ..NodeLoad::default()
-        };
-        let now = FarmTime::from_millis(0);
-        load.accept(
-            read(1, Vec::new(), Vec::new()),
-            now,
-            &capacity,
-            capacity.memory_bytes,
-            &cfg,
-            &mut counters,
-        );
-        // Leases 1, 2 and 4 are covered; 1 is a minute old, 2 is new, 4 has no clock.
-        let second = read(2, vec![lease(1), lease(2), lease(4)], Vec::new());
-        let clock = |l: u64, age_minutes: u64| LeaseClock {
-            lease: lease(l),
-            started_mono_usec: second.mono_usec - age_minutes * 60_000_000,
-        };
-        let second = NodeLoad {
-            lease_clocks: vec![clock(1, 1), clock(2, 0)],
-            ..second
-        };
-        load.accept(
-            second,
-            now,
-            &capacity,
-            capacity.memory_bytes,
-            &cfg,
-            &mut counters,
-        );
-        let t = load.totals();
-        assert!(t.has_timed());
-        // Covered by curve (lease 1: 60 cores from its minute 1); covered flat to a life
-        // (lease 2: 20 cores for three minutes, a floor of 0.75 on the sum); the flat
-        // lease 4 stays in the scalar sum (20 cores).
-        assert_eq!(
-            t.cpu_covered_at(0, &cfg),
-            60_000 + (20_000 + 20_000) * 3 / 4
-        );
-        assert_eq!(t.cpu_covered_at(5, &cfg), 60_000 + 20_000 * 3 / 4);
-        // Uncovered: leases 0 and 3 by curve (60 cores, the larger of minutes 0 and 1 and
-        // then the tail), lease 5 flat in CPU (20).
-        assert_eq!(t.cpu_uncovered_at(0), 60_000 + 60_000 + 20_000);
-        assert_eq!(t.cpu_uncovered_at(31), 60_000 + 60_000 + 20_000);
-        // Memory: lease 0 and 5 hold 4 GiB then 1; lease 1 holds 1 (from its minute 1);
-        // lease 2 holds 2 for three minutes; leases 3 and 4 flat (2 each).
-        assert_eq!(t.mem_all_at(0), (4 + 1 + 2 + 2 + 2 + 4) * GIB);
-        assert_eq!(t.mem_all_at(1), (1 + 1 + 2 + 2 + 2 + 1) * GIB);
-        // Lease 2 has ended its life by minute 3.
-        assert_eq!(t.mem_all_at(3), (1 + 1 + 2 + 2 + 1) * GIB);
-        assert_eq!(t.mem_uncovered_at(0), (4 + 2 + 4) * GIB);
-        assert_eq!(t.mem_uncovered_at(1), (1 + 2 + 1) * GIB);
-        for i in 0..6 {
-            load.remove(lease(i));
-        }
-        assert_eq!(*load.totals(), Totals::default());
-    }
-
-    /// Catches: a lease placed before a reading counted again beside the measurement, which
-    /// holds some of what it used; such a lease hidden in the measurement, which may be other
-    /// work, instead of added to the window before it was placed; and a lease placed after
-    /// the reading taken into the measurement's maximum. A covered lease (30 cores) and two
-    /// uncovered ones (one by curve, one flat) are on the ledger when a reading is taken in.
-    /// Two more are placed after it, and a VM, which no reading sees. At minute 0 the seen
-    /// leases are added to the larger of the window before and the covered charge, that is
-    /// raised to the measurement, and the unseen leases and the VM are added on top; later
-    /// minutes have no measurement. A new session leaves no lease seen, and the sums are
-    /// empty when the leases go.
-    #[test]
-    fn leases_placed_before_a_reading_are_added_to_the_window_before_it() {
-        let mut load = WorkerLoad::default();
-        let cfg = LoadConfig::default();
-        let capacity = Resources::new(400_000, 64 * GIB);
-        let mut counters = LoadCounters::default();
-        let read = |seq: u64, covered: Vec<LeaseId>| NodeLoad {
-            seq,
-            mono_usec: seq * 5_000_000,
-            covered,
-            ..NodeLoad::default()
-        };
-        let now = FarmTime::from_millis(0);
-        let by_curve = || Some(profile(true, true, false, None));
-        load.insert(lease(4), cost(30_000, GIB), false, None);
-        load.insert(lease(0), cost(20_000, GIB), false, by_curve());
-        load.insert(lease(1), cost(20_000, GIB), false, None);
-        for (seq, covered) in [(1, Vec::new()), (2, vec![lease(4)])] {
-            let reading = read(seq, covered);
-            load.accept(
-                reading,
-                now,
-                &capacity,
-                capacity.memory_bytes,
-                &cfg,
-                &mut counters,
-            );
-        }
-        load.insert(lease(2), cost(20_000, GIB), false, by_curve());
-        load.insert(lease(3), cost(20_000, GIB), false, None);
-        load.insert(lease(5), cost(10_000, GIB), true, None);
-        let t = *load.totals();
-        // Seen: lease 0 by curve (60 cores, the larger of minutes 0 and 1), lease 1 flat
-        // (20). Unseen: the same again. The VM is in neither.
-        assert_eq!(t.cpu_uncovered_at(0), 2 * (60_000 + 20_000));
-        assert_eq!(
-            (t.cpu_unseen_at(0), t.cpu_unseen),
-            (60_000 + 20_000, 40_000)
-        );
-        let (seen, unseen, vm) = (80_000, 80_000, 10_000);
-        let at = |measured, before| horizon::cpu_left(&t, 0, (measured, before), &cfg);
-        // The covered charge above the window before; then the window before above it.
-        assert_eq!(at(30_000, 0), 30_000 + seen + unseen + vm);
-        assert_eq!(at(60_000, 50_000), 50_000 + seen + unseen + vm);
-        // The measurement above both sums: it holds the seen leases' use.
-        assert_eq!(at(150_000, 10_000), 150_000 + unseen + vm);
-        assert_eq!(
-            horizon::cpu_left(&t, 5, (150_000, 10_000), &cfg),
-            30_000 + seen + unseen + vm
-        );
-        load.new_session();
-        let t = *load.totals();
-        assert_eq!(t.cpu_unseen, t.cpu_uncovered);
-        assert_eq!(t.cpu_unseen_at(0), t.cpu_uncovered_at(0));
-        for i in 0..6 {
-            load.remove(lease(i));
-        }
-        assert_eq!(*load.totals(), Totals::default());
-    }
-
-    fn keyed(cpu: u64, hash: u64) -> LeaseCost {
-        LeaseCost {
-            key_hash: hash,
-            ..cost(cpu, 0)
-        }
-    }
-
-    /// Catches: the same-key sum counting a lease of another key, a VM, or leases with no
-    /// key known (hash 0 matches nothing, not each other), or not counting covered and
-    /// uncovered leases alike.
-    #[test]
-    fn the_same_key_sum_counts_only_that_key_covered_or_not() {
-        let mut load = WorkerLoad::default();
-        load.insert(lease(1), keyed(1_000, 7), false, None);
-        load.insert(lease(2), keyed(2_000, 7), false, None);
-        load.insert(lease(3), keyed(4_000, 8), false, None);
-        load.insert(lease(4), keyed(8_000, 7), true, None);
-        load.insert(lease(5), keyed(16_000, 0), false, None);
-        load.cover(&BTreeSet::from([lease(1)]), true);
-        assert_eq!(load.same_key_millis(7), 3_000);
-        assert_eq!(load.same_key_millis(8), 4_000);
-        assert_eq!(load.same_key_millis(9), 0);
-        assert_eq!(load.same_key_millis(0), 0);
-    }
-
-    /// Catches: the uncovered count taking covered leases or VMs in, or not following a
-    /// reading that covers a lease.
-    #[test]
-    fn uncovered_leases_are_the_actions_no_reading_lists() {
-        let mut load = WorkerLoad::default();
-        load.insert(lease(1), cost(1_000, 0), false, None);
-        load.insert(lease(2), cost(1_000, 0), false, None);
-        load.insert(lease(3), cost(1_000, 0), true, None);
-        assert_eq!(load.uncovered_leases(), 2);
-        load.cover(&BTreeSet::from([lease(2), lease(3)]), true);
-        assert_eq!(load.uncovered_leases(), 1);
-    }
-
-    /// Catches: `M > P_c` compared with the floor or with all leases instead of the covered
-    /// ones, and true before any window: the measurement must be strictly above the sum of
-    /// the covered leases' predictions.
-    #[test]
-    fn measured_above_predicted_compares_with_the_covered_sum_only() {
-        let readings = |windows: [Option<u32>; 2]| Readings {
-            last: NodeLoad::default(),
-            arrived: FarmTime::from_millis(0),
-            windows,
-        };
-        let mut load = WorkerLoad::default();
-        load.insert(lease(1), cost(1_000, 0), false, None);
-        load.insert(lease(2), cost(5_000, 0), false, None);
-        load.cover(&BTreeSet::from([lease(1)]), true);
-        assert!(!load.measured_above_covered(), "no window yet");
-        load.readings = Some(readings([Some(1_000), None]));
-        assert!(!load.measured_above_covered(), "equal is not above");
-        load.readings = Some(readings([Some(1_001), None]));
-        assert!(load.measured_above_covered());
-        load.readings = Some(readings([Some(900), Some(1_001)]));
-        assert!(load.measured_above_covered(), "the larger of two windows");
-    }
-}
+#[path = "ledger_tests.rs"]
+mod tests;

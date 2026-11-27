@@ -4,15 +4,13 @@
 //!
 //! Both read what the placement rounds recorded, the marks, bars and waits
 //! ([`Scheduler::whole_mark`], [`Scheduler::whole_barred`], [`Scheduler::whole_wait`]), and count with the code the
-//! caps use, so neither can drift from what admission enforces. Two things are read at
-//! the scheduler's time now instead: whether a request is before `drain_after`, and which
-//! bars have not ended, so a bar that ended since the last round no longer shows as
-//! barring.
+//! caps use, so neither can drift from what admission enforces. One thing is read at the
+//! scheduler's time now instead: which bars have not ended, so a bar that ended since the
+//! last round no longer shows as barring.
 
 use std::collections::BTreeMap;
 
 use js_types::sched::{FarmTime, LeaseKind, OperationId, WorkerId};
-use js_whole::WholeNodeConfig;
 use js_whole::caps::Blocked;
 
 use super::whole::{WholeWait, ceiling_of};
@@ -23,10 +21,12 @@ use crate::unservable::Unservable;
 /// ([`Scheduler::whole_state`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WholeState {
-    /// It has not waited out `drain_after`: it holds no worker and takes only one that is
-    /// quiet.
+    /// Not shown any more: it named a request that had not yet waited out `drain_after`,
+    /// and that wait is removed (`drain_after` is deprecated and not read), so every
+    /// request may hold a worker from the first round. Kept so that a caller matching on
+    /// it still builds; [`Scheduler::whole_state`] never returns it.
     Early {
-        /// When it may first hold a worker: its queue time plus `drain_after`.
+        /// When it could first have held a worker.
         may_hold_at: FarmTime,
     },
     /// It holds a worker: no request after it in queue order is placed there, and the
@@ -54,16 +54,15 @@ pub enum WholeState {
         /// `u64::MAX` milliseconds, for a bar for life).
         workers: BTreeMap<WorkerId, FarmTime>,
     },
-    /// It has waited out `drain_after` and a cap, or the last-capable rule, stopped a
-    /// hold ([`Scheduler::whole_wait`]).
+    /// A cap, or the last-capable rule, stopped a hold ([`Scheduler::whole_wait`]).
     Stopped(WholeWait),
-    /// It has waited out `drain_after` and holds nothing, and no cap, bar or unservable
-    /// reason is recorded. Either every worker it could hold is held by a
-    /// request ahead of it, or no placement round has run since it became due (or since
-    /// its bar ended). A status page may label it "Waiting".
+    /// It holds nothing, and no cap, bar or unservable reason is recorded. Either every
+    /// worker it could hold is held by a request ahead of it, or no placement round has
+    /// run since it was queued (or since its bar ended). A status page may label it
+    /// "Waiting".
     Queued,
-    /// No live worker could ever hold it. It is shown before `drain_after` too: the
-    /// first round that finds no worker records it.
+    /// No live worker could ever hold it: the first round that finds no worker records
+    /// it.
     Unservable {
         /// Why no live worker can run it: the string [`Scheduler::waiting`] returns. An
         /// embedder shows it verbatim; its wording is not an interface.
@@ -77,7 +76,7 @@ pub enum WholeState {
 /// The kind of a [`WholeState`], for counting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum WholeReason {
-    /// [`WholeState::Early`].
+    /// [`WholeState::Early`], which is not shown any more: no count has it.
     Early,
     /// [`WholeState::Holding`].
     Holding,
@@ -141,18 +140,18 @@ impl Scheduler {
     /// Why queued whole-machine `operation` is not yet granted a worker, with whole-node
     /// settings on ([`Scheduler::with_whole_node`]); `None` without them, or if
     /// `operation` is not a queued whole-machine request (unknown, cancelled, placed or
-    /// finished). The marks and waits are as of the last placement round; whether it is
-    /// before `drain_after`, and which bars have not ended, are read at the scheduler's
-    /// time now: a bar that ended since the last round shows
-    /// [`WholeState::Queued`], not [`WholeState::Barred`], until the next round.
+    /// finished). The marks and waits are as of the last placement round; which bars have
+    /// not ended is read at the scheduler's time now: a bar that ended since the last
+    /// round shows [`WholeState::Queued`], not [`WholeState::Barred`], until the next
+    /// round. It is never [`WholeState::Early`]: nothing waits before it holds.
     #[must_use]
     pub fn whole_state(&self, operation: OperationId) -> Option<WholeState> {
-        let cfg = self.whole_node.as_ref()?;
+        self.whole_node.as_ref()?;
         let op = self.ops.get(&operation)?;
         if op.request.kind != LeaseKind::WholeMachine || op.state != OpState::Queued {
             return None;
         }
-        Some(self.state_of(cfg, operation))
+        Some(self.state_of(operation))
     }
 
     /// The caps' numbers now and how many queued whole-machine requests wait for each
@@ -166,7 +165,7 @@ impl Scheduler {
         for operation in self.queued() {
             if self.ops[&operation].request.kind == LeaseKind::WholeMachine {
                 *waiting
-                    .entry(self.state_of(cfg, operation).reason())
+                    .entry(self.state_of(operation).reason())
                     .or_default() += 1;
             }
         }
@@ -185,19 +184,14 @@ impl Scheduler {
     }
 
     /// The state of queued whole-machine `operation`, in the order the placement round
-    /// decides: unservable, before its turn, holding, stopped, barred, else queued.
-    fn state_of(&self, cfg: &WholeNodeConfig, operation: OperationId) -> WholeState {
+    /// decides: unservable, holding, stopped, barred, else queued.
+    fn state_of(&self, operation: OperationId) -> WholeState {
         let op = &self.ops[&operation];
         if let Some(unservable) = &op.unservable {
             return WholeState::Unservable {
                 reason: unservable.text.clone(),
                 cause: unservable.reason.clone(),
             };
-        }
-        let may_hold_at =
-            FarmTime::from_millis(op.queued_at.as_millis().saturating_add(cfg.drain_after_ms));
-        if self.now < may_hold_at {
-            return WholeState::Early { may_hold_at };
         }
         if let Some(mark) = self.whole_mark(operation) {
             return WholeState::Holding {

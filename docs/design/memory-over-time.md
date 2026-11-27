@@ -10,7 +10,7 @@ Companions: [sizing.md](sizing.md) (today's flat memory booking), [cpu-over-time
 profiles) and [placement-by-load.md](placement-by-load.md) (js-sched's load test, whose flat memory guard this page
 replaces on the hosts it names and nowhere else).
 
-Code references are `path:line` on main after komira-ai/jobscheduler#1249. Labels: **READ**, read in the code there.
+Code references are `path:line` on main after komira-ai/jobscheduler#1236. Labels: **READ**, read in the code there.
 **MEASURED**, a figure measured on the farm, named where it is used. **INFERRED**, reasoned, not run. **DECIDES**, a
 number not yet measured that settles a choice. The memory shadow's counts on the farm measure each one.
 
@@ -175,7 +175,7 @@ From the first defence to the last.
 4. **Swap with zswap in front: the cushion.**
    - **Recommend 32 GiB of swap per named host,** encrypted with a key made at each boot, with zswap (zstd) in front.
    - zswap keeps the first pages compressed in memory, so a small miss costs CPU, not disk.
-   - Encryption is needed because run files on a tmpfs can be swapped (`crates/js-agent/src/cli.rs:212-213`).
+   - Encryption is needed because run files on a tmpfs can be swapped (`crates/js-agent/src/cli.rs:215-216`).
    - Swap counts in `H` and is never room: a host that swaps takes nothing new.
    - **DECIDES:** the size is at least twice the largest shortfall in the shadow's "held more memory than ...
      projected" lines. If that is above 16 GiB, the cushion grows to match. If it is above 32 GiB, the step stops.

@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 
+use js_agent_wire::{HostPort, PortProtocol};
 use js_mac_pool::seatbelt::{AbsPath, MountGrant, Net, ReadModel};
 use js_mac_session::full_disk_access::FullDiskAccess;
 
@@ -32,6 +33,7 @@ fn config() -> NativeConfig {
         tool_roots: vec![PathBuf::from("/usr/bin")],
         read_denies,
         mount_roots: Vec::new(),
+        host_ports: Vec::new(),
         read_model: ReadModel::Open,
         journal: PathBuf::from("/srv/state/native-leases"),
         max_file_bytes: 1 << 30,
@@ -80,7 +82,15 @@ fn covers(grant: &str, place: &str) -> bool {
 #[test]
 fn a_run_may_write_below_its_run_directory_alone() {
     let home = Path::new("/srv/homes/kbf-acct-4");
-    let profile = build(&config(), &none(), home, (&[], &[]), (None, Reads::Open)).unwrap();
+    let profile = build(
+        &config(),
+        &none(),
+        home,
+        (&[], &[]),
+        (None, Reads::Open),
+        &[],
+    )
+    .unwrap();
     let rule = "(allow file-write* (subpath (param \"RUN\")) (literal \"/dev/null\") (subpath \"/dev/fd\"))";
     let writes: Vec<&str> = profile
         .text()
@@ -121,6 +131,7 @@ fn each_privacy_only_place_is_denied_after_every_grant_that_holds_it() {
         home,
         (&[], &grants),
         (None, Reads::Open),
+        &[],
     )
     .unwrap();
     let params = profile.params();
@@ -167,6 +178,7 @@ fn a_mount_in_a_privacy_only_place_is_refused() {
             home,
             (&[], &grants),
             (None, Reads::Open),
+            &[],
         )
         .unwrap_err();
         assert_eq!(
@@ -189,7 +201,8 @@ fn a_mount_beside_a_privacy_only_place_is_built() {
             &none(),
             home,
             (&[], &grants),
-            (None, Reads::Open)
+            (None, Reads::Open),
+            &[]
         )
         .is_ok()
     );
@@ -231,6 +244,7 @@ fn other_homes_and_roots_home_are_denied_reads_and_the_own_home_is_granted_back(
         home,
         (&[], &grants),
         (None, Reads::Open),
+        &[],
     )
     .unwrap();
     let params = profile.params();
@@ -289,6 +303,7 @@ fn a_mount_over_a_homes_root_is_refused() {
             home,
             (&[], &grants),
             (None, Reads::Open),
+            &[],
         )
         .unwrap_err();
         assert_eq!(
@@ -315,6 +330,7 @@ fn the_trees_given_to_the_build_are_granted_and_none_grants_nothing() {
         home,
         (&[], &[]),
         (Some(trees), Reads::Open),
+        &[],
     )
     .unwrap();
     let params = with.params();
@@ -325,7 +341,15 @@ fn the_trees_given_to_the_build_are_granted_and_none_grants_nothing() {
             .lines()
             .any(|line| line == "(allow file-read* (subpath (param \"MT_0\")))")
     );
-    let without = build(&config(), &none(), home, (&[], &[]), (None, Reads::Open)).unwrap();
+    let without = build(
+        &config(),
+        &none(),
+        home,
+        (&[], &[]),
+        (None, Reads::Open),
+        &[],
+    )
+    .unwrap();
     assert!(!without.params().iter().any(|(name, _)| name == "MOUNT"));
     assert!(!without.text().contains("MT_0"));
 }
@@ -368,7 +392,7 @@ fn the_allow_reads_deny_by_default_grant_the_tree_and_refuse_shared_trees() {
     let tree = js_mac_pool::seatbelt::PinnedTree::new(&store, &diff_id).unwrap();
     let grants = vec![ReadGrant::Tree(tree)];
     let reads = Reads::Allow(assured(), grants.clone());
-    let profile = build(&config(), &none(), home, (&[], &[]), (None, reads)).unwrap();
+    let profile = build(&config(), &none(), home, (&[], &[]), (None, reads), &[]).unwrap();
     let lines: Vec<&str> = profile.text().lines().collect();
     let deny = lines.iter().position(|line| *line == "(deny file-read*)");
     let grant = lines
@@ -386,7 +410,15 @@ fn the_allow_reads_deny_by_default_grant_the_tree_and_refuse_shared_trees() {
     let shared = AbsPath::parse("/srv/store/trees/abc").unwrap();
     let trees = js_mac_pool::seatbelt::MountTrees::new(root, vec![shared]).unwrap();
     let reads = Reads::Allow(assured(), grants);
-    let why = build(&config(), &none(), home, (&[], &[]), (Some(trees), reads)).unwrap_err();
+    let why = build(
+        &config(),
+        &none(),
+        home,
+        (&[], &[]),
+        (Some(trees), reads),
+        &[],
+    )
+    .unwrap_err();
     assert_eq!(
         why.0,
         "the policy: trees on a mount need the open read model"
@@ -431,4 +463,104 @@ fn a_none_job_gets_loopback_under_every_ceiling_but_off() {
         at(Ceiling::Open, NetworkLevel::Open, Some(Net::Loopback)),
         Net::Loopback
     );
+}
+
+/// A host port of a start, at `job` as its job port.
+fn host_port(port: u16, job: Option<u16>) -> HostPort {
+    HostPort {
+        host_port: port,
+        container_port: job,
+        protocol: PortProtocol::Tcp,
+    }
+}
+
+/// The network lines of `profile`, in order, as the profile has them.
+fn network_lines(profile: &Profile) -> Vec<String> {
+    let lines = profile.text().lines();
+    let network = lines.filter(|line| line.contains("network"));
+    network.map(str::to_owned).collect()
+}
+
+/// Asserts that a start's host ports open their loopback ports in the profile of a run of
+/// the level `none` under the ceiling `off`, which leaves it no other network: the `off`
+/// rules, then one `localhost:PORT` allow per port, lowest first and each once (a port named
+/// at its own number and one with no job port alike), then the floor's; and that the same
+/// run without host ports has no such allow. Catches a native job refused its service under
+/// the ceiling `off`, a host port that opens all of loopback, and one granted to a run that
+/// named none.
+#[test]
+fn a_host_port_opens_its_loopback_port_under_the_ceiling_off() {
+    let home = Path::new("/srv/homes/kbf-acct-4");
+    let config = NativeConfig {
+        network: Ceiling::Off,
+        ..config()
+    };
+    let net = level(&config, NetworkLevel::Off, None);
+    assert_eq!(net, Net::Off);
+    let ports = [
+        host_port(5432, Some(5432)),
+        host_port(80, None),
+        host_port(5432, None),
+    ];
+    let with = build(&config, &net, home, (&[], &[]), (None, Reads::Open), &ports).unwrap();
+    let network = network_lines(&with);
+    let wanted = [
+        "(deny network*)",
+        "(allow network-outbound (literal \"/private/var/run/syslog\"))",
+        "(allow network* (remote ip \"localhost:80\"))",
+        "(allow network* (remote ip \"localhost:5432\"))",
+    ];
+    assert_eq!(network[..wanted.len()], wanted, "{network:#?}");
+    assert!(
+        network[wanted.len()..]
+            .iter()
+            .all(|line| !line.contains("localhost")),
+        "{network:#?}"
+    );
+    let without = build(&config, &net, home, (&[], &[]), (None, Reads::Open), &[]).unwrap();
+    assert!(!without.text().contains("localhost"), "{}", without.text());
+}
+
+/// Asserts that host ports leave the profile of a run whose level already reaches loopback as
+/// it is: under the ceilings `loopback` (a `none` job) and `open` (an `open` job) the profile
+/// with a host port is the profile without, to the byte. Catches a host-port rule that would
+/// narrow an open loopback, and a rule rendered where it cannot matter.
+#[test]
+fn a_host_port_adds_nothing_where_loopback_is_open() {
+    let home = Path::new("/srv/homes/kbf-acct-4");
+    for (ceiling, asked) in [
+        (Ceiling::Loopback, NetworkLevel::Off),
+        (Ceiling::Open, NetworkLevel::Open),
+    ] {
+        let config = NativeConfig {
+            network: ceiling,
+            ..config()
+        };
+        let net = level(&config, asked, None);
+        let ports = [host_port(5432, None)];
+        let with = build(&config, &net, home, (&[], &[]), (None, Reads::Open), &ports).unwrap();
+        let without = build(&config, &net, home, (&[], &[]), (None, Reads::Open), &[]).unwrap();
+        assert_eq!(with.text(), without.text(), "{ceiling}");
+        assert_eq!(with.params(), without.params(), "{ceiling}");
+    }
+}
+
+/// Asserts that a host port the profile cannot name fails the build, naming the host ports:
+/// port 0, which the admission never lets through (no `--host-port` range holds it), is
+/// refused by the profile too, never dropped. Catches a run started without a host port it
+/// named.
+#[test]
+fn a_host_port_the_profile_cannot_name_fails_the_build() {
+    let home = Path::new("/srv/homes/kbf-acct-4");
+    let ports = [host_port(0, None)];
+    let why = build(
+        &config(),
+        &none(),
+        home,
+        (&[], &[]),
+        (None, Reads::Open),
+        &ports,
+    )
+    .unwrap_err();
+    assert_eq!(why.to_string(), "the host ports: port 0 listed");
 }
