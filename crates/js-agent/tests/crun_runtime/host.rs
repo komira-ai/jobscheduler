@@ -241,6 +241,7 @@ fn host_jobs_start_while_another_start_replaces_dev_ptmx() {
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .mode(0o600)
         .open(HOST_START_LOCK)
         .expect("the host start lock");

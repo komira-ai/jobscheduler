@@ -81,6 +81,12 @@ A host job is an OCI container that `crun` runs as root and that shares the mach
   is given no mount of its own: it starts in the run's scratch directory and reaches every other
   path at its place on the host. A host job that asks for a mount, run files or a GPU is refused (it
   sees the host's own paths and devices).
+- **The host's `/dev`, as `crun` prepares a container's.** Starting a host job, `crun` makes the
+  standard device nodes and links missing from the machine's `/dev` and replaces `/dev/ptmx` with
+  a link to `pts/ptmx` (where `devpts` is mounted `ptmxmode=000`, only root can then open it). The
+  agent's host starts on a machine hold one lock, `/dev/.js-host-start.lock`, until `crun` has
+  passed that step, so two of them never replace `/dev/ptmx` at once (which made one fail to start,
+  exit 126, `creating symlink for /dev/ptmx: File exists`).
 - **Every privilege.** It runs as uid 0 with every capability, no seccomp filter and no masked
   path, so it can install packages, load a kernel module or write anywhere.
 - **Its own cgroup.** It runs in `ctr` below its lease's cgroup, which the booking limits as it
