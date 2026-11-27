@@ -806,6 +806,10 @@ fn from(peer: Option<&str>, path: &str) -> HttpRequest<Body> {
     request
 }
 
+/// The families of the server's own work a server with no Postgres store serves, up to the
+/// count of its blocking tasks.
+const WORK: &str = "# HELP js_blocking_tasks_total Tasks the server ran on the runtime's pool for blocking calls: its store calls, file writes and syncs, each a hand-off to a thread of that pool and back.\n# TYPE js_blocking_tasks_total counter\njs_blocking_tasks_total ";
+
 /// The status, the content type and the body of the metrics router's answer to `request`.
 async fn answer(fixture: &Fixture, request: HttpRequest<Body>) -> (StatusCode, String, String) {
     let app = router(Arc::clone(&fixture.shared), Arc::clone(&fixture.recorder));
@@ -820,9 +824,10 @@ async fn answer(fixture: &Fixture, request: HttpRequest<Body>) -> (StatusCode, S
 }
 
 /// Asserts who the route answers: a private peer (v4 or v6) gets 200 with the text format's
-/// content type and the scrape; a public peer, a request whose peer is unknown and another
-/// path get the answer of an unknown route. It catches metrics served to the internet from a
-/// wildcard listener.
+/// content type and the scrape, followed by the server's own work (the blocking tasks alone,
+/// as this server has no Postgres store); a public peer, a request whose peer is unknown and
+/// another path get the answer of an unknown route. It catches metrics served to the internet
+/// from a wildcard listener, and a route that leaves out the server's work.
 #[tokio::test]
 async fn only_a_private_peer_is_answered_and_only_on_metrics() {
     let fixture = fixture("route").await;
@@ -833,7 +838,12 @@ async fn only_a_private_peer_is_answered_and_only_on_metrics() {
             (StatusCode::OK, TEXT_FORMAT),
             "{peer}"
         );
-        assert_eq!(body, scraped_as_served(&fixture).await);
+        // The count of blocking tasks is the process's, which the other tests move, so the
+        // work is held to its form, with any count.
+        let (scrape, work) = body.split_at(body.find(WORK).unwrap());
+        assert_eq!(scrape, scraped_as_served(&fixture).await);
+        let tasks = work.strip_prefix(WORK).unwrap().strip_suffix('\n').unwrap();
+        assert!(tasks.parse::<u64>().is_ok(), "{work}");
     }
     let unknown = crate::api::not_found();
     let unknown = to_bytes(unknown.into_body(), 1 << 20).await.unwrap();

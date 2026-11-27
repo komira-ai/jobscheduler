@@ -30,12 +30,13 @@ use postgres::{Client, Config, Row, Statement, ToStatement};
 use super::tls::{Tls, TlsError};
 use crate::Notice;
 
-/// Runs `f` on a thread that is not inside a tokio runtime and returns its result. A
-/// panic in `f` is raised again in the caller.
-pub(super) fn off_runtime<R: Send>(f: impl FnOnce() -> R + Send) -> R {
+/// Runs `f` on a thread that is not inside a tokio runtime and returns its result, adding one
+/// to `moved` for each thread started for it. A panic in `f` is raised again in the caller.
+pub(super) fn off_runtime<R: Send>(moved: &AtomicU64, f: impl FnOnce() -> R + Send) -> R {
     if tokio::runtime::Handle::try_current().is_err() {
         return f();
     }
+    moved.fetch_add(1, Ordering::Relaxed);
     thread::scope(|scope| match scope.spawn(f).join() {
         Ok(result) => result,
         Err(panic) => resume_unwind(panic),
@@ -45,14 +46,16 @@ pub(super) fn off_runtime<R: Send>(f: impl FnOnce() -> R + Send) -> R {
 type Params<'a> = &'a [&'a (dyn ToSql + Sync)];
 
 /// How to make a connection: the client's settings with the network limits and the TLS mode
-/// in them, the TLS settings, the statements a new session runs first, and the count every
-/// connection made from it adds each message it sends to ([`Conn`]).
+/// in them, the TLS settings, the statements a new session runs first, the count every
+/// connection made from it adds each message it sends to, and the count it adds each thread
+/// it starts for a call to ([`Conn`]).
 #[derive(Clone)]
 pub(super) struct Dial {
     pub(super) pg: Config,
     pub(super) tls: Tls,
     pub(super) session: String,
     pub(super) sent: Arc<AtomicU64>,
+    pub(super) moved: Arc<AtomicU64>,
 }
 
 /// Why [`Conn::connect`] failed.
@@ -109,6 +112,9 @@ pub struct Conn {
     /// the `query` calls, counted with every other connection of the same [`Dial`]. A prepare
     /// is not counted.
     sent: Arc<AtomicU64>,
+    /// The threads started to make a call, its connect and its drop included, off a runtime
+    /// ([`off_runtime`]), counted with every other connection of the same [`Dial`].
+    moved: Arc<AtomicU64>,
 }
 
 impl Conn {
@@ -120,7 +126,7 @@ impl Conn {
     pub(super) fn connect(dial: &Dial) -> Result<Conn, DialError> {
         let started = Arc::new(AtomicBool::new(false));
         let connector = dial.tls.connector(&started);
-        let client = off_runtime(|| dial.pg.connect(connector)).map_err(|err| {
+        let client = off_runtime(&dial.moved, || dial.pg.connect(connector)).map_err(|err| {
             match dial.tls.refusal(err, started.load(Ordering::Relaxed)) {
                 Ok(tls) => DialError::Tls(tls),
                 Err(err) => DialError::Pg(err),
@@ -129,19 +135,21 @@ impl Conn {
         let mut conn = Conn {
             client: Some(client),
             sent: Arc::clone(&dial.sent),
+            moved: Arc::clone(&dial.moved),
         };
         conn.batch_execute(&dial.session).map_err(DialError::Pg)?;
         Ok(conn)
     }
 
-    fn client(&mut self) -> &mut Client {
-        self.client
-            .as_mut()
-            .expect("the client is present until the connection is dropped")
+    /// The client, and the count of the threads started for its calls.
+    fn client(&mut self) -> (&mut Client, &AtomicU64) {
+        let client = self.client.as_mut();
+        let client = client.expect("the client is present until the connection is dropped");
+        (client, &self.moved)
     }
 
     /// The client, for a call that sends statements: the call is counted.
-    fn sending(&mut self) -> &mut Client {
+    fn sending(&mut self) -> (&mut Client, &AtomicU64) {
         self.sent.fetch_add(1, Ordering::Relaxed);
         self.client()
     }
@@ -158,8 +166,8 @@ impl Conn {
     /// # Errors
     /// The client's error: the connection failed while it waited.
     pub(super) fn notice(&mut self, wait: Duration) -> Result<Option<Notice>, postgres::Error> {
-        let client = self.client();
-        let heard = off_runtime(|| client.notifications().timeout_iter(wait).next())?;
+        let (client, moved) = self.client();
+        let heard = off_runtime(moved, || client.notifications().timeout_iter(wait).next())?;
         Ok(heard.map(|notice| Notice {
             channel: notice.channel().to_owned(),
             payload: notice.payload().to_owned(),
@@ -171,8 +179,8 @@ impl Conn {
     /// # Errors
     /// The client's error.
     pub fn prepare(&mut self, query: &str) -> Result<Statement, postgres::Error> {
-        let client = self.client();
-        off_runtime(|| client.prepare(query))
+        let (client, moved) = self.client();
+        off_runtime(moved, || client.prepare(query))
     }
 
     /// Runs statements that take no parameters and return no rows.
@@ -180,8 +188,8 @@ impl Conn {
     /// # Errors
     /// The client's error.
     pub fn batch_execute(&mut self, query: &str) -> Result<(), postgres::Error> {
-        let client = self.sending();
-        off_runtime(|| client.batch_execute(query))
+        let (client, moved) = self.sending();
+        off_runtime(moved, || client.batch_execute(query))
     }
 
     /// Runs a statement; the number of rows it changed.
@@ -193,8 +201,8 @@ impl Conn {
         query: &T,
         params: Params<'_>,
     ) -> Result<u64, postgres::Error> {
-        let client = self.sending();
-        off_runtime(|| client.execute(query, params))
+        let (client, moved) = self.sending();
+        off_runtime(moved, || client.execute(query, params))
     }
 
     /// Runs a statement; its rows.
@@ -206,8 +214,8 @@ impl Conn {
         query: &T,
         params: Params<'_>,
     ) -> Result<Vec<Row>, postgres::Error> {
-        let client = self.sending();
-        off_runtime(|| client.query(query, params))
+        let (client, moved) = self.sending();
+        off_runtime(moved, || client.query(query, params))
     }
 
     /// Runs a statement that returns exactly one row.
@@ -219,8 +227,8 @@ impl Conn {
         query: &T,
         params: Params<'_>,
     ) -> Result<Row, postgres::Error> {
-        let client = self.sending();
-        off_runtime(|| client.query_one(query, params))
+        let (client, moved) = self.sending();
+        off_runtime(moved, || client.query_one(query, params))
     }
 
     /// Runs a statement that returns at most one row.
@@ -232,8 +240,8 @@ impl Conn {
         query: &T,
         params: Params<'_>,
     ) -> Result<Option<Row>, postgres::Error> {
-        let client = self.sending();
-        off_runtime(|| client.query_opt(query, params))
+        let (client, moved) = self.sending();
+        off_runtime(moved, || client.query_opt(query, params))
     }
 }
 
@@ -243,12 +251,16 @@ impl Drop for Conn {
         self.client
             .take()
             .into_iter()
-            .for_each(|client| off_runtime(move || drop(client)));
+            .for_each(|client| off_runtime(&self.moved, move || drop(client)));
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::thread::{self, ThreadId};
+
     use super::off_runtime;
 
     fn runtime() -> tokio::runtime::Runtime {
@@ -257,37 +269,92 @@ mod tests {
             .expect("a runtime")
     }
 
+    fn multi_thread() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .build()
+            .expect("a runtime")
+    }
+
     // One call site for every case: the coverage of a generic function is that of its
-    // best single instantiation, so the three paths (no runtime, a runtime, a panic) go
-    // through the same closure.
-    fn on_a_thread(panics: bool) -> std::thread::ThreadId {
-        off_runtime(move || {
-            assert!(!panics, "the client broke");
-            std::thread::current().id()
+    // best single instantiation, so every path (no runtime, each kind of thread of a
+    // runtime, a panic) goes through the same closure. The closure does what the client
+    // does on every call: it blocks on a current-thread runtime of its own, which tokio
+    // refuses ("Cannot start a runtime from within a runtime") where a runtime runs.
+    fn on_a_thread(moved: &AtomicU64, panics: bool) -> ThreadId {
+        off_runtime(moved, move || {
+            runtime().block_on(async { assert!(!panics, "the client broke") });
+            thread::current().id()
         })
     }
 
-    // Catches a call that runs on the runtime's own thread (the client would panic with
-    // "Cannot start a runtime from within a runtime"): inside a runtime the work moves to
-    // another thread, outside it stays.
+    // Catches a call that runs on a current-thread runtime's own thread (the client would
+    // panic): there the work moves to a thread of its own, which is counted; outside any
+    // runtime it stays, and nothing is counted.
     #[test]
-    fn a_call_inside_a_runtime_runs_on_another_thread() {
-        let here = std::thread::current().id();
-        assert_eq!(on_a_thread(false), here);
-        let inside = runtime().block_on(async { on_a_thread(false) });
+    fn a_call_inside_a_current_thread_runtime_runs_on_a_thread_of_its_own() {
+        let moved = AtomicU64::new(0);
+        let here = thread::current().id();
+        assert_eq!(on_a_thread(&moved, false), here);
+        assert_eq!(moved.load(Ordering::Relaxed), 0);
+        let inside = runtime().block_on(async { on_a_thread(&moved, false) });
         assert_ne!(inside, here);
+        assert_eq!(moved.load(Ordering::Relaxed), 1);
     }
 
     // Catches a panic in the moved call being swallowed (the caller would carry on with
     // a result that does not exist): it must come out in the caller, with its message.
     #[test]
     fn a_panic_in_a_call_moved_off_the_runtime_is_raised_in_the_caller() {
-        let caught = std::panic::catch_unwind(|| runtime().block_on(async { on_a_thread(true) }));
+        let moved = AtomicU64::new(0);
+        let caught =
+            std::panic::catch_unwind(|| runtime().block_on(async { on_a_thread(&moved, true) }));
         let panic = caught.expect_err("the panic comes out");
         let said = panic
             .downcast_ref::<String>()
             .map(String::as_str)
             .or_else(|| panic.downcast_ref::<&str>().copied());
         assert_eq!(said, Some("the client broke"));
+    }
+
+    // Catches a thread started for every call the server makes: its store calls run on the
+    // pool for blocking calls of a multi-thread runtime, where the client's own runtime may
+    // run, so each call runs on the pool's thread that makes it and starts no thread. A
+    // thread started per statement, thousands a second under load, is what kept every
+    // thread of the server waking (the start and end of a thread take the process's memory
+    // map lock, which every thread's page faults wait on).
+    #[test]
+    fn a_call_from_the_pool_for_blocking_calls_runs_on_that_thread_and_starts_none() {
+        let moved = Arc::new(AtomicU64::new(0));
+        let counted = Arc::clone(&moved);
+        let blocking = move || (thread::current().id(), on_a_thread(&counted, false));
+        let (caller, ran_on) = multi_thread()
+            .block_on(async { tokio::task::spawn_blocking(blocking).await })
+            .unwrap();
+        assert_eq!(ran_on, caller);
+        assert_eq!(moved.load(Ordering::Relaxed), 0);
+    }
+
+    // Catches a call from a task of a multi-thread runtime, or from the thread that blocks
+    // on one, that panics because the client blocks on its own runtime there, or that starts
+    // a thread for it: the call runs where it is made, with the runtime's work handed to
+    // another thread meanwhile, and a panic in it comes out in the task.
+    #[test]
+    fn a_call_from_a_task_of_a_multi_thread_runtime_runs_where_it_is_made() {
+        let moved = Arc::new(AtomicU64::new(0));
+        let runtime = multi_thread();
+        let counted = Arc::clone(&moved);
+        let task = async move { (thread::current().id(), on_a_thread(&counted, false)) };
+        let (caller, ran_on) = runtime
+            .block_on(async { tokio::spawn(task).await })
+            .unwrap();
+        assert_eq!(ran_on, caller);
+        let here = thread::current().id();
+        assert_eq!(runtime.block_on(async { on_a_thread(&moved, false) }), here);
+        assert_eq!(moved.load(Ordering::Relaxed), 0);
+        let counted = Arc::clone(&moved);
+        let task = async move { on_a_thread(&counted, true) };
+        let panicked = runtime.block_on(async { tokio::spawn(task).await });
+        assert!(panicked.unwrap_err().is_panic());
     }
 }

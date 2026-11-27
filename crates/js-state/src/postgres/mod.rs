@@ -298,6 +298,7 @@ impl PostgresConfig {
             tls: self.tls.clone(),
             session: String::new(),
             sent: Arc::default(),
+            moved: Arc::default(),
         }
     }
 
@@ -634,6 +635,15 @@ impl PostgresStore {
     #[must_use]
     pub fn statements(&self) -> u64 {
         self.pool.sent()
+    }
+
+    /// How many threads this store's connections have started to make a call, a connect or a
+    /// drop of the client away from a tokio runtime: the client blocks on a runtime of its own,
+    /// which tokio refuses to start on a thread a runtime runs on. A call made outside any
+    /// runtime starts none.
+    #[must_use]
+    pub fn threads_started(&self) -> u64 {
+        self.pool.moved()
     }
 
     /// The configuration this store was opened with.

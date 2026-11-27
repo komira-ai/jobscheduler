@@ -64,6 +64,7 @@
 mod placement;
 mod render;
 mod scrape;
+mod work;
 
 use std::collections::BTreeMap;
 use std::future::Future;

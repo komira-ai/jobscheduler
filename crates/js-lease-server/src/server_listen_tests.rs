@@ -27,7 +27,7 @@ use crate::config::{Cli, Config};
 use crate::job_store::{ServerIds, ServerJobs};
 use crate::ticker::channel_ticker;
 
-const JOIN: &str = "join-token-A-0123456789-abcdefghijklmnop";
+pub(super) const JOIN: &str = "join-token-A-0123456789-abcdefghijklmnop";
 
 /// A server over the database of `url` whose agent routes are on a port of their own, with its
 /// directory named `name`; its job store and the other server's read `store_clock`.
@@ -81,7 +81,7 @@ async fn server(
 }
 
 /// The other server's job tables over the database of `url`, on `store_clock`.
-fn other_server(url: &str, store_clock: Arc<js_state::ManualClock>) -> ServerJobs {
+pub(super) fn other_server(url: &str, store_clock: Arc<js_state::ManualClock>) -> ServerJobs {
     let config = PostgresConfig::parse(url).unwrap();
     let store: Arc<dyn Store> = Arc::new(
         PostgresStore::open(&config)
@@ -114,7 +114,7 @@ fn listening_on(url: &str) {
 }
 
 /// `body` POSTed to `path` of `addr` with the join token; the status and the body's JSON.
-async fn post(addr: std::net::SocketAddr, path: &str, body: &Value) -> (u16, Value) {
+pub(super) async fn post(addr: std::net::SocketAddr, path: &str, body: &Value) -> (u16, Value) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let body = body.to_string();
@@ -175,7 +175,7 @@ async fn held_beat(running: &Running, meanwhile: impl std::future::Future<Output
     reply
 }
 
-fn queued(id: &JobId, cpu_millis: u64) -> NewJob {
+pub(super) fn queued(id: &JobId, cpu_millis: u64) -> NewJob {
     let mut spec = spec();
     spec.needs =
         js_jobs::Needs::Shape(js_types::Resources::new(cpu_millis, 1 << 30, 0, None).unwrap());
@@ -188,7 +188,7 @@ fn queued(id: &JobId, cpu_millis: u64) -> NewJob {
 }
 
 /// A database of its own for one test, made outside any runtime.
-fn database() -> (TestDatabase, String) {
+pub(super) fn database() -> (TestDatabase, String) {
     let database = test_database();
     let url = database.url();
     (database, url)
