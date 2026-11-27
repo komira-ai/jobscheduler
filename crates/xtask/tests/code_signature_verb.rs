@@ -372,8 +372,12 @@ fn each_way_a_signature_differs_from_the_releases_is_refused_and_named() {
     wrong_requirement("designated => cdhash H\"0123456789\"\n".to_owned());
     wrong_requirement(format!("{want}\n"));
     wrong_requirement(format!("designated => {want}\ndesignated => {want}\n"));
-    // The requirement of another program is not this one's.
-    wrong_requirement(requirements_of(&PROGRAMS[0]));
+    // The requirement of another program (here the helper an earlier package signed) is not
+    // this one's.
+    wrong_requirement(requirements_of(&mac_programs::Program {
+        name: "js-mac-session",
+        identifier: "com.komira.js-agent.session",
+    }));
 }
 
 /// A refusal names the binary, the program and every problem on one line.

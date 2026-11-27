@@ -107,18 +107,22 @@ mod tests {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
 
+    /// The runner of every `pfctl` a test's flags file names: none is there.
+    fn missing(_: &Path) -> Box<dyn Pfctl> {
+        Box::new(Missing)
+    }
+
     /// Runs the verb on `file` over the real file facts as its owner, with a runner that has no
     /// `pfctl`. Returns the status, the output and the error output.
     fn over(file: &Path) -> (u8, String, String) {
         let args = words(&["js-agent", VERB, "--flags-file", file.to_str().unwrap()]);
         let euid = rustix::process::geteuid().as_raw();
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        let pfctl_of = |_: &Path| -> Box<dyn Pfctl> { Box::new(Missing) };
         let code = run_over(
             &args,
             euid,
             &agent_flags::read_system,
-            &pfctl_of,
+            &missing,
             &mut out,
             &mut err,
         );
@@ -203,12 +207,11 @@ mod tests {
             &["js-agent", VERB, "/f", "--flags-file"][..],
         ] {
             let (mut out, mut err) = (Vec::new(), Vec::new());
-            let pfctl_of = |_: &Path| -> Box<dyn Pfctl> { Box::new(Missing) };
             let code = run_over(
                 &words(args),
                 0,
                 &agent_flags::read_system,
-                &pfctl_of,
+                &missing,
                 &mut out,
                 &mut err,
             );
