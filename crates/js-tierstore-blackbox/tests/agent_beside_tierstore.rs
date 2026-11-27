@@ -63,7 +63,7 @@ mod tierstore;
 #[path = "agent_beside_tierstore/upstream.rs"]
 mod upstream;
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use rig::{End, Rig};
 

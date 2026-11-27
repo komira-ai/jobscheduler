@@ -61,7 +61,7 @@ MANIFEST_SHA256 = {
     "crates/js-supervise/Cargo.toml": "15fdc15718a0ba968c5cbb5d12aacb4cf32d76bd70816d87d9f4160041e4a84c",
     "crates/js-system-clock/Cargo.toml": "92a21f5f08d4665a1e6fbd9d986cf88640ef6b7038ab600737e8d30643f50db8",
     "crates/js-testkit/Cargo.toml": "4e19132743d3081fa441d4791885b0747ee0f2f646733a2b37fd8c4e3b08867e",
-    "crates/js-tierstore-blackbox/Cargo.toml": "5eab7e76992f72272badd2cf22d28827d67946865aa487c864c19ed4c59ffab0",
+    "crates/js-tierstore-blackbox/Cargo.toml": "a9e35482a901c328b590ac69018aa5113b368709060e61459967f18b5dd90ca3",
     "crates/js-treestore/Cargo.toml": "8615e384f7060d309534d26b9c30c7f1a038851bd35084d4d54ff2faa77c1841",
     "crates/js-types/Cargo.toml": "422436f5c334d351ad0c3108649c680e1f6a7df5f324264e6c20b484ed58176f",
     "crates/js-update-hook/Cargo.toml": "a18b792500dfb2708b7a3766f246d1e0cd7e802c6ab3b476f88f3f1491bba1ce",
