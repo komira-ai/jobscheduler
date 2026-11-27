@@ -38,7 +38,7 @@ Columns:
 | rollout.md | 21 | 5 | 4 | 3 | - |
 | risks-f.md | 16 | 2 | 5 | 3 | komira-ai/jobscheduler#1150, komira-ai/jobscheduler#1152, komira-ai/jobscheduler#1172, komira-ai/jobscheduler#1174 |
 | merged-code.md | 34 | 15 | 5 | 3 | komira-ai/jobscheduler#1168, komira-ai/jobscheduler#1169, komira-ai/jobscheduler#1170, komira-ai/jobscheduler#1171 |
-| jobscheduler-design.md | 82 | 39 | 19 | 7 | komira-ai/jobscheduler#1153, komira-ai/jobscheduler#1154, komira-ai/jobscheduler#1155, komira-ai/jobscheduler#1156, komira-ai/jobscheduler#1157, komira-ai/jobscheduler#1158, komira-ai/jobscheduler#1174 |
+| jobscheduler-design.md | 83 | 40 | 19 | 7 | komira-ai/jobscheduler#1153, komira-ai/jobscheduler#1154, komira-ai/jobscheduler#1155, komira-ai/jobscheduler#1156, komira-ai/jobscheduler#1157, komira-ai/jobscheduler#1158, komira-ai/jobscheduler#1174 |
 | pools-providers-network.md | 30 | 6 | 8 | 10 | - |
 | job-rootfs.md | 17 | 3 | 2 | 9 | komira-ai/jobscheduler#1159 |
 | job-retry-and-completion-callback.md | 17 | 12 | 0 | 1 | komira-ai/jobscheduler#1150, komira-ai/jobscheduler#1193 |
@@ -370,7 +370,8 @@ As read: Current entry-point design doc (target plus as-built notes); not supers
 | 12.1 steps 27, 28 | Job calls served; agent protocol per job | partly: job_api/submit.rs:21; job_expiry.rs; job_loss.rs; agent-wire per_job.rs; lease/run messages still in js-agent-wire command.rs:265 | komira-ai/jobscheduler#1156 (new) |
 | 12.1 steps 29, 30 | Remove renewal; delete lease API | yes: PR komira-ai/jobscheduler#831; no renew/lease-ttl code in js-lease-server; js-lease crate gone | komira-ai/jobscheduler#831 |
 | 12.1 step 31 | Live logs | `crates/js-logstore`, `crates/js-logmint` | - |
-| 12.2 Macs remaining | read model allow; notarized binaries; automated isolation test per release; VM runtime with network path | partly: `crates/js-agent/src/bundle/settings.rs:253`, `xtask/tests/macos_pkg_workflow/main.rs:561` | komira-ai/jobscheduler#1157 (new); komira-ai/jobscheduler#1158 (new) |
+| 12.2 Macs: read model allow | `--read-model allow`: a bundle run's profile is the allow-list of the host's macOS base set and its grants, after a start-up self-test as a lent account through the supervisor | `crates/js-agent/src/native/allow.rs`, `crates/js-agent/src/mac_allow.rs` | komira-ai/jobscheduler#1157 |
+| 12.2 Macs remaining | notarized binaries; automated isolation test per release; VM runtime with network path | partly: `xtask/tests/macos_pkg_workflow/main.rs:561` | komira-ai/jobscheduler#1158 (new) |
 | 12.2 Cross-cutting | Supervisor definition, deny list of hosts, spot reclaim handling, safe restore verb | no | komira-ai/jobscheduler#1174 (new) |
 | 13 Q1 one writer or HA | Active writer vs hot standby vs several active | superseded: `crates/js-lease-server/src/lib.rs:422` | komira-ai/jobscheduler#873; komira-ai/jobscheduler#878 |
 | 13 Q2 HTTP/JSON gateway | B: generated gateway under /v1/jobs | `crates/js-api-gateway/src/annotation.rs` | - |
