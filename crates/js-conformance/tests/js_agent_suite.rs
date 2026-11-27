@@ -1,10 +1,18 @@
 //! The host-agent suite against the real js-agent lifecycle. The adapter drives
-//! `Lifecycle` over a runtime that lives in memory and a clock the suite moves, and stamps
-//! the agent's `Contact` where the session would: a message the harness delivers is a
-//! reply the session accepted, and `contact` is an answered heartbeat. A `start` is a run
-//! start (it carries the validity bound), a `start_fenced` a job start whose fence is the
-//! job with its allocation. The fence window is the agent's default silence bound
-//! (`--silence-stop`).
+//! `Lifecycle` over the in-memory runtime (`js_conformance::agent::memory`) and a clock the
+//! suite moves, and stamps the agent's `Contact` where the session would: a message the
+//! harness delivers is a reply the session accepted, and `contact` is an answered heartbeat.
+//! A `start` is a run start (it carries the validity bound), a `start_fenced` a job start
+//! whose fence is the job with its allocation. The fence window is the agent's default
+//! silence bound (`--silence-stop`).
+//!
+//! The runtime fails the removal of the runs the suite names (`remove_fails`) and reads a
+//! usage for every job that exited; the post-job check finds what the suite names
+//! (`check_finds`) and nothing else. A restart builds a new lifecycle over the same runtime,
+//! state and scratch directories (`Lifecycle::adopt`, as the agent's process does when it
+//! starts); the operator's consent to host jobs is a restart with `allow_host_jobs`. The
+//! whole-node lease is the `exclusive` of every reply after `hold_whole`, and its readiness
+//! is the lifecycle's answer to `prepare`, which the session asks on each heartbeat.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
@@ -13,17 +21,21 @@ use std::os::unix::fs::PermissionsExt;
 use std::rc::Rc;
 use std::time::Duration;
 
+use js_agent::integrity::code::{PROCESS_AS_JOB_USER, PROCESSES_UNREADABLE};
 use js_agent::lifecycle::{
-    Capacity, Clock, Config, Contact, DEFAULT_SILENCE_STOP, Event, Exit, Found, Lifecycle,
-    MountRoots, NoChecks, RunHandle, RunSpec, Runtime, RuntimeError, ScratchRoot, Skip, StateRoot,
-    Status, detail,
+    Capacity, CheckFinding, CheckHook, Config, Contact, DEFAULT_SILENCE_STOP, Event, Finished,
+    Found, Lifecycle, MountRoots, Quiet, RunHandle, RunSpec, Runtime, RuntimeError, ScratchRoot,
+    Skip, StateRoot, Status, detail,
 };
 use js_agent_wire::{
     Ack, BookedResources, Command, HeartbeatReply, HeldState, Isolation, JobResultAck, JobSpec,
-    JobStartSpec, Limits, ResultAck,
+    JobStartSpec, JobUsage, Limits, Mount, ResultAck, StartKind,
 };
 use js_conformance::Verdict;
-use js_conformance::agent::{self, AgentHarness, Delivery, Observed, Scenario};
+use js_conformance::agent::memory::{Memory, Time};
+use js_conformance::agent::{
+    self, AgentHarness, Answer, Cleanup, Delivery, Flaw, HostCheck, Observed, Scenario,
+};
 use js_testkit::dir::TestDir;
 
 const IMAGE: &str =
@@ -33,34 +45,41 @@ const IMAGE: &str =
 /// any wait the scenarios name: the suite reads the clock from 0.
 const BASE: u64 = 1 << 40;
 
-/// A runtime whose containers live in memory, exit when the suite ends a job and when they
-/// are stopped, and count what was created.
-#[derive(Clone, Default)]
-struct Fake(Rc<RefCell<World>>);
+/// How many steps the adapter lets the lifecycle take after each message or exit, as the
+/// agent's worker steps after every order and on every tick: enough for a stop to reach the
+/// runtime, the container to exit and its cleanup to finish.
+const SETTLE_STEPS: usize = 3;
 
-#[derive(Default)]
-struct World {
-    containers: BTreeMap<String, (String, Option<Exit>)>,
-    next: u32,
-    created: Vec<String>,
+/// The exit status of a job that fails.
+const FAILED: i32 = 1;
+
+/// What every exited job used, as the runtime reads it.
+const USAGE: JobUsage = JobUsage {
+    peak_memory_bytes: 1 << 20,
+    cpu_usage_usec: 1_000,
+    cpu_throttle: None,
+    cpu_pressure_some_usec: None,
+    cpu_peak: None,
+    peak_swap_bytes: None,
+};
+
+/// The in-memory runtime, whose removal of a container fails for the runs the suite named,
+/// and which reads [`USAGE`] for every container. Clones share everything.
+#[derive(Clone, Default)]
+struct Fake {
+    memory: Memory,
+    /// The run of each container, by the container's id.
+    runs: Rc<RefCell<BTreeMap<String, String>>>,
+    /// The runs whose container cannot be removed.
+    stuck: Rc<RefCell<BTreeSet<String>>>,
 }
 
 impl Fake {
-    fn exit(&self, run: &str) {
-        let mut world = self.0.borrow_mut();
-        let found = world.containers.values_mut().find(|(r, _)| r == run);
-        if let Some((_, exit)) = found {
-            exit.get_or_insert(Exit {
-                code: 0,
-                oom_killed: false,
-            });
-        }
-    }
-
+    /// How many containers were made for each run.
     fn launches(&self) -> BTreeMap<String, u32> {
         let mut launches = BTreeMap::new();
-        for run in &self.0.borrow().created {
-            *launches.entry(run.clone()).or_insert(0) += 1;
+        for run in self.memory.created() {
+            *launches.entry(run).or_insert(0) += 1;
         }
         launches
     }
@@ -68,50 +87,54 @@ impl Fake {
 
 impl Runtime for Fake {
     fn create_and_start(&mut self, spec: &RunSpec) -> Result<RunHandle, RuntimeError> {
-        let mut world = self.0.borrow_mut();
-        world.next += 1;
-        let id = format!("c{}", world.next);
-        world.created.push(spec.run_id.clone());
-        world
-            .containers
-            .insert(id.clone(), (spec.run_id.clone(), None));
-        Ok(RunHandle(id))
+        let handle = self.memory.create_and_start(spec)?;
+        let mut runs = self.runs.borrow_mut();
+        runs.insert(handle.0.clone(), spec.run_id.clone());
+        Ok(handle)
     }
 
     fn poll(&mut self, id: &RunHandle) -> Result<Status, RuntimeError> {
-        let world = self.0.borrow();
-        Ok(match world.containers.get(&id.0) {
-            None => Status::Gone,
-            Some((_, exit)) => exit.map_or(Status::Running, Status::Exited),
-        })
+        self.memory.poll(id)
     }
 
-    fn stop(&mut self, id: &RunHandle, _grace: Duration) -> Result<(), RuntimeError> {
-        let mut world = self.0.borrow_mut();
-        if let Some((_, exit)) = world.containers.get_mut(&id.0) {
-            exit.get_or_insert(Exit {
-                code: 137,
-                oom_killed: false,
-            });
-        }
-        Ok(())
+    fn stop(&mut self, id: &RunHandle, grace: Duration) -> Result<(), RuntimeError> {
+        self.memory.stop(id, grace)
     }
 
     fn remove(&mut self, id: &RunHandle) -> Result<(), RuntimeError> {
-        self.0.borrow_mut().containers.remove(&id.0);
-        Ok(())
+        let run = self.runs.borrow().get(&id.0).cloned().unwrap_or_default();
+        if self.stuck.borrow().contains(&run) {
+            return Err(RuntimeError::new("the container could not be removed"));
+        }
+        self.memory.remove(id)
     }
 
     fn list_labelled(&mut self) -> Result<Vec<Found>, RuntimeError> {
-        Ok(Vec::new())
+        self.memory.list_labelled()
+    }
+
+    fn usage(&mut self, _id: &RunHandle) -> Option<JobUsage> {
+        Some(USAGE)
     }
 }
 
-struct Time(Rc<Cell<u64>>);
+/// The post-job check: it finds what the suite named for a run, and nothing after any other.
+#[derive(Clone, Default)]
+struct Hook(Rc<RefCell<BTreeMap<String, HostCheck>>>);
 
-impl Clock for Time {
-    fn now_ms(&self) -> u64 {
-        self.0.get()
+impl CheckHook for Hook {
+    fn run(&mut self, job: &Finished<'_>) -> Result<(), CheckFinding> {
+        match self.0.borrow().get(job.run_id) {
+            None => Ok(()),
+            Some(HostCheck::LeftoverProcess) => Err(CheckFinding::residue(
+                PROCESS_AS_JOB_USER,
+                "a process of the job's user is left",
+            )),
+            Some(HostCheck::CannotRun) => Err(CheckFinding::unchecked(
+                PROCESSES_UNREADABLE,
+                "the host's processes could not be read",
+            )),
+        }
     }
 }
 
@@ -125,16 +148,45 @@ fn private(name: &str) -> TestDir {
 /// One js-agent lifecycle behind the suite's operations.
 struct JsAgent {
     life: Lifecycle,
+    config: Config,
     fake: Fake,
+    hook: Hook,
     clock: Rc<Cell<u64>>,
     contact: Contact,
     connected: bool,
     /// The names started by a job start: their results and acknowledgements are the job's.
     jobs: BTreeSet<String>,
+    /// The lease the host is held whole for, which every reply names.
+    whole: Option<String>,
+    /// How many commands the lifecycle refused as malformed.
+    invalid: usize,
     never_started: BTreeSet<String>,
+    refused: BTreeSet<String>,
+    findings: BTreeSet<String>,
+    cleanup: Vec<(String, Cleanup)>,
     sent: Vec<String>,
+    taint_reports: u32,
     /// The scratch and state roots, removed after the lifecycle that uses them is gone.
     _dirs: (TestDir, TestDir),
+}
+
+/// A lifecycle over `fake` that takes over what the runtime and the state root hold, as
+/// the agent's process does when it starts, with the agent's default silence bound.
+fn boot(
+    config: &Config,
+    (fake, hook): (&Fake, &Hook),
+    clock: &Rc<Cell<u64>>,
+    contact: &Contact,
+) -> (Lifecycle, Vec<Event>) {
+    let (mut life, events) = Lifecycle::adopt(
+        config.clone(),
+        Box::new(fake.clone()),
+        Box::new(hook.clone()),
+        Box::new(Time(clock.clone())),
+    )
+    .unwrap();
+    life.stop_on_silence(DEFAULT_SILENCE_STOP, contact.clone());
+    (life, events)
 }
 
 impl JsAgent {
@@ -157,57 +209,86 @@ impl JsAgent {
             bundle: None,
             quota: None,
         };
-        let (fake, clock, contact) = (
-            Fake::default(),
-            Rc::new(Cell::new(BASE)),
-            Contact::default(),
-        );
-        let (mut life, _) = Lifecycle::adopt(
-            config,
-            Box::new(fake.clone()),
-            Box::new(NoChecks),
-            Box::new(Time(clock.clone())),
-        )
-        .unwrap();
-        life.stop_on_silence(DEFAULT_SILENCE_STOP, contact.clone());
+        let (fake, hook) = (Fake::default(), Hook::default());
+        let (clock, contact) = (Rc::new(Cell::new(BASE)), Contact::default());
+        let (life, _) = boot(&config, (&fake, &hook), &clock, &contact);
         Self {
             life,
+            config,
             fake,
+            hook,
             clock,
             contact,
             connected: true,
             jobs: BTreeSet::new(),
+            whole: None,
+            invalid: 0,
             never_started: BTreeSet::new(),
+            refused: BTreeSet::new(),
+            findings: BTreeSet::new(),
+            cleanup: Vec::new(),
             sent: Vec::new(),
+            taint_reports: 0,
             _dirs: (scratch, state),
         }
     }
 
-    /// Notes the starts that were dropped as late.
+    /// Notes what the lifecycle reported: the starts dropped as late, the starts refused,
+    /// the commands refused as malformed, the steps of each cleanup and the findings.
     fn record(&mut self, events: &[Event]) {
         for event in events {
-            if let Event::Skipped {
-                run_id,
-                why: Skip::Stale,
-            } = event
-            {
-                self.never_started.insert(run_id.clone());
+            match event {
+                Event::Skipped {
+                    run_id,
+                    why: Skip::Stale,
+                } => {
+                    self.never_started.insert(run_id.clone());
+                }
+                Event::Refused { run_id, .. } => {
+                    self.refused.insert(run_id.clone());
+                }
+                Event::Invalid { .. } => self.invalid += 1,
+                Event::ContainerRemoved { run_id } => {
+                    self.cleanup.push((run_id.clone(), Cleanup::ContainerGone));
+                }
+                Event::ScratchRemoved { run_id } => {
+                    self.cleanup.push((run_id.clone(), Cleanup::ScratchGone));
+                }
+                Event::SlotFreed { run_id } => {
+                    self.cleanup.push((run_id.clone(), Cleanup::SlotFreed));
+                }
+                Event::Finding(finding) => {
+                    self.findings.extend(finding.run_id.clone());
+                }
+                _ => {}
             }
         }
     }
 
-    /// Delivers `reply` as one that arrived `waited` ms ago, then lets the worker step, as
-    /// the agent's worker does after every order.
-    fn deliver(&mut self, reply: &HeartbeatReply, waited: u64) -> Delivery {
+    /// Lets the lifecycle take [`SETTLE_STEPS`] steps.
+    fn settle(&mut self) {
+        for _ in 0..SETTLE_STEPS {
+            let events = self.life.step();
+            self.record(&events);
+        }
+    }
+
+    /// Delivers `reply`, naming the lease the host is held whole for, as one that arrived
+    /// `waited` ms ago, then lets the lifecycle settle, as the agent's worker steps after
+    /// every order.
+    fn deliver(&mut self, reply: HeartbeatReply, waited: u64) -> Delivery {
         if !self.connected {
             return Delivery::Lost;
         }
+        let reply = HeartbeatReply {
+            exclusive: self.whole.clone(),
+            ..reply
+        };
         let now = self.clock.get();
         self.contact.heard(now);
-        let events = self.life.apply_at(reply, now.saturating_sub(waited));
+        let events = self.life.apply_at(&reply, now.saturating_sub(waited));
         self.record(&events);
-        let events = self.life.step();
-        self.record(&events);
+        self.settle();
         Delivery::Delivered
     }
 
@@ -222,6 +303,24 @@ impl JsAgent {
             .filter_map(|job| job.result);
         runs.chain(jobs.map(|result| (result.job_id, result.detail)))
             .collect()
+    }
+
+    /// The running container of `run` exits with `code`, and the agent reports it.
+    fn exit(&mut self, run: &str, code: i32) {
+        self.fake.memory.exit(run, code);
+        self.settle();
+        self.heartbeat();
+    }
+
+    /// Delivers `command` alone, and notes `lease` refused when the lifecycle refused the
+    /// command as malformed.
+    fn deliver_one(&mut self, lease: &str, command: Command) -> Delivery {
+        let before = self.invalid;
+        let delivered = self.deliver(of(vec![command]), 0);
+        if self.invalid > before {
+            self.refused.insert(lease.to_owned());
+        }
+        delivered
     }
 }
 
@@ -314,12 +413,12 @@ impl AgentHarness for JsAgent {
 
     fn start(&mut self, lease: &str, valid_for: u64, waited: u64) -> Delivery {
         let start = Command::Start(Box::new(run_start(lease, valid_for)));
-        self.deliver(&of(vec![start]), waited)
+        self.deliver(of(vec![start]), waited)
     }
 
     fn start_fenced(&mut self, job: &str, allocation: &str) -> Delivery {
         let start = Command::JobStart(Box::new(job_start(job, allocation)));
-        let delivered = self.deliver(&of(vec![start]), 0);
+        let delivered = self.deliver(of(vec![start]), 0);
         if delivered == Delivery::Delivered {
             self.jobs.insert(job.to_owned());
         }
@@ -335,40 +434,156 @@ impl AgentHarness for JsAgent {
                 run_id: lease.to_owned(),
             },
         };
-        self.deliver(&of(vec![command]), 0)
+        self.deliver(of(vec![command]), 0)
     }
 
-    fn ack(&mut self, lease: &str) -> Delivery {
+    fn answer(&mut self, lease: &str, answer: Answer) -> Delivery {
+        let ack = match answer {
+            Answer::Accepted => Ack::Accepted,
+            Answer::Duplicate => Ack::Duplicate,
+            Answer::Stale => Ack::Stale,
+            Answer::UnknownLease => Ack::UnknownLease,
+            Answer::Mismatch => Ack::Mismatch,
+            Answer::Unrecognised => Ack::Unknown,
+        };
         let reply = match self.jobs.contains(lease) {
             true => HeartbeatReply {
                 job_acks: vec![JobResultAck {
                     job_id: lease.to_owned(),
-                    ack: Ack::Accepted,
+                    ack,
                 }],
                 ..HeartbeatReply::default()
             },
             false => HeartbeatReply {
                 result_acks: vec![ResultAck {
                     run_id: lease.to_owned(),
-                    ack: Ack::Accepted,
+                    ack,
                 }],
                 ..HeartbeatReply::default()
             },
         };
-        self.deliver(&reply, 0)
+        self.deliver(reply, 0)
     }
 
     fn complete(&mut self, lease: &str) {
-        self.fake.exit(lease);
-        let events = self.life.step();
+        self.exit(lease, 0);
+    }
+
+    fn fail(&mut self, lease: &str) {
+        self.exit(lease, FAILED);
+    }
+
+    fn start_flawed(&mut self, lease: &str, flaw: Flaw) -> Delivery {
+        let mut run = run_start(lease, 0);
+        let command = match flaw {
+            Flaw::NoWallTime => {
+                run.limits.wall_ms = 0;
+                Command::Start(Box::new(run))
+            }
+            Flaw::ReservedLabel => {
+                let key = format!("{}flaw", js_types::RESERVED_PREFIX);
+                run.labels.insert(key, "set".to_owned());
+                Command::Start(Box::new(run))
+            }
+            Flaw::MountOutsideRoots => {
+                run.mounts.push(Mount {
+                    root_name: "data".to_owned(),
+                    rel: "input".to_owned(),
+                    ro: true,
+                });
+                Command::Start(Box::new(run))
+            }
+            Flaw::GpuOnGpulessShape => {
+                run.gpu_indices.push(0);
+                Command::Start(Box::new(run))
+            }
+            Flaw::UnstatedFence => {
+                let mut job = job_start(lease, "first");
+                job.allocation_id = String::new();
+                Command::JobStart(Box::new(job))
+            }
+            Flaw::VmWithoutBackend => {
+                let mut job = job_start(lease, "first");
+                job.kind = StartKind::Vm;
+                Command::JobStart(Box::new(job))
+            }
+        };
+        self.deliver_one(lease, command)
+    }
+
+    fn remove_fails(&mut self, lease: &str) {
+        self.fake.stuck.borrow_mut().insert(lease.to_owned());
+    }
+
+    fn check_finds(&mut self, lease: &str, check: HostCheck) {
+        self.hook.0.borrow_mut().insert(lease.to_owned(), check);
+    }
+
+    fn consent_to_host_jobs(&mut self) {
+        self.config.allow_host_jobs = true;
+        self.restart();
+    }
+
+    fn start_host(&mut self, lease: &str) -> Delivery {
+        let mut run = run_start(lease, 0);
+        run.isolation = Isolation::Host;
+        self.deliver_one(lease, Command::Start(Box::new(run)))
+    }
+
+    fn ack_taint(&mut self) -> Delivery {
+        let reply = HeartbeatReply {
+            taint_ack: true,
+            ..HeartbeatReply::default()
+        };
+        self.deliver(reply, 0)
+    }
+
+    fn restart(&mut self) {
+        let (life, events) = boot(
+            &self.config,
+            (&self.fake, &self.hook),
+            &self.clock,
+            &self.contact,
+        );
+        self.life = life;
         self.record(&events);
+        self.connected = true;
+        self.settle();
         self.heartbeat();
+        self.deliver(HeartbeatReply::default(), 0);
+    }
+
+    fn hold_whole(&mut self, lease: &str) -> Delivery {
+        if !self.connected {
+            return Delivery::Lost;
+        }
+        self.whole = Some(lease.to_owned());
+        self.deliver(HeartbeatReply::default(), 0)
+    }
+
+    fn whole_ready(&mut self) -> bool {
+        let Some(lease) = self.whole.clone() else {
+            return false;
+        };
+        let mut events = Vec::new();
+        let quiet = self.life.prepare(&lease, &mut events);
+        self.record(&events);
+        matches!(quiet, Quiet::Ready)
+    }
+
+    fn start_whole(&mut self, lease: &str) -> Delivery {
+        let mut run = run_start(lease, 0);
+        run.lease_id = self.whole.clone().unwrap_or_default();
+        self.deliver_one(lease, Command::Start(Box::new(run)))
     }
 
     fn heartbeat(&mut self) {
         if self.connected {
             let results = self.results();
             self.sent.extend(results.into_iter().map(|(id, _)| id));
+            if self.life.pending_taint().is_some() {
+                self.taint_reports += 1;
+            }
         }
     }
 
@@ -397,12 +612,20 @@ impl AgentHarness for JsAgent {
         let silenced = Some(detail::SILENCE_STOP.to_owned());
         let fenced = self.results().into_iter();
         let fenced = fenced.filter(|(_, detail)| *detail == silenced);
+        let held = self.life.held_jobs().into_iter();
+        let used = held.filter(|job| job.result.as_ref().is_some_and(|r| r.usage.is_some()));
         Observed {
             running,
             fenced: fenced.map(|(id, _)| id).collect(),
             never_started: self.never_started.clone(),
             launches: self.fake.launches(),
             results_sent: self.sent.clone(),
+            refused: self.refused.clone(),
+            usage: used.map(|job| job.job_id).collect(),
+            cleanup: self.cleanup.clone(),
+            tainted: self.life.is_tainted(),
+            taint_reports: self.taint_reports,
+            findings: self.findings.clone(),
         }
     }
 }

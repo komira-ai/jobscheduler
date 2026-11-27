@@ -79,8 +79,6 @@ pub struct Checker {
     /// Whether the scheduler places by load: the reference placement is `load_reference`'s,
     /// not the booked rule's.
     load: bool,
-    /// The worker each blocked head held after the last round (load rule).
-    holds: BTreeMap<OperationId, WorkerId>,
     needs: Vec<js_caps::Request>,
     answered: BTreeSet<WaiterId>,
     waiters: u64,
@@ -115,7 +113,6 @@ impl Checker {
             in_flight: BTreeMap::new(),
             next_seq: 0,
             load: !crate::booked::is_booked(),
-            holds: BTreeMap::new(),
             needs: Vec::new(),
             answered: BTreeSet::new(),
             waiters: 0,

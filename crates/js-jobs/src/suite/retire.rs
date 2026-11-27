@@ -48,10 +48,12 @@ where
     let (old, new) = (host("node-old"), host("node-new"));
     let hello = hello_in("pool-a");
     rig.jobs
-        .hello_node_in_pool(&old, &hello, 1)
+        .hello_node_in_pool(&old, &hello, 1, GRACE)
         .expect("below the cap");
     assert_eq!(
-        rig.jobs.hello_node_in_pool(&new, &hello, 1).map(drop),
+        rig.jobs
+            .hello_node_in_pool(&new, &hello, 1, GRACE)
+            .map(drop),
         Err(JobStoreError::PoolFull {
             host: new.clone(),
             pool: "pool-a".to_owned(),
@@ -89,7 +91,7 @@ where
         "{name}: a repeat"
     );
     assert_eq!(rig.snapshot(), before, "{name}: a repeat wrote");
-    let admitted = rig.jobs.hello_node_in_pool(&new, &hello, 1);
+    let admitted = rig.jobs.hello_node_in_pool(&new, &hello, 1, GRACE);
     assert_eq!(
         admitted.map(|row| row.record.epoch),
         Ok(1),

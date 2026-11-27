@@ -38,7 +38,7 @@ impl Check {
         let mut placer = self.load.then(|| {
             let hosts = names.iter().map(|n| self.host(n)).collect();
             let next_seq = self.newest_grant.map_or(0, |l| l.seq + 1);
-            Placer::new(hosts, TERM, next_seq, self.holds.clone())
+            Placer::new(hosts, TERM, next_seq)
         });
         // The platform requests seen this round: a request's pool is the one its platform is.
         let mut pools: Vec<js_caps::Request> = Vec::new();
@@ -136,9 +136,6 @@ impl Check {
                 round.refusals.insert(id);
             }
             round.classes.insert(id, class);
-        }
-        if let Some(placer) = placer {
-            self.holds = placer.holds().clone();
         }
         round
     }
