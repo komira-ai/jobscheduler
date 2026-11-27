@@ -16,8 +16,8 @@ priority = 10
 # (`js_sim_cell::run_seed_range_on_threads`, with `THREADS` or `HEADLINE_THREADS` four in the
 # test's file). `threads-required = 4` gives each four of a run's test slots, so a shard
 # runs at most four seeds at once and starts no other test beside such a test that would
-# crowd them out. Which tests run, and what they assert, does not change. A test that
-# runs its seeds on threads is named here, and a test named here runs its seeds on threads.
+# crowd them out. Which tests run, and what they assert, does not change. The runner's own
+# tests (tests/seed_range.rs) use it on small scenarios and are not named here.
 [[profile.default.overrides]]
 filter = """\
     package(js-sim-cell) & ( \
