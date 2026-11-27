@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{AgentHarness, Delivery, Observed};
+use super::{AgentHarness, Answer, Cleanup, Delivery, Flaw, HostCheck, Observed};
 
 /// The fence window [`FakeAgent::new`] uses, in milliseconds.
 pub const FENCE_WINDOW: u64 = 30_000;
@@ -26,9 +26,65 @@ pub enum Defect {
     /// A retired fence is kept by the job alone, so the same job under a new allocation is
     /// refused too.
     FenceKeyedByJobAlone,
+    /// A result answered with a known verdict other than accepted is kept and sent again.
+    KeepsRefusedResult,
+    /// A result answered with a verdict the agent does not know is dropped.
+    DropsUnrecognisedAnswer,
+    /// The result of a job that failed carries no usage.
+    DropsUsageOnFailure,
+    /// The result of a job killed by a stop carries no usage.
+    DropsUsageOnKill,
+    /// A start that breaks this rule of the start contract is launched.
+    RunsFlawedStart(Flaw),
+    /// A run's slot is freed before its container and scratch are gone.
+    FreesSlotBeforeCleanup,
+    /// A container that could not be removed frees its slot.
+    FreesSlotOnFailedRemoval,
+    /// A container that could not be removed leaves the host untainted.
+    FailedRemovalTaintsNothing,
+    /// A start whose job may change the host is launched without the operator's consent.
+    RunsHostWithoutConsent,
+    /// A job that may change the host taints it only when it ends on its own.
+    HostJobTaintsOnlyOnSuccess,
+    /// A process of the job's user left after the job taints nothing.
+    LeftoverProcessTaintsNothing,
+    /// A check that could not run is taken as passed.
+    UnrunCheckPasses,
+    /// A taint is reported in one heartbeat, acknowledged or not.
+    ForgetsUnackedTaint,
+    /// The acknowledgement of a taint clears it.
+    AckClearsTaint,
+    /// A restart forgets the taint.
+    ForgetsTaintAtRestart,
+    /// A tainted host still launches a start.
+    StartsOnTaintedHost,
+    /// A restart forgets the runs that kept running.
+    ForgetsRunsAtRestart,
+    /// A restart forgets the results not yet acknowledged.
+    ForgetsResultsAtRestart,
+    /// A host held whole is reported ready while a run is held on it.
+    ReadyWhileBusy,
+    /// A host held whole still launches a run of another lease.
+    RunsBesideWholeLease,
+}
+
+/// How a running job ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ending {
+    /// On its own, and passed.
+    Completed,
+    /// On its own, with a failure.
+    Failed,
+    /// Stopped by a Cancel.
+    Killed,
 }
 
 /// A correct in-process agent, or with one [`Defect`] a broken one.
+///
+/// It models the cleanup, the checks, the taint, a restart and a whole-node hold as far as
+/// the scenarios read them: a run's cleanup is done when the run ends, a container that
+/// cannot be removed stays and holds its slot, a taint refuses every later run start (not a
+/// fenced, host or whole-node one), and a restart keeps the runs, the results and the taint.
 #[derive(Debug, Clone)]
 pub struct FakeAgent {
     defect: Option<Defect>,
@@ -48,6 +104,24 @@ pub struct FakeAgent {
     fences: BTreeMap<String, String>,
     /// The fences of the fenced jobs that ended: a job with its allocation.
     retired_fences: BTreeSet<(String, String)>,
+    refused: BTreeSet<String>,
+    usage: BTreeSet<String>,
+    cleanup: Vec<(String, Cleanup)>,
+    tainted: bool,
+    taint_acked: bool,
+    taint_reports: u32,
+    findings: BTreeSet<String>,
+    /// The leases whose container cannot be removed.
+    stuck: BTreeSet<String>,
+    /// What the post-job check finds after each lease that it finds something after.
+    checks: BTreeMap<String, HostCheck>,
+    /// Whether the operator consented to jobs that may change the host.
+    host_jobs: bool,
+    /// The running jobs that may change the host.
+    host_runs: BTreeSet<String>,
+    /// Whether the host is held whole for a lease, and whether it was found ready for it.
+    held_whole: bool,
+    whole_ready: bool,
 }
 
 impl FakeAgent {
@@ -75,6 +149,19 @@ impl FakeAgent {
             sent: Vec::new(),
             fences: BTreeMap::new(),
             retired_fences: BTreeSet::new(),
+            refused: BTreeSet::new(),
+            usage: BTreeSet::new(),
+            cleanup: Vec::new(),
+            tainted: false,
+            taint_acked: false,
+            taint_reports: 0,
+            findings: BTreeSet::new(),
+            stuck: BTreeSet::new(),
+            checks: BTreeMap::new(),
+            host_jobs: false,
+            host_runs: BTreeSet::new(),
+            held_whole: false,
+            whole_ready: false,
         }
     }
 
@@ -97,6 +184,93 @@ impl FakeAgent {
 
     fn lacks(&self, defect: Defect) -> bool {
         self.defect == Some(defect)
+    }
+
+    /// Launches the job of `lease` and lists it as running.
+    fn launch(&mut self, lease: &str) {
+        *self.launches.entry(lease.to_string()).or_insert(0) += 1;
+        self.running.insert(lease.to_string());
+    }
+
+    /// The job of `lease` ends as `ending` says: its usage is read and its cleanup done.
+    fn end(&mut self, lease: &str, ending: Ending) {
+        self.running.remove(lease);
+        let drops_usage = match ending {
+            Ending::Completed => false,
+            Ending::Failed => self.lacks(Defect::DropsUsageOnFailure),
+            Ending::Killed => self.lacks(Defect::DropsUsageOnKill),
+        };
+        if !drops_usage {
+            self.usage.insert(lease.to_string());
+        }
+        // A host job taints the host at its start; the broken agent only once it passed.
+        if self.host_runs.remove(lease) & (ending == Ending::Completed) {
+            self.tainted = true;
+        }
+        self.clean_up(lease);
+    }
+
+    /// Removes the container and scratch of `lease`, runs the post-job check and frees the
+    /// slot, reporting each step; a container that cannot be removed stops the cleanup there
+    /// and taints the host, and a check that finds something taints it and keeps the slot.
+    fn clean_up(&mut self, lease: &str) {
+        let steps = match self.stuck.contains(lease) {
+            true => self.stuck_removal(),
+            false => self.removal(lease),
+        };
+        let steps = steps.into_iter().map(|step| (lease.to_string(), step));
+        self.cleanup.extend(steps);
+    }
+
+    /// The cleanup steps of a run whose container cannot be removed.
+    fn stuck_removal(&mut self) -> Vec<Cleanup> {
+        self.tainted |= !self.lacks(Defect::FailedRemovalTaintsNothing);
+        match self.lacks(Defect::FreesSlotOnFailedRemoval) {
+            true => vec![Cleanup::SlotFreed],
+            false => Vec::new(),
+        }
+    }
+
+    /// The cleanup steps of a run whose container is removed, after its check.
+    fn removal(&mut self, lease: &str) -> Vec<Cleanup> {
+        let found = match self.checks.get(lease) {
+            None => false,
+            Some(HostCheck::LeftoverProcess) => !self.lacks(Defect::LeftoverProcessTaintsNothing),
+            Some(HostCheck::CannotRun) => !self.lacks(Defect::UnrunCheckPasses),
+        };
+        if found {
+            self.tainted = true;
+            self.findings.insert(lease.to_string());
+        }
+        let early = self.lacks(Defect::FreesSlotBeforeCleanup);
+        let (gone, scratch, freed) = (
+            Cleanup::ContainerGone,
+            Cleanup::ScratchGone,
+            Cleanup::SlotFreed,
+        );
+        match (found, early) {
+            (true, _) => vec![gone, scratch],
+            (false, false) => vec![gone, scratch, freed],
+            (false, true) => vec![freed, gone, scratch],
+        }
+    }
+
+    /// A job of `lease` ended on its own as `ending` says: its result is held and sent.
+    fn finish(&mut self, lease: &str, ending: Ending) {
+        self.end(lease, ending);
+        if let Some(allocation) = self.fences.remove(lease) {
+            self.retired_fences.insert((lease.to_string(), allocation));
+        }
+        self.unacked.insert(lease.to_string());
+        self.heartbeat();
+    }
+
+    /// Puts the taint in the heartbeat being sent, unless it was acknowledged.
+    fn report_taint(&mut self) {
+        if self.tainted & !self.taint_acked {
+            self.taint_reports += 1;
+            self.taint_acked |= self.lacks(Defect::ForgetsUnackedTaint);
+        }
     }
 }
 
@@ -129,6 +303,12 @@ impl AgentHarness for FakeAgent {
             return Delivery::Lost;
         }
         self.last_contact = self.now;
+        let tainted = self.tainted & !self.lacks(Defect::StartsOnTaintedHost);
+        let beside = self.held_whole & !self.lacks(Defect::RunsBesideWholeLease);
+        if tainted | beside {
+            self.refused.insert(lease.to_string());
+            return Delivery::Delivered;
+        }
         let fresh = self.known.insert(lease.to_string());
         let repeat = !fresh && !self.lacks(Defect::StartRunsTwice);
         let bounded = valid_for != 0 && waited > valid_for;
@@ -138,8 +318,7 @@ impl AgentHarness for FakeAgent {
             if late {
                 self.never_started.insert(lease.to_string());
             } else {
-                *self.launches.entry(lease.to_string()).or_insert(0) += 1;
-                self.running.insert(lease.to_string());
+                self.launch(lease);
             }
         }
         Delivery::Delivered
@@ -160,8 +339,7 @@ impl AgentHarness for FakeAgent {
         };
         let refused = fenced && !self.lacks(Defect::RunsRetiredFence);
         if !refused && !self.running.contains(job) {
-            *self.launches.entry(job.to_string()).or_insert(0) += 1;
-            self.running.insert(job.to_string());
+            self.launch(job);
             self.fences.insert(fence.0, fence.1);
         }
         Delivery::Delivered
@@ -172,8 +350,11 @@ impl AgentHarness for FakeAgent {
             return Delivery::Lost;
         }
         self.last_contact = self.now;
-        if !self.lacks(Defect::CancelKeepsListed) {
-            self.running.remove(lease);
+        if self.running.contains(lease) {
+            self.end(lease, Ending::Killed);
+            if self.lacks(Defect::CancelKeepsListed) {
+                self.running.insert(lease.to_string());
+            }
         }
         if self.lacks(Defect::ForgetsRetiredIds) {
             self.known.remove(lease);
@@ -183,27 +364,131 @@ impl AgentHarness for FakeAgent {
         Delivery::Delivered
     }
 
-    fn ack(&mut self, lease: &str) -> Delivery {
+    fn answer(&mut self, lease: &str, answer: Answer) -> Delivery {
         if !self.connected {
             return Delivery::Lost;
         }
         self.last_contact = self.now;
-        self.unacked.remove(lease);
+        let drops = match answer {
+            Answer::Accepted => true,
+            Answer::Unrecognised => self.lacks(Defect::DropsUnrecognisedAnswer),
+            _ => !self.lacks(Defect::KeepsRefusedResult),
+        };
+        if drops {
+            self.unacked.remove(lease);
+        }
         Delivery::Delivered
     }
 
     fn complete(&mut self, lease: &str) {
-        self.running.remove(lease);
-        if let Some(allocation) = self.fences.remove(lease) {
-            self.retired_fences.insert((lease.to_string(), allocation));
+        self.finish(lease, Ending::Completed);
+    }
+
+    fn fail(&mut self, lease: &str) {
+        self.finish(lease, Ending::Failed);
+    }
+
+    fn start_flawed(&mut self, lease: &str, flaw: Flaw) -> Delivery {
+        if !self.connected {
+            return Delivery::Lost;
         }
-        self.unacked.insert(lease.to_string());
+        self.last_contact = self.now;
+        match self.lacks(Defect::RunsFlawedStart(flaw)) {
+            true => self.launch(lease),
+            false => {
+                self.refused.insert(lease.to_string());
+            }
+        }
+        Delivery::Delivered
+    }
+
+    fn remove_fails(&mut self, lease: &str) {
+        self.stuck.insert(lease.to_string());
+    }
+
+    fn check_finds(&mut self, lease: &str, check: HostCheck) {
+        self.checks.insert(lease.to_string(), check);
+    }
+
+    fn consent_to_host_jobs(&mut self) {
+        self.host_jobs = true;
+    }
+
+    fn start_host(&mut self, lease: &str) -> Delivery {
+        if !self.connected {
+            return Delivery::Lost;
+        }
+        self.last_contact = self.now;
+        match self.host_jobs | self.lacks(Defect::RunsHostWithoutConsent) {
+            true => {
+                self.launch(lease);
+                self.host_runs.insert(lease.to_string());
+                self.tainted |= !self.lacks(Defect::HostJobTaintsOnlyOnSuccess);
+            }
+            false => {
+                self.refused.insert(lease.to_string());
+            }
+        }
+        Delivery::Delivered
+    }
+
+    fn ack_taint(&mut self) -> Delivery {
+        if !self.connected {
+            return Delivery::Lost;
+        }
+        self.last_contact = self.now;
+        self.taint_acked = true;
+        self.tainted &= !self.lacks(Defect::AckClearsTaint);
+        Delivery::Delivered
+    }
+
+    fn restart(&mut self) {
+        if self.lacks(Defect::ForgetsRunsAtRestart) {
+            self.running.clear();
+        }
+        if self.lacks(Defect::ForgetsResultsAtRestart) {
+            self.unacked.clear();
+        }
+        self.tainted &= !self.lacks(Defect::ForgetsTaintAtRestart);
+        self.taint_acked = false;
+        self.connected = true;
         self.heartbeat();
+    }
+
+    fn hold_whole(&mut self, _lease: &str) -> Delivery {
+        if !self.connected {
+            return Delivery::Lost;
+        }
+        self.last_contact = self.now;
+        self.held_whole = true;
+        Delivery::Delivered
+    }
+
+    fn whole_ready(&mut self) -> bool {
+        let quiet = self.running.len() + self.unacked.len() == 0;
+        let ready = quiet | self.lacks(Defect::ReadyWhileBusy);
+        self.whole_ready |= self.held_whole & ready;
+        self.whole_ready
+    }
+
+    fn start_whole(&mut self, lease: &str) -> Delivery {
+        if !self.connected {
+            return Delivery::Lost;
+        }
+        self.last_contact = self.now;
+        match self.whole_ready {
+            true => self.launch(lease),
+            false => {
+                self.refused.insert(lease.to_string());
+            }
+        }
+        Delivery::Delivered
     }
 
     fn heartbeat(&mut self) {
         if self.connected {
             self.sent.extend(self.unacked.iter().cloned());
+            self.report_taint();
         }
     }
 
@@ -230,6 +515,12 @@ impl AgentHarness for FakeAgent {
             never_started: self.never_started.clone(),
             launches: self.launches.clone(),
             results_sent: self.sent.clone(),
+            refused: self.refused.clone(),
+            usage: self.usage.clone(),
+            cleanup: self.cleanup.clone(),
+            tainted: self.tainted,
+            taint_reports: self.taint_reports,
+            findings: self.findings.clone(),
         }
     }
 }
