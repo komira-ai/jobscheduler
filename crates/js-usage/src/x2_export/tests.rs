@@ -209,7 +209,7 @@ fn rows_that_are_not_runs_are_counted_by_cause() {
     let key = digest("build:a");
     assert_eq!(
         export.key_profile,
-        format!("kp {key} any 0 30000 0 1000 1073741824\n")
+        format!("kp {key} any 30000 30000 0 1000 1073741824\n")
     );
 }
 
@@ -383,4 +383,73 @@ fn the_export_flags_are_each_given_once() {
         refused(&[&all[..2], &all[4..]].concat()),
         "--before-ms is required"
     );
+}
+
+/// The text of an export of five runs (four of class `a`, one of `b`) on two hosts, and of
+/// their node minutes: the x2 reader of `js-sched` parses the same two texts
+/// (`tests/sim_x_replay/x2_store_tests.rs` there holds a copy), so the writer and the reader
+/// are held to one format.
+const KEY_PROFILE: &str = concat!(
+    "kp af63dc4c8601ec8c any 0 150000 0 1000 536870912\n",
+    "kp af63dc4c8601ec8c any 0 150000 1 1000 536870912\n",
+    "kp af63dc4c8601ec8c any 0 150000 2 1000 536870912\n",
+    "kp af63dc4c8601ec8c any 120000 150000 0 2000 536870912\n",
+    "kp af63dc4c8601ec8c any 120000 150000 1 2000 536870912\n",
+    "kp af63dc4c8601ec8c any 120000 150000 2 2000 536870912\n",
+    "kp af63dc4c8601ec8c any 240000 150000 0 500 536870912\n",
+    "kp af63dc4c8601ec8c any 240000 150000 1 500 536870912\n",
+    "kp af63dc4c8601ec8c any 240000 150000 2 500 536870912\n",
+    "kp af63df4c8601f1a5 any 360000 30000 0 250 104857600\n",
+    "kp af63dc4c8601ec8c any 480000 150000 0 1000 536870912\n",
+    "kp af63dc4c8601ec8c any 480000 150000 1 1000 536870912\n",
+    "kp af63dc4c8601ec8c any 480000 150000 2 1000 536870912\n",
+);
+
+const NODE_MINUTE: &str = concat!(
+    "nm 0 0 900 1073741824 1\n",
+    "nm 0 1 900 1073741824 1\n",
+    "nm 1 3 900 1073741824 1\n",
+);
+
+/// Asserts five runs on two hosts export to the text the x2 reader of `js-sched` is tested
+/// on ([`KEY_PROFILE`], [`NODE_MINUTE`]). Catches a writer that moves away from that text
+/// (a field's place or unit, the minute count of a run, the start's clock) without the
+/// reader's copy moving with it.
+#[test]
+fn five_runs_export_to_the_text_the_reader_is_tested_on() {
+    let s = store();
+    let mut rows = Vec::new();
+    let mut add =
+        |id: &str, class: &str, on: &str, end: u64, run_ms: u64, sixteenths: u16, mib: u64| {
+            let mut row = run_row(id, end, run_ms, 8, vec![sixteenths; 16]);
+            row.class = Some(class.to_string());
+            row.profile = None;
+            row.host = Some(host(on));
+            row.used = Some(Used {
+                cpu_milli: 1_000,
+                memory_bytes: mib << 20,
+                cpu_mean_milli: 1_000,
+            });
+            rows.push(row);
+        };
+    add("1-1", "a", "h1", 100 * MIN + 150_000, 150_000, 16, 512);
+    add("1-2", "a", "h2", 102 * MIN + 150_000, 150_000, 32, 512);
+    add("1-3", "a", "h1", 104 * MIN + 150_000, 150_000, 8, 512);
+    add("1-4", "b", "h2", 106 * MIN + 30_000, 30_000, 4, 100);
+    add("1-5", "a", "h1", 108 * MIN + 150_000, 150_000, 16, 512);
+    put(&s, &rows);
+    let minute = |minute| NodeMinute {
+        minute,
+        cpu_millis: 900,
+        ws_max_bytes: 1 << 30,
+        leases: 1,
+    };
+    let series = NodeSeries::new(&s);
+    series
+        .append(&host("h1"), &[minute(100), minute(101)])
+        .unwrap();
+    series.append(&host("h2"), &[minute(103)]).unwrap();
+    let export = x2_export(&s, 0, 200 * MIN).unwrap();
+    assert_eq!(export.key_profile, KEY_PROFILE);
+    assert_eq!(export.node_minute, NODE_MINUTE);
 }

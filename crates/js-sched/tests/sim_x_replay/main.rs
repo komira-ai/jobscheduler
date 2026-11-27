@@ -11,7 +11,7 @@
 //!   candidate-order invariance.
 //! * `x2_tests` - the x2 run: the real series as the truth, the learner's beliefs in the
 //!   replay, the score rankers in the loop, the report and the runner's flags.
-//! * `x2_store_tests` - an export written from a usage store reads back as the x2 input.
+//! * `x2_store_tests` - the text the usage store's export writes reads back as the x2 input.
 
 mod adapter_tests;
 mod engine;

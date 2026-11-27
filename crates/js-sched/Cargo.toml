@@ -24,10 +24,6 @@ thiserror.workspace = true
 
 [dev-dependencies]
 js-sim = { path = "../js-sim" }
-# The x2 replay's round trip (tests/sim_x_replay/x2_store_tests.rs): an export written from
-# a usage store over the in-memory fake store reads back as the replay's input.
-js-state = { path = "../js-state", features = ["test-support"] }
-js-usage = { path = "../js-usage" }
 
 [lints]
 workspace = true

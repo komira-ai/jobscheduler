@@ -1883,9 +1883,7 @@ dependencies = [
  "js-elastic",
  "js-sim",
  "js-sizing",
- "js-state",
  "js-types",
- "js-usage",
  "js-whole",
  "thiserror",
 ]
