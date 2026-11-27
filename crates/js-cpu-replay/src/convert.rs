@@ -650,7 +650,10 @@ mod tests {
         ];
         for (n, series) in malformed.iter().enumerate() {
             let job = format!("m{n}");
-            usage.push(with_series(&line(&job, "node-1", 10_010, 4000, 0, 1), series));
+            usage.push(with_series(
+                &line(&job, "node-1", 10_010, 4000, 0, 1),
+                series,
+            ));
         }
         let converted = convert(&usage.join("\n"), &BTreeMap::new(), &BTreeMap::new(), 0).unwrap();
         let series: Vec<Option<CpuSeries>> = converted

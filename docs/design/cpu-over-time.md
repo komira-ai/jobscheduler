@@ -332,12 +332,20 @@ accepts. What corrects is the next placement:
   - the placer's sizing (mirrored from `JobSizes` over `js-sizing`) and its score (keys 1, 3, 5);
   - host readings every 5 s, as #1036 makes real (the arm "as deployed" has none, as before it);
   - the memory rule before #1035.
-- The arm `A median, curves packed, 1.1` replays the curve mode of `placement-profiles-live.md` on the shapes the replay
-  synthesises (the trace has each job's mean and peak, not its series): each class learns every successful run's
-  synthesised series in 2 s means, a job of a class that passes the four checks books its curve, a host takes a job
-  when the curves fit at every slot ahead (`Rule::Packed`), and a job that waited 30 s at the head is tested flat.
-  Its `booked/used` integrates the curve over each job's wall time. The residual of the design is the replay's
-  measured CPU beyond the jobs' charges. On the farm trace, which records no peaks, every series is flat.
+- The arm `A median, curves packed, 1.1` replays the curve mode of `placement-profiles-live.md`. The trace carries
+  each job's CPU series when the export has it (`GET /v1/usage`'s `cpuSeries`, or the store row's), as a sixteenth
+  field under the header `# js-cpu-replay trace 2`; a trace with no series is written as before, under `trace 1`.
+  Each class learns as the job service's history does: a successful run's recorded series when it is whole and
+  agrees with the run's CPU time, and an unusable series (check 4) for a run without one, a partial or disagreeing
+  one, or a failure of a class that exists. A job of a class that passes the four checks books its curve, a host takes
+  a job when the curves fit at every slot ahead (`Rule::Packed`), and a job that waited 30 s at the head is tested
+  flat. Its `booked/used` integrates the curve over each job's wall time. The residual of the design is the replay's
+  measured CPU beyond the jobs' charges. A trace that carries series is also replayed under the shape `recorded`, each
+  job living its series (a job without a usable one as the burst). On the farm trace, which records no series, no
+  class passes check 4, so the arm books every job flat and differs from `A median, 1.1` only in how it ranks hosts.
+- **The gate** (`run --learn-days N`, N at least 2): the section `placement-profiles-live.md` section 4 step 3 asks
+  for, the curve mode against the flat step on the jobs that arrive after the trace's first N days, every job living
+  its recorded series, the curve mode's classes learning only from the first N days (`crates/js-cpu-replay/src/gate.rs`).
 - **Contention** (ASSUMED): a host asked for more than its cores gives each job cores/demand of what it asks, and the
   job runs longer by that factor. Nothing is lost to cache or switching.
 - `js-cpu-replay shadow <log>` reads the job service's own log under `--placement-curves shadow` (step 2) and
@@ -413,8 +421,8 @@ What to read from the table:
   Once #1036's readings flow, the comparison is run again with recorded readings and the measured-load rule as the
   baseline.
 
-**Next:** the job store's rows (`convert --rows`: real classes, peaks, contention, start times), then step 1's
-series, with curves learned on two days and replayed on a held-out third.
+**Next:** an export of three days with step 1's series (`convert`, then `run --learn-days 2`): curves learned on two
+days and replayed on a held-out third. The code for it is built; the run on the farm's days is not yet made.
 
 **Pass mark** (decision 2): on held-out recorded days the curve rule takes 10% or more off total time against today's
 rule, by more than the spread between two days, with throughput within 2%; and the perfect curve does better still.

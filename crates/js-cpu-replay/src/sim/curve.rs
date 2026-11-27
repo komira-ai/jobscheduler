@@ -81,7 +81,11 @@ impl Learning {
     ) {
         let usable = series.filter(|series| shape::usable(series, cpu_ms));
         if let Some(series) = usable {
-            let points: Vec<u32> = series.points.iter().map(|point| u32::from(*point)).collect();
+            let points: Vec<u32> = series
+                .points
+                .iter()
+                .map(|point| u32::from(*point))
+                .collect();
             let run = RunSeries {
                 granularity_secs: series.granularity_secs,
                 points: &points,

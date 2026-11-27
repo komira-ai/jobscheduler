@@ -2,8 +2,9 @@
 
 Status: built behind `--placement-curves on`, off by default: the four checks, the curve booking, the packing rule
 on the curve hosts, the pack limit's fullest slot, the wait bound, `server.curve_hosts`,
-`server.curve_max_wait_seconds`, the metrics of section 5, the `shadow` table's three columns and a curve arm of the
-replay (on synthesised lives: the trace still carries no series). Not built: the decide-in-shadow line of section 4.
+`server.curve_max_wait_seconds`, the metrics of section 5, the `shadow` table's three columns, a curve arm of the
+replay that learns from the series the trace carries, and the replay on held-out days (`js-cpu-replay run
+--learn-days`). Not built: the decide-in-shadow line of section 4. Not yet run: the replay on the farm's recorded days.
 The code references below are to the commit the design was written at. It follows [cpu-over-time.md](cpu-over-time.md), whose steps 1
 (record) and 2 (learn in shadow, komira-ai/jobscheduler#1057) are built, and fixes what its steps 3 (decide in
 shadow) and 4 (enforce) book, gate and roll out. Companions: [sizing.md](sizing.md) (how a class is booked today)
@@ -99,7 +100,7 @@ what it books until then, and how the mode is turned on and back off.
 | `js-sched-placer` | `Curves` gains `On`. `JobSizes` answers, per job, flat or curve with the figures. A per-host table of 65 slots (64 of 2 s, then one from 128 s on). The packing test in `try_job`, in place of the CPU axis of `Room::fits` on a curve host. A first-waited time per queued job, in memory. One log line. |
 | `js-sched` | The pack limit's CPU share can read a per-host figure the placer gives (the largest booked slot) in place of the summed bookings. One read-only accessor for a host's slot-0 CPU charge (`cpu_left`, `crates/js-sched/src/admission/horizon.rs:57`). The minute horizon used for leases is unchanged. |
 | `js-lease-server` | The `on` value, `server.curve_hosts`, `server.curve_max_wait_seconds`, metrics (section 5). |
-| `js-cpu-replay` | `shadow` prints the four checks per class. The trace carries series, so the replay can run the curve mode (section 4). |
+| `js-cpu-replay` | `shadow` prints the four checks per class. The trace carries series, so the replay can run the curve mode and its held-out-day gate (section 4). |
 | Agent, wire, store | Nothing. A job's stored booking and its `cpu.weight` are its flat number (section 2). |
 
 ### Decisions needed
@@ -346,8 +347,10 @@ A class books its curve only while all four hold. While any fails, the class is 
    - throughput within 2%;
    - fewer core-seconds asked of hosts past their cores, which is what overlapping bursts is for.
    This replaces `cpu-over-time.md` decision 2's 10% pass mark, which compared against peak booking (question 9).
-   The trace must carry each job's series for this. Today it has a mean and a peak, and its shapes are synthesised
-   (`crates/js-cpu-replay/src/trace.rs:52-86`).
+   The trace carries each job's series for this (`crates/js-cpu-replay/src/trace.rs`, header `trace 2`), and
+   `js-cpu-replay run <trace> --learn-days 2` prints the three, with a fourth: at least one held-out job booked by
+   curve, so a trace without series cannot pass on the curve mode's other ranking of hosts alone
+   (`crates/js-cpu-replay/src/gate.rs`).
 
 ### When a CPU curve is wrong
 - **Nothing running is throttled, killed or moved** (the owner's ruling, `cpu-over-time.md` section 7). A host whose

@@ -215,7 +215,10 @@ fn series_of(text: &str) -> Option<Option<CpuSeries>> {
     let points = if points.is_empty() {
         Vec::new()
     } else {
-        points.split(',').map(number).collect::<Option<Vec<u16>>>()?
+        points
+            .split(',')
+            .map(number)
+            .collect::<Option<Vec<u16>>>()?
     };
     CpuSeries::new(number(granularity)?, points, number(run)?, partial).map(Some)
 }

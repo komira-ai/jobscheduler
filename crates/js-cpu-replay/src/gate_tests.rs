@@ -60,7 +60,10 @@ const ROWS: [&str; 4] = [
 #[test]
 fn a_shaped_class_learned_on_two_days_passes_the_gate_on_the_third() {
     let text = gate(&trace(true), FARM, 2);
-    assert!(text.starts_with("## The gate on held-out days\n\n"), "{text}");
+    assert!(
+        text.starts_with("## The gate on held-out days\n\n"),
+        "{text}"
+    );
     assert!(
         text.contains(
             "held out: the 1296 jobs that arrived after them, 1296 with a CPU series that stands \
