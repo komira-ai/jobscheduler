@@ -15,7 +15,7 @@
 //!   before the first buck2-farm step;
 //! - in this order, after farm-connect: the worker check ([`WORKERS_RUN`]), the build of the
 //!   `buildrules` command line ([`TOOL_ARGS`]), the table's check with it ([`TABLE_RUN`]) and the
-//!   build of `//:ci` ([`CI_ARGS`]), each buck2-farm step with a `with:` of exactly
+//!   build of `//:ci`, or of the caller's target when release.yml calls the file ([`CI_ARGS`]), each buck2-farm step with a `with:` of exactly
 //!   [`farm_inputs`]; exactly two buck2-farm steps; then the stop of buck2's daemon
 //!   ([`KILL_RUN`]) under `if: ${{ always() }}`.
 //!
@@ -50,8 +50,9 @@ pub const TOOL_ARGS: &str =
     "build buildrules//cli:buildrules --out ${{ runner.temp }}/bin/buildrules";
 /// The check of the generated build table with that command line.
 pub const TABLE_RUN: &str = "cargo xtask farm-table --buck2 \"$RUNNER_TEMP/bin/buck2\" --buildrules \"$RUNNER_TEMP/bin/buildrules\" --patch \"$RUNNER_TEMP/buildrules-sync/buildrules-sync.patch\" --summary \"$GITHUB_STEP_SUMMARY\" --repo \"$GITHUB_REPOSITORY\" --run-id \"$GITHUB_RUN_ID\"";
-/// The `args` of the build of the lane.
-pub const CI_ARGS: &str = "build //:ci";
+/// The `args` of the build of the lane: `//:ci`, or the target release.yml's `blackbox` names
+/// when it calls the file (the gate before the fleet).
+pub const CI_ARGS: &str = "build ${{ inputs.target || '//:ci' }}";
 /// The stop of buck2's daemon, the one `run:` of the repository that runs buck2.
 pub const KILL_RUN: &str = "\"$RUNNER_TEMP/bin/buck2\" kill";
 /// The exact `if:` of [`KILL_RUN`]'s step.

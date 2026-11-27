@@ -135,22 +135,26 @@
 # "The control-plane deploy"), and it starts only once `blackbox` passed.
 #
 # The gate before the farm, `blackbox`: the black-box tests of the release, the published bytes
-# started and driven from outside, after `publish`. `desired` (which tells the farm the agent's
-# version) and `cp-deploy-digest` (and so the deploy of js-server) need it to pass: a black-box
-# test that failed, was skipped or was cancelled fails `blackbox`, the farm is told nothing,
-# `release-red` opens or comments on the RELEASE-RED issue, and the next fix is the next release.
+# started and driven from outside, after `publish`, as one Buck2 target (`//:blackbox`) built on
+# the build farm by a call of farm.yml. `desired` (which tells the farm the agent's version) and
+# `cp-deploy-digest` (and so the deploy of js-server) need it to pass: a black-box test that
+# failed, or was skipped, holds `blackbox` back, the farm is told nothing, `release-red` opens or
+# comments on the RELEASE-RED issue, and the next fix is the next release. The release so waits for
+# the build farm: while it cannot be reached, nothing is deployed (re-run the failed jobs).
 #
-# Permissions are per job. Only `artifacts`, `beta-macos-pkg`, `pkg-upload`, `gamma`, `cp-deploy`
-# and the apt read and write jobs hold id-token write here, and `artifacts` also attestations
+# Permissions are per job. Only `artifacts`, `beta-macos-pkg`, `pkg-upload`, `gamma`, `cp-deploy`,
+# the apt read and write jobs and `blackbox` hold id-token write here, and `artifacts` also attestations
 # write, only because a called workflow can hold no more than its calling job grants: in
 # artifacts.yml only `attest` holds them to sign, and its call of macos-farm.yml holds id-token
 # write for the farm's network (a token that names macos-farm.yml, not artifacts.yml, as its
 # workflow). `beta-macos-pkg` grants id-token write for the same reason: js-agent-macos-pkg.yml's
 # call of macos-farm.yml holds it. Only
 # `publish` holds contents write. No job that holds a token or the signing key checks out or
-# compiles this repository's code (the one job that compiles any is docker-swarm-updater's deploy
-# job, which `cp-deploy` calls: it builds the updater's own client from the commit it is pinned
-# at): `attest` and `publish` run only pinned actions, `sha256sum`, `cmp`, `cp` and
+# compiles this repository's code, but two that are called: docker-swarm-updater's deploy job,
+# which `cp-deploy` calls (it builds the updater's own client from the commit it is pinned at), and
+# farm.yml's `build`, which `blackbox` calls (it compiles `xtask` and joins the build farm's network
+# with its token, whose job_workflow_ref names farm.yml; the signer farm hosts trust is
+# artifacts.yml's job_workflow_ref, so this token cannot sign): `attest` and `publish` run only pinned actions, `sha256sum`, `cmp`, `cp` and
 # `gh`; `gamma`, `cp-deploy-digest`, `pkg-upload`, `smoke-bundle-push` and the apt read, index and write jobs run the `xtask` binary
 # that the permissionless `deploy-tool` job built (so no build script ever sees a token, the token
 # service's address or the key), after the pinned actions. The apt read and write jobs hold no
@@ -2131,33 +2135,34 @@ jobs:
   # from the suite `testing`, the macOS package, the server image) started and driven from outside
   # (sockets, API, files, metrics and the jobs they run), after `publish`. `desired` and
   # `cp-deploy-digest` need it to pass, so a red black-box test tells the farm nothing and
-  # `release-red` reports it. It needs each test job and runs once `publish` passed, whatever the
-  # tests did (`!cancelled()`), and passes only when every job it needs passed: a test that failed,
-  # was skipped or was cancelled fails it; so a release whose apt jobs are off (no settings, so
-  # `check-apt` is skipped) tells the farm nothing. Each step is one `jq` command over the
-  # results, in which `plan` and `publish` are `success` whenever the job runs. The tests it needs:
+  # `release-red` reports it. It is one Buck2 target, `//:blackbox` (the root BUCK file: a
+  # `test_suite` that each black-box test target joins), built on the build farm by a call of
+  # farm.yml, whose last step builds the target it is given in place of `//:ci`, with `local: 0`
+  # (buildrules runs a test as a build action, so the build is the run). The target is named here
+  # alone. The suite holds no test target yet: today the black-box tests are the two jobs it
+  # needs besides `plan` and `publish`, and it runs only when every job it needs passed (no status
+  # function), so a test that failed or was skipped holds the farm back:
   #   check-apt                 js-agent installed from the suite `testing` in a clean Ubuntu
   #                             container, amd64 and arm64;
   #   beta-macos-first-install  the release's macOS package (the unsigned build of
   #                             `beta-macos-pkg`) installed for the first time on a hosted Mac
   #                             through hostkeeper's installer and the update hook, as root, then a
   #                             config package and an update of the agent rolled over it.
-  # A new black-box test is a job named `blackbox-<test>` that this job needs
-  # (crates/xtask/tests/release_workflow/blackbox.rs refuses one it does not need). It holds no
-  # permission, checks out nothing and runs `jq` over the results of the jobs it needs.
+  # A release whose apt jobs are off (no settings, so `check-apt` is skipped) tells the farm
+  # nothing. It grants `id-token: write` because farm.yml's job joins the build farm's network with
+  # it (farm-connect); that token's job_workflow_ref names farm.yml (its workflow claim names
+  # release.yml), so it cannot sign as artifacts.yml. farm.yml also checks the generated build table
+  # first, so a stale table on main holds the release back too. An empty suite builds nothing and
+  # passes: until a test target joins it, the build proves only that the farm answers.
   blackbox:
     needs: [plan, publish, check-apt, beta-macos-first-install]
-    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' && needs.publish.result == 'success' }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions: {}
-    env:
-      NEEDS: ${{ toJSON(needs) }}
-    steps:
-      - name: Show the result of each black-box test
-        run: jq -r 'to_entries[] | "\(.key) \(.value.result)"' <<< "$NEEDS"
-      - name: Pass only when every one passed
-        run: jq -e 'all(.[]; .result == "success")' <<< "$NEEDS"
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/farm.yml
+    with:
+      target: //:blackbox
 
   # Starts hostkeeper-desired.yml for this release, which sets it as hostkeeper's desired version
   # of js-agent (its `workflow_dispatch` with `version`: the coordinator's allow-list admits that
@@ -2252,14 +2257,15 @@ jobs:
             gh issue create --repo "$REPO" --label main-red --title "RELEASE-RED: jobscheduler ${first:-a job} failed on main at ${COMMIT:0:12}" --body-file "$RUNNER_TEMP/body.md"
           fi
 
-  # A run that released (plan said so) in which no job failed or was cancelled: every suite that
-  # ran on this commit passed. When the commit is still the tip of main, the RELEASE-RED issues
+  # A run that released (plan said so) in which no job failed or was cancelled, and `blackbox`
+  # passed (a run whose black-box tests were skipped deployed nothing, and closes nothing): every
+  # suite that ran on this commit passed. When the commit is still the tip of main, the RELEASE-RED issues
   # that are open are closed, each with a comment naming the commit and the run; when main has
   # moved on, a newer run may have opened them, so nothing is closed (the newer run's own green
   # closes them). Same permissions as `release-red`, `gh` only.
   release-green:
     needs: [plan, unit-tests, deployed, beta-macos, beta-macos-first-install, beta-macos-probe, beta-macos-isolation, promote-macos, blackbox, smoke-bundle-check]
-    if: ${{ !cancelled() && !failure() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}
+    if: ${{ !cancelled() && !failure() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' && needs.blackbox.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:

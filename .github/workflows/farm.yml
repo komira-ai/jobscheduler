@@ -12,9 +12,18 @@
 #
 # It is additive and advisory. ci.yml stays the pull-request gate: its tests run under coverage,
 # the 99% gate and the coverage ratchet are there, and so are the tests the build farm cannot run.
-# A farm outage turns this check red and blocks nothing; nothing here is a required check, and
-# the release (release.yml) stays plain cargo on GitHub's hosted runners. A fix to the build
-# farm's own setup is built and tested by ci.yml alone.
+# A farm outage turns its pull-request and push runs red and blocks nothing; nothing here is a
+# required check, and the release (release.yml) builds and tests its files with plain cargo on
+# GitHub's hosted runners. Called by release.yml as `blackbox` (below), it holds back that
+# release's control-plane deploy and `desired`; the apt repository, gamma and the Linux assets do
+# not wait for it. A fix to the build farm's own setup is built and tested by ci.yml alone.
+#
+# The release calls it too (`workflow_call`), as its job `blackbox`, the gate before the fleet
+# (release.yml): the caller names one target (`target`, `//:blackbox`, the black-box tests of the
+# release) and the last step builds that target instead of `//:ci`, with the same setup, the same
+# farm and the same `local: 0`. buildrules runs a test as a build action, so the build of a test
+# target is its run. Called, it runs under the caller's event (a push to main) and its token names
+# this file in its job_workflow_ref (its workflow claim names release.yml).
 #
 # The build farm is reached through komira's farm-connect action, pinned by commit (komira tags
 # no release of it). It joins the farm's private network with this job's OIDC token (workload
@@ -53,6 +62,12 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_call:
+    inputs:
+      target:
+        description: The one target the last step builds in place of //:ci.
+        type: string
+        required: true
 
 permissions: {}
 
@@ -190,11 +205,12 @@ jobs:
       - name: the generated build table is fresh
         timeout-minutes: 30
         run: cargo xtask farm-table --buck2 "$RUNNER_TEMP/bin/buck2" --buildrules "$RUNNER_TEMP/bin/buildrules" --patch "$RUNNER_TEMP/buildrules-sync/buildrules-sync.patch" --summary "$GITHUB_STEP_SUMMARY" --repo "$GITHUB_REPOSITORY" --run-id "$GITHUB_RUN_ID"
-      - name: buck2 build //:ci on the build farm, local 0
+      # `//:ci`, or the caller's target when release.yml calls this file.
+      - name: buck2 build //:ci or the caller's target on the build farm, local 0
         uses: komira-ai/komira/.github/actions/buck2-farm@b2080fe989248adf9b47d4bd14c0ecefa0802f79
         timeout-minutes: 120
         with:
-          args: build //:ci
+          args: build ${{ inputs.target || '//:ci' }}
           assert-remote: ${{ runner.temp }}/bin/assert_remote
           buck2: ${{ runner.temp }}/bin/buck2
       # No daemon outlives the job, however the steps above ended; whether the stop itself

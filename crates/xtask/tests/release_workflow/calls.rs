@@ -1,9 +1,10 @@
 //! The jobs of the release that call a workflow instead of running steps of their own.
 
 /// The jobs of the release that call a workflow, and the workflow each calls: artifacts.yml, the
-/// five workflows of the beta stage (the platforms other than Linux x86_64), and
-/// docker-swarm-updater's deploy workflow at the full commit its allow-list names.
-pub const CALLERS: [(&str, &str); 7] = [
+/// five workflows of the beta stage (the platforms other than Linux x86_64),
+/// docker-swarm-updater's deploy workflow at the full commit its allow-list names, and the build
+/// farm lane, which `blackbox` calls to build the black-box tests' target.
+pub const CALLERS: [(&str, &str); 8] = [
     ("artifacts", "./.github/workflows/artifacts.yml"),
     ("beta-macos", "./.github/workflows/beta.yml"),
     (
@@ -23,6 +24,7 @@ pub const CALLERS: [(&str, &str); 7] = [
         "cp-deploy",
         "komira-ai/docker-swarm-updater/.github/workflows/deploy.yml@c1fcc47610e2886d4d9e561be3c0c76f0452d1f6 # v0.1.3",
     ),
+    ("blackbox", "./.github/workflows/farm.yml"),
 ];
 
 /// The jobs of artifacts.yml that call a workflow, and the workflow each calls: the build of the

@@ -66,7 +66,7 @@ fn step_at(lines: &[String], at: usize) -> &[String] {
 }
 
 /// The number of steps of a job.
-pub(super) fn steps(lines: &[String]) -> usize {
+fn steps(lines: &[String]) -> usize {
     lines.iter().filter(|l| l.starts_with("      - ")).count()
 }
 

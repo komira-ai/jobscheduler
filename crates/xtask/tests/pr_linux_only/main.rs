@@ -409,7 +409,8 @@ fn the_package_upload_waits_for_the_package_job_to_pass_and_runs_for_a_push_alon
         .find(|(n, _)| n == "pkg-upload")
         .expect("job")
         .1;
-    // It waits for `publish` and for the package job to pass, and for no test of the beta stage.
+    // It waits for `publish` and for the package job to pass; the first install holds the deploy
+    // back through `blackbox`, not through this job.
     assert_eq!(
         block(upload, 4, "needs").expect("needs"),
         ["[plan, deploy-tool, publish, beta-macos-pkg]"]

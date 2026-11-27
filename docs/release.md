@@ -109,17 +109,21 @@ next push that ships code. Nothing runs on a timer.
 8. `gamma` (off until its variables are set, below) sets the release as the desired version of the
    service `js-server` on the update coordinator and waits for it to converge.
 8a. `blackbox`, the gate before the farm: the black-box tests of the release, the published bytes
-   started and driven from outside, after `publish`. It needs each test job, runs once `publish`
-   passed whatever they did, and passes only when every one passed; a test that failed, was skipped
-   or was cancelled fails it. `cp-deploy-digest` (step 9) and `desired` (step 10) need it to pass,
-   so a red black-box test tells the farm nothing, `release-red` (step 11) reports it, and the next
-   fix is the next release. Its tests today are `check-apt` (step 7: js-agent installed from the
-   suite `testing` on amd64 and arm64) and `beta-macos-first-install` (step 6a: the release's macOS
-   package installed for the first time on a hosted Mac through hostkeeper's installer and the update
-   hook, then updated). A new black-box test is a job named `blackbox-<test>` that `blackbox` needs;
-   `cargo test -p xtask --test release_workflow` refuses one it does not need. It holds no
-   permission and runs `jq` over the results of the jobs it needs. A release whose apt jobs are off
-   (no settings, so `check-apt` is skipped) fails `blackbox` and deploys nothing.
+   started and driven from outside, after `publish`. They are one Buck2 target, `//:blackbox` (a
+   `test_suite` in the root `BUCK` file, which each black-box test target joins), named in
+   `release.yml` alone: `blackbox` calls `farm.yml`, whose last step builds that target on the build
+   farm in place of `//:ci`, with `local: 0` ([farm.md](farm.md); buildrules runs a test as a build
+   action, so the build is the run). `cp-deploy-digest` (step 9) and `desired` (step 10) need it to
+   pass, so a red black-box test tells the farm nothing, `release-red` (step 11) reports it, and the
+   next fix is the next release. The suite holds no test target yet; the black-box tests today are
+   two jobs of the release that `blackbox` needs, and it runs only when both passed: `check-apt`
+   (step 7: js-agent installed from the suite `testing` on amd64 and arm64) and
+   `beta-macos-first-install` (step 6a: the release's macOS package installed for the first time
+   on a hosted Mac through hostkeeper's installer and the update hook, then updated). A test that
+   failed, or was skipped, holds it back: a release whose apt jobs are off (no settings, so
+   `check-apt` is skipped) deploys nothing. So does a build farm that cannot be reached: nothing is
+   deployed until it answers and the failed jobs are re-run. `cargo test -p xtask --test
+   release_workflow` holds the job, the jobs around it and the suite to this.
 9. `cp-deploy-digest` and `cp-deploy` (off until their variables are set, below), once `blackbox`
    passed, deploy the release's
    linux-x86_64 image of `js-lease-server` to the control plane's Docker Swarm service `js-server`
@@ -960,7 +964,7 @@ whose upload did not finish is deleted before it is uploaded again.
 | `plan`, `build`, `sums`, `attest` or `verify` failed | No tag, no release | Re-run failed jobs. After `verify` failed nothing was published; fix the cause (a change to the workflow is a new push) or re-run. |
 | An apt job of `testing` failed, or all three attempts lost the race | The release is published; the suite holds this version or not | Re-run failed jobs: a re-run of a read job reads again, and a write never puts other bytes in the pool under a name it holds. A package already in the pool is accepted when its bytes are equal. |
 | `check-apt` failed | The release and `testing` hold the version; `stable` does not | Nothing is promoted, and `blackbox` fails, so neither `desired` nor the control-plane deploy runs: hosts and the control plane keep their version. Fix forward: the next release supersedes it in `testing`. |
-| `beta-macos-pkg`, `beta-macos-first-install` or another black-box test failed (`blackbox` is red) | The release is published (and in `stable` when `check-apt` passed), but not deployed: the farm and the control plane keep their version; RELEASE-RED is open | Fix forward with a new push, or re-run the failed jobs: `blackbox` is judged again, and `desired` and the control-plane deploy follow when it passes. |
+| `beta-macos-pkg`, `beta-macos-first-install` or another black-box test failed, or `blackbox` itself (its build on the build farm) did | The release is published (and in `stable` when `check-apt` passed), but not deployed: the farm and the control plane keep their version; RELEASE-RED is open | Fix forward with a new push, or re-run the failed jobs (once the build farm answers, when it was the cause): `blackbox` runs again, and `desired` and the control-plane deploy follow when it passes. |
 | Another beta job or `promote-macos` failed | The release is published and deployed; RELEASE-RED is open | Fix forward with a new push; its green release run closes the issue. Re-running the failed jobs adds the macOS archives when the four beta jobs `promote-macos` needs pass. |
 | A run that `turn` gave the turn failed after it, and a newer release has been published since | The failed run is older than what is deployed | Do not re-run its failed jobs: a re-run keeps its `turn`, and its `gamma` or control-plane deploy would move those back to the older version (`desired` checks and starts nothing for an older release, so hostkeeper is not moved). Fix forward. |
 | `turn` failed or timed out | Nothing published by this run | A newer push releases the change. `turn` fails on an error reading the runs or releases, or after three hours waiting for an older run's `deployed`. |
