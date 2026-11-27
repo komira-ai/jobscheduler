@@ -16,8 +16,9 @@
 //!    mounted other than read-only (`input-not-allowed`: every job that names the tree is given
 //!    the one directory of the provider's mount, [`crate::native_fs`]), and more mounts than
 //!    the profile lists (`too-many-inputs-here`). A host port whose two numbers are equal is
-//!    not refused here: it falls through to the lifecycle's host-port admission, which refuses
-//!    it `input-not-allowed` because a native runtime offers no host port.
+//!    not refused here: it falls through to the lifecycle's host-port admission, which holds it
+//!    to the ports `--host-port` lists (`input-not-allowed`), and the run's profile allows a
+//!    connect to it (`native/profile.rs`).
 //! 2. [`resolve`], when the start waits for its file system: each host path (with its
 //!    `sub_path`) is resolved with `canonicalize`, which is a metadata lookup and is answered
 //!    at once (`Ready`), and its canonical path must be a directory (`input-unavailable`

@@ -108,8 +108,10 @@ pub(crate) fn engine(hosts: &[(&str, &[u64])]) -> Engine {
     engine_over(&every(hosts))
 }
 
-/// The settings of the passes: a job waits ten seconds before it marks a busy host, and a
-/// mark's deadline is a minute after it is made (reaching it gives nothing up).
+/// The settings of the passes: a mark's deadline is a minute after it is made (reaching it
+/// gives nothing up). `drain_after_ms` is set, to ten seconds, though the key is deprecated
+/// and read by nothing: a job is marked on a busy host in the first pass that sees it, so a
+/// pass within ten seconds of a submit shows the key delays nothing.
 pub(crate) fn settings() -> WholeNodeConfig {
     WholeNodeConfig {
         drain_after_ms: 10_000,

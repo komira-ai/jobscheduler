@@ -200,7 +200,7 @@ marked settled. The ids run D1 to D66 with no gaps. D26 is open. Superseded deci
   [whole-node.md](whole-node.md).
 - **D47. Admission and reservation of a whole-node request.** Eligible hosts are the capable hosts of D41 in the matching pools; the request
   is refused only when no registered host could ever be given whole and no elastic provider could launch one (`no-capable-host`, D35), else
-  queued in queue order. It takes a quiet host at once, else (after `drain_after`, default zero) reserves exactly one host: the least worst-case
+  queued in queue order. It takes a quiet host at once, else reserves exactly one host at once (the old `drain_after` delay is deprecated and not read): the least worst-case
   drain (the latest end bound of its leases and runs), then the fewest leases, then the lowest host id; it takes any host that becomes quiet
   first and does not switch to a cheaper one otherwise. Alternatives: reserve every eligible host (idles the pool), or wait for a quiet host
   with no reservation (starves, which R1's one allowed reservation exists to prevent). Recommend as stated.

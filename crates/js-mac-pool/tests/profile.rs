@@ -75,6 +75,91 @@ fn the_ports_profile_lists_single_loopback_ports_in_order() {
     assert_eq!(text_of(&policy), include_str!("goldens/open_ports.sb"));
 }
 
+/// The `localhost:PORT` rule of each port, in the order given.
+fn loopback_rules(list: &[u16]) -> String {
+    list.iter()
+        .map(|port| format!("(allow network* (remote ip \"localhost:{port}\"))\n"))
+        .collect()
+}
+
+/// Asserts that a job's host ports on a policy at `Off` (a ceiling of `off`) render as the
+/// `Off` rules and one `localhost:PORT` allow per port, lowest first and each once, right
+/// after them and before the read-deny socket rules, matching the golden whole. Catches host
+/// ports dropped at the level that needs them, a port listed twice, and a host port that
+/// opens all of loopback.
+#[test]
+fn host_ports_at_off_add_one_loopback_rule_per_port() {
+    let policy = Policy::base(layout(), caps(Net::Off))
+        .unwrap()
+        .with_host_ports(ports(&[5432, 80, 5432]));
+    assert_eq!(policy.net(), &Net::Off, "host ports are no level");
+    assert_eq!(
+        text_of(&policy),
+        include_str!("goldens/open_off_host_ports.sb")
+    );
+}
+
+/// Asserts that host ports on a policy at `Ports` are listed with the level's own ports as one
+/// set, lowest first and each once (a port both name is one rule), and that the profile is the
+/// `Off` profile with exactly those lines. Catches a port of both lists listed twice, and the
+/// level's ports replaced by the host ports.
+#[test]
+fn host_ports_at_ports_join_the_levels_ports() {
+    let policy = Policy::base(layout(), caps(Net::Ports(ports(&[8080, 80]))))
+        .unwrap()
+        .with_host_ports(ports(&[9000, 80]));
+    let off = include_str!("goldens/open_off.sb");
+    let syslog = "(allow network-outbound (literal \"/private/var/run/syslog\"))\n";
+    let want = off.replacen(
+        syslog,
+        &format!("{syslog}{}", loopback_rules(&[80, 8080, 9000])),
+        1,
+    );
+    assert_eq!(text_of(&policy), want);
+}
+
+/// Asserts that host ports add nothing at `Loopback`, `Remote` and `On`, where loopback is not
+/// filtered: each profile is the one of its level without them, to the byte. Catches a host
+/// port rule that narrows an open loopback, and one rendered where it cannot matter.
+#[test]
+fn host_ports_add_nothing_where_loopback_is_open() {
+    for net in [Net::Loopback, Net::Remote(ports(&[443])), Net::On] {
+        let without = Policy::base(layout(), caps(net.clone())).unwrap();
+        let with = without.clone().with_host_ports(ports(&[5432]));
+        assert_eq!(text_of(&with), text_of(&without), "{net:?}");
+        assert!(!text_of(&with).contains("localhost:5432"), "{net:?}");
+    }
+}
+
+/// Asserts that a narrowing applied after the host ports lowers the level and keeps the ports
+/// (a run narrowed from `Loopback` to `Off` still reaches its host port, and no other loopback
+/// port), and that host ports given again replace the earlier ones. Catches host ports lost to
+/// a later narrowing, which would refuse the job's service, and two lists merged.
+#[test]
+fn host_ports_outlive_a_narrowing_and_the_last_given_win() {
+    let narrowed = Policy::base(layout(), caps(Net::Loopback))
+        .unwrap()
+        .with_host_ports(ports(&[80, 5432]))
+        .narrowed(Narrowing {
+            net: Some(Net::Off),
+            ..Narrowing::default()
+        })
+        .unwrap();
+    assert_eq!(narrowed.net(), &Net::Off);
+    assert_eq!(
+        text_of(&narrowed),
+        include_str!("goldens/open_off_host_ports.sb")
+    );
+    let replaced = Policy::base(layout(), caps(Net::Off))
+        .unwrap()
+        .with_host_ports(ports(&[7000]))
+        .with_host_ports(ports(&[5432, 80]));
+    assert_eq!(
+        text_of(&replaced),
+        include_str!("goldens/open_off_host_ports.sb")
+    );
+}
+
 #[test]
 fn the_loopback_profile_matches_its_golden() {
     let policy = Policy::base(layout(), caps(Net::Loopback)).unwrap();
