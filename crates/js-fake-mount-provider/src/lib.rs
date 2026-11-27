@@ -129,9 +129,11 @@ async fn run(config: Config) -> io::Result<()> {
     println!("serving {}", config.socket.display());
     let mut served = served;
     let ended = tokio::select! {
+        // A quit (the serve ends once it has closed its socket), or a control socket that failed,
+        // whose error ends the program.
         controlled = control::control(listener, shared, signal) => {
-            let served = (&mut served).await.map_err(io::Error::other)?;
-            served.and(controlled)
+            controlled?;
+            (&mut served).await.map_err(io::Error::other)?
         }
         // The provider socket could not be bound again after a restart.
         served = &mut served => served.map_err(io::Error::other)?,

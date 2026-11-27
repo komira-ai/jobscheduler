@@ -92,15 +92,14 @@ const CLIENT_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Answers the commands sent on `listener` until one is `quit`. A connection that fails, or
 /// whose client sends nothing within [`CLIENT_LIMIT`], ends only itself; a listener that fails
-/// ends the server too.
+/// ends this with its error (and the program with it).
 pub(crate) async fn control(
     listener: UnixListener,
     shared: Arc<Shared>,
     signal: watch::Sender<Signal>,
 ) -> io::Result<()> {
     loop {
-        let accepted = listener.accept().await;
-        let (stream, _) = accepted.inspect_err(|_| _ = signal.send_replace(Signal::Quit))?;
+        let (stream, _) = listener.accept().await?;
         let _ = tokio::time::timeout(CLIENT_LIMIT, answer(stream, &shared, &signal)).await;
         if *signal.borrow() == Signal::Quit {
             return Ok(());
