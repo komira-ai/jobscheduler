@@ -36,6 +36,7 @@ use crate::load::{Charge, HostFacts, LeaseFacts, Load, SLOTS, SlotHost, SlotLoad
 use crate::probe::{ProbeHost, ProbeRefusal, admit_probe};
 use crate::provider_rank::of_first_provider;
 use crate::refusal::RefusalKind;
+use crate::scheduler::Placement;
 use crate::scheduler::Worker;
 use crate::unservable::Unservable;
 
@@ -79,6 +80,8 @@ pub(crate) struct Placed {
     pub(crate) device: Option<String>,
     /// What the lease is charged.
     pub(crate) cost: LeaseCost,
+    /// What placement expected of the lease, for its release record.
+    pub(crate) placement: Placement,
 }
 
 /// A worker a blocked head could hold ([`Servable::head_candidates`]).
@@ -330,6 +333,7 @@ impl Servable {
                 booked,
                 device,
                 cost,
+                placement: Placement::default(),
             }),
             blocked: None,
         }

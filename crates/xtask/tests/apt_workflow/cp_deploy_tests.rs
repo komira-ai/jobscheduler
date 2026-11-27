@@ -224,7 +224,7 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "cp-deploy",
-        "wait-minutes: 60",
+        "wait-minutes: 90",
         "wait-minutes: 0",
         "cp-deploy: passes",
     ),

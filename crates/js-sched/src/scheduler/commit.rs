@@ -10,6 +10,7 @@ use js_types::sched::{
 };
 
 use super::{OpState, Scheduler, StartSent};
+use crate::reservation::ReservationEnd;
 
 /// How a run that ends the operation ended: on its own, killed at its own memory limit or
 /// by the node, or cut short (its result says nothing about how the action runs).
@@ -45,11 +46,13 @@ impl Scheduler {
             self.in_flight.remove(&op.request.key);
         }
         self.finished.push_back((self.now, id));
-        vec![Effect::Refuse(Refusal {
+        let refused = vec![Effect::Refuse(Refusal {
             operation: id,
             waiters: op.waiters.clone(),
             reason: record.reason.clone(),
-        })]
+        })];
+        self.reservation_ended(id, || ReservationEnd::Refused);
+        refused
     }
 
     pub(super) fn lease_committed(&mut self, grant: &LeaseGrant, effects: &mut Vec<Effect>) {
@@ -184,6 +187,7 @@ impl Scheduler {
             return Vec::new();
         }
         self.release(id, run_end_of(record.outcome));
+        self.reservation_ended(id, || ReservationEnd::Finished);
         let op = self.ops.get_mut(&id).expect("checked above");
         op.state = match record.outcome {
             Outcome::Completed { action_result } => OpState::Completed {
