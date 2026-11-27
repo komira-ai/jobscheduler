@@ -162,6 +162,8 @@ async fn fixture(name: &str) -> Fixture {
     (0..2).for_each(|_| recorder.start_refused(&host_a, "no-capacity"));
     recorder.start_refused(&host_b, "input-not-allowed");
     (0..2).for_each(|_| recorder.curve_wait_expired());
+    recorder.agent_body_too_large(AgentRoute::Hello);
+    (0..2).for_each(|_| recorder.agent_body_too_large(AgentRoute::Heartbeat));
     let answers = [
         CallbackAnswer::Delivered,
         CallbackAnswer::Abandoned,

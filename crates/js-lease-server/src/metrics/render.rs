@@ -14,8 +14,8 @@ use js_types::HostId;
 
 use super::placement;
 use super::{
-    CALLBACK_RESULTS, FAILURE_CODES, Histogram, RETRY_OUTCOMES, Recorder, SUBMIT_PHASES,
-    TABLES_FROM,
+    AGENT_ROUTES, CALLBACK_RESULTS, FAILURE_CODES, Histogram, RETRY_OUTCOMES, Recorder,
+    SUBMIT_PHASES, TABLES_FROM,
 };
 use crate::hosts::mark_text;
 
@@ -263,6 +263,7 @@ pub(crate) fn render(seen: &Snapshot, recorder: &Recorder) -> String {
     let help = "Queued jobs of a curve class that waited past the wait bound (server.curve_max_wait_seconds) with no host fitting their curve, and were tested with their flat number from then on. A rise means curves book more than the hosts can give.";
     counter(&mut out, "js_curve_wait_expiries_total", help, expired);
     start_refusals(&mut out, recorder);
+    bodies_too_large(&mut out, recorder);
     acquires(&mut out, recorder);
     hosts(&mut out, seen);
     placement::write(&mut out, seen);
@@ -302,6 +303,16 @@ fn start_refusals(out: &mut String, recorder: &Recorder) {
     for ((host, code), count) in recorder.start_refusals() {
         let host = label(&host);
         let _ = writeln!(out, "{name}{{host=\"{host}\",code=\"{code}\"}} {count}");
+    }
+}
+
+fn bodies_too_large(out: &mut String, recorder: &Recorder) {
+    let name = "js_agent_bodies_too_large_total";
+    let help = "Agents' hellos and heartbeats refused 413 body-too-large, their body over the cap the server reads (65536 bytes), by route. The agent ends at such an answer, so each is an agent that stopped.";
+    family(out, name, "counter", help);
+    for (route, count) in AGENT_ROUTES.iter().zip(&recorder.bodies_too_large) {
+        let count = count.load(Ordering::Relaxed);
+        let _ = writeln!(out, "{name}{{route=\"{route}\"}} {count}");
     }
 }
 

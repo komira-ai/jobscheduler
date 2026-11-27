@@ -1,43 +1,30 @@
 //! Keeps the log tails of the held results within what one heartbeat can carry.
 //!
 //! A result is resent in every heartbeat until the server acknowledges it, and the body
-//! the server reads is bounded ([`limits::HEARTBEAT_BODY_BUDGET`]). A tail of plain text
+//! the server reads is bounded ([`js_agent_wire::limits::HEARTBEAT_BODY_BUDGET`]). A tail of plain text
 //! is 8 KiB a stream, but a job that prints control characters serialises six times as
-//! large (`\u00XX`), so the results are measured as they are sent.
+//! large (`\u00XX`), so the results are measured as they are sent. A tail cut down notes
+//! a `log-tail-cut` finding and one left out a `log-tail-shed` finding, once each for a
+//! run, so the agent's log counts the runs whose tails a heartbeat could not carry whole.
+//! What a heartbeat carries once the tails are cut is `listing`'s.
 
-use js_agent_wire::{HeldJob, LogTail, RunResult, limits};
+use js_agent_wire::{LogTail, RunResult};
 
 use super::job::Keyed;
 use super::{Job, Lifecycle, per_job};
 use crate::lifecycle::{Event, code};
 
-/// What a heartbeat keeps for its envelope (ids, session, phase, taint, exclusive fields),
-/// in bytes.
-const ENVELOPE_MARGIN: usize = 4 * 1024;
-
 /// The bytes the key that holds a job's result in its listing adds to it (`,"result":`).
 const RESULT_KEY_LEN: usize = 10;
 
-/// What the results of a heartbeat may weigh together once serialised, given the lists
-/// that go with them (`listed` bytes: the held runs, the jobs without their results and the
-/// retired job ids): the whole body the server reads ([`limits::HEARTBEAT_BODY_BUDGET`]; a
-/// beat over it is refused and the agent ends) less those lists as they are, the most a load
-/// can weigh ([`limits::MAX_LOAD_BYTES`], reserved whether or not this agent sends one yet)
-/// and the envelope. Measuring the lists, and not assuming their worst case, leaves the room
-/// a host with short ids really has.
-fn results_budget(listed: usize) -> usize {
-    let rest = listed + limits::MAX_LOAD_BYTES + ENVELOPE_MARGIN;
-    limits::HEARTBEAT_BODY_BUDGET.saturating_sub(rest)
-}
-
 /// The serialised length of `value`.
-fn len_of<T: serde::Serialize>(value: &T) -> usize {
+pub(super) fn len_of<T: serde::Serialize>(value: &T) -> usize {
     serde_json::to_vec(value).map_or(0, |bytes| bytes.len())
 }
 
 /// What the result of `job` weighs in a heartbeat: a run's in `results`, a job's inside its
-/// listing, in the form each is sent.
-fn result_len(job: &Job, result: &RunResult) -> usize {
+/// listing, in the form each is sent, without the comma after it.
+pub(super) fn result_len(job: &Job, result: &RunResult) -> usize {
     match job.keyed {
         Keyed::Run => len_of(result),
         Keyed::Job => {
@@ -78,24 +65,19 @@ fn weight(tail: &LogTail) -> usize {
 impl Lifecycle {
     /// [`Lifecycle::fit_log_tails`] to what the next heartbeat can carry.
     pub(super) fn fit_log_tails_to_beat(&mut self, events: &mut Vec<Event>) {
-        let bare = |job: HeldJob| HeldJob {
-            result: None,
-            ..job
-        };
-        let jobs: Vec<HeldJob> = self.held_jobs().into_iter().map(bare).collect();
-        let listed = len_of(&self.held()) + len_of(&jobs) + len_of(&self.retired_jobs());
-        self.fit_log_tails(results_budget(listed), events);
+        self.fit_log_tails(self.results_room(), events);
     }
 
     /// Cuts the log tails of the held results until their results serialise to at most
-    /// `budget` bytes together: the largest tail is halved (the end is kept and
-    /// `truncated` is set) again and again. A tail that is empty and still does not fit
-    /// is left out of its result, and the run notes a `log-tail-shed` finding. The stored
+    /// `budget` bytes together, a comma after each: the largest tail is halved (the end is kept and
+    /// `truncated` is set) again and again, and the run notes a `log-tail-cut` finding. A
+    /// tail that is empty and still does not fit is left out of its result, and the run
+    /// notes a `log-tail-shed` finding. The stored
     /// result is changed, so every heartbeat carries the same cut.
     pub fn fit_log_tails(&mut self, budget: usize, events: &mut Vec<Event>) {
         let size = |jobs: &[Job]| -> usize {
             jobs.iter()
-                .filter_map(|job| Some(result_len(job, job.result.as_ref()?)))
+                .filter_map(|job| Some(result_len(job, job.result.as_ref()?) + 1))
                 .sum()
         };
         while size(&self.jobs) > budget {
@@ -116,10 +98,12 @@ impl Lifecycle {
                 true => result.log_tail = None,
                 false => result.log_tail.iter_mut().for_each(halve),
             });
-            if dropped {
-                let why = "the log tail did not fit a heartbeat and was left out".to_owned();
-                job.note(code::LOG_TAIL_SHED, why, events);
-            }
+            let (code, why) = match dropped {
+                true => (code::LOG_TAIL_SHED, "was left out"),
+                false => (code::LOG_TAIL_CUT, "was cut down, its end kept"),
+            };
+            let why = format!("the log tail did not fit a heartbeat and {why}");
+            job.note(code, why, events);
         }
     }
 }
