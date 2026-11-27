@@ -305,11 +305,12 @@ impl Engine {
         let _ = self.heard_changed(host, load, now);
     }
 
-    /// [`Engine::heard`], answering whether the heartbeat changed what a pass over the queued
-    /// jobs reads of the engine: it brought a load reading, or the scheduler gave an
-    /// allocation up for it (moved it back to its queue, or answered with an effect). A
-    /// heartbeat that does neither only says the host is alive, which every pass says again
-    /// of the hosts it offers.
+    /// [`Engine::heard`], answering whether the heartbeat changed the bookings a pass over
+    /// the queued jobs reads of the engine: the scheduler gave an allocation up for it (moved
+    /// it back to its queue, or answered with an effect). A load reading alone is not such a
+    /// change: a busy host's load moves with every beat, so counting each would bring back a
+    /// pass over the whole queue for every beat of every host; the room a lower reading leaves
+    /// is taken by the next pass that runs, at the latest the tick's (`jobs_seen`).
     pub(crate) fn heard_changed(
         &mut self,
         host: &HostId,
@@ -347,7 +348,7 @@ impl Engine {
                 self.at_reading.remove(host);
             }
         }
-        load.is_some() | !effects.is_empty() | (before != after)
+        !effects.is_empty() | (before != after)
     }
 
     /// Lets go of what `placed` holds in the scheduler: its booking and its operation.
@@ -543,7 +544,8 @@ mod tests {
     }
 
     /// A reading's per-lease parts name leases the engine holds none of, so they are dropped
-    /// from the scheduler's reading: the host's load is charged with no lease covered.
+    /// from the scheduler's reading: the host's load is charged with no lease covered. The
+    /// readings give no booking up, so neither counts as a change.
     #[test]
     fn a_reading_keeps_no_lease_parts() {
         let mut engine = Engine::build(Settings::default(), at(0));
@@ -552,7 +554,7 @@ mod tests {
         let named = [SchedLeaseId::new(1, 2)];
         for seq in 1..=2 {
             let changed = engine.heard_changed(&b, Some(&reading(seq, &named)), at(seq * 5_000));
-            assert!(changed);
+            assert!(!changed, "reading {seq}");
         }
         let view = engine.sched.load_view(&WorkerId::new("b")).unwrap();
         assert_eq!(view.uncovered_cpu_millis, 0);
@@ -560,14 +562,17 @@ mod tests {
         assert_eq!(engine.hosts_kept(), 0);
     }
 
-    /// A heartbeat with no reading that gives nothing up changes nothing the passes read.
+    /// A heartbeat that gives nothing up changes nothing the passes read, with a load reading
+    /// or without one: a busy host's load moves with every beat, and a change for each would
+    /// bring back a pass over the whole queue each time.
     #[test]
-    fn a_beat_without_a_reading_is_no_change() {
+    fn a_beat_that_gives_nothing_up_is_no_change_with_or_without_a_reading() {
         let mut engine = Engine::build(Settings::default(), at(0));
         let b = host("b");
         engine.host_up(&b, &shape(true), at(0));
-        assert!(engine.heard_changed(&b, Some(&reading(1, &[])), at(5_000)));
-        assert!(!engine.heard_changed(&b, None, at(6_000)));
+        assert!(!engine.heard_changed(&b, Some(&reading(1, &[])), at(5_000)));
+        assert!(!engine.heard_changed(&b, Some(&reading(2, &[])), at(10_000)));
+        assert!(!engine.heard_changed(&b, None, at(11_000)));
     }
 
     const MIB: u64 = 1 << 20;

@@ -194,11 +194,12 @@ async fn a_submit_after_a_quiet_pass_reads_no_table_and_its_pass_reads_none_agai
 }
 
 /// Asserts that a commit of another server over the same store, between the pass's read and
-/// the submit, makes the poked pass read the four tables again and place the job: the
-/// submit's commit is not the only write since. It catches tables kept past another server's
-/// write, which leave its job out of the pass.
+/// the submit, makes the poked pass take that commit too: the submit's commit is not the only
+/// write since, so the pass brings its tables up to date from the store's feed, scanning none
+/// of the four, places the job and judges the other server's job, writing its queue status. It
+/// catches tables kept past another server's write, which leave its job out of the pass.
 #[tokio::test]
-async fn a_submit_after_another_servers_write_has_its_pass_read_the_tables_again() {
+async fn a_submit_after_another_servers_write_has_its_pass_take_that_write_too() {
     let rig = placing_rig("submit_other_write");
     let api = api(&rig, true);
     rig.agents.place_jobs();
@@ -213,9 +214,14 @@ async fn a_submit_after_another_servers_write_has_its_pass_read_the_tables_again
     let _ = table_scans(&rig);
     submit(&api, wire("job-s")).await;
     poller::pass(&rig.agents).await;
-    let read_again = ["idx/alloc/host/", "idx/job/queued/", "mark/", "cordon/"];
-    assert_eq!(table_scans(&rig), read_again);
+    assert_eq!(table_scans(&rig), Vec::<String>::new());
     assert_eq!(rig.job(&id("job-s")).state, JobState::Placed);
+    let other = rig.job(&id("job-o")).queue.code();
+    assert_ne!(
+        other,
+        js_types::QueueCode::Unspecified,
+        "job-o was left out"
+    );
 }
 
 /// Asserts that a submit made while a pass reads the job tables again (the pass held on a gate
@@ -246,6 +252,10 @@ async fn a_submit_during_a_pass_s_read_of_the_tables_answers_before_the_read_end
         client: None,
     };
     other.insert_queued(never).unwrap();
+    // The feed trimmed past that write, so the next pass reads the four tables in full rather
+    // than taking the write from the feed.
+    let head = rig.jobs.feed_head().unwrap().unwrap();
+    js_state::Store::trim_feed(&*rig.store, head).unwrap();
     let (entered_tx, entered) = std::sync::mpsc::channel();
     let (open, opened) = std::sync::mpsc::channel::<()>();
     rig.store.before_next_scan("idx/job/queued/", move || {

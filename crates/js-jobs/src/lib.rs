@@ -288,6 +288,6 @@ pub use result::{
 };
 pub use store::{
     Backfill, Beside, CordonWrite, FailedPrepare, HeldRequeue, Inserted, JobPage, JobStore,
-    MAX_PAGE, MINT_TRIES, NewJob, Placement, RequeuedFor, Row, SCHEMA_VERSION, Step, UncordonWrite,
-    Written, queue_order,
+    MAX_PAGE, MINT_TRIES, MOST_TABLE_CHANGES, NewJob, Placement, RequeuedFor, Row, SCHEMA_VERSION,
+    Step, TableChanges, UncordonWrite, Written, queue_order,
 };
