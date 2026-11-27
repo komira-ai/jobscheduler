@@ -92,8 +92,10 @@ fn noisy(prefix: &str, n: usize, suffix: &str) -> LogTail {
 
 /// Asserts that a job that prints control characters, which serialise six times as large,
 /// keeps a tail: the tail is cut down (the end kept, `truncated` set) until the results fit
-/// the heartbeat, and no finding is noted. It catches a tail dropped whole, which is the
-/// very job an operator wants to see, and one that is sent over the body the server reads.
+/// the heartbeat, and the run notes one `log-tail-cut` finding, however many halvings it
+/// took, so the agent's log counts the runs whose tails were cut. It catches a tail dropped
+/// whole, which is the very job an operator wants to see, one that is sent over the body the
+/// server reads, and a cut that leaves no trace.
 #[test]
 fn a_tail_that_serialises_too_large_is_truncated_to_fit() {
     let mut h = Harness::new("log-shed-cut");
@@ -108,11 +110,18 @@ fn a_tail_that_serialises_too_large_is_truncated_to_fit() {
     assert!(!tail.stdout.contains("START"), "the beginning went first");
     assert!(!tail.stdout.is_empty());
     assert!(serde_json::to_vec(&result).unwrap().len() <= 48 * 1024);
-    assert!(h.life.findings().is_empty());
+    let findings = h.life.findings();
+    let found: Vec<_> = findings
+        .iter()
+        .map(|f| (f.run_id.as_deref(), f.code, f.message.as_str()))
+        .collect();
+    let cut = "the log tail did not fit a heartbeat and was cut down, its end kept";
+    assert_eq!(found, [(Some("r1"), "log-tail-cut", cut)]);
 }
 
 /// Asserts that when even an empty tail does not fit the budget the tail is left out, the
-/// rest of the result is kept, and the run notes a `log-tail-shed` finding; and that a
+/// rest of the result is kept, and the run notes a `log-tail-cut` finding for the halvings
+/// and a `log-tail-shed` finding for the drop; and that a
 /// tail that fits is left alone. It catches a silent drop (no finding), a result lost with
 /// its tail, and a tail cut that did not need to be.
 #[test]
@@ -133,10 +142,8 @@ fn a_tail_that_cannot_fit_even_empty_is_dropped_with_a_finding() {
     );
     assert_eq!(result.log_tail, None);
     let findings = h.life.findings();
-    assert!(
-        findings.iter().any(|f| f.code == "log-tail-shed"),
-        "{findings:?}"
-    );
+    let codes: Vec<_> = findings.iter().map(|f| f.code).collect();
+    assert_eq!(codes, ["log-tail-cut", "log-tail-shed"], "{findings:?}");
 }
 
 /// Asserts that a tail with a multi-byte character at the halving point is cut at a
@@ -169,7 +176,7 @@ fn halving_cuts_at_a_character_boundary_and_stops_when_it_fits() {
 
 /// A load with every list at its cap and every id and number at its longest, as the wire's
 /// own size test builds it.
-fn full_load() -> NodeLoad {
+pub(super) fn full_load() -> NodeLoad {
     let id = |i: usize| format!("{}-{}", u64::MAX - i as u64, u64::MAX);
     NodeLoad {
         seq: u64::MAX,
@@ -207,7 +214,7 @@ fn full_load() -> NodeLoad {
 /// 96 held runs with 128-byte ids, a load at every cap, and the 8 finished runs whose
 /// tails are full of control characters (six times as large once serialised), after the
 /// agent has shed what does not fit. A server answers a beat over the body limit with 413,
-/// which ends the agent, so this is the line between a noisy job and a dead agent. It
+/// which the agent can only retry, so this is the line between a noisy job and a silent agent. It
 /// catches a results budget that leaves too little room for the load and the held list
 /// (the first one, 40 KiB for the results alone, fails it).
 #[test]

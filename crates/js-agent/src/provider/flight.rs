@@ -2,10 +2,11 @@
 //!
 //! One entry for each call key of each provider. An entry is `Out` from the moment the call
 //! is sent until its task has the answer, then `Answered` until the lifecycle asks again and
-//! is handed the answer, which removes the entry. A failed answer is `Rested` once its retry
-//! pause has passed: the ask it is handed to sends the call again at once. Each call sent
-//! has a number of its own, so the answer and the pause's end of a call sent earlier never
-//! touch the entry of one sent after it.
+//! is handed the answer, which removes the entry; the ask after that sends the call again.
+//! A failed answer is handed over like any other: when to send the call again is the
+//! lifecycle's to choose (it waits longer after each failure in a row). Each call sent has a
+//! number of its own, so the answer of a call sent earlier never touches the entry of one
+//! sent after it.
 //!
 //! A call may name the call that follows it ([`Flights::finish`]'s `then`): when it succeeds,
 //! the following call is marked out in the same turn of the lock, and the task that carried
@@ -26,10 +27,8 @@ pub(super) type Key = (String, u8, String, u32);
 enum Slot {
     /// Sent (the call's number), not answered.
     Out(u64),
-    /// Answered (the call's number), not yet handed over.
-    Answered(ProviderAnswer, u64),
-    /// A failed answer whose retry pause has passed, not yet handed over.
-    Rested(ProviderAnswer),
+    /// Answered, not yet handed over.
+    Answered(ProviderAnswer),
 }
 
 /// What the lifecycle's asking of a key comes to.
@@ -39,9 +38,6 @@ pub(super) enum Begun {
     Settled(ProviderAnswer),
     /// The call is to be sent, with this number: the entry is now `Out`.
     Send(u64),
-    /// A call that was unavailable and has waited its pause: its answer is handed over and
-    /// the call is to be sent again, with this number; the entry is now `Out`.
-    Retry(ProviderAnswer, u64),
 }
 
 /// The table of calls, shared by the client and the tasks that carry its calls.
@@ -73,9 +69,8 @@ impl Flights {
     }
 
     /// What the lifecycle's asking of `key` comes to: `Pending` while the call is out; its
-    /// answer, handed over once (the entry is removed); the call to be sent when there is no
-    /// entry; and, for an unavailable answer that has waited its pause, the answer with the
-    /// call to be sent again.
+    /// answer, handed over once (the entry is removed), whatever it is; and the call to be
+    /// sent when there is no entry.
     pub(super) fn begin(&self, key: Key) -> Begun {
         let mut table = self.lock();
         match table.slots.remove(&key) {
@@ -83,26 +78,9 @@ impl Flights {
                 table.slots.insert(key, Slot::Out(sent));
                 Begun::Settled(ProviderAnswer::Pending)
             }
-            Some(Slot::Answered(answer, _)) => Begun::Settled(answer),
-            Some(Slot::Rested(answer @ ProviderAnswer::Unavailable(_))) => {
-                Begun::Retry(answer, table.send(key))
-            }
-            Some(Slot::Rested(answer)) => Begun::Settled(answer),
+            Some(Slot::Answered(answer)) => Begun::Settled(answer),
             None => Begun::Send(table.send(key)),
         }
-    }
-
-    /// Marks the failed answer of the call `sent` of `key` as having waited its pause. An
-    /// entry that is not that call's answer (handed over during the pause, or a later call's)
-    /// is left as it is.
-    pub(super) fn rest(&self, key: &Key, sent: u64) {
-        let mut table = self.lock();
-        let kept = match table.slots.remove(key) {
-            Some(Slot::Answered(answer, number)) if number == sent => Slot::Rested(answer),
-            Some(other) => other,
-            None => return,
-        };
-        table.slots.insert(key.clone(), kept);
     }
 
     /// Records the answer of the call `sent` of `key` and wakes whoever waits for it. The
@@ -123,7 +101,7 @@ impl Flights {
         let mut follow = None;
         if matches!(table.slots.get(&key), Some(Slot::Out(number)) if *number == sent) {
             let succeeded = matches!(answer, ProviderAnswer::Done(_));
-            table.slots.insert(key, Slot::Answered(answer, sent));
+            table.slots.insert(key, Slot::Answered(answer));
             follow = then
                 .filter(|next| succeeded && !table.slots.contains_key(next))
                 .map(|next| table.send(next));
@@ -148,10 +126,7 @@ impl Flights {
         let (table, result) = self
             .changed
             .wait_timeout_while(table, guard, |table| {
-                !matches!(
-                    table.slots.get(key),
-                    Some(Slot::Answered(..) | Slot::Rested(_))
-                )
+                !matches!(table.slots.get(key), Some(Slot::Answered(_)))
             })
             .unwrap_or_else(PoisonError::into_inner);
         drop(table);

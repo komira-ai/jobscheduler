@@ -156,12 +156,21 @@ constant is in `crates/js-agent-wire/src/lib.rs`).
 | `max_connections` (`js-lease-server/src/config.rs`) | 256 | connections the server holds at once (section 11) |
 
 `MAX_HELD` and `MAX_RESULTS` allow far more than a 64 KiB body can carry; the doc of `HEARTBEAT_BODY_BUDGET` says so. The agent
-lists at most `RETIRED_LISTED` 96 retired job ids (`crates/js-agent/src/lifecycle/machine/per_job.rs`) and fits its results to what
-the body leaves after the other lists, a reserve of `MAX_LOAD_BYTES` and a 4 KiB envelope (`results_budget`), by halving and then
-dropping log tails (`Lifecycle::fit_log_tails` in `crates/js-agent/src/lifecycle/machine/tails.rs`). That fitting is not a
-guarantee: when no tail is left to cut it stops, whatever the size. The held list, the job list without results, and results without
-tails are never cut, so a beat whose non-tail content passes the body limit is sent anyway, refused 413 `body-too-large`, and
-retried with the agent's backoff, its jobs left running, until what it lists shrinks. Section 2 sizes where that happens.
+holds what it lists to the body itself (`crates/js-agent/src/lifecycle/machine/listing.rs`). The body less a reserve of
+`MAX_LOAD_BYTES` and a 4 KiB envelope (`ENVELOPE_MARGIN`) leaves 32,768 bytes for the lists. Of these the held entries (`held`, and
+`jobs` without their results), each measured at its longest state, may take `LISTED_BUDGET` 24,576, which leaves `RESULT_RESERVE`
+8 KiB, more than the largest result without a log tail weighs (a test builds one). A start that would take the entries past that is
+skipped `Full` (`Lifecycle::listable`, in `may_start`) and the server sends it again; at 128-byte ids that is 147 entries. The same
+bound holds a restart: a container to take over past it is stopped and removed, and a result file past it is removed, each with a
+finding. The retired job ids, at most `RETIRED_LISTED` 96 (`crates/js-agent/src/lifecycle/machine/per_job.rs`), go out first, oldest
+first, as far as the entries leave room (all 96 unless the entries are near their bound), because the first listing after a hello
+loses a job it neither lists nor names retired. The results go out after them, oldest first, up to the first that does not fit; that
+one and the ones after it wait for a later beat, a job's entry listed without its result meanwhile (the server leaves a listed job
+that has no result as it is, so neither loses nor restarts it, and the first listing after a hello still names every job)
+(`Lifecycle::fit`). With no retired id waiting for the server's record, the oldest result always fits. Before any result waits, the agent cuts log tails to fit all of them, by halving and then dropping them (`Lifecycle::fit_log_tails` in
+`crates/js-agent/src/lifecycle/machine/tails.rs`), and notes a `log-tail-cut` and a `log-tail-shed` finding, once each for a run,
+in its log. So a beat the agent builds stays within the body. The lease server counts each hello and heartbeat it refuses 413 `body-too-large` under `js_agent_bodies_too_large_total`, by
+route (`crates/js-lease-server/src/metrics.rs`), since the agent only retries such a beat and cannot report it.
 
 **The rule for change** (`crates/js-agent-wire/src/protocol.rs` and the crate's "Compatibility rule"): servers upgrade before
 agents. Within a major, fields are only added; a receiver ignores fields it does not know; a field a sender may leave out has a
@@ -292,15 +301,16 @@ At the documented list maxima, `MAX_HELD` 4,096 held runs and `MAX_RESULTS` 4,09
 Derived. They are 1,937,499 ÷ 65,536 = 29.6 and 1,650,710 ÷ 65,536 = 25.2 times the 65,536-byte body the server reads, so **the
 body limit, not the list caps and not the encoding, is what bounds a heartbeat**. Within it, with the envelope, n held runs take
 92 + 167n bytes of JSON (93 + 166n + n − 1 commas), so (65,536 − 92) ÷ 167 = 391 fit, and 22 + 136n of protobuf, so
-(65,536 − 22) ÷ 136 = 481 fit (both rounded down): 481 ÷ 391 = 1.23 times as many. Derived. Past those counts the beat is over the
-limit with no tail left to cut, the server answers 413 and the agent retries it (section 1), in either encoding; protobuf moves the
-point, it does not remove it. The registry once sent a host at most 256 live runs (its run table is deleted), and 256 held runs at 128-byte ids are
+(65,536 − 22) ÷ 136 = 481 fit (both rounded down): 481 ÷ 391 = 1.23 times as many. Derived. Past those counts the beat would be over
+the limit with no tail left to cut, in either encoding; protobuf moves the point, it does not remove it. The agent stops well before
+it: it takes a start only while its entries, at their longest state, stay within 24,576 bytes, 147 entries of 167 bytes at 128-byte
+ids, and leaves the rest of the body to the load, the envelope and the results (section 1). The registry once sent a host at most 256 live runs (its run table is deleted), and 256 held runs at 128-byte ids are
 92 + 167 × 256 = 42,844 bytes of JSON, inside the limit; a host that adds results, jobs and a load to that comes nearer. Derived.
 
 Log tails are where the two differ most. JSON writes a control character that has no short escape (anything but `\b`, `\t`,
 `\n`, `\f`, `\r`, which take 2 bytes) as `\u00XX`, six bytes for one, and `tails.rs` says so; a protobuf `string` holds the raw
 byte. In the worst case two streams of 8 KiB of such characters are 2×8,192×6 = 98,304 bytes of JSON, more than the whole body (the
-agent cuts them to fit, `results_budget`), and 2×(1+2+8,192) = 16,390 bytes of protobuf for the two strings, 1+3+16,390 = 16,394 with
+agent cuts them to fit, `results_room` in `listing.rs`), and 2×(1+2+8,192) = 16,390 bytes of protobuf for the two strings, 1+3+16,390 = 16,394 with
 the `LogTail` sub-message around them. Derived.
 
 ### The live-log fields
@@ -322,14 +332,14 @@ digits), with the comma that joins it to the message. Derived, and measured by t
   **89** bytes per result. The three optional counters, `,"cpu_throttle":{"periods":N,"throttled_periods":N}`,
   `,"cpu_pressure_some_usec":N` and `,"cpu_peak":{"millicores":N,"window_usec":N}`, add 89 + 46 + 82 = 217 more at 20 digits each, so **306** bytes;
   the swap peak, `,"peak_swap_bytes":N`, adds 39 more, so **345** bytes in all (the three figures measured by
-  `usage_at_its_widest_adds_its_documented_bytes_to_a_result`). The agent's `results_budget` counts it with the rest of the result.
+  `usage_at_its_widest_adds_its_documented_bytes_to_a_result`). The agent's `results_room` counts it with the rest of the result.
 - `cpu_series` in a job's result, `,"cpu_series":{"granularity_secs":N,"points":[...],"run_usec":N,"partial":true}` with 128 points
   of 5 digits: 14 + (1 + 19 + 10) + 11 + (128 × 5 + 127) + 1 + (1 + 11 + 20) + 15 + 1 = **871** bytes per result (measured by
-  `a_series_at_its_widest_adds_its_documented_bytes_to_a_result`). The agent's `results_budget` counts it with the rest of the result.
+  `a_series_at_its_widest_adds_its_documented_bytes_to_a_result`). The agent's `results_room` counts it with the rest of the result.
 - `memory_series` in a job's result, `,"memory_series":{"granularity_secs":N,"points":[...],"run_usec":N,"partial":true}` with 128
   points of 10 digits: 17 + (1 + 19 + 10) + 11 + (128 × 10 + 127) + 1 + (1 + 11 + 20) + 15 + 1 = **1,514** bytes per result
   (measured by `a_series_at_its_widest_adds_its_bytes_to_a_result` in `tests/memory_series.rs`). The agent's
-  `results_budget` counts it with the rest of the result.
+  `results_room` counts it with the rest of the result.
 - `second_cpu_millis` and `second_cpu_pressure_some_permille` in a heartbeat's load (the per-second busy CPU and CPU pressure of the whole
   host, from `/proc/stat` and `/proc/pressure/cpu`, on a Mac from its CPU load ticks with no pressure list; the design of komira-ai/jobscheduler#1033, section 3; sent by an agent started with `--host-second-samples`), `,"second_cpu_millis":[...]`
   with 16 values of 10 digits: 22 + (16 × 10 + 15) + 1 = 198, and `,"second_cpu_pressure_some_permille":[...]` with 16 values of 4 digits: 38 + (16 × 4 + 15) + 1 = 118, so **316**
@@ -338,7 +348,7 @@ digits), with the comma that joins it to the message. Derived, and measured by t
   Each decodes as the load's lists do (an element that is not a number of its type is dropped, counted as malformed; elements past 16 as over the cap); `vet` empties a pressure list with a value above 1000.
 
 The heartbeat's 65,536-byte body is what these press on: 8 results with `logs` add 8 × 157 = 1,256 bytes, and a beat carries one
-`log_grant_state`; the agent's `results_budget` is to count both before it fits log tails (Planned, with the fields).
+`log_grant_state`; the agent's `results_room` is to count both before it fits log tails (Planned, with the fields).
 
 ### Summary
 
@@ -507,8 +517,8 @@ previous-release side of those tests is a copy of that release's structs and its
 
 **When the recommendation changes.**
 
-- *A measured limit.* Real heartbeats refused 413 `body-too-large`, or results whose tails the agent cuts to fit, at a rate that
-  matters. The first answers are inside JSON (a larger body limit, fewer or shorter list entries per beat); protobuf buys 1.23 times
+- *A measured limit.* Real heartbeats refused 413 `body-too-large` (`js_agent_bodies_too_large_total`), or results whose tails the
+  agent cuts to fit (its `log-tail-cut` and `log-tail-shed` findings), or starts it skips `Full`, at a rate that matters. The first answers are inside JSON (a larger body limit, fewer or shorter list entries per beat); protobuf buys 1.23 times
   for ids and more only for escaped tails.
 - *A second implementation of the agent* in another language, or a third party writing one. Then a `.proto` with generated types
   is the cheapest way to hold two codebases to one schema, and (B) is the move.
@@ -531,8 +541,8 @@ If the decision is (A):
    in `js-agent-wire` for as long as an agent of that release runs.
 3. Move the previous-release fixtures to the first release whose agent sends the per-job lists, so the both-direction tests cover
    per-job bodies as a released agent wrote them (`tests/fixtures/v0.1.135` predate them; open point 7).
-4. Bound what a heartbeat lists besides tails so that a beat whose non-tail content passes the body limit cannot be built (section 1:
-   it is refused 413 and the agent retries it), in whichever encoding is kept; open point 2 asks how near real beats come.
+4. Bound what a heartbeat lists besides tails so that a beat whose non-tail content passes the body limit cannot be built, in
+   whichever encoding is kept; open point 2 asks how near real beats come. Built for JSON (section 1, `listing.rs`).
 
 If the decision is (B), in this order:
 
@@ -561,9 +571,9 @@ server, and the JSON fixtures and frozen copies.
    by an in-process test that counts the bytes `js-client` writes and reads against the lease server on a loopback listener
    (`crates/js-client/src/client.rs`, `build_agent`; `crates/js-lease-server/src/tls.rs`). Since `js-client` keeps its
    connection, the handshake is paid once a connection, not once an exchange.
-2. **How near real beats come to the body limit.** Nothing counts 413 `body-too-large` answers or the tails the agent cuts. Settled
-   by reading `read` in `crates/js-lease-server/src/agent_api.rs` and `results_budget` in
-   `crates/js-agent/src/lifecycle/machine/tails.rs` against the hosts' own logs, which this note does not do.
+2. **How near real beats come to the body limit.** The lease server counts the 413 `body-too-large` answers by route
+   (`js_agent_bodies_too_large_total`), and the agent notes each run whose tail it cut (`log-tail-cut`) or left out
+   (`log-tail-shed`) and each start it skipped `Full`. Settled by reading those over the farm, which this note does not do.
 3. **How the run messages leave major 1 (steps 28 and 30).** A server without the run path admits a hello without `per-job` and answers
    the agent's heartbeats as a responder (section 1; `answer` in `crates/js-registry/src/registry/beat.rs`). It does not refuse the hello,
    because that would raise a floor. When the run messages can be dropped from the wire is settled by the last release whose agent
