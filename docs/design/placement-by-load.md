@@ -273,6 +273,10 @@ asserts a wrong profile. The **shape guard** (per key): 2 of the last 3 runs, or
 is a statement about the whole population, so that a single noisy minute does not demote a key. Lowering `g` further (admitting more at a larger worst case, `r_b k / g` for a wrong profile) is a later decision from the histograms
 and not part of shipping; the off switch keeps the flat rule one setting away.
 
+The job service's live path does not use these lease curves for memory. Its memory shadow
+([placement-profiles-live.md](placement-profiles-live.md) section 2) projects a job per 2 s slot of its class's
+profile, not by the remaining maximum, and books nothing.
+
 ## Starvation
 A host marked for a whole-node request (reserved or draining for a whole-machine, exclusive or VM lease) is excluded **before** the load predicate and before scoring: its load falls as it drains, which would otherwise let the predicate pass it for work that refills it, so the whole-node request would miss its deadline. The existing mark is the gate; the predicate never sees such a host.
 

@@ -9,7 +9,8 @@
 //! the scratch quota's default ([`OpenHost::quota_disk_bytes`]), so the allocation the store
 //! records books what the agent books. A host that books by CPU curve is held to every axis but
 //! its CPU ([`Room::fits_without_cpu`]): the engine judges that one slot by slot
-//! ([`crate::engine`]).
+//! ([`crate::engine`]). The memory shadow reads the room too: every axis but memory
+//! ([`Room::fits_without_memory`]) and the memory a host can book ([`Room::memory_capacity`]).
 
 use std::collections::BTreeMap;
 
@@ -138,6 +139,25 @@ impl Room {
             };
             capacity.has_room(&line.booking, &booked)
         })
+    }
+
+    /// Whether `host` has room for `booked` on every axis but its memory, which the memory shadow
+    /// judges by its own projection; a host with no capacity always has.
+    pub(crate) fn fits_without_memory(&self, host: &HostId, booked: Booked) -> bool {
+        self.lines.get(host).is_none_or(|line| {
+            let booked = on_host(booked, line.quota_disk_bytes);
+            let capacity = Capacity {
+                memory_bytes: u64::MAX,
+                ..line.capacity
+            };
+            capacity.has_room(&line.booking, &booked)
+        })
+    }
+
+    /// The memory `host` can book, which a placement on it is held to; `None` for a host with no
+    /// capacity.
+    pub(crate) fn memory_capacity(&self, host: &HostId) -> Option<u64> {
+        self.lines.get(host).map(|line| line.capacity.memory_bytes)
     }
 
     /// Why `host` has no room for `booked` by memory, when that is why: the memory its

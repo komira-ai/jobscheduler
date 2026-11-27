@@ -44,21 +44,28 @@ use crate::map;
 use crate::place::SchedPlacer;
 use crate::sizes::{Curves, JobSizes, class_name, millis};
 
-/// A live allocation on a host, as the host's table charges it.
+/// A live allocation on a host, as the host's table charges it, and as the memory shadow
+/// projects it.
 #[derive(Debug, Clone)]
 pub(super) struct LiveJob {
     /// The allocation, so a job placed again is read again.
-    allocation: AllocationId,
+    pub(super) allocation: AllocationId,
     /// Its host.
-    host: HostId,
+    pub(super) host: HostId,
     /// What its allocation books, in millicores: its flat number.
-    flat_millis: u64,
+    pub(super) flat_millis: u64,
+    /// What its allocation books of memory, in bytes: its flat memory booking.
+    pub(super) memory_bytes: u64,
     /// Its class, once its record is read, when it books by its class's curve: it left its CPU
     /// at 0 ([`leaves_cpu`]). A job that named its CPU is charged its flat number, as it was
     /// booked.
-    key: Option<Key>,
+    pub(super) key: Option<Key>,
+    /// Its class, once its record is read, when it left its memory at 0 ([`leaves_memory`]):
+    /// the memory shadow projects it by its class's memory curve. A job that named its memory is
+    /// projected at its flat memory booking.
+    pub(super) memory_key: Option<Key>,
     /// When it started, in milliseconds since the epoch, once it has.
-    started_ms: Option<u64>,
+    pub(super) started_ms: Option<u64>,
 }
 
 /// The CPU booking of a queued job that books by its class's curve.
@@ -186,6 +193,15 @@ pub(super) fn leaves_cpu(job: &JobRecord) -> bool {
     }
 }
 
+/// Whether the queued `job` leaves its memory at 0, to be sized from its class's history: a job
+/// that names its memory is projected at it, and one that books the whole host is not projected.
+pub(super) fn leaves_memory(job: &JobRecord) -> bool {
+    match &job.spec.needs {
+        Needs::Shape(resources) => resources.memory_bytes() == 0,
+        Needs::WholeHost => false,
+    }
+}
+
 /// The hosts of a round that the curve rule leaves, and the booked CPU the pack limit reads
 /// on each curve host among them.
 pub(super) struct Curved<'a> {
@@ -256,29 +272,32 @@ impl Engine {
     /// Brings the live curve jobs to `live`, the live allocations of the job table: an entry
     /// whose allocation is gone (or placed again) is dropped, each share allocation not held is
     /// taken up, and the jobs whose start is not known are answered, to be read. Nothing under
-    /// [`Curves::Off`] and [`Curves::Shadow`].
+    /// [`Curves::Off`]; under [`Curves::Shadow`] the memory shadow projects them, and only
+    /// [`Curves::On`] charges their CPU.
     pub(super) fn sync_live_curves(&mut self, live: &[AllocationRecord]) -> Vec<JobId> {
-        if self.curves != Curves::On {
+        if self.curves == Curves::Off {
             return Vec::new();
         }
         let shares = live
             .iter()
             .filter(|allocation| allocation.step != AllocationStep::Freed);
-        let shares: BTreeMap<&JobId, (&AllocationRecord, u64)> = shares
+        let shares: BTreeMap<&JobId, (&AllocationRecord, u64, u64)> = shares
             .filter_map(|allocation| match allocation.booked {
-                Booked::Shape { cpu_millis, .. } => {
-                    Some((&allocation.job, (allocation, cpu_millis)))
-                }
+                Booked::Shape {
+                    cpu_millis,
+                    memory_bytes,
+                    ..
+                } => Some((&allocation.job, (allocation, cpu_millis, memory_bytes))),
                 Booked::WholeHost => None,
             })
             .collect();
         self.book.live.retain(|job, held| {
-            let same = |(allocation, _): &(&AllocationRecord, u64)| {
+            let same = |(allocation, _, _): &(&AllocationRecord, u64, u64)| {
                 allocation.allocation_id == held.allocation
             };
             shares.get(job).is_some_and(same)
         });
-        for (job, (allocation, flat_millis)) in shares {
+        for (job, (allocation, flat_millis, memory_bytes)) in shares {
             self.book
                 .live
                 .entry(job.clone())
@@ -286,7 +305,9 @@ impl Engine {
                     allocation: allocation.allocation_id,
                     host: allocation.host.clone(),
                     flat_millis,
+                    memory_bytes,
                     key: None,
+                    memory_key: None,
                     started_ms: None,
                 });
         }
@@ -301,26 +322,30 @@ impl Engine {
     /// Records what the record of a live job says: its class and when it started.
     fn read_live_curve(&mut self, job: &JobRecord) {
         let started = job.started_at.map(|at| millis(at.as_duration()));
+        let key = JobSizes::key_of(job);
         let held = self.book.live.get_mut(&job.id);
         held.into_iter().for_each(|held| {
-            held.key = leaves_cpu(job).then(|| JobSizes::key_of(job));
+            held.key = leaves_cpu(job).then(|| key.clone());
+            held.memory_key = leaves_memory(job).then(|| key.clone());
             held.started_ms = started;
         });
     }
 
     /// Builds the table of each of `hosts` that books by curve, as the walk at `now` finds it,
     /// and forgets the table of every other host. The jobs the queue no longer holds leave the
-    /// wait bound's books.
+    /// wait bound's books. The memory shadow begins its walk over the same hosts.
     pub(super) fn begin_curve_walk<'a>(
         &mut self,
         hosts: impl Iterator<Item = &'a HostId>,
         queued: &[JobRecord],
         now: FarmTime,
     ) {
+        let hosts: Vec<&HostId> = hosts.collect();
+        self.begin_memory_walk(&hosts, queued, now);
         let ids: BTreeSet<&JobId> = queued.iter().map(|job| &job.id).collect();
         self.book.waits.retain(|job, _| ids.contains(job));
         self.book.expired.retain(|job| ids.contains(job));
-        let curved = hosts.filter(|host| self.books_by_curve(host));
+        let curved = hosts.into_iter().filter(|host| self.books_by_curve(host));
         let tables = curved.map(|host| (host.clone(), self.table_of(host, now)));
         self.book.tables = tables.collect();
     }
@@ -483,8 +508,10 @@ impl Engine {
             .for_each(|table| table.add(&charges));
     }
 
-    /// Keeps the fullest booked slot of each curve host as the walk ended, for `/metrics`.
-    pub(super) fn end_curve_walk(&mut self) {
+    /// Keeps the fullest booked slot of each curve host as the walk ended, for `/metrics`, and
+    /// ends the memory shadow's walk at `now`.
+    pub(super) fn end_curve_walk(&mut self, now: FarmTime) {
+        self.end_memory_walk(now);
         let peaks = self.book.tables.iter();
         self.book.peaks = peaks
             .map(|(host, table)| (host.clone(), table.peak()))
