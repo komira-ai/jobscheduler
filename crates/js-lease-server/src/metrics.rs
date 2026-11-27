@@ -53,7 +53,8 @@
 //!
 //! The text names no job, lease, run or token: its labels are a job state, a start failure
 //! code, a host's id, a pool's name, a host's mark, a callback's result, a phase of a
-//! submit, a decision key, a reading's result, a resource, a check's status and a bucket bound,
+//! submit, a decision key, a reading's result, a resource, a check's status, a memory-shadow
+//! verdict and a bucket bound,
 //! and nothing else. The route takes no
 //! token, so it is served only on a private address ([`crate::is_private_address`]), and
 //! only to a private peer, as `/status` is.
