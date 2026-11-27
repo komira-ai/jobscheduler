@@ -401,8 +401,8 @@
 //! and `/v1/pools` are other routes than the server's of those names, so the two cannot
 //! share a port while both exist.
 //!
-//! The job store is in the state store when `--store` is given (the first start over it
-//! begins with no jobs, and a `.jobs` file of an earlier start is left unread); without
+//! The job store is in the state store when `--store` is given (the server leaves a `.jobs`
+//! file of an earlier start unread; `js-lease-server job-store copy` copies it in); without
 //! it, a SQLite file beside the state file, `<state file>.jobs`, owner-only: the
 //! single-node development backend. The server opens it once and holds that one handle: the job service and the
 //! per-job heartbeat both read it. The open (its index backfill, the boot's raise of
@@ -454,7 +454,8 @@
 //! before the call it records); a heartbeat with no new taint, a known host's hello and the
 //! host book use no store. The first start over an empty store imports the four files once,
 //! in one transaction with the marker `meta/server-state-imported`, and never changes them.
-//! The job store and the usage file are kept as without the setting.
+//! The job store and the usage rows are rows of the store too; `js-lease-server job-store`
+//! copies a job store's file into it, and exports them back to files for a rollback.
 //!
 //! # Who may do what
 //!
@@ -500,8 +501,9 @@
 //! address: whether the tick loop and the store paths work.
 //!
 //! `GET /readyz/sizes` says whether the job sizes are taught: the server answers `ready`
-//! before it reads the ended jobs its start teaches them from, and a job that books nothing
-//! books its class's cold size until that read ends. It answers 503 `teaching` until then,
+//! before it reads the ended jobs its start teaches them from, and until that read ends a job
+//! that books nothing is sized from the newest runs the start read alone. It answers 503
+//! `teaching` until then,
 //! whatever the phase, and 200 once the read has ended however it ended: `taught`, `nothing
 //! to teach` (no job tables), `not taught: the live allocations were not read`, `not taught:
 //! the ended jobs were not read` or `not taught: the server stopped before the ended jobs were
@@ -793,6 +795,7 @@ mod client_verifier;
 mod clock;
 mod config;
 mod cordon;
+mod cutover;
 mod dispatch_state;
 mod drain;
 mod error;
@@ -914,8 +917,9 @@ pub fn main() -> ExitCode {
 /// `err`.
 ///
 /// Exit status: 0 after an orderly stop (and for `--help`), 2 for a usage error or a
-/// start that was refused (the message names the flag), 1 for any other failure. The verb
-/// `update-hook` is answered first, before any flag is read ([`update_hook`]).
+/// start that was refused (the message names the flag), 1 for any other failure. The verbs
+/// `update-hook` ([`update_hook`]) and `job-store` (the job store's cutover between its SQLite
+/// file and the store) are answered first, before any flag is read.
 pub fn run(
     args: impl IntoIterator<Item = OsString>,
     out: &mut dyn Write,
@@ -928,6 +932,9 @@ pub fn run(
 fn run_words(args: Vec<OsString>, out: &mut dyn Write, err: &mut dyn Write) -> ExitCode {
     if update_hook::is_verb(&args) {
         return update_hook::run(&args, out, err, &update_hook::Host::system());
+    }
+    if cutover::is_verb(&args) {
+        return cutover::run(&args, out, err);
     }
     let parsed = Cli::try_parse_from(args);
     let cli = match parsed {

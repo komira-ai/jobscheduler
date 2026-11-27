@@ -15,7 +15,6 @@
 //! helper links. The caller check relies on the same for `kbf`: a requirement
 //! pinned by cdhash names exactly the installed `kbf` binary.
 
-pub mod admin;
 mod caller;
 pub mod gui;
 mod host;

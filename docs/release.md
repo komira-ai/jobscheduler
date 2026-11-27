@@ -381,7 +381,7 @@ everything after the image in `docker run` is the server's flags: either the fla
   nothing about a lock: a Postgres store has none.
 - `GET /readyz/sizes` on `--ready-listen`: 503 `teaching` while the server is still reading the
   ended jobs its start rebuilds the job sizes from (it answers `/readyz` 200 before that read ends,
-  and until it ends a job that books nothing books its class's cold size), then 200 `taught`, or
+  and until it ends a job that books nothing is sized from the newest runs the start read alone), then 200 `taught`, or
   200 `nothing to teach` or `not taught: ...` when there was nothing to read or the read failed or
   was stopped. Replacing a server that answers `teaching` starts that read over in the new one, so
   a deploy can wait for a 200 here, with a bound, before it replaces the running server. Do not use
@@ -884,8 +884,8 @@ is reported converged and fails otherwise, or when 90 minutes pass first (the de
 
 **Holding the update while the running server learns its job sizes (planned).** At each start the
 server reads every ended job its store holds to rebuild the history its job sizes come from, after
-it answers `/readyz` 200; until that read ends a job that books nothing books its class's cold
-size, and each replacement starts the read over. The running server says where its read is on
+it answers `/readyz` 200; until that read ends a job that books nothing is sized from the newest
+runs the start read alone, and each replacement starts the read over. The running server says where its read is on
 `GET /readyz/sizes` (its readiness listener, loopback only): 503 `teaching` during the read, 200
 once there is nothing left to learn. Only docker-swarm-updater, on the control plane, can reach
 the running task, so the hold is planned there: a service entry's `before_update` would name a

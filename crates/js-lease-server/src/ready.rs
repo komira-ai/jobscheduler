@@ -18,8 +18,8 @@
 //! `GET /readyz/sizes` on the same listener says whether the job sizes are taught: whether the
 //! server has finished reading the ended jobs its start rebuilds the sizes' history from
 //! (`crate::job_sizes`), which it does after it answers `ready`. Until then a job that books
-//! nothing books its class's cold size, and a replacement starts the read over: a deploy can
-//! wait for this route before it replaces the server.
+//! nothing is sized from the newest runs the start read alone, and a replacement starts the
+//! read over: a deploy can wait for this route before it replaces the server.
 //!
 //! | the teaching | status | body |
 //! |---|---|---|
