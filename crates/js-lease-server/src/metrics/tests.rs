@@ -665,7 +665,10 @@ async fn get_metrics_at_on_answers_the_curve_classes_and_each_curve_hosts_peak()
         .unwrap();
     let placer = rig.agents.placer.clone().unwrap();
     // The run reports no usage, so it teaches no memory sample (0), but its class's profile.
-    assert_eq!(crate::job_sizes::begin(&placer, jobs).teach(), 0);
+    assert_eq!(
+        crate::job_sizes::begin(&placer, jobs).teach(),
+        crate::job_sizes::Taught::Read { classes: 0 }
+    );
     rig.place("new-live", "host-a");
     let agent = crate::agent_api::job_rig::FakeAgent::new("host-a");
     rig.beat(&agent).await.unwrap();
