@@ -615,11 +615,8 @@ impl<'a> World<'a> {
         .into_iter()
         .filter(|start| start.ms > 0)
         .collect();
-        // A class's bursts fall at one point of its runs under `ClassBurst`, else by the run.
-        let at = match self.setup.shape {
-            Shape::ClassBurst => spot(job.class as usize),
-            _ => spot(index),
-        };
+        // Where a synthesised burst falls, by the run.
+        let at = spot(index);
         // Its recorded series under `Recorded`, when it can stand for the run.
         let recorded = job
             .cpu_series
