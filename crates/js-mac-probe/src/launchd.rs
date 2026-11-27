@@ -212,7 +212,13 @@ mod tests {
             "  PID  PPID  PGID COMMAND\n  600   500   600 /p/js-mac-probe child hold --secs 300 --tag {TAG}\n  601     1   601 /bin/zsh\n"
         );
         assert_eq!(seen(&ps, 600, TAG), ours(600, 500, 600));
-        assert!(matches!(seen(&ps, 601, TAG), Seen::Other(r) if r.pid == 601));
+        let reused = Seen::Other(Row {
+            pid: 601,
+            ppid: 1,
+            pgid: 601,
+            command: "/bin/zsh".to_owned(),
+        });
+        assert_eq!(seen(&ps, 601, TAG), reused);
         assert_eq!(seen(&ps, 602, TAG), Seen::Gone);
         assert_eq!(seen("", 600, TAG), Seen::Gone);
     }
