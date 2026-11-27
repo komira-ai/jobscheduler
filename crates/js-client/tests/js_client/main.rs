@@ -6,6 +6,8 @@
 //! the job client against an in-memory job server.
 
 mod client;
+#[cfg(feature = "jobs")]
+mod dropped;
 // The job client is behind the `jobs` feature, which a workspace test build turns on (js-cli
 // needs it) and a test build of js-client alone does not.
 #[cfg(feature = "jobs")]
