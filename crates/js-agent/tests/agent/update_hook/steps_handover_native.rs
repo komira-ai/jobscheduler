@@ -50,6 +50,13 @@ fn spy(rig: &Rig) -> Spy<'_> {
     spy
 }
 
+/// A spy whose staged agent lists the word and whose previous agent is of the release before.
+fn with_before(rig: &Rig) -> Spy<'_> {
+    let spy = spy(rig);
+    *spy.previous_version.borrow_mut() = Some(Ok(BEFORE.to_owned()));
+    spy
+}
+
 /// A busy Mac (two leases) as `prepare` leaves it for an update that hands over.
 fn handing(name: &str) -> Rig {
     let rig = Rig::mac(name);
@@ -155,11 +162,13 @@ fn a_mac_update_between_agents_that_both_list_native_handover_hands_the_runs_ove
 fn every_mac_update_that_cannot_hand_over_drains_and_says_why() {
     type Setup = fn(&Spy<'_>);
     let unit = "the unit changes (js-agent.plist): cutover starts the agent on the new unit";
-    let cases: [(&str, Setup, Option<String>); 9] = [
+    // Each case: its name, what it sets, the detail of the success, and whether it hands over.
+    let cases: [(&str, Setup, Option<String>, bool); 9] = [
         (
             "previous-before",
             |spy| *spy.previous_version.borrow_mut() = Some(Ok(BEFORE.to_owned())),
             Some(format!("{DRAINS}{NO_NATIVE_LEAVE}")),
+            false,
         ),
         (
             "previous-linux-word",
@@ -169,11 +178,13 @@ fn every_mac_update_that_cannot_hand_over_drains_and_says_why() {
                 ));
             },
             Some(format!("{DRAINS}{NO_NATIVE_LEAVE}")),
+            false,
         ),
         (
             "previous-fails",
             |spy| *spy.previous_version.borrow_mut() = Some(Err("exec failed".to_owned())),
             Some(format!("{DRAINS}{NO_NATIVE_LEAVE}")),
+            false,
         ),
         (
             "staged-without",
@@ -183,13 +194,15 @@ fn every_mac_update_that_cannot_hand_over_drains_and_says_why() {
                 *spy.previous_version.borrow_mut() = Some(Ok(LISTS.to_owned()));
             },
             Some(format!("{DRAINS}{NO_NATIVE_ADOPT}")),
+            false,
         ),
         (
             "vms",
             |spy| spy.vms.set(true),
             Some(format!("{DRAINS}{VM_BACKEND}")),
+            false,
         ),
-        ("plist-changed", |_| {}, Some(unit.to_owned())),
+        ("plist-changed", |_| {}, Some(unit.to_owned()), false),
         (
             "not-native",
             |spy| {
@@ -197,15 +210,17 @@ fn every_mac_update_that_cannot_hand_over_drains_and_says_why() {
                     Ok("js-agent 1.4.0\nstops: drain native-handover\n".to_owned());
             },
             Some(format!("{DRAINS}the jobs do not run on the native runtime")),
+            false,
         ),
         (
-            "egress-handover",
+            "egress-ignored",
             |spy| spy.egress.set(true),
             Some(HANDOVER.to_owned()),
+            true,
         ),
-        ("handover", |_| {}, Some(HANDOVER.to_owned())),
+        ("handover", |_| {}, Some(HANDOVER.to_owned()), true),
     ];
-    for (name, setup, detail) in cases {
+    for (name, setup, detail, hands_over) in cases {
         let mut rig = Rig::mac(&format!("hook-native-not-{name}"));
         match name {
             "plist-changed" => rig.stage_changed_unit(),
@@ -220,7 +235,6 @@ fn every_mac_update_that_cannot_hand_over_drains_and_says_why() {
         assert_eq!(done.outcome, Outcome::Success, "{name}: {done:?}");
         assert_eq!(done.report.detail, detail, "{name}");
         let record = rig.record().unwrap();
-        let hands_over = name.ends_with("handover");
         assert_eq!(record.handover, hands_over, "{name}");
         assert_eq!(record.cordon.placed, !hands_over, "{name}");
         assert!(!record.in_place, "{name}");
@@ -238,11 +252,6 @@ fn every_mac_update_that_cannot_hand_over_drains_and_says_why() {
 fn a_mac_update_from_an_agent_without_the_word_drains_and_so_does_its_rollback() {
     let rig = Rig::mac("hook-native-rollback-drains");
     rig.world.seed_unit(&rig.unit, "active", "running");
-    let with_before = |rig: &Rig| {
-        let spy = spy(rig);
-        *spy.previous_version.borrow_mut() = Some(Ok(BEFORE.to_owned()));
-        spy
-    };
     let done = with_before(&rig).prepare(&rig);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
     assert_eq!(
