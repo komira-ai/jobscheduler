@@ -264,7 +264,8 @@ use crate::cli_runtime::container_name;
 use crate::host_ports::Forwarder;
 use crate::lifecycle::{
     Created, Exit, FilesRoot, Found, FsPrepared, JobFs, LookupStamps, Prefetcher, Prepared,
-    Removal, RunHandle, RunSpec, Runtime, RuntimeError, Status, Ticket, Wake, Whereabouts,
+    Removal, RunHandle, RunSpec, Runtime, RuntimeError, Status, Ticket, UnreadLease, Wake,
+    Whereabouts,
 };
 use crate::logs::{LiveLogs, RunLogs};
 use ledger::{Entry, Ledger};
@@ -662,6 +663,11 @@ fn cpu_usec_of(cgroup: &LeaseCgroup) -> Option<u64> {
 impl Runtime for CrunRuntime {
     fn prepare(&mut self, image: &str, waited: Option<Ticket>) -> Prepared {
         self.pulls.prepare(image, waited)
+    }
+
+    /// The leases of this agent whose sidecars the start-up pass could not read.
+    fn unread_leases(&self) -> Vec<UnreadLease> {
+        adopt::unread_leases(&self.swept.left, &self.host_id)
     }
 
     fn set_wake(&mut self, wake: Wake) {

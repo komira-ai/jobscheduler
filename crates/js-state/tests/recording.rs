@@ -8,8 +8,8 @@ use std::time::Duration;
 use js_state::fake::{Fake, Flaw};
 use js_state::recording::{Read, RecordingStore, Write, WriteKind};
 use js_state::{
-    Changes, Commit, CommitStats, Cond, Conflict, ManualClock, Revision, ScanPage, ScanRange,
-    Store, StoreError, StoreTime, Txn, Versioned,
+    Changes, Commit, CommitStats, Cond, Conflict, ManualClock, Notice, Revision, ScanPage,
+    ScanRange, Store, StoreError, StoreTime, Txn, Versioned,
 };
 
 fn fake() -> Arc<dyn Store> {
@@ -311,4 +311,25 @@ fn a_stamped_transaction_is_recorded_as_it_committed_and_its_clock_is_not_a_read
         ]
     );
     assert_eq!(recording.reads(), Vec::new());
+}
+
+/// Notices are recorded in the order sent and passed on to the store underneath, and a clear
+/// forgets them with the rest. It catches a recorder that keeps the notices from the store it
+/// wraps (they would never reach a listener), and a clear that keeps them.
+#[test]
+fn notices_are_recorded_in_order_and_passed_on() {
+    let inner = Arc::new(RecordingStore::new(fake()));
+    let recording = RecordingStore::new(inner.clone());
+    let sent = |channel: &str, payload: &str| Notice {
+        channel: channel.to_owned(),
+        payload: payload.to_owned(),
+    };
+    recording.notify(&[sent("queue", "")]);
+    recording.notify(&[sent("host", "a"), sent("host", "b")]);
+    let all = [sent("queue", ""), sent("host", "a"), sent("host", "b")];
+    assert_eq!(recording.notices(), all);
+    assert_eq!(inner.notices(), all);
+    recording.clear();
+    assert_eq!(recording.notices(), []);
+    assert_eq!(recording.writes(), []);
 }

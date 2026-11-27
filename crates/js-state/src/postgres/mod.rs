@@ -23,7 +23,8 @@
 //!   head as its cursor: nothing at or below it can still commit. A bare sequence would not
 //!   do (a later number can commit first and a poller steps over the earlier one);
 //!   [`Flaw::SequenceRevisions`] is that mistake, kept so the suite can show it fails.
-//!   Polling is the baseline; this module sends no `NOTIFY`.
+//!   Polling is the baseline: a write's notices ([`Store::notify`]) go out with `pg_notify`
+//!   after its commit, best effort, to [`Listener`]s, and only end a poller's wait early.
 //! - **C6.** `synchronous_commit` must be on: a connection where it is not is refused,
 //!   so an acknowledged write has been flushed.
 //! - **C7.** A batch is one transaction and one commit, however many transactions it
@@ -76,7 +77,9 @@ mod conn;
 #[cfg(feature = "test-database")]
 mod database;
 mod extension;
+mod listen;
 mod not_up;
+mod pending;
 mod reach;
 pub mod schema;
 pub mod serving;
@@ -103,7 +106,9 @@ pub use conn::Conn;
 #[cfg(feature = "test-database")]
 pub use database::{TestDatabase, test_database, test_database_with};
 pub use extension::{ExtensionPool, Loan, store_error};
+pub use listen::{Heard, Listener};
 pub use not_up::OpenError;
+pub use pending::Pending;
 pub use reach::{Unreached, reach};
 use session::{Edge, Pool, Pooled, RangeShape, Session};
 pub use timeouts::Timeouts;
@@ -515,7 +520,7 @@ fn describe(err: &postgres::Error) -> String {
 }
 
 /// How many of `results` applied (the rest met a conflict).
-fn applied(results: &[Result<Commit, Conflict>]) -> usize {
+pub(super) fn applied(results: &[Result<Commit, Conflict>]) -> usize {
     results.iter().filter(|result| result.is_ok()).count()
 }
 
@@ -549,29 +554,6 @@ pub struct PostgresStore {
     txns: AtomicU64,
     syncs: AtomicU64,
     retries: AtomicU64,
-}
-
-/// A batch run in a database transaction that is not committed yet. Test support: it is
-/// how a test holds one commit back while another goes through.
-#[doc(hidden)]
-pub struct Pending<'s> {
-    store: &'s PostgresStore,
-    tx: Tx<'s>,
-    results: Vec<Result<Commit, Conflict>>,
-}
-
-impl Pending<'_> {
-    /// Commits, and returns the result of each transaction.
-    ///
-    /// # Errors
-    /// [`StoreError`] when the commit fails.
-    pub fn commit(self) -> Result<Vec<Result<Commit, Conflict>>, StoreError> {
-        let Pending { store, tx, results } = self;
-        store
-            .commit(tx, applied(&results))
-            .map_err(Fail::into_store)?;
-        Ok(results)
-    }
 }
 
 impl PostgresStore {
@@ -762,22 +744,6 @@ impl PostgresStore {
         self.txns.fetch_add(applied as u64, Ordering::Relaxed);
         self.syncs.fetch_add(u64::from(wrote), Ordering::Relaxed);
         Ok(())
-    }
-
-    /// Runs `txn` to the point of commit and holds it there: when it writes, it holds the
-    /// commit head. Test support.
-    ///
-    /// # Errors
-    /// [`StoreError`] when the database fails.
-    #[doc(hidden)]
-    pub fn begin(&self, txn: Txn) -> Result<Pending<'_>, StoreError> {
-        let batch = [txn];
-        let (tx, results) = self.retrying(|| self.run_batch(&batch))?;
-        Ok(Pending {
-            store: self,
-            tx,
-            results,
-        })
     }
 }
 
@@ -990,6 +956,10 @@ impl Store for PostgresStore {
             let us: i64 = s.client.query_one(&s.st.now, &[&None::<i64>])?.get(0);
             Ok(to_time(us))
         })
+    }
+
+    fn notify(&self, notices: &[crate::Notice]) {
+        self.send(notices);
     }
 }
 

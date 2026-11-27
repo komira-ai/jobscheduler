@@ -20,47 +20,28 @@
 //! than the newest it applied. The session reads no clock for it; it is a counter.
 //!
 //! Every hello carries `agent_process` when the session was given one
-//! ([`Session::with_agent_process`]): an id the agent draws once per process
-//! ([`agent_process`](crate::agent_process)) and sends in every hello of that process, the
-//! first and each one after a lost session. A server that knows the field takes the hello of
-//! the process that holds the host live over at once, instead of refusing it `host-live`.
+//! ([`Session::with_agent_process`]): an id the agent draws when the process starts, or takes
+//! over from the process that handed its runs to it ([`agent_process`](crate::agent_process)),
+//! and sends in every hello of that process, the first and each one after a lost session. A
+//! server that knows the field takes the hello of the process that holds the host live over at
+//! once, instead of refusing it `host-live`. A stop of a session with jobs leaves the id in the
+//! state root for the next process (`Session::leave_process`).
 //!
 //! # What an answer does
 //!
 //! - 200: the work went through. A welcome or a heartbeat reply that does not decode or
 //!   validate is treated as a failed exchange, not trusted.
-//! - Fatal: only the answers that name something an operator must change. The same message
-//!   will be refused again however long the agent waits, so the session ends with the
-//!   status and the server's code ([`Fatal`]) and the program exits 2. They are, each from
-//!   the server's refusals of a hello or a heartbeat:
-//!   - 401, with any code: the server holds no such bearer (a revoked or mistyped token, a
-//!     credential it never issued). A server that could not read its store of bearers
-//!     answers 503, which is retried, so a 401 is the server's word that the token is wrong.
-//!   - 403 `unknown-pool` (the server serves no such pool), `host-bound` (the host id was
-//!     admitted with another credential), `host-listed` (the operator lists the id in a
-//!     static pool), `shape-not-accepted` (the pool does not take the host's shape; the
-//!     refusal names the condition under `reason`, and the agent prints it),
-//!     `host-contract` and `execution-mismatch` (the host lacks what the pool's execution
-//!     mode requires; the refusal names the capability at fault): the pool's settings or the
-//!     host's flags must change.
-//!   - 403 `join-token-expired`, `join-token-used`, `join-token-instance`,
-//!     `join-token-not-admitted` and `join-token-credential-required`: the one-time token
-//!     cannot admit this host (past its time, spent on another host, bound to another
-//!     instance, not the token that registered the host, or the server requires a kept
-//!     credential and the agent has no state root to keep one in); a new token or a state
-//!     root is the operator's to give.
-//!   - 400 `unsupported-protocol`: the server speaks no protocol major the agent does; one
-//!     of the two must be updated.
-//!
-//!   The operator fixes the cause and the agent's supervisor starts it again. An agent that
-//!   runs jobs leaves them running for its next process to adopt (see [`crate::drive`]).
+//! - Fatal: only the answers that name something an operator must change: 401, the 403
+//!   refusals of the pool, of the host's admission and of a one-time join token, and 400
+//!   `unsupported-protocol` (the `verdict` module lists them and says why each is the
+//!   operator's). The same message will be refused again however long the agent waits, so
+//!   the session ends with the status and the server's code ([`Fatal`]) and the program exits
+//!   2; an agent that runs jobs leaves them to its next process (see [`crate::drive`]).
 //! - Every other 4xx is retried like a 5xx (below), and the session is kept: 404, 413
 //!   `body-too-large`, 422, a 400 `invalid-hello` or `invalid-heartbeat`, a 403 with any other
-//!   code. A server that was rolled back, a request routed to the wrong service, or a release
-//!   that is deployed to some instances and not yet to others answers them for a while and
-//!   then stops; the agent checks every message against the wire's rules before it sends it,
-//!   so a server that refuses a checked message as unreadable disagrees with the agent about
-//!   the wire, which a deploy settles, not the operator of the host.
+//!   code. A server rolled back, misrouted or half deployed answers them for a while; the
+//!   agent checks every message against the wire's rules before it sends it, so a server that
+//!   refuses one as unreadable disagrees about the wire, which a deploy settles.
 //! - 409 to a heartbeat (`stale-epoch`, `unknown-host`, `host-lost`), and 403
 //!   `session-mismatch` to one: the server no longer holds this session. A server of this
 //!   release serves any beat on any instance from its store, so these come only from an older
@@ -222,6 +203,11 @@ use crate::transport::{Answer, Transport};
 use crate::usage::Outbox;
 use crate::worker::{Delivery, Parked, Snapshot, Worker};
 
+/// The cap of the wait while the worker is full, which the heartbeat interval bounds too: a
+/// full worker is not a server out of reach, so its wait keeps the minute it always had and
+/// not the few seconds of [`crate::backoff::CAP`].
+const BUSY_CAP: Duration = Duration::from_secs(60);
+
 mod fatal;
 mod note;
 mod reason;
@@ -246,6 +232,9 @@ struct Live {
     epoch: u64,
     secret: Secret,
     interval: Duration,
+    /// The grace the welcome named: the server holds the session live that long after it last
+    /// heard the host.
+    grace: Duration,
 }
 
 /// What one [`Session::tick`] decided.
@@ -372,7 +361,7 @@ impl<'a> Session<'a> {
             hello,
             live: None,
             backoff: Backoff::default(),
-            busy: Backoff::default(),
+            busy: Backoff::up_to(BUSY_CAP),
             proven: false,
             lost_young: false,
             hold: None,
@@ -417,6 +406,22 @@ impl<'a> Session<'a> {
     /// the state root to hand over in ([`Session::with_handover`]).
     pub(crate) fn adoptable(&self) -> bool {
         self.handover.is_some()
+    }
+
+    /// Leaves this session's agent process id and its grace in the state root it looks in for a
+    /// handover, for the next process to say hello as (see [`crate::lifecycle::handover`]);
+    /// nothing for a session given no state root or no id, or that holds no session.
+    ///
+    /// # Errors
+    ///
+    /// The process file cannot be written.
+    pub(crate) fn leave_process(&self) -> std::io::Result<()> {
+        let grace = self.live.as_ref().map(|live| live.grace);
+        let left = self.handover.zip(self.hello.agent_process.as_deref());
+        let left = left.zip(grace);
+        left.map_or(Ok(()), |((root, id), grace)| {
+            handover::leave_process(root, id, grace)
+        })
     }
 
     /// Asks the worker to park for a handover, waiting at most `wait` ([`Worker::park`]);
@@ -775,6 +780,7 @@ impl<'a> Session<'a> {
             epoch: welcome.epoch,
             secret: Secret(welcome.session.clone()),
             interval,
+            grace: Duration::from_millis(welcome.grace_ms),
         });
         self.proven = false;
         self.seq = 0;

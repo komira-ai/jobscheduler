@@ -183,9 +183,15 @@ update hook's steps; on a crun node they go like this:
 3. The new agent takes over (adopts) every job, as after a crash, and lists them in its first
    heartbeat. A job that ended in the gap is reported from its `exit.json`, once. A job's result
    that the old agent had not had acknowledged is kept in the state root and sent by the new
-   agent, once. Its first hello waits until the server stops counting the old session as live
-   (the pool's grace, 15 s by default), so the node takes no new job for that long; the jobs
-   that run are not touched by it.
+   agent, once. The new agent says hello as the agent process that handed the jobs over (the old
+   agent leaves its process id in the state root, the file `handover-process`, and the new one
+   takes it at its start), so the server takes that hello at once: the node stays live in
+   `js host list` through the update and is placed work again from the new agent's first
+   heartbeat. Only when no id could be left or taken (an old agent from before the file, a file
+   the new agent refuses, which it names in a warning, or one left longer ago than the old
+   session's grace) does its first hello wait until the
+   server stops counting the old session as live (the pool's grace, 15 s by default), so that
+   the node takes no new job for that long; the jobs that run are not touched by it either way.
 4. `verify` waits for the new agent's hello, and `cleanup` ends the update. A `rollback` hands
    the jobs back to the previous agent the same way: no drain, the request file, and a signal
    (or a stop and a start). If the previous agent's unit then does not start, the report says

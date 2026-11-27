@@ -245,8 +245,10 @@ Read with `js-start-timeline` over that node's `journalctl -u js-agent-crun` for
   asks each provider, and then writes the record, in the same call and before the worker steps
   again. A record that cannot be written still fails the start, and its cleanup releases what was
   asked. A crash between a `Prepare` and the record leaves a source that no record names: the sweep
-  each provider is asked when the agent starts keeps only the runs the agent adopted, and a start
-  that had no container is not one, so the sweep releases it.
+  each provider is asked when the agent starts keeps only the runs the agent holds (those it
+  adopted, and those whose lease the runtime left alone because it cannot read the lease's ledger
+  file), each from the attempt its record names, and a start that had no container is not one, so
+  the sweep releases it.
 - **Every start is advanced before any job is watched or cleaned** (`Lifecycle::step`): one pass
   advances every job, then a second watches and cleans each. A start that settled in the first pass
   is watched in the second, as before.
@@ -641,6 +643,8 @@ one worker step between the two calls, with the provider idle meanwhile.
 - **A `Release` forgets the source's `Prepare` and `Mount`** (`Flights::forget`). A start stopped
   while its `Prepare` is out is released at its cleanup; without this its `Prepare` would still be
   followed by a `Mount` after the release. The answers it forgets are of calls no one asks again.
+  It forgets only the calls of its own attempt (a call names the run's attempt, and the client's
+  table keys calls by it): another start of the same job on this agent keeps its calls.
 
 ### Decisions
 
@@ -656,7 +660,10 @@ one worker step between the two calls, with the provider idle meanwhile.
 - No wire, record or configuration format changes. The provider receives the same calls in the same
   order: `Mount` after `Prepare` was answered, now sooner.
 - A provider that fails the `Mount` the client sent gets it again from the lifecycle's next ask, as a
-  `Mount` the lifecycle sent would.
+  `Mount` the lifecycle sent would. (Later, komira-ai/jobscheduler#1274: after a `Mount` answered
+  unavailable, the source's next ask, once its wait is over, sends its `Prepare` again and the
+  `Mount` only once that is taken, so a provider that restarted and lost the source is asked from
+  the start; `lifecycle/machine/providing.rs`.)
 
 ### What is left
 

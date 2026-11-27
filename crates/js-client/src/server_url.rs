@@ -13,6 +13,11 @@ pub struct ServerUrl {
     pub base: String,
     /// Whether the scheme is `https`.
     pub https: bool,
+    /// The host, without the brackets of an IPv6 literal: the name the addresses of the
+    /// server are looked up by.
+    pub(crate) host: String,
+    /// The port: the one named, or the scheme's (443 for `https`, 80 for `http`).
+    pub(crate) port: u16,
 }
 
 impl ServerUrl {
@@ -42,6 +47,8 @@ impl ServerUrl {
             ("https" | "http", true, false, true) => Ok(Self {
                 base: format!("{scheme}://{authority}"),
                 https,
+                host: host.to_owned(),
+                port: uri.port_u16().unwrap_or(if https { 443 } else { 80 }),
             }),
             ("https" | "http", false, _, _) => Err(refuse(
                 "is plain http to a host off the loopback: a bearer token never crosses a network in clear, use https://",
@@ -60,4 +67,25 @@ impl ServerUrl {
 /// Whether `host` names the machine itself.
 fn is_loopback(host: &str) -> bool {
     host.eq_ignore_ascii_case("localhost") | host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Asserts the host and port a server's addresses are looked up and kept by: the port
+    /// named, or the scheme's own, and an IPv6 literal without its brackets. It catches a
+    /// book kept under the scheme's port for a server on another, or one asked for `[::1]`.
+    #[test]
+    fn the_host_and_port_are_the_named_or_the_schemes() {
+        for (text, host, port) in [
+            ("https://js.example.test", "js.example.test", 443),
+            ("https://js.example.test:7301", "js.example.test", 7301),
+            ("http://localhost", "localhost", 80),
+            ("http://[::1]:9", "::1", 9),
+        ] {
+            let url = ServerUrl::parse(text).unwrap();
+            assert_eq!((url.host.as_str(), url.port), (host, port), "{text}");
+        }
+    }
 }

@@ -266,15 +266,21 @@ impl Engine {
         })
     }
 
-    /// What `/metrics` reads of the curve mode; `None` unless it is on.
+    /// What `/metrics` reads of the curve mode: under [`Curves::On`] the class counts and the
+    /// hosts' peaks, under [`Curves::Shadow`] the class counts alone (nothing is booked by
+    /// curve, so no host has a peak), and `None` under [`Curves::Off`].
     pub(super) fn curve_view_of(&self) -> Option<CurveView> {
         let (curve_classes, flat_classes) = self.sizes.curve_counts();
+        let host_peaks = match self.curves {
+            Curves::On => self.book.peaks.clone(),
+            Curves::Shadow | Curves::Off => BTreeMap::new(),
+        };
         let view = CurveView {
             curve_classes,
             flat_classes,
-            host_peaks: self.book.peaks.clone(),
+            host_peaks,
         };
-        (self.curves == Curves::On).then_some(view)
+        (self.curves != Curves::Off).then_some(view)
     }
 
     /// How many wait bounds ran out since the last call.

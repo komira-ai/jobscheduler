@@ -581,3 +581,42 @@ fn a_sweep_keeps_the_leases_the_judge_takes_over_and_removes_the_rest_with_the_r
     assert!(leases.root.join(&keep.name).is_dir());
     assert_eq!(files(&ledger), [format!("{}.json", keep.name)]);
 }
+
+/// Asserts the version a sidecar that cannot be read says it is of: a later form with a field
+/// this agent does not know and one with no other field say theirs; garbage, a version that is
+/// not a number, a link to a good sidecar (never followed), a file that is too long and a file
+/// that is not there say none. Catches a report of a sidecar this agent cannot read that names
+/// no version where its file gives one, and one that follows a link or reads past the bound.
+#[test]
+fn a_sidecar_says_its_version_whatever_else_it_holds() {
+    let dir = TestDir::under(std::env::temp_dir(), "ledger-version");
+    let ledger = ledger(&dir, "agent-a");
+    let good = entry("agent-a", "good");
+    ledger.record(&good).expect("record");
+    let text = serde_json::to_string(&good).expect("json");
+    let at = |name: &str| ledger.dir().join(name);
+    fs::write(
+        at("later.json"),
+        text.replace("\"version\":2", "\"version\":3,\"new\":{\"x\":1}"),
+    )
+    .expect("write");
+    fs::write(at("bare.json"), "{\"version\":7}").expect("write");
+    fs::write(at("garbage.json"), "not json").expect("write");
+    fs::write(at("text.json"), "{\"version\":\"3\"}").expect("write");
+    symlink(file_of(&ledger, &good), at("link.json")).expect("link");
+    let mut big = b"{\"version\":4,\"pad\":\"".to_vec();
+    big.extend(vec![b'x'; 70 * 1024]);
+    big.extend(b"\"}");
+    fs::write(at("big.json"), big).expect("write");
+    assert_eq!(Ledger::version_of(&at("later.json")), Some(3));
+    assert_eq!(Ledger::version_of(&at("bare.json")), Some(7));
+    for none in [
+        "garbage.json",
+        "text.json",
+        "link.json",
+        "big.json",
+        "gone.json",
+    ] {
+        assert_eq!(Ledger::version_of(&at(none)), None, "{none}");
+    }
+}

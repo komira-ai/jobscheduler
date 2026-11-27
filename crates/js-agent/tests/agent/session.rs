@@ -487,7 +487,7 @@ fn stale_epoch_triggers_one_rehello_not_a_loop() {
 }
 
 /// Asserts that a server that welcomes and then refuses the very next heartbeat is not
-/// asked in a loop: the second loss waits (the backoff doubles each time), so hellos are
+/// asked in a loop: the second loss waits (the backoff doubles each time, up to its cap), so hellos are
 /// spaced by more than the interval. It catches a re-hello that has no brake.
 #[test]
 fn a_welcome_then_stale_again_backs_off() {
@@ -501,7 +501,7 @@ fn a_welcome_then_stale_again_backs_off() {
     let mut session = Session::new(hello("h1"), &mut transport, lowest());
     let steps = ticks(&mut session, 8);
     let after_losses: Vec<Duration> = [1, 3, 5, 7].iter().map(|&i| wait(&steps[i])).collect();
-    assert_eq!(after_losses, [ms(500), ms(1000), ms(2000), ms(4000)]);
+    assert_eq!(after_losses, [ms(500), ms(1000), ms(2000), ms(2000)]);
     let hellos = paths(&sent).iter().filter(|p| *p == HELLO_PATH).count();
     assert_eq!(hellos, 4);
 }
@@ -654,7 +654,7 @@ fn retry_after_is_honoured_up_to_a_bound_without_a_retry_storm() {
     let secs = Duration::from_secs;
     assert_eq!(
         waits,
-        [secs(30), RETRY_AFTER_CAP, secs(2), secs(4), secs(8)]
+        [secs(30), RETRY_AFTER_CAP, secs(2), secs(2), secs(2)]
     );
 }
 

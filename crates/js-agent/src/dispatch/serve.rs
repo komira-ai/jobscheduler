@@ -4,7 +4,7 @@ use std::path::Path;
 
 use js_agent_wire::HostCredential;
 
-use super::{Cell, Next, Poller, ROOM_WAIT};
+use super::{Cell, Next, Poller, ROOM_WAIT, Route};
 use crate::backoff::Jitter;
 use crate::login::Login;
 use crate::transport::{Connector, Transport};
@@ -42,19 +42,23 @@ impl Dial<'_> {
     }
 }
 
-/// Polls for the sessions `cell` is given until it is closed: each poll on a transport of
-/// its own ([`Dial::open`]), the answers handed to `worker`, and a wait after a failure
-/// (any answer but a usable 200, any transport error) as `jitter` says. Messages the worker
-/// had no room for are held and handed over when it makes room, before the next poll is
-/// posted; meanwhile no transport is made. The poller's lines go to the cell.
+/// Polls for the sessions `cell` is given until it is closed, the answers handed to `worker`,
+/// and a wait after a failure (any answer but a usable 200, any transport error) as `jitter`
+/// says. The polls share one transport, as the session's heartbeats do, so they share its
+/// kept connection and what its client knows of the server's address; a new one is made
+/// ([`Dial::open`]) only for a route that names another host credential than the one it was
+/// made with, and after a poll for which none could be made. Messages the worker had no room
+/// for are held and handed over when it makes room, before the next poll is posted; meanwhile
+/// nothing is posted. The poller's lines go to the cell.
 pub fn serve(cell: &Cell, dial: &Dial<'_>, worker: &Worker, jitter: Box<dyn Jitter>) {
     let mut poller = Poller::new(worker, jitter);
+    let mut kept = None;
     while let Some((generation, route)) = cell.wait_route() {
         let next =
             poller
                 .hand_over()
-                .unwrap_or_else(|| match dial.open(route.credential.as_ref()) {
-                    Ok(mut transport) => poller.poll(&mut *transport, &route),
+                .unwrap_or_else(|| match transport_for(&mut kept, dial, &route) {
+                    Ok(transport) => poller.poll(&mut **transport, &route),
                     Err(_) => poller.failed(None),
                 });
         cell.note(poller.take_lines());
@@ -68,4 +72,34 @@ pub fn serve(cell: &Cell, dial: &Dial<'_>, worker: &Worker, jitter: Box<dyn Jitt
             }
         }
     }
+}
+
+/// The transport of the polls and the host credential it was made with.
+struct Kept {
+    credential: Option<HostCredential>,
+    transport: Box<dyn Transport>,
+}
+
+/// The transport for a poll of `route`: the kept one when it was made with the route's
+/// credential, otherwise a new one, which is kept from then on.
+///
+/// # Errors
+///
+/// No transport could be made (see [`Dial::open`]); none is kept then.
+fn transport_for<'k>(
+    kept: &'k mut Option<Kept>,
+    dial: &Dial<'_>,
+    route: &Route,
+) -> Result<&'k mut Box<dyn Transport>, String> {
+    let same = kept
+        .take()
+        .filter(|kept| kept.credential == route.credential);
+    let made = match same {
+        Some(same) => same,
+        None => Kept {
+            credential: route.credential.clone(),
+            transport: dial.open(route.credential.as_ref())?,
+        },
+    };
+    Ok(&mut kept.insert(made).transport)
 }

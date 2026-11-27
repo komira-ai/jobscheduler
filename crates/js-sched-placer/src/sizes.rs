@@ -137,11 +137,19 @@
 //!   over five seconds (`cpu_peak`, as its host reported it) is not taught: a booking of the
 //!   peaks held a host to a few jobs whose peaks fill it while their use left most of it idle.
 //!
+//! # The fit
+//!
+//! Whatever the mode, each run freed while serving (not one read from the history at a start)
+//! is also counted in [`JobSizes::fit`]: a memory kill, and for a success its mean CPU over
+//! its booked CPU, its CPU peak over its mean and its peak memory over its booked memory
+//! ([`RunFit`]), each when the run has what the ratio needs.
+//!
 //! # Profiles
 //!
 //! With [`Curves::Shadow`] or [`Curves::On`] each class also learns a CPU and a memory profile of
 //! its runs' recorded series ([`js_sizing::Profile`]), and a run freed while serving logs how
-//! its class's profile predicted it. The sizes above are the same in all three modes: a
+//! its class's profile predicted it and is counted by the status of its check
+//! ([`JobSizes::curve_checks`]). The sizes above are the same in all three modes: a
 //! profile never changes what a job books, which is what its allocation records and its agent
 //! weighs. Under [`Curves::On`] the placer reads a class's profile once the class passes its
 //! four checks ([`JobSizes::curve_of`]) and tests a job that leaves its CPU at 0 against the
@@ -167,6 +175,7 @@ use sha2::{Digest as _, Sha256};
 use tracing::{info, warn};
 
 use crate::place::SchedPlacer;
+use crate::telemetry::{CurveChecks, RunFit};
 
 pub use js_types::{SIZE_CLASS_LABEL, SIZE_FALLBACK_LABEL};
 pub use profile::Curves;
@@ -322,6 +331,8 @@ pub struct JobSizes {
     /// [`Curves::Off`]. Nothing the sizes book reads them; [`JobSizes::curve_of`] reads them,
     /// for the placer to book by under [`Curves::On`] and to judge by under [`Curves::Shadow`].
     profiles: Option<profile::Profiles>,
+    /// How the runs freed while serving did against what they booked ([`RunFit::record`]).
+    fit: RunFit,
 }
 
 /// The freed jobs a teaching of the ended jobs holds until it is taught ([`Teaching`]).
@@ -356,7 +367,7 @@ impl Held {
     /// while no bounds are known, once they are ([`JobSizes::set_bounds`]), as the history
     /// holds such a run. A job that teaches the history nothing teaches it nothing.
     fn learn(&mut self, job: &JobRecord, booked: Booked, bounds: Option<Bounds>) {
-        let Some((run, day)) = run_of(job, booked) else {
+        let Some((run, day, _)) = run_of(job, booked) else {
             return;
         };
         for key in keys_of_run(job, &run) {
@@ -619,9 +630,15 @@ impl JobSizes {
     /// [`JobSizes::observe`], which also logs the check of the run against its class's profile
     /// when `log` is set (a run freed while serving, not one read from the history).
     fn observe_logged(&mut self, job: &JobRecord, booked: Booked, log: bool) -> bool {
-        let Some((run, day)) = run_of(job, booked) else {
+        let Some((run, day, booked_cpu_millis)) = run_of(job, booked) else {
             return false;
         };
+        if log {
+            let fit = &mut self.fit;
+            job.result
+                .iter()
+                .for_each(|result| fit.record(&run, result, booked_cpu_millis));
+        }
         self.profile_run(job, &run, log);
         let taught = self.teaches(job, &run, day);
         let keys = keys_of_run(job, &run);
@@ -629,6 +646,20 @@ impl JobSizes {
             .extend(keys.into_iter().map(|key| (key, run, day)));
         self.set_bounds(self.bounds);
         taught
+    }
+
+    /// How the runs freed while serving did against what they booked: not the runs read from
+    /// the history at the server's start.
+    pub(crate) fn fit(&self) -> &RunFit {
+        &self.fit
+    }
+
+    /// The checks of the runs freed while serving against their classes' profiles; all zero
+    /// when profiles are not kept.
+    pub(crate) fn curve_checks(&self) -> CurveChecks {
+        self.profiles
+            .as_ref()
+            .map_or_else(CurveChecks::default, |profiles| profiles.checks)
     }
 
     /// Teaches the run of `job`, freed booked as `booked` ([`JobSizes::observe`]), or holds it
@@ -698,8 +729,8 @@ fn peak_of(result: &js_jobs::JobResult) -> Option<u64> {
 }
 
 /// The run of `job`, booked as `booked`, as the estimator takes it (the module docs), with the
-/// day it ended; `None` for a job that teaches nothing.
-fn run_of(job: &JobRecord, booked: Booked) -> Option<(Run, Day)> {
+/// day it ended and the CPU it booked, in millicores; `None` for a job that teaches nothing.
+fn run_of(job: &JobRecord, booked: Booked) -> Option<(Run, Day, u64)> {
     let Booked::Shape {
         cpu_millis,
         memory_bytes,
@@ -757,7 +788,7 @@ fn run_of(job: &JobRecord, booked: Booked) -> Option<(Run, Day)> {
         // averaging a few cores, while CPU is a share a burst can wait for, not a limit.
         cpu_peak_millis: None,
     };
-    Some((run, day_of_millis(millis(ended.as_duration()))))
+    Some((run, day_of_millis(millis(ended.as_duration())), cpu_millis))
 }
 
 /// Whether a run booked `booked` bytes reached its booking: its group's `memory.peak` came
@@ -966,3 +997,7 @@ impl SchedPlacer {
 #[cfg(test)]
 #[path = "sizes_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "sizes_fit_tests.rs"]
+mod fit_tests;

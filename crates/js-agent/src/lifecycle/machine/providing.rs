@@ -5,9 +5,9 @@
 //! as a host path, the step `provided` is marked, and the lookups of those paths are
 //! followed with the rest.
 //!
-//! - **At admission**, once the start has its slot, the sources are remembered for the
-//!   release at the run's end, each provider is asked to `Prepare` its source, and then the
-//!   record of the sources is written ([`provider_record`], so a restart can release what
+//! - **At admission**, once the start has its slot, the start is given its attempt and its
+//!   sources are remembered for the release at the run's end (`provided`), each provider is
+//!   asked to `Prepare` its source, and then the record of the sources is written ([`provider_record`], so a restart can release what
 //!   may exist). The asks go before the start's images are asked for, so the provider
 //!   fetches while the image is pulled and the container made, and before the record, so
 //!   the record's syncs overlap the provider's first work. A crash between a `Prepare` and
@@ -23,7 +23,12 @@
 //!   provider that is unavailable (or answers a `Mount` with no directory) is asked again
 //!   after a wait that grows with each failure in a row, per source, and a provider that
 //!   fails `Prepare`s is sent one `Prepare` at a time until one succeeds (`pace`); each step
-//!   in which a start's calls failed gives one `provider-backoff` line for it. One that
+//!   in which a start's calls failed gives one `provider-backoff` line for it. A `Mount`
+//!   answered unavailable is asked again from the start: after its wait the source's
+//!   `Prepare` is sent again, and the `Mount` follows it once it is taken, because a provider
+//!   that restarted has lost what it was asked before and answers a source it does not know
+//!   so (tierstore: "the source is not prepared here"). That `Prepare`'s success does not end
+//!   the failures in a row, so the waits still grow while the `Mount` fails. One that
 //!   refuses the ref fails the start
 //!   (`provider-refused`); a directory that is not an absolute path in normal form beneath a
 //!   mount root of the agent's (a root it may write, for a read-write mount) fails it
@@ -112,6 +117,9 @@ struct Wanted {
     why: String,
     /// The pace of its calls.
     pace: Pace,
+    /// The `Prepare` is sent again because the provider answered the `Mount` unavailable
+    /// after it had taken the ref: its success keeps the failures in a row.
+    again: bool,
 }
 
 impl Wanted {
@@ -125,6 +133,7 @@ impl Wanted {
             path: None,
             why: "no answer".to_owned(),
             pace: Pace::default(),
+            again: false,
         }
     }
 
@@ -194,13 +203,14 @@ impl Wanted {
     }
 
     /// Asks the provider for what this source still lacks, at `now_ms`: `Prepare` until it
-    /// is taken, then `Mount` until the directory is answered. A provider that has not
-    /// answered its sweep is not asked; nor is a source whose pace has it wait, nor (for a
+    /// is taken, then `Mount` until the directory is answered; a `Mount` answered unavailable
+    /// has the next ask send the `Prepare` again first, as the provider may have restarted
+    /// and lost the source. A provider that has not answered its sweep is not asked; nor is a source whose pace has it wait, nor (for a
     /// `Prepare` not out yet) one whose provider's gate is shut. A call that failed and now
     /// waits is given back, for the start's backoff line.
     fn ask(
         &mut self,
-        run_id: &str,
+        (run_id, attempt): (&str, u64),
         attached: &mut Attached,
         roots: &MountRoots,
         now_ms: u64,
@@ -225,10 +235,12 @@ impl Wanted {
             }
             let call = ProviderCall::Prepare {
                 run_id: run_id.to_owned(),
+                attempt,
                 index: self.index,
                 reference: self.reference.clone(),
                 mode: self.mode,
             };
+            let failures = self.pace.failures();
             let (answer, step) = attached.paced(
                 (self.provider.as_str(), &call),
                 &mut self.pace,
@@ -236,7 +248,12 @@ impl Wanted {
                 &seed,
             );
             match answer {
-                ProviderAnswer::Done(_) => self.prepared = true,
+                ProviderAnswer::Done(_) => {
+                    self.prepared = true;
+                    if std::mem::take(&mut self.again) {
+                        self.pace.resume(failures);
+                    }
+                }
                 other => {
                     self.settle(other)?;
                     return Ok(step.map(|step| self.backed("Prepare", step)));
@@ -245,6 +262,7 @@ impl Wanted {
         }
         let call = ProviderCall::Mount {
             run_id: run_id.to_owned(),
+            attempt,
             index: self.index,
         };
         let (answer, step) = attached.paced(
@@ -260,6 +278,10 @@ impl Wanted {
                 Ok(step.map(|step| self.backed("Mount", step)))
             }
             other => {
+                if matches!(other, ProviderAnswer::Unavailable(_)) {
+                    self.prepared = false;
+                    self.again = true;
+                }
                 self.settle(other)?;
                 Ok(step.map(|step| self.backed("Mount", step)))
             }
@@ -281,6 +303,8 @@ impl Wanted {
 /// What a start waits for from its providers: each source, and the moment the wait ends.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Providing {
+    /// The start's attempt, named in every call of its sources.
+    attempt: u64,
     /// When the start has waited as long as `--mount-provider-wait` allows, on the clock.
     deadline_ms: u64,
     sources: Vec<Wanted>,
@@ -306,7 +330,7 @@ impl Providing {
             .iter_mut()
             .filter(|source| source.path.is_none())
         {
-            match source.ask(run_id, attached, roots, now_ms) {
+            match source.ask((run_id, self.attempt), attached, roots, now_ms) {
                 Ok(waits) => backed.extend(waits),
                 Err(failure) => {
                     events.extend(attached.backoff(run_id, &backed));
@@ -399,7 +423,9 @@ pub(super) fn follow(
 
 impl Lifecycle {
     /// Begins the providers' part of a start admitted at `now_ms` whose file system `fs`
-    /// holds sources a provider makes: remembers them for the release, asks each provider
+    /// holds sources a provider makes: gives the start its attempt and remembers the sources
+    /// for the release (dropping a release still owed for an earlier attempt of the run,
+    /// [`Attached::begin`]), asks each provider
     /// for what its source lacks, and then writes the record of them. `None` for a start
     /// with no such source.
     ///
@@ -435,15 +461,18 @@ impl Lifecycle {
                 index: source.index,
             })
             .collect();
-        self.providers.keep(run_id, sources.clone());
+        let attempt = self
+            .providers
+            .begin(run_id, sources.clone(), now_ms, events);
         let deadline_ms = now_ms.saturating_add(self.providers.wait_ms());
         let mut providing = Providing {
+            attempt,
             deadline_ms,
             sources: provided.iter().map(Wanted::of).collect(),
         };
         let at = (&self.config.mounts, now_ms);
         providing.poll(run_id, &mut self.providers, at, events)?;
-        provider_record::write(&self.config.state, run_id, &sources).map_err(|why| {
+        provider_record::write(&self.config.state, (run_id, attempt), &sources).map_err(|why| {
             (
                 refusal::INPUT_UNAVAILABLE,
                 code::PROVIDER_RECORD_FAILED,

@@ -1,10 +1,12 @@
-//! `cargo xtask farm-build` end to end: the verb is run as a process in a git repository of its own
-//! (tests/support), with `--buck2` naming the stand-in (src/bin/xtask-fake.rs, linked as `buck2`),
-//! which answers each buck2 call from files of the working directory, names the stand-in linked as
-//! `buildrules` beside it as the command line it was asked to build, and records the calls it got
-//! (`buck2.calls`; the stand-in `buildrules` records its own in `buildrules.calls`). Each test reads
-//! the verb's exit status and words, those calls, and for a stale table the patch and the job
-//! summary it wrote. Nothing here reaches a network or a build farm.
+//! `cargo xtask farm-workers` and `cargo xtask farm-table` end to end: each verb is run as a
+//! process in a git repository of its own (tests/support), with `--buck2` naming the stand-in
+//! (src/bin/xtask-fake.rs, linked as `buck2`), which answers buck2's audit from files of the
+//! working directory and records the calls it got (`buck2.calls`), and `--buildrules` naming the
+//! stand-in linked as `buildrules` beside it, which records its own in `buildrules.calls`. Each
+//! test reads the verb's exit status and words, those calls, and for a stale table the patch and
+//! the job summary it wrote. Nothing here reaches a network or a build farm: the lane's builds on
+//! the farm are komira's buck2-farm action's, held to the workflow by
+//! tests/apt_workflow/farm_steps.rs.
 
 mod support;
 
@@ -14,23 +16,16 @@ use std::process::{Command, Output};
 use js_testkit::dir::TestDir;
 use sha2::Digest as _;
 use support::Repo;
-use xtask::farm::table::{PATCH_ARTIFACT, PATCH_FILE, summary_markdown};
+use xtask::farm::WORKERS_SET;
+use xtask::farm::table::{FRESH, PATCH_ARTIFACT, PATCH_FILE, summary_markdown};
 
 const FAKE: &str = env!("CARGO_BIN_EXE_xtask-fake");
 const XTASK: &str = env!("CARGO_BIN_EXE_xtask");
 
 /// What buck2 prints for a key that is set.
 const SET: &str = r#"{"buildrules_re.linux_x86_64_properties":"OSFamily=Linux,ISA=x86-64"}"#;
-/// A farm build's summary line.
-const FARM: &str = "Commands: 474 (cached: 0, remote: 474, local: 0)";
 /// The audit call.
 const AUDIT: &str = "audit config buildrules_re.linux_x86_64_properties --style json";
-/// The build of the command line.
-const TOOL: &str = "build buildrules//cli:buildrules --show-full-output";
-/// The calls of a run that got as far as the build.
-const BUILT: [&str; 4] = [AUDIT, TOOL, "build //:ci", "kill"];
-/// The calls of a run that stopped at the table.
-const STOPPED: [&str; 3] = [AUDIT, TOOL, "kill"];
 /// The run the handoff names.
 const RUN: &str = "42";
 /// The repository the handoff names.
@@ -112,26 +107,40 @@ impl Rig {
         std::fs::write(self.bin.join("defect"), defect).expect("defect");
     }
 
-    /// The farm build in the repository, with the handoff's flags.
-    fn farm_build(&self) -> Output {
-        self.farm_build_in(&self.repo.dir, &self.patch(), &self.summary())
+    /// The stand-in buildrules.
+    fn tool(&self) -> PathBuf {
+        self.bin.join("buildrules")
     }
 
-    /// The farm build in `cwd`, writing a stale table's fix to `patch` and `summary`.
-    fn farm_build_in(&self, cwd: &Path, patch: &Path, summary: &Path) -> Output {
-        xtask(cwd, &args(&self.buck2(), patch, summary))
+    /// The table's check in the repository, with the handoff's flags.
+    fn farm_table(&self) -> Output {
+        self.farm_table_in(&self.repo.dir, &self.patch(), &self.summary())
+    }
+
+    /// The table's check in `cwd`, writing a stale table's fix to `patch` and `summary`.
+    fn farm_table_in(&self, cwd: &Path, patch: &Path, summary: &Path) -> Output {
+        xtask(cwd, &args(&self.buck2(), &self.tool(), patch, summary))
+    }
+
+    /// The worker check in the repository.
+    fn farm_workers(&self) -> Output {
+        xtask(&self.repo.dir, &workers_args(&self.buck2()))
     }
 }
 
-/// The flags of a farm build of `//:ci`.
-fn args(buck2: &Path, patch: &Path, summary: &Path) -> Vec<String> {
-    let path = |p: &Path| p.to_str().expect("utf-8").to_owned();
+/// The path `p` as text.
+fn path(p: &Path) -> String {
+    p.to_str().expect("utf-8").to_owned()
+}
+
+/// The flags of the table's check with the command line `tool`.
+fn args(buck2: &Path, tool: &Path, patch: &Path, summary: &Path) -> Vec<String> {
     [
-        "farm-build",
+        "farm-table",
         "--buck2",
         &path(buck2),
-        "--target",
-        "//:ci",
+        "--buildrules",
+        &path(tool),
         "--patch",
         &path(patch),
         "--summary",
@@ -143,6 +152,13 @@ fn args(buck2: &Path, patch: &Path, summary: &Path) -> Vec<String> {
     ]
     .map(str::to_owned)
     .to_vec()
+}
+
+/// The flags of the worker check.
+fn workers_args(buck2: &Path) -> Vec<String> {
+    ["farm-workers", "--buck2", &path(buck2)]
+        .map(str::to_owned)
+        .to_vec()
 }
 
 /// `xtask <args>` in `cwd`.
@@ -194,38 +210,33 @@ fn apply() -> String {
     )
 }
 
-/// The log of a passing build.
-const BUILD_LOG: &str = "[t] Waiting on 3 actions\n[t] Commands: 474 (cached: 0, remote: 474, local: 0)\nBUILD SUCCEEDED\n";
-/// The answers of a passing build.
-const PASSING: [(&str, &str); 2] = [
-    ("buck2-audit.stdout", SET),
-    ("buck2-build.stderr", BUILD_LOG),
-];
+/// The answers of a buck2 that gives buildrules the farm's worker property set.
+const PASSING: [(&str, &str); 1] = [("buck2-audit.stdout", SET)];
 
 #[test]
-fn a_farm_build_with_a_fresh_table_prints_its_summary_line_and_stops_buck2_with_status_0() {
-    // Catches: the build not run, run before the worker check or the table's check, its log not
-    // passed on, its summary not printed, buck2's daemon left running, or a fresh table synced or
-    // handed over as a patch.
+fn a_fresh_table_passes_with_status_0_and_hands_over_nothing() {
+    // Catches: the check not run with the command line `--buildrules` names, buck2 run by the
+    // check (the lane's builds are the workflow's, under the watchdog), a fresh table synced or
+    // handed over as a patch, or the verb's line not printed.
     let d = Rig::new("ok", false, &PASSING);
-    let o = d.farm_build();
+    let o = d.farm_table();
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
-    assert_eq!(stdout(&o), format!("{FARM}\n"));
-    assert_eq!(stderr(&o), BUILD_LOG);
-    assert_eq!(calls(&d.repo.dir), BUILT);
+    assert_eq!(stdout(&o), format!("{FRESH}\n"));
+    assert_eq!(stderr(&o), "");
+    assert_eq!(calls(&d.repo.dir), Vec::<String>::new());
     assert_eq!(tool_calls(&d.repo.dir), ["check"]);
     assert!(!d.patch().exists());
     assert!(!d.summary().exists());
 }
 
-/// The stale table of `d` handed over: the verb fails before the build with the stale inputs
-/// `inputs` and the changed files `files` in its words and in the summary (after what the summary
-/// held), and the patch it wrote, applied to a clone of the stale commit, makes the table fresh
-/// and the farm build pass there.
+/// The stale table of `d` handed over: the verb fails with the stale inputs `inputs` and the
+/// changed files `files` in its words and in the summary (after what the summary held), and the
+/// patch it wrote, applied to a clone of the stale commit, makes the table fresh and the check
+/// pass there.
 fn hands_over(d: &Rig, inputs: &[String], files: &[&str]) {
     std::fs::create_dir_all(d.out.path()).expect("out");
     std::fs::write(d.summary(), "earlier\n").expect("summary");
-    let o = d.farm_build();
+    let o = d.farm_table();
     assert_eq!(o.status.code(), Some(1));
     assert_eq!(stdout(&o), "");
     let files: Vec<String> = files.iter().map(|f| (*f).to_owned()).collect();
@@ -243,7 +254,7 @@ fn hands_over(d: &Rig, inputs: &[String], files: &[&str]) {
             apply()
         )
     );
-    assert_eq!(calls(&d.repo.dir), STOPPED);
+    assert_eq!(calls(&d.repo.dir), Vec::<String>::new());
     let buck2 = d.buck2();
     assert_eq!(
         tool_calls(&d.repo.dir),
@@ -276,13 +287,10 @@ fn hands_over(d: &Rig, inputs: &[String], files: &[&str]) {
         Some(0),
         "the patch makes it fresh"
     );
-    for (file, text) in PASSING {
-        std::fs::write(tree.join(file), text).expect("an answer");
-    }
-    let o = d.farm_build_in(&tree, &clone.join("p"), &clone.join("s"));
+    let o = d.farm_table_in(&tree, &clone.join("p"), &clone.join("s"));
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
-    assert_eq!(stdout(&o), format!("{FARM}\n"));
-    assert_eq!(calls(&tree), BUILT);
+    assert_eq!(stdout(&o), format!("{FRESH}\n"));
+    assert!(!clone.join("p").exists());
 }
 
 /// The stale line of the stand-in for the file `input`, from the text `was` to the text `now`.
@@ -363,13 +371,13 @@ fn make_stale(d: &Rig) {
     d.repo.commit("the manifest changed, the table not synced");
 }
 
-/// Asserts that the run `o` of `d` failed with `words` after the log `log`, before the build,
+/// Asserts that the run `o` of `d` failed with `words` after the log `log`, running no buck2 and
 /// leaving no patch and no summary.
 fn refused(d: &Rig, o: &Output, log: &str, words: &str) {
     assert_eq!(o.status.code(), Some(1));
     assert_eq!(stdout(o), "");
     assert_eq!(stderr(o), format!("{log}xtask: {words}\n"));
-    assert_eq!(calls(&d.repo.dir), STOPPED);
+    assert_eq!(calls(&d.repo.dir), Vec::<String>::new());
     assert!(!d.patch().exists());
     assert!(!d.summary().exists());
 }
@@ -381,7 +389,7 @@ fn a_failed_sync_fails_with_its_output_and_hands_over_nothing() {
     let d = Rig::new("sync-fails", false, &PASSING);
     make_stale(&d);
     d.defect("sync-fails");
-    let o = d.farm_build();
+    let o = d.farm_table();
     refused(
         &d,
         &o,
@@ -399,7 +407,7 @@ fn a_sync_that_leaves_the_table_stale_fails_with_what_check_still_says() {
     let was = std::fs::read_to_string(d.repo.dir.join("Cargo.toml")).expect("read");
     make_stale(&d);
     d.defect("sync-writes-nothing");
-    let o = d.farm_build();
+    let o = d.farm_table();
     let line = changed("Cargo.toml", &was, &format!("{was}# a comment\n"));
     refused(
         &d,
@@ -429,7 +437,7 @@ fn a_check_that_cannot_judge_the_table_fails_with_its_words_and_runs_no_sync() {
     // stale one, and check's words hidden.
     let d = Rig::new("check-usage", false, &PASSING);
     d.defect("check-usage");
-    let o = d.farm_build();
+    let o = d.farm_table();
     refused(
         &d,
         &o,
@@ -441,59 +449,29 @@ fn a_check_that_cannot_judge_the_table_fails_with_its_words_and_runs_no_sync() {
 }
 
 #[test]
-fn a_command_line_that_cannot_be_built_named_or_run_fails_before_the_check() {
-    // Catches: a failed build of the command line read as a fresh table, an output line of
-    // another target or with no path taken for it, and a command line that cannot start taken
-    // for a passing check.
-    let mut answers = PASSING.to_vec();
-    answers.extend([
-        ("buck2-tool.status", "3"),
-        ("buck2-tool.stderr", "no cell buildrules\n"),
-    ]);
-    let d = Rig::new("tool-fails", false, &answers);
-    let o = d.farm_build();
-    refused(
-        &d,
-        &o,
-        "",
-        "`buck2 build buildrules//cli:buildrules` failed (exit status: 3): no cell buildrules",
+fn a_command_line_that_cannot_start_fails_before_the_check() {
+    // Catches: a `--buildrules` that names no program (its build in the step before failed to
+    // write it) taken for a passing check.
+    let d = Rig::new("tool-missing", false, &PASSING);
+    let o = xtask(
+        &d.repo.dir,
+        &args(
+            &d.buck2(),
+            Path::new("/nonexistent/buildrules"),
+            &d.patch(),
+            &d.summary(),
+        ),
     );
-    assert_eq!(tool_calls(&d.repo.dir), Vec::<String>::new());
-
-    for (name, stdout) in [
-        ("tool-none", ""),
-        ("tool-other", "buildrules//cli:other /x/other\n"),
-        ("tool-no-path", "buildrules//cli:buildrules \n"),
-    ] {
-        let mut answers = PASSING.to_vec();
-        answers.push(("buck2-tool.stdout", stdout));
-        let d = Rig::new(name, false, &answers);
-        let o = d.farm_build();
-        refused(
-            &d,
-            &o,
-            "",
-            &format!(
-                "`buck2 build buildrules//cli:buildrules --show-full-output` named no output of \
-                 buildrules//cli:buildrules: {stdout:?}"
-            ),
-        );
-    }
-
-    let mut answers = PASSING.to_vec();
-    answers.push((
-        "buck2-tool.stdout",
-        "buildrules//cli:buildrules /nonexistent/buildrules\n",
-    ));
-    let d = Rig::new("tool-missing", false, &answers);
-    let o = d.farm_build();
     assert_eq!(o.status.code(), Some(1));
+    assert_eq!(stdout(&o), "");
     assert!(
         stderr(&o).starts_with("xtask: cannot run \"/nonexistent/buildrules\": "),
         "{}",
         stderr(&o)
     );
-    assert_eq!(calls(&d.repo.dir), STOPPED);
+    assert_eq!(calls(&d.repo.dir), Vec::<String>::new());
+    assert!(!d.patch().exists());
+    assert!(!d.summary().exists());
 }
 
 #[test]
@@ -503,7 +481,7 @@ fn a_patch_that_git_cannot_make_fails_and_hands_over_nothing() {
     make_stale(&d);
     let o = Command::new(XTASK)
         .current_dir(&d.repo.dir)
-        .args(args(&d.buck2(), &d.patch(), &d.summary()))
+        .args(args(&d.buck2(), &d.tool(), &d.patch(), &d.summary()))
         .env("GIT_DIR", d.out.join("no-repository"))
         .output()
         .expect("run xtask");
@@ -523,7 +501,7 @@ fn a_patch_or_summary_that_cannot_be_written_fails() {
     let d = Rig::new("patch-unwritable", false, &PASSING);
     make_stale(&d);
     std::fs::write(d.out.join("patch"), "a file, not a directory").expect("block");
-    let o = d.farm_build();
+    let o = d.farm_table();
     assert_eq!(o.status.code(), Some(1));
     let patch = d.patch();
     assert_eq!(
@@ -536,7 +514,7 @@ fn a_patch_or_summary_that_cannot_be_written_fails() {
 
     let d = Rig::new("summary-unwritable", false, &PASSING);
     make_stale(&d);
-    let o = d.farm_build_in(&d.repo.dir, &d.patch(), d.out.path());
+    let o = d.farm_table_in(&d.repo.dir, &d.patch(), d.out.path());
     assert_eq!(o.status.code(), Some(1));
     assert_eq!(
         stderr(&o),
@@ -549,76 +527,23 @@ fn a_patch_or_summary_that_cannot_be_written_fails() {
 }
 
 #[test]
-fn a_build_with_actions_on_this_machine_fails_with_status_1() {
-    // Catches: a build that ran an action on the runner taken for a farm build.
-    let line = "Commands: 5 (cached: 2, remote: 1, local: 2)";
-    let log = format!("{line}\nBUILD SUCCEEDED\n");
-    let d = Rig::new(
-        "local",
-        false,
-        &[("buck2-audit.stdout", SET), ("buck2-build.stderr", &log)],
-    );
-    let o = d.farm_build();
-    assert_eq!(o.status.code(), Some(1));
-    assert_eq!(stdout(&o), "");
-    assert_eq!(
-        stderr(&o),
-        format!(
-            "{log}xtask: `{line}`: actions ran on this machine, not on the farm (local must be 0)\n"
-        )
-    );
-    assert_eq!(calls(&d.repo.dir), BUILT);
+fn a_worker_property_set_passes_with_status_0_and_one_audit() {
+    // Catches: a set key refused, the verb's line not printed, or a call of buck2 beyond its
+    // audit (a build, which belongs to the workflow's watched steps).
+    let d = Rig::new("workers-set", false, &PASSING);
+    let o = d.farm_workers();
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(stdout(&o), format!("{WORKERS_SET}\n"));
+    assert_eq!(stderr(&o), "");
+    assert_eq!(calls(&d.repo.dir), [AUDIT]);
+    assert_eq!(tool_calls(&d.repo.dir), Vec::<String>::new());
 }
 
 #[test]
-fn a_build_with_no_summary_line_fails_with_status_1() {
-    // Catches: a build whose summary is missing taken for one that ran nothing locally.
-    let d = Rig::new(
-        "no-summary",
-        false,
-        &[
-            ("buck2-audit.stdout", SET),
-            ("buck2-build.stderr", "BUILD SUCCEEDED\n"),
-        ],
-    );
-    let o = d.farm_build();
-    assert_eq!(o.status.code(), Some(1));
-    assert_eq!(
-        stderr(&o),
-        "BUILD SUCCEEDED\nxtask: the build printed no summary line (`Commands: N (cached: N, remote: N, local: N)`)\n"
-    );
-    assert_eq!(calls(&d.repo.dir), BUILT);
-}
-
-#[test]
-fn a_failed_build_fails_with_status_1_shows_its_log_and_still_stops_buck2() {
-    // Catches: a failed build read as a pass because its summary says `local: 0`, its log (the
-    // failing action's words) hidden, or the daemon left running after a failure.
-    let log = format!("Action failed: test of js-types\n{FARM}\nBUILD FAILED\n");
-    let d = Rig::new(
-        "failed",
-        false,
-        &[
-            ("buck2-audit.stdout", SET),
-            ("buck2-build.stderr", &log),
-            ("buck2-build.status", "3"),
-        ],
-    );
-    let o = d.farm_build();
-    assert_eq!(o.status.code(), Some(1));
-    assert_eq!(stdout(&o), "");
-    assert_eq!(
-        stderr(&o),
-        format!("{log}xtask: `buck2 build //:ci` failed (exit status: 3)\n")
-    );
-    assert_eq!(calls(&d.repo.dir), BUILT);
-}
-
-#[test]
-fn no_worker_property_set_fails_before_the_build_with_status_1() {
-    // Catches: a build started with no farm to run on (buck2 would then fail at analysis, or a
-    // later change could fall back to this machine): the key unset (buck2's `{}`, the stand-in's
-    // answer when it has no file), set to nothing, and set to blanks.
+fn no_worker_property_set_fails_with_status_1() {
+    // Catches: a lane let on to its builds with no farm to run on (buck2 would then fail at
+    // analysis, or a later change could fall back to this machine): the key unset (buck2's `{}`,
+    // the stand-in's answer when it has no file), set to nothing, and set to blanks.
     for (name, audit) in [
         ("unset", None),
         (
@@ -635,7 +560,7 @@ fn no_worker_property_set_fails_before_the_build_with_status_1() {
             .into_iter()
             .collect();
         let d = Rig::new(&format!("workers-{name}"), false, &answers);
-        let o = d.farm_build();
+        let o = d.farm_workers();
         assert_eq!(o.status.code(), Some(1), "{name}");
         assert_eq!(stdout(&o), "", "{name}");
         assert_eq!(
@@ -644,13 +569,12 @@ fn no_worker_property_set_fails_before_the_build_with_status_1() {
              [komira_re] linux_x86_64_properties, so buck2 has no farm to build on\n",
             "{name}"
         );
-        assert_eq!(calls(&d.repo.dir), [AUDIT, "kill"], "{name}");
-        assert_eq!(tool_calls(&d.repo.dir), Vec::<String>::new(), "{name}");
+        assert_eq!(calls(&d.repo.dir), [AUDIT], "{name}");
     }
 }
 
 #[test]
-fn a_failed_audit_fails_before_the_build_with_status_1() {
+fn a_failed_audit_fails_with_status_1() {
     // Catches: an audit that failed (no .buckconfig, a broken cell) read as a set key, though it
     // printed one.
     let d = Rig::new(
@@ -662,38 +586,45 @@ fn a_failed_audit_fails_before_the_build_with_status_1() {
             ("buck2-audit.status", "3"),
         ],
     );
-    let o = d.farm_build();
+    let o = d.farm_workers();
     assert_eq!(o.status.code(), Some(1));
+    assert_eq!(stdout(&o), "");
     assert_eq!(
         stderr(&o),
         "xtask: `buck2 audit config` failed (exit status: 3): no .buckconfig\n"
     );
-    assert_eq!(calls(&d.repo.dir), [AUDIT, "kill"]);
+    assert_eq!(calls(&d.repo.dir), [AUDIT]);
+}
+
+/// Asserts that `all`, a verb's whole command line, is refused as a usage error (status 2,
+/// naming a required flag) with each flag and its value left out in turn.
+fn every_flag_is_required(dir: &Path, all: &[String]) {
+    for flag in (1..all.len()).step_by(2) {
+        let mut without = all.to_vec();
+        without.drain(flag..flag + 2);
+        let o = xtask(dir, &without);
+        assert_eq!(o.status.code(), Some(2), "{without:?}");
+        assert!(stderr(&o).contains("required"), "{}", stderr(&o));
+    }
 }
 
 #[test]
 fn a_buck2_that_cannot_start_fails_with_status_1_and_the_flags_are_required() {
-    // Catches: a missing buck2 taken for a passing build, and a verb that runs without its
-    // target, its buck2 or any of the handoff's flags.
+    // Catches: a missing buck2 taken for a set worker property set, and either verb run without
+    // its buck2, its command line or any of the handoff's flags.
     let d = Rig::new("no-buck2", false, &[]);
-    let o = xtask(
-        &d.repo.dir,
-        &args(Path::new("/nonexistent/buck2"), &d.patch(), &d.summary()),
-    );
+    let o = xtask(&d.repo.dir, &workers_args(Path::new("/nonexistent/buck2")));
     assert_eq!(o.status.code(), Some(1));
     assert!(
         stderr(&o).starts_with("xtask: cannot run \"/nonexistent/buck2\": "),
         "{}",
         stderr(&o)
     );
-    let all = args(&d.buck2(), &d.patch(), &d.summary());
-    // Each flag and its value, left out in turn.
-    for flag in (1..all.len()).step_by(2) {
-        let mut without = all.clone();
-        without.drain(flag..flag + 2);
-        let o = xtask(&d.repo.dir, &without);
-        assert_eq!(o.status.code(), Some(2), "{without:?}");
-        assert!(stderr(&o).contains("required"), "{}", stderr(&o));
-    }
+    every_flag_is_required(&d.repo.dir, &workers_args(&d.buck2()));
+    every_flag_is_required(
+        &d.repo.dir,
+        &args(&d.buck2(), &d.tool(), &d.patch(), &d.summary()),
+    );
     assert_eq!(calls(&d.repo.dir), Vec::<String>::new());
+    assert_eq!(tool_calls(&d.repo.dir), Vec::<String>::new());
 }

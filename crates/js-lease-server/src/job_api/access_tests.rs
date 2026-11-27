@@ -99,6 +99,7 @@ fn h1() -> HostView {
         cordon_holder: None,
         load: None,
         load_seconds: Default::default(),
+        actions_oom_events: None,
     }
 }
 

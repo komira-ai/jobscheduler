@@ -46,14 +46,19 @@ pub const HOSTS: usize = 4;
 /// How many jobs a host runs at once: 3 of its 8 cores each.
 pub const PER_HOST: usize = 2;
 
-/// A server named `name` over the Postgres store at `url`, minting its ids from `ids`.
+/// A server named `name` over the Postgres store at `url`, minting its ids from `ids`. It does
+/// not listen to the other servers' notices ([`Harness::deaf_with_ids`]): each step of a roll
+/// names the one server that pulls (the placement its own submit pokes, the claim its own poll
+/// makes) and shows the other placing or claiming nothing until its own tick, round or poll,
+/// which a notice from the first would race. The notices across servers are
+/// `src/server_listen_tests.rs`'s.
 pub async fn server_minting(url: &str, name: &str, ids: Arc<dyn IdSource>) -> Harness {
     let scratch = Scratch::new(name);
     let mut args: Vec<OsString> = job_host_args(&scratch);
     scratch.write("agent-pool.toml", POOL, 0o644);
     args.push("--store".into());
     args.push(store_file(&scratch, url).into_os_string());
-    Harness::with_ids(scratch, args, ids).await
+    Harness::deaf_with_ids(scratch, args, ids).await
 }
 
 /// A server named `name` over the Postgres store at `url`, with a readiness route on a port

@@ -5,9 +5,17 @@
 //! The fake keeps the contract of [`Providers::ask`]: a call is sent (and logged) the first
 //! time it is asked, a `Pending` answer keeps it out (asking it again sends nothing), and any
 //! other answer is handed over once, after which asking it sends the call again.
+//!
+//! A test may have the providers keep the sources they took, as a real one does in memory
+//! ([`FakeProviders::keep_sources`]), and then restart them ([`FakeProviders::restart`]):
+//! a `Mount` of a source taken by no `Prepare` since is then answered as tierstore answers it.
+//!
+//! The fake does not tell the attempts of a run apart: a call is scripted, and logged, by its
+//! kind, run and index, as a provider that does not read attempts sees it. The attempt of
+//! every call sent is kept beside the log ([`FakeProviders::attempts`]).
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -22,7 +30,8 @@ use super::per_job::{job_start, listing, start};
 use super::{Harness, config_in, hook};
 use crate::support::Scratch;
 
-/// What tells one call apart for one provider: the provider, then the call's key.
+/// What tells one call apart for one provider: the provider, then the call's key without its
+/// attempt.
 type Key = (String, u8, String, u32);
 
 /// What a call is answered.
@@ -41,6 +50,11 @@ struct State {
     scripts: BTreeMap<Key, Script>,
     /// Where the agent's provider records are: a `Prepare` notes whether its run's is there.
     records: Option<PathBuf>,
+    /// The sources the providers hold, by provider, run and index, when the test has them kept
+    /// ([`FakeProviders::keep_sources`]): a `Prepare` that succeeds adds its source.
+    held: Option<BTreeSet<(String, String, u32)>>,
+    /// Each call sent, as its log line, with its attempt (a sweep: each kept run's).
+    attempts: Vec<(String, Vec<u64>)>,
 }
 
 /// The providers of a test: the names the agent was given, and what each call is answered.
@@ -54,6 +68,7 @@ pub struct FakeProviders {
 pub fn prepare(run_id: &str, index: u32, reference: &str, mode: MountMode) -> ProviderCall {
     ProviderCall::Prepare {
         run_id: run_id.to_owned(),
+        attempt: 0,
         index,
         reference: reference.to_owned(),
         mode,
@@ -64,6 +79,7 @@ pub fn prepare(run_id: &str, index: u32, reference: &str, mode: MountMode) -> Pr
 pub fn mount(run_id: &str, index: u32) -> ProviderCall {
     ProviderCall::Mount {
         run_id: run_id.to_owned(),
+        attempt: 0,
         index,
     }
 }
@@ -72,6 +88,7 @@ pub fn mount(run_id: &str, index: u32) -> ProviderCall {
 pub fn release(run_id: &str, index: u32) -> ProviderCall {
     ProviderCall::Release {
         run_id: run_id.to_owned(),
+        attempt: 0,
         index,
     }
 }
@@ -81,10 +98,21 @@ pub fn sweep() -> ProviderCall {
     ProviderCall::Sweep { keep: Vec::new() }
 }
 
-/// The key of `call` for `provider`: the call's own, so a sweep is one key whatever it keeps.
+/// The key of `call` for `provider`: the call's own without the attempt, so a sweep is one
+/// key whatever it keeps.
 fn key_of(provider: &str, call: &ProviderCall) -> Key {
-    let (kind, run, index) = call.key();
+    let (kind, run, _, index) = call.key();
     (provider.to_owned(), kind, run.to_owned(), index)
+}
+
+/// The attempts `call` names: its own, or each kept run's of a sweep.
+fn attempts_of(call: &ProviderCall) -> Vec<u64> {
+    match call {
+        ProviderCall::Prepare { attempt, .. }
+        | ProviderCall::Mount { attempt, .. }
+        | ProviderCall::Release { attempt, .. } => vec![*attempt],
+        ProviderCall::Sweep { keep } => keep.iter().map(|(_, attempt)| *attempt).collect(),
+    }
 }
 
 /// What a call is answered when nothing is scripted: it succeeds, but for `Mount`, which has
@@ -103,6 +131,8 @@ impl FakeProviders {
             names: names.iter().map(|name| (*name).to_owned()).collect(),
             scripts: BTreeMap::new(),
             records: None,
+            held: None,
+            attempts: Vec::new(),
         };
         Self {
             state: Rc::new(RefCell::new(state)),
@@ -114,6 +144,21 @@ impl FakeProviders {
     /// in `dir` (the agent's `providers` directory) at that moment.
     pub fn watch_records(&self, dir: PathBuf) {
         self.state.borrow_mut().records = Some(dir);
+    }
+
+    /// The providers keep the sources they take from now on, as a provider does in memory: a
+    /// `Prepare` that succeeds holds its source, and a `Mount` of a source not held is answered
+    /// [`not_prepared`], whatever is scripted for it, which stays for a later ask.
+    pub fn keep_sources(&self) {
+        self.state.borrow_mut().held = Some(BTreeSet::new());
+    }
+
+    /// The providers restart, as a release of the provider restarts it: every source they
+    /// held is lost (with [`FakeProviders::keep_sources`]).
+    pub fn restart(&self) {
+        if let Some(held) = self.state.borrow_mut().held.as_mut() {
+            held.clear();
+        }
     }
 
     /// The next ask of `call` of `provider` is answered `answer` (after those scripted
@@ -149,6 +194,17 @@ impl FakeProviders {
             .collect()
     }
 
+    /// Each call sent whose log line begins `provider <kind> `, in order, with the attempts it
+    /// named: its own, or a sweep's of each kept run.
+    pub fn attempts(&self, kind: &str) -> Vec<(String, Vec<u64>)> {
+        let prefix = format!("provider {kind} ");
+        let state = self.state.borrow();
+        let sent = state.attempts.iter();
+        sent.filter(|(line, _)| line.starts_with(&prefix))
+            .cloned()
+            .collect()
+    }
+
     /// What the log says of a call that was sent.
     fn line(&self, provider: &str, call: &ProviderCall) -> String {
         match call {
@@ -157,6 +213,7 @@ impl FakeProviders {
                 index,
                 reference,
                 mode,
+                ..
             } => {
                 let note = match &self.state.borrow().records {
                     Some(dir) => match dir.join(format!("{run_id}.json")).is_file() {
@@ -167,13 +224,16 @@ impl FakeProviders {
                 };
                 format!("provider prepare {provider} {run_id}#{index} {reference} {mode:?}{note}")
             }
-            ProviderCall::Mount { run_id, index } => {
+            ProviderCall::Mount { run_id, index, .. } => {
                 format!("provider mount {provider} {run_id}#{index}")
             }
-            ProviderCall::Release { run_id, index } => {
+            ProviderCall::Release { run_id, index, .. } => {
                 format!("provider release {provider} {run_id}#{index}")
             }
-            ProviderCall::Sweep { keep } => format!("provider sweep {provider} keep={keep:?}"),
+            ProviderCall::Sweep { keep } => {
+                let runs: Vec<&str> = keep.iter().map(|(run_id, _)| run_id.as_str()).collect();
+                format!("provider sweep {provider} keep={runs:?}")
+            }
         }
     }
 }
@@ -199,18 +259,41 @@ impl Providers for FakeProviders {
             .is_some_and(|script| script.out);
         if sent {
             let line = self.line(provider, call);
-            self.log.borrow_mut().push(line);
+            self.log.borrow_mut().push(line.clone());
+            let attempts = attempts_of(call);
+            self.state.borrow_mut().attempts.push((line, attempts));
         }
         let mut state = self.state.borrow_mut();
+        let (_, _, run, index) = key_of(provider, call);
+        let source = (provider.to_owned(), run, index);
+        let lost = matches!(call, ProviderCall::Mount { .. })
+            && state
+                .held
+                .as_ref()
+                .is_some_and(|held| !held.contains(&source));
         let script = state.scripts.entry(key_of(provider, call)).or_default();
-        let answer = script
-            .then
-            .pop_front()
-            .or_else(|| script.always.clone())
-            .unwrap_or_else(|| default_answer(call));
+        let answer = match lost {
+            true => not_prepared(),
+            false => script
+                .then
+                .pop_front()
+                .or_else(|| script.always.clone())
+                .unwrap_or_else(|| default_answer(call)),
+        };
         script.out = answer == ProviderAnswer::Pending;
+        let prepared = matches!(call, ProviderCall::Prepare { .. })
+            && matches!(answer, ProviderAnswer::Done(_));
+        if let Some(held) = state.held.as_mut().filter(|_| prepared) {
+            held.insert(source);
+        }
         answer
     }
+}
+
+/// What tierstore answers a `Mount` of a source it does not hold (never prepared, or lost
+/// when it restarted): `UNAVAILABLE`, which the agent's client hands over as unavailable.
+pub fn not_prepared() -> ProviderAnswer {
+    ProviderAnswer::Unavailable("the source is not prepared here".to_owned())
 }
 
 /// The image of the job starts of these tests.

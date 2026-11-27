@@ -28,6 +28,7 @@ use crate::hosts::listing;
 use crate::job_api;
 use crate::job_sizes;
 use crate::listener::{Slots, serve, serve_both};
+use crate::listening::{self, Listening};
 use crate::metrics::{self, Meter, Recorder};
 use crate::pool::{Pool, Setup};
 use crate::ready::{self, Gate, Phase};
@@ -40,6 +41,10 @@ use crate::tls;
 use crate::usage::ProfileCurves;
 use crate::usage_hub::UsageCounters;
 use crate::util::{blocking, or_pending};
+
+#[path = "server_tasks.rs"]
+mod tasks;
+use tasks::{Checking, Polling, Ticking};
 
 /// A running server. Dropping it stops serving and ticking; [`Running::shutdown`] stops
 /// it the orderly way (requests in flight finish, one last tick).
@@ -60,6 +65,8 @@ pub struct Running {
     /// The placement poller ([`crate::poller`]), which each submit and heartbeat pokes.
     polling: Polling,
     _checking: Checking,
+    /// What other servers of a shared store tell this one ([`crate::listening`]).
+    _listening: Option<Listening>,
     scaler: Option<Scaler>,
     tls: Option<tls::Tls>,
     /// How long [`Running::hold`] keeps serving (`--drain-hold`).
@@ -287,6 +294,7 @@ async fn start_held<T: Ticker, C: Ticker, R: Ticker>(
     // The ended jobs are read and taught while the server serves; nothing waits for them.
     let sizes = job_sizes::spawn(&shared, &gate, hold);
     shared.agents().set_duty_period(duty_period);
+    let heard = listening::start(shared.server_store(), shared.agents());
     // The name this server claims dispatch messages by: where it serves agents, and its pid.
     let agents_at = agent_listener.as_ref().map_or(addr, |(_, agents)| *agents);
     let claimer = format!("{agents_at}/{}", std::process::id());
@@ -391,6 +399,7 @@ async fn start_held<T: Ticker, C: Ticker, R: Ticker>(
         ticking,
         polling,
         _checking: checking,
+        _listening: heard,
         scaler,
         tls,
         drain_hold: limits.drain_hold,
@@ -647,34 +656,6 @@ pub(crate) fn open(prepared: Prepared, clock: &SharedClock) -> Result<Opened, St
         checker,
         cached,
     })
-}
-
-/// The tick task or the placement poller, ended when it is dropped: a server that is dropped
-/// must not go on ticking or placing.
-struct Ticking(JoinHandle<()>);
-
-/// The placement poller's task, with the signal that stops it between two passes: an orderly
-/// stop ([`Running::shutdown`]) waits for a pass under way to end, so nothing the pass holds
-/// outlives the stop. Dropped, it is aborted.
-struct Polling {
-    /// Sent to stop the poller once its pass under way, if any, has ended.
-    stop: oneshot::Sender<()>,
-    task: Ticking,
-}
-
-impl Drop for Ticking {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
-/// The check loop of the elastic pool, ended when it is dropped.
-struct Checking(Option<JoinHandle<()>>);
-
-impl Drop for Checking {
-    fn drop(&mut self) {
-        self.0.iter().for_each(JoinHandle::abort);
-    }
 }
 
 /// Marks the tick loop as stopped when it is dropped, however it ends: the caller
@@ -971,3 +952,7 @@ mod shutdown_tests;
 #[cfg(test)]
 #[path = "server_sizes_tests.rs"]
 mod sizes_tests;
+
+#[cfg(test)]
+#[path = "server_listen_tests.rs"]
+mod listen_tests;
