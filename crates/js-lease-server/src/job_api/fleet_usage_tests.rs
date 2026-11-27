@@ -731,6 +731,55 @@ async fn usage_tells_the_cpu_series_of_a_job_record() {
     assert_eq!(page.records[2].cpu_series, None);
 }
 
+/// Asserts that `GetUsage` tells the memory series a job's record holds, field for field (its
+/// granularity, its points in MiB, past 16 bits and at the top of 32, its run length and its
+/// partial flag), beside the record's CPU series and its peak memory, each as it is; and tells
+/// none for a job record without one and for a lease record, which has none. It catches a
+/// series lost between the job store's record and the answer, a point cut to 16 bits, a field
+/// read into another, the CPU series told in its place, and a series told for a record that has
+/// none.
+#[tokio::test]
+async fn usage_tells_the_memory_series_of_a_job_record() {
+    let name = "usage_tells_the_memory_series_of_a_job_record";
+    let s = server("usage-memory-series");
+    let with = EndedRow {
+        memory_series: js_types::MemorySeries::new(16, vec![0, 1, 70_000, u32::MAX], 900, true),
+        cpu_series: js_types::CpuSeries::new(1, vec![16], 900, false),
+        ..ended("job-with", 1000)
+    };
+    job_ended(&s, &with);
+    job_ended(&s, &ended("job-without", 2000));
+    s.sink.allocation_ended(&ended("1-9", 3000)).unwrap();
+    let page = usage_of(&s.api, GetUsageRequest::default()).await.unwrap();
+    assert_eq!(
+        job_ids(&page),
+        ["job-with", "job-without", "1-9"],
+        "{name}: ids"
+    );
+    assert_eq!(
+        page.records[0].memory_series,
+        Some(wire::MemorySeries {
+            granularity_secs: 16,
+            points: vec![0, 1, 70_000, u32::MAX],
+            run_usec: 900,
+            partial: true,
+        }),
+        "{name}: with"
+    );
+    assert_eq!(
+        page.records[0].cpu_series,
+        Some(wire::CpuSeries {
+            granularity_secs: 1,
+            points: vec![16],
+            run_usec: 900,
+            partial: false,
+        }),
+        "{name}: the cpu series beside it"
+    );
+    assert_eq!(page.records[1].memory_series, None, "{name}: without");
+    assert_eq!(page.records[2].memory_series, None, "{name}: lease");
+}
+
 /// Asserts that `GetUsage` tells the attempt of a job record that is not its first (2 and a
 /// large one, as stored), tells none for a job record of a first attempt, and tells none for a
 /// lease record, which has none. It catches an attempt dropped between the job store's record
