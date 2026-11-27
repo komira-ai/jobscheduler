@@ -142,12 +142,23 @@ impl Running {
     }
 }
 
+/// The source `run`, index 0, of the agent `host-1`. Built field by field, so that it reads the
+/// same whether or not the provider protocol has a field the fake does not read (a source's
+/// attempt, which a provider may leave unread).
+#[allow(clippy::field_reassign_with_default)] // The fields a test sets, whatever the message has.
 fn source(run: &str) -> Option<Source> {
-    Some(Source {
-        agent: "host-1".to_owned(),
-        run: run.to_owned(),
-        index: 0,
-    })
+    let mut source = Source::default();
+    source.agent = "host-1".to_owned();
+    source.run = run.to_owned();
+    Some(source)
+}
+
+/// A Sweep of every source of `host-1`, built as [`source`] is.
+#[allow(clippy::field_reassign_with_default)] // The fields a test sets, whatever the message has.
+fn sweep_all() -> SweepRequest {
+    let mut sweep = SweepRequest::default();
+    sweep.agent = "host-1".to_owned();
+    sweep
 }
 
 fn prepare(run: &str, reference: &str) -> PrepareRequest {
@@ -214,13 +225,7 @@ async fn the_provider_answers_on_its_socket() {
         })
         .await
         .expect("released");
-    let swept = client
-        .sweep(SweepRequest {
-            agent: "host-1".to_owned(),
-            keep: Vec::new(),
-        })
-        .await
-        .expect("swept");
+    let swept = client.sweep(sweep_all()).await.expect("swept");
     assert_eq!(swept.into_inner().released, 1);
     let calls: Vec<String> = fake
         .tell("calls")
@@ -281,13 +286,7 @@ async fn a_stall_holds_mount_and_unavailable_refuses_every_call() {
             })
             .await
             .map(|_| ()),
-        client
-            .sweep(SweepRequest {
-                agent: "host-1".to_owned(),
-                keep: Vec::new(),
-            })
-            .await
-            .map(|_| ()),
+        client.sweep(sweep_all()).await.map(|_| ()),
     ];
     for answer in down {
         assert_eq!(answer.expect_err("unavailable").code(), Code::Unavailable);
