@@ -63,6 +63,8 @@ async fn a_start_is_resent_until_listed() {
     for _ in 0..3 {
         let reply = rig.beat(&agent).await.unwrap();
         assert_eq!(starts(&reply), std::slice::from_ref(&expected));
+        // A start is no stop, whatever reason a stop would give.
+        assert!(stop_reasons(&reply).is_empty());
         assert_eq!(rig.states(&id), (JobState::Placed, AllocationStep::Booked));
         last = Some(reply);
     }
