@@ -190,7 +190,7 @@ impl Lifecycle {
         events: &mut Vec<Event>,
     ) {
         let run_id = &spec.run_id;
-        let mut job = match started {
+        let job = match started {
             Ok(id) => {
                 self.mark(run_id, "created");
                 let timeline = self.take_timeline(run_id, &id);

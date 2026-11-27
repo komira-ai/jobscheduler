@@ -169,7 +169,21 @@ fn a_job_start_without_log_sink_encodes_as_before() {
     assert_eq!(serde_json::to_value(&beat).unwrap(), file(HEARTBEAT));
     let reply: HeartbeatReply = serde_json::from_str(REPLY).unwrap();
     assert_eq!(reply.log_grant, None);
-    assert_eq!(serde_json::to_value(&reply).unwrap(), file(REPLY));
+    // That release's reply carries the run commands and an `UNKNOWN_LEASE` verdict, which
+    // this release reads as unknown: everything else encodes as the file holds it.
+    let mut expected = file(REPLY);
+    for command in expected["commands"].as_array_mut().unwrap() {
+        if matches!(command["type"].as_str(), Some("start" | "stop" | "cancel")) {
+            *command = json!({"type": "unknown"});
+        }
+    }
+    for ack in expected["result_acks"].as_array_mut().unwrap() {
+        if ack["ack"] == "UNKNOWN_LEASE" {
+            ack["ack"] = json!("UNKNOWN");
+        }
+    }
+    assert_ne!(expected, file(REPLY));
+    assert_eq!(serde_json::to_value(&reply).unwrap(), expected);
 }
 
 /// Asserts the exact JSON of a start with a sink, that it decodes to the same start (inside

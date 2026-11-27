@@ -241,9 +241,12 @@ fn the_retired_list_is_written_with_the_allocations_and_read_back() {
         ] })
     );
     h.restart().unwrap();
-    for id in ["r1", "j1", "r9"] {
+    // Each start names the fence it was retired with: `j1` its allocation, `r9` any.
+    for (id, allocation) in [("r1", "lease-r1"), ("j1", "alloc-j1"), ("r9", "lease-r9")] {
+        let mut spec = job(id);
+        spec.lease_id = allocation.to_owned();
         assert_eq!(
-            names(&h.start(job(id))),
+            names(&h.start(spec)),
             [format!("skipped {id} FenceRetired")]
         );
     }

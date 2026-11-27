@@ -350,8 +350,18 @@ fn the_v0_1_208_structs_read_the_v0_1_208_reply() {
     );
     assert!(matches!(&old.commands[4], previous::Command::JobStop { job_id } if job_id == "job-1"));
     assert_eq!(old.commands.len(), 5);
-    assert_eq!(old.result_acks[0].ack, previous::Ack::Accepted);
-    assert_eq!(old.result_acks[1].ack, previous::Ack::UnknownLease);
+    let acks: Vec<(&str, previous::Ack)> = old
+        .result_acks
+        .iter()
+        .map(|ack| (ack.run_id.as_str(), ack.ack))
+        .collect();
+    assert_eq!(
+        acks,
+        [
+            ("run-2", previous::Ack::Accepted),
+            ("run-3", previous::Ack::UnknownLease)
+        ]
+    );
     assert_eq!(old.job_acks[0].ack, previous::Ack::Accepted);
 }
 

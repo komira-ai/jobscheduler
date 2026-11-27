@@ -529,7 +529,12 @@ fn the_result_of_a_blocked_run_holds_the_drain_until_it_is_acknowledged() {
     );
     assert_eq!(sent[1].1["jobs"][0]["result"]["job_id"], "r1");
     assert_eq!(sent[2].1["jobs"][0]["result"]["job_id"], "r1");
-    assert!(sent[3].1.get("jobs").is_none(), "{}", sent[3].1);
+    assert_eq!(sent[3].1["jobs"][0]["job_id"], "r1");
+    assert!(
+        sent[3].1["jobs"][0].get("result").is_none(),
+        "{}",
+        sent[3].1
+    );
     assert!(
         log.contains("draining: only the runs whose checks found the taint are left"),
         "{log}"
