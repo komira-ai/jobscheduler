@@ -45,7 +45,7 @@ Columns:
 | cpu-over-time.md | 24 | 9 | 6 | 6 | komira-ai/jobscheduler#1143, komira-ai/jobscheduler#1144 |
 | live-logs.md | 11 | 5 | 0 | 4 | - |
 | mac-account-per-job.md | 17 | 6 | 6 | 1 | komira-ai/jobscheduler#1163 |
-| mac-one-program.md | 45 | 5 | 6 | 21 | komira-ai/jobscheduler#1160, komira-ai/jobscheduler#1161, komira-ai/jobscheduler#1162, komira-ai/jobscheduler#1163, komira-ai/jobscheduler#1164, komira-ai/jobscheduler#1165, komira-ai/jobscheduler#1166, komira-ai/jobscheduler#1193 |
+| mac-one-program.md | 45 | 6 | 6 | 20 | komira-ai/jobscheduler#1160, komira-ai/jobscheduler#1161, komira-ai/jobscheduler#1162, komira-ai/jobscheduler#1163, komira-ai/jobscheduler#1164, komira-ai/jobscheduler#1165, komira-ai/jobscheduler#1166, komira-ai/jobscheduler#1193 |
 | kbf-on-js-agent.md | 51 | 16 | 14 | 10 | - |
 | extraction-steps.md | 32 | 10 | 12 | 0 | - |
 | extraction-steps-d.md | 49 | 17 | 11 | 5 | komira-ai/jobscheduler#1150, komira-ai/jobscheduler#1167, komira-ai/jobscheduler#1168, komira-ai/jobscheduler#1169, komira-ai/jobscheduler#1170, komira-ai/jobscheduler#1172, komira-ai/jobscheduler#1173, komira-ai/jobscheduler#1174, komira-ai/jobscheduler#1175 |
@@ -579,7 +579,7 @@ As read: Status: accepted 2026-11-22; header says "apart from the accounts of se
 | 4.2 Not decided | GUI-session path (launchctl asuser, disclaim::exec) stays disclaimed; not measured. | decision, no code | - |
 | 4.2 Not measured | What macOS does with the responsible process when the agent that started a supervisor exits. | decision, no code | - |
 | 4.3 / 7 step 1 | Root probe of launchd in the system domain, with result recorded in the document. | yes: Status header says the probe has held in the system domain. Section 4.3 body still reads 'Not proven yet' and records no result. | komira-ai/jobscheduler#997 |
-| 7 step 1 | Add a probe to js-mac-probe that runs on the beta macOS runner: a process group under a launchd job survives bootout with parent pid 1. | no | komira-ai/jobscheduler#1166 (new) |
+| 7 step 1 | Add a probe to js-mac-probe that runs on the beta macOS runner: a process group under a launchd job survives bootout with parent pid 1. | yes: `crates/js-mac-probe/src/macos/launchd.rs`, `crates/js-mac-probe/src/launchd.rs`; run by `js-mac-probe report` in `.github/workflows/macos-probe.yml` | komira-ai/jobscheduler#1166 |
 | 5 / 7 step 5 | Cutover with one launchd job: write handover file, boot out js-agent, start staged agent; rollback same three steps swapped; agent applies pf anchor itself. | no | komira-ai/jobscheduler#1162 (new) |
 | 5 | The switch release's package drops js-agent.session.plist and js-agent.pf-pool.plist; cutover boots both out and removes their plists; rollback to a two-daemon release bootstraps them back. | no | komira-ai/jobscheduler#1162 (new) |
 | 5 / 7 step 6 | hands_over gains a launchd-plus-native case gated by a native-handover word on both agents' stops: line; steps_handover.rs launchd cases. | no | komira-ai/jobscheduler#1161 (new) |
