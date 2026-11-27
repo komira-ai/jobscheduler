@@ -142,6 +142,7 @@ fn a_condemned_host_in_a_block_is_still_released() {
     rig.pool().held = Some(vec![in_block(&plan, HostStatus::Active, HOUR)]);
     let actions = rig.tick(at(2 * SECOND));
     assert_eq!(kinds(&actions), ["Save", "Release"]);
+    assert_eq!(rig.phase(0), Phase::Releasing);
     assert!(rig.record(0).condemned);
 }
 

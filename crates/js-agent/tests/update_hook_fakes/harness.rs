@@ -716,10 +716,6 @@ impl StateView for FaultedState<'_> {
         self.root.owed()
     }
 
-    fn has_credential(&self) -> bool {
-        self.root.has_credential()
-    }
-
     fn request_handover(&self) -> Result<(), PortError> {
         self.root.request_handover()
     }

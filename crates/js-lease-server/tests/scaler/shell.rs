@@ -78,19 +78,6 @@ async fn records_that_cannot_be_written_stop_the_tick() {
     assert_eq!(rig.scaler.state().records.instances.len(), 1);
 }
 
-/// A rig whose one machine, `js-booting`, was launched at the start of the clock and has
-/// never said hello, with the clock moved past `boot_timeout` (15 minutes) and its host
-/// missing from complete views for the boot hold (5 minutes), counted from a first tick
-/// that does nothing: the next tick may give up on the machine.
-async fn timed_out() -> crate::fakes::Rig {
-    let rig = rig(records(vec![record("js-booting", Phase::Booting)]), live());
-    rig.advance(mins(16));
-    rig.scaler.tick().await;
-    assert!(rig.log().is_empty(), "{:?}", rig.log());
-    rig.advance(mins(5));
-    rig
-}
-
 /// Asserts the fix for a release that was under way at a restart. The records name a
 /// machine being released, one registered and one gone; before any tick, and so before the
 /// server admits a hello, the machine being released is marked ending in the registry and

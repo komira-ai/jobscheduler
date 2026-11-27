@@ -143,6 +143,7 @@ fn a_mismatch_releases_cools_down_and_counts_toward_the_brake() {
         panic!("the first action is the save");
     };
     assert_eq!(saved.instances[0].phase, Phase::Releasing);
+    assert_eq!(rig.phase(0), Phase::Releasing);
     assert!(rig.record(0).condemned);
     assert!(rig.record(0).registered);
 

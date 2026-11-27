@@ -30,8 +30,7 @@ use std::path::Path;
 use js_state::{Cond, Store, StoreError, Txn};
 use tracing::info;
 
-use crate::agent_state;
-use crate::agent_state::Skew;
+use crate::agent_state::{self, Skew};
 use crate::agents::state_path;
 use crate::clock::SharedClock;
 use crate::error::StartupError;
