@@ -36,8 +36,8 @@
 //!   bound does not outlast ([`Worker::check_grace`]).
 //! - **The runtime is made on the worker thread**, by the [`Machine`] of the plan, so it
 //!   needs no `Send` bound. The lifecycle is built (and the containers the previous
-//!   process left are adopted) before [`Worker::start`] returns, so the first hello can
-//!   list them.
+//!   process left are adopted) before [`Worker::start`] returns, so the first heartbeat lists
+//!   the jobs taken over.
 //! - **The worker samples the usage** of the node, once per heartbeat interval (no lease is
 //!   sampled, because no run is held, so the load carries no lease minutes),
 //!   when `--actions-cgroup` is given on Linux, and always on a Mac (the host's own counters):
@@ -50,8 +50,8 @@
 //!   restore order without waiting and reads the last answer the worker published, which
 //!   is tagged with the lease it is about. An answer for another lease is never handed
 //!   back; the worker drops its answers when its lifecycle follows a different lease. The
-//!   hook runs here, once for each grant (and again after an agent restart that holds no run
-//!   of the lease, which prepares it afresh; a lease taken over with a run held runs none).
+//!   hook runs here, once for each grant (and again after an agent restart that holds no job
+//!   of the lease, which prepares it afresh; a lease taken over with a job held runs none).
 //!   Because the hook runs on the worker's thread it holds the worker for as long as it
 //!   runs, up to its bound (twice `prepare_timeout`): no reply is applied meanwhile, so
 //!   starts, stops and acknowledgements wait in the queue, and replies beyond the queue are

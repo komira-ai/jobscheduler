@@ -201,9 +201,11 @@ impl Lifecycle {
         self.apply_reply(reply, received, false)
     }
 
-    /// Starts `spec`, the start that is not on the wire: it is what the agent's features
-    /// that only a [`JobSpec`] carries reach (the legacy native body and bundle, the legacy
-    /// mount roots, labels and pids), each until it is removed. It is started exactly as a job
+    /// Starts `spec`, the start that is not on the wire. Nothing in the agent calls it: no
+    /// server sends a start of a [`JobSpec`], and a job start comes through [`Lifecycle::apply`].
+    /// It is the one way the features that only a [`JobSpec`] carries (the legacy native body
+    /// and bundle, the legacy mount roots, labels and pids) are reached, by their tests, until
+    /// they are deleted (komira-ai/jobscheduler#1247). It is started exactly as a job
     /// start is: keyed by job (its `run_id` is the job id and its `lease_id` the allocation
     /// id), listed in [`Lifecycle::held_jobs`] with its result inside, acknowledged by
     /// `job_acks`, stopped by a `JobStop`, and fenced by its job id with its allocation id.
@@ -314,11 +316,12 @@ impl Lifecycle {
         events
     }
 
-    /// Asks the runtime again for the control group of each run that is running, was
-    /// started by this process and has none yet; the usage of a lease with no control group
-    /// is not sampled, and a runtime that could not say once (a container it had just
-    /// started) may say later. Returns one line for each run that is still without, the
-    /// first time only. Adopted runs are left alone: they are never sampled.
+    /// Asks the runtime again for the control group of each job that is running, was
+    /// started by this process and has none yet: a runtime that could not say once (a
+    /// container it had just started) may say later. Returns one line for each job that is
+    /// still without, the first time only. Adopted jobs are left alone. The group is what
+    /// the post-job checks read; the per-lease usage sampler it once fed has no lease to
+    /// sample, since no run is held (komira-ai/jobscheduler#1247 deletes it).
     pub fn find_cgroups(&mut self) -> Vec<String> {
         let mut lines = Vec::new();
         for job in &mut self.jobs {

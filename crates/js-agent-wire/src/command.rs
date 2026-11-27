@@ -300,9 +300,9 @@ impl JobSpec {
     /// Checks that the image is pinned by a `sha256:` digest, after [`JobSpec::validate`]
     /// has passed. A tag-only image is refused with [`refusal::IMAGE_DIGEST_REQUIRED`]
     /// naming `image`, and a tag-only bundle with [`refusal::BUNDLE_DIGEST_REQUIRED`]
-    /// naming `bundle`; `name:tag@sha256:...` passes. The server calls it with `validate`
-    /// before it queues a start and the agent before it acts on one, so no host pulls an
-    /// image whose content can move.
+    /// naming `bundle`; `name:tag@sha256:...` passes. No command carries a [`JobSpec`]: a job
+    /// start is checked by [`JobStartSpec::require_pinned`], which holds the same rule for
+    /// its image.
     pub fn require_pinned(&self) -> Result<(), ValidationError> {
         // The bundle first: a native job returns early below and must not skip it.
         if let Some(bundle) = &self.bundle {
@@ -358,8 +358,8 @@ impl JobSpec {
     }
 
     /// Checks the start contract and every bound: ids, image, arguments, limits, GPU
-    /// indices, mounts, files, labels and declared ports. The server calls it before it queues
-    /// a start and the agent before it acts on one.
+    /// indices, mounts, files, labels and declared ports. No command carries a [`JobSpec`]: a job
+    /// start is checked by [`JobStartSpec::validate`].
     pub fn validate(&self) -> Result<(), ValidationError> {
         let at = At::new("job", refusal::INVALID_JOB);
         check::ident(at.field("run_id"), &self.run_id)?;

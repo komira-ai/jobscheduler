@@ -20,8 +20,9 @@
 //!   limit counts from the moment the container is made, so a start delayed in delivery is
 //!   neither shortened nor stretched. A job is listed in the heartbeat's `jobs`, with its
 //!   result inside until a `job_acks` entry of a verdict the agent knows names it.
-//!   [`Lifecycle::start_spec`] is the one start that is not on the wire: it starts a
-//!   `JobSpec` as a job start is started, for the features only a `JobSpec` carries. A
+//!   [`Lifecycle::start_spec`] is the one start that is not on the wire and that nothing in
+//!   the agent calls: it starts a `JobSpec` as a job start is started, so the tests of the
+//!   features only a `JobSpec` carries reach them until they are deleted. A
 //!   container the agent made is labelled ([`label::KEYING`]) `job`, and a restart adopts only
 //!   a container so labelled. The job's
 //!   environment is delivered: it goes to the runtime in [`RunSpec::env`], and a container
