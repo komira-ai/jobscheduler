@@ -16,7 +16,6 @@ publish = false
 [workspace.dependencies]
 async-trait = "0.1.92"
 axum = { version = "0.8.9", default-features = false }
-# Grant verification and the lease-user key encodings (js-mac-session).
 base64 = "0.23.1"
 # macOS only (js-vmm): Virtualization.framework and the block and dispatch types its
 # completion handlers and queues use.
@@ -26,8 +25,6 @@ bytes = "1.12.1"
 # Allocation limit for the decode-memory tests and fuzz targets (js-agent-wire).
 cap = "0.1.2"
 clap = { version = "4.6.7", features = ["derive"] }
-# macOS only (js-mac-session): CFData for the caller's audit token.
-core-foundation = "0.10.1"
 dispatch2 = { version = "0.3.1", default-features = false, features = ["std", "objc2"] }
 flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
 # The concurrent uploads and the request streams of xtask's `mac-farm` (a REAPI client), and the
@@ -62,10 +59,10 @@ lzma-rs = "0.3.0"
 # js-contain: `unshare(CLONE_FILES)` as a safe call, for the thread that writes an installed
 # program (its `sched` feature). rustix has the call only as `unshare_unsafe`.
 nix = { version = "0.31.3", default-features = false }
-# macOS only (js-vmm, js-mac-session): the Objective-C runtime and the Foundation binding.
+# macOS only (js-vmm, js-agent): the Objective-C runtime and the Foundation binding.
 objc2 = "0.6.5"
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std"] }
-# macOS only (js-mac-session): OpenDirectory, for the per-lease users.
+# macOS only (js-agent): OpenDirectory, for the accounts of native jobs.
 objc2-open-directory = { version = "0.3.2", default-features = false, features = ["std"] }
 # macOS only (js-vmm): the Virtualization bindings.
 objc2-virtualization = { version = "0.3.2", features = ["block2", "dispatch2", "bitflags"] }
@@ -122,8 +119,6 @@ rustls = { version = "0.23.45", default-features = false, features = ["ring", "s
 rustls-native-certs = "0.8.4"
 # The YAML parser the workflow lint of the apt jobs (crates/xtask/tests/apt_workflow) reads each workflow with.
 saphyr-parser = "0.1.0"
-# macOS only (js-mac-session): the caller's code signature against a pinned requirement.
-security-framework = { version = "3.7.0", default-features = false }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"

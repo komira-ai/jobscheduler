@@ -208,6 +208,7 @@ fn fake_step(setup: &Setup, invocation: &Invocation, params: &Params) -> Done {
         // A systemd host: the host setup of a Mac is refused before it looks at anything.
         look: Machine::system().look,
         fstab_leftover: Machine::system().fstab_leftover,
+        retired_helper_plist: Machine::system().retired_helper_plist,
     };
     let done = match step_now {
         Step::Prepare => step::prepare(&env, params),

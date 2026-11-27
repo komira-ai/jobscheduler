@@ -13,7 +13,7 @@
 //! - [`agent_flags`]: the anchor the macOS agent's flags file names, which `install
 //!   --flags-file` loads.
 //! - [`launchd`]: the property list of the LaunchDaemon that keeps the anchor loaded.
-//! - [`daemon`]: the property lists of the js-agent package's three LaunchDaemons.
+//! - [`daemon`]: the property lists of the js-agent package's two LaunchDaemons.
 //! - [`probe()`]: one connect and its outcome, for the operator and the root test.
 //! - [`cli`]: the verbs of the `js-mac-provision` program.
 //!

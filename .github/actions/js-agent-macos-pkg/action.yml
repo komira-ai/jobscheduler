@@ -4,11 +4,10 @@
 # productbuild, reads it back with the xtask `pkg check-macos` verb and sums it. The package is
 # `dist/js-agent-<version>-macos-arm64.pkg` with `dist/SHA256SUMS`, in the workspace.
 #
-# With the input `programs` (a directory holding the three programs, already signed) it builds
+# With the input `programs` (a directory holding the two programs, already signed) it builds
 # nothing: it takes the programs from there, and checks each staged program with the xtask
 # `release check-code-signature` verb before the package is built, so a program that is not
-# signed as the release signs it never goes into the package. The cdhash the helper's plist
-# names is then the cdhash of the signed `js-agent`.
+# signed as the release signs it never goes into the package.
 #
 # js-agent-macos-pkg.yml calls it three times, in three jobs: `build` for the release's version
 # (an unsigned package, which the first-install test installs), `build-update` for the next patch
@@ -28,7 +27,7 @@ inputs:
     description: The package version, MAJOR.MINOR.PATCH
     required: true
   programs:
-    description: A directory with the signed js-agent, js-mac-session and js-mac-provision to package instead of building them; empty builds them
+    description: A directory with the signed js-agent and js-mac-provision to package instead of building them; empty builds them
     required: false
     default: ""
 
@@ -46,7 +45,6 @@ runs:
       run: |
         set -euo pipefail
         cargo build --locked --release -p js-agent --bin js-agent
-        cargo build --locked --release -p js-mac-session --bin js-mac-session
         cargo build --locked --release -p js-mac-provision --bin js-mac-provision
     - name: Take the signed programs
       if: ${{ inputs.programs != '' }}
@@ -56,7 +54,7 @@ runs:
       run: |
         set -euo pipefail
         mkdir -p target/release
-        for bin in js-agent js-mac-session js-mac-provision; do
+        for bin in js-agent js-mac-provision; do
           cp "$PROGRAMS/$bin" "target/release/$bin"
           chmod 755 "target/release/$bin"
         done
@@ -66,7 +64,7 @@ runs:
         VERSION: ${{ inputs.version }}
       run: |
         set -euo pipefail
-        for bin in js-agent js-mac-session js-mac-provision; do
+        for bin in js-agent js-mac-provision; do
           printed="$(target/release/$bin --version | sed -n 1p)"
           echo "$printed"
           case "$printed" in
@@ -84,29 +82,16 @@ runs:
       run: |
         set -euo pipefail
         mkdir inputs
-        # The root helper admits the agent of this package alone: the cdhash of its binary, which
-        # the linker's ad hoc signature gives and a copy keeps.
-        cdhash="$(/usr/bin/codesign --display --verbose=4 target/release/js-agent 2>&1 | /usr/bin/sed -n 's/^CDHash=//p')"
-        if ! [[ "$cdhash" =~ ^[0-9a-f]{40}$ ]]; then
-          echo "::error::the cdhash of js-agent is '$cdhash', not 40 hex digits"
-          exit 1
-        fi
         target/release/js-mac-provision agent-plist > inputs/agent.plist
-        target/release/js-mac-provision session-plist --daemon-requirement "cdhash H\"$cdhash\"" > inputs/session.plist
         target/release/js-mac-provision pf-pool-plist > inputs/pf-pool.plist
-        plutil -lint inputs/agent.plist inputs/session.plist inputs/pf-pool.plist
-        cargo xtask pkg stage-macos --version "$VERSION" --bin-dir target/release --license LICENSE --agent-plist inputs/agent.plist --session-plist inputs/session.plist --pf-pool-plist inputs/pf-pool.plist --out stage
-        staged="$(/usr/bin/codesign --display --verbose=4 "stage/root/Library/Application Support/js-agent/bin/js-agent" 2>&1 | /usr/bin/sed -n 's/^CDHash=//p')"
-        if [ "$staged" != "$cdhash" ]; then
-          echo "::error::the staged js-agent has the cdhash '$staged', not '$cdhash'"
-          exit 1
-        fi
+        plutil -lint inputs/agent.plist inputs/pf-pool.plist
+        cargo xtask pkg stage-macos --version "$VERSION" --bin-dir target/release --license LICENSE --agent-plist inputs/agent.plist --pf-pool-plist inputs/pf-pool.plist --out stage
     - name: The staged programs are signed as the release signs them
       if: ${{ inputs.programs != '' }}
       shell: bash
       run: |
         set -euo pipefail
-        for bin in js-agent js-mac-session js-mac-provision; do
+        for bin in js-agent js-mac-provision; do
           cargo xtask release check-code-signature "stage/root/Library/Application Support/js-agent/bin/$bin" --program "$bin"
         done
     - name: Build the package

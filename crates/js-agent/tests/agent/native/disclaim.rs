@@ -1,9 +1,9 @@
-//! Which process each program the agent and the helper start answers to for the privacy
-//! controls (TCC), and so whose grants it holds (`js_mac_session::disclaim`). A start is
-//! disclaimed unless it keeps the responsibility: then the program answers for the process its
-//! starter answers for. Two starts keep it, a native job's supervisor and the job's program,
-//! so that a job answers for the agent and holds its Full Disk Access; every other program
-//! the agent starts (a probe, `pfctl`), and every job the helper starts, answers for itself.
+//! Which process each program the agent starts answers to for the privacy controls (TCC), and
+//! so whose grants it holds (`js_mac_session::disclaim`). A start is disclaimed unless it keeps
+//! the responsibility: then the program answers for the process its starter answers for. Two
+//! starts keep it, a native job's supervisor and the job's program, so that a job answers for
+//! the agent and holds its Full Disk Access; every other program the agent starts (a probe,
+//! `pfctl`) answers for itself.
 //!
 //! Each test reads the responsible process back through the system's own interface while the
 //! process runs: the program says on a pipe that it is running, and waits for a line on its
@@ -26,8 +26,6 @@ use std::process::{Child, Command, Stdio};
 
 use js_mac_provision::pfctl::{Pfctl as _, SystemPfctl};
 use js_mac_session::disclaim::{Kept, Program, responsible_pid};
-use js_mac_session::proto::Session;
-use js_mac_session::spawn::{self, Spawn};
 
 use crate::support::Scratch;
 
@@ -67,29 +65,25 @@ impl Job {
     }
 }
 
-/// Starts `argv` the way the helper's `run` does, as the user running the tests, in the
-/// background session, with the environment `env` asked for and `cwd` as the lease
-/// directory.
+/// Starts `argv` through a [`Program`] that does not keep the responsibility, with exactly the
+/// environment `env` asked for, `cwd` as its working directory, a pipe for its input and one
+/// for its output.
 fn start(cwd: &Path, argv: &[&str], env: &[(&str, &str)]) -> std::io::Result<Job> {
     let (stdin, feed) = std::io::pipe().unwrap();
     let (out, out_end) = std::io::pipe().unwrap();
-    let child = spawn::spawn(Spawn {
-        uid: rustix::process::getuid().as_raw(),
-        gid: rustix::process::getgid().as_raw(),
-        user: "kbf-lease-7-1".to_owned(),
-        home: PathBuf::from("/var/empty"),
-        argv: argv.iter().map(|&arg| arg.to_owned()).collect(),
-        env: env
-            .iter()
-            .map(|&(name, value)| (name.to_owned(), value.to_owned()))
-            .collect(),
-        stdin: stdin.into(),
-        stdout: out_end.into(),
-        stderr: null(),
-        cwd: std::fs::File::open(cwd).unwrap().into(),
-        session: Session::Background,
-        limits: None,
-    })?;
+    let (program, args) = argv.split_first().expect("a program to start");
+    let mut command = Program::new(program, args);
+    command
+        .env_clear()
+        .envs(env.iter().copied())
+        .current_dir(cwd)
+        .stdin(stdin)
+        .stdout(out_end)
+        .stderr(null());
+    let child = command.spawn()?;
+    // The program holds the pipes' other ends until it is dropped: dropped here, a job that
+    // ends early is read as the end of its output, not waited for.
+    drop(command);
     Ok(Job {
         child,
         out: BufReader::new(out),
@@ -119,29 +113,11 @@ fn printed(mut job: Job) -> String {
     text
 }
 
-/// A job's process, started as the helper starts every job, is its own responsible
-/// process, read once its program has printed: the helper's start is not one of the two that
-/// keep the responsibility. It catches a helper start that keeps it: the job would answer for
-/// the helper, not for the agent whose grant a job is to hold.
-#[test]
-fn a_job_the_helper_starts_answers_for_itself() {
-    let dir = Scratch::new("disclaim-job");
-    let mut job = start(&dir.path(""), &READY, &[]).unwrap();
-    let pid = job.child.id();
-    assert_eq!(job.line(), format!("ready {pid}"));
-    assert_eq!(
-        responsible_pid(pid).unwrap(),
-        pid,
-        "the job answers for its starter"
-    );
-    job.finish();
-}
-
-/// A native job the helper starts runs as `sandbox-exec ... <program>`: once the program
+/// A program the agent starts disclaimed under `sandbox-exec ... <program>`: once the program
 /// itself has printed (so `sandbox-exec` has executed it), it is still its own responsible
-/// process. It catches a disclaim lost on the way from `sandbox-exec` to the job's program.
+/// process. It catches a disclaim lost on the way from `sandbox-exec` to the program.
 #[test]
-fn a_helper_job_under_sandbox_exec_answers_for_itself() {
+fn a_disclaimed_program_under_sandbox_exec_answers_for_itself() {
     let dir = Scratch::new("disclaim-sandbox");
     let argv = [
         "/usr/bin/sandbox-exec",
@@ -162,11 +138,11 @@ fn a_helper_job_under_sandbox_exec_answers_for_itself() {
     job.finish();
 }
 
-/// What a job the helper starts starts the usual way, a child and a grandchild, answers for
-/// the job, not for the helper: a process's children follow it. It catches a disclaim that
-/// the job's own processes escape (they would answer for the helper again).
+/// What a disclaimed program starts the usual way, a child and a grandchild, answers for the
+/// program, not for the agent: a process's children follow it. It catches a disclaim that the
+/// program's own processes escape (they would answer for the agent again).
 #[test]
-fn a_helper_jobs_children_answer_for_the_job() {
+fn a_disclaimed_programs_children_answer_for_the_program() {
     let dir = Scratch::new("disclaim-descendants");
     // Each shell ends with `:` so that none executes its last command in its own place.
     let script =
@@ -190,8 +166,8 @@ fn a_helper_jobs_children_answer_for_the_job() {
 
 /// A program the agent starts itself (a probe, the `sandbox-exec` self-test) is its own
 /// responsible process too: it does not keep the responsibility. It catches a [`Program`]
-/// that disclaims only when it is given steps, as the helper's runs are, or one that keeps
-/// the responsibility by default.
+/// that disclaims only when it is given steps, or one that keeps the responsibility by
+/// default.
 #[test]
 fn a_program_the_agent_starts_answers_for_itself() {
     let (stdin, mut feed) = std::io::pipe().unwrap();
@@ -520,14 +496,13 @@ fn a_pid_out_of_range_is_refused() {
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
 }
 
-/// The job gets exactly the environment the helper built for it, and a program named
-/// without a directory is found in the job's `PATH`, which only the job has: a script in a
-/// scratch directory that the test's own `PATH` does not name. It catches an execution
-/// that passes the helper's (or the agent's) own environment to the job, leaking the
-/// daemon's variables into user code, or one that looks the program up on the daemon's
-/// `PATH`.
+/// The program gets exactly the environment it was given, and a program named without a
+/// directory is found in its `PATH`, which only it has: a script in a scratch directory that
+/// the test's own `PATH` does not name. It catches an execution that passes the agent's own
+/// environment to the program, leaking the daemon's variables into user code, or one that
+/// looks the program up on the daemon's `PATH`.
 #[test]
-fn a_disclaimed_job_gets_exactly_its_own_environment() {
+fn a_disclaimed_program_gets_exactly_its_own_environment() {
     let dir = Scratch::new("disclaim-env");
     let bin = dir.path("job only bin");
     std::fs::create_dir_all(&bin).unwrap();
@@ -541,16 +516,7 @@ fn a_disclaimed_job_gets_exactly_its_own_environment() {
     let mut lines: Vec<&str> = text.lines().collect();
     lines.sort_unstable();
     let path_line = format!("PATH={path}");
-    assert_eq!(
-        lines,
-        [
-            "HOME=/var/empty",
-            "KEEP=kept",
-            "LOGNAME=kbf-lease-7-1",
-            path_line.as_str(),
-            "USER=kbf-lease-7-1",
-        ]
-    );
+    assert_eq!(lines, ["KEEP=kept", path_line.as_str()]);
 }
 
 /// An executable text file with no `#!` line runs through `/bin/sh`, with its arguments
@@ -605,10 +571,10 @@ impl Drop for Unlock {
     }
 }
 
-/// A relative directory of the job's `PATH`, and an empty one (the working directory),
-/// are searched in the directory the job runs in: the helper's lease directory, or a
-/// [`Program`]'s `current_dir`, never the starter's own. It catches a lookup made in the
-/// parent before the child has entered its directory.
+/// A relative directory of the program's `PATH`, and an empty one (the working directory),
+/// are searched in the directory the program runs in, a [`Program`]'s `current_dir`, never the
+/// starter's own. It catches a lookup made in the parent before the child has entered its
+/// directory.
 #[test]
 fn relative_path_directories_are_the_jobs_own() {
     let dir = Scratch::new("disclaim-relative");
@@ -626,7 +592,7 @@ fn relative_path_directories_are_the_jobs_own() {
     ];
     for (path, program, said) in cases {
         let job = start(&root, &[program], &[("PATH", path)]).unwrap();
-        assert_eq!(printed(job), said, "the lease directory, {path:?}");
+        assert_eq!(printed(job), said, "the started program, {path:?}");
         let out = Program::new(program, [""; 0])
             .env_clear()
             .env("PATH", path)
@@ -669,12 +635,12 @@ fn the_environment_and_arguments_arrive_as_set() {
     assert_eq!(echoed.stdout, [0xff, b'a', b'\n']);
 }
 
-/// Jobs started at the same moment from several threads keep their own arguments,
+/// Programs started at the same moment from several threads keep their own arguments,
 /// environments, streams and responsibility, and one that fails to start leaves the others
 /// alone. It catches state of one start reaching another through what the starts make
 /// before the fork.
 #[test]
-fn jobs_started_at_the_same_moment_keep_their_own_state() {
+fn programs_started_at_the_same_moment_keep_their_own_state() {
     let dir = Scratch::new("disclaim-together");
     let root = dir.path("");
     let barrier = std::sync::Barrier::new(3);
@@ -711,7 +677,7 @@ fn jobs_started_at_the_same_moment_keep_their_own_state() {
     }
 }
 
-/// An empty program is not found, and no directory of the job's `PATH` is tried for it. It
+/// An empty program is not found, and no directory of the program's `PATH` is tried for it. It
 /// catches an empty name joined to each directory, which `posix_spawn` would refuse as a
 /// directory (`EACCES`) instead of a missing program.
 #[test]

@@ -111,12 +111,6 @@ pub enum Verb {
     /// Print the property list of the js-agent.pf-pool LaunchDaemon: fixed, it runs
     /// `install --flags-file` with the agent's flags file at load and every 30 seconds.
     PfPoolPlist,
-    /// Print the property list of the js-agent.session LaunchDaemon.
-    SessionPlist {
-        /// The code requirement the helper holds its caller to.
-        #[arg(long)]
-        daemon_requirement: String,
-    },
     /// Connect once and print the outcome: connected, refused, timed out or failed.
     /// Run it as a pool user. Exits 1 unless it connected.
     Probe {
@@ -290,9 +284,6 @@ pub fn execute(cli: &Cli, pf: &dyn Pfctl, out: &mut dyn Write) -> Result<bool, C
         }
         Verb::PfPoolPlist => {
             out.write_all(pf_pool_plist().as_bytes())?;
-        }
-        Verb::SessionPlist { daemon_requirement } => {
-            out.write_all(Daemon::session(daemon_requirement).render().as_bytes())?;
         }
         Verb::Probe { addr, timeout_ms } => {
             let outcome = probe(*addr, Duration::from_millis(*timeout_ms));
@@ -574,33 +565,13 @@ mod tests {
     }
 
     #[test]
-    fn session_plist_prints_the_helpers_daemon() {
-        let dir = TestDir::under(std::env::temp_dir(), "js-mac-provision-cli-session-plist");
-        let pf = Fake::new(dir.path());
-        let c = parse(
-            dir.path(),
-            &[
-                "session-plist".to_owned(),
-                "--daemon-requirement".to_owned(),
-                "cdhash H\"abc\"".to_owned(),
-            ],
-        );
-        let (r, text) = run(&c, &pf);
-        assert!(r.unwrap());
-        assert_eq!(text, Daemon::session("cdhash H\"abc\"").render());
-    }
-
-    #[test]
-    fn session_plist_needs_the_requirement_and_takes_no_socket_group() {
-        assert!(Cli::try_parse_from(["js-mac-provision", "session-plist"]).is_err());
+    fn the_session_plist_verb_is_gone() {
         assert!(
             Cli::try_parse_from([
                 "js-mac-provision",
                 "session-plist",
                 "--daemon-requirement",
                 "x",
-                "--socket-group",
-                "g",
             ])
             .is_err()
         );

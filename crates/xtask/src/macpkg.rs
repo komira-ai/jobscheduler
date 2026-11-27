@@ -2,7 +2,7 @@
 //!
 //! The package is a hostkeeper `macos-pkg` service: it lays its files down and runs no script.
 //! `pkg stage-macos` lays the payload down in a directory from the built programs, the
-//! licence and the three plists (the agent, its root helper and the daemon that keeps the pool's
+//! licence and the two plists (the agent and the daemon that keeps the pool's
 //! pf anchor loaded); the workflow gives that directory to `pkgbuild` without
 //! `--scripts`. `pkg check-macos` reads the package back with Apple's `pkgutil` and `lsbom`
 //! and refuses it unless it holds exactly [`entries`], each with its mode and root as owner,
@@ -45,14 +45,9 @@ pub const PREFIX: &str = "Library/Application Support/js-agent";
 fn files() -> Vec<(String, u32)> {
     vec![
         (format!("{PREFIX}/bin/js-agent"), 0o755),
-        (format!("{PREFIX}/bin/js-mac-session"), 0o755),
         (format!("{PREFIX}/bin/js-mac-provision"), 0o755),
         (format!("{PREFIX}/LICENSE"), 0o644),
         ("Library/LaunchDaemons/js-agent.plist".to_owned(), 0o644),
-        (
-            "Library/LaunchDaemons/js-agent.session.plist".to_owned(),
-            0o644,
-        ),
         (
             "Library/LaunchDaemons/js-agent.pf-pool.plist".to_owned(),
             0o644,
@@ -102,7 +97,7 @@ pub struct StageArgs {
     /// The release version.
     #[arg(long)]
     pub version: Version,
-    /// The directory with the built `js-agent`, `js-mac-session` and `js-mac-provision`.
+    /// The directory with the built `js-agent` and `js-mac-provision`.
     #[arg(long)]
     pub bin_dir: PathBuf,
     /// The license file.
@@ -111,9 +106,6 @@ pub struct StageArgs {
     /// The agent's plist.
     #[arg(long)]
     pub agent_plist: PathBuf,
-    /// The helper's plist.
-    #[arg(long)]
-    pub session_plist: PathBuf,
     /// The plist of the daemon that keeps the pool's pf anchor loaded.
     #[arg(long)]
     pub pf_pool_plist: PathBuf,
@@ -186,10 +178,6 @@ pub fn stage(args: &StageArgs) -> Result<String, Error> {
             args.bin_dir.join("js-agent"),
         ),
         (
-            format!("{PREFIX}/bin/js-mac-session"),
-            args.bin_dir.join("js-mac-session"),
-        ),
-        (
             format!("{PREFIX}/bin/js-mac-provision"),
             args.bin_dir.join("js-mac-provision"),
         ),
@@ -197,10 +185,6 @@ pub fn stage(args: &StageArgs) -> Result<String, Error> {
         (
             "Library/LaunchDaemons/js-agent.plist".to_owned(),
             args.agent_plist.clone(),
-        ),
-        (
-            "Library/LaunchDaemons/js-agent.session.plist".to_owned(),
-            args.session_plist.clone(),
         ),
         (
             "Library/LaunchDaemons/js-agent.pf-pool.plist".to_owned(),

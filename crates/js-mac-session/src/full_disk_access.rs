@@ -1,28 +1,23 @@
 //! Whether a process holds Full Disk Access, the privacy (TCC) service
-//! `SystemPolicyAllFiles`: the judgement `js-agent` makes of its own listing at start, and
-//! the helper of its own for the verb `full-disk-access`.
+//! `SystemPolicyAllFiles`: the judgement `js-agent` makes of its own listing at start.
 //!
 //! macOS gives the grant to a program by a privacy profile that device management
 //! installs, and gives no call to ask whether a program has it. A program finds out the
 //! way every program does: it lists the directory of the privacy database, which only a
 //! process with Full Disk Access may list. The listing opens no file and reads no
-//! database. The profile grants it to `js-agent` alone, not to the helper. A program started
-//! with its privacy responsibility disclaimed ([`crate::disclaim`], the default) does not
-//! hold the grant of the process that started it; a native job and its supervisor keep the
-//! responsibility, so they answer for `js-agent` and hold its grant. Today the helper starts
-//! every job, disclaimed, and holds no grant.
+//! database. The profile grants it to `js-agent`. A program started with its privacy
+//! responsibility disclaimed ([`crate::disclaim`], the default) does not hold the grant of
+//! the process that started it; a native job and its supervisor keep the responsibility, so
+//! they answer for `js-agent` and hold its grant.
 
 use std::io;
-
-use serde::{Deserialize, Serialize};
 
 /// The directory of the privacy database, which only a process with Full Disk Access may
 /// list.
 pub const PRIVACY_DIR: &str = "/Library/Application Support/com.apple.TCC";
 
 /// Whether a process holds Full Disk Access (the privacy service `SystemPolicyAllFiles`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FullDiskAccess {
     /// The directory of the privacy database could be listed: the grant is held.
     Granted,
@@ -84,10 +79,9 @@ mod tests {
         }
     }
 
-    /// Asserts that each state's text is the one the agent reports and that the wire
-    /// spelling of the state is the same text. Catches: a state renamed in one place
-    /// only, which the agent's capability would then show differently from the helper's
-    /// reply.
+    /// Asserts that each state's text is the one the agent reports in its capabilities.
+    /// Catches: a state renamed in one place only, which the capability would then show
+    /// differently from the state the agent acts on.
     #[test]
     fn each_state_has_one_spelling() {
         for (state, text) in [
@@ -96,10 +90,6 @@ mod tests {
             (FullDiskAccess::Undetermined, "undetermined"),
         ] {
             assert_eq!(state.as_str(), text);
-            assert_eq!(
-                serde_json::to_string(&state).unwrap(),
-                format!("\"{text}\"")
-            );
         }
     }
 }

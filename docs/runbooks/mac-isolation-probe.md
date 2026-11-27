@@ -78,7 +78,7 @@ the host's bundle store, and add the digest to the host's `--bundle-allow-file` 
 ## The jobs
 
 The arguments name what differs per host: another user's home, root's home, the bundle store, the agent's files and
-its accounts ledger, the helper's files and socket, another service's key, three files the operator makes for the run,
+its accounts ledger, the retired helper's state directory and socket (`/var/db/js-mac-session` and its socket, absent on a Mac that no longer runs the helper, where the verdicts are `n/a`; a Mac still running one must deny both), another service's key, three files the operator makes for the run,
 the job service, a host on the same network, the cloud metadata address, a public address, a port that listens on
 loopback, an address the host's packet filter lets jobs with an allow-list reach, and a public host name. Every name
 here is pinned, so each must be given.
@@ -115,7 +115,7 @@ js job run --server <job service> --token-file <client token> --id <id>-probe \
   --spec.args --connect --spec.args loopback=127.0.0.1:<listening port> \
   --spec.args --connect --spec.args pf-endpoint=<an allow-listed host:port> \
   --spec.args --lookup --spec.args public-name=<public host name> \
-  --spec.args --connect-unix --spec.args helper-socket=<the helper's socket>
+  --spec.args --connect-unix --spec.args helper-socket=<the retired helper's socket path>
 ```
 
 Then the persistence check, in this order (the pool lends the lowest free slot, so a job alone gets the same slot

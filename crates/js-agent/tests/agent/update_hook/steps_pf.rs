@@ -1,20 +1,18 @@
 //! The Mac package's pf job (`pf_unit`): `cutover` boots it out, loads the anchor of the host's
 //! flags file with the staged release's `js-mac-provision`, and bootstraps the job from the staged
-//! release, after the helper and before the agent starts. `rollback` leaves it as it is. A
-//! systemd host that names one is refused by every step.
+//! release, after the retired helper job is booted out and before the agent starts. `rollback`
+//! leaves it as it is. A systemd host that names one is refused by every step.
 
 use std::path::PathBuf;
 
 use js_agent::update_hook::{Class, Outcome, Reason};
 
 use super::rollback_entries::verify_failed_on;
-use super::step_rig::{MAC_HELPER, MAC_PF, MAC_UNIT, Rig, Spy, end_state, killable, running};
+use super::step_rig::{MAC_PF, MAC_RETIRED, MAC_UNIT, Rig, Spy, end_state, killable, running};
 
-/// A Mac host with the helper and the pf job, after `prepare`, the old helper running.
+/// A Mac host whose package carries the pf job, after `prepare`.
 fn host(name: &str) -> Rig {
-    let rig = running(Rig::mac_with_helper_and_pf(name));
-    rig.world.seed_unit(MAC_HELPER, "active", "running");
-    rig
+    running(Rig::mac_with_pf(name))
 }
 
 fn stop(unit: &str) -> String {
@@ -62,18 +60,12 @@ fn pf_acts(rig: &Rig) -> [String; 3] {
 }
 
 #[test]
-fn a_cutover_loads_the_anchor_and_bootstraps_the_pf_job_after_the_helper_before_the_agent() {
+fn a_cutover_retires_the_helper_then_loads_the_anchor_and_bootstraps_the_pf_job_before_the_agent() {
     let rig = host("hook-pf-cutover");
     let spy = Spy::new(&rig);
     let done = spy.cutover(&rig);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
-    let staged = rig.params.staged_release.clone();
-    let mut want = vec![
-        stop(MAC_UNIT),
-        stop(MAC_HELPER),
-        bootstrap(staged, MAC_HELPER),
-        start(MAC_HELPER),
-    ];
+    let mut want = vec![stop(MAC_UNIT), stop(MAC_RETIRED)];
     want.extend(pf_acts(&rig));
     want.push(start(MAC_UNIT));
     assert_eq!(spy.act_names(), want);
@@ -81,7 +73,7 @@ fn a_cutover_loads_the_anchor_and_bootstraps_the_pf_job_after_the_helper_before_
 
 #[test]
 fn a_first_install_loads_the_anchor_and_bootstraps_the_pf_job_before_the_agent_starts() {
-    let rig = Rig::mac_first_install_with_helper_and_pf("hook-pf-first");
+    let rig = Rig::mac_first_install_with_pf("hook-pf-first");
     assert_eq!(Spy::new(&rig).prepare(&rig).outcome, Outcome::Success);
     rig.kill.disarm();
     let spy = Spy::new(&rig);

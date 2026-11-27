@@ -1,31 +1,28 @@
-//! The post-job check of a native agent on a Mac ([`NativeChecks`]): the root helper's
-//! leak scan (`scan`, [`js_mac_session::helper`]), judged against what the same scan
-//! answered when the host was last idle.
+//! The post-job check of a native agent on a Mac ([`NativeChecks`]): a leak scan, judged against
+//! what the same scan answered when the host was last idle.
 //!
-//! A Mac agent does not run it now: its native runs no longer go through the helper, whose
-//! recorded baseline the scan needs, and the account pool's retirement proves everything of a
-//! run's uid gone (`crate::mac_accounts`); the agent's post-job check is
-//! [`crate::lifecycle::NoChecks`]. The check, its codes and its judgment stay for the scan's
-//! return, over a baseline of a fresh account, built with [`NativeChecks::new`].
+//! A Mac agent does not run it now: no scan is wired in, and the account pool's retirement
+//! proves everything of a run's uid gone (`crate::mac_accounts`); the agent's post-job check is
+//! [`crate::lifecycle::NoChecks`]. The check, its codes and its judgment stay for a scan's
+//! return, over a baseline of a fresh account, built with [`NativeChecks::new`] over the scan
+//! ([`Scan`]).
 //!
-//! The helper's scan reports what changed against the node's recorded baseline: what was
-//! added, what was removed, and what it could not read (each list cut to
-//! [`js_mac_session::proto::SCAN_LINES`] lines and a last `and <n> more`). The baseline is
-//! the node's, so a scan of a host that drifted since it was recorded is dirty before any
-//! run; the check therefore keeps the scan of the idle host as its reference (taken again
-//! each time the host is idle, as the Linux checks retake theirs) and judges only what is
-//! new against it:
+//! A scan reports what changed against the node's recorded baseline ([`Scanned`]): what was
+//! added, what was removed, and what it could not read (each list cut to a fixed number of
+//! lines and a last `and <n> more`). The baseline is the node's, so a scan of a host that
+//! drifted since it was recorded is dirty before any run; the check therefore keeps the scan of
+//! the idle host as its reference (taken again each time the host is idle, as the Linux checks
+//! retake theirs) and judges only what is new against it:
 //!
 //! - an added login item or Background Task Management entry of a uid other than root's
-//!   is residue ([`code::SCAN_RESIDUE`]): a run as a pool user can make its own, and the
-//!   reset removes neither the entries nor (for a uid the pool keeps) their owner, so the
-//!   next run of the uid would inherit them. So is an added `and <n> more` line, which
+//!   is residue ([`code::SCAN_RESIDUE`]): a run's account can make its own, and the
+//!   retirement of the account does not remove the entries, so the next account of the
+//!   slot's uid would inherit them. So is an added `and <n> more` line, which
 //!   may hide one;
 //! - every other change is a note ([`code::SCAN_HOST_CHANGED`]), never a taint: the
-//!   launch agent and daemon folders and the auto-login state are root's, and the lease
-//!   users are the pool's own (the helper reports no live lease's user, and the end of a
-//!   lease fails when its user is not reset); so is a removal, which no pool user can make
-//!   of another user's entries. Lines are compared by their text, so when the idle host
+//!   launch agent and daemon folders and the auto-login state are root's, and the
+//!   accounts are the agent's own (the end of a run fails when its account is not proven
+//!   gone); so is a removal, which no run's account can make of another user's entries. Lines are compared by their text, so when the idle host
 //!   already had more changes than a reply holds, a root-owned change that moves an item
 //!   past the cut changes the count of `and <n> more` and taints the host, and a run's
 //!   entry behind an unchanged count is missed: the reference holds both cases only while
@@ -43,11 +40,13 @@
 
 use std::collections::BTreeSet;
 
-use js_mac_session::client::{ClientError, Scanned};
-use js_mac_session::helper::NO_BASELINE;
-use js_mac_session::scan::{BACKGROUND_TASKS, LOGIN_ITEMS};
-
 use crate::lifecycle::{CheckFinding, CheckHook, CheckNote, Finished};
+
+/// The class of a scan line that names a login item.
+const LOGIN_ITEMS: &str = "login-items";
+
+/// The class of a scan line that names a Background Task Management entry.
+const BACKGROUND_TASKS: &str = "background-tasks";
 
 /// The codes of the native check's findings and notes.
 pub mod code {
@@ -63,8 +62,30 @@ pub mod code {
     pub const SCAN_HOST_CHANGED: &str = "scan-host-changed";
 }
 
-/// How the check asks for a scan: the helper's `scan` on a Mac.
-pub type Scan = Box<dyn FnMut() -> Result<Scanned, ClientError> + Send>;
+/// What a scan answered: what changed on the host against the node's recorded baseline.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Scanned {
+    /// Whether nothing changed and every item could be read.
+    pub clean: bool,
+    /// Items that are not in the baseline.
+    pub added: Vec<String>,
+    /// Items of the baseline that are gone.
+    pub removed: Vec<String>,
+    /// Items that could not be read.
+    pub errors: Vec<String>,
+}
+
+/// Why a scan gave no answer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ScanError {
+    /// The node has no recorded baseline to compare with.
+    NoBaseline,
+    /// The scan could not run, and said why.
+    Failed(String),
+}
+
+/// How the check asks for a scan.
+pub type Scan = Box<dyn FnMut() -> Result<Scanned, ScanError> + Send>;
 
 /// The post-job check of a native agent: see the module documentation.
 pub struct NativeChecks {
@@ -92,7 +113,7 @@ impl NativeChecks {
     fn judge(&mut self) -> Result<(), CheckFinding> {
         let scanned = match (self.scan)() {
             Ok(scanned) => scanned,
-            Err(ClientError::Refused(why)) if why == NO_BASELINE => {
+            Err(ScanError::NoBaseline) => {
                 if !self.told_no_baseline {
                     self.told_no_baseline = true;
                     self.notes.push(CheckNote::new(
@@ -103,7 +124,7 @@ impl NativeChecks {
                 }
                 return Ok(());
             }
-            Err(why) => {
+            Err(ScanError::Failed(why)) => {
                 return Err(CheckFinding::unchecked(
                     code::SCAN_FAILED,
                     &format!("the leak scan could not run: {why}"),

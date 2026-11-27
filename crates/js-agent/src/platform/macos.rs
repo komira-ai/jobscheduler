@@ -489,8 +489,7 @@ pub(crate) fn jobs(
 /// The uid and the primary group of the user `name` in the directory service, as
 /// [`uid_of_name`] looks it up: the put ingest's node (`--native-put-user`).
 fn node_of_name(name: &str) -> std::io::Result<Option<crate::mac_put::Node>> {
-    use js_mac_session::helper::Host as _;
-    let account = js_mac_session::macos::MacHost.account(name)?;
+    let account = crate::mac_accounts::macos::account(name)?;
     Ok(account.map(|account| crate::mac_put::Node {
         uid: account.uid,
         gid: account.gid,
@@ -501,8 +500,7 @@ fn node_of_name(name: &str) -> std::io::Result<Option<crate::mac_put::Node>> {
 /// accounts, such as a provider's, are not in `/etc/passwd`, and their uids differ from Mac to
 /// Mac.
 fn uid_of_name(name: &str) -> std::io::Result<Option<u32>> {
-    use js_mac_session::helper::Host as _;
-    let account = js_mac_session::macos::MacHost.account(name)?;
+    let account = crate::mac_accounts::macos::account(name)?;
     Ok(account.map(|account| account.uid))
 }
 
@@ -763,8 +761,8 @@ pub(crate) type Checks = (
 );
 
 /// The checks after a native job: none. The account's retirement proves everything of the
-/// run's uid gone ([`crate::mac_accounts`]); a leak scan of the rest of the Mac needs a
-/// baseline nothing records yet. And the sampler of the Mac's load ([`HostSampler`] over
+/// run's uid gone ([`crate::mac_accounts`]); a leak scan of the rest of the Mac
+/// ([`crate::leak_scan`]) has no scan wired in. And the sampler of the Mac's load ([`HostSampler`] over
 /// [`MacHost`]: its CPU load and memory statistics, carried as a Linux host's `/proc`).
 ///
 /// # Errors

@@ -1,8 +1,8 @@
 //! The workflow that builds the macOS package (`.github/workflows/js-agent-macos-pkg.yml`)
 //! read as it is in the repository. Three jobs: `build` runs in the release's beta stage and by hand
 //! (never on a pull request), holds no secret and signs nothing, and builds a hostkeeper
-//! `macos-pkg` package (no script, the file `js-agent-<version>-macos-arm64.pkg`, the helper's
-//! plist naming the agent of the same package by its cdhash); `sign` runs in the release's call that
+//! `macos-pkg` package (no script, the file `js-agent-<version>-macos-arm64.pkg`, the two
+//! programs and the two plists of the agent and the pf daemon, and no root helper); `sign` runs in the release's call that
 //! asks for it and in a signing run (signing_run.rs), in the environment `pkg-signing`, takes
 //! the checked unsigned package from `build` without rebuilding, and is the only place a secret
 //! is named, on the step that signs and nowhere else. Nothing is notarized. `first-install` calls
@@ -752,7 +752,7 @@ fn no_command_expands_an_expression() {
 
 /// One line per way the workflow `text` is not the build of a hostkeeper `macos-pkg` package that
 /// is then signed with `productsign` alone: the package has no script and the file name of the
-/// design, the root helper's plist names the agent of the same package by its cdhash, the agent's
+/// design, the package carries no root helper (no helper plist, no cdhash pin), the agent's
 /// plist is the fixed one, the signing is one `productsign --timestamp` with the identity found
 /// in the temporary keychain, nothing is notarized, and the artifacts are the two the release
 /// reads.
@@ -789,27 +789,16 @@ fn package_problems(text: &str, action: &str) -> Vec<String> {
         "the agent's plist is not the fixed one",
     );
     want(
-        build.contains(
-            "session-plist --daemon-requirement \"cdhash H\\\"$cdhash\\\"\" > inputs/session.plist",
-        ),
-        "the helper's plist does not name the agent by its cdhash",
+        !body.contains("js-mac-session")
+            && !body.contains("session-plist")
+            && !body.contains("session.plist")
+            && !body.contains("cdhash"),
+        "the package builds a root helper, its plist or a cdhash pin",
     );
     want(
         build.contains("target/release/js-mac-provision pf-pool-plist > inputs/pf-pool.plist")
             && build.contains("--pf-pool-plist inputs/pf-pool.plist"),
         "the pf daemon's plist is not the fixed one",
-    );
-    want(
-        build.contains("cdhash=\"$(/usr/bin/codesign --display --verbose=4 target/release/js-agent 2>&1 | /usr/bin/sed -n 's/^CDHash=//p')\""),
-        "the cdhash is not read from the js-agent binary that is built",
-    );
-    want(
-        build.contains("[[ \"$cdhash\" =~ ^[0-9a-f]{40}$ ]]"),
-        "the cdhash is not checked to be 40 hex digits",
-    );
-    want(
-        build.contains("if [ \"$staged\" != \"$cdhash\" ]"),
-        "the cdhash of the staged js-agent is not compared with the one in the plist",
     );
     want(
         !body.contains("notarytool") && !body.contains("stapler") && !body.contains("xcrun"),
@@ -875,9 +864,19 @@ fn each_way_of_leaving_the_hostkeeper_package_shape_is_named() {
             "the agent's plist is not the fixed one",
         ),
         (
-            "--daemon-requirement \"cdhash H\\\"$cdhash\\\"\"",
-            "--daemon-requirement SET-THE-DAEMON-REQUIREMENT",
-            "the helper's plist does not name the agent by its cdhash",
+            "target/release/js-mac-provision pf-pool-plist > inputs/pf-pool.plist\n",
+            "target/release/js-mac-provision pf-pool-plist > inputs/pf-pool.plist\n        target/release/js-mac-provision session-plist > inputs/session.plist\n",
+            "the package builds a root helper, its plist or a cdhash pin",
+        ),
+        (
+            "cargo build --locked --release -p js-agent --bin js-agent\n",
+            "cargo build --locked --release -p js-agent --bin js-agent\n        cargo build --locked --release -p js-mac-session --bin js-mac-session\n",
+            "the package builds a root helper, its plist or a cdhash pin",
+        ),
+        (
+            "mkdir inputs\n",
+            "mkdir inputs\n        cdhash=\"$(/usr/bin/codesign --display --verbose=4 target/release/js-agent 2>&1)\"\n",
+            "the package builds a root helper, its plist or a cdhash pin",
         ),
         (
             "pf-pool-plist > inputs/pf-pool.plist",
@@ -888,21 +887,6 @@ fn each_way_of_leaving_the_hostkeeper_package_shape_is_named() {
             "--pf-pool-plist inputs/pf-pool.plist",
             "--pf-pool-plist inputs/other.plist",
             "the pf daemon's plist is not the fixed one",
-        ),
-        (
-            "codesign --display --verbose=4 target/release/js-agent 2>&1",
-            "codesign --display --verbose=4 target/release/js-mac-session 2>&1",
-            "the cdhash is not read from the js-agent binary that is built",
-        ),
-        (
-            "[[ \"$cdhash\" =~ ^[0-9a-f]{40}$ ]]",
-            "[ -n \"$cdhash\" ]",
-            "the cdhash is not checked to be 40 hex digits",
-        ),
-        (
-            "if [ \"$staged\" != \"$cdhash\" ]",
-            "if [ -z \"$staged\" ]",
-            "the cdhash of the staged js-agent is not compared",
         ),
         (
             "/usr/bin/productsign --timestamp --sign",

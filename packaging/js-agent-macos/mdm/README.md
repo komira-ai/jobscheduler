@@ -1,8 +1,8 @@
 # The privacy profile
 
 `js-agent-full-disk-access.mobileconfig` grants Full Disk Access (the privacy service
-`SystemPolicyAllFiles`) to `js-agent` itself, and to nothing else: not the root helper
-`js-mac-session`, which holds no grant. A native job and its supervisor are to be started without
+`SystemPolicyAllFiles`) to `js-agent` itself, and to nothing else: not `js-mac-provision`, which
+holds no grant. A native job and its supervisor are to be started without
 the disclaim, so that they answer for `js-agent` and hold what it holds; every other program
 `js-agent` starts is started disclaimed (see `../README.md`, "Privacy grants"). The profile's
 `Comment` says why the agent holds the grant: it deletes the accounts native jobs run as, and a

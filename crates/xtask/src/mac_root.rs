@@ -35,8 +35,8 @@ use std::process::{Command, ExitStatus, Stdio};
 
 use crate::test_build::{self, Built, Error};
 
-/// The uids the root helper `js-mac-session` of an earlier release lends to jobs (its default
-/// `--uid-range`): a user with one is a lease user of a farm Mac.
+/// The uids that an earlier release's lease users have (the root helper it ran lent these to
+/// jobs): a user with one is a lease user of a farm Mac.
 pub const PRODUCTION_UIDS: RangeInclusive<i64> = 600..=699;
 /// Every uid the tests use: the account pool of `native_privileged` ([`NATIVE_PRIVILEGED_UIDS`]),
 /// the accounts of `native_isolation`, `native_inbound_pf` and `native_fence`, and the unprivileged uid of

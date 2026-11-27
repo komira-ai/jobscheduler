@@ -126,19 +126,15 @@ pub const MAC_HOOK_COMMAND: [&str; 2] = [
 ];
 
 /// The launchd labels hostkeeper runs on a Mac: the agent (first, so that hostkeeper's observer
-/// reports the agent's version), its root helper, and the daemon that keeps the pool's pf anchor
-/// loaded.
-pub const MAC_RUN: [&str; 3] = ["js-agent", "js-agent.session", "js-agent.pf-pool"];
+/// reports the agent's version) and the daemon that keeps the pool's pf anchor loaded.
+pub const MAC_RUN: [&str; 2] = ["js-agent", "js-agent.pf-pool"];
 
-/// The Mac hook's `params`: the keys of [`PARAMS`], `helper_unit`, `pf_unit` and the two parts of
-/// the host setup `prepare` makes (`socket_group`, the group the helper's plist names, and
-/// `scratch_root`, the agent plist's `--scratch-root`), with the Mac's paths and the `native`
-/// runtime; the bounds are the Linux ones.
-pub const MAC_PARAMS: [(&str, Param); 21] = [
+/// The Mac hook's `params`: the keys of [`PARAMS`], `pf_unit` and the part of the host setup
+/// `prepare` makes (`scratch_root`, the agent plist's `--scratch-root`), with the Mac's paths and
+/// the `native` runtime; the bounds are the Linux ones.
+pub const MAC_PARAMS: [(&str, Param); 19] = [
     ("unit", Param::Text("js-agent")),
-    ("helper_unit", Param::Text("js-agent.session")),
     ("pf_unit", Param::Text("js-agent.pf-pool")),
-    ("socket_group", Param::Text("_jsagent")),
     ("scratch_root", Param::Text("/var/db/js-agent/scratch/runs")),
     (
         "state_dir",

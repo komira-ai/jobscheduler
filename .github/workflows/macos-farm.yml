@@ -113,8 +113,8 @@ jobs:
       TARGET: aarch64-apple-darwin
       # `<package>:<bin>` of each binary, and the binaries: the files the verb fetches and the
       # archives made of them.
-      BUILDS: js-cli:js js-agent:js-agent js-bundle-cli:js-bundle js-mac-session:js-mac-session js-mac-provision:js-mac-provision
-      BINS: js js-agent js-bundle js-mac-session js-mac-provision
+      BUILDS: js-cli:js js-agent:js-agent js-bundle-cli:js-bundle js-mac-provision:js-mac-provision
+      BINS: js js-agent js-bundle js-mac-provision
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -148,7 +148,7 @@ jobs:
           FARM_INSTANCE: ${{ vars.FARM_INSTANCE }}
           FARM_TLS: ${{ vars.FARM_TLS || 'false' }}
           FARM_PROPERTIES: ${{ vars.FARM_DARWIN_ARM64_PROPERTIES }}
-        run: tools/xtask mac-farm --address "$FARM_ADDRESS" --instance "$FARM_INSTANCE" --tls "$FARM_TLS" --properties "$FARM_PROPERTIES" --scratch "$RUNNER_TEMP/mac-farm" --env MACOSX_DEPLOYMENT_TARGET=11.0 --output target/aarch64-apple-darwin/release/js --output target/aarch64-apple-darwin/release/js-agent --output target/aarch64-apple-darwin/release/js-bundle --output target/aarch64-apple-darwin/release/js-mac-session --output target/aarch64-apple-darwin/release/js-mac-provision -- xtask release macos-leg --target "$TARGET" --builds "$BUILDS" --min-macos 11.0 --out target/macos-leg
+        run: tools/xtask mac-farm --address "$FARM_ADDRESS" --instance "$FARM_INSTANCE" --tls "$FARM_TLS" --properties "$FARM_PROPERTIES" --scratch "$RUNNER_TEMP/mac-farm" --env MACOSX_DEPLOYMENT_TARGET=11.0 --output target/aarch64-apple-darwin/release/js --output target/aarch64-apple-darwin/release/js-agent --output target/aarch64-apple-darwin/release/js-bundle --output target/aarch64-apple-darwin/release/js-mac-provision -- xtask release macos-leg --target "$TARGET" --builds "$BUILDS" --min-macos 11.0 --out target/macos-leg
       # Archives that depend only on the commit and the binaries: sorted names, the commit's time
       # as the modification time, numeric owner 0/0, no name or time in the gzip header.
       - name: Pack the archives
@@ -160,7 +160,7 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # The installer package of the version, built on a farm Mac: the three programs, the checks the
+  # The installer package of the version, built on a farm Mac: the two programs, the checks the
   # hosted `build` makes, the package and its SHA256SUMS, which are checked again here.
   pkg:
     needs: [xtask]
@@ -191,7 +191,7 @@ jobs:
           oauth-client-id: ${{ vars.TS_CLIENT_ID }}
           audience: ${{ vars.TS_AUDIENCE }}
           tags: tag:ci
-      # The package, its SHA256SUMS, the three programs with theirs, and the xtask that built
+      # The package, its SHA256SUMS, the two programs with theirs, and the xtask that built
       # them, which the signing job checks the signed package with.
       - name: Build the package on a farm Mac
         timeout-minutes: 60
@@ -200,7 +200,7 @@ jobs:
           FARM_INSTANCE: ${{ vars.FARM_INSTANCE }}
           FARM_TLS: ${{ vars.FARM_TLS || 'false' }}
           FARM_PROPERTIES: ${{ vars.FARM_DARWIN_ARM64_PROPERTIES }}
-        run: tools/xtask mac-farm --address "$FARM_ADDRESS" --instance "$FARM_INSTANCE" --tls "$FARM_TLS" --properties "$FARM_PROPERTIES" --scratch "$RUNNER_TEMP/mac-farm" --env MACOSX_DEPLOYMENT_TARGET=11.0 --output "dist/js-agent-$VERSION-macos-arm64.pkg" --output dist/SHA256SUMS --output target/release/js-agent --output target/release/js-mac-session --output target/release/js-mac-provision --output target/release/PROGRAMS.SHA256SUMS --output target/debug/xtask -- xtask pkg build-macos --version "$VERSION"
+        run: tools/xtask mac-farm --address "$FARM_ADDRESS" --instance "$FARM_INSTANCE" --tls "$FARM_TLS" --properties "$FARM_PROPERTIES" --scratch "$RUNNER_TEMP/mac-farm" --env MACOSX_DEPLOYMENT_TARGET=11.0 --output "dist/js-agent-$VERSION-macos-arm64.pkg" --output dist/SHA256SUMS --output target/release/js-agent --output target/release/js-mac-provision --output target/release/PROGRAMS.SHA256SUMS --output target/debug/xtask -- xtask pkg build-macos --version "$VERSION"
       - name: The fetched package is the one that was summed
         working-directory: dist
         run: sha256sum --check --strict SHA256SUMS
@@ -218,7 +218,6 @@ jobs:
           name: js-agent-macos-programs-unsigned
           path: |
             target/release/js-agent
-            target/release/js-mac-session
             target/release/js-mac-provision
             target/release/PROGRAMS.SHA256SUMS
           if-no-files-found: error

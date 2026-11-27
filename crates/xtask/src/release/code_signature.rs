@@ -2,7 +2,7 @@
 //! macOS program unless it carries the signature the release gives it, as
 //! [`super::mac_programs`] says.
 //!
-//! The release signs `js-agent`, `js-mac-session` and `js-mac-provision` with the team's
+//! The release signs `js-agent` and `js-mac-provision` with the team's
 //! Developer ID Application identity, a hardened runtime and a secure timestamp, each under
 //! its own identifier. This verb reads that back with `codesign` (behind the [`Codesign`]
 //! port, so the judgement is tested with a fake and the real adapter is the system tool),
@@ -225,7 +225,7 @@ pub fn check(tool: &dyn Codesign, binary: &Path, name: &str) -> Result<String, E
 pub struct CheckArgs {
     /// The binary to read.
     pub binary: PathBuf,
-    /// The program it must be: `js-agent`, `js-mac-session` or `js-mac-provision`.
+    /// The program it must be: `js-agent` or `js-mac-provision`.
     #[arg(long)]
     pub program: String,
     /// The `codesign` program.

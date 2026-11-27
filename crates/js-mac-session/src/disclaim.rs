@@ -1,4 +1,4 @@
-//! Starting a program: the one way the helper and the agent do it, and the one place that
+//! Starting a program: the one way the agent and the host step do it, and the one place that
 //! decides, on macOS, which process a program they start answers to for the privacy controls.
 //!
 //! macOS's privacy controls (TCC: Full Disk Access, the camera, another app's files)
@@ -8,13 +8,12 @@
 //! It answers for itself only when its starter disclaims the responsibility as it starts it
 //! (`responsibility_spawnattrs_setdisclaim` on the `posix_spawn` attributes), or when
 //! launchd starts it as a job of its own; it is then judged by its own code signature. The
-//! helper and the agent are launchd daemons and answer for themselves. The agent holds Full
-//! Disk Access (`packaging/js-agent-macos/mdm`).
+//! agent is a launchd daemon and answers for itself. It holds Full Disk Access (`packaging/js-agent-macos/mdm`).
 //!
 //! **The default: disclaimed.** A [`Program`] starts its program with the responsibility
 //! disclaimed, so the program holds none of its starter's grants: the host probes, the
 //! firewall and `launchctl` tools, the VM launcher (whether it should keep the
-//! responsibility is not decided) and every other program the agent or the helper starts.
+//! responsibility is not decided) and every other program the agent or the host step starts.
 //! A start that does not choose is this one: forgetting to choose can cost a
 //! program a read it needed, never give it a grant it should not have.
 //!
@@ -25,8 +24,7 @@
 //! With both kept, every process between the agent and the job is started without the
 //! disclaim, so the job answers for the agent and holds what the agent holds, Full Disk
 //! Access included. Its callers are the two starts of `js-agent`'s native job supervisor
-//! (`mac_supervisor`), which the agent's native runtime starts for every native job; the
-//! helper's job start (`crate::spawn`) disclaims, and the helper holds no grant to pass on. A
+//! (`mac_supervisor`), which the agent's native runtime starts for every native job. A
 //! job started disclaimed is judged by its own signature and is refused every read of the
 //! network file system mount its build trees are served from, and so are Apple's own tools
 //! it runs. What keeps a job from using the rest of the grant is the user it runs as (Unix
@@ -64,8 +62,7 @@
 //! one was refused so, `ENOENT` otherwise. The program is then its own responsible process:
 //! TCC judges it by its own code signature. Its children answer for it, as any process's
 //! do. [`exec`] does the same for a process that executes a program in its own place (the
-//! helper's `as-user` mode, the last step of a run in a GUI session), in the environment
-//! that process has.
+//! agent's in-place start of a program), in the environment that process has.
 //!
 //! Everything the child uses is made before the fork, because between `fork` and `exec`
 //! the child may not allocate. That is why the program and its arguments are fixed when
@@ -273,8 +270,7 @@ impl Program {
     }
 
     /// Sets the user id the program runs as (`CommandExt::uid`). When the caller is root,
-    /// std then calls `setgroups(0)`, which macOS turns into group 0 (`wheel`): nothing that
-    /// starts a program as a lease user uses it; they drop with the steps of `crate::spawn`.
+    /// std then calls `setgroups(0)`, which macOS turns into group 0 (`wheel`).
     pub fn uid(&mut self, id: u32) -> &mut Self {
         std::os::unix::process::CommandExt::uid(&mut self.command, id);
         self

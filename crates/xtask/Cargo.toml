@@ -64,7 +64,7 @@ ruzstd.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-# The spawn-site check (src/spawn_sites.rs) parses the agent's and the helper's source;
+# The spawn-site check (src/spawn_sites.rs) parses the source of the agent and of js-mac-session (the spawner);
 # proc-macro2's `span-locations` gives it the line of each place it reports.
 proc-macro2.workspace = true
 # `clone-impls`: tests/job_surface.rs copies the expressions of a rendered table.
@@ -101,7 +101,6 @@ js-elastic = { path = "../js-elastic" }
 js-update-hook = { path = "../js-update-hook" }
 # The plists the package carries must be flags the programs accept (tests/macos_pkg.rs).
 js-mac-provision = { path = "../js-mac-provision" }
-js-mac-session = { path = "../js-mac-session" }
 # The test definition of tests/job_surface.rs, compiled as js-proto's build script compiles
 # the job service.
 protox.workspace = true

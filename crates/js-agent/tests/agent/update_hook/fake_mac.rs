@@ -1,6 +1,5 @@
-//! A Mac's local directory and disks for the tests of the host setup: answers `dscl`,
-//! `dseditgroup` and `diskutil` as a Mac does, from a state its answers change, and looks at a
-//! path as the setup does. Everything is on device 1 except the scratch volume while it is
+//! A Mac's disks for the tests of the host setup: answers `diskutil` as a Mac does, from a state
+//! its answers change, and looks at a path as the setup does. Everything is on device 1 except the scratch volume while it is
 //! mounted on the scratch root, which is device 2; a volume that ignores ownership shows its
 //! root owned by uid 99 until `diskutil enableOwnership`.
 
@@ -13,25 +12,20 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use js_agent::update_hook::Params;
-use js_agent::update_hook::step::{
-    DATA_VOLUME, DISKUTIL, DSCL, DSEDITGROUP, PathFacts, SCRATCH_VOLUME,
-};
+use js_agent::update_hook::step::{DATA_VOLUME, DISKUTIL, PathFacts, SCRATCH_VOLUME};
 
 use super::step_rig::{Rig, Spy};
 
-/// The helper's socket group the Mac's params name.
-pub const GROUP: &str = "_jsagent";
-
-/// A Mac whose params name the helper's socket group and a scratch root: a first install
-/// (`previous` false) or an update from 1.3.0, with the state root and the scratch root
-/// `db/js-agent/state` and `db/js-agent/scratch/runs` of the rig's tree (the scratch volume's
-/// mount point is `db/js-agent/scratch`), none there yet. The params are read
-/// from the text a params file holds, with `socket_group` and `scratch_root` as its keys.
+/// A Mac whose params name a scratch root: a first install (`previous` false) or an update from
+/// 1.3.0, with the state root and the scratch root `db/js-agent/state` and
+/// `db/js-agent/scratch/runs` of the rig's tree (the scratch volume's mount point is
+/// `db/js-agent/scratch`), none there yet. The params are read from the text a params file
+/// holds, with `scratch_root` as one of its keys.
 pub fn mac_rig(name: &str, previous: bool) -> Rig {
     let mut rig = if previous {
-        Rig::mac_with_helper(name)
+        Rig::mac_package(name)
     } else {
-        Rig::mac_first_install_with_helper(name)
+        Rig::mac_first_install_package(name)
     };
     let db = rig.tmp.path().join("db/js-agent");
     let state_root = format!(
@@ -42,15 +36,13 @@ pub fn mac_rig(name: &str, previous: bool) -> Rig {
     rig.params_text = rig.params_text.replace(
         &state_root,
         &format!(
-            "state_root = \"{db}/state\"\nscratch_root = \"{db}/scratch/runs\"\n\
-             socket_group = \"{GROUP}\"\n",
+            "state_root = \"{db}/state\"\nscratch_root = \"{db}/scratch/runs\"\n",
             db = db.display()
         ),
     );
     rig.params = Params::parse(&rig.params_text).unwrap();
     assert_eq!(rig.params.state_root, db.join("state"));
     assert_eq!(rig.params.scratch_root, Some(db.join("scratch/runs")));
-    assert_eq!(rig.params.settings.socket_group.as_deref(), Some(GROUP));
     rig
 }
 
@@ -82,8 +74,6 @@ pub const QUOTA: &str = "3549G";
 pub const UUID: &str = "0E3D7A4C-5B21-4F0A-9C38-2D6E1F7B8A90";
 /// The device the scratch volume is made as.
 pub const DEVICE: &str = "disk3s7";
-/// The gid `dseditgroup` gives the first group it makes.
-pub const FIRST_GID: u32 = 501;
 /// The owner a volume that ignores ownership shows.
 pub const UNKNOWN_UID: u32 = 99;
 /// The error number of a call the system refuses (`EPERM`).
@@ -100,8 +90,6 @@ pub struct Volume {
 
 /// The Mac.
 pub struct FakeMac {
-    /// The local directory's groups and their gids.
-    pub groups: RefCell<BTreeMap<String, u32>>,
     /// The scratch volume, once it is made.
     pub volume: RefCell<Option<Volume>>,
     /// Answers given in place of the Mac's own, by the command line (`program arg arg...`).
@@ -121,14 +109,9 @@ pub struct FakeMac {
 }
 
 impl FakeMac {
-    /// A Mac with the groups every Mac has (`wheel`, `staff`, `admin`) and no scratch volume.
+    /// A Mac with no scratch volume.
     pub fn new() -> Rc<FakeMac> {
-        let groups = [("admin", 80), ("staff", 20), ("wheel", 0)]
-            .into_iter()
-            .map(|(name, gid)| (name.to_owned(), gid))
-            .collect();
         Rc::new(FakeMac {
-            groups: RefCell::new(groups),
             volume: RefCell::new(None),
             answers: RefCell::new(BTreeMap::new()),
             changes: RefCell::new(Vec::new()),
@@ -145,11 +128,6 @@ impl FakeMac {
             line.to_owned(),
             answer.map(str::to_owned).map_err(str::to_owned),
         );
-    }
-
-    /// The group `name` is there with `gid`.
-    pub fn with_group(&self, name: &str, gid: u32) {
-        self.groups.borrow_mut().insert(name.to_owned(), gid);
     }
 
     /// The scratch volume is there, as `volume`.
@@ -171,30 +149,12 @@ impl FakeMac {
     pub fn run(&self, program: &str, args: &[&str]) -> Option<Result<String, String>> {
         let line = format!("{program} {}", args.join(" "));
         if let Some(answer) = self.answers.borrow().get(&line) {
-            if answer.is_ok() && program != DSCL && !line.contains("-plist") {
+            if answer.is_ok() && !line.contains("-plist") {
                 self.change(&line);
             }
             return Some(answer.clone());
         }
         let answer = match (program, args) {
-            (DSCL, [".", "-list", "/Groups", "PrimaryGroupID"]) => Ok(self
-                .groups
-                .borrow()
-                .iter()
-                .map(|(name, gid)| format!("{name:<32} {gid}\n"))
-                .collect()),
-            (DSEDITGROUP, ["-o", "create", name]) => {
-                self.change(&line);
-                let mut groups = self.groups.borrow_mut();
-                let gid = groups
-                    .values()
-                    .copied()
-                    .filter(|gid| *gid >= FIRST_GID)
-                    .max();
-                let gid = gid.map_or(FIRST_GID, |gid| gid + 1);
-                groups.insert((*name).to_owned(), gid);
-                Ok(String::new())
-            }
             (DISKUTIL, ["info", "-plist", DATA_VOLUME]) => Ok(dictionary(&format!(
                 "<key>APFSContainerReference</key><string>{CONTAINER}</string>\
                  <key>MountPoint</key><string>{DATA_VOLUME}</string>"
@@ -248,9 +208,7 @@ impl FakeMac {
                 self.alter(|volume| volume.owners = true);
                 Ok(String::new())
             }
-            (DSCL | DSEDITGROUP | DISKUTIL, _) => {
-                Err(format!("the fake Mac has no answer to {line}"))
-            }
+            (DISKUTIL, _) => Err(format!("the fake Mac has no answer to {line}")),
             _ => return None,
         };
         Some(answer)
