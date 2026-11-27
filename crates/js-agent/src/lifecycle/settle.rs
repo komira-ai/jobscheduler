@@ -21,8 +21,10 @@ use std::time::Duration;
 /// The wait when `--settle-ms` is not given: one second.
 pub const DEFAULT_SETTLE: Duration = Duration::from_millis(1000);
 
-/// The most milliseconds `--settle-ms` takes (a minute: the agent's worker waits this long
-/// for each job whose check sees a process of a job's user).
+/// The most milliseconds `--settle-ms` takes (a minute: a job whose check sees a process of
+/// a job's user waits this long in its cleanup with its slot booked, and a re-check of a
+/// taint, a whole-node lease's checks and the checks owed at start hold the worker this
+/// long).
 pub const MAX_SETTLE_MS: u64 = 60_000;
 
 /// The wait `--settle-ms` gave, or [`DEFAULT_SETTLE`].

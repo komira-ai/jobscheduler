@@ -337,7 +337,7 @@ use crate::quota::ScratchQuota;
 
 pub use codes::{code, detail};
 pub use event::{CleanupTimeline, Event, Finding, JobBooking, LookupStamps, Skip, StartTimeline};
-pub use finding::{CHECK_DETAIL_MAX, CheckFinding, CheckNote};
+pub use finding::{CHECK_DETAIL_MAX, CheckFinding, CheckNote, Checked};
 pub use machine::{
     Lifecycle, Quiet, RETIRED_CAP, RETIRED_LISTED, Restored, RunningLease, SLOTS, Slots,
 };
@@ -421,6 +421,15 @@ pub trait CheckHook {
     /// is tainted.
     fn run(&mut self, job: &Finished<'_>) -> Result<(), CheckFinding>;
 
+    /// Checks the host after the job `job` as a step of the worker, which must not wait: the
+    /// verdict, or [`Checked::Wait`] when the checks would let the host go on for a while
+    /// before they look again. The lifecycle asks so after a job's cleanup, and asks again
+    /// for the same run once the wait has passed, with its books as they are then; that
+    /// call gives the verdict. The default is [`CheckHook::run`].
+    fn poll(&mut self, job: &Finished<'_>) -> Checked {
+        Checked::Done(self.run(job))
+    }
+
     /// Checks the host at a re-check of a taint read from the marker at start. The baseline
     /// this process took already holds what the tainting job left, so a hook that can must
     /// also judge what the baseline cannot clear (see [`crate::integrity`]). The default is
@@ -442,11 +451,12 @@ pub trait CheckHook {
         false
     }
 
-    /// What the last `run` or `run_restored` saw change that does not taint the host, drained
-    /// by the call; none by default. The lifecycle logs each as a [`Finding`] after every
-    /// call of either (after a job's checks as the job's finding, with its run id; for a
-    /// re-check or a whole-node lease's check with none), whatever it returned: a note never taints the host, holds a job or
-    /// quarantines a slot.
+    /// What the last `run`, `run_restored` or `poll` that gave a verdict saw change that
+    /// does not taint the host, drained by the call; none by default. The lifecycle logs
+    /// each as a [`Finding`] after every such call (after a job's checks as the job's
+    /// finding, with its run id; for a re-check or a whole-node lease's check with none),
+    /// whatever the verdict: a note never taints the host, holds a job or quarantines a
+    /// slot.
     fn notes(&mut self) -> Vec<CheckNote> {
         Vec::new()
     }

@@ -299,7 +299,7 @@ Read with `js-start-timeline` over that node's `journalctl -u js-agent-crun` for
   TLS connection until the server ends it. Still to measure: the start-latency gain on the farm.
 - The p99: the integrity check's settle wait (1 s, on the worker, only after a job that left a
   process or mount behind) and the image budget's first walk after a restart, both on threads a
-  start waits behind.
+  start waits behind (done in the seventh part below).
 
 ## Fourth part: a finished job's cleanup off the worker
 
@@ -394,7 +394,8 @@ the same `received->taken` row is 0 ms p50 and 3 ms p90.
 
 - The farm measurement after this agent ships: `received->taken` p50 in a burst of the same size,
   `the job worker is busy` counts, and the `Cleaned` lines' `worker_ms` against their steps.
-- The post-job checks and the owed record's syncs still run on the worker, once for each job.
+- The post-job checks and the owed record's syncs still run on the worker, once for each job (the
+  checks' settle wait no longer does: the seventh part).
 
 ## Fifth part: the held beat of a host that polls dispatch
 
@@ -539,6 +540,79 @@ nodes' measured demand fits in the pool with room to spare.
 - After deploy: the `queue_ms` of the `Started` lines, the target being a p90 under 20 ms on every
   node.
 
+## Seventh part: the checks' settle wait and the budget's first walk off a start's threads
+
+### Why, read in the code
+
+- **The settle wait slept on the worker.** The cleanup's `Stage::Checks` called `CheckHook::run`
+  on the worker's one thread (`lifecycle/machine/cleanup.rs`). When the first look of the process
+  check saw a process of the job users' range that the baseline did not have, `Integrity` slept
+  the settle wait (`--settle-ms`, 1 s by default, `ProcHost::settle`) and looked again
+  (`integrity/compare.rs`). For that second every order, start and step of the host waited.
+- **The image budget's first listing ran under the budget's turn.** `budget::load` counted the
+  images the store held (a walk of every image's tree, `disk::held_images`) the first time a pull
+  or a start's use of an image asked for it after the agent started, holding the turn every
+  admission takes. Every pull, and the first start of each image, waited behind that walk.
+
+### What this part changes
+
+- **The checks answer the wait instead of sleeping.** `CheckHook::poll` asks the checks as a step
+  that does not wait: the verdict, or `Checked::Wait(settle)` when the first look would look
+  again. `Integrity` keeps the first look's processes for the run, and the next call for that run
+  takes the second look and judges, with the lifecycle's books as they are then. The job waits in
+  `Stage::Checks` with its slot booked and its owed record on disk until the wait has passed on
+  the lifecycle's clock (`Job::checks_due`); the first step after that asks again. Meanwhile the
+  worker takes orders, starts and steps as it does for a removal that runs off it. The trait's
+  default is `run`, so the other hooks (the macOS scan, the tests' fakes) are unchanged.
+- **The budget counts the store when the runtime starts.** `CrunRuntime` runs `load` on a blocking
+  thread of its runtime as soon as its images are set up (`Images::count_held`). A start's use of
+  an image before the listing has ended takes no turn: it is the store's own `ensure` (a stat when
+  the image is there) and a use the book keeps for the listing, which gives it to the image when
+  it counts it, so the order of eviction is what it was. A pull still lists the store first when
+  the count at the start failed.
+- **The cleanup's line.** The settle wait is now in the `Cleaned` line's `checks` step and not in
+  its `worker_ms`.
+
+### Decisions
+
+- **One job's checks wait at a time.** A job that reaches its checks while another job's checks
+  wait waits too, and is checked after it, in the same step once it is done. The checks compare
+  the host with one baseline that each verdict moves; two looks interleaved would judge each
+  job against a host the other had half settled. The cost is the second job's slot, booked up to
+  one settle wait longer, never the worker.
+- **No timer.** The job is asked again by the first step after the wait has passed, and the worker
+  steps at least once each step interval (1 s), so the second look comes at most one interval
+  late on an idle host, and at once on a busy one, which steps for every order. A wake rung at the
+  wait's end would need a timer thread for a case (a process of the job user left as the job
+  ended) that is rare.
+- **The other checks keep `run` and its wait.** The re-check of a taint, a whole-node lease's
+  checks and the checks owed at start run only when no job runs (`host_idle`, `is_quiet`, before
+  the first start) and their callers need the verdict in the same call; they still wait on the
+  caller's thread.
+- **The count on a blocking thread, not a worker of the runtime.** The walk is a synchronous read of
+  the store; on a task it would take one of the runtime's two workers for as long as it lasts.
+- **A start before the listing ends does not measure its image.** It is counted by the listing when
+  it was in the store, or, when the listing ended while the start fetched it, as a pull counts it
+  (under the turn). An image a start fetched that the listing missed while it was under way is
+  counted once a pull meets it, as an image another agent on the store pulled always was.
+
+### Compatibility and failure modes
+
+- No wire, record or configuration format changes. The `Started` line is unchanged; the `Cleaned`
+  line keeps its fields, and only what its `worker_ms` holds changes, as above.
+- A restart while a job's checks wait leaves the owed record, and the next start runs the owed
+  check, as a restart during a check on the worker did.
+- A store that cannot be listed at the start is logged (`the image budget: reading the image
+  store`) and the first pull lists it again and fails with it, as before.
+- `CheckHook::poll` and `Checked` are additions to js-agent's library API, with a default, so a
+  hook written for the trait before builds and behaves as before.
+
+### What is left
+
+- After deploy: the p99 of the `Started` lines' `received->taken` on a node that runs jobs which
+  leave processes ending as they end, and the first starts after an agent restart on a node with
+  a full store, over `js-start-timeline`.
+
 ## Tests
 
 The tests drive the lifecycle with counted, ordered fakes and an injected clock; none asserts a
@@ -562,4 +636,10 @@ beat that lists no start, a drain), `held_beat_tests.rs`
 heartbeat being answered at the wake. The sixth part adds `crun/fs/lookups_tests.rs` (a start naming the
 most host paths has all its lookups running at once, a lookup past the pool's threads waits for one
 to end and its bound, lookups that hang hold no thread of the assemblies and checks), which takes
-over `fs_tests.rs`'s case of four held lookups and a fifth.
+over `fs_tests.rs`'s case of four held lookups and a fifth. The seventh part adds
+`tests/agent/integrity/poll.rs` (the first look answers the wait, the second judges, a call for
+another run looks first, a second look that cannot read the processes, what changes between the
+calls), `tests/agent/integrity/settle_steps.rs` (a job waits in its cleanup while a start takes its
+slot, the leftover that stays taints, a second job is checked after the one that waits) and
+`crun/budget_tests.rs` cases for a start before the listing (no turn and its use kept, an image the
+store lacks, a listing that ends during the fetch) and the count at the start.

@@ -103,8 +103,10 @@ its cleanup (the step after its container ended) at which the step that did each
 directories beside it are gone) and `checks` (the post-job checks passed and the slot is free).
 `worker_ms` is the time the job worker itself spent on the run's cleanup, summed over the steps.
 `crun` removes the container off the worker and the agent removes the directories off it, so their
-time is in `steps` and not in `worker_ms`; what is left in `worker_ms` (the record of the owed
-checks, the quota and the checks) is time every reply waiting in the worker's queue waited too.
+time is in `steps` and not in `worker_ms`, and so is the checks' settle wait (the job waits it out
+in its cleanup while the worker goes on); what is left in `worker_ms` (the record of the owed
+checks, the quota and the checks' looks at the host) is time every reply waiting in the worker's
+queue waited too.
 
 ## What the line does not hold
 
