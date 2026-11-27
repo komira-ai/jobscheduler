@@ -170,7 +170,9 @@ async fn submit_takes_retry_and_callback_and_refuses_bad_ones() {
 /// callback, is `job-id-conflict` (`ALREADY_EXISTS` with the refusal, 409) over both
 /// transports; one recorded with both is answered with itself when submitted again with the
 /// same ones, and is `job-id-conflict` with another `maxAttempts`, another URL or another key
-/// (which no answer shows); and the recorded jobs are unchanged. Catches a resubmit answered
+/// (which no answer shows); a bad policy or a bad key on that id is refused by its field
+/// (`INVALID_ARGUMENT`, 400) before the id is looked up, not answered as a conflict; and the
+/// recorded jobs are unchanged. Catches a resubmit answered
 /// from the stored job while it asks for another policy or callback, so its client would read
 /// the one it asked for as dropped, and a key left out of the comparison.
 #[tokio::test]
@@ -224,6 +226,33 @@ async fn a_resubmit_with_another_policy_or_callback_is_a_job_id_conflict() {
             (StatusCode::CONFLICT, json!({ "error": "job-id-conflict" })),
             "{index}"
         );
+    }
+    let bad = [
+        (
+            v1::JobSpec {
+                retry: Some(waits(3, Some(5), Some(4))),
+                ..both.clone()
+            },
+            "spec.retry.maxBackoffSeconds",
+        ),
+        (
+            v1::JobSpec {
+                callback: Some(v1::Callback {
+                    signing_key: vec![7; 31],
+                    ..callback()
+                }),
+                ..both.clone()
+            },
+            "spec.callback.signingKey: bad-length",
+        ),
+    ];
+    for (spec, field) in &bad {
+        let status = writes.submit_grpc(spec).await.unwrap_err();
+        assert_eq!(status.code(), Code::InvalidArgument, "{field}");
+        assert_eq!(status.message(), format!("field: {field}"), "{field}");
+        let (http, body) = writes.submit(Via::Json, spec).await.unwrap_err();
+        let refused = (StatusCode::BAD_REQUEST, invalid_body(field));
+        assert_eq!((http, body), refused, "{field}");
     }
     for via in Via::BOTH {
         let again = writes.submit(via, &both).await.expect("the same job");

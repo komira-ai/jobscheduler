@@ -760,6 +760,7 @@ Why this list is complete:
 
 ## 10. Implementation tasks
 
+The table is the plan the work followed; every task in it but the kbf row has landed (the `SubmitJob` refusal of task A was removed by task I).
 The interfaces land first (P7). After that, tasks in the same row of the plan can run at once, because each depends only on the agreed
 interfaces of task A.
 

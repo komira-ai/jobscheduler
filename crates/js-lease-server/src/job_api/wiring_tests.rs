@@ -284,11 +284,29 @@ async fn the_served_calls_are_the_ones_the_server_serves() {
     }
 }
 
+/// The 400 body the gateway answers for a refused `field`.
+fn invalid(field: &str) -> serde_json::Value {
+    serde_json::json!({
+        "error": "invalid-argument",
+        "field": field,
+        "reason": "the service refused an argument of the request",
+    })
+}
+
+/// The 422 body of a job no host and no catalog could ever serve: what a job that passed every
+/// check meets in a state with no host, so its check is shown passed.
+fn no_capable_host() -> (StatusCode, serde_json::Value) {
+    let body = serde_json::json!({ "error": "no-capable-host" });
+    (StatusCode::UNPROCESSABLE_ENTITY, body)
+}
+
 /// Asserts that the job service the server builds takes a job's callback over the gateway and
 /// judges it by the server's own address rule: a URL naming an address the agent side learned
 /// as the cluster's own is refused `spec.callback.url: refused-address`, and one naming another
-/// private address, which the rule admits, is taken (201). It catches a service that refuses every callback, and one
-/// that judges them by a rule of its own, blind to the addresses the server learns.
+/// private address, which the rule admits, passes every check and reaches admission (which,
+/// with no host in this state, answers `no-capable-host`). It catches a service that refuses
+/// every callback, and one that judges them by a rule of its own, blind to the addresses the
+/// server learns.
 #[tokio::test]
 async fn the_service_judges_a_callback_by_the_clusters_address_rule() {
     use super::super::writes_rig::{to_json, wire};
@@ -300,15 +318,15 @@ async fn the_service_judges_a_callback_by_the_clusters_address_rule() {
         .agents()
         .cluster
         .add_cluster_address([10, 9, 9, 9].into());
+    let refused = (
+        StatusCode::BAD_REQUEST,
+        invalid("spec.callback.url: refused-address"),
+    );
     let cases = [
-        (
-            "https://10.9.9.9/done",
-            StatusCode::BAD_REQUEST,
-            "spec.callback.url: refused-address",
-        ),
-        ("https://10.0.0.5/done", StatusCode::CREATED, ""),
+        ("https://10.9.9.9/done", refused),
+        ("https://10.0.0.5/done", no_capable_host()),
     ];
-    for (index, (url, status, field)) in cases.into_iter().enumerate() {
+    for (index, (url, answer)) in cases.into_iter().enumerate() {
         let spec = JobSpec {
             callback: Some(Callback {
                 url: url.to_owned(),
@@ -319,20 +337,15 @@ async fn the_service_judges_a_callback_by_the_clusters_address_rule() {
         };
         let request = SubmitJobRequest { spec: Some(spec) };
         let said = posted(&state, &to_json("SubmitJobRequest", &request).to_string()).await;
-        assert_eq!(said.0, status, "{url}");
-        if status == StatusCode::BAD_REQUEST {
-            assert_eq!(said.1["field"], field, "{url}");
-        } else {
-            assert_eq!(said.1["job"]["spec"]["callback"]["url"], url, "{url}");
-        }
+        assert_eq!(said, answer, "{url}");
     }
 }
 
 /// Asserts that the job service the server builds takes a job's retry policy over the gateway
 /// and reads it: one whose longest wait is below its first wait is refused at that field
-/// (`spec.retry.maxBackoffSeconds`), and one whose waits fit is taken (201) and shown. It
-/// catches a service that refuses every policy, and one that takes a policy without reading
-/// it.
+/// (`spec.retry.maxBackoffSeconds`), and one whose waits fit passes every check and reaches
+/// admission (`no-capable-host` in this state with no host). It catches a service that refuses
+/// every policy, and one that takes a policy without reading it.
 #[tokio::test]
 async fn the_service_takes_and_reads_a_retry_policy() {
     use super::super::writes_rig::{to_json, wire};
@@ -340,7 +353,11 @@ async fn the_service_takes_and_reads_a_retry_policy() {
     let dir = scratch("retry");
     let (_, jobs) = tables();
     let state = state(&dir, Some(Arc::new(jobs)));
-    for (index, (max, status)) in [(1, StatusCode::BAD_REQUEST), (5, StatusCode::CREATED)]
+    let refused = (
+        StatusCode::BAD_REQUEST,
+        invalid("spec.retry.maxBackoffSeconds"),
+    );
+    for (index, (max, answer)) in [(1, refused), (5, no_capable_host())]
         .into_iter()
         .enumerate()
     {
@@ -354,12 +371,7 @@ async fn the_service_takes_and_reads_a_retry_policy() {
         };
         let request = SubmitJobRequest { spec: Some(spec) };
         let said = posted(&state, &to_json("SubmitJobRequest", &request).to_string()).await;
-        assert_eq!(said.0, status, "{max}");
-        if status == StatusCode::BAD_REQUEST {
-            assert_eq!(said.1["field"], "spec.retry.maxBackoffSeconds", "{max}");
-        } else {
-            assert_eq!(said.1["job"]["spec"]["retry"]["maxAttempts"], 3, "{max}");
-        }
+        assert_eq!(said, answer, "{max}");
     }
 }
 

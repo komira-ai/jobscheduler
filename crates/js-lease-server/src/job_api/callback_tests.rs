@@ -38,6 +38,7 @@ use crate::callbacks::Delivery;
 use crate::callbacks::receiver::{Authority, Loopback, Receiver, status};
 use crate::clock::SharedClock;
 use crate::job_store::ServerJobs;
+use crate::logs::attempt::Attempts;
 use crate::metrics::{Meter, NoMetrics, Recorder, rendered};
 
 /// The key the redaction test's job is signed with: 40 bytes no answer, row or line may hold.
@@ -539,14 +540,16 @@ async fn beat_all(rig: &Rig, agents: &mut [FakeAgent]) {
 /// the job), and `GET /v1/jobs/{id}` then shows the job queued for its second attempt: attempt
 /// 1, one entry in its history (`HOST_LOST`, on that host, retried), a time before which it
 /// waits, and the callback still armed, and a delivery pass sends nothing. Once the backoff
-/// has passed the job is placed on the other host as attempt 2, runs and succeeds, and the
+/// has passed the job is placed on the other host as attempt 2, which the record's trail (what
+/// the start's log sink and `GetLogs` read, `Attempts::of`) shows with attempt 1 ended on the
+/// lost host; it runs and succeeds, and the
 /// read shows it succeeded, attempt 2, both attempts in its history (the second succeeded, not
 /// retried), and its callback pending with no try. One delivery pass then sends exactly one
 /// signed POST with an empty body to the path the job named, a second pass sends nothing, the
 /// read shows the callback delivered after one try, and the scrape counts one delivery. Catches
 /// a gateway that still refuses either field, a lost host that ends a job with attempts left,
 /// a retry placed on the host it failed on, a callback sent per attempt or before the final
-/// end, one never sent after it, and one sent twice.
+/// end, one never sent after it, one sent twice, and a log reader blind to the attempt.
 #[tokio::test]
 async fn a_job_whose_host_is_lost_is_retried_and_called_back_once() {
     let grace = Duration::from_millis(js_agent_wire::DEFAULT_GRACE_MS);
@@ -634,6 +637,16 @@ async fn a_job_whose_host_is_lost_is_retried_and_called_back_once() {
     }
     let again = rig.allocation(&id);
     assert_eq!(again.host.as_str(), agents[other].host);
+    // The log reader and the start's sink read the attempt from the record: attempt 2, with
+    // attempt 1 ended on the lost host.
+    let attempts = Attempts::of(&rig.job(&id));
+    assert_eq!(attempts.current, 2);
+    let ended: Vec<(u32, &str)> = attempts
+        .ended
+        .iter()
+        .map(|(n, row)| (*n, row.host.as_str()))
+        .collect();
+    assert_eq!(ended, [(1, first.as_str())]);
     assert_eq!(read_json(&writes, "lost-1").await.attempt, 2);
     agents[other].run("lost-1");
     beat_all(&rig, &mut agents).await;

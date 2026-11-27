@@ -13,7 +13,7 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-use super::{Cli, Config, TlsFiles, is_private_address};
+use super::{Cli, TlsFiles, is_private_address};
 use crate::error::StartupError;
 use crate::job_store::JobStoreSetup;
 
