@@ -255,7 +255,8 @@ fn pairs(given: &[(&str, i32)]) -> Vec<(String, i32)> {
 
 /// Asserts that the retry and attempt fields are additions in the schema: the field golden
 /// holds each row once; `JobSpec` numbers `retry` 70, after the shipped fields; `Job` numbers
-/// its attempt fields 37 to 41 with no number used twice; `JobResult`, `UsageRecord` and
+/// its attempt fields 37 to 41 (with `lost_cause` the one field after them, at 42) with no
+/// number used twice; `JobResult`, `UsageRecord` and
 /// `GetLogsRequest` number theirs 13, 24 and 6 (with `UsageRecord.memory_series` the one field
 /// after its attempt, at 25); the two enums of outcomes and states count from
 /// an unspecified zero, and `QueueStatusCode` and `JobEventKind` gained their values at their
@@ -282,6 +283,7 @@ fn the_retry_fields_are_numbered_after_the_shipped_ones() {
             ("retry_not_before_ms", 39),
             ("callback_status", 40),
             ("dropped_attempts", 41),
+            ("lost_cause", 42),
         ])
     );
     assert_eq!(
