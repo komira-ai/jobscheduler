@@ -1,6 +1,6 @@
-//! The job service with its submit taking completion callbacks, as a test builds it until the
-//! release that accepts them (`docs/design/job-retry-and-completion-callback.md`, sections 5.2,
-//! 5.5 and 7): the submit's checks of a callback, the status `GetJob` and `ListJobs` show, and
+//! The job service with its submit taking completion callbacks, judged by an address rule the
+//! test gives (`docs/design/job-retry-and-completion-callback.md`, sections 5.2, 5.5 and 7): the
+//! submit's checks of a callback, the status `GetJob` and `ListJobs` show, and
 //! the signing key kept out of every answer, row, count and log line. Deliveries run on the
 //! test's thread against loopback receivers (`crate::callbacks::receiver`).
 
@@ -26,26 +26,29 @@ use tonic::Code;
 use tonic_prost::prost::Message;
 
 use super::JobApi;
-use super::read_tests::json_of;
+use super::read_tests::{from_json, json_of};
 use super::submit::{Admission, Ctx};
 use super::tests::{TOKEN, token};
 use super::writes_rig::{CEILING, Fixed, NEVER, Via, Writes, rows, to_json, wire};
-use crate::agent_api::job_rig::{BOOKED, FakeAgent, OneClock, START_MS, clocked_rig, tables_on};
+use crate::agent_api::job_rig::{
+    BOOKED, FakeAgent, OneClock, Rig, START_MS, clocked_rig, tables_on,
+};
 use crate::api::rig::{Lines, process_sink};
 use crate::callbacks::Delivery;
 use crate::callbacks::receiver::{Authority, Loopback, Receiver, status};
 use crate::clock::SharedClock;
 use crate::job_store::ServerJobs;
+use crate::logs::attempt::Attempts;
 use crate::metrics::{Meter, NoMetrics, Recorder, rendered};
 
 /// The key the redaction test's job is signed with: 40 bytes no answer, row or line may hold.
 const KEY: &[u8; 40] = b"never-shown-callback-signing-key-0123456";
 
-/// The job service over `jobs` and `clock`, admitting every job, its submit taking callbacks
-/// judged by `rule`.
+/// The job service over `jobs` and `clock`, admitting every job, its submit judging a
+/// callback's address by `rule`.
 async fn accepting(jobs: Arc<ServerJobs>, clock: SharedClock, rule: AddressRule) -> Writes {
     let admission: Arc<dyn Admission> = Fixed::new(true);
-    let submit = Ctx::served(CEILING, admission).accepting_callbacks(rule);
+    let submit = Ctx::served(CEILING, admission).judging_callbacks_by(rule);
     Writes::over(JobApi::new(jobs, clock).with_submit(submit), token()).await
 }
 
@@ -503,4 +506,194 @@ async fn an_unreadable_status_fails_a_read_and_not_a_submit() {
     );
     let again = writes.submit_grpc(&spec).await.expect("the same job");
     assert_eq!(again.callback_status, None);
+}
+
+/// The job `id` as the gateway's `GET /v1/jobs/{id}` answers it.
+async fn read_json(writes: &Writes, id: &str) -> v1::Job {
+    let (http, body) = writes
+        .http_as(TOKEN, "GET", &format!("/v1/jobs/{id}"), None)
+        .await;
+    assert_eq!(http, StatusCode::OK, "{id}");
+    let got: GetJobResponse = from_json("jobscheduler.v1.GetJobResponse", &body);
+    got.job.expect("a job")
+}
+
+/// The state of `job`'s callback, and its tries.
+fn callback_state(job: &v1::Job) -> (v1::CallbackState, u32) {
+    let status = job.callback_status.as_ref().expect("a callback status");
+    (status.state(), status.tries)
+}
+
+/// One heartbeat of each of `agents`, their replies taken.
+async fn beat_all(rig: &Rig, agents: &mut [FakeAgent]) {
+    for agent in agents.iter_mut() {
+        let reply = rig.beat(agent).await.expect("a beat");
+        agent.take(&reply);
+    }
+}
+
+/// Asserts the whole path of a job with a retry policy and a completion callback, end to end
+/// through the JSON gateway, the job pass, the placer, two hosts' agents and a TLS receiver on
+/// loopback, on a clock only the test moves. The submit is taken (`201`), the answer shows the
+/// policy as sent and the callback with no key, and the callback is armed. The job runs on
+/// the host it is placed on; that host says hello again and lists nothing (its agent lost
+/// the job), and `GET /v1/jobs/{id}` then shows the job queued for its second attempt: attempt
+/// 1, one entry in its history (`HOST_LOST`, on that host, retried), a time before which it
+/// waits, and the callback still armed, and a delivery pass sends nothing. Once the backoff
+/// has passed the job is placed on the other host as attempt 2, which the record's trail (what
+/// the start's log sink and `GetLogs` read, `Attempts::of`) shows with attempt 1 ended on the
+/// lost host; it runs and succeeds, and the
+/// read shows it succeeded, attempt 2, both attempts in its history (the second succeeded, not
+/// retried), and its callback pending with no try. One delivery pass then sends exactly one
+/// signed POST with an empty body to the path the job named, a second pass sends nothing, the
+/// read shows the callback delivered after one try, and the scrape counts one delivery. Catches
+/// a gateway that still refuses either field, a lost host that ends a job with attempts left,
+/// a retry placed on the host it failed on, a callback sent per attempt or before the final
+/// end, one never sent after it, one sent twice, and a log reader blind to the attempt.
+#[tokio::test]
+async fn a_job_whose_host_is_lost_is_retried_and_called_back_once() {
+    let grace = Duration::from_millis(js_agent_wire::DEFAULT_GRACE_MS);
+    let step = Duration::from_secs(10);
+    let mut rig = clocked_rig("callback_after_retry", true, NEVER);
+    rig.register("host-a", true);
+    rig.register("host-b", true);
+    let mut agents = [FakeAgent::new("host-a"), FakeAgent::new("host-b")];
+    let authority = Authority::new();
+    let receiver = Receiver::start(&authority, &[status(200)]);
+    let writes = accepting(rig.jobs.clone(), rig.shared.clone(), AddressRule::new([])).await;
+    let recorder = Arc::new(Recorder::default());
+    let deliveries = delivery(&rig.jobs, &authority, &recorder);
+    let given = callback(&receiver.url("/js-done/ref-1"), &[5; 32], None);
+    let policy = v1::RetryPolicy {
+        max_attempts: 2,
+        initial_backoff_seconds: Some(30),
+        max_backoff_seconds: Some(30),
+    };
+    let request = SubmitJobRequest {
+        spec: Some(v1::JobSpec {
+            retry: Some(policy),
+            callback: Some(given.clone()),
+            ..wire("lost-1")
+        }),
+    };
+    let (http, body) = writes
+        .post("/v1/jobs", &to_json("SubmitJobRequest", &request))
+        .await;
+    assert_eq!(http, StatusCode::CREATED);
+    let made: SubmitJobResponse = from_json("jobscheduler.v1.SubmitJobResponse", &body);
+    let made = made.job.expect("a job");
+    let echoed = made.spec.clone().expect("a spec");
+    assert_eq!(
+        (echoed.retry, echoed.callback),
+        (Some(policy), Some(shown(&given)))
+    );
+    assert_eq!(made.state(), v1::JobState::Queued);
+    assert_eq!(callback_state(&made), (v1::CallbackState::Armed, 0));
+
+    // Attempt 1 is placed, taken and run.
+    let id = JobId::parse("lost-1").expect("an id");
+    rig.tick();
+    let first = rig.allocation(&id).host.as_str().to_owned();
+    let (lost, other) = match first.as_str() {
+        "host-a" => (0, 1),
+        _ => (1, 0),
+    };
+    beat_all(&rig, &mut agents).await;
+    agents[lost].run("lost-1");
+    beat_all(&rig, &mut agents).await;
+    assert_eq!(
+        read_json(&writes, "lost-1").await.state(),
+        v1::JobState::Running
+    );
+
+    // Its host says hello again and lists nothing: the attempt's host is lost, and the job is
+    // queued for attempt 2 with its callback still armed.
+    rig.advance(grace + step);
+    rig.register(&first, true);
+    agents[lost] = FakeAgent::new(&first);
+    beat_all(&rig, &mut agents).await;
+    let waiting = read_json(&writes, "lost-1").await;
+    assert_eq!(waiting.state(), v1::JobState::Queued);
+    assert_eq!(waiting.attempt, 1);
+    let ended: Vec<_> = waiting
+        .attempt_history
+        .iter()
+        .map(|a| (a.number, a.host_id.as_str(), a.outcome(), a.retried))
+        .collect();
+    assert_eq!(
+        ended,
+        [(1, first.as_str(), v1::AttemptOutcome::HostLost, true)]
+    );
+    assert!(waiting.retry_not_before_ms.is_some());
+    assert_eq!(callback_state(&waiting), (v1::CallbackState::Armed, 0));
+    assert!(!deliveries.pass(), "nothing is due at a retry");
+    assert_eq!(receiver.heads(), Vec::<String>::new());
+
+    // After the backoff, attempt 2 is placed on the other host, runs and succeeds.
+    for _ in 0..4 {
+        rig.advance(step);
+        rig.tick();
+        beat_all(&rig, &mut agents).await;
+    }
+    let again = rig.allocation(&id);
+    assert_eq!(again.host.as_str(), agents[other].host);
+    // The log reader and the start's sink read the attempt from the record: attempt 2, with
+    // attempt 1 ended on the lost host.
+    let attempts = Attempts::of(&rig.job(&id));
+    assert_eq!(attempts.current, 2);
+    let ended: Vec<(u32, &str)> = attempts
+        .ended
+        .iter()
+        .map(|(n, row)| (*n, row.host.as_str()))
+        .collect();
+    assert_eq!(ended, [(1, first.as_str())]);
+    assert_eq!(read_json(&writes, "lost-1").await.attempt, 2);
+    agents[other].run("lost-1");
+    beat_all(&rig, &mut agents).await;
+    agents[other].end("lost-1", Outcome::Succeeded, Some(0));
+    beat_all(&rig, &mut agents).await;
+    beat_all(&rig, &mut agents).await;
+    assert_eq!(rig.allocation(&id).step, AllocationStep::Freed);
+    let done = read_json(&writes, "lost-1").await;
+    assert_eq!(done.state(), v1::JobState::Succeeded);
+    assert_eq!(done.attempt, 2);
+    let outcomes: Vec<_> = done
+        .attempt_history
+        .iter()
+        .map(|a| (a.number, a.outcome(), a.retried))
+        .collect();
+    assert_eq!(
+        outcomes,
+        [
+            (1, v1::AttemptOutcome::HostLost, true),
+            (2, v1::AttemptOutcome::Succeeded, false),
+        ]
+    );
+    assert_eq!(callback_state(&done), (v1::CallbackState::Pending, 0));
+
+    // One delivery, of one bare signed POST, and none after it.
+    assert!(deliveries.pass(), "the callback is due at the final end");
+    let heads = receiver.heads();
+    assert_eq!(heads.len(), 1, "{heads:?}");
+    assert!(
+        heads[0].starts_with("POST /js-done/ref-1 HTTP/1.1\r\n"),
+        "{}",
+        heads[0]
+    );
+    for header in [
+        "webhook-id: ",
+        "webhook-timestamp: ",
+        "webhook-signature: v1,",
+    ] {
+        assert!(heads[0].contains(&format!("\r\n{header}")), "{header}");
+    }
+    assert!(!deliveries.pass(), "a delivered callback is not sent again");
+    assert_eq!(receiver.heads(), Vec::<String>::new());
+    assert_eq!(
+        callback_state(&read_json(&writes, "lost-1").await),
+        (v1::CallbackState::Delivered, 1)
+    );
+    let text = rendered(&recorder);
+    let delivered = "js_callback_deliveries_total{result=\"delivered\"} 1";
+    assert!(text.lines().any(|line| line == delivered), "{text}");
 }
