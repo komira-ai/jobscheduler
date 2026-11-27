@@ -37,7 +37,7 @@ impl Placed {
     pub(super) fn noted(mut self, attempt: &Attempt<'_>, holds: &Holds) -> Self {
         let backfilled = attempt.reserved.contains(&self.worker);
         self.placement = Placement {
-            estimate: attempt.backfill,
+            estimate: attempt.backfill.duration,
             backfilled,
             holder: holds.holder(&self.worker).filter(|_| backfilled),
         };
