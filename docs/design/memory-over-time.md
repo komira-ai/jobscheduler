@@ -10,7 +10,7 @@ Companions: [sizing.md](sizing.md) (today's flat memory booking), [cpu-over-time
 profiles) and [placement-by-load.md](placement-by-load.md) (js-sched's load test, whose flat memory guard this page
 replaces on the hosts it names and nowhere else).
 
-Code references are `path:line` on main after komira-ai/jobscheduler#1254. Labels: **READ**, read in the code there.
+Code references are `path:line` on main after komira-ai/jobscheduler#1249. Labels: **READ**, read in the code there.
 **MEASURED**, a figure measured on the farm, named where it is used. **INFERRED**, reasoned, not run. **DECIDES**, a
 number not yet measured that settles a choice. The memory shadow's counts on the farm measure each one.
 
@@ -121,7 +121,7 @@ most flat. A running job of age `a` is charged the largest of `charge(a, k)` ove
 - **No survival weighting,** as in the shadow: a job still running is charged as if it runs on.
 
 What the profile gains for this. It is learning state, rebuilt from the job records at start, as the profile is
-(`crates/js-sched-placer/src/sizes_profile.rs:20-22`). None of it is on the start path.
+(`crates/js-sched-placer/src/sizes_profile.rs:25-27`). None of it is on the start path.
 - **A window of 16 runs for whether the memory series was whole.** The existing window counts the CPU series.
 - **A window of 16 runs for the held-out check** (section 4, check 3).
 The tail figure the charge needs, each kept run's peak after 128 s, is already kept (komira-ai/jobscheduler#1254).
@@ -230,7 +230,7 @@ The stored booking is the flat number in every mode, as for CPU. It is what the 
     the store's sum, and it is at least its charge. So the test only gets stricter.
   - Placement is serial on the store's commit head ([multi-instance.md](multi-instance.md)). Two instances cannot
     overbook a host's memory between them, and a rolling update adds no race.
-  - This differs from CPU, whose store check is lifted on curve hosts (`curve_room.rs:236-252`). CPU can stay
+  - This differs from CPU, whose store check is lifted on curve hosts (`curve_room.rs:251-266`). CPU can stay
     lifted, because a CPU overlap costs a slowdown.
 - **The pass judges memory itself on a named host.** The build adds a memory-judged flag beside `set_cpu_judged`,
   so js-sched's minute-0 memory check and the booked-memory check are skipped there
@@ -243,7 +243,7 @@ The stored booking is the flat number in every mode, as for CPU. It is what the 
 ### The canary
 - **`--memory-curve-hosts`, or the file key `server.memory_curve_hosts`,** a list of host ids, read once at
   start. It mirrors `--curve-hosts` and `server.curve_hosts` (komira-ai/jobscheduler#1250), and the job service runs
-  on flags. It takes the same checks (`crates/js-lease-server/src/config/placement_curves.rs:73-95`): valid ids, no
+  on flags. It takes the same checks (`crates/js-lease-server/src/config/placement_curves.rs:75-97`): valid ids, no
   repeats, at least one.
 - **It acts only under `on`.** The server refuses at start a named host outside a non-empty `server.curve_hosts`, so
   memory goes on only where CPU curves have already run.

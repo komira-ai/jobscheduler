@@ -1,0 +1,161 @@
+# The plan of the coverage shards of .github/workflows/ci.yml, read by `cargo xtask
+# coverage-shard --plan .config/coverage-shards.toml --shard <k> --of <shards> -- <command>...`.
+#
+# The numbers are seconds one test took under coverage, measured on ci run 45933829163: the
+# duration each test printed in the log of its coverage shard. A test that took more than 100
+# seconds is named below, with its seconds. Every other test is a light test; `light-seconds` is
+# the sum of the seconds of all of them.
+#
+# The verb deals the work out by longest processing time first. The items are the named tests
+# (weight: their seconds) and `slices` equal slices of the light tests (weight: `light-seconds`
+# divided by `slices` each); heaviest first, each goes to the shard with the least load so far,
+# the lowest shard number on a tie. A shard runs the named tests it was given with one
+# `-E` filterset, then each light slice it was given with `-E 'not (<every named test>)'` and
+# `--partition slice:<j>/<slices>`.
+#
+# Every test runs in exactly one shard, by construction. A named test matches the filterset of
+# the one shard it is given, and no other: every other shard's light runs exclude it. Every other
+# test, including a test this plan names under a name it no longer has, is in the complement of
+# the named tests, which nextest cuts into `slices` slices: it is in exactly one slice, and
+# every slice is given to exactly one shard. A named test that is renamed or removed must leave
+# this file in the same change: `cargo test -p xtask --test coverage_shard` fails while an entry
+# names a test its binary's source does not have.
+#
+# To refresh the plan, read the durations of a green coverage run's shard logs (each test's
+# line `PASS [ <seconds>s ] <binary-id> <test>`), name the tests above 100 seconds with their
+# seconds, and set `light-seconds` to the sum of the seconds of all the others. `shards` is the
+# length of the `shard` matrix of the `coverage-shard` job; `slices` is at least `shards`, and a
+# multiple of it keeps the slices even.
+shards = 12
+slices = 48
+light-seconds = 4983
+
+[[heavy]]
+binary-id = "js-sim-cell::faults"
+test = "ten_of_two_hundred_agents_die_mid_run_seeds_12_to_15"
+seconds = 1562
+
+[[heavy]]
+binary-id = "js-sim-cell::faults"
+test = "a_thirty_second_partition_of_twenty_agents_loses_no_result"
+seconds = 1263
+
+[[heavy]]
+binary-id = "js-sim-cell::faults"
+test = "ten_of_two_hundred_agents_die_mid_run_seeds_4_to_7"
+seconds = 1162
+
+[[heavy]]
+binary-id = "js-sim-cell::faults"
+test = "ten_of_two_hundred_agents_die_mid_run_seeds_0_to_3"
+seconds = 1104
+
+[[heavy]]
+binary-id = "js-sim-cell::faults"
+test = "ten_of_two_hundred_agents_die_mid_run_seeds_8_to_11"
+seconds = 1101
+
+[[heavy]]
+binary-id = "js-sim-cell::faults"
+test = "a_lossy_wire_launches_every_run_once"
+seconds = 789
+
+[[heavy]]
+binary-id = "js-sim-cell::faults"
+test = "agents_killed_for_good_leave_no_booking_once_clients_release"
+seconds = 469
+
+[[heavy]]
+binary-id = "js-sim-cell::smoke"
+test = "a_lossy_agent_wire_settles_every_run"
+seconds = 440
+
+[[heavy]]
+binary-id = "js-sim-cell::whole_host"
+test = "fifty_whole_host_requests_over_twenty_hosts_are_each_held_once_and_released"
+seconds = 392
+
+[[heavy]]
+binary-id = "js-sim-cell::whole_host_prepare"
+test = "a_job_is_terminal_after_max_replace_silent_prepares_among_fifty_hosts"
+seconds = 335
+
+[[heavy]]
+binary-id = "js-sim-cell::replay"
+test = "a_seed_replays_to_the_same_trace_hash"
+seconds = 328
+
+[[heavy]]
+binary-id = "js-sim-cell::faults"
+test = "a_restart_of_the_server_with_runs_in_flight_double_books_nothing"
+seconds = 322
+
+[[heavy]]
+binary-id = "js-sim-cell::smoke"
+test = "a_hundred_hosts_settle_four_hundred_runs"
+seconds = 311
+
+[[heavy]]
+binary-id = "js-sim-cell::smoke"
+test = "a_partition_of_ten_agents_that_heals_settles_every_run"
+seconds = 299
+
+[[heavy]]
+binary-id = "js-sim-cell::whole_host_prepare"
+test = "a_refused_prepare_goes_elsewhere_for_each_refusal_reason"
+seconds = 235
+
+[[heavy]]
+binary-id = "js-sim-cell::whole_host_prepare"
+test = "a_silent_host_among_fifty_fails_the_prepare_and_the_job_goes_to_another_host"
+seconds = 217
+
+[[heavy]]
+binary-id = "js-sim-cell::faults"
+test = "a_silent_host_is_never_given_a_second_copy_of_its_run"
+seconds = 195
+
+[[heavy]]
+binary-id = "js-sim-cell::whole_host_prepare"
+test = "a_ready_report_racing_the_prepare_deadline_never_double_books"
+seconds = 185
+
+[[heavy]]
+binary-id = "js-sim-cell::replay"
+test = "the_smoke_scenario_matches_the_golden_file"
+seconds = 165
+
+[[heavy]]
+binary-id = "js-sim-cell::failover"
+test = "two_hundred_hosts_three_providers_kill_ten_agents_and_partition_thirty_seconds"
+seconds = 132
+
+[[heavy]]
+binary-id = "js-sim-cell::agreement"
+test = "fake_and_real_agents_give_the_client_the_same_outcomes_on_a_lossy_wire"
+seconds = 122
+
+[[heavy]]
+binary-id = "js-sim-cell::elastic_faults"
+test = "three_boot_failures_trip_the_brake_and_reset_clears_it"
+seconds = 115
+
+[[heavy]]
+binary-id = "js-sim-cell::whole_host_prepare"
+test = "a_job_is_terminal_after_max_replace_silent_prepares"
+seconds = 114
+
+[[heavy]]
+binary-id = "js-sim-cell::replay"
+test = "pinned_seeds_match_the_golden_file"
+seconds = 109
+
+[[heavy]]
+binary-id = "js-sim-cell::agreement"
+test = "fake_and_real_agents_give_the_client_the_same_outcomes_without_faults"
+seconds = 106
+
+[[heavy]]
+binary-id = "js-sim-cell::elastic"
+test = "an_ec2_like_pool_scales_up_to_demand_and_back_to_zero"
+seconds = 102
