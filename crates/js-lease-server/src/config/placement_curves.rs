@@ -110,9 +110,9 @@ pub(crate) fn max_wait(secs: Option<u64>) -> Result<Duration, String> {
 pub(crate) fn of_flags(cli: &Cli) -> Result<CurveSetting, StartupError> {
     let flags = &cli.curve;
     let hosts = hosts(flags.curve_hosts.as_deref())
-        .map_err(|said| StartupError::at("--curve-hosts", said))?;
+        .map_err(|said| StartupError::new("--curve-hosts", said))?;
     let max_wait = max_wait(flags.curve_max_wait_seconds)
-        .map_err(|said| StartupError::at("--curve-max-wait-seconds", said))?;
+        .map_err(|said| StartupError::new("--curve-max-wait-seconds", said))?;
     Ok(CurveSetting {
         mode: cli.placement_curves,
         settings: CurveSettings { hosts, max_wait },
@@ -193,12 +193,17 @@ mod tests {
         line.extend(["--token-file", "token", "--placement-curves", "on"]);
         line.extend_from_slice(extra);
         let cli = Cli::try_parse_from(line).unwrap();
-        of_flags(&cli).map_err(|err| err.to_string())
+        of_flags(&cli).map_err(|err| {
+            let said = err.to_string();
+            assert!(said.starts_with(&format!("{}: ", err.flag())), "{said}");
+            said
+        })
     }
 
     /// Asserts what the command line gives: the mode with every host and 30 s without the two
-    /// flags, the hosts and the wait given with them, and each flag's refusal naming the flag.
-    /// Catches a flag read from the other's value and a refusal naming the key, not the flag.
+    /// flags, the hosts and the wait given with them, and each flag's refusal naming the flag, as
+    /// its text and as the refusal's flag. Catches a flag read from the other's value and a
+    /// refusal naming the key, or the configuration file, not the flag.
     #[test]
     fn the_command_line_gives_the_mode_hosts_and_wait_or_names_the_flag() {
         let none = of_line(&[]).unwrap();
