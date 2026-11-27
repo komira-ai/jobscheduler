@@ -94,12 +94,13 @@ fn a_followed_prepare_rings_nothing_and_its_mount_rings_once() {
     assert_eq!(received(&rig.fake, Kind::Mount), 1);
 }
 
-/// Asserts that a mount that follows a prepare and fails rings after its pause, and that the
-/// ask it brings is handed the failure and sends the mount again, which then answers the
-/// directory. It catches a failed mount of the client's own that is lost, so the source waits
-/// for ever, or that is handed over and never sent again.
+/// Asserts that a mount that follows a prepare and fails rings after its pause, that the ask
+/// it brings is handed the failure and sends nothing with it, and that the next ask sends the
+/// mount again, which then answers the directory. It catches a failed mount of the client's
+/// own that is lost, so the source waits for ever, one that is never sent again, and one sent
+/// again by the client itself before the lifecycle asks.
 #[test]
-fn a_followed_mount_that_fails_is_handed_over_and_sent_again() {
+fn a_followed_mount_that_fails_is_handed_over_and_sent_again_when_asked() {
     let mut rig = rig_with(
         "pc-chain-fail",
         CallBounds {
@@ -119,6 +120,15 @@ fn a_followed_mount_that_fails_is_handed_over_and_sent_again() {
     assert_unavailable(
         &rig.client.ask(NAME, &mount("r1", 0)),
         "the fake provider is not ready",
+    );
+    assert_eq!(
+        received(&rig.fake, Kind::Mount),
+        1,
+        "not sent again by itself"
+    );
+    assert_eq!(
+        rig.client.ask(NAME, &mount("r1", 0)),
+        ProviderAnswer::Pending
     );
     rings
         .recv_timeout(GUARD)

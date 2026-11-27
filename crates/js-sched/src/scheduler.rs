@@ -504,12 +504,13 @@ impl Scheduler {
     /// run ended, for the shape guard ([`Admission::run_ended`]).
     fn release(&mut self, id: OperationId, end: RunEnd) {
         self.record_release(id);
+        let now = self.now;
         let op = self.ops.get_mut(&id).expect("released operations exist");
         if let Some((lease, worker)) = op.state.holding() {
             let held = self.held.remove(&lease);
             if let Some((w, held)) = self.workers.get_mut(worker).zip(held) {
                 w.booked = w.booked.saturating_sub(held.booked);
-                if let Some(ended) = w.load_state.remove(lease) {
+                if let Some(ended) = w.load_state.end(lease, now) {
                     self.admission.run_ended(&ended, end);
                 }
                 w.leases -= 1;
@@ -662,7 +663,7 @@ impl Scheduler {
             // granted one barred to it.
             let (barred, backoff) = self.drain.kept_off(id, now);
             let avoid = whole::Drain::avoiding(&op.avoid, &backoff);
-            let backfill = self.backfill_duration(id);
+            let backfill = self.backfill_ask(id);
             // A whole-machine request is not placed on a worker another request's mark is on.
             let takes_whole = request.kind == LeaseKind::WholeMachine && request.pin.is_none();
             let unmarked = takes_whole.then(|| self.off_marks(&reserved, id)).flatten();
