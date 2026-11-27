@@ -26,6 +26,7 @@
 --job-feed-retention default=100000 required=false
 --job-listen default=none required=false
 --job-retention default=7d required=false
+--key-share-percent default=none required=false
 --listen default=127.0.0.1:7300 required=false
 --max-connections default=256 required=false
 --max-job-wall default=none required=false
@@ -38,6 +39,8 @@
 --read-timeout default=30s required=false
 --ready-listen default=none required=false
 --require-host-credential default=none required=false values=true|false
+--score-balance default=none required=false
+--score-slack-tolerance-ppm default=none required=false
 --state-file default=none required=false
 --store default=none required=false
 --store-unreachable-after default=60s required=false
