@@ -188,7 +188,7 @@ pub fn programs(run: &str) -> Vec<String> {
     for command in run.split(['\n', ';', '|', '&', '(', ')', '`']) {
         let program = command
             .split_whitespace()
-            .map(|w| w.trim_matches(|c: char| c == '"' || c == '\''))
+            .map(|w| w.trim_matches(['"', '\'']))
             .find(|w| {
                 !w.is_empty()
                     && !(w.contains('=') && !w.starts_with('-') && !w.contains('/'))

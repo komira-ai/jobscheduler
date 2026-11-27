@@ -16,7 +16,7 @@
 //!   changed files and the one command that applies the patch to `--summary` (the job summary),
 //!   and fails, so `//:ci` is not built.
 //!
-//! Neither stops buck2's daemon: the job's last step does, however the steps ended.
+//! Neither stops buck2's daemon: a step of its own after the builds, under `if: always()`, does.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};

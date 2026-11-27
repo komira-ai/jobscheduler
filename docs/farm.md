@@ -39,7 +39,8 @@ The members listed below leave out some of these steps. The summary line must re
 
 Both buck2 commands that reach the build farm run through the buck2-farm action, under its watchdog
 (below, "A dead connection to the build farm"). Its second step fails a run that does not say
-`local: 0`. The job's last step stops buck2's daemon however the steps before it ended.
+`local: 0`. A step of its own after the builds, under `if: always()`, stops buck2's daemon however
+the steps before it ended.
 
 The files of the build, all generated or written once by `buildrules`:
 
