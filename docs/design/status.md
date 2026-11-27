@@ -1,7 +1,7 @@
 # Design status: what main builds
 
 Every page under `docs/design` that says Designed, not yet, Planned, Partly built, Open, or lists a build step, with each such claim checked
-against the code on `main` as of komira-ai/jobscheduler#1106, with the rows of the pull requests merged after it applied up to main at komira-ai/jobscheduler#1239. Each claim was read against the crate that would hold it, not matched by keyword.
+against the code on `main` as of komira-ai/jobscheduler#1106, with the rows of the pull requests merged after it applied up to main at komira-ai/jobscheduler#1252. Each claim was read against the crate that would hold it, not matched by keyword.
 The page records state; it builds nothing. A pull request that builds a row, or turns a page's tag from Designed to Built, does not edit this page: it writes the change in its body under a line `Status rows:` (the section, the claim, and the new On main and Tracking cells), and a sweep pull request applies the rows of the pull requests merged since the page was last checked (`AGENTS.md`, rule P6-status).
 
 Columns:
