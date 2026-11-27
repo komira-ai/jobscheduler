@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use js_state::fake::{Fake, Flaw};
 use js_state::{Cond, ManualClock, Txn};
-use js_types::{CpuSeries, HostId};
+use js_types::{CpuSeries, HostId, MemorySeries};
 
 use super::*;
 use crate::history::{AllocationId, Booked, DrainOutcome, Used};
@@ -54,6 +54,7 @@ fn run_row(id: &str, end: u64, run_ms: u64, granularity: u32, points: Vec<u16>) 
         cpu_series: CpuSeries::new(granularity, points, run_ms * 1_000, false),
         class: Some("build:a".to_string()),
         attempt: None,
+        memory_series: None,
     }
 }
 
@@ -117,6 +118,7 @@ fn a_run_is_written_minute_by_minute() {
             run_minutes: 3,
             node_minutes: 0,
             nodes: 1,
+            memory_series_runs: 0,
             skipped: X2Skipped::default(),
         }
     );
@@ -452,4 +454,44 @@ fn five_runs_export_to_the_text_the_reader_is_tested_on() {
     let export = x2_export(&s, 0, 200 * MIN).unwrap();
     assert_eq!(export.key_profile, KEY_PROFILE);
     assert_eq!(export.node_minute, NODE_MINUTE);
+}
+
+/// Asserts a run with a memory series holds, at each minute, the largest point of the
+/// series over that minute's seconds (in bytes, the last point for a minute with no second
+/// of the run), and is counted; and that a memory series that misses the start of the run,
+/// or has no point, leaves the run flat at its peak. Catches the series's mean taken for a
+/// peak, a minute read from the wrong points, a partial series trusted, and the counter
+/// counting every run.
+#[test]
+fn a_memory_series_gives_each_minute_its_peak() {
+    let s = store();
+    // 120 s, two seconds a point: minute 0 is points 0 to 29, minute 1 points 30 to 59.
+    let mut points = vec![100; 30];
+    points[7] = 300;
+    points.extend([50; 30]);
+    let mut with = run_row("5-1", 10 * MIN + 120_000, 120_000, 2, vec![16; 60]);
+    with.memory_series = MemorySeries::new(2, points, 120_000_000, false);
+    let mut partial = run_row("5-2", 10 * MIN + 120_000, 120_000, 2, vec![16; 60]);
+    partial.memory_series = MemorySeries::new(2, vec![7; 60], 120_000_000, true);
+    let mut empty = run_row("5-3", 10 * MIN + 120_000, 120_000, 2, vec![16; 60]);
+    empty.memory_series = MemorySeries::new(2, Vec::new(), 120_000_000, false);
+    put(&s, &[with, partial, empty]);
+    let export = x2_export(&s, 0, u64::MAX).unwrap();
+    let key = digest("build:a");
+    let mib = 1u64 << 20;
+    let mut want = format!(
+        "kp {key} any 0 120000 0 1000 {}\n\
+         kp {key} any 0 120000 1 1000 {}\n\
+         kp {key} any 0 120000 2 1000 {}\n",
+        300 * mib,
+        50 * mib,
+        50 * mib
+    );
+    for _ in 0..2 {
+        for minute in 0..3 {
+            want.push_str(&format!("kp {key} any 0 120000 {minute} 1000 1073741824\n"));
+        }
+    }
+    assert_eq!(export.key_profile, want);
+    assert_eq!(export.counts.memory_series_runs, 1);
 }

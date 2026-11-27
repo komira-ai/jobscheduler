@@ -9,7 +9,9 @@
 //! the pool at a time and compares nothing. A history row carries what the replay needs:
 //! when the run started (`actual_end - run_ms`), what it is (its class, or its profile key
 //! when it has no class), the host it ran on, the CPU second by second its host reported
-//! ([`js_types::CpuSeries`]) and the largest minute of its working set ([`Used`]).
+//! ([`js_types::CpuSeries`]), its non-file memory second by second when the host reported it
+//! ([`js_types::MemorySeries`]) and the largest minute of its working set
+//! ([`crate::history::Used`]).
 //!
 //! A row is a run of the export when it ended [`EndedReason::Released`], names a class or a
 //! profile key, was on a host, ran at least a millisecond, has what it used and a CPU series
@@ -28,8 +30,12 @@
 //!   minute (a point covers `granularity_secs` seconds, the last point what is left of the
 //!   run), in millicores, rounded down. A minute with no second of the run (the last of a
 //!   run of a whole number of minutes) holds the last point.
-//! * The working set of every minute is the run's largest ([`Used::memory_bytes`]): the
-//!   history keeps no memory series, so the export's memory is flat at the peak.
+//! * The working set of minute `m` is the largest point of the memory series over the
+//!   seconds of the run in that minute, in bytes (a minute with no second of the run holds
+//!   the last point), when the row has a memory series that starts with the run and has a
+//!   point. A row without one (an agent from before the series, or one that records none)
+//!   holds the run's largest working set ([`crate::history::Used`]'s `memory_bytes`) at
+//!   every minute: flat at the peak. [`X2Counts::memory_series_runs`] counts the first.
 //!
 //! # Node rows
 //!
@@ -43,7 +49,7 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 use js_state::Store;
-use js_types::HostId;
+use js_types::{HostId, MEMORY_SERIES_BYTES_PER_POINT};
 
 use crate::error::UsageError;
 use crate::history::{EndedHistory, EndedQuery, EndedReason, EndedRow};
@@ -91,6 +97,8 @@ pub struct X2Counts {
     pub node_minutes: u64,
     /// Hosts those lines are of.
     pub nodes: u64,
+    /// Runs whose memory is their memory series; the others are flat at their peak.
+    pub memory_series_runs: u64,
     /// History rows left out.
     pub skipped: X2Skipped,
 }
@@ -113,7 +121,10 @@ struct Run {
     wall_ms: u64,
     host: HostId,
     cores_milli: Vec<u64>,
-    ws_bytes: u64,
+    /// Bytes, one per minute.
+    ws_bytes: Vec<u64>,
+    /// Whether `ws_bytes` is the memory series's.
+    from_memory_series: bool,
 }
 
 /// FNV-1a over `bytes`.
@@ -125,27 +136,53 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     hash
 }
 
-/// The mean of `points` (each `granularity` seconds, the last one the rest of the run)
-/// over every minute of a run of `wall_ms`, in millicores: `wall_ms / 60,000 + 1` minutes.
+/// For every minute of a run of `wall_ms` (`wall_ms / 60,000 + 1` minutes), `fold` over the
+/// points of the run's seconds in that minute (point `i` covers `granularity` seconds, the
+/// last one the rest of the run), or `[last point]` for a minute with no second of the run.
 /// `points` is not empty.
-fn minute_means(points: &[u16], granularity: u64, wall_ms: u64) -> Vec<u64> {
+fn per_minute(
+    points: &[u64],
+    granularity: u64,
+    wall_ms: u64,
+    fold: impl Fn(&[u64]) -> u64,
+) -> Vec<u64> {
     let seconds = wall_ms.div_ceil(1_000);
     let last = points.len() - 1;
     let at = |second: u64| {
         let i = usize::try_from(second / granularity).map_or(last, |i| i.min(last));
-        u64::from(points[i])
+        points[i]
     };
     (0..=wall_ms / MINUTE_MS)
         .map(|minute| {
             let from = minute * 60;
             let to = (from + 60).min(seconds);
-            if from >= to {
-                return at(u64::MAX) * 1_000 / SIXTEENTHS;
-            }
-            let sum: u64 = (from..to).map(at).sum();
-            sum * 1_000 / SIXTEENTHS / (to - from)
+            let values: Vec<u64> = if from >= to {
+                vec![points[last]]
+            } else {
+                (from..to).map(at).collect()
+            };
+            fold(&values)
         })
         .collect()
+}
+
+/// The mean of a CPU series over each minute, in millicores, rounded down.
+fn minute_means(points: &[u16], granularity: u64, wall_ms: u64) -> Vec<u64> {
+    let points: Vec<u64> = points.iter().map(|p| u64::from(*p)).collect();
+    per_minute(&points, granularity, wall_ms, |v| {
+        v.iter().sum::<u64>() * 1_000 / SIXTEENTHS / v.len() as u64
+    })
+}
+
+/// The largest point of a memory series over each minute, in bytes.
+fn minute_peaks(points: &[u32], granularity: u64, wall_ms: u64) -> Vec<u64> {
+    let points: Vec<u64> = points
+        .iter()
+        .map(|p| u64::from(*p).saturating_mul(MEMORY_SERIES_BYTES_PER_POINT))
+        .collect();
+    per_minute(&points, granularity, wall_ms, |v| {
+        v.iter().copied().max().unwrap_or(0)
+    })
 }
 
 /// The run `row` makes, or the counter of the first thing it misses.
@@ -179,13 +216,26 @@ fn run_of(row: &EndedRow, skipped: &mut X2Skipped) -> Option<Run> {
     if series.partial || series.points.is_empty() {
         return miss(&mut skipped.partial_series);
     }
+    let cores_milli = minute_means(&series.points, u64::from(series.granularity_secs), wall_ms);
+    let memory = row
+        .memory_series
+        .as_ref()
+        .filter(|m| !m.partial && !m.points.is_empty());
+    let (ws_bytes, from_memory_series) = match memory {
+        Some(m) => (
+            minute_peaks(&m.points, u64::from(m.granularity_secs), wall_ms),
+            true,
+        ),
+        None => (vec![used.memory_bytes; cores_milli.len()], false),
+    };
     Some(Run {
         digest: fnv1a(key.as_bytes()),
         start_ms: row.actual_end.saturating_sub(wall_ms),
         wall_ms,
         host: host.clone(),
-        cores_milli: minute_means(&series.points, u64::from(series.granularity_secs), wall_ms),
-        ws_bytes: used.memory_bytes,
+        cores_milli,
+        ws_bytes,
+        from_memory_series,
     })
 }
 
@@ -235,14 +285,15 @@ fn paged(
     let mut key_profile = String::new();
     for run in &runs {
         let start = run.start_ms - zero_ms;
-        for (minute, cores) in run.cores_milli.iter().enumerate() {
+        for (minute, (cores, ws)) in run.cores_milli.iter().zip(&run.ws_bytes).enumerate() {
             let _ = writeln!(
                 key_profile,
-                "kp {:016x} {X2_PLATFORM} {start} {} {minute} {cores} {}",
-                run.digest, run.wall_ms, run.ws_bytes
+                "kp {:016x} {X2_PLATFORM} {start} {} {minute} {cores} {ws}",
+                run.digest, run.wall_ms
             );
         }
         counts.run_minutes += run.cores_milli.len() as u64;
+        counts.memory_series_runs += u64::from(run.from_memory_series);
     }
     counts.runs = runs.len() as u64;
 
