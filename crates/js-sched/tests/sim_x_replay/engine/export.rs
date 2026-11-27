@@ -524,23 +524,6 @@ pub fn read_dir(dir: &Path) -> Result<Export, ReadError> {
     Ok(Export { profile, nodes })
 }
 
-/// Reads the runner's flags: `--export <dir>`, given once, and nothing else.
-pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<PathBuf, String> {
-    let mut dir = None;
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--export" => {
-                let value = args.next().ok_or("--export needs a directory")?;
-                if dir.replace(PathBuf::from(value)).is_some() {
-                    return Err("--export given twice".to_string());
-                }
-            }
-            other => return Err(format!("unknown argument {other:?}")),
-        }
-    }
-    dir.ok_or_else(|| "--export is required".to_string())
-}
-
 /// A run's mean cores times its time in each minute, in ms of CPU.
 fn cpu_ms(run: &Run) -> u64 {
     let mut total: u128 = 0;
