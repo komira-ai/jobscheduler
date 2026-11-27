@@ -58,6 +58,7 @@ mod job_hosts;
 mod job_listen;
 mod job_port;
 mod job_retention;
+mod job_store_verb;
 mod job_wall;
 mod jobs_support;
 mod joins;

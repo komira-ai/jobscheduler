@@ -18,6 +18,14 @@
 //! copy or is not there; a `kept.making` that is found is what a killed step left, and is
 //! removed. It is removed the same way: renamed to `kept.making`, then removed.
 //!
+//! The copy is reached through the descriptor the step's [`Held`](super::Held) opened and
+//! checked the state directory as ([`StateDir`]), never by the directory's path: it is made
+//! (`mkdirat`), its files written and read (`openat`, a link not followed), renamed
+//! (`renameat`) and removed (`unlinkat`, walking the tree without following a link) relative to
+//! that descriptor, and the directory synced through it. The steps run as root, so a state
+//! directory moved and replaced by a link after the check redirects none of it. The paths in an
+//! error are only the names the copy is reported by.
+//!
 //! A file is put back by writing a file beside it (`.<name>.js-agent-config-restore`), giving it
 //! its owner, group and mode, syncing it and renaming it over the path, then syncing the
 //! directory, so the path holds the file that was there or the kept one and never a part of
@@ -25,11 +33,18 @@
 //! kept is not written.
 
 use std::collections::BTreeSet;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt, lchown};
+use std::os::fd::{AsFd, BorrowedFd};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt, lchown};
 use std::path::{Path, PathBuf};
 
+use rustix::fs::{
+    AtFlags, Dir, FileType, Mode, OFlags, fsync, mkdirat, openat, renameat, statat, unlinkat,
+};
+use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
 
 /// The kept copy's directory in the state directory.
@@ -79,6 +94,76 @@ fn at(path: &Path) -> impl FnOnce(io::Error) -> KeptError + '_ {
     }
 }
 
+/// An `Io` error at `path` from the system's answer, for `map_err`.
+fn errno_at(path: &Path) -> impl FnOnce(Errno) -> KeptError + '_ {
+    |errno: Errno| at(path)(errno.into())
+}
+
+/// How a directory of the copy is opened: a directory, a link not followed, not inherited by a
+/// child.
+const DIR_FLAGS: OFlags = OFlags::RDONLY
+    .union(OFlags::DIRECTORY)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
+
+/// How a file of the copy is read: a link not followed, not inherited by a child.
+const READ_FLAGS: OFlags = OFlags::RDONLY
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
+
+/// How a file of the copy is written: made new (never one that is there, nor through a link),
+/// not inherited by a child.
+const NEW_FLAGS: OFlags = OFlags::WRONLY
+    .union(OFlags::CREATE)
+    .union(OFlags::EXCL)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
+
+/// The state directory the copy is in: the descriptor the step's lock holds, checked when it
+/// was opened, and the path it is reported by.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct StateDir<'a> {
+    /// The directory, as it was opened and checked ([`Held::dir_fd`](super::Held)).
+    pub fd: BorrowedFd<'a>,
+    /// Its name in what the step tells.
+    pub path: &'a Path,
+}
+
+/// A file of the copy: the file `name` of the copy's directory `dir`, reported as `path`.
+struct Bytes<'a> {
+    dir: BorrowedFd<'a>,
+    name: String,
+    path: PathBuf,
+}
+
+impl<'a> Bytes<'a> {
+    /// The file `name` of `dir`, which is reported as `dir_path`.
+    fn new(dir: BorrowedFd<'a>, dir_path: &Path, name: String) -> Bytes<'a> {
+        Bytes {
+            dir,
+            path: dir_path.join(&name),
+            name,
+        }
+    }
+
+    /// The file, open to read.
+    fn open(&self) -> io::Result<File> {
+        let fd = openat(self.dir, self.name.as_str(), READ_FLAGS, Mode::empty())?;
+        Ok(File::from(fd))
+    }
+
+    /// The file, made new (owner read and write) and open to write.
+    fn create(&self) -> io::Result<File> {
+        let fd = openat(
+            self.dir,
+            self.name.as_str(),
+            NEW_FLAGS,
+            Mode::RUSR | Mode::WUSR,
+        )?;
+        Ok(File::from(fd))
+    }
+}
+
 /// What the index says: an entry per path, in the order the bytes are numbered.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -107,7 +192,7 @@ enum Kept {
 
 impl Kept {
     /// Whether `path`, which is `now`, is what was kept (a file's bytes kept as `bytes`).
-    fn is_at(&self, path: &Path, now: &fs::Metadata, bytes: &Path) -> io::Result<bool> {
+    fn is_at(&self, path: &Path, now: &fs::Metadata, bytes: &Bytes<'_>) -> io::Result<bool> {
         let owner = (now.uid(), now.gid());
         match self {
             Kept::File { mode, uid, gid } => {
@@ -115,7 +200,7 @@ impl Kept {
                 if file_now != (true, *mode, (*uid, *gid)) {
                     return Ok(false);
                 }
-                same_bytes(&mut File::open(path)?, &mut File::open(bytes)?)
+                same_bytes(&mut File::open(path)?, &mut bytes.open()?)
             }
             Kept::Link { target, uid, gid } => {
                 let target_now = if now.file_type().is_symlink() {
@@ -129,7 +214,7 @@ impl Kept {
     }
 
     /// Makes what was kept at `temp`, which is not there (a file's bytes kept as `bytes`).
-    fn make_at(&self, temp: &Path, bytes: &Path) -> io::Result<()> {
+    fn make_at(&self, temp: &Path, bytes: &Bytes<'_>) -> io::Result<()> {
         match self {
             Kept::File { mode, uid, gid } => write_file(temp, bytes, *mode, *uid, *gid),
             Kept::Link { target, uid, gid } => std::os::unix::fs::symlink(target, temp)
@@ -220,17 +305,40 @@ pub(super) fn placed(
     Ok(paths.into_iter().collect())
 }
 
-/// Syncs the directory `dir`, so that what was renamed or removed in it stays so.
+/// Syncs the host directory `dir`, so that what was renamed in it stays so.
 fn sync_dir(dir: &Path) -> Result<(), KeptError> {
     File::open(dir).and_then(|d| d.sync_all()).map_err(at(dir))
 }
 
-/// Removes the directory `dir` and what is in it; nothing when it is not there.
-fn remove(dir: &Path) -> Result<(), KeptError> {
-    match fs::remove_dir_all(dir) {
-        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(at(dir)(e)),
-        _ => Ok(()),
+/// Removes the directory `name` of `parent`, reported as `path`, and what is in it, walking
+/// down through descriptors without following a link; nothing when it is not there. A link or
+/// a file at `name` is not removed: it is an error.
+fn remove_tree(parent: BorrowedFd<'_>, name: &OsStr, path: &Path) -> Result<(), KeptError> {
+    let dir = match openat(parent, name, DIR_FLAGS, Mode::empty()) {
+        Err(Errno::NOENT) => return Ok(()),
+        opened => opened.map_err(errno_at(path))?,
+    };
+    // The names first and the removals after: a directory read while it is changed may skip
+    // an entry.
+    let mut names = Vec::new();
+    for entry in Dir::read_from(&dir).map_err(errno_at(path))? {
+        let entry = entry.map_err(errno_at(path))?;
+        let entry = OsStr::from_bytes(entry.file_name().to_bytes());
+        if entry != "." && entry != ".." {
+            names.push(entry.to_owned());
+        }
     }
+    for entry in names {
+        let below = path.join(&entry);
+        let seen =
+            statat(&dir, entry.as_os_str(), AtFlags::SYMLINK_NOFOLLOW).map_err(errno_at(&below))?;
+        if FileType::from_raw_mode(seen.st_mode) == FileType::Directory {
+            remove_tree(dir.as_fd(), entry.as_os_str(), &below)?;
+        } else {
+            unlinkat(&dir, entry.as_os_str(), AtFlags::empty()).map_err(errno_at(&below))?;
+        }
+    }
+    unlinkat(parent, name, AtFlags::REMOVEDIR).map_err(errno_at(path))
 }
 
 /// Where the copy in `state_dir` is.
@@ -238,20 +346,28 @@ pub(super) fn dir_of(state_dir: &Path) -> PathBuf {
     state_dir.join(KEPT)
 }
 
-/// Whether there is a copy in `state_dir`.
-pub(super) fn exists(state_dir: &Path) -> Result<bool, KeptError> {
-    let kept = state_dir.join(KEPT);
-    kept.try_exists().map_err(at(&kept))
+/// Whether there is a copy in `state`: anything at its name, a link not followed.
+pub(super) fn exists(state: StateDir<'_>) -> Result<bool, KeptError> {
+    match statat(state.fd, KEPT, AtFlags::SYMLINK_NOFOLLOW) {
+        Err(Errno::NOENT) => Ok(false),
+        seen => seen.map(|_| true).map_err(errno_at(&state.path.join(KEPT))),
+    }
 }
 
-/// Removes the copy in `state_dir`, and what a killed step left of one.
-pub(super) fn discard(state_dir: &Path) -> Result<(), KeptError> {
-    let (kept, making) = (state_dir.join(KEPT), state_dir.join(MAKING));
-    remove(&making)?;
-    if exists(state_dir)? {
-        fs::rename(&kept, &making).map_err(at(&kept))?;
-        sync_dir(state_dir)?;
-        remove(&making)?;
+/// Syncs the state directory, so that what was renamed in it stays so.
+fn sync_state(state: StateDir<'_>) -> Result<(), KeptError> {
+    fsync(state.fd).map_err(errno_at(state.path))
+}
+
+/// Removes the copy in `state`, and what a killed step left of one.
+pub(super) fn discard(state: StateDir<'_>) -> Result<(), KeptError> {
+    let making = state.path.join(MAKING);
+    remove_tree(state.fd, OsStr::new(MAKING), &making)?;
+    if exists(state)? {
+        let kept = state.path.join(KEPT);
+        renameat(state.fd, KEPT, state.fd, MAKING).map_err(errno_at(&kept))?;
+        sync_state(state)?;
+        remove_tree(state.fd, OsStr::new(MAKING), &making)?;
     }
     Ok(())
 }
@@ -265,7 +381,7 @@ fn meta_at(path: &Path) -> io::Result<Option<fs::Metadata>> {
 }
 
 /// What is at `path` now, the bytes of a file written to `bytes`.
-fn keep_one(path: &Path, bytes: &Path) -> Result<Option<Kept>, KeptError> {
+fn keep_one(path: &Path, bytes: &Bytes<'_>) -> Result<Option<Kept>, KeptError> {
     let Some(meta) = meta_at(path).map_err(at(path))? else {
         return Ok(None);
     };
@@ -286,15 +402,10 @@ fn keep_one(path: &Path, bytes: &Path) -> Result<Option<Kept>, KeptError> {
         .custom_flags(libc::O_NOFOLLOW)
         .open(path)
         .map_err(at(path))?;
-    let mut to = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(bytes)
-        .map_err(at(bytes))?;
+    let mut to = bytes.create().map_err(at(&bytes.path))?;
     io::copy(&mut from, &mut to)
         .and_then(|_| to.sync_all())
-        .map_err(at(bytes))?;
+        .map_err(at(&bytes.path))?;
     Ok(Some(Kept::File {
         mode: meta.mode() & 0o7777,
         uid,
@@ -302,31 +413,27 @@ fn keep_one(path: &Path, bytes: &Path) -> Result<Option<Kept>, KeptError> {
     }))
 }
 
-/// Writes `body` as the new file `path`, synced.
-fn write_new(path: &Path, body: &[u8]) -> Result<(), KeptError> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(at(path))?;
-    io::Write::write_all(&mut file, body)
-        .and_then(|()| file.sync_all())
-        .map_err(at(path))
+/// Writes `body` as the new file `file`, synced.
+fn write_new(file: &Bytes<'_>, body: &[u8]) -> Result<(), KeptError> {
+    let mut written = file.create().map_err(at(&file.path))?;
+    io::Write::write_all(&mut written, body)
+        .and_then(|()| written.sync_all())
+        .map_err(at(&file.path))
 }
 
-/// Keeps what is at each of `paths` in `state_dir`, as `kept/`, in place of a copy that is
-/// there.
-pub(super) fn keep(state_dir: &Path, paths: &[PathBuf]) -> Result<(), KeptError> {
-    discard(state_dir)?;
-    let making = state_dir.join(MAKING);
-    fs::DirBuilder::new()
-        .mode(0o700)
-        .create(&making)
-        .map_err(at(&making))?;
+/// Keeps what is at each of `paths` in `state`, as `kept/`, in place of a copy that is there.
+pub(super) fn keep(state: StateDir<'_>, paths: &[PathBuf]) -> Result<(), KeptError> {
+    discard(state)?;
+    let making_path = state.path.join(MAKING);
+    mkdirat(state.fd, MAKING, Mode::RWXU).map_err(errno_at(&making_path))?;
+    let making = openat(state.fd, MAKING, DIR_FLAGS, Mode::empty());
+    let making = making.map_err(errno_at(&making_path))?;
     let mut entries = Vec::with_capacity(paths.len());
     for (n, path) in paths.iter().enumerate() {
-        let was = keep_one(path, &making.join(n.to_string()))?;
+        let was = keep_one(
+            path,
+            &Bytes::new(making.as_fd(), &making_path, n.to_string()),
+        )?;
         entries.push(Entry {
             path: path.clone(),
             was,
@@ -336,15 +443,15 @@ pub(super) fn keep(state_dir: &Path, paths: &[PathBuf]) -> Result<(), KeptError>
         schema: INDEX_SCHEMA,
         entries,
     };
-    let path = making.join(INDEX);
+    let file = Bytes::new(making.as_fd(), &making_path, INDEX.to_owned());
     let body = serde_json::to_vec_pretty(&index)
         .map_err(io::Error::other)
-        .map_err(at(&path))?;
-    write_new(&path, &body)?;
-    sync_dir(&making)?;
-    let kept = state_dir.join(KEPT);
-    fs::rename(&making, &kept).map_err(at(&kept))?;
-    sync_dir(state_dir)
+        .map_err(at(&file.path))?;
+    write_new(&file, &body)?;
+    fsync(&making).map_err(errno_at(&making_path))?;
+    let kept = state.path.join(KEPT);
+    renameat(state.fd, MAKING, state.fd, KEPT).map_err(errno_at(&kept))?;
+    sync_state(state)
 }
 
 /// Whether the files `a` and `b` hold the same bytes.
@@ -363,15 +470,15 @@ fn temp_of(path: &Path) -> Result<(PathBuf, &Path), KeptError> {
             what: "names no file in a directory",
         });
     };
-    let mut temp = std::ffi::OsString::from(".");
+    let mut temp = OsString::from(".");
     temp.push(name);
     temp.push(RESTORE_SUFFIX);
     Ok((dir.join(temp), dir))
 }
 
 /// Writes the file kept as `bytes` at `temp`, its owner, group and mode as kept, synced.
-fn write_file(temp: &Path, bytes: &Path, mode: u32, uid: u32, gid: u32) -> io::Result<()> {
-    let mut from = File::open(bytes)?;
+fn write_file(temp: &Path, bytes: &Bytes<'_>, mode: u32, uid: u32, gid: u32) -> io::Result<()> {
+    let mut from = bytes.open()?;
     let mut to = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -386,7 +493,7 @@ fn write_file(temp: &Path, bytes: &Path, mode: u32, uid: u32, gid: u32) -> io::R
 }
 
 /// Puts what was kept back at `path` (a file's bytes kept as `bytes`); whether it wrote anything.
-fn put_one(path: &Path, kept: &Kept, bytes: &Path) -> Result<bool, KeptError> {
+fn put_one(path: &Path, kept: &Kept, bytes: &Bytes<'_>) -> Result<bool, KeptError> {
     let now = meta_at(path).map_err(at(path))?;
     let same = match &now {
         Some(now) => kept.is_at(path, now, bytes).map_err(at(path))?,
@@ -406,15 +513,20 @@ fn put_one(path: &Path, kept: &Kept, bytes: &Path) -> Result<bool, KeptError> {
     Ok(true)
 }
 
-/// Puts the copy in `state_dir` back, path by path; `None` when there is no copy. The copy is
-/// left where it is.
-pub(super) fn put_back(state_dir: &Path) -> Result<Option<PutBack>, KeptError> {
-    if !exists(state_dir)? {
+/// Puts the copy in `state` back, path by path; `None` when there is no copy. The copy is left
+/// where it is.
+pub(super) fn put_back(state: StateDir<'_>) -> Result<Option<PutBack>, KeptError> {
+    if !exists(state)? {
         return Ok(None);
     }
-    let kept = state_dir.join(KEPT);
-    let path = kept.join(INDEX);
-    let text = fs::read(&path).map_err(at(&path))?;
+    let kept_path = state.path.join(KEPT);
+    let kept = openat(state.fd, KEPT, DIR_FLAGS, Mode::empty()).map_err(errno_at(&kept_path))?;
+    let file = Bytes::new(kept.as_fd(), &kept_path, INDEX.to_owned());
+    let mut text = Vec::new();
+    file.open()
+        .and_then(|mut opened| opened.read_to_end(&mut text))
+        .map_err(at(&file.path))?;
+    let path = file.path;
     let index: Index = serde_json::from_slice(&text)
         .map_err(io::Error::other)
         .map_err(at(&path))?;
@@ -428,10 +540,13 @@ pub(super) fn put_back(state_dir: &Path) -> Result<Option<PutBack>, KeptError> {
     for (n, entry) in index.entries.iter().enumerate() {
         let list = match &entry.was {
             None => &mut done.absent,
-            Some(was) => match put_one(&entry.path, was, &kept.join(n.to_string()))? {
-                true => &mut done.written,
-                false => &mut done.same,
-            },
+            Some(was) => {
+                let bytes = Bytes::new(kept.as_fd(), &kept_path, n.to_string());
+                match put_one(&entry.path, was, &bytes)? {
+                    true => &mut done.written,
+                    false => &mut done.same,
+                }
+            }
         };
         list.push(entry.path.clone());
     }

@@ -1,7 +1,9 @@
 //! `--placement-curves` and `server.placement_curves`: whether the placement engine learns
-//! per-class profiles in shadow or books by them, and `server.curve_hosts` and
-//! `server.curve_max_wait_seconds`, which have no flags. These tests read the flag and the key and their refusals;
-//! what the engine does with the mode is tested in `js-sched-placer`.
+//! per-class profiles in shadow or books by them, and `--curve-hosts` and
+//! `--curve-max-wait-seconds`, or `server.curve_hosts` and `server.curve_max_wait_seconds`. These
+//! tests read the flags and the keys and their refusals; what the engine does with the mode is
+//! tested in `js-sched-placer`, and what a server started on the flags places in
+//! `js-lease-server`'s `config/placement_curves_canary_tests.rs`.
 
 use std::ffi::OsString;
 use std::time::Duration;
@@ -285,4 +287,116 @@ fn the_host_list_books_the_hosts_it_names_only() {
     let named = curve_settings("curves_named", "curve_hosts = [\"h-1\"]").unwrap();
     assert!(named.hosts.books(&HostId::new("h-1").unwrap()));
     assert!(!named.hosts.books(&HostId::new("h-2").unwrap()));
+}
+
+/// The curve settings the flags `extra` give a server over [`POOL`], or the refusal.
+fn flag_settings(name: &str, extra: &[&str]) -> Result<CurveSettings, String> {
+    let scratch = Scratch::new(name);
+    parsed(args(&scratch, extra)).map(|config| config.curve_settings())
+}
+
+/// Asserts that the flags give what the keys give for the same values, in every mode: neither
+/// is every host and 30 s; `--curve-hosts h-1,h-2` (and the flag given twice, once for each
+/// host) with `--curve-max-wait-seconds 45` is `curve_hosts = ["h-1", "h-2"]` with
+/// `curve_max_wait_seconds = 45`; the wait bound's two ends, 0 and 300, are read as given; and
+/// the flags are read under `off` and `shadow` as under `on`. Catches a flag that is not read, a
+/// list split on anything but a comma, a repeated flag that keeps only its last value, and a
+/// flag read only under `on`.
+#[test]
+fn the_curve_flags_give_what_the_keys_give() {
+    let none = flag_settings("curve_flags_none", &[]).unwrap();
+    assert_eq!(none, curve_settings("curve_keys_none", "").unwrap());
+    assert_eq!(none, CurveSettings::default());
+    for mode in ["off", "shadow", "on"] {
+        let key = format!(
+            "placement_curves = \"{mode}\"\ncurve_hosts = [\"h-1\", \"h-2\"]\ncurve_max_wait_seconds = 45"
+        );
+        let from_key = curve_settings("curve_keys_given", &key).unwrap();
+        assert_eq!(from_key.hosts, hosts(&["h-1", "h-2"]), "{mode}");
+        for hosts_given in [
+            &["--curve-hosts", "h-1,h-2"][..],
+            &["--curve-hosts", "h-1", "--curve-hosts", "h-2"],
+        ] {
+            let mut extra = vec!["--placement-curves", mode, "--curve-max-wait-seconds", "45"];
+            extra.extend_from_slice(hosts_given);
+            let from_flags = flag_settings("curve_flags_given", &extra).unwrap();
+            assert_eq!(from_flags, from_key, "{mode} {hosts_given:?}");
+        }
+    }
+    for secs in ["0", "300"] {
+        let from_flag = flag_settings("curve_flags_wait", &["--curve-max-wait-seconds", secs]);
+        let key = format!("curve_max_wait_seconds = {secs}");
+        let from_key = curve_settings("curve_keys_wait", &key).unwrap();
+        assert_eq!(from_flag.unwrap(), from_key, "{secs}");
+    }
+}
+
+/// Asserts that each value the keys refuse, the flags refuse with the same text after the flag's
+/// name: a host named twice (in one value, and in the flag given twice), an empty name, a name
+/// that is not a host id (a capital; 64 characters), each quoting the name, and a wait bound of
+/// 301. Asserts too that a wait bound that is not a whole number (`30.5`, `x`) is refused by the
+/// command line naming the flag. Catches a flag that skips a check of the keys, a refusal that
+/// does not name the flag or the bad name, and a wait bound past 300 that is read.
+#[test]
+fn the_curve_flags_refuse_what_the_keys_refuse_naming_the_flag() {
+    let long = "a".repeat(64);
+    let long_key = format!("curve_hosts = [\"{long}\"]");
+    let host_cases: [(Vec<&str>, &str); 5] = [
+        (vec!["--curve-hosts", "a,a"], "curve_hosts = [\"a\", \"a\"]"),
+        (
+            vec!["--curve-hosts", "a", "--curve-hosts", "a"],
+            "curve_hosts = [\"a\", \"a\"]",
+        ),
+        (
+            vec!["--curve-hosts", "a,,b"],
+            "curve_hosts = [\"a\", \"\", \"b\"]",
+        ),
+        (
+            vec!["--curve-hosts", "mac-1,Host"],
+            "curve_hosts = [\"mac-1\", \"Host\"]",
+        ),
+        (vec!["--curve-hosts", &long], &long_key),
+    ];
+    for (flags, key) in host_cases {
+        let by_key = curve_settings("curve_keys_bad", key).unwrap_err();
+        let reason = by_key.strip_prefix("server.curve_hosts: ").unwrap();
+        let by_flag = flag_settings("curve_flags_bad", &flags).unwrap_err();
+        assert_eq!(by_flag, format!("--curve-hosts: {reason}"), "{flags:?}");
+    }
+    let named = flag_settings("curve_flags_named", &["--curve-hosts", "Host"]).unwrap_err();
+    assert_eq!(
+        named,
+        "--curve-hosts: host id \"Host\" must be 1 to 63 characters of [a-z0-9._-]"
+    );
+    let wait = flag_settings("curve_flags_wait_bad", &["--curve-max-wait-seconds", "301"]);
+    let by_key = curve_settings("curve_keys_wait_bad", "curve_max_wait_seconds = 301");
+    assert_eq!(
+        by_key.unwrap_err(),
+        "server.curve_max_wait_seconds: must be from 0 to 300"
+    );
+    assert_eq!(
+        wait.unwrap_err(),
+        "--curve-max-wait-seconds: must be from 0 to 300"
+    );
+    for bad in ["30.5", "x"] {
+        let said = flag_settings("curve_flags_wait_text", &["--curve-max-wait-seconds", bad]);
+        let said = said.unwrap_err();
+        assert!(
+            said.contains("'--curve-max-wait-seconds <SECONDS>'"),
+            "{bad}: {said}"
+        );
+    }
+}
+
+/// Asserts that each curve flag without `--agent-pool-config` is refused naming that one, as
+/// `--placement-curves` is. Catches a flag accepted where nothing reads it.
+#[test]
+fn the_curve_flags_refuse_a_start_with_no_pool() {
+    let scratch = Scratch::new("curve_flags_no_pool");
+    for (flag, value) in [("--curve-hosts", "h-1"), ("--curve-max-wait-seconds", "45")] {
+        let mut bare = crate::support::without_agent_pool(&scratch);
+        bare.extend([flag, value].map(OsString::from));
+        let said = parsed(bare).err().unwrap();
+        assert_eq!(said, format!("{flag}: requires --agent-pool-config"));
+    }
 }
