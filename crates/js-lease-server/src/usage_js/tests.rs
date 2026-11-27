@@ -314,6 +314,8 @@ fn a_store_that_cannot_be_opened_or_read_refuses_the_start() {
         profile_store_bytes: 1 << 20,
         history_retention_days: 90,
         names: no_names(),
+        instance: InstanceTag::started(0, 1, 0),
+        prune_duty: None,
     };
     let err = open(&setup, None, 0)
         .err()
@@ -374,6 +376,8 @@ fn the_usage_file_keeps_ended_allocations_for_the_retention_days() {
         profile_store_bytes: 1 << 20,
         history_retention_days: 2,
         names: no_names(),
+        instance: InstanceTag::started(0, 1, 0),
+        prune_duty: None,
     };
     let sink = open(&setup, None, 0).unwrap();
     let now_minute = 10 * MINUTES_PER_DAY;
@@ -439,4 +443,169 @@ fn a_page_of_the_history_is_read_from_the_store() {
     let second = sink.ended_rows_after(&next).unwrap();
     assert_eq!(ids(Ok(second.rows)), ["1-3"]);
     assert_eq!(second.next, None);
+}
+
+/// Two servers' sinks over one store, each written as its own instance, with a job store of
+/// its own over the same store for the `usage-prune` duty.
+struct Pair {
+    clock: Arc<ManualClock>,
+    store: Arc<dyn Store>,
+    sinks: [NodeUsage; 2],
+}
+
+/// The handle of a server's job store over `store`.
+fn jobs_over(store: &Arc<dyn Store>) -> Arc<ServerJobs> {
+    let ids = crate::job_store::ServerIds::random();
+    Arc::new(js_jobs::JobStore::new(Arc::new(Arc::clone(store)), ids).unwrap())
+}
+
+fn pair(names: NameMap) -> Pair {
+    let clock = Arc::new(ManualClock::default());
+    let store: Arc<dyn Store> = Arc::new(Fake::with_flaw(clock.clone(), Flaw::None));
+    let sink = |nth: u32| {
+        NodeUsage::over(Arc::clone(&store), 1 << 20, 0, names.clone())
+            .unwrap()
+            .as_instance(InstanceTag::started(0, 1, nth))
+            .with_prune_duty(Some(jobs_over(&store)))
+    };
+    let sinks = [sink(0), sink(1)];
+    Pair {
+        clock,
+        store,
+        sinks,
+    }
+}
+
+/// Asserts that a host-minute two servers measured (the host moved between them within the
+/// minute) keeps both parts: the first server's flush puts its part in the hour's pack, the
+/// second's puts its own part in its instance row beside it, and a read of either server
+/// folds them to the higher figures. The pack alone still holds the first part, which is what
+/// a release before this one reads. It catches a later flush that replaces the minute, which
+/// leaves the second part alone (300 millicores, not 800).
+#[test]
+fn two_servers_keep_both_parts_of_a_host_minute() {
+    let Pair { store, sinks, .. } = pair(no_names());
+    let [first, second] = &sinks;
+    first.observe(&host(), 1, &reading(1, 10, 10), limits(), 100);
+    first.observe(&host(), 1, &reading(2, 20, 18), limits(), 100);
+    second.observe(&host(), 1, &reading(1, 30, 30), limits(), 100);
+    second.observe(&host(), 1, &reading(2, 40, 33), limits(), 100);
+    assert_eq!(first.flush(101).unwrap()[0].1.cpu_millis, 800);
+    assert_eq!(second.flush(101).unwrap()[0].1.cpu_millis, 300);
+
+    for sink in [first, second] {
+        let rows = sink.range(&host(), 0, 200);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            (rows[0].minute, rows[0].cpu_millis, rows[0].ws_max_bytes),
+            (100, 800, 4096)
+        );
+    }
+    let keys: Vec<String> = store
+        .scan_prefix(js_usage::store::NODE_PREFIX)
+        .unwrap()
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect();
+    let mine = InstanceTag::started(0, 1, 1);
+    assert_eq!(
+        keys,
+        [
+            js_usage::store::node_key(&host(), 1),
+            js_usage::store::instance_key(&host(), 1, &mine),
+        ]
+    );
+    let pack = store
+        .get(&js_usage::store::node_key(&host(), 1))
+        .unwrap()
+        .unwrap();
+    let pack = js_usage::minute::decode_hour(1, &pack.value).unwrap();
+    assert_eq!(pack.len(), 1);
+    assert_eq!(pack[0].cpu_millis, 800, "the pack holds the first part");
+}
+
+/// Writes one stored minute of `host()` at wall minute 0, long past retention at the prunes
+/// below.
+fn old_minute(store: &Arc<dyn Store>) {
+    NodeSeries::new(&**store)
+        .append(
+            &host(),
+            &[js_usage::NodeMinute {
+                minute: 0,
+                cpu_millis: 1,
+                ws_max_bytes: 1,
+                leases: 0,
+            }],
+        )
+        .unwrap();
+}
+
+/// Asserts that of two servers sharing the store and its job store, only the one that claims
+/// the `usage-prune` duty deletes in a period: the first server's prune deletes the old
+/// minute, the second's in the same period leaves one written since, and once the period has
+/// passed by the store's clock the second's deletes it. The second server's own half runs at
+/// every prune though: a key idle past the staleness limit loses its curve at the prune that
+/// was not claimed. It catches a prune every server runs (the second's first prune would
+/// delete), and one whose claim also skips the curves' day.
+#[test]
+fn only_the_server_that_claims_the_usage_prune_deletes() {
+    let Pair {
+        clock,
+        store,
+        sinks,
+    } = pair(named("Build/Pool-1", "est.row-1"));
+    let [first, second] = &sinks;
+    let late = js_usage::NODE_RETENTION_MINUTES + 120;
+    old_minute(&store);
+    first.prune(late).unwrap();
+    assert!(
+        first.range(&host(), 0, 200).is_empty(),
+        "the claimant deleted"
+    );
+
+    old_minute(&store);
+    let key = ProfileKey::parse("est.row-1").unwrap();
+    for minute in 0..3 {
+        finished(second, &key, minute);
+    }
+    let curves = second.curves().unwrap();
+    assert!(curves.curve(&work()).is_some());
+    let stale = 1440 * (js_usage::STALE_DAYS + 5);
+    second.prune(stale).unwrap();
+    assert_eq!(second.range(&host(), 0, 200).len(), 1, "not claimed: kept");
+    assert!(curves.curve(&work()).is_none(), "its own half ran");
+
+    clock.advance(USAGE_PRUNE_PERIOD);
+    second.prune(stale).unwrap();
+    assert!(
+        second.range(&host(), 0, 200).is_empty(),
+        "claimed a period on"
+    );
+}
+
+/// Asserts that a prune whose claim of the duty cannot be committed deletes nothing and fails
+/// with the store's fault, and that the next prune with the store back claims and deletes. It
+/// catches a claim whose failure is read as claimed (every server would delete while the
+/// store fails), and one that is swallowed.
+#[test]
+fn a_prune_whose_claim_fails_deletes_nothing_and_says_so() {
+    let fail = Arc::new(AtomicBool::new(false));
+    let flaky = Flaky {
+        inner: Fake::with_flaw(Arc::new(ManualClock::default()), Flaw::None),
+        fail: fail.clone(),
+        scan_fails: false,
+    };
+    let store: Arc<dyn Store> = Arc::new(flaky);
+    let sink = NodeUsage::over(Arc::clone(&store), 1 << 20, 0, no_names())
+        .unwrap()
+        .with_prune_duty(Some(jobs_over(&store)));
+    old_minute(&store);
+    let late = js_usage::NODE_RETENTION_MINUTES + 120;
+    fail.store(true, Ordering::SeqCst);
+    let err = sink.prune(late).unwrap_err();
+    assert!(err.0.contains("down"), "{err}");
+    fail.store(false, Ordering::SeqCst);
+    assert_eq!(sink.range(&host(), 0, 200).len(), 1);
+    sink.prune(late).unwrap();
+    assert!(sink.range(&host(), 0, 200).is_empty());
 }
