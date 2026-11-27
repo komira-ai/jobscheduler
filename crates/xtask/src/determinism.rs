@@ -857,13 +857,6 @@ pub const ALLOWED: &[Allowed] = &[
         reason: "the log uploader's wall clock behind js_logstore::Clock; the cell's agents upload no logs",
     },
     Allowed {
-        file: "crates/js-mac-session/src/macos/admin.rs",
-        item: "MacAdmin::now",
-        token: Token::SystemTimeNow,
-        sites: 1,
-        reason: "the macOS admin port's clock; macOS-only code the cell never builds a host of",
-    },
-    Allowed {
         file: "crates/js-mac-session/src/macos/host.rs",
         item: "MacHost::now",
         token: Token::SystemTimeNow,

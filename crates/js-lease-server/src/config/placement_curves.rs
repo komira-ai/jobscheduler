@@ -34,8 +34,9 @@ pub(crate) struct CurveSetting {
 }
 
 /// The flags of the live curve mode's canary and wait bound, the flags of `server.curve_hosts`
-/// and `server.curve_max_wait_seconds`. Both are read in every mode and act only under
-/// `--placement-curves on`; both need `--agent-pool-config`.
+/// and `server.curve_max_wait_seconds`. Both are read in every mode and book only under
+/// `--placement-curves on` (under `shadow`, `--curve-hosts` names the hosts its log line judges
+/// by curve); both need `--agent-pool-config`.
 #[derive(Debug, Clone, Default, Args)]
 pub struct CurveFlags {
     /// The hosts that book by curve under `--placement-curves on`, as host ids separated by

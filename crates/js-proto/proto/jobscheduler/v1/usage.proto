@@ -58,6 +58,11 @@ message UsageRecord {
   CpuSeries cpu_series = 23;
   // The attempt of the job the booking was for, from 1. Absent: 1.
   optional uint32 attempt = 24;
+  // The job's non-file memory second by second over its run, as its host's agent reported
+  // it. Absent: the agent reported none (an agent from before it, or one started without
+  // --memory-series), or the series it sent was not well formed. A reader from before the
+  // field skips it as unknown.
+  MemorySeries memory_series = 25;
 }
 
 // A job's CPU over its run: at most 128 points, each the mean CPU of the job over
@@ -70,6 +75,29 @@ message CpuSeries {
   uint32 granularity_secs = 1;
   // The mean CPU of each span of the run, in sixteenths of a core: 16 is one core busy for
   // the whole span. At most 128 points; each at most 65535.
+  repeated uint32 points = 2;
+  // The job's run as its agent measured it, in microseconds.
+  uint64 run_usec = 3;
+  // The series misses the start of the run: the agent adopted the run after a restart of
+  // its own and began to record it then.
+  bool partial = 4;
+}
+
+// A job's non-file memory over its run: at most 128 points, each the most the job held over
+// granularity_secs seconds of its run, in order from its start. Non-file memory is what the
+// job's control group held that the kernel cannot drop to make room: its anonymous and kernel
+// memory, its shared memory and its tmpfs pages (memory.current less the file pages that are
+// not shared memory, from memory.stat), and none of the page cache of the files it read, which
+// the kernel can drop. On a Mac it is the physical footprint of the job's processes together.
+// The agent samples it about once a second. A run starts at one second a point; each time it
+// outlasts its points, neighbouring points are combined in pairs by their maximum and the
+// granularity doubles, so the largest point is the most any sample saw. The last point covers
+// what is left of the run after the others. Kept as the agent reported it.
+message MemorySeries {
+  // The seconds each point covers: a power of two, 1, 2, 4, 8 and so on.
+  uint32 granularity_secs = 1;
+  // The most non-file memory of each span of the run, in MiB (1,048,576 bytes) rounded up.
+  // At most 128 points.
   repeated uint32 points = 2;
   // The job's run as its agent measured it, in microseconds.
   uint64 run_usec = 3;
