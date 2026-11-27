@@ -1,7 +1,8 @@
 //! The rules of `farm.yml` ([`super::farm`]), the farm lane: the one job that holds
 //! `id-token: write` on a pull request, and only under its exact `if:`; farm-connect pinned by
 //! commit with exactly the variables it is given; the triggers, the runner, the rights, and the
-//! build through `cargo xtask farm-build` after farm-connect; and no other workflow's job holding
+//! upload of a stale table's patch (the steps that reach the farm and the time limits are
+//! `farm_steps_tests`); and no other workflow's job holding
 //! the token on a pull request but under a push to main or a manual run, a check of the `if:`'s
 //! conjuncts that follows the calls of other workflows, the signer artifacts.yml's one holder
 //! besides its calls, and macos-farm.yml's token jobs that run no repository code. Each rule is
@@ -9,9 +10,10 @@
 //! problems the lint reports.
 
 use super::farm::{
-    BUILD_RUN, CONNECT_INPUTS, FARM_CONNECT, FILE, JOB_IF, ON_PROBLEM, PATCH_ARTIFACT, RUNNER,
+    CONNECT_INPUTS, FARM_CONNECT, FILE, JOB_IF, ON_PROBLEM, PATCH_ARTIFACT, RUNNER,
     TOP_PERMISSIONS_PROBLEM, UPLOAD_IF, patch_file, problems, token_problems, upload_inputs,
 };
+use super::farm_steps::TABLE_RUN;
 use super::support::{in_job, text_of, workflows};
 use super::yaml;
 
@@ -156,16 +158,20 @@ fn no_other_scope_is_held_by_the_job_or_the_file() {
 
 #[test]
 fn farm_connect_is_pinned_by_a_full_lowercase_commit() {
-    // Catches: farm-connect at a branch, a short commit or a commit in capitals.
+    // Catches: farm-connect at a branch, a short commit or a commit in capitals (each also another
+    // commit than the one buck2-farm and its tool are of, farm_steps' rule).
     let pin = pinned();
     let (_, sha) = pin.split_once('@').expect("a ref");
     let says =
         format!("job build: {FARM_CONNECT} must be pinned to a 40-digit lowercase commit SHA");
+    let other = format!(
+        "job build: step 15 uses {FARM_CONNECT} at another commit than KOMIRA_COMMIT ({sha})"
+    );
     let capitals = sha.to_uppercase();
     for at in ["main", &sha[..7], capitals.as_str()] {
         assert_eq!(
             problems_with(&pin, &format!("{FARM_CONNECT}@{at}")),
-            std::slice::from_ref(&says),
+            [says.clone(), other.clone()],
             "{at}"
         );
     }
@@ -179,15 +185,14 @@ fn exactly_one_step_uses_farm_connect() {
     let lookalike = pin.replace(FARM_CONNECT, &format!("{FARM_CONNECT}-v2"));
     assert_eq!(
         problems_with(&pin, &lookalike),
-        [
-            format!("job build: exactly one step must use {FARM_CONNECT}"),
-            "job build: the build does not come after the farm-connect step".to_owned(),
-        ]
+        [format!(
+            "job build: exactly one step must use {FARM_CONNECT}"
+        )]
     );
     let twice = with(
         "      - name: Connect to the build farm\n",
         &format!(
-            "      - uses: {pin}\n        with:\n          farm-address: elsewhere\n      - name: Connect to the build farm\n"
+            "      - uses: {pin}\n        timeout-minutes: 30\n        with:\n          farm-address: elsewhere\n      - name: Connect to the build farm\n"
         ),
     );
     assert_eq!(
@@ -219,37 +224,10 @@ fn farm_connect_takes_exactly_its_variables() {
     }
 }
 
-#[test]
-fn the_job_runs_farm_build_of_ci_after_farm_connect() {
-    // Catches: a build of another target, a plain `buck2 build` that checks no `local: 0`, or the
-    // build moved before the join (it would find no farm).
-    let no_build = format!("job build: no step runs `{BUILD_RUN}`");
-    for other in [
-        BUILD_RUN.replace("//:ci", "//:lint"),
-        "buck2 build //:ci".to_owned(),
-    ] {
-        assert_eq!(
-            problems_with(BUILD_RUN, &other),
-            std::slice::from_ref(&no_build),
-            "{other}"
-        );
-    }
-    let build = format!(
-        "      - name: buck2 build //:ci on the build farm, local 0\n        run: {BUILD_RUN}\n"
-    );
-    let moved = with(&build, "").replace(
-        "      - name: Connect to the build farm\n",
-        &format!("{build}      - name: Connect to the build farm\n"),
-    );
-    assert_eq!(
-        problems_of(&moved),
-        ["job build: the build does not come after the farm-connect step"]
-    );
-}
-
 /// The upload step of the committed file.
 const UPLOAD_STEP: &str = "      - name: Upload the regenerated build table as a patch
         if: ${{ failure() }}
+        timeout-minutes: 10
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: buildrules-sync
@@ -259,10 +237,10 @@ const UPLOAD_STEP: &str = "      - name: Upload the regenerated build table as a
 ";
 
 #[test]
-fn the_build_writes_the_patch_the_upload_takes() {
-    // Catches: the build step writing the patch to one file and the upload taking another, so a
+fn the_table_check_writes_the_patch_the_upload_takes() {
+    // Catches: the table's check writing the patch to one file and the upload taking another, so a
     // stale table's summary names an artifact that holds nothing.
-    assert!(BUILD_RUN.contains(&format!("--patch \"{}\"", patch_file(true))));
+    assert!(TABLE_RUN.contains(&format!("--patch \"{}\"", patch_file(true))));
     assert_eq!(
         upload_inputs().get("path").map(String::as_str),
         Some(patch_file(false).as_str())
@@ -280,8 +258,8 @@ fn the_build_writes_the_patch_the_upload_takes() {
 #[test]
 fn the_patch_is_uploaded_once_after_a_failed_build_under_its_name() {
     // Catches: no upload of the patch, two of them, one under another artifact name (the summary's
-    // command would download nothing), one before the build (there is no patch yet), one that
-    // runs on a passing build only or always, and one of another file or kept another time.
+    // command would download nothing), one before the table's check (there is no patch yet), one
+    // that runs on a passing build only or always, and one of another file or kept another time.
     let none = format!(
         "job build: exactly one step must upload the artifact {PATCH_ARTIFACT} with \
          actions/upload-artifact@<commit>"
@@ -309,7 +287,7 @@ fn the_patch_is_uploaded_once_after_a_failed_build_under_its_name() {
     assert_eq!(
         problems_of(&moved),
         [format!(
-            "job build: the upload of {PATCH_ARTIFACT} does not come after the build"
+            "job build: the upload of {PATCH_ARTIFACT} does not come after the table's check"
         )]
     );
     let wrong_if = format!(
