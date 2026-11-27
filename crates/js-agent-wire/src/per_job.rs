@@ -162,8 +162,9 @@ pub struct JobStartSpec {
     pub command: Vec<String>,
     /// What runs from the image ([`RunSpec`]), as [`crate::JobSpec::run`]: checked by
     /// [`RunSpec::validate`], and `command` is then empty (refused `invalid-job` naming
-    /// `command` otherwise). An agent of this version runs no `run` yet and answers it
-    /// `run-unsupported`, as for a run start. Absent when there is none.
+    /// `command` otherwise). A Mac agent with a bundle store runs it from the bundle the
+    /// image resolves to; any other agent answers it `run-unsupported`, as for a run start.
+    /// Absent when there is none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<RunSpec>,
     /// The operating system of the image manifest the digest pins, as

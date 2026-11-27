@@ -208,8 +208,9 @@ pub struct JobSpec {
     /// `image` (one without is refused `invalid-image`) and never beside `native` (refused
     /// `invalid-job` naming `run`); the job's own `args` are then empty. The program may be
     /// `@bundle/<entrypoint>`, an entrypoint of the bundle the image resolves to. An agent
-    /// from before the field ignores it, so a server sends it only to a host that reported
-    /// the `one-job` capability ([`crate::ONE_JOB_CAPABILITY`]).
+    /// from before the field ignores it, so a server sends a `run` only to a host that
+    /// reported the `one-job` capability ([`crate::ONE_JOB_CAPABILITY`]), in a job start
+    /// ([`crate::JobStartSpec`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<RunSpec>,
     /// The operating system of the image manifest the digest pins (`linux`, `macos`).
