@@ -399,20 +399,65 @@ fn the_live_jobs_follow_the_live_allocations_and_are_read_until_they_start() {
     assert!(placer.engine().book.live.is_empty());
 }
 
-/// Asserts that nothing is read or kept of the live jobs under `off` and `shadow`: the pass reads
-/// no job record (the store sees no read) and the engine keeps no live job. Catches a store read
-/// added to the modes that book flat.
+/// Asserts what is read and kept of the live jobs under `off` and `shadow`: under `off` the pass
+/// reads no job record (the store sees no read) and the engine keeps no live job; under `shadow`,
+/// which judges each placement by the tables `on` would build, it reads the live job's record and
+/// keeps it, as `on` does. Catches a store read added to `off`, and a shadow that judges by
+/// tables with no live job in them.
 #[test]
-fn the_modes_that_book_flat_read_no_live_job() {
-    for curves in [Curves::Off, Curves::Shadow] {
+fn off_reads_no_live_job_and_shadow_reads_them_as_on_does() {
+    for (curves, kept) in [(Curves::Off, 0), (Curves::Shadow, 1)] {
         let tables = Tables::new();
         let (placer, _) = placer_in(curves, CurveSettings::default());
         let row = running(&tables, ("started", "early"), (1_000, true));
         let _ = tables.store.take_reads();
         placer.read_live_curves(&tables.jobs, &[row]);
-        assert_eq!(tables.store.take_reads(), Vec::new(), "{curves:?}");
-        assert!(placer.engine().book.live.is_empty());
+        assert_eq!(
+            tables.store.take_reads().is_empty(),
+            kept == 0,
+            "{curves:?}"
+        );
+        assert_eq!(placer.engine().book.live.len(), kept, "{curves:?}");
     }
+}
+
+/// Asserts the decide-in-shadow line through whole passes over the job tables: a host `a` whose
+/// three running jobs of 30 000 m (90 000 m, read from the store) leave a job of `early` room by
+/// its flat 1000 m but not by its burst of 22 000 m at slot 10; under `off` and `shadow` the pass
+/// commits the job on `a` alike, and only `shadow` logs that its curve would place it on no host,
+/// naming `a` as its flat host and slot 10. Catches a shadow pass that places or commits otherwise
+/// than `off`, and one whose tables miss the live jobs the store holds.
+#[test]
+fn a_shadow_pass_commits_as_off_does_and_logs_a_job_its_curve_fits_on_no_host() {
+    let mut passes = Vec::new();
+    for curves in [Curves::Off, Curves::Shadow] {
+        let tables = Tables::new();
+        let (placer, _) = placer_in(curves, CurveSettings::default());
+        let early = burst_at(20, 352, 140);
+        teach(placer.engine().sizes(), &tables, ("early", 24), &early);
+        for at in 0..3 {
+            running(&tables, (&format!("fill-{at}"), "fill"), (30_000, true));
+        }
+        queued_of(&tables, "next", "early");
+        let (lines, _guard) = capture_targets();
+        let done = pass(&placer, &tables, offering(96_800), &Counting::default());
+        let said = lines.taken().into_iter();
+        let said: Vec<String> = said
+            .filter(|line| line.contains("would place it differently"))
+            .collect();
+        passes.push((done, said));
+    }
+    let next = vec![JobId::parse("next").unwrap()];
+    assert_eq!(passes[0], (next.clone(), Vec::new()));
+    assert_eq!(
+        passes[1],
+        (
+            next,
+            vec![
+                " INFO js_sched_placer::sizes::profile: a job's curve booking would place it differently job=next class=early flat_host=a slot=10".to_owned()
+            ]
+        )
+    );
 }
 
 /// Asserts what a job whose record cannot be read is charged: a read of the store that fails is

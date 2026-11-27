@@ -1,6 +1,6 @@
 # Scheduling on CPU use over time
 
-Status: design for review. Built so far: the replay (`crates/js-cpu-replay`), step 1 (record) and step 2 (learn in shadow, `--placement-curves shadow`); step 4 and the checks of step 3 are built as [placement-profiles-live.md](placement-profiles-live.md) revised them, behind `--placement-curves on`; the decide-in-shadow part of step 3 is not built. Companion to
+Status: design for review. Built so far: the replay (`crates/js-cpu-replay`), step 1 (record) and step 2 (learn in shadow, `--placement-curves shadow`); step 4 and the checks of step 3 are built as [placement-profiles-live.md](placement-profiles-live.md) revised them, behind `--placement-curves on`; the decide-in-shadow part of step 3 is built under `--placement-curves shadow` (placement-profiles-live.md section 4). Companion to
 [sizing.md](sizing.md) (how a class's CPU is booked) and [placement-by-load.md](placement-by-load.md) (the
 load rule and the time profiles designed for leases, never wired to jobs).
 
@@ -443,7 +443,7 @@ negative and fades; each release reads the other's results.
   (REPLAY).
 - **Measured host load alone:** it lags and cannot read above the cores.
 - **A pressure gate and a start charge only:** the lightest design; it drops the owner's idea before there is data.
-  Its gate is designed in shadow (step 3, not built).
+  Its gate is designed in shadow (step 3, whose decide-in-shadow line is built under `--placement-curves shadow`).
 - **Others:** sampled recording (starves rare classes); `js-sched`'s minute slots (unused by jobs); a one-second
   heartbeat (more passes); CPU quotas or cpusets and memory curves (against the owner's rulings).
 - **Killing, throttling or moving a running job on a wrong estimate:** ruled out by the owner.

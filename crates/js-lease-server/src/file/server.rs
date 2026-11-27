@@ -565,7 +565,8 @@ fn read_pack_limit(s: &mut Section) -> Result<Option<PackLimit>, StartupError> {
 /// `placement_curves`, the key of `--placement-curves`: `"off"`, `"shadow"` or `"on"`, read as
 /// the flag reads its text; absent, `off`. With it `curve_hosts`, an array of host ids (absent:
 /// every host), and `curve_max_wait_seconds`, a whole number from 0 to 300 (absent: 30), which
-/// have no flags, are read in every mode and act only under `on`.
+/// have no flags, are read in every mode and book only under `on` (`shadow` judges the hosts
+/// `curve_hosts` names by curve, for its log line alone).
 fn read_curves(s: &mut Section) -> Result<CurveSetting, StartupError> {
     let text = s.string("placement_curves")?;
     let read = text.as_deref().map(parse_curves).transpose();

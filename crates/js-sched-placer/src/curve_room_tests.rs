@@ -24,7 +24,7 @@ use crate::sizes::curve_rig::{
 };
 
 /// The farm time of the walks, in milliseconds.
-const NOW_MS: u64 = 5_000_000;
+pub(super) const NOW_MS: u64 = 5_000_000;
 
 const MIB: u64 = 1 << 20;
 const GIB: u64 = 1 << 30;
@@ -41,7 +41,7 @@ fn shape() -> Shape {
 }
 
 /// An engine in mode `curves` that books by curve as `curve` says, over the hosts `names`.
-fn engine_in(settings: Settings, curve: CurveSettings, names: &[&str]) -> Engine {
+pub(super) fn engine_in(settings: Settings, curve: CurveSettings, names: &[&str]) -> Engine {
     let mut engine = Engine::build(settings, at(0)).with_curve_settings(curve);
     for name in names {
         engine.host_up(&host(name), &shape(), at(0));
@@ -50,7 +50,7 @@ fn engine_in(settings: Settings, curve: CurveSettings, names: &[&str]) -> Engine
 }
 
 /// The settings of mode `curves`.
-fn mode(curves: Curves) -> Settings {
+pub(super) fn mode(curves: Curves) -> Settings {
     Settings {
         curves,
         ..Settings::default()
@@ -58,7 +58,7 @@ fn mode(curves: Curves) -> Settings {
 }
 
 /// Teaches the engine's history the classes `early` and `late` (24 runs each).
-fn teach_bursts(engine: &mut Engine, tables: &Tables) {
+pub(super) fn teach_bursts(engine: &mut Engine, tables: &Tables) {
     teach(
         engine.sizes(),
         tables,
@@ -75,7 +75,7 @@ fn teach_bursts(engine: &mut Engine, tables: &Tables) {
 
 /// The live allocation `name` of `flat` millicores on `on`, as the pass holds it: of the class of
 /// `class` (`None`: its record is not read) and `age_ms` old at [`NOW_MS`] (`None`: not started).
-fn live(
+pub(super) fn live(
     engine: &mut Engine,
     on: &str,
     (name, flat): (&str, u64),
@@ -116,7 +116,7 @@ fn reading(seq: u64, used: u64) -> NodeLoad {
 
 /// Walks `queued` over the hosts `names`, all open and each heard from at `now_ms` first: where
 /// each job was placed and the jobs that were not, with whether a host could run them.
-fn walk(
+pub(super) fn walk(
     engine: &mut Engine,
     queued: &[JobRecord],
     (names, now_ms): (&[&str], u64),
@@ -302,7 +302,7 @@ fn only_the_hosts_the_settings_name_are_judged_by_curve() {
 
 /// A class `steady` that uses 4 cores for its first 100 s and a quarter core after, over runs of
 /// 140 s: 3000 m flat, and a quarter core booked once a job is 100 s old.
-fn steady(engine: &mut Engine, tables: &Tables) -> JobRecord {
+pub(super) fn steady(engine: &mut Engine, tables: &Tables) -> JobRecord {
     teach(
         engine.sizes(),
         tables,
@@ -313,7 +313,7 @@ fn steady(engine: &mut Engine, tables: &Tables) -> JobRecord {
 }
 
 /// Thirty-two jobs of `steady` of 3000 m each, 110 s old, on `names`.
-fn old_steady(engine: &mut Engine, names: &[&str], model: &JobRecord) {
+pub(super) fn old_steady(engine: &mut Engine, names: &[&str], model: &JobRecord) {
     for name in names {
         for at in 0..32 {
             let job = (&format!("{name}-old-{at:02}")[..], 3_000);

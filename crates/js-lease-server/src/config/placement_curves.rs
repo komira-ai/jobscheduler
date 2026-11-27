@@ -13,8 +13,8 @@ use js_sched_placer::sizes::Curves;
 use crate::config::Config;
 
 /// The curve mode of the placement engine: its `mode` (`--placement-curves`, or
-/// `server.placement_curves`) and the `settings` that act only under `on`
-/// (`server.curve_hosts` and `server.curve_max_wait_seconds`, which have no flags).
+/// `server.placement_curves`) and the `settings` that book under `on` and that `shadow` judges
+/// by (`server.curve_hosts` and `server.curve_max_wait_seconds`, which have no flags).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct CurveSetting {
     /// `off` unless given.
@@ -26,7 +26,8 @@ pub(crate) struct CurveSetting {
 impl Config {
     /// The hosts that book by curve and the wait bound (`server.curve_hosts` and
     /// `server.curve_max_wait_seconds`): every host and 30 s unless the file names others.
-    /// They act only when [`Config::placement_curves`] is `on`.
+    /// They book only when [`Config::placement_curves`] is `on`; under `shadow` the hosts are
+    /// the ones its log line judges by curve.
     #[must_use]
     pub fn curve_settings(&self) -> CurveSettings {
         self.agents.curves.settings.clone()

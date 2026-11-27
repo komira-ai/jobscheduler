@@ -144,7 +144,9 @@
 //! weighs. Under [`Curves::On`] the placer reads a class's profile once the class passes its
 //! four checks ([`JobSizes::curve_of`]) and tests a job that leaves its CPU at 0 against the
 //! hosts by the class's CPU over the job's age, not by its sized number alone
-//! (`docs/design/placement-profiles-live.md`); a job that names its CPU books it flat.
+//! (`docs/design/placement-profiles-live.md`); a job that names its CPU books it flat. Under
+//! [`Curves::Shadow`] the placer reads the same curve only to log where it would have placed
+//! the job (`Engine::judge_in_shadow`), and places by the sized number.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -315,11 +317,9 @@ pub struct JobSizes {
     /// otherwise, when a freed job is taught at once.
     held: Option<Held>,
     /// The CPU and memory profiles learned in shadow and on, a pair for each class; `None` with
-    /// [`Curves::Off`]. Nothing the sizes book reads them; [`JobSizes::curve_of`] reads them
-    /// under [`Curves::On`].
+    /// [`Curves::Off`]. Nothing the sizes book reads them; [`JobSizes::curve_of`] reads them,
+    /// for the placer to book by under [`Curves::On`] and to judge by under [`Curves::Shadow`].
     profiles: Option<profile::Profiles>,
-    /// The mode the profiles are kept for: what [`JobSizes::curve_of`] answers by.
-    curves: Curves,
 }
 
 /// The freed jobs a teaching of the ended jobs holds until it is taught ([`Teaching`]).
@@ -376,7 +376,6 @@ impl JobSizes {
     #[must_use]
     pub fn with_curves(mut self, curves: Curves) -> Self {
         self.profiles = (curves != Curves::Off).then(profile::Profiles::default);
-        self.curves = curves;
         self
     }
 

@@ -30,7 +30,7 @@ Columns:
 | Page | Rows | Built | Partly | Not built | New issues |
 |---|---|---|---|---|---|
 | multi-instance.md | 29 | 2 | 6 | 17 | komira-ai/jobscheduler#1136, komira-ai/jobscheduler#1137, komira-ai/jobscheduler#1138, komira-ai/jobscheduler#1139, komira-ai/jobscheduler#1140, komira-ai/jobscheduler#1141, komira-ai/jobscheduler#1142 |
-| placement-profiles-live.md | 25 | 9 | 6 | 3 | komira-ai/jobscheduler#1143, komira-ai/jobscheduler#1144, komira-ai/jobscheduler#1193 |
+| placement-profiles-live.md | 25 | 11 | 5 | 2 | komira-ai/jobscheduler#1143, komira-ai/jobscheduler#1144, komira-ai/jobscheduler#1193 |
 | start-latency.md | 14 | 2 | 2 | 4 | komira-ai/jobscheduler#1145, komira-ai/jobscheduler#1146, komira-ai/jobscheduler#1147 |
 | whole-node.md | 27 | 13 | 4 | 3 | komira-ai/jobscheduler#1148, komira-ai/jobscheduler#1149, komira-ai/jobscheduler#1150, komira-ai/jobscheduler#1193 |
 | lease-limits.md | 5 | 1 | 2 | 1 | komira-ai/jobscheduler#1151 |
@@ -42,7 +42,7 @@ Columns:
 | pools-providers-network.md | 30 | 6 | 8 | 10 | - |
 | job-rootfs.md | 17 | 3 | 2 | 9 | komira-ai/jobscheduler#1159 |
 | job-retry-and-completion-callback.md | 17 | 8 | 2 | 5 | komira-ai/jobscheduler#1150, komira-ai/jobscheduler#1193 |
-| cpu-over-time.md | 24 | 9 | 5 | 7 | komira-ai/jobscheduler#1143, komira-ai/jobscheduler#1144 |
+| cpu-over-time.md | 24 | 10 | 5 | 6 | komira-ai/jobscheduler#1143, komira-ai/jobscheduler#1144 |
 | live-logs.md | 11 | 5 | 0 | 4 | - |
 | mac-account-per-job.md | 17 | 6 | 6 | 1 | komira-ai/jobscheduler#1163 |
 | mac-one-program.md | 45 | 4 | 5 | 23 | komira-ai/jobscheduler#1160, komira-ai/jobscheduler#1161, komira-ai/jobscheduler#1162, komira-ai/jobscheduler#1163, komira-ai/jobscheduler#1164, komira-ai/jobscheduler#1165, komira-ai/jobscheduler#1166, komira-ai/jobscheduler#1193 |
@@ -106,11 +106,11 @@ As read: Status: design, living document. Most gaps are Built (G2, G4 mostly, G5
 
 ## placement-profiles-live.md
 
-As read: Status: built behind --placement-curves on (off by default); header says only the decide-in-shadow line of section 4 is not built. Still accurate on main.
+As read: Status: built behind --placement-curves on (off by default); header now says the decide-in-shadow line of section 4 is built under --placement-curves shadow (komira-ai/jobscheduler#1143). Accurate on main.
 
 | Section | Claim | On main | Tracking |
 |---|---|---|---|
-| Status header / §4 Farm-wide step 2 / §5 Stages step 2 | Decide in shadow: under shadow the service also runs the curve packing rule and logs 'a job's curve booking would place it differently' (job, class, flat_host, curve_host, slot) for two working days before on. | no | komira-ai/jobscheduler#1143 (new) |
+| Status header / §4 Farm-wide step 2 / §5 Stages step 2 | Decide in shadow: under shadow the service also runs the curve packing rule and logs 'a job's curve booking would place it differently' (job, class, flat_host, curve_host, slot) for two working days before on. | `crates/js-sched-placer/src/curve_shadow.rs:1` | komira-ai/jobscheduler#1143 |
 | §4 Per class: four checks (checks 3 and 4 need new per-class state in js-sizing) | Checks 3 (peak overrun ring) and 4 (series usable ring) are computed at each pass. | `crates/js-sched-placer/src/sizes_profile.rs:12`, `crates/js-cpu-replay/src/shadow.rs:17-22` | komira-ai/jobscheduler#1087 |
 | §4 'shadow gains three columns' | js-cpu-replay shadow prints CPU peak over %, CPU series usable %, CPU curve. | `crates/js-cpu-replay/src/shadow.rs:322-323` | komira-ai/jobscheduler#1087 |
 | §4 Farm-wide step 1: a day of check lines | At least 24 h of check lines from every server task before on; the one measured window was 4 h 10 min. | decision, no code | - |
@@ -134,7 +134,7 @@ As read: Status: built behind --placement-curves on (off by default); header say
 | §8 Q8 pack limit's CPU share is the fullest booked slot | The pack share reads the fullest booked slot. | `crates/js-sched-placer/src/curve_room.rs:86`, `crates/js-sched-placer/src/curve_room_tests.rs:874` | komira-ai/jobscheduler#1087 |
 | §8 Q9 gate on on no loss against the flat step, not 10% against today | The gate is the replay against the flat step on held-out days with series. | partly: `crates/js-cpu-replay/src/sim/curve.rs` | - |
 | §8 Q10 raise MAX_PROFILES | Not now; raise only if evicted classes with 16 runs show up. | decision, no code | - |
-| Header: cpu-over-time.md steps 3 and 4 | Steps 3 (decide in shadow) and 4 (enforce) are fixed by this page. | partly: `docs/design/cpu-over-time.md:3` | komira-ai/jobscheduler#1087 |
+| Header: cpu-over-time.md steps 3 and 4 | Steps 3 (decide in shadow) and 4 (enforce) are fixed by this page. | `docs/design/cpu-over-time.md:3`, `crates/js-sched-placer/src/curve_shadow.rs:1` | komira-ai/jobscheduler#1087; komira-ai/jobscheduler#1143 |
 
 ## start-latency.md
 
@@ -477,13 +477,13 @@ As read: Header line 4-5 says "Status: decided, not built ... Nothing here is bu
 
 ## cpu-over-time.md
 
-As read: Status: design for review; header says replay, step 1 and step 2 built, steps 3 and 4 built as placement-profiles-live.md revised them behind --placement-curves on (header is partly wrong: the decide-in-shadow part of step 3 is not built).
+As read: Status: design for review; header says replay, step 1 and step 2 built, steps 3 and 4 built as placement-profiles-live.md revised them behind --placement-curves on (the header now says the decide-in-shadow part of step 3 is built, komira-ai/jobscheduler#1143).
 
 | Section | Claim | On main | Tracking |
 |---|---|---|---|
 | Status line / Build step 1 Record | Agent records per-job CPU series, host busy and pressure per second, agent run length; wire, store and GET usage carry it. | `crates/js-agent-wire/src/per_job.rs:470`, `crates/js-jobs/src/codec/result_fields.rs:107` | komira-ai/jobscheduler#1037 |
 | Build step 2 Learn, in shadow | Per-class CPU and memory profiles learned, self-check logged per run, js-cpu-replay shadow reads the log. | `crates/js-sched-placer/src/sizes_profile.rs:42`, `crates/js-cpu-replay/src/cli.rs:62` | komira-ai/jobscheduler#1057; komira-ai/jobscheduler#1077; komira-ai/jobscheduler#1083 |
-| Build step 3 Decide in shadow (replay gate) | Log what the curve rule would have done beside the flat rule, so the replay gate can be judged; no decide-in-shadow line exists. | no | komira-ai/jobscheduler#1143 (new) |
+| Build step 3 Decide in shadow (replay gate) | Log what the curve rule would have done beside the flat rule, so the replay gate can be judged. | `crates/js-sched-placer/src/curve_shadow.rs:1` | komira-ai/jobscheduler#1143 |
 | Build step 4 Enforce | Curve rule books curves and packs slot by slot on named curve hosts; off returns to today's rule. | `crates/js-sched-placer/src/curve_room.rs` | komira-ai/jobscheduler#1087 |
 | Build step 5 / Section 11 horizon of minutes | A horizon beyond 128 s, only if measured worth it (share of CPU after 128 s in bursts). | no | - |
 | Build step 5 / Section 11 credit for jobs about to end | Credit for jobs about to end, decided by whether the step 3 shadow shows flat sum over-counting hosts. | no | - |
