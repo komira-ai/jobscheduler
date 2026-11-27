@@ -646,8 +646,9 @@ mount comes up after the agent therefore stays without the capability until the 
 ### 4.2 The Seatbelt profile: the tree granted, the mount's root never
 
 The agent builds profiles with the open read model (`ReadModel::Open`, `crates/js-agent/src/native/settings.rs:174`):
-reads are allowed except under the listed read denies. The builder's allow-list model (`ReadModel::Allow`) exists, but
-the agent does not use it, because it builds no grants (the `NativeConfig` doc, `native/mod.rs`). Under either model the
+reads are allowed except under the listed read denies. Under `--read-model allow` a run that pins a bundle uses the
+allow-list model (`ReadModel::Allow`, `native/allow.rs`), and the policy refuses trees on the mount under that model
+(`PolicyError::TreesNeedOpenModel`), so such a run with a tree input fails its start. Under either model the
 tree must be readable and the rest of the mount must not:
 
 - The mount's root is a **read deny** of every run. The agent adds the canonicalised `--tierstore-fs` to

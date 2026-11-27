@@ -3,13 +3,16 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use js_state::Store;
 use js_types::Clock;
+use js_usage::store::InstanceTag;
 
 use crate::clock::SharedClock;
 use crate::error::StartupError;
 use crate::file::UsageKeys;
+use crate::job_store::ServerJobs;
 use crate::usage::{HostLimits, UsageSink};
 use crate::usage_hub::Usage;
 use crate::usage_js::{self, StoreSetup, no_names};
@@ -35,6 +38,17 @@ pub(crate) const DEFAULT_HISTORY_RETENTION_DAYS: u64 = 90;
 /// Milliseconds in a day.
 const MILLIS_PER_DAY: u64 = 86_400_000;
 
+/// How many usage sides this process has built: the last part of each one's [`InstanceTag`],
+/// so two servers one process runs (a test's, a simulation's) that start in the same
+/// millisecond are still two writers.
+static BUILT: AtomicU32 = AtomicU32::new(0);
+
+/// The name of the usage side this process builds now, started at `started_ms`.
+fn next_instance(started_ms: u64) -> InstanceTag {
+    let nth = BUILT.fetch_add(1, Ordering::Relaxed);
+    InstanceTag::started(started_ms, std::process::id(), nth)
+}
+
 impl UsageSetup {
     /// The usage side as `db` (`None` for usage off), `profile_store_bytes` and
     /// `history_retention_days` say, with no seam filled.
@@ -51,12 +65,14 @@ impl UsageSetup {
     /// With a state store `kept` the usage rows are rows of it and no file is opened; else a
     /// usage file that will not open is a refused start naming `--usage-db`. The flag
     /// answers whether the sink keeps its rows in `kept`: a sink the caller supplied
-    /// keeps them wherever it likes, so it is false for one.
+    /// keeps them wherever it likes, so it is false for one. With the rows in `kept` and the
+    /// job store `jobs` in it too, the prune's deletes are claimed by the job store's
+    /// `usage-prune` duty, so one of the servers sharing the store deletes in a period.
     pub(crate) fn build(
         self,
         clock: &SharedClock,
         limits: HostLimits,
-        kept: Option<Arc<dyn Store>>,
+        (kept, jobs): (Option<Arc<dyn Store>>, Option<&Arc<ServerJobs>>),
     ) -> Result<(Option<Arc<Usage>>, bool), StartupError> {
         let Some(db) = self.db else {
             return Ok((None, false));
@@ -70,6 +86,8 @@ impl UsageSetup {
                     profile_store_bytes: self.profile_store_bytes,
                     history_retention_days: self.history_retention_days,
                     names: no_names(),
+                    instance: next_instance(clock.now().millis()),
+                    prune_duty: jobs.filter(|_| in_store).cloned(),
                 };
                 usage_js::open(&setup, kept, clock.now().millis() / MILLIS_PER_DAY)?
             }
@@ -110,8 +128,23 @@ mod tests {
         let mut setup = UsageSetup::new(Some(PathBuf::from("usage.db")), 1 << 20, 90);
         setup.sink = sink;
         let clock = SharedClock::new(ManualClock::default());
-        let (usage, in_store) = setup.build(&clock, limits_of(1000, 1 << 30), kept).unwrap();
+        let (usage, in_store) = setup
+            .build(&clock, limits_of(1000, 1 << 30), (kept, None))
+            .unwrap();
         (usage.is_some(), in_store)
+    }
+
+    /// Asserts that two usage sides one process builds in the same millisecond are named
+    /// apart, each by its start: it catches two servers of one process (a simulation's)
+    /// writing one instance row, where the later part of a minute replaces the earlier.
+    #[test]
+    fn two_usage_sides_of_one_process_are_two_instances() {
+        let first = next_instance(5).to_string();
+        let second = next_instance(5).to_string();
+        assert_ne!(first, second);
+        for tag in [&first, &second] {
+            assert!(tag.starts_with("5-"), "{tag}");
+        }
     }
 
     #[test]
@@ -131,7 +164,7 @@ mod tests {
         setup.sink = None;
         let clock = SharedClock::new(ManualClock::default());
         let (usage, in_store) = setup
-            .build(&clock, limits_of(1000, 1 << 30), Some(kept()))
+            .build(&clock, limits_of(1000, 1 << 30), (Some(kept()), None))
             .unwrap();
         assert!(usage.is_none());
         assert!(!in_store);

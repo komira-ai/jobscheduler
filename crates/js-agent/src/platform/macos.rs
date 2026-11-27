@@ -619,7 +619,7 @@ pub(crate) fn complete(
     local.backend = match backend {
         Some(Backend::Native(native)) => {
             let native = match &start.bundles {
-                Some(store) => native.with_bundles(Arc::clone(store))?,
+                Some(store) => native.with_store(Arc::clone(store), cli.read_model.as_deref())?,
                 None => native,
             };
             // The agent asks itself once, here: the state its listing of the privacy
@@ -736,7 +736,7 @@ pub(crate) fn runtime(
         .with_live_logs(native.logs().live())
         .with_put(native.put().cloned())
         .with_series(native.series());
-    self_tested(runtime)
+    self_tested(runtime.with_host_read_allow(native.xcodes())?)
 }
 
 /// `runtime` after its self-test, which runs before the agent says hello: a failed self-test

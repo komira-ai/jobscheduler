@@ -183,6 +183,8 @@ disallowed_types = "allow"
 # Dev and test builds: a test binary with full debug info is large and a target
 # directory holds many of them. Line tables keep panic backtraces and profilers at
 # file:line. `test` inherits `dev`; it is spelled out so the two cannot drift.
+# CI's `test` job builds with `dev` (`--cargo-profile dev`), so the `test` overrides below
+# apply to release.yml's `unit-tests` and to a plain `cargo test`, not to that job.
 [profile.dev]
 debug = "line-tables-only"
 incremental = false
@@ -191,7 +193,7 @@ incremental = false
 debug = "line-tables-only"
 incremental = false
 
-# The replay simulations in these crates run in CI test builds, so the crates (not
+# The replay simulations in these crates run in the release's test builds, so the crates (not
 # their dependencies) are optimised there. `cargo test` builds everything it compiles
 # (the unit-test binaries and the libraries the integration tests link) with the
 # `test` profile, so this half alone reaches it; a `dev` override would only slow
