@@ -60,9 +60,14 @@
 //! `stops:` line. A host whose flags file sets an egress ceiling (or cannot be read) hands over
 //! only when both the previous agent, which leaves the runs' network wiring in place, and the
 //! staged agent, which adopts it (and which the rollback stops in its turn), list
-//! `egress-handover` there too. Its record is written with no cordon and the step ends after 6,
-//! saying so in its detail; the owed checks of the running agent are not looked at (it finishes
-//! them before it hands over, see `cutover`).
+//! `egress-handover` there too. On a Mac (launchd) an update hands over with the native runtime,
+//! the staged plist the same as the installed one, a previous agent and a staged agent that both
+//! list `native-handover` on their `stops:` line (the one the cutover stops leaves its runs, each
+//! under its own supervisor, and the one it starts adopts them; the rollback swaps the roles),
+//! and host flags that do not turn the VM backend on (`--vm-driver`; flags that cannot be read
+//! count as turning it on): a VM run is never adopted. Its record is written with no cordon and
+//! the step ends after 6, saying so in its detail; the owed checks of the running agent are not
+//! looked at (it finishes them before it hands over, see `cutover`).
 //!
 //! The hand-over is made in place (decided at the same time, kept in the record as `in_place`,
 //! and only with `handover`) when both the previous release's agent and the staged release's
@@ -75,9 +80,9 @@
 //! of the success says which hand-over it is.
 //!
 //! An update that does not hand over drains, and a success of `prepare` says why in its detail
-//! (one fixed text per [`Drain`] cause, in the order `hands_over` checks them, the systemd
-//! cause last), as does the deferral of a drain that passes its bound with a lease still
-//! running.
+//! (one fixed text per [`Drain`] cause, in the order `hands_over` checks them: on systemd the
+//! systemd cause last, on launchd the VM backend last), as does the deferral of a drain that
+//! passes its bound with a lease still running.
 //!
 //! A first install has no agent to drain and no host the lease server knows: it ends after 6.
 //!
@@ -114,6 +119,10 @@ const IN_PLACE_WORD: &str = "in-place";
 /// The word of an agent that keeps the network wiring of the runs it leaves to the next
 /// process, and adopts the wiring of the runs it finds (see [`crate::lifecycle::handover`]).
 const EGRESS_WORD: &str = "egress-handover";
+/// The word of a macOS agent whose native runs outlive it, each under a supervisor of its own,
+/// and that adopts the native runs an earlier process left (the macOS build's `native` module):
+/// on launchd the runs are handed over only between two agents that both list it.
+const NATIVE_WORD: &str = "native-handover";
 
 /// The detail of a `prepare` that hands the runs over by stopping the unit and starting it.
 pub(super) const HANDOVER_NOTE: &str =
@@ -217,10 +226,10 @@ fn run(env: &Env<'_>, params: &Params, superseded: &mut Option<String>) -> Resul
 /// The condition that made an update drain the host instead of handing the runs over.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Drain {
-    /// The host does not run the agent under systemd.
-    NotSystemd,
-    /// The runtime is not crun.
+    /// The host runs the agent under systemd and the runtime is not crun.
     NotCrun,
+    /// The host runs the agent under launchd and the runtime is not the native one.
+    NotNative,
     /// The staged unit differs from the installed one.
     UnitChanges,
     /// The previous agent does not list `handover`, could not be run, or there is none.
@@ -232,6 +241,13 @@ enum Drain {
     /// The host's systemd starts a service's first process in the unit's own cgroup (258 or
     /// newer, or its version cannot be read), and the agents do not both hand over in place.
     OwnCgroupStart,
+    /// On launchd: the previous agent does not list `native-handover`, could not be run, or
+    /// there is none.
+    PreviousKeepsNoNative,
+    /// On launchd: the staged agent does not list `native-handover`.
+    StagedAdoptsNoNative,
+    /// On launchd: the host's flags turn the VM backend on, or cannot be read.
+    VmBackend,
     /// A rerun of a prepare that began as a drain, whose conditions now allow a hand-over.
     Decided,
 }
@@ -240,8 +256,8 @@ impl Drain {
     /// The cause in plain words, one fixed text for each.
     fn text(self) -> &'static str {
         match self {
-            Self::NotSystemd => "the host does not run the agent under systemd",
             Self::NotCrun => "the jobs do not run on the crun runtime",
+            Self::NotNative => "the jobs do not run on the native runtime",
             Self::UnitChanges => "the unit changes",
             Self::PreviousKeepsNoHandover => {
                 "the previous release's agent does not hand its jobs over \
@@ -263,6 +279,18 @@ impl Drain {
                  from taking one, and the previous and staged agents do not both hand over in \
                  place (no `in-place` on their `stops:` line)"
             }
+            Self::PreviousKeepsNoNative => {
+                "the previous release's agent does not leave its native jobs to the next agent \
+                 (no `native-handover` on its `stops:` line, or it could not be run)"
+            }
+            Self::StagedAdoptsNoNative => {
+                "the staged release's agent does not adopt the native jobs \
+                 (no `native-handover` on its `stops:` line)"
+            }
+            Self::VmBackend => {
+                "the host's flags turn the VM backend on (`--vm-driver`), or its flags file \
+                 cannot be read, and an agent never adopts a VM run"
+            }
             Self::Decided => "decided when the update began",
         }
     }
@@ -275,9 +303,9 @@ impl Drain {
 
 /// `Ok` when this update hands the agent's runs over to the new agent at the cutover, instead
 /// of draining the host, and otherwise the first condition, in a fixed order, that makes it
-/// drain: on systemd with the crun runtime, whose runs outlive the agent and are adopted by its
-/// next process; with the same unit (a changed one is started from an empty cgroup, see
-/// `cutover`); and with a previous agent that takes the request: the previous release's agent
+/// drain. On launchd it is [`hands_over_native`]. On systemd: with the crun runtime, whose runs
+/// outlive the agent and are adopted by its next process; with the same unit (a changed one is
+/// started from an empty cgroup, see `cutover`); and with a previous agent that takes the request: the previous release's agent
 /// lists `handover` on its `stops:` line of `--version`. An agent from before the handover would
 /// read the stop as a drain and hold the cutover for its whole drain wait. On a host with an
 /// egress ceiling in its flags (`env.egress`) the runs have wiring, and the agent that is
@@ -292,8 +320,8 @@ impl Drain {
 /// hold controllers there: that is allowed only on a systemd whose version is read and is
 /// older, and every other host drains.
 fn hands_over(env: &Env<'_>, params: &Params, restart: Option<&UnitRestart>) -> Result<Way, Drain> {
-    if env.manager != Manager::Systemd {
-        return Err(Drain::NotSystemd);
+    if env.manager == Manager::Launchd {
+        return hands_over_native(env, params, restart);
     }
     if params.settings.runtime != "crun" {
         return Err(Drain::NotCrun);
@@ -329,12 +357,52 @@ fn hands_over(env: &Env<'_>, params: &Params, restart: Option<&UnitRestart>) -> 
     }
 }
 
+/// [`hands_over`] on launchd: `Ok` (the agent's job booted out and bootstrapped again, the only
+/// way launchd has) when the runtime is the native one, whose runs each have a supervisor of
+/// their own that a boot-out leaves running and that the next agent adopts; the plist is the
+/// same (a changed one may start the agent on other roots, which would not find the runs); both
+/// agents list `native-handover` on their `stops:` line: the previous release's, which the
+/// cutover stops and which must leave its runs, and the staged release's, which must adopt them
+/// (and which a rollback stops in its turn); and the host's flags do not turn
+/// the VM backend on (`env.vms`), since a VM run is never adopted and the agent that starts
+/// would destroy it. Otherwise the first condition, in that order, that makes it drain. The
+/// systemd conditions (crun, egress wiring, the cgroup of the unit) are not looked at: launchd
+/// has no cgroup, and the native runtime's network ceiling keeps no wiring an agent holds.
+fn hands_over_native(
+    env: &Env<'_>,
+    params: &Params,
+    restart: Option<&UnitRestart>,
+) -> Result<Way, Drain> {
+    if params.settings.runtime != "native" {
+        return Err(Drain::NotNative);
+    }
+    if restart.is_some() {
+        return Err(Drain::UnitChanges);
+    }
+    let lists = |words: &[String]| words.iter().any(|word| word == NATIVE_WORD);
+    let previous = params
+        .previous_release
+        .as_deref()
+        .map(|release| stops_of(env, release))
+        .unwrap_or_default();
+    if !lists(&previous) {
+        return Err(Drain::PreviousKeepsNoNative);
+    }
+    if !lists(&stops_of(env, &params.staged_release)) {
+        return Err(Drain::StagedAdoptsNoNative);
+    }
+    if env.vms {
+        return Err(Drain::VmBackend);
+    }
+    Ok(Way::StopStart)
+}
+
 /// How an update that hands the runs over does it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Way {
     /// The unit is signalled, and the agent hands over and runs again as the same process.
     InPlace,
-    /// The unit is stopped and started.
+    /// The unit is stopped and started (on launchd: the job booted out and bootstrapped).
     StopStart,
 }
 

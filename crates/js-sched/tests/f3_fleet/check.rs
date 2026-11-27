@@ -219,8 +219,6 @@ pub struct Check {
     /// Whether the scheduler places by load: the reference placement is `load_reference`'s,
     /// not the booked rule's.
     load: bool,
-    /// The worker each blocked head held after the last round (load rule).
-    holds: BTreeMap<OperationId, WorkerId>,
     newest_committed: BTreeMap<OperationId, LeaseId>,
     answered_waiters: BTreeSet<WaiterId>,
     pub seen: Seen,
@@ -239,7 +237,6 @@ impl Check {
             holding: BTreeMap::new(),
             newest_grant: None,
             load: !crate::booked::is_booked(),
-            holds: BTreeMap::new(),
             newest_committed: BTreeMap::new(),
             answered_waiters: BTreeSet::new(),
             seen: Seen::default(),
