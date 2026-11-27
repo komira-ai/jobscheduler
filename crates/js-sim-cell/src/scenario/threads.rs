@@ -37,6 +37,16 @@ pub fn try_run_seed_range_on_threads(
     seeds: Range<u64>,
     threads: usize,
 ) -> Result<Passed, ScenarioFailure> {
+    on_threads(&build, seeds, threads)
+}
+
+/// [`try_run_seed_range_on_threads`] over a builder behind a reference, so that one copy of
+/// this code serves every builder type.
+fn on_threads(
+    build: &(dyn Fn() -> Scenario + Sync),
+    seeds: Range<u64>,
+    threads: usize,
+) -> Result<Passed, ScenarioFailure> {
     let scenario = build();
     let count = seeds.end.saturating_sub(seeds.start);
     let most = usize::try_from(count).unwrap_or(usize::MAX).max(1);
@@ -56,7 +66,7 @@ pub fn try_run_seed_range_on_threads(
             done.push((seed, scenario.run_seed(seed)));
         }
     };
-    let (work, build) = (&work, &build);
+    let work = &work;
     let mut finished = thread::scope(|scope| {
         let mut spawned = Vec::new();
         for _ in 1..workers {
