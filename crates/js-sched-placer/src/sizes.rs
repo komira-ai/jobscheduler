@@ -83,12 +83,12 @@
 //! booked. After a server's start, [`JobSizes::observe`] is fed every ended job the job store
 //! still holds, in the order they ended, and then the runs the passes freed meanwhile, which
 //! were held for it ([`Teaching`]): the job records are the history, and nothing else is
-//! stored. Until then a job is sized from the runs the passes freed since the start (the cold
-//! size only until a run of its class, its fallback or its client teaches a size), which the
-//! teaching then drops. A run is taught to the job's class and, when the job names one, to its
-//! fallback class (once, when the two are one class), and, unless it is a memory kill, to its
-//! client's whole history on its platform
-//! ([`JobSizes::client_key_of`]).
+//! stored. Until then a job is sized from an interim history ([`Teaching`]): the runs of the
+//! newest freed allocations the start read, and the runs the passes freed since (the cold size
+//! only for a class, a fallback and a client with no run among them), which the teaching then
+//! drops. A run is taught to the job's class and, when the job names one, to its fallback class
+//! (once, when the two are one class), and, unless it is a memory kill, to its client's whole
+//! history on its platform ([`JobSizes::client_key_of`]).
 //!
 //! A run is one sample of [`js_sizing::Run`]:
 //!
@@ -168,7 +168,7 @@ use crate::place::SchedPlacer;
 
 pub use js_types::{SIZE_CLASS_LABEL, SIZE_FALLBACK_LABEL};
 pub use profile::Curves;
-pub use teach::Teaching;
+pub use teach::{BRIDGE_PAGES, Teaching};
 
 #[cfg(test)]
 #[path = "sizes_curve_rig.rs"]
@@ -334,25 +334,39 @@ struct Held {
     /// the passes teach them, so the teaching leaves them out of the ended jobs it read.
     named: BTreeSet<JobId>,
     /// What the passes size from until the teaching is taught: the history as it stood when the
-    /// teaching began, taught each held run as a pass frees it. Dropped once the teaching is
-    /// taught, which teaches the held runs again after the ended jobs, so it never changes the
-    /// history that is kept.
+    /// teaching began, taught the runs of the newest freed allocations the begin read and each
+    /// held run as a pass frees it. Dropped once the teaching is taught, which teaches the ended
+    /// jobs and the held runs to the history, so it never changes the history that is kept.
     interim: Summaries,
+    /// The runs the interim history is taught once bounds are known, in the order they came:
+    /// those learned before any host was known.
+    pending: Vec<(Key, Run, Day)>,
 }
 
 impl Held {
     /// Holds the run of `job`, freed booked as `booked`, and teaches it to the interim history
-    /// at once, against `bounds`: to the keys [`JobSizes::observe`] teaches it to, in the same
-    /// order. A job that teaches nothing, and any run while no bounds are known (no host to
-    /// judge its peak against, and no job is sized then), is held and teaches the interim
-    /// history nothing.
+    /// ([`Held::learn`]).
     fn hold(&mut self, job: JobRecord, booked: Booked, bounds: Option<Bounds>) {
-        if let (Some((run, day)), Some(bounds)) = (run_of(&job, booked), bounds) {
-            for key in keys_of_run(&job, &run) {
-                let _ = self.interim.observe(&key, &run, day, &bounds);
+        self.learn(&job, booked, bounds);
+        self.runs.push((job, booked));
+    }
+
+    /// Teaches the interim history the run of `job`, booked as `booked`, to the keys
+    /// [`JobSizes::observe`] teaches it to, in the same order: at once against `bounds`, or,
+    /// while no bounds are known, once they are ([`JobSizes::set_bounds`]), as the history
+    /// holds such a run. A job that teaches the history nothing teaches it nothing.
+    fn learn(&mut self, job: &JobRecord, booked: Booked, bounds: Option<Bounds>) {
+        let Some((run, day)) = run_of(job, booked) else {
+            return;
+        };
+        for key in keys_of_run(job, &run) {
+            match bounds {
+                Some(bounds) => {
+                    let _ = self.interim.observe(&key, &run, day, &bounds);
+                }
+                None => self.pending.push((key, run, day)),
             }
         }
-        self.runs.push((job, booked));
     }
 }
 
@@ -430,7 +444,8 @@ impl JobSizes {
 
     /// The bounds the next sizes and runs are taken against, when `bounds` knows a host (else
     /// the last ones stay), with the cold memory as their default booking; the runs observed
-    /// before any bounds were known are taught now.
+    /// before any bounds were known are taught now, to the history and, while a teaching is
+    /// held, to the interim history.
     pub fn set_bounds(&mut self, bounds: Option<Bounds>) {
         let Some(bounds) = bounds else {
             return;
@@ -439,6 +454,11 @@ impl JobSizes {
         self.bounds = Some(bounds);
         for (key, run, day) in std::mem::take(&mut self.pending) {
             let _ = self.summaries.observe(&key, &run, day, &bounds);
+        }
+        if let Some(held) = &mut self.held {
+            for (key, run, day) in std::mem::take(&mut held.pending) {
+                let _ = held.interim.observe(&key, &run, day, &bounds);
+            }
         }
     }
 

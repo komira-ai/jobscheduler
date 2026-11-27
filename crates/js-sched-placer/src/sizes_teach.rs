@@ -2,19 +2,21 @@
 //! (`docs/design/sizing.md`, "Where the history lives").
 //!
 //! A teaching is begun ([`SchedPlacer::begin_teaching`]) when the server starts: that reads the
-//! live allocations alone, takes them as those of the last pass, and from then on holds every
-//! run a pass frees instead of teaching it to the history. Its reads of the ended jobs come
-//! later, a page at a time ([`Teaching::read_page`]), outside the engine's lock, while the
-//! passes place. A job sized meanwhile is sized from an interim history: the history as it stood
-//! when the teaching began (nothing, at a start), taught each run a pass frees as the pass frees
-//! it (once bounds are known). So after a start a job books the cold size only until a run of its
-//! class, its fallback or its client ends and teaches a size, not for as long as the read takes:
-//! from then on the runs freed since the start size it, its class's, else its fallback's, else
-//! its client's. [`SchedPlacer::teach`] drops the interim history and teaches
-//! the history, under the lock, every ended job that was read, in the order the jobs ended, and
-//! after them the runs the passes held, in the order the passes freed them: the order a server
-//! that read everything before its first pass teaches them in, so the history once taught is the
-//! same.
+//! live allocations, takes them as those of the last pass, and from then on holds every run a
+//! pass frees instead of teaching it to the history. It also reads the runs of the newest freed
+//! allocations, at most [`BRIDGE_PAGES`] pages of them at a start, and teaches them, in the
+//! order the jobs ended, to an interim history that the passes size from until the teaching is
+//! taught, and that is taught each run a pass frees as the pass frees it (a run learned before
+//! any host is known, once one is). So after a start a job books from its class's recent runs,
+//! else its fallback's, else its client's, at the first pass, and the cold size only for a
+//! class, a fallback and a client with no run among them. The reads of the ended jobs come
+//! later, a page at a time ([`Teaching::read_page`]): the freed allocations newest free first,
+//! one scan of their entries and batched reads of their rows a page, outside the engine's lock,
+//! while the passes place. [`SchedPlacer::teach`] drops the interim history and teaches the
+//! history, under the lock, every ended job that was read, in the order the jobs ended (and of
+//! two that ended at once, of their ids), and after them the runs the passes held, in the order
+//! the passes freed them: the order a server that read everything before its first pass
+//! teaches them in, so the history once taught is the same.
 //!
 //! A job the passes still follow when the runs are taught (its allocation is live at the last
 //! pass, or a pass named it freed since the teaching began, its run held or still being read)
@@ -27,11 +29,13 @@
 //! held runs' checks, one line saying the checks start: the classes profiled, the ended jobs
 //! taught (none for a teaching not read through) and the seconds the teaching took.
 
+use std::cmp::Ordering;
 use std::collections::BTreeSet;
 
-use js_jobs::{AllocationStep, Booked, IdSource, JobRecord, JobStore, JobStoreError, MAX_PAGE};
+use js_jobs::{Booked, IdSource, JobRecord, JobStore, JobStoreError, MAX_PAGE};
 use js_state::ResumeToken;
 use js_types::sched::FarmTime;
+use tracing::warn;
 
 use super::Held;
 use crate::place::SchedPlacer;
@@ -43,7 +47,7 @@ use crate::place::SchedPlacer;
 #[derive(Debug)]
 #[must_use = "a teaching begun holds every freed run until it is taught"]
 pub struct Teaching {
-    /// The ended jobs whose allocations were freed, read so far, in key order.
+    /// The ended jobs whose allocations were freed, read so far, newest free first.
     ended: Vec<(JobRecord, Booked)>,
     /// Where the next page begins; `None` before the first page and after the last.
     resume: Option<ResumeToken>,
@@ -53,12 +57,15 @@ pub struct Teaching {
     read: bool,
     /// The placer's farm time when the teaching was begun.
     begun_at: FarmTime,
+    /// How many runs of the newest freed allocations the begin taught the interim history.
+    bridged: usize,
 }
 
 impl Teaching {
-    /// Reads the next page of the jobs `jobs` holds (at most [`MAX_PAGE`]), and the allocation
-    /// of each ended one, keeping the jobs whose allocations are freed. Answers whether a page
-    /// remains; once none does, the teaching is read through and a further call reads nothing.
+    /// Reads the next page of the freed allocations `jobs` holds, newest free first (at most
+    /// [`MAX_PAGE`], [`JobStore::freed_page`]), keeping each ended job with what its allocation
+    /// booked. Answers whether a page remains; once none does, the teaching is read through and
+    /// a further call reads nothing.
     ///
     /// # Errors
     /// The first [`JobStoreError`] of the page's reads; what the page read is not kept.
@@ -69,15 +76,8 @@ impl Teaching {
         if self.read {
             return Ok(false);
         }
-        let page = jobs.list_jobs(None, self.resume.as_ref(), MAX_PAGE)?;
-        let mut freed = Vec::new();
-        for job in page.jobs.into_iter().filter(|job| job.result.is_some()) {
-            let allocation = jobs.get_allocation(&job.id)?;
-            let allocation =
-                allocation.filter(|allocation| allocation.step == AllocationStep::Freed);
-            freed.extend(allocation.map(|allocation| (job, allocation.booked)));
-        }
-        self.ended.extend(freed);
+        let page = jobs.freed_page(self.resume.as_ref(), MAX_PAGE)?;
+        self.ended.extend(page.runs);
         self.pages += 1;
         self.resume = page.resume;
         self.read = self.resume.is_none();
@@ -89,13 +89,68 @@ impl Teaching {
     pub fn pages(&self) -> usize {
         self.pages
     }
+
+    /// How many runs of the newest freed allocations the begin taught the interim history
+    /// ([`SchedPlacer::begin_teaching`]).
+    #[must_use]
+    pub fn bridged(&self) -> usize {
+        self.bridged
+    }
+
+    /// The placer's farm time when the teaching was begun.
+    #[must_use]
+    pub fn begun_at(&self) -> FarmTime {
+        self.begun_at
+    }
+}
+
+/// The runs the store holds a page of before another's would be read, at most: the freed
+/// allocations newest free first, each page [`MAX_PAGE`] of them. A begin reads this many
+/// pages at most ([`SchedPlacer::begin_teaching`]): 10, so 10,000 runs, in 10 scans of the
+/// freed entries and 40 batched reads of rows, whatever the history the store keeps.
+pub const BRIDGE_PAGES: usize = 10;
+
+/// The runs of the newest `pages` pages of freed allocations `jobs` holds, newest free first;
+/// fewer when the store holds fewer, and those read before a read that fails, which is logged.
+fn newest_runs<S: js_state::Store, I: IdSource>(
+    jobs: &JobStore<S, I>,
+    pages: usize,
+) -> Vec<(JobRecord, Booked)> {
+    let mut runs = Vec::new();
+    let mut resume = None;
+    for _ in 0..pages {
+        let page = match jobs.freed_page(resume.as_ref(), MAX_PAGE) {
+            Ok(page) => page,
+            Err(error) => {
+                warn!(%error, "the newest runs were not read: the jobs sized before the history is taught are sized from fewer runs");
+                break;
+            }
+        };
+        runs.extend(page.runs);
+        resume = page.resume;
+        if resume.is_none() {
+            break;
+        }
+    }
+    runs
+}
+
+/// The order the runs are taught in: the order the jobs ended, and of two that ended at once,
+/// that of their ids.
+fn end_order(a: &(JobRecord, Booked), b: &(JobRecord, Booked)) -> Ordering {
+    let (a, b) = (&a.0, &b.0);
+    (a.ended_at, &a.id).cmp(&(b.ended_at, &b.id))
 }
 
 impl SchedPlacer {
     /// Begins a teaching of the ended jobs `jobs` holds (the module docs): reads the live
     /// allocations, takes them as those of the last pass, and holds from now on every run a pass
-    /// frees, until the teaching is taught ([`SchedPlacer::teach`]). It reads no ended job: what
-    /// it reads is set by the live allocations, not by the history the store keeps.
+    /// frees, until the teaching is taught ([`SchedPlacer::teach`]). It reads the runs of the
+    /// newest `bridge` pages of freed allocations at most ([`BRIDGE_PAGES`] at a server's start)
+    /// and teaches them the interim history the passes size from, in the order the jobs ended,
+    /// so a class with a recent run is sized from it at the first pass; what it reads is set by
+    /// the live allocations and `bridge`, not by the history the store keeps. A read of those
+    /// runs that fails is logged, and the interim history is taught the runs read before it.
     ///
     /// # Errors
     /// The [`JobStoreError`] of the read of the live allocations: nothing is begun, and the
@@ -103,21 +158,29 @@ impl SchedPlacer {
     pub fn begin_teaching<S: js_state::Store, I: IdSource>(
         &self,
         jobs: &JobStore<S, I>,
+        bridge: usize,
     ) -> Result<Teaching, JobStoreError> {
         let live = jobs.live_allocations()?;
+        let mut newest = newest_runs(jobs, bridge);
+        newest.sort_by(end_order);
         let mut engine = self.engine();
         let sizes = engine.sizes();
         let _ = sizes.freed(&live);
-        sizes.held = Some(Held {
+        let mut held = Held {
             interim: sizes.summaries.clone(),
             ..Held::default()
-        });
+        };
+        for (job, booked) in &newest {
+            held.learn(job, *booked, sizes.bounds);
+        }
+        sizes.held = Some(held);
         Ok(Teaching {
             ended: Vec::new(),
             resume: None,
             pages: 0,
             read: false,
             begun_at: self.now(),
+            bridged: newest.len(),
         })
     }
 
@@ -142,7 +205,7 @@ impl SchedPlacer {
             false => Vec::new(),
         };
         ended.retain(|(job, _)| !followed.contains(&job.id));
-        ended.sort_by_key(|(job, _)| job.ended_at);
+        ended.sort_by(end_order);
         let taught = ended
             .iter()
             .filter(|(job, booked)| sizes.observe(job, *booked))
@@ -167,7 +230,7 @@ impl SchedPlacer {
         &self,
         jobs: &JobStore<S, I>,
     ) -> Result<usize, JobStoreError> {
-        let mut teaching = self.begin_teaching(jobs)?;
+        let mut teaching = self.begin_teaching(jobs, 0)?;
         let read = loop {
             match teaching.read_page(jobs) {
                 Ok(true) => {}
