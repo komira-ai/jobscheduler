@@ -425,7 +425,9 @@ fn an_unsupported_protocol_refusal_carries_the_servers_majors() {
 
 /// Asserts that the code of a refusal is shown only when it is a plain code: text with a
 /// space, a code over the wire's length and an empty one read as `unreadable`, so a server
-/// cannot put its own text in the agent's log.
+/// cannot put its own text in the agent's log; both in a refusal that ends the agent (a 401)
+/// and in one the agent retries (a 403 whose code it cannot read, which names nothing an
+/// operator must change).
 #[test]
 fn a_refusal_code_that_is_not_a_code_is_not_repeated() {
     let long = "a".repeat(65);
@@ -436,17 +438,19 @@ fn a_refusal_code_that_is_not_a_code_is_not_repeated() {
         json!({ "error": 7 }),
         json!({}),
     ] {
-        let (mut transport, _) = script(vec![reply(403, body)]);
+        let (mut transport, _) = script(vec![reply(401, body.clone()), reply(403, body)]);
         let mut session = Session::new(hello("h1"), &mut transport, lowest());
         let Step::Fatal(fatal) = session.tick() else {
-            panic!("a 403 ends the agent");
+            panic!("a 401 ends the agent");
         };
         assert_eq!(fatal.code, "unreadable");
         let shown = fatal.to_string();
         assert_eq!(
             shown,
-            "the server refused the hello with status 403 (unreadable); not retrying"
+            "the server refused the hello with status 401 (unreadable); not retrying"
         );
+        let retried = note(&session.tick()).expect("a retry is noted");
+        assert_eq!(retried.to_string(), "hello failed: status 403 (unreadable)");
     }
 }
 
