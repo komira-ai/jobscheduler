@@ -94,6 +94,13 @@ pub fn dependents(otool_big_l: &str) -> Vec<String> {
         .collect()
 }
 
+/// The number in the first whitespace-separated `key=<number>` token of `text`.
+#[must_use]
+pub fn field(text: &str, key: &str) -> Option<u64> {
+    text.split_whitespace()
+        .find_map(|token| token.strip_prefix(key)?.strip_prefix('=')?.parse().ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,6 +169,19 @@ Load command 10\n          cmd LC_RPATH\n      cmdsize 32\n         path /abs\n\
 Load command 11\n          cmd LC_RPATH\n";
         assert_eq!(rpaths(text), ["@loader_path/../lib", "/abs"]);
         assert!(rpaths("cmd LC_UUID\n").is_empty());
+    }
+
+    #[test]
+    fn field_reads_the_number_after_its_key_and_nothing_else() {
+        let text = "reader_uid=0 user_time=12\nresident=4096 footprint=x residentx=9";
+        assert_eq!(field(text, "reader_uid"), Some(0));
+        assert_eq!(field(text, "resident"), Some(4096));
+        assert_eq!(field(text, "user_time"), Some(12));
+        // Not a number, a longer key, a missing key, an empty value.
+        assert_eq!(field(text, "footprint"), None);
+        assert_eq!(field("residentx=9", "resident"), None);
+        assert_eq!(field(text, "system_time"), None);
+        assert_eq!(field("a= b", "a"), None);
     }
 
     #[test]

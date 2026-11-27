@@ -1,7 +1,7 @@
 # Design status: what main builds
 
 Every page under `docs/design` that says Designed, not yet, Planned, Partly built, Open, or lists a build step, with each such claim checked
-against the code on `main` as of komira-ai/jobscheduler#1106, with the rows of the pull requests merged after it applied up to main at komira-ai/jobscheduler#1243. Each claim was read against the crate that would hold it, not matched by keyword.
+against the code on `main` as of komira-ai/jobscheduler#1106, with the rows of the pull requests merged after it applied up to main at komira-ai/jobscheduler#1229. Each claim was read against the crate that would hold it, not matched by keyword.
 The page records state; it builds nothing. A pull request that builds a row, or turns a page's tag from Designed to Built, does not edit this page: it writes the change in its body under a line `Status rows:` (the section, the claim, and the new On main and Tracking cells), and a sweep pull request applies the rows of the pull requests merged since the page was last checked (`AGENTS.md`, rule P6-status).
 
 Columns:
@@ -40,7 +40,7 @@ Columns:
 | merged-code.md | 34 | 15 | 5 | 3 | komira-ai/jobscheduler#1168, komira-ai/jobscheduler#1169, komira-ai/jobscheduler#1170, komira-ai/jobscheduler#1171 |
 | jobscheduler-design.md | 83 | 40 | 19 | 7 | komira-ai/jobscheduler#1153, komira-ai/jobscheduler#1154, komira-ai/jobscheduler#1155, komira-ai/jobscheduler#1156, komira-ai/jobscheduler#1157, komira-ai/jobscheduler#1158, komira-ai/jobscheduler#1174 |
 | pools-providers-network.md | 30 | 6 | 8 | 10 | - |
-| job-rootfs.md | 17 | 3 | 2 | 9 | komira-ai/jobscheduler#1159 |
+| job-rootfs.md | 17 | 4 | 2 | 8 | komira-ai/jobscheduler#1159 |
 | job-retry-and-completion-callback.md | 17 | 12 | 0 | 1 | komira-ai/jobscheduler#1150, komira-ai/jobscheduler#1193 |
 | cpu-over-time.md | 24 | 10 | 5 | 6 | komira-ai/jobscheduler#1143, komira-ai/jobscheduler#1144 |
 | live-logs.md | 11 | 5 | 0 | 4 | - |
@@ -60,7 +60,7 @@ Columns:
 | capabilities.md | 26 | 3 | 4 | 15 | komira-ai/jobscheduler#1168, komira-ai/jobscheduler#1169, komira-ai/jobscheduler#1170, komira-ai/jobscheduler#1171, komira-ai/jobscheduler#1173, komira-ai/jobscheduler#1189 |
 | kbf-today.md | 15 | 3 | 1 | 3 | - |
 | machines.md | 1 | 0 | 0 | 1 | - |
-| mac-runtime.md | 18 | 4 | 5 | 7 | komira-ai/jobscheduler#1183 |
+| mac-runtime.md | 18 | 10 | 3 | 3 | komira-ai/jobscheduler#1183 |
 | sizing.md | 13 | 1 | 2 | 2 | komira-ai/jobscheduler#1184 |
 | retries-and-runs.md | 5 | 2 | 1 | 1 | komira-ai/jobscheduler#1150 |
 | vm-backend.md | 17 | 2 | 4 | 8 | komira-ai/jobscheduler#1155, komira-ai/jobscheduler#1185, komira-ai/jobscheduler#1186, komira-ai/jobscheduler#1187, komira-ai/jobscheduler#1188, komira-ai/jobscheduler#1189 |
@@ -438,7 +438,7 @@ As read: Status: design for the owner's review; items 2-6 built (header). The he
 | Status line | Header lists only items 2-6 as built; 1, 7 and 8 are not named | `crates/js-agent/src/native/mod.rs:100`, `crates/js-agent-wire/src/refusal.rs:193-206` | - |
 | 11 item 1 | Retire the tree wire | `crates/js-agent-wire/src/refusal.rs:193-206` | - |
 | 11 item 7 | macOS: links and profile built for READ_ONLY/READ_WRITE; native runtime prepare and chosen 5.3 candidate wait | partly: `crates/js-agent/src/native/mounts.rs` | komira-ai/jobscheduler#888 |
-| 5 intro / 5.1 | macOS host_ports (job port equal to host port): not built, refused input-not-allowed | no | komira-ai/jobscheduler#1159 (new) |
+| 5 intro / 5.1 | macOS host_ports (job port equal to host port): `--host-port` offered by the native runtime, each port allowed in the Seatbelt profile | `crates/js-agent/src/native/mod.rs` (`host_ports`), `crates/js-mac-pool/src/seatbelt/policy.rs` (`Policy::with_host_ports`), `crates/js-agent/src/host_ports/mod.rs` (`HostPortFlags`) | komira-ai/jobscheduler#1159 |
 | 5 intro / 5.1 | macOS native runtime's prepare for lookups | no | - |
 | 5.3 / LR10 / Q1 | Copy-on-write mount on macOS: three candidates, none chosen | decision, no code | - |
 | 5.4 / 5.1 | Host sockets on macOS (designed) | no | - |
@@ -1012,18 +1012,18 @@ As read: No status header. The page has no Designed, not yet built, Planned, Par
 
 ## mac-runtime.md
 
-As read: Status: proposed (line 3). Section 4 step 2 (usage) is done; steps 1 and 3 are not built. Step 3 (memory cap) is overtaken by komira-ai/jobscheduler#1027 and B14.
+As read: Status: proposed (line 3). Section 4 steps 1 (the probes, komira-ai/jobscheduler#1183) and 2 (usage) are done; step 3 is not built. Step 3 (memory cap) is overtaken by komira-ai/jobscheduler#1027 and B14.
 
 | Section | Claim | On main | Tracking |
 |---|---|---|---|
 | Status line / What changes | The whole page is a proposal: 'Nothing in this document changes code by itself', with section 4 the one behaviour change. | partly: `docs/design/mac-runtime.md:3` | komira-ai/jobscheduler#886 |
 | §1 One runtime interface | 'A separate change makes the backend a compile-time choice by target OS.' | `crates/js-agent/src/lib.rs:308`, `crates/js-agent/src/cli.rs:12-15` | - |
-| §3 table, memory row | Memory is not enforced on a Mac ('Enforced today: no'); new probe limits/as-not-enforced. | no | komira-ai/jobscheduler#1183 (new) |
-| §3 table, memory row | proc/rusage-other-processes, an info probe today, becomes asserted and reads a process of another uid. | no | komira-ai/jobscheduler#1183 (new) |
-| §3 table, rlimits NPROC | RLIMIT_NPROC is enforced per uid; new probe limits/nproc-per-uid. | partly: `crates/js-agent/src/mac_supervisor/spec.rs:34`, `crates/js-mac-probe` | komira-ai/jobscheduler#1183 (new) |
-| §3 table, rlimits FSIZE | RLIMIT_FSIZE is enforced per process; new probe limits/fsize. | partly: `crates/js-mac-session/src/limits.rs` | komira-ai/jobscheduler#1183 (new) |
-| §3 table, CPU row | No CPU quota on macOS; new probe limits/cpu-seconds for RLIMIT_CPU. | no | komira-ai/jobscheduler#1183 (new) |
-| §4 Steps, step 1 | The new asserted probes of section 3, in js-mac-probe. | no | komira-ai/jobscheduler#1183 (new) |
+| §3 table, memory row | Memory is not enforced on a Mac ('Enforced today: no'); new probe limits/as-not-enforced. | `crates/js-mac-probe/src/macos/limits.rs` | komira-ai/jobscheduler#1183 (new) |
+| §3 table, memory row | proc/rusage-other-processes, an info probe today, becomes asserted and reads a process of another uid. | `crates/js-mac-probe/src/macos/usage.rs` | komira-ai/jobscheduler#1183 (new) |
+| §3 table, rlimits NPROC | RLIMIT_NPROC is enforced per uid; new probe limits/nproc-per-uid. | `crates/js-agent/src/mac_supervisor/spec.rs:34`, `crates/js-mac-probe/src/macos/limits.rs` | komira-ai/jobscheduler#1183 (new) |
+| §3 table, rlimits FSIZE | RLIMIT_FSIZE is enforced per process; new probe limits/fsize. | `crates/js-mac-session/src/limits.rs`, `crates/js-mac-probe/src/macos/limits.rs` | komira-ai/jobscheduler#1183 (new) |
+| §3 table, CPU row | No CPU quota on macOS; new probe limits/cpu-seconds for RLIMIT_CPU. | `crates/js-mac-probe/src/macos/limits.rs` | komira-ai/jobscheduler#1183 (new) |
+| §4 Steps, step 1 | The new asserted probes of section 3, in js-mac-probe. | `crates/js-mac-probe/src/macos/limits.rs`, `crates/js-mac-probe/src/macos/usage.rs` | komira-ai/jobscheduler#1183 (new) |
 | §4 Steps, step 2 / Today | Usage: the agent samples each run's processes at each poll, the supervisor's wait4 usage, job usage and series, heartbeat load from host counters. | `crates/js-agent/src/mac_usage/macos.rs`, `crates/js-agent/src/native` | komira-ai/jobscheduler#1056 |
 | §4 Memory: a cap enforced by sampling | The helper samples each live run every 2 seconds and kills the uid over its cap. | no | - |
 | §4 Memory: cap function moves | memory_max moves from js-contain/cgroup.rs to a crate both targets build. | no | - |
