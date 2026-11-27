@@ -311,7 +311,7 @@ fn a_teaching_logs_the_runs_it_held_and_not_the_ended_jobs_it_read() {
         },
         ManualClock::new(Timestamp::from_millis(0)),
     );
-    let mut teaching = placer.begin_teaching(&tables.jobs).unwrap();
+    let mut teaching = placer.begin_teaching(&tables.jobs, 0).unwrap();
     assert!(!teaching.read_page(&tables.jobs).unwrap());
     let held = good(&tables, "h2", "h", &[16; 10]);
     placer.engine().sizes().freed_run(held, bk());
@@ -349,7 +349,7 @@ fn a_teaching_in_shadow_logs_once_that_the_checks_start_before_the_held_runs() {
     good(&tables, "g0", "g", &[16; 10]);
     let clock = ManualClock::new(Timestamp::from_millis(1_000));
     let placer = placer_with(Curves::Shadow, &clock);
-    let mut teaching = placer.begin_teaching(&tables.jobs).unwrap();
+    let mut teaching = placer.begin_teaching(&tables.jobs, 0).unwrap();
     assert!(!teaching.read_page(&tables.jobs).unwrap());
     let held = good(&tables, "h2", "h", &[16; 10]);
     placer.engine().sizes().freed_run(held, bk());
@@ -387,7 +387,7 @@ fn a_teaching_not_read_through_logs_that_the_checks_start_from_nothing() {
     good(&tables, "h0", "h", &[16; 10]);
     let clock = ManualClock::new(Timestamp::from_millis(0));
     let placer = placer_with(Curves::Shadow, &clock);
-    let teaching = placer.begin_teaching(&tables.jobs).unwrap();
+    let teaching = placer.begin_teaching(&tables.jobs, 0).unwrap();
     placer.teach(teaching);
     let expected = vec![format!("{START} classes=0 ended_jobs=0 took_secs=0")];
     assert_eq!(lines.profile_lines(), expected);
@@ -402,13 +402,13 @@ fn a_teaching_with_the_profiles_off_logs_no_start() {
     good(&tables, "h0", "h", &[16; 10]);
     let clock = ManualClock::new(Timestamp::from_millis(0));
     let placer = placer_with(Curves::Off, &clock);
-    let mut teaching = placer.begin_teaching(&tables.jobs).unwrap();
+    let mut teaching = placer.begin_teaching(&tables.jobs, 0).unwrap();
     assert!(!teaching.read_page(&tables.jobs).unwrap());
     let held = good(&tables, "h1", "h", &[16; 10]);
     placer.engine().sizes().freed_run(held, bk());
     clock.advance(Duration::from_secs(60));
     placer.teach(teaching);
-    placer.teach(placer.begin_teaching(&tables.jobs).unwrap());
+    placer.teach(placer.begin_teaching(&tables.jobs, 0).unwrap());
     assert_eq!(lines.profile_lines(), Vec::<String>::new());
 }
 

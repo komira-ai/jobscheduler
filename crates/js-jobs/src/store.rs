@@ -27,6 +27,7 @@ mod cordons;
 mod dispatch;
 mod duties;
 mod ending;
+mod freed;
 mod guard;
 mod held;
 mod host_rows;
@@ -43,6 +44,7 @@ mod whole;
 mod written;
 
 pub use cordons::{CordonWrite, UncordonWrite};
+pub use freed::FreedPage;
 pub use held::{HeldRequeue, RequeuedFor};
 
 pub use index::Backfill;

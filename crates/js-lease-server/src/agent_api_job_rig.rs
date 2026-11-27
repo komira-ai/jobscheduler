@@ -184,6 +184,8 @@ pub(crate) struct Extra {
     pub(crate) whole: Option<WholePool>,
     /// The placer's `--placement-curves` mode; `off` by default.
     pub(crate) curves: js_sched_placer::sizes::Curves,
+    /// The placer's curve hosts and wait bound; every host and 30 s by default.
+    pub(crate) curve_settings: js_sched_placer::curves::CurveSettings,
 }
 
 /// What makes a rig's pool a whole-node pool of hosts without GPUs ([`whole_rig`]): its
@@ -272,12 +274,22 @@ pub(crate) fn clocked_rig(name: &str, placing: bool, limits: JobLimits) -> Rig {
 
 /// [`clocked_rig`] placing, its placer at `--placement-curves on`.
 pub(crate) fn clocked_curve_rig(name: &str) -> Rig {
+    let on = crate::config::CurveSetting {
+        mode: js_sched_placer::sizes::Curves::On,
+        ..crate::config::CurveSetting::default()
+    };
+    curve_rig(name, on)
+}
+
+/// [`clocked_rig`] placing, its placer in the curve mode `curves` with its hosts and wait bound.
+pub(crate) fn curve_rig(name: &str, curves: crate::config::CurveSetting) -> Rig {
     let clock = Arc::new(StoreClock::default());
     clock.advance(std::time::Duration::from_millis(START_MS));
     let shared = SharedClock::new(OneClock(Arc::clone(&clock)));
     let kept = (JobLimits::default(), Retention::DEFAULT);
     let extra = Extra {
-        curves: js_sched_placer::sizes::Curves::On,
+        curves: curves.mode,
+        curve_settings: curves.settings,
         ..Extra::default()
     };
     rig_on(name, (true, true), kept, (clock, shared), extra)
@@ -353,10 +365,8 @@ pub(crate) fn rig_on(
             curves: extra.curves,
             ..crate::sched::engine::Settings::default()
         };
-        Arc::new(crate::sched::place::SchedPlacer::new(
-            settings,
-            shared.clone(),
-        ))
+        let placer = crate::sched::place::SchedPlacer::new(settings, shared.clone());
+        Arc::new(placer.with_curve_settings(extra.curve_settings))
     };
     let registry = Registry::with_sessions(
         pool,
