@@ -13,7 +13,25 @@
 //! | a stop was signalled, until the process exits | 503 | `draining` |
 //!
 //! A server without a store setting, or over Postgres, has no lock to wait for: it is
-//! `starting`, then `ready`. Any other path answers 404.
+//! `starting`, then `ready`.
+//!
+//! `GET /readyz/sizes` on the same listener says whether the job sizes are taught: whether the
+//! server has finished reading the ended jobs its start rebuilds the sizes' history from
+//! (`crate::job_sizes`), which it does after it answers `ready`. Until then a job that books
+//! nothing books its class's cold size, so a deploy that replaces the server waits for this
+//! route first: a replacement starts the read over.
+//!
+//! | the teaching | status | body |
+//! |---|---|---|
+//! | not ended (or not begun yet: the start has not opened the store) | 503 | `teaching` |
+//! | every ended job read and taught | 200 | `taught` |
+//! | the server keeps no job tables | 200 | `nothing to teach` |
+//! | the start's read of the live allocations failed | 200 | `not taught: the live allocations were not read` |
+//! | a read of the ended jobs failed | 200 | `not taught: the ended jobs were not read` |
+//! | the server stopped before the ended jobs were read | 200 | `not taught: the server stopped before the ended jobs were read` |
+//!
+//! Only `teaching` is a 503: once the read has ended, however it ended, waiting longer teaches
+//! nothing. The route answers whatever the phase of `/readyz`. Any other path answers 404.
 
 use std::sync::Arc;
 
@@ -22,6 +40,8 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::get;
 use tokio::sync::watch;
+
+use crate::job_sizes::Taught;
 
 /// How far the start of the server has come, as the route says it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,19 +71,50 @@ impl Phase {
     }
 }
 
-/// The phase the route answers, set by the start and the stop of the server, and read by
-/// the route.
+/// The status and the body `/readyz/sizes` answers for how the teaching of the job sizes
+/// ended, `None` while it has not.
+fn sizes_answer(taught: Option<Taught>) -> (StatusCode, &'static str) {
+    match taught {
+        None => (StatusCode::SERVICE_UNAVAILABLE, "teaching"),
+        Some(Taught::Read { .. }) => (StatusCode::OK, "taught"),
+        Some(Taught::Nothing) => (StatusCode::OK, "nothing to teach"),
+        Some(Taught::AllocationsUnread) => (
+            StatusCode::OK,
+            "not taught: the live allocations were not read",
+        ),
+        Some(Taught::EndedUnread) => (StatusCode::OK, "not taught: the ended jobs were not read"),
+        Some(Taught::Stopped) => (
+            StatusCode::OK,
+            "not taught: the server stopped before the ended jobs were read",
+        ),
+    }
+}
+
+/// The phase the route answers, set by the start and the stop of the server, and how the
+/// teaching of the job sizes ended, set once it has; both read by the routes.
 #[derive(Clone)]
 pub(crate) struct Gate {
     phase: Arc<watch::Sender<Phase>>,
+    sizes: Arc<watch::Sender<Option<Taught>>>,
 }
 
 impl Gate {
-    /// A gate in `first` phase.
+    /// A gate in `first` phase, its sizes still teaching.
     pub(crate) fn new(first: Phase) -> Self {
         Self {
             phase: Arc::new(watch::Sender::new(first)),
+            sizes: Arc::new(watch::Sender::new(None)),
         }
+    }
+
+    /// Records how the teaching of the job sizes ended.
+    pub(crate) fn set_sizes(&self, taught: Taught) {
+        self.sizes.send_replace(Some(taught));
+    }
+
+    /// How the teaching of the job sizes ended, `None` while it has not.
+    pub(crate) fn sizes(&self) -> Option<Taught> {
+        *self.sizes.borrow()
     }
 
     /// Moves to `phase`.
@@ -82,13 +133,20 @@ impl Gate {
     }
 }
 
-/// The routes of the readiness listener: `/readyz` and nothing else.
+/// The routes of the readiness listener: `/readyz`, `/readyz/sizes` and nothing else.
 pub(crate) fn router(gate: Gate) -> Router {
-    Router::new().route("/readyz", get(readyz)).with_state(gate)
+    Router::new()
+        .route("/readyz", get(readyz))
+        .route("/readyz/sizes", get(sizes))
+        .with_state(gate)
 }
 
 async fn readyz(State(gate): State<Gate>) -> (StatusCode, &'static str) {
     gate.phase().answer()
+}
+
+async fn sizes(State(gate): State<Gate>) -> (StatusCode, &'static str) {
+    sizes_answer(gate.sizes())
 }
 
 #[cfg(test)]
@@ -128,5 +186,64 @@ mod tests {
         }
         assert_eq!(get_path(&app, "/healthz").await.0, StatusCode::NOT_FOUND);
         assert_eq!(get_path(&app, "/").await.0, StatusCode::NOT_FOUND);
+        assert_eq!(
+            get_path(&app, "/readyz/other").await.0,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    /// Asserts that `/readyz/sizes` answers 503 `teaching` from the gate's first moment, through
+    /// every phase of `/readyz`, until the teaching ends, and then each ending's status and
+    /// exact body: 200 for every ending, since none is followed by more teaching. Catches a
+    /// route that says taught before the read ended, one that follows the phase of `/readyz`
+    /// (which is `ready` while the sizes still teach), and an ending that keeps a deploy
+    /// waiting for a read that will never come.
+    #[tokio::test]
+    async fn the_sizes_route_answers_teaching_until_the_teaching_ends_then_how_it_ended() {
+        let gate = Gate::new(Phase::Waiting);
+        let app = router(gate.clone());
+        assert_eq!(gate.sizes(), None, "a gate starts teaching");
+        for phase in [
+            Phase::Waiting,
+            Phase::Starting,
+            Phase::Ready,
+            Phase::Draining,
+        ] {
+            gate.set(phase);
+            let (got, text) = get_path(&app, "/readyz/sizes").await;
+            assert_eq!(
+                (got.as_u16(), text.as_str()),
+                (503, "teaching"),
+                "{phase:?}"
+            );
+        }
+        gate.set(Phase::Ready);
+        let endings = [
+            (Taught::Read { classes: 0 }, "taught"),
+            (Taught::Read { classes: 7 }, "taught"),
+            (Taught::Nothing, "nothing to teach"),
+            (
+                Taught::AllocationsUnread,
+                "not taught: the live allocations were not read",
+            ),
+            (
+                Taught::EndedUnread,
+                "not taught: the ended jobs were not read",
+            ),
+            (
+                Taught::Stopped,
+                "not taught: the server stopped before the ended jobs were read",
+            ),
+        ];
+        for (taught, body) in endings {
+            gate.set_sizes(taught);
+            assert_eq!(gate.sizes(), Some(taught));
+            let (got, text) = get_path(&app, "/readyz/sizes").await;
+            assert_eq!((got.as_u16(), text.as_str()), (200, body), "{taught:?}");
+            assert_eq!(
+                get_path(&app, "/readyz").await,
+                (StatusCode::OK, "ready".to_owned())
+            );
+        }
     }
 }

@@ -465,6 +465,7 @@
 //! |---|---|
 //! | `GET /v1/hosts` | 200 `{hosts: [{id, source, shape {cpu_millis, memory_bytes, gpus, gpu_class?, disk_bytes?}, memory {configured_bytes, schedulable_percent, bookable_bytes}, capabilities, labels, state?, lost?, phase?, agent_version?, releasing?, taint?}]}`; `source` is `registered` (every listed host said hello; the value `static` of the removed agentless pool is not written any more), `capabilities` are those of the shape the pool books the host on and, for a host this server's registry holds, the `full-disk-access` its agent's last hello reported where that shape does not name it, and `state` (`live`, `lost`, `awaiting`), `lost`, `phase`, `agent_version`, `releasing` (work still to finish) and `taint` (`{reason, run_id?, check?}`, once the host reported one), `mark` (`reserved` for a waiting request, `held` while a whole-node lease is committed, `draining` and `releasing` while the host is being scaled away), `reserved_for` (the request id) and `drain_deadline_ms` (when the host a reservation is draining is expected to be drained at the latest; reaching it gives nothing up, and the mark stays) are those of a registered host; so is `cordon {expires_at_ms, holder?}`, present while the host is cordoned, with its holder when a holder placed or took it (see "Cordon" below: a host's own cordon left by a dead requester lapses within its last `lease_secs`, at most 3600 s after its last extension, and is not extended by another holder's request meanwhile; an operator's lasts the length it was set for, at most seven days; the host's own `:uncordon` or the operator's `UncordonHost` lifts it) |
 //! | `GET /readyz` | only on the listener of `--ready-listen`, plain HTTP, no token (see "The readiness route"): 200 `ready` while the server serves; else 503 `waiting for the store's writer lock` (a SQLite store's file lock), `starting` or `draining` |
+//! | `GET /readyz/sizes` | only on the listener of `--ready-listen`, same rules: 503 `teaching` until the server has read the ended jobs its start teaches the job sizes from; then 200 `taught`, `nothing to teach` (no job tables), or `not taught: ` and why (the live allocations or the ended jobs were not read, or the server stopped first) |
 //! | `GET /healthz` | 200 `ok`, no token; 503 `tick loop stopped` once the tick loop has stopped; else 503 `store unreachable` while the tick's store paths have failed for `--store-unreachable-after` (until a tick's store work succeeds) |
 //! | `GET /v1/pools` | 200 `{pools: [{name, kind, network, exec, launch, memory {configured_bytes, schedulable_percent, bookable_bytes}, state, reasons, credentials, network_check, instances, blocked, no_offer, last_launch, machines {host, state, offer, zone, price_cents_per_hour, provider_id}, orphans, last_tick_ms, scaler, next_launch}], warnings, store}`; `store` is `{consecutive_failures, failing_since_ms, last_error, last_ok_ms, latency_ms, lock, unreachable_after_ms, unreachable, alerts}`, the health of the tick's store paths, `last_error` a kind (`disconnected`, `failed`, `stale_cursor`) and never an error's text, `lock` `none`, or `held` for a SQLite store's file lock, `alerts` by key; `state` is `checking` (no pass yet), `available` or `unavailable`; `provider_checks` is the provider's own checks of the last pass, each `{name, ok, reason, note, checked_at_ms}`; `next_launch` holds the launch plan with every secret printed as `***`; no token, on `server.listen` only, and not served (404) when that is not a private address, nor to a peer that is not a private address (an IPv4-mapped IPv6 peer counts as its IPv4 form) |
 //! | `POST /v1/pools/{pool}/brake/reset` | 202 `{pool, reset: "requested"}`; 401; 404 for another pool |
@@ -478,7 +479,7 @@
 //!
 //! `--ready-listen <addr>` (`server.ready_listen`) serves `GET /readyz` on a listener of its
 //! own, on a loopback address only, plain HTTP whatever the other ports speak, with no
-//! token; any other path is a 404. It is bound and answering before a SQLite store's file lock
+//! token, and `GET /readyz/sizes` (below); any other path is a 404. It is bound and answering before a SQLite store's file lock
 //! is tried, and it is the last listener closed when the server stops, so a supervisor
 //! can tell the phases of the process apart from outside. At start the program prints
 //! `ready on <addr>` (the bound address) at once, and `listening on <addr>` when the start
@@ -495,6 +496,14 @@
 //! arrives while the server waits for the lock or starts ends the process with status 0
 //! at once, without a drain. `/healthz` is another question, served on the `--listen`
 //! address: whether the tick loop and the store paths work.
+//!
+//! `GET /readyz/sizes` says whether the job sizes are taught: the server answers `ready`
+//! before it reads the ended jobs its start teaches them from, and a job that books nothing
+//! books its class's cold size until that read ends. It answers 503 `teaching` until then,
+//! whatever the phase, and 200 once the read has ended however it ended: `taught`, `nothing
+//! to teach` (no job tables), `not taught: the live allocations were not read`, `not taught:
+//! the ended jobs were not read` or `not taught: the server stopped before the ended jobs were
+//! read`. A deploy waits for its 200 before it replaces the server.
 //!
 //! # Admission
 //!

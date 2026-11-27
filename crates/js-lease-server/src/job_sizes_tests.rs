@@ -13,7 +13,7 @@ use js_types::HostId;
 
 use js_state::ManualClock;
 
-use super::{Sizes, begin};
+use super::{Sizes, Taught, begin};
 use crate::agent_api::job_rig::{spec, tables_on};
 use crate::api::rig::{Lines, process_sink};
 use crate::job_store::ServerJobs;
@@ -95,11 +95,12 @@ fn tables() -> (
 
 /// Asserts that a teaching counts the ended jobs the store holds that taught a class a memory
 /// sample, and no others; that a taught teaching teaches nothing a second time; that a start
-/// whose read of the live allocations fails begins none (it teaches 0, and the start is not
-/// refused); and that a read of the ended jobs that fails teaches none of them. Each outcome
-/// logs its one line, whole. Catches a start
+/// whose read of the live allocations fails begins none (it teaches 0, says so each time it is
+/// asked, and the start is not refused); and that a read of the ended jobs that fails teaches
+/// none of them and says so. Each outcome logs its one line, whole. Catches a start
 /// that forgets the history, one that counts a job that ended with no usage as taught, a
-/// history taught twice, and a failed read that stops the server.
+/// history taught twice, a failed read that stops the server, and a failed read the readiness
+/// route would report as taught (`crate::ready`).
 #[test]
 fn a_teaching_counts_the_ended_jobs_and_a_failed_read_teaches_none() {
     let lines = Lines::default();
@@ -107,23 +108,29 @@ fn a_teaching_counts_the_ended_jobs_and_a_failed_read_teaches_none() {
     let (clock, store, jobs, _) = tables();
     ran(&clock, &jobs, "unmeasured", None);
     let sizes = begin(&Arc::default(), &jobs);
-    assert_eq!(sizes.teach(), 0);
+    assert_eq!(sizes.teach(), Taught::Read { classes: 0 });
     ran(&clock, &jobs, "measured", Some(MEASURED));
     let sizes = begin(&Arc::default(), &jobs);
     lines.take();
-    assert_eq!(sizes.teach(), 1);
+    assert_eq!(sizes.teach(), Taught::Read { classes: 1 });
     assert_eq!(
         said(&lines.take(), "were taught"),
         " INFO the job sizes were taught the runs of the ended jobs taught=1 pages=1"
     );
-    assert_eq!(sizes.teach(), 0, "taught: nothing more");
+    assert_eq!(sizes.teach(), Taught::Nothing, "taught: nothing more");
     store.fail_read_after(0);
     let sizes = begin(&Arc::default(), &jobs);
-    assert_eq!(sizes.teach(), 0, "no live allocations read: none begun");
+    assert_eq!(sizes.teach(), Taught::AllocationsUnread, "none begun");
+    assert_eq!(sizes.teach(), Taught::AllocationsUnread, "asked again");
     let sizes = begin(&Arc::default(), &jobs);
     store.fail_read_after(1);
     lines.take();
-    assert_eq!(sizes.teach(), 0, "the ended jobs' read failed");
+    assert_eq!(
+        sizes.teach(),
+        Taught::EndedUnread,
+        "the ended jobs' read failed"
+    );
+    assert_eq!(Taught::EndedUnread.classes(), 0);
     assert_eq!(
         said(&lines.take(), "were not read"),
         format!(
@@ -157,7 +164,7 @@ fn a_start_reads_no_ended_job_and_the_teaching_reads_every_page() {
         }),
         "no ended job read at the start: {begun:?}"
     );
-    assert_eq!(sizes.teach(), 1);
+    assert_eq!(sizes.teach(), Taught::Read { classes: 1 });
     let pages = store
         .take_reads()
         .into_iter()
@@ -167,8 +174,9 @@ fn a_start_reads_no_ended_job_and_the_teaching_reads_every_page() {
 }
 
 /// Asserts that a stop before the read ends it before its first page: the teaching reads no
-/// job and teaches none, logs the one line that says so, and a later call does nothing. Catches a stop that waits for the
-/// whole history to be read.
+/// job and teaches none, answers that the server stopped, logs the one line that says so, and
+/// a later call does nothing. Catches a stop that waits for the whole history to be read, and a
+/// stopped read reported as taught.
 #[test]
 fn a_stop_ends_the_read_before_its_next_page() {
     let lines = Lines::default();
@@ -179,18 +187,23 @@ fn a_stop_ends_the_read_before_its_next_page() {
     sizes.stop();
     store.take_reads();
     lines.take();
-    assert_eq!(sizes.teach(), 0);
+    assert_eq!(sizes.teach(), Taught::Stopped);
+    assert_eq!(Taught::Stopped.classes(), 0);
     assert_eq!(store.take_reads(), Vec::new(), "no page read");
     assert_eq!(
         said(&lines.take(), "stopped"),
         " INFO the server stopped before the ended jobs were read: their runs were not taught \
          pages=0"
     );
-    assert_eq!(sizes.teach(), 0);
+    assert_eq!(sizes.teach(), Taught::Nothing);
 }
 
-/// Asserts that a server with no teaching begun (no job service) teaches nothing.
+/// Asserts that a server with no teaching begun (no job service) teaches nothing and says it
+/// has nothing to teach, not that a read failed.
 #[test]
 fn no_teaching_begun_teaches_nothing() {
-    assert_eq!(Sizes::default().teach(), 0);
+    assert_eq!(Sizes::default().teach(), Taught::Nothing);
+    assert_eq!(Taught::Nothing.classes(), 0);
+    assert_eq!(Taught::AllocationsUnread.classes(), 0);
+    assert_eq!(Taught::Read { classes: 3 }.classes(), 3);
 }

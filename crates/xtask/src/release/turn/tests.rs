@@ -154,6 +154,45 @@ fn several_runs_mix_by_the_order_of_the_rules() {
     assert_eq!(decide(5, me, None, &with_newer), superseded_by(8));
 }
 
+/// Asserts that releases made while an older run's deploy waits (for the running job service
+/// to be taught, up to its bound) collapse to the newest: of runs 5, 6 and 7, all at their turn
+/// while run 4 has published and not yet deployed, 5 and 6 are superseded by the newest one at
+/// its turn, 7 waits for run 4 and for the turns of 5 and 6 to end (they end at once,
+/// superseded), and once 4 has deployed and 5 and 6 ended their turns (their `publish`
+/// skipped), 7 goes. Catches a run queued behind a waiting deploy that deploys an older release after it,
+/// which replaced the job service once per release before it had learned its sizes.
+#[test]
+fn runs_queued_behind_a_waiting_deploy_collapse_to_the_newest() {
+    let me = v(1, 0, 0);
+    let waiting = |turn: Job| {
+        [
+            peer(4, Job::Succeeded, Job::Running),
+            with_publish(5, turn, Job::Absent, Job::Absent),
+            with_publish(6, turn, Job::Absent, Job::Absent),
+            with_publish(7, turn, Job::Absent, Job::Absent),
+        ]
+    };
+    let others = |mine: u64, peers: &[Peer]| -> Vec<Peer> {
+        peers.iter().filter(|p| p.number != mine).cloned().collect()
+    };
+    let at_turn = waiting(Job::Running);
+    assert_eq!(decide(5, me, None, &others(5, &at_turn)), superseded_by(6));
+    assert_eq!(decide(6, me, None, &others(6, &at_turn)), superseded_by(7));
+    assert_eq!(
+        decide(7, me, None, &others(7, &at_turn)),
+        Decision::Wait(
+            "run #4 has published and not yet deployed; run #5 has its turn; run #6 has its turn"
+                .into()
+        )
+    );
+    let ended = [
+        peer(4, Job::Succeeded, Job::Succeeded),
+        with_publish(5, Job::Succeeded, Job::Ended, Job::Succeeded),
+        with_publish(6, Job::Succeeded, Job::Ended, Job::Succeeded),
+    ];
+    assert_eq!(decide(7, me, None, &ended), go());
+}
+
 /// Takes the turn of this test and makes the scratch directory. The lock is the one `release
 /// desired`'s tests hold while they write and start their stand-ins: a script being written is a
 /// file open for writing, and a program another test of this process starts meanwhile would
