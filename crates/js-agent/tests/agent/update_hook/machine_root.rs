@@ -13,9 +13,7 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
 use js_agent::own_host::RequestLimit;
-use js_agent::update_hook::{
-    Class, ConnectParams, Done, Held, Outcome, Reason, Record, Step, UpdateInfo,
-};
+use js_agent::update_hook::{Class, Done, Held, Outcome, Reason, Record, Step, UpdateInfo};
 
 use super::lease_port::{all_unreachable, lease, reach};
 use super::machine::Tree;

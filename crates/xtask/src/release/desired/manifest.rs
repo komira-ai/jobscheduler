@@ -85,9 +85,11 @@ pub enum Param {
 }
 
 /// The hook's `params`: exactly the keys of `js_agent::update_hook::params::KEYS`, which the hook
-/// requires (a test holds the two equal and has the hook's reader accept the table). The bounds
-/// mirror the ones of `hook.timeoutSecs`.
-pub const PARAMS: [(&str, Param); 16] = [
+/// requires, plus the retired `token_file`: this release's hook ignores it, and the hook of an
+/// earlier release, which may read these params during the update, still requires it (a test
+/// holds the sets equal and has the hook's reader accept the table). The bounds mirror the ones
+/// of `hook.timeoutSecs`.
+pub const PARAMS: [(&str, Param); 17] = [
     ("unit", Param::Text(RUN_UNIT)),
     ("state_dir", Param::Text("/var/lib/js-agent-update")),
     (
@@ -95,6 +97,7 @@ pub const PARAMS: [(&str, Param); 16] = [
         Param::Text("/var/lib/hostkeeper/packages/js-agent/current"),
     ),
     ("flags_file", Param::Text("/etc/js-agent/flags")),
+    ("token_file", Param::Text("/etc/js-agent/token")),
     ("state_root", Param::Text("/var/lib/js-agent/state")),
     ("runtime", Param::Text("crun")),
     ("cordon_lease_secs", Param::Integer(300)),
@@ -133,7 +136,7 @@ pub const MAC_RUN: [&str; 3] = ["js-agent", "js-agent.session", "js-agent.pf-poo
 /// the host setup `prepare` makes (`socket_group`, the group the helper's plist names, and
 /// `scratch_root`, the agent plist's `--scratch-root`), with the Mac's paths and the `native`
 /// runtime; the bounds are the Linux ones.
-pub const MAC_PARAMS: [(&str, Param); 20] = [
+pub const MAC_PARAMS: [(&str, Param); 21] = [
     ("unit", Param::Text("js-agent")),
     ("helper_unit", Param::Text("js-agent.session")),
     ("pf_unit", Param::Text("js-agent.pf-pool")),
@@ -148,6 +151,7 @@ pub const MAC_PARAMS: [(&str, Param); 20] = [
         Param::Text("/var/lib/hostkeeper/packages/js-agent/current"),
     ),
     ("flags_file", Param::Text("/etc/js-agent/flags")),
+    ("token_file", Param::Text("/etc/js-agent/token")),
     ("state_root", Param::Text("/var/db/js-agent/state")),
     ("runtime", Param::Text("native")),
     ("cordon_lease_secs", Param::Integer(300)),

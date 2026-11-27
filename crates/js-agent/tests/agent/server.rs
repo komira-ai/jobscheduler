@@ -360,11 +360,6 @@ impl Server {
             .unwrap_or_else(|| panic!("{host} is not listed: {listing}"))
             .clone()
     }
-
-    /// `POST path` with the client token and `body`.
-    pub fn post_body(&self, path: &str, body: &Value) -> Reply {
-        self.client().post(path, body).unwrap()
-    }
 }
 
 /// A pool that books a host as 4 CPUs and 4 GiB and asks only that it runs Linux on
@@ -493,22 +488,6 @@ impl Agent {
         machine: Arc<dyn Machine>,
     ) -> Self {
         Self::launch(url, identities, extra, host, connector, machine, true)
-    }
-
-    /// An agent whose command line is exactly `--flags-file FILE`: the server, the pool, the
-    /// host's certificate and the rest come from the flags file, as a hostkeeper-packaged unit
-    /// starts the agent.
-    pub fn spawn_flags_file(
-        flags: &Path,
-        host: fn() -> Host,
-        connector: impl Connector + Send + 'static,
-    ) -> Self {
-        let args = vec![
-            "--flags-file".to_owned(),
-            flags.to_str().unwrap().to_owned(),
-        ];
-        let machine = Arc::new(FakeMachine::new());
-        Self::run_args(args, host, (connector, None), machine, false)
     }
 
     /// [`Agent::spawn_on`] with the connector of the dispatch poll's transports given: the

@@ -92,9 +92,10 @@ pub const PREVIOUS_VERSION_KEY: &str = "updater.previous_version";
 /// The key of the agent's state root, as the agent's `--state-root`.
 pub const STATE_ROOT_KEY: &str = "state_root";
 
-/// The retired key of the file that held the host's join token. No hook reads it and a
-/// manifest that still carries it is accepted; the config hook, which refuses unknown keys,
-/// skips it by this name.
+/// The retired key of the file that held the host's join token. This hook does not read it
+/// and a manifest that still carries it is accepted; the config hook, which refuses unknown
+/// keys, skips it by this name. The release manifest still carries it, because the hook of an
+/// earlier release requires it when it reads the params of this one.
 pub const TOKEN_FILE_KEY: &str = "token_file";
 
 /// The key of the file of the host's own agent flags, as the agent's `--flags-file`.

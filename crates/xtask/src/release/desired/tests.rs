@@ -182,7 +182,7 @@ pub(super) fn refused(result: Result<String, Error>) -> Vec<String> {
 pub(super) fn golden() -> String {
     let entry = |digest: &str| {
         format!(
-            "{{\"entries\":[{{\"digest\":\"{digest}\",\"installer\":\"apt\",\"manifest\":{{\"healthUrl\":\"http://127.0.0.1:7311/healthz\",\"hook\":{{\"cleanupRetries\":3,\"command\":[\"/usr/bin/js-agent\",\"update-hook\"],\"drain\":\"drain\",\"resume\":\"resume\",\"timeoutSecs\":{{\"cleanup\":\"120\",\"cutover\":\"4320\",\"prepare\":\"3900\",\"rollback\":\"8220\",\"verify\":\"615\"}},\"verifyDeadlineSecs\":\"9000\"}},\"installerBounds\":{{\"activateSecs\":\"300\",\"removeSecs\":\"300\",\"stageSecs\":\"600\"}},\"minHostkeeper\":\"0.1.225\",\"package\":\"js-agent\",\"params\":{{\"cleanup_timeout_secs\":{{\"integer\":\"120\"}},\"cordon_lease_secs\":{{\"integer\":\"300\"}},\"cordon_max_secs\":{{\"integer\":\"17355\"}},\"cutover_timeout_secs\":{{\"integer\":\"4320\"}},\"defer_retry_secs\":{{\"integer\":\"300\"}},\"drain_wait_secs\":{{\"integer\":\"3600\"}},\"flags_file\":{{\"text\":\"/etc/js-agent/flags\"}},\"prepare_timeout_secs\":{{\"integer\":\"3900\"}},\"release_link\":{{\"text\":\"/var/lib/hostkeeper/packages/js-agent/current\"}},\"rollback_timeout_secs\":{{\"integer\":\"8220\"}},\"runtime\":{{\"text\":\"crun\"}},\"state_dir\":{{\"text\":\"/var/lib/js-agent-update\"}},\"state_root\":{{\"text\":\"/var/lib/js-agent/state\"}},\"unit\":{{\"text\":\"js-agent-crun.service\"}},\"verify_deadline_secs\":{{\"integer\":\"9000\"}},\"verify_timeout_secs\":{{\"integer\":\"615\"}}}},\"run\":[\"js-agent-crun.service\"]}},\"packageVersion\":\"1.2.3\",\"repository\":\"komira-stable\"}}]}}"
+            "{{\"entries\":[{{\"digest\":\"{digest}\",\"installer\":\"apt\",\"manifest\":{{\"healthUrl\":\"http://127.0.0.1:7311/healthz\",\"hook\":{{\"cleanupRetries\":3,\"command\":[\"/usr/bin/js-agent\",\"update-hook\"],\"drain\":\"drain\",\"resume\":\"resume\",\"timeoutSecs\":{{\"cleanup\":\"120\",\"cutover\":\"4320\",\"prepare\":\"3900\",\"rollback\":\"8220\",\"verify\":\"615\"}},\"verifyDeadlineSecs\":\"9000\"}},\"installerBounds\":{{\"activateSecs\":\"300\",\"removeSecs\":\"300\",\"stageSecs\":\"600\"}},\"minHostkeeper\":\"0.1.225\",\"package\":\"js-agent\",\"params\":{{\"cleanup_timeout_secs\":{{\"integer\":\"120\"}},\"cordon_lease_secs\":{{\"integer\":\"300\"}},\"cordon_max_secs\":{{\"integer\":\"17355\"}},\"cutover_timeout_secs\":{{\"integer\":\"4320\"}},\"defer_retry_secs\":{{\"integer\":\"300\"}},\"drain_wait_secs\":{{\"integer\":\"3600\"}},\"flags_file\":{{\"text\":\"/etc/js-agent/flags\"}},\"prepare_timeout_secs\":{{\"integer\":\"3900\"}},\"release_link\":{{\"text\":\"/var/lib/hostkeeper/packages/js-agent/current\"}},\"rollback_timeout_secs\":{{\"integer\":\"8220\"}},\"runtime\":{{\"text\":\"crun\"}},\"state_dir\":{{\"text\":\"/var/lib/js-agent-update\"}},\"state_root\":{{\"text\":\"/var/lib/js-agent/state\"}},\"token_file\":{{\"text\":\"/etc/js-agent/token\"}},\"unit\":{{\"text\":\"js-agent-crun.service\"}},\"verify_deadline_secs\":{{\"integer\":\"9000\"}},\"verify_timeout_secs\":{{\"integer\":\"615\"}}}},\"run\":[\"js-agent-crun.service\"]}},\"packageVersion\":\"1.2.3\",\"repository\":\"komira-stable\"}}]}}"
         )
     };
     format!(
@@ -751,15 +751,18 @@ pub(super) fn params_file_of(params: &Value) -> String {
 }
 
 /// Asserts that the params the manifest carries are exactly the keys the update hook requires
-/// (`js_agent::update_hook::params::KEYS`: none missing, none extra, none twice), and that the
+/// (`js_agent::update_hook::params::KEYS`: none missing, none extra, none twice) plus the
+/// retired `token_file`, which this hook ignores and a hook of an earlier release still
+/// requires when it reads this release's params, and that the
 /// hook's own reader accepts them written as hostkeeper writes its params file, with the
 /// bounds it reads equal to the manifest's `hook.timeoutSecs` and `verifyDeadlineSecs`.
 #[test]
 fn the_params_are_the_keys_the_hook_requires_and_its_reader_accepts_them() {
     let _serial = serial();
-    use js_agent::update_hook::params::{KEYS, Params};
+    use js_agent::update_hook::params::{KEYS, Params, TOKEN_FILE_KEY};
     let mut ours: Vec<&str> = PARAMS.iter().map(|(key, _)| *key).collect();
     let mut theirs: Vec<&str> = KEYS.to_vec();
+    theirs.push(TOKEN_FILE_KEY);
     ours.sort_unstable();
     theirs.sort_unstable();
     assert_eq!(ours, theirs);

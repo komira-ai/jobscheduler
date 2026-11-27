@@ -8,7 +8,7 @@ requirements do not make; each one is listed under Open questions (section 14).
 ## 1. Summary
 
 Today the server leases whole hosts. Hosts come from agents that register themselves into one
-pool (a static file of hosts (`--pool-config`, `crates/js-pool-static`) was another source; it was removed, and the flag is refused at start) (`--agent-pool-config`, `--agent-token-file`,
+pool (a static file of hosts (`--pool-config`, `crates/js-pool-static`) was another source; it was removed, and the flag is refused at start) (`--agent-pool-config`; `--agent-token-file` is accepted and ignored after G3,
 `crates/js-lease-server/src/agent_pool.rs`). A Lambda provider exists
 (`crates/js-provider-lambdalabs`) that can launch and terminate instances, but nothing
 calls it: its docs say "The provider is not wired to a scheduler"
@@ -748,7 +748,7 @@ What the shell owes the host facts, because the step cannot tell otherwise:
 - The records carry the first-seen times of silent and missing hosts (6.2, Lost), so the
   shell writes and reads them like the rest of the records file.
 
-### 6.2 State machine of one instance
+### 6.2 State machine of one instance (the token steps below are removed by G3, see 7.2)
 
 A record exists for each acquire, written to `<state file>.scaler` before the call it
 describes (write-whole-file-and-rename, as `agent_state::replace` does for `join_tokens.rs`
@@ -1019,14 +1019,12 @@ Rules, each tied to a requirement or to existing behaviour:
   file is rewritten from live records only), so nothing on the scheduler side remembers a
   forgotten host. That is safe here because every launch has a fresh `HostName` (the
   acquire id is the pool and 128 random bits from the input, unique per acquire, 5.2), so a name is never reused, even after
-  a lost state file; and a forgotten host's token is already spent and its credential is
-  revoked at release (7.2), so it cannot re-register under the old name. Only a hand-joined
+  a lost state file; and a forgotten host's name is never launched again, and a host is admitted
+  by its host certificate (7.2, removed by G3), so a released host has no token or credential to revoke. Only a hand-joined
   host that reuses an old name meets `host-bound`, which is the existing behaviour.
 - `Launchable`, as in 6.1.
-- `Agents` today requires `AgentTokens::open(--agent-token-file)` for any registering pool
-  (`config.rs::hosts`: both agent flags come together). An elastic pool needs only one-time
-  tokens, so the shared pool token file becomes optional and a pool without it admits only
-  hosts whose one-time token verifies. A hand-joined pool still sets `join_token_file`.
+- `Agents`: a registering pool admits a host by its host certificate alone. `--agent-token-file`
+  and a pool's `join_token_file` are accepted and ignored, with one warning at start (G3).
 
 ### 6.4 Orphans, lost state, spend over time
 
@@ -1114,7 +1112,7 @@ operator's own image or VPN setup gives the host a route to `advertise_url`; the
 not, and the bootstrap of 7.3 adds none. Without a route the host never says hello and is
 released at `boot_timeout` (F22).
 
-### 7.1 The sequence
+### 7.1 The sequence (the token steps are removed by G3, see 7.2)
 
 1. A consumer's whole-node request finds no free host and waits in the registry; `Launchable` is true,
    so it is not refused `no-capable-host`.
@@ -1219,7 +1217,7 @@ wrappers over `joins.mint` and `joins.revoke`; the HTTP routes stay for tooling.
 the minting side chose". `MintError::Full` (256 waiting, `MAX_WAITING`; removed by G3) blocked a launch and showed
 in status; the loader rule on `max_instances` (4.4) kept it from occurring.
 
-### 7.3 The bootstrap (Lambda: stock image plus a built-in template)
+### 7.3 The bootstrap (Lambda: stock image plus a built-in template; its token and instance files are removed by G3)
 
 Lambda gives no custom images (requirement 2). The service renders a cloud-init script from the
 `BootPlan` (module `bootstrap` of `js-lease-server`: one renderer for every provider and mode).

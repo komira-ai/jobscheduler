@@ -154,6 +154,7 @@ scratch_root          = "/var/db/js-agent/scratch/runs"
 state_dir             = "/Library/Application Support/js-agent/update"
 release_link          = "/var/lib/hostkeeper/packages/js-agent/current"
 flags_file            = "/etc/js-agent/flags"
+token_file            = "/etc/js-agent/token"
 state_root            = "/var/db/js-agent/state"
 runtime               = "native"
 cordon_lease_secs     = 300

@@ -195,7 +195,7 @@ as owner), any script, and another identifier or version.
 Nobody has a root shell on the Macs: everything a Mac needs arrives through hostkeeper, as a package, its files or
 its hook. The flags file and the CA come from the group's config package, above, and the flags file names hostkeeper's
 host certificate and key (`/var/lib/hostkeeper/identity/host.crt` and `host.key`), so a Mac needs no
-`/etc/js-agent/token` (and no instance file: that is for a token minted for a cloud instance). The rest is made by the
+`/etc/js-agent/token` (join tokens are removed). The rest is made by the
 update hook's `prepare`, which hostkeeper runs as root, before it writes its record or cordons the host, on a first
 install and on every update (`crates/js-agent/src/update_hook/step/host_setup.rs`):
 

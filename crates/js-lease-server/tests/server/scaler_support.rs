@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use js_elastic::{
     AcquireId, AcquireRequest, Acquired, BootStep, CapacityProvider, CatalogFuture, EventStream,
-    Held, HostName, HostRef, HostStatus, Offer, ProviderError, ProviderEvent, Released,
+    Held, HostRef, HostStatus, Offer, ProviderError, ProviderEvent, Released,
 };
 use js_elastic_fake::ElasticFake;
 use js_lease_server::{
@@ -567,21 +567,6 @@ pub async fn cancel(h: &Harness, id: &str) -> Reply {
     let job = h.running.job_addr().unwrap();
     let path = format!("/v1/jobs/{id}:cancel");
     request(job, "POST", &path, Some(TOKEN), Some(b"{}")).await
-}
-
-/// The id the agent of a launch registers under, as the unit in the user data names it
-/// (`--host-id "<id>"`).
-pub fn host_id_in(script: &str) -> String {
-    let head = "--host-id \"";
-    let at = script.find(head).expect("the unit names the host id") + head.len();
-    script[at..].split('"').next().unwrap().to_owned()
-}
-
-/// The name `scheduler` gives the machine of `acquire`.
-pub fn name_of(scheduler: &str, acquire: &str) -> String {
-    let scheduler = js_elastic::SchedulerId::new(scheduler).unwrap();
-    let acquire = js_elastic::AcquireId::new(acquire).unwrap();
-    HostName::derive(&scheduler, &acquire).to_string()
 }
 
 /// The path of the scaler's records beside the state file of `scratch`.

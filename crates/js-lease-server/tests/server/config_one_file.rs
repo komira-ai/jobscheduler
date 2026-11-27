@@ -271,6 +271,30 @@ fn every_flag_beside_config_is_refused_by_name() {
     );
 }
 
+/// Asserts that the two retired agent flags, which are hidden and so are not rows of
+/// [`beside`], are refused beside `--config` too, by name, with the text that says they do
+/// nothing (a server file has no key for them). It catches either flag being read beside the
+/// file, and a refusal that tells the operator to move it into the file.
+#[test]
+fn the_retired_agent_flags_beside_config_are_refused_saying_they_do_nothing() {
+    let scratch = Scratch::new("one_file_beside_retired");
+    let base = with_file(&scratch);
+    let retired: [(&[&str], &str); 2] = [
+        (&["--agent-token-file", "/file"], "--agent-token-file"),
+        (&["--require-host-credential"], "--require-host-credential"),
+    ];
+    for (given, flag) in retired {
+        let mut args = base.clone();
+        args.extend(given.iter().map(OsString::from));
+        assert_eq!(
+            refused(args),
+            format!(
+                "{flag}: not allowed with --config; drop it, as it does nothing: agents are admitted by host certificate only"
+            )
+        );
+    }
+}
+
 /// Asserts that the table of the test above is every flag there is: the long flags of the
 /// command line less `--config` (and less the hidden flags that only refuse, which `--config` does not
 /// treat as settings) are exactly the flags it refuses. It catches a flag added
