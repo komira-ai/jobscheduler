@@ -321,11 +321,9 @@ impl Servable {
         worker.booked = worker.booked.saturating_add(booked);
         worker.leases += 1;
         match request.kind {
-            LeaseKind::Action => worker
-                .load_state
-                .insert(attempt.lease, cost, false, profile),
+            LeaseKind::Action => worker.load_state.admit(attempt.lease, cost, profile, now),
             LeaseKind::Vm => worker.load_state.insert(attempt.lease, cost, true, None),
-            LeaseKind::WholeMachine => {}
+            LeaseKind::WholeMachine => worker.load_state.note_lease(),
         }
         let device = worker.free_device(&request.needs).map(str::to_owned);
         worker.devices.extend(device.clone());

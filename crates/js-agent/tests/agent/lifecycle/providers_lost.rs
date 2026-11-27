@@ -1,10 +1,10 @@
 //! A provider that restarted while a start waited on it (`providing`): it lost every source
 //! it held, as tierstore does at each of its releases, and answers their `Mount` "the source
-//! is not prepared here" (`UNAVAILABLE`). The start asks it from the start again: each `Mount`
-//! answered unavailable is followed by the source's `Prepare`, and the next `Mount` waits for
-//! that `Prepare` to be taken. The providers here keep the sources they take and lose them
-//! when the test restarts them (`fake_providers`); the agent's own restart is
-//! `providers_restart`'s.
+//! is not prepared here" (`UNAVAILABLE`). The start asks it from the start again: after a
+//! `Mount` answered unavailable, the source's next ask (once its wait is over, `pace`) sends
+//! its `Prepare` again, and the `Mount` follows once that is taken. The providers here keep
+//! the sources they take and lose them when the test restarts them (`fake_providers`); the
+//! agent's own restart is `providers_restart`'s.
 
 use js_agent::lifecycle::ProviderAnswer;
 use js_agent_wire::{HeldState, Layer, MountMode, Outcome, refusal};
@@ -13,9 +13,20 @@ use super::fake_providers::{FakeProviders, WAIT_MS, mount, prepare, rig, tree, w
 use super::per_job::{job_start, listing};
 use super::{Harness, names};
 
+/// The step period of the tests that step on the clock, in milliseconds.
+const TICK_MS: u64 = 100;
+
 /// Steps `h` four times and returns every event they gave, as `names` has them.
 fn steps(h: &mut Harness) -> Vec<String> {
     (0..4).flat_map(|_| names(&h.life.step())).collect()
+}
+
+/// Steps `h` every [`TICK_MS`] for `ms` milliseconds.
+fn tick_for(h: &mut Harness, ms: u64) {
+    for _ in 0..ms / TICK_MS {
+        h.clock.advance(TICK_MS);
+        h.life.step();
+    }
 }
 
 /// The `Prepare` and `Mount` calls the providers were sent, in order.
@@ -28,24 +39,37 @@ fn asked(h: &Harness) -> Vec<String> {
         .collect()
 }
 
-/// The message of the `start-failed` finding of `job_id`.
-fn start_failed(h: &Harness, job_id: &str) -> String {
+/// The message of the last finding of `code` of `job_id`.
+fn finding(h: &Harness, job_id: &str, code: &str) -> String {
     let found = h.life.findings();
-    let found = found.iter().find(|finding| {
-        finding.run_id.as_deref() == Some(job_id) && finding.code == "start-failed"
-    });
+    let found = found
+        .iter()
+        .rev()
+        .find(|finding| finding.run_id.as_deref() == Some(job_id) && finding.code == code);
     found.expect("the finding").message.clone()
 }
 
-/// The `Prepare` the start of `with_layer` sends for its source.
+/// The `Prepare` of the source of `j1`, a start of `with_layer`.
+fn prepare_j1() -> js_agent::lifecycle::ProviderCall {
+    prepare("j1", 0, "k1", MountMode::ReadOnly)
+}
+
+/// What a provider that is down answers.
+fn down() -> ProviderAnswer {
+    ProviderAnswer::Unavailable("socket missing".to_owned())
+}
+
+/// The `Prepare` the start of `with_layer` sends for its source, as logged.
 const PREPARE: &str = "provider prepare tier j1#0 k1 ReadOnly";
 
-/// The `Mount` of that source.
+/// The `Mount` of that source, as logged.
 const MOUNT: &str = "provider mount tier j1#0";
 
 /// A rig whose provider keeps the sources it takes, has taken the source of `j1` (a start of
-/// `with_layer`) and has its first `Mount` still out, and then restarts: it has lost the
-/// source and will answer the directory `t1` of the root `ro` once the source is taken again.
+/// `with_layer`, admitted at 0 on the test's clock) with its first `Mount` still out, and
+/// then restarts: it has lost the source, and answers the directory `t1` of the root `ro`
+/// once the source is taken again. The first step is taken: the `Mount` is answered "the
+/// source is not prepared here".
 fn restarted(name: &str) -> (Harness, FakeProviders) {
     let (mut h, providers) = rig(name, FakeProviders::keep_sources);
     providers.then("tier", &mount("j1", 0), ProviderAnswer::Pending);
@@ -53,27 +77,35 @@ fn restarted(name: &str) -> (Harness, FakeProviders) {
     h.apply(vec![job_start(with_layer("j1"))]);
     assert_eq!(asked(&h), [PREPARE, MOUNT]);
     providers.restart();
+    assert_eq!(names(&h.life.step()), ["finding j1 provider-backoff"]);
     (h, providers)
 }
 
 /// Asserts that a start whose provider restarted between the source's `Prepare` and its
-/// `Mount` (the `Mount` still out, then answered "the source is not prepared here") sends the
-/// source's `Prepare` again in the step that is handed that answer, sends the next `Mount`
-/// only after it, and runs on the directory the provider then answers, with the test's clock
-/// not moved at all: well inside `--mount-provider-wait`, where it failed at that wait
-/// `input-unavailable` when the agent asked only `Mount` once the source had been taken.
-/// Catches a source taken once and never asked from the start again after the provider lost
-/// it.
+/// `Mount` (the `Mount` still out, then answered "the source is not prepared here") says so
+/// in its `provider-backoff` line, sends the source's `Prepare` again once the first wait is
+/// over (1 s at most) and the `Mount` right after it, and runs on the directory the provider
+/// then answers, 1 s after its admission. Catches a source never asked from the start again
+/// after its provider lost it, which waits out `--mount-provider-wait` and fails
+/// `input-unavailable` asking only `Mount`.
 #[test]
 fn a_provider_that_restarted_between_prepare_and_mount_is_asked_to_prepare_again() {
     let (mut h, _providers) = restarted("lost-mid");
-    h.life.step();
+    let line = finding(&h, "j1", "provider-backoff");
+    assert!(
+        line.starts_with(
+            "the provider tier did not serve the Mount of source 0 (1 in a row): the source is \
+             not prepared here; asked again in "
+        ),
+        "{line}"
+    );
     assert_eq!(
         asked(&h),
-        [PREPARE, MOUNT, PREPARE],
-        "prepared again at once"
+        [PREPARE, MOUNT],
+        "nothing before the wait is over"
     );
     assert_eq!(listing(&h, "j1").state, HeldState::Starting);
+    h.clock.advance(1_000);
     assert_eq!(steps(&mut h), ["started j1"]);
     assert_eq!(asked(&h), [PREPARE, MOUNT, PREPARE, MOUNT]);
     let looked_up = h.fake.looked_up("j1").expect("looked up");
@@ -86,76 +118,75 @@ fn a_provider_that_restarted_between_prepare_and_mount_is_asked_to_prepare_again
     assert_eq!(listing(&h, "j1").state, HeldState::Running);
 }
 
-/// Asserts that a provider that is still down after its restart (its `Prepare` answered
-/// unavailable, "socket missing") is asked `Prepare` at each step and not `Mount` until it
-/// takes the source again, and that the start then runs. Catches a `Mount` sent to a provider
-/// that has not taken the source back, which can only be answered "not prepared here", and a
-/// source given up after the first `Prepare` that failed.
+/// Asserts that a provider still down after its restart (two `Prepare`s answered
+/// unavailable, "socket missing") is sent `Prepare` again after each wait and no `Mount`
+/// until it takes the source again, the waits growing (two `Prepare`s in the first 3 s, the
+/// third later), and that the start then runs well within its wait. Catches a `Mount` sent to
+/// a provider that has not taken the source back, which can only answer "not prepared here",
+/// and a source given up after a `Prepare` sent again failed.
 #[test]
 fn a_provider_still_down_after_its_restart_is_asked_to_prepare_until_it_takes_the_source() {
     let (mut h, providers) = restarted("lost-down");
-    let down = ProviderAnswer::Unavailable("socket missing".to_owned());
-    let again = prepare("j1", 0, "k1", MountMode::ReadOnly);
-    providers.then("tier", &again, down.clone());
-    providers.then("tier", &again, down);
-    h.life.step();
-    h.life.step();
+    providers.then("tier", &prepare_j1(), down());
+    providers.then("tier", &prepare_j1(), down());
+    tick_for(&mut h, 3_000);
     assert_eq!(
         asked(&h),
         [PREPARE, MOUNT, PREPARE, PREPARE],
         "no Mount while the Prepare is not taken"
     );
     assert_eq!(listing(&h, "j1").state, HeldState::Starting);
-    assert_eq!(steps(&mut h), ["started j1"]);
+    tick_for(&mut h, 5_000);
     assert_eq!(
         asked(&h),
         [PREPARE, MOUNT, PREPARE, PREPARE, PREPARE, MOUNT]
     );
+    assert_eq!(listing(&h, "j1").state, HeldState::Running);
 }
 
 /// Asserts that a provider that restarted and never takes the source again fails the start
 /// `input-unavailable` once `--mount-provider-wait` has passed since its admission and not a
 /// moment before, naming the last reason it gave (its `Prepare`'s), and that the source is
-/// released. Catches a start held for ever by a provider that came back without it, and a
-/// failure that names the stale `Mount` answer instead of why the source is not taken.
+/// released. Catches a start held for ever by a provider that came back without the source,
+/// and a failure that names the old `Mount` answer and not why the source is not taken.
 #[test]
 fn a_provider_that_never_takes_the_source_back_fails_the_start_at_the_wait() {
     let (mut h, providers) = restarted("lost-never");
-    let down = ProviderAnswer::Unavailable("socket missing".to_owned());
-    let again = prepare("j1", 0, "k1", MountMode::ReadOnly);
-    providers.always("tier", &again, down);
-    h.life.step();
-    h.clock.advance(WAIT_MS - 1);
-    h.life.step();
+    providers.always("tier", &prepare_j1(), down());
+    tick_for(&mut h, WAIT_MS - TICK_MS);
     assert_eq!(listing(&h, "j1").state, HeldState::Starting);
-    h.clock.advance(1);
-    h.life.step();
+    assert_eq!(
+        providers.sent("mount").len(),
+        1,
+        "no Mount after the restart"
+    );
+    tick_for(&mut h, TICK_MS);
     let result = listing(&h, "j1").result.expect("a result");
     assert_eq!(result.outcome, Outcome::FailedToStart);
     assert_eq!(result.detail.as_deref(), Some(refusal::INPUT_UNAVAILABLE));
     assert_eq!(
-        start_failed(&h, "j1"),
+        finding(&h, "j1", "start-failed"),
         "the provider tier did not mount source 0 within 30 s: socket missing"
     );
     assert_eq!(providers.sent("release"), ["provider release tier j1#0"]);
 }
 
 /// Asserts that a provider that restarted and then refuses the source's `Prepare` fails the
-/// start `provider-refused` at the step that is handed the refusal, with its reason, and
-/// releases the source. Catches a refusal of the `Prepare` sent again that is waited out as if
-/// the provider were down.
+/// start `provider-refused` at the step that sends it, with its reason, and releases the
+/// source. Catches a refusal of the `Prepare` sent again that is waited out as if the
+/// provider were down.
 #[test]
 fn a_prepare_refused_after_the_restart_fails_the_start_provider_refused() {
     let (mut h, providers) = restarted("lost-refused");
-    let again = prepare("j1", 0, "k1", MountMode::ReadOnly);
     let refused = ProviderAnswer::Refused("no such tree".to_owned());
-    providers.always("tier", &again, refused);
+    providers.always("tier", &prepare_j1(), refused);
+    h.clock.advance(1_000);
     h.life.step();
     let result = listing(&h, "j1").result.expect("a result");
     assert_eq!(result.outcome, Outcome::FailedToStart);
     assert_eq!(result.detail.as_deref(), Some(refusal::PROVIDER_REFUSED));
     assert_eq!(
-        start_failed(&h, "j1"),
+        finding(&h, "j1", "start-failed"),
         "the provider tier refused source 0: no such tree"
     );
     steps(&mut h);
@@ -163,12 +194,12 @@ fn a_prepare_refused_after_the_restart_fails_the_start_provider_refused() {
     assert!(h.fake.created().is_empty());
 }
 
-/// Asserts that a `Mount` answered unavailable by a provider that did not restart ("not
-/// ready": it still holds the source and is making its tree) is followed by the source's
-/// `Prepare` too, which it takes as it took it before, and that the start runs on the next
-/// `Mount`'s directory; and that a step whose `Mount` is still out, or is answered with no
-/// directory, sends no `Prepare`. Catches a `Prepare` sent again while the `Mount` is out, or
-/// for an answer that does not say the source may be lost.
+/// Asserts that a step whose `Mount` is still out sends nothing, that a `Mount` answered with
+/// no directory is asked again after its wait with no `Prepare`, and that a `Mount` answered
+/// unavailable by a provider that did not restart ("not ready": it still holds the source)
+/// has the next ask send the source's `Prepare` too, which it takes as before, and that the
+/// start runs on the `Mount` after it. Catches a `Prepare` sent again while the `Mount` is
+/// out, or for an answer that does not say the source may be lost.
 #[test]
 fn only_a_mount_answered_unavailable_is_followed_by_a_prepare() {
     let (mut h, providers) = rig("lost-not-ready", FakeProviders::keep_sources);
@@ -184,12 +215,14 @@ fn only_a_mount_answered_unavailable_is_followed_by_a_prepare() {
     assert_eq!(asked(&h), [PREPARE, MOUNT], "a Mount out: nothing sent");
     h.life.step();
     assert_eq!(asked(&h), [PREPARE, MOUNT], "no directory: no Prepare");
+    h.clock.advance(1_000);
     h.life.step();
     assert_eq!(
         asked(&h),
-        [PREPARE, MOUNT, MOUNT, PREPARE],
-        "unavailable: Mount, then Prepare at once"
+        [PREPARE, MOUNT, MOUNT],
+        "no directory: the Mount alone again"
     );
+    h.clock.advance(2_000);
     assert_eq!(steps(&mut h), ["started j1"]);
     assert_eq!(asked(&h), [PREPARE, MOUNT, MOUNT, PREPARE, MOUNT]);
 }

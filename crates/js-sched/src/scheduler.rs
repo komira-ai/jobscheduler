@@ -504,12 +504,13 @@ impl Scheduler {
     /// run ended, for the shape guard ([`Admission::run_ended`]).
     fn release(&mut self, id: OperationId, end: RunEnd) {
         self.record_release(id);
+        let now = self.now;
         let op = self.ops.get_mut(&id).expect("released operations exist");
         if let Some((lease, worker)) = op.state.holding() {
             let held = self.held.remove(&lease);
             if let Some((w, held)) = self.workers.get_mut(worker).zip(held) {
                 w.booked = w.booked.saturating_sub(held.booked);
-                if let Some(ended) = w.load_state.remove(lease) {
+                if let Some(ended) = w.load_state.end(lease, now) {
                     self.admission.run_ended(&ended, end);
                 }
                 w.leases -= 1;

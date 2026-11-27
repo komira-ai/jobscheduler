@@ -42,6 +42,7 @@ mod prepare;
 #[cfg(target_os = "linux")]
 mod provider_flags;
 mod providers;
+mod providers_backoff;
 mod providers_end;
 mod providers_lost;
 mod providers_restart;
