@@ -36,12 +36,18 @@ fn finding(h: &Harness, job_id: &str, code: &str) -> String {
 /// Asserts that the providers are asked for each source of a start at once, when it is
 /// admitted: `Prepare` with the ref and the mode (a layer's read-only, a mount's its own),
 /// in order of the sources, and then `Mount`, before the start's image is here and so before
-/// any container is made; and that the image is asked for in the same step, once. Catches a
-/// provider that begins its work only when the container is being made, which is what the
-/// whole design is to avoid.
+/// any container is made; that the image is asked for in the same step, once; and that a
+/// step while each `Mount` is still out asks nothing again. Catches a provider that begins
+/// its work only when the container is being made, which is what the whole design is to
+/// avoid.
 #[test]
 fn prepare_is_asked_at_assignment_before_the_image_is_ready() {
-    let (mut h, providers) = rig("prov-prepare", |_| {});
+    let (mut h, providers) = rig("prov-prepare", |providers| {
+        // The provider is making both trees: each `Mount` stays out. A `Mount` answered
+        // unavailable is followed by a `Prepare` (`providers_lost`).
+        providers.always("tier", &mount("j1", 0), ProviderAnswer::Pending);
+        providers.always("tier", &mount("j1", 1), ProviderAnswer::Pending);
+    });
     h.fake.pull_pending(IMAGE);
     let spec = JobStartSpec {
         mounts: vec![provided_mount("k2", "/opt/sdk", MountMode::ReadWrite)],
@@ -466,7 +472,11 @@ fn a_failed_sweep_is_asked_again_every_ten_seconds_and_reported_once() {
 /// sources held by the providers.
 #[test]
 fn a_record_that_cannot_be_written_fails_the_start_and_releases_what_was_asked() {
-    let (mut h, providers) = rig("prov-record-fails", |_| {});
+    let (mut h, providers) = rig("prov-record-fails", |providers| {
+        // Each `Mount` stays out, so each source is asked `Prepare` once.
+        providers.always("tier", &mount("j1", 0), ProviderAnswer::Pending);
+        providers.always("tier", &mount("j1", 1), ProviderAnswer::Pending);
+    });
     fs::write(h.dir.path("state/providers"), "not a directory").unwrap();
     h.apply(vec![job_start(with_layer_and_mount("j1"))]);
     let result = listing(&h, "j1").result.expect("a result");

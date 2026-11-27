@@ -19,7 +19,11 @@
 //!   provider client sends a source's first `Mount` itself as soon as its `Prepare` succeeds
 //!   ([`crate::lifecycle::Providers::ask`]), so the step that takes the `Prepare`'s answer
 //!   usually finds the `Mount` out or answered. A
-//!   provider that is unavailable is asked again; one that refuses the ref fails the start
+//!   provider that is unavailable is asked again; a `Mount` answered unavailable is followed
+//!   at once by the source's `Prepare` again, and the next `Mount` waits until that is taken,
+//!   because a provider that restarted has lost what it was asked before and answers a
+//!   source it does not know so (tierstore: "the source is not prepared here"). One that
+//!   refuses the ref fails the start
 //!   (`provider-refused`); a directory that is not an absolute path in normal form beneath a
 //!   mount root of the agent's (a root it may write, for a read-write mount) fails it
 //!   (`input-not-allowed`). A provider whose sweep at start is not answered yet is not asked.
@@ -183,9 +187,30 @@ impl Wanted {
         }
     }
 
+    /// Asks the provider to take the source's ref (`Prepare`): the source is prepared once it
+    /// answers so.
+    fn prepare(&mut self, run_id: &str, attached: &mut Attached) -> Result<(), Failure> {
+        let call = ProviderCall::Prepare {
+            run_id: run_id.to_owned(),
+            index: self.index,
+            reference: self.reference.clone(),
+            mode: self.mode,
+        };
+        match attached.ask(&self.provider, &call) {
+            ProviderAnswer::Done(_) => {
+                self.prepared = true;
+                Ok(())
+            }
+            other => self.settle(other),
+        }
+    }
+
     /// Asks the provider for what this source still lacks: `Prepare` until it is taken, then
-    /// `Mount` until the directory is answered. A provider that has not answered its sweep
-    /// is not asked.
+    /// `Mount` until the directory is answered. A `Mount` answered unavailable is followed at
+    /// once by the source's `Prepare` again, and the next `Mount` waits for it to be taken:
+    /// a provider that restarted has lost the sources it held and answers their `Mount` so
+    /// until it is asked from the start, which `Prepare`, idempotent, does. A provider that has
+    /// not answered its sweep is not asked.
     fn ask(
         &mut self,
         run_id: &str,
@@ -200,15 +225,9 @@ impl Wanted {
             return Ok(());
         }
         if !self.prepared {
-            let call = ProviderCall::Prepare {
-                run_id: run_id.to_owned(),
-                index: self.index,
-                reference: self.reference.clone(),
-                mode: self.mode,
-            };
-            match attached.ask(&self.provider, &call) {
-                ProviderAnswer::Done(_) => self.prepared = true,
-                other => return self.settle(other),
+            self.prepare(run_id, attached)?;
+            if !self.prepared {
+                return Ok(());
             }
         }
         let call = ProviderCall::Mount {
@@ -220,6 +239,11 @@ impl Wanted {
             ProviderAnswer::Done(None) => {
                 self.why = "the provider answered no directory".to_owned();
                 Ok(())
+            }
+            ProviderAnswer::Unavailable(why) => {
+                self.why = why;
+                self.prepared = false;
+                self.prepare(run_id, attached)
             }
             other => self.settle(other),
         }

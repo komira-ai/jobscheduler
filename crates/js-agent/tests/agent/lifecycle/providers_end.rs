@@ -56,14 +56,16 @@ fn release_follows_every_end_path_once() {
                 h.apply(vec![job_start(with_layer("j1"))]);
             }
             "stop-while-providing" => {
-                let down = ProviderAnswer::Unavailable("not ready".to_owned());
-                providers.always("tier", &mount("j1", 0), down);
+                // The `Mount` stays out: one answered unavailable would be followed by a
+                // `Prepare` again (`providers_lost`).
+                providers.always("tier", &mount("j1", 0), ProviderAnswer::Pending);
                 h.apply(vec![job_start(with_layer("j1"))]);
                 h.life.step();
                 assert!(record.is_file());
                 stop(&mut h, "j1");
             }
             "image-fails" => {
+                providers.always("tier", &mount("j1", 0), ProviderAnswer::Pending);
                 h.fake.pull_fails(IMAGE, "no such image");
                 h.apply(vec![job_start(with_layer("j1"))]);
             }
