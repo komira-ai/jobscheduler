@@ -3,12 +3,15 @@
 //! `--placement-curves shadow`, `--boot resume` and the cold bookings). Every store call the
 //! server makes runs on the runtime's pool for blocking calls; what the test counts is what the
 //! store counts of its own work ([`crate::store::ServerStore::tally`]): the statements it sent
-//! and the threads it started for its calls, per tick and per heartbeat. It also prints the
-//! process's voluntary context switches (`getrusage`) beside them, the figure the farm's
-//! control host showed; that figure is read, not asserted, since it depends on the scheduler.
+//! and the threads it started for its calls, for the hellos, for the heartbeats and for each
+//! tick, and what the server serves of it on `/metrics` at the end, with the queue statuses its
+//! passes wrote. It also prints the process's voluntary context switches (`getrusage`) beside
+//! them, the figure the farm's control host showed; that figure is read, not asserted, since
+//! it depends on the scheduler.
 //!
-//! Nothing here waits on time: the ticks are stepped, each heartbeat is answered at once (the
-//! hosts do not hold their beats), and the counts are taken between steps.
+//! Nothing here waits on time: the ticks are stepped (the store's clock moved a second before
+//! each, as the farm's moves), each heartbeat is answered at once (the hosts do not hold their
+//! beats), and the counts are taken between steps.
 
 use std::net::SocketAddr;
 use std::path::Path;
@@ -34,7 +37,11 @@ const HOSTS: usize = 10;
 const QUEUED: usize = 2_000;
 
 /// The ticks stepped.
-const TICKS: u64 = 5;
+const TICKS: usize = 5;
+
+/// The ticks after which the queue's statuses stand: the first passes write each queued job's
+/// status, first with no host open and again once the hosts are, and later ones write none.
+const SETTLING: usize = 2;
 
 /// The heartbeats each host sends.
 const BEATS: u64 = 3;
@@ -70,6 +77,7 @@ async fn farm_server(
         ("--cold-cpu-millis-on", "macos=1500".to_owned()),
         ("--cold-memory-bytes-on", "macos=6442450944".to_owned()),
         ("--job-listen", "127.0.0.1:0".to_owned()),
+        ("--metrics-listen", "127.0.0.1:0".to_owned()),
         (
             "--state-file",
             dir.path().join("state").display().to_string(),
@@ -99,9 +107,9 @@ async fn farm_server(
     (running, ticks, dir)
 }
 
-/// The host `n` of the pool, at the agent routes `agents`: it says hello as a per-job host and
-/// sends [`BEATS`] heartbeats, each as soon as the last was answered, listing nothing.
-async fn host(agents: SocketAddr, n: usize) {
+/// The hello of the host `n` of the pool, at the agent routes `agents`, as a per-job host; its
+/// welcome.
+async fn hello(agents: SocketAddr, n: usize) -> Value {
     let host_id = format!("farm-{n}");
     let hello = json!({
         "host_id": host_id,
@@ -113,6 +121,13 @@ async fn host(agents: SocketAddr, n: usize) {
     });
     let (status, welcome) = post(agents, "/v1/agent/hello", &hello).await;
     assert_eq!(status, 200, "{welcome}");
+    welcome
+}
+
+/// The host `n`, welcomed `welcome`, sends [`BEATS`] heartbeats to `agents`, each as soon as the
+/// last was answered, listing nothing.
+async fn beats(agents: SocketAddr, n: usize, welcome: Value) {
+    let host_id = format!("farm-{n}");
     for seq in 1..=BEATS {
         let beat = json!({
             "host_id": host_id,
@@ -139,6 +154,29 @@ fn switches() -> i64 {
         .voluntary_context_switches()
 }
 
+/// The value of the counter `name` in the `/metrics` text `text`.
+fn served(text: &str, name: &str) -> u64 {
+    let prefix = format!("{name} ");
+    let value = text.lines().find_map(|line| line.strip_prefix(&prefix));
+    value
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_else(|| panic!("{name} is not served:\n{text}"))
+}
+
+/// The `/metrics` text the server at `addr` serves.
+async fn scrape(addr: SocketAddr) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let ask = "GET /metrics HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n";
+    stream.write_all(ask.as_bytes()).await.unwrap();
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).await.unwrap();
+    let (head, body) = raw.split_once("\r\n\r\n").unwrap();
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    body.to_owned()
+}
+
 /// What a window of the run cost: the store's counts and the process's switches over it.
 struct Cost {
     statements: u64,
@@ -161,9 +199,11 @@ async fn cost(running: &Running, window: impl std::future::Future<Output = ()>) 
 /// Catches a server whose store starts a thread for each call it makes: under the farm's load
 /// that is thousands of threads started and ended a second, and every thread of the process
 /// is woken by them (the start and end of a thread take the process's memory map lock, which
-/// the page faults of every other thread wait on). With ten hosts beating and the ticks of a
-/// two-thousand-job queue stepped, the store sends statements and starts no thread for any of
-/// them: each call runs on the thread of the pool for blocking calls that makes it.
+/// the page faults of every other thread wait on). With ten hosts saying hello and beating and
+/// the ticks of a two-thousand-job queue stepped, the store sends statements and starts no
+/// thread for any of them, and `/metrics` says so: each call runs on the thread of the pool for
+/// blocking calls that makes it. Catches as well a tick whose statements grow with the queue:
+/// once the queue's statuses stand, a tick sends fewer statements than there are queued jobs.
 #[test]
 fn a_farm_shaped_server_starts_no_thread_for_a_store_call() {
     let (_database, url) = database();
@@ -180,36 +220,59 @@ fn a_farm_shaped_server_starts_no_thread_for_a_store_call() {
         .build()
         .unwrap();
     runtime.block_on(async {
-        let (running, ticks, _dir) = farm_server(&url, store_clock).await;
+        let (running, ticks, _dir) = farm_server(&url, Arc::clone(&store_clock)).await;
         let agents = running.agent_addr().unwrap();
-        let beats = cost(&running, async {
-            let mut hosts = tokio::task::JoinSet::new();
+        let mut welcomes = Vec::new();
+        let hellos = cost(&running, async {
             for n in 1..=HOSTS {
-                let _ = hosts.spawn(host(agents, n));
+                welcomes.push(hello(agents, n).await);
+            }
+        })
+        .await;
+        let beaten = cost(&running, async {
+            let mut hosts = tokio::task::JoinSet::new();
+            for (n, welcome) in (1..=HOSTS).zip(welcomes) {
+                let _ = hosts.spawn(beats(agents, n, welcome));
             }
             hosts.join_all().await;
         })
         .await;
-        let stepped = cost(&running, async {
-            for _ in 0..TICKS {
-                ticks.step().await;
-            }
-        })
-        .await;
+        let mut stepped = Vec::new();
+        for _ in 0..TICKS {
+            store_clock.advance(std::time::Duration::from_secs(1));
+            stepped.push(cost(&running, ticks.step()).await);
+        }
+        let text = scrape(running.metrics_addr().unwrap()).await;
         let beats_sent = u64::try_from(HOSTS).unwrap() * BEATS;
-        eprintln!(
-            "{HOSTS} hosts, {QUEUED} queued: {beats_sent} heartbeats sent {} statements and \
-             started {} threads ({} voluntary switches); {TICKS} ticks sent {} statements and \
-             started {} threads ({} voluntary switches)",
-            beats.statements,
-            beats.threads,
-            beats.switches,
-            stepped.statements,
-            stepped.threads,
-            stepped.switches,
+        let each = |cost: &Cost| {
+            format!(
+                "{} statements, {} threads, {} voluntary switches",
+                cost.statements, cost.threads, cost.switches
+            )
+        };
+        eprintln!("{HOSTS} hosts, {QUEUED} queued");
+        eprintln!("{HOSTS} hellos: {}", each(&hellos));
+        eprintln!("{beats_sent} heartbeats: {}", each(&beaten));
+        for (n, tick) in stepped.iter().enumerate() {
+            eprintln!("tick {}: {}", n + 1, each(tick));
+        }
+        let (statements, threads, writes) = (
+            served(&text, "js_store_statements_total"),
+            served(&text, "js_store_call_threads_total"),
+            served(&text, "js_queue_status_writes_total"),
         );
-        assert!(beats.statements > 0 && stepped.statements > 0);
-        assert_eq!((beats.threads, stepped.threads), (0, 0));
+        eprintln!(
+            "served: js_store_statements_total {statements}, js_store_call_threads_total \
+             {threads}, js_queue_status_writes_total {writes}"
+        );
+        assert!(hellos.statements > 0 && beaten.statements > 0);
+        let windows = [&hellos, &beaten].into_iter().chain(&stepped);
+        assert_eq!(windows.map(|cost| cost.threads).sum::<u64>(), 0);
+        assert_eq!(threads, 0);
+        let queued = u64::try_from(QUEUED).unwrap();
+        for (n, tick) in stepped.iter().enumerate().skip(SETTLING) {
+            assert!(tick.statements < queued, "tick {}: {}", n + 1, each(tick));
+        }
         running.shutdown().await.unwrap();
     });
 }

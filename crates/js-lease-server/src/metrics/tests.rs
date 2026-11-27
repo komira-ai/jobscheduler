@@ -810,6 +810,9 @@ fn from(peer: Option<&str>, path: &str) -> HttpRequest<Body> {
 /// count of its blocking tasks.
 const WORK: &str = "# HELP js_blocking_tasks_total Tasks the server ran on the runtime's pool for blocking calls: its store calls, file writes and syncs, each a hand-off to a thread of that pool and back.\n# TYPE js_blocking_tasks_total counter\njs_blocking_tasks_total ";
 
+/// The family of the queue status writes, up to its count, which follows [`WORK`]'s line.
+const WRITES: &str = "# HELP js_queue_status_writes_total Queue statuses of jobs a pass did not place that the pass wrote, each a read and a transaction of its own: a job's status changed (it waits for another reason, or the detail of its wait changed). A rate near the rate of passes times the queued jobs means every pass rewrites every queued job.\n# TYPE js_queue_status_writes_total counter\njs_queue_status_writes_total ";
+
 /// The status, the content type and the body of the metrics router's answer to `request`.
 async fn answer(fixture: &Fixture, request: HttpRequest<Body>) -> (StatusCode, String, String) {
     let app = router(Arc::clone(&fixture.shared), Arc::clone(&fixture.recorder));
@@ -824,9 +827,10 @@ async fn answer(fixture: &Fixture, request: HttpRequest<Body>) -> (StatusCode, S
 }
 
 /// Asserts who the route answers: a private peer (v4 or v6) gets 200 with the text format's
-/// content type and the scrape, followed by the server's own work (the blocking tasks alone,
-/// as this server has no Postgres store); a public peer, a request whose peer is unknown and
-/// another path get the answer of an unknown route. It catches metrics served to the internet
+/// content type and the scrape, followed by the server's own work (the blocking tasks and the
+/// queue status writes, and no store families, as this server has no Postgres store); a
+/// public peer, a request whose peer is unknown and another path get the answer of an
+/// unknown route. It catches metrics served to the internet
 /// from a wildcard listener, and a route that leaves out the server's work.
 #[tokio::test]
 async fn only_a_private_peer_is_answered_and_only_on_metrics() {
@@ -842,8 +846,10 @@ async fn only_a_private_peer_is_answered_and_only_on_metrics() {
         // work is held to its form, with any count.
         let (scrape, work) = body.split_at(body.find(WORK).unwrap());
         assert_eq!(scrape, scraped_as_served(&fixture).await);
-        let tasks = work.strip_prefix(WORK).unwrap().strip_suffix('\n').unwrap();
+        let (tasks, writes) = work.strip_prefix(WORK).unwrap().split_once('\n').unwrap();
         assert!(tasks.parse::<u64>().is_ok(), "{work}");
+        let written = fixture.recorder.queue_status_writes.load(Ordering::Relaxed);
+        assert_eq!(writes, format!("{WRITES}{written}\n"));
     }
     let unknown = crate::api::not_found();
     let unknown = to_bytes(unknown.into_body(), 1 << 20).await.unwrap();

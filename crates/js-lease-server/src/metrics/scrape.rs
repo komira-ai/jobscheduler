@@ -51,7 +51,7 @@ async fn metrics(State(scrape): State<Arc<Scrape>>, peer: Peer) -> Response {
     match snapshot(&scrape.shared, MAX_PAGE).await {
         Ok(seen) => {
             let mut text = render(&seen, &scrape.recorder);
-            work::write(&mut text, &Work::now(&scrape.shared));
+            work::write(&mut text, &Work::now(&scrape.shared, &scrape.recorder));
             ([(CONTENT_TYPE, TEXT_FORMAT)], text).into_response()
         }
         Err(error) => {
