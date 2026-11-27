@@ -407,3 +407,45 @@ async fn the_job_path_is_unaffected() {
         "JOB_STATE_CANCELLED"
     );
 }
+
+/// Asserts that the server's `--max-job-wall` is the bound after which an orphan is ended:
+/// on a server started with `--max-job-wall 2h`, a host that runs a job the store placed and
+/// lists one it holds no record of is told to stop nothing a second before the orphan has
+/// been listed for two hours, by the store's clock, and is told to stop the orphan, with the
+/// reason `orphan_expired`, at two hours, the placed job left running. It catches a bound
+/// that does not follow the setting (an orphan kept for the default 30 days, or ended at
+/// once).
+#[tokio::test]
+async fn an_orphan_is_ended_at_the_servers_max_job_wall() {
+    let scratch = Scratch::new("orphan_bound");
+    let clock = Arc::new(StoreClock::default());
+    clock.advance(Duration::from_millis(T0));
+    let mut args = job_args(&scratch, "initialise");
+    args.extend(["--max-job-wall".into(), "2h".into()]);
+    let checked = config(args).unwrap();
+    let store_clock: Arc<dyn js_state::Clock> = clock.clone();
+    let ids = Arc::new(ScriptedIds::new([1; 16], [[2; 16], [0xf0; 16]]));
+    let h = Harness::over(scratch, checked.with_job_sources(store_clock, ids)).await;
+    let host = job_agent(&h, "host-1").await;
+    let a = submit(&h).await;
+    h.ticks.step().await;
+    left_the_queue(&h, &a).await;
+    let (started, _) = one_start(&beat_with(&h, &host, &[]).await);
+    assert_eq!(started, a);
+
+    let listing = [running(&a), running("ghost-1")];
+    let first = beat_with(&h, &host, &listing).await;
+    assert_eq!(commands(&first), (vec![], vec![]), "{first}");
+    assert_eq!(first["unknown_jobs"], json!(["ghost-1"]), "{first}");
+    clock.advance(Duration::from_secs(2 * 3600 - 1));
+    let early = beat_with(&h, &host, &listing).await;
+    assert_eq!(commands(&early), (vec![], vec![]), "{early}");
+    clock.advance(Duration::from_secs(1));
+    let due = beat_with(&h, &host, &listing).await;
+    assert_eq!(
+        due["commands"],
+        json!([{ "type": "job_stop", "job_id": "ghost-1", "reason": "orphan_expired" }]),
+        "{due}"
+    );
+    h.running.shutdown().await.unwrap();
+}
