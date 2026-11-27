@@ -52,8 +52,10 @@
 //!    job now (capable, with room under the CPU slack and the memory percent, and with room in the
 //!    host's [`OpenHost::capacity`] for the summed bookings: [`crate::room`]; on a host that
 //!    books by CPU curve under `--placement-curves on`, with every slot of its booked CPU curve
-//!    within the slack instead of the CPU of both: `Engine::by_curve`), the job goes to
-//!    one of the first provider in the Default platform's order (pass 1 of design section 5.6),
+//!    within the slack instead of the CPU of both: `Engine::by_curve`; under `shadow` the
+//!    round is judged by that rule too, for a log line alone: `Engine::judge_in_shadow`), the
+//!    job goes to one of the first provider in the Default platform's order (pass 1 of design
+//!    section 5.6),
 //!    and the scheduler's score chooses among that provider's hosts alone; a busy, draining,
 //!    tainted or too small host of an earlier provider never keeps it off a free one of a
 //!    later provider. A host is capable of a job only if it can run it and its
@@ -122,6 +124,7 @@ use js_types::sched::{FarmTime, LeaseId as SchedLeaseId, LeaseKind, OperationId,
 use js_types::{EXEC_KEY, HostId, JobNetwork, QueueCode, QueueNote, Resources};
 use tracing::warn;
 
+use super::curve_room::shadow::ShadowRound;
 use super::jobs_retry::placeable;
 use super::jobs_walker::{Walker, walker};
 use super::whole_jobs::{WholeJobStep, WholeJobs};
@@ -459,10 +462,14 @@ impl Engine {
         let operation = self.sched.next_operation();
         self.sched
             .recover(JOB_TERM, operation, operation.0, Vec::new());
-        let free = room.iter().filter(|host| capable.contains(host));
-        let free = free.filter(|host| !self.port_held_on(host, &walker.host_ports));
-        let (free, full): (Vec<_>, Vec<_>) =
-            free.partition(|host| self.room_fits(host, walker.booked));
+        let open = room.iter().filter(|host| capable.contains(host));
+        let open: Vec<&HostId> = open
+            .filter(|host| !self.port_held_on(host, &walker.host_ports))
+            .collect();
+        let (free, full): (Vec<_>, Vec<_>) = open
+            .iter()
+            .copied()
+            .partition(|host| self.room_fits(host, walker.booked));
         // A host the bookings fill by memory is refused here, before the scheduler sees it:
         // say so, as the scheduler's refusals are said.
         for host in full {
@@ -473,6 +480,8 @@ impl Engine {
         let curved = self.by_curve(walker, free, now);
         let only: BTreeSet<_> = curved.hosts.into_iter().map(map::worker).collect();
         if only.is_empty() {
+            let round = ShadowRound::new(&open, &only, None, &[]);
+            self.judge_in_shadow(walker, &round);
             let next = OperationId(operation.0.saturating_add(1));
             self.sched.recover(JOB_TERM, next, operation.0, Vec::new());
             if !*settled {
@@ -487,8 +496,8 @@ impl Engine {
         }
         let request = (operation, walker.request.clone());
         self.judge_cpu(operation, curved.judged);
-        let granted = self.place_one(request, (walker.wall, walker.charge), only, now);
-        self.book_refusals(&walker.job);
+        let granted = self.place_one(request, (walker.wall, walker.charge), only.clone(), now);
+        let refused = self.book_refusals(&walker.job);
         // A placement held below changes the scheduler; a round that placed nothing ticked it
         // at `now` and changed nothing after.
         *settled = granted.is_none();
@@ -496,6 +505,8 @@ impl Engine {
             let host = room.iter().find(|host| map::worker(host) == worker);
             host.map(|host| (lease, host.clone()))
         });
+        let flat_host = placed.as_ref().map(|(_, host)| host);
+        self.judge_in_shadow(walker, &ShadowRound::new(&open, &only, flat_host, &refused));
         match placed {
             Some((lease, host)) => {
                 let placed = Placed { lease, operation };

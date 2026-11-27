@@ -436,6 +436,45 @@ fn shadow_keeps_each_live_jobs_memory_class_and_start() {
     assert!(placer.memory_shadow_view().is_some());
 }
 
+/// Asserts the decide-in-shadow line through whole passes over the job tables: a host `a` whose
+/// three running jobs of 30 000 m (90 000 m, read from the store) leave a job of `early` room by
+/// its flat 1000 m but not by its burst of 22 000 m at slot 10; under `off` and `shadow` the pass
+/// commits the job on `a` alike, and only `shadow` logs that its curve would place it on no host,
+/// naming `a` as its flat host and slot 10. Catches a shadow pass that places or commits otherwise
+/// than `off`, and one whose tables miss the live jobs the store holds.
+#[test]
+fn a_shadow_pass_commits_as_off_does_and_logs_a_job_its_curve_fits_on_no_host() {
+    let mut passes = Vec::new();
+    for curves in [Curves::Off, Curves::Shadow] {
+        let tables = Tables::new();
+        let (placer, _) = placer_in(curves, CurveSettings::default());
+        let early = burst_at(20, 352, 140);
+        teach(placer.engine().sizes(), &tables, ("early", 24), &early);
+        for at in 0..3 {
+            running(&tables, (&format!("fill-{at}"), "fill"), (30_000, true));
+        }
+        queued_of(&tables, "next", "early");
+        let (lines, _guard) = capture_targets();
+        let done = pass(&placer, &tables, offering(96_800), &Counting::default());
+        let said = lines.taken().into_iter();
+        let said: Vec<String> = said
+            .filter(|line| line.contains("would place it differently"))
+            .collect();
+        passes.push((done, said));
+    }
+    let next = vec![JobId::parse("next").unwrap()];
+    assert_eq!(passes[0], (next.clone(), Vec::new()));
+    assert_eq!(
+        passes[1],
+        (
+            next,
+            vec![
+                " INFO js_sched_placer::sizes::profile: a job's curve booking would place it differently job=next class=early flat_host=a slot=10".to_owned()
+            ]
+        )
+    );
+}
+
 /// Asserts what a job whose record cannot be read is charged: a read of the store that fails is
 /// logged at warn with the job and the job is charged its flat number at every slot (the class
 /// and the start stay unknown); a job the store does not hold is charged the same without a line.
