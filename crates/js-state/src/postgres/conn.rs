@@ -20,12 +20,15 @@ use std::panic::resume_unwind;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
+use std::time::Duration;
 
 use postgres::error::SqlState;
+use postgres::fallible_iterator::FallibleIterator;
 use postgres::types::ToSql;
 use postgres::{Client, Config, Row, Statement, ToStatement};
 
 use super::tls::{Tls, TlsError};
+use crate::Notice;
 
 /// Runs `f` on a thread that is not inside a tokio runtime and returns its result. A
 /// panic in `f` is raised again in the caller.
@@ -146,6 +149,21 @@ impl Conn {
     /// Whether the server closed the connection.
     pub fn is_closed(&self) -> bool {
         self.client.as_ref().is_none_or(postgres::Client::is_closed)
+    }
+
+    /// Waits at most `wait` for the next notice of a channel this connection listens on (a
+    /// notice already received first): `None` when none came, or when the connection is gone
+    /// (a statement sent next tells which). Nothing is sent, so nothing is counted.
+    ///
+    /// # Errors
+    /// The client's error: the connection failed while it waited.
+    pub(super) fn notice(&mut self, wait: Duration) -> Result<Option<Notice>, postgres::Error> {
+        let client = self.client();
+        let heard = off_runtime(|| client.notifications().timeout_iter(wait).next())?;
+        Ok(heard.map(|notice| Notice {
+            channel: notice.channel().to_owned(),
+            payload: notice.payload().to_owned(),
+        }))
     }
 
     /// Prepares a statement.
