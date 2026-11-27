@@ -55,8 +55,9 @@ pub(crate) struct AgentSetup {
     /// `server.max_lease_wall`: the one up to which the placement engine trusts a wall time
     /// for backfill.
     pub(crate) max_lease_wall: Option<Duration>,
-    /// The pool's `max_queue_wait` and `start_timeout`, which the tick's job pass enforces
-    /// (their defaults for a pool that does not set them, and for `--agent-pool-config`).
+    /// The pool's `max_queue_wait` and `start_timeout`, and the server's `silence_limit`, which
+    /// the tick's job pass enforces (their defaults for a pool or a file that does not set them,
+    /// and for `--agent-pool-config`).
     pub(crate) job_limits: JobLimits,
     /// The job store's setup when the job service is on; the agent side then opens it.
     pub(crate) jobs: Option<JobStoreSetup>,

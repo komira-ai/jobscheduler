@@ -43,6 +43,7 @@ use crate::error::StartupError;
 use crate::held_beat::{self, Wakes};
 use crate::host_keys::Writes;
 use crate::job_expiry::JobLimits;
+use crate::job_pass::SilenceFloor;
 use crate::job_sizes::Sizes;
 use crate::job_store::{self, FeedTrim, ServerJobs};
 use crate::join_tokens::{Admitted, JoinRefusal, JoinTokens, MintError, Minted, RevokeError};
@@ -62,8 +63,7 @@ use crate::util::blocking;
 /// What the agent routes and the tick share. Agent handlers take the registry's lock and
 /// nothing else of the server's.
 pub(crate) struct Agents {
-    /// The hosts of every pool ([`Registry::with_pools`]): the first pool's and the later
-    /// ones'.
+    /// The hosts of every pool ([`Registry::with_pools`]): the first pool's and the later ones'.
     pub(crate) registry: Registry,
     /// The first pool's shared join tokens.
     pub(crate) tokens: AgentTokens,
@@ -117,9 +117,10 @@ pub(crate) struct Agents {
     /// ([`crate::logs`]); `None` with `sink = "none"`. Its lock is a leaf, and no mint runs
     /// under it or under the registry's.
     pub(crate) logs: Option<Arc<LogGrants>>,
-    /// The pool's `max_queue_wait` and `start_timeout`, which the job pass of the tick
-    /// enforces ([`Agents::job_pass`]).
+    /// The pool's limits and the server's `silence_limit`, which the job pass enforces.
     pub(crate) job_limits: JobLimits,
+    /// Where the job pass counts a host's silence from ([`SilenceFloor`]).
+    pub(crate) silence_floor: SilenceFloor,
     /// How far past its cores a host's CPU may be booked ([`crate::config::CpuSlack`]), which
     /// the capacity a placement is held to in its own transaction allows too.
     pub(crate) cpu_slack: CpuSlack,
@@ -151,8 +152,7 @@ pub(crate) struct Agents {
     /// The jobs each host's held beats list as `starting`, and since when ([`held_beat::Starts`]).
     pub(crate) starts: held_beat::Starts,
     /// The machine providers of the pool's Default platform, first to last, as the bindings of
-    /// its hosts name them: the order the pass offers the hosts in
-    /// ([`crate::sched::rank`]).
+    /// its hosts name them: the order the pass offers the hosts in ([`crate::sched::rank`]).
     pub(crate) providers: Vec<ProviderId>,
     /// The live hosts the pass over the queued jobs has said it skips for their taint
     /// ([`TaintSkips`]), so that each taint is logged once.
@@ -355,6 +355,7 @@ fn placed_in(
         rows_read: Mutex::default(),
         logs,
         job_limits,
+        silence_floor: SilenceFloor::default(),
         cpu_slack: load.cpu_slack,
         duty_period_ms: AtomicU64::new(0),
         meter: OnceLock::new(),
@@ -433,6 +434,7 @@ impl Agents {
             rows_read: Mutex::default(),
             logs: None,
             job_limits: JobLimits::default(),
+            silence_floor: SilenceFloor::default(),
             cpu_slack: CpuSlack::default(),
             duty_period_ms: AtomicU64::new(0),
             meter: OnceLock::new(),
@@ -858,8 +860,7 @@ impl Agents {
         self.errors.load(Ordering::SeqCst)
     }
 
-    /// Counts the job side's events with `meter` from now on. Set once: a second meter is
-    /// ignored.
+    /// Counts the job side's events with `meter` from now on. Set once: a second meter is ignored.
     pub(crate) fn set_meter(&self, meter: Meter) {
         let _ = self.meter.set(meter);
     }

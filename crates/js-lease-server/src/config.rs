@@ -733,7 +733,7 @@ impl Config {
             },
             curves,
             max_lease_wall: server.max_lease_wall,
-            job_limits,
+            job_limits: job_limits.with_silence_limit(server.silence_limit),
             jobs: server.agents.job_store(server.job_store_windows()),
             job_sources: JobSources::default(),
             providers,

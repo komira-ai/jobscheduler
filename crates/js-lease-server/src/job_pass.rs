@@ -20,6 +20,11 @@
 //! 2. **Settle allocations** ([`job_loss::lose_absent`]): each host that holds a live
 //!    allocation is read once; a host the provider reads absent has its allocations freed and
 //!    its jobs lost, or queued for their next attempt when their retry policy leaves one.
+//! 3. **End the jobs of a host silent past the limit** ([`job_loss::lose_silent`]): a host
+//!    whose `node/` row was last heard the server's `silence_limit` (30 minutes by default) or
+//!    more before `now` has its placed, starting and running jobs ended as lost, with the cause
+//!    `host-silent` and no retry, their allocations moved to releasing, not freed. It comes
+//!    after the second step, so a host both absent and silent is settled as absent.
 //!
 //! After the passes, whether they succeeded or not, the tick trims the job store's change feed to its newest
 //! `--job-feed-retention` changes ([`crate::job_store::FeedTrim`]); a failed trim is logged
@@ -33,8 +38,12 @@
 //! and the duty claims read it too. A pass whose store cannot read its clock decides nothing.
 //! The server's own clock only measures how long the pass took.
 //!
-//! No rule of the pass ends a job because its host is silent (section 6.3, question 25): see
-//! [`crate::job_loss`].
+//! The third step counts a host's silence from the later of its row's last hearing and the
+//! server's [`SilenceFloor`]: the store's time when this server's pass first read the store's
+//! clock after the server booted or after a pass that failed. A host is never judged silent for
+//! a time no server could hear it or the store could not be read: after any such outage each
+//! host has the whole limit to be heard again. See [`crate::job_loss`] for why no job runs
+//! twice.
 //!
 //! The pass holds each queue-wait and start deadline to at least the job's deadline floor,
 //! which [`js_jobs::JobStore::raise_at_boot`] raises, with the retention ends, to the boot plus
@@ -45,7 +54,7 @@
 //! ended job still holds.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use js_jobs::{JobId, JobStoreError, StartFailure};
@@ -82,6 +91,8 @@ pub(crate) struct Passed {
     pub(crate) deleted: Vec<JobId>,
     /// The jobs lost because the provider read their host absent.
     pub(crate) lost: Vec<JobId>,
+    /// The jobs lost because their host was silent past the server's `silence_limit`.
+    pub(crate) silent: Vec<JobId>,
 }
 
 impl Passed {
@@ -91,12 +102,14 @@ impl Passed {
             & self.expired.is_empty()
             & self.deleted.is_empty()
             & self.lost.is_empty()
+            & self.silent.is_empty()
     }
 }
 
 /// One pass over `jobs` at `now`, under `limits` and the whole-node `rules`, reading each
-/// host's presence through `observer` (the steps of the module docs), and what it changed.
-/// Each start failure and loss is told to `metrics` as its commit lands.
+/// host's presence through `observer` and counting each host's silence from no earlier than
+/// `floor` (the steps of the module docs), and what it changed. Each start failure and loss is
+/// told to `metrics` as its commit lands.
 ///
 /// # Errors
 /// The first [`JobStoreError`] of a read or a commit; what was committed before it stays, and
@@ -105,18 +118,40 @@ pub(crate) fn run(
     jobs: &ServerJobs,
     (limits, rules): (JobLimits, &WholeNodeConfig),
     (observer, metrics): (&dyn Observe, &dyn MetricsSink),
-    now: StoreTime,
+    (now, floor): (StoreTime, StoreTime),
 ) -> Result<Passed, JobStoreError> {
     let unprepared = job_whole::expire_prepares(jobs, rules, now, metrics)?;
     let expired = job_expiry::expire(jobs, limits, now, metrics)?;
     let deleted = jobs.tick()?;
     let lost = job_loss::lose_absent(jobs, observer, metrics)?;
+    let silence = (limits.silence_limit, floor);
+    let silent = job_loss::lose_silent(jobs, silence, now, metrics)?;
     Ok(Passed {
         unprepared,
         expired,
         deleted,
         lost,
+        silent,
     })
+}
+
+/// Where a server counts a host's silence from (the third step of the module docs): the store's
+/// time when its job pass first read the store's clock after the server booted or after a pass
+/// that failed; unset until then.
+#[derive(Debug, Default)]
+pub(crate) struct SilenceFloor(Mutex<Option<StoreTime>>);
+
+impl SilenceFloor {
+    /// The floor, set to `now` when it is unset.
+    fn at(&self, now: StoreTime) -> StoreTime {
+        let mut floor = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        *floor.get_or_insert(now)
+    }
+
+    /// Unsets the floor, after a pass that failed: the next pass counts from its own reading.
+    fn reset(&self) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    }
 }
 
 /// What the server's provider reads of a host: absent when the registry removed it
@@ -153,7 +188,9 @@ pub(crate) fn store_time(millis: u64) -> StoreTime {
 impl Agents {
     /// The job pass of this tick ([`run`]) when the server holds the job tables, at the
     /// store's clock (read once, after the duty is claimed), under the pool's limits, with the
-    /// hosts the registry removed read absent; then those removals are settled. A failed pass
+    /// hosts the registry removed read absent and each host's silence counted from no earlier
+    /// than the server's [`SilenceFloor`]; then those removals are settled. A claim, a clock
+    /// reading or a pass that fails unsets the floor. A failed pass
     /// is logged and changes no removal; the next tick passes again. A store that cannot read
     /// its clock fails the claim or the pass before any write: no job is ended or deleted by a
     /// time the store did not give. The pass's duration, the start failures and losses it
@@ -191,6 +228,7 @@ impl Agents {
                 Ok(true) => {}
                 Ok(false) => return None,
                 Err(error) => {
+                    self.silence_floor.reset();
                     sink.store_write_failed();
                     warn!(%error, "the job pass could not be claimed; the next tick tries again");
                     return FailureKind::of(&error).map(Pass::Failed);
@@ -200,6 +238,7 @@ impl Agents {
         let now = match jobs.now() {
             Ok(now) => now,
             Err(error) => {
+                self.silence_floor.reset();
                 sink.store_write_failed();
                 warn!(%error, "the store's clock could not be read; the job pass decides nothing until the next tick");
                 return FailureKind::of(&error).map(Pass::Failed);
@@ -207,7 +246,8 @@ impl Agents {
         };
         let rules = self.whole_rules();
         let limits = (self.job_limits, &rules);
-        let (passed, took) = meter.timed(|| run(jobs, limits, (&observer, sink), now));
+        let times = (now, self.silence_floor.at(now));
+        let (passed, took) = meter.timed(|| run(jobs, limits, (&observer, sink), times));
         sink.job_pass_took(took);
         let ran = Duration::from_millis(self.clock.now().millis().saturating_sub(began.millis()));
         let seen = match passed {
@@ -218,6 +258,7 @@ impl Agents {
                         expired = passed.expired.len(),
                         deleted = passed.deleted.len(),
                         lost = passed.lost.len(),
+                        silent = passed.silent.len(),
                         "the job pass ended or deleted jobs"
                     );
                 }
@@ -230,6 +271,7 @@ impl Agents {
                 Some(Pass::Ran(ran))
             }
             Err(error) => {
+                self.silence_floor.reset();
                 sink.store_write_failed();
                 warn!(%error, "the job pass failed; the next tick passes again");
                 FailureKind::of(&error).map(Pass::Failed)
@@ -291,3 +333,7 @@ mod clock_tests;
 #[cfg(test)]
 #[path = "job_pass_forget_tests.rs"]
 mod forget_tests;
+
+#[cfg(test)]
+#[path = "job_pass_silence_tests.rs"]
+mod silence_tests;

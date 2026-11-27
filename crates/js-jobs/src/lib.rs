@@ -284,7 +284,7 @@ pub use record::{
     SizedFrom, StartFailure,
 };
 pub use result::{
-    BOOT_GRACE, CpuPeak, CpuThrottle, JobEnd, JobResult, JobTiming, LogLengths, Output,
+    BOOT_GRACE, CpuPeak, CpuThrottle, JobEnd, JobResult, JobTiming, LogLengths, LostCause, Output,
     ResourceUsage, ResultReason, Retention, RetentionError, SWEEP_BATCH, sweep,
 };
 pub use store::{

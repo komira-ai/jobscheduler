@@ -224,6 +224,15 @@ fn sum_booking(
 /// rows of the host's on-host entries and the allocation rows this build cannot read, which a
 /// booking cannot be counted without.
 fn booked_in(read: &mut dyn TxnRead, host: &HostId) -> Result<HostBooking, JobStoreError> {
+    sum_booking(host, live_rows_in(read, host)?)
+}
+
+/// The allocation rows (key and value) `read` shows live on `host`: the rows of the host's
+/// on-host entries and the allocation rows this build cannot read.
+fn live_rows_in(
+    read: &mut dyn TxnRead,
+    host: &HostId,
+) -> Result<Vec<(String, Vec<u8>)>, JobStoreError> {
     let mut entries = read.scan_prefix(&keys::on_host_prefix(host))?;
     entries.extend(read.scan_prefix(keys::UNREAD_ALLOCATION)?);
     let rows: BTreeSet<String> = entries
@@ -236,7 +245,7 @@ fn booked_in(read: &mut dyn TxnRead, host: &HostId) -> Result<HostBooking, JobSt
             found.push((key, row.value));
         }
     }
-    sum_booking(host, found)
+    Ok(found)
 }
 
 /// The allocation the row `key` holds.
@@ -853,6 +862,7 @@ fn queued_record(
         attempt: AttemptTrail::default(),
         carried: Carried::default(),
         start_failure_detail: None,
+        lost_cause: None,
     }
 }
 

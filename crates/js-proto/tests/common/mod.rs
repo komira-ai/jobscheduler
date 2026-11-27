@@ -100,5 +100,6 @@ pub fn job() -> Job {
         retry_not_before_ms: None,
         callback_status: None,
         dropped_attempts: 0,
+        lost_cause: 0,
     }
 }

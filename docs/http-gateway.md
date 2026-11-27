@@ -306,7 +306,9 @@ attempt, or the last that ran, from 1), `attemptHistory` (the attempts that ende
 `droppedAttempts` counting the older ones) and `retryNotBeforeMs` while the job waits out a backoff: it reads `queued` with the queue
 status `WAITING_FOR_RETRY` ([design/job-retry-and-completion-callback.md](design/job-retry-and-completion-callback.md), section 3).
 For a job with a callback it gives `callbackStatus` (`state`, `tries`, `lastTryAtMs`, `lastFailure`, `deliveredAtMs` and
-`deadlineAtMs`; absent for a job with none), as section 5.5 of that page describes. `spec.callback.signingKey` is empty in every
+`deadlineAtMs`; absent for a job with none), as section 5.5 of that page describes. A job that
+ended `LOST` because its host was not heard for the server's `silence_limit` gives `lostCause`
+`LOST_CAUSE_HOST_SILENT`; every other job leaves it out. `spec.callback.signingKey` is empty in every
 answer, `SubmitJob`'s included. `ListJobs` shows each job the same
 way. The host silence is not set yet.
 
@@ -569,13 +571,16 @@ generated paragraph above.
   refuses the new id `pool-full`. The call deletes the row at the version it read, then
   forgets the server's record and deletes the stored binding (in file mode, saves the bindings
   file without it), under the lock a hello takes. It is refused, with nothing written, while
-  the host is live (heard within the grace): `FAILED_PRECONDITION` `host-live`; while a job's
-  allocation on it is live (placed, starting, running, or ending without the host's
-  confirmation): `host-holds-jobs`; and while it is tainted, cordoned or marked for scale-down:
+  the host is live (heard within the grace): `FAILED_PRECONDITION` `host-live`; while it holds
+  a job's work (a job placed, starting or running there, or one asked to cancel whose stop the
+  host has not confirmed): `host-holds-jobs`; and while it is tainted, cordoned or marked for scale-down:
   `host-tainted`, `host-cordoned`, `host-marked`. A hello or beat that lands between the read
   and the delete keeps the row, and the host is then live. `retired` says something of the host
   was deleted; an id with nothing left answers `retired` false and writes nothing, so a repeat
-  is harmless. When a store cannot be read or written the answer is `UNAVAILABLE`
+  is harmless. A job that has ended there without the host confirming its stop (one lost to the
+  host's silence, or whose start timed out) does not keep the host: the call frees its
+  allocation once the row is gone, as the host's absence would. When a store cannot be read or
+  written the answer is `UNAVAILABLE`
   `retire-unsaved`, and the same call again finishes what the first left. Each server keeps its
   own record of a host: with several servers over one store, the call made on each forgets that
   server's record (or it leaves when that server forgets the host as lost). A rename is: drain

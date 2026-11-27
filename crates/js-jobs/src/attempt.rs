@@ -133,7 +133,10 @@ impl AttemptRecord {
             JobEnd::Memory { exit_code, .. } => (*exit_code, Some(ResultReason::Memory)),
             JobEnd::Cancelled { exit_code, .. } => (*exit_code, Some(ResultReason::Cancelled)),
             JobEnd::InputFailed { exit_code, .. } => (*exit_code, Some(ResultReason::InputFailed)),
-            JobEnd::Lost | JobEnd::FailedToStart(_) | JobEnd::Refused { .. } => (None, None),
+            JobEnd::Lost
+            | JobEnd::HostSilent
+            | JobEnd::FailedToStart(_)
+            | JobEnd::Refused { .. } => (None, None),
         };
         let (outcome, start_failure) = match end.state() {
             JobState::Succeeded => (AttemptOutcome::Succeeded, None),

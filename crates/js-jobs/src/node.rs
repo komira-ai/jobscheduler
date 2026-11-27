@@ -198,7 +198,8 @@ pub enum Kept {
     /// The host was heard within the grace: it is live.
     Live,
     /// A job's allocation on the host is live: a job placed, starting or running there, or one
-    /// ending there whose stop the host has not confirmed.
+    /// ending there whose stop the host has not confirmed. A retirement
+    /// ([`crate::JobStore::retire_node`]) counts the latter only while the job has not ended.
     HoldsJobs,
     /// The host is tainted: a `taint/<host>` row, or a taint on its stored binding.
     Tainted,

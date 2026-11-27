@@ -188,6 +188,7 @@ async fn get_job_shows_every_field_of_the_record() {
         retry_not_before_ms: None,
         callback_status: None,
         dropped_attempts: 0,
+        lost_cause: v1::LostCause::Unspecified.into(),
     };
     assert_eq!(rig.get_job("full-1").await.expect("read"), shown);
 

@@ -49,8 +49,9 @@ use crate::job_store::ServerJobs;
 use crate::metrics::MetricsSink;
 
 /// How long a pool's jobs may wait (design section 4.2): its `max_queue_wait` and its
-/// `start_timeout`; and how a start a host refused for capacity is answered: its
-/// `capacity_requeues` and `capacity_refusal_bar`.
+/// `start_timeout`; how a start a host refused for capacity is answered: its
+/// `capacity_requeues` and `capacity_refusal_bar`; and how long a host may be silent before its
+/// jobs end as lost: the server's `silence_limit` ([`crate::job_loss::lose_silent`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct JobLimits {
     /// How long a queued job waits for a host before it ends as `no-capacity`.
@@ -62,28 +63,49 @@ pub(crate) struct JobLimits {
     pub(crate) capacity_requeues: usize,
     /// How long a job is kept off a host that refused its start for capacity.
     pub(crate) capacity_refusal_bar: Duration,
+    /// How long a host may go unheard before its placed, starting and running jobs end as lost.
+    pub(crate) silence_limit: Duration,
 }
 
 impl JobLimits {
-    /// The limits of a pool that sets none: a queue wait of one hour, a start timeout of
-    /// fifteen minutes, eight capacity requeues and a capacity bar of sixty seconds.
+    /// The limits of a pool that sets none, on a server that sets no `silence_limit`: a queue
+    /// wait of one hour, a start timeout of fifteen minutes, eight capacity requeues, a
+    /// capacity bar of sixty seconds and a silence limit of thirty minutes
+    /// ([`DEFAULT_SILENCE_LIMIT`]).
     pub(crate) const DEFAULT: JobLimits = JobLimits {
         max_queue_wait: Duration::from_secs(3600),
         start_timeout: Duration::from_secs(900),
         capacity_requeues: 8,
         capacity_refusal_bar: Duration::from_secs(60),
+        silence_limit: DEFAULT_SILENCE_LIMIT,
     };
 
-    /// The limits the pool's `settings` give.
+    /// The limits the pool's `settings` give, with the default silence limit.
     pub(crate) fn of(settings: &PoolSettings) -> JobLimits {
         JobLimits {
             max_queue_wait: settings.max_queue_wait,
             start_timeout: settings.start_timeout,
             capacity_requeues: settings.capacity_requeues,
             capacity_refusal_bar: settings.capacity_refusal_bar,
+            silence_limit: DEFAULT_SILENCE_LIMIT,
+        }
+    }
+
+    /// These limits with the server's `silence_limit`.
+    pub(crate) fn with_silence_limit(self, silence_limit: Duration) -> JobLimits {
+        JobLimits {
+            silence_limit,
+            ..self
         }
     }
 }
+
+/// The `silence_limit` of a server that sets none: thirty minutes. An agent cut off from the
+/// server stops its jobs once it has not been answered for its `--silence-stop` (300 s by
+/// default) and their stop grace has passed (10 s by default, 120 s in the packaged crun unit);
+/// a restarted agent is back within its unit's 30 s restart delay and a hello. Thirty minutes is
+/// more than four times the longest of those together, and twice the default `start_timeout`.
+pub(crate) const DEFAULT_SILENCE_LIMIT: Duration = Duration::from_secs(1800);
 
 impl Default for JobLimits {
     fn default() -> JobLimits {
@@ -201,3 +223,7 @@ pub(crate) fn expire(
 #[cfg(test)]
 #[path = "job_expiry_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "job_expiry_silence_tests.rs"]
+mod silence_tests;

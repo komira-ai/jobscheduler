@@ -35,7 +35,9 @@
 //! the tables for every host of the answer ([`silence`]): every server shows the same silence,
 //! whichever holds the host's session. The field is absent while the host is heard, for a job
 //! with no host or one that has ended, and without a source. It is read at each call and drops
-//! the moment the host is heard again. No clock turns silence into a change of the job's state.
+//! the moment the host is heard again. Only the job pass turns silence into a change of the job's
+//! state, once the host has been silent for the server's `silence_limit` ([`crate::job_loss`]):
+//! the job then ends lost, and shows its `lost_cause` instead.
 //!
 //! # Callback status
 //!
