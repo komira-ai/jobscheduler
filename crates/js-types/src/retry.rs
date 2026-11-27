@@ -18,9 +18,8 @@
 //! `initial` and `max` the policy's effective waits and the jitter `j` in `[0, 0.1)` taken
 //! from SHA-256 of the job's id and `n`, so one job's attempt always waits the same.
 //!
-//! The server carries a retry out, but refuses a job that carries a policy at submit
-//! (`retry-not-enabled`) until the release that accepts one, so that every server over a store
-//! acts on a policy before any takes one; no submitted job is retried yet.
+//! The server carries a retry out for every submitted job that carries a policy
+//! (`docs/design/job-retry-and-completion-callback.md`, section 3).
 
 use std::time::Duration;
 
