@@ -256,7 +256,7 @@ fn placed_in(
         cold,
         cold_on,
         curves,
-        max_lease_wall,
+        backfill,
         job_limits,
         jobs,
         job_sources,
@@ -276,7 +276,7 @@ fn placed_in(
     // memory the pool's percent says (every pool's is the first's: `check_more`); the
     // registry books each host's whole booked memory.
     let (pool, memory) = split(pool);
-    let placer = placer(max_lease_wall, load, (memory, cold, curves), cold_on, clock);
+    let placer = placer(backfill, load, (memory, cold, curves), cold_on, clock);
     let later: Vec<_> = more.into_iter().map(|more| split(more.pool).0).collect();
     let pools = (pool, later);
     let registry = Registry::with_pools(pools, clock.clone(), OsSessions, placer.clone())

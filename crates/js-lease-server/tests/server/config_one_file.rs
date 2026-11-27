@@ -170,6 +170,8 @@ fn beside() -> Vec<(Vec<&'static str>, String)> {
         key("--placement", "js-sched"),
         key("--cpu-slack", "1.1"),
         key("--pack-limit", "0.8"),
+        key("--backfill-bounds-enforced", "false"),
+        key("--backfill-margin", "2m"),
         key("--score-balance", "2"),
         key("--score-slack-tolerance-ppm", "5000"),
         key("--key-share-percent", "40"),

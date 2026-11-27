@@ -1,8 +1,9 @@
 //! The registry's placer, with `js-sched` choosing the host.
 //!
 //! [`SchedPlacer`] keeps one scheduler for the life of the server ([`Engine`]), built once
-//! from the server's configuration: the backfill ceiling (`server.max_lease_wall`), the
-//! CPU slack (`--cpu-slack`, js-sched's default 1.1x unless given) and the share of each
+//! from the server's configuration: the backfill setting (whether bounds are enforced, the
+//! ceiling, `server.max_job_wall`, and the margin,
+//! `server.backfill_margin`), the CPU slack (`--cpu-slack`, js-sched's default 1.1x unless given) and the share of each
 //! host's memory it may book (`memory_schedulable_percent` of the pool). The registry
 //! tells it of every hello, accepted heartbeat and host it forgets as they happen
 //! ([`Placer::host_up`], [`Placer::heard`], [`Placer::host_gone`]), so the engine's picture

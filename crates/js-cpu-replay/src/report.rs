@@ -8,6 +8,24 @@ use crate::shape::{MOST_MEAN_MILLI, PEAK_WINDOW_MS, Shape, own_wall_ms};
 use crate::sim::{Arm, Bookings, Farm, Outcome, Rule, Setup, as_placed, replay};
 use crate::trace::{End, Job};
 
+/// The flat step: each class booked the median of its runs' mean CPU, packed by today's rule
+/// within the default slack of 1.1.
+pub const FLAT_STEP: Arm = Arm {
+    name: "A median, 1.1",
+    bookings: Bookings::Learned,
+    rule: Rule::Booked,
+    limit_permille: 1100,
+};
+
+/// The curve mode against [`FLAT_STEP`]: a class that passes its four checks booked by its
+/// curve, packed slot by slot within the same slack.
+pub const CURVE_MODE: Arm = Arm {
+    name: "A median, curves packed, 1.1",
+    bookings: Bookings::Curve,
+    rule: Rule::Packed,
+    limit_permille: 1100,
+};
+
 /// The ways of packing the report compares, in its order.
 pub const ARMS: [Arm; 15] = [
     Arm {
@@ -22,18 +40,8 @@ pub const ARMS: [Arm; 15] = [
         rule: Rule::Unread,
         limit_permille: 1100,
     },
-    Arm {
-        name: "A median, 1.1",
-        bookings: Bookings::Learned,
-        rule: Rule::Booked,
-        limit_permille: 1100,
-    },
-    Arm {
-        name: "A median, curves packed, 1.1",
-        bookings: Bookings::Curve,
-        rule: Rule::Packed,
-        limit_permille: 1100,
-    },
+    FLAT_STEP,
+    CURVE_MODE,
     Arm {
         name: "A heavy tail p90, 1.1",
         bookings: Bookings::Tailed,
@@ -120,6 +128,16 @@ pub const SPEEDS: [u64; 2] = [1, 4];
 
 /// The two shapes that bracket a run's life (see [`crate::shape`]).
 pub const SHAPES: [Shape; 2] = [Shape::Blip, Shape::Burst];
+
+/// The shapes the options are replayed under: [`SHAPES`], and [`Shape::Recorded`] when a job
+/// of `jobs` carries a CPU series.
+fn shapes(jobs: &[Job]) -> Vec<Shape> {
+    let recorded = jobs.iter().any(|job| job.cpu_series.is_some());
+    SHAPES
+        .into_iter()
+        .chain(recorded.then_some(Shape::Recorded))
+        .collect()
+}
 
 /// The classes the report lists by name, the most CPU first.
 const TOP_CLASSES: usize = 15;
@@ -396,6 +414,7 @@ fn checks(text: &mut String, jobs: &[Job], farm: Farm) {
                 farm,
                 shape,
                 speed: 1,
+                held_out_ms: None,
             },
         );
         waits_row(
@@ -422,6 +441,7 @@ fn checks(text: &mut String, jobs: &[Job], farm: Farm) {
                     farm,
                     shape,
                     speed: 1,
+                    held_out_ms: None,
                 },
             )
         })
@@ -508,8 +528,14 @@ fn options(text: &mut String, jobs: &[Job], farm: Farm) {
         );
         let mut alone = 0;
         for arm in ARMS {
-            for shape in SHAPES {
-                let outcome = replay(jobs, arm, Setup { farm, shape, speed });
+            for shape in shapes(jobs) {
+                let setup = Setup {
+                    farm,
+                    shape,
+                    speed,
+                    held_out_ms: None,
+                };
+                let outcome = replay(jobs, arm, setup);
                 alone += outcome.alone;
                 row(text, arm, shape, &outcome, (farm, cpu));
             }

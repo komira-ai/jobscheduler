@@ -29,7 +29,7 @@ Columns:
 | Page | Rows | Built | Partly | Not built | New issues |
 |---|---|---|---|---|---|
 | multi-instance.md | 29 | 3 | 6 | 16 | komira-ai/jobscheduler#1136, komira-ai/jobscheduler#1137, komira-ai/jobscheduler#1138, komira-ai/jobscheduler#1139, komira-ai/jobscheduler#1140, komira-ai/jobscheduler#1141, komira-ai/jobscheduler#1142 |
-| placement-profiles-live.md | 26 | 12 | 5 | 2 | komira-ai/jobscheduler#1143, komira-ai/jobscheduler#1144, komira-ai/jobscheduler#1193 |
+| placement-profiles-live.md | 26 | 14 | 3 | 2 | komira-ai/jobscheduler#1143, komira-ai/jobscheduler#1144, komira-ai/jobscheduler#1193 |
 | start-latency.md | 14 | 2 | 2 | 4 | komira-ai/jobscheduler#1145, komira-ai/jobscheduler#1146, komira-ai/jobscheduler#1147 |
 | whole-node.md | 27 | 14 | 3 | 3 | komira-ai/jobscheduler#1148, komira-ai/jobscheduler#1149, komira-ai/jobscheduler#1150, komira-ai/jobscheduler#1193 |
 | lease-limits.md | 5 | 1 | 2 | 1 | komira-ai/jobscheduler#1151 |
@@ -41,7 +41,7 @@ Columns:
 | pools-providers-network.md | 30 | 6 | 8 | 10 | - |
 | job-rootfs.md | 17 | 4 | 2 | 8 | komira-ai/jobscheduler#1159 |
 | job-retry-and-completion-callback.md | 17 | 12 | 0 | 1 | komira-ai/jobscheduler#1150, komira-ai/jobscheduler#1193 |
-| cpu-over-time.md | 24 | 10 | 5 | 6 | komira-ai/jobscheduler#1143, komira-ai/jobscheduler#1144 |
+| cpu-over-time.md | 24 | 12 | 3 | 6 | komira-ai/jobscheduler#1143, komira-ai/jobscheduler#1144 |
 | live-logs.md | 11 | 5 | 0 | 4 | - |
 | mac-account-per-job.md | 17 | 6 | 6 | 1 | komira-ai/jobscheduler#1163 |
 | mac-one-program.md | 45 | 6 | 6 | 20 | komira-ai/jobscheduler#1160, komira-ai/jobscheduler#1161, komira-ai/jobscheduler#1162, komira-ai/jobscheduler#1163, komira-ai/jobscheduler#1164, komira-ai/jobscheduler#1165, komira-ai/jobscheduler#1166, komira-ai/jobscheduler#1193 |
@@ -52,12 +52,12 @@ Columns:
 | configuration.md | 4 | 0 | 0 | 3 | komira-ai/jobscheduler#1153 |
 | deployment.md | 13 | 5 | 3 | 3 | - |
 | hosts.md | 41 | 2 | 12 | 17 | komira-ai/jobscheduler#1150, komira-ai/jobscheduler#1173, komira-ai/jobscheduler#1174, komira-ai/jobscheduler#1175, komira-ai/jobscheduler#1176 |
-| placement-by-load.md | 26 | 8 | 4 | 3 | komira-ai/jobscheduler#1178, komira-ai/jobscheduler#1179, komira-ai/jobscheduler#1180, komira-ai/jobscheduler#1181, komira-ai/jobscheduler#1182 |
+| placement-by-load.md | 26 | 10 | 3 | 2 | komira-ai/jobscheduler#1178, komira-ai/jobscheduler#1179, komira-ai/jobscheduler#1180, komira-ai/jobscheduler#1181, komira-ai/jobscheduler#1182 |
 | mac-lease-teardown.md | 5 | 1 | 1 | 1 | - |
 | decisions.md | 22 | 6 | 4 | 7 | komira-ai/jobscheduler#1150, komira-ai/jobscheduler#1174, komira-ai/jobscheduler#1175 |
 | amendments.md | 9 | 6 | 1 | 1 | - |
 | capabilities.md | 26 | 3 | 4 | 15 | komira-ai/jobscheduler#1168, komira-ai/jobscheduler#1169, komira-ai/jobscheduler#1170, komira-ai/jobscheduler#1171, komira-ai/jobscheduler#1173, komira-ai/jobscheduler#1189 |
-| kbf-today.md | 15 | 3 | 1 | 3 | - |
+| kbf-today.md | 15 | 4 | 1 | 3 | - |
 | machines.md | 1 | 0 | 0 | 1 | - |
 | mac-runtime.md | 18 | 10 | 3 | 3 | komira-ai/jobscheduler#1183 |
 | sizing.md | 13 | 0 | 2 | 3 | komira-ai/jobscheduler#1184 |
@@ -114,7 +114,7 @@ As read: Status: built behind --placement-curves on (off by default); header now
 | §4 Per class: four checks (checks 3 and 4 need new per-class state in js-sizing) | Checks 3 (peak overrun ring) and 4 (series usable ring) are computed at each pass. | `crates/js-sched-placer/src/sizes_profile.rs:12`, `crates/js-cpu-replay/src/shadow.rs:17-22` | komira-ai/jobscheduler#1087 |
 | §4 'shadow gains three columns' | js-cpu-replay shadow prints CPU peak over %, CPU series usable %, CPU curve. | `crates/js-cpu-replay/src/shadow.rs:322-323` | komira-ai/jobscheduler#1087 |
 | §4 Farm-wide step 1: a day of check lines | At least 24 h of check lines from every server task before on; the one measured window was 4 h 10 min. | decision, no code | - |
-| §4 Farm-wide step 3: the replay on held-out days | The replay must show no loss against the flat step, throughput within 2%, and fewer core-seconds past cores. The trace must carry each job's series; today it has only mean and peak and the replay synthesises shapes. | partly: `crates/js-cpu-replay/src/sim/curve.rs:1-8`, `crates/js-cpu-replay/src/trace.rs:52-86` | komira-ai/jobscheduler#1144 (new) |
+| §4 Farm-wide step 3: the replay on held-out days | The replay must show no loss against the flat step, throughput within 2%, and fewer core-seconds past cores. The trace must carry each job's series. | `crates/js-cpu-replay/src/gate.rs:112`, `crates/js-cpu-replay/src/trace.rs:24`, `crates/js-cpu-replay/src/sim/curve.rs:252` (the run on the farm's recorded days is an operator step) | komira-ai/jobscheduler#1144 |
 | §4 Memory: for a later memory step (question 4) | Booking memory below today's figure needs a per-class 64-run check and a host-OOM signal on /metrics. The memory shadow measures how often a projection is too low; it books nothing. | no | - |
 | §5 Switch: placement_curves gains on; server.curve_hosts; server.curve_max_wait_seconds (0-300, default 30); refusal text | The on value, the curve_hosts canary and the wait bound are read once at start, from the file keys or from the flags `--curve-hosts` and `--curve-max-wait-seconds`, by one code path. | `crates/js-lease-server/src/config/placement_curves.rs:68-120`, `crates/js-lease-server/src/file/server.rs:568-579` | komira-ai/jobscheduler#1087; komira-ai/jobscheduler#1250 |
 | §5 Stages 1 to 4 (flat step; checks and decide-in-shadow; replay; on with curve_hosts one host, half, all) | Staged rollout: flat step, checks and decide-in-shadow, replay, then on by canary. | partly: Flat step: komira-ai/jobscheduler#1085 merged (mergedprs.tsv) | komira-ai/jobscheduler#1085; komira-ai/jobscheduler#1087 |
@@ -132,7 +132,7 @@ As read: Status: built behind --placement-curves on (off by default); header now
 | §8 Q6 canary by named hosts | server.curve_hosts, a list of host ids (flag `--curve-hosts`). | `crates/js-lease-server/src/config/placement_curves.rs:77`, `crates/js-lease-server/src/file/server.rs:568-579`, `crates/js-sched-placer/src/curves.rs:3` | komira-ai/jobscheduler#1087; komira-ai/jobscheduler#1250 |
 | §8 Q7 wait bound 30 s then flat | A curve-class job that waited 30 s is tested flat. | `crates/js-sched-placer/src/curve_room.rs:445`, `crates/js-lease-server/src/config/placement_curves.rs:100` | komira-ai/jobscheduler#1087 |
 | §8 Q8 pack limit's CPU share is the fullest booked slot | The pack share reads the fullest booked slot. | `crates/js-sched-placer/src/curve_room.rs:86`, `crates/js-sched-placer/src/curve_room_tests.rs:874` | komira-ai/jobscheduler#1087 |
-| §8 Q9 gate on on no loss against the flat step, not 10% against today | The gate is the replay against the flat step on held-out days with series. | partly: `crates/js-cpu-replay/src/sim/curve.rs` | - |
+| §8 Q9 gate on on no loss against the flat step, not 10% against today | The gate is the replay against the flat step on held-out days with series. | `crates/js-cpu-replay/src/gate.rs:94` | komira-ai/jobscheduler#1144 |
 | §8 Q10 raise MAX_PROFILES | Not now; raise only if evicted classes with 16 runs show up. | decision, no code | - |
 | Header: cpu-over-time.md steps 3 and 4 | Steps 3 (decide in shadow) and 4 (enforce) are fixed by this page. | `docs/design/cpu-over-time.md:3`, `crates/js-sched-placer/src/curve_shadow.rs:1` | komira-ai/jobscheduler#1087; komira-ai/jobscheduler#1143 |
 
@@ -493,14 +493,14 @@ As read: Status: design for review; header says replay, step 1 and step 2 built,
 | Decision 2 Success measure / pass mark | Total time success measure; pass mark 10% less total time vs today's rule, throughput within 2%; stop if prize smaller. | decision, no code | - |
 | Decision 3 Keep flat ceiling beside the curve rule | Curve rule only holds a job, never admits more. | superseded: Page itself says reversed by placement-profiles-live.md s7; engine.rs/curve_room.rs: on a curve host the curve rule replaces flat CPU checks. | komira-ai/jobscheduler#1087 |
 | Decision 4 Hold bound 30 s | A job held on a forecast at most 30 s, then today's rule decides. | `crates/js-lease-server/src/config/placement_curves.rs` | komira-ai/jobscheduler#1087 |
-| Decision 5 Gate on the replay | Gate on the replay and stop if shape does not pay. | partly: Replay curve arm exists (docs line 'arm A median, curves packed' in js-cpu-replay) but on synthesised series; trace still carries no series; no held-out-day run. | komira-ai/jobscheduler#1144 (new) |
+| Decision 5 Gate on the replay | Gate on the replay and stop if shape does not pay. | `crates/js-cpu-replay/src/gate.rs:112` (the curve arm learns the recorded series, `crates/js-cpu-replay/src/sim/curve.rs:252`) | komira-ai/jobscheduler#1144 |
 | Section 3 Open question: keep first 128 s at 1 s for every job (second series past 128 s) | Send a second series so long jobs keep 1 s detail for the first 128 s; recommended, 514 B. | no | - |
 | Section 3 Wire: heartbeat per-second host arrays | Heartbeat carries whole-host busy cores and cpu.pressure per second. | `crates/js-agent/src/lib.rs:104`, `crates/js-lease-server/src/hosts.rs:172-201` | komira-ai/jobscheduler#1037 |
 | Section 8 unknown 1 Learning from held and contended runs; step 1 reports share of clean runs per class | Report the share of clean runs per class. | partly: `crates/js-cpu-replay/src/shadow.rs:25-29` | - |
 | Section 8 unknown 2 Start-time lag | Placement-to-start lag not in usage export; rows hold it. | partly: `crates/js-cpu-replay/src/cli.rs:41` | - |
 | Section 8 unknown 3 Whether jobs are phased at all | Step 1's series answers it. | partly: Series recorded (step 1) and shadow output shows 8.4% of classes CPU-shaped (page line ~361); no further analysis in code. | - |
 | Section 8 unknown 4 Class count (replay stand-in classes) | convert --rows reads real class keys. | `crates/js-cpu-replay/src/cli.rs:34-44`, `crates/js-cpu-replay/src/rows.rs` | komira-ai/jobscheduler#1077 |
-| Section 10 Next: convert --rows then step 1 series, learn on two days and replay a held-out third | Replay on real recorded series with two-day learn and held-out day; the pass mark check. | partly: convert --rows built (cli.rs:41); trace format still has no series per live doc line 6 ('the trace still carries no series'); no held-out-day mode found in js-cpu-replay/src. | komira-ai/jobscheduler#1144 (new) |
+| Section 10 Next: convert --rows then step 1 series, learn on two days and replay a held-out third | Replay on real recorded series with two-day learn and held-out day; the pass mark check. | `crates/js-cpu-replay/src/convert.rs:145`, `crates/js-cpu-replay/src/gate.rs:112` (the run on the farm's recorded days is an operator step) | komira-ai/jobscheduler#1144 |
 | Section 10 First check not yet met (replay waits 2.3x shorter than recorded) | Replay's own waits within 20% of recorded waits. | no | - |
 | Section 10 With readings or without: rerun with recorded readings and measured-load baseline | Re-run comparison once komira-ai/jobscheduler#1036 readings flow. | no | - |
 | Section 10 Kept Rust tests for the curve rule when built | Tests: flat equals flat rule; burst-first/quiet-first fit; empty host fits any job; B_h never negative and fades; each release reads the other's results. | `crates/js-sched-placer/src/curve_room_tests.rs`, `crates/js-lease-server/tests/server/placement_curves.rs` | komira-ai/jobscheduler#1087 |
@@ -879,9 +879,9 @@ As read: No status header. Mostly built; it marks "does not yet persist" (L56), 
 | Utilization (L25-26) | A feedback correction scaling predictions by observed mean k was considered and not proposed. | no | - |
 | Admission, Memory guard (L141) and Decided (L445) | The flat-sum memory guard with d = 0 is the memory admission limit. The page says it has not been confirmed. | decision, no code | komira-ai/jobscheduler#127 |
 | Starvation (L282) | A refinement was considered and not implemented: reserve the worker where the head first passes the predicate over the horizon (smallest tau). | no | komira-ai/jobscheduler#582 |
-| Lying or stuck node (L294-301) | A plausibility check compares leases' summed cpu_usage_us over a span with the counter's growth, and flags an idle node reporting over half of C for 3 windows. It is tested by sim k. | partly: `crates/js-sched/src/admission/ledger.rs:20` | komira-ai/jobscheduler#1180 (new) |
+| Lying or stuck node (L294-301) | A plausibility check compares leases' summed cpu_usage_us over a span with the counter's growth, and flags an idle node reporting over half of C for 3 windows. It is tested by sim k. | `crates/js-sched/src/admission/plausible.rs`, `crates/js-sched/src/scheduler/view.rs` (`Scheduler::lease_cpu_used`), `crates/js-sched-placer/src/sizes.rs` (`learn_freed` feeds each freed job's CPU time), `crates/js-sched/tests/sim_k_stuck_signal.rs` | komira-ai/jobscheduler#1180 (new) |
 | Simulation tests (L404-439) | Sims a-j, l-w, x, y, z and aa to ah. | `crates/js-sched/tests/load_sims_cpu.rs`, `crates/js-sched/tests/sim_ac_same_key_fan_out.rs`, `crates/js-sched/tests/sim_ae_head_under_best_fit.rs`, `crates/js-sched/tests/sim_ah_utilization_lever.rs` | komira-ai/jobscheduler#1181 |
-| Simulation tests, sim k | k (stuck-low signal), with the plausibility check it tests. | no | komira-ai/jobscheduler#1180 |
+| Simulation tests, sim k | k (stuck-low signal), with the plausibility check it tests. | `crates/js-sched/tests/sim_k_stuck_signal.rs` | komira-ai/jobscheduler#1180 |
 | Scoring, Unmeasured (L370) and sim x2 (L429) | Replay on the real series: an export of the runs and node minutes a usage store holds, through the five rankers and FW5, reporting the gain from curves over flat best fit. | `crates/js-usage/src/x2_export.rs`, `crates/js-sched/tests/sim_x_replay/engine/x2.rs`, `crates/js-sched/examples/sim_x2.rs` | komira-ai/jobscheduler#1182 |
 | Scoring, Unmeasured (L370) and sim x2 (L429): the tuning | Set b, tol and the key share from the x2 report on 14 days of the farm's usage store. `sim_x2` takes the three as flags; `w(tau)` is a formula of the key, not a flag. | decision, no code: waits on the report run over the farm's store | komira-ai/jobscheduler#1182 |
 | Time profiles 3 / bound with profiles (L230, L273, L372, L132) | Lowering g, lowering f below 1, reducing delta for short keys are later decisions from the histograms. | decision, no code | - |
@@ -997,7 +997,7 @@ As read: A description of kbf at kbf 45e420656 and 89af8f2ef, not a build plan. 
 | 4.5 Simulation / Step 0 | No golden trace hash is stored. Step 0 will write explicit hand-written trace lines (no {:?}), cover both hash mechanisms and state whether the 64-bit FNV-1a hash is replaced. | `crates/js-sim-cell/tests/golden/trace-hashes.txt`, `crates/js-sim-cell/tests/replay.rs` | komira-ai/jobscheduler#684; komira-ai/jobscheduler#699; komira-ai/jobscheduler#705; komira-ai/jobscheduler#735 |
 | 4.5 Simulation | Nothing compares a trace before and after a PR, and any Debug-format change moves the hash. | partly: The golden trace-hashes.txt gives a before-and-after comparison for js-sim-cell scenarios | - |
 | 4.6 ucdk | The launcher, run verb, run records, real cloud providers and cost logic are not built. UL1-UL4 and UJ1-UJ3 are properties this design needs of a launcher. | superseded: `docs/design/ucdk.md:7` | komira-ai/jobscheduler#1082 |
-| Corrections: scheduler cores | Only the legacy core runs in a kbf server. js is refused unless the test-only farm-core-js feature is built, and nothing in kbf runs js-agent or a js lease client. | decision, no code | komira-ai/jobscheduler#1130 |
+| Corrections: scheduler cores | Only the legacy core runs in a kbf server. js is refused unless the test-only farm-core-js feature is built, and nothing in kbf runs js-agent or a js lease client. | `crates/js-lease-server/src/config/backfill.rs`: settled, kbf embeds no js core, so the enforced bound is the job service's wall limit; `bounds_enforced` is the lease server's `server.backfill_bounds_enforced` (`--backfill-bounds-enforced`), true unless set, beside `server.backfill_margin`, and an unknown end counts as the ceiling in the drain order (`crates/js-sched/src/scheduler/whole.rs`, `Scheduler::ranked_end`) | komira-ai/jobscheduler#1130 |
 | Corrections: storage and trust | A node runs one storage-and-daemon process that holds the cold-store credential beside untrusted actions. Its unit says trusted network only until a test proves an action cannot read the key. | no | - |
 | Corrections: tierstore | tierstore is deployed nowhere and refuses presigned requests (kbf#1922). It goes on the storage nodes with Silo as its hot tier (decided). kbf-pack flags default off. | no | komira-ai/jobscheduler#1922 |
 
@@ -1106,7 +1106,7 @@ As read: No status header. The page has no Designed, Planned, Open question or W
 
 ## tree-inputs.md + estimate-feed.md + ucdk.md
 
-As read: tree-inputs: superseded by job-rootfs.md (D66), nothing to build. estimate-feed: "the feed is gone", flag is a no-op. ucdk: "Superseded (2026-11-24)", nothing built. Only live gap: one stale doc comment (komira-ai/jobscheduler#1130 related).
+As read: tree-inputs: superseded by job-rootfs.md (D66), nothing to build. estimate-feed: "the feed is gone", flag is a no-op. ucdk: "Superseded (2026-11-24)", nothing built. The one live gap, a stale doc comment, is fixed (komira-ai/jobscheduler#1134, komira-ai/jobscheduler#1130).
 
 | Section | Claim | On main | Tracking |
 |---|---|---|---|
@@ -1124,7 +1124,7 @@ As read: tree-inputs: superseded by job-rootfs.md (D66), nothing to build. estim
 | 5 option (b): compute estimate with feed off | Registry computes estimate for the row with feed off | superseded: registry has no lives or history modules | - |
 | 6 Q1 several runs on one lease | Open: bias of keyed runs on a lease | superseded: leases gone (komira-ai/jobscheduler#831); lives::estimate_end absent | komira-ai/jobscheduler#831 |
 | 6 Q2 read path / Q3 pool on row / Q4 key dominating / Q5 estimate kept on row / Q7 reservation deadline | Open questions about estimate-feed evidence | superseded: estimate-feed.md:3 'the feed is gone'; hosted_row/history.rs absent | - |
-| 6 Q6 stale comment on DEFAULT_BACKFILL_MARGIN_MS | Doc comment in js-whole cost.rs says nothing uses the constant yet, but js_sched::backfill uses it | `crates/js-whole/src/cost.rs` | komira-ai/jobscheduler#1134 |
+| 6 Q6 stale comment on DEFAULT_BACKFILL_MARGIN_MS | Doc comment in js-whole cost.rs says nothing uses the constant yet, but js_sched::backfill uses it | `crates/js-whole/src/cost.rs`: the comment names it the default of the backfill margin, which `server.backfill_margin` sets | komira-ai/jobscheduler#1134; komira-ai/jobscheduler#1130 |
 | ucdk.md: Superseded 2026-11-24 | Plan for jobscheduler as second realization of ucdk Jobs (sections 11.1-11.3) dropped; nothing built | superseded: `crates/js-lease-server/src/kinds.rs` | komira-ai/jobscheduler#28; komira-ai/jobscheduler#1082 |
 
 ## 14 other pages

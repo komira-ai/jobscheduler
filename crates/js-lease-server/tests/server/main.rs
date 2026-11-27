@@ -18,6 +18,7 @@ mod agents_restart;
 mod agents_support;
 mod alerts;
 mod auth;
+mod backfill;
 mod beat_rows;
 mod binary;
 mod brake_reset;

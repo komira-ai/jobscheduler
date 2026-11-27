@@ -12,6 +12,7 @@ use js_sched_placer::curves::CurveSettings;
 use js_sched_placer::sizes::{ColdCpuOn, ColdMemoryOn, ColdSize};
 
 use super::{Load, Section};
+use crate::config::backfill::BackfillSetting;
 use crate::config::placement_curves::{hosts as curve_hosts, max_wait as curve_max_wait};
 use crate::config::{
     BALANCE, BootMode, CpuSlack, CurveSetting, DEFAULT_LEASE_SECS, DEFAULT_RECHECK_MS,
@@ -22,6 +23,7 @@ use crate::config::{
     parse_job_retention, parse_max_job_wall, parse_token,
 };
 use crate::error::StartupError;
+use crate::job_api::submit::DEFAULT_MAX_JOB_WALL;
 use crate::job_store::JobStoreSetup;
 use crate::rate::HelloLimit;
 use crate::store_health::UNREACHABLE_AFTER;
@@ -55,6 +57,8 @@ const SERVER_KEYS: &[&str] = &[
     "estimate_feed",
     "cpu_slack",
     "pack_limit",
+    "backfill_bounds_enforced",
+    "backfill_margin",
     "score_balance",
     "score_slack_tolerance_ppm",
     "key_share_percent",
@@ -167,6 +171,8 @@ pub(crate) struct AgentKeys {
     estimate_feed: Option<bool>,
     cpu_slack: Option<CpuSlack>,
     pack_limit: Option<PackLimit>,
+    /// `backfill_bounds_enforced` and `backfill_margin`, each when the file gives it.
+    backfill: (Option<bool>, Option<Duration>),
     tunings: Tunings,
     cold: ColdSize,
     cold_on: ColdMemoryOn,
@@ -263,6 +269,16 @@ impl AgentKeys {
     }
 }
 
+impl Server {
+    /// The placement engine's backfill setting the file gives: `backfill_bounds_enforced`
+    /// and `backfill_margin` (each its default when absent), with `max_job_wall` (the job
+    /// service's default when absent) as the ceiling.
+    pub(crate) fn backfill(&self) -> BackfillSetting {
+        let most = self.max_job_wall.unwrap_or(DEFAULT_MAX_JOB_WALL);
+        BackfillSetting::of(self.agents.backfill, most)
+    }
+}
+
 pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
     let mut s = Section::open(table, "server.".to_owned());
     s.only(SERVER_KEYS)?;
@@ -321,6 +337,10 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
         estimate_feed: s.boolean("estimate_feed")?,
         cpu_slack: read_cpu_slack(&mut s)?,
         pack_limit: read_pack_limit(&mut s)?,
+        backfill: (
+            s.boolean("backfill_bounds_enforced")?,
+            s.duration("backfill_margin")?,
+        ),
         tunings: read_tunings(&mut s)?,
         cold: read_cold(&mut s)?,
         cold_on: ColdMemoryOn::new(read_per_os(&mut s, &COLD_MEMORY_ON)?),

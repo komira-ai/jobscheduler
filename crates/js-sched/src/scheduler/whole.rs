@@ -63,13 +63,6 @@ use crate::backfill;
 use crate::servable::{Placed, Servable, serves};
 use tie::kept_first;
 
-/// How long a lease already at or past its end is taken to hold its worker from now: the
-/// time for whatever ends it (its executor's wall limit, the next tick of the service that
-/// enforces it) to do so. The same minute backfill keeps spare before a start
-/// ([`js_whole::cost::DEFAULT_BACKFILL_MARGIN_MS`]), so a worker whose only lease is late
-/// takes no backfill.
-const OVERDUE_MARGIN_MS: u64 = js_whole::cost::DEFAULT_BACKFILL_MARGIN_MS;
-
 /// Why a whole-machine request that fits nowhere holds no worker ([`Scheduler::whole_wait`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WholeWait {
@@ -371,25 +364,35 @@ impl Scheduler {
     /// The registered workers by drain cost, cheapest first: by the least tail, whether or
     /// not whole-node settings are on; among workers that cost the same, the one of the
     /// earlier machine provider ([`Scheduler::set_provider_rank`]), then the first by name.
-    /// `placed` are this round's placements, not yet held.
+    /// `placed` are this round's placements, not yet held. With bounds enforced
+    /// ([`Scheduler::with_backfill`]) a lease whose end is not known counts as ending at its
+    /// start plus the ceiling ([`Scheduler::ranked_end`]), and its worker's `tail_end` stays
+    /// `None`, so nothing backfills there.
     pub(super) fn drain_order(&self, placed: &[(OperationId, Placed)]) -> Vec<DrainCost> {
         // Every held lease belongs to an operation that holds it. Each entry is the end
         // bound of a lease and its estimated end.
         let mut ends: BTreeMap<&WorkerId, Vec<(u64, Option<u64>)>> = BTreeMap::new();
+        let mut unknown: BTreeSet<&str> = BTreeSet::new();
+        let ceiling = self.wall_ceiling_ms();
         for held in self.held.values() {
             let start = held.started_at.unwrap_or(held.granted_at).as_millis();
-            let end = self.end_times(held.operation, (start, self.lease_host_end(held.operation)));
+            let times = (start, self.lease_host_end(held.operation));
+            let (end, end_unknown) = self.ranked_end(held.operation, times, ceiling);
             let holding = self.ops[&held.operation].state.holding();
-            holding
-                .into_iter()
-                .for_each(|(_, worker)| ends.entry(worker).or_default().push(end));
+            holding.into_iter().for_each(|(_, worker)| {
+                ends.entry(worker).or_default().push(end);
+                if end_unknown {
+                    unknown.insert(worker.as_str());
+                }
+            });
         }
         for (operation, placed) in placed {
-            let end = self.end_times(
-                *operation,
-                (self.now.as_millis(), self.host_end_ms(&placed.worker)),
-            );
+            let times = (self.now.as_millis(), self.host_end_ms(&placed.worker));
+            let (end, end_unknown) = self.ranked_end(*operation, times, ceiling);
             ends.entry(&placed.worker).or_default().push(end);
+            if end_unknown {
+                unknown.insert(placed.worker.as_str());
+            }
         }
         let loads: Vec<HostLoad> = self
             .workers
@@ -406,7 +409,35 @@ impl Scheduler {
                 }
             })
             .collect();
-        drain_cost(&loads, self.now.as_millis())
+        let mut order = drain_cost(&loads, self.now.as_millis());
+        for cost in &mut order {
+            if unknown.contains(cost.id.as_str()) {
+                cost.tail_end = None;
+            }
+        }
+        order
+    }
+
+    /// The end times of a lease of `operation` started at `start` ([`Scheduler::end_times`])
+    /// as the drain order counts them, and whether its end is unknown (neither an estimate
+    /// nor a bound of its own or its host's). Given `ceiling`, the longest any lease runs, an
+    /// unknown end counts as a bound at `start` plus `ceiling`, read as any bound is (a
+    /// margin from now once it has passed); without, it stays unknown.
+    fn ranked_end(
+        &self,
+        operation: OperationId,
+        (start, host_end): (u64, u64),
+        ceiling: Option<u64>,
+    ) -> ((u64, Option<u64>), bool) {
+        let end = self.end_times(operation, (start, host_end));
+        let unknown = end == (u64::MAX, None);
+        match ceiling.filter(|_| unknown) {
+            Some(ceiling) => (
+                self.overdue_floor(start.saturating_add(ceiling), None),
+                true,
+            ),
+            None => (end, unknown),
+        }
     }
 
     /// The end bound (start plus max wall time, the latest time there is for a lease with
@@ -414,11 +445,7 @@ impl Scheduler {
     /// unknown when the key has none) of a lease of `operation` started at `start`.
     ///
     /// A lease whose end (its estimate cut to its bound, else its bound) is now or already
-    /// past still holds its worker until something ends it, so it is read as ending
-    /// [`OVERDUE_MARGIN_MS`] from now: the bound is that time and the estimate is dropped.
-    /// It never reads as ending now, so a worker whose leases are late never looks cheaper
-    /// to drain than one whose leases end within the margin. A lease that ends after now
-    /// keeps its own times, however soon.
+    /// past is read as ending the margin from now ([`Scheduler::overdue_floor`]).
     fn end_times(
         &self,
         operation: OperationId,
@@ -433,16 +460,27 @@ impl Scheduler {
             .admission
             .wall_minutes_p90(key)
             .map(|minutes| start.saturating_add(u64::from(minutes).saturating_mul(60_000)));
+        self.overdue_floor(bound, estimate)
+    }
+
+    /// `bound` and `estimate` of a lease as the scheduler reads them. A lease whose end (the
+    /// estimate cut to the bound, else the bound) is now or already past still holds its
+    /// worker until something ends it, so it is read as ending the margin from now
+    /// ([`Scheduler::with_backfill`], a minute unless set): the bound is that time and the
+    /// estimate is dropped. It never reads as ending now, so a worker whose leases are late
+    /// never looks cheaper to drain than one whose leases end within the margin. A lease
+    /// that ends after now keeps its own times, however soon.
+    fn overdue_floor(&self, bound: u64, estimate: Option<u64>) -> (u64, Option<u64>) {
         let now = self.now.as_millis();
         if estimate.map_or(bound, |estimate| estimate.min(bound)) <= now {
-            return (now.saturating_add(OVERDUE_MARGIN_MS), None);
+            return (now.saturating_add(self.overdue_margin_ms()), None);
         }
         (bound, estimate)
     }
 
     /// The end of each lease held or placed this round, as farm milliseconds: its estimate
-    /// cut to its bound, else its bound, and a margin from now for a lease at or past that
-    /// end ([`OVERDUE_MARGIN_MS`]); `None` for a lease with neither. A lease placed this
+    /// cut to its bound, else its bound, and the margin from now for a lease at or past that
+    /// end ([`Scheduler::overdue_floor`]); `None` for a lease with neither. A lease placed this
     /// round starts now.
     pub(super) fn lease_ends(
         &self,
