@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use js_jobs::JobState;
 use js_registry::HostMark;
-use js_sched_placer::curves::CurveView;
+use js_sched_placer::curves::{CurveView, HostMemoryShadow, MemoryShadowView};
 use js_sched_placer::telemetry::Telemetry;
 use js_types::HostId;
 
@@ -110,14 +110,15 @@ pub(crate) struct HostSeen {
 
 /// What a scrape read: the job tables (`None` without the job service), the hosts, the curve
 /// view of the placer (`None` under `--placement-curves off`; under `shadow` it has the class
-/// counts and no host peaks) and the placer's
-/// telemetry (`None` without a placer).
+/// counts and no host peaks), its memory shadow (`None` unless it runs, under `shadow` and
+/// `on`) and the placer's telemetry (`None` without a placer).
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Snapshot {
     pub(crate) jobs: Option<JobsSeen>,
     pub(crate) hosts: Vec<HostSeen>,
     pub(crate) curves: Option<CurveView>,
     pub(crate) telemetry: Option<Telemetry>,
+    pub(crate) memory: Option<MemoryShadowView>,
 }
 
 /// `value` as a label value: a backslash, a double quote and a line feed escaped.
@@ -268,6 +269,9 @@ pub(crate) fn render(seen: &Snapshot, recorder: &Recorder) -> String {
     if let Some(view) = &seen.curves {
         curves(&mut out, view);
     }
+    if let Some(view) = &seen.memory {
+        memory_shadow(&mut out, view);
+    }
     out
 }
 
@@ -372,6 +376,71 @@ fn hosts(out: &mut String, seen: &Snapshot) {
     for (host, mark) in marked {
         let (host, state) = (label(host.host.as_str()), mark_text(mark));
         let _ = writeln!(out, "{name}{{host=\"{host}\",state=\"{state}\"}} 1");
+    }
+}
+
+/// The families of the memory shadow, written only while it runs (`--placement-curves shadow`
+/// and `on`): how each placement compared with a booking that follows the classes' memory
+/// curves, and each host's projected memory against its readings. Nothing in them is booked.
+fn memory_shadow(out: &mut String, view: &MemoryShadowView) {
+    let name = "js_memory_curve_placements_total";
+    let help = "Placements of queued jobs by how a booking that follows the classes' memory curves would have placed them (shadow only, nothing is booked by it): same, sooner (an earlier walk fitted a host the flat memory booking refused) or later (the curve would not have fitted the host the flat booking chose).";
+    family(out, name, "counter", help);
+    let verdicts = [
+        ("same", view.same),
+        ("sooner", view.sooner),
+        ("later", view.later),
+    ];
+    for (verdict, count) in verdicts {
+        let _ = writeln!(out, "{name}{{verdict=\"{verdict}\"}} {count}");
+    }
+    let help = "The time, summed over the placements counted sooner, from the first walk at which the memory curve fitted a host the flat memory booking refused to the placement, in milliseconds.";
+    counter(
+        out,
+        "js_memory_curve_sooner_milliseconds_total",
+        help,
+        view.sooner_ms,
+    );
+    type Of = fn(&HostMemoryShadow) -> Option<u64>;
+    let per_host: [(&str, &str, &str, Of); 5] = [
+        (
+            "js_host_memory_projected_bytes",
+            "gauge",
+            "What each host's live jobs are projected to hold now by their classes' memory curves (their flat memory booking where a class has none), as the last placement walk found it, in bytes.",
+            |seen| Some(seen.projected_bytes),
+        ),
+        (
+            "js_host_memory_measured_bytes",
+            "gauge",
+            "The memory each host's last reading showed in use (the whole host's non-file memory when its agent reports it), in bytes.",
+            |seen| seen.measured_bytes,
+        ),
+        (
+            "js_host_memory_projection_checks_total",
+            "counter",
+            "Readings of each host compared with the memory projection the walk before them made of their moment.",
+            |seen| Some(seen.checks),
+        ),
+        (
+            "js_host_memory_projection_low_total",
+            "counter",
+            "Readings of each host that showed more memory in use than the projection the walk before them made of their moment.",
+            |seen| Some(seen.too_low),
+        ),
+        (
+            "js_host_memory_projection_short_bytes_total",
+            "counter",
+            "What each host's readings showed beyond the projection, summed over the readings counted in js_host_memory_projection_low_total, in bytes.",
+            |seen| Some(seen.short_bytes),
+        ),
+    ];
+    for (name, kind, help, of) in per_host {
+        family(out, name, kind, help);
+        for (host, seen) in &view.hosts {
+            if let Some(value) = of(seen) {
+                let _ = writeln!(out, "{name}{{host=\"{}\"}} {value}", label(host.as_str()));
+            }
+        }
     }
 }
 

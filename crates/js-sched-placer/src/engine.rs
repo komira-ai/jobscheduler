@@ -17,7 +17,10 @@
 //! The scheduler is given no learned curves: each allocation is charged what it books (its flat
 //! number, in every mode), and each host by its load readings when it has fresh ones. Under
 //! `--placement-curves on` the engine itself tests a job against a curve host slot by slot
-//! (`curve_room`) and the scheduler makes no CPU test of that host.
+//! (`curve_room`) and the scheduler makes no CPU test of that host. Under `shadow` and `on` the
+//! engine also projects each host's memory by its jobs' memory curves and records where a
+//! booking that followed them would have placed a job differently (`memory_shadow`); that
+//! projection places nothing.
 //!
 //! The leases a reading covers are the engine's own: the job allocations it held on the host at
 //! the previous reading the scheduler accepted and holds still, which ran through the whole
@@ -41,7 +44,7 @@ use js_types::sched::{
 };
 use js_types::{HostId, Shape};
 
-use crate::curves::{CurveSettings, CurveView};
+use crate::curves::{CurveSettings, CurveView, MemoryShadowView};
 use crate::map;
 use crate::room::Room;
 use crate::sizes::{ColdCpuOn, ColdMemoryOn, ColdSize, Curves, JobSizes};
@@ -57,6 +60,8 @@ mod jobs_retry;
 pub(crate) mod jobs_seen;
 #[path = "jobs_walker.rs"]
 mod jobs_walker;
+#[path = "memory_shadow.rs"]
+mod memory_shadow;
 pub use jobs_seen::TablesFrom;
 #[path = "refusals.rs"]
 pub mod refusals;
@@ -153,6 +158,9 @@ pub struct Engine {
     /// What the curve mode keeps beside the scheduler: the live jobs it charges, the waits of
     /// the jobs whose curve fits no host and the tables of the curve hosts ([`curve_room`]).
     book: curve_room::CurveBook,
+    /// What the memory shadow keeps under `shadow` and `on`: each host's projected memory, the
+    /// queued jobs its curve fitted sooner and its counts (`memory_shadow`).
+    memory: memory_shadow::MemoryShadow,
     /// How many placement rounds the walks over the queued jobs ran, for the tests that
     /// count them ([`jobs`]).
     #[cfg(any(test, feature = "test-support"))]
@@ -185,6 +193,7 @@ impl Engine {
             curve: CurveSettings::default(),
             cpu_slack_permille: settings.load.normalised().s_cpu_permille,
             book: curve_room::CurveBook::default(),
+            memory: memory_shadow::MemoryShadow::default(),
             #[cfg(any(test, feature = "test-support"))]
             job_rounds: 0,
         }
@@ -230,6 +239,12 @@ impl Engine {
             fit: self.sizes.fit().clone(),
             checks: self.sizes.curve_checks(),
         }
+    }
+
+    /// What `/metrics` reads of the memory shadow; `None` under [`Curves::Off`].
+    #[must_use]
+    pub fn memory_shadow_view(&self) -> Option<MemoryShadowView> {
+        self.memory_shadow_view_of()
     }
 
     /// The same engine, a job of an operating system `on` names booking that cold memory while
@@ -346,6 +361,7 @@ impl Engine {
         load: Option<&NodeLoad>,
         now: FarmTime,
     ) -> bool {
+        self.memory_heard(host, load, now);
         let before = (self.sched.leases_held(), self.sched.queued_len());
         let jobs: BTreeSet<SchedLeaseId> = self.job_leases_on(host).collect();
         let running = jobs

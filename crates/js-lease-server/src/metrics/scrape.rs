@@ -12,7 +12,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use js_jobs::{AllocationRecord, Booked, JobStoreError, MAX_PAGE};
 use js_registry::HostState;
-use js_sched_placer::curves::CurveView;
+use js_sched_placer::curves::{CurveView, MemoryShadowView};
 use js_sched_placer::telemetry::Telemetry;
 use tracing::warn;
 
@@ -74,11 +74,17 @@ pub(crate) async fn snapshot(
         Some(jobs) => Some(blocking(move || read_jobs(&jobs, page)).await?),
         None => None,
     };
-    let (curves, telemetry) = match agents.placer.clone() {
-        Some(placer) => blocking(move || (placer.curve_view(), Some(placer.telemetry()))).await,
-        None => (None, None),
+    let views = match agents.placer.clone() {
+        Some(placer) => {
+            let read = move || {
+                let telemetry = Some(placer.telemetry());
+                (placer.curve_view(), placer.memory_shadow_view(), telemetry)
+            };
+            blocking(read).await
+        }
+        None => (None, None, None),
     };
-    Ok(combine(list, jobs, (curves, telemetry)))
+    Ok(combine(list, jobs, views))
 }
 
 /// Every job of `jobs` counted by state at the store's clock now (by which each job's submit
@@ -106,11 +112,15 @@ fn read_jobs(
 }
 
 /// The snapshot of the hosts of `list`, each booked with the live allocations of `jobs`, of
-/// the jobs, and of the placer's curve view and telemetry.
+/// the jobs, and of the placer's curve view, memory shadow view and telemetry, `views`.
 fn combine(
     list: HostList,
     jobs: Option<(JobsSeen, Vec<AllocationRecord>)>,
-    (curves, telemetry): (Option<CurveView>, Option<Telemetry>),
+    (curves, memory, telemetry): (
+        Option<CurveView>,
+        Option<MemoryShadowView>,
+        Option<Telemetry>,
+    ),
 ) -> Snapshot {
     let (jobs, live) = jobs.map_or((None, Vec::new()), |(seen, live)| (Some(seen), live));
     let hosts = list.hosts.into_iter();
@@ -120,6 +130,7 @@ fn combine(
         hosts,
         curves,
         telemetry,
+        memory,
     }
 }
 

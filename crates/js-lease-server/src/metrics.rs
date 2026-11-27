@@ -33,7 +33,11 @@
 //!   the CPU and memory booked and free and its whole-host mark, and under
 //!   `--placement-curves shadow` and `on` the classes booking by curve and flat and, under `on`,
 //!   each curve host's fullest booked slot, read from the placer
-//!   ([`js_sched_placer::place::SchedPlacer::curve_view`]), and the placement by load, read from
+//!   ([`js_sched_placer::place::SchedPlacer::curve_view`]); under `shadow` and `on` the memory
+//!   shadow: the placements by how a booking that follows the classes' memory curves would have
+//!   placed them, and each host's projected memory, its last reading and how often a reading
+//!   showed more than the projection ([`js_sched_placer::place::SchedPlacer::memory_shadow_view`]);
+//!   nothing in it is booked; and the placement by load, read from
 //!   the placer with the registry's hosts ([`js_sched_placer::place::SchedPlacer::telemetry`]):
 //!   what admission has done (`js_placement_admissions_total` and its kin, `js_placement_decided_total`
 //!   by `key`, `js_load_readings_total` by `result`), how each host is charged, each host's CPU
@@ -684,6 +688,7 @@ pub(crate) fn rendered(recorder: &Recorder) -> String {
         hosts: Vec::new(),
         curves: None,
         telemetry: None,
+        memory: None,
     };
     render::render(&seen, recorder)
 }

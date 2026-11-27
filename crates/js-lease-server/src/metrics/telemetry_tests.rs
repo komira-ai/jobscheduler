@@ -142,6 +142,7 @@ fn section(hosts: Vec<HostSeen>, telemetry: Option<Telemetry>) -> String {
         hosts,
         curves: None,
         telemetry,
+        memory: None,
     };
     let text = render(&seen, &Recorder::default());
     let at = text.find(FIRST).unwrap();

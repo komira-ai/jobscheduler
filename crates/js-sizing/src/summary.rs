@@ -95,7 +95,7 @@ fn round_up(value: u64, step: u64) -> u64 {
 
 /// A memory sample with the usual margin: `1.2 * sample + 128 MiB` in integer arithmetic
 /// (`sample + ceil(sample / 5)`), saturating; not yet rounded to a step.
-fn sized(sample: u64) -> u64 {
+pub(crate) fn sized(sample: u64) -> u64 {
     sample
         .saturating_add(sample.div_ceil(5))
         .saturating_add(SLACK)

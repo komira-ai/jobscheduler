@@ -45,7 +45,7 @@ use js_types::Shape;
 use js_types::sched::FarmTime;
 use js_types::sched::usage::NodeLoad;
 
-use super::curves::{CurveSettings, CurveView};
+use super::curves::{CurveSettings, CurveView, MemoryShadowView};
 use super::engine::jobs::Decided;
 use super::engine::jobs_seen::{Kept, Seen};
 use super::engine::{Engine, Settings};
@@ -172,6 +172,13 @@ impl SchedPlacer {
     #[must_use]
     pub fn telemetry(&self) -> Telemetry {
         self.engine().telemetry()
+    }
+
+    /// What `/metrics` reads of the memory shadow ([`Engine::memory_shadow_view`]); `None` under
+    /// [`crate::sizes::Curves::Off`].
+    #[must_use]
+    pub fn memory_shadow_view(&self) -> Option<MemoryShadowView> {
+        self.engine().memory_shadow_view()
     }
 
     /// `decided` with each placement's [`Placement::sized_from`](js_jobs::Placement::sized_from):

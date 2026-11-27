@@ -199,7 +199,7 @@ impl Settings {
     ///
     /// The text names the flag at fault: a bundle flag without `--bundle-store`; a store
     /// off a Mac, without `--scratch-root`, inside it, without a budget, on a volume the
-    /// checks refuse, below a directory a lease user cannot walk through, or not absolute; a choice that is none of its values; `--read-model allow`; a
+    /// checks refuse, below a directory a lease user cannot walk through, or not absolute; a choice that is none of its values; a
     /// registry entry that is not `HOST[:PORT]/PREFIX`, or an `--image-allow` entry that is
     /// not a js-oci allow-list entry; `--bundle-pull missing` with trust `digest` or with
     /// neither an `--image-allow` entry nor a registry; trust `list` without an allow list that holds a
@@ -252,13 +252,6 @@ impl Settings {
             cli.read_model.as_deref(),
             &[("open", ReadModel::Open), ("allow", ReadModel::Allow)],
         )?;
-        if read_model == ReadModel::Allow {
-            return Err(
-                "--read-model: allow is not available yet: the allow-list profile has not \
-                 landed"
-                    .to_owned(),
-            );
-        }
         let public = cli
             .bundle_registry_allow
             .iter()

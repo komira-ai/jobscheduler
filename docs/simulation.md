@@ -139,12 +139,14 @@ length; the kernel itself is described in the crate doc of `js-sim`, and
 ## Run one
 
 CI runs every test binary of the cell on each pull request, under coverage in the
-`coverage-shard` jobs, every store scenario over SQLite. The `test` job
-(`cargo nextest run --workspace --locked --no-fail-fast`) leaves out the four longest binaries
+`coverage-shard` jobs, every store scenario over SQLite. The `test` job, in five shards
+(`cargo nextest run --workspace --locked --no-fail-fast --cargo-profile dev --partition slice:<k>/5`),
+leaves out the four longest binaries
 (`faults`, `smoke`, `replay` and `whole_host_prepare`), which
 `required-features = ["slow-families"]` in the crate's `Cargo.toml` gates; the runs that start
-after a merge to main (the release's `unit-tests`, and the beta stage) and the coverage jobs
-build them with `--features js-sim-cell/slow-families`, so a red result there fails the
+after a merge to main (the release's `unit-tests`, and the beta stage), the `coverage-shard`
+jobs and the `coverage` job (which rebuilds the instrumented test binaries for its
+report) build them with `--features js-sim-cell/slow-families`, so a red result there fails the
 release run and `release-red` reports it. The Postgres cases are built only with the crate's `postgres`
 feature, and the `state-postgres` job runs them against its Postgres service
 (`cargo test -p js-sim-cell --features js-sim-cell/postgres --locked --test store --test server`);
@@ -166,6 +168,20 @@ A run is a function of (scenario, seed). A scenario runs seeds `0..n` in order
 same command on the same code fails at the same seed with the same trace hash. The pull
 request tests run a few seeds of each scenario; [Sweep many seeds](#sweep-many-seeds) runs
 the smoke family over thousands more.
+
+The largest scenarios run their seeds on several threads of the test's own:
+`run_seed_range_on_threads(build, seeds, threads)` takes a function that builds the
+scenario (a scenario holds `Rc`s, so it is built and run on one thread, and each thread
+calls `build` for itself) and answers what `build().run_seed_range(seeds)` answers: the
+runs in seed order, the failure of the lowest failing seed, and the witnesses judged over
+every seed of the range, not over a thread's share. The threads take seeds from one
+counter, lowest first, so one slow seed does not hold up a thread's share; a thread count
+of none is one, more than the seeds is as many as the seeds, and one thread runs the seeds
+on the calling thread. Unlike the sequential run, it does not stop at the first failure:
+every seed of the range runs. `try_run_seed_range_on_threads` returns the failure instead
+of panicking. A test that runs its seeds this way is named in `.config/nextest.toml`
+with `threads-required = 4`, so that nextest gives it four of a shard's slots and starts no
+other test beside it that would crowd them out.
 
 Each file directly under `crates/js-sim-cell/tests/` is one test binary. Files in the
 subdirectories (`cell/`, `agent/`, `invariants/`) are shared code that a binary includes
@@ -228,8 +244,8 @@ The flags, all the binary's own (it has no harness, so libtest never reads them)
 
 This is the one way to run a scenario over seeds other than the first few; there is no
 environment variable. A run with none of these flags runs no seed and passes, saying so
-on stderr: that is how the `test` job's `cargo nextest run --workspace` runs the binary on
-every pull request, so the pull request tests keep their few seeds. Flags that do not fit together (no shard, a
+on stderr: that is how the `test` job's `cargo nextest run --workspace` runs the binary in
+every shard of every pull request, so the pull request tests keep their few seeds. Flags that do not fit together (no shard, a
 shard past the last, fewer seeds than shards, a range past the last seed, a scenario the
 family does not have) are refused with exit status 2.
 
@@ -352,13 +368,14 @@ ended at 900 s by an action, and then what the scenario expects: every item term
 at least one seed in which some agent sent a result again (the witness). `settle_within`
 is how long the cell runs after the last action before the end check.
 
-The smoke family runs it over eight seeds:
+The smoke family runs it over eight seeds, on four threads:
 
 ```rust
 // Copied from crates/js-sim-cell/tests/smoke.rs
 #[test]
 fn a_lossy_agent_wire_settles_every_run() {
-    lossy_wire::a_lossy_agent_wire_settles_every_run().run_seeds(LOSSY_SEEDS);
+    let build = lossy_wire::a_lossy_agent_wire_settles_every_run;
+    run_seed_range_on_threads(build, 0..LOSSY_SEEDS, THREADS);
 }
 // End of the copy.
 ```
@@ -450,7 +467,8 @@ What a scenario can say, all of it in `crates/js-sim-cell/src/scenario/`,
 - `.run_seeds(n)`: run seeds `0..n`, and fail the test with the failure as text;
   `.run_seed_range(a..b)` does the same for the seeds of any range (`run_seeds(n)` is
   `run_seed_range(0..n)`), and `.try_run_seeds(n)` and `.try_run_seed_range(a..b)` return
-  the failure instead.
+  the failure instead; `run_seed_range_on_threads(build, a..b, threads)` runs the seeds of a
+  range on several threads, as [Run one](#run-one) says.
 
 The rules:
 

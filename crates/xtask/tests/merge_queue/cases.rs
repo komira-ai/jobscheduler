@@ -193,7 +193,7 @@ fn an_aggregate_that_may_pass_without_every_job_is_refused() {
 
 #[test]
 fn a_condition_that_keeps_a_job_or_a_deciding_step_off_a_merge_group_is_refused() {
-    let doctests = "- name: Doctests\n        if: ${{ !cancelled() }}\n";
+    let doctests = "- name: Doctests\n        if: ${{ !cancelled() && matrix.shard == 1 }}\n";
     let compare_if =
         "if: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}";
     refused(&[
