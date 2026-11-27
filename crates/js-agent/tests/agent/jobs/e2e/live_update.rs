@@ -10,8 +10,9 @@
 //!
 //! The next process takes the id only when the process file was written no longer ago, by the
 //! host's real clock, than the grace of the session that left it. So that no test races that
-//! real time, the tests whose next process must take the id run on a pool whose grace is an hour
-//! ([`POOL_GRACE_1H_TOML`]); the bound of the grace itself is asserted on the default 15 s
+//! real time, the tests whose next process must take the id run on a pool whose grace is four
+//! minutes, below the most the agent's default silence bound (300 s, with the 10 s stop grace)
+//! accepts ([`POOL_GRACE_4M_TOML`]); the bound of the grace itself is asserted on the default 15 s
 //! ([`POOL_GRACE_15S_TOML`]), where no next process starts.
 
 use std::sync::mpsc::{Receiver, channel};
@@ -45,11 +46,12 @@ os = "linux"
 arch = "x86_64"
 "#;
 
-/// [`POOL_GRACE_15S_TOML`] with a grace of an hour: the real time a test takes between an agent's
-/// end and the next one's start never passes it.
-const POOL_GRACE_1H_TOML: &str = r#"
+/// [`POOL_GRACE_15S_TOML`] with a grace of four minutes: the real time a test takes between an
+/// agent's end and the next one's start never passes it, and it is below what the agent's
+/// default `--silence-stop` (300 s) and stop grace (10 s) accept.
+const POOL_GRACE_4M_TOML: &str = r#"
 heartbeat_interval = "250ms"
-grace = "1h"
+grace = "4m"
 name = "macs"
 class = "mac"
 max_machines = 4
@@ -248,7 +250,7 @@ fn an_update_under_load_keeps_the_host_live_in_every_read_and_ends_no_job() {
         ("jobs_e2e_live_stop", Way::StopStart),
         ("jobs_e2e_live_place", Way::InPlace),
     ] {
-        let rig = busy_rig(name, POOL_GRACE_1H_TOML, &[]);
+        let rig = busy_rig(name, POOL_GRACE_4M_TOML, &[]);
         let (running, waiting) = load(&rig);
         let Handed {
             server,
@@ -353,7 +355,7 @@ const SERVER_OUTAGE: Duration = Duration::from_secs(8);
 fn a_restart_for_new_flags_keeps_the_host_live_and_its_first_hello_is_taken() {
     let rig = busy_rig(
         "jobs_e2e_live_flags",
-        POOL_GRACE_1H_TOML,
+        POOL_GRACE_4M_TOML,
         &["--drain-wait", "3600"],
     );
     let job = rig.queued(2000);

@@ -717,6 +717,13 @@ pub const ALLOWED: &[Allowed] = &[
         reason: "the agent program's process id, drawn once when the program starts its session; the cell builds its agents' sessions itself and names each process from its host and generation, with no random source",
     },
     Allowed {
+        file: "crates/js-agent/src/agent_process.rs",
+        item: "at_start",
+        token: Token::SystemTimeNow,
+        sites: 1,
+        reason: "the agent program's start reading how old the process id its last stop left is, against the grace it names, which decides only whether its hello names that process; the cell builds its agents' sessions itself and never runs the program's start",
+    },
+    Allowed {
         file: "crates/js-agent/src/backoff.rs",
         item: "SystemJitter::up_to",
         token: Token::Getrandom,
