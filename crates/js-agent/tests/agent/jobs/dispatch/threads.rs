@@ -368,12 +368,12 @@ fn a_transport_that_cannot_be_made_is_a_failed_poll() {
     });
 }
 
-/// Asserts that the poller's thread holds an answer its worker has no room for, makes no
-/// transport and posts nothing while the queue stays full, and once the worker makes room
-/// hands the start over and posts the next poll at once with its acknowledgement; and that
-/// the poller's lines reach the cell. Catches a thread that polls on while it holds messages
-/// (it would make a transport for every try), and one that waits out a bound after the room
-/// appeared instead of the room itself.
+/// Asserts that the poller's thread holds an answer its worker has no room for and posts
+/// nothing while the queue stays full, and once the worker makes room hands the start over
+/// and posts the next poll at once with its acknowledgement, on the transport it kept; and
+/// that the poller's lines reach the cell. Catches a thread that polls on while it holds
+/// messages, and one that waits out a bound after the room appeared instead of the room
+/// itself.
 #[test]
 fn the_poller_thread_holds_what_the_worker_has_no_room_for_until_it_makes_room() {
     let dir = Scratch::new("jobs-dispatch-serve-held");
@@ -395,7 +395,11 @@ fn the_poller_thread_holds_what_the_worker_has_no_room_for_until_it_makes_room()
         machine.world.release();
         let (carrying, _) = driver.next();
         assert_eq!(acked(&carrying), ["start:alloc-j1"]);
-        assert_eq!(connector.0.connects.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            connector.0.connects.load(Ordering::SeqCst),
+            1,
+            "the poll after the hold rides the kept transport"
+        );
         driver.answer(quiet());
         assert_eq!(
             cell.wait_lines(GUARD),

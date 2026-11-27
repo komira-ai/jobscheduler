@@ -362,7 +362,7 @@ fn a_server_address_is_taken_beside_an_https_server_only() {
         &mut Lowest,
     );
     assert_eq!(ran.status(), code(0), "{}", ran.err);
-    assert_eq!(sent.borrow().len(), 1, "the hello");
+    assert_eq!(sent.borrow()[0].0, "/v1/agent/hello");
     let plain = refused(&["--server-address", "192.0.2.10"], &host);
     assert!(
         plain.contains(

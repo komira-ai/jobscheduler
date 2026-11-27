@@ -491,10 +491,12 @@ impl<C: Connector<()>> Remember<C> {
         // capped attempt's deadline is the time already spent and its own limit. A deadline at
         // or past the whole limit keeps ureq's own form of it (one that never ends, with no
         // global limit, cannot be written as a duration: it would overflow the deadline).
+        // The clock is read once: what is spent and what is left add up to the whole limit.
         let spent = try_at.started.elapsed();
-        let deadline = spent.saturating_add(self.book.limit_for(address, try_at.left()));
-        let after = if deadline < try_at.budget {
-            Budget::Exact(deadline)
+        let left = try_at.budget.saturating_sub(spent);
+        let limit = self.book.limit_for(address, left);
+        let after = if limit < left {
+            Budget::Exact(spent.saturating_add(limit))
         } else {
             details.timeout.after
         };

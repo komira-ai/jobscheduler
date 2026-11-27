@@ -30,6 +30,12 @@ fn the_wait_doubles_to_the_cap_and_a_success_resets_it() {
     for _ in 0..100 {
         assert!(backoff.next(&mut Highest, None) <= CAP);
     }
+
+    // A backoff given its own cap (the session's while the worker is full) doubles to that.
+    let mut minute = Backoff::up_to(Duration::from_secs(60));
+    let longest: Vec<Duration> = (0..9).map(|_| minute.next(&mut Highest, None)).collect();
+    let expected = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 60.0, 60.0, 60.0].map(secs);
+    assert_eq!(longest, expected);
 }
 
 /// Asserts that the longest wait after a failure, with a request that runs to its limit

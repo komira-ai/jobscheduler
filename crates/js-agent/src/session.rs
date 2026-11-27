@@ -201,6 +201,11 @@ use crate::transport::{Answer, Transport};
 use crate::usage::Outbox;
 use crate::worker::{Delivery, Parked, Snapshot, Worker};
 
+/// The cap of the wait while the worker is full, which the heartbeat interval bounds too: a
+/// full worker is not a server out of reach, so its wait keeps the minute it always had and
+/// not the few seconds of [`crate::backoff::CAP`].
+const BUSY_CAP: Duration = Duration::from_secs(60);
+
 mod fatal;
 mod note;
 mod reason;
@@ -372,7 +377,7 @@ impl<'a> Session<'a> {
             hello,
             live: None,
             backoff: Backoff::default(),
-            busy: Backoff::default(),
+            busy: Backoff::up_to(BUSY_CAP),
             proven: false,
             lost_young: false,
             hold: None,
