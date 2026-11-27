@@ -20,7 +20,7 @@ pub(super) fn needs(lines: &[String]) -> Vec<String> {
 }
 
 /// The job-level `if:` lines.
-fn ifs(lines: &[String]) -> Vec<&str> {
+pub(super) fn ifs(lines: &[String]) -> Vec<&str> {
     lines
         .iter()
         .filter(|l| l.starts_with("    if:"))
@@ -66,7 +66,7 @@ fn step_at(lines: &[String], at: usize) -> &[String] {
 }
 
 /// The number of steps of a job.
-fn steps(lines: &[String]) -> usize {
+pub(super) fn steps(lines: &[String]) -> usize {
     lines.iter().filter(|l| l.starts_with("      - ")).count()
 }
 
@@ -499,6 +499,7 @@ fn desired_problems(text: &str) -> Vec<String> {
             "plan",
             "turn",
             "pkg-upload",
+            "blackbox",
             "stable-apt-write",
             "stable-apt-write-2",
             "stable-apt-write-3",
@@ -512,6 +513,7 @@ fn desired_problems(text: &str) -> Vec<String> {
         PUSH,
         "needs.plan.outputs.release == 'true'",
         "needs.turn.outputs.go == 'true'",
+        "needs.blackbox.result == 'success'",
         "vars.JS_AGENT_SETS_DESIRED == 'true'",
         "needs.stable-apt-write.outputs.conflict == 'false'",
         "needs.stable-apt-write-2.outputs.conflict == 'false'",
@@ -548,8 +550,8 @@ fn desired_problems(text: &str) -> Vec<String> {
 /// Asserts the shape of `desired`: `actions: write` and `contents: read`, a check that the
 /// release is the newest published one (a re-run of an older run's failed jobs must not move the
 /// farm back), then one `gh workflow run` of hostkeeper-desired.yml on main with the plan's
-/// version on that check's word alone, and the turn's go, the variable and a stable write
-/// without conflict in its condition.
+/// version on that check's word alone, and the turn's go, `blackbox`'s success, the variable and
+/// a stable write without conflict in its condition.
 #[test]
 fn desired_starts_hostkeeper_desired_only_for_the_newest_release() {
     let text = workflow();
@@ -568,16 +570,15 @@ fn desired_starts_hostkeeper_desired_only_for_the_newest_release() {
         ("select(.draft == false and .prerelease == false) | ", ""),
         ("        id: newest\n", ""),
         ("needs: [plan, turn, pkg-upload,", "needs: [plan, turn,"),
+        ("pkg-upload, blackbox,", "pkg-upload,"),
+        ("&& needs.blackbox.result == 'success' ", ""),
         ("needs: [plan, turn,", "needs: [plan,"),
         ("--ref main -f", "--ref dev -f"),
         (
             "workflow run hostkeeper-desired.yml",
             "workflow run other.yml",
         ),
-        (
-            "&& needs.turn.outputs.go == 'true' && vars.JS_AGENT",
-            "&& vars.JS_AGENT",
-        ),
+        ("&& needs.turn.outputs.go == 'true' ", ""),
         ("&& vars.JS_AGENT_SETS_DESIRED == 'true'", ""),
         (
             "needs.stable-apt-write-3.outputs.conflict == 'false'",
