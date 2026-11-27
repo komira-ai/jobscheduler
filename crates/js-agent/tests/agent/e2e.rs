@@ -293,7 +293,7 @@ fn sigterm_marks_the_host_draining() {
 /// that is live is answered 429 with a `Retry-After` of the refill interval, the agent waits at
 /// least that (not the half second of its own backoff), and once the server's clock has passed
 /// it the hello is past the limit and meets the registry's answer (409 `host-live`, waited out
-/// at the agent's own backoff). It catches an agent that ignores the header and retries into the
+/// at the agent's own backoff, which has doubled once). It catches an agent that ignores the header and retries into the
 /// limit, and a client that drops the header.
 #[test]
 fn a_rate_limited_hello_waits_for_retry_after() {
@@ -316,7 +316,8 @@ fn a_rate_limited_hello_waits_for_retry_after() {
     assert_eq!(second.next_wait(), secs(10));
     server.clock.advance(secs(10));
     second.elapse();
-    assert_eq!(second.next_wait(), Duration::from_millis(500));
+    // The backoff doubled at the 429 (500 ms, raised to the 10 s asked), so the 409 waits 1 s.
+    assert_eq!(second.next_wait(), secs(1));
     assert_eq!(server.host("mac-1")["state"], "live");
     let ran = second.stop();
     assert!(

@@ -12,7 +12,7 @@ use js_lease_server::{Cli, Config, SharedClock, StartupError, channel_ticker, st
 use js_types::ManualClock;
 
 use crate::agents_support::{agent_args, join, start_agents};
-use crate::config_support::{PoolText, file, load, refusal, server};
+use crate::config_support::{PoolText, file, load, refusal, server, server_without_tls};
 use crate::jobs_support::job_args;
 use crate::support::{Harness, Scratch, base_args, config, without_agent_pool};
 
@@ -150,7 +150,13 @@ fn job_listen_on_a_network_address_requires_tls() {
     assert_eq!(
         refusal(
             &scratch,
-            &joined_file(&scratch, "job_listen = \"10.1.2.3:7302\"")
+            &file(
+                &server_without_tls(
+                    &scratch,
+                    "listen = \"127.0.0.1:0\"\nagent_listen = \"127.0.0.2:0\"\njob_listen = \"10.1.2.3:7302\""
+                ),
+                &[&PoolText::joined("burst")]
+            )
         ),
         format!("server.job_listen: 10.1.2.3:7302 {clear}")
     );

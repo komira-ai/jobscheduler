@@ -202,16 +202,29 @@ pub fn quoted(path: &Path) -> String {
 /// `extra` names `tls_cert` or `agent_client_ca`, the server is on TLS and admits hosts by the certificates of the
 /// CA of the tests ([`agent_tls_keys`]), which is how a host is admitted.
 pub fn server(scratch: &Scratch, extra: &str) -> String {
-    let agents = match extra.contains("agent_listen") {
-        true => "",
-        false => "agent_listen = \"127.0.0.2:0\"\n",
-    };
     let tls = match extra.contains("tls_cert")
         || extra.contains("tls_key")
         || extra.contains("agent_client_ca")
     {
         true => String::new(),
         false => agent_tls_keys(scratch),
+    };
+    with_agent_port(scratch, extra, &tls)
+}
+
+/// [`server`] without the agent TLS keys: the `[server]` table of a file whose TLS rules
+/// are under test, which gets exactly the TLS keys `extra` gives (none, for the refusal of
+/// a network address that has none).
+pub fn server_without_tls(scratch: &Scratch, extra: &str) -> String {
+    with_agent_port(scratch, extra, "")
+}
+
+/// The `[server]` table of `extra` after the default agent port (unless `extra` names
+/// `agent_listen`) and `tls`.
+fn with_agent_port(scratch: &Scratch, extra: &str, tls: &str) -> String {
+    let agents = match extra.contains("agent_listen") {
+        true => "",
+        false => "agent_listen = \"127.0.0.2:0\"\n",
     };
     bare_server(scratch, &format!("{agents}{tls}{extra}"))
 }

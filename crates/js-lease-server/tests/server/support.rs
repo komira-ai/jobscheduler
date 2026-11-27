@@ -220,10 +220,11 @@ impl Harness {
         store_clock: Arc<dyn js_state::Clock>,
     ) -> Self {
         let clock = ManualClock::new(Timestamp::from_millis(T0));
+        let tls = names_tls(&args);
         let config = config(args)
             .unwrap()
             .with_job_sources(store_clock, Arc::new(RandomIds));
-        Self::over_at(scratch, config, clock).await
+        Self::over_at(scratch, config, clock, tls).await
     }
 
     /// A server on `args` whose job store mints its ids from `ids`.
@@ -236,8 +237,9 @@ impl Harness {
         // The job store reads the harness's clock too, so a cordon's row lapses, and a row's
         // times are stamped, at the time the test moves the server to.
         let reads = Arc::new(StoreReads(clock.clone()));
+        let tls = names_tls(&args);
         let config = config(args).unwrap().with_job_sources(reads, ids);
-        Self::over_at(scratch, config, clock).await
+        Self::over_at(scratch, config, clock, tls).await
     }
 
     /// A server on the base flags with these connection limits.
@@ -250,7 +252,7 @@ impl Harness {
     /// A server on `config`.
     pub async fn over(scratch: Scratch, config: Config) -> Self {
         let clock = ManualClock::new(Timestamp::from_millis(T0));
-        Self::over_at(scratch, config, clock).await
+        Self::over_at(scratch, config, clock, true).await
     }
 
     /// A server on `config` whose stores read the harness's clock, as [`Harness::with`]'s do:
@@ -259,11 +261,14 @@ impl Harness {
         let clock = ManualClock::new(Timestamp::from_millis(T0));
         let reads = Arc::new(StoreReads(clock.clone()));
         let config = config.with_job_sources(reads, Arc::new(RandomIds));
-        Self::over_at(scratch, config, clock).await
+        Self::over_at(scratch, config, clock, true).await
     }
 
-    /// A server on `config`, on `clock`.
-    async fn over_at(scratch: Scratch, config: Config, clock: ManualClock) -> Self {
+    /// A server on `config`, on `clock`. `tls` says whether the server may be on TLS: false
+    /// for a server started on flags that name no TLS files, whose scratch directory may
+    /// still hold the files of a server that was (a restart over them), true when the
+    /// files `scratch` holds are to say.
+    async fn over_at(scratch: Scratch, config: Config, clock: ManualClock, tls: bool) -> Self {
         quiet_logs();
         let (ticks, ticker) = channel_ticker();
         let (checks, check_ticker) = channel_ticker();
@@ -271,7 +276,7 @@ impl Harness {
         let running = start_with_checks(config, shared, ticker, check_ticker)
             .await
             .unwrap();
-        trust_server_of(&scratch, &running);
+        trust_server_of(&scratch, &running, tls);
         Self {
             running,
             clock,
@@ -307,13 +312,30 @@ static TRUSTED: std::sync::Mutex<BTreeMap<std::net::SocketAddr, String>> =
 
 /// Records the server certificate of `running` for every address it serves, when the files
 /// `scratch` holds say that the server was started with the agent TLS flags.
-fn trust_server_of(scratch: &Scratch, running: &Running) {
+fn trust_server_of(scratch: &Scratch, running: &Running, tls: bool) {
     let addrs = [
         Some(running.addr()),
         running.agent_addr(),
         running.job_addr(),
     ];
-    trust_addrs(scratch, &addrs.into_iter().flatten().collect::<Vec<_>>());
+    let addrs = addrs.into_iter().flatten().collect::<Vec<_>>();
+    match tls {
+        true => trust_addrs(scratch, &addrs),
+        false => forget_addrs(&addrs),
+    }
+}
+
+/// Whether `args` name the TLS files of a server (`--tls-cert`).
+fn names_tls(args: &[OsString]) -> bool {
+    args.iter().any(|arg| arg == "--tls-cert")
+}
+
+/// Forgets each of `addrs` as a TLS server: a plain server is there now.
+fn forget_addrs(addrs: &[std::net::SocketAddr]) {
+    let mut trusted = TRUSTED.lock().unwrap();
+    for addr in addrs {
+        trusted.remove(addr);
+    }
 }
 
 /// Records, for each of `addrs`, the server certificate `scratch` holds when the files say a
