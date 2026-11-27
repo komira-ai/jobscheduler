@@ -129,23 +129,20 @@ impl Rig {
         rig
     }
 
-    /// Waits until the agent is a live host that reports tierstore's provider.
+    /// Waits until the agent is a live host of the pool. Whether its hello reported tierstore's
+    /// provider (`mount-provider.tierstore`) the host list does not show (it lists the pool's
+    /// capabilities); the first submit shows it, as the job service refuses a job that names the
+    /// provider `no-capable-host` when no host reported it.
     fn wait_joined(&self) {
         let limit = Instant::now() + JOIN_LIMIT;
         loop {
             let entry = self.server.host(HOST_ID);
-            let joined = entry.as_ref().is_some_and(|entry| {
-                entry["state"] == "live"
-                    && entry["capabilities"]
-                        .get("mount-provider.tierstore")
-                        .is_some()
-            });
-            if joined {
+            if entry.as_ref().is_some_and(|entry| entry["state"] == "live") {
                 return;
             }
             assert!(
                 Instant::now() < limit,
-                "the agent did not join with mount-provider.tierstore within {} s: {entry:?}\n{}\n{}",
+                "the agent was not a live host within {} s: {entry:?}\n{}\n{}",
                 JOIN_LIMIT.as_secs(),
                 self.server.err(),
                 host::journal()
