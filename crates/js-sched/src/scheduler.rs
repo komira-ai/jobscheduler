@@ -352,14 +352,15 @@ impl Scheduler {
     /// apply: the take drains nothing, and the last-capable rule is not read: an older
     /// ordinary request a quiet worker could run is placed on it first). A request that
     /// holds a mark takes it whatever the caps, as its mark is already counted; any other
-    /// that a cap stops stays queued and [`Scheduler::whole_wait`] says which. A request that fits
-    /// nowhere holds a worker only after it has waited `drain_after` since it was queued,
-    /// and marks it ([`Scheduler::whole_mark`]) with a deadline of `drain_deadline`, or the
-    /// longest it may run when none is set (the one given with
-    /// [`Scheduler::set_max_wall`]; with neither, the end of time). The deadline is when
+    /// that a cap stops stays queued and [`Scheduler::whole_wait`] says which. A request that
+    /// fits nowhere holds a worker in the first round that sees it, and marks it
+    /// ([`Scheduler::whole_mark`]) with a deadline of `drain_deadline`, or the longest it
+    /// may run when none is set (the one given with [`Scheduler::set_max_wall`]; with
+    /// neither, the end of time). The deadline is when
     /// the worker is expected to be drained at the latest: reaching it does not give the
     /// hold up, so the mark stays until the request is placed or cancelled, and nothing
-    /// running is stopped. `max_reserve_attempts` and `reserve_backoff` are not read. The
+    /// running is stopped. `drain_after`, `max_reserve_attempts` and `reserve_backoff` are
+    /// not read: nothing waits before it holds, and nothing counts its attempts. The
     /// marks and bars are in memory only; a recovered scheduler has none until
     /// [`Scheduler::restore_whole`] puts them back.
     ///
@@ -728,27 +729,25 @@ impl Scheduler {
                 && self.backfill.only(id).is_none()
             {
                 let held = match &self.whole_node {
-                    Some(cfg) if request.kind == LeaseKind::WholeMachine => {
-                        let turn = self.drain.turn(id, op.queued_at, now, cfg);
-                        turn.and_then(|turn| {
-                            match self.hold_whole(
-                                &mut servable,
-                                &whole,
-                                (id, position),
-                                &reserved,
-                                &placed,
-                                turn,
-                            ) {
-                                Ok(held) => held.map(|(name, mark, tail)| {
-                                    whole.marks.insert(id, mark);
-                                    (name, tail)
-                                }),
-                                Err(wait) => {
-                                    whole.waits.insert(id, wait);
-                                    None
-                                }
+                    Some(_) if request.kind == LeaseKind::WholeMachine => {
+                        let turn = self.drain.turn(id, now);
+                        match self.hold_whole(
+                            &mut servable,
+                            &whole,
+                            (id, position),
+                            &reserved,
+                            &placed,
+                            turn,
+                        ) {
+                            Ok(held) => held.map(|(name, mark, tail)| {
+                                whole.marks.insert(id, mark);
+                                (name, tail)
+                            }),
+                            Err(wait) => {
+                                whole.waits.insert(id, wait);
+                                None
                             }
-                        })
+                        }
                     }
                     // Without whole-node settings: as it always was, the worker with the
                     // fewest leases, kept while it could run the request, and no limit

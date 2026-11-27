@@ -113,6 +113,9 @@ pub(crate) struct PoolFile {
     pub(crate) pool: PoolConfig,
     /// The file's `join_token_file`.
     pub(crate) join_token_file: Option<PathBuf>,
+    /// One warning for each deprecated key the file sets ([`deprecated_keys`]): each still
+    /// loads and does nothing.
+    pub(crate) deprecated: Vec<String>,
 }
 
 /// Reads the pool file at `path`.
@@ -125,7 +128,31 @@ pub(crate) fn read(path: &Path) -> Result<PoolFile, StartupError> {
     if let Some(note) = surplus_warning(&file.pool) {
         warn!("{}: {note}", path.display());
     }
+    for note in &file.deprecated {
+        warn!("{}: {note}", path.display());
+    }
     Ok(file)
+}
+
+/// The warning for each key of the whole-node class `raw` sets that is deprecated: it is
+/// still parsed and checked, so an older pool file loads, and it does nothing.
+fn deprecated_keys(raw: &RawPool) -> Vec<String> {
+    let keys = [
+        (
+            "drain_after",
+            raw.drain_after.is_some(),
+            "a whole-node request reserves a host at once",
+        ),
+        (
+            "max_reserve_attempts",
+            raw.max_reserve_attempts.is_some(),
+            "a reservation is never given up",
+        ),
+    ];
+    keys.into_iter()
+        .filter(|(_, set, _)| *set)
+        .map(|(key, _, why)| format!("{key} is deprecated and does nothing: {why} (drop the key)"))
+        .collect()
 }
 
 /// What to tell the operator when a dedicated pool allows fewer whole hosts than
@@ -160,10 +187,12 @@ fn parse_file(
 ) -> Result<PoolFile, String> {
     let raw: RawPool = toml::from_str(text).map_err(|err| err.to_string())?;
     let join_token_file = raw.join_token_file.clone();
+    let deprecated = deprecated_keys(&raw);
     let pool = pool_of(raw, classes)?;
     Ok(PoolFile {
         pool,
         join_token_file,
+        deprecated,
     })
 }
 
@@ -276,9 +305,10 @@ fn whole_node(raw: &RawPool, admission: &Admission) -> Result<Option<WholeNodeCo
             raw.reserve_backoff.clone(),
             base.reserve_backoff_ms,
         )?,
-        // `max_reserve_attempts` is deprecated and ignored: it is still parsed and checked
-        // (zero is refused) so a pool file that sets it loads, but a reservation is never
-        // given up, so nothing counts attempts.
+        // `drain_after` and `max_reserve_attempts` are deprecated and ignored: each is still
+        // parsed and checked (a bad duration, and zero attempts, are refused) so a pool file
+        // that sets it loads, but a request reserves at once and a reservation is never
+        // given up, so nothing waits and nothing counts attempts ([`deprecated_keys`]).
         max_reserve_attempts: raw
             .max_reserve_attempts
             .unwrap_or(base.max_reserve_attempts),
@@ -731,6 +761,38 @@ mod tests {
         assert_eq!(unset.whole_node().unwrap().max_reserve_attempts, 2);
         let zero = parse(&whole("max_reserve_attempts = 0")).unwrap_err();
         assert!(zero.contains("max_reserve_attempts"), "{zero}");
+    }
+
+    /// Asserts that each deprecated whole-node key a pool file sets loads and is named in
+    /// one warning, by its exact text and in key order, whatever its value (zero too),
+    /// that a file setting neither has no warning, and that through `read` such a file
+    /// loads as it parses, with the same warnings. It catches a deprecated key refused, a
+    /// warning lost or given for a key the file leaves out, and `drain_after` read again.
+    #[test]
+    fn deprecated_whole_node_keys_load_with_one_warning_each() {
+        let after = "drain_after is deprecated and does nothing: a whole-node request \
+                     reserves a host at once (drop the key)";
+        let attempts = "max_reserve_attempts is deprecated and does nothing: a reservation \
+                        is never given up (drop the key)";
+        let notes = |text: &str| parse_file(&whole(text), class).unwrap().deprecated;
+        assert_eq!(notes(""), Vec::<String>::new());
+        assert_eq!(notes("drain_after = \"1m\""), [after]);
+        assert_eq!(notes("max_reserve_attempts = 5"), [attempts]);
+        let both = "drain_after = \"0\"\nmax_reserve_attempts = 1";
+        assert_eq!(notes(both), [after, attempts]);
+        // A call with no subscriber skips evaluating its fields, so the warnings would go
+        // unrun; this one runs them and drops the lines.
+        let scope = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(std::io::sink)
+                .finish(),
+        );
+        let text = whole("drain_after = \"30s\"\nmax_reserve_attempts = 3");
+        let file = TempFile::new("deprecated-keys", &text);
+        let loaded = read(&file.0).unwrap();
+        assert_eq!(loaded.pool, parse(&text).unwrap());
+        assert_eq!(loaded.deprecated, [after, attempts]);
+        drop(scope);
     }
 
     /// A pool file written before the whole-node keys loads unchanged in every old field:

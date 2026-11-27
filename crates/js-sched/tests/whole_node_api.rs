@@ -36,9 +36,9 @@ use crate::whole_rig::{Farm, request, secs, w};
 
 /// Catches: a restart that loses the queue time or the mark (today's `recover` takes the
 /// time now): an operation taken up at 200 s and restored as queued at 100 s with a mark on
-/// `a` keeps the mark in the next round without waiting `drain_after` (30 s) again, with the
-/// restored time, deadline and tail end (500 s, not the 600 s the worker's tail reads now),
-/// and keeps it past that deadline with nothing barred.
+/// `a` keeps the mark in the next round (a `drain_after` of 30 s, deprecated, is not
+/// read), with the restored time, deadline and tail end (500 s, not the 600 s the worker's
+/// tail reads now), and keeps it past that deadline with nothing barred.
 #[test]
 fn restore_whole_keeps_queued_at_and_the_mark() {
     let mut f = busy(cfg(30_000, 2));
@@ -85,9 +85,9 @@ fn restore_whole_keeps_queued_at_and_the_mark() {
 }
 
 /// Worker `a` busy and `b` quiet; a whole-machine request granted `b` at zero, then at
-/// 40 s (past `drain_after`, 30 s) `b` cordoned and the grant committed and undone (its
-/// run never started, as when the prepare fails), keeping the queue
-/// time if `keep`. The farm after a round at 40 s, and the request.
+/// 40 s `b` cordoned and the grant committed and undone (its run never started, as when
+/// the prepare fails), keeping the queue time if `keep`. `drain_after` is set to 30 s and
+/// is not read. The farm after a round at 40 s, and the request.
 fn requeued(keep: bool) -> (Farm, OperationId) {
     let mut f = busy(cfg(30_000, 2));
     f.worker("b");
@@ -108,22 +108,24 @@ fn requeued(keep: bool) -> (Farm, OperationId) {
     (f, op)
 }
 
-/// Catches: a requeue after a failed prepare that restarts `drain_after`: put back with
-/// its queue time kept (zero), the request marks the busy `a` in the round at 40 s; put
-/// back with plain `unplace` it takes the time now and is early until 70 s.
+/// Catches: a requeue that loses the queue time, or one that waits before it holds a
+/// worker again. Undone at 40 s with the queue time kept (zero) or taken anew (plain
+/// `unplace`), the request marks the busy `a` in the round at 40 s either way and shows
+/// holding, never early, whatever the deprecated `drain_after` (30 s); the queue's oldest
+/// age is 40 s when the time was kept and nothing when it was not.
 #[test]
 fn a_requeue_keeps_queued_at() {
-    let (f, op) = requeued(true);
-    let mark = f.s.whole_mark(op).expect("marked");
-    assert_eq!((&mark.worker, mark.made), (&w("a"), t(40_000)));
-    let (f, op) = requeued(false);
-    assert_eq!(f.s.whole_mark(op), None);
-    assert_eq!(
-        f.s.whole_state(op),
-        Some(WholeState::Early {
-            may_hold_at: t(70_000)
-        })
-    );
+    for (keep, age) in [(true, secs(40)), (false, secs(0))] {
+        let (f, op) = requeued(keep);
+        let mark = f.s.whole_mark(op).expect("marked");
+        assert_eq!((&mark.worker, mark.made), (&w("a"), t(40_000)));
+        let Some(WholeState::Holding { worker, .. }) = f.s.whole_state(op) else {
+            panic!("holds");
+        };
+        assert_eq!(worker, w("a"));
+        let queue = f.s.queue_snapshot();
+        assert_eq!((queue.depth, queue.oldest_age), (1, Some(age)));
+    }
 }
 
 /// Catches: a hard bar that is soft (the only quiet worker granted because it is the last
