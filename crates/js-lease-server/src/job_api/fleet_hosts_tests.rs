@@ -35,6 +35,7 @@ fn view(id: &str, state: HostState, mark: Option<HostMark>) -> HostView {
         cordon_holder: None,
         load: None,
         load_seconds: Default::default(),
+        actions_oom_events: None,
     }
 }
 

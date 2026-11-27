@@ -9,8 +9,10 @@ use std::time::Duration;
 use js_jobs::JobState;
 use js_registry::HostMark;
 use js_sched_placer::curves::{CurveView, HostMemoryShadow, MemoryShadowView};
+use js_sched_placer::telemetry::Telemetry;
 use js_types::HostId;
 
+use super::placement;
 use super::{
     AGENT_ROUTES, CALLBACK_RESULTS, FAILURE_CODES, Histogram, RETRY_OUTCOMES, Recorder,
     SUBMIT_PHASES, TABLES_FROM,
@@ -96,16 +98,26 @@ pub(crate) struct HostSeen {
     /// In bytes.
     pub(crate) memory: Split,
     pub(crate) mark: Option<HostMark>,
+    /// Whether the registry lists the host live: it said hello or beat within the grace.
+    pub(crate) live: bool,
+    /// The host's cumulative CPU pressure (some) time in microseconds, 0 when its agent does
+    /// not measure it; `None` for a host with no load reported.
+    pub(crate) cpu_pressure_some_usec: Option<u64>,
+    /// How many times the OOM killer ran for the limit of the host's actions control group;
+    /// `None` for a host that reported none.
+    pub(crate) actions_oom_events: Option<u64>,
 }
 
 /// What a scrape read: the job tables (`None` without the job service), the hosts, the curve
-/// view of the placer (`None` unless it books by curve) and its memory shadow (`None` unless
-/// it runs, under `shadow` and `on`).
+/// view of the placer (`None` under `--placement-curves off`; under `shadow` it has the class
+/// counts and no host peaks), its memory shadow (`None` unless it runs, under `shadow` and
+/// `on`) and the placer's telemetry (`None` without a placer).
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Snapshot {
     pub(crate) jobs: Option<JobsSeen>,
     pub(crate) hosts: Vec<HostSeen>,
     pub(crate) curves: Option<CurveView>,
+    pub(crate) telemetry: Option<Telemetry>,
     pub(crate) memory: Option<MemoryShadowView>,
 }
 
@@ -124,11 +136,11 @@ pub(crate) fn label(value: &str) -> String {
 }
 
 /// A duration in seconds, as the text writes a number.
-fn seconds(value: Duration) -> String {
+pub(super) fn seconds(value: Duration) -> String {
     value.as_secs_f64().to_string()
 }
 
-fn family(out: &mut String, name: &str, kind: &str, help: &str) {
+pub(super) fn family(out: &mut String, name: &str, kind: &str, help: &str) {
     let _ = writeln!(out, "# HELP {name} {help}\n# TYPE {name} {kind}");
 }
 
@@ -254,6 +266,7 @@ pub(crate) fn render(seen: &Snapshot, recorder: &Recorder) -> String {
     bodies_too_large(&mut out, recorder);
     acquires(&mut out, recorder);
     hosts(&mut out, seen);
+    placement::write(&mut out, seen);
     if let Some(view) = &seen.curves {
         curves(&mut out, view);
     }
@@ -442,11 +455,12 @@ fn memory_shadow(out: &mut String, view: &MemoryShadowView) {
     }
 }
 
-/// The families of the curve mode, written only when the placer books by curve: the classes
-/// booking their curve and those booking flat, and the fullest booked slot of each curve host.
+/// The families of the curve mode, written only when the placer reads curves (`shadow` or
+/// `on`): the classes booking their curve and those booking flat, and the fullest booked slot
+/// of each curve host (a host of none under `shadow`, which books no curve).
 fn curves(out: &mut String, view: &CurveView) {
     let name = "js_curve_classes";
-    let help = "Job classes with a profile, by how they are booked: curve (passing all four checks, booked by their CPU curve) or flat (failing a check, booked their flat number).";
+    let help = "Job classes with a profile, by how they are booked: curve (passing all four checks, booked by their CPU curve under `on`) or flat (failing a check, booked their flat number).";
     family(out, name, "gauge", help);
     let _ = writeln!(out, "{name}{{state=\"curve\"}} {}", view.curve_classes);
     let _ = writeln!(out, "{name}{{state=\"flat\"}} {}", view.flat_classes);

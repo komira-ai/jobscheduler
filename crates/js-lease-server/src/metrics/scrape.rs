@@ -11,7 +11,9 @@ use axum::http::header::CONTENT_TYPE;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use js_jobs::{AllocationRecord, Booked, JobStoreError, MAX_PAGE};
+use js_registry::HostState;
 use js_sched_placer::curves::{CurveView, MemoryShadowView};
+use js_sched_placer::telemetry::Telemetry;
 use tracing::warn;
 
 use super::Recorder;
@@ -73,8 +75,14 @@ pub(crate) async fn snapshot(
         None => None,
     };
     let views = match agents.placer.clone() {
-        Some(placer) => blocking(move || (placer.curve_view(), placer.memory_shadow_view())).await,
-        None => (None, None),
+        Some(placer) => {
+            let read = move || {
+                let telemetry = Some(placer.telemetry());
+                (placer.curve_view(), placer.memory_shadow_view(), telemetry)
+            };
+            blocking(read).await
+        }
+        None => (None, None, None),
     };
     Ok(combine(list, jobs, views))
 }
@@ -104,11 +112,15 @@ fn read_jobs(
 }
 
 /// The snapshot of the hosts of `list`, each booked with the live allocations of `jobs`, of
-/// the jobs, and of the placer's curve view and memory shadow view, `views`.
+/// the jobs, and of the placer's curve view, memory shadow view and telemetry, `views`.
 fn combine(
     list: HostList,
     jobs: Option<(JobsSeen, Vec<AllocationRecord>)>,
-    (curves, memory): (Option<CurveView>, Option<MemoryShadowView>),
+    (curves, memory, telemetry): (
+        Option<CurveView>,
+        Option<MemoryShadowView>,
+        Option<Telemetry>,
+    ),
 ) -> Snapshot {
     let (jobs, live) = jobs.map_or((None, Vec::new()), |(seen, live)| (Some(seen), live));
     let hosts = list.hosts.into_iter();
@@ -117,6 +129,7 @@ fn combine(
         jobs,
         hosts,
         curves,
+        telemetry,
         memory,
     }
 }
@@ -146,5 +159,8 @@ fn host_seen(entry: HostEntry, live: &[AllocationRecord]) -> HostSeen {
         cpu: Split::of(whole.0, cpu),
         memory: Split::of(whole.1, memory),
         mark: entry.mark,
+        live: entry.state == Some(HostState::Live),
+        cpu_pressure_some_usec: entry.cpu_pressure_some_usec,
+        actions_oom_events: entry.actions_oom_events,
     }
 }
