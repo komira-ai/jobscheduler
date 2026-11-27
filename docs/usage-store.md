@@ -5,12 +5,15 @@ The server keeps what it measured and what it learned in one `js-state` store: t
 | prefix | one row per | written | kept |
 |---|---|---|---|
 | `usage/node/<host>/<hour>` | node and hour: up to 60 minutes of the node's CPU, working set and lease count (always zero now: no lease is held) | by the flush, every five minutes | 14 days (`NODE_RETENTION_MINUTES`) |
+| `usage/node/<host>/<hour>/<instance>` | node, hour and server instance (`<start ms>-<pid>-<n>`): the instance's own part of a minute the hour's row already held with other figures, from another instance (a host that moved between servers within the minute), in the same encoding. A read folds each minute of the hour's row and of these rows to the higher CPU, working set and lease count; a release before reads the hour's row alone | by the flush, in the transaction of the hour's row | with the hour's row |
 | `usage/key/<profile key>` | profile key: the ring of its last runs that ended cleanly, from which its cost curve and its P90 wall time are fitted | when a clean run of the key ends (nothing ends one now: the server has no run, so it writes none) | under `--profile-store-bytes`, least recently used key first |
 | `usage/ended/<ended-at>/<id>` | ended allocation: the record below | not by the server any more (a job's row is written by the job store, below); rows of the lease era stay until the prune | `--history-retention-days` (default 90) |
 | `usage/ended-id/<id>` | ended allocation: the key of its record, so an allocation is recorded once | with its record, in one transaction | deleted with its record |
 | `usage/tail/<counter>` | tail counter: the counter's total since the rows were first written (below) | not by the server any more (the tail counters are deleted); rows of the lease era stay | never reset by the server |
 
 Every row starts with a version byte.
+
+**The prune.** Once a day each server prunes. The deletes of rows past retention (the node rows, hour and instance rows alike, and the ended records) are claimed through the job store's `periodic/usage-prune` row when the usage rows are in the job store's database, so one of the servers sharing it deletes in a period (a day less an hour); a server with a usage file of its own deletes at each prune. The rest of the prune (the curves' day, the days profile keys were used) is each server's own and runs on every server.
 
 **What the server writes now.** The flush writes the node rows. The registry's history of ended leases, the profile rings and the tail counters were deleted with the lease table (`--estimate-feed` is accepted and does nothing), so the server writes no `usage/key`, `usage/ended` or `usage/tail` row, and the usage hub has no run to learn a profile from. The sections below on the record of an ended allocation, queue wait, why a lease ended, the estimate and the tail counters describe those rows as the lease-era server wrote them: `js-usage` still reads them, the prune still deletes the ended records, and a job's record is written by the job store with the same fields.
 

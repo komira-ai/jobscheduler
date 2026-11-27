@@ -69,6 +69,11 @@
 //! - `merge-profiles --dir <dir> --out <file> [--rustc <program>]` ([`merge_profiles`]): one
 //!   indexed coverage profile from the raw ones a coverage shard wrote at the top of `--dir`,
 //!   merged by the toolchain's llvm-profdata from a list file.
+//! - `coverage-shard --plan <file> --shard <k> --of <n> -- <program> <args>...`
+//!   ([`coverage_shard`]): one coverage shard of `ci.yml`: the program run once for the named
+//!   long tests the plan (`.config/coverage-shards.toml`) gives shard `k`, and once for each
+//!   light slice it gives it, with the filterset and partition of the run appended to its
+//!   arguments; every run is started even when an earlier one failed.
 //! - `postgres-for-tests --bin-dir <dir> --data-dir <dir> --socket-dir <dir> --github-env <file>`
 //!   ([`postgres_for_tests`]): a Postgres server for the tests that need one, on a runner with
 //!   no service container (the macOS job), and its URL for the later steps.
@@ -169,6 +174,7 @@ pub use js_handover_check as handover;
 
 pub mod channels;
 pub mod count_run;
+pub mod coverage_shard;
 pub mod crun_tests;
 pub mod debs;
 pub mod deploy;
@@ -259,6 +265,10 @@ pub enum Error {
     /// A Mac root test binary could not be staged.
     #[error("mac-test-artifact: {0}")]
     MacTestArtifact(#[from] mac_test_artifact::Error),
+    /// A coverage shard could not be run, or a run of it failed. A usage error of it is
+    /// [`Error::Usage`].
+    #[error("coverage-shard: {0}")]
+    CoverageShard(coverage_shard::Error),
     /// A coverage shard's raw profiles could not be merged.
     #[error("merge-profiles: {0}")]
     MergeProfiles(#[from] merge_profiles::Error),
@@ -426,6 +436,9 @@ enum Verb {
         #[arg(last = true)]
         command: Vec<std::ffi::OsString>,
     },
+    /// Run one coverage shard: the command once for the long tests the plan gives the shard,
+    /// and once for each light slice it gives it, each with its own filterset appended.
+    CoverageShard(coverage_shard::Args),
     /// Record the demonstration on the landing page of jobscheduler.dev (a build of the server and
     /// the client, a server on 127.0.0.1 with the job service on, a job submitted and the jobs listed).
     SiteDemo {
@@ -664,6 +677,10 @@ fn run(cli: Cli) -> Result<String, Error> {
             count_file,
             command,
         } => count_run::run(&count_file, &command),
+        Verb::CoverageShard(args) => coverage_shard::run(&args).map_err(|e| match e {
+            coverage_shard::Error::Usage(why) => Error::Usage(why),
+            other => Error::CoverageShard(other),
+        }),
         Verb::SiteDemo {
             root,
             out,

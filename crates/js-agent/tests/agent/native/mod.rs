@@ -34,6 +34,7 @@ mod network;
 mod outputs;
 mod pf_gate;
 mod put;
+mod read_allow;
 mod runtime;
 mod settings;
 mod silence;
