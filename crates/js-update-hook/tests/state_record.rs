@@ -544,3 +544,36 @@ fn peek_refuses_a_record_as_load_does() {
         "the record is not readable: not a regular file"
     );
 }
+
+/// Asserts that a step whose state directory is moved away after it opened, and a link to
+/// another directory put at its path, still saves, loads, sets aside and deletes in the
+/// directory it opened: nothing is written through the link, and the other directory stays
+/// empty. It catches a save, a rename or a sync that reopens the directory by its path, which
+/// whoever can write the parent could redirect between the check and the write.
+#[test]
+fn a_state_directory_swapped_for_a_link_after_the_open_redirects_nothing() {
+    let tmp = cell("record-swapped");
+    let state = tmp.path().join("state");
+    fs::create_dir(&state).unwrap();
+    let held = open(&state).unwrap();
+    let moved = tmp.path().join("moved");
+    fs::rename(&state, &moved).unwrap();
+    let elsewhere = tmp.path().join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    symlink(&elsewhere, &state).unwrap();
+
+    held.save(&Note::new("kept")).unwrap();
+    assert_eq!(held.load().unwrap(), Some(Note::new("kept")));
+    assert_eq!(
+        record_text(&moved),
+        "{\n  \"schema\": 3,\n  \"name\": \"kept\"\n}\n"
+    );
+    assert!(!moved.join(TEMP_FILE).exists());
+    let aside = held.set_aside("record.old").unwrap();
+    assert_eq!(aside, state.join("record.old"));
+    assert!(moved.join("record.old").is_file());
+    held.save(&Note::new("again")).unwrap();
+    held.delete().unwrap();
+    assert!(!moved.join(RECORD_FILE).exists());
+    assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+}

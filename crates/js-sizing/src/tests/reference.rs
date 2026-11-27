@@ -63,10 +63,15 @@ impl Reference {
                 if let Some(peak) = run.peak_memory_bytes.filter(usable) {
                     {
                         if run.limit_hits > 0 {
-                            let need = peak.max(run.booked_memory_bytes).min(b.host_memory - 1);
+                            let need = (peak.saturating_add(run.swap_peak_bytes))
+                                .max(run.booked_memory_bytes)
+                                .min(b.host_memory - 1);
                             self.samples.push((need, true, now));
                         } else if run.swap_peak_bytes > 0 {
-                            self.samples.push((peak, true, now));
+                            let need = peak
+                                .saturating_add(run.swap_peak_bytes)
+                                .min(b.host_memory - 1);
+                            self.samples.push((need, true, now));
                         } else {
                             self.samples.push((peak, false, now));
                         }
@@ -257,7 +262,11 @@ pub(super) fn random_run(rng: &mut Rng, host: u64) -> Run {
         booked_memory_bytes: booked,
         raised_memory_bytes: (rng.below(3) != 0).then(|| rng.size(host)),
         limit_hits: rng.below(8) / 7,
-        swap_peak_bytes: rng.below(10) / 9,
+        swap_peak_bytes: match rng.below(10) {
+            9 => rng.size(host),
+            8 => u64::MAX,
+            _ => 0,
+        },
         cpu_usage_us: if rng.below(4) == 0 {
             0
         } else {

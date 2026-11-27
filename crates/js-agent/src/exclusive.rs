@@ -38,9 +38,10 @@
 //! A phase other than `serving` that the agent is in for its own reasons (a drain) is not
 //! overridden. Without a [`Quiesce`] the session ignores `exclusive`.
 //!
-//! The VM check of the design (5.1) is not here: no VM backend exists. The readiness hook
-//! (5.5) answers [`Quiet::Refused`] when the hook refuses, and the session refuses the
-//! lease with that reason. The real agent runs the hook on its job worker (see
+//! The VM check of the design (5.1) is not here: the VM backend exists, but this gate
+//! has no VM-specific check, and a VM start goes through the same gate as any other start.
+//! The readiness hook (5.5) answers [`Quiet::Refused`] when the hook refuses, and the
+//! session refuses the lease with that reason. The real agent runs the hook on its job worker (see
 //! `worker::WorkerHost`); `readiness::Hooked` is the same rule as a [`Quiesce`] wrapper
 //! for a host driven in-thread.
 

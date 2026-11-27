@@ -30,6 +30,7 @@ fn reported(cpu: Duration, throttle: Option<CpuThrottle>, pressure: Option<Durat
                     millicores: u64::try_from(cpu.as_millis() / 10).unwrap(),
                     window_usec: 5_000_000,
                 }),
+                peak_swap_bytes: None,
             }),
             ..Output::default()
         },
@@ -158,6 +159,7 @@ fn a_class_books_the_mean_cpu_of_its_runs_whatever_their_peaks() {
                         millicores,
                         window_usec: 5_000_000,
                     }),
+                    peak_swap_bytes: None,
                 }),
                 ..Output::default()
             },

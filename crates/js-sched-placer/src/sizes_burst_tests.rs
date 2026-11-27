@@ -71,6 +71,7 @@ fn compiled(cpu_time: Duration, peak: Option<u64>) -> JobEnd {
             millicores,
             window_usec: 5_000_000,
         }),
+        peak_swap_bytes: None,
     };
     JobEnd::Exited {
         exit_code: 0,

@@ -321,6 +321,7 @@ fn as_root_the_supervisor_drops_opens_a_session_and_sets_the_limits() {
         max_file_bytes: FILE_BYTES,
         max_processes: PROCESSES,
         record_dir: folders.records.display().to_string(),
+        parent: None,
     };
     let mut supervisor = start(&folders, &spec);
     let mut out = BufReader::new(supervisor.stdout.take().unwrap());
@@ -391,6 +392,7 @@ fn as_root_the_job_holds_exactly_the_spec_s_group() {
         max_file_bytes: FILE_BYTES,
         max_processes: PROCESSES,
         record_dir: folders.records.display().to_string(),
+        parent: None,
     };
     let supervisor = start(&folders, &spec);
     let output = supervisor.wait_with_output().unwrap();

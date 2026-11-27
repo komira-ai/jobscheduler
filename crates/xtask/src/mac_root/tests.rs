@@ -219,14 +219,14 @@ impl Place {
 fn a_clean_mac_runs_every_target_from_the_work_directory_and_passes() {
     let place = Place::new("clean");
     let made =
-        "adi 501\nkbf-acct-0 4300\nkbf-acct-1 4309\nkbf-acct-7 650\nkbf-acct-x 4312\nother 4305\n";
+        "adi 501\nkbf-acct-0 4300\nkbf-acct-1 4309\nkbf-acct-7 650\nkbf-acct-x 4313\nother 4305\n";
     let fake = Fake::new().listing(&[CLEAN, made]);
     let ok = place.run(&fake).expect("every test passed");
     let table_path = place.root().join("target/mac-root-tests/table.tsv");
     assert_eq!(
         ok,
         format!(
-            "ok: 14 Mac root tests passed on macOS 27.0.1 (26A434); the table is {}",
+            "ok: 16 Mac root tests passed on macOS 27.0.1 (26A434); the table is {}",
             table_path.display()
         )
     );
@@ -242,6 +242,7 @@ fn a_clean_mac_runs_every_target_from_the_work_directory_and_passes() {
         "/native-privileged",
         "/native-isolation",
         "/native-inbound-pf",
+        "/native-fence",
     ]
     .iter()
     .map(|d| format!("/bin/mkdir -m 0755 {w}{d}"))
@@ -287,6 +288,36 @@ fn a_clean_mac_runs_every_target_from_the_work_directory_and_passes() {
         }
     }
     assert_eq!(table, want);
+}
+
+/// Asserts the account the `native_fence` target made (uid 4312, the last of the made range)
+/// is deleted after that target, and only after it: the listing taken after the earlier
+/// `js-agent` targets holds none. Catches a made range that stops one uid short, which would
+/// leave the fence test's account on the Mac.
+#[test]
+fn the_fence_targets_account_is_deleted_after_it() {
+    let place = Place::new("fence-cleanup");
+    let fence = "adi 501\nkbf-acct-0 4312\n";
+    let fake = Fake::new().listing(&[
+        CLEAN, CLEAN, CLEAN, CLEAN, CLEAN, CLEAN, CLEAN, fence, CLEAN,
+    ]);
+    place.run(&fake).expect("every test passed");
+    let roots = fake.roots();
+    let deletes: Vec<&String> = roots.iter().filter(|a| a.contains("-delete")).collect();
+    assert_eq!(deletes, ["/usr/bin/dscl . -delete /Users/kbf-acct-0"]);
+    assert!(place.table().contains("native_fence\ta\tpass\t\n"));
+}
+
+/// Asserts a Mac that already holds the fence target's uid 4312 is refused before anything
+/// runs as root, as every other uid of the tests' range is. Catches a test range that stops
+/// short of the fence target's uid.
+#[test]
+fn a_mac_with_the_fence_uid_is_refused() {
+    let place = Place::new("fence-refused");
+    let fake = Fake::new().listing(&["kbf-acct-0 4312\n"]);
+    let e = place.run(&fake).expect_err("refused").to_string();
+    assert!(e.ends_with("this Mac has kbf-acct-0 (4312)"), "{e}");
+    assert!(fake.roots().is_empty());
 }
 
 /// Catches a failure that passes for a pass, or that stops the targets after it: a failed
@@ -481,6 +512,7 @@ fn a_lease_user_is_refused_at_every_edge() {
         ("a", 600),
         ("a", 699),
         ("a", 4300),
+        ("a", 4312),
         ("a", 4320),
         ("kbf-lease-1-1", 501),
     ] {
@@ -515,9 +547,9 @@ fn a_lease_user_is_refused_at_every_edge() {
 fn only_the_tests_pool_users_are_deleted() {
     let users: Vec<(String, i64)> = [
         ("kbf-acct-0", 4300),
-        ("kbf-acct-1", 4311),
+        ("kbf-acct-1", 4312),
         ("kbf-acct-2", 4299),
-        ("kbf-acct-3", 4312),
+        ("kbf-acct-3", 4313),
         ("kbf-acct-4", 650),
         ("other", 4305),
         ("kbf-lease-pool-5", 4306),
@@ -568,6 +600,11 @@ fn each_target_gets_its_own_variables_directories_and_arguments() {
         line("native_inbound_pf"),
         "/usr/bin/env JS_NATIVE_INBOUND_ROOT=/S/w/native-inbound-pf JS_NATIVE_INBOUND_UID=4311 /S/w/bin/native_inbound_pf --ignored --test-threads=1"
     );
+    assert_eq!(
+        line("native_fence"),
+        "/usr/bin/env JS_NATIVE_FENCE_ROOT=/S/w/native-fence JS_NATIVE_FENCE_UID=4312 JS_NATIVE_FENCE_OWNER_UID=501 /S/w/bin/native_fence --ignored --test-threads=1"
+    );
+    assert_eq!(dirs_for("native_fence", w), [w.join("native-fence")]);
     assert_eq!(
         line("unknown"),
         "/usr/bin/env /S/w/bin/unknown --ignored --test-threads=1"

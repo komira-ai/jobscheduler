@@ -52,6 +52,11 @@
 "read:tcc-dir" = "denied"
 "read:tcc-db" = "denied"
 "read:timemachine-prefs" = "denied"
+# The same three under /System/Volumes/Data: the profile denies both spellings, as which one
+# Seatbelt matches was not measured.
+"read:tcc-dir-data" = "denied"
+"read:tcc-db-data" = "denied"
+"read:timemachine-prefs-data" = "denied"
 # Another user's home must not be readable, whatever its modes.
 "read:other-home" = "denied"
 "read:root-home" = "denied"

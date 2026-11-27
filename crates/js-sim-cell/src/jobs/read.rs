@@ -32,7 +32,7 @@ use js_lease_server::in_process::{InProcess, ServerIds};
 use js_state::{ResumeToken, Store, StoreTime};
 use js_types::sched::FarmTime;
 
-use super::{AllocationRead, AllocationRow, JobRead};
+use super::{AllocationRead, AllocationRow, AttemptRead, JobRead};
 use crate::observe::Observations;
 use crate::server::{ServerNode, virtual_time};
 
@@ -50,6 +50,7 @@ pub(crate) const QUIET_MAX: Duration = Duration::from_secs(60);
 #[derive(Debug, Default)]
 pub(crate) struct Reader {
     states: BTreeMap<JobId, JobState>,
+    attempts: BTreeMap<JobId, u32>,
     rows: BTreeMap<JobId, AllocationRow>,
     /// When the next read that is not forced is due; `None` before the first read.
     next_at: Option<FarmTime>,
@@ -81,6 +82,20 @@ impl Reader {
         let mut lines = Vec::new();
         let mut look = BTreeSet::new();
         for record in all_jobs(tables) {
+            let number = record.attempt.number();
+            if self.attempts.insert(record.id.clone(), number) != Some(number) {
+                let retry = record.spec.retry.as_ref();
+                let max_attempts = retry.map_or(1, |policy| policy.max_attempts.max(1));
+                if max_attempts > 1 {
+                    lines.push(format!("attempt {} {number}", record.id));
+                }
+                observations.attempt_reads.push(AttemptRead {
+                    job: record.id.clone(),
+                    at: now,
+                    number,
+                    max_attempts,
+                });
+            }
             if self.states.get(&record.id) == Some(&record.state) {
                 continue;
             }

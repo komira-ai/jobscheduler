@@ -359,8 +359,10 @@
 //! agent pool file's `[capabilities]`: a lease request is matched against them, and a
 //! host is admitted only if its hello reports each with the same value; a pool without
 //! them fits no request that requires a capability), `exec` (as above, but absent is
-//! `none`), `heartbeat_interval`, `grace`, `lost_retention` and `join_token_file` (the
-//! shared pool token). It launches nothing: `launch`, `network`, `provider`,
+//! `none`), `heartbeat_interval`, `grace`, `lost_retention`, `prepare_timeout` (class
+//! `whole-node` only, refused on any other: how long a whole-node lease may take to become
+//! ready, ten minutes unless set) and `join_token_file` (the shared pool token). It launches
+//! nothing: `launch`, `network`, `provider`,
 //! `max_instances`, `max_spend_per_hour`, `max_spend_per_day`, `idle`, `max_age`, `min_host_lifetime` and `boot_timeout`
 //! are each refused naming the key. It registers agents, so the server starts only when it
 //! is the one pool that does, and `server.agent_listen` is required. One-time tokens for its nodes

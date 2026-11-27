@@ -1,11 +1,16 @@
-//! A restart of the agent at the runtime level. A run is not adopted by the next process: its
-//! processes are ended and its account retired when the next process opens its account pool
-//! (the open retires every account an earlier process lent), so the runtime lists
-//! each run the journal has a record of as ended (`Gone`, with its labels, its age and the
-//! output it wrote), the lifecycle reports the job failed and removes it, which ends its
-//! lease; a lease with no run record (a start that died before its job started) is dropped by
-//! `reclaim`; a run whose record could not be written still runs; and a journal that cannot be
-//! read fails the listing.
+//! A restart of the agent at the runtime level. A run whose supervisor is still the process the
+//! journal names, or whose supervisor left its exit record, is taken back by the next process:
+//! the pool's open keeps its account, the listing holds it, and it is polled, stopped and
+//! removed (its outputs collected, its account retired) as a run of this process. Every other
+//! run of the journal (a supervisor gone with no record, a record of an earlier release that
+//! names no supervisor) is listed ended (`Gone`, with its labels, its age and the output it
+//! wrote) and its account is retired by the open, and the lifecycle reports the job failed and
+//! removes it, which ends its lease; a lease with no run record (a start that died before its
+//! job started) is dropped by `reclaim`; a run whose record could not be written still runs;
+//! and a journal that cannot be read fails the listing.
+//!
+//! The fake supervisor here is the job itself and writes no record: a test writes the exit
+//! record where the supervisor would (`exit.json` in the run's record directory).
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -15,9 +20,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use js_agent::lifecycle::{Exit, Found, RunHandle, Runtime, Status, label};
+use js_agent::mac_supervisor::{Ended, ExitRecord, JobRusage};
 use js_agent::native::Journal;
+use js_agent_wire::{OutputKind, OutputSpec};
 
-use super::{Rig, native};
+use rustix::process::{Pid, Signal, kill_process_group};
+
+use super::{Rig, gated, native, open_gate};
 
 fn labels(run_id: &str) -> BTreeMap<String, String> {
     BTreeMap::from([
@@ -233,4 +242,210 @@ fn a_runs_start_time_is_the_clock_at_job_ready() {
         .map(|found| (found.id, found.running_ms))
         .collect();
     assert_eq!(ages, BTreeMap::from([(first, 825_433), (second, 60_000)]));
+}
+
+fn exited(code: i32) -> Status {
+    Status::Exited(Exit {
+        code,
+        oom_killed: false,
+    })
+}
+
+/// What the supervisor of a job that exited `code` writes, with what the job used.
+fn exit_record(code: i32) -> ExitRecord {
+    ExitRecord {
+        ended: Ended::Exited(code),
+        job_pid: None,
+        asid: None,
+        usage: Some(JobRusage {
+            cpu_usec: 7_000,
+            max_rss_bytes: 1 << 20,
+        }),
+    }
+}
+
+/// Writes `record` as the exit record of the `n`th launch of `rig`, as its supervisor would.
+fn write_exit(rig: &Rig, n: usize, record: &ExitRecord) {
+    let dir = rig.launcher.launched()[n].record_dir.clone();
+    fs::write(dir.join("exit.json"), serde_json::to_vec(record).unwrap()).unwrap();
+}
+
+/// The account (its `USER`) of the `n`th launch of `rig`.
+fn account(rig: &Rig, n: usize) -> String {
+    rig.launcher.launched()[n].var("USER").unwrap().to_owned()
+}
+
+/// Asserts that a restart keeps the users of the runs it takes back and resets the rest: of
+/// three runs, one whose supervisor still runs and one whose supervisor ended after writing its
+/// exit record keep their accounts through the next process's open, and the one whose
+/// supervisor ended with no record loses its account there. The listing holds all three with
+/// their labels; the live run polls running until its supervisor writes its record, and then
+/// its exit, with what the job used; the recorded run polls its exit at once; the third is
+/// gone. Each removal retires its run's account and ends its lease.
+///
+/// Catches: a restart that ends a run its supervisor still runs, one that loses the end a
+/// supervisor recorded while no agent ran, and one that keeps the account of a run nobody can
+/// tell the end of.
+#[test]
+fn a_restart_keeps_the_users_of_runs_it_takes_back_and_resets_the_rest() {
+    let mut rig = Rig::in_dir("adopt-keep", 3, |_, _| {});
+    let live = started_unsettled(&mut rig, "r1", "/bin/sleep", &["600"]);
+    let recorded = started_gated(&mut rig, "r2", "exit 0");
+    write_exit(&rig, 1, &exit_record(0));
+    let lost = started_gated(&mut rig, "r3", "exit 0");
+    let names = [account(&rig, 0), account(&rig, 1), account(&rig, 2)];
+
+    let (mut next, pool) = rig.reopened_with_pool();
+    let records = rig.accounts.records();
+    assert!(records.contains(&names[0]), "the live run's user is kept");
+    assert!(
+        records.contains(&names[1]),
+        "the recorded run's user is kept"
+    );
+    assert!(!records.contains(&names[2]), "the lost run's user is reset");
+    let found = next.list_labelled().unwrap();
+    let ids: Vec<&RunHandle> = found.iter().map(|found| &found.id).collect();
+    assert_eq!(ids, [&live, &recorded, &lost]);
+    assert_eq!(found[0].labels, labels("r1"));
+
+    assert_eq!(next.poll(&live).unwrap(), Status::Running);
+    assert_eq!(next.poll(&recorded).unwrap(), exited(0));
+    assert_eq!(next.poll(&lost).unwrap(), Status::Gone);
+    write_exit(&rig, 0, &exit_record(3));
+    assert_eq!(next.poll(&live).unwrap(), exited(3));
+    assert_eq!(
+        next.poll(&live).unwrap(),
+        exited(3),
+        "answered the same again"
+    );
+    let used = next.usage(&live).unwrap();
+    assert_eq!(
+        (used.cpu_usage_usec, used.peak_memory_bytes),
+        (7_000, 1 << 20)
+    );
+
+    for id in [&live, &recorded, &lost] {
+        next.remove(id).unwrap();
+    }
+    let records = rig.accounts.records();
+    for name in &names {
+        assert!(!records.contains(name), "{name} retired");
+    }
+    assert!(pool.held().is_empty());
+    assert!(
+        Journal::new(&rig.dir.path("native-leases"))
+            .live()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// Starts the run `run_id`, with its labels, as a job [`gated`] on a file of its own, opens the
+/// gate once the start has returned, and settles it: its supervisor was surely running when
+/// the runtime read its identity.
+fn started_gated(rig: &mut Rig, run_id: &str, work: &str) -> RunHandle {
+    let gate = rig.dir.path(&format!("gate-{run_id}"));
+    let args = gated(&gate, work);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let id = started_unsettled(rig, run_id, "/bin/sh", &args);
+    open_gate(&gate);
+    rig.settle(&id);
+    id
+}
+
+/// Starts `program args` as the run `run_id`, with its labels, and leaves it running.
+fn started_unsettled(rig: &mut Rig, run_id: &str, program: &str, args: &[&str]) -> RunHandle {
+    let mut spec = rig.spec(run_id, native(program, args));
+    spec.labels = labels(run_id);
+    rig.rt.create_and_start(&spec).unwrap()
+}
+
+/// Asserts that a run taken back keeps what its job wrote: a job that wrote its declared output
+/// and ended while no agent ran (its supervisor's record says 0) has the output collected by
+/// the next process's removal, before its account is retired.
+///
+/// Catches: a restart that reports a run's exit and loses its outputs.
+#[test]
+fn a_run_taken_back_has_its_outputs_collected() {
+    let mut rig = Rig::new("adopt-outputs");
+    let gate = rig.dir.path("gate");
+    let args = gated(&gate, "echo made > out.txt");
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let mut body = native("/bin/sh", &args);
+    body.outputs.push(OutputSpec {
+        path: "out.txt".to_owned(),
+        kind: OutputKind::File,
+    });
+    let spec = rig.spec("r1", body);
+    let id = rig.rt.create_and_start(&spec).unwrap();
+    open_gate(&gate);
+    rig.settle(&id);
+    write_exit(&rig, 0, &exit_record(0));
+    let mut next = rig.reopened();
+    assert_eq!(next.list_labelled().unwrap().len(), 1);
+    assert_eq!(next.poll(&id).unwrap(), exited(0));
+    next.remove(&id).unwrap();
+    let copied = spec.scratch.join("outputs").join("out.txt");
+    assert_eq!(fs::read_to_string(copied).unwrap(), "made\n");
+}
+
+/// Asserts that a run whose record an earlier release wrote, which names no supervisor, is not
+/// taken back even while its job runs: its account is retired by the next process's open and
+/// it is listed gone. The record is rewritten here as an earlier release wrote it.
+///
+/// Catches: a run taken back with no identity to tell its supervisor by, whose end nobody could
+/// then read.
+#[test]
+fn a_run_recorded_by_an_earlier_release_is_not_taken_back() {
+    let mut rig = Rig::new("adopt-earlier");
+    let id = started_unsettled(&mut rig, "r1", "/bin/sleep", &["600"]);
+    let name = account(&rig, 0);
+    let path = rig.dir.path("native-leases");
+    let text = fs::read_to_string(&path).unwrap();
+    let earlier: String = text
+        .lines()
+        .map(|line| match line.split_once(" {") {
+            Some((head, json)) => {
+                let mut record: serde_json::Value =
+                    serde_json::from_str(&format!("{{{json}")).unwrap();
+                assert!(record["supervisor"].is_object(), "{line}");
+                record.as_object_mut().unwrap().remove("supervisor");
+                format!("{head} {record}\n")
+            }
+            None => format!("{line}\n"),
+        })
+        .collect();
+    fs::write(&path, earlier).unwrap();
+    let mut next = rig.reopened();
+    assert!(
+        !rig.accounts.records().contains(&name),
+        "retired by the open"
+    );
+    assert_eq!(next.list_labelled().unwrap().len(), 1);
+    assert_eq!(next.poll(&id).unwrap(), Status::Gone);
+    next.remove(&id).unwrap();
+    // Nothing of an ended run is swept: the job is ended here.
+    for group in rig.launcher.groups() {
+        let _ = Pid::from_raw(group).map(|group| kill_process_group(group, Signal::KILL));
+    }
+}
+
+/// Asserts that a run taken back holds its account's uid at the next process's start: with one
+/// slot, held by the run, no account is ready, the pool still opens, and the self-test is not
+/// run (no supervisor is started for it); once the run is removed, an account is ready again.
+///
+/// Catches: an agent that cannot start while the runs it took back fill its slots, and so
+/// cannot report them.
+#[test]
+fn a_full_pool_of_runs_taken_back_skips_the_self_test() {
+    let mut rig = Rig::new("adopt-full");
+    let id = started_unsettled(&mut rig, "r1", "/bin/sleep", &["600"]);
+    let (mut next, pool) = rig.reopened_with_pool();
+    assert_eq!(pool.ready_count(), 0);
+    next.self_test().unwrap();
+    assert_eq!(rig.launcher.launched().len(), 1, "no self-test run");
+    assert_eq!(next.list_labelled().unwrap().len(), 1);
+    next.remove(&id).unwrap();
+    assert!(pool.held().is_empty());
+    assert_eq!(pool.ready_count(), 1, "the uid is free again");
 }

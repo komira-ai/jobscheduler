@@ -11,6 +11,7 @@ use std::sync::Arc;
 use js_agent::bundle::{Admission, Placer, Registry, Settings};
 use js_agent::lifecycle::{Config, Event, Lifecycle, NoChecks};
 use js_agent::mac_accounts::{Pool, Settings as PoolSettings};
+use js_agent::mac_supervisor::{Ended, ExitRecord};
 use js_agent::native::{Ceiling, Enforcer, HandOver, Journal};
 use js_agent_wire::{
     BookedResources, Command, InputRef, JobSpec, JobStartSpec, NetworkLevel, Outcome, RunSpec,
@@ -50,6 +51,8 @@ pub(super) struct Native {
     pub(super) settings: PoolSettings,
     pub(super) clock: ManualClock,
     pub(super) dir: Scratch,
+    /// The lifecycle's configuration, for the lifecycle of a restart.
+    config: Config,
 }
 
 /// The most steps a test takes for a program to end.
@@ -155,6 +158,7 @@ impl Native {
             runtime = runtime.with_bundles(store);
         }
         let clock = ManualClock::default();
+        let kept = config.clone();
         let (life, _) = Lifecycle::adopt(
             config,
             Box::new(runtime),
@@ -170,7 +174,40 @@ impl Native {
             settings,
             clock,
             dir,
+            config: kept,
         }
+    }
+
+    /// Replaces the lifecycle with the one an agent's next process starts over the same state
+    /// (a pool that keeps the accounts of the runs it takes back, the same journal, the same
+    /// state root and clock), the earlier one dropped as a process that ends drops it; the
+    /// events of the start.
+    pub(super) fn restarted(&mut self) -> Vec<Event> {
+        let pool = super::reopen_pool(&self.dir, &self.settings, &self.accounts);
+        let mut runtime_config = self::config(&self.dir, &self.settings);
+        runtime_config.read_denies = vec![
+            canonical(&self.dir, "state"),
+            canonical(&self.dir, "scratch"),
+        ];
+        let runtime = NativeRuntime::over(
+            Some(pool.clone()),
+            self.launcher.clone(),
+            runtime_config,
+            TERM + 1,
+        )
+        .unwrap()
+        .with_process_table(super::end::GroupTable::new(self.launcher.clone()))
+        .with_hand_over(keep_owner());
+        let (life, events) = Lifecycle::adopt(
+            self.config.clone(),
+            Box::new(runtime),
+            Box::new(NoChecks),
+            Box::new(self.clock.clone()),
+        )
+        .unwrap();
+        drop(std::mem::replace(&mut self.life, life));
+        self.pool = pool;
+        events
     }
 
     /// The `n`th launch the runtime asked of the supervisor (the runs, in the order they
@@ -280,6 +317,59 @@ fn a_native_job_runs_to_its_result_and_its_user_is_removed() {
     let ack = reply_json(&json!({ "result_acks": [{ "run_id": "r1", "ack": "ACCEPTED" }] }));
     h.life.apply(&ack);
     assert!(h.life.held().is_empty());
+}
+
+/// Asserts a native job through a restart of the agent: the job runs on while the lifecycle
+/// and the runtime are dropped and the next ones start over the same state; the next lifecycle
+/// adopts the run at its start (the event `adopted`), lists it in its first heartbeat's runs,
+/// keeps its account, and once the supervisor records the job's exit (written here where the
+/// supervisor writes it: the fake supervisor writes none) reports the result once, with the
+/// code and what the job printed, and removes the run, its account and its scratch directory.
+/// It catches a restart that ends or forgets a running native job, and a result reported twice.
+#[test]
+fn a_native_job_outlives_a_restart_and_its_result_is_reported_once() {
+    let mut h = Native::new("restart");
+    let script = "echo before the restart; exec /bin/sleep 600";
+    h.start(job_with("r1", "/bin/sh", &["-c", script]));
+    let (account, home) = (h.account_of(0), h.home_of(0));
+    let events = h.restarted();
+    let adopted: Vec<String> = names(&events)
+        .into_iter()
+        .filter(|name| name.starts_with("adopted"))
+        .collect();
+    assert_eq!(adopted, ["adopted r1"], "{events:?}");
+    let held: Vec<String> = h.life.held().into_iter().map(|run| run.run_id).collect();
+    assert_eq!(held, ["r1"]);
+    assert!(h.accounts.records().contains(&account), "the user is kept");
+    assert!(h.life.results().is_empty());
+    let record = ExitRecord {
+        ended: Ended::Exited(5),
+        job_pid: None,
+        asid: None,
+        usage: None,
+    };
+    let exit = h.launch(0).record_dir.join("exit.json");
+    fs::write(exit, serde_json::to_vec(&record).unwrap()).unwrap();
+    let events = h.until(|life| life.busy_slots().is_empty());
+    let results: Vec<String> = names(&events)
+        .into_iter()
+        .filter(|name| name.starts_with("result"))
+        .collect();
+    assert_eq!(results, ["result r1"], "{events:?}");
+    let result = &h.life.results()[0];
+    assert_eq!(
+        (result.outcome, result.exit_code),
+        (Outcome::Failed, Some(5))
+    );
+    assert_eq!(
+        result.log_tail.as_ref().unwrap().stdout,
+        "before the restart\n"
+    );
+    assert_eq!(h.life.results().len(), 1);
+    assert!(!home.exists());
+    assert!(!h.accounts.records().contains(&account));
+    assert!(!h.scratch_of("r1").exists());
+    assert_eq!(h.launcher.launched().len(), 1, "started once");
 }
 
 /// Asserts that a stop ends the run (the job's group is sent `SIGTERM`) and the run ends as

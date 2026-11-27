@@ -149,7 +149,8 @@ impl std::fmt::Debug for LookupStamps {
 /// logged with it: where the time from a run's end to its free slot went, and how much of it
 /// the lifecycle's worker spent itself. The container's removal and the removal of the run's
 /// directories run off the worker when the runtime and the lifecycle can (on their pools),
-/// and their time is then in the steps and not in `worker_ms`.
+/// and their time is then in the steps and not in `worker_ms`; so is the checks' wait for
+/// the host to settle, which the job waits out in its cleanup while the worker goes on.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CleanupTimeline {
     /// The lifecycle's steps, each with the milliseconds, on the lifecycle's clock, after
@@ -160,7 +161,7 @@ pub struct CleanupTimeline {
     pub steps: Vec<(&'static str, u64)>,
     /// The milliseconds the worker spent in the run's cleanup, on the lifecycle's clock,
     /// summed over the steps that took it on: the record of the owed checks, what of the
-    /// removals runs on the worker, the quota and the checks.
+    /// removals runs on the worker, the quota and the checks' looks at the host.
     pub worker_ms: u64,
 }
 
