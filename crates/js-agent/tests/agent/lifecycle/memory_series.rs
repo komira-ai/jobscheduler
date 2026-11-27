@@ -56,8 +56,9 @@ fn a_memory_series_is_weighed_with_its_result() {
         h.fake.exit("j1", 0);
         h.life.step();
         let result = listing(&h, "j1").result.expect("a result");
-        // The key that holds the result in the listing adds 10 bytes to it.
-        let weight = serde_json::to_vec(&result).expect("json").len() + 10;
+        // The key that holds the result in the listing adds 10 bytes to it, and the comma
+        // after it one more.
+        let weight = serde_json::to_vec(&result).expect("json").len() + 11;
         h.life
             .fit_log_tails(budget.unwrap_or(weight), &mut Vec::new());
         let result = listing(&h, "j1").result.expect("a result");
