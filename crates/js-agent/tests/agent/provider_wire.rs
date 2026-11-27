@@ -36,17 +36,20 @@ fn source() -> (wire::Source, pb::Source) {
         agent: "host-1".to_owned(),
         run: "js.job-1".to_owned(),
         index: 2,
+        attempt: 3,
     };
     let theirs = pb::Source {
         agent: "host-1".to_owned(),
         run: "js.job-1".to_owned(),
         index: 2,
+        attempt: 3,
     };
     (ours, theirs)
 }
 
 /// Asserts that every request and response the agent writes or reads has the bytes of the
-/// proto's message of the same name, filled and empty, and that each reads the other's.
+/// proto's message of the same name, filled (an attempt and a kept attempt included) and
+/// empty, and that each reads the other's.
 /// Catches a field number, type or name of the agent's copy that drifts from
 /// `provider.proto`, which a provider built from the proto would read as another field.
 #[test]
@@ -110,15 +113,28 @@ fn the_agents_messages_are_the_protos_to_the_byte() {
         &pb::ReleaseResponse {},
     );
     let keep = vec!["js.job-1".to_owned(), "js.job-2".to_owned()];
+    let kept = (
+        wire::KeptAttempt {
+            run: "js.job-1".to_owned(),
+            attempt: 3,
+        },
+        pb::KeptAttempt {
+            run: "js.job-1".to_owned(),
+            attempt: 3,
+        },
+    );
+    same("KeptAttempt", &kept.0, &kept.1);
     same(
         "SweepRequest",
         &wire::SweepRequest {
             agent: "host-1".to_owned(),
             keep: keep.clone(),
+            keep_attempts: vec![kept.0],
         },
         &pb::SweepRequest {
             agent: "host-1".to_owned(),
             keep,
+            keep_attempts: vec![kept.1],
         },
     );
     same(

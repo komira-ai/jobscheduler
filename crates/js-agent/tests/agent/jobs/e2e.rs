@@ -846,3 +846,5 @@ fn an_agent_removes_a_handover_file_left_by_an_earlier_stop() {
         assert!(ran.err.contains(said), "{name}: {}", ran.err);
     }
 }
+
+mod live_update;

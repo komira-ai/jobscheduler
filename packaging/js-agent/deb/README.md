@@ -257,7 +257,10 @@ those files itself (the kept copy, below) and puts them back in `rollback`.
   (`lease_unreachable`, retried after 60 s) before anything is restarted. Then it stops the unit, waits for it to be down, starts it and waits
   for it to be active. The restart is not preceded by a cordon or a drain: running jobs are
   stopped as they are on any stop of the agent. A run after the restart was recorded does not
-  restart again.
+  restart again. The stopping agent leaves its process id in its state root (`handover-process`)
+  and the started one says hello as that process, so the lease server takes that hello at once
+  instead of refusing it `host-live` until the old session's grace has run out: the host stays
+  `live` through the restart.
 - `verify` waits until the unit is active and the lease server shows the host `live` in a session
   other than the noted one: `no_hello` when none comes in `verify_timeout_secs` less 15 s,
   `lease_unreachable` (class environment) when the server could not be asked, `start_failed` when

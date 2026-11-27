@@ -1,15 +1,19 @@
 //! What the agent writes down when it has asked its mount providers to prepare a run's
 //! sources, so that a restart can release what may exist (`docs/design/mount-providers.md`,
 //! section 4): `providers/<run>.json` in the state root, one file for each run that has
-//! provider sources, holding the provider and the index of each.
+//! provider sources, holding the run's attempt and the provider and the index of each source.
 //!
-//! A source is named in every call by the agent, the run and the index, so the record needs
-//! no answer of a provider's to say what to release. It is written whole (a temporary file,
-//! synced, renamed over, the directory synced; the directory is `0700`, the file `0600`)
-//! in the admission that sends the run's first `Prepare`s, after them so that the syncs
-//! overlap the providers' work (a crash in between is released by the sweep each provider
-//! is asked when the agent starts, which keeps only the runs the agent adopted), and
-//! removed once every source is released. An unfinished write (`<run>.json.tmp`) of a dead
+//! A source is named in every call by the agent, the run, the attempt and the index, so the
+//! record needs no answer of a provider's to say what to release. A record written before
+//! attempts were counted has none, and is read as attempt 0, which names its sources as they
+//! were named then; an agent before attempts reads a record that has one and skips the field.
+//!
+//! It is written whole (a temporary file, synced, renamed over, the directory synced; the
+//! directory is `0700`, the file `0600`) in the admission that sends the run's first
+//! `Prepare`s, after them so that the syncs overlap the providers' work (a crash in between
+//! is released by the sweep each provider is asked when the agent starts, which keeps only
+//! the runs the agent holds: those it adopted and those whose lease the runtime left alone,
+//! each from the attempt its record names), and removed once every source is released. An unfinished write (`<run>.json.tmp`) of a dead
 //! process is removed without a finding; a file that cannot be read or understood is
 //! removed and reported as a `provider-record-failed` finding.
 
@@ -47,7 +51,21 @@ pub(super) struct Source {
 /// A record as its file says it; fields it does not know are ignored.
 #[derive(Serialize, Deserialize)]
 struct Record {
+    /// The run's attempt; 0 when the record has none.
+    #[serde(default)]
+    attempt: u64,
     sources: Vec<Source>,
+}
+
+/// One record read back: the run, its attempt and its sources.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Recorded {
+    /// The run.
+    pub(super) run_id: String,
+    /// The run's attempt; 0 when the record names none.
+    pub(super) attempt: u64,
+    /// The run's sources.
+    pub(super) sources: Vec<Source>,
 }
 
 /// The directory of the records of the state root `state`.
@@ -55,15 +73,20 @@ fn dir_of(state: &StateRoot) -> PathBuf {
     state.path().join(DIR)
 }
 
-/// Writes the record of `run_id`: `sources`, durably.
+/// Writes the record of the attempt `attempt` of `run_id`: `sources`, durably.
 ///
 /// # Errors
 ///
 /// The directory could not be made or the file written.
-pub(super) fn write(state: &StateRoot, run_id: &str, sources: &[Source]) -> io::Result<()> {
+pub(super) fn write(
+    state: &StateRoot,
+    (run_id, attempt): (&str, u64),
+    sources: &[Source],
+) -> io::Result<()> {
     let dir = dir_of(state);
     DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
     let record = Record {
+        attempt,
         sources: sources.to_vec(),
     };
     serde_json::to_vec(&record)
@@ -77,10 +100,10 @@ pub(super) fn remove(state: &StateRoot, run_id: &str) {
     let _ = fs::remove_file(dir_of(state).join(format!("{run_id}{SUFFIX}")));
 }
 
-/// The records in the state root, each as the run it is of and its sources, in the order of
-/// their names. An unfinished write is removed without a word; a record that cannot be used
-/// is removed and reported, and so is a directory that cannot be listed.
-pub(super) fn load(state: &StateRoot, events: &mut Vec<Event>) -> Vec<(String, Vec<Source>)> {
+/// The records in the state root, in the order of their names. An unfinished write is
+/// removed without a word; a record that cannot be used is removed and reported, and so is a
+/// directory that cannot be listed.
+pub(super) fn load(state: &StateRoot, events: &mut Vec<Event>) -> Vec<Recorded> {
     let dir = dir_of(state);
     let failed = |events: &mut Vec<Event>, what: &str, why: &str| {
         events.push(Event::Finding(Finding {
@@ -114,7 +137,11 @@ pub(super) fn load(state: &StateRoot, events: &mut Vec<Event>) -> Vec<(String, V
             .map_err(|why| why.to_string())
             .and_then(|text| serde_json::from_str::<Record>(&text).map_err(|why| why.to_string()));
         match read {
-            Ok(record) => found.push((run, record.sources)),
+            Ok(record) => found.push(Recorded {
+                run_id: run,
+                attempt: record.attempt,
+                sources: record.sources,
+            }),
             Err(why) => {
                 let _ = fs::remove_file(&path);
                 failed(events, &format!("the provider record {name}"), &why);

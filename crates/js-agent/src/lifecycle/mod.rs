@@ -362,7 +362,7 @@ pub use run_files::{DEFAULT_ROOT as DEFAULT_RUN_FILES_ROOT, FilesRoot};
 pub use runtime::{
     Body, Created, Exit, Found, FsPrepared, HostSource, JobFs, NativeRefusal, OutputsReport,
     Prepared, Removal, ResolvedMount, RunHandle, RunSpec, Runtime, RuntimeError, Status, Ticket,
-    Whereabouts, check_run_env, label,
+    UnreadLease, Whereabouts, check_run_env, label,
 };
 pub use scratch::{DirLayout, ScratchRoot};
 pub use settle::{DEFAULT_SETTLE, MAX_SETTLE_MS, settle};
