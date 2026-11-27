@@ -94,10 +94,10 @@ impl Script {
 
 /// A call the stand-in received.
 pub enum Call {
-    /// A hello.
-    Hello(Hello),
-    /// A heartbeat.
-    Beat(Heartbeat),
+    /// A hello, boxed as the heartbeat is: the two differ in size.
+    Hello(Box<Hello>),
+    /// A heartbeat, boxed.
+    Beat(Box<Heartbeat>),
 }
 
 /// One call, when it arrived, and the bearer it carried.
@@ -148,7 +148,7 @@ impl StandIn {
     /// Every hello, in order.
     pub fn hellos(&self) -> Vec<&Hello> {
         let hellos = self.received.iter().filter_map(|r| match &r.call {
-            Call::Hello(hello) => Some(hello),
+            Call::Hello(hello) => Some(hello.as_ref()),
             Call::Beat(_) => None,
         });
         hellos.collect()
@@ -157,7 +157,7 @@ impl StandIn {
     /// Every heartbeat, with when it arrived, in order.
     pub fn beats(&self) -> Vec<(u64, &Heartbeat)> {
         let beats = self.received.iter().filter_map(|r| match &r.call {
-            Call::Beat(beat) => Some((r.at.as_millis(), beat)),
+            Call::Beat(beat) => Some((r.at.as_millis(), beat.as_ref())),
             Call::Hello(_) => None,
         });
         beats.collect()
@@ -295,14 +295,14 @@ impl StandIn {
                     .validate()
                     .expect("the agent's hello passes validation");
                 self.on_hello(from, id);
-                Call::Hello(hello)
+                Call::Hello(Box::new(hello))
             }
             Route::Heartbeat => {
                 let beat: Heartbeat = serde_json::from_str(&body).expect("a heartbeat body");
                 beat.validate()
                     .expect("the agent's heartbeat passes validation");
                 self.on_beat(from, id);
-                Call::Beat(beat)
+                Call::Beat(Box::new(beat))
             }
         };
         self.received.push(Received {

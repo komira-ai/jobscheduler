@@ -18,6 +18,10 @@
 //! `inactive_file`, clamped at 0 when the inactive file is larger, with the group's active
 //! file pages ([`WireLoad::node_memory_bytes`]).
 //!
+//! The agent's count of OOM events at the actions cgroup's own limit
+//! (`actions_oom_events`) is not part of the conversion either: it is kept beside the
+//! converted load for the hosts listing, as the lists are.
+//!
 //! The wire's two per-second lists (`second_cpu_millis`, `second_cpu_pressure_some_permille`)
 //! are not part of that conversion: they are kept beside the converted load as
 //! [`LoadSeconds`], for the hosts listing, and nothing in placement or sizing reads them.
@@ -118,6 +122,9 @@ pub(crate) struct Kept {
     pub(crate) latest: Option<NodeLoad>,
     /// The per-second lists of the same reading; empty whenever `latest` is `None`.
     pub(crate) seconds: LoadSeconds,
+    /// The actions cgroup's OOM count of the same reading; `None` whenever `latest` is `None`
+    /// and when the agent sent none.
+    pub(crate) actions_oom_events: Option<u64>,
     seen: Option<u64>,
 }
 
@@ -137,6 +144,7 @@ impl Kept {
         let Some(wire) = wire else {
             self.latest = None;
             self.seconds = LoadSeconds::default();
+            self.actions_oom_events = None;
             return None;
         };
         if self.seen.is_some_and(|seen| wire.seq <= seen) {
@@ -150,9 +158,10 @@ impl Kept {
                 cpu_millis: vetted.second_cpu_millis,
                 cpu_pressure_some_permille: vetted.second_cpu_pressure_some_permille,
             };
-            Some((load, seconds))
+            Some((load, seconds, vetted.actions_oom_events))
         });
-        let (latest, seconds) = kept.unzip();
+        self.actions_oom_events = kept.as_ref().and_then(|(_, _, oom)| *oom);
+        let (latest, seconds) = kept.map(|(load, seconds, _)| (load, seconds)).unzip();
         self.latest = latest;
         self.seconds = seconds.unwrap_or_default();
         self.latest.as_ref()

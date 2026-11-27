@@ -33,12 +33,20 @@
 //!   read ([`scrape`]): the jobs by state, the age of the oldest queued job, the completion
 //!   callbacks still pending, and for each host
 //!   the CPU and memory booked and free and its whole-host mark, and under
-//!   `--placement-curves on` the classes booking by curve and flat and each curve host's fullest
-//!   booked slot, read from the placer ([`js_sched_placer::place::SchedPlacer::curve_view`]),
-//!   and under `shadow` and `on` the memory shadow: the placements by how a booking that follows
-//!   the classes' memory curves would have placed them, and each host's projected memory, its
-//!   last reading and how often a reading showed more than the projection
-//!   ([`js_sched_placer::place::SchedPlacer::memory_shadow_view`]); nothing in it is booked.
+//!   `--placement-curves shadow` and `on` the classes booking by curve and flat and, under `on`,
+//!   each curve host's fullest booked slot, read from the placer
+//!   ([`js_sched_placer::place::SchedPlacer::curve_view`]); under `shadow` and `on` the memory
+//!   shadow: the placements by how a booking that follows the classes' memory curves would have
+//!   placed them, and each host's projected memory, its last reading and how often a reading
+//!   showed more than the projection ([`js_sched_placer::place::SchedPlacer::memory_shadow_view`]);
+//!   nothing in it is booked; and the placement by load, read from
+//!   the placer with the registry's hosts ([`js_sched_placer::place::SchedPlacer::telemetry`]):
+//!   what admission has done (`js_placement_admissions_total` and its kin, `js_placement_decided_total`
+//!   by `key`, `js_load_readings_total` by `result`), how each host is charged, each host's CPU
+//!   pressure and OOM events and the hosts kept empty, the ratios of the runs freed while serving
+//!   against what they booked (`js_run_*`, histograms with the buckets of
+//!   [`js_sched_placer::telemetry::FIT_BOUNDS_PERMILLE`]) and the checks of those runs
+//!   (`js_curve_checks_total` by `resource` and `status`).
 //!   A scrape holds no lock of the
 //!   server's while it renders: the registry's is taken and dropped as `GET /v1/hosts`
 //!   takes it, and the job tables are read on the pool for blocking
@@ -46,11 +54,14 @@
 //!   two reads can show as queued while its booking already counts.
 //!
 //! The text names no job, lease, run or token: its labels are a job state, a start failure
-//! code, a host's id, a pool's name, a host's mark, a callback's result and a phase of a
-//! submit, and nothing else. The route takes no
+//! code, a host's id, a pool's name, a host's mark, a callback's result, a phase of a
+//! submit, a decision key, a reading's result, a resource, a check's status, a memory-shadow
+//! verdict, an agent's route and a bucket bound,
+//! and nothing else. The route takes no
 //! token, so it is served only on a private address ([`crate::is_private_address`]), and
 //! only to a private peer, as `/status` is.
 
+mod placement;
 mod render;
 mod scrape;
 
@@ -710,6 +721,7 @@ pub(crate) fn rendered(recorder: &Recorder) -> String {
         jobs: None,
         hosts: Vec::new(),
         curves: None,
+        telemetry: None,
         memory: None,
     };
     render::render(&seen, recorder)
@@ -760,3 +772,7 @@ mod events_tests;
 #[cfg(test)]
 #[path = "metrics/retry_tests.rs"]
 mod retry_tests;
+
+#[cfg(test)]
+#[path = "metrics/telemetry_tests.rs"]
+mod telemetry_tests;

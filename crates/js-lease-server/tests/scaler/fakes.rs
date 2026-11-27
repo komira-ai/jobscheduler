@@ -667,6 +667,7 @@ pub fn view(name: &str) -> HostView {
         cordon_holder: None,
         load: None,
         load_seconds: Default::default(),
+        actions_oom_events: None,
     }
 }
 

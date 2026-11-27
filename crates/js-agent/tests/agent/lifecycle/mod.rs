@@ -45,6 +45,7 @@ mod provider_flags;
 mod providers;
 mod providers_backoff;
 mod providers_end;
+mod providers_lost;
 mod providers_restart;
 mod providers_stop;
 pub mod quota;
