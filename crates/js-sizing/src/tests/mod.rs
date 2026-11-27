@@ -7,6 +7,7 @@ mod curve;
 mod life;
 mod median;
 mod memory;
+mod memory_curve;
 mod profile;
 mod profile_check;
 mod recent_peak;

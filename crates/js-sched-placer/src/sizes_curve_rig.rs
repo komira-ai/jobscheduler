@@ -5,10 +5,10 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use js_jobs::{Booked, JobEnd, JobId, JobRecord, JobSpec, NewJob};
-use js_types::{CpuSeries, Labels, SIZE_CLASS_LABEL, SIZE_FALLBACK_LABEL};
+use js_types::{CpuSeries, Labels, MemorySeries, SIZE_CLASS_LABEL, SIZE_FALLBACK_LABEL};
 
 use super::JobSizes;
-use super::tests::{GIB, booked, exited, needs, of_class, output, ran_for};
+use super::tests::{GIB, MIB, booked, exited, needs, of_class, output, ran_for};
 use crate::engine::rig::Tables;
 
 pub(crate) use super::profile::tests::capture_targets;
@@ -153,4 +153,37 @@ pub(crate) fn failed(tables: &Tables, id: &str, class: &str) -> JobRecord {
         end,
         Duration::from_secs(10),
     )
+}
+
+/// A successful run of `class` recorded as `id` and freed in `tables`, whose memory series is
+/// `points` MiB (one second a point) and whose wall time and peak are the series': it records
+/// no CPU series.
+pub(crate) fn memory_run(tables: &Tables, (id, class): (&str, &str), points: &[u32]) -> JobRecord {
+    let secs = u64::try_from(points.len()).unwrap();
+    let peak = u64::from(points.iter().copied().max().unwrap()) * MIB;
+    let mut output = output(peak, Duration::from_secs(secs));
+    let series = MemorySeries::new(1, points.to_vec(), secs * 1_000_000, false);
+    output.memory_series = Some(series.unwrap());
+    let end = JobEnd::Exited {
+        exit_code: 0,
+        output,
+    };
+    let spec = of_class(class, needs(0, 0));
+    let wall = Duration::from_secs(secs);
+    ran_for(tables, (id, None), spec, booked(2000, 4 * GIB), end, wall)
+}
+
+/// Teaches `sizes` `runs` runs of `class` whose memory series is `points` MiB, one second a
+/// point; 24 runs score 16, which is what a class needs to have a memory curve.
+pub(crate) fn teach_memory(
+    sizes: &mut JobSizes,
+    tables: &Tables,
+    (class, runs): (&str, usize),
+    points: &[u32],
+) {
+    for at in 0..runs {
+        let id = format!("{class}-{at:02}");
+        let job = memory_run(tables, (&id, class), points);
+        assert!(sizes.observe(&job, booked(2000, 4 * GIB)), "{}", job.id);
+    }
 }
