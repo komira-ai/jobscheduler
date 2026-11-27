@@ -98,7 +98,7 @@ fn run_mode() -> ExitCode {
         /// Install the release, start the fakes, and run the scenarios.
         Rig(wrapper::Flags),
         /// Run the scenarios against what is installed and the fakes named.
-        Scenarios(scenarios::Flags),
+        Scenarios(Box<scenarios::Flags>),
         /// Serve the job image on the loopback.
         FakeRegistry(image::Flags),
         /// Serve the mount provider protocol on a Unix socket.
@@ -107,7 +107,7 @@ fn run_mode() -> ExitCode {
 
     match Cli::parse().mode {
         Mode::Rig(flags) => wrapper::run_rig(&flags),
-        Mode::Scenarios(flags) => scenarios::run_all(flags),
+        Mode::Scenarios(flags) => scenarios::run_all(*flags),
         Mode::FakeRegistry(flags) => {
             image::serve(&flags);
             ExitCode::SUCCESS

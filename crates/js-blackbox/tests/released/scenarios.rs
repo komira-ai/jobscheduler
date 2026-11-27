@@ -104,8 +104,11 @@ fn parse_version(text: &str) -> Result<Version, String> {
     Version::parse(text).ok_or_else(|| format!("{text:?} is not MAJOR.MINOR.PATCH"))
 }
 
+/// A scenario: what it found wrong, if anything.
+type Scenario = fn(&Rig) -> Result<(), String>;
+
 /// The scenarios, in the order they run.
-const SCENARIOS: [(&str, fn(&Rig) -> Result<(), String>); 6] = [
+const SCENARIOS: [(&str, Scenario); 6] = [
     ("j6", j6),
     ("j1", j1),
     ("name-lookup", name_lookup),

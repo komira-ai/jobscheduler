@@ -77,6 +77,9 @@ fn layer() -> (Vec<u8>, String) {
                 let mut header = tar::Header::new_gnu();
                 header.set_entry_type(tar::EntryType::Directory);
                 header.set_mode(0o755);
+                header.set_uid(0);
+                header.set_gid(0);
+                header.set_mtime(0);
                 header.set_size(0);
                 tar.append_data(&mut header, &above, std::io::empty())
                     .expect("a directory of the layer");
@@ -86,6 +89,9 @@ fn layer() -> (Vec<u8>, String) {
         let mut header = tar::Header::new_gnu();
         header.set_entry_type(tar::EntryType::Regular);
         header.set_mode(0o755);
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_mtime(0);
         header.set_size(bytes.len() as u64);
         tar.append_data(&mut header, inside, bytes.as_slice())
             .expect("a file of the layer");
