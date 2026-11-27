@@ -481,17 +481,20 @@ fn a_job_that_sets_tmpdir_is_refused_before_an_account_is_lent() {
     assert!(s.unpinned("7.0"));
 }
 
-/// Asserts that after a restart (a new runtime over the same state and the same store) the
-/// earlier run is listed and ended, and its bundle is not pinned again for it: the pins ended
-/// with the earlier process, and a run that is only ended holds no trees the store could not
-/// evict. It catches a restart that adopts a run it cannot watch, and one that keeps pins for
-/// it that nothing would ever release.
+/// Asserts that after a restart (a new runtime over the same state and the same store) an
+/// earlier run whose supervisor ended without a record is listed and ended, and its bundle is
+/// not pinned again for it: the pins ended with the earlier process, and a run that is only
+/// ended holds no trees the store could not evict. It catches a restart that keeps pins for an
+/// ended run that nothing would ever release.
 #[test]
 fn a_restarted_agent_pins_nothing_for_the_earlier_run() {
     let mut s = Stored::new("restart");
     let spec = s.spec("r1", "@bundle/tool", &[]);
     let old = s.rig.rt.create_and_start(&spec).unwrap();
     assert!(!s.unpinned(&old.0), "held while the process lives");
+    // The fake supervisor writes no exit record: once its job is reaped, nothing can tell how
+    // the run ended, and it is not taken back.
+    s.rig.settle(&old);
     let next = s.rig.reopened().with_bundles(Arc::clone(&s.store));
     drop(std::mem::replace(&mut s.rig.rt, next));
     assert!(s.unpinned(&old.0), "the pins end with the process");

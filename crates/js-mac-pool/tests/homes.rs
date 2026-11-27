@@ -175,6 +175,48 @@ fn the_homes_denies_precede_every_read_rule_and_the_own_home_is_granted_back_nex
     }
 }
 
+/// With homes roots, each root has a `file-link file-clone` deny, all of them come before
+/// the single grant of both in the own home (a mount's own grant aside), and that grant comes
+/// before the read deny's link and clone deny (so a denied place inside the own home is closed again).
+///
+/// Catches a homes root whose files a run hard-links or clones into its run directory, a
+/// link grant of the own home placed before a root's deny (it would be undone), and one placed
+/// after the read deny's (it would reopen a denied place).
+#[test]
+fn the_homes_roots_deny_links_and_clones_before_the_own_home_is_granted_them() {
+    let nets = [Net::Off, Net::Loopback, Net::Remote(ports(&[443])), Net::On];
+    for net in nets {
+        for set in [None, Some(trees())] {
+            for mounts in [vec![], vec![mount(MOUNTED)]] {
+                let profile = profile(job(set.clone(), mounts), net.clone());
+                let lines: Vec<&str> = profile.text().lines().collect();
+                let own = at(
+                    &lines,
+                    "(allow file-link file-clone (subpath (param \"OWN\")))",
+                );
+                for i in 0..HOMES.len() {
+                    let deny = format!("(deny file-link file-clone (subpath (param \"HM_{i}\")))");
+                    assert!(
+                        at(&lines, &deny) < own,
+                        "{net:?} {deny}:\n{}",
+                        profile.text()
+                    );
+                }
+                let secret = at(
+                    &lines,
+                    "(deny file-link file-clone (subpath (param \"RD_0\")))",
+                );
+                assert!(own < secret, "{net:?}:\n{}", profile.text());
+                let allows = lines
+                    .iter()
+                    .filter(|line| line.starts_with("(allow file-link") && !line.contains("GR_"))
+                    .count();
+                assert_eq!(allows, 1, "{net:?}:\n{}", profile.text());
+            }
+        }
+    }
+}
+
 /// A job without homes roots has neither the denies nor the own home's read grant, so
 /// its profile is the one it had before homes roots existed (the other goldens hold it).
 ///
@@ -189,6 +231,13 @@ fn a_job_without_homes_roots_has_no_homes_rules() {
     assert!(!profile.text().contains("HM_"), "{}", profile.text());
     assert!(!profile.text().contains(OWN_READ), "{}", profile.text());
     assert!(!profile.text().contains(OWN_WALK), "{}", profile.text());
+    for line in profile
+        .text()
+        .lines()
+        .filter(|line| line.contains("file-link"))
+    {
+        assert!(!line.contains("HM_") && !line.contains("OWN"), "{line}");
+    }
 }
 
 /// Under the allow read model the homes' rules come before its default read deny and its
@@ -343,5 +392,18 @@ fn a_homes_list_over_the_bound_is_refused_and_repeats_count_once() {
         .and_then(|policy| policy.narrowed(with_homes(vec![path("/Users"), path("/Users")])))
         .expect("a policy");
     let profile = Profile::for_policy(&twice).expect("a profile");
-    assert_eq!(profile.text().matches("HM_").count(), 1);
+    assert_eq!(
+        profile
+            .text()
+            .matches("(deny file-read* (subpath (param \"HM_")
+            .count(),
+        1
+    );
+    assert_eq!(
+        profile
+            .text()
+            .matches("(deny file-link file-clone (subpath (param \"HM_")
+            .count(),
+        1
+    );
 }

@@ -1,5 +1,5 @@
 //! The `Mount` the client sends itself once a source's `Prepare` has succeeded
-//! (`docs/design/start-latency.md`, seventh part): sent with no ask of it and only after the
+//! (`docs/design/start-latency.md`, eighth part): sent with no ask of it and only after the
 //! `Prepare`'s answer, handed over at the lifecycle's next asks, ringing the wake once for the
 //! two calls, a failure of it handed over and sent again like any call's, and nothing of it
 //! once the source is released. A refused or failed `Prepare` is followed by nothing, and a

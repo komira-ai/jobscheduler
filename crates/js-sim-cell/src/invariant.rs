@@ -3,6 +3,7 @@
 //! (`whole.rs`), the five of a job, its allocations and its result (`jobs.rs`), the five
 //! of an elastic pool's cloud (`elastic.rs`), the two of the usage history (`usage.rs`), the one of
 //! a cordon (`cordon.rs`), the four of the walk over a pool's machine providers (`walk.rs`),
+//! the three of a job's attempts and callback (`attempts.rs`),
 //! and the [`Checker`] that tests them.
 //!
 //! The checker runs a step check ([`Checker::step`]) after every kernel step and every
@@ -44,6 +45,7 @@ use crate::observe::{
 };
 use crate::text;
 
+mod attempts;
 mod cordon;
 mod elastic;
 mod jobs;
@@ -249,11 +251,24 @@ pub enum Invariant {
     /// of the allocations booked on it then). Every host of the cell is of one shape, so
     /// such a host could serve any job (`invariant/walk.rs`).
     FreeHostBeatsAcquire,
+    /// Step check. No job is launched under more allocations than its retry policy allows
+    /// (the launch ledger's runs `<job>/<allocation>`, counted by allocation), and no attempt
+    /// number read of its row exceeds it; a job without a policy allows one
+    /// (`invariant/attempts.rs`).
+    AttemptsBounded,
+    /// Step check. No two attempts of a job hold an allocation at once: no agent reads the
+    /// start of a job under an allocation while an agent, the same or another, still holds
+    /// the job under another one, by the agents' truth (`invariant/attempts.rs`).
+    OneAttemptAtATime,
+    /// Step check. Every call the cell's callback receiver got for a job was made after the
+    /// job's row ended, never while it waits for or runs another attempt, and every call of
+    /// one job carries one webhook id (`invariant/attempts.rs`).
+    CallbackAfterTheFinalEnd,
 }
 
 impl Invariant {
     /// Every invariant.
-    pub const ALL: [Invariant; 28] = [
+    pub const ALL: [Invariant; 31] = [
         Invariant::NoDoubleBooking,
         Invariant::AtMostOneLaunch,
         Invariant::OneTerminalAnswer,
@@ -282,6 +297,9 @@ impl Invariant {
         Invariant::NoSecondLaunchForOneAcquire,
         Invariant::QuotaPassOverHonoured,
         Invariant::FreeHostBeatsAcquire,
+        Invariant::AttemptsBounded,
+        Invariant::OneAttemptAtATime,
+        Invariant::CallbackAfterTheFinalEnd,
     ];
 
     /// A stable kebab-case name, as a failure writes it.
@@ -316,6 +334,9 @@ impl Invariant {
             Invariant::NoSecondLaunchForOneAcquire => "no-second-launch-for-one-acquire",
             Invariant::QuotaPassOverHonoured => "quota-pass-over-honoured",
             Invariant::FreeHostBeatsAcquire => "free-host-beats-acquire",
+            Invariant::AttemptsBounded => "attempts-bounded",
+            Invariant::OneAttemptAtATime => "one-attempt-at-a-time",
+            Invariant::CallbackAfterTheFinalEnd => "callback-after-the-final-end",
         }
     }
 
@@ -344,7 +365,10 @@ impl Invariant {
             | Invariant::ProviderOrder
             | Invariant::NoSecondLaunchForOneAcquire
             | Invariant::QuotaPassOverHonoured
-            | Invariant::FreeHostBeatsAcquire => Checked::EveryStep,
+            | Invariant::FreeHostBeatsAcquire
+            | Invariant::AttemptsBounded
+            | Invariant::OneAttemptAtATime
+            | Invariant::CallbackAfterTheFinalEnd => Checked::EveryStep,
             Invariant::SettlesWhenQuiet
             | Invariant::BookingsMatchAgents
             | Invariant::NoResultLost
@@ -511,6 +535,8 @@ pub struct Checker {
     ordinary: BTreeSet<LeaseId>,
     /// What the job invariants have read.
     jobs: jobs::Indices,
+    /// What the attempt and callback invariants have read.
+    attempts: attempts::Indices,
     /// What the whole-host invariants have read of the job tables and the agents' answers.
     whole_jobs: whole_jobs::Indices,
     /// What the invariants of the elastic pool's clouds have read.
@@ -561,6 +587,7 @@ impl Checker {
         self.read_starts(observations, &mut found);
         self.read_stops(observations, &mut found);
         self.jobs.step(observations, touched, &mut found);
+        self.attempts.step(observations, touched, &mut found);
         self.whole_jobs.step(&self.ready, observations, &mut found);
         self.cloud.step(observations, &mut found);
         self.walk.step(observations, &mut found);

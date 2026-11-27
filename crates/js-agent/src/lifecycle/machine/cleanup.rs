@@ -2,7 +2,12 @@
 //! cleanup in order. The container's removal and the removal of the run's directories run off
 //! the worker when the runtime ([`Runtime::removing`]) and the lifecycle
 //! ([`Lifecycle::with_cleanup_threads`]) can: the job waits in its stage until they answer,
-//! and every other job, a start among them, goes on meanwhile.
+//! and every other job, a start among them, goes on meanwhile. So does the wait of the
+//! post-job checks for the host to settle ([`CheckHook::poll`]): the job waits in
+//! [`Stage::Checks`] until it has passed on the lifecycle's clock, and the next step after
+//! that takes the second look.
+//!
+//! [`CheckHook::poll`]: crate::lifecycle::CheckHook::poll
 
 use std::path::{Path, PathBuf};
 
@@ -13,7 +18,9 @@ use super::job::{
 };
 use super::run_dirs::{DirsRemoval, RunDirs};
 use crate::lifecycle::runtime::{Removal, RunHandle, Runtime, Status, Whereabouts};
-use crate::lifecycle::{CheckFinding, Event, FilesRoot, Finding, Finished, ScratchRoot, code};
+use crate::lifecycle::{
+    CheckFinding, Checked, Event, FilesRoot, Finding, Finished, ScratchRoot, code,
+};
 
 /// How often a finished run's usage that stays nonzero is reported again while the agent
 /// waits for it (one hour).
@@ -233,6 +240,14 @@ impl Lifecycle {
             .filter(|(other, job)| *other != index && job.stage != Stage::Freed)
             .filter_map(|(_, job)| self.runtime.mounts_of(&job.run_id))
             .collect();
+        // The checks of another job wait for their second look: this job's look after it,
+        // so that the checks judge one job at a time against the baseline, as they did
+        // when the wait held the worker.
+        let other_waits = self
+            .jobs
+            .iter()
+            .enumerate()
+            .any(|(other, job)| other != index && job.checks_due.is_some());
         let Self {
             jobs,
             runtime,
@@ -394,14 +409,30 @@ impl Lifecycle {
                         return;
                     }
                 },
+                // The checks are asked as a step that does not wait: a first look that
+                // would wait for the host to settle answers how long, and the job waits here
+                // with its slot booked until then, while the worker goes on with the rest.
                 Stage::Checks => {
-                    let verdict = checks.run(&Finished {
+                    let now = clock.now_ms();
+                    if other_waits || job.checks_due.is_some_and(|due| now < due) {
+                        return;
+                    }
+                    let polled = checks.poll(&Finished {
                         run_id: &run_id,
                         live: &live,
                         slot: job.slot,
                         live_slots: &live_slots,
                         held_mounts: &held_mounts,
                     });
+                    let verdict = match polled {
+                        Checked::Wait(wait) => {
+                            let wait = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX);
+                            job.checks_due = Some(now.saturating_add(wait));
+                            return;
+                        }
+                        Checked::Done(verdict) => verdict,
+                    };
+                    job.checks_due = None;
                     // What the check saw change that does not taint the host is logged first,
                     // whatever it returned: it never taints, holds the job or quarantines a slot.
                     for note in checks.notes() {

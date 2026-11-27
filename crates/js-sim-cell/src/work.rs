@@ -2,6 +2,10 @@
 //! the resources it asks for, whether it wants a whole host,
 //! and how long the client waits for it before it gives up.
 //!
+//! A work may also ask for a retry policy ([`Work::retry`]) and a completion callback
+//! ([`Work::callback`]); a job front sends them with the job, and a work without them is
+//! submitted exactly as it was before they existed.
+//!
 //! A [`Work`] says nothing of how it reaches the server: a [`crate::front::Front`] turns
 //! it into calls. The cell numbers the items it submits from zero, in submission order
 //! ([`crate::ItemId`]), and records what each asked for ([`Ask`]) when it is submitted,
@@ -27,6 +31,26 @@ pub fn default_needs() -> Resources {
     Resources::new(1_000, 1_024, 1, Some("nvidia-a100".to_owned())).unwrap_or_default()
 }
 
+/// The retry policy a work asks for: how many attempts, and optionally the waits between
+/// them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Retry {
+    /// The most attempts, the first included.
+    pub max_attempts: u32,
+    /// The wait before the second attempt; `None` leaves the server's default.
+    pub initial_backoff: Option<Duration>,
+    /// The longest wait; `None` leaves the server's default.
+    pub max_backoff: Option<Duration>,
+}
+
+/// The completion callback a work asks for: the receiver is the cell's own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Callback {
+    /// How long the server keeps trying after the job's end; `None` leaves the server's
+    /// default.
+    pub deadline: Option<Duration>,
+}
+
 /// One unit of client work: a run that lasts a fixed time.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Work {
@@ -34,6 +58,8 @@ pub struct Work {
     give_up_after: Duration,
     needs: Resources,
     whole_host: bool,
+    retry: Option<Retry>,
+    callback: Option<Callback>,
 }
 
 impl Work {
@@ -46,6 +72,8 @@ impl Work {
             give_up_after: DEFAULT_GIVE_UP,
             needs: default_needs(),
             whole_host: false,
+            retry: None,
+            callback: None,
         }
     }
 
@@ -73,6 +101,61 @@ impl Work {
     pub fn needs(mut self, resources: Resources) -> Self {
         self.needs = resources;
         self
+    }
+
+    /// This work, asking for at most `max_attempts` attempts with the server's default
+    /// waits between them.
+    #[must_use]
+    pub fn retry(self, max_attempts: u32) -> Self {
+        self.retry_with_backoff(max_attempts, None, None)
+    }
+
+    /// This work, asking for at most `max_attempts` attempts, the wait before the second
+    /// `initial_backoff` and the longest wait `max_backoff` (each, when given, in place of
+    /// the server's default).
+    #[must_use]
+    pub fn retry_with_backoff(
+        mut self,
+        max_attempts: u32,
+        initial_backoff: Option<Duration>,
+        max_backoff: Option<Duration>,
+    ) -> Self {
+        self.retry = Some(Retry {
+            max_attempts,
+            initial_backoff,
+            max_backoff,
+        });
+        self
+    }
+
+    /// This work, asking for a completion callback to the cell's receiver, tried for the
+    /// server's default time after the job's end.
+    #[must_use]
+    pub fn callback(mut self) -> Self {
+        self.callback = Some(Callback { deadline: None });
+        self
+    }
+
+    /// This work, asking for a completion callback to the cell's receiver, tried for
+    /// `deadline` after the job's end.
+    #[must_use]
+    pub fn callback_for(mut self, deadline: Duration) -> Self {
+        self.callback = Some(Callback {
+            deadline: Some(deadline),
+        });
+        self
+    }
+
+    /// The retry policy it asks for, if any.
+    #[must_use]
+    pub fn retry_policy(&self) -> Option<&Retry> {
+        self.retry.as_ref()
+    }
+
+    /// The completion callback it asks for, if any.
+    #[must_use]
+    pub fn callback_spec(&self) -> Option<&Callback> {
+        self.callback.as_ref()
     }
 
     /// How long the run lasts once launched.

@@ -147,6 +147,7 @@ fn a_booking_of_0_is_never_reached() {
         cpu_throttle: None,
         cpu_pressure_some: None,
         cpu_peak: None,
+        peak_swap_bytes: None,
     };
     assert!(!reached(usage(0), 0));
     assert!(!reached(usage(GIB), 0));

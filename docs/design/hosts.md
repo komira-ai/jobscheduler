@@ -397,9 +397,10 @@ at the end of the grace are put back in the queue to be retried elsewhere; they 
   three losses (absence.md), not a task failure (8.1). The consumer is told the reason, so kbf, whose budgets are its own, can also not
   charge it. A request evicted `max_evictions` times has its host passed over as a victim, which bounds how often one request can be hit.
   The count is of jobs still running at the end of the grace, the ones requeued as `evicted`; a job that finished inside the grace is not
-  counted. It is kept per request id as its own *eviction record*, written in the same atomic write as the lease change (the lease table
-  holds leases, not requests; the reservation record of whole-node.md section 3 is the model). For a scheduler-placed run it is also
-  visible as the run's `evicted` attempts. For a lease a consumer holds (kbf), the record's counter goes up when the lease is lost at the
+  counted. It is kept per request id as its own *eviction record*, meant to be written in the same atomic write as the lease change. The lease table that
+  write assumed was deleted by komira-ai/jobscheduler#804 and no code keeps an eviction record on main, so this describes the design
+  and not a built mechanism (the reservation record of whole-node.md section 3 is the model). For a scheduler-placed run it is also
+  visible as the run's `evicted` attempts. For a lease a consumer holds (kbf; that lease API is the deleted one, so this also is design only), the record's counter goes up when the lease is lost at the
   end of the grace, and a consumer that presents the same request id when it asks for a replacement lease (as it does for a whole-node
   request) carries the count with it. A record is deleted when its request is granted a lease that then ends normally, is refused or
   cancelled, or, for an ordinary lease with no such event, when no replacement lease is asked for under that id within `regain_grace` of

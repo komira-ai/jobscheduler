@@ -268,10 +268,16 @@ profile-granted `js-agent`, the same reads as the same pool user succeed.
 
 What keeps a job from using the rest of the grant is the slot user it runs as (Unix
 permissions) and the Seatbelt profile applied in the job's child before its program runs.
-Measured on a Mac, the prototype's profile does not keep such a job out of three places only
-the privacy controls protect: the system privacy database's directory, the database, and
-`/Library/Preferences/com.apple.TimeMachine.plist`. How that is closed is not decided
-(`docs/design/spawn-disclaim.md`, "The fence, measured").
+Measured on a Mac (komira-ai/jobscheduler#1025), the prototype's profile did not keep such a
+job out of three places only the privacy controls protect: the system privacy database's
+directory, the database, and `/Library/Preferences/com.apple.TimeMachine.plist`. The profile
+now read-denies them (both spellings, `crates/js-agent/src/native/fence.rs`), refuses a mount
+at or below them, read-denies every other home and root's home, and denies hard links and
+clones from every read-denied place, the run's own home granted both back (a read deny matches
+paths, so a link or clone into the run directory would give the job a name no deny matches).
+The list is the measured places, not a complete list; the per-release walk of the system
+volume is not built (`docs/design/spawn-disclaim.md`, "The fence, as built"). The lab-Mac root
+test `native_fence` (`cargo xtask mac-root-tests`, komira-ai/jobscheduler#1020) checks it.
 
 Every other program `js-agent` starts stays disclaimed, which is the default of
 `js_mac_session::disclaim::Program` (`crates/js-mac-session/src/disclaim.rs`; the design is in
@@ -298,8 +304,8 @@ To see by hand whose grants a process uses, run a native job and run `sudo launc
 equals the job's own pid. Once the supervisor starts jobs, the `responsible pid` is the agent's
 pid. To see the effect, run a native job whose program is `/bin/ls` with the argument
 `/Library/Application Support/com.apple.TCC`: it fails with `Operation not permitted` today,
-and once the supervisor starts jobs it lists the directory unless the Seatbelt profile refuses
-the read, which the prototype's profile, measured, does not.
+and once the supervisor starts jobs the Seatbelt profile refuses the read (the prototype's
+profile, measured, did not).
 
 ## Network
 

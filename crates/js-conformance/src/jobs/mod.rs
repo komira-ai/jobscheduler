@@ -30,6 +30,27 @@
 //!   ended shows it false, a queued job cancelled at once and a marked job that then exits
 //!   alike. A move the state machine has no edge for is refused and leaves the job as it
 //!   was.
+//! - A job with a retry policy (`spec.retry`) is retried when an attempt ends for a cause of
+//!   its host, and only then: a host that is lost while the job is placed, starting or
+//!   running, and a start that fails ([`Step::HostLost`], [`Step::StartFailed`]). The job
+//!   is queued again, not ended: it shows the attempt that ended in `attempt_history` as
+//!   retried (its number, host, times, outcome `HOST_LOST` or `START_FAILED` and start
+//!   failure), no host, the queue status `WAITING_FOR_RETRY`, and `retry_not_before_ms`,
+//!   after the end of that attempt and at most the policy's longest wait away (the wait is
+//!   [`js_types::decide`]'s), and its result is not ready. It is not placed before that
+//!   time; the next placement counts the next attempt, and the time is no longer shown. The
+//!   attempt count and the history of every ended attempt, the last included (not retried),
+//!   show on the job and on its result (`attempt`). When the policy leaves no attempt, or
+//!   the job has none, the job ends `LOST` or `FAILED_TO_START` (`START_TIMEOUT`).
+//! - Nothing else retries: a process that exits with a nonzero code ends `FAILED` on its
+//!   first attempt, and a job whose cancel was asked for while an attempt held a host ends
+//!   `LOST` when that host is lost, still showing `cancel_requested`. A cancel of a job that
+//!   waits for its retry ends it `CANCELLED` at once, with no attempt after the one that
+//!   ended.
+//! - A job with a callback (`spec.callback`) shows `callback_status` `ARMED` with no tries
+//!   from its submit, through every retry, and `PENDING` with its deadline once the job has
+//!   ended for good; one delivery try answered 2xx ([`Step::DeliverCallback`]) makes it
+//!   `DELIVERED` with one try, and no second try is due. No job shows its callback's key.
 //! - `GetResult` of a job that has not ended answers `FAILED_PRECONDITION` `not-finished`;
 //!   after the end it answers the recorded result.
 //! - An ended job's result is readable until its retention ends; from then `GetResult`
@@ -50,8 +71,11 @@
 //!   retention sweep once. Nothing waits for real time.
 //! - **The scheduler and the agent are hooks.** [`JobHarness::step`] makes one move of a
 //!   job's state machine the way the server's own placing pass and agent heartbeats would,
-//!   and reports whether the state machine took it. The scenarios read the result only
-//!   through the client.
+//!   and reports whether the state machine took it. The same hook loses a job's host, fails
+//!   its start and delivers its due callback ([`Step::HostLost`], [`Step::StartFailed`],
+//!   [`Step::DeliverCallback`]), through the path the real service takes for each: the
+//!   job pass's own loss, the start timeout, a callback claimed and answered. The scenarios
+//!   read the result only through the client.
 //! - **A fresh service per scenario.** [`run`] builds one harness per scenario, so no
 //!   scenario sees another's jobs.
 //!
@@ -60,6 +84,7 @@
 //! can fail.
 
 mod model;
+mod retry;
 mod scenarios;
 mod serve;
 
@@ -89,6 +114,23 @@ pub enum Step {
     /// The agent reports the job's process ended with this exit code: running to succeeded
     /// (code 0) or failed (any other code).
     Exit(i32),
+    /// The job's host is lost while the job is placed, starting or running: the provider
+    /// reads the host absent, or the host comes back and does not list the job. The real
+    /// service retries the attempt when the job's retry policy leaves another attempt and no
+    /// cancel was asked for (the job is queued again, its attempt in the history, and it may
+    /// be placed once its wait has passed); otherwise the job ends lost. A job that is in
+    /// none of those states is refused.
+    HostLost,
+    /// The job's start fails for a cause of its host, as a start that times out does: the
+    /// job is placed or starting. The real service retries the attempt as it does for
+    /// [`Step::HostLost`]; otherwise the job ends failed to start (`START_TIMEOUT`). A job
+    /// that is in neither state is refused.
+    StartFailed,
+    /// One try of the job's completion callback, answered 2xx by the receiver: the callback
+    /// of a job that has ended and has one due is delivered, with one try. Refused when no
+    /// callback of the job is due: the job has none, has not ended (a job that waits for a
+    /// retry included), or its callback was delivered already.
+    DeliverCallback,
 }
 
 /// The service's state machine refused a [`Step`]: the job is in no state the move starts

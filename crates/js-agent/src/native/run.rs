@@ -14,7 +14,8 @@ use crate::mac_supervisor::{Ended, JobRusage, Ready, Supervised};
 use crate::mac_usage::RunUsage;
 
 /// A run: its scratch directory (where its log files and its supervisor's records are), its
-/// declared outputs, and, for a run this process started, its account and supervisor.
+/// declared outputs, and, for a run this process started or took back, its account and
+/// supervisor.
 pub(super) struct Run {
     /// The run's scratch directory, which only the agent can enter.
     pub(super) scratch: PathBuf,
@@ -36,8 +37,9 @@ pub(super) struct Run {
     /// The steps of its start, each with when it was done, until
     /// [`Runtime::start_steps`](crate::lifecycle::Runtime::start_steps) takes them.
     pub(super) marks: Vec<(&'static str, u64)>,
-    /// The account and the supervisor of a run this process started; none for a run an
-    /// earlier process of the agent left, whose account the pool's open retired.
+    /// The account and the supervisor of a run this process started or took back from an
+    /// earlier process (`native/adopt.rs`); none for a run an earlier process left that was
+    /// not taken back, whose account the pool's open retired.
     pub(super) job: Option<Job>,
 }
 
@@ -68,7 +70,8 @@ pub(super) struct Job {
 impl Run {
     /// Copies the run's outputs into its scratch directory, unless that was done, and logs
     /// what was copied and what was not, by path and byte count. A run with no account (an
-    /// earlier process's) has nothing to copy: its home went with the account.
+    /// earlier process's that was not taken back) has nothing to copy: its home went with the
+    /// account.
     pub(super) fn collect(&mut self, lease: &str, max_file_bytes: u64) {
         if self.collected.is_some() {
             return;

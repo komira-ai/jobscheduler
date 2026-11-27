@@ -7,8 +7,9 @@
 //! could not report `full-disk-access: not-granted`. Such an agent keeps no pool and refuses
 //! every native job `no-full-disk-access` (`native/grant.rs`).
 //!
-//! The pool is always opened with no adopted job: a restart of the agent ends every native
-//! run, so every account a run of an earlier process held is retired by the open.
+//! The pool is opened with the jobs the agent takes back after a restart
+//! (`native/adopt.rs`): the account lent to one of them is kept, and every other account a
+//! run of an earlier process held is retired by the open.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -41,8 +42,9 @@ pub(super) fn job_of(lease: &str) -> String {
     lease.replace('.', "-")
 }
 
-/// Opens the pool of `accounts` on this Mac when `held` is [`FullDiskAccess::Granted`], with
-/// no adopted job; `None` otherwise (nothing is made or deleted). A state directory that is
+/// Opens the pool of `accounts` on this Mac when `held` is [`FullDiskAccess::Granted`],
+/// keeping the accounts of the jobs `adopted` names; `None` otherwise (nothing is made or
+/// deleted). A state directory that is
 /// not there is made first, mode 0700 (the agent's, root's); its parent must exist.
 ///
 /// # Errors
@@ -51,17 +53,13 @@ pub(super) fn job_of(lease: &str) -> String {
 pub(super) fn open(
     accounts: &Accounts,
     held: FullDiskAccess,
+    adopted: &BTreeSet<String>,
 ) -> Result<Option<Arc<Pool>>, RuntimeError> {
     if held != FullDiskAccess::Granted {
         return Ok(None);
     }
     make_state(&accounts.state).map_err(|why| fail(&accounts.state.display(), &why))?;
-    let pool = Pool::open(
-        &accounts.state,
-        accounts.slots,
-        accounts.ready,
-        &BTreeSet::new(),
-    );
+    let pool = Pool::open(&accounts.state, accounts.slots, accounts.ready, adopted);
     pool.map(|pool| Some(Arc::new(pool)))
         .map_err(|why: AccountError| fail(&"the account pool", &why))
 }
