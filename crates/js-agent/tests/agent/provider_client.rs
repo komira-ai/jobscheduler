@@ -308,13 +308,14 @@ fn ringing() -> (js_agent::lifecycle::Wake, std::sync::mpsc::Receiver<()>) {
 }
 
 /// Asserts that a call the provider fails rings the wake once its retry pause has passed,
-/// and that the ask the ring brings is handed the failure and sends the call again in that
-/// same ask: with no pause, the ring comes, the ask answers the failure, the provider is
-/// asked a second time with no further ask, and that call, done, rings once more and is
-/// handed over. It catches a client that rings nothing for a failure, and one whose ring
-/// only hands the failure over, so the call is sent again only at the worker's next step.
+/// that the ask the ring brings is handed the failure and sends nothing with it, and that the
+/// ask after that sends the call again: with no pause, the ring comes, the ask answers the
+/// failure, the provider has still been asked once, the next ask is pending and sends the
+/// second call, which, done, rings once more and is handed over. It catches a client that
+/// rings nothing for a failure, and one that sends a failed call again by itself, before the
+/// lifecycle's wait after the failure has passed.
 #[test]
-fn a_failed_call_rings_after_its_pause_and_the_ask_it_brings_sends_it_again() {
+fn a_failed_call_rings_after_its_pause_and_is_sent_again_only_when_asked_again() {
     let mut rig = rig_with(
         "pc-wake-fail",
         CallBounds {
@@ -335,10 +336,12 @@ fn a_failed_call_rings_after_its_pause_and_the_ask_it_brings_sends_it_again() {
         matches!(failed, ProviderAnswer::Unavailable(_)),
         "{failed:?}"
     );
+    assert_eq!(rig.fake.requests().len(), 1, "not sent again by the ask");
+    assert_eq!(rig.client.ask(NAME, &call), ProviderAnswer::Pending);
     rings
         .recv_timeout(GUARD)
         .expect("rung once the release sent again was done");
-    assert_eq!(rig.fake.requests().len(), 2, "sent again by the ask");
+    assert_eq!(rig.fake.requests().len(), 2, "sent again by the next ask");
     assert_eq!(rig.client.ask(NAME, &call), ProviderAnswer::Done(None));
     assert!(rings.try_recv().is_err(), "one ring for each answer");
 }
