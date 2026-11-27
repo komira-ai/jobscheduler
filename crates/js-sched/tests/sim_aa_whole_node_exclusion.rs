@@ -47,11 +47,12 @@ fn phase(mark: Mark) -> NodePhase {
 }
 
 /// Three 8-core, 32 GiB workers. `a` holds two one-core leases predicted at 14 GiB each:
-/// it has the fewest leases (so a whole-machine request holds it) and its memory is
-/// nearly full, so a small action of a core and 2 GiB leaves almost no memory on it and
-/// is the tightest fit there (a leftover of 2 GiB), where `b` and `c` leave 30 GiB. Its
-/// future load is the lowest, since two leases are all it holds. `b` and `c` hold
-/// `others` one-core leases each.
+/// it has the fewest leases (no lease has an end known, so every tail is unknown and the
+/// drain order, which a whole-machine request holds the first of, falls to the fewest
+/// leases: it holds `a`) and its memory is nearly full, so a small action of a core and
+/// 2 GiB leaves almost no memory on it and is the tightest fit there (a leftover of
+/// 2 GiB), where `b` and `c` leave 30 GiB. Its future load is the lowest, since two
+/// leases are all it holds. `b` and `c` hold `others` one-core leases each.
 struct Fixture {
     r: Rig,
     a_leases: Vec<StartLease>,

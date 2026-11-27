@@ -1,29 +1,9 @@
 //! `js-mac-session`: see the library's documentation.
 
-use std::ffi::OsString;
 use std::process::ExitCode;
 
 use clap::Parser as _;
 
 fn main() -> ExitCode {
-    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    if let Some((mode, rest)) = args.split_first() {
-        // The verbs a node's administrator runs through sudo; never a flag of the
-        // helper itself.
-        if mode == js_mac_session::node_admin::MODE {
-            return node_admin(rest);
-        }
-    }
     js_mac_session::start::main(&js_mac_session::start::Args::parse())
-}
-
-#[cfg(target_os = "macos")]
-fn node_admin(args: &[OsString]) -> ExitCode {
-    js_mac_session::macos::admin::main(args)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn node_admin(_args: &[OsString]) -> ExitCode {
-    eprintln!("REFUSED: kbf-mac-session node-admin runs on a Mac");
-    ExitCode::from(2)
 }

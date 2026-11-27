@@ -3,10 +3,11 @@
 //! or ended in that wait; an attempt the record's list dropped, read through its row; the
 //! refusals of `attempt`; and the reader's side of the length rule of an attempt's prefix.
 //!
-//! This release's record holds one attempt (a submit refuses a retry policy), so the rig's
-//! reader learns each job's attempts from [`attempts`] and reads rows with [`rows`], keyed by
-//! the job's id: a job of several attempts as the record will hold it once retries are made.
-//! Every other job is read as the server reads it. Nothing sleeps: the settle window passes
+//! The rig's reader learns each job's attempts from [`attempts`] and reads rows with [`rows`],
+//! keyed by the job's id, so a job of several attempts (up to 300) is set up without running
+//! each one; the server reads them from the record's trail (`Attempts::of`), which
+//! `callback_tests.rs` follows through a real retry. Every other job is read as the server
+//! reads it. Nothing sleeps: the settle window passes
 //! on the manual clock.
 
 use std::collections::BTreeMap;

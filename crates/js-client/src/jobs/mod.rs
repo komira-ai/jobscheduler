@@ -5,7 +5,9 @@
 //! with no hand-written code; this module holds what is not about any call: the connection,
 //! the token, and how a failure is classified ([`JobError`]); and the hand-written loops
 //! over the calls (`loops.rs`): [`wait_for_terminal`], [`follow_logs`] and
-//! [`submit_retrying`], over [`JobCalls`] and a [`Waiter`].
+//! [`submit_retrying`], over [`JobCalls`] and a [`Waiter`]; and [`dropped_policies`]
+//! (`dropped.rs`), which reads from a submit's answer whether the server dropped the job's
+//! retry policy or its callback.
 //!
 //! The connection keeps the rules of the HTTP client ([`crate::Client`]): the same
 //! `--server` check ([`crate::ServerUrl::parse`]: `https://`, or `http://` for a loopback
@@ -16,6 +18,7 @@
 //! redirect (gRPC has none; an HTTP redirect answer is an error). The bearer is sent as
 //! `authorization` metadata on every call, marked sensitive so HTTP/2 never indexes it.
 
+mod dropped;
 mod error;
 mod generated;
 mod loops;
@@ -31,6 +34,7 @@ use tonic::codegen::http::Uri;
 use tonic::metadata::{Ascii, MetadataValue};
 use tonic::transport::{Channel, Endpoint};
 
+pub use dropped::{DroppedPolicy, dropped_policies};
 pub use error::{JobError, NotSent};
 pub use loops::{
     FollowError, JobCalls, Outcome, Piece, TokioWaiter, WaitError, Waiter, follow_logs,

@@ -30,11 +30,12 @@
 //! # Host silence
 //!
 //! `GetJob` and `ListJobs` show, for a job that has not ended and has a host, since when that
-//! host has missed its grace (`host_silent_since_ms`, design section 6.3), as the context's
-//! [`Silence`] source says (the registry's, [`Ctx::with_silence`]); the field is absent while
-//! the host is heard, for a job with no host or one that has ended, and without a source. It is
-//! read at each call and drops the moment the host is heard again. No clock turns silence into
-//! a change of the job's state.
+//! host has missed its grace (`host_silent_since_ms`, design section 6.3), read from the host's
+//! `node/<host>` row by the context's [`Silence`] source ([`Ctx::with_silence`]), in one call of
+//! the tables for every host of the answer ([`silence`]): every server shows the same silence,
+//! whichever holds the host's session. The field is absent while the host is heard, for a job
+//! with no host or one that has ended, and without a source. It is read at each call and drops
+//! the moment the host is heard again. No clock turns silence into a change of the job's state.
 //!
 //! # Callback status
 //!
@@ -89,14 +90,15 @@ use js_proto::v1::{
     GetResultResponse, ListJobsRequest, ListJobsResponse,
 };
 use js_state::ResumeToken;
-use js_types::HostId;
 use tonic::{Request, Response, Status};
 
+use self::silence::{Silence, Silences};
 use self::statuses::Statuses;
 use super::fleet::Handle;
 use super::roles::{Caller, hidden};
 use super::{JobApi, logs};
 
+pub(crate) mod silence;
 pub(crate) mod statuses;
 pub(crate) mod view;
 
@@ -119,14 +121,6 @@ const JOB_ID_FIELD: &str = "jobId";
 /// The field a bad page token is named by: `page_token`, by its JSON name.
 const PAGE_TOKEN_FIELD: &str = "pageToken";
 
-/// Since when a host has been silent past its grace (design section 6.3), as the read calls
-/// show it.
-pub(crate) trait Silence: Send + Sync {
-    /// The instant `host` missed its grace, in milliseconds since the Unix epoch; `None` while
-    /// the host is heard within it, and for a host no one holds.
-    fn silent_since(&self, host: &HostId) -> Option<u64>;
-}
-
 /// The state of the read group: how a listing reads the table, and where host silence is read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ctx {
@@ -135,7 +129,7 @@ pub struct Ctx {
     /// The most rows one `ListJobs` call reads: [`SCAN_BOUND`].
     pub(super) scan_bound: NonZeroUsize,
     /// Where a job's host silence is read; `None` shows none.
-    pub(super) silence: Option<Handle<dyn Silence>>,
+    pub(super) silence: Option<Handle<Silence>>,
     /// A value only tests set, so that a test can tell a context it gave from the default.
     #[cfg(test)]
     pub(super) mark: u32,
@@ -156,22 +150,19 @@ impl Default for Ctx {
 impl Ctx {
     /// The same context reading a job's host silence from `silence`.
     #[must_use]
-    pub(crate) fn with_silence(self, silence: Arc<dyn Silence>) -> Ctx {
+    pub(crate) fn with_silence(self, silence: Silence) -> Ctx {
         Ctx {
-            silence: Some(Handle(silence)),
+            silence: Some(Handle(Arc::new(silence))),
             ..self
         }
     }
 }
 
-/// `job` as the read calls show it: its record, with the silence of its host when it has not
-/// ended and has one, as `ctx` reads it, and its callback's status among `statuses`.
-fn shown(ctx: &Ctx, job: &JobRecord, statuses: &Statuses) -> v1::Job {
+/// `job` as the read calls show it: its record, with the silence of its host among `silences`
+/// when it has not ended and has one, and its callback's status among `statuses`.
+fn shown(job: &JobRecord, statuses: &Statuses, silences: &Silences) -> v1::Job {
     let holding = job.host.as_ref().filter(|_| !job.state.is_ended());
-    let source = ctx.silence.as_ref();
-    let silent = holding
-        .zip(source)
-        .and_then(|(host, source)| source.0.silent_since(host));
+    let silent = holding.and_then(|host| silences.get(host).copied());
     v1::Job {
         host_silent_since_ms: silent,
         callback_status: statuses.get(&job.id).map(view::callback_status),
@@ -251,6 +242,21 @@ impl Reads<'_> {
         read.await.map_err(|error| read_failed(&error))
     }
 
+    /// The silence of the host of each job of `jobs` that has not ended, read from the hosts'
+    /// rows by the context's source in one call of the tables ([`Silence::read`]); nothing is
+    /// read without a source or when no such job has a host.
+    pub(super) async fn silences(&self, jobs: &[JobRecord]) -> Result<Silences, Status> {
+        let hosts = silence::holding(jobs);
+        let source = self.0.read.silence.clone();
+        let Some(source) = source.filter(|_| !hosts.is_empty()) else {
+            return Ok(Silences::new());
+        };
+        let read = self
+            .0
+            .on_tables(move |tables| source.0.read(tables, &hosts));
+        read.await.map_err(|error| read_failed(&error))
+    }
+
     /// One window of the table: at most `window` rows after `resume`, keeping the jobs in
     /// `state` when one is given.
     async fn window(
@@ -291,8 +297,9 @@ pub(super) async fn get_job(
 ) -> Result<Response<GetJobResponse>, Status> {
     let job = Reads(api).job(&request.into_inner().job_id, caller).await?;
     let statuses = Reads(api).statuses(std::slice::from_ref(&job)).await?;
+    let silences = Reads(api).silences(std::slice::from_ref(&job)).await?;
     Ok(Response::new(GetJobResponse {
-        job: Some(shown(&api.read, &job, &statuses)),
+        job: Some(shown(&job, &statuses, &silences)),
     }))
 }
 
@@ -456,10 +463,11 @@ pub(super) async fn list_jobs(
     };
     let (jobs, next) = list(&api.read, Reads(api), &filter, resume, size).await?;
     let statuses = Reads(api).statuses(&jobs).await?;
+    let silences = Reads(api).silences(&jobs).await?;
     Ok(Response::new(ListJobsResponse {
         jobs: jobs
             .iter()
-            .map(|job| shown(&api.read, job, &statuses))
+            .map(|job| shown(job, &statuses, &silences))
             .collect(),
         next_page_token: next.map(|token| token.key().to_owned()).unwrap_or_default(),
     }))
