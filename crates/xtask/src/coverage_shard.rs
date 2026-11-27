@@ -258,7 +258,7 @@ pub fn assign(plan: &Plan) -> Vec<Shard> {
 }
 
 /// The filterset that selects exactly `tests`: `(binary_id(=B1) & test(=T1)) | ...`.
-fn union(tests: impl Iterator<Item = &Heavy>) -> String {
+fn union<'a>(tests: impl Iterator<Item = &'a Heavy>) -> String {
     tests
         .map(|h| format!("(binary_id(={}) & test(={}))", h.binary_id, h.test))
         .collect::<Vec<_>>()
