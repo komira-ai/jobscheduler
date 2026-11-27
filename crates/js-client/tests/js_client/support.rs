@@ -217,12 +217,37 @@ fn serve_one(tcp: TcpStream, tls: Option<&Arc<ServerConfig>>, reply: &[u8]) -> S
 
 /// Reads one request, sends `reply`, and returns the request as text.
 fn exchange(stream: &mut dyn Duplex, reply: &[u8]) -> String {
+    let Some(request) = read_request(stream) else {
+        return String::new();
+    };
+    // The client may stop reading a reply it refuses (one over its limit).
+    let _ = stream.write_all(reply);
+    let _ = stream.flush();
+    request.head + &String::from_utf8_lossy(&request.body)
+}
+
+/// One request as a fake server read it.
+pub struct Request {
+    /// The request line and headers, up to and including the blank line that ends them.
+    pub head: String,
+    /// The bytes that followed the head, as many as its `content-length` names (none when
+    /// it names none), or fewer when the stream ended or failed first.
+    pub body: Vec<u8>,
+}
+
+/// Reads one request from `stream`: its head, then the body its `content-length` names,
+/// and nothing after it. `None` when the stream ends or fails before the head does.
+///
+/// A fake reads the whole body before it answers and closes: a socket closed with bytes
+/// still unread sends the client a reset instead of a close, and the client can see the
+/// reset before it reads the answer, or while it is still sending the body.
+pub fn read_request<R: Read + ?Sized>(stream: &mut R) -> Option<Request> {
     let mut head = Vec::new();
     let mut byte = [0_u8; 1];
     while !head.ends_with(b"\r\n\r\n") {
         match stream.read(&mut byte) {
             Ok(1) => head.push(byte[0]),
-            _ => return String::new(),
+            _ => return None,
         }
     }
     let head = String::from_utf8_lossy(&head).into_owned();
@@ -233,12 +258,43 @@ fn exchange(stream: &mut dyn Duplex, reply: &[u8]) -> String {
                 .strip_prefix("content-length:")
                 .map(str::to_owned)
         })
-        .find_map(|value| value.trim().parse::<usize>().ok())
+        .find_map(|value| value.trim().parse::<u64>().ok())
         .unwrap_or(0);
-    let mut body = vec![0_u8; length];
-    let _ = stream.read_exact(&mut body);
-    // The client may stop reading a reply it refuses (one over its limit).
-    let _ = stream.write_all(reply);
-    let _ = stream.flush();
-    head + &String::from_utf8_lossy(&body)
+    let mut body = Vec::new();
+    let _ = Read::take(&mut *stream, length).read_to_end(&mut body);
+    Some(Request { head, body })
+}
+
+/// Asserts that a request is read up to the end of the body its `content-length` names
+/// (a header name in any case) and no further, so a byte after it stays unread.
+#[test]
+fn a_request_is_read_to_the_end_of_its_body_and_no_further() {
+    let mut stream: &[u8] = b"POST /a HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello!";
+    let request = read_request(&mut stream).unwrap();
+    assert_eq!(
+        request.head,
+        "POST /a HTTP/1.1\r\nContent-Length: 5\r\n\r\n"
+    );
+    assert_eq!(request.body, b"hello");
+    assert_eq!(stream, b"!");
+}
+
+/// Asserts that a request whose head names no length is read as having no body.
+#[test]
+fn a_request_with_no_content_length_has_no_body() {
+    let mut stream: &[u8] = b"GET /a HTTP/1.1\r\nhost: x\r\n\r\nnext";
+    let request = read_request(&mut stream).unwrap();
+    assert_eq!(request.head, "GET /a HTTP/1.1\r\nhost: x\r\n\r\n");
+    assert_eq!(request.body, b"");
+    assert_eq!(stream, b"next");
+}
+
+/// Asserts that a stream that ends inside the head is no request, and one that ends inside
+/// the body gives the body bytes that arrived.
+#[test]
+fn a_stream_that_ends_early_gives_what_arrived() {
+    let mut cut_in_head: &[u8] = b"POST /a HTTP/1.1\r\ncontent-length: 5\r\n";
+    assert!(read_request(&mut cut_in_head).is_none());
+    let mut cut_in_body: &[u8] = b"POST /a HTTP/1.1\r\ncontent-length: 5\r\n\r\nhel";
+    assert_eq!(read_request(&mut cut_in_body).unwrap().body, b"hel");
 }
