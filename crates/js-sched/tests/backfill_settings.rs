@@ -159,9 +159,10 @@ fn without_bounds_enforced_an_unknown_end_ranks_last() {
 }
 
 /// Catches: an unknown end counted at the ceiling read as ending then even once that has
-/// passed. With a ceiling of 60 s and a margin of two minutes, at 100 s `a`'s lease (from
-/// 0) is past its start plus the ceiling and reads as ending at 220 s, after `b`'s lease of
-/// 30 s from 100 s (130 s): `b` is held. Read as ending at 60 s, `a` would cost nothing.
+/// passed, or floored by other than the margin set. With a ceiling of 60 s and a margin of
+/// two minutes, at 100 s `a`'s lease (from 0) is past its start plus the ceiling and reads
+/// as ending at 220 s, after `b`'s lease of 90 s from 100 s (190 s): `b` is held. Read as
+/// ending at 60 s, or a minute from now (160 s), `a` would be the cheaper and be held.
 #[test]
 fn an_unknown_end_past_the_ceiling_reads_as_ending_the_margin_from_now() {
     let mut f = farm(two_minutes(secs(60)));
@@ -169,7 +170,7 @@ fn an_unknown_end_past_the_ceiling_reads_as_ending_the_margin_from_now() {
     f.place_on("a", None);
     f.worker("b");
     assert!(f.advance(100_000).is_empty());
-    f.lease_on("b", secs(30));
+    f.lease_on("b", secs(90));
     let whole = f.whole();
     assert_eq!(f.held_for(whole), Some(&w("b")));
 }

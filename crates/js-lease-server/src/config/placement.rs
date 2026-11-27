@@ -242,19 +242,18 @@ mod tests {
 
     /// Asserts that the settings the engine is built with carry the backfill setting given:
     /// the switch, the margin and the ceiling. Catches the setting replaced by a fixed one on
-    /// the way to the engine (the engine once always enforced bounds, with no ceiling unless
-    /// `server.max_lease_wall` set one).
+    /// the way to the engine.
     #[test]
     fn the_backfill_setting_reaches_the_engine_settings() {
         let (memory, cold) = (MemoryPercent::clamped(100), ColdSize::default());
         let load = LoadSetting::default();
         let hour = Duration::from_secs(3_600);
         let margin = Duration::from_secs(90);
-        let on = BackfillSetting::of((None, Some(margin)), Some(hour), 24 * hour);
+        let on = BackfillSetting::of((None, Some(margin)), hour);
         let made = settings_of(on, load, (memory, cold, Curves::Off));
         let enforced = js_sched::Backfill::enforced(hour).with_margin(margin);
         assert_eq!(made.backfill, enforced);
-        let off = BackfillSetting::of((Some(false), None), Some(hour), 24 * hour);
+        let off = BackfillSetting::of((Some(false), None), hour);
         let made = settings_of(off, load, (memory, cold, Curves::Off));
         assert_eq!(made.backfill, js_sched::Backfill::default());
         let plain = settings_of(

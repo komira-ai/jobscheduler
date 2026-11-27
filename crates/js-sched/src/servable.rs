@@ -222,7 +222,7 @@ impl Servable {
     /// ([`Servable::new`]) are out before the load predicate is read and before any
     /// ranking, so a worker that is being emptied for someone is never the least loaded
     /// one for small work. The one exception is backfill: a worker in `reserved` stays in
-    /// when the request ends, with a minute to spare, by that worker's start time in
+    /// when the request ends, with the margin to spare, by that worker's start time in
     /// `starts` ([`crate::backfill`]); the request is then judged and ranked there as on
     /// any other worker.
     ///

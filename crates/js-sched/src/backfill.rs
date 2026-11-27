@@ -60,9 +60,8 @@ impl Backfill {
     /// Backfill on: the executor ends every operation at its max wall time
     /// ([`crate::Scheduler::set_max_wall`]), for a max wall time no longer than `ceiling`,
     /// with [`Backfill::DEFAULT_MARGIN`]. Pass the ceiling the executor enforces (the lease
-    /// server: the shorter of `server.max_lease_wall` and the most a job's wall limit may
-    /// be), or [`Duration::MAX`] when it enforces none. A max wall time above `ceiling` is
-    /// taken as none, so that work never backfills.
+    /// server: the most a job's wall limit may be), or [`Duration::MAX`] when it enforces
+    /// none. A max wall time above `ceiling` is taken as none, so that work never backfills.
     #[must_use]
     pub const fn enforced(ceiling: Duration) -> Self {
         Self {

@@ -53,9 +53,9 @@ pub(crate) struct AgentSetup {
     /// (no flags) for the mode `on`.
     pub(crate) curves: CurveSetting,
     /// `--backfill-bounds-enforced` and `--backfill-margin`, or `server.backfill_bounds_enforced`
-    /// and `server.backfill_margin`, with `server.max_lease_wall` and the most a job's wall
-    /// limit may be: whether the placement engine trusts a wall time for backfill, up to which,
-    /// and the margin it keeps.
+    /// and `server.backfill_margin`, with the most a job's wall limit may be as the ceiling:
+    /// whether the placement engine trusts a wall time for backfill, up to which, and the
+    /// margin it keeps.
     pub(crate) backfill: BackfillSetting,
     /// The pool's `max_queue_wait` and `start_timeout`, which the tick's job pass enforces
     /// (their defaults for a pool that does not set them, and for `--agent-pool-config`).

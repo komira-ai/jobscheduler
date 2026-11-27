@@ -113,8 +113,8 @@ exist. (The scheduler-side mark is `reserved`; the agent-announced phase `draini
   past take none. In `js-sched` this is `Scheduler::with_backfill` (off unless the caller says its bounds are enforced, with the ceiling
   it enforces) and applies to every held worker, a blocked head's too; the kept start never moves later. On the lease server it applies
   to a job of the pool's `share_class` that is not a probe. The job service ends every job at its wall limit, so the server enforces
-  bounds unless `server.backfill_bounds_enforced = false` (`--backfill-bounds-enforced false`), with the shorter of
-  `server.max_lease_wall` and `server.max_job_wall` as the ceiling and `server.backfill_margin` (`--backfill-margin`, one minute
+  bounds unless `server.backfill_bounds_enforced = false` (`--backfill-bounds-enforced false`), with `server.max_job_wall`
+  (the most a job's wall limit may be) as the ceiling and `server.backfill_margin` (`--backfill-margin`, one minute
   unless set) as the margin; with bounds not enforced, and for every other start, a reserved host takes nothing new. With bounds
   enforced, a lease with neither an estimate nor a wall time (an allocation taken up after a restart, whose wall limit the
   scheduler was not told) counts, for the pick of a host to drain, as ending at its start plus the ceiling, not after every known

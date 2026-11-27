@@ -265,11 +265,11 @@ impl AgentKeys {
 
 impl Server {
     /// The placement engine's backfill setting the file gives: `backfill_bounds_enforced`
-    /// and `backfill_margin` (each its default when absent), with `max_lease_wall` and
-    /// `max_job_wall` (the job service's default when absent).
+    /// and `backfill_margin` (each its default when absent), with `max_job_wall` (the job
+    /// service's default when absent) as the ceiling.
     pub(crate) fn backfill(&self) -> BackfillSetting {
         let most = self.max_job_wall.unwrap_or(DEFAULT_MAX_JOB_WALL);
-        BackfillSetting::of(self.agents.backfill, self.max_lease_wall, most)
+        BackfillSetting::of(self.agents.backfill, most)
     }
 }
 

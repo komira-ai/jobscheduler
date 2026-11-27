@@ -93,22 +93,22 @@ fn the_flags_refuse_what_they_cannot_read() {
     }
 }
 
-/// Asserts the keys: absent, bounds are enforced up to the shorter of `max_lease_wall` (the
-/// test file sets `"2h"`) and `max_job_wall` with a minute's margin; `false` enforces
-/// nothing; a margin is kept; a `max_job_wall` under `max_lease_wall` is the ceiling. And the
-/// refusals, each by its whole message. Catches a key read and dropped, a ceiling taken from
-/// the longer wall, and a key of the wrong type accepted.
+/// Asserts the keys: absent, bounds are enforced up to `max_job_wall` (30 days unless set;
+/// the test file's `max_lease_wall = "2h"` bounds nothing) with a minute's margin; `false`
+/// enforces nothing; a margin is kept; a `max_job_wall` set is the ceiling. And the refusals,
+/// each by its whole message. Catches a key read and dropped, a ceiling taken from
+/// `max_lease_wall`, which no job is held to, and a key of the wrong type accepted.
 #[test]
 fn the_keys_set_the_switch_and_the_margin() {
     let scratch = Scratch::new("backfill_keys");
     let pool = PoolText::joined("hosts");
     let text = |lines: &str| file(&server(&scratch, lines), &[&pool]);
     let backfill = |lines: &str| load(&scratch, &text(lines)).unwrap().backfill();
-    assert_eq!(backfill(""), Backfill::enforced(2 * HOUR));
+    assert_eq!(backfill(""), Backfill::enforced(MONTH));
     assert_eq!(backfill("max_job_wall = \"1h\""), Backfill::enforced(HOUR));
     assert_eq!(
         backfill("backfill_bounds_enforced = true"),
-        Backfill::enforced(2 * HOUR)
+        Backfill::enforced(MONTH)
     );
     assert_eq!(
         backfill("backfill_bounds_enforced = false"),
@@ -117,7 +117,7 @@ fn the_keys_set_the_switch_and_the_margin() {
     let margin = Duration::from_secs(120);
     assert_eq!(
         backfill("backfill_margin = \"2m\""),
-        Backfill::enforced(2 * HOUR).with_margin(margin)
+        Backfill::enforced(MONTH).with_margin(margin)
     );
     assert_eq!(
         backfill("backfill_bounds_enforced = false\nbackfill_margin = \"2m\""),
