@@ -4,13 +4,21 @@
 //! A row is written when a run ends, not per minute. The index of what is stored (each
 //! key's size and last-used day) lives in memory and is rebuilt by one scan when the store
 //! opens; a read of a key's use is a [`ProfileStore::touch`] in memory, and its day reaches
-//! the store at most once a day per key, in [`ProfileStore::persist_touches`]. There is one
-//! writer (the scheduler); a second one is caught by the version the row is written under.
+//! the store at most once a day per key, in [`ProfileStore::persist_touches`].
+//!
+//! Several servers may share the store, each with a [`ProfileStore`] of its own, so another
+//! writer can change any row between this one's scan and its write. A key's own row is
+//! written at the version it was read at, and read again once when that version is gone.
+//! An evicted row is deleted at the version this store last saw it at (the scan's, or the
+//! read's that refreshed it), never unconditionally: when another server rewrote a victim
+//! since, the delete fails, the victim is read again and kept as just used, and the
+//! eviction is planned again against the budget. A row another server deleted is dropped
+//! from the index when it is next read.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use js_state::{Cond, Store, StoreError, Txn};
+use js_state::{Cond, Store, StoreError, Txn, Version};
 use thiserror::Error;
 
 use crate::codec::{self, RowError};
@@ -18,6 +26,10 @@ use crate::curves::{ProfileCurves, STALE_DAYS};
 use crate::fit::{Fit, fit};
 use crate::key::ProfileKey;
 use crate::ring::{Admitted, Run, RunSeries};
+
+/// How many times one [`ProfileStore::run_ended`] plans its evictions again after a victim
+/// another writer changed: past it the write fails with [`ProfileError::Conflict`].
+const MAX_EVICTION_REPLANS: usize = 8;
 
 /// The state-store prefix of the profile rows; a row's key is the prefix and the
 /// [`ProfileKey`].
@@ -86,6 +98,9 @@ struct Entry {
     used_tick: u64,
     /// The last-used day the stored row holds.
     persisted_day: u64,
+    /// The version of the row as this store last saw it (its scan, its read, or its own
+    /// write), which an eviction deletes it at.
+    version: Version,
 }
 
 /// The profile rows in a state store, bounded to a budget of bytes.
@@ -134,7 +149,8 @@ impl ProfileStore {
                 continue;
             };
             let bytes = held.value.len() as u64;
-            opened.set_entry(&key, bytes, row.last_used_day, row.last_used_day);
+            let day = row.last_used_day;
+            opened.set_entry(&key, bytes, (day, day), held.version);
             opened
                 .curves
                 .put(&key, row.last_used_day, fit(&row.ring).as_ref());
@@ -176,11 +192,14 @@ impl ProfileStore {
     /// ring and writes the row. Rows of the least recently used other keys are deleted in
     /// the same transaction while the bytes of all rows exceed the budget, so a failure
     /// leaves nothing half done. A row another writer changed meanwhile is read again and
-    /// the write tried once more.
+    /// the write tried once more. Each victim is deleted at the version this store last saw
+    /// it at: one another writer rewrote or deleted since fails the transaction, every victim
+    /// is read again (a rewritten one counts as just used and a deleted one leaves the
+    /// index), and the evictions are planned again, up to eight times.
     ///
     /// # Errors
     /// [`ProfileError::Store`] when the state store fails, [`ProfileError::Conflict`] when
-    /// the row was changed again, and [`ProfileError::TooLarge`] when the row alone does
+    /// the row was changed again or the victims kept changing through every plan, and [`ProfileError::TooLarge`] when the row alone does
     /// not fit the budget. A run that does not enter the ring is `Ok` with the reason, and
     /// writes nothing.
     pub fn run_ended(
@@ -195,6 +214,7 @@ impl ProfileStore {
         };
         let name = store_key(key);
         let mut retried = false;
+        let mut replans = 0;
         loop {
             let held = self.store.get(&name)?;
             // A row that cannot be read is replaced by a ring of this run.
@@ -214,20 +234,36 @@ impl ProfileStore {
                     budget: self.budget_bytes,
                 });
             }
-            let cond = held.map_or(Cond::Absent, |v| Cond::Version(v.version));
-            let mut txn = Txn::new().put(name.clone(), bytes, cond);
-            for victim in &victims {
-                txn = txn.delete(store_key(victim), Cond::Any);
+            // The evictions first and the key's own row last, so the commit's revision is the
+            // version of the row it wrote.
+            let mut txn = Txn::new();
+            for (victim, version) in &victims {
+                txn = txn.delete(store_key(victim), Cond::Version(*version));
             }
+            let cond = held.map_or(Cond::Absent, |v| Cond::Version(v.version));
+            let txn = txn.put(name.clone(), bytes, cond);
             match self.store.txn(txn)? {
-                Ok(_) => {
-                    for victim in &victims {
+                Ok(commit) => {
+                    for (victim, _) in &victims {
                         self.unlink(victim);
                         self.curves.remove(victim);
                     }
-                    self.set_entry(key, size, now_day, now_day);
+                    let version = Version(commit.revision.0);
+                    self.set_entry(key, size, (now_day, now_day), version);
                     self.curves.put(key, now_day, fit(&ring).as_ref());
                     return Ok(Admitted::Yes);
+                }
+                // A victim another writer changed or deleted since this store saw it: every
+                // victim is read again (one still as seen keeps its place) and the eviction
+                // planned again.
+                Err(conflict) if conflict.key != name => {
+                    if replans == MAX_EVICTION_REPLANS {
+                        return Err(ProfileError::Conflict(key.to_string()));
+                    }
+                    replans += 1;
+                    for (victim, _) in &victims {
+                        self.refresh(victim)?;
+                    }
                 }
                 Err(_) if !retried => retried = true,
                 Err(_) => return Err(ProfileError::Conflict(key.to_string())),
@@ -235,9 +271,43 @@ impl ProfileStore {
         }
     }
 
-    /// The keys to delete, least recently used first, so that a row of `size` bytes for
-    /// `key` fits the budget, and whether it then does.
-    fn victims(&self, key: &ProfileKey, size: u64) -> (Vec<ProfileKey>, bool) {
+    /// Reads the row of `victim`, a key of the index, again. A row still at the version this
+    /// store saw keeps its place. A row that is gone leaves the index and the curves. A row
+    /// another writer rewrote is taken as just used: it becomes the most recently used key of
+    /// the later of its two days, with the stored row's size and day, and its fit when the
+    /// row reads.
+    ///
+    /// # Errors
+    /// [`ProfileError::Store`] when the read fails.
+    fn refresh(&mut self, victim: &ProfileKey) -> Result<(), ProfileError> {
+        let entry = self.index[victim];
+        let Some(held) = self.store.get(&store_key(victim))? else {
+            self.unlink(victim);
+            self.curves.remove(victim);
+            return Ok(());
+        };
+        if entry.version == held.version {
+            return Ok(());
+        }
+        let bytes = held.value.len() as u64;
+        // A row that cannot be read keeps the day this store knew; the next run of its key
+        // replaces it.
+        let row = codec::decode(&held.value).ok();
+        let stored_day = row
+            .as_ref()
+            .map_or(entry.persisted_day, |row| row.last_used_day);
+        let used_day = entry.used_day.max(stored_day);
+        self.set_entry(victim, bytes, (used_day, stored_day), held.version);
+        if let Some(row) = row {
+            self.curves.put(victim, used_day, fit(&row.ring).as_ref());
+        }
+        Ok(())
+    }
+
+    /// The keys to delete, least recently used first, each with the version this store last
+    /// saw its row at, so that a row of `size` bytes for `key` fits the budget, and whether
+    /// it then does.
+    fn victims(&self, key: &ProfileKey, size: u64) -> (Vec<(ProfileKey, Version)>, bool) {
         let own = self.index.get(key).map_or(0, |e| e.bytes);
         let mut total = self.total - own + size;
         let mut victims = Vec::new();
@@ -246,8 +316,9 @@ impl ProfileStore {
                 break;
             }
             if name != key {
-                total -= self.index[name].bytes;
-                victims.push(name.clone());
+                let entry = self.index[name];
+                total -= entry.bytes;
+                victims.push((name.clone(), entry.version));
             }
         }
         (victims, total <= self.budget_bytes)
@@ -288,7 +359,8 @@ impl ProfileStore {
         };
         let used_day = entry.used_day.max(day);
         self.unlink(key);
-        self.set_entry(key, entry.bytes, used_day, entry.persisted_day);
+        let days = (used_day, entry.persisted_day);
+        self.set_entry(key, entry.bytes, days, entry.version);
         self.curves.touch(key, day);
     }
 
@@ -322,9 +394,9 @@ impl ProfileStore {
             let bytes = codec::encode(day, &row.ring);
             let size = bytes.len() as u64;
             let txn = Txn::new().put(name, bytes, Cond::Version(held.version));
-            if self.store.txn(txn)?.is_err() {
+            let Ok(commit) = self.store.txn(txn)? else {
                 return Err(ProfileError::Conflict(key.to_string()));
-            }
+            };
             let before = self.index[&key];
             self.unlink(&key);
             self.place(
@@ -332,6 +404,8 @@ impl ProfileStore {
                 Entry {
                     bytes: size,
                     persisted_day: day,
+                    // The one row the commit wrote.
+                    version: Version(commit.revision.0),
                     ..before
                 },
             );
@@ -349,8 +423,15 @@ impl ProfileStore {
         }
     }
 
-    /// Puts `key` in the index as the most recently used of its day.
-    fn set_entry(&mut self, key: &ProfileKey, bytes: u64, used_day: u64, persisted_day: u64) {
+    /// Puts `key` in the index as the most recently used of its day, with its row of `bytes`
+    /// at `version`; `days` is the day it was last used and the day its stored row holds.
+    fn set_entry(
+        &mut self,
+        key: &ProfileKey,
+        bytes: u64,
+        (used_day, persisted_day): (u64, u64),
+        version: Version,
+    ) {
         self.unlink(key);
         self.tick += 1;
         let entry = Entry {
@@ -358,6 +439,7 @@ impl ProfileStore {
             used_day,
             used_tick: self.tick,
             persisted_day,
+            version,
         };
         self.place(key, entry);
     }
@@ -553,6 +635,9 @@ mod tests {
     fn learn_one(ps: &mut ProfileStore, key: &str, day: u64) {
         assert_eq!(ps.run_ended(&pk(key), &run(), day).unwrap(), Admitted::Yes);
     }
+
+    /// Two servers' profile stores over one state store: eviction at the scanned version.
+    mod shared;
 
     /// Catches: eviction that deletes the key being written when it is the least recently
     /// used one (its own row would go with the write that replaces it), or that stops at

@@ -399,20 +399,41 @@ fn the_live_jobs_follow_the_live_allocations_and_are_read_until_they_start() {
     assert!(placer.engine().book.live.is_empty());
 }
 
-/// Asserts that nothing is read or kept of the live jobs under `off` and `shadow`: the pass reads
-/// no job record (the store sees no read) and the engine keeps no live job. Catches a store read
-/// added to the modes that book flat.
+/// Asserts that nothing is read or kept of the live jobs under `off`: the pass reads no job
+/// record (the store sees no read) and the engine keeps no live job. Catches a store read added
+/// to the mode that learns nothing.
 #[test]
-fn the_modes_that_book_flat_read_no_live_job() {
-    for curves in [Curves::Off, Curves::Shadow] {
-        let tables = Tables::new();
-        let (placer, _) = placer_in(curves, CurveSettings::default());
-        let row = running(&tables, ("started", "early"), (1_000, true));
-        let _ = tables.store.take_reads();
-        placer.read_live_curves(&tables.jobs, &[row]);
-        assert_eq!(tables.store.take_reads(), Vec::new(), "{curves:?}");
-        assert!(placer.engine().book.live.is_empty());
-    }
+fn off_reads_no_live_job() {
+    let tables = Tables::new();
+    let (placer, _) = placer_in(Curves::Off, CurveSettings::default());
+    let row = running(&tables, ("started", "early"), (1_000, true));
+    let _ = tables.store.take_reads();
+    placer.read_live_curves(&tables.jobs, &[row]);
+    assert_eq!(tables.store.take_reads(), Vec::new());
+    assert!(placer.engine().book.live.is_empty());
+    assert_eq!(placer.memory_shadow_view(), None);
+}
+
+/// Asserts what `shadow` keeps of a live job, for the memory shadow to project: its record is
+/// read once, and the engine holds its flat CPU and memory, its class for its CPU (it left its
+/// CPU at 0) and none for its memory (it named 64 MiB, so it is projected at that), and its
+/// start. Catches a shadow that projects no live job, one that keeps a job's memory as anything
+/// but what its allocation booked, and one that projects a named memory by its class.
+#[test]
+fn shadow_keeps_each_live_jobs_memory_class_and_start() {
+    let tables = Tables::new();
+    let (placer, _) = placer_in(Curves::Shadow, CurveSettings::default());
+    let row = running(&tables, ("started", "early"), (1_000, true));
+    let _ = tables.store.take_reads();
+    placer.read_live_curves(&tables.jobs, &[row]);
+    assert_eq!(tables.store.take_reads().len(), 1);
+    let engine = placer.engine();
+    let held = &engine.book.live[&JobId::parse("started").unwrap()];
+    assert_eq!((held.flat_millis, held.memory_bytes), (1_000, 64 * MIB));
+    assert!(held.memory_key.is_none() & held.key.is_some());
+    assert!(held.started_ms.is_some());
+    drop(engine);
+    assert!(placer.memory_shadow_view().is_some());
 }
 
 /// Asserts what a job whose record cannot be read is charged: a read of the store that fails is
