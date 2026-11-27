@@ -849,6 +849,7 @@ mod tests {
                 retry: false,
                 key_hash: 0,
             },
+            placement: crate::scheduler::Placement::default(),
         };
         let ends = s.lease_ends(&[(op, placed)]);
         let expected = BTreeMap::from([(LeaseId::new(1, 0), Some(105_000))]);

@@ -131,6 +131,16 @@ it still moves to a quiet host if one turns up first. Whole-node placement reser
 tail), so the wait is the shortest the leases on the hosts allow. Stopping other tenants' work was considered and rejected (D48): a deadline that
 kills is a silent loss for a tenant who did nothing wrong, and it would let one consumer's request destroy another's results.
 
+**What a reservation is recorded as.** `js-sched` reports how each large request's reservation went, when asked
+(`Scheduler::recording_reservations`, drained by `Scheduler::take_reservations`; off by default, in memory only, never in a log record, row or
+wire message). A large request is a whole-machine request or an owner-worker action that fits no worker, or a blocked head that holds a worker.
+When it leaves the queue (started, cancelled, refused, ended by an earlier run's result, or taken by another scheduler of the store) it gets one
+record: the round it was first blocked in, the round it was first reserved in and the start the pick then expected, the start expected in the
+last round it held a worker, how many times its hold went to another worker (a move adds to the count and emits nothing), the core-seconds of
+backfill placed on the worker it held (booked cores from each lease's grant to its end, or to the record), and when and how it left the queue
+(for a start, its actual start: the round of its grant). Every lease that ends reports its placement estimate (its backfill duration, above) and
+whether it was placed as backfill. A request queued again after its lease was given up is a new reservation with a record of its own.
+
 **The host is quiet** when the scheduler's table shows no lease and no placed run on it. The scheduler then commits the whole-node lease
 (state `pending`), the host mark becomes `held`, and the lease follows section 5.
 

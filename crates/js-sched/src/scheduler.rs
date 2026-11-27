@@ -18,6 +18,8 @@ mod outage;
 mod phase;
 mod rank;
 mod recover;
+mod reservation_log;
+pub(crate) use reservation_log::Placement;
 mod snapshot;
 mod state;
 mod view;
@@ -55,6 +57,7 @@ use crate::fence::HANDOVER_GRACE;
 use crate::headroom::MemoryPercent;
 use crate::input::Request;
 use crate::requeue::{Requeue, RequeueReason};
+use crate::reservation::ReservationEnd;
 use crate::servable::{Attempt, Matches, Placed, Servable, Verdict};
 use crate::unservable::Unservable;
 use memory::{MemoryLadder, MemoryState};
@@ -164,6 +167,8 @@ struct Held {
     /// When the grant was made (proposed), and when the worker reported it started.
     granted_at: FarmTime,
     started_at: Option<FarmTime>,
+    /// What its placement expected of it, for its release record.
+    placement: reservation_log::Placement,
 }
 
 /// When a `Start` was emitted, and the worker session and daemon process it was sent to.
@@ -495,6 +500,7 @@ impl Scheduler {
     /// Releases `operation`'s holding (booking and lease), if it has one. `end` is how its
     /// run ended, for the shape guard ([`Admission::run_ended`]).
     fn release(&mut self, id: OperationId, end: RunEnd) {
+        self.record_release(id);
         let op = self.ops.get_mut(&id).expect("released operations exist");
         if let Some((lease, worker)) = op.state.holding() {
             let held = self.held.remove(&lease);
@@ -687,7 +693,7 @@ impl Scheduler {
                             if whole_kind {
                                 whole.placed_whole();
                             }
-                            placed.push((id, p));
+                            placed.push((id, p.noted(&attempt, &holds)));
                         }
                     }
                     Ok(()) => {}
@@ -702,7 +708,8 @@ impl Scheduler {
                 && {
                     let fit = servable.fit(&mut self.workers, &mut self.admission, &attempt);
                     blocked = fit.blocked;
-                    fit.placed.map(|p| placed.push((id, p))).is_some()
+                    let noted = fit.placed.map(|p| p.noted(&attempt, &holds));
+                    noted.map(|p| placed.push((id, p))).is_some()
                 };
             let verdict = if fitted {
                 Verdict::Servable
@@ -727,6 +734,7 @@ impl Scheduler {
                 && verdict == Verdict::Servable
                 && self.backfill.only(id).is_none()
             {
+                self.backfill.blocked(id, now);
                 let held = match &self.whole_node {
                     Some(cfg) if request.kind == LeaseKind::WholeMachine => {
                         let turn = self.drain.turn(id, op.queued_at, now, cfg);
@@ -868,7 +876,7 @@ impl Scheduler {
         self.drain.marks = whole.marks;
         self.drain.waits = whole.waits;
         self.head_holds = head_holds;
-        self.backfill.end_round(holds);
+        self.backfill.end_round(holds, now);
         for (id, verdict) in verdicts {
             // A size a key floor gave it and no live worker can hold is lowered, not
             // waited on: the next round judges the smaller request.
@@ -883,7 +891,11 @@ impl Scheduler {
                 booked,
                 device,
                 cost,
+                placement,
             } = placed;
+            self.reservation_ended(id, || ReservationEnd::Started {
+                worker: worker.clone(),
+            });
             let lease = LeaseId::new(self.term, self.next_seq);
             self.next_seq += 1;
             let op = self.ops.get_mut(&id).expect("queued operations exist");
@@ -903,6 +915,7 @@ impl Scheduler {
                     start_sent: None,
                     granted_at: self.now,
                     started_at: None,
+                    placement,
                 },
             );
             self.cap_wall(id, &worker);

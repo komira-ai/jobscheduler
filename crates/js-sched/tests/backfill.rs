@@ -18,6 +18,9 @@ mod whole_rig;
 #[path = "load_curves/mod.rs"]
 mod load_curves;
 
+#[path = "backfill/reservation_record.rs"]
+mod reservation_record;
+
 use std::time::Duration;
 
 use crate::whole_rig::{Farm, request, secs, w};

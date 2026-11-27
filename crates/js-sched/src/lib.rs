@@ -126,6 +126,11 @@
 //!   purchase order and offer id. Nothing calls it yet.
 //! - what a pass records of why a queued job waits ([`queue_status::note`]): the queue code
 //!   and event an outcome of pass 1 or pass 2 gives a job.
+//! - how each large request's reservation went, when asked
+//!   ([`Scheduler::recording_reservations`]): one [`ReservationRecord`] when it leaves the
+//!   queue (blocked-at, the start estimated when reserved and the last one, its actual
+//!   start, its moves, the backfilled core-seconds) and one [`LeaseRelease`] per lease that
+//!   ends (its placement estimate, whether it was backfilled).
 //!
 //! Not yet: a reservation for
 //! a large `action` request (an action asking for most of a worker's cores waits, because spreading leaves no worker with the cores), reclaimed room and preemption, a budget for the
@@ -165,6 +170,7 @@ pub use provider_rank::ProviderRank;
 pub use queue::walk_in_order;
 pub use refusal::{HostRefusal, MAX_KEPT as MAX_KEPT_REFUSALS, Refusal, RefusalKind, Refusals};
 mod requeue;
+mod reservation;
 mod scheduler;
 mod servable;
 mod unservable;
@@ -181,6 +187,7 @@ pub use headroom::{MEMORY_SCHEDULABLE_PERCENT, MemoryPercent, PercentError};
 pub use input::{DaemonInstance, Event, Input, Request};
 pub use js_types::sched::NodePhase;
 pub use requeue::{Gib, Requeue, RequeueReason};
+pub use reservation::{LeaseRelease, ReservationEnd, ReservationEvent, ReservationRecord};
 pub use scheduler::loss::LOSS_REQUEUES;
 pub use scheduler::memory::{
     FARM_RERUNS, Floor, FloorChange, KeyFloor, LadderError, MEMORY_FLOORS, MemoryLadder,
