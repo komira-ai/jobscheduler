@@ -13,8 +13,7 @@
 //! has a `validate()` and the server and the agent must call it on every message they
 //! receive, before they act on any field:** [`Hello::validate`], [`Welcome::validate`]
 //! (and [`HelloReply::validate`]), [`Heartbeat::validate`], [`HeartbeatReply::validate`],
-//! [`Command::validate`] (a start is [`JobSpec::validate`], a job start
-//! [`JobStartSpec::validate`]), and the parts they hold ([`HeldRun`], [`RunResult`],
+//! [`Command::validate`] (a job start is [`JobStartSpec::validate`]), and the parts they hold ([`HeldRun`], [`RunResult`],
 //! [`HeldJob`], [`JobResult`], [`Taint`], [`ResultAck`], [`Mount`], [`Refused`]). A
 //! validator reads no state and no clock; whether an epoch is current, a lease is held
 //! or a shape fits a pool is the caller's. [`JobSpec::fits_shape`] answers the one
@@ -35,7 +34,7 @@
 //! reads as [`Command::Unknown`] and its error is dropped here.
 //!
 //! A reply is validated command by command ([`ReplyCheck`]): one refused start never
-//! costs a stop or cancel beside it, and the agent acts on every valid command.
+//! costs a job stop beside it, and the agent acts on every valid command.
 //!
 //! # Protocol version
 //!
@@ -76,8 +75,7 @@
 //! hello, and the server queues and sends a start with files only to a host that did.
 //! `JobSpec::run` is another (an older agent would run the image's own command instead):
 //! a server sends it, with `os` and `arch`, only to a host that reported `one-job`
-//! ([`ONE_JOB_CAPABILITY`]), and writes the start in the legacy forms for any other
-//! ([`JobSpec::downgrade_for`]).
+//! ([`ONE_JOB_CAPABILITY`]).
 //! `JobSpec::network` and `JobSpec::ports` are two more: an agent reports its network ceiling
 //! in its hello ([`NetworkCeiling`]: an absent one is `none` with no port), and the server
 //! sends a start that asks for more than `none`, or declares a port, only to a host whose
@@ -130,15 +128,20 @@
 //! [`ReplyCheck::host_taint`], set aside like [`ReplyCheck::log_grant`]: a bad one is
 //! ignored and the rest of the reply applies. An older receiver skips either field.
 //!
-//! # Two keyings in one major
+//! # Work keyed by job
 //!
-//! A start, stop and report are keyed by run and lease ([`Command::Start`], [`HeldRun`],
-//! [`RunResult`]) or by job ([`Command::JobStart`], [`Command::JobStop`], [`HeldJob`],
-//! [`JobResult`], [`JobResultAck`], and the `retired_jobs` and `retired_acks` lists; see
-//! [`per_job`]). The job messages are a message set added within major 1 and announced by
-//! the hello capability [`PER_JOB_CAPABILITY`], so one server speaks to agents of both
-//! kinds (see [`protocol`]). An agent lists what a job start began only under the job
-//! keying, so a server that knows no job ids never sees one in `held` or `results`.
+//! The work messages are the per-job ones: [`Command::JobStart`], [`Command::JobStop`],
+//! [`HeldJob`], [`JobResult`], [`JobResultAck`], and the `retired_jobs` and `retired_acks`
+//! lists (see [`per_job`]). They are a message set added within major 1 and announced by
+//! the hello capability [`PER_JOB_CAPABILITY`] (see [`protocol`]).
+//!
+//! The run-keyed messages are gone: a `start`, `stop` or `cancel` an older server sends
+//! reads as [`Command::Unknown`], and the verdict text `UNKNOWN_LEASE` reads as
+//! [`Ack::Unknown`]. The run lists stay on the wire because every previous release sends
+//! and reads them: [`Heartbeat::held`], [`Heartbeat::results`], [`Hello::held`] and
+//! [`HeartbeatReply::result_acks`], with [`HeldRun`], [`RunResult`] and [`ResultAck`]. They
+//! are still decoded and checked as before. An agent of this release sends them empty, and
+//! a server of this release answers `result_acks` empty.
 //!
 //! # Not here yet
 //!
@@ -146,7 +149,7 @@
 //!
 //! - the start's `booking`, `deadline`, named `assignments` beyond `gpu_indices`, and
 //!   environment by reference: the run-delivery change, which is where a start is first
-//!   sent (and where the server fills `valid_for_ms`). The fence of a job start is the
+//!   sent. The fence of a job start is the
 //!   pair of its job id and allocation id, which it already carries; an agent that
 //!   enforces it says so with the hello capability [`START_FENCE_CAPABILITY`];
 //! - the sum of several jobs' limits against one shape, and checks against pool state

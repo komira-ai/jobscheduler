@@ -25,7 +25,7 @@ fn made_nothing(h: &Native, run_id: &str, code: &str) {
     let scratch = fs::canonicalize(h.dir.path("scratch")).unwrap();
     assert!(!scratch.join(run_id).exists(), "no scratch directory");
     assert_eq!(h.life.free().cpu_millis, 4000, "the booking is intact");
-    let results = h.life.results();
+    let results = crate::lifecycle::results(&h.life);
     let result = results
         .iter()
         .find(|result| result.run_id == run_id)

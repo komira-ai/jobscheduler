@@ -64,7 +64,6 @@ fn job(node: &Node, run_id: &str) -> JobSpec {
         labels: BTreeMap::new(),
         heartbeat_seq: 0,
         files: Vec::new(),
-        valid_for_ms: 0,
         bundle: None,
         native: None,
         network: Default::default(),
@@ -123,11 +122,7 @@ fn past_the_wait(name: &str, proc_read: ProcRead) -> (Option<Taint>, Vec<String>
     )
     .expect("adopts");
     let mut life = Ringing::new(life);
-    let start = |spec| HeartbeatReply {
-        commands: vec![Command::Start(Box::new(spec))],
-        ..HeartbeatReply::default()
-    };
-    life.apply_and_create(&start(job(&node, "r1-hold")));
+    life.start_spec_and_create(&job(&node, "r1-hold"));
     assert!(!life.is_tainted(), "the start alone says nothing");
     let first = life.step();
     assert!(
@@ -150,8 +145,8 @@ fn past_the_wait(name: &str, proc_read: ProcRead) -> (Option<Taint>, Vec<String>
     let taint = life.pending_taint();
     node.up(&probe);
     life.apply(&HeartbeatReply {
-        commands: vec![Command::Stop {
-            run_id: "r1-hold".to_owned(),
+        commands: vec![Command::JobStop {
+            job_id: "r1-hold".to_owned(),
         }],
         ..HeartbeatReply::default()
     });

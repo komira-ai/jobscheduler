@@ -15,8 +15,6 @@ pub enum Defect {
     CancelKeepsListed,
     /// A Cancel does not retire the lease id, so a later Start for it runs.
     ForgetsRetiredIds,
-    /// A Start that waited longer than its validity is run.
-    RunsLateStart,
     /// The agent never stops its leases for want of the scheduler.
     NeverFences,
     /// A result not yet acknowledged is forgotten when the connection drops.
@@ -40,7 +38,6 @@ pub struct FakeAgent {
     retired: BTreeSet<String>,
     running: BTreeSet<String>,
     fenced: BTreeSet<String>,
-    never_started: BTreeSet<String>,
     launches: BTreeMap<String, u32>,
     unacked: BTreeSet<String>,
     sent: Vec<String>,
@@ -69,7 +66,6 @@ impl FakeAgent {
             retired: BTreeSet::new(),
             running: BTreeSet::new(),
             fenced: BTreeSet::new(),
-            never_started: BTreeSet::new(),
             launches: BTreeMap::new(),
             unacked: BTreeSet::new(),
             sent: Vec::new(),
@@ -124,23 +120,17 @@ impl AgentHarness for FakeAgent {
         }
     }
 
-    fn start(&mut self, lease: &str, valid_for: u64, waited: u64) -> Delivery {
+    fn start(&mut self, lease: &str) -> Delivery {
         if !self.connected {
             return Delivery::Lost;
         }
         self.last_contact = self.now;
         let fresh = self.known.insert(lease.to_string());
         let repeat = !fresh && !self.lacks(Defect::StartRunsTwice);
-        let bounded = valid_for != 0 && waited > valid_for;
-        let late = bounded && !self.lacks(Defect::RunsLateStart);
         let retired = self.retired.contains(lease);
         if !repeat && !retired {
-            if late {
-                self.never_started.insert(lease.to_string());
-            } else {
-                *self.launches.entry(lease.to_string()).or_insert(0) += 1;
-                self.running.insert(lease.to_string());
-            }
+            *self.launches.entry(lease.to_string()).or_insert(0) += 1;
+            self.running.insert(lease.to_string());
         }
         Delivery::Delivered
     }
@@ -227,7 +217,6 @@ impl AgentHarness for FakeAgent {
         Observed {
             running: self.running.clone(),
             fenced: self.fenced.clone(),
-            never_started: self.never_started.clone(),
             launches: self.launches.clone(),
             results_sent: self.sent.clone(),
         }
@@ -248,8 +237,8 @@ mod tests {
             names.iter().map(|name| (*name).to_string()).collect()
         };
         let mut agent = FakeAgent::new();
-        agent.start("a", 0, 0);
-        agent.start("b", 0, 0);
+        agent.start("a");
+        agent.start("b");
         assert_eq!(agent.unacked(), &held(&[]));
         agent.complete("a");
         agent.complete("b");
@@ -262,7 +251,7 @@ mod tests {
         assert_eq!(agent.unacked(), &held(&["b"]));
 
         let mut broken = FakeAgent::broken(Defect::ForgetsUnackedResult);
-        broken.start("a", 0, 0);
+        broken.start("a");
         broken.complete("a");
         assert_eq!(broken.unacked(), &held(&["a"]));
         broken.disconnect();

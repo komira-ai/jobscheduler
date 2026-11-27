@@ -93,7 +93,6 @@ fn ack() -> impl Strategy<Value = Ack> {
         Just(Ack::Accepted),
         Just(Ack::Duplicate),
         Just(Ack::Stale),
-        Just(Ack::UnknownLease),
         Just(Ack::Mismatch),
         Just(Ack::Unknown)
     ]
@@ -204,11 +203,11 @@ fn job_frame() -> impl Strategy<Value = JobSpec> {
         ident(),
         proptest::collection::vec("[ -~]{0,30}", 0..6),
         (1..=MAX_CPU_MILLIS, 1..=MAX_MEMORY_BYTES, 1..=MAX_WALL_MS),
-        (any::<u64>(), 0..=MAX_VALID_FOR_MS),
+        any::<u64>(),
         prop_oneof![Just(Isolation::Contained), Just(Isolation::Host)],
     )
         .prop_map(
-            |(run_id, lease_id, args, (cpu, memory, wall), (seq, valid_for), isolation)| {
+            |(run_id, lease_id, args, (cpu, memory, wall), seq, isolation)| {
                 let mut spec = job();
                 spec.run_id = run_id;
                 spec.lease_id = lease_id;
@@ -217,7 +216,6 @@ fn job_frame() -> impl Strategy<Value = JobSpec> {
                 spec.limits.memory_bytes = memory;
                 spec.limits.wall_ms = wall;
                 spec.heartbeat_seq = seq;
-                spec.valid_for_ms = valid_for;
                 spec.isolation = isolation;
                 spec.gpu_indices = Vec::new();
                 spec
@@ -257,9 +255,6 @@ fn job_start_frame() -> impl Strategy<Value = JobStartSpec> {
 
 fn command() -> impl Strategy<Value = Command> {
     prop_oneof![
-        job_frame().prop_map(|spec| Command::Start(Box::new(spec))),
-        ident().prop_map(|run_id| Command::Stop { run_id }),
-        ident().prop_map(|run_id| Command::Cancel { run_id }),
         job_start_frame().prop_map(|spec| Command::JobStart(Box::new(spec))),
         ident().prop_map(|job_id| Command::JobStop { job_id }),
         Just(Command::Unknown),
@@ -393,7 +388,7 @@ proptest! {
         survives(&frame);
     }
 
-    /// A generated run start is valid and decodes to itself.
+    /// A generated job spec is valid and decodes to itself.
     #[test]
     fn job_spec_round_trips_and_validates(frame in job_frame()) {
         prop_assert_eq!(frame.validate(), Ok(()));
@@ -556,7 +551,7 @@ fn truncated_body_is_eof_for_every_type() {
         "EOF while parsing",
     );
     refuses::<HeartbeatReply>(
-        br#"{"commands":[{"type":"stop""#,
+        br#"{"commands":[{"type":"job_stop""#,
         true,
         false,
         "EOF while parsing",
@@ -577,7 +572,7 @@ fn invalid_utf8_is_a_syntax_error() {
     refuses::<Hello>(&inside, false, true, "invalid unicode code point");
     refuses::<Hello>(b"\xff\xfe{}", false, true, "expected value");
     refuses::<Command>(
-        b"{\"type\":\"stop\",\"run_id\":\"\xc3\x28\"}",
+        b"{\"type\":\"job_stop\",\"job_id\":\"\xc3\x28\"}",
         false,
         true,
         "invalid unicode code point",
@@ -621,7 +616,7 @@ fn unknown_tag_is_refused_or_reads_as_the_unknown_value() {
         false,
         "unknown variant `promoted`",
     );
-    refuses::<Command>(br#"{"stop":"r"}"#, false, false, "missing field `type`");
+    refuses::<Command>(br#"{"job_stop":"r"}"#, false, false, "missing field `type`");
     let mut spec = serde_json::to_value(job()).expect("a job encodes");
     spec["isolation"] = json!("vm");
     let body = serde_json::to_vec(&spec).expect("a value encodes");
@@ -632,11 +627,11 @@ fn unknown_tag_is_refused_or_reads_as_the_unknown_value() {
         Command::Unknown
     );
     let reply: HeartbeatReply =
-        decode(br#"{"commands":[{"type":"launch"},{"type":"stop","run_id":"r"}]}"#)
+        decode(br#"{"commands":[{"type":"launch"},{"type":"job_stop","job_id":"r"}]}"#)
             .expect("lenient");
     assert_eq!(
         reply.commands,
-        vec![Command::Unknown, Command::Stop { run_id: "r".into() }]
+        vec![Command::Unknown, Command::JobStop { job_id: "r".into() }]
     );
     let ack: ResultAck = decode(br#"{"run_id":"r","ack":"EXPLODED"}"#).expect("lenient");
     assert_eq!(ack.ack, Ack::Unknown);
@@ -804,7 +799,7 @@ fn oversized_fields_are_refused_by_validate() {
     // A reply refuses by command, never as a whole: the stops beside an oversized start
     // and past the command cap are still read.
     let stops = (0..=MAX_COMMANDS)
-        .map(|i| json!({"type": "stop", "run_id": format!("r{i}")}))
+        .map(|i| json!({"type": "job_stop", "job_id": format!("r{i}")}))
         .collect::<Vec<_>>();
     let reply: HeartbeatReply =
         decode(&encode(&json!({"commands": stops}))).expect("the reply decodes");

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent::{Delivery, Drain, Exit, Handle, Session, Sleeper, Snapshot, Wake, Worker, drive};
-use js_agent_wire::{HeldRun, HeldState};
+use js_agent_wire::{HeldJob, HeldState};
 use serde_json::{Value, json};
 
 use super::fake::{Build, FakeMachine};
@@ -51,11 +51,11 @@ fn settling<'a>(worker: &Worker, act: impl FnMut(usize) -> Wake + 'a) -> Settlin
     }
 }
 
-/// The reply that acknowledges the result of `run`.
-fn ack_of(run: &str) -> Reply {
+/// The reply that acknowledges the result of the job `job`.
+fn ack_of(job: &str) -> Reply {
     reply(
         200,
-        json!({ "commands": [], "result_acks": [{ "run_id": run, "ack": "ACCEPTED" }] }),
+        json!({ "commands": [], "job_acks": [{ "job_id": job, "ack": "ACCEPTED" }] }),
     )
 }
 
@@ -121,17 +121,17 @@ fn a_job_that_ends_during_the_drain_is_reported_before_the_agent_leaves() {
         phases(&sent),
         ["serving", "draining", "draining", "draining"]
     );
-    assert_eq!(sent[1].1["held"][0]["state"], "running");
-    assert_eq!(sent[2].1["results"][0]["run_id"], "r1");
-    assert_eq!(sent[2].1["results"][0]["outcome"], "succeeded");
-    assert_eq!(sent[3].1["held"], json!([]));
+    assert_eq!(sent[1].1["jobs"][0]["state"], "running");
+    assert_eq!(sent[2].1["jobs"][0]["result"]["job_id"], "r1");
+    assert_eq!(sent[2].1["jobs"][0]["result"]["outcome"], "succeeded");
+    assert!(sent[3].1.get("jobs").is_none(), "{}", sent[3].1);
     assert_eq!(machine.world.created(), ["r1"], "r2 is not taken");
     assert!(
         !machine.world.log().contains(&"stop r1".to_owned()),
         "the job ended on its own"
     );
     assert!(
-        log.contains("draining: the start of r2 is not taken"),
+        log.contains("draining: the start of job r2 is not taken"),
         "{log}"
     );
     assert!(!log.contains("a run or a result is left"), "{log}");
@@ -165,9 +165,9 @@ fn a_job_still_running_after_the_wait_is_stopped_and_reported() {
     let (exit, _, sent) = drained(&worker, drain, replies, act);
 
     assert_eq!(exit, Exit::Stopped);
-    assert_eq!(sent[1].1["held"][0]["state"], "running");
-    assert_eq!(sent[3].1["results"][0]["outcome"], "killed");
-    assert_eq!(sent[4].1["held"], json!([]));
+    assert_eq!(sent[1].1["jobs"][0]["state"], "running");
+    assert_eq!(sent[3].1["jobs"][0]["result"]["outcome"], "killed");
+    assert!(sent[4].1.get("jobs").is_none(), "{}", sent[4].1);
     assert_eq!(
         *before_stop.borrow(),
         [false, false, true, true],
@@ -197,8 +197,8 @@ fn a_result_nobody_acknowledges_is_kept_when_the_drain_gives_up() {
     assert_eq!(exit, Exit::Stopped);
     assert!(log.contains("draining: a run or a result is left"), "{log}");
     let snapshot = worker.snapshot();
-    assert_eq!(snapshot.results.len(), 1);
-    assert_eq!(snapshot.held.len(), 1);
+    assert_eq!(snapshot.jobs.len(), 1);
+    assert!(snapshot.jobs[0].result.is_some());
 }
 
 /// Asserts that a second stop request ends the drain at once: the job is untouched, still
@@ -295,12 +295,13 @@ fn a_refusal_or_a_dead_worker_ends_the_loop() {
 #[test]
 fn a_reply_that_finds_the_queue_gone_during_the_drain_ends_it_as_failed() {
     let machine = FakeMachine::new();
-    let running = HeldRun {
-        run_id: "r1".to_owned(),
+    let running = HeldJob {
+        job_id: "r1".to_owned(),
         state: HeldState::Running,
+        result: None,
     };
     let held = Snapshot {
-        held: vec![running],
+        jobs: vec![running],
         ..Snapshot::default()
     };
     let dir = Scratch::new("jobs-drain-orphan");
@@ -466,7 +467,7 @@ fn with_blocked_run(dir: &Scratch, machine: &FakeMachine) -> Worker {
     assert!(worker.handle().settle());
     let snapshot = worker.snapshot();
     assert_eq!(snapshot.blocked, ["r1"], "{snapshot:?}");
-    assert_eq!(snapshot.results.len(), 1);
+    assert!(snapshot.jobs[0].result.is_some());
     worker
 }
 
@@ -489,12 +490,10 @@ fn a_run_the_taint_blocks_does_not_hold_the_drain() {
     assert_eq!(exit, Exit::Stopped);
     assert_eq!(phases(&sent), ["serving", "serving", "draining"]);
     assert_eq!(sent[1].1["taint"]["reason"], "unchecked");
-    assert_eq!(sent[1].1["results"][0]["run_id"], "r1");
-    assert_eq!(
-        sent[2].1["held"],
-        json!([{ "run_id": "r1", "state": "exited_unacked" }])
-    );
-    assert_eq!(sent[2].1["results"], json!([]));
+    assert_eq!(sent[1].1["jobs"][0]["result"]["job_id"], "r1");
+    assert_eq!(sent[2].1["jobs"][0]["job_id"], "r1");
+    assert_eq!(sent[2].1["jobs"][0]["state"], "exited_unacked");
+    assert!(sent[2].1["jobs"][0].get("result").is_none());
     assert!(
         !machine.world.log().contains(&"stop r1".to_owned()),
         "a blocked run has nothing to stop"
@@ -528,9 +527,9 @@ fn the_result_of_a_blocked_run_holds_the_drain_until_it_is_acknowledged() {
         phases(&sent),
         ["serving", "draining", "draining", "draining"]
     );
-    assert_eq!(sent[1].1["results"][0]["run_id"], "r1");
-    assert_eq!(sent[2].1["results"][0]["run_id"], "r1");
-    assert_eq!(sent[3].1["results"], json!([]));
+    assert_eq!(sent[1].1["jobs"][0]["result"]["job_id"], "r1");
+    assert_eq!(sent[2].1["jobs"][0]["result"]["job_id"], "r1");
+    assert!(sent[3].1.get("jobs").is_none(), "{}", sent[3].1);
     assert!(
         log.contains("draining: only the runs whose checks found the taint are left"),
         "{log}"

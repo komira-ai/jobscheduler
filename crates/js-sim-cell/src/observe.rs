@@ -6,14 +6,14 @@
 //!   asked for ([`Ask`]) and every answer it heard, in order ([`ClientEvent`]);
 //! - each agent process: what it runs now, what it completed and which results the
 //!   server acknowledged ([`AgentTruth`]), its ground truth, not what it reported;
-//! - the cell's launch ledger ([`Launch`]): one entry per run an agent process
-//!   launched, with the runs that ended on their own ([`Completion`]) and the verdicts the
-//!   agents read on their results ([`Acked`]). The ledger is the cell's, not the agent's,
-//!   so an agent that dies and is replaced cannot reset it; the cell adds the agent
-//!   processes it killed ([`Killed`]). Beside them the ledger keeps what the agents sent
-//!   and were sent for the whole-host handshake: each ready report sent
-//!   ([`ReadyReport`]), each start delivered ([`StartSeen`]) and each stop or cancel that
-//!   reached a running run ([`StopSeen`]);
+//! - the cell's launch ledger ([`Launch`]): one entry per job an agent process launched.
+//!   The ledger is the cell's, not the agent's, so an agent that dies and is replaced
+//!   cannot reset it; the cell adds the agent processes it killed ([`Killed`]). Beside it
+//!   the ledger keeps what the agents sent for the whole-host handshake: each ready report
+//!   sent ([`ReadyReport`]). The runs that ended on their own ([`Completion`]), the
+//!   verdicts read on their results ([`Acked`]), the starts delivered ([`StartSeen`]) and
+//!   the stops that reached a running run ([`StopSeen`]) are entries that a test writes
+//!   into the observations by hand: no agent writes them, as no agent holds a run;
 //! - the server's list of hosts ([`ServerView`]), as the cell last read it. The cell
 //!   fills it from the registry's host views, never through the JSON route.
 //!
@@ -212,8 +212,6 @@ pub enum Verdict {
     Duplicate,
     /// The lease has moved on, or the server holds no record of the run.
     Stale,
-    /// The server holds no such lease.
-    UnknownLease,
     /// The result does not match the lease it names.
     Mismatch,
 }
@@ -320,9 +318,9 @@ pub struct StartSeen {
 /// How the server told an agent to end a run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum StopCommand {
-    /// The wire's `stop`.
+    /// A stop that gives the run its stop grace, then a kill.
     Stop,
-    /// The wire's `cancel`.
+    /// A cancel, which ends the run with no result.
     Cancel,
 }
 
@@ -426,10 +424,10 @@ pub struct Observations {
     pub agents: BTreeMap<HostId, AgentTruth>,
     /// The cell's launch ledger, oldest first; entries are only ever appended.
     pub ledger: Vec<Launch>,
-    /// The runs that ended on their own, from the cell's ledger, oldest first.
+    /// The runs that ended on their own, oldest first; only a test writes them.
     pub completions: Vec<Completion>,
-    /// The verdicts the agents read on their results, from the cell's ledger, oldest
-    /// first.
+    /// The verdicts the agents read on their results, oldest first; only a test writes
+    /// them.
     pub verdicts: Vec<Acked>,
     /// The agent processes the cell killed, oldest first.
     pub kills: Vec<Killed>,
@@ -437,10 +435,10 @@ pub struct Observations {
     pub server: ServerView,
     /// Every ready report an agent process sent, oldest first; only ever appended.
     pub ready: Vec<ReadyReport>,
-    /// Every start that reached an agent process, oldest first; only ever appended.
+    /// Every start that reached an agent process, oldest first; only a test writes them.
     pub starts: Vec<StartSeen>,
-    /// Every stop or cancel that reached a running run, oldest first; only ever
-    /// appended.
+    /// Every stop or cancel that reached a running run, oldest first; only a test writes
+    /// them.
     pub stops: Vec<StopSeen>,
     /// The items the client asked to cancel, with when it first asked.
     pub cancels: BTreeMap<ItemId, FarmTime>,

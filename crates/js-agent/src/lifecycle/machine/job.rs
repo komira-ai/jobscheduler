@@ -1,6 +1,6 @@
-//! What the machine keeps for each run: its [`Job`] and the stage it is in, what it books,
-//! how it ended, the run ids and job fences that must not start again, and the taints and
-//! the container spec that follow from a job.
+//! What the machine keeps for each job: its [`Job`] and the stage it is in, what it books,
+//! how it ended, the fences that must not start again, and the taints and the container
+//! spec that follow from a job.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
@@ -9,7 +9,6 @@ use js_agent_wire::{
     CpuSeries, HeldRun, HeldState, HostPort, Isolation, JobSpec, JobUsage, LogReport, MemorySeries,
     NativeSpec, Outcome, RunResult, StartSizing, Taint, refusal,
 };
-use serde::{Deserialize, Serialize};
 
 use super::providing::Providing;
 use super::{RETIRED_CAP, SLOTS};
@@ -45,8 +44,8 @@ pub(super) enum Stage {
     Freed,
 }
 
-/// What a job start gives its run beyond the run start it stands for; nothing for a run
-/// start.
+/// What a job start gives its run beyond the [`JobSpec`] it stands for; nothing for a start
+/// made by [`Lifecycle::start_spec`](crate::lifecycle::Lifecycle::start_spec).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct Given {
     /// The environment, by name in order ([`RunSpec::env`]).
@@ -64,7 +63,7 @@ pub(super) struct Given {
     pub(super) fs: JobFs,
     /// The server's Unix time in milliseconds at which it placed the job
     /// ([`JobStartSpec::placed_at_ms`](js_agent_wire::JobStartSpec::placed_at_ms)), for the
-    /// start's timeline alone; `None` for a run start.
+    /// start's timeline alone; `None` for a start that is not on the wire.
     pub(super) placed_at_ms: Option<u64>,
     /// The start asks for the FUSE device
     /// ([`JobStartSpec::fuse`](js_agent_wire::JobStartSpec::fuse)), which the admission gives
@@ -77,7 +76,7 @@ pub(super) struct Given {
     pub(super) xcode: Option<String>,
     /// What the start's booking came from
     /// ([`JobStartSpec::sizing`](js_agent_wire::JobStartSpec::sizing)), checked
-    /// ([`StartSizing::checked`]), for the journal alone; `None` for a run start.
+    /// ([`StartSizing::checked`]), for the journal alone; `None` for a start that is not on the wire.
     pub(super) sizing: Option<StartSizing>,
 }
 
@@ -122,9 +121,6 @@ pub(super) struct Waiting {
     pub(super) tickets: Vec<(String, Ticket)>,
     /// What else it waits for.
     pub(super) phase: Phase,
-    /// When the lease the start named ends, on the agent's clock (`u64::MAX` when the
-    /// start named none): the run's wall time never reaches past it.
-    pub(super) lease_end_ms: u64,
 }
 
 impl Stage {
@@ -197,7 +193,7 @@ pub(super) fn cgroup_not_found_taint(run_id: &str) -> Taint {
 /// reached it is reported as it exited.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Cause {
-    /// A `Stop` or `Cancel`.
+    /// A `JobStop`.
     Stopped,
     /// The wall-time limit.
     TimedOut,
@@ -235,18 +231,6 @@ pub(super) fn input_failure(
 /// silence, none otherwise.
 pub(super) fn cause_detail(cause: Option<Cause>) -> Option<&'static str> {
     (cause == Some(Cause::Silenced)).then_some(detail::SILENCE_STOP)
-}
-
-/// What a job is keyed by on the wire, which decides where it is listed: a run (the lease
-/// and run messages: `held`, `results`, `result_acks`) or a job (the per-job messages:
-/// `jobs`, `jobs[].result`, `job_acks`). A job is listed under its own keying alone.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum Keyed {
-    /// Started by a `Start`: its id is a run id and its lease a lease id.
-    Run,
-    /// Started by a `JobStart`: its id is a job id and its lease the allocation id.
-    Job,
 }
 
 /// What a job holds of the host while its slot is booked.
@@ -346,12 +330,10 @@ pub(super) struct Cleaning {
 }
 
 pub(super) struct Job {
-    /// The run id, or the job id of a job keyed by job.
+    /// The job id.
     pub(super) run_id: String,
-    /// The lease id, or the allocation id of a job keyed by job.
+    /// The allocation id.
     pub(super) lease_id: String,
-    /// Which messages the job is listed and acknowledged in.
-    pub(super) keyed: Keyed,
     pub(super) booking: Booking,
     /// The slot the run holds, none for a run that was refused and one taken over from a
     /// container no slot is written on.
@@ -360,8 +342,6 @@ pub(super) struct Job {
     pub(super) deadline_ms: u64,
     pub(super) stage: Stage,
     pub(super) cause: Option<Cause>,
-    /// A cancelled job reports nothing.
-    pub(super) silent: bool,
     pub(super) stop_sent: bool,
     /// The job may change the host (`isolation = host`).
     pub(super) host: bool,
@@ -369,34 +349,29 @@ pub(super) struct Job {
     /// step of its cleanup, removed once the checks have run).
     pub(super) owed: bool,
     pub(super) result: Option<RunResult>,
-    /// The code of an input the host provides that failed, which a job keyed by job lists
+    /// The code of an input the host provides that failed, which the job lists
     /// in its result ([`JobResult::input_failure`](js_agent_wire::JobResult::input_failure)):
     /// set with the result, and kept with it in the state root.
     pub(super) input_failure: Option<String>,
-    /// What the runtime's capture saw of each stream, read with the result's tail: a job
-    /// keyed by job lists it in its result. `None` from a runtime that uploads no live logs,
+    /// What the runtime's capture saw of each stream, read with the result's tail: the job
+    /// lists it in its result. `None` from a runtime that uploads no live logs,
     /// for a run without a sink, and for a result read back from the state root.
     pub(super) logs: Option<LogReport>,
-    /// What the runtime's control group of the container counted, read with the result: a job
-    /// keyed by job lists it in its result. `None` for a runtime that cannot read it, and for
+    /// What the runtime's control group of the container counted, read with the result: the job
+    /// lists it in its result. `None` for a runtime that cannot read it, and for
     /// a result read back from the state root, which never reports a zero for what it does
     /// not know.
     pub(super) usage: Option<JobUsage>,
-    /// The job's CPU second by second, as the runtime recorded it, read with the result: a job
-    /// keyed by job lists it in its result. `None` for a runtime that records none, and for a
+    /// The job's CPU second by second, as the runtime recorded it, read with the result: the job
+    /// lists it in its result. `None` for a runtime that records none, and for a
     /// result read back from the state root or a run adopted already ended.
     pub(super) cpu_series: Option<CpuSeries>,
     /// The job's non-file memory second by second, read as `cpu_series` is.
     pub(super) memory_series: Option<MemorySeries>,
     /// What the job's booking came from, as its start said ([`Given::sizing`]): `None` for a
-    /// run start and for a job taken over from an earlier agent.
+    /// start that is not on the wire and for a job taken over from an earlier agent.
     pub(super) sizing: Option<StartSizing>,
     pub(super) findings: Vec<Finding>,
-    /// When the container started, on the agent's monotonic clock, in microseconds (the
-    /// lifecycle's clock counts milliseconds, so the stamp is a whole number of them). For
-    /// an adopted job it is when the runtime says the container began; `None` when that was
-    /// before the clock did, which the clock cannot say.
-    pub(super) started_usec: Option<u64>,
     /// The container's control group directory, asked of the runtime when the job starts
     /// or is adopted and, while it is not known, again by `Lifecycle::find_cgroups`.
     pub(super) cgroup: Option<PathBuf>,
@@ -425,9 +400,6 @@ pub(super) struct Job {
     /// Where its cleanup stands, once it ended.
     pub(super) cleaning: Cleaning,
 }
-
-/// Microseconds in a millisecond.
-const USEC_PER_MS: u64 = 1000;
 
 impl Job {
     pub(super) fn report(
@@ -479,20 +451,17 @@ impl Job {
         }
     }
 
-    /// Ends a job that was stopped before its container was made: killed, and silent (no
-    /// result) when it was cancelled. No container was made: the cleanup that follows
-    /// discards what the runtime prepared of its file system, removes the directories made
-    /// for its assembly, if any, and gives the slot back.
+    /// Ends a job that was stopped before its container was made: killed. No container was
+    /// made: the cleanup that follows discards what the runtime prepared of its file system,
+    /// removes the directories made for its assembly, if any, and gives the slot back.
     pub(super) fn end_unstarted(&mut self, events: &mut Vec<Event>) {
-        if !self.silent {
-            let detail = cause_detail(self.cause);
-            self.result = Some(self.report(Outcome::Killed, None, detail));
-            events.push(Event::ResultReady {
-                run_id: self.run_id.clone(),
-                booked: self.booked(),
-                usage: None,
-            });
-        }
+        let detail = cause_detail(self.cause);
+        self.result = Some(self.report(Outcome::Killed, None, detail));
+        events.push(Event::ResultReady {
+            run_id: self.run_id.clone(),
+            booked: self.booked(),
+            usage: None,
+        });
         self.stage = Stage::Scratch;
     }
 
@@ -518,8 +487,8 @@ impl Job {
 
     /// Asks a running job, or one still waiting to start, to stop; a job past its
     /// exit has nothing to stop.
-    pub(super) fn request_stop(&mut self, silent: bool) {
-        self.request_stop_for(Cause::Stopped, silent);
+    pub(super) fn request_stop(&mut self) {
+        self.request_stop_for(Cause::Stopped);
     }
 
     /// Stops a job adopted after a restart whose host ports could not be offered again
@@ -527,18 +496,17 @@ impl Job {
     /// `host-port-lost`, which a job that exits by itself before the stop reaches it keeps
     /// too unless it succeeded.
     pub(super) fn lose_host_ports(&mut self, why: String, events: &mut Vec<Event>) {
-        self.request_stop_for(Cause::HostPortLost, false);
+        self.request_stop_for(Cause::HostPortLost);
         self.note(code::HOST_PORT_LOST, why, events);
     }
 
     /// Asks a running job, or one still waiting to start, to stop for `cause` (a cause
     /// already set stays); a job past its exit has nothing to stop. Whether it was running
     /// or waiting.
-    pub(super) fn request_stop_for(&mut self, cause: Cause, silent: bool) -> bool {
+    pub(super) fn request_stop_for(&mut self, cause: Cause) -> bool {
         let live = matches!(self.stage, Stage::Running(_) | Stage::Preparing(_));
         if live {
             self.cause.get_or_insert(cause);
-            self.silent |= silent;
         }
         live
     }
@@ -565,10 +533,9 @@ pub(super) fn outcome(cause: Option<Cause>, exit: Option<Exit>) -> (Outcome, Opt
     }
 }
 
-/// The fences that must never start again, oldest first: each a run id (or job id) with
-/// the allocation (lease) id of the job when it is known, and a count of the fences added,
-/// which says whether the list has changed since it was last written down. A run start is
-/// judged by its id alone ([`Retired::contains`]); a job start by its fence
+/// The fences that must never start again, oldest first: each a job id with the allocation
+/// id of the job when it is known, and a count of the fences added, which says whether the
+/// list has changed since it was last written down. A start is judged by its fence
 /// ([`Retired::fenced`]), so the same job under a new allocation is new work.
 #[derive(Default)]
 pub(super) struct Retired {
@@ -611,13 +578,6 @@ impl Retired {
             .map(|(id, allocation)| (id.as_str(), allocation.as_deref()))
     }
 
-    /// Whether any fence of `run_id` is retired: how a run start is judged.
-    pub(super) fn contains(&self, run_id: &str) -> bool {
-        let from: (String, Option<String>) = (run_id.to_owned(), None);
-        let first = self.seen.range(from..).next();
-        first.is_some_and(|(id, _)| id == run_id)
-    }
-
     /// Whether the fence of `job_id` under `allocation` is retired, by itself or by a stop
     /// of the job that named no allocation: how a job start is judged.
     pub(super) fn fenced(&self, job_id: &str, allocation: &str) -> bool {
@@ -640,7 +600,6 @@ impl Job {
         Self {
             run_id: spec.run_id.clone(),
             lease_id: spec.lease_id.clone(),
-            keyed: Keyed::Run,
             booking: Booking {
                 cpu_millis: spec.limits.cpu_millis,
                 memory_bytes: spec.limits.memory_bytes,
@@ -651,7 +610,6 @@ impl Job {
             deadline_ms,
             stage,
             cause: None,
-            silent: false,
             stop_sent: false,
             host: spec.isolation == Isolation::Host,
             owed: false,
@@ -663,7 +621,6 @@ impl Job {
             sizing: None,
             logs: None,
             findings: Vec::new(),
-            started_usec: None,
             cgroup: None,
             cgroup_missing_told: false,
             blind_told: false,
@@ -679,11 +636,10 @@ impl Job {
     /// A job that holds nothing and only owes its `result` (with its `input_failure`), as one
     /// read back from the state root after a restart: its slot is free, so it is only listed until the result is
     /// acknowledged.
-    pub(super) fn held(keyed: Keyed, result: RunResult, input_failure: Option<String>) -> Self {
+    pub(super) fn held(result: RunResult, input_failure: Option<String>) -> Self {
         Self {
             run_id: result.run_id.clone(),
             lease_id: result.lease_id.clone(),
-            keyed,
             booking: Booking {
                 cpu_millis: 0,
                 memory_bytes: 0,
@@ -694,7 +650,6 @@ impl Job {
             deadline_ms: 0,
             stage: Stage::Freed,
             cause: None,
-            silent: false,
             stop_sent: false,
             host: false,
             owed: false,
@@ -702,7 +657,6 @@ impl Job {
             input_failure,
             logs: None,
             findings: Vec::new(),
-            started_usec: None,
             usage: None,
             cpu_series: None,
             memory_series: None,
@@ -731,13 +685,11 @@ impl Job {
         Some(Self {
             run_id: label_id(found, label::RUN)?.to_owned(),
             lease_id: label_id(found, label::LEASE)?.to_owned(),
-            keyed: keyed_label(found),
             booking,
             slot,
             deadline_ms: now.saturating_add(remaining),
             stage: Stage::Running(found.id.clone()),
             cause: None,
-            silent: false,
             stop_sent: false,
             host: may_change_host(found),
             owed: false,
@@ -749,9 +701,6 @@ impl Job {
             sizing: None,
             logs: None,
             findings: Vec::new(),
-            started_usec: now
-                .checked_sub(found.running_ms)
-                .map(|started| started.saturating_mul(USEC_PER_MS)),
             cgroup: None,
             cgroup_missing_told: false,
             blind_told: false,
@@ -763,23 +712,16 @@ impl Job {
             cleaning: Cleaning::default(),
         })
     }
-
-    /// Marks the job as started `now_ms` on the agent's clock.
-    pub(super) fn started_at(&mut self, now_ms: u64) {
-        self.started_usec = Some(now_ms.saturating_mul(USEC_PER_MS));
-    }
 }
 
-/// The value of the keying label of a container a job start made.
+/// The value of the keying label of every container the agent makes.
 const JOB_KEYED_LABEL: &str = "job";
 
-/// How the job of a found container is keyed: by job when the agent labelled it so, and by
-/// run otherwise (a container of a run start, or one an earlier agent made).
-fn keyed_label(found: &Found) -> Keyed {
-    match found.labels.get(label::KEYING).map(String::as_str) {
-        Some(JOB_KEYED_LABEL) => Keyed::Job,
-        _ => Keyed::Run,
-    }
+/// Whether a found container is keyed by job: the agent labelled it so. A container with
+/// any other keying label, or none (one an older release's run start made), is not a job
+/// this agent can take over.
+pub(super) fn keyed_by_job(found: &Found) -> bool {
+    found.labels.get(label::KEYING).map(String::as_str) == Some(JOB_KEYED_LABEL)
 }
 
 /// The value of the isolation label of a container that runs a host job.
@@ -825,12 +767,12 @@ pub(super) fn host_taint_of(run_id: Option<&str>) -> Taint {
 }
 
 /// The run of a start: the spec's own labels with the agent's over them, the body the
-/// start names, a container's or a native program's, and what a job start gives it (`given`:
-/// its environment by name in order, and its live-log sink; nothing for a run start). `made`
+/// start names, a container's or a native program's, and what the start gives it (`given`:
+/// its environment by name in order, and its live-log sink). `made`
 /// is what the lifecycle made for the run: its resolved mounts, its scratch directory and its
 /// files directory.
 pub(super) fn run_spec(
-    (spec, keyed): (&JobSpec, Keyed),
+    spec: &JobSpec,
     given: &Given,
     (mounts, scratch, files): (Vec<ResolvedMount>, PathBuf, Option<PathBuf>),
     slot: u32,
@@ -853,12 +795,10 @@ pub(super) fn run_spec(
                 Isolation::Contained => CONTAINED_LABEL.to_owned(),
             },
         ),
+        (label::KEYING, JOB_KEYED_LABEL.to_owned()),
     ];
     let mut labels: BTreeMap<String, String> = spec.labels.clone();
     labels.extend(own.map(|(key, value)| (key.to_owned(), value)));
-    if keyed == Keyed::Job {
-        labels.insert(label::KEYING.to_owned(), JOB_KEYED_LABEL.to_owned());
-    }
     if given.vm {
         labels.insert(label::KIND.to_owned(), label::VM_KIND.to_owned());
     }

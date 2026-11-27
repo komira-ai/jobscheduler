@@ -19,6 +19,7 @@ fn labels<'a>(run: &'a str, gpus: &'a str) -> Vec<(&'static str, &'a str)> {
         (label::GPUS, gpus),
         (label::WALL_MS, "60000"),
         (label::ISOLATION, "contained"),
+        (label::KEYING, "job"),
     ]
 }
 
@@ -55,9 +56,7 @@ fn restart_readopts_labelled_containers_listed_first() {
     assert_eq!(h.held(), ["r2", "r1", "r3"], "adopted runs come first");
 
     h.life.step();
-    let result = h
-        .life
-        .results()
+    let result = super::results(&h.life)
         .into_iter()
         .find(|r| r.run_id == "r2")
         .unwrap();
@@ -68,7 +67,7 @@ fn restart_readopts_labelled_containers_listed_first() {
     );
     assert_eq!(result.lease_id, "lease-r2");
     assert_eq!(
-        h.life.held()[1],
+        super::held(&h.life)[1],
         HeldRun {
             run_id: "r1".to_owned(),
             state: HeldState::Running
@@ -86,11 +85,11 @@ fn an_adopted_job_keeps_the_time_it_has_already_used() {
     h.restart().unwrap();
     h.clock.advance(999);
     h.life.step();
-    assert!(h.life.results().is_empty());
+    assert!(super::results(&h.life).is_empty());
     h.clock.advance(1);
     h.life.step();
-    assert_eq!(h.life.results()[0].outcome, Outcome::TimedOut);
-    assert_eq!(h.life.results()[0].lease_id, "lease-old");
+    assert_eq!(super::results(&h.life)[0].outcome, Outcome::TimedOut);
+    assert_eq!(super::results(&h.life)[0].lease_id, "lease-old");
 }
 
 /// `base` with the label `key` set to `value`.
@@ -150,6 +149,46 @@ fn containers_the_agent_cannot_account_for_are_stopped_removed_and_findings() {
     assert_eq!(h.fake.existing(), [kept], "only the adopted one is left");
     assert_eq!(h.fake.stops().len(), 14, "each was stopped, by its own id");
     assert!(h.fake.stops().iter().all(|(id, _)| *id != "leaked-1"));
+}
+
+/// Asserts that a labelled container of an older release, whose labels name its run and
+/// lease and carry no keying label (or a keying other than `job`), is not adopted: it is
+/// stopped and removed by its own id with one `unadoptable-container` finding, nothing is
+/// booked for it, and it is listed in neither the held runs nor the held jobs, while a
+/// container beside it that carries the job keying is adopted. It catches an agent that
+/// takes over a container of a run start it can no longer account for, and one that leaves
+/// it running with nothing booked.
+#[test]
+fn a_container_of_an_older_releases_run_start_is_removed_not_adopted() {
+    let mut h = Harness::new("adopt-older-run");
+    let good = labels("good", "0");
+    let kept = h.fake.leak(&good, 0);
+    let unkeyed: Vec<_> = good
+        .iter()
+        .copied()
+        .filter(|(key, _)| *key != label::KEYING)
+        .collect();
+    h.fake.leak(&set(&unkeyed, label::RUN, "older"), 0);
+    let marked = set(&good, label::RUN, "marked");
+    h.fake.leak(&set(&marked, label::KEYING, "run"), 0);
+    let events = names(&h.restart().unwrap());
+    assert_eq!(
+        events,
+        [
+            "adopted good",
+            "finding - unadoptable-container",
+            "finding - unadoptable-container"
+        ]
+    );
+    assert_eq!(h.held(), ["good"]);
+    assert_eq!(h.life.held_jobs().len(), 1);
+    assert_eq!(
+        h.fake.existing(),
+        [kept],
+        "only the job's container is left"
+    );
+    assert_eq!(h.fake.stops().len(), 2, "each was stopped, by its own id");
+    assert_eq!(h.life.free().cpu_millis, 3000, "only good is booked");
 }
 
 /// Asserts that an unadoptable container that cannot be removed is a different finding,
@@ -304,7 +343,11 @@ fn adoption_keeps_exited_then_oldest_and_evicts_the_newest() {
     assert_eq!(stopped, [mid.clone(), new.clone()], "the newest go");
     assert_eq!(h.fake.existing(), [old, done]);
     h.life.step();
-    assert_eq!(h.life.results()[0].run_id, "done", "its result is kept");
+    assert_eq!(
+        super::results(&h.life)[0].run_id,
+        "done",
+        "its result is kept"
+    );
 }
 
 /// Asserts that a lone GPU list that names a device twice is not adopted, though both

@@ -38,7 +38,7 @@ Columns:
 | rollout.md | 21 | 5 | 4 | 3 | - |
 | risks-f.md | 16 | 2 | 5 | 3 | komira-ai/jobscheduler#1150, komira-ai/jobscheduler#1152, komira-ai/jobscheduler#1172, komira-ai/jobscheduler#1174 |
 | merged-code.md | 34 | 15 | 5 | 3 | komira-ai/jobscheduler#1168, komira-ai/jobscheduler#1169, komira-ai/jobscheduler#1170, komira-ai/jobscheduler#1171 |
-| jobscheduler-design.md | 82 | 38 | 20 | 7 | komira-ai/jobscheduler#1153, komira-ai/jobscheduler#1154, komira-ai/jobscheduler#1155, komira-ai/jobscheduler#1156, komira-ai/jobscheduler#1157, komira-ai/jobscheduler#1158, komira-ai/jobscheduler#1174 |
+| jobscheduler-design.md | 82 | 40 | 18 | 7 | komira-ai/jobscheduler#1153, komira-ai/jobscheduler#1154, komira-ai/jobscheduler#1155, komira-ai/jobscheduler#1157, komira-ai/jobscheduler#1158, komira-ai/jobscheduler#1174 |
 | pools-providers-network.md | 30 | 6 | 8 | 10 | - |
 | job-rootfs.md | 17 | 3 | 2 | 9 | komira-ai/jobscheduler#1159 |
 | job-retry-and-completion-callback.md | 17 | 8 | 2 | 5 | komira-ai/jobscheduler#1150, komira-ai/jobscheduler#1193 |
@@ -49,7 +49,7 @@ Columns:
 | kbf-on-js-agent.md | 51 | 16 | 14 | 10 | - |
 | extraction-steps.md | 32 | 10 | 12 | 0 | - |
 | extraction-steps-d.md | 49 | 17 | 11 | 5 | komira-ai/jobscheduler#1150, komira-ai/jobscheduler#1167, komira-ai/jobscheduler#1168, komira-ai/jobscheduler#1169, komira-ai/jobscheduler#1170, komira-ai/jobscheduler#1172, komira-ai/jobscheduler#1173, komira-ai/jobscheduler#1174, komira-ai/jobscheduler#1175 |
-| agent-wire.md | 16 | 3 | 2 | 5 | komira-ai/jobscheduler#1146, komira-ai/jobscheduler#1156, komira-ai/jobscheduler#1177, komira-ai/jobscheduler#1193 |
+| agent-wire.md | 16 | 4 | 2 | 4 | komira-ai/jobscheduler#1146, komira-ai/jobscheduler#1177, komira-ai/jobscheduler#1193 |
 | configuration.md | 4 | 0 | 0 | 3 | komira-ai/jobscheduler#1153 |
 | deployment.md | 13 | 5 | 3 | 3 | - |
 | hosts.md | 41 | 2 | 12 | 17 | komira-ai/jobscheduler#1150, komira-ai/jobscheduler#1173, komira-ai/jobscheduler#1174, komira-ai/jobscheduler#1175, komira-ai/jobscheduler#1176 |
@@ -323,7 +323,7 @@ As read: Current entry-point design doc (target plus as-built notes); not supers
 | step 15 / 5.8 macOS mapping | open value on --native-network, level mapping, ports refused, root test for inbound filtering by uid | partly: `crates/js-agent/src/native/network.rs:46-132` | komira-ai/jobscheduler#679 |
 | 3.1 macOS runtime; step 17; 12.2 Macs | One image definition on both platforms: native body folded in; stage inputs and collecting outputs | partly: `crates/js-agent-wire/src/command.rs:233`, `crates/js-agent/src/native/mod.rs:111` | komira-ai/jobscheduler#1154 (new) |
 | 3.1 macOS runtime | A job cannot ask for a VM on macOS | partly: `crates/js-agent-wire/src/kind.rs:15`, `crates/js-vmm` | komira-ai/jobscheduler#1155 (new) |
-| 3.1 Agent | Per-run start/stop dropped from the agent wire (rest of step 28) | partly: `crates/js-agent-wire/src/command.rs:265`, `crates/js-agent/src/lifecycle/machine/mod.rs:239` | komira-ai/jobscheduler#1156 (new) |
+| 3.1 Agent | Per-run start/stop dropped from the agent wire (rest of step 28) | `crates/js-agent-wire/src/command.rs` (enum Command: `job_start`, `job_stop`, `Unknown`), `crates/js-registry/src/registry/beat.rs` (fn answer) | komira-ai/jobscheduler#1156 |
 | 3.5 provider table | lambdalabs row 'Partly built: built as ElasticProvider' | `crates/js-provider-lambdalabs` | komira-ai/jobscheduler#652 |
 | 3.5 ContainerPlatform sketch | capabilities and can_ever_serve; logs for Default | partly: `crates/js-platform/src/lib.rs:292` | komira-ai/jobscheduler#678 |
 | 3.5 CapacityProvider sketch | events: Interruption notice (Reclaimed built) | no | komira-ai/jobscheduler#1174 (new) |
@@ -366,7 +366,7 @@ As read: Current entry-point design doc (target plus as-built notes); not supers
 | 12.1 step 23 | GPUs for crun | `crates/js-agent/src/crun/gpu.rs:1` | - |
 | 12.1 step 24 | Other container platforms behind ContainerPlatform | no | - |
 | 12.1 steps 25, 26 | Capability vocabulary and alias table; catalog translation, cache, verify-on-hello | `crates/js-types/src/accel.rs`, `crates/js-elastic/src/cache.rs` | - |
-| 12.1 steps 27, 28 | Job calls served; agent protocol per job | partly: job_api/submit.rs:21; job_expiry.rs; job_loss.rs; agent-wire per_job.rs; lease/run messages still in js-agent-wire command.rs:265 | komira-ai/jobscheduler#1156 (new) |
+| 12.1 steps 27, 28 | Job calls served; agent protocol per job | job_api/submit.rs:21; job_expiry.rs; job_loss.rs; agent-wire per_job.rs; `crates/js-agent-wire/src/command.rs` (enum Command, the run commands gone); `crates/js-registry/src/registry/beat.rs` (fn answer) | komira-ai/jobscheduler#1156 |
 | 12.1 steps 29, 30 | Remove renewal; delete lease API | yes: PR komira-ai/jobscheduler#831; no renew/lease-ttl code in js-lease-server; js-lease crate gone | komira-ai/jobscheduler#831 |
 | 12.1 step 31 | Live logs | `crates/js-logstore`, `crates/js-logmint` | - |
 | 12.2 Macs remaining | read model allow; notarized binaries; automated isolation test per release; VM runtime with network path | partly: `crates/js-agent/src/bundle/settings.rs:253`, `xtask/tests/macos_pkg_workflow/main.rs:561` | komira-ai/jobscheduler#1157 (new); komira-ai/jobscheduler#1158 (new) |
@@ -761,8 +761,8 @@ As read: Decision paper (step 20), recommends staying on JSON polling (A); no ov
 |---|---|---|---|
 | §2 live-log fields, line 335 | The agent's results_budget is to count the per-result logs fields and the beat's log_grant_state before it fits log tails | `crates/js-agent/src/lifecycle/machine/tails.rs:28-30`, `crates/js-agent/src/session.rs:694` | komira-ai/jobscheduler#691 |
 | §4 follow-up (A) 1 | Record the decision (stay on JSON polling) in section 3.6 and step 20 of jobscheduler-design.md | partly: `docs/design/jobscheduler-design.md:301` | komira-ai/jobscheduler#1193 (new) |
-| §4 follow-up (A) 2 | Build the server side of the per-job set (step 28): job_start/job_stop/acks, and answer an older agent's heartbeat as a responder (cancel per held run, unknown-lease ack per result) without refusing a hello lacking per-job, with a test against the previous release's heartbeat fixture | `crates/js-lease-server/src/agent_api.rs`, `crates/js-registry/src/registry/beat.rs` | komira-ai/jobscheduler#664; komira-ai/jobscheduler#804 |
-| §4 follow-up (A) 2 / §5 point 3 | Decide how and when the run messages (Command::Start/Stop/Cancel, RunResult, ResultAck) leave major 1 / the wire (steps 28, 30) | no | komira-ai/jobscheduler#1156 (new) |
+| §4 follow-up (A) 2 | Build the server side of the per-job set (step 28): job_start/job_stop/acks, and answer an older agent's heartbeat as a responder (cancel per held run, unknown-lease ack per result) without refusing a hello lacking per-job, with a test against the previous release's heartbeat fixture | `crates/js-lease-server/src/agent_api.rs` (the per-job set); the cancel and unknown-lease answer to an older agent: superseded by komira-ai/jobscheduler#1156, which answers it with no command and no `result_acks` | komira-ai/jobscheduler#664; komira-ai/jobscheduler#804; komira-ai/jobscheduler#1156 |
+| §4 follow-up (A) 2 / §5 point 3 | Decide how and when the run messages (Command::Start/Stop/Cancel, RunResult, ResultAck) leave major 1 / the wire (steps 28, 30) | `crates/js-agent-wire/src/command.rs` (enum Command: the run commands left; an older server's read as `Unknown`), `crates/js-registry/src/registry/beat.rs` (fn answer: no command, no `result_acks`); the held/results/result_acks fields stay, always empty; refusing a hello without per-job is not taken (it raises the floor) | komira-ai/jobscheduler#1156 |
 | §4 follow-up (A) 3 / §5 point 7 | Move the previous-release fixtures to the first release whose agent sends the per-job lists, so both-direction tests cover per-job bodies | `crates/js-agent-wire/tests/fixtures/v0.1.208/`, `crates/js-agent-wire/tests/previous_release_v0_1_208.rs` | - |
 | §4 follow-up (A) 4 / §5 point 2 | Bound what a heartbeat lists besides tails so a beat whose non-tail content passes the 64 KiB body limit cannot be built (today it is refused 413 and the agent exits 2); also count 413s and cut tails to see how near real beats come | partly: `crates/js-agent/src/lifecycle/machine/per_job.rs:30-36`, `crates/js-agent/src/lifecycle/machine/tails.rs:28` | komira-ai/jobscheduler#1177 (new) |
 | §4 follow-up (B) 1-4 | If the decision were B: a .proto for the agent wire, server reading protobuf by Content-Type, a hello capability and welcome field, then a major 2 without JSON | not a gap: decision A (stay on JSON polling) was taken | - |

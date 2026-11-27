@@ -146,7 +146,7 @@
 //!
 //! # Jobs
 //!
-//! With `--no-jobs` the agent registers and heartbeats and starts nothing; a `Start` the
+//! With `--no-jobs` the agent registers and heartbeats and starts nothing; a job start the
 //! server sends it is ignored (and counted in the log). A Linux agent otherwise runs `crun`,
 //! and a Mac agent the native runtime of `--native-accounts`, which it requires. With
 //! `--allow-container-engine` and `--container-bin` a Linux agent runs the container engine
@@ -155,12 +155,14 @@
 //! takes the baseline of the host for the post-job checks, opens the taint marker, adopts the
 //! runs an earlier process of this agent left, and starts the [`Worker`], the thread that
 //! owns the [`lifecycle`]: it runs every call into the runtime, so a slow runtime never
-//! delays a heartbeat. The first hello lists what was adopted.
+//! delays a heartbeat. What was adopted is listed by the first heartbeat; the hello's held
+//! list is always empty.
 //!
-//! From then on each heartbeat carries the runs the agent holds, the results the server has
-//! not acknowledged and the taint to report; each reply's commands go to the worker in
-//! order (a command it refuses is logged by its place in the reply), its result
-//! acknowledgements let the worker drop the results it sent, and its `taint_ack` counts
+//! From then on each heartbeat carries the jobs the agent holds with the results the server
+//! has not acknowledged, the retired job ids and the taint to report (its `held` and
+//! `results` lists, fields of the wire an older server reads, are always empty); each reply's
+//! commands go to the worker in order (a command it refuses is logged by its place in the
+//! reply), its job acknowledgements let the worker drop the results it sent, and its `taint_ack` counts
 //! only when the heartbeat it answers carried the taint. See [`Session`] and [`Worker`]
 //! for the details and [`lifecycle`] for what the agent guarantees per job.
 //!
@@ -233,7 +235,7 @@
 //! 0, so the server leases the host no more. With jobs the agent first drains (see
 //! [`drive`] for the whole of it): it takes no new job, announces `draining` at once, lets
 //! the running jobs finish for `--drain-wait`, then stops them, and goes on heartbeating
-//! until the server has acknowledged every result and the host holds no run, or `--stop-grace`
+//! until the server has acknowledged every result and the host holds no job, or `--stop-grace`
 //! and [`DRAIN_SETTLE`] more have passed. A second signal ends it at once. A result that
 //! is not acknowledged is never dropped: its run stays listed, and a container that is
 //! still there is adopted by the next process.

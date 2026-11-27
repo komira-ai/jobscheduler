@@ -73,7 +73,7 @@ fn a_held_host_refuses_a_start_without_tainting() {
     assert!(h.fake.created().is_empty());
     assert!(!h.life.is_tainted());
     assert!(!h.marker().exists());
-    let results = h.life.results();
+    let results = super::results(&h.life);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].run_id, "r1");
     assert_eq!(results[0].outcome, Outcome::FailedToStart);
@@ -82,7 +82,8 @@ fn a_held_host_refuses_a_start_without_tainting() {
 
 /// Asserts that a held host refuses a per-job start the same way: the code `host-held`,
 /// nothing created, the answer in the job's listing as `failed_to_start` with the detail
-/// `host-held`, no run result and no taint. It catches a hold that only covers run starts.
+/// `host-held`, and no taint. It catches a hold that a job start does not
+/// meet.
 #[test]
 fn a_held_host_refuses_a_job_start() {
     let mut h = Harness::new("hold-job");
@@ -91,7 +92,6 @@ fn a_held_host_refuses_a_job_start() {
     assert_eq!(names(&events), ["refused j1 host-held"]);
     assert_eq!(why_of(&events), Hold::Held.why().unwrap());
     assert!(h.fake.created().is_empty());
-    assert!(h.life.results().is_empty());
     assert!(!h.life.is_tainted());
     let result = listing(&h, "j1").result.expect("a result");
     assert_eq!(result.outcome, Outcome::FailedToStart);
@@ -127,8 +127,7 @@ fn a_hold_written_during_a_run_leaves_it_running() {
     let events = names(&h.life.step());
     assert_eq!(events[0], "result r1");
     assert!(
-        h.life
-            .results()
+        super::results(&h.life)
             .iter()
             .any(|r| r.run_id == "r1" && r.outcome == Outcome::Succeeded)
     );

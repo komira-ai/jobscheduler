@@ -5,7 +5,6 @@
 
 use js_agent::lifecycle::{Clock, Event, JobBooking, LookupStamps, StartTimeline};
 use js_agent::{Machine, System};
-use js_agent_wire::Command;
 
 use super::fake::{NoUnixClock, UNIX_ORIGIN_MS};
 use super::per_job::{job_start, start};
@@ -45,7 +44,7 @@ fn a_start_is_logged_with_each_step_from_its_arrival_to_its_create() {
     h.fake.create_takes(7);
     h.fake
         .steps_of("r1", &[("begin", 1_000), ("bundle", 1_003)]);
-    let start = reply(vec![Command::Start(Box::new(job("r1")))]);
+    let start = reply(vec![job_start(start("r1"))]);
     let events = h.life.apply_at(&start, 4);
     let timeline = StartTimeline {
         received_ms: 4,
@@ -158,7 +157,7 @@ fn a_failed_start_leaves_no_timeline_behind() {
         runtime: Vec::new(),
         lookup: None,
     };
-    let start = reply(vec![Command::Start(Box::new(job("r2")))]);
+    let start = reply(vec![job_start(start("r2"))]);
     assert_eq!(h.life.apply_at(&start, 5), started("r2", timeline));
 }
 

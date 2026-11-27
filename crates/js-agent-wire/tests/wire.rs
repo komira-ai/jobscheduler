@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{heartbeat, heartbeat_with_load, hello, job, round_trip, welcome};
+use common::{heartbeat, heartbeat_with_load, hello, job, job_start, round_trip, welcome};
 use js_agent_wire::refusal;
 use js_agent_wire::{
     Ack, Command, DEFAULT_GRACE_MS, DEFAULT_HEARTBEAT_INTERVAL_MS, HeartbeatReply, HeldState,
@@ -229,8 +229,8 @@ fn round_trip_of_every_variant() {
         Ack::Accepted,
         Ack::Duplicate,
         Ack::Stale,
-        Ack::UnknownLease,
         Ack::Mismatch,
+        Ack::Unknown,
     ] {
         round_trip(&ack);
     }
@@ -238,9 +238,9 @@ fn round_trip_of_every_variant() {
         round_trip(&isolation);
     }
     for command in [
-        Command::Start(Box::new(job())),
-        Command::Stop { run_id: "r".into() },
-        Command::Cancel { run_id: "r".into() },
+        Command::JobStart(Box::new(job_start())),
+        Command::JobStop { job_id: "r".into() },
+        Command::Unknown,
     ] {
         round_trip(&command);
     }
@@ -294,7 +294,7 @@ fn round_trip_of_every_message() {
         check: None,
     });
     round_trip(&HeartbeatReply {
-        commands: vec![Command::Start(Box::new(job()))],
+        commands: vec![Command::JobStart(Box::new(job_start()))],
         result_acks: vec![ResultAck {
             run_id: "r".into(),
             ack: Ack::Stale,

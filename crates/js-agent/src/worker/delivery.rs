@@ -35,8 +35,7 @@ pub enum Delivery {
 impl Worker {
     /// Hands a reply to the worker without waiting: [`Delivery::Full`] when the worker is
     /// busy and the reply was dropped, [`Delivery::Gone`] when nobody reads the queue. The
-    /// reply is stamped with the clock now, so a start that waits in the queue has its
-    /// `valid_for_ms` counted from the moment it arrived.
+    /// reply is stamped with the clock now, so the lifecycle knows when it arrived.
     pub fn try_deliver(&self, reply: HeartbeatReply) -> Delivery {
         self.deliver(reply, true, self.clock.now_ms())
     }

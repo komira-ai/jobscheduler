@@ -20,19 +20,19 @@ const DRAIN: Drain = Drain {
     settle: Duration::from_secs(30),
 };
 
-/// A reply of 200 with these acknowledgements and taint flag.
+/// A reply of 200 with these job acknowledgements and taint flag.
 fn answer(acks: &[(&str, &str)], taint_ack: bool) -> crate::support::Reply {
     let acks: Vec<Value> = acks
         .iter()
-        .map(|(run, ack)| json!({ "run_id": run, "ack": ack }))
+        .map(|(job, ack)| json!({ "job_id": job, "ack": ack }))
         .collect();
     reply(
         200,
-        json!({ "commands": [], "result_acks": acks, "taint_ack": taint_ack }),
+        json!({ "commands": [], "job_acks": acks, "taint_ack": taint_ack }),
     )
 }
 
-/// A worker with `run` running, or exited with its result held.
+/// A worker with the job `run` running, or exited with its result held.
 fn with_run(dir: &Scratch, machine: &FakeMachine, run: &str, exited: bool) -> Worker {
     let worker = start(dir, machine);
     assert_eq!(worker.try_deliver(starts(&[run])), Delivery::Delivered);
@@ -44,13 +44,14 @@ fn with_run(dir: &Scratch, machine: &FakeMachine, run: &str, exited: bool) -> Wo
     worker
 }
 
-/// Asserts what the session says of the jobs: the hello lists the run the worker holds, the
-/// next heartbeat lists it as exited and carries its result, an acknowledgement in the
-/// reply makes the worker drop the result, and the heartbeat after that lists nothing. It
-/// catches a heartbeat that leaves out the held runs (the server would run the work
-/// twice), one that never carries the result, and an acknowledgement that goes nowhere.
+/// Asserts what the session says of the jobs: the hello lists no held run, the next
+/// heartbeat lists the job as exited with its result inside and no held run, an
+/// acknowledgement in the reply makes the worker drop the result, and the heartbeat after
+/// that lists nothing. It catches a heartbeat that leaves out the held jobs (the server
+/// would run the work twice), one that never carries the result, and an acknowledgement that
+/// goes nowhere.
 #[test]
-fn hello_and_heartbeat_carry_the_workers_runs_and_results() {
+fn hello_and_heartbeat_carry_the_workers_jobs_and_results() {
     let dir = Scratch::new("jobs-session-carry");
     let machine = FakeMachine::new();
     let worker = with_run(&dir, &machine, "r1", true);
@@ -66,23 +67,25 @@ fn hello_and_heartbeat_carry_the_workers_runs_and_results() {
     let sent = sent.borrow();
     let paths: Vec<&str> = sent.iter().map(|(path, _)| path.as_str()).collect();
     assert_eq!(paths, [HELLO_PATH, HEARTBEAT_PATH, HEARTBEAT_PATH]);
-    assert_eq!(
-        sent[0].1["held"],
-        json!([{ "run_id": "r1", "state": "exited_unacked" }])
-    );
-    assert_eq!(sent[1].1["held"], sent[0].1["held"]);
-    assert_eq!(sent[1].1["results"][0]["run_id"], "r1");
-    assert_eq!(sent[1].1["results"][0]["outcome"], "succeeded");
+    assert_eq!(sent[0].1["held"], json!([]));
+    assert!(sent[0].1.get("jobs").is_none(), "{}", sent[0].1);
+    assert_eq!(sent[1].1["held"], json!([]));
+    assert_eq!(sent[1].1["results"], json!([]));
+    assert_eq!(sent[1].1["jobs"][0]["job_id"], "r1");
+    assert_eq!(sent[1].1["jobs"][0]["state"], "exited_unacked");
+    assert_eq!(sent[1].1["jobs"][0]["result"]["job_id"], "r1");
+    assert_eq!(sent[1].1["jobs"][0]["result"]["outcome"], "succeeded");
     assert_eq!(sent[2].1["held"], json!([]));
     assert_eq!(sent[2].1["results"], json!([]));
+    assert!(sent[2].1.get("jobs").is_none(), "{}", sent[2].1);
 }
 
 /// Asserts that a new epoch keeps the worker and what it holds: after the server forgets
-/// the session (a stale epoch) the second hello lists the run again, and the run was
-/// created once. It catches a session that rebuilds the job half when it registers again,
-/// which would start the work twice or forget it.
+/// the session (a stale epoch) both hellos list no held run, the heartbeat after each lists
+/// the job running, and the job was created once. It catches a session that rebuilds the job
+/// half when it registers again, which would start the work twice or forget it.
 #[test]
-fn a_new_epoch_keeps_the_worker_and_lists_its_runs_in_the_hello() {
+fn a_new_epoch_keeps_the_worker_and_lists_its_jobs_in_the_heartbeat() {
     let dir = Scratch::new("jobs-session-epoch");
     let machine = FakeMachine::new();
     let worker = with_run(&dir, &machine, "r1", false);
@@ -103,9 +106,11 @@ fn a_new_epoch_keeps_the_worker_and_lists_its_runs_in_the_hello() {
         paths,
         [HELLO_PATH, HEARTBEAT_PATH, HELLO_PATH, HEARTBEAT_PATH]
     );
-    let running = json!([{ "run_id": "r1", "state": "running" }]);
-    assert_eq!(sent[0].1["held"], running);
-    assert_eq!(sent[2].1["held"], running);
+    let running = json!([{ "job_id": "r1", "state": "running" }]);
+    assert_eq!(sent[0].1["held"], json!([]));
+    assert_eq!(sent[2].1["held"], json!([]));
+    assert_eq!(sent[1].1["jobs"], running);
+    assert_eq!(sent[3].1["jobs"], running);
     assert_eq!(machine.world.created(), ["r1"]);
 }
 

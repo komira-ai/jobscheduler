@@ -53,11 +53,6 @@ fn the_fence_window_is_the_agents_own() {
 }
 
 #[test]
-fn running_a_late_start_fails_late_start_is_dropped() {
-    only_fails(Defect::RunsLateStart, Scenario::LateStartIsDropped);
-}
-
-#[test]
 fn never_fencing_fails_self_fences_after_silence() {
     only_fails(Defect::NeverFences, Scenario::SelfFencesAfterSilence);
 }
@@ -99,7 +94,7 @@ fn messages_on_a_dropped_connection_are_lost_and_change_nothing() {
     let mut agent = FakeAgent::default();
     assert_eq!(agent.fence_window(), Some(FENCE_WINDOW));
     agent.disconnect();
-    assert_eq!(agent.start("a", 10, 0), Delivery::Lost);
+    assert_eq!(agent.start("a"), Delivery::Lost);
     assert_eq!(agent.ack("a"), Delivery::Lost);
     assert_eq!(agent.start_fenced("a", "first"), Delivery::Lost);
     assert_eq!(agent.cancel("a"), Delivery::Lost);
@@ -109,7 +104,7 @@ fn messages_on_a_dropped_connection_are_lost_and_change_nothing() {
 #[test]
 fn a_result_finished_while_disconnected_is_sent_on_reconnect() {
     let mut agent = FakeAgent::new();
-    agent.start("a", 10, 0);
+    agent.start("a");
     agent.disconnect();
     agent.complete("a");
     assert!(agent.observed().results_sent.is_empty());

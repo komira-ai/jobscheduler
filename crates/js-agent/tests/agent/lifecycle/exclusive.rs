@@ -1,4 +1,4 @@
-//! The agent's side of a whole-node lease: the gate on `Start`, the quiet check of
+//! The agent's side of a whole-node lease: the gate on a job start, the quiet check of
 //! `Preparing` and the clean-up check of `Restoring`. Driven in memory like the rest of the
 //! lifecycle: a fake runtime, a clock that moves when a test moves it, and the scripted
 //! post-job checks, which note in the log each time they run.
@@ -34,16 +34,19 @@ fn granting(lease: &str, commands: Vec<Command>) -> js_agent_wire::HeartbeatRepl
     }
 }
 
+/// A job start of the id of `spec` whose allocation is the lease of `spec`.
 fn start(spec: JobSpec) -> Command {
-    Command::Start(Box::new(spec))
+    let mut started = super::per_job::start(&spec.run_id);
+    started.allocation_id = spec.lease_id;
+    super::per_job::job_start(started)
 }
 
-/// A reply that keeps naming the lease and acknowledges the result of `run_id`, as the
+/// A reply that keeps naming the lease and acknowledges the result of `job_id`, as the
 /// server's replies do for as long as it holds the host.
-fn ack_under(h: &mut Harness, run_id: &str) {
+fn ack_under(h: &mut Harness, job_id: &str) {
     let ack = reply_json(&json!({
         "exclusive": LEASE,
-        "result_acks": [{ "run_id": run_id, "ack": "ACCEPTED" }]
+        "job_acks": [{ "job_id": job_id, "ack": "ACCEPTED" }]
     }));
     h.life.apply(&ack);
 }
@@ -92,7 +95,7 @@ fn a_start_for_another_lease_is_refused_while_a_lease_holds_the_host() {
         [format!("refused a {}", refusal::NO_CAPACITY)]
     );
     assert!(h.fake.created().is_empty());
-    let result = &h.life.results()[0];
+    let result = &super::results(&h.life)[0];
     assert_eq!(result.outcome, Outcome::FailedToStart);
     assert_eq!(result.detail.as_deref(), Some(refusal::NO_CAPACITY));
     // Still named by a later reply: still refused.
@@ -154,8 +157,8 @@ fn commands_alone_leave_a_ready_lease_hold_as_it_is() {
     assert_eq!(names(&started), ["started a"]);
     assert_eq!(h.life.exclusive(), Some(LEASE));
     let stopped = h.life.apply_commands_at(
-        &reply(vec![Command::Stop {
-            run_id: "a".to_owned(),
+        &reply(vec![Command::JobStop {
+            job_id: "a".to_owned(),
         }]),
         now,
     );
@@ -218,7 +221,7 @@ fn the_host_is_not_quiet_until_the_last_run_is_acknowledged() {
     assert_eq!(prepare(&mut h).0, Quiet::Busy, "a run is running");
     h.fake.exit("a", 0);
     h.life.step();
-    assert_eq!(h.life.held().len(), 1);
+    assert_eq!(super::held(&h.life).len(), 1);
     assert_eq!(prepare(&mut h).0, Quiet::Busy, "its result is owed");
     assert_eq!(checks_of(&h, LEASE), 0);
     ack_under(&mut h, "a");
@@ -278,7 +281,7 @@ fn a_new_lease_is_not_ready_because_the_last_one_was() {
     h.life.apply(&granting("whole-2", vec![]));
     let result = reply_json(&json!({
         "exclusive": "whole-2",
-        "result_acks": [{ "run_id": "a", "ack": "ACCEPTED" }]
+        "job_acks": [{ "job_id": "a", "ack": "ACCEPTED" }]
     }));
     h.life.apply(&result);
     assert_eq!(prepare(&mut h).0, Quiet::Ready);
@@ -424,8 +427,8 @@ fn restoring_waits_for_the_runs_then_checks_once() {
     h.life.apply(&granting(LEASE, vec![]));
     assert_eq!(prepare(&mut h).0, Quiet::Ready);
     h.life.apply(&granting(LEASE, vec![start(of(LEASE, "a"))]));
-    h.life.apply(&reply(vec![Command::Stop {
-        run_id: "a".to_owned(),
+    h.life.apply(&reply(vec![Command::JobStop {
+        job_id: "a".to_owned(),
     }]));
     assert_eq!(h.life.exclusive(), None);
     assert_eq!(restore(&mut h).0, Restored::Busy, "the run is not gone yet");

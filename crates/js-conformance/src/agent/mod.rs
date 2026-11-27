@@ -33,14 +33,6 @@
 //!
 //! # What a transport adapter maps
 //!
-//! - **Start validity is relative.** `start(lease, valid_for, waited)` is a Start that
-//!   may be acted on for `valid_for` ms (0 means unbounded) and that waited `waited` ms
-//!   before the agent acted on it; it is dropped when `waited > valid_for`, so exactly at
-//!   the limit it runs and one tick past it does not. The adapter arranges the wait the
-//!   way its transport counts it: the legacy agent measures from receipt on the agent's
-//!   own clock (so the adapter holds the Start while the clock advances), the worker
-//!   wire from the send time of the heartbeat the Start names (so the adapter backdates
-//!   that heartbeat).
 //! - **The fence window comes from the transport.** `fence_window` is the transport's own
 //!   value, or `None` when the agent has none. An agent with no self-fence fails
 //!   `SelfFencesAfterSilence` with that reason rather than having it skipped. The js-agent
@@ -49,12 +41,10 @@
 //! - **A fenced start names the job and its allocation.** `start_fenced(job, allocation)`
 //!   is a start whose fence is the pair; the agent must refuse one whose fence it retired
 //!   and take the same job under another allocation. The js-agent adapter sends it as a job
-//!   start (`JobStart`), and its other operations as run starts, so `start` keeps its
-//!   validity bound.
-//! - **`Observed.launches` and `never_started` are derived.** Where the agent emits an
-//!   event for a skipped stale Start (the legacy agent does) read that; where it does
-//!   not (the worker wire), derive them from the Results and refusals that reached the
-//!   harness and from what the job runner was asked to launch.
+//!   start (`JobStart`), and `start` as the start the agent makes of a run spec
+//!   (`Lifecycle::start_spec`), which is keyed by job all the same.
+//! - **`Observed.launches` is derived.** Derive it from the results and refusals that
+//!   reached the harness and from what the job runner was asked to launch.
 //! - **Results repeat.** An unacknowledged result is repeated in every heartbeat, so
 //!   `heartbeat` makes the agent send one and `results_sent` counts every transmission.
 //!
@@ -92,8 +82,6 @@ pub struct Observed {
     pub running: BTreeSet<String>,
     /// Leases the agent stopped because it heard nothing for the fence window.
     pub fenced: BTreeSet<String>,
-    /// Leases whose Start had waited past its validity and was dropped.
-    pub never_started: BTreeSet<String>,
     /// How many times the agent actually launched each lease's job.
     pub launches: BTreeMap<String, u32>,
     /// One entry per transmission of a lease's result that reached the harness.
@@ -115,13 +103,11 @@ pub trait AgentHarness {
     /// Moves the injected clock forward and lets the agent act on the new time.
     fn advance(&mut self, millis: u64);
 
-    /// Delivers a Start for `lease` that is valid for `valid_for` ms (0 is unbounded) and
-    /// has waited `waited` ms before the agent acts on it. Counts as scheduler contact
-    /// when delivered.
-    fn start(&mut self, lease: &str, valid_for: u64, waited: u64) -> Delivery;
+    /// Delivers a Start for `lease`, whose fence is `lease` with an allocation of the
+    /// harness's choosing. Counts as scheduler contact when delivered.
+    fn start(&mut self, lease: &str) -> Delivery;
 
-    /// Delivers a start of the job `job` whose fence is `job` with `allocation`, with no
-    /// validity bound. Counts as scheduler contact when delivered. The job is named by
+    /// Delivers a start of the job `job` whose fence is `job` with `allocation`. Counts as scheduler contact when delivered. The job is named by
     /// `job` in [`Observed`] and in the other operations.
     fn start_fenced(&mut self, job: &str, allocation: &str) -> Delivery;
 

@@ -89,7 +89,7 @@ fn assert_refused_cleanly(h: &Harness, run_id: &str, code: &str) {
     assert!(h.log.borrow().is_empty());
     assert!(!h.scratch_of(run_id).exists());
     assert_eq!(h.life.free().cpu_millis, 4000);
-    let result = &h.life.results()[0];
+    let result = &crate::lifecycle::results(&h.life)[0];
     assert_eq!(result.outcome, Outcome::FailedToStart);
     assert_eq!(result.detail.as_deref(), Some(code));
 }

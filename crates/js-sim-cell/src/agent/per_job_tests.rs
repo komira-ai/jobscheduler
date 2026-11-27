@@ -385,9 +385,9 @@ fn a_stop_of_a_running_job_ends_it_killed_and_its_result_rides_on() {
 
 /// Asserts that a start naming no valid job id or no valid allocation id, and a stop
 /// naming no valid job id, are refused and counted as invalid; that a verdict on no valid
-/// job id, and a run's stop, change nothing; and that a timer that ends no job is not the
-/// per-job half's. Catches an agent that launches a job it cannot name, and one that takes
-/// a run's timer for a job's.
+/// job id, and a command it does not know, change nothing; and that a timer that ends no job
+/// is not the per-job half's. Catches an agent that launches a job it cannot name, and one
+/// that takes another timer for a job's.
 #[test]
 fn a_start_or_stop_that_names_no_valid_id_is_refused() {
     let mut agent = agent(None);
@@ -396,9 +396,7 @@ fn a_start_or_stop_that_names_no_valid_id_is_refused() {
         start_of("a/b", &allocation(), &["500"]),
         start_of(JOB, "xyz", &["500"]),
         stop("a b"),
-        Command::Stop {
-            run_id: "r".to_owned(),
-        },
+        Command::Unknown,
     ];
     answer(
         &mut agent,

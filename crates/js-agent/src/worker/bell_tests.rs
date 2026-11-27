@@ -3,34 +3,16 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use js_agent_wire::{HeldJob, HeldRun, HeldState, JobResult, Outcome, RunResult, Taint};
+use js_agent_wire::{HeldJob, HeldState, JobResult, Outcome, Taint};
 
 use super::*;
 use crate::worker::LeaseAnswers;
-
-fn run(id: &str, state: HeldState) -> HeldRun {
-    HeldRun {
-        run_id: id.to_owned(),
-        state,
-    }
-}
 
 fn job(id: &str, state: HeldState) -> HeldJob {
     HeldJob {
         job_id: id.to_owned(),
         state,
         result: None,
-    }
-}
-
-fn result(id: &str) -> RunResult {
-    RunResult {
-        run_id: id.to_owned(),
-        lease_id: "lease".to_owned(),
-        outcome: Outcome::Succeeded,
-        exit_code: Some(0),
-        detail: None,
-        log_tail: None,
     }
 }
 
@@ -58,13 +40,6 @@ fn taint(reason: &str) -> Taint {
     }
 }
 
-fn with_runs(runs: Vec<HeldRun>) -> Snapshot {
-    Snapshot {
-        held: runs,
-        ..Snapshot::default()
-    }
-}
-
 fn with_jobs(jobs: Vec<HeldJob>) -> Snapshot {
     Snapshot {
         jobs,
@@ -72,49 +47,49 @@ fn with_jobs(jobs: Vec<HeldJob>) -> Snapshot {
     }
 }
 
-/// Proves a run that appears already running, or that changes state from starting to
+/// Proves a job that appears already running, or that changes state from starting to
 /// running, is news. Catches a listing the server would learn of only an interval later.
 #[test]
-fn a_run_that_runs_is_news() {
+fn a_job_that_runs_is_news() {
     let none = Snapshot::default();
-    let running = with_runs(vec![run("r1", HeldState::Running)]);
+    let running = with_jobs(vec![job("j1", HeldState::Running)]);
     assert!(holds_news(&none, &running));
-    let starting = with_runs(vec![run("r1", HeldState::Starting)]);
+    let starting = with_jobs(vec![job("j1", HeldState::Starting)]);
     assert!(holds_news(&starting, &running));
 }
 
-/// Proves a run that is listed for the first time as starting is news, and that a run listed
+/// Proves a job that is listed for the first time as starting is news, and that a job listed
 /// as starting before and still starting is not. Catches a start taken that the server hears
 /// of only at the interval (no heartbeat of the host held for a placement meanwhile), and a
 /// ring at every publish while the start stands.
 #[test]
-fn a_run_just_taken_as_starting_is_news_and_one_still_starting_is_not() {
+fn a_job_just_taken_as_starting_is_news_and_one_still_starting_is_not() {
     let none = Snapshot::default();
-    let starting = with_runs(vec![run("r1", HeldState::Starting)]);
+    let starting = with_jobs(vec![job("j1", HeldState::Starting)]);
     assert!(holds_news(&none, &starting));
     assert!(!holds_news(&starting, &starting));
 }
 
-/// Proves a run already listed that goes back to starting counts as a change, and so is news.
+/// Proves a job already listed that goes back to starting counts as a change, and so is news.
 /// Catches a change of state that is not told.
 #[test]
-fn a_run_listed_before_that_changes_to_starting_is_news() {
-    let before = with_runs(vec![run("r1", HeldState::Running)]);
-    let now = with_runs(vec![run("r1", HeldState::Starting)]);
+fn a_job_listed_before_that_changes_to_starting_is_news() {
+    let before = with_jobs(vec![job("j1", HeldState::Running)]);
+    let now = with_jobs(vec![job("j1", HeldState::Starting)]);
     assert!(holds_news(&before, &now));
 }
 
-/// Proves a run that exits is news, and a run that is gone from the listing is not.
+/// Proves a job that exits is news, and a job that is gone from the listing is not.
 /// Catches ringing for an entry the server itself acknowledged away.
 #[test]
-fn a_run_that_ended_is_news_and_a_run_removed_is_not() {
-    let running = with_runs(vec![run("r1", HeldState::Running)]);
-    let exited = with_runs(vec![run("r1", HeldState::ExitedUnacked)]);
+fn a_job_that_ended_is_news_and_a_job_removed_is_not() {
+    let running = with_jobs(vec![job("j1", HeldState::Running)]);
+    let exited = with_jobs(vec![job("j1", HeldState::ExitedUnacked)]);
     assert!(holds_news(&running, &exited));
     assert!(!holds_news(&exited, &Snapshot::default()));
 }
 
-/// Proves a job follows the same rules as a run: a job newly listed as starting is news, one
+/// Proves a job newly listed as starting is news, one
 /// still starting is not, a job that runs or ends is news, a removed job is not. Catches a
 /// job listing left out of the check.
 #[test]
@@ -137,20 +112,6 @@ fn a_job_listed_before_that_changes_while_starting_is_news() {
     let mut changed = job("j1", HeldState::Starting);
     changed.result = Some(job_result("j1"));
     assert!(holds_news(&before, &with_jobs(vec![changed])));
-}
-
-/// Proves a result the server has not heard is news, an already told one is not, and a
-/// result that was acknowledged away is not. Catches a result that waits for the interval.
-#[test]
-fn a_new_result_is_news_and_a_removed_one_is_not() {
-    let none = Snapshot::default();
-    let held = Snapshot {
-        results: vec![result("r1")],
-        ..Snapshot::default()
-    };
-    assert!(holds_news(&none, &held));
-    assert!(!holds_news(&held, &held));
-    assert!(!holds_news(&held, &none));
 }
 
 /// Proves a newly retired job id is news, an id retired before is not, and an id acknowledged
@@ -234,7 +195,7 @@ fn a_publish_rings_the_bell_for_news_only_and_remembers_what_it_told() {
     let answers = LeaseAnswers::default();
     let mut told = Snapshot::default();
 
-    let starting = with_runs(vec![run("r1", HeldState::Starting)]);
+    let starting = with_jobs(vec![job("j1", HeldState::Starting)]);
     shared.publish_news(&mut told, (starting.clone(), &answers, Vec::new()));
     assert_eq!(rings.load(Ordering::SeqCst), 1, "the start taken");
     assert_eq!(told, starting);
@@ -242,7 +203,7 @@ fn a_publish_rings_the_bell_for_news_only_and_remembers_what_it_told() {
     shared.publish_news(&mut told, (starting.clone(), &answers, Vec::new()));
     assert_eq!(rings.load(Ordering::SeqCst), 1, "the same start rings once");
 
-    let running = with_runs(vec![run("r1", HeldState::Running)]);
+    let running = with_jobs(vec![job("j1", HeldState::Running)]);
     let lines = vec!["a line".to_owned()];
     shared.publish_news(&mut told, (running.clone(), &answers, lines));
     assert_eq!(rings.load(Ordering::SeqCst), 2);
@@ -260,7 +221,7 @@ fn a_publish_with_news_and_no_bell_still_publishes() {
     let shared = Shared::default();
     let answers = LeaseAnswers::default();
     let mut told = Snapshot::default();
-    let running = with_runs(vec![run("r1", HeldState::Running)]);
+    let running = with_jobs(vec![job("j1", HeldState::Running)]);
     shared.publish_news(&mut told, (running.clone(), &answers, Vec::new()));
     assert_eq!(shared.lock().snapshot, running);
 }

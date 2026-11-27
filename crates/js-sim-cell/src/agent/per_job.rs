@@ -4,7 +4,7 @@
 //! A fake agent speaks them when its hello reports [`PER_JOB_CAPABILITY`] (the cell's
 //! agents do). The real agent's node has its own half (`real_jobs.rs`), which shares the
 //! heartbeat book and the start intent below. Every call below goes to the second fake,
-//! so a [`Defect`] of the agent acts on its jobs as it acts on its runs.
+//! so a [`Defect`] of the agent acts on its jobs.
 //!
 //! | what arrives or happens | what the agent does |
 //! |---|---|
@@ -23,9 +23,9 @@
 //!
 //! What the agent sent and read is written into the cell's ledger: each heartbeat
 //! ([`JobBeat`]), each answer with what its heartbeat listed ([`JobReply`]), each result made
-//! ([`ResultMade`]), and each launch, in the launches beside the runs', named
-//! `<job>/<allocation>`. A job it runs that no heartbeat has listed yet counts as a run
-//! the server cannot have seen listed (`AgentNode::runs_unlisted`), as a run does.
+//! ([`ResultMade`]), and each launch, in the launches, named
+//! `<job>/<allocation>`. A job it runs that no heartbeat has listed yet counts as one the
+//! server cannot have seen listed (`AgentNode::runs_unlisted`).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -439,7 +439,7 @@ impl PerJob {
         let before = self.fake.observed();
         let launched = before.launches.contains_key(job.as_str());
         note_start(&self.stopped, launched, &job, io);
-        self.fake.start(job.as_str(), 0, 0);
+        self.fake.start(job.as_str());
         let after = self.fake.observed();
         if after.launches.get(job.as_str()) != before.launches.get(job.as_str()) {
             match io.refusal.clone() {

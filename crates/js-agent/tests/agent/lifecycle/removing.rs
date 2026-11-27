@@ -12,9 +12,9 @@ use std::sync::mpsc::{Receiver, channel};
 
 use js_agent::lifecycle::taint::reason;
 use js_agent::lifecycle::{CleanupTimeline, Clock, Event, Lifecycle, Wake, code};
-use js_agent_wire::Command;
 
 use super::deferring::Deferring;
+use super::per_job::{job_start, start};
 use super::{Harness, cleanup, hook, job, names, reply};
 
 /// The record of the checks owed by `run_id`.
@@ -58,7 +58,7 @@ fn a_start_received_while_a_removal_runs_is_taken_and_admitted_at_once() {
     );
     assert_eq!(gate.removal_asks("c1"), 1);
 
-    let start = reply(vec![Command::Start(Box::new(job("r2")))]);
+    let start = reply(vec![job_start(start("r2"))]);
     let events = h.life.apply_at(&start, received);
     let Some(Event::Started {
         run_id, timeline, ..

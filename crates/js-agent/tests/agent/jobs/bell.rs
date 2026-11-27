@@ -17,9 +17,8 @@ use serde_json::{Value, json};
 
 use super::drain::container_flags;
 use super::fake::{FakeMachine, HANG_GUARD};
-use super::{acks, start, start_answer, starts};
+use super::{acks, job_start, start, start_answer, starts};
 use crate::bounds::WakeBudget;
-use crate::lifecycle::job;
 use crate::support::{
     Highest, Lowest, Scratch, Script, ScriptConnector, beat_ok, flags, hello, linux_host, lowest,
     refused, reply, welcome, welcome_with,
@@ -57,13 +56,13 @@ fn the_worker_rings_for_a_start_taken_a_run_that_runs_and_ends_not_for_an_ack() 
     let (second, second_rings) = counting();
     worker.ring_on_news(bell);
     worker.ring_on_news(second);
-    let running = |s: &js_agent::Snapshot| s.held.iter().any(|h| h.state == HeldState::Running);
+    let running = |s: &js_agent::Snapshot| s.jobs.iter().any(|h| h.state == HeldState::Running);
 
-    let image = job("r1").image;
+    let image = job_start("r1").image;
     machine.world.begin_pull(&image);
     assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
     assert!(worker.handle().settle());
-    assert_eq!(worker.snapshot().held[0].state, HeldState::Starting);
+    assert_eq!(worker.snapshot().jobs[0].state, HeldState::Starting);
     assert_eq!(rings.load(Ordering::SeqCst), 1, "a start taken is news");
     assert!(worker.handle().settle());
     assert_eq!(rings.load(Ordering::SeqCst), 1, "the same start rings once");
@@ -75,13 +74,13 @@ fn the_worker_rings_for_a_start_taken_a_run_that_runs_and_ends_not_for_an_ack() 
 
     machine.world.exit("r1", 0);
     assert!(worker.handle().settle());
-    assert_eq!(worker.snapshot().results.len(), 1);
+    assert!(worker.snapshot().jobs[0].result.is_some());
     assert_eq!(rings.load(Ordering::SeqCst), 3, "the run ended");
 
     let ack = acks("r1", "ACCEPTED");
     assert_eq!(worker.try_deliver(ack), Delivery::Delivered);
     assert!(worker.handle().settle());
-    assert!(worker.snapshot().results.is_empty());
+    assert!(worker.snapshot().jobs.is_empty());
     assert_eq!(
         rings.load(Ordering::SeqCst),
         3,
@@ -376,9 +375,11 @@ fn a_start_is_reported_running_by_the_next_heartbeat_when_the_bell_ends_the_wait
         ]
     );
     let sent = sent.borrow();
-    let held = |n: usize| sent[n].1["held"].clone();
+    let jobs = |n: usize| sent[n].1["jobs"].clone();
     assert_eq!(sent[1].0, HEARTBEAT_PATH);
-    assert_eq!(held(1), json!([]));
-    assert_eq!(held(2), json!([{ "run_id": "r1", "state": "running" }]));
+    assert_eq!(sent[1].1["held"], json!([]));
+    assert_eq!(sent[2].1["held"], json!([]));
+    assert_eq!(jobs(1), Value::Null);
+    assert_eq!(jobs(2), json!([{ "job_id": "r1", "state": "running" }]));
     assert_eq!(machine.world.created(), ["r1"]);
 }

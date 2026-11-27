@@ -20,7 +20,7 @@ impl Lifecycle {
         self.runtime
             .check_vm()
             .map_err(|refused| (refused.code, refused.why))?;
-        // A job start carries no legacy native body (only a run start can), so a `run` is the
+        // A job start carries no legacy native body (only `Lifecycle::start_spec` can), so a `run` is the
         // one body a VM start may name.
         if spec.run.is_some() {
             return Err(no(

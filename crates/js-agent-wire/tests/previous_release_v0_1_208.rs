@@ -1,6 +1,8 @@
 //! The wire of release `v0.1.208`, which queued runs and whole-node leases, against this
 //! version, which does not: an agent of that release still sends run-keyed hellos and
-//! heartbeats, and still reads run-keyed commands.
+//! heartbeats, which this version reads, and this version sends it no run-keyed command and
+//! no result acknowledgement; a run-keyed command in a reply of that release reads here as an
+//! unknown command.
 //!
 //! The release's bodies are files under `fixtures/v0.1.208`, written by that tag's code, so
 //! they cannot follow a change to the types here. Its reader is a copy of the structs a
@@ -9,10 +11,10 @@
 
 use js_agent_wire::{
     Ack, Command, Heartbeat, HeartbeatReply, HeldState, Hello, JobResultAck, Outcome,
-    PER_JOB_CAPABILITY, ResultAck, START_FENCE_CAPABILITY, limits,
+    PER_JOB_CAPABILITY, ResultAck, START_FENCE_CAPABILITY,
 };
 use serde::{Deserialize, Deserializer};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 const HELLO_PER_JOB: &str = include_str!("fixtures/v0.1.208/hello_per_job.json");
 const HELLO_NATIVE: &str = include_str!("fixtures/v0.1.208/hello_native.json");
@@ -211,24 +213,30 @@ fn a_v0_1_208_heartbeat_with_held_runs_results_and_jobs_decodes_with_every_field
 
 /// Asserts that a v0.1.208 server's reply, which carries run-keyed and job commands side by
 /// side with a result acknowledgement of each kind, decodes, passes the reply's checks (no
-/// command refused, acknowledgements well formed) and encodes back to the same JSON. It
-/// catches a command or an acknowledgement the current types no longer read, which would
-/// break a new agent talking to a server that is not yet updated.
+/// command refused, acknowledgements well formed), reads the run `start`, `stop` and `cancel`
+/// as unknown commands and the job start and job stop as themselves, in order, reads the
+/// `UNKNOWN_LEASE` acknowledgement as `Unknown`, and encodes back to the fixture with exactly
+/// those three commands written as `{"type":"unknown"}` and that acknowledgement written as
+/// `UNKNOWN`. It catches a run command or an `UNKNOWN_LEASE` verdict that this version still
+/// acts on, and a job command or an acknowledgement the current types no longer read, which
+/// would break a new agent talking to a server that is not yet updated.
 #[test]
-fn a_v0_1_208_reply_decodes_with_every_field_kept() {
+fn a_v0_1_208_reply_decodes_with_its_run_commands_unknown() {
     let reply: HeartbeatReply = serde_json::from_value(fixture(REPLY)).unwrap();
     let checked = reply.validate();
     assert!(checked.refused.is_empty(), "{:?}", checked.refused);
+    assert_eq!(checked.commands.len(), 5);
     assert_eq!(
         (checked.acks, checked.job_acks, checked.retired_acks),
         (Ok(()), Ok(()), Ok(()))
     );
-    assert!(matches!(&reply.commands[0], Command::Start(spec) if spec.run_id == "run-1"));
-    assert!(matches!(&reply.commands[1], Command::Stop { run_id } if run_id == "run-4"));
-    assert!(matches!(&reply.commands[2], Command::Cancel { run_id } if run_id == "run-1"));
+    assert_eq!(reply.commands.len(), 5);
+    assert_eq!(
+        reply.commands[..3],
+        [Command::Unknown, Command::Unknown, Command::Unknown]
+    );
     assert!(matches!(&reply.commands[3], Command::JobStart(spec) if spec.job_id == "job-3"));
     assert!(matches!(&reply.commands[4], Command::JobStop { job_id } if job_id == "job-1"));
-    assert_eq!(reply.commands.len(), 5);
     assert_eq!(
         reply.result_acks,
         [
@@ -238,7 +246,7 @@ fn a_v0_1_208_reply_decodes_with_every_field_kept() {
             },
             ResultAck {
                 run_id: "run-3".into(),
-                ack: Ack::UnknownLease
+                ack: Ack::Unknown
             },
         ]
     );
@@ -250,44 +258,33 @@ fn a_v0_1_208_reply_decodes_with_every_field_kept() {
         }]
     );
     assert_eq!(reply.retired_acks, ["job-0"]);
-    assert_eq!(serde_json::to_value(&reply).unwrap(), fixture(REPLY));
+    let mut expected = fixture(REPLY);
+    for index in 0..3 {
+        expected["commands"][index] = json!({"type": "unknown"});
+    }
+    expected["result_acks"][1]["ack"] = json!("UNKNOWN");
+    assert_eq!(serde_json::to_value(&reply).unwrap(), expected);
 }
 
 /// Builds the reply this version's server gives an agent that reports held runs and
-/// results: a cancel for each held run (at most the wire's cap) and `UnknownLease` for
-/// each result, and nothing else.
+/// results: no command, no result acknowledgement, and the taint acknowledged when the
+/// heartbeat carries one.
 fn reply_for(beat: &Heartbeat) -> HeartbeatReply {
     HeartbeatReply {
-        commands: beat
-            .held
-            .iter()
-            .take(limits::MAX_COMMANDS)
-            .map(|run| Command::Cancel {
-                run_id: run.run_id.clone(),
-            })
-            .collect(),
-        result_acks: beat
-            .results
-            .iter()
-            .map(|result| ResultAck {
-                run_id: result.run_id.clone(),
-                ack: Ack::UnknownLease,
-            })
-            .collect(),
+        taint_ack: beat.taint.is_some(),
         ..HeartbeatReply::default()
     }
 }
 
-/// Asserts that the reply this version's server builds for the v0.1.208 heartbeat (a cancel
-/// for each held run, an `UnknownLease` acknowledgement for each result, empty commands
-/// otherwise) passes the reply's checks and decodes with the copy of that release's
-/// structs: the cancels as cancels in the order held, each acknowledgement as `UnknownLease`
-/// and not as the `Unknown` that an agent resends a result on, and nothing else set. It
-/// catches a reply an old agent cannot read, or reads as an order other than to drop its runs
-/// and results.
+/// Asserts that the reply this version's server builds for the v0.1.208 heartbeat (no
+/// commands, no result acknowledgements, taint acknowledgement false) passes the reply's
+/// checks and decodes with the copy of that release's structs with no commands, no result
+/// acknowledgements and nothing else set. It catches a reply that orders an old agent to drop
+/// its runs, or answers its results with a verdict, which this version no longer sends.
 #[test]
 fn the_reply_for_an_old_agent_decodes_with_the_v0_1_208_structs() {
     let beat: Heartbeat = serde_json::from_value(fixture(HEARTBEAT)).unwrap();
+    assert_eq!((beat.held.len(), beat.results.len()), (2, 2));
     let reply = reply_for(&beat);
     let checked = reply.validate();
     assert!(checked.refused.is_empty(), "{:?}", checked.refused);
@@ -295,27 +292,8 @@ fn the_reply_for_an_old_agent_decodes_with_the_v0_1_208_structs() {
 
     let old: previous::HeartbeatReply =
         serde_json::from_value(serde_json::to_value(&reply).unwrap()).unwrap();
-    let cancelled: Vec<&str> = old
-        .commands
-        .iter()
-        .map(|command| match command {
-            previous::Command::Cancel { run_id } => run_id.as_str(),
-            other => panic!("not a cancel: {other:?}"),
-        })
-        .collect();
-    assert_eq!(cancelled, ["run-1", "run-2"]);
-    let acks: Vec<(&str, previous::Ack)> = old
-        .result_acks
-        .iter()
-        .map(|ack| (ack.run_id.as_str(), ack.ack))
-        .collect();
-    assert_eq!(
-        acks,
-        [
-            ("run-2", previous::Ack::UnknownLease),
-            ("run-3", previous::Ack::UnknownLease)
-        ]
-    );
+    assert!(old.commands.is_empty());
+    assert!(old.result_acks.is_empty());
     assert!(!old.taint_ack);
     assert_eq!(old.exclusive, None);
     assert!(old.job_acks.is_empty());
@@ -323,11 +301,12 @@ fn the_reply_for_an_old_agent_decodes_with_the_v0_1_208_structs() {
 }
 
 /// Asserts that the same reply with the job half the transport adds (a job start and a job
-/// stop beside the cancels, a job and a retired acknowledgement) decodes with the copy of
-/// that release's structs, the run-keyed and job commands each as themselves and in order.
-/// It catches a job command that costs an old agent the cancels beside it.
+/// stop, a job and a retired acknowledgement) decodes with the copy of that release's
+/// structs, the job commands each as themselves and in order, and no result acknowledgement.
+/// It catches a job command an old agent cannot read, or one that costs it the commands
+/// beside it.
 #[test]
-fn the_cancels_for_an_old_agent_survive_the_job_commands_beside_them() {
+fn the_job_half_for_an_old_agent_reads_in_order_beside_the_empty_run_half() {
     let beat: Heartbeat = serde_json::from_value(fixture(HEARTBEAT)).unwrap();
     let mut reply = reply_for(&beat);
     let sent: HeartbeatReply = serde_json::from_value(fixture(REPLY)).unwrap();
@@ -342,14 +321,12 @@ fn the_cancels_for_an_old_agent_survive_the_job_commands_beside_them() {
 
     let old: previous::HeartbeatReply =
         serde_json::from_value(serde_json::to_value(&reply).unwrap()).unwrap();
-    assert_eq!(old.commands.len(), 4);
-    assert!(matches!(&old.commands[0], previous::Command::Cancel { run_id } if run_id == "run-1"));
-    assert!(matches!(&old.commands[1], previous::Command::Cancel { run_id } if run_id == "run-2"));
+    assert_eq!(old.commands.len(), 2);
     assert!(
-        matches!(&old.commands[2], previous::Command::JobStart(spec) if (spec.job_id.as_str(), spec.allocation_id.as_str(), spec.wall_ms) == ("job-3", "fedcba9876543210fedcba9876543210", 600_000))
+        matches!(&old.commands[0], previous::Command::JobStart(spec) if (spec.job_id.as_str(), spec.allocation_id.as_str(), spec.wall_ms) == ("job-3", "fedcba9876543210fedcba9876543210", 600_000))
     );
-    assert!(matches!(&old.commands[3], previous::Command::JobStop { job_id } if job_id == "job-1"));
-    assert_eq!(old.result_acks.len(), 2);
+    assert!(matches!(&old.commands[1], previous::Command::JobStop { job_id } if job_id == "job-1"));
+    assert!(old.result_acks.is_empty());
     assert_eq!(old.job_acks[0].job_id, "job-2");
     assert_eq!(old.job_acks[0].ack, previous::Ack::Accepted);
     assert_eq!(old.retired_acks, ["job-0"]);

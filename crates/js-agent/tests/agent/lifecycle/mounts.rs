@@ -242,7 +242,7 @@ fn a_start_with_an_escaping_mount_creates_nothing() {
         assert!(!h.scratch_of(run).exists());
     }
     assert!(h.log.borrow().is_empty());
-    let result = &h.life.results()[0];
+    let result = &super::results(&h.life)[0];
     assert_eq!(result.outcome, Outcome::FailedToStart);
     assert_eq!(result.detail.as_deref(), Some("invalid-mount"));
     let mut good = job("good");

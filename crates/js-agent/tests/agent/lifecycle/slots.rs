@@ -21,6 +21,7 @@ fn labelled<'a>(run: &'a str, slot: Option<&'a str>) -> Vec<(&'static str, &'a s
         (label::GPUS, ""),
         (label::WALL_MS, "60000"),
         (label::ISOLATION, "contained"),
+        (label::KEYING, "job"),
     ];
     labels.extend(slot.map(|slot| (label::SLOT, slot)));
     labels

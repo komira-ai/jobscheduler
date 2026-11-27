@@ -7,7 +7,6 @@
 
 use js_agent_wire::{HeldJob, LogTail, RunResult, limits};
 
-use super::job::Keyed;
 use super::{Job, Lifecycle, per_job};
 use crate::lifecycle::{Event, code};
 
@@ -19,8 +18,8 @@ const ENVELOPE_MARGIN: usize = 4 * 1024;
 const RESULT_KEY_LEN: usize = 10;
 
 /// What the results of a heartbeat may weigh together once serialised, given the lists
-/// that go with them (`listed` bytes: the held runs, the jobs without their results and the
-/// retired job ids): the whole body the server reads ([`limits::HEARTBEAT_BODY_BUDGET`]; a
+/// that go with them (`listed` bytes: the jobs without their results and the retired job
+/// ids): the whole body the server reads ([`limits::HEARTBEAT_BODY_BUDGET`]; a
 /// beat over it is refused and the agent ends) less those lists as they are, the most a load
 /// can weigh ([`limits::MAX_LOAD_BYTES`], reserved whether or not this agent sends one yet)
 /// and the envelope. Measuring the lists, and not assuming their worst case, leaves the room
@@ -35,21 +34,16 @@ fn len_of<T: serde::Serialize>(value: &T) -> usize {
     serde_json::to_vec(value).map_or(0, |bytes| bytes.len())
 }
 
-/// What the result of `job` weighs in a heartbeat: a run's in `results`, a job's inside its
-/// listing, in the form each is sent.
+/// What the result of `job` weighs in a heartbeat: inside its listing, in the form it is
+/// sent.
 fn result_len(job: &Job, result: &RunResult) -> usize {
-    match job.keyed {
-        Keyed::Run => len_of(result),
-        Keyed::Job => {
-            len_of(&per_job::job_result(
-                result,
-                job.logs,
-                job.input_failure.clone(),
-                job.usage,
-                (job.cpu_series.clone(), job.memory_series.clone()),
-            )) + RESULT_KEY_LEN
-        }
-    }
+    len_of(&per_job::job_result(
+        result,
+        job.logs,
+        job.input_failure.clone(),
+        job.usage,
+        (job.cpu_series.clone(), job.memory_series.clone()),
+    )) + RESULT_KEY_LEN
 }
 
 /// `text` cut to at most `max` bytes, keeping the end, at a character boundary.
@@ -83,7 +77,7 @@ impl Lifecycle {
             ..job
         };
         let jobs: Vec<HeldJob> = self.held_jobs().into_iter().map(bare).collect();
-        let listed = len_of(&self.held()) + len_of(&jobs) + len_of(&self.retired_jobs());
+        let listed = len_of(&jobs) + len_of(&self.retired_jobs());
         self.fit_log_tails(results_budget(listed), events);
     }
 

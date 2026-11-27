@@ -34,6 +34,7 @@
 //!   once for as long as it lasts.
 
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use js_agent_usage::{SecondSample, Seconds};
@@ -44,7 +45,21 @@ use super::clock::UsageClock;
 use super::outbox::{Outbox, Reading};
 use super::sampler::{LeaseCgroup, NodeSampler, SampleError, Sampler};
 use crate::facts::FileReader;
-use crate::lifecycle::RunningLease;
+
+/// A lease that is running, as far as its usage is concerned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunningLease {
+    /// The lease that is running.
+    pub lease_id: String,
+    /// The container's control group directory, when the runtime could say.
+    pub cgroup: Option<PathBuf>,
+    /// When the container started, on the agent's monotonic clock in microseconds, to the
+    /// millisecond. `None` for an adopted run that started before the clock began.
+    pub started_usec: Option<u64>,
+    /// The run was taken over from an earlier process of the agent, so the minutes before
+    /// the takeover were never seen.
+    pub adopted: bool,
+}
 
 /// Samples the node on the worker's thread. See the [module](self).
 pub struct Collector {

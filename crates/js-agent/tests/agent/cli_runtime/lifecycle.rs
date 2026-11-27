@@ -9,7 +9,7 @@ use js_agent_wire::{Command, Outcome, RunFile};
 use super::scripted::Scripted;
 use super::{HOST, docker, made_at, open_at, thirty_seconds_on};
 use crate::lifecycle::fake::ManualClock;
-use crate::lifecycle::{GRACE, cleanup, config_in, job, names, reply};
+use crate::lifecycle::{GRACE, cleanup, config_in, held, job, names, reply, results};
 use crate::support::Scratch;
 
 /// A lifecycle over a runtime over `docker`, on `os`.
@@ -43,13 +43,11 @@ impl World {
     }
 
     fn start(&mut self, run_id: &str) -> Vec<Event> {
-        let spec = job(run_id);
-        self.life
-            .apply(&reply(vec![Command::Start(Box::new(spec))]))
+        self.life.start_spec(&job(run_id))
     }
 
     fn outcomes(&self) -> Vec<Outcome> {
-        self.life.results().iter().map(|r| r.outcome).collect()
+        results(&self.life).iter().map(|r| r.outcome).collect()
     }
 }
 
@@ -96,8 +94,8 @@ fn a_stop_and_the_wall_limit_stop_the_container() {
     let mut w = World::new("stop", "linux");
     w.start("r1");
     w.start("r2");
-    w.life.apply(&reply(vec![Command::Stop {
-        run_id: "r1".to_owned(),
+    w.life.apply(&reply(vec![Command::JobStop {
+        job_id: "r1".to_owned(),
     }]));
     w.life.step();
     w.clock.advance(60_000);
@@ -142,7 +140,7 @@ fn a_failed_create_or_start_leaves_nothing() {
         w.outcomes(),
         [Outcome::FailedToStart, Outcome::FailedToStart]
     );
-    let details: Vec<Option<String>> = w.life.results().into_iter().map(|r| r.detail).collect();
+    let details: Vec<Option<String>> = results(&w.life).into_iter().map(|r| r.detail).collect();
     let failed = Some("runtime-failed".to_owned());
     assert_eq!(details, [failed.clone(), failed]);
     assert!(w.docker.ids().is_empty());
@@ -159,11 +157,10 @@ fn gpu_limit_on_macos_is_failed_to_start_with_a_code() {
     let mut mac = World::new("mac-gpu", "macos");
     let mut spec = job("g1");
     spec.gpu_indices = vec![0];
-    let events = mac
-        .life
-        .apply(&reply(vec![Command::Start(Box::new(spec.clone()))]));
+    let events = mac.life.start_spec(&spec);
     assert_eq!(names(&events), ["refused g1 gpu-unsupported"]);
-    let result = &mac.life.results()[0];
+    let results = results(&mac.life);
+    let result = &results[0];
     assert_eq!(result.outcome, Outcome::FailedToStart);
     assert_eq!(result.detail.as_deref(), Some("gpu-unsupported"));
     for sub in ["create", "start"] {
@@ -173,9 +170,7 @@ fn gpu_limit_on_macos_is_failed_to_start_with_a_code() {
     assert_eq!(names(&mac.start("c1")), ["started c1"]);
 
     let mut linux = World::new("linux-gpu", "linux");
-    let events = linux
-        .life
-        .apply(&reply(vec![Command::Start(Box::new(spec))]));
+    let events = linux.life.start_spec(&spec);
     assert_eq!(names(&events), ["started g1"]);
 }
 
@@ -213,7 +208,7 @@ fn a_restart_adopts_its_own_containers_with_their_age() {
     assert!(life.step().is_empty());
     w.clock.advance(1);
     life.step();
-    let results = life.results();
+    let results = results(&life);
     assert_eq!(results[0].outcome, Outcome::TimedOut);
     assert_eq!(results[0].run_id, "r1");
     assert_eq!(results.len(), 1);
@@ -308,13 +303,13 @@ fn a_dead_container_never_reports_success() {
     w.docker.say("inspect", "dead 0 false");
     w.life.step();
     assert_eq!(w.outcomes(), [Outcome::Failed]);
-    assert_eq!(w.life.results()[0].exit_code, None);
+    assert_eq!(results(&w.life)[0].exit_code, None);
 
     let mut coded = World::new("dead-coded", "linux");
     coded.start("r2");
     coded.docker.say("inspect", "dead 2 false");
     coded.life.step();
-    let results = coded.life.results();
+    let results = results(&coded.life);
     assert_eq!(results[0].outcome, Outcome::Failed);
     assert_eq!(results[0].exit_code, Some(2));
 }
@@ -335,9 +330,7 @@ fn an_agent_that_does_not_see_the_containers_process_taints_the_host() {
         Box::new(clock),
     )
     .unwrap();
-    let start = |life: &mut Lifecycle, run_id: &str| {
-        names(&life.apply(&reply(vec![Command::Start(Box::new(job(run_id)))])))
-    };
+    let start = |life: &mut Lifecycle, run_id: &str| names(&life.start_spec(&job(run_id)));
     assert_eq!(
         start(&mut life, "r1"),
         [
@@ -347,7 +340,7 @@ fn an_agent_that_does_not_see_the_containers_process_taints_the_host() {
         ]
     );
     assert!(docker.ids().is_empty(), "the container was removed");
-    assert_eq!(life.results()[0].outcome, Outcome::FailedToStart);
+    assert_eq!(results(&life)[0].outcome, Outcome::FailedToStart);
     assert!(life.is_tainted());
     assert_eq!(start(&mut life, "r2"), ["refused r2 host-tainted"]);
     assert_eq!(docker.calls_of("create").len(), 1);
@@ -368,9 +361,9 @@ fn a_planted_secret_is_on_no_command_line_and_in_no_report() {
             name: "tok".to_owned(),
             contents: SECRET.to_owned(),
         }];
-        reply(vec![Command::Start(Box::new(spec))])
+        spec
     };
-    let mut shown = vec![format!("{:?}", w.life.apply(&with_secret("r1")))];
+    let mut shown = vec![format!("{:?}", w.life.start_spec(&with_secret("r1")))];
     let create = super::created(&w.docker, "r1");
     assert!(
         create
@@ -388,10 +381,10 @@ fn a_planted_secret_is_on_no_command_line_and_in_no_report() {
     }
     std::fs::remove_dir_all(&root).unwrap();
     std::fs::write(&root, "in the way").unwrap();
-    shown.push(format!("{:?}", w.life.apply(&with_secret("r2"))));
+    shown.push(format!("{:?}", w.life.start_spec(&with_secret("r2"))));
     w.docker.exit("r1", 0);
     shown.push(format!("{:?}", w.life.step()));
-    shown.push(format!("{:?} {:?}", w.life.results(), w.life.held()));
+    shown.push(format!("{:?} {:?}", results(&w.life), held(&w.life)));
     for call in ["create", "start", "inspect", "stop", "rm", "ps"] {
         shown.push(format!("{:?}", w.docker.calls_of(call)));
     }
@@ -416,7 +409,7 @@ fn run_files_are_read_only_to_the_job_and_removed_by_the_agent_at_run_end() {
         name: "tok".to_owned(),
         contents: "x".to_owned(),
     }];
-    w.life.apply(&reply(vec![Command::Start(Box::new(spec))]));
+    w.life.start_spec(&spec);
     let create = super::created(&w.docker, "r1");
     let mount = create
         .iter()
@@ -451,7 +444,7 @@ fn a_docker_run_gets_none_only() {
     let mut w = World::new("network-none", "linux");
     let mut spec = job("r1");
     spec.network = JobNetwork::AllowList;
-    let events = w.life.apply(&reply(vec![Command::Start(Box::new(spec))]));
+    let events = w.life.start_spec(&spec);
     assert_eq!(names(&events), ["refused r1 network-above-ceiling"]);
     let refused = Event::Refused {
         run_id: "r1".to_owned(),

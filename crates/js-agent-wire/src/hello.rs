@@ -317,8 +317,8 @@ pub struct Hello {
     pub labels: BTreeMap<String, String>,
     /// The host's phase.
     pub phase: Phase,
-    /// The runs the agent already holds, listed first by an agent that restarted so the
-    /// server never sees a gap that would make it requeue running work.
+    /// The runs the agent already holds. It stays on the wire because every previous
+    /// release sends and reads it; an agent of this release always sends it empty.
     #[serde(default)]
     pub held: Vec<HeldRun>,
     /// Whether the agent keeps a [`HostCredential`] it is given: it has a durable place to

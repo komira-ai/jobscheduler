@@ -9,13 +9,12 @@ use std::time::Duration;
 
 use js_agent::lifecycle::handover;
 use js_agent::{Delivery, Drain, Exit, Handle, Session, Sleeper, Wake, Worker, drive};
-use js_agent_wire::HeldState;
+use js_agent_wire::{HeldJob, HeldState, JobResult};
 use serde_json::{Value, json};
 
 use super::fake::FakeMachine;
-use super::{start, starts};
+use super::{job_start, start, starts};
 use crate::bounds::{Capped, WakeBudget};
-use crate::lifecycle::job;
 use crate::support::{Reply, Scratch, Script, beat_ok, hello, lowest, refused, reply, welcome};
 
 /// What the sleeper does at its `n`th wait (counting from 0): the wake it reports.
@@ -114,15 +113,20 @@ fn phases(sent: &[(String, Value)]) -> Vec<String> {
     sent.iter().map(phase).collect()
 }
 
-/// The run ids of the results every message in `sent` carried, in order.
+/// The job ids of the results every message in `sent` carried, in order.
 fn results(sent: &[(String, Value)]) -> Vec<String> {
-    let runs = sent.iter().flat_map(|(_, body)| {
-        let results = body["results"].as_array().cloned().unwrap_or_default();
-        results
-            .into_iter()
-            .map(|result| result["run_id"].as_str().unwrap().to_owned())
+    let jobs = sent.iter().flat_map(|(_, body)| {
+        let jobs = body["jobs"].as_array().cloned().unwrap_or_default();
+        jobs.into_iter()
+            .filter(|job| job.get("result").is_some())
+            .map(|job| job["job_id"].as_str().unwrap().to_owned())
     });
-    runs.collect()
+    jobs.collect()
+}
+
+/// The result of the job at `at` in `jobs`, which the test knows to have ended.
+fn result_of(jobs: &[HeldJob], at: usize) -> &JobResult {
+    jobs[at].result.as_ref().expect("the job's result")
 }
 
 /// A worker over `machine` running `runs`, with the handover file written in its state root.
@@ -164,8 +168,8 @@ fn a_stop_asked_to_hand_over_leaves_the_running_jobs_to_the_next_process_which_r
 
     assert_eq!(exit, Exit::Stopped);
     assert_eq!(phases(&sent), ["serving", "draining"]);
-    assert_eq!(sent[1].1["held"][0]["state"], "running");
-    assert_eq!(sent[1].1["held"][1]["state"], "running");
+    assert_eq!(sent[1].1["jobs"][0]["state"], "running");
+    assert_eq!(sent[1].1["jobs"][1]["state"], "running");
     assert!(results(&sent).is_empty());
     assert_eq!(machine.world.alive(), 2);
     assert!(
@@ -191,10 +195,10 @@ fn a_stop_asked_to_hand_over_leaves_the_running_jobs_to_the_next_process_which_r
     );
 
     let next = next_process(&dir, &machine, worker);
-    let held = next.snapshot().held;
+    let held = next.snapshot().jobs;
     let states: Vec<(&str, HeldState)> = held
         .iter()
-        .map(|run| (run.run_id.as_str(), run.state))
+        .map(|job| (job.job_id.as_str(), job.state))
         .collect();
     assert_eq!(
         states,
@@ -204,10 +208,11 @@ fn a_stop_asked_to_hand_over_leaves_the_running_jobs_to_the_next_process_which_r
     assert!(next.handle().settle());
     machine.world.exit("r1", 0);
     assert!(next.handle().settle());
-    let results = next.snapshot().results;
-    let mut ends: Vec<(&str, Option<i32>)> = results
+    let jobs = next.snapshot().jobs;
+    let mut ends: Vec<(&str, Option<i32>)> = jobs
         .iter()
-        .map(|result| (result.run_id.as_str(), result.exit_code))
+        .filter_map(|job| job.result.as_ref())
+        .map(|result| (result.job_id.as_str(), result.exit_code))
         .collect();
     ends.sort_unstable();
     assert_eq!(ends, [("r1", Some(0)), ("r2", Some(3))]);
@@ -234,11 +239,12 @@ fn a_job_that_ends_during_the_restart_is_found_and_reported_by_the_next_process(
     machine.world.exit("r1", 7);
     let next = next_process(&dir, &machine, worker);
     assert!(next.handle().settle());
-    let results = next.snapshot().results;
-    assert_eq!(results.len(), 1, "{results:?}");
-    assert_eq!(results[0].run_id, "r1");
-    assert_eq!(results[0].exit_code, Some(7));
-    assert_eq!(results[0].outcome, js_agent_wire::Outcome::Failed);
+    let jobs = next.snapshot().jobs;
+    assert_eq!(jobs.len(), 1, "{jobs:?}");
+    let result = result_of(&jobs, 0);
+    assert_eq!(result.job_id, "r1");
+    assert_eq!(result.exit_code, Some(7));
+    assert_eq!(result.outcome, js_agent_wire::Outcome::Failed);
 }
 
 /// Asserts that a result the server has not acknowledged when the agent hands over is kept
@@ -253,7 +259,7 @@ fn a_result_not_yet_acknowledged_at_the_handover_is_sent_once_by_the_next_proces
     let worker = running(&dir, &machine, &["r1"]);
     machine.world.exit("r1", 0);
     assert!(worker.handle().settle());
-    assert_eq!(worker.snapshot().results.len(), 1);
+    assert!(worker.snapshot().jobs[0].result.is_some());
     let replies = vec![welcome(1), beat_ok()];
     let (exit, _, sent) = handed(&dir, &worker, replies, LONG, |_| Wake::Stop);
     assert_eq!(exit, Exit::Stopped);
@@ -264,10 +270,11 @@ fn a_result_not_yet_acknowledged_at_the_handover_is_sent_once_by_the_next_proces
     );
 
     let next = next_process(&dir, &machine, worker);
-    let results = next.snapshot().results;
-    assert_eq!(results.len(), 1, "{results:?}");
-    assert_eq!(results[0].run_id, "r1");
-    assert_eq!(results[0].exit_code, Some(0));
+    let jobs = next.snapshot().jobs;
+    assert_eq!(jobs.len(), 1, "{jobs:?}");
+    let result = result_of(&jobs, 0);
+    assert_eq!(result.job_id, "r1");
+    assert_eq!(result.exit_code, Some(0));
 }
 
 /// Asserts that a start under way (its image still being pulled: nothing of it exists yet)
@@ -279,10 +286,10 @@ fn a_result_not_yet_acknowledged_at_the_handover_is_sent_once_by_the_next_proces
 fn a_start_under_way_is_waited_for_and_then_handed_over_running() {
     let dir = Scratch::new("jobs-handover-start");
     let machine = FakeMachine::new();
-    let image = job("r1").image;
+    let image = job_start("r1").image;
     machine.world.begin_pull(&image);
     let worker = running(&dir, &machine, &["r1"]);
-    assert_eq!(worker.snapshot().held[0].state, HeldState::Starting);
+    assert_eq!(worker.snapshot().jobs[0].state, HeldState::Starting);
     let replies = vec![welcome(1), beat_ok(), beat_ok()];
     let world = machine.world.clone();
     let act = move |n: usize| match n {
@@ -296,13 +303,13 @@ fn a_start_under_way_is_waited_for_and_then_handed_over_running() {
 
     assert_eq!(exit, Exit::Stopped);
     assert_eq!(phases(&sent), ["serving", "draining", "draining"]);
-    assert_eq!(sent[1].1["held"][0]["state"], "starting");
-    assert_eq!(sent[2].1["held"][0]["state"], "running");
+    assert_eq!(sent[1].1["jobs"][0]["state"], "starting");
+    assert_eq!(sent[2].1["jobs"][0]["state"], "running");
     assert!(log.contains("js-agent: handed over"), "{log}");
     assert_eq!(machine.world.created(), ["r1"]);
 
     let next = next_process(&dir, &machine, worker);
-    assert_eq!(next.snapshot().held[0].state, HeldState::Running);
+    assert_eq!(next.snapshot().jobs[0].state, HeldState::Running);
     assert_eq!(
         machine.world.created(),
         ["r1"],
@@ -358,8 +365,8 @@ fn a_check_under_way_is_waited_for_and_the_next_process_starts_untainted() {
     let next = next_process(&dir, &machine, worker);
     let snapshot = next.snapshot();
     assert_eq!(snapshot.taint, None);
-    assert_eq!(snapshot.results.len(), 1);
-    assert_eq!(snapshot.results[0].run_id, "r1");
+    assert_eq!(snapshot.jobs.len(), 1);
+    assert_eq!(result_of(&snapshot.jobs, 0).job_id, "r1");
 }
 
 /// Asserts that the next process after a hand-over runs a post-job check the earlier process
@@ -386,8 +393,8 @@ fn the_next_process_runs_a_check_left_owed_and_starts_untainted() {
     let snapshot = next.snapshot();
     assert_eq!(snapshot.taint, None);
     assert!(owed(&dir).is_empty(), "{:?}", owed(&dir));
-    assert_eq!(snapshot.held.len(), 1);
-    assert_eq!(snapshot.held[0].state, HeldState::Running);
+    assert_eq!(snapshot.jobs.len(), 1);
+    assert_eq!(snapshot.jobs[0].state, HeldState::Running);
 }
 
 /// Asserts the end of a handover that the work under way does not let happen: with a pull
@@ -409,7 +416,7 @@ fn a_handover_held_past_the_drain_wait_or_stopped_twice_ends_and_stops_nothing()
     ] {
         let dir = Scratch::new(name);
         let machine = FakeMachine::new();
-        let pulled = job("r2").image;
+        let pulled = job_start("r2").image;
         let worker = running(&dir, &machine, &["r1"]);
         machine.world.begin_pull(&pulled);
         assert_eq!(worker.try_deliver(starts(&["r2"])), Delivery::Delivered);
@@ -508,7 +515,7 @@ fn a_worker_parks_only_closed_and_quiet_and_then_does_nothing_more() {
     use js_agent::Parked;
     let dir = Scratch::new("jobs-handover-park");
     let machine = FakeMachine::new();
-    let image = job("r1").image;
+    let image = job_start("r1").image;
     machine.world.begin_pull(&image);
     let worker = start(&dir, &machine);
     assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
@@ -519,7 +526,7 @@ fn a_worker_parks_only_closed_and_quiet_and_then_does_nothing_more() {
     assert_eq!(worker.park(ANSWER), Parked::Busy, "a start under way");
     machine.world.end_pull(&image, false);
     assert!(worker.handle().settle());
-    assert_eq!(worker.snapshot().held[0].state, HeldState::Running);
+    assert_eq!(worker.snapshot().jobs[0].state, HeldState::Running);
     assert_eq!(worker.park(ANSWER), Parked::Parked);
 
     machine.world.exit("r1", 0);
@@ -527,11 +534,11 @@ fn a_worker_parks_only_closed_and_quiet_and_then_does_nothing_more() {
     assert_eq!(worker.park(ANSWER), Parked::Parked);
     let snapshot = worker.snapshot();
     assert_eq!(
-        snapshot.held[0].state,
+        snapshot.jobs[0].state,
         HeldState::Running,
         "no step after the park"
     );
-    assert!(snapshot.results.is_empty());
+    assert!(snapshot.jobs[0].result.is_none());
     assert!(!worker.stalled());
     assert_eq!(
         worker.try_deliver(js_agent_wire::HeartbeatReply::default()),
@@ -539,7 +546,7 @@ fn a_worker_parks_only_closed_and_quiet_and_then_does_nothing_more() {
     );
     assert!(worker.handle().settle());
     assert!(
-        worker.snapshot().results.is_empty(),
+        worker.snapshot().jobs[0].result.is_none(),
         "a reply makes no step either"
     );
 }
@@ -556,7 +563,7 @@ fn a_stop_the_server_asked_for_is_finished_before_the_handover() {
     let worker = running(&dir, &machine, &["r1", "r2"]);
     let stop = reply(
         200,
-        json!({ "commands": [{ "type": "stop", "run_id": "r1" }], "result_acks": [] }),
+        json!({ "commands": [{ "type": "job_stop", "job_id": "r1" }] }),
     );
     let replies = vec![welcome(1), stop, beat_ok()];
     let (exit, log, sent) = handed(&dir, &worker, replies, LONG, |_| Wake::Stop);
@@ -572,9 +579,18 @@ fn a_stop_the_server_asked_for_is_finished_before_the_handover() {
     );
     let next = next_process(&dir, &machine, worker);
     let snapshot = next.snapshot();
-    let ended: Vec<&str> = snapshot.results.iter().map(|r| r.run_id.as_str()).collect();
+    let ended: Vec<&str> = snapshot
+        .jobs
+        .iter()
+        .filter_map(|job| job.result.as_ref())
+        .map(|result| result.job_id.as_str())
+        .collect();
     assert_eq!(ended, ["r1"]);
-    let held: Vec<&str> = snapshot.held.iter().map(|r| r.run_id.as_str()).collect();
+    let held: Vec<&str> = snapshot
+        .jobs
+        .iter()
+        .map(|job| job.job_id.as_str())
+        .collect();
     assert!(held.contains(&"r2"), "{held:?}");
 }
 
@@ -627,7 +643,7 @@ fn a_park_asked_of_a_worker_stuck_in_a_call_answers_busy_and_parks_once_it_is_ou
     assert_eq!(worker.park(ANSWER), Parked::Busy, "a full queue");
     machine.world.release();
     assert!(worker.handle().settle());
-    assert_eq!(worker.snapshot().held[0].state, HeldState::Running);
+    assert_eq!(worker.snapshot().jobs[0].state, HeldState::Running);
     assert_eq!(worker.park(ANSWER), Parked::Parked);
 }
 

@@ -405,19 +405,19 @@ fn leave(session: &Session<'_>, log: &mut dyn Write) -> Exit {
     Exit::Stopped
 }
 
-/// Whether a drain waits on what `snapshot` holds: a run or a job that is not `Blocked`
-/// ([`Snapshot::blocked`]), a result or a retired job id the server has not acknowledged. A
-/// `Blocked` run's container and scratch directory are gone and it leaves only when the taint
-/// clears, which no wait of the drain brings about: a tainted agent that holds nothing else
-/// leaves at once instead of heartbeating `draining` for the whole `--drain-wait`.
+/// Whether a drain waits on what `snapshot` holds: a job that is not `Blocked`
+/// ([`Snapshot::blocked`]), a job's result or a retired job id the server has not
+/// acknowledged. A `Blocked` job's container and scratch directory are gone and it leaves
+/// only when the taint clears, which no wait of the drain brings about: a tainted agent that
+/// holds nothing else leaves at once instead of heartbeating `draining` for the whole
+/// `--drain-wait`.
 pub(crate) fn drain_waits(snapshot: &Snapshot) -> bool {
     let waits = |id: &String| !snapshot.blocked.contains(id);
-    let run = snapshot.held.iter().any(|run| waits(&run.run_id));
     let job = snapshot
         .jobs
         .iter()
         .any(|job| job.result.is_some() || waits(&job.job_id));
-    run || job || !snapshot.results.is_empty() || !snapshot.retired_jobs.is_empty()
+    job || !snapshot.retired_jobs.is_empty()
 }
 
 #[cfg(test)]

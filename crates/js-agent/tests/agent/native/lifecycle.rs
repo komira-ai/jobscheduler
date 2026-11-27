@@ -239,7 +239,7 @@ impl Native {
     }
 
     pub(super) fn start(&mut self, spec: JobSpec) -> Vec<String> {
-        self.apply(vec![Command::Start(Box::new(spec))])
+        names(&self.life.start_spec(&spec))
     }
 
     /// Steps the lifecycle until `done`, and returns the events of the steps.
@@ -296,7 +296,7 @@ fn a_native_job_runs_to_its_result_and_its_user_is_removed() {
         h.start(job_with("r1", "/bin/echo", &["hello"])),
         ["started r1"]
     );
-    assert_eq!(h.life.held().len(), 1);
+    assert_eq!(crate::lifecycle::held(&h.life).len(), 1);
     assert!(h.scratch_of("r1").is_dir());
     let (account, home) = (h.account_of(0), h.home_of(0));
     assert!(h.accounts.records().contains(&account));
@@ -304,7 +304,7 @@ fn a_native_job_runs_to_its_result_and_its_user_is_removed() {
     let mut want = vec!["result r1".to_owned()];
     want.extend(cleanup("r1"));
     assert_eq!(names(&events), want);
-    let result = &h.life.results()[0];
+    let result = &crate::lifecycle::results(&h.life)[0];
     assert_eq!(
         (result.outcome, result.exit_code),
         (Outcome::Succeeded, Some(0))
@@ -314,14 +314,14 @@ fn a_native_job_runs_to_its_result_and_its_user_is_removed() {
     assert!(!h.scratch_of("r1").exists());
     assert!(!home.exists());
     assert!(!h.accounts.records().contains(&account));
-    let ack = reply_json(&json!({ "result_acks": [{ "run_id": "r1", "ack": "ACCEPTED" }] }));
+    let ack = reply_json(&json!({ "job_acks": [{ "job_id": "r1", "ack": "ACCEPTED" }] }));
     h.life.apply(&ack);
-    assert!(h.life.held().is_empty());
+    assert!(crate::lifecycle::held(&h.life).is_empty());
 }
 
 /// Asserts a native job through a restart of the agent: the job runs on while the lifecycle
 /// and the runtime are dropped and the next ones start over the same state; the next lifecycle
-/// adopts the run at its start (the event `adopted`), lists it in its first heartbeat's runs,
+/// adopts the run at its start (the event `adopted`), lists it among its held jobs,
 /// keeps its account, and once the supervisor records the job's exit (written here where the
 /// supervisor writes it: the fake supervisor writes none) reports the result once, with the
 /// code and what the job printed, and removes the run, its account and its scratch directory.
@@ -338,10 +338,13 @@ fn a_native_job_outlives_a_restart_and_its_result_is_reported_once() {
         .filter(|name| name.starts_with("adopted"))
         .collect();
     assert_eq!(adopted, ["adopted r1"], "{events:?}");
-    let held: Vec<String> = h.life.held().into_iter().map(|run| run.run_id).collect();
+    let held: Vec<String> = crate::lifecycle::held(&h.life)
+        .into_iter()
+        .map(|run| run.run_id)
+        .collect();
     assert_eq!(held, ["r1"]);
     assert!(h.accounts.records().contains(&account), "the user is kept");
-    assert!(h.life.results().is_empty());
+    assert!(crate::lifecycle::results(&h.life).is_empty());
     let record = ExitRecord {
         ended: Ended::Exited(5),
         job_pid: None,
@@ -356,7 +359,7 @@ fn a_native_job_outlives_a_restart_and_its_result_is_reported_once() {
         .filter(|name| name.starts_with("result"))
         .collect();
     assert_eq!(results, ["result r1"], "{events:?}");
-    let result = &h.life.results()[0];
+    let result = &crate::lifecycle::results(&h.life)[0];
     assert_eq!(
         (result.outcome, result.exit_code),
         (Outcome::Failed, Some(5))
@@ -365,7 +368,7 @@ fn a_native_job_outlives_a_restart_and_its_result_is_reported_once() {
         result.log_tail.as_ref().unwrap().stdout,
         "before the restart\n"
     );
-    assert_eq!(h.life.results().len(), 1);
+    assert_eq!(crate::lifecycle::results(&h.life).len(), 1);
     assert!(!home.exists());
     assert!(!h.accounts.records().contains(&account));
     assert!(!h.scratch_of("r1").exists());
@@ -382,13 +385,13 @@ fn a_stop_kills_the_user_and_the_run_ends_as_killed() {
     h.start(sleeper("r1"));
     let (account, home) = (h.account_of(0), h.home_of(0));
     assert!(
-        h.apply(vec![Command::Stop {
-            run_id: "r1".to_owned()
+        h.apply(vec![Command::JobStop {
+            job_id: "r1".to_owned()
         }])
         .is_empty()
     );
-    h.until(|life| !life.results().is_empty());
-    let result = &h.life.results()[0];
+    h.until(|life| !crate::lifecycle::results(life).is_empty());
+    let result = &crate::lifecycle::results(&h.life)[0];
     assert_eq!((result.outcome, result.exit_code), (Outcome::Killed, None));
     h.until(|life| life.busy_slots().is_empty());
     assert!(!home.exists());
@@ -403,8 +406,8 @@ fn a_run_past_its_wall_limit_is_killed_and_timed_out() {
     h.start(sleeper("r1"));
     let home = h.home_of(0);
     h.clock.advance(60_000);
-    h.until(|life| !life.results().is_empty());
-    let result = &h.life.results()[0];
+    h.until(|life| !crate::lifecycle::results(life).is_empty());
+    let result = &crate::lifecycle::results(&h.life)[0];
     assert_eq!(result.outcome, Outcome::TimedOut);
     h.until(|life| life.busy_slots().is_empty());
     assert!(!home.exists());
@@ -431,14 +434,14 @@ fn an_image_start_on_the_native_path_is_refused_with_a_typed_code() {
         h.made_no_run();
         assert!(!h.scratch_of("r1").exists());
         assert_eq!(h.life.free().cpu_millis, 4000);
-        let result = &h.life.results()[0];
+        let result = &crate::lifecycle::results(&h.life)[0];
         assert_eq!(result.outcome, Outcome::FailedToStart);
         assert_eq!(result.detail.as_deref(), Some("image-unsupported-here"));
     }
 }
 
 /// A job start of `job_id`, named by its image, with the environment `env`.
-fn job_start(job_id: &str, env: &[(&str, &str)]) -> Command {
+pub(super) fn job_start(job_id: &str, env: &[(&str, &str)]) -> Command {
     Command::JobStart(Box::new(job_start_spec(job_id, env)))
 }
 
@@ -550,7 +553,7 @@ fn a_start_the_runtime_cannot_serve_is_refused_and_makes_nothing() {
         h.made_no_run();
         assert!(!h.scratch_of("r1").exists());
         assert_eq!(h.life.free().cpu_millis, 4000);
-        let result = &h.life.results()[0];
+        let result = &crate::lifecycle::results(&h.life)[0];
         assert_eq!(result.outcome, Outcome::FailedToStart);
         assert_eq!(result.detail.as_deref(), Some(code));
     }
@@ -613,7 +616,7 @@ impl Imaged {
 
     /// The result of the run `run_id`.
     fn result_of(&self, run_id: &str) -> (Outcome, Option<String>) {
-        let results = self.h.life.results();
+        let results = crate::lifecycle::results(&self.h.life);
         let found = results.iter().find(|result| result.run_id == run_id);
         let result = found.expect("a result for the run");
         (result.outcome, result.detail.clone())

@@ -228,11 +228,15 @@ fn files_that_cannot_be_written_fail_the_start_without_leaking() {
     let events = h.start(spec);
     assert_eq!(names(&events), ["finding r1 scratch-failed", "result r1"]);
     assert_eq!(
-        h.life.results()[0].detail.as_deref(),
+        super::results(&h.life)[0].detail.as_deref(),
         Some("scratch-failed")
     );
     assert!(h.fake.created().is_empty(), "no container was created");
-    let shown = format!("{events:?} {:?} {:?}", h.life.results(), h.life.held());
+    let shown = format!(
+        "{events:?} {:?} {:?}",
+        super::results(&h.life),
+        super::held(&h.life)
+    );
     assert!(
         !shown.contains("SECRET") && !shown.contains("secret-name"),
         "{shown}"
@@ -260,8 +264,8 @@ fn a_planted_secret_is_printed_nowhere() {
         format!("{:?}", h.fake.created()),
         format!("{events:?}"),
         format!("{more:?}"),
-        format!("{:?}", h.life.results()),
-        format!("{:?}", h.life.held()),
+        format!("{:?}", super::results(&h.life)),
+        format!("{:?}", super::held(&h.life)),
         format!("{:?}", h.log.borrow()),
     ];
     for text in shown {

@@ -8,9 +8,17 @@ use js_agent_wire::limits::{MAX_COMMANDS, MAX_HELD, MAX_RESULTS};
 use js_agent_wire::{Command, HeldRun, HeldState, Isolation, Outcome};
 use serde_json::json;
 
+use super::per_job::{job_start, start};
 use super::{GRACE, Harness, Options, cleanup, job, names, reply_json};
 
-/// Asserts that a start for a run the agent holds changes nothing, whether the first
+/// A command that stops the job `job_id`.
+fn job_stop(job_id: &str) -> Command {
+    Command::JobStop {
+        job_id: job_id.to_owned(),
+    }
+}
+
+/// Asserts that a start for a job the agent holds changes nothing, whether the first
 /// start was a moment ago, in the same reply, or has since finished and been
 /// acknowledged: one container, one scratch directory, one booking. It catches a start
 /// that runs the work twice when the server resends it.
@@ -25,10 +33,7 @@ fn duplicate_start_idempotent() {
     );
     assert_eq!(h.fake.created().len(), 1);
     assert_eq!(h.life.free().cpu_millis, 3000);
-    let twice = h.apply(vec![
-        Command::Start(Box::new(job("r2"))),
-        Command::Start(Box::new(job("r2"))),
-    ]);
+    let twice = h.apply(vec![job_start(start("r2")), job_start(start("r2"))]);
     assert_eq!(names(&twice), ["invalid #1 invalid-reply", "started r2"]);
     assert_eq!(h.fake.created().len(), 2);
     h.fake.exit("r1", 0);
@@ -39,11 +44,11 @@ fn duplicate_start_idempotent() {
         "a run that exited and is not acknowledged is held: {after_exit:?}"
     );
     assert_eq!(h.fake.created().len(), 2);
-    assert_eq!(h.life.results().len(), 1);
+    assert_eq!(super::results(&h.life).len(), 1);
     h.ack("r1", "ACCEPTED");
     assert_eq!(h.held(), ["r2"]);
     let late = h.start(job("r1"));
-    assert_eq!(names(&late), ["skipped r1 Retired"]);
+    assert_eq!(names(&late), ["skipped r1 FenceRetired"]);
     assert_eq!(
         h.fake.created().len(),
         2,
@@ -51,23 +56,26 @@ fn duplicate_start_idempotent() {
     );
 }
 
-/// Asserts that a stop that arrives before its start, for a run the agent never held,
+/// Asserts that a stop that arrives before its start, for a job the agent never held,
 /// leaves the start dead: it creates nothing, makes no scratch directory and reports
-/// nothing. A cancel does the same. It catches an agent that forgets a stop it could not
-/// apply, and starts the run the server has given up.
+/// nothing, whether the start comes by [`Harness::start`] or in a reply. It catches an
+/// agent that forgets a stop it could not apply, and starts the job the server has given
+/// up.
 #[test]
 fn start_after_stop_never_runs() {
     let mut h = Harness::new("stop-first");
     assert!(h.stop("r1").is_empty());
-    assert!(h.cancel("r2").is_empty());
+    assert!(h.stop("r2").is_empty());
+    let events = h.start(job("r1"));
+    assert_eq!(names(&events), ["skipped r1 FenceRetired"]);
+    let events = h.apply(vec![job_start(start("r2"))]);
+    assert_eq!(names(&events), ["skipped r2 FenceRetired"]);
     for run in ["r1", "r2"] {
-        let events = h.start(job(run));
-        assert_eq!(names(&events), [format!("skipped {run} Retired")]);
         assert!(!h.scratch_of(run).exists());
     }
     assert!(h.log.borrow().is_empty(), "no container call was made");
     assert!(h.held().is_empty());
-    assert!(h.life.results().is_empty());
+    assert!(super::results(&h.life).is_empty());
     let ok = h.start(job("r3"));
     assert_eq!(names(&ok), ["started r3"]);
 }
@@ -80,17 +88,12 @@ fn the_memory_of_stopped_runs_is_bounded() {
     let mut h = Harness::new("retired-cap");
     let ids: Vec<String> = (0..=RETIRED_CAP).map(|n| format!("x{n}")).collect();
     for chunk in ids.chunks(1000) {
-        let stops = chunk
-            .iter()
-            .map(|run_id| Command::Stop {
-                run_id: run_id.clone(),
-            })
-            .collect();
+        let stops = chunk.iter().map(|job_id| job_stop(job_id)).collect();
         h.apply(stops);
     }
     assert_eq!(
         names(&h.start(job("x1"))),
-        ["skipped x1 Retired"],
+        ["skipped x1 FenceRetired"],
         "the second oldest is still remembered, with no stop sent again"
     );
     assert_eq!(
@@ -101,7 +104,7 @@ fn the_memory_of_stopped_runs_is_bounded() {
     let newest = ids.last().unwrap();
     assert_eq!(
         names(&h.start(job(newest))),
-        [format!("skipped {newest} Retired")]
+        [format!("skipped {newest} FenceRetired")]
     );
 }
 
@@ -116,63 +119,10 @@ fn a_repeated_stop_takes_one_place_in_the_memory() {
     h.stop("dup");
     let others: Vec<String> = (0..RETIRED_CAP - 1).map(|n| format!("y{n}")).collect();
     for chunk in others.chunks(1000) {
-        let stops = chunk
-            .iter()
-            .map(|run_id| Command::Stop {
-                run_id: run_id.clone(),
-            })
-            .collect();
+        let stops = chunk.iter().map(|job_id| job_stop(job_id)).collect();
         h.apply(stops);
     }
-    assert_eq!(names(&h.start(job("dup"))), ["skipped dup Retired"]);
-}
-
-/// Asserts that a start that waited longer than its `valid_for_ms` on the agent's clock
-/// (here because the starts before it in the reply took long) is dropped with no result,
-/// no held run and no container; that a start that waited exactly its `valid_for_ms`
-/// still runs; that a start with no bound runs however long the starts before it took;
-/// and that the same run may start from a later reply. It catches a stale start that
-/// runs, one that is reported (the server gives its lease up as never started on its
-/// own), a boundary off by one millisecond, and a zero bound read as "no time at all".
-#[test]
-fn stale_start_dropped_silently() {
-    let mut h = Harness::new("stale");
-    h.fake.create_takes(1500);
-    // Each start takes 1500 ms, so the n-th start of the reply waited (n - 1) * 1500.
-    let small = |run: &str, valid_for_ms: u64| {
-        let mut spec = job(run);
-        spec.limits.cpu_millis = 500;
-        spec.valid_for_ms = valid_for_ms;
-        spec
-    };
-    let late = small("late", 1000);
-    let events = h.apply(vec![
-        Command::Start(Box::new(small("slow", 0))),
-        // Waited exactly as long as it allows: runs.
-        Command::Start(Box::new(small("exact", 1500))),
-        // No bound, after the clock has moved: runs.
-        Command::Start(Box::new(small("unbounded", 0))),
-        Command::Start(Box::new(late.clone())),
-        Command::Start(Box::new(small("fine", 5000))),
-    ]);
-    assert_eq!(
-        names(&events),
-        [
-            "started slow",
-            "started exact",
-            "started unbounded",
-            "skipped late Stale",
-            "started fine"
-        ]
-    );
-    assert_eq!(h.held(), ["slow", "exact", "unbounded", "fine"]);
-    assert!(
-        h.life.results().is_empty(),
-        "nothing is sent for a stale start"
-    );
-    assert!(!h.scratch_of("late").exists());
-    h.fake.create_takes(0);
-    assert_eq!(names(&h.start(late)), ["started late"]);
+    assert_eq!(names(&h.start(job("dup"))), ["skipped dup FenceRetired"]);
 }
 
 /// Asserts that a start with a `run` beside its image, on an agent whose runtime runs
@@ -201,7 +151,7 @@ fn a_run_beside_an_image_is_refused_on_a_container_agent() {
     assert!(h.log.borrow().is_empty());
     assert!(!h.scratch_of("r1").exists());
     assert_eq!(h.life.free().cpu_millis, 4000);
-    let result = &h.life.results()[0];
+    let result = &super::results(&h.life)[0];
     assert_eq!(result.outcome, Outcome::FailedToStart);
     assert_eq!(result.detail.as_deref(), Some("run-unsupported"));
     spec.run = None;
@@ -234,7 +184,7 @@ fn native_job_is_refused_while_the_agent_has_no_native_runtime() {
     assert!(h.log.borrow().is_empty());
     assert!(!h.scratch_of("r1").exists());
     assert_eq!(h.life.free().cpu_millis, 4000);
-    let result = &h.life.results()[0];
+    let result = &super::results(&h.life)[0];
     assert_eq!(result.outcome, Outcome::FailedToStart);
     assert_eq!(result.detail.as_deref(), Some("native-unsupported"));
 }
@@ -255,11 +205,11 @@ fn host_job_without_agent_consent_creates_nothing() {
     assert!(h.log.borrow().is_empty());
     assert!(!h.scratch_of("r1").exists());
     assert_eq!(h.life.free().cpu_millis, 4000);
-    let result = &h.life.results()[0];
+    let result = &super::results(&h.life)[0];
     assert_eq!(result.outcome, Outcome::FailedToStart);
     assert_eq!(result.detail.as_deref(), Some("host-jobs-not-allowed"));
     assert_eq!(
-        h.life.held(),
+        super::held(&h.life),
         [HeldRun {
             run_id: "r1".to_owned(),
             state: HeldState::ExitedUnacked
@@ -271,8 +221,8 @@ fn host_job_without_agent_consent_creates_nothing() {
         again.is_empty(),
         "a refused run whose result is held is not refused twice: {again:?}"
     );
-    assert_eq!(h.life.results().len(), 1);
-    assert_eq!(h.life.held().len(), 1);
+    assert_eq!(super::results(&h.life).len(), 1);
+    assert_eq!(super::held(&h.life).len(), 1);
 
     let mut allowed = Harness::with(
         "host-allowed",
@@ -288,16 +238,16 @@ fn host_job_without_agent_consent_creates_nothing() {
     assert_eq!(allowed.fake.created()[0].isolation, Isolation::Host);
 }
 
-/// Asserts that a start whose isolation this version cannot classify never reaches the
+/// Asserts that a job start whose isolation this version cannot classify never reaches the
 /// runtime: the reply decodes it as an unknown command, nothing is created, and a valid
 /// start beside it still runs. It catches an agent that runs a job it cannot classify
 /// as a contained one.
 #[test]
 fn unknown_isolation_refused_never_run() {
     let mut h = Harness::new("unknown-isolation");
-    let mut odd = serde_json::to_value(Command::Start(Box::new(job("odd")))).unwrap();
+    let mut odd = serde_json::to_value(job_start(start("odd"))).unwrap();
     odd["isolation"] = json!("quantum");
-    let fine = serde_json::to_value(Command::Start(Box::new(job("fine")))).unwrap();
+    let fine = serde_json::to_value(job_start(start("fine"))).unwrap();
     let events = h
         .life
         .apply(&reply_json(&json!({ "commands": [odd, fine] })));
@@ -313,18 +263,12 @@ fn unknown_isolation_refused_never_run() {
 fn an_invalid_start_costs_the_commands_beside_it_nothing() {
     let mut h = Harness::new("invalid-beside");
     h.start(job("r1"));
-    let mut bad = job("bad");
+    let mut bad = start("bad");
     bad.image = "-v/:/host".to_owned();
-    let events = h.apply(vec![
-        Command::Start(Box::new(bad)),
-        Command::Stop {
-            run_id: "r1".to_owned(),
-        },
-        Command::Unknown,
-    ]);
+    let events = h.apply(vec![job_start(bad), job_stop("r1"), Command::Unknown]);
     assert_eq!(names(&events), ["invalid #0 invalid-image"]);
     h.life.step();
-    assert_eq!(h.life.results()[0].outcome, Outcome::Killed);
+    assert_eq!(super::results(&h.life)[0].outcome, Outcome::Killed);
     assert_eq!(h.fake.created().len(), 1);
 }
 
@@ -335,17 +279,13 @@ fn an_invalid_start_costs_the_commands_beside_it_nothing() {
 #[test]
 fn a_start_without_a_pinned_image_is_refused() {
     let mut h = Harness::new("unpinned");
-    let mut tag = job("tag");
+    let mut tag = start("tag");
     tag.image = "registry.example/job:1".to_owned();
-    let mut short = job("short");
+    let mut short = start("short");
     short.image = format!("registry.example/job@sha256:{}", "ab".repeat(20));
-    let mut both = job("both");
+    let mut both = start("both");
     both.image = format!("registry.example/job:1@sha256:{}", "ab".repeat(32));
-    let events = h.apply(vec![
-        Command::Start(Box::new(tag)),
-        Command::Start(Box::new(short)),
-        Command::Start(Box::new(both)),
-    ]);
+    let events = h.apply(vec![job_start(tag), job_start(short), job_start(both)]);
     assert_eq!(
         names(&events),
         [
@@ -357,13 +297,15 @@ fn a_start_without_a_pinned_image_is_refused() {
     assert_eq!(h.fake.created().len(), 1);
 }
 
-/// Asserts the refusals of a start that does not fit, each with its code and each
-/// creating nothing: more CPU than is free, more memory than is free, a GPU index a
-/// running job holds, and, with the machine idle, a job larger than the machine and a GPU
-/// index the machine does not offer. It catches over-commit, a GPU in two jobs, and a
-/// job placed on a device that is not there.
+/// Asserts what a job start is refused for: a GPU index a running job holds is
+/// `no-capacity`, while a job that asks for more CPU or more memory than is left beside the
+/// running jobs starts (the job service judges CPU and memory, the agent sums neither); with
+/// the machine idle, a job larger than the machine in CPU or memory and a GPU index the
+/// machine does not offer are `limits-exceed-shape`. It catches an agent that refuses a
+/// placed job for a CPU or memory sum, a GPU in two jobs, and a job placed on a device that
+/// is not there.
 #[test]
-fn overcommit_refused() {
+fn cpu_and_memory_are_not_summed_but_gpus_and_the_machine_shape_are_checked() {
     let mut h = Harness::new("overcommit");
     let mut first = job("first");
     first.limits.cpu_millis = 3000;
@@ -375,24 +317,23 @@ fn overcommit_refused() {
     cpu.limits.cpu_millis = 1001;
     let mut memory = job("memory");
     memory.limits.memory_bytes = (2 << 30) + 1;
-    let mut gpu = job("gpu");
-    gpu.gpu_indices = vec![1];
-    for spec in [cpu, memory, gpu] {
+    for spec in [cpu, memory] {
         let run = spec.run_id.clone();
         let events = names(&h.start(spec));
-        assert_eq!(events, [format!("refused {run} no-capacity")]);
-        assert!(!h.scratch_of(&run).exists());
+        assert_eq!(events, [format!("started {run}")], "no CPU or memory sum");
     }
+    let mut gpu = job("gpu");
+    gpu.gpu_indices = vec![1];
+    assert_eq!(names(&h.start(gpu)), ["refused gpu no-capacity"]);
+    assert!(!h.scratch_of("gpu").exists());
     let mut exact = job("exact");
-    exact.limits.cpu_millis = 1000;
-    exact.limits.memory_bytes = 2 << 30;
     exact.gpu_indices = vec![0];
     assert_eq!(
         names(&h.start(exact)),
         ["started exact"],
         "a job that fits runs"
     );
-    assert_eq!(h.fake.created().len(), 2);
+    assert_eq!(h.fake.created().len(), 4);
 
     let mut huge = job("huge");
     huge.limits.cpu_millis = 4001;
@@ -405,7 +346,7 @@ fn overcommit_refused() {
         let events = names(&h.start(spec));
         assert_eq!(events, [format!("refused {run} limits-exceed-shape")]);
     }
-    assert_eq!(h.fake.created().len(), 2);
+    assert_eq!(h.fake.created().len(), 4);
     assert_eq!(h.life.free().gpus.len(), 0, "both GPUs are booked");
 }
 
@@ -450,7 +391,7 @@ fn wall_limit_kills_and_reports_timed_out() {
     let events = names(&h.life.step());
     assert_eq!(events[0], "result r1");
     assert_eq!(h.fake.stops(), [("c1".to_owned(), GRACE)]);
-    let result = &h.life.results()[0];
+    let result = &super::results(&h.life)[0];
     assert_eq!(result.outcome, Outcome::TimedOut);
     assert_eq!(result.exit_code, None);
     assert_eq!(GRACE, Duration::from_secs(10));
@@ -466,7 +407,7 @@ fn a_job_that_finished_before_its_limit_is_not_timed_out() {
     h.fake.exit("r1", 0);
     h.clock.advance(120_000);
     h.life.step();
-    assert_eq!(h.life.results()[0].outcome, Outcome::Succeeded);
+    assert_eq!(super::results(&h.life)[0].outcome, Outcome::Succeeded);
     assert!(h.fake.stops().is_empty());
 }
 
@@ -490,7 +431,7 @@ fn a_runtime_that_cannot_poll_does_not_extend_the_limit() {
     );
     assert_eq!(h.fake.stops().len(), 1);
     h.life.step();
-    assert_eq!(h.life.results()[0].outcome, Outcome::TimedOut);
+    assert_eq!(super::results(&h.life)[0].outcome, Outcome::TimedOut);
 }
 
 /// Asserts that a container the runtime no longer has ends its job: it is reported
@@ -505,7 +446,7 @@ fn a_container_that_vanishes_ends_its_job() {
     let events = names(&h.life.step());
     assert_eq!(events[0], "result r1");
     assert_eq!(events[1..], cleanup("r1"));
-    let result = &h.life.results()[0];
+    let result = &super::results(&h.life)[0];
     assert_eq!(result.outcome, Outcome::Failed);
     assert_eq!(result.exit_code, None);
     assert_eq!(h.life.free().cpu_millis, 4000);
@@ -518,7 +459,7 @@ fn a_container_that_vanishes_ends_its_job() {
     h.stop("r2");
     h.clock.advance(60_000);
     h.life.step();
-    let outcomes: Vec<Outcome> = h.life.results().iter().map(|r| r.outcome).collect();
+    let outcomes: Vec<Outcome> = super::results(&h.life).iter().map(|r| r.outcome).collect();
     assert_eq!(
         outcomes,
         [Outcome::Failed, Outcome::Killed, Outcome::TimedOut]
@@ -540,25 +481,26 @@ fn refused_starts_cannot_outgrow_the_wire_limits() {
         let starts = chunk
             .iter()
             .map(|n| {
-                let mut one = spec.clone();
-                one.run_id = format!("x{n}");
-                Command::Start(Box::new(one))
+                let mut one = start(&format!("x{n}"));
+                one.isolation = Isolation::Host;
+                job_start(one)
             })
             .collect();
         h.apply(starts);
     }
-    assert_eq!(h.life.held().len(), MAX_HELD);
-    assert_eq!(h.life.results().len(), MAX_RESULTS);
+    assert_eq!(super::held(&h.life).len(), MAX_HELD);
+    assert_eq!(super::results(&h.life).len(), MAX_RESULTS);
     spec.run_id = "extra".to_owned();
+    spec.lease_id = "lease-extra".to_owned();
     assert_eq!(names(&h.start(spec.clone())), ["skipped extra Full"]);
-    assert_eq!(h.life.held().len(), MAX_HELD);
-    assert_eq!(h.life.results().len(), MAX_RESULTS);
+    assert_eq!(super::held(&h.life).len(), MAX_HELD);
+    assert_eq!(super::results(&h.life).len(), MAX_RESULTS);
     h.ack("x0", "ACCEPTED");
     assert_eq!(
         names(&h.start(spec)),
         ["refused extra host-jobs-not-allowed"]
     );
-    assert_eq!(h.life.held().len(), MAX_HELD);
+    assert_eq!(super::held(&h.life).len(), MAX_HELD);
 }
 
 /// Asserts that a stop that the runtime refuses is a finding and is asked for again at
@@ -571,9 +513,9 @@ fn a_failed_stop_is_retried() {
     h.fake.fail("stop", 1);
     h.stop("r1");
     assert_eq!(names(&h.life.step()), ["finding r1 stop-failed"]);
-    assert!(h.life.results().is_empty());
+    assert!(super::results(&h.life).is_empty());
     h.life.step();
-    assert_eq!(h.life.results()[0].outcome, Outcome::Killed);
+    assert_eq!(super::results(&h.life)[0].outcome, Outcome::Killed);
     assert_eq!(h.fake.stops().len(), 1);
 }
 
@@ -598,12 +540,12 @@ fn stop_twice_is_one_stop_and_stop_unknown_run_is_quiet() {
         "one stop however often it is asked for"
     );
     assert!(
-        h.life.results().is_empty(),
+        super::results(&h.life).is_empty(),
         "the container has not exited yet"
     );
     h.fake.exit("r1", 143);
     h.life.step();
-    assert_eq!(h.life.results()[0].outcome, Outcome::Killed);
+    assert_eq!(super::results(&h.life)[0].outcome, Outcome::Killed);
 
     let before = h.log.borrow().len();
     let events = h.stop("stranger");
@@ -623,7 +565,7 @@ fn a_stop_after_the_exit_changes_nothing() {
     h.life.step();
     h.stop("r1");
     h.life.step();
-    assert_eq!(h.life.results()[0].outcome, Outcome::Succeeded);
+    assert_eq!(super::results(&h.life)[0].outcome, Outcome::Succeeded);
     assert!(h.fake.stops().is_empty());
 }
 
@@ -641,7 +583,7 @@ fn a_stop_that_beats_the_look_does_not_relabel_a_finished_job() {
     h.stop("ok");
     h.stop("bad");
     h.life.step();
-    let results = h.life.results();
+    let results = super::results(&h.life);
     assert_eq!(
         (results[0].outcome, results[0].exit_code),
         (Outcome::Succeeded, Some(0))
@@ -665,36 +607,12 @@ fn a_timeout_whose_stop_failed_reports_a_later_exit_as_it_was() {
     assert_eq!(names(&h.life.step()), ["finding r1 stop-failed"]);
     h.fake.exit("r1", 0);
     h.life.step();
-    let result = &h.life.results()[0];
+    let result = &super::results(&h.life)[0];
     assert_eq!(
         (result.outcome, result.exit_code),
         (Outcome::Succeeded, Some(0))
     );
     assert!(h.fake.stops().is_empty());
-}
-
-/// Asserts that a cancel, even after a stop, reports nothing, and that a stop after a
-/// cancel does not take the cancel back: the container is stopped and cleaned and the
-/// slot freed, but no result is held. It catches a cancelled run that is reported to a
-/// server that no longer holds its lease.
-#[test]
-fn a_cancel_reports_nothing_even_after_a_stop() {
-    let mut h = Harness::new("cancel");
-    h.start(job("r1"));
-    h.stop("r1");
-    h.cancel("r1");
-    let events = names(&h.life.step());
-    assert_eq!(events, cleanup("r1"));
-    assert!(h.life.results().is_empty());
-    assert!(h.held().is_empty(), "nothing is owed, so nothing is held");
-    assert_eq!(h.life.free().cpu_millis, 4000);
-
-    h.start(job("r2"));
-    h.cancel("r2");
-    h.stop("r2");
-    h.life.step();
-    assert!(h.life.results().is_empty(), "a stop after a cancel reports");
-    assert!(h.held().is_empty());
 }
 
 /// Asserts that a job with an image runs through the runtime seam as a container body:
@@ -715,7 +633,7 @@ fn a_container_body_runs_to_its_result_through_the_runtime_seam() {
 
     h.fake.exit("r1", 0);
     h.life.step();
-    let result = &h.life.results()[0];
+    let result = &super::results(&h.life)[0];
     assert_eq!(
         (result.outcome, result.exit_code),
         (Outcome::Succeeded, Some(0))
@@ -752,6 +670,7 @@ fn the_container_is_created_with_the_jobs_limits_and_the_agents_labels() {
     assert_eq!(labels[label::LEASE], "lease-r1");
     assert_eq!(labels[label::GPUS], "1,0");
     assert_eq!(labels[label::WALL_MS], "60000");
+    assert_eq!(labels[label::KEYING], "job");
 }
 
 /// Asserts that two harnesses built under one name are two worlds: the second one's

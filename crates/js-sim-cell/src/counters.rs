@@ -7,18 +7,16 @@ use std::collections::BTreeMap;
 /// ([`crate::Cloud::counters`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Counter {
-    /// A start delivered for a run the agent process already holds or has run (and has
+    /// A start delivered for a job the agent process already holds or has run (and has
     /// not been told to stop).
     StartRepeated,
-    /// A start delivered for a run the agent process was told to stop or cancel.
+    /// A start delivered for a job the agent process was told to stop.
     StartAfterStop,
     /// The first stop delivered for a job that no answer the agent process read handed it a
     /// start of, before or beside the stop. Where the wire loses no answer (one heartbeat in
     /// flight, every answer read in the order the server built it), the server committed
     /// the cancel before it sent the job's start. Per-job agents only.
     StopBeforeStart,
-    /// A start the agent refused because it waited past its validity.
-    StartDroppedLate,
     /// A result sent in a heartbeat after the first heartbeat that carried it.
     ResultResent,
     /// An answer the agent ignored, wholly or in part, because it failed to decode or
@@ -44,11 +42,10 @@ pub enum Counter {
 
 impl Counter {
     /// Every counter, in order.
-    pub const ALL: [Counter; 12] = [
+    pub const ALL: [Counter; 11] = [
         Counter::StartRepeated,
         Counter::StartAfterStop,
         Counter::StopBeforeStart,
-        Counter::StartDroppedLate,
         Counter::ResultResent,
         Counter::ReplyInvalid,
         Counter::CutWithUnlistedRun,
@@ -66,7 +63,6 @@ impl Counter {
             Counter::StartRepeated => "start_repeated",
             Counter::StartAfterStop => "start_after_stop",
             Counter::StopBeforeStart => "stop_before_start",
-            Counter::StartDroppedLate => "start_dropped_late",
             Counter::ResultResent => "result_resent",
             Counter::ReplyInvalid => "reply_invalid",
             Counter::CutWithUnlistedRun => "cut_with_unlisted_run",
@@ -133,7 +129,6 @@ mod tests {
                 "start_repeated",
                 "start_after_stop",
                 "stop_before_start",
-                "start_dropped_late",
                 "result_resent",
                 "reply_invalid",
                 "cut_with_unlisted_run",

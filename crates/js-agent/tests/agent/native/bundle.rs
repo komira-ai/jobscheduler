@@ -431,7 +431,7 @@ fn a_bundle_job_runs_to_its_result_and_its_pins_are_released() {
     let mut want = vec!["result r1".to_owned()];
     want.extend(cleanup("r1"));
     assert_eq!(names(&events), want);
-    let result = &h.life.results()[0];
+    let result = &crate::lifecycle::results(&h.life)[0];
     assert_eq!(result.outcome, Outcome::Succeeded);
     assert!(
         store.pin(&bundle.pin(), "7.0").is_ok(),
@@ -457,7 +457,7 @@ fn a_bundle_job_for_a_program_the_bundle_lacks_is_refused_by_the_admission() {
     assert_eq!(h.start(spec), ["refused r1 invalid-program"]);
     assert!(h.launcher.launched().is_empty());
     assert_eq!(h.accounts.records(), ready);
-    let result = &h.life.results()[0];
+    let result = &crate::lifecycle::results(&h.life)[0];
     assert_eq!(result.outcome, Outcome::FailedToStart);
     assert_eq!(result.detail.as_deref(), Some(refusal::INVALID_PROGRAM));
 }

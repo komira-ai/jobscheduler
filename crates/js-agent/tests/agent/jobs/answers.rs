@@ -152,7 +152,7 @@ fn the_hook_runs_for_a_fresh_lease_after_a_restart_that_adopted_another() {
     // the hold, and the prepare would then answer for a lease no longer followed.
     h.life.apply(&reply_json(&json!({
         "exclusive": OTHER,
-        "result_acks": [{ "run_id": "a", "ack": "ACCEPTED" }]
+        "job_acks": [{ "job_id": "a", "ack": "ACCEPTED" }]
     })));
     answers.prepare(
         &mut h.life,

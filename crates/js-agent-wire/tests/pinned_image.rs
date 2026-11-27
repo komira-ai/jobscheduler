@@ -3,8 +3,8 @@
 
 mod common;
 
-use common::{broken, expect, job};
-use js_agent_wire::{Command, HeartbeatReply, JobSpec, Rule, refusal};
+use common::{broken, expect, job, job_start};
+use js_agent_wire::{Command, HeartbeatReply, JobStartSpec, Rule, refusal};
 
 const HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -66,15 +66,15 @@ fn a_digest_with_or_without_a_tag_passes() {
     }
 }
 
-/// The start command, which the agent validates, refuses a tag-only image and takes a
+/// The job start command, which the agent validates, refuses a tag-only image and takes a
 /// pinned one; a stop beside it is unaffected. It catches an agent that acts on a start
 /// the server should not have sent.
 #[test]
 fn a_start_command_needs_a_pinned_image() {
     let tag_only = broken(
-        &job(),
+        &job_start(),
         |j| j.image = "ubuntu:24.04".into(),
-        |j: &JobSpec| Command::Start(Box::new(j.clone())).validate(),
+        |j: &JobStartSpec| Command::JobStart(Box::new(j.clone())).validate(),
     );
     expect(
         tag_only,
@@ -82,11 +82,11 @@ fn a_start_command_needs_a_pinned_image() {
         Rule::NotPinned,
         refusal::IMAGE_DIGEST_REQUIRED,
     );
-    assert_eq!(Command::Start(Box::new(job())).validate(), Ok(()));
+    assert_eq!(Command::JobStart(Box::new(job_start())).validate(), Ok(()));
     let reply = HeartbeatReply {
         commands: vec![
-            Command::Start(Box::new(broken_job("ubuntu:24.04"))),
-            Command::Stop { run_id: "r".into() },
+            Command::JobStart(Box::new(broken_job("ubuntu:24.04"))),
+            Command::JobStop { job_id: "r".into() },
         ],
         ..HeartbeatReply::default()
     };
@@ -99,8 +99,8 @@ fn a_start_command_needs_a_pinned_image() {
     assert_eq!(checked.commands.len(), 1);
 }
 
-fn broken_job(image: &str) -> JobSpec {
-    let mut spec = job();
+fn broken_job(image: &str) -> JobStartSpec {
+    let mut spec = job_start();
     spec.image = image.into();
     spec
 }

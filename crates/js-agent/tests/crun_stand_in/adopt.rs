@@ -440,7 +440,6 @@ fn a_job_with_no_record_is_removed_and_the_server_is_told_it_is_gone() {
         result: None,
     };
     assert_eq!(jobs, [running]);
-    assert!(life.held().is_empty());
     let server = [
         "r1-nosidecar",
         "r2-old-hold",

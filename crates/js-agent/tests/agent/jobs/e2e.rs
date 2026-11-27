@@ -350,7 +350,11 @@ fn a_job_goes_through_the_agent_and_its_result_comes_back() {
         )
     );
     assert!(
-        rig.worker.snapshot().results.is_empty(),
+        rig.worker
+            .snapshot()
+            .jobs
+            .iter()
+            .all(|j| j.result.is_none()),
         "the ack was taken"
     );
     assert_eq!(rig.machine.world.alive(), 0);
@@ -480,12 +484,11 @@ fn a_running_job_survives_a_server_restart_and_its_result_arrives() {
 }
 
 /// Asserts what a server that forgot a job does to the agent's work: after the server
-/// restarts without its job store, the agent says hello again at once with the job in its
-/// held list, the server (which has no record of it) answers with a stop, the agent stops the
-/// container and sends no result, and the server lists no job. It catches a stop the agent
-/// does not obey and a result sent for work the server cancelled.
+/// restarts without its job store, the agent says hello again at once, its heartbeat lists
+/// the job, the server (which has no record of it) answers with a stop, the agent stops the
+/// container, and the server lists no job. It catches a stop the agent does not obey.
 #[test]
-fn a_stop_for_a_job_the_restarted_server_forgot_stops_it_silently() {
+fn a_stop_for_a_job_the_restarted_server_forgot_stops_it() {
     let rig = rig("jobs_e2e_forgot", &[]);
     let job = rig.queued(2000);
     rig.until_running(&job);
@@ -517,10 +520,6 @@ fn a_stop_for_a_job_the_restarted_server_forgot_stops_it_silently() {
     assert!(worker.settle());
     assert!(machine.world.log().contains(&format!("stop {job}")));
     assert_eq!(machine.world.alive(), 0);
-    assert!(
-        worker.snapshot().results.is_empty(),
-        "a stopped job the server forgot sends no result"
-    );
 
     agent.elapse();
     agent.next_wait();
@@ -812,7 +811,11 @@ fn an_update_hands_the_running_jobs_to_the_next_agent_and_each_result_reaches_th
         )
     );
     assert!(
-        rig.worker.snapshot().results.is_empty(),
+        rig.worker
+            .snapshot()
+            .jobs
+            .iter()
+            .all(|j| j.result.is_none()),
         "both acknowledged"
     );
     assert_eq!(

@@ -148,7 +148,7 @@ What the server does by itself, and what to check:
   so a restore cannot wind them back; a job id drawn that names a job the restored store holds is drawn again. A client-chosen job id that the
   restore forgot can be submitted again: that is how a client resubmits a job accepted after the backup. Jobs a client accepted after
   the backup read 404 until resubmitted.
-- **Runs.** A run an older agent's host lists is answered `Cancel`: the server holds none.
+- **Runs.** A run an older agent's host lists is read and not answered: the server holds none and gives that agent no command for it.
 
 The test that restores an older job store under live agents and asserts the stop, the bookings and the ids is
 `restart::a_restored_older_job_store_stops_unknown_jobs_and_reissues_no_id` in `crates/js-lease-server/tests/server/restart.rs`.

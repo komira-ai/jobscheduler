@@ -30,7 +30,7 @@ fn the_result_carries_the_tail_read_before_the_removal() {
     h.fake.print("r1", tail());
     h.fake.exit("r1", 3);
     h.life.step();
-    let results = h.life.results();
+    let results = super::results(&h.life);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].outcome, Outcome::Failed);
     assert_eq!(results[0].log_tail, Some(tail()));
@@ -52,7 +52,7 @@ fn a_failed_logs_call_still_yields_the_result_without_a_tail() {
     h.fake.fail("logs", u32::MAX);
     h.fake.exit("r1", 0);
     h.life.step();
-    let results = h.life.results();
+    let results = super::results(&h.life);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].outcome, Outcome::Succeeded);
     assert_eq!(results[0].exit_code, Some(0));
@@ -75,7 +75,7 @@ fn a_runtime_without_logs_gives_no_tail_and_no_finding() {
     h.start(job("r1"));
     h.fake.exit("r1", 0);
     h.life.step();
-    assert_eq!(h.life.results()[0].log_tail, None);
+    assert_eq!(super::results(&h.life)[0].log_tail, None);
     assert!(h.life.findings().is_empty());
 }
 
@@ -101,7 +101,7 @@ fn a_tail_that_serialises_too_large_is_truncated_to_fit() {
     h.fake.print("r1", noisy("START", 8000, "END"));
     h.fake.exit("r1", 1);
     h.life.step();
-    let result = h.life.results().remove(0);
+    let result = super::results(&h.life).remove(0);
     let tail = result.log_tail.clone().unwrap();
     assert!(tail.truncated);
     assert!(tail.stdout.ends_with("END") && tail.stderr.ends_with("END"));
@@ -124,9 +124,9 @@ fn a_tail_that_cannot_fit_even_empty_is_dropped_with_a_finding() {
     h.life.step();
     let mut events = Vec::new();
     h.life.fit_log_tails(1 << 20, &mut events);
-    assert_eq!(h.life.results()[0].log_tail, Some(tail()), "it fits");
+    assert_eq!(super::results(&h.life)[0].log_tail, Some(tail()), "it fits");
     h.life.fit_log_tails(1, &mut events);
-    let result = h.life.results().remove(0);
+    let result = super::results(&h.life).remove(0);
     assert_eq!(
         (result.outcome, result.exit_code),
         (Outcome::Failed, Some(1))
@@ -155,9 +155,11 @@ fn halving_cuts_at_a_character_boundary_and_stops_when_it_fits() {
     h.start(job("r1"));
     h.fake.exit("r1", 1);
     h.life.step();
-    let size = serde_json::to_vec(&h.life.results()[0]).unwrap().len();
+    let size = serde_json::to_vec(&super::results(&h.life)[0])
+        .unwrap()
+        .len();
     h.life.fit_log_tails(size - 1, &mut Vec::new());
-    let cut = h.life.results().remove(0).log_tail.unwrap();
+    let cut = super::results(&h.life).remove(0).log_tail.unwrap();
     assert_eq!(
         cut.stdout,
         "\u{20AC}".repeat(20),
@@ -204,7 +206,7 @@ fn full_load() -> NodeLoad {
 }
 
 /// Asserts that a whole heartbeat of a busy host stays within the body the server reads:
-/// 96 held runs with 128-byte ids, a load at every cap, and the 8 finished runs whose
+/// 96 held jobs with 128-byte ids, a load at every cap, and the 8 finished jobs whose
 /// tails are full of control characters (six times as large once serialised), after the
 /// agent has shed what does not fit. A server answers a beat over the body limit with 413,
 /// which ends the agent, so this is the line between a noisy job and a dead agent. It
@@ -238,8 +240,8 @@ fn a_full_beat_with_noisy_tails_fits_the_body_limit() {
         epoch: u64::MAX,
         session: wide(1),
         phase: Phase::Serving,
-        held: h.life.held(),
-        results: h.life.results(),
+        held: Vec::new(),
+        results: Vec::new(),
         taint: None,
         taint_cleared: None,
         tainted: None,
@@ -247,14 +249,16 @@ fn a_full_beat_with_noisy_tails_fits_the_body_limit() {
         exclusive_refused: None,
         load: Some(full_load()),
         disk_gib: None,
-        jobs: Vec::new(),
+        jobs: h.life.held_jobs(),
         retired_jobs: Vec::new(),
         log_grant_state: None,
     };
-    assert_eq!((beat.held.len(), beat.results.len()), (MAX_LOAD_LEASES, 8));
+    let finished = beat.jobs.iter().filter(|job| job.result.is_some());
+    assert_eq!((beat.jobs.len(), finished.count()), (MAX_LOAD_LEASES, 8));
     assert_eq!(beat.validate(), Ok(()));
     let size = serde_json::to_vec(&beat).unwrap().len();
     assert!(size <= HEARTBEAT_BODY_BUDGET, "{size} bytes");
-    let kept = beat.results.iter().filter(|r| r.log_tail.is_some()).count();
+    let results = beat.jobs.iter().filter_map(|job| job.result.as_ref());
+    let kept = results.filter(|r| r.log_tail.is_some()).count();
     assert!(kept > 0, "the tails are cut down and not all dropped");
 }

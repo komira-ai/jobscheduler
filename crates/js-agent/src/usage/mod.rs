@@ -73,7 +73,7 @@ pub use cgroup::{
     parse_pressure_some_total, parse_single_u64, parse_stat_key, parse_usage_usec, working_set,
 };
 pub use clock::{MINUTE_USEC, MonotonicClock, UsageClock};
-pub use collect::Collector;
+pub use collect::{Collector, RunningLease};
 pub use flags::SampleFlags;
 pub use host::{
     HostCpu, PROC_CPU_PRESSURE, PROC_MEMINFO, PROC_STAT, host_cpu, host_nonfile,

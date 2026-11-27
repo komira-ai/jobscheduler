@@ -156,8 +156,8 @@ impl Inputs {
 /// How long a reply to a beat is held at most when its host does not poll dispatch (or the
 /// beat lists no young start): [`Agents::starting_hold`] when the beat's listing has a young
 /// start (`young`, [`young_start`]), [`Agents::hold_bound`] otherwise. (The server sees jobs
-/// only: the registry cancels every run a beat lists, so a reply to a beat that lists one is
-/// never quiet and never held.) A host that polls dispatch is paced instead when the listing
+/// only: the registry answers a beat that lists runs with no command, so such a reply is held
+/// as any other quiet reply is.) A host that polls dispatch is paced instead when the listing
 /// has a young start ([`hold`]).
 pub(super) fn bound(agents: &Agents, young: bool) -> Duration {
     match young {

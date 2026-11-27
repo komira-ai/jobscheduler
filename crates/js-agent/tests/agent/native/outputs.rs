@@ -319,7 +319,10 @@ fn a_collection_failure_is_a_finding_and_leaves_the_host_untainted() {
     });
     let said = "outputs not copied: out: a symbolic link: not followed";
     assert_eq!(found.as_deref(), Some(said));
-    assert_eq!(h.life.results()[0].outcome, Outcome::Succeeded);
+    assert_eq!(
+        crate::lifecycle::results(&h.life)[0].outcome,
+        Outcome::Succeeded
+    );
     assert!(!h.life.is_tainted());
     assert!(!h.home_of(0).exists());
     assert_eq!(h.start(job("r2", "/bin/sh")), ["started r2"]);

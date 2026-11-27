@@ -73,30 +73,25 @@ pub fn job_start(job_id: &str, allocation: &str) -> Command {
     }))
 }
 
-/// The outcome and detail of the result of the run or job `id`, which must be held.
+/// The outcome and detail of the result of the job `id`, which must be held.
 pub fn result_of(h: &Harness, id: &str) -> (Outcome, Option<String>) {
-    let run = h.life.results().into_iter().find(|r| r.run_id == id);
-    let run = run.map(|r| (r.outcome, r.detail));
     let jobs = h.life.held_jobs().into_iter().filter_map(|j| j.result);
     let job = jobs
         .filter(|r| r.job_id == id)
         .map(|r| (r.outcome, r.detail))
         .next();
-    run.or(job).expect("the result is held")
+    job.expect("the result is held")
 }
 
-/// The ids of the runs and jobs listed as running.
+/// The ids of the jobs listed as running.
 fn running(h: &Harness) -> Vec<String> {
     use js_agent_wire::HeldState::Running;
-    let runs = h.life.held().into_iter().filter(|r| r.state == Running);
     let jobs = h
         .life
         .held_jobs()
         .into_iter()
         .filter(|j| j.state == Running);
-    runs.map(|r| r.run_id)
-        .chain(jobs.map(|j| j.job_id))
-        .collect()
+    jobs.map(|j| j.job_id).collect()
 }
 
 /// Asserts that with two jobs running (a run and a job) and no contact since the first
@@ -210,10 +205,10 @@ fn before_any_contact_the_count_starts_with_the_watch() {
 }
 
 /// Asserts that a job still waiting for its image is ended by a silence without a
-/// container (`killed`, `silence-stop`), that a job already stopped by the server keeps
-/// the server's reason (no `silence-stop` detail), and that a cancelled job stays silent:
-/// no result. It catches a silence that makes a container for a job it stops, one that
-/// rewrites the reason of a stop the server asked for, and a cancel that reports.
+/// container (`killed`, `silence-stop`), and that a job already stopped by the server keeps
+/// the server's reason (no `silence-stop` detail). It catches a silence that makes a
+/// container for a job it stops, and one that rewrites the reason of a stop the server
+/// asked for.
 #[test]
 fn a_silence_ends_a_waiting_job_and_keeps_the_reason_of_a_stop_already_asked() {
     let (mut h, contact) = fenced("silence-kinds");
@@ -223,19 +218,16 @@ fn a_silence_ends_a_waiting_job_and_keeps_the_reason_of_a_stop_already_asked() {
     h.fake.pull_pending(&waiting.image);
     h.start(waiting);
     h.start(long_run("r2"));
-    h.start(long_run("r3"));
     h.fake.fail("stop", 1);
     h.stop("r2");
     h.life.step();
-    h.cancel("r3");
     h.clock.advance(BOUND_MS);
     h.life.step();
     let silenced = (Outcome::Killed, Some(detail::SILENCE_STOP.to_owned()));
     assert_eq!(result_of(&h, "r1"), silenced);
     assert_eq!(result_of(&h, "r2"), (Outcome::Killed, None));
-    assert!(h.life.results().iter().all(|r| r.run_id != "r3"));
     let created: Vec<String> = h.fake.created().into_iter().map(|c| c.run_id).collect();
-    assert_eq!(created, ["r2", "r3"], "the waiting job made no container");
+    assert_eq!(created, ["r2"], "the waiting job made no container");
 }
 
 /// Asserts that the stop of a silence is written down before it is reported: in the step
@@ -249,8 +241,8 @@ fn the_fences_of_a_silence_are_on_disk_before_the_results() {
     h.apply(vec![job_start("j1", "a1")]);
     h.clock.advance(BOUND_MS);
     h.life.step();
-    assert_eq!(h.life.results().len(), 1);
-    assert_eq!(h.life.held_jobs().len(), 1);
+    assert_eq!(super::results(&h.life).len(), 2);
+    assert_eq!(h.life.held_jobs().len(), 2);
     let path = h.dir.path("state").join("retired.json");
     let list: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
@@ -263,8 +255,10 @@ fn the_fences_of_a_silence_are_on_disk_before_the_results() {
     );
     // The reply that acknowledges both drops the results and adds nothing to the list.
     h.life.apply(&reply_json(&json!({
-        "result_acks": [{ "run_id": "r1", "ack": "ACCEPTED" }],
-        "job_acks": [{ "job_id": "j1", "ack": "ACCEPTED" }],
+        "job_acks": [
+            { "job_id": "r1", "ack": "ACCEPTED" },
+            { "job_id": "j1", "ack": "ACCEPTED" },
+        ],
     })));
-    assert!(h.life.results().is_empty() && h.life.held_jobs().is_empty());
+    assert!(super::results(&h.life).is_empty() && h.life.held_jobs().is_empty());
 }

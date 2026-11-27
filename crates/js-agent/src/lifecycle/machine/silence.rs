@@ -1,6 +1,6 @@
 //! The stop after a silence of the server (`--silence-stop`): when the agent has heard
 //! nothing for the bound, every job it holds that runs, or waits to start, is
-//! stopped as a `Stop` stops it (the stop grace, then the kill; a native run's helper
+//! stopped as a `JobStop` stops it (the stop grace, then the kill; a native run's helper
 //! kills at once), its fence is retired, and its result says `killed` with the detail
 //! [`detail::SILENCE_STOP`](crate::lifecycle::detail::SILENCE_STOP). The silence counts
 //! from the last [`Contact`] the session stamped, or from the moment the watch began when
@@ -43,7 +43,7 @@ impl Lifecycle {
     /// bound, every job that runs or waits to start is asked to stop for the silence
     /// (a cause already set stays), once for this silence, its fence is retired, and a
     /// finding says so. The stop itself is made when the same step then watches the job, as
-    /// for a `Stop`.
+    /// for a `JobStop`.
     pub(super) fn watch_silence(&mut self, events: &mut Vec<Event>) {
         let now = self.clock.now_ms();
         let Self {
@@ -62,7 +62,7 @@ impl Lifecycle {
         }
         watch.stopped_for = Some(since);
         for job in jobs.iter_mut() {
-            if job.request_stop_for(Cause::Silenced, false) {
+            if job.request_stop_for(Cause::Silenced) {
                 retired.insert_with(&job.run_id, Some(&job.lease_id));
                 let message =
                     format!("the server was not heard for {silent} ms: the job is stopped");

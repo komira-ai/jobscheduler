@@ -2,13 +2,10 @@
 //! in a reply, `jobs` and `retired_jobs` in a heartbeat, `job_acks` and `retired_acks` in
 //! the reply that answers it (see `js_agent_wire::per_job`).
 //!
-//! A job start is made into the start a run start makes (the run id is the job id, the lease
-//! id the allocation id, `valid_for_ms` is 0 so no lease bounds it, and the limits are the
-//! booked resources with the job's wall limit) and goes through the one `start`: admission,
-//! mounts, slots, refusals and the wall clock are the run's. Only the keying differs: the job
-//! is listed in `jobs` with its result inside, acknowledged by `job_acks`, and never listed in
-//! `held` or `results` nor touched by a `Stop`, `Cancel` or `result_acks` entry, so a lease
-//! server that knows no job ids never sees one.
+//! A job start is made into a [`JobSpec`] (the run id is the job id, the lease id the
+//! allocation id, and the limits are the booked resources with the job's wall limit) and goes
+//! through the one start: admission, mounts, slots, refusals and the wall clock. The job is
+//! listed in `jobs` with its result inside and acknowledged by `job_acks`.
 
 use std::collections::BTreeMap;
 
@@ -19,7 +16,7 @@ use js_agent_wire::{
 
 use super::Lifecycle;
 use super::RETIRED_CAP;
-use super::job::{Given, Keyed};
+use super::job::Given;
 use crate::lifecycle::{Event, JobFs, code};
 use crate::logs::Sink;
 
@@ -35,9 +32,8 @@ const _: () = assert!(
 const _: () = assert!(RETIRED_LISTED < RETIRED_CAP);
 const _: () = assert!(RETIRED_LISTED <= limits::MAX_HELD);
 
-/// The start a job start stands for: one job, confined as the start says (`isolation`, so a
-/// host start meets the same admission as a run start), with no mounts and no labels of its
-/// own, bounded by what its allocation booked and by its own wall limit, with the network
+/// The start a job start stands for: one job, confined as the start says (`isolation`), with
+/// no mounts and no labels of its own, bounded by what its allocation booked and by its own wall limit, with the network
 /// and ports it asked for, which the shared admission holds to the runtime's ceiling.
 fn run_of(spec: &JobStartSpec) -> JobSpec {
     JobSpec {
@@ -62,7 +58,6 @@ fn run_of(spec: &JobStartSpec) -> JobSpec {
         isolation: spec.isolation,
         labels: BTreeMap::new(),
         heartbeat_seq: 0,
-        valid_for_ms: 0,
         bundle: None,
         network: spec.network,
         ports: spec.ports.clone(),
@@ -96,8 +91,7 @@ pub(super) fn job_result(
 }
 
 impl Lifecycle {
-    /// Acts on a job start: the same start as a run's, keyed by job id. It is idempotent on
-    /// the job id: a start for a job the agent holds changes nothing, and one whose fence
+    /// Acts on a job start. It is idempotent on the job id: a start for a job the agent holds changes nothing, and one whose fence
     /// (the job id with the allocation id) is retired is skipped (`Skip::FenceRetired`); the
     /// same job under a new allocation is new work. The job's environment goes to the
     /// runtime by name in order ([`RunSpec::env`](crate::lifecycle::RunSpec::env)); whether
@@ -111,7 +105,7 @@ impl Lifecycle {
         events: &mut Vec<Event>,
     ) {
         let run = run_of(spec);
-        if self.may_start((&run, Keyed::Job), received, events) {
+        if self.may_start(&run, events) {
             let sink = Sink::of_start(spec);
             let given = Given {
                 env: spec.env.clone().into_iter().collect(),
@@ -127,7 +121,7 @@ impl Lifecycle {
                 xcode: spec.xcode.clone(),
                 sizing: spec.sizing.clone().map(StartSizing::checked),
             };
-            self.admit_and_start((&run, Keyed::Job), &given, received, events);
+            self.admit_and_start(&run, &given, received, events);
             // The start always leaves its job last, running or refused.
             if let Err(why) = sink {
                 let job = self.jobs.last_mut().into_iter();
@@ -136,20 +130,17 @@ impl Lifecycle {
         }
     }
 
-    /// Acts on a job stop. A held job is asked to stop as a `Stop` asks a run (the stop
-    /// grace, then a kill) and ends `killed`; a second stop changes nothing. Its fence is
-    /// retired at once, so the list in the state root names it before the stop is reported.
+    /// Acts on a job stop. A held job is asked to stop (the stop grace, then a kill) and ends
+    /// `killed`; a second stop changes nothing. Its fence is retired
+    /// at once, so the list in the state root names it before the stop is reported.
     /// A job the agent does not hold has every fence of its id retired (the stop names no
     /// allocation), so a later start of it runs nothing, and is listed in `retired_jobs`
     /// until the server acknowledges it.
     pub(super) fn stop_job(&mut self, job_id: &str) {
-        let held = self
-            .jobs
-            .iter_mut()
-            .find(|job| job.keyed == Keyed::Job && job.run_id == job_id);
+        let held = self.jobs.iter_mut().find(|job| job.run_id == job_id);
         match held {
             Some(job) => {
-                job.request_stop(false);
+                job.request_stop();
                 self.retired.insert_with(&job.run_id, Some(&job.lease_id));
             }
             None => self.answer_stop(job_id),
@@ -172,7 +163,7 @@ impl Lifecycle {
 
     /// Drops the result of the job a `job_acks` entry names, on a verdict the agent knows.
     pub(super) fn acknowledge_job(&mut self, ack: &JobResultAck) {
-        self.drop_result((Keyed::Job, &ack.job_id), ack.ack);
+        self.drop_result(&ack.job_id, ack.ack);
     }
 
     /// Stops listing the retired job ids the server recorded.
@@ -180,11 +171,12 @@ impl Lifecycle {
         self.answered.retain(|id| !acked.contains(id));
     }
 
-    /// The jobs a job start began, for the `jobs` of the next heartbeat, in the order of
-    /// [`Lifecycle::held`], each with its result once it has ended. A job is listed until
+    /// The jobs the agent holds, for the `jobs` of the next heartbeat: adopted ones first,
+    /// then in the order they started, each with its result once it has ended. A job is listed until
     /// its container and scratch are gone and its result is acknowledged.
     pub fn held_jobs(&self) -> Vec<HeldJob> {
-        self.keyed(Keyed::Job)
+        self.jobs
+            .iter()
             .map(|job| HeldJob {
                 job_id: job.run_id.clone(),
                 state: job.held_state(),

@@ -1,19 +1,15 @@
-//! The cell's launch and completion ledger: one entry per run an agent process launched,
-//! one per run that ended on its own, one per verdict an agent process read on one of its
-//! results, and, for the whole-host handshake, one per ready report an agent sent, per
-//! start delivered and per stop or cancel that reached a running run.
+//! The cell's launch ledger: one entry per job an agent process launched and, for the
+//! whole-host handshake, one per ready report an agent sent.
 //!
 //! The ledger belongs to the cell, not to an agent. Every agent node writes into one
 //! shared [`Ledger`] handle that outlives the node's processes, so an agent that is
 //! killed and replaced cannot reset a count. [`Ledger::launches`] is what the cell puts
 //! in [`crate::Observations::ledger`] for [`crate::Invariant::AtMostOneLaunch`]: a
-//! replacement that launches a run its predecessor launched shows as a second entry. The
-//! completions and the verdicts are what [`crate::Invariant::NoResultLost`] reads: a
-//! process that dies takes its own record of them with it, the ledger keeps them.
+//! replacement that launches a job its predecessor launched shows as a second entry.
 //!
 //! A per-job agent also writes each heartbeat it sends, each answer it reads and each
 //! result it makes ([`JobBeat`], [`JobReply`], [`ResultMade`]), for the job invariants;
-//! its launches go into the launches beside the runs', each named `<job>/<allocation>`.
+//! its launches go into the launches, each named `<job>/<allocation>`.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -22,9 +18,10 @@ use js_types::HostId;
 use js_types::sched::FarmTime;
 
 use crate::jobs::{JobBeat, JobReply, ResultMade};
-use crate::observe::{Launch, ReadyReport, RunId, StartSeen, StopSeen, Verdict};
+use crate::observe::{Launch, ReadyReport, RunId, Verdict};
 
-/// One run that ended on its own (its job's time ran out), in the cell's ledger.
+/// One run that ended on its own (its job's time ran out), as the observations record it:
+/// no agent writes one now.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Completion {
     /// The run.
@@ -35,9 +32,8 @@ pub struct Completion {
     pub at: FarmTime,
 }
 
-/// One verdict an agent process read in an answer to one of its heartbeats, on the
-/// result of one run, in the cell's ledger. Every verdict read is written, whether or not
-/// the process still held the result.
+/// One verdict an agent process read on the result of one run, as the observations record
+/// it: no agent writes one now.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Acked {
     /// The run whose result was judged.
@@ -60,11 +56,7 @@ pub struct Ledger(Rc<RefCell<Entries>>);
 #[derive(Debug, Default)]
 struct Entries {
     launches: Vec<Launch>,
-    completions: Vec<Completion>,
-    verdicts: Vec<Acked>,
     ready: Vec<ReadyReport>,
-    starts: Vec<StartSeen>,
-    stops: Vec<StopSeen>,
     job_beats: Vec<JobBeat>,
     job_replies: Vec<JobReply>,
     results_made: Vec<ResultMade>,
@@ -94,32 +86,9 @@ impl Ledger {
             .collect()
     }
 
-    /// Every completion, oldest first.
-    #[must_use]
-    pub fn completions(&self) -> Vec<Completion> {
-        self.0.borrow().completions.clone()
-    }
-
-    /// The completions after the first `skip`, oldest first.
-    pub(crate) fn completions_after(&self, skip: usize) -> Vec<Completion> {
-        let entries = self.0.borrow();
-        entries.completions.iter().skip(skip).cloned().collect()
-    }
-
-    /// The verdicts after the first `skip`, oldest first.
-    pub(crate) fn verdicts_after(&self, skip: usize) -> Vec<Acked> {
-        let entries = self.0.borrow();
-        entries.verdicts.iter().skip(skip).cloned().collect()
-    }
-
     /// Appends a launch.
     pub(crate) fn launched(&self, launch: Launch) {
         self.0.borrow_mut().launches.push(launch);
-    }
-
-    /// Appends a completion.
-    pub(crate) fn completed(&self, completion: Completion) {
-        self.0.borrow_mut().completions.push(completion);
     }
 
     /// Every ready report sent, oldest first.
@@ -128,49 +97,14 @@ impl Ledger {
         self.0.borrow().ready.clone()
     }
 
-    /// Every start delivered, oldest first.
-    #[must_use]
-    pub fn starts(&self) -> Vec<StartSeen> {
-        self.0.borrow().starts.clone()
-    }
-
-    /// Every stop or cancel that reached a running run, oldest first.
-    #[must_use]
-    pub fn stops(&self) -> Vec<StopSeen> {
-        self.0.borrow().stops.clone()
-    }
-
-    /// The ready reports, starts and stops after the first `skip` of each, oldest first.
-    pub(crate) fn whole_after(
-        &self,
-        [ready, starts, stops]: [usize; 3],
-    ) -> (Vec<ReadyReport>, Vec<StartSeen>, Vec<StopSeen>) {
-        let entries = self.0.borrow();
-        (
-            entries.ready.iter().skip(ready).cloned().collect(),
-            entries.starts.iter().skip(starts).cloned().collect(),
-            entries.stops.iter().skip(stops).cloned().collect(),
-        )
+    /// The ready reports after the first `skip`, oldest first.
+    pub(crate) fn ready_after(&self, skip: usize) -> Vec<ReadyReport> {
+        self.0.borrow().ready.iter().skip(skip).cloned().collect()
     }
 
     /// Appends a ready report.
     pub(crate) fn reported_ready(&self, report: ReadyReport) {
         self.0.borrow_mut().ready.push(report);
-    }
-
-    /// Appends a delivered start.
-    pub(crate) fn start_seen(&self, start: StartSeen) {
-        self.0.borrow_mut().starts.push(start);
-    }
-
-    /// Appends a stop or cancel that reached a running run.
-    pub(crate) fn stop_seen(&self, stop: StopSeen) {
-        self.0.borrow_mut().stops.push(stop);
-    }
-
-    /// Appends a verdict.
-    pub(crate) fn acked(&self, acked: Acked) {
-        self.0.borrow_mut().verdicts.push(acked);
     }
 
     /// The per-job heartbeats, answers and results after the first `skip` of each, oldest

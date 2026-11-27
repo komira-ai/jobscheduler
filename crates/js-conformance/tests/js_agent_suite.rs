@@ -1,26 +1,25 @@
 //! The host-agent suite against the real js-agent lifecycle. The adapter drives
 //! `Lifecycle` over a runtime that lives in memory and a clock the suite moves, and stamps
 //! the agent's `Contact` where the session would: a message the harness delivers is a
-//! reply the session accepted, and `contact` is an answered heartbeat. A `start` is a run
-//! start (it carries the validity bound), a `start_fenced` a job start whose fence is the
-//! job with its allocation. The fence window is the agent's default silence bound
+//! reply the session accepted, and `contact` is an answered heartbeat. A `start` is the start
+//! the agent makes of a run spec (`Lifecycle::start_spec`), a `start_fenced` a job start
+//! whose fence is the job with its allocation; both are keyed by job. The fence window is the agent's default silence bound
 //! (`--silence-stop`).
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::rc::Rc;
 use std::time::Duration;
 
 use js_agent::lifecycle::{
-    Capacity, Clock, Config, Contact, DEFAULT_SILENCE_STOP, Event, Exit, Found, Lifecycle,
-    MountRoots, NoChecks, RunHandle, RunSpec, Runtime, RuntimeError, ScratchRoot, Skip, StateRoot,
-    Status, detail,
+    Capacity, Clock, Config, Contact, DEFAULT_SILENCE_STOP, Exit, Found, Lifecycle, MountRoots,
+    NoChecks, RunHandle, RunSpec, Runtime, RuntimeError, ScratchRoot, StateRoot, Status, detail,
 };
 use js_agent_wire::{
     Ack, BookedResources, Command, HeartbeatReply, HeldState, Isolation, JobResultAck, JobSpec,
-    JobStartSpec, Limits, ResultAck,
+    JobStartSpec, Limits,
 };
 use js_conformance::Verdict;
 use js_conformance::agent::{self, AgentHarness, Delivery, Observed, Scenario};
@@ -29,8 +28,7 @@ use js_testkit::dir::TestDir;
 const IMAGE: &str =
     "busybox:1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-/// Where the suite's clock starts on the lifecycle's, so that a start may be backdated by
-/// any wait the scenarios name: the suite reads the clock from 0.
+/// Where the suite's clock starts on the lifecycle's: the suite reads the clock from 0.
 const BASE: u64 = 1 << 40;
 
 /// A runtime whose containers live in memory, exit when the suite ends a job and when they
@@ -129,9 +127,6 @@ struct JsAgent {
     clock: Rc<Cell<u64>>,
     contact: Contact,
     connected: bool,
-    /// The names started by a job start: their results and acknowledgements are the job's.
-    jobs: BTreeSet<String>,
-    never_started: BTreeSet<String>,
     sent: Vec<String>,
     /// The scratch and state roots, removed after the lifecycle that uses them is gone.
     _dirs: (TestDir, TestDir),
@@ -176,57 +171,37 @@ impl JsAgent {
             clock,
             contact,
             connected: true,
-            jobs: BTreeSet::new(),
-            never_started: BTreeSet::new(),
             sent: Vec::new(),
             _dirs: (scratch, state),
         }
     }
 
-    /// Notes the starts that were dropped as late.
-    fn record(&mut self, events: &[Event]) {
-        for event in events {
-            if let Event::Skipped {
-                run_id,
-                why: Skip::Stale,
-            } = event
-            {
-                self.never_started.insert(run_id.clone());
-            }
-        }
-    }
-
-    /// Delivers `reply` as one that arrived `waited` ms ago, then lets the worker step, as
-    /// the agent's worker does after every order.
-    fn deliver(&mut self, reply: &HeartbeatReply, waited: u64) -> Delivery {
+    /// Lets the agent act on a message the session accepted: it counts as contact, then
+    /// `act` hands the lifecycle the message, then the worker steps, as the agent's worker
+    /// does after every order.
+    fn deliver(&mut self, act: impl FnOnce(&mut Lifecycle)) -> Delivery {
         if !self.connected {
             return Delivery::Lost;
         }
-        let now = self.clock.get();
-        self.contact.heard(now);
-        let events = self.life.apply_at(reply, now.saturating_sub(waited));
-        self.record(&events);
-        let events = self.life.step();
-        self.record(&events);
+        self.contact.heard(self.clock.get());
+        act(&mut self.life);
+        self.life.step();
         Delivery::Delivered
     }
 
-    /// The run ids and job ids of the results the lifecycle holds, with their details.
+    /// The job ids of the results the lifecycle holds, with their details.
     fn results(&self) -> Vec<(String, Option<String>)> {
-        let runs = self.life.results().into_iter();
-        let runs = runs.map(|result| (result.run_id, result.detail));
         let jobs = self
             .life
             .held_jobs()
             .into_iter()
             .filter_map(|job| job.result);
-        runs.chain(jobs.map(|result| (result.job_id, result.detail)))
-            .collect()
+        jobs.map(|result| (result.job_id, result.detail)).collect()
     }
 }
 
-/// A run start for `run`, valid for `valid_for` ms (0 is unbounded).
-fn run_start(run: &str, valid_for: u64) -> JobSpec {
+/// A run spec for `run`, under the allocation `lease-<run>`.
+fn run_spec(run: &str) -> JobSpec {
     JobSpec {
         run_id: run.into(),
         lease_id: format!("lease-{run}"),
@@ -245,7 +220,6 @@ fn run_start(run: &str, valid_for: u64) -> JobSpec {
         labels: BTreeMap::new(),
         heartbeat_seq: 0,
         files: Vec::new(),
-        valid_for_ms: valid_for,
         bundle: None,
         native: None,
         network: Default::default(),
@@ -308,60 +282,50 @@ impl AgentHarness for JsAgent {
 
     fn advance(&mut self, millis: u64) {
         self.clock.set(self.clock.get() + millis);
-        let events = self.life.step();
-        self.record(&events);
+        self.life.step();
     }
 
-    fn start(&mut self, lease: &str, valid_for: u64, waited: u64) -> Delivery {
-        let start = Command::Start(Box::new(run_start(lease, valid_for)));
-        self.deliver(&of(vec![start]), waited)
+    fn start(&mut self, lease: &str) -> Delivery {
+        let spec = run_spec(lease);
+        self.deliver(|life| {
+            life.start_spec(&spec);
+        })
     }
 
     fn start_fenced(&mut self, job: &str, allocation: &str) -> Delivery {
         let start = Command::JobStart(Box::new(job_start(job, allocation)));
-        let delivered = self.deliver(&of(vec![start]), 0);
-        if delivered == Delivery::Delivered {
-            self.jobs.insert(job.to_owned());
-        }
-        delivered
+        let reply = of(vec![start]);
+        self.deliver(|life| {
+            life.apply(&reply);
+        })
     }
 
     fn cancel(&mut self, lease: &str) -> Delivery {
-        let command = match self.jobs.contains(lease) {
-            true => Command::JobStop {
-                job_id: lease.to_owned(),
-            },
-            false => Command::Cancel {
-                run_id: lease.to_owned(),
-            },
+        let command = Command::JobStop {
+            job_id: lease.to_owned(),
         };
-        self.deliver(&of(vec![command]), 0)
+        let reply = of(vec![command]);
+        self.deliver(|life| {
+            life.apply(&reply);
+        })
     }
 
     fn ack(&mut self, lease: &str) -> Delivery {
-        let reply = match self.jobs.contains(lease) {
-            true => HeartbeatReply {
-                job_acks: vec![JobResultAck {
-                    job_id: lease.to_owned(),
-                    ack: Ack::Accepted,
-                }],
-                ..HeartbeatReply::default()
-            },
-            false => HeartbeatReply {
-                result_acks: vec![ResultAck {
-                    run_id: lease.to_owned(),
-                    ack: Ack::Accepted,
-                }],
-                ..HeartbeatReply::default()
-            },
+        let reply = HeartbeatReply {
+            job_acks: vec![JobResultAck {
+                job_id: lease.to_owned(),
+                ack: Ack::Accepted,
+            }],
+            ..HeartbeatReply::default()
         };
-        self.deliver(&reply, 0)
+        self.deliver(|life| {
+            life.apply(&reply);
+        })
     }
 
     fn complete(&mut self, lease: &str) {
         self.fake.exit(lease);
-        let events = self.life.step();
-        self.record(&events);
+        self.life.step();
         self.heartbeat();
     }
 
@@ -386,21 +350,15 @@ impl AgentHarness for JsAgent {
     }
 
     fn observed(&self) -> Observed {
-        let runs = self.life.held().into_iter();
-        let runs = runs.filter(|run| run.state == HeldState::Running);
         let jobs = self.life.held_jobs().into_iter();
         let jobs = jobs.filter(|job| job.state == HeldState::Running);
-        let running = runs
-            .map(|run| run.run_id)
-            .chain(jobs.map(|job| job.job_id))
-            .collect();
+        let running = jobs.map(|job| job.job_id).collect();
         let silenced = Some(detail::SILENCE_STOP.to_owned());
         let fenced = self.results().into_iter();
         let fenced = fenced.filter(|(_, detail)| *detail == silenced);
         Observed {
             running,
             fenced: fenced.map(|(id, _)| id).collect(),
-            never_started: self.never_started.clone(),
             launches: self.fake.launches(),
             results_sent: self.sent.clone(),
         }

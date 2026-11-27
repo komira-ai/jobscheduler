@@ -4,12 +4,6 @@ use crate::Verdict;
 /// How many times the scenario resends a Cancel while the lease is still listed.
 const CANCEL_ROUNDS: u32 = 3;
 
-/// The validity of a Start that never goes stale.
-const UNBOUNDED: u64 = 0;
-
-/// The validity the late-Start scenario gives its Starts, in milliseconds.
-const VALIDITY: u64 = 1_000;
-
 /// One behaviour every host agent must have, named in the suite's output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Scenario {
@@ -19,10 +13,6 @@ pub enum Scenario {
     /// lease is listed, and the lease leaves the listing, after which a further Cancel
     /// is harmless and a Start for the cancelled id does not run it again.
     CancelUntilAbsent,
-    /// A Start that has waited longer than its validity is dropped and reported as never
-    /// started; one that waited exactly its validity, and one with no validity bound,
-    /// run.
-    LateStartIsDropped,
     /// Silence of the agent's fence window, counted from the last scheduler contact,
     /// makes the agent stop its leases; one tick less does not. An agent with no
     /// self-fence fails this scenario, as the legacy agent does today.
@@ -39,10 +29,9 @@ pub enum Scenario {
 
 impl Scenario {
     /// Every scenario, in the order [`super::run`] runs them.
-    pub const ALL: [Scenario; 6] = [
+    pub const ALL: [Scenario; 5] = [
         Scenario::StartIsIdempotent,
         Scenario::CancelUntilAbsent,
-        Scenario::LateStartIsDropped,
         Scenario::SelfFencesAfterSilence,
         Scenario::UnackedResultIsResent,
         Scenario::RetiredFenceIsRefused,
@@ -54,7 +43,6 @@ impl Scenario {
         match self {
             Self::StartIsIdempotent => start_is_idempotent(harness, &mut notes),
             Self::CancelUntilAbsent => cancel_until_absent(harness, &mut notes),
-            Self::LateStartIsDropped => late_start_is_dropped(harness, &mut notes),
             Self::SelfFencesAfterSilence => self_fences_after_silence(harness, &mut notes),
             Self::UnackedResultIsResent => unacked_result_is_resent(harness, &mut notes),
             Self::RetiredFenceIsRefused => retired_fence_is_refused(harness, &mut notes),
@@ -83,8 +71,8 @@ impl Notes {
 }
 
 fn start_is_idempotent<H: AgentHarness>(harness: &mut H, notes: &mut Notes) {
-    harness.start("lease", UNBOUNDED, 0);
-    harness.start("lease", UNBOUNDED, 0);
+    harness.start("lease");
+    harness.start("lease");
     let seen = harness.observed();
     notes.expect(
         seen.launches.get("lease") == Some(&1),
@@ -94,7 +82,7 @@ fn start_is_idempotent<H: AgentHarness>(harness: &mut H, notes: &mut Notes) {
 }
 
 fn cancel_until_absent<H: AgentHarness>(harness: &mut H, notes: &mut Notes) {
-    harness.start("lease", UNBOUNDED, 0);
+    harness.start("lease");
     harness.disconnect();
     notes.expect(
         harness.cancel("lease") == Delivery::Lost,
@@ -119,7 +107,7 @@ fn cancel_until_absent<H: AgentHarness>(harness: &mut H, notes: &mut Notes) {
         harness.cancel("lease") == Delivery::Delivered,
         "a Cancel for an absent lease is acknowledged",
     );
-    harness.start("lease", UNBOUNDED, 0);
+    harness.start("lease");
     let seen = harness.observed();
     notes.expect(
         !seen.running.contains("lease"),
@@ -131,37 +119,6 @@ fn cancel_until_absent<H: AgentHarness>(harness: &mut H, notes: &mut Notes) {
     );
 }
 
-fn late_start_is_dropped<H: AgentHarness>(harness: &mut H, notes: &mut Notes) {
-    harness.start("late", VALIDITY, VALIDITY + 1);
-    harness.start("at-limit", VALIDITY, VALIDITY);
-    harness.start("unbounded", UNBOUNDED, u64::MAX);
-    let seen = harness.observed();
-    notes.expect(
-        seen.never_started.contains("late"),
-        "a Start one tick past its validity is reported as never started",
-    );
-    notes.expect(
-        !seen.running.contains("late"),
-        "a Start past its validity is not running",
-    );
-    notes.expect(
-        !seen.launches.contains_key("late"),
-        "a Start past its validity launches nothing",
-    );
-    notes.expect(
-        seen.running.contains("at-limit"),
-        "a Start at exactly its validity runs",
-    );
-    notes.expect(
-        seen.running.contains("unbounded"),
-        "a Start with no validity bound runs however long it waited",
-    );
-    notes.expect(
-        seen.never_started.len() == 1,
-        "only the stale Start is reported as never started",
-    );
-}
-
 fn self_fences_after_silence<H: AgentHarness>(harness: &mut H, notes: &mut Notes) {
     let Some(window) = harness.fence_window() else {
         notes.expect(
@@ -170,7 +127,7 @@ fn self_fences_after_silence<H: AgentHarness>(harness: &mut H, notes: &mut Notes
         );
         return;
     };
-    harness.start("lease", UNBOUNDED, 0);
+    harness.start("lease");
     harness.advance(window - 1);
     notes.expect(
         harness.observed().running.contains("lease"),
@@ -196,7 +153,7 @@ fn self_fences_after_silence<H: AgentHarness>(harness: &mut H, notes: &mut Notes
 }
 
 fn unacked_result_is_resent<H: AgentHarness>(harness: &mut H, notes: &mut Notes) {
-    harness.start("lease", UNBOUNDED, 0);
+    harness.start("lease");
     harness.complete("lease");
     notes.expect(
         harness.observed().results_sent == ["lease"],

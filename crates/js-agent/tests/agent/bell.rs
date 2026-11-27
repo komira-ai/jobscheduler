@@ -99,7 +99,7 @@ fn a_wait_may_end_on_the_bell_only_after_an_accepted_heartbeat() {
 /// on a worker being there.
 #[test]
 fn a_reply_with_commands_to_a_session_without_a_worker_is_still_accepted() {
-    let commands = json!({ "commands": [{ "type": "stop", "run_id": "r1" }] });
+    let commands = json!({ "commands": [{ "type": "job_stop", "job_id": "r1" }] });
     let replies = vec![welcome(1), reply(200, commands)];
     let (mut script, _) = crate::support::Script::new(replies);
     let mut session = Session::new(hello("h1"), &mut script, lowest());

@@ -8,7 +8,7 @@ use std::ops::Deref;
 use std::sync::PoisonError;
 
 use js_agent_wire::refusal as refusal_code;
-use js_agent_wire::{Ack, Command, Heartbeat, HeartbeatReply, Outcome, ResultAck, Taint, limits};
+use js_agent_wire::{Heartbeat, HeartbeatReply, Outcome, Taint};
 use js_provider::HostBook;
 use js_types::HostId;
 use js_types::Timestamp;
@@ -131,24 +131,15 @@ pub(super) fn taint_after(record: &Record, heartbeat: &Heartbeat) -> Option<Tain
     held.or(reported).or(mirror)
 }
 
-/// The reply to the heartbeat of an agent that keys its work by run, which this registry no
-/// longer queues: a cancel for each run the heartbeat lists as held, at most
-/// [`limits::MAX_COMMANDS`] of them, and an `UnknownLease` acknowledgement for each result
-/// it carries, so the agent kills what it holds and drops what it reports. The taint
+/// The reply to a heartbeat: no command and no result acknowledgement, whatever runs and
+/// results the heartbeat lists, since this registry queues no run and keeps none. The taint
 /// acknowledgement is that of the heartbeat; the rest of the reply is left empty, and the
 /// transport adds the job half. `held` is the taint the host holds once the beat is
 /// recorded, which the reply names as `host_taint`, none when the host holds none.
 pub(super) fn answer(heartbeat: &Heartbeat, held: Option<Taint>) -> HeartbeatReply {
-    let cancels = heartbeat.held.iter().map(|run| Command::Cancel {
-        run_id: run.run_id.clone(),
-    });
-    let acks = heartbeat.results.iter().map(|result| ResultAck {
-        run_id: result.run_id.clone(),
-        ack: Ack::UnknownLease,
-    });
     HeartbeatReply {
-        commands: cancels.take(limits::MAX_COMMANDS).collect(),
-        result_acks: acks.collect(),
+        commands: Vec::new(),
+        result_acks: Vec::new(),
         taint_ack: heartbeat.taint.is_some(),
         taint_cleared_ack: heartbeat.taint_cleared.is_some(),
         host_taint: held,

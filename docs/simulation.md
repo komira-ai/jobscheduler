@@ -439,7 +439,7 @@ What a scenario can say, all of it in `crates/js-sim-cell/src/scenario/`,
   `.expect_at(after, e)` (after the kernel's events and the actions of that time, before
   the client's calls of it);
 - witnesses: `.witness(name, |counters| ...)`, a predicate over the agents' counters
-  (`start_repeated`, `start_after_stop`, `stop_before_start` (the first stop of a job no answer handed the agent a start of), `start_dropped_late`, `result_resent`,
+  (`start_repeated`, `start_after_stop`, `stop_before_start` (the first stop of a job no answer handed the agent a start of), `result_resent`,
   `reply_invalid`, `cut_with_unlisted_run` (an agent that was cut off ran a job that none of its heartbeats had listed), `unknown_host`) and the elastic pool's
   cloud's (`acquire_lost`, `acquire_throttled`, `acquire_refused`, `machine_preempted`)
   added over one seed, which at least one seed must satisfy. A witness

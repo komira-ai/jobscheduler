@@ -6,7 +6,7 @@
 //! messages.
 //!
 //! A real agent speaks them when its hello reports `PER_JOB_CAPABILITY` as `true`. The
-//! reply is handed to the lifecycle whole, as for runs. Before that, [`RealJobs::noted`]
+//! reply is handed to the lifecycle whole. Before that, [`RealJobs::noted`]
 //! writes down what the reply carries: each start (counted after a stop or as a repeat),
 //! each stop and each verdict, in a [`JobReply`] of the heartbeat the reply answers, and
 //! leaves out a start or stop whose ids the cell's server would not write, which counts in

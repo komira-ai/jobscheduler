@@ -3,9 +3,9 @@
 //! that, and counts it). Both over the whole agent: the flags, the scripted server and a
 //! machine of the test's own.
 
-/// The whole-node lease of the first test: the lease of the run `r2`, so a start of `r2`
-/// is a start for the lease and any other run's is for another.
-const LEASE: &str = "lease-r2";
+/// The whole-node lease of the first test: the allocation of the job `r2`, so a start of
+/// `r2` is a start for the lease and any other job's is for another.
+const LEASE: &str = "alloc-r2";
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -73,7 +73,7 @@ fn an_agent_with_jobs_follows_a_whole_node_lease_through_its_worker() {
     let world = machine.world.clone();
     let acked = json!({
         "commands": [],
-        "result_acks": [{ "run_id": "r1", "ack": "ACCEPTED" }],
+        "job_acks": [{ "job_id": "r1", "ack": "ACCEPTED" }],
     });
     let replies = vec![
         welcome(1),
@@ -134,29 +134,23 @@ fn an_agent_with_jobs_follows_a_whole_node_lease_through_its_worker() {
     for beat in &beats {
         assert!(beat.get("exclusive_refused").is_none(), "{beat}");
     }
-    assert_eq!(
-        beats[1]["results"],
-        json!([{
-            "run_id": "r1",
-            "lease_id": "lease-r1",
+    let refused = |job: &str| {
+        json!({
+            "job_id": job,
+            "allocation_id": format!("alloc-{job}"),
             "outcome": "failed_to_start",
             "detail": "no-capacity",
-        }])
+        })
+    };
+    assert_eq!(
+        beats[1]["jobs"],
+        json!([{ "job_id": "r1", "state": "exited_unacked", "result": refused("r1") }])
     );
     assert_eq!(
-        beats[4]["results"],
-        json!([{
-            "run_id": "r3",
-            "lease_id": "lease-r3",
-            "outcome": "failed_to_start",
-            "detail": "no-capacity",
-        }])
-    );
-    assert_eq!(
-        beats[4]["held"],
+        beats[4]["jobs"],
         json!([
-            { "run_id": "r2", "state": "running" },
-            { "run_id": "r3", "state": "exited_unacked" },
+            { "job_id": "r2", "state": "running" },
+            { "job_id": "r3", "state": "exited_unacked", "result": refused("r3") },
         ])
     );
 }

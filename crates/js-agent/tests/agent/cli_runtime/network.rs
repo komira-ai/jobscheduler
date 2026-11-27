@@ -3,12 +3,11 @@
 //! runs on the `crun` runtime, which wires one per job.
 
 use js_agent::lifecycle::{Lifecycle, NoChecks, Runtime};
-use js_agent_wire::Command;
 
 use super::scripted::{DOCKER, Scripted};
 use super::{made_at, open_at};
 use crate::lifecycle::fake::ManualClock;
-use crate::lifecycle::{config_in, job, names, reply};
+use crate::lifecycle::{config_in, job, names};
 use crate::support::Scratch;
 
 const PODMAN: &str = "podman version 4.9.3\n";
@@ -35,7 +34,7 @@ fn a_fallback_runtime_job_gets_network_none() {
         )
         .unwrap();
         for run_id in ["r1", "r2"] {
-            let events = life.apply(&reply(vec![Command::Start(Box::new(job(run_id)))]));
+            let events = life.start_spec(&job(run_id));
             assert_eq!(names(&events), [format!("started {run_id}")], "{version}");
         }
         let calls = world.calls();
@@ -81,7 +80,7 @@ fn a_job_left_running_at_an_upgrade_is_adopted_as_it_is() {
         Box::new(ManualClock::default()),
     )
     .unwrap();
-    let events = before.apply(&reply(vec![Command::Start(Box::new(job("r1")))]));
+    let events = before.start_spec(&job("r1"));
     assert_eq!(names(&events), ["started r1"]);
     let id = world.id_of("r1").expect("the container of r1");
     let made = world.calls().len();

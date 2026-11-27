@@ -88,9 +88,9 @@ fn grant() -> LogGrant {
 /// One refused grant: the edit that breaks it, the field named and the rule broken.
 type GrantCase = (fn(&mut LogGrant), &'static str, Rule);
 
-/// A stop of the run `run`.
-fn stop(run: &str) -> Command {
-    Command::Stop { run_id: run.into() }
+/// A stop of the job `job`.
+fn stop(job: &str) -> Command {
+    Command::JobStop { job_id: job.into() }
 }
 
 /// What `log_sink_checked` says of the start of `build-42` with the sink `edit` makes.
@@ -805,7 +805,7 @@ fn a_malformed_log_field_reads_as_absent() {
         json!([]),
     ];
     for grant in grants {
-        let wire = json!({"commands": [{"type": "stop", "run_id": "r1"}], "log_grant": grant});
+        let wire = json!({"commands": [{"type": "job_stop", "job_id": "r1"}], "log_grant": grant});
         let reply: HeartbeatReply = serde_json::from_value(wire).unwrap();
         assert_eq!(reply.log_grant, None);
         assert_eq!(reply.validate().commands, [&stop("r1")]);

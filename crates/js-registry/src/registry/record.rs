@@ -25,7 +25,7 @@ pub(super) struct Record {
     pub(super) agent_version: Option<String>,
     pub(super) labels: BTreeMap<String, String>,
     /// The run ids the host listed as held in its last hello or heartbeat: runs of the
-    /// previous release's lease protocol, each answered with a cancel.
+    /// previous release's lease protocol, which the registry reads and does not answer.
     pub(super) held: BTreeSet<String>,
     /// The heartbeats taken in this session.
     pub(super) beats: u64,

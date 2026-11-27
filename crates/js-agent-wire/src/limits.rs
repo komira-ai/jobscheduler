@@ -202,8 +202,6 @@ const _: () = assert!(
 pub const MAX_PIDS: u64 = 4_194_304;
 /// Longest wall-time limit of one job, in milliseconds (seven days).
 pub const MAX_WALL_MS: u64 = 7 * 24 * 60 * 60 * 1000;
-/// Largest `valid_for_ms` of a start, in milliseconds (seven days).
-pub const MAX_VALID_FOR_MS: u64 = MAX_WALL_MS;
 /// Largest lease-count cap a host may announce.
 pub const MAX_LEASE_CAP: u64 = 4096;
 /// Shortest heartbeat interval a welcome may set, in milliseconds; a smaller one would

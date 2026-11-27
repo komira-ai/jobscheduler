@@ -289,14 +289,12 @@ fn a_start_or_stop_that_names_no_valid_id_is_refused() {
     assert!(!rig.jobs.timer(7, &mut rig.real, &mut rig.io));
 }
 
-/// Asserts that a command that names no job (a cancel of a run) is left alone by the
-/// per-job half: nothing is refused, launched or taken out of the reply.
+/// Asserts that a command that names no job (one this version does not know) is left alone
+/// by the per-job half: nothing is refused, launched or taken out of the reply.
 #[test]
 fn a_command_that_names_no_job_is_left_alone() {
     let mut rig = rig("real-jobs-run-command");
-    let commands = vec![Command::Cancel {
-        run_id: "run-1".to_owned(),
-    }];
+    let commands = vec![Command::Unknown];
     let reply = HeartbeatReply {
         commands,
         ..HeartbeatReply::default()
