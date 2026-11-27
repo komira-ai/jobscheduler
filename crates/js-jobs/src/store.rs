@@ -19,6 +19,7 @@ use crate::record::{
     may_move,
 };
 use crate::result::{JobEnd, Output, Retention};
+use crate::wake::Wake;
 
 mod attempts;
 mod callbacks;
@@ -589,7 +590,8 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// there is none, so a mark written in between makes the cancel stale); a placed, starting or
     /// running job gets the cancel intent, with a stop for its host queued if its start may have
     /// reached it (else its start deleted), and ends when the host reports it stopped; an ended
-    /// job, or one whose cancel was already asked for, is returned as it is, unwritten.
+    /// job, or one whose cancel was already asked for, is returned as it is, unwritten. A cancel
+    /// that wrote wakes the queue of every server ([`Wake::Queue`]) once it committed.
     ///
     /// # Errors
     /// [`JobStoreError::NotFound`]; [`JobStoreError::Stale`]; as for any read and write.
@@ -616,6 +618,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             (self.stop_on_cancel(txn, &job, now)?, asked)
         };
         self.commit(id, txn)?;
+        self.tell(true, &BTreeSet::from([Wake::Queue]));
         Ok(next)
     }
 
@@ -874,3 +877,6 @@ mod postgres_submit_tests;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod wake_tests;

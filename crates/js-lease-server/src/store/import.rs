@@ -433,6 +433,7 @@ mod tests {
             store: store.clone(),
             names: StoreNames::Flags,
             locked: false,
+            shared: None,
         };
         store.fail_read_after(0);
         let refused = server
