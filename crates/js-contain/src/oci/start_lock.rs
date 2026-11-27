@@ -13,7 +13,8 @@
 //! A host start takes [`HOST_START_LOCK`] (an exclusive `flock`) before `crun run` is
 //! started, and lets it go once `crun` has written its pid file ([`PID_FILE`], `--pid-file`),
 //! which `crun run` writes after the container's process has passed its `/dev` step, or once
-//! `crun` has ended, whichever is first. Every runtime and every agent on the node takes the
+//! `crun` has ended, whichever is first. The pid file is looked for every [`PID_FILE_POLL`]
+//! while `crun` runs, so the lock is held at most that much longer than the step. Every runtime and every agent on the node takes the
 //! same file, whatever its scratch directory. The file is made by the daemon (root for a host
 //! container) with mode `0600` in `/dev`, where no other user can make one or open it, so
 //! no other user can hold it.
@@ -22,16 +23,14 @@
 
 use std::fs::{File, OpenOptions};
 use std::future::Future;
-use std::os::fd::OwnedFd;
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::task::Poll;
+use std::time::Duration;
 
 use runc::Runc;
 use runc::options::CreateOpts;
-use rustix::fs::inotify;
-use tokio::io::unix::AsyncFd;
 
 /// The file a node's host starts lock: one per node, in the host's `/dev`, which is what
 /// `crun` changes.
@@ -40,16 +39,19 @@ pub(crate) const HOST_START_LOCK: &str = "/dev/.js-host-start.lock";
 /// The pid file `crun run` writes for a host container, in its lease directory.
 pub(crate) const PID_FILE: &str = "crun.pid";
 
+/// How often a host start looks for `crun`'s pid file while it holds the lock: a `stat` of
+/// the lease directory's entry, for the moment `crun` takes to start a container.
+const PID_FILE_POLL: Duration = Duration::from_millis(10);
+
 /// The pid file of the host container whose lease directory is `lease`.
 fn pid_file(lease: &Path) -> PathBuf {
     lease.join(PID_FILE)
 }
 
-/// The lock held for a host start, and the watch on the lease directory that sees `crun`'s
-/// pid file appear. Dropped, the lock is let go.
+/// The lock held for a host start, and the pid file `crun` is to write. Dropped, the lock is
+/// let go.
 struct Held {
     _lock: File,
-    watch: AsyncFd<OwnedFd>,
     pid_file: PathBuf,
 }
 
@@ -91,13 +93,11 @@ async fn host_start(lease: &Path, lock: &Path) -> Result<Option<Held>, String> {
 
 /// Takes the lock `lock` (made with mode `0600` if it is not there, never through a link),
 /// waiting for as long as another start holds it, for the start of the container whose lease
-/// directory is `lease`. Once it is taken (so that a start waiting for it holds nothing
-/// more), a pid file left in the lease directory by an earlier start is removed and the
-/// directory is watched for the new one, before `crun` is started and can write it.
+/// directory is `lease`. Once it is taken, a pid file left in the lease directory by an
+/// earlier start is removed, before `crun` is started and can write the new one.
 ///
 /// # Errors
-/// The lock could not be opened or taken, the old pid file could not be removed, or the watch
-/// could not be made.
+/// The lock could not be opened or taken, or the old pid file could not be removed.
 async fn take(lease: &Path, lock: &Path) -> Result<Held, String> {
     let lock = lock.to_owned();
     let taken = tokio::task::spawn_blocking(move || lock_file(&lock)).await;
@@ -106,10 +106,8 @@ async fn take(lease: &Path, lock: &Path) -> Result<Held, String> {
     if pid_file.symlink_metadata().is_ok() {
         std::fs::remove_file(&pid_file).map_err(|e| format!("{}: {e}", pid_file.display()))?;
     }
-    let watch = watch(lease).map_err(|e| format!("watch {}: {e}", lease.display()))?;
     Ok(Held {
         _lock: lock,
-        watch,
         pid_file,
     })
 }
@@ -131,17 +129,6 @@ fn lock_file(path: &Path) -> Result<File, String> {
     Ok(file)
 }
 
-/// An inotify watch for entries made or moved into `dir`, not blocking, on the runtime.
-fn watch(dir: &Path) -> std::io::Result<AsyncFd<OwnedFd>> {
-    let fd = inotify::init(inotify::CreateFlags::CLOEXEC | inotify::CreateFlags::NONBLOCK)?;
-    inotify::add_watch(
-        &fd,
-        dir,
-        inotify::WatchFlags::CREATE | inotify::WatchFlags::MOVED_TO,
-    )?;
-    AsyncFd::new(fd)
-}
-
 impl Held {
     /// Runs `run` (`crun run`) to its end, letting the lock go as soon as the pid file is
     /// there or, if `run` ends first, when it ends. Its result is `run`'s.
@@ -151,7 +138,7 @@ impl Held {
             let mut appeared = pin!(self.appeared());
             std::future::poll_fn(|cx| match run.as_mut().poll(cx) {
                 Poll::Ready(end) => Poll::Ready(Some(end)),
-                Poll::Pending => appeared.as_mut().poll(cx).map(|_| None),
+                Poll::Pending => appeared.as_mut().poll(cx).map(|()| None),
             })
             .await
         };
@@ -162,17 +149,11 @@ impl Held {
         }
     }
 
-    /// Ends once the pid file is there. Woken by the watch, which only says that something
-    /// was made in the lease directory: what it read is discarded, and the file is looked for
-    /// again. An error of the watch ends it too, so the lock is let go.
-    async fn appeared(&self) -> std::io::Result<()> {
-        let mut events = [0u8; 4096];
+    /// Ends once the pid file is there, looking for it every [`PID_FILE_POLL`].
+    async fn appeared(&self) {
         while self.pid_file.symlink_metadata().is_err() {
-            let mut ready = self.watch.readable().await?;
-            while rustix::io::read(self.watch.get_ref(), &mut events).is_ok() {}
-            ready.clear_ready();
+            tokio::time::sleep(PID_FILE_POLL).await;
         }
-        Ok(())
     }
 }
 
