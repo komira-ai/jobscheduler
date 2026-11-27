@@ -491,17 +491,15 @@ mod tests {
                 why: "not ready".to_owned(),
             })
             .collect();
-        let Some(Event::Finding(found)) = attached.backoff("j1", &backed) else {
-            panic!("a finding");
+        let line = Finding {
+            run_id: Some("j1".to_owned()),
+            code: code::PROVIDER_BACKOFF,
+            message: "the provider tier did not serve the Mount of source 0 (2 in a row): not \
+                      ready; asked again in 1500 ms; 2 more sources wait too; this agent: 4 \
+                      Prepares not served, 3 calls sent again"
+                .to_owned(),
         };
-        assert_eq!(found.run_id.as_deref(), Some("j1"));
-        assert_eq!(found.code, code::PROVIDER_BACKOFF);
-        assert_eq!(
-            found.message,
-            "the provider tier did not serve the Mount of source 0 (2 in a row): not ready; \
-             asked again in 1500 ms; 2 more sources wait too; this agent: 4 Prepares not served, \
-             3 calls sent again"
-        );
+        assert_eq!(attached.backoff("j1", &backed), Some(Event::Finding(line)));
         assert!(attached.backoff("j1", &[]).is_none());
     }
 }
