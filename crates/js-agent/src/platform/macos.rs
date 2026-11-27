@@ -347,12 +347,10 @@ pub(crate) fn open(
 ) -> Result<Start, Failure> {
     let os = &cli.os;
     let usage = |text: String| Failure::Usage(text);
-    let given = os
-        .given()
-        .into_iter()
-        .chain(cli.providers.given())
-        .chain(cli.samples.given())
-        .find_map(|(flag, given)| given.then_some(flag));
+    let given = os.given().into_iter().chain(cli.providers.given());
+    let given = given.chain(cli.host_ports.given());
+    let given = given.chain(cli.samples.given());
+    let given = given.find_map(|(flag, given)| given.then_some(flag));
     if cli.no_jobs {
         return match given {
             Some(flag) => Err(usage(format!(
@@ -527,9 +525,11 @@ impl Jobs {
         euid: u32,
     ) -> Result<(), String> {
         let journal = state.map_or_else(PathBuf::new, |state| state.path().join(NATIVE_JOURNAL));
+        let host_ports = cli.host_ports.allowed().map_err(|why| why.to_string())?;
         let native = NativeSettings::from_flags(&cli.os.native(), denied, &journal)?
             .map(|native| native.with_mount_roots(self.mounts.clone()))
-            .transpose()?;
+            .transpose()?
+            .map(|native| native.with_host_ports(host_ports));
         let put = &PutFlags {
             native_put_root: cli.os.native_put_root.clone(),
             native_put_user: cli.os.native_put_user.clone(),

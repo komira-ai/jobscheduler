@@ -4,9 +4,10 @@
 
 use std::path::{Path, PathBuf};
 
-use js_agent_wire::NetworkLevel;
+use js_agent_wire::{HostPort, NetworkLevel};
 use js_mac_pool::seatbelt::{
-    AbsPath, Caps, MountGrant, MountTrees, Narrowing, Net, Policy, Profile, SlotLayout,
+    AbsPath, Caps, MountGrant, MountTrees, Narrowing, Net, Policy, Ports, PortsError, Profile,
+    SlotLayout,
 };
 
 use super::{NativeConfig, fail, fence};
@@ -75,7 +76,10 @@ pub(super) fn level(config: &NativeConfig, asked: NetworkLevel, bundle: Option<N
 /// and nowhere else, `read_only` (the run's files directory, the `dest`
 /// of each input below `exec/` and the link of each read-only mount, each named for an error)
 /// is denied writes, `mounts` are granted after the read denies (every mount root is one),
-/// and `trees` are the shared trees of the run, if any.
+/// `trees` are the shared trees of the run, if any, and `host_ports` the host ports its start
+/// names, which the run reaches on the host's loopback at their own numbers whatever `net`
+/// is ([`Policy::with_host_ports`]: under the ceiling `off` too, since `--host-port`, not the
+/// ceiling, bounds them, and the admission held each to it).
 ///
 /// The read denies are the agent's (`config.read_denies`), the places only the privacy
 /// controls guard among them ([`fence::PRIVACY_ONLY_PLACES`]); a mount at or below one of
@@ -85,14 +89,15 @@ pub(super) fn level(config: &NativeConfig, asked: NetworkLevel, bundle: Option<N
 ///
 /// # Errors
 ///
-/// A path the profile cannot name, a mount in a fenced place, or a policy or profile that
-/// cannot be built.
+/// A path the profile cannot name, a mount in a fenced place, host ports the profile cannot
+/// list (port 0, or more than it holds), or a policy or profile that cannot be built.
 pub(super) fn build(
     config: &NativeConfig,
     net: &Net,
     home: &Path,
     (read_only, mounts): (&[(&str, PathBuf)], &[MountGrant]),
     trees: Option<MountTrees>,
+    host_ports: &[HostPort],
 ) -> Result<Profile, RuntimeError> {
     let run_path = run_dir(home);
     let run = AbsPath::new(&run_path).map_err(|why| fail(&run_path.display(), &why))?;
@@ -138,6 +143,13 @@ pub(super) fn build(
     let policy = Policy::base(layout, caps)
         .and_then(|policy| policy.narrowed(narrowing))
         .map_err(|why| fail(&"the policy", &why))?;
+    // After the narrowing, which never widens: the ports are no level.
+    let numbers: Vec<u16> = host_ports.iter().map(|port| port.host_port).collect();
+    let policy = match Ports::new(&numbers) {
+        Ok(ports) => policy.with_host_ports(ports),
+        Err(PortsError::Empty) => policy,
+        Err(why) => return Err(fail(&"the host ports", &why)),
+    };
     Profile::for_policy(&policy).map_err(|why| fail(&"the profile", &why))
 }
 

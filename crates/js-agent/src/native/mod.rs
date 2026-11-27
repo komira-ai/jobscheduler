@@ -157,7 +157,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use js_agent_wire::{
     BUNDLE_PROGRAM_PREFIX, CpuSeries, HostPort, InputRef, JobUsage, LogReport, LogTail,
-    MemorySeries, NativeSpec, refusal,
+    MemorySeries, NativeSpec, PortRange, refusal,
 };
 use js_mac_pool::seatbelt::{AbsPath, ReadModel};
 use js_mac_session::full_disk_access::FullDiskAccess;
@@ -210,6 +210,10 @@ pub struct NativeConfig {
     /// The roots a job's mounts must lie beneath once their links are followed
     /// (`--mount-root`, `--mount-root-ro`), canonical; also in `read_denies`.
     pub mount_roots: Vec<MountRoot>,
+    /// The ports of the host's loopback a job may reach (`--host-port`): a start that names
+    /// another is refused `input-not-allowed`, and the profile of a start that names one
+    /// allows a connect to it whatever the run's level.
+    pub host_ports: Vec<PortRange>,
     /// Which reads the profile permits. The runtime builds no grants, so only
     /// [`ReadModel::Open`] gives a profile; with the other every start fails.
     pub read_model: ReadModel,
@@ -694,6 +698,14 @@ impl Runtime for NativeRuntime {
             code: refusal::IMAGE_UNSUPPORTED_HERE,
             why: "this agent runs an image only as a bundle, with a run".to_owned(),
         })
+    }
+
+    /// The host ports `--host-port` allows: a native job reaches each it names at its own
+    /// number on the host's loopback, which its profile opens to that port whatever its level
+    /// (`native/profile.rs`). A run taken back after a restart keeps the profile it started
+    /// with, so it loses none ([`Runtime::host_port_lost`] keeps its default).
+    fn host_ports(&self) -> Vec<PortRange> {
+        self.config.host_ports.clone()
     }
 
     /// Mounts of host paths, as links in `exec/` (`native/mounts.rs`); layers are refused.
