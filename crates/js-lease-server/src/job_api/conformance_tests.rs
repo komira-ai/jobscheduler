@@ -18,7 +18,6 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::http::{HeaderValue, Request, header};
-use js_callback::AddressRule;
 use js_conformance::jobs::{self, JobHarness, Refused, Step};
 use js_jobs::{InstanceId, JobEnd, JobId, JobRecord, JobState, Output, Retention, StartFailure};
 use js_proto::v1::job_service_client::JobServiceClient;
@@ -117,9 +116,7 @@ impl Real {
             file: std::path::PathBuf::new(),
         };
         assert_eq!(clients.add(entry, &token), Ok(()));
-        let ctx: Ctx = submit::Ctx::served(CEILING, Fixed::new(true))
-            .accepting_retry()
-            .accepting_callbacks(AddressRule::new([]));
+        let ctx: Ctx = submit::Ctx::served(CEILING, Fixed::new(true));
         let api = Arc::new(JobApi::new(Arc::clone(&jobs), shared).with_submit(ctx));
         let channel = jobs::channel_to(Presenting(grpc(api, LiveClients::new(clients))));
         Real {

@@ -133,7 +133,7 @@ Non-goals:
   action is a job whose payload references CAS digests. A ucdk Job is a job whose payload is a container image and arguments.
 - **Request.** One submission of a job, with a request id. It enters the queue and ends in one outcome. In kbf it is
   `kbf_sched::input::Request` (`crates/kbf-sched/src/input.rs`) and the scheduler calls it an operation.
-- **Attempt.** One try at a request on one host. Retries and reruns create attempts. Exactly one attempt's result is accepted.
+- **Attempt.** One try at a request on one host. Retries and reruns create attempts. Exactly one attempt's result is accepted. For a job, an attempt is one placement (`Job.attempt`, `Job.attempt_history`; [design/job-retry-and-completion-callback.md](design/job-retry-and-completion-callback.md), section 3.2).
 - **Lease.** Two levels (9.1). A *machine lease* is the scheduler's grant of a host, or a share of one, to a consumer until it is released or its max wall time ends
   (the lease table that held it was deleted; the job service replaced it). A *placement* is a consumer's grant of resources inside its lease to one attempt, identified by (term, sequence)
   (`LeaseId`, `crates/kbf-types/src/lease.rs`). Per R1, a machine lease covers a node or half a node. A lease is recorded durably before
@@ -648,6 +648,12 @@ leasing it is level 2 (9.1). In short:
 ## 8. Retries, loss and run records
 
 ### 8.1 Retry policy
+The job API's retry is `JobSpec.retry`, which is not the policy below. It is opt-in: absent means one attempt. The service retries a
+job only after a start failure or a lost host, never after a job's own failure, a cancel, `NO_CAPACITY` or `EXCLUSIVE_NOT_READY`, and a
+job with a `callback` is called once after its final end. It is specified in
+[design/job-retry-and-completion-callback.md](design/job-retry-and-completion-callback.md), which supersedes this section for jobs. The
+rest of this section is the generic scheduling core's policy from the lease design; none of it is in the job API.
+
 `RetryPolicy` has the four axes of 4.1 by name (own-limit, platform fault, not started, loss) and adds *task failure*; instance reclaim
 spends the platform-fault budget. The portable `max_retries` of a ucdk Job (UJ1) counts every failed attempt on three axes together. The
 account is in [design/retries-and-runs.md](design/retries-and-runs.md).

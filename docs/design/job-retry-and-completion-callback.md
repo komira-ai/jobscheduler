@@ -1,11 +1,12 @@
 # A job's retry policy and its completion callback
 
 Companion to [jobscheduler-design.md](jobscheduler-design.md), sections 3.2 (jobs), 5.3 (submit, place, cancel), 5.4 (whole-host
-jobs), 6.3 (presence and loss) and 6.7 (restart recovery), and to [live-logs.md](live-logs.md). Status: **decided, not built**. The
-owner of the public job API has answered every question this page raised (section 0). Nothing here is built yet. The page changes the
-public job API (`crates/js-proto/proto/jobscheduler/v1/job.proto`, `service.proto`, `usage.proto`).
+jobs), 6.3 (presence and loss) and 6.7 (restart recovery), and to [live-logs.md](live-logs.md). Status: **built**. The act
+release, v0.1.431, retries and delivers. The accept release removed the refusal, so `SubmitJob` takes `retry` and `callback` (section
+7). The owner of the public job API answered every question this page raised (section 0). The page changes the public job API
+(`crates/js-proto/proto/jobscheduler/v1/job.proto`, `service.proto`, `usage.proto`).
 
-Two features are missing today:
+Two features were missing before this page:
 
 1. **A retry policy.** A job runs at most once. A job that fails to start, or whose host is lost, ends there, and the client must
    submit a new job. No field asks the service to try again.
@@ -133,7 +134,7 @@ What does not change:
 [design.md](../design.md) section 8.1 and [retries-and-runs.md](retries-and-runs.md) describe a `RetryPolicy` of the generic scheduling
 core from the lease design. It has budgets per axis (own-limit, platform fault, not started, loss, task failure) and an `evicted`
 outcome that charges none (D63 in [decisions.md](decisions.md)). None of it is in the job API or in code. This page is the job API's
-policy and supersedes those two sections for jobs; task I updates both to point here. Only two of their axes have a counterpart: not
+policy and supersedes those two sections for jobs, and both point here. Only two of their axes have a counterpart: not
 started is a start failure, and loss is a lost host. A platform fault that ends a running attempt arrives as `LOST` and retries with it.
 Task failure and the own-limit ladder stay with the client: the service never retries a job's own failure. Eviction is not built. When
 it is, an evicted attempt is requeued without counting against `max_attempts`, as D63 says, and gets an outcome value of its own then.
@@ -622,7 +623,9 @@ renumbered, and no shipped field takes another meaning.
   `GetLogs` request without `attempt` reads the latest attempt, which for a job without retries is its only attempt, under its old key.
 - **New client, old server.** An old server's decoder skips fields 70 and 71, so the job runs once with no callback. The answer's
   `job.spec` does not echo them. That is how a client tells: a client that sent a policy and sees no `retry` in the returned spec knows
-  the server dropped it. `js-client` checks this and reports it (task I).
+  the server dropped it. `js_client::jobs::dropped_policies` takes the request and the answer and returns a `DroppedPolicy` (`Retry` or `Callback`) for each
+  policy the request set and the answer's `job.spec` lacks. For a callback it tests whether the message is present, because
+  `signing_key` is empty in every answer.
 - **Old agents.** The agent wire does not change. A retry is a new placement with a new allocation id. It reaches a host that ran the
   job before only if that host's agent reports `start-fence` (section 3.5). The attempt's log prefix is built by the server and passes
   every agent's check (section 3.8).
@@ -631,14 +634,14 @@ renumbered, and no shipped field takes another meaning.
 - **Instances of two versions over one store** (multi-instance.md, section 7). During a rolling update, an older instance could end a
   job that has a policy without retrying it, or end a job with a callback without making its row due. So each feature lands in two
   releases:
-  1. **Act:** the release that can retry and deliver. `SubmitJob` still refuses a job carrying `retry` or `callback`
-     (`INVALID_ARGUMENT`, `retry-not-enabled` or `callback-not-enabled`). The refusal is a field of the server's internal `Config`
-     struct, not a configuration key or flag. Tests of tasks F, G and H build the server with it off, so the act release runs end to end
-     before anything accepts.
-  2. **Accept:** a later release removes the refusal. Every instance that can meet such a job then already acts on it.
+  1. **Act:** the release that can retry and deliver, v0.1.431. `SubmitJob` still refused a job carrying `retry` or `callback`
+     (`INVALID_ARGUMENT`, `retry-not-enabled` or `callback-not-enabled`). The refusal was a field of the server's internal `Config`
+     struct, not a configuration key or flag.
+  2. **Accept:** the release after it removed the refusal and the internal `Config` field. Every instance that can meet such a job
+     already acted on it. `SubmitJob` now takes `retry` and `callback`, and refuses a bad one by its field.
 
-  The proto fields land first (task A), with the refusal in place, so no server of this repository from task A on takes a field it
-  ignores. Servers released before task A skip the fields, as above.
+  The proto fields landed first (task A), with the refusal in place, so no server of this repository from task A on took a field it
+  ignored. Servers released before task A skip the fields, as above.
 - **Rollback.** Once the accept release has run, rolling the fleet back below the act release is not supported: an older build would end
   policy jobs without retrying them and callback jobs without a due row. A rollback to the act release is safe. The release notes of the
   accept release say so.
@@ -721,7 +724,7 @@ The tests follow the repository's rules:
 | A record from before the fields reads as attempt 1 | `js-jobs` codec `a_record_without_attempt_tags_reads_as_attempt_one` | C |
 | An older reader carries the new tags and leaves callback rows | `js-jobs` `a_build_without_the_new_tags_carries_them`, `an_older_store_reader_leaves_callback_rows_intact` | C, D |
 | New proto fields: goldens; an old reader skips them; old bytes give the defaults | `js-proto` `tests/retry.rs`, `tests/callback.rs`, rows in `golden/fields.txt` | A |
-| Until the accept release, `retry` and `callback` are refused | `js-lease-server` `submit_refuses_retry_and_callback_until_enabled` (the accept PR replaces it with the accepting test) | A |
+| `SubmitJob` takes `retry` and `callback`; bad ones are refused by field | `js-lease-server` `submit_takes_retry_and_callback_and_refuses_bad_ones` and end to end through the gateway `a_job_whose_host_is_lost_is_retried_and_called_back_once` | I |
 | A bad URL or key at submit is refused: plain http, userinfo, fragment, a literal denied address, a key under 32 or over 64 bytes; the error text holds neither | `js-lease-server` `submit_refuses_each_bad_callback` | G |
 | The key is in the `callback/` row only; the job row holds its digest | `js-jobs` `the_signing_key_is_held_in_the_callback_row_only` | D |
 | The key never leaves: `GetJob`, `ListJobs` and `SubmitJob` answers, events, usage rows, metrics and log lines, each compared by exact equality | `js-lease-server` `the_signing_key_is_never_returned_or_logged` | G |
@@ -753,7 +756,7 @@ Why this list is complete:
 - every answer a receiver can give: 2xx, 410, another status, a timeout, a refused connection and a redirect;
 - every way the key could leave the server, and every address class the rule names;
 - every compatibility path of section 7: old reader, old record, old agent, new client against an old server, `GetLogs` without
-  `attempt`, and the act-then-accept gate.
+  `attempt`, and the act-then-accept order of releases.
 
 ## 10. Implementation tasks
 
@@ -842,5 +845,5 @@ owner may reverse any of them.
   A bare, signed, answer-blind POST is all a job can aim there.
 - **A later attempt's log segment is a 64-byte hash,** one byte longer than any job id, so it never meets a job's own key.
 - **The `webhook-id` is minted, not derived from the job,** so the call carries nothing about the job.
-- **Two releases per feature,** act then accept, so instances of two versions over one store never mishandle a job. The gate is an
-  internal `Config` field, not a setting.
+- **Two releases per feature,** act then accept, so instances of two versions over one store never mishandle a job. The gate was an
+  internal `Config` field, not a setting, and the accept release removed it.
