@@ -45,7 +45,7 @@ Columns:
 | cpu-over-time.md | 24 | 9 | 5 | 7 | komira-ai/jobscheduler#1143, komira-ai/jobscheduler#1144 |
 | live-logs.md | 11 | 5 | 0 | 4 | - |
 | mac-account-per-job.md | 17 | 6 | 6 | 1 | komira-ai/jobscheduler#1163 |
-| mac-one-program.md | 45 | 4 | 5 | 23 | komira-ai/jobscheduler#1160, komira-ai/jobscheduler#1161, komira-ai/jobscheduler#1162, komira-ai/jobscheduler#1163, komira-ai/jobscheduler#1164, komira-ai/jobscheduler#1165, komira-ai/jobscheduler#1166, komira-ai/jobscheduler#1193 |
+| mac-one-program.md | 45 | 5 | 6 | 21 | komira-ai/jobscheduler#1160, komira-ai/jobscheduler#1161, komira-ai/jobscheduler#1162, komira-ai/jobscheduler#1163, komira-ai/jobscheduler#1164, komira-ai/jobscheduler#1165, komira-ai/jobscheduler#1166, komira-ai/jobscheduler#1193 |
 | kbf-on-js-agent.md | 51 | 16 | 14 | 10 | - |
 | extraction-steps.md | 32 | 10 | 12 | 0 | - |
 | extraction-steps-d.md | 49 | 17 | 11 | 5 | komira-ai/jobscheduler#1150, komira-ai/jobscheduler#1167, komira-ai/jobscheduler#1168, komira-ai/jobscheduler#1169, komira-ai/jobscheduler#1170, komira-ai/jobscheduler#1172, komira-ai/jobscheduler#1173, komira-ai/jobscheduler#1174, komira-ai/jobscheduler#1175 |
@@ -563,7 +563,7 @@ As read: Status: accepted 2026-11-22; header says "apart from the accounts of se
 | 3 | Pool is renamed Pool and called in-process by NativeRuntime instead of a socket Client. | partly: `crates/js-agent/src/native/accounts.rs:22`, `crates/js-agent/Cargo.toml:39` | - |
 | 3 | js-mac-session stops being a program: delete proto.rs, server.rs, client.rs, caller.rs, main.rs, socket binding, wire_golden tests. | no | komira-ai/jobscheduler#1163 (new) |
 | 3 / 8 Q2 / 7 step 7 | Delete uncalled helper verbs (session-*, role-*, image-*, baseline, reboot-dirty, macos/gui.rs as-user). | no | komira-ai/jobscheduler#1164 (new) |
-| 3 / 8 Q3 / 7 step 7 | Delete node-admin (node_admin.rs, phase0.rs, role_user.rs, macos/admin.rs). | no | komira-ai/jobscheduler#1165 (new) |
+| 3 / 8 Q3 / 7 step 7 | Delete node-admin (node_admin.rs, phase0.rs, role_user.rs, macos/admin.rs). | yes: deleted with their tests; `crates/js-mac-session/src/main.rs:7` takes no `node-admin` mode, and `crates/js-mac-session/tests/binary.rs` holds the word refused as an argument. | komira-ai/jobscheduler#1165 |
 | 3 | Administrator lease (grant.rs, grant keys, user-create grant, pool replace-by-admin path) removed by a separate change before the switch. | yes: PR komira-ai/jobscheduler#1003 merged 'Mac pool: no lease user is ever an administrator; the admin grant, its keys and set_admin are removed'. | komira-ai/jobscheduler#1003 |
 | 3 | js-mac-provision program deleted (main.rs, verb dispatch); plist verbs move to cargo xtask pkg; flags-file reader moves to library flags.rs which the agent calls at start; operator verbs check/remove/render/probe dropped; pf_as_root.rs test calls the library. | no | komira-ai/jobscheduler#1162 (new) |
 | 3 | Pool users are permanent: reset empties in place, replace becomes attribute reset (a change to the old pool that lands on its own). | superseded: `crates/js-agent/src/mac_accounts/teardown.rs` | komira-ai/jobscheduler#1023 |
@@ -589,7 +589,7 @@ As read: Status: accepted 2026-11-22; header says "apart from the accounts of se
 | 7 step 5 tests | fake_helper.rs (772 lines) removed; runtime tests run over a pool with a fake host; kept tests renamed (adopt.rs, bound.rs, journal.rs); new tests (restart keeps adopted users, lost journal lease reset, supervisor without = line ended, second agent fails, journal-reader and exit-record cross-version). | partly: `crates/js-agent/tests/agent/native/fake_accounts.rs` | komira-ai/jobscheduler#1160 (new) |
 | 7 step 5 | Real-macOS restart test on the beta stage: install the package, start a long native job, boot out and bootstrap js-agent, assert the job ran on, the new agent lists the run, exit reported once; holds back promote-macos. | no | komira-ai/jobscheduler#1160 (new) |
 | 7 step 6 | Hand-over on a Mac: stops: native-handover in macOS --version; launchd cases in steps_handover.rs; second real-macOS case for an update with hand-over. | no | komira-ai/jobscheduler#1161 (new) |
-| 7 step 7 | If owner agrees (Q2, Q3): delete uncalled verbs and node-admin, each its own PR. | no | komira-ai/jobscheduler#1164 (new) |
+| 7 step 7 | If owner agrees (Q2, Q3): delete uncalled verbs and node-admin, each its own PR. | partly: node-admin deleted (`crates/js-mac-session/src/main.rs:7`); the uncalled verbs not | komira-ai/jobscheduler#1164 (new); komira-ai/jobscheduler#1165 |
 | 7 (end) | The fixes of komira-ai/jobscheduler#988 (open) must be released before step 5 reaches them. | yes: komira-ai/jobscheduler#988 is MERGED ('js-agent on a Mac: the update hook compares the release link by real path ... first-install test'). | komira-ai/jobscheduler#988 |
 | 8 Q1 | One program on a Mac with a root supervisor per run keeping runs alive across restarts. | partly: Single program in the run path (native runtime, supervisor verb), but the helper still ships and runs is not kept across restarts (native/adopt.rs:1-12). | komira-ai/jobscheduler#1160 (new) |
 | 8 Q4 | A Mac run's deadline is held by its supervisor while no agent runs. | superseded: s12: supervisor 'holds no deadline: the lifecycle's wall limit stops the job'; s13 'no other process holds a deadline'. | - |
