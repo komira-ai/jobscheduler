@@ -46,7 +46,7 @@ fn number(name: &str) -> usize {
 
 /// The names of the two buck2-farm steps of the committed file.
 const TOOL_STEP: &str = "buck2 build the buildrules command line on the build farm, local 0";
-const CI_STEP: &str = "buck2 build //:ci on the build farm, local 0";
+const CI_STEP: &str = "buck2 build //:ci or the caller's target on the build farm, local 0";
 
 /// The `uses:` of buck2-farm at the pinned commit, as the committed file writes it.
 fn farm_use() -> String {
@@ -97,7 +97,8 @@ fn a_buck2_command_outside_the_action_is_refused_in_any_workflow() {
     // Catches: the build of //:ci run by a plain `run:` again (no watchdog: a dead connection to
     // the farm hangs it to its time limit), a buck2 run added to another workflow, and the
     // daemon's stop changed into a build.
-    let plain = format!("\"$RUNNER_TEMP/bin/buck2\" {CI_ARGS}");
+    // The plain command names //:ci itself: the step's expression would end the quoted `run:`.
+    let plain = "\"$RUNNER_TEMP/bin/buck2\" build //:ci".to_owned();
     let ci_step = format!(
         "        {}\n        timeout-minutes: 120\n        with:\n          args: {CI_ARGS}\n          assert-remote: ${{{{ runner.temp }}}}/bin/assert_remote\n          buck2: ${{{{ runner.temp }}}}/bin/buck2\n",
         farm_use()
@@ -181,7 +182,7 @@ fn every_komira_action_is_at_the_one_commit_with_the_watchdog() {
 
 #[test]
 fn each_farm_step_takes_exactly_its_inputs_and_there_are_exactly_two() {
-    // Catches: the lane's build pointed at another target, the command line built to another
+    // Catches: the lane's build pointed at another target or deaf to the caller's, the command line built to another
     // path than the table's check reads, the farm step given the checkout's `./buck2` (there is
     // none) instead of the pinned one, and a third buck2 command (one too few is the plain
     // `run:` of the build above).
@@ -195,6 +196,15 @@ fn each_farm_step_takes_exactly_its_inputs_and_there_are_exactly_two() {
         problems_with(
             &format!("          args: {CI_ARGS}\n"),
             "          args: build //:lint\n"
+        ),
+        [ci_with(number(CI_STEP))]
+    );
+    // The lane's build that ignores the caller's target: release.yml's gate would build //:ci
+    // and never its black-box tests.
+    assert_eq!(
+        problems_with(
+            &format!("          args: {CI_ARGS}\n"),
+            "          args: build //:ci\n"
         ),
         [ci_with(number(CI_STEP))]
     );

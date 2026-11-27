@@ -14,8 +14,10 @@
 //! `super::farm_steps` the steps that reach the build farm (each buck2 command through komira's
 //! buck2-farm action, under its watchdog) and the time limit of every step. The steps that install
 //! the pinned tools around `cargo xtask fetch` are `tests/pinned_tool_cache`'s:
-//! - its `on` is exactly `pull_request` with no filter and `push` to `branches: [main]`, and its
-//!   top-level `permissions` are `{}`;
+//! - its `on` is exactly `pull_request` with no filter, `push` to `branches: [main]` and
+//!   `workflow_call` with the one input `target` (a required string: release.yml's `blackbox`
+//!   calls it with the target it builds in place of `//:ci`), and its top-level `permissions` are
+//!   `{}`;
 //! - its jobs are exactly [`JOB`], on [`RUNNER`], under [`JOB_IF`], with `permissions` exactly
 //!   `contents: read` and `id-token: write`;
 //! - farm-connect is used by exactly one step, pinned by a 40-digit commit, whose `with:` is
@@ -96,8 +98,7 @@ pub fn upload_inputs() -> BTreeMap<&'static str, String> {
 }
 
 /// What a [`FILE`] whose `on` is anything else is refused with.
-pub const ON_PROBLEM: &str =
-    "farm.yml: on must be pull_request with no filter and push to branches [main] alone";
+pub const ON_PROBLEM: &str = "farm.yml: on must be pull_request with no filter, push to branches [main] and workflow_call with the one required string input target, alone";
 /// What a [`FILE`] with any top-level permission is refused with.
 pub const TOP_PERMISSIONS_PROBLEM: &str = "farm.yml: the top-level permissions must be `{}`";
 
@@ -112,7 +113,9 @@ fn scalar_map(node: &Node) -> Option<BTreeMap<&str, &str>> {
     }
 }
 
-/// Whether `on` is exactly `pull_request` with no filter and `push` with `branches: [main]`.
+/// Whether `on` is exactly `pull_request` with no filter, `push` with `branches: [main]` and
+/// `workflow_call` with the one input `target`, a required string, and nothing else but its
+/// description.
 fn pull_request_and_push_to_main(on: Option<&Node>) -> bool {
     let Some(on) = on.filter(|on| matches!(on.value, Value::Map(_))) else {
         return false;
@@ -124,7 +127,26 @@ fn pull_request_and_push_to_main(on: Option<&Node>) -> bool {
         [(key, branches)] => key.as_str() == Some("branches") && only_main(branches),
         _ => false,
     });
-    names(Some(on)) == ["pull_request", "push"] && unfiltered && to_main
+    let called = entry(on, "workflow_call").is_some_and(|call| match entries(call) {
+        [(key, inputs)] => key.as_str() == Some("inputs") && one_target(inputs),
+        _ => false,
+    });
+    names(Some(on)) == ["pull_request", "push", "workflow_call"] && unfiltered && to_main && called
+}
+
+/// Whether `inputs` is the one input `target`: a required string, with a description.
+fn one_target(inputs: &Node) -> bool {
+    match entries(inputs) {
+        [(key, target)] => {
+            key.as_str() == Some("target")
+                && scalar_map(target).is_some_and(|m| {
+                    m.keys().copied().collect::<Vec<_>>() == ["description", "required", "type"]
+                        && m.get("type") == Some(&"string")
+                        && m.get("required") == Some(&"true")
+                })
+        }
+        _ => false,
+    }
 }
 
 /// Whether `branches` is the list `[main]`.
