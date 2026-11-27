@@ -6,6 +6,15 @@
 //! deferred.
 //!
 //! In this order, each before anything is written unless it says so:
+//! 0. on a machine, before the step itself: the checks of the agent's start that read what the
+//!    host's neighbours provide, run on the host's flags file ([`crate::platform::neighbours`]:
+//!    the mount roots, each mount provider's directory and user, and on a Mac the trees root and
+//!    the put root and its user, which are tierstore's mount, socket, put directory and account
+//!    on the farm). A refusal defers (75, `host_setup_missing`, see [`neighbours_missing`]), naming
+//!    the flag, with nothing read or written: the agent the cutover would start refuses to start
+//!    without it, and so does the agent of the release it replaces, so a cutover would leave the
+//!    host with no agent. A flags file that cannot be read is not judged here (items 4 and 7 and
+//!    the lease say why it is needed);
 //! 1. the lock, the record (if there is one) and the params agree; a record that breaks a rule
 //!    is `state_invalid` (1), except a record of another target that never took the host, which
 //!    is superseded, and one of an update whose rollback is complete in effect, which is
@@ -560,6 +569,26 @@ pub(super) fn deferred(params: &Params, reason: Reason, detail: String) -> Done 
             ..Report::default()
         },
     }
+}
+
+/// The deferral of a `prepare` on a host that lacks a path or a user of its neighbours that the
+/// host's flags name (`problem`, the refusal of the agent's own start check,
+/// [`crate::platform::neighbours`]): exit 75, `host_setup_missing`, an environment matter, with
+/// the retry hint. The machine runs the check before the step (`update_hook::machine::run_step`),
+/// so nothing is read or written here: the agent this update would start would refuse to start,
+/// and so would the agent of the release it replaces, on the same flags, which a `cutover`
+/// would have stopped. hostkeeper rolls the deferral back (a rollback with no record has nothing
+/// to undo) and orders the host again, and the update goes on once the neighbour is there.
+pub(crate) fn neighbours_missing(params: &Params, problem: &str) -> Done {
+    deferred(
+        params,
+        Reason::HostSetupMissing,
+        format!(
+            "{problem}: the agent does not start on the flags of {} without it, so the update \
+             waits for it and nothing is stopped",
+            params.flags_file.display()
+        ),
+    )
 }
 
 /// The record of an update that is just beginning: nothing done, no cordon. The digest is the

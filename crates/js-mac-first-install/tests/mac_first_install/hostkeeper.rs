@@ -9,17 +9,19 @@
 //! `run` jobs stopped, the installer's `remove`, then `current` removed when it names the target),
 //! and `update_order` (the hook's program mapped into the sealed tree, its arguments, bounds and
 //! params from the manifest the release writes for the Mac, and for an update the release it
-//! replaces and its hook). A daemon rolls an update back by nothing here: `Back` of an update is
-//! an error, since the test that runs one expects it to succeed.
+//! replaces and its hook). `Back` of an update activates the release it replaces again, then
+//! switches `current` back to it, as the daemon's `activate_version` does.
 //!
 //! Not reproduced: the fetch of the package by its pin (the test hands the installer the file),
 //! the `target.json` the daemon writes beside the tree (nothing of the steps reads it), the
 //! daemon's quarantine and code-signature check of the staged tree, `placed.json` (the
 //! installer's records are kept in memory, as hostkeeper's own installer test keeps them, one
 //! set for every package of the host) and
-//! the signature of the package: the runner cannot sign one, so `pkgutil --check-signature` of
-//! this package is answered as signed by a leaf the signers list names ([`Signed`]), as
-//! hostkeeper's own installer test answers it. Every other tool call is the Mac's.
+//! the signature of an unsigned package: the runner cannot sign one, so `pkgutil
+//! --check-signature` of such a package is answered as signed by a leaf the signers list names
+//! ([`Signed`]), as hostkeeper's own installer test answers it. A package the release signed
+//! ([`Daemon::signed`]) is checked by the Mac's own `pkgutil`, against a signers list that names
+//! the leaf certificate it reports. Every other tool call is the Mac's.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -33,6 +35,7 @@ use hostkeeper_hook::Params;
 use hostkeeper_install::host::Host;
 use hostkeeper_install::lock::InstallerLock;
 use hostkeeper_install::macos_pkg::record::{PkgRecord, RecordError, Records};
+use hostkeeper_install::macos_pkg::signature;
 use hostkeeper_install::macos_pkg::signers::{Fingerprint, Signers};
 use hostkeeper_install::macos_pkg::{Bounds as PkgBounds, MacosPkg, Order};
 use hostkeeper_install::tools::{ToolError, ToolOutput};
@@ -216,9 +219,11 @@ fn signed_answer(package: &str) -> String {
     .join("\n")
 }
 
-/// The Mac's tools, but for `pkgutil --check-signature` of the package, answered as signed.
+/// The Mac's tools, but for `pkgutil --check-signature` of the package, answered as signed
+/// when `answer` is set (an unsigned package); a signed package is checked by the Mac itself.
 struct Signed {
     package: String,
+    answer: bool,
 }
 
 impl Tools for Signed {
@@ -229,7 +234,7 @@ impl Tools for Signed {
         deadline: Duration,
     ) -> Result<ToolOutput, ToolError> {
         let asked = args.first().map(String::as_str) == Some("--check-signature");
-        if tool == Tool::Pkgutil && asked && args.get(1) == Some(&self.package) {
+        if self.answer && tool == Tool::Pkgutil && asked && args.get(1) == Some(&self.package) {
             return Ok(ToolOutput {
                 code: Some(0),
                 stdout: signed_answer(&self.package).into_bytes(),
@@ -238,6 +243,51 @@ impl Tools for Signed {
         }
         HostTools.run(tool, args, deadline)
     }
+}
+
+/// How the signature of a package is checked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Signature {
+    /// Answered as signed by [`LEAF`]: the package is unsigned.
+    Answered,
+    /// By the Mac's `pkgutil --check-signature`: the package is the release's signed one.
+    Mac,
+}
+
+/// What every daemon of one host shares: the installer's records and the log of the steps.
+#[derive(Default)]
+struct Shared {
+    records: Arc<Memory>,
+    ran: Arc<Mutex<Vec<Ran>>>,
+}
+
+/// The leaf certificate `pkgutil --check-signature` names for the signed package `pkg`, after
+/// the check hostkeeper's installer makes (exit 0, a status the Mac trusts): the one signer of a
+/// host that installs the release's packages.
+fn leaf_of(pkg: &Path) -> Fingerprint {
+    let path = pkg.to_str().expect("a UTF-8 path").to_owned();
+    let out = HostTools
+        .run(
+            Tool::Pkgutil,
+            &["--check-signature".to_owned(), path],
+            Duration::from_secs(60),
+        )
+        .unwrap_or_else(|e| panic!("pkgutil --check-signature {}: {e:?}", pkg.display()));
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let leaf = signature::leaf_fingerprint(&text).unwrap_or_else(|| {
+        panic!(
+            "pkgutil names no leaf certificate of {}: {text}",
+            pkg.display()
+        )
+    });
+    let signers = Signers::new(vec![leaf.clone()]).expect("one signer");
+    if let Err(refused) = signature::check(out.code, &text, &signers) {
+        panic!(
+            "the Mac does not take the signature of {}: {refused}\n{text}",
+            pkg.display()
+        );
+    }
+    leaf
 }
 
 /// The installer's records, in memory.
@@ -300,24 +350,43 @@ pub struct Daemon {
 impl Daemon {
     /// The daemon of a Mac ordered to install the package `given` of `spec` as `version`.
     pub fn new(spec: &'static Service, given: &Path, version: &str) -> Daemon {
-        Daemon::build(spec, given, version, Arc::default(), Arc::default())
+        Daemon::build(spec, given, version, Shared::default(), Signature::Answered)
+    }
+
+    /// [`Daemon::new`] of a package the release signed: its signature is checked by the Mac's own
+    /// `pkgutil --check-signature`, and the host's one signer is the leaf certificate that check
+    /// names, as a farm Mac lists the release's signer.
+    pub fn signed(spec: &'static Service, given: &Path, version: &str) -> Daemon {
+        Daemon::build(spec, given, version, Shared::default(), Signature::Mac)
     }
 
     /// The same daemon, ordered to install another package, of `spec` (the same service at
     /// another version, or another service): the installer's records and the log of the steps
     /// are the ones this daemon keeps, as one daemon keeps them for the host.
     pub fn another(&self, spec: &'static Service, given: &Path, version: &str) -> Daemon {
-        let records = Arc::clone(&self.records);
-        Daemon::build(spec, given, version, records, Arc::clone(&self.ran))
+        Daemon::build(spec, given, version, self.shared(), Signature::Answered)
+    }
+
+    /// [`Daemon::another`] of a package the release signed (see [`Daemon::signed`]).
+    pub fn another_signed(&self, spec: &'static Service, given: &Path, version: &str) -> Daemon {
+        Daemon::build(spec, given, version, self.shared(), Signature::Mac)
+    }
+
+    fn shared(&self) -> Shared {
+        Shared {
+            records: Arc::clone(&self.records),
+            ran: Arc::clone(&self.ran),
+        }
     }
 
     fn build(
         spec: &'static Service,
         given: &Path,
         version: &str,
-        records: Arc<Memory>,
-        ran: Arc<Mutex<Vec<Ran>>>,
+        shared: Shared,
+        signature: Signature,
     ) -> Daemon {
+        let Shared { records, ran } = shared;
         let bytes = fs::read(given).unwrap_or_else(|e| panic!("read {}: {e}", given.display()));
         fs::create_dir_all(PACKAGES).expect("the packages directory");
         // The daemon stages its own root-owned download of the package (its package store), never
@@ -325,16 +394,20 @@ impl Daemon {
         // the check before every step refuses an entry of the tree owned by another user.
         let pkg = own_copy(given, &bytes);
         let pkg = pkg.as_path();
+        let leaf = match signature {
+            Signature::Answered => Fingerprint::parse(LEAF).expect("64 hex"),
+            Signature::Mac => leaf_of(pkg),
+        };
         Daemon {
             spec,
             host: Host::mac(),
             tools: Signed {
                 package: pkg.to_str().expect("a UTF-8 path").to_owned(),
+                answer: signature == Signature::Answered,
             },
             records,
             lock: InstallerLock::new(&Path::new(STATE_DIR).join("installer.lock")),
-            signers: Signers::new(vec![Fingerprint::parse(LEAF).expect("64 hex")])
-                .expect("one signer"),
+            signers: Signers::new(vec![leaf]).expect("one signer"),
             order: Order {
                 service: ServiceName::new(spec.name).expect("a service name"),
                 version: Version::new(version).expect("a version"),
@@ -471,11 +544,8 @@ impl Daemon {
 
     fn back(&self, order: &UpdateOrder) -> Result<(), SwitchError> {
         let failed = |what: &str, why: String| SwitchError::Failed(format!("{what}: {why}"));
-        if order.previous.is_some() {
-            return Err(failed(
-                "back",
-                "this test does not roll an update back to its previous release".to_owned(),
-            ));
+        if let (Some(previous), Some(version)) = (&order.previous, &order.previous_version) {
+            return self.activate_previous(previous, version);
         }
         let units = units()?;
         for label in &self.order.run {
@@ -498,6 +568,38 @@ impl Daemon {
         fs::remove_file(dir.join("current"))
             .and_then(|()| fs::File::open(&dir)?.sync_all())
             .map_err(|e| failed("remove current", e.to_string()))
+    }
+
+    /// `back` of an update, as the daemon's (`Repository::back` to `activate_version`): the
+    /// release the order replaces, `previous` at `version`, activated again from its sealed
+    /// directory (the installer's `activate` of its kept package, from the release `current`
+    /// names when that is another one), then `current` switched to it. Before the `rollback` of
+    /// an update deferred by its `prepare`, `current` still names the previous release: the
+    /// package is installed again as it is, and no job of it is started or stopped (the
+    /// installer only enables the package's jobs).
+    fn activate_previous(&self, previous: &Staged, version: &str) -> Result<(), SwitchError> {
+        let failed = |what: &str, why: String| SwitchError::Failed(format!("{what}: {why}"));
+        let version = Version::new(version).map_err(|e| failed("version", e.to_string()))?;
+        let order = Order {
+            version: version.clone(),
+            ..self.order.clone()
+        };
+        let units = units()?;
+        let fs = RealFs::new(Path::new("/"));
+        let placer = Placer::new(roots(), &fs, &units);
+        let named = placer
+            .current(self.spec.name)
+            .map_err(|e| failed("current", format!("{e:?}")))?;
+        let from = named
+            .filter(|named| named != version.as_str())
+            .map(|named| service_dir_of(self.spec.name).join(named));
+        self.installer()
+            .activate(&order, previous.dir(), from.as_deref())
+            .map_err(|e| failed("activate the previous release", format!("{e:?}")))?;
+        placer
+            .switch_current(&self.order.service, &version)
+            .map_err(|e| failed("switch current back", format!("{e:?}")))?;
+        Ok(())
     }
 
     /// The daemon's runner over `store` (the service's record directory), launching each step as

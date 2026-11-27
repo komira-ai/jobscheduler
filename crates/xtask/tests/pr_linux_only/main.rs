@@ -96,6 +96,7 @@ fn every_job_a_pull_request_starts_runs_on_linux_x86_64() {
                 && !job.starts_with("js-agent-macos-pkg.yml/")
                 && !job.starts_with("js-agent-macos-first-install.yml/")
                 && !job.starts_with("js-agent-native-isolation.yml/")
+                && !job.starts_with("js-agent-macos-blackbox.yml/")
                 && !job.contains("beta-macos")
                 && !job.contains("artifacts.yml/build"),
             "{job}"

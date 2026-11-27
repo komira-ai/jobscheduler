@@ -744,6 +744,28 @@ pub(crate) fn jobs(
     })
 }
 
+/// The checks of the agent's start that read what the host's neighbours provide, on the flags
+/// `cli`: the mount roots (`--mount-root`, `--mount-root-ro`), and the directory and the user of
+/// each `--mount-provider` (tierstore's mount and socket on a node of the farm). They are the
+/// start's own checks ([`crate::lifecycle::MountRoots::with_read_only`],
+/// [`MountProviders::from_flags`] as [`jobs`] calls it), which read and change nothing; the
+/// update hook's `prepare` runs them on the host's flags file, so that an update whose agent
+/// would refuse to start is refused before anything is stopped.
+///
+/// # Errors
+///
+/// The first refusal, as the start words it (the text names the flag).
+pub(crate) fn neighbours(cli: &Cli) -> Result<(), String> {
+    crate::lifecycle::MountRoots::with_read_only(&cli.mount_roots, &cli.mount_roots_ro)?;
+    MountProviders::from_flags(
+        &cli.providers.mount_providers,
+        &cli.providers.mount_provider_users,
+        cli.providers.mount_provider_wait,
+        UserNames::Passwd(Path::new(crate::cli_runtime::PASSWD_FILE)),
+    )?;
+    Ok(())
+}
+
 /// Why `--allow-host-jobs` is refused at start on an agent whose runtime is not `crun`.
 pub const HOST_JOBS_NEED_CRUN: &str = "--allow-host-jobs: only the crun runtime launches a \
      host job; the container engine (--allow-container-engine) runs contained jobs only";

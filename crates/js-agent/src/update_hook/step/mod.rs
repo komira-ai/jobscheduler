@@ -49,6 +49,7 @@ pub use host_setup::{
     DATA_VOLUME, DISKUTIL, DSCL, DSEDITGROUP, FSTAB_LEFTOVER, MOUNT_POINT_MODE, QUOTA_TENTHS,
     SCRATCH_VOLUME,
 };
+pub(crate) use prepare::neighbours_missing;
 pub use prepare::prepare;
 pub use resume::{RESTART_HELLO_SECS, RESTART_STOP_SECS, resume};
 pub use rollback::rollback;

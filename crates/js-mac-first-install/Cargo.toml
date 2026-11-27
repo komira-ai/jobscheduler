@@ -7,16 +7,25 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-# A test-only crate: the library is empty, and the one test (tests/mac_first_install.rs) is
-# js-agent's first install on a Mac, run by .github/workflows/js-agent-macos-first-install.yml.
-# It lives here, not in js-agent, because it runs hostkeeper's own code, and one of that code's
+# A test-only crate: the library is empty. Its test (tests/mac_first_install.rs) is js-agent's
+# first install on a Mac, run by .github/workflows/js-agent-macos-first-install.yml; its one
+# program, js-mac-package-blackbox (tests/bin/mac_package_blackbox.rs), is the black-box tests of
+# the released macOS package, run by .github/workflows/js-agent-macos-blackbox.yml. They live
+# here, not in js-agent, because they run hostkeeper's own code, and one of that code's
 # dependencies (`libproc`) generates its bindings only when the build host is a Mac: a
-# dev-dependency of js-agent would break the macOS clippy the lint job cross-builds on Linux,
-# and a dev-dependency cannot be optional. The lint job's macOS clippy and beta.yml's workspace
-# build and tests exclude this crate; the first-install workflow builds it on a Mac.
+# dependency of js-agent would break the macOS clippy the lint job cross-builds on Linux, and a
+# dev-dependency cannot be optional. The lint job's macOS clippy and beta.yml's workspace build
+# and tests exclude this crate; the two workflows build it on a Mac.
 
-# Everything the test uses is a dev-dependency for macOS alone; none of it is built for Linux.
-[target.'cfg(target_os = "macos")'.dev-dependencies]
+# The black-box tests: one program, given the packages as flags. Off a Mac it says it runs on
+# macOS only and exits 2.
+[[bin]]
+name = "js-mac-package-blackbox"
+path = "tests/bin/mac_package_blackbox.rs"
+
+# Everything the test and the program use is a dependency for macOS alone (a dependency, not a
+# dev-dependency, since the program is a binary); none of it is built for Linux.
+[target.'cfg(target_os = "macos")'.dependencies]
 # A service's name and a version, and a package's SHA-256, as hostkeeper's installer takes them.
 hostkeeper-config.workspace = true
 # The hook contract: the verdicts and parameters of the update hook the step runner runs.
@@ -33,6 +42,8 @@ hostkeeper-steps.workspace = true
 # (started in the test process).
 js-client = { path = "../js-client" }
 js-lease-server = { path = "../js-lease-server" }
+# The black-box program's flags.
+clap.workspace = true
 # The hex of a package's SHA-256.
 hex.workspace = true
 # The scratch directories.

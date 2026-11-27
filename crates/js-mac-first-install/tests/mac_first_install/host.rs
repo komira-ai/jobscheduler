@@ -150,6 +150,8 @@ pub struct LeaseServer {
     runtime: Runtime,
     pump: Option<Pump>,
     url: String,
+    /// The job service's address (`--job-listen`), over the same TLS.
+    job_url: String,
     /// The server's own certificate, which the agent and the test trust.
     server_cert: PathBuf,
     client_token: PathBuf,
@@ -192,6 +194,9 @@ impl LeaseServer {
             text(&server_key),
             "--agent-client-ca".to_owned(),
             text(&ca),
+            // The job service, on a port of its own: the black-box test submits its jobs there.
+            "--job-listen".to_owned(),
+            "127.0.0.1:0".to_owned(),
         ];
         let cli = Cli::try_parse_from(argv).expect("the server's flags");
         let config = Config::from_cli(cli).expect("the server's configuration");
@@ -206,12 +211,17 @@ impl LeaseServer {
             .block_on(start(config, SharedClock::new(clock.clone()), ticker))
             .expect("the lease server starts");
         let url = format!("https://{}", running.addr());
+        let job_url = format!(
+            "https://{}",
+            running.job_addr().expect("the job service is on")
+        );
         let pump = Pump::start(clock, ticks, runtime.handle().clone());
         LeaseServer {
             running: Some(running),
             runtime,
             pump: Some(pump),
             url,
+            job_url,
             server_cert,
             client_token,
         }
@@ -245,6 +255,19 @@ impl LeaseServer {
 }
 
 impl LeaseServer {
+    /// A client of the job service, by the client token.
+    pub fn jobs(&self) -> Client {
+        Client::connect(
+            &self.job_url,
+            &self.client_token,
+            Some(&self.server_cert),
+            Duration::from_secs(10),
+        )
+        .expect("a client of the job service")
+    }
+}
+
+impl LeaseServer {
     /// `GET /v1/hosts/<host>` as the agent reads itself (the route the hook's verify reads): by
     /// the host certificate the Studio holds, which the server takes the host's id from.
     pub fn host_as_itself(&self, host: &str) -> Value {
@@ -264,6 +287,71 @@ impl LeaseServer {
             .expect("the server answers");
         assert_eq!(reply.status, 200, "{}", reply.body);
         reply.body
+    }
+}
+
+/// What a thread of its own reads of the server: a host's entry in the host list and its
+/// session, with no hold on the server itself.
+#[derive(Clone)]
+pub struct SessionReader {
+    url: String,
+    server_cert: PathBuf,
+    client_token: PathBuf,
+}
+
+impl SessionReader {
+    /// The instant the session `host` is in began, as [`LeaseServer::session_started`] reads it;
+    /// `None` when the server shows it in no session, does not know the host yet, or does not
+    /// answer.
+    pub fn session_started(&self, host: &str) -> Option<u64> {
+        let identity = HostIdentity::new(
+            Path::new(IDENTITY_DIR).join("host.crt"),
+            Path::new(IDENTITY_DIR).join("host.key"),
+        );
+        let client = Client::connect_with_identity(
+            &self.url,
+            &identity,
+            Some(&self.server_cert),
+            Duration::from_secs(10),
+        )
+        .ok()?;
+        let reply = client.get(&format!("/v1/hosts/{host}")).ok()?;
+        (reply.status == 200)
+            .then(|| reply.body["session_started_ms"].as_u64())
+            .flatten()
+    }
+
+    /// The entry of `host` in `GET /v1/hosts`, as [`LeaseServer::host`] reads it; `None` when
+    /// the server does not list it yet or does not answer.
+    pub fn host(&self, host: &str) -> Option<Value> {
+        let client = Client::connect(
+            &self.url,
+            &self.client_token,
+            Some(&self.server_cert),
+            Duration::from_secs(10),
+        )
+        .ok()?;
+        let reply = client.get("/v1/hosts").ok()?;
+        (reply.status == 200)
+            .then(|| {
+                reply.body["hosts"]
+                    .as_array()?
+                    .iter()
+                    .find(|entry| entry["id"] == host)
+                    .cloned()
+            })
+            .flatten()
+    }
+}
+
+impl LeaseServer {
+    /// A reader of the hosts' sessions for another thread.
+    pub fn session_reader(&self) -> SessionReader {
+        SessionReader {
+            url: self.url.clone(),
+            server_cert: self.server_cert.clone(),
+            client_token: self.client_token.clone(),
+        }
     }
 }
 
@@ -330,6 +418,11 @@ impl Drop for LeaseServer {
 /// Writes what a Studio holds before the install, starts the lease server over `dir`, and
 /// returns it.
 pub fn studio(dir: &Path) -> LeaseServer {
+    studio_with(dir, &flags)
+}
+
+/// [`studio`] with the flags file `flags` gives for the lease server's address.
+pub fn studio_with(dir: &Path, flags: &dyn Fn(&str) -> String) -> LeaseServer {
     let ca = Ca::new();
     let server = LeaseServer::start(dir, &ca.pem());
     put(

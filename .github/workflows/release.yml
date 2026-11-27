@@ -85,7 +85,9 @@
 # package), where hostkeeper-desired.yml finds it, as soon as `beta-macos-pkg` has ended and
 # `publish` succeeded: a package that failed to build or sign is left out (hosts on macOS then keep
 # their version) and the deploy goes on without it, so `desired` waits for the package job's end but
-# never for its success, and for no test of the beta stage. `publish` leaves the archives out, and
+# never for its success, and for no test of the beta stage. After `pkg-upload`, `blackbox-macos`
+# (js-agent-macos-blackbox.yml) runs the black-box tests of that signed package on hosted Macs: its
+# first install, and its update from the release before it; nothing waits for it yet. `publish` leaves the archives out, and
 # nothing else waits for the beta stage: not the Linux assets, the .debs, the apt repository, gamma,
 # the control-plane deploy or hostkeeper. A pull request runs none of it. The tag is made first of
 # those: `publish` makes a draft release, uploads the files built, attested and verified, and
@@ -665,6 +667,21 @@ jobs:
           APT_BUCKET: ${{ vars.APT_BUCKET }}
           APT_DISTRIBUTION_ID: ${{ vars.APT_DISTRIBUTION_ID }}
         run: tool/xtask channels descriptor write --bucket "$APT_BUCKET" --distribution-id "$APT_DISTRIBUTION_ID" --work "$RUNNER_TEMP/descriptor"
+
+  # The black-box tests of the signed js-agent package of macOS (js-agent-macos-blackbox.yml): its
+  # first install (J2), and its update from the release before it with tierstore's mount missing
+  # (J4: refused at prepare, before any restart) and then served (J3), on hosted Macs, against the
+  # package `pkg-upload` put in the package repository. Nothing waits for it yet: a failure is
+  # this run's red job.
+  blackbox-macos:
+    needs: [plan, pkg-upload]
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' && needs.pkg-upload.result == 'success' }}
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/js-agent-macos-blackbox.yml
+    with:
+      version: ${{ needs.plan.outputs.version }}
 
   # Builds the `xtask` binary that gamma, cp-deploy-digest, pkg-upload and every apt read, index
   # and write job run. A job of its own so that the build, whose scripts run code from the locked dependency
