@@ -7,11 +7,12 @@
 //! whose worker is woken by other work.
 
 use js_agent::lifecycle::{Event, ProviderAnswer};
-use js_agent_wire::{HeldState, MountMode, Outcome, refusal};
+use js_agent_wire::{HeldState, JobStartSpec, MountMode, Outcome, refusal};
 
 use super::Harness;
 use super::fake_providers::{
-    WAIT_MS, mount, prepare, release, rig, run_one, tree, with_layer, with_layer_and_mount,
+    WAIT_MS, mount, prepare, provided_mount, release, rig, run_one, tree, with_layer,
+    with_layer_and_mount,
 };
 use super::per_job::{job_start, listing};
 
@@ -351,4 +352,34 @@ fn the_counts_count_the_prepares_not_served_and_the_calls_sent_again() {
         )
     );
     assert!((1_000..=2_000).contains(&wait), "{wait}");
+}
+
+/// Asserts the whole `provider-backoff` line of a step in which three sources of one start
+/// fail: the first is named and the other two are counted as "2 more sources", once. Catches
+/// a line for each source, and a count of the others that is off by one.
+#[test]
+fn three_sources_that_fail_together_give_one_line_that_counts_the_others() {
+    let (mut h, providers) = rig("backoff-three", |_| {});
+    for index in 0..3 {
+        providers.always("tier", &mount("j1", index), full());
+    }
+    let spec = JobStartSpec {
+        mounts: vec![
+            provided_mount("k2", "/opt/sdk", MountMode::ReadOnly),
+            provided_mount("k3", "/opt/data", MountMode::ReadOnly),
+        ],
+        ..with_layer("j1")
+    };
+    let lines = backoffs(&h.apply(vec![job_start(spec)]));
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(lines[0].0, "j1");
+    let (line, _) = masked(&lines[0].1);
+    assert_eq!(
+        line,
+        format!(
+            "the provider tier did not serve the Mount of source 0 (1 in a row): {FULL}; \
+             asked again in _ ms; 2 more sources wait too; this agent: 0 Prepares not served, \
+             0 calls sent again"
+        )
+    );
 }
