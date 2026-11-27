@@ -16,7 +16,7 @@ use js_jobs::{
 use js_sched_placer::sizes::{JobSizes, SIZE_CLASS_LABEL, SIZE_FALLBACK_LABEL};
 use js_state::sqlite::{Options, SqliteStore};
 use js_state::{ManualClock, Store as _};
-use js_types::{HostId, ImageDigestRef, Labels, Resources};
+use js_types::{CpuSeries, HostId, ImageDigestRef, Labels, Resources};
 
 /// A scratch directory of one test, removed when dropped.
 struct Scratch(PathBuf);
@@ -138,6 +138,7 @@ fn a_jobs_row_says_its_classes_times_end_and_usage() {
         exit_code: 0,
         output: Output {
             usage: Some(usage),
+            cpu_series: CpuSeries::new(2, vec![0, 16, 40], 5_500_000, true),
             ..Output::default()
         },
     };
@@ -184,6 +185,7 @@ fn a_jobs_row_says_its_classes_times_end_and_usage() {
             placed_ms: Some(2000),
             started_ms: Some(5000),
             ended_ms: Some(15_000),
+            cpu_series: CpuSeries::new(2, vec![0, 16, 40], 5_500_000, true),
         }
     );
     assert!(read["a-1"].fallback.is_some());

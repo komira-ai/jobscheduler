@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use js_agent::lifecycle::{Body, RETIRED_CAP, label};
-use js_agent_wire::limits::{MAX_COMMANDS, MAX_HELD, MAX_RESULTS};
+use js_agent_wire::limits::{MAX_COMMANDS, MAX_HELD};
 use js_agent_wire::{Command, HeldRun, HeldState, Isolation, Outcome};
 use serde_json::json;
 
@@ -467,10 +467,16 @@ fn a_container_that_vanishes_ends_its_job() {
     assert_eq!(h.life.free().cpu_millis, 4000);
 }
 
+/// The refused starts `x0`, `x1`, ... the agent holds before its entries reach what a
+/// heartbeat lists: an entry weighs 39 bytes and its id, so `x0` to `x9` take 410, `x10` to
+/// `x99` 3,780, and 474 more of 43 bytes fit the 24,576 the entries may take (24,572 in all).
+const HELD_SHORT: usize = 574;
+
 /// Asserts that starts that are refused cannot grow what the agent holds past what a
-/// heartbeat can list: after as many unacknowledged results as the wire allows, the next
-/// start is skipped with no record, the held and result lists stay within the limits, and
-/// an acknowledgement makes room for it. It catches a server that fills the agent's memory
+/// heartbeat can list, whatever the wire's count caps allow: of [`MAX_HELD`] refused starts
+/// the agent holds [`HELD_SHORT`], each with its result, the next start is skipped with no
+/// record, the results a heartbeat carries are fewer than those held (the rest wait), and an
+/// acknowledgement makes room for one more. It catches a server that fills the agent's memory
 /// with refused starts, and a heartbeat the server must reject.
 #[test]
 fn refused_starts_cannot_outgrow_the_wire_limits() {
@@ -488,19 +494,19 @@ fn refused_starts_cannot_outgrow_the_wire_limits() {
             .collect();
         h.apply(starts);
     }
-    assert_eq!(super::held(&h.life).len(), MAX_HELD);
-    assert_eq!(super::results(&h.life).len(), MAX_RESULTS);
+    assert_eq!(super::held(&h.life).len(), HELD_SHORT);
+    let carried = super::results(&h.life).len();
+    assert!(carried > 0 && carried < HELD_SHORT, "{carried}");
     spec.run_id = "extra".to_owned();
     spec.lease_id = "lease-extra".to_owned();
     assert_eq!(names(&h.start(spec.clone())), ["skipped extra Full"]);
-    assert_eq!(super::held(&h.life).len(), MAX_HELD);
-    assert_eq!(super::results(&h.life).len(), MAX_RESULTS);
+    assert_eq!(super::held(&h.life).len(), HELD_SHORT);
     h.ack("x0", "ACCEPTED");
     assert_eq!(
         names(&h.start(spec)),
         ["refused extra host-jobs-not-allowed"]
     );
-    assert_eq!(super::held(&h.life).len(), MAX_HELD);
+    assert_eq!(super::held(&h.life).len(), HELD_SHORT);
 }
 
 /// Asserts that a stop that the runtime refuses is a finding and is asked for again at

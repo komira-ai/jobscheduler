@@ -5,7 +5,7 @@
 use std::ffi::OsString;
 use std::net::SocketAddr;
 
-use js_lease_server::{Config, SharedClock, StartupError, channel_ticker, start};
+use js_lease_server::{BODY_LIMIT, Config, SharedClock, StartupError, channel_ticker, start};
 use js_types::ManualClock;
 
 use crate::config_support::{PoolText, file, load, refusal, server};
@@ -175,6 +175,50 @@ async fn a_scrape_answers_200_in_the_text_format_on_its_own_port_only() {
     );
     h.running.shutdown().await.unwrap();
     assert!(tokio::net::TcpStream::connect(addr).await.is_err());
+}
+
+/// Asserts that each hello and heartbeat refused 413 `body-too-large` is counted under its
+/// route: one hello and two heartbeats over the cap read 1 and 2, a body at the cap (refused
+/// for what it holds, not its size) counts nothing, and both
+/// lines are written at 0 before any. It catches a refusal the operator cannot see (the agent
+/// ends at it, so the server is the only place it shows), a count under the wrong route, and
+/// a body counted that was not over the cap.
+#[tokio::test]
+async fn agent_bodies_over_the_cap_are_counted_by_route() {
+    let scratch = Scratch::new("metrics_listen_bodies");
+    let args = metrics_args(&scratch, "127.0.0.1:0");
+    let h = Harness::with(scratch, args).await;
+    let addr = h.running.metrics_addr().unwrap();
+    let count = |body: &str, route: &str| {
+        let line = format!("\njs_agent_bodies_too_large_total{{route=\"{route}\"}} ");
+        let at = body
+            .find(&line)
+            .unwrap_or_else(|| panic!("{line} is not in:\n{body}"));
+        let rest = &body[at + line.len()..];
+        rest[..rest.find('\n').unwrap()].to_owned()
+    };
+    let scraped = request(addr, "GET", "/metrics", None, None).await.body;
+    assert_eq!(
+        [count(&scraped, "hello"), count(&scraped, "heartbeat")],
+        ["0", "0"]
+    );
+    let join = Some(crate::agents_support::JOIN);
+    let over = vec![b' '; BODY_LIMIT + 1];
+    let at_cap = vec![b' '; BODY_LIMIT];
+    for (path, body, status) in [
+        ("/v1/agent/hello", &over, 413),
+        ("/v1/agent/heartbeat", &over, 413),
+        ("/v1/agent/heartbeat", &over, 413),
+        ("/v1/agent/heartbeat", &at_cap, 400),
+    ] {
+        let reply = request(h.addr(), "POST", path, join, Some(body.as_slice())).await;
+        assert_eq!(reply.status, status, "{path}: {}", reply.body);
+    }
+    let scraped = request(addr, "GET", "/metrics", None, None).await.body;
+    assert_eq!(
+        [count(&scraped, "hello"), count(&scraped, "heartbeat")],
+        ["1", "2"]
+    );
 }
 
 /// Asserts that a server started without `--metrics-listen` binds no metrics listener.

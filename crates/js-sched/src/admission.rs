@@ -37,6 +37,12 @@
 //!   its leases' predicted costs ([`Left::fallback`]); never by the booked rule. Each lease
 //!   on a worker that never sent an accepted reading (a Mac, a native or VM node) is
 //!   charged at least 1000 m there; a worker that measured and went stale is not.
+//! - A worker whose signal the plausibility check (`plausible.rs`) marks implausible is
+//!   charged by prediction alone, as a worker with no usable measurement is, until the
+//!   check believes it again: the CPU time the results of leases admitted and ended inside
+//!   a span of readings report ([`crate::Scheduler::lease_cpu_used`]) is compared with the
+//!   growth of the node's CPU counter over that span, and a worker that holds no lease and
+//!   reads more than half its cores for three windows is marked too.
 //! - At most [`LoadConfig::cold_cap`] cold leases are admitted per worker per window.
 //! - A blocked head of the queue holds the worker with the most headroom, so a stream
 //!   of small work cannot keep a large action out for good (`head.rs`).
@@ -71,6 +77,7 @@ mod guard;
 mod head;
 mod horizon;
 mod ledger;
+mod plausible;
 mod profile;
 
 use std::collections::BTreeMap;
@@ -170,6 +177,26 @@ pub struct LoadCounters {
     /// [`crate::Scheduler::fallback_workers`]; a count above zero is a node whose cgroup
     /// limit and pool do not match.
     pub fallback_cpu_limited: u64,
+    /// Windows in which the plausibility check compared the CPU time of the leases that
+    /// ended inside a span of at most an hour (at least 60 core-seconds of it) with the
+    /// growth of the node's CPU counter.
+    pub signal_checked_windows: u64,
+    /// Windows in which it could not: no span of at most an hour held 60 core-seconds of
+    /// such leases. Unchecked, not failed.
+    pub signal_unchecked_windows: u64,
+    /// The length of those windows on the agents' clocks, in microseconds: the time the
+    /// check did not cover.
+    pub signal_unchecked_usec: u64,
+    /// Times a worker's signal was marked implausible because its counter grew by less than
+    /// half the CPU time its leases reported.
+    pub signal_implausible_lease_cpu: u64,
+    /// Times a worker's signal was marked implausible because, holding no lease, it read
+    /// more than half its cores for three windows in a row.
+    pub signal_implausible_idle: u64,
+    /// Not a running total: the live workers, as of the call that returned this, charged by
+    /// prediction because the plausibility check marks their signal, while the load rule is
+    /// on. Part of [`crate::Scheduler::fallback_workers`].
+    pub fallback_implausible: u64,
 }
 
 /// A prediction of what an action costs, from the estimator, fed for an operation with
@@ -577,6 +604,16 @@ pub struct LoadView {
     pub vm_memory_bytes: u64,
     /// Cold leases admitted in the current window.
     pub cold_this_window: u32,
+    /// The plausibility check marks the signal: the counter grew by less than half the CPU
+    /// time of the leases that ended inside a span. The worker is charged by prediction.
+    pub implausible_lease_cpu: bool,
+    /// The plausibility check marks the signal: holding no lease, the worker read more than
+    /// half its cores for three windows in a row. The worker is charged by prediction.
+    pub implausible_idle: bool,
+    /// How long, on the agent's clock in microseconds, the windows in a row up to the newest
+    /// were unchecked (no span of at most an hour held 60 core-seconds of leases that ended
+    /// in it); 0 when the newest window was checked or there is none.
+    pub unchecked_usec: u64,
 }
 
 impl LoadView {
@@ -601,6 +638,9 @@ impl LoadView {
             vm_cpu_millis: t.vm_cpu,
             vm_memory_bytes: t.vm_mem,
             cold_this_window: load.cold_admitted(now, cfg),
+            implausible_lease_cpu: load.check().lease_cpu_implausible(),
+            implausible_idle: load.check().idle_implausible(),
+            unchecked_usec: load.check().unchecked_usec(),
         }
     }
 }

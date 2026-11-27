@@ -1,6 +1,6 @@
 # Scheduling on CPU use over time
 
-Status: design for review. Built so far: the replay (`crates/js-cpu-replay`), step 1 (record) and step 2 (learn in shadow, `--placement-curves shadow`); step 4 and the checks of step 3 are built as [placement-profiles-live.md](placement-profiles-live.md) revised them, behind `--placement-curves on`; the decide-in-shadow part of step 3 is not built for CPU; for memory, its shadow is built under `shadow` and `on` (section 4, and [placement-profiles-live.md](placement-profiles-live.md) section 2). Companion to
+Status: design for review. Built so far: the replay (`crates/js-cpu-replay`), step 1 (record) and step 2 (learn in shadow, `--placement-curves shadow`); step 4 and the checks of step 3 are built as [placement-profiles-live.md](placement-profiles-live.md) revised them, behind `--placement-curves on`; the decide-in-shadow part of step 3 is built: for CPU under `--placement-curves shadow` (placement-profiles-live.md section 4), and for memory, its shadow under `shadow` and `on` (section 4, and [placement-profiles-live.md](placement-profiles-live.md) section 2). Companion to
 [sizing.md](sizing.md) (how a class's CPU is booked) and [placement-by-load.md](placement-by-load.md) (the
 load rule and the time profiles designed for leases, never wired to jobs).
 
@@ -338,12 +338,20 @@ accepts. What corrects is the next placement:
   - the placer's sizing (mirrored from `JobSizes` over `js-sizing`) and its score (keys 1, 3, 5);
   - host readings every 5 s, as #1036 makes real (the arm "as deployed" has none, as before it);
   - the memory rule before #1035.
-- The arm `A median, curves packed, 1.1` replays the curve mode of `placement-profiles-live.md` on the shapes the replay
-  synthesises (the trace has each job's mean and peak, not its series): each class learns every successful run's
-  synthesised series in 2 s means, a job of a class that passes the four checks books its curve, a host takes a job
-  when the curves fit at every slot ahead (`Rule::Packed`), and a job that waited 30 s at the head is tested flat.
-  Its `booked/used` integrates the curve over each job's wall time. The residual of the design is the replay's
-  measured CPU beyond the jobs' charges. On the farm trace, which records no peaks, every series is flat.
+- The arm `A median, curves packed, 1.1` replays the curve mode of `placement-profiles-live.md`. The trace carries
+  each job's CPU series when the export has it (`GET /v1/usage`'s `cpuSeries`, or the store row's), as a sixteenth
+  field under the header `# js-cpu-replay trace 2`; a trace with no series is written as before, under `trace 1`.
+  Each class learns as the job service's history does: a successful run's recorded series when it is whole and
+  agrees with the run's CPU time, and an unusable series (check 4) for a run without one, a partial or disagreeing
+  one, or a failure of a class that exists. A job of a class that passes the four checks books its curve, a host takes
+  a job when the curves fit at every slot ahead (`Rule::Packed`), and a job that waited 30 s at the head is tested
+  flat. Its `booked/used` integrates the curve over each job's wall time. The residual of the design is the replay's
+  measured CPU beyond the jobs' charges. A trace that carries series is also replayed under the shape `recorded`, each
+  job living its series (a job without a usable one as the burst). On the farm trace, which records no series, no
+  class passes check 4, so the arm books every job flat and differs from `A median, 1.1` only in how it ranks hosts.
+- **The gate** (`run --learn-days N`, N at least 2): the section `placement-profiles-live.md` section 4 step 3 asks
+  for, the curve mode against the flat step on the jobs that arrive after the trace's first N days, every job living
+  its recorded series, the curve mode's classes learning only from the first N days (`crates/js-cpu-replay/src/gate.rs`).
 - **Contention** (ASSUMED): a host asked for more than its cores gives each job cores/demand of what it asks, and the
   job runs longer by that factor. Nothing is lost to cache or switching.
 - `js-cpu-replay shadow <log>` reads the job service's own log under `--placement-curves shadow` (step 2) and
@@ -419,10 +427,11 @@ What to read from the table:
   Once #1036's readings flow, the comparison is run again with recorded readings and the measured-load rule as the
   baseline.
 
-**Next:** the job store's rows (`convert --rows`: real classes, peaks, contention, start times), then step 1's
-series, with curves learned on two days and replayed on a held-out third.
+**Next:** an export of three days with step 1's series (`convert`, then `run --learn-days 2`): curves learned on two
+days and replayed on a held-out third. The code for it is built; the run on the farm's days is not yet made.
 
-**Pass mark** (decision 2): on held-out recorded days the curve rule takes 10% or more off total time against today's
+**Pass mark** (decision 2, replaced): `placement-profiles-live.md` section 4 step 3 replaces it with no loss against
+the flat step, which is what `run --learn-days` checks. As first written: on held-out recorded days the curve rule takes 10% or more off total time against today's
 rule, by more than the spread between two days, with throughput within 2%; and the perfect curve does better still.
 
 **Kept Rust tests** (injected clock, no sleeps), for the curve rule when built: flat profiles equal the flat rule; a
@@ -450,7 +459,7 @@ negative and fades; each release reads the other's results.
   (REPLAY).
 - **Measured host load alone:** it lags and cannot read above the cores.
 - **A pressure gate and a start charge only:** the lightest design; it drops the owner's idea before there is data.
-  Its gate is designed in shadow (step 3, not built).
+  Its gate is designed in shadow (step 3, whose decide-in-shadow line is built under `--placement-curves shadow`).
 - **Others:** sampled recording (starves rare classes); `js-sched`'s minute slots (unused by jobs); a one-second
   heartbeat (more passes); CPU quotas or cpusets (against the owner's rulings); memory curves are booked nowhere and observed in shadow (section 4).
 - **Killing, throttling or moving a running job on a wrong estimate:** ruled out by the owner.

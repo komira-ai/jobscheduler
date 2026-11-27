@@ -237,8 +237,11 @@ pub const MAX_LOAD_BYTES: usize = 28 * 1024;
 /// The body a server reads for a heartbeat, in bytes; the server's own limit must equal
 /// it. A load at every cap here is about 25 KB, and beside 96 held runs and 8 results at
 /// the longest ids a beat stays under three quarters of it; a test fixes those totals.
-/// This is not a guarantee for every valid beat: `MAX_HELD` and `MAX_RESULTS` allow far
-/// more, and a beat over the server's limit is refused there.
+/// The wire's own caps are no guarantee for every valid beat: `MAX_HELD` and `MAX_RESULTS`
+/// allow far more, and a beat over the server's limit is refused there. The agent holds
+/// what it lists to this body itself: it takes a start only while its entries leave room
+/// for a result, and sends the results, oldest first, and the retired job ids only as far
+/// as they fit.
 pub const HEARTBEAT_BODY_BUDGET: usize = 65_536;
 /// The body an agent reads for a heartbeat reply (or any other answer of the server), in
 /// bytes; the agent's client (`js-client`) reads no more. A [`crate::LogGrant`] at every cap

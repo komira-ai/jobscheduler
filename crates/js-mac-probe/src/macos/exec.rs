@@ -1,6 +1,7 @@
 //! Running commands, with or without a profile, and building the profile.
 
 use std::ffi::OsStr;
+use std::os::unix::process::ExitStatusExt as _;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -10,6 +11,8 @@ use crate::report::Probe;
 pub struct Outcome {
     /// Exit code, if it exited.
     pub code: Option<i32>,
+    /// The signal that ended it, if one did.
+    pub signal: Option<i32>,
     /// Exited 0.
     pub ok: bool,
     /// Standard output.
@@ -43,12 +46,14 @@ pub fn run(mut cmd: Command) -> Outcome {
     match cmd.output() {
         Ok(out) => Outcome {
             code: out.status.code(),
+            signal: out.status.signal(),
             ok: out.status.success(),
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         },
         Err(err) => Outcome {
             code: None,
+            signal: None,
             ok: false,
             stdout: String::new(),
             stderr: format!("cannot start: {err}"),

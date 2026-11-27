@@ -12,7 +12,7 @@ use super::job::{
     may_change_host, slot_label,
 };
 use super::provided::Attached;
-use super::{Lifecycle, MAX_JOBS, SLOTS, Slots};
+use super::{Lifecycle, SLOTS, Slots};
 use crate::lifecycle::quota::QuotaHealth;
 use crate::lifecycle::runtime::{Found, Runtime, RuntimeError, Status};
 use crate::lifecycle::taint::TaintState;
@@ -284,7 +284,7 @@ impl Lifecycle {
                 "its slot is held already",
             ),
             (
-                self.jobs.len() >= MAX_JOBS,
+                !self.listable(&job.run_id),
                 "the agent holds as many runs as a heartbeat can list",
             ),
             (

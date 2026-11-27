@@ -8,7 +8,7 @@ use std::fs;
 
 use js_agent::lifecycle::Runtime;
 use js_agent::native::{Ceiling, NativeRuntime};
-use js_agent_wire::{NetworkLevel, refusal};
+use js_agent_wire::{HostPort, NetworkLevel, PortProtocol, PortRange, refusal};
 use js_types::PortMap;
 
 use super::lifecycle::Native;
@@ -227,4 +227,65 @@ fn a_runtime_with_nothing_to_check_refuses_an_open_job() {
             "{level:?}"
         );
     }
+}
+
+/// The network lines of the profile the supervisor of `rig` was last asked to apply.
+fn launched_network(rig: &Rig) -> Vec<String> {
+    let profile = rig.launcher.last().profile;
+    let lines = profile.lines().filter(|line| line.contains("network"));
+    lines.map(str::to_owned).collect()
+}
+
+/// Asserts that the native runtime offers the host ports `--host-port` allows (none by
+/// default, so the lifecycle refuses every start that names one `input-not-allowed`), and that
+/// a start naming two of them under the ceiling `off` (a port at its own number and one with no
+/// job port) has its supervisor apply a profile whose network is the `off` rules and a connect
+/// to each of the two ports of the host's loopback, lowest first, and nothing else of
+/// loopback; a start that names none under the same ceiling gets the `off` rules alone.
+/// Catches a Mac agent that offers no host port, one that starts the job without the connect
+/// it named, and one that opens all of loopback for it.
+#[test]
+fn a_start_naming_host_ports_reaches_those_ports_alone() {
+    let mut bare = Rig::with("net-host-port-none", |config| config.network = Ceiling::Off);
+    assert_eq!(bare.rt.host_ports(), []);
+    let allowed = vec![
+        PortRange::new(5432, 5432).unwrap(),
+        PortRange::new(9000, 9010).unwrap(),
+    ];
+    let mut rig = Rig::with("net-host-port", |config| {
+        config.network = Ceiling::Off;
+        config.host_ports = allowed.clone();
+    });
+    assert_eq!(rig.rt.host_ports(), allowed);
+    let port = |host_port, container_port| HostPort {
+        host_port,
+        container_port,
+        protocol: PortProtocol::Tcp,
+    };
+    let mut spec = rig.spec("r1", native("/usr/bin/true", &[]));
+    spec.host_ports = vec![port(9005, None), port(5432, Some(5432))];
+    rig.rt.create_and_start(&spec).unwrap();
+    assert_eq!(
+        launched_network(&rig)[..4],
+        [
+            "(deny network*)",
+            "(allow network-outbound (literal \"/private/var/run/syslog\"))",
+            "(allow network* (remote ip \"localhost:5432\"))",
+            "(allow network* (remote ip \"localhost:9005\"))",
+        ]
+    );
+    let localhost = launched_network(&rig);
+    let localhost = localhost.iter().filter(|line| line.contains("localhost"));
+    assert_eq!(localhost.count(), 2);
+
+    bare.start("r1", "/usr/bin/true", &[]);
+    let network = launched_network(&bare);
+    assert_eq!(
+        network[..2],
+        [
+            "(deny network*)",
+            "(allow network-outbound (literal \"/private/var/run/syslog\"))",
+        ]
+    );
+    assert!(!network.iter().any(|line| line.contains("localhost")));
 }

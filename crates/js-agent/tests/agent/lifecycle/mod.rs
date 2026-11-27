@@ -27,6 +27,7 @@ mod hold;
 mod host_ports;
 mod layout;
 mod lease_dir;
+mod listing;
 mod live_logs;
 mod logs;
 mod memory_series;
@@ -42,6 +43,7 @@ mod prepare;
 #[cfg(target_os = "linux")]
 mod provider_flags;
 mod providers;
+mod providers_backoff;
 mod providers_end;
 mod providers_restart;
 mod providers_stop;

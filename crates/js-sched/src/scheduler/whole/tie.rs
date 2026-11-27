@@ -5,13 +5,14 @@ use js_types::sched::WorkerId;
 use js_whole::cost::DrainCost;
 
 /// `drain` with the worker `kept` (a whole-machine mark's) moved ahead of every worker
-/// whose tail is the same as its own, so that a mark picked again by the least tail stays
+/// whose tail is the same as its own (the wait the order ranks by: a worker whose tail is
+/// unknown for backfill but counted at the ceiling ties on that wait), so that a mark picked again by the least tail stays
 /// where it is on a tie instead of moving to a worker with fewer leases, an earlier
 /// provider or a lower name. A worker with a shorter tail stays ahead of it. `drain` is in
 /// drain cost order (`Scheduler::drain_order`); a `kept` it does not list (a worker gone)
 /// changes nothing.
 pub(super) fn kept_first(mut drain: Vec<DrainCost>, kept: Option<&WorkerId>) -> Vec<DrainCost> {
-    let tail = |cost: &DrainCost| (cost.tail_end.is_none(), cost.wait_ms);
+    let tail = |cost: &DrainCost| cost.wait_ms;
     let at = kept.and_then(|kept| drain.iter().position(|cost| cost.id == kept.as_str()));
     if let Some(at) = at {
         let own = tail(&drain[at]);

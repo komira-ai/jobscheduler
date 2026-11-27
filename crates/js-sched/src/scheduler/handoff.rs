@@ -12,6 +12,7 @@ use std::cmp::Reverse;
 use js_types::sched::{OperationId, WaiterId, WorkerId};
 
 use super::{OpState, Scheduler};
+use crate::reservation::ReservationEnd;
 
 impl Scheduler {
     /// Forgets `operation`, which this scheduler holds queued and another one took: it
@@ -25,6 +26,7 @@ impl Scheduler {
         self.ops
             .get(&operation)
             .filter(|op| op.state == OpState::Queued)?;
+        self.reservation_ended(operation, || ReservationEnd::TakenElsewhere);
         Some(self.drop_operation(operation))
     }
 

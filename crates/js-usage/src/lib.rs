@@ -51,6 +51,12 @@
 //! takes each row from whatever ended the allocation without blocking it; the hub is the log
 //! a server runs, and writes the rows through the sink.
 //!
+//! # The x2 export
+//!
+//! [`x2_export()`] writes the runs of the ended-allocation history and the node minutes of
+//! their hosts as the two text files the x2 replay of `js-sched` reads (its
+//! `examples/sim_x2.rs`); `examples/x2_export.rs` here runs it over a copy of a store file.
+//!
 //! # Time
 //!
 //! Three bases never mix: a node's monotonic microseconds (windows and lease minutes,
@@ -84,6 +90,7 @@ mod sink;
 mod tail;
 #[cfg(test)]
 mod testkit;
+mod x2_export;
 
 pub use codec::{ROW_VERSION, RowError};
 pub use curves::{KeyMap, ProfileCurves, STALE_DAYS};
@@ -108,6 +115,10 @@ pub use sink::{
 pub use tail::{
     NoTail, StoreTailSink, TAIL_BUCKETS, TAIL_PREFIX, TAIL_ROW_VERSION, TAIL_WRITE_TRIES,
     TailDelta, TailFlush, TailRowError, TailSink, TailSinkCounters, TailSinkError, TailTotals,
+};
+pub use x2_export::{
+    X2_KEY_PROFILE_FILE, X2_NODE_MINUTE_FILE, X2_PLATFORM, X2Counts, X2Export, X2ExportArgs,
+    X2Skipped, X2WriteError, parse_x2_export_args, write_x2_export, x2_export,
 };
 
 /// Wall minutes in an hour: the unit a node series is stored in (one row per hour).
