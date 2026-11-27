@@ -45,6 +45,7 @@ fn row(end: u64, id: &str) -> EndedRow {
         cpu_series: None,
         class: Some("komira//src/json:json mojo_compile".to_owned()),
         attempt: None,
+        memory_series: None,
     }
 }
 

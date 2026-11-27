@@ -78,7 +78,7 @@ changing its role, takes a restart (a restart ends no job); `default`'s token is
   at start naming the flag.
 - **Agents.** The flag needs `--agent-pool-config` (the key, a pool that registers agents): the job store is held by the agent side,
   and jobs run on hosts that register.
-- **The job store.** Turning the port on opens the job store: with `--store`, rows of that store (the first start over it begins with no jobs; a `.jobs` file of an earlier start is left unread); without it, a SQLite file named after the state file, `<state file>.jobs`, owned
+- **The job store.** Turning the port on opens the job store: with `--store`, rows of that store (the first start over it begins with no jobs unless `js-lease-server job-store copy` copied a `.jobs` file of an earlier start into it; the server itself leaves that file unread, and `job-store export` writes the store's job and usage rows back to files: `docs/runbooks/state-database.md`, section 6); without it, a SQLite file named after the state file, `<state file>.jobs`, owned
   by the server's user and owner-only (mode 0600), with SQLite's own files beside it, the single-node development backend. A file that cannot be made owner-only or opened as a state store
   is refused at start naming `--job-listen`. With the store open, the heartbeat of an agent that reports the `per-job` capability is
   also served from it: its job listing is committed and it is told the starts and stops of its jobs. Without `--job-listen` such a
