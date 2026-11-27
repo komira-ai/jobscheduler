@@ -1,7 +1,8 @@
 # The js-agent flags of a Mac of the build farm, in shape: the flags the farm's Mac host group
 # commits in its config package (/etc/js-agent/flags), the same flags with the same kinds of
 # value, in the same order. What names the farm is replaced: the lease server's address is the
-# test's own server ({server}), and nothing here names a host, an address or a key of the farm.
+# test's own server (the placeholder of the --server line), and nothing here names a host, an
+# address or a key of the farm.
 # When the farm's file gains, drops or changes the kind of a flag, this copy changes with it.
 #
 # The host's identity: hostkeeper's facts and host certificate, and the lease server's CA.
