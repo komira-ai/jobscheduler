@@ -53,7 +53,7 @@ Columns:
 | configuration.md | 4 | 0 | 0 | 3 | komira-ai/jobscheduler#1153 |
 | deployment.md | 13 | 5 | 3 | 3 | - |
 | hosts.md | 41 | 2 | 12 | 17 | komira-ai/jobscheduler#1150, komira-ai/jobscheduler#1173, komira-ai/jobscheduler#1174, komira-ai/jobscheduler#1175, komira-ai/jobscheduler#1176 |
-| placement-by-load.md | 25 | 7 | 5 | 3 | komira-ai/jobscheduler#1178, komira-ai/jobscheduler#1179, komira-ai/jobscheduler#1180, komira-ai/jobscheduler#1181, komira-ai/jobscheduler#1182 |
+| placement-by-load.md | 26 | 8 | 4 | 3 | komira-ai/jobscheduler#1178, komira-ai/jobscheduler#1179, komira-ai/jobscheduler#1180, komira-ai/jobscheduler#1181, komira-ai/jobscheduler#1182 |
 | mac-lease-teardown.md | 5 | 1 | 1 | 1 | - |
 | decisions.md | 22 | 6 | 4 | 7 | komira-ai/jobscheduler#1150, komira-ai/jobscheduler#1174, komira-ai/jobscheduler#1175 |
 | amendments.md | 9 | 6 | 1 | 1 | - |
@@ -883,7 +883,8 @@ As read: No status header. Mostly built; it marks "does not yet persist" (L56), 
 | Lying or stuck node (L294-301) | A plausibility check compares leases' summed cpu_usage_us over a span with the counter's growth, and flags an idle node reporting over half of C for 3 windows. It is tested by sim k. | partly: `crates/js-sched/src/admission/ledger.rs:20` | komira-ai/jobscheduler#1180 (new) |
 | Simulation tests (L404-439) | Sims a-j, l-w, x, y, z and aa to ah. | `crates/js-sched/tests/load_sims_cpu.rs`, `crates/js-sched/tests/sim_ac_same_key_fan_out.rs`, `crates/js-sched/tests/sim_ae_head_under_best_fit.rs`, `crates/js-sched/tests/sim_ah_utilization_lever.rs` | komira-ai/jobscheduler#1181 |
 | Simulation tests, sim k | k (stuck-low signal), with the plausibility check it tests. | no | komira-ai/jobscheduler#1180 |
-| Scoring, Unmeasured (L370) and sim x2 (L429) | Replay on the real series after 14 days of collection, to set w, b, tol and the key share from the measured gain from curves. | partly: `crates/js-sched/examples/sim_x2.rs` | komira-ai/jobscheduler#1182 (new) |
+| Scoring, Unmeasured (L370) and sim x2 (L429) | Replay on the real series: an export of the runs and node minutes a usage store holds, through the five rankers and FW5, reporting the gain from curves over flat best fit. | `crates/js-usage/src/x2_export.rs`, `crates/js-sched/tests/sim_x_replay/engine/x2.rs`, `crates/js-sched/examples/sim_x2.rs` | komira-ai/jobscheduler#1182 |
+| Scoring, Unmeasured (L370) and sim x2 (L429): the tuning | Set b, tol and the key share from the x2 report on 14 days of the farm's usage store. `sim_x2` takes the three as flags; `w(tau)` is a formula of the key, not a flag. | decision, no code: waits on the report run over the farm's store | komira-ai/jobscheduler#1182 |
 | Time profiles 3 / bound with profiles (L230, L273, L372, L132) | Lowering g, lowering f below 1, reducing delta for short keys are later decisions from the histograms. | decision, no code | - |
 | Scoring, Level (L325) | Level-1 scoring is behind a flag that defaults off, 'with js-lease-server --placement js-sched'. | superseded: `crates/js-sched-placer/src/engine.rs` | komira-ai/jobscheduler#800 |
 | Order (L457-459) | The build order has the sampling and the tables first; the section lists nothing after that sentence. | superseded: `docs/design/placement-by-load.md:457-459` | - |
