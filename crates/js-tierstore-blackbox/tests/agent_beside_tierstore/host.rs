@@ -5,6 +5,7 @@ use std::fs::{self, DirBuilder};
 use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
 use std::path::Path;
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 /// The apt repository both packages are published to.
 const APT_URL: &str = "https://packages.komira.ai/apt";
@@ -99,7 +100,7 @@ pub fn install(agent_version: &str) -> Installed {
         ),
         0o644,
     );
-    run("apt-get", &["update"]);
+    wait_listed(agent_version);
     run(
         "apt-get",
         &[
@@ -123,6 +124,32 @@ pub fn install(agent_version: &str) -> Installed {
     };
     assert_eq!(installed.agent, agent_version, "the js-agent apt installed");
     installed
+}
+
+/// How long the CDN in front of the apt repository may take to serve the index a release
+/// wrote, before the test fails.
+const INDEX_LIMIT: Duration = Duration::from_secs(10 * 60);
+
+/// Updates apt's lists until `testing` lists js-agent at `version`: the release wrote the index
+/// moments before, and the CDN serves it once its invalidation has spread.
+fn wait_listed(version: &str) {
+    let limit = Instant::now() + INDEX_LIMIT;
+    loop {
+        run("apt-get", &["update"]);
+        let listed = run("apt-cache", &["madison", "js-agent"]);
+        if listed
+            .lines()
+            .any(|line| line.split('|').nth(1).map(str::trim) == Some(version))
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < limit,
+            "testing did not list js-agent {version} within {} s:\n{listed}",
+            INDEX_LIMIT.as_secs()
+        );
+        std::thread::sleep(Duration::from_secs(20));
+    }
 }
 
 /// The agent's scratch volume: an XFS file system with project quotas on a loop device, mounted

@@ -47,8 +47,10 @@ fn input(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| panic!("{name} is unset"))
 }
 
-/// The host of one test. Fields drop in order: the server and the proxies end before the
-/// runtime they run on, and the scratch directory goes last.
+/// The host of one test. Fields drop in order: the agent is stopped first ([`Drop`]), then the
+/// server's process is killed, the proxies' tasks end with the runtime they run on, and the
+/// scratch directory goes last. tierstore is left running: the next test's [`Rig::up`] stops it,
+/// and the runner is thrown away after the job.
 pub struct Rig {
     server: Server,
     /// The proxy on tierstore's provider socket, and the calls it passed on.
@@ -68,6 +70,11 @@ impl Rig {
     /// The host of the test `name`, with the agent joined and placeable.
     pub fn up(name: &str) -> Rig {
         host::require_root();
+        assert_eq!(
+            std::env::var("GITHUB_ACTIONS").as_deref(),
+            Ok("true"),
+            "this test rewrites a host's /etc, /var/lib and /run: it runs only on a GitHub Actions runner"
+        );
         let version = input("JS_BLACKBOX_AGENT_VERSION");
         let program = PathBuf::from(input("JS_BLACKBOX_SERVER_BIN"));
         let store: SocketAddr = input("JS_BLACKBOX_S3")

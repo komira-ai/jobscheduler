@@ -150,10 +150,14 @@ impl Tierstore {
     }
 
     /// Restarts the unit, as an operator or an update does (`systemctl restart`: a drain, then
-    /// a new process), and waits until it is ready again.
-    pub fn restart(&self) {
+    /// a new process), waits until it is ready again, and returns when the old process had
+    /// ended and the new one was started (when `systemctl restart` returned): a call that came
+    /// after it reached the new process.
+    pub fn restart(&self) -> Instant {
         run("systemctl", &["restart", TIERSTORE_UNIT]);
+        let started = Instant::now();
         self.wait_ready();
+        started
     }
 
     /// Waits until `/readyz` answers 200 and the provider's socket is there.

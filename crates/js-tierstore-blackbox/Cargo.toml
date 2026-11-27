@@ -11,8 +11,9 @@ publish.workspace = true
 # (tests/agent_beside_tierstore.rs) drives the released js-agent beside the released tierstore on
 # a disposable Linux runner, as root, from outside: the packages from their apt channel, the
 # lease server's released binary, and the sockets, routes and metrics of all three. It is run by
-# .github/workflows/js-agent-blackbox-tierstore.yml, after a release is published. Every test is
-# `#[ignore]`d, so the coverage run and every other `cargo test` build it and run none of it.
+# .github/workflows/js-agent-blackbox-tierstore.yml, once a release's js-agent is on the apt suite
+# `testing`. Every test is `#[ignore]`d, so the coverage run and every other `cargo test` build it
+# and run none of it.
 
 # Everything the test uses is a dev-dependency for Linux alone.
 [target.'cfg(target_os = "linux")'.dev-dependencies]

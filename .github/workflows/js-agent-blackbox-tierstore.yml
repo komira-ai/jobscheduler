@@ -81,6 +81,7 @@ jobs:
           set -euo pipefail
           printf 'blackboxroot\nblackbox-throwaway\n' > "$RUNNER_TEMP/s3-keys"
           sudo -n env \
+            GITHUB_ACTIONS="$GITHUB_ACTIONS" \
             JS_BLACKBOX_AGENT_VERSION="$VERSION" \
             JS_BLACKBOX_SERVER_BIN="$SERVER_BIN" \
             JS_BLACKBOX_S3="http://127.0.0.1:$S3_PORT" \

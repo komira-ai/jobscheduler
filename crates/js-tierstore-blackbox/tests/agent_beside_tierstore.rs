@@ -21,9 +21,9 @@
 //!   its placement cap when the plan was written; tierstore now answers Prepare at once and
 //!   refuses at Mount (`too many placements`, or `not ready` while it cannot read the store), so
 //!   a storm shows in either, and each is held to the plan's number.
-//! - [`tierstore_restarted_while_starts_wait`]: after the restart every waiting start is
-//!   prepared again (at least one Prepare per job reaches the new process) and every job
-//!   succeeds.
+//! - [`tierstore_restarted_while_starts_wait`]: after the restart the waiting starts are
+//!   prepared again (at least as many Prepare calls as starts reach the new process) and every
+//!   job succeeds.
 //! - [`tierstore_unavailable_for_60_s`]: for 60 s tierstore answers the waiting starts
 //!   unavailable (its own count of unavailable answers rises), and every job succeeds.
 //!
@@ -34,8 +34,11 @@
 //! workflow sets each): `JS_BLACKBOX_AGENT_VERSION` (the js-agent version on `testing`),
 //! `JS_BLACKBOX_SERVER_BIN` (the released `js-lease-server` binary of that version),
 //! `JS_BLACKBOX_S3` (the upstream store's `http://127.0.0.1:<port>`) and
-//! `JS_BLACKBOX_S3_KEY_FILE` (a file of two lines, the store's access key id and secret). A
-//! test that is not root, or lacks any of them, fails saying so: it never skips.
+//! `JS_BLACKBOX_S3_KEY_FILE` (a file of two lines, the store's access key id and secret). The
+//! tests install packages and write `/etc`, `/var/lib` and `/run` as a farm node's are written,
+//! so each also requires the mark of a GitHub Actions runner (`GITHUB_ACTIONS=true`, which the
+//! runner sets), whose machine is thrown away after the job. A test that is not root, or lacks
+//! any of them, fails saying so: it never skips.
 
 #![cfg(target_os = "linux")]
 
@@ -80,6 +83,11 @@ const WAITING: usize = 6;
 /// How long tierstore answers unavailable in the outage test.
 const OUTAGE: Duration = Duration::from_secs(60);
 
+/// The failure of a test whose stall made no start wait: tierstore counted no unavailable
+/// answer while its upstream was held.
+const STALL_NOT_SEEN: &str =
+    "tierstore answered no call unavailable while its upstream was stalled: no start waited on it";
+
 /// Catches an agent that asks again at once when tierstore cannot serve a start (the retry storm
 /// of a provider whose placements are full, about 1,000 calls a second): 20 starts wait on a
 /// tierstore whose upstream is stalled for 30 s and that then holds only two placements at a
@@ -93,12 +101,17 @@ fn twenty_starts_at_two_placements_with_the_upstream_stalled() {
     rig.stall.hold();
     let jobs = rig.submit("burst", BURST);
     let first = rig.provider.wait_for_calls("Prepare", 1);
+    let before = rig.tierstore.unavailable_answers();
     rig.wait_until(first + WINDOW);
+    let during = rig.tierstore.unavailable_answers() - before;
     rig.stall.release();
     let ends = rig.wait_for_ends(&jobs);
     let releases = rig.provider.wait_for_calls("Release", BURST);
 
     let mut wrong = Vec::new();
+    if during == 0 {
+        wrong.push(STALL_NOT_SEEN.to_owned());
+    }
     for method in ["Prepare", "Mount"] {
         let busiest = rig::busiest_window(&rig.provider.reached(method), WINDOW);
         if busiest.count > MOST_CALLS_IN_WINDOW {
@@ -118,7 +131,7 @@ fn twenty_starts_at_two_placements_with_the_upstream_stalled() {
 /// Catches an agent that, when tierstore restarts and forgets the starts it was preparing, waits
 /// on a Mount that can never be served instead of sending Prepare again: six starts wait on a
 /// stalled upstream, tierstore restarts, the upstream comes back, and every job must succeed
-/// with at least one Prepare per job reaching the new process.
+/// with at least as many Prepare calls as starts reaching the new process.
 #[test]
 #[ignore = "needs root on a disposable Linux runner, the apt channel and the released lease server: run by js-agent-blackbox-tierstore.yml"]
 fn tierstore_restarted_while_starts_wait() {
@@ -126,8 +139,7 @@ fn tierstore_restarted_while_starts_wait() {
     rig.stall.hold();
     let jobs = rig.submit("restart", WAITING);
     rig.provider.wait_for_calls("Prepare", WAITING);
-    rig.tierstore.restart();
-    let restarted = Instant::now();
+    let restarted = rig.tierstore.restart();
     rig.stall.release();
     let ends = rig.wait_for_ends(&jobs);
     let releases = rig.provider.wait_for_calls("Release", WAITING);
@@ -165,10 +177,7 @@ fn tierstore_unavailable_for_60_s() {
 
     let mut wrong = Vec::new();
     if during == 0 {
-        wrong.push(
-            "tierstore answered no call unavailable while its upstream was stalled: the outage was not one"
-                .to_owned(),
-        );
+        wrong.push(STALL_NOT_SEEN.to_owned());
     }
     wrong.extend(not_succeeded(&ends));
     let report = rig.report(&ends, releases);
