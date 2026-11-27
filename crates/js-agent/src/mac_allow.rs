@@ -248,8 +248,9 @@ fn tree(store: &AbsPath, digest: &str) -> Result<PinnedTree, String> {
     // The digests are the fixture's constants, so parsing them does not fail; the conversion
     // is a function, not a closure, so no code is left that no input can reach.
     DiffId::parse(digest)
+        .as_ref()
         .map_err(ToString::to_string)
-        .and_then(|diff_id| PinnedTree::new(store, &diff_id).map_err(|why| why.to_string()))
+        .and_then(|diff_id| PinnedTree::new(store, diff_id).map_err(|why| why.to_string()))
         .map_err(|why| format!("{digest}: {why}"))
 }
 
