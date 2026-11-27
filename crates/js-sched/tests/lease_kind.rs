@@ -1,7 +1,7 @@
 //! Lease kinds in placement: a request goes only to a worker whose node report lists a
 //! driver serving its kind, and a whole-machine lease books its worker alone. One that
-//! fits nowhere holds a worker in queue (QoS) order, so less urgent work stops landing
-//! there until it has emptied.
+//! fits nowhere holds a worker (the first in queue order holds one per pool), so less
+//! urgent work stops landing there until it has emptied.
 
 #[macro_use]
 #[path = "booked/mod.rs"]
@@ -233,10 +233,12 @@ fn a_platform_miss_is_explained_among_the_workers_that_serve_the_kind() {
 }
 
 both_rules! {
-/// Catches: two waiting whole-machine leases holding the same worker (the second then
-/// holds nothing back and is passed by every younger action), and a hold on a worker
-/// too small to ever run the lease. A third, with no worker left to hold, holds none.
-fn waiting_whole_machine_leases_hold_different_workers() {
+/// Catches: more than one waiting whole-machine lease holding a worker in a pool (without
+/// whole-node settings only the first in queue order holds, by the least tail, then the
+/// fewest leases, then the first by name; the others wait and hold none), and a hold on a
+/// worker too small to ever run the lease. Workers whose leases have no known end tie on
+/// the tail, so the emptier worker is the first held.
+fn only_the_first_waiting_whole_machine_lease_holds_a_worker_of_its_pool() {
     let mut h = Harness::new();
     let both = ["container", "native-whole-machine"];
     h.worker_of("a", &both, Resources::new(500, GIB));
@@ -265,7 +267,7 @@ fn waiting_whole_machine_leases_hold_different_workers() {
     assert!(h.grants().is_empty());
     let queued: Vec<_> = h.0.queued().collect();
     let held: Vec<_> = queued.iter().map(|op| h.0.reservation(*op)).collect();
-    assert_eq!(held, [Some(&w(emptier)), Some(&w(fuller)), None]);
+    assert_eq!(held, [Some(&w(emptier)), None, None]);
 }
 }
 
@@ -351,9 +353,11 @@ fn a_reservation_holds_back_only_less_urgent_work() {
 
 both_rules! {
 /// Catches: a reservation that does not follow the worker that could run it. A
-/// whole-machine lease holds the emptier of two workers (the one with fewer leases),
-/// keeps holding it while it empties, and moves when that worker is cordoned; the other
-/// worker takes new work meanwhile.
+/// whole-machine lease holds the emptier of two workers (no lease has a wall time, so
+/// every tail is unknown and the drain order falls to the fewer leases), is given the
+/// worker with the fewest leases again each round (it moves when a lease on the other
+/// worker ends and leaves that one emptier, the first by name on a tie), and moves
+/// when its worker is cordoned; the other worker takes new work meanwhile.
 fn a_reservation_holds_one_worker_and_moves_when_it_cannot_run_there() {
     let mut h = Harness::new();
     let both = ["container", "native-whole-machine"];
@@ -382,31 +386,31 @@ fn a_reservation_holds_one_worker_and_moves_when_it_cannot_run_there() {
         "the emptier worker"
     );
 
+    // The hold is picked again every round (it is not sticky): when a lease on the other
+    // worker ends, the worker with the fewest leases holds (every tail is unknown), the
+    // first by name on a tie.
     let a_done = grants.iter().find(|g| g.worker == w(fuller)).unwrap().clone();
     h.start(&a_done);
     h.finish(&a_done);
     assert!(h.grants().is_empty());
-    assert_eq!(
-        h.0.reservation(waiting),
-        Some(&w(emptier)),
-        "kept while it empties"
-    );
+    let after = |name: &str| on(name) - usize::from(name == fuller);
+    let held = if after("a") <= after("b") { "a" } else { "b" };
+    let other = if held == "a" { "b" } else { "a" };
+    assert_eq!(h.0.reservation(waiting), Some(&w(held)), "the fewest leases");
 
     h.submit(11, action(11));
     let [next] = h.grants().try_into().unwrap();
     assert_eq!(
         next.worker,
-        w(fuller),
+        w(other),
         "work past a reservation goes elsewhere"
     );
 
-    h.feed(Event::Cordon {
-        worker: w(emptier),
-    });
+    h.feed(Event::Cordon { worker: w(held) });
     assert!(h.grants().is_empty());
     assert_eq!(
         h.0.reservation(waiting),
-        Some(&w(fuller)),
+        Some(&w(other)),
         "moved off a cordon"
     );
 }

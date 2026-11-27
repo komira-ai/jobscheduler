@@ -355,6 +355,7 @@ fn ended_row(n: u64, end: u64) -> EndedRow {
         cpu_series: None,
         class: Default::default(),
         attempt: None,
+        memory_series: None,
     }
 }
 
