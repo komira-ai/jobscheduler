@@ -43,6 +43,7 @@ mod resolve;
 mod retention;
 mod store;
 mod tokens;
+mod tunings;
 pub(crate) use agent_setup::AgentSetup;
 use agent_setup::{MorePool, agents, check_more, parse_cold_cpu_on, parse_cold_on};
 pub(crate) use agent_setup::{cold_cpu_entry, cold_entry};
@@ -72,6 +73,8 @@ pub(crate) use retention::{
 pub(crate) use store::{StoreClock, StoreNames, StoreSetting, hook_store_target};
 pub use tokens::Token;
 pub(crate) use tokens::{Clients, Entry, LiveClients, Role, Taken, parse_token, token_at};
+pub use tunings::Tunings;
+pub(crate) use tunings::{BALANCE, KEY_SHARE_PERCENT, SLACK_TOLERANCE_PPM};
 
 /// The command line. Configuration is flags, or one file (`--config`); secrets come from
 /// files.
@@ -196,6 +199,10 @@ pub struct Cli {
     /// such as `0.5`. Without the flag the engine's own default is used, which is 0.5.
     #[arg(long, value_parser = PackLimit::parse)]
     pub pack_limit: Option<PackLimit>,
+    /// `--score-balance`, `--score-slack-tolerance-ppm` and `--key-share-percent`: the
+    /// placement engine's scoring settings.
+    #[command(flatten)]
+    pub tunings: Tunings,
     /// Whether the placement engine learns a CPU and a memory profile for each job class from
     /// its runs' series: `off` (the default) learns nothing; `shadow` learns and logs a line per
     /// run it checks and a line per job the curve rule of `on` would place elsewhere, placing as
@@ -704,10 +711,7 @@ impl Config {
             server.agents.estimate_feed(),
             "server.estimate_feed",
         ));
-        let load = LoadSetting {
-            cpu_slack: server.agents.cpu_slack().unwrap_or_default(),
-            pack_limit: server.agents.pack_limit().unwrap_or_default(),
-        };
+        let load = LoadSetting::of_file(&server.agents);
         let curves = server.agents.curves();
         // The order the pool's Default platform lists its machine providers in; a pool with
         // no platform (a joined one) keeps the order of no configuration.
@@ -922,18 +926,6 @@ impl Config {
     /// when `--usage-off` turned usage off.
     pub fn usage_db(&self) -> Option<&Path> {
         self.usage.db.as_deref()
-    }
-
-    /// The CPU slack of the placement engine (`--cpu-slack`, or `server.cpu_slack`): the
-    /// value given, or the engine's default, 1.1x.
-    pub fn cpu_slack(&self) -> CpuSlack {
-        self.agents.load.cpu_slack
-    }
-
-    /// The pack limit of the placement engine (`--pack-limit`, or `server.pack_limit`): the
-    /// value given, or the engine's default, 0.5.
-    pub fn pack_limit(&self) -> PackLimit {
-        self.agents.load.pack_limit
     }
 
     /// Whether the placement engine learns profiles, and books by them
