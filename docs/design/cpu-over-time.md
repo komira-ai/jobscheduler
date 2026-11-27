@@ -1,6 +1,6 @@
 # Scheduling on CPU use over time
 
-Status: design for review. Built so far: the replay (`crates/js-cpu-replay`), step 1 (record) and step 2 (learn in shadow, `--placement-curves shadow`); step 4 and the checks of step 3 are built as [placement-profiles-live.md](placement-profiles-live.md) revised them, behind `--placement-curves on`; the decide-in-shadow part of step 3 is not built. Companion to
+Status: design for review. Built so far: the replay (`crates/js-cpu-replay`), step 1 (record) and step 2 (learn in shadow, `--placement-curves shadow`); step 4 and the checks of step 3 are built as [placement-profiles-live.md](placement-profiles-live.md) revised them, behind `--placement-curves on`; the decide-in-shadow part of step 3 is not built for CPU; for memory, its shadow is built under `shadow` and `on` (section 4, and [placement-profiles-live.md](placement-profiles-live.md) section 2). Companion to
 [sizing.md](sizing.md) (how a class's CPU is booked) and [placement-by-load.md](placement-by-load.md) (the
 load rule and the time profiles designed for leases, never wired to jobs).
 
@@ -261,6 +261,12 @@ teaches the class: a run slowed by contention may only raise it, as today.
 - **The host's measured memory:** the whole host's non-file memory (`host_nonfile_bytes` of the heartbeat's load,
   from `/proc/meminfo`), the same measure, in place of the jobs' group's working set.
 - **Nothing is ever killed for memory.** A host whose bookings leave no room is refused as `booked-memory`.
+- **Memory over time, in shadow.** Section 14 left memory curves out; the owner has since asked for placement by
+  them. Since a low memory forecast can get a job killed where a low CPU forecast slows it, only the shadow half is
+  built: under `shadow` and `on` the job service projects each host's memory from its running jobs' memory curves,
+  records per placement whether a booking that followed them would have placed the job sooner or not at all, and per
+  host how the projection compared with the next reading. It books nothing ([placement-profiles-live.md](placement-profiles-live.md)
+  section 2, "Memory over time, in shadow", which also has what the recorded peaks say).
 
 ## 5. The placement rule
 
@@ -446,6 +452,6 @@ negative and fades; each release reads the other's results.
 - **A pressure gate and a start charge only:** the lightest design; it drops the owner's idea before there is data.
   Its gate is designed in shadow (step 3, not built).
 - **Others:** sampled recording (starves rare classes); `js-sched`'s minute slots (unused by jobs); a one-second
-  heartbeat (more passes); CPU quotas or cpusets and memory curves (against the owner's rulings; the owner has
-  since asked for memory curves in placement, designed in [memory-over-time.md](memory-over-time.md)).
+  heartbeat (more passes); CPU quotas or cpusets (against the owner's rulings); memory curves are observed in shadow
+  (section 4), and booking by them is designed in [memory-over-time.md](memory-over-time.md).
 - **Killing, throttling or moving a running job on a wrong estimate:** ruled out by the owner.

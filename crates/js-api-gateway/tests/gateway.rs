@@ -879,6 +879,15 @@ async fn fleet_usage_and_log_answers_survive_the_mapping() {
             "partial": true
         })
     );
+    // A series that is not partial carries no flag, as proto3 JSON leaves out a false.
+    assert_eq!(
+        usage.json()["records"][0]["memorySeries"],
+        json!({
+            "granularitySecs": 4,
+            "points": [1, 700, 70000],
+            "runUsec": "5500000"
+        })
+    );
     let empty = same!(
         get_usage,
         GetUsageRequest {
