@@ -15,7 +15,7 @@ use js_api_gateway::router;
 use js_proto::v1::job_service_server::JobService;
 use js_proto::v1::{
     Availability, CpuSeries, Host, HostBooking, HostMark, HostSource, HostState, Machine, Memory,
-    Pool, Provider, ProviderCheck, Shape, UsageRecord, WholeHostOutcome,
+    MemorySeries, Pool, Provider, ProviderCheck, Shape, UsageRecord, WholeHostOutcome,
 };
 use js_proto::v1::{
     CancelJobRequest, CancelJobResponse, ClearHostTaintRequest, ClearHostTaintResponse,
@@ -329,6 +329,12 @@ impl JobService for Stub {
                         partial: true,
                     }),
                     attempt: Some(2),
+                    memory_series: Some(MemorySeries {
+                        granularity_secs: 4,
+                        points: vec![1, 700, 70_000],
+                        run_usec: 5_500_000,
+                        partial: false,
+                    }),
                 }],
                 next_page_token: "usage-page-2".to_owned(),
             },

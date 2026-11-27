@@ -29,7 +29,7 @@ use crate::usage::UsageSink;
 use crate::usage_setup::{UsageSetup, usage_setup};
 
 mod agent_setup;
-mod backfill;
+pub(crate) mod backfill;
 mod cpu_slack;
 mod dispatch;
 mod estimate_feed;
@@ -44,11 +44,10 @@ mod resolve;
 mod retention;
 mod store;
 mod tokens;
+mod tunings;
 pub(crate) use agent_setup::AgentSetup;
 use agent_setup::{MorePool, agents, check_more, parse_cold_cpu_on, parse_cold_on};
 pub(crate) use agent_setup::{cold_cpu_entry, cold_entry};
-pub use backfill::BackfillFlags;
-pub(crate) use backfill::BackfillSetting;
 pub use cpu_slack::{CpuSlack, CpuSlackError};
 pub(crate) use dispatch::{
     DEFAULT_LEASE_SECS, DEFAULT_RECHECK_MS, DispatchTimes, MOST_LEASE_SECS, MOST_RECHECK_MS,
@@ -75,6 +74,8 @@ pub(crate) use retention::{
 pub(crate) use store::{StoreClock, StoreNames, StoreSetting, hook_store_target};
 pub use tokens::Token;
 pub(crate) use tokens::{Clients, Entry, LiveClients, Role, Taken, parse_token, token_at};
+pub use tunings::Tunings;
+pub(crate) use tunings::{BALANCE, KEY_SHARE_PERCENT, SLACK_TOLERANCE_PPM};
 
 /// The command line. Configuration is flags, or one file (`--config`); secrets come from
 /// files.
@@ -199,9 +200,13 @@ pub struct Cli {
     /// such as `0.5`. Without the flag the engine's own default is used, which is 0.5.
     #[arg(long, value_parser = PackLimit::parse)]
     pub pack_limit: Option<PackLimit>,
+    /// `--score-balance`, `--score-slack-tolerance-ppm` and `--key-share-percent`: the
+    /// placement engine's scoring settings.
+    #[command(flatten)]
+    pub tunings: Tunings,
     /// The placement engine's backfill (`--backfill-bounds-enforced`, `--backfill-margin`).
     #[command(flatten)]
-    pub backfill: BackfillFlags,
+    pub backfill: backfill::BackfillFlags,
     /// Whether the placement engine learns a CPU and a memory profile for each job class from
     /// its runs' series: `off` (the default) learns nothing; `shadow` learns and logs a line per
     /// run it checks, placing as `off` does; `on` also books a class passing its checks by its
@@ -708,10 +713,7 @@ impl Config {
             server.agents.estimate_feed(),
             "server.estimate_feed",
         ));
-        let load = LoadSetting {
-            cpu_slack: server.agents.cpu_slack().unwrap_or_default(),
-            pack_limit: server.agents.pack_limit().unwrap_or_default(),
-        };
+        let load = LoadSetting::of_file(&server.agents);
         let curves = server.agents.curves();
         // The order the pool's Default platform lists its machine providers in; a pool with
         // no platform (a joined one) keeps the order of no configuration.

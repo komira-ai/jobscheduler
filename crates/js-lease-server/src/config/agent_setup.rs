@@ -9,9 +9,9 @@ use js_registry::PoolConfig;
 use js_sched_placer::sizes::{ColdCpuOn, ColdMemoryOn, ColdSize};
 use js_types::ProviderId;
 
+use super::backfill::BackfillSetting;
 use super::{
-    BackfillSetting, Cli, ColdOn, Config, CurveSetting, DispatchTimes, LiveClients, LoadSetting,
-    check_pool, listen,
+    Cli, ColdOn, Config, CurveSetting, DispatchTimes, LiveClients, LoadSetting, check_pool, listen,
 };
 use crate::agent_pool;
 use crate::agent_tokens::{AgentTokens, PoolTokens};
@@ -36,7 +36,8 @@ pub(crate) struct AgentSetup {
     pub(crate) hello_limit: HelloLimit,
     /// `--require-host-credential`.
     pub(crate) require_host_credential: bool,
-    /// `--cpu-slack` and `--pack-limit`, each or the engine's default.
+    /// `--cpu-slack`, `--pack-limit` and the three flags of [`super::Tunings`], each or the
+    /// engine's default.
     pub(crate) load: LoadSetting,
     /// `--cold-cpu-millis` and `--cold-memory-bytes`, or `server.cold_cpu_millis` and
     /// `server.cold_memory_bytes`: what a job that books nothing books while neither its class,
@@ -176,6 +177,7 @@ pub(super) fn agents(cli: &Cli, clients: &LiveClients) -> Result<Box<AgentSetup>
     let load = LoadSetting {
         cpu_slack: cli.cpu_slack.unwrap_or_default(),
         pack_limit: cli.pack_limit.unwrap_or_default(),
+        tunings: cli.tunings,
     };
     let cold_on = cold_on_of(cli)?;
     Ok(Box::new(AgentSetup {
