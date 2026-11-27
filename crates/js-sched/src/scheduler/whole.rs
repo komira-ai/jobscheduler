@@ -386,12 +386,13 @@ impl Scheduler {
             let start = held.started_at.unwrap_or(held.granted_at).as_millis();
             let times = (start, self.lease_host_end(held.operation));
             let (end, end_unknown) = self.ranked_end(held.operation, times, ceiling);
-            for (_, worker) in self.ops[&held.operation].state.holding() {
+            let holding = self.ops[&held.operation].state.holding();
+            holding.into_iter().for_each(|(_, worker)| {
                 ends.entry(worker).or_default().push(end);
                 if end_unknown {
                     unknown.insert(worker.as_str());
                 }
-            }
+            });
         }
         for (operation, placed) in placed {
             let times = (self.now.as_millis(), self.host_end_ms(&placed.worker));
