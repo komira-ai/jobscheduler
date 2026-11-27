@@ -534,9 +534,11 @@ fn the_boot_reset_ends_every_leftover_lease_and_clears_auto_login() {
         "reset, 15.1 held"
     );
     // The pool's users are permanent: each lease is over, its user stays, reset.
-    for user in [held.name(), leftover.name()] {
-        assert!(user_exists(&user), "the pool user {user} was deleted");
-    }
+    assert!(user_exists(&held.name()), "15.1's pool user was deleted");
+    assert!(
+        user_exists(&leftover.name()),
+        "15.2's pool user was deleted"
+    );
     let auto_login = root(
         "/usr/bin/defaults",
         &["read", &loginwindow(), "autoLoginUser"],

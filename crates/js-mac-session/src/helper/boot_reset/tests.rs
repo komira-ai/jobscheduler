@@ -80,7 +80,7 @@ fn the_boot_reset_fails_when_auto_login_stays_or_a_held_id_is_malformed() {
     rig.helper.user_create("1.1").unwrap();
     let booted = rebooted(&rig, "reset-stays");
     let error = booted.helper.boot_reset(&["1.01".to_owned()]).unwrap_err();
-    assert!(error.contains("not <term>.<seq>"), "{error}");
+    assert!(error.contains("not <term>.<seq>"));
     assert!(log(&booted).is_empty(), "nothing done for a malformed id");
     let domain = domain(&booted);
     let answer = |success: bool, stdout: &str| CommandOutput {
@@ -100,10 +100,7 @@ fn the_boot_reset_fails_when_auto_login_stays_or_a_held_id_is_malformed() {
         );
     }
     let error = booted.helper.boot_reset(&[]).unwrap_err();
-    assert!(
-        error.contains("defaults delete") && error.contains("said no"),
-        "{error}"
-    );
+    assert!(error.contains("defaults delete") && error.contains("said no"));
     assert!(!booted.helper.reset_done());
     let calls = log(&booted);
     assert!(
@@ -118,6 +115,37 @@ fn the_boot_reset_fails_when_auto_login_stays_or_a_held_id_is_malformed() {
     );
 }
 
+/// Asserts that a boot reset whose ledger cannot record a lease's end fails, naming the
+/// lease, and leaves that lease's slot leased and its pool user untouched: the slot is
+/// still leased to a live lease, so the reset of orphaned slots passes over it. Catches: a
+/// reset that resets (and so lends again) the user of a lease the ledger still holds live,
+/// which the next start would end a second time.
+#[test]
+fn a_lease_whose_end_cannot_be_recorded_keeps_its_slot() {
+    let rig = rig("reset-unrecorded", 4);
+    rig.helper.user_create("1.1").unwrap();
+    let booted = rebooted(&rig, "reset-unrecorded");
+    booted
+        .helper
+        .lock()
+        .fail_writes(&booted.dir.join("ledger"), false);
+    let error = booted.helper.boot_reset(&[]).unwrap_err();
+    assert!(error.contains("lease 1.1: recording the end of lease 1.1"));
+    assert!(!booted.helper.reset_done());
+    assert_eq!(
+        booted.helper.pool_status().leased,
+        [(Slot::new(0), LeaseId::new(1, 1))]
+    );
+    let home = booted.dir.join("Users/kbf-lease-pool-0");
+    let calls = log(&booted);
+    assert!(
+        calls
+            .iter()
+            .all(|call| !call.starts_with(&format!("make_home {}", home.display()))),
+        "{calls:#?}"
+    );
+}
+
 /// Catches: a boot reset that fails part-way yet lets the other verbs in, or one that
 /// can run twice (a second one would end the leases started since). The user that
 /// cannot be ended is a lease's from before the pool, whose kill fails.
@@ -129,13 +157,13 @@ fn the_boot_reset_runs_once_and_must_succeed() {
     booted.host.state().stubborn.insert(me(), 100);
     booted.host.state().procs.insert(me(), 1);
     let error = booted.helper.boot_reset(&[]).unwrap_err();
-    assert!(error.contains("lease 1.1:"), "{error}");
+    assert!(error.contains("lease 1.1:"));
     assert!(!booted.helper.reset_done());
     booted.host.state().stubborn.clear();
     booted.helper.boot_reset(&[]).unwrap();
     assert!(booted.helper.reset_done());
     let again = booted.helper.boot_reset(&[]).unwrap_err();
-    assert!(again.contains("runs once"), "{again}");
+    assert!(again.contains("runs once"));
 }
 
 /// Catches: a verb served before the boot reset (the daemon could start a lease on a
