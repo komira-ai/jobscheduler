@@ -65,7 +65,8 @@
 //! [`JobStore::beat_node`], [`JobStore::read_node`], [`JobStore::live_nodes`],
 //! [`JobStore::forget_node`]), and listed by [`JobStore::live_nodes`] and [`JobStore::nodes`]: every
 //! server places over the live rows, whichever server took the host's hello. A hello of a host
-//! new to its pool is counted against the pool's cap over every server's rows
+//! new to its pool is counted against the pool's cap over every server's rows, and a hello of a
+//! host whose row is live is refused unless it names the row's agent process
 //! ([`JobStore::hello_node_in_pool`]), and a row silent long enough that holds nothing is
 //! deleted ([`JobStore::forget_silent_nodes`]), or sooner, when the operator retires the host,
 //! once it is silent past the grace and holds nothing ([`JobStore::retire_node`]).
@@ -192,7 +193,7 @@
 //! | [`JobStore::restore_cordons`] | nothing when `meta/cordons/restored` is there; else, as [`JobStore::restore_cordon`] for each cordon given (a transaction each), then put `meta/cordons/restored` if absent |
 //! | [`JobStore::hello_node`] | put `node/<host>` if absent or at the version read, with the next epoch; a lost race reads the row again |
 //! | [`JobStore::beat_node`] | put `node/<host>` at the version read, when the beat's (epoch, sequence) is the row's to take; nothing otherwise; a lost race reads the row again and judges the beat on it |
-//! | [`JobStore::hello_node_in_pool`] | as [`JobStore::hello_node`] for a host that has a row; for one that has none, put `node/<host>` if absent and `pool/<pool>` if absent or at the version read, when the pool's rows are fewer than its cap; nothing otherwise |
+//! | [`JobStore::hello_node_in_pool`] | for a host that has a row: nothing when the row was heard within the grace and names another agent process than the hello's (or either names none), else put `node/<host>` at the version read, with the next epoch, a lost race reading the row again and judging it again; for one that has none, put `node/<host>` if absent and `pool/<pool>` if absent or at the version read, when the pool's rows are fewer than its cap; nothing otherwise |
 //! | [`JobStore::forget_node`] | delete `node/<host>` at the version given; nothing when the row is not at it |
 //! | [`JobStore::forget_silent_nodes`] | per silent host, claim `node/<host>` and delete it at the version read when the host holds no live allocation, taint, cordon or mark; nothing otherwise |
 //! | [`JobStore::retire_node`] | when the host's row is silent past the grace, claim `node/<host>` and delete it at the version read when the host holds no live allocation, taint, cordon or mark; nothing otherwise; a row that moved or went first is read again |
@@ -288,6 +289,6 @@ pub use result::{
 };
 pub use store::{
     Backfill, Beside, CordonWrite, FailedPrepare, HeldRequeue, Inserted, JobPage, JobStore,
-    MAX_PAGE, MINT_TRIES, NewJob, Placement, RequeuedFor, Row, SCHEMA_VERSION, Step, UncordonWrite,
-    Written, queue_order,
+    MAX_PAGE, MINT_TRIES, MOST_TABLE_CHANGES, NewJob, Placement, RequeuedFor, Row, SCHEMA_VERSION,
+    Step, TableChanges, UncordonWrite, Written, queue_order,
 };

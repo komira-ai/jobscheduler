@@ -153,6 +153,7 @@ fn the_release_passes_secrets_to_the_package_call_alone() {
         "artifacts.yml",
         "beta.yml",
         "js-agent-macos-first-install.yml",
+        "js-agent-native-isolation.yml",
         "macos-probe.yml",
     ] {
         assert_eq!(

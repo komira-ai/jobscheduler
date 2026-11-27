@@ -2,6 +2,7 @@
 //! place of a bearer, and reloaded from its two files before each request.
 
 use std::fs;
+use std::io::Write;
 use std::net::{SocketAddr, TcpListener};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -16,9 +17,14 @@ use rustls::{ServerConfig, ServerConnection, StreamOwned};
 use serde_json::json;
 
 use crate::reuse::{self, KeepAlive};
-use crate::support::{Cert, Scratch, exchange, json_reply};
+use crate::support::{Cert, Scratch, json_reply, read_request};
 
 const LIMIT: Duration = Duration::from_secs(20);
+
+/// A request body larger than what the send and receive buffers of a loopback connection
+/// hold together (Linux grows each to a few MiB at most), so the client is still sending it
+/// when a fake that does not read it answers and closes.
+const LARGE_BODY: usize = 32 * 1024 * 1024;
 
 /// The certificate file of the identities these tests install.
 const CERT_FILE: &str = "host.pem";
@@ -66,12 +72,15 @@ impl Authority {
 struct Seen {
     /// The DER of each certificate the client presented.
     presented: Vec<Vec<u8>>,
-    /// The request, head and body, empty when the handshake failed.
-    request: String,
+    /// The request head, empty when the handshake failed.
+    head: String,
+    /// The request body, read to the end before the answer.
+    body: Vec<u8>,
 }
 
 /// A TLS server on 127.0.0.1 that requires a client certificate and answers `connections`
-/// connections with an empty JSON object.
+/// connections with an empty JSON object, each after reading its request to the end of the
+/// body, then closes the connection.
 struct Mutual {
     addr: SocketAddr,
     served: JoinHandle<Vec<Seen>>,
@@ -88,13 +97,22 @@ impl Mutual {
                     tcp.set_read_timeout(Some(LIMIT)).unwrap();
                     let conn = ServerConnection::new(Arc::clone(&config)).unwrap();
                     let mut stream = StreamOwned::new(conn, tcp);
-                    let request = exchange(&mut stream, &json_reply(200, "{}"));
+                    let (head, body) = read_request(&mut stream)
+                        .map(|request| (request.head, request.body))
+                        .unwrap_or_default();
                     let presented = stream
                         .conn
                         .peer_certificates()
                         .map(|certs| certs.iter().map(|der| der.as_ref().to_vec()).collect())
                         .unwrap_or_default();
-                    Seen { presented, request }
+                    let reply = json_reply(200, "{}");
+                    let _ = stream.write_all(&reply);
+                    let _ = stream.flush();
+                    Seen {
+                        presented,
+                        head,
+                        body,
+                    }
                 })
                 .collect()
         });
@@ -140,8 +158,8 @@ fn refused(connected: Result<Client, ClientError>) -> String {
 
 /// Asserts that a client built on the identity files presents that certificate to a
 /// server that requires one, on every call (get, post, post_within, delete, delete_with),
-/// and sends no Authorization header. A cert-only server that sees a bearer on the
-/// request would take it for the credential.
+/// sends the body of each call that has one, and sends no Authorization header. A
+/// cert-only server that sees a bearer on the request would take it for the credential.
 #[test]
 fn a_client_presents_the_identity_and_sends_no_bearer() {
     let dir = Scratch::new("identity_presents");
@@ -162,18 +180,44 @@ fn a_client_presents_the_identity_and_sends_no_bearer() {
     assert_eq!(with_body.unwrap().status, 200);
 
     let seen = fake.seen();
-    assert_eq!(seen.len(), 5);
-    let bodies = ["", "{}", "{}", "", r#"{"id":1}"#];
-    for (connection, body) in seen.iter().zip(bodies) {
+    let bodies: Vec<_> = seen
+        .iter()
+        .map(|connection| connection.body.as_slice())
+        .collect();
+    assert_eq!(bodies, [&b""[..], b"{}", b"{}", b"", br#"{"id":1}"#]);
+    for connection in &seen {
         assert_eq!(connection.presented, vec![minted.der.clone()]);
-        let request = connection.request.to_ascii_lowercase();
-        assert!(!request.contains("authorization"), "{request}");
-        assert!(
-            connection.request.ends_with(&format!("\r\n\r\n{body}")),
-            "{}",
-            connection.request
-        );
+        let head = connection.head.to_ascii_lowercase();
+        assert!(!head.contains("authorization"), "{head}");
     }
+}
+
+/// Asserts that a request body larger than the loopback socket buffers can hold reaches the
+/// identity fake whole and the call gets the fake's 200. A fake that answers and closes with
+/// the body unread resets the connection, and the client, still sending, fails the call.
+#[test]
+fn a_body_larger_than_the_socket_buffers_is_read_whole_before_the_answer() {
+    let dir = Scratch::new("identity_large_body");
+    let authority = Authority::new();
+    let minted = authority.issue("host-1");
+    let identity = install(&dir, &minted, 0o600);
+    let server = Cert::new();
+    let ca = ca_file(&dir, &server);
+    let fake = Mutual::start(server.requiring_clients_of(authority.der()), 1);
+    let client = Client::connect_with_identity(&fake.url(), &identity, Some(&ca), LIMIT).unwrap();
+    let body = json!({ "pad": "x".repeat(LARGE_BODY) });
+    let sent = body.to_string().into_bytes();
+
+    assert_eq!(client.post("/large", &body).unwrap().status, 200);
+
+    let seen = fake.seen();
+    // Not assert_eq: a failure would print both 32 MiB bodies.
+    assert!(
+        seen[0].body == sent,
+        "the fake read {} of the {} bytes sent",
+        seen[0].body.len(),
+        sent.len()
+    );
 }
 
 /// Asserts that the rest of the chain in the certificate file is presented after the leaf.
@@ -336,7 +380,7 @@ fn a_certificate_of_another_authority_fails_the_handshake() {
     let client = Client::connect_with_identity(&fake.url(), &identity, Some(&ca), LIMIT).unwrap();
     let err = client.get("/a").err().unwrap();
     assert!(matches!(err, ClientError::Server(_)), "{err:?}");
-    assert_eq!(fake.seen()[0].request, "");
+    assert_eq!(fake.seen()[0].head, "");
 }
 
 /// Asserts that the identity files are refused at build, naming `--host-cert` or `--host-key`
@@ -632,8 +676,7 @@ fn an_identity_client_takes_no_bearer() {
     client.get("/a").unwrap();
     let seen = fake.seen();
     assert_eq!(seen[0].presented, vec![minted.der.clone()]);
-    let request = seen[0].request.to_ascii_lowercase();
-    assert!(!request.contains("authorization"), "{request}");
+    assert!(!seen[0].head.to_ascii_lowercase().contains("authorization"));
 }
 
 /// A named pipe at `path`, which a blocking open would wait on forever. `mkfifo`, not rustix's
