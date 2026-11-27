@@ -168,7 +168,7 @@ So launchd sends `SIGTERM` to the job's own process, then `SIGKILL` after `ExitT
 | `kill -9` of the job, which `KeepAlive` restarts | killed | runs on, parent pid 1 | runs on, parent pid 1 |
 | any of the three, with `AbandonProcessGroup` true | runs on | runs on | runs on |
 
-In that domain a process group of its own is enough, and a supervisor already gets one from `process_group(0)`. The session does not matter, and no plist key is needed. The design leaves `AbandonProcessGroup` unset (D4): launchd should still clean up anything else the agent leaves in its own group, such as a `pfctl` it was running when it was stopped.
+In that domain a process group of its own is enough, and a supervisor already gets one from `process_group(0)`. The beta stage's macOS runner checks the bootout row on every push to main (`launchd/own-group-survives-bootout` in `js-mac-probe report`, section 7 step 1). The session does not matter, and no plist key is needed. The design leaves `AbandonProcessGroup` unset (D4): launchd should still clean up anything else the agent leaves in its own group, such as a `pfctl` it was running when it was stopped.
 
 **Not proven yet: the system domain.** The agent runs in the `system` domain, as root, which needs root to probe. The same probe, written for the system domain and adding a child that drops to an unprivileged uid, is written as a script for an operator to run as root on a Mac with no agent installed; running it is step 1 of section 7, which records the result here. If the system domain kills a separate group, step 1 tries `AbandonProcessGroup` true there (which kept even same-group children in the user domain). If that fails too, the design goes back to the owner before step 4: the fallback is section 9's helper started by the agent.
 
@@ -228,7 +228,7 @@ Each step is a pull request that leaves main shippable. Steps 2 and 3 depend on 
 **Step 1. The system-domain probe and a supervisor probe on the hosted runner.**
 
 - Run the root probe (section 4.3) and record its result in this document.
-- Add a probe to `js-mac-probe` that runs unprivileged on the beta stage's macOS runner. It starts a process group under a `launchd` job, boots the job out, and asserts that the group runs on with parent pid 1. It catches a macOS release that starts killing the descendants of a stopped job.
+- Add a probe to `js-mac-probe` that runs unprivileged on the beta stage's macOS runner. It starts a process group under a `launchd` job, boots the job out, and asserts that the group runs on with parent pid 1. It catches a macOS release that starts killing the descendants of a stopped job. Built: the probe `launchd/own-group-survives-bootout` of `js-mac-probe report` (`crates/js-mac-probe/src/macos/launchd.rs`, its plain parts in `src/launchd.rs`), which `macos-probe.yml` runs in the beta stage on every push to main. It runs in the runner user's `gui/<uid>` domain (`user/<uid>` when there is none), with `AbandonProcessGroup` unset, and fails the beta stage's probe job when the child is gone, has another parent, or has left its group.
 
 **Step 2. The pf job folded into the agent.** Superseded and not built (komira-ai/jobscheduler#1010, closed): the agent does not load a pf anchor, and the `js-agent.pf-pool` job and the hook's `step/pf.rs` stay. The plan as it was written:
 
