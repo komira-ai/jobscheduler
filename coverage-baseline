@@ -17,6 +17,7 @@ js-agent-wire               0      0
 js-alert                    0      0
 js-analysis                 0      0
 js-api-gateway              0      0
+js-blackbox                 0      0
 js-bundle                   0      0
 js-bundle-cli               0      0
 js-callback                 0      0
@@ -66,7 +67,6 @@ js-state                    0      0
 js-supervise                0      0
 js-system-clock             0      -
 js-testkit                  0      0
-js-tierstore-blackbox       -      -
 js-treestore                0      0
 js-types                    0      0
 js-update-hook              0      0

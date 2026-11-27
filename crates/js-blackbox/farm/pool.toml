@@ -1,0 +1,22 @@
+# The shape of the farm's Linux pool file, the control host's first --agent-pool-config: a 1 s
+# heartbeat, a fixed pool of container hosts, and the capabilities every farm agent reports
+# (layered root file systems, the allow-list egress ceiling, tierstore's mount provider). The
+# pool's name, its class and the shape booked before a host reports its own are the test's.
+#
+# When the farm's file gains, loses or changes a key, change this file in the same way.
+heartbeat_interval = "1s"
+name = "{pool}"
+class = "burst-host"
+max_machines = 6
+exec = "container"
+
+[shape]
+cpu_millis = 2000
+memory_bytes = 4294967296
+
+[capabilities]
+os = "linux"
+arch = "x86_64"
+layered-rootfs = "true"
+egress = "allow-list"
+"mount-provider.tierstore" = "true"

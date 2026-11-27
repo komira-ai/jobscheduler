@@ -1,0 +1,21 @@
+# The shape of the farm's Mac pool file, the control host's second --agent-pool-config. No Mac
+# joins the black-box test's server: the file is there because the control host's server starts
+# with it, and a server that refused a second pool file would refuse the control host's start.
+# The pool's name and its class are the test's.
+#
+# When the farm's file gains, loses or changes a key, change this file in the same way.
+heartbeat_interval = "1s"
+name = "{pool}"
+class = "mac-host"
+max_machines = 4
+exec = "sandbox-exec"
+
+[shape]
+cpu_millis = 27000
+memory_bytes = 94489280512
+
+[capabilities]
+os = "macos"
+arch = "arm64"
+layered-rootfs = "true"
+"mount-provider.tierstore" = "true"

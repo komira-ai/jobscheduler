@@ -1,0 +1,36 @@
+# The shape of the flags file of the farm's Linux hosts: the file a config package of the host
+# group puts at /etc/js-agent/flags, which the packaged js-agent-crun.service reads with
+# --flags-file. The same flags in the same order, with the same kinds of value. What is the
+# farm's own (the server's name and port, the pool, the egress endpoint) is a placeholder the
+# black-box test fills in; the paths are the products' own (hostkeeper's identity and facts
+# files, tierstore's roots and socket). One line is the test's and not the farm's: the
+# --image-allow-loopback entry of the registry the test serves its job image from.
+#
+# When the farm's file gains, loses or changes a flag, change this file in the same way.
+#
+# The server, by name over TLS, trusted through the CA file the package of the host group puts
+# beside this file.
+--server=https://{server_name}:{agent_port}
+--pool={pool}
+# The host id from hostkeeper's facts file, and the host's hostkeeper certificate and key, which
+# the agent presents in its TLS handshake in place of a join token.
+--host-id-from-facts=/var/lib/hostkeeper/facts.json
+--ca-cert=/etc/js-agent/ca.pem
+--host-cert=/var/lib/hostkeeper/identity/host.crt
+--host-key=/var/lib/hostkeeper/identity/host.key
+--image-allow=ghcr.io/komira-ai/
+--image-allow=docker.io/library/
+# The test's own: the registry on this host's loopback that serves the job image.
+--image-allow-loopback=127.0.0.1:{registry_port}/blackbox/
+--egress=allow-list
+--egress-allow={egress_endpoint}
+# tierstore's file system roots, and its mount provider.
+--mount-root-ro=trees=/run/tierstore/fs/trees
+--mount-root=put=/run/tierstore/fs/put
+--mount-provider=tierstore=/var/lib/tierstore/provider.sock
+--mount-provider-user=tierstore=tierstore
+--mount-root-ro=tierstore-fs=/run/tierstore/fs
+# The per-second CPU and memory series of each job, and the host's per-second CPU.
+--cpu-series
+--host-second-samples
+--memory-series
