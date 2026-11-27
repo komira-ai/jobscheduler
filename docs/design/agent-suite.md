@@ -19,7 +19,7 @@ broken agent and that no other scenario does.
 | `StartIsIdempotent` | a repeated Start launches the job once | `StartRunsTwice` |
 | `CancelUntilAbsent` | a Cancel lost on a dropped connection changes nothing; resent while the lease is listed, the lease leaves the listing; a further Cancel is harmless; a Start for the cancelled id does not run (the id is retired) | `CancelKeepsListed`, `ForgetsRetiredIds` |
 | `LateStartIsDropped` | a Start that waited longer than its validity is reported never started and launches nothing; one that waited exactly its validity runs; validity 0 is unbounded and runs | `RunsLateStart` |
-| `SelfFencesAfterSilence` | one tick short of the agent's own fence window the lease runs, the window counts from the last contact, the full window stops and reports it fenced; an agent with no fence fails | `NeverFences` |
+| `SilenceKeepsRunningLeases` | after twice the agent's own fence window of silence (a day for an agent with none) the running lease still runs and is not reported fenced; its own end during the silence is reported once the connection is back | `StopsRunningOnSilence` |
 | `UnackedResultIsResent` | an unacknowledged result is repeated in every heartbeat, including the first on a new connection, and not while the link is down; an acknowledged one is not | `ForgetsUnackedResult` |
 | `RetiredFenceIsRefused` | a fenced Start repeated while its job runs launches it once; one whose fence (the job with its allocation) the agent retired, the job having ended and its result been acknowledged, launches nothing; the same job under a new allocation runs | `RunsRetiredFence`, `FenceKeyedByJobAlone` |
 | `AnsweredResultIsDropped` | a result answered with a verdict the agent knows (accepted, duplicate, stale, unknown lease, mismatch) is not sent again; one answered with a verdict it does not know is; an answer for a lease with no result, or one the agent does not hold, changes nothing | `KeepsRefusedResult`, `DropsUnrecognisedAnswer` |
@@ -38,8 +38,8 @@ How an adapter maps a transport (full text in the module documentation of `agent
 - Start validity is relative (`valid_for`, 0 unbounded; dropped when `waited > valid_for`). The legacy agent measures `waited` from
   receipt on the agent's clock (`valid_for_ms != 0 && waited > valid_for_ms`); the worker wire counts `valid_for_ms` from the send
   time of the heartbeat the Start names.
-- The fence window is the transport's own, or none; an agent with no self-fence fails `SelfFencesAfterSilence` with that reason. The
-  js-agent's window is its silence bound (`--silence-stop`, 300 s by default).
+- The fence window is the transport's own, or none; `SilenceKeepsRunningLeases` waits twice the window, or a day with none. The
+  js-agent's window is its silence bound (`--silence-stop`, 300 s by default), past which it starts nothing new and keeps what runs.
 - A fenced Start is a job start (`job_start`, fenced by the job id with the allocation id); `start` stays a run start, so it keeps
   its validity bound.
 - `launches` and `never_started` are derived: the legacy agent emits a skipped-stale event to read; the worker wire has none, so an
@@ -76,8 +76,8 @@ kinds, and each is tested where it lives:
 - Reconciliation: an absent lease is freed and an unknown one kept, and a lease left out of a heartbeat is absent only once its
   `Start` is due (5.2, graded by session and process as in 4.4). Silence is not absence. Tested in
   `crates/js-sched/tests/sim_f2_failures.rs` and the core suite (`RecoveredLeaseWaitsForItsWorker`, `StoreOutageIsWaitedOut`).
-  The agent's half, that a lease is listed while it is held and silence stops it, is `RestartKeepsWhatItHolds` and
-  `SelfFencesAfterSilence`.
+  The agent's half, that a lease is listed while it is held and silence does not stop it, is `RestartKeepsWhatItHolds` and
+  `SilenceKeepsRunningLeases`.
 - An unknown phase value read as quarantined: the wire's decoding, `crates/js-agent-wire/tests/decode.rs`
   (`unknown_phase_reads_quarantined`).
 - Retries are not passed on: the agent wire carries no retry. The start contract's retry rule is the scheduler's, and

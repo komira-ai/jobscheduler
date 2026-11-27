@@ -2,9 +2,9 @@
 //! reply ([`Lifecycle::apply`]) and by the passing of time ([`Lifecycle::step`]).
 //!
 //! The jobs and what they book are in `job`, a restart in `adopt`, the end of a job
-//! (watching its container and the cleanup in order) in `cleanup`, the stop after a
-//! silence of the server in `silence`, and the mount providers a start waits on and a run
-//! releases in `providing` and `provided`.
+//! (watching its container and the cleanup in order) in `cleanup`, what a silence of the
+//! server stops (the starts, not the running jobs) in `silence`, and the mount providers a
+//! start waits on and a run releases in `providing` and `provided`.
 
 mod adopt;
 mod cleanup;
@@ -140,7 +140,7 @@ pub struct Lifecycle {
     /// When the slots that stay parked were last reported, on the clock; none while no slot
     /// is parked.
     parked_reminded_ms: Option<u64>,
-    /// The stop after a silence of the server, once it is set (see `silence`).
+    /// What a silence of the server stops, once it is set (see `silence`).
     silence: Option<silence::Watch>,
     /// How long a run must be seen with no control group before the host counts as blind
     /// to it ([`Lifecycle::with_blind_wait`]).
@@ -280,9 +280,9 @@ impl Lifecycle {
         self.taint.is_tainted()
     }
 
-    /// Lets the jobs make progress: stops every job when the server has been silent for the
-    /// bound ([`Lifecycle::stop_on_silence`]), takes each job that waits to start one step
-    /// on, watches each running container and its wall-time limit, then takes each finished
+    /// Lets the jobs make progress: ends every job that waits to start when the server has
+    /// been silent for the bound ([`Lifecycle::stop_on_silence`]), takes each job that waits
+    /// to start one step on, watches each running container and its wall-time limit, then takes each finished
     /// job as far through its cleanup as it will go, and tries again to remove the
     /// containers no job stands for that could not be removed. Every start is advanced
     /// before any job is watched or cleaned, so a start that waits is never behind another
@@ -514,6 +514,12 @@ impl Lifecycle {
         // A held host (its hold file is there) starts nothing, and is not tainted for it.
         if let Some(why) = hold::read_own(&self.config.state).why() {
             return Err(no(refusal::HOST_HELD, &why));
+        }
+        // A host whose server has been silent for the bound starts nothing until it is heard
+        // again (see `silence`): what it would start could not be reported.
+        if let Some(silent) = self.silenced() {
+            let why = format!("the server was not heard for {silent} ms");
+            return Err(no(detail::SILENCE_STOP, &why));
         }
         // A bundle is judged before the native body it belongs to, so a host without the
         // capability says so (`bundle-unsupported`) and a host with it applies the bundle's

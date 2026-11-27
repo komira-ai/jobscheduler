@@ -30,11 +30,12 @@
 //!   threads for the cleanup ([`Plan::cleanup_threads`]), a reply in the queue does not wait
 //!   for those removals.
 //! - **The session says when it heard the server.** [`Worker::heard`] stamps a [`Contact`]
-//!   on the lifecycle's clock without waiting, at every welcome and every accepted reply,
-//!   whether or not the queue had room for it; the lifecycle reads it at every step and
-//!   stops every job once the server has been silent for the plan's bound
-//!   ([`Lifecycle::stop_on_silence`]). The session refuses a welcome whose grace that
-//!   bound does not outlast ([`Worker::check_grace`]).
+//!   on the lifecycle's clock without waiting, at every answer the server wrote (a body that
+//!   is a JSON object, whatever its status), whether or not the queue had room for it; the
+//!   lifecycle reads it at every step and, once the server has been silent for the plan's
+//!   bound, stops starting work and keeps its running jobs
+//!   ([`Lifecycle::stop_on_silence`]). The session refuses a welcome whose grace that bound
+//!   does not outlast ([`Worker::check_grace`]).
 //! - **The runtime is made on the worker thread**, by the [`Machine`] of the plan, so it
 //!   needs no `Send` bound. The lifecycle is built (and the containers the previous
 //!   process left are adopted) before [`Worker::start`] returns, so the first hello can
@@ -198,8 +199,8 @@ pub struct Plan {
     /// The readiness hook the worker runs for a whole-node lease whose host it found quiet;
     /// none when the operator gave no `--readiness-hook`.
     pub readiness: Option<WorkerHook>,
-    /// How long the server may be silent before every job is stopped (`--silence-stop`);
-    /// none for a worker that never stops a job for silence, which the agent never builds.
+    /// How long the server may be silent before the agent stops starting work
+    /// (`--silence-stop`); none for a worker that never does, which the agent never builds.
     pub silence_stop: Option<Duration>,
     /// The VM backend (`--vm-driver`, `--vm-store`); none when it is off.
     pub vm: Option<VmSettings>,
@@ -580,7 +581,8 @@ pub struct Worker {
     rescue: Rescue,
     /// When the server was last heard, which the lifecycle reads.
     contact: Contact,
-    /// The silence bound and the stop grace, when the lifecycle stops jobs for silence.
+    /// The silence bound and the stop grace, when the lifecycle watches for a silence (it
+    /// then ends the jobs that wait to start and refuses new starts).
     silence: Option<(Duration, Duration)>,
 }
 
@@ -694,16 +696,16 @@ impl Worker {
         }
     }
 
-    /// Says that the server was heard now, on the lifecycle's clock: a welcome, or a
-    /// heartbeat reply the session accepted, whether or not [`Worker::try_deliver`] found
-    /// room for it. The silence after which the lifecycle stops every job counts from the
-    /// last of these. It never waits.
+    /// Says that the server was heard now, on the lifecycle's clock: an answer the server
+    /// wrote to a hello or a heartbeat, whatever its status, whether or not
+    /// [`Worker::try_deliver`] found room for it. The silence after which the lifecycle stops
+    /// starting work counts from the last of these. It never waits.
     pub fn heard(&self) {
         self.contact.heard(self.clock.now_ms());
     }
 
     /// Whether the silence bound outlasts the grace a welcome names (`grace_ms`) plus the
-    /// stop grace; always for a worker that stops no job for silence.
+    /// stop grace; always for a worker that watches no silence.
     ///
     /// # Errors
     ///

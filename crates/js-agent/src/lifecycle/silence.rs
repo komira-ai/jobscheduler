@@ -1,30 +1,35 @@
-//! The silence bound (`--silence-stop`): how long the agent goes on running its jobs when
-//! it hears nothing from the server, and the [`Contact`] the session stamps and the
-//! lifecycle reads (see `Lifecycle::stop_on_silence`).
+//! The silence bound (`--silence-stop`): how long the agent goes on starting work when it
+//! hears nothing from the server, and the [`Contact`] the session stamps and the lifecycle
+//! reads (see `Lifecycle::stop_on_silence`).
+//!
+//! Contact is any answer the server wrote to a hello or a heartbeat: a body that is a JSON
+//! object, whatever the status. A server that answers 503 because its store fails is there,
+//! and is heard. Past the bound the agent ends the jobs that wait to start and refuses new
+//! starts, and its running jobs run on to their own limits; no rule of the server ends or
+//! re-places a running job for its host's silence.
 //!
 //! # Why 300 seconds
 //!
-//! The bound must not trip on a routine loss of the server, and must end a job the server
-//! gave up on long before the job's own wall limit. A server restart silences a well agent
+//! The bound must not trip on a routine loss of the server, and must end a start the server
+//! may give up on (a placed job's start timeout, 900 s by default) before that happens. A
+//! server restart silences a well agent
 //! for at most: the heartbeat interval before the last reply it heard (5 s by default), the
 //! server's downtime, then the wait before the agent's next hello, which a `Retry-After`
 //! raises to at most [`RETRY_AFTER_CAP`] (120 s; the agent's own backoff is at most 60 s),
 //! and a refusal of that hello while the old session is still within its grace (15 s by
 //! default) before the hello is taken. That is 140 s and the downtime, so the default of
-//! 300 s ([`DEFAULT_SILENCE_STOP`]) lets a server restart take up to 160 s without stopping a
-//! job, and a lost reply or two (5 s each) is nothing beside it. Once the bound is reached
-//! each job gets the stop grace (10 s by default) before it is killed, so a partitioned
-//! host runs a job the server gave up on for at most 310 s by default, against wall limits
-//! of up to days. The default is [`SILENCE_STOP_GRACE_RATIO`] (20) times the server's
-//! default grace, which a const assertion holds it to.
+//! 300 s ([`DEFAULT_SILENCE_STOP`]) lets a server restart take up to 160 s without ending a
+//! start, and a lost reply or two (5 s each) is nothing beside it. The default is
+//! [`SILENCE_STOP_GRACE_RATIO`] (20) times the server's default grace, which a const
+//! assertion holds it to.
 //!
-//! A bound at or below the server's grace plus the stop grace could stop the jobs of a host
+//! A bound at or below the server's grace plus the stop grace could end the starts of a host
 //! the server still counts as present ([`fits_grace`]). The agent refuses such a bound at
 //! start against the default grace (status 2, so a `--stop-grace` of 285 s or more needs a
 //! longer `--silence-stop`), and again when a welcome names the server's own grace: the
 //! agent then ends, naming the flag. The most the flag takes is [`MAX_SILENCE_STOP_SECS`]
 //! (two hours, so that the longest `--stop-grace`, an hour, has a bound above it). There is
-//! no value that turns the stop off.
+//! no value that turns the watch off.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -34,8 +39,8 @@ use js_agent_wire::{DEFAULT_GRACE_MS, DEFAULT_HEARTBEAT_INTERVAL_MS, RETRY_AFTER
 
 use super::DEFAULT_STOP_GRACE;
 
-/// How long the agent goes on when it hears nothing from the server, when `--silence-stop`
-/// is not given: 300 seconds (see the module for the arithmetic).
+/// How long the agent goes on starting work when it hears nothing from the server, when
+/// `--silence-stop` is not given: 300 seconds (see the module for the arithmetic).
 pub const DEFAULT_SILENCE_STOP: Duration = Duration::from_secs(300);
 
 /// The most seconds `--silence-stop` takes: two hours.
@@ -75,7 +80,8 @@ pub fn silence_stop(given: Option<u64>) -> Result<Duration, String> {
     match given {
         None => Ok(DEFAULT_SILENCE_STOP),
         Some(0) => Err(
-            "--silence-stop: at least 1 second: the agent always stops its jobs after a silence"
+            "--silence-stop: at least 1 second: the agent always stops starting work after a \
+             silence"
                 .to_owned(),
         ),
         Some(secs) if secs > MAX_SILENCE_STOP_SECS => Err(format!(
@@ -86,7 +92,7 @@ pub fn silence_stop(given: Option<u64>) -> Result<Duration, String> {
 }
 
 /// Whether the silence bound `bound` is above the grace a welcome names (`grace_ms`) plus
-/// the stop grace: a bound at or below it could stop the jobs of a host the server still
+/// the stop grace: a bound at or below it could stop the starts of a host the server still
 /// counts as present.
 ///
 /// # Errors
@@ -98,8 +104,8 @@ pub fn fits_grace(bound: Duration, grace_ms: u64, stop_grace: Duration) -> Resul
         true => Ok(()),
         false => Err(format!(
             "--silence-stop: {} ms is at or below the server's grace of {grace_ms} ms plus the \
-             stop grace of {} ms, so a host the server still counts as present could stop its \
-             jobs; give a longer bound",
+             stop grace of {} ms, so a host the server still counts as present could stop \
+             starting work; give a longer bound",
             bound.as_millis(),
             stop_grace.as_millis()
         )),
@@ -107,9 +113,9 @@ pub fn fits_grace(bound: Duration, grace_ms: u64, stop_grace: Duration) -> Resul
 }
 
 /// When the agent last heard from the server, on the lifecycle's clock
-/// ([`Clock`](super::Clock)): the session stamps it at every welcome and at every heartbeat
-/// reply it accepts (one the worker had no room for included), and the lifecycle reads it
-/// at every step. Clones share one stamp, across threads.
+/// ([`Clock`](super::Clock)): the session stamps it at every answer the server wrote to a
+/// hello or a heartbeat, whatever its status (a reply the worker had no room for included),
+/// and the lifecycle reads it at every step. Clones share one stamp, across threads.
 #[derive(Debug, Clone, Default)]
 pub struct Contact(Arc<AtomicU64>);
 

@@ -42,22 +42,25 @@
 //! - **A job start whose fence is retired runs never.** The fence is the job id with the
 //!   allocation id (`js_agent_wire::START_FENCE_CAPABILITY`, which the hello reports). The
 //!   fence of a job that ended is retired when the job leaves the listing; that of a job
-//!   the server stopped or cancelled, or that the agent stopped for silence, when the stop
+//!   the server stopped or cancelled, or that the agent did not start for silence, when the stop
 //!   is asked, and it is in the state root before the stop is reported; a stop of a job
 //!   the agent does not hold names no allocation and retires every fence of the job. Such
 //!   a start is skipped (`Skip::FenceRetired`) before anything is booked or made; the same
 //!   job under a new allocation is a new fence and runs. A run start has no fence beyond
 //!   its run id and is judged as before (`Skip::Retired`).
-//! - **A silence of the server stops every job** ([`Lifecycle::stop_on_silence`],
-//!   `--silence-stop`, see [`DEFAULT_SILENCE_STOP`] for the bound). Contact is a welcome or
-//!   a heartbeat reply the session accepted, stamped on the lifecycle's clock by the
-//!   session ([`Contact`]); a reply the worker had no room for counts. Once the server has
-//!   not been heard for the bound, every job that runs or waits to start is stopped as
-//!   a `Stop` stops it (the stop grace, then the kill; a native run is killed at once), its
-//!   fence is retired and its result is `killed` with the detail `silence-stop`. It is done
-//!   once for each silence; a contact ends the silence, and starts that follow are judged
-//!   as above. It runs while an agent runs: a native run is not bounded while no agent
-//!   does (see [`crate::native`]).
+//! - **A silence of the server stops the starts, not the running jobs**
+//!   ([`Lifecycle::stop_on_silence`], `--silence-stop`, see [`DEFAULT_SILENCE_STOP`] for the
+//!   bound). Contact is any answer the server wrote to a hello or a heartbeat (a JSON body,
+//!   whatever its status), stamped on the lifecycle's clock by the session ([`Contact`]); a
+//!   reply the worker had no room for counts. Once the server has not been heard for the
+//!   bound, every job that waits to start is ended as a `Stop` ends one (nothing is made),
+//!   its fence is retired and its result is `failed_to_start` with the detail
+//!   `silence-stop`, once for each silence; every start that comes while the silence lasts
+//!   is refused with the same code. A job whose container runs is left to run to its own
+//!   limits, and its result is held until the server acknowledges it: no rule of the server
+//!   ends or re-places a running job for its host's silence, while the start timeout of a
+//!   job that has not started may. A contact ends the silence, and starts that follow are
+//!   judged as above.
 //! - **A start that must be refused creates nothing** and is answered with a result of
 //!   outcome `failed_to_start` and the refusal code as its detail, held like any other
 //!   result: a host job on an agent without `--allow-host-jobs`
@@ -601,7 +604,8 @@ pub struct Local {
     /// `allow-list` or `open` was given, which only the crun runtime takes ([`crate::egress`]).
     pub egress: crate::egress::Config,
     /// `--silence-stop`, or [`DEFAULT_SILENCE_STOP`]: how long the server may be silent
-    /// before every job is stopped; above the server's default grace plus the stop grace.
+    /// before the agent stops starting work; above the server's default grace plus the stop
+    /// grace.
     pub silence_stop: Duration,
     /// The VM backend, when `--vm-driver` turned it on; the agent sets it after the checks
     /// here ([`crate::platform`]).

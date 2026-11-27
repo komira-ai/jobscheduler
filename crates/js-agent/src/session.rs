@@ -111,13 +111,18 @@
 //!   heartbeat it answers carried the cleared taint, for the same reason: the acknowledgement
 //!   of a taint report that was in flight when the agent began to clear it must not end the
 //!   taint before the server has heard of the clear.
-//! - Every welcome and every reply the session accepts (decoded, after a success) is
-//!   contact: the session stamps it on the worker's clock ([`Worker::heard`]) before it
-//!   hands the reply over, so a reply the worker had no room for counts too. The worker's
-//!   lifecycle stops every job once the server has not been heard for the silence bound.
+//! - Every answer of the server to a hello or a heartbeat whose body is a JSON object is
+//!   contact, whatever its status: a welcome, a reply, and a refusal such as a 503 with its
+//!   `error` code all prove the server is there. The session stamps it on the worker's clock
+//!   ([`Worker::heard`]) before it reads the answer, so a reply the worker had no room for
+//!   counts too. An answer with an empty or non-JSON body (a proxy's, in front of a server
+//!   that is down) and an answer that never came (a transport error, a reply later than the
+//!   transport's limit) are not. Once the server has not been heard for the silence bound
+//!   the worker's lifecycle stops starting work (it ends the jobs that wait to start and
+//!   refuses new starts) and keeps its running jobs.
 //!   A welcome whose grace plus the stop grace the bound does not outlast ends the session
 //!   with [`Step::Failed`] naming `--silence-stop` ([`Worker::check_grace`]): such a bound
-//!   could stop the jobs of a host the server still counts as present.
+//!   could refuse the starts of a host the server still counts as present.
 //! - A worker that has ended ends the session with [`Step::Failed`]. So does one that is
 //!   found gone without having said so (a reply that finds nobody to read the queue), and
 //!   one that has been inside a single order or step for longer than its calls can take
@@ -728,6 +733,7 @@ impl<'a> Session<'a> {
     }
 
     fn after_hello(&mut self, answer: &Answer) -> Step {
+        self.heard_in(answer);
         let code = code_of(&answer.body);
         match verdict(answer.status, &code) {
             Verdict::Done => match welcome(&answer.body) {
@@ -753,11 +759,9 @@ impl<'a> Session<'a> {
     }
 
     fn registered(&mut self, welcome: &Welcome) -> Step {
-        if let Some(jobs) = &self.jobs {
-            if let Err(why) = jobs.worker.check_grace(welcome.grace_ms) {
-                return Step::Failed(why);
-            }
-            jobs.worker.heard();
+        let grace = |jobs: &Jobs<'_>| jobs.worker.check_grace(welcome.grace_ms);
+        if let Some(Err(why)) = self.jobs.as_ref().map(grace) {
+            return Step::Failed(why);
         }
         let credential = self.keep_credential(welcome.host_credential.as_ref());
         if let Some(cell) = self.dispatch {
@@ -806,6 +810,7 @@ impl<'a> Session<'a> {
     }
 
     fn after_beat(&mut self, live: Live, answer: &Answer) -> Step {
+        self.heard_in(answer);
         let code = code_of(&answer.body);
         let verdict = verdict(answer.status, &code);
         let interval = live.interval;
@@ -827,7 +832,6 @@ impl<'a> Session<'a> {
                 self.proven = true;
                 self.lost_young = false;
                 self.backoff.reset();
-                self.jobs.iter().for_each(|jobs| jobs.worker.heard());
                 // `None` when the lease id the reply names is not acceptable: the agent
                 // then changes nothing.
                 let lease = reply
@@ -869,6 +873,16 @@ impl<'a> Session<'a> {
                 }
             }
             Err(_) => self.retry("heartbeat", Reason::Unusable(refusal::INVALID_REPLY), None),
+        }
+    }
+
+    /// Stamps contact for the silence bound when `answer` is the server's own: its body is a
+    /// JSON object, whatever the status (a welcome, a reply, a refusal with its `error` code).
+    /// A body that is empty or not JSON (what a proxy in front of a server that is down
+    /// answers) is not contact, and nor is an answer that never came.
+    fn heard_in(&self, answer: &Answer) {
+        if answer.body.is_object() {
+            self.jobs.iter().for_each(|jobs| jobs.worker.heard());
         }
     }
 

@@ -47,10 +47,11 @@ pub const PER_JOB_CAPABILITY: &str = "per-job";
 /// them, a bounded number), keeps them in its state root across a restart, and runs
 /// nothing for a start whose fence is among them (a stop that names no allocation retires
 /// every fence of the job). The same job id under a new allocation is a new fence and
-/// runs. Such an agent also stops every job it holds after a bounded silence of the
-/// server, and retires their fences. An agent without it promises neither: it may judge a
-/// start by its job id alone, and it runs its jobs through any silence until their wall
-/// limits. A server tells the two apart by this capability; nothing else on the wire
+/// runs. Such an agent also starts nothing after a bounded silence of the server: the jobs
+/// it holds that wait to start are not started and their fences are retired, and the starts
+/// that reach it while the silence lasts are refused; its running jobs run on to their wall
+/// limits. An agent without it promises none of this: it may judge a start by its job id
+/// alone. A server tells the two apart by this capability; nothing else on the wire
 /// changes.
 pub const START_FENCE_CAPABILITY: &str = "start-fence";
 

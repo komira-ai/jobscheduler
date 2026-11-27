@@ -70,7 +70,10 @@
 //! (`lifecycle/mod.rs`), and a stop of a job the agent does not hold changes nothing, so a
 //! message handed out twice (an acknowledgement lost, a server that died after answering)
 //! starts one job. A poll's answer is not contact for the silence bound
-//! (`--silence-stop`): only the welcome and the heartbeat's replies are.
+//! (`--silence-stop`): only the answers to the hello and the heartbeat are, whatever their
+//! status, since the heartbeat is what carries the results. A start a poll hands over while
+//! the server is silent past the bound is refused `silence-stop`, and the refusal reaches
+//! the server on the first heartbeat it answers.
 
 mod cell;
 mod poller;

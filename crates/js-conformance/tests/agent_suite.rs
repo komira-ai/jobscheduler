@@ -36,15 +36,13 @@ fn forgetting_retired_ids_fails_cancel_until_absent() {
     only_fails(Defect::ForgetsRetiredIds, Scenario::CancelUntilAbsent);
 }
 
+/// Asserts that an agent with no fence window passes every scenario: it runs its leases
+/// through any silence, which is what the silence scenario asks. It catches a scenario that
+/// fails an agent for having no window.
 #[test]
-fn an_agent_with_no_self_fence_fails_only_the_fence_scenario_and_says_why() {
+fn an_agent_with_no_fence_window_passes_every_scenario() {
     let report = agent::run(|| FakeAgent::with_window(None));
-    assert_eq!(report.failed(), vec![Scenario::SelfFencesAfterSilence]);
-    let reason = report.results.iter().find_map(|(_, v)| match v {
-        Verdict::Failed(text) => Some(text.clone()),
-        _ => None,
-    });
-    assert!(reason.unwrap().contains("no self-fence"));
+    assert!(report.failed().is_empty(), "{:?}", report.failed());
 }
 
 #[test]
@@ -59,8 +57,11 @@ fn running_a_late_start_fails_late_start_is_dropped() {
 }
 
 #[test]
-fn never_fencing_fails_self_fences_after_silence() {
-    only_fails(Defect::NeverFences, Scenario::SelfFencesAfterSilence);
+fn stopping_running_leases_on_silence_fails_silence_keeps_running_leases() {
+    only_fails(
+        Defect::StopsRunningOnSilence,
+        Scenario::SilenceKeepsRunningLeases,
+    );
 }
 
 #[test]
@@ -86,12 +87,12 @@ fn a_fence_kept_by_the_job_alone_fails_retired_fence_is_refused() {
 
 #[test]
 fn the_failure_text_names_what_was_wrong() {
-    let report = agent::run(|| FakeAgent::broken(Defect::NeverFences));
+    let report = agent::run(|| FakeAgent::broken(Defect::StopsRunningOnSilence));
     let text = report.results.iter().find_map(|(_, v)| match v {
         Verdict::Failed(text) => Some(text.clone()),
         _ => None,
     });
-    assert!(text.unwrap().contains("reported fenced"));
+    assert!(text.unwrap().contains("still runs after twice the window"));
 }
 
 /// The fake itself: the operations the scenarios do not reach on their own.

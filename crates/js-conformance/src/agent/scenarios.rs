@@ -25,10 +25,11 @@ pub enum Scenario {
     /// started; one that waited exactly its validity, and one with no validity bound,
     /// run.
     LateStartIsDropped,
-    /// Silence of the agent's fence window, counted from the last scheduler contact,
-    /// makes the agent stop its leases; one tick less does not. An agent with no
-    /// self-fence fails this scenario, as the legacy agent does today.
-    SelfFencesAfterSilence,
+    /// Silence of the scheduler, for twice the agent's fence window (or a day, for an agent
+    /// with none) after the last contact, leaves a running lease running and not fenced:
+    /// no rule of the scheduler gives a running lease away for its host's silence. The job's
+    /// own end during the silence is reported once the connection is back.
+    SilenceKeepsRunningLeases,
     /// A result the scheduler has not acknowledged is sent again in every heartbeat,
     /// including the first on a new connection, and one that was acknowledged is not.
     UnackedResultIsResent,
@@ -82,7 +83,7 @@ impl Scenario {
         Scenario::StartIsIdempotent,
         Scenario::CancelUntilAbsent,
         Scenario::LateStartIsDropped,
-        Scenario::SelfFencesAfterSilence,
+        Scenario::SilenceKeepsRunningLeases,
         Scenario::UnackedResultIsResent,
         Scenario::RetiredFenceIsRefused,
         Scenario::AnsweredResultIsDropped,
@@ -106,7 +107,7 @@ impl Scenario {
             Self::StartIsIdempotent => start_is_idempotent(harness, &mut notes),
             Self::CancelUntilAbsent => cancel_until_absent(harness, &mut notes),
             Self::LateStartIsDropped => late_start_is_dropped(harness, &mut notes),
-            Self::SelfFencesAfterSilence => self_fences_after_silence(harness, &mut notes),
+            Self::SilenceKeepsRunningLeases => silence_keeps_running_leases(harness, &mut notes),
             Self::UnackedResultIsResent => unacked_result_is_resent(harness, &mut notes),
             Self::RetiredFenceIsRefused => retired_fence_is_refused(harness, &mut notes),
             Self::AnsweredResultIsDropped => answered_result_is_dropped(harness, &mut notes),
@@ -223,36 +224,34 @@ fn late_start_is_dropped<H: AgentHarness>(harness: &mut H, notes: &mut Notes) {
     );
 }
 
-fn self_fences_after_silence<H: AgentHarness>(harness: &mut H, notes: &mut Notes) {
-    let Some(window) = harness.fence_window() else {
-        notes.expect(
-            false,
-            "the agent has no self-fence, so it cannot stop its leases by itself",
-        );
-        return;
-    };
+/// A day, in milliseconds: the silence the scenario waits for an agent with no fence window.
+const DAY_MS: u64 = 86_400_000;
+
+fn silence_keeps_running_leases<H: AgentHarness>(harness: &mut H, notes: &mut Notes) {
+    let window = harness.fence_window().unwrap_or(DAY_MS / 2);
     harness.start("lease", UNBOUNDED, 0);
-    harness.advance(window - 1);
-    notes.expect(
-        harness.observed().running.contains("lease"),
-        "the lease runs one tick short of the window",
-    );
     harness.contact();
     harness.disconnect();
-    harness.advance(window - 1);
-    notes.expect(
-        harness.observed().running.contains("lease"),
-        "the window counts from the last contact, not from the Start",
-    );
-    harness.advance(1);
+    harness.advance(window);
+    harness.advance(window);
     let seen = harness.observed();
     notes.expect(
-        !seen.running.contains("lease"),
-        "the lease is stopped after the full window of silence",
+        seen.running.contains("lease"),
+        "the lease still runs after twice the window of silence",
     );
     notes.expect(
-        seen.fenced.contains("lease"),
-        "the lease is reported fenced after the full window of silence",
+        !seen.fenced.contains("lease"),
+        "the lease is not reported fenced after a silence",
+    );
+    harness.complete("lease");
+    harness.reconnect();
+    notes.expect(
+        harness
+            .observed()
+            .results_sent
+            .iter()
+            .any(|lease| lease == "lease"),
+        "the result of the lease's own end is sent once the connection is back",
     );
 }
 
