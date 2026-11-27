@@ -18,15 +18,21 @@
 //!   until the provider has taken it, then `Mount` until it answers the directory. The
 //!   provider client sends a source's first `Mount` itself as soon as its `Prepare` succeeds
 //!   ([`crate::lifecycle::Providers::ask`]), so the step that takes the `Prepare`'s answer
-//!   usually finds the `Mount` out or answered. A
-//!   provider that is unavailable is asked again; one that refuses the request as wrong in
-//!   itself (`INVALID_ARGUMENT`) fails the start `provider-refused`, the job's own fault; one
-//!   that cannot serve it in its present state (`FAILED_PRECONDITION`) fails it
-//!   `provider-failed`, the host's, so the server places the job again elsewhere; a
-//!   directory that is not an absolute path in normal form beneath a mount root of the
-//!   agent's (a root it may write, for a read-write mount) fails it (`input-not-allowed`). A provider whose sweep at start is not answered yet is not asked.
+//!   usually finds the `Mount` out or answered. A call that is out is asked at every step
+//!   (that sends nothing), and is never sent twice. A
+//!   provider that is unavailable (or answers a `Mount` with no directory) is asked again
+//!   after a wait that grows with each failure in a row, per source, and a provider that
+//!   fails `Prepare`s is sent one `Prepare` at a time until one succeeds (`pace`); each step
+//!   in which a start's calls failed gives one `provider-backoff` line for it. One that
+//!   refuses the request as wrong in itself (`INVALID_ARGUMENT`) fails the start
+//!   `provider-refused`, the job's own fault; one that cannot serve it in its present state
+//!   (`FAILED_PRECONDITION`) fails it `provider-failed`, the host's, so the server places the
+//!   job again elsewhere; a directory that is not an absolute path in normal form beneath a
+//!   mount root of the agent's (a root it may write, for a read-write mount) fails it
+//!   (`input-not-allowed`). A provider whose sweep at start is not answered yet is not asked.
 //! - **From the admission to `--mount-provider-wait`** a start may wait; past it the start
-//!   fails `input-unavailable` naming the first source without a directory.
+//!   fails `input-unavailable` naming the first source without a directory and the
+//!   provider's last reason, once.
 //! - **A stop** while providing ends the start at once, whatever a call in flight does: its
 //!   sources are released at its cleanup like any run's (`provided`).
 
@@ -35,11 +41,12 @@ use std::collections::BTreeMap;
 use js_agent_wire::{Layer, MountMode, MountSource, refusal};
 
 use super::job::{Phase, Waiting};
-use super::provided::Attached;
+use super::pace::{Pace, Step};
+use super::provided::{Attached, Backed, seed};
 use super::provider_record::{self, Source};
 use super::{Failure, Lifecycle};
 use crate::lifecycle::runtime::JobFs;
-use crate::lifecycle::{MountRoots, ProviderAnswer, ProviderCall, code};
+use crate::lifecycle::{Event, MountRoots, ProviderAnswer, ProviderCall, code};
 
 /// One source a provider makes, as the start names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,6 +112,8 @@ struct Wanted {
     /// Why the last call did not get the directory, for the failure of a start that waited
     /// too long.
     why: String,
+    /// The pace of its calls.
+    pace: Pace,
 }
 
 impl Wanted {
@@ -117,6 +126,7 @@ impl Wanted {
             prepared: false,
             path: None,
             why: "no answer".to_owned(),
+            pace: Pace::default(),
         }
     }
 
@@ -200,45 +210,87 @@ impl Wanted {
         }
     }
 
-    /// Asks the provider for what this source still lacks: `Prepare` until it is taken, then
-    /// `Mount` until the directory is answered. A provider that has not answered its sweep
-    /// is not asked.
+    /// Asks the provider for what this source still lacks, at `now_ms`: `Prepare` until it
+    /// is taken, then `Mount` until the directory is answered. A provider that has not
+    /// answered its sweep is not asked; nor is a source whose pace has it wait, nor (for a
+    /// `Prepare` not out yet) one whose provider's gate is shut. A call that failed and now
+    /// waits is given back, for the start's backoff line.
     fn ask(
         &mut self,
         run_id: &str,
         attached: &mut Attached,
         roots: &MountRoots,
-    ) -> Result<(), Failure> {
+        now_ms: u64,
+    ) -> Result<Option<Backed>, Failure> {
         if !attached.swept(&self.provider) {
             self.why = format!(
                 "the provider {} has not answered its sweep since the agent started",
                 self.provider
             );
-            return Ok(());
+            return Ok(None);
         }
+        if !self.pace.due(now_ms) {
+            return Ok(None);
+        }
+        let seed = seed(&self.provider, run_id, self.index);
         if !self.prepared {
+            if self.pace.idle()
+                && let Some(why) = attached.gate_shut(&self.provider, now_ms)
+            {
+                why.clone_into(&mut self.why);
+                return Ok(None);
+            }
             let call = ProviderCall::Prepare {
                 run_id: run_id.to_owned(),
                 index: self.index,
                 reference: self.reference.clone(),
                 mode: self.mode,
             };
-            match attached.ask(&self.provider, &call) {
+            let (answer, step) = attached.paced(
+                (self.provider.as_str(), &call),
+                &mut self.pace,
+                now_ms,
+                &seed,
+            );
+            match answer {
                 ProviderAnswer::Done(_) => self.prepared = true,
-                other => return self.settle(other),
+                other => {
+                    self.settle(other)?;
+                    return Ok(step.map(|step| self.backed("Prepare", step)));
+                }
             }
         }
         let call = ProviderCall::Mount {
             run_id: run_id.to_owned(),
             index: self.index,
         };
-        match attached.ask(&self.provider, &call) {
-            ProviderAnswer::Done(Some(path)) => self.accept(path, roots),
+        let (answer, step) = attached.paced(
+            (self.provider.as_str(), &call),
+            &mut self.pace,
+            now_ms,
+            &seed,
+        );
+        match answer {
+            ProviderAnswer::Done(Some(path)) => self.accept(path, roots).map(|()| None),
             ProviderAnswer::Done(None) => {
                 self.why = "the provider answered no directory".to_owned();
-                Ok(())
+                Ok(step.map(|step| self.backed("Mount", step)))
             }
-            other => self.settle(other),
+            other => {
+                self.settle(other)?;
+                Ok(step.map(|step| self.backed("Mount", step)))
+            }
+        }
+    }
+
+    /// The call `call` of this source failed and now waits as `step` says.
+    fn backed(&self, call: &'static str, step: Step) -> Backed {
+        Backed {
+            provider: self.provider.clone(),
+            index: self.index,
+            call,
+            step,
+            why: self.why.clone(),
         }
     }
 }
@@ -262,16 +314,24 @@ impl Providing {
         &mut self,
         run_id: &str,
         attached: &mut Attached,
-        roots: &MountRoots,
-        now_ms: u64,
+        (roots, now_ms): (&MountRoots, u64),
+        events: &mut Vec<Event>,
     ) -> Result<bool, Failure> {
+        let mut backed = Vec::new();
         for source in self
             .sources
             .iter_mut()
             .filter(|source| source.path.is_none())
         {
-            source.ask(run_id, attached, roots)?;
+            match source.ask(run_id, attached, roots, now_ms) {
+                Ok(waits) => backed.extend(waits),
+                Err(failure) => {
+                    events.extend(attached.backoff(run_id, &backed));
+                    return Err(failure);
+                }
+            }
         }
+        events.extend(attached.backoff(run_id, &backed));
         match self.sources.iter().find(|source| source.path.is_none()) {
             None => Ok(true),
             Some(late) if now_ms >= self.deadline_ms => Err((
@@ -335,6 +395,7 @@ pub(super) fn follow(
     waiting: &mut Waiting,
     (attached, roots): (&mut Attached, &MountRoots),
     now_ms: u64,
+    events: &mut Vec<Event>,
 ) -> Follow {
     let Phase::Resolving { providing, .. } = &mut waiting.phase else {
         return Follow::Go;
@@ -342,7 +403,7 @@ pub(super) fn follow(
     let Some(part) = providing.as_mut() else {
         return Follow::Go;
     };
-    match part.poll(&waiting.spec.run_id, attached, roots, now_ms) {
+    match part.poll(&waiting.spec.run_id, attached, (roots, now_ms), events) {
         Err(failure) => Follow::Fail(failure),
         Ok(false) => Follow::Go,
         Ok(true) => {
@@ -378,6 +439,7 @@ impl Lifecycle {
         run_id: &str,
         fs: &JobFs,
         now_ms: u64,
+        events: &mut Vec<Event>,
     ) -> Result<Option<Providing>, Failure> {
         let provided = fs.providers();
         if provided.is_empty() {
@@ -396,7 +458,8 @@ impl Lifecycle {
             deadline_ms,
             sources: provided.iter().map(Wanted::of).collect(),
         };
-        providing.poll(run_id, &mut self.providers, &self.config.mounts, now_ms)?;
+        let at = (&self.config.mounts, now_ms);
+        providing.poll(run_id, &mut self.providers, at, events)?;
         provider_record::write(&self.config.state, run_id, &sources).map_err(|why| {
             (
                 refusal::INPUT_UNAVAILABLE,

@@ -147,6 +147,14 @@ pub mod code {
     /// asked again every ten seconds, and a start that names it waits meanwhile. Reported once
     /// for each provider.
     pub const PROVIDER_SWEEP_FAILED: &str = "provider-sweep-failed";
+    /// A mount provider did not serve a `Prepare`, `Mount` or `Release` of a run's source
+    /// (it answered unavailable or refused it, or did not answer within the call's bound),
+    /// and the call waits before it is sent again. One for each run at each such wait, not one
+    /// for each call: the message names the provider, the call, the source, the failures in a
+    /// row, the provider's reason, the wait in milliseconds, how many more sources of the run
+    /// wait with it, and the agent's counts of the `Prepare`s not served and the calls sent
+    /// again since it started.
+    pub const PROVIDER_BACKOFF: &str = "provider-backoff";
     /// The record of a run's provider sources (`providers/<run>.json` in the state root) could
     /// not be written, so the start failed; or, when the agent started, a record could not be
     /// read, or named a provider this agent was not given (either is removed, its sources left

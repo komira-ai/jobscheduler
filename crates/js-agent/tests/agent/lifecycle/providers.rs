@@ -92,6 +92,9 @@ fn a_mount_answered_late_still_starts_the_job() {
         Some(JobFs::default()),
         "the lookups begun at the admission leave the provider's layer out"
     );
+    // The unavailable answer has the source wait (at most 1 s, the first wait) before its
+    // `Mount` is sent again.
+    h.clock.advance(1_000);
     let events = steps(&mut h);
     assert_eq!(events, ["started j1"]);
     assert_eq!(

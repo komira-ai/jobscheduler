@@ -102,9 +102,11 @@
 //!   the request as wrong in itself fails it `provider-refused`, one that cannot serve it in
 //!   its present state `provider-failed`). Each source is then a host path, and the start goes
 //!   on as above. When the run's file system is taken apart, on every end path, each source is
-//!   released; a release that fails is asked again every step for a minute and then left to
-//!   the provider with a `provider-release-failed` finding, never tainting the host or holding
-//!   the slot. An agent that restarts releases the sources its records name for the runs it
+//!   released; a release that fails is asked again for a minute, after a wait that grows with
+//!   each failure (`machine::pace`, one `provider-backoff` line at each), and then left to the
+//!   provider with a `provider-release-failed` finding, never tainting the host or holding
+//!   the slot. A start's calls that fail are paced the same way, and a provider that fails a
+//!   `Prepare` is sent one at a time until one succeeds. An agent that restarts releases the sources its records name for the runs it
 //!   did not adopt and sweeps each provider ([`Lifecycle::attach_providers`]).
 //! - **A result says what happened.** It is sent as soon as the container has exited,
 //!   before any cleanup, and it stays in the heartbeat until the server acknowledges it. An

@@ -8,7 +8,8 @@
 //! asked and answers [`ProviderAnswer::Pending`] until the provider has answered, then
 //! hands the answer over once. Asked again after that, it sends the call again. Every call
 //! of the contract is idempotent, so asking again is always safe; the lifecycle counts its
-//! own bounds (the provider wait of a start, the release retries) on its own clock.
+//! own bounds (the provider wait of a start, the release retries, and the wait after a
+//! failed call before it is sent again) on its own clock.
 
 use js_agent_wire::MountMode;
 
@@ -107,8 +108,8 @@ pub trait Providers {
 
     /// Gives the providers the [`Wake`](super::Wake) to ring when a call's answer is in, so
     /// the start that waits on it goes on at once. A call that succeeded rings at once; a
-    /// call refused or failed rings after a short pause, so its retry does not wait for the
-    /// next step and a provider that fails at once is asked again at most once per pause. The
-    /// default keeps none: answers are then asked for at the next step.
+    /// call refused or failed rings after a short pause, and is sent again only when the
+    /// lifecycle asks for it again, after its own wait. The default keeps none: answers are
+    /// then asked for at the next step.
     fn set_wake(&mut self, _wake: super::Wake) {}
 }

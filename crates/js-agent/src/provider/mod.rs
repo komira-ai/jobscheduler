@@ -20,9 +20,10 @@
 //! - Each call has a bound ([`CallBounds`]); a provider that does not answer within it is
 //!   answered `Unavailable`, and the lifecycle asks again when it chooses. The client rings the
 //!   lifecycle's wake at once for an answer it goes on from, and for a failed or refused one
-//!   after the pause [`CallBounds::retry`], so a retry does not wait for the worker's next
-//!   step and a provider that fails at once is asked at most once per pause. A `Prepare` that
-//!   is followed by its `Mount` rings nothing of its own; the `Mount`'s answer rings.
+//!   after the pause [`CallBounds::retry`]. A failed answer is handed over like any other and
+//!   sends nothing with it: the lifecycle chooses when to send the call again, after a wait
+//!   that grows with each failure in a row. A `Prepare` that is followed by its `Mount` rings
+//!   nothing of its own; the `Mount`'s answer rings.
 //! - A reply of `INVALID_ARGUMENT` is a refusal (`Refused`: the request is wrong in itself),
 //!   one of `FAILED_PRECONDITION` a failure of the provider's state on this host (`Failed`);
 //!   every other failure is `Unavailable`.
@@ -64,8 +65,9 @@ pub struct CallBounds {
     /// `Sweep`.
     pub sweep: Duration,
     /// The pause after a call that was refused or failed (or outlived its bound) before the
-    /// client rings the lifecycle's wake, so the retry does not wait for the worker's next
-    /// step. A call that succeeded rings at once.
+    /// client rings the lifecycle's wake, so the step that takes the failure does not wait for
+    /// the worker's next step. The call is not sent again by the ring: the lifecycle sends it
+    /// when its own wait after the failure has passed. A call that succeeded rings at once.
     pub retry: Duration,
 }
 
@@ -227,11 +229,10 @@ impl Carrier {
     /// and so on; then rings the wake once, for the last call's answer.
     ///
     /// An answer the lifecycle goes on from rings at once. A refused or failed call rings
-    /// after the retry pause, once its answer is stored: ringing for it at once would ask a
-    /// provider that fails at once again and again without a pause. The step the ring brings
-    /// is handed the failure and, for an unavailable one, sends the call again in the same
-    /// ask. A call that is followed rings nothing of its own: the lifecycle has nothing to go
-    /// on with until the call that follows it answers.
+    /// after the retry pause: the step the ring brings is handed the failure, and the
+    /// lifecycle sends the call again when its wait after the failure has passed. A call that
+    /// is followed rings nothing of its own: the lifecycle has nothing to go on with until the
+    /// call that follows it answers.
     async fn carry(self, mut key: Key, mut sent: u64, mut call: ProviderCall) {
         loop {
             let bound = self.bounds.of(&call);
@@ -258,7 +259,6 @@ impl Carrier {
                 None => {
                     if !goes_on {
                         tokio::time::sleep(self.bounds.retry).await;
-                        self.flights.rest(&key, sent);
                     }
                     self.wake.wake();
                     return;
@@ -294,10 +294,9 @@ impl Providers for ProviderClient {
             self.flights.forget(&source);
         }
         let key = flight_key(provider, call);
-        let (handed, sent) = match self.flights.begin(key.clone()) {
+        let sent = match self.flights.begin(key.clone()) {
             Begun::Settled(answer) => return answer,
-            Begun::Send(sent) => (ProviderAnswer::Pending, sent),
-            Begun::Retry(failed, sent) => (failed, sent),
+            Begun::Send(sent) => sent,
         };
         let carrier = Carrier {
             channel: client.clone(),
@@ -308,7 +307,7 @@ impl Providers for ProviderClient {
             wake: self.wake.clone(),
         };
         self.handle.spawn(carrier.carry(key, sent, call.clone()));
-        handed
+        ProviderAnswer::Pending
     }
 
     fn set_wake(&mut self, wake: Wake) {

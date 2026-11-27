@@ -934,6 +934,9 @@ impl SchedPlacer {
     /// ran ([`JobSizes::observe`]), or held until the teaching of the ended jobs begun is taught
     /// ([`Teaching`]). A job the store no longer holds teaches nothing; a read that
     /// fails is logged and the job's run is let go (the history is a guide, not a record).
+    /// The CPU time a freed job's result reports is also handed to the scheduler for the
+    /// plausibility check of its host's readings ([`crate::engine::Engine::job_cpu_used`]),
+    /// before the pass lets the allocation go.
     pub(crate) fn learn_freed<S: js_state::Store, I: IdSource>(
         &self,
         jobs: &JobStore<S, I>,
@@ -944,8 +947,13 @@ impl SchedPlacer {
             match jobs.get_job(&id) {
                 Ok(job) => {
                     let mut engine = self.engine();
-                    job.into_iter()
-                        .for_each(|job| engine.sizes().freed_run(job, booked));
+                    if let Some(job) = job {
+                        let used = job.result.as_ref().and_then(|result| result.usage);
+                        if let Some(usage) = used {
+                            engine.job_cpu_used(&id, micros(usage.cpu_time));
+                        }
+                        engine.sizes().freed_run(job, booked);
+                    }
                 }
                 Err(error) => {
                     warn!(job = %id, %error, "a freed job was not read; its run teaches no size")

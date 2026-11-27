@@ -131,13 +131,44 @@ fn a_stop_while_preparing_releases_the_source() {
     assert!(prepared < released, "{log:?}");
 }
 
+/// Asserts that a release the provider answers `Failed` (its `FAILED_PRECONDITION`) waits and
+/// is asked again, as an unavailable one is, with a `provider-backoff` line. Catches a
+/// release given up on, or asked at every step, when the provider's state turns it away.
+#[test]
+fn a_release_the_provider_cannot_serve_backs_off_and_is_asked_again() {
+    let (mut h, providers) = rig("prov-release-state", |_| {});
+    run_one(&mut h, &providers, "j1");
+    let failed = ProviderAnswer::Failed("restarting".to_owned());
+    providers.always("tier", &release("j1", 0), failed);
+    h.fake.exit("j1", 0);
+    let events = (0..4)
+        .flat_map(|_| names(&h.life.step()))
+        .collect::<Vec<_>>();
+    assert!(
+        events.contains(&"finding j1 provider-backoff".to_owned()),
+        "{events:?}"
+    );
+    assert_eq!(
+        providers.sent("release").len(),
+        1,
+        "the steps that follow wait"
+    );
+    h.clock.advance(59_999);
+    h.life.step();
+    assert_eq!(
+        providers.sent("release").len(),
+        2,
+        "asked again after its wait"
+    );
+}
+
 /// Asserts that a release a provider does not answer never taints the host and never holds
-/// the run's slot or its checks (the run is freed in the step it ended in), is asked again at
-/// every step for a minute from the end of the run, and is then given up with one
-/// `provider-release-failed` finding that names the sources left and is not repeated, after
-/// which it is not asked again and its record is gone. Catches a release that taints, one
-/// that holds up the next job, one that is retried for ever, and a finding repeated at every
-/// step.
+/// the run's slot or its checks (the run is freed in the step it ended in), is asked again
+/// for a minute from the end of the run (after a wait that grows with each failure, so not at
+/// every step), and is then given up with one `provider-release-failed` finding that names
+/// the sources left and is not repeated, after which it is not asked again and its record is
+/// gone. Catches a release that taints, one that holds up the next job, one that is retried
+/// for ever or at every step, and a finding repeated at every step.
 #[test]
 fn a_failed_release_never_taints_the_host() {
     let (mut h, providers) = rig("prov-release-fails", |_| {});
@@ -154,17 +185,25 @@ fn a_failed_release_never_taints_the_host() {
     );
     assert!(events.contains(&"freed j1".to_owned()), "{events:?}");
     assert!(
+        events.contains(&"finding j1 provider-backoff".to_owned()),
+        "{events:?}"
+    );
+    assert!(
         !events.iter().any(|event| event.starts_with("tainted")),
         "{events:?}"
     );
     assert!(!h.life.is_tainted());
     assert!(h.life.busy_slots().is_empty(), "the slot is free");
-    assert_eq!(providers.sent("release").len(), 4, "asked at every step");
+    assert_eq!(
+        providers.sent("release").len(),
+        1,
+        "asked once: the steps that follow wait"
+    );
     assert!(h.dir.path("state/providers/j1.json").is_file());
 
     h.clock.advance(59_999);
-    assert!(names(&h.life.step()).is_empty());
-    assert_eq!(providers.sent("release").len(), 5);
+    assert_eq!(names(&h.life.step()), ["finding j1 provider-backoff"]);
+    assert_eq!(providers.sent("release").len(), 2);
     h.clock.advance(1);
     let events = h.life.step();
     assert_eq!(names(&events), ["finding j1 provider-release-failed"]);
@@ -175,10 +214,16 @@ fn a_failed_release_never_taints_the_host() {
         found.message,
         "not released within a minute: tier source 0; left to the providers' own collection"
     );
-    assert_eq!(providers.sent("release").len(), 6);
+    assert_eq!(
+        providers.sent("release").len(),
+        2,
+        "the last failure's wait has not passed"
+    );
     assert!(!h.dir.path("state/providers/j1.json").exists());
     assert!(names(&h.life.step()).is_empty(), "reported once");
-    assert_eq!(providers.sent("release").len(), 6, "given up");
+    h.clock.advance(60_000);
+    assert!(names(&h.life.step()).is_empty());
+    assert_eq!(providers.sent("release").len(), 2, "given up");
     assert!(!h.life.is_tainted());
 }
 
@@ -205,6 +250,14 @@ fn a_run_releases_its_sources_one_by_one_and_keeps_its_record_until_the_last() {
         ["provider release tier j1#0", "provider release tier j1#1"]
     );
     assert!(record.is_file(), "source 1 is still held");
+    h.life.step();
+    assert_eq!(
+        providers.sent("release").len(),
+        2,
+        "the refusal has it wait"
+    );
+    // The first wait is at most 1 s.
+    h.clock.advance(1_000);
     h.life.step();
     assert!(record.is_file(), "its call is still out");
     h.life.step();
