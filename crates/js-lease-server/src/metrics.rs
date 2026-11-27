@@ -21,7 +21,9 @@
 //!   `host-lost`), and each job that ended so with no attempt left under its retry policy
 //!   (`js_job_attempts_exhausted_total`) (`docs/design/job-retry-and-completion-callback.md`,
 //!   section 4), and how long each phase of each `SubmitJob` call took
-//!   (`js_submit_phase_seconds`, by `phase`, [`SubmitPhase`]). A start failure or a loss is
+//!   (`js_submit_phase_seconds`, by `phase`, [`SubmitPhase`]), and each hello or heartbeat
+//!   refused 413 `body-too-large` for a body over the cap (`js_agent_bodies_too_large_total`,
+//!   by `route`, [`AgentRoute`]). A start failure or a loss is
 //!   counted as the end of a job, so an attempt that
 //!   retries counts as a retry and not as a start failure or a loss. Each is counted as
 //!   its commit lands, so a pass that fails later still counts what it ended. The paths that count them call
@@ -106,6 +108,29 @@ pub(crate) trait MetricsSink: Send + Sync + std::fmt::Debug {
     fn attempts_exhausted(&self) {}
     /// The phase `phase` of a `SubmitJob` call took `took`; by default, nothing is counted.
     fn submit_phase(&self, _phase: SubmitPhase, _took: Duration) {}
+    /// An agent's request on `route` was refused 413 `body-too-large`, its body over the cap;
+    /// by default, nothing is counted.
+    fn agent_body_too_large(&self, _route: AgentRoute) {}
+}
+
+/// An agent route whose body is read whole and held to the cap: the label of
+/// `js_agent_bodies_too_large_total`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentRoute {
+    /// `POST /v1/agent/hello`.
+    Hello,
+    /// `POST /v1/agent/heartbeat`.
+    Heartbeat,
+}
+
+/// The agent routes, in the order they are written, as the metric spells them.
+const AGENT_ROUTES: [&str; 2] = ["hello", "heartbeat"];
+
+fn route_slot(route: AgentRoute) -> usize {
+    match route {
+        AgentRoute::Hello => 0,
+        AgentRoute::Heartbeat => 1,
+    }
 }
 
 /// A phase of a `SubmitJob` call (`job_api/submit.rs`, steps 1 to 5): the label of
@@ -573,6 +598,7 @@ pub(crate) struct Recorder {
     attempts_exhausted: AtomicU64,
     callbacks: [AtomicU64; 4],
     submit_phases: [Histogram; 6],
+    bodies_too_large: [AtomicU64; 2],
 }
 
 impl Default for Recorder {
@@ -593,6 +619,7 @@ impl Default for Recorder {
             attempts_exhausted: AtomicU64::new(0),
             callbacks: Default::default(),
             submit_phases: std::array::from_fn(|_| Histogram::new(SUBMIT_PHASE)),
+            bodies_too_large: Default::default(),
         }
     }
 }
@@ -667,6 +694,10 @@ impl MetricsSink for Recorder {
 
     fn submit_phase(&self, phase: SubmitPhase, took: Duration) {
         self.submit_phases[phase_slot(phase)].observe(took);
+    }
+
+    fn agent_body_too_large(&self, route: AgentRoute) {
+        self.bodies_too_large[route_slot(route)].fetch_add(1, Ordering::Relaxed);
     }
 }
 

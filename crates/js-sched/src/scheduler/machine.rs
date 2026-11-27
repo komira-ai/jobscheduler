@@ -161,8 +161,7 @@ impl StateMachine for Scheduler {
                         w.load_state.accept(
                             load,
                             self.now,
-                            &w.capacity,
-                            w.raw_memory_bytes,
+                            (&w.capacity, w.raw_memory_bytes, w.leases > 0),
                             &adm.cfg,
                             &mut adm.counters,
                         );
