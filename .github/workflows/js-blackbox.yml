@@ -1,18 +1,18 @@
 # The black-box tests of the released js-agent and js-server (J1 and J6: the agent's session and
-# the server's readiness, each with a job),
-# on a GitHub-hosted Linux x86_64 runner, a whole machine with root: the integration test
-# `released` of crates/js-blackbox (`#[ignore]`d, run as root) installs the js-agent .deb of the
-# release from the apt suite `testing` and starts it under systemd with flags of the farm's shape,
-# loads the js-server image of the release (from the GitHub release, checked against its
-# SHA256SUMS) into Docker and starts it as the control host starts it, over a Postgres store, and
-# runs jobs through them: the agent's session and a job (J1), the server's readiness and a job
-# (J6), the server restarted while a job runs, the agent updated from the previous release while
-# a job runs, the server unreachable for 60 s, and the server's name not found for 60 s. The test
-# takes the published bytes and nothing from the project's own hosts; the job image is the
-# runner's own `sleep`, served from a registry on the loopback.
+# the server's readiness, each with a job), on a GitHub-hosted Linux x86_64 runner, a whole
+# machine with root. The program `released` of crates/js-blackbox (no libtest harness) runs its
+# wrapper, `released rig`, as root: it installs the js-agent .deb of the release from the apt
+# suite `testing`, loads the js-server image of the release (from the GitHub release, checked
+# against its SHA256SUMS) into Docker, starts the fakes of their neighbours (a registry on the
+# loopback with the job image, a mount provider on tierstore's socket; the server's store is its
+# own SQLite store), and runs the test itself, `released scenarios`, which starts the server as
+# the control host starts it and the agent under systemd with flags of the farm's shape, and runs
+# jobs through them: the agent's session and a job (J1), the server's readiness and a job (J6),
+# the server's name not found for 60 s, the server unreachable for 60 s, the server restarted and
+# the agent updated from the previous release while a job runs. It takes the published bytes and
+# nothing from the project's own hosts, and installs no other service's package.
 #
-# The release is the one input. The test reads it from its own crate's version: the checkout is
-# stamped with it first (`cargo xtask release stamp`), as the release's build is.
+# The release is the one input, given to the wrapper as its --version.
 #
 # It is called, never started by an event of its own but a manual run: by release.yml's
 # `blackbox` on a push to main, after `check-apt` passed (the release is then published and in
@@ -59,11 +59,9 @@ jobs:
         with:
           persist-credentials: false
       - run: rustup toolchain install
-      - name: Stamp the checkout with the release's version
-        run: cargo xtask release stamp --to "$VERSION"
       - name: Build the test as the runner's user
         run: cargo test --locked -p js-blackbox --test released --no-run
       - name: Install, start and drive the released agent and server, as root
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo
-        run: cargo test --locked -p js-blackbox --test released -- --ignored --nocapture --test-threads=1
+        run: cargo test --locked -p js-blackbox --test released -- rig --version "$VERSION"

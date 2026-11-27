@@ -14,9 +14,15 @@ publish.workspace = true
 # agent runs). The library is what the tests judge by: the pass conditions as numbers, the wait
 # that measures them on an injected clock, the readers of the job service's answers, and the
 # farm's flag shapes (farm/) with what fills them in. Its own tests (tests/judge.rs) run
-# everywhere. The black-box test (tests/released.rs) is `#[ignore]`d, Linux only and run as root
-# on a disposable GitHub-hosted runner by .github/workflows/js-blackbox.yml, which release.yml
-# calls after `check-apt`.
+# everywhere. The black-box test (tests/released.rs) is a program with modes and no libtest
+# harness: run with no mode (as `cargo test` and cargo-nextest run it) it holds no test; its
+# wrapper, `released rig`, runs as root on a disposable GitHub-hosted runner by
+# .github/workflows/js-blackbox.yml, which release.yml calls after `check-apt`.
+
+[[test]]
+name = "released"
+path = "tests/released.rs"
+harness = false
 
 [dependencies]
 # The monotonic clock the wait reads.
@@ -30,10 +36,13 @@ js-system-clock = { path = "../js-system-clock" }
 # Everything the black-box test uses besides that is for Linux alone; none of it is built for
 # macOS, where the test does not exist.
 [target.'cfg(target_os = "linux")'.dev-dependencies]
+# The modes of the program and their flags.
+clap.workspace = true
 # The job service's client (the HTTP gateway and the host list), over the server's TLS.
 js-client = { path = "../js-client" }
-# The state schema the released server needs in its Postgres store (the installer's part).
-js-state = { path = "../js-state", features = ["postgres"] }
+# The fake mount provider: the protocol's service, served over a Unix socket.
+js-proto = { path = "../js-proto" }
+tonic = { workspace = true, features = ["transport"] }
 # The scratch directory, and the registry the job image is pulled from, on the loopback.
 js-testkit = { path = "../js-testkit", features = ["oci-registry"] }
 # The job image's layer, a gzipped tar.
@@ -44,16 +53,16 @@ rustix.workspace = true
 sha2.workspace = true
 hex.workspace = true
 tar.workspace = true
-tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["net", "rt", "rt-multi-thread"] }
 
 [lints]
 workspace = true
 
 [package.metadata.buildrules]
 # The farm lane's `//:ci` (docs/farm.md) checks the format of, builds and lints this package but
-# does not run its tests: the black-box test is an `#[ignore]`d root test of released artifacts on
-# a disposable runner, and buildrules' test gate refuses a test target with an ignored test. ci.yml
-# runs tests/judge.rs with the workspace, and its coverage job measures the library.
+# does not run its tests: the black-box test installs released packages as root on a disposable
+# runner, which no build-farm action can. ci.yml runs tests/judge.rs with the workspace, and its
+# coverage job measures the library.
 
 [package.metadata.buildrules.actions]
 ci = ["fmt", "lint"]

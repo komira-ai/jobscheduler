@@ -1246,10 +1246,11 @@ dependencies = [
 name = "js-blackbox"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "flate2",
  "hex",
  "js-client",
- "js-state",
+ "js-proto",
  "js-system-clock",
  "js-testkit",
  "js-types",
@@ -1259,6 +1260,7 @@ dependencies = [
  "sha2",
  "tar",
  "tokio",
+ "tonic",
 ]
 
 [[package]]

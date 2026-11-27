@@ -1,22 +1,22 @@
 //! The released js-agent: the `.deb` installed with apt from the suite `testing` of the
 //! project's repository, as `check-apt` installs it, on a host made ready as a farm host is
-//! (the scratch disk, hostkeeper's identity and facts files, tierstore's user and roots, the flags
-//! file of the farm's shape), and run by the package's own unit, `js-agent-crun.service`.
+//! (the scratch disk, hostkeeper's identity and facts files, tierstore's account and roots, the
+//! flags file of the farm's shape), which the wrapper does; and run by the package's own unit,
+//! `js-agent-crun.service`, which the scenarios start, restart and update.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use js_blackbox::{AGENT_FLAGS, Version, previous_version, render};
 
-use crate::host::{directory, http_get, put, run, try_run};
+use crate::host::{directory, http_get, put, run, run_in, try_run};
 
 /// The unit the package installs and the farm's hosts run.
 pub const UNIT: &str = "js-agent-crun.service";
 
 /// The address the unit gives the agent's health route (`--health-listen`).
-const HEALTH: SocketAddr =
-    SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 7311);
+pub const HEALTH: &str = "127.0.0.1:7311";
 
 /// The project's apt repository, and the keyring its index is signed with.
 const APT: &str = "https://packages.komira.ai/apt";
@@ -81,8 +81,40 @@ pub fn previous(released: Version) -> Version {
     })
 }
 
-/// Installs js-agent `version` from the suite (an older one too), and checks the installed
-/// program says it.
+/// Downloads the package of js-agent `version` from the suite into `dir`: its path.
+pub fn download(version: Version, dir: &Path) -> PathBuf {
+    run_in(
+        dir,
+        "apt-get",
+        &["download", &format!("js-agent={version}")],
+    );
+    let name = format!("js-agent_{version}_amd64.deb");
+    let path = dir.join(&name);
+    assert!(
+        path.is_file(),
+        "apt-get download made no {name} in {}",
+        dir.display()
+    );
+    path
+}
+
+/// Installs the package file `deb` (an older one too), as the update does, and checks the
+/// installed program says `version`.
+pub fn install_file(deb: &Path, version: Version) {
+    run(
+        "apt-get",
+        &[
+            "install",
+            "--yes",
+            "--no-install-recommends",
+            "--allow-downgrades",
+            deb.to_str().expect("a UTF-8 path"),
+        ],
+    );
+    check_version(version);
+}
+
+/// Installs js-agent `version` from the suite, and checks the installed program says it.
 pub fn install(version: Version) {
     run(
         "apt-get",
@@ -94,6 +126,10 @@ pub fn install(version: Version) {
             &format!("js-agent={version}"),
         ],
     );
+    check_version(version);
+}
+
+fn check_version(version: Version) {
     let said = run("/usr/bin/js-agent", &["--version"]);
     assert_eq!(
         said.lines().next(),
@@ -194,15 +230,15 @@ pub fn prepare_host(
 }
 
 /// Starts the unit.
-pub fn start() {
-    run("systemctl", &["start", UNIT]);
+pub fn start(unit: &str) {
+    run("systemctl", &["start", unit]);
 }
 
 /// Restarts the unit after a new package: systemd reads the unit again, and the stop takes the
 /// handover file if there is one.
-pub fn restart() {
+pub fn restart(unit: &str) {
     run("systemctl", &["daemon-reload"]);
-    run("systemctl", &["restart", UNIT]);
+    run("systemctl", &["restart", unit]);
 }
 
 /// Writes the file the update hook writes before it stops the agent, which makes the stop leave
@@ -217,18 +253,18 @@ pub fn ask_for_handover() {
 }
 
 /// The agent's health route: `Ok` only for 200 (`placeable`: a session's welcome held, no taint).
-pub fn healthy() -> Result<(), String> {
-    match http_get(HEALTH, "/healthz")? {
+pub fn healthy(addr: SocketAddr) -> Result<(), String> {
+    match http_get(addr, "/healthz")? {
         (200, _) => Ok(()),
         (status, body) => Err(format!("the agent's /healthz answered {status}: {body}")),
     }
 }
 
 /// The unit's last journal lines, for a failure message.
-pub fn journal() -> String {
+pub fn journal(unit: &str) -> String {
     try_run(
         "journalctl",
-        &["--unit", UNIT, "--no-pager", "--lines", "40"],
+        &["--unit", unit, "--no-pager", "--lines", "40"],
     )
     .unwrap_or_else(|e| e)
 }

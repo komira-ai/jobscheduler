@@ -19,7 +19,20 @@ const PROBE_LIMIT: Duration = Duration::from_secs(5);
 ///
 /// A line with the command, its exit status and what it printed on its standard error.
 pub fn try_run(program: &str, args: &[&str]) -> Result<String, String> {
-    let output = Command::new(program)
+    try_run_in(None, program, args)
+}
+
+/// [`run`] in the working directory `dir`.
+pub fn run_in(dir: &Path, program: &str, args: &[&str]) -> String {
+    try_run_in(Some(dir), program, args).unwrap_or_else(|e| panic!("{e}"))
+}
+
+fn try_run_in(dir: Option<&Path>, program: &str, args: &[&str]) -> Result<String, String> {
+    let mut command = Command::new(program);
+    if let Some(dir) = dir {
+        command.current_dir(dir);
+    }
+    let output = command
         .args(args)
         .env("DEBIAN_FRONTEND", "noninteractive")
         .output()

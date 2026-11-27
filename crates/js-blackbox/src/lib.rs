@@ -4,7 +4,7 @@
 //! `.deb` of the release, installed with apt from the suite `testing` and started under systemd
 //! with flags of the farm's shape ([`AGENT_FLAGS`]), and the js-server image of the release (the
 //! js-lease-server OCI image, a file of the GitHub release), loaded into Docker and started with
-//! the control host's command line ([`SERVER_ARGS`]) over a Postgres store. They drive both only
+//! the control host's command line ([`SERVER_ARGS`]), their neighbours faked. They drive both only
 //! from outside: the job service's API, the agent's health route, the files the package installs,
 //! the jobs the agent runs. This crate is the part of them that decides: the pass conditions as
 //! numbers (the constants below), the wait that measures them on an injected clock

@@ -5,7 +5,9 @@
 # under /etc/js-lease-server; the black-box test starts the container the same way. What
 # differs is the network: the control host listens on all addresses of an overlay network behind
 # a proxy, and the test listens on this host's loopback (Docker's host network), on ports it
-# picks (the placeholders). The store is a Postgres database there and here.
+# picks (the placeholders). The store is the other difference: a Postgres database there, and
+# here a SQLite file in the state directory, which the store file names; the one line marked as
+# the test's own below lets the server take it.
 #
 # When the control host's command line gains, loses or changes an argument, change this file in
 # the same way.
@@ -37,6 +39,8 @@ resume
 /etc/js-lease-server/agent-client-ca.pem
 --store
 /run/secrets/store.url
+# The test's own: the store is a SQLite file, the fake of the control host's Postgres database.
+--allow-sqlite-store
 --client-token
 kbf=/run/secrets/kbf-client-token
 --cold-cpu-millis

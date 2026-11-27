@@ -3,10 +3,9 @@
 //! repository.
 //!
 //! The workflow is called by the release and run by hand, never started by another event; it has
-//! one job on a hosted Linux x86_64 runner with `contents: read` and no secret; it stamps the
-//! checkout with the release's version (the test reads the release from its crate's version),
-//! builds the test as the runner's user and runs it as root through cargo's target runner, so
-//! nothing is built as root. The release calls it once `check-apt` passed, for a push to main
+//! one job on a hosted Linux x86_64 runner with `contents: read` and no secret; it builds the test
+//! as the runner's user and runs its wrapper (`released rig`, given the release as its
+//! `--version`) as root through cargo's target runner, so nothing is built as root. The release calls it once `check-apt` passed, for a push to main
 //! that released, and no job of the release waits for it.
 
 use std::path::Path;
@@ -151,12 +150,11 @@ fn problems(text: &str) -> Vec<String> {
     let all = steps(&job_lines);
     let position = |needle: &str| all.iter().position(|s| s.join("\n").contains(needle));
     let step_text = |at: usize| all.get(at).map_or(String::new(), |s| s.join("\n"));
-    let stamp = position("cargo xtask release stamp --to \"$VERSION\"");
     let build = position("--no-run");
-    let run = position("--ignored");
+    let run = position("-- rig ");
     want(
-        matches!((stamp, build, run), (Some(s), Some(b), Some(r)) if s < b && b < r),
-        "the checkout is not stamped with the release before the test is built, and built before it runs",
+        matches!((build, run), (Some(b), Some(r)) if b < r),
+        "the test is not built before its wrapper runs",
     );
     want(
         build.is_some_and(|b| {
@@ -167,10 +165,10 @@ fn problems(text: &str) -> Vec<String> {
     want(
         run.is_some_and(|r| {
             step_text(r).contains(
-                "cargo test --locked -p js-blackbox --test released -- --ignored --nocapture --test-threads=1",
+                "cargo test --locked -p js-blackbox --test released -- rig --version \"$VERSION\"",
             )
         }),
-        "the run is not the released test's ignored tests one at a time",
+        "the run is not the released test's wrapper given the release's version",
     );
     want(
         joined.matches("sudo").count() == 1
@@ -349,14 +347,14 @@ fn each_way_of_leaving_the_workflows_shape_is_named() {
             "keeps the credentials",
         ),
         (
-            "        run: cargo xtask release stamp --to \"$VERSION\"\n",
-            "        run: |\n          cargo xtask release stamp --to \"$VERSION\"\n",
+            "        run: cargo test --locked -p js-blackbox --test released --no-run\n",
+            "        run: |\n          cargo test --locked -p js-blackbox --test released --no-run\n",
             "more than one command line",
         ),
         (
-            "      - name: Stamp the checkout with the release's version\n        run: cargo xtask release stamp --to \"$VERSION\"\n",
+            "      - name: Build the test as the runner's user\n        run: cargo test --locked -p js-blackbox --test released --no-run\n",
             "",
-            "not stamped with the release before the test is built",
+            "the test is not built before its wrapper runs",
         ),
         (
             "--test released --no-run",
@@ -364,9 +362,9 @@ fn each_way_of_leaving_the_workflows_shape_is_named() {
             "the test built is not js-blackbox's released",
         ),
         (
-            "-- --ignored --nocapture --test-threads=1",
-            "-- --ignored --nocapture",
-            "the released test's ignored tests one at a time",
+            "-- rig --version \"$VERSION\"",
+            "-- rig --version 0.1.0",
+            "given the release's version",
         ),
         (
             "          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo\n        run: cargo test",
@@ -383,8 +381,8 @@ fn each_way_of_leaving_the_workflows_shape_is_named() {
     }
     let expands = edit(
         &text,
-        "run: cargo xtask release stamp --to \"$VERSION\"",
-        "run: cargo xtask release stamp --to \"${{ inputs.version }}\"",
+        "-- rig --version \"$VERSION\"",
+        "-- rig --version \"${{ inputs.version }}\"",
     );
     assert!(
         problems(&expands)

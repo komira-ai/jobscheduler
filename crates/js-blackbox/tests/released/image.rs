@@ -111,3 +111,34 @@ fn libraries(ldd: &str) -> Vec<String> {
         })
         .collect()
 }
+
+/// The flags of `released fake-registry`.
+#[derive(Debug, clap::Args)]
+pub struct Flags {
+    /// The file to write, once the registry serves: its port on the first line, the job
+    /// image's reference on the second.
+    #[arg(long)]
+    pub out: std::path::PathBuf,
+}
+
+/// Serves the job image until the process is stopped.
+pub fn serve(flags: &Flags) {
+    let registry = Registry::start();
+    // Written aside and renamed, so the wrapper never reads half of it.
+    let aside = flags.out.with_extension("part");
+    crate::host::put(
+        &aside,
+        format!("{}\n{}\n", registry.port, registry.image),
+        0o644,
+        (0, 0),
+    );
+    std::fs::rename(&aside, &flags.out)
+        .unwrap_or_else(|e| panic!("rename {}: {e}", aside.display()));
+    eprintln!(
+        "fake registry: serving {} on 127.0.0.1:{}",
+        registry.image, registry.port
+    );
+    loop {
+        std::thread::park();
+    }
+}

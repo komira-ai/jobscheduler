@@ -773,9 +773,14 @@ Not proven until the first real run on `main`, and fixed there if it differs:
 
 ## The black-box tests
 
-`blackbox` (after `check-apt` passed) calls `js-blackbox.yml`, which runs the ignored test
-`released` of `crates/js-blackbox` as root on a hosted `ubuntu-24.04` runner. It takes the release as
-the farm takes it and drives it only from outside:
+`blackbox` (after `check-apt` passed) calls `js-blackbox.yml`, which runs the program `released`
+of `crates/js-blackbox` (no libtest harness) as root on a hosted `ubuntu-24.04` runner. It is two
+parts. The wrapper, `released rig --version X.Y.Z`, installs and wires; it is the part another
+runner (an image of its own) would replace. The test itself, `released scenarios`, is given as
+flags what was installed and where each fake listens, starts the services under test, runs the
+scenarios and holds each to its pass condition, printing `PASS`, `FAIL` or `NOT RUN` for each.
+
+The released artifacts, taken as the farm takes them and driven only from outside:
 
 - the js-agent `.deb` of the release, installed with apt from the suite `testing` (as `check-apt`
   installs it), on a host made ready as a farm host is (a scratch disk with project quota,
@@ -785,9 +790,20 @@ the farm takes it and drives it only from outside:
 - the js-lease-server image of the release, downloaded from the GitHub release and checked against
   its `SHA256SUMS`, loaded into Docker and started with the control host's command line
   (`crates/js-blackbox/farm/js-server.args`: its user, a read-only root, no capability, TLS on every
-  listener, hosts admitted by their certificates), over a Postgres store in a container of its own
-  to which the test applies the state schema first;
-- jobs that run the runner's own `sleep` in an image the test serves from a registry on the loopback.
+  listener, hosts admitted by their certificates).
+
+Their neighbours are fakes, each a process of its own speaking the real protocol, and no other
+service's package is installed:
+
+- the job image is served by a registry on the loopback (`released fake-registry`): the runner's own
+  `sleep`, which the agent reaches through its `--image-allow-loopback` entry;
+- tierstore's mount provider is `released fake-provider`, serving `jobscheduler.provider.v1` on the
+  socket the farm's flags name; it answers `Prepare` one way, chosen when it starts (`success`,
+  `refuse`, `unavailable`, `full` or `hold`), and the scenarios use `success` (J1's job mounts a tree
+  from it);
+- the server's Postgres store is the server's own SQLite store in its state directory (`--store`
+  naming `sqlite:...`, with `--allow-sqlite-store`, the one argument of `js-server.args` that is the
+  test's own).
 
 The `farm/` files keep the shape of the flags and the command line the farm commits (the same flags
 and kinds of value), with placeholders for the farm's names, addresses and ports; a change to the
