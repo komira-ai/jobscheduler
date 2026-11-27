@@ -11,7 +11,7 @@ use js_types::sched::usage::NodeLoad;
 use js_types::{HostId, Resources, Shape};
 
 use super::super::curve_room::{LiveJob, leaves_memory};
-use crate::curves::{CurveSettings, HostMemoryShadow, MemoryShadowView};
+use crate::curves::{CurveSettings, HostMemoryShadow};
 use crate::engine::jobs::OpenHost;
 use crate::engine::rig::{Tables, at, host};
 use crate::engine::{Engine, Settings};
@@ -309,22 +309,40 @@ fn a_placement_the_curve_would_not_have_made_is_counted_later_with_its_slot() {
 
 /// Asserts what a host with no capacity is: the room does not hold it to a memory figure, so the
 /// shadow has no table of it, a job placed there is counted in no verdict, and a reading of it
-/// heard before the walk leaves the view once the walk has no table of it. Catches a host
-/// projected against a capacity it does not have, and a forgotten host kept in the view.
+/// heard before the walk leaves the view once the walk has no table of it. Beside it, host `b` is
+/// held to 1 GiB, too little for the job's flat booking, so the walk has a table (of `b`) and
+/// judges the round, yet the job is placed on `a`. Catches a host projected against a capacity it
+/// does not have, a placement there counted against another host's table, and a forgotten host
+/// kept in the view.
 #[test]
 fn a_host_with_no_capacity_is_not_judged() {
     let tables = Tables::new();
     let mut engine = engine_in(Curves::Shadow);
+    engine.host_up(&host("b"), &shape(), at(0));
     taught(&mut engine, &tables, 24);
     let link = queued_of(&tables, "link-new", "link");
     engine.heard(&host("a"), Some(&reading(1, GIB)), at(NOW_MS - 1_000));
     assert!(!engine.memory_shadow_view().unwrap().hosts.is_empty());
-    let placed = walk(&mut engine, &[link], (false, &[]), NOW_MS);
-    assert_eq!(placed.len(), 1);
-    assert_eq!(
-        engine.memory_shadow_view(),
-        Some(MemoryShadowView::default())
-    );
+    let small = Capacity {
+        cpu_millis: 88_000,
+        memory_bytes: GIB,
+        disk_bytes: 0,
+        accelerators: 0,
+    };
+    let b = OpenHost {
+        capacity: Some(small),
+        ..OpenHost::default()
+    };
+    let mut open = open(false);
+    open.insert(host("b"), b);
+    engine.set_room(Room::of(&open, &[]));
+    let (decided, _) = engine.walk_jobs(&[link], &open, at(NOW_MS));
+    let placed: Vec<HostId> = decided.into_iter().map(|(_, on, _, _)| on).collect();
+    assert_eq!(placed, vec![host("a")]);
+    let view = engine.memory_shadow_view().unwrap();
+    assert_eq!((view.same, view.sooner, view.later), (0, 0, 0));
+    let hosts: Vec<&HostId> = view.hosts.keys().collect();
+    assert_eq!(hosts, vec![&host("b")]);
 }
 
 /// Asserts which jobs are projected by their class: one that leaves its memory at 0, not one
