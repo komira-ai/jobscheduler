@@ -102,10 +102,9 @@ fn times(n: usize, answer: impl Fn() -> Reply) -> Vec<Reply> {
 /// The last heartbeat sent.
 fn last_beat(sent: &Sent) -> Heartbeat {
     let sent = sent.borrow();
-    let beats = sent
-        .iter()
-        .filter(|(path, _)| path == js_agent::HEARTBEAT_PATH);
-    let (_, body) = beats.last().expect("a heartbeat was sent");
+    let mut beats = sent.iter().rev();
+    let last = beats.find(|(path, _)| path == js_agent::HEARTBEAT_PATH);
+    let (_, body) = last.expect("a heartbeat was sent");
     serde_json::from_value(body.clone()).expect("a heartbeat")
 }
 

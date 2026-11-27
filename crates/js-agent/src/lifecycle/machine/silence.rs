@@ -99,15 +99,15 @@ impl Lifecycle {
             Stage::Preparing(waiting) => waiting.phase != Phase::Creating,
             _ => false,
         });
+        // Every job taken here waits to start, so the stop is always asked of a live job.
         for job in waiting {
-            if job.request_stop_for(Cause::Silenced, false) {
-                retired.insert_with(&job.run_id, Some(&job.lease_id));
-                let message = format!(
-                    "the server was not heard for {silent} ms: the job, which had not started, \
-                     is not started"
-                );
-                job.note(code::SILENCE_STOP, message, events);
-            }
+            job.request_stop_for(Cause::Silenced, false);
+            retired.insert_with(&job.run_id, Some(&job.lease_id));
+            let message = format!(
+                "the server was not heard for {silent} ms: the job, which had not started, is \
+                 not started"
+            );
+            job.note(code::SILENCE_STOP, message, events);
         }
     }
 }
