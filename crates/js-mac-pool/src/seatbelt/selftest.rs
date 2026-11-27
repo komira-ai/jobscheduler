@@ -28,9 +28,11 @@
 //! restart.
 //!
 //! A pass is an [`Assurance`], which [`Policy::allowing`](super::Policy::allowing)
-//! takes; a failure lists every step that was wrong and why, and the agent then refuses
-//! the bundle and allow-model capabilities and logs the list. The open model is
-//! unaffected. This crate starts nothing: the caller runs [`Step::argv`] with the
+//! takes; a failure lists every step that was wrong and why, and the agent then does not
+//! start: it exits naming the list, so it never offers a bundle it could not run under the
+//! allow model (its hello names the bundles, and is built before the self-test runs and sent
+//! after it).
+//! This crate starts nothing: the caller runs [`Step::argv`] with the
 //! environment of [`Step::env`], as the pool user, and reports what each step did
 //! ([`Outcome`]): a denied step passes only when it was refused with the kernel's
 //! "Operation not permitted", so a spawn error, a signal or a timeout is not a denial.
@@ -254,6 +256,15 @@ impl Step {
     #[must_use]
     pub fn command(&self) -> (&str, &[OsString]) {
         (&self.program, &self.args)
+    }
+
+    /// The profile the step runs under: the allow profile for a [`Role::Denied`] or a
+    /// [`Role::Allowed`] step, none for a [`Role::Control`]. For a caller that applies it in
+    /// the step's own process, as a job's supervisor does, and starts [`Step::command`]
+    /// under it.
+    #[must_use]
+    pub fn profile(&self) -> Option<&Profile> {
+        self.profile.as_ref()
     }
 }
 

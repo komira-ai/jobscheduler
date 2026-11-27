@@ -282,6 +282,30 @@ pub fn survey(files: &dyn FileReader, runner: &dyn CommandRunner, site: Site<'_>
     }
 }
 
+/// The proof objects of `xcodes` (the ready ones a [`survey`] found) that a profile of the allow
+/// read model grants ([`js_mac_pool::seatbelt::ReadGrant::Xcode`]): each is put to the catalog
+/// again, as [`survey`] does, through `runner`, and one that is no longer ready is left out.
+/// `owner` is the user that may own an app besides root ([`Site::owner`]). More Xcodes than
+/// the catalog takes, or a build given twice, give none.
+pub fn hosts(runner: &dyn CommandRunner, xcodes: &[Xcode], owner: u32) -> Vec<HostXcode> {
+    let flags: Vec<XcodeFlag> = xcodes
+        .iter()
+        .filter_map(|xcode| {
+            XcodeFlag::parse(&format!("{}={}", xcode.build, xcode.app.display())).ok()
+        })
+        .collect();
+    let catalog = Catalog::survey(&flags, owner, |question| ask(runner, question));
+    catalog
+        .map(|catalog| {
+            catalog
+                .all()
+                .iter()
+                .filter_map(|xcode| xcode.host.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// What a state that is not ready means, for the warning.
 fn not_ready(state: State) -> &'static str {
     match state {

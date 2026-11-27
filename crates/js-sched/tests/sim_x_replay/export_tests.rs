@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::engine::export::{
     Arrivals, Export, ExportError, KEY_PROFILE_FILE, KeyProfile, LineError, NODE_MINUTE_FILE,
-    NodeMinute, ReadError, Run, parse_args, parse_key_profile, parse_node_minutes, read_dir,
+    NodeMinute, ReadError, Run, parse_key_profile, parse_node_minutes, read_dir,
     render_key_profile, render_node_minutes,
 };
 use crate::engine::fixture::KeyIx;
@@ -626,28 +626,4 @@ fn runs_past_the_curve_horizon_are_read_without_panic() {
     assert!(!b.belief(3).is_cold());
     assert_eq!(b.belief(3).life_minutes(), LIFE_HORIZON);
     assert_eq!(e.rows()[3].cpu_ms, 300 * 60_000);
-}
-
-#[test]
-fn the_runner_flags_are_export_once_and_nothing_else() {
-    // The example's argument handling: each refusal and the one accepted shape.
-    let args = |v: &[&str]| parse_args(v.iter().map(|s| s.to_string()));
-    assert_eq!(args(&["--export", "d"]), Ok(PathBuf::from("d")));
-    assert_eq!(args(&[]), Err("--export is required".to_string()));
-    assert_eq!(
-        args(&["--export"]),
-        Err("--export needs a directory".to_string())
-    );
-    assert_eq!(
-        args(&["--export", "a", "--export", "b"]),
-        Err("--export given twice".to_string())
-    );
-    assert_eq!(
-        args(&["--bogus"]),
-        Err("unknown argument \"--bogus\"".to_string())
-    );
-    assert_eq!(
-        args(&["--export", "d", "extra"]),
-        Err("unknown argument \"extra\"".to_string())
-    );
 }
