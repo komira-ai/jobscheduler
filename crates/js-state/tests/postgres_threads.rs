@@ -13,10 +13,12 @@ use std::sync::Arc;
 use js_state::postgres::{Flaw, PostgresBackend, PostgresStore};
 use js_state::{Cond, Store, Txn};
 
-/// A store on a fresh schema of the test server.
-fn store() -> PostgresStore {
+/// A store on a fresh schema of the test server, with the backend that drops the schema when it
+/// is dropped: bound first, it is dropped after the store.
+fn store() -> (PostgresBackend, PostgresStore) {
     let backend = PostgresBackend::new(&js_testkit::database::server_url(), Flaw::None);
-    PostgresStore::open(&backend.fresh_config()).expect("the test database opens")
+    let store = PostgresStore::open(&backend.fresh_config()).expect("the test database opens");
+    (backend, store)
 }
 
 /// A write and a read of `key` in `store`: a transaction's statements and a read's.
@@ -35,7 +37,8 @@ fn write_and_read(store: &PostgresStore, key: &str) {
 // a read's, send their statements and start no thread.
 #[test]
 fn calls_from_the_pool_for_blocking_calls_start_no_thread() {
-    let store = Arc::new(store());
+    let (_backend, store) = store();
+    let store = Arc::new(store);
     let opened = store.threads_started();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -56,7 +59,7 @@ fn calls_from_the_pool_for_blocking_calls_start_no_thread() {
 // and each such call is counted. Outside any runtime a call starts none.
 #[test]
 fn calls_on_a_current_thread_runtime_start_a_thread_each_and_are_counted() {
-    let store = store();
+    let (_backend, store) = store();
     let opened = store.threads_started();
     write_and_read(&store, "outside");
     assert_eq!(store.threads_started(), opened);
