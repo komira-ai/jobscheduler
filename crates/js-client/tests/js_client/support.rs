@@ -91,7 +91,8 @@ impl Cert {
         }
     }
 
-    fn server_config(&self) -> Arc<ServerConfig> {
+    /// A server configuration with this certificate that asks no client certificate.
+    pub fn server_config(&self) -> Arc<ServerConfig> {
         let key = PrivateKeyDer::from(PrivatePkcs8KeyDer::from(self.key.clone()));
         let config = ServerConfig::builder_with_provider(Arc::new(default_provider()))
             .with_safe_default_protocol_versions()

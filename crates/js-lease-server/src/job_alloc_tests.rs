@@ -426,6 +426,7 @@ fn a_job_row_holds_the_peak_and_the_cpu_its_host_reported() {
         cpu_throttle: None,
         cpu_pressure_some: None,
         cpu_peak: None,
+        peak_swap_bytes: None,
     };
     let output = Output {
         usage: Some(usage),
@@ -513,6 +514,7 @@ fn a_repeat_run_of_one_build_writes_its_row_under_the_same_name() {
             cpu_throttle: None,
             cpu_pressure_some: None,
             cpu_peak: None,
+            peak_swap_bytes: None,
         };
         let output = Output {
             usage: Some(usage),
@@ -653,6 +655,7 @@ fn the_history_row_of_a_free_carries_the_jobs_cpu_series() {
         cpu_throttle: None,
         cpu_pressure_some: None,
         cpu_peak: None,
+        peak_swap_bytes: None,
     };
     let cases = [
         ("with-usage", Some(usage), Some(series.clone())),

@@ -27,6 +27,12 @@
 //!   below those roots only its own home and what a later grant (a tree, a mount) names. A
 //!   homes root in the own home ([`PolicyError::HomesInOwnHome`]) and a mount grant at or
 //!   above a homes root are refused.
+//! - A read-denied place cannot be given a second name or a copy: every read deny and every
+//!   homes root also denies hard links and clones (`file-link file-clone`) from it, so a run
+//!   cannot link or clone a denied file into its run directory and read it there under a
+//!   path no deny names. The own home is granted both back after the homes' denies, and the
+//!   read denies close a denied place inside it again; a mount grant gives both back for
+//!   what it grants, as it does reads.
 //! - A run's trees on the store's shared mount ([`MountTrees`]) are its only readable
 //!   places below the mount's root: the root is read-denied, each tree is read-granted
 //!   after the deny, and a mount grant that would reopen the root is refused.
@@ -81,7 +87,7 @@ mod selftest;
 mod tool;
 mod trees;
 
-pub use allow::{BaseSet, MacosMajor};
+pub use allow::{BaseSet, MacosMajor, NoBaseSet};
 pub use apply::{InitError, SandboxInit};
 pub use grant::{Match, PinnedTree, ReadGrant, is_directory_wide, kind_rules};
 pub use net::{MAX_PORTS, Net, Ports, PortsError};

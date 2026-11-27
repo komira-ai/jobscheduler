@@ -102,6 +102,11 @@ pub struct ResourceUsage {
     /// The most CPU its group used over a window of its run. `None` when the agent did not
     /// report it.
     pub cpu_peak: Option<CpuPeak>,
+    /// The most swap its group held at once, in bytes (`memory.swap.peak`), which
+    /// `peak_memory_bytes`, counting memory alone, leaves out of a run that a host short of
+    /// memory pushed into swap. `None` when the agent did not report it (an agent from before
+    /// the field, or a kernel that does not count a group's swap).
+    pub peak_swap_bytes: Option<u64>,
 }
 
 /// The length of each output stream of a job and the bytes of each that the host's capture
@@ -525,6 +530,7 @@ mod tests {
                 cpu_throttle: None,
                 cpu_pressure_some: None,
                 cpu_peak: None,
+                peak_swap_bytes: None,
             }),
             logs: Some(LENGTHS),
             cpu_series: Some(series()),
@@ -632,6 +638,7 @@ mod tests {
                             cpu_throttle: None,
                             cpu_pressure_some: None,
                             cpu_peak: None,
+                            peak_swap_bytes: None,
                         }),
                         logs: Some(LENGTHS),
                         cpu_series: Some(series()),

@@ -11,10 +11,10 @@ use js_proto::v1::{
 use tonic::transport::Channel;
 use tonic::{Code, Response, Status};
 
-use super::{JobHarness, Step, other_spec, spec, submit};
+use super::{JobHarness, Step, other_spec, retry, spec, submit};
 use crate::Verdict;
 
-type Client = JobServiceClient<Channel>;
+pub(super) type Client = JobServiceClient<Channel>;
 
 /// One behaviour every job service must have, named in the suite's output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -46,11 +46,30 @@ pub enum Scenario {
     ErrorsHaveStableCodes,
     /// The job records the client that submitted it and shows it on every read.
     ClientIsRecorded,
+    /// A job with a retry policy whose host is lost while it is placed, starting or running
+    /// is queued again with its attempt in the history, waits for its backoff, runs its next
+    /// attempt and ends there; when the attempts run out, or the job has no policy, it ends
+    /// lost.
+    RetryOnHostLoss,
+    /// A job with a retry policy whose start fails for a cause of its host is retried as a
+    /// lost host is; when the attempts run out, or the job has no policy, it ends failed to
+    /// start.
+    RetryOnStartFailure,
+    /// A job that exits with a nonzero code ends failed after its first attempt, whatever
+    /// its retry policy.
+    NoRetryOnNonzeroExit,
+    /// A job whose cancel was asked for while an attempt held a host is not retried when
+    /// that host is lost: it ends lost, with its cancel still shown.
+    NoRetryOnCancel,
+    /// The callback of a job with a retry policy stays armed through every retry, is due at
+    /// the job's final end alone (succeeded after a lost attempt, lost when the attempts ran
+    /// out, or cancelled while it waited for a retry), and is delivered once.
+    CallbackOnceAfterRetries,
 }
 
 impl Scenario {
     /// Every scenario, in the order [`super::run`] runs them.
-    pub const ALL: [Scenario; 10] = [
+    pub const ALL: [Scenario; 15] = [
         Scenario::SubmitIsIdempotent,
         Scenario::SameIdOtherSpecIsRefused,
         Scenario::StatesMoveInOrder,
@@ -61,6 +80,11 @@ impl Scenario {
         Scenario::RetentionHoldsUntilItsBound,
         Scenario::ErrorsHaveStableCodes,
         Scenario::ClientIsRecorded,
+        Scenario::RetryOnHostLoss,
+        Scenario::RetryOnStartFailure,
+        Scenario::NoRetryOnNonzeroExit,
+        Scenario::NoRetryOnCancel,
+        Scenario::CallbackOnceAfterRetries,
     ];
 
     /// Runs this scenario on a fresh harness. Every observation is made, and the verdict
@@ -78,6 +102,11 @@ impl Scenario {
             Self::RetentionHoldsUntilItsBound => retention(harness, &mut notes).await,
             Self::ErrorsHaveStableCodes => errors_are_stable(harness, &mut notes).await,
             Self::ClientIsRecorded => client_is_recorded(harness, &mut notes).await,
+            Self::RetryOnHostLoss => retry::on_host_loss(harness, &mut notes).await,
+            Self::RetryOnStartFailure => retry::on_start_failure(harness, &mut notes).await,
+            Self::NoRetryOnNonzeroExit => retry::not_on_nonzero_exit(harness, &mut notes).await,
+            Self::NoRetryOnCancel => retry::not_on_cancel(harness, &mut notes).await,
+            Self::CallbackOnceAfterRetries => retry::callback_once(harness, &mut notes).await,
         }
         notes.verdict()
     }
@@ -85,10 +114,10 @@ impl Scenario {
 
 /// The observations that did not hold, in the order they were made. A scenario makes
 /// every observation, so the verdict names everything that was wrong, not the first.
-struct Notes(Vec<String>);
+pub(super) struct Notes(Vec<String>);
 
 impl Notes {
-    fn expect(&mut self, held: bool, what: &str) {
+    pub(super) fn expect(&mut self, held: bool, what: &str) {
         if !held {
             self.0.push(what.to_string());
         }
@@ -96,7 +125,7 @@ impl Notes {
 
     /// The part of the answer `take` picks, or a note that the call failed or that the
     /// answer lacks it.
-    fn answer<R, T>(
+    pub(super) fn answer<R, T>(
         &mut self,
         what: &str,
         answer: Result<Response<R>, Status>,
@@ -118,7 +147,7 @@ impl Notes {
     }
 
     /// The status of an answer that must be a refusal with `code` and `message`.
-    fn refused<R>(
+    pub(super) fn refused<R>(
         &mut self,
         what: &str,
         answer: Result<Response<R>, Status>,
@@ -151,7 +180,7 @@ fn id_request(id: &str) -> GetJobRequest {
     }
 }
 
-async fn submitted(
+pub(super) async fn submitted(
     client: &mut Client,
     notes: &mut Notes,
     what: &str,
@@ -161,12 +190,12 @@ async fn submitted(
     notes.answer(what, answer, |response| response.job)
 }
 
-async fn read(client: &mut Client, notes: &mut Notes, id: &str) -> Option<v1::Job> {
+pub(super) async fn read(client: &mut Client, notes: &mut Notes, id: &str) -> Option<v1::Job> {
     let answer = client.get_job(id_request(id)).await;
     notes.answer(&format!("GetJob {id}"), answer, |response| response.job)
 }
 
-async fn cancelled(client: &mut Client, notes: &mut Notes, id: &str) -> Option<v1::Job> {
+pub(super) async fn cancelled(client: &mut Client, notes: &mut Notes, id: &str) -> Option<v1::Job> {
     let request = CancelJobRequest {
         job_id: id.to_string(),
     };
@@ -174,7 +203,11 @@ async fn cancelled(client: &mut Client, notes: &mut Notes, id: &str) -> Option<v
     notes.answer(&format!("CancelJob {id}"), answer, |response| response.job)
 }
 
-async fn result_of(client: &mut Client, notes: &mut Notes, id: &str) -> Option<v1::JobResult> {
+pub(super) async fn result_of(
+    client: &mut Client,
+    notes: &mut Notes,
+    id: &str,
+) -> Option<v1::JobResult> {
     let request = GetResultRequest {
         job_id: id.to_string(),
     };
@@ -191,7 +224,7 @@ async fn listed(client: &mut Client, notes: &mut Notes) -> Option<Vec<String>> {
     jobs.map(|jobs| jobs.into_iter().map(|job| job.id).collect())
 }
 
-fn state_is(job: &Option<v1::Job>, state: JobState) -> bool {
+pub(super) fn state_is(job: &Option<v1::Job>, state: JobState) -> bool {
     job.as_ref()
         .is_some_and(|job| job.state == i32::from(state))
 }
@@ -201,7 +234,7 @@ fn times_of(job: &Option<v1::Job>) -> v1::JobTimes {
 }
 
 /// Makes `steps` on `id`, noting each one the service refused.
-fn drive<H: JobHarness>(harness: &mut H, notes: &mut Notes, id: &str, steps: &[Step]) {
+pub(super) fn drive<H: JobHarness>(harness: &mut H, notes: &mut Notes, id: &str, steps: &[Step]) {
     for step in steps {
         let taken = harness.step(id, *step).is_ok();
         notes.expect(taken, &format!("{id}: {step:?} is taken"));
@@ -209,7 +242,7 @@ fn drive<H: JobHarness>(harness: &mut H, notes: &mut Notes, id: &str, steps: &[S
 }
 
 /// The steps that take a queued job to running.
-const TO_RUNNING: [Step; 3] = [Step::Place, Step::Start, Step::Run];
+pub(super) const TO_RUNNING: [Step; 3] = [Step::Place, Step::Start, Step::Run];
 
 /// Submits `id` and makes it run to its end with `code`.
 async fn ended<H: JobHarness>(harness: &mut H, notes: &mut Notes, id: &str, code: i32) {

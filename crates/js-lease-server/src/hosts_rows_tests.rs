@@ -45,11 +45,11 @@ fn ids(body: &Value) -> Vec<&str> {
 
 /// Asserts that the listing of a server lists a host only a row knows (it said hello to
 /// another server) beside its own, each once and in id order, with the state from when it was
-/// last heard, the phase, shape and capabilities, labels and no registry-only fields; and that
-/// a host in both the registry and the rows (each host whose hello it took) is listed as the
-/// registry sees it. Catches a
-/// listing that shows only the hosts a server took the hello of, and one that lists a host
-/// twice.
+/// last heard, the phase, shape and capabilities, labels, the agent version its hello gave and
+/// no registry-only fields; and that a host in both the registry and the rows (each host whose
+/// hello it took) is listed as the registry sees it. Catches a listing that shows only the
+/// hosts a server took the hello of, one that lists a host twice, and one that drops the agent
+/// version of a host only a row knows.
 #[tokio::test]
 async fn the_listing_shows_a_host_only_a_row_knows_once() {
     let mut first = clocked_rig("hosts_rows_a", false, NEVER);
@@ -69,7 +69,7 @@ async fn the_listing_shows_a_host_only_a_row_knows_once() {
     assert_eq!(by_row["releasing"], false);
     assert_eq!(by_row["memory"]["bookable_bytes"], 17_179_869_184u64);
     assert!(by_row["capabilities"].get("arch").is_some());
-    assert!(by_row.get("agent_version").is_none());
+    assert_eq!(by_row["agent_version"], "0.1.0");
     assert!(by_row.get("mark").is_none());
     assert!(by_row.get("taint").is_none());
     assert!(by_row["shape"].get("cpu_millis").is_some());

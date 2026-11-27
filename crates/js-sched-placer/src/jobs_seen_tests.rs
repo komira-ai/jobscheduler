@@ -447,5 +447,36 @@ fn a_placement_from_a_picture_another_server_changed_does_not_book_the_host() {
     );
 }
 
+/// Asserts the three answers of the lock a note takes without waiting: a free mutex is locked,
+/// one another thread holds is not waited for (`None`), and one a panic poisoned is locked as
+/// the plain lock takes it, so a panicked pass does not stop every note after it. It catches a
+/// helper that waits, and one that answers `None` for a poisoned mutex.
+#[test]
+fn the_note_s_lock_takes_a_free_or_poisoned_mutex_and_never_waits_for_a_held_one() {
+    let mutex = Mutex::new(1);
+    assert_eq!(super::lock_if_free(&mutex).map(|guard| *guard), Some(1));
+    {
+        let _held = mutex.lock().unwrap();
+        std::thread::scope(|scope| {
+            let other = scope.spawn(|| super::lock_if_free(&mutex).is_none());
+            assert!(
+                other.join().unwrap(),
+                "a held mutex was waited for or taken"
+            );
+        });
+    }
+    let poisoned = std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let _held = mutex.lock().unwrap();
+                panic!("poisons the mutex");
+            })
+            .join()
+    });
+    assert!(poisoned.is_err());
+    assert!(mutex.is_poisoned());
+    assert_eq!(super::lock_if_free(&mutex).map(|guard| *guard), Some(1));
+}
+
 #[path = "jobs_seen_submit_tests.rs"]
 mod submit;

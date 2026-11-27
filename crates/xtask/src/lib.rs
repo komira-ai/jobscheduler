@@ -76,6 +76,11 @@
 //!   <sha> --summary <file> --github-env <file>` ([`mac_test_artifact`]): a Mac root test binary
 //!   and the `js-agent` it starts, staged for an operator with their SHA-256 sums.
 //!
+//! - `agent-handover-check --server <url> --token-file <file> --out-dir <dir> --host <id>...
+//!   [--ca-cert <file>] [--samples <n>] [--interval-secs <s>] [--js <program>]` ([`handover`]):
+//!   read-only, through `js`, while a js-agent release rolls onto the hosts: fails a host that
+//!   did not move to a new agent version, was seen cordoned (it drained) or tainted, or lost,
+//!   failed or started again a job that ran on it before (docs/runbooks/agent-handover-check.md).
 //! - `deploy --service NAME... --version X.Y.Z --url <coordinator>` ([`deploy`]): the gamma
 //!   step of a release, setting the version of each service on the update coordinator in
 //!   order and waiting for it to converge (docs/release.md).
@@ -166,6 +171,7 @@ pub mod determinism;
 pub mod doc_refs;
 pub mod farm;
 pub mod fetch;
+pub mod handover;
 pub mod image;
 pub mod job_surface;
 pub mod layering;
@@ -203,6 +209,9 @@ pub enum Error {
     /// `release smoke-bundle` failed.
     #[error(transparent)]
     SmokeBundle(#[from] release::smoke_bundle::Error),
+    /// The agent hand-over check did not pass. A usage error of it is [`Error::Usage`].
+    #[error(transparent)]
+    Handover(handover::Error),
     /// The deploy verb failed.
     #[error(transparent)]
     Deploy(#[from] deploy::Error),
@@ -344,6 +353,9 @@ enum Verb {
     },
     /// Set the release's version for services on the update coordinator and wait for them.
     Deploy(deploy::Args),
+    /// Watch hosts, read-only, while a js-agent release rolls onto them, and fail one that did
+    /// not hand its running jobs to the new agent.
+    AgentHandoverCheck(handover::Args),
     /// Fail unless every clock and random-source site in the crates the simulation cell
     /// links is on the lint's allow-list, and every entry of the list matches a site.
     Determinism {
@@ -590,6 +602,10 @@ fn run(cli: Cli) -> Result<String, Error> {
             )?)
         }
         Verb::Deploy(args) => Ok(deploy::run(&args)?),
+        Verb::AgentHandoverCheck(args) => handover::run(&args).map_err(|e| match e {
+            handover::Error::Usage(why) => Error::Usage(why),
+            other => Error::Handover(other),
+        }),
         Verb::Determinism { root } => Ok(determinism::run(&root)?),
         Verb::CrunTests {
             sudo,

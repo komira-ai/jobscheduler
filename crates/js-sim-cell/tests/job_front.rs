@@ -360,6 +360,52 @@ fn the_job_front_sends_the_works_own_resources_in_the_submit() {
     assert_eq!(spec["wallLimitSeconds"], "900", "{spec}");
 }
 
+/// Asserts that a work that asks for a retry policy and a callback submits `spec.retry` and
+/// `spec.callback` (the URL of the cell's receiver under the job's id, the fixed key and the
+/// deadline in seconds), each backoff only when given, and that a work that asks for neither
+/// submits a spec with no `retry` and no `callback`, so its body is what it always was.
+/// Catches a front that sends a policy or a callback nobody asked for, drops a wait or the
+/// deadline, or sends the deadline in milliseconds.
+#[test]
+fn the_job_front_sends_the_retry_policy_and_the_callback_the_work_asks_for() {
+    let body = |work: &Work| {
+        let mut front = JobFront::new();
+        front.submit(ItemId(0), work, FarmTime::default());
+        let (_, _, bodies) = poll(&mut front, 0, vec![status(422)]);
+        bodies[0]["spec"].clone()
+    };
+    let plain = body(&Work::run_for(RUN));
+    assert!(plain.get("retry").is_none() && plain.get("callback").is_none());
+    let bare = body(&Work::run_for(RUN).retry(3).callback());
+    assert_eq!(bare["retry"], json!({ "maxAttempts": 3 }), "{bare}");
+    let key = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
+    let url = "https://receiver.example/sim/sim-job-0";
+    assert_eq!(bare["callback"], json!({ "url": url, "signingKey": key }));
+    let waits = Work::run_for(RUN)
+        .retry_with_backoff(
+            4,
+            Some(Duration::from_secs(20)),
+            Some(Duration::from_secs(90)),
+        )
+        .callback_for(Duration::from_secs(120));
+    let full = body(&waits);
+    let retry = json!({ "maxAttempts": 4, "initialBackoffSeconds": 20, "maxBackoffSeconds": 90 });
+    assert_eq!(full["retry"], retry, "{full}");
+    let callback = json!({ "url": url, "signingKey": key, "deadlineSeconds": 120 });
+    assert_eq!(full["callback"], callback, "{full}");
+    let half = body(&Work::run_for(RUN).retry_with_backoff(2, None, Some(Duration::from_secs(30))));
+    assert_eq!(
+        half["retry"],
+        json!({ "maxAttempts": 2, "maxBackoffSeconds": 30 })
+    );
+    assert_eq!(
+        waits.retry_policy().map(|retry| retry.max_attempts),
+        Some(4)
+    );
+    let deadline = waits.callback_spec().and_then(|callback| callback.deadline);
+    assert_eq!(deadline, Some(Duration::from_secs(120)));
+}
+
 /// Asserts that each kind of call a front keeps an answer for has its own stable name:
 /// `queue` for the submit, `read` for a read of the job or its result, `cancel` for the
 /// stop. Catches two kinds that share a name, which a report of the answers would then

@@ -23,8 +23,10 @@ a `Heartbeat` carries the `epoch` and the `session` secret the `Welcome` gave, a
 decode is answered with the route's `invalid-*` code and never with the decoder's message (`decode`, `read`).
 
 **Transport.** One HTTP/1.1 POST of a JSON body, one answer. The agent's `Transport::post` takes a `serde_json::Value`
-(`crates/js-agent/src/transport.rs`). `js-client` sends `content_type("application/json")` and opens a new connection for every
-request (`max_idle_connections(0)`, `crates/js-client/src/client.rs`), so every heartbeat is a fresh TCP and TLS connection. The
+(`crates/js-agent/src/transport.rs`). `js-client` sends `content_type("application/json")` and keeps one idle connection to the
+server for the next request, for at most 8 s (`IDLE_LIMIT`, `crates/js-client/src/client.rs`), so a host's heartbeats ride one TCP
+and TLS connection until the server ends it (its 10 s `header_timeout` on an idle connection, the `Connection: close` of its
+`max_requests`th answer, a drain). The
 server's TLS offers only `http/1.1` in ALPN (`crates/js-lease-server/src/tls.rs`). The server reads the body with
 `serde_json::from_slice` whatever the content type says.
 
@@ -364,8 +366,9 @@ hosts is **chosen**: it is the connection limit of section 11, as the question f
 | every beat at the 65,536-byte body limit, either encoding, beats only | 65,536 | 65,536 × 17,280 = 1,132,462,080 | 65,536 × 256 ÷ 5 = 3,355,443.2 | — |
 
 At the shortest interval a welcome may set (250 ms) every per-second figure is 20 times larger. Not counted, and the same for
-options A and B: HTTP request and response heads, TLS records, and the TCP and TLS handshake that every exchange makes because
-`js-client` opens a new connection per request. Their size is not derived here (open point 1).
+options A and B: HTTP request and response heads, TLS records, and the TCP and TLS handshake of each new connection (one in
+`max_requests`, 100, exchanges since `js-client` keeps its connection; every exchange before). Their size is not derived here
+(open point 1).
 
 ## 3. What a change would buy and cost
 
@@ -508,9 +511,9 @@ previous-release side of those tests is a copy of that release's structs and its
 - *A latency goal* for delivering a start or stop below one heartbeat interval. Such a goal came (a submit on an idle host
   starting within a fraction of a second); the answer taken is a held reply inside JSON polling, a long poll
   ([held-beat.md](held-beat.md)): no stream, no new encoding, one connection per agent held while its reply waits.
-- *A measured cost of the per-exchange handshake.* The answer is connection reuse in `js-client` for the agent (it opens a new
-  connection per request today; the listener's 10 s `header_timeout` would keep a connection open across 5 s beats), not an
-  encoding change.
+- *A measured cost of the per-exchange handshake.* The answer is connection reuse in `js-client` for the agent, not an encoding
+  change. Built: `js-client` keeps its connection between requests for up to 8 s (`IDLE_LIMIT`), and the listener's 10 s
+  `header_timeout` keeps it open across 5 s beats.
 
 **The follow-up changes each outcome creates.**
 
@@ -552,7 +555,8 @@ server, and the JSON fixtures and frozen copies.
 
 1. **Header and handshake bytes per exchange.** How large are the HTTP heads and the TLS handshake that each exchange makes? Settled
    by an in-process test that counts the bytes `js-client` writes and reads against the lease server on a loopback listener
-   (`crates/js-client/src/client.rs`, `max_idle_connections`; `crates/js-lease-server/src/tls.rs`).
+   (`crates/js-client/src/client.rs`, `build_agent`; `crates/js-lease-server/src/tls.rs`). Since `js-client` keeps its
+   connection, the handshake is paid once a connection, not once an exchange.
 2. **How near real beats come to the body limit.** Nothing counts 413 `body-too-large` answers or the tails the agent cuts. Settled
    by reading `read` in `crates/js-lease-server/src/agent_api.rs` and `results_budget` in
    `crates/js-agent/src/lifecycle/machine/tails.rs` against the hosts' own logs, which this note does not do.

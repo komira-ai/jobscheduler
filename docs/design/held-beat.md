@@ -28,7 +28,9 @@ interval: up to 10 s with the defaults (`--tick 5s`, interval 5 s), up to 2 s at
    kept as one, and the pass after the last poke reads every commit made before it. Before the poke
    the submit tells the placer of its commit (`Agents::note_inserted`), so when nothing else wrote the
    job store since the last pass, the poked pass adds the job to the tables it read then instead of
-   reading the four tables again. A retry of a job already recorded is answered with the job as it now
+   reading the four tables again. The submit never waits for that: while a pass holds those tables
+   (it is reading them again), the submit tells the placer nothing and answers, and that pass or the
+   next reads the job from the store. A retry of a job already recorded is answered with the job as it now
    is, in whatever state, and pokes too; its pass finds nothing new. The server in process
    (`in_process`, the simulation and test seam) spawns no task: its caller runs the poller's turn
    (`InProcess::poll`) after each request, and a poke it leaves waits for the next tick.

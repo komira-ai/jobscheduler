@@ -147,6 +147,19 @@ impl<'p> Tx<'p> {
         Ok(tx)
     }
 
+    /// The store's time as the transaction read it last.
+    pub(super) fn now(&self) -> i64 {
+        self.now
+    }
+
+    /// `txn` alone, its body and its tail: its keys locked, its preconditions judged and its
+    /// writes made, with the revisions settled.
+    pub(super) fn apply_alone(&mut self, txn: &Txn) -> Result<Result<Commit, Conflict>, Error> {
+        let result = self.apply(txn)?;
+        let revs = self.flush()?;
+        Ok(result.map(|commit| revs.settle(commit)))
+    }
+
     /// Takes the commit head now, before anything is read, and reads the clock again after
     /// the wait: until this transaction ends no other transaction's writes commit, so what it
     /// reads without a lock ([`Tx::peek`], [`Tx::read_prefix`]) is what its commit finds.
@@ -283,8 +296,19 @@ impl<'p> Tx<'p> {
                 .map(|row| row.get(0))
                 .collect();
             // Every key now has a row this transaction sees: its locked row or its own
-            // placeholder. The clock is read again, after any wait for those locks.
-            for row in s.client.query(&s.st.load, &[&wanted, &self.over])? {
+            // placeholder. A key it reserved holds no row, so when it reserved them all (a
+            // transaction that creates keys, as a submit's does) there is nothing to load and
+            // nothing for the clock to judge. Otherwise the rows are loaded, and the clock is
+            // read again, after any wait for those locks.
+            let all = reserved.len() == wanted.len();
+            let rows = match all {
+                true => Vec::new(),
+                false => s.client.query(&s.st.load, &[&wanted, &self.over])?,
+            };
+            for key in &wanted {
+                self.cache.insert((*key).to_owned(), None);
+            }
+            for row in rows {
                 let key: String = row.get(0);
                 self.now = self.now.max(row.get(4));
                 let loaded = (!reserved.contains(&key)).then(|| Row::from_row(&row, 1));

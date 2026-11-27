@@ -509,6 +509,42 @@ fn the_account_of_an_adopted_job_is_kept_at_open_and_retired_after() {
     assert!(rig.fake.state().processes.is_empty());
 }
 
+/// Asserts that after the open the pool names the account it kept for an adopted job
+/// (`lent_to`, which the runtime takes the run back with) and none for a job it was not
+/// lent to, or once it is retired; and that the open of a pool whose every uid an adopted
+/// job holds makes no account ready and still opens, saying why, while the same full range
+/// with no job adopted (a uid another record holds) still refuses the open. Catches an
+/// adopted run that cannot find its account, and an agent that cannot start while the jobs
+/// it took back fill the range.
+#[test]
+fn the_account_kept_for_an_adopted_job_is_named_and_a_full_range_still_opens() {
+    let rig = Rig::new("adopted-full", 1, 1);
+    rig.write_ledger(&line(
+        "made kbf-acct-1 {me}\nready kbf-acct-1\nlent kbf-acct-1 job-1\n",
+    ));
+    made(&rig, 1, me());
+    let pool = rig.open_adopting(&["job-1"]);
+    assert_eq!(pool.lent_to("job-1"), Some(first_account()));
+    assert_eq!(pool.lent_to("job-2"), None);
+    assert_eq!(pool.ready_count(), 0);
+    assert_eq!(rig.lines().len(), 3, "nothing made: {:?}", rig.lines());
+    assert!(
+        rig.log
+            .text()
+            .contains("no account made ready at open: the jobs taken back hold the uids"),
+        "{}",
+        rig.log.text()
+    );
+    pool.retire(first_account()).unwrap();
+    assert_eq!(pool.lent_to("job-1"), None);
+
+    let rig = rig.next("unadopted-full", 1, 1);
+    rig.fake
+        .add_user("someone", me(), my_gid(), &rig.settings.homes);
+    let why = rig.refused();
+    assert!(matches!(why, AccountError::NoFreeUid { .. }), "{why:?}");
+}
+
 /// A case of a test and what it does to the rig before the open.
 type Spoil = (&'static str, fn(&Rig));
 

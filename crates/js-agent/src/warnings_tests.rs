@@ -32,16 +32,13 @@ impl Sink {
 }
 
 /// The line of each event `emit` makes while the agent's subscriber, writing to a sink, is
-/// this thread's; it is installed while no capture of `test_tracing` is, with the callsites'
-/// interest rebuilt, as a capture is.
+/// this thread's; it is installed with `test_tracing`'s keeper registered, as a capture is,
+/// so what another test's thread reaches first does not decide what it sees.
 fn lines_of(emit: impl FnOnce()) -> String {
-    let _serial = crate::test_tracing::serial();
+    crate::test_tracing::keeper();
     let sink = Sink::default();
     let writer = sink.clone();
-    tracing::subscriber::with_default(subscriber(move || writer.clone()), || {
-        tracing::callsite::rebuild_interest_cache();
-        emit();
-    });
+    tracing::subscriber::with_default(subscriber(move || writer.clone()), emit);
     sink.text()
 }
 
@@ -101,11 +98,10 @@ fn the_failed_input_check_of_a_run_names_its_lease_and_the_source() {
 /// no subscriber was installed, or one installed for the main thread alone.
 #[test]
 fn an_installed_subscriber_writes_the_warnings_of_every_thread() {
-    let _serial = crate::test_tracing::serial();
+    crate::test_tracing::keeper();
     let sink = Sink::default();
     let writer = sink.clone();
     assert!(install_with(move || writer.clone()));
-    tracing::callsite::rebuild_interest_cache();
     assert!(!install_with(io::sink), "the first install stands");
     std::thread::spawn(|| tracing::warn!("from another thread"))
         .join()

@@ -16,6 +16,7 @@ use rustls::pki_types::CertificateDer;
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
 use serde_json::json;
 
+use crate::reuse::{self, KeepAlive};
 use crate::support::{Cert, Scratch, json_reply, read_request};
 
 const LIMIT: Duration = Duration::from_secs(20);
@@ -267,6 +268,46 @@ fn a_renewed_pair_is_used_by_the_next_request_of_the_same_client() {
             vec![first.der.clone()],
             vec![first.der.clone()],
             vec![second.der.clone()],
+        ]
+    );
+}
+
+/// Asserts that an identity client keeps its connection between requests while its files
+/// are unchanged, and that after a renewal its next request opens a new connection whose
+/// handshake presents the new certificate, and the request after that rides it. A
+/// connection keeps the certificate of the handshake that opened it, so a client that kept
+/// the old connection past a renewal would go on being known by the old certificate.
+#[test]
+fn a_renewal_moves_the_client_to_a_new_connection_with_the_new_certificate() {
+    let dir = Scratch::new("identity_renewal_reuse");
+    let authority = Authority::new();
+    let first = authority.issue("host-1");
+    let second = authority.issue("host-1");
+    let identity = install(&dir, &first, 0o600);
+    let server = Cert::new();
+    let ca = ca_file(&dir, &server);
+    let fake = KeepAlive::tls(server.requiring_clients_of(authority.der()), Vec::new());
+    let client =
+        Client::connect_with_identity(&fake.url("https"), &identity, Some(&ca), LIMIT).unwrap();
+
+    client.get("/a").unwrap();
+    client.get("/b").unwrap();
+    renew(&dir, &second);
+    client.get("/c").unwrap();
+    client.get("/d").unwrap();
+
+    let line = |path: &str| format!("GET {path} HTTP/1.1");
+    assert_eq!(
+        fake.seen(),
+        vec![
+            reuse::Seen {
+                presented: vec![first.der.clone()],
+                requests: vec![line("/a"), line("/b")],
+            },
+            reuse::Seen {
+                presented: vec![second.der.clone()],
+                requests: vec![line("/c"), line("/d")],
+            },
         ]
     );
 }

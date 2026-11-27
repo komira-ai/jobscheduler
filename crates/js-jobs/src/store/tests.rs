@@ -228,3 +228,19 @@ fn a_backfill_and_a_raise_that_read_rows_again_each_say_so_once_with_the_count()
          the rows another server changed before its commit again=2\n"
     );
 }
+
+// Catches a stamped write whose build fails and that still writes, or that answers something
+// other than the build's error: the build's failure is the answer, and the store is asked for
+// no commit.
+#[test]
+fn a_stamped_write_whose_build_fails_answers_its_error_and_writes_nothing() {
+    let store = fake();
+    let jobs = JobStore::new(store.clone(), RandomIds).expect("opens");
+    let before = store.commit_stats();
+    let id = crate::JobId::parse("never").expect("an id");
+    let failed = JobStoreError::Stale { id: id.clone() };
+    let answer = jobs.write_stamped::<()>(&mut |_| Err(failed.clone()));
+    assert_eq!(answer.err(), Some(failed));
+    assert_eq!(store.commit_stats(), before);
+    assert_eq!(jobs.get_job(&id).expect("reads"), None);
+}

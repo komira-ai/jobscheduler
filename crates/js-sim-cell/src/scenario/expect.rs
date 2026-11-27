@@ -2,13 +2,14 @@
 //! seed after the end check ([`super::Scenario::expect`]) or at a virtual time
 //! ([`super::Scenario::expect_at`]).
 //!
-//! Every statement but [`Expect::answer`] and the last sixteen reads what the cell observed
+//! Every statement but [`Expect::answer`] and the last nineteen reads what the cell observed
 //! (`launched_on.rs` and `held_after_runs.rs` hold the two that need more than a count;
 //! [`Expect::marks_held`] reads the server's job store when it is judged).
 //! [`Expect::answer`] reads an answer the client kept (`answer.rs`). The five from
 //! [`Expect::pool_tripped`] to [`Expect::machines_joined`] read the elastic pool's clouds
-//! when they are judged, and the first of them its brake (`cloud.rs`). The eleven from [`Expect::jobs_read`] on read the server's job and
-//! allocation tables as the cell read them, and the jobs the agents launched (`jobs.rs`).
+//! when they are judged, and the first of them its brake (`cloud.rs`). The fourteen from
+//! [`Expect::jobs_read`] on read the server's job and allocation tables as the cell read them,
+//! and the jobs the agents launched (`jobs.rs`).
 
 use std::time::Duration;
 
@@ -279,6 +280,28 @@ impl Expect {
     #[must_use]
     pub fn kept_off_a_failed_host(span: Duration) -> Self {
         Self(Wanted::Job(JobFact::KeptOff(span)))
+    }
+
+    /// The receiver of the cell's callbacks answered 2xx to exactly `count` calls for the job
+    /// of `item`: how a scenario states that a job's callback was delivered once, and none
+    /// before its last attempt ended.
+    #[must_use]
+    pub fn callbacks_delivered(item: ItemId, count: usize) -> Self {
+        Self(Wanted::Job(JobFact::CallbacksDelivered(item, count)))
+    }
+
+    /// The receiver of the cell's callbacks got exactly `count` calls for the job of
+    /// `item`, whatever it answered each.
+    #[must_use]
+    pub fn callback_calls(item: ItemId, count: usize) -> Self {
+        Self(Wanted::Job(JobFact::CallbackCalls(item, count)))
+    }
+
+    /// The job of `item` was last read at attempt `number` (from 1) in the server's job
+    /// table; a job never read is `unread`.
+    #[must_use]
+    pub fn attempts_of(item: ItemId, number: u32) -> Self {
+        Self(Wanted::Job(JobFact::Attempt(item, number)))
     }
 
     /// `None` when `cell` meets the statement; otherwise what it wanted and what it got,

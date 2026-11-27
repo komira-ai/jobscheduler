@@ -258,7 +258,8 @@ Read with `js-start-timeline` over that node's `journalctl -u js-agent-crun` for
   every heartbeat until the agent lists it, so a `beat_now` there would ask a slow agent in a loop.
   A beat that lists the start is answered with nothing, and is held briefly.
 - **200 ms for that hold.** A host with a start under way beats about five times a second, and each
-  beat is a new connection and a commit of the listing at the server. Shorter would add beats;
+  beat is a commit of the listing at the server (and was a new connection, until `js-client` kept
+  its connection between requests, komira-ai/jobscheduler#1146). Shorter would add beats;
   longer would report `running` later. A placement ends the hold at once whatever its bound.
 - **Only for 2 s of each start.** A start can wait minutes as `starting` (a provider's `Mount`, up to
   `--mount-provider-wait`; an image pull). Holding its host's beats short all that time would make
@@ -292,7 +293,10 @@ Read with `js-start-timeline` over that node's `journalctl -u js-agent-crun` for
 
 - The farm table after this agent and server ship, on the busy node and a node at normal load.
 - `Mount` sent by the provider client as soon as `Prepare` is answered (one worker step a source).
-- The connection of each heartbeat (a new TCP and TLS handshake every beat, `js-client`).
+- The connection of each heartbeat (a new TCP and TLS handshake every beat, `js-client`). Built
+  (komira-ai/jobscheduler#1146): `js-client` keeps one connection between requests, idle for at
+  most 8 s (`IDLE_LIMIT` in `crates/js-client/src/client.rs`), so a host's beats ride one TCP and
+  TLS connection until the server ends it. Still to measure: the start-latency gain on the farm.
 - The p99: the integrity check's settle wait (1 s, on the worker, only after a job that left a
   process or mount behind) and the image budget's first walk after a restart, both on threads a
   start waits behind.
