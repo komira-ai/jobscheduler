@@ -252,7 +252,7 @@ result and a phase of a submit.
 
 `--ready-listen <addr>` (`server.ready_listen`) serves `GET /readyz` on a port of its own, plain HTTP, with no token. It is off by
 default: without it the server binds no such port, tries a SQLite store's file lock once and refuses a start whose lock another process
-holds (a Postgres store has none). Any other path, on that port, is a 404.
+holds (a Postgres store has none). Any other path, on that port, than `/readyz` and `/readyz/sizes` (below) is a 404.
 
 | phase | answer |
 |---|---|
@@ -260,6 +260,11 @@ holds (a Postgres store has none). Any other path, on that port, is a 404.
 | the store is open (a server without a store setting, or over Postgres, has no lock to take) and the listeners are not all serving yet | 503 `starting` |
 | every listener is bound and serving | 200 `ready` |
 | from the SIGTERM or ctrl-c that starts the stop until the process exits | 503 `draining` |
+
+`GET /readyz/sizes` on the same port answers whether the job sizes are taught: 503 `teaching` until the server has read the ended jobs
+its start rebuilds the sizes from (after it answers `/readyz` 200), then 200 `taught`; 200 `nothing to teach` for a server with no job
+tables, and 200 `not taught: the live allocations were not read`, `not taught: the ended jobs were not read` or `not taught: the server
+stopped before the ended jobs were read` when the read failed or was stopped. A deploy can wait for its 200 before it replaces the server.
 
 - **Address.** A loopback address only, since the route takes no token; any other address is refused at start naming the flag or the
   key. An address in use is refused at start naming the flag or the key.
