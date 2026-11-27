@@ -36,6 +36,9 @@ const HOST: &str = "host-1";
 /// The name the agent was given the fake's socket under.
 const NAME: &str = "tier";
 
+/// The attempt of every run of these tests but where a test names its own.
+const ATTEMPT: u64 = 1;
+
 /// A fake provider and a client of it.
 struct Rig {
     _scratch: Scratch,
@@ -111,6 +114,7 @@ fn rig_with(name: &str, bounds: CallBounds) -> Rig {
 fn prepare(run_id: &str, index: u32, reference: &str, mode: MountMode) -> ProviderCall {
     ProviderCall::Prepare {
         run_id: run_id.to_owned(),
+        attempt: ATTEMPT,
         index,
         reference: reference.to_owned(),
         mode,
@@ -120,20 +124,31 @@ fn prepare(run_id: &str, index: u32, reference: &str, mode: MountMode) -> Provid
 fn mount(run_id: &str, index: u32) -> ProviderCall {
     ProviderCall::Mount {
         run_id: run_id.to_owned(),
+        attempt: ATTEMPT,
         index,
     }
 }
 
 fn release(run_id: &str, index: u32) -> ProviderCall {
+    release_of(run_id, ATTEMPT, index)
+}
+
+/// `Release` of the source `index` of the attempt `attempt` of `run_id`.
+fn release_of(run_id: &str, attempt: u64, index: u32) -> ProviderCall {
     ProviderCall::Release {
         run_id: run_id.to_owned(),
+        attempt,
         index,
     }
 }
 
-fn sweep(keep: &[&str]) -> ProviderCall {
+/// `Sweep` keeping each run of `keep` from its attempt on (0: every attempt).
+fn sweep(keep: &[(&str, u64)]) -> ProviderCall {
     ProviderCall::Sweep {
-        keep: keep.iter().map(|run_id| (*run_id).to_owned()).collect(),
+        keep: keep
+            .iter()
+            .map(|(run_id, attempt)| ((*run_id).to_owned(), *attempt))
+            .collect(),
     }
 }
 
@@ -187,12 +202,14 @@ fn assert_unavailable(answer: &ProviderAnswer, text: &str) {
     }
 }
 
-/// The source the provider sees for a run and an index of [`HOST`].
+/// The source the provider sees for a run and an index of [`HOST`], of the attempt
+/// [`ATTEMPT`].
 fn source(run: &str, index: u32) -> Option<pb::Source> {
     Some(pb::Source {
         agent: HOST.to_owned(),
         run: run.to_owned(),
         index,
+        attempt: ATTEMPT,
     })
 }
 
@@ -753,10 +770,13 @@ fn the_client_can_move_to_another_thread() {
 
 /// Asserts what the provider received for each call: the agent's host id as `Source.agent`
 /// and `SweepRequest.agent`, `js.` before every run id (in the keep list
-/// of a sweep too), the index, the ref untouched, and each mode of the wire as the protocol's
-/// mode, and each prepare followed by the mount of its own source. It catches an id sent
-/// without its prefix, a ref altered on the way, a mode mapped to another, and a call that
-/// names another source than the one asked.
+/// of a sweep too), the attempt, the index, the ref untouched, and each mode of the wire as
+/// the protocol's mode, and each prepare followed by the mount of its own source; a sweep
+/// names every kept run in `keep` and, in `keep_attempts`, the runs kept from an attempt
+/// on, and not a run kept whatever its attempt (0). It catches an id sent without its
+/// prefix, a ref altered on the way, a mode mapped to another, an attempt dropped, a kept
+/// run missing from `keep` (a provider that does not read attempts would release it), and a
+/// call that names another source than the one asked.
 #[test]
 fn the_provider_sees_the_agents_id_the_prefixed_run_the_index_the_ref_and_the_mode() {
     let mut rig = rig("pc-saw");
@@ -790,12 +810,56 @@ fn the_provider_sees_the_agents_id_the_prefixed_run_the_index_the_ref_and_the_mo
     expected.push(Seen::Release(pb::ReleaseRequest {
         source: source("js.run-a", 4),
     }));
-    settle(&mut rig.client, NAME, &sweep(&["run-b", "run-c"]));
+    settle(&mut rig.client, NAME, &sweep(&[("run-b", 0), ("run-c", 7)]));
     expected.push(Seen::Sweep(pb::SweepRequest {
         agent: HOST.to_owned(),
         keep: vec!["js.run-b".to_owned(), "js.run-c".to_owned()],
+        keep_attempts: vec![pb::KeptAttempt {
+            run: "js.run-c".to_owned(),
+            attempt: 7,
+        }],
     }));
     assert_eq!(rig.fake.requests(), expected);
+}
+
+/// Asserts that the releases of one source of two attempts of a run are two calls: while the
+/// provider holds the first, the second is sent too, and the provider sees each with its own
+/// attempt; each is handed its own answer. Catches a client that takes a release of a later
+/// attempt for the one out of an earlier attempt, and so never sends it, or hands it the
+/// earlier attempt's answer.
+#[test]
+fn releases_of_two_attempts_of_one_run_are_two_calls() {
+    let mut rig = rig("pc-attempts");
+    rig.fake.hold(Kind::Release);
+    let (first, second) = (release_of("r1", 1, 0), release_of("r1", 2, 0));
+    assert_eq!(rig.client.ask(NAME, &first), ProviderAnswer::Pending);
+    assert_eq!(rig.client.ask(NAME, &second), ProviderAnswer::Pending);
+    assert!(
+        rig.fake.wait_parked(2, GUARD),
+        "the provider was not sent both releases"
+    );
+    rig.fake.unhold(Kind::Release);
+    for call in [&first, &second] {
+        assert_eq!(
+            taken(&mut rig.client, NAME, call),
+            ProviderAnswer::Done(None)
+        );
+    }
+    let of = |attempt| {
+        Seen::Release(pb::ReleaseRequest {
+            source: Some(pb::Source {
+                attempt,
+                ..source("js.r1", 0).unwrap_or_default()
+            }),
+        })
+    };
+    // The two were sent on tasks of their own, so they may reach the provider in either order.
+    let mut seen = rig.fake.requests();
+    seen.sort_by_key(|seen| match seen {
+        Seen::Release(request) => request.source.as_ref().map_or(0, |source| source.attempt),
+        _ => u64::MAX,
+    });
+    assert_eq!(seen, [of(1), of(2)]);
 }
 
 /// Asserts that a sweep releases the sources of the agent that sweeps whose run it does not
@@ -815,7 +879,7 @@ fn a_sweep_releases_the_sources_the_agent_does_not_keep() {
         );
     }
     assert_eq!(
-        settle(&mut rig.client, NAME, &sweep(&["r1"])),
+        settle(&mut rig.client, NAME, &sweep(&[("r1", 0)])),
         ProviderAnswer::Done(None)
     );
     let kept: BTreeMap<_, _> = [
