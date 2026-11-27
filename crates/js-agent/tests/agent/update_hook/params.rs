@@ -132,7 +132,27 @@ fn the_manifest_keys_and_the_reserved_release_keys_are_read() {
 /// `KEYS` lists that the hook never requires.
 #[test]
 fn every_key_of_the_list_is_required_and_nothing_else_is() {
-    assert_eq!(KEYS.len(), 17);
+    assert_eq!(
+        KEYS,
+        [
+            "unit",
+            "state_dir",
+            "release_link",
+            "flags_file",
+            "state_root",
+            "runtime",
+            "cordon_lease_secs",
+            "cordon_max_secs",
+            "drain_wait_secs",
+            "defer_retry_secs",
+            "prepare_timeout_secs",
+            "cutover_timeout_secs",
+            "verify_timeout_secs",
+            "rollback_timeout_secs",
+            "cleanup_timeout_secs",
+            "verify_deadline_secs",
+        ]
+    );
     for key in KEYS {
         match refused(&good_but(key, "")) {
             ParamsError::Missing(missing) => assert_eq!(missing, key),
@@ -141,6 +161,8 @@ fn every_key_of_the_list_is_required_and_nothing_else_is() {
     }
     let extra = format!("{}something_else = \"x\"\n", good());
     assert!(Params::parse(&extra).is_ok());
+    let retired = format!("{}token_file = \"/etc/js-agent/token\"\n", good());
+    assert!(Params::parse(&retired).is_ok());
     assert_eq!(RELEASE_LINK_KEY, "release_link");
 }
 

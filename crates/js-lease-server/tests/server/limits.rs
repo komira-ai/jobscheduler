@@ -107,7 +107,9 @@ async fn an_idle_keep_alive_connection_is_closed_after_its_answer() {
 async fn a_client_that_stops_in_the_body_is_cut_and_its_slot_returned() {
     let limits = Limits {
         max_connections: 1,
-        read_timeout: Duration::from_millis(20),
+        // Long enough that the second client's TLS handshake and request, which the server
+        // reads on this limit, are not cut on a loaded machine.
+        read_timeout: Duration::from_millis(250),
         ..Limits::default()
     };
     let h = limited_with_agents("limit_read", limits).await;
@@ -277,7 +279,8 @@ async fn a_stalled_request_cannot_hold_up_a_stop() {
 
     h.running.shutdown().await.unwrap();
     let mut seen = Vec::new();
-    guard(stalled.read_to_end(&mut seen)).await.unwrap();
+    // A TLS connection the server cuts ends without a close_notify, which reads as an error.
+    let _ = guard(stalled.read_to_end(&mut seen)).await;
     assert!(seen.is_empty());
     let stored = crate::restart::stored(&jobs);
     let job_q = stored

@@ -137,15 +137,17 @@ async fn restart_keeps_the_binding_of_a_tainted_host_in(kept: Kept) {
     if kept == Kept::Store {
         assert!(!agent_file(&h.scratch).exists());
     }
-    // The restarted server holds the live session the host's row names.
-    assert_eq!(entry(&hosts(&h).await, "burst-1")["state"], "live");
-
-    // A hello of another process over a live row is refused; the same process replaces it.
+    // The host is not heard yet; a hello of another process reads the host's row, which the
+    // restarted server holds live: it is refused, and the host reads live.
+    assert_eq!(entry(&hosts(&h).await, "burst-1")["state"], "awaiting");
     let mut other = job_hello("burst-1");
     other["agent_process"] = json!("another-process");
     let other = post(&h, "/v1/agent/hello", None, &other).await;
     assert_eq!(other.status, 409, "{}", other.body);
     assert_eq!(other.json(), json!({ "error": "host-live" }));
+    assert_eq!(entry(&hosts(&h).await, "burst-1")["state"], "live");
+
+    // The same process replaces the session.
     let owner = post(&h, "/v1/agent/hello", None, &hello).await;
     assert_eq!(owner.status, 200, "{}", owner.body);
     assert_eq!(entry(&hosts(&h).await, "burst-1")["state"], "live");

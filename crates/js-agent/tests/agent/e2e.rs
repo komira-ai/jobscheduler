@@ -288,37 +288,44 @@ fn sigterm_marks_the_host_draining() {
     );
 }
 
-/// Asserts that the hello rate limit is waited out as the server says: with a burst of one
-/// the second agent's hello is answered 429 with a `Retry-After` of the refill interval,
-/// the agent waits at least that (not the half second of its own backoff), and once the
-/// server's clock has passed it the hello is admitted. It catches an agent that ignores the
-/// header and retries into the limit, and a client that drops the header.
+/// Asserts that the hello rate limit is waited out as the server says. The limit is of a host
+/// (the credential of its certificate): with a burst of one, a second hello for the host id
+/// that is live is answered 429 with a `Retry-After` of the refill interval, the agent waits at
+/// least that (not the half second of its own backoff), and once the server's clock has passed
+/// it the hello is past the limit and meets the registry's answer (409 `host-live`, waited out
+/// at the agent's own backoff). It catches an agent that ignores the header and retries into the
+/// limit, and a client that drops the header.
 #[test]
 fn a_rate_limited_hello_waits_for_retry_after() {
     let server = Server::start(
         "e2e_rate",
         &["--agent-hello-burst", "1", "--agent-hello-interval", "10s"],
     );
-    let spawn = |host: &'static str| {
+    let spawn = || {
         crate::server::Agent::spawn(
             server.url(),
             server.identities(),
-            &["--host-id", host],
+            &["--host-id", "mac-1"],
             mac_host,
             Dialer,
         )
     };
-    let first = spawn("mac-1");
+    let first = spawn();
     assert_eq!(first.next_wait(), secs(5));
-    let second = spawn("mac-2");
+    let second = spawn();
     assert_eq!(second.next_wait(), secs(10));
     server.clock.advance(secs(10));
     second.elapse();
-    assert_eq!(second.next_wait(), secs(5));
-    assert_eq!(server.host("mac-2")["state"], "live");
+    assert_eq!(second.next_wait(), Duration::from_millis(500));
+    assert_eq!(server.host("mac-1")["state"], "live");
     let ran = second.stop();
     assert!(
         ran.err.contains("hello failed: status 429 (rate-limited)"),
+        "{}",
+        ran.err
+    );
+    assert!(
+        ran.err.contains("hello failed: status 409 (host-live)"),
         "{}",
         ran.err
     );

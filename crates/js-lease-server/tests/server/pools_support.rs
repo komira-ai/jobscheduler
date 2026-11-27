@@ -417,6 +417,12 @@ impl Rig {
             .map(|url| format!("advertise_url = {}\n", quote(url)))
             .unwrap_or_default();
         let server = server(&scratch, &format!("{extra}{advertise}"));
+        // Without a certificate of its own the server took the test's agent TLS files
+        // (`server` adds them), so it is on TLS and a client trusts that certificate.
+        let tls = tls.or_else(|| {
+            let cert = std::fs::read_to_string(scratch.path("test-only-cert.pem")).ok()?;
+            Some(crate::tls::connector(&cert))
+        });
         let key = scratch.path("api-key");
         let provider = format!(
             "{{ kind = \"fake-cloud\", api_key_file = {} }}",
@@ -522,6 +528,18 @@ impl Rig {
             .borrow_mut()
             .push(format!("{}\n{}", reply.head, reply.body));
         reply
+    }
+
+    /// `GET path` on the agent port over TLS with no host certificate: the port a launched
+    /// host reaches. The certificate is for 127.0.0.1, which is the name the client checks.
+    pub async fn get_on_agent_port(&self, path: &str) -> Reply {
+        let connector = self.tls.as_ref().expect("the rig's server is on TLS");
+        let agent = self.running.agent_addr().unwrap();
+        let tcp = tokio::net::TcpStream::connect(agent).await.unwrap();
+        let name =
+            rustls::pki_types::ServerName::IpAddress(std::net::IpAddr::from([127, 0, 0, 1]).into());
+        let stream = connector.connect(name, tcp).await.unwrap();
+        crate::support::exchange(stream, "GET", path, None, None).await
     }
 
     /// `GET /v1/pools`, which must be 200.

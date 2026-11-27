@@ -261,7 +261,8 @@ async fn a_preempted_machine_is_released_and_billed_only_until_it_was_taken() {
 /// Asserts a reclaim seen by the cloud's notice, through the server, with a list that
 /// still shows the machine active and no tick of the server's: once the reader has acted on
 /// the notice the record is `Releasing`, the release has been sent and the brake counts one
-/// failure; a request submitted then waits, and the next tick launches a replacement for
+/// failure; a request submitted then waits (the machine was still booting, so the pool
+/// is in its boot-failure cooldown), and the first tick after ten minutes launches a replacement for
 /// it. It catches a notice nobody reads (the machine would stay counted until a list caught
 /// up), and a reclaim that skips the route a listed preemption takes.
 #[tokio::test]
@@ -289,6 +290,13 @@ async fn a_reclaim_notice_takes_the_host_out_before_any_list_shows_it() {
     let queued = submit(&rig.h, "j2").await;
     assert_eq!(queued.status, 201, "{}", queued.body);
     rig.tick().await;
+    assert_eq!(
+        rig.launched(),
+        1,
+        "a machine lost while booting starts the boot-failure cooldown"
+    );
+    rig.advance(10 * 60);
+    rig.tick().await;
     assert_eq!(rig.launched(), 2);
     assert_eq!(rig.state().records.brake["burst"].failures, 1);
 }
@@ -306,6 +314,8 @@ async fn a_release_the_cloud_refuses_forever_alerts_at_boot_timeout_plus_unknown
     let cloud = cloud();
     let rig = Rig::elastic("e2e_cloud_stuck_release", cloud.clone()).await;
     rig.launch().await;
+    // The job is given up, so no replacement is launched once the first machine is.
+    rig.withdraw().await;
     cloud.script_forever(Call::Release, Step::Refuse(RefusalCode::Denied));
     let asked_at = until_release_is_asked(&rig, &cloud).await;
     assert_eq!(rig.phase(), Phase::Releasing);

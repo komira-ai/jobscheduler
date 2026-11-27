@@ -206,7 +206,10 @@ pub fn server(scratch: &Scratch, extra: &str) -> String {
         true => "",
         false => "agent_listen = \"127.0.0.2:0\"\n",
     };
-    let tls = match extra.contains("tls_cert") || extra.contains("agent_client_ca") {
+    let tls = match extra.contains("tls_cert")
+        || extra.contains("tls_key")
+        || extra.contains("agent_client_ca")
+    {
         true => String::new(),
         false => agent_tls_keys(scratch),
     };

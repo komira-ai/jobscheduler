@@ -11,7 +11,9 @@ use std::time::Duration;
 use js_agent::HEARTBEAT_PATH;
 use js_agent::{Answer, Connector, Dialer, Handle, Login, Machine, Sleeper, Transport, Wake};
 use js_agent_wire::ProtocolRange;
-use js_client::{Client, ClientError, Reply};
+#[cfg(target_os = "linux")]
+use js_client::Reply;
+use js_client::{Client, ClientError};
 use js_lease_server::{Cli, Config, Running, SharedClock, TickHandle, channel_ticker, start};
 use js_types::{ManualClock, Timestamp};
 use serde_json::{Value, json};

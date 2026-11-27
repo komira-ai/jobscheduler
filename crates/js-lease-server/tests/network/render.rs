@@ -126,8 +126,8 @@ fn the_script_is_hardened() {
         assert!(cleanup.contains(trace), "{trace} is not removed");
     }
     assert!(
-        !text.contains("/etc/jobscheduler"),
-        "the script writes no identity file for the agent"
+        !text.contains("/etc/jobscheduler/token") && !text.contains("/etc/jobscheduler/instance"),
+        "the script writes no token or instance file for the agent"
     );
 
     assert!(!text.contains("set -x"));

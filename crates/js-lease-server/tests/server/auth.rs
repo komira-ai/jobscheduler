@@ -20,7 +20,6 @@ async fn token_is_required() {
     let wrong_same_length = TOKEN.replace('t', "T");
     let routes = [
         ("GET", "/v1/hosts"),
-        ("POST", "/v1/hosts/host-1:cordon"),
         ("GET", "/v1/usage/nodes/host-1"),
         ("GET", "/v1/usage/keys/act.build"),
         ("GET", "/v1/unknown"),
@@ -36,6 +35,13 @@ async fn token_is_required() {
             assert_eq!(reply.status, 401, "{method} {path} {token:?}");
             assert_eq!(reply.body, "");
         }
+    }
+    // A route of one host is an agent route: the host's certificate is its only credential, so
+    // a request with none is refused for that, with a bearer or without.
+    for token in [None, Some(TOKEN)] {
+        let reply = request(addr, "POST", "/v1/hosts/host-1:cordon", token, None).await;
+        assert_eq!(reply.status, 401, "{token:?}");
+        assert_eq!(reply.body, r#"{"error":"host-certificate-required"}"#);
     }
     let basic = raw_header(addr, "Authorization: Basic dGVzdDp0ZXN0").await;
     assert_eq!(basic, 401);

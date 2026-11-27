@@ -308,20 +308,28 @@ static TRUSTED: std::sync::Mutex<BTreeMap<std::net::SocketAddr, String>> =
 /// Records the server certificate of `running` for every address it serves, when the files
 /// `scratch` holds say that the server was started with the agent TLS flags.
 fn trust_server_of(scratch: &Scratch, running: &Running) {
-    let Ok(cert) = fs::read_to_string(scratch.path("test-only-cert.pem")) else {
-        return;
-    };
-    if !scratch.path("hostkeeper-ca.pem").exists() {
-        return;
-    }
     let addrs = [
         Some(running.addr()),
         running.agent_addr(),
         running.job_addr(),
     ];
+    trust_addrs(scratch, &addrs.into_iter().flatten().collect::<Vec<_>>());
+}
+
+/// Records, for each of `addrs`, the server certificate `scratch` holds when the files say a
+/// server was started there with the agent TLS flags, and forgets the address otherwise (a
+/// port an earlier server had is no longer a TLS one). For a server in a child process, whose
+/// addresses the test reads from its output.
+pub fn trust_addrs(scratch: &Scratch, addrs: &[std::net::SocketAddr]) {
+    let cert = fs::read_to_string(scratch.path("test-only-cert.pem"));
+    let tls = cert.is_ok() && scratch.path("hostkeeper-ca.pem").exists();
     let mut trusted = TRUSTED.lock().unwrap();
-    for addr in addrs.into_iter().flatten() {
-        trusted.insert(addr, cert.clone());
+    for addr in addrs.iter().copied() {
+        // A port of an earlier server that a plain server now has is no longer a TLS one.
+        match (&cert, tls) {
+            (Ok(cert), true) => trusted.insert(addr, cert.clone()),
+            _ => trusted.remove(&addr),
+        };
     }
 }
 

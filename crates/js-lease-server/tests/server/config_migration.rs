@@ -47,7 +47,7 @@ fn the_documented_old_pool_is_refused_with_the_migration() {
 
 /// Asserts that route 1 of the document holds: its `[server]` fragment sets
 /// `agent_listen`, and its `[[pool]]` of `kind = "joined"` loads under a server table with
-/// agent listening, with no warning. It catches a route-1 example that a file cannot
+/// agent listening, with the one warning that its `join_token_file` is ignored. It catches a route-1 example that a file cannot
 /// load, and a fragment that lost `agent_listen`.
 #[test]
 fn the_config_file_route_loads() {
@@ -64,7 +64,13 @@ fn the_config_file_route_loads() {
     let pool = migration_block("Route 1: a pool in the `--config` file", 1);
     let text = format!("{}\n{pool}", server_with_agents(&scratch));
     let loaded = load(&scratch, &text).unwrap();
-    assert!(loaded.warnings().is_empty(), "{:?}", loaded.warnings());
+    // The document's pool still names `join_token_file`, accepted and ignored with one warning.
+    assert_eq!(
+        loaded.warnings(),
+        [
+            "pool \"gpu\": join_token_file is ignored: agents are admitted by host certificate only (drop it)"
+        ]
+    );
 }
 
 /// Asserts that route 2 of the document holds: its agent pool file, with no host list,

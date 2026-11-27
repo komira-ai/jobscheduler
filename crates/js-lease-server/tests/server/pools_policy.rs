@@ -24,8 +24,7 @@ async fn the_status_routes_are_on_the_listen_port_only_and_need_no_token() {
     for path in ["/v1/pools", "/status"] {
         let reply = rig.get(path).await;
         assert_eq!(reply.status, 200, "{path}");
-        let agent = rig.running.agent_addr().unwrap();
-        let reply = request(agent, "GET", path, None, None).await;
+        let reply = rig.get_on_agent_port(path).await;
         assert_eq!(reply.status, 404, "{path}");
     }
     rig.assert_clean();

@@ -107,7 +107,11 @@ async fn launches_once_in(kept: Kept) {
     assert!(!acquire.ends_with("0000000000000000"), "{acquire}");
     let script = account.launches()[0].user_data().unwrap().to_owned();
     let name = written.instances[0].name.clone();
-    assert!(script.contains(&format!("burst:{name}")));
+    assert!(
+        script.contains(&format!("--host-id \"{name}\"")),
+        "{script}"
+    );
+    assert!(script.contains("--pool \"burst\""), "{script}");
     assert!(!script.contains("--token-file"), "{script}");
 
     h.ticks.step().await;

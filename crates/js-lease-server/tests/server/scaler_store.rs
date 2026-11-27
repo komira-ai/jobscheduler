@@ -117,7 +117,10 @@ async fn scaler_records_are_committed_before_the_provider_is_called() {
     assert_eq!(at_launch.instances.len(), 1);
     let name = at_launch.instances[0].name.clone();
     let script = account.launches()[0].user_data().unwrap().to_owned();
-    assert!(script.contains(&format!("burst:{name}")), "{script}");
+    assert!(
+        script.contains(&format!("--host-id \"{name}\"")),
+        "{script}"
+    );
     assert!(at_launch.instances[0].acquire.is_some());
     assert!(!records_path(&h.scratch).exists(), "no records file");
 }
