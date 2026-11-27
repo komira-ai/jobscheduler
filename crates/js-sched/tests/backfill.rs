@@ -1,8 +1,11 @@
 //! Backfill on a held worker ([`Scheduler::with_backfill`]): an operation after a
 //! whole-machine request in queue order is placed on the worker the request holds only if
 //! it ends, with a minute to spare, by the end of that worker's tail as the hold took it.
-//! The request then starts when the tail ends. Every time is farm time fed to the
-//! scheduler; an operation's end is its max wall time, the bound an executor enforces.
+//! The request then starts when the tail ends. Work ahead of the request in queue order
+//! (older work of its QoS, any work of a higher QoS) is not held to the tail, and the
+//! request starts when that work ends, ahead of the work behind it. Every time is farm
+//! time fed to the scheduler; an operation's end is its max wall time, the bound an
+//! executor enforces.
 
 #[macro_use]
 #[path = "booked/mod.rs"]
@@ -446,13 +449,15 @@ fn an_owner_action_starts_at_its_tail_through_a_stream_of_backfill() {
     assert_eq!(ops, [owner]);
 }
 
-/// Catches: a hold traded for the worker that became cheaper to drain, or its start time
-/// taken again. `a` carries a lease of 600 s and `b` one of 900 s, so the request holds `a`
-/// with its start at 600 s. A job of an hour ahead of the request in queue order lands on
-/// `a`, whose tail is now an hour away; the hold stays on `a` with its start of 600 s. At
-/// 20 s a job of 700 s, which does not fit that start, is placed on `b`.
+/// Catches: a hold kept on its worker when work ahead of the request makes that worker the
+/// dearer to drain, or a moved hold keeping the start of the worker it left. `a` carries a
+/// lease of 600 s and `b` one of 900 s, so the request holds `a`. At 10 s a job of an hour
+/// ahead of the request in queue order lands on `a`, whose tail is now an hour away: in
+/// that round the hold moves to `b`, keeping when the mark was made and taking `b`'s tail
+/// end, 900 s. `a`, which nothing holds any more, takes a job of 900 s, which would not fit
+/// `b`'s start.
 #[test]
-fn a_hold_stays_on_its_worker_with_its_start_when_work_ahead_lands_there() {
+fn a_hold_moves_with_its_start_when_work_ahead_lands_on_its_worker() {
     let mut f = enforced();
     f.worker("a");
     f.worker("b");
@@ -460,25 +465,31 @@ fn a_hold_stays_on_its_worker_with_its_start_when_work_ahead_lands_there() {
     f.lease_on("b", secs(900));
     let whole = f.whole();
     assert_eq!(f.held_for(whole), Some(&w("a")));
+    let made = f.s.whole_mark(whole).map(|m| m.made);
     f.at(10_000);
     f.beat();
     let (_, ahead) = job_of(&mut f, Qos::Interactive, Some(secs(3_600)));
     assert_eq!(ahead.map(|g| g.worker), Some(w("a")));
+    assert_eq!(f.held_for(whole), Some(&w("b")));
+    let mark = f.s.whole_mark(whole).cloned().expect("still marked");
+    assert_eq!(
+        (Some(mark.made), mark.tail_end),
+        (made, Some(FarmTime::from_millis(900_000)))
+    );
     assert!(f.grants().is_empty());
-    assert_eq!(f.held_for(whole), Some(&w("a")));
     f.at(20_000);
     f.beat();
-    assert_eq!(job(&mut f, Some(secs(700))), Some(w("b")));
-    assert_eq!(f.held_for(whole), Some(&w("a")));
+    assert_eq!(job(&mut f, Some(secs(900))), Some(w("a")));
+    assert_eq!(f.held_for(whole), Some(&w("b")));
 }
 
 /// Catches: a moved hold keeping the start time of the worker it left, or the worker it
 /// left still held. `a` carries a lease of 600 s and `b` one of 900 s, so the request
 /// holds `a` with its start at 600 s. `a` is cordoned at 10 s, so it can no longer hold
 /// the request: the hold moves to `b` and takes `b`'s start, 900 s. At 20 s a job of 700 s
-/// fits that start (but not 600 s) and is placed on `b`. Once `a` is uncordoned, a job of
-/// an hour, which does not fit before `b`'s start of 900 s, is placed on `a`: nothing holds
-/// it any more, and the hold stays on `b`.
+/// fits that start (but not 600 s) and is placed on `b`. Once `a` is uncordoned its tail
+/// (600 s) is again the shorter, so the hold moves back to `a`, and a job of an hour, which
+/// fits neither start, is placed on `b`: nothing holds it any more.
 #[test]
 fn a_moved_hold_takes_its_new_workers_start_and_frees_the_old_one() {
     let mut f = enforced();
@@ -499,8 +510,10 @@ fn a_moved_hold_takes_its_new_workers_start_and_frees_the_old_one() {
     f.feed(js_sched::Event::Uncordon { worker: w("a") });
     f.at(30_000);
     f.beat();
-    assert_eq!(job(&mut f, Some(secs(3_600))), Some(w("a")));
-    assert_eq!(f.held_for(whole), Some(&w("b")));
+    assert!(f.grants().is_empty());
+    assert_eq!(f.held_for(whole), Some(&w("a")));
+    assert_eq!(job(&mut f, Some(secs(3_600))), Some(w("b")));
+    assert_eq!(f.held_for(whole), Some(&w("a")));
 }
 
 /// Catches: an underestimated tail read as still to come, or as a free worker. Every key's
@@ -580,4 +593,93 @@ fn backfill_that_outlives_its_p90_admits_no_more_and_the_request_waits_for_it() 
     f.finish(&long);
     let ops: Vec<OperationId> = f.grants().iter().map(|g| g.operation).collect();
     assert_eq!(ops, [whole]);
+}
+
+/// An action of 7.5 of the worker's 8 cores that may run `wall`, placed on `name` and
+/// started now: no job of a core fits beside it.
+fn full_on(f: &mut Farm, name: &str, wall: Duration) -> LeaseGrant {
+    let resources = js_types::sched::Resources::new(7_500, whole_rig::GIB);
+    f.place_sized_on(name, Some(wall), resources)
+}
+
+/// Catches: a held worker closed to work ahead of its request in queue order, the request
+/// started before that work ends, or work behind the request started ahead of it. `a` and
+/// `b` are full until 600 s and 7_200 s. A job of an hour of the request's QoS is queued
+/// first and finds no room; the request comes next and holds `a`, the cheaper to drain
+/// (the job could also run on `b`, so `a` is not its last capable worker); a job of the
+/// same QoS and length comes after. At 600 s `a` empties: the older job, ahead of the
+/// request, is placed there, and the later one, behind it, is not (the hold's start of
+/// 600 s is past). The older job ends at 4_200 s and the request starts on `a` then, with
+/// the later job still queued and `b` still full.
+#[test]
+fn older_work_ahead_lands_on_the_held_worker_and_the_request_starts_before_later_work() {
+    let mut f = enforced();
+    f.worker("a");
+    f.worker("b");
+    let on_a = full_on(&mut f, "a", secs(600));
+    full_on(&mut f, "b", secs(7_200));
+    let (older, none) = job_of(&mut f, Qos::Ci, Some(secs(3_600)));
+    assert!(none.is_none());
+    let whole = f.whole();
+    assert_eq!(f.held_for(whole), Some(&w("a")));
+    f.at(10_000);
+    f.beat();
+    let (_, later) = job_of(&mut f, Qos::Ci, Some(secs(3_600)));
+    assert!(later.is_none());
+    assert!(f.advance(599_000).is_empty());
+    f.at(600_000);
+    f.finish(&on_a);
+    let grants = f.grants();
+    let ops: Vec<OperationId> = grants.iter().map(|g| g.operation).collect();
+    assert_eq!(ops, [older]);
+    assert_eq!(grants[0].worker, w("a"));
+    f.start(&grants[0]);
+    assert_eq!(f.held_for(whole), Some(&w("a")));
+    assert!(f.advance(4_199_000).is_empty());
+    f.at(4_200_000);
+    f.finish(&grants[0]);
+    let grants = f.grants();
+    let ops: Vec<OperationId> = grants.iter().map(|g| g.operation).collect();
+    assert_eq!(ops, [whole]);
+    assert_eq!(grants[0].worker, w("a"));
+}
+
+/// Catches: a queued request aged past work of a higher QoS, or not started once that work
+/// stops. The request, of QoS `ci`, holds `a`, whose lease ends at 600 s. From 100 s to
+/// four hours an `interactive` job of 120 s is submitted every 100 s, so `a` is never
+/// empty: each job is ahead of the request in queue order and is placed on `a` at once,
+/// however long the request has waited, and the request is not placed while one runs. The
+/// stream stops; the last job ends at 14_520 s and the request starts on `a` then.
+#[test]
+fn a_lower_qos_request_waits_out_a_higher_qos_stream_and_starts_when_it_stops() {
+    let mut f = enforced();
+    let (lease, whole) = marked(&mut f);
+    let mut running: Vec<(u64, LeaseGrant)> = vec![(600_000, lease)];
+    for at in (100_000..=14_400_000).step_by(100_000) {
+        running.sort_by_key(|(end, _)| *end);
+        while running.first().is_some_and(|(end, _)| *end <= at) {
+            let (end, grant) = running.remove(0);
+            assert!(f.advance(end).is_empty());
+            f.finish(&grant);
+        }
+        assert!(f.advance(at).is_empty());
+        let (_, grant) = job_of(&mut f, Qos::Interactive, Some(secs(120)));
+        let grant = grant.expect("a job of the stream is placed at once");
+        assert_eq!(grant.worker, w("a"));
+        running.push((at + 120_000, grant));
+    }
+    assert_eq!(f.held_for(whole), Some(&w("a")));
+    running.sort_by_key(|(end, _)| *end);
+    assert_eq!(running.len(), 2);
+    let (last_end, last) = running.pop().expect("two left");
+    let (end, grant) = running.pop().expect("one left");
+    assert!(f.advance(end).is_empty());
+    f.finish(&grant);
+    assert!(f.advance(last_end - 1_000).is_empty());
+    f.at(last_end);
+    f.finish(&last);
+    let grants = f.grants();
+    let ops: Vec<OperationId> = grants.iter().map(|g| g.operation).collect();
+    assert_eq!(ops, [whole]);
+    assert_eq!(grants[0].worker, w("a"));
 }
