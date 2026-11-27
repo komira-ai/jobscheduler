@@ -7,11 +7,14 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-[dependencies]
-# The `posix_spawn` attributes and error numbers of `disclaim`.
+# The `posix_spawn` attributes and error numbers of `disclaim`, which starts through them on
+# macOS only.
+[target.'cfg(target_os = "macos")'.dependencies]
 libc.workspace = true
 
 [dev-dependencies]
+# The error numbers of the start plan's tests, which run on every platform.
+libc.workspace = true
 # The programs the unit tests start: js-testkit's act verbs, through links to the test
 # binary, and its scratch directories.
 js-testkit = { path = "../js-testkit" }

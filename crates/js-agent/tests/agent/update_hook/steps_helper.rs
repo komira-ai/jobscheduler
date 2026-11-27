@@ -9,6 +9,7 @@
 use std::fs;
 use std::path::PathBuf;
 
+use js_agent::own_host::Lease as _;
 use js_agent::update_hook::{Class, Outcome, Params, Reason, Units};
 
 use super::rollback_entries::verify_failed_on;
