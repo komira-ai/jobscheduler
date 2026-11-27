@@ -101,6 +101,14 @@ pub(crate) fn tables_on(
     (store, jobs.with_retention(retention))
 }
 
+/// The agent process every hello of `host` through a rig names: a host of a rig has one agent
+/// process, so a hello of a host whose row is live (a server rebuilt on the store, a host the
+/// registry removed and that says hello again) takes the host over at once, as the same agent
+/// saying hello again does.
+fn agent_process(host: &str) -> String {
+    format!("proc-{host}")
+}
+
 /// When a rig's clock starts: the registry's reading, in milliseconds.
 pub(crate) const START_MS: u64 = 5_000_000;
 
@@ -176,6 +184,8 @@ pub(crate) struct Extra {
     pub(crate) whole: Option<WholePool>,
     /// The placer's `--placement-curves` mode; `off` by default.
     pub(crate) curves: js_sched_placer::sizes::Curves,
+    /// The placer's curve hosts and wait bound; every host and 30 s by default.
+    pub(crate) curve_settings: js_sched_placer::curves::CurveSettings,
 }
 
 /// What makes a rig's pool a whole-node pool of hosts without GPUs ([`whole_rig`]): its
@@ -264,12 +274,22 @@ pub(crate) fn clocked_rig(name: &str, placing: bool, limits: JobLimits) -> Rig {
 
 /// [`clocked_rig`] placing, its placer at `--placement-curves on`.
 pub(crate) fn clocked_curve_rig(name: &str) -> Rig {
+    let on = crate::config::CurveSetting {
+        mode: js_sched_placer::sizes::Curves::On,
+        ..crate::config::CurveSetting::default()
+    };
+    curve_rig(name, on)
+}
+
+/// [`clocked_rig`] placing, its placer in the curve mode `curves` with its hosts and wait bound.
+pub(crate) fn curve_rig(name: &str, curves: crate::config::CurveSetting) -> Rig {
     let clock = Arc::new(StoreClock::default());
     clock.advance(std::time::Duration::from_millis(START_MS));
     let shared = SharedClock::new(OneClock(Arc::clone(&clock)));
     let kept = (JobLimits::default(), Retention::DEFAULT);
     let extra = Extra {
-        curves: js_sched_placer::sizes::Curves::On,
+        curves: curves.mode,
+        curve_settings: curves.settings,
         ..Extra::default()
     };
     rig_on(name, (true, true), kept, (clock, shared), extra)
@@ -345,10 +365,8 @@ pub(crate) fn rig_on(
             curves: extra.curves,
             ..crate::sched::engine::Settings::default()
         };
-        Arc::new(crate::sched::place::SchedPlacer::new(
-            settings,
-            shared.clone(),
-        ))
+        let placer = crate::sched::place::SchedPlacer::new(settings, shared.clone());
+        Arc::new(placer.with_curve_settings(extra.curve_settings))
     };
     let registry = Registry::with_sessions(
         pool,
@@ -463,6 +481,7 @@ impl Rig {
             "host_id": host,
             "pool": "burst",
             "agent_version": "0.1.0",
+            "agent_process": agent_process(host),
             "shape": self.shape(),
             "capabilities": capabilities,
             "phase": "serving",
@@ -548,6 +567,7 @@ impl Rig {
             "host_id": host,
             "pool": "burst",
             "agent_version": "0.1.0",
+            "agent_process": agent_process(host),
             "shape": self.shape(),
             "capabilities": capabilities,
             "phase": "serving",

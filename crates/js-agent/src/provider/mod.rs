@@ -7,6 +7,11 @@
 //!   answers `Pending` until the task that carries it has the answer, then hands the answer
 //!   over once. It runs the calls on a tokio runtime of its own (two threads named
 //!   `js-provide`), as the image pulls of `lifecycle::prefetch` do.
+//! - A `Prepare` that succeeds is followed by the `Mount` of its source, which the client sends
+//!   itself in the task that carried the `Prepare`, once its answer is in: the `Mount` does not
+//!   wait for the worker's next step, and the provider still sees the `Prepare` answered first.
+//!   The lifecycle's ask of that `Mount` finds it out or answered. A `Release` of the source
+//!   forgets its `Prepare` and `Mount`, so a `Prepare` still out is not followed after it.
 //! - Each channel connects lazily, on its first call, and again after a connection is lost.
 //!   Before every connect it checks the socket file against the user the provider runs as
 //!   (`--mount-provider-user`): a socket of that user or root that no other user can write
@@ -16,7 +21,8 @@
 //!   answered `Unavailable`, and the lifecycle asks again when it chooses. The client rings the
 //!   lifecycle's wake at once for an answer it goes on from, and for a failed or refused one
 //!   after the pause [`CallBounds::retry`], so a retry does not wait for the worker's next
-//!   step and a provider that fails at once is asked at most once per pause.
+//!   step and a provider that fails at once is asked at most once per pause. A `Prepare` that
+//!   is followed by its `Mount` rings nothing of its own; the `Mount`'s answer rings.
 //! - A reply of `INVALID_ARGUMENT` or `FAILED_PRECONDITION` is a refusal; every other failure
 //!   is `Unavailable`.
 //!
@@ -172,6 +178,95 @@ fn flight_key(provider: &str, call: &ProviderCall) -> Key {
     (provider.to_owned(), kind, run.to_owned(), index)
 }
 
+/// The key of the `Prepare` of the source `index` of `run_id` to `provider`, whatever its ref
+/// and mode (which [`ProviderCall::key`] leaves out).
+fn prepare_key(provider: &str, run_id: &str, index: u32) -> Key {
+    let call = ProviderCall::Prepare {
+        run_id: run_id.to_owned(),
+        index,
+        reference: String::new(),
+        mode: js_agent_wire::MountMode::ReadOnly,
+    };
+    flight_key(provider, &call)
+}
+
+/// The `Mount` of the source `index` of `run_id`.
+fn mount_of(run_id: &str, index: u32) -> ProviderCall {
+    ProviderCall::Mount {
+        run_id: run_id.to_owned(),
+        index,
+    }
+}
+
+/// The call the client sends itself once `call` has succeeded: a source's `Mount` after its
+/// `Prepare`, so the `Mount` does not wait for the lifecycle's next step. It is sent only after
+/// the `Prepare`'s answer is in, so the provider sees the two in that order.
+fn then(call: &ProviderCall) -> Option<ProviderCall> {
+    match call {
+        ProviderCall::Prepare { run_id, index, .. } => Some(mount_of(run_id, *index)),
+        ProviderCall::Mount { .. } | ProviderCall::Release { .. } | ProviderCall::Sweep { .. } => {
+            None
+        }
+    }
+}
+
+/// What the task that carries a call to one provider holds.
+struct Carrier {
+    channel: Channel,
+    agent: String,
+    provider: String,
+    bounds: CallBounds,
+    flights: Arc<Flights>,
+    wake: Wake,
+}
+
+impl Carrier {
+    /// Sends `call` (its entry `key`, out as the call `sent`), records its answer and, when it
+    /// succeeded and is followed ([`then`]), sends the call that follows in the same task,
+    /// and so on; then rings the wake once, for the last call's answer.
+    ///
+    /// An answer the lifecycle goes on from rings at once. A refused or failed call rings
+    /// after the retry pause, once its answer is stored: ringing for it at once would ask a
+    /// provider that fails at once again and again without a pause. The step the ring brings
+    /// is handed the failure and, for an unavailable one, sends the call again in the same
+    /// ask. A call that is followed rings nothing of its own: the lifecycle has nothing to go
+    /// on with until the call that follows it answers.
+    async fn carry(self, mut key: Key, mut sent: u64, mut call: ProviderCall) {
+        loop {
+            let bound = self.bounds.of(&call);
+            let answer = call::run(
+                self.channel.clone(),
+                self.agent.clone(),
+                call.clone(),
+                bound,
+            )
+            .await;
+            let goes_on = matches!(answer, ProviderAnswer::Done(_));
+            let follow = then(&call).map(|next| (flight_key(&self.provider, &next), next));
+            let then_key = follow.as_ref().map(|(next_key, _)| next_key.clone());
+            match self
+                .flights
+                .finish(key.clone(), sent, answer, then_key)
+                .zip(follow)
+            {
+                Some((number, (next_key, next))) => {
+                    key = next_key;
+                    sent = number;
+                    call = next;
+                }
+                None => {
+                    if !goes_on {
+                        tokio::time::sleep(self.bounds.retry).await;
+                        self.flights.rest(&key, sent);
+                    }
+                    self.wake.wake();
+                    return;
+                }
+            }
+        }
+    }
+}
+
 impl Providers for ProviderClient {
     fn has(&self, name: &str) -> bool {
         self.clients.contains_key(name)
@@ -182,44 +277,36 @@ impl Providers for ProviderClient {
         self.clients.keys().cloned().collect()
     }
 
+    /// A `Release` first forgets the source's `Prepare` and `Mount`, so a `Prepare` still out
+    /// is not followed by a `Mount` once the source is given up.
     fn ask(&mut self, provider: &str, call: &ProviderCall) -> ProviderAnswer {
         let Some(client) = self.clients.get(provider) else {
             return ProviderAnswer::Unavailable(format!(
                 "this agent was given no mount provider named {provider}"
             ));
         };
+        if let ProviderCall::Release { run_id, index } = call {
+            let source = [
+                prepare_key(provider, run_id, *index),
+                flight_key(provider, &mount_of(run_id, *index)),
+            ];
+            self.flights.forget(&source);
+        }
         let key = flight_key(provider, call);
         let (handed, sent) = match self.flights.begin(key.clone()) {
             Begun::Settled(answer) => return answer,
             Begun::Send(sent) => (ProviderAnswer::Pending, sent),
             Begun::Retry(failed, sent) => (failed, sent),
         };
-        let task = call::run(
-            client.clone(),
-            self.agent.clone(),
-            call.clone(),
-            self.bounds.of(call),
-        );
-        let (flights, wake, retry) = (
-            Arc::clone(&self.flights),
-            self.wake.clone(),
-            self.bounds.retry,
-        );
-        self.handle.spawn(async move {
-            let answer = task.await;
-            // An answer the lifecycle goes on from rings at once. A refused or failed call
-            // rings after the retry pause, once its answer is stored: ringing for it at once
-            // would ask a provider that fails at once again and again without a pause. The
-            // step the ring brings is handed the failure and, for an unavailable one, sends
-            // the call again in the same ask.
-            let goes_on = matches!(answer, ProviderAnswer::Done(_));
-            flights.finish(key.clone(), sent, answer);
-            if !goes_on {
-                tokio::time::sleep(retry).await;
-                flights.rest(&key, sent);
-            }
-            wake.wake();
-        });
+        let carrier = Carrier {
+            channel: client.clone(),
+            agent: self.agent.clone(),
+            provider: provider.to_owned(),
+            bounds: self.bounds,
+            flights: Arc::clone(&self.flights),
+            wake: self.wake.clone(),
+        };
+        self.handle.spawn(carrier.carry(key, sent, call.clone()));
         handed
     }
 

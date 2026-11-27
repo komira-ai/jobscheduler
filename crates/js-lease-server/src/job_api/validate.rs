@@ -24,8 +24,8 @@
 //! | `spec.labels` | as a lease's labels are (`Labels::from_caller`) | `field: spec.labels` |
 //! | `spec.historyKey` | empty, or 1 to 512 bytes of printable ASCII (`0x20` to `0x7e`), kept as sent ([`HistoryKey`]) | `field: spec.historyKey: bad-length`, `field: spec.historyKey: not-printable-ascii` |
 //! | `spec.layers`, `spec.mounts` | the rules of `rootfs` | `field: spec.layers[i].<name>`, `spec.mounts[i].<name>` |
-//! | `spec.retry` | absent, until the release that accepts a policy: this release refuses one, whatever it says; once accepted ([`Accepts::retry`], which only tests set yet), a `maxBackoffSeconds` given below the effective initial wait (`initialBackoffSeconds`, 10 when absent, cut to 3600) is refused, and nothing else is: `maxAttempts` has no ceiling | `field: spec.retry: retry-not-enabled`, `field: spec.retry.maxBackoffSeconds` |
-//! | `spec.callback` | absent while the server takes no callback (until the release that accepts one), whatever it says; else the rules of `callback_check` | `field: spec.callback: callback-not-enabled`; `field: spec.callback.url: <code>`, `spec.callback.signingKey: bad-length` |
+//! | `spec.retry` | a `maxBackoffSeconds` given below the effective initial wait (`initialBackoffSeconds`, 10 when absent, cut to 3600) is refused, and nothing else is: `maxAttempts` has no ceiling | `field: spec.retry.maxBackoffSeconds` |
+//! | `spec.callback` | the rules of `callback_check` | `field: spec.callback.url: <code>`, `spec.callback.signingKey: bad-length` |
 //!
 //! The cross-field rules (an empty image, its command, `exec`, `needs.wholeHost` and
 //! `isolation` beside the layers, mounts and host ports) are checked once those fields are, and
@@ -78,16 +78,6 @@ use super::{callback_check, rootfs};
 /// names it by.
 pub(crate) const ISA_LEVEL_KEY: &str = "isa_level";
 
-/// The fields a submit acts on that this release refuses until the release that accepts them
-/// (`docs/design/job-retry-and-completion-callback.md`, section 7): the default accepts none.
-/// A field of the server's own, never a setting: only tests accept a policy yet, so that the
-/// release that can retry a job runs end to end before any submit asks it to.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct Accepts {
-    /// Whether a job may carry a retry policy (`spec.retry`).
-    pub(crate) retry: bool,
-}
-
 /// A submitted job that passed every check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Valid {
@@ -108,7 +98,7 @@ pub(crate) enum Fault {
     Field(&'static str),
     /// The field, by its JSON name, breaks a rule whose code the answer carries: one of the
     /// wire's check of a start (`js_agent_wire::refusal`), or of this module's own (the
-    /// history key's, `retry-not-enabled`, and the callback's, `callback_check`).
+    /// history key's, and the callback's, `callback_check`).
     Wire(&'static str, &'static str),
     /// The field, by its JSON name, of the port at this index of `spec.ports`.
     Port(usize, &'static str),
@@ -125,17 +115,15 @@ pub(crate) enum Fault {
     WallAboveCeiling,
 }
 
-/// The job `spec` checked against `ceiling`, the most a wall limit may be, with the fields
-/// `accepts` takes, and its callback, if it asks for one, judged by `callbacks`: refused while
-/// it is `None`, which is the server that takes no callback.
+/// The job `spec` checked against `ceiling`, the most a wall limit may be, and its callback, if
+/// it asks for one, with an address literal in its URL judged by `callbacks`.
 ///
 /// # Errors
 /// The [`Fault`] of the first field, in the message's order, that is not valid.
 pub(crate) fn job(
     spec: Option<&v1::JobSpec>,
     ceiling: Duration,
-    accepts: Accepts,
-    callbacks: Option<&AddressRule>,
+    callbacks: &AddressRule,
 ) -> Result<Valid, Fault> {
     let spec = spec.ok_or(Fault::Field("spec"))?;
     let id = id(&spec.job_id)?;
@@ -157,7 +145,6 @@ pub(crate) fn job(
     let history_key = history_key(&spec.history_key)?;
     let layers = rootfs::layers(&spec.layers)?;
     let mounts = rootfs::mounts(&spec.mounts)?;
-    not_enabled(spec, accepts)?;
     let retry = retry(spec.retry.as_ref())?;
     let callback = callback_check::callback(spec.callback.as_ref(), callbacks)?;
     let accelerator = AcceleratorNeed::requested(&capabilities, resources.shape())
@@ -226,7 +213,6 @@ pub(crate) fn job(
         mounts,
         host_ports,
         history_key,
-        // Absent unless `accepts` takes a policy (`not_enabled`).
         retry,
         callback,
     };
@@ -516,18 +502,6 @@ fn history_key(text: &str) -> Result<Option<HistoryKey>, Fault> {
     HistoryKey::parse(text)
         .map(Some)
         .map_err(|fault| Fault::Wire("spec.historyKey", fault.code()))
-}
-
-/// A job that carries a retry policy `accepts` does not take is refused, whatever it holds (an
-/// empty policy included), before its callback is looked at: every instance over the store must
-/// be one that acts on a policy before any accepts one, or an older one would end the job
-/// without retrying it while its client believed otherwise
-/// (`docs/design/job-retry-and-completion-callback.md`, section 7).
-fn not_enabled(spec: &v1::JobSpec, accepts: Accepts) -> Result<(), Fault> {
-    match spec.retry {
-        Some(_) if !accepts.retry => Err(Fault::Wire("spec.retry", "retry-not-enabled")),
-        _ => Ok(()),
-    }
 }
 
 /// The retry policy `policy` as the record keeps it, its waits in whole seconds, as given

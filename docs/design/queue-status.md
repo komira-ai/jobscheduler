@@ -15,7 +15,7 @@ reads with their defaults.
 | Field | Number | Type | Meaning |
 | --- | --- | --- | --- |
 | `queue_status` | 33 | `QueueStatus` | Why the job is where it is now. Absent when nothing has been recorded. |
-| `attempts` | 34 | `uint32` | How many placement attempts the job has had (section 3). |
+| `attempts` | 34 | `uint32` | How many placement attempts the job has had, over all of the job's retry attempts (section 3). |
 | `events` | 35 | `repeated JobEvent` | The job's newest transitions, oldest first, at most 32 (section 4). |
 | `dropped_events` | 36 | `uint32` | How many older events were dropped to keep the bound. |
 
@@ -123,6 +123,10 @@ pass 1, so pass 1 records nothing for them. They keep `UNSPECIFIED` unless pass 
 An attempt is a placement commit or an acquire refused for the job. A whole-host job requeued after a failed prepare and placed
 again has two attempts. A launch that was accepted is not counted: the placement onto its machine is. `attempts` saturates at
 `u32::MAX`.
+
+`attempts` is not `Job.attempt`. A retry of the job (`WAITING_FOR_RETRY`) does not reset `attempts`: the count runs over all of the job's
+attempts. `Job.attempt` numbers the retry attempts, from 1 ([job-retry-and-completion-callback.md](job-retry-and-completion-callback.md),
+section 3.2).
 
 ## 4. Events: the bound and eviction
 

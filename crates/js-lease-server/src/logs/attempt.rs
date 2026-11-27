@@ -98,14 +98,22 @@ pub(crate) struct Attempts {
 }
 
 impl Attempts {
-    /// The attempts of `job`. This release's record holds no attempt number and no history:
-    /// a submit refuses a retry policy (`job_api/validate.rs`), so every job is on its first
-    /// attempt and none ended before it.
+    /// The attempts of `job`, as its record's trail holds them: its attempt number (1 for a job
+    /// never retried, and for a record written before attempts), and the host and times of each
+    /// ended attempt its history still lists. An attempt the history dropped is not here; the
+    /// reader finds it through its `attempt/` row.
     pub(crate) fn of(job: &JobRecord) -> Attempts {
-        let _ = job;
+        let ended = job.attempt.history().iter().map(|attempt| {
+            let row = AttemptRow {
+                host: attempt.host.clone(),
+                placed_at: attempt.placed_at,
+                ended_at: attempt.ended_at,
+            };
+            (attempt.number, row)
+        });
         Attempts {
-            current: 1,
-            ended: BTreeMap::new(),
+            current: job.attempt.number(),
+            ended: ended.collect(),
         }
     }
 }

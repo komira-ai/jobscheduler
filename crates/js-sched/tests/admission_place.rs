@@ -362,13 +362,16 @@ fn a_blocked_head_does_not_delay_another_pool() {
     assert_eq!(f.r.s.load_counters().reservations, 2);
 }
 
-/// Catches: a hold that wanders (moving at every wobble of the loads) or one that never
-/// moves: both workers measured at 6000 m, the head holds `a`; `b` falling to 5500 m
-/// (within a tenth of the head's ratio; the four leases' predicted 4000 m is the
-/// floor, so the readings are above it) leaves the hold, and falling to 4500 m moves it
-/// to `b`.
+/// Catches: a hold that stays on the worker it had while another is the better one (a
+/// stickiness the pick no longer has), or one that does not follow the pick: with no lease
+/// carrying a wall time or an estimate no start is known, so the head holds the worker
+/// with the smallest binding ratio, the first by name on a tie, picked again every round.
+/// Both workers measured at 6000 m, the head holds `a` (the tie goes to the first name);
+/// `b` falling to 5500 m (the four leases' predicted 4000 m is the floor, so the
+/// readings are above it) moves the hold to `b` at once, and falling to 4500 m keeps it
+/// there without counting a change.
 #[test]
-fn the_hold_moves_only_when_the_kept_worker_is_a_tenth_worse() {
+fn the_hold_follows_the_smallest_ratio_every_round() {
     let mut f = Blocked::new();
     let (held_a, held_b) = (f.held_a.clone(), f.held_b.clone());
     for (name, held) in [("a", &held_a), ("b", &held_b)] {
@@ -377,21 +380,29 @@ fn the_hold_moves_only_when_the_kept_worker_is_a_tenth_worse() {
     }
     let head = f.head();
     f.r.round(0);
-    assert_eq!(f.r.s.head_hold(head), Some(&w("a")));
+    assert_eq!(
+        f.r.s.head_hold(head),
+        Some(&w("a")),
+        "a tie: the first name"
+    );
+    assert_eq!(f.r.s.load_counters().reservations, 1);
     for _ in 0..2 {
-        // `a` keeps reporting, or its reading goes stale and it is charged its prediction.
         f.r.window("a", 6_000, 0, &held_a);
         f.r.window("b", 5_500, 0, &held_b);
     }
     f.r.round(0);
-    assert_eq!(f.r.s.head_hold(head), Some(&w("a")), "4% worse is kept");
+    assert_eq!(
+        f.r.s.head_hold(head),
+        Some(&w("b")),
+        "4% better moves: the hold is not sticky"
+    );
+    assert_eq!(f.r.s.load_counters().reservations, 2);
     for _ in 0..2 {
-        // `a` keeps reporting, or its reading goes stale and it is charged its prediction.
         f.r.window("a", 6_000, 0, &held_a);
         f.r.window("b", 4_500, 0, &held_b);
     }
     f.r.round(0);
-    assert_eq!(f.r.s.head_hold(head), Some(&w("b")), "14% worse moves");
+    assert_eq!(f.r.s.head_hold(head), Some(&w("b")), "14% better stays");
     assert_eq!(f.r.s.load_counters().reservations, 2);
 }
 
@@ -812,7 +823,8 @@ fn an_action_at_the_whole_hosts_memory_holds_no_worker() {
 
 /// Catches: a head holding the worker a whole-machine lease is emptying (the worker would be
 /// refilled for the head as soon as the lease ends, or the two holds would fight over it):
-/// the whole-machine lease holds `a` (the first with the fewest leases), and the large
+/// the whole-machine lease holds `a` (no lease has a wall time or an estimate, so no tail is
+/// known; the two workers hold as many leases, and `a` is the first by name), and the large
 /// action behind it holds `b`.
 #[test]
 fn a_head_does_not_hold_the_worker_a_whole_machine_lease_holds() {
