@@ -593,7 +593,8 @@ fn agent_update(rig: &Rig) -> Result<(), String> {
         != (RUNNING, before.attempt, flags.host_id.as_str())
     {
         return Err(format!(
-            "the job was not handed over running, on its host and in its attempt: {now:?}"
+            "the job was not handed over running, on its host and in its attempt: {now:?}\n{}",
+            rig.journal()
         ));
     }
     rig.ends_zero(&id)
