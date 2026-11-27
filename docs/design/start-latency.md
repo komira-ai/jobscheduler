@@ -158,9 +158,11 @@ agents' journals:
   drain's) does not. So the heartbeat after a start leaves the moment its container runs, carries
   `running`, and is then the heartbeat the server holds for the next placement on the host: a
   placement waits at most for the start before it, not for the interval.
-- **A full worker is backed off from.** After a reply the worker had no room for, the next heartbeat
-  waits the session's backoff (500 ms to 1 s at first, doubling while the worker stays full, reset
-  by a reply it takes), not the interval and never 0 ms.
+- **A full worker is backed off from, within the interval.** After a reply the worker had no room
+  for, the next heartbeat waits a backoff of its own (500 ms to 1 s at first, doubling while the
+  worker stays full, reset by a reply it takes), never 0 ms and never more than the interval, so a
+  busy worker never makes the host miss its grace. The reply is still an accepted heartbeat: it ends
+  a run of failed exchanges, so a failure after it waits the first failure's backoff.
 
 ### Decisions
 
