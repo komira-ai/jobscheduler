@@ -58,7 +58,7 @@ Columns:
 | decisions.md | 22 | 6 | 4 | 7 | komira-ai/jobscheduler#1150, komira-ai/jobscheduler#1174, komira-ai/jobscheduler#1175 |
 | amendments.md | 9 | 6 | 1 | 1 | - |
 | capabilities.md | 26 | 3 | 4 | 15 | komira-ai/jobscheduler#1168, komira-ai/jobscheduler#1169, komira-ai/jobscheduler#1170, komira-ai/jobscheduler#1171, komira-ai/jobscheduler#1173, komira-ai/jobscheduler#1189 |
-| kbf-today.md | 15 | 3 | 1 | 3 | - |
+| kbf-today.md | 15 | 4 | 1 | 3 | - |
 | machines.md | 1 | 0 | 0 | 1 | - |
 | mac-runtime.md | 18 | 10 | 3 | 3 | komira-ai/jobscheduler#1183 |
 | sizing.md | 13 | 0 | 2 | 3 | komira-ai/jobscheduler#1184 |
@@ -998,7 +998,7 @@ As read: A description of kbf at kbf 45e420656 and 89af8f2ef, not a build plan. 
 | 4.5 Simulation / Step 0 | No golden trace hash is stored. Step 0 will write explicit hand-written trace lines (no {:?}), cover both hash mechanisms and state whether the 64-bit FNV-1a hash is replaced. | `crates/js-sim-cell/tests/golden/trace-hashes.txt`, `crates/js-sim-cell/tests/replay.rs` | komira-ai/jobscheduler#684; komira-ai/jobscheduler#699; komira-ai/jobscheduler#705; komira-ai/jobscheduler#735 |
 | 4.5 Simulation | Nothing compares a trace before and after a PR, and any Debug-format change moves the hash. | partly: The golden trace-hashes.txt gives a before-and-after comparison for js-sim-cell scenarios | - |
 | 4.6 ucdk | The launcher, run verb, run records, real cloud providers and cost logic are not built. UL1-UL4 and UJ1-UJ3 are properties this design needs of a launcher. | superseded: `docs/design/ucdk.md:7` | komira-ai/jobscheduler#1082 |
-| Corrections: scheduler cores | Only the legacy core runs in a kbf server. js is refused unless the test-only farm-core-js feature is built, and nothing in kbf runs js-agent or a js lease client. | decision, no code | komira-ai/jobscheduler#1130 |
+| Corrections: scheduler cores | Only the legacy core runs in a kbf server. js is refused unless the test-only farm-core-js feature is built, and nothing in kbf runs js-agent or a js lease client. | `crates/js-lease-server/src/config/backfill.rs`: settled, kbf embeds no js core, so the enforced bound is the job service's wall limit; `bounds_enforced` is the lease server's `server.backfill_bounds_enforced` (`--backfill-bounds-enforced`), true unless set, beside `server.backfill_margin`, and an unknown end counts as the ceiling in the drain order (`crates/js-sched/src/scheduler/whole.rs`, `Scheduler::ranked_end`) | komira-ai/jobscheduler#1130 |
 | Corrections: storage and trust | A node runs one storage-and-daemon process that holds the cold-store credential beside untrusted actions. Its unit says trusted network only until a test proves an action cannot read the key. | no | - |
 | Corrections: tierstore | tierstore is deployed nowhere and refuses presigned requests (kbf#1922). It goes on the storage nodes with Silo as its hot tier (decided). kbf-pack flags default off. | no | komira-ai/jobscheduler#1922 |
 
@@ -1107,7 +1107,7 @@ As read: No status header. The page has no Designed, Planned, Open question or W
 
 ## tree-inputs.md + estimate-feed.md + ucdk.md
 
-As read: tree-inputs: superseded by job-rootfs.md (D66), nothing to build. estimate-feed: "the feed is gone", flag is a no-op. ucdk: "Superseded (2026-11-24)", nothing built. Only live gap: one stale doc comment (komira-ai/jobscheduler#1130 related).
+As read: tree-inputs: superseded by job-rootfs.md (D66), nothing to build. estimate-feed: "the feed is gone", flag is a no-op. ucdk: "Superseded (2026-11-24)", nothing built. The one live gap, a stale doc comment, is fixed (komira-ai/jobscheduler#1134, komira-ai/jobscheduler#1130).
 
 | Section | Claim | On main | Tracking |
 |---|---|---|---|
@@ -1125,7 +1125,7 @@ As read: tree-inputs: superseded by job-rootfs.md (D66), nothing to build. estim
 | 5 option (b): compute estimate with feed off | Registry computes estimate for the row with feed off | superseded: registry has no lives or history modules | - |
 | 6 Q1 several runs on one lease | Open: bias of keyed runs on a lease | superseded: leases gone (komira-ai/jobscheduler#831); lives::estimate_end absent | komira-ai/jobscheduler#831 |
 | 6 Q2 read path / Q3 pool on row / Q4 key dominating / Q5 estimate kept on row / Q7 reservation deadline | Open questions about estimate-feed evidence | superseded: estimate-feed.md:3 'the feed is gone'; hosted_row/history.rs absent | - |
-| 6 Q6 stale comment on DEFAULT_BACKFILL_MARGIN_MS | Doc comment in js-whole cost.rs says nothing uses the constant yet, but js_sched::backfill uses it | `crates/js-whole/src/cost.rs` | komira-ai/jobscheduler#1134 |
+| 6 Q6 stale comment on DEFAULT_BACKFILL_MARGIN_MS | Doc comment in js-whole cost.rs says nothing uses the constant yet, but js_sched::backfill uses it | `crates/js-whole/src/cost.rs`: the comment names it the default of the backfill margin, which `server.backfill_margin` sets | komira-ai/jobscheduler#1134; komira-ai/jobscheduler#1130 |
 | ucdk.md: Superseded 2026-11-24 | Plan for jobscheduler as second realization of ucdk Jobs (sections 11.1-11.3) dropped; nothing built | superseded: `crates/js-lease-server/src/kinds.rs` | komira-ai/jobscheduler#28; komira-ai/jobscheduler#1082 |
 
 ## 14 other pages

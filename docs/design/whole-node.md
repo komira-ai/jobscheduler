@@ -112,13 +112,18 @@ exist. (The scheduler-side mark is `reserved`; the agent-announced phase `draini
 "draining" for D41, because it is not leaving.) What runs on it **finishes or reaches its end**, and nothing is killed:
 
 - **Backfill, the one exception.** A host reserved with a known tail (the latest end of its leases when the mark was made: each lease's
-  estimate cut to its max wall, else its max wall) takes work that ends, with a minute to spare, by that tail, so the reserved request
+  estimate cut to its max wall, else its max wall) takes work that ends, with the margin to spare (a minute unless set), by that tail, so the reserved request
   still starts when the tail ends. The work's end is its max wall time (cut by the P90 of its key's wall minutes where that is known),
   and counts only where the max wall is enforced, up to a ceiling; work with no known end, a host with an unknown tail and a tail already
   past take none. In `js-sched` this is `Scheduler::with_backfill` (off unless the caller says its bounds are enforced, with the ceiling
   it enforces) and applies to every held worker, a blocked head's too; the kept start never moves later. On the lease server it applies
-  to a lease of the pool's `share_class` that is not a probe, with `server.max_lease_wall` as the
-  ceiling (the lease table that ended every lease at its wall is deleted; a job has its own wall); without it, and for every other start, a reserved host takes nothing new.
+  to a job of the pool's `share_class` that is not a probe. The job service ends every job at its wall limit, so the server enforces
+  bounds unless `server.backfill_bounds_enforced = false` (`--backfill-bounds-enforced false`), with `server.max_job_wall`
+  (the most a job's wall limit may be) as the ceiling and `server.backfill_margin` (`--backfill-margin`, one minute
+  unless set) as the margin; with bounds not enforced, and for every other start, a reserved host takes nothing new. With bounds
+  enforced, a lease with neither an estimate nor a wall time (an allocation taken up after a restart, whose wall limit the
+  scheduler was not told) counts, for the pick of a host to drain, as ending at its start plus the ceiling, not after every known
+  tail; the host's tail stays unknown, so it takes no backfill.
 
 - A lease ends by release or by its max wall time, whichever is first. The host list (`GET /v1/hosts`) carries `reserved_for` on a reserved
   host: it asks the consumer to place no more work there and to release when its work is done
