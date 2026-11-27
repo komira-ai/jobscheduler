@@ -818,8 +818,8 @@ impl SchedPlacer {
                 continue;
             }
             match jobs.note_queue(&job.id, &notes) {
-                Ok(Some(_)) => metrics.queue_status_written(),
-                Ok(None) => {}
+                // `None`: the job was no longer queued, or the row read changed nothing.
+                Ok(written) => written.iter().for_each(|_| metrics.queue_status_written()),
                 Err(error) => {
                     warn!(job = %job.id, %error, "a queued job's queue status was not written; the next pass writes it");
                     noted.unwritten(&job.id);

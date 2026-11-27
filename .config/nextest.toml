@@ -41,3 +41,10 @@ filter = """\
     test(=the_headline_over_jobs) )\
 """
 threads-required = 4
+
+# The farm-shaped server test prints what each window of its run cost (the statements, the
+# threads and the switches of its hellos, heartbeats and ticks); its output is shown when it
+# passes too, so a run's log carries those figures. What it asserts does not change.
+[[profile.default.overrides]]
+filter = 'package(js-lease-server) & test(=server::storm_tests::a_farm_shaped_server_starts_no_thread_for_a_store_call)'
+success-output = "final"
