@@ -81,7 +81,7 @@ pub(super) struct Shaped {
 pub(super) struct CurveBook {
     /// The live allocations of the job table on hosts, as of the last pass, with what the
     /// engine read of their jobs.
-    live: BTreeMap<JobId, LiveJob>,
+    pub(super) live: BTreeMap<JobId, LiveJob>,
     /// Each queued job whose curve found no host, with the walk time of the first such round.
     waits: BTreeMap<JobId, FarmTime>,
     /// The queued jobs whose wait bound ran out: tested with their flat number from then on.
