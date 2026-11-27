@@ -16,8 +16,9 @@
 //!   ([`Session::with_dispatch`]). A later welcome replaces the route, and one without the
 //!   flag withdraws it.
 //! - The poller ([`serve`]) runs on a thread of its own beside the heartbeat loop, and
-//!   makes a transport for each poll through the same connector, server, login and CA the
-//!   session's was made with ([`Dial`]). The
+//!   makes its transport through the same connector, server, login and CA the session's was
+//!   made with ([`Dial`]). It keeps that transport for every poll, as the session keeps its
+//!   own for every heartbeat, and makes a new one only when none could be made. The
 //!   poll carries the session secret as a heartbeat does; the [`Route`] has no `Debug` text
 //!   for it.
 //!

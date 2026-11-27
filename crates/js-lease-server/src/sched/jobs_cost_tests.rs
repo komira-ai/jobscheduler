@@ -348,6 +348,7 @@ fn full_host_load(seq: u64) -> js_agent_wire::NodeLoad {
         cpu_usage_usec: seq * 40_000_000 + seq % 7,
         host_cpu_usec: None,
         host_cpu_pressure_some_usec: None,
+        actions_oom_events: None,
         working_set_bytes: (6 << 30) + seq * 4096,
         active_file_bytes: 0,
         host_nonfile_bytes: None,

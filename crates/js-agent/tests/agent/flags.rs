@@ -309,6 +309,48 @@ fn plain_http_off_loopback_refused() {
     );
 }
 
+/// Asserts `--server-address`: an address beside an `https://` server is taken and the agent
+/// registers as it does without one; beside a plain-http server it is refused naming the flag
+/// before anything is sent; and a value that is not an IP address is refused naming the flag.
+/// It catches a flag that is parsed and never handed to the client, and an address that would
+/// take a bearer in clear to a machine other than the loopback server named.
+#[test]
+fn a_server_address_is_taken_beside_an_https_server_only() {
+    let host = linux_host();
+    let (script, sent) = Script::new(vec![welcome(1)]);
+    let args = [
+        "--server",
+        "https://js.example.test:7301",
+        "--server-address",
+        "192.0.2.10",
+        "--host-cert",
+        "/nonexistent/host.crt",
+        "--host-key",
+        "/nonexistent/host.key",
+        "--pool",
+        "macs",
+    ];
+    let mut sleeper = CountingSleeper::stopping_at(1);
+    let ran = run(
+        &args,
+        &host,
+        &ScriptConnector::of(script),
+        &mut sleeper,
+        &mut Lowest,
+    );
+    assert_eq!(ran.status(), code(0), "{}", ran.err);
+    assert_eq!(sent.borrow()[0].0, "/v1/agent/hello");
+    let plain = refused(&["--server-address", "192.0.2.10"], &host);
+    assert!(
+        plain.contains(
+            "js-agent: --server-address: is given only with an https:// --server: a plain http:// server is the machine itself"
+        ),
+        "{plain}"
+    );
+    let named = refused(&["--server-address", "js.example.test"], &host);
+    assert!(named.contains("--server-address <IP>"), "{named}");
+}
+
 /// Asserts that a server that cannot be talked to is not a refusal: the real transport reports it
 /// as a failed hello naming the address, the agent waits and tries again, and a stop
 /// request ends the program with status 0. The host key is not in the message.

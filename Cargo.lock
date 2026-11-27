@@ -1337,6 +1337,8 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tonic",
+ "tracing",
+ "tracing-subscriber",
  "ureq",
  "webpki-roots",
 ]

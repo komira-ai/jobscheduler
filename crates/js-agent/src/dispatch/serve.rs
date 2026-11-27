@@ -34,18 +34,23 @@ impl Dial<'_> {
     }
 }
 
-/// Polls for the sessions `cell` is given until it is closed: each poll on a transport of
-/// its own ([`Dial::open`]), the answers handed to `worker`, and a wait after a failure
-/// (any answer but a usable 200, any transport error) as `jitter` says. Messages the worker
-/// had no room for are held and handed over when it makes room, before the next poll is
-/// posted; meanwhile no transport is made. The poller's lines go to the cell.
+/// Polls for the sessions `cell` is given until it is closed, the answers handed to `worker`,
+/// and a wait after a failure (any answer but a usable 200, any transport error) as `jitter`
+/// says. The polls share one transport, as the session's heartbeats do, so they share its
+/// kept connection and what its client knows of the server's address; a new one is made
+/// ([`Dial::open`]) only after a poll for which none could be made. Messages the worker had no room
+/// for are held and handed over when it makes room, before the next poll is posted; meanwhile
+/// nothing is posted. The poller's lines go to the cell.
 pub fn serve(cell: &Cell, dial: &Dial<'_>, worker: &Worker, jitter: Box<dyn Jitter>) {
     let mut poller = Poller::new(worker, jitter);
+    let mut kept = None;
     while let Some((generation, route)) = cell.wait_route() {
-        let next = poller.hand_over().unwrap_or_else(|| match dial.open() {
-            Ok(mut transport) => poller.poll(&mut *transport, &route),
-            Err(_) => poller.failed(None),
-        });
+        let next = poller
+            .hand_over()
+            .unwrap_or_else(|| match transport_for(&mut kept, dial) {
+                Ok(transport) => poller.poll(&mut **transport, &route),
+                Err(_) => poller.failed(None),
+            });
         cell.note(poller.take_lines());
         match next {
             Next::Again => {}
@@ -57,4 +62,22 @@ pub fn serve(cell: &Cell, dial: &Dial<'_>, worker: &Worker, jitter: Box<dyn Jitt
             }
         }
     }
+}
+
+/// The transport for a poll: the kept one, otherwise a new one, which is kept from then on.
+/// Every route of the session authenticates with the host's one certificate, so a kept
+/// transport serves every later route.
+///
+/// # Errors
+///
+/// No transport could be made (see [`Dial::open`]); none is kept then.
+fn transport_for<'k>(
+    kept: &'k mut Option<Box<dyn Transport>>,
+    dial: &Dial<'_>,
+) -> Result<&'k mut Box<dyn Transport>, String> {
+    let made = match kept.take() {
+        Some(transport) => transport,
+        None => dial.open()?,
+    };
+    Ok(kept.insert(made))
 }

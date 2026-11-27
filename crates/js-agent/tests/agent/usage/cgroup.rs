@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use js_agent::usage::{
-    Layout, cpu_limited, layout_of, parse_active_file, parse_inactive_file,
+    Layout, cpu_limited, layout_of, parse_active_file, parse_inactive_file, parse_oom_events,
     parse_pressure_some_total, parse_single_u64, parse_stat_key, parse_usage_usec, working_set,
 };
 
@@ -174,4 +174,15 @@ fn pressure_some_total_table() {
     for (text, want) in cases {
         assert_eq!(parse_pressure_some_total(text), want, "{text:?}");
     }
+}
+
+/// Asserts that `oom` of a `memory.events.local` is read apart from `oom_kill` and
+/// `oom_group_kill`, and that text without the line gives nothing. It catches a prefix match
+/// that would read the kill count as the event count.
+#[test]
+fn oom_events_are_read_apart_from_oom_kills() {
+    let events = "low 0\nhigh 0\nmax 12\noom_kill 4\noom 5\noom_group_kill 1\n";
+    assert_eq!(parse_oom_events(events), Some(5));
+    assert_eq!(parse_oom_events("oom_kill 4\n"), None);
+    assert_eq!(parse_oom_events("oom\n"), None);
 }

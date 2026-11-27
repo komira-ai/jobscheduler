@@ -1,5 +1,6 @@
 //! The HTTP client: one agent per command, bound to one server and one token or one
-//! host identity, which keeps its connection to the server between requests.
+//! host identity, which keeps its connection to the server between requests, and finds the
+//! server at the address its book gives (see [`crate::address`]).
 
 use std::fmt;
 use std::path::Path;
@@ -12,8 +13,10 @@ use rustls::pki_types::pem::PemObject;
 use serde_json::Value;
 use ureq::RequestBuilder;
 use ureq::tls::{Certificate, ClientCert, RootCerts, TlsConfig, TlsProvider};
+use ureq::unversioned::transport::{Connector, RustlsConnector, TcpConnector};
 use ureq::{Agent, Error as TransportError};
 
+use crate::address::{self, Book, Remember, Resolve};
 use crate::error::ClientError;
 use crate::identity::{HostIdentity, Live};
 use crate::server_url::ServerUrl;
@@ -98,7 +101,8 @@ impl Client {
         let server = ServerUrl::parse(server)?;
         let bearer = token::bearer(token_file)?;
         let roots = roots(server.https, ca_cert)?;
-        let agent = build_agent(server.https, limit, IDLE_LIMIT, &roots, None);
+        let book = address::book(&server);
+        let agent = build_agent(server.https, limit, IDLE_LIMIT, &roots, None, &book);
         Ok(Self {
             auth: Auth::Bearer { agent, bearer },
             server,
@@ -138,8 +142,9 @@ impl Client {
         }
         let roots = roots(server.https, ca_cert)?;
         let https = server.https;
+        let book = address::book(&server);
         let live = Live::open(identity.clone(), move |cert| {
-            build_agent(https, limit, IDLE_LIMIT, &roots, Some(cert))
+            build_agent(https, limit, IDLE_LIMIT, &roots, Some(cert), &book)
         })?;
         Ok(Self {
             auth: Auth::Identity(live),
@@ -277,13 +282,16 @@ fn authorized<B>(request: RequestBuilder<B>, bearer: Option<&str>) -> RequestBui
 /// The HTTP agent for one server: no proxy, no redirect, at most one idle connection kept
 /// for less than `idle` (the clients pass [`IDLE_LIMIT`]), and TLS with `roots` and, when
 /// given, a client certificate. The clones of a [`Client`] share the agent and so the
-/// connection.
-fn build_agent(
+/// connection. Its addresses are `book`'s: it asks no resolver of its own, and each new
+/// connection is made by TCP then TLS (which checks the certificate against the server's
+/// name, whatever the address) on one address at a time.
+pub(crate) fn build_agent(
     https: bool,
     limit: Duration,
     idle: Duration,
     roots: &RootCerts,
     cert: Option<ClientCert>,
+    book: &Arc<Book>,
 ) -> Agent {
     let tls = TlsConfig::builder()
         .provider(TlsProvider::Rustls)
@@ -291,7 +299,7 @@ fn build_agent(
         .client_cert(cert)
         .unversioned_rustls_crypto_provider(Arc::new(default_provider()))
         .build();
-    Agent::config_builder()
+    let config = Agent::config_builder()
         .proxy(None)
         .max_redirects(0)
         .http_status_as_error(false)
@@ -308,8 +316,13 @@ fn build_agent(
         .max_idle_connections_per_host(1)
         .max_idle_age(idle)
         .tls_config(tls)
-        .build()
-        .into()
+        .build();
+    let connect = ().chain(TcpConnector::default()).chain(RustlsConnector::default());
+    let connector = Remember {
+        inner: connect,
+        book: Arc::clone(book),
+    };
+    Agent::with_parts(config, connector, Resolve(Arc::clone(book)))
 }
 
 /// The roots to trust: none for plain http; for `https://`, the certificates of the
@@ -390,6 +403,7 @@ mod tests {
             idle,
             &roots(false, None).unwrap(),
             None,
+            &address::book(&ServerUrl::parse(&url).unwrap()),
         );
         for path in ["/a", "/b"] {
             let reply = agent.get(format!("{url}{path}")).call().unwrap();
