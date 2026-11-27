@@ -487,7 +487,8 @@ async fn concurrent_hellos_are_taken_one_at_a_time() {
         hello("host-3")
     );
     for answer in [a, b, c, d] {
-        answer.expect("every host is admitted");
+        let Json(welcome) = answer.expect("every host is admitted");
+        assert_eq!(welcome.epoch, 1, "each host's first session");
     }
     let bound = rig.keys("hosts/binding/");
     assert_eq!(bound.len(), 4);
