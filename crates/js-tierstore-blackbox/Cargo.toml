@@ -1,0 +1,49 @@
+[package]
+name = "js-tierstore-blackbox"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# A test-only crate: the library is empty, and the one test target
+# (tests/agent_beside_tierstore.rs) drives the released js-agent beside the released tierstore on
+# a disposable Linux runner, as root, from outside: the packages from their apt channel, the
+# lease server's released binary, and the sockets, routes and metrics of all three. It is run by
+# .github/workflows/js-agent-blackbox-tierstore.yml, after a release is published. Every test is
+# `#[ignore]`d, so the coverage run and every other `cargo test` build it and run none of it.
+
+# Everything the test uses is a dev-dependency for Linux alone.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# The bytes a gRPC call and an S3 object travel in.
+bytes.workspace = true
+# The signature of the S3 PUT that puts the tree into the upstream store.
+hex.workspace = true
+hmac.workspace = true
+# The counting proxy on the mount provider's socket: an HTTP/2 server and client.
+http-body-util.workspace = true
+hyper = { workspace = true, features = ["client", "http2", "server"] }
+hyper-util = { workspace = true, features = ["tokio"] }
+# The client the test reads the lease server with (hosts, jobs).
+js-client = { path = "../js-client" }
+# The scratch directory of the server's files.
+js-testkit = { path = "../js-testkit" }
+# The test CA, the host certificate it signs and the server's certificate.
+rcgen.workspace = true
+# The test's check that it runs as root.
+rustix = { workspace = true, features = ["process"] }
+serde_json.workspace = true
+sha2.workspace = true
+tokio = { workspace = true, features = ["io-util", "net", "rt", "rt-multi-thread", "sync", "time"] }
+
+[lints]
+workspace = true
+
+[package.metadata.buildrules]
+# The farm lane's `//:ci` (docs/farm.md) checks the format of, builds and lints this package but
+# does not run its tests: every test is an `#[ignore]`d root test on a disposable runner, and
+# buildrules' test gate refuses a test target with an ignored test.
+
+[package.metadata.buildrules.actions]
+ci = ["fmt", "lint"]

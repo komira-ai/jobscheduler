@@ -1,0 +1,91 @@
+# The released js-agent beside the released tierstore, driven from outside
+# (crates/js-tierstore-blackbox/tests/agent_beside_tierstore.rs): on a hosted Ubuntu runner, as
+# root, the test installs js-agent at the version given from the apt suite `testing` and
+# tierstore at its newest release from `stable`, starts both by their packaged units with the
+# farm's shape of flags and config (tierstore with `trees.max_placements = 2`), starts the
+# release's js-lease-server binary beside them, and runs jobs whose input tree tierstore serves,
+# with tierstore's upstream store (the S3 server below) behind a proxy the test stalls.
+#
+# release.yml calls it (job `blackbox-tierstore`) once the release's js-agent is on `testing`;
+# nothing waits for it yet. A manual run takes a version that `testing` lists and whose GitHub
+# release holds the lease server, so a branch's change to the test can be tried before it merges.
+name: js-agent-blackbox-tierstore
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: The js-agent version on the apt suite testing (X.Y.Z), whose release's js-lease-server runs beside it
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      version:
+        description: The js-agent version on the apt suite testing (X.Y.Z), whose release's js-lease-server runs beside it
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  blackbox-tierstore:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    # tierstore's upstream store: an S3 server with the bucket tierstore's cold store names. Its
+    # keys are throwaway values of this runner's alone.
+    services:
+      s3:
+        image: docker.io/bitnamilegacy/minio@sha256:a340369228a43597f0540c3f5f7b76ed3324bb38c1d0ecf272f96fc7bf193753
+        env:
+          MINIO_ROOT_USER: blackboxroot
+          MINIO_ROOT_PASSWORD: blackbox-throwaway
+          MINIO_SITE_REGION: us-east-1
+          MINIO_DEFAULT_BUCKETS: cas
+        ports:
+          - 9000
+        options: --health-cmd "curl -fsS http://127.0.0.1:9000/minio/health/live" --health-interval 2s --health-timeout 5s --health-retries 30
+    env:
+      VERSION: ${{ inputs.version }}
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: The release's js-lease-server, checked against its SHA256SUMS
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tarball="js-lease-server-$VERSION-x86_64-unknown-linux-musl.tar.gz"
+          mkdir -p "$RUNNER_TEMP/server"
+          gh release download "v$VERSION" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/server" --pattern "$tarball" --pattern SHA256SUMS
+          (cd "$RUNNER_TEMP/server" && sha256sum --check --ignore-missing --strict SHA256SUMS && tar -xzf "$tarball")
+          server=$(find "$RUNNER_TEMP/server" -type f -name js-lease-server -perm -u+x | head -n 1)
+          test -n "$server"
+          "$server" --version
+          echo "SERVER_BIN=$server" >> "$GITHUB_ENV"
+      - name: Build the test as the runner user
+        run: |
+          set -euo pipefail
+          cargo test --locked -p js-tierstore-blackbox --test agent_beside_tierstore --no-run --message-format json > "$RUNNER_TEMP/build.json"
+          exe=$(jq -r 'select(.executable != null and .target.name == "agent_beside_tierstore") | .executable' "$RUNNER_TEMP/build.json" | tail -n 1)
+          test -x "$exe"
+          echo "EXE=$exe" >> "$GITHUB_ENV"
+      - name: Run the test as root
+        env:
+          S3_PORT: ${{ job.services.s3.ports['9000'] }}
+        run: |
+          set -euo pipefail
+          printf 'blackboxroot\nblackbox-throwaway\n' > "$RUNNER_TEMP/s3-keys"
+          sudo -n env \
+            JS_BLACKBOX_AGENT_VERSION="$VERSION" \
+            JS_BLACKBOX_SERVER_BIN="$SERVER_BIN" \
+            JS_BLACKBOX_S3="http://127.0.0.1:$S3_PORT" \
+            JS_BLACKBOX_S3_KEY_FILE="$RUNNER_TEMP/s3-keys" \
+            "$EXE" --ignored --nocapture --test-threads=1
+      - name: The units' logs
+        if: failure()
+        run: sudo -n journalctl --no-pager --lines=1000 --unit js-agent-crun.service --unit tierstore@a.service

@@ -1558,6 +1558,22 @@ jobs:
           ARCH: ${{ matrix.arch }}
         run: docker run --rm --volume "$PWD/target/debug/xtask:/usr/local/bin/xtask:ro" ubuntu@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852 xtask channels check-apt --arch "$ARCH" --version "$VERSION"
 
+  # BLACK BOX, js-agent beside tierstore (release time only, after the same write of testing
+  # check-apt waits for): on a hosted amd64 runner, as root, the released js-agent from
+  # `testing` and tierstore's newest release from `stable`, started by their packaged units with
+  # the farm's shape of flags and config, the release's js-lease-server beside them, and jobs
+  # whose input tree tierstore serves while its upstream is stalled, restarted or unavailable
+  # (.github/workflows/js-agent-blackbox-tierstore.yml). Nothing waits for it yet: neither the
+  # promotion, the deploy path nor release-red and release-green count it.
+  blackbox-tierstore:
+    needs: [plan, testing-apt-write, testing-apt-write-2, testing-apt-write-3]
+    if: ${{ !cancelled() && !failure() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' && (needs.testing-apt-write.outputs.conflict == 'false' || needs.testing-apt-write-2.outputs.conflict == 'false' || needs.testing-apt-write-3.outputs.conflict == 'false') }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/js-agent-blackbox-tierstore.yml
+    with:
+      version: ${{ needs.plan.outputs.version }}
+
   # PROMOTION, the apt repository: the same three jobs for the suite `stable`, after `check-apt`
   # succeeded (a failed or skipped check promotes nothing). The read job reads the index of
   # testing and of stable; the index job lists the entries of this release that testing holds in

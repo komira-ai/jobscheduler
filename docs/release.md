@@ -125,7 +125,7 @@ next push that ships code. Nothing runs on a timer.
    run. Both hold `issues: write` and `actions: read` and run `gh` alone.
 
 Each job holds only the permission it needs: `contents: read` for plan, build, deploy-tool, sums,
-verify, the apt index jobs, `check-apt`, `smoke-bundle-pack` and `smoke-bundle-check` (plus `attestations: read` for verify), `id-token` and
+verify, the apt index jobs, `check-apt`, `blackbox-tierstore`, `smoke-bundle-pack` and `smoke-bundle-check` (plus `attestations: read` for verify), `id-token` and
 `attestations` write for `attest`, `actions: read` and
 `contents: read` for `turn`, `actions: write` alone for `desired`, `issues: write` and
 `actions: read` for `release-red` and `release-green`, `contents` write for
@@ -437,6 +437,7 @@ of every other product of the repository as they are.
 | `testing-apt-index` | `apt-signing` | checks the two packages against `SHA256SUMS` and their attestation by artifacts.yml at this commit, merges them into the index read (`channels apt index`) and signs `Release` (`InRelease`, `Release.gpg`) with the repository's subkey (`channels apt sign`), which it then removes |
 | `testing-apt-write` | `apt-publish` | checks the packages again, uploads each once to the pool (never over other bytes), writes the signed index with `If-Match` on the ETags read, and invalidates `/apt/dists/*` on the CDN (`channels apt write`) |
 | `check-apt` | none | on an amd64 and an arm64 runner, in a clean Ubuntu container pinned by digest: adds the repository with its keyring, installs `js-agent=X.Y.Z` from `testing`, and checks the version, the files, that the agent's own start check accepts the job user `jsjob` (a system account with no home and no login) and its subordinate uid and gid ranges, that nothing is enabled and that nothing runs (`channels check-apt`) |
+| `blackbox-tierstore` | none | when a write of `testing` landed, the call of `js-agent-blackbox-tierstore.yml` on a hosted amd64 runner, as root: installs `js-agent=X.Y.Z` from `testing` and tierstore's newest release from `stable`, starts both by their packaged units with the farm's shape of flags and config (tierstore at `trees.max_placements = 2`), the release's `js-lease-server` beside them, and runs jobs whose input tree tierstore serves while its upstream is stalled, while it restarts, and while it answers unavailable for 60 s (`crates/js-tierstore-blackbox`, whose test says each pass condition). Nothing waits for it: the promotion, the deploy path, `release-red` and `release-green` do not count it |
 | `stable-apt-read`, `stable-apt-index`, `stable-apt-write` | as above | only when `check-apt` passed on both: read both suites, list in `stable` the entries `testing` holds for this version, held to the digests of `SHA256SUMS` (`channels apt promote`), sign, and write the index alone (`--no-pool`): `stable` serves the very bytes `testing` was checked with |
 
 No job holds both the signing key and the cloud role. A write that loses the race for the shared

@@ -1,9 +1,10 @@
 //! The jobs of the release that call a workflow instead of running steps of their own.
 
 /// The jobs of the release that call a workflow, and the workflow each calls: artifacts.yml, the
-/// five workflows of the beta stage (the platforms other than Linux x86_64), and
-/// docker-swarm-updater's deploy workflow at the full commit its allow-list names.
-pub const CALLERS: [(&str, &str); 7] = [
+/// five workflows of the beta stage (the platforms other than Linux x86_64), the black-box test
+/// of js-agent beside tierstore, and docker-swarm-updater's deploy workflow at the full commit
+/// its allow-list names.
+pub const CALLERS: [(&str, &str); 8] = [
     ("artifacts", "./.github/workflows/artifacts.yml"),
     ("beta-macos", "./.github/workflows/beta.yml"),
     (
@@ -18,6 +19,10 @@ pub const CALLERS: [(&str, &str); 7] = [
     (
         "beta-macos-isolation",
         "./.github/workflows/js-agent-native-isolation.yml",
+    ),
+    (
+        "blackbox-tierstore",
+        "./.github/workflows/js-agent-blackbox-tierstore.yml",
     ),
     (
         "cp-deploy",

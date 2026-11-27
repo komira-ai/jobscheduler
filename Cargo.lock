@@ -2029,6 +2029,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-tierstore-blackbox"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "hex",
+ "hmac",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "js-client",
+ "js-testkit",
+ "rcgen",
+ "rustix",
+ "serde_json",
+ "sha2",
+ "tokio",
+]
+
+[[package]]
 name = "js-treestore"
 version = "0.1.0"
 dependencies = [
