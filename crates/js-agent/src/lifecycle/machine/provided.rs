@@ -183,7 +183,7 @@ impl Attached {
     ) -> (ProviderAnswer, Option<Step>) {
         let prepare = matches!(call, ProviderCall::Prepare { .. });
         if pace.idle() {
-            if pace.failures() > 0 {
+            if pace.retrying() {
                 self.retries = self.retries.saturating_add(1);
             }
             if prepare && let Some((gate, _)) = self.gates.get_mut(provider) {
