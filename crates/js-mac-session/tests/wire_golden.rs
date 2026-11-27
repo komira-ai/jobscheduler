@@ -13,9 +13,7 @@ use std::os::unix::net::UnixStream;
 use js_mac_session::lease::{Dotted, Slot, parse_lease, pool_user_name, user_name};
 use js_mac_session::ledger::Ledger;
 use js_mac_session::ledger::pool::SlotState;
-use js_mac_session::proto::{
-    self, Call, FullDiskAccess, Limits, PoolState, Reply, Request, Session,
-};
+use js_mac_session::proto::{self, Call, FullDiskAccess, Limits, PoolState, Reply, Request};
 use js_testkit::dir::TestDir;
 use js_types::LeaseId;
 
@@ -42,7 +40,6 @@ fn requests() -> Vec<(Request, &'static str)> {
                 lease: s("3.7"),
                 argv: vec![s("/bin/true")],
                 env: vec![(s("A"), s("b"))],
-                session: Session::Background,
                 limits: None,
                 deadline_ms: None,
             },
@@ -53,18 +50,6 @@ fn requests() -> Vec<(Request, &'static str)> {
                 lease: s("3.7"),
                 argv: vec![s("/bin/true")],
                 env: Vec::new(),
-                session: Session::Gui,
-                limits: None,
-                deadline_ms: None,
-            },
-            r#"{"verb":"run","lease":"3.7","argv":["/bin/true"],"env":[],"session":"gui"}"#,
-        ),
-        (
-            Request::Run {
-                lease: s("3.7"),
-                argv: vec![s("/bin/true")],
-                env: Vec::new(),
-                session: Session::Background,
                 limits: Some(Limits {
                     file_bytes: 1_048_576,
                     processes: 512,
@@ -78,7 +63,6 @@ fn requests() -> Vec<(Request, &'static str)> {
                 lease: s("3.7"),
                 argv: vec![s("/bin/true")],
                 env: Vec::new(),
-                session: Session::Background,
                 limits: None,
                 deadline_ms: Some(60_000),
             },
@@ -96,10 +80,6 @@ fn requests() -> Vec<(Request, &'static str)> {
             r#"{"verb":"stop","lease":"3.7","grace_ms":5000}"#,
         ),
         (
-            Request::SessionReady { lease: s("3.7") },
-            r#"{"verb":"session-ready","lease":"3.7"}"#,
-        ),
-        (
             Request::KillUid { lease: s("3.7") },
             r#"{"verb":"kill-uid","lease":"3.7"}"#,
         ),
@@ -108,50 +88,12 @@ fn requests() -> Vec<(Request, &'static str)> {
             r#"{"verb":"user-delete","lease":"3.7"}"#,
         ),
         (
-            Request::SessionLogin { lease: s("3.7") },
-            r#"{"verb":"session-login","lease":"3.7"}"#,
-        ),
-        (Request::SessionIdle, r#"{"verb":"session-idle"}"#),
-        (
-            Request::RoleRun {
-                argv: vec![s("/v/vmm"), s("vm-run"), s("--spec"), s("/i/spec")],
-                env: Vec::new(),
-            },
-            r#"{"verb":"role-run","argv":["/v/vmm","vm-run","--spec","/i/spec"],"env":[]}"#,
-        ),
-        (
-            Request::RoleSessionReady,
-            r#"{"verb":"role-session-ready"}"#,
-        ),
-        (Request::RoleKillUid, r#"{"verb":"role-kill-uid"}"#),
-        (
-            Request::RoleReap {
-                pgid: 4242,
-                start: 1_700_000_000_123_456,
-                boot: s("B0"),
-            },
-            r#"{"verb":"role-reap","pgid":4242,"start":1700000000123456,"boot":"B0"}"#,
-        ),
-        (
-            Request::ImageSetup { bundle: s("/i/b") },
-            r#"{"verb":"image-setup","bundle":"/i/b"}"#,
-        ),
-        (
-            Request::ImageHarvest {
-                bundle: s("/i/b"),
-                out: s("/i/o"),
-            },
-            r#"{"verb":"image-harvest","bundle":"/i/b","out":"/i/o"}"#,
-        ),
-        (
             Request::BootReset {
                 held: vec![s("1.1"), s("2.9")],
             },
             r#"{"verb":"boot-reset","held":["1.1","2.9"]}"#,
         ),
         (Request::Scan, r#"{"verb":"scan"}"#),
-        (Request::Baseline, r#"{"verb":"baseline"}"#),
-        (Request::RebootDirty, r#"{"verb":"reboot-dirty"}"#),
         (Request::PoolCreate, r#"{"verb":"pool-create"}"#),
         (Request::PoolStatus, r#"{"verb":"pool-status"}"#),
         (Request::FullDiskAccess, r#"{"verb":"full-disk-access"}"#),
@@ -187,11 +129,6 @@ fn replies() -> Vec<(Reply, &'static str)> {
             Reply::Deleted { existed: false },
             r#"{"deleted":{"existed":false}}"#,
         ),
-        (Reply::Restarting, r#""restarting""#),
-        (
-            Reply::SessionReady { ready: true },
-            r#"{"session-ready":{"ready":true}}"#,
-        ),
         (
             Reply::Reset {
                 kept: Some(s("1.1")),
@@ -214,16 +151,6 @@ fn replies() -> Vec<(Reply, &'static str)> {
                 errors: vec![s("e")],
             },
             r#"{"scanned":{"clean":false,"added":["a"],"removed":["r"],"errors":["e"]}}"#,
-        ),
-        (
-            Reply::Baselined {
-                classes: vec![(s("lease-users"), 1)],
-            },
-            r#"{"baselined":{"classes":[["lease-users",1]]}}"#,
-        ),
-        (
-            Reply::Imaged { report: s("{}") },
-            r#"{"imaged":{"report":"{}"}}"#,
         ),
         (
             Reply::Refused { reason: s("no") },
@@ -269,6 +196,44 @@ fn every_request_has_its_bytes() {
     for (request, text) in requests() {
         assert_eq!(serde_json::to_string(&request).unwrap(), text);
         assert_eq!(serde_json::from_str::<Request>(text).unwrap(), request);
+    }
+}
+
+/// The rows of the release before for the verbs this helper no longer has, and for a `run`
+/// in the GUI session, byte for byte; and the rows of its replies to them.
+const REMOVED_REQUESTS: [&str; 12] = [
+    r#"{"verb":"run","lease":"3.7","argv":["/bin/true"],"env":[],"session":"gui"}"#,
+    r#"{"verb":"session-ready","lease":"3.7"}"#,
+    r#"{"verb":"session-login","lease":"3.7"}"#,
+    r#"{"verb":"session-idle"}"#,
+    r#"{"verb":"role-run","argv":["/v/vmm","vm-run","--spec","/i/spec"],"env":[]}"#,
+    r#"{"verb":"role-session-ready"}"#,
+    r#"{"verb":"role-kill-uid"}"#,
+    r#"{"verb":"role-reap","pgid":4242,"start":1700000000123456,"boot":"B0"}"#,
+    r#"{"verb":"image-setup","bundle":"/i/b"}"#,
+    r#"{"verb":"image-harvest","bundle":"/i/b","out":"/i/o"}"#,
+    r#"{"verb":"baseline"}"#,
+    r#"{"verb":"reboot-dirty"}"#,
+];
+const REMOVED_REPLIES: [&str; 4] = [
+    r#""restarting""#,
+    r#"{"session-ready":{"ready":true}}"#,
+    r#"{"baselined":{"classes":[["lease-users",1]]}}"#,
+    r#"{"imaged":{"report":"{}"}}"#,
+];
+
+/// Asserts that every request row of the release before for a verb this helper no longer
+/// has, and its GUI `run`, fails to parse (the server refuses it as a bad request and starts
+/// nothing), and that the replies only those verbs had fail to parse too. Catches: a removed
+/// verb that still parses (as itself or as another verb), or a GUI `run` read as a
+/// background one, which would start a process the caller asked for in another session.
+#[test]
+fn the_rows_of_the_removed_verbs_are_refused() {
+    for text in REMOVED_REQUESTS {
+        assert!(serde_json::from_str::<Request>(text).is_err(), "{text}");
+    }
+    for text in REMOVED_REPLIES {
+        assert!(serde_json::from_str::<Reply>(text).is_err(), "{text}");
     }
 }
 

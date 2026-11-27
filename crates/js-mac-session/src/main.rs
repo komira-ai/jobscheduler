@@ -13,12 +13,6 @@ fn main() -> ExitCode {
         if mode == js_mac_session::node_admin::MODE {
             return node_admin(rest);
         }
-        // The mode `run` in a GUI session executes this binary in (`macos::gui`), as
-        // root under `launchctl asuser`.
-        #[cfg(target_os = "macos")]
-        if mode == js_mac_session::macos::gui::AS_USER {
-            return js_mac_session::macos::gui::as_user(rest);
-        }
     }
     js_mac_session::start::main(&js_mac_session::start::Args::parse())
 }

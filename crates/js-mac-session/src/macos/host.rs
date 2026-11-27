@@ -10,13 +10,10 @@ use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::AnyObject;
 use objc2_foundation::{NSError, NSString};
 use objc2_open_directory::{ODNode, ODRecord, ODSession, kODNodeTypeLocalNodes};
-use security_framework::random::SecRandom;
 
 use crate::autologin::{self, CommandOutput};
 use crate::disclaim::Program;
-use crate::helper::{
-    self, Account, Host, LiveProcess, NewUser, PrintAnswer, Process, SHELL, UserRecord,
-};
+use crate::helper::{self, Account, Host, LiveProcess, NewUser, PrintAnswer, SHELL, UserRecord};
 
 const USERS: &str = "dsRecTypeStandard:Users";
 const GROUPS: &str = "dsRecTypeStandard:Groups";
@@ -154,24 +151,6 @@ impl Host for MacHost {
         })
     }
 
-    fn reset_password(&self, name: &str) -> io::Result<String> {
-        autoreleasepool(|_| {
-            let node = local_node()?;
-            let mut error = None;
-            // SAFETY: the record type and name are NSStrings; no attributes needed.
-            let record = unsafe {
-                node.recordWithRecordType_name_attributes_error(
-                    Some(&NSString::from_str(USERS)),
-                    Some(&NSString::from_str(name)),
-                    None,
-                    Some(&mut error),
-                )
-            }
-            .ok_or_else(|| od_error("looking the user up", error))?;
-            random_password(&record)
-        })
-    }
-
     fn command(&self, program: &str, args: &[&str]) -> io::Result<CommandOutput> {
         autologin::run_command(program, args)
     }
@@ -291,29 +270,6 @@ impl Host for MacHost {
         Ok(pids.into_iter().filter_map(live).collect())
     }
 
-    fn processes(&self) -> io::Result<Vec<Process>> {
-        // Room for more pids than the kernel reports, so a few new ones still fit.
-        // SAFETY: a null buffer asks only for the count.
-        let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
-        if count < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let mut pids = vec![0 as libc::pid_t; count.unsigned_abs() as usize + 64];
-        let bytes =
-            i32::try_from(std::mem::size_of_val(pids.as_slice())).map_err(io::Error::other)?;
-        // SAFETY: the buffer holds `bytes` bytes of pids and outlives the call.
-        let wrote = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
-        if wrote < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        pids.truncate(wrote.unsigned_abs() as usize);
-        Ok(pids.into_iter().filter_map(process).collect())
-    }
-
-    fn kill_group(&self, pgid: i32) -> io::Result<()> {
-        signal_group(pgid, libc::SIGKILL)
-    }
-
     fn term_group(&self, pgid: i32) -> io::Result<()> {
         signal_group(pgid, libc::SIGTERM)
     }
@@ -330,93 +286,6 @@ impl Host for MacHost {
     fn pause(&self) {
         std::thread::sleep(Duration::from_millis(100));
     }
-
-    fn clone_file(
-        &self,
-        src: std::os::fd::BorrowedFd<'_>,
-        dir: std::os::fd::BorrowedFd<'_>,
-        name: &str,
-    ) -> io::Result<()> {
-        use std::os::fd::AsRawFd as _;
-        /// `CLONE_NOOWNCOPY` (`sys/clonefile.h`): the clone is owned by the caller, not the
-        /// source's owner.
-        const CLONE_NOOWNCOPY: u32 = 0x0002;
-        let c_name = std::ffi::CString::new(name)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "the name holds NUL"))?;
-        // SAFETY: both descriptors are open for the call and the name is NUL-terminated.
-        let code = unsafe {
-            libc::fclonefileat(
-                src.as_raw_fd(),
-                dir.as_raw_fd(),
-                c_name.as_ptr(),
-                CLONE_NOOWNCOPY,
-            )
-        };
-        if code == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::last_os_error())
-        }
-    }
-
-    fn clear_user_flags(&self, file: std::os::fd::BorrowedFd<'_>) -> io::Result<()> {
-        use std::os::fd::AsRawFd as _;
-        // SAFETY: the descriptor is open for the call.
-        if unsafe { libc::fchflags(file.as_raw_fd(), 0) } == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::last_os_error())
-        }
-    }
-
-    fn boot_session(&self) -> io::Result<String> {
-        let mut buffer = [0u8; 128];
-        let mut len = buffer.len();
-        // SAFETY: the name is a NUL-terminated string, `buffer` is writable for `len`
-        // bytes and `len` is a writable size_t the call sets to what it wrote; nothing
-        // is written to the sysctl (null new value, length 0).
-        let code = unsafe {
-            libc::sysctlbyname(
-                c"kern.bootsessionuuid".as_ptr(),
-                buffer.as_mut_ptr().cast(),
-                &raw mut len,
-                std::ptr::null_mut(),
-                0,
-            )
-        };
-        if code != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let value = buffer.get(..len).unwrap_or_default();
-        let value = value.strip_suffix(&[0]).unwrap_or(value);
-        match std::str::from_utf8(value) {
-            Ok(text) if !text.is_empty() => Ok(text.to_owned()),
-            _ => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "kern.bootsessionuuid is not a non-empty string",
-            )),
-        }
-    }
-}
-
-/// Sets a fresh password of 32 random bytes, in hex, on `record`, and returns it.
-fn random_password(record: &ODRecord) -> io::Result<String> {
-    let mut bytes = [0u8; 32];
-    SecRandom::default().copy_bytes(&mut bytes)?;
-    let password = hex::encode(bytes);
-    let mut error = None;
-    // SAFETY: a record of the local node and an NSString; no old password, as root on
-    // the local node.
-    if !unsafe {
-        record.changePassword_toPassword_error(
-            None,
-            Some(&NSString::from_str(&password)),
-            Some(&mut error),
-        )
-    } {
-        return Err(od_error("setting the password", error));
-    }
-    Ok(password)
 }
 
 /// The local directory node (`/Local/Default`).
@@ -575,35 +444,6 @@ fn live(pid: libc::pid_t) -> Option<LiveProcess> {
     }
     let command = info.map_or_else(|| "?".to_owned(), |info| c_name(&info.pbi_comm));
     Some(LiveProcess { pid, command })
-}
-
-/// `pid` as the process table shows it; `None` once it is gone or its info is short.
-fn process(pid: libc::pid_t) -> Option<Process> {
-    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
-    let size = i32::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
-    // SAFETY: `info` is a writable proc_bsdinfo of `size` bytes.
-    let wrote = unsafe {
-        libc::proc_pidinfo(
-            pid,
-            libc::PROC_PIDTBSDINFO,
-            0,
-            info.as_mut_ptr().cast(),
-            size,
-        )
-    };
-    if wrote != size {
-        return None;
-    }
-    // SAFETY: the call filled the whole struct (checked above).
-    let info = unsafe { info.assume_init() };
-    Some(Process {
-        pid,
-        pgid: i32::try_from(info.pbi_pgid).ok()?,
-        uid: info.pbi_uid,
-        ruid: info.pbi_ruid,
-        start: info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec,
-        zombie: info.pbi_status == SZOMB,
-    })
 }
 
 /// A NUL-terminated name of at most `raw.len()` bytes, as text.

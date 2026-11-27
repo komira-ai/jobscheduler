@@ -6,7 +6,7 @@ use std::time::Duration;
 use crate::helper::tests::{Rig, fds, rig};
 use crate::helper::{NO_RUN, Outcome};
 use crate::lease::parse_lease;
-use crate::proto::{Reply, Request, Session};
+use crate::proto::{Reply, Request};
 use crate::testing::act_argv;
 
 /// The pid the table names for runs that no process stands for.
@@ -81,7 +81,6 @@ fn watch_finds_the_last_run_and_reports_its_end() {
         lease: "7.1".to_owned(),
         argv: act_argv("exit 3"),
         env: Vec::new(),
-        session: Session::Background,
         limits: None,
         deadline_ms: None,
     };
@@ -249,7 +248,6 @@ fn a_run_with_a_deadline_is_held_to_it_and_its_end_recorded() {
         lease: "7.1".to_owned(),
         argv: act_argv("exit 0"),
         env: Vec::new(),
-        session: Session::Background,
         limits: None,
         deadline_ms: Some(60_000),
     };
@@ -280,8 +278,8 @@ fn an_end_is_recorded_on_the_running_entry_of_its_pid() {
     assert_eq!(rig.helper.wait_watched("7.1"), Some((Some(0), None)));
 }
 
-/// Catches: the end of a process the table does not hold (a `role-run`'s) recorded on some
-/// entry, and a `watch` that answers before the run it watches has ended.
+/// Catches: the end of a process the table does not hold (one whose start was not
+/// recorded) recorded on some entry, and a `watch` that answers before the run it watches has ended.
 #[test]
 fn a_watch_waits_for_the_end_and_an_unknown_end_changes_nothing() {
     let rig = rig("watch-wait", 2);

@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
-use crate::autologin::SessionPaths;
+use crate::autologin::LoginPaths;
 use crate::client::{Client, ClientError, Exit};
 use crate::helper::{POOL_EXHAUSTED, Settings};
 use crate::lease::UidRange;
@@ -86,38 +86,11 @@ fn served_with(name: &str, check: Arc<Scripted>) -> Served {
 
 /// A helper served on a socket, its boot reset done if `reset`.
 fn served_from(name: &str, check: Arc<Scripted>, reset: bool) -> Served {
-    served_vm(name, check, reset, None)
-}
-
-/// [`served_from`] on a Mac whose VM user is `vm_user`, if any.
-fn served_vm(name: &str, check: Arc<Scripted>, reset: bool, vm_user: Option<&str>) -> Served {
-    served_in(
-        name,
-        check,
-        reset,
-        vm_user,
-        UidRange::new(me(), me() + 1).unwrap(),
-    )
-}
-
-/// [`served_vm`] with the lease users' uid `range`.
-fn served_in(
-    name: &str,
-    check: Arc<Scripted>,
-    reset: bool,
-    vm_user: Option<&str>,
-    range: UidRange,
-) -> Served {
     trace();
+    let range = UidRange::new(me(), me() + 1).unwrap();
     let dir = scratch(&format!("server-{name}"));
     std::fs::create_dir(dir.join("Users")).unwrap();
     let host = FakeHost::default();
-    if vm_user.is_some() {
-        // What provisioning wrote: 64 hex digits, mode 0400.
-        let file = dir.join("vm-user-password");
-        std::fs::write(&file, "ab".repeat(32)).unwrap();
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o400)).unwrap();
-    }
     let settings = Settings {
         range,
         pool: pool_of(range),
@@ -132,10 +105,9 @@ fn served_in(
             owned: Vec::new(),
         },
         user_folders: dir.join("folders"),
-        session: SessionPaths::under(&dir),
+        state_dir: dir.path().to_path_buf(),
+        login: LoginPaths::under(&dir),
         scan: crate::scan::ScanSettings::under(&dir),
-        image: crate::helper::ImageSettings::under(&dir),
-        vm_user: vm_user.map(|name| crate::lease::VmUser::new(name).unwrap()),
     };
     let ledger = Ledger::open(&dir.join("ledger")).unwrap();
     let helper = Arc::new(Helper::new(Box::new(host.clone()), settings, ledger));
@@ -192,185 +164,30 @@ fn a_linked_or_missing_directory_is_refused() {
     assert!(bind(&dir.join("elsewhere/socket"), my_gid()).is_err());
 }
 
-/// Catches: the session switch or the boot reset answered with the wrong reply over
-/// the socket, or a refusal of either taken by the client as success.
+/// Catches: the boot reset answered with the wrong reply over the socket, a refusal of a
+/// second one taken by the client as success, or a lease the server holds kept over the
+/// reset.
 #[test]
-fn the_switch_and_the_reset_work_over_the_socket() {
-    let served = served_from("switch", Scripted::fixed(Ok(())), false);
+fn the_reset_works_over_the_socket() {
+    let served = served_from("reset", Scripted::fixed(Ok(())), false);
     let client = &served.client;
-    assert_eq!(client.boot_reset(&[]).unwrap(), (None, Vec::new()));
+    assert_eq!(client.boot_reset(&[]).unwrap(), Vec::<String>::new());
     match client.boot_reset(&[]) {
         Err(ClientError::Refused(why)) => assert!(why.contains("runs once"), "{why}"),
         other => panic!("a second reset: {other:?}"),
     }
-    match client.session_login("1.1") {
-        Err(ClientError::Refused(why)) => assert!(why.contains("has no user"), "{why}"),
-        other => panic!("a login without a user: {other:?}"),
-    }
-    client.user_create("1.1").unwrap();
-    client.session_login("1.1").unwrap();
-    client.session_idle().unwrap();
     let log = served.host.state().log.clone();
-    let restarts = log.iter().filter(|call| call.contains("reboot userspace"));
-    assert_eq!(restarts.count(), 2, "{log:#?}");
+    assert!(
+        log.iter()
+            .any(|call| call.starts_with("command /usr/bin/defaults delete")),
+        "auto-login cleared: {log:#?}"
+    );
 }
 
-/// Catches: the VM user's verbs answered with the wrong reply over the socket, a refusal
-/// taken by the client as success, or a Mac with no VM user answering them.
+/// Catches: the leak scan's verb answered with the wrong reply over the socket, its
+/// refusal taken by the client as success, or the scan's lists lost on the way.
 #[test]
-fn the_role_verbs_work_over_the_socket() {
-    let refused = |result: Result<(), ClientError>, says: &str| match result {
-        Err(ClientError::Refused(why)) => assert!(why.contains(says), "{why}"),
-        other => panic!("{other:?}"),
-    };
-    let null = std::fs::File::open("/dev/null").unwrap();
-    let fds = [null.as_fd(), null.as_fd(), null.as_fd(), null.as_fd()];
-    let none = served("role-none", Ok(()));
-    refused(none.client.role_session_ready().map(drop), "no VM user");
-    refused(none.client.role_kill_uid(), "no VM user");
-    refused(none.client.role_reap(4242, 1, "boot-2"), "no VM user");
-    refused(
-        none.client.role_run(&argv(&none.dir), &[], fds).map(drop),
-        "no VM user",
-    );
-
-    let served = served_vm("role", Scripted::fixed(Ok(())), true, Some("kbf-vm"));
-    let client = &served.client;
-    refused(client.role_session_ready().map(drop), "has no account");
-    served.host.state().users.insert(
-        "kbf-vm".to_owned(),
-        crate::helper::NewUser {
-            name: "kbf-vm".to_owned(),
-            uid: me() + 10,
-            gid: my_gid(),
-            home: served.dir.join("Users/kbf-vm"),
-        },
-    );
-    assert!(!client.role_session_ready().unwrap());
-    refused(
-        client.role_run(&argv(&served.dir), &[], fds).map(drop),
-        "does not exist",
-    );
-    served
-        .host
-        .state()
-        .domains
-        .insert(format!("gui/{}", me() + 10));
-    assert!(client.role_session_ready().unwrap());
-    client.role_kill_uid().unwrap();
-    // A group the table does not show: nothing to end, and the reply is `killed`.
-    client.role_reap(4242, 1, "boot-2").unwrap();
-    refused(client.role_reap(1, 1, "boot-2"), "will signal");
-    // The session switch rests at the VM user, over the socket.
-    client.session_idle().unwrap();
-    assert_eq!(
-        std::fs::read_to_string(served.dir.join("session-intent")).unwrap(),
-        "vm\n"
-    );
-}
-
-/// Catches: the image verbs answered with the wrong reply over the socket, a refusal
-/// taken by the client as success, or a report lost on the way.
-#[test]
-fn the_image_verbs_work_over_the_socket() {
-    // The VM user is this test's own account, the one a test can hand a file to.
-    let range = UidRange::new(me() + 100, me() + 101).unwrap();
-    let served = served_in(
-        "image",
-        Scripted::fixed(Ok(())),
-        true,
-        Some("kbf-vm"),
-        range,
-    );
-    let client = &served.client;
-    let image = crate::helper::ImageSettings::under(&served.dir);
-    let refused = |result: Result<String, ClientError>, says: &str| match result {
-        Err(ClientError::Refused(why)) => assert!(why.contains(says), "{why}"),
-        other => panic!("{other:?}"),
-    };
-    refused(
-        client.image_setup("/elsewhere/b"),
-        "not inside the staging directory",
-    );
-    refused(
-        client.image_harvest("/elsewhere/b", "/elsewhere/o"),
-        "inside neither",
-    );
-    std::fs::create_dir(&image.dir).unwrap();
-    std::fs::create_dir(&image.staging).unwrap();
-    for program in [&image.vmm, &image.guest] {
-        std::fs::write(program, "program").unwrap();
-        std::fs::set_permissions(program, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    std::fs::set_permissions(&image.dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let bundle = image.staging.join("clone");
-    std::fs::create_dir(&bundle).unwrap();
-    std::fs::write(bundle.join("disk.img"), "d").unwrap();
-    let dir = |name: &str| image.dir.join(name).display().to_string();
-    let staged = |name: &str| image.staging.join(name).display().to_string();
-    // Not the VM user's account yet: setup is refused before it takes the bundle.
-    refused(client.image_setup(&staged("clone")), "has no account");
-    served.host.state().users.insert(
-        "kbf-vm".to_owned(),
-        crate::helper::NewUser {
-            name: "kbf-vm".to_owned(),
-            uid: me(),
-            gid: my_gid(),
-            home: served.dir.join("Users/kbf-vm"),
-        },
-    );
-    let setup = format!(
-        "{} image setup --base {} --guest-binary {}",
-        image.vmm.display(),
-        dir("clone"),
-        image.guest.display()
-    );
-    served.host.state().answers.insert(
-        setup,
-        crate::autologin::CommandOutput {
-            success: true,
-            stdout: "{\"setup\":1}".to_owned(),
-            stderr: String::new(),
-        },
-    );
-    assert_eq!(
-        client.image_setup(&staged("clone")).unwrap(),
-        "{\"setup\":1}"
-    );
-    assert!(image.dir.join("clone").is_dir());
-    assert!(bundle.exists(), "the original is left alone");
-    served.host.state().answers.insert(
-        format!(
-            "{} image harvest --bundle {} --out {}/files",
-            image.vmm.display(),
-            dir("clone"),
-            dir("out")
-        ),
-        crate::autologin::CommandOutput {
-            success: true,
-            stdout: "{\"harvest\":2}".to_owned(),
-            stderr: String::new(),
-        },
-    );
-    assert_eq!(
-        client.image_harvest(&dir("clone"), &dir("out")).unwrap(),
-        "{\"harvest\":2}"
-    );
-    assert!(image.dir.join("out").is_dir());
-    refused(
-        client.image_harvest(&dir("clone"), &dir("out")),
-        "making out in the images directory",
-    );
-}
-
-fn argv(dir: &std::path::Path) -> Vec<String> {
-    crate::helper::ImageSettings::under(dir).vm_run_argv()
-}
-
-/// Catches: the leak scan's verbs answered with the wrong reply over the socket, a
-/// refusal of one taken by the client as success, or the scan's lists lost on the way.
-#[test]
-fn the_scan_verbs_work_over_the_socket() {
+fn the_scan_verb_works_over_the_socket() {
     let served = served("scan", Ok(()));
     let client = &served.client;
     let refused = |result: Result<(), ClientError>, says: &str| match result {
@@ -378,24 +195,18 @@ fn the_scan_verbs_work_over_the_socket() {
         other => panic!("{other:?}"),
     };
     refused(client.scan().map(drop), "no baseline");
-    refused(client.baseline().map(drop), "window is closed");
-    let window = served.dir.join("baseline-window");
-    std::fs::write(&window, "boot-1\n").unwrap();
-    std::fs::set_permissions(&window, std::fs::Permissions::from_mode(0o600)).unwrap();
-    let classes = client.baseline().unwrap();
-    assert!(
-        classes.contains(&("launch-daemons".to_owned(), 0)),
-        "{classes:?}"
-    );
+    // The baseline of a Mac with nothing to scan, as a release with a `baseline` verb
+    // recorded it.
+    let baseline = served.dir.join("scan-baseline");
+    std::fs::write(&baseline, format!("{}\n", crate::scan::BASELINE_HEADER)).unwrap();
+    std::fs::set_permissions(&baseline, std::fs::Permissions::from_mode(0o600)).unwrap();
     assert!(client.scan().unwrap().clean);
-    refused(client.reboot_dirty(), "did not come back dirty");
     std::fs::create_dir(served.dir.join("LaunchDaemons")).unwrap();
     std::fs::write(served.dir.join("LaunchDaemons/evil.plist"), "x").unwrap();
     let scanned = client.scan().unwrap();
     assert!(!scanned.clean);
     assert_eq!(scanned.added.len(), 1, "{scanned:?}");
     assert!(scanned.removed.is_empty() && scanned.errors.is_empty());
-    client.reboot_dirty().unwrap();
 }
 
 /// The four verbs end to end over the socket, descriptors included. Catches: the
@@ -738,18 +549,6 @@ fn the_client_reports_unexpected_replies_and_hangups() {
         None,
         Some(Reply::Started { pid: 7 }),
         Some(Reply::Killed),
-        Some(Reply::SessionReady { ready: true }),
-        Some(Reply::Killed),
-        // The role verbs: a reply of the wrong kind each.
-        Some(Reply::Killed),
-        Some(Reply::SessionReady { ready: true }),
-        Some(Reply::Created { uid: 1 }),
-        Some(Reply::Killed),
-        Some(Reply::Started { pid: 9 }),
-        Some(Reply::Exited {
-            code: Some(3),
-            signal: None,
-        }),
         // The pool: an exhausted pool, a state, and a reply of the wrong kind.
         Some(Reply::Refused {
             reason: format!("{POOL_EXHAUSTED}: of 1 slots"),
@@ -806,15 +605,6 @@ fn the_client_reports_unexpected_replies_and_hangups() {
     }
     let running = client.run("1.1", &[], &[], fds).unwrap();
     assert!(unexpected(running.wait().map(drop)).contains("Killed"));
-    assert!(client.session_ready("1.1").unwrap());
-    assert!(unexpected(client.session_ready("1.1").map(drop)).contains("Killed"));
-    assert!(unexpected(client.role_session_ready().map(drop)).contains("Killed"));
-    assert!(unexpected(client.role_kill_uid()).contains("SessionReady"));
-    assert!(unexpected(client.role_reap(7, 8, "boot")).contains("Created"));
-    assert!(unexpected(client.role_run(&[], &[], fds).map(drop)).contains("Killed"));
-    let running = client.role_run(&[], &[], fds).unwrap();
-    assert_eq!(running.pid, 9);
-    assert_eq!(running.wait().unwrap().code, Some(3));
     match client.user_create("1.1") {
         Err(error @ ClientError::Exhausted(_)) => assert_eq!(
             error.to_string(),
@@ -925,10 +715,9 @@ fn serve_returns_when_accept_fails() {
                 owned: Vec::new(),
             },
             user_folders: dir.join("folders"),
-            session: SessionPaths::under(&dir),
+            state_dir: dir.to_path_buf(),
+            login: LoginPaths::under(&dir),
             scan: crate::scan::ScanSettings::under(&dir),
-            image: crate::helper::ImageSettings::under(&dir),
-            vm_user: None,
         };
         Arc::new(Helper::new(Box::new(FakeHost::default()), settings, ledger))
     };
@@ -981,10 +770,9 @@ fn quiet_helper(dir: &Path) -> Helper {
             owned: Vec::new(),
         },
         user_folders: dir.join("folders"),
-        session: SessionPaths::under(dir),
+        state_dir: dir.to_path_buf(),
+        login: LoginPaths::under(dir),
         scan: crate::scan::ScanSettings::under(dir),
-        image: crate::helper::ImageSettings::under(dir),
-        vm_user: None,
     };
     Helper::new(Box::new(FakeHost::default()), settings, ledger)
 }

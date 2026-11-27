@@ -62,14 +62,13 @@ fn the_verb_is_answered_before_the_boot_reset() {
 }
 
 /// Asserts that a request carrying descriptors is refused as any pool verb is. Catches:
-/// the verb answering a request that smuggles descriptors in (only `run` and `role-run`
-/// take them).
+/// the verb answering a request that smuggles descriptors in (only `run` takes them).
 #[test]
 fn the_verb_takes_no_descriptors() {
     let rig = rig("fda-fds", 1);
     let fd = OwnedFd::from(std::fs::File::open("/dev/null").unwrap());
     assert!(matches!(
         rig.helper.handle(Request::FullDiskAccess, vec![fd]),
-        Outcome::Reply(Reply::Refused { reason }) if reason.contains("take descriptors")
+        Outcome::Reply(Reply::Refused { reason }) if reason.contains("takes descriptors")
     ));
 }

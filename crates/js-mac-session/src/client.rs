@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::helper::POOL_EXHAUSTED;
-use crate::proto::{self, Call, FullDiskAccess, Limits, PoolState, Reply, Request, Session};
+use crate::proto::{self, Call, FullDiskAccess, Limits, PoolState, Reply, Request};
 
 /// Why a call did not succeed.
 #[derive(Debug)]
@@ -165,28 +165,12 @@ impl Client {
         env: &[(String, String)],
         fds: [BorrowedFd<'_>; 4],
     ) -> Result<Running, ClientError> {
-        self.run_in(lease, argv, env, fds, Session::Background)
+        self.run_limited(lease, argv, env, fds, None)
     }
 
-    /// [`Self::run`] in `session`: [`Session::Gui`] is the lease user's GUI session,
-    /// refused until it is up ([`Self::session_ready`]).
-    ///
-    /// # Errors
-    /// The call failed or was refused.
-    pub fn run_in(
-        &self,
-        lease: &str,
-        argv: &[String],
-        env: &[(String, String)],
-        fds: [BorrowedFd<'_>; 4],
-        session: Session,
-    ) -> Result<Running, ClientError> {
-        self.run_limited(lease, argv, env, fds, session, None)
-    }
-
-    /// [`Self::run_in`] with `limits` for the helper to set on the process before it
-    /// starts it. The helper refuses limits in the GUI session, and values that are zero or
-    /// above their caps ([`Limits::new`] checks the same).
+    /// [`Self::run`] with `limits` for the helper to set on the process before it starts
+    /// it. The helper refuses values that are zero or above their caps ([`Limits::new`]
+    /// checks the same).
     ///
     /// # Errors
     /// The call failed or was refused.
@@ -196,21 +180,19 @@ impl Client {
         argv: &[String],
         env: &[(String, String)],
         fds: [BorrowedFd<'_>; 4],
-        session: Session,
         limits: Option<Limits>,
     ) -> Result<Running, ClientError> {
         let request = Request::Run {
             lease: lease.to_owned(),
             argv: argv.to_vec(),
             env: env.to_vec(),
-            session,
             limits,
             deadline_ms: None,
         };
         self.started(&request, &fds)
     }
 
-    /// [`Self::run_limited`] outside any login session, with the run's own `deadline`
+    /// [`Self::run_limited`] with the run's own `deadline`
     /// after its start: the helper ends the lease's processes once it passes, whether or not
     /// this connection is still open. A helper from before the deadline refuses the request
     /// and starts nothing ([`ClientError::unknown_to_helper`]).
@@ -229,7 +211,6 @@ impl Client {
             lease: lease.to_owned(),
             argv: argv.to_vec(),
             env: env.to_vec(),
-            session: Session::Background,
             limits,
             deadline_ms: Some(u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX)),
         };
@@ -274,100 +255,6 @@ impl Client {
         }
     }
 
-    /// `role-run`: starts `argv` as the standing VM user in its GUI session, with the
-    /// four descriptors stdin, stdout, stderr and the working directory.
-    ///
-    /// # Errors
-    /// The call failed or was refused (no VM user, its session not up, or a lease
-    /// holding the session).
-    pub fn role_run(
-        &self,
-        argv: &[String],
-        env: &[(String, String)],
-        fds: [BorrowedFd<'_>; 4],
-    ) -> Result<Running, ClientError> {
-        let request = Request::RoleRun {
-            argv: argv.to_vec(),
-            env: env.to_vec(),
-        };
-        self.started(&request, &fds)
-    }
-
-    /// `role-session-ready`: whether the standing VM user's GUI session is up.
-    ///
-    /// # Errors
-    /// The call failed or was refused.
-    pub fn role_session_ready(&self) -> Result<bool, ClientError> {
-        match self.call(&Request::RoleSessionReady, &[])?.1 {
-            Reply::SessionReady { ready } => Ok(ready),
-            other => Err(unexpected(other)),
-        }
-    }
-
-    /// `role-kill-uid`: returns once no process of the standing VM user is left.
-    ///
-    /// # Errors
-    /// The call failed or was refused.
-    pub fn role_kill_uid(&self) -> Result<(), ClientError> {
-        match self.call(&Request::RoleKillUid, &[])?.1 {
-            Reply::Killed => Ok(()),
-            other => Err(unexpected(other)),
-        }
-    }
-
-    /// `role-reap`: ends the process group `pgid` a `role-run` started, if its leader is
-    /// still the VM user's process with this `start` time in this `boot`; returns once
-    /// the group is empty. A group whose leader is gone or is another process now (the
-    /// pid was reused, or the Mac rebooted) is left alone and is a success.
-    ///
-    /// # Errors
-    /// The call failed or was refused.
-    pub fn role_reap(&self, pgid: i32, start: u64, boot: &str) -> Result<(), ClientError> {
-        let request = Request::RoleReap {
-            pgid,
-            start,
-            boot: boot.to_owned(),
-        };
-        match self.call(&request, &[])?.1 {
-            Reply::Killed => Ok(()),
-            other => Err(unexpected(other)),
-        }
-    }
-
-    /// `image-setup`: as root, writes the guest's first-boot files into the base image
-    /// bundle `bundle` (a path directly inside the helper's images directory) and
-    /// returns what `js-vmm` reported.
-    ///
-    /// # Errors
-    /// The call failed or was refused (a bundle the helper will not touch, no VM user,
-    /// or `js-vmm` failed).
-    pub fn image_setup(&self, bundle: &str) -> Result<String, ClientError> {
-        let request = Request::ImageSetup {
-            bundle: bundle.to_owned(),
-        };
-        match self.call(&request, &[])?.1 {
-            Reply::Imaged { report } => Ok(report),
-            other => Err(unexpected(other)),
-        }
-    }
-
-    /// `image-harvest`: as root, copies the diagnostics allowlist out of the stopped
-    /// guest bundle `bundle` into the new directory `out` (both directly inside the
-    /// images directory) and returns what `js-vmm` reported.
-    ///
-    /// # Errors
-    /// The call failed or was refused.
-    pub fn image_harvest(&self, bundle: &str, out: &str) -> Result<String, ClientError> {
-        let request = Request::ImageHarvest {
-            bundle: bundle.to_owned(),
-            out: out.to_owned(),
-        };
-        match self.call(&request, &[])?.1 {
-            Reply::Imaged { report } => Ok(report),
-            other => Err(unexpected(other)),
-        }
-    }
-
     /// `kill-uid`: returns once no process of the lease user is left.
     ///
     /// # Errors
@@ -396,57 +283,20 @@ impl Client {
         }
     }
 
-    /// `boot-reset`, naming the leases the server still holds for this node: returns
-    /// the lease whose session was kept and the leases whose users were deleted.
+    /// `boot-reset`, naming the leases the server still holds for this node: returns the
+    /// leases whose users were deleted. The reply's `kept`, which a helper of a release
+    /// before could fill, is not read.
     ///
     /// # Errors
     /// The call failed or was refused.
-    pub fn boot_reset(
-        &self,
-        held: &[String],
-    ) -> Result<(Option<String>, Vec<String>), ClientError> {
+    pub fn boot_reset(&self, held: &[String]) -> Result<Vec<String>, ClientError> {
         let request = Request::BootReset {
             held: held.to_vec(),
         };
         match self.call(&request, &[])?.1 {
-            Reply::Reset { kept, deleted } => Ok((kept, deleted)),
+            Reply::Reset { deleted, .. } => Ok(deleted),
             other => Err(unexpected(other)),
         }
-    }
-
-    /// `session-login`: returns once the helper has asked for the restart (which may
-    /// end the connection first: an end of stream is then the expected answer).
-    ///
-    /// # Errors
-    /// The call failed or was refused.
-    pub fn session_login(&self, lease: &str) -> Result<(), ClientError> {
-        let request = Request::SessionLogin {
-            lease: lease.to_owned(),
-        };
-        restarting(self.call(&request, &[])?.1)
-    }
-
-    /// `session-ready`: whether the GUI session `session-login` started for the lease
-    /// is up.
-    ///
-    /// # Errors
-    /// The call failed or was refused.
-    pub fn session_ready(&self, lease: &str) -> Result<bool, ClientError> {
-        let request = Request::SessionReady {
-            lease: lease.to_owned(),
-        };
-        match self.call(&request, &[])?.1 {
-            Reply::SessionReady { ready } => Ok(ready),
-            other => Err(unexpected(other)),
-        }
-    }
-
-    /// `session-idle`: as [`Self::session_login`].
-    ///
-    /// # Errors
-    /// The call failed or was refused.
-    pub fn session_idle(&self) -> Result<(), ClientError> {
-        restarting(self.call(&Request::SessionIdle, &[])?.1)
     }
 
     /// `scan`: the leak scan against the recorded baseline.
@@ -469,25 +319,6 @@ impl Client {
             other => Err(unexpected(other)),
         }
     }
-
-    /// `baseline`: returns how many items each class of the recorded baseline holds.
-    ///
-    /// # Errors
-    /// The call failed or was refused.
-    pub fn baseline(&self) -> Result<Vec<(String, usize)>, ClientError> {
-        match self.call(&Request::Baseline, &[])?.1 {
-            Reply::Baselined { classes } => Ok(classes),
-            other => Err(unexpected(other)),
-        }
-    }
-
-    /// `reboot-dirty`: as [`Self::session_login`], for a reboot.
-    ///
-    /// # Errors
-    /// The call failed or was refused.
-    pub fn reboot_dirty(&self) -> Result<(), ClientError> {
-        restarting(self.call(&Request::RebootDirty, &[])?.1)
-    }
 }
 
 /// What `scan` answered: see [`Reply::Scanned`].
@@ -501,13 +332,6 @@ pub struct Scanned {
     pub removed: Vec<String>,
     /// Items that could not be read.
     pub errors: Vec<String>,
-}
-
-fn restarting(reply: Reply) -> Result<(), ClientError> {
-    match reply {
-        Reply::Restarting => Ok(()),
-        other => Err(unexpected(other)),
-    }
 }
 
 /// Sends `request` over `stream`, a connection to the helper not yet used: waits for

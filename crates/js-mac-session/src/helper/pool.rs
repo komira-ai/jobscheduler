@@ -346,7 +346,6 @@ impl Helper {
         let (slot, uid) = self
             .free_slot(ledger)
             .ok_or_else(|| PoolExhausted(Box::new(self.status(ledger))))?;
-        self.first_lease_user()?;
         ledger
             .record_leased(slot, lease)
             .map_err(|why| format!("recording lease {}: {why}", Dotted(lease)))?;
@@ -432,7 +431,7 @@ impl Helper {
     /// see the module documentation. Each step is judged by its outcome; the first that does not hold
     /// fails the reset.
     pub(super) fn reset(&self, name: &str, uid: u32) -> Result<(), TeardownError> {
-        self.kill_pool_user(name, uid)?;
+        self.kill_account(name, uid)?;
         // The account is there: [`Self::reset_or_make`], the one caller, looked it up and
         // made it when it was not.
         let entries = self.user_entries(name, uid)?;
@@ -542,23 +541,6 @@ impl Helper {
                 output.stderr.trim()
             ))),
         }
-    }
-
-    /// [`Helper::kill_account`] of the pool user `name`, with `uid`: a uid whose
-    /// processes or domains outlive it is a lease's, quarantined, as `kill-uid` words it.
-    fn kill_pool_user(&self, name: &str, uid: u32) -> Result<(), TeardownError> {
-        self.kill_account(name, uid, false)
-            .map_err(|why| match why {
-                TeardownError::Outlived {
-                    uid, left, stayed, ..
-                } => TeardownError::Outlived {
-                    uid,
-                    left,
-                    stayed,
-                    lease: true,
-                },
-                other => other,
-            })
     }
 
     /// What `user-delete` sweeps, with the home folder of each user.

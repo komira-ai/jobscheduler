@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 
@@ -8,7 +9,6 @@ use crate::helper::tests::{Rig, log, me, rig_with};
 use crate::lease::{PoolSize, UidRange};
 use crate::proto::Request;
 
-const REBOOT: &str = "/bin/launchctl reboot system";
 const DUMPBTM: &str = "/usr/bin/sfltool dumpbtm";
 
 /// `sfltool dumpbtm` with one entry per identifier in `ids`, all under uid 0.
@@ -41,9 +41,42 @@ fn write_private(path: &Path, text: &str) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
 }
 
-/// Opens the baseline window as the apply in boot `boot-1` would.
-fn open_window(rig: &Rig) {
-    write_private(&rig.dir.join("baseline-window"), "boot-1\n");
+/// Records the baseline as a release with a `baseline` verb wrote it: the header, then each
+/// item a collection finds now, one per line, in a file of the helper's own. Every item must
+/// be readable (that release refused an incomplete baseline). Returns how many items each
+/// class holds, every class named.
+fn record(rig: &Rig) -> Vec<(String, usize)> {
+    let snapshot = {
+        let ledger = rig.helper.lock();
+        scan::collect(
+            rig.helper.host.as_ref(),
+            &rig.helper.settings,
+            &own_uids(&ledger),
+        )
+    };
+    assert!(snapshot.errors.is_empty(), "{:?}", snapshot.errors);
+    let mut text = format!("{}\n", scan::BASELINE_HEADER);
+    for item in &snapshot.items {
+        text.push_str(item);
+        text.push('\n');
+    }
+    write_private(&rig.helper.settings.scan.baseline, &text);
+    let mut counts: BTreeMap<String, usize> = [
+        "auto-login",
+        "background-tasks",
+        "launch-agents",
+        "launch-daemons",
+        "lease-users",
+        "login-items",
+    ]
+    .into_iter()
+    .map(|class| (class.to_owned(), 0))
+    .collect();
+    for item in &snapshot.items {
+        let class = item.split(' ').next().unwrap_or_default();
+        *counts.entry(class.to_owned()).or_default() += 1;
+    }
+    counts.into_iter().collect()
 }
 
 /// A Mac with something in every class but auto-login (off at rest): a launch agent,
@@ -71,8 +104,7 @@ fn furnished(name: &str) -> Rig {
 /// A furnished Mac whose baseline is recorded.
 fn baselined(name: &str) -> Rig {
     let rig = furnished(name);
-    open_window(&rig);
-    rig.helper.baseline().unwrap();
+    record(&rig);
     log(&rig);
     rig
 }
@@ -82,13 +114,12 @@ fn classes(pairs: &[(&str, usize)]) -> Vec<(String, usize)> {
 }
 
 /// Catches: a scan of an untouched Mac that is not clean (an item that changes by
-/// itself, such as a BTM entry's UUID or generation, or a baseline written in another
-/// form than it is read), or a baseline that leaves a class out of its counts.
+/// itself, such as a BTM entry's UUID or generation), or a collection that leaves a class
+/// out.
 #[test]
 fn a_clean_tree_gives_an_empty_diff() {
     let rig = furnished("leak-clean");
-    open_window(&rig);
-    let counts = rig.helper.baseline().unwrap();
+    let counts = record(&rig);
     assert_eq!(
         counts,
         classes(&[
@@ -114,16 +145,14 @@ fn a_clean_tree_gives_an_empty_diff() {
     assert!(report.clean());
     // An empty Mac too: no folder, no entry.
     let empty = crate::helper::tests::rig("leak-empty", 2);
-    open_window(&empty);
-    empty.helper.baseline().unwrap();
+    record(&empty);
     assert!(empty.helper.scan().unwrap().clean());
 }
 
-/// Asserts that a Mac with no auto-login set records a baseline and scans clean, with no
-/// error, whichever words its `defaults read` uses for the missing key (the texts are
+/// Asserts that a Mac with no auto-login set collects no auto-login item and no error, and
+/// scans clean, whichever words its `defaults read` uses for the missing key (the texts are
 /// what macOS 26.4, 26.6 and 27.0.1 printed). Catches a scan that knows only macOS 26's
-/// wording: on macOS 27 the baseline would be refused as incomplete and every scan would
-/// report an error.
+/// wording: on macOS 27 every scan would report an error.
 #[test]
 fn an_unset_auto_login_scans_clean_in_the_words_of_macos_26_and_27() {
     let unset = [
@@ -136,8 +165,7 @@ fn an_unset_auto_login_scans_clean_in_the_words_of_macos_26_and_27() {
         let domain = rig.dir.join("loginwindow").display().to_string();
         let read = format!("/usr/bin/defaults read {domain} autoLoginUser");
         answer(&rig, &read, false, "", stderr);
-        open_window(&rig);
-        let counts = rig.helper.baseline().unwrap();
+        let counts = record(&rig);
         assert!(
             counts.contains(&("auto-login".to_owned(), 0)),
             "{stderr}: {counts:?}"
@@ -179,7 +207,7 @@ fn a_live_lease_s_user_is_no_item_and_is_one_once_its_lease_ended() {
 /// must add.
 type Plant = fn(&Rig);
 
-const PLANTS: [(&str, Plant, &str); 11] = [
+const PLANTS: [(&str, Plant, &str); 9] = [
     (
         "a launch agent",
         |rig| std::fs::write(rig.dir.join("LaunchAgents/evil.plist"), "x").unwrap(),
@@ -232,16 +260,6 @@ const PLANTS: [(&str, Plant, &str); 11] = [
         "a kcpassword",
         |rig| std::fs::write(rig.dir.join("kcpassword"), "x").unwrap(),
         "auto-login kcpassword present",
-    ),
-    (
-        "an intent record",
-        |rig| std::fs::write(rig.dir.join("session-intent"), "9.9\n").unwrap(),
-        "auto-login intent 9.9",
-    ),
-    (
-        "the VM user's intent record",
-        |rig| std::fs::write(rig.dir.join("session-intent"), "vm\n").unwrap(),
-        "auto-login intent vm",
     ),
     (
         "a launch daemon's new contents",
@@ -311,8 +329,7 @@ fn a_change_past_the_first_read_of_a_large_file_is_seen() {
     let rig = furnished("leak-large");
     let file = rig.dir.join("LaunchDaemons/big.plist");
     std::fs::write(&file, vec![b'a'; size]).unwrap();
-    open_window(&rig);
-    rig.helper.baseline().unwrap();
+    record(&rig);
     for (n, at) in [READ, 2 * READ, size - 1].into_iter().enumerate() {
         let mut body = vec![b'a'; size];
         body[at] = b'b';
@@ -338,11 +355,10 @@ fn a_change_past_the_first_read_of_a_large_file_is_seen() {
 }
 
 /// Catches: an item that cannot be read taken as an empty class (a leak hidden by a
-/// failing `sfltool`, an unreadable folder or a broken directory lookup would pass),
-/// or a baseline recorded with a class missing.
+/// failing `sfltool`, an unreadable folder or a broken directory lookup would pass).
 #[test]
-fn an_unreadable_item_makes_the_scan_dirty_and_the_baseline_refused() {
-    let breaks: [(&str, Plant, &str); 7] = [
+fn an_unreadable_item_makes_the_scan_dirty() {
+    let breaks: [(&str, Plant, &str); 6] = [
         (
             "a folder that is a file",
             |rig| {
@@ -378,11 +394,6 @@ fn an_unreadable_item_makes_the_scan_dirty_and_the_baseline_refused() {
             "failed: busy",
         ),
         (
-            "the intent record is broken",
-            |rig| std::fs::write(rig.dir.join("session-intent"), "garbage").unwrap(),
-            "auto-login: ",
-        ),
-        (
             "no program runs",
             |rig| {
                 rig.host.state().fail.insert("command");
@@ -399,8 +410,6 @@ fn an_unreadable_item_makes_the_scan_dirty_and_the_baseline_refused() {
             report.errors.iter().any(|error| error.contains(says)),
             "{what}: no {says:?} in {report:#?}"
         );
-        let error = rig.helper.baseline().unwrap_err();
-        assert!(error.contains("would be incomplete"), "{what}: {error}");
     }
 }
 
@@ -458,150 +467,17 @@ fn a_scan_needs_a_recorded_baseline_of_its_own() {
     assert!(error.contains("writable by its group or others"), "{error}");
 }
 
-/// Catches: a baseline recorded outside its window: with no apply or erase behind it,
-/// in the very boot of the apply (before the reboot that settles it), while a lease
-/// user exists, or when this boot cannot be told; and a malformed window taken as open.
-#[test]
-fn baseline_outside_its_window_is_refused() {
-    let rig = furnished("leak-window");
-    let error = rig.helper.baseline().unwrap_err();
-    assert!(error.contains("window is closed"), "{error}");
-    let window = rig.dir.join("baseline-window");
-    write_private(&window, "boot-2\n");
-    let error = rig.helper.baseline().unwrap_err();
-    assert!(error.contains("opened in this boot (boot-2)"), "{error}");
-    for bad in ["", "\n", "boot-1", "boot-1\nboot-0\n"] {
-        write_private(&window, bad);
-        let error = rig.helper.baseline().unwrap_err();
-        assert!(error.contains("does not name one boot"), "{bad:?}: {error}");
-    }
-    open_window(&rig);
-    rig.host.state().fail.insert("boot_session");
-    let error = rig.helper.baseline().unwrap_err();
-    assert!(error.contains("this boot's identifier"), "{error}");
-    rig.host.state().fail.clear();
-    rig.helper.user_create("1.1").unwrap();
-    // The user exists and the window is opened again (an apply while it lived).
-    open_window(&rig);
-    let error = rig.helper.baseline().unwrap_err();
-    assert!(error.contains("lease 1.1's user exists"), "{error}");
-    assert!(!rig.dir.join("scan-baseline").exists());
-    rig.helper.kill_uid("1.1").unwrap();
-    rig.helper.user_delete("1.1").unwrap();
-    assert!(rig.helper.baseline().is_ok());
-}
-
-/// Catches: a baseline accepted after a lease user existed this boot (the lease's
-/// leaks would become the baseline): the first `user-create` must close the window,
-/// and a create that cannot close it must not create.
-#[test]
-fn the_first_lease_user_closes_the_window() {
-    let rig = furnished("leak-first");
-    open_window(&rig);
-    rig.helper.user_create("1.1").unwrap();
-    assert!(!rig.dir.join("baseline-window").exists());
-    rig.helper.kill_uid("1.1").unwrap();
-    rig.helper.user_delete("1.1").unwrap();
-    let error = rig.helper.baseline().unwrap_err();
-    assert!(error.contains("window is closed"), "{error}");
-    // A window that cannot be removed (a directory with something in it).
-    std::fs::create_dir_all(rig.dir.join("baseline-window/x")).unwrap();
-    let error = rig.helper.user_create("1.2").unwrap_err().to_string();
-    assert!(error.contains("closing "), "{error}");
-    assert!(rig.helper.pool_status().leased.is_empty());
-    std::fs::remove_dir_all(rig.dir.join("baseline-window")).unwrap();
-    assert_eq!(rig.helper.user_create("1.2"), Ok(me()));
-}
-
-/// Catches: a baseline that cannot be written reported as recorded.
-#[test]
-fn a_baseline_that_cannot_be_written_is_refused() {
-    let rig = furnished("leak-unwritable");
-    open_window(&rig);
-    std::fs::create_dir_all(rig.dir.join("scan-baseline.new/x")).unwrap();
-    let error = rig.helper.baseline().unwrap_err();
-    assert!(error.contains("writing "), "{error}");
-}
-
-/// Catches: `reboot-dirty` accepted without a dirty scan of the helper's own (the
-/// daemon could reboot a node at will), on a stale verdict (a later clean or refused
-/// scan, a new baseline, or a lease user created since), or twice on one verdict; and
-/// a failed reboot reported as done.
-#[test]
-fn reboot_dirty_needs_the_helpers_own_dirty_scan() {
-    // A function, not a closure, so a failure names the line of the step it checks.
-    #[track_caller]
-    fn refused(rig: &Rig) {
-        let error = rig.helper.reboot_dirty().unwrap_err();
-        assert!(error.contains("did not come back dirty"), "{error}");
-        assert!(log(rig).iter().all(|call| !call.contains(REBOOT)));
-    }
-    let rig = baselined("leak-reboot");
-    refused(&rig);
-    rig.helper.scan().unwrap();
-    refused(&rig);
-    let plant = rig.dir.join("LaunchDaemons/evil.plist");
-    std::fs::write(&plant, "x").unwrap();
-    assert!(!rig.helper.scan().unwrap().clean());
-    rig.helper.reboot_dirty().unwrap();
-    assert!(
-        log(&rig)
-            .iter()
-            .any(|call| call.starts_with(&format!("command {REBOOT}")))
-    );
-    refused(&rig);
-    // Dirty, then clean again: stale.
-    rig.helper.scan().unwrap();
-    std::fs::remove_file(&plant).unwrap();
-    rig.helper.scan().unwrap();
-    refused(&rig);
-    // Dirty, then a lease user: stale (the reboot would cut the new lease).
-    std::fs::write(&plant, "x").unwrap();
-    rig.helper.scan().unwrap();
-    rig.helper.user_create("1.1").unwrap();
-    refused(&rig);
-    // Dirty, then a scan refused for want of a baseline.
-    rig.helper.scan().unwrap();
-    std::fs::remove_file(rig.dir.join("scan-baseline")).unwrap();
-    assert!(rig.helper.scan().is_err());
-    refused(&rig);
-    // Dirty, then a new baseline (which takes the plant in).
-    rig.helper.kill_uid("1.1").unwrap();
-    rig.helper.user_delete("1.1").unwrap();
-    open_window(&rig);
-    rig.helper.baseline().unwrap();
-    std::fs::write(rig.dir.join("LaunchDaemons/evil2.plist"), "x").unwrap();
-    rig.helper.scan().unwrap();
-    open_window(&rig);
-    rig.helper.baseline().unwrap();
-    refused(&rig);
-    // The reboot itself fails, or launchctl cannot run.
-    std::fs::write(rig.dir.join("LaunchDaemons/evil3.plist"), "x").unwrap();
-    rig.helper.scan().unwrap();
-    answer(&rig, REBOOT, false, "", "not permitted");
-    let error = rig.helper.reboot_dirty().unwrap_err();
-    assert!(
-        error.contains("reboot system failed: not permitted"),
-        "{error}"
-    );
-    rig.helper.scan().unwrap();
-    rig.host.state().fail.insert("command");
-    let error = rig.helper.reboot_dirty().unwrap_err();
-    assert!(error.contains("running /bin/launchctl"), "{error}");
-}
-
-/// Catches: the scan's verbs routed to the wrong method, or a reply larger than a
+/// Catches: the scan verb routed to the wrong method, or a reply larger than a
 /// frame (every list is cut to SCAN_LINES lines of SCAN_LINE_BYTES, the rest
 /// counted).
 #[test]
-fn the_scan_verbs_are_routed_and_their_replies_capped() {
+fn the_scan_verb_is_routed_and_its_reply_capped() {
     let rig = furnished("leak-handle");
     let reply = |request| match rig.helper.handle(request, Vec::new()) {
         Outcome::Reply(reply) => reply,
         other => panic!("not a reply: {other:?}"),
     };
-    open_window(&rig);
-    assert!(matches!(reply(Request::Baseline), Reply::Baselined { .. }));
+    record(&rig);
     let daemons = rig.dir.join("LaunchDaemons");
     for n in 0..SCAN_LINES + 2 {
         std::fs::write(daemons.join(format!("{n:02}{}", "x".repeat(200))), "x").unwrap();
@@ -621,7 +497,6 @@ fn the_scan_verbs_are_routed_and_their_replies_capped() {
     assert!(added.iter().all(|line| line.len() <= SCAN_LINE_BYTES));
     assert!(added[0].len() == SCAN_LINE_BYTES, "{}", added[0]);
     assert!(removed.is_empty() && errors.is_empty());
-    assert_eq!(reply(Request::RebootDirty), Reply::Restarting);
     // A cut never splits a character.
     let line = format!("{}é", "a".repeat(SCAN_LINE_BYTES - 1));
     assert_eq!(capped(vec![line])[0].len(), SCAN_LINE_BYTES - 1);

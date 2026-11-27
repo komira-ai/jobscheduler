@@ -30,7 +30,7 @@ The native runtime (`crates/js-agent/src/native`) starts every native job throug
 | The `sandbox-exec` self-test (`native/profile.rs`) | `js-agent` | disclaimed; goes away with the helper path |
 | The agent re-executing itself in place (`in_place.rs`) | `js-agent` | unchanged: the same process |
 | The VM launcher (`vm/helper.rs`, the `js-vmm` lease) | `js-agent` | not decided; stays disclaimed. Disclaimed, it answers for itself by its own signature and entitlement and has no Full Disk Access; kept, it answers for the agent |
-| The GUI-session path (`macos/gui.rs`: `launchctl asuser`, then `disclaim::exec`) | `js-agent` | not decided, not measured; stays disclaimed. launchd starts it in the user's session, so keeping it is not simply a flag. After an unattended restart a Mac has no logged-in user, so a start that needs a user's graphical session cannot happen until someone logs in. |
+| The GUI-session path (`macos/gui.rs`: `launchctl asuser`, then `disclaim::exec`) | `js-agent` | gone: deleted with the GUI session switch (komira-ai/jobscheduler#1164), so there is nothing to decide. |
 
 Not measured: what macOS does with the responsible process when the agent that started a supervisor exits (a restart or an update while a job runs). Nothing is claimed about it.
 
@@ -94,7 +94,7 @@ Options considered:
 
 A `Program` is used once: a second start, after a first that succeeded or failed, is refused. What the first start made is the child's, and the parent never makes it twice for one command.
 
-The helper's `as-user` mode (the last step of a run in a GUI session, executed by `launchctl asuser`) executes the program in its own place with `disclaim::exec`: the same plan and attributes, from the process's own environment, with no fork.
+`disclaim::exec` executes a program in the calling process's own place (`js-agent` running itself again, `crates/js-agent/src/in_place.rs`): the same plan and attributes, from the process's own environment, with no fork. (The helper's `as-user` mode, the last step of a run in a GUI session, used it too; it went with the GUI session switch, komira-ai/jobscheduler#1164.)
 
 What the disclaim gives: the program is its own responsible process, and what it starts answers for it. What it does not do: it does not take away a grant that the program itself already has (a grant given to that app by someone); it only stops the daemon's grants from reaching it. A start that keeps the responsibility (`Program::keep_responsibility(Kept::Job)` or `Kept::Supervisor`) makes none of the above: the child does the standard library's set-up and the caller's steps, and the standard library executes the program, as it does off macOS. The default stays disclaimed.
 
@@ -114,7 +114,7 @@ Added, in `js-mac-session` (a workspace crate, not published):
 - `disclaim::Kept`, `Job` or `Supervisor`: which of the two starts that keep the responsibility a start is.
 - `disclaim::exec(program, args) -> io::Error` and `disclaim::responsible_pid(pid) -> io::Result<u32>`, macOS only.
 
-Changed: `macos::gui::command(uid, gid, program, args) -> io::Result<Command>` became `macos::gui::argv(uid, gid, program, args) -> io::Result<(&'static str, Vec<OsString>)>`, the vector `launchctl asuser` is started with, so the start goes through `Program`.
+Changed: `macos::gui::command(uid, gid, program, args) -> io::Result<Command>` became `macos::gui::argv(uid, gid, program, args) -> io::Result<(&'static str, Vec<OsString>)>`, the vector `launchctl asuser` is started with, so the start goes through `Program`. (`macos::gui` was later removed with the GUI session switch, komira-ai/jobscheduler#1164.)
 
 Added, in `xtask` (used by its `spawn_sites` test only): the module `spawn_sites`, with `check(&Path) -> Result<Vec<Site>, Error>`, `check_with_keepers(&Path, &[&str]) -> Result<Vec<Site>, Error>` (the same check with the given files as the keepers, for the tests) and `crates(&Path) -> Result<BTreeSet<String>, Error>` (both borrow the repository root and return owned results); `Site` (file, line, what); `Error`, whose variants each carry the file and the cause (`Read`, `Parse`, `Manifest`, `NoModule`, `PathAttribute`, `ConditionalPath`, `Include`, `NoRoot`, `NoSpawner`, `NoKeeper`); and the constants `START_CRATES`, `SPAWNER`, `EXECUTORS`, `KEEPERS`.
 

@@ -1,10 +1,12 @@
-//! The leak scan's items (S4.2 `scan` and `baseline`; fleet-updates.md 10.2, layer L3),
+//! The leak scan's items (S4.2 `scan`; fleet-updates.md 10.2, layer L3),
 //! the minimal set: the launch agent and daemon folders, launchd's login items,
 //! Background Task Management's entries, users in the lease range, and the auto-login
 //! state. fleet-updates.md 10.2 lists more items; they are not collected yet.
 //!
 //! Each item is one line of text, `<class> <what>`, so a baseline is a sorted list of
-//! lines and a scan's result is what was added to it and what was removed:
+//! lines and a scan's result is what was added to it and what was removed. The scan reads
+//! the baseline file of the state directory ([`read_baseline`]); no verb of the helper
+//! records one, so it is a file a release before recorded or one written by hand.
 //!
 //! - `launch-agents`, `launch-daemons`: each entry of `/Library/LaunchAgents` and
 //!   `/Library/LaunchDaemons`, with its kind, owner and mode, and a file's SHA-256 (a
@@ -17,13 +19,13 @@
 //!   of the pool's free users and of the live leases: a free pool user is the clean
 //!   node's own and a live lease's user is its lease's, while a resetting or broken one,
 //!   one leased to a lease that is over, or a user the pool does not hold is reported.
-//! - `auto-login`: the login window's `autoLoginUser`, whether `/etc/kcpassword` is
-//!   there, and the session switch's intent record.
+//! - `auto-login`: the login window's `autoLoginUser`, and whether `/etc/kcpassword` is
+//!   there.
 //!
 //! An item that cannot be read is an error, never an empty class: a scan with an
 //! error is not clean.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::io::{self, Read as _};
@@ -34,7 +36,7 @@ use std::path::{Path, PathBuf};
 use rustix::fs::{AtFlags, CWD, FileType, Mode, OFlags};
 use sha2::{Digest as _, Sha256};
 
-use crate::autologin::{AUTO_LOGIN_USER, DEFAULTS, read_intent};
+use crate::autologin::{AUTO_LOGIN_USER, DEFAULTS};
 use crate::helper::{Host, Settings};
 use crate::sweep::list;
 
@@ -104,11 +106,6 @@ pub struct ScanSettings {
     pub folders: Vec<ScanFolder>,
     /// The recorded baseline (in the state directory).
     pub baseline: PathBuf,
-    /// The baseline window: written by the root tool that applied a software set or
-    /// erased the Mac, it names the boot it was written in (one line). `baseline` is
-    /// accepted only while it exists and names another boot; the first `user-create`
-    /// removes it.
-    pub window: PathBuf,
 }
 
 impl ScanSettings {
@@ -133,7 +130,6 @@ impl ScanSettings {
         Self {
             folders,
             baseline: dir.join("scan-baseline"),
-            window: dir.join("baseline-window"),
         }
     }
 }
@@ -145,27 +141,6 @@ pub struct Snapshot {
     pub items: BTreeSet<String>,
     /// What could not be read, and why.
     pub errors: Vec<String>,
-}
-
-impl Snapshot {
-    /// How many items each class holds, every class of the set named.
-    #[must_use]
-    pub fn classes(&self, folders: &[ScanFolder]) -> Vec<(String, usize)> {
-        let mut counts: BTreeMap<&str, usize> = folders
-            .iter()
-            .map(|folder| folder.class)
-            .chain([BACKGROUND_TASKS, LEASE_USERS, AUTO_LOGIN])
-            .map(|class| (class, 0))
-            .collect();
-        for item in &self.items {
-            let class = item.split(' ').next().unwrap_or_default();
-            *counts.entry(class).or_default() += 1;
-        }
-        counts
-            .into_iter()
-            .map(|(class, n)| (class.to_owned(), n))
-            .collect()
-    }
 }
 
 /// What a scan found against the baseline.
@@ -366,9 +341,9 @@ fn lease_users(
     Ok(items)
 }
 
-/// The login window's `autoLoginUser`, `/etc/kcpassword`, and the intent record.
+/// The login window's `autoLoginUser`, and `/etc/kcpassword`.
 fn auto_login(host: &dyn Host, settings: &Settings) -> Result<Vec<String>, String> {
-    let paths = &settings.session;
+    let paths = &settings.login;
     let mut items = Vec::new();
     let domain = paths.loginwindow.as_str();
     let read = host
@@ -392,25 +367,7 @@ fn auto_login(host: &dyn Host, settings: &Settings) -> Result<Vec<String>, Strin
             ));
         }
     }
-    match read_intent(&paths.intent) {
-        Ok(Some(intent)) => items.push(format!("{AUTO_LOGIN} intent {intent}")),
-        Ok(None) => {}
-        Err(why) => return Err(format!("{AUTO_LOGIN}: {why}")),
-    }
     Ok(items)
-}
-
-/// Writes the baseline, whole and durably.
-///
-/// # Errors
-/// It could not be written.
-pub fn write_baseline(path: &Path, items: &BTreeSet<String>) -> io::Result<()> {
-    let mut text = format!("{BASELINE_HEADER}\n");
-    for item in items {
-        text.push_str(item);
-        text.push('\n');
-    }
-    crate::autologin::write_whole(path, text.as_bytes())
 }
 
 /// The recorded baseline; `None` if none was recorded.
@@ -429,23 +386,6 @@ pub fn read_baseline(path: &Path) -> Result<Option<BTreeSet<String>>, String> {
         ));
     }
     Ok(Some(lines.map(str::to_owned).collect()))
-}
-
-/// The boot the baseline window was opened in; `None` if it is closed.
-///
-/// # Errors
-/// It cannot be read, is not the helper's own, or is not one non-empty line.
-pub fn read_window(path: &Path) -> Result<Option<String>, String> {
-    let Some(text) = read_owned(path)? else {
-        return Ok(None);
-    };
-    match text.strip_suffix('\n') {
-        Some(boot) if !boot.is_empty() && !boot.contains('\n') => Ok(Some(boot.to_owned())),
-        _ => Err(format!(
-            "{}: {text:?} does not name one boot",
-            path.display()
-        )),
-    }
 }
 
 /// Reads a file of the state directory the helper trusts (see

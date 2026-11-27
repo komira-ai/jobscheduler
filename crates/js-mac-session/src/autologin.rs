@@ -1,80 +1,46 @@
-//! The GUI session switch's pieces (S4.2, `session-login` and `session-idle`): the
-//! intent record, `/etc/kcpassword`, the login window's `autoLoginUser`, FileVault's
-//! state and the userspace restart.
+//! The login window's auto-login, which the boot reset clears and the leak scan reads,
+//! and the small pieces the helper's other parts share: running a program and writing a
+//! file of the state directory whole.
 //!
-//! - **The intent record** is a root-only file in the helper's state directory that
-//!   names who the session switch logs in: the one lease whose user it logs in,
-//!   `<term>.<seq>` and a newline, or `vm` and a newline for the standing VM user (the
-//!   Mac's resting state when a VM user is configured). `session-login` writes it
-//!   before it changes anything else, and `session-idle` removes it after auto-login is
-//!   cleared (or, with a VM user configured, rewrites it to `vm`), so whenever
-//!   auto-login names a lease user, the record names that lease. The boot reset reads it, and so does
-//!   `kbf-mac-provision check`, which fails a lease user's auto-login that no record
-//!   names.
-//! - **The VM user's password** is made once by `kbf-mac-provision` and kept in a
-//!   root-only file in this state directory ([`read_vm_password`]); this crate reads
-//!   it and never changes it.
-//! - **`/etc/kcpassword`** holds the password the login window logs in with,
-//!   obfuscated by the fixed XOR key macOS uses ([`kcpassword`]); it is not secret,
-//!   which is acceptable only for a random password of a lease user that is deleted
-//!   after its lease.
+//! - **Auto-login** is the login window's `autoLoginUser` and `/etc/kcpassword`, the
+//!   password it logs in with. The helper never sets either: the boot reset clears both
+//!   ([`clear_auto_login`]), so a Mac of the pool never logs a user in at its start.
 //! - Every program runs through [`Host::command`](crate::helper::Host::command), so
-//!   the tests fake each one and nothing is restarted.
+//!   the tests fake each one.
 //!
 //! Files are written whole (a temporary file, `fsync`, `rename`, then the directory's
 //! `fsync`) and never through a link.
 
-use std::io::{self, Read as _, Write as _};
+use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
-use js_types::LeaseId;
 use rustix::fs::{CWD, Mode, OFlags};
 
 use crate::helper::Host;
-use crate::lease::{Dotted, parse_lease};
 
-/// The programs the switch runs. Absolute, and run with an empty environment.
+/// `defaults`, which reads and deletes the login window's preference. Absolute, and run
+/// with an empty environment.
 pub const DEFAULTS: &str = "/usr/bin/defaults";
-/// `launchctl`, which starts jobs in a user's session and restarts userspace.
-pub const LAUNCHCTL: &str = "/bin/launchctl";
-/// `fdesetup`, which reports whether FileVault is on.
-pub const FDESETUP: &str = "/usr/bin/fdesetup";
 
 /// The login window's preference that names the user to log in at start.
 pub const AUTO_LOGIN_USER: &str = "autoLoginUser";
 
-/// The fixed key macOS XORs `/etc/kcpassword` with.
-const KC_KEY: [u8; 11] = [
-    0x7D, 0x89, 0x52, 0x23, 0xD2, 0xBC, 0xDD, 0xEA, 0xA3, 0xB9, 0x1F,
-];
-/// `/etc/kcpassword` is a whole number of these blocks.
-const KC_BLOCK: usize = 12;
-
-/// Where the switch's state lives.
+/// Where the login window keeps its auto-login.
 #[derive(Clone, Debug)]
-pub struct SessionPaths {
-    /// The intent record.
-    pub intent: PathBuf,
+pub struct LoginPaths {
     /// `/etc/kcpassword`.
     pub kcpassword: PathBuf,
-    /// The VM user's password, as `kbf-mac-provision` wrote it (see [`read_vm_password`]).
-    pub vm_password: PathBuf,
-    /// The uid that must own `vm_password`: 0 on a Mac, the test's own uid in tests.
-    pub vm_password_owner: u32,
     /// The login window's preferences domain, as `defaults` takes it
     /// (`/Library/Preferences/com.apple.loginwindow`).
     pub loginwindow: String,
 }
 
-impl SessionPaths {
+impl LoginPaths {
     /// The paths a test uses: everything under `dir`.
     #[cfg(test)]
     pub(crate) fn under(dir: &Path) -> Self {
         Self {
-            intent: dir.join("session-intent"),
             kcpassword: dir.join("kcpassword"),
-            vm_password: dir.join("vm-user-password"),
-            vm_password_owner: rustix::process::getuid().as_raw(),
             loginwindow: dir.join("loginwindow").display().to_string(),
         }
     }
@@ -114,168 +80,6 @@ fn failed(what: &str, output: &CommandOutput) -> String {
 fn command(host: &dyn Host, program: &str, args: &[&str]) -> Result<CommandOutput, String> {
     host.command(program, args)
         .map_err(|why| format!("running {program}: {why}"))
-}
-
-/// `/etc/kcpassword`'s bytes for `password`: the password, a NUL, zeros up to a whole
-/// number of 12-byte blocks (so a password whose length is a multiple of 12 gets a
-/// whole block more), every byte XORed with the 11-byte key, repeated.
-#[must_use]
-pub fn kcpassword(password: &[u8]) -> Vec<u8> {
-    let len = (password.len() / KC_BLOCK + 1) * KC_BLOCK;
-    let mut bytes = password.to_vec();
-    bytes.resize(len, 0);
-    for (byte, key) in bytes.iter_mut().zip(KC_KEY.iter().cycle()) {
-        *byte ^= key;
-    }
-    bytes
-}
-
-/// The file name of the VM user's password in the state directory. Coupling: this is
-/// `kbf-mac-provision`'s `PASSWORD_FILE` (`/var/db/kbf-mac-session/vm-user-password`),
-/// which writes it once; the two must agree on the name and on [`read_vm_password`]'s
-/// validity rule (64 lowercase hex digits, no newline, a regular file, root's, mode 0400).
-pub const VM_PASSWORD_FILE: &str = "vm-user-password";
-
-/// The VM user's password, read from `paths.vm_password` as provisioning wrote it. It is
-/// never made or changed here: a password reset would strand the account's login
-/// keychain.
-///
-/// # Errors
-/// The file is missing, a link, not a regular file, not owned by `vm_password_owner`,
-/// not mode 0400, or does not hold exactly 64 lowercase hex digits. The message names
-/// the path and says to run `kbf-mac-provision apply`.
-pub fn read_vm_password(paths: &SessionPaths) -> Result<String, String> {
-    let path = &paths.vm_password;
-    let bad = |why: String| {
-        format!(
-            "the VM user's password file {} {why}; run kbf-mac-provision apply",
-            path.display()
-        )
-    };
-    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let opened = match rustix::fs::openat(CWD, path, flags, Mode::empty()) {
-        Err(rustix::io::Errno::NOENT) => return Err(bad("is missing".to_owned())),
-        Err(why) => return Err(bad(format!("cannot be opened ({why})"))),
-        Ok(opened) => opened,
-    };
-    // One closure for both ways a file that was opened can fail to be read.
-    let unreadable = |why: std::io::Error| bad(format!("cannot be read ({why})"));
-    let stat = rustix::fs::fstat(&opened)
-        .map_err(std::io::Error::from)
-        .map_err(&unreadable)?;
-    if stat.st_mode & 0o170_000 != 0o100_000 {
-        return Err(bad("is not a regular file".to_owned()));
-    }
-    if stat.st_uid != paths.vm_password_owner {
-        return Err(bad(format!("is owned by uid {}", stat.st_uid)));
-    }
-    if stat.st_mode & 0o7777 != 0o400 {
-        return Err(bad(format!(
-            "has mode {:o}, not 400",
-            stat.st_mode & 0o7777
-        )));
-    }
-    let mut text = String::new();
-    std::fs::File::from(opened)
-        .take(VM_PASSWORD_LEN as u64 + 1)
-        .read_to_string(&mut text)
-        .map_err(&unreadable)?;
-    if text.len() == VM_PASSWORD_LEN && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-    {
-        Ok(text)
-    } else {
-        Err(bad("is not 64 lowercase hex digits".to_owned()))
-    }
-}
-
-const VM_PASSWORD_LEN: usize = 64;
-
-/// Writes `/etc/kcpassword` for `password` unless it already holds exactly that
-/// encoding. Returns whether it wrote.
-///
-/// # Errors
-/// The file could not be written.
-pub fn ensure_kcpassword(path: &Path, password: &[u8]) -> io::Result<bool> {
-    let want = kcpassword(password);
-    if read_nofollow(path).as_deref() == Some(&want[..]) {
-        return Ok(false);
-    }
-    write_whole(path, &want)?;
-    Ok(true)
-}
-
-/// A regular file's bytes; `None` for anything else (missing, a link, unreadable).
-fn read_nofollow(path: &Path) -> Option<Vec<u8>> {
-    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let opened = rustix::fs::openat(CWD, path, flags, Mode::empty()).ok()?;
-    let mut bytes = Vec::new();
-    std::fs::File::from(opened).read_to_end(&mut bytes).ok()?;
-    Some(bytes)
-}
-
-/// What the intent record names: the lease whose user the session switch logged in, or
-/// the standing VM user.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Intent {
-    /// `<term>.<seq>`: a whole-machine lease holds the session.
-    Lease(LeaseId),
-    /// `vm`: the Mac rests at the VM user.
-    Vm,
-}
-
-/// The spelling of [`Intent::Vm`] in the record. It is not a lease id, so a reader that
-/// knows only leases refuses the record (and treats it as stale) instead of reading it
-/// as a lease.
-pub const VM_RECORD: &str = "vm";
-
-impl std::fmt::Display for Intent {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Lease(lease) => Dotted(*lease).fmt(f),
-            Self::Vm => f.write_str(VM_RECORD),
-        }
-    }
-}
-
-/// What the intent record names; `None` when there is no record.
-///
-/// # Errors
-/// The record cannot be read (or is a link), or does not hold one lease id or `vm`.
-pub fn read_intent(path: &Path) -> Result<Option<Intent>, String> {
-    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let opened = match rustix::fs::openat(CWD, path, flags, Mode::empty()) {
-        Err(rustix::io::Errno::NOENT) => return Ok(None),
-        other => other.map_err(|why| format!("{}: {why}", path.display()))?,
-    };
-    let mut text = String::new();
-    std::fs::File::from(opened)
-        .read_to_string(&mut text)
-        .map_err(|why| format!("{}: {why}", path.display()))?;
-    let named = text
-        .strip_suffix('\n')
-        .ok_or_else(|| format!("{}: {text:?} is not one lease id", path.display()))?;
-    if named == VM_RECORD {
-        return Ok(Some(Intent::Vm));
-    }
-    parse_lease(named)
-        .map(|lease| Some(Intent::Lease(lease)))
-        .map_err(|why| format!("{}: {why}", path.display()))
-}
-
-/// Writes the intent record naming `intent`, durably.
-///
-/// # Errors
-/// The record could not be written.
-pub fn write_intent(path: &Path, intent: Intent) -> io::Result<()> {
-    write_whole(path, format!("{intent}\n").as_bytes())
-}
-
-/// Writes `/etc/kcpassword` for `password`, durably, mode 0600.
-///
-/// # Errors
-/// The file could not be written.
-pub fn write_kcpassword(path: &Path, password: &[u8]) -> io::Result<()> {
-    write_whole(path, &kcpassword(password))
 }
 
 /// Removes `path` (a file, or a link itself), durably; `false` if there was none.
@@ -322,60 +126,6 @@ fn sync_parent(path: &Path) -> io::Result<()> {
     Ok(rustix::fs::fsync(&dir)?)
 }
 
-/// Refuses unless `fdesetup isactive` says FileVault is off: with it on, macOS never
-/// logs anyone in by itself, and a restart would leave the Mac at the unlock screen.
-///
-/// # Errors
-/// FileVault is on, or its state could not be read.
-pub fn require_filevault_off(host: &dyn Host) -> Result<(), String> {
-    let output = command(host, FDESETUP, &["isactive"])?;
-    match output.stdout.trim() {
-        "false" => Ok(()),
-        "true" => Err("FileVault is on, and macOS logs no one in by itself with it on".to_owned()),
-        other => Err(format!(
-            "fdesetup isactive answered {other:?} ({}), not true or false",
-            output.stderr.trim()
-        )),
-    }
-}
-
-/// Sets the login window's `autoLoginUser` to `name`.
-///
-/// # Errors
-/// `defaults` failed.
-pub fn set_auto_login(host: &dyn Host, paths: &SessionPaths, name: &str) -> Result<(), String> {
-    let domain = paths.loginwindow.as_str();
-    let args = ["write", domain, AUTO_LOGIN_USER, "-string", name];
-    let output = command(host, DEFAULTS, &args)?;
-    if output.success {
-        Ok(())
-    } else {
-        Err(failed(
-            &format!("defaults write {domain} {AUTO_LOGIN_USER}"),
-            &output,
-        ))
-    }
-}
-
-/// The login window's `autoLoginUser`; `None` when it is not set.
-///
-/// # Errors
-/// `defaults read` failed for any reason but the key being absent.
-pub fn read_auto_login(host: &dyn Host, paths: &SessionPaths) -> Result<Option<String>, String> {
-    let domain = paths.loginwindow.as_str();
-    let read = command(host, DEFAULTS, &["read", domain, AUTO_LOGIN_USER])?;
-    if read.success {
-        Ok(Some(read.stdout.trim().to_owned()))
-    } else if key_absent(&read.stderr) {
-        Ok(None)
-    } else {
-        Err(failed(
-            &format!("defaults read {domain} {AUTO_LOGIN_USER}"),
-            &read,
-        ))
-    }
-}
-
 /// Whether a failed `defaults read`'s `stderr` says the key is not set. macOS 26 says
 /// `The domain/default pair of (<domain>, <key>) does not exist`; macOS 27 says
 /// `Error: Could not find key '<key>' in domain '<domain>'.`. Both exit 1, as every
@@ -392,7 +142,7 @@ pub(crate) fn key_absent(stderr: &str) -> bool {
 ///
 /// # Errors
 /// The key is still set, or the file could not be removed.
-pub fn clear_auto_login(host: &dyn Host, paths: &SessionPaths) -> Result<bool, String> {
+pub fn clear_auto_login(host: &dyn Host, paths: &LoginPaths) -> Result<bool, String> {
     let domain = paths.loginwindow.as_str();
     let deleted = command(host, DEFAULTS, &["delete", domain, AUTO_LOGIN_USER])?;
     if !deleted.success {
@@ -407,20 +157,6 @@ pub fn clear_auto_login(host: &dyn Host, paths: &SessionPaths) -> Result<bool, S
     let removed = remove(&paths.kcpassword)
         .map_err(|why| format!("removing {}: {why}", paths.kcpassword.display()))?;
     Ok(deleted.success || removed)
-}
-
-/// Asks launchd for a userspace restart: every process but the kernel's ends, and the
-/// login window starts again, logging in whoever `autoLoginUser` names.
-///
-/// # Errors
-/// `launchctl` refused.
-pub fn restart_userspace(host: &dyn Host) -> Result<(), String> {
-    let output = command(host, LAUNCHCTL, &["reboot", "userspace"])?;
-    if output.success {
-        Ok(())
-    } else {
-        Err(failed("launchctl reboot userspace", &output))
-    }
 }
 
 #[cfg(test)]

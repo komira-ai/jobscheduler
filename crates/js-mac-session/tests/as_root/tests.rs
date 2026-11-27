@@ -7,8 +7,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::*;
 
 /// Catches: a verb served before the boot reset (a lease user of an earlier boot could
-/// be used), a reset that leaves a stale session's auto-login, kcpassword or intent
-/// record (the Mac would log a lease user in at the next boot), or a second reset.
+/// be used), a reset that leaves a stale auto-login or kcpassword (the Mac would log a
+/// lease user in at the next boot), or a second reset.
 #[test]
 #[ignore = "needs root: run the test binary through `sudo` (see the header of tests/as_root.rs)"]
 fn the_boot_reset_comes_first_and_clears_a_stale_session() {
@@ -19,7 +19,7 @@ fn the_boot_reset_comes_first_and_clears_a_stale_session() {
         "boot reset has not run",
         "kill-uid before the reset",
     );
-    says(&first.reset, "kept none deleted ", "the first boot reset");
+    says(&first.reset, "deleted ", "the first boot reset");
     assert!(
         !first.auto_login.ok(),
         "auto-login survived the reset: {}",
@@ -33,13 +33,12 @@ fn the_boot_reset_comes_first_and_clears_a_stale_session() {
     refused(&first.reset_again, "runs once", "a second boot reset");
 }
 
-/// Catches: a baseline taken with no window or with one opened in this boot (a leak
-/// planted before the reboot would become the baseline), a baseline whose counts are not
-/// what is there (Background Task Management parsed wrong, a folder not walked), and a
-/// scan that is not clean right after it; `reboot-dirty` must then be refused.
+/// Catches: a scan with no baseline taken as clean, a baseline whose counts are not what
+/// is there as the scan reads it (Background Task Management parsed wrong, a folder not
+/// walked), and a scan that is not clean right after it is recorded.
 #[test]
 #[ignore = "needs root: run the test binary through `sudo` (see the header of tests/as_root.rs)"]
-fn the_baseline_is_taken_only_in_its_window_and_counts_what_is_there() {
+fn the_scan_reads_the_recorded_baseline_and_counts_what_is_there() {
     let (_serial, mac) = mac();
     let first = &mac.first;
     refused(
@@ -47,41 +46,21 @@ fn the_baseline_is_taken_only_in_its_window_and_counts_what_is_there() {
         "no baseline was recorded",
         "scan before a baseline",
     );
-    refused(
-        &first.baseline_closed,
-        "window is closed",
-        "baseline with no window",
-    );
-    let this_boot = format!("opened in this boot ({})", first.boot);
-    refused(
-        &first.baseline_this_boot,
-        &this_boot,
-        "baseline in the window's boot",
-    );
-    assert!(first.baseline.ok(), "baseline: {}", first.baseline.all());
-    let classes: Vec<&str> = first.baseline.said().lines().collect();
     for want in [
-        format!("background-tasks {}", first.btm),
-        format!("launch-agents {}", first.agents),
-        format!("launch-daemons {}", first.daemons),
-        "lease-users 0".to_owned(),
-        "auto-login 0".to_owned(),
+        ("background-tasks", first.btm),
+        ("launch-agents", first.agents),
+        ("launch-daemons", first.daemons),
+        ("lease-users", 0),
+        ("auto-login", 0),
     ] {
+        let want = (want.0.to_owned(), want.1);
         assert!(
-            classes.contains(&want.as_str()),
-            "want {want:?}; the baseline: {classes:?}"
+            first.recorded.contains(&want),
+            "want {want:?}; the baseline: {:?}",
+            first.recorded
         );
     }
     says(&first.scan, "clean", "the scan right after the baseline");
-    let reboot = first
-        .reboot_dirty
-        .as_ref()
-        .expect("sent after the clean scan");
-    refused(
-        reboot,
-        "did not come back dirty",
-        "reboot-dirty after a clean scan",
-    );
 }
 
 /// Catches (S4.3): a socket or socket directory other users can reach, or of the wrong
@@ -141,23 +120,12 @@ fn user_create_makes_a_hidden_non_admin_user_with_a_private_home() {
     lease.end();
 }
 
-/// Catches: a user-create that leaves the baseline window open (a later boot could
-/// re-baseline a leak), a scan that misses a lease user, and a baseline taken while one
-/// exists.
+/// Catches: a scan that misses a lease user.
 #[test]
 #[ignore = "needs root: run the test binary through `sudo` (see the header of tests/as_root.rs)"]
-fn a_lease_user_makes_the_scan_dirty_and_closes_the_baseline_window() {
+fn a_lease_user_makes_the_scan_dirty() {
     let (_serial, mac) = mac();
-    let _closed = OnPanic(|| {
-        let _ = fs::remove_file(window());
-    });
-    // As an apply in an earlier boot leaves it: user-create must close it.
-    write_root(&window(), "ci-earlier-boot\n");
     let lease = mac.create("6.1");
-    assert!(
-        !exists(&window()),
-        "user-create left the baseline window open"
-    );
     let scan = mac.client(&["scan", SOCKET]);
     assert!(scan.ok(), "scan: {}", scan.all());
     let lines: Vec<&str> = scan.said().lines().collect();
@@ -168,11 +136,6 @@ fn a_lease_user_makes_the_scan_dirty_and_closes_the_baseline_window() {
     );
     let named = format!("+ lease-users uid {}", lease.uid);
     assert!(lines.contains(&named.as_str()), "want {named:?}: {lines:?}");
-    refused(
-        &mac.client(&["baseline", SOCKET]),
-        "lease 6.1's user exists",
-        "baseline with a lease user",
-    );
     lease.end();
 }
 
@@ -432,7 +395,7 @@ fn the_ledger_survives_a_restart_of_the_helper() {
     used.end();
     assert_eq!(
         mac.restart(&[]),
-        "kept none deleted ",
+        "deleted ",
         "the boot reset after a restart"
     );
     says(
@@ -544,19 +507,16 @@ fn no_cron_job_of_the_lease_user_starts_after_kill_uid() {
     }
 }
 
-/// Catches: a boot reset that deletes the user of the session the server still holds
-/// (or drops its auto-login), keeps any other leftover lease user, lets the held
-/// session's user be deleted, or keeps the session once the server no longer holds it.
+/// Catches: a boot reset that keeps a lease the server still holds (no lease keeps a
+/// session over a restart now) or any other leftover lease, deletes a pool user it ends
+/// (the pool's users are permanent), or leaves auto-login set.
 #[test]
 #[ignore = "needs root: run the test binary through `sudo` (see the header of tests/as_root.rs)"]
-fn the_boot_reset_keeps_the_held_session_and_deletes_every_other_leftover() {
+fn the_boot_reset_ends_every_leftover_lease_and_clears_auto_login() {
     let (_serial, mac) = mac();
     let held = mac.create("15.1");
     let leftover = mac.create("15.2");
-    // Dropped before the leases: their delete is refused while the session is held.
-    let _clear = OnPanic(clear_session);
-    // What session-login leaves (it is not run here: it restarts userspace).
-    write_root(&intent(), "15.1\n");
+    let _clear = OnPanic(clear_auto_login);
     succeeds(
         "/usr/bin/defaults",
         &[
@@ -570,42 +530,13 @@ fn the_boot_reset_keeps_the_held_session_and_deletes_every_other_leftover() {
     write_root(&autologin_cipher_path(), "x\n");
     assert_eq!(
         mac.restart(&["15.1"]),
-        "kept 15.1 deleted 15.2",
+        "deleted 15.1,15.2",
         "reset, 15.1 held"
     );
-    assert!(
-        user_exists(&held.name()),
-        "the held session's user was deleted"
-    );
-    // The pool's users are permanent: the leftover lease is over, its user stays, reset.
-    assert!(
-        user_exists(&leftover.name()),
-        "the leftover pool user was deleted"
-    );
-    says(
-        &root(
-            "/usr/bin/defaults",
-            &["read", &loginwindow(), "autoLoginUser"],
-        ),
-        &held.name(),
-        "auto-login",
-    );
-    assert!(exists(&autologin_cipher_path()), "kcpassword was not kept");
-    refused(
-        &held.call("delete"),
-        "holds the GUI session",
-        "delete the held session's user",
-    );
-    // Booted again, and the server no longer holds 15.1: everything goes.
-    assert_eq!(
-        mac.restart(&[]),
-        "kept none deleted 15.1",
-        "reset, nothing held"
-    );
-    assert!(
-        user_exists(&held.name()),
-        "the held session's pool user was deleted by the reset"
-    );
+    // The pool's users are permanent: each lease is over, its user stays, reset.
+    for user in [held.name(), leftover.name()] {
+        assert!(user_exists(&user), "the pool user {user} was deleted");
+    }
     let auto_login = root(
         "/usr/bin/defaults",
         &["read", &loginwindow(), "autoLoginUser"],
@@ -615,65 +546,27 @@ fn the_boot_reset_keeps_the_held_session_and_deletes_every_other_leftover() {
         "auto-login survived the reset: {}",
         auto_login.all()
     );
-    for gone in [autologin_cipher_path(), intent()] {
-        assert!(!exists(&gone), "{gone} survived the reset");
-    }
+    assert!(
+        !exists(&autologin_cipher_path()),
+        "kcpassword survived the reset"
+    );
+    says(&held.call("delete"), "absent", "the reset ended 15.1");
+    says(&leftover.call("delete"), "absent", "the reset ended 15.2");
 }
 
 /// Catches: a scan that stays dirty after every lease user is gone (an item that
-/// counts a deleted user), a baseline that does not survive a restart, a `reboot-dirty`
-/// that reboots after a clean scan, and a baseline window reopened by a restart.
+/// counts a deleted user), and a baseline that does not survive a restart.
 #[test]
 #[ignore = "needs root: run the test binary through `sudo` (see the header of tests/as_root.rs)"]
 fn the_scan_is_clean_again_once_every_lease_user_is_gone() {
     let (_serial, mac) = mac();
     mac.create("16.1").end();
-    assert_eq!(mac.restart(&[]), "kept none deleted ", "the boot reset");
-    // The order matters: reboot-dirty only after a scan that said clean.
+    assert_eq!(mac.restart(&[]), "deleted ", "the boot reset");
     says(
         &mac.client(&["scan", SOCKET]),
         "clean",
         "the scan after every lease",
     );
-    refused(
-        &mac.client(&["reboot-dirty", SOCKET]),
-        "did not come back dirty",
-        "reboot-dirty after a clean scan",
-    );
-    refused(
-        &mac.client(&["baseline", SOCKET]),
-        "window is closed",
-        "baseline",
-    );
-}
-
-/// Catches: `session-ready` or `run-gui` that answer for a lease that does not hold the
-/// GUI session, or that run in a GUI domain that does not exist.
-#[test]
-#[ignore = "needs root: run the test binary through `sudo` (see the header of tests/as_root.rs)"]
-fn run_gui_is_refused_until_the_lease_user_s_gui_domain_exists() {
-    let (_serial, mac) = mac();
-    let dir = scratch_dir("lease-17", 0o777);
-    let lease = mac.create("17.1");
-    // Dropped before the lease: its delete is refused while the session is held.
-    let _clear = OnPanic(clear_session);
-    refused(
-        &lease.call("session-ready"),
-        "does not hold the GUI session",
-        "session-ready, no session",
-    );
-    // What session-login leaves for the lease (it is not run here: it restarts
-    // userspace).
-    write_root(&intent(), "17.1\n");
-    says(
-        &lease.call("session-ready"),
-        "false",
-        "a user never logged in",
-    );
-    let gui = mac.client(&["run-gui", SOCKET, "17.1", &dir, "/usr/bin/true"]);
-    refused(&gui, "does not exist", "run-gui with no GUI domain");
-    fs::remove_file(intent()).expect("remove the intent record");
-    lease.end();
 }
 
 /// Escapes `text` for a plist's XML.
@@ -683,22 +576,16 @@ fn xml(text: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// The client's `spawn <session> ...` started by a root LaunchDaemon in the system
-/// domain, as the helper runs on a node: what it printed.
-fn spawn_in(mac: &Mac, session: &str, argv: &[&str]) -> String {
-    let label = format!("kbf.ci.mac-session.spawn-{session}");
-    let out = format!("{SCRATCH}/spawn-{session}.out");
+/// The client's `spawn ...` started by a root LaunchDaemon in the system domain, as the
+/// helper runs on a node: what it printed.
+fn spawned(mac: &Mac, argv: &[&str]) -> String {
+    let label = "kbf.ci.mac-session.spawn";
+    let out = format!("{SCRATCH}/spawn.out");
     let _ = fs::remove_file(&out);
     let me = mac.runner.uid.to_string();
     let gid = mac.runner.gid.to_string();
-    let dir = scratch_dir(&format!("gui-{session}"), 0o755);
-    let mut words = vec![
-        path_str(&mac.client),
-        "spawn",
-        session,
-        me.as_str(),
-        gid.as_str(),
-    ];
+    let dir = scratch_dir("spawn", 0o755);
+    let mut words = vec![path_str(&mac.client), "spawn", me.as_str(), gid.as_str()];
     words.extend([mac.runner.name.as_str(), dir.as_str()]);
     words.extend(argv);
     let mut args = String::new();
@@ -735,30 +622,19 @@ fn spawn_in(mac: &Mac, session: &str, argv: &[&str]) -> String {
     root("/bin/launchctl", &["bootout", &format!("system/{label}")]);
     let printed = fs::read_to_string(&out).unwrap_or_default();
     let errors = fs::read_to_string(format!("{out}.err")).unwrap_or_default();
-    println!("{session}: {printed}{errors}");
+    println!("spawn: {printed}{errors}");
     printed.trim_end_matches('\n').to_owned()
 }
 
-/// Catches: a GUI run that does not land in the user's Aqua session, or lands there with
-/// another uid or group, or as a process that can still read a file only wheel may read.
-/// The control, a background run, stays in the system's session.
-///
-/// No lease user has a GUI session here (that takes a session switch, which restarts
-/// userspace), so `spawn::spawn` runs for the runner's own uid, from a root
-/// LaunchDaemon, as the helper runs on a node. Not from this process: it is already in
-/// the runner's Aqua session; and not under `launchctl bsexec 1`, where the nested
-/// `launchctl asuser` refuses with "Reentrancy avoided".
+/// Catches: a run that does not stay in the system's session, or runs with another uid or
+/// group, in another directory or home, or as a process that can still read a file only
+/// wheel may read. `spawn::spawn` runs for the runner's own uid, from a root LaunchDaemon,
+/// as the helper runs on a node.
 #[test]
 #[ignore = "needs root: run the test binary through `sudo` (see the header of tests/as_root.rs)"]
-fn a_gui_spawn_lands_in_aqua_and_a_background_one_in_the_system_session() {
+fn a_spawn_runs_in_the_system_session_as_the_user() {
     let (_serial, mac) = mac();
     let me = mac.runner.uid;
-    let domain = quiet("/bin/launchctl", &["print", &format!("gui/{me}")]);
-    assert!(
-        domain.ok(),
-        "the runner has no gui/{me} domain: {}",
-        domain.stderr
-    );
     let wheel_only = format!("{SCRATCH}/wheel-only");
     write_root(&wheel_only, "secret\n");
     std::os::unix::fs::chown(&wheel_only, Some(0), Some(0)).expect("root:wheel");
@@ -773,16 +649,10 @@ fn a_gui_spawn_lands_in_aqua_and_a_background_one_in_the_system_session() {
         &["pwd", ";", "env", "HOME", ";", "cat", &wheel_only],
     ];
     let argv = mac.act(&probe.concat());
-    let control = spawn_in(mac, "background", &argv);
-    assert_eq!(
-        control.lines().next(),
-        Some("System"),
-        "the control is not in the system's session: {control:?}"
-    );
-    let gui = spawn_in(mac, "gui", &argv);
-    let dir = fs::canonicalize(format!("{SCRATCH}/gui-gui")).expect("the directory");
+    let printed = spawned(mac, &argv);
+    let dir = fs::canonicalize(format!("{SCRATCH}/spawn")).expect("the directory");
     let want = [
-        "Aqua".to_owned(),
+        "System".to_owned(),
         me.to_string(),
         mac.runner.gid.to_string(),
         dir.display().to_string(),
@@ -790,54 +660,11 @@ fn a_gui_spawn_lands_in_aqua_and_a_background_one_in_the_system_session() {
         "exit 1".to_owned(),
     ]
     .join("\n");
-    assert_eq!(gui, want, "the GUI spawn");
+    assert_eq!(printed, want, "the spawn");
 }
 
-/// Catches: a GUI run that keeps root's supplementary groups, or loses the user's own.
-/// Under sudo, root holds its whole group list (initgroups), which this process passes
-/// on; the GUI run's process must hold the user's groups as the directory lists them, and
-/// none of root's that the user is not in (the kernel's list, `getgroups`, not `id -G`,
-/// which asks the directory).
-#[test]
-#[ignore = "needs root: run the test binary through `sudo` (see the header of tests/as_root.rs)"]
-fn a_gui_run_holds_the_user_s_groups_and_no_other() {
-    let (_serial, mac) = mac();
-    let client = path_str(&mac.client);
-    let root_groups = succeeds(client, &["groups"]);
-    assert!(
-        root_groups.split_whitespace().count() > 1,
-        "root holds one group here, so the check below cannot fail: {root_groups}"
-    );
-    let me = mac.runner.uid.to_string();
-    let gid = mac.runner.gid.to_string();
-    let dir = scratch_dir("gui-groups", 0o755);
-    let name = mac.runner.name.as_str();
-    let held = succeeds(
-        client,
-        &["spawn", "gui", &me, &gid, name, &dir, client, "groups"],
-    );
-    let lines: Vec<&str> = held.lines().collect();
-    assert_eq!(lines.last(), Some(&"exit 0"), "{held:?}");
-    let sorted = |text: &str| {
-        let mut ids: Vec<u32> = text
-            .split_whitespace()
-            .map(|g| g.parse().expect("a group id"))
-            .collect();
-        ids.sort_unstable();
-        ids.dedup();
-        ids
-    };
-    let want = sorted(&succeeds("/usr/bin/id", &["-G", name]));
-    assert_eq!(
-        sorted(lines.first().copied().unwrap_or_default()),
-        want,
-        "the GUI run's groups are not the user's: {held:?}"
-    );
-}
-
-/// Catches: the macOS host's account lookup (the VM user's uid and gid come from it, and
-/// the helper kills and starts processes by that uid) that finds no one for a name the
-/// directory has, finds someone for a name it does not, or reads the wrong ids.
+/// Catches: the macOS host's account lookup that finds no one for a name the directory
+/// has, finds someone for a name it does not, or reads the wrong ids.
 #[test]
 #[ignore = "needs root: run the test binary through `sudo` (see the header of tests/as_root.rs)"]
 fn the_macos_host_looks_an_account_up_by_name() {

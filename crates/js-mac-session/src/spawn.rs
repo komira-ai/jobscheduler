@@ -13,30 +13,19 @@
 //! change, so the lease user must be able to search it). A process that is not root
 //! cannot change its groups, and keeps its own.
 //!
-//! In the lease user's GUI session (`Session::Gui`, macOS only) the helper starts
-//! `launchctl asuser <uid>` as root instead, which runs the helper's own `as-user` mode
-//! in the user's `gui/<uid>` bootstrap namespace; that mode sets the same groups (the
-//! parent's list, on its argument vector), gid and uid, and executes the argument
-//! vector, in the working directory and environment above (`crate::macos::gui`). A process started so
-//! reaches the user's Aqua services (the window server, Launch Services), as a process
-//! the user started at the login window does.
-//!
 //! A `run` may carry limits (`crate::limits::Limits`): the child sets the largest file
 //! (`RLIMIT_FSIZE`) and the most processes (`RLIMIT_NPROC`), soft and hard, with
 //! `setrlimit`, after the fork and before the `exec`, so they bind the program however it
-//! is started and no shell is needed to set them. They are not set in the GUI session,
-//! where the child that executes is the root helper itself, and are refused there.
+//! is started and no shell is needed to set them.
 //!
 //! Every other descriptor is closed across `exec`: the helper serves several leases at
 //! once, and macOS cannot receive a descriptor already close-on-exec, so a lease
 //! directory just received for one lease could otherwise leak into another lease's
 //! process started at that moment.
 //!
-//! Both are started through [`crate::disclaim::Program`]: on macOS the process the
-//! child executes (the action's program, or `launchctl`, whose `as-user` mode executes
-//! the program with [`crate::disclaim::exec`]) answers to the privacy controls (TCC) for
-//! itself, never for the helper, so a grant the helper held would not reach an action; the
-//! helper holds none.
+//! The process is started through [`crate::disclaim::Program`]: on macOS the action's
+//! program answers to the privacy controls (TCC) for itself, never for the helper, so a
+//! grant the helper held would not reach an action; the helper holds none.
 
 use std::ffi::{OsStr, OsString};
 use std::io;
@@ -46,7 +35,6 @@ use std::process::{Child, Stdio};
 
 use crate::disclaim::Program;
 use crate::limits::Limits;
-use crate::proto::Session;
 
 /// The highest descriptor number the child's close-on-exec pass reaches when the
 /// descriptor limit is unlimited or higher.
@@ -78,27 +66,17 @@ pub struct Spawn {
     pub stderr: OwnedFd,
     /// The lease directory, made the working directory.
     pub cwd: OwnedFd,
-    /// Where it runs.
-    pub session: Session,
-    /// The limits the child sets on itself before it executes; none for no limits.
-    /// Refused in the GUI session ([`check_limits`]).
+    /// The limits the child sets on itself before it executes; none for no limits
+    /// ([`check_limits`]).
     pub limits: Option<Limits>,
 }
 
 /// Checks the limits of a start before anything starts.
 ///
 /// # Errors
-/// A value is out of range ([`Limits::check`]), or the session is the GUI session, where
-/// the helper cannot set them on the process that runs as the lease user.
-pub fn check_limits(session: Session, limits: Option<&Limits>) -> Result<(), String> {
-    let Some(limits) = limits else {
-        return Ok(());
-    };
-    limits.check()?;
-    if session == Session::Gui {
-        return Err("limits are not set in the GUI session".to_owned());
-    }
-    Ok(())
+/// A value is out of range ([`Limits::check`]).
+pub fn check_limits(limits: Option<&Limits>) -> Result<(), String> {
+    limits.map_or(Ok(()), Limits::check)
 }
 
 /// Checks an argument vector and environment before anything starts.
@@ -127,7 +105,7 @@ pub fn check(argv: &[String], env: &[(String, String)]) -> Result<(), String> {
 /// The process could not be started (the program is missing, the uid change, `fchdir` or
 /// a `setrlimit` failed, or the limits are refused by [`check_limits`]).
 pub fn spawn(spawn: Spawn) -> io::Result<Child> {
-    check_limits(spawn.session, spawn.limits.as_ref())
+    check_limits(spawn.limits.as_ref())
         .map_err(|why| io::Error::new(io::ErrorKind::InvalidInput, why))?;
     let (program, args) = spawn
         .argv
@@ -138,18 +116,9 @@ pub fn spawn(spawn: Spawn) -> io::Result<Child> {
         .map_err(|why| io::Error::new(io::ErrorKind::InvalidInput, why))?;
     let ids = Ids::new(spawn.uid, spawn.gid, groups);
     // `cwd` stays open in the parent until `spawn` returns, so the child's copy is the
-    // lease directory. In the GUI session the child is the root `launchctl`, which does
-    // not change ids: `as-user` does, after `launchctl asuser`.
-    let mut command = match spawn.session {
-        Session::Background => {
-            let steps = child_steps(Some(ids), spawn.cwd.as_raw_fd(), spawn.limits);
-            start(OsStr::new(program), args, steps)
-        }
-        Session::Gui => {
-            let steps = child_steps(None, spawn.cwd.as_raw_fd(), spawn.limits);
-            gui(&ids, program, args, steps)?
-        }
-    };
+    // lease directory.
+    let steps = child_steps(ids, spawn.cwd.as_raw_fd(), spawn.limits);
+    let mut command = start(OsStr::new(program), args, steps);
     command
         .env_clear()
         .envs(
@@ -181,33 +150,6 @@ fn start(
     // SAFETY: the steps run in the child between fork and exec; they are
     // [`child_steps`]', which call only async-signal-safe functions and allocate nothing.
     unsafe { Program::with_steps(program, args, steps) }
-}
-
-/// The [`Program`] that starts `program` in the GUI session of `uid` (see the module
-/// documentation), after the child's `steps`.
-#[cfg(target_os = "macos")]
-fn gui(
-    ids: &Ids,
-    program: &str,
-    args: &[String],
-    steps: impl FnMut() -> io::Result<()> + Send + Sync + 'static,
-) -> io::Result<Program> {
-    let (launcher, args) = crate::macos::gui::argv(ids.uid, ids.gid, &ids.groups, program, args)?;
-    Ok(start(OsStr::new(launcher), &args, steps))
-}
-
-/// There is no GUI session to start a process in off macOS.
-#[cfg(not(target_os = "macos"))]
-fn gui(
-    _: &Ids,
-    _: &str,
-    _: &[String],
-    _: impl FnMut() -> io::Result<()> + Send + Sync + 'static,
-) -> io::Result<Program> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "a GUI session exists only on macOS",
-    ))
 }
 
 /// The limits the child can set, as the kernel names them.
@@ -318,17 +260,17 @@ impl ChildOs for Os {
 }
 
 /// The steps the child runs before the program executes ([`Program::with_steps`]):
-/// [`run_steps`] on the operating system, with the ids (none in the GUI session), the
-/// lease directory and the limits.
+/// [`run_steps`] on the operating system, with the ids, the lease directory and the
+/// limits.
 fn child_steps(
-    ids: Option<Ids>,
+    ids: Ids,
     cwd: libc::c_int,
     limits: Option<Limits>,
 ) -> impl FnMut() -> io::Result<()> + Send + Sync + 'static {
-    move || run_steps(&mut Os, ids.as_ref(), cwd, limits)
+    move || run_steps(&mut Os, &ids, cwd, limits)
 }
 
-/// The child's steps before `exec`, in this order: with `ids`, set the groups (when root;
+/// The child's steps before `exec`, in this order: set the groups (when root;
 /// another process cannot change them), then the gid, then the uid; enter the lease
 /// directory (after the uid change, so the lease user must be able to search it); mark
 /// every descriptor above the standard streams close-on-exec; then set the largest file
@@ -339,13 +281,11 @@ fn child_steps(
 /// allocates nothing.
 fn run_steps(
     os: &mut impl ChildOs,
-    ids: Option<&Ids>,
+    ids: &Ids,
     cwd: libc::c_int,
     limits: Option<Limits>,
 ) -> io::Result<()> {
-    if let Some(ids) = ids {
-        set_ids(os, ids)?;
-    }
+    set_ids(os, ids)?;
     os.fchdir(cwd)?;
     os.close_on_exec_from(3);
     if let Some(limits) = limits {
@@ -452,25 +392,9 @@ mod tests {
             stdout: write,
             stderr: null(),
             cwd: std::fs::File::open(cwd).unwrap().into(),
-            session: Session::Background,
             limits: None,
         };
         (spawn, out)
-    }
-
-    /// Catches a GUI run that falls back to a background one where there is no GUI
-    /// session: off macOS it is refused, and nothing starts.
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn a_gui_session_is_refused_off_macos() {
-        let dir = std::env::temp_dir();
-        let (spawn, _out) = base(&["/bin/true"], &dir);
-        let spawn = Spawn {
-            session: Session::Gui,
-            ..spawn
-        };
-        let error = super::spawn(spawn).expect_err("started off macOS");
-        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
     }
 
     /// Catches: the lease directory not made the working directory, the daemon's
@@ -671,11 +595,15 @@ mod tests {
     /// has none.
     #[test]
     fn the_child_enters_the_directory_then_sets_the_limits() {
+        let ids = Ids::new(604, 20, vec![20]);
         let mut os = Recorder::default();
-        run_steps(&mut os, None, 9, Some(Limits::new(4096, 8).unwrap())).unwrap();
+        run_steps(&mut os, &ids, 9, Some(Limits::new(4096, 8).unwrap())).unwrap();
         assert_eq!(
             os.asked,
             [
+                Asked::Groups(vec![20]),
+                Asked::Gid(20),
+                Asked::Uid(604),
                 Asked::Chdir(9),
                 Asked::CloseOnExec(3),
                 Asked::Limit(Resource::FileSize, 4096),
@@ -683,9 +611,9 @@ mod tests {
             ]
         );
         let mut unlimited = Recorder::default();
-        run_steps(&mut unlimited, None, 9, None).unwrap();
+        run_steps(&mut unlimited, &ids, 9, None).unwrap();
         assert_eq!(
-            unlimited.asked,
+            unlimited.asked[3..],
             [Asked::Chdir(9), Asked::CloseOnExec(3)],
             "no limits asked for, none set"
         );
@@ -704,30 +632,23 @@ mod tests {
                 fail_at: Some(fail_at),
                 ..Recorder::default()
             };
-            let error = run_steps(&mut os, Some(&ids), 9, limits).unwrap_err();
+            let error = run_steps(&mut os, &ids, 9, limits).unwrap_err();
             assert_eq!(error.raw_os_error(), Some(libc::EPERM), "{fail_at}");
             assert_eq!(os.asked.len(), ran, "{fail_at}: {:?}", os.asked);
         }
     }
 
-    /// Catches: limits refused in no case, or accepted in the GUI session, where the
-    /// child that executes is the root helper itself and the limits would bind the wrong
-    /// process, or a bad value that reaches `setrlimit`.
+    /// Catches: limits refused in no case, or a bad value that reaches `setrlimit`.
     #[test]
     fn limits_are_checked_before_anything_starts() {
         let good = Limits::new(4096, 8).unwrap();
-        assert_eq!(check_limits(Session::Background, Some(&good)), Ok(()));
-        assert_eq!(check_limits(Session::Gui, None), Ok(()));
-        assert!(
-            check_limits(Session::Gui, Some(&good))
-                .unwrap_err()
-                .contains("GUI")
-        );
+        assert_eq!(check_limits(Some(&good)), Ok(()));
+        assert_eq!(check_limits(None), Ok(()));
         let zero = Limits {
             file_bytes: 0,
             processes: 8,
         };
-        assert!(check_limits(Session::Background, Some(&zero)).is_err());
+        assert!(check_limits(Some(&zero)).is_err());
         let (mut spawn, _out) = base(&["/usr/bin/true"], &std::env::temp_dir());
         spawn.limits = Some(zero);
         assert_eq!(
@@ -850,7 +771,7 @@ mod tests {
         child_steps(Some(ids.clone()), here.as_raw_fd(), None)().unwrap();
         let file = std::fs::File::open("/dev/null").unwrap();
         assert_eq!(
-            run_steps(&mut Os, Some(&ids), file.as_raw_fd(), None)
+            run_steps(&mut Os, &ids, file.as_raw_fd(), None)
                 .unwrap_err()
                 .raw_os_error(),
             Some(libc::ENOTDIR)
@@ -858,16 +779,14 @@ mod tests {
     }
 
     /// The child sets exactly the groups it is given, then the gid, then the uid, and only
-    /// then enters the lease directory; with no ids (the GUI session's `launchctl`, which
-    /// stays root) it sets none. Catches an id change before the groups (the groups need
-    /// root, which the uid change takes away), a gid or uid set after the directory is
-    /// entered, a list cut or reordered on its way to the kernel, and ids set for a child
-    /// that must stay root.
+    /// then enters the lease directory. Catches an id change before the groups (the groups
+    /// need root, which the uid change takes away), a gid or uid set after the directory is
+    /// entered, and a list cut or reordered on its way to the kernel.
     #[test]
     fn the_child_sets_the_groups_then_the_gid_then_the_uid_before_the_directory() {
         let ids = Ids::new(604, 20, vec![20, 12, 61, 701, 100]);
         let mut os = Recorder::default();
-        run_steps(&mut os, Some(&ids), 9, None).unwrap();
+        run_steps(&mut os, &ids, 9, None).unwrap();
         assert_eq!(
             os.asked,
             [
@@ -878,9 +797,6 @@ mod tests {
                 Asked::CloseOnExec(3),
             ]
         );
-        let mut staying = Recorder::default();
-        run_steps(&mut staying, None, 9, None).unwrap();
-        assert_eq!(staying.asked, [Asked::Chdir(9), Asked::CloseOnExec(3)]);
     }
 
     /// The lookup run as a user (`getconf DARWIN_USER_DIR`) holds its primary group alone.
@@ -903,7 +819,7 @@ mod tests {
         let ids = Ids::new(604, 20, Vec::new());
         assert_eq!(ids.groups, [20]);
         let mut os = Recorder::default();
-        run_steps(&mut os, Some(&ids), 9, None).unwrap();
+        run_steps(&mut os, &ids, 9, None).unwrap();
         assert_eq!(os.asked[0], Asked::Groups(vec![20]));
         // The operating system's own step refuses an empty list outright.
         assert_eq!(
@@ -921,7 +837,7 @@ mod tests {
             root: false,
             ..Recorder::default()
         };
-        run_steps(&mut os, Some(&ids), 9, None).unwrap();
+        run_steps(&mut os, &ids, 9, None).unwrap();
         assert_eq!(
             os.asked[..2],
             [Asked::Gid(20), Asked::Uid(604)],

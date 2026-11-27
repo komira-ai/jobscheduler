@@ -1,5 +1,4 @@
-//! macOS: the host the verbs run on, the caller check by code signature, a process
-//! started in a lease user's GUI session ([`gui`]), and `main`.
+//! macOS: the host the verbs run on, the caller check by code signature, and `main`.
 //!
 //! Nothing here is reached by the Linux test jobs; the `native-macos` CI job runs the
 //! helper for real as root (`tests/as_root.rs`).
@@ -17,7 +16,6 @@
 
 pub mod admin;
 mod caller;
-pub mod gui;
 mod host;
 
 use std::io;

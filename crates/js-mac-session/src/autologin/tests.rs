@@ -3,120 +3,24 @@ use std::os::unix::fs::PermissionsExt as _;
 use super::*;
 use crate::testing::{FakeHost, act, scratch};
 
-fn decode(bytes: &[u8]) -> Vec<u8> {
-    bytes
-        .iter()
-        .zip(KC_KEY.iter().cycle())
-        .map(|(byte, key)| byte ^ key)
-        .collect()
-}
-
-/// Catches: a `/etc/kcpassword` the login window cannot read back: the key not
-/// repeated past its 11 bytes, no NUL after the password, or a length that is not a
-/// whole number of 12-byte blocks (a password of exactly 12 bytes needs a second block,
-/// or it has no terminator).
+/// Catches: a file of the state directory written through a link planted at its path (root
+/// would write where the link points), left readable by others, or a stale temporary file
+/// that stops the write.
 #[test]
-fn kcpassword_is_the_password_and_a_nul_xored_in_whole_blocks() {
-    assert_eq!(
-        kcpassword(b"a"),
-        [
-            b'a' ^ 0x7D,
-            0x89,
-            0x52,
-            0x23,
-            0xD2,
-            0xBC,
-            0xDD,
-            0xEA,
-            0xA3,
-            0xB9,
-            0x1F,
-            0x7D
-        ]
-    );
-    for len in [0, 1, 11, 12, 13, 23, 24, 64] {
-        let password: Vec<u8> = (0..len).map(|i| b'a' + (i % 26) as u8).collect();
-        let encoded = kcpassword(&password);
-        assert_eq!(encoded.len() % KC_BLOCK, 0, "length {len}");
-        assert!(encoded.len() > len, "length {len}: no room for the NUL");
-        assert!(
-            encoded.len() <= len + KC_BLOCK,
-            "length {len}: a block too many"
-        );
-        let plain = decode(&encoded);
-        assert_eq!(&plain[..len], &password[..], "length {len}");
-        assert!(plain[len..].iter().all(|&b| b == 0), "length {len}");
-    }
-    assert_eq!(kcpassword(&[b'x'; 12]).len(), 24);
-}
-
-/// Catches: an intent record that is read through a link, taken although it is torn
-/// or holds something else, or left readable by others.
-#[test]
-fn the_intent_record_names_one_lease_and_is_private() {
-    let dir = scratch("intent");
-    let path = dir.join("session-intent");
-    assert_eq!(read_intent(&path), Ok(None));
-    write_intent(&path, Intent::Lease(LeaseId::new(3, 7))).unwrap();
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), "3.7\n");
-    let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-    assert_eq!(mode & 0o777, 0o600);
-    assert_eq!(
-        read_intent(&path),
-        Ok(Some(Intent::Lease(LeaseId::new(3, 7))))
-    );
-    // Written again over the old record, whole.
-    write_intent(&path, Intent::Lease(LeaseId::new(3, 8))).unwrap();
-    assert_eq!(
-        read_intent(&path),
-        Ok(Some(Intent::Lease(LeaseId::new(3, 8))))
-    );
-    // The VM user's record is its own spelling, not a lease id.
-    write_intent(&path, Intent::Vm).unwrap();
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), "vm\n");
-    assert_eq!(read_intent(&path), Ok(Some(Intent::Vm)));
-    assert_eq!(Intent::Vm.to_string(), "vm");
-    assert_eq!(Intent::Lease(LeaseId::new(3, 7)).to_string(), "3.7");
-    for bad in [
-        "3.7",
-        "3.7\n4.1\n",
-        "03.7\n",
-        "\n",
-        "kbf-lease-3-7\n",
-        "vm",
-        "VM\n",
-        "vm\nvm\n",
-        " vm\n",
-        "vm \n",
-    ] {
-        std::fs::write(&path, bad).unwrap();
-        assert!(read_intent(&path).is_err(), "{bad:?} was taken");
-    }
-    assert!(remove(&path).unwrap());
-    assert!(!remove(&path).unwrap());
-    std::fs::write(dir.join("elsewhere"), "3.7\n").unwrap();
-    std::os::unix::fs::symlink(dir.join("elsewhere"), &path).unwrap();
-    assert!(read_intent(&path).is_err(), "read through a link");
-}
-
-/// Catches: `/etc/kcpassword` written through a link planted at its path (root would
-/// write the password where the link points), left readable by others, or a stale
-/// temporary file that stops the write.
-#[test]
-fn kcpassword_replaces_a_planted_link_and_is_private() {
-    let dir = scratch("kcpassword");
-    let path = dir.join("kcpassword");
+fn a_file_is_written_whole_over_a_planted_link_and_is_private() {
+    let dir = scratch("write-whole");
+    let path = dir.join("record");
     let target = dir.join("target");
     std::fs::write(&target, "keep").unwrap();
     std::os::unix::fs::symlink(&target, &path).unwrap();
-    std::fs::write(dir.join("kcpassword.new"), "stale").unwrap();
-    write_kcpassword(&path, b"secret").unwrap();
+    std::fs::write(dir.join("record.new"), "stale").unwrap();
+    write_whole(&path, b"text").unwrap();
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
     let meta = std::fs::symlink_metadata(&path).unwrap();
     assert!(meta.file_type().is_file());
     assert_eq!(meta.permissions().mode() & 0o777, 0o600);
-    assert_eq!(std::fs::read(&path).unwrap(), kcpassword(b"secret"));
-    assert!(!dir.join("kcpassword.new").exists());
+    assert_eq!(std::fs::read(&path).unwrap(), b"text");
+    assert!(!dir.join("record.new").exists());
 }
 
 fn answer(host: &FakeHost, text: &str, success: bool, stdout: &str) {
@@ -135,7 +39,7 @@ fn answer(host: &FakeHost, text: &str, success: bool, stdout: &str) {
 #[test]
 fn clearing_auto_login_checks_a_failed_delete_with_a_read() {
     let dir = scratch("clear");
-    let paths = SessionPaths::under(&dir);
+    let paths = LoginPaths::under(&dir);
     let domain = paths.loginwindow.clone();
     let host = FakeHost::default();
     std::fs::write(&paths.kcpassword, "x").unwrap();
@@ -169,119 +73,23 @@ fn clearing_auto_login_checks_a_failed_delete_with_a_read() {
     assert!(error.contains("running /usr/bin/defaults"), "{error}");
 }
 
-/// Catches: an `autoLoginUser` read that takes an unset key as an error (the boot reset
-/// would fail on every Mac at the login window), takes any failure as unset (it would
-/// clear what it could not read), or keeps the newline.
-#[test]
-fn the_auto_login_user_reads_as_set_unset_or_unreadable() {
-    let dir = scratch("read-auto-login");
-    let paths = SessionPaths::under(&dir);
-    let read = format!("{DEFAULTS} read {} autoLoginUser", paths.loginwindow);
-    let host = FakeHost::default();
-    assert_eq!(read_auto_login(&host, &paths), Ok(None));
-    answer(&host, &read, true, "kbf-vm\n");
-    assert_eq!(
-        read_auto_login(&host, &paths),
-        Ok(Some("kbf-vm".to_owned()))
-    );
-    host.state().answers.insert(
-        read,
-        CommandOutput {
-            success: false,
-            stdout: String::new(),
-            stderr: "permission denied".to_owned(),
-        },
-    );
-    let error = read_auto_login(&host, &paths).unwrap_err();
-    assert!(error.contains("permission denied"), "{error}");
-    host.state().fail.insert("command");
-    let error = read_auto_login(&host, &paths).unwrap_err();
-    assert!(error.contains("running /usr/bin/defaults"), "{error}");
-}
-
-/// Asserts that an unset `autoLoginUser` reads as unset in the words of each macOS the
+/// Asserts that a failed `defaults read` reads as an unset key in the words of each macOS the
 /// pool runs on (the texts are what `defaults read` printed on macOS 26.4, 26.6 and
-/// 27.0.1), and that a failure in neither form
-/// stays an error. Catches a read that knows only macOS 26's wording, which on macOS 27
-/// fails the VM user's resting check on every Mac with no auto-login set.
+/// 27.0.1), and that a failure in neither form does not. Catches a check that knows only
+/// macOS 26's wording, which on macOS 27 would make the leak scan fail its auto-login item on
+/// every Mac with no auto-login set.
 #[test]
 fn an_unset_auto_login_user_reads_as_unset_on_macos_26_and_27() {
-    let dir = scratch("read-auto-login-versions");
-    let paths = SessionPaths::under(&dir);
-    let read = format!("{DEFAULTS} read {} autoLoginUser", paths.loginwindow);
-    let host = FakeHost::default();
     let unset = [
         "2026-11-20 21:29:13.385 defaults[84941:2779365] \nThe domain/default pair of \
          (/Library/Preferences/com.apple.loginwindow, autoLoginUser) does not exist\n",
         "Error: Could not find key 'autoLoginUser' in domain 'com.apple.loginwindow'.\n",
     ];
     for stderr in unset {
-        host.state().answers.insert(
-            read.clone(),
-            CommandOutput {
-                success: false,
-                stdout: String::new(),
-                stderr: stderr.to_owned(),
-            },
-        );
-        assert_eq!(read_auto_login(&host, &paths), Ok(None), "{stderr}");
+        assert!(key_absent(stderr), "{stderr}");
     }
     let other = "Error: Could not read domain 'com.apple.loginwindow': not permitted.\n";
-    host.state().answers.insert(
-        read.clone(),
-        CommandOutput {
-            success: false,
-            stdout: String::new(),
-            stderr: other.to_owned(),
-        },
-    );
-    assert_eq!(
-        read_auto_login(&host, &paths),
-        Err(failed(
-            &format!("defaults read {} autoLoginUser", paths.loginwindow),
-            &CommandOutput {
-                success: false,
-                stdout: String::new(),
-                stderr: other.to_owned(),
-            },
-        ))
-    );
-}
-
-/// Catches: a session switch on a Mac with FileVault on (it would restart to the
-/// unlock screen and never log in), or an unreadable answer taken as off.
-#[test]
-fn filevault_must_say_it_is_off() {
-    let host = FakeHost::default();
-    assert_eq!(require_filevault_off(&host), Ok(()));
-    answer(&host, "/usr/bin/fdesetup isactive", true, "true\n");
-    let error = require_filevault_off(&host).unwrap_err();
-    assert!(error.contains("FileVault is on"), "{error}");
-    answer(&host, "/usr/bin/fdesetup isactive", false, "");
-    let error = require_filevault_off(&host).unwrap_err();
-    assert!(error.contains("not true or false"), "{error}");
-}
-
-/// Catches: a failed `defaults write` or restart reported as done.
-#[test]
-fn a_failed_write_or_restart_is_an_error() {
-    let dir = scratch("write-fail");
-    let paths = SessionPaths::under(&dir);
-    let host = FakeHost::default();
-    assert_eq!(set_auto_login(&host, &paths, "kbf-lease-1-1"), Ok(()));
-    assert_eq!(restart_userspace(&host), Ok(()));
-    let write = format!(
-        "{DEFAULTS} write {} autoLoginUser -string kbf-lease-1-1",
-        paths.loginwindow
-    );
-    answer(&host, &write, false, "");
-    answer(&host, "/bin/launchctl reboot userspace", false, "");
-    assert!(set_auto_login(&host, &paths, "kbf-lease-1-1").is_err());
-    let error = restart_userspace(&host).unwrap_err();
-    assert!(
-        error.contains("launchctl reboot userspace failed: said no"),
-        "{error}"
-    );
+    assert!(!key_absent(other));
 }
 
 /// Catches the real runner losing or swapping stdout and stderr, taking a failed exit
@@ -309,59 +117,24 @@ fn run_command_reports_output_and_clears_the_environment() {
     assert!(run_command("/nonexistent/program", &[]).is_err());
 }
 
-/// Catches: a failure to read, write or remove one of the switch's files taken as
-/// success (each path here is a directory, which no file operation may treat as the
-/// record), and a relative path's directory not synced.
+/// Catches: a failure to write or remove a file of the state directory taken as success
+/// (each path here is a directory, which no file operation may treat as the file), and a
+/// relative path's directory not synced.
 #[test]
 fn file_errors_are_reported() {
     let dir = scratch("file-errors");
     let taken = dir.join("taken");
     std::fs::create_dir_all(taken.join("inside")).unwrap();
-    assert!(read_intent(&taken).is_err(), "a directory read as a record");
     assert!(remove(&taken).is_err(), "a directory removed as a file");
     std::fs::create_dir_all(dir.join("record.new/inside")).unwrap();
-    assert!(write_intent(&dir.join("record"), Intent::Lease(LeaseId::new(1, 1))).is_err());
-    let paths = SessionPaths {
+    assert!(write_whole(&dir.join("record"), b"").is_err());
+    let paths = LoginPaths {
         kcpassword: taken.clone(),
-        ..SessionPaths::under(&dir)
+        ..LoginPaths::under(&dir)
     };
     let error = clear_auto_login(&FakeHost::default(), &paths).unwrap_err();
     assert!(error.contains("removing"), "{error}");
     // A bare file name: its directory is the current one.
     assert!(!remove(Path::new("kbf-mac-session-no-such-file")).unwrap());
     assert!(sync_parent(Path::new("kbf-mac-session-no-such-file")).is_ok());
-}
-
-/// Catches: a password file owned by anyone but the expected owner (root on a Mac)
-/// being trusted, so an unprivileged user could choose the VM user's login password;
-/// and the error not naming whose it is.
-#[test]
-fn the_vm_password_must_be_owned_by_the_expected_uid() {
-    let dir = scratch("vm-password-owner");
-    let paths = SessionPaths::under(&dir);
-    let pw = "ab".repeat(32);
-    std::fs::write(&paths.vm_password, &pw).unwrap();
-    std::fs::set_permissions(&paths.vm_password, std::fs::Permissions::from_mode(0o400)).unwrap();
-    assert_eq!(read_vm_password(&paths), Ok(pw));
-    let other = SessionPaths {
-        vm_password_owner: paths.vm_password_owner + 1,
-        ..paths
-    };
-    let error = read_vm_password(&other).unwrap_err();
-    assert!(error.contains("is owned by uid"), "{error}");
-    assert!(error.contains("vm-user-password"), "{error}");
-}
-
-/// Catches: a password file that is not text taken as a password, or its read failure
-/// reported as if the file were missing or merely malformed: the error says it cannot be
-/// read, and names the file.
-#[test]
-fn a_password_file_that_is_not_text_cannot_be_read() {
-    let dir = scratch("vm-password-bytes");
-    let paths = SessionPaths::under(&dir);
-    std::fs::write(&paths.vm_password, [0xff_u8; 64]).unwrap();
-    std::fs::set_permissions(&paths.vm_password, std::fs::Permissions::from_mode(0o400)).unwrap();
-    let error = read_vm_password(&paths).unwrap_err();
-    assert!(error.contains("cannot be read"), "{error}");
-    assert!(error.contains("vm-user-password"), "{error}");
 }

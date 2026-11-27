@@ -1,10 +1,9 @@
 //! `js-mac-session`: the root helper that lends every Mac lease a user of its pool: the
-//! verbs `user-create` (a free pool user for the lease), `run` (in the background, or in
-//! the lease user's GUI session), `kill-uid` and `user-delete` (the lease ends: its user
-//! is reset in place for the next lease), `pool-create` and `pool-status`, the GUI
-//! session switch (`session-login`, `session-ready`, `session-idle`), the boot reset
-//! (which also makes the pool), and the leak scan's `scan`, `baseline` and
-//! `reboot-dirty` over a minimal item set.
+//! verbs `user-create` (a free pool user for the lease), `run` (outside any login
+//! session), `watch` and `stop`, `kill-uid` and `user-delete` (the lease ends: its user
+//! is reset in place for the next lease), `pool-create` and `pool-status`, the boot reset
+//! (which also clears auto-login and makes the pool), the leak scan's `scan` over a
+//! minimal item set, and `full-disk-access`.
 //!
 //! - [`lease`]: lease ids, the pool's slots, user names (`kbf-lease-pool-<slot>`) and the
 //!   uid range.
@@ -14,11 +13,11 @@
 //! - [`groups`]: the group list a process started as a lease user holds.
 //! - [`limits`]: the file-size and process limits a `run` asks the helper to set.
 //! - [`helper`]: the verbs' rules, over a [`helper::Host`] that does the OS's part.
-//! - [`autologin`]: the session switch's intent record, `/etc/kcpassword`, the login
-//!   window's preference and the restart.
+//! - [`autologin`]: the login window's auto-login, which the boot reset clears, and the
+//!   command runner and whole-file writes the rest share.
 //! - [`sweep`]: what `user-delete` and a pool user's reset remove, never following a
 //!   link.
-//! - [`scan`]: the leak scan's items, its baseline and the baseline window.
+//! - [`scan`]: the leak scan's items and its recorded baseline.
 //! - [`spawn`]: starting a process as the lease user.
 //! - [`disclaim`]: the one way this crate and `js-agent` start a program; on macOS with
 //!   its privacy (TCC) responsibility disclaimed by default, so it does not hold the
@@ -29,9 +28,8 @@
 //! - [`start`]: flags and start-up.
 //! - [`node_admin`]: the `node-admin` mode, the verbs a node's administrator runs
 //!   through `sudo` (`phase0` and `role-user` so far), behind its own guards.
-//! - `macos`: the host (OpenDirectory, launchd, libproc), the caller check by code
-//!   signature, and the `as-user` mode a GUI run executes (`macos::gui`), on macOS
-//!   only.
+//! - `macos`: the host (OpenDirectory, launchd, libproc) and the caller check by code
+//!   signature, on macOS only.
 //!
 //! Everything but `macos` builds and is tested on every platform; the binary serves
 //! only on macOS.
@@ -45,6 +43,13 @@
 //! is kept too, although the binary file, and so the usage text, is now named
 //! `js-mac-session`. The `S<n>` and `fleet-updates` references in comments are sections
 //! of design documents of the kbf repository that are not part of this one.
+//!
+//! Since the move, the verbs no code of this repository called are gone: the GUI session
+//! switch (`session-login`, `session-ready`, `session-idle`, a `run` in the GUI session and
+//! the `as-user` mode it executed), the standing VM user's `role-*` verbs, the image verbs
+//! (`image-setup`, `image-harvest`), and the leak scan's `baseline` and `reboot-dirty`.
+//! The helper refuses each as an unknown verb, and a `run` that names a `session` as an
+//! unknown field.
 
 pub mod autologin;
 pub mod client;
