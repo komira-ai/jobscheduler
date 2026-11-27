@@ -228,9 +228,10 @@ fn a_home_the_profile_cannot_name_refuses_the_fixture() {
 }
 
 /// The plants are made in order, directories `0755` and files `0644` with their text, and the
-/// first that cannot be made stops the placing, naming it. It catches a canary a pool account
-/// could not read without the profile (its control would fail) and a fixture half made in
-/// silence.
+/// first that cannot be made stops the placing, naming it; a path that is there, a link
+/// included, is refused and not followed. It catches a canary a pool account could not read
+/// without the profile (its control would fail), a fixture half made in silence, and root
+/// writing through a link another user left in a shared folder.
 #[test]
 fn the_plants_are_made_readable_and_unchangeable_and_a_failure_names_its_path() {
     let scratch = Scratch::new("mac-allow-place");
@@ -256,6 +257,16 @@ fn the_plants_are_made_readable_and_unchangeable_and_a_failure_names_its_path() 
     let file = scratch.path("none/canary");
     let why = place(&[Plant::File(file.clone(), CANARY)]).unwrap_err();
     assert!(why.starts_with(&format!("{}: ", file.display())), "{why}");
+
+    // A link where a canary goes (another user's, in a folder everyone may write) is refused,
+    // and what it points to is left as it was.
+    let target = scratch.write("target", "theirs\n", 0o600);
+    let link = scratch.path("linked-canary");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let why = place(&[Plant::File(link.clone(), CANARY)]).unwrap_err();
+    assert!(why.starts_with(&format!("{}: ", link.display())), "{why}");
+    assert_eq!(fs::read_to_string(&target).unwrap(), "theirs\n");
+    assert_eq!(mode(&target), 0o600);
 }
 
 /// The canaries outside the home are removed; one already gone is no complaint, and one that

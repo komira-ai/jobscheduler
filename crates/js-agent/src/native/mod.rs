@@ -182,7 +182,7 @@ use crate::mac_usage::{ProcessUsage, Series};
 use crate::usage::{MonotonicClock, UsageClock as _};
 
 pub use accounts::Accounts;
-pub use allow::ReadAllow;
+pub use allow::{ReadAllow, read_model_named};
 pub use files::HandOver;
 pub use journal::{Journal, PutRecord, RunRecord};
 pub use mounts::{MountRoot, roots_of};

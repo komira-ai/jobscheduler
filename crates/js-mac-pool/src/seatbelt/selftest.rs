@@ -30,7 +30,8 @@
 //! A pass is an [`Assurance`], which [`Policy::allowing`](super::Policy::allowing)
 //! takes; a failure lists every step that was wrong and why, and the agent then does not
 //! start: it exits naming the list, so it never offers a bundle it could not run under the
-//! allow model (its hello, which names the bundles, is made before the self-test runs).
+//! allow model (its hello names the bundles, and is built before the self-test runs and sent
+//! after it).
 //! This crate starts nothing: the caller runs [`Step::argv`] with the
 //! environment of [`Step::env`], as the pool user, and reports what each step did
 //! ([`Outcome`]): a denied step passes only when it was refused with the kernel's

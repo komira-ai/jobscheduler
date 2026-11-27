@@ -86,7 +86,35 @@ impl ReadAllow {
     }
 }
 
+/// The read model `--read-model` names (checked with the bundle flags): `allow`, or the open
+/// model.
+#[must_use]
+pub fn read_model_named(given: Option<&str>) -> ReadModel {
+    match given {
+        Some("allow") => ReadModel::Allow,
+        _ => ReadModel::Open,
+    }
+}
+
 impl NativeRuntime {
+    /// Under `--read-model allow`, the same runtime with this host's [`ReadAllow`]
+    /// ([`ReadAllow::of_host`], over the system's programs, for the Xcodes `xcodes`); under
+    /// `open`, the same runtime.
+    ///
+    /// # Errors
+    ///
+    /// The host's version cannot be read or has no base set, naming the flag.
+    pub fn with_host_read_allow(self, xcodes: &[Xcode]) -> Result<Self, String> {
+        match self.config.read_model {
+            ReadModel::Allow => {
+                let allow = ReadAllow::of_host(&crate::facts::SystemCommands::default(), xcodes)
+                    .map_err(|why| format!("--read-model allow: {why}"))?;
+                Ok(self.with_read_allow(allow))
+            }
+            ReadModel::Open => Ok(self),
+        }
+    }
+
     /// The same runtime, with `allow` as what the allow read model needs of the host. A
     /// runtime whose config asks for the model ([`ReadModel::Allow`]) and was given none fails
     /// its self-test.
@@ -182,13 +210,12 @@ impl NativeRuntime {
             outside,
         } = mac_allow::plan(&places, read_denies, xcode, allow.scan.clone())
             .map_err(RuntimeError::new)?;
-        let tested = mac_allow::place(&plants)
-            .map_err(RuntimeError::new)
-            .and_then(|()| {
-                SelfTest::new(allow.major, fixture)
-                    .map_err(|why| fail(&"the allow read model's self-test", &why))
-            })
+        // The fixture is checked before anything of it is made, so a refused one touches no
+        // shared place.
+        let tested = SelfTest::new(allow.major, fixture)
+            .map_err(|why| fail(&"the allow read model's self-test", &why))
             .and_then(|test| {
+                mac_allow::place(&plants).map_err(RuntimeError::new)?;
                 let outcomes = self.run_steps(&test, account)?;
                 mac_allow::verdict(&test, &outcomes).map_err(RuntimeError::new)
             });

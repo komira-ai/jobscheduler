@@ -32,7 +32,7 @@
 //! account by their modes, so a canary there would fail its control and prove nothing.
 
 use std::fs;
-use std::io;
+use std::io::{self, Write as _};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
@@ -249,8 +249,9 @@ fn tree(store: &AbsPath, digest: &str) -> Result<PinnedTree, String> {
     PinnedTree::new(store, &diff_id).map_err(|why| format!("{digest}: {why}"))
 }
 
-/// Makes each of `plants`, in order: directories `0755`, files `0644`, owned by the caller
-/// (root, in the agent), so the account may read each but change none.
+/// Makes each of `plants`, in order: directories `0755`, files `0644` (each new: a path that is
+/// there, a link included, is refused), owned by the caller (root, in the agent), so the account
+/// may read each but change none.
 ///
 /// # Errors
 ///
@@ -271,9 +272,15 @@ fn make_dir(path: &Path) -> io::Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755))
 }
 
+/// A new file: one that is there, a link included, is refused rather than followed, since two
+/// of the canaries lie in folders every user may write.
 fn make_file(path: &Path, text: &str) -> io::Result<()> {
-    fs::write(path, text)?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o644))
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(text.as_bytes())?;
+    file.set_permissions(fs::Permissions::from_mode(0o644))
 }
 
 /// Removes each of `outside` that is there, and says which could not be removed.
