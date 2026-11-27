@@ -7,7 +7,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_registry::PoolConfig;
-use js_sched_placer::curves::CurveSettings;
 use js_sched_placer::sizes::{ColdCpuOn, ColdMemoryOn, ColdSize};
 use js_types::ProviderId;
 
@@ -44,8 +43,8 @@ pub(crate) struct AgentSetup {
     /// operating system they name, in place of `cold`'s.
     pub(crate) cold_on: ColdOn,
     /// `--placement-curves`, or `server.placement_curves`: whether the engine learns profiles
-    /// and books by them, with `server.curve_hosts` and `server.curve_max_wait_seconds`
-    /// (no flags) for the mode `on`.
+    /// and books by them, with `--curve-hosts` and `--curve-max-wait-seconds` (or
+    /// `server.curve_hosts` and `server.curve_max_wait_seconds`) for the mode `on`.
     pub(crate) curves: CurveSetting,
     /// `server.max_lease_wall`: the one up to which the placement engine trusts a wall time
     /// for backfill.
@@ -168,10 +167,7 @@ pub(super) fn agents(
             memory_bytes: cli.cold_memory_bytes,
         },
         cold_on,
-        curves: CurveSetting {
-            mode: cli.placement_curves,
-            settings: CurveSettings::default(),
-        },
+        curves: super::placement_curves::of_flags(cli)?,
         max_lease_wall: None,
         job_limits: JobLimits::default(),
         jobs: listen::job_store(cli),

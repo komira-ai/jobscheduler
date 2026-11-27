@@ -43,7 +43,7 @@ impl Checker {
     fn placer(&self, names: &[WorkerId]) -> Placer {
         let hosts = names.iter().map(|n| self.host(n)).collect();
         let next_seq = self.last_lease.map_or(0, |l| l.seq + 1);
-        Placer::new(hosts, TERM, next_seq, self.holds.clone())
+        Placer::new(hosts, TERM, next_seq)
     }
 
     /// The reference verdict on queued operation `id`.

@@ -97,8 +97,8 @@ What is simulated:
   `.retry_with_backoff(n, initial, longest)`) submits `spec.retry`, and one that asks for
   `.callback()` (or `.callback_for(deadline)`) submits `spec.callback` with the URL
   `https://receiver.example/sim/<job id>` and a fixed 32-byte key; a work with neither is
-  submitted as it always was. The cell's server accepts both (the in-process
-  `Config::accepting_retry_and_callbacks`; no shipped build takes either yet), and a job
+  submitted as it always was. The cell's server takes both, as a shipped
+  server does, and a job
   waiting for its next attempt reads `queued`, so the item keeps polling and ends only at the
   job's final state.
 - the callback receiver: the cell's own, not a server. After each tick the server node has the
@@ -826,7 +826,7 @@ host absent) is not run.
 
 The retry family (`tests/retry.rs`, its scenarios in `tests/cell/retry.rs`) runs every
 invariant of `Invariant::ALL`, the three of retry and the callback among them, over the
-cell's server with retry and callbacks accepted (`Config::accepting_retry_and_callbacks`)
+cell's server, which takes retry and callbacks as a shipped server does,
 and its callback receiver. It covers no row of section 8 of the jobscheduler design: its
 rows are those of section 8 of `docs/design/job-retry-and-completion-callback.md`. A job
 that is refused or lost waits its first backoff (10 s and the job's own jitter) and then

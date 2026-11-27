@@ -22,7 +22,7 @@ use js_proto::v1::{
     UncordonHostRequest,
 };
 use js_types::Timestamp;
-use js_types::{CpuSeries, HostId};
+use js_types::{CpuSeries, HostId, MemorySeries};
 use js_usage::{AllocationId, DrainOutcome, EndedPage, EndedQuery, EndedReason, EndedRow};
 use rustls::crypto::ring::default_provider;
 use rustls::pki_types::pem::PemObject;
@@ -450,6 +450,7 @@ fn ended_row() -> EndedRow {
         cpu_series: CpuSeries::new(2, vec![0, 16, 40], 5_500_000, true),
         class: Default::default(),
         attempt: None,
+        memory_series: MemorySeries::new(2, vec![1, 700, 4096], 5_500_000, true),
     }
 }
 
@@ -536,7 +537,8 @@ async fn gateway_post(job: SocketAddr, path: &str) -> Reply {
 /// the untainted host answers it with `cleared` false over both, `RetireHost` of an id that
 /// never said hello answers `retired` false over both, `ListPools` and
 /// `ListProviders` name the pool `gpu`, `GetUsage` returns the ended booking by job and
-/// host with its CPU series, and a cordon of a host the registry does not hold is `NOT_FOUND` `unknown-host`
+/// host with its CPU series and its memory series (`memorySeries` over the gateway), and a
+/// cordon of a host the registry does not hold is `NOT_FOUND` `unknown-host`
 /// over gRPC and 500 `internal` over the gateway, whose error table does not name it yet. It catches a server that builds the job
 /// service without the fleet group's context, whose every fleet call answers `UNIMPLEMENTED`
 /// (`501`).
@@ -654,6 +656,19 @@ async fn the_fleet_calls_are_served_on_the_job_port() {
         ),
         (2, vec![0, 16, 40], 5_500_000, true)
     );
+    let memory = usage.records[0]
+        .memory_series
+        .clone()
+        .expect("a memory series");
+    assert_eq!(
+        (
+            memory.granularity_secs,
+            memory.points,
+            memory.run_usec,
+            memory.partial
+        ),
+        (2, vec![1, 700, 4096], 5_500_000, true)
+    );
     assert_eq!(usage.next_page_token, "");
     let reply = request(job, "GET", "/v1/usage", Some(TOKEN), None).await;
     assert_eq!(reply.status, 200, "{}", reply.body);
@@ -665,6 +680,15 @@ async fn the_fleet_calls_are_served_on_the_job_port() {
         json!({
             "granularitySecs": 2,
             "points": [0, 16, 40],
+            "runUsec": "5500000",
+            "partial": true
+        })
+    );
+    assert_eq!(
+        reply.json()["records"][0]["memorySeries"],
+        json!({
+            "granularitySecs": 2,
+            "points": [1, 700, 4096],
             "runUsec": "5500000",
             "partial": true
         })

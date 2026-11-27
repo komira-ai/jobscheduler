@@ -178,40 +178,6 @@ async fn without_the_job_service_the_seam_has_no_job_router_and_no_tables() {
     assert!(server.jobs().is_none());
 }
 
-/// Asserts that a server started from its flags (`--job-listen` given) refuses a job that asks
-/// for a completion callback, `400` with exactly `spec.callback: callback-not-enabled`, and
-/// records nothing: this release takes no callback, whatever the callback holds, until the
-/// release that accepts them. It catches a start that turns the refusal off.
-#[tokio::test]
-async fn a_server_from_its_flags_refuses_a_callback() {
-    let scratch = Scratch::new("jobs-seam-callback");
-    let (_clock, shared) = clock();
-    let server = InProcess::start(job_config(&scratch, true), shared).unwrap();
-    let router = server.job_router().expect("the job service is on");
-    let spec = json!({
-        "spec": {
-            "jobId": "job-cb",
-            "image": IMAGE,
-            "needs": { "cpuMillis": "1000", "memoryBytes": "1073741824" },
-            "wallLimitSeconds": "60",
-            "callback": {
-                "url": "https://hooks.example/done",
-                "signingKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-            },
-        }
-    });
-    let refused = routed(&router, "POST", "/v1/jobs", Some(TOKEN), Some(&spec)).await;
-    assert_eq!(refused.status, 400, "{:?}", refused.body);
-    assert_eq!(
-        refused.body["field"], "spec.callback: callback-not-enabled",
-        "{:?}",
-        refused.body
-    );
-    let jobs = server.jobs().expect("the job tables are open");
-    let id = JobId::parse("job-cb").unwrap();
-    assert_eq!(jobs.get_job(&id).unwrap(), None);
-}
-
 /// The body of a submit of job `id`, with the retry policy and the callback it is given.
 fn submit_body(id: &str, retry: bool, callback: Option<&str>) -> serde_json::Value {
     let mut spec = json!({
@@ -247,61 +213,49 @@ async fn served(config: Config) -> (InProcess, axum::Router, Arc<StoreClock>) {
     (server, router, store_clock)
 }
 
-/// Asserts that a server built from its flags refuses a job's retry policy, `400` with exactly
-/// `spec.retry: retry-not-enabled`, and its completion callback (`spec.callback:
-/// callback-not-enabled`), and that the same configuration passed through
-/// `accepting_retry_and_callbacks` answers `201` to each and keeps each; and that the call on a
-/// configuration with no job service changes nothing. It catches a lift that opens only one of
-/// the two, a flags' server that takes either, and a lift that turns a job service on.
+/// Asserts that a server built from its flags (`--job-listen` given), with nothing else set,
+/// answers `201` to a job with a retry policy, one with a completion callback and one with both,
+/// and keeps each; and that it refuses a callback whose URL names a loopback address, `400` with
+/// exactly `spec.callback.url: refused-address`, recording nothing. It catches a shipped
+/// server that still refuses either field, one that drops either on its way to the record,
+/// and one that takes a callback aimed at itself.
 #[tokio::test]
-async fn only_a_config_told_to_accept_takes_a_retry_policy_and_a_callback() {
+async fn a_server_from_its_flags_takes_a_retry_policy_and_a_callback() {
     let url = Some("https://hooks.example/done");
-    for accepting in [false, true] {
-        let scratch = Scratch::new("jobs-seam-accepting");
-        let config = job_config(&scratch, true);
-        let config = if accepting {
-            config.accepting_retry_and_callbacks()
-        } else {
-            config
-        };
-        let (server, router, _) = served(config).await;
-        let retry = submit_body("job-r", true, None);
-        let retried = routed(&router, "POST", "/v1/jobs", Some(TOKEN), Some(&retry)).await;
-        let callback = submit_body("job-c", false, url);
-        let called = routed(&router, "POST", "/v1/jobs", Some(TOKEN), Some(&callback)).await;
-        let jobs = server.jobs().expect("the job tables are open");
-        let (retry_id, callback_id) = (JobId::parse("job-r"), JobId::parse("job-c"));
-        let (retry_id, callback_id) = (retry_id.unwrap(), callback_id.unwrap());
-        if accepting {
-            assert_eq!(retried.status, 201, "{:?}", retried.body);
-            assert_eq!(called.status, 201, "{:?}", called.body);
-            let kept = jobs.get_job(&retry_id).unwrap().expect("the job is stored");
-            assert_eq!(kept.spec.retry.map(|policy| policy.max_attempts), Some(3));
-            let kept = jobs
-                .get_job(&callback_id)
-                .unwrap()
-                .expect("the job is stored");
-            assert_eq!(kept.spec.callback.map(|c| c.url).as_deref(), url);
-        } else {
-            assert_eq!(retried.status, 400, "{:?}", retried.body);
-            assert_eq!(retried.body["field"], "spec.retry: retry-not-enabled");
-            assert_eq!(called.status, 400, "{:?}", called.body);
-            assert_eq!(called.body["field"], "spec.callback: callback-not-enabled");
-            assert_eq!(jobs.get_job(&retry_id).unwrap(), None);
-            assert_eq!(jobs.get_job(&callback_id).unwrap(), None);
-        }
+    let scratch = Scratch::new("jobs-seam-accepting");
+    let (server, router, _) = served(job_config(&scratch, true)).await;
+    let jobs = server.jobs().expect("the job tables are open");
+    for (id, retry, callback) in [
+        ("job-r", true, None),
+        ("job-c", false, url),
+        ("job-rc", true, url),
+    ] {
+        let body = submit_body(id, retry, callback);
+        let taken = routed(&router, "POST", "/v1/jobs", Some(TOKEN), Some(&body)).await;
+        assert_eq!(taken.status, 201, "{id}: {:?}", taken.body);
+        let kept = jobs
+            .get_job(&JobId::parse(id).unwrap())
+            .unwrap()
+            .expect("the job is stored");
+        let attempts = kept.spec.retry.map(|policy| policy.max_attempts);
+        assert_eq!(attempts, retry.then_some(3), "{id}");
+        assert_eq!(
+            kept.spec.callback.map(|c| c.url).as_deref(),
+            callback,
+            "{id}"
+        );
     }
-
-    let scratch = Scratch::new("jobs-seam-accepting-off");
-    let (_clock, shared) = clock();
-    let config = job_config(&scratch, false).accepting_retry_and_callbacks();
-    let server = InProcess::start(config, shared).unwrap();
-    assert!(server.job_router().is_none());
-    assert!(server.jobs().is_none());
+    let inward = submit_body("job-in", true, Some("https://127.0.0.1/done"));
+    let refused = routed(&router, "POST", "/v1/jobs", Some(TOKEN), Some(&inward)).await;
+    assert_eq!(refused.status, 400, "{:?}", refused.body);
+    assert_eq!(refused.body["field"], "spec.callback.url: refused-address");
+    assert_eq!(
+        jobs.get_job(&JobId::parse("job-in").unwrap()).unwrap(),
+        None
+    );
 }
 
-/// Records job `id` through the router with a callback to `url`, as the accepting server takes
-/// it, and ends it by a cancel at the tables, so its callback is due.
+/// Records job `id` through the router with a callback to `url`, as the server takes it, and ends it by a cancel at the tables, so its callback is due.
 async fn ended_with_callback(server: &InProcess, router: &axum::Router, id: &str, url: &str) {
     let body = submit_body(id, false, Some(url));
     let made = routed(router, "POST", "/v1/jobs", Some(TOKEN), Some(&body)).await;
@@ -322,7 +276,7 @@ async fn ended_with_callback(server: &InProcess, router: &axum::Router, id: &str
 #[tokio::test]
 async fn deliver_callback_tries_one_due_callback_and_records_its_answer() {
     let scratch = Scratch::new("jobs-seam-deliver");
-    let config = job_config(&scratch, true).accepting_retry_and_callbacks();
+    let config = job_config(&scratch, true);
     let (server, router, clock) = served(config).await;
     let mut never = |_: &CallbackClaim, _: u64| -> CallbackAnswer { panic!("nothing is due") };
     assert!(!server.deliver_callback("sim-server", &mut never));
@@ -367,7 +321,7 @@ async fn deliver_callback_tries_one_due_callback_and_records_its_answer() {
 #[tokio::test]
 async fn deliver_callback_never_sends_a_url_the_build_refuses_and_claims_nothing_when_off() {
     let scratch = Scratch::new("jobs-seam-refused");
-    let config = job_config(&scratch, true).accepting_retry_and_callbacks();
+    let config = job_config(&scratch, true);
     let (server, router, _) = served(config).await;
     ended_with_callback(&server, &router, "job-ok", "https://hooks.example/done").await;
     let jobs = server.jobs().expect("the job tables are open");

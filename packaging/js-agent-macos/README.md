@@ -109,7 +109,13 @@ On a first install `prepare` finds no state directory and none of the directorie
 (the package is not installed yet), and makes them: `js-agent` mode 0755 and `update` mode 0700,
 root's. A Mac joins by hostkeeper's host certificate alone: the flags file names it (`--host-cert`,
 `--host-key`, hostkeeper's copy under `/var/lib/hostkeeper/identity`: `host.crt` and
-`host.key`), and `prepare` defers a first install whose flags file names none. The hook cordons and drains the agent; on a Mac the cutover, and the rollback, then replace
+`host.key`), and `prepare` defers a first install whose flags file names none. The hook cordons and drains the agent, unless the running agent and the staged one both
+print `native-handover` on the `stops:` line of `js-agent --version`, the agent's plist does not
+change and the flags file does not turn the VM backend on (`--vm-driver`): then it places no
+cordon and waits for no job, and the cutover writes the file `handover` in the agent's state root
+before it boots the agent out, so that the agent leaves its native jobs running under their
+supervisors and the new agent adopts them (the rollback does the same the other way). On a Mac
+the cutover, and the rollback, then replace
 the helper's daemon and the agent's from the release tree with `launchctl` while the agent
 is stopped, the helper before the agent. Between the two, the cutover boots the pf job out, runs
 the staged release's `js-mac-provision install --flags-file /etc/js-agent/flags` to its end (so

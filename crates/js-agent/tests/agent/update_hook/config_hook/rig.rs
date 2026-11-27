@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use js_agent::update_hook::config::{Done, Env, Params, Record, prepare};
-use js_agent::update_hook::{Clock, HostReading, Lease, LeaseError, PortError, UnitState, Units};
+use js_agent::update_hook::{
+    Clock, HostReading, Lease, LeaseError, PortError, StatFn, UnitState, Units,
+};
 use js_agent::update_hook::{Cordoned, Uncordoned};
 
 use crate::support::Scratch;
@@ -301,6 +303,12 @@ impl Rig {
 
     /// Runs `step` on the fakes.
     pub fn run(&self, step: impl FnOnce(&Env<'_>, &Params) -> Done) -> Done {
+        self.run_with(&as_root, step)
+    }
+
+    /// Runs `step` on the fakes, every directory of the state directory's path looked at
+    /// through `stat`.
+    pub fn run_with(&self, stat: &StatFn, step: impl FnOnce(&Env<'_>, &Params) -> Done) -> Done {
         let lease = |_: &Params| match self.flags.borrow().clone() {
             Some(why) => Err(why),
             None => Ok(Box::new(&self.lease) as Box<dyn Lease + '_>),
@@ -308,7 +316,7 @@ impl Rig {
         let env = Env {
             units: &self.units,
             clock: &self.clock,
-            stat: &as_root,
+            stat,
             lease: &lease,
             root: &self.root,
         };
@@ -317,7 +325,12 @@ impl Rig {
 
     /// Runs `prepare` of the release staged in [`Rig::staged`] on the fakes.
     pub fn prepare(&self) -> Done {
-        self.run(|env, params| prepare(env, params, &self.staged))
+        self.prepare_with(&as_root)
+    }
+
+    /// [`Rig::prepare`], the state directory's path looked at through `stat`.
+    pub fn prepare_with(&self, stat: &StatFn) -> Done {
+        self.run_with(stat, |env, params| prepare(env, params, &self.staged))
     }
 }
 

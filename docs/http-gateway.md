@@ -299,7 +299,13 @@ and start failure, its host once placed, whether a cancel was asked for, its tim
 (queued, placed, started, ended), and why it waits: its queue status (`queueStatus`, a code, a
 detail and `sinceMs`), its placement attempts (`attempts`), its newest events (`events`, at most
 32) and how many older ones were dropped (`droppedEvents`), as
-[design/queue-status.md](design/queue-status.md) describes. `ListJobs` shows each job the same
+[design/queue-status.md](design/queue-status.md) describes. For a job with a retry policy it also gives `attempt` (the current
+attempt, or the last that ran, from 1), `attemptHistory` (the attempts that ended, oldest first, the newest 256, with
+`droppedAttempts` counting the older ones) and `retryNotBeforeMs` while the job waits out a backoff: it reads `queued` with the queue
+status `WAITING_FOR_RETRY` ([design/job-retry-and-completion-callback.md](design/job-retry-and-completion-callback.md), section 3).
+For a job with a callback it gives `callbackStatus` (`state`, `tries`, `lastTryAtMs`, `lastFailure`, `deliveredAtMs` and
+`deadlineAtMs`; absent for a job with none), as section 5.5 of that page describes. `spec.callback.signingKey` is empty in every
+answer, `SubmitJob`'s included. `ListJobs` shows each job the same
 way. The host silence is not set yet.
 
 **The `expired` window.** An ended job keeps its record and result until its retention end
@@ -447,7 +453,16 @@ answer from what the commit returned; neither holds anything of its own outside 
    refused naming `spec.env`, with the wire's code: `spec.env: invalid-env`); the files are
    checked as a start's files are; the labels as a caller's labels are (`Labels::from_caller`);
    the history key (`historyKey`) is empty or 1 to 512 bytes of printable ASCII, kept as sent,
-   else refused naming `spec.historyKey: bad-length` or `spec.historyKey: not-printable-ascii`. The layers,
+   else refused naming `spec.historyKey: bad-length` or `spec.historyKey: not-printable-ascii`. The retry policy
+   (`spec.retry`, `docs/design/job-retry-and-completion-callback.md`, section 3.1) is any `maxAttempts` (0 or 1 is one
+   attempt; there is no ceiling); a `maxBackoffSeconds` below the effective initial wait (`initialBackoffSeconds`, 10 when absent,
+   cut to 3600) is refused naming `spec.retry.maxBackoffSeconds`. The completion callback (`spec.callback`, section 5.2 of that
+   page) has an `url` that is an https URL of printable ASCII with no space, a host, no userinfo, no fragment, a port of 1 to 65535
+   and at most 2048 bytes, else refused as `spec.callback.url: <code>` with the code `not-https`, `userinfo`, `fragment`, `no-host`,
+   `bad-port`, `not-printable-ascii` or `too-long`; a host that is an address literal must pass the server's address rule, else
+   `spec.callback.url: refused-address` (a host that is a name is resolved and judged when the callback is sent); and a `signingKey`
+   of 32 to 64 bytes (base64 in JSON), else `spec.callback.signingKey: bad-length`. The `deadlineSeconds` is not checked: absent
+   is 86400, and any value is cut to the job's retention end. These refusals repeat neither the URL nor the key. The layers,
    mounts and host ports (`docs/design/job-rootfs.md`, section 2.5) are at most 16, 64 and
    16; each layer and mount has one source this server knows (else refused naming
    `spec.layers[<i>]` or `spec.mounts[<i>]`, "no source this server knows"); a host path is
@@ -471,7 +486,8 @@ answer from what the commit returned; neither holds anything of its own outside 
    refusal never repeats a value of the request. Every check runs before the id is looked
    up, so a retry of a job the ceiling now refuses is refused, not answered.
 2. **Idempotency.** A job id the tables hold, with the same job (every field but the
-   priority, compared on the job as recorded), is answered with that job as it is now, in
+   priority, compared on the job as recorded; the retry policy and the callback are part of the job, the callback's key
+   compared by its SHA-256 digest, so a resubmit with another policy, URL or key is `job-id-conflict`), is answered with that job as it is now, in
    whatever state, with its own priority, and the same answer as a new job's (OK, 201): a
    retry cannot tell. A different job is `job-id-conflict`. An id is held for as long as its
    job's row is: until the sweep on the server's tick deletes it once its retention window has
@@ -582,7 +598,16 @@ generated paragraph above.
   second by second with its result: `granularity_secs` (the seconds each point covers: 1, 2, 4,
   and so on), `points` (the mean CPU of each span in sixteenths of a core, at most 128), `run_usec`
   (the run as the agent measured it) and `partial` (the series misses the start of the run), kept
-  as reported; it is absent for a job whose agent reported none, and for a lease's record. A page holds
+  as reported; it is absent for a job whose agent reported none, and for a lease's record. It
+  carries `memory_series` (`memorySeries`) the same way when the agent reported the job's
+  non-file memory second by second (an agent started with `--memory-series`): the same four
+  fields and the same bounds, each point the most the job held over its span in MiB rounded up.
+  Non-file memory is what the job's control group held that the kernel cannot drop: its
+  anonymous and kernel memory, its shared memory and tmpfs pages, and none of the page cache of
+  the files it read (on a Mac, the physical footprint of its processes). On Linux
+  `used.peak_memory_bytes` is the group's `memory.peak`, which counts that page cache too, so
+  it can be the larger. A client from
+  before the field skips it. A page holds
   `page_size` records (100 when 0, at most 1000); the filters apply before the page is cut.
   `next_page_token` names the page's last record, its key and which store it came from: the
   next page starts right after it, so no record is read twice or skipped while records are

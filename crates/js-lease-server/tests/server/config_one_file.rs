@@ -175,6 +175,8 @@ fn beside() -> Vec<(Vec<&'static str>, String)> {
         key("--cold-memory-bytes-on", "macos=4294967296"),
         key("--cold-cpu-millis-on", "macos=1000"),
         key("--placement-curves", "shadow"),
+        key("--curve-hosts", "h-1,h-2"),
+        key("--curve-max-wait-seconds", "45"),
         key("--tick", "3s"),
         key("--tls-cert", "/cert"),
         key("--tls-key", "/key"),

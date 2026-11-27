@@ -426,7 +426,7 @@ impl ServerSpec {
     ) -> Result<Config, StartupError> {
         let args = self.args_over(dir, at)?;
         let cli = Cli::try_parse_from(args).map_err(StartupError::because("command line"))?;
-        let config = Config::from_cli(cli)?.accepting_retry_and_callbacks();
+        let config = Config::from_cli(cli)?;
         Ok(config.with_monotonic(Arc::new(Virtual(clock.clone()))))
     }
 }
@@ -474,7 +474,6 @@ impl ServerSpec {
         let file = write(dir, "js.toml", &text, "--config")?;
         let shared = SharedClock::new(clock.clone());
         let config = elastic::config::read(Path::new(&file), clouds, shared)?;
-        let config = config.accepting_retry_and_callbacks();
         let config = config.with_monotonic(Arc::new(Virtual(clock.clone())));
         Ok(config.with_entropy(entropy))
     }

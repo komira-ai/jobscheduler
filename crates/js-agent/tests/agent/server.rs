@@ -125,6 +125,16 @@ fn args(scratch: &Scratch, boot: &str, extra: &[String], pool_text: &str) -> Vec
     all
 }
 
+/// The server's clock as the job store reads it: the time since the Unix epoch.
+struct StoreReads(ManualClock);
+
+impl js_state::Clock for StoreReads {
+    fn now(&self) -> js_state::StoreTime {
+        let millis = js_types::Clock::now(&self.0).millis();
+        js_state::StoreTime::from_duration(Duration::from_millis(millis))
+    }
+}
+
 fn launch(
     runtime: Arc<Runtime>,
     scratch: Scratch,
@@ -135,8 +145,14 @@ fn launch(
 ) -> Server {
     let argv = args(&scratch, boot, &extra, pool);
     let config = Config::from_cli(Cli::try_parse_from(argv).unwrap());
+    // The job store reads the server's clock too, so a host's row is heard, and judged live or
+    // silent, at the time the test moves the server to.
+    let reads = Arc::new(StoreReads(clock.clone()));
+    let config = config
+        .unwrap()
+        .with_job_sources(reads, Arc::new(js_jobs::RandomIds));
     let (ticks, ticker) = channel_ticker();
-    let started = start(config.unwrap(), SharedClock::new(clock.clone()), ticker);
+    let started = start(config, SharedClock::new(clock.clone()), ticker);
     let running = runtime.block_on(started).unwrap();
     Server {
         runtime,

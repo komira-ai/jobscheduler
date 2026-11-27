@@ -28,7 +28,7 @@ use crate::update_hook::step::{Life, life};
 use crate::update_hook::{Class, HostReading, Lease, LeaseError, StatFn};
 
 use super::Done;
-use super::kept::{self, KeptError};
+use super::kept::{self, KeptError, StateDir};
 use super::params::{HELLO_WAIT_SECS, Params};
 use super::reason::{Reason, Report};
 use super::record::{Held, Invalid, Record, StateError};
@@ -116,6 +116,15 @@ fn open_state(env: &Env<'_>, params: &Params) -> Result<(Held, Option<Record>), 
     Ok((held, record))
 }
 
+/// The state directory as `held` opened and checked it, for the kept copy: the copy is reached
+/// through its descriptor, never by `state_dir` again.
+fn state_of<'a>(held: &'a Held, params: &'a Params) -> StateDir<'a> {
+    StateDir {
+        fd: held.dir_fd(),
+        path: &params.state_dir,
+    }
+}
+
 fn save(held: &Held, record: &Record) -> Result<(), Done> {
     held.save(record).map_err(state_failure)
 }
@@ -163,7 +172,7 @@ fn prepare_run(env: &Env<'_>, params: &Params, staged: &Path) -> Result<Done, Do
     let unfinished = if loaded.is_some_and(|record| record.verified) {
         false
     } else {
-        kept::exists(&params.state_dir).map_err(keep_failure)?
+        kept::exists(state_of(&held, params)).map_err(keep_failure)?
     };
     let done = if unfinished {
         success_with(
@@ -171,7 +180,7 @@ fn prepare_run(env: &Env<'_>, params: &Params, staged: &Path) -> Result<Done, Do
         )
     } else {
         let paths = kept::placed(env.root, staged, &params.flags_file).map_err(keep_failure)?;
-        kept::keep(&params.state_dir, &paths).map_err(keep_failure)?;
+        kept::keep(state_of(&held, params), &paths).map_err(keep_failure)?;
         success()
     };
     held.delete().map_err(state_failure)?;
@@ -311,7 +320,7 @@ fn verify_run(env: &Env<'_>, params: &Params) -> Result<Done, Done> {
         ));
     };
     if record.verified {
-        return Ok(drop_kept(params));
+        return Ok(drop_kept(state_of(&held, params)));
     }
     let lease = (env.lease)(params).map_err(|why| failure(Reason::BadConfig, why))?;
     let bound_ms = params
@@ -357,13 +366,13 @@ fn verify_run(env: &Env<'_>, params: &Params) -> Result<Done, Done> {
     // After the observation, so that a mark means it was made.
     record.verified = true;
     save(&held, &record)?;
-    Ok(drop_kept(params))
+    Ok(drop_kept(state_of(&held, params)))
 }
 
 /// The end of a `verify` that succeeded: the kept copy is removed, as nothing rolls this update
 /// back now. A copy that cannot be removed does not fail the step; `cleanup` removes it.
-fn drop_kept(params: &Params) -> Done {
-    match kept::discard(&params.state_dir) {
+fn drop_kept(state: StateDir<'_>) -> Done {
+    match kept::discard(state) {
         Ok(()) => success(),
         Err(why) => success_with(format!("the kept copy is left for cleanup: {why}")),
     }
@@ -405,7 +414,7 @@ fn finish_rollback(
             kept::dir_of(&params.state_dir).display()
         )
     } else {
-        match kept::discard(&params.state_dir) {
+        match kept::discard(state_of(held, params)) {
             Ok(()) => String::new(),
             Err(why) => format!("; the kept copy could not be removed: {why}"),
         }
@@ -416,7 +425,7 @@ fn finish_rollback(
 
 fn rollback_run(env: &Env<'_>, params: &Params) -> Result<Done, Done> {
     let (held, loaded) = open_state(env, params)?;
-    let put = kept::put_back(&params.state_dir)
+    let put = kept::put_back(state_of(&held, params))
         .map_err(|why| environment(Reason::RestoreFailed, why.to_string()))?;
     let restored = put.as_ref().map(kept::PutBack::told).unwrap_or_default();
     if !loaded.is_some_and(|record| record.restart_begun) {
@@ -479,7 +488,7 @@ fn cleanup_run(env: &Env<'_>, params: &Params) -> Result<Done, Done> {
             "the record does not say that verify succeeded",
         ));
     }
-    kept::discard(&params.state_dir).map_err(keep_failure)?;
+    kept::discard(state_of(&held, params)).map_err(keep_failure)?;
     held.delete().map_err(state_failure)?;
     Ok(success())
 }

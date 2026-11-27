@@ -33,6 +33,9 @@ mod binding;
 #[path = "agent_api_rows_version_tests.rs"]
 mod version;
 
+#[path = "agent_api_rows_live_tests.rs"]
+mod live;
+
 /// Session secrets that start at a number of the server's own, so that two servers never
 /// make the same secret and a secret a server checks is the one the row's digest holds.
 struct Secrets(AtomicU64);

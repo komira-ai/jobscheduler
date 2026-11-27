@@ -105,6 +105,10 @@ pub struct Env<'a> {
     /// agents that both list `egress-handover` on their `stops:` line, and drains the host
     /// otherwise (see `prepare`).
     pub egress: bool,
+    /// The host's flags file turns the VM backend on (`--vm-driver`, a macOS flag), or cannot be
+    /// read: the agent never adopts a VM run, so an update on launchd drains the host (see
+    /// `prepare`). Always `false` in a Linux build, which has no such flag.
+    pub vms: bool,
     /// How a directory of the state directory's path is looked at (see
     /// [`fd_stat`](super::fd_stat)).
     pub stat: &'a dyn Fn(&Path, BorrowedFd<'_>) -> io::Result<DirStat>,

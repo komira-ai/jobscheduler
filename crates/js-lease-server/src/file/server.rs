@@ -1,19 +1,17 @@
 //! The `[server]` table of the configuration file: its keys and the client token file.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use js_elastic::SchedulerId;
 use js_jobs::Retention;
-use js_sched_placer::curves::{
-    CurveHosts, CurveSettings, DEFAULT_CURVE_MAX_WAIT, MAX_CURVE_MAX_WAIT_SECS,
-};
+use js_sched_placer::curves::CurveSettings;
 use js_sched_placer::sizes::{ColdCpuOn, ColdMemoryOn, ColdSize};
-use js_types::HostId;
 
 use super::{Load, Section};
+use crate::config::placement_curves::{hosts as curve_hosts, max_wait as curve_max_wait};
 use crate::config::{
     BootMode, CpuSlack, CurveSetting, DEFAULT_LEASE_SECS, DEFAULT_RECHECK_MS, DispatchTimes,
     FeedRetention, JOB_FEED_RETENTION_MUST, JOB_RETENTION_MUST, JobListen, Limits,
@@ -237,12 +235,7 @@ impl AgentKeys {
     /// Where the job service is served, when the file turns it on.
     pub(crate) fn job_listen(&self) -> Option<JobListen> {
         let flag = "server.job_listen";
-        self.job_listen.map(|addr| JobListen {
-            addr,
-            flag,
-            callback_refused: true,
-            retry_refused: true,
-        })
+        self.job_listen.map(|addr| JobListen { addr, flag })
     }
 
     /// The job store's setup when the file turns the job service on: named by its key, and
@@ -565,27 +558,42 @@ fn read_pack_limit(s: &mut Section) -> Result<Option<PackLimit>, StartupError> {
 
 /// `placement_curves`, the key of `--placement-curves`: `"off"`, `"shadow"` or `"on"`, read as
 /// the flag reads its text; absent, `off`. With it `curve_hosts`, an array of host ids (absent:
-/// every host), and `curve_max_wait_seconds`, a whole number from 0 to 300 (absent: 30), which
-/// have no flags, are read in every mode and act only under `on`.
+/// every host), and `curve_max_wait_seconds`, a whole number from 0 to 300 (absent: 30), the
+/// keys of `--curve-hosts` and `--curve-max-wait-seconds`, read and refused by the code the flags
+/// take ([`curve_hosts`] and [`curve_max_wait`]) in every mode, acting only under `on`.
 fn read_curves(s: &mut Section) -> Result<CurveSetting, StartupError> {
     let text = s.string("placement_curves")?;
     let read = text.as_deref().map(parse_curves).transpose();
     let mode = read.map_err(|said| s.fail("placement_curves", &said))?;
-    let mut named = BTreeSet::new();
-    for name in s.names("curve_hosts")?.unwrap_or_default() {
-        let id = HostId::new(&name).map_err(|err| s.fail("curve_hosts", &err.to_string()))?;
-        named.insert(id);
-    }
-    let most = MAX_CURVE_MAX_WAIT_SECS;
-    let default = DEFAULT_CURVE_MAX_WAIT.as_secs();
-    let wait = s.bounded("curve_max_wait_seconds", 0, most, default)?;
+    let names = read_strings(s, "curve_hosts")?;
+    let hosts = curve_hosts(names.as_deref()).map_err(|said| s.fail("curve_hosts", &said))?;
+    let wait = s.integer("curve_max_wait_seconds")?;
+    let max_wait = curve_max_wait(wait).map_err(|said| s.fail("curve_max_wait_seconds", &said))?;
     Ok(CurveSetting {
         mode: mode.unwrap_or_default(),
-        settings: CurveSettings {
-            hosts: CurveHosts::new(named),
-            max_wait: Duration::from_secs(wait),
-        },
+        settings: CurveSettings { hosts, max_wait },
     })
+}
+
+/// The array of strings `key` gives, unchecked but for its type; `None` when absent.
+fn read_strings(s: &mut Section, key: &str) -> Result<Option<Vec<String>>, StartupError> {
+    let Some(value) = s.map.remove(key) else {
+        return Ok(None);
+    };
+    let strings = match value {
+        toml::Value::Array(items) => items
+            .into_iter()
+            .map(|item| match item {
+                toml::Value::String(text) => Some(text),
+                _ => None,
+            })
+            .collect(),
+        _ => None,
+    };
+    match strings {
+        Some(strings) => Ok(Some(strings)),
+        None => Err(s.fail(key, "must be an array of strings")),
+    }
 }
 
 /// The least `cold_cpu_millis`: a quarter core, the least CPU the estimator books.

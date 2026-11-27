@@ -224,14 +224,15 @@ fn usage_errors_and_help() {
     let version = go(&["--version"]);
     assert_eq!(version.status(), code(0));
     assert!(version.out.starts_with("js-agent "), "{}", version.out);
-    // The line the node-setup script reads to know the crun runtime is wired, and on Linux the
-    // line the update hook reads to know the agent it stops can hand its runs over.
+    // The line the node-setup script reads to know the crun runtime is wired, and the line the
+    // update hook reads to know the agent it stops can hand its runs over (on a Mac, the native
+    // runs, which the hook hands over only between two agents that both list the word).
     let after: &[&str] = match cfg!(target_os = "linux") {
         true => &[
             "runtimes: docker crun",
             "stops: drain handover egress-handover in-place",
         ],
-        false => &["runtimes: native"],
+        false => &["runtimes: native", "stops: drain native-handover"],
     };
     let lines: Vec<&str> = version.out.lines().collect();
     assert_eq!(lines[1..], *after, "{}", version.out);
