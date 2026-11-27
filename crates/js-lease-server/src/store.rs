@@ -71,13 +71,14 @@ impl ServerStore {
             clock,
             target,
             names,
+            notices,
         } = setting;
         match target {
             WriterTarget::Sqlite(file) => {
                 let lock = WriterLock::acquire(&file).map_err(|refused| names.refuse(refused))?;
                 Self::sqlite(&file, lock, clock, names)
             }
-            WriterTarget::Postgres(config) => Self::postgres(&config, clock, names),
+            WriterTarget::Postgres(config) => Self::postgres(&config, (clock, notices), names),
         }
     }
 
@@ -98,6 +99,7 @@ impl ServerStore {
             clock,
             target,
             names,
+            notices,
         } = setting;
         match target {
             WriterTarget::Sqlite(file) => {
@@ -105,7 +107,7 @@ impl ServerStore {
                 blocking(move || Self::sqlite(&file, lock, clock, names)).await
             }
             WriterTarget::Postgres(config) => {
-                blocking(move || Self::postgres(&config, clock, names)).await
+                blocking(move || Self::postgres(&config, (clock, notices), names)).await
             }
         }
     }
@@ -127,10 +129,11 @@ impl ServerStore {
         })
     }
 
-    /// The Postgres database `config` names.
+    /// The Postgres database `config` names, listened to for the other servers' notices when
+    /// `notices`.
     fn postgres(
         config: &PostgresConfig,
-        clock: StoreClock,
+        (clock, notices): (StoreClock, bool),
         names: StoreNames,
     ) -> Result<Self, StartupError> {
         // The login first: a refusal of it is told by what to do about it, since the server's
@@ -146,7 +149,7 @@ impl ServerStore {
             store: Arc::new(store),
             names,
             locked: false,
-            shared: Some(config.clone()),
+            shared: notices.then(|| config.clone()),
         })
     }
 

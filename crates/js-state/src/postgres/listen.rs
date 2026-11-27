@@ -20,6 +20,10 @@ use super::conn::{Conn, Dial};
 use super::{Fail, PostgresConfig, PostgresStore};
 use crate::{Notice, StoreError};
 
+/// What is logged of notices that were not sent.
+const UNSENT: &str =
+    "the notices of a commit were not sent: their listeners read the rows at their next poll";
+
 /// The statement that sends notices: one `pg_notify` for each channel and payload, in order.
 const SEND: &str = "SELECT pg_notify(c, p) FROM unnest($1::text[], $2::text[]) AS n(c, p)";
 
@@ -30,11 +34,8 @@ impl PostgresStore {
         let payloads: Vec<&str> = notices.iter().map(|n| n.payload.as_str()).collect();
         let sent = self.read(|s| s.client.execute(SEND, &[&channels, &payloads]));
         if let Err(error) = sent {
-            tracing::warn!(
-                %error,
-                notices = notices.len(),
-                "the notices of a commit were not sent: their listeners read the rows at their next poll"
-            );
+            let unsent = notices.len();
+            tracing::warn!(%error, unsent, "{UNSENT}");
         }
     }
 }
