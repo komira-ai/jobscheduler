@@ -92,6 +92,12 @@ pub trait Providers {
     /// [`ProviderCall::key`] is already out to it, and answers what is known now. A call
     /// whose answer is handed over is forgotten: asking it again sends it again. A provider
     /// this agent was not given answers [`ProviderAnswer::Unavailable`].
+    ///
+    /// When a source's [`ProviderCall::Prepare`] succeeds, an implementation may send that
+    /// source's [`ProviderCall::Mount`] itself, after the `Prepare`'s answer is in; asking for
+    /// that `Mount` then finds it out or answered, as if it had been asked. A
+    /// [`ProviderCall::Release`] of the source ends that: a `Prepare` still out is then not
+    /// followed.
     fn ask(&mut self, provider: &str, call: &ProviderCall) -> ProviderAnswer;
 
     /// Gives the providers the [`Wake`](super::Wake) to ring when a call's answer is in, so

@@ -34,6 +34,8 @@ js-agent = { path = "../js-agent" }
 # `gen-job-surface` renders the route table of docs/http-gateway.md from the gateway's routes,
 # and its served paragraph from the calls the lease server serves.
 js-api-gateway = { path = "../js-api-gateway" }
+# `agent-handover-check` runs the check of this crate (docs/runbooks/agent-handover-check.md).
+js-handover-check = { path = "../js-handover-check" }
 # `release smoke-bundle`: the smoke bundle packed and pushed with `js-bundle`'s own commands,
 # pulled back with the agent's registry client and extracted with the agent's extractor.
 js-bundle = { path = "../js-bundle" }

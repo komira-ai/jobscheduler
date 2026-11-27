@@ -99,15 +99,14 @@ pub(super) fn tail_of(drain: &[DrainCost], worker: &WorkerId) -> Option<u64> {
 
 impl Scheduler {
     /// This scheduler, placing work on a held worker as `backfill` allows: a worker held
-    /// for a whole-machine request or an action that owns its worker (with whole-node
-    /// settings, [`Scheduler::with_whole_node`]), or for a blocked head, takes an operation
-    /// after the holder in queue order only if the operation ends, with a minute to spare,
-    /// by the holder's start time there. The start time is taken by the pick that holds the
+    /// for a whole-machine request or an action that owns its worker, or for a blocked
+    /// head, with or without [`Scheduler::with_whole_node`], takes an operation after the
+    /// holder in queue order only if the operation ends, with a minute to spare, by the
+    /// holder's start time there. The start time is taken by the pick that holds the
     /// worker: the end of the worker's tail for a whole-machine request or an owner action,
     /// the first instant the head's charge fits for a head. A hold made again on the same
-    /// worker keeps the earlier start, so work placed since never moves it later. A hold
-    /// made without whole-node settings has no start time, and nothing backfills there.
-    /// Work ahead of the holder in queue order is placed as before. The default
+    /// worker keeps the earlier start, so work placed since never moves it later. Work
+    /// ahead of the holder in queue order is placed as before. The default
     /// ([`Backfill::default`]) places nothing on a held worker.
     #[must_use]
     pub fn with_backfill(mut self, backfill: Backfill) -> Self {
