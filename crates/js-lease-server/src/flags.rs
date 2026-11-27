@@ -11,7 +11,7 @@ use crate::config::Cli;
 use crate::error::StartupError;
 
 /// The flags that mean something only beside `--agent-pool-config`.
-const NEED_AGENT_POOL: [&str; 15] = [
+const NEED_AGENT_POOL: [&str; 17] = [
     "--agent-hello-burst",
     "--agent-hello-interval",
     "--require-host-credential",
@@ -22,6 +22,8 @@ const NEED_AGENT_POOL: [&str; 15] = [
     "--backfill-bounds-enforced",
     "--backfill-margin",
     "--placement-curves",
+    "--curve-hosts",
+    "--curve-max-wait-seconds",
     "--cold-cpu-millis",
     "--cold-memory-bytes",
     "--cold-memory-bytes-on",

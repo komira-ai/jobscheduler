@@ -18,6 +18,8 @@
 --cold-memory-bytes-on default=none required=false
 --config default=none required=false
 --cpu-slack default=none required=false
+--curve-hosts default=none required=false
+--curve-max-wait-seconds default=none required=false
 --drain-hold default=15s required=false
 --drain-timeout default=10s required=false
 --estimate-feed default=none required=false values=true|false

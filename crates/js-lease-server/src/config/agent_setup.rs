@@ -6,7 +6,6 @@ use std::path::Path;
 use std::sync::Arc;
 
 use js_registry::PoolConfig;
-use js_sched_placer::curves::CurveSettings;
 use js_sched_placer::sizes::{ColdCpuOn, ColdMemoryOn, ColdSize};
 use js_types::ProviderId;
 
@@ -49,8 +48,8 @@ pub(crate) struct AgentSetup {
     /// operating system they name, in place of `cold`'s.
     pub(crate) cold_on: ColdOn,
     /// `--placement-curves`, or `server.placement_curves`: whether the engine learns profiles
-    /// and books by them, with `server.curve_hosts` and `server.curve_max_wait_seconds`
-    /// (no flags) for the mode `on`.
+    /// and books by them, with `--curve-hosts` and `--curve-max-wait-seconds` (or
+    /// `server.curve_hosts` and `server.curve_max_wait_seconds`) for the mode `on`.
     pub(crate) curves: CurveSetting,
     /// `--backfill-bounds-enforced` and `--backfill-margin`, or `server.backfill_bounds_enforced`
     /// and `server.backfill_margin`, with the most a job's wall limit may be as the ceiling:
@@ -195,10 +194,7 @@ pub(super) fn agents(cli: &Cli, clients: &LiveClients) -> Result<Box<AgentSetup>
             memory_bytes: cli.cold_memory_bytes,
         },
         cold_on,
-        curves: CurveSetting {
-            mode: cli.placement_curves,
-            settings: CurveSettings::default(),
-        },
+        curves: super::placement_curves::of_flags(cli)?,
         backfill: BackfillSetting::of_flags(
             cli.backfill,
             super::job_wall::or_default(cli.max_job_wall),

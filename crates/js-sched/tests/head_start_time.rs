@@ -55,7 +55,8 @@ fn two_loaded(curves: Option<std::sync::Arc<Curves>>, booked: u64, charge: u64) 
     fill(configured(r), booked, charge)
 }
 
-/// As [`two_loaded`], with no whole-node settings: the head is held as it always was.
+/// As [`two_loaded`], with no whole-node settings: the head is held by start time all the
+/// same.
 fn two_loaded_off(booked: u64, charge: u64) -> Rig {
     fill(Rig::on(), booked, charge)
 }
@@ -302,16 +303,42 @@ fn with_settings_a_head_ahead_of_an_owner_action_takes_the_pools_hold() {
     assert_eq!(r.s.reservation(own), None);
 }
 
-/// Catches (off is main): a shared slot without settings: an owner-worker action and a
-/// blocked head each hold a worker, as before.
+/// Catches (without whole-node settings): an owner-worker action and a blocked head both
+/// holding a worker of one pool: the pool has one hold per round, so the owner-worker
+/// action, earlier in queue order, holds and the head holds nothing, as with settings.
 #[test]
-fn without_settings_an_owner_action_and_a_head_each_hold_a_worker() {
+fn without_settings_an_owner_action_ahead_of_a_head_takes_the_pools_hold() {
     let mut r = two_loaded_off(1_000, 1_000);
     let own = owner(&mut r);
     let op = head(&mut r, 6_000);
     r.round(1_000);
     assert!(r.s.reservation(own).is_some());
+    assert_eq!(r.s.head_hold(op), None);
+}
+
+/// Catches (without whole-node settings): as above in the other order: the head, earlier,
+/// holds; the owner-worker action holds nothing.
+#[test]
+fn without_settings_a_head_ahead_of_an_owner_action_takes_the_pools_hold() {
+    let mut r = two_loaded_off(1_000, 1_000);
+    let op = head(&mut r, 6_000);
+    let own = owner(&mut r);
+    r.round(1_000);
     assert!(r.s.head_hold(op).is_some());
+    assert_eq!(r.s.reservation(own), None);
+}
+
+/// Catches (without whole-node settings): the hold by the binding ratio, which the two
+/// workers tie on (so the first by name, `a`), instead of by when the head's 6 cores free
+/// up: `a` frees them at 200 s, `b` at 100 s. The head holds `b`.
+#[test]
+fn without_settings_the_head_holds_the_worker_where_its_cores_free_up_first() {
+    let mut r = two_loaded_off(1_000, 1_000);
+    walls(&mut r, 0, [Some(200); 4]);
+    walls(&mut r, 4, [Some(100), Some(100), Some(900), Some(900)]);
+    let op = head(&mut r, 6_000);
+    r.round(1_000);
+    assert_eq!(r.s.head_hold(op), Some(&w("b")));
 }
 
 /// Eight actions of 4 cores each, placed on `worker` alone; their starts.
