@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 
 use js_jobs::interfere::Read;
 use js_jobs::{Booked, EndReason, JobEnd, JobId, JobRecord, NewJob, Output, SizedFrom};
+use js_state::Clock as _;
 use js_types::Labels;
 
 use super::super::tests::{
