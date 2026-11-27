@@ -1,7 +1,10 @@
-//! `agent-handover-check` (docs/runbooks/agent-handover-check.md): watches named hosts through
+//! The agent hand-over check (docs/runbooks/agent-handover-check.md): watches named hosts through
 //! the job service while a js-agent release rolls onto them, and says whether each one handed
 //! its running jobs to the new agent instead of draining. It is read-only: it runs only
 //! `js host list`, `js job list` and `js job get`, and changes nothing.
+//!
+//! It runs as the program `js-handover-check` ([`main`]), which the build farm builds on its own,
+//! and as the verb `cargo xtask agent-handover-check` (xtask's `handover`, this crate).
 //!
 //! It reads the hosts and the jobs running on them once, then reads the hosts every
 //! `--interval-secs`, at most `--samples` times, until every named host lists an agent version
@@ -20,10 +23,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use clap::Args as ClapArgs;
+use std::process::ExitCode;
+
+use clap::{Args as ClapArgs, Parser};
 use serde::Deserialize;
 
-/// The flags of the verb.
+/// The flags of the check, the same for the program and the verb.
 #[derive(Debug, ClapArgs)]
 pub struct Args {
     /// The job service's address, as `js --server` takes it.
@@ -50,6 +55,54 @@ pub struct Args {
     /// The `js` program.
     #[arg(long, default_value = "js")]
     pub js: PathBuf,
+}
+
+/// The program `js-handover-check`: the check's flags and nothing else.
+#[derive(Debug, Parser)]
+#[command(
+    name = "js-handover-check",
+    about = "Watch hosts, read-only, while a js-agent release rolls onto them, and fail one that did not hand its running jobs to the new agent"
+)]
+struct Cli {
+    #[command(flatten)]
+    args: Args,
+}
+
+/// The program `js-handover-check`: [`run`] with the flags given, its outcome reported by
+/// [`report`].
+#[must_use]
+pub fn main() -> ExitCode {
+    let cli = Cli::parse();
+    report(
+        &run(&cli.args),
+        &mut std::io::stdout().lock(),
+        &mut std::io::stderr().lock(),
+    )
+}
+
+/// Reports `result`: a pass is its line on `out` and status 0; a usage error its reason on `err`
+/// and status 2; any other end its reason on `err` and status 1. Each line on `err` begins with
+/// `js-handover-check: `.
+pub fn report(
+    result: &Result<String, Error>,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> ExitCode {
+    // A stream that cannot be written leaves the status to say how the check ended.
+    match result {
+        Ok(line) => {
+            let _ = writeln!(out, "{line}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            let _ = writeln!(err, "js-handover-check: {e}");
+            if matches!(e, Error::Usage(_)) {
+                ExitCode::from(2)
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+    }
 }
 
 /// Why the check did not pass.
@@ -239,6 +292,9 @@ impl Seen {
     }
 }
 
+/// The most calls of `js` for one page of a job listing: the first and two more.
+const PAGE_TRIES: u32 = 3;
+
 /// `text` or `-` when it is empty.
 fn or_dash(text: &str) -> &str {
     if text.is_empty() { "-" } else { text }
@@ -266,8 +322,16 @@ impl Reader<'_, '_> {
         Ok((text, hosts))
     }
 
-    /// Every job in one of `states` on a named host, every page.
-    fn jobs_in(&mut self, states: &[&str]) -> Result<Vec<Job>, Error> {
+    /// Every job in one of `states` on a named host, every page. A page whose `js` call fails is
+    /// asked for again, after `sleep(pause)`, up to [`PAGE_TRIES`] calls in all: a listing of
+    /// the jobs that ended badly reads the service's whole history, page by page, and one
+    /// dropped connection among its pages would otherwise end the check with no verdict.
+    fn jobs_in(
+        &mut self,
+        states: &[&str],
+        sleep: &mut dyn FnMut(Duration),
+        pause: Duration,
+    ) -> Result<Vec<Job>, Error> {
         let what = format!("the jobs {}", states.join(", "));
         let mut found = Vec::new();
         let mut token = String::new();
@@ -284,7 +348,17 @@ impl Reader<'_, '_> {
                 what: what.clone(),
                 why,
             };
-            let text = self.call(&verb).map_err(read)?;
+            let mut tries = 1;
+            let text = loop {
+                match self.call(&verb) {
+                    Ok(text) => break text,
+                    Err(_) if tries < PAGE_TRIES => {
+                        tries += 1;
+                        sleep(pause);
+                    }
+                    Err(why) => return Err(read(why)),
+                }
+            };
             let page: Jobs = serde_json::from_str(&text).map_err(|e| read(e.to_string()))?;
             found.extend(
                 page.jobs
@@ -396,6 +470,7 @@ pub fn check(
     if let Some(ca) = &args.ca_cert {
         flags.extend(["--ca-cert".to_owned(), ca.display().to_string()]);
     }
+    let pause = Duration::from_secs(args.interval_secs);
     let mut reader = Reader {
         js,
         flags,
@@ -408,7 +483,7 @@ pub fn check(
         why,
     })?;
     put(dir, "hosts-before.json", &text)?;
-    let before = reader.jobs_in(&["running"])?;
+    let before = reader.jobs_in(&["running"], sleep, pause)?;
     let mut seen = Vec::new();
     for name in &args.hosts {
         let host = listed
@@ -487,7 +562,7 @@ pub fn check(
             }
         }
         if reading < args.samples {
-            sleep(Duration::from_secs(args.interval_secs));
+            sleep(pause);
         }
     }
     put(dir, "timeline.tsv", &timeline)?;
@@ -499,7 +574,7 @@ pub fn check(
         ),
     )?;
 
-    let after = reader.jobs_in(&["running"])?;
+    let after = reader.jobs_in(&["running"], sleep, pause)?;
     let mut outcomes = Vec::new();
     for job in &before {
         let kept = after
@@ -518,7 +593,7 @@ pub fn check(
         .collect();
     put(dir, "outcomes.tsv", &tsv)?;
     let badly: Vec<Job> = reader
-        .jobs_in(&["lost", "failed", "failed-to-start"])?
+        .jobs_in(&["lost", "failed", "failed-to-start"], sleep, pause)?
         .into_iter()
         .filter(|j| j.ended_ms() >= now_ms)
         .collect();
