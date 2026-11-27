@@ -79,7 +79,7 @@ pub(crate) fn from_server(
 ) -> Option<JobApi> {
     let agents = state.agents();
     let jobs = agents.jobs.clone()?;
-    let silence: Arc<dyn read::Silence> = Arc::new(agents.registry.clone());
+    let silence = read::silence::Silence::of(agents.registry.clone());
     let read = read::Ctx::default().with_silence(silence);
     let admission = JobAdmission::new(
         state.admit().clone(),

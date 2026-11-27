@@ -6,6 +6,12 @@
 //! pause has passed: the ask it is handed to sends the call again at once. Each call sent
 //! has a number of its own, so the answer and the pause's end of a call sent earlier never
 //! touch the entry of one sent after it.
+//!
+//! A call may name the call that follows it ([`Flights::finish`]'s `then`): when it succeeds,
+//! the following call is marked out in the same turn of the lock, and the task that carried
+//! the first sends it. A source's `Mount` follows its `Prepare` so. [`Flights::forget`] drops
+//! the entries of calls no one will ask for again (a released source's), so a call out then is
+//! neither handed over nor followed.
 
 use std::collections::BTreeMap;
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
@@ -100,15 +106,40 @@ impl Flights {
     }
 
     /// Records the answer of the call `sent` of `key` and wakes whoever waits for it. The
-    /// answer of a call whose entry is no longer out for it (a later call was sent) is
-    /// dropped: the later call's answer is the one handed over.
-    pub(super) fn finish(&self, key: Key, sent: u64, answer: ProviderAnswer) {
+    /// answer of a call whose entry is no longer out for it (a later call was sent, or it was
+    /// forgotten) is dropped: the later call's answer is the one handed over.
+    ///
+    /// `then` names the call that follows this one when it succeeds. It is marked out, and
+    /// its number answered for the caller to send it, when the answer is recorded and is a
+    /// success, and `then` has no entry (a call of its own is not replaced).
+    pub(super) fn finish(
+        &self,
+        key: Key,
+        sent: u64,
+        answer: ProviderAnswer,
+        then: Option<Key>,
+    ) -> Option<u64> {
         let mut table = self.lock();
+        let mut follow = None;
         if matches!(table.slots.get(&key), Some(Slot::Out(number)) if *number == sent) {
+            let succeeded = matches!(answer, ProviderAnswer::Done(_));
             table.slots.insert(key, Slot::Answered(answer, sent));
+            follow = then
+                .filter(|next| succeeded && !table.slots.contains_key(next))
+                .map(|next| table.send(next));
         }
         drop(table);
         self.changed.notify_all();
+        follow
+    }
+
+    /// Drops the entries of `keys`, whatever their state: a call out of one of them is then
+    /// neither handed over nor followed when it answers, and asking it again sends it again.
+    pub(super) fn forget(&self, keys: &[Key]) {
+        let mut table = self.lock();
+        for key in keys {
+            table.slots.remove(key);
+        }
     }
 
     /// Blocks until the answer of `key` is in, for at most `guard`; whether it is.
