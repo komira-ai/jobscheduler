@@ -18,6 +18,7 @@ use js_jobs::{JobId, JobRecord, JobStore, RandomIds, ResultReason};
 use js_sched_placer::sizes::JobSizes;
 use js_state::sqlite::{Options, SqliteStore};
 use js_state::{Clock, Cond, Store as _, StoreTime, SystemClock, Txn};
+use js_types::CpuSeries;
 
 use crate::trace::End;
 
@@ -52,6 +53,8 @@ pub struct Facts {
     pub started_ms: Option<u64>,
     /// When it ended.
     pub ended_ms: Option<u64>,
+    /// Its CPU over its run, as its host recorded it.
+    pub cpu_series: Option<CpuSeries>,
 }
 
 /// Why the rows do not read.
@@ -163,5 +166,6 @@ fn facts_of(job: &JobRecord) -> Facts {
         placed_ms: job.placed_at.map(ms),
         started_ms: job.started_at.map(ms),
         ended_ms: job.ended_at.map(ms),
+        cpu_series: result.and_then(|result| result.cpu_series.clone()),
     }
 }

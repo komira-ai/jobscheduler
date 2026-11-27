@@ -3,8 +3,10 @@
 //! written by `result_line` in the agent's `worker/replies.rs`), and made anonymous.
 //!
 //! A job's store row (`crate::rows`), when the export holds it, gives its times (submitted,
-//! placed, started, ended, by the store's clock), its estimator keys, its end, its CPU, peak and
-//! contention, and these win over the record's and the result line's.
+//! placed, started, ended, by the store's clock), its estimator keys, its end, its CPU, peak,
+//! contention and CPU series, and these win over the record's and the result line's. A record
+//! of a release that lists a job's CPU series (`cpuSeries`) gives it too; one of a release
+//! before, or a series that is not well formed, gives none.
 //!
 //! A record becomes a job of the trace when it ran (it has a run time and a usage), on a host
 //! that holds at least a hundredth of the records (a host of another kind that ran a few test
@@ -18,6 +20,7 @@
 
 use std::collections::BTreeMap;
 
+use js_types::CpuSeries;
 use serde_json::Value;
 
 use crate::rows::Facts;
@@ -124,6 +127,7 @@ struct Record {
     booked_bytes: u64,
     cpu_usec: Option<u64>,
     peak_bytes: Option<u64>,
+    cpu_series: Option<CpuSeries>,
 }
 
 /// The number at `path` in `value`: a JSON number, or a string of one (as proto3 JSON writes
@@ -133,6 +137,31 @@ fn number(value: &Value, path: &[&str]) -> Option<u64> {
     value
         .as_u64()
         .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+}
+
+/// The CPU series of a record, when it holds a well-formed one: its points (each a number of 16
+/// bits), its granularity, its run (absent read as 0) and whether it is partial (absent read as
+/// whole), as proto3 JSON leaves a default out.
+fn series(value: &Value) -> Option<CpuSeries> {
+    let series = value.get("cpuSeries")?;
+    let points = match series.get("points") {
+        Some(points) => points
+            .as_array()?
+            .iter()
+            .map(|point| point.as_u64().and_then(|point| u16::try_from(point).ok()))
+            .collect::<Option<Vec<u16>>>()?,
+        None => Vec::new(),
+    };
+    let granularity = number(series, &["granularitySecs"])?;
+    CpuSeries::new(
+        u32::try_from(granularity).ok()?,
+        points,
+        number(series, &["runUsec"]).unwrap_or(0),
+        series
+            .get("partial")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    )
 }
 
 /// The record of one line.
@@ -149,6 +178,7 @@ fn record(line: &str) -> Result<Record, &'static str> {
         booked_bytes: number(&value, &["booked", "memoryBytes"]).unwrap_or(0),
         cpu_usec: number(&value, &["used", "cpuUsec"]),
         peak_bytes: number(&value, &["used", "peakMemoryBytes"]),
+        cpu_series: series(&value),
     })
 }
 
@@ -169,6 +199,8 @@ pub struct Converted {
     pub with_result: usize,
     /// Jobs of the trace that had a store row.
     pub with_row: usize,
+    /// Jobs of the trace that carry a CPU series.
+    pub with_series: usize,
 }
 
 /// When a job was submitted, how long it waited for a host and to start, how long it ran,
@@ -313,6 +345,10 @@ pub fn convert(
         let pressure = row
             .and_then(|row| row.pressure_usec)
             .or(result.pressure_usec);
+        let cpu_series = row
+            .and_then(|row| row.cpu_series.clone())
+            .or_else(|| record.cpu_series.clone());
+        converted.with_series += usize::from(cpu_series.is_some());
         converted.jobs.push(Job {
             arrive_ms: times.arrive - first,
             wait_ms: times.wait,
@@ -329,6 +365,7 @@ pub fn convert(
             class,
             fallback,
             client,
+            cpu_series,
         });
     }
     Ok(converted)
@@ -453,6 +490,7 @@ mod tests {
             class: 1,
             fallback: None,
             client: 0,
+            cpu_series: None,
         };
         let c = b.clone();
         let a = Job {
@@ -519,6 +557,7 @@ mod tests {
             placed_ms: Some(2000),
             started_ms: Some(4500),
             ended_ms: Some(9000),
+            cpu_series: None,
         };
         let results = BTreeMap::from([(
             "a".to_owned(),
@@ -550,6 +589,7 @@ mod tests {
                 class: 1,
                 fallback: Some(2),
                 client: 3,
+                cpu_series: None,
             }]
         );
         // The cut is at the row's start; a row not yet placed falls back to the record.
@@ -573,6 +613,81 @@ mod tests {
             (0, 0, 4000)
         );
         assert_eq!(converted.jobs[0].fallback, None);
+    }
+
+    /// `line` with `series` (a JSON object) as its `cpuSeries`.
+    fn with_series(line: &str, series: &str) -> String {
+        format!("{},\"cpuSeries\":{series}}}", &line[..line.len() - 1])
+    }
+
+    /// Asserts that a record's CPU series reaches its job in the trace: a well-formed one as
+    /// listed (its run in a string, as proto3 JSON writes a 64-bit number), one whose partial and
+    /// run proto3 JSON left out read as whole and 0, and none for a record of the release before
+    /// (no `cpuSeries`) or a series that is not well formed (points not an array, a point that is
+    /// not a number or is past 16 bits, no granularity or one that is not a power of two); and
+    /// that a store row's series wins over its record's. Catches a series dropped on the way to
+    /// the trace, a malformed one taken as recorded, and a record's series that hides its row's.
+    #[test]
+    fn a_records_cpu_series_reaches_its_job_and_a_rows_wins() {
+        let listed = "{\"granularitySecs\":2,\"points\":[0,16,40],\"runUsec\":\"5500000\",\
+                      \"partial\":true}";
+        let bare = "{\"granularitySecs\":4,\"points\":[7]}";
+        let malformed = [
+            "{\"granularitySecs\":2,\"points\":16}",
+            "{\"granularitySecs\":2,\"points\":[\"x\"]}",
+            "{\"granularitySecs\":2,\"points\":[65536]}",
+            "{\"points\":[1]}",
+            "{\"granularitySecs\":3,\"points\":[1]}",
+        ];
+        let mut usage = vec![
+            with_series(&line("a", "node-1", 10_000, 4000, 0, 1), listed),
+            with_series(&line("b", "node-1", 10_001, 4000, 0, 1), bare),
+            line("c", "node-1", 10_002, 4000, 0, 1),
+            with_series(
+                &line("d", "node-1", 10_003, 4000, 0, 1),
+                "{\"granularitySecs\":1}",
+            ),
+        ];
+        for (n, series) in malformed.iter().enumerate() {
+            let job = format!("m{n}");
+            usage.push(with_series(&line(&job, "node-1", 10_010, 4000, 0, 1), series));
+        }
+        let converted = convert(&usage.join("\n"), &BTreeMap::new(), &BTreeMap::new(), 0).unwrap();
+        let series: Vec<Option<CpuSeries>> = converted
+            .jobs
+            .iter()
+            .map(|job| job.cpu_series.clone())
+            .collect();
+        let mut expected = vec![
+            CpuSeries::new(2, vec![0, 16, 40], 5_500_000, true),
+            CpuSeries::new(4, vec![7], 0, false),
+            None,
+            CpuSeries::new(1, Vec::new(), 0, false),
+        ];
+        expected.extend([None, None, None, None, None]);
+        assert_eq!(series, expected);
+        assert_eq!(converted.with_series, 3);
+        // A row's series wins over its record's.
+        let row = Facts {
+            class: "K".to_owned(),
+            fallback: None,
+            client: "C".to_owned(),
+            end: End::Ok,
+            cpu_usec: None,
+            peak_milli: None,
+            pressure_usec: None,
+            queued_ms: 1000,
+            placed_ms: Some(2000),
+            started_ms: Some(4500),
+            ended_ms: Some(9000),
+            cpu_series: CpuSeries::new(8, vec![1, 2], 9_000_000, false),
+        };
+        let rows = BTreeMap::from([("a".to_owned(), row)]);
+        let converted = convert(&usage[0], &BTreeMap::new(), &rows, 0).unwrap();
+        assert_eq!(
+            converted.jobs[0].cpu_series,
+            CpuSeries::new(8, vec![1, 2], 9_000_000, false)
+        );
     }
 
     #[test]

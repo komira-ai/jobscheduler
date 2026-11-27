@@ -9,6 +9,13 @@
 //! every figure the replay reports is given under both. Without a recorded peak both are
 //! [`Shape::Flat`]. [`Shape::ClassBurst`] is the burst at the same point of every run of a
 //! class: the shaped class the curve mode books by its curve, which a test replays.
+//!
+//! An agent run with `--cpu-series` records the curve, and a trace carries it
+//! ([`crate::trace::Job::cpu_series`]): [`Shape::Recorded`] runs each job as its series says
+//! ([`recorded`]), and a job whose series cannot stand for its run as the burst.
+
+use js_sizing::{RunSeries, series_agrees};
+use js_types::CpuSeries;
 
 /// The window the agent measures a run's peak over, in milliseconds (`PeakWindow` in the
 /// agent's `crun/peak.rs`).
@@ -35,6 +42,9 @@ pub enum Shape {
     /// [`Shape::Burst`], with the burst at the same point of every run of its class (where
     /// the other shapes place it by the run).
     ClassBurst,
+    /// The run's recorded CPU series ([`recorded`]); [`Shape::Burst`] for a run whose series is
+    /// missing or cannot stand for it.
+    Recorded,
 }
 
 impl Shape {
@@ -46,6 +56,7 @@ impl Shape {
             Shape::Blip => "blip",
             Shape::Burst => "burst",
             Shape::ClassBurst => "class burst",
+            Shape::Recorded => "recorded",
         }
     }
 }
@@ -99,7 +110,7 @@ pub fn phases(
     };
     match shape {
         Shape::Flat => flat,
-        Shape::Burst | Shape::ClassBurst => burst(),
+        Shape::Burst | Shape::ClassBurst | Shape::Recorded => burst(),
         Shape::Blip => {
             let in_window = peak.saturating_mul(PEAK_WINDOW_MS);
             if wall <= PEAK_WINDOW_MS || in_window > total {
@@ -118,6 +129,44 @@ pub fn phases(
             ])
         }
     }
+}
+
+/// Whether `series` can stand for a run that used `cpu_ms` of CPU, as the job service judges a
+/// run's series before its class learns it: it does not miss the run's start, and its total
+/// agrees with the CPU time ([`series_agrees`]).
+#[must_use]
+pub fn usable(series: &CpuSeries, cpu_ms: u64) -> bool {
+    let points: Vec<u32> = series.points.iter().map(|point| u32::from(*point)).collect();
+    let run = RunSeries {
+        granularity_secs: series.granularity_secs,
+        points: &points,
+        run_usec: series.run_usec,
+    };
+    !series.partial && series_agrees(run, cpu_ms.saturating_mul(1000))
+}
+
+/// The phases of a run whose host recorded `series` and that used `cpu_ms` of CPU, on a host of
+/// `host_milli`: each point at its mean, held to the host, for the seconds it covers as the job
+/// service reads a series (`granularity_secs` each; the last up to the series' run rounded up to
+/// a second, at least one second and at most a point). `None` when the series has no point or
+/// is not [`usable`].
+#[must_use]
+pub fn recorded(series: &CpuSeries, cpu_ms: u64, host_milli: u64) -> Option<Vec<Phase>> {
+    if series.points.is_empty() || !usable(series, cpu_ms) {
+        return None;
+    }
+    let span = u64::from(series.granularity_secs);
+    let count = series.points.len() as u64;
+    let last = (count - 1) * span;
+    let end = series
+        .run_usec
+        .div_ceil(1_000_000)
+        .clamp(last + 1, count * span);
+    let phases = series.points.iter().zip(1..).map(|(point, at)| Phase {
+        ms: 1000 * if at == count { end - last } else { span },
+        milli: (u64::from(*point) * 125 / 2).min(host_milli),
+    });
+    Some(phases.collect())
 }
 
 /// The phases of `parts` (length, demand) that last at least a millisecond.
@@ -230,8 +279,58 @@ mod tests {
             vec![phase(1, 1000), phase(9999, 0)]
         );
         assert_eq!(
-            [Shape::Flat, Shape::Blip, Shape::Burst, Shape::ClassBurst].map(Shape::name),
-            ["flat", "blip", "burst", "class burst"]
+            [
+                Shape::Flat,
+                Shape::Blip,
+                Shape::Burst,
+                Shape::ClassBurst,
+                Shape::Recorded
+            ]
+            .map(Shape::name),
+            ["flat", "blip", "burst", "class burst", "recorded"]
         );
+    }
+
+    /// Asserts that a run is shaped by its recorded series: each 2 s point at its mean (16
+    /// sixteenths a core, 3 sixteenths 187 millicores), the last point for the second left of the
+    /// run, a point past the host held to it, a last point whose run ends before it given one
+    /// second; and that a series that misses the run's start, has no point, or whose total is
+    /// more than 5% off the CPU time stands for no run. Catches a series read at the wrong scale,
+    /// a last point given a whole span, and a partial or disagreeing series run as if whole.
+    #[test]
+    fn a_recorded_series_shapes_its_run_and_one_that_cannot_stand_for_it_shapes_none() {
+        // 2 s at 2 cores, 2 s at 3/16, 1 s at 1 core: 4000 + 375 + 1000 = 5375 ms of CPU.
+        let series = CpuSeries::new(2, vec![32, 3, 16], 5_000_000, false).unwrap();
+        assert!(usable(&series, 5375));
+        assert_eq!(
+            recorded(&series, 5375, HOST),
+            Some(vec![phase(2000, 2000), phase(2000, 187), phase(1000, 1000)])
+        );
+        // On a host of 1.5 cores the first point is held to the host.
+        assert_eq!(
+            recorded(&series, 5375, 1500),
+            Some(vec![phase(2000, 1500), phase(2000, 187), phase(1000, 1000)])
+        );
+        // A single point covers the run; a last point the run ends before still covers a second.
+        let one = CpuSeries::new(4, vec![16], 3_000_000, false).unwrap();
+        assert_eq!(recorded(&one, 3000, HOST), Some(vec![phase(3000, 1000)]));
+        let cut = CpuSeries::new(4, vec![16, 0], 0, false).unwrap();
+        assert_eq!(
+            recorded(&cut, 4000, HOST),
+            Some(vec![phase(4000, 1000), phase(1000, 0)])
+        );
+        // 5% off agrees, more does not.
+        assert!(usable(&series, 5657));
+        assert!(!usable(&series, 5658));
+        assert_eq!(recorded(&series, 5658, HOST), None);
+        let partial = CpuSeries {
+            partial: true,
+            ..series.clone()
+        };
+        assert!(!usable(&partial, 5375));
+        assert_eq!(recorded(&partial, 5375, HOST), None);
+        let empty = CpuSeries::new(2, Vec::new(), 0, false).unwrap();
+        assert!(usable(&empty, 0));
+        assert_eq!(recorded(&empty, 0, HOST), None);
     }
 }

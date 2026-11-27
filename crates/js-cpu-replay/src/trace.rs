@@ -4,15 +4,24 @@
 //! milliseconds since the first arrival, hosts are indices `0..` and classes are dense
 //! indices in order of first appearance ([`crate::convert`] makes them so).
 //!
-//! The file is the line [`HEADER`], then one line per job in arrival order, its fields
-//! separated by tabs, in the order of the fields of [`Job`]: a number in decimal, an absent
-//! value as `-`, the end as `ok`, `failed` or `memory`.
+//! The file is a header line, then one line per job in arrival order, its fields separated by
+//! tabs, in the order of the fields of [`Job`]: a number in decimal, an absent value as `-`,
+//! the end as `ok`, `failed` or `memory`. A trace no job of which carries a CPU series opens
+//! with [`HEADER`] and its lines hold the first 15 fields, as every trace did before the series;
+//! one that carries a series opens with [`SERIES_HEADER`] and every line adds the series as a
+//! sixteenth field, `-` or `granularity:run_usec:whole|partial:points` (the points in decimal,
+//! separated by commas). A reader of either version reads both.
 
 use std::fmt::Write as _;
 use std::str::FromStr;
 
-/// The first line of a trace.
+use js_types::CpuSeries;
+
+/// The first line of a trace whose jobs carry no CPU series.
 pub const HEADER: &str = "# js-cpu-replay trace 1";
+
+/// The first line of a trace whose lines carry each job's CPU series.
+pub const SERIES_HEADER: &str = "# js-cpu-replay trace 2";
 
 /// How a job's run ended, as far as its class's history is concerned.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,13 +91,16 @@ pub struct Job {
     pub fallback: Option<u32>,
     /// The key of its client's whole history, as an index.
     pub client: u32,
+    /// Its CPU over its run as its host recorded it (the agent's `--cpu-series`), when the
+    /// export holds a well-formed one.
+    pub cpu_series: Option<CpuSeries>,
 }
 
 /// Why a trace does not read.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum TraceError {
-    /// The first line is not [`HEADER`].
-    #[error("the first line is not {HEADER:?}")]
+    /// The first line is neither [`HEADER`] nor [`SERIES_HEADER`].
+    #[error("the first line is not {HEADER:?} or {SERIES_HEADER:?}")]
     Header,
     /// A line does not hold a job.
     #[error("line {line}: {what}")]
@@ -107,16 +119,20 @@ pub enum TraceError {
 /// before the one above it.
 pub fn parse(text: &str) -> Result<Vec<Job>, TraceError> {
     let mut lines = text.lines();
-    if lines.next() != Some(HEADER) {
-        return Err(TraceError::Header);
-    }
+    let series = match lines.next() {
+        Some(HEADER) => false,
+        Some(SERIES_HEADER) => true,
+        _ => return Err(TraceError::Header),
+    };
+    let what = if series {
+        "not a job of 16 fields"
+    } else {
+        "not a job of 15 fields"
+    };
     let mut jobs: Vec<Job> = Vec::new();
     for (at, line) in lines.enumerate() {
         let number = at + 2;
-        let job = job_of(line).ok_or(TraceError::Line {
-            line: number,
-            what: "not a job of 15 fields",
-        })?;
+        let job = job_of(line, series).ok_or(TraceError::Line { line: number, what })?;
         if jobs
             .last()
             .is_some_and(|last| last.arrive_ms > job.arrive_ms)
@@ -131,8 +147,15 @@ pub fn parse(text: &str) -> Result<Vec<Job>, TraceError> {
     Ok(jobs)
 }
 
-/// The job of one line, or `None` when it is not one.
-fn job_of(line: &str) -> Option<Job> {
+/// The job of one line, its last field its CPU series when `series` is set, or `None` when it
+/// is not one.
+fn job_of(line: &str, series: bool) -> Option<Job> {
+    let (line, cpu_series) = if series {
+        let (rest, last) = line.rsplit_once('\t')?;
+        (rest, series_of(last)?)
+    } else {
+        (line, None)
+    };
     let fields: Vec<&str> = line.split('\t').collect();
     let [
         arrive,
@@ -170,7 +193,49 @@ fn job_of(line: &str) -> Option<Job> {
         class: number(class)?,
         fallback: absent_or(fallback)?,
         client: number(client)?,
+        cpu_series,
     })
+}
+
+/// `Some(None)` for `-`, `Some(Some(series))` for a well-formed series as [`series_text`]
+/// writes it, `None` for anything else.
+fn series_of(text: &str) -> Option<Option<CpuSeries>> {
+    if text == "-" {
+        return Some(None);
+    }
+    let parts: Vec<&str> = text.split(':').collect();
+    let [granularity, run, kind, points] = parts.as_slice() else {
+        return None;
+    };
+    let partial = match *kind {
+        "whole" => false,
+        "partial" => true,
+        _ => return None,
+    };
+    let points = if points.is_empty() {
+        Vec::new()
+    } else {
+        points.split(',').map(number).collect::<Option<Vec<u16>>>()?
+    };
+    CpuSeries::new(number(granularity)?, points, number(run)?, partial).map(Some)
+}
+
+/// A series as a trace writes it: `-` when absent, else its granularity, its run, `whole` or
+/// `partial`, and its points, separated by colons.
+fn series_text(series: Option<&CpuSeries>) -> String {
+    series.map_or_else(
+        || "-".to_owned(),
+        |series| {
+            let points: Vec<String> = series.points.iter().map(u16::to_string).collect();
+            let kind = if series.partial { "partial" } else { "whole" };
+            format!(
+                "{}:{}:{kind}:{}",
+                series.granularity_secs,
+                series.run_usec,
+                points.join(",")
+            )
+        },
+    )
 }
 
 /// A decimal number.
@@ -187,12 +252,16 @@ fn absent_or<T: FromStr>(text: &str) -> Option<Option<T>> {
     }
 }
 
-/// The text of a trace of `jobs`, which [`parse`] reads back.
+/// The text of a trace of `jobs`, which [`parse`] reads back: under [`HEADER`] when no job
+/// carries a CPU series (the trace a reader of the release before the series reads), under
+/// [`SERIES_HEADER`] with each job's series otherwise.
 #[must_use]
 pub fn write(jobs: &[Job]) -> String {
-    let mut text = format!("{HEADER}\n");
+    let series = jobs.iter().any(|job| job.cpu_series.is_some());
+    let header = if series { SERIES_HEADER } else { HEADER };
+    let mut text = format!("{header}\n");
     for job in jobs {
-        let fields = [
+        let mut fields = vec![
             job.arrive_ms.to_string(),
             job.wait_ms.to_string(),
             job.start_ms.to_string(),
@@ -209,6 +278,9 @@ pub fn write(jobs: &[Job]) -> String {
             shown(job.fallback),
             job.client.to_string(),
         ];
+        if series {
+            fields.push(series_text(job.cpu_series.as_ref()));
+        }
         let _ = writeln!(text, "{}", fields.join("\t"));
     }
     text
@@ -242,6 +314,7 @@ pub(crate) mod tests {
             class,
             fallback: None,
             client: 0,
+            cpu_series: None,
         }
     }
 
@@ -327,7 +400,90 @@ pub(crate) mod tests {
         );
         assert_eq!(
             TraceError::Header.to_string(),
-            "the first line is not \"# js-cpu-replay trace 1\""
+            "the first line is not \"# js-cpu-replay trace 1\" or \"# js-cpu-replay trace 2\""
         );
+    }
+
+    /// A series of `points` at 2 s a point over a run of `run_usec`, whole.
+    pub(crate) fn series(points: &[u16], run_usec: u64) -> CpuSeries {
+        CpuSeries::new(2, points.to_vec(), run_usec, false).unwrap()
+    }
+
+    /// Asserts that a trace one job of which carries a CPU series is written under the second
+    /// header with the series as every line's sixteenth field (`-` for a job without one), whole
+    /// and partial, with points and with none, and reads back the same jobs. Catches a series
+    /// lost on the way through the file, a job without one written with the wrong number of
+    /// fields, and `partial` read as `whole`.
+    #[test]
+    fn a_trace_with_series_reads_back_what_was_written() {
+        let jobs = vec![
+            Job {
+                cpu_series: Some(series(&[0, 16, 65_535], 5_500_000)),
+                ..job(0, 10, 5, 1)
+            },
+            job(1, 10, 5, 1),
+            Job {
+                cpu_series: CpuSeries::new(1, Vec::new(), 0, true),
+                ..job(2, 10, 5, 1)
+            },
+        ];
+        let text = write(&jobs);
+        assert_eq!(
+            text,
+            "# js-cpu-replay trace 2\n\
+             0\t0\t0\t10\t5\t-\t-\t1024\t1000\t4096\t0\tok\t1\t-\t0\t2:5500000:whole:0,16,65535\n\
+             1\t0\t0\t10\t5\t-\t-\t1024\t1000\t4096\t0\tok\t1\t-\t0\t-\n\
+             2\t0\t0\t10\t5\t-\t-\t1024\t1000\t4096\t0\tok\t1\t-\t0\t1:0:partial:\n"
+        );
+        assert_eq!(parse(&text), Ok(jobs));
+    }
+
+    /// Asserts that a trace with no series is written exactly as the release before the series
+    /// wrote it (the first header, 15 fields), so a reader of that release reads it, and that a
+    /// trace that release wrote reads here with no series. Catches a writer that always moves to
+    /// the second header and a reader that refuses the first.
+    #[test]
+    fn a_trace_without_series_is_the_trace_of_the_release_before() {
+        let before = "# js-cpu-replay trace 1\n\
+                      0\t0\t0\t10\t5\t-\t-\t1024\t1000\t4096\t0\tok\t1\t-\t0\n";
+        let jobs = vec![job(0, 10, 5, 1)];
+        assert_eq!(write(&jobs), before);
+        assert_eq!(parse(before), Ok(jobs));
+    }
+
+    /// Asserts that under the second header each line that is not a job of 16 fields is refused
+    /// by number: 15 fields, a line with no tab, and each way a series can be malformed (too few
+    /// or too many parts, a kind that is neither `whole` nor `partial`, a point or a run that is
+    /// not a number, a point past 16 bits, a granularity that is not a power of two). Catches a
+    /// reader that takes a 15-field line under the second header or a malformed series as none.
+    #[test]
+    fn each_malformed_line_of_a_trace_with_series_is_refused_by_number() {
+        let fields = "0\t0\t0\t10\t5\t-\t-\t1024\t1000\t4096\t0\tok\t1\t-\t0";
+        let bad_series = [
+            "2:100:whole",
+            "2:100:whole:1:2",
+            "2:100:most:1",
+            "2:100:whole:1,x",
+            "2:x:whole:1",
+            "2:100:whole:65536",
+            "3:100:whole:1",
+        ];
+        let mut cases: Vec<String> = bad_series
+            .iter()
+            .map(|series| format!("{fields}\t{series}"))
+            .collect();
+        cases.push(fields.to_owned());
+        cases.push("x".to_owned());
+        for bad in cases {
+            let text = format!("{SERIES_HEADER}\n{fields}\t-\n{bad}\n");
+            assert_eq!(
+                parse(&text),
+                Err(TraceError::Line {
+                    line: 3,
+                    what: "not a job of 16 fields"
+                }),
+                "{bad}"
+            );
+        }
     }
 }

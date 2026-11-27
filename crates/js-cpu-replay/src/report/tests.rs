@@ -209,3 +209,21 @@ fn a_waits_row_gives_every_job_and_those_after_the_first_hour() {
     waits_row(&mut text, "x", &jobs, &[5000, 7000]);
     assert_eq!(text, "| x | 5 | 7 | 7 | 7 | 7 | 7 |\n");
 }
+
+/// Asserts that the options replay every arm under the recorded shape too, at each speed, when a
+/// job of the trace carries a CPU series, and under the two bracketing shapes alone when none
+/// does. Catches a trace's series left out of the options, and rows of a shape a trace without
+/// series cannot give.
+#[test]
+fn the_options_replay_the_recorded_series_when_the_trace_carries_one() {
+    let without = report(&nine(), Farm::OURS);
+    let mut jobs = nine();
+    // Ten seconds at two cores, recorded as five points of 2 s at 32 sixteenths.
+    jobs[0].cpu_series = Some(crate::trace::tests::series(&[32; 5], 10_000_000));
+    let with = report(&jobs, Farm::OURS);
+    for arm in ARMS {
+        let row = format!("| {} | recorded | ", arm.name);
+        assert_eq!(without.matches(&row).count(), 0, "{row}");
+        assert_eq!(with.matches(&row).count(), 2, "{row}");
+    }
+}

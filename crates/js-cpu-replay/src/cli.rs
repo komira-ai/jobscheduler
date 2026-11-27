@@ -11,6 +11,7 @@ use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 
 use crate::convert::{ConvertError, convert, results};
+use crate::gate::{MIN_LEARN_DAYS, gate};
 use crate::report::report;
 use crate::rows::{self, RowsError};
 use crate::shadow::{self, ShadowError};
@@ -56,6 +57,11 @@ pub enum Command {
     Run {
         /// The trace; a name ending in `.gz` is read compressed.
         trace: PathBuf,
+        /// Adds the gate before the curves place jobs: the curve mode against the flat step on
+        /// the jobs that arrived after the trace's first this many days (of 24 h), its classes
+        /// learning from the jobs before. At least 2.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(i64::from(MIN_LEARN_DAYS)..))]
+        learn_days: Option<u32>,
     },
     /// Prints, per class, how close the job service's shadow profiles came to its runs, from
     /// the server's log (`--placement-curves shadow`).
@@ -176,21 +182,28 @@ pub fn run(cli: &Cli, out: &mut dyn Write) -> Result<(), Error> {
             write(to, &trace::write(&converted.jobs))?;
             writeln!(
                 out,
-                "{} records: {} jobs in the trace ({} with a store row, {} with a result line); {} \
-                 did not run, {} ran on a host of under a hundredth of them, {} started before \
-                 the cut",
+                "{} records: {} jobs in the trace ({} with a store row, {} with a result line, {} \
+                 with a CPU series); {} did not run, {} ran on a host of under a hundredth of \
+                 them, {} started before the cut",
                 converted.read,
                 converted.jobs.len(),
                 converted.with_row,
                 converted.with_result,
+                converted.with_series,
                 converted.not_run,
                 converted.other_host,
                 converted.before_cut,
             )?;
         }
-        Command::Run { trace: path } => {
+        Command::Run {
+            trace: path,
+            learn_days,
+        } => {
             let jobs = trace::parse(&read(path)?)?;
             out.write_all(report(&jobs, Farm::OURS).as_bytes())?;
+            if let Some(days) = learn_days {
+                out.write_all(gate(&jobs, Farm::OURS, *days).as_bytes())?;
+            }
         }
         Command::Shadow {
             log,

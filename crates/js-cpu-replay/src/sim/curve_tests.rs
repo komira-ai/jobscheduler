@@ -5,6 +5,7 @@ use crate::sizing::Booking;
 use crate::trace::tests::job;
 use crate::trace::{End, Job};
 use js_sizing::Day;
+use js_types::CpuSeries;
 
 const GIB: u64 = 1 << 30;
 
@@ -30,6 +31,7 @@ fn setup(hosts: usize) -> Setup {
         },
         shape: Shape::Flat,
         speed: 1,
+        held_out_ms: None,
     }
 }
 
@@ -38,12 +40,27 @@ fn burst_at(burst: usize) -> Vec<u32> {
     (0..35).map(|s| if s == burst { 64 } else { 48 }).collect()
 }
 
+/// A whole series of `points` at 2 s a point over as many seconds, and the CPU time it adds up
+/// to, in milliseconds (a point of 16 is a core for 2 s: 2000 ms).
+fn recorded(points: &[u32]) -> (CpuSeries, u64) {
+    let cpu_ms = points.iter().map(|point| u64::from(*point)).sum::<u64>() * 125;
+    let points: Vec<u16> = points.iter().map(|p| u16::try_from(*p).unwrap()).collect();
+    let run_usec = points.len() as u64 * 2_000_000;
+    (CpuSeries::new(2, points, run_usec, false).unwrap(), cpu_ms)
+}
+
+/// Teaches `class` a clean run of `points` that ended at `ended_ms`.
+fn teach(class: &mut Learning, points: &[u32], ended_ms: u64) {
+    let (series, cpu_ms) = recorded(points);
+    class.teach(Some(&series), cpu_ms, ended_ms, true);
+}
+
 /// A class that has learned 24 runs of `points`, one a minute: its checks pass when the
 /// points are not constant.
 fn taught(points: &[u32]) -> Learning {
     let mut class = Learning::new();
     for run in 1..=24 {
-        class.teach(points, points.len() as u64 * 2000, run * 60_000, true);
+        teach(&mut class, points, run * 60_000);
     }
     class
 }
@@ -310,12 +327,12 @@ fn a_class_that_fails_a_check_books_flat() {
     let points = burst_at(10);
     let mut class = Learning::new();
     for run in 1..=23 {
-        class.teach(&points, 70_000, run * 60_000, true);
+        teach(&mut class, &points, run * 60_000);
     }
     assert!(!class.passes());
     world.curves.classes.insert(1, class.clone());
     assert!(!books(&mut world));
-    class.teach(&points, 70_000, 24 * 60_000, true);
+    teach(&mut class, &points, 24 * 60_000);
     assert!(class.passes());
     world.curves.classes.insert(1, class.clone());
     assert!(books(&mut world));
@@ -330,7 +347,7 @@ fn a_class_that_fails_a_check_books_flat() {
     // Constant runs: the curve is the flat level, which is no shape.
     let mut constant = Learning::new();
     for run in 1..=30 {
-        constant.teach(&[48; 35], 70_000, run * 60_000, true);
+        teach(&mut constant, &[48; 35], run * 60_000);
     }
     assert!(!constant.passes());
     // The job books its flat step beside the curve: 2000, whatever it books.
@@ -363,7 +380,7 @@ fn a_curve_is_kept_until_the_class_or_the_flat_step_changes() {
         ),
         (4000, 2500, 2500)
     );
-    class.teach(&burst_at(10), 70_000, 25 * 60_000, true);
+    teach(&mut class, &burst_at(10), 25 * 60_000);
     assert!(!Rc::ptr_eq(&other, &class.curve(2500, clamp, 0)));
 }
 
@@ -408,67 +425,110 @@ fn a_curve_job_books_its_curve_over_its_wall_time() {
     assert_eq!(world.outcome.booked, 4000 * 10_000);
 }
 
-/// Asserts the series of a run: the 2 s means of its phases after its start, in sixteenths of a
-/// core, rounded half up (a mean of 31.25 millicores is half a sixteenth and reads 1, one
-/// millicore-ms less reads 0); a window the run ends inside is the mean of what remains; phases
-/// before the start and after the end are no part of it.
-#[test]
-fn a_series_is_the_two_second_means_of_the_phases_after_the_start() {
-    let phase = |ms, milli| Phase { ms, milli };
-    // 1 s of start, 3 s at 4 cores, 1.5 s at 1 core, then 9 s beyond the run's 4.5 s.
-    let phases = [
-        phase(1000, 0),
-        phase(3000, 4000),
-        phase(1500, 1000),
-        phase(9000, 8000),
-    ];
-    assert_eq!(series(&phases, 1000, 4500), [64, 40, 16]);
-    assert_eq!(series(&phases, 1000, 4000), [64, 40]);
-    assert_eq!(series(&phases, 1000, 0), Vec::<u32>::new());
-    // The run starts in the middle of a phase: 2 s of 4 cores, 1 s of 2 cores.
-    assert_eq!(
-        series(&[phase(3000, 4000), phase(1000, 2000)], 1000, 3000),
-        [64, 32]
-    );
-    // Rounding half up over a second: 250 ms at 125 millicores and none for the rest is 31.25.
-    assert_eq!(series(&[phase(250, 125), phase(750, 0)], 0, 1000), [1]);
-    assert_eq!(
-        series(&[phase(249, 125), phase(1, 124), phase(750, 0)], 0, 1000),
-        [0]
-    );
+/// The order a replay of `jobs` takes them in: each at its arrival.
+fn arrivals(jobs: &[Job]) -> Vec<(u64, usize)> {
+    jobs.iter()
+        .enumerate()
+        .map(|(index, job)| (job.arrive_ms, index))
+        .collect()
 }
 
-/// Asserts what a replay teaches each class: every successful run of a second or more teaches
-/// its series (a run that was slowed teaches nothing a lower mean would lower, and counts as
-/// usable all the same); a failed run and one under a second teach nothing; and a class of
-/// constant runs does not pass the checks, so its jobs book flat.
+/// Asserts what a replay teaches each class, as the job service's history teaches it: every
+/// successful run whose host recorded a whole series that agrees with its CPU time teaches it
+/// and counts as usable; a successful run with no series, a partial one or one that disagrees
+/// teaches nothing and counts as unusable (one with no series starts its class); a failed run
+/// counts as unusable in a class that exists and starts none; a run under a second teaches as
+/// any other; and a class of constant runs does not pass the checks. Catches a curve arm that
+/// learns a series it is not given, marks every run usable, or starts a class from a failure.
 #[test]
-fn the_replay_teaches_a_class_at_each_successful_runs_end() {
-    // Thirty runs of class 1, a minute apart, then a failed run of class 2 and a run of class 3
-    // of half a second.
+fn the_replay_teaches_a_class_what_its_hosts_recorded() {
+    let (series, cpu_ms) = recorded(&[32; 5]);
+    assert_eq!(cpu_ms, 20_000);
+    let with = |job: Job| Job {
+        cpu_series: Some(series.clone()),
+        ..job
+    };
+    // Thirty runs of class 1, a minute apart, each 10 s at 2 cores and recorded so.
     let mut jobs: Vec<Job> = (0..30)
-        .map(|run| job(run * 60_000, 10_000, 20_000, 1))
+        .map(|run| with(job(run * 60_000, 10_000, 20_000, 1)))
+        .collect();
+    let at = |n: u64| 1_800_000 + n * 60_000;
+    jobs.extend([
+        // Class 1: no series, a partial one, one that is half the CPU time, and a failure.
+        job(at(0), 10_000, 20_000, 1),
+        Job {
+            cpu_series: CpuSeries::new(2, vec![32; 5], 10_000_000, true),
+            ..job(at(1), 10_000, 20_000, 1)
+        },
+        with(job(at(2), 10_000, 40_000, 1)),
+        Job {
+            end: End::Failed,
+            ..with(job(at(3), 10_000, 20_000, 1))
+        },
+        // A failure of class 2, which has no run.
+        Job {
+            end: End::Failed,
+            ..with(job(at(4), 10_000, 20_000, 2))
+        },
+        // Half a second at 2 cores of class 3, its one point a core for a second.
+        Job {
+            cpu_series: CpuSeries::new(1, vec![16], 500_000, false),
+            ..job(at(5), 500, 1000, 3)
+        },
+        // A success of class 4 with no series.
+        job(at(6), 10_000, 20_000, 4),
+    ]);
+    let mut world = World::new(&jobs, PACKED, setup(1));
+    world.run(&arrivals(&jobs), World::place);
+    let classes = &world.curves.classes;
+    assert_eq!(classes.keys().copied().collect::<Vec<u32>>(), [1, 3, 4]);
+    let class = &classes[&1];
+    assert_eq!(class.profile.runs(), 30);
+    assert_eq!((class.series.runs(), class.series.usable()), (16, 12));
+    assert!(!class.passes());
+    // The first run of 5 slots at 2 cores: the profile reads 32 sixteenths in slot 0.
+    assert_eq!(class.profile.slot_mean(0, 0), Some(32));
+    let short = &classes[&3];
+    assert_eq!((short.profile.runs(), short.series.usable()), (1, 1));
+    let bare = &classes[&4];
+    assert_eq!(bare.profile.runs(), 0);
+    assert_eq!((bare.series.runs(), bare.series.usable()), (1, 0));
+}
+
+/// Asserts that a job of the held-out part teaches its class nothing: of twenty recorded runs
+/// of class 1 a minute apart, with the part held out from the eleventh's arrival (at twice the
+/// speed, so at 300 s of the replay), the profile and the window hold the first ten, and a
+/// failure in the held-out part records no unusable series. Catches a held-out part the
+/// profiles go on learning from, which would let them book what they learned on the day they
+/// are judged on.
+#[test]
+fn a_job_of_the_held_out_part_teaches_its_class_nothing() {
+    let (series, _) = recorded(&[32; 5]);
+    let mut jobs: Vec<Job> = (0..20)
+        .map(|run| Job {
+            cpu_series: Some(series.clone()),
+            ..job(run * 60_000, 10_000, 20_000, 1)
+        })
         .collect();
     jobs.push(Job {
         end: End::Failed,
-        ..job(1_800_000, 10_000, 20_000, 2)
+        ..job(1_200_000, 10_000, 20_000, 1)
     });
-    jobs.push(job(1_900_000, 500, 1000, 3));
-    let mut world = World::new(&jobs, PACKED, setup(1));
-    let order: Vec<(u64, usize)> = jobs
-        .iter()
-        .enumerate()
-        .map(|(index, job)| (job.arrive_ms, index))
+    let held = Setup {
+        speed: 2,
+        held_out_ms: Some(300_000),
+        ..setup(1)
+    };
+    let mut world = World::new(&jobs, PACKED, held);
+    let order: Vec<(u64, usize)> = arrivals(&jobs)
+        .into_iter()
+        .map(|(at, index)| (at / 2, index))
         .collect();
     world.run(&order, World::place);
     let class = &world.curves.classes[&1];
-    assert_eq!(class.profile.runs(), 30);
-    assert_eq!(class.series.runs(), 16);
-    assert_eq!(class.series.usable(), 16);
-    assert!(!class.passes());
-    assert_eq!(world.curves.classes.len(), 1);
-    // The first run of 5 slots at 2 cores: the profile reads 32 sixteenths in slot 0.
-    assert_eq!(class.profile.slot_mean(0, 0), Some(32));
+    assert_eq!(class.profile.runs(), 10);
+    assert_eq!((class.series.runs(), class.series.usable()), (10, 10));
+    assert!(world.outcome.ended.iter().all(|end| *end > 0));
 }
 
 /// Asserts a run that contention slowed is taught as a series and counts as usable but only
@@ -485,16 +545,14 @@ fn a_slowed_run_is_usable_but_does_not_lower_its_class() {
         },
         ..setup(1)
     };
-    let jobs = [
-        Job {
-            booked_milli: 0,
-            ..job(0, 10_000, 40_000, 1)
-        },
-        Job {
-            booked_milli: 0,
-            ..job(0, 10_000, 40_000, 1)
-        },
-    ];
+    let (series, cpu_ms) = recorded(&[64; 5]);
+    assert_eq!(cpu_ms, 40_000);
+    let slowed = Job {
+        booked_milli: 0,
+        cpu_series: Some(series),
+        ..job(0, 10_000, 40_000, 1)
+    };
+    let jobs = [slowed.clone(), slowed];
     let arm = Arm {
         rule: Rule::Booked,
         limit_permille: 100_000,

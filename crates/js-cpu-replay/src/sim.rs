@@ -13,7 +13,9 @@
 //! time it lost is its slowdown.
 //!
 //! The curve mode ([`curve`]) books and packs by what each class learned of its jobs' CPU over
-//! their age.
+//! their age, from the series their hosts recorded. A replay can hold out the part of the trace
+//! from a moment on ([`Setup::held_out_ms`]): the curve mode learns nothing from its jobs, and
+//! the outcome counts the CPU asked past the hosts' cores in it apart.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, VecDeque};
@@ -88,10 +90,10 @@ pub enum Bookings {
     },
     /// [`Bookings::Learned`], and a job of a class that passes the four checks of
     /// `js_sizing::Checks` books its CPU curve over its age instead: each class learns, at
-    /// each successful run's end, the run's series as the replay synthesised it
-    /// ([`crate::shape`]) in 2 s means. A job's `booking` stays its flat step; the curve
-    /// books beside it ([`Rule::Packed`] places by it, and the outcome's `booked` integrates
-    /// it). See [`curve`].
+    /// each successful run's end, the CPU series its host recorded ([`Job::cpu_series`]), as
+    /// the job service learns it. A job's `booking` stays its flat step; the curve books
+    /// beside it ([`Rule::Packed`] places by it, and the outcome's `booked` integrates it). See
+    /// [`curve`].
     Curve,
 }
 
@@ -197,6 +199,10 @@ pub struct Setup {
     pub shape: Shape,
     /// How many times faster the jobs arrive than they did (1: as recorded).
     pub speed: u64,
+    /// When the held-out part starts, in the replay's milliseconds (a job's is its arrival over
+    /// `speed`): the curve mode's classes learn nothing from a job that arrives at or after it,
+    /// and [`Outcome::held_over_excess`] counts from it. `None`: nothing is held out.
+    pub held_out_ms: Option<u64>,
 }
 
 /// What a replay measured.
@@ -219,6 +225,13 @@ pub struct Outcome {
     pub over_ms: u64,
     /// The CPU asked for past the hosts' cores, summed over that time, in millicore-ms.
     pub over_excess: u128,
+    /// [`Outcome::over_excess`] from the start of the held-out part on (all of it when nothing
+    /// is held out).
+    pub held_over_excess: u128,
+    /// When each job ended, in milliseconds since the first arrival, by trace index.
+    pub ended: Vec<u64>,
+    /// Whether each job was booked by its class's curve, by trace index.
+    pub curved: Vec<bool>,
     /// The CPU the jobs got, in millicore-ms.
     pub used: f64,
     /// The jobs no host admitted even with nothing on the farm, each run alone on an empty
@@ -504,6 +517,8 @@ impl<'a> World<'a> {
             outcome: Outcome {
                 slowed: vec![0; jobs.len()],
                 waited: vec![0; jobs.len()],
+                ended: vec![0; jobs.len()],
+                curved: vec![false; jobs.len()],
                 placed: vec![0; farm.hosts],
                 ..Outcome::default()
             },
@@ -592,7 +607,6 @@ impl<'a> World<'a> {
                 }
             }
         };
-        let run = shape::own_wall_ms(job.wall_ms, job.cpu_ms, farm.milli);
         // Its start holds its booking and asks for no CPU.
         let mut phases: Vec<Phase> = [Phase {
             ms: job.start_ms,
@@ -606,14 +620,25 @@ impl<'a> World<'a> {
             Shape::ClassBurst => spot(job.class as usize),
             _ => spot(index),
         };
-        phases.extend(shape::phases(
-            self.setup.shape,
-            run,
-            job.cpu_ms,
-            job.peak_milli,
-            farm.milli,
-            at,
-        ));
+        // Its recorded series under `Recorded`, when it can stand for the run.
+        let recorded = job
+            .cpu_series
+            .as_ref()
+            .filter(|_| self.setup.shape == Shape::Recorded)
+            .and_then(|series| shape::recorded(series, job.cpu_ms, farm.milli));
+        let lived = recorded.unwrap_or_else(|| {
+            let wall = shape::own_wall_ms(job.wall_ms, job.cpu_ms, farm.milli);
+            shape::phases(
+                self.setup.shape,
+                wall,
+                job.cpu_ms,
+                job.peak_milli,
+                farm.milli,
+                at,
+            )
+        });
+        let run: u64 = lived.iter().map(|phase| phase.ms).sum();
+        phases.extend(lived);
         let var = [Some(job.class), job.fallback, Some(job.client)]
             .iter()
             .flatten()
@@ -701,6 +726,7 @@ impl<'a> World<'a> {
         let wait = now.saturating_sub(arrived);
         self.outcome.waits.push(wait);
         self.outcome.waited[new.job] = wait;
+        self.outcome.curved[new.job] = new.curve.is_some();
         self.curves.placed();
         let host = &mut self.hosts[at];
         host.bytes += new.booking.bytes;
@@ -713,6 +739,7 @@ impl<'a> World<'a> {
     /// Runs every host for the tick that starts at `now`.
     fn tick(&mut self, now: u64) {
         let cores = self.setup.farm.milli;
+        let held = now >= self.setup.held_out_ms.unwrap_or(0);
         let mut ended = Vec::new();
         for host in &mut self.hosts {
             let asked: u64 = host.runs.iter().map(Running::demand).sum();
@@ -724,8 +751,10 @@ impl<'a> World<'a> {
                 outcome.under_ms += TICK_MS;
             }
             if asked > cores {
+                let excess = u128::from(asked - cores) * u128::from(TICK_MS);
                 outcome.over_ms += TICK_MS;
-                outcome.over_excess += u128::from(asked - cores) * u128::from(TICK_MS);
+                outcome.over_excess += excess;
+                outcome.held_over_excess += if held { excess } else { 0 };
             }
             let rate = if asked > cores {
                 cores as f64 / asked as f64
@@ -761,6 +790,7 @@ impl<'a> World<'a> {
         let slowed = wall.saturating_sub(run.own);
         let outcome = &mut self.outcome;
         outcome.slowed[run.job] = slowed;
+        outcome.ended[run.job] = end;
         outcome.last_end_ms = outcome.last_end_ms.max(end);
         outcome.own_ms += run.own;
         outcome.slowed_ms += slowed;
@@ -771,8 +801,8 @@ impl<'a> World<'a> {
         let ran = wall.saturating_sub(job.start_ms);
         self.sizer
             .learn(job, (ran, slowed), run.booking, day_of(end));
+        self.teach_curve(&run, end, slowed);
         if job.end == End::Ok && run.run >= TICK_MS {
-            self.teach_curve(&run, end, slowed);
             let mean = job.cpu_ms * 1000 / run.run;
             let host = self.setup.farm.milli.max(mean);
             let peak = job.peak_milli.map_or(mean, u64::from).clamp(mean, host);
