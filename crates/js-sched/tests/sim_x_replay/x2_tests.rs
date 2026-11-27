@@ -161,7 +161,7 @@ fn flattened_beliefs_have_no_shape() {
 
 /// A host of `Pool::ci` holding a resident of key 0 placed at tick 0 (covered by the round
 /// at tick 5), one of key 1 and one of key 0 placed in the round at tick 5, read once.
-fn busy_host<'w>(beliefs: &'w [Belief]) -> HostState<'w> {
+fn busy_host(beliefs: &[Belief]) -> HostState<'_> {
     let mut host = HostState::new(Pool::ci().cap);
     host.begin_round(0);
     host.place(0, 0, &beliefs[0]);
@@ -190,7 +190,7 @@ fn shaped(cores: &[u64], mem_mib: u64) -> Belief {
 /// uncovered leases counted from the first round.
 #[test]
 fn the_scorer_sees_what_the_predicate_reads() {
-    let beliefs = vec![
+    let beliefs = [
         shaped(&[2_000, 500, 500], 1_000),
         shaped(&[1_000, 3_000], 2_000),
         shaped(&[700, 700, 4_000], 500),
@@ -230,7 +230,7 @@ fn the_scorer_sees_what_the_predicate_reads() {
 /// evaluations the loop bounds then misread.
 #[test]
 fn the_score_rule_places_where_the_scorer_places() {
-    let beliefs = vec![
+    let beliefs = [
         shaped(&[2_000, 500, 500], 1_000),
         shaped(&[1_000, 3_000], 2_000),
         shaped(&[700, 700, 4_000], 500),

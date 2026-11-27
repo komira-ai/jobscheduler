@@ -40,6 +40,7 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::num::NonZeroUsize;
+use std::path::{Path, PathBuf};
 
 use js_state::Store;
 use js_types::HostId;
@@ -58,7 +59,7 @@ const MINUTE_MS: u64 = 60_000;
 const SIXTEENTHS: u64 = 16;
 
 /// History rows read a page at a time.
-const PAGE: NonZeroUsize = NonZeroUsize::new(1024).unwrap();
+const PAGE: NonZeroUsize = NonZeroUsize::MIN.saturating_add(1023);
 
 /// How many history rows were left out of an export, by the first thing each missed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -268,6 +269,88 @@ fn paged(
         key_profile,
         node_minute,
         counts,
+    })
+}
+
+/// The name of the file of run minutes in an export directory.
+pub const X2_KEY_PROFILE_FILE: &str = "key_profile.txt";
+
+/// The name of the file of node minutes in an export directory.
+pub const X2_NODE_MINUTE_FILE: &str = "node_minute.txt";
+
+/// A file of an export that could not be written.
+#[derive(Debug, thiserror::Error)]
+#[error("{}: {source}", .path.display())]
+pub struct X2WriteError {
+    /// The file.
+    pub path: PathBuf,
+    /// What the system said.
+    pub source: std::io::Error,
+}
+
+/// Writes `export`'s two files, [`X2_KEY_PROFILE_FILE`] and [`X2_NODE_MINUTE_FILE`], into
+/// the directory `dir`, replacing files of those names.
+///
+/// # Errors
+/// [`X2WriteError`] naming the first file that could not be written.
+pub fn write_x2_export(dir: &Path, export: &X2Export) -> Result<(), X2WriteError> {
+    let files = [
+        (X2_KEY_PROFILE_FILE, &export.key_profile),
+        (X2_NODE_MINUTE_FILE, &export.node_minute),
+    ];
+    for (name, text) in files {
+        let path = dir.join(name);
+        std::fs::write(&path, text).map_err(|source| X2WriteError { path, source })?;
+    }
+    Ok(())
+}
+
+/// What the `x2_export` example is asked to do.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct X2ExportArgs {
+    /// The SQLite store file to read (a copy: the server holds the lock of the live one).
+    pub sqlite: PathBuf,
+    /// The first end, ms since the Unix epoch, of an allocation exported.
+    pub from_ms: u64,
+    /// The end, ms since the Unix epoch, before which an allocation is exported.
+    pub before_ms: u64,
+    /// The directory the two files are written into.
+    pub out: PathBuf,
+}
+
+/// Reads the `x2_export` example's flags: `--sqlite <file>`, `--from-ms <ms>`,
+/// `--before-ms <ms>` and `--out <dir>`, each exactly once.
+///
+/// # Errors
+/// What is wrong with the flags, in words: a flag without a value, a value that is not a
+/// whole number, an unknown flag, a flag given twice, a flag missing.
+pub fn parse_x2_export_args(
+    mut args: impl Iterator<Item = String>,
+) -> Result<X2ExportArgs, String> {
+    let (mut sqlite, mut from, mut before, mut out) = (None, None, None, None);
+    while let Some(flag) = args.next() {
+        let value = args.next().ok_or_else(|| format!("{flag} needs a value"))?;
+        let number = || {
+            value
+                .parse::<u64>()
+                .map_err(|_| format!("{flag} is not a whole number"))
+        };
+        let given_before = match flag.as_str() {
+            "--sqlite" => sqlite.replace(PathBuf::from(&value)).is_some(),
+            "--from-ms" => from.replace(number()?).is_some(),
+            "--before-ms" => before.replace(number()?).is_some(),
+            "--out" => out.replace(PathBuf::from(&value)).is_some(),
+            _ => return Err(format!("unknown argument {flag:?}")),
+        };
+        if given_before {
+            return Err(format!("{flag} given twice"));
+        }
+    }
+    Ok(X2ExportArgs {
+        sqlite: sqlite.ok_or("--sqlite is required")?,
+        from_ms: from.ok_or("--from-ms is required")?,
+        before_ms: before.ok_or("--before-ms is required")?,
+        out: out.ok_or("--out is required")?,
     })
 }
 

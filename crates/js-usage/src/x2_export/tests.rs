@@ -3,6 +3,7 @@
 //! does not read.
 
 use std::num::NonZeroUsize;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use js_state::fake::{Fake, Flaw};
@@ -297,4 +298,89 @@ fn a_node_hour_that_does_not_read_is_an_error() {
         x2_export(&s, 0, u64::MAX),
         Err(UsageError::Corrupt { .. })
     ));
+}
+
+/// Asserts the two files are written under their names with the export's text, replacing
+/// what was there, and that a directory that does not exist is an error naming the first
+/// file. Catches the files swapped, one of them not written, and a failed write that is
+/// reported as done.
+#[test]
+fn the_files_are_written_into_the_directory() {
+    let dir = js_testkit::dir::TestDir::under(std::env::temp_dir(), "js-usage-x2-write");
+    let export = X2Export {
+        key_profile: "kp text\n".to_string(),
+        node_minute: "nm text\n".to_string(),
+        counts: X2Counts::default(),
+    };
+    std::fs::write(dir.path().join(X2_KEY_PROFILE_FILE), "old").unwrap();
+    write_x2_export(dir.path(), &export).unwrap();
+    let read = |name| std::fs::read_to_string(dir.path().join(name)).unwrap();
+    assert_eq!(read(X2_KEY_PROFILE_FILE), "kp text\n");
+    assert_eq!(read(X2_NODE_MINUTE_FILE), "nm text\n");
+
+    let missing = dir.path().join("missing");
+    let error = write_x2_export(&missing, &export).unwrap_err();
+    assert_eq!(error.path, missing.join(X2_KEY_PROFILE_FILE));
+    assert_eq!(error.source.kind(), std::io::ErrorKind::NotFound);
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "{}: {}",
+            missing.join(X2_KEY_PROFILE_FILE).display(),
+            error.source
+        )
+    );
+}
+
+/// Asserts the example's flags: the shape accepted, in any order, and each refusal by its
+/// words. Catches a flag read into another's place, a second value taken over the first, a
+/// number that is not one, and a missing flag defaulted.
+#[test]
+fn the_export_flags_are_each_given_once() {
+    let parse = |v: &[&str]| parse_x2_export_args(v.iter().map(|s| s.to_string()));
+    let all = [
+        "--out",
+        "d",
+        "--before-ms",
+        "20",
+        "--sqlite",
+        "s.db",
+        "--from-ms",
+        "10",
+    ];
+    assert_eq!(
+        parse(&all),
+        Ok(X2ExportArgs {
+            sqlite: PathBuf::from("s.db"),
+            from_ms: 10,
+            before_ms: 20,
+            out: PathBuf::from("d"),
+        })
+    );
+    let refused = |v: &[&str]| parse(v).unwrap_err();
+    assert_eq!(refused(&["--out"]), "--out needs a value");
+    assert_eq!(
+        refused(&["--from-ms", "x"]),
+        "--from-ms is not a whole number"
+    );
+    assert_eq!(
+        refused(&["--before-ms", "-1"]),
+        "--before-ms is not a whole number"
+    );
+    assert_eq!(refused(&["--bogus", "1"]), "unknown argument \"--bogus\"");
+    for flag in ["--sqlite", "--from-ms", "--before-ms", "--out"] {
+        let mut twice = all.to_vec();
+        twice.extend([flag, "1"]);
+        assert_eq!(refused(&twice), format!("{flag} given twice"));
+    }
+    assert_eq!(refused(&all[2..]), "--out is required");
+    assert_eq!(refused(&all[..6]), "--from-ms is required");
+    assert_eq!(
+        refused(&[&all[..4], &all[6..]].concat()),
+        "--sqlite is required"
+    );
+    assert_eq!(
+        refused(&[&all[..2], &all[4..]].concat()),
+        "--before-ms is required"
+    );
 }

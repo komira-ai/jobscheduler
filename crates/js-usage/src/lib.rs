@@ -116,7 +116,10 @@ pub use tail::{
     NoTail, StoreTailSink, TAIL_BUCKETS, TAIL_PREFIX, TAIL_ROW_VERSION, TAIL_WRITE_TRIES,
     TailDelta, TailFlush, TailRowError, TailSink, TailSinkCounters, TailSinkError, TailTotals,
 };
-pub use x2_export::{X2_PLATFORM, X2Counts, X2Export, X2Skipped, x2_export};
+pub use x2_export::{
+    X2_KEY_PROFILE_FILE, X2_NODE_MINUTE_FILE, X2_PLATFORM, X2Counts, X2Export, X2ExportArgs,
+    X2Skipped, X2WriteError, parse_x2_export_args, write_x2_export, x2_export,
+};
 
 /// Wall minutes in an hour: the unit a node series is stored in (one row per hour).
 pub const MINUTES_PER_HOUR: u64 = 60;
