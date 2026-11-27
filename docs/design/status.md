@@ -37,7 +37,7 @@ Columns:
 | rollout.md | 21 | 5 | 4 | 3 | - |
 | risks-f.md | 16 | 2 | 5 | 3 | komira-ai/jobscheduler#1150, komira-ai/jobscheduler#1152, komira-ai/jobscheduler#1172, komira-ai/jobscheduler#1174 |
 | merged-code.md | 34 | 15 | 5 | 3 | komira-ai/jobscheduler#1168, komira-ai/jobscheduler#1169, komira-ai/jobscheduler#1170, komira-ai/jobscheduler#1171 |
-| jobscheduler-design.md | 82 | 38 | 20 | 7 | komira-ai/jobscheduler#1153, komira-ai/jobscheduler#1154, komira-ai/jobscheduler#1155, komira-ai/jobscheduler#1156, komira-ai/jobscheduler#1157, komira-ai/jobscheduler#1158, komira-ai/jobscheduler#1174 |
+| jobscheduler-design.md | 82 | 39 | 19 | 7 | komira-ai/jobscheduler#1153, komira-ai/jobscheduler#1154, komira-ai/jobscheduler#1155, komira-ai/jobscheduler#1156, komira-ai/jobscheduler#1157, komira-ai/jobscheduler#1158, komira-ai/jobscheduler#1174 |
 | pools-providers-network.md | 30 | 6 | 8 | 10 | - |
 | job-rootfs.md | 17 | 3 | 2 | 9 | komira-ai/jobscheduler#1159 |
 | job-retry-and-completion-callback.md | 17 | 12 | 0 | 1 | komira-ai/jobscheduler#1150, komira-ai/jobscheduler#1193 |
@@ -320,7 +320,7 @@ As read: Current entry-point design doc (target plus as-built notes); not supers
 | 3.1 Other container platforms; 3.7; step 24 | Kubernetes, Cloud Run, ECS platforms | no | - |
 | 3.1 Job network policy; steps 12-14, 16 | crun networking wired: network and ports fields, ceilings, DNAT forwards, Podman firewall retired | `crates/js-agent/src/egress/forward.rs:7`, `crates/js-agent/src/cli.rs:421-433` | komira-ai/jobscheduler#668 |
 | step 15 / 5.8 macOS mapping | open value on --native-network, level mapping, ports refused, root test for inbound filtering by uid | partly: `crates/js-agent/src/native/network.rs:46-132` | komira-ai/jobscheduler#679 |
-| 3.1 macOS runtime; step 17; 12.2 Macs | One image definition on both platforms: native body folded in; stage inputs and collecting outputs | partly: `crates/js-agent-wire/src/command.rs:233`, `crates/js-agent/src/native/mod.rs:111` | komira-ai/jobscheduler#1154 (new) |
+| 3.1 macOS runtime; step 17; 12.2 Macs | One image definition on both platforms: native body folded in; stage inputs and collecting outputs | `crates/js-lease-server/src/job_start.rs:336`, `crates/js-agent/src/lifecycle/machine/mod.rs:661`, `crates/js-agent/src/native/put.rs:11`; stage inputs superseded: `docs/design/job-rootfs.md:927` | komira-ai/jobscheduler#1154 |
 | 3.1 macOS runtime | A job cannot ask for a VM on macOS | partly: `crates/js-agent-wire/src/kind.rs:15`, `crates/js-vmm` | komira-ai/jobscheduler#1155 (new) |
 | 3.1 Agent | Per-run start/stop dropped from the agent wire (rest of step 28) | partly: `crates/js-agent-wire/src/command.rs:265`, `crates/js-agent/src/lifecycle/machine/mod.rs:239` | komira-ai/jobscheduler#1156 (new) |
 | 3.5 provider table | lambdalabs row 'Partly built: built as ElasticProvider' | `crates/js-provider-lambdalabs` | komira-ai/jobscheduler#652 |
