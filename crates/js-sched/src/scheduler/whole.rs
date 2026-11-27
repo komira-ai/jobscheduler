@@ -439,7 +439,10 @@ impl Scheduler {
         let end = self.end_times(operation, (start, host_end));
         let unknown = end == (u64::MAX, None);
         match ceiling.filter(|_| unknown) {
-            Some(ceiling) => (self.floored(start.saturating_add(ceiling), None), true),
+            Some(ceiling) => (
+                self.overdue_floor(start.saturating_add(ceiling), None),
+                true,
+            ),
             None => (end, unknown),
         }
     }
@@ -449,7 +452,7 @@ impl Scheduler {
     /// unknown when the key has none) of a lease of `operation` started at `start`.
     ///
     /// A lease whose end (its estimate cut to its bound, else its bound) is now or already
-    /// past is read as ending the margin from now ([`Scheduler::floored`]).
+    /// past is read as ending the margin from now ([`Scheduler::overdue_floor`]).
     fn end_times(
         &self,
         operation: OperationId,
@@ -464,7 +467,7 @@ impl Scheduler {
             .admission
             .wall_minutes_p90(key)
             .map(|minutes| start.saturating_add(u64::from(minutes).saturating_mul(60_000)));
-        self.floored(bound, estimate)
+        self.overdue_floor(bound, estimate)
     }
 
     /// `bound` and `estimate` of a lease as the scheduler reads them. A lease whose end (the
@@ -474,7 +477,7 @@ impl Scheduler {
     /// estimate is dropped. It never reads as ending now, so a worker whose leases are late
     /// never looks cheaper to drain than one whose leases end within the margin. A lease
     /// that ends after now keeps its own times, however soon.
-    fn floored(&self, bound: u64, estimate: Option<u64>) -> (u64, Option<u64>) {
+    fn overdue_floor(&self, bound: u64, estimate: Option<u64>) -> (u64, Option<u64>) {
         let now = self.now.as_millis();
         if estimate.map_or(bound, |estimate| estimate.min(bound)) <= now {
             return (now.saturating_add(self.overdue_margin_ms()), None);
@@ -484,7 +487,7 @@ impl Scheduler {
 
     /// The end of each lease held or placed this round, as farm milliseconds: its estimate
     /// cut to its bound, else its bound, and the margin from now for a lease at or past that
-    /// end ([`Scheduler::floored`]); `None` for a lease with neither. A lease placed this
+    /// end ([`Scheduler::overdue_floor`]); `None` for a lease with neither. A lease placed this
     /// round starts now.
     pub(super) fn lease_ends(
         &self,
