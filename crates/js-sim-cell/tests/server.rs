@@ -131,6 +131,10 @@ fn agents_register_through_the_real_hello_and_are_listed_by_the_registry() {
         .map(|i| answered(&cell, i, Route::Hello, 429))
         .sum();
     assert_eq!(refused, 0);
+    // The cell reads the listing again only at a step after it is due, and welcomed agents
+    // are quiet until their first heartbeat: settling reads it now.
+    cell.settle(Duration::ZERO)
+        .expect("nothing is left to settle");
     assert_eq!(cell.observations().server.hosts.len(), REGISTER_HOSTS);
     let server = cell.server().expect("a server").server();
     assert_eq!(server.map(|server| server.agent_errors()), Some(0));
@@ -558,6 +562,27 @@ fn a_host_presenting_another_hosts_certificate_is_refused_and_never_seated() {
     run_to(&mut cell, 3_000);
     assert_eq!(listed(&cell), [("h000".to_owned(), HostState::Live)]);
     assert!(answered(&cell, 1, Route::Hello, 403) > 0);
+    assert_eq!(answered(&cell, 1, Route::Hello, 200), 0);
+}
+
+/// Asserts that the real limiter keys a hello on the certificate it presents, not on the host
+/// the hello names: with a burst of one, a host presenting another host's certificate
+/// (`join_presenting`) draws on that host's bucket, so of the two hellos sent at once one is
+/// refused 429 with a wait to come back after (`Retry-After`), and the presenting host is
+/// never seated. Catches a limiter keyed on the hello's host id, which would give each its
+/// own bucket and refuse neither.
+#[test]
+fn a_host_presenting_another_hosts_certificate_draws_on_its_hello_bucket() {
+    let mut cell = cell(
+        "presenting-limited",
+        pool(2).hello_burst(1),
+        1,
+        Faults::default(),
+    );
+    cell.join_presenting(0).expect("a host is added");
+    run_to(&mut cell, 3_000);
+    let waited: u64 = (0..2).map(|i| answered(&cell, i, Route::Hello, 429)).sum();
+    assert!(waited > 0, "no hello was refused with a wait");
     assert_eq!(answered(&cell, 1, Route::Hello, 200), 0);
 }
 

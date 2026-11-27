@@ -120,7 +120,7 @@ fn a_lost_usage_row_fails_the_one_row_per_ended_allocation_invariant() {
         failure(UsageReadFault::DropRow),
         (
             Invariant::UsageRowPerEndedAllocation,
-            "job sim-job-2 freed on host h005 at 25068 has 0 usage rows, not one".to_owned()
+            "job sim-job-2 freed on host h005 at 25056 has 0 usage rows, not one".to_owned()
         )
     );
 }
@@ -134,7 +134,7 @@ fn a_doubled_usage_row_fails_the_one_row_per_ended_allocation_invariant() {
         failure(UsageReadFault::DoubleRow),
         (
             Invariant::UsageRowPerEndedAllocation,
-            "job sim-job-2 freed on host h005 at 25068 has 2 usage rows, not one".to_owned()
+            "job sim-job-2 freed on host h005 at 25056 has 2 usage rows, not one".to_owned()
         )
     );
 }
