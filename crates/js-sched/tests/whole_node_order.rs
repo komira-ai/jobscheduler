@@ -1,7 +1,8 @@
-//! Which worker a blocked whole-machine request holds: by leases and booking alone, as a
-//! scheduler built with [`Scheduler::new`] does, or by drain cost once it is given
-//! whole-node settings ([`Scheduler::with_whole_node`]). Every time here is farm time fed
-//! to the scheduler; the longest a lease may run is a value handed to it, never waited for.
+//! Which worker a blocked whole-machine request holds: by drain cost (the least tail, then
+//! the fewest leases), with or without whole-node settings ([`Scheduler::with_whole_node`]);
+//! without them one request holds a worker per pool and the rest wait. Every time here is
+//! farm time fed to the scheduler; the longest a lease may run is a value handed to it,
+//! never waited for.
 
 #[macro_use]
 #[path = "booked/mod.rs"]
@@ -40,13 +41,42 @@ fn one_long_two_short(s: Scheduler) -> Farm {
 }
 
 both_rules! {
-/// Catches: the choice of the held worker changed for a scheduler without whole-node
-/// settings: it holds the one with the fewest leases (`b`, one lease), whatever its
-/// leases are still to run.
-fn without_settings_the_worker_with_fewest_leases_is_held() {
+/// Catches: a scheduler without whole-node settings holding by the fewest leases and the
+/// booking instead of by drain cost: `b` has one lease but it runs an hour, `a` has two
+/// that end within a minute, and the request holds `a`, the least tail.
+fn without_settings_the_worker_with_the_least_tail_is_held() {
     let mut f = one_long_two_short(Scheduler::new(1).with_load_config(booked::current()));
     let whole = f.whole();
+    assert_eq!(f.held_for(whole), Some(&w("a")));
+}
+}
+
+both_rules! {
+/// Catches: the tie of the drain order broken wrongly without whole-node settings: every
+/// lease has no wall time, so no tail is known and the worker with the fewest leases is
+/// held (`b`, one lease against `a`'s two).
+fn without_settings_unknown_tails_fall_back_to_the_fewest_leases() {
+    let mut f = Farm::new(Scheduler::new(1).with_load_config(booked::current()));
+    f.worker("a");
+    f.place_on("a", None);
+    f.place_on("a", None);
+    f.worker("b");
+    f.place_on("b", None);
+    let whole = f.whole();
     assert_eq!(f.held_for(whole), Some(&w("b")));
+}
+}
+
+both_rules! {
+/// Catches: a second whole-machine request without whole-node settings holding a worker of
+/// the pool while the first does: only the first in queue order holds (`a`, the least
+/// tail), the second holds nothing and waits.
+fn without_settings_a_second_request_holds_nothing() {
+    let mut f = one_long_two_short(Scheduler::new(1).with_load_config(booked::current()));
+    let first = f.whole();
+    let second = f.whole();
+    assert_eq!(f.held_for(first), Some(&w("a")));
+    assert_eq!(f.held_for(second), None);
 }
 }
 

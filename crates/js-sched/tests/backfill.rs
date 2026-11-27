@@ -300,10 +300,11 @@ fn a_worker_held_for_an_owner_action_takes_backfill_by_its_tail() {
     assert_eq!(job(&mut f, Some(secs(600))), None);
 }
 
-/// Catches: a hold made without whole-node settings given a start time. Without them the
-/// hold has none, so even with bounds enforced nothing backfills there.
+/// Catches: a hold made without whole-node settings given no start time. Without them the
+/// hold takes its start from the same tail (600 s), so with bounds enforced a job of 300 s
+/// backfills there and one of 600 s does not.
 #[test]
-fn without_whole_node_settings_a_hold_takes_no_backfill() {
+fn without_whole_node_settings_a_hold_takes_backfill_by_its_tail() {
     let s = Scheduler::new(1)
         .with_load_config(booked::booked())
         .with_backfill(Backfill::enforced(DAY));
@@ -311,7 +312,8 @@ fn without_whole_node_settings_a_hold_takes_no_backfill() {
     marked(&mut f);
     f.at(10_000);
     f.beat();
-    assert_eq!(job(&mut f, Some(secs(1))), None);
+    assert_eq!(job(&mut f, Some(secs(300))), Some(w("a")));
+    assert_eq!(job(&mut f, Some(secs(600))), None);
 }
 
 /// Catches: a worker held outside the scheduler ([`Scheduler::reserve_outside`]) open to
