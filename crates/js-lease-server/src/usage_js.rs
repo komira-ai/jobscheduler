@@ -4,8 +4,19 @@
 //! A reading goes into the [`Recorder`], which judges it (a lying node, a resend, a
 //! counter that went back) and keeps the node's minute being built. A flush moves the
 //! closed wall minutes into a [`NodeBuffer`] and writes the buffer through
-//! [`NodeSeries`]; a minute leaves the buffer only when its write succeeded. A prune
-//! removes hours past [`js_usage::NODE_RETENTION_MINUTES`].
+//! [`NodeSeries`], as this instance ([`InstanceTag`]): a minute another instance sharing the
+//! store wrote first is kept beside its part, not over it. A minute leaves the buffer only
+//! when its write succeeded. A prune removes hours past [`js_usage::NODE_RETENTION_MINUTES`].
+//!
+//! The daily prune has two halves. The deletes of the shared rows (the node hours and the
+//! history records past retention) are a duty of the servers sharing the job store: the
+//! prune runs them only when it claims `periodic/usage-prune`
+//! ([`js_jobs::JobStore::claim_duty`]) for [`USAGE_PRUNE_PERIOD`], so one server deletes in a
+//! period and the others pass. A server whose usage rows are not in the job store (its own
+//! usage file, or no job service) is their one writer and deletes at each prune. The other
+//! half is this instance's own (the curves' day and the days its keys were used) and runs at
+//! every prune of every server. A server that claims the deletes and then fails one leaves
+//! them to the next period: rows past retention stay a day longer, and nothing is lost.
 //!
 //! The profile side: a run that ended cleanly goes into the [`ProfileStore`] under its
 //! key, which refits the key's curve; the daily prune tells the curves what day it is and
@@ -24,11 +35,13 @@
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use js_state::sqlite::{Options, SqliteStore};
 use js_state::{Store, SystemClock};
 use js_types::HostId;
 use js_types::sched::WorkKey;
+use js_usage::store::InstanceTag;
 use js_usage::{
     EndedHistory, EndedPage, EndedQuery, EndedRow, KeyProfile, NodeBuffer, NodeSeries,
     ProfileCurves, ProfileError, ProfileKey, ProfileStore, Recorder, RunSeries,
@@ -36,6 +49,7 @@ use js_usage::{
 use tracing::info;
 
 use crate::error::StartupError;
+use crate::job_store::ServerJobs;
 use crate::usage::{
     HostLimits, LoadIn, NodeRow, Observation, RunEnd, SinkCounters, UsageFault, UsageSink,
 };
@@ -51,6 +65,14 @@ pub(crate) fn no_names() -> NameMap {
     Arc::new(|_| None)
 }
 
+/// The periodic duty of the deletes of the usage prune, as the servers claim it.
+const USAGE_PRUNE: &str = "usage-prune";
+
+/// How long a claim of the usage prune keeps the other servers off it: a day less an hour, so
+/// that the prune of each server's next day, run at its first tick of the day, finds the
+/// claim of the day before due though the servers' clocks and ticks are some minutes apart.
+pub(crate) const USAGE_PRUNE_PERIOD: Duration = Duration::from_secs(23 * 3600);
+
 /// Where the usage store is and how large the profile part of it may grow.
 #[derive(Clone)]
 pub(crate) struct StoreSetup {
@@ -60,6 +82,11 @@ pub(crate) struct StoreSetup {
     pub(crate) history_retention_days: u64,
     /// How admission's curve reads find the profile of a work key.
     pub(crate) names: NameMap,
+    /// The name of this instance's own rows of the node series.
+    pub(crate) instance: InstanceTag,
+    /// The job store whose `usage-prune` duty the prune's deletes are claimed by, when the
+    /// usage rows are in it; `None` deletes at every prune.
+    pub(crate) prune_duty: Option<Arc<ServerJobs>>,
 }
 
 /// The sink over the state store `kept` when there is one (the usage rows are keys of the
@@ -92,11 +119,15 @@ fn sink_over(
 ) -> Result<Arc<dyn UsageSink>, StartupError> {
     let usage = NodeUsage::over(store, setup.profile_store_bytes, today, setup.names.clone())
         .map_err(StartupError::because("--usage-db"))?
-        .with_history_retention_days(setup.history_retention_days);
+        .with_history_retention_days(setup.history_retention_days)
+        .writing_as(setup.instance.clone())
+        .with_prune_duty(setup.prune_duty.clone());
     info!(
         db = %setup.db.display(),
         profile_store_bytes = setup.profile_store_bytes,
         history_retention_days = setup.history_retention_days,
+        instance = %setup.instance,
+        prune_claimed = setup.prune_duty.is_some(),
         "usage is recorded"
     );
     Ok(Arc::new(usage))
@@ -124,6 +155,11 @@ pub(crate) struct NodeUsage {
     inner: Mutex<Inner>,
     /// How long a record of an ended allocation is kept, in milliseconds.
     history_retention_ms: u64,
+    /// The instance the node series is written as; `None` writes it as the one writer.
+    instance: Option<InstanceTag>,
+    /// The job store the prune's deletes claim the `usage-prune` duty of; `None` deletes at
+    /// every prune.
+    prune_duty: Option<Arc<ServerJobs>>,
 }
 
 fn fault(err: impl std::fmt::Display) -> UsageFault {
@@ -150,7 +186,62 @@ impl NodeUsage {
                 profiles,
             }),
             history_retention_ms: DEFAULT_HISTORY_RETENTION_DAYS * MILLIS_PER_DAY,
+            instance: None,
+            prune_duty: None,
         })
+    }
+
+    /// The same sink, writing the node series as the instance `instance`.
+    pub(crate) fn writing_as(self, instance: InstanceTag) -> Self {
+        Self {
+            instance: Some(instance),
+            ..self
+        }
+    }
+
+    /// The same sink, its prune's deletes claimed by the `usage-prune` duty of `jobs` when
+    /// there is one.
+    pub(crate) fn with_prune_duty(self, jobs: Option<Arc<ServerJobs>>) -> Self {
+        Self {
+            prune_duty: jobs,
+            ..self
+        }
+    }
+
+    /// The node series over the store, as this instance when it has a name.
+    fn series(&self) -> NodeSeries<'_> {
+        let series = NodeSeries::new(&*self.store);
+        match &self.instance {
+            Some(instance) => series.with_instance(instance),
+            None => series,
+        }
+    }
+
+    /// Whether this server runs the prune's deletes now: always without a duty, else when it
+    /// claims the `usage-prune` duty for [`USAGE_PRUNE_PERIOD`].
+    fn prune_claimed(&self) -> Result<bool, UsageFault> {
+        match &self.prune_duty {
+            None => Ok(true),
+            Some(jobs) => jobs
+                .claim_duty(USAGE_PRUNE, USAGE_PRUNE_PERIOD)
+                .map_err(fault),
+        }
+    }
+
+    /// The prune's deletes of the shared rows: the node hours past retention and the history
+    /// records older than `--history-retention-days`, when this server claims them.
+    fn prune_store(&self, now_minute: u64) -> Result<(), UsageFault> {
+        if !self.prune_claimed()? {
+            return Ok(());
+        }
+        let series = NodeSeries::new(&*self.store);
+        series.prune(now_minute).map_err(fault)?;
+        let now_ms = now_minute.saturating_mul(MILLIS_PER_MINUTE);
+        let history = EndedHistory::new(&*self.store);
+        history
+            .prune(now_ms, self.history_retention_ms)
+            .map(drop)
+            .map_err(fault)
     }
 
     /// The same sink, keeping a record of an ended allocation for `days` days
@@ -200,25 +291,24 @@ impl UsageSink for NodeUsage {
         for (host, row) in &due {
             inner.buffer.push(host.clone(), *row);
         }
-        let series = NodeSeries::new(&*self.store);
-        inner.buffer.flush(&series).map_err(fault)?;
+        inner.buffer.flush(&self.series()).map_err(fault)?;
         Ok(due)
     }
 
+    /// This instance's half first (the curves' day and the days its keys were used), then the
+    /// deletes of the shared rows when this server claims them; the first failure is
+    /// returned, and a failure of one half does not skip the other.
     fn prune(&self, now_minute: u64) -> Result<(), UsageFault> {
-        let series = NodeSeries::new(&*self.store);
-        series.prune(now_minute).map_err(fault)?;
-        let now_ms = now_minute.saturating_mul(MILLIS_PER_MINUTE);
-        let history = EndedHistory::new(&*self.store);
-        history
-            .prune(now_ms, self.history_retention_ms)
-            .map_err(fault)?;
-        let mut inner = self.inner();
-        inner
-            .profiles
-            .curves()
-            .set_today(now_minute / MINUTES_PER_DAY);
-        inner.profiles.persist_touches().map(drop).map_err(fault)
+        let mine = {
+            let mut inner = self.inner();
+            inner
+                .profiles
+                .curves()
+                .set_today(now_minute / MINUTES_PER_DAY);
+            inner.profiles.persist_touches().map(drop).map_err(fault)
+        };
+        let shared = self.prune_store(now_minute);
+        mine.and(shared)
     }
 
     fn node_rows(

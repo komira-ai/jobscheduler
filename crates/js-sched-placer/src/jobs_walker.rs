@@ -30,9 +30,13 @@ pub(super) struct Walker {
     pub(super) wall: Duration,
     pub(super) charge: Prediction,
     /// The CPU curve the job books by when it leaves its CPU at 0 and its class passes its
-    /// checks under `--placement-curves on` ([`super::Engine::shaped`]); `None`: it books its
-    /// flat number at every slot. The booking it is stored with is its flat number either way.
+    /// checks under `--placement-curves on`, or would book by under `shadow`
+    /// ([`super::Engine::shaped`]); `None`: it books its flat number at every slot. The booking
+    /// it is stored with is its flat number either way.
     pub(super) curve: Option<Shaped>,
+    /// Its class's name, for the curve mode's lines, under `--placement-curves shadow` and
+    /// `on`; `None` under `off`.
+    pub(super) class: Option<String>,
 }
 
 /// The queued `job` as a pass offers it to the engine at `now`; `None` for a job that books the
@@ -68,5 +72,6 @@ pub(super) fn walker(job: &JobRecord, now: FarmTime) -> Option<Walker> {
         wall: Duration::from_secs(job.spec.wall_limit_secs),
         charge,
         curve: None,
+        class: None,
     })
 }

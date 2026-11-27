@@ -67,7 +67,7 @@ pub const WITH: [(&str, &str); 12] = [
     ),
     ("tailscale-tags", "${{ vars.CP_DEPLOY_TAILSCALE_TAGS }}"),
     ("version", "${{ needs.plan.outputs.version }}"),
-    ("wait-minutes", "60"),
+    ("wait-minutes", "90"),
 ];
 
 /// The keys of `cp-deploy`, sorted: it has no runner, steps, secrets, matrix or `env:` of its own.

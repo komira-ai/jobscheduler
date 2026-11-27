@@ -386,10 +386,11 @@ fn a_list_file_that_cannot_be_read_stops_the_start() {
 }
 
 /// A choice flag with a value that is none of its choices names the flag and the choices,
-/// and `--read-model allow` is refused as not available yet. It catches a typo taken for a
-/// default and an allow-list profile that is promised and not there.
+/// and `--read-model` takes `allow` as it takes `open`, and without `--bundle-store` neither.
+/// It catches a typo taken for a default, an allow-list read model refused at start, and a
+/// read model given to an agent with no bundle, which no run would read by.
 #[test]
-fn choices_are_checked_and_the_allow_read_model_is_not_available() {
+fn choices_are_checked_and_both_read_models_are_taken() {
     for (flag, value, names) in [
         ("--bundle-pull", "always", "never, missing"),
         ("--bundle-trust", "any", "list, digest"),
@@ -398,13 +399,12 @@ fn choices_are_checked_and_the_allow_read_model_is_not_available() {
         let why = refused(&with(&[flag, value]));
         assert_eq!(why, format!("{flag}: \"{value}\" is none of {names}"));
     }
-    let why = refused(&with(&["--read-model", "allow"]));
-    assert!(
-        why.starts_with("--read-model: allow is not available yet"),
-        "{why}"
-    );
+    let allow = checked(&with(&["--read-model", "allow"])).unwrap().unwrap();
+    assert_eq!(allow.read_model, ReadModel::Allow);
     let open = checked(&with(&["--read-model", "open"])).unwrap().unwrap();
     assert_eq!(open.read_model, ReadModel::Open);
+    let alone = Settings::from_cli(&cli(&["--read-model", "allow"]), &mac(), &*host());
+    assert_eq!(alone.unwrap_err(), "--read-model: needs --bundle-store");
 }
 
 /// The start checks of the machine are asked of the store and the scratch root, and what
