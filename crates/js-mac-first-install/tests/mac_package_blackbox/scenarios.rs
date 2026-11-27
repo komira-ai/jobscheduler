@@ -14,7 +14,7 @@ use js_testkit::dir::TestDir;
 
 use crate::farm;
 use crate::host::{HOST_ID, LeaseServer, NATIVE_ACCOUNTS, studio_with};
-use crate::hostkeeper::{AGENT, Daemon, RUN, SERVICE, STATE_DIR, current_link, service_dir};
+use crate::hostkeeper::{AGENT, Daemon, SERVICE, STATE_DIR, current_link, service_dir};
 use crate::jobs;
 use crate::look::{Diagnose, launchd_pid, launchd_state};
 use crate::neighbours::Tierstore;
@@ -119,10 +119,10 @@ fn assert_succeeded(what: &str, done: &Finished) {
     assert_eq!(done.reason, None, "{what}: {done:?}");
 }
 
-/// The agent and the jobs of its package run under launchd, and the host is live with the agent
-/// of `version`.
+/// The agent and its root helper run under launchd (the package's third job, the pf anchor's,
+/// loads the anchor and exits), and the host is live with the agent of `version`.
 fn assert_runs(what: &str, server: &LeaseServer, version: &str) {
-    for label in RUN {
+    for label in ["js-agent", "js-agent.session"] {
         assert_eq!(
             launchd_state(label).as_deref(),
             Some("running"),
