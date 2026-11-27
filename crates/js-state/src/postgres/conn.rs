@@ -5,10 +5,21 @@
 //! call, connect and drop. Tokio panics ("Cannot start a runtime from within a runtime")
 //! when that happens on a thread a runtime is running tasks on, and a panic in a
 //! destructor during unwinding aborts the process. The store's calls are blocking by
-//! design (as the SQLite store's are) and the scheduler calls them from async tasks, so
-//! every client call goes through [`off_runtime`]: where a runtime is current, the call
-//! runs on a short-lived scoped thread that has none, and the caller waits for it, as it
-//! would wait on the socket. Where no runtime is current the call runs in place.
+//! design (as the SQLite store's are), so every client call goes through [`off_runtime`],
+//! which makes it where the client may block:
+//!
+//! - outside any runtime, and on a thread of a multi-thread runtime's pool for blocking
+//!   calls (where the lease server makes every store call), in place;
+//! - on a task of a multi-thread runtime, or on the thread that blocks on one, in place too,
+//!   with the runtime's work handed to another thread meanwhile
+//!   ([`tokio::task::block_in_place`]);
+//! - on a current-thread runtime, which can hand its work to no other thread (tests), on a
+//!   short-lived scoped thread that has no runtime, which the caller waits for, as it would
+//!   wait on the socket.
+//!
+//! Only the last starts a thread, and each one is counted: a thread started per statement,
+//! thousands a second under load, wakes every thread of the process (a thread's start and end
+//! take the process's memory map lock, which every page fault waits on).
 //!
 //! [`Conn::connect`] is the one place a connection is made: with the configuration's TLS
 //! ([`super::tls`]) and network limits, and, for the store's own sessions, its server limits
@@ -26,21 +37,30 @@ use postgres::error::SqlState;
 use postgres::fallible_iterator::FallibleIterator;
 use postgres::types::ToSql;
 use postgres::{Client, Config, Row, Statement, ToStatement};
+use tokio::runtime::RuntimeFlavor;
 
 use super::tls::{Tls, TlsError};
 use crate::Notice;
 
-/// Runs `f` on a thread that is not inside a tokio runtime and returns its result, adding one
-/// to `moved` for each thread started for it. A panic in `f` is raised again in the caller.
+/// Runs `f` where it may block on a runtime of its own (see the module documentation) and
+/// returns its result, adding one to `moved` for each thread started for it. A panic in `f` is
+/// raised again in the caller.
 pub(super) fn off_runtime<R: Send>(moved: &AtomicU64, f: impl FnOnce() -> R + Send) -> R {
-    if tokio::runtime::Handle::try_current().is_err() {
-        return f();
+    let flavor = tokio::runtime::Handle::try_current().map(|runtime| runtime.runtime_flavor());
+    match flavor {
+        Err(_) => f(),
+        // On a thread of the pool for blocking calls this runs `f` as it is; on a task or the
+        // thread that blocks on the runtime it first hands the runtime's work to another
+        // thread. Either way the client's own runtime may run here.
+        Ok(RuntimeFlavor::MultiThread) => tokio::task::block_in_place(f),
+        Ok(_) => {
+            moved.fetch_add(1, Ordering::Relaxed);
+            thread::scope(|scope| match scope.spawn(f).join() {
+                Ok(result) => result,
+                Err(panic) => resume_unwind(panic),
+            })
+        }
     }
-    moved.fetch_add(1, Ordering::Relaxed);
-    thread::scope(|scope| match scope.spawn(f).join() {
-        Ok(result) => result,
-        Err(panic) => resume_unwind(panic),
-    })
 }
 
 type Params<'a> = &'a [&'a (dyn ToSql + Sync)];
