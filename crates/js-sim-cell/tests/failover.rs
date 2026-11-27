@@ -18,17 +18,17 @@
 mod failover;
 
 use js_sim_cell::{
-    AcquireAnswer, AcquireSeen, Checker, CloudFacts, EarlierSeen, Invariant, Observations,
-    Scenario, Touched,
+    AcquireAnswer, AcquireSeen, Checker, CloudFacts, EarlierSeen, Invariant, Observations, Touched,
+    run_seed_range_on_threads,
 };
 use js_types::sched::FarmTime;
 
 /// How many seeds each scenario runs.
 const SEEDS: u64 = 16;
 
-/// How many threads the headline's seeds run on, a quarter each: it is the family's
-/// largest scenario by far.
-const THREADS: u64 = 4;
+/// How many threads the headline's seeds run on ([`run_seed_range_on_threads`]): it is the
+/// family's largest scenario by far. `.config/nextest.toml` reserves this many slots for it.
+const THREADS: usize = 4;
 
 /// The headline (no row of section 8; design 5.6 steps 4 and 5, and section 7, "Scaler
 /// double launch"): the design's 200 hosts at a tenth, so that sixteen seeds run in the
@@ -42,7 +42,7 @@ const THREADS: u64 = 4;
 /// share. Its seeds run on [`THREADS`] threads.
 #[test]
 fn two_hundred_hosts_three_providers_kill_ten_agents_and_partition_thirty_seconds() {
-    on_threads(failover::headline);
+    run_seed_range_on_threads(failover::headline, 0..SEEDS, THREADS);
 }
 
 /// Design 5.6, pass 1 before pass 2 (no row of section 8): with 4 jobs for 6 registered
@@ -198,25 +198,4 @@ fn flagged(observations: &Observations) -> Vec<Invariant> {
     let mut flagged: Vec<Invariant> = found.iter().map(|v| v.invariant).collect();
     flagged.dedup();
     flagged
-}
-
-/// Runs the seeds of the scenario `make` builds on [`THREADS`] threads, each building its
-/// own scenario over its share of the seeds, and fails with the first failure.
-fn on_threads(make: fn() -> Scenario) {
-    let parts: Vec<_> = (0..THREADS)
-        .map(|part| {
-            let seeds = part * SEEDS / THREADS..(part + 1) * SEEDS / THREADS;
-            std::thread::spawn(move || {
-                let ran = make().try_run_seed_range(seeds);
-                ran.map(|_| ()).map_err(|failure| failure.to_string())
-            })
-        })
-        .collect();
-    for part in parts {
-        match part.join() {
-            Ok(Ok(())) => {}
-            Ok(Err(failure)) => panic!("{failure}"),
-            Err(panicked) => std::panic::resume_unwind(panicked),
-        }
-    }
 }

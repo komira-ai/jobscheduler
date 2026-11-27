@@ -53,6 +53,7 @@ mod integrity;
 mod jobs;
 mod join_round_trip;
 mod lifecycle;
+mod mac_allow;
 mod mac_supervisor;
 #[cfg(target_os = "linux")]
 mod memory_series;

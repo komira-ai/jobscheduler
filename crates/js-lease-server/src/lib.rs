@@ -738,7 +738,9 @@
 //! earlier release wrote are read as they were written.
 //!
 //! Every tick acts by the wall clock of the server: the sink is flushed every five
-//! minutes and once more at shutdown, and pruned at the first tick and once a day. A
+//! minutes and once more at shutdown, and pruned at the first tick and once a day; with the
+//! usage rows in the store of the job service, the prune's deletes are run by the one server
+//! that claims the `usage-prune` duty in a period. A
 //! flush logs one `node minute` line for each node minute it closed and a warning for
 //! each node and minute that had readings dropped.
 //!
