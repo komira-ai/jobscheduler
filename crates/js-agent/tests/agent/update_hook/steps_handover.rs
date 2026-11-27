@@ -4,7 +4,8 @@
 //! that lists `egress-handover` too) and records it;
 //! `prepare` then places no cordon and waits for nothing; `cutover` and `rollback` write the
 //! handover file before they stop the unit, remove it once the unit is down, and never wait for
-//! the host to be idle. Every other host drains as before, and the outcome names the cause.
+//! the host to be idle. Every other host drains as before, and the outcome names the cause. A
+//! Mac's hand-over (launchd, the native runtime) has its cases in `steps_handover_native`.
 
 use std::path::PathBuf;
 
@@ -112,6 +113,9 @@ const NO_HANDOVER: &str = "the previous release's agent does not hand its jobs o
 const NO_KEEP: &str = "the host has an egress ceiling (or its flags file cannot be read) and the \
      previous release's agent does not keep the jobs' egress wiring \
      (no `egress-handover` on its `stops:` line)";
+/// Why a Mac whose previous agent does not leave its native runs drains.
+pub(super) const NO_NATIVE_LEAVE: &str = "the previous release's agent does not leave its native \
+     jobs to the next agent (no `native-handover` on its `stops:` line, or it could not be run)";
 const NO_ADOPT: &str = "the host has an egress ceiling (or its flags file cannot be read) and the \
      staged release's agent does not adopt the jobs' egress wiring \
      (no `egress-handover` on its `stops:` line)";
@@ -124,7 +128,8 @@ const KEEPS_EGRESS: &str =
 /// handover, and the cordon is placed) and that the detail of the success names the one
 /// condition that made it drain, in full: a previous agent from before the handover (its
 /// `--version` has no `stops:` line, or one without the handover, or cannot be run), a staged
-/// unit that differs, the container engine's runtime, and a Mac; and that a host that can hand
+/// unit that differs, the container engine's runtime, and a Mac whose agents list Linux's
+/// `handover` but not `native-handover`; and that a host that can hand
 /// over says nothing of a drain. Catches a handover asked of an agent that would drain on it,
 /// and a drain whose journal line leaves the operator guessing why.
 #[test]
@@ -174,9 +179,7 @@ fn every_host_that_cannot_hand_over_drains_and_says_why() {
             "mac",
             Rig::mac,
             |_, _| {},
-            Some(format!(
-                "{DRAINS}the host does not run the agent under systemd"
-            )),
+            Some(format!("{DRAINS}{NO_NATIVE_LEAVE}")),
         ),
         ("handover", Rig::new, |_, _| {}, Some(HANDOVER.to_owned())),
         (
