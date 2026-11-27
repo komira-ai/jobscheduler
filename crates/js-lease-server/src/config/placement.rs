@@ -11,10 +11,10 @@ use js_registry::PoolConfig;
 use js_sched::{Backfill, MemoryPercent};
 use js_sched_placer::sizes::{ColdCpuOn, ColdMemoryOn, ColdSize, Curves};
 
-use super::{CpuSlack, CurveSetting, PackLimit};
+use super::{Config, CpuSlack, CurveSetting, PackLimit, Tunings};
 use crate::clock::SharedClock;
 use crate::error::StartupError;
-use crate::file::Registering;
+use crate::file::{AgentKeys, Registering};
 use crate::sched::engine::Settings;
 use crate::sched::map;
 use crate::sched::place::SchedPlacer;
@@ -86,20 +86,56 @@ pub(crate) fn split(pool: PoolConfig) -> (PoolConfig, MemoryPercent) {
     (pool.booking_whole_memory(), percent)
 }
 
-/// The operator's two load settings of the placement engine: how far above a host's cores it
-/// may be charged, and how full a host is packed before the least full one is chosen.
+/// The operator's load settings of the placement engine: how far above a host's cores it
+/// may be charged, how full a host is packed before the least full one is chosen, and the
+/// scoring settings of [`Tunings`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct LoadSetting {
     /// `--cpu-slack`.
     pub(crate) cpu_slack: CpuSlack,
     /// `--pack-limit`.
     pub(crate) pack_limit: PackLimit,
+    /// `--score-balance`, `--score-slack-tolerance-ppm` and `--key-share-percent`, each as
+    /// given or `None`.
+    pub(crate) tunings: Tunings,
 }
 
 impl LoadSetting {
-    /// js-sched's load settings with both values and every other setting at its default.
+    /// The settings the `[server]` table gives, each absent one the engine's default.
+    pub(crate) fn of_file(keys: &AgentKeys) -> Self {
+        Self {
+            cpu_slack: keys.cpu_slack().unwrap_or_default(),
+            pack_limit: keys.pack_limit().unwrap_or_default(),
+            tunings: keys.tunings(),
+        }
+    }
+
+    /// js-sched's load settings with the values given and every other setting at its
+    /// default.
     fn load_config(self) -> js_sched::LoadConfig {
-        self.pack_limit.apply(self.cpu_slack.load_config())
+        let load = self.pack_limit.apply(self.cpu_slack.load_config());
+        self.tunings.apply(load)
+    }
+}
+
+impl Config {
+    /// The CPU slack of the placement engine (`--cpu-slack`, or `server.cpu_slack`): the
+    /// value given, or the engine's default, 1.1x.
+    pub fn cpu_slack(&self) -> CpuSlack {
+        self.agents.load.cpu_slack
+    }
+
+    /// The pack limit of the placement engine (`--pack-limit`, or `server.pack_limit`): the
+    /// value given, or the engine's default, 0.5.
+    pub fn pack_limit(&self) -> PackLimit {
+        self.agents.load.pack_limit
+    }
+
+    /// The scoring settings of the placement engine (`--score-balance`,
+    /// `--score-slack-tolerance-ppm` and `--key-share-percent`, or their keys of `[server]`):
+    /// each value given, `None` for each left to the engine's default.
+    pub fn tunings(&self) -> Tunings {
+        self.agents.load.tunings
     }
 }
 
@@ -208,6 +244,7 @@ mod tests {
         let load = LoadSetting {
             cpu_slack: CpuSlack::parse("1.5").unwrap(),
             pack_limit: PackLimit::parse("0.65").unwrap(),
+            tunings: Tunings::default(),
         };
         let made = settings_of(None, load, (memory, cold, Curves::Off));
         assert_eq!(made.load.pack_limit_permille, 650);
@@ -216,6 +253,34 @@ mod tests {
         assert_eq!(made.load.s_mem_permille, default.s_mem_permille);
         let plain = settings_of(None, LoadSetting::default(), (memory, cold, Curves::Off));
         assert_eq!(plain.load, default);
+    }
+
+    /// Behaviour: the settings the engine is built with carry the score balance, the slack
+    /// tolerance and the key share given, beside the CPU slack and the pack
+    /// limit given, and js-sched's defaults for the rest. Catches a tuning read and then
+    /// dropped before the engine, and one that resets the slack or the pack limit.
+    #[test]
+    fn the_tunings_reach_the_engine_settings() {
+        let (memory, cold) = (MemoryPercent::clamped(100), ColdSize::default());
+        let load = LoadSetting {
+            cpu_slack: CpuSlack::parse("1.2").unwrap(),
+            pack_limit: PackLimit::parse("0.8").unwrap(),
+            tunings: Tunings {
+                score_balance: Some(2),
+                score_slack_tolerance_ppm: Some(5_000),
+                key_share_percent: Some(50),
+            },
+        };
+        let made = settings_of(None, load, (memory, cold, Curves::Off));
+        let want = js_sched::LoadConfig {
+            s_cpu_permille: 200,
+            pack_limit_permille: 800,
+            score_balance: 2,
+            score_slack_tol_ppm: 5_000,
+            key_share_percent: 50,
+            ..js_sched::LoadConfig::default()
+        };
+        assert_eq!(made.load, want);
     }
 
     /// Asserts that the settings the engine is built with carry the `curves` mode given,
