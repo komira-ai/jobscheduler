@@ -94,6 +94,17 @@ impl Op {
     }
 }
 
+/// A notice of a write, sent to the processes that listen to the store ([`crate::Store::notify`]):
+/// the channel it is sent on and the text it carries (empty when the channel says all there is
+/// to say). Postgres limits a payload to 8000 bytes; a longer one is not sent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Notice {
+    /// The channel: the listeners of this name hear it.
+    pub channel: String,
+    /// What the notice carries.
+    pub payload: String,
+}
+
 /// Operations that commit together or not at all. Every precondition is judged against
 /// the store as it was before the transaction; the operations then apply in order.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

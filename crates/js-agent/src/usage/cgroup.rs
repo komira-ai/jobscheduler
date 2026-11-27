@@ -93,6 +93,12 @@ pub fn parse_active_file(text: &str) -> Option<u64> {
     parse_stat_key(text, "active_file")
 }
 
+/// `oom` of a `memory.events.local`: how many times the OOM killer ran for the group's own
+/// limit, not counting its descendants'.
+pub fn parse_oom_events(text: &str) -> Option<u64> {
+    parse_stat_key(text, "oom")
+}
+
 /// A file that holds one number, such as `memory.current`: surrounding white space is
 /// trimmed and nothing but digits may remain.
 pub fn parse_single_u64(text: &str) -> Option<u64> {

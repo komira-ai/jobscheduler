@@ -38,6 +38,7 @@ use js_types::sched::FarmTime;
 use tracing::info;
 
 use super::{CPU_STEP, JobSizes, class_name, host_share, micros, millis};
+use crate::telemetry::CurveChecks;
 
 /// The most classes whose profiles are kept: a class that starts beyond it evicts the class
 /// whose last run ended earliest.
@@ -115,6 +116,8 @@ impl ClassProfile {
 #[derive(Debug, Default)]
 pub(super) struct Profiles {
     classes: BTreeMap<Key, ClassProfile>,
+    /// How the checks of the runs freed while serving came out.
+    pub(super) checks: CurveChecks,
 }
 
 /// Makes room in `classes` for `key` under `cap` classes: when `key` is new and the map is full,
@@ -331,6 +334,9 @@ impl Profiles {
             )
         };
         if log {
+            let overran = |part: Part| part.checked.is_some_and(|c| c.overran == Some(true));
+            self.checks.cpu.count(cpu.status, overran(cpu));
+            self.checks.memory.count(memory.status, overran(memory));
             let class = class_name(job);
             let cpu = Shown::of(cpu, millicores);
             let memory = Shown::of(memory, mebibytes);

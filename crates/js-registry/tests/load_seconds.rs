@@ -15,6 +15,7 @@ fn wire(seq: u64, millis: Vec<u32>, pressure: Vec<u16>) -> Wire {
         cpu_usage_usec: 0,
         host_cpu_usec: None,
         host_cpu_pressure_some_usec: None,
+        actions_oom_events: None,
         working_set_bytes: 1 << 20,
         active_file_bytes: 0,
         host_nonfile_bytes: None,
@@ -103,4 +104,55 @@ fn a_lost_host_lists_no_seconds() {
     assert_eq!(lost.load_seconds, LoadSeconds::default());
     beat_with(&fx, a, Some(wire(3, vec![11], vec![12])));
     assert_eq!(view(&fx).load_seconds, seconds(&[11], &[12]));
+}
+
+fn with_oom(seq: u64, oom: Option<u64>) -> Wire {
+    Wire {
+        actions_oom_events: oom,
+        ..wire(seq, Vec::new(), Vec::new())
+    }
+}
+
+/// Asserts that the actions cgroup's OOM count is listed with the reading it came in: replaced
+/// by a newer reading's (including one with none), kept by an older or repeated reading, 0
+/// listed as 0, and cleared by a beat without a load and by a load that fails vetting. It
+/// catches a count that outlives its reading and one of an older reading beside a newer load.
+#[test]
+fn the_oom_count_follows_the_latest_reading() {
+    let fx = fixture(1);
+    let a = fx.join("a", "t");
+    assert_eq!(view(&fx).actions_oom_events, None);
+    beat_with(&fx, a, Some(with_oom(5, Some(3))));
+    assert_eq!(view(&fx).actions_oom_events, Some(3));
+    beat_with(&fx, a, Some(with_oom(4, Some(9))));
+    assert_eq!(view(&fx).actions_oom_events, Some(3));
+    beat_with(&fx, a, Some(with_oom(6, Some(0))));
+    assert_eq!(view(&fx).actions_oom_events, Some(0));
+    beat_with(&fx, a, Some(with_oom(7, None)));
+    assert_eq!(view(&fx).load.unwrap().seq, 7);
+    assert_eq!(view(&fx).actions_oom_events, None);
+    beat_with(&fx, a, Some(with_oom(8, Some(4))));
+    beat_with(&fx, a, None);
+    assert_eq!(view(&fx).load, None);
+    assert_eq!(view(&fx).actions_oom_events, None);
+    let mut huge = with_oom(9, Some(5));
+    huge.working_set_bytes = js_agent_wire::limits::MAX_MEMORY_BYTES + 1;
+    beat_with(&fx, a, Some(with_oom(9, Some(5))));
+    assert_eq!(view(&fx).actions_oom_events, Some(5));
+    beat_with(&fx, a, Some(Wire { seq: 10, ..huge }));
+    assert_eq!(view(&fx).load, None);
+    assert_eq!(view(&fx).actions_oom_events, None);
+}
+
+/// Asserts that a lost host lists no OOM count, as it lists no load, and that it is listed
+/// again with the old reading when a beat that repeats its `seq` revives the host.
+#[test]
+fn a_lost_host_lists_no_oom_count() {
+    let fx = fixture(1);
+    let a = fx.join("a", "t");
+    beat_with(&fx, a, Some(with_oom(3, Some(2))));
+    fx.pass_grace();
+    assert_eq!(view(&fx).actions_oom_events, None);
+    beat_with(&fx, a, Some(with_oom(3, Some(2))));
+    assert_eq!(view(&fx).actions_oom_events, Some(2));
 }

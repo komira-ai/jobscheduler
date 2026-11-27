@@ -4,7 +4,8 @@
 //! The wakes are their own ([`crate::held_beat::Wakes`] keeps one watch per host, and a later
 //! watch takes over from an earlier one): a host that polls dispatch also has its heartbeat
 //! held, and each needs a wake of its own when a job is placed on the host, so the pass wakes
-//! both ([`DispatchState::wakes`] beside the heartbeat's).
+//! both ([`DispatchState::wakes`] beside the heartbeat's), as another server's notice of a
+//! message for the host does ([`crate::listening`]).
 
 use std::sync::OnceLock;
 
@@ -20,7 +21,7 @@ pub(crate) struct DispatchState {
     /// How long a claim holds a message, and how a held poll is timed.
     pub(crate) times: DispatchTimes,
     /// The polls held open for a message, one watch per host; every placement the pass
-    /// commits wakes the host's.
+    /// commits wakes the host's, and so does another server's notice for the host.
     pub(crate) wakes: Wakes,
     /// The name this server claims messages by, set once the server knows where it listens.
     claimer: OnceLock<String>,
