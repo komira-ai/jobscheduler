@@ -5,12 +5,15 @@
 //! Each run the history observes is checked against its class's profiles as they stand, then
 //! learned, and a run freed while serving (not one read from the history at the start) logs one
 //! line with what the profiles predicted and what the run did. The sizes a job books
-//! ([`JobSizes::sized`]) are the same in every mode, and no profile is read by anything under
-//! [`Curves::Off`] and [`Curves::Shadow`]. Under [`Curves::On`] the placer reads a class's CPU
+//! ([`JobSizes::sized`]) are the same in every mode, and no profile is read by anything that
+//! places a job under [`Curves::Off`] and [`Curves::Shadow`]. Under [`Curves::On`] the placer reads a class's CPU
 //! profile when the class passes its four checks ([`JobSizes::curve_of`]), to book the job's CPU
 //! by curve on the curve hosts (`docs/design/placement-profiles-live.md`); the checks' state,
 //! the window of whether each run carried a usable CPU series (check 4), is kept here beside
-//! the profile and rebuilt with it.
+//! the profile and rebuilt with it. Under [`Curves::Shadow`] and [`Curves::On`] the memory
+//! shadow reads a class's memory profile ([`JobSizes::memory_curve_of`]) to project each host's
+//! memory and record where a booking that followed it would have placed a job differently; it
+//! books nothing.
 //!
 //! A run teaches its class's CPU profile when it succeeded, its CPU series is whole (it does not
 //! miss the run's start), the series agrees with the run's exact CPU time, and the run was not
@@ -26,8 +29,8 @@ use std::collections::BTreeMap;
 
 use js_jobs::{JobRecord, JobResult};
 use js_sizing::{
-    CPU_PRESSURE_MAX_PERMILLE, CPU_UNIT, Checked, Checks, Clamp, Curve, Key, MEMORY_UNIT, Outcome,
-    Profile, Run, RunSeries, SeriesWindow, series_agrees,
+    CPU_PRESSURE_MAX_PERMILLE, CPU_UNIT, Checked, Checks, Clamp, Curve, Key, MEMORY_UNIT,
+    MemoryCurve, Outcome, Profile, Run, RunSeries, SeriesWindow, series_agrees,
 };
 use js_types::sched::FarmTime;
 use tracing::info;
@@ -47,7 +50,9 @@ pub enum Curves {
     #[default]
     Off,
     /// Learns a CPU and a memory profile for each class and logs one line for each run it
-    /// checks while serving.
+    /// checks while serving; projects each host's memory by its jobs' memory curves and records
+    /// where a booking that followed them would have placed a job differently, placing nothing
+    /// differently itself.
     Shadow,
     /// Learns and logs as [`Curves::Shadow`] does, and books a class that passes its four
     /// checks by its CPU curve on the curve hosts (`docs/design/placement-profiles-live.md`).
@@ -373,6 +378,21 @@ impl JobSizes {
         };
         let passes = Checks::of(&class.cpu, &class.series).pass();
         passes.then(|| Curve::of(&class.cpu, flat_millis, clamp, now.as_millis()))
+    }
+
+    /// The memory curve `key`'s class would hold for a job whose flat memory booking is
+    /// `flat_bytes`, at `now` ([`MemoryCurve::of`]): `Some` while profiles are kept (under
+    /// [`Curves::Shadow`] and [`Curves::On`]) for a class whose memory profile has scored enough
+    /// runs. Nothing books it: only the memory shadow reads it (`crate::engine`'s
+    /// `memory_shadow`). `key` is the job's own class, never its fallback or its client's.
+    pub(crate) fn memory_curve_of(
+        &self,
+        key: &Key,
+        flat_bytes: u64,
+        now: FarmTime,
+    ) -> Option<MemoryCurve> {
+        let class = self.profiles.as_ref()?.classes.get(key)?;
+        MemoryCurve::of(&class.memory, flat_bytes, now.as_millis())
     }
 
     /// How many classes with a profile pass their four checks (book their curve under

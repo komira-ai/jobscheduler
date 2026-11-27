@@ -52,6 +52,7 @@ mod image_budget;
 mod integrity;
 mod jobs;
 mod lifecycle;
+mod mac_allow;
 mod mac_supervisor;
 #[cfg(target_os = "linux")]
 mod memory_series;

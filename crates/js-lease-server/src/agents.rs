@@ -283,22 +283,18 @@ fn placed_in(
         .map_err(|err| StartupError::new("--agent-pool-config", err))?;
     let interval = registry.heartbeat_interval();
     let providers = providers.unwrap_or_else(|| static_then(&registry.pool_id()));
-    let (usage, usage_in_job_store) = usage.build(clock, limits, kept.map(ServerStore::store))?;
     // The one job store of the server, when the job service is on. It is opened
     // before the bindings are put back: a host a host job tainted whose binding lost
     // the taint (a crash between the placement and the binding's write) gets it from
     // the job store's row first. Its commit failing refuses the start, as a store
     // that cannot be read does.
     let restore_flag = jobs.as_ref().map(|setup| setup.flag);
+    let kept_store = kept.map(ServerStore::store);
     // The sizes' teaching is begun, not read: the server listens before its read of the ended
     // jobs (`crate::job_sizes`).
     let (jobs, job_feed, job_state, sizes) = match jobs {
         Some(setup) => {
-            let opened = job_store::open(
-                (state_file, kept.map(ServerStore::store)),
-                setup,
-                &job_sources,
-            )?;
+            let opened = job_store::open((state_file, kept_store.clone()), setup, &job_sources)?;
             restore_job_taints(&opened.jobs, &store, &mut bindings, setup.flag)?;
             let sizes = crate::job_sizes::begin(&placer, &opened.jobs);
             let (jobs, feed, state) = (opened.jobs, opened.feed, opened.store);
@@ -306,6 +302,8 @@ fn placed_in(
         }
         None => (None, None, None, Sizes::default()),
     };
+    // After the job store: with the usage rows in its store, the prune's deletes are claimed.
+    let (usage, in_store) = usage.build(clock, limits, (kept_store, jobs.as_ref()))?;
     for (host, binding) in &bindings {
         taints::put_back(&registry, host, binding, "start");
     }
@@ -326,7 +324,7 @@ fn placed_in(
         jobs,
         job_feed,
         job_state,
-        usage_in_job_store,
+        usage_in_job_store: in_store,
         placer: Some(placer.clone()),
         sizes,
         rows_read: Mutex::default(),

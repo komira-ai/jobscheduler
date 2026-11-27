@@ -126,6 +126,24 @@ fn controls_run_unsandboxed_and_the_rest_under_the_allow_profile() {
     assert!(first.env().is_empty());
 }
 
+/// A caller that applies the profile itself (the agent's supervisor) gets the same profile
+/// `argv` passes to `sandbox-exec`, and none for a control.
+#[test]
+fn a_step_gives_its_profile_to_a_caller_that_applies_it_itself() {
+    let scratch = Scratch::new("selftest-profile");
+    let test = selftest(grants_with_xcode(&scratch));
+    for step in test.steps() {
+        match (step.role(), step.profile()) {
+            (Role::Control, None) => {}
+            (Role::Denied | Role::Allowed, Some(profile)) => {
+                let (program, args) = step.command();
+                assert_eq!(profile.argv(program, args), step.argv(), "{}", step.class());
+            }
+            (role, profile) => panic!("{}: {role:?} with {profile:?}", step.class()),
+        }
+    }
+}
+
 #[test]
 fn the_xcode_steps_run_with_the_granted_developer_dir_and_the_run_directory() {
     let scratch = Scratch::new("selftest-env");

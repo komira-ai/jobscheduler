@@ -132,7 +132,7 @@
 //! | `--bundle-deny-file <path>` | digests refused `bundle-denied`, read at every start of a job |
 //! | `--bundle-trust <list\|digest>` | which digests may run: `list` (default) those of `--bundle-allow-file`, which must be given and hold a digest; `digest` any, for developer hosts, and never with `--bundle-pull missing`; a digest off the list is refused `bundle-not-allowed` |
 //! | `--bundle-allow-file <path>` | the allow list, read at every start of a job |
-//! | `--read-model <open\|allow>` | the read model of a run's profile; `allow` is refused at start for now |
+//! | `--read-model <open\|allow>` | the read model of the profile of a run that pins a bundle (`open` by default; a run that pins none keeps `open`); needs `--bundle-store`. Under `allow` such a run reads only the base set of the host's macOS version, its run directory, its run files and mounts, its bundle's trees, the kinds its bundle declares and the Xcode its start names. A host whose macOS version has no base set refuses it at start, and at every start, before the hello is sent, the runtime runs the model's self-test as a lent account through the supervisor (each denied place unreadable under the profile and readable without it, the toolchain working under it); a failure ends the agent with status 2, naming every step that was wrong (see [`mac_allow`]) |
 //!
 //! The job flags are checked at start and a wrong one ends the agent with exit status 2.
 //! A marker that is already in the state root is reported on stderr at start.
@@ -331,6 +331,7 @@ pub mod lifecycle;
 mod login;
 pub mod logs;
 pub mod mac_accounts;
+pub mod mac_allow;
 pub mod mac_put;
 pub mod mac_supervisor;
 pub mod mac_sweep;

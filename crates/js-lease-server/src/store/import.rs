@@ -10,8 +10,13 @@
 //! hosts to remove and the marker in ONE transaction. A `<state file>.joins` an earlier release
 //! kept is not read, and is not named stale. A file that is
 //! refused, or a commit that fails, writes nothing: the start is refused and the next start
-//! imports again. The marker is written even when there are no files (a fresh install), so a
-//! file that appears later is never read. A binding's cordon end, which the file holds on the
+//! imports again. Several servers starting at once over one store race to the import; the
+//! commit of each is `Cond::Absent` on every key, so one wins. A loser's commit meets a key
+//! the winner wrote: it reads the marker again and, finding it, starts over the winner's rows
+//! as a start that found the marker does (the files are named stale); it is refused only
+//! when the marker is still absent (a key written by something other than an import). The
+//! marker is written even when there are no files (a fresh install), so a file that appears
+//! later is never read. A binding's cordon end, which the file holds on the
 //! server's clock, is written on the store's ([`crate::agent_state`]), by the store's clock
 //! less the server's read once before the files: a store that cannot read its clock imports
 //! nothing.
@@ -97,8 +102,25 @@ pub(super) fn run(
         txn.put(key, value, Cond::Absent)
     });
     let txn = txn.put(IMPORTED, MARKER, Cond::Absent);
-    let committed = host_keys::committed(store.txn(txn));
-    committed.map_err(|err| refuse(format!("the import of the state files failed: {err}")))?;
+    let failed = |err: String| refuse(format!("the import of the state files failed: {err}"));
+    let answer = store.txn(txn);
+    if matches!(answer, Ok(Err(_))) {
+        // Another writer wrote a key of this import since the reads: another server's import
+        // won the race. With its marker set this start goes on over what it wrote; with the
+        // marker still absent the refusal below names the key.
+        if store
+            .get(IMPORTED)
+            .map_err(|err| failed(err.to_string()))?
+            .is_some()
+        {
+            info!(
+                "another server imported the files beside the state file first: this start reads the store"
+            );
+            stale(state_file);
+            return Ok(());
+        }
+    }
+    host_keys::committed(answer).map_err(|err| failed(err.to_string()))?;
     info!(
         keys,
         "the import marker is set: the files beside the state file are not read again; the store holds the server's state"
@@ -436,6 +458,92 @@ mod tests {
         ];
         assert_eq!(keys(&store), all);
         assert!(!FILES.contains(&".joins"));
+    }
+
+    /// Asserts that of two servers racing the first start over one store, the one whose commit
+    /// meets the other's import starts: the other's commit lands between this one's reads and
+    /// its commit, and this start reads the marker, writes nothing and answers `Ok`, leaving
+    /// the winner's rows as they were. It catches a loser whose conflict refuses its start
+    /// (exit 2) though the store holds the import.
+    #[test]
+    fn the_server_that_loses_the_import_race_starts() {
+        quiet_logs();
+        let (_dir, path) = state("import_race");
+        the_three_files(&path);
+        let store = store();
+        let other = store.inner();
+        let winner = path.clone();
+        store.before_next(move || {
+            run(
+                &*other,
+                (&winner, &crate::agent_state::epoch_clock()),
+                true,
+                &refuse,
+            )
+            .unwrap();
+        });
+        run(
+            &store,
+            (&path, &crate::agent_state::epoch_clock()),
+            true,
+            &refuse,
+        )
+        .unwrap();
+        let all = [
+            "acquires/scaler/records",
+            "acquires/scaler/unremoved",
+            "hosts/binding/a",
+            IMPORTED,
+        ];
+        assert_eq!(keys(&store), all);
+        assert_eq!(store.get(IMPORTED).unwrap().unwrap().value, MARKER);
+        assert_eq!(
+            store.commit_stats().txns,
+            1,
+            "only the winner's import committed"
+        );
+    }
+
+    /// Asserts that an import whose commit meets a key written by something other than an
+    /// import (the marker is still absent) refuses the start, naming the key, and that one
+    /// whose read of the marker then fails refuses it with the store's reason. It catches a
+    /// loser that starts without the marker, over a store no import filled, and a failed read
+    /// taken for an absent marker or a present one.
+    #[test]
+    fn a_conflict_without_the_marker_refuses_the_start() {
+        let (_dir, path) = state("import_conflict");
+        the_three_files(&path);
+        for fail_read in [false, true] {
+            let store = store();
+            let other = store.inner();
+            let also = Arc::clone(&other);
+            store.before_next(move || {
+                let txn = Txn::new().put("hosts/binding/a", "{}", Cond::Any);
+                also.txn(txn).unwrap().unwrap();
+            });
+            if fail_read {
+                // The marker's read and the two scans pass (the clock's read is not counted);
+                // the read of the marker after the conflict fails.
+                store.fail_read_after(3);
+            }
+            let refused = run(
+                &store,
+                (&path, &crate::agent_state::epoch_clock()),
+                true,
+                &refuse,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                refused.starts_with("--store: the import of the state files failed: "),
+                "{refused}"
+            );
+            match fail_read {
+                false => assert!(refused.contains("hosts/binding/a"), "{refused}"),
+                true => assert!(refused.contains(INJECTED), "{refused}"),
+            }
+            assert!(other.get(IMPORTED).unwrap().is_none());
+        }
     }
 
     /// Asserts that the server's own import names its store setting when the store fails:

@@ -26,7 +26,7 @@ use js_sim::Faults;
 use js_sim_cell::elastic::offer;
 use js_sim_cell::{
     AcquireAnswer, Cell, CloudEvent, ElasticPool, Killed, Scenario, ScenarioFailure, ServerSpec,
-    Setup, Shape, Work,
+    Setup, Shape, Work, run_seed_range_on_threads,
 };
 use js_testkit::dir::TestDir;
 use js_types::HostId;
@@ -38,8 +38,9 @@ const SEEDS: u64 = 2;
 
 /// The two scenarios are the family's largest by far (about a quarter hour each under the
 /// coverage job's unoptimised, instrumented build): each runs its seeds on this many
-/// threads, a quarter each, so that neither outlasts the rest of the job's tests.
-const THREADS: u64 = 4;
+/// threads ([`run_seed_range_on_threads`]), so that neither outlasts the rest of the job's
+/// tests. `.config/nextest.toml` reserves this many slots for each.
+const THREADS: usize = 4;
 
 /// How long a cell driven by hand runs: past the first launch (the second tick, at 10 s),
 /// the machine's boot ([`Knobs::boot`], 120 s, later) and its hello.
@@ -67,7 +68,7 @@ const LONG_RUN: Duration = Duration::from_secs(600);
 /// never settles), and a cell whose cloud clock drifts from the server's.
 #[test]
 fn an_ec2_like_pool_scales_up_to_demand_and_back_to_zero() {
-    on_threads(elastic::an_ec2_like_pool);
+    run_seed_range_on_threads(elastic::an_ec2_like_pool, 0..SEEDS, THREADS);
 }
 
 /// Proves the same shape over a cloud billed as Lambda bills (each started minute whole,
@@ -77,32 +78,7 @@ fn an_ec2_like_pool_scales_up_to_demand_and_back_to_zero() {
 /// scenario is, and for a recomputation that bills a part of a minute.
 #[test]
 fn a_lambda_like_pool_bills_whole_minutes_and_releases_idle_machines() {
-    on_threads(elastic::a_lambda_like_pool);
-}
-
-/// Runs seeds `0..SEEDS` of the scenario `make` builds, [`THREADS`] contiguous ranges at
-/// once, each on a thread of its own with a scenario built there (a scenario is built
-/// and run on one thread), and fails with the first failure of any range. The scenarios
-/// have no witness, so judging each range alone judges what one run of every seed would;
-/// a witness added to either would be judged per range, and these tests would then run
-/// the seeds as one range.
-fn on_threads(make: fn() -> Scenario) {
-    let parts: Vec<_> = (0..THREADS)
-        .map(|part| {
-            let seeds = part * SEEDS / THREADS..(part + 1) * SEEDS / THREADS;
-            std::thread::spawn(move || {
-                let ran = make().try_run_seed_range(seeds);
-                ran.map(|_| ()).map_err(|failure| failure.to_string())
-            })
-        })
-        .collect();
-    for part in parts {
-        match part.join() {
-            Ok(Ok(())) => {}
-            Ok(Err(failure)) => panic!("{failure}"),
-            Err(panicked) => std::panic::resume_unwind(panicked),
-        }
-    }
+    run_seed_range_on_threads(elastic::a_lambda_like_pool, 0..SEEDS, THREADS);
 }
 
 /// A cell of seed `seed` with an elastic pool of at most two machines of `pool`'s kind,

@@ -20,13 +20,18 @@ mod whole_host_prepare;
 
 use js_agent_wire::RefusalReason;
 use js_sim_cell::actions::REFUSAL_REASONS;
-use js_sim_cell::{Expect, ScenarioFailure};
+use js_sim_cell::{Expect, ScenarioFailure, run_seed_range_on_threads};
 
 /// Every scenario of the family runs over this many seeds.
 const SEEDS: u64 = 16;
 
 /// The scenarios of fifty hosts run over this many.
 const SCALE_SEEDS: u64 = 2;
+
+/// The threads a scenario of this file that is large runs its seeds on
+/// ([`run_seed_range_on_threads`]); `.config/nextest.toml` reserves this many slots for
+/// each of those tests.
+const THREADS: usize = 4;
 
 /// Each step of the race's sweep runs over this many seeds: which side of the deadline the
 /// ready report lands on is set by the step's preparation time, and the sweep's thirteen
@@ -51,7 +56,8 @@ fn a_silent_host_fails_the_prepare_and_the_job_goes_to_another_host() {
 /// within the bar among many.
 #[test]
 fn a_silent_host_among_fifty_fails_the_prepare_and_the_job_goes_to_another_host() {
-    whole_host_prepare::a_silent_host(whole_host_prepare::SCALE_HOSTS).run_seeds(SCALE_SEEDS);
+    let build = || whole_host_prepare::a_silent_host(whole_host_prepare::SCALE_HOSTS);
+    run_seed_range_on_threads(build, 0..SCALE_SEEDS, THREADS);
 }
 
 /// A job whose three tries all end at the deadline (silent hosts) fails to start with
@@ -69,8 +75,8 @@ fn a_job_is_terminal_after_max_replace_silent_prepares() {
 #[test]
 fn a_job_is_terminal_after_max_replace_silent_prepares_among_fifty_hosts() {
     let hosts = whole_host_prepare::SCALE_HOSTS;
-    whole_host_prepare::a_job_is_terminal_after_max_replace_silent_prepares(hosts)
-        .run_seeds(SCALE_SEEDS);
+    let build = || whole_host_prepare::a_job_is_terminal_after_max_replace_silent_prepares(hosts);
+    run_seed_range_on_threads(build, 0..SCALE_SEEDS, THREADS);
 }
 
 /// A silent host with no other host to go to is placed the job again only after the
