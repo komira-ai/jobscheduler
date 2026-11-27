@@ -27,7 +27,7 @@ use js_jobs::{JobId, JobState};
 use js_sim::Faults;
 use js_sim_cell::{
     Cell, Checker, Invariant, ItemId, JobReply, Observations, Prepare, ServerSpec, Setup, Shape,
-    Touched, Violation, Work,
+    Touched, Violation, Work, run_seed_range_on_threads,
 };
 use js_testkit::dir::TestDir;
 use js_types::HostId;
@@ -35,6 +35,11 @@ use js_types::sched::FarmTime;
 
 /// How many seeds the scenario runs.
 const SEEDS: u64 = 16;
+
+/// The threads a scenario of this file that is large runs its seeds on
+/// ([`run_seed_range_on_threads`]); `.config/nextest.toml` reserves this many slots for
+/// each of those tests.
+const THREADS: usize = 4;
 
 /// How long a negative case runs its cell: past the placement, the ready report and the
 /// start of the job of [`NEGATIVE_RUN`], which is still running then.
@@ -47,7 +52,7 @@ const NEGATIVE_RUN: Duration = Duration::from_secs(600);
 /// what turns it red).
 #[test]
 fn fifty_whole_host_requests_over_twenty_hosts_are_each_held_once_and_released() {
-    whole_host::fifty_whole_host_requests().run_seeds(SEEDS);
+    run_seed_range_on_threads(whole_host::fifty_whole_host_requests, 0..SEEDS, THREADS);
 }
 
 /// A cell of one host per entry of `prepares` (agent `i` answering a prepare as

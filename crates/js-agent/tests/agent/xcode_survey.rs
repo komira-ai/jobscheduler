@@ -785,3 +785,51 @@ fn an_empty_applications_directory_surveys_nothing() {
     let runner = Answering::new(|line, _| panic!("{line} was run"));
     assert_eq!(survey(&files, &runner, site(&dir)), Surveyed::default());
 }
+
+/// A ready Xcode of `build` in `scratch`, as the catalog's proof object the allow read model
+/// grants: the app `Xcode-<build>.app`, put to the catalog by [`js_agent::xcode::hosts`].
+pub fn host_xcode(scratch: &Scratch, build: &str) -> js_mac_pool::xcode::HostXcode {
+    let name = format!("Xcode-{build}.app");
+    let (dir, _files) = applications(scratch, &[(&name, build)]);
+    let owned = build.to_owned();
+    let runner = Answering::new(move |line: &str, dev: &str| ready(line, dev, &owned, "{}"));
+    let xcodes = [Xcode {
+        build: build.to_owned(),
+        app: dir.join(&name),
+    }];
+    let mut hosts = js_agent::xcode::hosts(&runner, &xcodes, owner());
+    assert_eq!(hosts.len(), 1, "a ready Xcode");
+    hosts.remove(0)
+}
+
+/// The Xcodes a survey found ready are put to the catalog again for the proof objects the
+/// allow read model grants, each with its build and its app's real path: one that no longer
+/// answers is left out, and a build given twice gives none. It catches a grant of an Xcode
+/// that stopped being ready after the hello, and one made from a path no catalog checked.
+#[test]
+fn the_ready_xcodes_are_put_to_the_catalog_again_for_their_grants() {
+    let scratch = Scratch::new("xcode-hosts");
+    let apps = [("Xcode-16.2.app", "16C5032a"), ("Xcode-16.4.app", "16F6")];
+    let (dir, _files) = applications(&scratch, &apps);
+    let good = developer(&dir, "Xcode-16.2.app");
+    let runner = Answering::new(move |line: &str, dev: &str| match dev == good {
+        true => ready(line, dev, "16C5032a", "{}"),
+        false => Err(format!("{line}: exit status: 1")),
+    });
+    let xcodes: Vec<Xcode> = apps
+        .iter()
+        .map(|(name, build)| Xcode {
+            build: (*build).to_owned(),
+            app: dir.join(name),
+        })
+        .collect();
+    let hosts = js_agent::xcode::hosts(&runner, &xcodes, owner());
+    let found: Vec<(String, String)> = hosts
+        .iter()
+        .map(|host| (host.build().to_owned(), host.app().as_str().to_owned()))
+        .collect();
+    let app = dir.join("Xcode-16.2.app").display().to_string();
+    assert_eq!(found, [("16C5032a".to_owned(), app)]);
+    let twice = [xcodes[0].clone(), xcodes[0].clone()];
+    assert!(js_agent::xcode::hosts(&runner, &twice, owner()).is_empty());
+}

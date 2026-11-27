@@ -207,7 +207,10 @@ pub use observe::{
     StopCommand, StopSeen, Verdict,
 };
 pub use replay::{Failure, FailureReport, drive, run};
-pub use scenario::{Call, Expect, HostIs, Passed, Scenario, ScenarioFailure, SeedRun};
+pub use scenario::{
+    Call, Expect, HostIs, Passed, Scenario, ScenarioFailure, SeedRun, run_seed_range_on_threads,
+    try_run_seed_range_on_threads,
+};
 pub use server::{EPOCH_MS, JOBS_PATH, ServerNode, ServerSpec, Shape, Store, WHOLE_CLASS};
 pub use usage::{UsageReadFault, UsageRow};
 pub use work::{Callback, Retry, Work};
