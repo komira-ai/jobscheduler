@@ -469,4 +469,39 @@ mod tests {
             )
         );
     }
+
+    /// Asserts the whole `provider-backoff` line of a step in which three sources of a run
+    /// failed: the first is named, the other two are counted as "2 more sources", and the
+    /// agent's counts close it; and that a step in which none failed gives no line. Catches a
+    /// line for each source, and a count of the others that is off by one.
+    #[test]
+    fn a_backoff_line_names_the_first_source_and_counts_the_rest() {
+        let mut attached = Attached::none();
+        attached.turned_away = 4;
+        attached.retries = 3;
+        let backed: Vec<Backed> = (0..3)
+            .map(|index| Backed {
+                provider: "tier".to_owned(),
+                index,
+                call: "Mount",
+                step: Step {
+                    failures: 2,
+                    wait_ms: 1_500,
+                },
+                why: "not ready".to_owned(),
+            })
+            .collect();
+        let Some(Event::Finding(found)) = attached.backoff("j1", &backed) else {
+            panic!("a finding");
+        };
+        assert_eq!(found.run_id.as_deref(), Some("j1"));
+        assert_eq!(found.code, code::PROVIDER_BACKOFF);
+        assert_eq!(
+            found.message,
+            "the provider tier did not serve the Mount of source 0 (2 in a row): not ready; \
+             asked again in 1500 ms; 2 more sources wait too; this agent: 4 Prepares not served, \
+             3 calls sent again"
+        );
+        assert!(attached.backoff("j1", &[]).is_none());
+    }
 }

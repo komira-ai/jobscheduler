@@ -220,7 +220,8 @@ mod tests {
     #[test]
     fn a_pace_waits_from_the_send_and_a_success_ends_it() {
         let mut pace = Pace::default();
-        assert!(pace.due(0) && pace.idle());
+        assert!(pace.due(0));
+        assert!(pace.idle());
         pace.asked(100);
         assert!(!pace.idle());
         pace.asked(150);
