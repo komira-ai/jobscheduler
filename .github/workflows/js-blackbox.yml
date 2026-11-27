@@ -1,0 +1,68 @@
+# The black-box tests of the released js-agent and js-server (J1 and J6 of the black-box plan),
+# on a GitHub-hosted Linux x86_64 runner, a whole machine with root: the integration test
+# `released` of crates/js-blackbox (`#[ignore]`d, run as root) installs the js-agent .deb of the
+# release from the apt suite `testing` and starts it under systemd with flags of the farm's shape,
+# loads the js-server image of the release (from the GitHub release, checked against its
+# SHA256SUMS) into Docker and starts it as the control host starts it, over a Postgres store, and
+# runs jobs through them: the agent's session and a job (J1), the server's readiness and a job
+# (J6), the server restarted while a job runs, the agent updated from the previous release while
+# a job runs, the server unreachable for 60 s, and the server's name not found for 60 s. The test
+# takes the published bytes and nothing from the project's own hosts; the job image is the
+# runner's own `sleep`, served from a registry on the loopback.
+#
+# The release is the one input. The test reads it from its own crate's version: the checkout is
+# stamped with it first (`cargo xtask release stamp`), as the release's build is.
+#
+# It is called, never started by an event of its own but a manual run: by release.yml's
+# `blackbox` on a push to main, after `check-apt` passed (the release is then published and in
+# `testing`), and by hand (`workflow_dispatch`, the version of a release in `testing`), so a
+# branch's test can be run against a release before it merges. Nothing waits for it: no job of
+# the release needs `blackbox`, so a red test holds back no deploy yet.
+#
+# One job, no secret, no environment, `contents: read` alone. The test is built as the runner's
+# user, then run as root through cargo's target runner, so nothing is built as root. Every step
+# is one command, and no command expands an expression: a command reads its environment.
+# crates/xtask/tests/blackbox_workflow.rs pins these rules.
+name: js-blackbox
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: The release to test, MAJOR.MINOR.PATCH
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      version:
+        description: The release to test, MAJOR.MINOR.PATCH (published, and in the apt suite testing)
+        required: true
+        type: string
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  VERSION: ${{ inputs.version }}
+
+jobs:
+  blackbox:
+    name: js-blackbox
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Stamp the checkout with the release's version
+        run: cargo xtask release stamp --to "$VERSION"
+      - name: Build the test as the runner's user
+        run: cargo test --locked -p js-blackbox --test released --no-run
+      - name: Install, start and drive the released agent and server, as root
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo
+        run: cargo test --locked -p js-blackbox --test released -- --ignored --nocapture --test-threads=1

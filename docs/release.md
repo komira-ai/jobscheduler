@@ -104,7 +104,9 @@ next push that ships code. Nothing runs on a timer.
    suite `testing` of the apt repository at `https://packages.komira.ai/apt`; `check-apt` installs
    `js-agent` from that suite in a clean Ubuntu container on an amd64 and an arm64 runner; only when
    both installs passed are the same packages promoted into the suite `stable`
-   ([The apt repository](#the-apt-repository)).
+   ([The apt repository](#the-apt-repository)). Once `check-apt` passed, `blackbox` runs the
+   black-box tests of the released agent and server beside the promotion; nothing waits for it
+   ([The black-box tests](#the-black-box-tests)).
 8. `gamma` (off until its variables are set, below) sets the release as the desired version of the
    service `js-server` on the update coordinator and waits for it to converge.
 9. `cp-deploy-digest` and `cp-deploy` (off until their variables are set, below) deploy the release's
@@ -437,6 +439,7 @@ of every other product of the repository as they are.
 | `testing-apt-index` | `apt-signing` | checks the two packages against `SHA256SUMS` and their attestation by artifacts.yml at this commit, merges them into the index read (`channels apt index`) and signs `Release` (`InRelease`, `Release.gpg`) with the repository's subkey (`channels apt sign`), which it then removes |
 | `testing-apt-write` | `apt-publish` | checks the packages again, uploads each once to the pool (never over other bytes), writes the signed index with `If-Match` on the ETags read, and invalidates `/apt/dists/*` on the CDN (`channels apt write`) |
 | `check-apt` | none | on an amd64 and an arm64 runner, in a clean Ubuntu container pinned by digest: adds the repository with its keyring, installs `js-agent=X.Y.Z` from `testing`, and checks the version, the files, that the agent's own start check accepts the job user `jsjob` (a system account with no home and no login) and its subordinate uid and gid ranges, that nothing is enabled and that nothing runs (`channels check-apt`) |
+| `blackbox` | none | only when `check-apt` passed: the black-box tests of the released agent and server (`js-blackbox.yml`, [The black-box tests](#the-black-box-tests)); no job waits for it |
 | `stable-apt-read`, `stable-apt-index`, `stable-apt-write` | as above | only when `check-apt` passed on both: read both suites, list in `stable` the entries `testing` holds for this version, held to the digests of `SHA256SUMS` (`channels apt promote`), sign, and write the index alone (`--no-pool`): `stable` serves the very bytes `testing` was checked with |
 
 No job holds both the signing key and the cloud role. A write that loses the race for the shared
@@ -768,6 +771,42 @@ Not proven until the first real run on `main`, and fixed there if it differs:
 - the draft and asset calls of `publish` (listing drafts, uploading to a draft, reading an asset
   back to compare it).
 
+## The black-box tests
+
+`blackbox` (after `check-apt` passed) calls `js-blackbox.yml`, which runs the ignored test
+`released` of `crates/js-blackbox` as root on a hosted `ubuntu-24.04` runner. It takes the release as
+the farm takes it and drives it only from outside:
+
+- the js-agent `.deb` of the release, installed with apt from the suite `testing` (as `check-apt`
+  installs it), on a host made ready as a farm host is (a scratch disk with project quota,
+  hostkeeper's identity and facts files, tierstore's account and roots), with a flags file of the
+  farm's shape (`crates/js-blackbox/farm/js-agent.flags`), and run by the package's own
+  `js-agent-crun.service`;
+- the js-lease-server image of the release, downloaded from the GitHub release and checked against
+  its `SHA256SUMS`, loaded into Docker and started with the control host's command line
+  (`crates/js-blackbox/farm/js-server.args`: its user, a read-only root, no capability, TLS on every
+  listener, hosts admitted by their certificates), over a Postgres store in a container of its own
+  to which the test applies the state schema first;
+- jobs that run the runner's own `sleep` in an image the test serves from a registry on the loopback.
+
+The `farm/` files keep the shape of the flags and the command line the farm commits (the same flags
+and kinds of value), with placeholders for the farm's names, addresses and ports; a change to the
+farm's flags is made to them in the same way.
+
+| Test | Passes when |
+|---|---|
+| J6, the released server image | `/readyz` answers 200 within 60 s of the container's start, and a job run through the released agent ends with exit code 0 |
+| J1, the released `.deb` with the farm's flags | the host is listed live and the agent's health route answers 200 within 60 s of the unit's start, and a job ends with exit code 0 |
+| The server restarted while a job runs | the job ends with exit code 0 in its first attempt, and no listing of the hosts after the restart shows the host lost |
+| The agent updated while a job runs | from the previous release in `testing` to this one (the package installed, the handover file written, the unit restarted): the job ends with exit code 0 in its first attempt, and the host lists the new version within 60 s |
+| The server unreachable for 60 s | the job keeps running, the agent is back in a session within 30 s of the server's return, and the job ends with exit code 0 |
+| The server's name not found for 60 s after the first contact | the host is listed live and the agent's health route answers 200 at every probe of the 60 s |
+
+A manual run of `js-blackbox.yml` (`gh workflow run js-blackbox.yml --ref <branch> -f
+version=X.Y.Z`) runs a branch's test against a release that is in `testing`. Nothing waits for
+`blackbox` yet: its failure makes the run red and holds back neither `stable`, the control-plane
+deploy nor `desired`, and `release-red` does not count it.
+
 ## The smoke bundle
 
 A darwin bundle of one program that prints the host name, the user and uid it runs as, the macOS
@@ -944,6 +983,7 @@ whose upload did not finish is deleted before it is uploaded again.
 | `plan`, `build`, `sums`, `attest` or `verify` failed | No tag, no release | Re-run failed jobs. After `verify` failed nothing was published; fix the cause (a change to the workflow is a new push) or re-run. |
 | An apt job of `testing` failed, or all three attempts lost the race | The release is published; the suite holds this version or not | Re-run failed jobs: a re-run of a read job reads again, and a write never puts other bytes in the pool under a name it holds. A package already in the pool is accepted when its bytes are equal. |
 | `check-apt` failed | The release and `testing` hold the version; `stable` does not | Nothing is promoted and hosts are not ordered it (`desired` starts `hostkeeper-desired.yml` only once a stable write succeeded). Fix forward: the next release supersedes it in `testing`. |
+| `blackbox` failed | The release is published, promoted and deployed as if it had passed; the run is red | Read which test failed and what it saw (each failure names its pass condition and the agent's journal or the server's log). Fix forward with a new push. No job waits for it yet. |
 | A beta job or `promote-macos` failed | The release is published and deployed; RELEASE-RED is open | Fix forward with a new push; its green release run closes the issue. Re-running the failed jobs adds the macOS archives when the four beta jobs `promote-macos` needs pass. |
 | A run that `turn` gave the turn failed after it, and a newer release has been published since | The failed run is older than what is deployed | Do not re-run its failed jobs: a re-run keeps its `turn`, and its `gamma` or control-plane deploy would move those back to the older version (`desired` checks and starts nothing for an older release, so hostkeeper is not moved). Fix forward. |
 | `turn` failed or timed out | Nothing published by this run | A newer push releases the change. `turn` fails on an error reading the runs or releases, or after three hours waiting for an older run's `deployed`. |

@@ -1243,6 +1243,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-blackbox"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "hex",
+ "js-client",
+ "js-state",
+ "js-system-clock",
+ "js-testkit",
+ "js-types",
+ "rcgen",
+ "rustix",
+ "serde_json",
+ "sha2",
+ "tar",
+ "tokio",
+]
+
+[[package]]
 name = "js-bundle"
 version = "0.1.0"
 dependencies = [

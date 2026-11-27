@@ -200,6 +200,7 @@ fn a_push_to_main_is_the_only_releasing_trigger() {
         "smoke-bundle-pack",
         "smoke-bundle-push",
         "smoke-bundle-check",
+        "blackbox",
     ]
     .map(str::to_owned)
     .to_vec();

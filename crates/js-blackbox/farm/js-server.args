@@ -1,0 +1,53 @@
+# The shape of the control host's js-server command line: the arguments its stack gives the
+# js-lease-server image, one a line, in the same order, with the same kinds of value. The
+# control host runs the image as uid and gid 65532, with a read-only root file system, every
+# capability dropped, a tmpfs at /tmp, its secrets under /run/secrets and its configuration files
+# under /etc/js-lease-server; the black-box test starts the container the same way. What
+# differs is the network: the control host listens on all addresses of an overlay network behind
+# a proxy, and the test listens on this host's loopback (Docker's host network), on ports it
+# picks (the placeholders). The store is a Postgres database there and here.
+#
+# When the control host's command line gains, loses or changes an argument, change this file in
+# the same way.
+--listen
+127.0.0.1:{agent_port}
+--job-listen
+127.0.0.1:{job_port}
+--ready-listen
+127.0.0.1:{ready_port}
+--metrics-listen
+127.0.0.1:{metrics_port}
+--tls-cert
+/etc/js-lease-server/tls.pem
+--tls-key
+/run/secrets/tls.key
+--state-file
+/var/lib/js-lease-server/leases.toml
+--boot
+resume
+--token-file
+/run/secrets/token
+--agent-pool-config
+/etc/js-lease-server/pool.toml
+--agent-pool-config
+/etc/js-lease-server/pool-mac-build.toml
+--agent-token-file
+/run/secrets/join-tokens
+--agent-client-ca
+/etc/js-lease-server/agent-client-ca.pem
+--store
+/run/secrets/store.url
+--client-token
+kbf=/run/secrets/kbf-client-token
+--cold-cpu-millis
+4000
+--cold-memory-bytes
+17179869184
+--cold-cpu-millis-on
+macos=1500
+--cold-memory-bytes-on
+macos=6442450944
+--tick
+1s
+--placement-curves
+shadow
