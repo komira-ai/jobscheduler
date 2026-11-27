@@ -229,7 +229,8 @@ which the first update of a host that ran one still compares the units with.
 A host group's flags file and certificate come in a config package, `js-agent-config-<group>`,
 which installs `/etc/js-agent/flags` and the `ca.pem` the flags name and runs no service of its
 own. The agent reads its flags once, at its start, so the package's hook hands the new files
-over by restarting the agent. Its manifest names
+over by restarting the agent, unless every file the package places is as it was before the update
+(a package re-versioned with the same files): then it restarts nothing. Its manifest names
 
 ```
 "hook": {
@@ -248,10 +249,17 @@ those files itself (the kept copy, below) and puts them back in `rollback`.
 - `prepare` reads and checks the params, keeps the kept copy, and deletes the record an earlier
   update left when its `cleanup` did not run, so the update it begins restarts the agent again. A
   path it cannot keep (a directory where the package places a file, a file it cannot read) ends it
-  `keep_failed` (class environment) before the installer replaces anything.
+  `keep_failed` (class environment) before the installer replaces anything. A copy it finds from
+  an earlier update that neither verified nor rolled back is kept as it is and marked as that
+  update's (`kept/earlier`), so `cutover` never compares the files in place with it.
 - `cutover` checks that the flags file now in place parses as the agent's flags and names a host
   id (a facts file read included). If it does not, the step ends `bad_config` (reversible) with
-  nothing restarted, and hostkeeper rolls the files back. Otherwise it notes the session the lease
+  nothing restarted, and hostkeeper rolls the files back. When every path of this update's kept
+  copy holds what was kept (a file with the same bytes, mode, owner and group, a link with the same
+  target, nothing where nothing was), the package placed the files that were already there: a
+  config package re-versioned with the same files. The step then restarts nothing, records that
+  the files are unchanged and succeeds, without asking the lease server. A copy it cannot compare
+  counts as a change. Otherwise it notes the session the lease
   server shows for the host (none when the server does not know the host or shows it in no
   session); a server that cannot be reached or refuses the question defers the step
   (`lease_unreachable`, retried after 60 s) before anything is restarted. Then it stops the unit, waits for it to be down, starts it and waits
@@ -264,8 +272,13 @@ those files itself (the kept copy, below) and puts them back in `rollback`.
 - `verify` waits until the unit is active and the lease server shows the host `live` in a session
   other than the noted one: `no_hello` when none comes in `verify_timeout_secs` less 15 s,
   `lease_unreachable` (class environment) when the server could not be asked, `start_failed` when
-  the unit is down. Once it has seen the hello it removes the kept copy; a copy it cannot remove is
-  told in its detail and left for `cleanup`.
+  the unit is down. When `cutover` found the files unchanged there is no restart to wait for: it
+  waits until the unit is active and the lease server shows the host `live` in any session, the
+  agent that runs on the files in place, which a healthy agent passes at the first look. It fails
+  `agent_down` at once when the unit is down and `agent_not_live` when the server does not show
+  the host `live` within the same bound, both class environment, and `lease_unreachable` as above.
+  Once it has seen the hello (or the agent that runs) it removes the kept copy; a copy it cannot
+  remove is told in its detail and left for `cleanup`.
 - `rollback` first puts the kept files back: each path that holds other than what was there before
   the update is written back, bytes, mode, owner and group; one that already holds it (an update's
   previous version, which the installer put back) is not written; one where nothing was is left to
@@ -301,7 +314,9 @@ The kept copy is `kept/` in `state_dir`: `kept/index.json` says what was at each
 file's mode, owner and group, a link's target, owner and group, or nothing) and `kept/<n>` holds the
 bytes of the file of the entry at position `n` of its `entries` (counted from 0, links and paths
 where nothing was included). The paths are every file and link below `tree/` of the staged release
-directory `prepare` is given, at the same path below `/`, and the flags file. The copy is written
+directory `prepare` is given, at the same path below `/`, and the flags file. An empty file
+`kept/earlier` marks a copy `prepare` kept as it was from an earlier update that did not finish;
+`cutover` compares the files in place only with a copy without it. The copy is written
 as `kept.making` and renamed to `kept` when whole, and is removed the same way. It is removed after
 a `verify` that succeeded (or by `cleanup`), and at the end of a `rollback`, except a first install's
 whose copy holds a file or link: hostkeeper removes a first install's package after its hook's

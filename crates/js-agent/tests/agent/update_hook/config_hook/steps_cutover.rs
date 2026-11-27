@@ -122,7 +122,8 @@ fn a_server_that_cannot_be_asked_defers_the_cutover_before_anything_is_restarted
 
 /// Asserts that `prepare` begins an update afresh: after a whole update whose `cleanup` never
 /// ran, the next update's `prepare` deletes the record, and its `cutover` restarts the unit
-/// again and its `verify` waits for another hello.
+/// again and its `verify` waits for another hello. Each update places other flags (the
+/// installer's activate, after `prepare`), so each is a change the agent is restarted on.
 ///
 /// Catches a record left by an earlier update that makes the next `cutover` and `verify`
 /// succeed without restarting the agent, so the new flags would never be read.
@@ -131,6 +132,7 @@ fn prepare_clears_a_record_an_earlier_update_left_and_the_next_cutover_restarts_
     let rig = fresh("config-cutover-next-update");
     rig.lease.say(&[Say::Host("live", Some(1000))]);
     assert_eq!(rig.prepare().outcome, Outcome::Success);
+    std::fs::write(&rig.params.flags_file, "--pool=a\n").unwrap();
     assert_eq!(rig.run(cutover).outcome, Outcome::Success);
     rig.lease.say(&[Say::Host("live", Some(2000))]);
     assert_eq!(rig.run(verify).outcome, Outcome::Success);
@@ -139,6 +141,7 @@ fn prepare_clears_a_record_an_earlier_update_left_and_the_next_cutover_restarts_
     let done = rig.prepare();
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
     assert!(rig.record().is_none());
+    std::fs::write(&rig.params.flags_file, "--pool=b\n").unwrap();
     assert_eq!(rig.run(cutover).outcome, Outcome::Success);
     assert_eq!(rig.calls(), ["stop", "start"]);
     let record = rig.record().unwrap();

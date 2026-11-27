@@ -3,15 +3,26 @@
 //! wakes its accept loop with a connection from an address it noted before connecting, so every
 //! connection queued before that one is counted, and joins its thread, which drops the
 //! listener and every connection it held. A failed assertion therefore leaves nothing running.
+//!
+//! [`Stub::start`] speaks plain HTTP. [`Stub::start_tls`] speaks HTTPS with a server certificate
+//! and key the test gives it, asks no client for a certificate, and serves the same script over
+//! the decrypted stream; the wake-up connection is told apart by its address before any
+//! handshake, so it ends the loop without one.
 
+use std::fs;
 use std::io::{Read, Write};
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener};
 use std::os::fd::OwnedFd;
+use std::path::Path;
 use std::sync::{Arc, Mutex, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use rustix::net::{self, AddressFamily, SocketType};
+use rustls::crypto::ring::default_provider;
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::{ServerConfig, ServerConnection, StreamOwned};
 
 /// How long the stub waits on a request that is being sent; the clients of these tests send
 /// theirs at once. Not a pass/fail timeout: it keeps a broken client from holding the stub.
@@ -41,7 +52,7 @@ pub(super) fn closed() -> (OwnedFd, String) {
 
 /// The server: see the module header.
 pub(super) struct Stub {
-    /// `http://<addr>`.
+    /// `http://<addr>`, or `https://<addr>` for a stub made by [`Stub::start_tls`].
     pub(super) url: String,
     addr: SocketAddrV4,
     wake: Arc<Mutex<Option<SocketAddr>>>,
@@ -52,22 +63,42 @@ pub(super) struct Stub {
 impl Stub {
     /// Serves connection `n` as `script[n]`, and every one after the script as its last entry.
     pub(super) fn start(script: &[Reply]) -> Stub {
+        Stub::spawn(script, None)
+    }
+
+    /// [`Stub::start`] over TLS, at an `https://127.0.0.1:<port>` url: the server certificate is
+    /// the PEM file `cert` (naming `127.0.0.1`) and its key the PEM file `key`, and no client
+    /// certificate is asked for.
+    pub(super) fn start_tls(script: &[Reply], cert: &Path, key: &Path) -> Stub {
+        let chain = vec![CertificateDer::from_pem_slice(&fs::read(cert).unwrap()).unwrap()];
+        let key = PrivateKeyDer::from_pem_slice(&fs::read(key).unwrap()).unwrap();
+        let config = ServerConfig::builder_with_provider(Arc::new(default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(chain, key)
+            .unwrap();
+        Stub::spawn(script, Some(Arc::new(config)))
+    }
+
+    fn spawn(script: &[Reply], tls: Option<Arc<ServerConfig>>) -> Stub {
         assert!(!script.is_empty());
         let script = script.to_vec();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let SocketAddr::V4(addr) = listener.local_addr().unwrap() else {
             panic!("a loopback v4 listener has a v4 address");
         };
+        let scheme = if tls.is_some() { "https" } else { "http" };
         let wake = Arc::new(Mutex::new(None));
         let seen = Arc::clone(&wake);
         let token = Arc::new(());
         let alive = Arc::downgrade(&token);
         let thread = thread::spawn(move || {
             let _alive = token;
-            let mut held = Vec::new();
+            let mut held: Vec<Box<dyn Send>> = Vec::new();
             let mut count = 0;
             for stream in listener.incoming() {
-                let mut stream = stream.unwrap();
+                let stream = stream.unwrap();
                 if Some(stream.peer_addr().unwrap()) == *seen.lock().unwrap() {
                     break;
                 }
@@ -76,15 +107,32 @@ impl Stub {
                     .copied()
                     .unwrap_or(script[script.len() - 1]);
                 count += 1;
-                serve(&mut stream, reply);
+                stream.set_read_timeout(Some(READ_GUARD)).unwrap();
+                let kept: Box<dyn Send> = match &tls {
+                    None => {
+                        let mut stream = stream;
+                        serve(&mut stream, reply);
+                        Box::new(stream)
+                    }
+                    Some(config) => {
+                        let conn = ServerConnection::new(Arc::clone(config)).unwrap();
+                        let mut stream = StreamOwned::new(conn, stream);
+                        serve(&mut stream, reply);
+                        if matches!(reply, Reply::Answer(..)) {
+                            stream.conn.send_close_notify();
+                            let _ = stream.flush();
+                        }
+                        Box::new(stream)
+                    }
+                };
                 if !matches!(reply, Reply::Answer(..)) {
-                    held.push(stream);
+                    held.push(kept);
                 }
             }
             count
         });
         Stub {
-            url: format!("http://{addr}"),
+            url: format!("{scheme}://{addr}"),
             addr,
             wake,
             thread: Some(thread),
@@ -135,7 +183,7 @@ impl Drop for Stub {
 }
 
 /// Does what `reply` says with one connection.
-fn serve(stream: &mut TcpStream, reply: Reply) {
+fn serve(stream: &mut (impl Read + Write), reply: Reply) {
     let answer = match reply {
         Reply::Silent => return,
         Reply::Partial => "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 100\r\n\r\n{\"id\":\"m\"".to_owned(),
@@ -151,8 +199,7 @@ fn serve(stream: &mut TcpStream, reply: Reply) {
 
 /// Reads a request head and as many bytes of body as it declares, or until the client stops
 /// sending.
-fn read_request(stream: &mut TcpStream) {
-    stream.set_read_timeout(Some(READ_GUARD)).unwrap();
+fn read_request(stream: &mut impl Read) {
     let mut seen = Vec::new();
     while !complete(&seen) {
         let mut chunk = [0_u8; 1024];

@@ -17,10 +17,11 @@
 //!   replaces it;
 //! - `cutover` checks that the flags file now in place is one the agent can use (it parses as
 //!   the agent's flags and names a host id, a facts file read included), else it ends
-//!   `bad_config` with nothing restarted; notes the session the lease server shows for the
-//!   host; restarts the unit;
-//! - `verify` waits for the unit to be active and the host to be `live` in another session, and
-//!   then removes the kept copy;
+//!   `bad_config` with nothing restarted; when every file the package placed is as it was before
+//!   the update (this update's kept copy says so), restarts nothing; else notes the session the
+//!   lease server shows for the host and restarts the unit;
+//! - `verify` waits for the unit to be active and the host to be `live` in another session (in
+//!   any session, when `cutover` found the files unchanged), and then removes the kept copy;
 //! - `rollback` puts the kept files back, restarts the unit onto them and, when the lease server
 //!   can be reached as the host, waits for the hello without failing on it;
 //! - `cleanup` deletes the record (and a kept copy `verify` could not remove), once `verify` has

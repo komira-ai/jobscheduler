@@ -142,6 +142,9 @@ hostkeeper-hook = { workspace = true, features = ["conformance"] }
 hostkeeper-steps.workspace = true
 # The certificates the host certificate tests mint (tests/agent/update_hook/machine_host_certificate.rs).
 rcgen.workspace = true
+# The TLS server of the lease stand-in that answers the update hook over https
+# (tests/agent/update_hook/lease_stub.rs).
+rustls.workspace = true
 
 [lints]
 workspace = true

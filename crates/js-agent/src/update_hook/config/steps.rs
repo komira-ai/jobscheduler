@@ -11,6 +11,10 @@
 //! replaces as they were (see [`kept`](super::kept)), so that `rollback` puts them back before
 //! it restarts the unit, first install or not.
 //!
+//! A config package re-versioned with the same files needs no hand-over: `cutover` compares the
+//! files in place with the kept copy, and when every one is as it was, it restarts nothing and
+//! `verify` checks the agent that runs instead of waiting for a hello no restart causes.
+//!
 //! Every step but `prepare` and `cleanup` ends with the unit as it found it or restarted;
 //! only `rollback` changes the files the package placed, to put back what was kept. Each takes
 //! the state directory's lock first (making the directory when it is not there) and loads the
@@ -161,7 +165,8 @@ fn is_new_session(host: &HostReading, before: Option<u64>) -> bool {
 /// A copy it finds is of an earlier update that neither verified nor rolled back (`verify` and
 /// `rollback` remove theirs), so the files in place may be that update's: it is kept as it is,
 /// and this update puts back the same files. Only a copy whose record says that `verify`
-/// succeeded is replaced.
+/// succeeded is replaced. A copy kept as it is is marked as an earlier update's, so that
+/// `cutover` never takes the files in place for the ones the agent already runs on.
 #[must_use]
 pub fn prepare(env: &Env<'_>, params: &Params, staged: &Path) -> Done {
     prepare_run(env, params, staged).unwrap_or_else(|done| done)
@@ -175,6 +180,7 @@ fn prepare_run(env: &Env<'_>, params: &Params, staged: &Path) -> Result<Done, Do
         kept::exists(state_of(&held, params)).map_err(keep_failure)?
     };
     let done = if unfinished {
+        kept::mark_earlier(state_of(&held, params)).map_err(keep_failure)?;
         success_with(
             "kept as it is the copy of the files from before an update that did not finish",
         )
@@ -187,7 +193,16 @@ fn prepare_run(env: &Env<'_>, params: &Params, staged: &Path) -> Result<Done, Do
     Ok(done)
 }
 
-/// `cutover`: checks the flags file now in place, notes the host's session, restarts the unit.
+/// `cutover`: checks the flags file now in place; when the files the package placed are all as
+/// they were before the update, restarts nothing; else notes the host's session and restarts
+/// the unit.
+///
+/// The files are unchanged when this update's `prepare` kept a copy and every path of it holds
+/// what was kept (see [`kept::unchanged`]): the agent read these flags at its start, so a restart
+/// would change nothing but take the host out of service, and `verify` would wait for a hello
+/// that nothing causes. The record says so (`unchanged`), and `verify` then checks the agent that
+/// runs. A copy that cannot be compared is taken as a change: the step restarts, as it does with
+/// no copy at all.
 ///
 /// A flags file the agent could not use ends the step `bad_config`, reversible, before anything
 /// is restarted: hostkeeper then puts the previous files back. The session the server shows is
@@ -207,7 +222,22 @@ fn cutover_run(env: &Env<'_>, params: &Params) -> Result<Done, Done> {
     if record.restarted {
         return Ok(success_with("the unit was restarted by an earlier run"));
     }
+    if record.unchanged {
+        return Ok(success_with(UNCHANGED));
+    }
     let lease = (env.lease)(params).map_err(|why| failure(Reason::BadConfig, why))?;
+    let mut compared = None;
+    if !record.restart_begun {
+        match kept::unchanged(state_of(&held, params)) {
+            Ok(true) => {
+                record.unchanged = true;
+                save(&held, &record)?;
+                return Ok(success_with(UNCHANGED));
+            }
+            Ok(false) => {}
+            Err(why) => compared = Some(why),
+        }
+    }
     if !record.session_read {
         record.session_started_ms = match lease.host() {
             Ok(host) => host.session_started_ms,
@@ -229,8 +259,16 @@ fn cutover_run(env: &Env<'_>, params: &Params) -> Result<Done, Done> {
     restart(env, &params.unit, stop_secs)?;
     record.restarted = true;
     save(&held, &record)?;
-    Ok(success())
+    Ok(compared.map_or_else(success, |why| {
+        success_with(format!(
+            "the files in place could not be compared with the kept copy ({why}): the unit was restarted"
+        ))
+    }))
 }
+
+/// What `cutover` says when the files did not change.
+const UNCHANGED: &str =
+    "the files the package placed are as they were before the update: nothing was restarted";
 
 /// Stops the unit, waits (at most `stop_secs`) for it to be down, starts it and waits for it to
 /// be active, for at most the start wait.
@@ -298,14 +336,81 @@ fn wait_up(env: &Env<'_>, unit: &str) -> Result<(), Done> {
     }
 }
 
-/// `verify`: looks, again and again until a bound, for the agent's hello after the restart: the
-/// unit active and the lease server showing the host `live` in a session other than the one
-/// `cutover` recorded (any session, when none was recorded).
+/// What `verify` waits to see, and how it fails when it does not.
+#[derive(Clone, Copy)]
+enum Proof {
+    /// `cutover` restarted the unit: the agent's hello, the host `live` in a session other than
+    /// the one recorded (any session, when none was).
+    NewSession(Option<u64>),
+    /// `cutover` found the files unchanged and restarted nothing: the agent that runs, the host
+    /// `live` in any session.
+    Running,
+}
+
+impl Proof {
+    fn of(record: &Record) -> Proof {
+        if record.restarted {
+            Proof::NewSession(record.session_started_ms)
+        } else {
+            Proof::Running
+        }
+    }
+
+    fn holds(self, host: &HostReading) -> bool {
+        match self {
+            Proof::NewSession(before) => is_new_session(host, before),
+            Proof::Running => host.state == "live",
+        }
+    }
+
+    /// The unit is down or stopping during `verify`.
+    fn down(self, unit: &str, state: &UnitState) -> Done {
+        match self {
+            Proof::NewSession(_) => failure(
+                Reason::StartFailed,
+                format!("{unit} is {} ({}) during verify", state.active, state.sub),
+            ),
+            Proof::Running => environment(
+                Reason::AgentDown,
+                format!(
+                    "the agent's unit {unit} is {} ({}): the files did not change, so nothing \
+                     was restarted, and the agent is not running",
+                    state.active, state.sub
+                ),
+            ),
+        }
+    }
+
+    /// The bound passed with the unit up and the lease server answering.
+    fn unseen(self, unit: &str, secs: u64) -> Done {
+        match self {
+            Proof::NewSession(_) => failure(
+                Reason::NoHello,
+                format!("no new session of the host said hello in {secs} s"),
+            ),
+            Proof::Running => environment(
+                Reason::AgentNotLive,
+                format!(
+                    "the agent's unit {unit} runs, but the lease server did not show the host \
+                     live in {secs} s: the files did not change, so nothing was restarted"
+                ),
+            ),
+        }
+    }
+}
+
+/// `verify`: looks, again and again until a bound, for the proof that the agent runs on the
+/// files in place. After a restart that is the agent's hello: the unit active and the lease
+/// server showing the host `live` in a session other than the one `cutover` recorded (any
+/// session, when none was recorded). When `cutover` found the files unchanged and restarted
+/// nothing, it is the agent that runs: the unit active and the host `live` in any session.
 ///
 /// The wait ends at the declared `verify` timeout less a margin. Then the failure is the
 /// config's (`no_hello`) unless the last look of the lease server failed: that is
 /// `lease_unreachable`, class environment, and says nothing of the config. A unit that is down
-/// ends the step at once as `start_failed`.
+/// ends the step at once as `start_failed`. With the files unchanged, neither says anything of
+/// the config, and both name the agent, class environment: `agent_down` for a unit that is down,
+/// `agent_not_live` for a host the server does not show `live`.
 #[must_use]
 pub fn verify(env: &Env<'_>, params: &Params) -> Done {
     verify_run(env, params).unwrap_or_else(|done| done)
@@ -313,15 +418,16 @@ pub fn verify(env: &Env<'_>, params: &Params) -> Done {
 
 fn verify_run(env: &Env<'_>, params: &Params) -> Result<Done, Done> {
     let (held, loaded) = open_state(env, params)?;
-    let Some(mut record) = loaded.filter(|record| record.restarted) else {
+    let Some(mut record) = loaded.filter(|record| record.restarted || record.unchanged) else {
         return Err(failure(
             Reason::StateInvalid,
-            "the record does not say that cutover restarted the unit",
+            "the record does not say that cutover restarted the unit or found the files unchanged",
         ));
     };
     if record.verified {
         return Ok(drop_kept(state_of(&held, params)));
     }
+    let proof = Proof::of(&record);
     let lease = (env.lease)(params).map_err(|why| failure(Reason::BadConfig, why))?;
     let bound_ms = params
         .verify_secs
@@ -332,32 +438,18 @@ fn verify_run(env: &Env<'_>, params: &Params) -> Result<Done, Done> {
     loop {
         let state = show(env, &params.unit, Reason::StartFailed)?;
         if matches!(life(&state), Life::Down | Life::Stopping) {
-            return Err(failure(
-                Reason::StartFailed,
-                format!(
-                    "{} is {} ({}) during verify",
-                    params.unit, state.active, state.sub
-                ),
-            ));
+            return Err(proof.down(&params.unit, &state));
         }
         if matches!(life(&state), Life::Up) {
             match lease.host() {
-                Ok(host) if is_new_session(&host, record.session_started_ms) => break,
+                Ok(host) if proof.holds(&host) => break,
                 Ok(_) | Err(LeaseError::UnknownHost) => last = None,
                 Err(why) => last = Some(why),
             }
         }
         if env.clock.now_ms().saturating_sub(began) >= bound_ms {
             return Err(last.map_or_else(
-                || {
-                    failure(
-                        Reason::NoHello,
-                        format!(
-                            "no new session of the host said hello in {} s",
-                            bound_ms / 1000
-                        ),
-                    )
-                },
+                || proof.unseen(&params.unit, bound_ms / 1000),
                 lease_failure,
             ));
         }
