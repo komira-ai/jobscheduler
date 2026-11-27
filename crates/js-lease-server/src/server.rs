@@ -26,6 +26,7 @@ use crate::error::StartupError;
 use crate::file::Launch;
 use crate::hosts::listing;
 use crate::job_api;
+use crate::job_sizes;
 use crate::listener::{Slots, serve, serve_both};
 use crate::listening::{self, Listening};
 use crate::metrics::{self, Meter, Recorder};
@@ -291,7 +292,7 @@ async fn start_held<T: Ticker, C: Ticker, R: Ticker>(
         cached,
     } = open(prepared, &clock)?;
     // The ended jobs are read and taught while the server serves; nothing waits for them.
-    let sizes = teach_sizes(&shared, hold);
+    let sizes = job_sizes::spawn(&shared, &gate, hold);
     shared.agents().set_duty_period(duty_period);
     let heard = listening::start(shared.server_store(), shared.agents());
     // The name this server claims dispatch messages by: where it serves agents, and its pid.
@@ -404,19 +405,6 @@ async fn start_held<T: Ticker, C: Ticker, R: Ticker>(
         drain_hold: limits.drain_hold,
         sizes: Some(sizes),
         delivering,
-    })
-}
-
-/// Teaches the job sizes the ended jobs the start began to teach ([`crate::job_sizes`]), off
-/// the runtime's threads, once `hold` is sent or dropped (`None`: at once); the task answers
-/// how many taught a class a memory sample.
-fn teach_sizes(shared: &Arc<Shared>, hold: Option<oneshot::Receiver<()>>) -> JoinHandle<usize> {
-    let shared = shared.clone();
-    tokio::spawn(async move {
-        if let Some(hold) = hold {
-            let _ = hold.await;
-        }
-        blocking(move || shared.agents().sizes.teach()).await
     })
 }
 

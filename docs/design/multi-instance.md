@@ -61,7 +61,7 @@ the queue (two rules) and how a placement reaches its host (a dispatch queue the
   `pg_notify` on a session of its pool, a failure logged and dropped (`js-state/src/postgres/listen.rs:32`). The channels are
   `js_jobs_queue` (no payload) and `js_jobs_host` (the host's id). Each server listens on a connection of its own
   (`js-state/src/postgres/listen.rs:61`, made again 5 s after it is lost) on a thread of its own
-  (`js-lease-server/src/listening.rs:80`, started at `js-lease-server/src/server.rs:296`); the queue pokes the placement poller,
+  (`js-lease-server/src/listening.rs:80`, started at `js-lease-server/src/server.rs:297`); the queue pokes the placement poller,
   a host wakes its held beat and its held dispatch poll, and the connection made wakes every held beat and poll once and pokes
   the poller (`js-lease-server/src/listening.rs:100`).
 - **Deadlines are the database's `now()`** (G2). Every time that one instance writes and another compares (`heard_at`, queue and

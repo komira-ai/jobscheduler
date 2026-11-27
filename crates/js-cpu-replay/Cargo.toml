@@ -26,15 +26,13 @@ js-sched-placer = { path = "../js-sched-placer" }
 js-sizing = { path = "../js-sizing" }
 # The scratch SQLite store the job rows are read through.
 js-state = { path = "../js-state" }
+# The CPU series a job's host recorded (`CpuSeries`), which a trace carries.
+js-types = { path = "../js-types" }
 base64.workspace = true
 clap.workspace = true
 flate2.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-
-[dev-dependencies]
-# The host ids and resources of the jobs the rows' tests run through a job store.
-js-types = { path = "../js-types" }
 
 [lints]
 workspace = true

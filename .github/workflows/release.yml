@@ -838,7 +838,10 @@ jobs:
   #          signer is the default, this repository's artifacts.yml on refs/heads/main, which
   #          the updater holds the image's bundle to before it updates the service by digest. The
   #          job ends once the deploy is reported converged and fails
-  #          otherwise, after waiting up to 60 minutes. The release stays published whatever it
+  #          otherwise, after waiting up to 90 minutes: room for the planned hold of the update
+  #          while the running server still reads its ended jobs (GET /readyz/sizes answers 503
+  #          `teaching`, up to 30 minutes; docs/release.md, "The control-plane deploy") and the
+  #          updater's converge timeout (40 minutes). The release stays published whatever it
   #          says, and "Re-run failed jobs" repeats it.
   cp-deploy-digest:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' && vars.CP_DEPLOY_ENDPOINT != '' && vars.CP_DEPLOY_TAILSCALE_TAGS != '' }}
@@ -885,7 +888,7 @@ jobs:
       endpoint: ${{ vars.CP_DEPLOY_ENDPOINT }}
       audience: ${{ vars.CP_DEPLOY_AUDIENCE }}
       environment: controlplane
-      wait-minutes: 60
+      wait-minutes: 90
       tailscale-oauth-client-id: ${{ vars.CP_DEPLOY_TAILSCALE_CLIENT_ID }}
       tailscale-audience: ${{ vars.CP_DEPLOY_TAILSCALE_AUDIENCE }}
       tailscale-tags: ${{ vars.CP_DEPLOY_TAILSCALE_TAGS }}

@@ -168,20 +168,24 @@ fn a_cancel_returns_every_caller_and_clears_what_the_operation_held() {
 }
 
 /// Catches: an unmarked request's cancel reporting a mark, a repeated cancel that does
-/// anything, and a cancel that changes a failed or a refused operation. A request still
-/// before `drain_after` is cancelled with no mark and again with nothing; a failed action
-/// and a refused probe are left as they were, the whole scheduler unchanged.
+/// anything, and a cancel that changes a failed or a refused operation. A request that
+/// holds no worker, as the only worker it could hold is barred to it for life, is cancelled
+/// with no mark and again with nothing; a failed action and a refused probe are left as
+/// they were, the whole scheduler unchanged.
 #[test]
 fn an_unmarked_request_is_cancelled_and_a_failed_or_refused_one_is_left() {
-    let mut f = busy(cfg(30_000, 2));
-    let early = ask(&mut f);
+    let mut f = busy(cfg(0, 2));
+    let unmarked = f.submit_whole(Some(secs(MAX_WALL)));
+    assert_eq!(f.s.bar_whole(unmarked, w("a"), Bar::ForLife), Ok(()));
+    assert!(f.grants().is_empty());
+    assert_eq!(f.s.whole_mark(unmarked), None);
     let by = waiter(&f);
     let queued = Cancelled::Queued {
         waiters: vec![by],
         mark: None,
     };
-    assert_eq!(f.s.cancel_whole(early), queued);
-    assert_eq!(f.s.cancel_whole(early), Cancelled::Nothing);
+    assert_eq!(f.s.cancel_whole(unmarked), queued);
+    assert_eq!(f.s.cancel_whole(unmarked), Cancelled::Nothing);
 
     f.worker("b");
     f.next_n += 1;

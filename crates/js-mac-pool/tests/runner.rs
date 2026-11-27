@@ -242,9 +242,18 @@ const TRIES: usize = 8;
 const ALLOW_MIN: usize = 7;
 
 fn allowed(scene: &Scene, net: &Net, to: &[OsString]) -> bool {
+    allowed_under(scene, &scene.policy(net.clone()), to)
+}
+
+fn refused(scene: &Scene, net: &Net, to: &[OsString]) -> bool {
+    refused_under(scene, &scene.policy(net.clone()), to)
+}
+
+/// [`allowed`], under `policy`.
+fn allowed_under(scene: &Scene, policy: &Policy, to: &[OsString]) -> bool {
     let mut connected = 0;
     for _ in 0..TRIES {
-        let out = scene.sandboxed(net.clone(), "/usr/bin/perl", to);
+        let out = scene.sandboxed_with(policy, "/usr/bin/perl", to);
         if out.status.success() {
             connected += 1;
         } else if String::from_utf8_lossy(&out.stderr).trim() != EPERM {
@@ -254,9 +263,10 @@ fn allowed(scene: &Scene, net: &Net, to: &[OsString]) -> bool {
     connected >= ALLOW_MIN
 }
 
-fn refused(scene: &Scene, net: &Net, to: &[OsString]) -> bool {
+/// [`refused`], under `policy`.
+fn refused_under(scene: &Scene, policy: &Policy, to: &[OsString]) -> bool {
     (0..TRIES).all(|_| {
-        let out = scene.sandboxed(net.clone(), "/usr/bin/perl", to);
+        let out = scene.sandboxed_with(policy, "/usr/bin/perl", to);
         !out.status.success() && String::from_utf8_lossy(&out.stderr).trim() == EPERM
     })
 }
@@ -295,6 +305,24 @@ fn each_network_level_allows_what_it_names_and_refuses_the_rest() {
         "Loopback connects to any port"
     );
     assert!(allowed(&scene, &Net::On, &to_one), "On connects");
+}
+
+/// Asserts, under `sandbox-exec`, that a job's host port at the level `Off` (a ceiling of
+/// `off`) connects to its listener on the host's loopback, while another listener's port is
+/// refused `EPERM`, as is the host port under `Off` without it. Catches a host port the
+/// profile names but the kernel refuses, and one that opens the rest of loopback.
+#[test]
+fn a_host_port_at_off_reaches_its_listener_and_no_other() {
+    let scene = Scene::new("host-port", "run");
+    let port_one = accepting_listener();
+    let port_two = accepting_listener();
+    let (to_one, to_two) = (connect_to(port_one), connect_to(port_two));
+    let reaching = scene
+        .policy(Net::Off)
+        .with_host_ports(Ports::new(&[port_one]).expect("ports"));
+    assert!(allowed_under(&scene, &reaching, &to_one), "the host port");
+    assert!(refused_under(&scene, &reaching, &to_two), "another port");
+    assert!(refused(&scene, &Net::Off, &to_one), "Off without the port");
 }
 
 #[test]
