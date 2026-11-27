@@ -306,7 +306,13 @@ impl Providing {
             .iter_mut()
             .filter(|source| source.path.is_none())
         {
-            backed.extend(source.ask(run_id, attached, roots, now_ms)?);
+            match source.ask(run_id, attached, roots, now_ms) {
+                Ok(waits) => backed.extend(waits),
+                Err(failure) => {
+                    events.extend(attached.backoff(run_id, &backed));
+                    return Err(failure);
+                }
+            }
         }
         events.extend(attached.backoff(run_id, &backed));
         match self.sources.iter().find(|source| source.path.is_none()) {

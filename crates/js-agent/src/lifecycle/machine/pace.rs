@@ -139,6 +139,9 @@ pub(super) struct Gate {
     failures: u32,
     /// When the next `Prepare` may be sent, while it fails them.
     again_ms: u64,
+    /// When the gate last let a `Prepare` through while the provider fails them; `None`
+    /// once that one's failure was counted.
+    turn_ms: Option<u64>,
 }
 
 impl Gate {
@@ -154,15 +157,29 @@ impl Gate {
         if self.failures > 0 {
             let wait = wait_ms(self.failures - 1, name);
             self.again_ms = now_ms.saturating_add(wait);
+            self.turn_ms = Some(now_ms);
         }
     }
 
-    /// A `Prepare` to the provider `name` sent at `sent_ms` was answered unavailable: one
-    /// more failure, and the next `Prepare` waits its wait from that send. (A success removes
-    /// the gate; a refusal is about the ref, not the provider, and changes nothing.)
+    /// A `Prepare` to the provider `name` sent at `sent_ms` was answered unavailable. The
+    /// first failure, and the failure of a `Prepare` the gate let through since the last one
+    /// counted, count one more failure in a row: the next `Prepare` waits the longer wait
+    /// from that send. Any other (a `Prepare` that was already out with others when the
+    /// provider began to fail) counts nothing, so `Prepare`s that fail together grow the wait
+    /// once, not once each; it still keeps the next `Prepare` from going before the present
+    /// wait after its send. (A success removes the gate; a refusal is about the ref, not the
+    /// provider, and changes nothing.)
     pub(super) fn failed(&mut self, sent_ms: u64, name: &str) {
-        let wait = wait_ms(self.failures, name);
-        self.failures = self.failures.saturating_add(1);
+        let counts = self.failures == 0 || self.turn_ms.is_some_and(|turn| sent_ms >= turn);
+        let wait = match counts {
+            true => {
+                let wait = wait_ms(self.failures, name);
+                self.failures = self.failures.saturating_add(1);
+                self.turn_ms = None;
+                wait
+            }
+            false => wait_ms(self.failures - 1, name),
+        };
         self.again_ms = self.again_ms.max(sent_ms.saturating_add(wait));
     }
 }
@@ -272,5 +289,24 @@ mod tests {
         gate.failed(turn, "tier");
         assert!(!gate.open(turn + wait_ms(1, "tier") - 1));
         assert!(gate.open(turn + wait_ms(1, "tier")));
+    }
+
+    /// Asserts that `Prepare`s that were out together and fail together count one failure,
+    /// so the gate opens again after the first wait, not the fourth; and that a failure of a
+    /// `Prepare` the gate let through counts. Catches a provider that answers a burst of
+    /// in-flight `Prepare`s unavailable being held shut for 8 to 16 s at once.
+    #[test]
+    fn prepares_that_fail_together_count_once() {
+        let mut gate = Gate::default();
+        for _ in 0..4 {
+            gate.failed(10, "tier");
+        }
+        let first = 10 + wait_ms(0, "tier");
+        assert!(!gate.open(first - 1));
+        assert!(gate.open(first), "one failure in a row, not four");
+        gate.sent(first, "tier");
+        gate.failed(first, "tier");
+        assert!(!gate.open(first + wait_ms(1, "tier") - 1));
+        assert!(gate.open(first + wait_ms(1, "tier")));
     }
 }

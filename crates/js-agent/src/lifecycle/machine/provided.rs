@@ -159,11 +159,6 @@ impl Attached {
         !self.sweeps.contains_key(name)
     }
 
-    /// Asks the provider `provider` for `call`; see [`Providers::ask`].
-    pub(super) fn ask(&mut self, provider: &str, call: &ProviderCall) -> ProviderAnswer {
-        self.providers.ask(provider, call)
-    }
-
     /// The reason the provider `name` gave for the last `Prepare` it failed, while it fails
     /// them and its gate is shut at `now_ms`: a `Prepare` that is not out yet is not sent.
     pub(super) fn gate_shut(&self, name: &str, now_ms: u64) -> Option<&str> {
@@ -467,7 +462,8 @@ mod tests {
         assert!(!none.has("tierstore"));
         assert!(none.providers.names().is_empty());
         assert_eq!(
-            none.ask("tierstore", &ProviderCall::Sweep { keep: Vec::new() }),
+            none.providers
+                .ask("tierstore", &ProviderCall::Sweep { keep: Vec::new() }),
             ProviderAnswer::Unavailable(
                 "this agent was not given the provider tierstore".to_owned()
             )
