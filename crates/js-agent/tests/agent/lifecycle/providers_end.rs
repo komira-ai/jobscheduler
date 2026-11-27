@@ -21,6 +21,7 @@ fn steps(h: &mut Harness) -> Vec<String> {
 fn stop(h: &mut Harness, job_id: &str) {
     h.apply(vec![Command::JobStop {
         job_id: job_id.to_owned(),
+        reason: None,
     }]);
 }
 

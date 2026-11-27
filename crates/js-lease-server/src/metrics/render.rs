@@ -252,6 +252,7 @@ pub(crate) fn render(seen: &Snapshot, recorder: &Recorder) -> String {
     counter(&mut out, "js_curve_wait_expiries_total", help, expired);
     start_refusals(&mut out, recorder);
     bodies_too_large(&mut out, recorder);
+    unknown(&mut out, recorder);
     acquires(&mut out, recorder);
     hosts(&mut out, seen);
     if let Some(view) = &seen.curves {
@@ -300,6 +301,24 @@ fn bodies_too_large(out: &mut String, recorder: &Recorder) {
     for (route, count) in AGENT_ROUTES.iter().zip(&recorder.bodies_too_large) {
         let count = count.load(Ordering::Relaxed);
         let _ = writeln!(out, "{name}{{route=\"{route}\"}} {count}");
+    }
+}
+
+fn unknown(out: &mut String, recorder: &Recorder) {
+    let (found, guarded) = recorder.unknown();
+    let name = "js_unknown_jobs_found_total";
+    let help = "Jobs a host's heartbeat listed that the store holds no record of, by host, each counted once, at the beat that first listed it. They are kept running as orphans of the host, which takes no job while it lists one.";
+    family(out, name, "counter", help);
+    for (host, count) in found {
+        let host = label(&host);
+        let _ = writeln!(out, "{name}{{host=\"{host}\"}} {count}");
+    }
+    let name = "js_unknown_listing_guarded_total";
+    let help = "Heartbeats whose listing was more than half jobs the store holds no record of, by host: the host was told to stop nothing but the orphans an operator ended. Any rise means the store may have lost or rolled back its tables.";
+    family(out, name, "counter", help);
+    for (host, count) in guarded {
+        let host = label(&host);
+        let _ = writeln!(out, "{name}{{host=\"{host}\"}} {count}");
     }
 }
 

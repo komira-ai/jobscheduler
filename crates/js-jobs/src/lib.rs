@@ -273,8 +273,8 @@ pub use ids::{
     JobIdError, MAX_CLIENT_NAME_LEN, MAX_JOB_ID_LEN, MintError, RandomIds,
 };
 pub use node::{
-    AppliedBeat, Beat, Kept, LoadReading, NodeHello, NodeRecord, NodeRow, NodeState, Retire,
-    SessionDigest,
+    AppliedBeat, Beat, Kept, LoadReading, NodeHello, NodeRecord, NodeRow, NodeState, Orphan,
+    Retire, SessionDigest,
 };
 pub use queue::{JobEvent, MAX_JOB_EVENTS, QueueTrail};
 pub use record::{

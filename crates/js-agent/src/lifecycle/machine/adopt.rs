@@ -96,6 +96,7 @@ impl Lifecycle {
             quota_health: QuotaHealth::default(),
             parked_reminded_ms: None,
             answered: Vec::new(),
+            unknown_here: Vec::new(),
             silence: None,
             blind_wait: DEFAULT_SETTLE,
             taint_recheck: DEFAULT_TAINT_RECHECK,

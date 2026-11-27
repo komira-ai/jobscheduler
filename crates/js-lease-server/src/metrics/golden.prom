@@ -185,6 +185,12 @@ js_agent_start_refusals_total{host="host-b",code="input-not-allowed"} 1
 # TYPE js_agent_bodies_too_large_total counter
 js_agent_bodies_too_large_total{route="hello"} 1
 js_agent_bodies_too_large_total{route="heartbeat"} 2
+# HELP js_unknown_jobs_found_total Jobs a host's heartbeat listed that the store holds no record of, by host, each counted once, at the beat that first listed it. They are kept running as orphans of the host, which takes no job while it lists one.
+# TYPE js_unknown_jobs_found_total counter
+js_unknown_jobs_found_total{host="host-a"} 5
+# HELP js_unknown_listing_guarded_total Heartbeats whose listing was more than half jobs the store holds no record of, by host: the host was told to stop nothing but the orphans an operator ended. Any rise means the store may have lost or rolled back its tables.
+# TYPE js_unknown_listing_guarded_total counter
+js_unknown_listing_guarded_total{host="host-b"} 2
 # HELP js_acquires_total Launches the scaler ran, by pool, whatever their answer.
 # TYPE js_acquires_total counter
 js_acquires_total{pool="gpu"} 3

@@ -429,6 +429,7 @@ impl AgentHarness for JsAgent {
         let command = match self.jobs.contains(lease) {
             true => Command::JobStop {
                 job_id: lease.to_owned(),
+                reason: None,
             },
             false => Command::Cancel {
                 run_id: lease.to_owned(),

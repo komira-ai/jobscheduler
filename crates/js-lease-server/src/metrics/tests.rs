@@ -164,6 +164,9 @@ async fn fixture(name: &str) -> Fixture {
     (0..2).for_each(|_| recorder.curve_wait_expired());
     recorder.agent_body_too_large(AgentRoute::Hello);
     (0..2).for_each(|_| recorder.agent_body_too_large(AgentRoute::Heartbeat));
+    recorder.unknown_jobs_found(&host_a, 3);
+    recorder.unknown_jobs_found(&host_a, 2);
+    (0..2).for_each(|_| recorder.unknown_listing_guarded(&host_b));
     let answers = [
         CallbackAnswer::Delivered,
         CallbackAnswer::Abandoned,

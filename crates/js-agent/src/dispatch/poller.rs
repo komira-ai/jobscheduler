@@ -224,6 +224,7 @@ fn actionable(message: Dispatched) -> Option<(Command, DispatchAck)> {
         Some(spec) => Command::JobStart(spec),
         None => Command::JobStop {
             job_id: message.job_id,
+            reason: None,
         },
     };
     Some((command, ack))

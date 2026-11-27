@@ -1,16 +1,18 @@
 //! The per-job heartbeat against a fake agent, scenario by scenario (design section 5.3 and
-//! section 8, rows 37 and 38): starts resent until listed, unknown and ended jobs told to
-//! stop, a cancel answered by a retired id, a late start after a cancel, and a queued job
+//! section 8, rows 37 and 38): starts resent until listed, ended jobs told to stop and jobs
+//! the store holds no record of kept as orphans, a cancel answered by a retired id, a late start after a cancel, and a queued job
 //! placed by a heartbeat under `--placement js-sched`.
 
 use std::collections::BTreeMap;
 
-use js_agent_wire::{Ack, BookedResources, HeldState, JobStartSpec, Layer, Outcome};
+use js_agent_wire::{Ack, BookedResources, HeldState, JobStartSpec, Layer, Outcome, StopReason};
 use js_jobs::{AllocationStep, EndReason, JobEnd, JobId, JobState, NewJob};
 
 use crate::job_api::read::view::millis;
 
-use super::job_rig::{BOOKED, FakeAgent, image, placing_rig, rig, spec, starts, stops};
+use super::job_rig::{
+    BOOKED, FakeAgent, image, placing_rig, rig, spec, starts, stop_reasons, stops,
+};
 use super::*;
 
 /// A placed job's start is in every reply, the same each time, with the allocation's booked
@@ -74,54 +76,82 @@ async fn a_start_is_resent_until_listed() {
     assert!(starts(&rig.beat(&agent).await.unwrap()).is_empty());
 }
 
-/// A host that lists a job id the store never made, an id that is no job id, and a job that
-/// was lost (its allocation freed) is told to stop each of them; the store gains no job and no
-/// allocation, the lost job stays lost and its allocation freed, and the host's listing is not
-/// clean until it lists none of them. It catches a server that accepts such a listing, makes a
-/// row for it, revives the lost job, or says nothing.
+/// A host that lists a job id the store never made and an id that is no job id, beside two
+/// jobs that were lost (their allocations freed), is told to stop the lost jobs, each with the
+/// reason `ended`, and not the others: those are named in `unknown_jobs`, kept running, and
+/// held in the host's row as its orphans, with the time the beat first listed them. The store
+/// gains no job and no allocation, the lost jobs stay lost and their allocations freed, and
+/// the host's listing is not clean until it lists none of them; once the orphans end on the
+/// host, their results are answered stale and the row holds no orphan. It catches a server
+/// that stops a job it holds no record of (a server on an empty or older table would stop
+/// every job of the farm), one that makes a row for it or revives a lost job, and one that
+/// says nothing.
 #[tokio::test]
-async fn a_listed_unknown_job_is_told_to_stop() {
+async fn a_listed_job_the_store_holds_no_record_of_is_kept_and_a_lost_one_is_stopped() {
     let mut rig = rig("unknown_listed", true);
     rig.register("host-a", true);
     let host = HostId::new("host-a").unwrap();
     let mut agent = FakeAgent::new("host-a");
-    let lost = rig.place("job-lost", "host-a");
-    let allocation = rig.allocation(&lost).allocation_id.to_string();
-    rig.jobs
-        .end_and_free(&lost, JobEnd::Lost, EndReason::HostAbsent)
-        .unwrap();
+    let mut lost = Vec::new();
+    for id in ["job-lost", "job-lost2"] {
+        let job = rig.place(id, "host-a");
+        let allocation = rig.allocation(&job).allocation_id.to_string();
+        rig.jobs
+            .end_and_free(&job, JobEnd::Lost, EndReason::HostAbsent)
+            .unwrap();
+        agent.hold(id, &allocation, HeldState::Running);
+        lost.push(job);
+    }
     let long = "x".repeat(70);
-    agent.hold("ghost", &allocation, HeldState::Running);
-    agent.hold("job-lost", &allocation, HeldState::Running);
-    agent.hold(&long, &allocation, HeldState::Starting);
+    agent.hold("ghost", "00", HeldState::Running);
+    agent.hold(&long, "00", HeldState::Starting);
     let before = rig.commits();
 
     let reply = rig.beat(&agent).await.unwrap();
-    let mut told = vec!["ghost".to_owned(), "job-lost".to_owned(), long.clone()];
-    told.sort();
-    assert_eq!(stops(&reply), told);
+    let ended = Some(StopReason::Ended);
+    assert_eq!(
+        stop_reasons(&reply),
+        [
+            ("job-lost".to_owned(), ended),
+            ("job-lost2".to_owned(), ended)
+        ]
+    );
+    assert_eq!(reply.unknown_jobs, ["ghost".to_owned(), long.clone()]);
     assert!(starts(&reply).is_empty());
     // Catches a beat that writes more or fewer than its two row commits (the beat's, then the
-    // listing's settle) when its listing changes no job.
+    // listing's settle, which holds the orphans) when its listing changes no job.
     assert_eq!(rig.commits(), before + 2);
     assert!(!rig.agents.listing_clean(&host));
+    let row = rig.jobs.read_node(&host).unwrap().unwrap();
+    let orphans: Vec<&String> = row.record.state.orphans.keys().collect();
+    assert_eq!(orphans, ["ghost", long.as_str()]);
     let ghost = JobId::parse("ghost").unwrap();
     assert_eq!(rig.jobs.get_job(&ghost).unwrap(), None);
     assert_eq!(rig.jobs.get_allocation(&ghost).unwrap(), None);
-    assert_eq!(rig.states(&lost), (JobState::Lost, AllocationStep::Freed));
+    for job in &lost {
+        assert_eq!(rig.states(job), (JobState::Lost, AllocationStep::Freed));
+    }
     assert!(rig.jobs.live_on(&host).unwrap().is_empty());
 
-    // The agent stops them and lists their results: each is acknowledged stale, nothing
-    // moves, and once it lists none of them its listing is clean again.
+    // The agent stops the lost jobs, and the orphans end on their own: each result is
+    // acknowledged stale, nothing moves, and once it lists none of them its listing is clean
+    // again and its row holds no orphan.
     agent.take(&reply);
+    agent.end("ghost", Outcome::Succeeded, Some(0));
+    agent.end(&long, Outcome::Failed, Some(1));
     let reply = rig.beat(&agent).await.unwrap();
     let verdicts: Vec<_> = reply.job_acks.iter().map(|ack| ack.ack).collect();
-    assert_eq!(verdicts, [Ack::Stale; 3]);
-    assert_eq!(rig.states(&lost), (JobState::Lost, AllocationStep::Freed));
+    assert_eq!(verdicts, [Ack::Stale; 4]);
+    for job in &lost {
+        assert_eq!(rig.states(job), (JobState::Lost, AllocationStep::Freed));
+    }
     agent.take(&reply);
     assert!(agent.listing().is_empty());
-    rig.beat(&agent).await.unwrap();
+    let reply = rig.beat(&agent).await.unwrap();
+    assert!(reply.unknown_jobs.is_empty());
     assert!(rig.agents.listing_clean(&host));
+    let row = rig.jobs.read_node(&host).unwrap().unwrap();
+    assert!(row.record.state.orphans.is_empty());
     assert_eq!(rig.commits(), before + 6);
 }
 
@@ -313,8 +343,9 @@ async fn a_heartbeat_places_a_queued_job_and_the_next_one_starts_it() {
 }
 
 /// Under `--placement js-sched`, a host whose listing names a job it holds no live allocation
-/// for takes no start while it lists it, though it has room: neither the beat that lists it,
-/// nor the one that lists its result, nor a pass of its own places the queued job there. The
+/// for (here one the store holds no record of, which it keeps running) takes no start while it
+/// lists it, though it has room: neither the beat that lists it, nor the one that lists its
+/// result, nor a pass of its own places the queued job there. The
 /// first beat whose listing is clean places it (its start rides on the next reply). It
 /// catches a placement that counts the capacity of a host still running a job the store does
 /// not know (design section 8, row 37).
@@ -334,15 +365,20 @@ async fn a_host_that_lists_an_unknown_job_takes_no_start_until_its_listing_is_cl
     let queued = rig.jobs.insert_queued(new).unwrap().record.id;
 
     let reply = rig.beat(&agent).await.unwrap();
-    assert_eq!(stops(&reply), ["ghost"]);
+    assert!(stops(&reply).is_empty());
+    assert_eq!(reply.unknown_jobs, ["ghost"]);
     assert!(!rig.agents.listing_clean(&host));
     assert_eq!(rig.job(&queued).state, JobState::Queued);
     rig.agents.place_jobs();
     assert_eq!(rig.job(&queued).state, JobState::Queued);
 
+    // The job the store does not know ends on the host by itself: its result is answered
+    // stale, and the beat that lists it still places nothing.
     agent.take(&reply);
+    agent.end("ghost", Outcome::Succeeded, Some(0));
     let reply = rig.beat(&agent).await.unwrap();
-    assert_eq!(stops(&reply), ["ghost"]);
+    assert!(stops(&reply).is_empty());
+    assert_eq!(reply.job_acks[0].ack, Ack::Stale);
     assert_eq!(rig.job(&queued).state, JobState::Queued);
 
     agent.take(&reply);

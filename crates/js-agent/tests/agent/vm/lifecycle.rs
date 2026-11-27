@@ -267,6 +267,7 @@ fn a_stopped_vm_job_ends_killed_and_its_vm_is_destroyed() {
     driver.wait_for(&vm("job-vm"), Step::Exec);
     life.apply(&reply(vec![Command::JobStop {
         job_id: "job-vm".to_owned(),
+        reason: None,
     }]));
     life.step();
     let result = result_of(&mut life, &driver, "job-vm");

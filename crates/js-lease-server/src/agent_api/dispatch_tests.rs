@@ -9,7 +9,7 @@
 use std::time::Duration;
 
 use js_agent_wire::{HeldState, InstanceIdentity};
-use js_jobs::{AllocationId, JobId, JobState};
+use js_jobs::{AllocationId, EndReason, JobEnd, JobId, JobState};
 use js_state::Store as _;
 use serde_json::json;
 
@@ -595,7 +595,8 @@ fn an_allocation_id_is_32_lowercase_hex_digits_and_a_kind_is_start_or_stop() {
 /// that polls leaves out a start and a stop the queue carries, and carries a start of a job
 /// placed with no queued message (the release before), a stop the queue no longer carries (its
 /// acknowledgement deleted it; the job's end waits for the agent) and the stop of a job the
-/// agent lists and the store holds no allocation of; the beat of a host that does not poll
+/// agent lists that the store holds no allocation of and records the end of (one it holds no
+/// record of is named in `unknown_jobs`, not stopped); the beat of a host that does not poll
 /// carries the starts and stops it always did.
 #[tokio::test]
 async fn the_beat_of_a_polling_host_leaves_out_what_the_queue_carries_and_no_other_host_does() {
@@ -641,11 +642,22 @@ async fn the_beat_of_a_polling_host_leaves_out_what_the_queue_carries_and_no_oth
     let reply = rig.beat(&polls).await.unwrap();
     assert_eq!(stops(&reply), ["job-old", "job-queued"], "{reply:?}");
 
-    // A job the agent lists that the store holds no allocation of is stopped by the beat.
+    // A job the agent lists that the store holds no live allocation of, and whose end it
+    // records, is stopped by the beat; one it holds no record of is named, not stopped.
+    let gone = rig.place("job-gone", "host-a");
+    rig.jobs
+        .end_and_free(&gone, JobEnd::Lost, EndReason::HostAbsent)
+        .unwrap();
     let mut ghost = FakeAgent::new("host-a");
-    ghost.hold("job-ghost", "alloc-x", HeldState::Running);
+    ghost.hold("job-gone", "alloc-x", HeldState::Running);
+    ghost.hold("job-ghost", "alloc-y", HeldState::Running);
     let reply = rig.beat(&ghost).await.unwrap();
-    assert!(stops(&reply).contains(&"job-ghost".to_owned()), "{reply:?}");
+    assert!(stops(&reply).contains(&"job-gone".to_owned()), "{reply:?}");
+    assert!(
+        !stops(&reply).contains(&"job-ghost".to_owned()),
+        "{reply:?}"
+    );
+    assert_eq!(reply.unknown_jobs, ["job-ghost"], "{reply:?}");
 }
 
 /// The hello body of `host` in the pool of `rig`, reporting `capabilities`, naming the launched

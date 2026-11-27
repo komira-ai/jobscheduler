@@ -97,7 +97,8 @@ fn isolation_is_additive_on_the_wire_and_in_the_proto() {
         [
             Command::Unknown,
             Command::JobStop {
-                job_id: "job-0".into()
+                job_id: "job-0".into(),
+                reason: None,
             }
         ]
     );

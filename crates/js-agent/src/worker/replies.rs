@@ -12,10 +12,10 @@ pub(super) fn stops(life: &Lifecycle) -> HeartbeatReply {
         .held()
         .into_iter()
         .map(|run| Command::Stop { run_id: run.run_id });
-    let jobs = life
-        .held_jobs()
-        .into_iter()
-        .map(|job| Command::JobStop { job_id: job.job_id });
+    let jobs = life.held_jobs().into_iter().map(|job| Command::JobStop {
+        job_id: job.job_id,
+        reason: None,
+    });
     let commands = runs.chain(jobs).collect();
     HeartbeatReply {
         commands,

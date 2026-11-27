@@ -844,7 +844,7 @@ fn hand_over(
     reply.commands.retain(|command| match command {
         Command::Start(job) => !unaccounted.contains(&job.run_id),
         Command::JobStart(job) => !unaccounted.contains(&job.job_id),
-        Command::JobStop { job_id } => !unaccounted.contains(job_id),
+        Command::JobStop { job_id, .. } => !unaccounted.contains(job_id),
         _ => true,
     });
     let owed = real.owed();

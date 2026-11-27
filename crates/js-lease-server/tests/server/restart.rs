@@ -201,8 +201,9 @@ pub(crate) fn stored(file: &Path) -> Vec<String> {
 /// snapshot is restored over the store offline (`js_state::sqlite::restore`), and the server
 /// starts again (`--boot resume`) while both agents still hold their jobs. Then:
 ///
-/// - Unknown jobs are stopped: `host-2`, which lists B (unknown to the restored store), is
-///   told to stop it on every reply while it lists it, its killed result is acknowledged
+/// - Unknown jobs are not stopped: `host-2`, which lists B (unknown to the restored store),
+///   is told to stop nothing on any reply while it lists it, and each reply names B in
+///   `unknown_jobs`; B runs on until it ends there by itself, its result is acknowledged
 ///   `STALE`, and B stays unknown (404, no row). `host-1`, which lists A, is told nothing,
 ///   and A keeps its allocation.
 /// - Nothing is booked twice: the next job, C, is not placed on `host-1`, whose booking for
@@ -215,13 +216,13 @@ pub(crate) fn stored(file: &Path) -> Vec<String> {
 ///   nothing there could refuse them; they stay unique because the ids come from a source a
 ///   restore does not wind back (in a service, 128 random bits), never from the store.
 ///
-/// It catches a restore that leaves an unknown job running, a job revived from a host's
-/// listing, a booking not rebuilt from the restored table (C placed beside A), a start sent
+/// It catches a restore that stops the work the restored store forgot (every host of a farm
+/// would lose its jobs to one restore), a job revived from a host's listing, a booking not rebuilt from the restored table (C placed beside A), a start sent
 /// to a host that still runs a job the store forgot, and a minted id written over a row the
 /// restored store holds. (That the service's ids come from a source a restore does not wind
 /// back is not shown here: the test gives the ids.)
 #[tokio::test]
-async fn a_restored_older_job_store_stops_unknown_jobs_and_reissues_no_id() {
+async fn a_restored_older_job_store_keeps_unknown_jobs_running_and_reissues_no_id() {
     let scratch = Scratch::new("restore_jobs");
     // The job tables' clock reads what the server's does, so no deadline is judged across
     // two clocks.
@@ -280,10 +281,12 @@ async fn a_restored_older_job_store_stops_unknown_jobs_and_reissues_no_id() {
     let told = beat_with(&h, &host_1, &[running(&a)]).await;
     assert_eq!(commands(&told), (vec![], vec![]), "{told}");
     let told = beat_with(&h, &host_2, &[running(&b)]).await;
-    assert_eq!(commands(&told), (vec![], vec![b.clone()]), "{told}");
-    // Told again while it still lists the job.
+    assert_eq!(commands(&told), (vec![], vec![]), "{told}");
+    assert_eq!(told["unknown_jobs"], json!([b]), "{told}");
+    // Named again, and still not stopped, while it lists the job.
     let again = beat_with(&h, &host_2, &[running(&b)]).await;
-    assert_eq!(commands(&again).1, vec![b.clone()], "{again}");
+    assert_eq!(commands(&again), (vec![], vec![]), "{again}");
+    assert_eq!(again["unknown_jobs"], json!([b]), "{again}");
 
     let c = submit(&h).await;
     assert_eq!(c, "05".repeat(16), "the draw of A's id was drawn again");
@@ -292,22 +295,24 @@ async fn a_restored_older_job_store_stops_unknown_jobs_and_reissues_no_id() {
     // capacity is not counted until its listing is clean.
     h.ticks.step().await;
     let busy = beat_with(&h, &host_2, &[running(&b)]).await;
-    assert_eq!(commands(&busy), (vec![], vec![b.clone()]), "{busy}");
+    assert_eq!(commands(&busy), (vec![], vec![]), "{busy}");
     let still = beat_with(&h, &host_1, &[running(&a)]).await;
     assert_eq!(commands(&still), (vec![], vec![]), "{still}");
 
-    let killed = json!({
+    let finished = json!({
         "job_id": b,
         "state": "exited_unacked",
-        "result": { "job_id": b, "allocation_id": b_allocation, "outcome": "killed" },
+        "result": {
+            "job_id": b, "allocation_id": b_allocation, "outcome": "succeeded", "exit_code": 0,
+        },
     });
-    let acked = beat_with(&h, &host_2, &[killed]).await;
+    let acked = beat_with(&h, &host_2, &[finished]).await;
     assert_eq!(
         acked["job_acks"],
         json!([{ "job_id": b, "ack": "STALE" }]),
         "{acked}"
     );
-    assert_eq!(commands(&acked), (vec![], vec![b.clone()]), "{acked}");
+    assert_eq!(commands(&acked), (vec![], vec![]), "{acked}");
     h.ticks.step().await;
     let clean = beat_with(&h, &host_2, &[]).await;
     assert_eq!(commands(&clean), (vec![], vec![]), "{clean}");
