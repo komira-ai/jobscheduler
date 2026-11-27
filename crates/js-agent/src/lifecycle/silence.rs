@@ -8,7 +8,7 @@
 //! gave up on long before the job's own wall limit. A server restart silences a well agent
 //! for at most: the heartbeat interval before the last reply it heard (5 s by default), the
 //! server's downtime, then the wait before the agent's next hello, which a `Retry-After`
-//! raises to at most [`RETRY_AFTER_CAP`] (120 s; the agent's own backoff is at most 60 s),
+//! raises to at most [`RETRY_AFTER_CAP`] (120 s; the agent's own backoff is at most 4 s),
 //! and a refusal of that hello while the old session is still within its grace (15 s by
 //! default) before the hello is taken. That is 140 s and the downtime, so the default of
 //! 300 s ([`DEFAULT_SILENCE_STOP`]) lets a server restart take up to 160 s without stopping a

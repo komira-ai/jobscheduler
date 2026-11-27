@@ -6,16 +6,21 @@ use std::time::Duration;
 /// The ceiling of the first wait.
 pub const BASE: Duration = Duration::from_secs(1);
 
-/// The longest ceiling a run of failures reaches.
-pub const CAP: Duration = Duration::from_secs(60);
+/// The longest ceiling a run of failures reaches: a few seconds, well under the server's
+/// grace (15 s by default), so that a host whose requests fail for a while (a lookup of the
+/// server's name, a dropped connection) is back within the grace once they work again, and a
+/// failed heartbeat or poll costs the host its place only when the server stays out of reach.
+/// A wait together with a request that runs to its limit (`REQUEST_LIMIT`, 10 s) stays under
+/// the grace. The server slows the agents down by `Retry-After` when it needs them to.
+pub const CAP: Duration = Duration::from_secs(4);
 
 /// The longest `Retry-After` the agent obeys: a server that asks for more is not
 /// allowed to silence the host for longer. Owned by the wire crate, which the server
 /// also reads it from.
 pub use js_agent_wire::RETRY_AFTER_CAP;
 
-/// Doublings after which the ceiling is above [`CAP`] for any [`BASE`] of a second.
-const MAX_DOUBLINGS: u32 = 6;
+/// Doublings after which the ceiling is at or above [`CAP`] for any [`BASE`] of a second.
+const MAX_DOUBLINGS: u32 = 2;
 
 /// A source of randomness for the wait, so a test picks the number.
 pub trait Jitter {

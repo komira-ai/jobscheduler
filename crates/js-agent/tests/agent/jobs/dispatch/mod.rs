@@ -339,7 +339,8 @@ fn every_refusal_backs_off_and_the_poll_goes_on() {
     assert_eq!(decided(), Next::After(ms(500)));
     assert_eq!(decided(), Next::After(ms(1000)));
     assert_eq!(decided(), Next::After(ms(2000)));
-    for wait in [4000, 8000, 16000, 30000] {
+    // The cap: a few seconds, however long the failures last.
+    for wait in [2000, 2000, 2000, 2000] {
         assert_eq!(decided(), Next::After(ms(wait)));
     }
     assert_eq!(decided(), Next::Again);
