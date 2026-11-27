@@ -127,9 +127,18 @@ impl Tierstore {
             "cold.credentials",
             &format!("{}\n{}\n", credentials.key_id, credentials.secret),
         );
+        // As the unit runs it: tierstore holds its key files to the user it runs as.
         run(
-            "/usr/libexec/tierstore/tierstore",
-            &["--config", CONFIG, "--check-config"],
+            "runuser",
+            &[
+                "--user",
+                "tierstore",
+                "--",
+                "/usr/libexec/tierstore/tierstore",
+                "--config",
+                CONFIG,
+                "--check-config",
+            ],
         );
         make_dir(Path::new("/var/lib/tierstore"), 0o700);
         chown(Path::new("/var/lib/tierstore"), "tierstore:tierstore");
