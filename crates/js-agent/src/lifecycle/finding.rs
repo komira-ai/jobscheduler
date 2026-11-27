@@ -1,7 +1,22 @@
 //! What a post-job check reports when the host is not known to be clean ([`CheckFinding`]),
-//! and what it reports of a change that does not taint the host ([`CheckNote`]).
+//! what it reports of a change that does not taint the host ([`CheckNote`]), and what a
+//! check asked as a step of the worker answers ([`Checked`]).
+
+use std::time::Duration;
 
 use super::{Event, Finding};
+
+/// What [`CheckHook::poll`](super::CheckHook::poll) answers: the verdict, or how long the
+/// checks wait before they look at the host again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Checked {
+    /// The verdict, as [`CheckHook::run`](super::CheckHook::run) gives it.
+    Done(Result<(), CheckFinding>),
+    /// The checks look again once this long has passed: the lifecycle asks again for the
+    /// same run no sooner (on its clock), and the job waits in its cleanup with its slot
+    /// booked meanwhile.
+    Wait(Duration),
+}
 
 /// The most bytes of detail a [`CheckFinding`] keeps.
 pub const CHECK_DETAIL_MAX: usize = 256;

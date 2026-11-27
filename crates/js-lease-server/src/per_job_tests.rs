@@ -581,6 +581,7 @@ fn the_usage_of_a_result_is_stored_with_the_jobs_output() {
         cpu_throttle: None,
         cpu_pressure_some: None,
         cpu_peak: None,
+        peak_swap_bytes: None,
     };
     let mut measured = ended(Outcome::Succeeded, Some(0));
     measured.usage = Some(counted);
@@ -642,6 +643,7 @@ fn the_cpu_counters_of_a_usage_are_stored_when_reported_and_none_when_not() {
             }),
             cpu_pressure_some: Some(Duration::new(1, 250_001_000)),
             cpu_peak: None,
+            peak_swap_bytes: None,
         })
     );
     let mut older = ended(Outcome::Succeeded, Some(0));
@@ -664,6 +666,7 @@ fn the_cpu_counters_of_a_usage_are_stored_when_reported_and_none_when_not() {
             cpu_throttle: None,
             cpu_pressure_some: None,
             cpu_peak: None,
+            peak_swap_bytes: None,
         })
     );
 }
@@ -702,6 +705,34 @@ fn the_cpu_peak_of_a_usage_is_stored_when_reported_and_none_when_not() {
         })
     );
     assert_eq!(stored(usage(None)), None);
+}
+
+/// A usage that reports a swap peak stores it with the output, a swap peak of 0 (measured, none
+/// used) stores `Some(0)`, and a usage that does not report one stores `None`, not a zero. It
+/// catches a swap peak dropped between the agent's report and the stored result (the estimator
+/// then never sees a run that swapped) and an absent peak made into a zero.
+#[test]
+fn the_swap_peak_of_a_usage_is_stored_when_reported_and_none_when_not() {
+    let (_store, jobs) = tables();
+    let (job, _) = placed(&jobs, "job-a", "host-a", spec(), BOOKED);
+    let stored = |peak_swap_bytes| {
+        let mut result = ended(Outcome::Succeeded, Some(0));
+        result.usage = Some(JobUsage {
+            peak_memory_bytes: 1 << 30,
+            cpu_usage_usec: 2_000_000,
+            cpu_throttle: None,
+            cpu_pressure_some_usec: None,
+            cpu_peak: None,
+            peak_swap_bytes,
+        });
+        let Some(JobEnd::Exited { output, .. }) = end_of(&job, &result) else {
+            panic!("a clean exit ends exited");
+        };
+        output.usage.expect("a usage").peak_swap_bytes
+    };
+    assert_eq!(stored(Some(768 << 20)), Some(768 << 20));
+    assert_eq!(stored(Some(0)), Some(0));
+    assert_eq!(stored(None), None);
 }
 
 /// A result that carries a CPU series ends the job with the series stored in its output as

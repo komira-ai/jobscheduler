@@ -417,6 +417,79 @@ fn read_denies_follow_every_allow_but_a_mount_grants_in_every_job_shape() {
     }
 }
 
+/// Read denies also deny hard links and clones of the place: in every job shape each read
+/// deny has exactly one `file-link file-clone` deny line, after its file-read deny and before
+/// the first mount grant, and no later line allows either operation again but each mount's
+/// one grant of both, for its own path.
+///
+/// Catches a denied file that a run hard-links or clones into its run directory and reads
+/// there under a path no deny names, a link deny placed after a grant that reopens it, an
+/// allow of link or clone after the denies that is not a mount's, and a mount that loses
+/// links and clones below its denied root.
+#[test]
+fn every_read_deny_also_denies_links_and_clones_in_every_job_shape() {
+    let nets = [Net::Off, Net::Loopback, Net::Remote(ports(&[443])), Net::On];
+    for net in nets {
+        for set in [None, Some(trees(&[TREE_A, TREE_B]))] {
+            for mounts in [vec![], vec![rw_mount()]] {
+                let layout = SlotLayout {
+                    read_denies: FENCE.iter().map(|place| path(place)).collect(),
+                    ..job(set.clone(), mounts)
+                };
+                let profile = profile(layout, net.clone());
+                let text = profile.text();
+                let lines: Vec<&str> = text.lines().collect();
+                let first_grant = lines.iter().position(|line| {
+                    line.starts_with("(allow file-read*") && line.contains("(param \"GR_")
+                });
+                let mut last_link_deny = 0;
+                for i in 0..FENCE.len() {
+                    let read = format!("(deny file-read* (subpath (param \"RD_{i}\")))");
+                    let link = format!("(deny file-link file-clone (subpath (param \"RD_{i}\")))");
+                    let found: Vec<usize> =
+                        (0..lines.len()).filter(|at| lines[*at] == link).collect();
+                    assert_eq!(found.len(), 1, "{net:?} {link}:\n{text}");
+                    let read_at = lines.iter().position(|line| *line == read);
+                    assert!(
+                        read_at.is_some_and(|at| at < found[0]),
+                        "{net:?} {link}:\n{text}"
+                    );
+                    if let Some(grant) = first_grant {
+                        assert!(found[0] < grant, "{net:?} {link}:\n{text}");
+                    }
+                    last_link_deny = last_link_deny.max(found[0]);
+                }
+                // Only a mount grant gives links and clones back after the denies, and only
+                // for what it grants (a mount at or above a denied place is refused, see
+                // the next test).
+                for line in &lines[last_link_deny..] {
+                    if line.starts_with("(allow file-link") || line.starts_with("(allow file-clone")
+                    {
+                        assert!(
+                            line.starts_with("(allow file-link file-clone (subpath (param \"GR_"),
+                            "{net:?}:\n{text}"
+                        );
+                    }
+                }
+                let mount_links = lines
+                    .iter()
+                    .filter(|line| {
+                        line.starts_with("(allow file-link file-clone (subpath (param \"GR_")
+                    })
+                    .count();
+                assert_eq!(
+                    mount_links,
+                    profile
+                        .params()
+                        .iter()
+                        .filter(|(name, _)| name.starts_with("GR_"))
+                        .count()
+                );
+            }
+        }
+    }
+}
+
 /// A mount grant at or above a read-denied place is refused, at the start and when a
 /// narrowing adds the deny: its grant comes after the denies and would reopen the place.
 /// A grant below a denied place, or beside it, is not.

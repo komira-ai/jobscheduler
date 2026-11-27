@@ -36,6 +36,12 @@ pub struct SuperviseSpec {
     /// The directory the records are written in: absolute, made by the agent, root's, mode
     /// 0700, in the run's scratch.
     pub record_dir: String,
+    /// The pid of the agent that started the supervisor, which the supervisor must still have
+    /// as its parent when it is about to start the job: once that agent is gone, nothing
+    /// journaled the run, and the next agent ends the run's account, so the job is not
+    /// started. `None` (a spec of an earlier release, or a test's) checks nothing.
+    #[serde(default)]
+    pub parent: Option<u32>,
 }
 
 /// Why a spec was refused. The supervisor then exits with

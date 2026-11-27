@@ -240,6 +240,7 @@ impl AgentKeys {
             addr,
             flag,
             callback_refused: true,
+            retry_refused: true,
         })
     }
 

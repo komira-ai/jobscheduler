@@ -87,6 +87,12 @@
 //! wait ([`Integrity::with_settle`], `--settle-ms`): the check looks again after the wait and
 //! judges what of the first look is still there. A process that is ending is gone by then; a
 //! job's leftover is not. The notes are taken from the host as the check last looked at it.
+//! After a job's cleanup the lifecycle asks the check through [`CheckHook::poll`], which
+//! does not wait: the first look answers the wait, the job waits in its cleanup while the
+//! worker goes on with other work, and the lifecycle asks again once the wait has passed,
+//! for the second look. The other checks ([`CheckHook::run`] and
+//! [`CheckHook::run_restored`]: the re-check of a taint, a whole-node lease's checks, the
+//! checks owed at start) wait on the caller's thread ([`HostView::settle`]).
 //!
 //! The finding names the process: `pid <pid> (<comm>, state <state>, cgroup <cgroup>, owner
 //! <owner>, cmd "<command line>") is running after job <run>`, where the owner is `name
@@ -288,7 +294,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::cli_runtime::{IdRange, JobUsers};
-use crate::lifecycle::{CheckFinding, CheckHook, CheckNote, Finished};
+use crate::lifecycle::{CheckFinding, CheckHook, CheckNote, Checked, Finished};
 
 use own::{is_live, under_held, unified};
 pub use proc::{DirLister, Entry, Listing, PROCESS_CAP, ProcHost, SystemDirs, WATCH_ENTRY_CAP};
@@ -478,6 +484,9 @@ pub struct Integrity {
     /// What the last check saw change that does not taint the host, until
     /// [`CheckHook::notes`] drains it.
     notes: Vec<CheckNote>,
+    /// The first look of a [`CheckHook::poll`] that waits, until the next call takes the
+    /// second.
+    pending: Option<compare::Again>,
 }
 
 impl Integrity {
@@ -520,6 +529,7 @@ impl Integrity {
             agent_pid,
             settle: Duration::ZERO,
             notes: Vec::new(),
+            pending: None,
         };
         let reading = this.observe();
         if !reading.unread.is_empty() {
@@ -599,6 +609,13 @@ impl CheckHook for Integrity {
 
     fn run_restored(&mut self, job: &Finished<'_>) -> Result<(), CheckFinding> {
         self.judge(job, true)
+    }
+
+    /// The check of [`CheckHook::run`] without the wait on the caller's thread: a first
+    /// look that sees a process that would be a leftover answers [`Checked::Wait`] with the
+    /// settle wait, and the next call for the same run looks again and judges.
+    fn poll(&mut self, job: &Finished<'_>) -> Checked {
+        self.poll_after(job)
     }
 
     /// The baseline-free rule of [`CheckHook::run_restored`] judges every process of the job

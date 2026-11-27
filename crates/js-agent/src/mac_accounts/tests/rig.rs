@@ -67,9 +67,9 @@ impl Rig {
         Self::build(name, uids, ready, log, Some(capture))
     }
 
-    /// Another rig for the same test, logging to this one's log: a test that needs two rigs
-    /// cannot capture twice (a capture is held for as long as it is installed, and there is
-    /// one at a time).
+    /// Another rig for the same test, logging to this one's log through this one's capture:
+    /// a second capture on the test's thread would take the events from the first for as
+    /// long as both are installed.
     pub(in super::super) fn next(&self, name: &str, uids: u32, ready: usize) -> Self {
         Self::build(name, uids, ready, self.log.clone(), None)
     }

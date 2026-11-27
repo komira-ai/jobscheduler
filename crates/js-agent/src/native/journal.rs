@@ -3,16 +3,17 @@
 //!
 //! A lease is written (and synced to disk) before the pool lends it an account, and marked done
 //! after the account was retired or after a failed start was undone. A process that dies,
-//! stops or is rescued with runs going leaves them in the journal; the account pool's next open
-//! retires their accounts, and the next process (or the rescue) lists each lease that has a run
-//! as ended and drops the rest (`native/adopt.rs`). The file is append-only text, one
+//! stops or is rescued with runs going leaves them in the journal; the next process takes back
+//! each run whose supervisor still runs or has left its exit record, the account pool's open
+//! keeping its account, retires every other account, lists the other runs as ended and drops
+//! the leases with no run (`native/adopt.rs`). The file is append-only text, one
 //! `+ <lease>`, `- <lease>` or `= <lease> <run>` per line; a line that is none of them (a torn
 //! last line) is ignored, and the leases that are live are the added ones not yet removed.
 //!
 //! A `=` line is written once the supervisor said the lease's job started: `<run>` is a
 //! [`RunRecord`] in JSON, what a later process needs to report the run as the process that
 //! started it would (its labels, its scratch directory and home, its declared outputs, its
-//! bundle, its account). Fields were only ever added, each with a default, so a record of an
+//! bundle, its account, its supervisor, its put directory). Fields were only ever added, each with a default, so a record of an
 //! earlier release reads, and an earlier release skips the fields it does not know.
 //!
 //! An append and a [`retire`](Journal::retire) hold an exclusive `flock` on `<journal>.lock`
@@ -27,6 +28,8 @@ use std::path::{Path, PathBuf};
 use js_agent_wire::OutputSpec;
 use rustix::fs::{FlockOperation, flock};
 use serde::{Deserialize, Serialize};
+
+use crate::mac_supervisor::SupervisorId;
 
 /// What the journal keeps of a run whose job started, for a later process of the agent to
 /// report it.
@@ -59,6 +62,27 @@ pub struct RunRecord {
     /// The uid of that account; `None` in a record of an earlier release.
     #[serde(default)]
     pub uid: Option<u32>,
+    /// The run's supervisor, by which a later process takes the run back
+    /// (`native/adopt.rs`); `None` in a record of an earlier release, whose run is not taken
+    /// back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisor: Option<SupervisorId>,
+    /// The put directory the run's output is committed to (`native/put.rs`), for a run that
+    /// has one; `None` for one that has none, and in a record of an earlier release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub put: Option<PutRecord>,
+}
+
+/// What the journal keeps of a run's put target, for a later process to commit the run's
+/// output as the process that started it would.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PutRecord {
+    /// The put directory: `<put root>/cas/b/<build>/<nonce>`, absolute.
+    pub dir: PathBuf,
+    /// Its path below the put root, the key without `/pack`.
+    pub key_prefix: String,
+    /// The run's output, `<rest>/pack`, below its run directory.
+    pub output: String,
 }
 
 /// The journal in the file at a path.

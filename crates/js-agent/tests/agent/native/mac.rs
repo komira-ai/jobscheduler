@@ -21,7 +21,8 @@ use js_agent_wire::NativeSpec;
 use js_mac_pool::seatbelt::AbsPath;
 
 use super::{
-    FakeAccounts, Scratch, TERM, config, native, open_pool, pool_settings, settle, spec_in,
+    FakeAccounts, Scratch, TERM, config, native, open_pool, pool_settings, reopen_pool, settle,
+    spec_in,
 };
 
 fn exited(code: i32) -> Status {
@@ -36,6 +37,7 @@ struct MacRig {
     rt: NativeRuntime,
     dir: Scratch,
     settings: Settings,
+    accounts: Arc<FakeAccounts>,
 }
 
 impl MacRig {
@@ -55,7 +57,30 @@ impl MacRig {
         let rt = NativeRuntime::over(Some(pool), launcher, config, TERM)
             .unwrap()
             .without_new_session();
-        Self { rt, dir, settings }
+        Self {
+            rt,
+            dir,
+            settings,
+            accounts,
+        }
+    }
+
+    /// A second runtime over the same state and the real supervisor, as the agent's next
+    /// process opens it: its pool keeps the accounts of the runs it takes back.
+    fn reopened(&self) -> NativeRuntime {
+        let pool = reopen_pool(&self.dir, &self.settings, &self.accounts);
+        let launcher = Arc::new(SystemLauncher::at(env!("CARGO_BIN_EXE_js-agent")));
+        let config = config(&self.dir, &self.settings);
+        NativeRuntime::over(Some(pool), launcher, config, TERM + 1)
+            .unwrap()
+            .without_new_session()
+    }
+
+    /// Replaces the runtime with [`MacRig::reopened`], the earlier one dropped as a process
+    /// that ends drops it: its supervisors are left running.
+    fn restart(&mut self) {
+        let next = self.reopened();
+        drop(std::mem::replace(&mut self.rt, next));
     }
 
     fn spec(&self, run_id: &str, body: NativeSpec) -> RunSpec {
@@ -576,4 +601,49 @@ fn the_supervisor_of_a_removed_run_is_reaped() {
         rustix::process::test_kill_process(pid).is_err(),
         "the supervisor {pid:?} is still there, a zombie of the agent"
     );
+}
+
+/// Asserts that a job outlives the restart of the runtime that started it, with the real
+/// supervisor: the job waits for a file, the runtime is dropped and a second one opened over
+/// the same state, which lists the run (once) and polls it running; once the file is made, the
+/// job ends and the second runtime reads its exit from the supervisor's record, with what it
+/// printed, and removes it. Catches a restart that ends or loses a running job, and an end a
+/// supervisor recorded with no agent that is not read.
+#[test]
+fn a_job_runs_on_across_a_restart_and_its_exit_is_read_from_its_supervisor() {
+    let mut rig = MacRig::new("restart");
+    let go = rig.dir.path("go");
+    let script = "while [ ! -e \"$1\" ]; do /bin/sleep 0.05; done; echo ran on; exit 3";
+    let gate = go.display().to_string();
+    let id = rig.start("r1", "/bin/sh", &["-c", script, "sh", &gate]);
+    assert_eq!(rig.rt.poll(&id).unwrap(), Status::Running);
+    rig.restart();
+    let found = rig.rt.list_labelled().unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].id, id);
+    assert_eq!(rig.rt.poll(&id).unwrap(), Status::Running);
+    fs::write(&go, "").unwrap();
+    assert_eq!(rig.settle(&id), exited(3));
+    let tail = rig.rt.log_tail(&id).unwrap().unwrap();
+    assert_eq!(tail.stdout, "ran on\n");
+    rig.rt.remove(&id).unwrap();
+    assert!(rig.rt.list_labelled().unwrap().is_empty());
+}
+
+/// Asserts that a job taken back after a restart is stopped as one the runtime started: the
+/// stop's `SIGTERM` reaches the job's process group, the real supervisor records the signal,
+/// and the run reads as a shell tells a job `SIGTERM` ended (143). Catches a run taken back
+/// that cannot be stopped, or whose stop reads as a lost run.
+#[test]
+fn a_job_taken_back_is_stopped_and_its_end_is_its_supervisors() {
+    let mut rig = MacRig::new("restart-stop");
+    let id = rig.start("r1", "/bin/sleep", &["600"]);
+    assert_eq!(rig.rt.poll(&id).unwrap(), Status::Running);
+    rig.restart();
+    assert_eq!(rig.rt.list_labelled().unwrap().len(), 1);
+    rig.rt
+        .stop(&id, std::time::Duration::from_secs(600))
+        .unwrap();
+    assert_eq!(rig.settle(&id), exited(128 + 15));
+    rig.rt.remove(&id).unwrap();
 }

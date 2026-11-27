@@ -446,8 +446,9 @@ fn advance(
 /// ([`JobResult::logs_report`]); an inconsistent one is dropped and the result recorded
 /// without it, so that a reader of the job's live logs knows where each stream ends. The
 /// result's `usage`, what the job's control group counted, is kept as the output's resource
-/// usage, with the CPU periods, the throttled periods, the CPU pressure and the CPU peak it reports; a
-/// result with none records none, never a zero, and a counter it does not report is `None`. The
+/// usage, with the CPU periods, the throttled periods, the CPU pressure, the CPU peak and the swap
+/// peak it reports; a result with none records none, never a zero, and a counter it does not
+/// report is `None`. The
 /// result's `cpu_series` is kept as reported, beside the usage and whether or not the result has
 /// one, when it is well formed ([`CpuSeries::new`]); a series that is not is dropped. Its
 /// `memory_series` is kept the same way ([`MemorySeries::new`]).
@@ -478,6 +479,7 @@ pub(crate) fn end_of(job: &JobRecord, result: &JobResult) -> Option<JobEnd> {
             millicores: peak.millicores,
             window_usec: peak.window_usec,
         }),
+        peak_swap_bytes: used.peak_swap_bytes,
     });
     // The wire type reads only a series with a power-of-two granularity and at most 128
     // points; the store also keeps no granularity past 16 bits, and drops such a series.

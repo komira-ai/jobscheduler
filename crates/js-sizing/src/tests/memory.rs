@@ -251,7 +251,8 @@ fn held_to(booked: u64, need: u64) -> Run {
 /// M2: a success that reached its booking ([`Run::limit_hits`]) needed at least the booking:
 /// it is a held sample of the larger of its peak and its booking, sized with the usual
 /// margin, so its key books a step above the booking. A success that swapped is a held sample
-/// of its peak; any other success is an honest one, whatever its booking. Catches a run held
+/// of its peak plus its swap (`swap.rs`); any other success is an honest one, whatever its
+/// booking. Catches a run held
 /// at its booking recorded as `min(peak, booked)` with no margin, which books its key at that
 /// booking again, and a run that reached its booking sized from its lower peak alone.
 #[test]
@@ -283,7 +284,11 @@ fn a_success_that_reached_its_booking_books_a_step_above_it() {
         swap_peak_bytes: 1,
         ..booked_at(4 * GIB, 3 * GIB)
     };
-    assert_eq!(held_estimate(swapped, 5), 3840 * MIB, "swap: its peak");
+    assert_eq!(
+        held_estimate(swapped, 5),
+        3840 * MIB,
+        "one byte of swap: its peak plus the byte"
+    );
     assert_eq!(
         held_estimate(booked_at(4 * GIB, 3 * GIB), 5),
         3840 * MIB,

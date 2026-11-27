@@ -17,7 +17,7 @@ use js_agent_wire::{
 use js_mac_pool::seatbelt::AbsPath;
 use sha2::{Digest as _, Sha256};
 
-use super::{Rig, me, my_gid, native};
+use super::{Rig, gated, me, my_gid, native, open_gate};
 
 /// The node of these tests: the test's own user, which the hand-over needs no root for.
 fn node() -> Node {
@@ -89,6 +89,16 @@ fn handle() -> RunHandle {
 /// Starts the run `r1` (lease `7.0`) of the build service's shape: its put mount of
 /// `<root>/cas/b/b1/n1` at `/work/.kbf-out`, and `declared` outputs. Answers its folder.
 fn started(rig: &mut Rig, root: &Path, declared: Vec<OutputSpec>) -> PathBuf {
+    started_running(rig, root, declared, &[])
+}
+
+/// [`started`], the job's program `/bin/sh` given `args`.
+fn started_running(
+    rig: &mut Rig,
+    root: &Path,
+    declared: Vec<OutputSpec>,
+    args: &[&str],
+) -> PathBuf {
     let put = mount(
         &root.join("cas/b/b1/n1"),
         "/work/.kbf-out",
@@ -97,7 +107,7 @@ fn started(rig: &mut Rig, root: &Path, declared: Vec<OutputSpec>) -> PathBuf {
     let fs = fs_of(vec![put]);
     assert_eq!(rig.rt.check_job_fs(&fs, &[]), Ok(()));
     assert_eq!(rig.rt.resolve_fs("r1", "", &fs, 0), FsPrepared::Ready);
-    let mut body = native("/bin/sh", &[]);
+    let mut body = native("/bin/sh", args);
     body.outputs = declared;
     let spec = rig.spec("r1", body);
     rig.rt.create_and_start(&spec).unwrap();
@@ -152,6 +162,53 @@ fn a_put_mount_is_committed_once_before_the_retirement() {
     };
     assert_eq!(rig.rt.outputs_report(&handle()), Some(report));
     assert_eq!(rig.rt.outputs_report(&handle()), None, "answered once");
+}
+
+/// Asserts that a run's put target outlives a restart: the journal records it with the run,
+/// and the next process, which takes the run back by its supervisor's exit record (written
+/// here where the supervisor writes it), commits the job's pack at the removal and reports it
+/// once. Catches a run taken back that reports its exit and never commits the output its job
+/// wrote, which the build service would then wait for in vain.
+#[test]
+fn a_put_target_is_committed_by_the_process_that_takes_the_run_back() {
+    let (mut rig, root) = rig("put-adopt");
+    let gate = rig.dir.path("gate");
+    let args = gated(&gate, "exit 0");
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let exec = started_running(&mut rig, &root, Vec::new(), &args);
+    write_pack(&exec, b"packed before the restart");
+    open_gate(&gate);
+    assert!(matches!(rig.settle(&handle()), Status::Exited(_)));
+    let journal = js_agent::native::Journal::new(&rig.dir.path("native-leases"));
+    let record = journal.runs().unwrap().remove("7.0").unwrap();
+    let put = record.put.expect("the put target is journaled");
+    assert_eq!(put.dir, root.join("cas/b/b1/n1"));
+    assert_eq!(
+        (put.key_prefix.as_str(), put.output.as_str()),
+        ("cas/b/b1/n1", ".kbf-out/pack")
+    );
+    let exit = rig.launcher.last().record_dir.join("exit.json");
+    fs::write(
+        exit,
+        br#"{"ended":{"how":"exited","value":0},"job_pid":null,"asid":null}"#,
+    )
+    .unwrap();
+    let config = PutConfig {
+        root: root.clone(),
+        node: node(),
+    };
+    let mut next = rig.reopened().with_put(Some(config));
+    assert_eq!(next.list_labelled().unwrap().len(), 1);
+    assert!(matches!(next.poll(&handle()).unwrap(), Status::Exited(_)));
+    next.remove(&handle()).unwrap();
+    let pack = root.join("cas/b/b1/n1/pack");
+    assert_eq!(fs::read(&pack).unwrap(), b"packed before the restart");
+    let report = OutputsReport {
+        key: "cas/b/b1/n1/pack".to_owned(),
+        sha256: hex::encode(Sha256::digest(b"packed before the restart")),
+        bytes: 25,
+    };
+    assert_eq!(next.outputs_report(&handle()), Some(report));
 }
 
 /// Asserts that an agent with a trees root admits the build service's put mount before its

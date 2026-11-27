@@ -924,6 +924,7 @@ pub(crate) fn output() -> Output {
             cpu_throttle: None,
             cpu_pressure_some: None,
             cpu_peak: None,
+            peak_swap_bytes: None,
         }),
         logs: None,
         cpu_series: Some(series()),

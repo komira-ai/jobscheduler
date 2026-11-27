@@ -78,13 +78,11 @@ fn host_id(text: &str) -> Option<HostId> {
     HostId::new(text).ok().filter(|_| !dots)
 }
 
-/// The key a path segment names, if it is exactly a key in its canonical spelling and
-/// starts with a letter or a digit: the store admits more (a leading dot or dash), the
-/// route does not, so `.` and `..` never reach it.
+/// The key a path segment names, if it is exactly a key in its canonical spelling. The
+/// key's own grammar ([`ProfileKey::parse`]) requires a first byte of `0-9` or `a-z`, so
+/// `.`, `..` and a leading dash never reach the store.
 fn key_id(text: &str) -> Option<ProfileKey> {
-    let first = text.bytes().next()?;
-    let starts = first.is_ascii_lowercase() || first.is_ascii_digit();
-    ProfileKey::parse(text).ok().filter(|_| starts)
+    ProfileKey::parse(text).ok()
 }
 
 /// A decimal number of minutes: digits only, and no more than a `u64` holds.
@@ -454,9 +452,8 @@ mod tests {
     }
 
     /// Asserts that a key segment is taken only in its canonical spelling and starts with
-    /// a letter or a digit, although the store's grammar admits more. It catches `.` and
-    /// `..` (and a leading dash) reaching a store key, and an escape or a capital naming
-    /// a key twice.
+    /// a letter or a digit, as the key's grammar requires. It catches `.` and `..` (and a
+    /// leading dash) reaching a store key, and an escape or a capital naming a key twice.
     #[test]
     fn a_key_segment_is_a_key_and_not_a_path_trick() {
         let longest = "a".repeat(128);
