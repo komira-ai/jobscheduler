@@ -446,13 +446,15 @@ fn an_owner_action_starts_at_its_tail_through_a_stream_of_backfill() {
     assert_eq!(ops, [owner]);
 }
 
-/// Catches: a hold traded for the worker that became cheaper to drain, or its start time
-/// taken again. `a` carries a lease of 600 s and `b` one of 900 s, so the request holds `a`
-/// with its start at 600 s. A job of an hour ahead of the request in queue order lands on
-/// `a`, whose tail is now an hour away; the hold stays on `a` with its start of 600 s. At
-/// 20 s a job of 700 s, which does not fit that start, is placed on `b`.
+/// Catches: a hold kept on its worker when work ahead of the request makes that worker the
+/// dearer to drain, or a moved hold keeping the start of the worker it left. `a` carries a
+/// lease of 600 s and `b` one of 900 s, so the request holds `a`. At 10 s a job of an hour
+/// ahead of the request in queue order lands on `a`, whose tail is now an hour away: in
+/// that round the hold moves to `b`, keeping when the mark was made and taking `b`'s tail
+/// end, 900 s. `a`, which nothing holds any more, takes a job of 900 s, which would not fit
+/// `b`'s start.
 #[test]
-fn a_hold_stays_on_its_worker_with_its_start_when_work_ahead_lands_there() {
+fn a_hold_moves_with_its_start_when_work_ahead_lands_on_its_worker() {
     let mut f = enforced();
     f.worker("a");
     f.worker("b");
@@ -460,25 +462,31 @@ fn a_hold_stays_on_its_worker_with_its_start_when_work_ahead_lands_there() {
     f.lease_on("b", secs(900));
     let whole = f.whole();
     assert_eq!(f.held_for(whole), Some(&w("a")));
+    let made = f.s.whole_mark(whole).map(|m| m.made);
     f.at(10_000);
     f.beat();
     let (_, ahead) = job_of(&mut f, Qos::Interactive, Some(secs(3_600)));
     assert_eq!(ahead.map(|g| g.worker), Some(w("a")));
+    assert_eq!(f.held_for(whole), Some(&w("b")));
+    let mark = f.s.whole_mark(whole).cloned().expect("still marked");
+    assert_eq!(
+        (Some(mark.made), mark.tail_end),
+        (made, Some(FarmTime::from_millis(900_000)))
+    );
     assert!(f.grants().is_empty());
-    assert_eq!(f.held_for(whole), Some(&w("a")));
     f.at(20_000);
     f.beat();
-    assert_eq!(job(&mut f, Some(secs(700))), Some(w("b")));
-    assert_eq!(f.held_for(whole), Some(&w("a")));
+    assert_eq!(job(&mut f, Some(secs(900))), Some(w("a")));
+    assert_eq!(f.held_for(whole), Some(&w("b")));
 }
 
 /// Catches: a moved hold keeping the start time of the worker it left, or the worker it
 /// left still held. `a` carries a lease of 600 s and `b` one of 900 s, so the request
 /// holds `a` with its start at 600 s. `a` is cordoned at 10 s, so it can no longer hold
 /// the request: the hold moves to `b` and takes `b`'s start, 900 s. At 20 s a job of 700 s
-/// fits that start (but not 600 s) and is placed on `b`. Once `a` is uncordoned, a job of
-/// an hour, which does not fit before `b`'s start of 900 s, is placed on `a`: nothing holds
-/// it any more, and the hold stays on `b`.
+/// fits that start (but not 600 s) and is placed on `b`. Once `a` is uncordoned its tail
+/// (600 s) is again the shorter, so the hold moves back to `a`, and a job of an hour, which
+/// fits neither start, is placed on `b`: nothing holds it any more.
 #[test]
 fn a_moved_hold_takes_its_new_workers_start_and_frees_the_old_one() {
     let mut f = enforced();
@@ -499,8 +507,10 @@ fn a_moved_hold_takes_its_new_workers_start_and_frees_the_old_one() {
     f.feed(js_sched::Event::Uncordon { worker: w("a") });
     f.at(30_000);
     f.beat();
-    assert_eq!(job(&mut f, Some(secs(3_600))), Some(w("a")));
-    assert_eq!(f.held_for(whole), Some(&w("b")));
+    assert!(f.grants().is_empty());
+    assert_eq!(f.held_for(whole), Some(&w("a")));
+    assert_eq!(job(&mut f, Some(secs(3_600))), Some(w("b")));
+    assert_eq!(f.held_for(whole), Some(&w("a")));
 }
 
 /// Catches: an underestimated tail read as still to come, or as a free worker. Every key's

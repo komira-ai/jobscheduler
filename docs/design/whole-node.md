@@ -82,7 +82,11 @@ holds at most one reservation and a host carries at most one. The host is chosen
 3. then the lowest host id (the order of the table), so the choice is deterministic on the injected clock.
 
 A reserved request that finds another available eligible host already quiet takes that host and drops its reservation. Otherwise it keeps
-the host it has and does not switch to a cheaper one later (no thrash). Two requests never share a host; the next request in queue order
+the host it has and does not switch to a cheaper one later (no thrash). *In `js-sched` (`scheduler/whole.rs`, `hold_whole`) the host is
+picked again every placement round by the least tail (komira-ai/jobscheduler#582, rule 2; komira-ai/jobscheduler#1127): the mark moves to a
+host whose tail has become shorter than its own host's, keeping the time it was made and taking the new host's tail end; on a tie it stays
+where it is, so it never moves for a lease count, a provider or a name; and a move the caps refuse leaves it where it is. A lease past its
+end reads as ending a minute from now, so a host with a late lease does not pull the mark onto itself.* Two requests never share a host; the next request in queue order
 picks the cheapest host that no reservation holds. A request that is cancelled by its consumer, or whose wait ends, drops its reservation
 at once and the host returns to `serving`. *In the lease server a whole-node request has a request id when its `POST /v1/leases` names a `request_id`; the
 request is then the pending lease the acquire made, the server presents it to the registry again on every tick (the poll that keeps its
