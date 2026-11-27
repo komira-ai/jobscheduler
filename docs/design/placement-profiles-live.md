@@ -1,8 +1,8 @@
 # Booking from the learned profiles: the live mode after `--placement-curves shadow`
 
 Status: built behind `--placement-curves on`, off by default: the four checks, the curve booking, the packing rule
-on the curve hosts, the pack limit's fullest slot, the wait bound, `server.curve_hosts`,
-`server.curve_max_wait_seconds`, the metrics of section 5, the `shadow` table's three columns and a curve arm of the
+on the curve hosts, the pack limit's fullest slot, the wait bound, `server.curve_hosts` and
+`server.curve_max_wait_seconds` with their flags `--curve-hosts` and `--curve-max-wait-seconds`, the metrics of section 5, the `shadow` table's three columns and a curve arm of the
 replay (on synthesised lives: the trace still carries no series), and under `shadow` and `on` the memory shadow of
 section 2 ("Memory over time, in shadow"). Not built: the decide-in-shadow line of section 4 for CPU.
 The code references below are to the commit the design was written at. It follows [cpu-over-time.md](cpu-over-time.md), whose steps 1
@@ -99,7 +99,7 @@ what it books until then, and how the mode is turned on and back off.
 | `js-sizing` | The profile already answers `slot_p90`, `slot_runs`, `tail`, `level`. It gains, beside its window of 16 scores, a ring of the last 16 scored runs' peak-overrun flags (check 3) and a ring of the last 16 runs' CPU series status (check 4), and pure functions reading them. It answers how many kept runs went past 128 s (`tail_runs`, from each kept run's tail seconds). |
 | `js-sched-placer` | `Curves` gains `On`. `JobSizes` answers, per job, flat or curve with the figures. A per-host table of 65 slots (64 of 2 s, then one from 128 s on). The packing test in `try_job`, in place of the CPU axis of `Room::fits` on a curve host. A first-waited time per queued job, in memory. One log line. |
 | `js-sched` | The pack limit's CPU share can read a per-host figure the placer gives (the largest booked slot) in place of the summed bookings. One read-only accessor for a host's slot-0 CPU charge (`cpu_left`, `crates/js-sched/src/admission/horizon.rs:57`). The minute horizon used for leases is unchanged. |
-| `js-lease-server` | The `on` value, `server.curve_hosts`, `server.curve_max_wait_seconds`, metrics (section 5). |
+| `js-lease-server` | The `on` value, `server.curve_hosts`, `server.curve_max_wait_seconds` and their flags `--curve-hosts` and `--curve-max-wait-seconds`, metrics (section 5). |
 | `js-cpu-replay` | `shadow` prints the four checks per class. The trace carries series, so the replay can run the curve mode (section 4). |
 | Agent, wire, store | Nothing. A job's stored booking and its `cpu.weight` are its flat number (section 2). |
 
@@ -442,15 +442,19 @@ The live mode books today's memory figure, so its fallback is today's:
   - `on` needs `--agent-pool-config`, as `shadow` does, and learns, logs and checks exactly as `shadow`.
   - The refusal text becomes `placement_curves must be off, shadow or on`. This is the value
     `cpu-over-time.md` section 12 reserved.
-- **Canary:** `server.curve_hosts`, a list of host ids.
-  - Non-empty: curves are booked only for jobs placed on the hosts it names. On every other host, every job is
+- **Canary:** `server.curve_hosts` (flag `--curve-hosts`, host ids separated by commas), a list of host ids.
+  - Given: curves are booked only for jobs placed on the hosts it names. On every other host, every job is
     booked flat.
-  - Empty: curves are booked on every host.
+  - Absent: curves are booked on every host. An empty list is refused at start, as are an empty name, a name twice
+    and a name that is not a host id, each refusal naming the key or the flag and quoting the name. The flag and
+    the key are read by the same code (`crates/js-lease-server/src/config/placement_curves.rs`), so a server
+    configured by flags alone, as the live one is, can run the canary.
   - Per pool was considered. One engine places every pool, and pools must already share one memory percent
     (`crates/js-lease-server/src/config/agent_setup.rs:79-98`). A host list needs no setting per pool.
   - Per class is automatic (section 4). An operator list of classes was not chosen: there were 5,335 classes in 4 h,
     most named by a hash.
-- **Wait bound:** `server.curve_max_wait_seconds`, default 30, from 0 to 300. At 0 a curve never delays a job.
+- **Wait bound:** `server.curve_max_wait_seconds` (flag `--curve-max-wait-seconds`), default 30, from 0 to 300. At 0
+  a curve never delays a job.
 - **All three are read once at start**, like every placement setting. A change is a restart through the server's
   update hook (`docs/lease-server-update.md`).
 
@@ -514,9 +518,12 @@ against them, not built in this one.
   runs, 80% and 80.1%, 3 and 4 overruns, 11 and 12 usable lines.
 - **The wait bound.** A job waiting exactly 30 s on the injected farm clock is tested flat; at 29.999 s it is not.
 - **The pack share.** With curves, it equals the fullest booked slot. With every class flat, it equals today's.
-- **Canary.** With `curve_hosts` naming host `a`, only jobs on `a` are booked by curve.
+- **Canary.** With `curve_hosts` naming host `a`, only jobs on `a` are booked by curve. Through the flags, a server
+  started with `--placement-curves on --curve-hosts a` books a job on `a` by its curve and places a job that fits
+  flat on another host flat there; without `--curve-hosts` it books by curve on every host.
 - **Settings.** `on` is accepted and `On` is refused. `curve_max_wait_seconds` of 301 is refused. `on` without
-  `--agent-pool-config` is refused.
+  `--agent-pool-config` is refused. `--curve-hosts` and `--curve-max-wait-seconds` give what the keys give and
+  refuse what they refuse, and each is refused without `--agent-pool-config` and beside `--config`.
 - **The shadow table.** It prints the new columns from the current release's lines, and reads a log of the release
   before without error.
 

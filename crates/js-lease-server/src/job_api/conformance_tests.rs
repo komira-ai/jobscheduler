@@ -5,8 +5,8 @@
 //! manual clock the store stamps ends and retention with and the service reads when it
 //! decides a result has expired. Nothing here sleeps or binds a socket.
 //!
-//! The service is built as a test builds it until the release that accepts a retry policy and
-//! a completion callback: its submit takes both. A host that is lost goes through the job
+//! The service is built as a server builds it: its submit takes a retry policy and a
+//! completion callback. A host that is lost goes through the job
 //! pass's own loss path ([`job_loss::lose_absent`], an observer that reads every host
 //! absent), a start that times out through [`job_retry::end_or_retry`] as the start timeout
 //! of [`crate::job_expiry`] does, and a callback is claimed from the store and answered
@@ -18,7 +18,6 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::http::{HeaderValue, Request, header};
-use js_callback::AddressRule;
 use js_conformance::jobs::{self, JobHarness, Refused, Step};
 use js_jobs::{InstanceId, JobEnd, JobId, JobRecord, JobState, Output, Retention, StartFailure};
 use js_proto::v1::job_service_client::JobServiceClient;
@@ -117,9 +116,7 @@ impl Real {
             file: std::path::PathBuf::new(),
         };
         assert_eq!(clients.add(entry, &token), Ok(()));
-        let ctx: Ctx = submit::Ctx::served(CEILING, Fixed::new(true))
-            .accepting_retry()
-            .accepting_callbacks(AddressRule::new([]));
+        let ctx: Ctx = submit::Ctx::served(CEILING, Fixed::new(true));
         let api = Arc::new(JobApi::new(Arc::clone(&jobs), shared).with_submit(ctx));
         let channel = jobs::channel_to(Presenting(grpc(api, LiveClients::new(clients))));
         Real {

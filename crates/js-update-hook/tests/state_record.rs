@@ -577,3 +577,25 @@ fn a_state_directory_swapped_for_a_link_after_the_open_redirects_nothing() {
     assert!(!moved.join(RECORD_FILE).exists());
     assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
 }
+
+/// Asserts that a directory a hook makes through [`Held::dir_fd`] after the state directory was
+/// swapped for a link is in the directory that was opened and checked, and that nothing is made
+/// at the link's target.
+///
+/// Catches a descriptor of the hook's own files that reaches the path again after the check.
+#[test]
+fn what_a_hook_makes_through_the_held_descriptor_is_in_the_directory_opened() {
+    let tmp = cell("record-dir-fd");
+    let state = tmp.path().join("state");
+    fs::create_dir(&state).unwrap();
+    let held = open(&state).unwrap();
+    let moved = tmp.path().join("moved");
+    fs::rename(&state, &moved).unwrap();
+    let elsewhere = tmp.path().join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    symlink(&elsewhere, &state).unwrap();
+
+    rustix::fs::mkdirat(held.dir_fd(), "own", rustix::fs::Mode::RWXU).unwrap();
+    assert!(moved.join("own").is_dir());
+    assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+}

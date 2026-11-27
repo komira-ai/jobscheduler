@@ -440,8 +440,9 @@ negative and fades; each release reads the other's results.
   run's processes (`docs/design/mac-runtime.md`, section 4), so Mac classes learn as Linux's do.
 - **Settings** (flags, each off or at today's value by default): agent `--cpu-series`, `--host-second-samples`;
   server `--placement-curves off|shadow|on`; the CPU slack stays 1.1. Off equals today's behaviour exactly. The
-  live mode's other settings are the file keys `server.curve_hosts` and `server.curve_max_wait_seconds`
-  ([placement-profiles-live.md](placement-profiles-live.md) section 5); the slot length, horizon, run minimum and fit
+  live mode's other settings are `--curve-hosts` and `--curve-max-wait-seconds`, the flags of the file keys
+  `server.curve_hosts` and `server.curve_max_wait_seconds` ([placement-profiles-live.md](placement-profiles-live.md)
+  section 5); the slot length, horizon, run minimum and fit
   ratio are the profile's constants, not settings, and the readings residual is carried, not faded.
 
 ## 14. Considered and not chosen
