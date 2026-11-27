@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use js_agent::dispatch::{Cell, Dial, serve};
 use js_agent::{
-    Answer, Connector, Drain, Handle, Login, Session, Sleeper, Transport, Wake, Worker,
+    Answer, Connector, Drain, HEARTBEAT_PATH, HELLO_PATH, Handle, Login, Session, Sleeper, Step,
+    Transport, Wake, Worker,
 };
 use js_agent_wire::{Command, DISPATCH_PATH, Dispatched, HeartbeatReply};
 use js_client::{ClientError, HostIdentity};
@@ -400,17 +401,38 @@ fn a_session_tells_its_cell_each_welcome_and_closes_it_at_a_drain() {
     assert!(cell.wait_route().is_none(), "the drain closed the cell");
 }
 
-/// Asserts that a session with no cell says nothing to a poller and works as it did. Catches a
-/// session that needs a cell.
+/// Asserts that a session with no cell, welcomed by a server that offers the dispatch poll,
+/// works as it did: its first tick says hello for its host and is answered with a wait (the
+/// session is live, not failed or refused), the drain keeps the session's drain plan, and the
+/// next tick beats for the welcome's epoch saying it drains. Nothing else is sent: no poller
+/// runs without a cell. Catches a session that needs a cell, one that fails or ends on a
+/// polling welcome it cannot hand on, and a drain that is not reported to the server.
 #[test]
 fn a_session_without_a_cell_says_nothing_to_a_poller() {
     let dir = Scratch::new("jobs-dispatch-session-bare");
     let machine = FakeMachine::new();
     let worker = start(&dir, &machine);
-    let (mut script, _) = Script::new(vec![welcome_polling(1)]);
+    let (mut script, sent) = Script::new(vec![welcome_polling(1), beat_ok()]);
     let mut session = Session::new(hello("h1"), &mut script, lowest()).with_jobs(&worker, DRAIN);
-    session.tick();
+    let welcomed = session.tick();
+    assert!(matches!(welcomed, Step::Wait { .. }), "{welcomed:?}");
     session.begin_drain();
+    assert_eq!(session.drain_plan(), Some(DRAIN));
+    let beaten = session.tick();
+    assert!(matches!(beaten, Step::Wait { .. }), "{beaten:?}");
+    drop(session);
+    let sent = sent.borrow();
+    let paths: Vec<&str> = sent.iter().map(|(path, _)| path.as_str()).collect();
+    assert_eq!(paths, [HELLO_PATH, HEARTBEAT_PATH]);
+    assert_eq!(sent[0].1["host_id"], "h1");
+    assert_eq!(
+        (
+            &sent[1].1["host_id"],
+            &sent[1].1["epoch"],
+            &sent[1].1["phase"]
+        ),
+        (&json!("h1"), &json!(1), &json!("draining"))
+    );
 }
 
 /// A sleeper that waits for the test's go at its first wait and ends the agent there and at
