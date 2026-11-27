@@ -465,7 +465,7 @@ fn pair(names: NameMap) -> Pair {
     let sink = |nth: u32| {
         NodeUsage::over(Arc::clone(&store), 1 << 20, 0, names.clone())
             .unwrap()
-            .as_instance(InstanceTag::started(0, 1, nth))
+            .writing_as(InstanceTag::started(0, 1, nth))
             .with_prune_duty(Some(jobs_over(&store)))
     };
     let sinks = [sink(0), sink(1)];

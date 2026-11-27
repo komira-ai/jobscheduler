@@ -120,7 +120,7 @@ fn sink_over(
     let usage = NodeUsage::over(store, setup.profile_store_bytes, today, setup.names.clone())
         .map_err(StartupError::because("--usage-db"))?
         .with_history_retention_days(setup.history_retention_days)
-        .as_instance(setup.instance.clone())
+        .writing_as(setup.instance.clone())
         .with_prune_duty(setup.prune_duty.clone());
     info!(
         db = %setup.db.display(),
@@ -192,7 +192,7 @@ impl NodeUsage {
     }
 
     /// The same sink, writing the node series as the instance `instance`.
-    pub(crate) fn as_instance(self, instance: InstanceTag) -> Self {
+    pub(crate) fn writing_as(self, instance: InstanceTag) -> Self {
         Self {
             instance: Some(instance),
             ..self
