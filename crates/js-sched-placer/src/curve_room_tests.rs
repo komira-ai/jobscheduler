@@ -96,7 +96,9 @@ fn live(
         allocation: AllocationId::from_bits(bits),
         host: on,
         flat_millis: flat,
+        memory_bytes: 64 * MIB,
         key: class.map(crate::sizes::JobSizes::key_of),
+        memory_key: None,
         started_ms: age_ms.map(|age| NOW_MS - age),
     };
     engine.book.live.insert(job, held);

@@ -44,7 +44,7 @@ use js_sim_cell::actions::{
 };
 use js_sim_cell::{
     Call, CallKind, Cell, Counter, Expect, HowEnded, ItemId, JobFront, LostAnswer, Route, Scenario,
-    ServerSpec, Shape, Work,
+    ServerSpec, Shape, Work, run_seed_range_on_threads,
 };
 
 /// Every scenario of the family runs over this many seeds.
@@ -89,9 +89,9 @@ const EARLY_CANCEL_AT: Duration = Duration::from_millis(6_500);
 const EARLY_QUIET_AT: Duration = Duration::from_secs(30);
 const EARLY_SETTLE: Duration = Duration::from_secs(120);
 
-/// The headline's seeds run on this many threads, a quarter each: it is the family's
-/// largest by far.
-const HEADLINE_THREADS: u64 = 4;
+/// The headline's seeds run on this many threads ([`run_seed_range_on_threads`]): it is
+/// the family's largest by far. `.config/nextest.toml` reserves this many slots for it.
+const HEADLINE_THREADS: usize = 4;
 
 /// The restart: four hosts at the server's default heartbeat, room for 32 jobs at once,
 /// and 36 jobs of 150 s, so four wait queued; the server is stopped at 60 s, while the
@@ -274,25 +274,14 @@ fn a_cancel_before_the_host_lists_the_start_ends_cancelled_and_frees_the_allocat
 /// allocation on silence (`freed-only-when-confirmed`), never ends a killed host's jobs
 /// (`jobs-ended`, `all-items-terminal`), or leaves their allocations booked
 /// (`no-allocation-live`). Its seeds run on [`HEADLINE_THREADS`] threads, each building
-/// the scenario for its quarter.
+/// the scenario for itself.
 #[test]
 fn the_headline_over_jobs() {
-    let parts: Vec<_> = (0..HEADLINE_THREADS)
-        .map(|part| {
-            let seeds = part * SEEDS / HEADLINE_THREADS..(part + 1) * SEEDS / HEADLINE_THREADS;
-            std::thread::spawn(move || {
-                let ran = jobs_headline::the_headline_over_jobs().try_run_seed_range(seeds);
-                ran.map(|_| ()).map_err(|failure| failure.to_string())
-            })
-        })
-        .collect();
-    for part in parts {
-        match part.join() {
-            Ok(Ok(())) => {}
-            Ok(Err(failure)) => panic!("{failure}"),
-            Err(panicked) => std::panic::resume_unwind(panicked),
-        }
-    }
+    run_seed_range_on_threads(
+        jobs_headline::the_headline_over_jobs,
+        0..SEEDS,
+        HEADLINE_THREADS,
+    );
 }
 
 /// What a restart over the store must not cost an agent: a host's session is its row in the
