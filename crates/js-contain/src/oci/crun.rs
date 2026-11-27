@@ -248,8 +248,9 @@ pub(crate) struct Crun {
     program: PathBuf,
     scrub: EnvScrub,
     job: Option<JobDrop>,
-    /// The lock a host start holds across `crun`'s `/dev` step ([`super::start_lock`]).
-    pub(super) start_lock: PathBuf,
+    /// The lock a host start holds across `crun`'s `/dev` step, none for a daemon that is not
+    /// root ([`super::start_lock::node_lock`]).
+    pub(super) start_lock: Option<PathBuf>,
 }
 
 /// The state directory of a lease's `crun` (`--root`), inside the lease directory: no
@@ -269,7 +270,7 @@ impl Crun {
             program,
             scrub,
             job,
-            start_lock: PathBuf::from(super::start_lock::HOST_START_LOCK),
+            start_lock: super::start_lock::node_lock(rustix::process::geteuid().as_raw()),
         }
     }
 
@@ -341,7 +342,8 @@ impl Crun {
             stdout,
             stderr,
         }));
-        let ran = super::start_lock::run(&client, (lease, &self.start_lock), (id, bundle), opts);
+        let lock = self.start_lock.as_deref();
+        let ran = super::start_lock::run(&client, (lease, lock), (id, bundle), opts);
         match ran.await {
             Err(why) => RunEnd::Failed(why),
             Ok(Ok(())) => RunEnd::Exited(0),

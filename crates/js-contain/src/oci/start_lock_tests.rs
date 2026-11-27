@@ -57,7 +57,7 @@ impl Stage {
             self.dir.join("pid-arg").display()
         );
         js_testkit::spawn::install_script(&program, &script, "755");
-        Crun::new(program, no_scrub, None).with_start_lock(self.lock.clone())
+        Crun::new(program, no_scrub, None).with_start_lock(Some(self.lock.clone()))
     }
 
     /// What the stand-in said its `--pid-file` was, or `None` if it never ran.
@@ -221,4 +221,28 @@ fn a_host_start_fails_without_starting_crun_when_its_lock_cannot_be_opened() {
         ))
     );
     assert_eq!(s.pid_arg(), None, "crun was started");
+}
+
+/// Proves a daemon that is not root runs a host lease's `crun` with no lock and no pid file:
+/// it cannot make the node's lock, and its `crun` cannot change the host's `/dev`. Catches a
+/// host start that fails for want of a lock the daemon could never have taken.
+#[test]
+fn a_host_start_without_a_lock_runs_crun_as_a_contained_one() {
+    let s = stage("unlocked", true);
+    let crun = s.crun("exit 0").with_start_lock(None);
+    assert_eq!(s.start(crun).join().expect("the run"), RunEnd::Exited(0));
+    assert_eq!(s.pid_arg(), Some("none\n".to_owned()));
+    assert!(!s.lock.exists(), "a lock was made");
+}
+
+/// Proves the node's lock is `/dev/.js-host-start.lock` for a root daemon and that a daemon
+/// that is not root has none. Catches a root daemon whose host starts lock nothing, or lock a
+/// file another node's agent, or another runtime on this node, does not.
+#[test]
+fn the_node_lock_is_in_dev_for_a_root_daemon_alone() {
+    assert_eq!(
+        node_lock(0),
+        Some(PathBuf::from("/dev/.js-host-start.lock"))
+    );
+    assert_eq!(node_lock(1000), None);
 }

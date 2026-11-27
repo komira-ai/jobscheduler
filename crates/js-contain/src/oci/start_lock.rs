@@ -17,7 +17,8 @@
 //! while `crun` runs, so the lock is held at most that much longer than the step. Every runtime and every agent on the node takes the
 //! same file, whatever its scratch directory. The file is made by the daemon (root for a host
 //! container) with mode `0600` in `/dev`, where no other user can make one or open it, so
-//! no other user can hold it.
+//! no other user can hold it. A daemon that is not root takes no lock ([`node_lock`]): it
+//! cannot make the file, and the `crun` it runs cannot change the host's `/dev`.
 //!
 //! [`Isolation::Host`]: crate::container::Isolation::Host
 
@@ -43,6 +44,17 @@ pub(crate) const PID_FILE: &str = "crun.pid";
 /// the lease directory's entry, for the moment `crun` takes to start a container.
 const PID_FILE_POLL: Duration = Duration::from_millis(10);
 
+/// The lock a daemon whose effective uid is `euid` takes for its host starts:
+/// [`HOST_START_LOCK`] for root, and none otherwise (a daemon that is not root can neither
+/// make it nor have `crun` change the host's `/dev`).
+pub(crate) fn node_lock(euid: u32) -> Option<PathBuf> {
+    if euid == 0 {
+        Some(PathBuf::from(HOST_START_LOCK))
+    } else {
+        None
+    }
+}
+
 /// The pid file of the host container whose lease directory is `lease`.
 fn pid_file(lease: &Path) -> PathBuf {
     lease.join(PID_FILE)
@@ -58,13 +70,14 @@ struct Held {
 /// `crun run` of the container `id` of the bundle `bundle` by `client`, with `opts`, for the
 /// lease in `lease`. For a host lease ([`host_start`]) `lock` is held from before `crun`
 /// starts until its pid file is there or it has ended ([`Held::across`]), and `crun` is
-/// given the pid file; any other lease's run takes no lock. The result is `crun run`'s.
+/// given the pid file; any other lease's run, and every run without a `lock`, takes none.
+/// The result is `crun run`'s.
 ///
 /// # Errors
 /// The lock of a host lease could not be taken ([`take`]): `crun` is not started.
 pub(crate) async fn run(
     client: &Runc,
-    (lease, lock): (&Path, &Path),
+    (lease, lock): (&Path, Option<&Path>),
     (id, bundle): (&str, &Path),
     opts: CreateOpts,
 ) -> Result<runc::Result<()>, String> {
@@ -77,13 +90,16 @@ pub(crate) async fn run(
     }
 }
 
-/// For the lease in `lease`: `None` when it is not a host lease (no
+/// For the lease in `lease`: `None` when there is no `lock` or it is not a host lease (no
 /// [`HOST_LEASE_MARKER`](super::HOST_LEASE_MARKER) in it, a regular file), and otherwise the
 /// lock `lock` held ([`take`]).
 ///
 /// # Errors
 /// The lock could not be taken ([`take`]).
-async fn host_start(lease: &Path, lock: &Path) -> Result<Option<Held>, String> {
+async fn host_start(lease: &Path, lock: Option<&Path>) -> Result<Option<Held>, String> {
+    let Some(lock) = lock else {
+        return Ok(None);
+    };
     let marker = lease.join(super::HOST_LEASE_MARKER).symlink_metadata();
     if !marker.is_ok_and(|meta| meta.is_file()) {
         return Ok(None);
@@ -159,8 +175,9 @@ impl Held {
 
 #[cfg(test)]
 impl super::crun::Crun {
-    /// This driver with its host starts locking `lock` instead of the node's lock.
-    pub(crate) fn with_start_lock(mut self, lock: PathBuf) -> Self {
+    /// This driver with its host starts locking `lock` (none for `None`) instead of the
+    /// node's lock.
+    pub(crate) fn with_start_lock(mut self, lock: Option<PathBuf>) -> Self {
         self.start_lock = lock;
         self
     }

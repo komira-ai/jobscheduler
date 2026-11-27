@@ -99,7 +99,7 @@ async fn a_host_lease_of_the_daemons_gets_its_config_alone_and_the_daemons_crun(
     let dir = scratch("host-lease-own");
     let mut oci = start(&config(&dir, true), &dir.join("s")).expect("started");
     let lock = dir.join("host-start.lock");
-    let locking = oci.crun.clone().with_start_lock(lock.clone());
+    let locking = oci.crun.clone().with_start_lock(Some(lock.clone()));
     Arc::get_mut(&mut oci).expect("the only handle").crun = locking;
     let me = rustix::process::getuid().as_raw();
     let lease = oci.lease_dirs("js-x-r1").dir;
