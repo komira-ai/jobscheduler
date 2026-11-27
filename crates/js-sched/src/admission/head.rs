@@ -62,7 +62,8 @@ pub(crate) fn binding(cpu: (u64, u64), mem: (u64, u64)) -> Ratio {
 /// needs `need` (cores, memory) fits on a worker, against the caps `limits`: the left
 /// side `left` with the charge of each lease in `leases` (lease, cores, memory) taken off
 /// at that lease's end in `ends`. The measured load and working set of `left` stay as they
-/// are. A lease whose end is in the past is released at `now`; a lease with no end in
+/// are. A lease whose end is in the past is released at `now` (the scheduler's own lease
+/// ends never are: it reads such a lease as ending a minute from now); a lease with no end in
 /// `ends` is never released. `None` when the lease does not fit even after every lease
 /// with an end is released.
 ///

@@ -216,7 +216,7 @@ impl Engine {
 
     /// Whether the engine holds a job allocation on `host` that holds one of the host ports
     /// `ports`.
-    fn port_held_on(&self, host: &HostId, ports: &[u16]) -> bool {
+    pub(super) fn port_held_on(&self, host: &HostId, ports: &[u16]) -> bool {
         let mut here = self.jobs.values().filter(|hold| hold.host == *host);
         here.any(|hold| hold.host_ports.iter().any(|port| ports.contains(port)))
     }
@@ -415,13 +415,13 @@ impl Engine {
             |at, room| {
                 let walker = &walkers[*at];
                 let room: BTreeSet<HostId> = room.difference(&tainted).cloned().collect();
-                let host = self.try_job(walker, (&room, &usable[*at]), now, &mut settled);
+                let host = self.shadowed_try(walker, (&room, &usable[*at]), now, &mut settled);
                 tainted.extend(host.clone().filter(|_| walker.host_isolation));
                 host
             },
         );
         self.sched.drop_matches();
-        self.end_curve_walk();
+        self.end_curve_walk(now);
         let decided = walkers.into_iter().zip(placed).zip(&usable);
         let mut placements = Vec::new();
         let mut waiting = Vec::new();
@@ -447,7 +447,7 @@ impl Engine {
     /// operation after it is numbered as if the round had run; and the scheduler is ticked
     /// only when it was not ticked at `now` since the last change the walk made (`settled`),
     /// since a second tick at the same time with nothing changed in between does nothing.
-    fn try_job(
+    pub(super) fn try_job(
         &mut self,
         walker: &Walker,
         (room, capable): (&BTreeSet<HostId>, &BTreeSet<&HostId>),

@@ -26,7 +26,9 @@
 //! [`crate::FailureReport`] (the scenario, the seed, the trace hash, the invariant and the
 //! last forty trace lines); an [`Expect`] a seed does not meet (the first one judged at a
 //! virtual time that was not met, else the first judged at the end); or, once every seed
-//! has run, a witness no seed satisfied.
+//! has run, a witness no seed satisfied. [`try_run_seed_range_on_threads`] and
+//! [`run_seed_range_on_threads`] run the seeds of a range on several threads and answer
+//! what the sequential run answers.
 //!
 //! A witness is how a scenario shows that the situation it is about happened: a predicate
 //! over the [`Counters`] of all a seed's agents added together, which at least one seed
@@ -66,10 +68,12 @@ mod expect;
 mod held_after_runs;
 mod jobs;
 mod launched_on;
+mod threads;
 
 pub use answer::Call;
 pub(crate) use expect::ended;
 pub use expect::{Expect, HostIs};
+pub use threads::{run_seed_range_on_threads, try_run_seed_range_on_threads};
 
 /// How long a scenario runs after its last action unless [`Scenario::settle_within`]
 /// says otherwise.
@@ -429,8 +433,8 @@ impl Scenario {
     /// Runs the seeds of `seeds` in order, stopping at the first that fails, then judges
     /// the witnesses over every seed of the range: [`Scenario::try_run_seeds`] over a part
     /// of the seeds. A scenario is built and run on one thread, so a test that runs a
-    /// large scenario's seeds on several threads builds the scenario on each and gives
-    /// each a range.
+    /// large scenario's seeds on several threads uses [`try_run_seed_range_on_threads`],
+    /// which builds the scenario on each thread.
     ///
     /// # Errors
     ///
@@ -439,6 +443,12 @@ impl Scenario {
         let count = seeds.end.saturating_sub(seeds.start);
         let runs = seeds.map(|seed| self.run_seed(seed));
         let runs = runs.collect::<Result<Vec<SeedRun>, ScenarioFailure>>()?;
+        self.judged(count, runs)
+    }
+
+    /// Judges the witnesses over `runs`, the passed seeds of a range of `count` seeds in
+    /// seed order: the first witness no run satisfies fails, else the runs are `Passed`.
+    fn judged(&self, count: u64, runs: Vec<SeedRun>) -> Result<Passed, ScenarioFailure> {
         let held = |witness: &&Witness| runs.iter().any(|run| (witness.holds)(&run.counters));
         let unwitnessed = self.witnesses.iter().find(|witness| !held(witness));
         match unwitnessed {
