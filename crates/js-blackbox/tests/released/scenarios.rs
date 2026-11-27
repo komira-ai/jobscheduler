@@ -32,6 +32,10 @@ use crate::{agent, server, watch};
 /// condition: the longest job sleeps 150 s).
 const JOB_LIMIT: Duration = Duration::from_secs(600);
 
+/// How long the host's resolver may take to stop finding a name taken out of /etc/hosts (a bound
+/// on the setup of the name-lookup scenario, not a pass condition).
+const UNRESOLVED_WITHIN: Duration = Duration::from_secs(30);
+
 /// The flags of `released scenarios`.
 #[derive(Debug, clap::Args)]
 pub struct Flags {
@@ -444,11 +448,23 @@ fn name_lookup(rig: &Rig) -> Result<(), String> {
     rig.steady()?;
     let name = rig.flags.server_name.as_str();
     let _unresolved = Unresolved::new(name);
-    if try_run("getent", &["hosts", name]).is_ok() {
-        return Err(format!(
-            "{name} is still found after its line left /etc/hosts"
-        ));
-    }
+    // The host's resolver (systemd-resolved, which the agent's own lookups reach for a name its
+    // reading of /etc/hosts does not find) reads /etc/hosts again only every few seconds: the
+    // outage starts once the name is no longer found anywhere, which is a bound on the setup, not
+    // a pass condition.
+    watch(|w| {
+        w.until(
+            UNRESOLVED_WITHIN,
+            &mut || match try_run("getent", &["hosts", name]) {
+                Ok(found) => Seen::No(format!("{name} is still found: {}", found.trim())),
+                Err(_) => Seen::Yes,
+            },
+        )
+    })
+    .within(
+        &format!("{name} is no longer found after its line left /etc/hosts"),
+        UNRESOLVED_WITHIN,
+    )?;
     let id = rig.submit("name-lookup", 30, json!([]));
     watch(|w| {
         w.hold(OUTAGE, &mut || -> Result<(), String> {
@@ -531,8 +547,10 @@ fn server_restart(rig: &Rig) -> Result<(), String> {
 
 /// The agent is updated while a job runs, from the previous release's package to this release's,
 /// the way the update hook does it on a farm host (the new package installed, the handover file
-/// written, the unit restarted): the job is handed over to the new agent and ends with exit code
-/// 0 in its first attempt, and the host lists the new version within 60 s of the restart.
+/// written, the unit restarted): the host lists the new version within 60 s of the restart, the
+/// job is still running then, on its host and in its attempt (handed over, not drained: a stop
+/// without the handover file lets the job finish before the new agent starts), and it ends with
+/// exit code 0 in its first attempt.
 fn agent_update(rig: &Rig) -> Result<(), String> {
     let flags = &rig.flags;
     rig.steady()?;
@@ -548,9 +566,11 @@ fn agent_update(rig: &Rig) -> Result<(), String> {
     rig.in_session(SESSION_WITHIN, flags.released)
         .map_err(|e| format!("after the update: {e}"))?;
     let now = rig.job(&id)?;
-    if (now.attempt, now.host_id.as_str()) != (before.attempt, flags.host_id.as_str()) {
+    if (now.state.as_str(), now.attempt, now.host_id.as_str())
+        != (RUNNING, before.attempt, flags.host_id.as_str())
+    {
         return Err(format!(
-            "the job left its attempt or its host in the update: {now:?}"
+            "the job was not handed over running, on its host and in its attempt: {now:?}"
         ));
     }
     rig.ends_zero(&id)

@@ -814,7 +814,7 @@ farm's flags is made to them in the same way.
 | J6, the released server image | `/readyz` answers 200 within 60 s of the container's start, and a job run through the released agent ends with exit code 0 |
 | J1, the released `.deb` with the farm's flags | the host is listed live and the agent's health route answers 200 within 60 s of the unit's start, and a job ends with exit code 0 |
 | The server restarted while a job runs | the job ends with exit code 0 in its first attempt, and no listing of the hosts after the restart shows the host lost |
-| The agent updated while a job runs | from the previous release in `testing` to this one (the package installed, the handover file written, the unit restarted): the job ends with exit code 0 in its first attempt, and the host lists the new version within 60 s |
+| The agent updated while a job runs | from the previous release in `testing` to this one (the package installed, the handover file written, the unit restarted): the host lists the new version within 60 s, the job is still running then (handed over, not drained), and it ends with exit code 0 in its first attempt |
 | The server unreachable for 60 s | the job keeps running, the agent is back in a session within 30 s of the server's return, and the job ends with exit code 0 |
 | The server's name not found for 60 s after the first contact | the host is listed live and the agent's health route answers 200 at every probe of the 60 s |
 
