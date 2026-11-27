@@ -189,14 +189,20 @@ pub fn programs(run: &str) -> Vec<String> {
         let program = command
             .split_whitespace()
             .map(|w| w.trim_matches(['"', '\'']))
-            .find(|w| {
-                !w.is_empty()
-                    && !(w.contains('=') && !w.starts_with('-') && !w.contains('/'))
-                    && !matches!(*w, "sudo" | "env" | "exec" | "time" | "nice")
-            });
+            .find(|w| !w.is_empty() && !is_setting(w) && !is_wrapper(w));
         found.extend(program.map(str::to_owned));
     }
     found
+}
+
+/// Whether the word `word` sets a variable for the command (`NAME=value`), not a flag's value.
+fn is_setting(word: &str) -> bool {
+    word.contains('=') && !word.starts_with('-') && !word.contains('/')
+}
+
+/// Whether the word `word` is a wrapper that runs the command after it.
+fn is_wrapper(word: &str) -> bool {
+    matches!(word, "sudo" | "env" | "exec" | "time" | "nice")
 }
 
 /// Whether the program `program` is buck2 (or buck), by its last path component.
