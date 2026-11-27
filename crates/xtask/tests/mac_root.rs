@@ -261,7 +261,7 @@ fn the_verb_refuses_an_unknown_only_name_first() {
         String::from_utf8_lossy(&out.stderr),
         "xtask: --only native-isolation: no such target; the targets are pf_as_root, \
          treestore, mac_pool, mac_pool_trace, native_privileged, native_isolation, \
-         native_inbound_pf\n"
+         native_inbound_pf, native_fence\n"
     );
     assert_eq!(out.status.code(), Some(1));
 

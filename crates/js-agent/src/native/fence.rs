@@ -8,10 +8,14 @@
 //! the proof Mac with a profile whose reads are open (`docs/design/spawn-disclaim.md`, "The
 //! fence, measured"). Each is a read deny of every run's profile, under both spellings,
 //! since `/Library` is a firmlink to the data volume and which spelling Seatbelt matches
-//! was not measured.
+//! was not measured. Every read-denied place also denies hard links and clones from it
+//! (`file-link`, `file-clone`), the run's own home granted both back, since a read deny
+//! matches paths and a link or clone into the run directory would give the job a name no
+//! deny matches.
 //!
-//! The list is fixed for one macOS release: the measurement is run again after every macOS
-//! upgrade of the pool, and a new place is added here.
+//! The list is the measured places, not a complete list: Apple publishes none. A new place
+//! is added here when it is measured. The walk of the system volume per macOS release that
+//! would find them is not built (`docs/design/spawn-disclaim.md`, "The fence, as built").
 
 /// The privacy-only places, each spelled under `/Library` and under
 /// `/System/Volumes/Data/Library`: the privacy database's directory, the database itself,

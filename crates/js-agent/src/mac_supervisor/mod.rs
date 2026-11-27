@@ -54,6 +54,13 @@
 //! ([`record::from_status`]). [`FakeLauncher`] runs shell text with no supervisor and writes
 //! the same records, for tests.
 //!
+//! **A later process of the agent** ([`adopt`]) takes back a supervisor an earlier one
+//! started, by its identity ([`SupervisorId`], its pid and start time): its run is adoptable
+//! while the supervisor runs or once its exit record is there, and [`Adopted`] reads its
+//! records as [`Supervised`] does. A spec that names the agent ([`SuperviseSpec::parent`])
+//! starts no job once that agent is gone: a supervisor whose run nothing journaled never
+//! runs a job the next agent cannot end.
+//!
 //! The native runtime's start of a job (`crate::native`) calls [`SystemLauncher`], for every
 //! native job and for its self-test. The decisions here are tested on every platform; the system calls of the
 //! audit session, the drop, the limits and the profile are in `macos` and only macOS has them
@@ -64,6 +71,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+pub mod adopt;
 pub mod fake;
 pub mod launch;
 #[cfg(target_os = "macos")]
@@ -72,6 +80,7 @@ pub mod record;
 pub mod run;
 pub mod spec;
 
+pub use adopt::{Adopted, StartOf, SupervisorId};
 pub use fake::FakeLauncher;
 pub use launch::{
     LaunchRequest, Launcher, Supervised, Supervision, SupervisorChild, SystemLauncher,

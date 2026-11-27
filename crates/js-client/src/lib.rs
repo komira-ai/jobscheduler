@@ -2,7 +2,10 @@
 //! a server address checked for the rule that a token crosses a network only inside TLS,
 //! the bearer token read from an owner-only file, and an HTTP client that trusts only
 //! the PEM file it is given or, without one, the public roots bundled in `webpki-roots`
-//! (never the platform's store), and sends the token to the one host named.
+//! (never the platform's store), and sends the token to the one host named. It keeps one
+//! connection to the server between requests, idle for at most 8 s, so a program that calls
+//! the server again and again (the agent's heartbeats) pays one TCP and TLS handshake a
+//! connection, not one a request.
 //!
 //! A client can authenticate by the host's identity instead: a client certificate and key in
 //! two files (`HostIdentity`, given by `--host-cert` and `--host-key`), presented in the TLS

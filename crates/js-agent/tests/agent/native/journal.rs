@@ -8,10 +8,11 @@ use std::fs;
 use std::io::Write as _;
 
 use js_agent::lifecycle::Runtime;
-use js_agent::native::{Journal, NativeRuntime, RunRecord};
+use js_agent::mac_supervisor::SupervisorId;
+use js_agent::native::{Journal, NativeRuntime, PutRecord, RunRecord};
 use js_agent_wire::{OutputKind, OutputSpec};
 
-use super::{Failing, Rig, native};
+use super::{Failing, Rig, gated, native, open_gate};
 use crate::support::Scratch;
 
 fn live(rig: &Rig) -> Vec<String> {
@@ -120,7 +121,10 @@ fn concurrent_adds_are_never_lost_to_a_retirement() {
 #[test]
 fn a_started_run_is_recorded_with_its_account_and_uid_until_it_is_removed() {
     let mut rig = Rig::new("journal-record");
-    let mut body = native("/usr/bin/true", &[]);
+    let gate = rig.dir.path("gate");
+    let args = gated(&gate, "exit 0");
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let mut body = native("/bin/sh", &args);
     body.outputs.push(OutputSpec {
         path: "out".to_owned(),
         kind: OutputKind::File,
@@ -149,6 +153,16 @@ fn a_started_run_is_recorded_with_its_account_and_uid_until_it_is_removed() {
     assert_eq!(record.bundle, None);
     assert_eq!(record.account, Some(name));
     assert_eq!(record.uid, Some(launched.uid));
+    // The fake supervisor is its job, so the identity names the job's process.
+    let supervisor = record.supervisor.expect("the supervisor's identity");
+    assert_eq!(supervisor.pid, record.pid);
+    assert_eq!(
+        Some(supervisor.start),
+        js_agent::mac_supervisor::macos::start_of(record.pid),
+        "{supervisor:?}"
+    );
+    assert_eq!(record.put, None);
+    open_gate(&gate);
     rig.settle(&id);
     rig.rt.remove(&id).unwrap();
     assert!(live(&rig).is_empty());
@@ -199,18 +213,55 @@ fn a_run_record_of_an_earlier_release_still_reads() {
     let third = &runs["3.2"];
     assert_eq!(third.account.as_deref(), Some("kbf-acct-9"));
     assert_eq!(third.uid, Some(509));
+    for record in runs.values() {
+        assert_eq!((record.supervisor, &record.put), (None, &None));
+    }
 }
 
-/// Asserts that a record of this release, with its account and uid, reads back from the
-/// journal as written, and survives a retirement of another lease.
+/// The run record as the release before the supervisor and the put target were recorded
+/// reads it: every field it had, and no refusal of a field it does not know.
+#[derive(Debug, serde::Deserialize)]
+#[allow(dead_code)] // Read for the decode alone: the test asserts what decodes.
+struct EarlierRecord {
+    pid: u32,
+    started_ms: u64,
+    #[serde(default)]
+    deadline_ms: Option<u64>,
+    labels: BTreeMap<String, String>,
+    scratch: std::path::PathBuf,
+    home: std::path::PathBuf,
+    #[serde(default)]
+    outputs: Vec<OutputSpec>,
+    #[serde(default)]
+    bundle: Option<String>,
+    #[serde(default)]
+    account: Option<String>,
+    #[serde(default)]
+    uid: Option<u32>,
+}
+
+/// Asserts that a run record of this release, with its supervisor and its put target, is read
+/// by the release before it, whose record has neither: the agent of an update's previous
+/// release (a rollback) reads the journal the new one wrote, and lists the run as it lists
+/// every run of an earlier process.
 ///
-/// Catches: a field of the record that the journal drops, or a retirement that rewrites a
-/// kept record without its account.
+/// Catches: a record the previous release would refuse, so that a rollback could list none of
+/// the runs the journal holds.
 #[test]
-fn a_run_record_with_its_account_and_uid_reads_back_as_written() {
-    let dir = Scratch::new("journal-roundtrip");
-    let journal = Journal::new(&dir.path("j"));
-    let record = RunRecord {
+fn a_run_record_of_this_release_reads_in_the_release_before() {
+    let line = serde_json::to_string(&full_record()).unwrap();
+    assert!(
+        line.contains("\"supervisor\":{\"pid\":4100,\"start\":99}"),
+        "{line}"
+    );
+    let earlier: EarlierRecord = serde_json::from_str(&line).unwrap();
+    assert_eq!((earlier.pid, earlier.uid), (31, Some(504)));
+    assert_eq!(earlier.account.as_deref(), Some("kbf-acct-4"));
+}
+
+/// A record of this release with every field set.
+fn full_record() -> RunRecord {
+    RunRecord {
         pid: 31,
         started_ms: 1234,
         deadline_ms: None,
@@ -224,7 +275,28 @@ fn a_run_record_with_its_account_and_uid_reads_back_as_written() {
         bundle: Some("example.com/b@sha256:00".to_owned()),
         account: Some("kbf-acct-4".to_owned()),
         uid: Some(504),
-    };
+        supervisor: Some(SupervisorId {
+            pid: 4100,
+            start: 99,
+        }),
+        put: Some(PutRecord {
+            dir: "/srv/put/cas/b/b1/n1".into(),
+            key_prefix: "cas/b/b1/n1".to_owned(),
+            output: ".kbf-out/pack".to_owned(),
+        }),
+    }
+}
+
+/// Asserts that a record of this release, with its account, uid, supervisor and put target,
+/// reads back from the journal as written, and survives a retirement of another lease.
+///
+/// Catches: a field of the record that the journal drops, or a retirement that rewrites a
+/// kept record without its account.
+#[test]
+fn a_run_record_with_its_account_and_uid_reads_back_as_written() {
+    let dir = Scratch::new("journal-roundtrip");
+    let journal = Journal::new(&dir.path("j"));
+    let record = full_record();
     journal.add("8.0").unwrap();
     journal.started("8.0", &record).unwrap();
     journal.add("8.1").unwrap();
