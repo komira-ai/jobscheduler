@@ -288,8 +288,19 @@ impl World {
         self.add_node(name, Resources::new(cores * 1000, gib * GIB), caps);
     }
 
-    /// Submits one action of `spec` now.
+    /// Submits one action of `spec` now. A second request of the same key while the first
+    /// is in flight joins it, as the scheduler joins hermetic cacheable work.
     pub fn submit(&mut self, spec: &Spec) -> OperationId {
+        self.submit_as(spec, false)
+    }
+
+    /// Submits one action of `spec` now as its own operation even when another of its key
+    /// is in flight (`do_not_cache` set, so it is not joined): a fan-out of one key.
+    pub fn submit_unjoined(&mut self, spec: &Spec) -> OperationId {
+        self.submit_as(spec, true)
+    }
+
+    fn submit_as(&mut self, spec: &Spec, do_not_cache: bool) -> OperationId {
         let index = self.specs.len();
         self.specs.push(spec.clone());
         let n = self.next_waiter;
@@ -304,7 +315,7 @@ impl World {
             resources: Resources::new(spec.request_cpu, spec.limit),
             needs: spec.needs.clone().unwrap_or_default(),
             hermetic: true,
-            do_not_cache: false,
+            do_not_cache,
             whole_worker: false,
             pin: None,
         };
