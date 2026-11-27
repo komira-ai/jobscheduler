@@ -1,5 +1,6 @@
 //! The profile text and the `sandbox-exec` argument vector.
 
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 
 use super::allow;
@@ -126,7 +127,8 @@ impl Profile {
     /// write protection of inputs; the mount grants (for each mount a read grant of its
     /// path, a metadata grant on the path and its ancestors, for a read-write mount
     /// a write grant, and a hard-link and clone grant), then the exec denies of the mounts that are `no_exec`, after every
-    /// grant so no grant reopens them; the network; a deny of unix-socket connect and bind
+    /// grant so no grant reopens them; the network (with the run's host ports at `Off` and
+    /// `Ports`, [`Policy::with_host_ports`]); a deny of unix-socket connect and bind
     /// under each read-denied path (after the network rules, so no network allow
     /// reaches the agent's sockets); process info; the floor.
     ///
@@ -326,15 +328,23 @@ fn mount_rules(policy: &Policy, lines: &mut Vec<String>, params: &mut Vec<(Strin
     }
 }
 
+/// The network rules of the policy's level, with its host ports ([`Policy::with_host_ports`])
+/// where the level filters loopback (`Off` and `Ports`): a single loopback port each, the
+/// level's and the host ports together, lowest first and each once.
 fn net_rules(policy: &Policy, lines: &mut Vec<String>) {
+    let host_ports = policy
+        .host_ports()
+        .into_iter()
+        .flat_map(|ports| ports.iter());
     match policy.net() {
         Net::On => {}
-        Net::Off => push_all(lines, &OFF_RULES),
+        Net::Off => {
+            push_all(lines, &OFF_RULES);
+            loopback_ports(host_ports, lines);
+        }
         Net::Ports(ports) => {
             push_all(lines, &OFF_RULES);
-            for port in ports.iter() {
-                lines.push(format!("(allow network* (remote ip \"localhost:{port}\"))"));
-            }
+            loopback_ports(ports.iter().chain(host_ports), lines);
         }
         Net::Loopback => {
             push_all(lines, &OFF_RULES);
@@ -350,5 +360,12 @@ fn net_rules(policy: &Policy, lines: &mut Vec<String>) {
             }
             lines.push(RESOLVER.to_owned());
         }
+    }
+}
+
+/// One rule per loopback port of `ports`, lowest first and each once.
+fn loopback_ports(ports: impl Iterator<Item = u16>, lines: &mut Vec<String>) {
+    for port in ports.collect::<BTreeSet<u16>>() {
+        lines.push(format!("(allow network* (remote ip \"localhost:{port}\"))"));
     }
 }

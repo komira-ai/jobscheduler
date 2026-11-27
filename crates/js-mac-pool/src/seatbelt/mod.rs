@@ -14,7 +14,9 @@
 //!   early and the parameter list is a sane command line.
 //! - A caller cannot build a [`Policy`] except from a [`SlotLayout`] and the agent's
 //!   [`Caps`], and cannot change it except with a [`Narrowing`], which only lowers the
-//!   network, drops a grant or adds a deny.
+//!   network, drops a grant or adds a deny, and with a job's host ports
+//!   ([`Policy::with_host_ports`]): single loopback ports the run reaches whatever its level,
+//!   which the agent's `--host-port` bounds, never a level.
 //! - The floor is a private constant emitted after every other rule.
 //! - A read deny wins over every allow that covers it: the run's write grant, the trees and
 //!   the allow model's reads are emitted before the denies, and a mount grant (emitted

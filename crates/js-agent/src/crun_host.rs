@@ -770,7 +770,7 @@ pub fn make_roots(request: &Request<'_>) {
 /// The text for exit status 2: a flag that is wrong or missing, or [`Report::refusal`].
 pub fn start(cli: &Cli, host: &CrunHost, commands: &dyn CommandRunner) -> Result<Ready, String> {
     // Before anything of the host is asked: a wrong entry is named first.
-    let host_ports = crate::host_ports::allowed(&cli.os.host_port).map_err(|why| why.to_string());
+    let host_ports = cli.host_ports.allowed().map_err(|why| why.to_string());
     host_ports.and_then(|host_ports| {
         let request = flags(cli)?;
         make_roots(&request);

@@ -593,7 +593,7 @@ The job is **queued** while it waits, including while a host is marked and drain
 The mark pass (`whole/reserve.rs`) runs each tick and on each start:
 
 1. Drop marks on hosts that became tainted or unknown, marks over the pool's ceiling (newest first), and the mark of a job that was cancelled or ended (committed hosts are never touched).
-2. For each waiting job in order: if a quiet host exists, assign it (no drain). Else, after the job has waited `drain_after` (default 0), mark the capable, unallocated, unmarked, not-excluded host with the cheapest drain (section 5.5), with a deadline and the tail it was chosen on.
+2. For each waiting job in order: if a quiet host exists, assign it (no drain). Else, at once (the deprecated `drain_after` is not read), mark the capable, unallocated, unmarked, not-excluded host with the cheapest drain (section 5.5), with a deadline and the tail it was chosen on.
 3. A marked host accepts no other start, except backfill (section 5.5); only the marked host can commit the job, so the pass runs first.
 4. The deadline (`drain_deadline` if set, else the job's wall limit) is informational: reaching it gives nothing up, excludes no host and counts nothing; the mark stays until the job is placed or cancelled, the host is tainted or gone, or the ceiling falls.
 5. When the marked host is quiet it is committed (as built, on the request's next presentation): the host becomes `Committed` and the job stays placed.
@@ -818,7 +818,7 @@ A registered host that misses the grace (15 s) is **lost**: it takes no new job,
 
 ### 6.4 Whole-host draining
 
-Section 5.4 describes the pass. **Drain never cuts work:** a drain waits for jobs to end and kills none; the one exception today is the agent's own drain cap of 3600 s, after which a job is stopped (section 13, question 12). The cap settings (`js-whole/src/config.rs`): `max_whole_node`, `keep_for_ordinary`, `max_draining` (1), `drain_after` (0), drain deadline (default: the job's wall limit; informational), `reserve_backoff` (300 s; sizes only the failed-prepare exclusion), `max_reserve_attempts` (deprecated: parsed, validated, ignored), `prepare_timeout` (600 s), `max_replace` (3), `path_grace` (15 s; `regain_grace` as built). There is no per-consumer cap in the single-token service.
+Section 5.4 describes the pass. **Drain never cuts work:** a drain waits for jobs to end and kills none; the one exception today is the agent's own drain cap of 3600 s, after which a job is stopped (section 13, question 12). The cap settings (`js-whole/src/config.rs`): `max_whole_node`, `keep_for_ordinary`, `max_draining` (1), `drain_after` (deprecated: parsed, warned about, ignored), drain deadline (default: the job's wall limit; informational), `reserve_backoff` (300 s; sizes only the failed-prepare exclusion), `max_reserve_attempts` (deprecated: parsed, validated, ignored), `prepare_timeout` (600 s), `max_replace` (3), `path_grace` (15 s; `regain_grace` as built). There is no per-consumer cap in the single-token service.
 
 On the agent, the whole-host prepare is: the reply names an `exclusive` allocation; the agent goes `preparing`, starts nothing for other jobs, reports `exclusive_ready` when no job is held, post-job checks are clean and the host is untainted (or `exclusive_refused` with `host-unsafe` or `not-quiet`); at the end it goes `restoring`, rechecks, and returns to `serving`.
 

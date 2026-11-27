@@ -127,6 +127,9 @@ pub struct Cli {
     /// `--mount-provider-wait`), which both builds take.
     #[command(flatten)]
     pub providers: crate::lifecycle::ProviderFlags,
+    /// The host ports a job may reach (`--host-port`), which both builds take.
+    #[command(flatten)]
+    pub host_ports: crate::host_ports::HostPortFlags,
     /// What the agent records beyond each job's usage (`--cpu-series`, `--memory-series`,
     /// `--host-second-samples`), which both builds take.
     #[command(flatten)]
