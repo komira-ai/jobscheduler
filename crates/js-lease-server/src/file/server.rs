@@ -15,13 +15,14 @@ use js_types::HostId;
 
 use super::{Load, Section};
 use crate::config::{
-    BootMode, CpuSlack, CurveSetting, DEFAULT_LEASE_SECS, DEFAULT_RECHECK_MS, DispatchTimes,
-    FeedRetention, JOB_FEED_RETENTION_MUST, JOB_RETENTION_MUST, JobListen, Limits,
+    BackfillSetting, BootMode, CpuSlack, CurveSetting, DEFAULT_LEASE_SECS, DEFAULT_RECHECK_MS,
+    DispatchTimes, FeedRetention, JOB_FEED_RETENTION_MUST, JOB_RETENTION_MUST, JobListen, Limits,
     MAX_JOB_WALL_MUST, MOST_LEASE_SECS, MOST_RECHECK_MS, MetricsListen, PackLimit, Placement,
     ReadyListen, TlsFiles, Token, cold_cpu_entry, cold_entry, not_loopback, not_private,
     parse_curves, parse_job_feed_retention, parse_job_retention, parse_max_job_wall, parse_token,
 };
 use crate::error::StartupError;
+use crate::job_api::submit::DEFAULT_MAX_JOB_WALL;
 use crate::job_store::JobStoreSetup;
 use crate::rate::HelloLimit;
 use crate::store_health::UNREACHABLE_AFTER;
@@ -55,6 +56,8 @@ const SERVER_KEYS: &[&str] = &[
     "estimate_feed",
     "cpu_slack",
     "pack_limit",
+    "backfill_bounds_enforced",
+    "backfill_margin",
     "cold_cpu_millis",
     "cold_memory_bytes",
     "cold_memory_bytes_on",
@@ -163,6 +166,8 @@ pub(crate) struct AgentKeys {
     estimate_feed: Option<bool>,
     cpu_slack: Option<CpuSlack>,
     pack_limit: Option<PackLimit>,
+    /// `backfill_bounds_enforced` and `backfill_margin`, each when the file gives it.
+    backfill: (Option<bool>, Option<Duration>),
     cold: ColdSize,
     cold_on: ColdMemoryOn,
     cold_cpu_on: ColdCpuOn,
@@ -258,6 +263,16 @@ impl AgentKeys {
     }
 }
 
+impl Server {
+    /// The placement engine's backfill setting the file gives: `backfill_bounds_enforced`
+    /// and `backfill_margin` (each its default when absent), with `max_lease_wall` and
+    /// `max_job_wall` (the job service's default when absent).
+    pub(crate) fn backfill(&self) -> BackfillSetting {
+        let most = self.max_job_wall.unwrap_or(DEFAULT_MAX_JOB_WALL);
+        BackfillSetting::of(self.agents.backfill, self.max_lease_wall, most)
+    }
+}
+
 pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
     let mut s = Section::open(table, "server.".to_owned());
     s.only(SERVER_KEYS)?;
@@ -316,6 +331,10 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
         estimate_feed: s.boolean("estimate_feed")?,
         cpu_slack: read_cpu_slack(&mut s)?,
         pack_limit: read_pack_limit(&mut s)?,
+        backfill: (
+            s.boolean("backfill_bounds_enforced")?,
+            s.duration("backfill_margin")?,
+        ),
         cold: read_cold(&mut s)?,
         cold_on: ColdMemoryOn::new(read_per_os(&mut s, &COLD_MEMORY_ON)?),
         cold_cpu_on: ColdCpuOn::new(read_per_os(&mut s, &COLD_CPU_ON)?),

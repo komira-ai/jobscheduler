@@ -101,14 +101,19 @@ impl Scheduler {
     /// This scheduler, placing work on a held worker as `backfill` allows: a worker held
     /// for a whole-machine request or an action that owns its worker (with whole-node
     /// settings, [`Scheduler::with_whole_node`]), or for a blocked head, takes an operation
-    /// after the holder in queue order only if the operation ends, with a minute to spare,
-    /// by the holder's start time there. The start time is taken by the pick that holds the
+    /// after the holder in queue order only if the operation ends, with the margin to spare
+    /// ([`Backfill::with_margin`], a minute unless set), by the holder's start time there. The start time is taken by the pick that holds the
     /// worker: the end of the worker's tail for a whole-machine request or an owner action,
     /// the first instant the head's charge fits for a head. A hold made again on the same
     /// worker keeps the earlier start, so work placed since never moves it later. A hold
     /// made without whole-node settings has no start time, and nothing backfills there.
     /// Work ahead of the holder in queue order is placed as before. The default
     /// ([`Backfill::default`]) places nothing on a held worker.
+    ///
+    /// The setting also times leases for the pick of a worker to drain: a lease at or past
+    /// its end reads as ending the margin from now, and with bounds enforced a lease with
+    /// neither an estimate nor a max wall time counts as ending at its start plus the
+    /// ceiling (its worker's tail stays unknown for backfill).
     #[must_use]
     pub fn with_backfill(mut self, backfill: Backfill) -> Self {
         self.backfill.settings = backfill;
@@ -162,13 +167,26 @@ impl Scheduler {
         self.backfill.judged.insert(operation, workers);
     }
 
-    /// How long queued `operation` counts for backfill ([`Backfill`]): its max wall time
-    /// and the P90 of its key's wall minutes, as the setting reads them.
-    pub(super) fn backfill_duration(&self, operation: OperationId) -> Option<u64> {
+    /// What queued `operation` brings to the backfill check ([`Backfill`]): how long it
+    /// counts by its max wall time and the P90 of its key's wall minutes, as the setting
+    /// reads them, and the setting's margin.
+    pub(super) fn backfill_ask(&self, operation: OperationId) -> backfill::Ask {
         let wall = self.max_walls.get(&operation).copied();
         let key = &self.ops[&operation].request.key;
         let p90 = || self.admission.wall_minutes_p90(key);
-        self.backfill.settings.duration(wall, p90)
+        self.backfill.settings.ask(wall, p90)
+    }
+
+    /// How long a lease at or past its end is read as still running, from now, in
+    /// milliseconds: the setting's margin ([`Backfill::with_margin`]).
+    pub(super) fn overdue_margin_ms(&self) -> u64 {
+        self.backfill.settings.margin_ms()
+    }
+
+    /// The longest a lease runs when bounds are enforced, in milliseconds; `None` when they
+    /// are not ([`Backfill::enforced`]).
+    pub(super) fn wall_ceiling_ms(&self) -> Option<u64> {
+        self.backfill.settings.ceiling_ms()
     }
 }
 

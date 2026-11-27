@@ -4,7 +4,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use js_registry::PoolConfig;
 use js_sched_placer::curves::CurveSettings;
@@ -12,7 +11,8 @@ use js_sched_placer::sizes::{ColdCpuOn, ColdMemoryOn, ColdSize};
 use js_types::ProviderId;
 
 use super::{
-    Cli, ColdOn, Config, CurveSetting, DispatchTimes, LiveClients, LoadSetting, check_pool, listen,
+    BackfillSetting, Cli, ColdOn, Config, CurveSetting, DispatchTimes, LiveClients, LoadSetting,
+    check_pool, listen,
 };
 use crate::agent_pool;
 use crate::agent_tokens::{AgentTokens, PoolTokens};
@@ -52,9 +52,11 @@ pub(crate) struct AgentSetup {
     /// and books by them, with `server.curve_hosts` and `server.curve_max_wait_seconds`
     /// (no flags) for the mode `on`.
     pub(crate) curves: CurveSetting,
-    /// `server.max_lease_wall`: the one up to which the placement engine trusts a wall time
-    /// for backfill.
-    pub(crate) max_lease_wall: Option<Duration>,
+    /// `--backfill-bounds-enforced` and `--backfill-margin`, or `server.backfill_bounds_enforced`
+    /// and `server.backfill_margin`, with `server.max_lease_wall` and the most a job's wall
+    /// limit may be: whether the placement engine trusts a wall time for backfill, up to which,
+    /// and the margin it keeps.
+    pub(crate) backfill: BackfillSetting,
     /// The pool's `max_queue_wait` and `start_timeout`, which the tick's job pass enforces
     /// (their defaults for a pool that does not set them, and for `--agent-pool-config`).
     pub(crate) job_limits: JobLimits,
@@ -197,7 +199,10 @@ pub(super) fn agents(cli: &Cli, clients: &LiveClients) -> Result<Box<AgentSetup>
             mode: cli.placement_curves,
             settings: CurveSettings::default(),
         },
-        max_lease_wall: None,
+        backfill: BackfillSetting::of_flags(
+            cli.backfill,
+            super::job_wall::or_default(cli.max_job_wall),
+        ),
         job_limits: JobLimits::default(),
         jobs: listen::job_store(cli),
         job_sources: JobSources::default(),

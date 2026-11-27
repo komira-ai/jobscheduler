@@ -29,6 +29,7 @@ use crate::usage::UsageSink;
 use crate::usage_setup::{UsageSetup, usage_setup};
 
 mod agent_setup;
+mod backfill;
 mod cpu_slack;
 mod dispatch;
 mod estimate_feed;
@@ -46,6 +47,8 @@ mod tokens;
 pub(crate) use agent_setup::AgentSetup;
 use agent_setup::{MorePool, agents, check_more, parse_cold_cpu_on, parse_cold_on};
 pub(crate) use agent_setup::{cold_cpu_entry, cold_entry};
+pub use backfill::BackfillFlags;
+pub(crate) use backfill::BackfillSetting;
 pub use cpu_slack::{CpuSlack, CpuSlackError};
 pub(crate) use dispatch::{
     DEFAULT_LEASE_SECS, DEFAULT_RECHECK_MS, DispatchTimes, MOST_LEASE_SECS, MOST_RECHECK_MS,
@@ -195,6 +198,9 @@ pub struct Cli {
     /// such as `0.5`. Without the flag the engine's own default is used, which is 0.5.
     #[arg(long, value_parser = PackLimit::parse)]
     pub pack_limit: Option<PackLimit>,
+    /// The placement engine's backfill (`--backfill-bounds-enforced`, `--backfill-margin`).
+    #[command(flatten)]
+    pub backfill: BackfillFlags,
     /// Whether the placement engine learns a CPU and a memory profile for each job class from
     /// the series its runs recorded: `off` (the default) learns nothing; `shadow` learns and
     /// logs one line per run it checks, placing as `off` does; `on` learns as `shadow` does
@@ -726,7 +732,7 @@ impl Config {
                 cpu: server.agents.cold_cpu_on(),
             },
             curves,
-            max_lease_wall: server.max_lease_wall,
+            backfill: server.backfill(),
             job_limits,
             jobs: server.agents.job_store(server.job_store_windows()),
             job_sources: JobSources::default(),
@@ -920,18 +926,6 @@ impl Config {
     /// when `--usage-off` turned usage off.
     pub fn usage_db(&self) -> Option<&Path> {
         self.usage.db.as_deref()
-    }
-
-    /// The CPU slack of the placement engine (`--cpu-slack`, or `server.cpu_slack`): the
-    /// value given, or the engine's default, 1.1x.
-    pub fn cpu_slack(&self) -> CpuSlack {
-        self.agents.load.cpu_slack
-    }
-
-    /// The pack limit of the placement engine (`--pack-limit`, or `server.pack_limit`): the
-    /// value given, or the engine's default, 0.5.
-    pub fn pack_limit(&self) -> PackLimit {
-        self.agents.load.pack_limit
     }
 
     /// Whether the placement engine learns profiles, and books by them

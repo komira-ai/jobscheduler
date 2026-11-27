@@ -4,14 +4,13 @@
 //! the engine places on, and the placer the registry is given.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use clap::ValueEnum;
 use js_registry::PoolConfig;
-use js_sched::{Backfill, MemoryPercent};
+use js_sched::MemoryPercent;
 use js_sched_placer::sizes::{ColdCpuOn, ColdMemoryOn, ColdSize, Curves};
 
-use super::{CpuSlack, CurveSetting, PackLimit};
+use super::{BackfillSetting, Config, CpuSlack, CurveSetting, PackLimit};
 use crate::clock::SharedClock;
 use crate::error::StartupError;
 use crate::file::Registering;
@@ -103,21 +102,36 @@ impl LoadSetting {
     }
 }
 
+impl Config {
+    /// The CPU slack of the placement engine (`--cpu-slack`, or `server.cpu_slack`): the
+    /// value given, or the engine's default, 1.1x.
+    pub fn cpu_slack(&self) -> CpuSlack {
+        self.agents.load.cpu_slack
+    }
+
+    /// The pack limit of the placement engine (`--pack-limit`, or `server.pack_limit`): the
+    /// value given, or the engine's default, 0.5.
+    pub fn pack_limit(&self) -> PackLimit {
+        self.agents.load.pack_limit
+    }
+}
+
 /// The placer the registry takes: its one engine is built with `load` (the CPU slack and
 /// the pack limit), the share
 /// `memory` of each host's memory, the `cold` size of a job class with no estimate (and
 /// `cold_on`, the cold memory and the cold CPU of the jobs of each operating system the server
-/// names), the `curves` mode (`--placement-curves`) and its hosts and wait bound, and backfill: work may backfill a host a
-/// whole-node request has set aside, up to `max_lease_wall` (`server.max_lease_wall`; none: any
-/// wall time). `clock` is the registry's.
+/// names), the `curves` mode (`--placement-curves`) and its hosts and wait bound, and
+/// `backfill`: whether work may backfill a host a whole-node request has set aside, up to
+/// which wall time and with which margin ([`BackfillSetting::engine`]). `clock` is the
+/// registry's.
 pub(crate) fn placer(
-    max_lease_wall: Option<Duration>,
+    backfill: BackfillSetting,
     load: LoadSetting,
     (memory, cold, curves): (MemoryPercent, ColdSize, CurveSetting),
     cold_on: ColdOn,
     clock: &SharedClock,
 ) -> Arc<SchedPlacer> {
-    let settings = settings_of(max_lease_wall, load, (memory, cold, curves.mode));
+    let settings = settings_of(backfill, load, (memory, cold, curves.mode));
     let placer = SchedPlacer::new(settings, clock.clone());
     Arc::new(
         placer
@@ -139,13 +153,12 @@ pub(crate) struct ColdOn {
 
 /// The engine's settings from the server's configuration, as [`placer`] takes them.
 fn settings_of(
-    max_lease_wall: Option<Duration>,
+    backfill: BackfillSetting,
     load: LoadSetting,
     (memory, cold, curves): (MemoryPercent, ColdSize, Curves),
 ) -> Settings {
-    let ceiling = max_lease_wall.unwrap_or(Duration::MAX);
     Settings {
-        backfill: Backfill::enforced(ceiling),
+        backfill: backfill.engine(),
         load: load.load_config(),
         memory,
         cold,
@@ -162,6 +175,7 @@ pub(crate) fn checked(head: String, pool: &Registering) -> Result<String, Startu
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::time::Duration;
 
     use js_types::{ProviderId, ResourceClass, Resources, Shape};
 
@@ -209,13 +223,47 @@ mod tests {
             cpu_slack: CpuSlack::parse("1.5").unwrap(),
             pack_limit: PackLimit::parse("0.65").unwrap(),
         };
-        let made = settings_of(None, load, (memory, cold, Curves::Off));
+        let made = settings_of(
+            BackfillSetting::default(),
+            load,
+            (memory, cold, Curves::Off),
+        );
         assert_eq!(made.load.pack_limit_permille, 650);
         assert_eq!(made.load.s_cpu_permille, 500);
         let default = js_sched::LoadConfig::default();
         assert_eq!(made.load.s_mem_permille, default.s_mem_permille);
-        let plain = settings_of(None, LoadSetting::default(), (memory, cold, Curves::Off));
+        let plain = settings_of(
+            BackfillSetting::default(),
+            LoadSetting::default(),
+            (memory, cold, Curves::Off),
+        );
         assert_eq!(plain.load, default);
+    }
+
+    /// Asserts that the settings the engine is built with carry the backfill setting given:
+    /// the switch, the margin and the ceiling. Catches the setting replaced by a fixed one on
+    /// the way to the engine (the engine once always enforced bounds, with no ceiling unless
+    /// `server.max_lease_wall` set one).
+    #[test]
+    fn the_backfill_setting_reaches_the_engine_settings() {
+        let (memory, cold) = (MemoryPercent::clamped(100), ColdSize::default());
+        let load = LoadSetting::default();
+        let hour = Duration::from_secs(3_600);
+        let margin = Duration::from_secs(90);
+        let on = BackfillSetting::of((None, Some(margin)), Some(hour), 24 * hour);
+        let made = settings_of(on, load, (memory, cold, Curves::Off));
+        let enforced = js_sched::Backfill::enforced(hour).with_margin(margin);
+        assert_eq!(made.backfill, enforced);
+        let off = BackfillSetting::of((Some(false), None), Some(hour), 24 * hour);
+        let made = settings_of(off, load, (memory, cold, Curves::Off));
+        assert_eq!(made.backfill, js_sched::Backfill::default());
+        let plain = settings_of(
+            BackfillSetting::default(),
+            load,
+            (memory, cold, Curves::Off),
+        );
+        let default = crate::job_api::submit::DEFAULT_MAX_JOB_WALL;
+        assert_eq!(plain.backfill, js_sched::Backfill::enforced(default));
     }
 
     /// Asserts that the settings the engine is built with carry the `curves` mode given,
@@ -227,7 +275,7 @@ mod tests {
         let memory = MemoryPercent::clamped(100);
         let cold = ColdSize::default();
         for curves in [Curves::Shadow, Curves::Off] {
-            let made = settings_of(None, slack, (memory, cold, curves));
+            let made = settings_of(BackfillSetting::default(), slack, (memory, cold, curves));
             assert_eq!(made.curves, curves);
             assert_eq!(made.cold, cold);
             assert_eq!(made.memory, memory);
@@ -261,7 +309,7 @@ mod tests {
             };
             let load = LoadSetting::default();
             let made = placer(
-                None,
+                BackfillSetting::default(),
                 load,
                 (memory, cold, curves),
                 ColdOn::default(),

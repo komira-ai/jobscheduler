@@ -856,8 +856,8 @@ pub use api::BODY_LIMIT;
 pub use catalogs::Catalogs;
 pub use clock::SharedClock;
 pub use config::{
-    BootMode, Cli, Config, CpuSlack, CpuSlackError, Limits, MIN_TOKEN_BYTES, PackLimit,
-    PackLimitError, Placement, TlsFiles, Token, is_private_address, parse_duration,
+    BackfillFlags, BootMode, Cli, Config, CpuSlack, CpuSlackError, Limits, MIN_TOKEN_BYTES,
+    PackLimit, PackLimitError, Placement, TlsFiles, Token, is_private_address, parse_duration,
 };
 pub use error::StartupError;
 pub use file::{
