@@ -589,6 +589,81 @@ fn a_native_agent_must_be_root_and_denies_its_secret_files() {
     }
 }
 
+/// Asserts that a native agent takes `--host-port` and hands its entries to the runtime,
+/// sorted and each once, none without the flag; that an entry that is not a port or a range
+/// ends the start naming the flag and the entry; and that `--no-jobs` refuses the flag by
+/// name before anything is sent. Catches a Mac agent that refuses the flag a Linux agent
+/// takes (every host-port job would be refused `input-not-allowed`), one that drops the
+/// entries on the way to the runtime, and a no-job agent that silently ignores them.
+#[test]
+fn a_native_agent_takes_its_host_ports_to_the_runtime() {
+    let dir = Scratch::new("native-agent-host-ports");
+    let accounts = dir.path("accounts").display().to_string();
+    let (state, scratch) = (private(&dir, "state"), private(&dir, "scratch"));
+    let token = dir.write("token", "x", 0o600).display().to_string();
+    let base = [
+        "js-agent",
+        "--server",
+        "http://127.0.0.1:1",
+        "--pool",
+        "macs",
+        "--token-file",
+        &token,
+        "--native-accounts",
+        &accounts,
+        "--native-account-range",
+        ACCOUNT_RANGE,
+        "--state-root",
+        &state,
+        "--scratch-root",
+        &scratch,
+    ];
+    let offered = |extra: &[&str]| {
+        let argv: Vec<&str> = base.iter().chain(extra).copied().collect();
+        let cli = Cli::try_parse_from(argv).unwrap();
+        Local::from_cli(&cli, 0).map(|local| {
+            let backend = local.backend.unwrap();
+            let ranges = &backend.settings().config().host_ports;
+            ranges.iter().map(ToString::to_string).collect::<Vec<_>>()
+        })
+    };
+    assert_eq!(offered(&[]).unwrap(), Vec::<String>::new());
+    let given = [
+        "--host-port",
+        "9000-9010",
+        "--host-port",
+        "5432",
+        "--host-port",
+        "5432",
+    ];
+    assert_eq!(offered(&given).unwrap(), ["5432", "9000-9010"]);
+    let why = offered(&["--host-port", "5432", "--host-port", "0"]).unwrap_err();
+    assert_eq!(
+        why,
+        "--host-port: not <PORT> or <LO-HI>, each from 1 to 65535, LO not above HI: \"0\""
+    );
+
+    let args = flags(&["--no-jobs", "--host-port", "5432"]);
+    let (script, sent) = Script::new(vec![welcome(1)]);
+    let connector = ScriptConnector::of(script);
+    let mut sleeper = CountingSleeper::stopping_at(1);
+    let jobs: Jobs<'_> = (Arc::new(FakeMachine::new()), None);
+    let ran = run_on_defaulted(
+        &args,
+        &mac_host(),
+        &connector,
+        &mut sleeper,
+        &mut Lowest,
+        jobs,
+    );
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    assert_eq!(
+        ran.err,
+        "js-agent: --host-port: not with --no-jobs (an agent that runs no job)\n"
+    );
+    assert!(sent.borrow().is_empty(), "something was sent");
+}
+
 /// The flags of a Mac agent that runs native jobs and keeps a store of bundles.
 fn store_flags(dir: &Scratch, extra: &[&str]) -> Vec<String> {
     let mut flags = native_flags(dir);

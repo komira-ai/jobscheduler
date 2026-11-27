@@ -356,7 +356,7 @@ everything after the image in `docker run` is the server's flags: either the fla
 | `--listen` | `127.0.0.1:7300` | the API, the agents, `GET /healthz` | an address off the loopback needs `--tls-cert` and `--tls-key`. With the default, run on the host's network or nothing outside the container reaches it |
 | `--job-listen` | off | the job service | same TLS rule |
 | `--metrics-listen` | off | `GET /metrics` | a private address |
-| `--ready-listen` | off | `GET /readyz` | the loopback only: the probe must run in the container's network namespace (the host's network, or a sidecar in the same namespace). The image has no shell and no HTTP client, so an engine `HEALTHCHECK` that runs a command inside it cannot be used |
+| `--ready-listen` | off | `GET /readyz`, `GET /readyz/sizes` | the loopback only: the probe must run in the container's network namespace (the host's network, or a sidecar in the same namespace). The image has no shell and no HTTP client, so an engine `HEALTHCHECK` that runs a command inside it cannot be used |
 
 **Files and volumes.** The image declares no volume and runs as `65532:65532`. Mount:
 
@@ -378,6 +378,13 @@ everything after the image in `docker run` is the server's flags: either the fla
 - `GET /healthz` on `--listen`: 200 `ok` while the tick loop runs; 503 `tick loop stopped`, or 503
   `store unreachable` once the store paths have failed for `--store-unreachable-after`. It says
   nothing about a lock: a Postgres store has none.
+- `GET /readyz/sizes` on `--ready-listen`: 503 `teaching` while the server is still reading the
+  ended jobs its start rebuilds the job sizes from (it answers `/readyz` 200 before that read ends,
+  and until it ends a job that books nothing is sized from the newest runs the start read alone), then 200 `taught`, or
+  200 `nothing to teach` or `not taught: ...` when there was nothing to read or the read failed or
+  was stopped. Replacing a server that answers `teaching` starts that read over in the new one, so
+  a deploy can wait for a 200 here, with a bound, before it replaces the running server. Do not use
+  it as the health check: a server that teaches serves.
 
 **Stopping.** The stop signal is `SIGTERM` (ctrl-c's `SIGINT` does the same). The server answers
 `/readyz` 503 `draining` at once and keeps serving the job service for `--drain-hold` (`15s` by default), so a proxy that polls `/readyz` takes it out of rotation while requests still succeed. The agents leave at the signal: the listener that serves the agent routes (`server.agent_listen`, or `--listen` with every route on it when they share it) takes no new connection and closes each one once it has answered, a held heartbeat or dispatch poll is answered at once, a dispatch poll that has already claimed its messages is answered with them and its claim is committed (it finishes within `--drain-timeout`, which the stop timeout below covers), and the server places no more jobs and claims no more dispatch messages, so each agent's next heartbeat or poll reaches the server that took over (which serves its session from the host's row, so it says no hello again, and it keeps its runs) or, with none, retries with its backoff. Then it stops
@@ -862,7 +869,7 @@ and outputs `digest=sha256:<hex>` and the release's download addresses of the im
 | `image-digest`, `image-url`, `bundle-url` | the outputs of `cp-deploy-digest` |
 | `endpoint`, `audience` | the variables `CP_DEPLOY_ENDPOINT`, `CP_DEPLOY_AUDIENCE` |
 | `environment` | `controlplane` |
-| `wait-minutes` | 60 |
+| `wait-minutes` | 90 |
 | `tailscale-oauth-client-id`, `tailscale-audience`, `tailscale-tags` | the variables `CP_DEPLOY_TAILSCALE_CLIENT_ID`, `CP_DEPLOY_TAILSCALE_AUDIENCE`, `CP_DEPLOY_TAILSCALE_TAGS` |
 
 The signer inputs keep the called workflow's defaults: this repository, `.github/workflows/artifacts.yml`
@@ -871,7 +878,28 @@ this repository's environment `controlplane`, joins the updater's Tailscale netw
 `CP_DEPLOY_TAILSCALE_CLIENT_ID` is set, and asks GitHub for a fresh OIDC token for each request.
 docker-swarm-updater (its `docs/design.md`) checks the token's claims and the image's bundle against
 the signer, then updates the service by digest; nothing in this repository enforces that side. The job passes when the deploy
-is reported converged and fails otherwise, or when 60 minutes pass first (the deploy then goes on).
+is reported converged and fails otherwise, or when 90 minutes pass first (the deploy then goes on).
+
+**Holding the update while the running server learns its job sizes (planned).** At each start the
+server reads every ended job its store holds to rebuild the history its job sizes come from, after
+it answers `/readyz` 200; until that read ends a job that books nothing is sized from the newest
+runs the start read alone, and each replacement starts the read over. The running server says where its read is on
+`GET /readyz/sizes` (its readiness listener, loopback only): 503 `teaching` during the read, 200
+once there is nothing left to learn. Only docker-swarm-updater, on the control plane, can reach
+the running task, so the hold is planned there: a service entry's `before_update` would name a
+probe of that route, run inside the running task before Swarm is asked to update the service, a
+bound (30 minutes for `js-server`) and a round (15 seconds); the update would go ahead once the
+probe passes, or at the bound with the deploy record and the updater's log saying so, or at once
+when the probe cannot run. Today docker-swarm-updater has no such key and the deploy replaces the
+running server at once.
+
+What this repository already does for it: `wait-minutes` is 90, so that the hold (30 minutes) and
+the updater's converge timeout (40 minutes), which the hold would not count in, fit in the job's
+wait with the fetch and push before them; and releases do not stack up behind a long deploy: a run
+holds its turn until its `deployed` has ended, and of the runs waiting at `turn` meanwhile only the
+newest publishes and deploys ("Several merges at once", above). With the hold in place, the pinned
+client of `cp-deploy` prints `deploy <id>: running, phase before_update` when the hold starts and
+the next phase when it ends; the per-round note is in the deploy's record on the deploy front.
 
 The project owner sets up the environment `controlplane` with deployments from `main` only and no
 required reviewer; this repository does not check that it is so.

@@ -10,8 +10,11 @@ mod load_rig;
 
 use std::time::Duration;
 
-use js_sched::{Backfill, Event, LoadConfig, Request, Scheduler};
-use js_types::sched::{LeaseKind, OperationId, Resources};
+use js_sched::{
+    Backfill, Event, LoadConfig, Request, ReservationEnd, ReservationEvent, ReservationRecord,
+    Scheduler,
+};
+use js_types::sched::{FarmTime, LeaseKind, OperationId, Resources};
 use js_whole::WholeNodeConfig;
 
 use load_curves::Curves;
@@ -209,4 +212,34 @@ fn a_head_starts_at_its_start_through_a_stream_of_backfill() {
     }
     let started = r.tick().into_iter().find(|s| s.operation == head);
     assert_eq!(started.map(|s| s.worker), Some(w("b")));
+}
+
+/// Catches: a blocked head's hold left out of the reservation records (they would cover
+/// whole-machine requests alone), or the backfill around it not counted. Recording, the
+/// head holds `b` from 1 s with its start expected at 100 s; a job of a core and 30 s is
+/// placed on `b` as backfill at 1 s and still runs when the head is cancelled at 11 s: one
+/// record, its estimates those of the hold, 10 core-seconds of backfill.
+#[test]
+fn a_blocked_heads_record_has_its_holds_start_and_the_backfill_around_it() {
+    let mut r = backfilling(Rig::on(), true);
+    let given = std::mem::replace(&mut r.s, Scheduler::new(1));
+    r.s = given.recording_reservations();
+    let (head, _) = head_on_b(&mut r, false);
+    assert_eq!(small(&mut r, 30).as_deref(), Some("b"));
+    assert!(r.round(10_000).is_empty());
+    assert_eq!(r.s.head_hold(head), Some(&w("b")));
+    assert_eq!(r.s.take_reservations(), []);
+    r.s.cancel_whole(head);
+    let record = ReservationRecord {
+        operation: head,
+        blocked_at: FarmTime::from_millis(1_000),
+        reserved_at: Some(FarmTime::from_millis(1_000)),
+        estimated_start: Some(FarmTime::from_millis(100_000)),
+        last_estimate: Some(FarmTime::from_millis(100_000)),
+        moves: 0,
+        backfilled_core_seconds: 10,
+        ended_at: FarmTime::from_millis(11_000),
+        end: ReservationEnd::Cancelled,
+    };
+    assert_eq!(r.s.take_reservations(), [ReservationEvent::Ended(record)]);
 }

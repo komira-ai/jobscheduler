@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use js_agent_wire::PortRange;
 use js_mac_pool::seatbelt::{AbsPath, ReadModel};
 use js_mac_session::full_disk_access::FullDiskAccess;
 
@@ -209,6 +210,7 @@ impl NativeSettings {
                 tool_roots,
                 read_denies,
                 mount_roots: Vec::new(),
+                host_ports: Vec::new(),
                 read_model: ReadModel::Open,
                 journal: journal.to_path_buf(),
                 max_file_bytes,
@@ -275,6 +277,14 @@ impl NativeSettings {
         }
         self.config.mount_roots = roots;
         Ok(self)
+    }
+
+    /// The same settings with `allowed` (`--host-port`, checked by
+    /// [`crate::host_ports::allowed`]) as the ports of the host's loopback a job may reach.
+    #[must_use]
+    pub fn with_host_ports(mut self, allowed: Vec<PortRange>) -> Self {
+        self.config.host_ports = allowed;
+        self
     }
 
     /// The same settings with `put` (`--native-put-root`, `--native-put-user`, checked by

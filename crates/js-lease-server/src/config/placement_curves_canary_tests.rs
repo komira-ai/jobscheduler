@@ -106,7 +106,10 @@ fn teach_burst(rig: &Rig) {
             .unwrap();
     }
     let placer = rig.agents.placer.clone().unwrap();
-    assert_eq!(crate::job_sizes::begin(&placer, &rig.jobs).teach(), 24);
+    assert_eq!(
+        crate::job_sizes::begin(&placer, &rig.jobs).teach(),
+        crate::job_sizes::Taught::Read { classes: 24 }
+    );
 }
 
 /// A server on the command line `--placement-curves on` and `extra`, read as a start reads it,
