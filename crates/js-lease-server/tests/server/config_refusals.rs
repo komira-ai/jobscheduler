@@ -69,7 +69,8 @@ fn an_unknown_table_or_field_is_refused_with_the_known_ones() {
          scheduler_id, state_file, boot, client_token_file, tls_cert, tls_key, agent_client_ca, tick, \
          max_lease_wall, max_connections, handshake_timeout, header_timeout, read_timeout, write_timeout, \
          max_requests, drain_timeout, drain_hold, agent_hello_burst, agent_hello_interval, \
-         require_host_credential, placement, estimate_feed, cpu_slack, pack_limit, cold_cpu_millis, \
+         require_host_credential, placement, estimate_feed, cpu_slack, pack_limit, score_balance, \
+         score_slack_tolerance_ppm, key_share_percent, cold_cpu_millis, \
          cold_memory_bytes, cold_memory_bytes_on, cold_cpu_millis_on, placement_curves, curve_hosts, curve_max_wait_seconds, usage_db, \
          usage_off, \
          profile_store_bytes, \

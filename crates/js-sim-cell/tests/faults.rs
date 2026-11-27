@@ -38,12 +38,17 @@ use js_sim_cell::actions::{
 };
 use js_sim_cell::{
     Counter, Expect, HostIs, HowEnded, Invariant, Scenario, ScenarioFailure, ServerSpec, Shape,
-    Work,
+    Work, run_seed_range_on_threads,
 };
 use js_types::Resources;
 
 /// Every scenario of the family runs over this many seeds.
 const SEEDS: u64 = 16;
+
+/// The threads the family's largest scenarios run their seeds on
+/// ([`run_seed_range_on_threads`]); `.config/nextest.toml` reserves this many slots for
+/// each of those tests.
+const THREADS: usize = 4;
 
 /// A unit of work that runs for `run` and asks for all the cores of a host
 /// ([`Shape::gpu_host`]), so a host runs one at a time and a scenario that counts on one
@@ -216,12 +221,11 @@ fn should_fail(scenario: &Scenario, invariant: Invariant) {
 /// dead process's run again on the new one (`at-most-one-launch`).
 ///
 /// The scenario has no witness, so each part's seeds are judged on their own, as one run
-/// of all sixteen would judge them; the four tests below together run every seed once.
+/// of all sixteen would judge them; the four tests below together run every seed once, each
+/// on [`THREADS`] threads.
 fn ten_of_two_hundred_agents_die_mid_run(part: u64) {
     let seeds = part * DIE_SEEDS / DIE_PARTS..(part + 1) * DIE_SEEDS / DIE_PARTS;
-    if let Err(failure) = agents_that_die().try_run_seed_range(seeds) {
-        panic!("{failure}");
-    }
+    run_seed_range_on_threads(agents_that_die, seeds, THREADS);
 }
 
 /// [`ten_of_two_hundred_agents_die_mid_run`] over seeds 0 to 3.
@@ -249,7 +253,7 @@ fn ten_of_two_hundred_agents_die_mid_run_seeds_12_to_15() {
 }
 
 /// The scenario of [`ten_of_two_hundred_agents_die_mid_run`], built by each of the
-/// tests that run its seeds.
+/// threads that run its seeds.
 fn agents_that_die() -> Scenario {
     let dead = || Agents::Listed(DIE_AGENTS.to_vec());
     let spec = ServerSpec::registered_pool("burst", Shape::gpu_host(), DIE_HOSTS)
@@ -282,6 +286,12 @@ fn agents_that_die() -> Scenario {
 /// job was cancelled (`settles-when-quiet`).
 #[test]
 fn agents_killed_for_good_leave_no_booking_once_clients_release() {
+    run_seed_range_on_threads(agents_killed_for_good, 0..SEEDS, THREADS);
+}
+
+/// The scenario of [`agents_killed_for_good_leave_no_booking_once_clients_release`],
+/// built by each of the threads that run its seeds.
+fn agents_killed_for_good() -> Scenario {
     let dead = Agents::Listed(GOOD_DEAD.to_vec());
     let lost = GOOD_DEAD.map(|index| Expect::host_state(index, HostIs::Lost));
     let scenario = Scenario::new("agents_killed_for_good_leave_no_booking_once_clients_release")
@@ -303,9 +313,7 @@ fn agents_killed_for_good_leave_no_booking_once_clients_release() {
             HowEnded::Succeeded,
         ))
         .settle_within(GOOD_SETTLE);
-    lost.into_iter()
-        .fold(scenario, Scenario::expect)
-        .run_seeds(SEEDS);
+    lost.into_iter().fold(scenario, Scenario::expect)
 }
 
 /// Covers section 7 ("Result lost": the agent holds a result until it is acknowledged
@@ -321,7 +329,7 @@ fn agents_killed_for_good_leave_no_booking_once_clients_release() {
 /// count of successes).
 #[test]
 fn a_thirty_second_partition_of_twenty_agents_loses_no_result() {
-    partition(None).run_seeds(SEEDS);
+    run_seed_range_on_threads(|| partition(None), 0..SEEDS, THREADS);
 }
 
 /// Covers section 8, row 31 (a start is resent until the host lists the run, and only
@@ -336,7 +344,7 @@ fn a_thirty_second_partition_of_twenty_agents_loses_no_result() {
 /// again on a resent result or listing (`at-most-one-launch`).
 #[test]
 fn a_lossy_wire_launches_every_run_once() {
-    lossy(None).run_seeds(SEEDS);
+    run_seed_range_on_threads(|| lossy(None), 0..SEEDS, THREADS);
 }
 
 /// Covers section 8, row 35 (a host silent while a run is placed or starting: the run is
@@ -373,8 +381,8 @@ fn a_silent_host_is_never_given_a_second_copy_of_its_run() {
 /// proves are in `cell/server_restart.rs`.
 #[test]
 fn a_restart_of_the_server_with_runs_in_flight_double_books_nothing() {
-    server_restart::a_restart_of_the_server_with_runs_in_flight_double_books_nothing()
-        .run_seeds(SEEDS);
+    let build = server_restart::a_restart_of_the_server_with_runs_in_flight_double_books_nothing;
+    run_seed_range_on_threads(build, 0..SEEDS, THREADS);
 }
 
 /// Covers section 6.3 (a lost host with no allocation is forgotten after
