@@ -10,10 +10,12 @@
 //! - `image-pull` (Linux): pulls an image into the image store ([`crate::image::pull`]).
 //! - `__pf-anchor`: loads the pf anchor the agent's flags file names, unless it is in force
 //!   already. The package's `js-agent.pf-pool` LaunchDaemon runs it as root at load and every
-//!   30 seconds ([`crate::pf_anchor`]).
+//!   30 seconds ([`pf_anchor`]).
 //! - `__account-cycle`: a development verb that runs the life cycle of one account of the
 //!   Mac account pool once, to prove it on a Mac ([`crate::mac_accounts::cycle`]). It runs no
 //!   job, and is removed once the native runtime proves an account's life cycle itself.
+
+mod pf_anchor;
 
 use std::ffi::OsString;
 use std::io::Write;
@@ -35,8 +37,8 @@ pub(crate) fn dispatch(
         let host = crate::image::pull::Host::system();
         return Some(crate::image::pull::run(args, out, err, &host));
     }
-    if verb == crate::pf_anchor::VERB {
-        return Some(crate::pf_anchor::run(args, out, err));
+    if verb == pf_anchor::VERB {
+        return Some(pf_anchor::run(args, out, err));
     }
     if verb == crate::mac_accounts::cycle::VERB {
         return Some(crate::mac_accounts::cycle::run(args, out, err));
@@ -86,7 +88,7 @@ mod tests {
     /// loads nothing and exits 0 with one line on the output.
     #[test]
     fn the_pf_anchor_is_answered_here() {
-        use crate::pf_anchor::{VERB, status};
+        use super::pf_anchor::{VERB, status};
 
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let code = dispatch(&words(&["js-agent", VERB]), &mut out, &mut err);

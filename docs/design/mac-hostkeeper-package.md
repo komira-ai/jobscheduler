@@ -107,7 +107,7 @@ as owner), any script, and another identifier or version.
   its own.
 - The pf job's plist is fixed text (`pf_pool_plist()`): as root, at load and every 30 seconds, it runs
   `/Library/Application Support/js-agent/bin/js-agent __pf-anchor --flags-file /etc/js-agent/flags`, a hidden verb of the agent
-  (`crates/js-agent/src/pf_anchor.rs`), which loads the anchor the agent's own `--native-network` and `--native-pf-*`
+  (`crates/js-agent/src/hidden_verbs/pf_anchor.rs`), which loads the anchor the agent's own `--native-network` and `--native-pf-*`
   flags name unless it is in force already, and does nothing while the flags file is absent or sets no
   `--native-network=on` (`crates/js-mac-provision/README.md`). Its log is `/var/log/js-agent.pf-pool.log`. Its
   label is a label of the service (`js-agent.` and more), as hostkeeper requires of a `run` label. The agent loads no

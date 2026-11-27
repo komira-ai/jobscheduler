@@ -57,6 +57,7 @@
 //! | flag | meaning |
 //! |---|---|
 //! | `--server <url>` | required: `https://host:port`; `http://` only for `localhost`, `127.0.0.0/8` and `::1` |
+//! | `--server-address <ip>` | optional, `https://` only: the address of the `--server` host, so a start needs no lookup of the name; the certificate is still checked against the name (see `js_client::give_server_address`) |
 //! | `--token-file <path>` | required unless `--host-cert` and `--host-key` are given or `--state-root` holds a usable `host-credential` file: the pool's join token, in a regular file owned by the user running the agent, mode 0600 or 0400 |
 //! | `--host-cert <path>`, `--host-key <path>` | both or neither: the host's own certificate and key, which hostkeeper keeps at fixed paths and renews in place (the host group's config package names the two paths in the flags file). The certificate is presented in the TLS handshake in place of a token (the server must be `https://` and run with `--agent-client-ca`); no `Authorization` header is sent, `--token-file` is not read, and no host credential is kept. Both files are read again before each request and a consistent new pair is used from the next one. The key, after following links, must be a regular file owned by root or by the user running the agent, with no access for others and not writable by its group (mode 0600, 0400, 0640 or 0440) |
 //! | `--ca-cert <path>` | optional for `https://`: the PEM file with the certificate to trust, and then only that is trusted. Without it the public roots bundled in the agent (`webpki-roots`, pinned by `Cargo.lock`) are trusted, so a publicly trusted endpoint works with no certificate pushed; the platform's roots are never read. Ignored for `http://` |
@@ -344,7 +345,6 @@ pub mod native;
 pub mod native_fs;
 mod os_version;
 pub mod own_host;
-mod pf_anchor;
 pub mod platform;
 mod pool;
 pub mod provider;
@@ -662,6 +662,13 @@ fn execute(
         platform::image_allow(&cli, &credentials).map_err(|why| Failure::Usage(why.to_string()))?;
     let ca_cert = cli.ca_cert.as_deref();
     let login = login::login(&cli)?;
+    // The address beside the name, for every client of the server this process makes: the
+    // session's, each dispatch poll's and the hold keeper's (js-client keeps one book per
+    // server for the process).
+    cli.server_address
+        .map(|address| js_client::give_server_address(&cli.server, address))
+        .transpose()
+        .map_err(|why| Failure::Usage(why.to_string()))?;
     let mut transport = services
         .connector
         .connect(&cli.server, &login, ca_cert)

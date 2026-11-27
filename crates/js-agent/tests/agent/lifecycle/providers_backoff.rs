@@ -164,6 +164,11 @@ fn many_starts_waiting_on_a_failing_provider_send_it_one_prepare_at_a_time() {
 fn a_new_start_waits_its_turn_behind_a_failed_prepare() {
     let (mut h, providers) = rig("backoff-turn", |_| {});
     providers.then("tier", &prepare_of("j1"), full());
+    // Each `Mount` answers its directory: one answered unavailable would have its source's
+    // `Prepare` sent again, and this test counts the `Prepare`s of the gate alone.
+    for job in ["j1", "j2"] {
+        providers.mounts_at("tier", job, 0, &tree(&h, "ro", job));
+    }
     h.apply(vec![job_start(with_layer("j1"))]);
     h.apply(vec![job_start(with_layer("j2"))]);
     tick_for(&mut h, 400);
@@ -220,8 +225,11 @@ fn a_call_out_is_sent_once_and_a_late_failure_is_asked_again_at_once() {
 }
 
 /// Asserts that a `Mount` the provider fails at once is paced as a `Prepare` is (at most
-/// five in 10 s of steps ten times a second), and that one answered with no directory is too.
-/// Catches a `Mount` loop left at the step rate after the `Prepare` loop is paced.
+/// five in 10 s of steps ten times a second), and that one answered with no directory is too;
+/// and that each `Mount` answered unavailable has the next one follow a `Prepare` sent again
+/// (one `Prepare` for each `Mount`), while one answered with no directory does not. Catches a
+/// `Mount` loop left at the step rate after the `Prepare` loop is paced, and waits that the
+/// `Prepare` sent again starts over from the first.
 #[test]
 fn a_mount_that_fails_at_once_is_paced() {
     let answers = [full(), ProviderAnswer::Done(None)];
@@ -232,7 +240,11 @@ fn a_mount_that_fails_at_once_is_paced() {
         tick_for(&mut h, 10_000);
         let asked = providers.sent("mount").len();
         assert!((3..=5).contains(&asked), "{n}: {asked} Mounts in 10 s");
-        assert_eq!(providers.sent("prepare").len(), 1, "{n}");
+        let prepared = match n {
+            0 => asked,
+            _ => 1,
+        };
+        assert_eq!(providers.sent("prepare").len(), prepared, "{n}");
     }
 }
 

@@ -6,15 +6,21 @@ use std::time::Duration;
 /// The ceiling of the first wait.
 pub const BASE: Duration = Duration::from_secs(1);
 
-/// The longest ceiling a run of failures reaches.
-pub const CAP: Duration = Duration::from_secs(60);
+/// The longest ceiling a run of failures reaches: a few seconds, well under the server's
+/// grace (15 s by default), so that a host whose requests fail for a while (a lookup of the
+/// server's name, a dropped connection) is back within the grace once they work again, and a
+/// failed heartbeat or poll costs the host its place only when the server stays out of reach.
+/// A wait together with a request that runs to its limit (`REQUEST_LIMIT`, 10 s) stays under
+/// the grace. The server slows the agents down by `Retry-After` when it needs them to.
+pub const CAP: Duration = Duration::from_secs(4);
 
 /// The longest `Retry-After` the agent obeys: a server that asks for more is not
 /// allowed to silence the host for longer. Owned by the wire crate, which the server
 /// also reads it from.
 pub use js_agent_wire::RETRY_AFTER_CAP;
 
-/// Doublings after which the ceiling is above [`CAP`] for any [`BASE`] of a second.
+/// Doublings after which the ceiling is above any cap the agent gives a backoff (at most a
+/// minute) for a [`BASE`] of a second.
 const MAX_DOUBLINGS: u32 = 6;
 
 /// A source of randomness for the wait, so a test picks the number.
@@ -37,26 +43,43 @@ impl Jitter for SystemJitter {
 }
 
 /// The run of failures since the last success.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Backoff {
     failures: u32,
+    cap: Duration,
+}
+
+/// A backoff up to [`CAP`]: the wait after a failed exchange with the server.
+impl Default for Backoff {
+    fn default() -> Self {
+        Self::up_to(CAP)
+    }
 }
 
 impl Backoff {
+    /// A backoff whose ceiling stops at `cap` instead of [`CAP`]: for a wait that is not for
+    /// a server out of reach (the session's wait while the worker is full, which the
+    /// heartbeat interval also bounds).
+    #[must_use]
+    pub fn up_to(cap: Duration) -> Self {
+        Self { failures: 0, cap }
+    }
+
     /// A success: the next failure waits the shortest time again.
     pub fn reset(&mut self) {
         self.failures = 0;
     }
 
     /// The wait after one more failure. The ceiling is [`BASE`] doubled once for each
-    /// failure before this one, up to [`CAP`]; the wait is somewhere from half the
+    /// failure before this one, up to the cap ([`CAP`] unless [`Backoff::up_to`] gave
+    /// another); the wait is somewhere from half the
     /// ceiling to the ceiling, so a fleet that failed together does not return together.
     /// A `retry_after` the server asked for raises the wait to that, at most
     /// [`RETRY_AFTER_CAP`].
     pub fn next(&mut self, jitter: &mut dyn Jitter, retry_after: Option<Duration>) -> Duration {
         let doublings = self.failures.min(MAX_DOUBLINGS);
         self.failures = self.failures.saturating_add(1);
-        let ceiling = BASE.saturating_mul(1 << doublings).min(CAP);
+        let ceiling = BASE.saturating_mul(1 << doublings).min(self.cap);
         let half = ceiling / 2;
         let room = u64::try_from(half.as_millis()).unwrap_or(u64::MAX);
         let spread = Duration::from_millis(jitter.up_to(room).min(room));
