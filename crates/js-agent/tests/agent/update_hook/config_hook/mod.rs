@@ -11,5 +11,6 @@ mod steps_cutover;
 mod steps_kept;
 mod steps_kept_descriptor;
 mod steps_rollback;
+mod steps_unchanged;
 mod steps_verify;
 mod verb;

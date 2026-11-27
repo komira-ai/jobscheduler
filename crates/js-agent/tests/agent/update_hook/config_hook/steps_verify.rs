@@ -175,7 +175,9 @@ fn verify_needs_a_cutover_that_restarted_the_unit_and_a_flags_file_the_agent_can
         assert_eq!(done.report.reason, Some(Reason::StateInvalid), "{record:?}");
         assert_eq!(
             done.report.detail.as_deref(),
-            Some("the record does not say that cutover restarted the unit")
+            Some(
+                "the record does not say that cutover restarted the unit or found the files unchanged"
+            )
         );
         assert!(rig.units.log.borrow().is_empty());
     }
