@@ -22,9 +22,9 @@
 //!   provider that is unavailable is asked again; one that refuses the request as wrong in
 //!   itself (`INVALID_ARGUMENT`) fails the start `provider-refused`, the job's own fault; one
 //!   that cannot serve it in its present state (`FAILED_PRECONDITION`) fails it
-//!   `provider-failed`, the host's, so the server places the job again elsewhere; a directory that is not an absolute path in normal form beneath a
-//!   mount root of the agent's (a root it may write, for a read-write mount) fails it
-//!   (`input-not-allowed`). A provider whose sweep at start is not answered yet is not asked.
+//!   `provider-failed`, the host's, so the server places the job again elsewhere; a
+//!   directory that is not an absolute path in normal form beneath a mount root of the
+//!   agent's (a root it may write, for a read-write mount) fails it (`input-not-allowed`). A provider whose sweep at start is not answered yet is not asked.
 //! - **From the admission to `--mount-provider-wait`** a start may wait; past it the start
 //!   fails `input-unavailable` naming the first source without a directory.
 //! - **A stop** while providing ends the start at once, whatever a call in flight does: its
