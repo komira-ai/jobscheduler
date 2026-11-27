@@ -20,8 +20,9 @@ use std::time::Duration;
 
 use crate::lifecycle::ProviderAnswer;
 
-/// What tells two calls apart: the provider, then `ProviderCall::key` (kind, run, index).
-pub(super) type Key = (String, u8, String, u32);
+/// What tells two calls apart: the provider, then `ProviderCall::key` (kind, run, attempt,
+/// index).
+pub(super) type Key = (String, u8, String, u64, u32);
 
 /// One call's state.
 enum Slot {

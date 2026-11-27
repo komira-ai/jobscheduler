@@ -229,6 +229,8 @@ fn open_store(store_file: &Path) -> Result<Arc<dyn Store>, Refusal> {
         clock: StoreClock::default(),
         target: hook_store_target(&bytes, store_file)?,
         names: StoreNames::Flags,
+        // The cutover reads and writes the store and serves nothing, so it listens to no one.
+        notices: false,
     };
     Ok(ServerStore::open(setting)?.store())
 }

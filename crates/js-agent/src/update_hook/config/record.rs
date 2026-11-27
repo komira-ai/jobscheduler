@@ -5,8 +5,8 @@
 //! [`Held`](js_update_hook::Held): the lock, the checks of the directory and of every directory
 //! above it, and the save that is the old record or the new one and never a part of either are
 //! its. This module holds what is the config hook's: the record and the rule it is held to.
-//! Each mark is written before the act it names, except `restarted` and `verified`, which are
-//! written after the observation they name.
+//! Each mark is written before the act it names, except `restarted`, `verified` and
+//! `unchanged`, which are written after the observation they name.
 
 use js_update_hook::Document;
 use serde::{Deserialize, Serialize};
@@ -37,6 +37,12 @@ pub struct Record {
     pub restarted: bool,
     /// A `verify` succeeded.
     pub verified: bool,
+    /// `cutover` found every file the package placed as it was before the update (see
+    /// [`kept`](super::kept)), and so restarted nothing: `verify` then checks the agent that
+    /// runs. Absent from the file when `false`, so a record of an update whose files changed
+    /// is written as before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unchanged: bool,
 }
 
 impl Record {
@@ -51,6 +57,7 @@ impl Record {
             restart_begun: false,
             restarted: false,
             verified: false,
+            unchanged: false,
         }
     }
 }

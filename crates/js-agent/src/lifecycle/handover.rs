@@ -41,11 +41,34 @@
 //! 0600, synced, renamed and the directory synced. It must be a regular file of the agent's
 //! user, not a link, that group and others have no permission on; a file that breaks this is
 //! not a request (the stop drains, the safe end), and the agent says why.
+//!
+//! # The process id it leaves
+//!
+//! A process with jobs that ends at a stop request, by a hand-over or a drain, leaves its agent
+//! process id (the one every hello of it names, `js_agent_wire::Hello::agent_process`) and the
+//! grace of its session in `PROCESS_FILE` (`handover-process`) beside the handover file
+//! (`leave_process`). The next process takes the file at its start (`take_process`: read once
+//! and removed) and, when it was left no longer ago than that grace, says hello as that process.
+//! The server holds the host live in the session of that id until its grace runs out, and takes
+//! a hello naming the same process at once instead of refusing it `host-live`; so a host whose
+//! agent is restarted (an update, a new flags file) is not seen lost when the next process says
+//! hello within the grace of the last heartbeat. Nothing else is held: the server hears the host
+//! only from the heartbeats and hellos it is sent, and a host whose next process never says hello
+//! is lost once the grace after the last heartbeat has passed, as any silent host is. A file
+//! older than the grace is of no use (the server holds no live session of the id by then) and is
+//! not used, so a state root copied or kept for longer never takes a live host over.
+//!
+//! The file is written as the handover file is (through `PROCESS_TEMP_FILE`, mode 0600) and
+//! holds the id and the grace in milliseconds, each on a line of its own. Its form is the
+//! handover file's: a file that is a link, of another user or open to group or others, or one
+//! that cannot be read or removed, is not used, and the next process draws an id of its own and
+//! waits out the grace as before. An agent from before the file neither writes nor reads it.
 
 use std::fs::{self, File, OpenOptions, Permissions};
 use std::io::{self, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
+use std::time::{Duration, SystemTime};
 
 /// The name of the handover file in the state root.
 pub const HANDOVER_FILE: &str = "handover";
@@ -56,6 +79,13 @@ pub const HANDOVER_TEMP_FILE: &str = "handover.tmp";
 /// The text [`write`] puts in the handover file, for a person who finds it.
 pub const HANDOVER_TEXT: &str = "the next stop of js-agent leaves its runs to the next process of \
      the agent instead of draining the host; the update hook writes this file and removes it\n";
+
+/// The name of the file in the state root a process that hands its runs over leaves its agent
+/// process id in, for the next process to say hello as.
+pub(crate) const PROCESS_FILE: &str = "handover-process";
+
+/// The temporary file the process file is written through, renamed over [`PROCESS_FILE`].
+pub(crate) const PROCESS_TEMP_FILE: &str = "handover-process.tmp";
 
 /// The permission bits of group and others a handover file may not carry.
 const FORBIDDEN_MODE: u32 = 0o077;
@@ -76,27 +106,35 @@ pub enum Handover {
 /// looked at without following a link.
 #[must_use]
 pub fn read(root: &Path, owner: u32) -> Handover {
-    let meta = match fs::symlink_metadata(root.join(HANDOVER_FILE)) {
-        Ok(meta) => meta,
-        Err(why) if why.kind() == io::ErrorKind::NotFound => return Handover::Absent,
-        Err(why) => return Handover::Refused(format!("it cannot be looked at: {why}")),
-    };
+    match fs::symlink_metadata(root.join(HANDOVER_FILE)) {
+        Ok(meta) => match of_form(&meta, owner) {
+            Ok(()) => Handover::Asked,
+            Err(why) => Handover::Refused(why),
+        },
+        Err(why) if why.kind() == io::ErrorKind::NotFound => Handover::Absent,
+        Err(why) => Handover::Refused(format!("it cannot be looked at: {why}")),
+    }
+}
+
+/// Whether `meta`, of a file looked at without following a link, is of the form of the files
+/// the update writes in a state root of the user `owner`; the error says why not.
+fn of_form(meta: &fs::Metadata, owner: u32) -> Result<(), String> {
     if !meta.file_type().is_file() {
-        return Handover::Refused("it is not a regular file (a link is not accepted)".to_owned());
+        return Err("it is not a regular file (a link is not accepted)".to_owned());
     }
     if meta.uid() != owner {
-        return Handover::Refused(format!(
+        return Err(format!(
             "it is owned by user {}, not by the user running the agent ({owner})",
             meta.uid()
         ));
     }
     let mode = meta.mode() & 0o7777;
     if mode & FORBIDDEN_MODE != 0 {
-        return Handover::Refused(format!(
+        return Err(format!(
             "group or others have permission on it (mode {mode:04o})"
         ));
     }
-    Handover::Asked
+    Ok(())
 }
 
 /// Writes the handover file of `root`: [`HANDOVER_TEXT`] to [`HANDOVER_TEMP_FILE`] with mode
@@ -107,7 +145,70 @@ pub fn read(root: &Path, owner: u32) -> Handover {
 ///
 /// Any step failed. The file is then what it was before, or the new one: never a part of it.
 pub fn write(root: &Path) -> io::Result<()> {
-    let temp = root.join(HANDOVER_TEMP_FILE);
+    write_through(root, (HANDOVER_TEMP_FILE, HANDOVER_FILE), HANDOVER_TEXT)
+}
+
+/// Leaves the agent process id `id` and the grace of its session in the process file of `root`
+/// for the next process (see the module documentation), written as [`write`] writes the
+/// handover file.
+///
+/// # Errors
+///
+/// Any step failed. The file is then what it was before, or the new one: never a part of it.
+pub(crate) fn leave_process(root: &Path, id: &str, grace: Duration) -> io::Result<()> {
+    let text = format!("{id}\n{}\n", grace.as_millis());
+    write_through(root, (PROCESS_TEMP_FILE, PROCESS_FILE), &text)
+}
+
+/// What the state root holds of an agent process id the last hand-over left.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Left {
+    /// There is no process file.
+    Absent,
+    /// The process file was of its form and read, and is removed.
+    Kept {
+        /// Its text, the newline that ends it taken off.
+        text: String,
+        /// When it was last written, as its modification time says; `None` when that cannot
+        /// be read.
+        written: Option<SystemTime>,
+    },
+    /// A file was there under the name and is not used; the text says why.
+    Refused(String),
+}
+
+/// Takes the process file of `root`, whose files belong to the user `owner`: looked at without
+/// following a link, read when it is of its form, and removed whatever it held (a link itself,
+/// not what it names), so that it is used once. A file that cannot be removed is not used.
+pub(crate) fn take_process(root: &Path, owner: u32) -> Left {
+    let path = root.join(PROCESS_FILE);
+    let found = match fs::symlink_metadata(&path) {
+        Err(why) if why.kind() == io::ErrorKind::NotFound => return Left::Absent,
+        found => found,
+    };
+    let judged = found
+        .map_err(|why| format!("it cannot be looked at: {why}"))
+        .and_then(|meta| of_form(&meta, owner).map(|()| meta.modified().ok()))
+        .and_then(|written| {
+            let read = fs::read_to_string(&path).map(|text| (text, written));
+            read.map_err(|why| format!("it cannot be read: {why}"))
+        });
+    let removed = fs::remove_file(&path).and_then(|()| sync(root));
+    match (judged, removed) {
+        (_, Err(why)) => Left::Refused(format!("it cannot be removed: {why}")),
+        (Err(why), Ok(())) => Left::Refused(why),
+        (Ok((text, written)), Ok(())) => Left::Kept {
+            text: text.trim_end_matches('\n').to_owned(),
+            written,
+        },
+    }
+}
+
+/// Writes `text` to the file named `names.1` in `root` through the temporary file `names.0`:
+/// mode 0600 (set again on a temporary file a crash left), synced, renamed, and the directory
+/// synced.
+fn write_through(root: &Path, names: (&str, &str), text: &str) -> io::Result<()> {
+    let (temp, name) = (root.join(names.0), root.join(names.1));
     OpenOptions::new()
         .write(true)
         .create(true)
@@ -116,10 +217,10 @@ pub fn write(root: &Path) -> io::Result<()> {
         .open(&temp)
         .and_then(|mut file| {
             file.set_permissions(Permissions::from_mode(0o600))
-                .and_then(|()| file.write_all(HANDOVER_TEXT.as_bytes()))
+                .and_then(|()| file.write_all(text.as_bytes()))
                 .and_then(|()| file.sync_all())
         })
-        .and_then(|()| fs::rename(&temp, root.join(HANDOVER_FILE)))
+        .and_then(|()| fs::rename(&temp, name))
         .and_then(|()| sync(root))
 }
 

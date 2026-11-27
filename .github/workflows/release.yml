@@ -19,11 +19,12 @@
 # The deploy path, and what is not on it. A merge reaches the farm through `plan`, `artifacts`
 # (build, sums, attest, verify) and `unit-tests` (the workspace's tests, the ones `ci`'s `test`
 # job runs but its `--ignored` live steps, in four shards beside the build), then `turn`,
-# `publish`, the apt repository (with `check-apt`, its install check), the control-plane deploy
-# and `desired`, which starts hostkeeper-desired.yml for the release. Nothing else gates it:
-# `ci` (lint, deny, coverage, the privileged and live jobs) and the beta stage (the macOS tests
-# and probe) run beside it or after it. Nothing in this file waits for `ci` or reports its result;
-# a failing `ci` run on a commit is that run's own red check, and the fix is the next merge.
+# `publish`, the apt repository (with `check-apt`, its install check), `blackbox` (the gate before
+# the farm: the black-box tests of the published bytes, below), the control-plane deploy and
+# `desired`, which starts hostkeeper-desired.yml for the release. Nothing else gates it: `ci`
+# (lint, deny, coverage, the privileged and live jobs) and the rest of the beta stage (the macOS
+# tests and probe) run beside it or after it. Nothing in this file waits for `ci` or reports its
+# result; a failing `ci` run on a commit is that run's own red check, and the fix is the next merge.
 #
 # A failure of any job of the run on main (the deploy path or the beta stage) runs
 # `release-red`, which opens an issue titled `RELEASE-RED: jobscheduler ...` with the label
@@ -63,8 +64,9 @@
 # one signer farm hosts trust (see the top of that file).
 #
 # Order: plan, then artifacts (build, sums, attest, verify) beside unit-tests, then turn and
-# publish, then the apt repository, gamma, the control-plane deploy, pkg-upload and desired, and
-# last `deployed`, which marks the end of the run's publish and deploy jobs for `turn`. The beta stage, the platforms other than Linux
+# publish, then the apt repository, gamma, pkg-upload and `blackbox`, then the control-plane
+# deploy and desired, and last `deployed`, which marks the end of the run's publish and deploy
+# jobs for `turn`. The beta stage, the platforms other than Linux
 # x86_64, runs beside publish and the jobs after it, not before them: after `artifacts`, the
 # jobs `beta-macos` (beta.yml: the workspace's tests on Apple silicon), `beta-macos-pkg`
 # (js-agent-macos-pkg.yml: the installer package of js-agent, built and signed),
@@ -82,12 +84,15 @@
 # js-agent-native-isolation.yml says why). `pkg-upload` puts the signed package in the package
 # repository (`pkg/jobscheduler/<version>/`) and maps `js-agent` to `pkg/jobscheduler` in the
 # repository's descriptor (`hostkeeper-repository.json`, which a coordinator reads to find the
-# package), where hostkeeper-desired.yml finds it, as soon as `beta-macos-pkg` has ended and
-# `publish` succeeded: a package that failed to build or sign is left out (hosts on macOS then keep
-# their version) and the deploy goes on without it, so `desired` waits for the package job's end but
-# never for its success, and for no test of the beta stage. `publish` leaves the archives out, and
-# nothing else waits for the beta stage: not the Linux assets, the .debs, the apt repository, gamma,
-# the control-plane deploy or hostkeeper. A pull request runs none of it. The tag is made first of
+# package), where hostkeeper-desired.yml finds it, once `beta-macos-pkg` and `publish` succeeded:
+# a package job that failed uploads nothing, and a package that was built but not signed (the
+# `pkg-signing` environment is not set up) is left out while the deploy goes on (hosts on macOS
+# then keep their version). The deploy waits for the beta stage only through `blackbox`, which
+# needs `beta-macos-first-install` (and so `beta-macos-pkg`): a package job or a first install
+# that failed tells the farm nothing, Linux hosts and the control plane included. `publish` leaves
+# the archives out, and nothing else waits for the beta stage: not the Linux assets, the .debs, the
+# apt repository or gamma; `beta-macos`, `beta-macos-probe` and `beta-macos-isolation` hold back
+# no deploy. A pull request runs none of it. The tag is made first of
 # those: `publish` makes a draft release, uploads the files built, attested and verified, and
 # publishes it in one call, which creates the tag. A failed run leaves no tag. A re-run of a failed
 # run continues the same draft and adds what is missing; a published release is never changed, a
@@ -127,19 +132,29 @@
 # linux-x86_64 image of js-lease-server to the Docker Swarm service js-server by calling
 # docker-swarm-updater's reusable deploy workflow. It is off (both jobs skipped) until the
 # repository variables CP_DEPLOY_ENDPOINT and CP_DEPLOY_TAILSCALE_TAGS are set (docs/release.md,
-# "The control-plane deploy").
+# "The control-plane deploy"), and it starts only once `blackbox` passed.
 #
-# Permissions are per job. Only `artifacts`, `beta-macos-pkg`, `pkg-upload`, `gamma`, `cp-deploy`
-# and the apt read and write jobs hold id-token write here, and `artifacts` also attestations
+# The gate before the farm, `blackbox`: the black-box tests of the release, the published bytes
+# started and driven from outside, after `publish`, as one Buck2 target (`//:blackbox`) built on
+# the build farm by a call of farm.yml. `desired` (which tells the farm the agent's version) and
+# `cp-deploy-digest` (and so the deploy of js-server) need it to pass: a black-box test that
+# failed, or was skipped, holds `blackbox` back, the farm is told nothing, `release-red` opens or
+# comments on the RELEASE-RED issue, and the next fix is the next release. The release so waits for
+# the build farm: while it cannot be reached, nothing is deployed (re-run the failed jobs).
+#
+# Permissions are per job. Only `artifacts`, `beta-macos-pkg`, `pkg-upload`, `gamma`, `cp-deploy`,
+# the apt read and write jobs and `blackbox` hold id-token write here, and `artifacts` also attestations
 # write, only because a called workflow can hold no more than its calling job grants: in
 # artifacts.yml only `attest` holds them to sign, and its call of macos-farm.yml holds id-token
 # write for the farm's network (a token that names macos-farm.yml, not artifacts.yml, as its
 # workflow). `beta-macos-pkg` grants id-token write for the same reason: js-agent-macos-pkg.yml's
 # call of macos-farm.yml holds it. Only
 # `publish` holds contents write. No job that holds a token or the signing key checks out or
-# compiles this repository's code (the one job that compiles any is docker-swarm-updater's deploy
-# job, which `cp-deploy` calls: it builds the updater's own client from the commit it is pinned
-# at): `attest` and `publish` run only pinned actions, `sha256sum`, `cmp`, `cp` and
+# compiles this repository's code, but two that are called: docker-swarm-updater's deploy job,
+# which `cp-deploy` calls (it builds the updater's own client from the commit it is pinned at), and
+# farm.yml's `build`, which `blackbox` calls (it compiles `xtask` and joins the build farm's network
+# with its token, whose job_workflow_ref names farm.yml; the signer farm hosts trust is
+# artifacts.yml's job_workflow_ref, so this token cannot sign): `attest` and `publish` run only pinned actions, `sha256sum`, `cmp`, `cp` and
 # `gh`; `gamma`, `cp-deploy-digest`, `pkg-upload`, `smoke-bundle-push` and the apt read, index and write jobs run the `xtask` binary
 # that the permissionless `deploy-tool` job built (so no build script ever sees a token, the token
 # service's address or the key), after the pinned actions. The apt read and write jobs hold no
@@ -600,15 +615,15 @@ jobs:
 
   # Puts the signed js-agent package of macOS in the package repository, under
   # `pkg/jobscheduler/<version>/` (the one prefix the publish role may write there), once
-  # `publish` passed and `beta-macos-pkg` has ended, whatever its result: it is part of the
-  # deploy, which waits for no test of the beta stage. hostkeeper-desired.yml then adds the
-  # package to the release's targets when its SHA256SUMS is there; the targets of a version are
-  # fixed by its first set, so the package has to be there before `desired`, or hosts on macOS
+  # `publish` and `beta-macos-pkg` passed: a package job that failed uploads nothing (and its
+  # first install, which `blackbox` needs, does not run, so the farm is told nothing).
+  # hostkeeper-desired.yml then adds the package to the release's targets when its SHA256SUMS
+  # is there; the targets of a version are fixed by its first set, so the package has to be there before `desired`, or hosts on macOS
   # never get the version. Like the apt jobs it runs the `xtask` of `deploy-tool` with the role of
   # the environment `apt-publish`, compiles nothing, ends green and writes nothing without the
   # settings of that environment (`channels gate`), and runs for a push to main only. A release
-  # whose package was not built or not signed (the `pkg-signing` environment is not set up)
-  # uploads nothing, and the release is deployed to the Linux hosts alone. After the upload a
+  # whose package was built but not signed (the `pkg-signing` environment is not set up) uploads
+  # nothing, and the release is deployed to the Linux hosts alone. After the upload a
   # last step adds the one entry this repository owns to the repository's descriptor,
   # `hostkeeper-repository.json` (`channels descriptor write`): `formats.macos-pkg.packages.js-agent`
   # is `{"dir": "jobscheduler"}`, which is how a coordinator finds a package that is not in
@@ -617,7 +632,7 @@ jobs:
   # variable APT_DISTRIBUTION_ID is set.
   pkg-upload:
     needs: [plan, deploy-tool, publish, beta-macos-pkg]
-    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' && needs.publish.result == 'success' && needs.deploy-tool.result == 'success' }}
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' && needs.publish.result == 'success' && needs.deploy-tool.result == 'success' && needs.beta-macos-pkg.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: apt-publish
@@ -823,8 +838,9 @@ jobs:
   # Tailscale join refuses a federated client id without tags, so the call never sends none). The lint
   # (crates/xtask/tests/apt_workflow, `cp_deploy.rs`) holds the two jobs to this shape.
   #
-  # cp-deploy-digest  holds no permission. It downloads the files `publish` uploaded (the same
-  #          artifacts, so the same bytes) and the `xtask` that `deploy-tool` built, and runs
+  # cp-deploy-digest  needs `blackbox` (with no status function, so it runs only when `blackbox`
+  #          passed: a red black-box test deploys nothing) and holds no permission. It
+  #          downloads the files `publish` uploaded (the same artifacts, so the same bytes) and the `xtask` that `deploy-tool` built, and runs
   #          `release image-digest`: the image held to SHA256SUMS, its bundle present, and the
   #          manifest digest its index.json names, with the release's download addresses of the
   #          image and the bundle.
@@ -845,7 +861,7 @@ jobs:
   #          says, and "Re-run failed jobs" repeats it.
   cp-deploy-digest:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' && vars.CP_DEPLOY_ENDPOINT != '' && vars.CP_DEPLOY_TAILSCALE_TAGS != '' }}
-    needs: [plan, publish, deploy-tool]
+    needs: [plan, publish, deploy-tool, blackbox]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions: {}
@@ -2115,13 +2131,46 @@ jobs:
           APT_HOSTNAME: ${{ vars.APT_HOSTNAME }}
         run: tool/xtask channels apt write --suite stable --bucket "$APT_BUCKET" --distribution-id "$APT_DISTRIBUTION_ID" --hostname "$APT_HOSTNAME" --next "$RUNNER_TEMP/apt-next" --no-pool --last --output "$GITHUB_OUTPUT"
 
+  # The gate before the farm: the black-box tests of the release, the published bytes (the .debs
+  # from the suite `testing`, the macOS package, the server image) started and driven from outside
+  # (sockets, API, files, metrics and the jobs they run), after `publish`. `desired` and
+  # `cp-deploy-digest` need it to pass, so a red black-box test tells the farm nothing and
+  # `release-red` reports it. It is one Buck2 target, `//:blackbox` (the root BUCK file: a
+  # `test_suite` that each black-box test target joins), built on the build farm by a call of
+  # farm.yml, whose last step builds the target it is given in place of `//:ci`, with `local: 0`
+  # (buildrules runs a test as a build action, so the build is the run). The target is named here
+  # alone. The suite holds no test target yet: today the black-box tests are the two jobs it
+  # needs besides `plan` and `publish`, and it runs only when every job it needs passed (no status
+  # function), so a test that failed or was skipped holds the farm back:
+  #   check-apt                 js-agent installed from the suite `testing` in a clean Ubuntu
+  #                             container, amd64 and arm64;
+  #   beta-macos-first-install  the release's macOS package (the unsigned build of
+  #                             `beta-macos-pkg`) installed for the first time on a hosted Mac
+  #                             through hostkeeper's installer and the update hook, as root, then a
+  #                             config package and an update of the agent rolled over it.
+  # A release whose apt jobs are off (no settings, so `check-apt` is skipped) tells the farm
+  # nothing. It grants `id-token: write` because farm.yml's job joins the build farm's network with
+  # it (farm-connect); that token's job_workflow_ref names farm.yml (its workflow claim names
+  # release.yml), so it cannot sign as artifacts.yml. farm.yml also checks the generated build table
+  # first, so a stale table on main holds the release back too. An empty suite builds nothing and
+  # passes: until a test target joins it, the build proves only that the farm answers.
+  blackbox:
+    needs: [plan, publish, check-apt, beta-macos-first-install]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/farm.yml
+    with:
+      target: //:blackbox
+
   # Starts hostkeeper-desired.yml for this release, which sets it as hostkeeper's desired version
   # of js-agent (its `workflow_dispatch` with `version`: the coordinator's allow-list admits that
   # event; a call from this run would carry the event `push`, which it does not). Only once the
   # suite `stable` lists the release (one of the stable writes reported no conflict, which also
   # means the apt jobs are on), after `pkg-upload` has ended (its package is in the targets the
-  # first set fixes), when `turn` gave this run the turn, and while JS_AGENT_SETS_DESIRED is
-  # `true` (hostkeeper-desired.yml is off otherwise). It does not wait for that workflow, which
+  # first set fixes), when `blackbox` passed, when `turn` gave this run the turn, and while
+  # JS_AGENT_SETS_DESIRED is `true` (hostkeeper-desired.yml is off otherwise). It does not wait for that workflow, which
   # takes about two minutes; a newer run starts its own after this one, in turn. It first checks
   # that the release is still the newest published one: a re-run of the failed jobs of an older
   # run keeps that run's `turn` (and its `go=true`), and must not move the farm back to an older
@@ -2129,8 +2178,8 @@ jobs:
   # `actions: write`, to start the workflow, and `contents: read`, to list the releases, and runs
   # `gh` only.
   desired:
-    needs: [plan, turn, pkg-upload, stable-apt-write, stable-apt-write-2, stable-apt-write-3]
-    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' && needs.turn.outputs.go == 'true' && vars.JS_AGENT_SETS_DESIRED == 'true' && (needs.stable-apt-write.outputs.conflict == 'false' || needs.stable-apt-write-2.outputs.conflict == 'false' || needs.stable-apt-write-3.outputs.conflict == 'false') }}
+    needs: [plan, turn, pkg-upload, blackbox, stable-apt-write, stable-apt-write-2, stable-apt-write-3]
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' && needs.turn.outputs.go == 'true' && needs.blackbox.result == 'success' && vars.JS_AGENT_SETS_DESIRED == 'true' && (needs.stable-apt-write.outputs.conflict == 'false' || needs.stable-apt-write-2.outputs.conflict == 'false' || needs.stable-apt-write-3.outputs.conflict == 'false') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -2175,7 +2224,7 @@ jobs:
   # or comments the same lines on the RELEASE-RED issue that is open. It holds `issues: write`
   # and `actions: read` and runs `gh` only.
   release-red:
-    needs: [unit-tests, deployed, beta-macos, beta-macos-first-install, beta-macos-probe, beta-macos-isolation, promote-macos, smoke-bundle-check]
+    needs: [unit-tests, deployed, beta-macos, beta-macos-first-install, beta-macos-probe, beta-macos-isolation, promote-macos, blackbox, smoke-bundle-check]
     if: ${{ failure() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -2208,14 +2257,15 @@ jobs:
             gh issue create --repo "$REPO" --label main-red --title "RELEASE-RED: jobscheduler ${first:-a job} failed on main at ${COMMIT:0:12}" --body-file "$RUNNER_TEMP/body.md"
           fi
 
-  # A run that released (plan said so) in which no job failed or was cancelled: every suite that
-  # ran on this commit passed. When the commit is still the tip of main, the RELEASE-RED issues
+  # A run that released (plan said so) in which no job failed or was cancelled, and `blackbox`
+  # passed (a run whose black-box tests were skipped deployed nothing, and closes nothing): every
+  # suite that ran on this commit passed. When the commit is still the tip of main, the RELEASE-RED issues
   # that are open are closed, each with a comment naming the commit and the run; when main has
   # moved on, a newer run may have opened them, so nothing is closed (the newer run's own green
   # closes them). Same permissions as `release-red`, `gh` only.
   release-green:
-    needs: [plan, unit-tests, deployed, beta-macos, beta-macos-first-install, beta-macos-probe, beta-macos-isolation, promote-macos, smoke-bundle-check]
-    if: ${{ !cancelled() && !failure() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}
+    needs: [plan, unit-tests, deployed, beta-macos, beta-macos-first-install, beta-macos-probe, beta-macos-isolation, promote-macos, blackbox, smoke-bundle-check]
+    if: ${{ !cancelled() && !failure() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' && needs.blackbox.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:

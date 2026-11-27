@@ -60,7 +60,10 @@
 //! this agent's name that has no sidecar at all. The sidecars and leases of other agents are
 //! left alone, as they always were. A sidecar this agent cannot read (a form it does not know,
 //! or a broken file) is left alone too, with its lease, and reported in a line of its own: its
-//! job, if it still runs, is neither taken over nor stopped.
+//! job, if it still runs, is neither taken over nor stopped. When the sidecar's name is a lease
+//! name of this agent, the runtime gives the lease to the lifecycle as one it left alone
+//! ([`crate::lifecycle::Runtime::unread_leases`], with the version the file says), which keeps
+//! the lease's provider sources and its run's directory and reports it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
@@ -77,12 +80,13 @@ use js_types::{JobNetwork, PortMap};
 
 use super::dirs::cgroup_dir;
 use super::ledger::{
-    Booked, Entry, Failed, Left, Phase, Read, Reason, Removed, Supervisor, SweepReport, VERSION,
+    Booked, Entry, Failed, Ledger, Left, Phase, Read, Reason, Removed, Supervisor, SweepReport,
+    VERSION,
 };
 use super::spec::{adopted_spec, concluded};
 use super::{CrunError, CrunRuntime, Fault, Run, State, legacy_lease, net};
 use crate::cli_runtime::{NAME_PREFIX, agent_tag, container_name};
-use crate::lifecycle::{RunSpec, RuntimeError, label};
+use crate::lifecycle::{RunSpec, RuntimeError, UnreadLease, label};
 use crate::logs::{LiveLogs, RunLogs};
 
 /// The version 2 fields of a sidecar in the state running, all present.
@@ -265,6 +269,34 @@ pub(super) fn report_lines(report: &SweepReport) -> Vec<String> {
         Left::Foreign { .. } => None,
     });
     adopted.chain(removed).chain(failed).chain(left).collect()
+}
+
+/// The leases of this agent among the files of the ledger left alone (`left`): each sidecar
+/// that cannot be read whose file is named `<lease>.json`, the lease being a name this agent
+/// (`host_id`) gives a run, with the version the file says. Another agent's sidecar, and a
+/// file whose name is no lease name of this agent, is not one.
+pub(super) fn unread_leases(left: &[Left], host_id: &str) -> Vec<UnreadLease> {
+    let prefix = format!("{NAME_PREFIX}{}-", agent_tag(host_id));
+    left.iter()
+        .filter_map(|left| match left {
+            Left::Malformed { path, why } => {
+                let lease = path
+                    .file_name()?
+                    .to_str()?
+                    .strip_suffix(".json")?
+                    .to_owned();
+                let run_id = lease.strip_prefix(&prefix)?.to_owned();
+                container_name(host_id, &run_id).ok()?;
+                Some(UnreadLease {
+                    run_id,
+                    lease,
+                    version: Ledger::version_of(path),
+                    why: why.clone(),
+                })
+            }
+            Left::Foreign { .. } => None,
+        })
+        .collect()
 }
 
 impl CrunRuntime {

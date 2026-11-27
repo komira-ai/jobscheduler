@@ -16,8 +16,8 @@ package holds, what hostkeeper requires, how a release reaches the Macs, and whi
   update package are built on a Mac of the build farm from a Linux runner instead (`macos-farm.yml`,
   `docs/mac-farm.md`), and uploaded as the same artifacts; the signing jobs stay on hosted runners.
 - `release.yml` calls it as `beta-macos-pkg` with the release's version. Its job `pkg-upload` puts the signed package
-  in the package repository once `publish` passed and `beta-macos-pkg` has ended (it waits for no beta test), before
-  the release's `desired` starts `hostkeeper-desired.yml`.
+  in the package repository once `publish` and `beta-macos-pkg` passed, before the release's `desired` starts
+  `hostkeeper-desired.yml`.
 - `cargo xtask release desired --pkg-url` adds a `macos-arm64` entry to the release's targets when the package is in the
   package repository, and `hostkeeper-desired.yml` sets it for the host group `mac-build`.
 - The agent reports the capabilities `os` and `arch` as detected (`crates/js-agent/src/host.rs`, `capabilities`):
@@ -157,8 +157,8 @@ as owner), any script, and another identifier or version.
    is signed with is the one to check for first; another identity needs each Mac's signers file extended by hand and its
    daemon restarted before the first order, since nothing pushes that file to an enrolled Mac. Without the secrets the
    job says so in a notice and the release has no signed package.
-3. `pkg-upload` runs on ubuntu in the environment `apt-publish`, after `publish` passed and `beta-macos-pkg` ended,
-   pass or fail (it waits for no test of the beta stage), never on a pull request. It downloads the artifact `js-agent-macos-pkg-signed`, gates on the
+3. `pkg-upload` runs on ubuntu in the environment `apt-publish`, after `publish` and `beta-macos-pkg` passed (a
+   package job that failed uploads nothing), never on a pull request. It downloads the artifact `js-agent-macos-pkg-signed`, gates on the
    settings as the apt jobs do (`channels gate`), assumes `vars.APT_PUBLISH_ROLE_ARN`, and runs `channels pkg upload
    --dir <dir> --version <V> --bucket <b> --work <dir>`. The verb checks that `<dir>/SHA256SUMS` lists exactly the
    package with its digest, puts the package and then `SHA256SUMS` under the key prefix `pkg/jobscheduler/<V>/` (the one
@@ -311,8 +311,9 @@ job's `constraints.os_version` (`26`: macOS 26 or newer) is compared with it as 
 - The agent cannot mount the scratch volume at a start (no `js-agent-scratch` in the Data volume's container, or
   `diskutil` fails): the agent exits naming `--scratch-root` and the cause, and launchd starts it again after its
   throttle interval; during an update `verify` sees no hello and the release is rolled back.
-- No signed package for a release (the environment `pkg-signing` is not set up, or `beta-macos-pkg` failed): `pkg-upload`
-  uploads nothing, `release desired` writes `set-mac=false`, and the Linux nodes are set as before.
+- No signed package for a release (the environment `pkg-signing` is not set up): `pkg-upload` uploads nothing,
+  `release desired` writes `set-mac=false`, and the Linux nodes are set as before. When `beta-macos-pkg` failed,
+  `pkg-upload` uploads nothing and its first install does not run, so release.yml's `blackbox` fails and no host is set.
 - The entry does not resolve (no `macos-pkg` format in the descriptor, platform missing, no `packages` entry for
   js-agent; the release writes the last two, and the first is the descriptor's own): the Mac shows `no_build_for_host`.
 - `set-desired` for `mac-build` before the group lists js-agent: refused `not_in_host_group`; nothing changes.
