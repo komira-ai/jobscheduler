@@ -354,6 +354,20 @@ impl NativeSettings {
         self.bundles.as_ref()
     }
 
+    /// The same settings with `placer` as the bundle store ([`NativeSettings::with_bundles`])
+    /// and the read model `read_model` names (`--read-model`, checked with the bundle flags,
+    /// which need `--bundle-store`: with no store open no run pins a bundle, and the open model
+    /// is all there is) as that of the profile of a run that pins a bundle.
+    ///
+    /// # Errors
+    ///
+    /// As [`NativeSettings::with_bundles`].
+    pub fn with_store(self, placer: Arc<Placer>, read_model: Option<&str>) -> Result<Self, String> {
+        let mut settings = self.with_bundles(placer)?;
+        settings.config.read_model = super::read_model_named(read_model);
+        Ok(settings)
+    }
+
     /// The same settings with `enforcer` as the check of the pf anchor: a seam for tests.
     #[must_use]
     pub fn with_enforcer(mut self, enforcer: Arc<dyn Enforcer>) -> Self {

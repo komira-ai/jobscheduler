@@ -38,7 +38,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use js_agent_wire::{BUNDLE_PROGRAM_PREFIX, Isolation, NativeSpec, NetworkLevel};
-use js_mac_pool::seatbelt::{AbsPath, MountGrant};
+use js_mac_pool::seatbelt::{AbsPath, MountGrant, ReadModel};
 
 use super::journal::{PutRecord, RunRecord};
 use super::run::{Job, Run};
@@ -71,10 +71,10 @@ pub(super) const RECORDS_DIR: &str = "supervisor";
 const SELF_TEST_DIR: &str = "self-test";
 
 /// The most polls the self-test makes for its run to end, a pause apart.
-const SELF_TEST_POLLS: u32 = 3000;
+pub(super) const SELF_TEST_POLLS: u32 = 3000;
 
 /// The pause between two polls of the self-test.
-const SELF_TEST_PAUSE: Duration = Duration::from_millis(10);
+pub(super) const SELF_TEST_PAUSE: Duration = Duration::from_millis(10);
 
 /// What the steps after the account is lent are given.
 struct Lent<'a> {
@@ -260,13 +260,24 @@ impl NativeRuntime {
             .map(|rules| rules.mount_trees())
             .transpose()
             .map_err(|why| fail(&"the trees", &why))?;
+        let reads = self.reads_of(pinned.as_ref(), spec.xcode.as_deref())?;
+        // Under the allow model a run reads nothing outside its run directory that no grant
+        // names: its files, which the profile keeps unwritable, are granted for reading.
+        if let (profile::Reads::Allow(..), Some(dir)) = (&reads, files) {
+            let path = AbsPath::new(dir).map_err(|why| fail(&dir.display(), &why))?;
+            grants.push(MountGrant {
+                path,
+                write: false,
+                no_exec: false,
+            });
+        }
         let net = profile::level(&self.config, native.network, bundle_net);
         let built = profile::build(
             &self.config,
             &net,
             &home,
             (&read_only, &grants),
-            trees,
+            (trees, reads),
             &spec.host_ports,
         )?;
         self.mark(marks, STEPS[5]);
@@ -387,12 +398,14 @@ impl NativeRuntime {
     /// runtime with no pool (the agent does not hold Full Disk Access) runs nothing: it
     /// refuses every native job anyway; nor does one with no account ready while runs taken
     /// back from an earlier process hold accounts (`native/adopt.rs`). The run's scratch directory is `self-test` below
-    /// `--native-accounts`, which no run may read.
+    /// `--native-accounts`, which no run may read. Under `--read-model allow` the allow read
+    /// model's self-test follows (`native/allow.rs`); a runtime that skipped the run of
+    /// `/usr/bin/true` skips it too, and then runs no bundle under that model.
     ///
     /// # Errors
     ///
     /// A step failed, the program did not exit 0, or it did not end in time (it is stopped
-    /// and removed).
+    /// and removed); or the allow read model's self-test failed.
     pub fn self_test(&mut self) -> Result<(), RuntimeError> {
         let Some(pool) = &self.pool else {
             return Ok(());
@@ -423,17 +436,23 @@ impl NativeRuntime {
         }
         self.remove(&id)?;
         match status {
-            Status::Exited(exit) if exit.code == 0 => Ok(()),
-            Status::Running => Err(RuntimeError::new("/usr/bin/true did not end")),
-            other => Err(RuntimeError::new(format!(
-                "/usr/bin/true ended as {other:?}"
-            ))),
+            Status::Exited(exit) if exit.code == 0 => {}
+            Status::Running => return Err(RuntimeError::new("/usr/bin/true did not end")),
+            other => {
+                return Err(RuntimeError::new(format!(
+                    "/usr/bin/true ended as {other:?}"
+                )));
+            }
+        }
+        match self.config.read_model {
+            ReadModel::Allow => self.allow_self_test(),
+            ReadModel::Open => Ok(()),
         }
     }
 }
 
 /// Makes `dir` empty and private to the agent: what an earlier self-test left is removed.
-fn fresh_dir(dir: &Path) -> std::io::Result<()> {
+pub(super) fn fresh_dir(dir: &Path) -> std::io::Result<()> {
     match fs::remove_dir_all(dir) {
         Err(why) if why.kind() != std::io::ErrorKind::NotFound => return Err(why),
         _ => {}

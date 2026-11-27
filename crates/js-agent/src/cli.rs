@@ -409,8 +409,9 @@ pub struct Cli {
     /// refused `bundle-not-allowed`.
     #[arg(long, value_name = "PATH")]
     pub bundle_allow_file: Option<PathBuf>,
-    /// The read model of a run's profile: `open` (the default) or `allow`. `allow` is not
-    /// available yet: the agent refuses it at start.
+    /// The read model of the profile of a run that pins a bundle: `open` (the default) or
+    /// `allow` (an allow-list, checked by a self-test at every start; a run that pins no
+    /// bundle keeps `open`).
     #[arg(long, value_name = "open|allow")]
     pub read_model: Option<String>,
 }

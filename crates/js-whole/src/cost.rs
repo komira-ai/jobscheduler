@@ -68,7 +68,8 @@ pub fn drain_cost(hosts: &[HostLoad], now: u64) -> Vec<DrainCost> {
 }
 
 /// The default margin [`fits_in_tail`] keeps between backfilled work and the end of the
-/// tail: one minute. Nothing in production uses it yet; the backfill gate (step 3) will.
+/// tail: one minute. `js-sched`'s backfill gate keeps it, and reads a lease already past
+/// its end as ending this long from now.
 pub const DEFAULT_BACKFILL_MARGIN_MS: u64 = 60_000;
 
 /// The end of one lease: its estimate cut to its max-wall bound when it has one, else the

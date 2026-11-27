@@ -447,13 +447,14 @@ fn a_start_that_fails_after_the_account_is_lent_leaves_nothing() {
 }
 
 /// Asserts that a home the profile cannot name (here one spelled with `..`, which the
-/// kernel resolves and a profile parameter may not hold) and a read model with no profile
-/// builder each fail the start by name and retire the account.
+/// kernel resolves and a profile parameter may not hold) fails the start by name and retires
+/// the account, and that under the allow read model a run that pins no bundle starts under the
+/// open model: no default read deny in its profile.
 ///
 /// Catches: a run started under a profile built from a path that was never checked, and a
-/// pool configured for a model that is not built that runs under the open one.
+/// run without a bundle held to an allow-list its program was never granted for.
 #[test]
-fn a_home_or_a_read_model_the_profile_cannot_serve_fails_the_start() {
+fn a_home_the_profile_cannot_name_fails_the_start_and_a_run_without_a_bundle_reads_openly() {
     // The same directory as the pool's homes, spelled through its parent.
     let mut rig = Rig::with("oddhome", |config| {
         config.homes = config.homes.join("..").join("Users");
@@ -465,11 +466,14 @@ fn a_home_or_a_read_model_the_profile_cannot_serve_fails_the_start() {
     nothing_left(&rig, &lent, 0);
 
     let mut rig = Rig::with("allow", |config| config.read_model = ReadModel::Allow);
-    let lent = ready_account(&rig);
-    let spec = rig.spec("r1", native("/usr/bin/true", &[]));
-    let error = rig.rt.create_and_start(&spec).unwrap_err();
-    assert!(error.0.starts_with("the profile: "), "{}", error.0);
-    nothing_left(&rig, &lent, 0);
+    let id = rig.start("r1", "/usr/bin/true", &[]);
+    let profile = rig.launcher.last().profile;
+    assert!(
+        !profile.lines().any(|line| line == "(deny file-read*)"),
+        "{profile}"
+    );
+    rig.settle(&id);
+    rig.rt.remove(&id).unwrap();
 }
 
 /// Asserts that a policy over the profile's bounds (too many read-denied paths) fails the

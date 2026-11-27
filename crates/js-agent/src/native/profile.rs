@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 
 use js_agent_wire::{HostPort, NetworkLevel};
 use js_mac_pool::seatbelt::{
-    AbsPath, Caps, MountGrant, MountTrees, Narrowing, Net, Policy, Ports, PortsError, Profile,
-    SlotLayout,
+    AbsPath, Assurance, Caps, MountGrant, MountTrees, Narrowing, Net, Policy, Ports, PortsError,
+    Profile, ReadGrant, ReadModel, SlotLayout,
 };
 
 use super::{NativeConfig, fail, fence};
@@ -70,6 +70,16 @@ pub(super) fn level(config: &NativeConfig, asked: NetworkLevel, bundle: Option<N
     }
 }
 
+/// What a run's profile reads by (`native/allow.rs`, `NativeRuntime::reads_of`).
+#[derive(Debug)]
+pub(super) enum Reads {
+    /// The open model: reads are allowed but for the read denies.
+    Open,
+    /// The allow model: the base set of the assured macOS version, the run's own places, its
+    /// mounts and these grants.
+    Allow(Assurance, Vec<ReadGrant>),
+}
+
 /// The profile of a run at the level `net` ([`level`]) under the policy of `config`, run as an account whose home is
 /// `home`: writes are granted to the run directory (`<home>/exec`) and to the grants in
 /// `mounts` (the run's job mounts and its account's own per-user temporary and cache folders),
@@ -79,7 +89,9 @@ pub(super) fn level(config: &NativeConfig, asked: NetworkLevel, bundle: Option<N
 /// `trees` are the shared trees of the run, if any, and `host_ports` the host ports its start
 /// names, which the run reaches on the host's loopback at their own numbers whatever `net`
 /// is ([`Policy::with_host_ports`]: under the ceiling `off` too, since `--host-port`, not the
-/// ceiling, bounds them, and the admission held each to it).
+/// ceiling, bounds them, and the admission held each to it). `reads` is the read model of the
+/// run: under [`Reads::Allow`] the policy is given its grants with the assurance, and a run
+/// with shared trees is refused (the trees' rules are the open model's).
 ///
 /// The read denies are the agent's (`config.read_denies`), the places only the privacy
 /// controls guard among them ([`fence::PRIVACY_ONLY_PLACES`]); a mount at or below one of
@@ -96,7 +108,7 @@ pub(super) fn build(
     net: &Net,
     home: &Path,
     (read_only, mounts): (&[(&str, PathBuf)], &[MountGrant]),
-    trees: Option<MountTrees>,
+    (trees, reads): (Option<MountTrees>, Reads),
     host_ports: &[HostPort],
 ) -> Result<Profile, RuntimeError> {
     let run_path = run_dir(home);
@@ -127,9 +139,13 @@ pub(super) fn build(
     };
     // The policy never grants more than the ceiling: `net` was met with it already
     // ([`level`]), so the cap lowers nothing here; it is a defence in depth.
+    let read_model = match &reads {
+        Reads::Open => ReadModel::Open,
+        Reads::Allow(..) => ReadModel::Allow,
+    };
     let caps = Caps {
         net: config.network.net(),
-        read_model: config.read_model,
+        read_model,
     };
     let deny_homes = home_roots(&config.homes)
         .iter()
@@ -141,6 +157,10 @@ pub(super) fn build(
         ..Narrowing::default()
     };
     let policy = Policy::base(layout, caps)
+        .and_then(|policy| match reads {
+            Reads::Open => Ok(policy),
+            Reads::Allow(assurance, grants) => policy.allowing(&assurance, grants),
+        })
         .and_then(|policy| policy.narrowed(narrowing))
         .map_err(|why| fail(&"the policy", &why))?;
     // After the narrowing, which never widens: the ports are no level.

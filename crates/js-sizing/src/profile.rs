@@ -155,6 +155,8 @@ struct Kept {
     tail_sum: u64,
     /// Seconds from 128 s on.
     tail_secs: u64,
+    /// The largest point from 128 s on; 0 for a run that ended before.
+    tail_peak: u32,
 }
 
 impl Kept {
@@ -285,6 +287,14 @@ impl Profile {
         self.p90_with(&self.weights(at_ms), slot)
     }
 
+    /// [`Profile::slot_p90`] of every start slot at `at_ms`, the runs weighed once.
+    pub(crate) fn slot_p90s(&self, at_ms: u64) -> Vec<Option<u32>> {
+        let weights = self.weights(at_ms);
+        (0..START_SLOTS)
+            .map(|slot| self.p90_with(&weights, slot))
+            .collect()
+    }
+
     /// Kept runs that reached start slot `slot`.
     pub fn slot_runs(&self, slot: usize) -> usize {
         self.runs.iter().filter(|r| r.slots.len() > slot).count()
@@ -294,6 +304,27 @@ impl Profile {
     /// 128 s, or every such run is too old to weigh.
     pub fn tail(&self, at_ms: u64) -> Option<u32> {
         self.tail_with(&self.weights(at_ms))
+    }
+
+    /// The load-weighted 90th percentile at `at_ms` of the peaks after 128 s of the kept runs
+    /// that lasted past it, each run's load being its weight x its seconds past 128 s x its
+    /// peak there: the high end of what a run of the class holds at once after its start
+    /// slots, which [`Profile::tail`], a mean, is not. `Some(0)` when such runs' total load is
+    /// 0; `None` when no kept run lasted past 128 s.
+    pub fn tail_p90(&self, at_ms: u64) -> Option<u32> {
+        let weights = self.weights(at_ms);
+        let mut samples: Vec<(u32, u128)> = self
+            .runs
+            .iter()
+            .zip(&weights)
+            .filter(|(r, _)| r.tail_secs > 0)
+            .map(|(r, &w)| {
+                let load = u128::from(w) * u128::from(r.tail_secs) * u128::from(r.tail_peak);
+                (r.tail_peak, load)
+            })
+            .collect();
+        samples.sort_by_key(|s| s.0);
+        p90(&samples).or(samples.first().map(|_| 0))
     }
 
     /// The decayed seconds of every kept run's samples in each log-spaced bucket at
@@ -609,6 +640,7 @@ fn parse(unit: Unit, run: RunSeries<'_>, ended_ms: u64) -> Option<Parsed> {
             start_sum: sum.iter().sum(),
             tail_sum,
             tail_secs,
+            tail_peak,
             slots,
         },
         tail_spans,

@@ -32,7 +32,11 @@
 //!   callbacks still pending, and for each host
 //!   the CPU and memory booked and free and its whole-host mark, and under
 //!   `--placement-curves on` the classes booking by curve and flat and each curve host's fullest
-//!   booked slot, read from the placer ([`js_sched_placer::place::SchedPlacer::curve_view`]).
+//!   booked slot, read from the placer ([`js_sched_placer::place::SchedPlacer::curve_view`]),
+//!   and under `shadow` and `on` the memory shadow: the placements by how a booking that follows
+//!   the classes' memory curves would have placed them, and each host's projected memory, its
+//!   last reading and how often a reading showed more than the projection
+//!   ([`js_sched_placer::place::SchedPlacer::memory_shadow_view`]); nothing in it is booked.
 //!   A scrape holds no lock of the
 //!   server's while it renders: the registry's is taken and dropped as `GET /v1/hosts`
 //!   takes it, and the job tables are read on the pool for blocking
@@ -673,6 +677,7 @@ pub(crate) fn rendered(recorder: &Recorder) -> String {
         jobs: None,
         hosts: Vec::new(),
         curves: None,
+        memory: None,
     };
     render::render(&seen, recorder)
 }

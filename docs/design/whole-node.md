@@ -82,7 +82,11 @@ holds at most one reservation and a host carries at most one. The host is chosen
 3. then the lowest host id (the order of the table), so the choice is deterministic on the injected clock.
 
 A reserved request that finds another available eligible host already quiet takes that host and drops its reservation. Otherwise it keeps
-the host it has and does not switch to a cheaper one later (no thrash). Two requests never share a host; the next request in queue order
+the host it has and does not switch to a cheaper one later (no thrash). *In `js-sched` (`scheduler/whole.rs`, `hold_whole`) the host is
+picked again every placement round by the least tail (komira-ai/jobscheduler#582, rule 2; komira-ai/jobscheduler#1127): the mark moves to a
+host whose tail has become shorter than its own host's, keeping the time it was made and taking the new host's tail end; on a tie it stays
+where it is, so it never moves for a lease count, a provider or a name; and a move the caps refuse leaves it where it is. A lease past its
+end reads as ending a minute from now, so a host with a late lease does not pull the mark onto itself.* Two requests never share a host; the next request in queue order
 picks the cheapest host that no reservation holds. A request that is cancelled by its consumer, or whose wait ends, drops its reservation
 at once and the host returns to `serving`. *In the lease server a whole-node request has a request id when its `POST /v1/leases` names a `request_id`; the
 request is then the pending lease the acquire made, the server presents it to the registry again on every tick (the poll that keeps its
@@ -377,7 +381,9 @@ Invariants, checked at every step of seeded runs of the fake agent and the simul
 - W1. **Never two leases on a whole-node host.** From commit to clearing, a host with a whole-node lease holds no other lease, no placed run
   and no `Start` of another lease.
 - W2. A reserved host takes no new lease, no placed run and no `Start` for a lease that did not exist at the reservation, but backfill
-  that ends, with the margin, by the tail the reservation was made with (section 4).
+  that ends, with the margin, by the tail the reservation was made with (section 4). Work ahead of the request in queue order (older work
+  of its QoS, any work of a higher QoS) is not held back and may land there; the request starts when that work ends, ahead of the work
+  behind it.
 - W3. **The token is never minted before the agent reports ready**; the TTL and the max wall time count from the token.
 - W4. A request holds at most one reservation; a host carries at most one; a held host is not reservable.
 - W5. **Caps are never exceeded:** whole hosts at most the effective ceiling (held leases are not revoked when it falls); reserved-not-held at
@@ -391,8 +397,9 @@ Invariants, checked at every step of seeded runs of the fake agent and the simul
 - W8. Refused only when no registered host could ever be given whole and no elastic provider could launch one (D35); a busy, lost, cordoned
   or reserved host is capable; a tainted or denied host is not.
 - W9. The host is bookable only after the agent's `restoring` and clean checks; a tainted host is never bookable.
-- W10. **Starvation bounds** (section 6): with a stream of share requests, a queued whole-node request is committed within its bound; with a
-  stream of whole-node requests, ordinary requests keep `keep_for_ordinary` hosts and are placed on them; one consumer cannot hold more
+- W10. **Starvation bounds** (section 6): with a stream of share requests of its QoS or lower, a queued whole-node request is committed
+  within its bound (a stream of a higher QoS is ahead of it in queue order and is served first, with no aging: the request starts when
+  the stream stops); with a stream of whole-node requests, ordinary requests keep `keep_for_ordinary` hosts and are placed on them; one consumer cannot hold more
   than its limit; a newer ordinary request does not hold off an older whole-node request (the last-capable rule).
 - W11. A `host_jobs` lease on a host that is not whole-node is refused.
 - W12. With elastic entries, a launch for a whole-node request is committed to it at registration, and a booting machine is released by the

@@ -82,7 +82,15 @@ fn covers(grant: &str, place: &str) -> bool {
 #[test]
 fn a_run_may_write_below_its_run_directory_alone() {
     let home = Path::new("/srv/homes/kbf-acct-4");
-    let profile = build(&config(), &none(), home, (&[], &[]), None, &[]).unwrap();
+    let profile = build(
+        &config(),
+        &none(),
+        home,
+        (&[], &[]),
+        (None, Reads::Open),
+        &[],
+    )
+    .unwrap();
     let rule = "(allow file-write* (subpath (param \"RUN\")) (literal \"/dev/null\") (subpath \"/dev/fd\"))";
     let writes: Vec<&str> = profile
         .text()
@@ -117,7 +125,15 @@ fn a_run_may_write_below_its_run_directory_alone() {
 fn each_privacy_only_place_is_denied_after_every_grant_that_holds_it() {
     let home = Path::new("/srv/homes/kbf-acct-4");
     let grants = [mount("/srv/mounts/work")];
-    let profile = build(&config(), &none(), home, (&[], &grants), None, &[]).unwrap();
+    let profile = build(
+        &config(),
+        &none(),
+        home,
+        (&[], &grants),
+        (None, Reads::Open),
+        &[],
+    )
+    .unwrap();
     let params = profile.params();
     let lines: Vec<&str> = profile.text().lines().collect();
     for place in PRIVACY_ONLY_PLACES {
@@ -156,7 +172,15 @@ fn a_mount_in_a_privacy_only_place_is_refused() {
         "/System/Volumes/Data/Library/Application Support/com.apple.TCC/sub",
     ] {
         let grants = [mount(place)];
-        let why = build(&config(), &none(), home, (&[], &grants), None, &[]).unwrap_err();
+        let why = build(
+            &config(),
+            &none(),
+            home,
+            (&[], &grants),
+            (None, Reads::Open),
+            &[],
+        )
+        .unwrap_err();
         assert_eq!(
             why.0,
             format!("a mount: {place} lies in a place only the privacy controls guard")
@@ -171,7 +195,17 @@ fn a_mount_in_a_privacy_only_place_is_refused() {
 fn a_mount_beside_a_privacy_only_place_is_built() {
     let home = Path::new("/srv/homes/kbf-acct-4");
     let grants = [mount("/Library/Application Support/com.apple.TCC2")];
-    assert!(build(&config(), &none(), home, (&[], &grants), None, &[]).is_ok());
+    assert!(
+        build(
+            &config(),
+            &none(),
+            home,
+            (&[], &grants),
+            (None, Reads::Open),
+            &[]
+        )
+        .is_ok()
+    );
 }
 
 /// Asserts the homes roots of a pool whose homes are `/Users`, by the exact list: the homes
@@ -204,7 +238,15 @@ fn the_homes_roots_are_the_homes_and_roots_home_under_both_spellings() {
 fn other_homes_and_roots_home_are_denied_reads_and_the_own_home_is_granted_back() {
     let home = Path::new("/srv/homes/kbf-acct-4");
     let grants = [mount("/srv/mounts/work")];
-    let profile = build(&config(), &none(), home, (&[], &grants), None, &[]).unwrap();
+    let profile = build(
+        &config(),
+        &none(),
+        home,
+        (&[], &grants),
+        (None, Reads::Open),
+        &[],
+    )
+    .unwrap();
     let params = profile.params();
     let lines: Vec<&str> = profile.text().lines().collect();
     let roots = home_roots(Path::new("/srv/homes"));
@@ -255,7 +297,15 @@ fn a_mount_over_a_homes_root_is_refused() {
         "/System/Volumes/Data/srv",
     ] {
         let grants = [mount(place)];
-        let why = build(&config(), &none(), home, (&[], &grants), None, &[]).unwrap_err();
+        let why = build(
+            &config(),
+            &none(),
+            home,
+            (&[], &grants),
+            (None, Reads::Open),
+            &[],
+        )
+        .unwrap_err();
         assert_eq!(
             why.0, "the policy: a mount grant holds a read-denied path",
             "{place}"
@@ -274,7 +324,15 @@ fn the_trees_given_to_the_build_are_granted_and_none_grants_nothing() {
     let root = AbsPath::parse("/srv/store/trees").unwrap();
     let tree = AbsPath::parse("/srv/store/trees/abc").unwrap();
     let trees = js_mac_pool::seatbelt::MountTrees::new(root, vec![tree]).unwrap();
-    let with = build(&config(), &none(), home, (&[], &[]), Some(trees), &[]).unwrap();
+    let with = build(
+        &config(),
+        &none(),
+        home,
+        (&[], &[]),
+        (Some(trees), Reads::Open),
+        &[],
+    )
+    .unwrap();
     let params = with.params();
     assert!(params.contains(&("MOUNT".to_owned(), "/srv/store/trees".to_owned())));
     assert!(params.contains(&("MT_0".to_owned(), "/srv/store/trees/abc".to_owned())));
@@ -283,9 +341,88 @@ fn the_trees_given_to_the_build_are_granted_and_none_grants_nothing() {
             .lines()
             .any(|line| line == "(allow file-read* (subpath (param \"MT_0\")))")
     );
-    let without = build(&config(), &none(), home, (&[], &[]), None, &[]).unwrap();
+    let without = build(
+        &config(),
+        &none(),
+        home,
+        (&[], &[]),
+        (None, Reads::Open),
+        &[],
+    )
+    .unwrap();
     assert!(!without.params().iter().any(|(name, _)| name == "MOUNT"));
     assert!(!without.text().contains("MT_0"));
+}
+
+/// The assurance of a self-test whose every step did what its role says.
+fn assured() -> js_mac_pool::seatbelt::Assurance {
+    use js_mac_pool::seatbelt::{MacosMajor, Outcome, Role, SelfTest, scan_privileged};
+    let home = PathBuf::from("/Users/kbf-lease-pool-9");
+    let places = crate::mac_allow::Places {
+        run: home.join("exec"),
+        home,
+        shared: PathBuf::from("/Users/Shared"),
+        var_tmp: PathBuf::from("/private/var/tmp"),
+        tag: "9".to_owned(),
+    };
+    let plan = crate::mac_allow::plan(&places, &[], None, scan_privileged(&[])).unwrap();
+    let test = SelfTest::new(MacosMajor::Macos15, plan.fixture).unwrap();
+    let right: Vec<Outcome> = test
+        .steps()
+        .iter()
+        .map(|step| match step.role() {
+            Role::Denied => Outcome::Refused,
+            Role::Control | Role::Allowed => Outcome::Success,
+        })
+        .collect();
+    crate::mac_allow::verdict(&test, &right).unwrap()
+}
+
+/// Asserts that under [`Reads::Allow`] the profile denies reads by default and grants back
+/// the run's tree after that deny, keeps the agent's read denies after every grant, and that
+/// trees on a shared mount are refused under that model.
+///
+/// Catches: an allow-model run built as an open one, a grant rendered before the default deny
+/// (which would then hide it), and the trees' open-model rules mixed into an allow-list.
+#[test]
+fn the_allow_reads_deny_by_default_grant_the_tree_and_refuse_shared_trees() {
+    let home = Path::new("/srv/homes/kbf-acct-4");
+    let store = AbsPath::parse("/srv/bundles").unwrap();
+    let diff_id = js_bundle::DiffId::parse(&format!("sha256:{}", "c".repeat(64))).unwrap();
+    let tree = js_mac_pool::seatbelt::PinnedTree::new(&store, &diff_id).unwrap();
+    let grants = vec![ReadGrant::Tree(tree)];
+    let reads = Reads::Allow(assured(), grants.clone());
+    let profile = build(&config(), &none(), home, (&[], &[]), (None, reads), &[]).unwrap();
+    let lines: Vec<&str> = profile.text().lines().collect();
+    let deny = lines.iter().position(|line| *line == "(deny file-read*)");
+    let grant = lines
+        .iter()
+        .position(|line| *line == "(allow file-read* (subpath (param \"TREE_0\")))");
+    let state = lines.iter().position(|line| {
+        line.starts_with("(deny file-read*")
+            && param_of(line, profile.params()) == Some("/srv/js-state")
+    });
+    assert!(deny < grant && grant < state && deny.is_some(), "{lines:?}");
+    let tree_dir = format!("/srv/bundles/v1/objects/trees/{}", "c".repeat(64));
+    assert!(profile.params().contains(&("TREE_0".to_owned(), tree_dir)));
+
+    let root = AbsPath::parse("/srv/store/trees").unwrap();
+    let shared = AbsPath::parse("/srv/store/trees/abc").unwrap();
+    let trees = js_mac_pool::seatbelt::MountTrees::new(root, vec![shared]).unwrap();
+    let reads = Reads::Allow(assured(), grants);
+    let why = build(
+        &config(),
+        &none(),
+        home,
+        (&[], &[]),
+        (Some(trees), reads),
+        &[],
+    )
+    .unwrap_err();
+    assert_eq!(
+        why.0,
+        "the policy: trees on a mount need the open read model"
+    );
 }
 
 /// Asserts the level of a run's profile for every ceiling and every level a start asks: the
@@ -365,7 +502,7 @@ fn a_host_port_opens_its_loopback_port_under_the_ceiling_off() {
         host_port(80, None),
         host_port(5432, None),
     ];
-    let with = build(&config, &net, home, (&[], &[]), None, &ports).unwrap();
+    let with = build(&config, &net, home, (&[], &[]), (None, Reads::Open), &ports).unwrap();
     let network = network_lines(&with);
     let wanted = [
         "(deny network*)",
@@ -380,7 +517,7 @@ fn a_host_port_opens_its_loopback_port_under_the_ceiling_off() {
             .all(|line| !line.contains("localhost")),
         "{network:#?}"
     );
-    let without = build(&config, &net, home, (&[], &[]), None, &[]).unwrap();
+    let without = build(&config, &net, home, (&[], &[]), (None, Reads::Open), &[]).unwrap();
     assert!(!without.text().contains("localhost"), "{}", without.text());
 }
 
@@ -401,8 +538,8 @@ fn a_host_port_adds_nothing_where_loopback_is_open() {
         };
         let net = level(&config, asked, None);
         let ports = [host_port(5432, None)];
-        let with = build(&config, &net, home, (&[], &[]), None, &ports).unwrap();
-        let without = build(&config, &net, home, (&[], &[]), None, &[]).unwrap();
+        let with = build(&config, &net, home, (&[], &[]), (None, Reads::Open), &ports).unwrap();
+        let without = build(&config, &net, home, (&[], &[]), (None, Reads::Open), &[]).unwrap();
         assert_eq!(with.text(), without.text(), "{ceiling}");
         assert_eq!(with.params(), without.params(), "{ceiling}");
     }
@@ -416,6 +553,14 @@ fn a_host_port_adds_nothing_where_loopback_is_open() {
 fn a_host_port_the_profile_cannot_name_fails_the_build() {
     let home = Path::new("/srv/homes/kbf-acct-4");
     let ports = [host_port(0, None)];
-    let why = build(&config(), &none(), home, (&[], &[]), None, &ports).unwrap_err();
+    let why = build(
+        &config(),
+        &none(),
+        home,
+        (&[], &[]),
+        (None, Reads::Open),
+        &ports,
+    )
+    .unwrap_err();
     assert_eq!(why.to_string(), "the host ports: port 0 listed");
 }
