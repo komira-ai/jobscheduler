@@ -233,7 +233,7 @@ fn a_listing_after_a_hello_loses_only_the_jobs_that_ran_and_are_not_named() {
 }
 
 /// The silence limit of the tests of the third way.
-const LIMIT: Duration = Duration::from_secs(1800);
+const LIMIT: Duration = Duration::from_secs(600);
 
 /// Job tables on a clock an hour past its origin, the store under them, and a second job store
 /// over the same rows, standing for another writer.

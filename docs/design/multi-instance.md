@@ -621,7 +621,7 @@ An agent whose connection was closed or refused retries with its backoff. Today 
 beat is answered `409 unknown-host` or `403 session-mismatch` and the agent says hello there (`js-agent/src/session.rs:32-45`); after G15 it serves the beat from the `node/` row and no hello is repeated.
 Its jobs run on throughout: an agent keeps its jobs without a server for up to `--silence-stop` with no accepted reply (300 s by
 default, `js-agent/src/cli.rs:311-316`), far more than the drain hold and drain timeout (25 s), and on the server's side silence
-ends no job before the server's `silence_limit` (30 minutes by default) and frees nothing before grace plus retention
+ends no job before the server's `silence_limit` (10 minutes by default) and frees nothing before grace plus retention
 ([absence.md](absence.md)).
 
 **The update, by the two rules of section 0.1.** Heartbeats, the job API and dispatch go through the edge to any instance, old or

@@ -75,7 +75,7 @@ pub(crate) struct JobLimits {
 impl JobLimits {
     /// The limits of a pool that sets none, on a server that sets no `silence_limit`: a queue
     /// wait of one hour, a start timeout of fifteen minutes, eight capacity requeues, a
-    /// capacity bar of sixty seconds and a silence limit of thirty minutes
+    /// capacity bar of sixty seconds and a silence limit of ten minutes
     /// ([`DEFAULT_SILENCE_LIMIT`]); an orphan is ended after the default `--max-job-wall`.
     pub(crate) const DEFAULT: JobLimits = JobLimits {
         max_queue_wait: Duration::from_secs(3600),
@@ -117,12 +117,14 @@ impl JobLimits {
     }
 }
 
-/// The `silence_limit` of a server that sets none: thirty minutes. An agent cut off from the
+/// The `silence_limit` of a server that sets none: ten minutes. An agent cut off from the
 /// server stops its jobs once it has not been answered for its `--silence-stop` (300 s by
 /// default) and their stop grace has passed (10 s by default, 120 s in the packaged crun unit);
-/// a restarted agent is back within its unit's 30 s restart delay and a hello. Thirty minutes is
-/// more than four times the longest of those together, and twice the default `start_timeout`.
-pub(crate) const DEFAULT_SILENCE_LIMIT: Duration = Duration::from_secs(1800);
+/// a restarted agent is back within its unit's 30 s restart delay and a hello: about 7.5
+/// minutes in all. Ten minutes is above that with room for a slow stop. An agent whose
+/// `--silence-stop` is raised past the limit may still run a job the server has lost; the job
+/// is never placed again and its room stays booked until the host confirms it stopped.
+pub(crate) const DEFAULT_SILENCE_LIMIT: Duration = Duration::from_secs(600);
 
 impl Default for JobLimits {
     fn default() -> JobLimits {

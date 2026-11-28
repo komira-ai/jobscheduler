@@ -23,7 +23,7 @@
 //!    their next attempt when their retry policy leaves one, each in a commit that checks the
 //!    row is still absent (design `multi-instance.md`, G6).
 //! 3. **End the jobs of a host silent past the limit** ([`job_loss::lose_silent`]): a host
-//!    whose `node/` row was last heard the server's `silence_limit` (30 minutes by default) or
+//!    whose `node/` row was last heard the server's `silence_limit` (10 minutes by default) or
 //!    more before `now` has its placed, starting and running jobs ended as lost, with the cause
 //!    `host-silent` and no retry, their allocations moved to releasing, not freed. It comes
 //!    after the second step, so a host both absent and silent is settled as absent.

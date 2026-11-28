@@ -437,7 +437,7 @@ enum LostCause {
   // host absent or the host came back and does not list it, or it ended before causes were
   // recorded.
   LOST_CAUSE_UNSPECIFIED = 0;
-  // The job's host was not heard for the server's `silence_limit` (30 minutes by default).
+  // The job's host was not heard for the server's `silence_limit` (10 minutes by default).
   // The job's container may have run on: the host is told to stop it once it is heard again,
   // and the service never places the job again. A client that wants the work done submits a
   // new job.

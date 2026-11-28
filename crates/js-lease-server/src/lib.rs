@@ -114,7 +114,7 @@
 //! # store: the path of an owner-only file holding the store's connection (never the
 //! # connection itself); allow_sqlite_store (false): refused as true without store
 //! # store_unreachable_after ("60s"): the flag's name, default and rules
-//! # silence_limit ("30m", a positive duration): config file only, there is no flag; how long a
+//! # silence_limit ("10m", a positive duration): config file only, there is no flag; how long a
 //! # host may go unheard before the job pass ends its placed, starting and running jobs as lost
 //! # (cause host-silent, never retried, their room kept until the host confirms them stopped)
 //! # dispatch_lease_secs (10, a whole number of seconds from 1 to 3600), dispatch_recheck_ms

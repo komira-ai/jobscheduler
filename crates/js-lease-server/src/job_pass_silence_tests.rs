@@ -28,7 +28,7 @@ const MINUTE: Duration = Duration::from_secs(60);
 const YEAR: Duration = Duration::from_secs(365 * 24 * 3600);
 
 /// The server's limits in these tests: no job runs out of time while it waits, and the silence
-/// limit is the default, thirty minutes.
+/// limit is the default, ten minutes.
 const LIMITS: JobLimits = JobLimits {
     max_queue_wait: YEAR,
     start_timeout: YEAR,
@@ -95,7 +95,8 @@ async fn a_host_silent_past_the_limit_has_its_jobs_lost_and_told_to_stop_on_its_
         .0
         .id;
 
-    for _ in 0..29 {
+    // A minute short of the limit, the other host beating each minute.
+    for _ in 1..DEFAULT_SILENCE_LIMIT.as_secs() / 60 {
         rig.advance(MINUTE);
         heard.take(&rig.beat(&heard).await.unwrap());
         rig.tick();
@@ -161,7 +162,7 @@ async fn a_host_silent_past_the_limit_has_its_jobs_lost_and_told_to_stop_on_its_
 }
 
 // Catches a silence counted across beats (three silences just short
-// of the limit add up to an hour and a half), a host heard within the limit whose job is
+// of the limit add up to half an hour), a host heard within the limit whose job is
 // ended, and a limit that never ends anything.
 #[tokio::test]
 async fn a_host_heard_within_the_limit_keeps_its_jobs_and_each_beat_restarts_the_count() {
@@ -187,7 +188,7 @@ async fn a_host_heard_within_the_limit_keeps_its_jobs_and_each_beat_restarts_the
 // Catches a server that counts a silence from before its own first pass (after a boot, or an
 // outage of every server, each host's row is old) or across a pass that failed (the store could
 // not be read, so no host could be heard): each would end every job of the farm at once. Here
-// the first pass comes an hour after the host was last heard, and a pass fails just before the
+// the first pass comes twice the limit after the host was last heard, and a pass fails just before the
 // limit; each time the host gets the whole limit again.
 #[tokio::test]
 async fn silence_counts_from_the_first_pass_after_a_boot_and_after_a_failed_pass() {

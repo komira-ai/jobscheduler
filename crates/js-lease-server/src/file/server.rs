@@ -138,7 +138,7 @@ pub(crate) struct Server {
     /// is unreachable; 60 s unless the file sets it.
     pub(crate) store_unreachable_after: Duration,
     /// `silence_limit`: how long a host may go unheard before the job pass ends its jobs as
-    /// lost ([`crate::job_loss::lose_silent`]); 30 minutes unless the file sets it.
+    /// lost ([`crate::job_loss::lose_silent`]); 10 minutes unless the file sets it.
     pub(crate) silence_limit: Duration,
     /// `dispatch_lease_secs` and `dispatch_recheck_ms`: what the dispatch poll is timed by;
     /// 10 s and 500 ms unless the file sets them.

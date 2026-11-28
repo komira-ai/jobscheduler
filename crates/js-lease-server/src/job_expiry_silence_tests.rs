@@ -14,12 +14,12 @@ fn limit_of(rig: &ClientsRig, lines: &str) -> Result<Duration, String> {
         .map_err(|refused| format!("{refused}"))
 }
 
-// Catches a default other than thirty minutes, a flag-started server or a file without the key
+// Catches a default other than ten minutes, a flag-started server or a file without the key
 // that reads another, a key the file sets that does not reach the job pass, and a pool's limits
 // read in place of the server's.
 #[test]
-fn the_silence_limit_is_thirty_minutes_unless_the_file_sets_it() {
-    assert_eq!(DEFAULT_SILENCE_LIMIT, Duration::from_secs(30 * 60));
+fn the_silence_limit_is_ten_minutes_unless_the_file_sets_it() {
+    assert_eq!(DEFAULT_SILENCE_LIMIT, Duration::from_secs(10 * 60));
     assert_eq!(JobLimits::DEFAULT.silence_limit, DEFAULT_SILENCE_LIMIT);
     let rig = ClientsRig::new("silence_limit_set");
     let flags = rig.config_of_flags(&[]).unwrap();
@@ -44,7 +44,7 @@ fn a_zero_or_mistyped_silence_limit_is_refused_naming_the_key() {
         ("silence_limit = \"0s\"", duration),
         ("silence_limit = \"soon\"", duration),
         (
-            "silence_limit = 1800",
+            "silence_limit = 600",
             "server.silence_limit: must be a string",
         ),
     ];
