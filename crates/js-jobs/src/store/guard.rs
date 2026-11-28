@@ -1,7 +1,8 @@
-//! The guarded view of a job store ([`JobStore::guarded`]): every write it makes is conditional
-//! on a host's node row still being at the version given, so a beat's listing writes stop once
-//! a newer beat or hello of the host has been applied (design `multi-instance.md`, section 0
-//! and G15).
+//! The guarded views of a job store: every write one makes is conditional on a host's node row,
+//! either still being at the version given ([`JobStore::guarded`]), so a beat's listing writes
+//! stop once a newer beat or hello of the host has been applied (design `multi-instance.md`,
+//! section 0 and G15), or still being absent ([`JobStore::guarded_absent`]), so the settlement
+//! of a removed host loses nothing once a hello of the host has written its row again (G6).
 
 use js_state::{Cond, Conflict, Store, Txn, Version};
 use js_types::HostId;
@@ -15,8 +16,8 @@ use crate::keys;
 pub(super) struct Guard {
     /// The host whose row it is.
     host: HostId,
-    /// The version the row must be at.
-    at: Version,
+    /// The version the row must be at, or `None` for a row that must be absent.
+    at: Option<Version>,
 }
 
 impl<S, I: Clone> JobStore<S, I> {
@@ -29,6 +30,22 @@ impl<S, I: Clone> JobStore<S, I> {
     /// guard.
     #[must_use]
     pub fn guarded(&self, host: &HostId, at: Version) -> JobStore<S, I> {
+        self.guarded_at(host, Some(at))
+    }
+
+    /// A job store as [`JobStore::guarded`] makes one, whose every write checks instead that
+    /// `host` has no node row: the view the job pass loses a removed host's allocations through
+    /// (design `multi-instance.md`, G6). A write that finds a row there (a hello of the host
+    /// wrote one since the pass read it absent) is [`JobStoreError::NodeMoved`] and writes
+    /// nothing. Reads are not guarded; guarding a view that is already guarded replaces its
+    /// guard.
+    #[must_use]
+    pub fn guarded_absent(&self, host: &HostId) -> JobStore<S, I> {
+        self.guarded_at(host, None)
+    }
+
+    /// The view whose every write checks that `host`'s node row is at `at` (absent for `None`).
+    fn guarded_at(&self, host: &HostId, at: Option<Version>) -> JobStore<S, I> {
         JobStore {
             store: self.store.clone(),
             ids: self.ids.clone(),
@@ -53,7 +70,10 @@ impl<S: Store, I> JobStore<S, I> {
     /// not guarded.
     pub(super) fn guard_txn(&self, txn: Txn) -> Txn {
         match &self.guard {
-            Some(guard) => txn.check(keys::node(&guard.host), Cond::Version(guard.at)),
+            Some(guard) => {
+                let cond = guard.at.map_or(Cond::Absent, Cond::Version);
+                txn.check(keys::node(&guard.host), cond)
+            }
             None => txn,
         }
     }
@@ -62,8 +82,8 @@ impl<S: Store, I> JobStore<S, I> {
     /// guard's row has moved. A transaction that conflicts on several keys reports one of them,
     /// which need not be the guard's: a newer beat that committed the same job change as this
     /// one moves both that job's row and the node row. So a guarded view that loses any write
-    /// reads the node row again, and a row no longer at the guard's version (or gone) is the
-    /// move, whatever key the store named.
+    /// reads the node row again, and a row no longer at the guard's version (or gone, or for a
+    /// view guarded on the row's absence, there) is the move, whatever key the store named.
     ///
     /// # Errors
     /// [`JobStoreError::NodeMoved`]; [`JobStoreError::Store`] when the node row cannot be read.
@@ -73,11 +93,7 @@ impl<S: Store, I> JobStore<S, I> {
         };
         let key = keys::node(&guard.host);
         let on_guard = conflict.key == key;
-        let moved = on_guard
-            || self
-                .store
-                .get(&key)?
-                .is_none_or(|row| row.version != guard.at);
+        let moved = on_guard || self.store.get(&key)?.map(|row| row.version) != guard.at;
         match moved {
             true => Err(JobStoreError::NodeMoved {
                 host: guard.host.clone(),
