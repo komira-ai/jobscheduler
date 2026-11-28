@@ -154,6 +154,10 @@ impl PassMetrics for Watched<'_> {
     fn curve_wait_expired(&self) {
         self.metrics.curve_wait_expired();
     }
+
+    fn queue_status_written(&self) {
+        self.metrics.queue_status_written();
+    }
 }
 
 /// When each of `cordons` lapses, each with the time it had left at `now`.

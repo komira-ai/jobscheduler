@@ -329,20 +329,38 @@ fn the_patch_is_uploaded_once_after_a_failed_build_under_its_name() {
 #[test]
 fn the_triggers_are_every_pull_request_and_a_push_to_main() {
     // Catches: a filtered pull request, a push of another branch or of more branches, a push by
-    // tags, another trigger beside them, `branches` as a scalar, and the list form of `on`.
-    let on = "on:\n  pull_request:\n  push:\n    branches: [main]\n";
+    // tags, another trigger beside them, `branches` as a scalar, and the list form of `on`; and a
+    // call without its input, or with the input renamed, optional, of another type, defaulted, or
+    // beside another.
+    let call = "  workflow_call:\n    inputs:\n      target:\n        description: The one target the last step builds in place of //:ci.\n        type: string\n        required: true\n";
+    let on = format!("on:\n  pull_request:\n  push:\n    branches: [main]\n{call}");
     for other in [
-        "on:\n  pull_request:\n    paths: [crates/**]\n  push:\n    branches: [main]\n",
-        "on:\n  pull_request:\n  push:\n    branches: [dev]\n",
-        "on:\n  pull_request:\n  push:\n    branches: [main, dev]\n",
-        "on:\n  pull_request:\n  push:\n    branches: main\n",
-        "on:\n  pull_request:\n  push:\n    tags: ['v*']\n",
-        "on:\n  pull_request:\n  push:\n    branches: [main]\n    paths: [crates/**]\n",
-        "on:\n  pull_request:\n  push:\n    branches: [main]\n  workflow_dispatch:\n",
-        "on: [pull_request, push]\n",
-        "on: push\n",
+        format!(
+            "on:\n  pull_request:\n    paths: [crates/**]\n  push:\n    branches: [main]\n{call}"
+        ),
+        format!("on:\n  pull_request:\n  push:\n    branches: [dev]\n{call}"),
+        format!("on:\n  pull_request:\n  push:\n    branches: [main, dev]\n{call}"),
+        format!("on:\n  pull_request:\n  push:\n    branches: main\n{call}"),
+        format!("on:\n  pull_request:\n  push:\n    tags: ['v*']\n{call}"),
+        format!(
+            "on:\n  pull_request:\n  push:\n    branches: [main]\n    paths: [crates/**]\n{call}"
+        ),
+        format!(
+            "on:\n  pull_request:\n  push:\n    branches: [main]\n{call}  workflow_dispatch:\n"
+        ),
+        "on:\n  pull_request:\n  push:\n    branches: [main]\n".to_owned(),
+        on.replace("      target:\n", "      targets:\n"),
+        on.replace("        required: true\n", "        required: false\n"),
+        on.replace("        type: string\n", "        type: boolean\n"),
+        on.replace(
+            "        required: true\n",
+            "        required: true\n        default: //:ci\n",
+        ),
+        format!("{on}      other:\n        type: string\n        required: false\n"),
+        "on: [pull_request, push, workflow_call]\n".to_owned(),
+        "on: push\n".to_owned(),
     ] {
-        assert_eq!(problems_with(on, other), [ON_PROBLEM], "{other}");
+        assert_eq!(problems_with(&on, &other), [ON_PROBLEM], "{other}");
     }
 }
 

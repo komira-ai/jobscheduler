@@ -64,6 +64,7 @@
 mod placement;
 mod render;
 mod scrape;
+mod work;
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -108,6 +109,9 @@ pub(crate) trait MetricsSink: Send + Sync + std::fmt::Debug {
     /// A queued job of a curve class waited past the wait bound with no host fitting its
     /// curve, and is tested with its flat number from then on; by default, nothing is counted.
     fn curve_wait_expired(&self) {}
+    /// A pass wrote the queue status of a job it did not place, in a commit of its own; by
+    /// default, nothing is counted.
+    fn queue_status_written(&self) {}
     /// A try of a job's completion callback was answered `answer`, and the answer recorded;
     /// by default, nothing is counted.
     fn callback_answered(&self, _answer: &CallbackAnswer) {}
@@ -258,6 +262,10 @@ impl js_sched_placer::engine::jobs::PassMetrics for PassSink<'_> {
 
     fn curve_wait_expired(&self) {
         self.0.curve_wait_expired();
+    }
+
+    fn queue_status_written(&self) {
+        self.0.queue_status_written();
     }
 }
 
@@ -610,6 +618,9 @@ pub(crate) struct Recorder {
     callbacks: [AtomicU64; 4],
     submit_phases: [Histogram; 6],
     bodies_too_large: [AtomicU64; 2],
+    /// The queue statuses of unplaced jobs the passes wrote, served with the server's own work
+    /// ([`work`]).
+    queue_status_writes: AtomicU64,
 }
 
 impl Default for Recorder {
@@ -631,6 +642,7 @@ impl Default for Recorder {
             callbacks: Default::default(),
             submit_phases: std::array::from_fn(|_| Histogram::new(SUBMIT_PHASE)),
             bodies_too_large: Default::default(),
+            queue_status_writes: AtomicU64::new(0),
         }
     }
 }
@@ -689,6 +701,10 @@ impl MetricsSink for Recorder {
 
     fn curve_wait_expired(&self) {
         self.curve_wait_expiries.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn queue_status_written(&self) {
+        self.queue_status_writes.fetch_add(1, Ordering::Relaxed);
     }
 
     fn job_retried(&self, outcome: RetryOutcome) {

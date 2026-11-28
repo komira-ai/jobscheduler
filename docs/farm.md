@@ -10,6 +10,13 @@ The lane is additive and advisory. `.github/workflows/farm.yml` runs it on every
 on every pull request from a branch of this repository (not a fork's, not Dependabot's). No check
 of it is required, and a build farm outage turns it red and holds nothing.
 
+One use of it holds the release back. `release.yml` calls `farm.yml` as its job `blackbox`, the
+gate before the fleet, with the target of the release's black-box tests (`target: //:blackbox`):
+the last step builds that target in place of `//:ci`, with the same setup and `local: 0`, and the
+release tells the fleet about itself only when it passed ([release.md](release.md), step 8a). So
+while the build farm cannot be reached, a release is published but not deployed; re-run its failed
+jobs once the farm answers.
+
 The same farm also builds the macOS files of a release on its Macs, from a Linux runner, when the
 repository variable `MACOS_ON_FARM` is `true`: that is `macos-farm.yml`, with Cargo and not Buck2
 ([mac-farm.md](mac-farm.md)).

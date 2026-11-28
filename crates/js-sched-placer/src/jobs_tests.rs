@@ -34,6 +34,7 @@ struct Recorder {
     started: Mutex<Vec<(JobId, HostId)>>,
     tainted: Mutex<Vec<(HostId, JobId)>>,
     failed: Mutex<u32>,
+    status_writes: Mutex<u32>,
 }
 
 impl PassMetrics for Recorder {
@@ -43,6 +44,10 @@ impl PassMetrics for Recorder {
 
     fn store_write_failed(&self) {
         *self.failed.lock().unwrap() += 1;
+    }
+
+    fn queue_status_written(&self) {
+        *self.status_writes.lock().unwrap() += 1;
     }
 }
 
@@ -522,8 +527,8 @@ fn refusal(code: RefusalCode, zone: &str) -> Outcome {
 
 /// Catches: a job placed nowhere that shows no reason, a reason written again at every pass,
 /// and a time that is not the store's at the change. On full hosts a one-core job waits for
-/// capacity from the pass at 5 s, with one event then and no attempt; a second pass at 9 s
-/// writes nothing and the time stays 5 s.
+/// capacity from the pass at 5 s, with one event then and no attempt, its one status write
+/// told; a second pass at 9 s writes nothing, tells no write, and the time stays 5 s.
 #[test]
 fn a_job_with_no_room_waits_for_capacity_from_the_pass_that_found_none() {
     let rig = full();
@@ -543,10 +548,12 @@ fn a_job_with_no_room_waits_for_capacity_from_the_pass_that_found_none() {
         events(&job),
         [(JobEventKind::WaitingForCapacity, 5_000, None)]
     );
+    assert_eq!(*recorder.status_writes.lock().unwrap(), 1);
     let before = rig.tables.store.commit_stats().txns;
     rig.at(9_000);
     rig.go(&recorder);
     assert_eq!(rig.tables.store.commit_stats().txns, before);
+    assert_eq!(*recorder.status_writes.lock().unwrap(), 1);
     assert_eq!(read(&rig, &j.id), job);
 }
 

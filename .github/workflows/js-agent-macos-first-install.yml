@@ -15,8 +15,9 @@
 # It is called, never started by itself or by a pull request: by release.yml's
 # `beta-macos-first-install` on a push to main (after `beta-macos-pkg`, whose unsigned package
 # it installs), and by js-agent-macos-pkg.yml's `first-install` job on a manual run, so the
-# package of a branch can be built and tried before it merges. The deploy never waits for it:
-# only `promote-macos`, which adds the macOS archives to the release, needs it.
+# package of a branch can be built and tried before it merges. `promote-macos`, which adds the
+# macOS archives to the release, needs it, and so does `blackbox`, the gate before the farm:
+# `desired` and the control-plane deploy run only when it passed.
 #
 # One job, no secret, no environment, `contents: read` alone. The test is built as the runner's
 # user, then run as root through cargo's target runner, so nothing is built as root. Every step

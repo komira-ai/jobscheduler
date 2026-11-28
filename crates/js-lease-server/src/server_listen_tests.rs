@@ -75,7 +75,7 @@ async fn server(
 }
 
 /// The other server's job tables over the database of `url`, on `store_clock`.
-fn other_server(url: &str, store_clock: Arc<js_state::ManualClock>) -> ServerJobs {
+pub(super) fn other_server(url: &str, store_clock: Arc<js_state::ManualClock>) -> ServerJobs {
     let config = PostgresConfig::parse(url).unwrap();
     let store: Arc<dyn Store> = Arc::new(
         PostgresStore::open(&config)
@@ -107,24 +107,23 @@ fn listening_on(url: &str) {
     }
 }
 
-/// `body` POSTed to `path` of the agent routes of `running` as `burst-1`, whose host
-/// certificate the TLS listener has verified (the extension it puts on the request); the
-/// status and the body's JSON.
-async fn post(running: &Running, path: &str, body: &Value) -> (u16, Value) {
+/// `body` POSTed to `path` of the agent routes `routes` as the host the body names (its
+/// `host_id`), whose host certificate the TLS listener has verified (the extension it puts on
+/// the request); the status and the body's JSON.
+pub(super) async fn post(routes: &axum::Router, path: &str, body: &Value) -> (u16, Value) {
     use tower::ServiceExt;
 
-    let routes = crate::api::agent_router(&running.shared);
     let mut request = axum::http::Request::builder()
         .method("POST")
         .uri(path)
         .header("content-type", "application/json")
         .body(axum::body::Body::from(body.to_string()))
         .unwrap();
-    let host = js_types::HostId::new("burst-1").unwrap();
+    let host = js_types::HostId::new(body["host_id"].as_str().unwrap()).unwrap();
     request
         .extensions_mut()
         .insert(crate::host_cert::CertHost(host));
-    let answer = routes.oneshot(request).await.unwrap();
+    let answer = routes.clone().oneshot(request).await.unwrap();
     let status = answer.status().as_u16();
     let bytes = axum::body::to_bytes(answer.into_body(), usize::MAX)
         .await
@@ -148,6 +147,7 @@ fn started(reply: &Value) -> Vec<String> {
 /// with nothing listed; the reply once the server answers it, after `meanwhile` ran with the
 /// beat held.
 async fn held_beat(running: &Running, meanwhile: impl std::future::Future<Output = ()>) -> Value {
+    let routes = crate::api::agent_router(&running.shared);
     let hello = json!({
         "host_id": "burst-1",
         "pool": "burst",
@@ -156,7 +156,7 @@ async fn held_beat(running: &Running, meanwhile: impl std::future::Future<Output
         "capabilities": { "per-job": "true", "held-beat": "true", "arch": "x86_64", "isa": "x86-64-v3" },
         "phase": "serving",
     });
-    let (status, welcome) = post(running, "/v1/agent/hello", &hello).await;
+    let (status, welcome) = post(&routes, "/v1/agent/hello", &hello).await;
     assert_eq!(status, 200, "{welcome}");
     let beat = json!({
         "host_id": "burst-1",
@@ -165,7 +165,7 @@ async fn held_beat(running: &Running, meanwhile: impl std::future::Future<Output
         "phase": "serving",
         "seq": 1,
     });
-    let held = post(running, "/v1/agent/heartbeat", &beat);
+    let held = post(&routes, "/v1/agent/heartbeat", &beat);
     let other = async {
         let mut waits = running.shared.agents().wakes.waits();
         waits.wait_for(|waits| *waits >= 1).await.unwrap();
@@ -176,7 +176,7 @@ async fn held_beat(running: &Running, meanwhile: impl std::future::Future<Output
     reply
 }
 
-fn queued(id: &JobId, cpu_millis: u64) -> NewJob {
+pub(super) fn queued(id: &JobId, cpu_millis: u64) -> NewJob {
     let mut spec = spec();
     spec.needs =
         js_jobs::Needs::Shape(js_types::Resources::new(cpu_millis, 1 << 30, 0, None).unwrap());
@@ -189,7 +189,7 @@ fn queued(id: &JobId, cpu_millis: u64) -> NewJob {
 }
 
 /// A database of its own for one test, made outside any runtime.
-fn database() -> (TestDatabase, String) {
+pub(super) fn database() -> (TestDatabase, String) {
     let database = test_database();
     let url = database.url();
     (database, url)
