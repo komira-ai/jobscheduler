@@ -119,10 +119,7 @@ pub fn a_view_guarded_on_absence_writes_only_while_the_host_has_no_row<B: Backen
     let guarded = rig.jobs.guarded_absent(&node);
 
     let inserted = guarded.insert_queued(new_job("a-one")).expect("commits");
-    assert!(
-        inserted.created,
-        "{name}: a write with no row was not made"
-    );
+    assert!(inserted.created, "{name}: a write with no row was not made");
 
     rig.tick();
     let said = rig.jobs.hello_node(&node, &hello()).expect("a hello");

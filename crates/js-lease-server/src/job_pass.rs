@@ -18,8 +18,10 @@
 //!    ([`js_jobs::JobStore::tick`]); a job that has not ended is never deleted, and no log
 //!    object is touched.
 //! 2. **Settle allocations** ([`job_loss::lose_absent`]): each host that holds a live
-//!    allocation is read once; a host the provider reads absent has its allocations freed and
-//!    its jobs lost, or queued for their next attempt when their retry policy leaves one.
+//!    allocation is read once, from its `node/` row; a host that has none, which the provider's
+//!    removal of it left ([`Rows`]), has its allocations freed and its jobs lost, or queued for
+//!    their next attempt when their retry policy leaves one, each in a commit that checks the
+//!    row is still absent (design `multi-instance.md`, G6).
 //!
 //! After the passes, whether they succeeded or not, the tick trims the job store's change feed to its newest
 //! `--job-feed-retention` changes ([`crate::job_store::FeedTrim`]); a failed trim is logged
@@ -44,12 +46,10 @@
 //! tick. The same transaction replaces by their digests the files' contents that a row of an
 //! ended job still holds.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::time::Duration;
 
 use js_jobs::{JobId, JobStoreError, StartFailure};
-use js_registry::{Registry, WholeNodeConfig};
+use js_registry::WholeNodeConfig;
 use js_state::StoreTime;
 use js_types::Clock;
 use js_types::HostId;
@@ -57,11 +57,10 @@ use tracing::{info, warn};
 
 use crate::agents::Agents;
 use crate::job_expiry::{self, JobLimits};
-use crate::job_loss::{self, Observe, Seen};
+use crate::job_loss::{self, Observe, RowRead, Seen};
 use crate::job_store::ServerJobs;
 use crate::job_whole;
 use crate::metrics::MetricsSink;
-use crate::sched::place::SchedPlacer;
 use crate::store_health::{FailureKind, Pass};
 
 /// The periodic duty of the job pass ([`run`]), as the servers claim it ([`js_jobs::JobStore::claim_duty`]).
@@ -119,24 +118,23 @@ pub(crate) fn run(
     })
 }
 
-/// What the server's provider reads of a host: absent when the registry removed it
-/// ([`crate::sched::place::SchedPlacer::gone`]); present while the registry hears it; unknown
-/// while it is silent or the registry does not hold it. Silence is never absence.
-struct Presence<'a> {
-    registry: &'a Registry,
-    gone: &'a BTreeMap<HostId, u64>,
-}
+/// What the server's provider reads of a host, from the host's `node/` row, the same on every
+/// server over the store (design `multi-instance.md`, G6): absent when the host has no row,
+/// which only a removal leaves of a host that holds work (the scaler's, once the cloud
+/// confirmed its machine gone: [`crate::scaler`]); present while it has one, heard lately or
+/// not, so silence is never absence (design section 6.3, question 25); unknown when the row
+/// could not be read.
+struct Rows;
 
-impl Observe for Presence<'_> {
-    fn observe(&self, host: &HostId) -> Result<Seen, String> {
-        let seen = if self.gone.contains_key(host) {
-            Seen::Absent
-        } else if self.registry.own_host(host).is_some()
-            & self.registry.silent_since(host).is_none()
-        {
-            Seen::Present
-        } else {
-            Seen::Unknown
+impl Observe for Rows {
+    fn observe(&self, host: &HostId, row: &RowRead) -> Result<Seen, String> {
+        let seen = match row {
+            Ok(None) => Seen::Absent,
+            Ok(Some(_)) => Seen::Present,
+            Err(error) => {
+                warn!(%host, %error, "a host whose row cannot be read is not read absent");
+                Seen::Unknown
+            }
         };
         Ok(seen)
     }
@@ -151,10 +149,10 @@ pub(crate) fn store_time(millis: u64) -> StoreTime {
 }
 
 impl Agents {
-    /// The job pass of this tick ([`run`]) when the server holds the job tables, at the
-    /// store's clock (read once, after the duty is claimed), under the pool's limits, with the
-    /// hosts the registry removed read absent; then those removals are settled. A failed pass
-    /// is logged and changes no removal; the next tick passes again. A store that cannot read
+    /// The job pass of this tick ([`run`]) when the server holds the job tables and claims the
+    /// period, at the store's clock (read once, after the duty is claimed), under the pool's
+    /// limits, with each host read from its row ([`Rows`]). A failed pass is logged; the next
+    /// tick passes again. A store that cannot read
     /// its clock fails the claim or the pass before any write: no job is ended or deleted by a
     /// time the store did not give. The pass's duration, the start failures and losses it
     /// made, and a failure of it, are counted on the agent side's meter ([`Agents::meter`]).
@@ -166,35 +164,20 @@ impl Agents {
         let Some(jobs) = &self.jobs else {
             return None;
         };
-        let gone = self
-            .placer
-            .as_ref()
-            .map(|placer| placer.gone())
-            .unwrap_or_default();
-        let observer = Presence {
-            registry: &self.registry,
-            gone: &gone,
-        };
         let began = self.clock.now();
         let meter = self.meter();
         let sink = meter.sink();
         // One server runs the pass in each period: the one whose advance of the duty's row
-        // commits. The others leave it, having learnt that the store answers. A server whose
-        // registry removed a host holds what only its own pass settles (the host is read absent
-        // here, and unknown to every other server), so it runs the pass whether or not another
-        // server claimed the period: the pass's writes are conditional on the rows it read, so
-        // two passes in one period do no wrong, and one that is never run would leave the
-        // removed host's jobs unended.
-        let claimed = gone.is_empty();
-        if claimed {
-            match jobs.claim_duty(JOB_PASS, self.duty_period()) {
-                Ok(true) => {}
-                Ok(false) => return None,
-                Err(error) => {
-                    sink.store_write_failed();
-                    warn!(%error, "the job pass could not be claimed; the next tick tries again");
-                    return FailureKind::of(&error).map(Pass::Failed);
-                }
+        // commits. The others leave it, having learnt that the store answers. Every server reads
+        // a host's absence from the same rows, so the one that claims the period settles every
+        // removed host, whichever server served it.
+        match jobs.claim_duty(JOB_PASS, self.duty_period()) {
+            Ok(true) => {}
+            Ok(false) => return None,
+            Err(error) => {
+                sink.store_write_failed();
+                warn!(%error, "the job pass could not be claimed; the next tick tries again");
+                return FailureKind::of(&error).map(Pass::Failed);
             }
         }
         let now = match jobs.now() {
@@ -207,7 +190,7 @@ impl Agents {
         };
         let rules = self.whole_rules();
         let limits = (self.job_limits, &rules);
-        let (passed, took) = meter.timed(|| run(jobs, limits, (&observer, sink), now));
+        let (passed, took) = meter.timed(|| run(jobs, limits, (&Rows, sink), now));
         sink.job_pass_took(took);
         let ran = Duration::from_millis(self.clock.now().millis().saturating_sub(began.millis()));
         let seen = match passed {
@@ -221,12 +204,7 @@ impl Agents {
                         "the job pass ended or deleted jobs"
                     );
                 }
-                let settle = |placer: &Arc<SchedPlacer>| placer.settle_gone(&gone);
-                self.placer.iter().for_each(settle);
-                // Only the server that claimed the period forgets rows: one per period.
-                if claimed {
-                    self.forget_silent_rows(jobs);
-                }
+                self.forget_silent_rows(jobs);
                 Some(Pass::Ran(ran))
             }
             Err(error) => {
@@ -240,7 +218,7 @@ impl Agents {
     }
 
     /// Forgets the `node/` rows of the hosts silent for longer than the registry's
-    /// [`Registry::forget_after`] that hold nothing ([`js_jobs::JobStore::forget_silent_nodes`]),
+    /// [`js_registry::Registry::forget_after`] that hold nothing ([`js_jobs::JobStore::forget_silent_nodes`]),
     /// so a pool's cap counts only rows not forgotten. The hosts forgotten are logged; a store
     /// that fails is logged, and the next period forgets them.
     fn forget_silent_rows(&self, jobs: &ServerJobs) {

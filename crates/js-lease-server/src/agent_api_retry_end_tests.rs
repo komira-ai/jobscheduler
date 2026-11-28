@@ -20,7 +20,7 @@ use serde_json::json;
 use super::job_rig::{BOOKED, FakeAgent, Rig, clocked_rig, placed, spec, starts, stops};
 use crate::job_api::read::view;
 use crate::job_expiry::JobLimits;
-use crate::job_loss::{Observe, Seen};
+use crate::job_loss::{Observe, RowRead, Seen};
 use crate::job_pass::{run, store_time};
 use crate::metrics::NoMetrics;
 
@@ -141,7 +141,7 @@ fn acks(reply: &HeartbeatReply) -> Vec<(String, Ack)> {
 struct Absent(&'static str);
 
 impl Observe for Absent {
-    fn observe(&self, host: &HostId) -> Result<Seen, String> {
+    fn observe(&self, host: &HostId, _: &RowRead) -> Result<Seen, String> {
         let seen = match host.as_str() == self.0 {
             true => Seen::Absent,
             false => Seen::Present,
