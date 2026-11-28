@@ -14,8 +14,9 @@
 //! - adds the project's apt repository with the suite `testing`, installs the released js-agent,
 //!   downloads its package and the previous release's for the update scenario, and makes the host
 //!   ready as a farm host is, with the flags file of the farm's shape;
-//! - starts the fake mount provider (`released fake-provider`, a transient unit of its own) on
-//!   the socket the flags name;
+//! - starts the fake mount provider (the program `js-fake-mount-provider`, given by
+//!   `--fake-provider`, as a transient unit of its own) on the socket the flags name, with its
+//!   control socket beside it;
 //! - runs `released scenarios` and exits as it does, after stopping the fakes.
 //!
 //! It installs no other service's package: the server is this repository's own release, and the
@@ -48,12 +49,18 @@ const PROVIDER_SOCKET: &str = "/var/lib/tierstore/provider.sock";
 /// Where the fake provider makes its trees: under the farm's tierstore mount roots.
 const PROVIDER_TREES: &str = "/run/tierstore/fs/trees";
 
+/// The fake provider's control socket, which the scenarios set it through.
+const PROVIDER_CONTROL: &str = "/run/js-blackbox/provider-control.sock";
+
 /// The flags of `released rig`.
 #[derive(Debug, clap::Args)]
 pub struct Flags {
     /// The release to test, MAJOR.MINOR.PATCH: published, and in the apt suite `testing`.
     #[arg(long)]
     pub version: String,
+    /// The fake mount provider, the program `js-fake-mount-provider` of this repository.
+    #[arg(long)]
+    pub fake_provider: std::path::PathBuf,
 }
 
 /// Installs, wires, and runs the test.
@@ -109,17 +116,18 @@ pub fn run_rig(flags: &Flags) -> ExitCode {
         registry_port,
     );
 
+    std::fs::create_dir_all(Path::new(PROVIDER_CONTROL).parent().expect("a parent"))
+        .expect("the control socket's directory");
     start_fake(
         FAKE_PROVIDER,
-        &me,
+        &flags.fake_provider,
         &[
-            "fake-provider",
             "--socket",
             PROVIDER_SOCKET,
-            "--trees",
+            "--control",
+            PROVIDER_CONTROL,
+            "--root",
             PROVIDER_TREES,
-            "--answer",
-            "success",
         ],
     );
     wait_for_file(Path::new(PROVIDER_SOCKET));
@@ -172,6 +180,8 @@ pub fn run_rig(flags: &Flags) -> ExitCode {
             &image,
             "--provider",
             "tierstore",
+            "--provider-control",
+            PROVIDER_CONTROL,
         ])
         .status()
         .expect("run the scenarios");

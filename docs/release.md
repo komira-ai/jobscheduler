@@ -803,7 +803,7 @@ Not proven until the first real run on `main`, and fixed there if it differs:
 
 `blackbox-linux` (after `check-apt` passed) calls `js-blackbox.yml`, which runs the program `released`
 of `crates/js-blackbox` (no libtest harness) as root on a hosted `ubuntu-24.04` runner. It is two
-parts. The wrapper, `released rig --version X.Y.Z`, installs and wires; it is the part another
+parts. The wrapper, `released rig --version X.Y.Z --fake-provider PATH`, installs and wires; it is the part another
 runner (an image of its own) would replace. The test itself, `released scenarios`, is given as
 flags what was installed and where each fake listens, starts the services under test, runs the
 scenarios and holds each to its pass condition, printing `PASS`, `FAIL` or `NOT RUN` for each.
@@ -825,10 +825,13 @@ service's package is installed:
 
 - the job image is served by a registry on the loopback (`released fake-registry`): the runner's own
   `sleep`, which the agent reaches through its `--image-allow-loopback` entry;
-- tierstore's mount provider is `released fake-provider`, serving `jobscheduler.provider.v1` on the
-  socket the farm's flags name; it answers `Prepare` one way, chosen when it starts (`success`,
-  `refuse`, `unavailable`, `full` or `hold`), and the scenarios use `success` (J1's job mounts a tree
-  from it);
+- tierstore's mount provider is the program `js-fake-mount-provider` (`crates/js-fake-mount-provider`,
+  built by the workflow), serving `jobscheduler.provider.v1` on the socket the farm's flags name and
+  answering as tierstore does: `Prepare` at once, the tree placed at `Mount`, a placement limit, a
+  store that stalls (a `Mount` held 25 s, then `UNAVAILABLE` "not ready"), a restart that forgets
+  the starts it was preparing, every call `UNAVAILABLE`, and a ref it refuses. A control socket
+  beside it sets which, and lists every call it answered with the time it came; J1's job mounts a
+  tree from it as it serves, and J5 sets it for each of its scenarios;
 - the server's Postgres store is the server's own SQLite store in its state directory (`--store`
   naming `sqlite:...`, with `--allow-sqlite-store`, the one argument of `js-server.args` that is the
   test's own).
@@ -845,6 +848,11 @@ farm's flags is made to them in the same way.
 | The server unreachable for 60 s | the job keeps running, the agent is back in a session within 30 s of the server's return, and the job ends with exit code 0 |
 | The server restarted while a job runs | at least one listing of the hosts is read after the restart and none shows the host lost, the job never shows its host silent or itself lost, and it ends with exit code 0 in its first attempt |
 | The agent updated while a job runs | from the previous release in `testing` to this one (the package installed with dpkg, the handover file written, the unit restarted): the host lists the new version within 60 s, the job is still running then (handed over, not drained), and it ends with exit code 0 in its first attempt |
+| J5, 20 starts at a placement limit of 2, the provider's store stalled for the first 30 s (refused at `Mount`, as tierstore answers) | in no 30 s do more than 20 Prepare calls, nor more than 20 Mount calls, reach the provider; as many Releases as jobs reach it; every job ends, none as its own fault (all but a success and a start failed `INPUT_UNAVAILABLE`) |
+| J5, the same burst with the limit met at `Prepare` (as tierstore answered when the agent's retry storm was seen) | the same |
+| J5, the provider restarted while 6 starts wait | at least 6 Prepare calls reach it after the restart, and every job succeeds |
+| J5, the provider answering every call unavailable for 60 s while 6 starts wait | every job succeeds |
+| J5, a ref the provider refuses | the start fails `provider-refused` (the job's own fault), after one Prepare |
 
 A manual run of `js-blackbox.yml` (`gh workflow run js-blackbox.yml --ref <branch> -f
 version=X.Y.Z`) runs a branch's test against a release that is in `testing`. Nothing waits for

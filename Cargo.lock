@@ -1250,7 +1250,6 @@ dependencies = [
  "flate2",
  "hex",
  "js-client",
- "js-proto",
  "js-system-clock",
  "js-testkit",
  "js-types",
@@ -1260,7 +1259,6 @@ dependencies = [
  "sha2",
  "tar",
  "tokio",
- "tonic",
 ]
 
 [[package]]
@@ -1451,6 +1449,17 @@ version = "0.1.0"
 dependencies = [
  "js-elastic",
  "js-types",
+]
+
+[[package]]
+name = "js-fake-mount-provider"
+version = "0.1.0"
+dependencies = [
+ "hyper-util",
+ "js-proto",
+ "js-testkit",
+ "tokio",
+ "tonic",
 ]
 
 [[package]]

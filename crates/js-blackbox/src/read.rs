@@ -43,6 +43,10 @@ pub struct JobSeen {
     /// Whether the service says its host has been silent past its grace
     /// (`hostSilentSinceMs` given).
     pub host_silent: bool,
+    /// Why its start failed (`START_FAILURE_CODE_...`), empty when it did not.
+    pub start_failure: String,
+    /// The agent's own code for the failed start (`provider-refused`, say), empty when none.
+    pub start_failure_detail: String,
 }
 
 impl JobSeen {
@@ -79,6 +83,8 @@ pub fn job(answer: &Value) -> Result<JobSeen, String> {
         host_id: text_or(job, "hostId", ""),
         attempt: job.get("attempt").and_then(Value::as_u64).unwrap_or(0),
         host_silent: job.get("hostSilentSinceMs").is_some(),
+        start_failure: text_or(job, "startFailure", ""),
+        start_failure_detail: text_or(job, "startFailureDetail", ""),
     })
 }
 

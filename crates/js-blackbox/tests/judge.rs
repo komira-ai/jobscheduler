@@ -7,9 +7,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use js_blackbox::{
-    AGENT_FLAGS, BACK_WITHIN, FARM_POOL, Held, HostSeen, JobSeen, MAC_POOL, OUTAGE, PROBE_EVERY,
-    READY_WITHIN, ResultSeen, SERVER_ARGS, SESSION_WITHIN, Seen, Version, Waited, Watch, arguments,
-    host, job, loaded_image, previous_version, render, result,
+    AGENT_FLAGS, BACK_WITHIN, BURST, Busiest, CALL_WINDOW, FARM_POOL, Held, HostSeen, JobSeen,
+    MAC_POOL, MAX_PLACEMENTS, MOST_CALLS_IN_WINDOW, OUTAGE, PROBE_EVERY, PROVIDER_OUTAGE,
+    READY_WITHIN, ResultSeen, SERVER_ARGS, SESSION_WITHIN, STALL, Seen, Version, WAITING, Waited,
+    Watch, arguments, busiest, host, job, loaded_image, own_fault, per_second, previous_version,
+    provider_calls, render, result,
 };
 use js_types::Monotonic;
 use serde_json::json;
@@ -47,6 +49,18 @@ fn the_pass_conditions_are_60_60_30_and_60_seconds() {
     assert_eq!(BACK_WITHIN, Duration::from_secs(30));
     assert_eq!(OUTAGE, Duration::from_secs(60));
     assert_eq!(PROBE_EVERY, Duration::from_secs(1));
+    assert_eq!(
+        (BURST, MAX_PLACEMENTS, MOST_CALLS_IN_WINDOW, WAITING),
+        (20, 2, 20, 6)
+    );
+    assert_eq!(
+        (STALL, CALL_WINDOW, PROVIDER_OUTAGE),
+        (
+            Duration::from_secs(30),
+            Duration::from_secs(30),
+            Duration::from_secs(60)
+        )
+    );
 }
 
 /// A wait with a 1 s pace whose probe `n` (from 1) first moves the clock by `late(n)`, then
@@ -258,9 +272,24 @@ fn a_job_and_its_result_are_read_from_the_gateways_answers() {
             host_id: "blackbox-node".to_owned(),
             attempt: 1,
             host_silent: false,
+            start_failure: String::new(),
+            start_failure_detail: String::new(),
         }
     );
     assert!(!seen.ended());
+    let refused = json!({"job": {
+        "state": "JOB_STATE_FAILED_TO_START",
+        "startFailure": "START_FAILURE_CODE_AGENT_REFUSED",
+        "startFailureDetail": "provider-refused"
+    }});
+    let seen = job(&refused).expect("a job");
+    assert_eq!(
+        (
+            seen.start_failure.as_str(),
+            seen.start_failure_detail.as_str()
+        ),
+        ("START_FAILURE_CODE_AGENT_REFUSED", "provider-refused")
+    );
     let silent =
         json!({"job": {"state": "JOB_STATE_RUNNING", "hostSilentSinceMs": "1800000000000"}});
     let seen = job(&silent).expect("a job");
@@ -469,4 +498,93 @@ fn the_farm_shapes_render_with_the_values_the_black_box_test_gives() {
         assert!(text.contains("name = \"blackbox\""));
         assert!(text.contains("heartbeat_interval = \"1s\""));
     }
+}
+
+/// Asserts the fake provider's list of calls is read line by line, and each line that is not a
+/// call is refused by its full text.
+#[test]
+fn the_provider_calls_are_read_from_the_fakes_list() {
+    let calls = provider_calls("0 Prepare ok\n1500 Mount unavailable\n").expect("two calls");
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[1].at, Duration::from_millis(1500));
+    assert_eq!(
+        (calls[1].method.as_str(), calls[1].answer.as_str()),
+        ("Mount", "unavailable")
+    );
+    assert_eq!(provider_calls(""), Ok(Vec::new()));
+    for line in ["soon Prepare ok", "0 Prepare", "0 Prepare ok now"] {
+        assert_eq!(
+            provider_calls(line),
+            Err(format!("not a call of the fake provider: {line:?}"))
+        );
+    }
+}
+
+/// Asserts the busiest window: the calls of the one method, a call exactly one window after
+/// another in a window of its own, and the first window of the most kept when a later one ties.
+#[test]
+fn the_busiest_window_counts_one_method() {
+    let listed = "0 Prepare ok\n10000 Mount ok\n29999 Prepare ok\n30000 Prepare ok\n\
+                  31000 Prepare ok\n59000 Prepare ok\n";
+    let calls = provider_calls(listed).expect("calls");
+    assert_eq!(
+        busiest(&calls, "Prepare", CALL_WINDOW),
+        Busiest {
+            count: 4,
+            from: Duration::from_millis(29_999)
+        }
+    );
+    assert_eq!(
+        busiest(&calls, "Mount", CALL_WINDOW),
+        Busiest {
+            count: 1,
+            from: Duration::from_millis(10_000)
+        }
+    );
+    assert_eq!(
+        busiest(&calls, "Release", CALL_WINDOW),
+        Busiest {
+            count: 0,
+            from: Duration::ZERO
+        }
+    );
+    assert_eq!(per_second(&calls, "Prepare"), "0:1 29:1 30:1 31:1 59:1");
+    // A Mount held 25 s is listed after one that came later and was answered at once.
+    let held =
+        provider_calls("5000 Mount ok\n0 Mount unavailable\n31000 Mount ok\n").expect("calls");
+    assert_eq!(
+        busiest(&held, "Mount", CALL_WINDOW),
+        Busiest {
+            count: 2,
+            from: Duration::ZERO
+        }
+    );
+    assert_eq!(per_second(&held, "Mount"), "0:1 5:1 31:1");
+    let same = provider_calls("100 Mount ok\n900 Mount ok\n1000 Mount ok\n").expect("calls");
+    assert_eq!(per_second(&same, "Mount"), "0:2 1:1");
+    assert_eq!(per_second(&same, "Prepare"), "");
+}
+
+/// Asserts which ends are a job's own fault: all but a success and a start that failed for the
+/// host's unavailable input.
+#[test]
+fn a_job_ends_as_its_own_fault_unless_it_succeeded_or_its_input_was_unavailable() {
+    let ended = |state: &str, failure: &str| JobSeen {
+        state: state.to_owned(),
+        host_id: String::new(),
+        attempt: 1,
+        host_silent: false,
+        start_failure: failure.to_owned(),
+        start_failure_detail: String::new(),
+    };
+    assert!(!own_fault(&ended("JOB_STATE_SUCCEEDED", "")));
+    assert!(!own_fault(&ended(
+        "JOB_STATE_FAILED_TO_START",
+        "START_FAILURE_CODE_INPUT_UNAVAILABLE"
+    )));
+    assert!(own_fault(&ended(
+        "JOB_STATE_FAILED_TO_START",
+        "START_FAILURE_CODE_AGENT_REFUSED"
+    )));
+    assert!(own_fault(&ended("JOB_STATE_FAILED", "")));
 }
