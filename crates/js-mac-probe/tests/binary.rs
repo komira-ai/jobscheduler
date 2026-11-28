@@ -103,10 +103,13 @@ fn write_bytes_into_a_missing_directory_is_refused() {
     assert!(stderr(&out).starts_with("errno=2 "), "{out:?}");
 }
 
-/// Linux enforces `RLIMIT_AS` (macOS does not, which `limits/as-not-enforced` checks): an
+/// Linux enforces `RLIMIT_AS` (macOS gives no cap, which `limits/as-not-enforced` checks): an
 /// allocation larger than the limit is refused and the mode exits 1 naming the size. A
 /// smaller one under the same limit succeeds. Catches a mode that sets no limit (the large
-/// allocation then succeeds) and one that reports an allocation it did not make.
+/// allocation then succeeds) and one that reports an allocation it did not make. Built on
+/// Linux only: macOS refuses the limit itself (`EINVAL`), so the mode ends before it
+/// allocates, and what macOS does is the probe's to report.
+#[cfg(target_os = "linux")]
 #[test]
 fn allocate_is_held_to_its_address_space_limit_on_linux() {
     let gib = "1073741824";
