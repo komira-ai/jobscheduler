@@ -23,7 +23,7 @@ use js_types::{ManualClock, Timestamp};
 use super::{JobHosts, JobStarts, OpenHost, PassMetrics};
 use crate::engine::Settings;
 use crate::engine::rig::{
-    Tables, at, engine_with, every, host, hosts, mark, run, settings, spec_of, store,
+    Tables, at, engine_with, every, host, hosts, mark, run, settings, spec_of, store, waiting,
 };
 use crate::place::SchedPlacer;
 
@@ -258,33 +258,34 @@ fn the_marks_of_the_engine_are_written_to_the_table_once() {
     }
 }
 
-/// Catches: a stored mark dropped at a pass before `claim_by` (the server's start plus the
-/// pool's `regain_grace`), kept past it when its host never says hello, or replaced when
-/// its host said hello in time. A mark stored on `a` before the server started is kept at
-/// 10 s with no hello (and no job queued for it); at 15 s it is replaced by a fresh mark; and
-/// on another server, with `a` said hello, it is kept as stored and the job is queued.
+/// Catches: a mark given no stored wait for its host's hello (a restart would begin it again),
+/// one dropped before that wait ends, kept past it when its host never says hello, or replaced
+/// when its host said hello in time. A mark stored on `a` is given its wait at 10 s, until 25 s
+/// (the store's time plus `regain_grace`), and stands with no job queued, as stored at 24.999 s;
+/// at 25 s it is replaced by a fresh mark; on another placer, with `a` said hello, it is kept.
 #[test]
-fn a_stored_mark_waits_for_its_hello_until_the_server_start_plus_the_grace() {
+fn a_stored_mark_waits_for_its_hello_until_the_time_it_stores() {
     let rig = Rig::busy();
     let j = rig.tables.whole("j");
     let held = mark(&j, "a", (5_000, 65_000), None);
     let stored = rig.tables.jobs.put_mark(held).unwrap();
-    let whole = settings();
-    let recorder = Recorder::default();
+    let (whole, recorder) = (settings(), Recorder::default());
     rig.at(10_000);
     rig.pass(Some(&whole), &[], &recorder).unwrap();
-    let now = rig.tables.jobs.get_mark(&j.id).unwrap();
-    assert_eq!(now, Some(stored));
+    let wait = rig.tables.jobs.get_mark(&j.id).unwrap();
+    assert_eq!(wait, Some(waiting(stored, 25_000)));
     assert!(rig.placer.engine().whole_jobs.is_empty());
-    rig.at(15_000);
+    rig.at(24_999);
+    rig.pass(Some(&whole), &[], &recorder).unwrap();
+    assert_eq!(rig.tables.jobs.get_mark(&j.id).unwrap(), wait);
+    rig.at(25_000);
     rig.pass(Some(&whole), &[], &recorder).unwrap();
     let remade = rig.tables.jobs.get_mark(&j.id).unwrap().unwrap();
-    assert_eq!(remade.made, store(15_000));
+    assert_eq!((remade.made, remade.hello_by), (store(25_000), None));
     let heard = Rig::busy();
     let k = heard.tables.whole("k");
     let held = mark(&k, "a", (5_000, 65_000), None);
     let kept = heard.tables.jobs.put_mark(held).unwrap();
-    // Before `claim_by`, with `a` said hello: the stored mark is taken back as it is stored.
     heard.at(12_000);
     heard.pass(Some(&whole), &["a"], &recorder).unwrap();
     assert_eq!(heard.tables.jobs.get_mark(&k.id).unwrap(), Some(kept));
@@ -293,16 +294,15 @@ fn a_stored_mark_waits_for_its_hello_until_the_server_start_plus_the_grace() {
 
 /// Catches: a failed delete of a mark that takes the pass with it, goes uncounted, or stops
 /// the writes after it. `j`'s stored mark on `a`, whose host never says hello, is dropped at
-/// `claim_by`; the delete fails: the pass ends well, counts one failed write, and goes on to
-/// write the job's fresh mark, which the table holds in place of the stored one.
+/// the end of its stored wait; the delete fails: the pass ends well, counts one failed write,
+/// and goes on to write the job's fresh mark, which the table holds in place of the stored one.
 #[test]
 fn a_mark_that_could_not_be_deleted_is_counted_and_the_pass_goes_on() {
     let rig = Rig::busy();
     let j = rig.tables.whole("j");
-    let held = mark(&j, "a", (5_000, 65_000), None);
+    let held = waiting(mark(&j, "a", (5_000, 65_000), None), 15_000);
     rig.tables.jobs.put_mark(held).unwrap();
-    let whole = settings();
-    let recorder = Recorder::default();
+    let (whole, recorder) = (settings(), Recorder::default());
     rig.at(15_000);
     rig.tables.store.fail_next();
     rig.pass(Some(&whole), &[], &recorder).unwrap();

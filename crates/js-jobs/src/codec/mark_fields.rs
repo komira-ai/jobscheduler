@@ -35,6 +35,8 @@ pub(crate) mod mark_tag {
     /// The hosts the job may not mark (map of text to a kind byte and, but for a kind of 2,
     /// a time).
     pub const EXCLUSIONS: u16 = 6;
+    /// Until when the mark waits for its host's hello (time).
+    pub const HELLO_BY: u16 = 7;
 }
 
 use mark_tag as t;
@@ -111,6 +113,7 @@ pub(crate) fn encode_mark(mark: &MarkRecord) -> Result<Vec<u8>, JobStoreError> {
     row.put(t::DEADLINE, time(mark.deadline));
     row.put_opt(t::TAIL_END, mark.tail_end.map(time));
     row.put(t::EXCLUSIONS, exclusions_value(&mark.exclusions));
+    row.put_opt(t::HELLO_BY, mark.hello_by.map(time));
     row.finish(&mark.carried)
 }
 
@@ -129,6 +132,7 @@ pub(crate) fn decode_mark(row: &[u8]) -> Result<MarkRecord, DecodeError> {
     let exclusions = fields
         .opt(t::EXCLUSIONS, exclusions_of)?
         .unwrap_or_default();
+    let hello_by = fields.opt(t::HELLO_BY, time_of)?;
     Ok(MarkRecord {
         job,
         host,
@@ -136,6 +140,7 @@ pub(crate) fn decode_mark(row: &[u8]) -> Result<MarkRecord, DecodeError> {
         deadline,
         tail_end,
         exclusions,
+        hello_by,
         carried: fields.carried(),
     })
 }

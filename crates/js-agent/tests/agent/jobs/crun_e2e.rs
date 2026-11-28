@@ -188,6 +188,7 @@ pub(super) fn seams() -> Seams {
             now_ms: || 5_000,
             mono_us: || 7_000_000,
             kill_wait: LONG,
+            force_wait: LONG,
             pull_limit: LONG,
             call_limit: LONG,
             proc_read: |_| None,

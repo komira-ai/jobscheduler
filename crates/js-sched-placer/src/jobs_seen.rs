@@ -41,8 +41,8 @@
 //! found them, that pass failed no read and no write, and nothing waits from pass 2. A skipped
 //! pass would have placed nothing and written nothing, except what the clock alone changes,
 //! and what a host's load alone changes: a whole-host job's mark that turns at its drain time
-//! or at the end of a bar, a stored mark whose host's hello is waited for past the server's
-//! start plus the regain grace, the wall limit a backfill placement gets, a retried job whose
+//! or at the end of a bar, a stored mark whose host's hello is waited for past the wait its
+//! row stores, the wall limit a backfill placement gets, a retried job whose
 //! backoff ends (`jobs_retry`), a cordon that lapses, and the room a host's lower load
 //! reading leaves. Those are left to the next pass that runs, at the latest the tick's, which
 //! always runs ([`SchedPlacer::place_jobs_with`]). A skipped pass reads the store's feed when a

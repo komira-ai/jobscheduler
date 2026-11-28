@@ -81,7 +81,7 @@
 //! the jobs whose live allocations are gone since the last pass, and
 //! [`JobSizes::observe`] feeds each one that ended with a result, with what its allocation
 //! booked. After a server's start, [`JobSizes::observe`] is fed every ended job the job store
-//! still holds, in the order they ended, and then the runs the passes freed meanwhile, which
+//! still holds, oldest free first and each page in the order its jobs ended, and then the runs the passes freed meanwhile, which
 //! were held for it ([`Teaching`]): the job records are the history, and nothing else is
 //! stored. Until then a job is sized from an interim history ([`Teaching`]): the runs of the
 //! newest freed allocations the start read, and the runs the passes freed since (the cold size

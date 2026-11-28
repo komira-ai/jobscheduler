@@ -17,7 +17,8 @@
 //! [`Runtime::remove`]: the thread holds the lease.
 //!
 //! A removal has no deadline of its own: its waits are bounded where they are made (the end
-//! of the supervisor, by the kill wait). A call that hangs in the kernel (a disk, or a file
+//! of the run after its cgroup was killed, by the kill wait, then the end of a supervisor
+//! ended by force, by the force wait). A call that hangs in the kernel (a disk, or a file
 //! system that never answers an unmount) holds its thread and its job, which stays in its
 //! cleanup with its slot booked, where it held the whole worker before. A thread that ends
 //! without an answer (it panicked) loses the run it was given: the next removal finds the
@@ -37,7 +38,7 @@ use tokio::runtime::Runtime as TokioRuntime;
 use super::fs::Releaser;
 use super::ledger::Ledger;
 use super::pull::Images;
-use super::{CrunRuntime, FORCE_FLOOR, Run, State, dirs, rootfs};
+use super::{CrunRuntime, Run, State, dirs, rootfs};
 use crate::lifecycle::{Removal, RunHandle, RuntimeError, Wake};
 use crate::pool::{Pending, Poll, Pool, THREADS};
 
@@ -75,12 +76,14 @@ impl Removals {
 }
 
 /// What the removal of a lease needs, shared with the threads of the removal pool: shares of
-/// what is safe to use from many threads at once and a copy of the kill wait.
+/// what is safe to use from many threads at once and copies of the kill wait and the force
+/// wait.
 struct Remover {
     oci: Arc<Oci>,
     images: Arc<Images>,
     rt: Arc<TokioRuntime>,
     kill_wait: Duration,
+    force_wait: Duration,
     ledger: Ledger,
     /// What unmounts the lease's file system; none for a runtime that gives none.
     mounts: Option<Releaser>,
@@ -94,6 +97,7 @@ impl CrunRuntime {
             images: Arc::clone(&self.images),
             rt: Arc::clone(&self.rt),
             kill_wait: self.hooks.kill_wait,
+            force_wait: self.hooks.force_wait,
             ledger: self.ledger.clone(),
             mounts: self.fs.as_ref().map(super::fs::Fs::releaser),
         }
@@ -166,7 +170,7 @@ impl Remover {
 
     /// The steps of a removal, in order; the first that fails ends it.
     fn take_apart(&self, name: &str, run: &mut Run) -> Result<(), RuntimeError> {
-        let (rt, kill_wait) = (&self.rt, self.kill_wait);
+        let (rt, kill_wait, force_wait) = (&self.rt, self.kill_wait, self.force_wait);
         let failed =
             |what: &str, why: &dyn std::fmt::Display| RuntimeError::new(format!("{what}: {why}"));
         if let State::Running { run: running, .. } = &mut run.state
@@ -177,9 +181,8 @@ impl Remover {
             let ended =
                 rt.block_on(async { tokio::time::timeout(kill_wait, running.wait()).await });
             if ended.is_err() {
-                let forced = rt.block_on(async {
-                    tokio::time::timeout(kill_wait.max(FORCE_FLOOR), running.force()).await
-                });
+                let forced =
+                    rt.block_on(async { tokio::time::timeout(force_wait, running.force()).await });
                 forced.map_err(|_| {
                     failed(
                         "end the supervisor",

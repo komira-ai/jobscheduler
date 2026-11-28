@@ -1,9 +1,8 @@
-//! `Switch` when a connection ends by itself. The in-file tests cut connections; none lets
-//! one finish, so the end of the forwarding task was never reached. Added with the move to
-//! this repository.
+//! `Switch` when a connection ends by itself, as a client outside the crate sees it. The
+//! end of that connection's forwarding task is covered by the in-file test
+//! `a_connection_that_finishes_ends_its_forwarding_task`, which can wait for the task.
 
 use std::net::SocketAddr;
-use std::time::Duration;
 
 use js_testkit::switch::Switch;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -39,7 +38,4 @@ async fn a_connection_that_finishes_ends_cleanly_through_the_switch() {
         .await
         .expect("read to the end");
     assert_eq!(answer, b"pong");
-    drop(client);
-    // The forwarding task ends once both sides have closed; let it run before the test does.
-    tokio::time::sleep(Duration::from_millis(200)).await;
 }

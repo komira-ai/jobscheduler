@@ -40,7 +40,7 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <path d="M290,180 L290,194" class="ln" marker-end="url(#restart-recovery-ak)"/>
 <rect x="30" y="194" width="520" height="58" rx="5" class="box-o"/>
 <text x="290" y="218" class="b" text-anchor="middle">3  restore the mark ledger</text>
-<text x="290" y="236" class="t-m" text-anchor="middle">deadlines >= boot + 120 s, claim_by = boot + path_grace</text>
+<text x="290" y="236" class="t-m" text-anchor="middle">deadlines >= boot + 120 s, hello wait stored once (store time + path_grace)</text>
 <path d="M290,252 L290,266" class="ln" marker-end="url(#restart-recovery-ak)"/>
 <rect x="30" y="266" width="520" height="58" rx="5" class="box-o"/>
 <text x="290" y="290" class="b" text-anchor="middle">4  seat hosts that hold allocations as awaiting</text>

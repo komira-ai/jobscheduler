@@ -1,8 +1,9 @@
 //! The removals of leases off the worker (`Runtime::removing` of `CrunRuntime`), against the
 //! stand-in `crun`: a removal that waits (in `crun delete`, which a test holds with a named
 //! pipe) holds only its own lease, a removal that fails keeps the run for the next, and one
-//! whose thread dies leaves the lease to its sidecar. Nothing waits for a clock: a held
-//! delete is released by a write to its pipe, and an answer is awaited by the runtime's ring.
+//! whose thread dies leaves the lease to its sidecar, and a removal waits for a supervisor it
+//! ended by force until it is gone. Nothing waits for a clock: a held delete is released by a
+//! write to its pipe, and an answer is awaited by the runtime's ring.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -16,6 +17,7 @@ use js_agent::lifecycle::{Removal, RunHandle, RunSpec, Runtime, RuntimeError, St
 use js_agent_wire::NetworkCeiling;
 use js_types::{JobNetwork, PortMap};
 
+use crate::adopt::{held, name_an_unreachable_supervisor};
 use crate::node::{LONG, NoImages, Node};
 
 /// A runtime on `node` whose waits after a kill are spent at once, with `egress` when
@@ -213,4 +215,63 @@ fn a_removal_whose_thread_panics_leaves_the_lease_to_its_sidecar() {
     assert!(!node.lease_of(&id.0).exists());
     assert!(!node.cgroup_of(&id.0).exists());
     assert!(runtime.list_labelled().expect("lists").is_empty());
+}
+
+/// Proves a removal waits for a supervisor it ended by force for as long as the supervisor is
+/// there, and takes the lease apart once it is gone: the sidecar of an adopted run names a
+/// process the group kill does not reach ([`name_an_unreachable_supervisor`]), so it is still
+/// there after the kill, as a supervisor a loaded host has not ended yet is; the lease's
+/// `cgroup.kill` is a pipe the test reads, so the test knows the removal has killed the cgroup
+/// and gone on to the supervisor; the removal still answers pending then, and once the test
+/// ends the process the removal answers done and nothing of the lease is left. Catches a
+/// removal that gives up on a supervisor after a wait of its own choosing rather than the
+/// force wait it was given.
+#[test]
+fn a_removal_waits_for_a_supervisor_ended_by_force_until_it_is_gone() {
+    let node = Node::new("removes-force");
+    let mut first = node.open();
+    let id = held(&node, &mut first, "r1-hold");
+    let child = name_an_unreachable_supervisor(&node, &id.0);
+    drop(first);
+    let kill = node.cgroup_of(&id.0).join("cgroup.kill");
+    let made = Command::new("mkfifo").arg(&kill).status().expect("mkfifo");
+    assert!(made.success());
+
+    let (mut runtime, rung) = ringing(&node, None);
+    // Declared after the runtime, so a failed assertion ends the process before the runtime
+    // is dropped, and the removal waiting on it goes on.
+    let process = Ends(child);
+    assert_eq!(
+        runtime.swept().adopted,
+        ["r1-hold"],
+        "{:?}",
+        runtime.swept()
+    );
+    assert_eq!(runtime.removing(&id), Removal::Pending);
+    let written = std::fs::read_to_string(&kill).expect("the cgroup's kill");
+    assert_eq!(written, "1");
+    assert_eq!(
+        runtime.removing(&id),
+        Removal::Pending,
+        "the supervisor is there"
+    );
+    assert!(node.sidecar(&id.0).exists());
+
+    drop(process);
+    assert_eq!(removed(&mut runtime, &rung, &id), Removal::Done(Ok(())));
+    assert!(!node.sidecar(&id.0).exists());
+    assert!(!node.lease_of(&id.0).exists());
+    assert!(!node.cgroup_of(&id.0).exists());
+    assert!(runtime.list_labelled().expect("lists").is_empty());
+}
+
+/// A process the test started, ended (killed and reaped) when dropped.
+struct Ends(std::process::Child);
+
+impl Drop for Ends {
+    fn drop(&mut self) {
+        // It may have ended already: there is then nothing to kill.
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }

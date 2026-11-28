@@ -12,7 +12,7 @@ use js_jobs::{
 };
 use js_registry::WholeNodeConfig;
 use js_state::fake::Fake;
-use js_state::{ManualClock, Store, StoreError, StoreTime};
+use js_state::{Cond, ManualClock, Store, StoreError, StoreTime, Txn};
 use js_types::HostId;
 
 use super::{Beat, expire_prepares, serve};
@@ -196,6 +196,44 @@ fn a_ready_report_starts_a_placed_job_from_an_untainted_host() {
     assert_eq!(fixture.allocation(&id).step, AllocationStep::Booked);
     assert_eq!(fixture.serve(&beat, &no_taint()), Ok(false));
     assert_eq!(fixture.commits(), before + 1);
+}
+
+// Catches a ready report that starts the job on a host the rows hold tainted while this
+// server's registry holds no taint for it (a taint stored through another server): with the
+// host's binding holding a taint, then with a `taint/<host>` row, the ready report from a beat
+// the registry calls untainted writes nothing and the job stays placed; once neither row holds
+// a taint the same report starts it.
+#[test]
+fn a_ready_report_from_a_host_a_row_holds_tainted_starts_nothing() {
+    let fixture = Fixture::new();
+    let id = fixture.place("job-w");
+    let host = host();
+    let ready = lease(&fixture, &id);
+    let beat = Beat {
+        ready: Some(&ready),
+        ..quiet(&host)
+    };
+    let put = |key: &str, value: &[u8]| {
+        let txn = Txn::new().put(key, value.to_vec(), Cond::Any);
+        fixture.store.txn(txn).unwrap().unwrap();
+    };
+    let binding = js_jobs::keys::binding(&host);
+    let taint_row = js_jobs::keys::taint(&host);
+    for (key, value) in [
+        (&binding, &br#"{"version":1,"taint_reason":"residue"}"#[..]),
+        (&taint_row, &b"a host job"[..]),
+    ] {
+        put(key.as_str(), value);
+        let before = fixture.commits();
+        assert_eq!(fixture.serve(&beat, &no_taint()), Ok(false), "{key}");
+        assert_eq!(fixture.commits(), before, "{key}");
+        assert_eq!(fixture.job(&id).state, JobState::Placed, "{key}");
+        put(binding.as_str(), br#"{"version":1,"taint_reason":null}"#);
+    }
+    let dropped = Txn::new().delete(taint_row, Cond::Any);
+    fixture.store.txn(dropped).unwrap().unwrap();
+    assert_eq!(fixture.serve(&beat, &no_taint()), Ok(false));
+    assert_eq!(fixture.job(&id).state, JobState::Starting);
 }
 
 // Catches a beat that writes when the agent reports nothing, and one that touches a job that

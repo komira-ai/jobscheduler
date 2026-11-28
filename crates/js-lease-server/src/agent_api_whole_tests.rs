@@ -13,10 +13,10 @@ use js_jobs::{
     StartFailure,
 };
 use js_registry::WholeNodeConfig;
-use js_state::StoreTime;
+use js_state::{Cond, Store, StoreTime, Txn};
 use js_types::{Clock, JobEventKind};
 
-use super::job_rig::{FakeAgent, Rig, spec, starts, stops, whole_rig};
+use super::job_rig::{FakeAgent, Rig, START_MS, spec, starts, stops, whole_over, whole_rig};
 use crate::job_pass::store_time;
 
 pub(super) const SECOND: Duration = Duration::from_secs(1);
@@ -442,6 +442,43 @@ async fn a_host_unsafe_refusal_taints_the_host() {
     pass_time(&rig, &mut agent, 600).await;
     place_all(&rig);
     assert_eq!(rig.job(&job).state, JobState::Queued);
+}
+
+/// Two servers over one store. `host-a` said hello to the second, which placed the whole-host
+/// job `job-w` on it, and the agent prepares. A taint for the host is then stored in its
+/// binding row as a server that keeps its bindings in the store writes it (this rig's servers
+/// keep theirs in their state files, so the row is written past them), and the next beat
+/// reaches the second server and reports the host ready. The second server's registry holds no
+/// taint for the host (it read the binding at the hello, before the taint), but the start reads
+/// the host's rows: the job stays placed, no start is sent, and the reply still names the
+/// allocation. It catches a whole-host start judged on one server's registry.
+#[tokio::test]
+async fn a_ready_report_on_a_host_another_server_tainted_starts_nothing() {
+    let first = whole_rig("whole_taint_first", rules(), None);
+    let second = (rules(), None);
+    let mut second = whole_over("whole_taint_second", second, Some(&first), START_MS);
+    second.register("host-a", true);
+    let mut agent = FakeAgent::new("host-a");
+    let job = prepare(&second, &mut agent, "job-w").await;
+
+    let tainted = br#"{"version":1,"taint_reason":"residue","taint_run_id":"r1"}"#.to_vec();
+    let put = Txn::new().put("hosts/binding/host-a", tainted, Cond::Any);
+    first.store.txn(put).unwrap().unwrap();
+    let host = js_types::HostId::new("host-a").unwrap();
+    let view = second.agents.registry.own_host(&host).unwrap();
+    assert_eq!(
+        view.host.taint, None,
+        "the second server's registry holds no taint"
+    );
+
+    agent.report_ready();
+    let reply = beat(&second, &mut agent).await;
+    assert_eq!(
+        second.states(&job),
+        (JobState::Placed, AllocationStep::Booked)
+    );
+    assert!(starts(&reply).is_empty());
+    assert_eq!(reply.exclusive, Some(lease(&second, &job)));
 }
 
 /// The host `name` as the registry holds it is tainted, and the taint's reason.

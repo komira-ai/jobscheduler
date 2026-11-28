@@ -9,6 +9,8 @@
 //! A test may have the providers keep the sources they took, as a real one does in memory
 //! ([`FakeProviders::keep_sources`]), and then restart them ([`FakeProviders::restart`]):
 //! a `Mount` of a source taken by no `Prepare` since is then answered as tierstore answers it.
+//! A `Release` that succeeds gives its source up, so [`FakeProviders::alive`] counts the
+//! sources the agent has not released, as tierstore counts the placements alive.
 //!
 //! The fake does not tell the attempts of a run apart: a call is scripted, and logged, by its
 //! kind, run and index, as a provider that does not read attempts sees it. The attempt of
@@ -51,7 +53,8 @@ struct State {
     /// Where the agent's provider records are: a `Prepare` notes whether its run's is there.
     records: Option<PathBuf>,
     /// The sources the providers hold, by provider, run and index, when the test has them kept
-    /// ([`FakeProviders::keep_sources`]): a `Prepare` that succeeds adds its source.
+    /// ([`FakeProviders::keep_sources`]): a `Prepare` that succeeds adds its source, a `Release`
+    /// that succeeds removes it.
     held: Option<BTreeSet<(String, String, u32)>>,
     /// Each call sent, as its log line, with its attempt (a sweep: each kept run's).
     attempts: Vec<(String, Vec<u64>)>,
@@ -151,6 +154,12 @@ impl FakeProviders {
     /// [`not_prepared`], whatever is scripted for it, which stays for a later ask.
     pub fn keep_sources(&self) {
         self.state.borrow_mut().held = Some(BTreeSet::new());
+    }
+
+    /// How many sources the providers hold (with [`FakeProviders::keep_sources`]): taken by a
+    /// `Prepare` and not given up by a `Release` since.
+    pub fn alive(&self) -> usize {
+        self.state.borrow().held.as_ref().map_or(0, BTreeSet::len)
     }
 
     /// The providers restart, as a release of the provider restarts it: every source they
@@ -281,10 +290,17 @@ impl Providers for FakeProviders {
                 .unwrap_or_else(|| default_answer(call)),
         };
         script.out = answer == ProviderAnswer::Pending;
-        let prepared = matches!(call, ProviderCall::Prepare { .. })
-            && matches!(answer, ProviderAnswer::Done(_));
-        if let Some(held) = state.held.as_mut().filter(|_| prepared) {
-            held.insert(source);
+        let done = matches!(answer, ProviderAnswer::Done(_));
+        if let Some(held) = state.held.as_mut().filter(|_| done) {
+            match call {
+                ProviderCall::Prepare { .. } => {
+                    held.insert(source);
+                }
+                ProviderCall::Release { .. } => {
+                    held.remove(&source);
+                }
+                ProviderCall::Mount { .. } | ProviderCall::Sweep { .. } => {}
+            }
         }
         answer
     }

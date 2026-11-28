@@ -244,6 +244,7 @@ where
     marks_are_raised_at_boot(backend);
     end_and_unmark_deletes_both_or_neither(backend);
     delete_mark_removes_the_mark_it_read(backend);
+    a_marks_hello_wait_is_written_once(backend);
     a_mark_that_loses_to_an_end_or_another_mark_is_stale(backend);
     a_host_isolation_placement_taints_its_host_in_the_same_commit(backend);
     a_contained_placement_writes_no_taint(backend);
@@ -279,6 +280,7 @@ where
     a_failed_prepare_drops_its_mark_or_writes_nothing(backend);
     a_restarted_prepare_moves_only_the_deadline(backend);
     a_restarted_prepare_loses_to_a_change_of_either_row(backend);
+    a_whole_host_start_refuses_a_host_a_row_holds_tainted(backend);
     a_claimed_placement_refuses_a_tainted_host(backend);
     a_plain_placement_of_a_contained_job_on_a_tainted_host_is_stale(backend);
     a_hostmark_refuses_every_placement(backend);
@@ -473,6 +475,7 @@ macro_rules! job_store_tests {
             marks_are_raised_at_boot,
             end_and_unmark_deletes_both_or_neither,
             delete_mark_removes_the_mark_it_read,
+            a_marks_hello_wait_is_written_once,
             a_mark_that_loses_to_an_end_or_another_mark_is_stale,
             a_host_isolation_placement_taints_its_host_in_the_same_commit,
             a_contained_placement_writes_no_taint,
@@ -508,6 +511,7 @@ macro_rules! job_store_tests {
             a_failed_prepare_drops_its_mark_or_writes_nothing,
             a_restarted_prepare_moves_only_the_deadline,
             a_restarted_prepare_loses_to_a_change_of_either_row,
+            a_whole_host_start_refuses_a_host_a_row_holds_tainted,
             a_claimed_placement_refuses_a_tainted_host,
             a_plain_placement_of_a_contained_job_on_a_tainted_host_is_stale,
             a_hostmark_refuses_every_placement,

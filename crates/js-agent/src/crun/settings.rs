@@ -104,6 +104,11 @@ pub struct Hooks {
     pub mono_us: fn() -> u64,
     /// How long a run is waited for after its cgroup was killed ([`KILL_WAIT`]).
     pub kill_wait: Duration,
+    /// How long a removal waits for a supervisor it ended by force (`SIGKILL` to its process
+    /// group, once [`Hooks::kill_wait`] is spent) to be gone ([`KILL_WAIT`]). The kernel bounds
+    /// no time a killed process takes to go: one in an uninterruptible sleep outlasts any
+    /// wait, and the removal then fails and is tried again.
+    pub force_wait: Duration,
     /// How long a pull and unpack of one image may take ([`PULL_LIMIT`]).
     pub pull_limit: Duration,
     /// How long a `crun kill` may take before it is given up ([`CALL_LIMIT`]).
@@ -120,6 +125,7 @@ impl Default for Hooks {
             now_ms: system_now_ms,
             mono_us: system_mono_us,
             kill_wait: KILL_WAIT,
+            force_wait: KILL_WAIT,
             pull_limit: PULL_LIMIT,
             call_limit: CALL_LIMIT,
             proc_read: read_proc,

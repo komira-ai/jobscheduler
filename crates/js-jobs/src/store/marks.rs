@@ -20,6 +20,7 @@
 //! host it holds, so the table is read whole, by a scan of `mark/`.
 
 use js_state::{Cond, Store, StoreTime, Txn, Version};
+use js_types::HostId;
 
 use super::{JobStore, ensure, same_key};
 use crate::codec::{Carried, decode_mark, encode_mark};
@@ -122,6 +123,43 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             }
         }
         Ok(marks)
+    }
+
+    /// Writes `by` as the time until which the mark of the job `id` on `host` waits for its
+    /// host's hello ([`MarkRecord::hello_by`]) when the row carries none: the row is put at the
+    /// version read with that field alone changed (a later build's fields are kept). A mark
+    /// that already waits keeps its time, so neither a second pass nor another server moves
+    /// the wait later; a job with no mark, or marked on another host, is left as it is.
+    /// Returns whether it wrote. The job's row is not read: a mark row stands only while its
+    /// job is queued, and each write that takes the job out of the queue deletes the row at
+    /// the version it read (the module docs), so this write never puts a mark back.
+    ///
+    /// # Errors
+    /// [`JobStoreError::UnknownRow`] when a later build wrote the row,
+    /// [`JobStoreError::Corrupt`] when it does not parse; [`JobStoreError::Stale`] when the row
+    /// changed before the commit; [`JobStoreError::TooLarge`]; [`JobStoreError::Store`].
+    pub fn wait_for_hello(
+        &self,
+        id: &JobId,
+        host: &HostId,
+        by: StoreTime,
+    ) -> Result<bool, JobStoreError> {
+        let Some((mark, version)) = self.read_mark(id)? else {
+            return Ok(false);
+        };
+        if (mark.host != *host) | mark.hello_by.is_some() {
+            return Ok(false);
+        }
+        let waiting = MarkRecord {
+            hello_by: Some(by),
+            ..mark
+        };
+        let row = encode_mark(&waiting)?;
+        self.commit(
+            id,
+            Txn::new().put(keys::mark(id), row, Cond::Version(version)),
+        )?;
+        Ok(true)
     }
 
     /// Deletes the mark of the job `id`, at the version read, whatever the row holds (a later

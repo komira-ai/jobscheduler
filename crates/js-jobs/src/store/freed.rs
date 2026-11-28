@@ -1,8 +1,9 @@
-//! The runs of the freed allocations, newest free first: what a server teaches the history of
-//! its job sizes from. A page walks the freed entries (`idx/alloc/freed/<at>/<id>`) in reverse,
-//! so its first page holds the runs freed last, and reads the allocation rows and then the job
-//! rows its entries point at [`SWEEP_BATCH`] keys to a read ([`Store::get_many`]), never a row
-//! at a time.
+//! The runs of the freed allocations: what a server teaches the history of its job sizes from.
+//! A page walks the freed entries (`idx/alloc/freed/<at>/<id>`) newest free first
+//! ([`JobStore::freed_page`], in reverse, so its first page holds the runs freed last) or oldest
+//! free first ([`JobStore::freed_page_oldest_first`]), and reads the allocation rows and then the
+//! job rows its entries point at [`SWEEP_BATCH`] keys to a read ([`Store::get_many`]), never a
+//! row at a time.
 
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
@@ -16,7 +17,8 @@ use crate::keys;
 use crate::record::{AllocationStep, Booked, JobRecord};
 use crate::result::SWEEP_BATCH;
 
-/// A page of the runs of the freed allocations, newest free first ([`JobStore::freed_page`]).
+/// A page of the runs of the freed allocations, newest or oldest free first
+/// ([`JobStore::freed_page`], [`JobStore::freed_page_oldest_first`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FreedPage {
     /// Each job of the page that ended with a result, with what its freed allocation booked, in
@@ -25,7 +27,8 @@ pub struct FreedPage {
     /// How many freed entries the page walked: a page can hold fewer runs, since an entry's
     /// job row may be gone (a job's row is kept for less time than its freed allocation's).
     pub entries: usize,
-    /// Where the next page begins, toward older frees; `None` after the oldest.
+    /// Where the next page begins, toward older frees (newer ones for
+    /// [`JobStore::freed_page_oldest_first`]); `None` after the last.
     pub resume: Option<ResumeToken>,
 }
 
@@ -45,6 +48,30 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         limit: NonZeroUsize,
     ) -> Result<FreedPage, JobStoreError> {
         let scan = ScanRange::new(keys::FREED, limit.min(MAX_PAGE)).reverse();
+        self.freed_page_of(scan, resume)
+    }
+
+    /// [`JobStore::freed_page`], oldest free first: from the oldest or from `resume`, toward
+    /// newer frees. What a teaching of the whole history reads, so that it can teach each page
+    /// as it is read, in the order the runs were freed.
+    ///
+    /// # Errors
+    /// As [`JobStore::freed_page`].
+    pub fn freed_page_oldest_first(
+        &self,
+        resume: Option<&ResumeToken>,
+        limit: NonZeroUsize,
+    ) -> Result<FreedPage, JobStoreError> {
+        let scan = ScanRange::new(keys::FREED, limit.min(MAX_PAGE));
+        self.freed_page_of(scan, resume)
+    }
+
+    /// The page `scan` walks of the freed entries, from `resume` when given.
+    fn freed_page_of<'a>(
+        &self,
+        scan: ScanRange<'a>,
+        resume: Option<&'a ResumeToken>,
+    ) -> Result<FreedPage, JobStoreError> {
         let scan = match resume {
             Some(token) => scan.resume(token),
             None => scan,

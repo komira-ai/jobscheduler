@@ -312,7 +312,7 @@ fn a_teaching_logs_the_runs_it_held_and_not_the_ended_jobs_it_read() {
         ManualClock::new(Timestamp::from_millis(0)),
     );
     let mut teaching = placer.begin_teaching(&tables.jobs, 0).unwrap();
-    assert!(!teaching.read_page(&tables.jobs).unwrap());
+    assert!(!teaching.read_page(&placer, &tables.jobs).unwrap());
     let held = good(&tables, "h2", "h", &[16; 10]);
     placer.engine().sizes().freed_run(held, bk());
     assert!(lines.checked().is_empty(), "a held run logs when taught");
@@ -350,7 +350,7 @@ fn a_teaching_in_shadow_logs_once_that_the_checks_start_before_the_held_runs() {
     let clock = ManualClock::new(Timestamp::from_millis(1_000));
     let placer = placer_with(Curves::Shadow, &clock);
     let mut teaching = placer.begin_teaching(&tables.jobs, 0).unwrap();
-    assert!(!teaching.read_page(&tables.jobs).unwrap());
+    assert!(!teaching.read_page(&placer, &tables.jobs).unwrap());
     let held = good(&tables, "h2", "h", &[16; 10]);
     placer.engine().sizes().freed_run(held, bk());
     assert_eq!(lines.profile_lines(), Vec::<String>::new());
@@ -403,7 +403,7 @@ fn a_teaching_with_the_profiles_off_logs_no_start() {
     let clock = ManualClock::new(Timestamp::from_millis(0));
     let placer = placer_with(Curves::Off, &clock);
     let mut teaching = placer.begin_teaching(&tables.jobs, 0).unwrap();
-    assert!(!teaching.read_page(&tables.jobs).unwrap());
+    assert!(!teaching.read_page(&placer, &tables.jobs).unwrap());
     let held = good(&tables, "h1", "h", &[16; 10]);
     placer.engine().sizes().freed_run(held, bk());
     clock.advance(Duration::from_secs(60));
