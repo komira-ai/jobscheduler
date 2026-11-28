@@ -115,23 +115,20 @@ fn refused_with(fake: &Fake, name: &str, says: &str) {
 
 // ---- the table ----
 
-/// The table holds the three programs of the package under the identifiers the signed programs
-/// carry, and the program of the grant is one of them.
+/// The table holds the one program of the package under the identifier the signed program
+/// carries, and the program of the grant is that one. The programs that left the package are
+/// not in it.
 ///
-/// Catches an identifier that changes or collides (a requirement names it, and so does the
-/// profile), and a grant holder that is not a program of the package.
+/// Catches an identifier that changes (a requirement names it, and so does the profile), a
+/// grant holder that is not a program of the package, and a program of an earlier package that
+/// is still signed.
 #[test]
-fn the_table_names_the_three_programs_by_distinct_identifiers() {
+fn the_table_names_the_one_program_of_the_package() {
     let table: Vec<(&str, &str)> = PROGRAMS.iter().map(|p| (p.name, p.identifier)).collect();
-    assert_eq!(
-        table,
-        [
-            ("js-agent", "com.komira.js-agent"),
-            ("js-mac-session", "com.komira.js-agent.session"),
-            ("js-mac-provision", "com.komira.js-agent.provision"),
-        ]
-    );
-    assert_eq!(mac_programs::program("js-mac-session"), Some(PROGRAMS[1]));
+    assert_eq!(table, [("js-agent", "com.komira.js-agent")]);
+    assert_eq!(mac_programs::program("js-agent"), Some(PROGRAMS[0]));
+    assert_eq!(mac_programs::program("js-mac-session"), None);
+    assert_eq!(mac_programs::program("js-mac-provision"), None);
     assert_eq!(mac_programs::program("js-vmm"), None);
     assert_eq!(mac_programs::grant_holder().name, FULL_DISK_ACCESS_PROGRAM);
     assert_eq!(FULL_DISK_ACCESS_PROGRAM, "js-agent");
@@ -172,8 +169,8 @@ fn the_table_agrees_with_the_package_and_the_team() {
 #[test]
 fn the_requirement_names_the_identifier_the_chain_and_the_team_and_no_hash() {
     assert_eq!(
-        PROGRAMS[1].requirement(),
-        "identifier \"com.komira.js-agent.session\" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = U7RTX4XD3X"
+        PROGRAMS[0].requirement(),
+        "identifier \"com.komira.js-agent\" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = U7RTX4XD3X"
     );
     for p in PROGRAMS {
         let r = p.requirement();
@@ -264,7 +261,7 @@ fn a_read_that_fails_fails_the_check() {
 /// a code hash, or none).
 #[test]
 fn each_way_a_signature_differs_from_the_releases_is_refused_and_named() {
-    let p = PROGRAMS[1];
+    let p = PROGRAMS[0];
     let good = display_of(p.identifier);
     let chain = format!(
         "Authority={}\nAuthority={}\nAuthority={}\n",
@@ -276,11 +273,11 @@ fn each_way_a_signature_differs_from_the_releases_is_refused_and_named() {
             "the signature is ad hoc",
         ),
         (
-            good.replace("Identifier=com.komira.js-agent.session", "Identifier=js-mac-session"),
-            "the identifier is js-mac-session, not com.komira.js-agent.session",
+            good.replace("Identifier=com.komira.js-agent", "Identifier=js-agent"),
+            "the identifier is js-agent, not com.komira.js-agent",
         ),
         (
-            good.replace("Identifier=com.komira.js-agent.session\n", ""),
+            good.replace("Identifier=com.komira.js-agent\n", ""),
             "the identifier is absent",
         ),
         (
@@ -369,14 +366,18 @@ fn each_way_a_signature_differs_from_the_releases_is_refused_and_named() {
     ));
     wrong_requirement(format!(
         "designated => {}\n",
-        want.replace("com.komira.js-agent.session", "com.komira.js-agent")
+        want.replace("com.komira.js-agent", "com.komira.js-agent.session")
     ));
     wrong_requirement(format!("designated => {want} and cdhash H\"0123\"\n"));
     wrong_requirement("designated => cdhash H\"0123456789\"\n".to_owned());
     wrong_requirement(format!("{want}\n"));
     wrong_requirement(format!("designated => {want}\ndesignated => {want}\n"));
-    // The requirement of another program is not this one's.
-    wrong_requirement(requirements_of(&PROGRAMS[0]));
+    // The requirement of another program (here the helper an earlier package signed) is not
+    // this one's.
+    wrong_requirement(requirements_of(&mac_programs::Program {
+        name: "js-mac-session",
+        identifier: "com.komira.js-agent.session",
+    }));
 }
 
 /// A refusal names the binary, the program and every problem on one line.
@@ -400,12 +401,12 @@ fn a_refusal_names_the_binary_the_program_and_every_problem() {
 /// Catches a check that holds every program to one identifier or to any identifier of the table.
 #[test]
 fn a_program_signed_under_another_programs_identifier_is_refused() {
-    let mut fake = Fake::signed(&PROGRAMS[1]);
-    fake.display = Ok(display_of(PROGRAMS[0].identifier));
+    let mut fake = Fake::signed(&PROGRAMS[0]);
+    fake.display = Ok(display_of("com.komira.js-agent.session"));
     refused_with(
         &fake,
-        "js-mac-session",
-        "the identifier is com.komira.js-agent, not com.komira.js-agent.session",
+        "js-agent",
+        "the identifier is com.komira.js-agent.session, not com.komira.js-agent",
     );
 }
 

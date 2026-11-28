@@ -16,7 +16,7 @@ use js_agent::update_hook::{
     Step, VERB, agent_in, run,
 };
 
-use super::step_rig::{MAC_UNIT, Rig, Spy};
+use super::step_rig::{MAC_HELPER, MAC_UNIT, Rig, Spy};
 use super::steps_handover::NO_NATIVE_LEAVE;
 
 /// What a Mac agent of this release prints to `--version`.
@@ -42,6 +42,12 @@ fn stop() -> String {
 
 fn start() -> String {
     format!("units.start({MAC_UNIT})")
+}
+
+/// The boot-out of an earlier release's helper job, which every Mac cutover makes before the
+/// agent's start (`step/retired.rs`).
+fn retire() -> String {
+    format!("units.stop({MAC_HELPER})")
 }
 
 /// The handover file of the agent's state root.
@@ -127,7 +133,10 @@ fn a_mac_update_between_agents_that_both_list_native_handover_hands_the_runs_ove
     let cutover = spy(&rig);
     let done = cutover.cutover(&rig);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
-    assert_eq!(cutover.act_names(), [REQUEST, &stop(), WITHDRAW, &start()]);
+    assert_eq!(
+        cutover.act_names(),
+        [REQUEST, &stop(), WITHDRAW, &retire(), &start()]
+    );
     assert!(!file_of(&rig).exists());
     assert_eq!(rig.host().leases, 2, "the jobs run on");
     assert_eq!(rig.world.ticks(), 0, "nothing is waited for");
@@ -283,7 +292,7 @@ fn a_mac_update_from_an_agent_without_the_word_drains_and_so_does_its_rollback()
 
     let cutover = with_before(&rig);
     assert_eq!(cutover.cutover(&rig).outcome, Outcome::Success);
-    assert_eq!(cutover.act_names(), [stop(), start()]);
+    assert_eq!(cutover.act_names(), [stop(), retire(), start()]);
     assert_eq!(with_before(&rig).verify(&rig).outcome, Outcome::Success);
 
     rig.set_leases(1);
@@ -419,7 +428,7 @@ fn a_mac_hand_over_driven_through_the_hooks_command_line_exits_0_and_reports_eac
     assert_eq!(report["reversible"], false, "the boot-out is the commit");
     assert_eq!(
         acts.borrow().last().unwrap(),
-        &[REQUEST, &stop(), WITHDRAW, &start()]
+        &[REQUEST, &stop(), WITHDRAW, &retire(), &start()]
     );
     assert!(!file_of(&rig).exists());
     assert_eq!(rig.host().leases, 2, "the jobs run on");

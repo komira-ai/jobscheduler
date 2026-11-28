@@ -7,7 +7,7 @@
 //! The import of Apple's intermediate passes on a runner without it and on one that holds it
 //! already (`security` answers exactly that the item exists), and on nothing else; the identity
 //! must still be listed as valid by `find-identity -v`, once, by its exact name, and valid for 30
-//! days; only then are the three programs signed. Whatever happens, the keychain is deleted
+//! days; only then is each program signed. Whatever happens, the keychain is deleted
 //! last and the job's files are removed, and neither secret reaches the log.
 
 mod crun_host;
@@ -391,7 +391,7 @@ fn assert_cleaned_up(name: &str, ran: &Ran) {
 }
 
 #[test]
-fn the_intermediate_imported_into_the_keychain_signs_the_three_programs() {
+fn the_intermediate_imported_into_the_keychain_signs_the_programs() {
     // Catches: a step that fails on a runner without the intermediate, imports it anywhere but
     // the job's keychain, signs before the identity is found valid, or signs another program or
     // identifier than the table's.
@@ -419,7 +419,7 @@ fn the_intermediate_imported_into_the_keychain_signs_the_three_programs() {
 }
 
 #[test]
-fn a_runner_that_holds_the_intermediate_already_signs_the_three_programs() {
+fn a_runner_that_holds_the_intermediate_already_signs_the_programs() {
     // Catches: the duplicate answer of a hosted runner that holds Apple's intermediate failing
     // the job, as it failed the first signing run on main.
     let answer = format!("{DUPLICATE}\n");

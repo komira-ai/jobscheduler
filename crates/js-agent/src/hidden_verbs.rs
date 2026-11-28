@@ -8,9 +8,14 @@
 //!   ([`crate::mac_supervisor`]). The native runtime starts it for every native job and for
 //!   its self-test ([`crate::native`]).
 //! - `image-pull` (Linux): pulls an image into the image store ([`crate::image::pull`]).
+//! - `__pf-anchor`: loads the pf anchor the agent's flags file names, unless it is in force
+//!   already. The package's `js-agent.pf-pool` LaunchDaemon runs it as root at load and every
+//!   30 seconds ([`pf_anchor`]).
 //! - `__account-cycle`: a development verb that runs the life cycle of one account of the
 //!   Mac account pool once, to prove it on a Mac ([`crate::mac_accounts::cycle`]). It runs no
 //!   job, and is removed once the native runtime proves an account's life cycle itself.
+
+mod pf_anchor;
 
 use std::ffi::OsString;
 use std::io::Write;
@@ -31,6 +36,9 @@ pub(crate) fn dispatch(
     if verb == crate::image::pull::VERB {
         let host = crate::image::pull::Host::system();
         return Some(crate::image::pull::run(args, out, err, &host));
+    }
+    if verb == pf_anchor::VERB {
+        return Some(pf_anchor::run(args, out, err));
     }
     if verb == crate::mac_accounts::cycle::VERB {
         return Some(crate::mac_accounts::cycle::run(args, out, err));
@@ -73,6 +81,37 @@ mod tests {
             assert_eq!(dispatch(&words(args), &mut out, &mut err), None, "{args:?}");
             assert_eq!((out, err), (Vec::new(), Vec::new()), "{args:?}");
         }
+    }
+
+    /// Asserts that `__pf-anchor` is answered here: a command line with no flags file is a usage
+    /// error (status 2, a usage line on the error output), and a flags file that is not there
+    /// loads nothing and exits 0 with one line on the output.
+    #[test]
+    fn the_pf_anchor_is_answered_here() {
+        use super::pf_anchor::{VERB, status};
+
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let code = dispatch(&words(&["js-agent", VERB]), &mut out, &mut err);
+        assert_eq!(code, Some(ExitCode::from(status::USAGE)));
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            "usage: js-agent __pf-anchor --flags-file <path>\n"
+        );
+        assert!(out.is_empty());
+
+        let dir = js_testkit::dir::TestDir::under(std::env::temp_dir(), "hidden-pf-anchor");
+        let absent = dir.join("flags");
+        let args = words(&["js-agent", VERB, "--flags-file", absent.to_str().unwrap()]);
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        assert_eq!(
+            dispatch(&args, &mut out, &mut err),
+            Some(ExitCode::from(status::OK))
+        );
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            format!("no flags file {}: nothing to install\n", absent.display())
+        );
+        assert!(err.is_empty());
     }
 
     /// Asserts that `__supervise-native` is answered here, with status 2 and a usage line,

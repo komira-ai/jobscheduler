@@ -1,6 +1,6 @@
-//! `probe`: one TCP connect and what became of it. It is the check an operator runs as a
-//! pool user (`sudo -u <pool user> js-mac-provision probe 192.0.2.10:443`), and what the
-//! root test runs as a pool uid and as a control.
+//! `probe`: one TCP connect and what became of it. It is what the root test runs as a pool uid
+//! and as a control, through the `pf_probe` example (`pf_probe 192.0.2.10:443`), whose command
+//! line [`parse_args`] reads.
 
 use std::fmt;
 use std::io::ErrorKind;
@@ -40,6 +40,24 @@ pub fn probe(addr: SocketAddrV4, timeout: Duration) -> Probe {
     }
 }
 
+/// The connect bound, in milliseconds, when the command line gives none.
+pub const DEFAULT_TIMEOUT_MS: u64 = 2000;
+
+/// The address and the connect bound the command line `args` (after the program name) of the
+/// `pf_probe` example name: `<ipv4:port>` and then, optionally, `--timeout-ms <n>`. `None` for
+/// anything else.
+#[must_use]
+pub fn parse_args(args: &[String]) -> Option<(SocketAddrV4, Duration)> {
+    let (addr, rest) = args.split_first()?;
+    let addr = addr.parse().ok()?;
+    let timeout = match rest {
+        [] => DEFAULT_TIMEOUT_MS,
+        [flag, ms] if flag == "--timeout-ms" => ms.parse().ok()?,
+        _ => return None,
+    };
+    Some((addr, Duration::from_millis(timeout)))
+}
+
 /// The outcome for a failed connect of kind `kind`.
 fn classify(kind: ErrorKind) -> Probe {
     match kind {
@@ -67,6 +85,37 @@ mod tests {
         // Not `l` dropped: that frees the number for any other test to bind.
         let dead = js_testkit::port::dead_addr().to_string().parse().unwrap();
         assert_eq!(probe(dead, Duration::from_secs(5)), Probe::Refused);
+    }
+
+    fn words(words: &[&str]) -> Vec<String> {
+        words.iter().map(|w| (*w).to_owned()).collect()
+    }
+
+    #[test]
+    fn the_command_line_is_an_address_and_an_optional_bound() {
+        let addr: SocketAddrV4 = "192.0.2.10:443".parse().unwrap();
+        assert_eq!(
+            parse_args(&words(&["192.0.2.10:443"])),
+            Some((addr, Duration::from_millis(DEFAULT_TIMEOUT_MS)))
+        );
+        assert_eq!(
+            parse_args(&words(&["192.0.2.10:443", "--timeout-ms", "250"])),
+            Some((addr, Duration::from_millis(250)))
+        );
+    }
+
+    #[test]
+    fn any_other_command_line_is_refused() {
+        for args in [
+            &[][..],
+            &["not-an-address"][..],
+            &["192.0.2.10:443", "--timeout-ms"][..],
+            &["192.0.2.10:443", "--timeout-ms", "soon"][..],
+            &["192.0.2.10:443", "--bound", "250"][..],
+            &["192.0.2.10:443", "--timeout-ms", "250", "extra"][..],
+        ] {
+            assert_eq!(parse_args(&words(args)), None, "{args:?}");
+        }
     }
 
     #[test]

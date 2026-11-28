@@ -63,8 +63,8 @@ pub enum Reason {
     DrainDeadline,
     /// The hold file of the agent's state root could not be read, written or ended.
     HoldFailed,
-    /// A Mac's host setup is not complete and `prepare` could not complete it: the helper's
-    /// socket group, the agent's state root or the scratch root's own volume (exit 75).
+    /// A Mac's host setup is not complete and `prepare` could not complete it: the agent's
+    /// state root or the scratch root's own volume (exit 75).
     HostSetupMissing,
     /// The system refused a call of a Mac's host setup (`EPERM`), which no retry changes: the
     /// path and the error are named (exit 1).

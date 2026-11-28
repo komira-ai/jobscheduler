@@ -12,7 +12,7 @@
 use std::fmt::Debug;
 use std::path::{Path, PathBuf};
 
-use js_mac_provision::cli::{DEFAULT_ANCHOR, DEFAULT_STATE_DIR};
+use js_mac_provision::agent_flags::{DEFAULT_ANCHOR, DEFAULT_STATE_DIR};
 use js_mac_provision::pfctl::{SYSTEM_PFCTL, SystemPfctl};
 use js_mac_provision::{AnchorName, Config, Endpoint, UidRange, enforced};
 

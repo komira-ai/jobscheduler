@@ -39,7 +39,7 @@ fn a_scratch_volume_that_is_there_is_mounted_and_not_made_again() {
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
     let mount = mount_of(&rig).display().to_string();
     assert_eq!(
-        mac.changes()[1..],
+        mac.changes(),
         [format!(
             "{DISKUTIL} mount nobrowse -mountPoint {mount} {DEVICE}"
         )]
@@ -60,7 +60,7 @@ fn a_scratch_volume_mounted_elsewhere_is_moved_onto_the_scratch_root() {
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
     let mount = mount_of(&rig);
     assert_eq!(
-        mac.changes()[1..],
+        mac.changes(),
         [
             format!("{DISKUTIL} unmount {DEVICE}"),
             format!(

@@ -130,7 +130,7 @@ const ROWS: readonly Row[] = [
   ['install', 'not codesigned or notarized.', 'docs/release.md', 'are not codesigned or notarized'],
   ['install', '<span class="tag tag-planned">not proven</span> That the macOS archives come out byte-identical when a partly published release is re-run, nor that the Linux arm64 ones do when built again on a hosted arm64 runner.', 'docs/release.md', 'Not yet proven: that the Mac archives come out byte-identical'],
   ['install', '<span class="tag tag-planned">not proven</span> That the macOS archives come out byte-identical when a partly published release is re-run, nor that the Linux arm64 ones do when built again on a hosted arm64 runner.', 'docs/release.md', 'nor that the Linux arm64 ones do when they are built again on a hosted arm64 runner'],
-  ['install', 'the SHA-256 of the fifteen archives', 'docs/release.md', 'SHA-256 of the fifteen archives'],
+  ['install', 'the SHA-256 of the fourteen archives', 'docs/release.md', 'SHA-256 of the fourteen archives'],
   ['index', 'the Debian package, x86_64 and arm64, in the apt repository once the release\'s apt settings are set;', 'docs/release.md', '| `js-agent_X.Y.Z_arm64.deb` | the Debian package of `js-agent` for arm64 Linux hosts |'],
   ['index', 'the Debian package, x86_64 and arm64, in the apt repository once the release\'s apt settings are set;', 'docs/release.md', 'publish the two Debian packages into the suite `testing` of the apt repository at `https://packages.komira.ai/apt`'],
   ['index', 'once the release\'s apt settings are set;', 'docs/release.md', 'with none of them set it does nothing and passes'],
@@ -153,7 +153,7 @@ const ROWS: readonly Row[] = [
   ['install', 'A host gets the agent from the package or from the release archive and the unit in <code>packaging/js-agent</code>, as the steps below say.', 'docs/release.md', 'apt-get update && apt-get install js-agent'],
   ['install', '<code>js-agent_X.Y.Z_amd64.deb</code>, <code>js-agent_X.Y.Z_arm64.deb</code></td><td>the agent as a Debian package', 'docs/release.md', '| `js-agent_X.Y.Z_amd64.deb` | the Debian package of `js-agent` for x86_64 Linux hosts (below) |'],
   ['install', 'each with the bundle of its attestation (<code>.deb.sigstore.json</code>)', 'docs/release.md', 'keeps the bundle of that attestation beside it as `<file>.sigstore.json`'],
-  ['install', '<code>SHA256SUMS</code></td><td>the SHA-256 of the fifteen archives, the two Debian packages and the two images', 'docs/release.md', '`SHA256SUMS` | SHA-256 of the fifteen archives, the two Debian packages and the two images'],
+  ['install', '<code>SHA256SUMS</code></td><td>the SHA-256 of the fourteen archives, the two Debian packages and the two images', 'docs/release.md', '`SHA256SUMS` | SHA-256 of the fourteen archives, the two Debian packages and the two images'],
   ['install', 'the lease server as a container image, named by its digest only, each with the bundle of its attestation (<code>.oci.tar.sigstore.json</code>)', 'docs/release.md', 'The image has no name and no tag.'],
   ['install', '<code>js-lease-server-X.Y.Z-x86_64-unknown-linux-musl.oci.tar</code>, <code>js-lease-server-X.Y.Z-aarch64-unknown-linux-musl.oci.tar</code>', 'docs/release.md', 'it then attests each Debian package and each image alone'],
   ['install', 'The lease server is also a container image for x86_64 and arm64 Linux.', 'docs/release.md', 'The js-lease-server image'],
@@ -194,8 +194,7 @@ const ROWS: readonly Row[] = [
   ['install', '<td><code>js-bundle-X.Y.Z-x86_64-unknown-linux-musl.tar.gz</code>,', 'docs/release.md', '`js-bundle-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js-bundle` binary (packs, prints, verifies and pushes darwin bundles) and `LICENSE`'],
   ['install', '<code>js-bundle-X.Y.Z-aarch64-apple-darwin.tar.gz</code></td><td>the tool that packs, prints, verifies and pushes darwin bundles</td>', 'docs/release.md', '`js-bundle-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js-bundle` binary for Apple silicon Macs and `LICENSE`'],
   ['install', '<code>js-mdm-X.Y.Z-x86_64-unknown-linux-musl.tar.gz</code>', 'docs/release.md', '`js-mdm-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js-mdm` binary and `LICENSE`'],
-  ['install', '<td><code>js-mac-session-X.Y.Z-aarch64-apple-darwin.tar.gz</code>,', 'docs/release.md', '`js-mac-session-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js-mac-session` root helper for Apple silicon Macs and `LICENSE`'],
-  ['install', '<code>js-mac-provision-X.Y.Z-aarch64-apple-darwin.tar.gz</code></td><td>the root helper and the pf anchor installer a Mac node installs</td>', 'docs/release.md', '`js-mac-provision-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js-mac-provision` pf anchor installer for Apple silicon Macs and `LICENSE`'],
+  ['install', '<td><code>js-mac-session-X.Y.Z-aarch64-apple-darwin.tar.gz</code></td><td>the root helper, no longer part of the Mac package</td>', 'docs/release.md', '`js-mac-session-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js-mac-session` root helper for Apple silicon Macs and `LICENSE`'],
   ['install', 'The lease server, the <code>js</code> client and the agent are Rust binaries built by the repository\'s release workflow', 'docs/release.md', 'builds the binaries for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` (`js-lease-server`, `js`, `js-agent`'],
   ['install', 'The Linux binaries are static (musl, x86_64 and arm64);', 'docs/release.md', 'The Linux binaries are statically linked against musl, for both architectures'],
   ['install', '(musl, x86_64 and arm64)', 'docs/release.md', 'builds the binaries for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`'],
@@ -708,7 +707,7 @@ test('an archive left off the install page, or a wrong count, is reported (the c
   assert.match(archiveGaps(release, dropped).join('\n'), new RegExp(`does not name ${name.replace(/\./g, '\\.')}`));
   const added = release.replace('| `SHA256SUMS` |', '| `js-new-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | a new tool |\n| `SHA256SUMS` |');
   assert.match(archiveGaps(added, page('install')).join('\n'), /does not name js-new-X\.Y\.Z/);
-  assert.match(archiveGaps(added, page('install')).join('\n'), /docs\/release\.md lists 16/);
+  assert.match(archiveGaps(added, page('install')).join('\n'), /docs\/release\.md lists 15/);
 });
 
 test('the verification commands of the install page are those of the release document', () => {

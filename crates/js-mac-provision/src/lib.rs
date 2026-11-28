@@ -10,18 +10,17 @@
 //! - [`pfctl`]: `pfctl` behind a trait, with the real runner.
 //! - [`provision`]: install, check and remove over a [`pfctl::Pfctl`].
 //! - [`counters`]: the per-rule packet counters of the anchor, which show pf blocked a packet.
-//! - [`agent_flags`]: the anchor the macOS agent's flags file names, which `install
-//!   --flags-file` loads.
+//! - [`agent_flags`]: the anchor the macOS agent's flags file names.
+//! - [`apply()`]: loads that anchor unless it is in force; `js-agent __pf-anchor` runs it.
 //! - [`launchd`]: the property list of the LaunchDaemon that keeps the anchor loaded.
-//! - [`daemon`]: the property lists of the js-agent package's three LaunchDaemons.
-//! - [`probe()`]: one connect and its outcome, for the operator and the root test.
-//! - [`cli`]: the verbs of the `js-mac-provision` program.
+//! - [`daemon`]: the property lists of the js-agent package's two LaunchDaemons.
+//! - [`probe()`]: one connect and its outcome, for the root test.
 //!
 //! Everything builds and is tested on every platform with a fake `pfctl`; only the real
 //! `pfctl` needs a Mac and root.
 
 pub mod agent_flags;
-pub mod cli;
+pub mod apply;
 pub mod counters;
 pub mod daemon;
 pub mod launchd;
@@ -34,6 +33,7 @@ pub mod render;
 #[cfg(test)]
 mod testing;
 
+pub use apply::{Applied, ApplyError, apply};
 pub use policy::{AnchorName, Endpoint, PolicyError, UidRange};
 pub use probe::probe;
 pub use provision::{Config, enforced};

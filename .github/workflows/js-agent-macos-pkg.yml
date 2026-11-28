@@ -1,6 +1,6 @@
 # The js-agent installer package for macOS (packaging/js-agent-macos): built on a hosted Apple
 # silicon runner (or on a Mac of the build farm, see below) from the release build of js-agent,
-# js-mac-session and js-mac-provision, with pkgbuild and productbuild, and read back by the xtask
+# the one program of the package, with pkgbuild and productbuild, and read back by the xtask
 # `pkg check-macos` verb, which refuses anything but the files, modes and owners the package is
 # meant to have, and any script. It is a hostkeeper `macos-pkg` package
 # (docs/design/mac-hostkeeper-package.md): the file is `js-agent-<version>-macos-arm64.pkg`, it
@@ -12,7 +12,7 @@
 # released; `build-update` and `first-install` are for the first-install test. `build` runs in the
 # beta stage of the release (release.yml's `beta-macos-pkg` calls this file on a push to main) and
 # by hand; no pull request runs it. It builds, checks and sums the package unsigned (the steps are
-# the local action .github/actions/js-agent-macos-pkg), sums the three programs it built and
+# the local action .github/actions/js-agent-macos-pkg), sums the program it built and
 # uploads both, and no secret is named anywhere in it, so no code of a branch (a build script, a
 # macro, xtask) can see one.
 #
@@ -51,7 +51,7 @@
 #
 # - `sign-code` runs in the environment `pkg-signing`, which a repository administrator creates
 #   with its secrets; it admits every branch of this repository, which a signing run needs. It
-#   takes the three programs from `build`, checks them against the sums `build` wrote, and signs
+#   takes the program from `build`, checks it against the sums `build` wrote, and signs
 #   each with `codesign` under the Developer ID Application identity of the team, a fixed
 #   identifier, the hardened runtime and a secure timestamp (the identifiers and the identity are
 #   the table of crates/xtask/src/release/mac_programs.rs). Apple's Developer ID intermediate is
@@ -64,8 +64,8 @@
 #   absolute path. It fails, naming the secret, when a signing secret is not set.
 # - `package` holds no secret and has no environment. It checks the repository out, builds the
 #   package with the local action from the signed programs instead of building them (the action
-#   checks each staged program with `cargo xtask release check-code-signature`, so the package's
-#   cdhash pin of js-agent is read from the signed binary), and uploads the package.
+#   checks each staged program with `cargo xtask release check-code-signature`), and uploads the
+#   package.
 # - `sign` runs in the environment `pkg-signing`. It does not build: it takes the checked package
 #   from `package` and the checker from `build`, checks that the package is the one `package`
 #   summed, signs it with `productsign --timestamp` (no notarization: hostkeeper reads the
@@ -173,15 +173,13 @@ jobs:
         run: |
           set -euo pipefail
           cd target/release
-          shasum -a 256 js-agent js-mac-session js-mac-provision > PROGRAMS.SHA256SUMS
+          shasum -a 256 js-agent > PROGRAMS.SHA256SUMS
           shasum -a 256 --check PROGRAMS.SHA256SUMS
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: js-agent-macos-programs-unsigned
           path: |
             target/release/js-agent
-            target/release/js-mac-session
-            target/release/js-mac-provision
             target/release/PROGRAMS.SHA256SUMS
           if-no-files-found: error
           retention-days: 1
@@ -327,13 +325,11 @@ jobs:
             /usr/bin/codesign --force --sign "$identity" --keychain "$keychain" --identifier "$identifier" --options runtime --timestamp "programs/$program"
           done <<'TABLE'
           js-agent com.komira.js-agent
-          js-mac-session com.komira.js-agent.session
-          js-mac-provision com.komira.js-agent.provision
           TABLE
       - name: The signed programs verify
         run: |
           set -euo pipefail
-          for program in js-agent js-mac-session js-mac-provision; do
+          for program in js-agent; do
             /usr/bin/codesign --verify --strict --verbose=2 "programs/$program"
           done
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -341,8 +337,6 @@ jobs:
           name: js-agent-macos-programs-signed
           path: |
             programs/js-agent
-            programs/js-mac-session
-            programs/js-mac-provision
           if-no-files-found: error
           retention-days: 1
 

@@ -1,14 +1,14 @@
 # One command that builds the js-agent installer package of one version, on a macOS runner that
 # has checked out the repository and installed the toolchain: it stamps the version, builds the
-# programs, checks that they print it, stages the payload, builds the package with pkgbuild and
+# program, checks that it prints the version, stages the payload, builds the package with pkgbuild and
 # productbuild, reads it back with the xtask `pkg check-macos` verb and sums it. The package is
 # `dist/js-agent-<version>-macos-arm64.pkg` with `dist/SHA256SUMS`, in the workspace.
 #
-# With the input `programs` (a directory holding the three programs, already signed) it builds
-# nothing: it takes the programs from there, and checks each staged program with the xtask
+# With the input `programs` (a directory holding the signed js-agent) it builds nothing: it
+# takes the program from there, and checks each staged program with the xtask
 # `release check-code-signature` verb before the package is built, so a program that is not
-# signed as the release signs it never goes into the package. The cdhash the helper's plist
-# names is then the cdhash of the signed `js-agent`.
+# signed as the release signs it never goes into the package. The two plists are rendered by
+# `pkg stage-macos` itself, from the same table the agent's update hook reads.
 #
 # js-agent-macos-pkg.yml calls it three times, in three jobs: `build` for the release's version
 # (an unsigned package, which the first-install test installs), `build-update` for the next patch
@@ -28,7 +28,7 @@ inputs:
     description: The package version, MAJOR.MINOR.PATCH
     required: true
   programs:
-    description: A directory with the signed js-agent, js-mac-session and js-mac-provision to package instead of building them; empty builds them
+    description: A directory with the signed js-agent to package instead of building it; empty builds it
     required: false
     default: ""
 
@@ -40,15 +40,13 @@ runs:
       env:
         VERSION: ${{ inputs.version }}
       run: cargo xtask release stamp --to "$VERSION"
-    - name: Build the programs
+    - name: Build the program
       if: ${{ inputs.programs == '' }}
       shell: bash
       run: |
         set -euo pipefail
         cargo build --locked --release -p js-agent --bin js-agent
-        cargo build --locked --release -p js-mac-session --bin js-mac-session
-        cargo build --locked --release -p js-mac-provision --bin js-mac-provision
-    - name: Take the signed programs
+    - name: Take the signed program
       if: ${{ inputs.programs != '' }}
       shell: bash
       env:
@@ -56,17 +54,17 @@ runs:
       run: |
         set -euo pipefail
         mkdir -p target/release
-        for bin in js-agent js-mac-session js-mac-provision; do
+        for bin in js-agent; do
           cp "$PROGRAMS/$bin" "target/release/$bin"
           chmod 755 "target/release/$bin"
         done
-    - name: The programs print the version
+    - name: The program prints the version
       shell: bash
       env:
         VERSION: ${{ inputs.version }}
       run: |
         set -euo pipefail
-        for bin in js-agent js-mac-session js-mac-provision; do
+        for bin in js-agent; do
           printed="$(target/release/$bin --version | sed -n 1p)"
           echo "$printed"
           case "$printed" in
@@ -83,30 +81,14 @@ runs:
         VERSION: ${{ inputs.version }}
       run: |
         set -euo pipefail
-        mkdir inputs
-        # The root helper admits the agent of this package alone: the cdhash of its binary, which
-        # the linker's ad hoc signature gives and a copy keeps.
-        cdhash="$(/usr/bin/codesign --display --verbose=4 target/release/js-agent 2>&1 | /usr/bin/sed -n 's/^CDHash=//p')"
-        if ! [[ "$cdhash" =~ ^[0-9a-f]{40}$ ]]; then
-          echo "::error::the cdhash of js-agent is '$cdhash', not 40 hex digits"
-          exit 1
-        fi
-        target/release/js-mac-provision agent-plist > inputs/agent.plist
-        target/release/js-mac-provision session-plist --daemon-requirement "cdhash H\"$cdhash\"" > inputs/session.plist
-        target/release/js-mac-provision pf-pool-plist > inputs/pf-pool.plist
-        plutil -lint inputs/agent.plist inputs/session.plist inputs/pf-pool.plist
-        cargo xtask pkg stage-macos --version "$VERSION" --bin-dir target/release --license LICENSE --agent-plist inputs/agent.plist --session-plist inputs/session.plist --pf-pool-plist inputs/pf-pool.plist --out stage
-        staged="$(/usr/bin/codesign --display --verbose=4 "stage/root/Library/Application Support/js-agent/bin/js-agent" 2>&1 | /usr/bin/sed -n 's/^CDHash=//p')"
-        if [ "$staged" != "$cdhash" ]; then
-          echo "::error::the staged js-agent has the cdhash '$staged', not '$cdhash'"
-          exit 1
-        fi
+        cargo xtask pkg stage-macos --version "$VERSION" --bin-dir target/release --license LICENSE --out stage
+        plutil -lint stage/root/Library/LaunchDaemons/js-agent.plist stage/root/Library/LaunchDaemons/js-agent.pf-pool.plist
     - name: The staged programs are signed as the release signs them
       if: ${{ inputs.programs != '' }}
       shell: bash
       run: |
         set -euo pipefail
-        for bin in js-agent js-mac-session js-mac-provision; do
+        for bin in js-agent; do
           cargo xtask release check-code-signature "stage/root/Library/Application Support/js-agent/bin/$bin" --program "$bin"
         done
     - name: Build the package

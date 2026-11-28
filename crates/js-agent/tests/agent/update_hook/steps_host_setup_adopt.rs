@@ -1,5 +1,5 @@
 //! A Mac that an earlier release's host setup left half done, and calls the system refuses: the
-//! group, the roots and the unmounted scratch volume that are there are used and not made
+//! roots and the unmounted scratch volume that are there are used and not made
 //! again, the leftover copy of the file system table is removed, and a call the system refuses
 //! (`EPERM`) fails the step (1, `host_setup_refused`) naming the path and the error, where any
 //! other error defers it.
@@ -9,12 +9,10 @@ use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-use js_agent::update_hook::step::{DISKUTIL, DSEDITGROUP};
+use js_agent::update_hook::step::DISKUTIL;
 use js_agent::update_hook::{Class, Done, Outcome, Reason};
 
-use super::fake_mac::{
-    DEVICE, EPERM, FakeMac, GROUP, Volume, mac_rig, mount_of, scratch_of, spy_on,
-};
+use super::fake_mac::{DEVICE, EPERM, FakeMac, Volume, mac_rig, mount_of, scratch_of, spy_on};
 use super::step_rig::MAC_UNIT;
 use super::steps_host_setup::{assert_missing, assert_no_table, leave_leftover};
 
@@ -39,17 +37,16 @@ fn assert_ending(done: &Done, path: &Path, why: &io::Error) {
     }
 }
 
-/// Asserts that a Mac as a release whose table write macOS refused left it (the group there with
-/// a gid of macOS's, the state root and the mount point there and private, the scratch volume
-/// made, unmounted and ignoring ownership, and the copy of the table beside it) ends set up: the
-/// volume is mounted on the mount point and given ownership, the scratch root is made on it,
-/// nothing else is made, no table is written and the leftover is gone. Catches a setup that makes a second volume or group, or that writes the
-/// table again.
+/// Asserts that a Mac as a release whose table write macOS refused left it (the state root and
+/// the mount point there and private, the scratch volume made, unmounted and ignoring ownership,
+/// and the copy of the table beside it) ends set up: the volume is mounted on the mount point and
+/// given ownership, the scratch root is made on it, nothing else is made, no table is written and
+/// the leftover is gone. Catches a setup that makes a second volume, or that writes the table
+/// again.
 #[test]
 fn a_mac_an_earlier_setup_left_half_done_is_adopted_and_its_leftover_removed() {
     let rig = mac_rig("hook-setup-adopt", false);
     let mac = FakeMac::new();
-    mac.with_group(GROUP, 502);
     mac.with_volume(Volume {
         mount: None,
         owners: false,
@@ -71,7 +68,6 @@ fn a_mac_an_earlier_setup_left_half_done_is_adopted_and_its_leftover_removed() {
             format!("{DISKUTIL} enableOwnership {shown}"),
         ]
     );
-    assert_eq!(mac.groups.borrow().get(GROUP), Some(&502));
     assert_eq!(
         *mac.volume.borrow(),
         Some(Volume {
@@ -102,7 +98,6 @@ fn a_mac_an_earlier_setup_left_half_done_is_adopted_and_its_leftover_removed() {
 fn a_mac_whose_volume_is_mounted_on_the_parent_already_is_given_the_modes_and_no_mount() {
     let rig = mac_rig("hook-setup-adopt-mounted", false);
     let mac = FakeMac::new();
-    mac.with_group(GROUP, 502);
     let mount = mount_of(&rig);
     mac.with_volume(Volume {
         mount: Some(mount.clone()),
@@ -136,7 +131,7 @@ fn a_call_the_system_refuses_fails_naming_the_path_and_the_error() {
     let detail = format!("{}: Operation not permitted (os error 1)", mount.display());
     assert_refused(&done, &detail);
     assert!(rig.record().is_none());
-    assert_eq!(mac.changes(), [format!("{DSEDITGROUP} -o create {GROUP}")]);
+    assert!(mac.changes().is_empty(), "{:?}", mac.changes());
 
     let rig = mac_rig("hook-setup-refused-update", true);
     rig.world.seed_unit(MAC_UNIT, "active", "running");

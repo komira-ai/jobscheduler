@@ -1,15 +1,17 @@
 //! The js-agent installer package for macOS (`packaging/js-agent-macos`).
 //!
 //! The package is a hostkeeper `macos-pkg` service: it lays its files down and runs no script.
-//! `pkg stage-macos` lays the payload down in a directory from the built programs, the
-//! licence and the three plists (the agent, its root helper and the daemon that keeps the pool's
-//! pf anchor loaded); the workflow gives that directory to `pkgbuild` without
+//! `pkg stage-macos` lays the payload down in a directory from the built `js-agent`, the
+//! licence and the two plists it renders itself (the agent, and the daemon that keeps the pool's
+//! pf anchor loaded, which runs the agent's own `__pf-anchor` verb); the workflow gives that directory to `pkgbuild` without
 //! `--scripts`. `pkg check-macos` reads the package back with Apple's `pkgutil` and `lsbom`
 //! and refuses it unless it holds exactly [`entries`], each with its mode and root as owner,
 //! no script at all, and the identifier and version of the release.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+
+use js_mac_provision::daemon::{Daemon, pf_pool_plist};
 
 use crate::release::Version;
 
@@ -45,17 +47,27 @@ pub const PREFIX: &str = "Library/Application Support/js-agent";
 fn files() -> Vec<(String, u32)> {
     vec![
         (format!("{PREFIX}/bin/js-agent"), 0o755),
-        (format!("{PREFIX}/bin/js-mac-session"), 0o755),
-        (format!("{PREFIX}/bin/js-mac-provision"), 0o755),
         (format!("{PREFIX}/LICENSE"), 0o644),
         ("Library/LaunchDaemons/js-agent.plist".to_owned(), 0o644),
         (
-            "Library/LaunchDaemons/js-agent.session.plist".to_owned(),
+            "Library/LaunchDaemons/js-agent.pf-pool.plist".to_owned(),
             0o644,
+        ),
+    ]
+}
+
+/// The package's two property lists, rendered from [`js_mac_provision::daemon`]: path below the
+/// volume, text.
+#[must_use]
+pub fn plists() -> Vec<(String, String)> {
+    vec![
+        (
+            "Library/LaunchDaemons/js-agent.plist".to_owned(),
+            Daemon::agent().render(),
         ),
         (
             "Library/LaunchDaemons/js-agent.pf-pool.plist".to_owned(),
-            0o644,
+            pf_pool_plist(),
         ),
     ]
 }
@@ -102,21 +114,12 @@ pub struct StageArgs {
     /// The release version.
     #[arg(long)]
     pub version: Version,
-    /// The directory with the built `js-agent`, `js-mac-session` and `js-mac-provision`.
+    /// The directory with the built `js-agent`.
     #[arg(long)]
     pub bin_dir: PathBuf,
     /// The license file.
     #[arg(long)]
     pub license: PathBuf,
-    /// The agent's plist.
-    #[arg(long)]
-    pub agent_plist: PathBuf,
-    /// The helper's plist.
-    #[arg(long)]
-    pub session_plist: PathBuf,
-    /// The plist of the daemon that keeps the pool's pf anchor loaded.
-    #[arg(long)]
-    pub pf_pool_plist: PathBuf,
     /// The directory to make, which must not exist: `root/` goes in it.
     #[arg(long)]
     pub out: PathBuf,
@@ -185,31 +188,14 @@ pub fn stage(args: &StageArgs) -> Result<String, Error> {
             format!("{PREFIX}/bin/js-agent"),
             args.bin_dir.join("js-agent"),
         ),
-        (
-            format!("{PREFIX}/bin/js-mac-session"),
-            args.bin_dir.join("js-mac-session"),
-        ),
-        (
-            format!("{PREFIX}/bin/js-mac-provision"),
-            args.bin_dir.join("js-mac-provision"),
-        ),
         (format!("{PREFIX}/LICENSE"), args.license.clone()),
-        (
-            "Library/LaunchDaemons/js-agent.plist".to_owned(),
-            args.agent_plist.clone(),
-        ),
-        (
-            "Library/LaunchDaemons/js-agent.session.plist".to_owned(),
-            args.session_plist.clone(),
-        ),
-        (
-            "Library/LaunchDaemons/js-agent.pf-pool.plist".to_owned(),
-            args.pf_pool_plist.clone(),
-        ),
     ];
     let mut bytes = BTreeMap::new();
     for (dest, source) in sources {
         bytes.insert(dest, std::fs::read(&source).map_err(failure(&source))?);
+    }
+    for (dest, text) in plists() {
+        bytes.insert(dest, text.into_bytes());
     }
     if args.out.exists() {
         return Err(io(

@@ -600,7 +600,6 @@ fn this_repositorys_shipped_crates() {
         "js-agent",
         "js-bundle-cli",
         "js-mac-session",
-        "js-mac-provision",
         "js-mdm",
     ]);
     let shipped = Metadata::parse(&json)
@@ -689,7 +688,6 @@ fn the_default_ship_roots_are_the_released_binaries_crates() {
             "js-agent",
             "js-bundle-cli",
             "js-mac-session",
-            "js-mac-provision",
             "js-mdm"
         ]
     );

@@ -1648,10 +1648,8 @@ dependencies = [
 name = "js-mac-provision"
 version = "0.1.0"
 dependencies = [
- "clap",
  "js-mac-session",
  "js-testkit",
- "rustix",
  "thiserror",
 ]
 
@@ -4235,7 +4233,6 @@ dependencies = [
  "js-handover-check",
  "js-lease-server",
  "js-mac-provision",
- "js-mac-session",
  "js-oci",
  "js-proto",
  "js-testkit",
