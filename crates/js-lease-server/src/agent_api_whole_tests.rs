@@ -7,13 +7,13 @@
 
 use std::time::Duration;
 
-use js_agent_wire::{HeartbeatReply, Outcome, Phase, RefusalReason, Taint};
+use js_agent_wire::{HeartbeatReply, Outcome, Phase, RefusalReason};
 use js_jobs::{
     AllocationRecord, AllocationStep, Booked, EndReason, JobId, JobSpec, JobState, Needs, NewJob,
     StartFailure,
 };
 use js_registry::WholeNodeConfig;
-use js_state::{Store, StoreTime};
+use js_state::{Cond, Store, StoreTime, Txn};
 use js_types::{Clock, JobEventKind};
 
 use super::job_rig::{FakeAgent, Rig, START_MS, spec, starts, stops, whole_over, whole_rig};
@@ -445,35 +445,25 @@ async fn a_host_unsafe_refusal_taints_the_host() {
 }
 
 /// Two servers over one store. `host-a` said hello to the second, which placed the whole-host
-/// job `job-w` on it, and the agent prepares. A beat of the agent (one that sends no `tainted` of
-/// its own) reaches the first server and reports a taint, which the first stores in the host's
-/// binding; the next beat reaches the second and reports the host ready. The second server's
-/// registry holds no taint for the host (it read the binding at the hello, before the taint),
-/// but the start reads the host's rows: the job stays placed, no start is sent, and the reply
-/// still names the allocation. It catches a whole-host start judged on one server's registry.
+/// job `job-w` on it, and the agent prepares. A taint for the host is then stored in its
+/// binding row as a server that keeps its bindings in the store writes it (this rig's servers
+/// keep theirs in their state files, so the row is written past them), and the next beat
+/// reaches the second server and reports the host ready. The second server's registry holds no
+/// taint for the host (it read the binding at the hello, before the taint), but the start reads
+/// the host's rows: the job stays placed, no start is sent, and the reply still names the
+/// allocation. It catches a whole-host start judged on one server's registry.
 #[tokio::test]
 async fn a_ready_report_on_a_host_another_server_tainted_starts_nothing() {
-    let mut first = whole_rig("whole_taint_first", rules(), None);
+    let first = whole_rig("whole_taint_first", rules(), None);
     let second = (rules(), None);
     let mut second = whole_over("whole_taint_second", second, Some(&first), START_MS);
     second.register("host-a", true);
     let mut agent = FakeAgent::new("host-a");
     let job = prepare(&second, &mut agent, "job-w").await;
 
-    let session = second.sessions["host-a"].clone();
-    first.sessions.insert("host-a".to_owned(), session);
-    let taint = Taint {
-        reason: "residue".to_owned(),
-        run_id: Some("r1".to_owned()),
-        check: None,
-    };
-    let _ = first.beat_reporting(&agent, Some(taint)).await;
-    let binding = first.store.get("hosts/binding/host-a").unwrap().unwrap();
-    let binding: serde_json::Value = serde_json::from_slice(&binding.value).unwrap();
-    assert_eq!(
-        binding["taint_reason"], "residue",
-        "the first server stored the taint"
-    );
+    let tainted = br#"{"version":1,"taint_reason":"residue","taint_run_id":"r1"}"#.to_vec();
+    let put = Txn::new().put("hosts/binding/host-a", tainted, Cond::Any);
+    first.store.txn(put).unwrap().unwrap();
     let host = js_types::HostId::new("host-a").unwrap();
     let view = second.agents.registry.own_host(&host).unwrap();
     assert_eq!(
