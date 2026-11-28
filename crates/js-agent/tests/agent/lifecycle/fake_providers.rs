@@ -53,7 +53,8 @@ struct State {
     /// Where the agent's provider records are: a `Prepare` notes whether its run's is there.
     records: Option<PathBuf>,
     /// The sources the providers hold, by provider, run and index, when the test has them kept
-    /// ([`FakeProviders::keep_sources`]): a `Prepare` that succeeds adds its source.
+    /// ([`FakeProviders::keep_sources`]): a `Prepare` that succeeds adds its source, a `Release`
+    /// that succeeds removes it.
     held: Option<BTreeSet<(String, String, u32)>>,
     /// Each call sent, as its log line, with its attempt (a sweep: each kept run's).
     attempts: Vec<(String, Vec<u64>)>,
