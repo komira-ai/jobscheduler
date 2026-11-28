@@ -1,5 +1,6 @@
 //! A scrape: the snapshot read from the state `GET /v1/hosts` reads and from the job tables,
-//! rendered with the recorder's counts, and the router of the metrics listener.
+//! rendered with the recorder's counts and followed by the server's own work
+//! ([`super::work`]), and the router of the metrics listener.
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -18,6 +19,7 @@ use tracing::warn;
 
 use super::Recorder;
 use super::render::{HostSeen, JobsSeen, Snapshot, Split, render};
+use super::work::{self, Work};
 use crate::api::{Peer, Shared, not_found, peer_may_read_status};
 use crate::hosts::{HostEntry, HostList, listing};
 use crate::job_store::ServerJobs;
@@ -47,11 +49,11 @@ async fn metrics(State(scrape): State<Arc<Scrape>>, peer: Peer) -> Response {
         return not_found();
     }
     match snapshot(&scrape.shared, MAX_PAGE).await {
-        Ok(seen) => (
-            [(CONTENT_TYPE, TEXT_FORMAT)],
-            render(&seen, &scrape.recorder),
-        )
-            .into_response(),
+        Ok(seen) => {
+            let mut text = render(&seen, &scrape.recorder);
+            work::write(&mut text, &Work::now(&scrape.shared, &scrape.recorder));
+            ([(CONTENT_TYPE, TEXT_FORMAT)], text).into_response()
+        }
         Err(error) => {
             warn!(%error, "a scrape could not read the job tables");
             let text = "the job tables could not be read\n";
