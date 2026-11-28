@@ -155,8 +155,8 @@ fn suite_problems(text: &str) -> Vec<String> {
 }
 
 /// Asserts the shape of `blackbox`: it needs `publish` and the black-box test jobs, runs only when
-/// all of them passed (each named by its result, after `!cancelled() && !failure()`), and calls farm.yml with the one target named here alone; each change below
-/// is refused.
+/// all of them passed (each named by its result, after `!cancelled() && !failure()`), and calls
+/// farm.yml with the one target named here alone; each change below is refused.
 #[test]
 fn blackbox_builds_the_black_box_target_on_the_farm_after_every_test_job_passed() {
     let text = workflow();

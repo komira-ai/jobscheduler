@@ -206,7 +206,7 @@ impl Context<'_> {
             )),
             ["needs", job, "result"] => text(self.done[job].word()),
             ["needs", job, "outputs", output] => {
-                if self.done[job] != Outcome::Success {
+                if self.done[job] == Outcome::Skipped {
                     return text("");
                 }
                 text(
@@ -303,8 +303,9 @@ fn tokenize(expr: &str) -> Result<Vec<Token>, String> {
     Ok(tokens)
 }
 
-/// Evaluates tokens: `or := and ('||' and)*`, `and := not ('&&' not)*`,
-/// `not := '!' not | cmp`, `cmp := atom (('==' | '!=') atom)?`,
+/// Evaluates tokens: `or := and ('||' and)*`, `and := cmp ('&&' cmp)*`,
+/// `cmp := not (('==' | '!=') not)?`, `not := '!' not | atom` (so `!` binds tighter than `==`,
+/// as in GitHub's expressions),
 /// `atom := '(' or ')' | text | ident | ident '(' ')'`.
 struct Parser<'a> {
     tokens: &'a [Token],
@@ -341,10 +342,10 @@ impl<'a> Parser<'a> {
     }
 
     fn and(&mut self) -> Result<Value, String> {
-        let mut value = self.not()?;
+        let mut value = self.cmp()?;
         while self.peek() == Some(&Token::And) {
             self.next();
-            let right = self.not()?;
+            let right = self.cmp()?;
             value = Value::Bool(value.truthy() && right.truthy());
         }
         Ok(value)
@@ -355,18 +356,18 @@ impl<'a> Parser<'a> {
             self.next();
             return Ok(Value::Bool(!self.not()?.truthy()));
         }
-        self.cmp()
+        self.atom()
     }
 
     fn cmp(&mut self) -> Result<Value, String> {
-        let left = self.atom()?;
+        let left = self.not()?;
         let equal = match self.peek() {
             Some(Token::Eq) => true,
             Some(Token::Ne) => false,
             _ => return Ok(left),
         };
         self.next();
-        let right = self.atom()?;
+        let right = self.not()?;
         match (&left, &right) {
             (Value::Text(a), Value::Text(b)) => Ok(Value::Bool(a.eq_ignore_ascii_case(b) == equal)),
             _ => Err(format!(
@@ -699,7 +700,7 @@ fn the_model_reads_the_rule_on_a_small_graph() {
     assert_eq!(three(&tiny(c_true), skip_b), [Success, Skipped, Skipped]);
     let explicit = "    if: ${{ !cancelled() && !failure() && needs.b.result != 'success' }}\n";
     assert_eq!(three(&tiny(explicit), skip_b), [Success, Skipped, Success]);
-    // A failed grandparent: the output of a failed job is empty, so `b` is skipped.
+    // A failed grandparent: `b` reads its output, but the implied `success()` skips it.
     assert_eq!(three(&tiny(explicit), go), [Failure, Skipped, Skipped]);
     let failed = "    if: ${{ failure() }}\n";
     assert_eq!(three(&tiny(failed), go), [Failure, Skipped, Success]);
