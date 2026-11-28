@@ -849,10 +849,31 @@ jobs:
       # under one name, and keeps the `.profraw` ending so that `coverage` can hand it to
       # `cargo llvm-cov report` beside the other shards' profiles: llvm-profdata, which merges
       # them there, reads raw and indexed profiles alike, by their content. It is written
-      # even when a test failed, so the report still shows what ran.
+      # even when a test failed, so the report still shows what ran. A raw profile cut short
+      # (a process killed as it wrote its profile) is left out of it by name, counted, and
+      # copied into `<out>.left-out`; when llvm-profdata refuses the merge, the step's error
+      # names each profile it refuses alone.
       - name: Merge this shard's profiles into one
+        id: merge
         if: ${{ !cancelled() }}
         run: cargo "+$COVERAGE_TOOLCHAIN" xtask merge-profiles --dir target/llvm-cov-target --out "target/jobscheduler-shard-${{ matrix.shard }}.profraw"
+      # The raw profiles the merge left out as cut short, kept a week so each can be read;
+      # nothing is uploaded when none was. The attempt's number keeps a re-run's apart.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: coverage-left-out-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: target/jobscheduler-shard-${{ matrix.shard }}.profraw.left-out
+          if-no-files-found: ignore
+          retention-days: 7
+      # When the merge fails, every raw profile it was given, kept a week so the one
+      # llvm-profdata refuses can be read.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ failure() && steps.merge.outcome == 'failure' }}
+        with:
+          name: coverage-raw-profiles-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: target/llvm-cov-target/*.profraw
+          retention-days: 7
       # Kept a day: `coverage`, later in this run, is its only reader.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: ${{ !cancelled() }}
