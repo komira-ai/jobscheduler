@@ -382,7 +382,7 @@ fn a_teaching_whose_read_fails_teaches_the_held_runs_alone() {
 }
 
 /// Asserts that a job a pass named freed while the teaching was begun, whose run the pass had
-/// not yet handed over when the teaching was taught (the pass reads the job between the two,
+/// not yet handed over when its page was read (the pass reads the job between the two,
 /// outside the engine's lock), is taught once: by the pass, after the ended jobs, as a server
 /// that taught first teaches it; the read, which found it freed, leaves it out. Catches the run
 /// taught by the read and again by the pass.
@@ -543,8 +543,8 @@ fn a_begin_whose_read_of_the_newest_runs_fails_begins_with_none_of_them() {
 }
 
 /// Asserts that a teaching keeps none of the ended jobs it read: over 2,500 freed jobs (three
-/// pages), what it holds after its second page (every field, as its `Debug` shows it) is what it
-/// held after its first, byte for byte, and it is read through in three pages. Catches a
+/// pages), what it holds after its second page (every field, as its `Debug` shows it) is as long
+/// as what it held after its first, and it is read through in three pages. Catches a
 /// teaching that keeps each page's jobs until it is taught, which held a farm's seven days of
 /// ended jobs, about 6.9 GiB, until its last page.
 #[test]

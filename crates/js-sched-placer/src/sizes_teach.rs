@@ -60,7 +60,8 @@ pub struct Teaching {
     /// The history as the teaching began, taught every ended job of the pages read so far.
     history: History,
     /// How many ended jobs of the pages read were taught, and how many of them taught a class a
-    /// memory sample ([`crate::sizes::JobSizes::observe`]).
+    /// memory sample ([`crate::sizes::JobSizes::observe`]), judged against the bounds known when
+    /// their page was taught (against a host of unlimited memory before any host is known).
     ended: (usize, usize),
     /// Where the next page begins; `None` before the first page and after the last.
     resume: Option<ResumeToken>,

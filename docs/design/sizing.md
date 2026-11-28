@@ -203,7 +203,7 @@ was given or at what a run that waited used: what it is booked rises with the ru
 runs that used less.
 
 **Where the history lives.** Nowhere new: after its start the server teaches the estimator every ended job its job store still holds
-(seven days by default), in the order they ended, with what each allocation booked; then each pass teaches the jobs it sees freed.
+(seven days by default), oldest free first and each page in the order its jobs ended, with what each allocation booked; then each pass teaches the jobs it sees freed.
 The start does not wait for it: it reads the live allocations and the runs of the newest freed allocations (at most ten pages of a
 thousand, newest free first, by the index of the frees), so what it reads does not grow with the history, and the server answers ready;
 the ended jobs are read after that, a page of the freed allocations at a time while it serves, oldest free first, each page one scan
