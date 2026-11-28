@@ -702,13 +702,20 @@ pub struct MarkRecord {
     pub tail_end: Option<StoreTime>,
     /// The hosts the job may not mark, each with what keeps it off and until when.
     pub exclusions: BTreeMap<HostId, Exclusion>,
+    /// Until when the mark waits for its host's hello, on the store's clock, while a pass
+    /// that does not queue the job finds no live row of the host: the store's time plus the
+    /// pool's `regain_grace`, written once by the first pass that waited
+    /// ([`crate::JobStore::wait_for_hello`]) and never moved later, so every server judges the
+    /// same wait and a restart does not begin it again. `None`: no pass has waited on the
+    /// mark since it was last written (a row an earlier build wrote reads so).
+    pub hello_by: Option<StoreTime>,
     /// Fields a later build wrote, kept for the next write of the row.
     pub(crate) carried: Carried,
 }
 
 impl MarkRecord {
     /// The mark of `job` on `host`, made at `made`, with its deadline at `deadline`, no tail end
-    /// known and no exclusions.
+    /// known, no exclusions and no hello waited for.
     #[must_use]
     pub fn new(job: JobId, host: HostId, made: StoreTime, deadline: StoreTime) -> MarkRecord {
         MarkRecord {
@@ -718,6 +725,7 @@ impl MarkRecord {
             deadline,
             tail_end: None,
             exclusions: BTreeMap::new(),
+            hello_by: None,
             carried: Carried::default(),
         }
     }

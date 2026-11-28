@@ -57,9 +57,6 @@ use super::telemetry::Telemetry;
 /// queued jobs, and follows the registry's hosts.
 pub struct SchedPlacer {
     pub(crate) clock: Arc<dyn Clock + Send + Sync>,
-    /// The placer's clock when it was made: the server's start, which the marks of the
-    /// whole-host jobs the store held then wait from for their hosts' hellos.
-    boot: FarmTime,
     engine: Mutex<Engine>,
     /// The registry's calls that found the engine held by a pass, in the order the registry
     /// made them, until the engine is next taken ([`SchedPlacer::engine`]). Its lock is a
@@ -100,7 +97,6 @@ impl SchedPlacer {
             kept: Mutex::default(),
             passes: Mutex::new(()),
             clock,
-            boot: now,
             outcomes: Mutex::default(),
             changes: AtomicU64::new(0),
             seen: Mutex::default(),
@@ -312,11 +308,6 @@ impl SchedPlacer {
     /// The lock of one pass over the queued jobs.
     pub(super) fn pass(&self) -> MutexGuard<'_, ()> {
         self.passes.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// The farm time of the placer's clock when the placer was made: the server's start.
-    pub fn boot(&self) -> FarmTime {
-        self.boot
     }
 
     /// The farm time of the placer's clock now.

@@ -108,30 +108,53 @@ async fn a_marked_deadline_before_boot_plus_120s_is_raised_to_it() {
     assert_eq!(stood.made, mark.made);
 }
 
+/// The pool's `regain_grace`: how long a stored mark waits for its host's hello.
+fn regain() -> Duration {
+    Duration::from_millis(rules().regain_grace_ms)
+}
+
+/// How far before a mark's wait ends a pass is run that must still find the mark standing: more
+/// than the store's clock moves for the commits of the ticks before the pass reads it.
+const SHY: Duration = Duration::from_millis(100);
+
 /// A server is started again, after the marked host's row went past the grace, and the host
-/// never says hello. The stored mark stands
-/// until the server's start plus `regain_grace` (the job is not queued in the engine meanwhile),
-/// and is deleted at that instant; the job stays queued, and when the host does say hello the
-/// job is marked again, on a mark made then. It catches a mark dropped at once, one kept for
-/// ever, one dropped a tick late or early, a job lost with its mark, and a job not marked
-/// again.
+/// never says hello. The server's first pass gives the stored mark its wait, the store's time
+/// then plus `regain_grace`, and changes nothing else of it; the mark stands until that time
+/// (the job is not queued in the engine meanwhile), and is deleted at it; the job stays queued,
+/// and when the host does say hello the job is marked again, on a mark made then. It catches a
+/// mark dropped at once, one kept for ever, a wait not stored or begun at another time, a job
+/// lost with its mark, and a job not marked again.
 #[tokio::test]
-async fn a_restored_mark_whose_host_never_says_hello_is_dropped_after_claim_by() {
+async fn a_restored_mark_whose_host_never_says_hello_is_dropped_when_its_wait_ends() {
     let (rig, _, whole, mark) = marked("whole_restart_claim").await;
     // The server starts again once the host's row is past the grace too: a live row is a host
     // heard from (another server may hold it), whose mark stands.
     let grace_ms = u64::try_from(WHOLE_GRACE.as_millis()).unwrap();
     let boot_ms = START_MS + grace_ms + 10_000;
     let mut again = restarted("whole_restart_claim_again", &rig, boot_ms);
+    let begun = now(&again);
     place_all(&again);
-    assert_eq!(again.jobs.get_mark(&whole).unwrap(), Some(mark.clone()));
+    let waiting = again.jobs.get_mark(&whole).unwrap().unwrap();
+    let by = waiting
+        .hello_by
+        .expect("the first pass gives the mark its wait");
+    assert!(
+        by >= begun.saturating_add(regain()),
+        "{by:?} begun {begun:?}"
+    );
+    assert!(by <= now(&again).saturating_add(regain()), "{by:?}");
+    let unwaited = MarkRecord {
+        hello_by: None,
+        ..waiting.clone()
+    };
+    assert_eq!(unwaited, mark);
 
-    again.advance(14 * SECOND);
+    again.advance(by.since(now(&again)).saturating_sub(SHY));
     place_all(&again);
-    assert_eq!(again.jobs.get_mark(&whole).unwrap(), Some(mark.clone()));
+    assert_eq!(again.jobs.get_mark(&whole).unwrap(), Some(waiting));
     assert_eq!(again.job(&whole).state, JobState::Queued);
 
-    again.advance(SECOND);
+    again.advance(SHY);
     place_all(&again);
     assert_eq!(again.jobs.get_mark(&whole).unwrap(), None);
     assert_eq!(again.job(&whole).state, JobState::Queued);
@@ -143,6 +166,44 @@ async fn a_restored_mark_whose_host_never_says_hello_is_dropped_after_claim_by()
     let marked_again = again.jobs.get_mark(&whole).unwrap().unwrap();
     assert!(marked_again.made > mark.made);
     assert_eq!(marked_again.host.as_str(), "host-a");
+    assert_eq!(marked_again.hello_by, None);
+}
+
+/// A server is started again after the marked host's row went past the grace and gives the
+/// mark its wait; ten seconds into the wait a second server starts over the same store (the
+/// server started again once more, or one beside it). The second server's passes keep the
+/// stored wait as it is, the mark stands until that wait ends and is deleted at it, not at the
+/// second server's start plus `regain_grace`. It catches a wait judged from a server's own start,
+/// which a restart loop would stretch for ever and two servers would judge apart.
+#[tokio::test]
+async fn a_hello_wait_is_not_begun_again_by_a_restart_or_another_server() {
+    let (rig, _, whole, _) = marked("whole_restart_wait").await;
+    let grace_ms = u64::try_from(WHOLE_GRACE.as_millis()).unwrap();
+    let first = restarted(
+        "whole_restart_wait_first",
+        &rig,
+        START_MS + grace_ms + 10_000,
+    );
+    place_all(&first);
+    let waiting = first.jobs.get_mark(&whole).unwrap().unwrap();
+    let by = waiting
+        .hello_by
+        .expect("the first pass gives the mark its wait");
+
+    first.advance(10 * SECOND);
+    let second = restarted("whole_restart_wait_second", &first, millis(now(&first)));
+    let second_start = now(&second);
+    assert!(second_start.saturating_add(regain()) > by.saturating_add(SHY));
+    place_all(&second);
+    assert_eq!(second.jobs.get_mark(&whole).unwrap(), Some(waiting.clone()));
+    second.advance(by.since(now(&second)).saturating_sub(SHY));
+    place_all(&second);
+    assert_eq!(second.jobs.get_mark(&whole).unwrap(), Some(waiting));
+
+    second.advance(SHY);
+    place_all(&second);
+    assert_eq!(second.jobs.get_mark(&whole).unwrap(), None);
+    assert_eq!(second.job(&whole).state, JobState::Queued);
 }
 
 /// A server is started again and the marked host says hello inside `regain_grace`: the mark

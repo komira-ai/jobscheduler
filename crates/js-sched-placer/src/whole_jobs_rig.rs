@@ -161,6 +161,14 @@ pub(crate) fn mark(
     mark
 }
 
+/// `mark`, waiting for its host's hello until `by_ms` ([`MarkRecord::hello_by`]).
+pub(crate) fn waiting(mark: MarkRecord, by_ms: u64) -> MarkRecord {
+    MarkRecord {
+        hello_by: Some(store(by_ms)),
+        ..mark
+    }
+}
+
 /// The job tables over the in-memory fake, behind the wrapper that fails or races a commit.
 pub(crate) struct Tables {
     /// The store's clock.
@@ -248,8 +256,8 @@ pub(crate) fn beat(engine: &mut Engine, names: &[&str], now_ms: u64) {
 }
 
 /// A pass of `engine` at `now_ms` over `queued` and `marks`: the hosts `a` and `b` have said
-/// hello and may take a job, the pool has `settings()`, and a mark waits for its host's hello
-/// until 15 s. The hosts are heard from first, as a pass follows their heartbeats.
+/// hello and may take a job, the pool has `settings()`, and the store's clock reads the pass's
+/// time. The hosts are heard from first, as a pass follows their heartbeats.
 pub(crate) fn run(
     engine: &mut Engine,
     (queued, marks): (&[JobRecord], &[MarkRecord]),
@@ -303,7 +311,7 @@ fn pass_of(
         open,
         tainted,
         settings: Some(&settings),
-        claim_by: at(15_000),
+        store_now: Some(store(now_ms)),
     };
     engine.whole_jobs(&input, at(now_ms))
 }

@@ -66,6 +66,28 @@ fn ports_held(read: &mut dyn TxnRead, host: &HostId) -> Result<BTreeSet<u16>, Jo
     Ok(held)
 }
 
+/// The check a commit makes of the binding row of `host` (its key and the condition of the
+/// version read) when neither `taint`, the host's `taint/<host>` row as read, nor `binding`, its
+/// binding row as read, holds a taint; otherwise [`JobStoreError::HostTainted`] for the job
+/// `id`, and nothing is written.
+pub(super) fn untainted(
+    (id, host): (&JobId, &HostId),
+    taint: Option<&Versioned>,
+    binding: Option<Versioned>,
+) -> Result<(String, Cond), JobStoreError> {
+    let tainted = || JobStoreError::HostTainted {
+        id: id.clone(),
+        host: host.clone(),
+    };
+    ensure(taint.is_none(), tainted())?;
+    let binding_key = keys::binding(host);
+    if let Some(row) = &binding {
+        ensure(!binding_tainted(&binding_key, &row.value)?, tainted())?;
+    }
+    let binding_cond = binding.map_or(Cond::Absent, |row| Cond::Version(row.version));
+    Ok((binding_key, binding_cond))
+}
+
 /// The check the commit makes of the host's binding row (its key and the condition of the
 /// version read) once the rows of `host` that `read` shows let the job `id`, which declares the
 /// host ports `ports`, be placed there; otherwise the refusal, and nothing is written:
@@ -82,17 +104,9 @@ pub(super) fn refuse_host(
     (id, host): (&JobId, &HostId),
     ports: &BTreeSet<u16>,
 ) -> Result<(String, Cond), JobStoreError> {
-    let tainted = || JobStoreError::HostTainted {
-        id: id.clone(),
-        host: host.clone(),
-    };
-    ensure(read.get(&keys::taint(host))?.is_none(), tainted())?;
-    let binding_key = keys::binding(host);
-    let binding = read.get(&binding_key)?;
-    if let Some(row) = &binding {
-        ensure(!binding_tainted(&binding_key, &row.value)?, tainted())?;
-    }
-    let binding_cond = binding.map_or(Cond::Absent, |row| Cond::Version(row.version));
+    let taint = read.get(&keys::taint(host))?;
+    let binding = read.get(&keys::binding(host))?;
+    let (binding_key, binding_cond) = untainted((id, host), taint.as_ref(), binding)?;
     ensure(
         read.get(&keys::hostmark(host))?.is_none(),
         JobStoreError::HostMarked {

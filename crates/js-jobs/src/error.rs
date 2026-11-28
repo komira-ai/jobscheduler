@@ -80,7 +80,8 @@ pub enum JobStoreError {
         host: HostId,
     },
     /// The host is tainted: its `taint/<host>` row is there (a host job was placed on it), or its
-    /// binding holds a taint, so no job is placed on it.
+    /// binding holds a taint, so no job is placed on it (and a placed whole-host job is not
+    /// started there, [`crate::JobStore::start_untainted`]).
     #[error("host {host} is tainted, so job {id} is not placed on it")]
     HostTainted {
         /// The job.
