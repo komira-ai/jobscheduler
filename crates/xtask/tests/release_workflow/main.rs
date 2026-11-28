@@ -20,6 +20,7 @@ mod fast_lane;
 mod images;
 mod macos_farm;
 mod secrets;
+mod skip_rule;
 mod smoke;
 
 use calls::{ARTIFACTS_CALLS, CALLERS, calls};
