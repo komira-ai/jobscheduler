@@ -16,7 +16,7 @@ use js_lease_server::{Cli, Config};
 use js_state::{ManualClock as StoreClock, StoreTime};
 use serde_json::json;
 
-use crate::support::{JOIN, Scratch, Stepping, TOKEN, args, clock, hello_body, routed};
+use crate::support::{Scratch, Stepping, TOKEN, args, clock, hello_body, routed};
 
 /// The image every job here runs: pinned by digest, as the service demands.
 const IMAGE: &str =
@@ -62,7 +62,7 @@ async fn the_job_service_is_served_through_the_seam_on_the_given_clock_and_ids()
         &agents,
         "POST",
         "/v1/agent/hello",
-        Some(JOIN),
+        None,
         Some(&hello_body("host-a")),
     )
     .await;
@@ -124,7 +124,7 @@ async fn a_poll_after_a_submit_places_the_job_with_no_tick() {
         &server.agent_router(),
         "POST",
         "/v1/agent/hello",
-        Some(JOIN),
+        None,
         Some(&hello_body("host-a")),
     )
     .await;
@@ -207,7 +207,7 @@ async fn served(config: Config) -> (InProcess, axum::Router, Arc<StoreClock>) {
     let server = InProcess::start(config, shared).unwrap();
     let agents = server.agent_router();
     let body = hello_body("host-a");
-    let hello = routed(&agents, "POST", "/v1/agent/hello", Some(JOIN), Some(&body)).await;
+    let hello = routed(&agents, "POST", "/v1/agent/hello", None, Some(&body)).await;
     assert_eq!(hello.status, 200, "{:?}", hello.body);
     let router = server.job_router().expect("the job service is on");
     (server, router, store_clock)

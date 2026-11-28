@@ -2,7 +2,7 @@
 //! hello and its limiter, loss and forgetting by the real registry, a job made through the
 //! job service's router, started, ended and acknowledged on the real wire, and
 //! the store the server keeps its state in (`--store`): the file the cell hands it, a host
-//! joined with a minted token, a read of the store while the server is down, and a second
+//! joined by its certificate, a read of the store while the server is down, and a second
 //! server on the same store.
 //!
 //! Each scenario names its host count, horizon and heartbeat interval below. The bus
@@ -21,7 +21,7 @@ use js_conformance::agent::Defect;
 use js_registry::HostState;
 use js_sim::{Event, Faults, Node, NodeInput};
 use js_sim_cell::bus::{agent_name, trace_msg};
-use js_sim_cell::server::{CLIENT_TOKEN, SQLITE_FILE, STORE_LINE_FILE};
+use js_sim_cell::server::{SQLITE_FILE, STORE_LINE_FILE};
 use js_sim_cell::{
     AgentNode, AgentSpec, CallId, Cell, CellNode, Checker, Counter, EPOCH_MS, Invariant, Ledger,
     Msg, Route, SecondServer, ServerNode, ServerSpec, Setup, Shape, Store, StoreRead, Verdict,
@@ -34,8 +34,8 @@ use serde_json::Value;
 
 use crate::support::{call, job, ms, scratch};
 
-/// Registration: as many hosts as one join token's default burst would refuse some of,
-/// heard within this horizon.
+/// Registration: as many hosts as the default hello burst of 60 covers, heard within this
+/// horizon.
 const REGISTER_HOSTS: usize = 64;
 const REGISTER_HORIZON_MS: u64 = 2_500;
 
@@ -110,10 +110,10 @@ fn run_to(cell: &mut Cell, at: u64) {
     cell.run_until(ms(at)).expect("every invariant holds");
 }
 
-/// Asserts that 64 agents sharing one join token all say hello through the real route and
-/// are listed live by the registry within 2.5 s, with no hello refused. Catches a spec that
-/// leaves `max_machines` at less than the hosts (the hellos past it are refused
-/// `pool-full`) or the hello burst at its default of 60 (four hosts wait a second each).
+/// Asserts that 64 agents, each with a host certificate of its own, all say hello through
+/// the real route and are listed live by the registry within 2.5 s, with no hello refused.
+/// Catches a spec that leaves `max_machines` at less than the hosts (the hellos past it are
+/// refused `pool-full`).
 #[test]
 fn agents_register_through_the_real_hello_and_are_listed_by_the_registry() {
     let spec = pool(REGISTER_HOSTS);
@@ -131,27 +131,26 @@ fn agents_register_through_the_real_hello_and_are_listed_by_the_registry() {
         .map(|i| answered(&cell, i, Route::Hello, 429))
         .sum();
     assert_eq!(refused, 0);
+    // The cell reads the listing again only at a step after it is due, and welcomed agents
+    // are quiet until their first heartbeat: settling reads it now.
+    cell.settle(Duration::ZERO)
+        .expect("nothing is left to settle");
     assert_eq!(cell.observations().server.hosts.len(), REGISTER_HOSTS);
     let server = cell.server().expect("a server").server();
     assert_eq!(server.map(|server| server.agent_errors()), Some(0));
 }
 
-/// Asserts that with a burst of one the real limiter refuses one of two hellos with a wait
-/// (429 and `Retry-After`), that the refused agent says hello once more after the wait and
-/// is welcomed, and that each host is welcomed once. Catches an agent that hammers the
-/// server (more than one refusal) or gives up (no second hello).
+/// Asserts that the real limiter counts hellos for each host's certificate: with a burst of
+/// one, two hosts that say hello at once are each welcomed on their first hello, and none is
+/// refused with a wait (429). Catches a limiter that shares one bucket between hosts, which
+/// would refuse the second.
 #[test]
-fn a_refused_hello_is_retried_after_the_wait_the_server_names() {
+fn a_burst_of_one_hello_is_a_bucket_of_each_host() {
     let spec = pool(LIMITED_HOSTS).hello_burst(1);
     let mut cell = cell("limited", spec, LIMITED_HOSTS, Faults::default());
-    run_to(&mut cell, 500);
-    assert_eq!(listed(&cell).len(), 1, "one host waits");
     run_to(&mut cell, LIMITED_HORIZON_MS);
-    let refused: Vec<u64> = (0..LIMITED_HOSTS)
-        .map(|i| answered(&cell, i, Route::Hello, 429))
-        .collect();
-    assert_eq!(refused.iter().sum::<u64>(), 1, "{refused:?}");
     for i in 0..LIMITED_HOSTS {
+        assert_eq!(answered(&cell, i, Route::Hello, 429), 0, "h00{i}");
         assert_eq!(answered(&cell, i, Route::Hello, 200), 1, "h00{i}");
     }
     let live = listed(&cell)
@@ -366,7 +365,7 @@ fn the_server_node_ticks_on_its_period_and_answers_only_calls() {
     let hello = Msg::Request {
         id: CallId(4),
         route: Route::Hello,
-        bearer: CLIENT_TOKEN.to_owned(),
+        certificate: None,
         body: "{}".to_owned(),
     };
     node.apply(input(
@@ -392,7 +391,7 @@ fn the_server_node_ticks_on_its_period_and_answers_only_calls() {
     let agent = AgentSpec {
         host: js_types::HostId::new("h000").expect("a host id"),
         pool: "burst".to_owned(),
-        join_token: CLIENT_TOKEN.to_owned(),
+        certificate: None,
         capacity: Shape::gpu_host().resources().expect("a host"),
         capabilities: Shape::gpu_host().capabilities,
         labels: Default::default(),
@@ -484,41 +483,31 @@ fn the_store_choice_opens_the_store_the_server_flag_names() {
     }
 }
 
-/// Asserts the store side of a cell: a host joins with a token the cell minted through the
-/// operator route (a token it did not mint adds no host) and is seated; a stop of the server
-/// reads the store while it is down, the token used by that host and the host bound to it;
-/// a second server is started over the store while the first is down and refused, naming
-/// `--store` and the writer lock, once the first runs again; a stop over a store that
-/// cannot be opened is kept as a read that failed and traced `store unread`; and a read
-/// pairs each used
-/// token with its binding, naming a token used by a host with no binding to it and a host
-/// bound to a token it did not use, and passing a host bound to the pool's shared token.
-/// Catches a mint whose token the agent never gets, a read that misses a row or reads a
-/// field the server does not write, and a judge that passes a token without its binding or
-/// a binding without its token.
+/// Asserts the store side of a cell: a host says hello with its certificate and is seated; a
+/// stop of the server reads the store while it is down, the hosts it had welcomed and the
+/// binding of each; a second server is started over the store while the first is down and
+/// refused, naming `--store` and the writer lock, once the first runs again; a stop over a
+/// store that cannot be opened is kept as a read that failed and traced `store unread`; and a
+/// read names a welcomed host that has no binding, and keeps a binding that holds no
+/// credential as bound to nothing. Catches a read that misses a row or reads a field the
+/// server does not write, and a judge that passes a welcomed host without its binding.
 #[test]
-fn a_store_read_pairs_each_used_token_with_its_binding() {
+fn a_store_read_pairs_each_welcomed_host_with_its_binding() {
     let dir = scratch("store-side");
     let path = dir.path().to_path_buf();
     let setup = Setup::new(11).with_trace_lines();
     let mut cell = Cell::new(setup, pool(1), dir, Faults::default()).expect("starts");
-    assert!(cell.join(0).is_none(), "no token minted yet");
-    cell.mint_join_token();
-    assert_eq!(cell.minted(), 1);
-    let host = cell.join(0).expect("a host of its own token");
+    let host = cell.add_agent().expect("an agent name is a host id");
     assert_eq!(host.as_str(), "h000");
     run_to(&mut cell, 2_000);
     assert_eq!(listed(&cell), [("h000".to_owned(), HostState::Live)]);
     cell.stop_server();
     let read = cell.store_reads()[0].clone().expect("the store is read");
     assert_eq!(read.at, ms(2_000));
-    assert_eq!(
-        read.joins.values().collect::<Vec<_>>(),
-        [&Some("h000".to_owned())]
-    );
+    assert_eq!(read.seated.iter().collect::<Vec<_>>(), ["h000"]);
     let bound = read.bindings.get("h000").expect("h000 is bound");
-    assert!(read.joins.contains_key(bound), "to the token it used");
-    assert!(read.unpaired().is_empty(), "{:?}", read.unpaired());
+    assert!(!bound.is_empty(), "to a credential");
+    assert!(read.unbound().is_empty(), "{:?}", read.unbound());
     cell.start_second_server();
     cell.restart_server();
     cell.start_second_server();
@@ -541,30 +530,60 @@ fn a_store_read_pairs_each_used_token_with_its_binding() {
         .filter(|line| line.ends_with(" cell store unread"));
     assert_eq!(unread.count(), 1);
 
-    let used = |host: &str| format!("{{\"version\":1,\"used_by\":\"{host}\"}}").into_bytes();
     let bound = |digest: &str| format!("{{\"version\":1,\"credential\":\"{digest}\"}}");
     let row = |key: &str, value: Vec<u8>| (key.to_owned(), value);
-    let joins = vec![
-        row("hosts/join/aa", used("h000")),
-        row("hosts/join/bb", b"{\"version\":1}".to_vec()),
-        row("hosts/join/cc", used("h002")),
-    ];
+    let seated = ["h000", "h001", "h002"].map(str::to_owned).into();
     let bindings = vec![
         row("hosts/binding/h000", bound("aa").into_bytes()),
-        row("hosts/binding/h001", bound("bb").into_bytes()),
-        row("hosts/binding/h003", bound("pool").into_bytes()),
+        row("hosts/binding/h003", bound("bb").into_bytes()),
         row("hosts/binding/h004", b"not json".to_vec()),
     ];
-    let read = StoreRead::from_rows(ms(5), joins, bindings);
-    assert_eq!(read.joins.get("bb"), Some(&None), "unused");
+    let read = StoreRead::from_rows(ms(5), seated, bindings);
     assert_eq!(read.bindings.get("h004"), Some(&String::new()));
     assert_eq!(
-        read.unpaired(),
+        read.unbound(),
         [
-            "a token used by h002, which has no binding to it",
-            "h001 is bound to a token it did not use",
+            "h001 was welcomed and has no binding in the store",
+            "h002 was welcomed and has no binding in the store",
         ]
     );
+}
+
+/// Asserts that a host presenting the certificate of another host (`join_presenting`) is
+/// refused 403 on every hello and never seated, beside the host whose certificate it
+/// presents, which is seated; and that a certificate of an agent the cell does not have
+/// adds no host. Catches a server that takes the hello's host for the certificate's.
+#[test]
+fn a_host_presenting_another_hosts_certificate_is_refused_and_never_seated() {
+    let mut cell = cell("presenting", pool(2), 1, Faults::default());
+    assert_eq!(cell.join_presenting(7), None, "no such agent");
+    let host = cell.join_presenting(0).expect("a host is added");
+    assert_eq!(host.as_str(), "h001");
+    run_to(&mut cell, 3_000);
+    assert_eq!(listed(&cell), [("h000".to_owned(), HostState::Live)]);
+    assert!(answered(&cell, 1, Route::Hello, 403) > 0);
+    assert_eq!(answered(&cell, 1, Route::Hello, 200), 0);
+}
+
+/// Asserts that the real limiter keys a hello on the certificate it presents, not on the host
+/// the hello names: with a burst of one, a host presenting another host's certificate
+/// (`join_presenting`) draws on that host's bucket, so of the two hellos sent at once one is
+/// refused 429 with a wait to come back after (`Retry-After`), and the presenting host is
+/// never seated. Catches a limiter keyed on the hello's host id, which would give each its
+/// own bucket and refuse neither.
+#[test]
+fn a_host_presenting_another_hosts_certificate_draws_on_its_hello_bucket() {
+    let mut cell = cell(
+        "presenting-limited",
+        pool(2).hello_burst(1),
+        1,
+        Faults::default(),
+    );
+    cell.join_presenting(0).expect("a host is added");
+    run_to(&mut cell, 3_000);
+    let waited: u64 = (0..2).map(|i| answered(&cell, i, Route::Hello, 429)).sum();
+    assert!(waited > 0, "no hello was refused with a wait");
+    assert_eq!(answered(&cell, 1, Route::Hello, 200), 0);
 }
 
 /// Asserts that a run's Postgres database is there while its cell runs and dropped when the

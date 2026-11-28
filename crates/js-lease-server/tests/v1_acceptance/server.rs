@@ -14,6 +14,11 @@ use std::sync::{Arc, Mutex};
 
 use js_state::postgres::{TestDatabase, test_database};
 use js_testkit::dir::TestDir;
+use rcgen::string::Ia5String;
+use rcgen::{
+    BasicConstraints, CertificateParams, CertifiedIssuer, DistinguishedName, DnType,
+    ExtendedKeyUsagePurpose, IsCa, KeyPair, SanType, date_time_ymd,
+};
 use rustix::process::{Pid, Signal, kill_process};
 
 use crate::agent::HANG_GUARD;
@@ -24,9 +29,6 @@ const PROGRAM: &str = env!("CARGO_BIN_EXE_js-lease-server");
 /// The bearer token of the lease port and of the job service's `default` client (an
 /// operator).
 pub const TOKEN: &str = "test-token-0123456789-abcdefghijkl";
-
-/// The join token the agent presents.
-const JOIN: &str = "join-token-A-0123456789-abcdefghijklmnop";
 
 /// The pool the agent joins.
 pub const POOL_NAME: &str = "burst";
@@ -76,6 +78,19 @@ impl Store {
 pub struct Files {
     dir: TestDir,
     store: Store,
+    /// The authority whose host certificates the server admits hosts by.
+    ca: CertifiedIssuer<'static, KeyPair>,
+}
+
+/// The files an agent is started with: its host certificate and key, and the certificate of
+/// the server it trusts.
+pub struct HostFiles {
+    /// The host's certificate (`--host-cert`).
+    pub cert: PathBuf,
+    /// The key of the certificate (`--host-key`).
+    pub key: PathBuf,
+    /// The server's certificate, which the agent trusts (`--ca-cert`).
+    pub trust: PathBuf,
 }
 
 /// Writes `text` to `path` with `mode`.
@@ -91,9 +106,25 @@ impl Files {
             Path::new(env!("CARGO_TARGET_TMPDIR")).join("v1-acceptance-server"),
             name,
         );
-        let files = Self { dir, store };
+        let mut params = CertificateParams::new(Vec::<String>::new()).expect("ca params");
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.distinguished_name = DistinguishedName::new();
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "test-only hostkeeper CA");
+        let ca = CertifiedIssuer::self_signed(params, KeyPair::generate().expect("a key"))
+            .expect("the CA");
+        let files = Self { dir, store, ca };
         write(&files.path("token"), TOKEN, 0o600);
-        write(&files.join_file(), &format!("{JOIN}\n"), 0o600);
+        let names = vec!["127.0.0.1".to_owned(), "localhost".to_owned()];
+        let server = rcgen::generate_simple_self_signed(names).expect("the server's certificate");
+        write(&files.server_cert_file(), &server.cert.pem(), 0o644);
+        write(
+            &files.path("tls-key.pem"),
+            &server.signing_key.serialize_pem(),
+            0o600,
+        );
+        write(&files.path("host-ca.pem"), &files.ca.pem(), 0o644);
         write(&files.path("agent-pool.toml"), &pool(), 0o644);
         let line = match &files.store {
             Store::Sqlite => format!("sqlite:{}", files.path("store.db").display()),
@@ -113,9 +144,38 @@ impl Files {
         self.path("token")
     }
 
-    /// The join token's file, which the agent is given.
-    pub fn join_file(&self) -> PathBuf {
-        self.path("agent-tokens")
+    /// The server's certificate, which every client of the server trusts.
+    pub fn server_cert_file(&self) -> PathBuf {
+        self.path("tls-cert.pem")
+    }
+
+    /// The files of an agent that runs as the host `host`: a host certificate signed by the
+    /// authority the server admits hosts by, its key, and the server's certificate.
+    pub fn host_files(&self, host: &str) -> HostFiles {
+        let key = KeyPair::generate().expect("a key");
+        let mut params = CertificateParams::new(vec![host.to_owned()]).expect("params");
+        let uri = Ia5String::try_from("urn:hostkeeper:host-role:host".to_owned()).expect("a URI");
+        params.subject_alt_names.push(SanType::URI(uri));
+        params.distinguished_name = DistinguishedName::new();
+        params
+            .distinguished_name
+            .push(DnType::CommonName, format!("host:{host}"));
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        params.not_before = date_time_ymd(2020, 1, 1);
+        params.not_after = date_time_ymd(3000, 1, 1);
+        let cert = params
+            .signed_by(&key, &self.ca)
+            .expect("the host certificate");
+        let dir = self.path(&format!("host-{host}"));
+        fs::create_dir_all(&dir).expect("a directory of the host's files");
+        let (cert_file, key_file) = (dir.join("host.crt"), dir.join("host.key"));
+        write(&cert_file, &cert.pem(), 0o644);
+        write(&key_file, &key.serialize_pem(), 0o600);
+        HostFiles {
+            cert: cert_file,
+            key: key_file,
+            trust: self.server_cert_file(),
+        }
     }
 
     /// The flags of a start with `--boot boot`.
@@ -141,7 +201,9 @@ impl Files {
         for (flag, name) in [
             ("--state-file", "leases.toml"),
             ("--token-file", "token"),
-            ("--agent-token-file", "agent-tokens"),
+            ("--tls-cert", "tls-cert.pem"),
+            ("--tls-key", "tls-key.pem"),
+            ("--agent-client-ca", "host-ca.pem"),
             ("--agent-pool-config", "agent-pool.toml"),
             ("--store", "store"),
         ] {
@@ -246,7 +308,7 @@ impl Server {
 
     /// The lease port as the agent's `--server`.
     pub fn url(&self) -> String {
-        format!("http://{}", self.lease)
+        format!("https://{}", self.lease)
     }
 
     /// What the server printed on standard error so far.

@@ -137,7 +137,7 @@ no cluster; step 51 adds the manifests and the image; step 52 changes clients; s
     file is reported; nothing is written (the files are unchanged).
 51. The manifests and the image. `deploy/kubernetes/` holds the objects of [deployment.md](deployment.md) as plain manifests, and the
     release gains a container image of `js-lease-server` built from the same static binary. *Proves:* a test reads the manifests and
-    asserts the rules (one replica, `Recreate`, a `ReadWriteOnce` volume, the token and join-token files mounted from Secrets and no
+    asserts the rules (one replica, `Recreate`, a `ReadWriteOnce` volume, the token file mounted from a Secret and no
     secret in `env`, configuration from a mounted file, both probes, resource requests, a `PodDisruptionBudget`, TLS flags set); no
     manifest names a host or an address. Publishing the image to a registry is an upload and needs the go of R7.
 52. The client side. kbf's frontend and `js-cli` reach the service by its cluster name over TLS, retry an outage with back-off inside the

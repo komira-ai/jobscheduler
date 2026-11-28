@@ -23,7 +23,7 @@ use crate::store::ServerStore;
 
 /// What the scaler is put together with besides the pool's plan.
 pub(crate) struct Parts<'a> {
-    /// The agent side of the server: the registry and the join tokens.
+    /// The agent side of the server: the registry.
     pub(crate) agents: Arc<Agents>,
     /// The server's clock.
     pub(crate) clock: SharedClock,
@@ -210,7 +210,7 @@ pub(crate) fn build(plan: &ElasticPlan, parts: Parts<'_>) -> Result<Scaler, Star
         .with_catalogs(parts.catalogs);
     let registry = parts.agents.registry.clone();
     let live = Live::new(
-        (parts.agents, plan.id.clone(), plan.scheduler.clone()),
+        (parts.agents, plan.scheduler.clone()),
         providers,
         launcher,
         (kept, parts.health),

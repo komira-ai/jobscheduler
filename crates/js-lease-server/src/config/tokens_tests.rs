@@ -8,7 +8,7 @@ use js_jobs::ClientName;
 
 use super::*;
 use crate::config::Config;
-use crate::config::clients_rig::{ClientsRig, DEFAULT_TOKEN, JOIN};
+use crate::config::clients_rig::{ClientsRig, DEFAULT_TOKEN};
 
 /// The token of the client `ci`.
 const CI: &str = "ci-token-0123456789-abcdefghijklmnopqrst";
@@ -121,8 +121,6 @@ fn a_client_has_a_name_and_a_token_of_its_own() {
             (&wants, key, said.to_owned())
         );
     }
-    assert_eq!(clients.holder_of(&token(CI)), Some("--client-token ci"));
-    assert_eq!(clients.holder_of(&token(STRANGER)), None);
     assert_eq!(
         named(&clients, STRANGER),
         None,
@@ -144,7 +142,7 @@ fn a_client_has_a_name_and_a_token_of_its_own() {
 
 /// Asserts that `--client-token NAME=PATH` and a `[[client]]` table give the same clients:
 /// the same names in the same order, each named by its own token, `default` by the token of
-/// `--token-file` (`server.client_token_file`), and no client by the join token; and that
+/// `--token-file` (`server.client_token_file`), and no client by a token nobody has; and that
 /// the flag beside `--config` is refused naming the table that takes its place. Catches a
 /// table or flag read and dropped, a name given to the wrong token, and a flag let through
 /// beside the file.
@@ -167,7 +165,7 @@ fn flag_and_config_table_agree() {
             (DEFAULT_TOKEN, Some("default")),
             (CI, Some("ci")),
             (OPS, Some("ops.team_1-A")),
-            (JOIN, None),
+            (STRANGER, None),
         ] {
             assert_eq!(named(&config.clients.now(), given).as_deref(), wants);
         }
@@ -233,8 +231,7 @@ fn file_refusal(rig: &ClientsRig, server: &str, tables: &str) -> String {
 /// clients of one name, a client named `default` beside `--token-file`, a name that is not
 /// one (a flag entry without `=` is named by its position and not repeated, so a token
 /// pasted in its place is never printed), a short token, a token file others can read, the
-/// same token in two entries, a client whose token is the join token (refused by the join
-/// token file, naming the client), and named clients without the job service; and, in the
+/// same token in two entries, and named clients without the job service; and, in the
 /// file, a table without a name or without a token file, with a field it does not know, or
 /// not written as tables. Each names the flag or the table and the key at fault, and no
 /// message holds a token. Catches any of them accepted, a refusal that names the wrong
@@ -298,18 +295,6 @@ fn config_is_validated_naming_the_entry() {
     assert_eq!(at, flag);
     assert!(message.starts_with(&prefix), "{message}");
     assert!(message.contains("not mode 0644"), "{message}");
-    refused.push(message);
-
-    let (at, message) = flag_refusal(&rig, &rig.client_flags(&[("ci", JOIN)]));
-    let joins = rig.path("joins");
-    let said = format!(
-        "--agent-token-file: {} holds the client token of --client-token ci: the two must differ",
-        joins.display()
-    );
-    assert_eq!(
-        (at, message.as_str()),
-        ("--agent-token-file", said.as_str())
-    );
     refused.push(message);
 
     let mut no_job = rig.flags(&rig.client_flags(&[("ci", CI)]));
@@ -382,14 +367,6 @@ fn config_is_validated_naming_the_entry() {
                 .to_owned(),
         ),
         (
-            serves,
-            rig.client_tables(&[("ci", JOIN)]),
-            format!(
-                "pool \"burst\": join_token_file: {} holds the client token of [[client]] \"ci\": the two must differ",
-                joins.display()
-            ),
-        ),
-        (
             "",
             rig.client_tables(&[("ci", CI)]),
             "client: needs server.job_listen, the job service it serves".to_owned(),
@@ -416,7 +393,7 @@ fn config_is_validated_naming_the_entry() {
     refused.push(message);
 
     for message in &refused {
-        for secret in [DEFAULT_TOKEN, CI, OPS, JOIN] {
+        for secret in [DEFAULT_TOKEN, CI, OPS] {
             assert!(!message.contains(secret), "{message}");
         }
     }
@@ -517,7 +494,7 @@ fn a_named_client_is_a_client_unless_its_entry_says_operator() {
 /// every named client's file is read again in order (`default`'s never, it has none), the
 /// names, roles and order are kept, a new token replaces the old one and the call says the
 /// tokens changed, a second reload with the same files says they did not, and any refusal
-/// (a file the reader cannot read, a token `taken` refuses) keeps the set in force whole.
+/// (a file the reader cannot read) keeps the set in force whole.
 /// Catches a reload that reads `default`'s token again, drops a role, reorders the clients,
 /// replaces part of the set before a later file fails, or reports every reload as a change.
 #[test]
@@ -548,8 +525,7 @@ fn a_reload_replaces_the_whole_set_or_nothing() {
             .map(|text| text.as_bytes().to_vec())
             .ok_or_else(|| format!("{key}: gone"))
     };
-    let free = |_: &Token| None;
-    assert_eq!(live.reload(&read, &free), Ok(true));
+    assert_eq!(live.reload(&read), Ok(true));
     assert_eq!(*read_paths.borrow(), ["ci", "ops"]);
     assert_eq!(
         format!("{live:?}"),
@@ -561,12 +537,12 @@ fn a_reload_replaces_the_whole_set_or_nothing() {
         named(&live.now(), DEFAULT_TOKEN).as_deref(),
         Some("default")
     );
-    assert_eq!(live.reload(&read, &free), Ok(false));
+    assert_eq!(live.reload(&read), Ok(false));
 
     files.borrow_mut().insert("ci", CI.to_owned());
     files.borrow_mut().remove("ops");
     assert_eq!(
-        live.reload(&read, &free),
+        live.reload(&read),
         Err("--client-token ops: ops: gone".to_owned())
     );
     assert_eq!(
@@ -574,15 +550,4 @@ fn a_reload_replaces_the_whole_set_or_nothing() {
         Some("ci"),
         "a part was replaced"
     );
-    files.borrow_mut().insert("ops", OPS.to_owned());
-    let join = |token: &Token| {
-        token
-            .matches(CI.as_bytes())
-            .then(|| "is the join token".to_owned())
-    };
-    assert_eq!(
-        live.reload(&read, &join),
-        Err("--client-token ci: is the join token".to_owned())
-    );
-    assert_eq!(named(&live.now(), STRANGER).as_deref(), Some("ci"));
 }

@@ -34,11 +34,7 @@ async fn says(
         "phase": "serving",
         "tainted": tainted,
     });
-    let agents = State(Arc::clone(&rig.agents));
-    let body = Ok(Bytes::from(beat.to_string()));
-    let who = Extension(rig.pool.clone());
-    let reply = super::super::heartbeat(agents, who, (None, None), None, body).await;
-    reply.map(|Json(reply)| reply)
+    beat_as(&rig.agents, host, Bytes::from(beat.to_string())).await
 }
 
 /// Asserts that `failed` is the refusal of a taint commit: 503 `state-write-failed`.
@@ -65,10 +61,10 @@ fn taken(lines: &Lines) -> Vec<String> {
 /// second's registry holds none. Answers the first, the second and the welcome of each.
 async fn first_stored(name: &str, run: &str) -> (Rig, Rig, Welcome, Welcome) {
     let first = rig(&format!("{name}_first"));
-    let at_first = first.pooled("host-a", "burst").await.unwrap();
+    let at_first = first.hello("host-a", "burst").await.unwrap();
     let second = Rig::second(&first, &format!("{name}_second"));
-    let at_second = second.pooled("host-a", "burst").await.unwrap();
-    let told = first.beat((&first.pool, None), "host-a", &at_first, residue(run));
+    let at_second = second.hello("host-a", "burst").await.unwrap();
+    let told = first.beat("host-a", &at_first, residue(run));
     assert!(told.await.unwrap().taint_ack);
     assert_eq!(first.binding("host-a")["taint_run_id"], run);
     assert!(second.held("host-a").unwrap().taint().is_none());
@@ -116,11 +112,11 @@ async fn a_registry_behind_the_store_takes_the_stored_taint_when_its_commit_is_r
 #[tokio::test]
 async fn a_registry_behind_the_store_ends_the_taint_the_store_no_longer_holds() {
     let first = rig("resync_end_first");
-    let at_first = first.pooled("host-a", "burst").await.unwrap();
-    let told = first.beat((&first.pool, None), "host-a", &at_first, residue("r1"));
+    let at_first = first.hello("host-a", "burst").await.unwrap();
+    let told = first.beat("host-a", &at_first, residue("r1"));
     assert!(told.await.unwrap().taint_ack);
     let second = Rig::second(&first, "resync_end_second");
-    let at_second = second.pooled("host-a", "burst").await.unwrap();
+    let at_second = second.hello("host-a", "burst").await.unwrap();
     let held = second.held("host-a").unwrap();
     assert_eq!(held.taint(), Some(&held_residue("r1")));
     let ended = says(&first, "host-a", &at_first, false).await.unwrap();

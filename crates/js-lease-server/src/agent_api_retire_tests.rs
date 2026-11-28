@@ -36,7 +36,7 @@ async fn a_full_pool_admits_a_new_id_once_the_lost_old_id_is_retired() {
         first.join(name, false).await;
     }
     for server in [&first, &second] {
-        let refused = hello(server, "host-5", None).await;
+        let refused = hello(server, "host-5").await;
         assert_eq!(refusal(refused), (403, "pool-full"));
     }
     let old = host("host-1");
@@ -50,7 +50,7 @@ async fn a_full_pool_admits_a_new_id_once_the_lost_old_id_is_retired() {
     assert_eq!(first.agents.retire(&old).await, Ok(true));
     assert_eq!(first.jobs.read_node(&old).unwrap(), None, "the row");
     assert!(first.agents.registry.own_host(&old).is_none(), "the record");
-    let admitted = hello(&second, "host-5", None).await.unwrap();
+    let admitted = hello(&second, "host-5").await.unwrap();
     assert_eq!(admitted.epoch, 1);
 
     let commits = first.commits();

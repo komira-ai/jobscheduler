@@ -33,13 +33,9 @@ pub(crate) struct Claims {
     records: BTreeSet<usize>,
 }
 
-/// The actions that start a launch of `record` in the pool of `settings`: the join token,
-/// valid for the pool's token life, then the acquire, to the provider the record names.
+/// The actions that start a launch of `record` in the pool of `settings`: the acquire, to
+/// the provider the record names.
 fn launch_actions(record: &Record, settings: &Settings) -> impl Iterator<Item = Action> {
-    let mint = Action::Mint {
-        host: record.name.clone(),
-        valid_for: settings.token_life(),
-    };
     let provider = settings.provider_of(record.provider_id().as_ref()).provider;
     let acquire = record.acquire.clone().map(|acquire| {
         Action::Acquire(Box::new(AcquirePlan {
@@ -52,7 +48,7 @@ fn launch_actions(record: &Record, settings: &Settings) -> impl Iterator<Item = 
             lifetime: settings.lifetime(),
         }))
     });
-    [Some(mint), acquire].into_iter().flatten()
+    acquire.into_iter()
 }
 
 /// The offer `record` was launched from, as a request's fit judges it: the stored shape,
@@ -192,8 +188,8 @@ impl Pass<'_> {
     }
 
     /// Forgets the launches the provider told to wait that no request waits for any more:
-    /// no waiting request was matched to them. Nothing was sent for one, so its token is
-    /// revoked and its network key forgotten and the record simply goes; kept, it would be
+    /// no waiting request was matched to them. Nothing was sent for one, so its network key
+    /// is forgotten and the record simply goes; kept, it would be
     /// retried at its time and launch a machine for nobody, or, in a pool that does not
     /// launch, stay counted for good.
     ///
@@ -532,7 +528,6 @@ impl Pass<'_> {
                     record.launched_at = now;
                     record.retry_at = None;
                     record.attempt += 1;
-                    record.token_expires = Some(now.plus(settings.token_life()));
                     self.actions.extend(launch_actions(record, settings));
                     sent += 1;
                 }
@@ -715,7 +710,7 @@ impl Pass<'_> {
             phase: Phase::Launching,
             since: self.now,
             launched_at: self.now,
-            token_expires: Some(self.now.plus(settings.token_life())),
+            token_expires: None,
             cloud_id: None,
             retry_at: None,
             attempt: 0,

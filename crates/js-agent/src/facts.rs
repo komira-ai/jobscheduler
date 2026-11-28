@@ -780,7 +780,6 @@ fn accepted(gpus: Gpus) -> Result<Gpus, String> {
         labels: BTreeMap::new(),
         phase: Phase::Serving,
         held: Vec::new(),
-        accepts_host_credential: false,
         identity: None,
     };
     probe

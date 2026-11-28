@@ -1,6 +1,6 @@
 //! The scaler's records and the hosts the registry refused to remove, kept in the state store
 //! (`--store`; SQLite with the dev flag here, and Postgres in `store_postgres.rs`), and the
-//! first start's import of the four files a server without the setting keeps beside the lease
+//! first start's import of the three files a server without the setting keeps beside the lease
 //! file. Time is the test's clock and the ticks are stepped; nothing sleeps and no network is
 //! touched.
 
@@ -57,23 +57,10 @@ fn agents_file(reason: &str) -> String {
     )
 }
 
-/// The join tokens file: an unused token (digest `a`) and one used by [`HOST`] (digest `b`).
-fn joins_file() -> String {
-    format!(
-        "version = 1\n\n[[join]]\nhash = \"{}\"\nprovider = \"burst\"\ninstance_id = \"js-unused\"\nexpires_at_ms = {}\n\n[[join]]\nhash = \"{}\"\nprovider = \"burst\"\ninstance_id = \"{HOST}\"\nexpires_at_ms = {}\nused_by = \"{HOST}\"\ncredential_expires_at_ms = {}\n",
-        digest('a'),
-        T0 + 600_000,
-        digest('b'),
-        T0 + 600_000,
-        T0 + 86_400_000
-    )
-}
-
-/// The four files beside the state file of `scratch`: the bindings, the join tokens, the
+/// The three files beside the state file of `scratch`: the bindings, the
 /// records (none of them in flight) and one host to remove. Returns the records' text.
-fn the_four_files(scratch: &Scratch) -> String {
+fn the_three_files(scratch: &Scratch) -> String {
     write_beside(scratch, ".agents", &agents_file("residue"));
-    write_beside(scratch, ".joins", &joins_file());
     RecordsFile::new(records_path(scratch))
         .save(&Records::default())
         .unwrap();
@@ -130,25 +117,28 @@ async fn scaler_records_are_committed_before_the_provider_is_called() {
     assert_eq!(at_launch.instances.len(), 1);
     let name = at_launch.instances[0].name.clone();
     let script = account.launches()[0].user_data().unwrap().to_owned();
-    assert!(script.contains(&format!("burst:{name}")), "{script}");
+    assert!(
+        script.contains(&format!("--host-id \"{name}\"")),
+        "{script}"
+    );
     assert!(at_launch.instances[0].acquire.is_some());
     assert!(!records_path(&h.scratch).exists(), "no records file");
 }
 
-/// Asserts that the first start over an empty store imports the four files once: the store
+/// Asserts that the first start over an empty store imports the three files once: the store
 /// then holds exactly the host's binding (credential digest, instance, taint, cordon), the
 /// cordon's row in the job store and the mark that the cordons were carried over, the
-/// two join-token rows (the used one with its host and credential time), the records file's
+/// records file's
 /// text, the host to remove, and the marker. A restart, with the bindings file edited since,
 /// changes nothing in the store (its revision is the same) and reads the binding from the
 /// store, not from the file. The files are left as they were. It catches an import that
 /// misses a file, one that runs again at the next start or reads an edited file, and a
 /// server that deletes or rewrites the files.
 #[tokio::test]
-async fn first_boot_on_an_empty_store_imports_the_four_files_once() {
+async fn first_boot_on_an_empty_store_imports_the_three_files_once() {
     let scratch = Scratch::new("scaler_store_import");
     account(&scratch);
-    let records = the_four_files(&scratch);
+    let records = the_three_files(&scratch);
     let source = text_in(&scratch, "live", "initialise", Kept::Store);
     // The store reads the server's clock, so the cordon end the file holds on the server's
     // clock is the store's time too.
@@ -160,14 +150,10 @@ async fn first_boot_on_an_empty_store_imports_the_four_files_once() {
         .map(|(key, _)| key)
         .collect();
     let binding = format!("hosts/binding/{HOST}");
-    let unused = format!("hosts/join/{}", digest('a'));
-    let used = format!("hosts/join/{}", digest('b'));
     let expected = [
         RECORDS_KEY,
         UNREMOVED_KEY,
         binding.as_str(),
-        unused.as_str(),
-        used.as_str(),
         IMPORTED,
         // The job store's schema marker: the job store is in this store.
         "meta/jobs/schema",
@@ -190,26 +176,6 @@ async fn first_boot_on_an_empty_store_imports_the_four_files_once() {
             "taint_reason": "residue",
             "taint_check": "tmp-files",
             "cordon_until_ms": CORDON_UNTIL,
-        })
-    );
-    assert_eq!(
-        json_at(&*store, &unused),
-        json!({
-            "version": 1,
-            "provider": "burst",
-            "instance_id": "js-unused",
-            "expires_at_ms": T0 + 600_000,
-        })
-    );
-    assert_eq!(
-        json_at(&*store, &used),
-        json!({
-            "version": 1,
-            "provider": "burst",
-            "instance_id": HOST,
-            "expires_at_ms": T0 + 600_000,
-            "used_by": HOST,
-            "credential_expires_at_ms": T0 + 86_400_000,
         })
     );
     let stored = store.get(RECORDS_KEY).unwrap().unwrap().value;

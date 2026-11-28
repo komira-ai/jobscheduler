@@ -6,13 +6,13 @@ use std::net::IpAddr;
 use js_lease_server::is_private_address;
 use serde_json::json;
 
-use crate::agents_support::JOIN;
 use crate::config_support::{PoolText, file, load, quoted, server};
 use crate::pools_support::{Options, Rig, a10};
 use crate::support::{Harness, Scratch, request};
 
 /// Asserts that both routes answer on `server.listen` with no token and are 404 on the
-/// agent port, which a launched host may reach. It catches a status route left on the
+/// agent port, which a launched host may reach (404 for a host's certificate, 401
+/// `host-certificate-required` for none). It catches a status route left on the
 /// agent port.
 #[tokio::test]
 async fn the_status_routes_are_on_the_listen_port_only_and_need_no_token() {
@@ -25,9 +25,17 @@ async fn the_status_routes_are_on_the_listen_port_only_and_need_no_token() {
     for path in ["/v1/pools", "/status"] {
         let reply = rig.get(path).await;
         assert_eq!(reply.status, 200, "{path}");
-        let agent = rig.running.agent_addr().unwrap();
-        let reply = request(agent, "GET", path, Some(JOIN), None).await;
+        // A host with its certificate finds no such route on the agent port; a caller with
+        // none is refused before routing.
+        let reply = rig.get_on_agent_port(path, Some("burst-1")).await;
         assert_eq!(reply.status, 404, "{path}");
+        let reply = rig.get_on_agent_port(path, None).await;
+        assert_eq!(reply.status, 401, "{path}");
+        assert_eq!(
+            reply.json(),
+            serde_json::json!({ "error": "host-certificate-required" }),
+            "{path}"
+        );
     }
     rig.assert_clean();
 }

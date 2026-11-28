@@ -89,15 +89,14 @@ fn a_first_install_whose_verify_fails_rolls_back_with_success_and_leaves_no_unit
     assert_retired(&rig);
 }
 
-/// A server that does not take the hook's credential as the host's (the agent was never
-/// welcomed, so the hook presents the join token) gives the host no work: the unit is stopped
-/// with no cordon asked for, for each code that says so.
+/// A server that does not take the hook's certificate as the host's (the agent was never
+/// admitted) gives the host no work: the unit is stopped with no cordon asked for, for each
+/// code that says so.
 #[test]
-fn a_server_that_does_not_take_the_credential_as_the_hosts_lets_the_stop_go_ahead() {
+fn a_server_that_does_not_take_the_certificate_as_the_hosts_lets_the_stop_go_ahead() {
     for (n, code) in [
-        "host-credential-required",
-        "join-token-not-admitted",
-        "join-token-expired",
+        "host-certificate-required",
+        "certificate-host-mismatch",
         "http-401",
     ]
     .into_iter()

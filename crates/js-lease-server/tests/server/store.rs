@@ -241,9 +241,9 @@ async fn a_store_with_an_elastic_pool_starts_and_writes_no_records_file() {
     assert!(!records_path(&h.scratch).exists(), "no records file");
 }
 
-/// Asserts that agent registration from the flags, whose bindings and join tokens the store
+/// Asserts that agent registration from the flags, whose bindings the store
 /// keeps, starts over a SQLite store with the dev flag and serves, and that a tick writes no
-/// agent state or join token file beside the state file. It catches a guard that still
+/// agent state file beside the state file. It catches a guard that still
 /// refuses agent registration with a store setting, and a store mode that writes the files.
 #[tokio::test]
 async fn agent_registration_starts_over_a_store_and_writes_no_files() {

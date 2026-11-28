@@ -13,7 +13,7 @@ use js_state::postgres::test_database;
 use serde_json::{Value, json};
 use tokio::runtime::Runtime;
 
-use crate::agents_support::{JOIN, Session, entry, hosts, job_hello, job_host_args, post};
+use crate::agents_support::{Session, entry, hosts, job_hello, job_host_args, post};
 use crate::jobs_support::{
     JobBody, commands, exited, job_agent, job_state, left_the_queue, running, submit_body,
 };
@@ -101,7 +101,7 @@ impl Agent {
         let session = self.session.as_ref().expect("the agent said hello");
         let mut body = session.beat();
         body["jobs"] = json!(self.listing());
-        let reply = post(server, "/v1/agent/heartbeat", Some(JOIN), &body).await;
+        let reply = post(server, "/v1/agent/heartbeat", None, &body).await;
         assert_eq!(reply.status, 200, "{}: {}", self.host, reply.body);
         let reply = reply.json();
         let (starts, stops) = commands(&reply);
@@ -315,13 +315,13 @@ fn an_agent_clear_that_reaches_the_other_server_ends_the_taint() {
 
         let mut tainted = session.beat();
         tainted["taint"] = residue("r1");
-        let reply = post(&first, "/v1/agent/heartbeat", Some(JOIN), &tainted).await;
+        let reply = post(&first, "/v1/agent/heartbeat", None, &tainted).await;
         assert_eq!(reply.status, 200, "{}", reply.body);
         assert_eq!(reply.json()["taint_ack"], true);
 
         let mut cleared = session.beat();
         cleared["taint_cleared"] = residue("r1");
-        let reply = post(&second, "/v1/agent/heartbeat", Some(JOIN), &cleared).await;
+        let reply = post(&second, "/v1/agent/heartbeat", None, &cleared).await;
         assert_eq!(reply.status, 200, "{}", reply.body);
         assert_eq!(reply.json()["taint_cleared_ack"], true);
         first.running.shutdown().await.unwrap();

@@ -97,40 +97,23 @@ async fn a_taint_stored_through_one_server_survives_another_servers_save() {
     assert_ne!(written["cordon_until_ms"], Value::Null);
 }
 
-/// Asserts that a hello refused for `host-bound` writes nothing: server A binds `host-a` to the
-/// pool's credential, and a hello of the host to server B with a one-time token (another
-/// credential) is judged on the binding row B read, before the token is used: 403 `host-bound`,
-/// no commit at all, the binding row at the version it had, and the token unused. It catches a
-/// hello that uses the token or writes its binding before the registry has judged it (and then
-/// has to undo them, when it can).
+/// Asserts that a hello refused for `host-live` writes nothing: server A holds `host-a` live,
+/// and the hello of the host's certificate to server B is judged on the session B read from the
+/// rows: 409 `host-live`, no commit at all, and the binding row at the version it had. It
+/// catches a hello that writes its binding before the registry has judged it.
 #[tokio::test]
-async fn a_hello_refused_for_host_bound_leaves_the_binding_and_the_token_alone() {
+async fn a_hello_refused_for_host_live_leaves_the_binding_alone() {
     let world = World::new();
-    let a = world.server("binding_bound_a", Kind::KEPT);
-    let b = world.server("binding_bound_b", Kind::KEPT);
+    let a = world.server("binding_live_a", Kind::KEPT);
+    let b = world.server("binding_live_b", Kind::KEPT);
     a.join("host-a").await;
-    let minted = b
-        .agents
-        .joins
-        .mint(
-            InstanceIdentity {
-                provider: "lambdalabs".into(),
-                instance_id: "i-1".into(),
-            },
-            Duration::from_secs(600),
-        )
-        .unwrap();
-    let who = Credential::of_token(&minted.token);
     let version = row(&world, "host-a").unwrap().version;
     let commits = world.commits();
 
-    let body = Ok(hello_body("host-a"));
-    let refused = serve_hello(&b.agents, who.clone(), Some(who.clone()), body, &|| ()).await;
-    assert_eq!(said(&refused.unwrap_err()), (403, "host-bound"));
+    let refused = b.hello("host-a").await;
+    assert_eq!(said(&refused.unwrap_err()), (409, "host-live"));
     assert_eq!(world.commits(), commits, "nothing was committed");
     assert_eq!(row(&world, "host-a").unwrap().version, version);
-    let unused = b.agents.joins.serves(&who, "host-a");
-    assert_eq!(unused, Err(crate::join_tokens::JoinRefusal::NotAdmitted));
 }
 
 /// Asserts that a hello whose binding write loses the row's version is refused and writes
@@ -153,7 +136,7 @@ async fn a_hello_whose_binding_write_loses_the_version_is_refused_and_applies_no
         holder: None,
     };
     b.agents.registry.set_cordon(&host, Some(&cordon)).unwrap();
-    rival_writes(&world, "host-a", &b.who, true);
+    rival_writes(&world, "host-a", &who_of("host-a"), true);
     let commits = world.commits();
 
     let refused = b.hello("host-a").await.unwrap_err();
@@ -184,7 +167,7 @@ async fn a_hello_whose_binding_write_loses_the_version_is_refused_and_applies_no
 async fn the_first_hello_of_a_host_never_overwrites_a_binding_written_in_between() {
     let world = World::new();
     let b = world.server("binding_absent_b", Kind::KEPT);
-    rival_writes(&world, "host-a", &b.who, false);
+    rival_writes(&world, "host-a", &who_of("host-a"), false);
     let commits = world.commits();
 
     let refused = b.hello("host-a").await.unwrap_err();
@@ -268,9 +251,9 @@ async fn a_hosts_read_of_itself_takes_the_host_from_the_rows() {
     let session = a.join("host-a").await;
     assert_eq!(b.holds("host-a"), None);
     let read = |agents: &Arc<Agents>, host: &str| {
-        let certified = Some(Extension(CertifiedHost(id(host))));
+        let certified = Extension(CertifiedHost(id(host)));
         let target = axum::extract::Path(host.to_owned());
-        own_host::show(State(Arc::clone(agents)), (None, certified), target)
+        own_host::show(State(Arc::clone(agents)), certified, target)
     };
 
     let shown = read(&b.agents, "host-a").await;

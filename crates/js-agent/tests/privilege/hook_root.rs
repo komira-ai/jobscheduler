@@ -44,7 +44,7 @@ fn params(tree: &Path, root: &Path, update: bool) -> Params {
             "cordon_lease_secs = 300\ncordon_max_secs = 17355\ndrain_wait_secs = 3600\n",
             "defer_retry_secs = 300\nrelease_link = \"{tree}/current\"\n",
             "unit = \"js-agent-crun.service\"\nstate_dir = \"{tree}/state\"\n",
-            "flags_file = \"{tree}/flags\"\ntoken_file = \"{tree}/token\"\nruntime = \"crun\"\n",
+            "flags_file = \"{tree}/flags\"\nruntime = \"crun\"\n",
             "prepare_timeout_secs = 3900\ncutover_timeout_secs = 4320\nverify_timeout_secs = 615\n",
             "rollback_timeout_secs = 8220\ncleanup_timeout_secs = 120\nverify_deadline_secs = 9000\n",
             "\"updater.artifact_digest\" = \"sha256:{digest}\"\n",

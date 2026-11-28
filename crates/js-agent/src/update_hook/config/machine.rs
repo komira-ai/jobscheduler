@@ -3,9 +3,9 @@
 //!
 //! Where the lease server is, and the host id the agent registers under, come from the flags
 //! file now in place, read as `js-agent --flags-file` reads it (the same words as the update
-//! hook's: see [`Machine`]); the host authenticates by its own certificate and key when the flags
-//! file names `--host-cert` and `--host-key` (no bearer), else by the host credential in the
-//! agent's state root, else by the token file. Nothing here is an environment variable.
+//! hook's: see [`Machine`]); the host authenticates by its own certificate and key, which the
+//! flags file names with `--host-cert` and `--host-key`. Nothing here is an environment
+//! variable.
 
 use std::path::Path;
 use std::time::Duration;
@@ -31,12 +31,7 @@ use crate::update_hook::ArgsError;
 /// The flags file cannot be used (see the update hook's `flags_file` errors), or no valid host
 /// id can be had. The text starts with the params key, `flags_file`.
 fn lease_of(params: &Params, machine: &Machine<'_>) -> Result<Box<dyn Lease>, String> {
-    let mut connect = connect_with(
-        &params.flags_file,
-        &params.state_root,
-        &params.token_file,
-        machine,
-    )?;
+    let mut connect = connect_with(&params.flags_file, machine)?;
     let id = match connect.host_id.take() {
         Some(id) => id,
         None => {

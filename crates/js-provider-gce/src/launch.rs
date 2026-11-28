@@ -414,7 +414,7 @@ pub struct Scheduling {
 }
 
 /// The boot payload of an inserted instance, as one metadata item: the bytes the machine
-/// reads at boot. They can hold a join token, so the `Debug` text says how many there are
+/// reads at boot. They can hold a secret, so the `Debug` text says how many there are
 /// and never what they are.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Payload(String);

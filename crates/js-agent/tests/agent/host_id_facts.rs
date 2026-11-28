@@ -231,8 +231,10 @@ fn started(text: Option<FileFacts>, extra: &[&str]) -> (String, String, Option<V
     let args = [
         "--server",
         "http://127.0.0.1:1",
-        "--token-file",
-        "/nonexistent/token",
+        "--host-cert",
+        "/nonexistent/host.crt",
+        "--host-key",
+        "/nonexistent/host.key",
         "--pool",
         "farm",
     ];

@@ -10,7 +10,6 @@ use std::process::{ExitCode, Stdio};
 use js_lease_server::{Cli, Config, Tunings};
 use rustix::process::{Pid, Signal, kill_process};
 
-use crate::agents_support::JOIN;
 use crate::config_support::{PoolText, file, load, refusal, server};
 use crate::support::{Scratch, TOKEN, base_args, config, request};
 
@@ -31,10 +30,7 @@ arch = "x86_64"
 /// The flags of a server with agent registration over [`POOL`], and `extra` after them.
 fn args(scratch: &Scratch, extra: &[&str]) -> Vec<OsString> {
     let mut args = base_args(scratch);
-    let tokens = scratch.write("agent-tokens", &format!("{JOIN}\n"), 0o600);
     scratch.write("agent-pool.toml", POOL, 0o644);
-    args.push("--agent-token-file".into());
-    args.push(tokens.into_os_string());
     args.extend(extra.iter().map(OsString::from));
     args
 }

@@ -21,11 +21,9 @@ fn restarted() -> Rig {
     rig
 }
 
-/// Whether the log holds a launch (a mint or an acquire).
+/// Whether the log holds a launch (an acquire).
 fn launched(rig: &Rig) -> bool {
-    rig.log()
-        .iter()
-        .any(|entry| entry.starts_with("mint:") || entry.starts_with("acquire:"))
+    rig.log().iter().any(|entry| entry.starts_with("acquire:"))
 }
 
 /// Asserts that no machine is launched for a request the restored machine fits, on the

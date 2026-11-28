@@ -30,8 +30,8 @@ pub use host_id::{FactsError, HostIdFlags, resolve_host_id};
 )]
 pub struct Cli {
     /// The lease server, such as `https://leases.example:7300`. Plain `http://` is
-    /// accepted for a loopback host only: the join token never crosses a network in
-    /// clear.
+    /// accepted for a loopback host only: the host certificate is presented in a TLS
+    /// handshake, which a plain connection has none of.
     #[arg(long, value_name = "URL")]
     pub server: String,
     /// The IP address of the `--server` host, given beside its name (`--server-address=192.0.2.10`;
@@ -50,40 +50,30 @@ pub struct Cli {
     /// name the host's server and pool.
     #[arg(long, value_name = "PATH")]
     pub flags_file: Option<PathBuf>,
-    /// A file holding the pool's join token, or the one-time token minted for this
-    /// instance: a regular file owned by the user running the agent, mode 0600 or 0400.
-    /// The token is sent only in the `Authorization` header. Without `--state-root` a
-    /// one-time token is this host's credential for as long as the host stays registered,
-    /// so the agent leaves the file in place: it reads it again at every start. With a
-    /// state root, the first hello of a host that joins with a one-time token is answered
-    /// with a host credential that replaces the token (the server retires it): the agent
-    /// keeps the credential in the state root and sends it from then on. Required unless
-    /// `--host-cert` and `--host-key` are given, which the agent then presents in place of
-    /// any token (the token file is not read), or `--state-root` holds a usable
-    /// `host-credential` file, which the agent then sends in place of a token; with a
-    /// credential a token file given beside it is read as before.
-    #[arg(long, value_name = "PATH")]
+    /// Accepted and ignored: a host is identified by its certificate (`--host-cert` and
+    /// `--host-key`). Kept so a unit that still passes it starts; the agent warns once and
+    /// never reads the file.
+    #[arg(long, value_name = "PATH", hide = true)]
     pub token_file: Option<PathBuf>,
     /// A PEM file with the host's own client certificate (the leaf first, then the rest of
     /// its chain), which hostkeeper keeps and renews in place. With `--host-key` the agent
-    /// presents it in the TLS handshake as its credential, sends no `Authorization` header,
-    /// and neither reads `--token-file` nor keeps a host credential; both files are read
-    /// again before each request, so a renewed pair is used without a restart. The server
-    /// must be `https://` and started with the CA that signs these certificates
-    /// (`--agent-client-ca`). Both flags or neither.
+    /// presents it in the TLS handshake: it is the only way a host is identified, and the
+    /// agent refuses to start without it. Both files are read again before each request, so
+    /// a renewed pair is used without a restart. The server must be `https://` and started
+    /// with the CA that signs these certificates (`--agent-client-ca`). Required, with
+    /// `--host-key`.
     #[arg(long, value_name = "PATH", requires = "host_key")]
     pub host_cert: Option<PathBuf>,
     /// The PEM private key of `--host-cert`, after following links a regular file owned by
     /// root or by the user running the agent, with no access for others and not writable by
     /// its group (mode 0600, 0400, 0640 or 0440, so that hostkeeper can share it through a
-    /// group the agent's account belongs to). Both flags or neither.
+    /// group the agent's account belongs to). Required, with `--host-cert`.
     #[arg(long, value_name = "PATH", requires = "host_cert")]
     pub host_key: Option<PathBuf>,
-    /// A file holding the instance this machine runs on, as one line `PROVIDER:INSTANCE_ID`
-    /// (`lambdalabs:0920582c...`), read when the agent starts. The hello names the
-    /// instance, which a one-time join token minted for that instance requires: the server
-    /// refuses a hello that names another instance or none. The file is not secret.
-    #[arg(long, value_name = "PATH")]
+    /// Accepted and ignored: a host is identified by its certificate (`--host-cert` and
+    /// `--host-key`). Kept so a unit that still passes it starts; the agent warns once and
+    /// never reads the file.
+    #[arg(long, value_name = "PATH", hide = true)]
     pub instance_file: Option<PathBuf>,
     /// The cloud's signed identity of this machine, sent in the hello (see
     /// [`crate::identity`]).
@@ -233,12 +223,9 @@ pub struct Cli {
     /// path native runs may not read.
     #[arg(long, value_name = "PATH")]
     pub run_files_root: Option<PathBuf>,
-    /// The directory the agent keeps its taint marker and its host credential in: it must be
+    /// The directory the agent keeps its taint marker and its hold files in: it must be
     /// owned by the user running the agent, with no permission for group or others.
-    /// Required unless `--no-jobs`. Giving it also lets a server issue the host a
-    /// credential at its first hello (a file `host-credential`, mode 0600, which the agent
-    /// writes before it uses it and reads at start; a file that is there and unusable stops
-    /// the agent). A host that a post-job check found unclean is tainted for good:
+    /// Required unless `--no-jobs`. A host that a post-job check found unclean is tainted for good:
     /// the marker survives a restart, and no code of the agent removes it. It may not be,
     /// or lie in, a mount root or the scratch root (a job with a read-write mount could
     /// delete the marker). It must be on a disk of its own: a job that fills a disk the
@@ -453,6 +440,25 @@ static REMOVED: [(&str, &str); 4] = [
     ),
 ];
 
+/// One warning for each flag the agent accepts and ignores that `cli` gives: `--token-file`
+/// and `--instance-file`, which a unit installed before hosts were identified by their
+/// certificate alone still passes. The files are never opened.
+pub(crate) fn ignored_flags(cli: &Cli) -> Vec<String> {
+    [
+        ("--token-file", &cli.token_file),
+        ("--instance-file", &cli.instance_file),
+    ]
+    .into_iter()
+    .filter(|(_, given)| given.is_some())
+    .map(|(flag, _)| {
+        format!(
+            "{flag} is accepted and ignored: agents are admitted by host certificate only \
+             (--host-cert and --host-key)"
+        )
+    })
+    .collect()
+}
+
 /// The refusal of the first removed flag (see [`REMOVED`]) that `args` gives, the program
 /// name first, as `--flag value` or `--flag=value`; none when it gives none. The words are
 /// read the way clap reads them, so a removed name that is the value of another flag is not
@@ -504,7 +510,7 @@ pub fn removed_flag(args: &[OsString]) -> Option<String> {
 /// The agent's flags as the command line `args` (the program name first) gives them, a
 /// `--flags-file` among them read as the agent reads it: by the user `euid`, with the facts of
 /// a file from `read`. The update hook and the cordon verb read the host's own agent flags
-/// through it, so they find the server, the host and the credential the agent finds.
+/// through it, so they find the server, the host and the certificate the agent finds.
 ///
 /// # Errors
 ///

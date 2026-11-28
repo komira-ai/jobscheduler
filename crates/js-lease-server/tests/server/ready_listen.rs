@@ -459,6 +459,8 @@ async fn sigterm_to_a_serving_server_makes_the_route_say_draining_until_it_exits
     let ready = ready.expect("the program printed the route's address");
     let logged = Lines::of(child.0.stderr.take().unwrap());
     assert_eq!(readyz(ready).await, (200, "ready".to_owned()));
+    // The program serves TLS (the agent flags), which the stall's client trusts.
+    crate::support::trust_addrs(&scratch, &[listen]);
     let stalled = stall_in_body(listen).await;
     sigterm(&child);
     logged.until("the readiness route answers 503");

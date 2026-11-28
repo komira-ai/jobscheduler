@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use js_elastic::{
     AcquireId, AcquireRequest, Acquired, BootPlan, BootStep, CapacityProvider, CatalogFuture, Held,
-    HostName, HostRef, Offer, PriceUnit, ProviderError, Released, SchedulerId, Secret,
+    HostName, HostRef, Offer, PriceUnit, ProviderError, Released, SchedulerId,
 };
 use js_lease_server::bootstrap::{BootSecrets, payload};
 use js_lease_server::network::{DefaultMode, NetworkMode};
@@ -133,8 +133,7 @@ fn launch(mode: &dyn NetworkMode, provider: &dyn CapacityProvider, name: &HostNa
     let mut boot: BootPlan = plan(name);
     boot.host_prep = provider.host_prep(&offer());
     boot.network = contribution.steps;
-    let secrets =
-        BootSecrets::new(Secret::new("join-MARK".to_owned()), contribution.secrets).unwrap();
+    let secrets = BootSecrets::new(contribution.secrets).unwrap();
     let body = payload(&boot, &secrets, provider.payload_limit()).unwrap();
     let request = AcquireRequest {
         acquire: AcquireId::new("acquire-1").unwrap(),

@@ -21,7 +21,7 @@ use js_types::HostId;
 use postgres::{Client, NoTls};
 use serde_json::{Value, json};
 
-use crate::agents_support::{JOIN, Session, job_hello, job_host_args};
+use crate::agents_support::{Session, job_hello, job_host_args};
 use crate::jobs_support::{JobBody, commands, exited, running};
 use crate::store_support::store_file;
 use crate::support::{Harness, Reply, Scratch, TOKEN, guard, request};
@@ -341,10 +341,10 @@ pub async fn due(job: SocketAddr, jobs: &[String], agent: &Agent) -> bool {
     false
 }
 
-/// POSTs `body` to `path` on the agent listener at `server` with the join token.
+/// POSTs `body` to `path` on the agent listener at `server`, presenting the certificate of the host the body names.
 pub async fn post_at(server: SocketAddr, path: &str, body: &Value) -> Reply {
     let bytes = body.to_string().into_bytes();
-    request(server, "POST", path, Some(JOIN), Some(&bytes)).await
+    request(server, "POST", path, None, Some(&bytes)).await
 }
 
 /// An id source that mints as [`RandomIds`] and, once armed, parks one mint until released.

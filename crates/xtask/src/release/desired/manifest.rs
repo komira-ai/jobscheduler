@@ -85,8 +85,10 @@ pub enum Param {
 }
 
 /// The hook's `params`: exactly the keys of `js_agent::update_hook::params::KEYS`, which the hook
-/// requires (a test holds the two equal and has the hook's reader accept the table). The bounds
-/// mirror the ones of `hook.timeoutSecs`.
+/// requires, plus the retired `token_file`: this release's hook ignores it, and the hook of an
+/// earlier release, which may read these params during the update, still requires it (a test
+/// holds the sets equal and has the hook's reader accept the table). The bounds mirror the ones
+/// of `hook.timeoutSecs`.
 pub const PARAMS: [(&str, Param); 17] = [
     ("unit", Param::Text(RUN_UNIT)),
     ("state_dir", Param::Text("/var/lib/js-agent-update")),

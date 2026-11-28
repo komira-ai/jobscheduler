@@ -65,7 +65,7 @@ fn script(disk_gib: u64) -> String {
 }
 
 /// Asserts the whole masked script of a Lambda machine on a 512 GiB disk against a file:
-/// the provider's steps come first, before the join token is written, and the agent's unit
+/// the provider's steps come first, before the network steps run, and the agent's unit
 /// that follows requires the scratch mount the steps made, at the path they made it.
 #[test]
 fn the_lambda_script_matches_its_golden_file() {
@@ -77,14 +77,14 @@ fn the_lambda_script_matches_its_golden_file() {
 }
 
 /// Asserts that on a disk too small for the scratch image and the reserve the script
-/// logs why and fails before the join token is written, so the agent never starts.
+/// logs why and fails before the network steps run, so the agent never starts.
 #[test]
-fn a_disk_too_small_fails_the_script_before_the_token_is_written() {
+fn a_disk_too_small_fails_the_script_before_the_network_steps() {
     let text = script(100);
     let lines: Vec<&str> = text.lines().collect();
     let failed = lines.iter().position(|line| *line == "false").unwrap();
-    let identity = lines.iter().position(|line| *line == "# identity").unwrap();
-    assert!(failed < identity, "{text}");
+    let network = lines.iter().position(|line| *line == "# network").unwrap();
+    assert!(failed < network, "{text}");
     assert!(lines[failed - 1].starts_with("logger -p user.err -t js-bootstrap "));
     assert!(!lines.iter().any(|line| line.starts_with("mount ")));
 }

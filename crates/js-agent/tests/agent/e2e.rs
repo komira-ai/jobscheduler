@@ -8,8 +8,8 @@ use js_agent::{Connector, Dialer, Login, Session, Step};
 use js_agent_wire::ProtocolRange;
 use serde_json::json;
 
-use crate::server::{CLIENT_TOKEN, JOIN, OtherMajors, Redirect, Server, Spy};
-use crate::support::{AMD_MAC, Host, PROFILER_CMD, Scratch, code, hello, lowest, mac_host};
+use crate::server::{CLIENT_TOKEN, OtherMajors, Redirect, Server, Spy};
+use crate::support::{AMD_MAC, Host, PROFILER_CMD, code, hello, lowest, mac_host};
 
 fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
@@ -41,7 +41,7 @@ fn agent_registers_and_the_host_is_listed() {
     let flags = ["--host-id", "mac-1", "--label", "rack=r1"];
     let agent = crate::server::Agent::spawn(
         server.url(),
-        server.join_file(),
+        server.identities(),
         &flags,
         mac_without_gpu,
         Dialer,
@@ -75,7 +75,7 @@ fn an_apple_gpu_host_is_admitted_and_listed() {
     let server = Server::start("e2e_apple", &[]);
     let agent = crate::server::Agent::spawn(
         server.url(),
-        server.join_file(),
+        server.identities(),
         &["--host-id", "mac-gpu"],
         mac_host,
         Dialer,
@@ -90,31 +90,29 @@ fn an_apple_gpu_host_is_admitted_and_listed() {
     agent.stop();
 }
 
-/// Asserts what each refusal of the real server does to the agent: a wrong token (401, no
-/// body), a pool the server does not have (403 `unknown-pool`), a Linux host for a pool
-/// that asks for `os=macos` (403 `shape-not-accepted`) and a second agent claiming a host
-/// id that is live (409 `host-live`, which is waited out, not fatal). The first three end
-/// the program with status 2 after one request and register nothing; none prints a token.
+/// Asserts what each refusal of the real server does to the agent: a hello for a host id other
+/// than the one its certificate names (403 `certificate-host-mismatch`), a pool the server does
+/// not have (403 `unknown-pool`), a Linux host for a pool that asks for `os=macos` (403
+/// `shape-not-accepted`) and a second agent claiming a host id that is live (409 `host-live`,
+/// which is waited out, not fatal). The first three end the program with status 2 after one
+/// request and register nothing.
 #[test]
 fn refused_hello_is_fatal_per_code() {
     let server = Server::start("e2e_refused", &[]);
-    let dir = Scratch::new("e2e_refused_files");
-    let wrong = "wrong-token-0123456789-abcdefghijklmnop";
-    let bad_token = dir.write("wrong", wrong, 0o600);
 
-    let agent = crate::server::Agent::spawn(
+    let agent = crate::server::Agent::spawn_certified_as(
+        "mac-2",
         server.url(),
-        bad_token,
+        server.identities(),
         &["--host-id", "mac-1"],
         mac_host,
         Dialer,
     );
     let ran = agent.finish();
     assert_eq!(ran.status(), code(2), "{}", ran.err);
-    let said =
-        "js-agent: the server refused the hello with status 401 (unreadable); not retrying\n";
+    let said = "js-agent: the server refused the hello with status 403 (certificate-host-mismatch); \
+                not retrying\n";
     assert_eq!(ran.err, said);
-    assert!(!ran.err.contains(wrong) && !ran.err.contains(JOIN));
     assert!(
         server.get("/v1/hosts")["hosts"]
             .as_array()
@@ -124,7 +122,7 @@ fn refused_hello_is_fatal_per_code() {
 
     let nowhere = crate::server::Agent::spawn(
         server.url(),
-        server.join_file(),
+        server.identities(),
         &["--host-id", "mac-1", "--pool", "nowhere"],
         mac_host,
         Dialer,
@@ -135,7 +133,7 @@ fn refused_hello_is_fatal_per_code() {
 
     let linux = crate::server::Agent::spawn(
         server.url(),
-        server.join_file(),
+        server.identities(),
         &["--host-id", "linux-1"],
         crate::support::linux_host,
         Dialer,
@@ -157,7 +155,7 @@ fn refused_hello_is_fatal_per_code() {
 
     let first = crate::server::Agent::spawn(
         server.url(),
-        server.join_file(),
+        server.identities(),
         &["--host-id", "mac-1"],
         mac_host,
         Dialer,
@@ -165,7 +163,7 @@ fn refused_hello_is_fatal_per_code() {
     first.next_wait();
     let second = crate::server::Agent::spawn(
         server.url(),
-        server.join_file(),
+        server.identities(),
         &["--host-id", "mac-1"],
         mac_host,
         Dialer,
@@ -196,7 +194,7 @@ fn server_restart_agent_keeps_its_session() {
     let address = Arc::new(Mutex::new(server.url()));
     let agent = crate::server::Agent::spawn(
         server.url(),
-        server.join_file(),
+        server.identities(),
         &["--host-id", "mac-1"],
         mac_host,
         Redirect(address.clone()),
@@ -228,7 +226,7 @@ fn server_that_lost_the_host_makes_the_agent_say_hello_again() {
     let address = Arc::new(Mutex::new(server.url()));
     let agent = crate::server::Agent::spawn(
         server.url(),
-        server.join_file(),
+        server.identities(),
         &["--host-id", "mac-1"],
         mac_host,
         Redirect(address.clone()),
@@ -268,7 +266,7 @@ fn sigterm_marks_the_host_draining() {
     let server = Server::start("e2e_drain", &[]);
     let agent = crate::server::Agent::spawn(
         server.url(),
-        server.join_file(),
+        server.identities(),
         &["--host-id", "mac-1"],
         mac_host,
         Dialer,
@@ -290,37 +288,45 @@ fn sigterm_marks_the_host_draining() {
     );
 }
 
-/// Asserts that the hello rate limit is waited out as the server says: with a burst of one
-/// the second agent's hello is answered 429 with a `Retry-After` of the refill interval,
-/// the agent waits at least that (not the half second of its own backoff), and once the
-/// server's clock has passed it the hello is admitted. It catches an agent that ignores the
-/// header and retries into the limit, and a client that drops the header.
+/// Asserts that the hello rate limit is waited out as the server says. The limit is of a host
+/// (the credential of its certificate): with a burst of one, a second hello for the host id
+/// that is live is answered 429 with a `Retry-After` of the refill interval, the agent waits at
+/// least that (not the half second of its own backoff), and once the server's clock has passed
+/// it the hello is past the limit and meets the registry's answer (409 `host-live`, waited out
+/// at the agent's own backoff, which has doubled once). It catches an agent that ignores the header and retries into the
+/// limit, and a client that drops the header.
 #[test]
 fn a_rate_limited_hello_waits_for_retry_after() {
     let server = Server::start(
         "e2e_rate",
         &["--agent-hello-burst", "1", "--agent-hello-interval", "10s"],
     );
-    let spawn = |host: &'static str| {
+    let spawn = || {
         crate::server::Agent::spawn(
             server.url(),
-            server.join_file(),
-            &["--host-id", host],
+            server.identities(),
+            &["--host-id", "mac-1"],
             mac_host,
             Dialer,
         )
     };
-    let first = spawn("mac-1");
+    let first = spawn();
     assert_eq!(first.next_wait(), secs(5));
-    let second = spawn("mac-2");
+    let second = spawn();
     assert_eq!(second.next_wait(), secs(10));
     server.clock.advance(secs(10));
     second.elapse();
-    assert_eq!(second.next_wait(), secs(5));
-    assert_eq!(server.host("mac-2")["state"], "live");
+    // The backoff doubled at the 429 (500 ms, raised to the 10 s asked), so the 409 waits 1 s.
+    assert_eq!(second.next_wait(), secs(1));
+    assert_eq!(server.host("mac-1")["state"], "live");
     let ran = second.stop();
     assert!(
         ran.err.contains("hello failed: status 429 (rate-limited)"),
+        "{}",
+        ran.err
+    );
+    assert!(
+        ran.err.contains("hello failed: status 409 (host-live)"),
         "{}",
         ran.err
     );
@@ -334,8 +340,13 @@ fn a_rate_limited_hello_waits_for_retry_after() {
 #[test]
 fn the_servers_unsupported_protocol_refusal_reaches_the_session() {
     let server = Server::start("e2e_majors", &[]);
+    let identities = server.identities();
     let mut transport = OtherMajors(ProtocolRange { min: 2, max: 3 })
-        .connect(&server.url(), &Login::Token(server.join_file()), None)
+        .connect(
+            &server.url(),
+            &Login::HostCertificate(identities.of("mac-1")),
+            Some(identities.server_cert()),
+        )
         .unwrap();
     let mut session = Session::new(hello("mac-1"), &mut *transport, lowest());
     let Step::Fatal(fatal) = session.tick() else {
@@ -348,16 +359,15 @@ fn the_servers_unsupported_protocol_refusal_reaches_the_session() {
     assert_eq!(fatal.supported, Some(ProtocolRange::THIS));
 }
 
-/// Asserts that neither the join token nor the session secret the server issued appears on
-/// stdout or stderr of a whole run, including a refused one, and that the token is not in
-/// the program's arguments (only the path of its file is).
+/// Asserts that neither the client token nor the session secret the server issued appears on
+/// stdout or stderr of a whole run.
 #[test]
-fn token_absent_from_stderr() {
+fn secrets_absent_from_stderr() {
     let server = Server::start("e2e_secrets", &[]);
     let spy = Spy::default();
     let agent = crate::server::Agent::spawn(
         server.url(),
-        server.join_file(),
+        server.identities(),
         &["--host-id", "mac-1"],
         mac_host,
         spy.clone(),
@@ -377,7 +387,6 @@ fn token_absent_from_stderr() {
     );
     for text in [&ran.err, &ran.out] {
         assert!(!text.contains(secret), "{text}");
-        assert!(!text.contains(JOIN), "{text}");
         assert!(!text.contains(CLIENT_TOKEN), "{text}");
     }
     assert!(ran.err.contains("registered, epoch 1"), "{}", ran.err);

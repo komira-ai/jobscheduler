@@ -11,7 +11,8 @@ use std::time::Duration;
 use js_types::CordonHolder;
 use rustix::process::{Pid, Signal, kill_process};
 
-use super::http::enrol;
+use super::http::{as_host, enrol};
+use crate::server::Server;
 
 /// How long the test waits for the next line of the verb before it fails. It is a guard
 /// against a hang, never an expectation: a healthy verb prints within milliseconds, and the
@@ -48,12 +49,13 @@ struct Running {
     lines: Receiver<String>,
 }
 
-/// Starts `js-agent cordon` on `server` for the host `mac-1`, with `more` flags beside the
-/// ones every run needs.
-fn start(url: &str, state: &str, more: &[&str]) -> Running {
+/// Starts `js-agent cordon` on `server` for the host `mac-1`, with its certificate, and `more`
+/// flags beside the ones every run needs.
+fn start(server: &Server, more: &[&str]) -> Running {
     let child = Command::new(env!("CARGO_BIN_EXE_js-agent"))
-        .args(["cordon", "--server", url, "--state-root", state])
-        .args(["--host-id", "mac-1", "--for", "1h", "--lease-secs", "30"])
+        .arg("cordon")
+        .args(as_host(server))
+        .args(["--for", "1h", "--lease-secs", "30"])
         .args(more)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -96,7 +98,7 @@ fn finish_lifted(mut run: Running) {
     assert_eq!(err, "");
 }
 
-/// Asserts the program end to end: `js-agent cordon` finds the credential in the state root,
+/// Asserts the program end to end: `js-agent cordon` presents the host's certificate and key,
 /// places a cordon on the real server (which then shows it), prints `cordoned` with the holder
 /// it made for the run (`cordon-<its pid>-<unix millis>`, a valid holder id) and `idle`, and
 /// on SIGTERM lifts it, prints `lifted`, exits 0 with nothing on standard error and leaves the
@@ -107,8 +109,7 @@ fn finish_lifted(mut run: Running) {
 #[test]
 fn the_binary_cordons_a_host_and_lifts_the_cordon_on_sigterm() {
     let enrolled = enrol("cordon_binary");
-    let (url, state) = (enrolled.server.url(), enrolled.state_flag());
-    let run = start(&url, &state, &[]);
+    let run = start(&enrolled.server, &[]);
 
     let cordoned = next_line(&run.lines).expect("the verb ended before it cordoned");
     let prefix = format!("cordoned host=mac-1 holder=cordon-{}-", run.verb.child.id());
@@ -134,8 +135,7 @@ fn the_binary_cordons_a_host_and_lifts_the_cordon_on_sigterm() {
 #[test]
 fn the_binary_lifts_the_cordon_on_sighup() {
     let enrolled = enrol("cordon_binary_hup");
-    let (url, state) = (enrolled.server.url(), enrolled.state_flag());
-    let run = start(&url, &state, &["--holder", "ops-session"]);
+    let run = start(&enrolled.server, &["--holder", "ops-session"]);
 
     let cordoned = next_line(&run.lines).expect("the verb ended before it cordoned");
     assert_eq!(

@@ -53,10 +53,10 @@ fn a_restart_over_the_store_keeps_every_host_binding() {
     over_every_store(world::restart);
 }
 
-/// A stop of the server in a burst of hellos that consume join tokens; see
+/// A stop of the server in a burst of certificate hellos; see
 /// [`world::hellos`].
 #[test]
-fn a_hello_that_consumes_a_join_token_commits_the_binding_with_it() {
+fn a_certificate_hello_commits_the_binding() {
     over_every_store(world::hellos);
 }
 

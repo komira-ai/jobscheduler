@@ -1,4 +1,4 @@
-//! The verb's flags, the credential it picks, the host it names, and the exit status and
+//! The verb's flags, the identity it presents, the host it names, and the exit status and
 //! words of each way the window can end, over a fake lease server and a clock moved by hand.
 
 use std::cell::RefCell;
@@ -12,8 +12,7 @@ use js_agent::own_host::{HeldLease, LeaseError};
 use js_client::{ClientError, HostIdentity};
 
 use super::fakes::{Call, Effect, FakeLease, FakePace, Kind};
-use crate::jobs::private;
-use crate::support::{Host, Scratch, code, linux_host, mac_host};
+use crate::support::{Host, code, linux_host, mac_host};
 
 /// The holder a run that gives none is handed by the entry point.
 pub(super) const DEFAULT_HOLDER: &str = "cordon-4242-1700000000000";
@@ -91,11 +90,13 @@ fn drive(flags: &[&str], host: &Host, lease: &FakeLease, pace: &mut FakePace) ->
 }
 
 /// The flags every run needs besides the ones under test.
-const BASE: [&str; 6] = [
+const BASE: [&str; 8] = [
     "--server",
     "http://127.0.0.1:7300",
-    "--token-file",
-    "/token",
+    "--host-cert",
+    "/host.crt",
+    "--host-key",
+    "/host.key",
     "--host-id",
     "h-1",
 ];
@@ -143,7 +144,7 @@ fn help_lists_the_lines_the_statuses_and_the_lapse_of_a_killed_verb() {
 
 /// Asserts the usage errors: no server, no `--for`, a `--for` that is not a duration, a
 /// `--lease-secs` of 0 and of one more than the server's cut, a flag the verb does not have,
-/// no credential, a host id that cannot be one and a machine id that cannot be read each end
+/// no host certificate, a host id that cannot be one and a machine id that cannot be read each end
 /// with status 2 and a message naming what is wrong, and ask the connector for nothing. It
 /// catches a wrong flag that starts a window and one that reports a usage error as a server
 /// error.
@@ -179,14 +180,16 @@ fn a_wrong_flag_or_file_ends_with_status_2_and_names_the_flag() {
                 "h-1",
             ],
             &bare,
-            "--token-file: required unless --state-root holds a host credential",
+            "--host-cert and --host-key: required, here or in the --flags-file that names them",
         ),
         (
             vec![
                 "--server",
                 "http://127.0.0.1:1",
-                "--token-file",
-                "/t",
+                "--host-cert",
+                "/c",
+                "--host-key",
+                "/k",
                 "--for",
                 "1h",
                 "--host-id",
@@ -199,8 +202,10 @@ fn a_wrong_flag_or_file_ends_with_status_2_and_names_the_flag() {
             vec![
                 "--server",
                 "http://127.0.0.1:1",
-                "--token-file",
-                "/t",
+                "--host-cert",
+                "/c",
+                "--host-key",
+                "/k",
                 "--for",
                 "1h",
             ],
@@ -217,7 +222,7 @@ fn a_wrong_flag_or_file_ends_with_status_2_and_names_the_flag() {
     }
 }
 
-/// Asserts that a connector that refuses a flag (an unreadable `--ca-cert`, a token file of
+/// Asserts that a connector that refuses a flag (an unreadable `--ca-cert`, a host key of
 /// the wrong mode) ends the verb with status 2 and the connector's own words. It catches a
 /// connection error reported as a server error, which would send an operator to the server.
 #[test]
@@ -238,77 +243,28 @@ fn a_flag_the_connector_refuses_ends_with_status_2() {
     assert_eq!(ran.seen[0].ca_cert, Some(PathBuf::from("/ca.pem")));
 }
 
-/// Writes a host credential of `text` in a state root and returns its directory.
-fn state_with(files: &Scratch, name: &str, text: Option<&str>) -> PathBuf {
-    let dir = private(files, name);
-    if let Some(text) = text {
-        files.write(&format!("{name}/host-credential"), text, 0o600);
-    }
-    dir
-}
-
-/// Asserts which file the bearer is read from: the host credential of `--state-root` when it
-/// holds one, even beside a `--token-file` (the agent too sends the credential once it has
-/// one, and the pool token is refused on these routes); the token file when the state root
-/// holds none; and, when the credential file is there and is not a credential, a usage error
-/// that names the file and does not print its content. It catches a verb that sends the token
-/// of a host that has already swapped it, and one that echoes a file it could not read.
+/// Asserts that `--state-root` and `--token-file` are accepted and ignored: given beside the
+/// host certificate and key, the connector is told the certificate and nothing else, and a
+/// state root that is not there changes nothing. It catches a verb that reads a file of an
+/// earlier login, or one that refuses the flags a script written for an earlier release gives.
 #[test]
-fn the_host_credential_of_the_state_root_wins_over_the_token_file() {
-    let files = Scratch::new("cordon_verb_credentials");
-    let kept = state_with(&files, "kept", Some(&"c".repeat(64)));
-    let empty = state_with(&files, "empty", None);
-    let broken = state_with(&files, "broken", Some("not a credential!"));
-    let (kept_flag, empty_flag, broken_flag) = (
-        kept.display().to_string(),
-        empty.display().to_string(),
-        broken.display().to_string(),
-    );
+fn the_state_root_and_the_token_file_are_accepted_and_ignored() {
     let host = linux_host();
-    let more = |root: &str| {
-        [
-            "--server",
-            "https://leases.example:7300",
-            "--token-file",
-            "/token",
-            "--state-root",
-            root,
-            "--host-id",
-            "h-1",
-            "--for",
-            "1m",
-        ]
-        .map(str::to_owned)
-        .to_vec()
-    };
-    let run_on = |root: &str| {
-        let flags = more(root);
-        let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
-        drive(&flags, &host, &FakeLease::new(), &mut FakePace::new())
-    };
-
-    let ran = run_on(&kept_flag);
+    let flags = with(&[
+        "--token-file",
+        "/no/such/token",
+        "--state-root",
+        "/no/such/state",
+        "--for",
+        "1m",
+    ]);
+    let ran = drive(&flags, &host, &FakeLease::new(), &mut FakePace::new());
     assert_eq!(ran.status, code(0), "{}", ran.err);
     assert_eq!(
-        ran.seen,
-        [Seen {
-            server: "https://leases.example:7300".to_owned(),
-            login: Login::Token(kept.join("host-credential")),
-            ca_cert: None,
-            host: "h-1".to_owned(),
-        }]
+        ran.seen[0].login,
+        Login::HostCertificate(HostIdentity::new("/host.crt", "/host.key"))
     );
-
-    let ran = run_on(&empty_flag);
-    assert_eq!(ran.status, code(0), "{}", ran.err);
-    assert_eq!(ran.seen[0].login, Login::Token(PathBuf::from("/token")));
-
-    let ran = run_on(&broken_flag);
-    assert_eq!(ran.status, code(2));
-    assert!(ran.err.contains("host-credential"), "{}", ran.err);
-    assert!(ran.err.contains("does not hold a host credential"));
-    assert!(!ran.err.contains("not a credential!"), "{}", ran.err);
-    assert!(ran.seen.is_empty());
+    assert!(ran.err.is_empty(), "{}", ran.err);
 }
 
 /// Asserts the host the verb cordons: the one `--host-id` names, and without it the id the
@@ -322,8 +278,10 @@ fn the_default_host_is_the_one_the_agent_registers_under() {
         let more = [
             "--server",
             "http://127.0.0.1:1",
-            "--token-file",
-            "/t",
+            "--host-cert",
+            "/c",
+            "--host-key",
+            "/k",
             "--for",
             "1m",
         ];
@@ -587,8 +545,10 @@ fn the_facts_file_names_the_host_to_cordon() {
     let more = [
         "--server",
         "http://127.0.0.1:1",
-        "--token-file",
-        "/t",
+        "--host-cert",
+        "/c",
+        "--host-key",
+        "/k",
         "--host-id-from-facts",
         "/facts.json",
         "--for",
@@ -615,8 +575,10 @@ fn a_facts_file_that_cannot_be_used_or_a_second_id_flag_is_a_usage_error() {
     let refused = [
         "--server",
         "http://127.0.0.1:1",
-        "--token-file",
-        "/t",
+        "--host-cert",
+        "/c",
+        "--host-key",
+        "/k",
         "--host-id-from-facts",
         "/facts.json",
         "--for",
@@ -637,14 +599,10 @@ fn a_facts_file_that_cannot_be_used_or_a_second_id_flag_is_a_usage_error() {
 }
 
 /// Asserts that `--host-cert` and `--host-key` are what the verb connects with: the connector
-/// is told the host certificate, even beside a state root holding a host credential and a
-/// `--token-file`, and the verb needs neither. It catches a verb that sends a bearer on a host
-/// hostkeeper manages, which the server would not take for the host's own credential.
+/// is told the host certificate and key it was given, over a loopback or any other server.
+/// It catches a verb that connects with another identity than the one hostkeeper keeps.
 #[test]
-fn the_host_certificate_wins_over_the_credential_and_the_token_file() {
-    let files = Scratch::new("cordon_verb_host_cert");
-    let root = state_with(&files, "root", Some(&"c".repeat(64)));
-    let root_flag = root.display().to_string();
+fn the_host_certificate_is_what_the_verb_sends() {
     let host = linux_host();
     let flags = [
         "--server",
@@ -658,37 +616,25 @@ fn the_host_certificate_wins_over_the_credential_and_the_token_file() {
         "--for",
         "1m",
     ];
-    let certificate_only = drive(&flags, &host, &FakeLease::new(), &mut FakePace::new());
-    assert_eq!(certificate_only.status, code(0), "{}", certificate_only.err);
-    let beside: Vec<&str> = flags
-        .iter()
-        .copied()
-        .chain(["--token-file", "/token", "--state-root", &root_flag])
-        .collect();
-    let ran = drive(&beside, &host, &FakeLease::new(), &mut FakePace::new());
+    let ran = drive(&flags, &host, &FakeLease::new(), &mut FakePace::new());
     assert_eq!(ran.status, code(0), "{}", ran.err);
-    for ran in [&certificate_only, &ran] {
-        assert_eq!(
-            ran.seen[0].login,
-            Login::HostCertificate(HostIdentity::new(
-                "/run/hostkeeper/host.pem",
-                "/run/hostkeeper/host.key"
-            ))
-        );
-    }
+    assert_eq!(
+        ran.seen[0].login,
+        Login::HostCertificate(HostIdentity::new(
+            "/run/hostkeeper/host.pem",
+            "/run/hostkeeper/host.key"
+        ))
+    );
 }
 
 /// Asserts that one of the two host flags without the other ends the verb with status 2,
-/// naming the flag that is missing, in both directions, and connects to nothing, even with a
-/// good `--token-file`.
+/// naming the flag that is missing, in both directions, and connects to nothing.
 #[test]
 fn one_host_flag_without_the_other_ends_the_verb_naming_the_other() {
     for (given, missing) in [("--host-cert", "--host-key"), ("--host-key", "--host-cert")] {
         let flags = [
             "--server",
             "https://leases.example:7300",
-            "--token-file",
-            "/token",
             given,
             "/run/hostkeeper/host.file",
             "--host-id",

@@ -299,7 +299,7 @@ fn a_day_cap_equal_to_the_least_cost_of_a_launch_allows_exactly_one() {
 /// Asserts that a pool in plan mode asks the cloud for nothing, across random demand: for 16
 /// seeds and a simulated day each, with the cloud scripted to say yes to everything and its
 /// list failing now and then, the simulation runs every action the step returns against the
-/// cloud (`Sim::tick`), so an acquire, a release or a token the step wanted would reach it.
+/// cloud (`Sim::tick`), so an acquire or a release the step wanted would reach it.
 /// The cloud records no `acquire`, no `release` and no machine, while the pool shows what
 /// it would have launched (more than a hundred plan lines in all, so the demand was real).
 /// It catches a plan mode that launches when demand is large, after a list failure, or with

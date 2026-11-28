@@ -8,7 +8,7 @@ use common::*;
 use js_elastic::HostStatus;
 use js_scaler::{CooldownReason, HostState, Mark, Phase, Records};
 
-/// Asserts that the boot clock runs from the launch, as the token's does, and not from
+/// Asserts that the boot clock runs from the launch, as the boot clock does, and not from
 /// the answer: a machine accepted ten minutes after its launch is given up on at
 /// `boot_timeout` after the launch.
 #[test]
@@ -38,14 +38,13 @@ fn a_silent_busy_host_is_not_released_by_the_boot_timeout() {
     rig.input.hosts = vec![silent];
     let actions = rig.tick(at(booted + 15 * MINUTE));
     assert_eq!(count(&actions, "Release"), 0, "{:?}", kinds(&actions));
-    assert_eq!(count(&actions, "Revoke"), 0);
     assert_eq!(rig.phase(0), Phase::Registered);
     assert!(rig.state.silent.contains_key(&plan.name));
 }
 
 /// Asserts that a host that announced less than its offer has its machine released in the
-/// step that judged its hello, whether it is quiet or busy: its token is revoked and the
-/// release asked at once, and neither is drained first. The shell holds the release call
+/// step that judged its hello, whether it is quiet or busy: the
+/// release is asked at once, and neither is drained first. The shell holds the release call
 /// itself while the host holds work (`Effects::holds_work`), so no work is cut. Catches a
 /// mismatched machine left registered while it is busy, where the registry could book more
 /// on it.
@@ -58,17 +57,13 @@ fn a_short_hello_releases_the_machine_at_once_quiet_or_busy() {
         announced.busy = busy;
         rig.input.hosts = vec![announced];
         let actions = rig.tick(at(2 * SECOND));
-        assert_eq!(
-            kinds(&actions),
-            ["Save", "Revoke", "Release"],
-            "busy {busy}"
-        );
+        assert_eq!(kinds(&actions), ["Save", "Release"], "busy {busy}");
         assert_eq!(rig.phase(0), Phase::Releasing);
     }
 }
 
-/// Asserts that a registered or draining machine the registry no longer shows is revoked
-/// and released, once the view is complete and it has been missing on two steps
+/// Asserts that a registered or draining machine the registry no longer shows is
+/// released, once the view is complete and it has been missing on two steps
 /// `unknown_hold` apart, and counted throughout: the registry forgot the host, the cloud
 /// still bills the machine.
 #[test]
@@ -77,7 +72,6 @@ fn a_machine_the_registry_forgot_is_released() {
     rig.input.hosts = Vec::new();
     rig.tick(at(3 * SECOND));
     let actions = rig.tick(at(3 * SECOND + 30 * MINUTE));
-    assert_eq!(count(&actions, "Revoke"), 1);
     assert_eq!(count(&actions, "Release"), 1);
     assert_eq!(rig.phase(0), Phase::Releasing);
 
@@ -87,7 +81,6 @@ fn a_machine_the_registry_forgot_is_released() {
     draining.state.records.instances = vec![held];
     draining.tick(at(MINUTE));
     let actions = draining.tick(at(31 * MINUTE));
-    assert_eq!(count(&actions, "Revoke"), 1);
     assert_eq!(count(&actions, "Release"), 1);
     assert_eq!(draining.phase(0), Phase::Releasing);
     assert!(draining.record(0).counts());
@@ -100,7 +93,6 @@ fn a_registered_host_marked_releasing_is_released() {
     let (mut rig, _) = registered(settings("gpu"), "i-1", 2 * SECOND);
     rig.input.hosts[0].mark = Some(Mark::Releasing);
     let actions = rig.tick(at(3 * SECOND));
-    assert_eq!(count(&actions, "Revoke"), 1);
     assert_eq!(count(&actions, "Release"), 1);
     assert_eq!(rig.phase(0), Phase::Releasing);
 }
@@ -128,7 +120,7 @@ fn a_silent_host_is_held_and_its_age_is_shown() {
 }
 
 /// Asserts that a machine the provider says it no longer has, for a host the registry
-/// does not hear from or no longer shows, is revoked, forgotten and removed and ends
+/// does not hear from or no longer shows, is forgotten and removed and ends
 /// Gone, while the same answer for a host that is live is not believed.
 #[test]
 fn a_silent_host_the_provider_cannot_find_is_settled() {
@@ -146,7 +138,6 @@ fn a_silent_host_the_provider_cannot_find_is_settled() {
     ];
     for change in changes {
         let (rig, actions) = silent(change);
-        assert_eq!(count(&actions, "Revoke"), 1);
         assert_eq!(count(&actions, "RemoveHost"), 1);
         assert_eq!(count(&actions, "ForgetNetwork"), 1);
         assert_eq!(count(&actions, "Release"), 0);
@@ -212,7 +203,7 @@ fn an_incomplete_registry_view_releases_nothing() {
     rig.input.registry_complete = false;
     for later in [3 * SECOND, HOUR, 2 * HOUR] {
         let actions = rig.tick(at(later));
-        assert_eq!(count(&actions, "Release") + count(&actions, "Revoke"), 0);
+        assert_eq!(count(&actions, "Release"), 0);
         assert_eq!(rig.phase(0), Phase::Registered);
         assert!(rig.record(0).counts());
     }
@@ -243,7 +234,6 @@ fn a_host_missing_on_two_complete_steps_is_released() {
         0
     );
     let actions = rig.tick(at(3 * SECOND + 30 * MINUTE));
-    assert_eq!(count(&actions, "Revoke"), 1);
     assert_eq!(count(&actions, "Release"), 1);
     assert_eq!(rig.phase(0), Phase::Releasing);
 }
@@ -278,7 +268,7 @@ fn a_silent_host_with_leases_still_held_is_not_released() {
     let (mut rig, _) = silent_for_a_while(false);
     for later in [3 * SECOND, 30 * MINUTE, 2 * HOUR, 2 * DAY] {
         let actions = rig.tick(at(later));
-        assert_eq!(count(&actions, "Release") + count(&actions, "Revoke"), 0);
+        assert_eq!(count(&actions, "Release"), 0);
         assert_eq!(rig.phase(0), Phase::Registered);
     }
     assert!(rig.state.silent_released.is_empty());
@@ -287,7 +277,7 @@ fn a_silent_host_with_leases_still_held_is_not_released() {
 /// Asserts that a silent elastic host whose leases were given up is drained and marked
 /// for release once it has been silent `unknown_hold`, to the millisecond, as an idle one
 /// is; that both are asked again while the registry has not marked it; that once the
-/// registry shows it marked releasing it is revoked and released and named in the state
+/// registry shows it marked releasing it is released and named in the state
 /// for the shell to log; and that the usual read-back then ends it Gone.
 #[test]
 fn a_silent_host_with_its_leases_given_up_is_drained_then_released_after_the_hold() {
@@ -305,7 +295,7 @@ fn a_silent_host_with_its_leases_given_up_is_drained_then_released_after_the_hol
 
     rig.input.hosts[0].mark = Some(Mark::Releasing);
     let actions = rig.tick(at(3 * SECOND + 32 * MINUTE));
-    assert_eq!(kinds(&actions), ["Save", "Revoke", "Release"]);
+    assert_eq!(kinds(&actions), ["Save", "Release"]);
     assert_eq!(rig.phase(0), Phase::Releasing);
     assert_eq!(rig.state.silent_released, vec![name.clone()]);
     assert_eq!(rig.state.refused, 0);
@@ -350,7 +340,7 @@ fn welcome_lost() -> (Rig, String) {
 
 /// Asserts that a host that said hello and never heartbeated since, and books nothing, is
 /// a failed boot: left alone a millisecond before `boot_timeout` after the launch,
-/// revoked and released at it, with the boot-failure cooldown started, as for a boot that
+/// released at it, with the boot-failure cooldown started, as for a boot that
 /// never said hello.
 #[test]
 fn a_lost_welcome_is_released_at_boot_timeout_and_starts_the_cooldown() {
@@ -360,7 +350,7 @@ fn a_lost_welcome_is_released_at_boot_timeout_and_starts_the_cooldown() {
     assert!(rig.state.records.cooldowns.is_empty());
 
     let actions = rig.tick(at(15 * MINUTE));
-    assert_eq!(kinds(&actions), ["Save", "Revoke", "Release"]);
+    assert_eq!(kinds(&actions), ["Save", "Release"]);
     assert_eq!(rig.phase(0), Phase::Releasing);
     let cooldown = rig.state.records.cooldowns["gpu"];
     assert_eq!(cooldown.reason, CooldownReason::BootFailed);
@@ -377,7 +367,7 @@ fn a_host_that_heartbeated_once_is_not_released_at_boot_timeout() {
     rig.input.hosts[0].heard_since_hello = true;
     for later in [15 * MINUTE - 1, 15 * MINUTE, 3 * SECOND + 30 * MINUTE] {
         let actions = rig.tick(at(later));
-        assert_eq!(count(&actions, "Release") + count(&actions, "Revoke"), 0);
+        assert_eq!(count(&actions, "Release"), 0);
         assert_eq!(rig.phase(0), Phase::Registered);
     }
     assert!(rig.state.records.cooldowns.is_empty());
@@ -401,7 +391,7 @@ fn a_host_heard_before_a_re_hello_is_not_released_at_boot_timeout() {
     rig.input.hosts[0].state = HostState::Lost;
     for later in [20 * MINUTE, 20 * MINUTE + 1, 3 * HOUR] {
         let actions = rig.tick(at(later));
-        assert_eq!(count(&actions, "Release") + count(&actions, "Revoke"), 0);
+        assert_eq!(count(&actions, "Release"), 0);
         assert_eq!(rig.phase(0), Phase::Registered);
     }
     assert!(rig.state.records.cooldowns.is_empty());
@@ -424,7 +414,7 @@ fn a_host_recorded_before_the_upgrade_is_not_released_at_boot_timeout() {
     assert!(rig.record(0).seen_live);
     for later in [15 * MINUTE - 1, 15 * MINUTE, 3 * HOUR] {
         let actions = rig.tick(at(later));
-        assert_eq!(count(&actions, "Release") + count(&actions, "Revoke"), 0);
+        assert_eq!(count(&actions, "Release"), 0);
         assert_eq!(rig.phase(0), Phase::Registered);
     }
     assert!(rig.state.records.cooldowns.is_empty());
@@ -443,7 +433,7 @@ fn a_lost_welcome_host_shown_live_before_it_lapsed_is_still_released_at_boot_tim
     rig.input.hosts[0].state = HostState::Lost;
     assert_eq!(kinds(&rig.tick(at(15 * MINUTE - 1))), ["Save"]);
     let actions = rig.tick(at(15 * MINUTE));
-    assert_eq!(kinds(&actions), ["Save", "Revoke", "Release"]);
+    assert_eq!(kinds(&actions), ["Save", "Release"]);
     assert_eq!(rig.phase(0), Phase::Releasing);
     assert_eq!(
         rig.state.records.cooldowns["gpu"].reason,
@@ -486,7 +476,7 @@ fn a_host_that_never_heartbeated_but_books_work_is_not_released_at_boot_timeout(
         let (mut rig, name) = welcome_lost();
         work(&mut rig, &name);
         let actions = rig.tick(at(15 * MINUTE));
-        assert_eq!(count(&actions, "Release") + count(&actions, "Revoke"), 0);
+        assert_eq!(count(&actions, "Release"), 0);
         assert_eq!(rig.phase(0), Phase::Registered);
         assert!(rig.state.records.cooldowns.is_empty());
     }

@@ -3,7 +3,7 @@
 //!
 //! A binding holds which credential and instance a host id was bound to when the host was
 //! admitted. Without it, the first hello for the id after a restart would take the id from
-//! anyone holding a join token. The server keeps the bindings itself and hands them back to
+//! any host presenting a certificate. The server keeps the bindings itself and hands them back to
 //! the registry at start (a host that reported a taint, or is cordoned, is put back as an
 //! awaiting host, bound as it was).
 //!
@@ -27,7 +27,7 @@
 //!
 //! [[host]]
 //! id = "builder-7"
-//! credential = "<64 hex digits: SHA-256 of the join token>"
+//! credential = "<64 hex digits: the digest of the credential the host was admitted with>"
 //! instance_provider = "aws"      # with instance_id, when the first hello named one
 //! instance_id = "i-0abc"
 //! taint_reason = "residue"       # when the host reported a taint
@@ -780,8 +780,7 @@ impl BindingStore {
     }
 
     /// Commits `writes` to the store in one transaction, and answers its revision: the version
-    /// of the binding written when `writes` is a change's one write, or the last of the writes
-    /// of a hello's transaction ([`crate::join_tokens::JoinTokens::admit_writing`]); none when
+    /// of the binding written when `writes` is a change's one write; none when
     /// there was nothing to commit. A file keeps nothing here (its writes are empty): the save
     /// after the change writes it.
     ///

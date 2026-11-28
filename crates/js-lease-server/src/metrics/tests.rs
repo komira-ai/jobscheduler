@@ -234,15 +234,18 @@ async fn the_text_of_a_known_state_is_the_golden() {
     assert_eq!(text, include_str!("golden.prom"), "the scrape now:\n{text}");
 }
 
-/// Asserts that the text names none of the fixture's job ids, the client token or the agents'
-/// join token: a scrape shows states, codes, hosts, pools and marks only.
+/// Asserts that the text names none of the fixture's job ids or the client token: a scrape
+/// shows states, codes, hosts, pools and marks only.
 #[tokio::test]
 async fn the_text_holds_no_job_id_or_token() {
     let fixture = fixture("no_secrets").await;
     let text = scraped(&fixture).await;
-    let tokens = [String::from_utf8(TOKEN.to_vec()).unwrap(), "j".repeat(40)];
-    for secret in fixture.ids.iter().chain(&tokens) {
-        assert!(!text.contains(secret.as_str()), "{secret} is in:\n{text}");
+    let tokens = [String::from_utf8(TOKEN.to_vec()).unwrap()];
+    for (at, secret) in fixture.ids.iter().chain(&tokens).enumerate() {
+        assert!(
+            !text.contains(secret.as_str()),
+            "secret {at} (the job ids, then the token) is in the scrape"
+        );
     }
 }
 

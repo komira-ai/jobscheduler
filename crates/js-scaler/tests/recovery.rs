@@ -31,7 +31,7 @@ fn one_machine(mut limits: Settings) -> Settings {
 }
 
 /// Asserts that a scaler restarted from the records file it wrote before the call neither
-/// acquires nor mints again, and that when the list then shows the machine the record
+/// acquires again, and that when the list then shows the machine the record
 /// moves on to booting with the provider's id, still without either.
 #[test]
 fn a_restart_between_the_record_and_the_call_launches_nothing_twice() {
@@ -130,7 +130,7 @@ fn an_unknown_answer_then_a_list_showing_the_machine_makes_it_booting() {
 }
 
 /// Asserts the hold on an acquire whose machine is not listed: nothing happens a
-/// millisecond before `unknown_hold`; at it the record fails, its token is revoked and
+/// millisecond before `unknown_hold`; at it the record fails, it is released and
 /// its network key forgotten, and it still counts against a cap of one machine; the next
 /// clean list a millisecond short of `unknown_hold` after the first changes nothing; the
 /// one at `unknown_hold` settles it, and only then may the request have a machine.
@@ -141,7 +141,7 @@ fn a_machine_never_listed_fails_after_the_hold_and_counts_until_two_clean_lists(
     assert_eq!(rig.phase(0), Phase::Launching);
 
     let actions = rig.tick(at(30 * MINUTE));
-    assert_eq!(kinds(&actions), ["Save", "Revoke", "ForgetNetwork"]);
+    assert_eq!(kinds(&actions), ["Save", "ForgetNetwork"]);
     assert_eq!(rig.phase(0), Phase::Failed);
     assert_eq!(rig.record(0).clean_lists, 1);
     assert_eq!(rig.state.blocked["gpu"], Blocked::MaxInstances);
@@ -150,7 +150,7 @@ fn a_machine_never_listed_fails_after_the_hold_and_counts_until_two_clean_lists(
     assert_eq!(rig.record(0).clean_lists, 1);
 
     let actions = rig.tick(at(60 * MINUTE));
-    assert_eq!(kinds(&actions), ["Save", "Mint", "Acquire"]);
+    assert_eq!(kinds(&actions), ["Save", "Acquire"]);
     assert_eq!(rig.record(0).clean_lists, 2);
     assert_eq!(rig.state.records.instances.len(), 2);
 
@@ -171,9 +171,7 @@ fn an_unresolved_acquire_fails_after_the_hold_counted_from_the_answer() {
 }
 
 /// Asserts that a machine listed after its acquire failed is released and never
-/// uncounted until a read by id says it is gone: its token is revoked on the way into
-/// release too (a restart may have lost the revoke made when it failed; a second revoke
-/// of a missing token is a no-op), it holds the cap of one machine throughout, and the
+/// uncounted until a read by id says it is gone: it holds the cap of one machine throughout, and the
 /// request gets a machine only once it is confirmed gone.
 #[test]
 fn a_machine_listed_after_failing_is_released_and_stays_counted() {
@@ -183,9 +181,9 @@ fn a_machine_listed_after_failing_is_released_and_stays_counted() {
 
     rig.pool().held = Some(vec![listed(&plan, "i-late", HostStatus::Active)]);
     let actions = rig.tick(at(31 * MINUTE));
-    assert_eq!(kinds(&actions), ["Save", "Revoke", "Release"]);
+    assert_eq!(kinds(&actions), ["Save", "Release"]);
     assert_eq!(
-        actions[2],
+        actions[1],
         Action::Release {
             host: plan.name.clone(),
             id: HostRef("i-late".to_owned())
@@ -214,24 +212,21 @@ fn a_late_acceptance_of_a_failed_acquire_is_released() {
     rig.tick(at(30 * MINUTE));
     rig.input.acquired = vec![accepted(&plan, "i-late")];
     let actions = rig.tick(at(31 * MINUTE));
-    assert_eq!(kinds(&actions), ["Save", "Revoke", "Release"]);
+    assert_eq!(kinds(&actions), ["Save", "Release"]);
     assert_eq!(rig.phase(0), Phase::Releasing);
     assert_eq!(rig.record(0).cloud_id.as_deref(), Some("i-late"));
 }
 
 /// Asserts that `Capacity` refuses the offer for this step: the request is launched at
 /// the next cheapest offer in the same step, the refused record is gone with the step, and
-/// its token and network key are cleaned up.
+/// its network key is cleaned up.
 #[test]
 fn a_capacity_refusal_tries_the_next_offer() {
     let (mut rig, plan) = launched(settings("gpu"));
     rig.pool().offers = vec![offer("a10", 60), offer("b", 90)];
     rig.input.acquired = vec![answered(&plan, refusal(RefusalCode::Capacity))];
     let actions = rig.tick(at(SECOND));
-    assert_eq!(
-        kinds(&actions),
-        ["Save", "Revoke", "ForgetNetwork", "Mint", "Acquire"]
-    );
+    assert_eq!(kinds(&actions), ["Save", "ForgetNetwork", "Acquire"]);
     assert_eq!(rig.state.records.instances.len(), 1);
     assert_eq!(rig.phase(0), Phase::Launching);
     assert_eq!(acquires(&actions)[0].offer.id, "b");
@@ -239,7 +234,7 @@ fn a_capacity_refusal_tries_the_next_offer() {
 }
 
 /// Asserts that a pool whose only offer is refused for capacity over and over keeps no
-/// refused record and mints no token in the step that learns of the refusal, and asks again
+/// refused record and launches nothing in the step that learns of the refusal, and asks again
 /// only when `acquire_retry` (a minute) has passed: the records hold the one launch in flight
 /// and no more, after a thousand rounds. It catches a refused record that is kept, and a
 /// retry sent in the step that read the refusal.
@@ -252,7 +247,7 @@ fn a_pool_refused_for_capacity_over_and_over_keeps_its_records_bounded() {
         rig.input.acquired = vec![answered(&plan, refusal(RefusalCode::Capacity))];
         now += SECOND;
         let refusal_step = rig.tick(at(now));
-        assert_eq!(kinds(&refusal_step), ["Save", "Revoke", "ForgetNetwork"]);
+        assert_eq!(kinds(&refusal_step), ["Save", "ForgetNetwork"]);
         assert!(rig.state.records.instances.is_empty());
 
         now += MINUTE;
@@ -279,7 +274,7 @@ fn denied_and_shape_block_the_pool_for_the_cooldown() {
         rig.input.acquired = vec![answered(&plan, refusal(code))];
         let first = 5 * SECOND;
         let actions = rig.tick(at(first));
-        assert_eq!(kinds(&actions), ["Save", "Revoke", "ForgetNetwork"]);
+        assert_eq!(kinds(&actions), ["Save", "ForgetNetwork"]);
         assert_eq!(rig.state.blocked["gpu"], expected);
 
         let actions = rig.tick(at(first + 10 * MINUTE - 1));
@@ -293,7 +288,7 @@ fn denied_and_shape_block_the_pool_for_the_cooldown() {
 }
 
 /// Asserts that a launch the provider told to wait stays one machine of the request, is
-/// not sent before its time, and then goes out with a new token for the same acquire id,
+/// not sent before its time, and then goes out with the same acquire id,
 /// at the instant its time comes.
 #[test]
 fn a_deferred_acquire_is_retried_with_the_same_id_when_its_time_comes() {
@@ -310,7 +305,7 @@ fn a_deferred_acquire_is_retried_with_the_same_id_when_its_time_comes() {
 
     assert!(rig.tick(at(13 * SECOND - 1)).is_empty());
     let actions = rig.tick(at(13 * SECOND));
-    assert_eq!(kinds(&actions), ["Save", "Mint", "Acquire"]);
+    assert_eq!(kinds(&actions), ["Save", "Acquire"]);
     assert_eq!(acquires(&actions)[0].acquire, plan.acquire);
     assert_eq!(acquires(&actions)[0].name, plan.name);
     assert_eq!(rig.phase(0), Phase::Launching);
@@ -446,10 +441,9 @@ fn unknown_machines_are_adopted_as_orphans_and_never_released() {
 }
 
 /// Asserts that a failed acquire whose machine shows up after a restart from the records
-/// (by a list, or by a late acceptance) has its join token revoked when it goes into
-/// release, before the release, so the revoke made when it failed cannot have been lost.
+/// (by a list, or by a late acceptance) is released.
 #[test]
-fn a_failed_record_restarted_from_records_is_revoked_then_released() {
+fn a_failed_record_restarted_from_records_is_released() {
     let (mut rig, plan) = launched(one_machine(settings("gpu")));
     rig.tick(at(30 * MINUTE));
     assert_eq!(rig.phase(0), Phase::Failed);
@@ -464,11 +458,7 @@ fn a_failed_record_restarted_from_records_is_revoked_then_released() {
             fresh.pool().held = Some(vec![listed(&plan, "i-late", HostStatus::Active)]);
         }
         let actions = fresh.tick(at(31 * MINUTE));
-        assert_eq!(
-            kinds(&actions),
-            ["Save", "Revoke", "Release"],
-            "late {late}"
-        );
+        assert_eq!(kinds(&actions), ["Save", "Release"], "late {late}");
         assert_eq!(fresh.phase(0), Phase::Releasing);
         assert_eq!(fresh.state.refused, 0);
     }

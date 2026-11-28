@@ -27,13 +27,12 @@
 //!
 //! After every step the cell reads the machines the fake has launched. For each, it reads
 //! the launch payload through the fake's own accessor, `ElasticFake::user_data`, the boot
-//! script the server rendered, exactly as the server's tests read it: the one-time join
-//! token from the line that writes the token file, and the host id from the agent's
+//! script the server rendered, exactly as the server's tests read it: the host id from the agent's
 //! `--host-id` ([`Payload`]). Nothing reaches the agent by another way. The pool's boot
 //! time (the fake's [`js_elastic_fake::Knobs::boot`]) later, of virtual time, the cell adds
 //! an agent node for the machine, unless the cloud no longer runs it or the pool does not
-//! join ([`ElasticPool::joins`]): its bearer is that token, its host id that name, its
-//! hello names the instance `<pool>:<name>` that the token is bound to, and it announces
+//! join ([`ElasticPool::joins`]): it presents the host certificate of that name, its host id is that name, its
+//! hello names the instance `<pool>:<name>`, and it announces
 //! the server's shape with the capabilities of the boot script's agent (a container
 //! runtime and the GPU toolkit). The node is named `m000`, `m001`, ... in its cloud's
 //! launch order, after the provider's name and a dash for a cloud of

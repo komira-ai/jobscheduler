@@ -25,7 +25,7 @@ use super::writes_rig::{Fixed, Said, Via, Writes, id as job_id, said, to_json, w
 use super::{gateway_over, grpc_over};
 use crate::agent_api::job_rig::{OneClock, START_MS, tables_on};
 use crate::clock::SharedClock;
-use crate::config::clients_rig::{ClientsRig, DEFAULT_TOKEN, JOIN};
+use crate::config::clients_rig::{ClientsRig, DEFAULT_TOKEN};
 use crate::config::{Cli, Clients, Config, Entry, LiveClients, Role, parse_token};
 
 /// The token of the client `ci`.
@@ -383,14 +383,12 @@ async fn the_token_never_appears_in_debug_errors_or_logs() {
 
     let pasted: Vec<OsString> = vec!["--client-token".into(), MARKER.into()];
     let twice = rig.client_flags(&[("marker", MARKER), ("copy", MARKER)]);
-    let joined = rig.client_flags(&[("marker", JOIN)]);
     for (extra, wants) in [
         (pasted, "--client-token: entry 1: "),
         (
             twice,
             "--client-token: copy: holds the same token as --client-token marker",
         ),
-        (joined, "the two must differ"),
     ] {
         let said = rig
             .config_of_flags(&extra)
@@ -411,7 +409,7 @@ async fn the_token_never_appears_in_debug_errors_or_logs() {
     assert!(said.starts_with(wants), "{said}");
     printed.push(said);
     for text in &printed {
-        assert!(!text.contains(MARKER) && !text.contains(JOIN), "{text}");
+        assert!(!text.contains(MARKER), "{text}");
         assert!(!text.contains(DEFAULT_TOKEN), "{text}");
     }
 

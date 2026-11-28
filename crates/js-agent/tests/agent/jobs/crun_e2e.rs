@@ -500,7 +500,7 @@ impl Rig {
         machine: &Arc<CrunMachine>,
     ) -> Agent {
         let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
-        let (url, join, to) = (server.url(), server.join_file(), Redirect(address.clone()));
+        let (url, join, to) = (server.url(), server.identities(), Redirect(address.clone()));
         Agent::spawn_machine_defaulted(url, join, &flags, host, to, machine.clone())
     }
 
@@ -704,7 +704,7 @@ fn a_store_on_another_file_system_than_the_scratch_root_is_accepted() {
         let address = Arc::new(Mutex::new(server.url()));
         let agent = Agent::spawn_machine_defaulted(
             server.url(),
-            server.join_file(),
+            server.identities(),
             &flags,
             apart,
             Redirect(address),
@@ -880,7 +880,7 @@ fn an_agent_below_a_directory_others_can_write_is_refused() {
     }
     let ran = Agent::spawn_machine_defaulted(
         server.url(),
-        server.join_file(),
+        server.identities(),
         &flags,
         from_root,
         Redirect(address),
@@ -1129,7 +1129,7 @@ fn an_agent_whose_cgroups_cannot_be_set_up_exits_2() {
     let machine = CrunMachine::with_system(System::new().with_crun(Seams { cgroups, ..seams() }));
     let ran = Agent::spawn_machine_defaulted(
         server.url(),
-        server.join_file(),
+        server.identities(),
         &flags,
         host,
         Redirect(address),

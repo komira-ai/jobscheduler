@@ -15,16 +15,20 @@ use js_agent::update_hook::{
     own_host_id, run_step,
 };
 use js_agent_wire::Taint;
+use js_client::HostIdentity;
 
 use super::step_rig::as_root;
 use crate::cordon::http::{Enrolled, enrol};
+use crate::host_certs::self_signed;
 use crate::jobs::private;
+use crate::server::Server;
 use crate::support::{FakeFiles, MACHINE_ID, Scratch, linux_host};
 
 const UNIT: &str = "js-agent-crun.service";
 
 /// A tree of one test: the state directory of the hook, the staged release (an agent that prints
-/// its version), the host's flags file and join token, and a place for the params files.
+/// its version), the host's flags file and the host certificate and key it names, and a place
+/// for the params files.
 pub(super) struct Tree {
     pub(super) files: Scratch,
     pub(super) root: PathBuf,
@@ -60,10 +64,12 @@ impl Tree {
             )
             .unwrap();
         }
-        // The join token a first install needs, as the operator places it.
-        let token = root.join("token");
-        fs::write(&token, "tok-0123456789\n").unwrap();
-        fs::set_permissions(&token, fs::Permissions::from_mode(0o600)).unwrap();
+        // The host certificate and key a first install needs, as hostkeeper places them.
+        let (cert, key) = (root.join("host.crt"), root.join("host.key"));
+        fs::write(&cert, "a certificate\n").unwrap();
+        fs::set_permissions(&cert, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::write(&key, "a key\n").unwrap();
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).unwrap();
         Tree { files, root }
     }
 
@@ -86,11 +92,14 @@ impl Tree {
     }
 
     /// The params of an update from 1.3.0 (or a first install). `extra` is lines of the
-    /// agent's flags the way the old table gave them: `state_root` and `token_file` are params
-    /// keys (the tree's own state root is not there, and its token file is a good one, unless
-    /// they say otherwise), `server`, `ca_cert`, `host_id`, `host_cert` and `host_key` go to the tree's flags file, which
-    /// always names the pool, and any other line is put in the table as it is.
+    /// agent's flags the way the old table gave them: `state_root` is a params key (the tree's
+    /// own state root is not there unless it says otherwise), `server`, `ca_cert`, `host_id`,
+    /// `host_cert` and `host_key` go to the tree's flags file, which always names the pool and,
+    /// unless `extra` names others, the tree's own good host certificate and key, and, for a
+    /// first install, a server the step never asks (the agent's flags require one, and the step
+    /// reads them to find the certificate); any other line is put in the table as it is.
     pub(super) fn params(&self, previous: bool, extra: &str) -> Params {
+        let first_install = !previous;
         let previous = if previous {
             format!(
                 "\"updater.previous_release\" = \"{}/releases/1.3.0\"\n\"updater.previous_version\" = \"1.3.0\"\n",
@@ -100,14 +109,15 @@ impl Tree {
             String::new()
         };
         let mut state_root = format!("\"{}\"", self.root.join("no-such-state").display());
-        let mut token_file = format!("\"{}\"", self.root.join("token").display());
         let mut flags = vec!["--pool=farm".to_owned()];
+        let mut identity = true;
+        let mut server = first_install;
         let mut rest = String::new();
         for line in extra.lines() {
             match line.split_once(" = ") {
                 Some(("state_root", value)) => state_root = value.to_owned(),
-                Some(("token_file", value)) => token_file = value.to_owned(),
                 Some(("server", value)) => {
+                    server = false;
                     flags.push(format!("--server={}", value.trim_matches('"')))
                 }
                 Some(("ca_cert", value)) => {
@@ -117,9 +127,11 @@ impl Tree {
                     flags.push(format!("--host-id={}", value.trim_matches('"')))
                 }
                 Some(("host_cert", value)) => {
+                    identity = false;
                     flags.push(format!("--host-cert={}", value.trim_matches('"')))
                 }
                 Some(("host_key", value)) => {
+                    identity = false;
                     flags.push(format!("--host-key={}", value.trim_matches('"')))
                 }
                 Some(("host_id_from_facts", value)) => {
@@ -128,6 +140,19 @@ impl Tree {
                 _ => rest.push_str(&format!("{line}\n")),
             }
         }
+        if server {
+            flags.push("--server=https://127.0.0.1:1".to_owned());
+        }
+        if identity {
+            flags.push(format!(
+                "--host-cert={}",
+                self.root.join("host.crt").display()
+            ));
+            flags.push(format!(
+                "--host-key={}",
+                self.root.join("host.key").display()
+            ));
+        }
         fs::write(self.flags(), format!("{}\n", flags.join("\n"))).unwrap();
         fs::set_permissions(self.flags(), fs::Permissions::from_mode(0o600)).unwrap();
         Params::parse(&format!(
@@ -135,7 +160,7 @@ impl Tree {
                 "cordon_lease_secs = 300\ncordon_max_secs = 17355\ndrain_wait_secs = 3600\n",
                 "defer_retry_secs = 300\nrelease_link = \"{root}/link/current\"\n",
                 "unit = \"{unit}\"\nstate_dir = \"{root}/state\"\n",
-                "flags_file = \"{flags}\"\nstate_root = {state_root}\ntoken_file = {token_file}\n",
+                "flags_file = \"{flags}\"\nstate_root = {state_root}\n",
                 "runtime = \"crun\"\nprepare_timeout_secs = 3900\ncutover_timeout_secs = 4320\n",
                 "verify_timeout_secs = 615\nrollback_timeout_secs = 8220\n",
                 "cleanup_timeout_secs = 120\nverify_deadline_secs = 9000\n",
@@ -147,7 +172,6 @@ impl Tree {
             unit = UNIT,
             flags = self.flags().display(),
             state_root = state_root,
-            token_file = token_file,
             digest = "0123456789abcdef".repeat(4),
             staged = self.staged().display(),
             previous = previous,
@@ -173,12 +197,25 @@ impl Tree {
     }
 }
 
-/// The params lines that reach the enrolled server as its host `mac-1`.
+/// The params lines that reach the enrolled server as its host `mac-1`, by the host's
+/// certificate and key.
 pub(super) fn reaching(enrolled: &Enrolled) -> String {
+    reaching_as_mac_1(&enrolled.server, &enrolled.state)
+}
+
+/// The params lines that reach `server` as its host `mac-1`, by the host's certificate and key,
+/// with the agent's state root at `state`.
+pub(super) fn reaching_as_mac_1(server: &Server, state: &Path) -> String {
+    let identities = server.identities();
+    let identity = identities.of("mac-1");
     format!(
-        "server = \"{}\"\nstate_root = \"{}\"\nhost_id = \"mac-1\"\n",
-        enrolled.server.url(),
-        enrolled.state.display()
+        "server = \"{}\"\nca_cert = \"{}\"\nhost_cert = \"{}\"\nhost_key = \"{}\"\n\
+         state_root = \"{}\"\nhost_id = \"mac-1\"\n",
+        server.url(),
+        identities.server_cert().display(),
+        identity.cert_path().display(),
+        identity.key_path().display(),
+        state.display()
     )
 }
 
@@ -364,17 +401,13 @@ fn unreachable(why: Result<impl std::fmt::Debug, LeaseError>) -> String {
 #[test]
 fn a_lease_that_could_not_be_made_answers_every_call_with_the_reason_it_could_not() {
     let files = Scratch::new("hook-machine-broken-lease");
-    let empty_state = private(&files, "empty-state");
     let ca = files.path("no-such-ca.pem");
-    // A credential in a state root that others can read is not used.
-    let open_state = super::machine_root::open_state_root(&files);
+    let identity = self_signed(&files, "mac-1");
     let full = ConnectParams {
-        server: Some("http://127.0.0.1:1".to_owned()),
-        state_root: Some(empty_state.clone()),
-        token_file: None,
+        server: Some("https://127.0.0.1:1".to_owned()),
         ca_cert: None,
         host_id: Some("mac-1".to_owned()),
-        host_identity: None,
+        host_identity: Some(identity.clone()),
     };
     let cases = [
         (
@@ -386,43 +419,34 @@ fn a_lease_that_could_not_be_made_answers_every_call_with_the_reason_it_could_no
         ),
         (
             ConnectParams {
-                state_root: None,
+                host_identity: None,
                 ..full.clone()
             },
-            "token_file",
-        ),
-        (full.clone(), "token_file"),
-        (
-            ConnectParams {
-                state_root: Some(open_state),
-                ..full.clone()
-            },
-            "state_root: ",
+            "flags_file: the flags file names no --host-cert and --host-key",
         ),
         (
             ConnectParams {
-                token_file: Some(files.path("no-such-token")),
+                host_identity: Some(HostIdentity::new(
+                    files.path("no-such.crt"),
+                    identity.key_path(),
+                )),
                 ..full.clone()
             },
-            "token_file: ",
-        ),
-        // A state root that is not there holds no credential: the token file is read.
-        (
-            ConnectParams {
-                state_root: Some(files.path("no-such-state")),
-                token_file: Some(files.path("no-such-token")),
-                ..full.clone()
-            },
-            "token_file: ",
+            "--host-cert: ",
         ),
         (
             ConnectParams {
-                server: Some("https://127.0.0.1:1".to_owned()),
-                token_file: Some(files.write("token", "tok-0123456789", 0o600)),
                 ca_cert: Some(ca),
                 ..full.clone()
             },
             "--ca-cert: ",
+        ),
+        (
+            ConnectParams {
+                server: Some("http://127.0.0.1:1".to_owned()),
+                ..full.clone()
+            },
+            "--server: ",
         ),
         (
             ConnectParams {
@@ -452,43 +476,21 @@ fn a_lease_that_could_not_be_made_answers_every_call_with_the_reason_it_could_no
 }
 
 #[test]
-fn a_lease_made_from_the_params_reaches_the_server_and_the_join_token_is_not_a_host_credential() {
+fn a_lease_made_from_the_params_reaches_the_server_by_the_host_certificate() {
     let enrolled = enrol("hook_machine_lease");
+    let identities = enrolled.server.identities();
     let lease = connect(
         &ConnectParams {
             server: Some(enrolled.server.url()),
-            state_root: Some(enrolled.state.clone()),
+            ca_cert: Some(identities.server_cert().to_owned()),
             host_id: Some("mac-1".to_owned()),
-            ..ConnectParams::default()
+            host_identity: Some(identities.of("mac-1")),
         },
         Err("unused"),
     );
     assert_eq!(lease.host().unwrap().id, "mac-1");
     assert!(!lease.cordon(60).unwrap().already_cordoned);
     assert!(lease.uncordon().unwrap().lifted);
-    // A state root with no credential in it: the token file is used, and the server refuses
-    // the pool's join token on the host's own routes.
-    let files = Scratch::new("hook-machine-join-token");
-    let bare = private(&files, "bare-state");
-    let lease = connect(
-        &ConnectParams {
-            server: Some(enrolled.server.url()),
-            state_root: Some(bare),
-            token_file: Some(enrolled.server.join_file()),
-            host_id: Some("mac-1".to_owned()),
-            ..ConnectParams::default()
-        },
-        Err("unused"),
-    );
-    let Err(LeaseError::Refused(why)) = lease.host() else {
-        panic!("the pool token is refused on the host's own routes");
-    };
-    assert!(
-        why.starts_with("host-credential-required: no host credential"),
-        "{why}"
-    );
-    assert!(why.contains("shared pool token"), "{why}");
-    assert!(why.contains("docs/runbooks/farm-node-enroll.md"), "{why}");
 }
 
 #[test]

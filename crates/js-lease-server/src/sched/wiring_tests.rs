@@ -16,7 +16,7 @@ use crate::agents::{Agents, assemble};
 use crate::clock::SharedClock;
 use crate::config::{Cli, Config};
 
-/// The join token of the pool.
+/// The secret of the credential the fixtures register their hosts under.
 pub(super) const JOIN: &str = "join-token-A-0123456789-abcdefghijklmnop";
 
 /// A pool of up to two machines with a node report: the scheduler describes a host by
@@ -73,10 +73,6 @@ pub(super) fn config_result(
         ("--state-file", dir.join("leases.toml").into_os_string()),
         ("--boot", boot.into()),
         ("--token-file", write(dir, "token", &"t".repeat(40), 0o600)),
-        (
-            "--agent-token-file",
-            write(dir, "agent-tokens", &format!("{JOIN}\n"), 0o600),
-        ),
         (
             "--agent-pool-config",
             write(dir, "agent-pool.toml", pool, 0o644),
@@ -157,7 +153,7 @@ fn fixtures_of_one_name_have_their_own_directories() {
     let state = one._dir.path().join("leases.toml");
     drop(two);
     assert!(
-        one._dir.path().join("agent-tokens").is_file(),
+        one._dir.path().join("token").is_file(),
         "{}",
         state.display()
     );

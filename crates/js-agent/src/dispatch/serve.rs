@@ -2,9 +2,7 @@
 
 use std::path::Path;
 
-use js_agent_wire::HostCredential;
-
-use super::{Cell, Next, Poller, ROOM_WAIT, Route};
+use super::{Cell, Next, Poller, ROOM_WAIT};
 use crate::backoff::Jitter;
 use crate::login::Login;
 use crate::transport::{Connector, Transport};
@@ -24,21 +22,15 @@ pub struct Dial<'a> {
 }
 
 impl Dial<'_> {
-    /// A transport that authenticates with `credential` when the host holds one.
+    /// A transport that authenticates as the session's does.
     ///
     /// # Errors
     ///
-    /// The connector refused the flags, or the transport would not take the credential;
-    /// the text never holds a secret.
-    pub fn open(&self, credential: Option<&HostCredential>) -> Result<Box<dyn Transport>, String> {
-        let connected = self
-            .connector
-            .connect(self.server, self.login, self.ca_cert);
-        let mut transport = connected.map_err(|why| why.to_string())?;
-        credential
-            .iter()
-            .try_for_each(|credential| transport.adopt_credential(credential.expose()))?;
-        Ok(transport)
+    /// The connector refused the flags; the text never holds a secret.
+    pub fn open(&self) -> Result<Box<dyn Transport>, String> {
+        self.connector
+            .connect(self.server, self.login, self.ca_cert)
+            .map_err(|why| why.to_string())
     }
 }
 
@@ -46,21 +38,19 @@ impl Dial<'_> {
 /// and a wait after a failure (any answer but a usable 200, any transport error) as `jitter`
 /// says. The polls share one transport, as the session's heartbeats do, so they share its
 /// kept connection and what its client knows of the server's address; a new one is made
-/// ([`Dial::open`]) only for a route that names another host credential than the one it was
-/// made with, and after a poll for which none could be made. Messages the worker had no room
+/// ([`Dial::open`]) only after a poll for which none could be made. Messages the worker had no room
 /// for are held and handed over when it makes room, before the next poll is posted; meanwhile
 /// nothing is posted. The poller's lines go to the cell.
 pub fn serve(cell: &Cell, dial: &Dial<'_>, worker: &Worker, jitter: Box<dyn Jitter>) {
     let mut poller = Poller::new(worker, jitter);
     let mut kept = None;
     while let Some((generation, route)) = cell.wait_route() {
-        let next =
-            poller
-                .hand_over()
-                .unwrap_or_else(|| match transport_for(&mut kept, dial, &route) {
-                    Ok(transport) => poller.poll(&mut **transport, &route),
-                    Err(_) => poller.failed(None),
-                });
+        let next = poller
+            .hand_over()
+            .unwrap_or_else(|| match transport_for(&mut kept, dial) {
+                Ok(transport) => poller.poll(&mut **transport, &route),
+                Err(_) => poller.failed(None),
+            });
         cell.note(poller.take_lines());
         match next {
             Next::Again => {}
@@ -74,32 +64,20 @@ pub fn serve(cell: &Cell, dial: &Dial<'_>, worker: &Worker, jitter: Box<dyn Jitt
     }
 }
 
-/// The transport of the polls and the host credential it was made with.
-struct Kept {
-    credential: Option<HostCredential>,
-    transport: Box<dyn Transport>,
-}
-
-/// The transport for a poll of `route`: the kept one when it was made with the route's
-/// credential, otherwise a new one, which is kept from then on.
+/// The transport for a poll: the kept one, otherwise a new one, which is kept from then on.
+/// Every route of the session authenticates with the host's one certificate, so a kept
+/// transport serves every later route.
 ///
 /// # Errors
 ///
 /// No transport could be made (see [`Dial::open`]); none is kept then.
 fn transport_for<'k>(
-    kept: &'k mut Option<Kept>,
+    kept: &'k mut Option<Box<dyn Transport>>,
     dial: &Dial<'_>,
-    route: &Route,
 ) -> Result<&'k mut Box<dyn Transport>, String> {
-    let same = kept
-        .take()
-        .filter(|kept| kept.credential == route.credential);
-    let made = match same {
-        Some(same) => same,
-        None => Kept {
-            credential: route.credential.clone(),
-            transport: dial.open(route.credential.as_ref())?,
-        },
+    let made = match kept.take() {
+        Some(transport) => transport,
+        None => dial.open()?,
     };
-    Ok(&mut kept.insert(made).transport)
+    Ok(kept.insert(made))
 }

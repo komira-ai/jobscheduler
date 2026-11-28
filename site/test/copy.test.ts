@@ -317,8 +317,7 @@ const EXPECTED: Record<string, (string | null)[]> = {
       'js-lease-server --listen 127.0.0.1:7300 --state-file /var/lib/jobscheduler/state --boot initialise \\',
       '--token-file /etc/jobscheduler/client-token \\',
       '--job-listen 127.0.0.1:7301 \\',
-      '--agent-pool-config /etc/jobscheduler/agent-pool.toml \\',
-      '--agent-token-file /etc/jobscheduler/join-tokens',
+      '--agent-pool-config /etc/jobscheduler/agent-pool.toml',
       '',
     ].join('\n'),
     [

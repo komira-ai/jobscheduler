@@ -30,7 +30,6 @@ const MEMORY: u64 = 251 * GIB;
 /// `[server]` table ending with `extra`, written into `dir`.
 fn file_text(dir: &std::path::Path, extra: &str) -> String {
     let token = write(dir, "client-token", &"t".repeat(40), 0o600);
-    let join = write(dir, "join-tokens", &format!("{JOIN}\n"), 0o600);
     let path = |p: &std::ffi::OsString| format!("{:?}", p.to_string_lossy());
     let state = dir.join("leases.toml").into_os_string();
     format!(
@@ -47,13 +46,11 @@ name = "farm"
 class = "farm-host"
 exec = "none"
 max_machines = 1
-join_token_file = {join}
 shape = {{ cpu_millis = 88000, memory_bytes = {MEMORY} }}
 capabilities = {{ arch = "x86_64" }}
 "#,
         state = path(&state),
         token = path(&token),
-        join = path(&join),
     )
 }
 

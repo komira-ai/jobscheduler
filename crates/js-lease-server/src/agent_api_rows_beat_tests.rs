@@ -56,12 +56,12 @@ async fn a_listing_a_newer_beat_overtook_is_answered_from_the_rows_with_no_acks(
     // second server serves the newer beat of the host to the end.
     let answered = std::sync::Arc::new(Mutex::new(None));
     let newer = beat_body(&session, Some(4), agent.listing(), json!({}));
-    let (agents, who) = (Arc::clone(&second.agents), second.who.clone());
+    let agents = Arc::clone(&second.agents);
     let (store, sink) = (world.store.clone(), answered.clone());
     let runtime = tokio::runtime::Handle::current();
     world.store.before_next(move || {
         store.before_next(move || {
-            let reply = runtime.block_on(post_beat(agents, who, newer));
+            let reply = runtime.block_on(post_beat(agents, "host-a", newer));
             *sink.lock().unwrap() = Some(reply.map_err(|refused| said(&refused)));
         });
     });

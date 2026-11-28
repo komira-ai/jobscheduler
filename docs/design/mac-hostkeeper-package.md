@@ -93,13 +93,12 @@ as owner), any script, and another identifier or version.
   plist; of its pf anchor verbs, `install` also takes `--flags-file`.
   Its `postinstall` verb is gone, with its link and its tests.
 - The agent plist is fixed text, checked for drift, never edited on a host. Its program arguments are
-  `/Library/Application Support/js-agent/bin/js-agent --flags-file /etc/js-agent/flags --token-file
-  /etc/js-agent/token --state-root /var/db/js-agent/state --scratch-root /var/db/js-agent/scratch/runs`
+  `/Library/Application Support/js-agent/bin/js-agent --flags-file /etc/js-agent/flags
+  --state-root /var/db/js-agent/state --scratch-root /var/db/js-agent/scratch/runs`
   (the account pool's flags, `--native-accounts` and `--native-account-range`, are in the flags file); it runs as root, with `RunAtLoad` false, `ThrottleInterval`
   30, `ExitTimeOut` 120, 65536 open files soft and hard (`SoftResourceLimits` and `HardResourceLimits`, `NumberOfFiles`), and its logs in `.../js-agent/log/js-agent.log` and `js-agent.err.log`. `KeepAlive` is
-  conditional on the flags file `/etc/js-agent/flags` (`PathState`), not on the token: a Mac joins by hostkeeper's
-  host certificate, which the flags file names (`--host-cert`, `--host-key`), and has no token; the agent then reads no
-  `--token-file`. It names no `--server` and no `--pool`: a host's own values (the
+  conditional on the flags file `/etc/js-agent/flags` (`PathState`), not on a token: a Mac joins by hostkeeper's
+  host certificate alone, which the flags file names (`--host-cert`, `--host-key`). It names no `--server` and no `--pool`: a host's own values (the
   lease server and its CA, the pool, `--native-network` and its pf flags) are in `/etc/js-agent/flags` and
   `/etc/js-agent/ca.pem`, which this package does not list. They are the group's: a config package per service and
   host group (`js-agent-config-mac-build`, listed in the group after `js-agent`) installs them, as
@@ -129,7 +128,7 @@ as owner), any script, and another identifier or version.
   `unit` `js-agent`, `helper_unit` `js-agent.session`, `pf_unit` `js-agent.pf-pool`, `state_dir`
   `/Library/Application Support/js-agent/update`,
   `release_link` `/var/lib/hostkeeper/packages/js-agent/current`, `flags_file` `/etc/js-agent/flags`, `token_file`
-  `/etc/js-agent/token`, `state_root` `/var/db/js-agent/state`, `socket_group` `_jsagent`, `scratch_root`
+  `/etc/js-agent/token` (a manifest that carries it passes; the key is ignored), `state_root` `/var/db/js-agent/state`, `socket_group` `_jsagent`, `scratch_root`
   `/var/db/js-agent/scratch/runs`, `runtime` `native`, and the cordon, drain and step bounds of the Linux manifest.
   `socket_group` and `scratch_root` are the helper plist's `--socket-group` and the agent plist's `--scratch-root`
   (a test of xtask holds them equal); they name the host setup the hook makes (below).
@@ -196,7 +195,7 @@ as owner), any script, and another identifier or version.
 Nobody has a root shell on the Macs: everything a Mac needs arrives through hostkeeper, as a package, its files or
 its hook. The flags file and the CA come from the group's config package, above, and the flags file names hostkeeper's
 host certificate and key (`/var/lib/hostkeeper/identity/host.crt` and `host.key`), so a Mac needs no
-`/etc/js-agent/token` (and no instance file: that is for a token minted for a cloud instance). The rest is made by the
+`/etc/js-agent/token` (join tokens are removed). The rest is made by the
 update hook's `prepare`, which hostkeeper runs as root, before it writes its record or cordons the host, on a first
 install and on every update (`crates/js-agent/src/update_hook/step/host_setup.rs`):
 
@@ -312,7 +311,7 @@ job's `constraints.os_version` (`26`: macOS 26 or newer) is compared with it as 
 - A `js-agent` whose cdhash is not the one in the helper's plist (a binary changed after the build): the helper refuses
   the agent, and `build` refuses the package first, because it compares the cdhash of the staged binary with the one in
   the plist.
-- No flags file on the Mac, or one that names no host certificate on a Mac with no token: a first install's `prepare`
+- No flags file on the Mac, or one that names no host certificate: a first install's `prepare`
   defers `join_token_missing` (exit 75) having installed nothing, and hostkeeper runs the hook's `rollback` and retries
   later. A later order installs it once the host setup is done.
 - A part of the host setup the hook cannot make (the socket group, a root, the scratch volume or its mount):

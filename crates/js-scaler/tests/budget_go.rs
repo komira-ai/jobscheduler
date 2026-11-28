@@ -40,7 +40,7 @@ fn the_first_launch_writes_the_go_and_quiet_steps_write_nothing() {
     assert!(rig.tick(at(0)).is_empty());
     assert!(rig.state.records.go.is_empty());
     rig.input.waiting = vec![request("r1")];
-    assert_eq!(kinds(&rig.tick(at(MINUTE))), ["Save", "Mint", "Acquire"]);
+    assert_eq!(kinds(&rig.tick(at(MINUTE))), ["Save", "Acquire"]);
     let go = Go {
         at: at(MINUTE),
         settled: 0,

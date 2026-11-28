@@ -1,4 +1,4 @@
-//! The routes a host calls about itself, with the credential it was admitted with:
+//! The routes a host calls about itself, with its host certificate:
 //!
 //! - `POST /v1/hosts/{id}:cordon`: cordon the host for `lease_secs` seconds (an optional
 //!   JSON body `{"lease_secs": n, "holder": "<id>", "take_over": true}`; every field optional,
@@ -18,19 +18,15 @@
 //! take-over that names none, is 400 `invalid-cordon`. The reading of a cordoned host names
 //! the cordon's holder, when it has one.
 //!
-//! The host id in the path must be the host of the credential: a host credential (or the
-//! one-time token that registered the host), whose host the server wrote down at the
-//! hello. The shared pool token names no host and is refused. Every other host id is the
-//! same 403 as a credential that never was the host's, so the answer tells nothing of
-//! which hosts exist. A host id that passes and that the registry does not hold is first
-//! taken from the store's rows, when the server holds the job tables (a session another
-//! server, or this one before a restart, took the hello of: [`Agents::take_from_rows`]); a
-//! host the rows do not hold either is 409 `unknown-host`, as for a heartbeat: the agent says
-//! hello again. A row that cannot be read is 503 `cordon-unsaved`.
-//!
-//! A request whose connection carries a host certificate (see [`super::host_cert`]) is
-//! served with no other credential, and the path's host must be the certificate's, or it is
-//! 403 `certificate-host-mismatch`.
+//! The host id in the path must be the host of the request's certificate ([`super::host_cert`]),
+//! or the answer is 403 `certificate-host-mismatch`; every other host id is the same 403, so
+//! the answer tells nothing of which hosts exist. A host id that passes and that the registry
+//! does not hold is first taken from the store's rows, when the server holds the job tables (a
+//! session another server, or this one before a restart, took the hello of:
+//! [`Agents::take_from_rows`]); a host the rows do not hold either is 409 `unknown-host`, as
+//! for a heartbeat: the agent says hello again. A row that cannot be read is 503
+//! `cordon-unsaved`. A request without a verified certificate is refused before the route
+//! (401 `host-certificate-required`).
 //!
 //! There is no server-side total cap: a caller that dies leaves its cordon to lapse within
 //! its last `lease_secs`, at most [`cordon::MAX_CORDON`], and a caller of another holder does
@@ -44,10 +40,7 @@
 //! binding is written to the agent state file after the registry took it, so the cordon holds
 //! on this server all the same, and until a save succeeds a server restart loses that cordon,
 //! or brings back one that an unsaved uncordon lifted (for at most the length it was asked for:
-//! [`cordon::MAX_CORDON`] on this route, seven days for an operator's). Every call, the read too, checks the credential with
-//! `JoinTokens::serves`, which renews the host credential: in file mode it may write the join
-//! token file, and a failed write is logged and does not fail the call; with the store the
-//! renewal is left for the tick, and the call makes no store call.
+//! [`cordon::MAX_CORDON`] on this route, seven days for an operator's).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -65,14 +58,11 @@ use js_types::{CordonHolder, HostId};
 use serde::{Deserialize, Serialize};
 
 use super::host_cert::{self, CertifiedHost};
-use super::{OneTime, Refused, decode, read};
+use super::{Refused, decode, read};
 use crate::agents::{Agents, CordonFault};
 use crate::cordon::{self, CORDON_UNSAVED, INVALID_CORDON, UNKNOWN_HOST};
 use crate::hosts::{mark_text, state_text};
-use crate::join_tokens::JoinRefusal;
 
-/// The pool token, or no one-time token or credential, names no host.
-const HOST_CREDENTIAL_REQUIRED: &str = "host-credential-required";
 const NOT_FOUND: &str = "not-found";
 
 /// The body of a cordon request.
@@ -203,36 +193,11 @@ fn split(target: &str) -> (&str, Option<&str>) {
     }
 }
 
-/// The host of the request, if `host` is the host of the credential the request carries (a
-/// certificate's host is checked as [`host_cert::check`] does).
-fn authorize(
-    agents: &Agents,
-    (one_time, certified): (Option<Extension<OneTime>>, Option<Extension<CertifiedHost>>),
-    host: &str,
-) -> Result<HostId, Refused> {
-    let id = match (certified, one_time) {
-        (Some(Extension(certified)), _) => {
-            host_cert::check(Some(&certified), host)?;
-            certified.0
-        }
-        (None, Some(Extension(OneTime(presented)))) => {
-            // An id that cannot be a host's is not the credential's host: the answer is the
-            // one for any other host.
-            let id = HostId::new(host).map_err(|_| Refused::join(JoinRefusal::NotAdmitted))?;
-            agents
-                .joins
-                .serves(&presented, host)
-                .map_err(Refused::join)?;
-            id
-        }
-        (None, None) => {
-            return Err(Refused::new(
-                StatusCode::FORBIDDEN,
-                HOST_CREDENTIAL_REQUIRED,
-            ));
-        }
-    };
-    Ok(id)
+/// The host of the request, if `host` is the host of the certificate the request carries
+/// ([`host_cert::check`]).
+fn authorize(certified: CertifiedHost, host: &str) -> Result<HostId, Refused> {
+    host_cert::check(&certified, host)?;
+    Ok(certified.0)
 }
 
 /// The answer to a cordon or uncordon that was not done (409 `unknown-host`) or not made
@@ -280,11 +245,11 @@ fn cordon_of(body: &[u8]) -> Result<(Duration, Asker), Refused> {
 /// `GET /v1/hosts/{id}`.
 pub(super) async fn show(
     State(agents): State<Arc<Agents>>,
-    who: (Option<Extension<OneTime>>, Option<Extension<CertifiedHost>>),
+    Extension(who): Extension<CertifiedHost>,
     Path(target): Path<String>,
 ) -> Result<Response, Refused> {
     let (host, verb) = split(&target);
-    let host = authorize(&agents, who, host)?;
+    let host = authorize(who, host)?;
     match verb {
         Some(_) => Err(not_found()),
         None => {
@@ -299,12 +264,12 @@ pub(super) async fn show(
 /// `POST /v1/hosts/{id}:cordon` and `POST /v1/hosts/{id}:uncordon`.
 pub(super) async fn act(
     State(agents): State<Arc<Agents>>,
-    who: (Option<Extension<OneTime>>, Option<Extension<CertifiedHost>>),
+    Extension(who): Extension<CertifiedHost>,
     Path(target): Path<String>,
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Response, Refused> {
     let (host, verb) = split(&target);
-    let host = authorize(&agents, who, host)?;
+    let host = authorize(who, host)?;
     let body = read(body, INVALID_CORDON)?;
     match verb {
         Some("cordon") => {

@@ -850,7 +850,6 @@ mod tests {
             labels: BTreeMap::new(),
             phase: Phase::Serving,
             held: Vec::<HeldRun>::new(),
-            accepts_host_credential: false,
             identity: None,
         }
     }

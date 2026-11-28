@@ -19,7 +19,7 @@ const CORDON: &str = concat!(
 const SETTINGS: &str = concat!(
     "unit = \"js-agent-crun.service\"\nstate_dir = \"/var/lib/js-agent-update\"\n",
     "release_link = \"/var/lib/hostkeeper/packages/js-agent/current\"\n",
-    "flags_file = \"/etc/js-agent/flags\"\ntoken_file = \"/etc/js-agent/token\"\n",
+    "flags_file = \"/etc/js-agent/flags\"\n",
     "state_root = \"/var/lib/js-agent/state\"\nruntime = \"crun\"\n",
     "prepare_timeout_secs = 3900\ncutover_timeout_secs = 4320\nverify_timeout_secs = 615\n",
     "rollback_timeout_secs = 8220\ncleanup_timeout_secs = 120\nverify_deadline_secs = 9000\n",
@@ -33,7 +33,7 @@ const RELEASES: &str = concat!(
     "\"updater.previous_version\" = \"1.3.2\"\n",
     "unit = \"js-agent-crun.service\"\nstate_dir = \"/var/lib/js-agent-update\"\n",
     "release_link = \"/var/lib/hostkeeper/packages/js-agent/current\"\n",
-    "flags_file = \"/etc/js-agent/flags\"\ntoken_file = \"/etc/js-agent/token\"\n",
+    "flags_file = \"/etc/js-agent/flags\"\n",
     "state_root = \"/var/lib/js-agent/state\"\nruntime = \"crun\"\n",
     "prepare_timeout_secs = 3900\ncutover_timeout_secs = 4320\nverify_timeout_secs = 615\n",
     "rollback_timeout_secs = 8220\ncleanup_timeout_secs = 120\nverify_deadline_secs = 9000\n",
@@ -120,7 +120,6 @@ fn the_manifest_keys_and_the_reserved_release_keys_are_read() {
             target_version: "1.4.0".to_owned(),
             previous_version: Some("1.3.2".to_owned()),
             state_root: PathBuf::from("/var/lib/js-agent/state"),
-            token_file: PathBuf::from("/etc/js-agent/token"),
             scratch_root: None,
         }
     );
@@ -133,7 +132,27 @@ fn the_manifest_keys_and_the_reserved_release_keys_are_read() {
 /// `KEYS` lists that the hook never requires.
 #[test]
 fn every_key_of_the_list_is_required_and_nothing_else_is() {
-    assert_eq!(KEYS.len(), 17);
+    assert_eq!(
+        KEYS,
+        [
+            "unit",
+            "state_dir",
+            "release_link",
+            "flags_file",
+            "state_root",
+            "runtime",
+            "cordon_lease_secs",
+            "cordon_max_secs",
+            "drain_wait_secs",
+            "defer_retry_secs",
+            "prepare_timeout_secs",
+            "cutover_timeout_secs",
+            "verify_timeout_secs",
+            "rollback_timeout_secs",
+            "cleanup_timeout_secs",
+            "verify_deadline_secs",
+        ]
+    );
     for key in KEYS {
         match refused(&good_but(key, "")) {
             ParamsError::Missing(missing) => assert_eq!(missing, key),
@@ -142,6 +161,8 @@ fn every_key_of_the_list_is_required_and_nothing_else_is() {
     }
     let extra = format!("{}something_else = \"x\"\n", good());
     assert!(Params::parse(&extra).is_ok());
+    let retired = format!("{}token_file = \"/etc/js-agent/token\"\n", good());
+    assert!(Params::parse(&retired).is_ok());
     assert_eq!(RELEASE_LINK_KEY, "release_link");
 }
 
@@ -447,33 +468,45 @@ fn a_retry_of_zero_seconds_means_try_again_at_once() {
     assert_eq!(Params::parse(&text).unwrap().defer_retry_secs, 0);
 }
 
-/// The state root and the token file are the agent's own flags by name; the server, the
-/// certificate and the host id are not params keys (they come from the flags file).
+/// The state root is the agent's own flag by name; the server, the certificate and the host id
+/// are not params keys (they come from the flags file).
 #[test]
-fn the_state_root_and_the_token_file_are_params_and_the_server_is_not() {
-    assert_eq!(
-        [STATE_ROOT_KEY, TOKEN_FILE_KEY],
-        ["state_root", "token_file"]
-    );
+fn the_state_root_is_a_param_and_the_server_is_not() {
+    assert_eq!(STATE_ROOT_KEY, "state_root");
     let params = Params::parse(&good()).unwrap();
     assert_eq!(params.state_root, PathBuf::from("/var/lib/js-agent/state"));
-    assert_eq!(params.token_file, PathBuf::from("/etc/js-agent/token"));
     // A `server` key is just an unknown key: the flags file is where the server is named.
     let text = format!("{}server = \"https://leases.example:7300\"\n", good());
     assert!(Params::parse(&text).is_ok());
     assert_eq!(ConnectParams::default().server, None);
 }
 
+/// A manifest that still names the retired `token_file`, as one issued before hosts were
+/// identified by their certificate alone does, is read as one that does not: the key is ignored,
+/// whatever its value, and `KEYS` no longer lists it.
+///
+/// Catches a manifest of an earlier release that every step of the hook would refuse, and a
+/// `KEYS` that still requires a file nothing reads.
+#[test]
+fn a_manifest_that_still_names_token_file_is_accepted_and_the_key_is_not_required() {
+    assert_eq!(TOKEN_FILE_KEY, "token_file");
+    assert!(!KEYS.contains(&TOKEN_FILE_KEY));
+    let named = format!("{}token_file = \"/etc/js-agent/token\"\n", good());
+    assert_eq!(
+        Params::parse(&named).unwrap(),
+        Params::parse(&good()).unwrap()
+    );
+    let relative = format!("{}token_file = \"token\"\n", good());
+    assert_eq!(
+        Params::parse(&relative).unwrap(),
+        Params::parse(&good()).unwrap()
+    );
+}
+
 /// A path that is not absolute, or is not text, is refused by key.
 #[test]
 fn the_paths_of_the_table_must_be_absolute_text() {
-    for key in [
-        "state_dir",
-        "release_link",
-        "flags_file",
-        "token_file",
-        "state_root",
-    ] {
+    for key in ["state_dir", "release_link", "flags_file", "state_root"] {
         let relative = good_but(key, &format!("{key} = \"relative/path\""));
         assert!(
             matches!(refused(&relative), ParamsError::Relative(k) if k == key),

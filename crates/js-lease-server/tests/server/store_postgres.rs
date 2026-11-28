@@ -22,10 +22,9 @@ use rustix::process::{Pid, Signal, kill_process};
 use serde_json::json;
 use tokio::runtime::Runtime;
 
-use crate::agents_support::{JOIN, JOIN_B, agent_args, hello_with, job_host_args, post, session};
+use crate::agents_support::{agent_args, hello_as, job_host_args, post, session};
 use crate::binary::{address_in, launch, spawn};
 use crate::jobs_support::{job_agent, job_of, per_job_hello, submit};
-use crate::joins::{code, hello, minted};
 use crate::ready_listen::with_ready;
 use crate::store_support::{
     assert_unquoted, revision, run_to_end, store_args, store_file, unflushed, with_userinfo,
@@ -107,8 +106,11 @@ fn the_store_url_is_never_in_an_error_or_a_log_line() {
         ended.stderr
     );
     let printed = format!("{}{}", ended.stdout, ended.stderr);
-    for secret in [url.as_str(), PASSWORD, ROLE] {
-        assert!(!printed.contains(secret), "{secret} in {printed}");
+    for (at, secret) in [url.as_str(), PASSWORD, ROLE].into_iter().enumerate() {
+        assert!(
+            !printed.contains(secret),
+            "secret {at} (the URL, the password, the role) is printed"
+        );
     }
 }
 
@@ -163,14 +165,13 @@ fn a_store_that_does_not_open_is_refused() {
     assert!(!scratch.state().exists(), "no lease file was made");
 }
 
-/// Asserts that the host bindings and the join tokens survive a restart over a Postgres store
-/// as they do over SQLite (`hosts_store.rs`): after the restart a tainted host's binding
-/// refuses another credential (403 `host-bound`) and the host still shows its taint, a used
-/// one-time token is refused for another host as used and goes on serving its own, and the
-/// store holds the token's digest and never its text, with no `.agents` or `.joins` file
-/// beside the state file. It catches a Postgres store that loses what SQLite keeps.
+/// Asserts that the host bindings survive a restart over a Postgres store as they do over SQLite
+/// (`hosts_store.rs`): after the restart a tainted host still shows its taint and says hello
+/// again with its certificate, the store holds a binding row for each host and no row under
+/// `hosts/join/`, and no `.agents` or `.joins` file is beside the state file. It catches a
+/// Postgres store that loses what SQLite keeps.
 #[test]
-fn bindings_and_join_tokens_survive_a_restart_on_postgres() {
+fn bindings_survive_a_restart_on_postgres() {
     let database = test_database();
     let url = database.url();
     let flags = |scratch: &Scratch| {
@@ -181,43 +182,36 @@ fn bindings_and_join_tokens_survive_a_restart_on_postgres() {
     let scratch = Scratch::new("store_pg_hosts");
     let args = flags(&scratch);
     let runtime = Runtime::new().unwrap();
-    let (h, token) = runtime.block_on(async {
+    let h = runtime.block_on(async {
         let first = Harness::with(scratch, args).await;
-        let me = session(&hello_with(&first, JOIN, "burst-1").await, "burst-1");
+        let me = session(&hello_as(&first, "burst-1").await, "burst-1");
         let mut beat = me.beat();
         beat["taint"] = json!({ "reason": "residue" });
-        let reply = post(&first, "/v1/agent/heartbeat", Some(JOIN), &beat).await;
+        let reply = post(&first, "/v1/agent/heartbeat", None, &beat).await;
         assert_eq!(reply.json()["taint_ack"], true, "{}", reply.body);
-        let token = minted(&first, "i-2").await;
-        assert_eq!(hello(&first, &token, "burst-2", "i-2").await.status, 200);
+        assert_eq!(hello_as(&first, "burst-2").await.status, 200);
         let Harness {
             running, scratch, ..
         } = first;
         running.shutdown().await.unwrap();
         let resumed = replace(flags(&scratch), "--boot", "resume");
-        (Harness::with(scratch, resumed).await, token)
+        Harness::with(scratch, resumed).await
     });
     runtime.block_on(async {
-        let other = hello_with(&h, JOIN_B, "burst-1").await;
-        assert_eq!((other.status, code(&other)), (403, "host-bound".to_owned()));
         let listing = request(h.addr(), "GET", "/v1/hosts", Some(TOKEN), None).await;
         assert!(listing.body.contains("residue"), "{}", listing.body);
-        let taken = hello(&h, &token, "burst-3", "i-2").await;
-        assert_eq!(
-            (taken.status, code(&taken)),
-            (403, "join-token-used".to_owned())
-        );
-        assert_eq!(hello(&h, &token, "burst-2", "i-2").await.status, 200);
+        assert_eq!(hello_as(&h, "burst-1").await.status, 200);
+        assert_eq!(hello_as(&h, "burst-2").await.status, 200);
     });
     let store = h.running.store().expect("the server holds the store");
     let rows = store.scan_prefix("hosts/").unwrap();
     let keys: Vec<&str> = rows.iter().map(|(key, _)| key.as_str()).collect();
     assert!(keys.contains(&"hosts/binding/burst-1"), "{keys:?}");
     assert!(keys.contains(&"hosts/binding/burst-2"), "{keys:?}");
-    let mut values = rows
-        .iter()
-        .map(|(_, row)| String::from_utf8_lossy(&row.value));
-    assert!(values.all(|value| !value.contains(token.as_str())));
+    assert!(
+        !keys.iter().any(|key| key.starts_with("hosts/join/")),
+        "{keys:?}"
+    );
     for suffix in [".agents", ".joins"] {
         let file = h.scratch.path(&format!("leases.toml{suffix}"));
         assert!(!file.exists(), "{suffix}");

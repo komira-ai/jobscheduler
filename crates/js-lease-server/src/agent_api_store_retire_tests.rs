@@ -19,9 +19,9 @@ use crate::agents::retire::RetireFault;
 async fn a_retire_deletes_the_stored_binding_and_the_record_on_each_server() {
     let first = rig("retire_binding");
     for name in ["host-1", "host-2", "host-3", "host-4"] {
-        first.pooled(name, "burst").await.unwrap();
+        first.hello(name, "burst").await.unwrap();
     }
-    let full = first.pooled("host-5", "burst").await;
+    let full = first.hello("host-5", "burst").await;
     assert_eq!(full.err().map(|refused| refused.error), Some("pool-full"));
     let old = HostId::new("host-1").unwrap();
     let live = first.agents.retire(&old).await;
@@ -36,7 +36,7 @@ async fn a_retire_deletes_the_stored_binding_and_the_record_on_each_server() {
     assert_eq!(first.binding("host-1"), Value::Null, "the stored binding");
     assert_eq!(first.held("host-1"), None, "the registry's binding");
     assert!(first.agents.registry.own_host(&old).is_none(), "the record");
-    first.pooled("host-5", "burst").await.unwrap();
+    first.hello("host-5", "burst").await.unwrap();
     let commits = first.commits();
     assert_eq!(first.agents.retire(&old).await, Ok(false), "a repeat");
     assert_eq!(first.commits(), commits, "a repeat committed");
@@ -59,7 +59,7 @@ async fn a_retire_deletes_the_stored_binding_and_the_record_on_each_server() {
 #[tokio::test]
 async fn a_retire_whose_binding_cannot_be_deleted_is_unsaved_and_the_repeat_deletes_it() {
     let rig = rig("retire_binding_fails");
-    rig.pooled("host-1", "burst").await.unwrap();
+    rig.hello("host-1", "burst").await.unwrap();
     rig.clock
         .advance(Duration::from_millis(js_agent_wire::DEFAULT_GRACE_MS + 1));
     let old = HostId::new("host-1").unwrap();
@@ -87,8 +87,8 @@ async fn a_retire_whose_binding_cannot_be_deleted_is_unsaved_and_the_repeat_dele
 #[tokio::test]
 async fn a_retire_is_refused_for_a_stored_taint_and_unsaved_for_an_unreadable_binding() {
     let first = rig("retire_taint");
-    first.pooled("host-1", "burst").await.unwrap();
-    first.pooled("host-2", "burst").await.unwrap();
+    first.hello("host-1", "burst").await.unwrap();
+    first.hello("host-2", "burst").await.unwrap();
     first
         .clock
         .advance(Duration::from_millis(js_agent_wire::DEFAULT_GRACE_MS + 1));

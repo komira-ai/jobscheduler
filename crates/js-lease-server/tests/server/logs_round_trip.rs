@@ -29,20 +29,18 @@ use js_agent_wire::{
     Command, Heartbeat, HeartbeatReply, HeldJob, HeldState, JobResult, JobStartSpec, LogReport,
     Outcome, Phase,
 };
-use js_lease_server::in_process::InProcess;
+use js_lease_server::in_process::{InProcess, as_host};
 use js_lease_server::{Config, Kinds, OwnerOnlyFiles, SharedClock};
 use js_logstore::{Clock as _, ManualClock, UreqTransport};
 use js_proto::v1::GetLogsResponse;
 use js_testkit::s3::{TestStore, unique};
+use js_types::HostId;
 use prost_reflect::{DescriptorPool, DynamicMessage};
 use serde_json::{Value, json};
 use tower::ServiceExt as _;
 
 use crate::config_support::{PoolText, file, quote, quoted, server};
 use crate::support::{Scratch, TOKEN};
-
-/// The join token the agent says hello with.
-const JOIN: &str = "join-token-L-0123456789-abcdefghijklmnop";
 
 /// The pool the agent joins.
 const POOL: &str = "burst";
@@ -91,21 +89,28 @@ struct Reply {
     body: Vec<u8>,
 }
 
-/// One request answered by `router`, called as a service, with the bearer `token`.
+/// One request answered by `router`, called as a service, with the bearer `token` when given. A
+/// call to an agent route presents the host its body names, as the listener does for a
+/// connection that carries that host's certificate.
 async fn routed(
     router: &Router,
     method: &str,
     path: &str,
-    token: &str,
+    token: Option<&str>,
     body: Option<&Value>,
 ) -> Reply {
-    let request = Request::builder()
-        .method(method)
-        .uri(path)
-        .header("authorization", format!("Bearer {token}"))
+    let mut request = Request::builder().method(method).uri(path);
+    if let Some(token) = token {
+        request = request.header("authorization", format!("Bearer {token}"));
+    }
+    let mut request = request
         .header("content-type", "application/json")
         .body(Body::from(body.map(Value::to_string).unwrap_or_default()))
         .expect("a request");
+    let named = body.and_then(|body| body["host_id"].as_str());
+    if let (true, Some(host)) = (path.starts_with("/v1/agent/"), named) {
+        as_host(&mut request, &HostId::new(host).expect("a host id"));
+    }
     let response = router.clone().oneshot(request).await.expect("an answer");
     let status = response.status().as_u16();
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -172,12 +177,9 @@ impl Cell {
         );
         let read_key = scratch.write("read-key", &key, 0o600);
         let mint_key = scratch.write("mint-key", &key, 0o600);
-        let join = scratch.write("join-token", &format!("{JOIN}\n"), 0o600);
         let listeners = "listen = \"127.0.0.1:0\"\nagent_listen = \"127.0.0.2:0\"\n\
                          job_listen = \"127.0.0.1:0\"\nplacement = \"js-sched\"";
-        let pool = PoolText::joined(POOL)
-            .set("capabilities", "{ arch = \"x86_64\" }")
-            .set("join_token_file", &quoted(&join));
+        let pool = PoolText::joined(POOL).set("capabilities", "{ arch = \"x86_64\" }");
         let logs = format!(
             "[logs]\nsink = \"object_store\"\nurl = {}\nregion = {}\nendpoint = {}\n\
              path_style = true\nread_key_file = {}\nrole_arn = {}\nmint_key_file = {}\n\
@@ -228,7 +230,7 @@ impl Cell {
             "phase": "serving",
         });
         let router = self.server.agent_router();
-        let welcome = routed(&router, "POST", "/v1/agent/hello", JOIN, Some(&hello)).await;
+        let welcome = routed(&router, "POST", "/v1/agent/hello", None, Some(&hello)).await;
         assert_eq!(
             welcome.status,
             200,
@@ -265,7 +267,7 @@ impl Cell {
         };
         let body = serde_json::to_value(&beat).expect("a heartbeat");
         let router = self.server.agent_router();
-        let answer = routed(&router, "POST", "/v1/agent/heartbeat", JOIN, Some(&body)).await;
+        let answer = routed(&router, "POST", "/v1/agent/heartbeat", None, Some(&body)).await;
         // The placement poller's turn, which the server runs on a task of its own right after a
         // heartbeat or a submit pokes it, and which the server in process leaves to its caller.
         self.server.poll().await;
@@ -295,7 +297,7 @@ impl Cell {
             }
         });
         let router = self.server.job_router().expect("the job service is on");
-        let submitted = routed(&router, "POST", "/v1/jobs", TOKEN, Some(&spec)).await;
+        let submitted = routed(&router, "POST", "/v1/jobs", Some(TOKEN), Some(&spec)).await;
         assert_eq!(
             submitted.status,
             201,
@@ -430,7 +432,7 @@ impl Cell {
             &router,
             "GET",
             &Self::logs_path(job, stream, from, follow),
-            TOKEN,
+            Some(TOKEN),
             None,
         )
         .await

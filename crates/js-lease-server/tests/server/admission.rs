@@ -16,7 +16,7 @@ use js_lease_server::{BuildCtx, Built, Config, ElasticBuilt, Floor, KindError, O
 use js_types::{ExecMode, Model, ProviderId, accelerator_of};
 use serde_json::{Value, json};
 
-use crate::agents_support::{JOIN, agent_args, join};
+use crate::agents_support::{agent_args, join};
 use crate::config_support::{PoolText, file, kinds, quote, quoted, server};
 use crate::jobs_support::{JobBody, job_of, left_the_queue, submit, submit_body};
 use crate::support::{Harness, Reply, Scratch, TOKEN, request};
@@ -166,7 +166,7 @@ fn a100(available: bool) -> Offer {
 }
 
 /// A server whose one pool, `burst`, of `class`, launches (in plan) on a fresh cloud and
-/// takes hosts that join with [`JOIN`], with `more` keys set, and whose job service is on a
+/// takes hosts that join by certificate, with `more` keys set, and whose job service is on a
 /// loopback port; the cloud with it.
 async fn elastic(name: &str, class: &str, more: &[(&str, &str)]) -> (Harness, Arc<Cloud>) {
     over(name, class, more, None).await
@@ -188,7 +188,6 @@ async fn over(
         .lock()
         .unwrap()
         .insert(key.display().to_string(), cloud.clone());
-    let joins = scratch.write("joins", &format!("{JOIN}\n"), 0o600);
     let provider = format!(
         "{{ kind = \"admission-cloud\", api_key_file = {} }}",
         quoted(&key)
@@ -197,8 +196,7 @@ async fn over(
         .set("name", &quote("burst"))
         .set("class", &quote(class))
         .set("exec", &quote("none"))
-        .set("provider", &provider)
-        .set("join_token_file", &quoted(&joins));
+        .set("provider", &provider);
     for (key, value) in more {
         pool = pool.set(key, value);
     }

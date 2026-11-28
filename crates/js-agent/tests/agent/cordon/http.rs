@@ -1,7 +1,7 @@
 //! The real client and the real verb against a lease server in the test process: a host
-//! admitted with a one-time token and given a host credential by an agent, a cordon placed,
-//! renewed, read and lifted over HTTP, and the refusals of a credential that is not the
-//! host's. The server's clock is moved by the test; the verb's pace is the fake one.
+//! admitted by its host certificate, a cordon placed, renewed, read and lifted over HTTPS,
+//! and the refusal of a certificate that is not the host's. The server's clock is moved by the
+//! test; the verb's pace is the fake one.
 
 use std::cell::Cell;
 use std::io::{Read, Write};
@@ -11,16 +11,17 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use js_agent::own_host::{CordonView, HeldLease, HttpLease, Lease, LeaseError, RequestLimit};
-use js_agent::{CREDENTIAL_FILE, Dialer, Login};
-use js_client::ClientError;
+use js_agent::{Dialer, Login};
+use js_client::{Client, ClientError};
 use js_types::CordonHolder;
 use serde_json::json;
 
 use super::fakes::FakePace;
 use super::verb::{Ran, drive_with};
+use crate::host_certs::self_signed;
 use crate::jobs::private;
-use crate::server::{Agent, JOIN, Server, T0};
-use crate::support::{Host, Scratch, code, linux_host, mac_host};
+use crate::server::{Agent, Server, T0};
+use crate::support::{Scratch, code, linux_host, mac_host};
 
 fn holder(name: &str) -> CordonHolder {
     CordonHolder::new(name).expect("a holder")
@@ -30,75 +31,66 @@ fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
 }
 
-/// A Mac whose instance file says it runs on `lambdalabs:i-1`.
-fn launched() -> Host {
-    let mut host = mac_host();
-    host.files = host.files.with("/instance", "lambdalabs:i-1\n");
-    host
-}
-
-/// A lease server, and the host `mac-1` admitted to it with a one-time token that its agent
-/// swapped for a host credential kept in `state`.
+/// A lease server, and the host `mac-1` admitted to it by its host certificate, with the state
+/// root its agent uses.
 pub(crate) struct Enrolled {
     pub(crate) server: Server,
     pub(crate) state: PathBuf,
     _files: Scratch,
-    /// The agent that enrolled the host, held at its next wait.
+    /// The agent of the host, held at its next wait.
     pub(crate) agent: Agent,
 }
 
-impl Enrolled {
-    /// The state root as a flag value.
-    pub(super) fn state_flag(&self) -> String {
-        self.state.display().to_string()
-    }
+/// The lease of the host `mac-1` of `server`, presenting its host certificate.
+pub(crate) fn lease_of(server: &Server) -> HttpLease {
+    lease_as(server, "mac-1", "mac-1")
+}
 
-    /// The client of the host, with its own credential.
+/// The lease of the host `host` of `server`, presenting the host certificate of `certified`.
+pub(crate) fn lease_as(server: &Server, certified: &str, host: &str) -> HttpLease {
+    let identities = server.identities();
+    HttpLease::connect(
+        &server.url(),
+        &Login::HostCertificate(identities.of(certified)),
+        Some(identities.server_cert()),
+        host,
+        RequestLimit::DEFAULT,
+    )
+    .unwrap()
+}
+
+impl Enrolled {
+    /// The client of the host, with its own certificate.
     fn client(&self) -> HttpLease {
-        let credential = self.state.join(CREDENTIAL_FILE);
-        HttpLease::connect(
-            &self.server.url(),
-            &Login::Token(credential),
-            None,
-            "mac-1",
-            RequestLimit::DEFAULT,
-        )
-        .unwrap()
+        lease_of(&self.server)
     }
 }
 
-/// Starts a server and enrols `mac-1` on it: the agent's hello is answered with a host
-/// credential, which it saves in the state root before its next call.
+/// Starts a server and enrols `mac-1` on it: the agent's hello, made with the host's
+/// certificate, is answered with a welcome.
 pub(crate) fn enrol(name: &str) -> Enrolled {
     let server = Server::start(name, &[]);
     let files = Scratch::new(&format!("{name}-files"));
-    let instance = json!({ "provider": "lambdalabs", "instance_id": "i-1" });
-    let minted = server.post_body("/v1/agent/join-tokens", &instance);
-    assert_eq!(minted.status, 201, "{}", minted.body);
-    let token = files.write(
-        "one-time-token",
-        minted.body["token"].as_str().unwrap(),
-        0o600,
-    );
     let state = private(&files, "state");
     let state_flag = state.display().to_string();
-    let flags = [
-        "--host-id",
-        "mac-1",
-        "--instance-file",
-        "/instance",
-        "--state-root",
-        &state_flag,
-    ];
-    let agent = Agent::spawn(server.url(), token, &flags, launched, Dialer);
+    let flags = ["--host-id", "mac-1", "--state-root", &state_flag];
+    let agent = Agent::spawn(server.url(), server.identities(), &flags, mac_host, Dialer);
     assert_eq!(agent.next_wait(), secs(5), "the hello");
-    assert!(state.join(CREDENTIAL_FILE).exists());
     Enrolled {
         server,
         state,
         _files: files,
         agent,
     }
+}
+
+/// The verb's flags that make it the host `mac-1` of `server`: the server, the host's
+/// certificate and key and the certificate to trust.
+pub(crate) fn as_host(server: &Server) -> Vec<String> {
+    let mut flags = vec!["--server".to_owned(), server.url()];
+    flags.extend(server.identities().flags("mac-1"));
+    flags.extend(["--host-id".to_owned(), "mac-1".to_owned()]);
+    flags
 }
 
 /// The connector of the program: a real client for the host.
@@ -115,12 +107,40 @@ pub(super) fn real(
     .map(|lease| Box::new(lease) as Box<dyn HeldLease>)
 }
 
+/// The own-host routes of `mac-1` at the plain-HTTP server `url` of the test, a server of its
+/// own that answers what the test wants it to, with the bearer in `token`: the client's requests
+/// and reading of answers, which a real server cannot be made to give wrongly.
+fn plain_lease(url: &str, token: &std::path::Path) -> HttpLease {
+    let client = Client::connect(url, token, None, RequestLimit::DEFAULT.get()).unwrap();
+    HttpLease::over(client, "mac-1")
+}
+
+/// Runs the verb on `flags` (and the host certificate flags it requires, whose files that
+/// connector never reads) against the plain-HTTP server of the test, over a client with the
+/// bearer in `token`.
+fn plain_verb(flags: &[&str], token: &std::path::Path) -> Ran {
+    let token = token.to_owned();
+    let connect =
+        move |at: &js_agent::cordon::Connection<'_>| -> Result<Box<dyn HeldLease>, ClientError> {
+            let client = Client::connect(at.server, &token, None, RequestLimit::DEFAULT.get())?;
+            Ok(Box::new(HttpLease::over(client, at.host)) as Box<dyn HeldLease>)
+        };
+    let mut flags = flags.to_vec();
+    flags.extend([
+        "--host-cert",
+        "/never/read.crt",
+        "--host-key",
+        "/never/read.key",
+    ]);
+    drive_with(&flags, &linux_host(), &connect, &mut FakePace::new())
+}
+
 /// Runs the verb for real on `flags`, over a pace the test gave.
 fn verb(flags: &[&str], pace: &mut FakePace<'_>) -> Ran {
     drive_with(flags, &linux_host(), &real, pace)
 }
 
-/// Asserts what the client does on the wire with the host's own credential: a read shows a
+/// Asserts what the client does on the wire with the host's own certificate: a read shows a
 /// live host with no cordon and no mark; a cordon of 120 s says it was not cordoned before,
 /// carries the server's expiry, which the server's host listing shows too; a second cordon
 /// of a shorter lease says it was cordoned already and does not shorten it; an uncordon says
@@ -129,7 +149,7 @@ fn verb(flags: &[&str], pace: &mut FakePace<'_>) -> Ran {
 /// catches a client that sends the wrong
 /// path, drops `already_cordoned` or `lifted`, or reads the expiry wrong.
 #[test]
-fn the_client_cordons_reads_and_uncordons_a_real_host_with_its_credential() {
+fn the_client_cordons_reads_and_uncordons_a_real_host_with_its_certificate() {
     let enrolled = enrol("cordon_http_client");
     let (server, lease) = (&enrolled.server, enrolled.client());
 
@@ -172,71 +192,42 @@ fn the_client_cordons_reads_and_uncordons_a_real_host_with_its_credential() {
     assert!(!lease.uncordon().unwrap().lifted);
 }
 
-/// Asserts the refusals of a credential that is not the host's, as the client reports them:
-/// the shared pool token is refused 403 `host-credential-required` on all three routes, and a
-/// token the server does not know is a 401 with no body, which the client names `http-401`;
-/// the verb ends with status 1, calls both a credential error and names the token file it
-/// sent and the host it asked for, and neither the token nor
-/// anything of it is on standard output or error. It catches a client that reports a refused
-/// credential as an unreachable server, and a verb that prints the secret it was given.
+/// Asserts the refusal of a certificate that is not the host's, as the client reports them: the
+/// host certificate of `mac-2` presented for the routes of `mac-1` is refused 403
+/// `certificate-host-mismatch` on all three, and the verb with the same flags ends with status 1,
+/// calling it a credential error and naming the refusal. It catches a client that reports a refused certificate as an
+/// unreachable server, and a server that lets one host act for another.
 #[test]
-fn the_pool_token_and_an_unknown_token_are_refused_as_credential_errors() {
-    let server = Server::start("cordon_http_refused", &[]);
-    let files = Scratch::new("cordon_http_refused-files");
-    let unknown = "an-unknown-token-0123456789abcdef";
-    let unknown_file = files.write("unknown", unknown, 0o600);
-    let url = server.url();
+fn a_certificate_of_another_host_is_refused_on_all_three_routes() {
+    let enrolled = enrol("cordon_http_refused");
+    let server = &enrolled.server;
+    let stranger = lease_as(server, "mac-2", "mac-1");
+    let denied = || LeaseError::Refused("certificate-host-mismatch".to_owned());
+    assert_eq!(stranger.cordon(60).unwrap_err(), denied());
+    assert_eq!(stranger.uncordon().unwrap_err(), denied());
+    assert_eq!(stranger.host().unwrap_err(), denied());
+    assert!(server.host("mac-1").get("cordon").is_none());
 
-    let pooled = HttpLease::connect(
-        &url,
-        &Login::Token(server.join_file()),
-        None,
-        "mac-1",
-        RequestLimit::DEFAULT,
-    )
-    .unwrap();
-    let denied = || LeaseError::Refused("host-credential-required".to_owned());
-    assert_eq!(pooled.cordon(60).unwrap_err(), denied());
-    assert_eq!(pooled.uncordon().unwrap_err(), denied());
-    assert_eq!(pooled.host().unwrap_err(), denied());
-    let stranger = HttpLease::connect(
-        &url,
-        &Login::Token(unknown_file.clone()),
-        None,
-        "mac-1",
-        RequestLimit::DEFAULT,
-    )
-    .unwrap();
-    assert_eq!(
-        stranger.cordon(60).unwrap_err(),
-        LeaseError::Refused("http-401".to_owned())
-    );
-
-    for (file, token, why) in [
-        (server.join_file(), JOIN, "host-credential-required"),
-        (unknown_file, unknown, "http-401"),
-    ] {
-        let flags = ["--server", &url, "--host-id", "mac-1", "--for", "1h"];
-        let mut flags = flags.to_vec();
-        let file = file.display().to_string();
-        flags.extend(["--token-file", &file]);
-        let ran = verb(&flags, &mut FakePace::new());
-        assert_eq!(ran.status, code(1), "{}", ran.err);
-        let expected = format!(
+    let mut flags = vec!["--server".to_owned(), server.url()];
+    flags.extend(server.identities().flags("mac-2"));
+    flags.extend(["--host-id", "mac-1", "--for", "1h"].map(str::to_owned));
+    let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
+    let ran = verb(&flags, &mut FakePace::new());
+    assert_eq!(ran.status, code(1), "{}", ran.err);
+    assert!(
+        ran.err.starts_with(
             "js-agent cordon: credential error: cannot cordon the host: the server refused the \
-             credential ({why})\njs-agent cordon: it sent the token file {file} for host mac-1; \
-             to cordon with what the agent on this host presents, give the agent's flags file \
-             with --flags-file (such as /etc/js-agent/flags)\n"
-        );
-        assert_eq!(ran.err, expected);
-        assert!(ran.out.is_empty());
-        assert!(!format!("{}{}", ran.out, ran.err).contains(token));
-    }
+             host certificate (certificate-host-mismatch)\n"
+        ),
+        "{}",
+        ran.err
+    );
+    assert!(ran.out.is_empty());
 }
 
 /// Asserts what a restarted server says to a host that said hello before the restart: the
 /// server holds the host's session in its row (the job tables persist), so with no hello since
-/// the host's own credential places a cordon on it (live, epoch 1, the session it had), the
+/// the host's own certificate places a cordon on it (live, epoch 1, the session it had), the
 /// read then shows the cordon, the lift is served and the verb ends with status 0. It catches a restarted
 /// server that answers a host it can read from its rows as unknown, which would make the
 /// operator's cordon fail until the agent's next hello.
@@ -244,81 +235,46 @@ fn the_pool_token_and_an_unknown_token_are_refused_as_credential_errors() {
 fn a_restarted_server_serves_the_host_its_rows_hold() {
     let Enrolled {
         server,
-        state,
+        state: _state,
         _files,
         agent: _agent,
     } = enrol("cordon_http_restarted");
     let server = server.restart();
-    let url = server.url();
-    let credential = state.join(CREDENTIAL_FILE);
-    let lease = HttpLease::connect(
-        &url,
-        &Login::Token(credential),
-        None,
-        "mac-1",
-        RequestLimit::DEFAULT,
-    )
-    .unwrap();
+    let lease = lease_of(&server);
     let placed = lease.cordon(60).unwrap();
     assert!(!placed.already_cordoned);
     assert_eq!((placed.host.state.as_str(), placed.host.epoch), ("live", 1));
     assert!(lease.host().unwrap().cordon.is_some());
     lease.uncordon().unwrap();
 
-    let state_flag = state.display().to_string();
-    let flags = [
-        "--server",
-        &url,
-        "--state-root",
-        &state_flag,
-        "--host-id",
-        "mac-1",
-        "--for",
-        "1h",
-    ];
+    let mut flags = as_host(&server);
+    flags.extend(["--for".to_owned(), "1h".to_owned()]);
+    let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
     let ran = verb(&flags, &mut FakePace::new());
     assert_eq!(ran.status, code(0), "{}", ran.err);
 }
 
-/// Asserts what a server whose job tables hold no row for the host says to it: the credential
-/// is still the host's (it was saved with the binding) and the tables hold no such host, so
-/// the client reports `UnknownHost` and the verb ends with status 1 saying the server holds
-/// no such host. It catches an unknown host reported as a refused credential, which would send
-/// an operator to the wrong place.
+/// Asserts what a server whose job tables hold no row for the host says to it: the certificate
+/// is still the host's and the tables hold no such host, so the client reports `UnknownHost`
+/// and the verb ends with status 1 saying the server holds no such host. It catches an unknown
+/// host reported as a refused certificate, which would send an operator to the wrong place.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_server_whose_tables_hold_no_row_for_the_host_says_unknown_host() {
     let Enrolled {
         server,
-        state,
+        state: _state,
         _files,
         agent: _agent,
     } = enrol("cordon_http_unknown");
     let server = server.restart_forgetting_jobs();
-    let url = server.url();
-    let credential = state.join(CREDENTIAL_FILE);
-    let lease = HttpLease::connect(
-        &url,
-        &Login::Token(credential),
-        None,
-        "mac-1",
-        RequestLimit::DEFAULT,
-    )
-    .unwrap();
+    let lease = lease_of(&server);
     assert_eq!(lease.cordon(60).unwrap_err(), LeaseError::UnknownHost);
     assert_eq!(lease.host().unwrap_err(), LeaseError::UnknownHost);
 
-    let state_flag = state.display().to_string();
-    let flags = [
-        "--server",
-        &url,
-        "--state-root",
-        &state_flag,
-        "--host-id",
-        "mac-1",
-        "--for",
-        "1h",
-    ];
+    let mut flags = as_host(&server);
+    flags.extend(["--for".to_owned(), "1h".to_owned()]);
+    let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
     let ran = verb(&flags, &mut FakePace::new());
     assert_eq!(ran.status, code(1));
     assert!(
@@ -382,14 +338,7 @@ fn an_answer_that_is_not_a_host_reading_is_not_understood() {
     let (url, served) = serve_garbage(6);
     let files = Scratch::new("cordon_http_garbage");
     let token = files.write("token", "token-0123456789abcdef", 0o600);
-    let lease = HttpLease::connect(
-        &url,
-        &Login::Token(token.clone()),
-        None,
-        "mac-1",
-        RequestLimit::DEFAULT,
-    )
-    .unwrap();
+    let lease = plain_lease(&url, &token);
     for error in [
         lease.cordon(60).unwrap_err(),
         lease.uncordon().unwrap_err(),
@@ -402,18 +351,8 @@ fn an_answer_that_is_not_a_host_reading_is_not_understood() {
         };
         assert!(text.starts_with("the answer is not understood: "), "{text}");
     }
-    let token = token.display().to_string();
-    let flags = [
-        "--server",
-        &url,
-        "--host-id",
-        "mac-1",
-        "--for",
-        "1h",
-        "--token-file",
-        &token,
-    ];
-    let ran = verb(&flags, &mut FakePace::new());
+    let flags = ["--server", &url, "--host-id", "mac-1", "--for", "1h"];
+    let ran = plain_verb(&flags, &token);
     assert_eq!(ran.status, code(1));
     assert!(
         ran.err
@@ -423,32 +362,42 @@ fn an_answer_that_is_not_a_host_reading_is_not_understood() {
 }
 
 /// Asserts that a server nothing listens on is a server error with status 1, naming the
-/// address and not the credential. It catches an unreachable server reported as a usage error
+/// address and not the key. It catches an unreachable server reported as a usage error
 /// (status 2) or as a refusal.
 #[test]
 fn a_server_that_cannot_be_reached_is_a_server_error() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
+    let url = format!("https://{}", listener.local_addr().unwrap());
     drop(listener);
     let files = Scratch::new("cordon_http_closed");
-    let token = files.write("token", "token-0123456789abcdef", 0o600);
-    let token = token.display().to_string();
+    let identity = self_signed(&files, "mac-1");
+    let (cert, key) = (
+        identity.cert_path().display().to_string(),
+        identity.key_path().display().to_string(),
+    );
     let flags = [
         "--server",
         &url,
+        "--host-cert",
+        &cert,
+        "--host-key",
+        &key,
         "--host-id",
         "mac-1",
         "--for",
         "1h",
-        "--token-file",
-        &token,
     ];
     let ran = verb(&flags, &mut FakePace::new());
     assert_eq!(ran.status, code(1));
     let start =
         format!("js-agent cordon: server error: cannot cordon the host: cannot talk to {url}");
     assert!(ran.err.starts_with(&start), "{}", ran.err);
-    assert!(!ran.err.contains("token-0123456789abcdef"));
+    let pem = std::fs::read_to_string(&key).unwrap();
+    assert!(
+        !ran.err.contains(pem.lines().nth(1).unwrap()),
+        "{}",
+        ran.err
+    );
 }
 
 /// Asserts the whole verb against a real server over a window of 100 s with cordons of 30 s,
@@ -472,21 +421,9 @@ fn the_verb_holds_a_real_cordon_for_the_window_and_lifts_it() {
         assert!(expires > T0 + elapsed.get(), "wait {waits}: {cordon}");
         checks.set(checks.get() + 1);
     });
-    let (url, state) = (server.url(), enrolled.state_flag());
-    let flags = [
-        "--server",
-        &url,
-        "--state-root",
-        &state,
-        "--host-id",
-        "mac-1",
-        "--for",
-        "100s",
-        "--lease-secs",
-        "30",
-        "--holder",
-        "ops-1",
-    ];
+    let mut flags = as_host(server);
+    flags.extend(["--for", "100s", "--lease-secs", "30", "--holder", "ops-1"].map(str::to_owned));
+    let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
     let ran = verb(&flags, &mut pace);
     assert_eq!(ran.status, code(0), "{}", ran.err);
     assert_eq!(
@@ -514,19 +451,9 @@ fn another_holders_cordon_on_a_real_server_is_kept() {
             None => other.cordon(600).unwrap(),
         };
         assert!(!placed.already_cordoned);
-        let (url, state) = (enrolled.server.url(), enrolled.state_flag());
-        let flags = [
-            "--server",
-            &url,
-            "--state-root",
-            &state,
-            "--host-id",
-            "mac-1",
-            "--for",
-            "1h",
-            "--holder",
-            "ops-1",
-        ];
+        let mut flags = as_host(&enrolled.server);
+        flags.extend(["--for", "1h", "--holder", "ops-1"].map(str::to_owned));
+        let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
         let before = enrolled.server.host("mac-1")["cordon"]["expires_at_ms"].clone();
         let mut pace = FakePace::new();
         let ran = verb(&flags, &mut pace);
@@ -603,8 +530,7 @@ fn the_client_names_the_holder_and_reads_whose_the_cordon_is() {
     let (url, served) = serve_recording(replies);
     let files = Scratch::new("cordon_http_holder");
     let token = files.write("token", "token-0123456789abcdef", 0o600);
-    let login = Login::Token(token);
-    let lease = HttpLease::connect(&url, &login, None, "mac-1", RequestLimit::DEFAULT).unwrap();
+    let lease = plain_lease(&url, &token);
     let me = holder("me");
 
     let kept = lease.cordon_held(90, &me, false).unwrap();

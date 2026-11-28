@@ -9,8 +9,6 @@
 		<string>/Library/Application Support/js-agent/bin/js-agent</string>
 		<string>--flags-file</string>
 		<string>/etc/js-agent/flags</string>
-		<string>--token-file</string>
-		<string>/etc/js-agent/token</string>
 		<string>--state-root</string>
 		<string>/var/db/js-agent/state</string>
 		<string>--scratch-root</string>

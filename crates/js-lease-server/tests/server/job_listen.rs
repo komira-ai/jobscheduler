@@ -12,9 +12,9 @@ use js_lease_server::{Cli, Config, SharedClock, StartupError, channel_ticker, st
 use js_types::ManualClock;
 
 use crate::agents_support::{agent_args, join, start_agents};
-use crate::config_support::{PoolText, file, load, refusal, server};
+use crate::config_support::{PoolText, file, load, refusal, server, server_without_tls};
 use crate::jobs_support::job_args;
-use crate::support::{Harness, Scratch, config, without_agent_pool};
+use crate::support::{Harness, Scratch, base_args, config, without_agent_pool};
 
 /// A `[server]` table whose listeners let a pool that registers agents start, with `extra`
 /// lines after them.
@@ -26,6 +26,14 @@ fn server_lines(scratch: &Scratch, extra: &str) -> String {
 /// A file whose one pool registers agents (a joined pool), with `extra` in `[server]`.
 fn joined_file(scratch: &Scratch, extra: &str) -> String {
     file(&server_lines(scratch, extra), &[&PoolText::joined("burst")])
+}
+
+/// The base flags (agent registration on, no TLS files) with the job service on `listen`: what
+/// the TLS rule of a network address is checked against.
+fn plain_job_args(scratch: &Scratch, listen: &str) -> Vec<OsString> {
+    let mut args = base_args(scratch);
+    args.extend(["--job-listen".into(), listen.into()]);
+    args
 }
 
 /// What the refusal of a start says: its flag and its message.
@@ -118,7 +126,7 @@ fn job_listen_on_a_network_address_requires_tls() {
     let scratch = Scratch::new("job_listen_tls");
     for wide in ["0.0.0.0:7302", "192.0.2.1:7302", "[::]:7302"] {
         assert_eq!(
-            refused(config(job_args(&scratch, wide))),
+            refused(config(plain_job_args(&scratch, wide))),
             (
                 "--job-listen",
                 format!(
@@ -129,9 +137,12 @@ fn job_listen_on_a_network_address_requires_tls() {
         );
     }
     for loopback in ["127.0.0.1:7302", "[::1]:7302", "127.9.9.9:1"] {
-        assert!(config(job_args(&scratch, loopback)).is_ok(), "{loopback}");
+        assert!(
+            config(plain_job_args(&scratch, loopback)).is_ok(),
+            "{loopback}"
+        );
     }
-    let mut with_tls = job_args(&scratch, "0.0.0.0:7302");
+    let mut with_tls = plain_job_args(&scratch, "0.0.0.0:7302");
     with_tls.extend(["--tls-cert", "c.pem", "--tls-key", "k.pem"].map(OsString::from));
     assert!(config(with_tls).is_ok());
 
@@ -139,7 +150,13 @@ fn job_listen_on_a_network_address_requires_tls() {
     assert_eq!(
         refusal(
             &scratch,
-            &joined_file(&scratch, "job_listen = \"10.1.2.3:7302\"")
+            &file(
+                &server_without_tls(
+                    &scratch,
+                    "listen = \"127.0.0.1:0\"\nagent_listen = \"127.0.0.2:0\"\njob_listen = \"10.1.2.3:7302\""
+                ),
+                &[&PoolText::joined("burst")]
+            )
         ),
         format!("server.job_listen: 10.1.2.3:7302 {clear}")
     );

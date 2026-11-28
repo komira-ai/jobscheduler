@@ -6,10 +6,9 @@
 use std::collections::BTreeSet;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use js_elastic::{
-    AcquireId, Acquired, Demand, Held, HostRef, Offer, ProviderError, Released, SchedulerId, Secret,
+    AcquireId, Acquired, Demand, Held, HostRef, Offer, ProviderError, Released, SchedulerId,
 };
 use js_jobs::JobStoreError;
 use js_lease_server::{Call, Effects, JobTables, Scaler, SharedClock, UnremovedFile};
@@ -71,20 +70,12 @@ impl Effects for Wired {
         self.file.save(hosts).map_err(|err| err.to_string())
     }
 
-    fn mint(&self, host: &str, valid_for: Duration) -> Option<Secret> {
-        self.fake.mint(host, valid_for)
-    }
-
-    fn acquire(&self, plan: &AcquirePlan, token: Secret) -> Acquired {
-        self.fake.acquire(plan, token)
+    fn acquire(&self, plan: &AcquirePlan) -> Acquired {
+        self.fake.acquire(plan)
     }
 
     fn release(&self, id: &HostRef) -> Released {
         self.fake.release(id)
-    }
-
-    fn revoke(&self, host: &str) -> bool {
-        self.fake.revoke(host)
     }
 
     fn remove(&self, host: &str) -> Result<(), Busy> {

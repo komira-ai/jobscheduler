@@ -35,7 +35,7 @@
 //!   `pool-full`. The same message will be refused again however long the agent waits,
 //!   so the session ends with the status and the server's code ([`Fatal`]) and the
 //!   program exits 2. These are the refusals that name something only the operator can
-//!   change: the token (401), the pool (`unknown-pool`), the shape the pool accepts
+//!   change: the host certificate (401), the pool (`unknown-pool`), the shape the pool accepts
 //!   (`shape-not-accepted`; the refusal names the condition under `reason`, and the
 //!   agent prints it), the host contract of an execution mode (`host-contract`,
 //!   `execution-mismatch`; the refusal names the capability at fault), the credential the host id was admitted with (`host-bound`),
@@ -64,19 +64,6 @@
 //! The session secret is held in memory, goes into the body of every heartbeat and, through the
 //! dispatch [`Cell`], of every dispatch poll, and into nothing else: it is in no log line, no
 //! [`Note`] and no `Debug` output.
-//!
-//! # The host credential
-//!
-//! A session given a [`CredentialStore`] ([`Session::with_credential_store`]) keeps the host
-//! credential a welcome may carry. The server issues one only to a hello that says the agent
-//! keeps it (the agent says so when it has a state root), and retires the one-time token in
-//! the same step, so the credential is written to the store first and only then made the
-//! bearer of every later call ([`Transport::adopt_credential`]). A write that fails does not
-//! stop the session: the credential serves this process, and the note says that a restart
-//! could not register the host again ([`CredentialState::Unsaved`]). A welcome without a
-//! credential changes nothing, so an agent that meets an older server, or a pool's shared
-//! token, goes on with the token it has. A session with no store ignores a credential it is
-//! sent.
 //!
 //! # Jobs
 //!
@@ -183,14 +170,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent_wire::refusal;
-use js_agent_wire::{
-    Heartbeat, HeartbeatReply, Hello, HostCredential, NodeLoad, Phase, ValidationError, Welcome,
-};
+use js_agent_wire::{Heartbeat, HeartbeatReply, Hello, NodeLoad, Phase, ValidationError, Welcome};
 use js_caps::DISK_GIB;
 use serde_json::Value;
 
 use crate::backoff::{Backoff, Jitter};
-use crate::credential::CredentialStore;
 use crate::disk::DiskGauge;
 use crate::dispatch::Cell;
 use crate::exclusive::{Fields, Hold, PREPARE_TIMEOUT, Quiesce};
@@ -213,7 +197,7 @@ mod note;
 mod reason;
 pub use fatal::Fatal;
 pub use note::Note;
-pub use reason::{CredentialState, Reason};
+pub use reason::Reason;
 
 /// The route of the hello.
 pub const HELLO_PATH: &str = "/v1/agent/hello";
@@ -338,8 +322,6 @@ pub struct Session<'a> {
     hold: Option<Hold<'a>>,
     jobs: Option<Jobs<'a>>,
     usage: Option<Arc<Outbox>>,
-    /// Where the host credential of a welcome is kept, when the agent has a place for it.
-    store: Option<&'a dyn CredentialStore>,
     /// The last heartbeat sent carried the taint: only an answer to it can acknowledge it.
     carried: bool,
     /// The last heartbeat sent carried the cleared taint: only an answer to it can acknowledge
@@ -388,7 +370,6 @@ impl<'a> Session<'a> {
             hold: None,
             jobs: None,
             usage: None,
-            store: None,
             carried: false,
             carried_clear: false,
             worker_gone: false,
@@ -511,16 +492,6 @@ impl<'a> Session<'a> {
     pub fn with_disk(self, gauge: &'a dyn DiskGauge) -> Self {
         Self {
             disk: Some(gauge),
-            ..self
-        }
-    }
-
-    /// The same session keeping the host credential a welcome carries in `store` (see the
-    /// module documentation).
-    #[must_use]
-    pub fn with_credential_store(self, store: &'a dyn CredentialStore) -> Self {
-        Self {
-            store: Some(store),
             ..self
         }
     }
@@ -764,20 +735,6 @@ impl<'a> Session<'a> {
         }
     }
 
-    /// Keeps the credential a welcome carried: written to the store first, then made the
-    /// bearer of every later call. The credential is sent nowhere else and printed nowhere.
-    fn keep_credential(&mut self, credential: Option<&HostCredential>) -> CredentialState {
-        let (Some(credential), Some(store)) = (credential, self.store) else {
-            return CredentialState::None;
-        };
-        let saved = store.save(credential).is_ok();
-        match (self.transport.adopt_credential(credential.expose()), saved) {
-            (Err(_), _) => CredentialState::Refused,
-            (Ok(()), true) => CredentialState::Saved,
-            (Ok(()), false) => CredentialState::Unsaved,
-        }
-    }
-
     fn registered(&mut self, welcome: &Welcome) -> Step {
         if let Some(jobs) = &self.jobs {
             if let Err(why) = jobs.worker.check_grace(welcome.grace_ms) {
@@ -785,9 +742,8 @@ impl<'a> Session<'a> {
             }
             jobs.worker.heard();
         }
-        let credential = self.keep_credential(welcome.host_credential.as_ref());
         if let Some(cell) = self.dispatch {
-            cell.publish(&self.hello.host_id, welcome, credential);
+            cell.publish(&self.hello.host_id, welcome);
         }
         let interval = Duration::from_millis(welcome.heartbeat_interval_ms);
         self.live = Some(Live {
@@ -815,7 +771,6 @@ impl<'a> Session<'a> {
             note: Some(Note::Registered {
                 epoch: welcome.epoch,
                 interval,
-                credential,
             }),
         }
     }

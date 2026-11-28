@@ -13,6 +13,7 @@ use js_agent_wire::{Heartbeat, Hello};
 use js_sim::{Event, Faults, Node, NodeId, NodeInput, Output, Sim};
 use js_sim_cell::bus::{self, SERVER};
 use js_sim_cell::{AgentNode, AgentSpec, CallId, Ledger, Msg, Route};
+use js_types::HostId;
 use js_types::sched::{Effect, FarmTime, StateMachine};
 use serde_json::{Value, json};
 
@@ -100,10 +101,10 @@ pub enum Call {
     Beat(Box<Heartbeat>),
 }
 
-/// One call, when it arrived, and the bearer it carried.
+/// One call, when it arrived, and the host certificate it presented.
 pub struct Received {
     pub at: FarmTime,
-    pub bearer: String,
+    pub certificate: Option<HostId>,
     pub call: Call,
 }
 
@@ -214,6 +215,7 @@ impl StandIn {
             "grace_ms": interval_ms * 3,
             "pool": POOL,
             "session": format!("{SESSION_PREFIX}{}", self.epoch),
+            // What a server of the release before this one sent: this release ignores it.
             "host_credential": "standin-credential-the-agent-never-keeps",
         });
         welcome.to_string()
@@ -282,7 +284,7 @@ impl StandIn {
         let Msg::Request {
             id,
             route,
-            bearer,
+            certificate,
             body,
         } = msg
         else {
@@ -307,7 +309,7 @@ impl StandIn {
         };
         self.received.push(Received {
             at: now,
-            bearer,
+            certificate,
             call,
         });
     }

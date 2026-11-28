@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use js_agent::cli_runtime::{CALL_LIMIT, LOGS_LIMIT};
 use js_agent::{
-    Answer, CredentialState, Delivery, Drain, HEARTBEAT_PATH, HELLO_PATH, Note, QUEUE,
-    STALL_MARGIN, Session, Snapshot, Step, Transport, Worker,
+    Answer, Delivery, Drain, HEARTBEAT_PATH, HELLO_PATH, Note, QUEUE, STALL_MARGIN, Session,
+    Snapshot, Step, Transport, Worker,
 };
 use serde_json::{Value, json};
 
@@ -182,10 +182,6 @@ impl Transport for Hooked<'_> {
         }
         answered
     }
-
-    fn adopt_credential(&mut self, secret: &str) -> Result<(), String> {
-        self.inner.adopt_credential(secret)
-    }
 }
 
 /// Asserts that a `taint_ack` answers only a heartbeat that carried the taint: the host is
@@ -287,7 +283,6 @@ fn a_reply_the_busy_worker_cannot_take_is_noted_and_the_tick_returns() {
         Some(Note::Registered {
             epoch: 1,
             interval: Duration::from_secs(5),
-            credential: CredentialState::None,
         })
     );
     assert_eq!(note(&mut session), None);

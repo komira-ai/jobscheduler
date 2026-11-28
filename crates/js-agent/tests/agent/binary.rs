@@ -32,7 +32,7 @@ impl Agent {
     fn start(server: &Server, host: &str) -> Self {
         let child = Command::new(env!("CARGO_BIN_EXE_js-agent"))
             .args(["--server", &server.url(), "--pool", "macs"])
-            .args(["--token-file", server.join_file().to_str().unwrap()])
+            .args(server.identities().flags(host))
             .args(["--host-id", host, "--label", "rack=r9"])
             // The agent that runs no job: a Linux agent given no `--no-jobs` runs crun.
             .args(["--no-jobs"])

@@ -1,5 +1,13 @@
 # First live launch on Lambda Cloud
 
+> **A scaler launch needs G9 first.** Hosts are admitted by their host certificate alone
+> (`docs/design/multi-instance.md`, G3): the one-time join tokens, the host credential and the
+> scaler's mint and revoke of a launched machine's token are gone, and the scaler does not mint
+> anything for a launched machine. A launched machine can join only once G9 gives it a
+> certificate. Until then the scaler stays off and this checklist cannot be run to its end. The
+> steps below stay as the launch path they describe, with the token and credential items reduced to
+> what G3 left.
+
 This is the checklist for the first time a scheduler spends money on a Lambda Cloud GPU
 instance. A lead and the owner of the account run it together. The design is
 `docs/design/pools-providers-network.md`; sections are cited as `D§n` and open questions as `Qn`.
@@ -12,8 +20,8 @@ Each item is marked:
 
 It is written against `main` after the scaler's shell (#287), the Tailscale DNS and socket wait (#309),
 digest-pinned images (#311), the pool's provider checks (#312), the one config file (#302), the status
-pages (#286), the Lambda launch inputs (#267), the host credential (#266, #274) and revoke on terminate
-(#196). Key names below are the ones the config reader accepts today. The reader refuses a key it does not
+pages (#286), the Lambda launch inputs (#267), the host credential (#266, #274, since removed by G3) and revoke on terminate
+(#196, since removed by G3). Key names below are the ones the config reader accepts today. The reader refuses a key it does not
 know, so a mistyped key stops the start rather than being ignored. The design's `memory_schedulable_percent`
 is not a key on `main`; nothing here sets it.
 
@@ -59,10 +67,10 @@ The lead has decided every item below. The marks are the decisions.
 | #329, the same change: boot hold | A booting machine past `boot_timeout` is released at the first complete registry view, with no hold, so a restart can release a machine whose agent is about to say hello. #329 holds for a third of `boot_timeout` (5 min by default) first. This costs a launch, not an overspend. | **blocking** (it ships with the price fix) |
 | #387: `heard_since_hello` | The shell passes `true` for every host, which turns off the lost-Welcome rule. A host whose hello was admitted but whose Welcome was lost never heartbeats and cannot register again (the token is retired); it is released only after `unknown_hold` of silence, not at `boot_timeout`. The bound for one such machine is the time to its hello, plus the 15 s heartbeat grace, plus 30 min (`unknown_hold`, not a config key), at the offer's hourly price: at `max_instances = 1` that is about half an hour of one instance, and the pool launches nothing else meanwhile. This path starts no boot-failure cooldown as far as the design describes it, so a repeat is bounded by `max_spend_per_day`, not by time. | **accepted for the first run** (the first live run only), with `max_instances = 1`, a small day cap (a few hours of one instance), and the watch rule of step 4 (terminate by hand a registered host that has not heartbeated within `boot_timeout`). It stays a named follow-up. |
 | #388: persist the unremoved hosts | A host whose registry removal was refused (a lease booked on it) is retried each tick, but the list is in memory. After a restart it leaves the registry only by `forget_lost`, up to 24 h later, and keeps its pool slot. No machine is running and nothing is billed; with `max_instances = 1` the pool cannot launch again until then. | **accepted for the first run** (no spend). It stays a named follow-up. |
-| Metadata-address block (design 7.3 step 8, F12b), branch `bootstrap-metadata-block` | The design says the bootstrap blocks containers from the provider's metadata address. The rendered bootstrap on `main` has no such step: it prepares the image, writes the token and instance line, runs the network steps, fetches the agent, installs the GPU hook and the unit. No open issue names it; the branch above is the work. A job on the host can read the instance's user data (the agent URL, and the Tailscale key, which is single-use and 10 min old at most; the join token is retired at the first hello). | **blocking.** It is being built on the branch `bootstrap-metadata-block`; do not set `launch = "live"` until it has merged and the deployed build contains it. Step 5.1 passes only once it has landed. |
+| Metadata-address block (design 7.3 step 8, F12b), branch `bootstrap-metadata-block` | The design says the bootstrap blocks containers from the provider's metadata address. The rendered bootstrap on `main` has no such step: it prepares the image, runs the network steps, fetches the agent, installs the GPU hook and the unit. No open issue names it; the branch above is the work. A job on the host can read the instance's user data (the agent URL, and the Tailscale key, which is single-use and 10 min old at most; the join token has been removed by G3). | **blocking.** It is being built on the branch `bootstrap-metadata-block`; do not set `launch = "live"` until it has merged and the deployed build contains it. Step 5.1 passes only once it has landed. |
 | #345: the bootstrap's agent unit | Fixed: the unit the bootstrap writes has the packaged unit's engine ordering (`After=` `docker.service` and `containerd.service`), stop timeout (`TimeoutStopSec=120`), restart pace (`RestartSec=30`) and mount condition (`ConditionPathIsMountPoint=` the scratch root), and `crates/js-lease-server/tests/network/packaged_unit.rs` holds the two units to the same values. A misconfigured agent says hello every 30 s. | fixed; the deployed build must contain it. |
 | Human checks the design puts before the go | Q10 (no inbound under Lambda's account-wide rules, 3.1), Q2 (launch field names and the `user_data` limit, 3.2), Q5 (the stock image: driver, runtime, toolkit, scratch device, cloud-init file list, 5.2), and the live checklist of design 13.4 (sections 3 to 6). They are steps of this runbook, not code. | **blocking**, each as its step says. |
-| Host credential (design 7.2, PR 7b) | Merged (#266, #274). The switch `require_host_credential` is off by default; with it off, a hello that does not ask for a credential keeps the join token as the host's credential for up to 24 h. Step 1.11 turns it on. | merged; the setting is decided: **on** for launched pools (`server.require_host_credential = true`, in the example and step 1.11). |
+| Host credential (design 7.2, PR 7b) | Removed by G3. The switch `require_host_credential` is accepted and ignored with a warning; a host is known by its certificate alone. | removed; nothing to set. |
 
 ## 1. Prerequisites
 
@@ -80,7 +88,6 @@ boot              = "resume"                    # "initialise" for the first liv
 client_token_file = "<path>"
 tls_cert          = "<path>"
 tls_key           = "<path>"
-require_host_credential = true
 job_listen        = "<tailnet address>:7302"    # the job service, which js job calls
 max_lease_wall    = "1h"                        # required with a pool with GPUs: part of the lifetime a launch carries
 
@@ -124,7 +131,7 @@ The reader refuses an unknown key, a `launch` other than `plan` or `live`, a day
 | 1.8 | Caps. `max_instances = 1`; `max_spend_per_hour` set to the smallest GPU type's price for one instance for one hour, and `max_spend_per_day` to about twice that. | The config has all three. `/v1/pools` shows `instances.max` 1 and `instances.max_spend_cents_per_hour` equal to your figure in cents. Read the type's price on Lambda's page and confirm it is above zero (#329: the cap does not bind on a zero price until it lands). | CI (they are required and the step enforces them), LIVE (the prices the catalog returns are the ones you budgeted) |
 | 1.9 | `launch = "plan"` in the pool. A second lock: the provider is built disabled and in dry run unless `launch = "live"`. | `grep launch <config>` prints `plan`; `/v1/pools` shows `launch: plan`. | CI (`a_plan_pool_launches_nothing`) |
 | 1.10 | A client token file for the job service, and the `js` CLI on a machine that can reach `job_listen`. | `js job list --server https://js.example.ts.net:<job port> --token-file <file> --ca-cert <pem>` prints an empty list. | CI (CLI), LIVE (the route) |
-| 1.11 | `server.require_host_credential = true`: the first hello of a one-time join token must ask for a host credential, or it is refused (`join-token-credential-required`, 403) and the token stays unused. The pinned agent asks. | The line is in the config. A launched host's token is dead after its first hello (5.3). | CI (`the_switch_refuses_an_unasked_first_hello_of_a_one_time_token`), LIVE (the pinned agent asks) |
+| 1.11 | Removed by G3: `require_host_credential` is accepted and ignored, and the server admits a host by its certificate alone. | Nothing to set. | none |
 | 1.12 | Where the records file will be: `<state_file>.scaler`, beside the state file, in a directory only the service user can write. Back it up with the binding file and the job store. | `ls -l` of the directory. Nothing in the directory is deleted by hand during the run. | LIVE |
 
 On fail: fix the item. Nothing has been spent.
@@ -164,13 +171,12 @@ For the pool in `/v1/pools` (`pools[]`), look at:
 - `instances.n` is 0, `instances.max` is 1; `blocked` is null (it is `unavailable` whenever `state` is not
   `available`; it carries no other value); `no_offer` is null; `machines`, `orphans` and `alerts` are
   empty arrays.
-- `next_launch` holds the offer, the zone, a name, and a `plan` in which `join_token` and
-  `network.tailscale.authkey` print as `***`, with the agent and Tailscale urls and digests you pinned,
+- `next_launch` holds the offer, the zone, a name, and a `plan` in which
+  `network.tailscale.authkey` prints as `***`, with the agent and Tailscale urls and digests you pinned,
   `--host-id`, `--container-pull missing` and the GPU toolkit hook. `plan_error` is null.
 
 Pass: every check green, `next_launch` as above, no secret in either response
-(`curl ... | grep -c` for the first characters of the join-token file and of the OAuth secret
-prints 0).
+(`curl ... | grep -c` for the first characters of the OAuth secret prints 0).
 
 | claim | mark |
 |---|---|
@@ -279,7 +285,7 @@ the Lambda console during the run, and the decisions of "Must land" that are not
 |---|---|
 | `last_launch.outcome` is `accepted` (the provider gave an id; `pending` before), `host` set; the instance in Lambda's list carries our name and tags `jobscheduler:scheduler`, `jobscheduler:pool`, `jobscheduler:acquire`, and the firewall ruleset | the tags and name are as above (**LIVE**) |
 | `booting` within one tick of the request | **CI** for the order (record written before the call, one launch per request: `a_waiting_request_is_launched_once_with_its_records_written_first`, `a_live_pool_launches_once_and_not_again_after_a_restart`) |
-| A tailnet device named like the host appears, then `registered` once the host says hello, within `boot_timeout` (default 15 min). The unit starts the agent with `--host-id <name>`, which is how the scaler finds the host of the record. | **LIVE.** Time it: the Tailscale key lives 10 minutes (Q11); the join token lives `boot_timeout` plus 5 minutes. |
+| A tailnet device named like the host appears, then `registered` once the host says hello, within `boot_timeout` (default 15 min). The unit starts the agent with `--host-id <name>`, which is how the scaler finds the host of the record. | **LIVE.** Time it: the Tailscale key lives 10 minutes (Q11). |
 | `instances.n` is 1 and `spend_cents_per_hour` is the catalog price | **CI** (arithmetic), **LIVE** (price is Lambda's) |
 | The job moves from `queued` to `running` on `js job get --job-id <id>` | **CI** (flow), **LIVE** (a real host) |
 
@@ -305,10 +311,9 @@ On fail:
 - `alerts` on `/v1/pools` or `/status` is not empty: read the text. The alerts are an orphan (a machine of
   ours that no record knows: `a machine of ours that no record knows: ...; release it at the provider`), a
   record of a pool the server does not have, a host `silent past twice unknown_hold, books nothing and is
-  not marked releasing`, a join token `that cannot be revoked, so its machine is not terminated and keeps
-  running`, a host `of a machine that is gone` that the registry will not remove (#388), and a machine
+  not marked releasing`, a host `of a machine that is gone` that the registry will not remove (#388), and a machine
   `whose release the provider does not confirm`. Each alert means a machine may still be billing; go to
-  section 7 for any of them. **CI** (`the_alerts_are_on_the_status`, `a_revoke_that_keeps_failing_is_said_once`).
+  section 7 for any of them. **CI** (`the_alerts_are_on_the_status`).
 
 ## 5. On the live host, while it runs
 
@@ -353,21 +358,12 @@ it changes. **LIVE.** Removal with `rm` does not erase blocks and nothing here c
 On fail (a path holds a secret and is not in the list): the token is dead after hello (5.3); the
 Tailscale key is single-use and ten minutes old at most. Record it and add the path before a second launch.
 
-### 5.3 The join token is retired after the first hello (D§7.2)
+### 5.3 The agent routes refuse a request without a host certificate (G3)
 
-The scheduler keeps only a digest of the token, so an operator cannot replay it from the scheduler
-host. The live replay is from the host itself, and only if the token file survived the trap:
-
-```sh
-test -f /etc/jobscheduler/token && curl -sS -o /dev/null -w '%{http_code}\n' -X POST \
-  -H "Authorization: Bearer $(cat /etc/jobscheduler/token)" \
-  https://js.example.ts.net:<agent port>/v1/agent/hello -d '{}'
-```
-
-Pass: the file is gone (the trap ran), or the answer is 401 with an empty body. **CI**: a retired
-token is unknown and gets the same 401, and two concurrent first hellos make one credential
-(`agent_api_race_tests`). **LIVE**: that the real agent sent the first hello and was given the
-credential: `/v1/hosts` lists the host with `source: registered`, and the agent keeps heart-beating.
+There is no join token to replay: the agent routes admit a request only with a verified host
+certificate and answer any other with 401 and the body `{"error":"host-certificate-required"}`.
+**LIVE**, once G9 launches a machine with a certificate: `/v1/hosts` lists the host with
+`source: registered`, and the agent keeps heart-beating.
 
 ### 5.4 The tailnet and port separation (D§8.3, F21)
 
@@ -406,21 +402,15 @@ On fail: read the agent unit's output through the job, or the console output in 
    `draining`, then `releasing`. **CI**: a host is released only while it has no lease, run or stream
    (`a_busy_host_is_kept_and_a_drained_host_is_taken_back_for_a_request`,
    `a_machine_is_launched_registered_idle_drained_released_and_removed`).
-3. Order, as the log and the status show it: the host's token or credential is revoked **before** the
-   release is sent. If the revoke fails, the release waits and the revoke is retried each tick.
-   **CI** (`a_revoke_that_fails_holds_the_release_back`,
-   `a_restart_marks_what_was_being_released_before_anything_else`; the host credential ends with the
-   revoke: `a_revoke_ends_the_credential`). A revoke that keeps failing raises the alert
-   `the join token of host <name> cannot be revoked, so its machine is not terminated`: the machine
-   is billing, so go to section 7.
+3. The scaler no longer revokes anything before the release is sent: no token was minted. The
+   release is sent once the host is drained.
 4. The release is read back until the instance is gone. The status shows the machine
    (state `releasing`) until Lambda's list does not hold it; a release the provider does not confirm
    within `boot_timeout` plus 30 min raises an alert (`a machine whose release the provider does not confirm`). **LIVE** that Lambda's list agrees (open the console).
 5. The tailnet device is deleted: `tailscale status` and the admin console no longer list the host name.
    A failed delete is logged as a warning and does not block the release; delete it by hand if so. **CI** (the
    delete, fake API), **LIVE** (the real one).
-6. The join token and the host credential are revoked: the agent routes answer 401 to both. **CI**
-   (revoke), **LIVE** (against the running service).
+6. No token or credential was issued, so none is revoked.
 7. The Tailscale OAuth client and the Lambda API key remain; revoke or rotate them if the run showed any
    secret in a log or on a host path (5.2).
 8. Return the pool to `launch = "plan"`, set `boot = "resume"` (check `<state file>.scaler` exists first),
@@ -428,7 +418,7 @@ On fail: read the agent unit's output through the job, or the console output in 
    it, and it holds the day's spend.
 
 Pass for the run: from Lambda's list and status: our tags and name; a hello arrived; the job ran; the
-instance terminated and read back gone; the device gone from the tailnet; the token revoked;
+instance terminated and read back gone; the device gone from the tailnet;
 `instances.n` is 0; no spend after the release. **LIVE.**
 Open the Lambda billing page after an hour and compare the charge with `max_spend_per_hour`.
 

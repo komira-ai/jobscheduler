@@ -751,15 +751,18 @@ pub(super) fn params_file_of(params: &Value) -> String {
 }
 
 /// Asserts that the params the manifest carries are exactly the keys the update hook requires
-/// (`js_agent::update_hook::params::KEYS`: none missing, none extra, none twice), and that the
+/// (`js_agent::update_hook::params::KEYS`: none missing, none extra, none twice) plus the
+/// retired `token_file`, which this hook ignores and a hook of an earlier release still
+/// requires when it reads this release's params, and that the
 /// hook's own reader accepts them written as hostkeeper writes its params file, with the
 /// bounds it reads equal to the manifest's `hook.timeoutSecs` and `verifyDeadlineSecs`.
 #[test]
 fn the_params_are_the_keys_the_hook_requires_and_its_reader_accepts_them() {
     let _serial = serial();
-    use js_agent::update_hook::params::{KEYS, Params};
+    use js_agent::update_hook::params::{KEYS, Params, TOKEN_FILE_KEY};
     let mut ours: Vec<&str> = PARAMS.iter().map(|(key, _)| *key).collect();
     let mut theirs: Vec<&str> = KEYS.to_vec();
+    theirs.push(TOKEN_FILE_KEY);
     ours.sort_unstable();
     theirs.sort_unstable();
     assert_eq!(ours, theirs);

@@ -1,19 +1,18 @@
 //! The params file of `drain` and `resume`: the manifest's table with the updater's
-//! maintenance keys, of which these steps read seven and ignore the rest.
+//! maintenance keys, of which these steps read six and ignore the rest.
 
 use std::path::{Path, PathBuf};
 
 use js_agent::update_hook::{
     CORDON_LEASE_KEY, DEFER_RETRY_KEY, DRAIN_DEADLINE_KEY, DrainParams, FLAGS_FILE_KEY,
-    MIN_CORDON_LEASE_SECS, ParamsError, STATE_ROOT_KEY, TOKEN_FILE_KEY, UNIT_KEY,
+    MIN_CORDON_LEASE_SECS, ParamsError, STATE_ROOT_KEY, UNIT_KEY,
 };
 use js_testkit::dir::TestDir;
 
 /// The keys these steps read, in a table that holds them all and no deadline.
-const KEYS: [(&str, &str); 6] = [
+const KEYS: [(&str, &str); 5] = [
     ("unit", "\"js-agent-crun.service\""),
     ("flags_file", "\"/etc/js-agent/flags\""),
-    ("token_file", "\"/etc/js-agent/token\""),
     ("state_root", "\"/var/lib/js-agent/state\""),
     ("cordon_lease_secs", "300"),
     ("defer_retry_secs", "120"),
@@ -53,7 +52,6 @@ fn a_table_with_every_key_is_read_value_for_value() {
         DrainParams {
             unit: "js-agent-crun.service".to_owned(),
             flags_file: PathBuf::from("/etc/js-agent/flags"),
-            token_file: PathBuf::from("/etc/js-agent/token"),
             state_root: PathBuf::from("/var/lib/js-agent/state"),
             cordon_lease_secs: 300,
             defer_retry_secs: 120,
@@ -76,7 +74,6 @@ fn every_key_these_steps_read_is_required() {
     let keys = [
         UNIT_KEY,
         FLAGS_FILE_KEY,
-        TOKEN_FILE_KEY,
         STATE_ROOT_KEY,
         CORDON_LEASE_KEY,
         DEFER_RETRY_KEY,
@@ -88,7 +85,7 @@ fn every_key_these_steps_read_is_required() {
 /// `NotSeconds`, each naming the key. It catches a value read by coercion.
 #[test]
 fn a_value_of_the_wrong_type_is_refused_by_key() {
-    for key in ["unit", "flags_file", "token_file", "state_root"] {
+    for key in ["unit", "flags_file", "state_root"] {
         let got = DrainParams::parse(&table_with(key, Some("7")));
         assert!(
             matches!(&got, Err(ParamsError::NotText(name)) if name == key),
@@ -104,11 +101,11 @@ fn a_value_of_the_wrong_type_is_refused_by_key() {
     }
 }
 
-/// Asserts that a relative path in any of the three path keys is `Relative`, naming the key. It
+/// Asserts that a relative path in either of the two path keys is `Relative`, naming the key. It
 /// catches a path that would be taken against the updater's working directory.
 #[test]
 fn a_relative_path_is_refused_by_key() {
-    for key in ["flags_file", "token_file", "state_root"] {
+    for key in ["flags_file", "state_root"] {
         let got = DrainParams::parse(&table_with(key, Some("\"relative/path\"")));
         assert!(
             matches!(&got, Err(ParamsError::Relative(name)) if name == key),
@@ -237,7 +234,7 @@ fn the_table_the_package_ships_with_the_updaters_keys_is_accepted() {
     let text = concat!(
         "unit = \"js-agent-crun.service\"\nstate_dir = \"/var/lib/js-agent-update\"\n",
         "release_link = \"/opt/js-agent/current\"\nflags_file = \"/etc/js-agent/flags\"\n",
-        "token_file = \"/etc/js-agent/token\"\nstate_root = \"/var/lib/js-agent/state\"\n",
+        "state_root = \"/var/lib/js-agent/state\"\n",
         "runtime = \"crun\"\ncordon_lease_secs = 300\ncordon_max_secs = 17355\n",
         "drain_wait_secs = 3600\ndefer_retry_secs = 300\nprepare_timeout_secs = 3900\n",
         "cutover_timeout_secs = 4320\nverify_timeout_secs = 615\n",
@@ -250,13 +247,28 @@ fn the_table_the_package_ships_with_the_updaters_keys_is_accepted() {
         DrainParams {
             unit: "js-agent-crun.service".to_owned(),
             flags_file: PathBuf::from("/etc/js-agent/flags"),
-            token_file: PathBuf::from("/etc/js-agent/token"),
             state_root: PathBuf::from("/var/lib/js-agent/state"),
             cordon_lease_secs: 300,
             defer_retry_secs: 300,
             drain_deadline_unix: Some(1_893_456_000),
         }
     );
+}
+
+/// Asserts that a manifest that still names the retired `token_file`, as one issued before hosts
+/// were identified by their certificate alone does, is read as one that does not: the key is
+/// ignored, whatever its value. It catches a drain that refuses the manifest of a host whose
+/// package has not been replaced yet.
+#[test]
+fn a_manifest_that_still_names_token_file_is_accepted_and_the_key_ignored() {
+    for value in ["\"/etc/js-agent/token\"", "\"relative\"", "7"] {
+        let named = format!("{}token_file = {value}\n", full());
+        assert_eq!(
+            DrainParams::parse(&named).unwrap(),
+            DrainParams::parse(&full()).unwrap(),
+            "{value}"
+        );
+    }
 }
 
 /// Asserts that a table with none of the update's staged-release keys (no digest, no version, no

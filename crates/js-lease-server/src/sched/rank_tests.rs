@@ -21,7 +21,7 @@ fn id(name: &str) -> ProviderId {
     ProviderId::new(name).unwrap()
 }
 
-/// A binding of the pool's join token, naming the instance `instance` of `provider` when
+/// A binding of a credential held from before certificates, naming the instance `instance` of `provider` when
 /// given.
 fn bound(instance: Option<(&str, &str)>) -> Binding {
     let instance = instance.map(|(provider, instance_id)| InstanceIdentity {

@@ -1,4 +1,4 @@
-//! The boot payload (it holds the machine's join token) and the private half of a key the
+//! The boot payload (it can hold the network's secrets) and the private half of a key the
 //! API makes appear in no log line, no `Debug`, no call log and no answer, at the most
 //! verbose level, from this crate or from the HTTP client under it. This binary holds one
 //! test: it installs the process's `log` sink.

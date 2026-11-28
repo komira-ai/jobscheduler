@@ -18,7 +18,6 @@ pub use js_update_hook::{
     UnitState, Units, read_link,
 };
 
-use crate::CredentialFile;
 use crate::lifecycle::StateRoot;
 use crate::lifecycle::handover;
 use crate::lifecycle::hold::{self, HOLD_FILE, HOLD_RESUME_FILE};
@@ -29,8 +28,8 @@ pub use crate::own_host::{
     CordonView, Cordoned, HostReading, Lease, LeaseError, MAX_CORDON_SECS, Uncordoned,
 };
 
-/// The agent's state root, read only: the taint marker and pin file, the records of owed checks and whether
-/// it holds a host credential.
+/// The agent's state root, read only: the taint marker and pin file, the records of owed checks
+/// and the handover request.
 ///
 /// The agent runs as root on the crun unit, so the root hook can open its state root.
 pub trait StateView {
@@ -47,11 +46,6 @@ pub trait StateView {
     /// # Errors
     /// The state root could not be listed.
     fn owed(&self) -> Result<Vec<String>, PortError>;
-
-    /// Whether the state root holds a usable `host-credential`: the agent sends it in place of
-    /// a join token, so a host that has one needs no token file. A credential file that cannot
-    /// be read, or holds no credential, is not one.
-    fn has_credential(&self) -> bool;
 
     /// Asks the agent's next stop to hand its runs over to the agent's next process instead
     /// of draining the host: writes the handover file in the state root, atomically and
@@ -86,12 +80,6 @@ impl StateView for StateRoot {
 
     fn owed(&self) -> Result<Vec<String>, PortError> {
         StateRoot::owed(self).map_err(PortError::from)
-    }
-
-    fn has_credential(&self) -> bool {
-        CredentialFile::in_dir(self.path())
-            .load()
-            .is_ok_and(|loaded| loaded.is_some())
     }
 
     fn request_handover(&self) -> Result<(), PortError> {

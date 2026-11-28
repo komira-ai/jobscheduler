@@ -1,13 +1,11 @@
-# Moving a Mac from its join token to its host certificate
+# Giving a Mac its host certificate
 
-A Mac that joined the lease server by a join token (its agent runs with `--token-file
-/etc/js-agent/token` and nothing in its flags file names a certificate) moves onto hostkeeper's
-host certificate when its group's config package names the certificate. Nothing else changes on
-the Mac: the agent's package, its plist (which goes on naming `--token-file`), the token file
-and the host id stay as they are. A Mac that has moved sends no token; the Macs that have not
-moved go on joining by the token, so the Macs of a group can move one at a time. The join
-tokens are deleted from the lease server only after every host has moved
-([docs/design/multi-instance.md](../design/multi-instance.md), G3).
+A Mac joins the lease server by hostkeeper's host certificate and by nothing else: the one-time
+join tokens and the pool's token are gone ([docs/design/multi-instance.md](../design/multi-instance.md),
+G3), and the move of the Macs from the token to the certificate is done. A Mac's group config
+package names the certificate in `/etc/js-agent/flags`, and the agent's plist names only
+`--flags-file /etc/js-agent/flags`. This page is the check to make before a Mac, or a new group
+of Macs, is given that package.
 
 Examples use the host id `mac-1` and the group `mac-build`. Replace them.
 
@@ -31,8 +29,7 @@ Examples use the host id `mac-1` and the group `mac-build`. Replace them.
   0440 (`--host-key` in `crates/js-agent/src/cli.rs`). The agent refuses any other, naming the
   flag and the file.
 - **The server trusts hostkeeper's CA.** The lease server is started with `--agent-client-ca`
-  naming the CA that signs the host certificates, as it is for the Linux hosts that join by
-  certificate.
+  naming the CA that signs the host certificates, as it is for every other host.
 
 ## 2. Name the certificate in the group's flags
 
@@ -45,48 +42,14 @@ packages") adds two lines to `/etc/js-agent/flags` and keeps the others:
 --host-key=/var/lib/hostkeeper/identity/host.key
 ```
 
-With both flags the agent presents the certificate in the TLS handshake and sends no bearer: it
-reads neither the token file nor a host credential kept in its state root, and keeps no new one
-(`crates/js-agent/src/login.rs`). It reads the two files again before each request, so
+With both flags the agent presents the certificate in the TLS handshake and sends no bearer. An
+agent started without both flags refuses to start, naming them, and the lease server refuses a
+request with no verified host certificate (`401 host-certificate-required`). It reads the two files again before each request, so
 hostkeeper's renewal in place needs no restart.
 
 ## 3. What the Mac does when the package lands
 
-The config hook restarts the agent so that it reads the new flags. The lease server still holds
-the session the agent opened on the token, so the first hello by certificate is refused `409
-host-live`, and the agent tries again with its backoff. Once that session has lapsed (its grace,
-15 seconds unless the pool's configuration says otherwise), the hello is admitted at the next
-epoch and the Mac's binding moves from the token to the certificate
-(`crates/js-registry/src/registry/admit.rs`). The config hook's `verify` passes when it sees that
-new session.
-
-Check it with `js host list --server https://<job service> --token-file <operator token>`: the
-Mac is `live` under the same id.
-
-## 4. There is no way back to the token
-
-Once a Mac has said hello by its certificate, a token never takes that host id again: the token's
-hello for it is refused `403 host-bound`, live or lost. `host-bound` is fatal to the agent, so
-an agent put back on its token flags exits, and launchd starts it again into the same refusal.
-
-The config hook's `rollback` can do that. If `verify` fails after the Mac has already said hello
-by its certificate (the lease server cannot be reached for the rest of `verify`'s time), the
-rollback puts the token flags back and restarts the agent. A missing hello never fails a
-rollback, so the step still ends succeeded, and its detail says that no hello came
-(`crates/js-agent/src/update_hook/config/steps.rs`, `rollback`). To bring such a Mac back,
-roll the config package that names the certificate forward again. Do not take the certificate
-lines out of the flags of a Mac that has moved.
-
-## What the tests show
-
-- `a_token_host_moves_onto_its_certificate_while_another_stays_on_the_token`
-  (`crates/js-lease-server/tests/server/host_certs_agent.rs`): js-agent's own transport joins by
-  the pool's token, then by the host certificate after its token session lapsed; the token is
-  refused for that host, and a second host goes on joining and beating by the token.
-- `a_lost_token_host_is_rebound_to_its_certificate_by_its_first_hello` and
-  `the_move_onto_a_certificate_keeps_the_cordon_across_a_restart`
-  (`crates/js-lease-server/tests/server/host_certs_hosts.rs`): the binding the server keeps
-  moves to the certificate, a cordon is kept across the move and a server restart.
-- `an_agent_given_its_host_certificate_and_key_connects_with_them`
-  (`crates/js-agent/tests/agent/credential.rs`): with the certificate flags beside a kept host
-  credential, the agent logs in by the certificate and leaves the kept file as it is.
+The config hook restarts the agent so that it reads the new flags, and the agent says hello with
+its certificate. Check it with `js host list --server https://<job service> --token-file <operator
+token>`: the Mac is `live` under its host id. An agent that holds a flags file naming `--token-file`
+or `--instance-file` still starts: it reads neither file and warns once for each.

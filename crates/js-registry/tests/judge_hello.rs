@@ -135,7 +135,6 @@ fn judge_hello_draws_the_secret_and_records_nothing() {
     let welcome = fx.registry.take_hello(admission);
     assert_eq!(welcome.epoch, 1);
     assert_eq!(welcome.session, format!("{:064x}", 1));
-    assert_eq!(welcome.host_credential, None);
 
     fx.pass_grace();
     let certificate = Credential::of_host_certificate(&host("a"));

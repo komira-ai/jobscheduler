@@ -19,27 +19,24 @@
 //! - **Binding, and what it does not do.** A host id binds to the credential of its
 //!   first hello and, when that hello named `Hello::instance`, to that instance
 //!   ([`Binding`]); a later hello or heartbeat that does not match is refused as
-//!   host-bound. Without an instance identity the binding is at the level of the pool
-//!   credential only: all hosts of a pool share the join token, so a holder of the pool
-//!   token can say hello for an unbound-instance host id once that host is lost. Per-host
-//!   tokens or client certificates close that later (design D18). [`Credential`] equality
-//!   is on a digest; the constant-time compare of the token belongs to the transport.
+//!   host-bound. A host admitted by its certificate is bound to the credential of that
+//!   certificate's host ([`Credential::of_host_certificate`]), which no other host's
+//!   certificate has, so only that host can say hello for its id. A row bound before
+//!   certificates held a different credential: a lost host with such a row is rebound to
+//!   its certificate by its next hello. [`Credential`] equality is on a digest.
 //! - **Session secret.** Every admitted hello is answered with a fresh secret from the
 //!   registry's [`SessionSource`] ([`OsSessions`] in production); the registry keeps its
 //!   SHA-256 digest only. A heartbeat must carry the secret issued at that host's last
 //!   hello, compared as digests in constant time: one that lacks it or carries another is
-//!   refused as `session-mismatch` and changes nothing, so a holder of the pool token,
-//!   who also knows the host id and epoch, cannot keep a host live, revive it or set its
-//!   phase. A new hello replaces the secret. The one way in for a pool-token holder is a
-//!   hello, and only for an id that is not instance-bound and is lost, as above.
+//!   refused as `session-mismatch` and changes nothing, so one who knows the host id and
+//!   epoch but not the secret cannot keep a host live, revive it or set its phase. A new
+//!   hello replaces the secret.
 //! - **Retention, and what it does not do.** A lost host that its placer holds no work on
 //!   is forgotten, binding included, after [`PoolConfig::with_lost_retention`], so ids made
-//!   up by a token holder who then goes silent stop filling the pool. That is all it
-//!   bounds: silent squatters. A holder of the pool token can still lock the pool out,
-//!   because it can say hello for `max_machines` made-up ids and keep them live with the
-//!   sessions it was issued, or refill the pool every grace plus retention. The transport
-//!   must rate-limit hellos per credential, and per-host credentials (design D18) close
-//!   it; the registry has no per-credential cap. A host its placer holds work on
+//!   up by a caller who then goes silent stop filling the pool. That is all it bounds:
+//!   silent squatters. A caller with a certificate of its own can still say hello for ids
+//!   of its choosing until the transport's per-credential rate limit stops it; the
+//!   registry has no per-credential cap. A host its placer holds work on
 //!   ([`Placer::holds_work_on`]) is never forgotten.
 //! - **Loss.** A host silent for more than the grace period is lost: it takes no new job.
 //! - **Phase.** Only a serving host takes a new job. A phase the wire does not know

@@ -30,10 +30,7 @@ async fn the_next_launch_is_the_cheapest_offer_with_a_masked_plan() {
     assert_eq!(next["offer"], "gpu_1x_a10");
     assert_eq!(next["zone"], "us-west-1");
     assert_eq!(next["plan_error"], Value::Null);
-    assert_eq!(
-        next["secret_slots"],
-        json!(["join_token", "network.fake.key"])
-    );
+    assert_eq!(next["secret_slots"], json!(["network.fake.key"]));
 
     let scheduler = SchedulerId::new("preview").unwrap();
     let host = HostName::derive(&scheduler, &AcquireId::new("preview").unwrap());

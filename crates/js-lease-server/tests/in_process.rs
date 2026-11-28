@@ -5,6 +5,10 @@
 //!
 //! Time is the test's clock ([`support::clock`]) and the metrics' timings a clock of
 //! the test's own ([`support::Stepping`]); nothing sleeps and nothing measures elapsed time.
+//!
+//! A request to an agent route presents the host it names, as the listener does for a
+//! connection that carries that host's certificate (`in_process::as_host`); the tests that
+//! reach a listening server do it over TLS, with a certificate of the CA the server trusts.
 
 // This file is the root of its test binary, so its modules are found by path.
 #[path = "in_process/client_tokens.rs"]
@@ -33,7 +37,7 @@ use js_state::ManualClock as StoreClock;
 use serde_json::{Value, json};
 
 use crate::support::{
-    Cell, JOIN, Listening, Reply, Scratch, Stepping, TOKEN, args, beat_body, clock, hello_body,
+    Cell, Listening, Reply, Scratch, Stepping, TOKEN, args, beat_body, clock, hello_body,
     hello_body_draining, routed,
 };
 
@@ -191,7 +195,7 @@ async fn through_the_tick_loop(inputs: &[Input]) -> Vec<Listing> {
                 let hello = hello_body_draining("host-a");
                 welcome = Some(
                     server
-                        .request("POST", "/v1/agent/hello", JOIN, Some(&hello))
+                        .request("POST", "/v1/agent/hello", None, Some(&hello))
                         .await,
                 );
             }
@@ -199,7 +203,7 @@ async fn through_the_tick_loop(inputs: &[Input]) -> Vec<Listing> {
                 let mut beat = beat_body("host-a", welcome.as_ref().unwrap());
                 beat["phase"] = json!("draining");
                 let reply = server
-                    .request("POST", "/v1/agent/heartbeat", JOIN, Some(&beat))
+                    .request("POST", "/v1/agent/heartbeat", None, Some(&beat))
                     .await;
                 assert_eq!(reply.status, 200, "{:?}", reply.body);
             }
@@ -207,7 +211,7 @@ async fn through_the_tick_loop(inputs: &[Input]) -> Vec<Listing> {
             Input::Tick => {
                 server.ticks.step().await;
                 let jobs = server.job_request("GET", "/v1/jobs", None).await;
-                let hosts = server.request("GET", "/v1/hosts", TOKEN, None).await;
+                let hosts = server.request("GET", "/v1/hosts", Some(TOKEN), None).await;
                 seen.push((jobs, hosts));
             }
         }
@@ -243,13 +247,13 @@ async fn through_the_seam(inputs: &[Input]) -> Vec<Listing> {
             Input::Hello => {
                 let hello = hello_body_draining("host-a");
                 let path = "/v1/agent/hello";
-                welcome = Some(routed(&agents, "POST", path, Some(JOIN), Some(&hello)).await);
+                welcome = Some(routed(&agents, "POST", path, None, Some(&hello)).await);
             }
             Input::Beat => {
                 let mut beat = beat_body("host-a", welcome.as_ref().unwrap());
                 beat["phase"] = json!("draining");
                 let path = "/v1/agent/heartbeat";
-                let reply = routed(&agents, "POST", path, Some(JOIN), Some(&beat)).await;
+                let reply = routed(&agents, "POST", path, None, Some(&beat)).await;
                 assert_eq!(reply.status, 200, "{:?}", reply.body);
             }
             Input::Advance(n) => clock.advance(secs(n)),
@@ -362,7 +366,7 @@ async fn a_second_in_process_server_starts_over_the_state_file_after_the_first_i
         &first.agent_router(),
         "POST",
         "/v1/agent/hello",
-        Some(JOIN),
+        None,
         Some(&hello_body("host-a")),
     )
     .await;

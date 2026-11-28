@@ -13,7 +13,7 @@ The server compiles in the machine provider kinds below and one platform kind, `
 
 | Kind | Role | Creates or destroys compute |
 |---|---|---|
-| `static` | The hosts that register themselves: a machine runs `js-agent`, says hello with the pool's join credential, and is a host of the pool. The registry's host table behind `CapacityProvider` (`StaticCapacity`, `crates/js-registry/src/capacity.rs`). A `[[machine_provider]]` of this kind takes only `name` and `kind`; it lists no hosts. | Never. |
+| `static` | The hosts that register themselves: a machine runs `js-agent`, says hello with its host certificate, and is a host of the pool. The registry's host table behind `CapacityProvider` (`StaticCapacity`, `crates/js-registry/src/capacity.rs`). A `[[machine_provider]]` of this kind takes only `name` and `kind`; it lists no hosts. | Never. |
 | `lambdalabs`, `ec2`, `gce`; later kinds named only (`azure`, `k8s`, `vsphere`, `proxmox`) | Elastic providers: `acquire` boots a host, a machine that runs `js-agent` and many jobs at once, and that agent registers itself. | Yes: boots and terminates. |
 
 `default` is not a machine provider: it is the platform kind, a `[[platform]]` that names machine providers in priority order. The
@@ -30,9 +30,8 @@ Provider crates in code today:
 
 A pool that names its provider directly (`provider = { kind = "lambdalabs", ... }`) is read as three things the loader makes, each
 named with a leading `+`: a machine provider from the table, the `static` machine provider, and a `default` platform that names the two,
-`static` first (`crates/js-lease-server/src/file/platform.rs`). A pool admits registering hosts only when it has a `join_token_file`
-(registration.md); without one no shared pool token admits a host, and only machines an elastic provider launched, which prove
-themselves by their launch, can join it.
+`static` first (`crates/js-lease-server/src/file/platform.rs`). A host joins a pool by its host certificate (registration.md); a
+`join_token_file` is accepted and ignored with a warning.
 
 ## The registered hosts (`static`)
 
@@ -93,15 +92,14 @@ a launch answers the packed demand of the queue, never one job (hosts.md, sectio
    machine from the image its configuration names; the image carries `js-agent`, the scheduler's address and identity to pin, and the pool
    name. The image holds **no secret** (K6). Every launch today, whatever the kind, carries a launch payload (`user_data`, or the `user-data` metadata item on
    Compute Engine) that, by the design of pools-providers-network.md (7.2 and 9),
-   holds a one-time join token valid for minutes, and a network key where the pool's network mode needs one; both cross TLS to the
-   provider and are never logged, and the join token is dead after the host's first hello, when a host credential replaces it
-   (registration.md, Host credential). The reason is requirement 8 of pools-providers-network.md: the alternative, a later push over
+   held a one-time join token valid for minutes, and a network key where the pool's network mode needs one (the join token and its host credential
+   are removed by G3: registration.md, Host certificate; nothing replaces the token until G9). The reason is requirement 8 of pools-providers-network.md: the alternative, a later push over
    ssh, needs an inbound port open for the instance's whole life.
-   The scaler mints that token for each acquire (`crates/js-lease-server/src/scaler/live.rs`).
-2. **The machine registers itself.** The agent says hello with the one-time join token, and the first hello that presents it completes
+   The scaler no longer mints a token for an acquire.
+2. **The machine registers itself.** The agent says hello (with a certificate, from G9 for a launched machine), and the first hello that matches it completes
    the acquire: the instance leaves `registering` and is a host of the pool. Each provider also implements `verify_instance`, the check
    that matches a hello to the launch it came from (`ec2` and `gce` check the cloud's signed instance identity when the hello carries
-   one, registration.md, Aws instances); the server does not call it yet, so the signed identity does not replace the join token today.
+   one, registration.md, Aws instances); the server does not call it yet, so the signed identity does not replace the host certificate today.
 3. **The provider's job ends there**, at boot plus registration, or at failure: a refusal, a boot that never says hello within
    `boot_timeout` (released, reaped, counted by the failure brake of 5.8), or a hello that does not match.
 4. **A registered elastic host is an ordinary host of the pool.** Placement, reuse, caps, taint, leases and fencing treat it exactly as a
@@ -132,8 +130,7 @@ hangs shows with a growing age while its tick waits. Nothing here changes how a 
 kind's own keys), `[[platform]]` tables of kind `default` whose `machine_providers` lists them first to last, and the pool's `platforms`,
 first to last. A pool's per-provider caps and limits are its `[pool.provider_limits.<name>]` tables. The single `provider` key is the
 shorthand above: it makes a `default` platform of the `static` provider followed by the launching one, so registered hosts are preferred
-and the elastic provider tops up; it is refused beside `platforms`. Without a `join_token_file` no shared pool token admits a registering
-host. The keys and their checks are in `crates/js-lease-server/src/lib.rs` and jobscheduler-design.md, section 4.2
+and the elastic provider tops up; it is refused beside `platforms`. A `join_token_file` is accepted and ignored with a warning: a host is admitted by its host certificate. The keys and their checks are in `crates/js-lease-server/src/lib.rs` and jobscheduler-design.md, section 4.2
 (komira-ai/jobscheduler#678).
 
 ```toml
@@ -157,7 +154,7 @@ name            = "linux-build"
 class           = "burst-host"
 platforms       = ["ours"]
 max_machines    = 24                        # the pool's total, every provider counted (5.11)
-join_token_file = "<path-to-token-file>"
+join_token_file = "<path-to-token-file>"      # accepted and ignored
 # max_spend_per_hour, max_spend_per_day, idle, max_age, min_host_lifetime and the other keys an elastic pool must set
 # (crates/js-lease-server/src/lib.rs), and server.max_lease_wall
 

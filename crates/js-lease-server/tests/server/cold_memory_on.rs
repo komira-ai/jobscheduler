@@ -6,8 +6,8 @@ use std::ffi::OsString;
 
 use js_lease_server::{Cli, Config};
 
-use crate::agents_support::JOIN;
-use crate::support::{Scratch, base_args};
+use crate::agents_support::agent_args;
+use crate::support::Scratch;
 
 /// A pool of Macs, whose capabilities name an `arch` and an `os`.
 const POOL: &str = r#"
@@ -26,10 +26,8 @@ os = "macos"
 
 /// The flags of a server with agent registration over [`POOL`], and `extra` after them.
 fn args(scratch: &Scratch, extra: &[&str]) -> Vec<OsString> {
-    let mut args = base_args(scratch);
-    let tokens = scratch.write("agent-tokens", &format!("{JOIN}\n"), 0o600);
+    let mut args = agent_args(scratch);
     scratch.write("agent-pool.toml", POOL, 0o644);
-    args.extend(["--agent-token-file".into(), tokens.into_os_string()]);
     args.extend(extra.iter().map(OsString::from));
     args
 }

@@ -17,13 +17,13 @@ fn id(text: &str) -> RequestId {
     RequestId::new(text).unwrap()
 }
 
-/// Asserts the first launch writes the records, then mints, then acquires; that the record
-/// holds the stored price, the time of launch and a token that lives `boot_timeout` plus
-/// its margin; and that the same step on the same state and input gives the same answer.
+/// Asserts the first launch writes the records, then acquires; that the record
+/// holds the stored price and the time of launch, and no token expiry; and that the same
+/// step on the same state and input gives the same answer.
 /// It catches an acquire that is not preceded by its records, and a step that reads
 /// anything but its arguments.
 #[test]
-fn one_waiting_request_gets_one_launch_in_the_order_record_mint_acquire() {
+fn one_waiting_request_gets_one_launch_in_the_order_record_acquire() {
     let mut rig = Rig::new(settings("gpu"));
     rig.input.waiting = vec![request("r1")];
     rig.input.entropy = vec![draw(1)];
@@ -31,7 +31,7 @@ fn one_waiting_request_gets_one_launch_in_the_order_record_mint_acquire() {
     let actions = rig.tick(at(0));
     assert_eq!(actions, again_actions);
     assert_eq!(rig.state, again_state);
-    assert_eq!(kinds(&actions), ["Save", "Mint", "Acquire"]);
+    assert_eq!(kinds(&actions), ["Save", "Acquire"]);
     let plan = acquires(&actions).remove(0);
     assert_eq!(plan.pool, "gpu");
     assert_eq!(plan.offer.id, "a10");
@@ -41,17 +41,10 @@ fn one_waiting_request_gets_one_launch_in_the_order_record_mint_acquire() {
         Action::Save(Box::new(rig.state.records.clone()))
     );
     assert_eq!(plan.acquire.as_str(), format!("gpu-{}", draw_text(1)));
-    assert_eq!(
-        actions[1],
-        Action::Mint {
-            host: plan.name.clone(),
-            valid_for: minutes(20)
-        }
-    );
     assert_eq!(rig.phase(0), Phase::Launching);
     assert_eq!(rig.record(0).price_cents_per_hour, 60);
     assert_eq!(rig.record(0).launched_at, at(0));
-    assert_eq!(rig.record(0).token_expires, Some(at(20 * MINUTE)));
+    assert_eq!(rig.record(0).token_expires, None);
 }
 
 /// Asserts that the same request presented again, with the record of its launch in the

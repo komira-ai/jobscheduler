@@ -1,6 +1,6 @@
 //! A held agent against a real server in the test process: the hold file in the state root
 //! makes the agent cordon its host through the lease server's own-host route, with the host
-//! credential its first hello was answered with, and refuse the starts placed before the
+//! certificate its hello was made with, and refuse the starts placed before the
 //! cordon is in force. The agent's waits are opened one at a time by the test, the container
 //! runtime is in memory, and the server's clock is moved by the test: nothing here waits for
 //! a time to pass.
@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use super::fake::FakeMachine;
 use super::{private, user};
 use crate::server::{Agent, POOL_RUNS_QUICK_TOML, Server, T0};
-use crate::support::{Host, Ran, Scratch, code, linux_host};
+use crate::support::{Ran, Scratch, code, linux_host};
 
 /// The cordon the keeper asks for, in milliseconds: an hour.
 const HOUR_MS: u64 = 3_600_000;
@@ -26,20 +26,11 @@ const HOUR_MS: u64 = 3_600_000;
 /// The state of a job that is running, as the job service names it.
 const RUNNING: &str = "JOB_STATE_RUNNING";
 
-/// A Linux host whose instance file says it runs on `lambdalabs:i-1`, so that its first
-/// hello, made with a one-time token, is answered with a host credential.
-fn launched() -> Host {
-    let mut host = linux_host();
-    host.files = host.files.with("/instance", "lambdalabs:i-1\n");
-    host
-}
-
-/// A server and the host `h1` of a container agent admitted to it with a one-time token.
+/// A server and the host `h1` of a container agent admitted to it by its host certificate.
 struct Held {
     server: Server,
     state: PathBuf,
     flags: Vec<String>,
-    token: PathBuf,
     _files: Scratch,
 }
 
@@ -49,11 +40,6 @@ impl Held {
     fn new(name: &str, hold: bool) -> Self {
         let server = Server::start_pool(name, &[], POOL_RUNS_QUICK_TOML);
         let files = Scratch::new(&format!("{name}-files"));
-        let instance = json!({ "provider": "lambdalabs", "instance_id": "i-1" });
-        let minted = server.post_body("/v1/agent/join-tokens", &instance);
-        assert_eq!(minted.status, 201, "{}", minted.body);
-        let text = minted.body["token"].as_str().unwrap();
-        let token = files.write("one-time-token", text, 0o600);
         let exec = files.write("docker", "#!/bin/sh\n", 0o755);
         let (user, _, _) = user();
         let state = private(&files, "state");
@@ -61,8 +47,6 @@ impl Held {
         let flags = [
             "--host-id",
             "h1",
-            "--instance-file",
-            "/instance",
             "--allow-container-engine",
             "--container-bin",
             &exec.display().to_string(),
@@ -83,7 +67,6 @@ impl Held {
             server,
             state,
             flags,
-            token,
             _files: files,
         };
         if hold {
@@ -101,15 +84,15 @@ impl Held {
         self.flags.iter().map(String::as_str).collect()
     }
 
-    /// Starts the agent with the one-time token and waits for its hello and what the agent
+    /// Starts the agent with its host certificate and waits for its hello and what the agent
     /// does after it.
     fn start(&self) -> (Agent, Handle, Arc<FakeMachine>) {
         let machine = Arc::new(FakeMachine::new());
         let agent = Agent::spawn_on(
             self.server.url(),
-            self.token.clone(),
+            self.server.identities(),
             &self.args(),
-            launched,
+            linux_host,
             Dialer,
             machine.clone(),
         );
@@ -173,7 +156,7 @@ fn assert_keepers_cordon(cordon: &Value) {
 /// submitted then stays queued across heartbeats and the runtime creates nothing; and the
 /// agent's log says the hold began and the cordon was placed, in its own words. It catches a
 /// keeper that is never stepped by the loop, one that asks the server before the host is
-/// known, one that connects with a credential the own-host route refuses, and a held host
+/// known, one that connects with an identity the own-host route refuses, and a held host
 /// that is placed work.
 #[test]
 fn a_held_agent_cordons_its_host_right_after_its_hello() {
@@ -212,7 +195,7 @@ fn a_held_agent_cordons_its_host_right_after_its_hello() {
 
 /// Asserts that the hold outlives the agent: after the first agent, held and cordoned, is
 /// stopped and the cordon is lifted on the server by the operator route, an agent started
-/// again over the same state root and credential (no token file) cordons the host again
+/// again over the same state root and certificate cordons the host again
 /// after its hello, and the hold file is as it was. It catches a hold that lives in the
 /// process and not in the state root, and a keeper that does not ask again at the first
 /// hello of a new process.
@@ -229,7 +212,13 @@ fn the_hold_survives_an_agent_restart_and_the_host_is_cordoned_again() {
     assert!(held.cordon().is_null());
     held.server.clock.advance(Duration::from_secs(120));
 
-    let again = Agent::spawn_tokenless(held.server.url(), &held.args(), launched, Dialer);
+    let again = Agent::spawn(
+        held.server.url(),
+        held.server.identities(),
+        &held.args(),
+        linux_host,
+        Dialer,
+    );
     assert_eq!(again.next_wait(), Duration::from_millis(250), "the hello");
     let cordon = held.cordon();
     assert_eq!(cordon["expires_at_ms"], T0 + 120_000 + HOUR_MS, "{cordon}");

@@ -1,8 +1,11 @@
-//! The lease port of the hook on a machine ([`MachineLease`]) when the transport fails or the
-//! server answers what is not a reading: the request limit it is given and its range, a server
-//! that is down, one that stalls before the head, in the middle of the body or in the TLS
-//! handshake, a call answered after a timeout on the same port, the answers that are and are not
-//! the typed unknown host, and an older server's reading. The steps that loop on the server run
+//! The lease port of the hook on a machine ([`MachineLease`], and the own-host client it is made
+//! of) when the transport fails or the server answers what is not a reading: the request limit it
+//! is given and its range, a server that is down, one that stalls before the head, in the middle
+//! of the body or in the TLS handshake, a call answered after a timeout on the same port, the
+//! answers that are and are not the typed unknown host, and an older server's reading. The
+//! servers that answer wrongly are plain-HTTP stubs, which the host certificate cannot be
+//! presented to: the client over a bearer reads them, and the port itself meets the stubs that
+//! stall in the TLS handshake and the address nothing listens on. The steps that loop on the server run
 //! over the fakes' clock: their bound is the step's, and no test waits for it or measures it.
 
 use std::net::TcpStream;
@@ -14,11 +17,14 @@ use js_agent::own_host::{
 };
 use js_agent::update_hook::{Class, Outcome, POLL_SECS, Reason, step};
 
-use super::lease_port::{all_unreachable, cut_over, lease, reach, short, unreachable, with_lease};
+use super::lease_port::{
+    all_unreachable, cut_over, lease, plain_lease, reach, reach_server, short, unreachable,
+    with_lease,
+};
 use super::lease_stub::{Reply, Stub, closed};
 use super::step_rig::Rig;
 use crate::cordon::http::enrol;
-use crate::jobs::private;
+use crate::host_certs::self_signed;
 use crate::support::Scratch;
 
 /// A host reading of every field, as a current server sends it.
@@ -45,7 +51,7 @@ fn reading() -> HostReading {
     }
 }
 
-/// A token file with a token in it: the stub servers take any bearer.
+/// A token file with a token in it: the plain stub servers take any bearer.
 fn token(files: &Scratch) -> std::path::PathBuf {
     files.write("token", "token-0123456789abcdef", 0o600)
 }
@@ -64,7 +70,7 @@ fn timed_out(url: &str) -> String {
 fn the_limit_the_port_is_given_is_the_one_every_call_is_held_to() {
     let enrolled = enrol("hook_lease_limit_live");
     let url = enrolled.server.url();
-    let params = reach(&url, Some(enrolled.state.clone()), None);
+    let params = reach_server(&enrolled.server);
     let instant = RequestLimit::new(Duration::from_nanos(1)).unwrap();
     for text in all_unreachable(&lease(&params, instant)) {
         assert_eq!(text, timed_out(&url));
@@ -108,7 +114,7 @@ fn a_request_limit_of_zero_or_past_the_maximum_is_refused_by_name() {
     let files = Scratch::new("hook-lease-limit-range");
     let stub = Stub::start(&[Reply::Answer(200, READING)]);
     let longest = RequestLimit::new(MAX_REQUEST_LIMIT).unwrap();
-    let port = lease(&reach(&stub.url, None, Some(token(&files))), longest);
+    let port = plain_lease(&stub.url, &token(&files), longest);
     assert_eq!(port.host().unwrap(), reading());
     assert_eq!(stub.stop(), 1);
 }
@@ -123,7 +129,7 @@ fn a_request_limit_of_zero_or_past_the_maximum_is_refused_by_name() {
 fn a_stall_at_any_point_of_a_call_is_a_timeout_and_the_same_port_is_answered_after_it() {
     let files = Scratch::new("hook-lease-stalls");
     let stub = Stub::start(&[Reply::Silent, Reply::Partial, Reply::Answer(200, READING)]);
-    let port = lease(&reach(&stub.url, None, Some(token(&files))), short());
+    let port = plain_lease(&stub.url, &token(&files), short());
     assert_eq!(unreachable(port.host()), timed_out(&stub.url), "no head");
     assert_eq!(
         unreachable(port.host()),
@@ -138,7 +144,8 @@ fn a_stall_at_any_point_of_a_call_is_a_timeout_and_the_same_port_is_answered_aft
     assert_eq!(stub.stop(), 3);
 
     let tls = Stub::start(&[Reply::Silent]);
-    let port = lease(&reach(&tls.https_url(), None, Some(token(&files))), short());
+    let identity = self_signed(&files, "mac-1");
+    let port = lease(&reach(&tls.https_url(), Some(identity), None), short());
     for text in all_unreachable(&port) {
         assert_eq!(text, timed_out(&tls.https_url()));
     }
@@ -158,10 +165,13 @@ fn a_stall_at_any_point_of_a_call_is_a_timeout_and_the_same_port_is_answered_aft
 fn a_server_that_is_down_or_silent_is_a_bounded_unreachable_lease_and_the_steps_end_on_it() {
     let bound = 3 * POLL_SECS;
     let (_held, down) = closed();
+    let down = down.replacen("http://", "https://", 1);
     let silent = Stub::start(&[Reply::Silent]);
+    let silent_url = silent.https_url();
     let files = Scratch::new("hook-lease-port-down");
-    for (url, timeout) in [(down.as_str(), false), (silent.url.as_str(), true)] {
-        let port = lease(&reach(url, None, Some(token(&files))), short());
+    let identity = self_signed(&files, "mac-1");
+    for (url, timeout) in [(down.as_str(), false), (silent_url.as_str(), true)] {
+        let port = lease(&reach(url, Some(identity.clone()), None), short());
         for text in all_unreachable(&port) {
             assert!(
                 text.starts_with(&format!("cannot talk to {url}: ")),
@@ -198,37 +208,6 @@ fn a_server_that_is_down_or_silent_is_a_bounded_unreachable_lease_and_the_steps_
     assert_eq!(silent.stop(), 3 + 1 + 4);
 }
 
-/// Asserts that a 403 `host-credential-required` to a call made with the token file, the state
-/// root holding no host credential, is told with its cause on each of the three calls (the
-/// server's code first, then that this host enrolled with the shared pool token and is to be
-/// enrolled again with a join token), and that the same refusal to a call made with the state
-/// root's host credential keeps the bare code: the cause is not the pool token there. It
-/// catches a refusal that leaves the operator with a bare `lease_unreachable`, or that blames
-/// the pool token of a host that has a credential.
-#[test]
-fn a_host_credential_required_to_the_token_file_names_the_pool_token_as_the_cause() {
-    let files = Scratch::new("hook-lease-pool-token");
-    let body = r#"{"error":"host-credential-required"}"#;
-    let named = LeaseError::Refused(
-        "host-credential-required: no host credential in the state root: this host enrolled with the shared pool token; re-enroll with a join token (docs/runbooks/farm-node-enroll.md)".to_owned(),
-    );
-    let stub = Stub::start(&[Reply::Answer(403, body)]);
-    let port = lease(&reach(&stub.url, None, Some(token(&files))), short());
-    assert_eq!(port.host().unwrap_err(), named);
-    assert_eq!(port.cordon(60).unwrap_err(), named);
-    assert_eq!(port.uncordon().unwrap_err(), named);
-    assert_eq!(stub.stop(), 3);
-    let state = private(&files, "state");
-    files.write("state/host-credential", &"a".repeat(64), 0o600);
-    let stub = Stub::start(&[Reply::Answer(403, body)]);
-    let port = lease(&reach(&stub.url, Some(state), None), short());
-    let bare = LeaseError::Refused("host-credential-required".to_owned());
-    assert_eq!(port.host().unwrap_err(), bare);
-    assert_eq!(port.cordon(60).unwrap_err(), bare);
-    assert_eq!(port.uncordon().unwrap_err(), bare);
-    assert_eq!(stub.stop(), 3);
-}
-
 /// Asserts how each refusal is told on each of the three calls: only a 409 whose code is
 /// `unknown-host` is the typed `UnknownHost`; another 409 code and `unknown-host` under another
 /// status are refusals by their code; a code that is not a string, an empty body and a body
@@ -248,14 +227,14 @@ fn only_a_409_unknown_host_is_the_unknown_host_and_every_other_refusal_keeps_its
         (500, "not json", refused("http-500")),
     ] {
         let stub = Stub::start(&[Reply::Answer(status, body)]);
-        let port = lease(&reach(&stub.url, None, Some(token(&files))), short());
+        let port = plain_lease(&stub.url, &token(&files), short());
         assert_eq!(port.host().unwrap_err(), want, "{status} {body}");
         assert_eq!(port.cordon(60).unwrap_err(), want, "{status} {body}");
         assert_eq!(port.uncordon().unwrap_err(), want, "{status} {body}");
         assert_eq!(stub.stop(), 3);
     }
     let stub = Stub::start(&[Reply::Answer(200, r#"{"error":"unknown-host"}"#)]);
-    let port = lease(&reach(&stub.url, None, Some(token(&files))), short());
+    let port = plain_lease(&stub.url, &token(&files), short());
     for text in all_unreachable(&port) {
         assert!(text.starts_with("the answer is not understood: "), "{text}");
     }
@@ -270,7 +249,7 @@ fn only_a_409_unknown_host_is_the_unknown_host_and_every_other_refusal_keeps_its
 fn an_older_servers_reading_of_an_awaiting_host_is_read_with_its_absent_fields() {
     let files = Scratch::new("hook-lease-older");
     let stub = Stub::start(&[Reply::Answer(200, OLDER)]);
-    let port = lease(&reach(&stub.url, None, Some(token(&files))), short());
+    let port = plain_lease(&stub.url, &token(&files), short());
     assert_eq!(
         port.host().unwrap(),
         HostReading {

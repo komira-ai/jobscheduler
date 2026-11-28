@@ -1,9 +1,8 @@
-//! The program itself, run as a child process against the server of the test: the
-//! process's own exit status.
+//! The program itself, run as a child process: the process's own exit status.
 
 use std::process::{Command, Output};
 
-use crate::support::{Harness, Js, REVOKE, Scratch, against, http, recording};
+use crate::support::{Js, Scratch, against, hangup_port};
 
 const PROGRAM: &str = env!("CARGO_BIN_EXE_js");
 
@@ -17,13 +16,12 @@ fn program(js: &Js, words: &[&str]) -> Output {
         .unwrap()
 }
 
-/// Asserts that the program prints its usage on `--help` with status 0, revokes a join
-/// token on the server of the test with status 0 and its line on stdout, and exits 3 with the
-/// refusal on stderr against a server that has no join-token route (the 404 of an unknown
-/// route, as a server of an older release answers). It catches an exit status
-/// that is not the process's own (a status the library returns but `main` drops).
+/// Asserts that the program prints its usage on `--help` with status 0, and exits 1 with
+/// nothing on stdout and its reason on stderr when the TLS handshake fails before any request
+/// is written (a server that hangs up on the connection). It catches an exit status that
+/// is not the process's own (a status the library returns but `main` drops).
 #[test]
-fn the_program_prints_help_and_revokes() {
+fn the_program_prints_help_and_exits_1_when_no_server_answers() {
     let help = Command::new(PROGRAM).arg("--help").output().unwrap();
     assert_eq!(help.status.code(), Some(0));
     assert!(
@@ -32,30 +30,29 @@ fn the_program_prints_help_and_revokes() {
             .contains("Usage: js")
     );
 
-    let h = Harness::new("binary_revoke");
-    let revoked = program(&h.js, &REVOKE);
-    assert_eq!(revoked.status.code(), Some(0));
-    assert_eq!(
-        String::from_utf8(revoked.stdout).unwrap(),
-        "join tokens for lambdalabs:i-1 revoked\n"
+    let url = format!("https://127.0.0.1:{}", hangup_port());
+    let failed = program(
+        &against(&url, &Scratch::new("binary_hangup")),
+        &["pool", "list"],
     );
-
-    let (url, _) = recording(http("404 Not Found", r#"{"error":"not-found"}"#));
-    let refused = program(&against(&url, &Scratch::new("binary_refused")), &REVOKE);
-    assert_eq!(refused.status.code(), Some(3));
-    assert_eq!(refused.stdout, b"");
-    assert_eq!(
-        String::from_utf8(refused.stderr).unwrap(),
-        "js: refused: join-tokens-unsupported\n"
+    assert_eq!(failed.status.code(), Some(1));
+    assert_eq!(failed.stdout, b"");
+    assert!(
+        String::from_utf8(failed.stderr)
+            .unwrap()
+            .starts_with("js: "),
+        "the reason is on stderr"
     );
 }
 
-/// Asserts that the program, as a process, exits 2 for the removed `lease` commands with
-/// clap's message naming the unrecognized subcommand and nothing on stdout. It catches an
-/// exit status that is not the process's own and a removed command that still parses.
+/// Asserts that the program, as a process, exits 2 for the removed `lease` and `join-token`
+/// commands with clap's message naming the unrecognized subcommand and nothing on stdout.
+/// It catches an exit status that is not the process's own and a removed command that
+/// still parses.
 #[test]
 fn the_program_refuses_the_removed_commands() {
-    let h = Harness::new("binary_removed");
+    let scratch = Scratch::new("binary_removed");
+    let js = against("http://127.0.0.1:1", &scratch);
     for words in [
         &["lease", "list"][..],
         &[
@@ -67,14 +64,30 @@ fn the_program_refuses_the_removed_commands() {
             "1h",
         ],
         &["lease", "run", "--class", "gpu-host", "--", "true"],
+        &[
+            "join-token",
+            "mint",
+            "--provider",
+            "p",
+            "--instance-id",
+            "i",
+        ],
+        &[
+            "join-token",
+            "revoke",
+            "--provider",
+            "p",
+            "--instance-id",
+            "i",
+        ],
     ] {
-        let got = program(&h.js, words);
+        let got = program(&js, words);
         assert_eq!(got.status.code(), Some(2), "{words:?}");
         assert_eq!(got.stdout, b"");
         assert!(
             String::from_utf8(got.stderr)
                 .unwrap()
-                .starts_with("error: unrecognized subcommand 'lease'\n"),
+                .starts_with(&format!("error: unrecognized subcommand '{}'\n", words[0])),
             "{words:?}"
         );
     }

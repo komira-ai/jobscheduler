@@ -308,9 +308,7 @@ only on the binary and the packaging files: root-owned entries, a fixed modifica
 names, gzip without a name. The verb refuses a version that is not `X.Y.Z`, a binary that does not
 carry the version's `--version` line, and a file that is already there. The package carries no
 server address, pool, token or host name: the host's own flags are in `/etc/js-agent/flags` (read
-with `--flags-file`) and its join token in `/etc/js-agent/token`, which an operator places. A host
-whose hostkeeper keeps the host's certificate and key, and whose flags file (from its host
-group's config package) names them (`--host-cert` and `--host-key`), needs no token file (`packaging/js-agent/deb/README.md`).
+with `--flags-file`), which names the host's certificate and key (`--host-cert` and `--host-key`; hostkeeper keeps them, and the host group's config package names them in the flags file). The agent is admitted by that certificate alone (`packaging/js-agent/deb/README.md`).
 
 The `.deb` replaces the hostkeeper archive package of earlier releases (`js-agent-X.Y.Z-<platform>.tar.zst`
 and `js-agent-index.json`): hostkeeper installs native packages only. The pull-request check
@@ -389,9 +387,9 @@ everything after the image in `docker run` is the server's flags: either the fla
 
 | What | Mode in the container | Why |
 |---|---|---|
-| the directory of `--state-file` | read-write, owned by `65532` | the server writes `<path>.agents`, `<path>.joins`, `<path>.scaler`, and, without `--store`, `<path>.jobs` and, unless `--usage-db` puts it elsewhere, `usage.db` beside them (with `--store` the job store and the usage rows are in the database). This is the state that must outlive the container |
+| the directory of `--state-file` | read-write, owned by `65532` | the server writes `<path>.agents`, `<path>.scaler`, and, without `--store`, `<path>.jobs` and, unless `--usage-db` puts it elsewhere, `usage.db` beside them (with `--store` the job store and the usage rows are in the database). This is the state that must outlive the container |
 | `--usage-db`'s directory, when it is not that one | read-write, owned by `65532` | the usage file |
-| `--token-file`, `--client-token` files, `--agent-token-file`, `--store`, `--tls-key` | read-only, owned by `65532`, mode 0600 or 0400 | the server refuses a secret file that is not owner-only. For `--tls-key` a symbolic link, as secret mounts make, is followed and the file it leads to is checked |
+| `--token-file`, `--client-token` files, `--store`, `--tls-key` | read-only, owned by `65532`, mode 0600 or 0400 | the server refuses a secret file that is not owner-only. For `--tls-key` a symbolic link, as secret mounts make, is followed and the file it leads to is checked |
 | `--agent-pool-config` or `--config`, `--tls-cert` | read-only | |
 | the store's `sslrootcert`, or the directory of a Postgres Unix socket | read-only | the store URL names them |
 
@@ -689,8 +687,8 @@ The Mac manifest is the Linux one (`minHostkeeper`, `installerBounds`, the hook'
 | `params.scratch_root` | `/var/db/js-agent/scratch/runs`, the agent's scratch root, which `prepare` makes on an APFS volume of its own mounted on its parent `/var/db/js-agent/scratch` (root's, 0711) |
 | `params.runtime` | `native` |
 
-The `release_link` (`/var/lib/hostkeeper/packages/js-agent/current`), `flags_file` and `token_file`
-are the Linux values. The Mac archives (`*-aarch64-apple-darwin.tar.gz`) are released as before.
+The `release_link` (`/var/lib/hostkeeper/packages/js-agent/current`), and `flags_file`
+are the Linux values (a manifest that still carries `token_file` passes; the key is ignored). The Mac archives (`*-aarch64-apple-darwin.tar.gz`) are released as before.
 
 The Linux binaries are statically linked against musl, for both architectures (`x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`), so each runs on any Linux host of its architecture, including `gcr.io/distroless/cc-debian12`. Each Linux target is built natively on a GitHub-hosted runner of its architecture (`ubuntu-24.04` for x86_64, `ubuntu-24.04-arm` for arm64), with no cross linker and no emulation, so the `--version` check runs every binary on a host of the kind it is for, and the static check (no `NEEDED` entry in `readelf -d`) is the same for both. The TLS stack (rustls with ring) needs a C compiler for ring, which the workflow gets from `musl-tools` on both Linux runners, its packages pinned by version and SHA-256 in `.github/debs/musl-tools.toml` and installed with `dpkg` after `cargo xtask debs` took them from the actions cache or, when the cache missed, from the pinned mirrors (on the arm64 runner a link gives its `musl-gcc` the name `aarch64-linux-musl-gcc`, the one the `cc` crate looks for there); musl itself needed no crate code change (the Mac build needed one: `js` draws its run label and `js-agent` its retry jitter through the `getrandom` crate, which both targets share). The macOS assets (`aarch64-apple-darwin`) are built on a `macos-15` runner, or on a Mac of the build farm when `MACOS_ON_FARM` is `true` ([mac-farm.md](mac-farm.md)), with `MACOSX_DEPLOYMENT_TARGET=11.0` pinned (the build fails if a binary's minimum macOS is above it) and are dynamically linked against the system libraries, as every Mac binary is; there is no macOS `js-lease-server`. `js-mac-session` and `js-mac-provision` are the host tools a Mac node installs; `js-mac-pool` is a library and `js-mac-probe` runs only on hosted CI runners, so neither is shipped. The darwin binaries of the release archives are not codesigned or notarized. The three programs inside the Mac installer package (`js-agent`, `js-mac-session`, `js-mac-provision`) are signed, see "macOS" below. The Mac agent refuses `--container-bin`, whose post-job checks read `/proc`.
 

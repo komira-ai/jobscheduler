@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use js_elastic::{
     AcquireRequest, Acquired, Artifact, BootPlan, CapacityProvider, Cooldowns, HostName, Instant,
-    Offer, Reason, Refusal, RefusalCode, SchedulerId, Secret,
+    Offer, Reason, Refusal, RefusalCode, SchedulerId,
 };
 use js_scaler::AcquirePlan;
 use js_types::{ProviderId, normalise_arch};
@@ -115,14 +115,13 @@ impl Launcher {
         named.unwrap_or(&self.providers[0])
     }
 
-    /// Launches the machine `plan` describes, booting with the join token `token`.
+    /// Launches the machine `plan` describes.
     ///
     /// The network mode's secret is made now, the boot plan is rendered and the payload is
     /// handed to the provider as it is. If the mode cannot make its secret nothing is
-    /// sent, and the answer is [`Acquired::Deferred`]: the scaler tries again later, minting
-    /// a new token. A plan that cannot be rendered (a payload over the provider's limit, a
+    /// sent, and the answer is [`Acquired::Deferred`]: the scaler tries again later. A plan that cannot be rendered (a payload over the provider's limit, a
     /// slot twice) is a [`RefusalCode::Shape`] refusal, which nothing retries.
-    pub fn acquire(&self, plan: &AcquirePlan, token: Secret) -> Acquired {
+    pub fn acquire(&self, plan: &AcquirePlan) -> Acquired {
         let provider = self.provider(plan);
         let host = HostName::derive(&self.scheduler, &plan.acquire);
         // The pins are keyed by the architecture in the one spelling, an offer's own.
@@ -148,7 +147,7 @@ impl Launcher {
             network: contribution.steps,
         };
         let limit = provider.payload_limit();
-        let rendered = BootSecrets::new(token, contribution.secrets)
+        let rendered = BootSecrets::new(contribution.secrets)
             .and_then(|secrets| payload(&boot, &secrets, limit));
         match rendered {
             Ok(payload) => {

@@ -17,10 +17,10 @@ fn script() -> String {
     render(&plan, Fill::Mask).unwrap()
 }
 
-/// The lines of the script from the user namespace heading to the identity heading.
+/// The lines of the script from the user namespace heading to the network heading.
 fn section(script: &str) -> &str {
     let start = script.find("# container user namespace\n").unwrap();
-    let end = script.find("# identity\n").unwrap();
+    let end = script.find("# network\n").unwrap();
     &script[start..end]
 }
 
@@ -60,7 +60,7 @@ systemctl restart docker.service
 "#;
 
 /// Asserts that the agent's unit passes `--container-subuid` with the user the script
-/// made, once: without the flag the agent refuses to start and no launched host joins.
+/// made, once: without the flag the agent refuses to start and no launched host starts.
 #[test]
 fn the_agent_unit_passes_the_subuid_user() {
     let script = script();
@@ -109,7 +109,7 @@ fn the_section_is_pinned_exactly() {
 }
 
 /// Asserts the order: the check, then the daemon configuration (which can refuse), then the
-/// user, then both id lines, then the restart, then the identity and the agent's unit.
+/// user, then both id lines, then the restart, then the network steps and the agent's unit.
 #[test]
 fn the_daemon_is_restarted_under_the_remap_before_the_agent() {
     let script = script();
@@ -124,7 +124,7 @@ fn the_daemon_is_restarted_under_the_remap_before_the_agent() {
         format!("{SUBID_USER}:{SUBID_START}:{SUBID_COUNT} >> /etc/subuid\n"),
         format!("{SUBID_USER}:{SUBID_START}:{SUBID_COUNT} >> /etc/subgid\n"),
         "systemctl restart docker.service\n".to_owned(),
-        "# identity\n".to_owned(),
+        "# network\n".to_owned(),
         "cat > /etc/systemd/system/js-agent.service".to_owned(),
     ];
     let places: Vec<usize> = order.iter().map(|n| at(n)).collect();

@@ -89,7 +89,7 @@ fn a_host_the_server_shows_in_no_session_does_not_hold_the_restart() {
 fn a_server_that_cannot_be_asked_defers_the_cutover_before_anything_is_restarted() {
     for say in [
         Say::Down("cannot talk to the server"),
-        Say::Refused("host-credential-required"),
+        Say::Refused("host-certificate-required"),
     ] {
         let rig = fresh("config-cutover-lease-down");
         rig.lease.say(&[say]);

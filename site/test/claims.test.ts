@@ -39,7 +39,7 @@ const ROWS: readonly Row[] = [
   ['index', 'Every push to <code>main</code> that changes code that ships is released, with a checksum file and a build attestation', 'docs/release.md', '`SHA256SUMS` over the archives, the two Debian packages and the two images'],
   ['index', 'Every push to <code>main</code> that changes code that ships is released, with a checksum file and a build attestation', 'docs/release.md', '`attest` attests every archive and Debian package with build provenance'],
   ['index', '; TLS</td><td><span class="tag tag-ok">works today</span></td>', 'crates/js-lease-server/src/lib.rs', '`--tls-cert`, `--tls-key` | PEM files; both or neither'],
-  ['index', '<td>Agents that register with a join token and run', 'crates/js-agent/src/lib.rs', 'the pool\'s join token'],
+  ['index', '<td>Agents that register with a host certificate and run', 'crates/js-agent/src/lib.rs', 'the host\'s own certificate and key'],
   ['index', 'container jobs on Linux or native jobs on a Mac</td><td><span class="tag tag-ok">works today</span></td>', 'crates/js-agent/src/lib.rs', 'the `docker` or `podman` program that runs container jobs'],
   ['index', 'container jobs on Linux or native jobs on a Mac</td><td><span class="tag tag-ok">works today</span></td>', 'crates/js-agent/src/platform/macos.rs', 'with it the macOS build runs native jobs'],
   ['index', '<td>Pools of class <code>whole-node</code> or <code>gpu-host</code></td><td><span class="tag tag-ok">works today</span></td>', 'crates/js-lease-server/src/agent_pool.rs', 'a shipped class (`whole-node`, or `gpu-host`, kept as an alias)'],
@@ -69,7 +69,7 @@ const ROWS: readonly Row[] = [
   ['concepts', '<code>/healthz</code> needs none, and neither do <code>/v1/pools</code> and <code>/status</code>', 'crates/js-lease-server/src/api.rs', 'let open = Router::new() .route("/healthz", get(healthz)) .route("/v1/pools", get(pools)) .route("/status", get(status_page))'],
   ['concepts', 'which are served only when the server listens on a private address, and only to a private peer', 'crates/js-lease-server/src/lib.rs', 'no token, on `server.listen` only, and not served (404) when that is not a private address, nor to a peer that is not a private address'],
   ['concepts', 'which are served only when the server listens on a private address, and only to a private peer', 'crates/js-lease-server/src/api/status_gate_tests.rs', 'a status route served over the router answers a private peer with 200 and a public peer'],
-  ['concepts', 'An agent\'s routes take a join token instead', 'crates/js-lease-server/src/lib.rs', 'machine\'s agent calls two routes with a join token'],
+  ['concepts', 'An agent\'s routes take its host certificate instead', 'crates/js-lease-server/src/lib.rs', 'a PEM file of the CA certificates (hostkeeper\'s; two while one is replaced) that sign the hosts\' certificates'],
   ['concepts', 'The provider kinds compiled in are <code>lambdalabs</code>, <code>ec2</code> and <code>gce</code>', 'crates/js-lease-server/src/lib.rs', 'the provider kinds a `[[pool]]` of the configuration file may name, compiled in (`lambdalabs`, `ec2` and `gce`)'],
   ['concepts', 'is <code>plan</code>, which launches nothing, unless the file says <code>live</code>;', 'crates/js-lease-server/src/lib.rs', '`launch` is `plan` unless the file says `live`: a pool in `plan` launches nothing'],
   ['concepts', 'A pool books that share of each host\'s memory, rounded down', 'crates/js-lease-server/src/lib.rs', '`memory_schedulable_percent` (1 to 100, default 100: the share of the memory each host reports that the pool books, rounded down'],
@@ -100,7 +100,9 @@ const ROWS: readonly Row[] = [
   ['concepts', 'A host is booked at the capacity it reports, less or more than the shape: the shape is what the pool books for a host that has not reported its own capacity yet.', 'crates/js-lease-server/src/agent_pool.rs', 'The `[shape]` table: what the pool books for a host that has not reported its own'],
   ['concepts', 'The shape names <code>cpu_millis</code> and <code>memory_bytes</code>, and optionally <code>gpus</code>, <code>gpu_class</code> and <code>disk_bytes</code>', 'crates/js-lease-server/src/lib.rs', '`[shape]` (`cpu_millis`, `memory_bytes`, `gpus?`, `gpu_class?`, `disk_bytes?`:'],
   ['concepts', '<strong>A joined pool</strong>: a <code>[[pool]]</code> of <code>kind = "joined"</code> is the pool of hosts that run <code>js-agent</code> and are started by hand.', 'crates/js-lease-server/src/lib.rs', 'A pool of machines that run `js-agent` and are started by hand has `kind = "joined"`'],
-  ['concepts', '<strong>Agents that join</strong>: an agent says hello with a join token,', 'crates/js-lease-server/src/lib.rs', 'machine\'s agent calls two routes with a join token'],
+  ['concepts', '<strong>Agents that join</strong>: an agent says hello with its host certificate,', 'crates/js-lease-server/src/lib.rs', 'a PEM file of the CA certificates (hostkeeper\'s; two while one is replaced) that sign the hosts\' certificates'],
+  ['install', 'An agent is admitted by its host certificate alone, and a request without a verified one is refused.', 'crates/js-lease-server/src/lib.rs', 'the certificate is the only credential: a request that carries none is refused 401 `host-certificate-required`'],
+  ['install', 'For that the server needs <code>--agent-client-ca</code>, a PEM file of the CA certificates that sign the hosts\' certificates, with <code>--tls-cert</code> and <code>--tls-key</code>.', 'crates/js-lease-server/src/lib.rs', 'so a server that registers agents needs this flag and the TLS pair, or it admits no host'],
   ['concepts', 'offers its CPU, memory and GPUs, and heartbeats.', 'crates/js-agent/src/lib.rs', 'tells a lease server what the machine offers, and keeps telling it that the machine is alive'],
   ['concepts', 'The pool file for them is <code>--agent-pool-config</code>', 'crates/js-lease-server/src/lib.rs', '`--agent-pool-config <path>` | the pool agents join, as TOML'],
   ['concepts', '<strong>An elastic pool</strong>: a provider launches machines', 'crates/js-lease-server/src/lib.rs', 'A pool whose provider launches machines (an elastic pool)'],
@@ -169,8 +171,6 @@ const ROWS: readonly Row[] = [
   ['install', 'at least 32 bytes), a state file, and a pool file for the agents that will join.', 'crates/js-lease-server/src/lib.rs', 'holding one token of printable ASCII of at least 32 bytes'],
   ['install', 'The server needs a token for clients (a regular file owned by the server\'s user, mode 0600 or 0400, one token of printable ASCII,', 'crates/js-lease-server/src/lib.rs', 'a regular file owned by the server\'s user, mode 0600 or 0400'],
   ['install', 'A start the server refuses prints the flag at fault and exits with status 2', 'crates/js-lease-server/src/lib.rs', 'A start that is refused prints the flag at fault and exits with status 2'],
-  ['install', 'one per line, each as strong as the client token, in an owner-only file.', 'crates/js-lease-server/src/lib.rs', 'one per line, each as strong as `--token-file`\'s, in an owner-only file'],
-  ['install', 'write the pool\'s join token to <code>/etc/js-agent/token</code>, mode 0600', 'packaging/js-agent/js-agent.service', 'write the pool\'s join token to /etc/js-agent/token, mode 0600'],
   ['install', 'mount a disk of its own at <code>/var/lib/js-agent/scratch</code>', 'packaging/js-agent/js-agent.service', 'mount a disk of its own at /var/lib/js-agent/scratch'],
   ['install', 'the shipped <code>--server</code> is a placeholder the agent refuses', 'packaging/js-agent/js-agent.service', 'the shipped --server is a placeholder the agent refuses'],
   ['install', 'A missing mount fails silently.', 'packaging/js-agent/js-agent.service', 'With the mount of step 3 missing this exits 0 and starts nothing, silently'],
@@ -199,9 +199,10 @@ const ROWS: readonly Row[] = [
   ['install', 'The lease server, the <code>js</code> client and the agent are Rust binaries built by the repository\'s release workflow', 'docs/release.md', 'builds the binaries for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` (`js-lease-server`, `js`, `js-agent`'],
   ['install', 'The Linux binaries are static (musl, x86_64 and arm64);', 'docs/release.md', 'The Linux binaries are statically linked against musl, for both architectures'],
   ['install', '(musl, x86_64 and arm64)', 'docs/release.md', 'builds the binaries for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`'],
-  ['install', '<code>systemctl edit js-agent</code>: clear <code>ExecStart=</code> and set the whole line again with this host\'s <code>--server</code> and <code>--pool</code>', 'packaging/js-agent/js-agent.service', 'systemctl edit js-agent: clear ExecStart= and set the whole line again with this host\'s --server and --pool'],
+  ['install', '<code>systemctl edit js-agent</code>: clear <code>ExecStart=</code> and set the whole line again with this host\'s <code>--server</code>, <code>--pool</code>, <code>--host-cert</code> and <code>--host-key</code>', 'packaging/js-agent/js-agent.service', 'systemctl edit js-agent: clear ExecStart= and set the whole line again with this host\'s --server, --pool, --host-cert and --host-key'],
+  ['install', 'and an agent started without both certificate flags refuses to start', 'packaging/js-agent/js-agent.service', 'the agent refuses to start without --host-cert and --host-key, naming both flags'],
   ['install', '<code>systemctl enable --now js-agent</code>', 'packaging/js-agent/js-agent.service', 'systemctl enable --now js-agent'],
-  ['install', 'With the mount of step 3 absent, step 5 exits 0 and starts nothing', 'packaging/js-agent/js-agent.service', 'With the mount of step 3 missing this exits 0 and starts nothing'],
+  ['install', 'With the mount of step 2 absent, step 4 exits 0 and starts nothing', 'packaging/js-agent/js-agent.service', 'With the mount of step 3 missing this exits 0 and starts nothing'],
   ['install', '<code>systemctl status js-agent</code> shows the unmet <code>ConditionPathIsMountPoint</code>', 'packaging/js-agent/js-agent.service', '`systemctl status js-agent` shows the unmet ConditionPathIsMountPoint'],
   ['install', 'The agent reads no environment variable and no configuration file: its flags are the <code>ExecStart</code> line', 'packaging/js-agent/js-agent.service', '(it reads no environment variable and no config file), so the host\'s values are the flags of ExecStart'],
   ['install', '<code>--server</code> is <code>https://host:port</code>', 'crates/js-agent/src/lib.rs', '`--server <url>` | required: `https://host:port`'],
@@ -230,8 +231,7 @@ const ROWS: readonly Row[] = [
   ['install', 'On an arm64 Linux host, write <code>aarch64-unknown-linux-musl</code> in their place, as in <code>-p \'js-agent-*-aarch64-unknown-linux-musl.tar.gz\'</code>.', 'docs/release.md', 'On an arm64 Linux host, write `aarch64-unknown-linux-musl` where these say `x86_64-unknown-linux-musl`'],
   ['install', 'On an arm64 Linux host, write <code>aarch64-unknown-linux-musl</code> in their place, as in <code>-p \'js-agent-*-aarch64-unknown-linux-musl.tar.gz\'</code>.', 'docs/release.md', 'for the agent `-p \'js-agent-*-aarch64-unknown-linux-musl.tar.gz\'`'],
   ['install', '<code>--boot resume</code>, for which the records of a live elastic pool must exist.', 'crates/js-lease-server/src/lib.rs', '`resume` a later one (its records must exist)'],
-  ['install', 'The pool\'s join tokens are in the file after <code>--agent-token-file</code>,', 'crates/js-lease-server/src/lib.rs', '`--agent-token-file <path>` | the pool\'s shared join tokens'],
-  ['install', '<code>--tls-cert</code> and', 'crates/js-lease-server/src/lib.rs', '`--tls-cert`, `--tls-key` | PEM files; both or neither'],
+  ['install', 'needs both <code>--tls-cert</code> and', 'crates/js-lease-server/src/lib.rs', '`--tls-cert`, `--tls-key` | PEM files; both or neither'],
   ['install', '<code>--tls-key</code> and refuses to start without them.', 'crates/js-lease-server/src/lib.rs', '`--tls-cert`, `--tls-key` | PEM files; both or neither'],
   ['install', 'Install the agent on a Linux host <span class="tag tag-ok">works today</span>', 'packaging/js-agent/js-agent.service', 'js-agent on a Linux host, installed by the js-agent deb (packaging/js-agent).'],
   ['install', 'reads <code>/usr/share/js-agent/tmpfiles.conf</code>.', 'packaging/js-agent/js-agent.service', 'ExecStartPre=+systemd-tmpfiles --create /usr/share/js-agent/tmpfiles.conf'],
@@ -464,6 +464,16 @@ test('every statement of a page is still what its source says', () => {
   assert.deepEqual(unheld(ROWS, source, page), []);
 });
 
+/** `html` without its comments, removed again until none is left: a removal can join two halves into a new one. */
+function withoutComments(html: string): string {
+  let text = html;
+  for (let last = ''; last !== text; ) {
+    last = text;
+    text = text.replace(/<!--[\s\S]*?-->/g, '');
+  }
+  return text;
+}
+
 /**
  * The units of a page that can carry a claim: each heading, each sentence of a paragraph or list item, each row of a
  * table (its cells with their <td> markup, so one phrase can hold a row: the thing and its state), and the page's title and description. Left out: code blocks (<pre>, held by the
@@ -471,8 +481,7 @@ test('every statement of a page is still what its source says', () => {
  * table of contents (links to headings, checked by the link test). Markup stays in, because the rows quote it.
  */
 export function claimUnits(html: string): string[] {
-  const text = html
-    .replace(/<!--[\s\S]*?-->/g, '')
+  const text = withoutComments(html)
     .replace(/<pre\b[\s\S]*?<\/pre>/g, '')
     .replace(/<p class="(?:source-note|toc)">[\s\S]*?<\/p>/g, '')
     .replace(/<thead>[\s\S]*?<\/thead>/g, '');
@@ -704,8 +713,9 @@ test('the install page names every archive the release document lists, and count
 test('an archive left off the install page, or a wrong count, is reported (the check can fail)', () => {
   const release = source('docs/release.md');
   const name = 'js-mdm-X.Y.Z-x86_64-unknown-linux-musl.tar.gz';
-  const dropped = page('install').replace(new RegExp(`<tr><td><code>${name.replace(/\./g, '\\.')}</code>.*?</tr>`), '');
-  assert.match(archiveGaps(release, dropped).join('\n'), new RegExp(`does not name ${name.replace(/\./g, '\\.')}`));
+  const literal = name.replace(/\W/g, '\\$&');
+  const dropped = page('install').replace(new RegExp(`<tr><td><code>${literal}</code>.*?</tr>`), '');
+  assert.match(archiveGaps(release, dropped).join('\n'), new RegExp(`does not name ${literal}`));
   const added = release.replace('| `SHA256SUMS` |', '| `js-new-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | a new tool |\n| `SHA256SUMS` |');
   assert.match(archiveGaps(added, page('install')).join('\n'), /does not name js-new-X\.Y\.Z/);
   assert.match(archiveGaps(added, page('install')).join('\n'), /docs\/release\.md lists 16/);

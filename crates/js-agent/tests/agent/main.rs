@@ -24,8 +24,6 @@ mod cordon;
 mod cpu_ceiling;
 #[cfg(target_os = "linux")]
 mod cpu_series;
-mod credential;
-mod credential_e2e;
 #[cfg(target_os = "linux")]
 mod crun_default;
 #[cfg(target_os = "linux")]
@@ -45,13 +43,14 @@ mod health_flag;
 #[cfg(target_os = "linux")]
 mod helper_modes;
 mod hold_cordon;
+mod host_certs;
 mod host_id_facts;
+mod host_login;
 mod identity;
 #[cfg(target_os = "linux")]
 mod image_budget;
 mod integrity;
 mod jobs;
-mod join_round_trip;
 mod lifecycle;
 mod mac_allow;
 mod mac_supervisor;

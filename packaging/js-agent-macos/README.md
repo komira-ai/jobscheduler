@@ -36,9 +36,9 @@ the goldens are in `crates/js-mac-provision/tests/golden`). Both plists are comp
 shipped: nothing in them is a placeholder. The third daemon, `js-agent.pf-pool`
 (`js-mac-provision pf-pool-plist`), is described below.
 
-- The agent's plist names `--flags-file /etc/js-agent/flags` and `--token-file
-  /etc/js-agent/token`, and the fixed state root and scratch root. The host's
-  own values (`--server`, `--pool`, `--native-network`, `--native-accounts`,
+- The agent's plist names `--flags-file /etc/js-agent/flags` and the fixed state root
+  and scratch root. The host's own values (`--server`, `--pool`, `--host-cert`,
+  `--host-key`, `--native-network`, `--native-accounts`,
   `--native-account-range`, `--native-account-ready` and the `--native-pf-*` flags) are in
   `/etc/js-agent/flags`, which a per-group configuration package installs. The plist carries
   no server and no pool.
@@ -102,14 +102,14 @@ installer and points its `current` link at the release, then runs the hook's `cu
 and `cleanup` (`/Library/Application Support/js-agent/bin/js-agent update-hook`), with the
 params of the manifest: the unit
 `js-agent`, the helper unit `js-agent.session`, the pf job `js-agent.pf-pool`, the state directory above, the release link
-under `/var/lib/hostkeeper/packages/js-agent`, the flags and token files, the state root, the
+under `/var/lib/hostkeeper/packages/js-agent`, the flags file, the state root, the
 helper's socket group and the scratch root (the last two name the host setup `prepare` makes,
 see "Not done yet").
 On a first install `prepare` finds no state directory and none of the directories above it
 (the package is not installed yet), and makes them: `js-agent` mode 0755 and `update` mode 0700,
-root's. A Mac joins by hostkeeper's host certificate: the flags file names it (`--host-cert`,
-`--host-key`, hostkeeper's copy under `/var/lib/hostkeeper/identity`), and then no token file is
-needed. The hook cordons and drains the agent, unless the running agent and the staged one both
+root's. A Mac joins by hostkeeper's host certificate alone: the flags file names it (`--host-cert`,
+`--host-key`, hostkeeper's copy under `/var/lib/hostkeeper/identity`: `host.crt` and
+`host.key`), and `prepare` defers a first install whose flags file names none. The hook cordons and drains the agent, unless the running agent and the staged one both
 print `native-handover` on the `stops:` line of `js-agent --version`, the agent's plist does not
 change and the flags file does not turn the VM backend on (`--vm-driver`): then it places no
 cordon and waits for no job, and the cutover writes the file `handover` in the agent's state root
@@ -227,13 +227,15 @@ with the params
 ```
 unit = "js-agent"
 flags_file = "/etc/js-agent/flags"
-token_file = "/etc/js-agent/token"
 state_root = "/var/db/js-agent/state"
 state_dir = "/var/db/js-agent-config"
 cutover_timeout_secs = 420
 verify_timeout_secs = 300
 rollback_timeout_secs = 420
 ```
+
+(A manifest issued before hosts were identified by their certificate alone still names
+`token_file`; the hook accepts the key and ignores it.)
 
 The hook keeps the files the package replaces in `/var/db/js-agent-config/kept` and puts them
 back in `rollback`, as the Linux package's section describes; a first install's copy stays there

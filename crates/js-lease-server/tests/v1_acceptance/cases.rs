@@ -232,8 +232,8 @@ fn get_job_answers_after_the_server_restarts(kind: Kind) {
     assert_eq!(agent.stop().status, "ExitCode(unix_exit_status(0))");
     assert!(server.stop().success());
     let server = Server::start(&files, "resume");
-    let http = crate::http::Gateway::new(server.job);
-    let js = crate::cli::Js::new(server.job, &files.token_file());
+    let http = crate::http::Gateway::new(server.job, &files.server_cert_file());
+    let js = crate::cli::Js::new(server.job, &files.token_file(), &files.server_cert_file());
     for jobs in [&http as &dyn crate::rig::Jobs, &js] {
         let after = jobs.job("r1");
         assert_eq!(after, before, "GetJob after the restart");
@@ -283,8 +283,8 @@ fn a_finished_job_has_a_usage_row(kind: Kind) {
     agent.stop();
     assert!(server.stop().success());
     let server = Server::start(&files, "resume");
-    let http = crate::http::Gateway::new(server.job);
-    let js = crate::cli::Js::new(server.job, &files.token_file());
+    let http = crate::http::Gateway::new(server.job, &files.server_cert_file());
+    let js = crate::cli::Js::new(server.job, &files.token_file(), &files.server_cert_file());
     assert_eq!(
         usage_of(&http, &js, "u1"),
         before,
@@ -307,8 +307,8 @@ fn usage_of(http: &crate::http::Gateway, js: &crate::cli::Js, id: &str) -> Value
 /// succeeded. It catches a Linux agent whose runtime is not crun, or a crun agent that runs no
 /// job.
 fn an_agent_with_no_runtime_flag_runs_a_job_through_crun(kind: Kind) {
-    let rig = Rig::with_agent(&name("default", kind, None), kind, |node, server, token| {
-        Agent::start_defaulted(node, server, token, "h1")
+    let rig = Rig::with_agent(&name("default", kind, None), kind, |node, server, host| {
+        Agent::start_defaulted(node, server, host, "h1")
     });
     rig.submit(Via::Http, &Spec::new("d1"));
     rig.until_state("d1", "JOB_STATE_SUCCEEDED");
@@ -323,15 +323,15 @@ fn a_second_agent_on_the_same_host_id_or_scratch_root_is_refused(kind: Kind) {
     let rig = Rig::new(&name("claims", kind, None), kind, &[]);
     rig.submit(Via::Http, &Spec::new("k1").held());
     rig.until_up("k1");
-    let (url, join) = (rig.server.url(), rig.files.join_file());
-    let same_host = Agent::refused(&rig.node, &url, &join, "h1", &[]);
+    let url = rig.server.url();
+    let same_host = Agent::refused(&rig.node, &url, &rig.files.host_files("h1"), "h1", &[]);
     assert_eq!(same_host.status, "ExitCode(unix_exit_status(2))");
     assert!(
         same_host.err.contains("--host-id h1: another crun agent"),
         "{}",
         same_host.err
     );
-    let same_scratch = Agent::refused(&rig.node, &url, &join, "h2", &[]);
+    let same_scratch = Agent::refused(&rig.node, &url, &rig.files.host_files("h2"), "h2", &[]);
     assert_eq!(same_scratch.status, "ExitCode(unix_exit_status(2))");
     let scratch = rig.node.scratch.display().to_string();
     assert!(

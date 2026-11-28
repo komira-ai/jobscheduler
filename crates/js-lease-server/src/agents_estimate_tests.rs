@@ -12,9 +12,6 @@ use crate::agents::assemble;
 use crate::clock::SharedClock;
 use crate::config::{Cli, Config};
 
-/// The join token of the pool.
-const JOIN: &str = "join-token-A-0123456789-abcdefghijklmnop";
-
 /// When the test's clock starts.
 const T0: u64 = 1_000_000;
 
@@ -61,10 +58,6 @@ fn config_over(dir: &Path, extra: &[&str], pool: &str) -> Config {
         ("--boot", "initialise".into()),
         ("--token-file", write(dir, "token", &"t".repeat(40), 0o600)),
         (
-            "--agent-token-file",
-            write(dir, "agent-tokens", &format!("{JOIN}\n"), 0o600),
-        ),
-        (
             "--agent-pool-config",
             write(dir, "agent-pool.toml", pool, 0o644),
         ),
@@ -99,20 +92,14 @@ fn refused(name: &str, extra: &[&str], spoil: impl Fn(&Path)) -> String {
 }
 
 /// Asserts that with the flag a start whose usage file will not open (a directory in its
-/// place) is refused naming `--usage-db`, and one whose file of join tokens cannot be read
-/// (a directory in its place) is refused. The flag, which does nothing, does not turn a
-/// broken usage file into a start.
+/// place) is refused naming `--usage-db`. The flag, which does nothing, does not turn a broken
+/// usage file into a start.
 #[test]
-fn with_the_flag_a_start_over_files_that_will_not_open_is_refused() {
+fn with_the_flag_a_start_over_a_usage_file_that_will_not_open_is_refused() {
     let usage = refused("refused_usage", &["--estimate-feed"], |dir| {
         std::fs::create_dir(dir.join("usage.db")).unwrap();
     });
     assert!(usage.starts_with("--usage-db: "), "{usage}");
-    let joins = refused("refused_joins", &["--estimate-feed"], |dir| {
-        std::fs::create_dir(dir.join("state.joins")).unwrap();
-    });
-    assert!(!joins.is_empty());
-    assert!(!joins.starts_with("--usage-db"), "{joins}");
 }
 
 /// Asserts that the agent side, assembled as the server assembles it, holds a quiet heartbeat's

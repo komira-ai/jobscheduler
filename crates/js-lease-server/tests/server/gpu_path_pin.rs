@@ -31,7 +31,6 @@ use std::path::{Path, PathBuf};
 use clap::CommandFactory;
 use js_lease_server::Cli;
 
-use crate::agents_support::{agent_args, join};
 use crate::support::{Harness, Scratch, TOKEN, base_args, replace};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
@@ -46,13 +45,7 @@ const REGENERATE: &str = "JS_REGENERATE_GOLDEN=1 cargo test -p js-lease-server -
 const WRONG_TOKEN: &str = "wrong-token-0123456789-abcdefghijklmnop";
 
 /// The sections of the golden file, in file order.
-const SECTIONS: [&str; 5] = [
-    "flags",
-    "routes",
-    "routes-with-agents",
-    "keep-alive",
-    "state-files",
-];
+const SECTIONS: [&str; 4] = ["flags", "routes", "keep-alive", "state-files"];
 
 /// Every flag by name with its default and whether it is required, sorted. A hidden flag
 /// (one that only refuses) is not a flag the server has, so it is not listed.
@@ -95,8 +88,7 @@ fn flags() -> String {
 type Probe = (&'static str, &'static str, Option<serde_json::Value>);
 
 /// The client routes of the documentation table, the lease and run routes of earlier
-/// releases (which are not routes now), the agent routes (which do not exist without the
-/// agent flags), a path under `/v1/sched/` and two wrong-method requests.
+/// releases (which are not routes now), the agent routes, a path under `/v1/sched/` and two wrong-method requests.
 fn probes() -> Vec<Probe> {
     let mut probes = vec![
         ("GET", "/healthz", None),
@@ -298,31 +290,18 @@ async fn keep_alive(tag: &str) -> String {
     out
 }
 
-/// The routes of a server on the base flags: agent registration with no shared join token
-/// file.
+/// The routes of a server on the base flags, which name the pool the hosts register into; the
+/// agent routes answer every caller that presents no host certificate the same 401.
 async fn routes(tag: &str) -> String {
     let harness = Harness::new(&format!("gpu_path_{tag}_routes")).await;
     matrix(&harness, TOKEN).await
 }
 
-/// The same requests on a server with agent registration on; the valid token is the
-/// client token, which the agent routes refuse.
-async fn routes_with_agents(tag: &str) -> String {
-    let scratch = Scratch::new(&format!("gpu_path_{tag}_routes_agents"));
-    let args = agent_args(&scratch);
-    let harness = Harness::with(scratch, args).await;
-    matrix(&harness, TOKEN).await
-}
-
 /// The base flags with the state file in a directory of its own, which holds nothing else.
-fn args_with_state_dir(scratch: &Scratch, agents: bool) -> (Vec<OsString>, PathBuf) {
+fn args_with_state_dir(scratch: &Scratch) -> (Vec<OsString>, PathBuf) {
     let dir = scratch.path("state");
     fs::create_dir_all(&dir).unwrap();
-    let args = match agents {
-        true => agent_args(scratch),
-        false => base_args(scratch),
-    };
-    let args = replace(args, "--state-file", dir.join("leases.toml"));
+    let args = replace(base_args(scratch), "--state-file", dir.join("leases.toml"));
     (args, dir)
 }
 
@@ -352,28 +331,19 @@ fn tree(root: &Path) -> String {
     found.into_iter().collect::<Vec<_>>().join(" ")
 }
 
-/// Every file under the scratch root (flag files, state directory) after a start and after a
-/// shutdown, with and without the agent flags (where an agent also joins).
+/// Every file under the scratch root (flag files, state directory) before a start, after it and
+/// after a shutdown, with no agent joined.
 async fn state_files(tag: &str) -> String {
     let mut out = String::new();
-    for (label, agents) in [
-        ("without a join token file", false),
-        ("with a join token file", true),
-    ] {
-        let scratch = Scratch::new(&format!("gpu_path_{tag}_files_{agents}"));
-        let (args, _) = args_with_state_dir(&scratch, agents);
-        let dir = scratch.dir.clone();
-        let _ = writeln!(out, "{label}\n  before start: {}", tree(&dir));
-        let harness = Harness::with(scratch, args).await;
-        let _ = writeln!(out, "  after start: {}", tree(&dir));
-        if agents {
-            join(&harness, "node-a").await;
-            let _ = writeln!(out, "  after an agent joins: {}", tree(&dir));
-        }
-        let Harness { running, .. } = harness;
-        running.shutdown().await.unwrap();
-        let _ = writeln!(out, "  after shutdown: {}", tree(&dir));
-    }
+    let scratch = Scratch::new(&format!("gpu_path_{tag}_files"));
+    let (args, _) = args_with_state_dir(&scratch);
+    let dir = scratch.dir.clone();
+    let _ = writeln!(out, "no agent has joined\n  before start: {}", tree(&dir));
+    let harness = Harness::with(scratch, args).await;
+    let _ = writeln!(out, "  after start: {}", tree(&dir));
+    let Harness { running, .. } = harness;
+    running.shutdown().await.unwrap();
+    let _ = writeln!(out, "  after shutdown: {}", tree(&dir));
     out
 }
 
@@ -383,7 +353,6 @@ async fn current(tag: &str) -> Vec<(&'static str, String)> {
     vec![
         ("flags", flags()),
         ("routes", routes(tag).await),
-        ("routes-with-agents", routes_with_agents(tag).await),
         ("keep-alive", keep_alive(tag).await),
         ("state-files", state_files(tag).await),
     ]

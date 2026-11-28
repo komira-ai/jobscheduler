@@ -110,21 +110,6 @@ fn cloud_lines(cell: &mut Cell) -> Vec<String> {
     cloud.cloned().collect()
 }
 
-/// The join token a boot script writes, read as the server's own tests read it: the line
-/// that writes the token file, unquoted.
-fn token_in(script: &str) -> String {
-    let head = "printf '%s' '";
-    let line = script
-        .lines()
-        .find(|line| line.starts_with(head) && line.ends_with("/etc/jobscheduler/token"));
-    let line = line.expect("the script writes the token");
-    let rest = &line[head.len()..];
-    rest.split("' > ")
-        .next()
-        .expect("a quoted token")
-        .to_owned()
-}
-
 /// The host id a boot script starts the agent with.
 fn host_id_in(script: &str) -> String {
     let head = "--host-id \"";
@@ -136,29 +121,25 @@ fn host_id_in(script: &str) -> String {
         .to_owned()
 }
 
-/// Asserts that the machine the scaler launched boots into an agent whose bearer is the
-/// one-time join token of its launch payload (`ElasticFake::user_data`, read as the
-/// server's tests read it), whose host id is the name the payload starts the agent with,
-/// and whose hello names the instance `<pool>:<name>` the token is bound to; that the
+/// Asserts that the machine the scaler launched boots into an agent whose host id is the
+/// name its launch payload (`ElasticFake::user_data`, read as the server's tests read it)
+/// starts the agent with, which presents the host certificate of that name and whose hello
+/// names the instance `<pool>:<name>`; that the
 /// server then lists the host (the hello was welcomed); and that when the cloud drops the
 /// machine its agent is killed in that same step, with no cloud trace line holding the
-/// token or the name. Catches a boot that reads the token from anywhere but the payload,
-/// an agent that says hello without the instance (refused: the token is bound to it),
-/// and a dropped machine whose agent goes on beating.
+/// name. Catches a boot that reads the host from anywhere but the payload, an agent that
+/// presents no certificate (refused 401) or another host's (refused 403), and a dropped machine whose agent goes on beating.
 #[test]
-fn a_booted_machine_joins_with_the_token_in_its_launch_payload() {
+fn a_booted_machine_joins_with_the_certificate_of_the_host_its_payload_names() {
     let mut cell = cell_of("a_booted_machine_joins", 1, small_pool());
     cell.run_until(LOOK_AT).expect("no invariant fails");
     let cloud = cell.cloud().expect("an elastic pool").clone();
     assert_eq!(cloud.fake().launched(), 1);
     let script = cloud.fake().user_data(0);
-    let (token, name) = (token_in(&script), host_id_in(&script));
+    let name = host_id_in(&script);
     let machine = cell.machine(0).expect("the machine booted");
     let spec = machine.spec();
-    assert!(
-        spec.join_token == token,
-        "the bearer is the payload's token"
-    );
+    assert_eq!(spec.certificate, HostId::new(&name).ok());
     assert_eq!(spec.host.as_str(), name);
     let instance = InstanceIdentity {
         provider: elastic::POOL.to_owned(),
@@ -193,10 +174,8 @@ fn a_booted_machine_joins_with_the_token_in_its_launch_payload() {
             .iter()
             .any(|line| line.ends_with(" cell cloud boot m000"))
     );
-    let leaked = lines
-        .iter()
-        .any(|line| line.contains(&token) || line.contains(&name));
-    assert!(!leaked, "no cloud line holds the token or the name");
+    let leaked = lines.iter().any(|line| line.contains(&name));
+    assert!(!leaked, "no cloud line holds the name");
 }
 
 /// Asserts that the recording wrapper records the one acquire of a cell with the virtual

@@ -475,8 +475,8 @@ fn unanswered(unknown: &Unknown) -> impl Iterator<Item = AcquireId> + '_ {
 }
 
 /// The `scheduling` of an instance of `model`: no restart and termination on host
-/// maintenance for every instance, since a restarted machine would boot the agent again
-/// with a spent join token; deletion when the cloud ends it, for Spot (so a preempted
+/// maintenance for every instance, since a restarted machine would boot the agent a second
+/// time; deletion when the cloud ends it, for Spot (so a preempted
 /// machine does not linger as `TERMINATED`) and whenever the pool bounds its `lifetime`,
 /// which becomes the run duration, in whole seconds rounded up.
 fn scheduling(model: ProvisioningModel, lifetime: Option<Duration>) -> Scheduling {

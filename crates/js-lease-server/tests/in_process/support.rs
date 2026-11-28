@@ -14,13 +14,23 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::Body;
 use axum::http::Request;
-use js_lease_server::in_process::InProcess;
+use js_lease_server::in_process::{InProcess, as_host};
 use js_lease_server::{Cli, Config, Running, SharedClock, TickHandle, channel_ticker};
 use js_testkit::dir::TestDir;
-use js_types::{ManualClock, Monotonic, Timestamp};
+use js_types::{HostId, ManualClock, Monotonic, Timestamp};
+use rcgen::string::Ia5String;
+use rcgen::{
+    BasicConstraints, CertificateParams, CertifiedIssuer, DistinguishedName, DnType,
+    ExtendedKeyUsagePurpose, IsCa, KeyPair, SanType, date_time_ymd,
+};
+use rustls::ClientConfig;
+use rustls::crypto::ring::default_provider;
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio_rustls::TlsConnector;
 use tower::ServiceExt;
 
 /// The wall time every test clock starts at.
@@ -28,9 +38,6 @@ pub const T0: u64 = 1_000_000;
 
 /// The bearer token of the test servers.
 pub const TOKEN: &str = "test-token-0123456789-abcdefghijkl";
-
-/// The join token agents say hello with.
-pub const JOIN: &str = "join-token-A-0123456789-abcdefghijklmnop";
 
 /// The pool registering hosts join: room for two machines of the shape [`hello_body`]
 /// announces.
@@ -86,18 +93,86 @@ impl Scratch {
     }
 }
 
+/// The certificates of the tests, made once: a CA whose host certificates the servers admit
+/// hosts by, and the certificate and key of the servers themselves (for 127.0.0.1), which the
+/// clients of a listening server trust.
+struct Pki {
+    ca: CertifiedIssuer<'static, KeyPair>,
+    server_cert: String,
+    server_key: String,
+}
+
+fn pki() -> &'static Pki {
+    static PKI: std::sync::OnceLock<Pki> = std::sync::OnceLock::new();
+    PKI.get_or_init(|| {
+        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.distinguished_name = DistinguishedName::new();
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "test-only hostkeeper CA");
+        let ca = CertifiedIssuer::self_signed(params, KeyPair::generate().unwrap()).unwrap();
+        let names = vec!["127.0.0.1".to_string(), "localhost".to_string()];
+        let made = rcgen::generate_simple_self_signed(names).unwrap();
+        Pki {
+            ca,
+            server_cert: made.cert.pem(),
+            server_key: made.signing_key.serialize_pem(),
+        }
+    })
+}
+
+/// The host certificate of `host`, as hostkeeper issues one, signed by the CA of the tests: its
+/// chain and key.
+fn host_identity(host: &str) -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
+    let key = KeyPair::generate().unwrap();
+    let mut params = CertificateParams::new(vec![host.to_owned()]).unwrap();
+    let uri = Ia5String::try_from("urn:hostkeeper:host-role:host".to_owned()).unwrap();
+    params.subject_alt_names.push(SanType::URI(uri));
+    params.distinguished_name = DistinguishedName::new();
+    params
+        .distinguished_name
+        .push(DnType::CommonName, format!("host:{host}"));
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+    params.not_before = date_time_ymd(2020, 1, 1);
+    params.not_after = date_time_ymd(3000, 1, 1);
+    let cert = params.signed_by(&key, &pki().ca).unwrap();
+    let pem = cert.pem();
+    let chain = CertificateDer::pem_slice_iter(pem.as_bytes());
+    let chain = chain.collect::<Result<Vec<_>, _>>().unwrap();
+    let key = PrivateKeyDer::from_pem_slice(key.serialize_pem().as_bytes()).unwrap();
+    (chain, key)
+}
+
+/// The host an agent-API call is for: the host of `/v1/hosts/<host>`, or the `host_id` of the
+/// body of a message to `/v1/agent/`. `None` for every other call (a client's).
+fn host_of(path: &str, body: Option<&Value>) -> Option<String> {
+    if let Some(rest) = path.strip_prefix("/v1/hosts/") {
+        return rest.split(['/', '?']).next().map(str::to_owned);
+    }
+    path.starts_with("/v1/agent/").then(|| {
+        let named = body.and_then(|body| body["host_id"].as_str());
+        named.unwrap_or("unnamed-host").to_owned()
+    })
+}
+
 /// The flags of a test server: an ephemeral loopback port, `boot`, an owner-only token file,
-/// and registration of hosts into [`POOL`] with [`JOIN`].
+/// registration of hosts into [`POOL`], and TLS with the CA that admits hosts by their
+/// certificates.
 pub fn args(scratch: &Scratch, boot: &str) -> Vec<OsString> {
     let token = scratch.write("token", TOKEN, 0o600);
-    let tokens = scratch.write("agent-tokens", &format!("{JOIN}\n"), 0o600);
     let pool = scratch.write("agent-pool.toml", POOL, 0o644);
+    let cert = scratch.write("tls-cert.pem", &pki().server_cert, 0o644);
+    let key = scratch.write("tls-key.pem", &pki().server_key, 0o600);
+    let ca = scratch.write("host-ca.pem", &pki().ca.pem(), 0o644);
     let flags: Vec<(&str, OsString)> = vec![
         ("--listen", "127.0.0.1:0".into()),
         ("--state-file", scratch.state().into_os_string()),
         ("--boot", boot.into()),
         ("--token-file", token.into_os_string()),
-        ("--agent-token-file", tokens.into_os_string()),
+        ("--tls-cert", cert.into_os_string()),
+        ("--tls-key", key.into_os_string()),
+        ("--agent-client-ca", ca.into_os_string()),
         ("--agent-pool-config", pool.into_os_string()),
     ];
     let mut args: Vec<OsString> = vec!["js-lease-server".into()];
@@ -175,10 +250,10 @@ impl Cell {
         routed(&router, method, path, Some(TOKEN), body).await
     }
 
-    /// A request to the agent router, with the join token.
+    /// A request to the agent router, presenting the host the body names.
     pub async fn agent(&self, path: &str, body: &Value) -> Reply {
         let router = self.server.agent_router();
-        routed(&router, "POST", path, Some(JOIN), Some(body)).await
+        routed(&router, "POST", path, None, Some(body)).await
     }
 }
 
@@ -199,7 +274,9 @@ fn reply(status: u16, bytes: &[u8]) -> Reply {
     Reply { status, body }
 }
 
-/// One request answered by `router`, called as a service: no socket, no peer address.
+/// One request answered by `router`, called as a service: no socket, no peer address. A call
+/// to an agent route presents the host its body (or its path) names, as the listener does for
+/// a connection that carries that host's certificate ([`as_host`]).
 pub async fn routed(
     router: &Router,
     method: &str,
@@ -212,7 +289,10 @@ pub async fn routed(
         request = request.header("authorization", format!("Bearer {token}"));
     }
     let bytes = body.map(Value::to_string).unwrap_or_default();
-    let request = request.body(Body::from(bytes)).unwrap();
+    let mut request = request.body(Body::from(bytes)).unwrap();
+    if let Some(host) = host_of(path, body) {
+        as_host(&mut request, &HostId::new(&host).unwrap());
+    }
     let response = router.clone().oneshot(request).await.unwrap();
     let status = response.status().as_u16();
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -249,7 +329,7 @@ impl Listening {
         &self,
         method: &str,
         path: &str,
-        token: &str,
+        token: Option<&str>,
         body: Option<&Value>,
     ) -> Reply {
         exchange(self.running.addr(), method, path, token, body).await
@@ -258,24 +338,48 @@ impl Listening {
     /// [`Self::request`] to the job service's listener, with the client token.
     pub async fn job_request(&self, method: &str, path: &str, body: Option<&Value>) -> Reply {
         let addr = self.running.job_addr().expect("the job service is on");
-        exchange(addr, method, path, TOKEN, body).await
+        exchange(addr, method, path, Some(TOKEN), body).await
     }
 }
 
-/// One HTTP/1.1 request over a new loopback connection to `addr`, read to the end of the
-/// connection.
+/// One HTTP/1.1 request over a new TLS connection to `addr`, read to the end of the
+/// connection. It presents the host certificate of the host an agent-API call is for, and none
+/// for any other call.
 async fn exchange(
     addr: SocketAddr,
     method: &str,
     path: &str,
-    token: &str,
+    token: Option<&str>,
     body: Option<&Value>,
 ) -> Reply {
-    let mut stream = TcpStream::connect(addr).await.unwrap();
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(CertificateDer::from_pem_slice(pki().server_cert.as_bytes()).unwrap())
+        .unwrap();
+    let builder = ClientConfig::builder_with_provider(Arc::new(default_provider()))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots);
+    let config = match host_of(path, body) {
+        Some(host) => {
+            let (chain, key) = host_identity(&host);
+            builder.with_client_auth_cert(chain, key).unwrap()
+        }
+        None => builder.with_no_client_auth(),
+    };
+    let tcp = TcpStream::connect(addr).await.unwrap();
+    let name = ServerName::IpAddress(std::net::IpAddr::from([127, 0, 0, 1]).into());
+    let mut stream = TlsConnector::from(Arc::new(config))
+        .connect(name, tcp)
+        .await
+        .unwrap();
     let body = body.map(Value::to_string).unwrap_or_default();
+    let authorization = token.map_or(String::new(), |token| {
+        format!("Authorization: Bearer {token}\r\n")
+    });
     let message = format!(
         "{method} {path} HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\
-         Authorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n{body}",
+         {authorization}Content-Length: {}\r\n\r\n{body}",
         body.len()
     );
     stream.write_all(message.as_bytes()).await.unwrap();

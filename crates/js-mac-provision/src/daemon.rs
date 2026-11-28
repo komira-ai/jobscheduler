@@ -4,9 +4,9 @@
 //! The agent and the helper are described by flags and nothing else: no environment variable;
 //! the agent's plist names a flags file ([`FLAGS_FILE`]), which holds only more flags. Neither of
 //! the two runs at load. `KeepAlive` holds each of them while [`GATE`], the host's flags file, exists, which is
-//! launchd's form of the unit's `ConditionPathExists`. The gate is the flags file and not the
-//! join token ([`TOKEN_FILE`]): a Mac joins by hostkeeper's host certificate, which the flags
-//! file names, and has no token; every host has its flags, which name its server and pool. The
+//! launchd's form of the unit's `ConditionPathExists`. The gate is the flags file: a Mac joins
+//! by hostkeeper's host certificate alone, which the flags file names beside its server and
+//! pool, and the plist names no certificate path itself. The
 //! package runs no install script: the update hook bootstraps the plists, and a daemon starts
 //! once the host has its flags. launchd then starts a daemon again after every exit, a clean
 //! one included (the agent exits 0 after it has drained), at most once in
@@ -47,9 +47,6 @@ pub const LAUNCH_DAEMONS_DIR: &str = "/Library/LaunchDaemons";
 pub const FLAGS_FILE: &str = "/etc/js-agent/flags";
 /// The path whose existence lets the daemons run: the flags file.
 pub const GATE: &str = FLAGS_FILE;
-/// The join token file the agent's `--token-file` names. A host whose flags name its host
-/// certificate (`--host-cert`, `--host-key`) has none, and the agent then reads none.
-pub const TOKEN_FILE: &str = "/etc/js-agent/token";
 /// Seconds launchd gives the agent to exit after SIGTERM before it kills it (`ExitTimeOut`): the
 /// unit's `TimeoutStopSec`, the drain the agent's default flags ask for, 10 + 10 + 30 s, with room
 /// for the engine calls. `launchctl bootout` returns when the agent has exited, so whatever stops
@@ -104,8 +101,6 @@ impl Daemon {
         let words = [
             "--flags-file",
             FLAGS_FILE,
-            "--token-file",
-            TOKEN_FILE,
             "--state-root",
             "/var/db/js-agent/state",
             "--scratch-root",

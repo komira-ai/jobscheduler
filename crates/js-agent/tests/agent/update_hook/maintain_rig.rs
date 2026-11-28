@@ -55,7 +55,6 @@ impl Rig {
         let params = DrainParams {
             unit: UNIT.to_owned(),
             flags_file: root.join("flags"),
-            token_file: root.join("token"),
             state_root,
             cordon_lease_secs: LEASE_SECS,
             defer_retry_secs: RETRY_SECS,

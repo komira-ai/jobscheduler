@@ -19,7 +19,6 @@ use crate::agent_api;
 use crate::agents::Agents;
 use crate::config::{Token, is_private_address};
 use crate::hosts::listing_with_rows;
-use crate::join_api;
 use crate::scaler::Scaler;
 use crate::status::{self, Status};
 use crate::store::ServerStore;
@@ -205,7 +204,7 @@ impl Shared {
     }
 }
 
-/// The router of the host listing, orphan, join, brake, usage and status routes: `/healthz` open,
+/// The router of the host listing, orphan, brake, usage and status routes: `/healthz` open,
 /// everything else behind the bearer token. With `with_agents` the agent routes are served too (one port
 /// for everything, as without `server.agent_listen`); without it they are served by
 /// [`agent_router`] on a port of their own and answer 404 here.
@@ -222,11 +221,12 @@ pub(crate) fn router(shared: Arc<Shared>, with_agents: bool) -> Router {
         .route("/status", get(status_page))
         .with_state(shared.clone());
     let app = open.merge(guarded);
-    let agents = shared.agents.clone();
-    let app = app.merge(join_api::router(shared.clone(), agents.clone()));
-    let app = app.merge(crate::orphan_api::router(shared.clone(), agents.clone()));
+    let app = app.merge(crate::orphan_api::router(
+        shared.clone(),
+        shared.agents.clone(),
+    ));
     let app = match with_agents {
-        true => app.merge(agent_api::router(agents)),
+        true => app.merge(agent_api::router(shared.agents.clone())),
         false => app,
     };
     let app = match &shared.scaler {
@@ -379,9 +379,8 @@ mod tests {
     }
 
     /// Asserts that `GET /v1/hosts`, a route behind the bearer token, answers 401 with no
-    /// header, with the pool's join token, with another token and with a header that is
-    /// no bearer, and 200 with the client token. It catches a guarded route that trusts an
-    /// agent credential.
+    /// header, with another token and with a header that is no bearer, and 200 with the
+    /// client token. It catches a guarded route that trusts an agent credential.
     #[tokio::test]
     async fn a_guarded_route_takes_the_client_token_alone() {
         use axum::body::Body;

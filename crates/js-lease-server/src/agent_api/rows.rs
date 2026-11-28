@@ -17,13 +17,11 @@
 //!   token's use and the binding the refused hello committed before the row stand.
 //! - **The pool's cap** counts every server's rows. A hello of a host that has no row is judged
 //!   against it before anything of the hello is written ([`room_in_pool`]): a full pool refuses
-//!   it 403 `pool-full`, with no token used and no binding written. The row's write decides it
+//!   it 403 `pool-full`, with no binding written. The row's write decides it
 //!   again under the pool's admission row, so of two hellos that both found room one is
 //!   written; the other is the 503 of a row that could not be written, as for any row that
-//!   cannot be written: its token's use and its binding were committed before the row's write,
-//!   so a hello with a one-time token that was to be given a host credential cannot use the
-//!   token again (it is issued again), and any other agent's next hello is refused `pool-full`
-//!   before anything of it is written.
+//!   cannot be written: its binding was committed before the row's write, so the agent's next
+//!   hello is refused `pool-full` before anything of it is written.
 //! - **The registry is a cache of the rows.** Before a hello is judged, and before a heartbeat
 //!   whose epoch the registry does not hold is checked, the row and the host's binding are read
 //!   and the session another server's hello wrote is adopted ([`refresh`]): its epoch, the
@@ -222,8 +220,7 @@ pub(super) async fn hello_row(
 /// ([`JobStoreError::PoolFull`]), or the row holds a live session of another agent process
 /// ([`JobStoreError::HostLive`]: another server wrote its hello since the refresh): the registry has given up the session it admitted
 /// ([`js_registry::Registry::abandon`]), so no beat of it is taken and the next hello is not
-/// refused `host-live` for it. The token's use and the binding the hello committed before the
-/// row stand.
+/// refused `host-live` for it. The binding the hello committed before the row stands.
 pub(crate) fn record_hello(
     agents: &Agents,
     host: &HostId,

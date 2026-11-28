@@ -14,8 +14,8 @@
 //!   as long as the lock is held ([`ServerStore::open_waiting`]). The store holds the lock from
 //!   before its open to its end ([`SqliteStore::open_locked`]).
 //!
-//! What the store keeps: the host bindings, with their taints and cordons, and the join
-//! tokens' digests ([`crate::host_keys`]), and the scaler's records and the hosts the
+//! What the store keeps: the host bindings, with their taints and cordons
+//! ([`crate::host_keys`]), and the scaler's records and the hosts the
 //! registry refused to remove (`acquires/scaler/records`, `acquires/scaler/unremoved`), read
 //! once at start, and, with the job service on, the job store (jobs, allocations, marks,
 //! taints and the change feed) and, with usage on, the usage rows (node minutes, profiles,
@@ -23,8 +23,8 @@
 //! `<state file>.jobs` and the usage the file `usage.db`; with it neither file is made, opened
 //! or read, and a pair left by an earlier start stays where it is, unread.
 //!
-//! The first start over a store imports the four files a server without the setting keeps
-//! beside the state file (`.agents`, `.joins`, `.scaler`, `.scaler.unremoved`) once, before
+//! The first start over a store imports the three files a server without the setting keeps
+//! beside the state file (`.agents`, `.scaler`, `.scaler.unremoved`) once, before
 //! anything is read from the store ([`ServerStore::import`]).
 
 use std::fs::{OpenOptions, Permissions};

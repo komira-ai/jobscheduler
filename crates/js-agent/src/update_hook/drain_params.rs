@@ -8,8 +8,8 @@
 //! of the manifest's keys, each held to the rule an update holds it to, and ignore every other
 //! key:
 //!
-//! - `flags_file`, `token_file` and `state_root`: how the lease server is reached, as for an
-//!   update, and the state root the hold file is in;
+//! - `flags_file` and `state_root`: how the lease server is reached, as for an update, and
+//!   the state root the hold file is in;
 //! - `unit`: the agent's unit, which `resume` restarts when the host facts changed;
 //! - `cordon_lease_secs`: how long a cordon lives between renewals (at least
 //!   [`MIN_CORDON_LEASE_SECS`](super::MIN_CORDON_LEASE_SECS));
@@ -20,8 +20,8 @@
 use std::path::{Path, PathBuf};
 
 use super::params::{
-    CORDON_LEASE_KEY, DEFER_RETRY_KEY, FLAGS_FILE_KEY, ParamsError, STATE_ROOT_KEY, TOKEN_FILE_KEY,
-    long_enough, required_path, required_seconds, seconds, table_of, unit_of,
+    CORDON_LEASE_KEY, DEFER_RETRY_KEY, FLAGS_FILE_KEY, ParamsError, STATE_ROOT_KEY, long_enough,
+    required_path, required_seconds, seconds, table_of, unit_of,
 };
 
 /// The reserved key of the drain's deadline: a whole number of seconds since the Unix epoch.
@@ -35,8 +35,6 @@ pub struct DrainParams {
     pub unit: String,
     /// The file of the host's own agent flags (`flags_file`).
     pub flags_file: PathBuf,
-    /// The join token file (`token_file`).
-    pub token_file: PathBuf,
     /// The agent's state root (`state_root`), where the hold file is.
     pub state_root: PathBuf,
     /// How long a cordon lives between renewals.
@@ -68,7 +66,6 @@ impl DrainParams {
         Ok(DrainParams {
             unit: unit_of(&table)?,
             flags_file: required_path(&table, FLAGS_FILE_KEY)?,
-            token_file: required_path(&table, TOKEN_FILE_KEY)?,
             state_root: required_path(&table, STATE_ROOT_KEY)?,
             cordon_lease_secs,
             defer_retry_secs: required_seconds(&table, DEFER_RETRY_KEY)?,

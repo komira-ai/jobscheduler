@@ -25,7 +25,8 @@
 //! - `release_link`: hostkeeper's `current` link of the package, which the hook only reads;
 //! - `flags_file`: the host's own agent flags (the file `js-agent --flags-file` reads), where
 //!   the hook finds the lease server, the certificate to trust and the host id;
-//! - `token_file` and `state_root`: the agent's `--token-file` and `--state-root` values;
+//! - `state_root`: the agent's `--state-root` value (a manifest that still names the retired
+//!   `token_file` is accepted: the key is ignored like any other scalar key);
 //! - `cordon_lease_secs`: how long a cordon lives between renewals; at least
 //!   [`MIN_CORDON_LEASE_SECS`] (three polls) and not zero;
 //! - `cordon_max_secs`: the longest a cordon is held from its first placement; not zero and
@@ -91,7 +92,10 @@ pub const PREVIOUS_VERSION_KEY: &str = "updater.previous_version";
 /// The key of the agent's state root, as the agent's `--state-root`.
 pub const STATE_ROOT_KEY: &str = "state_root";
 
-/// The key of the file holding the host's join token, as the agent's `--token-file`.
+/// The retired key of the file that held the host's join token. This hook does not read it
+/// and a manifest that still carries it is accepted; the config hook, which refuses unknown
+/// keys, skips it by this name. The release manifest still carries it, because the hook of an
+/// earlier release requires it when it reads the params of this one.
 pub const TOKEN_FILE_KEY: &str = "token_file";
 
 /// The key of the file of the host's own agent flags, as the agent's `--flags-file`.
@@ -138,12 +142,11 @@ pub const VERIFY_DEADLINE_KEY: &str = "verify_deadline_secs";
 
 /// Every key the hook reads from the package manifest's `[params]` table, and requires. A
 /// manifest gives exactly these (the reserved `updater.*` keys are the updater's).
-pub const KEYS: [&str; 17] = [
+pub const KEYS: [&str; 16] = [
     UNIT_KEY,
     STATE_DIR_KEY,
     RELEASE_LINK_KEY,
     FLAGS_FILE_KEY,
-    TOKEN_FILE_KEY,
     STATE_ROOT_KEY,
     RUNTIME_KEY,
     CORDON_LEASE_KEY,
@@ -250,28 +253,19 @@ pub enum ParamsError {
     },
 }
 
-/// How the hook on a machine reaches the lease server and the agent's state: the values of the
-/// agent's own flags of the same names. `state_root` and `token_file` are params keys
-/// ([`Params::state_root`], [`Params::token_file`]); `server`, `ca_cert`, `host_id` and
-/// `host_identity` come from the host's flags file, which the machine reads when a step asks the
-/// lease server (a first install asks none).
+/// How the hook on a machine reaches the lease server: the values of the agent's own flags of
+/// the same names (`server`, `ca_cert`, `host_id` and `host_identity`), from the host's flags
+/// file, which the machine reads when a step asks the lease server (a first install asks none).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ConnectParams {
     /// The lease server (`--server` of the flags file).
     pub server: Option<String>,
-    /// The agent's state root (`state_root`), where the host credential and the taint are.
-    pub state_root: Option<PathBuf>,
-    /// The join token file (`token_file`), used when no state root is there or a private one
-    /// holds no credential; never in place of a state root that is there and not private. Not
-    /// used when the flags file names a host certificate.
-    pub token_file: Option<PathBuf>,
     /// The certificate to trust (`--ca-cert` of the flags file).
     pub ca_cert: Option<PathBuf>,
     /// The host's id (`--host-id` of the flags file); the machine's own id when absent.
     pub host_id: Option<String>,
     /// The host's certificate and key (`--host-cert` and `--host-key` of the flags file), which
-    /// the connection presents in place of any token or credential; `None` when the file names
-    /// neither.
+    /// the connection presents; `None` when the file names neither.
     pub host_identity: Option<HostIdentity>,
 }
 
@@ -306,10 +300,8 @@ pub struct Params {
     pub target_version: String,
     /// The version that runs now (`updater.previous_version`); `None` on a first install.
     pub previous_version: Option<String>,
-    /// The agent's state root (`state_root`), where the host credential and the taint are.
+    /// The agent's state root (`state_root`), where the taint is.
     pub state_root: PathBuf,
-    /// The join token file (`token_file`).
-    pub token_file: PathBuf,
     /// The agent's scratch root (`scratch_root`), when the params name it: `prepare` makes it
     /// on a file system apart from the state root's, mounted on its parent. Only a launchd host
     /// is set up so.
@@ -363,7 +355,6 @@ impl Params {
                 .ok_or(ParamsError::Missing(TARGET_VERSION_KEY))?,
             previous_version: string_of(&table, PREVIOUS_VERSION_KEY)?,
             state_root: required_path(&table, STATE_ROOT_KEY)?,
-            token_file: required_path(&table, TOKEN_FILE_KEY)?,
             scratch_root: None,
         };
         let scratch_root = scratch_root_of(&table, &params.state_root)?;

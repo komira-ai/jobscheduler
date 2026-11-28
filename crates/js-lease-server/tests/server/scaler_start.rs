@@ -1,30 +1,21 @@
 //! A server with a launching pool, started from a configuration file, over an account in
 //! memory: a pool in `plan` launches nothing, a `live` pool launches once and not again
-//! after a restart, a machine goes through its whole life, and a host whose release was
-//! under way when the server stopped is marked when it says hello again. Time is the
-//! test's clock and the ticks are stepped; nothing sleeps and no network is touched.
+//! after a restart, and a missing records file is a first start only when the operator says
+//! so. Time is the test's clock and the ticks are stepped; nothing sleeps and no network is
+//! touched.
 
-use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
-use std::time::Duration;
 
-use js_elastic::AcquireId;
 use js_lease_server::RecordsFile;
-use js_provider_lambdalabs::{Call, TerminateEffect};
-use js_scaler::{Blocked, Millis, Phase, Record, Records, StoredOffer};
+use js_provider_lambdalabs::Call;
+use js_scaler::{Blocked, Phase, Records};
 use js_state::Store;
-use serde_json::json;
 
-use crate::agents_support::{entry, hosts};
 use crate::scaler_support::{
-    RECORDS_KEY, account, beat, cancel, hello, host_id_in, join, kept_records, name_of, open_store,
-    put_in_store, records_path, start, start_refused, submit, text, text_in, text_with, token_in,
+    RECORDS_KEY, account, kept_records, open_store, put_in_store, records_path, start,
+    start_refused, submit, text, text_in, text_with,
 };
-use crate::support::{Harness, Kept, Scratch, T0};
-
-fn secs(n: u64) -> Duration {
-    Duration::from_secs(n)
-}
+use crate::support::{Harness, Kept, Scratch};
 
 /// The phase of the first record the scaler of `h` holds.
 fn phase(h: &Harness) -> Phase {
@@ -72,12 +63,12 @@ async fn a_plan_pool_starts_without_an_agent_pin() {
 }
 
 /// Asserts that a `live` pool launches once for a queued job and not again after a restart:
-/// one tick after the job is queued the machine is launched with a join token in
-/// its user data, the records are in a file that only the owner can use (or, with a store, in
+/// one tick after the job is queued the machine is launched
+/// with its user data (which names no token file), the records are in a file that only the owner can use (or, with a store, in
 /// the store and in no file), and the account holds one machine; the ticks that follow add
 /// none. The server is stopped and another started over the same files or store, the job
 /// is still queued, and the account still holds one machine, the scaler one record, and no
-/// second token is minted for it. It runs with the records in their file and in the state
+/// second machine is launched for it. It runs with the records in their file and in the state
 /// store. It catches a launch that is forgotten at a restart, a store mode that writes the
 /// records file.
 #[tokio::test]
@@ -116,8 +107,12 @@ async fn launches_once_in(kept: Kept) {
     assert!(!acquire.ends_with("0000000000000000"), "{acquire}");
     let script = account.launches()[0].user_data().unwrap().to_owned();
     let name = written.instances[0].name.clone();
-    assert!(script.contains(&format!("burst:{name}")));
-    assert!(!token_in(&script).is_empty());
+    assert!(
+        script.contains(&format!("--host-id \"{name}\"")),
+        "{script}"
+    );
+    assert!(script.contains("--pool \"burst\""), "{script}");
+    assert!(!script.contains("--token-file"), "{script}");
 
     h.ticks.step().await;
     h.ticks.step().await;
@@ -140,146 +135,6 @@ async fn launches_once_in(kept: Kept) {
     assert_eq!(state.records.instances.len(), 1);
     assert_eq!(state.records.instances[0].name, name);
     assert_eq!(state.records.instances[0].phase, Phase::Booting);
-}
-
-/// Asserts a machine's whole life through the server: launched for a queued job, booted, its
-/// agent says hello with the token from the user data and is registered; the job is
-/// cancelled, and after `idle` of quiet the host is drained, marked releasing, its token revoked
-/// and the machine terminated, in that order, with the host's own heartbeats accepted until
-/// the tick that terminates it and refused after; the next tick removes the host. It
-/// catches a token that outlives the machine and a host left in the registry.
-#[tokio::test]
-async fn a_machine_is_launched_registered_idle_released_and_removed() {
-    let scratch = Scratch::new("scaler_life");
-    let account = account(&scratch);
-    account.set_terminate_effect(TerminateEffect::Removed);
-    let source = text(&scratch, "live", "initialise");
-    let h = start(scratch, &source).await;
-    h.ticks.step().await;
-    let registry = h.running.registry().unwrap();
-    let queued = submit(&h, "j1").await;
-    assert_eq!(queued.status, 201, "{}", queued.body);
-    h.ticks.step().await;
-    let name = h.running.scaler().unwrap().state().records.instances[0]
-        .name
-        .clone();
-    let script = account.launches()[0].user_data().unwrap().to_owned();
-    let token = token_in(&script);
-    // The agent registers under the id its unit names, which is the record's name; the
-    // scaler finds the host by that name, so the record moves past Booting.
-    let registers_as = host_id_in(&script);
-    assert_eq!(registers_as, name);
-    h.ticks.step().await;
-    assert_eq!(phase(&h), Phase::Booting);
-    let me = join(&h, &token, &registers_as).await;
-    h.ticks.step().await;
-    assert_eq!(phase(&h), Phase::Registered);
-    let cancelled = cancel(&h, "j1").await;
-    assert_eq!(cancelled.status, 200, "{}", cancelled.body);
-
-    for _ in 0..40 {
-        h.clock.advance(secs(10));
-        let reply = beat(&h, &token, &me).await;
-        if account.count(Call::Terminate) == 0 {
-            assert_eq!(reply.status, 200, "{}", reply.body);
-        }
-        h.ticks.step().await;
-        if account.count(Call::Terminate) > 0 {
-            break;
-        }
-    }
-    assert_eq!(account.count(Call::Terminate), 1);
-    let after = beat(&h, &token, &me).await;
-    assert_eq!(after.status, 401, "the token still works: {}", after.body);
-    assert!(account.instances().is_empty());
-
-    h.ticks.step().await;
-    assert_eq!(phase(&h), Phase::Gone);
-    assert!(registry.hosts().is_empty());
-    assert_eq!(account.launched(), 1);
-}
-
-/// A record of the machine `name` of the pool `burst` that was being released.
-fn releasing(name: &str) -> Records {
-    Records {
-        instances: vec![Record {
-            pool: "burst".to_owned(),
-            acquire: Some(AcquireId::new("burst-0001").unwrap()),
-            name: name.to_owned(),
-            offer: StoredOffer::nothing("gpu_1x_a100", Some("us-west-1".to_owned())),
-            price_cents_per_hour: 129,
-            phase: Phase::Releasing,
-            since: Millis::new(T0),
-            launched_at: Millis::new(T0),
-            token_expires: None,
-            cloud_id: Some("i-1".to_owned()),
-            retry_at: None,
-            attempt: 0,
-            gone_at: None,
-            registered: true,
-            condemned: false,
-            clean_lists: 0,
-            last_clean: None,
-            seen_live: false,
-            ends_at: None,
-            provider: None,
-        }],
-        cooldowns: BTreeMap::new(),
-        ..Default::default()
-    }
-}
-
-/// Asserts the restart case of a release under way. The server stops after the scaler
-/// wrote `Releasing` for a machine and before its token was revoked, so the token still
-/// works. The server starts again; before any tick, and before any hello is admitted, the
-/// scaler marks the machine ending; the agent says hello again with the token, is admitted
-/// and is listed `releasing` and is reserved by no job; the first tick
-/// revokes the token and releases the machine, the second removes the host, and a hello
-/// with the token is then refused. It catches a host that rejoins unmarked and could be
-/// booked before its machine is terminated.
-#[tokio::test]
-async fn a_host_whose_release_was_under_way_is_marked_when_it_says_hello_again() {
-    let scratch = Scratch::new("scaler_restart_release");
-    let account = account(&scratch);
-    let name = name_of("js", "burst-0001");
-    let first = text(&scratch, "live", "initialise");
-    let h = start(scratch, &first).await;
-    let body = json!({ "provider": "burst", "instance_id": name });
-    let minted = h.call("POST", "/v1/agent/join-tokens", Some(&body)).await;
-    assert_eq!(minted.status, 201, "{}", minted.body);
-    let token = minted.json()["token"].as_str().unwrap().to_owned();
-    let Harness {
-        running, scratch, ..
-    } = h;
-    running.shutdown().await.unwrap();
-    RecordsFile::new(records_path(&scratch))
-        .save(&releasing(&name))
-        .unwrap();
-
-    let again = text(&scratch, "live", "resume");
-    let h = start(scratch, &again).await;
-    let me = join(&h, &token, &name).await;
-    let listing = hosts(&h).await;
-    assert_eq!(entry(&listing, &name)["mark"], "releasing");
-    assert!(entry(&listing, &name).get("lease").is_none());
-    let registry = h.running.registry().unwrap();
-    let queued = submit(&h, "j1").await;
-    assert_eq!(queued.status, 201, "{}", queued.body);
-    assert_eq!(beat(&h, &token, &me).await.status, 200);
-
-    h.ticks.step().await;
-    assert_eq!(beat(&h, &token, &me).await.status, 401);
-    h.ticks.step().await;
-    assert_eq!(phase(&h), Phase::Gone);
-    assert!(registry.hosts().is_empty());
-    assert_eq!(hello(&h, &token, &name).await.status, 401);
-
-    // The job that could not be placed on the releasing host is served by a machine of
-    // its own, and the releasing machine is not launched again.
-    assert_eq!(account.launched(), 1);
-    let state = h.running.scaler().unwrap().state();
-    assert_eq!(state.records.instances.len(), 2);
-    assert_ne!(state.records.instances[1].name, name);
 }
 
 /// Asserts that a missing records file is a first start only when the operator says so

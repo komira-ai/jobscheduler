@@ -15,7 +15,7 @@ fn masked(plan: &js_elastic::BootPlan) -> String {
 }
 
 /// Asserts the whole masked script of a plan under the default mode: the trap first, the
-/// cleanup lists, the identity files, no network steps, the agent checked by hash and the
+/// cleanup lists, no network steps, the agent checked by hash and the
 /// unit. A change to the script is a change to this file.
 #[test]
 fn the_default_mode_script_matches_its_golden_file() {

@@ -1,6 +1,5 @@
 //! What ends a command without success, and the exit status each kind has.
 
-use js_client::ClientError;
 use js_client::jobs::{FollowError, JobError, NotSent};
 use tonic::Code;
 
@@ -15,8 +14,7 @@ pub mod exit {
     /// A flag or a file it names is wrong. Statuses clap reports for a command line it
     /// refuses are 2 as well.
     pub const USAGE: u8 = 2;
-    /// The server refused: a job command's definite refusal other than an invalid request,
-    /// or a join-token call the server does not serve.
+    /// The server refused: a job command's definite refusal other than an invalid request.
     pub const REFUSED: u8 = 3;
     /// The server refused the request itself: a rule of the contract, or a body it cannot
     /// read.
@@ -104,15 +102,6 @@ impl From<FollowError> for Failure {
         match err {
             FollowError::Call(call) => call.into(),
             write @ FollowError::Write(_) => Self::Server(write.to_string()),
-        }
-    }
-}
-
-impl From<ClientError> for Failure {
-    fn from(err: ClientError) -> Self {
-        match err {
-            ClientError::Flag { flag, why } => Self::flag(flag, why),
-            ClientError::Server(why) => Self::Server(why),
         }
     }
 }

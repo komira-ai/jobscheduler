@@ -24,11 +24,13 @@ use js_types::{ManualClock, Timestamp};
 use serde_json::Value;
 use tokio_rustls::TlsConnector;
 
-use crate::agents_support::JOIN;
 use crate::config_support::{
     API_KEY, OAUTH_SECRET, PoolText, clock, file, oauth_file, quote, quoted, server,
 };
-use crate::support::{LogCapture, Reply, Scratch, T0, TOKEN, quiet_logs, request};
+use crate::host_certs_support::{Spec, shared_ca};
+use crate::support::{
+    LogCapture, Reply, Scratch, T0, TOKEN, client_at, quiet_logs, request, trust_addrs,
+};
 
 /// The secret the fake network mode would mint for a launch. Nothing mints it: a plan is
 /// shown and nothing is launched.
@@ -42,7 +44,7 @@ pub const ADVERTISE: &str = "https://js.example:7301";
 
 /// Every secret the tests plant: the key file, the OAuth client, the client token, the join
 /// token and the fake network key.
-pub const SECRETS: [&str; 5] = [API_KEY, OAUTH_SECRET, TOKEN, JOIN, NET_SECRET];
+pub const SECRETS: [&str; 4] = [API_KEY, OAUTH_SECRET, TOKEN, NET_SECRET];
 
 /// The secrets of [`SECRETS`] that `text` holds.
 pub fn leaked(text: &str) -> Vec<&'static str> {
@@ -418,16 +420,20 @@ impl Rig {
             .map(|url| format!("advertise_url = {}\n", quote(url)))
             .unwrap_or_default();
         let server = server(&scratch, &format!("{extra}{advertise}"));
+        // Without a certificate of its own the server took the test's agent TLS files
+        // (`server` adds them), so it is on TLS and a client trusts that certificate.
+        let tls = tls.or_else(|| {
+            let cert = std::fs::read_to_string(scratch.path("test-only-cert.pem")).ok()?;
+            Some(crate::tls::connector(&cert))
+        });
         let key = scratch.path("api-key");
-        let joins = scratch.write("joins", &format!("{JOIN}\n"), 0o600);
         let provider = format!(
             "{{ kind = \"fake-cloud\", api_key_file = {} }}",
             quoted(&key)
         );
         let pool = PoolText::elastic(&scratch)
             .set("exec", &quote(options.exec))
-            .set("provider", &provider)
-            .set("join_token_file", &quoted(&joins));
+            .set("provider", &provider);
         let pool = match options.live {
             true => pool.set("launch", &quote("live")),
             false => pool,
@@ -469,6 +475,9 @@ impl Rig {
         let running = start_with_checks(config, shared, ticker, check_ticker)
             .await
             .unwrap();
+        // `request` to this server reaches it over TLS when its files say it is on TLS.
+        let addrs = [Some(running.addr()), running.agent_addr()];
+        trust_addrs(&scratch, &addrs.into_iter().flatten().collect::<Vec<_>>());
         Self {
             running,
             clock: manual,
@@ -525,6 +534,16 @@ impl Rig {
             .borrow_mut()
             .push(format!("{}\n{}", reply.head, reply.body));
         reply
+    }
+
+    /// `GET path` on the agent port over TLS, the port a launched host reaches: with the host
+    /// certificate of `host`, or with none. The certificate of the server is for 127.0.0.1,
+    /// which is the name the client checks.
+    pub async fn get_on_agent_port(&self, path: &str, host: Option<&str>) -> Reply {
+        let agent = self.running.agent_addr().unwrap();
+        let identity = host.map(|host| shared_ca().issue(&Spec::host(host)));
+        let client = client_at(agent, identity);
+        client.send("GET", path, None, None).await.unwrap()
     }
 
     /// `GET /v1/pools`, which must be 200.

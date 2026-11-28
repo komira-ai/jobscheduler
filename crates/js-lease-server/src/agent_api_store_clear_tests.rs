@@ -19,10 +19,8 @@ fn residue(run: &str) -> Value {
 #[tokio::test]
 async fn a_clear_commits_the_binding_without_the_taint_before_the_registry_forgets_it() {
     let rig = rig("clear_commit");
-    let welcome = rig.pooled("host-a", "burst").await.unwrap();
-    let reply = rig
-        .beat((&rig.pool, None), "host-a", &welcome, residue("r1"))
-        .await;
+    let welcome = rig.hello("host-a", "burst").await.unwrap();
+    let reply = rig.beat("host-a", &welcome, residue("r1")).await;
     assert!(reply.unwrap().taint_ack);
     assert_eq!(rig.binding("host-a")["taint_reason"], "residue");
     let host = HostId::new("host-a").unwrap();
@@ -64,12 +62,10 @@ async fn a_clear_commits_the_binding_without_the_taint_before_the_registry_forge
 #[tokio::test]
 async fn a_clear_is_refused_when_the_store_holds_another_taint() {
     let first = rig("clear_two_first");
-    first.pooled("host-a", "burst").await.unwrap();
+    first.hello("host-a", "burst").await.unwrap();
     let second = Rig::second(&first, "clear_two_second");
-    let welcome = second.pooled("host-a", "burst").await.unwrap();
-    let reply = second
-        .beat((&second.pool, None), "host-a", &welcome, residue("r1"))
-        .await;
+    let welcome = second.hello("host-a", "burst").await.unwrap();
+    let reply = second.beat("host-a", &welcome, residue("r1")).await;
     assert!(reply.unwrap().taint_ack);
 
     let newer = first.binding("host-a");
@@ -99,7 +95,7 @@ async fn a_clear_is_refused_when_the_store_holds_another_taint() {
 #[tokio::test]
 async fn a_clear_of_an_unknown_or_clean_host_writes_nothing() {
     let rig = rig("clear_none");
-    rig.pooled("host-a", "burst").await.unwrap();
+    rig.hello("host-a", "burst").await.unwrap();
     let before = rig.commits();
     let ghost = HostId::new("ghost").unwrap();
     let unknown = rig.agents.clear_taint(&ghost).await;
@@ -120,12 +116,10 @@ async fn a_clear_of_an_unknown_or_clean_host_writes_nothing() {
 #[tokio::test]
 async fn an_agent_clear_reaching_the_other_server_ends_the_stored_taint() {
     let first = rig("clear_other_first");
-    let at_first = first.pooled("host-a", "burst").await.unwrap();
+    let at_first = first.hello("host-a", "burst").await.unwrap();
     let second = Rig::second(&first, "clear_other_second");
-    let at_second = second.pooled("host-a", "burst").await.unwrap();
-    let reply = first
-        .beat((&first.pool, None), "host-a", &at_first, residue("r1"))
-        .await;
+    let at_second = second.hello("host-a", "burst").await.unwrap();
+    let reply = first.beat("host-a", &at_first, residue("r1")).await;
     assert!(reply.unwrap().taint_ack);
     assert_eq!(first.binding("host-a")["taint_run_id"], "r1");
     assert!(second.held("host-a").unwrap().taint().is_none());
@@ -140,7 +134,7 @@ async fn an_agent_clear_reaching_the_other_server_ends_the_stored_taint() {
     }
 
     let third = Rig::second(&first, "clear_other_third");
-    third.pooled("host-a", "burst").await.unwrap();
+    third.hello("host-a", "burst").await.unwrap();
     let host = HostId::new("host-a").unwrap();
     let views = third.agents.registry.hosts();
     let view = views.iter().find(|view| view.id == host).unwrap();
@@ -155,12 +149,10 @@ async fn an_agent_clear_reaching_the_other_server_ends_the_stored_taint() {
 #[tokio::test]
 async fn an_agent_clear_of_another_taint_leaves_the_stored_taint() {
     let first = rig("clear_another_first");
-    let at_first = first.pooled("host-a", "burst").await.unwrap();
+    let at_first = first.hello("host-a", "burst").await.unwrap();
     let second = Rig::second(&first, "clear_another_second");
-    let at_second = second.pooled("host-a", "burst").await.unwrap();
-    let reply = first
-        .beat((&first.pool, None), "host-a", &at_first, residue("r2"))
-        .await;
+    let at_second = second.hello("host-a", "burst").await.unwrap();
+    let reply = first.beat("host-a", &at_first, residue("r2")).await;
     assert!(reply.unwrap().taint_ack);
 
     let before = first.binding("host-a");
@@ -180,13 +172,11 @@ async fn an_agent_clear_of_another_taint_leaves_the_stored_taint() {
 #[tokio::test]
 async fn an_agent_clear_ends_the_stored_taint_a_refused_start_made() {
     let first = rig("clear_refused_first");
-    let at_first = first.pooled("host-a", "burst").await.unwrap();
+    let at_first = first.hello("host-a", "burst").await.unwrap();
     let second = Rig::second(&first, "clear_refused_second");
-    let at_second = second.pooled("host-a", "burst").await.unwrap();
+    let at_second = second.hello("host-a", "burst").await.unwrap();
     let refused = json!({ "reason": "host-tainted", "run_id": "r1" });
-    let reply = first
-        .beat((&first.pool, None), "host-a", &at_first, refused)
-        .await;
+    let reply = first.beat("host-a", &at_first, refused).await;
     assert!(reply.unwrap().taint_ack);
     assert_eq!(first.binding("host-a")["taint_reason"], "host-tainted");
 

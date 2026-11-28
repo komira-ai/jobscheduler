@@ -110,7 +110,6 @@ impl Rig {
             labels: Default::default(),
             phase: Phase::Serving,
             held: Vec::new(),
-            accepts_host_credential: false,
             identity: None,
         };
         let agents = Agents::over(registry.clone(), &shared_clock, &dir);

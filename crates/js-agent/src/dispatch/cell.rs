@@ -4,9 +4,7 @@ use std::fmt;
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use js_agent_wire::{HostCredential, Welcome};
-
-use crate::session::CredentialState;
+use js_agent_wire::Welcome;
 
 /// The session a poll belongs to, as its welcome gave it.
 #[derive(Clone)]
@@ -17,32 +15,26 @@ pub struct Route {
     pub epoch: u64,
     /// The session secret of the welcome. A poll carries it as a heartbeat does.
     pub session: String,
-    /// The host credential that authenticates the host, when the agent holds one: the one
-    /// found in the state root at start, or the latest a welcome carried that the session
-    /// adopted. `None` when the transport's own login authenticates the host.
-    pub credential: Option<HostCredential>,
 }
 
-/// Every field but the secrets, which print as `".."`.
+/// Every field but the secret, which prints as `".."`.
 impl fmt::Debug for Route {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Route")
             .field("host_id", &self.host_id)
             .field("epoch", &self.epoch)
             .field("session", &"..")
-            .field("credential", &self.credential.as_ref().map(|_| ".."))
             .finish()
     }
 }
 
 /// What both threads see.
+#[derive(Default)]
 struct State {
     /// Counts the welcomes: a route is told apart from the one before it by it.
     generation: u64,
     /// The route of the latest welcome, `None` when it did not say `dispatch_poll`.
     route: Option<Route>,
-    /// The host credential in use, kept across the welcomes that carry none.
-    credential: Option<HostCredential>,
     /// The agent is ending or draining: no poll is made any more.
     closed: bool,
     /// The poller's lines not yet taken, at most `LINES_CAP`.
@@ -57,27 +49,16 @@ const LINES_CAP: usize = 64;
 /// The meeting place of the heartbeat loop, which publishes a route at every welcome, and
 /// the poller, which waits for one. Every wait ends on an event (a welcome, the close); the
 /// pause of a backoff also ends by its own time.
+#[derive(Default)]
 pub struct Cell {
     state: Mutex<State>,
     changed: Condvar,
 }
 
 impl Cell {
-    /// A cell with no route. `credential` is the host credential the agent found in its
-    /// state root at start, which its transports authenticate with from the first call.
-    pub fn new(credential: Option<HostCredential>) -> Self {
-        let state = State {
-            generation: 0,
-            route: None,
-            credential,
-            closed: false,
-            lines: Vec::new(),
-            lost: 0,
-        };
-        Self {
-            state: Mutex::new(state),
-            changed: Condvar::new(),
-        }
+    /// A cell with no route.
+    pub fn new() -> Self {
+        Self::default()
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -85,22 +66,14 @@ impl Cell {
     }
 
     /// Records the welcome of host `host_id`'s session: the route to poll when it says
-    /// [`Welcome::dispatch_poll`], none otherwise (which stops the poller). The credential
-    /// the welcome carried counts when the session adopted it (`kept`: it was saved, or
-    /// could not be saved but serves this process).
-    pub fn publish(&self, host_id: &str, welcome: &Welcome, kept: CredentialState) {
+    /// [`Welcome::dispatch_poll`], none otherwise (which stops the poller).
+    pub fn publish(&self, host_id: &str, welcome: &Welcome) {
         let mut state = self.lock();
-        let adopted = match kept {
-            CredentialState::Saved | CredentialState::Unsaved => welcome.host_credential.clone(),
-            CredentialState::None | CredentialState::Refused => None,
-        };
-        state.credential = adopted.or_else(|| state.credential.take());
         state.generation = state.generation.saturating_add(1);
         state.route = welcome.dispatch_poll.then(|| Route {
             host_id: host_id.to_owned(),
             epoch: welcome.epoch,
             session: welcome.session.clone(),
-            credential: state.credential.clone(),
         });
         drop(state);
         self.changed.notify_all();

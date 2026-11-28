@@ -154,37 +154,6 @@ fn gpu_class_names_offered_gpus_only() {
     );
 }
 
-/// Asserts that `--instance-file` puts the instance the file names into the hello (a line
-/// `PROVIDER:INSTANCE_ID`, surrounding white space dropped), that a hello without the flag
-/// names none, and that a file that is missing or is not that form, or names what the
-/// wire refuses, ends the program before it says hello and names the flag. It catches an
-/// agent that cannot present the instance a one-time token is bound to, and one that
-/// sends a made-up instance.
-#[test]
-fn the_instance_file_names_the_instance_in_the_hello() {
-    let path = "/etc/js-agent/instance";
-    let host = |text: &str| {
-        let mut host = linux_host();
-        host.files = host.files.with(path, text);
-        host
-    };
-    let plain = hello_of(&["--host-id", "gpu-1"], &linux_host());
-    assert!(plain.get("instance").is_none(), "{plain}");
-    let flags = ["--host-id", "gpu-1", "--instance-file", path];
-    let hello = hello_of(&flags, &host("lambdalabs:0920582c\n"));
-    assert_eq!(
-        hello["instance"],
-        json!({ "provider": "lambdalabs", "instance_id": "0920582c" })
-    );
-    let said = refused(&flags, &linux_host());
-    assert!(said.contains("--instance-file: "), "{said}");
-    assert!(said.contains("No such file"), "{said}");
-    let said = refused(&flags, &host("no-colon-here\n"));
-    assert!(said.contains("must hold PROVIDER:INSTANCE_ID"), "{said}");
-    let said = refused(&flags, &host("Not A Provider:i-1\n"));
-    assert!(said.contains("instance.provider"), "{said}");
-}
-
 /// Asserts that `os` and `arch` cannot be set as capabilities, that an operator
 /// capability of another name is passed on, and that a label the wire refuses (the
 /// reserved prefix) ends the program before it says hello.
@@ -247,7 +216,9 @@ fn usage_errors_and_help() {
     };
     let help = go(&["--help"]);
     assert_eq!(help.status(), code(0));
-    assert!(help.out.contains("--token-file"), "{}", help.out);
+    assert!(help.out.contains("--host-cert"), "{}", help.out);
+    assert!(!help.out.contains("--token-file"), "{}", help.out);
+    assert!(!help.out.contains("--instance-file"), "{}", help.out);
     assert!(help.out.contains("--gpu-class"), "{}", help.out);
     assert!(help.err.is_empty());
     let version = go(&["--version"]);
@@ -279,18 +250,20 @@ fn usage_errors_and_help() {
 /// Asserts that plain http to a host off the loopback is refused naming `--server`, and
 /// an https `--ca-cert` file that is missing naming `--ca-cert`, before any fact is probed
 /// or anything is sent. (https without `--ca-cert` is no longer refused: it trusts the
-/// bundled public roots.) It catches a token that would cross a network in clear.
+/// bundled public roots.) It catches a host certificate that would be offered where no TLS
+/// handshake carries it.
 #[test]
 fn plain_http_off_loopback_refused() {
     let dir = Scratch::new("flags_http");
-    let token = dir.write("token", "join-token-0123456789-abcdefghijklmnop\n", 0o600);
     let host = linux_host();
     let go = |server: &str| {
         let args = [
             "--server",
             server,
-            "--token-file",
-            token.to_str().unwrap(),
+            "--host-cert",
+            "/nonexistent/host.crt",
+            "--host-key",
+            "/nonexistent/host.key",
             "--pool",
             "macs",
         ];
@@ -310,8 +283,10 @@ fn plain_http_off_loopback_refused() {
         &[
             "--server",
             "https://leases.example.com:7300",
-            "--token-file",
-            token.to_str().unwrap(),
+            "--host-cert",
+            "/nonexistent/host.crt",
+            "--host-key",
+            "/nonexistent/host.key",
             "--pool",
             "macs",
             "--ca-cert",
@@ -348,8 +323,10 @@ fn a_server_address_is_taken_beside_an_https_server_only() {
         "https://js.example.test:7301",
         "--server-address",
         "192.0.2.10",
-        "--token-file",
-        "/nonexistent/token",
+        "--host-cert",
+        "/nonexistent/host.crt",
+        "--host-key",
+        "/nonexistent/host.key",
         "--pool",
         "macs",
     ];
@@ -374,54 +351,21 @@ fn a_server_address_is_taken_beside_an_https_server_only() {
     assert!(named.contains("--server-address <IP>"), "{named}");
 }
 
-/// Asserts that a join token file other users can read (mode 0644) is refused with status
-/// 2 and an error that names `--token-file` and the file, never the token, and that a
-/// missing file is refused the same way. It catches an agent that sends a token it could
-/// not keep private.
-#[test]
-fn token_file_0644_refused_naming_the_flag() {
-    let dir = Scratch::new("flags_token_mode");
-    let secret = "join-token-0123456789-abcdefghijklmnop";
-    let open = dir.write("token", secret, 0o644);
-    let go = |path: &std::path::Path| {
-        let args = [
-            "--server",
-            "http://127.0.0.1:1",
-            "--token-file",
-            path.to_str().unwrap(),
-            "--pool",
-            "macs",
-        ];
-        let mut sleeper = CountingSleeper::stopping_at(1);
-        run(&args, &linux_host(), &Dialer, &mut sleeper, &mut Highest)
-    };
-    let ran = go(&open);
-    assert_eq!(ran.status(), code(2));
-    assert!(
-        ran.err.starts_with("js-agent: --token-file: "),
-        "{}",
-        ran.err
-    );
-    assert!(ran.err.contains("mode 0644"), "{}", ran.err);
-    assert!(ran.err.contains(open.to_str().unwrap()), "{}", ran.err);
-    assert!(!ran.err.contains(secret) && !ran.out.contains(secret));
-    let missing = go(&dir.path("absent"));
-    assert_eq!(missing.status(), code(2));
-    assert!(missing.err.contains("--token-file: "), "{}", missing.err);
-}
-
 /// Asserts that a server that cannot be talked to is not a refusal: the real transport reports it
 /// as a failed hello naming the address, the agent waits and tries again, and a stop
-/// request ends the program with status 0. The token is not in the message.
+/// request ends the program with status 0. The host key is not in the message.
 #[test]
 fn an_unreachable_server_is_retried_not_fatal() {
     let dir = Scratch::new("flags_unreachable");
-    let secret = "join-token-0123456789-abcdefghijklmnop";
-    let token = dir.write("token", secret, 0o600);
+    let identity = crate::host_certs::self_signed(&dir, "mac-1");
+    let (cert, key) = (
+        identity.cert_path().display().to_string(),
+        identity.key_path().display().to_string(),
+    );
     // The listener stays bound and hangs up on every connection: a port that was bound
     // and then freed can be taken by another process before the agent dials it.
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
+    let url = format!("https://{}", listener.local_addr().unwrap());
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             drop(stream);
@@ -430,8 +374,10 @@ fn an_unreachable_server_is_retried_not_fatal() {
     let args = [
         "--server",
         url.as_str(),
-        "--token-file",
-        token.to_str().unwrap(),
+        "--host-cert",
+        &cert,
+        "--host-key",
+        &key,
         "--pool",
         "macs",
         "--host-id",
@@ -444,7 +390,8 @@ fn an_unreachable_server_is_retried_not_fatal() {
     assert_eq!(waits.borrow().len(), 2);
     let said = format!("hello failed: cannot talk to {url}: ");
     assert_eq!(ran.err.matches(&said).count(), 2, "{}", ran.err);
-    assert!(!ran.err.contains(secret));
+    let pem = std::fs::read_to_string(&key).unwrap();
+    assert!(!ran.err.contains(pem.lines().nth(1).unwrap()));
 }
 
 /// Asserts the readiness-hook flags: with none the agent starts as before; a hook that is

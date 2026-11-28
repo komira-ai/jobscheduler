@@ -6,8 +6,7 @@
 //! ([`NetworkMode::describe`]), the provider's host preparation, the agent and the
 //! scheduler's address, rendered by [`crate::bootstrap::render`]. It is rendered with
 //! [`Fill::Mask`], so a secret slot prints as `***` and the status routes never hold a
-//! secret: nothing here calls [`NetworkMode::prepare`], and no join token exists to
-//! render.
+//! secret: nothing here calls [`NetworkMode::prepare`].
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -21,7 +20,7 @@ use js_elastic::{
 use js_types::{ExecMode, MemoryHeadroom, ProviderId, normalise_arch};
 use serde::Serialize;
 
-use crate::bootstrap::{Fill, JOIN_TOKEN_SLOT, render};
+use crate::bootstrap::{Fill, render};
 use crate::checks::{AgentPins, Checker, Health};
 use crate::clock::SharedClock;
 use crate::config::TlsFiles;
@@ -260,15 +259,16 @@ fn preview_host() -> HostName {
     HostName::derive(&scheduler, &acquire)
 }
 
-/// The slots a plan names: the join token, and each secret file a step writes.
+/// The slots a plan names: each secret file a step writes.
 fn secret_slots(plan: &BootPlan) -> Vec<String> {
-    let mut slots = vec![JOIN_TOKEN_SLOT.to_owned()];
-    for step in plan.host_prep.iter().chain(&plan.network) {
-        if let BootStep::SecretFile { slot, .. } = step {
-            slots.push(slot.0.clone());
-        }
-    }
-    slots
+    plan.host_prep
+        .iter()
+        .chain(&plan.network)
+        .filter_map(|step| match step {
+            BootStep::SecretFile { slot, .. } => Some(slot.0.clone()),
+            BootStep::Run(_) | BootStep::Fetch { .. } => None,
+        })
+        .collect()
 }
 
 /// What a launch would be for.

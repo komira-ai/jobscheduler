@@ -29,12 +29,12 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="20" y="28" class="b" text-anchor="start" font-size="16">Agent lifecycle: how a host joins, serves, drains and is lost</text>
 <text x="20" y="100" class="b" text-anchor="start">Enrolment</text>
 <rect x="20" y="110" width="220" height="70" rx="5" class="box-b"/>
-<text x="130.0" y="133.0" class="t-m" text-anchor="middle">install package, mint join</text>
-<text x="130.0" y="149.0" class="t-m" text-anchor="middle">token, place token file</text>
+<text x="130.0" y="133.0" class="t-m" text-anchor="middle">install package, place host</text>
+<text x="130.0" y="149.0" class="t-m" text-anchor="middle">certificate and key</text>
 <text x="130.0" y="165.0" class="t-m" text-anchor="middle">(manual today)</text>
 <rect x="20" y="200" width="220" height="56" rx="5" class="box-b"/>
-<text x="130.0" y="224.0" class="t-m" text-anchor="middle">elastic: scaler mints</text>
-<text x="130.0" y="240.0" class="t-m" text-anchor="middle">token, boot payload</text>
+<text x="130.0" y="224.0" class="t-m" text-anchor="middle">elastic: boot payload</text>
+<text x="130.0" y="240.0" class="t-m" text-anchor="middle">(certificate: G9)</text>
 <path d="M240,145 L290,225" class="ln" marker-end="url(#agent-lifecycle-ak)"/>
 <path d="M240,228 L290,240" class="ln" marker-end="url(#agent-lifecycle-ak)"/>
 <rect x="290" y="213" width="160" height="70" rx="5" class="box-o"/>
@@ -45,9 +45,8 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="855.0" y="257.5" class="t-r" text-anchor="middle">tainted: takes no start;</text>
 <text x="855.0" y="272.5" class="t-r" text-anchor="middle">permanent</text>
 <path d="M450,232 L760,232" class="ln" marker-end="url(#agent-lifecycle-ak)"/>
-<text x="605" y="196" class="t-m lbl" text-anchor="middle">hello (join token or host credential)</text>
+<text x="605" y="196" class="t-m lbl" text-anchor="middle">hello (host certificate)</text>
 <text x="605" y="210" class="t-m lbl" text-anchor="middle">Welcome: epoch, secret, interval, grace;</text>
-<text x="605" y="224" class="t-m lbl" text-anchor="middle">host credential written first</text>
 <path d="M760,264 L450,264" class="ln" marker-end="url(#agent-lifecycle-ak)"/>
 <text x="605" y="282" class="t-m lbl" text-anchor="middle">409 stale-epoch, unknown-host, host-lost,</text>
 <text x="605" y="296" class="t-m lbl" text-anchor="middle">or 403 session-mismatch: hello again at once</text>

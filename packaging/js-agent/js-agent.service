@@ -8,11 +8,14 @@
 #   1. systemd-tmpfiles --create /usr/share/js-agent/tmpfiles.conf
 #        makes the directories below with this unit's modes (dpkg does not run
 #        systemd-tmpfiles; the unit's ExecStartPre runs this file at every start)
-#   2. write the pool's join token to /etc/js-agent/token, mode 0600
+#   2. put the host's certificate and key where hostkeeper keeps them (a host is identified by
+#        its certificate alone)
 #   3. mount a disk of its own at /var/lib/js-agent/scratch (an /etc/fstab line, then
 #        `systemctl daemon-reload`, then `mount`)
 #   4. systemctl edit js-agent: clear ExecStart= and set the whole line again with this
-#        host's --server and --pool (the shipped --server is a placeholder the agent refuses)
+#        host's --server, --pool, --host-cert and --host-key (the shipped --server is a
+#        placeholder the agent refuses, and the unit names no certificate path: the agent
+#        refuses to start without --host-cert and --host-key, naming both flags)
 #   5. systemctl enable --now js-agent
 #        With the mount of step 3 missing this exits 0 and starts nothing, silently:
 #        `systemctl status js-agent` shows the unmet ConditionPathIsMountPoint.
@@ -30,16 +33,8 @@
 # file), so the host's values are the flags of ExecStart below.
 #
 # Files the agent uses, all owned by root and closed to group and others:
-#   /etc/js-agent/token             the pool's join token (mode 0600); the agent refuses a token
-#                                   file that is not a regular file of its own user with mode
-#                                   0600 or 0400. (The elastic boot payload of the lease server
-#                                   keeps its token in /etc/jobscheduler/token, beside an
-#                                   instance file: that host gets a one-time token for its
-#                                   instance, while a host of this package joins with the
-#                                   pool's token.)
-#   /var/lib/js-agent/state         the state root (mode 0700): the taint marker and, once the
-#                                   server has admitted the host, `host-credential` (mode 0600,
-#                                   written by the agent), which replaces the token
+#   /var/lib/js-agent/state         the state root (mode 0700): the taint marker and the hold
+#                                   files
 #   /var/lib/js-agent/scratch       the scratch root (mode 0700): a private directory per run
 # The agent refuses a state root on the same disk as the scratch root, which is why step 3
 # exists. ConditionPathIsMountPoint keeps a host without that mount from starting the agent: the
@@ -51,15 +46,13 @@
 # which declares /var/lib/js-agent and the scratch root 0711, and ExecStartPre sets them to
 # 0700 again before this unit's agent starts.
 #
-# The host credential and the token: the agent reads the token file at every start, also after
-# the server has retired the token and the agent holds a host credential. Keep
-# /etc/js-agent/token, or clear --token-file in the drop-in once
-# /var/lib/js-agent/state/host-credential exists. The credential cannot be recovered from the
-# retired token: a host that lost it needs a new token.
+# The host's identity: its certificate and key, which --host-cert and --host-key name and
+# which hostkeeper keeps and renews in place. The agent reads both files again before each
+# request. A unit written for an earlier release may still pass --token-file or
+# --instance-file: the agent accepts them, warns once for each and never reads the files.
 #
 # Removing the package (`remove` or `purge`) deletes the binary, this unit and the tmpfiles
-# file and nothing else: /etc/js-agent and /var/lib/js-agent stay, with the token and the
-# credential. To wipe a host, run `systemctl disable --now js-agent`, remove the package,
+# file and nothing else: /etc/js-agent and /var/lib/js-agent stay. To wipe a host, run `systemctl disable --now js-agent`, remove the package,
 # unmount the scratch disk, then delete /etc/js-agent and /var/lib/js-agent.
 #
 # User=root, and no sandboxing: the agent must read /proc/1/ns, share init's pid and mount
@@ -74,7 +67,7 @@
 # next process adopts them (or stops them), so the supervisor must start the agent after every
 # exit, 0 and 2 included. A refusal restarts every RestartSec seconds and is read from the
 # journal; the restart does not hide it. RestartSec is 30 so that a permanent refusal (a
-# retired token, an unknown pool) sends the server two hellos a minute, not twelve.
+# refused certificate, an unknown pool) sends the server two hellos a minute, not twelve.
 # RestartSteps= would back off further but needs systemd 254, and Debian 12 has 252.
 [Unit]
 Description=jobscheduler agent
@@ -99,7 +92,7 @@ ExecStartPre=+systemd-tmpfiles --create /usr/share/js-agent/tmpfiles.conf
 # containers detached under the engine's own cgroup, so KillMode=process would save none of
 # them and would orphan the agent's readiness and GPU hook processes.
 TimeoutStopSec=120
-ExecStart=/usr/bin/js-agent --server SET-THE-SERVER-WITH-SYSTEMCTL-EDIT --token-file /etc/js-agent/token --pool default --allow-container-engine --container-bin /usr/bin/docker --state-root /var/lib/js-agent/state --scratch-root /var/lib/js-agent/scratch
+ExecStart=/usr/bin/js-agent --server SET-THE-SERVER-WITH-SYSTEMCTL-EDIT --pool default --allow-container-engine --container-bin /usr/bin/docker --state-root /var/lib/js-agent/state --scratch-root /var/lib/js-agent/scratch
 Restart=always
 RestartSec=30
 

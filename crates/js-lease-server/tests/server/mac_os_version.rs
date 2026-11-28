@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
 
-use crate::agents_support::{JOIN, post};
+use crate::agents_support::post;
 use crate::jobs_support::{JobBody, job_agent, job_args, job_of, submit_body};
 use crate::support::{Harness, Scratch};
 
@@ -190,7 +190,7 @@ async fn the_floor_refuses_a_mac_below_26_or_reporting_no_version() {
     scratch.write("agent-pool.toml", MAC_POOL, 0o644);
     let h = Harness::with(scratch, args).await;
     for (host, version) in [("mac-25", Some("25")), ("mac-unknown", None)] {
-        let reply = post(&h, "/v1/agent/hello", Some(JOIN), &mac_hello(host, version)).await;
+        let reply = post(&h, "/v1/agent/hello", None, &mac_hello(host, version)).await;
         assert_eq!(reply.status, 403, "{host}: {}", reply.body);
         assert_eq!(
             reply.json(),

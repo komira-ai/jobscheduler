@@ -10,17 +10,18 @@ const HOST_CERTIFICATE_LABEL: &[u8] = b"\0js-registry/host-certificate/v1\0";
 /// What a host presented to be admitted, reduced to its SHA-256 digest.
 ///
 /// The registry binds a host id to the first credential it was admitted with and compares
-/// later hellos against that binding, so it keeps the digest and never the token. The
-/// transport computes it from the join token it authenticated the request with.
+/// later hellos against that binding, so it keeps the digest and never the secret. The
+/// transport computes it from the host certificate it verified the request with
+/// ([`Credential::of_host_certificate`]).
 ///
-/// Equality is on the digest, which is what the registry compares. The constant-time
-/// comparison of the token itself, when the transport checks a request against the
-/// pool's accepted tokens, belongs to the transport and is not done here.
+/// Equality is on the digest, which is what the registry compares.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Credential([u8; 32]);
 
 impl Credential {
-    /// The credential of a join token.
+    /// The credential of any secret text. A row bound before host certificates held the
+    /// credential of the pool token the host said hello with; the registry still compares
+    /// such rows, and tests use it as an arbitrary credential.
     pub fn of_token(token: &str) -> Self {
         Self(sha2::Sha256::digest(token.as_bytes()).into())
     }
@@ -79,9 +80,9 @@ impl fmt::Debug for Credential {
 ///
 /// A later hello for the id must match the credential, and must match the instance when
 /// the binding has one; any mismatch is a refusal as host-bound. A binding without an
-/// instance holds at the level of the pool credential only: a holder of the pool's token
-/// can say hello for such an id once the host is lost. Per-host tokens or client
-/// certificates close that later (design D18).
+/// instance holds at the level of the credential only: one who holds that credential can say
+/// hello for such an id once the host is lost. A host certificate's credential is the
+/// host's alone ([`Credential::of_host_certificate`]).
 ///
 /// A binding also carries the taint the host reported, when it has, and the time its
 /// cordon lapses, when it is cordoned, so that what a caller persists for a host id holds

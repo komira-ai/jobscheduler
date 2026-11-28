@@ -437,8 +437,7 @@ async fn hello_through_the_route(
         "phase": "serving",
     });
     let body = axum::body::Bytes::from(serde_json::to_vec(&hello).unwrap());
-    let welcome =
-        crate::agent_api::serve_hello(&rig.agents, rig.who.clone(), None, Ok(body), &|| ());
+    let welcome = crate::agent_api::serve_hello(&rig.agents, host, Ok(body), &|| ());
     let axum::Json(welcome) = welcome.await.unwrap();
     rig.sessions
         .insert(host.to_owned(), (welcome.epoch, welcome.session));

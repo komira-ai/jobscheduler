@@ -842,10 +842,8 @@ impl Running {
         self.shared.server_store().map(ServerStore::store)
     }
 
-    /// How many times the agent side could not read or write one of its files since the
-    /// server started: the join token file that could not be read again at a tick, the
-    /// file of bindings (or, with a store setting, the store) that could not be written, and
-    /// the credential times a tick could not commit to the store.
+    /// How many times the agent side could not write its file of bindings (or, with a store
+    /// setting, the store) since the server started.
     pub fn agent_errors(&self) -> u64 {
         self.shared.agent_errors()
     }

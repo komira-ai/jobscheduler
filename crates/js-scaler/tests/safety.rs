@@ -6,24 +6,19 @@ mod common;
 use common::*;
 use js_scaler::{HostFacts, HostState, Mark, Phase};
 
-/// Asserts that a booting machine is not revoked and released at `boot_timeout` when the
+/// Asserts that a booting machine is not released at `boot_timeout` when the
 /// registry's view is incomplete: its host may have said hello and be holding work.
 #[test]
 fn a_booting_machine_is_held_by_the_boot_timeout_on_an_incomplete_view() {
     let (mut rig, _plan, _) = booting(settings("gpu"), "i-1");
     rig.input.registry_complete = false;
     let actions = rig.tick(at(15 * MINUTE));
-    assert_eq!(
-        count(&actions, "Release") + count(&actions, "Revoke"),
-        0,
-        "{:?}",
-        kinds(&actions)
-    );
+    assert_eq!(count(&actions, "Release"), 0, "{:?}", kinds(&actions));
     assert_eq!(rig.phase(0), Phase::Booting);
 }
 
 /// Asserts that the boot timeout does give up on a machine that has said nothing once the
-/// registry's view is complete again, at the next step: it is revoked and released, and the
+/// registry's view is complete again, at the next step: it is released, and the
 /// pool cools off.
 #[test]
 fn a_booting_machine_is_given_up_once_the_view_is_complete() {
@@ -32,7 +27,6 @@ fn a_booting_machine_is_given_up_once_the_view_is_complete() {
     rig.tick(at(15 * MINUTE));
     rig.input.registry_complete = true;
     let actions = rig.tick(at(15 * MINUTE + SECOND));
-    assert_eq!(count(&actions, "Revoke"), 1);
     assert_eq!(count(&actions, "Release"), 1);
     assert_eq!(rig.phase(0), Phase::Releasing);
     assert_eq!(rig.state.records.cooldowns.len(), 1);
@@ -77,7 +71,7 @@ fn a_silent_host_marked_held_is_not_released() {
     assert_left_alone(silent_given_up(|host| host.mark = Some(Mark::Held)));
 }
 
-/// Asserts that a silent host that shows work is not revoked or released although the
+/// Asserts that a silent host that shows work is not released although the
 /// registry marks it for release.
 #[test]
 fn a_silent_host_that_shows_work_is_not_released_although_marked_releasing() {
@@ -114,7 +108,6 @@ fn a_silent_host_marked_releasing_is_released() {
         0
     );
     let actions = rig.tick(at(3 * SECOND + 30 * MINUTE));
-    assert_eq!(count(&actions, "Revoke"), 1);
     assert_eq!(count(&actions, "Release"), 1);
     assert_eq!(rig.phase(0), Phase::Releasing);
 }

@@ -1,14 +1,12 @@
-//! The host certificate and key a first install may find named in the host's flags file in
-//! place of a join token, looked at through the hook's token port.
-
-use std::fs;
+//! The host certificate and key a first install finds named in the host's flags file, looked at
+//! through the hook's file port.
 
 use js_agent::update_hook::step::TokenFacts;
 use js_agent::update_hook::{Class, Outcome, Reason};
 use js_client::HostIdentity;
 
 use super::step_rig::{
-    HOST_CERT_PATH, HOST_KEY_PATH, RETRY_AFTER_SECS, Rig, Spy, TokenFile, euid, good_token,
+    HOST_CERT_PATH, HOST_KEY_PATH, RETRY_AFTER_SECS, Rig, Spy, TokenFile, euid, good_file,
 };
 
 /// A spy over `rig` whose flags file names the host certificate and key.
@@ -33,7 +31,7 @@ fn key(mode: u32, uid: u32) -> TokenFile {
     TokenFile::Facts(TokenFacts {
         mode,
         uid,
-        ..good_token()
+        ..good_file()
     })
 }
 
@@ -42,13 +40,13 @@ fn cert() -> TokenFile {
     TokenFile::Facts(TokenFacts {
         mode: 0o644,
         uid: 0,
-        ..good_token()
+        ..good_file()
     })
 }
 
 /// Asserts that a first install whose flags file names the host files, which show `cert` and
-/// `key` and whose token file is good, defers with exactly `problem` after the flags file's
-/// name, with the retry the params ask for, and changes nothing.
+/// `key`, defers with exactly `problem` after the flags file's name, with the retry the params
+/// ask for, and changes nothing.
 #[track_caller]
 fn deferred_for_the_host_files(name: &str, cert: TokenFile, key: TokenFile, problem: &str) {
     let rig = Rig::first_install(name);
@@ -77,10 +75,10 @@ fn deferred_for_the_host_files(name: &str, cert: TokenFile, key: TokenFile, prob
 }
 
 /// Asserts that a first install whose flags file names the host files, the key one the agent
-/// may use (mode 0600, 0400, 0640 or 0440, owned by root or by the hook's user), goes on with
-/// no token file at all: no `join_token_missing`, and the record is written.
+/// may use (mode 0600, 0400, 0640 or 0440, owned by root or by the hook's user), goes on: no
+/// `join_token_missing`, and the record is written.
 #[test]
-fn a_first_install_with_the_host_files_in_the_flags_file_and_no_token_file_goes_on() {
+fn a_first_install_with_the_host_files_in_the_flags_file_goes_on() {
     for (mode, uid) in [
         (0o600, euid()),
         (0o400, euid()),
@@ -90,7 +88,6 @@ fn a_first_install_with_the_host_files_in_the_flags_file_and_no_token_file_goes_
     ] {
         let rig = Rig::first_install(&format!("hook-host-files-good-{mode:o}-{uid}"));
         let spy = naming_the_host_files(&rig);
-        spy.token.set(TokenFile::Missing);
         spy.identity_cert.set(cert());
         spy.identity_key.set(key(mode, uid));
         let done = spy.prepare(&rig);
@@ -99,25 +96,8 @@ fn a_first_install_with_the_host_files_in_the_flags_file_and_no_token_file_goes_
     }
 }
 
-/// Asserts that with host files named the token file is not looked at: a token file that is
-/// wrong in every way does not defer an install whose host files are good.
-#[test]
-fn a_first_install_with_the_host_files_does_not_look_at_the_token_file() {
-    let rig = Rig::first_install("hook-host-files-ignore-token");
-    let spy = naming_the_host_files(&rig);
-    spy.token.set(TokenFile::Facts(TokenFacts {
-        mode: 0o666,
-        uid: euid() + 1,
-        regular: false,
-    }));
-    spy.identity_cert.set(cert());
-    spy.identity_key.set(good_key());
-    assert_eq!(spy.prepare(&rig).outcome, Outcome::Success);
-}
-
 /// Asserts that a key the others can reach or its group can write (0644, 0660, 0604, 0666)
-/// defers naming the key file and its mode, even when the token file is good: the agent would
-/// refuse to start on it, so the token file does not stand in for it.
+/// defers naming the key file and its mode: the agent would refuse to start on it.
 #[test]
 fn a_first_install_with_a_key_that_others_can_read_or_its_group_can_write_defers() {
     for mode in [0o644, 0o604, 0o666] {
@@ -159,7 +139,7 @@ fn a_first_install_with_a_key_of_another_owner_or_not_a_regular_file_defers() {
         cert(),
         TokenFile::Facts(TokenFacts {
             regular: false,
-            ..good_token()
+            ..good_file()
         }),
         &format!("{HOST_KEY_PATH} is not a regular file"),
     );
@@ -198,7 +178,7 @@ fn a_first_install_with_a_host_file_that_is_missing_or_cannot_be_read_defers() {
         "hook-host-files-cert-not-regular",
         TokenFile::Facts(TokenFacts {
             regular: false,
-            ..good_token()
+            ..good_file()
         }),
         good_key(),
         &format!("{HOST_CERT_PATH} is not a regular file"),
@@ -211,50 +191,11 @@ fn a_first_install_with_a_host_file_that_is_missing_or_cannot_be_read_defers() {
     );
 }
 
-/// Asserts that a host credential in the state root does not stand in for host files that are
-/// named and wrong: the agent presents the certificate first and would stop on a bad key.
-#[test]
-fn host_files_that_are_wrong_defer_even_beside_a_host_credential() {
-    let rig = Rig::first_install("hook-host-files-credential");
-    let spy = naming_the_host_files(&rig);
-    drop(rig.state_root());
-    let root = rig.tmp.path().join("world/state");
-    fs::write(root.join("host-credential"), "cred-0123456789abcdefghij").unwrap();
-    spy.identity_cert.set(cert());
-    spy.identity_key.set(key(0o644, 0));
-    assert_eq!(spy.prepare(&rig).outcome, Outcome::Deferred);
-    spy.identity_key.set(good_key());
-    assert_eq!(spy.prepare(&rig).outcome, Outcome::Success);
-}
-
-/// Asserts that a flags file that names no host files leaves the first-install check as it
-/// was: the join token file is looked at and its problem is told as before, and the host files
-/// the fakes would show are not looked at.
-#[test]
-fn a_first_install_whose_flags_file_names_no_host_files_still_needs_the_token() {
-    let rig = Rig::first_install("hook-host-files-none-named");
-    let spy = Spy::new(&rig);
-    spy.token.set(TokenFile::Missing);
-    spy.identity_cert.set(cert());
-    spy.identity_key.set(good_key());
-    let done = spy.prepare(&rig);
-    assert_eq!(done.outcome, Outcome::Deferred, "{done:?}");
-    assert_eq!(
-        done.report.detail,
-        Some(format!(
-            "the join token file {} is not there; place it, root-owned and mode 0600, to install the agent",
-            rig.params.token_file.display()
-        ))
-    );
-}
-
-/// Asserts that an update never looks at the host files or the token file: its host has an
-/// agent that runs.
+/// Asserts that an update never looks at the host files: its host has an agent that runs.
 #[test]
 fn an_update_does_not_look_at_the_host_files() {
     let rig = Rig::new("hook-host-files-update");
     let spy = naming_the_host_files(&rig);
-    spy.token.set(TokenFile::Missing);
     spy.identity_cert.set(TokenFile::Missing);
     spy.identity_key.set(TokenFile::Missing);
     assert_eq!(spy.prepare(&rig).outcome, Outcome::Success);

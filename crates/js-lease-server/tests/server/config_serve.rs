@@ -6,18 +6,16 @@ use std::net::SocketAddr;
 
 use serde_json::{Value, json};
 
-use crate::agents_support::{JOIN, Session, hello_body, session};
+use crate::agents_support::{Session, hello_body, session};
 use crate::config_support::{PoolText, file, load, quote, quoted, server, server_with_agents};
-use crate::support::{Harness, Reply, Scratch, TOKEN, request};
+use crate::support::{Harness, Reply, Scratch, TOKEN, host_client_at, request};
 
 /// An elastic pool `burst` of the stand-in cloud kind (one GPU of class `nvidia-a10` at
-/// least) that admits agents with [`JOIN`], with `exec` as given (the default when `None`).
+/// least) that admits agents by certificate, with `exec` as given (the default when `None`).
 fn pool(scratch: &Scratch, exec: Option<&str>) -> PoolText {
-    let joins = scratch.write("joins", &format!("{JOIN}\n"), 0o600);
     let pool = PoolText::elastic(scratch)
         .set("name", &quote("burst"))
-        .set("class", &quote("gpu-host"))
-        .set("join_token_file", &quoted(&joins));
+        .set("class", &quote("gpu-host"));
     match exec {
         Some(exec) => pool.set("exec", &quote(exec)),
         None => pool,
@@ -43,12 +41,31 @@ fn hello(host: &str, class: &str, caps: &[(&str, &str)]) -> Value {
     body
 }
 
-/// One request to `addr`.
-async fn call(addr: SocketAddr, method: &str, path: &str, token: &str, body: &Value) -> Reply {
+/// One request to `addr` with `token` as its bearer, when given. A call to an agent route
+/// presents the certificate of the host its body names.
+async fn call(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    token: Option<&str>,
+    body: &Value,
+) -> Reply {
     let bytes = body.to_string().into_bytes();
     let sent = (method != "GET").then_some(bytes.as_slice());
-    request(addr, method, path, Some(token), sent).await
+    request(addr, method, path, token, sent).await
 }
+
+/// One request to `addr` presenting the host certificate of `h1`, whatever the path.
+async fn as_host(addr: SocketAddr, method: &str, path: &str, body: &Value) -> Reply {
+    let sent = (method != "GET").then_some(body);
+    let reply = host_client_at(addr, "h1")
+        .send(method, path, None, sent)
+        .await;
+    reply.unwrap_or_else(|error| panic!("{method} {path}: {error}"))
+}
+
+/// The body of a refusal for want of a host certificate.
+const REQUIRED: &str = r#"{"error":"host-certificate-required"}"#;
 
 /// Asserts the route split against a real server with both ports bound: `hello` and
 /// heartbeat answer on `agent_listen` and are 404 on `listen`; the host and
@@ -65,36 +82,30 @@ async fn agent_routes_answer_on_the_agent_port_only() {
         agent,
         "POST",
         "/v1/agent/hello",
-        JOIN,
+        None,
         &hello("h1", "nvidia-a10", &[]),
     )
     .await;
     let held: Session = session(&welcome, "h1");
-    let beat = call(agent, "POST", "/v1/agent/heartbeat", JOIN, &held.beat()).await;
+    let beat = call(agent, "POST", "/v1/agent/heartbeat", None, &held.beat()).await;
     assert_eq!(beat.status, 200, "{}", beat.body);
     h.ticks.step().await;
 
     let none = json!({});
     for path in ["/v1/agent/hello", "/v1/agent/heartbeat"] {
-        let reply = call(listen, "POST", path, TOKEN, &none).await;
+        let reply = call(listen, "POST", path, Some(TOKEN), &none).await;
         assert_eq!(reply.status, 404, "{path}: {}", reply.body);
-        let reply = call(listen, "POST", path, JOIN, &none).await;
+        let reply = call(listen, "POST", path, None, &none).await;
         assert_eq!(reply.status, 401, "{path}: {}", reply.body);
     }
-    let hosts = call(listen, "GET", "/v1/hosts", TOKEN, &none).await;
+    let hosts = call(listen, "GET", "/v1/hosts", Some(TOKEN), &none).await;
     assert_eq!(hosts.status, 200, "{}", hosts.body);
     assert_eq!(hosts.json()["hosts"][0]["id"], "h1");
     let health = request(listen, "GET", "/healthz", None, None).await;
     assert_eq!(health.status, 200);
-    let minted = call(listen, "POST", "/v1/agent/join-tokens", TOKEN, &none).await;
-    assert_ne!(minted.status, 404, "{}", minted.body);
 
-    for (method, path) in [
-        ("GET", "/v1/hosts"),
-        ("GET", "/healthz"),
-        ("POST", "/v1/agent/join-tokens"),
-    ] {
-        let reply = call(agent, method, path, JOIN, &none).await;
+    for (method, path) in [("GET", "/v1/hosts"), ("GET", "/healthz")] {
+        let reply = as_host(agent, method, path, &none).await;
         assert_eq!(reply.status, 404, "{path}: {}", reply.body);
     }
 }
@@ -112,11 +123,11 @@ const REMOVED_ROUTES: [(&str, &str); 8] = [
 ];
 
 /// Asserts that the lease and run routes of earlier releases are not routes: with the
-/// client token on `listen` and with the join token on `agent_listen`, each answers 404
+/// client token on `listen` and with a host certificate on `agent_listen`, each answers 404
 /// with exactly the status and body that an unknown path gets from the same listener and
-/// token; with no token on `listen` each stays the 401 with an empty body that every path
-/// gets, and on `agent_listen` each gets the 401 with an empty body that an unknown path
-/// gets with no token there. Catches
+/// caller; with no token on `listen` each stays the 401 with an empty body that every path
+/// gets, and on `agent_listen` each gets the 401 `host-certificate-required` that an unknown
+/// path gets with no certificate there. Catches
 /// a lease or run route that is served again, or one that answers differently from a path
 /// the router does not have.
 #[tokio::test]
@@ -124,10 +135,10 @@ async fn the_lease_routes_answer_404() {
     let h = serving("serve_no_lease_routes", Some("none")).await;
     let (listen, agent) = (h.addr(), h.running.agent_addr().unwrap());
     let none = json!({});
-    let unknown = call(listen, "GET", "/v1/nothing", TOKEN, &none).await;
+    let unknown = call(listen, "GET", "/v1/nothing", Some(TOKEN), &none).await;
     assert_eq!(unknown.status, 404);
     assert_eq!(unknown.json(), json!({ "error": "not-found" }));
-    let unknown_on_agent = call(agent, "GET", "/v1/nothing", JOIN, &none).await;
+    let unknown_on_agent = as_host(agent, "GET", "/v1/nothing", &none).await;
     assert_eq!(unknown_on_agent.status, 404);
     let unsigned = request(listen, "GET", "/v1/nothing", None, None).await;
     assert_eq!(
@@ -138,18 +149,18 @@ async fn the_lease_routes_answer_404() {
     let unsigned_on_agent = request(agent, "GET", "/v1/nothing", None, None).await;
     assert_eq!(
         (unsigned_on_agent.status, unsigned_on_agent.body.as_str()),
-        (401, ""),
-        "an unknown path with no token on the agent listener"
+        (401, REQUIRED),
+        "an unknown path with no certificate on the agent listener"
     );
 
     for (method, path) in REMOVED_ROUTES {
-        let reply = call(listen, method, path, TOKEN, &none).await;
+        let reply = call(listen, method, path, Some(TOKEN), &none).await;
         assert_eq!(
             (reply.status, &reply.body),
             (404, &unknown.body),
             "{method} {path} on the client listener"
         );
-        let reply = call(agent, method, path, JOIN, &none).await;
+        let reply = as_host(agent, method, path, &none).await;
         assert_eq!(
             (reply.status, &reply.body),
             (404, &unknown_on_agent.body),
@@ -164,8 +175,8 @@ async fn the_lease_routes_answer_404() {
         let reply = request(agent, method, path, None, None).await;
         assert_eq!(
             (reply.status, reply.body.as_str()),
-            (401, ""),
-            "{method} {path} with no token on the agent listener"
+            (401, REQUIRED),
+            "{method} {path} with no certificate on the agent listener"
         );
     }
 }
@@ -180,7 +191,7 @@ async fn a_pool_requires_the_container_contract_by_default() {
     let h = serving("serve_default_exec", None).await;
     let agent = h.running.agent_addr().unwrap();
     let old = hello("old", "nvidia-a10", &[]);
-    let reply = call(agent, "POST", "/v1/agent/hello", JOIN, &old).await;
+    let reply = call(agent, "POST", "/v1/agent/hello", None, &old).await;
     assert_eq!(reply.status, 403, "{}", reply.body);
     assert_eq!(
         reply.json(),
@@ -192,7 +203,7 @@ async fn a_pool_requires_the_container_contract_by_default() {
         ("gpu-toolkit", "true"),
     ];
     let new = hello("new", "nvidia-a10", &caps);
-    let reply = call(agent, "POST", "/v1/agent/hello", JOIN, &new).await;
+    let reply = call(agent, "POST", "/v1/agent/hello", None, &new).await;
     session(&reply, "new");
 }
 
@@ -207,39 +218,16 @@ async fn exec_none_admits_hosts_without_the_contract_and_the_floor_still_holds()
     let agent = h.running.agent_addr().unwrap();
     let old = hello("old", "nvidia-a10", &[]);
     session(
-        &call(agent, "POST", "/v1/agent/hello", JOIN, &old).await,
+        &call(agent, "POST", "/v1/agent/hello", None, &old).await,
         "old",
     );
     let other = hello("other", "nvidia-a100", &[]);
-    let reply = call(agent, "POST", "/v1/agent/hello", JOIN, &other).await;
+    let reply = call(agent, "POST", "/v1/agent/hello", None, &other).await;
     assert_eq!(reply.status, 403, "{}", reply.body);
     assert_eq!(
         reply.json(),
         json!({ "error": "shape-not-accepted", "reason": "below-floor" })
     );
-}
-
-/// Asserts that a pool with no join token file admits no host with a token that every
-/// host would share: the join token of the other tests is refused 401, as is the client
-/// token, and a tick that has no token file to read again goes by. It catches a pool that
-/// admits a shared token it was never given.
-#[tokio::test]
-async fn a_pool_without_a_join_token_file_admits_no_shared_token() {
-    let scratch = Scratch::new("serve_no_join_file");
-    let pool = PoolText::elastic(&scratch)
-        .set("name", &quote("burst"))
-        .set("class", &quote("gpu-host"))
-        .set("exec", &quote("none"));
-    let text = file(&server_with_agents(&scratch), &[&pool]);
-    let config = load(&scratch, &text).unwrap();
-    let h = Harness::over(scratch, config).await;
-    h.ticks.step().await;
-    let agent = h.running.agent_addr().unwrap();
-    for token in [JOIN, TOKEN] {
-        let hello = hello("h1", "nvidia-a10", &[]);
-        let reply = call(agent, "POST", "/v1/agent/hello", token, &hello).await;
-        assert_eq!(reply.status, 401, "{}", reply.body);
-    }
 }
 
 /// A certificate for the wildcard test and its key, as PEM text.

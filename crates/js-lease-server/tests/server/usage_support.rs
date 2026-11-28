@@ -17,7 +17,7 @@ use js_types::{HostId, LeaseId};
 use js_usage::EndedRow;
 use serde_json::{Value, json};
 
-use crate::agents_support::{JOIN, Session, agent_args, post};
+use crate::agents_support::{Session, agent_args, post};
 use crate::support::{Harness, Reply, Scratch, config};
 
 /// One reading as the sink was given it.
@@ -352,5 +352,5 @@ pub fn load(seq: u64, cpu_usage_usec: u64, minutes: &[u16]) -> Value {
 pub async fn beat_load(h: &Harness, session: &Session, load: Value) -> Reply {
     let mut body = session.beat();
     body["load"] = load;
-    post(h, "/v1/agent/heartbeat", Some(JOIN), &body).await
+    post(h, "/v1/agent/heartbeat", None, &body).await
 }

@@ -1,10 +1,10 @@
 //! `rollback` on the fakes: the unit restarted onto the previous files, the hello waited for
-//! when the join token is there, and never failed for want of it.
+//! when the lease can be made as the host, and never failed for want of it.
 
 use js_agent::update_hook::config::{Reason, Record, rollback};
 use js_agent::update_hook::{Class, Outcome};
 
-use super::rig::{Rig, Say};
+use super::rig::{NO_CERTIFICATE, Rig, Say};
 
 /// A rig whose record says `cutover` began the restart when the host was in session 1000.
 fn begun(name: &str) -> Rig {
@@ -19,7 +19,7 @@ fn begun(name: &str) -> Rig {
     rig
 }
 
-/// Asserts the whole of a rollback with the token in place: the session is noted, the unit is
+/// Asserts the whole of a rollback with the host certificate named: the session is noted, the unit is
 /// stopped and started, the hello (a session other than the one just before the restart) is
 /// waited for, and the record is deleted.
 ///
@@ -28,7 +28,6 @@ fn begun(name: &str) -> Rig {
 #[test]
 fn rollback_restarts_the_unit_and_waits_for_the_hello_of_the_previous_files() {
     let rig = begun("config-rollback-hello");
-    rig.with_token();
     rig.lease.say(&[
         Say::Host("live", Some(2000)),
         Say::Host("live", Some(2000)),
@@ -45,19 +44,22 @@ fn rollback_restarts_the_unit_and_waits_for_the_hello_of_the_previous_files() {
     assert!(rig.record().is_none());
 }
 
-/// Asserts that without the join token the unit is restarted and no hello is waited for or
-/// asked about.
+/// Asserts that when the flags file names no host certificate and key the unit is restarted and
+/// no hello is waited for or asked about.
 ///
 /// Catches a rollback that waits a minute for a host that cannot say hello until it has a
-/// token (the unit is held back by it).
+/// certificate (the agent refuses to start without one).
 #[test]
-fn without_the_token_file_the_unit_is_restarted_and_no_hello_is_waited_for() {
-    let rig = begun("config-rollback-no-token");
+fn without_a_host_certificate_the_unit_is_restarted_and_no_hello_is_waited_for() {
+    let rig = begun("config-rollback-no-certificate");
+    rig.without_a_host_certificate();
     let done = rig.run(rollback);
     assert_eq!(done.outcome, Outcome::Success);
     assert_eq!(
-        done.report.detail.as_deref(),
-        Some("the unit was restarted; no join token file: not waiting for a hello")
+        done.report.detail,
+        Some(format!(
+            "the unit was restarted; not waiting for a hello: {NO_CERTIFICATE}"
+        ))
     );
     assert_eq!(rig.calls(), ["stop", "start"]);
     assert_eq!(rig.lease.looks.get(), 0);
@@ -72,7 +74,6 @@ fn without_the_token_file_the_unit_is_restarted_and_no_hello_is_waited_for() {
 #[test]
 fn a_missing_hello_is_told_in_the_detail_and_never_fails_the_rollback() {
     let rig = begun("config-rollback-silent");
-    rig.with_token();
     rig.lease.say(&[Say::Host("live", Some(2000))]);
     let done = rig.run(rollback);
     assert_eq!(done.outcome, Outcome::Success);
@@ -83,7 +84,6 @@ fn a_missing_hello_is_told_in_the_detail_and_never_fails_the_rollback() {
     assert_eq!(rig.clock.pauses.get(), 6);
 
     let rig = begun("config-rollback-down");
-    rig.with_token();
     rig.lease.say(&[Say::Down("cannot talk to the server")]);
     let done = rig.run(rollback);
     assert_eq!(done.outcome, Outcome::Success);
@@ -93,7 +93,6 @@ fn a_missing_hello_is_told_in_the_detail_and_never_fails_the_rollback() {
     );
 
     let rig = begun("config-rollback-bad-flags");
-    rig.with_token();
     *rig.flags.borrow_mut() = Some("flags_file: cannot be read".to_owned());
     let done = rig.run(rollback);
     assert_eq!(done.outcome, Outcome::Success);
@@ -112,7 +111,6 @@ fn a_missing_hello_is_told_in_the_detail_and_never_fails_the_rollback() {
 #[test]
 fn a_rollback_with_nothing_restarted_leaves_the_unit_alone() {
     let rig = Rig::new("config-rollback-nothing");
-    rig.with_token();
     let done = rig.run(rollback);
     assert_eq!(done.outcome, Outcome::Success);
     assert_eq!(

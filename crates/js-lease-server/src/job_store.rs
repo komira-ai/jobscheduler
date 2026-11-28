@@ -11,7 +11,7 @@
 //! # The backend
 //!
 //! With a state store (`--store`, `server.store`) the tables are rows of that store, the one
-//! the host bindings and the join tokens are in, so Postgres is the one place the server's
+//! the host bindings are in, so Postgres is the one place the server's
 //! state is. A file `<state file>.jobs` of an earlier start without the setting is not read
 //! or changed: the first start over the store begins with the job store's rows the store
 //! holds, none unless `js-lease-server job-store copy` (`crate::cutover`) copied the file into

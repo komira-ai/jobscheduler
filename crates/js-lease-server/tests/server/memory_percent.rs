@@ -4,10 +4,8 @@
 
 use serde_json::{Value, json};
 
-use crate::agents_support::{JOIN, POOL, agent_args, entry, hello_body, hosts, post, session};
-use crate::config_support::{
-    PoolText, file, load, quote, quoted, refusal, server, server_with_agents,
-};
+use crate::agents_support::{POOL, agent_args, entry, hello_body, hosts, post, session};
+use crate::config_support::{PoolText, file, load, quote, refusal, server, server_with_agents};
 use crate::jobs_support::{JobBody, submit_body};
 use crate::support::{Harness, Scratch, config, replace, request};
 
@@ -95,13 +93,7 @@ fn claiming(host: &str, memory_bytes: u64) -> Value {
 #[tokio::test]
 async fn the_agent_pool_percent_cuts_the_claim_of_a_host_larger_than_the_pool() {
     let h = registering("mempct_agents_90", &ninety_pool()).await;
-    let reply = post(
-        &h,
-        "/v1/agent/hello",
-        Some(JOIN),
-        &claiming("big-1", 100 * GIB),
-    )
-    .await;
+    let reply = post(&h, "/v1/agent/hello", None, &claiming("big-1", 100 * GIB)).await;
     session(&reply, "big-1");
     let cut = 100 * GIB * 90 / 100;
     assert_eq!(
@@ -124,7 +116,7 @@ async fn a_host_claiming_less_than_the_listing_joins_and_is_booked_the_cut_of_it
     let short = post(
         &h,
         "/v1/agent/hello",
-        Some(JOIN),
+        None,
         &claiming("short-1", POOLED_NINETY),
     )
     .await;
@@ -157,7 +149,7 @@ async fn a_host_claiming_less_memory_than_the_pool_is_booked_at_its_claim() {
     let h = registering("mempct_agents_less", POOL).await;
     let claimed = POOLED - GIB;
     session(
-        &post(&h, "/v1/agent/hello", Some(JOIN), &claiming("a-1", claimed)).await,
+        &post(&h, "/v1/agent/hello", None, &claiming("a-1", claimed)).await,
         "a-1",
     );
     assert_eq!(
@@ -176,7 +168,7 @@ async fn a_host_claiming_less_memory_than_the_pool_is_booked_at_its_claim() {
 async fn the_agent_pool_default_is_unchanged_and_bad_values_are_refused() {
     let h = registering("mempct_agents_default", POOL).await;
     session(
-        &post(&h, "/v1/agent/hello", Some(JOIN), &claiming("a-1", POOLED)).await,
+        &post(&h, "/v1/agent/hello", None, &claiming("a-1", POOLED)).await,
         "a-1",
     );
     assert_eq!(
@@ -217,13 +209,7 @@ async fn the_agent_pool_default_is_unchanged_and_bad_values_are_refused() {
 async fn hosts_show_the_claimed_memory_the_percent_and_the_bookable_memory() {
     let h = registering("mempct_hosts_registered", &ninety_pool()).await;
     session(
-        &post(
-            &h,
-            "/v1/agent/hello",
-            Some(JOIN),
-            &claiming("big-1", 100 * GIB),
-        )
-        .await,
+        &post(&h, "/v1/agent/hello", None, &claiming("big-1", 100 * GIB)).await,
         "big-1",
     );
     let listing = hosts(&h).await;
@@ -250,10 +236,7 @@ async fn the_pool_status_shows_the_floor_memory_the_percent_and_the_bookable_mem
         ("mempct_pool_status_default", None, GIB),
     ] {
         let scratch = Scratch::new(name);
-        let joins = scratch.write("joins", &format!("{JOIN}\n"), 0o600);
-        let mut pool = PoolText::elastic(&scratch)
-            .set("exec", &quote("none"))
-            .set("join_token_file", &quoted(&joins));
+        let mut pool = PoolText::elastic(&scratch).set("exec", &quote("none"));
         if let Some(percent) = percent {
             pool = pool.set("memory_schedulable_percent", percent);
         }

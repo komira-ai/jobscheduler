@@ -16,15 +16,14 @@
 //! the store the crun runtime reads, without starting the agent and without a container
 //! engine; see `image::pull`.
 //!
-//! `js-agent cordon --server <url> --state-root <dir> --for <duration>` (Linux and macOS, run as
-//! the user who can read the host's credential) keeps the lease server from placing a lease on
-//! this host for a window, and lifts the cordon at the end or on SIGTERM, SIGINT or SIGHUP; see
+//! `js-agent cordon --flags-file <file> --for <duration>` (Linux and macOS, run as the user who
+//! can read the host's certificate and key) keeps the lease server from placing a lease on this
+//! host for a window, and lifts the cordon at the end or on SIGTERM, SIGINT or SIGHUP; see
 //! [`cordon`] and docs/runbooks/cordon-a-node.md. It is for an operator's measurement script,
 //! which needs one node to itself for an hour or two:
 //!
 //! ```text
-//! js-agent cordon --server https://leases.example:7300 --state-root /var/lib/js-agent \
-//!     --for 2h > /run/measure/cordon.log &
+//! js-agent cordon --flags-file /etc/js-agent/flags --for 2h > /run/measure/cordon.log &
 //! until grep -q '^idle ' /run/measure/cordon.log; do sleep 5; done   # no lease, not releasing
 //! ... measure ...
 //! kill -TERM %1; wait %1                                             # prints `lifted`
@@ -58,8 +57,8 @@
 //! |---|---|
 //! | `--server <url>` | required: `https://host:port`; `http://` only for `localhost`, `127.0.0.0/8` and `::1` |
 //! | `--server-address <ip>` | optional, `https://` only: the address of the `--server` host, so a start needs no lookup of the name; the certificate is still checked against the name (see `js_client::give_server_address`) |
-//! | `--token-file <path>` | required unless `--host-cert` and `--host-key` are given or `--state-root` holds a usable `host-credential` file: the pool's join token, in a regular file owned by the user running the agent, mode 0600 or 0400 |
-//! | `--host-cert <path>`, `--host-key <path>` | both or neither: the host's own certificate and key, which hostkeeper keeps at fixed paths and renews in place (the host group's config package names the two paths in the flags file). The certificate is presented in the TLS handshake in place of a token (the server must be `https://` and run with `--agent-client-ca`); no `Authorization` header is sent, `--token-file` is not read, and no host credential is kept. Both files are read again before each request and a consistent new pair is used from the next one. The key, after following links, must be a regular file owned by root or by the user running the agent, with no access for others and not writable by its group (mode 0600, 0400, 0640 or 0440) |
+//! | `--token-file <path>`, `--instance-file <path>` | accepted and ignored, and hidden from `--help`: a host is identified by its certificate alone. The agent warns once for each it is given and never opens the file; they are kept so a unit that still passes them starts |
+//! | `--host-cert <path>`, `--host-key <path>` | required, both: the host's own certificate and key, which hostkeeper keeps at fixed paths and renews in place (the host group's config package names the two paths in the flags file). The certificate is presented in the TLS handshake (the server must be `https://` and run with `--agent-client-ca`); no `Authorization` header is sent. An agent started without them stops with status 2 naming both flags. Both files are read again before each request and a consistent new pair is used from the next one. The key, after following links, must be a regular file owned by root or by the user running the agent, with no access for others and not writable by its group (mode 0600, 0400, 0640 or 0440) |
 //! | `--ca-cert <path>` | optional for `https://`: the PEM file with the certificate to trust, and then only that is trusted. Without it the public roots bundled in the agent (`webpki-roots`, pinned by `Cargo.lock`) are trusted, so a publicly trusted endpoint works with no certificate pushed; the platform's roots are never read. Ignored for `http://` |
 //! | `--pool <name>` | required: the pool to join |
 //! | `--host-id <id>` | the id to register under; by default `h-` and 32 hex digits of a salted SHA-256 of the machine id, never the machine id; `--host-id-from-facts <path>` takes it from the `host_id` of hostkeeper's facts file instead (not with `--host-id`; a file that cannot be used stops the agent) |
@@ -221,7 +220,7 @@
 //! the agent after every exit, status 0 and 2 included: with systemd that is
 //! `Restart=always` and no `RestartPreventExitStatus=2`, because a refusal exits with 2
 //! and a SIGTERM with 0, and `Restart=on-failure` would leave the leftovers of either
-//! unsupervised; see `run`): 401 (the token), 403 `unknown-pool`, `shape-not-accepted`,
+//! unsupervised; see `run`): 401 (the host certificate), 403 `unknown-pool`, `shape-not-accepted`,
 //! `host-contract`, `execution-mismatch`, `host-bound` and `host-listed` (things only the operator can change), and the 4xx that
 //! say the message cannot be read or served (`invalid-hello`, `invalid-heartbeat`,
 //! `unsupported-protocol`, `body-too-large`). A 403 `pool-full` is not among them: a pool
@@ -283,8 +282,7 @@
 //!
 //! # Secrets
 //!
-//! The join token is read from its file by `js-client`, held there, and sent in the
-//! `Authorization` header only. The session secret lives in the [`Session`], in the dispatch
+//! The host's private key is read from its file by `js-client` and never leaves it. The session secret lives in the [`Session`], in the dispatch
 //! [`dispatch::Cell`] and in the body of the heartbeats and of the dispatch polls. Neither is
 //! in argv, in a log line, in an error or in a `Debug` output.
 //!
@@ -304,7 +302,6 @@ pub mod cli_runtime;
 mod container;
 mod contract;
 pub mod cordon;
-mod credential;
 #[cfg(target_os = "linux")]
 pub mod crun;
 #[cfg(target_os = "linux")]
@@ -385,7 +382,6 @@ use clap::Parser;
 pub use backoff::{BASE, Backoff, CAP, Jitter, RETRY_AFTER_CAP, SystemJitter};
 use bundle::{Admission, BundleHost, Settings as BundleSettings, SystemHost};
 pub use cli::{Cli, FactsError, HostIdFlags, resolve_host_id};
-pub use credential::{CREDENTIAL_FILE, CREDENTIAL_TEMP_FILE, CredentialFile, CredentialStore};
 pub use exclusive::{PREPARE_TIMEOUT, Quiesce};
 pub use facts::{
     APPLE_GPU_CLASS, CommandRunner, Detected, FileReader, Gpus, PROBE_LIMIT, PROBE_OUTPUT_CAP,
@@ -407,9 +403,7 @@ pub use registry_credentials::{
     CREDENTIALS_MAX, ImageAllowError, RegistryCredentials, RegistryCredentialsError,
 };
 pub use run::{Exit, Sleeper, Wake, drive, drive_holding};
-pub use session::{
-    CredentialState, Drain, Fatal, HEARTBEAT_PATH, HELLO_PATH, Note, Reason, Session, Step,
-};
+pub use session::{Drain, Fatal, HEARTBEAT_PATH, HELLO_PATH, Note, Reason, Session, Step};
 pub use signals::SystemSleeper;
 pub use system::{Backend, Machine, RuntimeBuild, SharedClock, System};
 pub use transport::{Answer, Connector, Dialer, REQUEST_LIMIT, Transport};
@@ -649,6 +643,11 @@ fn execute(
         return Err(Failure::Usage(refusal.to_owned()));
     }
     let cli = Cli::try_parse_from(args).map_err(Failure::Clap)?;
+    // A flag a unit still passes and that does nothing now is said once, before the agent
+    // registers; the file it names is never opened.
+    cli::ignored_flags(&cli).iter().for_each(|warning| {
+        let _ = writeln!(err, "js-agent: warning: {warning}");
+    });
     // The health route is bound before anything else, so a wrong address stops the agent
     // before it registers.
     let route = cli.health_listen.map(Route::bind);
@@ -691,10 +690,6 @@ fn execute(
     let site = services.xcode_site;
     let mut offer =
         offer(&cli, platform, commands, files, site, version, store).map_err(Failure::Usage)?;
-    // A host that authenticates by its own certificate is issued no host credential, and
-    // says it keeps none.
-    let by_identity = matches!(login, Login::HostCertificate(_));
-    offer.hello.accepts_host_credential &= !by_identity;
     offer.warnings.iter().for_each(|warning| {
         let _ = writeln!(err, "js-agent: warning: {warning}");
     });
@@ -818,24 +813,6 @@ fn execute(
         let checked = offer.hello.validate();
         checked.map_err(|why| Failure::Usage(format!("the hello is not acceptable: {why}")))?;
     }
-    // A host that was given a credential in an earlier life uses it from the first hello:
-    // its token is dead. The transport was connected with the token file, or with this very
-    // file when no token file was given (above). A host that authenticates by its own
-    // certificate has no use for one: the file is not read and never adopted.
-    let credentials = local
-        .state
-        .as_ref()
-        .filter(|_| !by_identity)
-        .map(|state| CredentialFile::in_dir(state.path()));
-    let mut kept = None;
-    if let Some(file) = &credentials {
-        kept = file.load().map_err(Failure::Usage)?;
-        if let Some(credential) = &kept {
-            transport
-                .adopt_credential(credential.expose())
-                .map_err(|why| Failure::Usage(format!("{}: {why}", file.path().display())))?;
-        }
-    }
     let taint = local.state.iter().filter_map(StateRoot::read);
     taint.for_each(|taint| {
         let _ = writeln!(
@@ -897,7 +874,7 @@ fn execute(
         .as_ref()
         .map(|(worker, ..)| WorkerHost::new(worker.handle()));
     let clock = jobs.as_ref().map(|(worker, ..)| worker.clock());
-    let cell = dispatch::Cell::new(kept);
+    let cell = dispatch::Cell::new();
     let health = Health::default();
     let host_id = offer.hello.host_id.clone();
     let mut session = Session::new(offer.hello, &mut *transport, &mut *services.jitter)
@@ -916,9 +893,6 @@ fn execute(
     if let (Some(host), Some(clock)) = (host.as_mut(), clock.as_ref()) {
         session = session.with_default_quiesce(host, clock);
     }
-    if let Some(file) = &credentials {
-        session = session.with_credential_store(file);
-    }
     if let Some(gauge) = &gauge {
         session = session.with_disk(gauge);
     }
@@ -936,9 +910,8 @@ fn execute(
         );
     }
     // The cordon of a held host is asked on the lease server the agent registers with, with
-    // the credential it registered with, after each exchange (see `hold_cordon`).
-    let connect =
-        |root: &Path| hold_cordon::connect_http(&cli.server, &login, ca_cert, &host_id, root);
+    // the certificate it registered with, after each exchange (see `hold_cordon`).
+    let connect = || hold_cordon::connect_http(&cli.server, &login, ca_cert, &host_id);
     let hold_clock = services.machine.clock();
     let mut keeper = held_root.as_ref().map(|state| {
         Keeper::new(KeeperSeams {

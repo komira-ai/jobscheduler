@@ -6,7 +6,7 @@
 
 use std::ffi::OsString;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use rcgen::string::Ia5String;
@@ -25,7 +25,6 @@ use tokio_rustls::TlsConnector;
 
 use crate::agents_support::agent_args;
 use crate::support::{Harness, Kept, Reply, Scratch, TOKEN, guard, parse_reply, replace};
-use crate::tls::test_identity;
 
 /// The URI SAN hostkeeper puts on a host's own certificate.
 pub const HOST_ROLE_URI: &str = "urn:hostkeeper:host-role:host";
@@ -78,6 +77,13 @@ impl Spec {
 pub struct Identity {
     pub cert_pem: String,
     pub key_pem: String,
+}
+
+/// The certificate authority every server of the tests trusts for host certificates, made once
+/// per test process: a test that needs a CA of its own makes one with [`Ca::new`].
+pub fn shared_ca() -> &'static Ca {
+    static CA: std::sync::OnceLock<Ca> = std::sync::OnceLock::new();
+    CA.get_or_init(Ca::new)
 }
 
 /// A certificate authority of the test's own.
@@ -157,16 +163,14 @@ impl Options {
     };
 }
 
-/// The flags of a server with the pool, TLS and the CA at `ca_file`, and the job service when
-/// `options` say so.
-pub fn args(scratch: &Scratch, options: Options, ca_file: &Path) -> Vec<OsString> {
-    let (cert, key) = test_identity();
-    let tls_cert = scratch.write("test-only-cert.pem", &cert, 0o644);
-    let tls_key = scratch.write("test-only-key.pem", &key, 0o600);
+/// The flags of a server with the pool, TLS and the CA `ca`, and the job service when
+/// `options` say so. The CA is written to the scratch directory as the agent flags name it.
+pub fn args(scratch: &Scratch, options: Options, ca: &Ca) -> Vec<OsString> {
     let base = match options.jobs {
         true => crate::job_hosts::placing_args(scratch, options.kept),
         false => options.kept.args(scratch, agent_args(scratch)),
     };
+    scratch.write("hostkeeper-ca.pem", &ca.pem(), 0o644);
     // Room for the several hosts a test says hello for.
     let pool = std::fs::read_to_string(scratch.path("agent-pool.toml")).unwrap();
     scratch.write(
@@ -175,14 +179,6 @@ pub fn args(scratch: &Scratch, options: Options, ca_file: &Path) -> Vec<OsString
         0o644,
     );
     let mut args = base;
-    for (flag, value) in [
-        ("--tls-cert", tls_cert),
-        ("--tls-key", tls_key),
-        ("--agent-client-ca", ca_file.to_path_buf()),
-    ] {
-        args.push(flag.into());
-        args.push(value.into_os_string());
-    }
     if let Some(burst) = options.burst {
         args.push("--agent-hello-burst".into());
         args.push(burst.into());
@@ -201,7 +197,7 @@ impl Rig {
         let scratch = Scratch::new(&options.kept.named(name));
         let ca = Ca::new();
         let ca_file = scratch.write("hostkeeper-ca.pem", &ca.pem(), 0o644);
-        let mut args = args(&scratch, options, &ca_file);
+        let mut args = args(&scratch, options, &ca);
         if let Some(pool) = second_pool {
             let file = scratch.write("second-pool.toml", pool, 0o644);
             args.extend(["--agent-pool-config".into(), file.into_os_string()]);
@@ -233,7 +229,7 @@ impl Rig {
             running, scratch, ..
         } = h;
         running.shutdown().await.unwrap();
-        let args = args(&scratch, options, &ca_file);
+        let args = args(&scratch, options, &ca);
         let args = replace(args, "--boot", "resume");
         let server_cert = std::fs::read_to_string(scratch.path("test-only-cert.pem")).unwrap();
         let h = Harness::with(scratch, args).await;
@@ -329,6 +325,18 @@ impl Client {
         bearer: Option<&str>,
         body: Option<&Value>,
     ) -> Result<Reply, String> {
+        let body = body.map(|body| body.to_string().into_bytes());
+        guard(self.exchange(&self.connector(), method, path, bearer, body.as_deref())).await
+    }
+
+    /// [`Client::send`] with a body that is the bytes `body`, whatever they hold.
+    pub async fn send_bytes(
+        &self,
+        method: &str,
+        path: &str,
+        bearer: Option<&str>,
+        body: Option<&[u8]>,
+    ) -> Result<Reply, String> {
         guard(self.exchange(&self.connector(), method, path, bearer, body)).await
     }
 
@@ -342,7 +350,23 @@ impl Client {
         bearer: Option<&str>,
         body: Option<&Value>,
     ) -> Result<Reply, String> {
-        guard(self.exchange(connector, method, path, bearer, body)).await
+        let body = body.map(|body| body.to_string().into_bytes());
+        guard(self.exchange(connector, method, path, bearer, body.as_deref())).await
+    }
+
+    /// A new TLS connection to the server over `connector`: the handshake done, or what
+    /// failed in it.
+    pub async fn open(
+        &self,
+        connector: &TlsConnector,
+    ) -> Result<tokio_rustls::client::TlsStream<tokio::net::TcpStream>, String> {
+        let tcp = tokio::net::TcpStream::connect(self.addr).await.unwrap();
+        // The server certificate names 127.0.0.1, whichever loopback address is dialled.
+        let name = ServerName::IpAddress(std::net::IpAddr::from([127, 0, 0, 1]).into());
+        match connector.connect(name, tcp).await {
+            Ok(stream) => Ok(stream),
+            Err(error) => Err(format!("handshake: {error}")),
+        }
     }
 
     async fn exchange(
@@ -351,16 +375,9 @@ impl Client {
         method: &str,
         path: &str,
         bearer: Option<&str>,
-        body: Option<&Value>,
+        body: Option<&[u8]>,
     ) -> Result<Reply, String> {
-        let tcp = tokio::net::TcpStream::connect(self.addr).await.unwrap();
-        // The server certificate names 127.0.0.1, whichever loopback address is dialled.
-        let name = ServerName::IpAddress(std::net::IpAddr::from([127, 0, 0, 1]).into());
-        let mut stream = match connector.connect(name, tcp).await {
-            Ok(stream) => stream,
-            Err(error) => return Err(format!("handshake: {error}")),
-        };
-        let body = body.map(|body| body.to_string().into_bytes());
+        let mut stream = self.open(connector).await?;
         let body = body.unwrap_or_default();
         let mut head = format!("{method} {path} HTTP/1.1\r\nHost: test\r\nConnection: close\r\n");
         if let Some(token) = bearer {
@@ -368,7 +385,7 @@ impl Client {
         }
         head.push_str(&format!("Content-Length: {}\r\n\r\n", body.len()));
         let mut message = head.into_bytes();
-        message.extend_from_slice(&body);
+        message.extend_from_slice(body);
         let sent = stream.write_all(&message).await;
         let mut raw = Vec::new();
         let read = stream.read_to_end(&mut raw).await;

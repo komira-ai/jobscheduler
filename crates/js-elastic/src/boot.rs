@@ -85,23 +85,14 @@ pub struct BootPlan {
     pub network: Vec<BootStep>,
 }
 
-impl BootPlan {
-    /// The line that names the machine to the scheduler when its agent first calls:
-    /// `<pool>:<name>`.
-    pub fn instance(&self) -> String {
-        format!("{}:{}", self.pool, self.host)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ids::{AcquireId, SchedulerId};
 
-    /// Asserts that a plan names its machine to the scheduler as `<pool>:<name>`, and
-    /// that a secret appears in a plan as a slot name, never as text.
+    /// Asserts that a secret appears in a plan as a slot name, never as text.
     #[test]
-    fn a_plan_names_its_machine_and_holds_secrets_as_slots() {
+    fn a_plan_holds_secrets_as_slots() {
         let host = HostName::derive(
             &SchedulerId::new("s").unwrap(),
             &AcquireId::new("a").unwrap(),
@@ -113,14 +104,13 @@ mod tests {
             },
             scheduler_url: "https://sched.example.org:7301".to_owned(),
             pool: "gpu".to_owned(),
-            host: host.clone(),
+            host,
             host_prep: vec![BootStep::Run(vec!["apt-get".into(), "update".into()])],
             network: vec![BootStep::SecretFile {
                 path: "/etc/net.key".to_owned(),
                 slot: SlotName("network.key".to_owned()),
             }],
         };
-        assert_eq!(plan.instance(), format!("gpu:{host}"));
         assert_eq!(plan.clone(), plan);
         let fetch = BootStep::Fetch {
             url: "https://example.org/x".to_owned(),

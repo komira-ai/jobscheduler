@@ -17,7 +17,7 @@ async fn join_as(server: &Server, host: &str, version: &str) -> Sess {
     let mut hello: Value = serde_json::from_slice(&hello_body(host)).unwrap();
     hello["agent_version"] = json!(version);
     let body = Ok(Bytes::from(hello.to_string()));
-    let welcome = serve_hello(&server.agents, server.who.clone(), None, body, &|| ());
+    let welcome = serve_hello(&server.agents, host, body, &|| ());
     let Json(welcome) = welcome.await.unwrap();
     Sess {
         host: host.to_owned(),

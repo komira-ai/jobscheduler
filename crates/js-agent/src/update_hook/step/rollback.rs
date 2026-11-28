@@ -29,9 +29,8 @@
 //!    commit. A unit that is down is left so; one that is stopping is waited for. A unit that is
 //!    up, starting or waiting to restart (the agent was refused and exits, and the manager
 //!    starts it again) is stopped once the host can hold no work: the lease server knows no
-//!    such host (`unknown-host`), or does not take the hook's credential as the host's (one of
-//!    `cordon::CREDENTIAL_CODES`: an agent that was never welcomed holds no host credential,
-//!    and the hook then presents the join token), or it shows the host and the host holds no
+//!    such host (`unknown-host`), or does not take the hook's certificate as the host's (one of
+//!    `cordon::CREDENTIAL_CODES`), or it shows the host and the host holds no
 //!    lease under a cordon of this update's, kept as in item 5 and within the drain bound
 //!    (`drain_bound`, class environment, nothing stopped, after it). A server that does not
 //!    answer, or refuses for another reason, is waited for as in `read_host` and ends the step

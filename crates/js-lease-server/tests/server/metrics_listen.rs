@@ -20,7 +20,7 @@ fn static_file(scratch: &Scratch, extra: &str) -> String {
     file(&server(scratch, extra), &[&hosts])
 }
 
-/// The agent flags (the shared join token among them) with the metrics on `listen`.
+/// The agent flags with the metrics on `listen`.
 fn metrics_args(scratch: &Scratch, listen: &str) -> Vec<OsString> {
     let mut args = crate::agents_support::agent_args(scratch);
     args.extend(["--metrics-listen", listen].map(OsString::from));
@@ -202,7 +202,6 @@ async fn agent_bodies_over_the_cap_are_counted_by_route() {
         [count(&scraped, "hello"), count(&scraped, "heartbeat")],
         ["0", "0"]
     );
-    let join = Some(crate::agents_support::JOIN);
     let over = vec![b' '; BODY_LIMIT + 1];
     let at_cap = vec![b' '; BODY_LIMIT];
     for (path, body, status) in [
@@ -211,7 +210,7 @@ async fn agent_bodies_over_the_cap_are_counted_by_route() {
         ("/v1/agent/heartbeat", &over, 413),
         ("/v1/agent/heartbeat", &at_cap, 400),
     ] {
-        let reply = request(h.addr(), "POST", path, join, Some(body.as_slice())).await;
+        let reply = request(h.addr(), "POST", path, None, Some(body.as_slice())).await;
         assert_eq!(reply.status, status, "{path}: {}", reply.body);
     }
     let scraped = request(addr, "GET", "/metrics", None, None).await.body;

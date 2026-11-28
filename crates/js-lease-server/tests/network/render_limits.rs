@@ -12,8 +12,31 @@ fn runs(count: usize) -> Vec<BootStep> {
     vec![BootStep::Run(vec!["true".to_owned()]); count]
 }
 
-fn join_only(token: &str) -> BootSecrets {
-    BootSecrets::new(Secret::new(token.to_owned()), Vec::new()).unwrap()
+/// The slot the plans of this file write to a file.
+const SLOT: &str = "k";
+
+/// A plan whose one network step writes the secret of [`SLOT`] to a file.
+fn secret_plan() -> BootPlan {
+    let mut plan = plan(&host());
+    plan.network = vec![BootStep::SecretFile {
+        path: "/etc/net.key".to_owned(),
+        slot: SlotName(SLOT.to_owned()),
+    }];
+    plan
+}
+
+/// The secrets of a launch that fills [`SLOT`] with `secret`.
+fn one_secret(secret: &str) -> BootSecrets {
+    BootSecrets::new(vec![(
+        SlotName(SLOT.to_owned()),
+        Secret::new(secret.to_owned()),
+    )])
+    .unwrap()
+}
+
+/// The secrets of a launch that fills no slot.
+fn none() -> BootSecrets {
+    BootSecrets::new(Vec::new()).unwrap()
 }
 
 /// Asserts that a plan of exactly the step limit renders, the provider's steps and the
@@ -25,16 +48,13 @@ fn a_plan_may_hold_the_step_limit_and_not_one_more() {
     at.host_prep = runs(MAX_STEPS - 1);
     at.network = runs(1);
     assert!(render(&at, Fill::Mask).is_ok());
-    assert!(render(&at, Fill::Real(&join_only("t"))).is_ok());
+    assert!(render(&at, Fill::Real(&none())).is_ok());
 
     let mut over = at.clone();
     over.network = runs(2);
     let expected = RenderError::TooManySteps(MAX_STEPS + 1);
     assert_eq!(render(&over, Fill::Mask).unwrap_err(), expected);
-    assert_eq!(
-        render(&over, Fill::Real(&join_only("t"))).unwrap_err(),
-        expected
-    );
+    assert_eq!(render(&over, Fill::Real(&none())).unwrap_err(), expected);
     assert_eq!(MAX_STEPS, 64);
 }
 
@@ -42,8 +62,8 @@ fn a_plan_may_hold_the_step_limit_and_not_one_more() {
 /// refused, naming the slot; and that an empty secret and one with a NUL are refused.
 #[test]
 fn a_secret_is_one_byte_to_the_size_limit_with_no_nul() {
-    let plan = plan(&host());
-    let at = join_only(&"a".repeat(MAX_SECRET_BYTES));
+    let plan = secret_plan();
+    let at = one_secret(&"a".repeat(MAX_SECRET_BYTES));
     let text = render(&plan, Fill::Real(&at)).unwrap();
     assert!(text.contains(&"a".repeat(MAX_SECRET_BYTES)));
     for bad in [
@@ -52,8 +72,8 @@ fn a_secret_is_one_byte_to_the_size_limit_with_no_nul() {
         "a\0b".to_owned(),
     ] {
         assert_eq!(
-            render(&plan, Fill::Real(&join_only(&bad))).unwrap_err(),
-            RenderError::BadSecret("join_token".to_owned()),
+            render(&plan, Fill::Real(&one_secret(&bad))).unwrap_err(),
+            RenderError::BadSecret(SLOT.to_owned()),
             "{} bytes",
             bad.len()
         );
@@ -67,8 +87,8 @@ fn a_secret_is_one_byte_to_the_size_limit_with_no_nul() {
 /// refused with both sizes.
 #[test]
 fn a_payload_may_be_the_providers_limit_and_not_one_byte_more() {
-    let plan = plan(&host());
-    let secrets = join_only("t");
+    let plan = secret_plan();
+    let secrets = one_secret("t");
     let size = render(&plan, Fill::Real(&secrets)).unwrap().len();
     assert_eq!(payload(&plan, &secrets, size).unwrap().len(), size);
     assert_eq!(
@@ -123,13 +143,10 @@ fn a_host_prep_secret_file_is_filled_and_cleaned_up_too() {
         path: "/etc/prep key".to_owned(),
         slot: SlotName("host_prep.key".to_owned()),
     });
-    let secrets = BootSecrets::new(
-        Secret::new("t".to_owned()),
-        vec![(
-            SlotName("host_prep.key".to_owned()),
-            Secret::new("k".to_owned()),
-        )],
-    )
+    let secrets = BootSecrets::new(vec![(
+        SlotName("host_prep.key".to_owned()),
+        Secret::new("k".to_owned()),
+    )])
     .unwrap();
     let text = render(&p, Fill::Real(&secrets)).unwrap();
     assert!(text.contains("  rm -f -- '/etc/prep key'\n"), "{text}");

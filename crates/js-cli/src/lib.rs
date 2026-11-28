@@ -1,8 +1,7 @@
 //! `js`: the command-line client of `js-lease-server`. It makes the calls
 //! of the job service (`jobscheduler.v1.JobService`), one command per call, with three
 //! commands written by hand that loop over several calls: `job wait`, `job follow` and
-//! `job run` (see "Job commands" below); and it mints and revokes the join tokens that
-//! admit a launched machine's agent (`join-token`).
+//! `job run` (see "Job commands" below).
 //!
 //! The library is the program: [`run_with`] takes the arguments, the streams to print
 //! to and the [`Services`] (the signal source, and the job commands' waiter and dialer),
@@ -23,29 +22,7 @@
 //! No proxy setting is read, no redirect is followed and the token is sent to the one
 //! host named, over TLS unless that host is the machine itself.
 //!
-//! # Join tokens
-//!
-//! ```text
-//! js join-token mint --provider NAME --instance-id ID [--ttl <dur>] [--out FILE]
-//! js join-token revoke --provider NAME --instance-id ID
-//! ```
-//!
 //! Durations are whole seconds: `90`, `90s`, `15m`, `2h`.
-//!
-//! `join-token mint` asks for a one-time join token (`POST /v1/agent/join-tokens`, behind
-//! the client token) for the machine a provider launched as
-//! `NAME:ID`; the agent that runs there names the same pair in its `--instance-file` and
-//! reads the token from its `--token-file`. `--ttl` is how long the token may be used
-//! (default 30 minutes, at most 24h). Without `--out` the token alone is printed on stdout
-//! (`--json`: `{"token", "expires_at_ms"}`); it is the only command that prints a secret.
-//! With `--out FILE` the file is created new with mode 0600 and holds the token and a
-//! newline, stdout says where it went and when it expires (`expires` is the server's clock
-//! in milliseconds) and never shows the token, and a `FILE` that exists is refused (exit 2)
-//! before the server is asked for anything; a mint that fails leaves no file. Minting again
-//! for an instance replaces its unused tokens. `join-token revoke` drops every token of
-//! the instance, used or not (idempotent). A server that admits no agents has no such route
-//! and answers `join-tokens-unsupported` (exit 3); a provider the pool does not admit, an
-//! id that is not valid or a `--ttl` above a day is exit 4.
 //!
 //! # Job commands
 //!
@@ -68,8 +45,8 @@
 //! from the service definition in `js-proto` ([`jobs::surface`]), and [`jobs`] builds the
 //! command line from it, so a call added to the definition is a command with no hand-written
 //! code. `js <command> --help` shows each flag with the comment of its field. The global
-//! flags mean the same as for `join-token`: the same `--server` rule, token file
-//! and roots, over gRPC (HTTP/2) to the one origin.
+//! flags mean the same for every command: the `--server` rule, the token file and
+//! the roots, over gRPC (HTTP/2) to the one origin.
 //!
 //! How a call is named: a call is a verb and a noun. When its request has exactly one
 //! singular, non-`optional` scalar field (its subject, whose flag is required) named
@@ -149,8 +126,8 @@
 //! | 0 | the command succeeded; for `job wait` and `job run`, the job succeeded |
 //! | 1 | the server or the network failed, or the token was refused (401); a job command whose request was not sent (`not-sent`) |
 //! | 2 | a flag or a file it names is wrong, including what clap refuses |
-//! | 3 | refused: a job command's definite refusal other than `INVALID_ARGUMENT` (`no-capable-host`, an unknown job); `join-tokens-unsupported`, a server that admits no agents |
-//! | 4 | the request itself was refused: a job command answered `INVALID_ARGUMENT`; a `join-token` body the server refuses (a provider the pool does not admit, an invalid id, a `--ttl` above a day) |
+//! | 3 | refused: a job command's definite refusal other than `INVALID_ARGUMENT` (`no-capable-host`, an unknown job) |
+//! | 4 | the request itself was refused: a job command answered `INVALID_ARGUMENT` |
 //! //! //! | 9 | a job command sent its request and read no answer, so the call may have taken effect (`unconfirmed`); for `job submit` and `job run` the job may exist and the same command with the same `--id` is safe to run again |
 //! | 10 | `job wait`, `job run`: the job failed (a nonzero exit code, or stopped for its memory) |
 //! | 11 | `job wait`, `job run`: the job was cancelled |
@@ -159,15 +136,11 @@
 //! | 14 | `job wait`, `job run`: the job failed to start |
 //! | 15 | `job wait`, `job run`: how the job ended could not be told: a call failed, or the job is in a state this `js` does not know (`undetermined`) |
 //! | 129, 130, 143 | `job run`: a second SIGHUP, SIGINT or SIGTERM ended `js` before the job ended (`interrupted`) |
-//!
-//! The reason is on stderr (`js: refused: join-tokens-unsupported`), and never holds the token.
 
-mod api;
 mod cli;
 mod events;
 mod failure;
 pub mod jobs;
-mod join_token;
 mod render;
 mod signals;
 
@@ -175,18 +148,16 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::process::ExitCode;
 
-use clap::{ArgMatches, FromArgMatches};
+use clap::ArgMatches;
 
-use cli::{Cli, Command};
 use failure::Failure;
-use js_client::{Client, REQUEST_LIMIT};
 use render::Render;
 
 pub use events::{ForwardedSignal, Services, SignalSource, Signaller};
 pub use failure::exit;
 
-/// The whole command line of `js`, as it parses: the `join-token` commands, the job commands
-/// generated from the job service, and the global flags. Read-only: a caller that walks
+/// The whole command line of `js`, as it parses: the job commands generated from the job
+/// service, and the global flags. Read-only: a caller that walks
 /// its subcommands and flags (a check that the documentation names only commands that
 /// exist) sees the tree [`run_with`] parses with.
 #[must_use]
@@ -229,8 +200,7 @@ fn usage_exit(usage: &clap::Error, out: &mut dyn Write, err: &mut dyn Write) -> 
     u8::try_from(usage.exit_code()).unwrap_or(exit::USAGE)
 }
 
-/// Runs a parsed command line, a job command or a `join-token` command, and prints its failure,
-/// if any.
+/// Runs a parsed command line, a job command, and prints its failure, if any.
 fn execute(
     matches: &ArgMatches,
     out: &mut dyn Write,
@@ -238,38 +208,16 @@ fn execute(
     services: Services,
 ) -> u8 {
     let render = Render::new(matches.get_flag("json"));
-    let done = match jobs::chosen(matches) {
-        Some(chosen) => jobs::execute(chosen, matches, render, out, err, services),
-        None => join_token_command(matches, render, out),
-    };
+    // clap already checked `matches` against the commands, so a command is always chosen; the
+    // failure is made up front.
+    let done = jobs::chosen(matches)
+        .ok_or(Failure::Usage("not a command".to_owned()))
+        .and_then(|chosen| jobs::execute(chosen, matches, render, out, err, services));
     match done {
         Ok(code) => code,
         Err(failure) => {
             let _ = err.write_all(render.failure(&failure).as_bytes());
             failure.parts().0
         }
-    }
-}
-
-/// Runs a `join-token` command.
-fn join_token_command(
-    matches: &ArgMatches,
-    render: Render,
-    out: &mut dyn Write,
-) -> Result<u8, Failure> {
-    // clap already checked `matches` against these commands, so this does not fail; its
-    // error is made up front.
-    let cli = Cli::from_arg_matches(matches)
-        .ok()
-        .ok_or(Failure::Usage("not a join-token command".to_owned()))?;
-    dispatch(cli, render, out)
-}
-
-fn dispatch(cli: Cli, render: Render, out: &mut dyn Write) -> Result<u8, Failure> {
-    let server = cli.need_server()?;
-    let token_file = cli.need_token_file()?;
-    let client = Client::connect(server, token_file, cli.ca_cert.as_deref(), REQUEST_LIMIT)?;
-    match cli.command {
-        Command::JoinToken(action) => join_token::run(&client, render, action, out),
     }
 }

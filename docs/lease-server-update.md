@@ -35,7 +35,7 @@ the process. At this release:
   older agent that lists a run after the restart is told to cancel it.
 
 A job outlives the restart: it is in the job store, and its host keeps running it. The store (`--store`)
-holds the host bindings, the join tokens and the scaler's records; the hook uses it for its writer
+holds the host bindings and the scaler's records; the hook uses it for its writer
 lock (below).
 
 ## What the hook needs

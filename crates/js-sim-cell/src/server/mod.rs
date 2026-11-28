@@ -27,12 +27,12 @@
 //! through the seam (`Config::with_job_sources`); the node keeps the one source across a
 //! restart. So a seed replays with the job service on too (module `ids`).
 //!
-//! The state file's family, the pool file, the token files and the store file live in a [`TestDir`]
+//! The state file's family, the pool file, the client token file and the store file live in a [`TestDir`]
 //! the node owns.
 //!
 //! # The store
 //!
-//! The server keeps its host bindings, its join tokens and its scaler's records in the store
+//! The server keeps its host bindings and its scaler's records in the store
 //! `--store` names (`server.store` for an elastic pool's server), which the node makes when
 //! it starts, as [`ServerSpec::store`] says (module `store`): a SQLite file in its directory,
 //! or a Postgres database of its own (feature `postgres`), dropped with the node. The node
@@ -77,10 +77,10 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Body;
-use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER};
+use axum::http::header::{CONTENT_TYPE, RETRY_AFTER};
 use axum::http::{Method, Request, Response, StatusCode};
 use js_jobs::{InstanceId, ScriptedIds};
-use js_lease_server::in_process::InProcess;
+use js_lease_server::in_process::{InProcess, as_host};
 use js_lease_server::{Config, SharedClock, StartupError};
 use js_registry::{HostMark, HostState, HostView, Registry, SessionSource};
 use js_sim::{Event, NodeId, NodeInput, Output};
@@ -101,9 +101,7 @@ mod store;
 
 pub use ids::{SCRIPT_LEN, StoreClock, seeded};
 pub use receiver::Receiver;
-pub use spec::{
-    ARCH, ARCH_KEY, CLIENT_TOKEN, JOIN_TOKEN, POOL_CLASS, ServerSpec, Shape, WHOLE_CLASS,
-};
+pub use spec::{ARCH, ARCH_KEY, CLIENT_TOKEN, POOL_CLASS, ServerSpec, Shape, WHOLE_CLASS};
 use store::StoreAt;
 pub use store::{SQLITE_FILE, STORE_LINE_FILE, Store};
 
@@ -514,20 +512,23 @@ impl ServerNode {
             Msg::Request {
                 id,
                 route,
-                bearer,
+                certificate,
                 body,
             },
         ) = (&self.up, msg)
         else {
             return;
         };
-        let request = Request::builder()
+        let mut request = Request::builder()
             .method(Method::POST)
             .uri(route.path())
-            .header(AUTHORIZATION, format!("Bearer {bearer}"))
             .header(CONTENT_TYPE, "application/json")
             .body(Body::from(body))
             .unwrap_or_default();
+        // What the TLS listener does for a verified host certificate: the call is the host's.
+        certificate
+            .iter()
+            .for_each(|host| as_host(&mut request, host));
         let answer = self.runtime.block_on(call(up.agent.clone(), request));
         // A heartbeat pokes the placement poller, which the server runs on a task of its own
         // right after the call; in process it runs here, at the same virtual time.

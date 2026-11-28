@@ -11,7 +11,7 @@ use js_state::postgres::test_database;
 use serde_json::{Value, json};
 use tokio::runtime::Runtime;
 
-use crate::agents_support::{JOIN, Session, job_hello, job_host_args, post};
+use crate::agents_support::{Session, job_hello, job_host_args, post};
 use crate::jobs_support::{JobBody, commands, exited, job_agent, job_state, running, submit_body};
 use crate::store_support::store_file;
 use crate::support::{Harness, Reply, Scratch};
@@ -51,7 +51,7 @@ async fn beat(server: &Harness, session: &Session, seq: u64, jobs: &[Value]) -> 
     let mut body = session.beat();
     body["seq"] = json!(seq);
     body["jobs"] = json!(jobs);
-    post(server, "/v1/agent/heartbeat", Some(JOIN), &body).await
+    post(server, "/v1/agent/heartbeat", None, &body).await
 }
 
 /// [`beat`], which must be answered 200: the reply's JSON.

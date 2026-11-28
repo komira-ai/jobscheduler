@@ -10,16 +10,14 @@ are described in `packaging/js-agent/deb/README.md`. There is no native package 
 (`packaging/js-agent-macos/README.md`) and is not updated by hostkeeper.
 
 A package is public and the same on every host, so it carries no secret and no host setting. You
-place the files on the node yourself: the join token, the flags file and the instance file. A
-node whose hostkeeper manages the host's certificate needs no join token or instance file
-(section 3A).
+place the files on the node yourself: the flags file, and the host certificate and key, which
+hostkeeper keeps on a node it manages (section 2). A node is admitted by its host certificate
+alone: a request without a verified host certificate is refused.
 
 Examples use `js.example.com`, `node-5` and `farm`. Replace them.
 
 ## 1. What you need
 
-- A client token with permission to mint join tokens, in a file only you can read. It is the token
-  of one of the lease server's clients, the one `js` takes as `--token-file`.
 - A node with hostkeeper installed and enrolled. hostkeeper's own documents cover that: read
   "Enrolling a node" in its operations documents, and its `ctl` reference. This runbook does not
   repeat them.
@@ -27,58 +25,17 @@ Examples use `js.example.com`, `node-5` and `farm`. Replace them.
   `js-agent --version` prints after the program name.
 - Root on the node.
 - What the agent's start check needs and the package does not carry: `crun` and `uidmap` from
-  the distribution, the scratch mount (XFS with `prjquota`: see "No job starts" in section 8)
+  the distribution, the scratch mount (XFS with `prjquota`: see "No job starts" in section 7)
   and, where user namespaces are restricted, crun's AppArmor
   profile ("What the host provides" in `packaging/js-agent/deb/README.md`). The package makes
   the job user `jsjob` and its subuid and subgid ranges itself, and keeps ranges a host has.
-- The node's repository entry of the stable suite, `komira-stable` (section 9), which
+- The node's repository entry of the stable suite, `komira-stable` (section 8), which
   hostkeeper's coordinator pushes to every Linux host from its registry of repositories.
 
-## 2. Mint a one-time join token
-
-Mint the token for the instance the node is, named `PROVIDER:INSTANCE_ID`. The provider must be
-one the pool admits.
-
-```
-js join-token mint --server https://js.example.com:8443 --token-file ./client-token \
-    --provider PROVIDER --instance-id INSTANCE_ID --out ./node-5.token
-```
-
-- `--out` creates the file new, with mode 0600, and writes the token and a newline. If the file
-  exists, `js` refuses before it asks the server for anything. If the mint fails, no file is left.
-- `js` prints where the file went and when the token expires. It never prints the token.
-- The token is good for 30 minutes unless you pass `--ttl` (at most 24h). Mint close to the
-  install, or give a longer `--ttl`.
-- Minting again for the same instance replaces its unused tokens.
-- Never put the token on a command line, in a shell variable or in a package.
-
-Carry the file to the node by a channel you trust.
-
-## 3. Place the files on the node
+## 2. Place the files on the node
 
 Do this as root, before you assign the service. Create `/etc/js-agent` first if it does not exist
 (the package's tmpfiles file makes it mode 0700 at boot; the agent's unit does not make it).
-
-The token, root:root with mode 0600:
-
-```
-install -m 600 -o root -g root ./node-5.token /etc/js-agent/token
-```
-
-Or feed it on standard input, so that it is never in an argument:
-
-```
-( umask 077; cat > /etc/js-agent/token ) < ./node-5.token
-chown root:root /etc/js-agent/token
-```
-
-Do not echo the token. Delete the minted file from the place you carried it to.
-
-The instance, one line, `PROVIDER:INSTANCE_ID`, the pair you minted for. It is not secret:
-
-```
-printf '%s\n' 'PROVIDER:INSTANCE_ID' > /etc/js-agent/instance
-```
 
 The flags file, `/etc/js-agent/flags`. The unit passes `--flags-file /etc/js-agent/flags` to the
 agent, and the update hook reads the same file. The rules:
@@ -94,12 +51,13 @@ agent, and the update hook reads the same file. The rules:
 # /etc/js-agent/flags
 --server=https://js.example.com:8443
 --pool=farm
---instance-file=/etc/js-agent/instance
+--host-cert=/var/lib/hostkeeper/identity/host.crt
+--host-key=/var/lib/hostkeeper/identity/host.key
 --host-id=node-5
 --ca-cert=/etc/js-agent/ca.pem
 ```
 
-`--server` and `--pool` are required. `--host-id` and `--ca-cert` are optional (a host of a host group may give `--host-id-from-facts=/var/lib/hostkeeper/facts.json` instead of `--host-id`, never both). Set the mode
+`--server`, `--pool`, `--host-cert` and `--host-key` are required. `--host-id` and `--ca-cert` are optional (a host of a host group may give `--host-id-from-facts=/var/lib/hostkeeper/facts.json` instead of `--host-id`, never both). Set the mode
 and owner:
 
 ```
@@ -141,17 +99,12 @@ drops what is sent to it, the first request uses up its limit and fails; the nex
 name up first. A stale value stops a node only if the name cannot be looked up at that moment
 either.
 
-## 3A. A node that hostkeeper manages needs no join token
+### The host certificate
 
-An enrolled, approved node is trusted. hostkeeper keeps the host's own certificate and private key
+An enrolled, approved node holds a host certificate. hostkeeper keeps the host's own certificate and private key
 at fixed paths it documents and renews both in place before the certificate expires. The flags file
 (`/etc/js-agent/flags`), which the host group's config package installs like every other setting,
-names the two paths, for example:
-
-```
---host-cert=/var/lib/hostkeeper/identity/host.crt
---host-key=/var/lib/hostkeeper/identity/host.key
-```
+names the two paths, as in the example above:
 
 hostkeeper does not edit the flags file.
 
@@ -165,10 +118,9 @@ pass; 0644, 0660 and 0604 do not). The certificate file only has to be readable.
 With both flags the agent presents the certificate to the lease server in the TLS handshake and
 sends no token. It reads the two files again before every request, so a renewal needs no restart;
 it switches to a new pair only when the pair is consistent (the certificate parses, the key passes
-the rule and goes with it) and otherwise keeps the pair it has. The agent does not read
-`--token-file` or a `host-credential` file on such a host and keeps no host credential. Skip
-section 2, and the token and the instance file of section 3: place only the flags file (section 3)
-with the two lines above. The lease server must be `https://` and started with the CA that signs
+the rule and goes with it) and otherwise keeps the pair it has. The agent still accepts
+`--token-file` and `--instance-file` (installed units pass them), reads neither and warns once for
+each at start. The lease server must be `https://` and started with the CA that signs
 these certificates (`--agent-client-ca`); a server without it refuses the handshake.
 
 The flags are both or neither. One alone stops the agent with status 2 and names the other. At
@@ -178,11 +130,10 @@ takes `--host-cert` and `--host-key` the same way, and the user running it must 
 key; given the agent's flags file (`--flags-file /etc/js-agent/flags`) it reads them, the server and
 the host id from there (`docs/runbooks/cordon-a-node.md`).
 
-Keep the token path (sections 2 and 3) for a node that hostkeeper does not manage, such as a node
-launched by the scaler with a one-time token in its launch data. Its flags file names neither flag,
-and nothing changes for it.
+A node that hostkeeper does not manage needs a certificate of its own that the server's
+`--agent-client-ca` accepts, at paths you name with the two flags. There is no other way to join.
 
-## 4. A node that ran the archive package or the setup script's unit
+## 3. A node that ran the archive package or the setup script's unit
 
 A node that ran the agent from hostkeeper's archive package (`hostkeeper-archive`, deleted from
 hostkeeper) moves to the `.deb` on the first order of the native entry: hostkeeper's `activate`
@@ -193,9 +144,9 @@ A node set up by the held setup script (`crun_host_setup.sh`) has its own copy o
 `/etc/systemd/system/js-agent-crun.service`, `/etc/systemd/system/js-agent-crun-gpu.service`,
 `/etc/tmpfiles.d/js-agent-crun.conf` and any `/etc/systemd/system/js-agent-crun.service.d`
 override that sets `ExecStart=`, and move `--server` and `--pool` into `/etc/js-agent/flags`
-(section 3), before you assign the service.
+(section 2), before you assign the service.
 
-## 5. Assign the service and set the version
+## 4. Assign the service and set the version
 
 hostkeeper's coordinator decides which services a node runs. All the `hostkeeper ctl` commands
 below take the coordinator's address, its CA and an operator token file:
@@ -237,36 +188,25 @@ each node the entry of its own platform.
 
 hostkeeper's own documents on assignments say when an install is ordered and what holds one back.
 
-## 6. What happens next
+## 5. What happens next
 
 1. At its next heartbeat, hostkeeper orders the node to install `js-agent` at the desired
    version. It downloads the `.deb` from the stable suite, checks it against the pin, extracts it
    into the version's directory under `/var/lib/hostkeeper/packages/js-agent/` and runs the hook's
    `prepare` from that copy (`tree/usr/bin/js-agent`).
-2. On a first install, `prepare` checks that the node has a way to authenticate. When the flags file
-   (`/etc/js-agent/flags`) names `--host-cert` and `--host-key`, it does not look at the token file:
-   it checks that the certificate file is there and that the key passes the rule of section 3A,
-   and defers with the reason `join_token_missing`, naming the file to fix, otherwise. When the
-   flags file names neither flag, or cannot be read, it defers with the reason `join_token_missing`
-   unless the token file is a regular file, owned by the user running the hook (root), with mode
-   0600 or 0400. hostkeeper retries the install. Fix the file and the next attempt goes on. A node
-   whose state root already holds a usable `host-credential` is not deferred by the token file.
+2. On a first install, `prepare` checks that the node has a way to authenticate: the flags file
+   (`/etc/js-agent/flags`) must name `--host-cert` and `--host-key`, the certificate file must be
+   there and the key must pass the rule of section 2. Otherwise it defers with the reason
+   `join_token_missing` (the name is a shipped wire value, kept), naming the file to fix.
+   hostkeeper retries the install. Fix the file and the next attempt goes on.
 3. When `prepare` passes, hostkeeper installs the `.deb` with `apt-get` (the package's
    `/usr/bin/js-agent` and its units), holds it, switches `current`, runs `cutover`, which starts
    the agent, and then `verify`.
-4. A node with `--host-cert` and `--host-key` says hello with its certificate, and the server
-   registers the host under the host id the certificate names, with no token and no host
-   credential. Otherwise the agent says hello to the server with the token and the instance. The server registers the
-   host and answers with a host credential. The agent stores it in its state root as the file
-   `host-credential`, and sends it from then on. The one-time token is retired by the server and is
-   spent.
+4. The agent says hello with its certificate, and the server registers the host under the host
+   id the certificate names.
    - State root: `/var/lib/js-agent/state`.
 
-On a node that uses a join token, keep `/etc/js-agent/token`. Do not delete it. The unit still passes
-`--token-file /etc/js-agent/token`, the agent reads that file again at every start, and a file
-that is given and missing stops it.
-
-## 7. Check it worked
+## 6. Check it worked
 
 The host is registered. `js` has no verb that lists hosts. Read the lease server's `GET /v1/hosts`
 (see `docs/http-gateway.md`) with a client token. The host is listed with its host id (`node-5` if
@@ -290,44 +230,7 @@ hostkeeper ctl --endpoint https://hostkeeper.example.com:9443 --ca-file ./ca.pem
 
 `hostkeeper admin status` runs on the node and shows the installed services and their versions.
 
-## 8. Troubleshooting
-
-### The update fails with `host-credential-required`
-
-The hook's refusal reads `refused: host-credential-required: no host credential in the state root:
-this host enrolled with the shared pool token; re-enroll with a join token`. The agent was
-admitted with the pool's shared token (the server's log says `credential_issued=false`), so the
-state root holds no `host-credential`, and the server refuses the shared token on the host's own
-routes, which the hook uses. The agent itself keeps working. Re-enroll the host: mint a one-time
-token (section 2) and place it (section 3). The host id is bound to the shared token's digest,
-so with the server stopped delete that host's binding (`hosts/binding/<host id>` in the store, or
-its entry in the `.agents` file), stop the agent first so it cannot bind the id again when the
-server starts, then start the server and the agent. The agent's hello is answered with a host
-credential (`credential_issued=true`) and `host-credential` appears in the state root.
-
-### The server refuses the token, or says it expired
-
-The server answers `join-token-expired` for a token past its time, `join-token-used` for a token
-that already registered another host, and `join-token-instance` for a hello that names another
-instance or none. Mint a new token (section 2, with a new `--out` path or after removing the old
-file), replace `/etc/js-agent/token` with `install` as in section 3, and check that
-`/etc/js-agent/instance` is the pair you minted for and that `--instance-file` is in the flags
-file. The agent unit restarts on its own and reads the new file.
-
-A host silent for longer than 24 hours after its first hello also needs a new token.
-
-### Revoke a token
-
-To drop every token bound to an instance, used or not, for example for a node you will not bring
-up:
-
-```
-js join-token revoke --server https://js.example.com:8443 --token-file ./client-token \
-    --provider PROVIDER --instance-id INSTANCE_ID
-```
-
-It is idempotent. A revoked token is unknown to the server. A server that admits no agents
-answers `join-tokens-unsupported`.
+## 7. Troubleshooting
 
 ### The flags file is refused
 
@@ -351,21 +254,20 @@ A line is also not a flag when it is only `--`.
 
 ### The first install keeps deferring
 
-hostkeeper shows the install as deferred, and the hook's reason is `join_token_missing`. On a node
-whose flags file names `--host-cert` and `--host-key`, the detail names the file to fix: a
+hostkeeper shows the install as deferred, and the hook's reason is `join_token_missing`. The detail names the file to fix: a
 certificate or key that is not there, a key that others can read or its group can write, or a key
-owned by a user that is neither root nor the user running the hook (section 3A). A flags file
-that cannot be read (missing, writable by group or others, one of the two flags alone) counts as
-naming neither, so the check goes to the token file; the agent itself stops on such a file when it
-starts, naming it. On any other node, check the token file:
+owned by a user that is neither root nor the user running the hook (section 2). A flags file
+that cannot be read (missing, writable by group or others, one of the two flags alone) is a
+failure too; the agent itself stops on such a file when it starts, naming it. hostkeeper retries
+on its own; there is nothing to restart. `hostkeeper admin status` and
+`releases status --service js-agent` (section 6) show where the install stands.
 
-```
-ls -l /etc/js-agent/token
-```
+### The server answers `host-certificate-required`
 
-It must be a regular file, owned by root, mode 0600 or 0400. Place the file with `install` as in
-section 3. The hook reads the path from the package's params, which is `/etc/js-agent/token`. hostkeeper retries on its own; there is nothing to restart. `hostkeeper admin
-status` and `releases status --service js-agent` (section 7) show where the install stands.
+The server refused an agent request that carried no verified host certificate (a 401 with the
+body `{"error":"host-certificate-required"}`). Check that the server runs with `--agent-client-ca` and a TLS listener, that the agent's `--server`
+is `https://`, and that the certificate and key named by `--host-cert` and `--host-key` are the
+host's, signed by that CA.
 
 ### The server refuses the hello with shape-not-accepted
 
@@ -431,7 +333,7 @@ not at a remount, so the filesystem is unmounted and mounted again. One node at 
 4. Let the cordon end (stop the `js-agent cordon` process, or let `--for` pass), then go on to the
    next node.
 
-## 9. Trust: the repository's key and the pin
+## 8. Trust: the repository's key and the pin
 
 hostkeeper installs the `.deb` only from a suite whose `InRelease` is signed by a key in the host's
 keyring for the repository entry, and only a file whose SHA-256 is the one the order pins (the

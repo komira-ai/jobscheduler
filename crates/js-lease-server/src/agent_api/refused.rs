@@ -7,8 +7,6 @@ use js_agent_wire::ProtocolRange;
 use js_registry::Refusal;
 use serde::Serialize;
 
-use crate::join_tokens::JoinRefusal;
-
 /// An error answer: a status and `{"error": "<code>"}`, with the majors the server
 /// speaks when the code is `unsupported-protocol`.
 #[derive(Debug, Serialize)]
@@ -35,17 +33,6 @@ impl Refused {
             field: None,
             reason: None,
         }
-    }
-
-    /// The answer to a refused one-time token: 503 when the use could not be written down or
-    /// the credential could not be made, 403 otherwise. The code names the fault and
-    /// nothing of the token.
-    pub(super) fn join(refusal: JoinRefusal) -> Self {
-        let status = match refusal {
-            JoinRefusal::Unsaved | JoinRefusal::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
-            _ => StatusCode::FORBIDDEN,
-        };
-        Self::new(status, refusal.code())
     }
 
     /// The answer to a registry refusal: 400 for a message that breaks the wire's rules,
@@ -99,7 +86,6 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::join_tokens::JoinRefusal;
     use js_agent_wire::{Heartbeat, Hello};
 
     /// Every refusal of the registry has the status and the wire code the API documents:
@@ -215,30 +201,5 @@ mod tests {
         }
         let plain = serde_json::to_value(Refused::of(&Refusal::HostLive)).unwrap();
         assert_eq!(plain, json!({ "error": "host-live" }));
-    }
-
-    /// Every refusal of a one-time token has its status and code: 503 for the use that
-    /// could not be written down (the agent may try again), 403 for the rest.
-    #[test]
-    fn every_join_refusal_has_its_status_and_code() {
-        let cases = [
-            (JoinRefusal::Expired, 403, "join-token-expired"),
-            (JoinRefusal::Used, 403, "join-token-used"),
-            (JoinRefusal::WrongInstance, 403, "join-token-instance"),
-            (JoinRefusal::NotAdmitted, 403, "join-token-not-admitted"),
-            (JoinRefusal::Unsaved, 503, "join-token-unsaved"),
-            (JoinRefusal::Unavailable, 503, "join-token-unavailable"),
-            (
-                JoinRefusal::CredentialRequired,
-                403,
-                "join-token-credential-required",
-            ),
-        ];
-        for (refusal, status, code) in cases {
-            let answer = Refused::join(refusal);
-            assert_eq!(answer.status.as_u16(), status, "{code}");
-            assert_eq!(answer.error, code);
-            assert!(answer.supported.is_none());
-        }
     }
 }

@@ -29,10 +29,7 @@ tonic.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
 js-conformance = { path = "../js-conformance" }
-js-lease-server = { path = "../js-lease-server" }
 js-testkit = { path = "../js-testkit" }
-js-types = { path = "../js-types" }
-rcgen.workspace = true
 # `signals`: the test sends the process the signal its handlers are installed for.
 rustix = { workspace = true, features = ["process"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }

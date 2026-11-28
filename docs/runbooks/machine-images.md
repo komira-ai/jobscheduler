@@ -63,14 +63,13 @@ The agent's configuration comes from the provider's user data at boot. The user 
 
 | path | mode | required | what |
 |---|---|---|---|
-| `/etc/systemd/system/js-agent-crun.service.d/50-user-data.conf` | 0644 | yes | `[Service]`, then `ExecStart=` (cleared) and `ExecStart=` set again: the baked unit's line with this host's `--server` and `--pool` |
-| `/etc/js-agent/token` | 0600 | yes | the join token the agent reads with `--token-file` |
+| `/etc/systemd/system/js-agent-crun.service.d/50-user-data.conf` | 0644 | yes | `[Service]`, then `ExecStart=` (cleared) and `ExecStart=` set again: the baked unit's line with this host's `--server`, `--pool`, `--host-cert` and `--host-key` |
 | `/etc/hostkeeper/hostkeeper.toml` | 0600 | no | hostkeeper's config, filled from `/usr/share/hostkeeper/hostkeeper.toml.template`; without it hostkeeper does not start |
 
 The baked unit's line is:
 
 ```text
-/opt/js-agent/link/current/js-agent --server <server> --token-file /etc/js-agent/token --pool <pool> --drain-wait 3600 --stop-grace 120 --crun-bin /usr/bin/crun --job-user jsjob --state-root /var/lib/js-agent/state --scratch-root /var/lib/js-agent/scratch/runs
+/opt/js-agent/link/current/js-agent --server <server> --pool <pool> --drain-wait 3600 --stop-grace 120 --crun-bin /usr/bin/crun --job-user jsjob --state-root /var/lib/js-agent/state --scratch-root /var/lib/js-agent/scratch/runs
 ```
 
 `js-agent-user-data.service` runs after `cloud-init.service` and before the agent and hostkeeper.

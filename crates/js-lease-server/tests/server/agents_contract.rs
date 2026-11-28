@@ -5,7 +5,7 @@
 use serde_json::{Value, json};
 
 use crate::agents_support::{
-    JOIN, POOL, agent_args, hello_body, hosts, listed, post, session, start_agents,
+    POOL, agent_args, hello_body, hosts, listed, post, session, start_agents,
 };
 use crate::support::{Harness, Scratch};
 
@@ -46,16 +46,16 @@ async fn a_container_pool_names_what_the_host_lacks() {
     };
     let old = hello_body("old");
     refused(
-        post(&h, "/v1/agent/hello", Some(JOIN), &old).await,
+        post(&h, "/v1/agent/hello", None, &old).await,
         "host-contract",
         "runtime",
     );
     let runtime = [("runtime", "container"), ("exec", "container")];
     let bare = reporting("bare", &runtime);
-    let reply = post(&h, "/v1/agent/hello", Some(JOIN), &bare).await;
+    let reply = post(&h, "/v1/agent/hello", None, &bare).await;
     refused(reply, "host-contract", "gpu-toolkit");
     let other = [("runtime", "container"), ("exec", "sandbox-exec")];
-    let reply = post(&h, "/v1/agent/hello", Some(JOIN), &reporting("mac", &other)).await;
+    let reply = post(&h, "/v1/agent/hello", None, &reporting("mac", &other)).await;
     refused(reply, "execution-mismatch", "exec");
     assert!(hosts(&h).await["hosts"].as_array().unwrap().is_empty());
 
@@ -64,13 +64,7 @@ async fn a_container_pool_names_what_the_host_lacks() {
         ("exec", "container"),
         ("gpu-toolkit", "true"),
     ];
-    let reply = post(
-        &h,
-        "/v1/agent/hello",
-        Some(JOIN),
-        &reporting("good", &whole),
-    )
-    .await;
+    let reply = post(&h, "/v1/agent/hello", None, &reporting("good", &whole)).await;
     session(&reply, "good");
     assert_eq!(listed(&hosts(&h).await), ["good"]);
 }
@@ -82,7 +76,7 @@ async fn a_container_pool_names_what_the_host_lacks() {
 #[tokio::test]
 async fn a_pool_without_exec_admits_old_and_new_agents() {
     let h = start_agents("agents_contract_none").await;
-    let old = post(&h, "/v1/agent/hello", Some(JOIN), &hello_body("old")).await;
+    let old = post(&h, "/v1/agent/hello", None, &hello_body("old")).await;
     assert!(old.json().get("field").is_none(), "{}", old.body);
     session(&old, "old");
     let whole = [
@@ -90,11 +84,11 @@ async fn a_pool_without_exec_admits_old_and_new_agents() {
         ("exec", "container"),
         ("gpu-toolkit", "true"),
     ];
-    let new = post(&h, "/v1/agent/hello", Some(JOIN), &reporting("new", &whole)).await;
+    let new = post(&h, "/v1/agent/hello", None, &reporting("new", &whole)).await;
     session(&new, "new");
     let mut other_arch = hello_body("other-arch");
     other_arch["capabilities"]["arch"] = json!("arm64");
-    let reply = post(&h, "/v1/agent/hello", Some(JOIN), &other_arch).await;
+    let reply = post(&h, "/v1/agent/hello", None, &other_arch).await;
     assert_eq!(
         reply.json(),
         json!({ "error": "shape-not-accepted", "reason": "below-floor" })

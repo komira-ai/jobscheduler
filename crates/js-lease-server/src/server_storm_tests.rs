@@ -23,7 +23,7 @@ use js_types::ManualClock;
 use nix::sys::resource::{UsageWho, getrusage};
 use serde_json::{Value, json};
 
-use super::listen_tests::{JOIN, database, other_server, post, queued};
+use super::listen_tests::{database, other_server, post, queued};
 use super::{Running, start};
 use crate::clock::SharedClock;
 use crate::config::{Cli, Config};
@@ -86,10 +86,6 @@ async fn farm_server(
             "--token-file",
             write("token", "test-token-0123456789-abcdefghijkl", 0o600),
         ),
-        (
-            "--agent-token-file",
-            write("agent-tokens", &format!("{JOIN}\n"), 0o600),
-        ),
         ("--agent-pool-config", write("agent-pool.toml", POOL, 0o644)),
         ("--store", write("store", &format!("{url}\n"), 0o600)),
     ];
@@ -109,7 +105,7 @@ async fn farm_server(
 
 /// The hello of the host `n` of the pool, at the agent routes `agents`, as a per-job host; its
 /// welcome.
-async fn hello(agents: SocketAddr, n: usize) -> Value {
+async fn hello(agents: &axum::Router, n: usize) -> Value {
     let host_id = format!("farm-{n}");
     let hello = json!({
         "host_id": host_id,
@@ -126,7 +122,7 @@ async fn hello(agents: SocketAddr, n: usize) -> Value {
 
 /// The host `n`, welcomed `welcome`, sends [`BEATS`] heartbeats to `agents`, each as soon as the
 /// last was answered, listing nothing.
-async fn beats(agents: SocketAddr, n: usize, welcome: Value) {
+async fn beats(agents: axum::Router, n: usize, welcome: Value) {
     let host_id = format!("farm-{n}");
     for seq in 1..=BEATS {
         let beat = json!({
@@ -136,7 +132,7 @@ async fn beats(agents: SocketAddr, n: usize, welcome: Value) {
             "phase": "serving",
             "seq": seq,
         });
-        let (status, reply): (u16, Value) = post(agents, "/v1/agent/heartbeat", &beat).await;
+        let (status, reply): (u16, Value) = post(&agents, "/v1/agent/heartbeat", &beat).await;
         assert_eq!(status, 200, "{reply}");
     }
 }
@@ -221,18 +217,18 @@ fn a_farm_shaped_server_starts_no_thread_for_a_store_call() {
         .unwrap();
     runtime.block_on(async {
         let (running, ticks, _dir) = farm_server(&url, Arc::clone(&store_clock)).await;
-        let agents = running.agent_addr().unwrap();
+        let agents = crate::api::agent_router(&running.shared);
         let mut welcomes = Vec::new();
         let hellos = cost(&running, async {
             for n in 1..=HOSTS {
-                welcomes.push(hello(agents, n).await);
+                welcomes.push(hello(&agents, n).await);
             }
         })
         .await;
         let beaten = cost(&running, async {
             let mut hosts = tokio::task::JoinSet::new();
             for (n, welcome) in (1..=HOSTS).zip(welcomes) {
-                let _ = hosts.spawn(beats(agents, n, welcome));
+                let _ = hosts.spawn(beats(agents.clone(), n, welcome));
             }
             hosts.join_all().await;
         })

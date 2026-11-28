@@ -72,7 +72,8 @@ fn the_agent_side_refuses_two_pools_of_one_name_and_takes_two_names() {
     let state = config.state_file.clone();
     let assembled = assemble(config.agents, config.usage, &clock, &state, None).unwrap();
     assert_eq!(assembled.registry.pool_id().as_str(), "burst");
-    assert_eq!(assembled.more_tokens[0].pool, "macs");
+    assert_eq!(assembled.registry.pool_cap("macs"), Some(2));
+    assert_eq!(assembled.registry.pool_cap("elsewhere"), None);
     drop(assembled);
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/agents_pools");
     let dir = TestDir::under(root, "one_name");

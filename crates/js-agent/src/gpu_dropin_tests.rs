@@ -764,7 +764,7 @@ fn exec_start_is_read_as_systemd_reads_it() {
     );
 }
 
-/// The unit the .deb installs names only `--flags-file` and `--token-file`: the server and the
+/// The unit the .deb installs names `--flags-file` and no `--server`: the server and the
 /// pool are in the operator's flags file. The checks read the file as the agent does, and the
 /// drop-in keeps `--flags-file` as the unit has it, so the agent reads the file at its start.
 #[test]

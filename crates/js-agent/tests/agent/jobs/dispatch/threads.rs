@@ -3,7 +3,6 @@
 //! which answers it, so the poller runs as fast as the test and no faster; every wait on
 //! another thread is for an event with a hang guard.
 
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -12,17 +11,17 @@ use std::time::Duration;
 
 use js_agent::dispatch::{Cell, Dial, serve};
 use js_agent::{
-    Answer, Connector, CredentialFile, CredentialState, Drain, Handle, Login, Session, Sleeper,
+    Answer, Connector, Drain, HEARTBEAT_PATH, HELLO_PATH, Handle, Login, Session, Sleeper, Step,
     Transport, Wake, Worker,
 };
 use js_agent_wire::{Command, DISPATCH_PATH, Dispatched, HeartbeatReply};
-use js_client::ClientError;
+use js_client::{ClientError, HostIdentity};
 use serde_json::{Value, json};
 
 use super::{GUARD, acked, handed, quiet, spec, welcome_polling, welcomed};
 use crate::jobs::drain::container_flags;
 use crate::jobs::fake::FakeMachine;
-use crate::jobs::{private, start};
+use crate::jobs::start;
 use crate::support::{
     Lowest, Reply, SECRET, Scratch, Script, ScriptConnector, beat_ok, flags, hello, limited,
     linux_host, lowest, refused, reply, run_on_polling, welcome,
@@ -37,7 +36,7 @@ const DRAIN: Drain = Drain {
 /// What the poller's connector and its transports share with the test: every poll is handed
 /// to the test, which answers it, so the poller runs as fast as the test and no faster.
 struct Rig {
-    polls: Mutex<Sender<(Value, Option<String>)>>,
+    polls: Mutex<Sender<Value>>,
     replies: Mutex<Receiver<Reply>>,
     connects: AtomicUsize,
 }
@@ -47,7 +46,6 @@ struct RigConnector(Arc<Rig>);
 
 struct RigTransport {
     rig: Arc<Rig>,
-    credential: Option<String>,
 }
 
 impl Connector for RigConnector {
@@ -60,7 +58,6 @@ impl Connector for RigConnector {
         self.0.connects.fetch_add(1, Ordering::SeqCst);
         Ok(Box::new(RigTransport {
             rig: self.0.clone(),
-            credential: None,
         }))
     }
 }
@@ -68,14 +65,13 @@ impl Connector for RigConnector {
 impl Transport for RigTransport {
     fn post(&mut self, path: &str, body: &Value) -> Result<Answer, String> {
         assert_eq!(path, DISPATCH_PATH);
-        let sent = (body.clone(), self.credential.clone());
         let polls = self
             .rig
             .polls
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         polls
-            .send(sent)
+            .send(body.clone())
             .map_err(|_| "the test is gone".to_owned())?;
         drop(polls);
         let replies = self
@@ -87,22 +83,17 @@ impl Transport for RigTransport {
             .recv_timeout(GUARD)
             .map_err(|_| "no answer".to_owned())?
     }
-
-    fn adopt_credential(&mut self, secret: &str) -> Result<(), String> {
-        self.credential = Some(secret.to_owned());
-        Ok(())
-    }
 }
 
 /// The test's end of a [`Rig`]: the polls that arrive, and the answers it gives.
 struct Driver {
-    polls: Receiver<(Value, Option<String>)>,
+    polls: Receiver<Value>,
     replies: Sender<Reply>,
 }
 
 impl Driver {
-    /// The next poll and the credential its transport authenticated with.
-    fn next(&self) -> (Value, Option<String>) {
+    /// The next poll.
+    fn next(&self) -> Value {
         self.polls.recv_timeout(GUARD).expect("the poller polled")
     }
 
@@ -112,7 +103,7 @@ impl Driver {
 
     /// Answers nothing more: a poll in flight, and every later one, fails at once. Returns
     /// the polls that arrive.
-    fn finish(self) -> Receiver<(Value, Option<String>)> {
+    fn finish(self) -> Receiver<Value> {
         self.polls
     }
 }
@@ -149,7 +140,10 @@ fn serving<R>(
     connector: &RigConnector,
     body: impl FnOnce() -> R,
 ) -> R {
-    let login = Login::Token(PathBuf::from("/nonexistent/token"));
+    let login = Login::HostCertificate(HostIdentity::new(
+        "/nonexistent/host.crt",
+        "/nonexistent/host.key",
+    ));
     let dial = Dial {
         connector,
         server: "http://127.0.0.1:1",
@@ -166,32 +160,29 @@ fn serving<R>(
 /// Asserts that the poller polls only once a welcome says `dispatch_poll`; polls again at once
 /// after every answer; uses the session of the welcome that replaced the one before (the poll
 /// in flight when it arrives is answered, the next names the new epoch and session);
-/// authenticates with the credential of the route; and stops for a welcome without the flag.
-/// Catches a poller that keeps the first welcome's session after a second hello, one that
-/// polls before any welcome or after the flag is withdrawn, one that waits between answered
-/// polls, and one whose transport lacks the host credential.
+/// and stops for a welcome without the flag. Catches a poller that keeps the first welcome's
+/// session after a second hello, one that polls before any welcome or after the flag is
+/// withdrawn, and one that waits between answered polls.
 #[test]
 fn the_poller_follows_each_welcome_and_stops_when_the_flag_is_withdrawn() {
     let dir = Scratch::new("jobs-dispatch-serve");
     let machine = FakeMachine::new();
     let worker = start(&dir, &machine);
-    let cell = Cell::new(None);
+    let cell = Cell::new();
     let (connector, driver) = rig();
 
     let arrived = serving(&cell, &worker, &connector, || {
         let polling = |epoch: u64, session: &str, polling: bool| {
-            let welcome = welcomed(epoch, session, polling, Some("host-credential-1"));
-            cell.publish("h1", &welcome, CredentialState::Saved);
+            cell.publish("h1", &welcomed(epoch, session, polling));
         };
         polling(1, "session-one", true);
-        let (first, credential) = driver.next();
+        let first = driver.next();
         assert_eq!(first["epoch"], 1);
         assert_eq!(first["session"], "session-one");
         assert_eq!(first["host_id"], "h1");
-        assert_eq!(credential.as_deref(), Some("host-credential-1"));
         polling(2, "session-two", true);
         driver.answer(quiet());
-        let (second, _) = driver.next();
+        let second = driver.next();
         assert_eq!(second["epoch"], 2);
         assert_eq!(second["session"], "session-two");
         polling(3, "session-three", false);
@@ -203,48 +194,36 @@ fn the_poller_follows_each_welcome_and_stops_when_the_flag_is_withdrawn() {
     assert_eq!(
         connector.0.connects.load(Ordering::SeqCst),
         1,
-        "both routes name one credential: one transport"
+        "both routes ride one transport"
     );
 }
 
 /// Asserts that the polls share one transport, as the session's heartbeats do: three polls of
-/// one route, and a later route of the same credential, make one transport; a route that
-/// names another credential makes a new one, which authenticates with it. It catches a poller
-/// that makes a transport for each poll, whose every poll then opens a connection and looks
-/// the server's name up again (and fails while the name cannot be looked up, though the
+/// one route, and the polls of a later route, make one transport. It catches a poller that
+/// makes a transport for each poll, whose every poll then opens a connection and looks the
+/// server's name up again (and fails while the name cannot be looked up, though the
 /// heartbeats, on their kept transport, go on).
 #[test]
-fn the_polls_share_one_transport_until_the_credential_changes() {
+fn the_polls_share_one_transport() {
     let dir = Scratch::new("jobs-dispatch-one-transport");
     let machine = FakeMachine::new();
     let worker = start(&dir, &machine);
-    let cell = Cell::new(None);
+    let cell = Cell::new();
     let (connector, driver) = rig();
     let connects = || connector.0.connects.load(Ordering::SeqCst);
 
     serving(&cell, &worker, &connector, || {
-        let welcome = welcomed(1, "one", true, Some("credential-one"));
-        cell.publish("h1", &welcome, CredentialState::Saved);
+        cell.publish("h1", &welcomed(1, "one", true));
         for _ in 0..3 {
-            let (_, credential) = driver.next();
-            assert_eq!(credential.as_deref(), Some("credential-one"));
+            driver.next();
             driver.answer(quiet());
         }
         let _in_flight = driver.next();
-        let again = welcomed(2, "two", true, Some("credential-one"));
-        cell.publish("h1", &again, CredentialState::Saved);
+        cell.publish("h1", &welcomed(2, "two", true));
         driver.answer(quiet());
-        let (second, credential) = driver.next();
+        let second = driver.next();
         assert_eq!(second["epoch"], 2);
-        assert_eq!(credential.as_deref(), Some("credential-one"));
         assert_eq!(connects(), 1);
-        let renewed = welcomed(3, "three", true, Some("credential-two"));
-        cell.publish("h1", &renewed, CredentialState::Saved);
-        driver.answer(quiet());
-        let (third, credential) = driver.next();
-        assert_eq!(third["epoch"], 3);
-        assert_eq!(credential.as_deref(), Some("credential-two"));
-        assert_eq!(connects(), 2);
         driver.finish();
     });
 }
@@ -259,17 +238,17 @@ fn a_refused_poll_is_polled_again_with_the_same_session() {
     let dir = Scratch::new("jobs-dispatch-refused");
     let machine = FakeMachine::new();
     let worker = start(&dir, &machine);
-    let cell = Cell::new(None);
+    let cell = Cell::new();
     let (connector, driver) = rig();
 
     serving(&cell, &worker, &connector, || {
-        cell.publish("h1", &welcomed(1, "one", true, None), CredentialState::None);
+        cell.publish("h1", &welcomed(1, "one", true));
         driver.next();
         driver.answer(handed(vec![Dispatched::start(spec("j1"))]));
-        let (carrying, _) = driver.next();
+        let carrying = driver.next();
         assert_eq!(acked(&carrying), ["start:alloc-j1"]);
         driver.answer(refused(409, "dispatch-not-served"));
-        let (after, _) = driver.next();
+        let after = driver.next();
         assert_eq!(after["epoch"], 1);
         assert_eq!(after["session"], "one");
         assert_eq!(acked(&after), ["start:alloc-j1"], "kept across the refusal");
@@ -286,11 +265,14 @@ fn a_pause_ends_at_a_new_welcome_and_at_the_end_of_the_agent() {
     let dir = Scratch::new("jobs-dispatch-pause");
     let machine = FakeMachine::new();
     let worker = start(&dir, &machine);
-    let cell = Cell::new(None);
+    let cell = Cell::new();
     let (connector, driver) = rig();
     let (done, finished) = channel();
 
-    let login = Login::Token(PathBuf::from("/nonexistent/token"));
+    let login = Login::HostCertificate(HostIdentity::new(
+        "/nonexistent/host.crt",
+        "/nonexistent/host.key",
+    ));
     let dial = Dial {
         connector: &connector,
         server: "http://127.0.0.1:1",
@@ -303,11 +285,11 @@ fn a_pause_ends_at_a_new_welcome_and_at_the_end_of_the_agent() {
             let _ = done.send(());
         });
         let _closing = Closing(&cell);
-        cell.publish("h1", &welcomed(1, "one", true, None), CredentialState::None);
+        cell.publish("h1", &welcomed(1, "one", true));
         driver.next();
         driver.answer(limited(429, 60));
-        cell.publish("h1", &welcomed(2, "two", true, None), CredentialState::None);
-        let (next, _) = driver.next();
+        cell.publish("h1", &welcomed(2, "two", true));
+        let next = driver.next();
         assert_eq!(next["epoch"], 2);
         driver.answer(limited(429, 60));
         cell.close();
@@ -341,10 +323,13 @@ fn a_transport_that_cannot_be_made_is_a_failed_poll() {
     let dir = Scratch::new("jobs-dispatch-refusing");
     let machine = FakeMachine::new();
     let worker = start(&dir, &machine);
-    let cell = Cell::new(None);
+    let cell = Cell::new();
     let (tried, connecting) = channel();
     let refusing = Refusing(Mutex::new(tried));
-    let login = Login::Token(PathBuf::from("/nonexistent/token"));
+    let login = Login::HostCertificate(HostIdentity::new(
+        "/nonexistent/host.crt",
+        "/nonexistent/host.key",
+    ));
     let dial = Dial {
         connector: &refusing,
         server: "http://127.0.0.1:1",
@@ -359,7 +344,7 @@ fn a_transport_that_cannot_be_made_is_a_failed_poll() {
             let _ = done.send(());
         });
         let _closing = Closing(&cell);
-        cell.publish("h1", &welcomed(1, "one", true, None), CredentialState::None);
+        cell.publish("h1", &welcomed(1, "one", true));
         connecting
             .recv_timeout(GUARD)
             .expect("the poller tried to connect");
@@ -380,11 +365,11 @@ fn the_poller_thread_holds_what_the_worker_has_no_room_for_until_it_makes_room()
     let machine = FakeMachine::new();
     let worker = start(&dir, &machine);
     super::held::fill(&worker, &machine);
-    let cell = Cell::new(None);
+    let cell = Cell::new();
     let (connector, driver) = rig();
 
     serving(&cell, &worker, &connector, || {
-        cell.publish("h1", &welcomed(1, "one", true, None), CredentialState::None);
+        cell.publish("h1", &welcomed(1, "one", true));
         driver.next();
         driver.answer(handed(vec![Dispatched::start(spec("j1"))]));
         assert_eq!(
@@ -393,7 +378,7 @@ fn the_poller_thread_holds_what_the_worker_has_no_room_for_until_it_makes_room()
         );
         assert_eq!(connector.0.connects.load(Ordering::SeqCst), 1);
         machine.world.release();
-        let (carrying, _) = driver.next();
+        let carrying = driver.next();
         assert_eq!(acked(&carrying), ["start:alloc-j1"]);
         assert_eq!(
             connector.0.connects.load(Ordering::SeqCst),
@@ -419,28 +404,23 @@ fn session_over<'a>(script: &'a mut Script, worker: &'a Worker, cell: &'a Cell) 
 }
 
 /// Asserts that a session tells its cell every welcome: the route (host, epoch and session) of
-/// one that says `dispatch_poll`, none for one that does not, the host credential it adopted,
-/// and that a drain closes the cell. Catches a session that never publishes, one that
-/// publishes the session of the welcome before, one that publishes a credential it did not
-/// adopt, and a drain that leaves the poller taking starts the worker will not act on.
+/// one that says `dispatch_poll`, none for one that does not, and that a drain closes the cell.
+/// Catches a session that never publishes, one that publishes the session of the welcome
+/// before, and a drain that leaves the poller taking starts the worker will not act on.
 #[test]
 fn a_session_tells_its_cell_each_welcome_and_closes_it_at_a_drain() {
     let dir = Scratch::new("jobs-dispatch-session");
-    let state = private(&dir, "state");
-    let store = CredentialFile::in_dir(&state);
     let machine = FakeMachine::new();
     let worker = start(&dir, &machine);
-    let cell = Cell::new(None);
-    let mut issuing = welcome_polling(1).unwrap();
-    issuing.body["host_credential"] = json!("issued-credential");
+    let cell = Cell::new();
     let (mut script, _) = Script::new(vec![
-        Ok(issuing),
+        welcome_polling(1),
         refused(409, "stale-epoch"),
         welcome(2),
         refused(409, "stale-epoch"),
         welcome_polling(3),
     ]);
-    let mut session = session_over(&mut script, &worker, &cell).with_credential_store(&store);
+    let mut session = session_over(&mut script, &worker, &cell);
 
     session.tick();
     let (generation, route) = cell.try_route().unwrap();
@@ -449,7 +429,6 @@ fn a_session_tells_its_cell_each_welcome_and_closes_it_at_a_drain() {
         (1, 1, "h1")
     );
     assert_eq!(route.session, SECRET);
-    assert_eq!(route.credential.unwrap().expose(), "issued-credential");
     session.tick();
     session.tick();
     assert!(cell.try_route().is_none(), "a welcome without the flag");
@@ -460,29 +439,38 @@ fn a_session_tells_its_cell_each_welcome_and_closes_it_at_a_drain() {
     assert!(cell.wait_route().is_none(), "the drain closed the cell");
 }
 
-/// Asserts that a session with no cell says nothing to a poller and works as it did, and that
-/// a session whose transport refused the credential publishes none. Catches a session that
-/// needs a cell, and one that hands the poller a credential its own transport refused.
+/// Asserts that a session with no cell, welcomed by a server that offers the dispatch poll,
+/// works as it did: its first tick says hello for its host and is answered with a wait (the
+/// session is live, not failed or refused), the drain keeps the session's drain plan, and the
+/// next tick beats for the welcome's epoch saying it drains. Nothing else is sent: no poller
+/// runs without a cell. Catches a session that needs a cell, one that fails or ends on a
+/// polling welcome it cannot hand on, and a drain that is not reported to the server.
 #[test]
-fn a_session_without_a_cell_or_with_a_refused_credential_publishes_nothing_wrong() {
+fn a_session_without_a_cell_says_nothing_to_a_poller() {
     let dir = Scratch::new("jobs-dispatch-session-bare");
-    let state = private(&dir, "state");
-    let store = CredentialFile::in_dir(&state);
     let machine = FakeMachine::new();
     let worker = start(&dir, &machine);
-    let (mut script, _) = Script::new(vec![welcome_polling(1)]);
+    let (mut script, sent) = Script::new(vec![welcome_polling(1), beat_ok()]);
     let mut session = Session::new(hello("h1"), &mut script, lowest()).with_jobs(&worker, DRAIN);
-    session.tick();
+    let welcomed = session.tick();
+    assert!(matches!(welcomed, Step::Wait { .. }), "{welcomed:?}");
     session.begin_drain();
-
-    let cell = Cell::new(None);
-    let mut issuing = welcome_polling(1).unwrap();
-    issuing.body["host_credential"] = json!("refused-credential");
-    let (script, _) = Script::new(vec![Ok(issuing)]);
-    let mut script = script.refusing_credentials();
-    let mut session = session_over(&mut script, &worker, &cell).with_credential_store(&store);
-    session.tick();
-    assert!(cell.try_route().unwrap().1.credential.is_none());
+    assert_eq!(session.drain_plan(), Some(DRAIN));
+    let beaten = session.tick();
+    assert!(matches!(beaten, Step::Wait { .. }), "{beaten:?}");
+    drop(session);
+    let sent = sent.borrow();
+    let paths: Vec<&str> = sent.iter().map(|(path, _)| path.as_str()).collect();
+    assert_eq!(paths, [HELLO_PATH, HEARTBEAT_PATH]);
+    assert_eq!(sent[0].1["host_id"], "h1");
+    assert_eq!(
+        (
+            &sent[1].1["host_id"],
+            &sent[1].1["epoch"],
+            &sent[1].1["phase"]
+        ),
+        (&json!("h1"), &json!(1), &json!("draining"))
+    );
 }
 
 /// A sleeper that waits for the test's go at its first wait and ends the agent there and at
@@ -563,12 +551,12 @@ fn the_whole_agent_polls_while_it_heartbeats_and_ends_with_the_poller() {
             let stop = Dispatched::stop("j1".to_owned(), "alloc-j1".to_owned());
             let mut seen_created = 0;
             for answer in [vec![again.clone()], vec![again], vec![stop], vec![]] {
-                bodies.push(driver.next().0);
+                bodies.push(driver.next());
                 assert!(handle.settle());
                 seen_created = world.created().len();
                 driver.answer(handed(answer));
             }
-            bodies.push(driver.next().0);
+            bodies.push(driver.next());
             assert!(handle.settle());
             go.send(()).unwrap();
             driver.answer(quiet());
@@ -649,47 +637,4 @@ fn a_welcome_without_dispatch_poll_leaves_the_starts_in_the_heartbeat_reply() {
     assert!(driver.polls.try_recv().is_err());
     assert_eq!(world.created().len(), 1, "{:?}", world.log());
     assert!(sent.borrow().iter().all(|(path, _)| path != DISPATCH_PATH));
-}
-
-/// Asserts that a poll's transport that will not take the host's credential is not used: the
-/// open fails with the transport's own reason (which names no secret), while the same
-/// connector opens for a route with no credential. Catches a poller that polls with the join
-/// token in place of the credential the session adopted, and one that drops the refusal.
-#[test]
-fn a_transport_that_refuses_the_credential_is_a_failed_open() {
-    struct Unadoptable;
-    impl Transport for Unadoptable {
-        fn post(&mut self, _path: &str, _body: &Value) -> Result<Answer, String> {
-            Err("not used".to_owned())
-        }
-
-        fn adopt_credential(&mut self, _secret: &str) -> Result<(), String> {
-            Err("the credential is not a bearer".to_owned())
-        }
-    }
-    struct Giving;
-    impl Connector for Giving {
-        fn connect(
-            &self,
-            _server: &str,
-            _login: &Login,
-            _ca_cert: Option<&std::path::Path>,
-        ) -> Result<Box<dyn Transport>, ClientError> {
-            Ok(Box::new(Unadoptable))
-        }
-    }
-    let login = Login::Token(PathBuf::from("/nonexistent/token"));
-    let dial = Dial {
-        connector: &Giving,
-        server: "http://127.0.0.1:1",
-        login: &login,
-        ca_cert: None,
-    };
-    let credential = js_agent_wire::HostCredential::parse("cred-secret-2").unwrap();
-    let refused = dial.open(Some(&credential)).err();
-    assert_eq!(refused.as_deref(), Some("the credential is not a bearer"));
-    assert!(
-        dial.open(None).is_ok(),
-        "no credential: the transport is used as made"
-    );
 }

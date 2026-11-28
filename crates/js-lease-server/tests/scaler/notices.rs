@@ -107,8 +107,8 @@ fn failures(rig: &Rig) -> u32 {
 
 /// Asserts that a reclaim notice for a registered machine, while the list still shows it
 /// active and with no tick of the server's, cordons its host first and then has the machine
-/// released through the step's route: the records are written, the host is marked ending,
-/// the token revoked and the release sent; the brake counts one failure, as for a machine a
+/// released through the step's route: the records are written, the host is marked ending
+/// and the release sent; the brake counts one failure, as for a machine a
 /// list shows preempted, and nothing is ignored. It catches a notice nobody reads (the host
 /// stays open to work until a list catches up), a cordon after the release, and a reclaim
 /// that skips the brake.
@@ -118,13 +118,7 @@ async fn a_reclaim_cordons_the_host_and_releases_the_machine_at_once() {
     provider.reclaims("i-9");
     assert_eq!(
         rig.log(),
-        [
-            "Cordon:js-a",
-            "save",
-            "MarkEnding:js-a",
-            "revoke:js-a",
-            "release:js-a"
-        ]
+        ["Cordon:js-a", "save", "MarkEnding:js-a", "release:js-a"]
     );
     assert!(rig.world().hosts[0].cordon_until.is_some());
     assert_eq!(
@@ -135,7 +129,7 @@ async fn a_reclaim_cordons_the_host_and_releases_the_machine_at_once() {
     assert_eq!(rig.scaler.reclaims_ignored(), 0);
 }
 
-/// Asserts that the same notice twice cordons once, revokes once, and counts once; and that
+/// Asserts that the same notice twice cordons once and counts once; and that
 /// the server's next tick, whose list now shows the machine preempted, does not count it
 /// again. It catches a repeat that is acted on twice.
 #[tokio::test]
@@ -148,7 +142,6 @@ async fn a_repeated_reclaim_is_acted_on_once() {
     let log = rig.log();
     let count = |entry: &str| log.iter().filter(|each| *each == entry).count();
     assert_eq!(count("Cordon:js-a"), 1, "{log:?}");
-    assert_eq!(count("revoke:js-a"), 1, "{log:?}");
     assert_eq!(failures(&rig), 1);
     assert_eq!(rig.scaler.reclaims_ignored(), 0);
 }
@@ -186,7 +179,10 @@ async fn a_reclaimed_booting_machine_is_released_without_a_cordon() {
         !log.iter().any(|each| each.starts_with("Cordon")),
         "{log:?}"
     );
-    assert!(log.contains(&"revoke:js-b".to_owned()), "{log:?}");
+    assert!(
+        log.iter().any(|each| each.starts_with("release:")),
+        "{log:?}"
+    );
     assert_eq!(
         rig.scaler.state().records.instances[0].phase,
         Phase::Releasing
@@ -293,7 +289,7 @@ async fn a_reader_whose_tick_panics_is_replaced_at_the_next_tick() {
     assert!(rig.scaler.notices_open());
     again.reclaims("i-9");
     assert!(
-        rig.log().contains(&"revoke:js-a".to_owned()),
+        rig.log().contains(&"release:js-a".to_owned()),
         "{:?}",
         rig.log()
     );

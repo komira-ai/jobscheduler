@@ -48,7 +48,6 @@ fn params_for(record: &Record) -> Params {
         target_version: record.update.target.clone(),
         previous_version: record.update.previous.clone(),
         state_root: PathBuf::from("/var/lib/js-agent/state"),
-        token_file: PathBuf::from("/etc/js-agent/token"),
         scratch_root: None,
     }
 }

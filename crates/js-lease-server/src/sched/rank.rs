@@ -5,10 +5,9 @@
 //! The order is the Default platform's `machine_providers`, first to last
 //! ([`order_of`]); a configuration that names no platform keeps the order the server always
 //! had, `static` first and then the pool's launched hosts ([`static_then`]). A host's provider
-//! comes from its binding alone ([`rank`]): a host whose binding names no instance (it joined
-//! with the pool's join token) is of the `static` provider, and one whose binding names an
-//! instance (it joined with a token minted for that instance) is of the pool's launching
-//! providers. A binding does not say which launching provider launched its machine, so a
+//! comes from its binding alone ([`rank`]): a host whose binding names no instance is of the
+//! `static` provider, and one whose binding names an instance (its hello carried the
+//! `instance` of the machine that was launched) is of the pool's launching providers. A binding does not say which launching provider launched its machine, so a
 //! pool that launches with several ranks every launched host at the place of the first of
 //! them the platform lists; the engine's score decides among them. Nothing here reads a host's
 //! name, its address, the provider text its instance carries or a catalog. Pure: no I/O, no
@@ -20,8 +19,8 @@ use js_types::ProviderId;
 
 use crate::file::Resolved;
 
-/// The `static` machine provider: the hosts that join with the pool's join token and whose
-/// binding names no instance. Every other provider of an order is the pool's launching one.
+/// The `static` machine provider: the hosts whose binding names no instance. Every other
+/// provider of an order is the pool's launching one.
 pub(crate) const STATIC: ProviderId = ProviderId::known("static");
 
 /// The order of a configuration that names no platform: `static`, then the hosts launched for

@@ -20,6 +20,12 @@
 //! the operating system unless [`Config::with_entropy`] gives another source: a caller that
 //! must name the same machines on every run with the same inputs gives it a seeded one.
 //!
+//! The agent routes admit a host by its client certificate alone, which only the TLS listener
+//! can see; in process a caller presents the host with [`as_host`], which marks a request as
+//! the listener marks one whose connection carries that host's verified certificate. A request
+//! the caller does not mark is refused 401 `host-certificate-required`, whatever header it
+//! holds.
+//!
 //! A request carries no peer address, so the status routes (`/v1/pools`, `/status`) answer
 //! as they do for a peer the listener could not name: as a route that does not exist.
 //!
@@ -37,7 +43,7 @@ use js_callback::CallbackUrl;
 use js_jobs::{CallbackClaim, InstanceId, JobStore};
 use js_registry::Registry;
 use js_state::Store;
-use js_types::{CallbackAnswer, Clock};
+use js_types::{CallbackAnswer, Clock, HostId};
 use tokio::sync::Mutex;
 
 use crate::api::{Shared, agent_router, router};
@@ -47,11 +53,22 @@ use crate::checks::{Checker, Schedule};
 use crate::clock::SharedClock;
 use crate::config::Config;
 use crate::error::StartupError;
+use crate::host_cert::CertHost;
 use crate::job_api;
 pub use crate::job_store::ServerIds;
 use crate::scaler::Scaler;
 use crate::server::{Opened, open, prepare};
 use crate::store::ServerStore;
+
+/// Presents `host` on `request` for the agent routes ([`InProcess::agent_router`]) as the TLS
+/// listener does for a request whose connection carries the verified host certificate of
+/// `host`: the way an in-process caller (a simulation of agents, a replay) says which host it
+/// is. The routes then take `host` as the host of the certificate, so a hello or a heartbeat
+/// that names another host is refused 403 `certificate-host-mismatch`. A header is never
+/// taken for it. A second call replaces the host.
+pub fn as_host<B>(request: &mut axum::http::Request<B>, host: &HostId) {
+    request.extensions_mut().insert(CertHost(host.clone()));
+}
 
 /// A server built in process, with no listener and no task of its own.
 ///
@@ -204,9 +221,8 @@ impl InProcess {
         self.scaler.as_ref()
     }
 
-    /// How many times the agent side could not read or write one of its files since the
-    /// server started. As
-    /// [`crate::Running::agent_errors`].
+    /// How many times the agent side could not write its file of bindings (or the store)
+    /// since the server started. As [`crate::Running::agent_errors`].
     pub fn agent_errors(&self) -> u64 {
         self.shared.agent_errors()
     }
@@ -217,5 +233,27 @@ impl InProcess {
     /// (`--boot resume`).
     pub fn shutdown(self) {
         drop(self);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `as_host` marks the request with the host the TLS listener would, and a second call
+    /// replaces it; a request never marked carries none. It catches a seam that marks nothing
+    /// (every in-process agent refused 401) or one that keeps the first host.
+    #[test]
+    fn a_request_is_marked_with_the_host_the_caller_presents() {
+        let marked = |request: &axum::http::Request<()>| {
+            let found = request.extensions().get::<CertHost>();
+            found.map(|CertHost(host)| host.as_str().to_owned())
+        };
+        let mut request = axum::http::Request::new(());
+        assert_eq!(marked(&request), None);
+        as_host(&mut request, &HostId::new("host-a").unwrap());
+        assert_eq!(marked(&request).as_deref(), Some("host-a"));
+        as_host(&mut request, &HostId::new("host-b").unwrap());
+        assert_eq!(marked(&request).as_deref(), Some("host-b"));
     }
 }

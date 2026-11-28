@@ -7,6 +7,7 @@ use js_lease_server::{Config, Kinds, OwnerOnlyFiles};
 
 use crate::config_support::{
     PoolText, bare_server, clock, file, load, oauth_file, quoted, refusal, server,
+    server_without_tls,
 };
 use crate::support::Scratch;
 
@@ -20,6 +21,13 @@ fn hosts() -> PoolText {
 fn refused_server(name: &str, extra: &str) -> String {
     let scratch = Scratch::new(name);
     let text = file(&server(&scratch, extra), &[&hosts()]);
+    refusal(&scratch, &text)
+}
+
+/// [`refused_server`] for a table with no TLS keys at all.
+fn refused_plain(name: &str, extra: &str) -> String {
+    let scratch = Scratch::new(name);
+    let text = file(&server_without_tls(&scratch, extra), &[&hosts()]);
     refusal(&scratch, &text)
 }
 
@@ -242,11 +250,11 @@ fn tls_files_come_together_and_a_public_listener_needs_them() {
     );
     let clear = "is not a loopback address, so server.tls_cert and server.tls_key are required: a bearer token never crosses a network in clear";
     assert_eq!(
-        refused_server("config_tls_c", "listen = \"0.0.0.0:7300\""),
+        refused_plain("config_tls_c", "listen = \"0.0.0.0:7300\""),
         format!("server.listen: 0.0.0.0:7300 {clear}")
     );
     assert_eq!(
-        refused_server("config_tls_d", "agent_listen = \"10.1.2.3:7301\""),
+        refused_plain("config_tls_d", "agent_listen = \"10.1.2.3:7301\""),
         format!("server.agent_listen: 10.1.2.3:7301 {clear}")
     );
     let with_tls = "listen = \"0.0.0.0:7300\"\ntls_cert = \"/c\"\ntls_key = \"/k\"";

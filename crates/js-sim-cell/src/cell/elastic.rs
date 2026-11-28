@@ -13,7 +13,7 @@
 //! server ([`Cloud::crash_at_next_acquire`]). A cloud of a server of
 //! [`crate::ServerSpec::ordered`] is named: its lines put its name after `cloud` (`cloud
 //! <provider> launch m<n>`), and its machines' nodes are `<provider>-m<n>`. No line holds a
-//! payload, a token, a host's name or an id the server or the cloud generated.
+//! payload, a host's name or an id the server or the cloud generated.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -63,8 +63,6 @@ impl Machines {
 struct Launched {
     /// The cloud's id of it.
     id: String,
-    /// What its launch payload holds.
-    payload: Payload,
     /// The host id its agent registers under.
     host: HostId,
     /// The acquire id it was launched for.
@@ -204,10 +202,10 @@ impl Cell {
                 let found = truth.iter().find(|machine| machine.name.as_deref() == name);
                 let host = HostId::new(&payload.host).ok();
                 let both = found.zip(host);
-                both.map(|(held, host)| (held.clone(), payload, host))
+                both.map(|(held, host)| (held.clone(), host))
             });
-            if let Some((held, payload, host)) = held {
-                self.launch(at, cloud, held, payload, host);
+            if let Some((held, host)) = held {
+                self.launch(at, cloud, held, host);
             }
         }
         self.machines.clouds[at].read = fake.launched();
@@ -230,12 +228,11 @@ impl Cell {
     }
 
     /// Notes machine `held`, launched now on cloud `at`, `cloud`, and scripts its boot.
-    fn launch(&mut self, at: usize, cloud: &Cloud, held: Held, payload: Payload, host: HostId) {
+    fn launch(&mut self, at: usize, cloud: &Cloud, held: Held, host: HostId) {
         let launched = &mut self.machines.clouds[at].launched;
         let number = launched.len();
         launched.push(Launched {
             id: held.id.as_str().to_owned(),
-            payload,
             host,
             acquire: held.acquire,
             booted: false,
@@ -266,7 +263,6 @@ impl Cell {
         }
         machine.booted = true;
         let host = machine.host.clone();
-        let token = machine.payload.token.clone();
         let mut capabilities = self.spec.shape().capabilities.clone();
         // Those of the agent the boot script starts, which runs containers
         // (`--container-bin`) with the GPU toolkit (`--gpu-toolkit-hook`).
@@ -281,7 +277,7 @@ impl Cell {
         let spec = AgentSpec {
             host: host.clone(),
             pool,
-            join_token: token,
+            certificate: Some(host.clone()),
             capacity: self.capacity.clone(),
             capabilities,
             labels: BTreeMap::new(),

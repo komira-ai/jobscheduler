@@ -91,7 +91,6 @@ fn table_on(hosts: &[&str], clock: ManualClock) -> Registry {
             labels: BTreeMap::new(),
             phase: Phase::Serving,
             held: Vec::new(),
-            accepts_host_credential: false,
             identity: None,
         };
         registry.hello(&hello, &Credential::of_token("t")).unwrap();

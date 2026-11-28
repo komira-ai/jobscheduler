@@ -105,7 +105,9 @@
 # Like js-agent.service, the unit runs as root with no sandboxing (the agent reads /proc/1/ns and
 # owns the state and scratch roots); add none of the Protect*, Private*, Restrict* or
 # Capability* settings. Set this host's --server and --pool with `systemctl edit`, clearing
-# ExecStart= first, or give them to the setup script, which writes them in.
+# ExecStart= first, or give them to the setup script, which writes them in. A host is
+# identified by its certificate alone, and this unit names no certificate path: set --host-cert
+# and --host-key the same way (the agent refuses to start without them, naming both flags).
 [Unit]
 Description=jobscheduler agent (crun runtime)
 Documentation=https://github.com/komira-ai/jobscheduler
@@ -122,7 +124,7 @@ Delegate=yes
 DelegateSubgroup=supervisor
 StateDirectory=js-agent
 StateDirectoryMode=0711
-ExecStart=/opt/js-agent/link/current/js-agent --server SET-THE-SERVER-WITH-SYSTEMCTL-EDIT --token-file /etc/js-agent/token --pool default --drain-wait 3600 --stop-grace 120 --crun-bin /usr/bin/crun --job-user jsjob --state-root /var/lib/js-agent/state --scratch-root /var/lib/js-agent/scratch/runs
+ExecStart=/opt/js-agent/link/current/js-agent --server SET-THE-SERVER-WITH-SYSTEMCTL-EDIT --pool default --drain-wait 3600 --stop-grace 120 --crun-bin /usr/bin/crun --job-user jsjob --state-root /var/lib/js-agent/state --scratch-root /var/lib/js-agent/scratch/runs
 ExecStopPost=/opt/js-agent/link/current/js-agent crun-start-refused --result ${SERVICE_RESULT}
 KillMode=process
 TimeoutStopSec=3900

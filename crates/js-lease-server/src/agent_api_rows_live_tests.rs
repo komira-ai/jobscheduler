@@ -128,7 +128,7 @@ async fn a_hello_whose_row_another_process_took_first_is_host_live() {
             .expect("the other server's hello is written first");
     };
     let body = Ok(hello_by("host-a", "proc-b"));
-    let refused = serve_hello(&server.agents, server.who.clone(), None, body, &between).await;
+    let refused = serve_hello(&server.agents, "host-a", body, &between).await;
     let refused = refused.expect_err("refused");
     assert_eq!(said(&refused), (409, "host-live"));
     let row = world.row("host-a");
@@ -138,7 +138,7 @@ async fn a_hello_whose_row_another_process_took_first_is_host_live() {
     );
 
     let body = Ok(hello_by("host-a", "proc-a"));
-    let welcome = serve_hello(&server.agents, server.who.clone(), None, body, &|| ());
+    let welcome = serve_hello(&server.agents, "host-a", body, &|| ());
     let Json(welcome) = welcome.await.expect("the row's own process");
     assert_eq!(welcome.epoch, 2);
     assert_eq!(server.holds("host-a"), Some(2));

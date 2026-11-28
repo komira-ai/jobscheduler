@@ -81,7 +81,7 @@ fn failures(rig: &Rig) -> u32 {
 
 /// Asserts that a hello reporting the canonical model of an offer named by an alias, the
 /// same count and the same sizes registers the machine: the record is `Registered` and not
-/// condemned, nothing is revoked or released, no offer is cooled down, the pool gets no
+/// condemned, nothing is released, no offer is cooled down, the pool gets no
 /// cooldown and its brake's count is unchanged. Catches a match treated as a mismatch, and a
 /// matching host that is not registered.
 #[test]
@@ -119,7 +119,7 @@ fn a_matching_hello_registers_the_host() {
 }
 
 /// Asserts the three effects of a mismatched hello, in the one step that judged it: the
-/// record is condemned and `Releasing` (its token revoked and the machine's release asked
+/// record is condemned and `Releasing` (the machine's release asked
 /// in that step, after the save that the shell follows by marking the host ending); the
 /// offer is cooled down, keyed by provider, instance type and zone, until the step's time
 /// plus `offer_cooldown`, with the dimension that failed, and the same instance type in
@@ -138,12 +138,11 @@ fn a_mismatch_releases_cools_down_and_counts_toward_the_brake() {
     };
     rig.input.hosts = vec![hello(&name, wrong)];
     let actions = rig.tick(at(SECOND));
-    assert_eq!(kinds(&actions), ["Save", "Revoke", "Release"]);
+    assert_eq!(kinds(&actions), ["Save", "Release"]);
     let Action::Save(saved) = &actions[0] else {
         panic!("the first action is the save");
     };
     assert_eq!(saved.instances[0].phase, Phase::Releasing);
-    assert_eq!(actions[1], Action::Revoke(name.clone()));
     assert_eq!(rig.phase(0), Phase::Releasing);
     assert!(rig.record(0).condemned);
     assert!(rig.record(0).registered);
@@ -263,8 +262,8 @@ fn a_hello_with_no_offer_record_is_checked_against_the_shape_floor_only() {
 }
 
 /// Asserts that a host the scaler did not launch (a static host of the pool, joined with the
-/// pool's join token) whose shape matches no offer of the pool is untouched: no drain,
-/// revoke or release, no offer cooled down, no failure counted. Catches a check that judges
+/// pool's boot payload) whose shape matches no offer of the pool is untouched: no drain
+/// or release, no offer cooled down, no failure counted. Catches a check that judges
 /// every host of the pool rather than the machines the scaler acquired.
 #[test]
 fn a_hello_of_a_host_the_scaler_did_not_launch_is_untouched() {
@@ -276,7 +275,7 @@ fn a_hello_of_a_host_the_scaler_did_not_launch_is_untouched() {
     };
     rig.input.hosts = vec![hello("static-1", stranger)];
     let actions = rig.tick(at(SECOND));
-    for kind in ["Drain", "ReleaseHost", "Revoke", "Release", "Retire"] {
+    for kind in ["Drain", "ReleaseHost", "Release", "Retire"] {
         assert_eq!(count(&actions, kind), 0, "{kind}");
     }
     assert!(rig.state.records.instances.is_empty());

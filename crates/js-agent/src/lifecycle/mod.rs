@@ -698,7 +698,8 @@ impl Local {
             .map(|path| ScratchRoot::open_with(path, layout))
             .transpose()?;
         let state = cli.state_root.as_deref().map(StateRoot::open).transpose()?;
-        // What no run may read: the agent's own roots and the files it keeps secrets in.
+        // What no run may read: the agent's own roots and the files a unit written for an earlier
+        // release still names (`--token-file`, `--instance-file`: accepted, never read).
         let denied: Vec<&Path> = state
             .iter()
             .map(StateRoot::path)

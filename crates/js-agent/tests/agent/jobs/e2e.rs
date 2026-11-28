@@ -98,10 +98,6 @@ impl Transport for Announced {
         }
         Ok(answer)
     }
-
-    fn adopt_credential(&mut self, secret: &str) -> Result<(), String> {
-        self.inner.adopt_credential(secret)
-    }
 }
 
 /// A server with one agent that runs containers.
@@ -199,7 +195,7 @@ fn launch<C: js_agent::Connector + Send + 'static>(
     let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
     let agent = Agent::spawn_polling(
         server.url(),
-        server.join_file(),
+        server.identities(),
         &flags,
         linux_host,
         (connector(address.clone()), Arc::new(dispatch)),

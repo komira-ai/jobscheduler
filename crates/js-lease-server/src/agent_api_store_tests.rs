@@ -1,5 +1,5 @@
-//! The hello, the heartbeat, the cordon and the tick over a server whose bindings and join
-//! tokens are kept in the state store: what each commits, in how many transactions, before
+//! The hello, the heartbeat, the cordon and the tick over a server whose bindings are kept in
+//! the state store: what each commits, in how many transactions, before
 //! what it changes in memory, and what a failed commit leaves. The store is the in-memory
 //! fake behind a wrapper that fails the commit or the read it is told to.
 
@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::path::Path as FilePath;
 use std::time::Duration;
 
-use js_agent_wire::{InstanceIdentity, Taint};
+use js_agent_wire::Taint;
 use js_jobs::interfere::{INJECTED, Interfere};
 use js_registry::{Binding, PoolConfig, Registry, SequentialSessions};
 use js_state::fake::{Fake, Flaw};
@@ -26,8 +26,6 @@ use crate::api::Shared;
 use crate::api::rig::Lines;
 use crate::clock::SharedClock;
 use crate::config::parse_token;
-use crate::join_tokens::JoinRefusal;
-use crate::join_tokens::JoinTokens;
 
 #[path = "agent_api_store_clear_tests.rs"]
 mod clear;
@@ -56,16 +54,8 @@ mod resync;
 /// When a rig's clock starts, in milliseconds.
 const START_MS: u64 = 5_000_000;
 
-fn instance() -> InstanceIdentity {
-    InstanceIdentity {
-        provider: "lambdalabs".to_string(),
-        instance_id: "i-1".to_string(),
-    }
-}
-
-/// The body of a hello of `host` in the pool `pool`, naming the instance `i-1`, that asks
-/// for a host credential when `asking`.
-fn body(host: &str, pool: &str, asking: bool) -> Bytes {
+/// The body of a hello of `host` in the pool `pool`, naming the instance `i-1`.
+fn body(host: &str, pool: &str) -> Bytes {
     let hello = json!({
         "host_id": host,
         "pool": pool,
@@ -79,7 +69,6 @@ fn body(host: &str, pool: &str, asking: bool) -> Bytes {
         },
         "capabilities": { "arch": "x86_64" },
         "phase": "serving",
-        "accepts_host_credential": asking,
     });
     Bytes::from(hello.to_string())
 }
@@ -90,15 +79,23 @@ fn fake() -> Arc<Interfere<Fake>> {
     Arc::new(Interfere::new(Fake::with_flaw(clock, Flaw::None)))
 }
 
-/// The agent side of a server over the pool `burst`, its bindings and join tokens kept in
-/// `store`.
+/// The agent side of a server over the pool `burst`, its bindings kept in `store`.
 struct Rig {
     agents: Arc<Agents>,
     store: Arc<Interfere<Fake>>,
     clock: ManualClock,
-    /// The digest of the pool's join token.
-    pool: Credential,
     dir: TestDir,
+}
+
+/// The credential the registry knows the host `host` by: the one its certificate gives.
+fn who_of(host: &str) -> Credential {
+    Credential::of_host_certificate(&HostId::new(host).unwrap())
+}
+
+/// The credential a binding written by a release that admitted hosts by token holds: the
+/// digest of a token, which no certificate gives.
+fn legacy() -> Credential {
+    Credential::of_token(&"j".repeat(40))
 }
 
 /// A process-wide subscriber that takes every event and writes it nowhere, so the code of
@@ -153,43 +150,38 @@ fn over(dir: TestDir, store: Arc<Interfere<Fake>>, clock: ManualClock) -> Rig {
     );
     let kept: Arc<dyn Store> = store.clone();
     let agents = Agents::over(registry, &shared, dir.path()).kept_in(kept);
-    let pool = agents.tokens.identify(&"j".repeat(40)).unwrap();
     Rig {
         agents: Arc::new(agents),
         store,
         clock,
-        pool,
         dir,
     }
 }
 
 impl Rig {
-    /// Mints a join token for the instance `i-1` and returns its digest.
-    fn mint(&self) -> Credential {
-        let ttl = Duration::from_secs(600);
-        let minted = self.agents.joins.mint(instance(), ttl).unwrap();
-        Credential::of_token(&minted.token)
-    }
-
-    /// The hello of `host` in `pool` with the join token whose digest is `who`.
-    async fn hello(&self, who: &Credential, host: &str, pool: &str) -> Result<Welcome, Refused> {
-        let body = Ok(body(host, pool, false));
-        let welcome = serve_hello(&self.agents, who.clone(), Some(who.clone()), body, &|| ());
+    /// The hello of `host` in `pool` with the certificate of `host`.
+    async fn hello(&self, host: &str, pool: &str) -> Result<Welcome, Refused> {
+        let body = Ok(body(host, pool));
+        let welcome = serve_hello(&self.agents, host, body, &|| ());
         welcome.await.map(|Json(welcome)| welcome)
     }
 
-    /// The hello of `host` in `pool` with the pool's join token.
-    async fn pooled(&self, host: &str, pool: &str) -> Result<Welcome, Refused> {
-        let body = Ok(body(host, pool, false));
-        let welcome = serve_hello(&self.agents, self.pool.clone(), None, body, &|| ());
-        welcome.await.map(|Json(welcome)| welcome)
+    /// Writes the binding of `host` as a release that admitted hosts by token wrote it: bound
+    /// to the credential [`legacy`], with no row for the token.
+    fn bind_by_token(&self, host: &str) {
+        let binding = json!({ "version": 1, "credential": legacy().to_hex() });
+        let put = Txn::new().put(
+            format!("hosts/binding/{host}"),
+            binding.to_string(),
+            Cond::Any,
+        );
+        self.store.inner().txn(put).unwrap().unwrap();
     }
 
     /// The heartbeat of `host` in the session `welcome` opened, carrying `taint` (`null` for
-    /// none), authenticated as `who` and, for a one-time token, `one_time`.
+    /// none), with the certificate of `host`.
     async fn beat(
         &self,
-        (who, one_time): (&Credential, Option<Credential>),
         host: &str,
         welcome: &Welcome,
         taint: Value,
@@ -201,12 +193,7 @@ impl Rig {
             "phase": "serving",
             "taint": taint,
         });
-        let one_time = one_time.map(|presented| Extension(OneTime(presented)));
-        let agents = State(Arc::clone(&self.agents));
-        let body = Ok(Bytes::from(beat.to_string()));
-        let reply =
-            super::heartbeat(agents, Extension(who.clone()), (one_time, None), None, body).await;
-        reply.map(|Json(reply)| reply)
+        beat_as(&self.agents, host, Bytes::from(beat.to_string())).await
     }
 
     /// The heartbeat of `host` that reports `held` as cleared and `taint` as new, as `beat`
@@ -225,17 +212,7 @@ impl Rig {
             "taint": taint,
             "taint_cleared": held,
         });
-        let agents = State(Arc::clone(&self.agents));
-        let body = Ok(Bytes::from(beat.to_string()));
-        let reply = super::heartbeat(
-            agents,
-            Extension(self.pool.clone()),
-            (None, None),
-            None,
-            body,
-        )
-        .await;
-        reply.map(|Json(reply)| reply)
+        beat_as(&self.agents, host, Bytes::from(beat.to_string())).await
     }
 
     /// A second server over the store of `first`, started as a server starts, reading what
@@ -263,11 +240,6 @@ impl Rig {
         self.stored(&format!("hosts/binding/{host}"))
     }
 
-    /// The stored row of the token or host credential whose digest is `who`.
-    fn row(&self, who: &Credential) -> Value {
-        self.stored(&format!("hosts/join/{}", who.to_hex()))
-    }
-
     /// The keys the store holds under `prefix`.
     fn keys(&self, prefix: &str) -> Vec<String> {
         let rows = self.store.inner().scan_prefix(prefix).unwrap();
@@ -286,98 +258,52 @@ impl Rig {
     }
 }
 
+/// The heartbeat route's answer to `body`, with the certificate of the host `host`.
+async fn beat_as(agents: &Arc<Agents>, host: &str, body: Bytes) -> Result<HeartbeatReply, Refused> {
+    let id = HostId::new(host).unwrap();
+    let who = Extension(Credential::of_host_certificate(&id));
+    let certified = Extension(CertifiedHost(id));
+    let agents = State(Arc::clone(agents));
+    let reply = super::heartbeat(agents, who, certified, None, Ok(body)).await;
+    reply.map(|Json(reply)| reply)
+}
+
 /// The server state the host book is read from, over `rig`'s agent side.
 fn shared_over(rig: &Rig) -> Shared {
     let token = parse_token(&[b'q'; 40]).unwrap();
     Shared::new(token, Arc::clone(&rig.agents))
 }
 
-/// Asserts that the first hello with a join token commits the token's use and the host's
-/// binding in one transaction, before the registry takes the hello: when that commit fails (once,
-/// by the store's fault hook) the hello is refused 503 `join-token-unsaved`, the store holds
-/// the token unused and no binding, and memory agrees (the token serves no host, the
-/// registry holds nothing); once the fault is gone the same hello is admitted with exactly
-/// one more commit, which holds both. It catches a use and a binding written in two
-/// commits (a crash between them would leave one without the other), and a failed commit
-/// that changes memory.
+/// Asserts that the first hello of a host commits its binding alone, before the registry takes
+/// the hello: when that commit fails (once, by the store's fault hook) the hello is refused 503
+/// `state-write-failed`, the store holds no binding and the registry holds nothing; once the
+/// fault is gone the same hello is admitted with exactly one more commit, which holds the
+/// binding of the host's certificate. It catches a binding committed after the registry took the
+/// hello (a crash between would lose it), and a failed commit that changes memory.
 #[tokio::test]
-async fn hello_consumes_the_token_and_binds_the_host_in_one_commit() {
+async fn hello_binds_the_host_in_one_commit() {
     let rig = rig("one_commit");
-    let who = rig.mint();
     let before = rig.commits();
     rig.store.fail_next();
-    let failed = rig.hello(&who, "host-a", "burst").await;
+    let failed = rig.hello("host-a", "burst").await;
     let failed = failed.expect_err("the commit fails");
     assert_eq!(
         (failed.status.as_u16(), failed.error),
-        (503, "join-token-unsaved")
+        (503, "state-write-failed")
     );
     assert_eq!(rig.commits(), before);
-    assert_eq!(rig.row(&who)["used_by"], Value::Null);
     assert_eq!(rig.binding("host-a"), Value::Null);
-    let unused = rig.agents.joins.serves(&who, "host-a");
-    assert_eq!(unused, Err(JoinRefusal::NotAdmitted));
     assert!(rig.held("host-a").is_none());
 
-    let admitted = rig.hello(&who, "host-a", "burst").await;
+    let admitted = rig.hello("host-a", "burst").await;
     admitted.expect("the same hello is admitted once the fault is gone");
-    assert_eq!(
-        rig.commits(),
-        before + 1,
-        "the use and the binding in one commit"
-    );
-    assert_eq!(rig.row(&who)["used_by"], "host-a");
+    assert_eq!(rig.commits(), before + 1, "the binding in one commit");
     let binding = rig.binding("host-a");
     assert_eq!(binding["version"], 1);
-    assert_eq!(binding["credential"], who.to_hex().as_str());
+    assert_eq!(binding["credential"], who_of("host-a").to_hex().as_str());
     assert_eq!(binding["instance_provider"], "lambdalabs");
     assert_eq!(binding["instance_id"], "i-1");
-    assert_eq!(rig.agents.joins.serves(&who, "host-a"), Ok(()));
-    assert_eq!(
-        rig.keys("hosts/"),
-        [
-            "hosts/binding/host-a".to_owned(),
-            format!("hosts/join/{}", who.to_hex())
-        ]
-    );
-}
-
-/// Asserts that a hello the registry refuses (it names another pool) is judged before anything
-/// is taken: the answer is the registry's refusal, the store takes no commit at all, the
-/// token's row stays unused, no binding is written, the token serves no host, and the token
-/// then registers a host of the pool. A hello that asked for a host credential leaves no
-/// credential row either. It catches a refused hello that uses the token or writes a binding
-/// first and takes them back after (an instance stranded when the take-back fails, a binding
-/// of a host the registry never admitted in the store between the two commits).
-#[tokio::test]
-async fn a_registry_refused_hello_takes_no_token_and_writes_nothing() {
-    let rig = rig("judged_first");
-    let who = rig.mint();
-    let before = rig.commits();
-    let refused = rig.hello(&who, "host-a", "elsewhere").await;
-    let refused = refused.expect_err("the registry refuses the pool");
-    assert_eq!(
-        (refused.status.as_u16(), refused.error),
-        (403, Refusal::UnknownPool.code())
-    );
-    assert_eq!(rig.commits(), before, "nothing was taken or written");
-    assert_eq!(rig.row(&who)["used_by"], Value::Null);
-    assert_eq!(rig.binding("host-a"), Value::Null);
-    let unused = rig.agents.joins.serves(&who, "host-a");
-    assert_eq!(unused, Err(JoinRefusal::NotAdmitted));
-
-    let asking = Ok(body("host-b", "elsewhere", true));
-    let asked = serve_hello(&rig.agents, who.clone(), Some(who.clone()), asking, &|| ()).await;
-    asked.expect_err("the registry refuses the pool again");
-    let token_row = format!("hosts/join/{}", who.to_hex());
-    assert_eq!(rig.keys("hosts/"), [token_row]);
-    assert_eq!(rig.row(&who)["used_by"], Value::Null);
-    assert_eq!(rig.commits(), before);
-
-    rig.hello(&who, "host-a", "burst")
-        .await
-        .expect("the token is good");
-    assert_eq!(rig.row(&who)["used_by"], "host-a");
+    assert_eq!(rig.keys("hosts/"), ["hosts/binding/host-a".to_owned()]);
 }
 
 /// Asserts that a heartbeat that brings a taint has it committed with the host's binding
@@ -389,12 +315,12 @@ async fn a_registry_refused_hello_takes_no_token_and_writes_nothing() {
 #[tokio::test]
 async fn a_heartbeat_taint_is_committed_before_it_is_acknowledged() {
     let rig = rig("taint");
-    let welcome = rig.pooled("host-a", "burst").await.unwrap();
+    let welcome = rig.hello("host-a", "burst").await.unwrap();
     let taint = json!({ "reason": "residue", "check": "tmp-files" });
     rig.store.fail_next();
     let lines = Lines::default();
     let capture = capture(&lines);
-    let failed = rig.beat((&rig.pool, None), "host-a", &welcome, taint.clone());
+    let failed = rig.beat("host-a", &welcome, taint.clone());
     let failed = failed.await.expect_err("the commit fails");
     drop(capture);
     assert_eq!(
@@ -405,7 +331,7 @@ async fn a_heartbeat_taint_is_committed_before_it_is_acknowledged() {
     assert!(rig.held("host-a").unwrap().taint().is_none());
     assert_eq!(rig.binding("host-a")["taint_reason"], Value::Null);
 
-    let reply = rig.beat((&rig.pool, None), "host-a", &welcome, taint).await;
+    let reply = rig.beat("host-a", &welcome, taint).await;
     assert!(reply.unwrap().taint_ack);
     let binding = rig.binding("host-a");
     assert_eq!(binding["taint_reason"], "residue");
@@ -429,7 +355,7 @@ async fn a_heartbeat_taint_is_committed_before_it_is_acknowledged() {
 #[tokio::test]
 async fn cordon_and_uncordon_commit_before_they_take_effect() {
     let rig = rig("cordon");
-    rig.pooled("host-a", "burst").await.unwrap();
+    rig.hello("host-a", "burst").await.unwrap();
     let host = HostId::new("host-a").unwrap();
     let lease = Duration::from_secs(60);
     let cordon_until = |rig: &Rig| rig.agents.registry.own_host(&host).unwrap().cordon_until;
@@ -488,7 +414,7 @@ async fn cordon_and_uncordon_commit_before_they_take_effect() {
 #[tokio::test]
 async fn a_cordon_whose_store_cannot_read_its_clock_is_unsaved() {
     let rig = rig("cordon_unclocked");
-    rig.pooled("host-a", "burst").await.unwrap();
+    rig.hello("host-a", "burst").await.unwrap();
     let host = HostId::new("host-a").unwrap();
     let lease = Duration::from_secs(60);
     rig.store.fail_clock(true);
@@ -514,23 +440,21 @@ async fn a_cordon_whose_store_cannot_read_its_clock_is_unsaved() {
 #[tokio::test]
 async fn heartbeat_and_host_book_reads_make_no_store_call() {
     let rig = rig("no_calls");
-    let who = rig.mint();
-    rig.hello(&who, "host-a", "burst").await.unwrap();
+    rig.hello("host-a", "burst").await.unwrap();
     rig.clock.advance(Duration::from_secs(60));
     let shared = shared_over(&rig);
-    let welcome = rig.hello(&who, "host-a", "burst").await;
+    let welcome = rig.hello("host-a", "burst").await;
     let welcome = welcome.expect("a known host's hello");
     rig.store.fail_after(0);
     rig.store.fail_read_after(0);
-    let one_time = (&who, Some(who.clone()));
-    let reply = rig.beat(one_time, "host-a", &welcome, Value::Null).await;
+    let reply = rig.beat("host-a", &welcome, Value::Null).await;
     assert!(!reply.expect("a heartbeat").taint_ack);
     let book = crate::hosts::listing(&shared);
     let listed = serde_json::to_value(&book).unwrap();
     assert!(listed.to_string().contains("host-a"), "{listed}");
     let target = axum::extract::Path("host-a".to_owned());
-    let presented = Some(Extension(OneTime(who.clone())));
-    let shown = own_host::show(State(Arc::clone(&rig.agents)), (presented, None), target).await;
+    let certified = Extension(CertifiedHost(HostId::new("host-a").unwrap()));
+    let shown = own_host::show(State(Arc::clone(&rig.agents)), certified, target).await;
     assert!(shown.is_ok());
 
     assert!(rig.store.get("probe").is_err(), "no read reached the store");
@@ -538,25 +462,23 @@ async fn heartbeat_and_host_book_reads_make_no_store_call() {
     assert!(rig.store.txn(probe).is_err(), "no commit reached the store");
 }
 
-/// Asserts that hellos racing for one fresh token are taken one at a time and exactly one
-/// is admitted: each runs its seam between the use and the registry taking it with the host writes'
-/// gate held, the others are refused 403 `join-token-used`, the stored row names the
-/// winner and the store holds the winner's binding alone. The hellos are polled together on
-/// one task, so each that waits for the gate is parked at a known point, and nothing waits
-/// on timing. It catches a hello path that lets a second hello in between the use and the
-/// registry taking the hello, and two hosts registered with one token.
+/// Asserts that hellos racing at one server are taken one at a time: each runs its seam between
+/// the binding's commit and the registry taking the hello with the host writes' gate held, and
+/// all four hosts are admitted, each with the binding of its own certificate. The hellos are
+/// polled together on one task, so each that waits for the gate is parked at a known point, and
+/// nothing waits on timing. It catches a hello path that lets a second hello in between the
+/// judgement and the registry taking the hello.
 #[tokio::test]
-async fn concurrent_hellos_with_one_token_admit_exactly_one() {
+async fn concurrent_hellos_are_taken_one_at_a_time() {
     let rig = rig("concurrent");
-    let who = rig.mint();
     let agents = &rig.agents;
     let alone = move || {
         let held = agents.host_writes.try_lock().is_err();
         assert!(held, "the seam runs with the gate held");
     };
     let hello = |host: &'static str| {
-        let body = Ok(body(host, "burst", false));
-        serve_hello(agents, who.clone(), Some(who.clone()), body, &alone)
+        let body = Ok(body(host, "burst"));
+        serve_hello(agents, host, body, &alone)
     };
     let (a, b, c, d) = tokio::join!(
         hello("host-0"),
@@ -564,37 +486,31 @@ async fn concurrent_hellos_with_one_token_admit_exactly_one() {
         hello("host-2"),
         hello("host-3")
     );
-    let answers = [a, b, c, d];
-    let admitted: Vec<usize> = (0..answers.len())
-        .filter(|at| answers[*at].is_ok())
-        .collect();
-    assert_eq!(admitted.len(), 1, "{answers:?}");
-    for refused in answers.iter().filter_map(|answer| answer.as_ref().err()) {
-        assert_eq!(
-            (refused.status.as_u16(), refused.error),
-            (403, "join-token-used")
-        );
+    for answer in [a, b, c, d] {
+        let Json(welcome) = answer.expect("every host is admitted");
+        assert_eq!(welcome.epoch, 1, "each host's first session");
     }
-    let winner = format!("host-{}", admitted[0]);
-    assert_eq!(rig.row(&who)["used_by"], winner.as_str());
     let bound = rig.keys("hosts/binding/");
-    assert_eq!(bound, [format!("hosts/binding/{winner}")]);
+    assert_eq!(bound.len(), 4);
+    for host in ["host-0", "host-1", "host-2", "host-3"] {
+        let credential = rig.binding(host)["credential"].clone();
+        assert_eq!(credential, who_of(host).to_hex().as_str());
+    }
 }
 
-/// Asserts that a hello with the pool's token commits the host's binding alone before the
-/// registry is asked: when the commit fails it is refused 503 `state-write-failed`, with a
-/// warning naming the failure, and the registry holds nothing; a hello the registry refuses
-/// commits nothing (it is judged before the binding is written); an admitted one leaves the
-/// binding to the pool token's digest. It catches a pool token's binding left to the file-mode
-/// save after the hello (a crash in between would lose it) and a binding written for a host the
-/// registry refused.
+/// Asserts that a hello commits the host's binding alone before the registry is asked: when the
+/// commit fails it is refused 503 `state-write-failed`, with a warning naming the failure, and
+/// the registry holds nothing; a hello the registry refuses commits nothing (it is judged before
+/// the binding is written); an admitted one leaves the binding to the certificate's digest. It
+/// catches a binding left to the file-mode save after the hello (a crash in between would lose
+/// it) and a binding written for a host the registry refused.
 #[tokio::test]
-async fn a_pool_token_hello_commits_its_binding_alone_and_none_when_refused() {
+async fn a_hello_commits_its_binding_alone_and_none_when_refused() {
     let rig = rig("pooled");
     rig.store.fail_next();
     let lines = Lines::default();
     let capture = capture(&lines);
-    let failed = rig.pooled("host-a", "burst").await;
+    let failed = rig.hello("host-a", "burst").await;
     drop(capture);
     let failed = failed.expect_err("the commit fails");
     assert_eq!(
@@ -609,29 +525,27 @@ async fn a_pool_token_hello_commits_its_binding_alone_and_none_when_refused() {
     assert!(rig.held("host-a").is_none());
 
     let before = rig.commits();
-    let refused = rig.pooled("host-b", "elsewhere").await;
+    let refused = rig.hello("host-b", "elsewhere").await;
     assert_eq!(refused.expect_err("another pool").status.as_u16(), 403);
     assert_eq!(rig.commits(), before);
     assert_eq!(rig.binding("host-b"), Value::Null);
 
-    rig.pooled("host-a", "burst").await.expect("admitted");
+    rig.hello("host-a", "burst").await.expect("admitted");
     assert_eq!(
         rig.binding("host-a")["credential"],
-        rig.pool.to_hex().as_str()
+        who_of("host-a").to_hex().as_str()
     );
 }
 
-/// Asserts that a token that registered its host, presented again after a restart over a
-/// store that no longer holds the host's binding (the tick dropped it once the registry
-/// forgot the host), has the binding committed alone before the registry takes the hello: a
-/// failed commit refuses the hello 503 `join-token-unsaved` with nothing held, and the
-/// hello repeated is admitted with one commit that holds the binding. It catches a binding
-/// taken by the registry with no commit.
+/// Asserts that a host that said hello before a restart over a store that no longer holds its
+/// binding (the tick dropped it once the registry forgot the host) has the binding committed
+/// alone before the registry takes the hello: a failed commit refuses the hello 503
+/// `state-write-failed` with nothing held, and the hello repeated is admitted with one commit
+/// that holds the binding. It catches a binding taken by the registry with no commit.
 #[tokio::test]
-async fn a_used_token_whose_binding_is_gone_commits_the_binding_alone() {
+async fn a_hello_whose_binding_is_gone_commits_the_binding_alone() {
     let rig = rig("again_rebound");
-    let who = rig.mint();
-    rig.hello(&who, "host-a", "burst").await.unwrap();
+    rig.hello("host-a", "burst").await.unwrap();
     let gone = Txn::new().delete("hosts/binding/host-a", Cond::Any);
     rig.store.inner().txn(gone).unwrap().unwrap();
     let Rig {
@@ -640,96 +554,47 @@ async fn a_used_token_whose_binding_is_gone_commits_the_binding_alone() {
     let rig = over(dir, store, clock);
 
     rig.store.fail_next();
-    let failed = rig.hello(&who, "host-a", "burst").await;
+    let failed = rig.hello("host-a", "burst").await;
     let failed = failed.expect_err("the commit fails");
     assert_eq!(
         (failed.status.as_u16(), failed.error),
-        (503, "join-token-unsaved")
+        (503, "state-write-failed")
     );
     assert!(rig.held("host-a").is_none());
     let before = rig.commits();
-    rig.hello(&who, "host-a", "burst")
-        .await
-        .expect("admitted again");
+    rig.hello("host-a", "burst").await.expect("admitted again");
     assert_eq!(rig.commits(), before + 1);
-    assert_eq!(rig.binding("host-a")["credential"], who.to_hex().as_str());
+    let credential = rig.binding("host-a")["credential"].clone();
+    assert_eq!(credential, who_of("host-a").to_hex().as_str());
 }
 
-/// Asserts what the tick commits: a credential time that a heartbeat found due (a step
-/// later than the stored one) is written by the tick, not by the heartbeat, and moved only
-/// once the commit succeeded; a failed commit counts an error and leaves the stored time,
-/// which the next tick writes. Once the registry forgets the silent host, the tick drops its
-/// binding. It catches a renewal written on the hot path, one held in memory without its
-/// commit, one lost after a failed commit, and the binding of a forgotten host kept forever.
+/// Asserts that once the registry forgets a silent host the tick drops its binding, and that a
+/// tick whose commit fails counts an error and leaves the binding for the next. It catches the
+/// binding of a forgotten host kept forever.
 #[tokio::test]
-async fn the_tick_commits_due_credential_times_and_drops_forgotten_hosts() {
+async fn the_tick_drops_the_bindings_of_forgotten_hosts() {
     let rig = rig("tick");
-    let who = rig.mint();
-    let welcome = rig.hello(&who, "host-a", "burst").await.unwrap();
-    let used = rig.row(&who)["credential_expires_at_ms"].clone();
-    assert_eq!(used, START_MS + 86_400_000);
-    rig.clock.advance(Duration::from_secs(2 * 3600));
-    let one_time = (&who, Some(who.clone()));
-    rig.beat(one_time, "host-a", &welcome, Value::Null)
-        .await
-        .unwrap();
-    assert_eq!(rig.row(&who)["credential_expires_at_ms"], used);
-
+    rig.hello("host-a", "burst").await.unwrap();
+    rig.clock.advance(Duration::from_secs(28 * 3600));
     rig.store.fail_next();
     rig.agents.refresh().await;
     assert_eq!(rig.agents.errors(), 1);
-    assert_eq!(rig.row(&who)["credential_expires_at_ms"], used);
-    rig.agents.refresh().await;
-    assert_eq!(rig.agents.errors(), 1);
-    let renewed = START_MS + 2 * 3_600_000 + 86_400_000;
-    assert_eq!(rig.row(&who)["credential_expires_at_ms"], renewed);
-
-    rig.clock.advance(Duration::from_secs(26 * 3600));
+    assert_ne!(rig.binding("host-a"), Value::Null);
     rig.agents.refresh().await;
     assert!(rig.held("host-a").is_none());
     assert_eq!(rig.binding("host-a"), Value::Null);
 }
 
-/// Asserts that a credential time found due for a token that is revoked before the tick
-/// writes nothing at the tick: the revoked row stays gone and no commit is made.
-#[test]
-fn a_due_time_of_a_token_revoked_before_the_tick_writes_nothing() {
-    let store = fake();
-    let clock = ManualClock::new(Timestamp::from_millis(START_MS));
-    let random = Box::new(SequentialSessions::new());
-    let kept: Arc<dyn Store> = store.clone();
-    let joins = JoinTokens::in_store(kept, SharedClock::new(clock.clone()), random).unwrap();
-    let minted = joins.mint(instance(), Duration::from_secs(600)).unwrap();
-    let who = Credential::of_token(&minted.token);
-    joins.admit(&who, "host-a", Some(&instance())).unwrap();
-    clock.advance(Duration::from_secs(2 * 3600));
-    assert_eq!(joins.serves(&who, "host-a"), Ok(()));
-    assert_eq!(joins.revoke(&instance()), Ok(1));
-    let before = store.commit_stats().txns;
-    assert!(joins.flush());
-    assert_eq!(store.commit_stats().txns, before);
-    assert!(store.scan_prefix("hosts/join/").unwrap().is_empty());
-}
-
-/// Asserts that the stored hosts keep what a newer build wrote: a binding and a token row
-/// with a higher version and a field this build does not know are read, and the next write
-/// of each key writes the field back (with this build's version). It catches a write that
-/// drops a newer build's data, and a reader that refuses a newer version.
+/// Asserts that the stored hosts keep what a newer build wrote: a binding with a higher
+/// version and a field this build does not know is read, and the next write of the key writes
+/// the field back (with this build's version). It catches a write that drops a newer build's
+/// data, and a reader that refuses a newer version.
 #[test]
 fn stored_hosts_keep_the_fields_a_newer_build_wrote() {
     let store = fake();
     let digest = Credential::of_token("t").to_hex();
     let binding = json!({ "version": 2, "credential": digest, "later": [1] });
-    let row = json!({
-        "version": 2,
-        "provider": "lambdalabs",
-        "instance_id": "i-1",
-        "expires_at_ms": 9_000_000u64,
-        "later": "x",
-    });
-    let txn = Txn::new()
-        .put("hosts/binding/host-a", binding.to_string(), Cond::Any)
-        .put(format!("hosts/join/{digest}"), row.to_string(), Cond::Any);
+    let txn = Txn::new().put("hosts/binding/host-a", binding.to_string(), Cond::Any);
     store.txn(txn).unwrap().unwrap();
     let kept: Arc<dyn Store> = store.clone();
 
@@ -752,34 +617,16 @@ fn stored_hosts_keep_the_fields_a_newer_build_wrote() {
         "later": [1],
     });
     assert_eq!(written, expected);
-
-    let clock = SharedClock::new(ManualClock::new(Timestamp::from_millis(START_MS)));
-    let random = Box::new(SequentialSessions::new());
-    let joins = JoinTokens::in_store(kept, clock, random).unwrap();
-    let who = Credential::of_token("t");
-    joins.admit(&who, "host-b", Some(&instance())).unwrap();
-    let written = store
-        .get(&format!("hosts/join/{digest}"))
-        .unwrap()
-        .unwrap()
-        .value;
-    let written: Value = serde_json::from_slice(&written).unwrap();
-    assert_eq!(
-        (&written["version"], &written["used_by"], &written["later"]),
-        (&json!(1), &json!("host-b"), &json!("x"))
-    );
 }
 
 /// Asserts that a stored value that cannot be read as written refuses the read with a
-/// reason naming its key and what is wrong, as a damaged file is refused: a binding or a row
-/// that is not the key's JSON, a binding whose credential is no digest or whose key is no
-/// host id, a row whose key is no digest, and a store that cannot be read. It catches a
-/// start that reads a damaged store as fewer bindings or tokens (a booked host's binding
-/// lost, a used token given back).
+/// reason naming its key and what is wrong, as a damaged file is refused: a binding that is not
+/// the key's JSON, a binding whose credential is no digest or whose key is no host id, and a
+/// store that cannot be read. It catches a start that reads a damaged store as fewer bindings
+/// (a booked host's binding lost).
 #[test]
 fn a_stored_host_that_cannot_be_read_as_written_refuses_the_read() {
     let digest = Credential::of_token("t").to_hex();
-    let row = json!({ "version": 1, "provider": "p", "instance_id": "i", "expires_at_ms": 1 });
     let cases = [
         (
             "hosts/binding/host-a",
@@ -796,16 +643,6 @@ fn a_stored_host_that_cannot_be_read_as_written_refuses_the_read() {
             json!({ "version": 1, "credential": digest }).to_string(),
             "hosts/binding/Bad Id: a host id is not valid",
         ),
-        (
-            "hosts/join/k",
-            "[]".to_owned(),
-            "hosts/join/k does not hold this key's fields",
-        ),
-        (
-            "hosts/join/abc",
-            row.to_string(),
-            "hosts/join/abc: a token hash is not 64 lower-case hex digits",
-        ),
     ];
     for (key, value, reason) in cases {
         let store = fake();
@@ -814,12 +651,8 @@ fn a_stored_host_that_cannot_be_read_as_written_refuses_the_read() {
             .unwrap()
             .unwrap();
         let kept: Arc<dyn Store> = store;
-        let bindings =
-            BindingStore::in_store(Arc::clone(&kept), crate::agent_state::epoch_clock()).err();
-        let clock = SharedClock::new(ManualClock::new(Timestamp::from_millis(START_MS)));
-        let random = Box::new(SequentialSessions::new());
-        let joins = JoinTokens::in_store(kept, clock, random).err();
-        assert_eq!(bindings.or(joins).as_deref(), Some(reason), "{key}");
+        let bindings = BindingStore::in_store(kept, crate::agent_state::epoch_clock()).err();
+        assert_eq!(bindings.as_deref(), Some(reason), "{key}");
     }
 
     let store = fake();
@@ -827,11 +660,6 @@ fn a_stored_host_that_cannot_be_read_as_written_refuses_the_read() {
     let failed = BindingStore::in_store(store.clone(), crate::agent_state::epoch_clock())
         .err()
         .unwrap();
-    assert!(failed.contains(js_jobs::interfere::INJECTED), "{failed}");
-    store.fail_read_after(0);
-    let clock = SharedClock::new(ManualClock::new(Timestamp::from_millis(START_MS)));
-    let random = Box::new(SequentialSessions::new());
-    let failed = JoinTokens::in_store(store, clock, random).err().unwrap();
     assert!(failed.contains(js_jobs::interfere::INJECTED), "{failed}");
 }
 
@@ -847,17 +675,17 @@ fn a_stored_host_that_cannot_be_read_as_written_refuses_the_read() {
 #[tokio::test]
 async fn two_servers_do_not_overwrite_each_others_taint() {
     let first = rig("two_first");
-    let welcome = first.pooled("host-a", "burst").await.unwrap();
+    let welcome = first.hello("host-a", "burst").await.unwrap();
     let second = Rig::second(&first, "two_second");
-    let second_welcome = second.pooled("host-a", "burst").await.unwrap();
+    let second_welcome = second.hello("host-a", "burst").await.unwrap();
     let a = json!({ "reason": "residue", "check": "daemonised-child", "run_id": "r1" });
     let b = json!({ "reason": "residue", "check": "process-as-job-user", "run_id": "r2" });
 
-    let reply = second.beat((&second.pool, None), "host-a", &second_welcome, a.clone());
+    let reply = second.beat("host-a", &second_welcome, a.clone());
     assert!(reply.await.unwrap().taint_ack);
     assert_eq!(first.binding("host-a")["taint_run_id"], "r1");
     let commits = first.commits();
-    let late = first.beat((&first.pool, None), "host-a", &welcome, b.clone());
+    let late = first.beat("host-a", &welcome, b.clone());
     let late = late
         .await
         .expect_err("the store holds a taint the server does not");
@@ -904,7 +732,7 @@ async fn two_servers_do_not_overwrite_each_others_taint() {
 #[tokio::test]
 async fn a_taint_commit_refuses_what_it_cannot_read() {
     let rig = rig("unreadable");
-    rig.pooled("host-a", "burst").await.unwrap();
+    rig.hello("host-a", "burst").await.unwrap();
     let host = HostId::new("host-a").unwrap();
     let taint = Taint {
         reason: "residue".to_owned(),
@@ -957,4 +785,39 @@ async fn a_taint_commit_refuses_what_it_cannot_read() {
         "hosts/binding/host-a is not in the store"
     );
     assert_eq!(rig.binding("host-a"), Value::Null, "nothing was written");
+}
+
+/// Asserts that a store holding `hosts/join/` rows (the join tokens and host credentials of a
+/// release that admitted hosts by token, one of them damaged) is served: a hello with a
+/// certificate, a heartbeat and the tick work as over a store without them, and every row of the
+/// prefix is left as it was, with the same bytes and the same version. It catches a server
+/// that reads the prefix (the damaged row would refuse its start), or writes it (a release
+/// before this one would find its tokens changed).
+#[tokio::test]
+async fn a_store_holding_join_rows_is_served_and_the_rows_are_left() {
+    let rig = rig("join_rows");
+    let digest = Credential::of_token("t").to_hex();
+    let row = json!({
+        "version": 1,
+        "provider": "lambdalabs",
+        "instance_id": "i-1",
+        "expires_at_ms": 1u64,
+    });
+    let txn = Txn::new()
+        .put(format!("hosts/join/{digest}"), row.to_string(), Cond::Any)
+        .put("hosts/join/damaged", "not json", Cond::Any);
+    rig.store.inner().txn(txn).unwrap().unwrap();
+    let read = |rig: &Rig| rig.store.inner().scan_prefix("hosts/join/").unwrap();
+    let before = read(&rig);
+    assert_eq!(before.len(), 2);
+
+    let Rig {
+        store, clock, dir, ..
+    } = rig;
+    let rig = over(dir, store, clock);
+    let welcome = rig.hello("host-a", "burst").await.unwrap();
+    rig.beat("host-a", &welcome, Value::Null).await.unwrap();
+    rig.agents.refresh().await;
+    assert!(rig.held("host-a").is_some());
+    assert_eq!(read(&rig), before);
 }

@@ -477,7 +477,7 @@ fn job_user(name: &str, host: &CrunHost, report: &mut Report) {
 fn state_root(path: &Path, owner: u32, report: &mut Report) {
     let at = path.display();
     let fix = format!(
-        "mkdir {at}; chown root:root {at}; chmod 0700 {at}: the taint marker and the host credential are the agent's alone"
+        "mkdir {at}; chown root:root {at}; chmod 0700 {at}: the taint marker is the agent's alone"
     );
     match std::fs::symlink_metadata(path) {
         Err(why) => report.miss(Piece::StateRoot, &format!("{at}: {why}"), &fix),

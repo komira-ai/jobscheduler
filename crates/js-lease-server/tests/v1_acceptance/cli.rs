@@ -27,18 +27,21 @@ impl Ran {
     }
 }
 
-/// `js --server http://JOB --token-file TOKEN --json ...` against one server.
+/// `js --server https://JOB --token-file TOKEN --ca-cert CERT --json ...` against one server.
 pub struct Js {
     server: String,
     token: PathBuf,
+    trust: PathBuf,
 }
 
 impl Js {
-    /// The client of the job port `job`, with the token in `token`.
-    pub fn new(job: SocketAddr, token: &Path) -> Self {
+    /// The client of the job port `job`, with the token in `token`, trusting the server
+    /// certificate in `trust`.
+    pub fn new(job: SocketAddr, token: &Path, trust: &Path) -> Self {
         Self {
-            server: format!("http://{job}"),
+            server: format!("https://{job}"),
             token: token.to_owned(),
+            trust: trust.to_owned(),
         }
     }
 
@@ -48,6 +51,8 @@ impl Js {
             .map(OsString::from)
             .into();
         args.push(self.token.clone().into_os_string());
+        args.push("--ca-cert".into());
+        args.push(self.trust.clone().into_os_string());
         args.extend(words.iter().map(OsString::from));
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let status = js_cli::run_with(args, &mut out, &mut err, js_cli::Services::system());

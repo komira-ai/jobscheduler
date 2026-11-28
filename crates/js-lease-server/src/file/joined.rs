@@ -1,7 +1,7 @@
 //! The `joined` kind of `[[pool]]`: a fixed set of machines that run `js-agent` and join
 //! by hand. The pool launches nothing, so it has no provider, no scaler, no spend caps and
 //! no network mode; it books one shape for every host, and the hosts register with their
-//! join tokens.
+//! host certificates.
 //!
 //! ```toml
 //! [[pool]]
@@ -10,7 +10,7 @@
 //! class = "whole-node"
 //! exec  = "container"                    # optional; absent or "none": no host contract
 //! max_machines = 6                       # required; from 1 to 262144
-//! join_token_file = "/etc/js/join-token" # optional shared pool token
+//! join_token_file = "/etc/js/join-token" # optional; accepted, not read, noted at start
 //! share_class = "share"                  # optional; leases that share a host, js-sched only
 //! heartbeat_interval = "10s"             # optional
 //! grace              = "1m"              # optional
@@ -49,8 +49,8 @@
 //! 2. Call [`JoinedPool::validate`], which checks every field and returns the registry's
 //!    [`PoolConfig`] for the pool.
 //!
-//! The shared pool token, if the pool has one, is the caller's: `join_token_file` is a
-//! field to carry, and the file is read when the server starts.
+//! `join_token_file` is accepted and not read: a host is admitted by its certificate only, and
+//! a pool that names it starts with a line saying it is ignored.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -65,8 +65,7 @@ use js_types::{
 use super::platform::PATH_GRACE;
 use super::{Pool, Read, Registering, Section, registry_pool};
 use crate::agent_pool::{MAX_MACHINES, capabilities_fit, share_class, shipped_class};
-use crate::agent_tokens::AgentTokens;
-use crate::config::LiveClients;
+use crate::config::retired;
 use crate::error::StartupError;
 
 const KEYS: &[&str] = &[
@@ -116,8 +115,7 @@ const PREPARES_NOTHING: &str =
 /// A pool of hand-joined agents, as the configuration describes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JoinedPool {
-    /// The pool's name: what a host names as `pool` in its hello, and the `provider` of
-    /// its one-time join tokens.
+    /// The pool's name: what a host names as `pool` in its hello.
     pub name: String,
     /// The pool's class, such as `whole-node`.
     pub class: String,
@@ -145,7 +143,7 @@ pub struct JoinedPool {
     pub grace: Duration,
     /// How long a lost host that holds no lease is remembered.
     pub lost_retention: Duration,
-    /// The file of the shared pool token, when the pool has one.
+    /// The retired file of a shared pool token: accepted and not read.
     pub join_token_file: Option<PathBuf>,
     /// A class that books part of a host, served beside `class` so that its leases share a
     /// host with room, when the pool has one.
@@ -356,29 +354,24 @@ fn needed(sh: &mut Section, key: &str) -> Result<u64, StartupError> {
     }
 }
 
-/// Reads the `[[pool]]` table of a joined pool for the file: the pool, and the shared token
-/// file when it names one. The pool registers agents and launches nothing.
-pub(super) fn read(table: toml::Table, client: &LiveClients) -> Result<Read, StartupError> {
+/// Reads the `[[pool]]` table of a joined pool for the file: the pool, and a line for the start
+/// when it names `join_token_file`, which is not read. The pool registers agents and launches
+/// nothing.
+pub(super) fn read(table: toml::Table) -> Result<Read, StartupError> {
     let joined = JoinedPool::from_table(table)?;
     let pool = joined.validate()?;
-    let tokens = match &joined.join_token_file {
-        Some(path) => match AgentTokens::open(path, client) {
-            Ok(tokens) => tokens,
-            Err(err) => {
-                let place = format!("pool {:?}: join_token_file", joined.name);
-                return Err(StartupError::at(place, err.reason()));
-            }
-        },
-        None => AgentTokens::none(client),
-    };
+    let place = format!("pool {:?}: join_token_file", joined.name);
+    let ignored = joined
+        .join_token_file
+        .iter()
+        .map(|_| retired::ignored(&place));
     let registering = Registering {
         plan: None,
         pool,
-        tokens,
-        mint_provider: std::collections::BTreeSet::from([joined.name.clone()]),
         job_limits: crate::job_expiry::JobLimits::default(),
     };
     Ok(Read {
+        ignored: ignored.collect(),
         name: joined.name,
         pool: Pool::Elastic(Box::new(registering)),
     })
@@ -442,6 +435,25 @@ mod tests {
         assert_ne!(full.validate().unwrap(), small.validate().unwrap());
         let none = JoinedPool::from_table(with("exec = \"none\"")).unwrap();
         assert_eq!(none.exec, None);
+    }
+
+    /// A joined pool of the file that names `join_token_file` is read whatever the path is (a
+    /// path nothing could read is not looked at) and leaves one line for the start naming the
+    /// pool and the key; one that does not name it leaves none.
+    #[test]
+    fn a_retired_join_token_file_is_noted_and_never_read() {
+        let named = read(with(
+            "kind = \"joined\"\njoin_token_file = \"/nowhere/at/all\"",
+        ))
+        .unwrap();
+        assert_eq!(
+            named.ignored,
+            [
+                "pool \"nodes\": join_token_file is ignored: agents are admitted by host certificate only (drop it)"
+            ]
+        );
+        let plain = read(with("kind = \"joined\"")).unwrap();
+        assert!(plain.ignored.is_empty());
     }
 
     /// The registry's pool that [`MINIMAL`] builds, as `PoolConfig`'s own builders make it:

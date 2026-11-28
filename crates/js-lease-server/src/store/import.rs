@@ -3,11 +3,12 @@
 //!
 //! Right after the store is opened, and before anything else is read from the store, a
 //! start looks for the marker `meta/server-state-imported`. Without it, and with nothing in
-//! the store under `hosts/` or `acquires/`, it reads `<state file>.agents`, `.joins`, `.scaler`
+//! the store under `hosts/` or `acquires/`, it reads `<state file>.agents`, `.scaler`
 //! and `.scaler.unremoved` with the readers a start without the setting uses (a missing file is
 //! empty, as it is there, and a file those readers refuse, of a bad version, damaged, or one
-//! others can use, stops the start), and writes every binding, every join-token row, the
-//! records file's text, the hosts to remove and the marker in ONE transaction. A file that is
+//! others can use, stops the start), and writes every binding, the records file's text, the
+//! hosts to remove and the marker in ONE transaction. A `<state file>.joins` an earlier release
+//! kept is not read, and is not named stale. A file that is
 //! refused, or a commit that fails, writes nothing: the start is refused and the next start
 //! imports again. Several servers starting at once over one store race to the import; the
 //! commit of each is `Cond::Absent` on every key, so one wins. A loser's commit meets a key
@@ -34,14 +35,13 @@ use std::path::Path;
 use js_state::{Cond, Store, StoreError, Txn};
 use tracing::info;
 
-use crate::agent_state::Skew;
+use crate::agent_state::{self, Skew};
 use crate::agents::state_path;
 use crate::clock::SharedClock;
 use crate::error::StartupError;
 use crate::host_keys;
 use crate::scaler::kept;
 use crate::scaler::{RecordsFile, UnremovedFile};
-use crate::{agent_state, join_tokens};
 
 /// The key that says the files were imported.
 const IMPORTED: &str = "meta/server-state-imported";
@@ -54,7 +54,7 @@ const MARKER: &[u8] = b"{\"version\":1}";
 const HELD: [&str; 2] = ["hosts/", "acquires/"];
 
 /// The files beside the state file the import reads.
-const FILES: [&str; 4] = [".agents", ".joins", ".scaler", ".scaler.unremoved"];
+const FILES: [&str; 3] = [".agents", ".scaler", ".scaler.unremoved"];
 
 /// Imports the files beside the state file at `state_file` into `store` once (see the module
 /// docs), the bindings' cordon ends moved from `clock` (the server's) onto the store's.
@@ -128,7 +128,7 @@ pub(super) fn run(
     Ok(())
 }
 
-/// The keys of the four files beside `state_file`, read with their own readers.
+/// The keys of the three files beside `state_file`, read with their own readers.
 fn files(
     state_file: &Path,
     records_needed: bool,
@@ -136,7 +136,6 @@ fn files(
 ) -> Result<Vec<(String, Vec<u8>)>, StartupError> {
     let at = |suffix: &str| state_path(state_file, suffix);
     let mut writes = agent_state::import(&at(".agents"), skew)?;
-    writes.extend(join_tokens::import(&at(".joins"))?);
     let records = RecordsFile::new(at(".scaler"));
     let unremoved = UnremovedFile::new(at(".scaler.unremoved"));
     writes.extend(kept::import((&records, &unremoved), records_needed)?);
@@ -305,21 +304,13 @@ mod tests {
         assert_eq!(row["cordon_until_ms"], 60_000);
     }
 
-    /// The four files beside `state`: one binding, one join token, the records and a host to
-    /// remove.
-    fn the_four_files(state: &Path) {
+    /// The three files beside `state`: one binding, the records and a host to remove.
+    fn the_three_files(state: &Path) {
         let credential = "0123456789abcdef".repeat(4);
         beside(
             state,
             ".agents",
             &format!("version = 1\n[[host]]\nid = \"a\"\ncredential = \"{credential}\"\n"),
-        );
-        beside(
-            state,
-            ".joins",
-            &format!(
-                "version = 1\n[[join]]\nhash = \"{credential}\"\nprovider = \"p\"\ninstance_id = \"i\"\nexpires_at_ms = 1\n"
-            ),
         );
         let records = js_scaler::Records::default().encode().unwrap();
         beside(state, ".scaler", &records);
@@ -332,7 +323,7 @@ mod tests {
         rows.map(|(key, _)| key).collect()
     }
 
-    /// Asserts each way a start meets the import: an empty store imports the four files with
+    /// Asserts each way a start meets the import: an empty store imports the three files with
     /// the marker in one commit; a start that finds the marker reads no file (a file edited
     /// since is not read) and commits nothing; a store that holds server state without the
     /// marker gets the marker only. It catches an import that runs twice, one that misses a
@@ -341,7 +332,7 @@ mod tests {
     fn the_files_are_imported_once_and_never_over_held_state() {
         quiet_logs();
         let (_dir, path) = state("import_once");
-        the_four_files(&path);
+        the_three_files(&path);
         let store = store();
         run(
             &store,
@@ -351,12 +342,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(store.commit_stats().txns, 1);
-        let join = format!("hosts/join/{}", "0123456789abcdef".repeat(4));
         let all = [
             "acquires/scaler/records",
             "acquires/scaler/unremoved",
             "hosts/binding/a",
-            join.as_str(),
             IMPORTED,
         ];
         assert_eq!(keys(&store), all);
@@ -415,19 +404,18 @@ mod tests {
         assert_eq!(keys(&store), [IMPORTED]);
     }
 
-    /// Asserts that a damaged bindings, join tokens or records file stops the import with the
+    /// Asserts that a damaged bindings or records file stops the import with the
     /// file's own refusal, naming the file, and writes nothing. It catches an import that
     /// reads a damaged file as empty, or writes the files it could read and not the rest.
     #[test]
     fn a_damaged_file_refuses_the_import_and_writes_nothing() {
         let cases = [
             (".agents", "is not a valid agent state file"),
-            (".joins", "is not a valid join token file"),
             (".scaler", "is not a valid scaler records file"),
         ];
         for (n, (suffix, says)) in cases.into_iter().enumerate() {
             let (_dir, path) = state(&format!("import_damaged_{n}"));
-            the_four_files(&path);
+            the_three_files(&path);
             beside(&path, suffix, "{}");
             let store = store();
             let refused = run(
@@ -444,6 +432,34 @@ mod tests {
         }
     }
 
+    /// Asserts that a `.joins` file beside the state file, whatever it holds, is neither read
+    /// nor written into the store, and is not named stale: the import with it writes the same
+    /// keys as the import without it, and a damaged one refuses nothing. It catches an import
+    /// that still reads the retired file of join tokens.
+    #[test]
+    fn a_joins_file_beside_the_state_file_is_not_read() {
+        quiet_logs();
+        let (_dir, path) = state("import_joins");
+        the_three_files(&path);
+        beside(&path, ".joins", "not toml at all");
+        let store = store();
+        run(
+            &store,
+            (&path, &crate::agent_state::epoch_clock()),
+            true,
+            &refuse,
+        )
+        .unwrap();
+        let all = [
+            "acquires/scaler/records",
+            "acquires/scaler/unremoved",
+            "hosts/binding/a",
+            IMPORTED,
+        ];
+        assert_eq!(keys(&store), all);
+        assert!(!FILES.contains(&".joins"));
+    }
+
     /// Asserts that of two servers racing the first start over one store, the one whose commit
     /// meets the other's import starts: the other's commit lands between this one's reads and
     /// its commit, and this start reads the marker, writes nothing and answers `Ok`, leaving
@@ -453,7 +469,7 @@ mod tests {
     fn the_server_that_loses_the_import_race_starts() {
         quiet_logs();
         let (_dir, path) = state("import_race");
-        the_four_files(&path);
+        the_three_files(&path);
         let store = store();
         let other = store.inner();
         let winner = path.clone();
@@ -473,12 +489,10 @@ mod tests {
             &refuse,
         )
         .unwrap();
-        let join = format!("hosts/join/{}", "0123456789abcdef".repeat(4));
         let all = [
             "acquires/scaler/records",
             "acquires/scaler/unremoved",
             "hosts/binding/a",
-            join.as_str(),
             IMPORTED,
         ];
         assert_eq!(keys(&store), all);
@@ -498,7 +512,7 @@ mod tests {
     #[test]
     fn a_conflict_without_the_marker_refuses_the_start() {
         let (_dir, path) = state("import_conflict");
-        the_four_files(&path);
+        the_three_files(&path);
         for fail_read in [false, true] {
             let store = store();
             let other = store.inner();

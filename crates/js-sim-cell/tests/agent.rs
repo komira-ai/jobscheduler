@@ -34,9 +34,6 @@ use standin::{
 /// The heartbeat interval the stand-in's welcome names, and the agent's hello interval.
 const INTERVAL: Duration = Duration::from_millis(1_000);
 
-/// The join token of every agent here.
-const JOIN: &str = "join-token-sim-0123456789-abcdefghij";
-
 /// How long a run that should outlast the test runs.
 const LONG_RUN_MS: u64 = 60_000;
 
@@ -61,7 +58,7 @@ fn spec() -> AgentSpec {
     AgentSpec {
         host: HostId::new("h000").expect("host id"),
         pool: POOL.to_owned(),
-        join_token: JOIN.to_owned(),
+        certificate: Some(HostId::new("h000").expect("host id")),
         capacity: Resources::new(8_000, 16 * GIB, 1, Some("nvidia-a100".to_owned()))
             .expect("capacity"),
         capabilities: BTreeMap::from([("isa".to_owned(), "x86-64-v3".to_owned())]),
@@ -151,25 +148,28 @@ fn runs(names: &[&str]) -> Vec<String> {
     names.iter().map(|name| (*name).to_owned()).collect()
 }
 
-/// The stand-in drops the first two hellos; the third, an interval after the second, is
-/// welcomed, and the heartbeats follow one interval apart from the welcome. Every call
-/// carries the join token, though the welcome offered a host credential. Catches an agent
-/// that gives up after a lost hello, hellos off the interval, beats off the interval, or
-/// keeps a credential it did not ask for.
+/// The agent keeps one hello in flight, as the real agent does: the stand-in drops the
+/// first two hellos, and the agent gives each the request limit (10 s) before it counts it
+/// failed and sends the next one backoff (1 s) later, never a second hello while one is
+/// open. The third is welcomed, and the heartbeats follow one interval apart from the
+/// welcome. Every call presents the certificate of host `h000`, though the welcome carries a
+/// host credential of a server before this release. Catches an agent that gives up after a
+/// lost hello, one that says hello again while an earlier hello is unanswered (each of which
+/// a server keyed per certificate admits and takes a session from), hellos off the request
+/// limit and backoff, beats off the interval, or a call that presents no certificate.
 #[test]
 fn a_hello_is_resent_until_welcomed_and_heartbeats_follow_on_the_interval() {
     let script = Script::plain()
         .hello(1, HelloAnswer::Silent)
         .hello(2, HelloAnswer::Silent);
-    let (sim, _) = run(spec(), script, 6_500);
+    let (sim, _) = run(spec(), script, 26_500);
     let server = stand_in(&sim);
-    assert_eq!(server.hello_times(), [5, 1_005, 2_005]);
-    assert_eq!(server.beat_times(), [3_015, 4_025, 5_035, 6_045]);
+    assert_eq!(server.hello_times(), [5, 11_005, 22_005]);
+    assert_eq!(server.beat_times(), [23_015, 24_025, 25_035, 26_045]);
     for received in &server.received {
-        assert_eq!(received.bearer, JOIN);
+        assert_eq!(received.certificate, HostId::new("h000").ok());
     }
     for hello in server.hellos() {
-        assert!(!hello.accepts_host_credential);
         assert_eq!(hello.host_id, "h000");
         assert_eq!(hello.pool, POOL);
     }
@@ -208,7 +208,8 @@ fn a_refused_hello_is_retried_after_the_wait_it_names() {
 }
 
 /// A refusal other than 429 (here 403 `pool-full`), and a 429 that names no wait, are
-/// followed by the next hello one interval later. Catches an agent that gives up on a
+/// followed by the next hello one interval after the answer was read (the agent waits for
+/// the answer before it sends another hello). Catches an agent that gives up on a
 /// refusal it does not read as final, or retries at once.
 #[test]
 fn a_hello_refused_without_a_wait_is_retried_on_the_interval() {
@@ -231,20 +232,20 @@ fn a_hello_refused_without_a_wait_is_retried_on_the_interval() {
         );
     let (sim, _) = run(spec(), script, 3_500);
     let server = stand_in(&sim);
-    assert_eq!(server.hello_times(), [5, 1_005, 2_015]);
-    assert_eq!(server.beat_times(), [3_025]);
+    assert_eq!(server.hello_times(), [5, 1_015, 2_025]);
+    assert_eq!(server.beat_times(), [3_035]);
 }
 
 /// A welcome with a zero heartbeat interval fails the wire's check: the agent ignores it,
-/// counts it, and says hello again an interval later. Catches an agent that trusts a
+/// counts it, and says hello again an interval after it read the answer. Catches an agent that trusts a
 /// welcome it did not validate.
 #[test]
 fn a_welcome_that_fails_validation_is_ignored_and_counted() {
     let script = Script::plain().hello(1, HelloAnswer::Invalid);
     let (sim, _) = run(spec(), script, 2_500);
     let server = stand_in(&sim);
-    assert_eq!(server.hello_times(), [5, 1_005]);
-    assert_eq!(server.beat_times(), [2_015]);
+    assert_eq!(server.hello_times(), [5, 1_015]);
+    assert_eq!(server.beat_times(), [2_025]);
     assert_eq!(count(&sim, Counter::ReplyInvalid), 1);
 }
 
@@ -706,7 +707,7 @@ fn a_call_addressed_to_the_agent_is_ignored() {
     let call = Msg::Request {
         id: CallId(0),
         route: Route::Hello,
-        bearer: JOIN.to_owned(),
+        certificate: None,
         body: String::new(),
     };
     let from = NodeId::new(SERVER);
@@ -738,7 +739,7 @@ fn a_started_run_is_unlisted_until_a_heartbeat_lists_it() {
 }
 
 /// The same script twice gives the same trace hash; the trace names every call and
-/// answer by route, number and status, and no line holds the join token or the session
+/// answer by route, number and status, and no line holds the session
 /// secret. Catches a trace that leaks a secret, or a node whose run depends on anything
 /// but the seed and the script.
 #[test]
@@ -768,7 +769,6 @@ fn the_trace_of_an_agent_run_replays_and_holds_no_secret() {
             .any(|line| line.contains("/v1/agent/heartbeat"))
     );
     for line in lines {
-        assert!(!line.contains(JOIN), "{line}");
         assert!(!line.contains(SESSION_PREFIX), "{line}");
         assert!(!line.contains("credential"), "{line}");
     }

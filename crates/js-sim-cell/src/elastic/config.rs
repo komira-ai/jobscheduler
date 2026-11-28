@@ -108,13 +108,13 @@ pub(crate) struct Files<'a> {
 /// The configuration file of a server whose one pool is `cloud`'s elastic pool: the lease
 /// file, the client token's file and the store's file of `files`,
 /// usage recording off, and booting `initialise` (which reads
-/// the state file, and the join tokens and the scaler's saved state from the store, when
-/// they are there, so a restart over the same files and store reads them too).
+/// the state file, and the scaler's saved state from the store, when
+/// it is there, so a restart over the same files and store reads it too).
 ///
 /// The pool is of class `whole-node` and launches for real (`launch = "live"`); its
 /// spending caps are what `max_instances` machines of its dearest offer cost, an hour and a
-/// day, so they never refuse a launch the instance limit allows. It names no shared join
-/// token: only the one-time tokens of its launched machines register hosts. A queued job
+/// day, so they never refuse a launch the instance limit allows. It names no static hosts:
+/// only its launched machines register hosts. A queued job
 /// waits for a machine two hours (`max_queue_wait`, the server's default being one), longer
 /// than the longest the elastic fault scenarios keep demand waiting through the cloud's
 /// cooldowns and its brake.
@@ -187,11 +187,9 @@ fn server_table(files: &Files<'_>) -> String {
 pub(crate) struct Ordered<'a> {
     /// The pool's name.
     pub(crate) pool: &'a str,
-    /// How many hosts of the `static` machine provider (registered with the shared join
-    /// token) the pool admits.
+    /// How many hosts of the `static` machine provider (registered by their certificates)
+    /// the pool admits.
     pub(crate) hosts: usize,
-    /// The file that holds the pool's shared join token (`join_token_file`).
-    pub(crate) joins: &'a Path,
 }
 
 /// The name of the `static` machine provider of a server of [`crate::ServerSpec::ordered`].
@@ -218,8 +216,7 @@ pub const PLATFORM: &str = "cell";
 ///
 /// The pool is as [`text`]'s but of class [`ORDERED_CLASS`], with `max_instances` the static hosts and every cloud's
 /// share together (at most 255, which the server refuses above), its spending caps those of
-/// so many machines of the dearest offer of any cloud, and the shared join token of
-/// `ordered.joins`, which the static hosts say hello with.
+/// so many machines of the dearest offer of any cloud.
 #[must_use]
 pub(crate) fn ordered_text(clouds: &[Cloud], files: &Files<'_>, ordered: &Ordered<'_>) -> String {
     let pools = clouds.iter().map(Cloud::pool);
@@ -279,7 +276,6 @@ pub(crate) fn ordered_text(clouds: &[Cloud], files: &Files<'_>, ordered: &Ordere
          max_age = {age}\n\
          launch = \"live\"\n\
          max_queue_wait = \"2h\"\n\
-         join_token_file = {joins}\n\
          agent = {{ x86_64 = {{ url = {url}, sha256 = {sha} }} }}\n\
          {limits}",
         server = server_table(files),
@@ -298,7 +294,6 @@ pub(crate) fn ordered_text(clouds: &[Cloud], files: &Files<'_>, ordered: &Ordere
         ),
         lifetime = millis(MIN_HOST_LIFETIME),
         age = millis(MAX_AGE),
-        joins = quoted(&ordered.joins.display().to_string()),
         url = quoted(AGENT_URL),
         sha = quoted(AGENT_SHA256),
         limits = limits.collect::<String>(),
@@ -337,9 +332,9 @@ mod tests {
     /// machine provider of the cell's kind for each cloud, naming its cloud, lists them
     /// first to last in its platform, the static one first, gives each cloud its
     /// `provider_limits` (share, `quota_backoff`, `acquire_retry`), admits the static hosts
-    /// and every share in `max_instances`, and names the shared join token's file. Catches a
+    /// and every share in `max_instances`, and names no token file. Catches a
     /// provider left out or listed out of order, a share or a failover time not written, a
-    /// pool too small for its static hosts, and static hosts with no token to say hello with.
+    /// pool too small for its static hosts, and a file that still names a retired key.
     #[test]
     fn the_ordered_file_lists_the_providers_first_to_last_with_their_limits() {
         let offers = vec![OfferSpec::new("sim_cpu", "zone-a", 120)];
@@ -357,7 +352,6 @@ mod tests {
         let ordered = Ordered {
             pool: "burst",
             hosts: 5,
-            joins: Path::new("/scratch/agent-tokens"),
         };
         let text = ordered_text(&[first, second], &files, &ordered);
         let wanted = [
@@ -366,13 +360,13 @@ mod tests {
             "name = \"lambda\"\nkind = \"sim-cloud\"\ncloud = \"lambda\"\n",
             "machine_providers = [\"registered\", \"ec2\", \"lambda\"]\n",
             "class = \"shared-host\"\nplatforms = [\"cell\"]\nmax_instances = 12\n",
-            "join_token_file = \"/scratch/agent-tokens\"\n",
             "[pool.provider_limits.\"ec2\"]\nmax_machines = 3\nquota_backoff = \"3600000ms\"\nacquire_retry = \"60000ms\"\n",
             "[pool.provider_limits.\"lambda\"]\nmax_machines = 4\nquota_backoff = \"90000ms\"\nacquire_retry = \"30000ms\"\n",
         ];
         for line in wanted {
             assert!(text.contains(line), "{line:?} is not in:\n{text}");
         }
+        assert!(!text.contains("join_token_file"), "{text}");
         assert!(text.parse::<toml::Table>().is_ok(), "{text}");
     }
 

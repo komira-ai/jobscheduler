@@ -20,6 +20,10 @@ use super::super::step_rig::as_root;
 
 pub const UNIT: &str = "js-agent.service";
 
+/// What the hook says when the host's flags file names no host certificate and key, so that the
+/// lease cannot be made ([`Rig::without_a_host_certificate`]).
+pub const NO_CERTIFICATE: &str = "flags_file: the flags file names no --host-cert and --host-key: a host is identified by its certificate";
+
 /// What the lease server says at a look.
 #[derive(Clone, Copy, Debug)]
 pub enum Say {
@@ -260,9 +264,9 @@ impl Rig {
         }
     }
 
-    /// The join token file is in place.
-    pub fn with_token(&self) {
-        fs::write(&self.params.token_file, "tok-0123456789\n").unwrap();
+    /// The flags file names no host certificate and key: the lease cannot be made.
+    pub fn without_a_host_certificate(&self) {
+        *self.flags.borrow_mut() = Some(NO_CERTIFICATE.to_owned());
     }
 
     pub fn record_path(&self) -> std::path::PathBuf {
@@ -334,7 +338,7 @@ impl Rig {
 pub fn text(root: &str, cutover: u64, verify: u64, rollback: u64) -> String {
     format!(
         concat!(
-            "unit = \"{unit}\"\nflags_file = \"{root}/flags\"\ntoken_file = \"{root}/token\"\n",
+            "unit = \"{unit}\"\nflags_file = \"{root}/flags\"\n",
             "state_root = \"{root}/state-root\"\nstate_dir = \"{root}/state\"\n",
             "cutover_timeout_secs = {cutover}\nverify_timeout_secs = {verify}\n",
             "rollback_timeout_secs = {rollback}\n"

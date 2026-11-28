@@ -397,18 +397,16 @@ impl Registry {
     /// session stops working.
     ///
     /// The binding is as strong as what the first hello presented. With an instance
-    /// identity it names the machine. Without one it holds at the level of the pool
-    /// credential only: whoever holds the pool's token can say hello for the id once
-    /// the host is lost. Per-host tokens or client
-    /// certificates close that later (design D18). A binding is not upgraded by a later
-    /// hello that names an instance.
+    /// identity it names the machine. Without one it holds at the level of the credential
+    /// only: whoever holds that credential can say hello for the id once the host is lost.
+    /// A host certificate's credential is the host's alone. A binding is not upgraded by a
+    /// later hello that names an instance.
     ///
-    /// The pool-full check does not stop a holder of the pool token from locking the pool
-    /// out: retention bounds only silent squatters. Such a holder can say hello for
-    /// `max_machines` made-up ids and keep them live with the sessions it was issued, or
-    /// refill the pool every grace plus retention, and every real new host then gets
-    /// pool-full. The transport must rate-limit hellos per credential, and per-host
-    /// credentials (design D18) close it; there is no per-credential cap here.
+    /// The pool-full check does not stop one credential from filling the pool: retention
+    /// bounds only silent squatters. A caller can say hello for `max_machines` made-up ids
+    /// and keep them live with the sessions it was issued, or refill the pool every grace
+    /// plus retention, and every real new host then gets pool-full. The transport
+    /// rate-limits hellos per credential; there is no per-credential cap here.
     ///
     /// A pool that names `scratch-quota` also refuses (`shape-not-accepted`) a host whose
     /// quota default does not count (see `quota_default`) or is more than the disk the host
@@ -426,8 +424,8 @@ impl Registry {
     }
 
     /// [`Registry::hello`] for a hello authenticated by a host certificate
-    /// ([`Credential::of_host_certificate`]): a host id bound to another credential (a
-    /// join token, say) that is not live is bound to `credential` instead, by this hello,
+    /// ([`Credential::of_host_certificate`]): a host id bound to another credential (one
+    /// from before host certificates, say) that is not live is bound to `credential` instead, by this hello,
     /// keeping its taint and cordon; its instance becomes the hello's. A live host is
     /// refused [`Refusal::HostLive`] as for any hello, and every other check is as
     /// `hello`'s. The caller keeps its own record of the binding in step (see
@@ -454,16 +452,14 @@ impl Registry {
     /// the first and the epoch refusal by saying hello again.
     ///
     /// The session secret is what proves the sender is the host that was admitted: the
-    /// pool's join token is shared by every host of the pool, and the host id and epoch
-    /// are guessable, so neither names a session. The registry keeps only the SHA-256
+    /// host id and epoch are guessable, so neither names a session. The registry keeps only the SHA-256
     /// digest of the secret and compares digests in constant time. A refusal for the
     /// session (`session-mismatch`) is the last check and, like every refusal, changes
     /// nothing: the host's last-heard time, phase and epoch stay as they were. A hello
     /// replaces the secret, so the old one stops working at once.
     ///
     /// What this does not cover: the secret travels in the heartbeat, so it protects a
-    /// session only as far as the transport does, and a pool-token holder can still
-    /// take an id over with a hello, as [`Registry::hello`] says.
+    /// session only as far as the transport does.
     ///
     /// The reply is the one for a previous release's agent that still keys its work by run
     /// ([`beat::answer`]): a cancel for each run the heartbeat lists as held, at most

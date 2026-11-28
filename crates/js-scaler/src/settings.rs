@@ -51,9 +51,6 @@ pub struct Settings {
     /// machine is given up on at this time only if the registry has also not shown its host
     /// on complete views for a third of it (`boot_hold`); see the design, section 6.2.
     pub boot_timeout: Duration,
-    /// How long past `boot_timeout` a join token lives, so a host that boots at the very
-    /// limit still finds its token alive.
-    pub token_margin: Duration,
     /// How long the pool launches nothing after a boot failure or a `denied` or `shape`
     /// refusal.
     pub boot_fail_cooldown: Duration,
@@ -219,7 +216,7 @@ pub const BOOT_FAIL_TRIP_AFTER: u32 = 3;
 
 impl Settings {
     /// A pool in `Plan` mode with the design's defaults: `idle` 10 minutes, `boot_timeout`
-    /// 15 minutes, `token_margin` 5 minutes (a token lives 20), `boot_fail_cooldown` 10
+    /// 15 minutes, `boot_fail_cooldown` 10
     /// minutes, `unknown_hold` 30 minutes, `max_step` 1, `quota_backoff` one hour,
     /// `acquire_retry` 60 seconds, `size_tolerance_percent` 10 and `offer_cooldown` one
     /// hour; [`UNNAMED_PROVIDER`], with no
@@ -239,7 +236,6 @@ impl Settings {
             max_spend_per_day,
             idle: Duration::from_secs(10 * 60),
             boot_timeout: Duration::from_secs(15 * 60),
-            token_margin: Duration::from_secs(5 * 60),
             boot_fail_cooldown: Duration::from_secs(10 * 60),
             boot_fail_cooldown_max: BOOT_FAIL_COOLDOWN_MAX,
             boot_fail_trip_after: BOOT_FAIL_TRIP_AFTER,
@@ -345,11 +341,6 @@ impl Settings {
     /// Whether a machine launched at `launched` has reached `max_age` at `now`.
     pub(crate) fn aged(&self, launched: Millis, now: Millis) -> bool {
         self.max_age.is_some_and(|max| now.since(launched) >= max)
-    }
-
-    /// How long the join token of a launch lives: `boot_timeout` plus `token_margin`.
-    pub(crate) fn token_life(&self) -> Duration {
-        self.boot_timeout.saturating_add(self.token_margin)
     }
 
     /// How long a booting machine past `boot_timeout` must have been missing from complete

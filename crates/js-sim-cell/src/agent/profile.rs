@@ -1,9 +1,9 @@
 //! Which release of the agent a node says hello as.
 //!
-//! The wire crate (`js-agent-wire`) has not changed since v0.1.208, so an agent of the
-//! previous release (v0.1.213, recorded in `crates/js-agent/tests/agent/skew/v0.1.213.json`)
-//! differs on the wire from this one only in what its hello says: the agent version, that
-//! it accepts a host credential, and its capability set. Its heartbeats are built from the
+//! The wire crate (`js-agent-wire`) has only dropped fields since v0.1.208, so an agent of
+//! the previous release (v0.1.213, recorded in `crates/js-agent/tests/agent/skew/v0.1.213.json`)
+//! differs on the wire from this one only in what its hello says: the agent version, the
+//! `accepts_host_credential` field this release no longer has, and its capability set. Its heartbeats are built from the
 //! same optional fields and carry nothing this server cannot read. The profile changes the
 //! hello and nothing else; the node's behaviour past it is the cell's agent as before.
 //!
@@ -13,13 +13,14 @@
 //! - it names no `agent_process` in its hello and no `seq` in its heartbeats (the fields
 //!   came after that release), so a server serves it as an agent that does not number its
 //!   beats;
-//! - `accepts_host_credential` is `true` (it matters only to a host that joins with a
-//!   one-time token, and the cell's hosts join with the pool's shared one);
+//! - `accepts_host_credential` is `true`, a field of the hello this release dropped (the
+//!   server ignores it, as it ignores any field it does not know);
 //! - the capabilities `start-fence`, `runtime`, `exec`, `os`, `egress` and `arch` beside
 //!   the ones the shape and the per-job messages give, a capability the shape already
 //!   names keeping the shape's value.
 
 use js_agent_wire::{Heartbeat, Hello, ProtocolRange, START_FENCE_CAPABILITY};
+use serde_json::Value;
 
 /// The agent version of the previous release's recorded hello.
 const PREVIOUS_VERSION: &str = "0.1.0";
@@ -60,7 +61,6 @@ impl AgentProfile {
             Self::Current => {}
             Self::PreviousRelease => {
                 PREVIOUS_VERSION.clone_into(&mut hello.agent_version);
-                hello.accepts_host_credential = true;
                 hello.agent_process = None;
                 let named = &mut hello.capabilities;
                 for (key, value) in PREVIOUS_CAPABILITIES {
@@ -72,6 +72,22 @@ impl AgentProfile {
             Self::ProtocolAhead => hello.protocol = AHEAD,
         }
         hello
+    }
+
+    /// `hello` as the JSON body an agent of this profile sends: the previous release's body
+    /// also names the `accepts_host_credential` field it still had.
+    ///
+    /// # Errors
+    ///
+    /// When the hello does not encode, which no wire type fails to do.
+    pub(super) fn encode(self, hello: &Hello) -> Result<String, serde_json::Error> {
+        let mut body = serde_json::to_value(hello)?;
+        let previous = (self == Self::PreviousRelease).then_some(true);
+        let fields = body.as_object_mut().into_iter();
+        for (fields, flag) in fields.zip(previous) {
+            fields.insert("accepts_host_credential".to_owned(), Value::Bool(flag));
+        }
+        serde_json::to_string(&body)
     }
 
     /// `beat` as an agent of this profile sends it: the previous release does not number its

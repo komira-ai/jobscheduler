@@ -18,6 +18,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use js_types::Timestamp;
 
 use crate::binary::launch;
+use crate::host_certs_support::{Client, Spec, shared_ca};
 use crate::support::{Harness, LogCapture, Scratch, TOKEN, base_args, config, guard};
 use crate::tls::{connector, tls_request};
 
@@ -78,17 +79,9 @@ async fn server(name: &str) -> (Harness, Files, (String, String)) {
         cert: scratch.path("test-only-cert.pem"),
         key: scratch.path("test-only-key.pem"),
     };
+    // The agent flags name the two files: the pair of serial 1 is put in them.
+    let args = crate::agents_support::agent_args(&scratch);
     files.put(&scratch, &first);
-    let mut args = crate::agents_support::agent_args(&scratch);
-    args.extend(
-        [
-            "--tls-cert",
-            files.cert.to_str().unwrap(),
-            "--tls-key",
-            files.key.to_str().unwrap(),
-        ]
-        .map(Into::into),
-    );
     let h = Harness::over(scratch, config(args).unwrap()).await;
     h.clock.set(Timestamp::from_millis(START_OF_2030_MS));
     (h, files, first)
@@ -300,16 +293,17 @@ async fn a_server_without_tls_refuses_a_reload() {
 #[tokio::test]
 async fn the_host_list_survives_a_reload() {
     let (h, files, first) = server("tls_reload_state").await;
-    let hello = crate::agents_support::hello_body("burst-1").to_string();
-    let welcomed = tls_request(
-        h.addr(),
-        &connector(&first.0),
-        "POST",
-        "/v1/agent/hello",
-        Some(crate::agents_support::JOIN),
-        Some(hello.as_bytes()),
-    )
-    .await;
+    let hello = crate::agents_support::hello_body("burst-1");
+    let host = Client {
+        addr: h.addr(),
+        trusted: first.0.clone(),
+        identity: Some(shared_ca().issue(&Spec::host("burst-1"))),
+        tls12: false,
+    };
+    let welcomed = host
+        .send("POST", "/v1/agent/hello", None, Some(&hello))
+        .await
+        .unwrap();
     assert_eq!(welcomed.status, 200, "{}", welcomed.body);
     let before = tls_request(
         h.addr(),

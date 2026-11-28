@@ -181,7 +181,9 @@ const CONFIG_BOUNDS: Bounds = Bounds {
     cleanup_retries: 3,
 };
 
-/// The config package's `params`, as packaging/js-agent-macos/README.md gives them.
+/// The config package's `params`, as packaging/js-agent-macos/README.md gives them, with the
+/// retired `token_file` that a config package issued before hosts were identified by their
+/// certificate alone still names: the hook accepts it and ignores it.
 const CONFIG_PARAMS: &str = r#"unit                  = "js-agent"
 flags_file            = "/etc/js-agent/flags"
 token_file            = "/etc/js-agent/token"

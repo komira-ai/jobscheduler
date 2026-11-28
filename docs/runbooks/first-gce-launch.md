@@ -139,7 +139,7 @@ was lost and the scheduler cannot tell whether an instance exists, it holds the 
 ## 4. Teardown
 
 Cancel the job (`js job cancel --job-id <id>`) or let its wall limit end. The host drains after the pool's `idle`
-time, its token is revoked before the release is sent, and the instance is deleted, then read back until the
+time, the instance is deleted, then read back until the
 cloud reports it gone (a `TERMINATED` instance is still there). The order is the one in section 6 of `first-live-launch.md`. **CI**
 (release and read-back against the fake), **LIVE** (the instance list agrees).
 
@@ -160,7 +160,7 @@ Stop spend at the first doubt.
 | An instance exists and the scheduler is healthy | Cancel the job; let the teardown run. Watch it. |
 | An `alerts` entry about a machine, or a registered host that never heartbeated past `boot_timeout` | Delete the instance by hand: `gcloud compute instances delete <name> --zone <zone> --project <project id>`. Instances are found with `gcloud compute instances list --filter="labels.js-scheduler=<scheduler id>"`. |
 | The scheduler is wedged or unreachable | The same action. Stopping the service does not delete instances; they bill until deleted. |
-| A secret may have leaked | Delete first. Then rotate the service-account key, or remove the role from the service account, and rotate any join token. |
+| A secret may have leaked | Delete first. Then rotate the service-account key, or remove the role from the service account. |
 
 After an abort, verify by hand: the list with the filter `labels.js-scheduler=<scheduler id>` shows no
 instance, `/v1/pools` shows `instances.n` 0, and `orphans` and `alerts` are empty.

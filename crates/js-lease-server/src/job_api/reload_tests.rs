@@ -22,7 +22,7 @@ use super::writes_rig::{Fixed, Writes, wire};
 use crate::agent_api::job_rig::{OneClock, START_MS, tables_on};
 use crate::clock::SharedClock;
 use crate::config::LiveClients;
-use crate::config::clients_rig::{ClientsRig, DEFAULT_TOKEN, JOIN};
+use crate::config::clients_rig::{ClientsRig, DEFAULT_TOKEN};
 use crate::in_process::InProcess;
 
 /// The first token of `ci`.
@@ -163,10 +163,10 @@ async fn a_tick_revokes_a_rewritten_token_and_admits_the_new_one() {
 /// one warning, whose fields are exactly the fixed message and the reason naming the entry
 /// and the file (so it holds no token): a token too short, an empty file, a
 /// file removed, one others may read (mode 0644), `ops`'s token, the lease routes' token
-/// (`default`'s) and the agent side's join token; and that once the file holds a valid new
+/// (`default`'s); and that once the file holds a valid new
 /// token C, the next tick puts it in force. Catches a reload that empties the set (every
 /// client locked out), one that drops only the bad client, one that lets two clients share
-/// a token or a client hold the join token, a silent refusal, and a token in the warning.
+/// a token, a silent refusal, and a token in the warning.
 #[tokio::test]
 async fn a_bad_token_file_keeps_every_client_token_in_force() {
     let (events, _scope) = Events::scoped();
@@ -175,7 +175,7 @@ async fn a_bad_token_file_keeps_every_client_token_in_force() {
     let uid = std::os::unix::fs::MetadataExt::uid(&std::fs::metadata(&s.file).expect("meta"));
     let ci = "--client-token ci";
     let own = "each client needs its own token";
-    let edits: [(&str, Edit, String); 7] = [
+    let edits: [(&str, Edit, String); 6] = [
         (
             "too short",
             Box::new(|path| rewrite(path, "short")),
@@ -214,11 +214,6 @@ async fn a_bad_token_file_keeps_every_client_token_in_force() {
             "default's token",
             Box::new(|path| rewrite(path, DEFAULT_TOKEN)),
             format!("{ci}: holds the same token as the client of --token-file; {own}"),
-        ),
-        (
-            "the join token",
-            Box::new(|path| rewrite(path, JOIN)),
-            format!("{ci}: holds a join token of --agent-token-file: the two must differ"),
         ),
     ];
     for (case, edit, wants) in edits {

@@ -4,7 +4,6 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::path::Path;
 use std::sync::mpsc::Receiver;
 
 use base64::Engine as _;
@@ -14,7 +13,7 @@ use crate::agent::{Agent, HANG_GUARD};
 use crate::cli::Js;
 use crate::http::Gateway;
 use crate::node::{Node, image};
-use crate::server::{Files, Server, Store};
+use crate::server::{Files, HostFiles, Server, Store};
 
 /// The most reads of a job [`Rig::left_the_queue`] makes before it fails: a guard against a
 /// poller that never places, far above the few reads a placement takes.
@@ -267,8 +266,8 @@ impl Rig {
     /// A server over a new store of `kind` and an agent of a new node, registered as `h1`
     /// with `extra` flags, for the case `name`.
     pub fn new(name: &str, kind: Kind, extra: &[&str]) -> Self {
-        Self::with_agent(name, kind, |node, server, token| {
-            Agent::start(node, server, token, "h1", extra)
+        Self::with_agent(name, kind, |node, server, host| {
+            Agent::start(node, server, host, "h1", extra)
         })
     }
 
@@ -276,14 +275,14 @@ impl Rig {
     pub fn with_agent(
         name: &str,
         kind: Kind,
-        start: impl FnOnce(&Node, &str, &Path) -> Agent,
+        start: impl FnOnce(&Node, &str, &HostFiles) -> Agent,
     ) -> Self {
         let node = Node::new(name);
         let files = Files::new(name, kind.store());
         let server = Server::start(&files, "initialise");
-        let agent = start(&node, &server.url(), &files.join_file());
-        let http = Gateway::new(server.job);
-        let js = Js::new(server.job, &files.token_file());
+        let agent = start(&node, &server.url(), &files.host_files("h1"));
+        let http = Gateway::new(server.job, &files.server_cert_file());
+        let js = Js::new(server.job, &files.token_file(), &files.server_cert_file());
         Self {
             node,
             files,

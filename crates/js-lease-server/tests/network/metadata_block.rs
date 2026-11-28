@@ -50,8 +50,8 @@ fn the_rules_drop_the_address_from_containers_and_from_every_user_but_root() {
 }
 
 /// Asserts the order: the program is checked, the rules and the unit are written, the
-/// unit is started and the loaded table is read back, all before the join token is
-/// written, the network steps run, the agent is fetched or its unit exists.
+/// unit is started and the loaded table is read back, all before the network steps run, the agent is fetched or its unit
+/// exists.
 #[test]
 fn the_block_is_loaded_before_the_agent_exists() {
     let script = script();
@@ -62,7 +62,6 @@ fn the_block_is_loaded_before_the_agent_exists() {
         format!("cat > /etc/systemd/system/{METADATA_UNIT}"),
         format!("systemctl enable --now {METADATA_UNIT}"),
         format!("{NFT_BIN} list table inet js_metadata"),
-        "# identity".to_owned(),
         "# network".to_owned(),
         "curl ".to_owned(),
         "cat > /etc/systemd/system/js-agent.service".to_owned(),
@@ -70,7 +69,7 @@ fn the_block_is_loaded_before_the_agent_exists() {
     ];
     let places: Vec<usize> = order.iter().map(|n| at(n)).collect();
     assert!(places.windows(2).all(|w| w[0] < w[1]), "{places:?}");
-    assert!(at("# metadata block") < at("# identity"));
+    assert!(at("# metadata block") < at("# network"));
 }
 
 /// Asserts that the rules persist across a reboot: they are in a file, a oneshot unit
@@ -114,7 +113,7 @@ fn the_agent_unit_requires_the_block_and_gives_containers_no_network() {
 }
 
 /// Asserts that the block holds only constants: a plan whose values hold shell and unit
-/// syntax changes nothing between the `# metadata block` line and `# identity`.
+/// syntax changes nothing between the `# metadata block` line and `# network`.
 #[test]
 fn nothing_from_the_plan_reaches_the_block() {
     let host = host();
@@ -123,7 +122,7 @@ fn nothing_from_the_plan_reaches_the_block() {
     odd.scheduler_url = "https://h.example/%h\"$x".to_owned();
     let section = |text: &str| {
         let start = text.find("# metadata block").unwrap();
-        let end = text.find("# identity").unwrap();
+        let end = text.find("# network").unwrap();
         text[start..end].to_owned()
     };
     assert_eq!(

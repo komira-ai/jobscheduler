@@ -38,6 +38,8 @@ use js_agent::update_hook::{
     Clock, DirStat, Done, DrainParams, Host, Invocation, Lease, Machine, MaintainInvocation,
     MaintenanceStep, Manager, NoGate, Outcome, Params, Ports, Step, run,
 };
+#[cfg(target_os = "linux")]
+use js_client::HostIdentity;
 
 #[cfg(target_os = "linux")]
 #[path = "../update_hook_fakes/mod.rs"]
@@ -79,7 +81,7 @@ fn as_root(_: &Path, _: std::os::fd::BorrowedFd<'_>) -> std::io::Result<DirStat>
     })
 }
 
-/// The join token file as the agent needs it, or (the first-install `prepare` fault,
+/// The host's key file as the agent needs it, or (the first-install `prepare` fault,
 /// `Fault::Defer`) readable by everyone.
 #[cfg(target_os = "linux")]
 fn token(wrong: bool) -> impl Fn(&Path) -> std::io::Result<TokenFacts> {
@@ -178,6 +180,7 @@ fn fake_step(setup: &Setup, invocation: &Invocation, params: &Params) -> Done {
     let frozen = Frozen(&world);
     let clock: &dyn Clock = if hang { &frozen } else { &world };
     let guard = Guard::new(clock, Guard::budget_of(step_now), &hung);
+    let identity = HostIdentity::new("/run/hostkeeper/host.crt", "/run/hostkeeper/host.key");
     let env = Env {
         ports: Ports {
             units: &ports,
@@ -190,7 +193,7 @@ fn fake_step(setup: &Setup, invocation: &Invocation, params: &Params) -> Done {
         runner: &staged,
         manager: Manager::Systemd,
         euid: rustix::process::geteuid().as_raw(),
-        host_identity: None,
+        host_identity: Some(&identity),
         egress: false,
         vms: false,
         token: &token(

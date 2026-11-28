@@ -1,4 +1,4 @@
-//! One launch: the plan rendered with both secrets and handed to the provider as a payload,
+//! One launch: the plan rendered with the network secret and handed to the provider as a payload,
 //! what happens when the network mode or the renderer cannot do its part, and the cleanup
 //! after a release. The provider and the mode are stubs that remember what they were asked.
 
@@ -100,6 +100,8 @@ struct Mode {
     slot: &'static str,
     fail_prepare: bool,
     fail_forget: bool,
+    /// Whether the mode contributes its secret twice, for one slot.
+    twice: bool,
     seen: Mutex<Seen>,
 }
 
@@ -122,7 +124,13 @@ impl NetworkMode for Handle {
                 path: "/etc/net.key".to_owned(),
                 slot: slot.clone(),
             }],
-            secrets: vec![(slot, Secret::new("net-secret-value".to_owned()))],
+            secrets: match self.0.twice {
+                true => vec![
+                    (slot.clone(), Secret::new("net-secret-value".to_owned())),
+                    (slot, Secret::new("net-secret-value".to_owned())),
+                ],
+                false => vec![(slot, Secret::new("net-secret-value".to_owned()))],
+            },
         })
     }
 
@@ -190,6 +198,7 @@ fn mode(slot: &'static str) -> Mode {
         slot,
         fail_prepare: false,
         fail_forget: false,
+        twice: false,
         seen: Mutex::new(Seen::default()),
     }
 }
@@ -210,32 +219,25 @@ fn plan() -> (AcquirePlan, HostName) {
     (plan, name)
 }
 
-fn join_token() -> Secret {
-    Secret::new("join-token-value".to_owned())
-}
-
 /// Asserts what a launch hands the provider: the machine's name derived from the scheduler
-/// and the acquire id, the acquire id, and a payload that holds the join token, the network
-/// mode's secret, the instance line `<pool>:<name>`, the provider's image steps, the mode's
-/// steps and the address of the scheduler; the mode was asked for a secret that lives
+/// and the acquire id, the acquire id, and a payload that holds the network
+/// mode's secret, the provider's image steps, the mode's steps and the address of the
+/// scheduler, and whose agent unit names no token or instance file; the mode was asked for a secret that lives
 /// [`KEY_VALID_FOR`] for that pool and that machine. The answer is the provider's. It
 /// catches a launch that leaves a secret out of the payload, one that renders with the
 /// mask, and a machine named other than the name its hello will carry.
 #[test]
-fn a_launch_hands_the_provider_a_payload_with_both_secrets() {
+fn a_launch_hands_the_provider_a_payload_with_the_network_secret() {
     let rig = rig(1 << 20, mode("network.key"));
     let (plan, name) = plan();
-    let answer = rig.launcher.acquire(&plan, join_token());
+    let answer = rig.launcher.acquire(&plan);
     assert_eq!(answer, Acquired::Unknown);
     let asked = rig.provider.asked.lock().unwrap();
     assert_eq!(asked.name, [name.to_string()]);
     assert_eq!(asked.acquire, ["burst-0001"]);
     let payload = &asked.payload[0];
-    let instance = format!("burst:{name}");
     for wanted in [
-        "join-token-value",
         "net-secret-value",
-        instance.as_str(),
         "prepare-image",
         "/etc/net.key",
         "https://sched.example.org:7301",
@@ -254,6 +256,9 @@ fn a_launch_hands_the_provider_a_payload_with_both_secrets() {
         name.as_str()
     );
     assert!(!payload.contains("***"), "the payload was rendered masked");
+    for retired in ["--token-file", "--instance-file", "/etc/jobscheduler/token"] {
+        assert!(!payload.contains(retired), "{retired} is in the payload");
+    }
     let seen = rig.mode.seen.lock().unwrap();
     let launch = ("burst".to_owned(), name.to_string(), KEY_VALID_FOR);
     assert_eq!(seen.launches, [launch]);
@@ -261,7 +266,7 @@ fn a_launch_hands_the_provider_a_payload_with_both_secrets() {
 
 /// Asserts that a network mode that cannot make its secret sends nothing to the provider
 /// and answers with a deferral of [`RETRY_AFTER`], so that the scaler plans the launch
-/// again and mints a new token. It catches a launch that goes out without the network
+/// again. It catches a launch that goes out without the network
 /// step it needed.
 #[test]
 fn a_network_secret_that_cannot_be_made_defers_the_launch() {
@@ -270,20 +275,19 @@ fn a_network_secret_that_cannot_be_made_defers_the_launch() {
         ..mode("network.key")
     };
     let rig = rig(1 << 20, failing);
-    let answer = rig.launcher.acquire(&plan().0, join_token());
+    let answer = rig.launcher.acquire(&plan().0);
     assert_eq!(answer, Acquired::Deferred { wait: RETRY_AFTER });
     assert!(rig.provider.asked.lock().unwrap().payload.is_empty());
 }
 
 /// Asserts that a plan that cannot be rendered is refused as a shape error and sent
-/// nowhere: a payload over the provider's limit, and a mode that fills the slot of the
-/// join token. The reason names the fault and holds neither secret. It catches a payload
-/// the provider would cut or refuse sent anyway, and a mode able to overwrite the join
-/// token.
+/// nowhere: a payload over the provider's limit, and a mode that fills one slot twice. The
+/// reason names the fault and does not hold the secret. It catches a payload the provider
+/// would cut or refuse sent anyway, and a mode able to overwrite a secret.
 #[test]
 fn a_plan_that_cannot_be_rendered_is_refused_and_not_sent() {
     let small = rig(10, mode("network.key"));
-    let answer = small.launcher.acquire(&plan().0, join_token());
+    let answer = small.launcher.acquire(&plan().0);
     let Acquired::Refused(refusal) = answer else {
         panic!("{answer:?}");
     };
@@ -294,8 +298,14 @@ fn a_plan_that_cannot_be_rendered_is_refused_and_not_sent() {
     assert!(why.contains("provider carries at most 10"), "{why}");
     assert!(small.provider.asked.lock().unwrap().payload.is_empty());
 
-    let twice = rig(1 << 20, mode("join_token"));
-    let answer = twice.launcher.acquire(&plan().0, join_token());
+    let twice = rig(
+        1 << 20,
+        Mode {
+            twice: true,
+            ..mode("network.key")
+        },
+    );
+    let answer = twice.launcher.acquire(&plan().0);
     let Acquired::Refused(refusal) = answer else {
         panic!("{answer:?}");
     };
@@ -303,9 +313,7 @@ fn a_plan_that_cannot_be_rendered_is_refused_and_not_sent() {
         panic!("not a boot reason");
     };
     assert!(why.contains("filled twice"), "{why}");
-    for secret in ["join-token-value", "net-secret-value"] {
-        assert!(!why.contains(secret), "{why}");
-    }
+    assert!(!why.contains("net-secret-value"), "{why}");
     assert!(twice.provider.asked.lock().unwrap().payload.is_empty());
 }
 
@@ -336,9 +344,9 @@ fn a_released_host_is_forgotten_and_a_failed_cleanup_is_not_fatal() {
 fn each_architecture_gets_its_own_agent_and_one_with_none_is_refused() {
     let rig = rig(1 << 20, mode("network.key"));
     let (mut plan, _) = plan();
-    rig.launcher.acquire(&plan, join_token());
+    rig.launcher.acquire(&plan);
     plan.offer.arch = "arm64".to_owned();
-    rig.launcher.acquire(&plan, join_token());
+    rig.launcher.acquire(&plan);
     {
         let asked = rig.provider.asked.lock().unwrap();
         let (x86, arm) = (&asked.payload[0], &asked.payload[1]);
@@ -352,7 +360,7 @@ fn each_architecture_gets_its_own_agent_and_one_with_none_is_refused() {
     }
 
     plan.offer.arch = "riscv64".to_owned();
-    let answer = rig.launcher.acquire(&plan, join_token());
+    let answer = rig.launcher.acquire(&plan);
     let Acquired::Refused(refusal) = answer else {
         panic!("not refused: {answer:?}");
     };

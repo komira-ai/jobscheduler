@@ -159,12 +159,12 @@ async fn a_client_past_the_bound_is_told_to_calm_down() {
 /// which a gRPC client reads as `RESOURCE_EXHAUSTED`: this is that chain, held at the pass.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn a_request_that_beats_is_answered_while_a_pass_holds_the_engine() {
-    use crate::agent_api::job_rig::{FakeAgent, placing_rig};
+    use crate::agent_api::job_rig::{FakeAgent, placing_rig, who_of};
 
     let mut rig = placing_rig("h2_engine_held");
     rig.register("host-a", true);
     let beat = rig.heartbeat(&FakeAgent::new("host-a"), None);
-    let who = rig.who.clone();
+    let who = who_of("host-a");
     let agents = Arc::clone(&rig.agents);
     let placer = agents.placer.clone().unwrap();
     let (held, holding) = std::sync::mpsc::channel();

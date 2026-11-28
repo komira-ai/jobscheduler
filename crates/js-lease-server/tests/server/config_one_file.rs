@@ -8,22 +8,18 @@ use std::time::Duration;
 
 use clap::CommandFactory;
 use js_lease_server::{Cli, Config};
-use serde_json::{Value, json};
+use serde_json::json;
 
-use crate::agents_support::{JOIN, hello_body};
-use crate::config_support::{PoolText, file, quote, quoted, refusal, server};
+use crate::agents_support::hello_body;
+use crate::config_support::{PoolText, file, quote, refusal, server};
 use crate::support::{Harness, Reply, Scratch, request};
 
-const MINT: &str = "/v1/agent/join-tokens";
-
-/// An elastic pool that admits agents with [`JOIN`] and asks nothing of a host's contract.
+/// An elastic pool that admits agents by certificate and asks nothing of a host's contract.
 fn pool(scratch: &Scratch) -> PoolText {
-    let joins = scratch.write("joins", &format!("{JOIN}\n"), 0o600);
     PoolText::elastic(scratch)
         .set("name", &quote("burst"))
         .set("class", &quote("gpu-host"))
         .set("exec", &quote("none"))
-        .set("join_token_file", &quoted(&joins))
 }
 
 /// A server on a file whose `[server]` table has `extra` besides two listeners and whose
@@ -39,33 +35,30 @@ async fn serving(name: &str, extra: &str) -> Harness {
     Harness::over(scratch, config).await
 }
 
-/// A hello of `host` with `join` as its bearer, on the agent port.
-async fn say(h: &Harness, join: &str, host: &str, instance: Option<&str>, asks: bool) -> Reply {
+/// A hello of `host`, presenting its certificate, on the agent port.
+async fn say(h: &Harness, host: &str, instance: Option<&str>) -> Reply {
     let mut body = hello_body(host);
     body["shape"]["gpu_class"] = json!("nvidia-a10");
     if let Some(instance) = instance {
         body["instance"] = json!({ "provider": "lambdalabs", "instance_id": instance });
     }
-    if asks {
-        body["accepts_host_credential"] = json!(true);
-    }
     let agent = h.running.agent_addr().unwrap();
     let bytes = body.to_string().into_bytes();
-    request(agent, "POST", "/v1/agent/hello", Some(join), Some(&bytes)).await
+    request(agent, "POST", "/v1/agent/hello", None, Some(&bytes)).await
 }
 
-/// The statuses of `count` hellos of one host with the pool's token, one after the other.
+/// The statuses of `count` hellos of one host of the host `h1`, one after the other.
 async fn burst(h: &Harness, count: usize) -> Vec<u16> {
     let mut statuses = Vec::new();
     for _ in 0..count {
-        statuses.push(say(h, JOIN, "h1", None, false).await.status);
+        statuses.push(say(h, "h1", None).await.status);
     }
     statuses
 }
 
 /// Asserts the defaults of the hello limit when the file names neither key: the same
 /// burst of 60 and one more hello a second as the flags' defaults. Sixty hellos of one
-/// token are held to nothing; the sixty-first is 429; a second later one more passes and
+/// host are held to nothing; the sixty-first is 429; a second later one more passes and
 /// the next is held again. It catches a limit that was left out of the file's path, or
 /// one whose defaults differ from the flags'.
 #[tokio::test]
@@ -89,7 +82,7 @@ async fn the_hello_limit_keys_are_read() {
     let h = serving("one_file_hello_keys", extra).await;
     let first = burst(&h, 2).await;
     assert!(first.iter().all(|status| *status != 429), "{first:?}");
-    let held = say(&h, JOIN, "h1", None, false).await;
+    let held = say(&h, "h1", None).await;
     assert_eq!(held.status, 429, "{}", held.body);
     assert!(held.head.contains("retry-after: 10"), "{}", held.head);
     h.clock.advance(Duration::from_secs(10));
@@ -97,39 +90,30 @@ async fn the_hello_limit_keys_are_read() {
     assert_eq!(burst(&h, 1).await, [429]);
 }
 
-/// A one-time join token minted for `instance` on the client port.
-async fn minted(h: &Harness, instance: &str) -> String {
-    let body = json!({ "provider": "lambdalabs", "instance_id": instance });
-    let reply = h.call("POST", MINT, Some(&body)).await;
-    assert_eq!(reply.status, 201, "{}", reply.body);
-    reply.json()["token"].as_str().unwrap().to_owned()
-}
-
-/// The error code of a refusal.
-fn code(reply: &Reply) -> Value {
-    reply.json()["error"].clone()
-}
-
-/// Asserts `require_host_credential`: without the key the first hello of a one-time token
-/// that does not say the agent keeps a credential is welcomed, as the flag's default
-/// does; with `require_host_credential = true` it is refused 403
-/// `join-token-credential-required`, and a hello that asks gets its credential. It
-/// catches a key that is dropped, and one that refuses when it is off.
+/// Asserts that `server.require_host_credential`, which a deployed file may still carry, is
+/// read and ignored: the file loads with that one key, with the value `true` as with `false`,
+/// leaves exactly one warning naming the key and saying that agents are admitted by host
+/// certificate only, and a server started on it welcomes a host that has a certificate. It
+/// catches a key that is refused, one that is dropped without a line, and one that makes the
+/// server ask more of a host.
 #[tokio::test]
-async fn require_host_credential_is_read_from_the_file() {
-    let off = serving("one_file_cred_off", "").await;
-    let token = minted(&off, "i-1").await;
-    let welcomed = say(&off, &token, "h1", Some("i-1"), false).await;
+async fn require_host_credential_in_the_file_is_ignored_with_one_warning() {
+    let line = "server.require_host_credential is ignored: agents are admitted by host certificate only (drop it)";
+    for value in ["true", "false"] {
+        let scratch = Scratch::new("one_file_cred_ignored");
+        let extra = format!("require_host_credential = {value}");
+        let text = file(&server(&scratch, &extra), &[&pool(&scratch)]);
+        let config = crate::config_support::load(&scratch, &text).unwrap();
+        assert_eq!(config.warnings(), [line], "{value}");
+    }
+    let h = serving(
+        "one_file_cred_ignored_start",
+        "require_host_credential = true",
+    )
+    .await;
+    let welcomed = say(&h, "h1", Some("i-1")).await;
     assert_eq!(welcomed.status, 200, "{}", welcomed.body);
-
-    let on = serving("one_file_cred_on", "require_host_credential = true").await;
-    let token = minted(&on, "i-1").await;
-    let refused = say(&on, &token, "h1", Some("i-1"), false).await;
-    assert_eq!(refused.status, 403, "{}", refused.body);
-    assert_eq!(code(&refused), "join-token-credential-required");
-    let asked = say(&on, &token, "h1", Some("i-1"), true).await;
-    assert_eq!(asked.status, 200, "{}", asked.body);
-    assert!(asked.json()["host_credential"].is_string());
+    assert!(welcomed.json().get("host_credential").is_none());
 }
 
 /// Asserts that a bad value of each registration key is refused naming the key. It catches
@@ -232,11 +216,6 @@ fn beside() -> Vec<(Vec<&'static str>, String)> {
         "--estimate-feed: not allowed with --config; set server.estimate_feed".to_owned(),
     ));
     rows.push((
-        vec!["--require-host-credential"],
-        "--require-host-credential: not allowed with --config; set server.require_host_credential"
-            .to_owned(),
-    ));
-    rows.push((
         vec!["--allow-sqlite-store"],
         "--allow-sqlite-store: not allowed with --config; set server.allow_sqlite_store".to_owned(),
     ));
@@ -246,7 +225,6 @@ fn beside() -> Vec<(Vec<&'static str>, String)> {
             "--agent-pool-config",
             "add a [[pool]] with an elastic provider",
         ),
-        ("--agent-token-file", "set join_token_file of the [[pool]]"),
         ("--client-token", "add a [[client]] table"),
     ];
     for (flag, instead) in moved {
@@ -298,6 +276,30 @@ fn every_flag_beside_config_is_refused_by_name() {
         refused(default),
         "--listen: not allowed with --config; set server.listen"
     );
+}
+
+/// Asserts that the two retired agent flags, which are hidden and so are not rows of
+/// [`beside`], are refused beside `--config` too, by name, with the text that says they do
+/// nothing (a server file has no key for them). It catches either flag being read beside the
+/// file, and a refusal that tells the operator to move it into the file.
+#[test]
+fn the_retired_agent_flags_beside_config_are_refused_saying_they_do_nothing() {
+    let scratch = Scratch::new("one_file_beside_retired");
+    let base = with_file(&scratch);
+    let retired: [(&[&str], &str); 2] = [
+        (&["--agent-token-file", "/file"], "--agent-token-file"),
+        (&["--require-host-credential"], "--require-host-credential"),
+    ];
+    for (given, flag) in retired {
+        let mut args = base.clone();
+        args.extend(given.iter().map(OsString::from));
+        assert_eq!(
+            refused(args),
+            format!(
+                "{flag}: not allowed with --config; drop it, as it does nothing: agents are admitted by host certificate only"
+            )
+        );
+    }
 }
 
 /// Asserts that the table of the test above is every flag there is: the long flags of the

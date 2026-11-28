@@ -16,11 +16,16 @@ use tokio::net::{TcpSocket, TcpStream};
 
 use crate::agents_support::{agent_args, job_host_args};
 use crate::jobs_support::{job_agent, job_state, left_the_queue, per_job_hello, submit};
-use crate::support::{Harness, Scratch, TOKEN, config, guard, parse_reply, request, until};
+use crate::support::{
+    Duplex, Harness, Scratch, config, connect_for, guard, parse_reply, request, until,
+};
 
-/// A route behind the client token that reads a request body, so a body that stalls holds
-/// its handler.
-const BODY_ROUTE: &str = "/v1/agent/join-tokens";
+/// A route that reads a request body, so a body that stalls holds its handler: the hello route
+/// of the agent API, called presenting the certificate of the host [`BODY_HOST`].
+const BODY_ROUTE: &str = "/v1/agent/hello";
+
+/// The body the stalled requests announce, which names the host whose certificate they present.
+const BODY_HOST: &[u8] = br#"{"host_id":"burst-1"}"#;
 
 /// A server with agent registration on (which serves [`BODY_ROUTE`]) under these limits.
 async fn limited_with_agents(name: &str, limits: Limits) -> Harness {
@@ -102,14 +107,14 @@ async fn an_idle_keep_alive_connection_is_closed_after_its_answer() {
 async fn a_client_that_stops_in_the_body_is_cut_and_its_slot_returned() {
     let limits = Limits {
         max_connections: 1,
-        read_timeout: Duration::from_millis(20),
+        // Long enough that the second client's TLS handshake and request, which the server
+        // reads on this limit, are not cut on a loaded machine.
+        read_timeout: Duration::from_millis(250),
         ..Limits::default()
     };
     let h = limited_with_agents("limit_read", limits).await;
-    let mut stalled = TcpStream::connect(h.addr()).await.unwrap();
-    let head = format!(
-        "POST {BODY_ROUTE} HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {TOKEN}\r\nContent-Length: 100\r\n\r\n0123456789"
-    );
+    let mut stalled = connect_for(h.addr(), BODY_ROUTE, Some(BODY_HOST)).await;
+    let head = "POST /v1/agent/hello HTTP/1.1\r\nHost: t\r\nContent-Length: 100\r\n\r\n0123456789";
     let _ = stalled.write_all(head.as_bytes()).await;
 
     let mut seen = Vec::new();
@@ -227,14 +232,12 @@ async fn an_oversized_request_head_is_refused() {
     assert_eq!(parse_reply(&raw).status, 431);
 }
 
-/// Sends the head of an authenticated request to [`BODY_ROUTE`] that expects `100 Continue` and
-/// reads that answer: the server has taken the connection and its handler is waiting
-/// for the body, which is never sent. Returns the stream.
-pub(crate) async fn stall_in_body(addr: std::net::SocketAddr) -> TcpStream {
-    let mut stream = TcpStream::connect(addr).await.unwrap();
-    let head = format!(
-        "POST {BODY_ROUTE} HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {TOKEN}\r\nExpect: 100-continue\r\nContent-Length: 10\r\n\r\n"
-    );
+/// Sends the head of a request to [`BODY_ROUTE`] that expects `100 Continue` and reads that
+/// answer: the server has taken the connection and its handler is waiting for the body, which
+/// is never sent. Returns the stream.
+pub(crate) async fn stall_in_body(addr: std::net::SocketAddr) -> Box<dyn Duplex> {
+    let mut stream = connect_for(addr, BODY_ROUTE, Some(BODY_HOST)).await;
+    let head = "POST /v1/agent/hello HTTP/1.1\r\nHost: t\r\nExpect: 100-continue\r\nContent-Length: 10\r\n\r\n";
     stream.write_all(head.as_bytes()).await.unwrap();
     let mut line = [0u8; 25];
     stream.read_exact(&mut line).await.unwrap();
@@ -276,7 +279,8 @@ async fn a_stalled_request_cannot_hold_up_a_stop() {
 
     h.running.shutdown().await.unwrap();
     let mut seen = Vec::new();
-    guard(stalled.read_to_end(&mut seen)).await.unwrap();
+    // A TLS connection the server cuts ends without a close_notify, which reads as an error.
+    let _ = guard(stalled.read_to_end(&mut seen)).await;
     assert!(seen.is_empty());
     let stored = crate::restart::stored(&jobs);
     let job_q = stored

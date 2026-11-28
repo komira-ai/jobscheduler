@@ -6,7 +6,7 @@ use std::ffi::OsString;
 
 use serde_json::{Value, json};
 
-use crate::agents_support::{JOIN, Session, agent_args, hello_body, post, session};
+use crate::agents_support::{Session, agent_args, hello_body, post, session};
 use crate::support::{Harness, Reply, Scratch, TOKEN, request};
 
 /// The base flags with agent registration on and the job service on
@@ -204,14 +204,14 @@ pub fn per_job_hello(host: &str) -> Value {
 /// opened; the hello must be admitted.
 pub async fn job_agent(h: &Harness, hello: &Value) -> Session {
     let host = hello["host_id"].as_str().unwrap().to_owned();
-    session(&post(h, "/v1/agent/hello", Some(JOIN), hello).await, &host)
+    session(&post(h, "/v1/agent/hello", None, hello).await, &host)
 }
 
 /// The heartbeat of `agent` listing `jobs` (each a `(job id, state, result)`), answered 200.
 pub async fn beat_with(h: &Harness, agent: &Session, jobs: &[Value]) -> Value {
     let mut body = agent.beat();
     body["jobs"] = json!(jobs);
-    let reply = post(h, "/v1/agent/heartbeat", Some(JOIN), &body).await;
+    let reply = post(h, "/v1/agent/heartbeat", None, &body).await;
     assert_eq!(reply.status, 200, "{}", reply.body);
     reply.json()
 }

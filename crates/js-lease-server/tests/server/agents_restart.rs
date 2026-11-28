@@ -7,16 +7,22 @@ use std::path::PathBuf;
 
 use js_lease_server::{SharedClock, StartupError, channel_ticker};
 use js_registry::Credential;
+use js_types::HostId;
 use serde_json::json;
 
 use crate::agents_support::{
-    JOIN, JOIN_B, Session, agent_args, beat, entry, hello_with, hosts, job_hello, join, post,
-    restarted_job_hosts, session, start_agents, start_job_hosts_in,
+    Session, agent_args, beat, entry, hello_as, hosts, job_hello, join, post, restarted_job_hosts,
+    session, start_agents, start_job_hosts_in,
 };
 use crate::jobs_support::{
     JobBody, beat_with, commands, exited, job_agent, job_state, one_start, running, submit_body,
 };
 use crate::support::{Harness, Kept, Scratch, base_args, config, kept_bindings, replace, start};
+
+/// The digest of the credential a host certificate gives `host`, as the bindings hold it.
+fn certified(host: &str) -> String {
+    Credential::of_host_certificate(&HostId::new(host).unwrap()).to_hex()
+}
 
 /// The file of bindings beside the state file.
 fn agent_file(scratch: &Scratch) -> PathBuf {
@@ -37,7 +43,7 @@ async fn running_on(h: &Harness, host: &Session, id: &str) -> String {
     allocation
 }
 
-/// A host of the pool that speaks the per-job messages, admitted with the pool's join token.
+/// A host of the pool that speaks the per-job messages, admitted by its certificate.
 async fn job_host(h: &Harness, host: &str) -> Session {
     job_agent(h, &job_hello(host)).await
 }
@@ -47,7 +53,7 @@ async fn job_host(h: &Harness, host: &str) -> Session {
 async fn taint(h: &Harness, host: &Session) {
     let mut body = host.beat();
     body["taint"] = json!({ "reason": "residue", "check": "tmp" });
-    let sent = post(h, "/v1/agent/heartbeat", Some(JOIN), &body).await;
+    let sent = post(h, "/v1/agent/heartbeat", None, &body).await;
     assert_eq!(sent.status, 200, "{}", sent.body);
     assert_eq!(sent.json()["taint_ack"], true, "{}", sent.body);
 }
@@ -108,22 +114,20 @@ async fn restart_keeps_a_registered_host_as_unknown_until_rehello_in(kept: Kept)
     assert_eq!(job_state(&h, "job-1").await, "JOB_STATE_SUCCEEDED");
 }
 
-/// Asserts that a tainted registered host keeps its binding across a restart: after it, a
-/// hello for the host from another join token is refused 403 `host-bound` and the host
-/// is read back from the host's row, which the restarted server holds live (another process's
-/// hello is refused `host-live`), and the host's own hello (the token the host was admitted
-/// with, from the same agent process) is then admitted. It catches a restart that forgets the
-/// binding, so that the first hello from any holder of a join token takes the host. It runs
-/// with the bindings in files and in the state store, and catches in the store a binding that
-/// is not read back at the start.
+/// Asserts that a tainted registered host keeps its binding across a restart: the host is
+/// read back from the host's row, which the restarted server holds live (another process's
+/// hello is refused `host-live`), and the host's own hello (from the same agent process) is
+/// then admitted. It catches a restart that forgets the host's row. It runs with the bindings in
+/// files and in the state store, and catches in the store a binding that is not read back at
+/// the start.
 #[tokio::test]
-async fn restart_keeps_the_binding_so_another_token_cannot_take_the_host() {
+async fn restart_keeps_the_binding_of_a_tainted_host() {
     for kept in Kept::BOTH {
-        restart_keeps_the_binding_so_another_token_cannot_take_the_host_in(kept).await;
+        restart_keeps_the_binding_of_a_tainted_host_in(kept).await;
     }
 }
 
-async fn restart_keeps_the_binding_so_another_token_cannot_take_the_host_in(kept: Kept) {
+async fn restart_keeps_the_binding_of_a_tainted_host_in(kept: Kept) {
     let first = start_job_hosts_in("agents_restart_binding", kept).await;
     let hello = job_hello("burst-1");
     let host = job_agent(&first, &hello).await;
@@ -133,28 +137,26 @@ async fn restart_keeps_the_binding_so_another_token_cannot_take_the_host_in(kept
     if kept == Kept::Store {
         assert!(!agent_file(&h.scratch).exists());
     }
-    let intruder = post(&h, "/v1/agent/hello", Some(JOIN_B), &job_hello("burst-1")).await;
-    assert_eq!(intruder.status, 403, "{}", intruder.body);
-    assert_eq!(intruder.json(), json!({ "error": "host-bound" }));
-    // The hello that was refused still read the host's row, and the restarted server holds the
-    // live session it names.
-    assert_eq!(entry(&hosts(&h).await, "burst-1")["state"], "live");
-
-    // A hello of another process over a live row is refused; the same process replaces it.
+    // The host is not heard yet; a hello of another process reads the host's row, which the
+    // restarted server holds live: it is refused, and the host reads live.
+    assert_eq!(entry(&hosts(&h).await, "burst-1")["state"], "awaiting");
     let mut other = job_hello("burst-1");
     other["agent_process"] = json!("another-process");
-    let other = post(&h, "/v1/agent/hello", Some(JOIN), &other).await;
+    let other = post(&h, "/v1/agent/hello", None, &other).await;
     assert_eq!(other.status, 409, "{}", other.body);
     assert_eq!(other.json(), json!({ "error": "host-live" }));
-    let owner = post(&h, "/v1/agent/hello", Some(JOIN), &hello).await;
+    assert_eq!(entry(&hosts(&h).await, "burst-1")["state"], "live");
+
+    // The same process replaces the session.
+    let owner = post(&h, "/v1/agent/hello", None, &hello).await;
     assert_eq!(owner.status, 200, "{}", owner.body);
     assert_eq!(entry(&hosts(&h).await, "burst-1")["state"], "live");
 }
 
 /// Asserts that an instance identity is kept with the binding: a host admitted with an
-/// instance is, after a restart, refused for the same token under another instance and
+/// instance is, after a restart, refused for the same certificate under another instance and
 /// under none (403 `host-bound`), and admitted under its own. It catches a binding
-/// persisted without its instance, which a token holder could then step around. It runs
+/// persisted without its instance, which a host could then step around. It runs
 /// with the bindings in files and in the state store, and catches in the store a binding
 /// row that leaves out the instance.
 #[tokio::test]
@@ -168,7 +170,7 @@ async fn restart_keeps_the_instance_of_a_binding_in(kept: Kept) {
     let first = start_job_hosts_in("agents_restart_instance", kept).await;
     let mut body = job_hello("burst-1");
     body["instance"] = json!({ "provider": "aws", "instance_id": "i-0abc" });
-    let admitted = post(&first, "/v1/agent/hello", Some(JOIN), &body).await;
+    let admitted = post(&first, "/v1/agent/hello", None, &body).await;
     let host = session(&admitted, "burst-1");
     taint(&first, &host).await;
 
@@ -180,18 +182,18 @@ async fn restart_keeps_the_instance_of_a_binding_in(kept: Kept) {
     let mut other = body.clone();
     other["instance"]["instance_id"] = json!("i-0def");
     for refused in [other, job_hello("burst-1")] {
-        let reply = post(&h, "/v1/agent/hello", Some(JOIN), &refused).await;
+        let reply = post(&h, "/v1/agent/hello", None, &refused).await;
         assert_eq!(reply.status, 403, "{}", reply.body);
         assert_eq!(reply.json(), json!({ "error": "host-bound" }));
     }
-    let own = post(&h, "/v1/agent/hello", Some(JOIN), &body).await;
+    let own = post(&h, "/v1/agent/hello", None, &body).await;
     assert_eq!(own.status, 200, "{}", own.body);
 }
 
 /// Asserts what the file of bindings is: written when a hello admits a host, mode 0600,
-/// holding a digest of the token and never the token, rewritten (a new file) only when
+/// holding the digest of each host's certificate credential, rewritten (a new file) only when
 /// the bindings change, and left alone by a tick or a heartbeat. It catches a file other
-/// users can read, one that holds the secret, and a rewrite on every tick or heartbeat.
+/// users can read and a rewrite on every tick or heartbeat.
 #[tokio::test]
 async fn the_binding_file_is_private_and_written_only_on_change() {
     let h = start_agents("agents_binding_file").await;
@@ -203,25 +205,18 @@ async fn the_binding_file_is_private_and_written_only_on_change() {
     let text = fs::read_to_string(&path).unwrap();
     assert!(text.contains("version = 1"), "{text}");
     assert!(text.contains("id = \"burst-1\""), "{text}");
-    assert!(
-        text.contains(&Credential::of_token(JOIN).to_hex()),
-        "{text}"
-    );
-    assert!(!text.contains(JOIN), "{text}");
+    assert!(text.contains(&certified("burst-1")), "{text}");
 
     h.ticks.step().await;
     assert_eq!(beat(&h, &a).await.status, 200);
     h.ticks.step().await;
     assert_eq!(fs::metadata(&path).unwrap().ino(), meta.ino());
 
-    let second = hello_with(&h, JOIN_B, "burst-2").await;
+    let second = hello_as(&h, "burst-2").await;
     assert_eq!(second.status, 200);
     let text = fs::read_to_string(&path).unwrap();
     assert!(text.contains("burst-2"), "{text}");
-    assert!(
-        text.contains(&Credential::of_token(JOIN_B).to_hex()),
-        "{text}"
-    );
+    assert!(text.contains(&certified("burst-2")), "{text}");
     assert_ne!(fs::metadata(&path).unwrap().ino(), meta.ino());
     assert!(!fs::read_dir(h.scratch.dir.as_path()).unwrap().any(|e| {
         e.unwrap()
@@ -273,7 +268,7 @@ async fn a_binding_file_that_cannot_be_trusted_refuses_the_start() {
     let scratch = Scratch::new("agents_binding_refused");
     let args = agent_args(&scratch);
     let path = agent_file(&scratch);
-    let digest = Credential::of_token(JOIN).to_hex();
+    let digest = certified("burst-1");
     let good = format!("version = 1\n[[host]]\nid = \"burst-1\"\ncredential = \"{digest}\"\n");
 
     fs::write(&path, &good).unwrap();
