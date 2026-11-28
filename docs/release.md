@@ -105,7 +105,9 @@ next push that ships code. Nothing runs on a timer.
    suite `testing` of the apt repository at `https://packages.komira.ai/apt`; `check-apt` installs
    `js-agent` from that suite in a clean Ubuntu container on an amd64 and an arm64 runner; only when
    both installs passed are the same packages promoted into the suite `stable`
-   ([The apt repository](#the-apt-repository)).
+   ([The apt repository](#the-apt-repository)). Once `check-apt` passed, `blackbox-linux` runs
+   the black-box tests of the released agent and server on Linux beside the promotion; nothing
+   waits for it yet, not even the gate `blackbox` (8a) ([The black-box tests](#the-black-box-tests)).
 8. `gamma` (off until its variables are set, below) sets the release as the desired version of the
    service `js-server` on the update coordinator and waits for it to converge.
 8a. `blackbox`, the gate before the farm: the black-box tests of the release, the published bytes
@@ -462,6 +464,7 @@ of every other product of the repository as they are.
 | `testing-apt-index` | `apt-signing` | checks the two packages against `SHA256SUMS` and their attestation by artifacts.yml at this commit, merges them into the index read (`channels apt index`) and signs `Release` (`InRelease`, `Release.gpg`) with the repository's subkey (`channels apt sign`), which it then removes |
 | `testing-apt-write` | `apt-publish` | checks the packages again, uploads each once to the pool (never over other bytes), writes the signed index with `If-Match` on the ETags read, and invalidates `/apt/dists/*` on the CDN (`channels apt write`) |
 | `check-apt` | none | on an amd64 and an arm64 runner, in a clean Ubuntu container pinned by digest: adds the repository with its keyring, installs `js-agent=X.Y.Z` from `testing`, and checks the version, the files, that the agent's own start check accepts the job user `jsjob` (a system account with no home and no login) and its subordinate uid and gid ranges, that nothing is enabled and that nothing runs (`channels check-apt`) |
+| `blackbox-linux` | none | only when `check-apt` passed: the black-box tests of the released agent and server on Linux (`js-blackbox.yml`, [The black-box tests](#the-black-box-tests)); no job waits for it yet |
 | `stable-apt-read`, `stable-apt-index`, `stable-apt-write` | as above | only when `check-apt` passed on both: read both suites, list in `stable` the entries `testing` holds for this version, held to the digests of `SHA256SUMS` (`channels apt promote`), sign, and write the index alone (`--no-pool`): `stable` serves the very bytes `testing` was checked with |
 
 No job holds both the signing key and the cloud role. A write that loses the race for the shared
@@ -796,6 +799,67 @@ Not proven until the first real run on `main`, and fixed there if it differs:
 - the draft and asset calls of `publish` (listing drafts, uploading to a draft, reading an asset
   back to compare it).
 
+## The black-box tests
+
+`blackbox-linux` (after `check-apt` passed) calls `js-blackbox.yml`, which runs the program `released`
+of `crates/js-blackbox` (no libtest harness) as root on a hosted `ubuntu-24.04` runner. It is two
+parts. The wrapper, `released rig --version X.Y.Z --fake-provider PATH`, installs and wires; it is the part another
+runner (an image of its own) would replace. The test itself, `released scenarios`, is given as
+flags what was installed and where each fake listens, starts the services under test, runs the
+scenarios and holds each to its pass condition, printing `PASS`, `FAIL` or `NOT RUN` for each.
+
+The released artifacts, taken as the farm takes them and driven only from outside:
+
+- the js-agent `.deb` of the release, installed with apt from the suite `testing` (as `check-apt`
+  installs it), on a host made ready as a farm host is (a scratch disk with project quota,
+  hostkeeper's identity and facts files, tierstore's account and roots), with a flags file of the
+  farm's shape (`crates/js-blackbox/farm/js-agent.flags`), and run by the package's own
+  `js-agent-crun.service`;
+- the js-lease-server image of the release, downloaded from the GitHub release and checked against
+  its `SHA256SUMS`, loaded into Docker and started with the control host's command line
+  (`crates/js-blackbox/farm/js-server.args`: its user, a read-only root, no capability, TLS on every
+  listener, hosts admitted by their certificates).
+
+Their neighbours are fakes, each a process of its own speaking the real protocol, and no other
+service's package is installed:
+
+- the job image is served by a registry on the loopback (`released fake-registry`): the runner's own
+  `sleep`, which the agent reaches through its `--image-allow-loopback` entry;
+- tierstore's mount provider is the program `js-fake-mount-provider` (`crates/js-fake-mount-provider`,
+  built by the workflow), serving `jobscheduler.provider.v1` on the socket the farm's flags name and
+  answering as tierstore does: `Prepare` at once, the tree placed at `Mount`, a placement limit, a
+  store that stalls (a `Mount` held 25 s, then `UNAVAILABLE` "not ready"), a restart that forgets
+  the starts it was preparing, every call `UNAVAILABLE`, and a ref it refuses. A control socket
+  beside it sets which, and lists every call it answered with the time it came; J1's job mounts a
+  tree from it as it serves, and J5 sets it for each of its scenarios;
+- the server's Postgres store is the server's own SQLite store in its state directory (`--store`
+  naming `sqlite:...`, with `--allow-sqlite-store`, the one argument of `js-server.args` that is the
+  test's own).
+
+The `farm/` files keep the shape of the flags and the command line the farm commits (the same flags
+and kinds of value), with placeholders for the farm's names, addresses and ports; a change to the
+farm's flags is made to them in the same way.
+
+| Test | Passes when |
+|---|---|
+| J6, the released server image | `/readyz` answers 200 within 60 s of the container's start, and a job run through the released agent ends with exit code 0 |
+| J1, the released `.deb` with the farm's flags | the host is listed live and the agent's health route answers 200 within 60 s of the unit's start, and a job that mounts a tree from the fake mount provider ends with exit code 0 |
+| The server's name not found for 60 s after the first contact | the host is listed live and the agent's health route answers 200 at every probe of the 60 s, and a job submitted in it ends with exit code 0 |
+| The server unreachable for 60 s | the job keeps running, the agent is back in a session within 30 s of the server's return, and the job ends with exit code 0 |
+| The server restarted while a job runs | at least one listing of the hosts is read after the restart and none shows the host lost, the job never shows its host silent or itself lost, and it ends with exit code 0 in its first attempt |
+| The agent updated while a job runs | from the previous release in `testing` to this one (the package installed with dpkg, the handover file written, the unit restarted): the host lists the new version within 60 s, the job is still running then (handed over, not drained), and it ends with exit code 0 in its first attempt |
+| J5, 20 starts at a placement limit of 2, the provider's store stalled for the first 30 s (refused at `Mount`, as tierstore answers) | in no 30 s do more than 20 Prepare calls, nor more than 20 Mount calls, reach the provider; as many Releases as jobs reach it; every job ends, none as its own fault (all but a success and a start failed `INPUT_UNAVAILABLE`) |
+| J5, the same burst with the limit met at `Prepare` (as tierstore answered when the agent's retry storm was seen) | the same |
+| J5, the provider restarted while 6 starts wait | at least 6 Prepare calls reach it after the restart, and every job succeeds |
+| J5, the provider answering every call unavailable for 60 s while 6 starts wait | every job succeeds |
+| J5, a ref the provider refuses | the start fails `provider-refused` (the job's own fault), after one Prepare |
+
+A manual run of `js-blackbox.yml` (`gh workflow run js-blackbox.yml --ref <branch> -f
+version=X.Y.Z`) runs a branch's test against a release that is in `testing`. Nothing waits for
+`blackbox-linux` yet: it is not among the jobs the gate `blackbox` needs, so its failure makes the
+run red and holds back neither `stable`, the control-plane deploy nor `desired`, and `release-red`
+does not count it. Making it one of the gate's tests is a change of its own.
+
 ## The smoke bundle
 
 A darwin bundle of one program that prints the host name, the user and uid it runs as, the macOS
@@ -972,6 +1036,7 @@ whose upload did not finish is deleted before it is uploaded again.
 | `plan`, `build`, `sums`, `attest` or `verify` failed | No tag, no release | Re-run failed jobs. After `verify` failed nothing was published; fix the cause (a change to the workflow is a new push) or re-run. |
 | An apt job of `testing` failed, or all three attempts lost the race | The release is published; the suite holds this version or not | Re-run failed jobs: a re-run of a read job reads again, and a write never puts other bytes in the pool under a name it holds. A package already in the pool is accepted when its bytes are equal. |
 | `check-apt` failed | The release and `testing` hold the version; `stable` does not | Nothing is promoted, and `blackbox` is skipped, so neither `desired` nor the control-plane deploy runs: hosts and the control plane keep their version. Fix forward: the next release supersedes it in `testing`. |
+| `blackbox-linux` failed | Nothing waits for it yet: the release is published, promoted and deployed as if it had passed; the run is red | Read which scenario failed and what it saw (each failure names its pass condition and the agent's journal or the server's log). Fix forward with a new push. |
 | `beta-macos-pkg`, `beta-macos-first-install` or another black-box test failed, or `blackbox` itself (its build on the build farm) did | The release is published (and in `stable` when `check-apt` passed), but not deployed: the farm and the control plane keep their version; RELEASE-RED is open | Fix forward with a new push, or re-run the failed jobs (once the build farm answers, when it was the cause): `blackbox` runs again, and `desired` and the control-plane deploy follow when it passes. |
 | Another beta job or `promote-macos` failed | The release is published and deployed; RELEASE-RED is open | Fix forward with a new push; its green release run closes the issue. Re-running the failed jobs adds the macOS archives when the four beta jobs `promote-macos` needs pass. |
 | A run that `turn` gave the turn failed after it, and a newer release has been published since | The failed run is older than what is deployed | Do not re-run its failed jobs: a re-run keeps its `turn`, and its `gamma` or control-plane deploy would move those back to the older version (`desired` checks and starts nothing for an older release, so hostkeeper is not moved). Fix forward. |

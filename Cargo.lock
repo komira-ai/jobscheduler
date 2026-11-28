@@ -1243,6 +1243,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-blackbox"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "flate2",
+ "hex",
+ "js-client",
+ "js-system-clock",
+ "js-testkit",
+ "js-types",
+ "rcgen",
+ "rustix",
+ "serde_json",
+ "sha2",
+ "tar",
+ "tokio",
+]
+
+[[package]]
 name = "js-bundle"
 version = "0.1.0"
 dependencies = [
@@ -1430,6 +1449,17 @@ version = "0.1.0"
 dependencies = [
  "js-elastic",
  "js-types",
+]
+
+[[package]]
+name = "js-fake-mount-provider"
+version = "0.1.0"
+dependencies = [
+ "hyper-util",
+ "js-proto",
+ "js-testkit",
+ "tokio",
+ "tonic",
 ]
 
 [[package]]

@@ -115,6 +115,14 @@
 # with `channels gate`, so without the settings of the two environments it ends green and writes
 # nothing; and each runs only for a push to main, so a pull request's dry run never publishes.
 #
+# The black-box tests on Linux (`blackbox-linux`, after `check-apt` passed): js-blackbox.yml, on a
+# hosted Linux x86_64 runner, installs this release's js-agent .deb from `testing`, starts it under
+# systemd with flags of the farm's shape, starts this release's js-server image as the control host
+# starts it, and runs jobs through them (crates/js-blackbox). It holds `contents: read` alone and no
+# job needs it yet, the gate `blackbox` included: a red test makes the run red and holds back
+# neither `stable`, the control-plane deploy nor `desired`. `release-red` and `release-green` do
+# not count it yet.
+#
 # gamma sets the release as the desired version of the service js-server (the lease server, which
 # the kbf host updater runs; js-agent is a hostkeeper service whose desired version
 # hostkeeper-desired.yml sets) on the update coordinator and waits for it to converge. It is off
@@ -1579,6 +1587,23 @@ jobs:
         env:
           ARCH: ${{ matrix.arch }}
         run: docker run --rm --volume "$PWD/target/debug/xtask:/usr/local/bin/xtask:ro" ubuntu@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852 xtask channels check-apt --arch "$ARCH" --version "$VERSION"
+
+  # BLACK-BOX TESTS ON LINUX (release time only; nothing waits for them yet, not even the gate
+  # `blackbox`). blackbox-linux: once `check-apt`
+  # passed (the release is published and in `testing`), js-blackbox.yml installs the released
+  # js-agent .deb from `testing` on a hosted Linux x86_64 runner, starts it under systemd with
+  # flags of the farm's shape, starts the released js-server image as the control host starts
+  # it, and runs jobs through them, with the server restarted, the agent updated, the server
+  # unreachable and its name not found while they run. No job needs it: a red test makes the run
+  # red and holds back nothing.
+  blackbox-linux:
+    needs: [plan, check-apt]
+    if: ${{ !cancelled() && !failure() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' && needs.check-apt.result == 'success' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/js-blackbox.yml
+    with:
+      version: ${{ needs.plan.outputs.version }}
 
   # PROMOTION, the apt repository: the same three jobs for the suite `stable`, after `check-apt`
   # succeeded (a failed or skipped check promotes nothing). The read job reads the index of
