@@ -5,7 +5,7 @@
 //! `crates/js-agent/tests/native_isolation/main.rs`), and whose failure is not passed over; and
 //! its call in release.yml, `beta-macos-isolation`: on a push to main alone, counted by
 //! `release-red` and `release-green`, and not needed by `promote-macos`, since on a hosted
-//! runner the test reaches no verdict yet (the workflow's header says why).
+//! runner the test cannot pass yet (the workflow's header says why).
 
 use std::path::Path;
 
@@ -139,8 +139,7 @@ fn check_job(workflow: &str, isolation_src: &str) -> Vec<String> {
 
 /// One line per way release.yml's call of the workflow is not the one the release asks for:
 /// the call gone, calling another workflow or without its push condition; a report that does
-/// not count it; or `promote-macos` needing it while the test reaches no verdict on a hosted
-/// runner.
+/// not count it; or `promote-macos` needing it while the test cannot pass on a hosted runner.
 fn check_release(release: &str) -> Vec<String> {
     let mut found = Vec::new();
     match job_lines(release, CALL) {
@@ -168,7 +167,7 @@ fn check_release(release: &str) -> Vec<String> {
         job_lines(release, "promote-macos").is_some_and(|job| needs(&job).contains(&CALL));
     if promote_needs {
         found.push(format!(
-            "promote-macos needs {CALL}, which reaches no verdict on a hosted runner"
+            "promote-macos needs {CALL}, which cannot pass on a hosted runner"
         ));
     }
     found
@@ -379,7 +378,7 @@ fn a_call_that_is_not_reported_or_gates_the_archives_is_refused() {
             "needs: [plan, publish, beta-macos, beta-macos-pkg, beta-macos-first-install, beta-macos-probe, beta-macos-isolation]"
         )),
         [format!(
-            "promote-macos needs {CALL}, which reaches no verdict on a hosted runner"
+            "promote-macos needs {CALL}, which cannot pass on a hosted runner"
         )]
     );
 }
