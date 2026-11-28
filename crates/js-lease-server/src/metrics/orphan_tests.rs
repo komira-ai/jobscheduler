@@ -109,3 +109,40 @@ fn each_host_that_holds_orphans_has_its_count_and_oldest_age() {
         "{none}"
     );
 }
+
+/// Asserts a scrape of a server end to end: after a host's heartbeat lists a job the store
+/// holds no record of, the scrape's text has that host's orphan count and the age of its
+/// orphan, read from its row at the store's clock, and nothing for the host that lists none.
+/// It catches a scrape that reads the hosts' rows and drops what it found, so a host closed by
+/// an orphan would show no gauge.
+#[tokio::test]
+async fn a_scrape_of_a_server_shows_the_host_its_orphan_closes() {
+    let mut rig = crate::agent_api::job_rig::clocked_rig(
+        "metrics_orphans",
+        true,
+        crate::job_expiry::JobLimits::default(),
+    );
+    rig.register("host-a", true);
+    rig.register("host-b", true);
+    let mut agent = crate::agent_api::job_rig::FakeAgent::new("host-a");
+    agent.hold("ghost", "00", js_agent_wire::HeldState::Running);
+    let reply = rig.beat(&agent).await.unwrap();
+    assert_eq!(reply.unknown_jobs, ["ghost"]);
+    rig.beat(&crate::agent_api::job_rig::FakeAgent::new("host-b"))
+        .await
+        .unwrap();
+    rig.advance(Duration::from_secs(90));
+    let shared = super::tests::shared_over(&rig);
+    let page = std::num::NonZeroUsize::MIN;
+    let seen = super::scrape::snapshot(&shared, page).await.unwrap();
+    let text = render(&seen, &Recorder::default());
+    assert!(
+        text.contains("\njs_host_orphans{host=\"host-a\"} 1\n"),
+        "{text}"
+    );
+    assert!(!text.contains("js_host_orphans{host=\"host-b\"}"), "{text}");
+    let age = "js_host_oldest_orphan_age_seconds{host=\"host-a\"} ";
+    let line = text.lines().find(|line| line.starts_with(age)).unwrap();
+    let secs: f64 = line[age.len()..].parse().unwrap();
+    assert!((90.0..91.0).contains(&secs), "{line}");
+}
